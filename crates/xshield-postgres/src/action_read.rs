@@ -6,14 +6,15 @@ use std::collections::BTreeSet;
 use xshield_core::{
     domain::{
         ActionId, FieldName, MappingRevision, OperationId, PageEvidenceId, PageTemplate, RequestId,
-        ResourceType, ViewProfile,
+        ResourceType, ResponseEvidenceId, ViewProfile,
     },
     grant::ResourceKeyHmac,
     identity::UnixSeconds,
     ports::{UiActionProofQuery, UiActionProofState, UiActionProofStore},
     provenance::{
         ActionDescriptor, ActionGrant, ActionGrantDraft, ActionTarget, ActionTargetRule,
-        BuildFingerprint, HttpMethod, PageEvidence, ProvenanceError, RouteTemplate,
+        BuildFingerprint, HttpMethod, PageEvidence, ProvenanceError, ResponseEvidence,
+        RouteTemplate,
     },
 };
 
@@ -50,37 +51,53 @@ impl UiActionProofStore for PostgresIdentityStore {
             .map_err(|_| StoreError::NumericRange("auth_epoch"))?;
         let row = sqlx::query(
             "SELECT action.source_request_id, action.page_evidence_id,
+                    action.response_evidence_id,
                     action.source_action_ref, action.operation_id,
                     action.target_constraints, action.field_profile,
                     action.policy_revision, action.mapping_revision, action.method,
                     action.route_template, action.allowed_fields,
                     extract(epoch FROM action.issued_at)::bigint AS action_issued_at,
                     extract(epoch FROM action.expires_at)::bigint AS action_expires_at,
-                    evidence.page_template, evidence.build_fingerprint,
-                    extract(epoch FROM evidence.verified_at)::bigint AS evidence_verified_at,
-                    extract(epoch FROM evidence.expires_at)::bigint AS evidence_expires_at,
+                    page.page_template, page.build_fingerprint,
+                    extract(epoch FROM page.verified_at)::bigint AS page_verified_at,
+                    extract(epoch FROM page.expires_at)::bigint AS page_expires_at,
+                    response.source_operation_id, response.target_operation_id,
+                    response.response_status,
+                    extract(epoch FROM response.verified_at)::bigint AS response_verified_at,
+                    extract(epoch FROM response.expires_at)::bigint AS response_expires_at,
+                    descriptor.page_template AS descriptor_page_template,
                     descriptor.target_rule, descriptor.allowed_fields AS descriptor_fields
              FROM xshield.ui_actions action
-             JOIN xshield.page_evidence evidence
-               ON evidence.tenant_id = action.tenant_id
-              AND evidence.site_id = action.site_id
-              AND evidence.page_evidence_id = action.page_evidence_id
-              AND evidence.binding_id = action.binding_id
-              AND evidence.auth_epoch = action.auth_epoch
-              AND evidence.source_request_id = action.source_request_id
-              AND evidence.policy_revision = action.policy_revision
-              AND evidence.mapping_revision = action.mapping_revision
+             LEFT JOIN xshield.page_evidence page
+               ON page.tenant_id = action.tenant_id
+              AND page.site_id = action.site_id
+              AND page.page_evidence_id = action.page_evidence_id
+              AND page.binding_id = action.binding_id
+              AND page.auth_epoch = action.auth_epoch
+              AND page.source_request_id = action.source_request_id
+              AND page.policy_revision = action.policy_revision
+              AND page.mapping_revision = action.mapping_revision
+             LEFT JOIN xshield.response_evidence response
+               ON response.tenant_id = action.tenant_id
+              AND response.site_id = action.site_id
+              AND response.response_evidence_id = action.response_evidence_id
+              AND response.binding_id = action.binding_id
+              AND response.auth_epoch = action.auth_epoch
+              AND response.source_request_id = action.source_request_id
+              AND response.target_operation_id = action.operation_id
+              AND response.policy_revision = action.policy_revision
              JOIN xshield.action_descriptors descriptor
                ON descriptor.tenant_id = action.tenant_id
               AND descriptor.site_id = action.site_id
               AND descriptor.action_id = action.source_action_ref
               AND descriptor.policy_revision = action.policy_revision
               AND descriptor.mapping_revision = action.mapping_revision
-              AND descriptor.page_template = evidence.page_template
               AND descriptor.operation_id = action.operation_id
               AND descriptor.method = action.method
               AND descriptor.route_template = action.route_template
               AND descriptor.field_profile = action.field_profile
+              AND (action.response_evidence_id IS NOT NULL
+                   OR descriptor.page_template = page.page_template)
              JOIN xshield.policy_revisions policy
                ON policy.tenant_id = action.tenant_id
               AND policy.site_id = action.site_id
@@ -89,7 +106,11 @@ impl UiActionProofStore for PostgresIdentityStore {
                AND action.action_ref = $3 AND action.binding_id = $4
                AND action.auth_epoch = $5 AND action.policy_revision = $6
                AND action.status = 'active' AND action.expires_at > to_timestamp($7)
-               AND evidence.status = 'verified' AND evidence.expires_at > to_timestamp($7)
+               AND ((page.page_evidence_id IS NOT NULL
+                     AND page.status = 'verified' AND page.expires_at > to_timestamp($7))
+                    OR (response.response_evidence_id IS NOT NULL
+                        AND response.status = 'verified'
+                        AND response.expires_at > to_timestamp($7)))
                AND descriptor.status = 'approved' AND policy.status = 'active'",
         )
         .bind(query.snapshot.tenant_id().as_str())
@@ -112,46 +133,27 @@ impl UiActionProofStore for PostgresIdentityStore {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn rehydrate_action(
     row: &sqlx::postgres::PgRow,
     query: &UiActionProofQuery<'_>,
 ) -> Result<ActionGrant, StoreError> {
-    let evidence = PageEvidence::verified(
-        parse(
-            row.try_get("page_evidence_id")?,
-            "page_evidence_id",
-            PageEvidenceId::parse,
-        )?,
-        query.binding,
-        query.snapshot.clone(),
-        parse(
-            row.try_get("source_request_id")?,
-            "source_request_id",
-            RequestId::parse,
-        )?,
-        parse(
-            row.try_get("page_template")?,
-            "page_template",
-            PageTemplate::parse,
-        )?,
-        build_fingerprint(row.try_get("build_fingerprint")?)?,
-        query.policy_revision.clone(),
-        parse(
-            row.try_get("mapping_revision")?,
-            "mapping_revision",
-            MappingRevision::parse,
-        )?,
-        time(row, "evidence_expires_at")?,
-        time(row, "evidence_verified_at")?,
-    )
-    .map_err(|_| StoreError::CorruptData("page_evidence"))?;
+    let mapping_revision = parse(
+        row.try_get("mapping_revision")?,
+        "mapping_revision",
+        MappingRevision::parse,
+    )?;
     let descriptor = ActionDescriptor::approved(
         parse(
             row.try_get("source_action_ref")?,
             "source_action_ref",
             ActionId::parse,
         )?,
-        evidence.page_template().clone(),
+        parse(
+            row.try_get("descriptor_page_template")?,
+            "descriptor_page_template",
+            PageTemplate::parse,
+        )?,
         parse(
             row.try_get("operation_id")?,
             "operation_id",
@@ -168,20 +170,85 @@ fn rehydrate_action(
             ViewProfile::parse,
         )?,
         query.policy_revision.clone(),
-        evidence.mapping_revision().clone(),
+        mapping_revision.clone(),
     );
-    ActionGrant::issue(
+    let draft = ActionGrantDraft {
+        action_ref: query.action_ref.clone(),
+        target: target(row.try_get("target_constraints")?)?,
+        fields: fields(row.try_get("allowed_fields")?, "allowed_fields")?,
+        expires_at: time(row, "action_expires_at")?,
+    };
+    let issued_at = time(row, "action_issued_at")?;
+    if let Some(page_evidence_id) = row.try_get::<Option<&str>, _>("page_evidence_id")? {
+        let evidence = PageEvidence::verified(
+            parse(page_evidence_id, "page_evidence_id", PageEvidenceId::parse)?,
+            query.binding,
+            query.snapshot.clone(),
+            parse(
+                row.try_get("source_request_id")?,
+                "source_request_id",
+                RequestId::parse,
+            )?,
+            parse(
+                row.try_get("page_template")?,
+                "page_template",
+                PageTemplate::parse,
+            )?,
+            build_fingerprint(row.try_get("build_fingerprint")?)?,
+            query.policy_revision.clone(),
+            mapping_revision,
+            time(row, "page_expires_at")?,
+            time(row, "page_verified_at")?,
+        )
+        .map_err(|_| StoreError::CorruptData("page_evidence"))?;
+        return ActionGrant::issue(
+            query.binding,
+            query.snapshot,
+            &evidence,
+            &descriptor,
+            draft,
+            issued_at,
+        )
+        .map_err(|_| StoreError::CorruptData("ui_action"));
+    }
+
+    let evidence = ResponseEvidence::verified(
+        parse(
+            row.try_get("response_evidence_id")?,
+            "response_evidence_id",
+            ResponseEvidenceId::parse,
+        )?,
+        query.binding,
+        query.snapshot.clone(),
+        parse(
+            row.try_get("source_request_id")?,
+            "source_request_id",
+            RequestId::parse,
+        )?,
+        parse(
+            row.try_get("source_operation_id")?,
+            "source_operation_id",
+            OperationId::parse,
+        )?,
+        parse(
+            row.try_get("target_operation_id")?,
+            "target_operation_id",
+            OperationId::parse,
+        )?,
+        u16::try_from(row.try_get::<i32, _>("response_status")?)
+            .map_err(|_| StoreError::CorruptData("response_status"))?,
+        query.policy_revision.clone(),
+        time(row, "response_expires_at")?,
+        time(row, "response_verified_at")?,
+    )
+    .map_err(|_| StoreError::CorruptData("response_evidence"))?;
+    ActionGrant::issue_from_response(
         query.binding,
         query.snapshot,
         &evidence,
         &descriptor,
-        ActionGrantDraft {
-            action_ref: query.action_ref.clone(),
-            target: target(row.try_get("target_constraints")?)?,
-            fields: fields(row.try_get("allowed_fields")?, "allowed_fields")?,
-            expires_at: time(row, "action_expires_at")?,
-        },
-        time(row, "action_issued_at")?,
+        draft,
+        issued_at,
     )
     .map_err(|_| StoreError::CorruptData("ui_action"))
 }

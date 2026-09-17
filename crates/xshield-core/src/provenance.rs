@@ -4,7 +4,7 @@ use crate::{
     audit::ReasonCode,
     domain::{
         ActionId, ActionRef, FieldName, MappingRevision, OperationId, PageEvidenceId, PageTemplate,
-        PolicyRevision, RequestId, ResourceType, ViewProfile,
+        PolicyRevision, RequestId, ResourceType, ResponseEvidenceId, ViewProfile,
     },
     grant::ResourceKeyHmac,
     identity::{AuthBinding, AuthSnapshot, IdentityDenied, UnixSeconds},
@@ -120,6 +120,137 @@ pub struct PageEvidence {
     verified_at: UnixSeconds,
     expires_at: UnixSeconds,
     status: EvidenceStatus,
+}
+
+/// Immutable proof that one approved source response was fully verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponseEvidence {
+    evidence_id: ResponseEvidenceId,
+    snapshot: AuthSnapshot,
+    source_request_id: RequestId,
+    source_operation_id: OperationId,
+    target_operation_id: OperationId,
+    response_status: u16,
+    policy_revision: PolicyRevision,
+    verified_at: UnixSeconds,
+    expires_at: UnixSeconds,
+    status: EvidenceStatus,
+}
+
+impl ResponseEvidence {
+    /// Creates response evidence after complete origin, status, and shape validation.
+    ///
+    /// # Errors
+    /// Returns [`ProvenanceError::EvidenceUnverified`] for stale identity or a
+    /// lease outside the active authentication session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verified(
+        evidence_id: ResponseEvidenceId,
+        binding: &AuthBinding,
+        snapshot: AuthSnapshot,
+        source_request_id: RequestId,
+        source_operation_id: OperationId,
+        target_operation_id: OperationId,
+        response_status: u16,
+        policy_revision: PolicyRevision,
+        expires_at: UnixSeconds,
+        now: UnixSeconds,
+    ) -> Result<Self, ProvenanceError> {
+        binding.validate_epoch(&snapshot, now)?;
+        if expires_at <= now
+            || expires_at > binding.absolute_expires_at()
+            || !(200..=299).contains(&response_status)
+            || response_status == 204
+        {
+            return Err(ProvenanceError::EvidenceUnverified);
+        }
+        Ok(Self {
+            evidence_id,
+            snapshot,
+            source_request_id,
+            source_operation_id,
+            target_operation_id,
+            response_status,
+            policy_revision,
+            verified_at: now,
+            expires_at,
+            status: EvidenceStatus::Verified,
+        })
+    }
+
+    /// Revokes future action issuance while retaining the response fact.
+    pub fn revoke(&mut self) {
+        self.status = EvidenceStatus::Revoked;
+    }
+
+    /// Returns the response evidence identifier.
+    #[must_use]
+    pub const fn evidence_id(&self) -> &ResponseEvidenceId {
+        &self.evidence_id
+    }
+
+    /// Returns the frozen identity snapshot.
+    #[must_use]
+    pub const fn snapshot(&self) -> &AuthSnapshot {
+        &self.snapshot
+    }
+
+    /// Returns the request whose response produced this evidence.
+    #[must_use]
+    pub const fn source_request_id(&self) -> &RequestId {
+        &self.source_request_id
+    }
+
+    /// Returns the approved source operation.
+    #[must_use]
+    pub const fn source_operation_id(&self) -> &OperationId {
+        &self.source_operation_id
+    }
+
+    /// Returns the exact operation the response may qualify.
+    #[must_use]
+    pub const fn target_operation_id(&self) -> &OperationId {
+        &self.target_operation_id
+    }
+
+    /// Returns the configured business-success status observed on the response.
+    #[must_use]
+    pub const fn response_status(&self) -> u16 {
+        self.response_status
+    }
+
+    /// Returns the frozen policy revision.
+    #[must_use]
+    pub const fn policy_revision(&self) -> &PolicyRevision {
+        &self.policy_revision
+    }
+
+    /// Returns the response verification time.
+    #[must_use]
+    pub const fn verified_at(&self) -> UnixSeconds {
+        self.verified_at
+    }
+
+    /// Returns the evidence expiry.
+    #[must_use]
+    pub const fn expires_at(&self) -> UnixSeconds {
+        self.expires_at
+    }
+
+    fn validate(&self, snapshot: &AuthSnapshot, now: UnixSeconds) -> Result<(), ProvenanceError> {
+        if self.status != EvidenceStatus::Verified || now >= self.expires_at {
+            return Err(ProvenanceError::EvidenceUnverified);
+        }
+        if self.snapshot.tenant_id() != snapshot.tenant_id()
+            || self.snapshot.site_id() != snapshot.site_id()
+            || self.snapshot.binding_id() != snapshot.binding_id()
+            || self.snapshot.epoch() != snapshot.epoch()
+            || self.snapshot.principal_ref() != snapshot.principal_ref()
+        {
+            return Err(ProvenanceError::EvidenceUnverified);
+        }
+        Ok(())
+    }
 }
 
 impl PageEvidence {
@@ -375,6 +506,15 @@ pub struct ActionGrantDraft {
     pub expires_at: UnixSeconds,
 }
 
+/// Verified source record that authorized one action grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActionEvidenceRef {
+    /// An approved page/build mapping exposed the action.
+    Page(PageEvidenceId),
+    /// A fully verified source response qualified the action target.
+    Response(ResponseEvidenceId),
+}
+
 /// Persistable action grant bound to one immutable identity epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionGrant {
@@ -382,7 +522,7 @@ pub struct ActionGrant {
     action_id: ActionId,
     snapshot: AuthSnapshot,
     source_request_id: RequestId,
-    page_evidence_id: PageEvidenceId,
+    evidence_ref: ActionEvidenceRef,
     operation_id: OperationId,
     method: HttpMethod,
     route: RouteTemplate,
@@ -433,7 +573,57 @@ impl ActionGrant {
             action_id: descriptor.action_id.clone(),
             snapshot: snapshot.clone(),
             source_request_id: evidence.source_request_id.clone(),
-            page_evidence_id: evidence.evidence_id.clone(),
+            evidence_ref: ActionEvidenceRef::Page(evidence.evidence_id.clone()),
+            operation_id: descriptor.operation_id.clone(),
+            method: descriptor.method,
+            route: descriptor.route.clone(),
+            field_profile: descriptor.field_profile.clone(),
+            policy_revision: descriptor.policy_revision.clone(),
+            mapping_revision: descriptor.mapping_revision.clone(),
+            issued_at: now,
+            active: true,
+        })
+    }
+
+    /// Issues one action from a completely verified source response.
+    ///
+    /// # Errors
+    /// Returns [`ProvenanceError`] for stale response evidence, descriptor,
+    /// target or field expansion, or a lease outside the response/session.
+    pub fn issue_from_response(
+        binding: &AuthBinding,
+        snapshot: &AuthSnapshot,
+        evidence: &ResponseEvidence,
+        descriptor: &ActionDescriptor,
+        draft: ActionGrantDraft,
+        now: UnixSeconds,
+    ) -> Result<Self, ProvenanceError> {
+        binding.validate_epoch(snapshot, now)?;
+        evidence.validate(snapshot, now)?;
+        if !descriptor.active
+            || descriptor.policy_revision != evidence.policy_revision
+            || descriptor.operation_id != evidence.target_operation_id
+        {
+            return Err(ProvenanceError::ActionUnavailable);
+        }
+        if !draft.target.matches_rule(&descriptor.target_rule, snapshot) {
+            return Err(ProvenanceError::TargetScopeMismatch);
+        }
+        if !draft.fields.is_subset(&descriptor.allowed_fields) {
+            return Err(ProvenanceError::FieldNotAllowed);
+        }
+        if draft.expires_at <= now
+            || draft.expires_at > evidence.expires_at
+            || draft.expires_at > binding.absolute_expires_at()
+        {
+            return Err(ProvenanceError::ExpiryInvalid);
+        }
+        Ok(Self {
+            draft,
+            action_id: descriptor.action_id.clone(),
+            snapshot: snapshot.clone(),
+            source_request_id: evidence.source_request_id.clone(),
+            evidence_ref: ActionEvidenceRef::Response(evidence.evidence_id.clone()),
             operation_id: descriptor.operation_id.clone(),
             method: descriptor.method,
             route: descriptor.route.clone(),
@@ -513,10 +703,19 @@ impl ActionGrant {
         &self.source_request_id
     }
 
-    /// Returns the page evidence ID.
+    /// Returns the verified evidence record that produced this action.
     #[must_use]
-    pub const fn page_evidence_id(&self) -> &PageEvidenceId {
-        &self.page_evidence_id
+    pub const fn evidence_ref(&self) -> &ActionEvidenceRef {
+        &self.evidence_ref
+    }
+
+    /// Returns the page evidence ID for page-derived actions.
+    #[must_use]
+    pub const fn page_evidence_id(&self) -> Option<&PageEvidenceId> {
+        match &self.evidence_ref {
+            ActionEvidenceRef::Page(value) => Some(value),
+            ActionEvidenceRef::Response(_) => None,
+        }
     }
 
     /// Returns the exact operation.
@@ -880,6 +1079,50 @@ mod tests {
                 UnixSeconds::new(100),
             ),
             Err(ProvenanceError::EvidenceUnverified)
+        );
+    }
+
+    #[test]
+    fn verified_response_issues_only_its_exact_target_action() {
+        let mut fixture = fixture();
+        let evidence = ResponseEvidence::verified(
+            ResponseEvidenceId::parse("response_018f2a3b-4c5d-7000-8000-000000000306").unwrap(),
+            &fixture.binding,
+            fixture.snapshot.clone(),
+            RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000307").unwrap(),
+            OperationId::parse("users.list").unwrap(),
+            fixture.descriptor.operation_id().clone(),
+            200,
+            fixture.descriptor.policy_revision.clone(),
+            UnixSeconds::new(200),
+            UnixSeconds::new(100),
+        )
+        .unwrap();
+        let grant = ActionGrant::issue_from_response(
+            &fixture.binding,
+            &fixture.snapshot,
+            &evidence,
+            &fixture.descriptor,
+            draft("principal_a", &["new_password"]),
+            UnixSeconds::new(100),
+        )
+        .unwrap();
+        assert!(matches!(
+            grant.evidence_ref(),
+            ActionEvidenceRef::Response(_)
+        ));
+
+        fixture.descriptor.operation_id = OperationId::parse("user.password.reset").unwrap();
+        assert_eq!(
+            ActionGrant::issue_from_response(
+                &fixture.binding,
+                &fixture.snapshot,
+                &evidence,
+                &fixture.descriptor,
+                draft("principal_a", &["new_password"]),
+                UnixSeconds::new(100),
+            ),
+            Err(ProvenanceError::ActionUnavailable)
         );
     }
 }

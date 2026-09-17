@@ -10,12 +10,16 @@ mod grant;
 mod grant_read;
 mod identity_read;
 mod provenance;
+mod response_grant;
 mod service_identity_read;
 mod share_grant_issue;
 mod share_grant_read;
 
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
+pub use response_grant::{
+    CommittedResponseGrant, ResponseGrantItem, ResponseGrantPersistence, ResponseGrantWriteOutcome,
+};
 pub use share_grant_issue::{ShareGrantPersistence, ShareGrantWriteOutcome};
 
 use serde_json::Value;

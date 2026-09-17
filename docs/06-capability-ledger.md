@@ -37,7 +37,7 @@ PageEvidence 必须关联认可来源；源站返回 200 不是授权证明。�
 
 ## 6.4 事务与容量
 
-PostgreSQL 首版使用短事务校验 auth_epoch 与 policy_revision，幂等写入发行事件并写 outbox。相同 source_request_id/source_rule/resource/operation 的重复消费不重复增权。普通查询永不无限续租；最长资格期限不得超过当前会话和来源证据期限。
+PostgreSQL 首版在同一短事务中锁定当前 binding，重验 auth_epoch、活动策略和精确动作描述，再把完整响应证据、逐资源 ActionGrant、ResourceGrant 与 outbox 整批提交。整批任一写入失败、会话容量不足或资格变化均不留下部分授权；相同来源响应的精确重放返回原有引用，语义变化则冲突。响应证据只保存受限 artifact 引用和带域 HMAC，不保存原始资源值。普通查询永不无限续租；最长资格期限不得超过当前会话和来源证据期限。
 
 首版可配置每会话最多 5000 条资格、单响应 1000 条、写操作更短 TTL；这些是待测限额。超额返回重新获取/明确拒绝，不授予 wildcard。删除旧观察记录不应误删仍有效资格；撤销资格也不删除历史证据。
 

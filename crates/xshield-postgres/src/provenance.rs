@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, Row};
 use xshield_core::{
     audit::ReasonCode,
+    domain::PageEvidenceId,
     provenance::{ActionGrant, ActionTarget, PageEvidence},
 };
 
@@ -10,6 +11,7 @@ use xshield_core::{
 pub struct ProvenancePersistence<'a> {
     evidence: &'a PageEvidence,
     action: &'a ActionGrant,
+    action_page_evidence_id: &'a PageEvidenceId,
     response_artifact_ref: &'a str,
     event_id: &'a xshield_core::domain::EventId,
     event_envelope: &'a Value,
@@ -35,9 +37,12 @@ impl<'a> ProvenancePersistence<'a> {
             && response_artifact_ref
                 .bytes()
                 .all(|byte| !byte.is_ascii_control());
+        let Some(action_page_evidence_id) = action.page_evidence_id() else {
+            return Err(StoreError::InvalidCommand);
+        };
         if !artifact_valid
             || !event_envelope.is_object()
-            || evidence.evidence_id() != action.page_evidence_id()
+            || evidence.evidence_id() != action_page_evidence_id
             || evidence.source_request_id() != action.source_request_id()
             || evidence.snapshot() != action.snapshot()
             || evidence.policy_revision() != action.policy_revision()
@@ -52,6 +57,7 @@ impl<'a> ProvenancePersistence<'a> {
         Ok(Self {
             evidence,
             action,
+            action_page_evidence_id,
             response_artifact_ref,
             event_id,
             event_envelope,
@@ -373,7 +379,7 @@ async fn existing_action(
             && row.try_get::<&str, _>("source_request_id")?
                 == command.action.source_request_id().as_str()
             && row.try_get::<&str, _>("page_evidence_id")?
-                == command.action.page_evidence_id().as_str()
+                == command.action_page_evidence_id.as_str()
             && row.try_get::<&str, _>("source_action_ref")? == command.action.action_id().as_str()
             && row.try_get::<&str, _>("operation_id")? == command.action.operation_id().as_str()
             && row.try_get::<Value, _>("target_constraints")? == *target
@@ -421,7 +427,7 @@ async fn insert_action_and_event(
     .bind(command.action.snapshot().binding_id().as_str())
     .bind(epoch)
     .bind(command.action.source_request_id().as_str())
-    .bind(command.action.page_evidence_id().as_str())
+    .bind(command.action_page_evidence_id.as_str())
     .bind(command.action.action_id().as_str())
     .bind(command.action.operation_id().as_str())
     .bind(target)
