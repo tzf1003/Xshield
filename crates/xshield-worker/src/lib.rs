@@ -15,7 +15,9 @@ use std::{
     time::Duration,
 };
 use uuid::{Uuid, Version};
-use xshield_audit::{JournalError, JournalKey, SealVerifyingKey, SealedSegmentReader};
+use xshield_audit::{
+    JournalError, JournalKey, SealVerifyingKey, SealedSegmentReader, verify_sealed_segment,
+};
 use xshield_core::domain::{EventId, PolicyRevision, RequestId, SiteId, TenantId};
 
 #[cfg(unix)]
@@ -78,6 +80,125 @@ pub struct PublishReport {
     pub watermark_producer_boot_id: Option<String>,
     /// Final producer sequence within the watermark segment.
     pub watermark_producer_sequence: u64,
+}
+
+/// Latest contiguous segment represented by the analytical index.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct IndexWatermark {
+    /// Producer boot ID committed by the sealed segment.
+    pub producer_boot_id: String,
+    /// Final producer-local sequence in that segment.
+    pub producer_sequence: u64,
+}
+
+/// Authenticated local view of journal-to-index publication state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PublicationHealth {
+    /// Non-secret operator identity for the selected analytical destination.
+    pub target_id: String,
+    /// Escaped single-table destination bound into every checkpoint.
+    pub table: String,
+    /// UTC observation time for this snapshot.
+    pub as_of: String,
+    /// Number of immutable closed journal segments.
+    pub closed_segments: usize,
+    /// Total bytes occupied by immutable closed journal segments.
+    pub closed_segment_bytes: u64,
+    /// Number of segments covered by exact destination checkpoints.
+    pub published_segments: usize,
+    /// Number of closed segments not yet covered by a checkpoint.
+    pub pending_segments: usize,
+    /// Pending segments for which no signed manifest exists yet.
+    pub unsealed_segments: usize,
+    /// True when a published segment appears after an unpublished segment.
+    pub has_gaps: bool,
+    /// Latest continuously published segment, excluding any later island.
+    pub index_watermark: Option<IndexWatermark>,
+}
+
+/// Inspects sealed segments and exact checkpoints without querying `ClickHouse`.
+///
+/// Segment signatures, journal authentication, and checkpoint bindings are
+/// verified before they affect the returned counters. A missing manifest is a
+/// visible pending state; malformed or mismatched evidence is an error.
+///
+/// # Errors
+/// Returns [`PublishError`] for unsafe paths, corrupt evidence, invalid
+/// checkpoint bindings, or arithmetic overflow.
+pub fn inspect_publication_health(
+    config: &PublisherConfig,
+    journal_key_id: &str,
+    journal_key: &JournalKey,
+    seal_key: &SealVerifyingKey,
+) -> Result<PublicationHealth, PublishError> {
+    prepare_private_directory(&config.journal_directory, false)?;
+    prepare_private_directory(&config.manifest_directory, false)?;
+    let checkpoint_directory_exists = match fs::symlink_metadata(&config.checkpoint_directory) {
+        Ok(_) => {
+            prepare_private_directory(&config.checkpoint_directory, false)?;
+            true
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let paths = closed_segment_paths(&config.journal_directory)?;
+    let mut health = PublicationHealth {
+        target_id: config.target_id.clone(),
+        table: config.table.clone(),
+        as_of: Utc::now().to_rfc3339(),
+        closed_segments: paths.len(),
+        closed_segment_bytes: 0,
+        published_segments: 0,
+        pending_segments: 0,
+        unsealed_segments: 0,
+        has_gaps: false,
+        index_watermark: None,
+    };
+    let mut continuous = true;
+    for path in paths {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.len() > config.max_segment_bytes {
+            return Err(PublishError::SegmentLimitExceeded);
+        }
+        health.closed_segment_bytes = health
+            .closed_segment_bytes
+            .checked_add(metadata.len())
+            .ok_or(PublishError::InvalidEvent)?;
+        let boot_id = segment_boot_id(&path)?;
+        let manifest_path = config
+            .manifest_directory
+            .join(format!("segment-{boot_id}.xjs"));
+        let manifest = match fs::symlink_metadata(&manifest_path) {
+            Ok(_) => read_private_bounded(&manifest_path, MANIFEST_BYTES_MAX)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                health.pending_segments += 1;
+                health.unsealed_segments += 1;
+                continuous = false;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let segment =
+            verify_sealed_segment(&path, journal_key_id, journal_key, &manifest, seal_key)?;
+        let checkpoint = Checkpoint::from_segment(&config.target_id, &config.table, &segment);
+        let published = checkpoint_directory_exists
+            && checkpoint_matches(&config.checkpoint_directory, &checkpoint)?;
+        if published {
+            health.published_segments += 1;
+            if continuous {
+                health.index_watermark = Some(IndexWatermark {
+                    producer_boot_id: segment.producer_boot_id,
+                    producer_sequence: segment.final_sequence,
+                });
+            } else {
+                health.has_gaps = true;
+            }
+        } else {
+            health.pending_segments += 1;
+            continuous = false;
+        }
+    }
+    Ok(health)
 }
 
 /// Publishes every closed segment in filename order using at-least-once delivery.
@@ -921,6 +1042,8 @@ pub enum PublishError {
     IntegrityConflict,
     /// Event schema, identity, ordering, or payload validation failed.
     InvalidEvent,
+    /// A closed segment exceeds the configured health inspection ceiling.
+    SegmentLimitExceeded,
     /// The adapter does not recognize the versioned event type.
     UnsupportedEventType,
     /// Local journal authentication or decryption failed.
@@ -943,6 +1066,7 @@ impl fmt::Display for PublishError {
             Self::CheckpointConflict => formatter.write_str("publisher checkpoint conflict"),
             Self::IntegrityConflict => formatter.write_str("audit integrity conflict"),
             Self::InvalidEvent => formatter.write_str("invalid authenticated audit event"),
+            Self::SegmentLimitExceeded => formatter.write_str("audit segment read limit exceeded"),
             Self::UnsupportedEventType => formatter.write_str("unsupported audit event type"),
             Self::Journal(error) => error.fmt(formatter),
             Self::Io(_) => formatter.write_str("publisher storage failed"),
@@ -990,7 +1114,11 @@ impl From<clickhouse::error::Error> for PublishError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExistingDigest, IndexRow, PublishError, PublisherConfig, publish_sealed_segments};
+    use super::{
+        Checkpoint, ExistingDigest, IndexRow, PublishError, PublisherConfig, closed_segment_paths,
+        inspect_publication_health, prepare_private_directory, publish_sealed_segments,
+        read_private_bounded, write_checkpoint,
+    };
     use clickhouse::{Client, test};
     use std::{
         fs,
@@ -1012,11 +1140,15 @@ mod tests {
         config: PublisherConfig,
         journal_key: JournalKey,
         seal_key: SealSigningKey,
-        event_id: String,
+        event_ids: Vec<String>,
     }
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_events(1)
+        }
+
+        fn with_events(event_count: usize) -> Self {
             let root = std::env::temp_dir().join(format!("xshield-worker-test-{}", Uuid::now_v7()));
             let journal_directory = root.join("journal");
             let manifest_directory = root.join("manifests");
@@ -1033,16 +1165,20 @@ mod tests {
                 limits,
             )
             .unwrap();
-            let boot_id = journal.producer_boot_id();
-            let event_id = format!("ev_{}", Uuid::now_v7());
-            let plaintext = event_json(&event_id, &boot_id);
-            let typed_event_id = EventId::parse(event_id.clone()).unwrap();
-            journal
-                .append_batch(&[JournalRecord {
-                    event_id: &typed_event_id,
-                    plaintext: plaintext.as_bytes(),
-                }])
-                .unwrap();
+            let mut event_ids = Vec::with_capacity(event_count);
+            for _ in 0..event_count {
+                let boot_id = journal.producer_boot_id();
+                let event_id = format!("ev_{}", Uuid::now_v7());
+                let plaintext = event_json(&event_id, &boot_id);
+                let typed_event_id = EventId::parse(event_id.clone()).unwrap();
+                journal
+                    .append_batch(&[JournalRecord {
+                        event_id: &typed_event_id,
+                        plaintext: plaintext.as_bytes(),
+                    }])
+                    .unwrap();
+                event_ids.push(event_id);
+            }
             drop(journal);
             let seal_key = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY_HEX).unwrap();
             seal_closed_segments(
@@ -1067,7 +1203,7 @@ mod tests {
                 config,
                 journal_key,
                 seal_key,
-                event_id,
+                event_ids,
             }
         }
 
@@ -1115,7 +1251,7 @@ mod tests {
         assert_eq!(report.published_segments, 1);
         assert_eq!(report.published_events, 1);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].event_id, fixture.event_id);
+        assert_eq!(rows[0].event_id, fixture.event_ids[0]);
         assert_eq!(rows[0].content_digest.len(), 64);
         assert_eq!(fixture.checkpoint_count(), 1);
 
@@ -1158,7 +1294,7 @@ mod tests {
         let fixture = Fixture::new();
         let mock = test::Mock::new();
         mock.add(test::handlers::provide([ExistingDigest {
-            event_id: fixture.event_id.clone(),
+            event_id: fixture.event_ids[0].clone(),
             content_digest: "0".repeat(64),
             digest_count: 1,
         }]));
@@ -1184,7 +1320,7 @@ mod tests {
         mock.add(test::handlers::provide(Vec::<ExistingDigest>::new()));
         let insertion = mock.add(test::handlers::record::<IndexRow>());
         mock.add(test::handlers::provide([ExistingDigest {
-            event_id: fixture.event_id.clone(),
+            event_id: fixture.event_ids[0].clone(),
             content_digest: "0".repeat(64),
             digest_count: 1,
         }]));
@@ -1230,6 +1366,90 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(synthetic_error, PublishError::InvalidEvent));
+    }
+
+    #[test]
+    fn reports_only_the_contiguous_publication_watermark() {
+        let fixture = Fixture::with_events(2);
+        let later_boot_id = checkpoint_segment(&fixture, 1);
+        let verifier = fixture.seal_key.verifying_key().unwrap();
+        let gapped = inspect_publication_health(
+            &fixture.config,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .unwrap();
+        assert_eq!(gapped.closed_segments, 2);
+        assert_eq!(gapped.published_segments, 1);
+        assert_eq!(gapped.pending_segments, 1);
+        assert!(gapped.has_gaps);
+        assert_eq!(gapped.index_watermark, None);
+
+        checkpoint_segment(&fixture, 0);
+        let continuous = inspect_publication_health(
+            &fixture.config,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .unwrap();
+        assert_eq!(continuous.published_segments, 2);
+        assert_eq!(continuous.pending_segments, 0);
+        assert!(!continuous.has_gaps);
+        assert_eq!(
+            continuous.index_watermark.unwrap().producer_boot_id,
+            later_boot_id
+        );
+    }
+
+    #[test]
+    fn reports_unsealed_tail_as_pending() {
+        let fixture = Fixture::new();
+        let manifest = fs::read_dir(&fixture.config.manifest_directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::remove_file(manifest).unwrap();
+        let verifier = fixture.seal_key.verifying_key().unwrap();
+        let health = inspect_publication_health(
+            &fixture.config,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .unwrap();
+        assert_eq!(health.pending_segments, 1);
+        assert_eq!(health.unsealed_segments, 1);
+        assert!(!health.has_gaps);
+        assert_eq!(health.index_watermark, None);
+    }
+
+    fn checkpoint_segment(fixture: &Fixture, index: usize) -> String {
+        prepare_private_directory(&fixture.config.checkpoint_directory, true).unwrap();
+        let paths = closed_segment_paths(&fixture.config.journal_directory).unwrap();
+        let path = &paths[index];
+        let boot_id = super::segment_boot_id(path).unwrap();
+        let manifest_path = fixture
+            .config
+            .manifest_directory
+            .join(format!("segment-{boot_id}.xjs"));
+        let manifest = read_private_bounded(&manifest_path, super::MANIFEST_BYTES_MAX).unwrap();
+        let verifier = fixture.seal_key.verifying_key().unwrap();
+        let segment = super::verify_sealed_segment(
+            path,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &manifest,
+            &verifier,
+        )
+        .unwrap();
+        let checkpoint =
+            Checkpoint::from_segment(&fixture.config.target_id, &fixture.config.table, &segment);
+        write_checkpoint(&fixture.config.checkpoint_directory, &checkpoint).unwrap();
+        segment.producer_boot_id
     }
 
     fn private_directory(path: &Path) {
