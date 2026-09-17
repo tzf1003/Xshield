@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, new_trace_id,
 };
-use crate::protected_identity::{ProtectedIdentity, store_failure_reason, strip_waf_cookie};
+use crate::protected_identity::{ProtectedIdentity, store_failure_reason, strip_edge_proofs};
 
 struct Gateway {
     config: Arc<GatewayConfig>,
@@ -157,7 +157,7 @@ impl ProxyHttp for Gateway {
         upstream_request: &mut pingora::http::RequestHeader,
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
-        strip_waf_cookie(upstream_request)?;
+        strip_edge_proofs(upstream_request)?;
         upstream_request.insert_header("Host", self.config.origin_server_name())?;
         upstream_request.insert_header("X-Xshield-Request-Id", &context.request_id)?;
         Ok(())

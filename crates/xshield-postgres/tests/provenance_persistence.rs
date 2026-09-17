@@ -15,6 +15,7 @@ use xshield_core::{
         AuthBinding, AuthEpoch, AuthSnapshot, CredentialFingerprint, CredentialGeneration,
         CredentialSlot, UnixSeconds,
     },
+    ports::{UiActionProofQuery, UiActionProofState, UiActionProofStore},
     provenance::{
         ActionDescriptor, ActionGrant, ActionGrantDraft, ActionTarget, ActionTargetRule,
         BuildFingerprint, HttpMethod, PageEvidence, RouteTemplate,
@@ -302,6 +303,31 @@ async fn provenance_is_atomic_idempotent_and_epoch_bound() {
             .unwrap(),
         ProvenanceWriteOutcome::Existing
     );
+    let loaded = store
+        .load_ui_action(UiActionProofQuery {
+            binding: &fixture.binding,
+            snapshot: &fixture.snapshot,
+            action_ref: action.action_ref(),
+            policy_revision: action.policy_revision(),
+            now: UnixSeconds::new(NOW),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(loaded, UiActionProofState::Verified(found) if *found == action));
+    let wrong_policy = PolicyRevision::parse("policy-r2").unwrap();
+    assert!(matches!(
+        store
+            .load_ui_action(UiActionProofQuery {
+                binding: &fixture.binding,
+                snapshot: &fixture.snapshot,
+                action_ref: action.action_ref(),
+                policy_revision: &wrong_policy,
+                now: UnixSeconds::new(NOW),
+            })
+            .await
+            .unwrap(),
+        UiActionProofState::Denied(_)
+    ));
     assert_eq!(
         persist(
             &store,

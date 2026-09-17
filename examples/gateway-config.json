@@ -15,6 +15,10 @@
     "max_bytes": 16777216,
     "high_watermark_bytes": 12582912
   },
+  "identity_store": {
+    "max_connections": 4,
+    "acquire_timeout_ms": 2000
+  },
   "operations": [
     {
       "operation_id": "health.read",
@@ -26,11 +30,11 @@
       "view_profile": null
     },
     {
-      "operation_id": "account.password.update",
-      "method": "POST",
-      "path": "/account/password",
+      "operation_id": "settings.open",
+      "method": "GET",
+      "path": "/settings",
       "admission": "UI_ACTION_REQUIRED",
-      "source_action": "account_password_form.submit",
+      "source_action": "settings.open",
       "resource_type": null,
       "view_profile": null
     }

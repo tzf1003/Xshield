@@ -192,7 +192,10 @@ impl GatewayConfig {
         }
         if identity_store.is_none()
             && operations.values().any(|operation| {
-                operation.policy.admission_class() == AdmissionClass::AuthenticatedRoot
+                matches!(
+                    operation.policy.admission_class(),
+                    AdmissionClass::AuthenticatedRoot | AdmissionClass::UiActionRequired
+                )
             })
         {
             return Err(ConfigError::Invalid("identity_store"));
@@ -542,6 +545,7 @@ mod tests {
       "site_id":"site_demo",
       "policy_revision":"policy-r1",
       "audit":{"directory":"target/xshield-audit-test","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432},
+      "identity_store":{"max_connections":4,"acquire_timeout_ms":1000},
       "operations":[
         {"operation_id":"catalog.read","method":"GET","path":"/catalog","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null},
         {"operation_id":"account.update","method":"POST","path":"/account","admission":"UI_ACTION_REQUIRED","source_action":"account_form.submit","resource_type":null,"view_profile":null}
@@ -588,10 +592,7 @@ mod tests {
 
     #[test]
     fn validates_identity_store_bounds() {
-        let configured = CONFIG.replace(
-            "\"operations\":[",
-            "\"identity_store\":{\"max_connections\":4,\"acquire_timeout_ms\":1000},\"operations\":[",
-        );
+        let configured = CONFIG.to_owned();
         let config = GatewayConfig::from_json(configured.as_bytes()).unwrap();
         let identity = config.identity_store().unwrap();
         assert_eq!(identity.max_connections(), 4);
@@ -604,8 +605,8 @@ mod tests {
         ));
 
         let missing = CONFIG.replace(
-            "\"admission\":\"PUBLIC\"",
-            "\"admission\":\"AUTHENTICATED_ROOT\"",
+            "      \"identity_store\":{\"max_connections\":4,\"acquire_timeout_ms\":1000},\n",
+            "",
         );
         assert!(matches!(
             GatewayConfig::from_json(missing.as_bytes()),

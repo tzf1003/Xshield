@@ -2,11 +2,14 @@
 
 use crate::{
     audit::AuditEvent,
-    domain::{EventId, SiteId, StageExecutionId, TenantId, WafSessionId},
+    domain::{
+        ActionRef, EventId, PolicyRevision, SiteId, StageExecutionId, TenantId, WafSessionId,
+    },
     identity::{
         AuthBinding, AuthSnapshot, CredentialFingerprint, CredentialSlot, IdentityDenied,
         UnixSeconds,
     },
+    provenance::{ActionGrant, ProvenanceError},
 };
 use std::{cell::RefCell, collections::BTreeMap, fmt, future::Future};
 
@@ -53,6 +56,44 @@ pub trait IdentityProofStore {
         &'a self,
         query: IdentityProofQuery<'a>,
     ) -> impl Future<Output = Result<IdentityProofState, Self::Error>> + Send + 'a;
+}
+
+/// Scoped request for one authoritative UI action grant.
+pub struct UiActionProofQuery<'a> {
+    /// Current binding loaded for this same request.
+    pub binding: &'a AuthBinding,
+    /// Immutable current identity snapshot.
+    pub snapshot: &'a AuthSnapshot,
+    /// Opaque server-issued action reference presented by the client.
+    pub action_ref: &'a ActionRef,
+    /// Policy revision fixed by trusted gateway configuration.
+    pub policy_revision: &'a PolicyRevision,
+    /// Trusted server time frozen for this request.
+    pub now: UnixSeconds,
+}
+
+/// Authoritative result of loading one exact UI action grant.
+#[derive(Debug)]
+pub enum UiActionProofState {
+    /// Persisted state revalidated through the domain issuance rules.
+    Verified(Box<ActionGrant>),
+    /// Missing, stale, revoked, mismatched, or ineligible action state.
+    Denied(ProvenanceError),
+}
+
+/// Reads UI action state only from an authoritative scoped store.
+pub trait UiActionProofStore {
+    /// Adapter-specific lookup failure.
+    type Error;
+
+    /// Loads an exact action reference and revalidates its complete provenance chain.
+    ///
+    /// # Errors
+    /// Returns the adapter error when authoritative state cannot be read safely.
+    fn load_ui_action<'a>(
+        &'a self,
+        query: UiActionProofQuery<'a>,
+    ) -> impl Future<Output = Result<UiActionProofState, Self::Error>> + Send + 'a;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

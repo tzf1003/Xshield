@@ -6,7 +6,7 @@
 
 ## 实现状态
 
-M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关可按可信 JSON 配置转发精确 `PUBLIC` / `AUTH_ENTRY` 操作；配置身份存储后，`AUTHENTICATED_ROOT` 会用租户隔离 HMAC 核对 `__Host-xshield_sid`、Bearer 凭证、当前 generation、epoch 和服务端期限，并在访问源站前剥离 WAF Cookie。未配置路由及缺少所需证明的其他受保护入口在源站前拒绝。网关已接入加密分段 journal：准入、阶段、判定和转发意图必须批量持久化成功后才能访问源站，配额、写入或恢复失败均关闭转发。审计 seal/发布与未知源站结果对账、UI 动作/资源证明加载、分享和服务身份证明持久化仍在后续闭环中。
+M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关可按可信 JSON 配置转发精确 `PUBLIC` / `AUTH_ENTRY` 操作；配置身份存储后，`AUTHENTICATED_ROOT` 会用租户隔离 HMAC 核对 `__Host-xshield_sid`、Bearer 凭证、当前 generation、epoch 和服务端期限。无资源、无请求字段的 `UI_ACTION_REQUIRED` 操作还会按不透明动作引用重验当前策略、页面证据和动作描述；缺失、替换、退休或过期状态均在源站前拒绝。WAF Cookie 与边缘动作头在访问源站前剥离。网关已接入加密分段 journal：准入、阶段、判定和转发意图必须批量持久化成功后才能访问源站，配额、写入或恢复失败均关闭转发。审计 seal/发布与未知源站结果对账、资源/字段提取适配器、分享和服务身份证明持久化仍在后续闭环中。
 
 ```bash
 cargo test --workspace --all-targets
@@ -16,10 +16,12 @@ scripts/test_postgres.sh
 scripts/test_gateway_identity.sh
 XSHIELD_CONFIG=examples/gateway-config.json \
 XSHIELD_JOURNAL_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
+XSHIELD_DATABASE_URL="$YOUR_POSTGRES_URL" \
+XSHIELD_FINGERPRINT_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
 cargo run -p xshield-gateway
 ```
 
-身份存储由可选的 `identity_store` 配置启用；运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。生产环境应由秘密管理器注入并按租户轮换，不写入配置文件或日志。
+身份存储由可选的 `identity_store` 配置启用；`AUTHENTICATED_ROOT` 或 `UI_ACTION_REQUIRED` 路由存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。UI 动作由自动注入探针通过 `X-Xshield-Action-Ref` 携带服务端发行的不透明引用；网关只信任 PostgreSQL 中与当前认证代际和活动策略精确匹配的记录。生产环境应由秘密管理器注入并按租户轮换，不写入配置文件或日志。
 
 ## Rust 运行时依赖
 

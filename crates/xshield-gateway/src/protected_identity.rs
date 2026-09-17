@@ -4,19 +4,23 @@ use std::{collections::BTreeMap, env, fmt, time::Duration};
 use xshield_core::{
     admission::{AdmissionClass, AdmissionProof},
     audit::ReasonCode,
-    domain::WafSessionId,
+    domain::{ActionRef, WafSessionId},
     identity::{CredentialFingerprint, CredentialSlot, IdentityDenied, UnixSeconds},
-    ports::{IdentityProofQuery, IdentityProofState, IdentityProofStore},
+    ports::{
+        IdentityProofQuery, IdentityProofState, IdentityProofStore, UiActionProofQuery,
+        UiActionProofState, UiActionProofStore,
+    },
 };
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig};
 use xshield_postgres::{PostgresIdentityStore, StoreError};
 use zeroize::Zeroizing;
 
 const WAF_COOKIE: &str = "__Host-xshield_sid";
+const ACTION_HEADER: &str = "x-xshield-action-ref";
 const MAX_SESSION_BYTES: usize = 256;
 const MAX_BEARER_BYTES: usize = 8192;
 
-pub(crate) fn strip_waf_cookie(request: &mut RequestHeader) -> PingoraResult<()> {
+pub(crate) fn strip_edge_proofs(request: &mut RequestHeader) -> PingoraResult<()> {
     let mut retained = Vec::new();
     let mut valid_ascii = true;
     for value in request.headers.get_all("cookie") {
@@ -34,6 +38,7 @@ pub(crate) fn strip_waf_cookie(request: &mut RequestHeader) -> PingoraResult<()>
     if valid_ascii && !retained.is_empty() {
         request.insert_header("Cookie", retained.join("; "))?;
     }
+    request.remove_header(ACTION_HEADER);
     Ok(())
 }
 
@@ -58,6 +63,20 @@ impl ProtectedIdentity {
         })
     }
 
+    async fn store(&self) -> Result<&PostgresIdentityStore, IdentityRuntimeError> {
+        self.store
+            .get_or_try_init(|| async {
+                PostgresIdentityStore::connect(
+                    &self.database_url,
+                    self.max_connections,
+                    self.acquire_timeout,
+                )
+                .await
+            })
+            .await
+            .map_err(Into::into)
+    }
+
     pub(crate) async fn admit(
         &self,
         config: &GatewayConfig,
@@ -66,7 +85,11 @@ impl ProtectedIdentity {
         path: &str,
         now: UnixSeconds,
     ) -> Result<GatewayDecision, IdentityRuntimeError> {
-        if config.admission_class(method, path) != Some(AdmissionClass::AuthenticatedRoot) {
+        let class = config.admission_class(method, path);
+        if !matches!(
+            class,
+            Some(AdmissionClass::AuthenticatedRoot | AdmissionClass::UiActionRequired)
+        ) {
             return Ok(config.admit(method, path, now));
         }
         let presented = match PresentedIdentity::parse(request, &self.fingerprint_key) {
@@ -91,17 +114,7 @@ impl ProtectedIdentity {
             }
             Err(error) => return Err(error),
         };
-        let store = self
-            .store
-            .get_or_try_init(|| async {
-                PostgresIdentityStore::connect(
-                    &self.database_url,
-                    self.max_connections,
-                    self.acquire_timeout,
-                )
-                .await
-            })
-            .await?;
+        let store = self.store().await?;
         let state = store
             .load_identity(IdentityProofQuery {
                 tenant_id: config.tenant_id(),
@@ -113,15 +126,52 @@ impl ProtectedIdentity {
             })
             .await?;
         Ok(match state {
-            IdentityProofState::Verified { binding, snapshot } => config.admit_with_proof(
-                method,
-                path,
-                now,
-                AdmissionProof::Authenticated {
-                    binding: &binding,
-                    snapshot: &snapshot,
-                },
-            ),
+            IdentityProofState::Verified { binding, snapshot } => match class {
+                Some(AdmissionClass::AuthenticatedRoot) => config.admit_with_proof(
+                    method,
+                    path,
+                    now,
+                    AdmissionProof::Authenticated {
+                        binding: &binding,
+                        snapshot: &snapshot,
+                    },
+                ),
+                Some(AdmissionClass::UiActionRequired) => {
+                    let action_ref = match unique_action_ref(request) {
+                        Ok(action_ref) => action_ref,
+                        Err(IdentityRuntimeError::Missing | IdentityRuntimeError::Malformed) => {
+                            return Ok(config.admit(method, path, now));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    match store
+                        .load_ui_action(UiActionProofQuery {
+                            binding: &binding,
+                            snapshot: &snapshot,
+                            action_ref: &action_ref,
+                            policy_revision: config.policy_revision(),
+                            now,
+                        })
+                        .await?
+                    {
+                        UiActionProofState::Verified(action) => config.admit_with_proof(
+                            method,
+                            path,
+                            now,
+                            AdmissionProof::UiAction {
+                                binding: &binding,
+                                snapshot: &snapshot,
+                                action: &action,
+                                grants: None,
+                            },
+                        ),
+                        UiActionProofState::Denied(error) => {
+                            denied_reason(config, method, path, now, error.reason_code())
+                        }
+                    }
+                }
+                _ => config.admit(method, path, now),
+            },
             IdentityProofState::Denied(error) => denied(config, method, path, now, error),
         })
     }
@@ -134,9 +184,19 @@ fn denied(
     now: UnixSeconds,
     error: IdentityDenied,
 ) -> GatewayDecision {
+    denied_reason(config, method, path, now, error.reason_code())
+}
+
+fn denied_reason(
+    config: &GatewayConfig,
+    method: &str,
+    path: &str,
+    now: UnixSeconds,
+    reason: ReasonCode,
+) -> GatewayDecision {
     let mut decision = config.admit(method, path, now);
     decision.outcome = GatewayOutcome::Denied;
-    decision.reason_code = error.reason_code();
+    decision.reason_code = reason;
     decision
 }
 
@@ -200,6 +260,20 @@ fn unique_bearer(request: &RequestHeader) -> Result<&str, IdentityRuntimeError> 
         .filter(|token| !token.is_empty() && token.len() <= MAX_BEARER_BYTES)
         .ok_or(IdentityRuntimeError::Malformed)?;
     Ok(token)
+}
+
+fn unique_action_ref(request: &RequestHeader) -> Result<ActionRef, IdentityRuntimeError> {
+    let mut values = request.headers.get_all(ACTION_HEADER).iter();
+    let value = values.next().ok_or(IdentityRuntimeError::Missing)?;
+    if values.next().is_some() {
+        return Err(IdentityRuntimeError::Malformed);
+    }
+    ActionRef::parse(
+        value
+            .to_str()
+            .map_err(|_| IdentityRuntimeError::Malformed)?,
+    )
+    .map_err(|_| IdentityRuntimeError::Malformed)
 }
 
 fn fingerprint(key: &[u8; 32], value: &[u8]) -> Result<[u8; 32], IdentityRuntimeError> {
@@ -333,10 +407,33 @@ mod tests {
     #[test]
     fn strips_only_the_edge_session_cookie_before_origin() {
         let mut request = request();
-        strip_waf_cookie(&mut request).unwrap();
+        request
+            .insert_header(ACTION_HEADER, "action_settings_primary")
+            .unwrap();
+        strip_edge_proofs(&mut request).unwrap();
         assert_eq!(
             request.headers.get("cookie").unwrap().to_str().unwrap(),
             "theme=dark"
         );
+        assert!(!request.headers.contains_key(ACTION_HEADER));
+    }
+
+    #[test]
+    fn parses_one_bounded_action_reference() {
+        let mut request = request();
+        request
+            .insert_header(ACTION_HEADER, "action_settings_primary")
+            .unwrap();
+        assert_eq!(
+            unique_action_ref(&request).unwrap().as_str(),
+            "action_settings_primary"
+        );
+        request
+            .append_header(ACTION_HEADER, "action_settings_other")
+            .unwrap();
+        assert!(matches!(
+            unique_action_ref(&request),
+            Err(IdentityRuntimeError::Malformed)
+        ));
     }
 }

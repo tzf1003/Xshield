@@ -5,6 +5,7 @@
 
 #![warn(missing_docs)]
 
+mod action_read;
 mod grant;
 mod identity_read;
 mod provenance;
