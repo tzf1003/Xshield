@@ -6,11 +6,12 @@
 
 ## 实现状态
 
-M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关现可按可信 JSON 配置把精确 `PUBLIC` / `AUTH_ENTRY` 操作转发到固定源站；未配置路由和尚未接入证明加载器的受保护入口在源站前拒绝。分享与服务身份证明持久化、耐久 journal、完整审计投递和受保护请求转发仍在后续闭环中。
+M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关现可按可信 JSON 配置把精确 `PUBLIC` / `AUTH_ENTRY` 操作转发到固定源站；未配置路由和尚未接入证明加载器的受保护入口在源站前拒绝。本地审计 journal 已实现加密分段、批量持久确认、单写者、配额、哈希链、篡改拒绝及崩溃尾部恢复；网关接入、分享与服务身份证明持久化、完整审计投递和受保护请求转发仍在后续闭环中。
 
 ```bash
 cargo test --workspace --all-targets
 cargo run -p xshield-core --example m0_stage_tree
+cargo test -p xshield-audit
 scripts/test_postgres.sh
 XSHIELD_CONFIG=examples/gateway-config.json cargo run -p xshield-gateway
 ```
@@ -19,12 +20,13 @@ XSHIELD_CONFIG=examples/gateway-config.json cargo run -p xshield-gateway
 
 | 依赖 | 用途 | 许可证与更新策略 |
 |---|---|---|
-| Pingora 0.9.0 + OpenSSL backend | HTTP 代理生命周期、固定源站连接和请求过滤 | Apache-2.0；精确版本并锁文件，升级先复跑协议歧义、转发和故障测试；OpenSSL 随部署系统安全维护 |
+| Pingora 0.9.0 + OpenSSL backend | HTTP 代理生命周期、固定源站连接、请求过滤及 journal AES-256-GCM | Apache-2.0；精确版本并锁文件，部署同步审查 OpenSSL 版本与许可证，升级先复跑协议歧义、加密恢复、转发和故障测试 |
 | SQLx 0.9.0 | PostgreSQL 异步事务和连接池 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 migration、回滚和并发测试 |
 | Tokio 1.51 LTS | SQLx 异步运行时 | MIT；跟随 1.51 LTS 补丁，变更 minor 前执行故障与负载回归 |
 | serde / serde_json 1.x | 类型化配置 DTO 与 outbox JSON | MIT OR Apache-2.0；锁文件固定，补丁升级执行配置和契约测试 |
 | UUID 1.x | 生成服务器侧 UUIDv7 请求 ID | MIT OR Apache-2.0；锁文件固定，补丁升级执行 ID 契约测试 |
 | async-trait / bytes 1.x | 实现 Pingora 异步过滤器及有界拒绝响应体 | MIT OR Apache-2.0；锁文件固定，随 Pingora 兼容线评估更新 |
+| crc32fast / zeroize 1.x | journal 快速损坏检测与秘密缓冲清零 | MIT OR Apache-2.0；锁文件固定，升级执行篡改、恢复和秘密生命周期测试 |
 
 当前 workspace MSRV 为 Rust 1.94，与 SQLx 0.9.0 一致。生产依赖升级需审查许可证、安全公告和 Cargo.lock 差异。
 

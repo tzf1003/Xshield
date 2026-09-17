@@ -1,0 +1,16 @@
+[package]
+name = "xshield-audit"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+openssl.workspace = true
+uuid.workspace = true
+xshield-core = { path = "../xshield-core" }
+zeroize.workspace = true
+
+[lints]
+workspace = true
