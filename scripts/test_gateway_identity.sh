@@ -32,10 +32,15 @@ session_id="ses_018f2a3b-4c5d-7000-8000-000000000902"
 bearer="verified-business-token"
 session_fingerprint=$(printf '%s' "$session_id" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary | od -An -tx1 | tr -d ' \n')
 bearer_fingerprint=$(printf '%s' "$bearer" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary | od -An -tx1 | tr -d ' \n')
+resource_fingerprint=$(printf '%s\0%s\0%s\0%s\0%s\0' \
+    'xshield-resource-v1' 'tenant_gateway' 'site_gateway' 'order' 'order-123' \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
 
 psql -X -v ON_ERROR_STOP=1 -d "$test_database" \
     -v session_fingerprint="$session_fingerprint" \
-    -v bearer_fingerprint="$bearer_fingerprint" <<'SQL' >/dev/null
+    -v bearer_fingerprint="$bearer_fingerprint" \
+    -v resource_fingerprint="$resource_fingerprint" <<'SQL' >/dev/null
 INSERT INTO xshield.policy_revisions (
     tenant_id, site_id, revision, status, content_digest, artifact_ref
 ) VALUES (
@@ -69,6 +74,16 @@ INSERT INTO xshield.action_descriptors (
     'settings.open', 'GET', '/settings', '{"kind":"none"}', '[]',
     'no_fields', 'policy-r1', 'mapping-r1', 'approved'
 );
+INSERT INTO xshield.action_descriptors (
+    tenant_id, site_id, action_id, page_template, operation_id, method,
+    route_template, target_rule, allowed_fields, field_profile,
+    policy_revision, mapping_revision, status
+) VALUES (
+    'tenant_gateway', 'site_gateway', 'orders.open', 'settings_page',
+    'orders.read', 'GET', '/orders',
+    '{"kind":"resource","resource_type":"order"}', '["order_id"]',
+    'customer_detail', 'policy-r1', 'mapping-r1', 'approved'
+);
 INSERT INTO xshield.page_evidence (
     tenant_id, site_id, page_evidence_id, binding_id, auth_epoch,
     source_request_id, response_artifact_ref, page_template, build_fingerprint,
@@ -96,6 +111,37 @@ INSERT INTO xshield.ui_actions (
     'policy-r1', 'active', now() - interval '30 seconds', now() + interval '15 minutes',
     'mapping-r1', 'GET', '/settings', '[]'
 );
+INSERT INTO xshield.ui_actions (
+    tenant_id, site_id, action_ref, binding_id, auth_epoch,
+    source_request_id, page_evidence_id, source_action_ref, operation_id,
+    target_constraints, field_profile, source_rule, policy_revision,
+    status, issued_at, expires_at, mapping_revision, method, route_template,
+    allowed_fields
+) VALUES (
+    'tenant_gateway', 'site_gateway', 'action_order_primary',
+    'auth_018f2a3b-4c5d-7000-8000-000000000901', 1,
+    'req_018f2a3b-4c5d-7000-8000-000000000904',
+    'page_018f2a3b-4c5d-7000-8000-000000000903', 'orders.open',
+    'orders.read', jsonb_build_object(
+        'kind', 'resource', 'resource_type', 'order',
+        'resource_key_hmac', :'resource_fingerprint'
+    ), 'customer_detail', 'mapping-r1', 'policy-r1', 'active',
+    now() - interval '30 seconds', now() + interval '15 minutes',
+    'mapping-r1', 'GET', '/orders', '["order_id"]'
+);
+INSERT INTO xshield.resource_grants (
+    tenant_id, site_id, grant_id, binding_id, auth_epoch, action_ref,
+    resource_type, resource_key_hmac, operation_id, view_id, constraints,
+    source_event_id, issuance_key, policy_revision, status, issued_at, expires_at
+) VALUES (
+    'tenant_gateway', 'site_gateway',
+    'grant_018f2a3b-4c5d-7000-8000-000000000905',
+    'auth_018f2a3b-4c5d-7000-8000-000000000901', 1, 'action_order_primary',
+    'order', decode(:'resource_fingerprint', 'hex'), 'orders.read',
+    'customer_detail', '{}', 'ev_018f2a3b-4c5d-7000-8000-000000000906',
+    'orders-primary-r1', 'policy-r1', 'active',
+    now() - interval '20 seconds', now() + interval '10 minutes'
+);
 SQL
 
 cat >"$test_dir/config.json" <<JSON
@@ -109,7 +155,8 @@ cat >"$test_dir/config.json" <<JSON
   "identity_store":{"max_connections":2,"acquire_timeout_ms":2000},
   "operations":[
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
-    {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null}
+    {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
+    {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"}
   ]
 }
 JSON
@@ -199,6 +246,46 @@ retired_action_status=$(curl -sS -o "$test_dir/retired-action.json" -w '%{http_c
 [[ "$retired_action_status" == "403" ]]
 grep -q '"reason_code":"UI_ACTION_NOT_AVAILABLE"' "$test_dir/retired-action.json"
 
+valid_resource_status=$(curl -sS -o "$test_dir/valid-resource.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_order_primary" \
+    'http://127.0.0.1:6288/orders?order_id=order-123')
+[[ "$valid_resource_status" == "404" ]]
+
+unknown_resource_status=$(curl -sS -o "$test_dir/unknown-resource.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_order_primary" \
+    'http://127.0.0.1:6288/orders?order_id=order-999')
+[[ "$unknown_resource_status" == "403" ]]
+grep -q '"reason_code":"CAPABILITY_MISSING"' "$test_dir/unknown-resource.json"
+
+expanded_fields_status=$(curl -sS -o "$test_dir/expanded-fields.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_order_primary" \
+    'http://127.0.0.1:6288/orders?order_id=order-123&expand=admin')
+[[ "$expanded_fields_status" == "403" ]]
+grep -q '"reason_code":"FIELD_NOT_ALLOWED"' "$test_dir/expanded-fields.json"
+
+ambiguous_resource_status=$(curl -sS -o "$test_dir/ambiguous-resource.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_order_primary" \
+    'http://127.0.0.1:6288/orders?order_id=order-123&order%5fid=order-999')
+[[ "$ambiguous_resource_status" == "403" ]]
+
+psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+    "UPDATE xshield.resource_grants SET status = 'revoked' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND grant_id = 'grant_018f2a3b-4c5d-7000-8000-000000000905'" >/dev/null
+revoked_resource_status=$(curl -sS -o "$test_dir/revoked-resource.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_order_primary" \
+    'http://127.0.0.1:6288/orders?order_id=order-123')
+[[ "$revoked_resource_status" == "403" ]]
+grep -q '"reason_code":"CAPABILITY_MISSING"' "$test_dir/revoked-resource.json"
+
 kill -KILL "$gateway_pid"
 wait "$gateway_pid" 2>/dev/null || true
 gateway_pid=""
@@ -207,6 +294,7 @@ wait "$origin_pid" 2>/dev/null || true
 origin_pid=""
 [[ $(grep -c 'GET /account' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
 ! grep -q '__Host-xshield_sid' "$test_dir/origin.log"
 ! grep -q 'ActionRef=action_' "$test_dir/origin.log"
 grep -q 'Authorization=Bearer verified-business-token' "$test_dir/origin.log"

@@ -15,6 +15,12 @@ use std::fmt;
 pub struct ResourceKeyHmac([u8; 32]);
 
 impl ResourceKeyHmac {
+    /// Wraps an HMAC produced by a trusted tenant-isolated route adapter.
+    #[must_use]
+    pub const fn from_bytes(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+
     /// Parses a canonical lowercase 64-character hexadecimal HMAC.
     ///
     /// # Errors

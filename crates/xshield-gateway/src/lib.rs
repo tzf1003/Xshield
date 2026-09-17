@@ -13,9 +13,11 @@ use xshield_audit::JournalLimits;
 use xshield_core::{
     admission::{
         AdmissionClass, AdmissionProof, AdmissionRequest, CapabilityPolicy, OperationPolicy,
+        ResourceAccess,
     },
     audit::ReasonCode,
-    domain::{ActionId, OperationId, ResourceType, SiteId, TenantId, ViewProfile},
+    domain::{ActionId, FieldName, OperationId, ResourceType, SiteId, TenantId, ViewProfile},
+    grant::ResourceKeyHmac,
     identity::UnixSeconds,
     provenance::{ActionTarget, HttpMethod, RouteTemplate},
 };
@@ -63,6 +65,14 @@ struct CompiledOperation {
     method: HttpMethod,
     route: RouteTemplate,
     policy: OperationPolicy,
+    resource: Option<CompiledResource>,
+}
+
+#[derive(Debug)]
+struct CompiledResource {
+    resource_type: ResourceType,
+    view_profile: ViewProfile,
+    query_parameter: FieldName,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +124,7 @@ struct OperationDto {
     source_action: Option<String>,
     resource_type: Option<String>,
     view_profile: Option<String>,
+    resource_query_parameter: Option<String>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -295,9 +306,8 @@ impl GatewayConfig {
 
     /// Applies the compiled exact-operation policy with no client-created proof.
     ///
-    /// This MVP adapter can admit only public and authentication-entry routes.
-    /// All identity, UI, share, and service entries fail closed until their
-    /// authoritative proof loaders are connected.
+    /// Protected entries fail closed until their authoritative proof loader
+    /// invokes one of the proof-bearing admission methods.
     #[must_use]
     pub fn admit(&self, method: &str, path: &str, now: UnixSeconds) -> GatewayDecision {
         self.admit_with_proof(method, path, now, AdmissionProof::None)
@@ -311,6 +321,19 @@ impl GatewayConfig {
             .map(|operation| operation.policy.admission_class())
     }
 
+    /// Returns the trusted query adapter for an exact resource operation.
+    #[must_use]
+    pub fn resource_operation(&self, method: &str, path: &str) -> Option<ResourceOperation<'_>> {
+        let operation = self.operations.get(&(method.to_owned(), path.to_owned()))?;
+        let resource = operation.resource.as_ref()?;
+        Some(ResourceOperation {
+            operation_id: operation.policy.operation_id(),
+            resource_type: &resource.resource_type,
+            view_profile: &resource.view_profile,
+            query_parameter: &resource.query_parameter,
+        })
+    }
+
     /// Applies the compiled exact-operation policy with authoritative loaded proof.
     #[must_use]
     pub fn admit_with_proof(
@@ -320,6 +343,24 @@ impl GatewayConfig {
         now: UnixSeconds,
         proof: AdmissionProof<'_>,
     ) -> GatewayDecision {
+        let target = ActionTarget::None;
+        let fields = BTreeSet::new();
+        self.admit_scoped_with_proof(method, path, now, &target, &fields, None, proof)
+    }
+
+    /// Applies policy to request facts extracted by a trusted route adapter.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_scoped_with_proof(
+        &self,
+        method: &str,
+        path: &str,
+        now: UnixSeconds,
+        target: &ActionTarget,
+        fields: &BTreeSet<FieldName>,
+        resource_key: Option<&ResourceKeyHmac>,
+        proof: AdmissionProof<'_>,
+    ) -> GatewayDecision {
         let Some(operation) = self.operations.get(&(method.to_owned(), path.to_owned())) else {
             return GatewayDecision {
                 outcome: GatewayOutcome::Denied,
@@ -327,16 +368,20 @@ impl GatewayConfig {
                 reason_code: ReasonCode::OperationNotMatched,
             };
         };
-        let target = ActionTarget::None;
-        let fields = BTreeSet::new();
+        let resource = operation.resource.as_ref().and_then(|resource| {
+            resource_key.map(|resource_key| ResourceAccess {
+                resource_type: &resource.resource_type,
+                resource_key,
+            })
+        });
         let request = AdmissionRequest {
             tenant_id: &self.tenant_id,
             site_id: &self.site_id,
             method: operation.method,
             route: &operation.route,
-            target: &target,
-            fields: &fields,
-            resource: None,
+            target,
+            fields,
+            resource,
             now,
         };
         match operation.policy.admit(request, proof) {
@@ -352,6 +397,19 @@ impl GatewayConfig {
             },
         }
     }
+}
+
+/// Trusted resource semantics compiled for one exact operation.
+#[derive(Clone, Copy, Debug)]
+pub struct ResourceOperation<'a> {
+    /// Exact operation selected by method and path.
+    pub operation_id: &'a OperationId,
+    /// Canonical resource type used in action and grant checks.
+    pub resource_type: &'a ResourceType,
+    /// Exact view required by the resource grant.
+    pub view_profile: &'a ViewProfile,
+    /// Query field containing the canonical resource reference.
+    pub query_parameter: &'a FieldName,
 }
 
 impl IdentityStoreConfig {
@@ -381,12 +439,30 @@ fn compile_operation(
         .map(ActionId::parse)
         .transpose()
         .map_err(ConfigError::Domain)?;
-    let capability = match (dto.resource_type, dto.view_profile) {
-        (None, None) => CapabilityPolicy::None,
-        (Some(resource_type), Some(view_profile)) => CapabilityPolicy::ExactResource {
-            resource_type: ResourceType::parse(resource_type).map_err(ConfigError::Domain)?,
-            view_profile: ViewProfile::parse(view_profile).map_err(ConfigError::Domain)?,
-        },
+    let (capability, resource) = match (
+        dto.resource_type,
+        dto.view_profile,
+        dto.resource_query_parameter,
+    ) {
+        (None, None, None) => (CapabilityPolicy::None, None),
+        (Some(resource_type), Some(view_profile), Some(query_parameter))
+            if method == HttpMethod::Get =>
+        {
+            let resource_type = ResourceType::parse(resource_type).map_err(ConfigError::Domain)?;
+            let view_profile = ViewProfile::parse(view_profile).map_err(ConfigError::Domain)?;
+            let query_parameter = FieldName::parse(query_parameter).map_err(ConfigError::Domain)?;
+            (
+                CapabilityPolicy::ExactResource {
+                    resource_type: resource_type.clone(),
+                    view_profile: view_profile.clone(),
+                },
+                Some(CompiledResource {
+                    resource_type,
+                    view_profile,
+                    query_parameter,
+                }),
+            )
+        }
         _ => return Err(ConfigError::Invalid("operation capability")),
     };
     let policy = OperationPolicy::new(
@@ -404,6 +480,7 @@ fn compile_operation(
             method,
             route,
             policy,
+            resource,
         },
     ))
 }
@@ -611,6 +688,28 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(missing.as_bytes()),
             Err(ConfigError::Invalid("identity_store"))
+        ));
+    }
+
+    #[test]
+    fn compiles_only_get_resource_query_adapters() {
+        let resource = CONFIG
+            .replace("\"method\":\"POST\",\"path\":\"/account\"", "\"method\":\"GET\",\"path\":\"/account\"")
+            .replace(
+                "\"resource_type\":null,\"view_profile\":null}\n      ]",
+                "\"resource_type\":\"account\",\"view_profile\":\"summary\",\"resource_query_parameter\":\"account_id\"}\n      ]",
+            );
+        let config = GatewayConfig::from_json(resource.as_bytes()).unwrap();
+        let operation = config.resource_operation("GET", "/account").unwrap();
+        assert_eq!(operation.query_parameter.as_str(), "account_id");
+
+        let non_get = resource.replace(
+            "\"method\":\"GET\",\"path\":\"/account\"",
+            "\"method\":\"POST\",\"path\":\"/account\"",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(non_get.as_bytes()),
+            Err(ConfigError::Invalid("operation capability"))
         ));
     }
 }

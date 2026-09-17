@@ -3,8 +3,10 @@
 use crate::{
     audit::AuditEvent,
     domain::{
-        ActionRef, EventId, PolicyRevision, SiteId, StageExecutionId, TenantId, WafSessionId,
+        ActionRef, EventId, OperationId, PolicyRevision, ResourceType, SiteId, StageExecutionId,
+        TenantId, ViewProfile, WafSessionId,
     },
+    grant::{GrantDenied, GrantLedger, ResourceKeyHmac},
     identity::{
         AuthBinding, AuthSnapshot, CredentialFingerprint, CredentialSlot, IdentityDenied,
         UnixSeconds,
@@ -94,6 +96,52 @@ pub trait UiActionProofStore {
         &'a self,
         query: UiActionProofQuery<'a>,
     ) -> impl Future<Output = Result<UiActionProofState, Self::Error>> + Send + 'a;
+}
+
+/// Scoped request for one exact persisted resource qualification.
+pub struct ResourceProofQuery<'a> {
+    /// Current binding loaded for this same request.
+    pub binding: &'a AuthBinding,
+    /// Immutable current identity snapshot.
+    pub snapshot: &'a AuthSnapshot,
+    /// UI action that introduced this resource operation.
+    pub action_ref: &'a ActionRef,
+    /// Canonical resource type fixed by trusted operation configuration.
+    pub resource_type: &'a ResourceType,
+    /// Tenant-isolated HMAC derived from the actual request resource value.
+    pub resource_key: &'a ResourceKeyHmac,
+    /// Exact operation fixed by trusted route matching.
+    pub operation_id: &'a OperationId,
+    /// Exact view fixed by trusted operation configuration.
+    pub view_profile: &'a ViewProfile,
+    /// Policy revision fixed by trusted gateway configuration.
+    pub policy_revision: &'a PolicyRevision,
+    /// Trusted server time frozen for this request.
+    pub now: UnixSeconds,
+}
+
+/// Authoritative result of loading one exact resource qualification.
+#[derive(Debug)]
+pub enum ResourceProofState {
+    /// Persisted state revalidated through the domain grant rules.
+    Verified(Box<GrantLedger>),
+    /// No current exact qualification exists.
+    Denied(GrantDenied),
+}
+
+/// Reads resource qualification state only from an authoritative scoped store.
+pub trait ResourceProofStore {
+    /// Adapter-specific lookup failure.
+    type Error;
+
+    /// Loads an exact resource, operation, view, action, and identity-epoch grant.
+    ///
+    /// # Errors
+    /// Returns the adapter error when authoritative state cannot be read safely.
+    fn load_resource_grant<'a>(
+        &'a self,
+        query: ResourceProofQuery<'a>,
+    ) -> impl Future<Output = Result<ResourceProofState, Self::Error>> + Send + 'a;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

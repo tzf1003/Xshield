@@ -6,11 +6,12 @@ use xshield_core::{
         ActionRef, AuthBindingId, EventId, GrantId, IssuanceKey, OperationId, PolicyRevision,
         RequestId, ResourceType, SiteId, TenantId, ViewProfile, WafSessionId,
     },
-    grant::{GrantDraft, ResourceKeyHmac},
+    grant::{GrantDenied, GrantDraft, GrantQuery, ResourceKeyHmac},
     identity::{
         AuthBinding, AuthEpoch, AuthSnapshot, CredentialFingerprint, CredentialGeneration,
         CredentialSlot, UnixSeconds,
     },
+    ports::{ResourceProofQuery, ResourceProofState, ResourceProofStore},
 };
 use xshield_postgres::{GrantPersistence, GrantWriteOutcome, PostgresIdentityStore, StoreError};
 
@@ -23,6 +24,7 @@ struct Fixture {
     site: SiteId,
     binding_id: AuthBindingId,
     action_ref: ActionRef,
+    binding: AuthBinding,
     snapshot: AuthSnapshot,
 }
 
@@ -64,6 +66,7 @@ fn fixture() -> Fixture {
         site,
         binding_id,
         action_ref: ActionRef::parse("action_order_read").unwrap(),
+        binding,
         snapshot,
     }
 }
@@ -270,6 +273,82 @@ async fn assert_capacity_is_serialized(
     );
 }
 
+async fn assert_resource_grant_reads(
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    draft: &GrantDraft,
+) {
+    let loaded = store
+        .load_resource_grant(ResourceProofQuery {
+            binding: &fixture.binding,
+            snapshot: &fixture.snapshot,
+            action_ref: &fixture.action_ref,
+            resource_type: &draft.resource_type,
+            resource_key: &draft.resource_key,
+            operation_id: &draft.operation_id,
+            view_profile: &draft.view_profile,
+            policy_revision: &draft.policy_revision,
+            now: UnixSeconds::new(NOW),
+        })
+        .await
+        .unwrap();
+    let ResourceProofState::Verified(ledger) = loaded else {
+        panic!("exact persisted grant must load");
+    };
+    assert!(
+        ledger
+            .authorize(
+                &fixture.binding,
+                GrantQuery {
+                    snapshot: &fixture.snapshot,
+                    resource_type: &draft.resource_type,
+                    resource_key: &draft.resource_key,
+                    operation_id: &draft.operation_id,
+                    view_profile: &draft.view_profile,
+                    now: UnixSeconds::new(NOW),
+                },
+            )
+            .is_ok()
+    );
+
+    let wrong_operation = OperationId::parse("orders.update").unwrap();
+    assert!(matches!(
+        store
+            .load_resource_grant(ResourceProofQuery {
+                binding: &fixture.binding,
+                snapshot: &fixture.snapshot,
+                action_ref: &fixture.action_ref,
+                resource_type: &draft.resource_type,
+                resource_key: &draft.resource_key,
+                operation_id: &wrong_operation,
+                view_profile: &draft.view_profile,
+                policy_revision: &draft.policy_revision,
+                now: UnixSeconds::new(NOW),
+            })
+            .await
+            .unwrap(),
+        ResourceProofState::Denied(GrantDenied::OperationNotGranted)
+    ));
+    let unknown_resource = ResourceKeyHmac::parse(&"9".repeat(64)).unwrap();
+    assert!(matches!(
+        store
+            .load_resource_grant(ResourceProofQuery {
+                binding: &fixture.binding,
+                snapshot: &fixture.snapshot,
+                action_ref: &fixture.action_ref,
+                resource_type: &draft.resource_type,
+                resource_key: &unknown_resource,
+                operation_id: &draft.operation_id,
+                view_profile: &draft.view_profile,
+                policy_revision: &draft.policy_revision,
+                now: UnixSeconds::new(NOW),
+            })
+            .await
+            .unwrap(),
+        ResourceProofState::Denied(GrantDenied::CapabilityMissing)
+    ));
+}
+
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
 async fn grant_issue_is_atomic_idempotent_and_capacity_bounded() {
@@ -300,6 +379,7 @@ async fn grant_issue_is_atomic_idempotent_and_capacity_bounded() {
             .unwrap(),
         GrantWriteOutcome::Existing(first_draft.grant_id.clone())
     );
+    assert_resource_grant_reads(&store, &fixture, &first_draft).await;
     assert_eq!(
         issue(
             &store,

@@ -37,6 +37,16 @@
       "source_action": "settings.open",
       "resource_type": null,
       "view_profile": null
+    },
+    {
+      "operation_id": "orders.read",
+      "method": "GET",
+      "path": "/orders",
+      "admission": "UI_ACTION_REQUIRED",
+      "source_action": "orders.open",
+      "resource_type": "order",
+      "view_profile": "customer_detail",
+      "resource_query_parameter": "order_id"
     }
   ]
 }

@@ -7,6 +7,7 @@
 
 mod action_read;
 mod grant;
+mod grant_read;
 mod identity_read;
 mod provenance;
 

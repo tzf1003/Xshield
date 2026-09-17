@@ -1,17 +1,29 @@
 use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use pingora::{Result as PingoraResult, http::RequestHeader};
-use std::{collections::BTreeMap, env, fmt, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fmt,
+    time::Duration,
+};
 use xshield_core::{
     admission::{AdmissionClass, AdmissionProof},
     audit::ReasonCode,
-    domain::{ActionRef, WafSessionId},
-    identity::{CredentialFingerprint, CredentialSlot, IdentityDenied, UnixSeconds},
-    ports::{
-        IdentityProofQuery, IdentityProofState, IdentityProofStore, UiActionProofQuery,
-        UiActionProofState, UiActionProofStore,
+    domain::{ActionRef, FieldName, ResourceType, WafSessionId},
+    grant::ResourceKeyHmac,
+    identity::{
+        AuthBinding, AuthSnapshot, CredentialFingerprint, CredentialSlot, IdentityDenied,
+        UnixSeconds,
     },
+    ports::{
+        IdentityProofQuery, IdentityProofState, IdentityProofStore, ResourceProofQuery,
+        ResourceProofState, ResourceProofStore, UiActionProofQuery, UiActionProofState,
+        UiActionProofStore,
+    },
+    provenance::ActionTarget,
 };
-use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig};
+use xshield_gateway::{
+    GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, ResourceOperation,
+};
 use xshield_postgres::{PostgresIdentityStore, StoreError};
 use zeroize::Zeroizing;
 
@@ -19,6 +31,10 @@ const WAF_COOKIE: &str = "__Host-xshield_sid";
 const ACTION_HEADER: &str = "x-xshield-action-ref";
 const MAX_SESSION_BYTES: usize = 256;
 const MAX_BEARER_BYTES: usize = 8192;
+const MAX_QUERY_BYTES: usize = 8192;
+const MAX_QUERY_PARAMETERS: usize = 64;
+const MAX_QUERY_COMPONENT_BYTES: usize = 4096;
+const MAX_RESOURCE_BYTES: usize = 512;
 
 pub(crate) fn strip_edge_proofs(request: &mut RequestHeader) -> PingoraResult<()> {
     let mut retained = Vec::new();
@@ -137,42 +153,187 @@ impl ProtectedIdentity {
                     },
                 ),
                 Some(AdmissionClass::UiActionRequired) => {
-                    let action_ref = match unique_action_ref(request) {
-                        Ok(action_ref) => action_ref,
-                        Err(IdentityRuntimeError::Missing | IdentityRuntimeError::Malformed) => {
-                            return Ok(config.admit(method, path, now));
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    match store
-                        .load_ui_action(UiActionProofQuery {
-                            binding: &binding,
-                            snapshot: &snapshot,
-                            action_ref: &action_ref,
-                            policy_revision: config.policy_revision(),
-                            now,
-                        })
-                        .await?
-                    {
-                        UiActionProofState::Verified(action) => config.admit_with_proof(
-                            method,
-                            path,
-                            now,
-                            AdmissionProof::UiAction {
-                                binding: &binding,
-                                snapshot: &snapshot,
-                                action: &action,
-                                grants: None,
-                            },
-                        ),
-                        UiActionProofState::Denied(error) => {
-                            denied_reason(config, method, path, now, error.reason_code())
-                        }
-                    }
+                    self.admit_ui_action(
+                        config, store, request, method, path, now, &binding, &snapshot,
+                    )
+                    .await?
                 }
                 _ => config.admit(method, path, now),
             },
             IdentityProofState::Denied(error) => denied(config, method, path, now, error),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_ui_action(
+        &self,
+        config: &GatewayConfig,
+        store: &PostgresIdentityStore,
+        request: &RequestHeader,
+        method: &str,
+        path: &str,
+        now: UnixSeconds,
+        binding: &AuthBinding,
+        snapshot: &AuthSnapshot,
+    ) -> Result<GatewayDecision, IdentityRuntimeError> {
+        let action_ref = match unique_action_ref(request) {
+            Ok(action_ref) => action_ref,
+            Err(IdentityRuntimeError::Missing | IdentityRuntimeError::Malformed) => {
+                return Ok(config.admit(method, path, now));
+            }
+            Err(error) => return Err(error),
+        };
+        let UiActionProofState::Verified(action) = store
+            .load_ui_action(UiActionProofQuery {
+                binding,
+                snapshot,
+                action_ref: &action_ref,
+                policy_revision: config.policy_revision(),
+                now,
+            })
+            .await?
+        else {
+            return Ok(denied_reason(
+                config,
+                method,
+                path,
+                now,
+                ReasonCode::UiActionNotAvailable,
+            ));
+        };
+        let Some(operation) = config.resource_operation(method, path) else {
+            if request.uri.query().is_some() {
+                return Ok(denied_reason(
+                    config,
+                    method,
+                    path,
+                    now,
+                    ReasonCode::FieldNotAllowed,
+                ));
+            }
+            return Ok(config.admit_with_proof(
+                method,
+                path,
+                now,
+                AdmissionProof::UiAction {
+                    binding,
+                    snapshot,
+                    action: &action,
+                    grants: None,
+                },
+            ));
+        };
+        self.admit_resource_action(
+            config, store, request, method, path, now, binding, snapshot, &action, operation,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_resource_action(
+        &self,
+        config: &GatewayConfig,
+        store: &PostgresIdentityStore,
+        request: &RequestHeader,
+        method: &str,
+        path: &str,
+        now: UnixSeconds,
+        binding: &AuthBinding,
+        snapshot: &AuthSnapshot,
+        action: &xshield_core::provenance::ActionGrant,
+        operation: ResourceOperation<'_>,
+    ) -> Result<GatewayDecision, IdentityRuntimeError> {
+        let Ok(scope) = RequestResource::parse(
+            request.uri.query(),
+            operation.query_parameter,
+            operation.resource_type,
+            &self.fingerprint_key,
+            config,
+        ) else {
+            return Ok(denied_reason(
+                config,
+                method,
+                path,
+                now,
+                ReasonCode::CapabilityMissing,
+            ));
+        };
+        let grants = match store
+            .load_resource_grant(ResourceProofQuery {
+                binding,
+                snapshot,
+                action_ref: action.action_ref(),
+                resource_type: operation.resource_type,
+                resource_key: &scope.key,
+                operation_id: operation.operation_id,
+                view_profile: operation.view_profile,
+                policy_revision: config.policy_revision(),
+                now,
+            })
+            .await?
+        {
+            ResourceProofState::Verified(grants) => grants,
+            ResourceProofState::Denied(error) => {
+                return Ok(denied_reason(
+                    config,
+                    method,
+                    path,
+                    now,
+                    error.reason_code(),
+                ));
+            }
+        };
+        Ok(config.admit_scoped_with_proof(
+            method,
+            path,
+            now,
+            &scope.target,
+            &scope.fields,
+            Some(&scope.key),
+            AdmissionProof::UiAction {
+                binding,
+                snapshot,
+                action,
+                grants: Some(&grants),
+            },
+        ))
+    }
+}
+
+struct RequestResource {
+    key: ResourceKeyHmac,
+    target: ActionTarget,
+    fields: BTreeSet<FieldName>,
+}
+
+impl RequestResource {
+    fn parse(
+        query: Option<&str>,
+        wanted: &FieldName,
+        resource_type: &ResourceType,
+        key: &[u8; 32],
+        config: &GatewayConfig,
+    ) -> Result<Self, ()> {
+        let (resource, fields) = parse_query(query.ok_or(())?, wanted)?;
+        let mut canonical = Vec::with_capacity(128 + resource.len());
+        for component in [
+            "xshield-resource-v1",
+            config.tenant_id().as_str(),
+            config.site_id().as_str(),
+            resource_type.as_str(),
+            &resource,
+        ] {
+            canonical.extend_from_slice(component.as_bytes());
+            canonical.push(0);
+        }
+        let key = ResourceKeyHmac::from_bytes(fingerprint(key, &canonical).map_err(|_| ())?);
+        Ok(Self {
+            target: ActionTarget::Resource {
+                resource_type: resource_type.clone(),
+                resource_key: key.clone(),
+            },
+            key,
+            fields,
         })
     }
 }
@@ -274,6 +435,68 @@ fn unique_action_ref(request: &RequestHeader) -> Result<ActionRef, IdentityRunti
             .map_err(|_| IdentityRuntimeError::Malformed)?,
     )
     .map_err(|_| IdentityRuntimeError::Malformed)
+}
+
+fn parse_query(query: &str, wanted: &FieldName) -> Result<(String, BTreeSet<FieldName>), ()> {
+    if query.is_empty() || query.len() > MAX_QUERY_BYTES || query.contains(';') {
+        return Err(());
+    }
+    let mut fields = BTreeSet::new();
+    let mut resource = None;
+    for (index, pair) in query.split('&').enumerate() {
+        if index >= MAX_QUERY_PARAMETERS || pair.is_empty() {
+            return Err(());
+        }
+        let (name, value) = pair.split_once('=').ok_or(())?;
+        let field = FieldName::parse(decode_query_component(name)?).map_err(|_| ())?;
+        let value = decode_query_component(value)?;
+        if value.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(());
+        }
+        if !fields.insert(field.clone()) {
+            return Err(());
+        }
+        if &field == wanted {
+            if value.is_empty() || value.len() > MAX_RESOURCE_BYTES {
+                return Err(());
+            }
+            resource = Some(value);
+        }
+    }
+    Ok((resource.ok_or(())?, fields))
+}
+
+fn decode_query_component(value: &str) -> Result<String, ()> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let pair = bytes.get(index + 1..index + 3).ok_or(())?;
+                decoded.push((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?);
+                index += 3;
+            }
+            b'+' => return Err(()),
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+        if decoded.len() > MAX_QUERY_COMPONENT_BYTES {
+            return Err(());
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| ())
+}
+
+const fn hex_nibble(value: u8) -> Result<u8, ()> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(()),
+    }
 }
 
 fn fingerprint(key: &[u8; 32], value: &[u8]) -> Result<[u8; 32], IdentityRuntimeError> {
@@ -435,5 +658,17 @@ mod tests {
             unique_action_ref(&request),
             Err(IdentityRuntimeError::Malformed)
         ));
+    }
+
+    #[test]
+    fn query_adapter_decodes_once_and_rejects_ambiguity() {
+        let wanted = FieldName::parse("order_id").unwrap();
+        let (resource, fields) = parse_query("order_id=order%2D123&view=summary", &wanted).unwrap();
+        assert_eq!(resource, "order-123");
+        assert_eq!(fields.len(), 2);
+        assert!(parse_query("order_id=one&order%5fid=two", &wanted).is_err());
+        assert!(parse_query("order_id=%GG", &wanted).is_err());
+        assert!(parse_query("order_id=order+123", &wanted).is_err());
+        assert!(parse_query("order_id=one;view=full", &wanted).is_err());
     }
 }
