@@ -22,6 +22,7 @@ use xshield_core::{
     provenance::{ActionTarget, HttpMethod, RouteTemplate},
 };
 
+pub mod share_issue;
 pub mod share_token;
 
 /// Maximum accepted gateway configuration size.
