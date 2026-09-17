@@ -6,7 +6,7 @@
 
 ## 实现状态
 
-M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关可按可信 JSON 配置转发精确 `PUBLIC` / `AUTH_ENTRY` 操作；配置身份存储后，`AUTHENTICATED_ROOT` 会用租户隔离 HMAC 核对 `__Host-xshield_sid`、Bearer 凭证、当前 generation、epoch 和服务端期限。`UI_ACTION_REQUIRED` 会按不透明动作引用重验当前策略、页面证据和动作描述；GET 查询资源操作还会从实际 URI 严格提取资源与字段，以租户、站点和资源类型带域 HMAC 精确匹配资格账本。缺失、替换、退休、过期、资源偏差、字段扩张或歧义查询均在源站前拒绝。WAF Cookie 与边缘动作头在访问源站前剥离。网关已接入加密分段 journal：准入、阶段、判定和转发意图必须批量持久化成功后才能访问源站，配额、写入或恢复失败均关闭转发。审计 seal/发布与未知源站结果对账、正文及路径资源适配器、分享和服务身份证明持久化仍在后续闭环中。
+M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关可按可信 JSON 配置转发精确 `PUBLIC` / `AUTH_ENTRY` 操作；配置身份存储后，`AUTHENTICATED_ROOT` 会用租户隔离 HMAC 核对 `__Host-xshield_sid`、Bearer 凭证、当前 generation、epoch 和服务端期限。`UI_ACTION_REQUIRED` 会按不透明动作引用重验当前策略、页面证据和动作描述；GET 查询资源操作还会从实际 URI 严格提取资源与字段，以租户、站点和资源类型带域 HMAC 精确匹配资格账本。缺失、替换、退休、过期、资源偏差、字段扩张或歧义查询均在源站前拒绝。WAF Cookie 与边缘动作头在访问源站前剥离。网关已接入加密分段 journal：准入、阶段、判定和转发意图必须批量持久化成功后才能访问源站，配额、写入或恢复失败均关闭转发。关闭段现可离线重验 AEAD、CRC 和哈希链，生成包含整段摘要与链头的规范 Ed25519 签名清单，并以不覆盖方式持久化到独立私有位置。周期轮转、自动封存/发布与未知源站结果对账、正文及路径资源适配器、分享和服务身份证明持久化仍在后续闭环中。
 
 ```bash
 cargo test --workspace --all-targets
@@ -27,7 +27,7 @@ cargo run -p xshield-gateway
 
 | 依赖 | 用途 | 许可证与更新策略 |
 |---|---|---|
-| Pingora 0.9.0 + OpenSSL backend | HTTP 代理生命周期、固定源站连接、请求过滤及 journal AES-256-GCM | Apache-2.0；精确版本并锁文件，部署同步审查 OpenSSL 版本与许可证，升级先复跑协议歧义、加密恢复、转发和故障测试 |
+| Pingora 0.9.0 + OpenSSL backend | HTTP 代理生命周期、固定源站连接、请求过滤、journal AES-256-GCM 及段清单 Ed25519 签名 | Apache-2.0；精确版本并锁文件，部署同步审查 OpenSSL 版本与许可证，升级先复跑协议歧义、加密恢复、签名验证、转发和故障测试 |
 | SQLx 0.9.0 | PostgreSQL 异步事务和连接池 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 migration、回滚和并发测试 |
 | Tokio 1.51 LTS | SQLx 异步运行时 | MIT；跟随 1.51 LTS 补丁，变更 minor 前执行故障与负载回归 |
 | serde / serde_json 1.x | 类型化配置 DTO 与 outbox JSON | MIT OR Apache-2.0；锁文件固定，补丁升级执行配置和契约测试 |

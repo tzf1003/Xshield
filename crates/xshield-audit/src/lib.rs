@@ -9,8 +9,10 @@
 use crc32fast::hash as crc32;
 use openssl::{
     error::ErrorStack,
+    pkey::{Id, PKey, Private, Public},
     rand::rand_bytes,
-    sha::sha256,
+    sha::{Sha256, sha256},
+    sign::{Signer, Verifier},
     symm::{Cipher, Crypter, Mode},
 };
 use std::{
@@ -27,7 +29,9 @@ use zeroize::{Zeroize, Zeroizing};
 use std::os::unix::{fs::OpenOptionsExt, fs::PermissionsExt};
 
 const MAGIC: &[u8; 8] = b"XSHJNL01";
+const SEAL_MAGIC: &[u8; 8] = b"XSHSL001";
 const FORMAT_VERSION: u16 = 1;
+const SEAL_VERSION: u16 = 1;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const HASH_BYTES: usize = 32;
@@ -36,6 +40,8 @@ const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_BATCH_RECORDS: usize = 64;
 const MAX_RECORD_BYTES: usize = MAX_EVENT_BYTES + 256;
 const ZERO_HASH: [u8; HASH_BYTES] = [0; HASH_BYTES];
+const ED25519_BYTES: usize = 32;
+const ED25519_SIGNATURE_BYTES: usize = 64;
 
 /// AES-256 key used only for local journal encryption.
 pub struct JournalKey([u8; 32]);
@@ -59,6 +65,99 @@ impl JournalKey {
         }
         Ok(Self(key))
     }
+}
+
+/// Ed25519 key held by the separately authorized segment-sealing process.
+pub struct SealSigningKey {
+    key_id: String,
+    key: PKey<Private>,
+}
+
+impl SealSigningKey {
+    /// Parses a key identifier and exactly 32 bytes of canonical lowercase hex seed material.
+    ///
+    /// # Errors
+    /// Returns [`JournalError::InvalidSealKey`] for invalid key metadata or material.
+    pub fn from_hex(key_id: impl Into<String>, value: &str) -> Result<Self, JournalError> {
+        let key_id = key_id.into();
+        if !valid_key_id(&key_id) {
+            return Err(JournalError::InvalidSealKey);
+        }
+        let mut bytes = Zeroizing::new(decode_32_byte_hex(value)?);
+        let key = PKey::private_key_from_raw_bytes(bytes.as_ref(), Id::ED25519)
+            .map_err(|_| JournalError::InvalidSealKey)?;
+        bytes.zeroize();
+        Ok(Self { key_id, key })
+    }
+
+    /// Derives the public verifier that may be distributed to readers.
+    ///
+    /// # Errors
+    /// Returns a cryptographic error if OpenSSL cannot export or import the public key.
+    pub fn verifying_key(&self) -> Result<SealVerifyingKey, JournalError> {
+        let bytes = self.key.raw_public_key()?;
+        Ok(SealVerifyingKey {
+            key_id: self.key_id.clone(),
+            key: PKey::public_key_from_raw_bytes(&bytes, Id::ED25519)?,
+        })
+    }
+}
+
+impl fmt::Debug for SealSigningKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealSigningKey")
+            .field("key_id", &self.key_id)
+            .field("key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Ed25519 public key used to verify a signed segment manifest.
+pub struct SealVerifyingKey {
+    key_id: String,
+    key: PKey<Public>,
+}
+
+impl SealVerifyingKey {
+    /// Parses a key identifier and exactly 32 bytes of canonical lowercase public-key hex.
+    ///
+    /// # Errors
+    /// Returns [`JournalError::InvalidSealKey`] for invalid key metadata or material.
+    pub fn from_hex(key_id: impl Into<String>, value: &str) -> Result<Self, JournalError> {
+        let key_id = key_id.into();
+        if !valid_key_id(&key_id) {
+            return Err(JournalError::InvalidSealKey);
+        }
+        let bytes = decode_32_byte_hex(value).map_err(|_| JournalError::InvalidSealKey)?;
+        let key = PKey::public_key_from_raw_bytes(&bytes, Id::ED25519)
+            .map_err(|_| JournalError::InvalidSealKey)?;
+        Ok(Self { key_id, key })
+    }
+}
+
+impl fmt::Debug for SealVerifyingKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealVerifyingKey")
+            .field("key_id", &self.key_id)
+            .finish_non_exhaustive()
+    }
+}
+
+fn decode_32_byte_hex(value: &str) -> Result<[u8; ED25519_BYTES], JournalError> {
+    if value.len() != ED25519_BYTES * 2
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(JournalError::InvalidSealKey);
+    }
+    let mut bytes = [0; ED25519_BYTES];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
+    }
+    Ok(bytes)
 }
 
 impl fmt::Debug for JournalKey {
@@ -122,6 +221,287 @@ pub struct JournalReceipt {
     pub event_id: EventId,
     /// Producer-local sequence within the active segment.
     pub producer_sequence: u64,
+}
+
+/// Authenticated summary of one immutable journal segment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedSegment {
+    /// Producer boot ID committed by the segment header and every record AAD.
+    pub producer_boot_id: String,
+    /// Encryption-key identifier committed by the segment header and every record AAD.
+    pub journal_key_id: String,
+    /// Number of complete authenticated records.
+    pub record_count: u64,
+    /// Final producer-local sequence, or zero for an empty segment.
+    pub final_sequence: u64,
+    /// Final record-body hash, or the all-zero chain root for an empty segment.
+    pub chain_head: [u8; HASH_BYTES],
+    /// Exact immutable segment length.
+    pub segment_bytes: u64,
+    /// SHA-256 digest of the entire segment file.
+    pub segment_digest: [u8; HASH_BYTES],
+}
+
+/// Canonically encoded Ed25519-signed segment manifest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedSegmentManifest(Vec<u8>);
+
+impl SignedSegmentManifest {
+    /// Signs a verified segment summary with a separately held sealing key.
+    ///
+    /// # Errors
+    /// Returns [`JournalError`] when canonical encoding or signing fails.
+    pub fn sign(segment: &VerifiedSegment, key: &SealSigningKey) -> Result<Self, JournalError> {
+        let payload = encode_seal_payload(segment, &key.key_id)?;
+        let mut signer = Signer::new_without_digest(&key.key)?;
+        let signature = signer.sign_oneshot_to_vec(&payload)?;
+        if signature.len() != ED25519_SIGNATURE_BYTES {
+            return Err(JournalError::Corrupt("seal signature length"));
+        }
+        let mut encoded = payload;
+        encoded.extend_from_slice(&signature);
+        Ok(Self(encoded))
+    }
+
+    /// Parses and verifies a manifest, returning its authenticated segment summary.
+    ///
+    /// # Errors
+    /// Returns [`JournalError`] for malformed input, the wrong key identifier, or
+    /// an invalid signature.
+    pub fn verify(bytes: &[u8], key: &SealVerifyingKey) -> Result<VerifiedSegment, JournalError> {
+        if bytes.len() < ED25519_SIGNATURE_BYTES {
+            return Err(JournalError::Corrupt("seal manifest"));
+        }
+        let (payload, signature) = bytes.split_at(bytes.len() - ED25519_SIGNATURE_BYTES);
+        let (segment, key_id) = decode_seal_payload(payload)?;
+        if key_id != key.key_id {
+            return Err(JournalError::SealKeyMismatch);
+        }
+        let mut verifier = Verifier::new_without_digest(&key.key)?;
+        if !verifier.verify_oneshot(signature, payload)? {
+            return Err(JournalError::Corrupt("seal signature"));
+        }
+        Ok(segment)
+    }
+
+    /// Returns the stable binary representation suitable for an object store.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Creates and durably syncs a new manifest without replacing existing evidence.
+    ///
+    /// The caller selects a separately controlled destination. Parent directories
+    /// must already exist and be private; this function never overwrites a path.
+    ///
+    /// # Errors
+    /// Returns [`JournalError`] for an unsafe destination or durability failure.
+    pub fn write_new(&self, path: impl AsRef<Path>) -> Result<(), JournalError> {
+        let path = path.as_ref();
+        let parent = path.parent().ok_or(JournalError::UnsafePath)?;
+        prepare_existing_private_directory(parent)?;
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Err(JournalError::UnsafePath),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(JournalError::Io(error)),
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or(JournalError::UnsafePath)?;
+        let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::now_v7()));
+        let mut file = private_new_file(&temporary)?;
+        file.write_all(&self.0)?;
+        file.sync_all()?;
+        if let Err(error) = fs::hard_link(&temporary, path) {
+            let _ = fs::remove_file(&temporary);
+            return if error.kind() == io::ErrorKind::AlreadyExists {
+                Err(JournalError::UnsafePath)
+            } else {
+                Err(JournalError::Io(error))
+            };
+        }
+        fs::remove_file(temporary)?;
+        sync_directory(parent)
+    }
+}
+
+/// Fully validates one closed segment without repairing or exposing event plaintext.
+///
+/// # Errors
+/// Returns [`JournalError`] for unsafe paths, key mismatch, truncation, corruption,
+/// authentication failure, or filesystem failure.
+pub fn verify_segment(
+    path: impl AsRef<Path>,
+    expected_key_id: &str,
+    key: &JournalKey,
+) -> Result<VerifiedSegment, JournalError> {
+    let path = path.as_ref();
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(JournalError::UnsafePath);
+    }
+    let recovered = recover_segment(path, expected_key_id, key, false)?;
+    Ok(VerifiedSegment {
+        producer_boot_id: Uuid::from_bytes(recovered.identity.boot_id).to_string(),
+        journal_key_id: recovered.identity.key_id,
+        record_count: recovered.report.recovered_records,
+        final_sequence: recovered.report.recovered_records,
+        chain_head: recovered.final_hash,
+        segment_bytes: metadata.len(),
+        segment_digest: hash_file(path)?,
+    })
+}
+
+/// Verifies both a segment and its signed manifest and requires an exact match.
+///
+/// This is the preferred boundary for publishers and investigators because it
+/// prevents a valid manifest from being paired with another segment.
+///
+/// # Errors
+/// Returns [`JournalError`] when either artifact is invalid or their authenticated
+/// summaries differ.
+pub fn verify_sealed_segment(
+    path: impl AsRef<Path>,
+    expected_journal_key_id: &str,
+    journal_key: &JournalKey,
+    manifest: &[u8],
+    seal_key: &SealVerifyingKey,
+) -> Result<VerifiedSegment, JournalError> {
+    let actual = verify_segment(path, expected_journal_key_id, journal_key)?;
+    let sealed = SignedSegmentManifest::verify(manifest, seal_key)?;
+    if actual != sealed {
+        return Err(JournalError::Corrupt("seal segment mismatch"));
+    }
+    Ok(actual)
+}
+
+fn encode_seal_payload(
+    segment: &VerifiedSegment,
+    seal_key_id: &str,
+) -> Result<Vec<u8>, JournalError> {
+    if !valid_key_id(seal_key_id) || !valid_key_id(&segment.journal_key_id) {
+        return Err(JournalError::InvalidSealKey);
+    }
+    if segment.final_sequence != segment.record_count {
+        return Err(JournalError::Corrupt("seal sequence"));
+    }
+    let seal_key_len =
+        u16::try_from(seal_key_id.len()).map_err(|_| JournalError::InvalidSealKey)?;
+    let journal_key_len =
+        u16::try_from(segment.journal_key_id.len()).map_err(|_| JournalError::InvalidKeyId)?;
+    let boot_id = Uuid::parse_str(&segment.producer_boot_id)
+        .map_err(|_| JournalError::Corrupt("seal producer boot id"))?;
+    let mut payload = Vec::with_capacity(118 + seal_key_id.len() + segment.journal_key_id.len());
+    payload.extend_from_slice(SEAL_MAGIC);
+    payload.extend_from_slice(&SEAL_VERSION.to_le_bytes());
+    payload.extend_from_slice(&seal_key_len.to_le_bytes());
+    payload.extend_from_slice(seal_key_id.as_bytes());
+    payload.extend_from_slice(boot_id.as_bytes());
+    payload.extend_from_slice(&journal_key_len.to_le_bytes());
+    payload.extend_from_slice(segment.journal_key_id.as_bytes());
+    payload.extend_from_slice(&segment.record_count.to_le_bytes());
+    payload.extend_from_slice(&segment.final_sequence.to_le_bytes());
+    payload.extend_from_slice(&segment.chain_head);
+    payload.extend_from_slice(&segment.segment_bytes.to_le_bytes());
+    payload.extend_from_slice(&segment.segment_digest);
+    Ok(payload)
+}
+
+fn decode_seal_payload(payload: &[u8]) -> Result<(VerifiedSegment, String), JournalError> {
+    let mut cursor = payload;
+    if seal_take(&mut cursor, SEAL_MAGIC.len())? != SEAL_MAGIC {
+        return Err(JournalError::Corrupt("seal magic"));
+    }
+    let version = u16::from_le_bytes(
+        seal_take(&mut cursor, 2)?
+            .try_into()
+            .map_err(|_| JournalError::Corrupt("seal version"))?,
+    );
+    if version != SEAL_VERSION {
+        return Err(JournalError::UnsupportedSealFormat);
+    }
+    let seal_key_id = decode_seal_key_id(&mut cursor)?;
+    let boot_id: [u8; 16] = seal_take(&mut cursor, 16)?
+        .try_into()
+        .map_err(|_| JournalError::Corrupt("seal producer boot id"))?;
+    let journal_key_id = decode_seal_key_id(&mut cursor)?;
+    let record_count = decode_seal_u64(&mut cursor, "seal record count")?;
+    let final_sequence = decode_seal_u64(&mut cursor, "seal sequence")?;
+    if final_sequence != record_count {
+        return Err(JournalError::Corrupt("seal sequence"));
+    }
+    let chain_head = seal_take(&mut cursor, HASH_BYTES)?
+        .try_into()
+        .map_err(|_| JournalError::Corrupt("seal chain head"))?;
+    let segment_bytes = decode_seal_u64(&mut cursor, "seal segment bytes")?;
+    let segment_digest = seal_take(&mut cursor, HASH_BYTES)?
+        .try_into()
+        .map_err(|_| JournalError::Corrupt("seal segment digest"))?;
+    if !cursor.is_empty() {
+        return Err(JournalError::Corrupt("seal trailing bytes"));
+    }
+    Ok((
+        VerifiedSegment {
+            producer_boot_id: Uuid::from_bytes(boot_id).to_string(),
+            journal_key_id,
+            record_count,
+            final_sequence,
+            chain_head,
+            segment_bytes,
+            segment_digest,
+        },
+        seal_key_id,
+    ))
+}
+
+fn decode_seal_key_id(cursor: &mut &[u8]) -> Result<String, JournalError> {
+    let length = usize::from(u16::from_le_bytes(
+        seal_take(cursor, 2)?
+            .try_into()
+            .map_err(|_| JournalError::Corrupt("seal key id length"))?,
+    ));
+    if length == 0 || length > MAX_KEY_ID_BYTES {
+        return Err(JournalError::Corrupt("seal key id length"));
+    }
+    let value = std::str::from_utf8(seal_take(cursor, length)?)
+        .map_err(|_| JournalError::Corrupt("seal key id"))?;
+    if !valid_key_id(value) {
+        return Err(JournalError::Corrupt("seal key id"));
+    }
+    Ok(value.to_owned())
+}
+
+fn decode_seal_u64(cursor: &mut &[u8], kind: &'static str) -> Result<u64, JournalError> {
+    Ok(u64::from_le_bytes(
+        seal_take(cursor, 8)?
+            .try_into()
+            .map_err(|_| JournalError::Corrupt(kind))?,
+    ))
+}
+
+fn seal_take<'a>(cursor: &mut &'a [u8], count: usize) -> Result<&'a [u8], JournalError> {
+    if cursor.len() < count {
+        return Err(JournalError::Corrupt("seal manifest"));
+    }
+    let (value, rest) = cursor.split_at(count);
+    *cursor = rest;
+    Ok(value)
+}
+
+fn hash_file(path: &Path) -> Result<[u8; HASH_BYTES], JournalError> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hasher.finish())
 }
 
 /// Result of validating old segments before opening a new producer segment.
@@ -346,6 +726,18 @@ fn prepare_directory(directory: &Path) -> Result<(), JournalError> {
     Ok(())
 }
 
+fn prepare_existing_private_directory(directory: &Path) -> Result<(), JournalError> {
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(JournalError::UnsafePath);
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(JournalError::UnsafePermissions);
+    }
+    Ok(())
+}
+
 fn parent_or_current(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -453,11 +845,11 @@ fn recover_directory(
         let recovered = recover_segment(&path, key_id, key, index == last_index)?;
         report.recovered_records = report
             .recovered_records
-            .checked_add(recovered.recovered_records)
+            .checked_add(recovered.report.recovered_records)
             .ok_or(JournalError::Full)?;
         report.truncated_bytes = report
             .truncated_bytes
-            .checked_add(recovered.truncated_bytes)
+            .checked_add(recovered.report.truncated_bytes)
             .ok_or(JournalError::Full)?;
         used_bytes = used_bytes
             .checked_add(fs::metadata(path)?.len())
@@ -466,12 +858,18 @@ fn recover_directory(
     Ok((report, used_bytes))
 }
 
+struct RecoveredSegment {
+    report: RecoveryReport,
+    identity: SegmentIdentity,
+    final_hash: [u8; HASH_BYTES],
+}
+
 fn recover_segment(
     path: &Path,
     expected_key_id: &str,
     key: &JournalKey,
     allow_tail_repair: bool,
-) -> Result<RecoveryReport, JournalError> {
+) -> Result<RecoveredSegment, JournalError> {
     #[cfg(unix)]
     if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
         return Err(JournalError::UnsafePermissions);
@@ -522,7 +920,11 @@ fn recover_segment(
             .checked_add(1)
             .ok_or(JournalError::Full)?;
     }
-    Ok(report)
+    Ok(RecoveredSegment {
+        report,
+        identity,
+        final_hash: previous_hash,
+    })
 }
 
 fn truncate_tail(file: &mut File, valid_end: u64) -> Result<u64, JournalError> {
@@ -817,6 +1219,8 @@ pub enum JournalError {
     InvalidKey,
     /// Key identifier is empty, oversized, or contains unsupported bytes.
     InvalidKeyId,
+    /// Seal key identifier or Ed25519 material is not canonical.
+    InvalidSealKey,
     /// Capacity or high-watermark limits are incoherent.
     InvalidLimits,
     /// Batch size is empty or exceeds the hard record-count bound.
@@ -829,10 +1233,14 @@ pub enum JournalError {
     UnsafePermissions,
     /// Existing segments use another key identifier.
     KeyMismatch,
+    /// A signed manifest names another seal verification key.
+    SealKeyMismatch,
     /// Another process already owns the single-writer journal lock.
     WriterActive,
     /// Segment format version is unsupported.
     UnsupportedFormat,
+    /// Signed manifest format version is unsupported.
+    UnsupportedSealFormat,
     /// A complete record or segment failed structural or integrity validation.
     Corrupt(&'static str),
     /// The configured hard quota cannot accept more durable bytes.
@@ -850,14 +1258,17 @@ impl fmt::Display for JournalError {
         match self {
             Self::InvalidKey => formatter.write_str("invalid journal key"),
             Self::InvalidKeyId => formatter.write_str("invalid journal key id"),
+            Self::InvalidSealKey => formatter.write_str("invalid journal seal key"),
             Self::InvalidLimits => formatter.write_str("invalid journal limits"),
             Self::InvalidBatch => formatter.write_str("invalid journal batch"),
             Self::InvalidEvent => formatter.write_str("invalid journal event"),
             Self::UnsafePath => formatter.write_str("unsafe journal path"),
             Self::UnsafePermissions => formatter.write_str("unsafe journal permissions"),
             Self::KeyMismatch => formatter.write_str("journal key id mismatch"),
+            Self::SealKeyMismatch => formatter.write_str("journal seal key id mismatch"),
             Self::WriterActive => formatter.write_str("journal writer already active"),
             Self::UnsupportedFormat => formatter.write_str("unsupported journal format"),
+            Self::UnsupportedSealFormat => formatter.write_str("unsupported journal seal format"),
             Self::Corrupt(kind) => write!(formatter, "corrupt journal {kind}"),
             Self::Full => formatter.write_str("journal quota exhausted"),
             Self::Poisoned => formatter.write_str("journal requires recovery"),
@@ -896,6 +1307,9 @@ mod tests {
 
     const KEY_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const OTHER_KEY_HEX: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const SEAL_KEY_HEX: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const OTHER_SEAL_KEY_HEX: &str =
+        "4444444444444444444444444444444444444444444444444444444444444444";
     const EVENT: &str = "ev_018f2a3b-4c5d-7000-8000-000000000001";
 
     fn test_directory() -> PathBuf {
@@ -1046,6 +1460,91 @@ mod tests {
                 plaintext: &[0; 64],
             }]),
             Err(JournalError::Full)
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn verifies_and_signs_an_immutable_segment_summary() {
+        let directory = test_directory();
+        let event = EventId::parse(EVENT).unwrap();
+        let (mut journal, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), limits()).unwrap();
+        journal
+            .append_batch(&[JournalRecord {
+                event_id: &event,
+                plaintext: b"sealed event",
+            }])
+            .unwrap();
+        drop(journal);
+
+        let summary = verify_segment(segment(&directory), "journal-key-r1", &key()).unwrap();
+        assert_eq!(summary.record_count, 1);
+        assert_eq!(summary.final_sequence, 1);
+        assert_ne!(summary.chain_head, ZERO_HASH);
+
+        let signer = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY_HEX).unwrap();
+        let verifier = signer.verifying_key().unwrap();
+        let manifest = SignedSegmentManifest::sign(&summary, &signer).unwrap();
+        assert_eq!(
+            SignedSegmentManifest::verify(manifest.as_bytes(), &verifier).unwrap(),
+            summary
+        );
+        assert_eq!(
+            verify_sealed_segment(
+                segment(&directory),
+                "journal-key-r1",
+                &key(),
+                manifest.as_bytes(),
+                &verifier,
+            )
+            .unwrap(),
+            summary
+        );
+
+        let mut mismatched = summary.clone();
+        mismatched.segment_bytes += 1;
+        let mismatched = SignedSegmentManifest::sign(&mismatched, &signer).unwrap();
+        assert!(matches!(
+            verify_sealed_segment(
+                segment(&directory),
+                "journal-key-r1",
+                &key(),
+                mismatched.as_bytes(),
+                &verifier,
+            ),
+            Err(JournalError::Corrupt("seal segment mismatch"))
+        ));
+
+        let seal_directory = directory.join("sealed");
+        fs::create_dir(&seal_directory).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&seal_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest_path = seal_directory.join("segment.xjs");
+        manifest.write_new(&manifest_path).unwrap();
+        assert!(matches!(
+            manifest.write_new(&manifest_path),
+            Err(JournalError::UnsafePath)
+        ));
+        assert_eq!(
+            SignedSegmentManifest::verify(&fs::read(manifest_path).unwrap(), &verifier).unwrap(),
+            summary
+        );
+
+        let wrong_signer = SealSigningKey::from_hex("seal-key-r2", OTHER_SEAL_KEY_HEX).unwrap();
+        assert!(matches!(
+            SignedSegmentManifest::verify(
+                manifest.as_bytes(),
+                &wrong_signer.verifying_key().unwrap()
+            ),
+            Err(JournalError::SealKeyMismatch)
+        ));
+        let mut tampered = manifest.as_bytes().to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(matches!(
+            SignedSegmentManifest::verify(&tampered, &verifier),
+            Err(JournalError::Corrupt("seal signature"))
         ));
         fs::remove_dir_all(directory).unwrap();
     }
