@@ -22,8 +22,11 @@ use xshield_core::{
     provenance::{ActionTarget, HttpMethod, RouteTemplate},
 };
 
+pub mod response_grant;
 pub mod share_issue;
 pub mod share_token;
+
+use response_grant::ResponseGrantRule;
 
 /// Maximum accepted gateway configuration size.
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
@@ -74,8 +77,15 @@ struct CompiledOperation {
     route: RouteTemplate,
     route_match: CompiledRouteMatch,
     policy: OperationPolicy,
+    source_action: Option<ActionId>,
     resource: Option<CompiledResource>,
-    buffered_json_max_bytes: Option<usize>,
+    response: Option<CompiledResponse>,
+}
+
+#[derive(Debug)]
+struct CompiledResponse {
+    max_bytes: usize,
+    grant: Option<ResponseGrantRule>,
 }
 
 struct CompiledOperations {
@@ -171,6 +181,20 @@ struct OperationDto {
 struct ResponseDto {
     mode: ResponseModeDto,
     max_bytes: usize,
+    #[serde(default)]
+    resource_grant: Option<ResponseGrantDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseGrantDto {
+    success_status: u16,
+    items_pointer: String,
+    resource_pointer: String,
+    target_operation_id: String,
+    ttl_seconds: u64,
+    max_items: usize,
+    max_active_grants: u32,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -405,7 +429,35 @@ impl GatewayConfig {
     /// Returns the complete-buffer limit for an exact private JSON response.
     #[must_use]
     pub fn buffered_json_max_bytes(&self, method: &str, path: &str) -> Option<usize> {
-        self.operation(method, path)?.buffered_json_max_bytes
+        Some(self.operation(method, path)?.response.as_ref()?.max_bytes)
+    }
+
+    /// Returns one validated response extraction rule and its exact target operation.
+    #[must_use]
+    pub fn response_grant_operation(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<ResponseGrantOperation<'_>> {
+        let rule = self
+            .operation(method, path)?
+            .response
+            .as_ref()?
+            .grant
+            .as_ref()?;
+        let target = self.operation_by_id(rule.target_operation_id())?;
+        let resource = target.resource.as_ref()?;
+        let target_field = match &resource.location {
+            CompiledResourceLocation::Query(parameter)
+            | CompiledResourceLocation::FinalPathSegment { parameter, .. } => parameter,
+        };
+        Some(ResponseGrantOperation {
+            rule,
+            target_action_id: target.source_action.as_ref()?,
+            resource_type: &resource.resource_type,
+            view_profile: &resource.view_profile,
+            target_field,
+        })
     }
 
     /// Applies the compiled exact-operation policy with authoritative loaded proof.
@@ -481,6 +533,13 @@ impl GatewayConfig {
                     .find(|operation| operation.matches_text(method, path))
             })
     }
+
+    fn operation_by_id(&self, operation_id: &OperationId) -> Option<&CompiledOperation> {
+        self.operations
+            .values()
+            .chain(self.path_resource_operations.iter())
+            .find(|operation| operation.policy.operation_id() == operation_id)
+    }
 }
 
 fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperations, ConfigError> {
@@ -489,8 +548,12 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
     }
     let mut exact = BTreeMap::new();
     let mut path_resources = Vec::new();
+    let mut operation_ids = BTreeSet::new();
     for operation in operations {
         let compiled = compile_operation(operation)?;
+        if !operation_ids.insert(compiled.policy.operation_id().clone()) {
+            return Err(ConfigError::Invalid("operations.operation_id"));
+        }
         match &compiled.route_match {
             CompiledRouteMatch::Exact(path) => {
                 let path = path.clone();
@@ -525,10 +588,48 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
             }
         }
     }
+    validate_response_grants(&exact, &path_resources)?;
     Ok(CompiledOperations {
         exact,
         path_resources,
     })
+}
+
+fn validate_response_grants(
+    exact: &BTreeMap<(String, String), CompiledOperation>,
+    path_resources: &[CompiledOperation],
+) -> Result<(), ConfigError> {
+    let operations = exact.values().chain(path_resources);
+    for source in operations.clone() {
+        let Some(rule) = source
+            .response
+            .as_ref()
+            .and_then(|response| response.grant.as_ref())
+        else {
+            continue;
+        };
+        if !matches!(
+            source.policy.admission_class(),
+            AdmissionClass::AuthenticatedRoot | AdmissionClass::UiActionRequired
+        ) {
+            return Err(ConfigError::Invalid("operations.response.resource_grant"));
+        }
+        let target = operations
+            .clone()
+            .find(|operation| operation.policy.operation_id() == rule.target_operation_id())
+            .ok_or(ConfigError::Invalid(
+                "operations.response.target_operation_id",
+            ))?;
+        if target.policy.admission_class() != AdmissionClass::UiActionRequired
+            || target.source_action.is_none()
+            || target.resource.is_none()
+        {
+            return Err(ConfigError::Invalid(
+                "operations.response.target_operation_id",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Trusted resource semantics compiled for one matched operation.
@@ -556,6 +657,21 @@ pub enum ResourceLocation<'a> {
         /// Field identity used by the action field policy.
         parameter: &'a FieldName,
     },
+}
+
+/// Approved response extraction rule resolved to one exact UI resource operation.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseGrantOperation<'a> {
+    /// Strict JSON extraction and issuance limits.
+    pub rule: &'a ResponseGrantRule,
+    /// Descriptor that creates the target action grant.
+    pub target_action_id: &'a ActionId,
+    /// Canonical resource type shared by action and resource grants.
+    pub resource_type: &'a ResourceType,
+    /// Exact view shared by action and resource grants.
+    pub view_profile: &'a ViewProfile,
+    /// Request field authorized by the generated target action.
+    pub target_field: &'a FieldName,
 }
 
 impl IdentityStoreConfig {
@@ -643,31 +759,69 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         method,
         route.clone(),
         dto.admission.into(),
-        source_action,
+        source_action.clone(),
         capability,
     )
     .map_err(ConfigError::Policy)?;
-    let buffered_json_max_bytes = dto
-        .response
-        .map(|response| match response.mode {
-            ResponseModeDto::BufferedJson
-                if (1..=MAX_BUFFERED_JSON_BYTES).contains(&response.max_bytes) =>
-            {
-                Ok(response.max_bytes)
-            }
-            ResponseModeDto::BufferedJson => {
-                Err(ConfigError::Invalid("operations.response.max_bytes"))
-            }
-        })
-        .transpose()?;
+    let response = dto.response.map(compile_response).transpose()?;
     Ok(CompiledOperation {
         method,
         route,
         route_match,
         policy,
+        source_action,
         resource,
-        buffered_json_max_bytes,
+        response,
     })
+}
+
+fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
+    if !matches!(dto.mode, ResponseModeDto::BufferedJson)
+        || !(1..=MAX_BUFFERED_JSON_BYTES).contains(&dto.max_bytes)
+    {
+        return Err(ConfigError::Invalid("operations.response.max_bytes"));
+    }
+    let grant = dto
+        .resource_grant
+        .map(|grant| {
+            if !(200..=299).contains(&grant.success_status)
+                || grant.success_status == 204
+                || !valid_json_pointer(&grant.items_pointer)
+                || !valid_json_pointer(&grant.resource_pointer)
+                || !(1..=1_000).contains(&grant.max_items)
+                || !(1..=5_000).contains(&grant.max_active_grants)
+                || !(1..=86_400).contains(&grant.ttl_seconds)
+            {
+                return Err(ConfigError::Invalid("operations.response.resource_grant"));
+            }
+            Ok(ResponseGrantRule {
+                success_status: grant.success_status,
+                items_pointer: grant.items_pointer,
+                resource_pointer: grant.resource_pointer,
+                target_operation_id: OperationId::parse(grant.target_operation_id)
+                    .map_err(ConfigError::Domain)?,
+                ttl_seconds: grant.ttl_seconds,
+                max_items: grant.max_items,
+                max_active_grants: grant.max_active_grants,
+            })
+        })
+        .transpose()?;
+    Ok(CompiledResponse {
+        max_bytes: dto.max_bytes,
+        grant,
+    })
+}
+
+fn valid_json_pointer(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= 512
+        && value.bytes().all(|byte| !byte.is_ascii_control())
+        && value
+            .as_bytes()
+            .windows(2)
+            .filter(|pair| pair[0] == b'~')
+            .all(|pair| matches!(pair[1], b'0' | b'1'))
+        && value.as_bytes().last().is_none_or(|byte| *byte != b'~')
 }
 
 impl CompiledOperation {
@@ -1026,6 +1180,97 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(oversized.as_bytes()),
             Err(ConfigError::Invalid("operations.response.max_bytes"))
+        ));
+    }
+
+    #[test]
+    fn compiles_response_resources_to_one_exact_target_operation() {
+        let config = serde_json::json!({
+            "listen": "127.0.0.1:6188",
+            "origin": {
+                "address": "127.0.0.1:8080",
+                "server_name": "origin.example",
+                "tls": false
+            },
+            "tenant_id": "tenant_demo",
+            "site_id": "site_demo",
+            "policy_revision": "policy-r1",
+            "audit": {
+                "directory": "target/xshield-response-grant-test",
+                "key_id": "journal-key-r1",
+                "producer_id": "edge-test",
+                "max_bytes": 1_048_576,
+                "high_watermark_bytes": 786_432,
+                "segment_max_bytes": 262_144
+            },
+            "identity_store": {"max_connections": 4, "acquire_timeout_ms": 1_000},
+            "operations": [
+                {
+                    "operation_id": "orders.list",
+                    "method": "GET",
+                    "path": "/orders",
+                    "admission": "AUTHENTICATED_ROOT",
+                    "source_action": null,
+                    "resource_type": null,
+                    "view_profile": null,
+                    "response": {
+                        "mode": "BUFFERED_JSON",
+                        "max_bytes": 4_096,
+                        "resource_grant": {
+                            "success_status": 200,
+                            "items_pointer": "/orders",
+                            "resource_pointer": "/id",
+                            "target_operation_id": "orders.read",
+                            "ttl_seconds": 900,
+                            "max_items": 100,
+                            "max_active_grants": 5_000
+                        }
+                    }
+                },
+                {
+                    "operation_id": "orders.read",
+                    "method": "GET",
+                    "path": "/orders/{order_id}",
+                    "admission": "UI_ACTION_REQUIRED",
+                    "source_action": "orders.open",
+                    "resource_type": "order",
+                    "view_profile": "customer_detail",
+                    "resource_path_parameter": "order_id"
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&config).unwrap();
+        let compiled = GatewayConfig::from_json(&bytes).unwrap();
+        let operation = compiled.response_grant_operation("GET", "/orders").unwrap();
+        assert_eq!(operation.target_action_id.as_str(), "orders.open");
+        assert_eq!(operation.resource_type.as_str(), "order");
+        assert_eq!(operation.view_profile.as_str(), "customer_detail");
+        assert_eq!(operation.target_field.as_str(), "order_id");
+        assert_eq!(operation.rule.ttl_seconds(), 900);
+        assert_eq!(operation.rule.max_active_grants(), 5_000);
+
+        let mut missing_target = config.clone();
+        missing_target["operations"][0]["response"]["resource_grant"]["target_operation_id"] =
+            serde_json::json!("orders.missing");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&missing_target).unwrap()),
+            Err(ConfigError::Invalid(
+                "operations.response.target_operation_id"
+            ))
+        ));
+
+        let mut public_source = config.clone();
+        public_source["operations"][0]["admission"] = serde_json::json!("PUBLIC");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&public_source).unwrap()),
+            Err(ConfigError::Invalid("operations.response.resource_grant"))
+        ));
+
+        let mut duplicate_id = config;
+        duplicate_id["operations"][1]["operation_id"] = serde_json::json!("orders.list");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&duplicate_id).unwrap()),
+            Err(ConfigError::Invalid("operations.operation_id"))
         ));
     }
 }

@@ -3,6 +3,7 @@ use pingora::http::ResponseHeader;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use xshield_core::audit::ReasonCode;
+use xshield_gateway::response_grant::{ResponseGrantError, validate_strict_json};
 
 pub(crate) struct BufferedJsonResponse {
     bytes: Vec<u8>,
@@ -57,8 +58,7 @@ impl BufferedJsonResponse {
         if !end_of_stream {
             return Ok(());
         }
-        serde_json::from_slice::<Box<serde_json::value::RawValue>>(&self.bytes)
-            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        validate_strict_json(&self.bytes).map_err(ResponseGrantError::reason_code)?;
         *body = Some(Bytes::from(std::mem::take(&mut self.bytes)));
         Ok(())
     }
@@ -181,6 +181,15 @@ mod tests {
             Err(ReasonCode::ResponseValidationFailed)
         );
         assert!(body.is_none());
+
+        let mut ambiguous =
+            BufferedJsonResponse::begin(&response("application/json", None), 64, &budget())
+                .unwrap();
+        let mut body = Some(Bytes::from_static(br#"{"id":"a","id":"b"}"#));
+        assert_eq!(
+            ambiguous.filter(&mut body, true),
+            Err(ReasonCode::ResponseValidationFailed)
+        );
     }
 
     #[test]
