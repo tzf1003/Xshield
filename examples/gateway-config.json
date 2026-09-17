@@ -1,0 +1,30 @@
+{
+  "listen": "127.0.0.1:6188",
+  "origin": {
+    "address": "127.0.0.1:8080",
+    "server_name": "origin.local",
+    "tls": false
+  },
+  "tenant_id": "tenant_demo",
+  "site_id": "site_demo",
+  "operations": [
+    {
+      "operation_id": "health.read",
+      "method": "GET",
+      "path": "/health",
+      "admission": "PUBLIC",
+      "source_action": null,
+      "resource_type": null,
+      "view_profile": null
+    },
+    {
+      "operation_id": "account.password.update",
+      "method": "POST",
+      "path": "/account/password",
+      "admission": "UI_ACTION_REQUIRED",
+      "source_action": "account_password_form.submit",
+      "resource_type": null,
+      "view_profile": null
+    }
+  ]
+}

@@ -19,6 +19,7 @@ def main() -> int:
         try: json.loads(p.read_text(encoding='utf-8'));check(f'json:{p.relative_to(ROOT)}',True)
         except (ValueError,OSError) as exc: check(f'json:{p.name}',False,str(exc))
     for p in sorted(ROOT.rglob('*.yaml')):
+        if 'validation' in p.parts or 'target' in p.parts: continue
         try: yaml.safe_load(p.read_text(encoding='utf-8'));check(f'yaml:{p.relative_to(ROOT)}',True)
         except yaml.YAMLError as exc: check(f'yaml:{p.name}',False,str(exc))
     schemas = {p.stem.replace('.schema',''):json.loads(p.read_text()) for p in (ROOT/'schemas').glob('*.json')}

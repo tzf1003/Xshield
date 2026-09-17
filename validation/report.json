@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 227,
-  "passed_count": 227,
+  "checks_total": 228,
+  "passed_count": 228,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -47,6 +47,11 @@
     },
     {
       "name": "json:examples/evidence/response_to_client.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/gateway-config.json",
       "passed": true,
       "detail": ""
     },
