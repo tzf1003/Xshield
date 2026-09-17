@@ -128,6 +128,7 @@ scoped_name!(OperationId, "operation_id");
 scoped_name!(ResourceType, "resource_type");
 scoped_name!(ViewProfile, "view_profile");
 scoped_name!(IssuanceKey, "issuance_key");
+scoped_name!(ShareIssuanceRuleId, "share_issuance_rule_id");
 scoped_name!(ActionRef, "action_ref");
 scoped_name!(ActionId, "action_id");
 scoped_name!(PageTemplate, "page_template");

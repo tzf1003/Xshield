@@ -3,8 +3,8 @@
 use crate::{
     audit::ReasonCode,
     domain::{
-        OperationId, ResourceType, ServiceIdentityId, ShareGrantId, SiteId, TenantId, ViewProfile,
-        parse_lower_hex_32,
+        GrantId, IssuanceKey, OperationId, PolicyRevision, ResourceType, ServiceIdentityId,
+        ShareGrantId, ShareIssuanceRuleId, SiteId, TenantId, ViewProfile, parse_lower_hex_32,
     },
     grant::ResourceKeyHmac,
     identity::UnixSeconds,
@@ -52,6 +52,42 @@ macro_rules! fingerprint {
 
 fingerprint!(ShareTokenFingerprint, ShareTokenFingerprint);
 fingerprint!(ServiceCredentialFingerprint, ServiceCredentialFingerprint);
+
+/// Exact share scope approved for persistence after issuer revalidation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShareGrantDraft {
+    /// Server-generated share grant ID.
+    pub share_id: ShareGrantId,
+    /// Stable key derived from the authorized issuance request.
+    pub issuance_key: IssuanceKey,
+    /// Digest of the opaque token returned once to the caller.
+    pub token_fingerprint: ShareTokenFingerprint,
+    /// Resource type inherited from the issuer's exact resource grant.
+    pub resource_type: ResourceType,
+    /// Resource digest inherited from the issuer's exact resource grant.
+    pub resource_key: ResourceKeyHmac,
+    /// Read-only operation exposed by the share entry.
+    pub operation_id: OperationId,
+    /// Limited response view exposed by the share entry.
+    pub view_profile: ViewProfile,
+    /// Frozen policy revision approving issuance.
+    pub policy_revision: PolicyRevision,
+    /// Server-side expiry bounded by the issuer proof and rule.
+    pub expires_at: UnixSeconds,
+}
+
+/// Exact persisted authority required to issue a limited share.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShareIssueAuthority {
+    /// Existing resource grant proving access to the exact resource.
+    pub resource_grant_id: GrantId,
+    /// Active policy rule mapping the issuer operation to the share scope.
+    pub rule_id: ShareIssuanceRuleId,
+    /// Dedicated issuer operation; ordinary reads use a different operation.
+    pub operation_id: OperationId,
+    /// Issuer view required by the active rule.
+    pub view_profile: ViewProfile,
+}
 
 /// Limited share bound to one exact read operation, resource, and view.
 #[derive(Clone, Debug, Eq, PartialEq)]

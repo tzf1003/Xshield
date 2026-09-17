@@ -81,9 +81,22 @@ CREATE TABLE xshield.service_identities (
 );
 CREATE UNIQUE INDEX service_identity_active_credential ON xshield.service_identities
  (tenant_id,site_id,credential_fingerprint) WHERE status='active';
+CREATE TABLE xshield.share_issuance_rules (
+ tenant_id text NOT NULL, site_id text NOT NULL, policy_revision text NOT NULL,
+ rule_id text NOT NULL, issuer_operation_id text NOT NULL, issuer_view_id text NOT NULL,
+ share_operation_id text NOT NULL, share_view_id text NOT NULL,
+ max_ttl_seconds bigint NOT NULL CHECK(max_ttl_seconds BETWEEN 1 AND 86400),
+ status text NOT NULL CHECK(status IN ('active','retired')),
+ CHECK(issuer_operation_id<>share_operation_id),
+ PRIMARY KEY(tenant_id,site_id,policy_revision,rule_id),
+ FOREIGN KEY(tenant_id,site_id,policy_revision)
+ REFERENCES xshield.policy_revisions(tenant_id,site_id,revision)
+);
 CREATE TABLE xshield.share_grants (
  tenant_id text NOT NULL, site_id text NOT NULL, share_id text NOT NULL,
- issuer_binding_id text NOT NULL, token_fingerprint bytea NOT NULL,
+ issuer_binding_id text NOT NULL, issuer_auth_epoch bigint,
+ issuer_grant_id text, issuance_rule_id text, issuance_key text,
+ token_fingerprint bytea NOT NULL,
  resource_type text NOT NULL, resource_key_hmac bytea NOT NULL,
  operation_id text NOT NULL, view_id text NOT NULL,
  use_policy text NOT NULL CHECK(use_policy='reusable_read'),
@@ -93,16 +106,27 @@ CREATE TABLE xshield.share_grants (
  PRIMARY KEY(tenant_id,site_id,share_id),
  CHECK(octet_length(token_fingerprint)=32),
  CHECK(octet_length(resource_key_hmac)=32), CHECK(expires_at>issued_at),
+ CHECK((issuer_auth_epoch IS NULL AND issuer_grant_id IS NULL AND issuance_rule_id IS NULL AND issuance_key IS NULL)
+    OR (issuer_auth_epoch IS NOT NULL AND issuer_grant_id IS NOT NULL AND issuance_rule_id IS NOT NULL AND issuance_key IS NOT NULL)),
  FOREIGN KEY(tenant_id,site_id,issuer_binding_id)
  REFERENCES xshield.auth_bindings(tenant_id,site_id,binding_id),
+ FOREIGN KEY(tenant_id,site_id,issuer_grant_id)
+ REFERENCES xshield.resource_grants(tenant_id,site_id,grant_id),
+ FOREIGN KEY(tenant_id,site_id,policy_revision,issuance_rule_id)
+ REFERENCES xshield.share_issuance_rules(tenant_id,site_id,policy_revision,rule_id),
  FOREIGN KEY(tenant_id,site_id,policy_revision)
  REFERENCES xshield.policy_revisions(tenant_id,site_id,revision)
 );
 CREATE UNIQUE INDEX share_grant_active_token ON xshield.share_grants
  (tenant_id,site_id,token_fingerprint) WHERE status='active';
+CREATE UNIQUE INDEX share_grant_qualified_issuance ON xshield.share_grants
+ (tenant_id,site_id,issuance_key) WHERE issuance_key IS NOT NULL;
 CREATE INDEX share_grant_exact_lookup ON xshield.share_grants
  (tenant_id,site_id,token_fingerprint,resource_type,resource_key_hmac,operation_id,view_id,expires_at)
  WHERE status='active';
+CREATE INDEX share_grant_issuer_capacity ON xshield.share_grants
+ (tenant_id,site_id,issuer_binding_id,issuer_auth_epoch,expires_at)
+ WHERE status='active' AND issuer_auth_epoch IS NOT NULL;
 -- 与认证/资格事务一起写入；传输可至少一次，消费者按event_id去重。
 CREATE TABLE xshield.audit_outbox (
  event_id text PRIMARY KEY, tenant_id text NOT NULL, site_id text NOT NULL,

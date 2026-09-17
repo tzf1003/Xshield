@@ -122,6 +122,16 @@ pub enum ReasonCode {
     OperationNotMatched,
     /// Share proof does not match the exact resource, view, operation, or lease.
     ShareScopeMismatch,
+    /// A new limited-share grant and its issuance event committed.
+    ShareIssued,
+    /// An identical limited-share issuance resolved to the original grant.
+    ShareAlreadyIssued,
+    /// A share issuance key was reused with different authorization semantics.
+    ShareIssuanceConflict,
+    /// The issuer identity, resource grant, rule, policy, or lease is ineligible.
+    ShareSourceIneligible,
+    /// The issuer reached the configured active-share bound.
+    ShareCapacityExceeded,
     /// Service identity proof does not match the exact operation scope.
     ServiceIdentityMismatch,
     /// Exact limited-share proof passed.
@@ -190,6 +200,11 @@ impl ReasonCode {
             Self::UiActionAllowed => "UI_ACTION_ALLOWED",
             Self::OperationNotMatched => "OPERATION_NOT_MATCHED",
             Self::ShareScopeMismatch => "SHARE_SCOPE_MISMATCH",
+            Self::ShareIssued => "SHARE_ISSUED",
+            Self::ShareAlreadyIssued => "SHARE_ALREADY_ISSUED",
+            Self::ShareIssuanceConflict => "SHARE_ISSUANCE_CONFLICT",
+            Self::ShareSourceIneligible => "SHARE_SOURCE_INELIGIBLE",
+            Self::ShareCapacityExceeded => "SHARE_CAPACITY_EXCEEDED",
             Self::ServiceIdentityMismatch => "SERVICE_IDENTITY_MISMATCH",
             Self::ShareEntryAllowed => "SHARE_ENTRY_ALLOWED",
             Self::ServiceIdentityAllowed => "SERVICE_IDENTITY_ALLOWED",

@@ -45,6 +45,8 @@ PostgreSQL 首版使用短事务校验 auth_epoch 与 policy_revision，幂等�
 
 首个适配器通过专用 `X-Xshield-Share-Token` 请求头接收不透明凭证，只允许带一个资源查询字段的 GET。网关分别按租户、站点和固定用途域生成凭证与资源 HMAC，精确查询 PostgreSQL 中活动、未过期、`reusable_read` 的 ShareGrant，再由领域层复核资源类型、资源值、operation、view 和期限。额外查询字段、替换、跨站、过期或撤销统一拒绝为 `SHARE_SCOPE_MISMATCH`；分享头在转发前剥离。路径资源、Range、附件和写入采用独立适配器，不由该入口推断放行。
 
+分享发行使用独立的 `share_issuance_rules` 映射发行 operation/view 到有限读取 operation/view。事务重新锁定当前认证 binding，并精确核对发行者持有的活动 ResourceGrant、资源 HMAC、auth epoch、活动策略、规则和 TTL；分享期限不得超过认证、来源资格或规则上限。幂等 key 的全部授权语义一致时返回原 share ID，任何字段变化均冲突；每个发行者的活动分享容量在同一行锁下检查。ShareGrant 与 `share.issued` outbox 事件同事务提交，任一写入失败都不产生凭证记录。
+
 兑换后为接收者建立 LIMITED_SHARE 上下文，与分享者 Cookie 不必相同；不会扩大为完整用户身份。只读不等于可转分享，病例摘要不等于患者全量信息。附件、视频分片、Range 访问需单独或可证明收缩的子资格。重复读取与单次写请求 nonce 分离。
 
 ## 6.6 服务身份

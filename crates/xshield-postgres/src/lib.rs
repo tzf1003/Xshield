@@ -11,10 +11,12 @@ mod grant_read;
 mod identity_read;
 mod provenance;
 mod service_identity_read;
+mod share_grant_issue;
 mod share_grant_read;
 
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
+pub use share_grant_issue::{ShareGrantPersistence, ShareGrantWriteOutcome};
 
 use serde_json::Value;
 use sqlx::{PgPool, postgres::PgPoolOptions};
