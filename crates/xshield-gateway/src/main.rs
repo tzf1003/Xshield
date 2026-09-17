@@ -1,10 +1,11 @@
+mod buffered_json;
 mod durable_audit;
 mod protected_identity;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora::{
-    Result as PingoraResult,
+    Error as PingoraError, ErrorType, Result as PingoraResult,
     http::ResponseHeader,
     proxy::{ProxyHttp, Session, http_proxy_service},
     server::Server,
@@ -17,21 +18,26 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 use xshield_audit::JournalKey;
 use xshield_core::{audit::ReasonCode, identity::UnixSeconds};
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome, MAX_CONFIG_BYTES};
 use zeroize::Zeroizing;
 
+use crate::buffered_json::BufferedJsonResponse;
 use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, new_trace_id,
 };
 use crate::protected_identity::{ProtectedIdentity, store_failure_reason, strip_edge_proofs};
 
+const BUFFERED_JSON_IN_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
+
 struct Gateway {
     config: Arc<GatewayConfig>,
     audit: DurableAudit,
     identity: Option<ProtectedIdentity>,
+    buffered_json_budget: Arc<Semaphore>,
 }
 
 struct RequestContext {
@@ -40,6 +46,9 @@ struct RequestContext {
     started_at: Instant,
     decision: Option<GatewayDecision>,
     admission_audit: Option<AdmissionAudit>,
+    buffered_response: Option<BufferedJsonResponse>,
+    response_failure: Option<ReasonCode>,
+    origin_status: Option<u16>,
 }
 
 #[async_trait]
@@ -53,6 +62,9 @@ impl ProxyHttp for Gateway {
             started_at: Instant::now(),
             decision: None,
             admission_audit: None,
+            buffered_response: None,
+            response_failure: None,
+            origin_status: None,
         }
     }
 
@@ -165,12 +177,54 @@ impl ProxyHttp for Gateway {
 
     async fn response_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_response: &mut pingora::http::ResponseHeader,
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
+        let request = session.req_header();
+        let buffered_json_limit = self
+            .config
+            .buffered_json_max_bytes(request.method.as_str(), request.uri.path());
+        if upstream_response.status.as_u16() == 101 && buffered_json_limit.is_some() {
+            context.origin_status = Some(101);
+            context.response_failure = Some(ReasonCode::ResponseValidationFailed);
+            return response_error(ReasonCode::ResponseValidationFailed);
+        }
+        if !upstream_response.status.is_informational() {
+            context.origin_status = Some(upstream_response.status.as_u16());
+            if let Some(limit) = buffered_json_limit {
+                match BufferedJsonResponse::begin(
+                    upstream_response,
+                    limit,
+                    &self.buffered_json_budget,
+                ) {
+                    Ok(buffer) => context.buffered_response = Some(buffer),
+                    Err(reason) => {
+                        context.response_failure = Some(reason);
+                        return response_error(reason);
+                    }
+                }
+            }
+        }
         upstream_response.insert_header("X-Xshield-Request-Id", &context.request_id)?;
         Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        context: &mut Self::CTX,
+    ) -> PingoraResult<Option<std::time::Duration>> {
+        let Some(buffer) = context.buffered_response.as_mut() else {
+            return Ok(None);
+        };
+        if let Err(reason) = buffer.filter(body, end_of_stream) {
+            context.response_failure = Some(reason);
+            return response_error(reason);
+        }
+        Ok(None)
     }
 
     async fn logging(
@@ -199,12 +253,21 @@ impl ProxyHttp for Gateway {
                 status,
                 duration_us: elapsed_us(context.started_at),
                 proxy_error: error.is_some(),
+                response_failure: context.response_failure,
+                origin_status: context.origin_status,
             })
             .await;
         if let Err(error) = result {
             self.audit.observe_failure(&error);
         }
     }
+}
+
+fn response_error<T>(reason: ReasonCode) -> PingoraResult<T> {
+    Err(PingoraError::explain(
+        ErrorType::HTTPStatus(502),
+        reason.as_str(),
+    ))
 }
 
 fn elapsed_us(started_at: Instant) -> u64 {
@@ -264,6 +327,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             config: Arc::clone(&config),
             audit,
             identity,
+            buffered_json_budget: Arc::new(Semaphore::new(BUFFERED_JSON_IN_FLIGHT_BYTES)),
         },
     );
     proxy.add_tcp(&config.listen().to_string());

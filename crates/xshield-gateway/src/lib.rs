@@ -27,6 +27,8 @@ pub mod share_token;
 
 /// Maximum accepted gateway configuration size.
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+/// Maximum complete private JSON response accepted by the MVP adapter.
+pub const MAX_BUFFERED_JSON_BYTES: usize = 16 * 1024 * 1024;
 
 /// Fully validated gateway configuration selected at process startup.
 #[derive(Debug)]
@@ -70,6 +72,7 @@ struct CompiledOperation {
     route: RouteTemplate,
     policy: OperationPolicy,
     resource: Option<CompiledResource>,
+    buffered_json_max_bytes: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -136,6 +139,20 @@ struct OperationDto {
     resource_type: Option<String>,
     view_profile: Option<String>,
     resource_query_parameter: Option<String>,
+    response: Option<ResponseDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseDto {
+    mode: ResponseModeDto,
+    max_bytes: usize,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum ResponseModeDto {
+    BufferedJson,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -362,6 +379,14 @@ impl GatewayConfig {
         })
     }
 
+    /// Returns the complete-buffer limit for an exact private JSON response.
+    #[must_use]
+    pub fn buffered_json_max_bytes(&self, method: &str, path: &str) -> Option<usize> {
+        self.operations
+            .get(&(method.to_owned(), path.to_owned()))?
+            .buffered_json_max_bytes
+    }
+
     /// Applies the compiled exact-operation policy with authoritative loaded proof.
     #[must_use]
     pub fn admit_with_proof(
@@ -502,6 +527,19 @@ fn compile_operation(
         capability,
     )
     .map_err(ConfigError::Policy)?;
+    let buffered_json_max_bytes = dto
+        .response
+        .map(|response| match response.mode {
+            ResponseModeDto::BufferedJson
+                if (1..=MAX_BUFFERED_JSON_BYTES).contains(&response.max_bytes) =>
+            {
+                Ok(response.max_bytes)
+            }
+            ResponseModeDto::BufferedJson => {
+                Err(ConfigError::Invalid("operations.response.max_bytes"))
+            }
+        })
+        .transpose()?;
     Ok((
         (method.as_str().to_owned(), dto.path),
         CompiledOperation {
@@ -509,6 +547,7 @@ fn compile_operation(
             route,
             policy,
             resource,
+            buffered_json_max_bytes,
         },
     ))
 }
@@ -758,6 +797,26 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(non_get.as_bytes()),
             Err(ConfigError::Invalid("operation capability"))
+        ));
+    }
+
+    #[test]
+    fn validates_bounded_json_response_configuration() {
+        let buffered = CONFIG.replace(
+            "\"operation_id\":\"catalog.read\"",
+            "\"operation_id\":\"catalog.read\",\"response\":{\"mode\":\"BUFFERED_JSON\",\"max_bytes\":4096}",
+        );
+        let config = GatewayConfig::from_json(buffered.as_bytes()).unwrap();
+        assert_eq!(
+            config.buffered_json_max_bytes("GET", "/catalog"),
+            Some(4096)
+        );
+        assert_eq!(config.buffered_json_max_bytes("POST", "/account"), None);
+
+        let oversized = buffered.replace("\"max_bytes\":4096", "\"max_bytes\":16777217");
+        assert!(matches!(
+            GatewayConfig::from_json(oversized.as_bytes()),
+            Err(ConfigError::Invalid("operations.response.max_bytes"))
         ));
     }
 }

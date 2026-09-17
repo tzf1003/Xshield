@@ -154,6 +154,12 @@ pub enum ReasonCode {
     OriginForwardIntentRecorded,
     /// A response was received from the selected origin.
     OriginResponseReceived,
+    /// A configured private response exceeded its complete-buffer bound.
+    ResponseBodyTooLarge,
+    /// Aggregate private-response buffering capacity was unavailable.
+    ResponseBufferCapacityExhausted,
+    /// A configured private response failed framing, encoding, media-type, or JSON validation.
+    ResponseValidationFailed,
     /// Origin side effects cannot be determined after a proxy failure.
     OriginOutcomeUnknown,
     /// A durable request prefix ended before a release decision or forward intent committed.
@@ -216,6 +222,9 @@ impl ReasonCode {
             Self::AuditTailRecovered => "AUDIT_TAIL_RECOVERED",
             Self::OriginForwardIntentRecorded => "ORIGIN_FORWARD_INTENT_RECORDED",
             Self::OriginResponseReceived => "ORIGIN_RESPONSE_RECEIVED",
+            Self::ResponseBodyTooLarge => "RESPONSE_BODY_TOO_LARGE",
+            Self::ResponseBufferCapacityExhausted => "RESPONSE_BUFFER_CAPACITY_EXHAUSTED",
+            Self::ResponseValidationFailed => "RESPONSE_VALIDATION_FAILED",
             Self::OriginOutcomeUnknown => "ORIGIN_OUTCOME_UNKNOWN",
             Self::RequestIncomplete => "REQUEST_INCOMPLETE",
             Self::ClockUnavailable => "CLOCK_UNAVAILABLE",

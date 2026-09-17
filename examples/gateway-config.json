@@ -48,7 +48,11 @@
       "source_action": "orders.open",
       "resource_type": "order",
       "view_profile": "customer_detail",
-      "resource_query_parameter": "order_id"
+      "resource_query_parameter": "order_id",
+      "response": {
+        "mode": "BUFFERED_JSON",
+        "max_bytes": 1048576
+      }
     },
     {
       "operation_id": "reports.ingest",

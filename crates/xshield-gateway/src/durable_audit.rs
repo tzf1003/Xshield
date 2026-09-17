@@ -55,6 +55,15 @@ pub(crate) struct FinalFacts<'a> {
     pub(crate) status: u16,
     pub(crate) duration_us: u64,
     pub(crate) proxy_error: bool,
+    pub(crate) response_failure: Option<ReasonCode>,
+    pub(crate) origin_status: Option<u16>,
+}
+
+struct FinalOrigin {
+    state: &'static str,
+    event_type: &'static str,
+    reason_code: &'static str,
+    status: Option<u16>,
 }
 
 impl DurableAudit {
@@ -201,11 +210,7 @@ impl DurableAudit {
     }
 
     pub(crate) async fn finalize(&self, facts: FinalFacts<'_>) -> Result<(), DurableAuditError> {
-        let origin_state = match (facts.decision.outcome, facts.proxy_error) {
-            (GatewayOutcome::Denied, _) => "not_sent",
-            (GatewayOutcome::Allowed, false) => "response_received",
-            (GatewayOutcome::Allowed, true) => "unknown",
-        };
+        let origin = final_origin(&facts);
         let mut events = Vec::new();
         let mut request_sequence = facts.admission.next_request_sequence;
         let mut completion_causes = vec![facts.admission.decision_event_id.clone()];
@@ -219,11 +224,7 @@ impl DurableAudit {
                 .collect();
             events.push(PendingEvent::new(
                 origin_id.clone(),
-                if facts.proxy_error {
-                    "origin.unknown"
-                } else {
-                    "origin.response"
-                },
+                origin.event_type,
                 request_sequence,
                 forward_cause,
                 Payload::Origin {
@@ -233,13 +234,9 @@ impl DurableAudit {
                         .operation_id
                         .as_ref()
                         .map(|operation| operation.as_str().to_owned()),
-                    origin_state,
-                    reason_code: if facts.proxy_error {
-                        ReasonCode::OriginOutcomeUnknown.as_str()
-                    } else {
-                        ReasonCode::OriginResponseReceived.as_str()
-                    },
-                    status: (!facts.proxy_error).then_some(facts.status),
+                    origin_state: origin.state,
+                    reason_code: origin.reason_code,
+                    status: origin.status,
                 },
             ));
             completion_causes.push(origin_id.as_str().to_owned());
@@ -250,7 +247,7 @@ impl DurableAudit {
         let completion_id = new_event_id()?;
         events.push(PendingEvent::new(
             completion_id,
-            if facts.proxy_error {
+            if facts.proxy_error || facts.response_failure.is_some() {
                 "request.aborted"
             } else {
                 "request.completed"
@@ -262,14 +259,9 @@ impl DurableAudit {
                     GatewayOutcome::Allowed => "ALLOW".to_owned(),
                     GatewayOutcome::Denied => "DENY".to_owned(),
                 },
-                reason_code: match (facts.decision.outcome, facts.proxy_error) {
-                    (GatewayOutcome::Allowed, true) => ReasonCode::OriginOutcomeUnknown.as_str(),
-                    (GatewayOutcome::Allowed, false) => ReasonCode::OriginResponseReceived.as_str(),
-                    (GatewayOutcome::Denied, _) => facts.decision.reason_code.as_str(),
-                }
-                .to_owned(),
-                status: Some(facts.status),
-                origin_state: origin_state.to_owned(),
+                reason_code: completion_reason(&facts).to_owned(),
+                status: (facts.status != 0).then_some(facts.status),
+                origin_state: origin.state.to_owned(),
                 duration_us: facts.duration_us,
             },
         ));
@@ -444,6 +436,55 @@ impl DurableAudit {
             }
         }
     }
+}
+
+fn final_origin(facts: &FinalFacts<'_>) -> FinalOrigin {
+    if facts.decision.outcome == GatewayOutcome::Denied {
+        return FinalOrigin {
+            state: "not_sent",
+            event_type: "origin.unknown",
+            reason_code: facts.decision.reason_code.as_str(),
+            status: None,
+        };
+    }
+    if let Some(reason) = facts.response_failure {
+        return FinalOrigin {
+            state: "response_received",
+            event_type: "origin.response",
+            reason_code: reason.as_str(),
+            status: facts.origin_status,
+        };
+    }
+    if facts.proxy_error {
+        FinalOrigin {
+            state: "unknown",
+            event_type: "origin.unknown",
+            reason_code: ReasonCode::OriginOutcomeUnknown.as_str(),
+            status: None,
+        }
+    } else {
+        FinalOrigin {
+            state: "response_received",
+            event_type: "origin.response",
+            reason_code: ReasonCode::OriginResponseReceived.as_str(),
+            status: Some(facts.status),
+        }
+    }
+}
+
+fn completion_reason(facts: &FinalFacts<'_>) -> &'static str {
+    facts.response_failure.map_or_else(
+        || {
+            if facts.decision.outcome == GatewayOutcome::Denied {
+                facts.decision.reason_code.as_str()
+            } else if facts.proxy_error {
+                ReasonCode::OriginOutcomeUnknown.as_str()
+            } else {
+                ReasonCode::OriginResponseReceived.as_str()
+            }
+        },
+        ReasonCode::as_str,
+    )
 }
 
 fn append_locked(
@@ -884,6 +925,8 @@ mod tests {
                 status: 200,
                 duration_us: 20,
                 proxy_error: false,
+                response_failure: None,
+                origin_status: Some(200),
             })
             .await
             .unwrap();
@@ -909,6 +952,8 @@ mod tests {
                 status: 403,
                 duration_us: 20,
                 proxy_error: false,
+                response_failure: None,
+                origin_status: None,
             })
             .await
             .unwrap();
@@ -922,6 +967,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.recovered_records, 10);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn records_response_validation_failure_as_received_and_aborted() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000008";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", "/health", UnixSeconds::new(1));
+        let admission = audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "88888888888888888888888888888888",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+            })
+            .await
+            .unwrap();
+        audit
+            .finalize(FinalFacts {
+                request_id,
+                trace_id: "88888888888888888888888888888888",
+                method: "GET",
+                decision: &decision,
+                admission: &admission,
+                status: 200,
+                duration_us: 20,
+                proxy_error: true,
+                response_failure: Some(ReasonCode::ResponseValidationFailed),
+                origin_status: Some(200),
+            })
+            .await
+            .unwrap();
+        drop(audit);
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut terminal = Vec::new();
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id
+                    && matches!(
+                        event["event_type"].as_str(),
+                        Some("origin.response" | "request.aborted")
+                    )
+                {
+                    terminal.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(terminal.len(), 2);
+        assert_eq!(terminal[0]["payload"]["origin_state"], "response_received");
+        assert_eq!(terminal[0]["payload"]["status"], 200);
+        assert_eq!(
+            terminal[1]["payload"]["reason_code"],
+            ReasonCode::ResponseValidationFailed.as_str()
+        );
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }

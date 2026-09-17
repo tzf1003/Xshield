@@ -196,7 +196,10 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
     {"operation_id":"reports.ingest","method":"POST","path":"/service/report","admission":"SERVICE_IDENTITY","source_action":null,"resource_type":null,"view_profile":null,"resource_query_parameter":null},
-    {"operation_id":"records.share.read","method":"GET","path":"/shared-record","admission":"SHARE_ENTRY","source_action":null,"resource_type":"record","view_profile":"shared_summary","resource_query_parameter":"record_id"}
+    {"operation_id":"records.share.read","method":"GET","path":"/shared-record","admission":"SHARE_ENTRY","source_action":null,"resource_type":"record","view_profile":"shared_summary","resource_query_parameter":"record_id"},
+    {"operation_id":"buffered.valid","method":"GET","path":"/buffered-valid","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":64}},
+    {"operation_id":"buffered.invalid","method":"GET","path":"/buffered-invalid","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":64}},
+    {"operation_id":"buffered.oversize","method":"GET","path":"/buffered-oversize","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":8}}
   ]
 }
 JSON
@@ -219,8 +222,21 @@ class Handler(BaseHTTPRequestHandler):
             output.write(f"ActionRef={self.headers.get('X-Xshield-Action-Ref', '')}\n")
             output.write(f"ServiceCredential={self.headers.get('X-Xshield-Service-Credential', '')}\n")
             output.write(f"ShareToken={self.headers.get('X-Xshield-Share-Token', '')}\n")
-        self.send_response(404)
+        responses = {
+            "/buffered-valid": b'{"ok":true}',
+            "/buffered-invalid": b'private-invalid-json',
+            "/buffered-oversize": b'{"private":"must-not-release"}',
+        }
+        body = responses.get(self.path)
+        if body is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         return
@@ -247,6 +263,24 @@ for _ in {1..50}; do
 done
 [[ $(<"$test_dir/missing.status") == "403" ]]
 grep -q '"reason_code":"AUTH_REQUIRED"' "$test_dir/missing.json"
+
+buffered_status=$(curl -sS -o "$test_dir/buffered-valid.json" -w '%{http_code}' \
+    http://127.0.0.1:6288/buffered-valid)
+[[ "$buffered_status" == "200" ]]
+[[ $(<"$test_dir/buffered-valid.json") == '{"ok":true}' ]]
+
+set +e
+curl -sS -o "$test_dir/buffered-invalid.body" \
+    http://127.0.0.1:6288/buffered-invalid >/dev/null 2>&1
+invalid_buffer_exit=$?
+set -e
+[[ "$invalid_buffer_exit" != "0" ]]
+[[ ! -s "$test_dir/buffered-invalid.body" ]]
+
+oversize_status=$(curl -sS -o "$test_dir/buffered-oversize.body" -w '%{http_code}' \
+    http://127.0.0.1:6288/buffered-oversize)
+[[ "$oversize_status" == "502" ]]
+! grep -q 'must-not-release' "$test_dir/buffered-oversize.body"
 
 valid_status=$(curl -sS -o "$test_dir/valid.body" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$session_id" \
@@ -400,6 +434,9 @@ origin_pid=""
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /buffered-valid' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /buffered-invalid' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /buffered-oversize' "$test_dir/origin.log") == "1" ]]
 ! grep -q '__Host-xshield_sid' "$test_dir/origin.log"
 ! grep -q 'ActionRef=action_' "$test_dir/origin.log"
 ! grep -q 'ServiceCredential=verified-' "$test_dir/origin.log"
