@@ -121,11 +121,16 @@ v7_id!(StageExecutionId, "stg_", "stage_execution_id");
 v7_id!(WafSessionId, "ses_", "waf_session_id");
 v7_id!(AuthBindingId, "auth_", "auth_binding_id");
 v7_id!(GrantId, "grant_", "grant_id");
+v7_id!(PageEvidenceId, "page_", "page_evidence_id");
 scoped_name!(OperationId, "operation_id");
 scoped_name!(ResourceType, "resource_type");
 scoped_name!(ViewProfile, "view_profile");
 scoped_name!(IssuanceKey, "issuance_key");
 scoped_name!(ActionRef, "action_ref");
+scoped_name!(ActionId, "action_id");
+scoped_name!(PageTemplate, "page_template");
+scoped_name!(MappingRevision, "mapping_revision");
+scoped_name!(FieldName, "field_name");
 
 pub(crate) fn parse_lower_hex_32(value: &str) -> Option<[u8; 32]> {
     if value.len() != 64

@@ -94,6 +94,16 @@ pub enum ReasonCode {
     GrantAlreadyIssued,
     /// The identity, approved action, policy, or lease cannot issue a grant.
     GrantSourceIneligible,
+    /// No approved action mapping is available for the verified page.
+    UiActionNotAvailable,
+    /// Page evidence is unverified, expired, or revoked.
+    UiEvidenceUnverified,
+    /// The action target exceeds the approved subject or resource scope.
+    TargetScopeMismatch,
+    /// The request contains a field outside the approved action profile.
+    FieldNotAllowed,
+    /// An action grant has invalid time bounds.
+    UiActionExpiryInvalid,
     /// No site policy exists for the requested scope.
     SiteNotConfigured,
     /// The scoped site policy is explicitly disabled.
@@ -128,6 +138,11 @@ impl ReasonCode {
             Self::GrantIssued => "GRANT_ISSUED",
             Self::GrantAlreadyIssued => "GRANT_ALREADY_ISSUED",
             Self::GrantSourceIneligible => "GRANT_SOURCE_INELIGIBLE",
+            Self::UiActionNotAvailable => "UI_ACTION_NOT_AVAILABLE",
+            Self::UiEvidenceUnverified => "UI_EVIDENCE_UNVERIFIED",
+            Self::TargetScopeMismatch => "TARGET_SCOPE_MISMATCH",
+            Self::FieldNotAllowed => "FIELD_NOT_ALLOWED",
+            Self::UiActionExpiryInvalid => "UI_ACTION_EXPIRY_INVALID",
             Self::SiteNotConfigured => "SITE_NOT_CONFIGURED",
             Self::SiteDisabled => "SITE_DISABLED",
             Self::SiteConfigUnavailable => "SITE_CONFIG_UNAVAILABLE",
