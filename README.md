@@ -6,7 +6,7 @@
 
 ## 实现状态
 
-M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已开始实现 WAF 会话与业务凭证的精确组合绑定；网络入口、持久身份/资格、持久审计和源站转发仍在后续闭环中。
+M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、同上下文刷新、身份 epoch 轮换和撤销领域规则；网络入口、持久身份/资格、持久审计和源站转发仍在后续闭环中。
 
 ```bash
 cargo test --workspace --all-targets

@@ -70,6 +70,12 @@ pub enum ReasonCode {
     AuthBindingMismatch,
     /// The exact credential combination matches an active binding.
     AuthBindingValid,
+    /// A previously captured identity epoch is no longer current.
+    AuthEpochChanged,
+    /// A previously captured credential generation is no longer current.
+    AuthCredentialGenerationChanged,
+    /// The server revoked this authentication binding.
+    AuthBindingRevoked,
     /// The server-side session lease has expired.
     AuthSessionExpired,
     /// No site policy exists for the requested scope.
@@ -94,6 +100,9 @@ impl ReasonCode {
             Self::AuthRequired => "AUTH_REQUIRED",
             Self::AuthBindingMismatch => "AUTH_BINDING_MISMATCH",
             Self::AuthBindingValid => "AUTH_BINDING_VALID",
+            Self::AuthEpochChanged => "AUTH_EPOCH_CHANGED",
+            Self::AuthCredentialGenerationChanged => "AUTH_CREDENTIAL_GENERATION_CHANGED",
+            Self::AuthBindingRevoked => "AUTH_BINDING_REVOKED",
             Self::AuthSessionExpired => "AUTH_SESSION_EXPIRED",
             Self::SiteNotConfigured => "SITE_NOT_CONFIGURED",
             Self::SiteDisabled => "SITE_DISABLED",

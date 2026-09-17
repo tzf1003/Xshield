@@ -188,6 +188,7 @@ pub struct AuthBinding {
     generation: CredentialGeneration,
     credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
     absolute_expires_at: UnixSeconds,
+    status: BindingStatus,
 }
 
 impl AuthBinding {
@@ -207,13 +208,7 @@ impl AuthBinding {
         credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
         absolute_expires_at: UnixSeconds,
     ) -> Result<Self, IdentityInputError> {
-        let principal_ref = principal_ref.into();
-        if principal_ref.is_empty()
-            || principal_ref.len() > 256
-            || principal_ref.chars().any(char::is_control)
-        {
-            return Err(IdentityInputError::PrincipalRef);
-        }
+        let principal_ref = validate_principal_ref(principal_ref.into())?;
         if credentials.is_empty() {
             return Err(IdentityInputError::EmptyCredentialSet);
         }
@@ -227,6 +222,7 @@ impl AuthBinding {
             generation,
             credentials,
             absolute_expires_at,
+            status: BindingStatus::Active,
         })
     }
 
@@ -243,6 +239,9 @@ impl AuthBinding {
         credentials: &BTreeMap<CredentialSlot, CredentialFingerprint>,
         now: UnixSeconds,
     ) -> Result<AuthSnapshot, IdentityDenied> {
+        if self.status == BindingStatus::Revoked {
+            return Err(IdentityDenied::BindingRevoked);
+        }
         if &self.tenant_id != tenant
             || &self.site_id != site
             || &self.session_id != session
@@ -262,7 +261,220 @@ impl AuthBinding {
             generation: self.generation,
         })
     }
+
+    /// Replaces verified credentials while preserving principal, scope, and epoch.
+    ///
+    /// The captured counters are the expected values for a persistence-layer
+    /// compare-and-swap. The absolute WAF session lease is not extended.
+    ///
+    /// # Errors
+    /// Returns [`IdentityTransitionError`] for a stale snapshot, revoked
+    /// binding, empty credential set, or exhausted generation counter.
+    pub fn refresh_same_context(
+        &mut self,
+        snapshot: &AuthSnapshot,
+        credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
+        now: UnixSeconds,
+    ) -> Result<IdentityTransition, IdentityTransitionError> {
+        self.validate_snapshot(snapshot, now)?;
+        if credentials.is_empty() {
+            return Err(IdentityInputError::EmptyCredentialSet.into());
+        }
+        let next_generation = self
+            .generation
+            .0
+            .checked_add(1)
+            .ok_or(IdentityTransitionError::CounterExhausted)?;
+        let transition = IdentityTransition {
+            kind: IdentityTransitionKind::SameContextRefresh,
+            previous_epoch: self.epoch,
+            current_epoch: self.epoch,
+            previous_generation: self.generation,
+            current_generation: CredentialGeneration(next_generation),
+        };
+        self.credentials = credentials;
+        self.generation = transition.current_generation;
+        Ok(transition)
+    }
+
+    /// Rebinds the WAF session to a newly verified principal or permission context.
+    ///
+    /// Incrementing the epoch makes every grant keyed by the prior snapshot
+    /// immediately ineligible, even before asynchronous cleanup runs.
+    ///
+    /// # Errors
+    /// Returns [`IdentityTransitionError`] for invalid input, a stale snapshot,
+    /// revoked binding, or exhausted counters.
+    pub fn switch_context(
+        &mut self,
+        snapshot: &AuthSnapshot,
+        principal_ref: impl Into<String>,
+        credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
+        now: UnixSeconds,
+    ) -> Result<IdentityTransition, IdentityTransitionError> {
+        self.validate_snapshot(snapshot, now)?;
+        let principal_ref = validate_principal_ref(principal_ref.into())?;
+        if credentials.is_empty() {
+            return Err(IdentityInputError::EmptyCredentialSet.into());
+        }
+        let next_epoch = self
+            .epoch
+            .0
+            .checked_add(1)
+            .ok_or(IdentityTransitionError::CounterExhausted)?;
+        let next_generation = self
+            .generation
+            .0
+            .checked_add(1)
+            .ok_or(IdentityTransitionError::CounterExhausted)?;
+        let transition = IdentityTransition {
+            kind: IdentityTransitionKind::ContextChanged,
+            previous_epoch: self.epoch,
+            current_epoch: AuthEpoch(next_epoch),
+            previous_generation: self.generation,
+            current_generation: CredentialGeneration(next_generation),
+        };
+        self.principal_ref = principal_ref;
+        self.credentials = credentials;
+        self.epoch = transition.current_epoch;
+        self.generation = transition.current_generation;
+        Ok(transition)
+    }
+
+    /// Permanently revokes this in-memory binding state.
+    pub fn revoke(&mut self) {
+        self.status = BindingStatus::Revoked;
+    }
+
+    /// Checks whether a captured request identity is still current.
+    ///
+    /// Response handlers call this before issuing grants so a late response
+    /// cannot write into a newer identity ledger.
+    ///
+    /// # Errors
+    /// Returns [`IdentityDenied`] when scope, epoch, generation, or status changed.
+    pub fn validate_snapshot(
+        &self,
+        snapshot: &AuthSnapshot,
+        now: UnixSeconds,
+    ) -> Result<(), IdentityDenied> {
+        if self.status == BindingStatus::Revoked {
+            return Err(IdentityDenied::BindingRevoked);
+        }
+        if self.binding_id != snapshot.binding_id
+            || self.tenant_id != snapshot.tenant_id
+            || self.site_id != snapshot.site_id
+        {
+            return Err(IdentityDenied::BindingMismatch);
+        }
+        if now >= self.absolute_expires_at {
+            return Err(IdentityDenied::SessionExpired);
+        }
+        if self.epoch != snapshot.epoch {
+            return Err(IdentityDenied::EpochChanged);
+        }
+        if self.generation != snapshot.generation {
+            return Err(IdentityDenied::CredentialGenerationChanged);
+        }
+        if self.principal_ref != snapshot.principal_ref {
+            return Err(IdentityDenied::BindingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Returns the current identity epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> AuthEpoch {
+        self.epoch
+    }
+
+    /// Returns the current credential generation.
+    #[must_use]
+    pub const fn generation(&self) -> CredentialGeneration {
+        self.generation
+    }
+
+    /// Returns the binding lifecycle state.
+    #[must_use]
+    pub const fn status(&self) -> BindingStatus {
+        self.status
+    }
 }
+
+fn validate_principal_ref(value: String) -> Result<String, IdentityInputError> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(IdentityInputError::PrincipalRef);
+    }
+    Ok(value)
+}
+
+/// Lifecycle state that affects request and response authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BindingStatus {
+    /// Binding can verify requests and snapshots.
+    Active,
+    /// Binding rejects all later request and response work.
+    Revoked,
+}
+
+/// Security meaning of an accepted identity transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IdentityTransitionKind {
+    /// Credential rotation with the same principal and authorization context.
+    SameContextRefresh,
+    /// Principal or authorization context changed and grants must not carry over.
+    ContextChanged,
+}
+
+/// Auditable before/after counters returned by a successful transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdentityTransition {
+    /// Kind of verified transition.
+    pub kind: IdentityTransitionKind,
+    /// Epoch before the transition.
+    pub previous_epoch: AuthEpoch,
+    /// Epoch after the transition.
+    pub current_epoch: AuthEpoch,
+    /// Credential generation before the transition.
+    pub previous_generation: CredentialGeneration,
+    /// Credential generation after the transition.
+    pub current_generation: CredentialGeneration,
+}
+
+/// Rejected identity state transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IdentityTransitionError {
+    /// New binding data is invalid.
+    InvalidInput(IdentityInputError),
+    /// The captured request identity is stale or belongs to another binding.
+    Denied(IdentityDenied),
+    /// An epoch or generation counter cannot advance safely.
+    CounterExhausted,
+}
+
+impl From<IdentityInputError> for IdentityTransitionError {
+    fn from(value: IdentityInputError) -> Self {
+        Self::InvalidInput(value)
+    }
+}
+
+impl From<IdentityDenied> for IdentityTransitionError {
+    fn from(value: IdentityDenied) -> Self {
+        Self::Denied(value)
+    }
+}
+
+impl fmt::Display for IdentityTransitionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput(error) => error.fmt(formatter),
+            Self::Denied(error) => error.fmt(formatter),
+            Self::CounterExhausted => formatter.write_str("identity counter exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for IdentityTransitionError {}
 
 /// Immutable identity captured for one request and later response commits.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -322,6 +534,12 @@ pub enum IdentityDenied {
     BindingMismatch,
     /// The server-side absolute lease has expired.
     SessionExpired,
+    /// The binding was explicitly revoked.
+    BindingRevoked,
+    /// The identity context changed after the request snapshot was captured.
+    EpochChanged,
+    /// Another verified refresh advanced the credential generation.
+    CredentialGenerationChanged,
 }
 
 impl IdentityDenied {
@@ -332,6 +550,9 @@ impl IdentityDenied {
             Self::AuthRequired => ReasonCode::AuthRequired,
             Self::BindingMismatch => ReasonCode::AuthBindingMismatch,
             Self::SessionExpired => ReasonCode::AuthSessionExpired,
+            Self::BindingRevoked => ReasonCode::AuthBindingRevoked,
+            Self::EpochChanged => ReasonCode::AuthEpochChanged,
+            Self::CredentialGenerationChanged => ReasonCode::AuthCredentialGenerationChanged,
         }
     }
 }
@@ -350,6 +571,7 @@ mod tests {
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     fn credentials(value: &str) -> BTreeMap<CredentialSlot, CredentialFingerprint> {
         [(
@@ -481,6 +703,106 @@ mod tests {
         assert_eq!(
             format!("{:?}", CredentialFingerprint::parse(A).unwrap()),
             "CredentialFingerprint([REDACTED])"
+        );
+    }
+
+    #[test]
+    fn refresh_advances_only_generation_and_rejects_late_response() {
+        let mut binding = binding();
+        let snapshot = binding
+            .verify(
+                &TenantId::parse("tenant_a").unwrap(),
+                &SiteId::parse("site_a").unwrap(),
+                &WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+                &credentials(A),
+                UnixSeconds::new(100),
+            )
+            .unwrap();
+
+        let transition = binding
+            .refresh_same_context(&snapshot, credentials(C), UnixSeconds::new(100))
+            .unwrap();
+        assert_eq!(transition.kind, IdentityTransitionKind::SameContextRefresh);
+        assert_eq!(transition.previous_epoch, transition.current_epoch);
+        assert_eq!(binding.epoch(), AuthEpoch::new(4));
+        assert_eq!(binding.generation(), CredentialGeneration::new(3));
+        assert_eq!(
+            binding.refresh_same_context(&snapshot, credentials(A), UnixSeconds::new(100)),
+            Err(IdentityTransitionError::Denied(
+                IdentityDenied::CredentialGenerationChanged
+            ))
+        );
+        assert_eq!(
+            binding.validate_snapshot(&snapshot, UnixSeconds::new(100)),
+            Err(IdentityDenied::CredentialGenerationChanged)
+        );
+        assert_eq!(
+            binding.validate_snapshot(&snapshot, UnixSeconds::new(200)),
+            Err(IdentityDenied::SessionExpired)
+        );
+    }
+
+    #[test]
+    fn context_switch_advances_epoch_and_invalidates_old_snapshot() {
+        let mut binding = binding();
+        let snapshot = binding
+            .verify(
+                &TenantId::parse("tenant_a").unwrap(),
+                &SiteId::parse("site_a").unwrap(),
+                &WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+                &credentials(A),
+                UnixSeconds::new(100),
+            )
+            .unwrap();
+
+        let transition = binding
+            .switch_context(
+                &snapshot,
+                "principal_b",
+                credentials(B),
+                UnixSeconds::new(100),
+            )
+            .unwrap();
+        assert_eq!(transition.kind, IdentityTransitionKind::ContextChanged);
+        assert_eq!(binding.epoch(), AuthEpoch::new(5));
+        assert_eq!(binding.generation(), CredentialGeneration::new(3));
+        assert_eq!(
+            binding.validate_snapshot(&snapshot, UnixSeconds::new(100)),
+            Err(IdentityDenied::EpochChanged)
+        );
+    }
+
+    #[test]
+    fn revocation_stops_request_and_response_paths() {
+        let mut binding = binding();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let session = WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap();
+        let snapshot = binding
+            .verify(
+                &tenant,
+                &site,
+                &session,
+                &credentials(A),
+                UnixSeconds::new(100),
+            )
+            .unwrap();
+
+        binding.revoke();
+        assert_eq!(binding.status(), BindingStatus::Revoked);
+        assert_eq!(
+            binding.verify(
+                &tenant,
+                &site,
+                &session,
+                &credentials(A),
+                UnixSeconds::new(100)
+            ),
+            Err(IdentityDenied::BindingRevoked)
+        );
+        assert_eq!(
+            binding.validate_snapshot(&snapshot, UnixSeconds::new(100)),
+            Err(IdentityDenied::BindingRevoked)
         );
     }
 }
