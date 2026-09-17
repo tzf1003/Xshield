@@ -263,6 +263,7 @@ pub struct VerifiedSegment {
 pub struct AuthenticatedJournalRecord {
     event_id: EventId,
     receipt_id: String,
+    producer_boot_id: String,
     producer_sequence: u64,
     plaintext_digest: [u8; HASH_BYTES],
     plaintext: Zeroizing<Vec<u8>>,
@@ -279,6 +280,12 @@ impl AuthenticatedJournalRecord {
     #[must_use]
     pub fn receipt_id(&self) -> &str {
         &self.receipt_id
+    }
+
+    /// Returns the producer boot ID authenticated by the record AAD.
+    #[must_use]
+    pub fn producer_boot_id(&self) -> &str {
+        &self.producer_boot_id
     }
 
     /// Returns the producer-local sequence committed by record AAD.
@@ -592,21 +599,7 @@ pub fn seal_closed_segments(
     prepare_existing_private_directory(journal_directory)?;
     prepare_existing_private_directory(manifest_directory)?;
     let verifier = seal_key.verifying_key()?;
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(journal_directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if name.starts_with("segment-") && name.ends_with(".closed.xja") {
-            if !entry.file_type()?.is_file() {
-                return Err(JournalError::UnsafePath);
-            }
-            paths.push(entry.path());
-        }
-    }
-    paths.sort();
+    let paths = closed_segment_paths(journal_directory)?;
 
     // ponytail: linear verification is simplest; add a signed checkpoint index
     // when retained segment count makes periodic scans measurably expensive.
@@ -976,6 +969,85 @@ impl LocalJournal {
         Uuid::from_bytes(self.identity.boot_id).to_string()
     }
 
+    /// Authenticates historical closed records and visits them in segment order.
+    ///
+    /// This read is intended for startup recovery while the caller owns the
+    /// journal writer. The active segment is excluded, and plaintext is
+    /// zeroized after each callback. The callback remains responsible for
+    /// validating its application event schema.
+    ///
+    /// # Errors
+    /// Returns [`JournalError`] for unsafe storage, corruption, authentication
+    /// failure, callback rejection, or when `max_records` is exceeded.
+    pub fn visit_closed_records(
+        &self,
+        max_records: u64,
+        mut visit: impl FnMut(&AuthenticatedJournalRecord) -> Result<(), JournalError>,
+    ) -> Result<u64, JournalError> {
+        if max_records == 0 {
+            return Err(JournalError::InvalidLimits);
+        }
+        let mut visited = 0_u64;
+        for path in closed_segment_paths(&self.directory)? {
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(JournalError::UnsafePath);
+            }
+            #[cfg(unix)]
+            if metadata.permissions().mode() & 0o277 != 0 {
+                return Err(JournalError::UnsafePermissions);
+            }
+            let mut file = File::open(&path)?;
+            let identity = read_header(&mut file)?;
+            if identity.key_id != self.identity.key_id {
+                return Err(JournalError::KeyMismatch);
+            }
+            if !segment_path_state(&path, &identity)? {
+                return Err(JournalError::Corrupt("segment not closed"));
+            }
+            let mut expected_sequence = 1_u64;
+            let mut previous_hash = ZERO_HASH;
+            loop {
+                let mut length = [0; 4];
+                let read = read_until_full_or_eof(&mut file, &mut length)?;
+                if read == 0 {
+                    break;
+                }
+                if read != length.len() {
+                    return Err(JournalError::Corrupt("closed record length"));
+                }
+                let body_len = usize::try_from(u32::from_le_bytes(length))
+                    .map_err(|_| JournalError::Corrupt("record length"))?;
+                if body_len == 0 || body_len > MAX_RECORD_BYTES {
+                    return Err(JournalError::Corrupt("record length"));
+                }
+                let mut body = vec![0; body_len];
+                if read_until_full_or_eof(&mut file, &mut body)? != body_len {
+                    return Err(JournalError::Corrupt("closed record body"));
+                }
+                visited = visited
+                    .checked_add(1)
+                    .ok_or(JournalError::RecordLimitExceeded)?;
+                if visited > max_records {
+                    return Err(JournalError::RecordLimitExceeded);
+                }
+                let record = decode_record(
+                    &identity,
+                    &self.key,
+                    &body,
+                    expected_sequence,
+                    previous_hash,
+                )?;
+                visit(&record)?;
+                previous_hash = sha256(&body);
+                expected_sequence = expected_sequence
+                    .checked_add(1)
+                    .ok_or(JournalError::Corrupt("record sequence"))?;
+            }
+        }
+        Ok(visited)
+    }
+
     /// Returns the next sequence available to a caller holding exclusive access.
     #[must_use]
     pub const fn next_sequence(&self) -> Option<u64> {
@@ -1048,6 +1120,25 @@ fn prepare_directory(directory: &Path) -> Result<(), JournalError> {
         }
     }
     Ok(())
+}
+
+fn closed_segment_paths(directory: &Path) -> Result<Vec<PathBuf>, JournalError> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with("segment-") && name.ends_with(".closed.xja") {
+            if !entry.file_type()?.is_file() {
+                return Err(JournalError::UnsafePath);
+            }
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 fn prepare_existing_private_directory(directory: &Path) -> Result<(), JournalError> {
@@ -1552,6 +1643,7 @@ fn decode_record(
     Ok(AuthenticatedJournalRecord {
         event_id,
         receipt_id: receipt_id.to_owned(),
+        producer_boot_id: Uuid::from_bytes(identity.boot_id).to_string(),
         producer_sequence: sequence,
         plaintext_digest,
         plaintext,
@@ -1663,6 +1755,8 @@ pub enum JournalError {
     InvalidEvent,
     /// A signed segment exceeds the caller's bounded publication-read limit.
     ReadLimitExceeded,
+    /// A historical record scan exceeded the caller's explicit work limit.
+    RecordLimitExceeded,
     /// Journal directory or segment resolves to an unsafe object type.
     UnsafePath,
     /// Journal storage is visible to group or other Unix users.
@@ -1699,6 +1793,7 @@ impl fmt::Display for JournalError {
             Self::InvalidBatch => formatter.write_str("invalid journal batch"),
             Self::InvalidEvent => formatter.write_str("invalid journal event"),
             Self::ReadLimitExceeded => formatter.write_str("journal read limit exceeded"),
+            Self::RecordLimitExceeded => formatter.write_str("journal record limit exceeded"),
             Self::UnsafePath => formatter.write_str("unsafe journal path"),
             Self::UnsafePermissions => formatter.write_str("unsafe journal permissions"),
             Self::KeyMismatch => formatter.write_str("journal key id mismatch"),

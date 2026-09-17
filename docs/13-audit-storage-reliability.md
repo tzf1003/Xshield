@@ -30,7 +30,7 @@
 
 ALLOW 的高危请求至少在转发前耐久记录：request.accepted、必要输入证据 manifest、所有必需阶段结果、final decision、origin.forward_intent、实际重建请求引用。没有 receipt 就不向源站释放该请求。
 
-不能把源站网络发送与 journal 写入变成跨系统原子事务。进程可能在发送成功后、结果事件落盘前崩溃，因此明确 outcome_unknown，由 reconciler 标记；不得自动重发写请求或补造成功日志。
+不能把源站网络发送与 journal 写入变成跨系统原子事务。进程可能在 journal 批次中途或发送成功后、结果事件落盘前崩溃，因此网关下次启动在接收流量前认证扫描关闭段：未完成的准入前缀追加 REQUEST_INCOMPLETE 补偿终态，已记录转发意图但缺少结果时追加 outcome_unknown 和补偿终态；扫描超过配置上限、事件结构冲突或补偿写入失败均阻止启动。恢复保留已经耐久记录的 response_received，不执行写请求重发，也不补造成功日志。
 
 DENY 也应记录；磁盘耗尽时预留独立的小型紧急事件区。若紧急区也失败，节点退出就绪状态并触发独立监控，不能许诺物理故障下 100% 永不丢失。
 

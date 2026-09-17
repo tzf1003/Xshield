@@ -146,6 +146,8 @@ pub enum ReasonCode {
     OriginResponseReceived,
     /// Origin side effects cannot be determined after a proxy failure.
     OriginOutcomeUnknown,
+    /// A durable request prefix ended before a release decision or forward intent committed.
+    RequestIncomplete,
     /// Trusted wall-clock time was unavailable for admission.
     ClockUnavailable,
     /// Authoritative identity state could not be read safely.
@@ -200,6 +202,7 @@ impl ReasonCode {
             Self::OriginForwardIntentRecorded => "ORIGIN_FORWARD_INTENT_RECORDED",
             Self::OriginResponseReceived => "ORIGIN_RESPONSE_RECEIVED",
             Self::OriginOutcomeUnknown => "ORIGIN_OUTCOME_UNKNOWN",
+            Self::RequestIncomplete => "REQUEST_INCOMPLETE",
             Self::ClockUnavailable => "CLOCK_UNAVAILABLE",
             Self::IdentityStoreUnavailable => "IDENTITY_STORE_UNAVAILABLE",
             Self::RequestNotConfigured => "REQUEST_NOT_CONFIGURED",

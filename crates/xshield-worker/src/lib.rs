@@ -472,10 +472,8 @@ impl PayloadSummary {
                 let payload: OriginPayload = serde_json::from_str(json)?;
                 payload.validate()
             }
-            "request.completed" | "request.aborted" => {
-                let payload: CompletionPayload = serde_json::from_str(json)?;
-                payload.validate()
-            }
+            "request.completed" => serde_json::from_str::<CompletionPayload>(json)?.validate(true),
+            "request.aborted" => serde_json::from_str::<CompletionPayload>(json)?.validate(false),
             "audit.recovered" => {
                 let payload: RecoveryPayload = serde_json::from_str(json)?;
                 payload.validate()
@@ -655,16 +653,20 @@ impl OriginPayload {
 struct CompletionPayload {
     decision: String,
     reason_code: String,
-    status: u16,
+    status: Option<u16>,
     origin_state: String,
     duration_us: u64,
 }
 
 impl CompletionPayload {
-    fn validate(self) -> Result<PayloadSummary, PublishError> {
-        if !matches!(self.decision.as_str(), "ALLOW" | "DENY")
+    fn validate(self, requires_status: bool) -> Result<PayloadSummary, PublishError> {
+        if !matches!(self.decision.as_str(), "ALLOW" | "DENY" | "UNKNOWN")
+            || (self.decision == "UNKNOWN" && requires_status)
             || !valid_name(&self.reason_code)
-            || !(100..=599).contains(&self.status)
+            || (requires_status && self.status.is_none())
+            || self
+                .status
+                .is_some_and(|status| !(100..=599).contains(&status))
             || !matches!(
                 self.origin_state.as_str(),
                 "not_sent" | "unknown" | "response_received"
@@ -1115,9 +1117,9 @@ impl From<clickhouse::error::Error> for PublishError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Checkpoint, ExistingDigest, IndexRow, PublishError, PublisherConfig, closed_segment_paths,
-        inspect_publication_health, prepare_private_directory, publish_sealed_segments,
-        read_private_bounded, write_checkpoint,
+        Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError, PublisherConfig,
+        closed_segment_paths, inspect_publication_health, prepare_private_directory,
+        publish_sealed_segments, read_private_bounded, write_checkpoint,
     };
     use clickhouse::{Client, test};
     use std::{
@@ -1425,6 +1427,20 @@ mod tests {
         assert_eq!(health.unsealed_segments, 1);
         assert!(!health.has_gaps);
         assert_eq!(health.index_watermark, None);
+    }
+
+    #[test]
+    fn indexes_reconciled_abort_without_inventing_an_http_status() {
+        let payload = r#"{"decision":"ALLOW","reason_code":"ORIGIN_OUTCOME_UNKNOWN","status":null,"origin_state":"unknown","duration_us":0}"#;
+        let summary = PayloadSummary::parse("request.aborted", payload).unwrap();
+        assert_eq!(summary.outcome, "ALLOW");
+        assert_eq!(summary.reason_code, "ORIGIN_OUTCOME_UNKNOWN");
+        assert!(PayloadSummary::parse("request.completed", payload).is_err());
+
+        let prefix = r#"{"decision":"UNKNOWN","reason_code":"REQUEST_INCOMPLETE","status":null,"origin_state":"not_sent","duration_us":0}"#;
+        let summary = PayloadSummary::parse("request.aborted", prefix).unwrap();
+        assert_eq!(summary.outcome, "UNKNOWN");
+        assert!(PayloadSummary::parse("request.completed", prefix).is_err());
     }
 
     fn checkpoint_segment(fixture: &Fixture, index: usize) -> String {

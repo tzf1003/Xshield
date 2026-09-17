@@ -43,7 +43,7 @@
 
 首版私有 JSON 响应采用有界完整缓冲；HTTP 流式、SSE、超大附件和业务 WS 必须声明各自的记录、决策和释放粒度。不可能在最后一字节尚未到达时声称已完整检查全部内容。将部分转发记为 response.partially_released，不能称为完全阻断。
 
-客户端中断、上游超时、节点退出都留下可调和终态。由后台 reconciler 扫描只有 request.accepted 而无终态的请求，追加 incomplete/outcome_unknown；不伪造成功记录。
+客户端中断、上游超时、节点退出都留下可调和终态。网关重启恢复屏障认证扫描历史关闭段；只有 request.accepted 或只完成部分准入批次而无终态的请求会在开放流量前追加 request.aborted，尚无完整判定时使用 `UNKNOWN / REQUEST_INCOMPLETE`，存在 forward_intent 且没有源站结果时先追加 origin.unknown。已经耐久记录的 origin.response 保持 response_received。补偿终态的 HTTP status 为 null，避免把进程退出伪装成实际响应；扫描量由 `audit.reconcile_max_records` 限制。
 
 ## 3.5 重放与重试
 

@@ -51,6 +51,7 @@ struct AuditConfig {
     key_id: String,
     producer_id: String,
     limits: JournalLimits,
+    reconcile_max_records: u64,
 }
 
 /// Bounded `PostgreSQL` identity lookup settings for protected roots.
@@ -98,6 +99,12 @@ struct AuditDto {
     max_bytes: u64,
     high_watermark_bytes: u64,
     segment_max_bytes: u64,
+    #[serde(default = "default_reconcile_max_records")]
+    reconcile_max_records: u64,
+}
+
+const fn default_reconcile_max_records() -> u64 {
+    1_000_000
 }
 
 #[derive(Deserialize)]
@@ -179,6 +186,9 @@ impl GatewayConfig {
             dto.audit.segment_max_bytes,
         )
         .map_err(ConfigError::Journal)?;
+        if dto.audit.reconcile_max_records == 0 || dto.audit.reconcile_max_records > 10_000_000 {
+            return Err(ConfigError::Invalid("audit.reconcile_max_records"));
+        }
         let identity_store = dto
             .identity_store
             .map(|identity| {
@@ -231,6 +241,7 @@ impl GatewayConfig {
                 key_id: dto.audit.key_id,
                 producer_id: dto.audit.producer_id,
                 limits: audit_limits,
+                reconcile_max_records: dto.audit.reconcile_max_records,
             },
             identity_store,
             operations,
@@ -301,6 +312,12 @@ impl GatewayConfig {
     #[must_use]
     pub const fn audit_limits(&self) -> JournalLimits {
         self.audit.limits
+    }
+
+    /// Returns the startup ceiling for authenticated historical record scans.
+    #[must_use]
+    pub const fn audit_reconcile_max_records(&self) -> u64 {
+        self.audit.reconcile_max_records
     }
 
     /// Returns bounded identity-store settings when protected roots are enabled.
@@ -704,6 +721,15 @@ mod tests {
             Err(ConfigError::Journal(
                 xshield_audit::JournalError::InvalidLimits
             ))
+        ));
+
+        let invalid_reconcile = CONFIG.replace(
+            "\"segment_max_bytes\":262144",
+            "\"segment_max_bytes\":262144,\"reconcile_max_records\":0",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(invalid_reconcile.as_bytes()),
+            Err(ConfigError::Invalid("audit.reconcile_max_records"))
         ));
     }
 

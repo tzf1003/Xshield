@@ -1,4 +1,7 @@
 use chrono::{SecondsFormat, Utc};
+mod reconcile;
+
+use reconcile::{IncompleteRequest, incomplete_requests};
 use serde::Serialize;
 use std::{
     fmt,
@@ -62,6 +65,7 @@ impl DurableAudit {
             key,
             config.audit_limits(),
         )?;
+        let incomplete = incomplete_requests(&journal, config)?;
         let audit = Self {
             journal: Arc::new(Mutex::new(journal)),
             ready: Arc::new(AtomicBool::new(true)),
@@ -74,6 +78,7 @@ impl DurableAudit {
         if recovery.truncated_bytes > 0 {
             audit.record_recovery(recovery)?;
         }
+        audit.record_incomplete(incomplete)?;
         Ok(audit)
     }
 
@@ -91,6 +96,7 @@ impl DurableAudit {
             DurableAuditError::SequenceExhausted => 6,
             DurableAuditError::ReceiptMismatch => 7,
             DurableAuditError::Unavailable => 8,
+            DurableAuditError::InvalidHistoricalEvent => 9,
         };
         self.failure_code.store(code, Ordering::Release);
         self.ready.store(false, Ordering::Release);
@@ -253,16 +259,17 @@ impl DurableAudit {
             completion_causes,
             Payload::RequestCompleted {
                 decision: match facts.decision.outcome {
-                    GatewayOutcome::Allowed => "ALLOW",
-                    GatewayOutcome::Denied => "DENY",
+                    GatewayOutcome::Allowed => "ALLOW".to_owned(),
+                    GatewayOutcome::Denied => "DENY".to_owned(),
                 },
                 reason_code: match (facts.decision.outcome, facts.proxy_error) {
                     (GatewayOutcome::Allowed, true) => ReasonCode::OriginOutcomeUnknown.as_str(),
                     (GatewayOutcome::Allowed, false) => ReasonCode::OriginResponseReceived.as_str(),
                     (GatewayOutcome::Denied, _) => facts.decision.reason_code.as_str(),
-                },
-                status: facts.status,
-                origin_state,
+                }
+                .to_owned(),
+                status: Some(facts.status),
+                origin_state: origin_state.to_owned(),
                 duration_us: facts.duration_us,
             },
         ));
@@ -301,6 +308,100 @@ impl DurableAudit {
             },
             &[event],
         )?;
+        Ok(())
+    }
+
+    fn record_incomplete(&self, requests: Vec<IncompleteRequest>) -> Result<(), DurableAuditError> {
+        for request in requests {
+            let mut sequence = request
+                .last_request_sequence
+                .checked_add(1)
+                .ok_or(DurableAuditError::SequenceExhausted)?;
+            let mut events = Vec::new();
+            let (event_type, completion_cause, reason_code, status, origin_state) =
+                if let Some(origin) = request.origin {
+                    let event_type = if origin.state == "response_received" {
+                        "request.completed"
+                    } else {
+                        "request.aborted"
+                    };
+                    let reason_code = if origin.state == "response_received" {
+                        ReasonCode::OriginResponseReceived.as_str()
+                    } else {
+                        ReasonCode::OriginOutcomeUnknown.as_str()
+                    };
+                    (
+                        event_type,
+                        origin.event_id,
+                        reason_code.to_owned(),
+                        origin.status,
+                        origin.state,
+                    )
+                } else if let Some(forward) = request.forward {
+                    let unknown_id = new_event_id()?;
+                    events.push(PendingEvent::new(
+                        unknown_id.clone(),
+                        "origin.unknown",
+                        sequence,
+                        vec![forward.event_id],
+                        Payload::Origin {
+                            method: forward.method,
+                            operation_id: forward.operation_id,
+                            origin_state: "unknown",
+                            reason_code: ReasonCode::OriginOutcomeUnknown.as_str(),
+                            status: None,
+                        },
+                    ));
+                    sequence = sequence
+                        .checked_add(1)
+                        .ok_or(DurableAuditError::SequenceExhausted)?;
+                    (
+                        "request.aborted",
+                        unknown_id.as_str().to_owned(),
+                        ReasonCode::OriginOutcomeUnknown.as_str().to_owned(),
+                        None,
+                        "unknown".to_owned(),
+                    )
+                } else {
+                    let reason_code = if request.decision.outcome == "DENY" {
+                        request.decision.reason_code.clone()
+                    } else {
+                        ReasonCode::RequestIncomplete.as_str().to_owned()
+                    };
+                    (
+                        "request.aborted",
+                        request.decision.event_id.clone(),
+                        reason_code,
+                        None,
+                        "not_sent".to_owned(),
+                    )
+                };
+            events.push(PendingEvent::new(
+                new_event_id()?,
+                event_type,
+                sequence,
+                vec![completion_cause],
+                Payload::RequestCompleted {
+                    decision: request.decision.outcome,
+                    reason_code,
+                    status,
+                    origin_state,
+                    duration_us: 0,
+                },
+            ));
+            append_locked(
+                &self.journal,
+                &self.tenant_id,
+                &self.site_id,
+                &request.policy_revision,
+                &self.producer_id,
+                &BatchContext {
+                    request_id: Some(request.request_id),
+                    trace_id: request.trace_id,
+                },
+                &events,
+            )?;
+        }
         Ok(())
     }
 
@@ -551,10 +652,10 @@ enum Payload {
         status: Option<u16>,
     },
     RequestCompleted {
-        decision: &'static str,
-        reason_code: &'static str,
-        status: u16,
-        origin_state: &'static str,
+        decision: String,
+        reason_code: String,
+        status: Option<u16>,
+        origin_state: String,
         duration_us: u64,
     },
     Recovery {
@@ -616,6 +717,7 @@ pub(crate) enum DurableAuditError {
     SequenceExhausted,
     ReceiptMismatch,
     Unavailable,
+    InvalidHistoricalEvent,
 }
 
 impl fmt::Display for DurableAuditError {
@@ -629,6 +731,9 @@ impl fmt::Display for DurableAuditError {
             Self::SequenceExhausted => formatter.write_str("audit sequence exhausted"),
             Self::ReceiptMismatch => formatter.write_str("audit receipt sequence mismatch"),
             Self::Unavailable => formatter.write_str("audit durability unavailable"),
+            Self::InvalidHistoricalEvent => {
+                formatter.write_str("historical audit event is invalid")
+            }
         }
     }
 }
@@ -643,7 +748,8 @@ impl std::error::Error for DurableAuditError {
             Self::LockPoisoned
             | Self::SequenceExhausted
             | Self::ReceiptMismatch
-            | Self::Unavailable => None,
+            | Self::Unavailable
+            | Self::InvalidHistoricalEvent => None,
         }
     }
 }
@@ -702,6 +808,53 @@ mod tests {
             }]
         });
         GatewayConfig::from_json(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+
+    fn append_accepted_prefix(
+        config: &GatewayConfig,
+        directory: &std::path::Path,
+        tenant_id: &str,
+        request_id: &str,
+        trace_id: &str,
+    ) {
+        let (mut journal, _) = LocalJournal::open(
+            directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 3,
+            "event_id": event_id.as_str(),
+            "event_type": "request.accepted",
+            "tenant_id": tenant_id,
+            "site_id": "site_test",
+            "request_id": request_id,
+            "trace_id": trace_id,
+            "span_id": &trace_id[..16],
+            "producer_id": "edge-test",
+            "producer_boot_id": journal.producer_boot_id(),
+            "producer_seq": 1,
+            "request_seq": 1,
+            "occurred_at": "2026-09-18T00:00:00.000Z",
+            "observed_at": "2026-09-18T00:00:00.000Z",
+            "policy_revision": "policy-r1",
+            "example_only": false,
+            "evidence_refs": [],
+            "cause_event_ids": [],
+            "payload": {"method": "GET", "operation_id": "health.read", "origin_state": "not_sent"},
+            "sensitivity": "INTERNAL",
+            "integrity": {"state": "pending", "previous_hash": null, "event_hash": null}
+        }))
+        .unwrap();
+        journal
+            .append_batch(&[JournalRecord {
+                event_id: &event_id,
+                plaintext: &bytes,
+            }])
+            .unwrap();
     }
 
     #[tokio::test]
@@ -770,6 +923,180 @@ mod tests {
         .unwrap();
         assert_eq!(report.recovered_records, 10);
         drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconciles_crashed_forward_once_before_reopening_traffic() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000004";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", "/health", UnixSeconds::new(1));
+        audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "44444444444444444444444444444444",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+            })
+            .await
+            .unwrap();
+        drop(audit);
+
+        let recovered = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        drop(recovered);
+        let reopened = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        drop(reopened);
+
+        let (journal, report) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        assert_eq!(report.recovered_records, 6);
+        let mut terminal = Vec::new();
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id
+                    && matches!(
+                        event["event_type"].as_str(),
+                        Some("origin.unknown" | "request.aborted")
+                    )
+                {
+                    terminal.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(terminal.len(), 2);
+        assert_eq!(terminal[0]["event_type"], "origin.unknown");
+        assert_eq!(terminal[0]["payload"]["origin_state"], "unknown");
+        assert_eq!(terminal[1]["event_type"], "request.aborted");
+        assert_eq!(terminal[1]["payload"]["status"], serde_json::Value::Null);
+        assert_eq!(
+            terminal[1]["payload"]["reason_code"],
+            ReasonCode::OriginOutcomeUnknown.as_str()
+        );
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconciles_denied_request_without_inventing_a_status() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000006";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", "/unknown", UnixSeconds::new(1));
+        audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "66666666666666666666666666666666",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+            })
+            .await
+            .unwrap();
+        drop(audit);
+
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+
+        let (journal, report) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        assert_eq!(report.recovered_records, 4);
+        let mut terminal = Vec::new();
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id && event["event_type"] == "request.aborted" {
+                    terminal.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0]["payload"]["decision"], "DENY");
+        assert_eq!(terminal[0]["payload"]["status"], serde_json::Value::Null);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reconciles_an_accepted_crash_prefix_once() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000007";
+        append_accepted_prefix(
+            &config,
+            &directory,
+            "tenant_test",
+            request_id,
+            "77777777777777777777777777777777",
+        );
+
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+
+        let (journal, report) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        assert_eq!(report.recovered_records, 2);
+        let mut terminal = Vec::new();
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id && event["event_type"] == "request.aborted" {
+                    terminal.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0]["payload"]["decision"], "UNKNOWN");
+        assert_eq!(
+            terminal[0]["payload"]["reason_code"],
+            ReasonCode::RequestIncomplete.as_str()
+        );
+        assert_eq!(terminal[0]["payload"]["status"], serde_json::Value::Null);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_authenticated_history_from_another_scope() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        append_accepted_prefix(
+            &config,
+            &directory,
+            "tenant_other",
+            "req_018f2a3b-4c5d-7000-8000-000000000005",
+            "55555555555555555555555555555555",
+        );
+
+        assert!(matches!(
+            DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()),
+            Err(DurableAuditError::Journal(JournalError::InvalidEvent))
+        ));
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -28,7 +28,7 @@
 
 ## RB-07 源站执行结果未知
 
-有 forward_intent 无确认业务结果时，标 outcome_unknown；不根据 WAF 允许推断成功，不自动重放非幂等请求。优先原站已有幂等/状态查询流程；没有则由业务方核实。保留发送字节和中断位置，不能声称 WAF 已保证 exactly-once。
+网关启动恢复会在开放流量前认证扫描关闭段：只留下 request.accepted 或部分准入批次时追加 `UNKNOWN / REQUEST_INCOMPLETE` 的 request.aborted；有 forward_intent 且缺少源站结果时追加 origin.unknown 与 request.aborted；已有 origin.response 时只补相应请求终态。补偿终态使用 status=null，表示没有可证明的客户端响应。超过 `audit.reconcile_max_records`、历史结构冲突或 journal 写入失败时节点保持未启动。后续核实优先使用原站已有幂等/状态查询流程，由业务方确认真实副作用。
 
 ## RB-08 密钥或凭证泄露
 
