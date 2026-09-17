@@ -118,6 +118,8 @@ scoped_name!(PolicyRevision, "policy_revision");
 v7_id!(RequestId, "req_", "request_id");
 v7_id!(EventId, "ev_", "event_id");
 v7_id!(StageExecutionId, "stg_", "stage_execution_id");
+v7_id!(WafSessionId, "ses_", "waf_session_id");
+v7_id!(AuthBindingId, "auth_", "auth_binding_id");
 
 #[cfg(test)]
 mod tests {

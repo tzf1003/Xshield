@@ -64,6 +64,14 @@ impl Outcome {
 /// Stable machine-readable reasons for the implemented M0 branches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReasonCode {
+    /// The request has no authenticated binding.
+    AuthRequired,
+    /// Presented credentials do not match the bound combination.
+    AuthBindingMismatch,
+    /// The exact credential combination matches an active binding.
+    AuthBindingValid,
+    /// The server-side session lease has expired.
+    AuthSessionExpired,
     /// No site policy exists for the requested scope.
     SiteNotConfigured,
     /// The scoped site policy is explicitly disabled.
@@ -83,6 +91,10 @@ impl ReasonCode {
     /// Returns the stable machine-readable code.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AuthRequired => "AUTH_REQUIRED",
+            Self::AuthBindingMismatch => "AUTH_BINDING_MISMATCH",
+            Self::AuthBindingValid => "AUTH_BINDING_VALID",
+            Self::AuthSessionExpired => "AUTH_SESSION_EXPIRED",
             Self::SiteNotConfigured => "SITE_NOT_CONFIGURED",
             Self::SiteDisabled => "SITE_DISABLED",
             Self::SiteConfigUnavailable => "SITE_CONFIG_UNAVAILABLE",

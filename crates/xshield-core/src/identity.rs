@@ -1,0 +1,486 @@
+//! Pure identity binding rules for WAF sessions and verified business credentials.
+
+use crate::{
+    audit::ReasonCode,
+    domain::{AuthBindingId, SiteId, TenantId, WafSessionId},
+};
+use std::{collections::BTreeMap, fmt};
+
+/// Server time represented as whole Unix seconds.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct UnixSeconds(u64);
+
+impl UnixSeconds {
+    /// Creates a timestamp from the trusted server clock.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Monotonic identity generation within one binding.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct CredentialGeneration(u64);
+
+impl CredentialGeneration {
+    /// Creates a generation counter.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Epoch that invalidates grants when identity or authorization context changes.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AuthEpoch(u64);
+
+impl AuthEpoch {
+    /// Creates an identity epoch.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Authentication credential location selected by the site profile.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum CredentialSlot {
+    /// The effective business authentication cookie.
+    Cookie,
+    /// The effective `Authorization` bearer token.
+    Bearer,
+    /// A body-carried token for an explicitly configured operation.
+    BodyToken,
+}
+
+/// Tenant-isolated fingerprint of one verified credential.
+///
+/// The original credential is never stored in this type or exposed through
+/// `Debug` or `Display`.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct CredentialFingerprint([u8; 32]);
+
+impl CredentialFingerprint {
+    /// Parses a lowercase 64-character hexadecimal HMAC fingerprint.
+    ///
+    /// # Errors
+    /// Returns [`IdentityInputError`] for malformed or uppercase input.
+    pub fn parse(value: &str) -> Result<Self, IdentityInputError> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(IdentityInputError::CredentialFingerprint);
+        }
+        let mut bytes = [0; 32];
+        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+            bytes[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl fmt::Debug for CredentialFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CredentialFingerprint([REDACTED])")
+    }
+}
+
+const fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => 0,
+    }
+}
+
+/// Invalid data rejected while constructing identity domain values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IdentityInputError {
+    /// Credential fingerprint is not canonical lowercase SHA-256/HMAC hex.
+    CredentialFingerprint,
+    /// An authenticated binding has no effective verified credential.
+    EmptyCredentialSet,
+    /// Principal reference is empty, oversized, or contains control data.
+    PrincipalRef,
+}
+
+impl fmt::Display for IdentityInputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::CredentialFingerprint => "invalid credential fingerprint",
+            Self::EmptyCredentialSet => "authenticated binding requires a credential",
+            Self::PrincipalRef => "invalid principal reference",
+        })
+    }
+}
+
+impl std::error::Error for IdentityInputError {}
+
+/// A newly issued WAF session with no business identity or grants.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnonymousSession {
+    session_id: WafSessionId,
+    site_id: SiteId,
+    absolute_expires_at: UnixSeconds,
+}
+
+impl AnonymousSession {
+    /// Creates an empty anonymous session. It performs no external effects.
+    #[must_use]
+    pub const fn new(
+        session_id: WafSessionId,
+        site_id: SiteId,
+        absolute_expires_at: UnixSeconds,
+    ) -> Self {
+        Self {
+            session_id,
+            site_id,
+            absolute_expires_at,
+        }
+    }
+
+    /// Always reports zero grants; only verified transitions can create a ledger.
+    #[must_use]
+    pub const fn grant_count(&self) -> usize {
+        0
+    }
+
+    /// Rejects an authenticated operation without changing this session.
+    ///
+    /// # Errors
+    /// Always returns [`IdentityDenied::AuthRequired`].
+    pub const fn require_authenticated(&self) -> Result<AuthSnapshot, IdentityDenied> {
+        Err(IdentityDenied::AuthRequired)
+    }
+
+    /// Verifies that this anonymous session is usable for the requested site.
+    ///
+    /// # Errors
+    /// Returns [`IdentityDenied`] for cross-site use or server-side expiry.
+    pub fn verify(&self, site: &SiteId, now: UnixSeconds) -> Result<(), IdentityDenied> {
+        if &self.site_id != site {
+            return Err(IdentityDenied::BindingMismatch);
+        }
+        if now >= self.absolute_expires_at {
+            return Err(IdentityDenied::SessionExpired);
+        }
+        Ok(())
+    }
+
+    /// Returns the opaque server-side WAF session ID.
+    #[must_use]
+    pub const fn session_id(&self) -> &WafSessionId {
+        &self.session_id
+    }
+}
+
+/// Active binding between a WAF session and the exact effective credentials.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthBinding {
+    binding_id: AuthBindingId,
+    session_id: WafSessionId,
+    tenant_id: TenantId,
+    site_id: SiteId,
+    principal_ref: String,
+    epoch: AuthEpoch,
+    generation: CredentialGeneration,
+    credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
+    absolute_expires_at: UnixSeconds,
+}
+
+impl AuthBinding {
+    /// Creates a binding from credentials already verified by a site adapter.
+    ///
+    /// # Errors
+    /// Rejects an empty credential set or invalid principal reference.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        binding_id: AuthBindingId,
+        session_id: WafSessionId,
+        tenant_id: TenantId,
+        site_id: SiteId,
+        principal_ref: impl Into<String>,
+        epoch: AuthEpoch,
+        generation: CredentialGeneration,
+        credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
+        absolute_expires_at: UnixSeconds,
+    ) -> Result<Self, IdentityInputError> {
+        let principal_ref = principal_ref.into();
+        if principal_ref.is_empty()
+            || principal_ref.len() > 256
+            || principal_ref.chars().any(char::is_control)
+        {
+            return Err(IdentityInputError::PrincipalRef);
+        }
+        if credentials.is_empty() {
+            return Err(IdentityInputError::EmptyCredentialSet);
+        }
+        Ok(Self {
+            binding_id,
+            session_id,
+            tenant_id,
+            site_id,
+            principal_ref,
+            epoch,
+            generation,
+            credentials,
+            absolute_expires_at,
+        })
+    }
+
+    /// Matches the complete credential combination and returns an immutable snapshot.
+    ///
+    /// # Errors
+    /// Returns [`IdentityDenied`] for scope mismatch, expiry, or any missing,
+    /// substituted, or additional credential.
+    pub fn verify(
+        &self,
+        tenant: &TenantId,
+        site: &SiteId,
+        session: &WafSessionId,
+        credentials: &BTreeMap<CredentialSlot, CredentialFingerprint>,
+        now: UnixSeconds,
+    ) -> Result<AuthSnapshot, IdentityDenied> {
+        if &self.tenant_id != tenant
+            || &self.site_id != site
+            || &self.session_id != session
+            || &self.credentials != credentials
+        {
+            return Err(IdentityDenied::BindingMismatch);
+        }
+        if now >= self.absolute_expires_at {
+            return Err(IdentityDenied::SessionExpired);
+        }
+        Ok(AuthSnapshot {
+            binding_id: self.binding_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            site_id: self.site_id.clone(),
+            principal_ref: self.principal_ref.clone(),
+            epoch: self.epoch,
+            generation: self.generation,
+        })
+    }
+}
+
+/// Immutable identity captured for one request and later response commits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthSnapshot {
+    binding_id: AuthBindingId,
+    tenant_id: TenantId,
+    site_id: SiteId,
+    principal_ref: String,
+    epoch: AuthEpoch,
+    generation: CredentialGeneration,
+}
+
+impl AuthSnapshot {
+    /// Returns the binding ID used by grant keys and response commit checks.
+    #[must_use]
+    pub const fn binding_id(&self) -> &AuthBindingId {
+        &self.binding_id
+    }
+
+    /// Returns the captured identity epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> AuthEpoch {
+        self.epoch
+    }
+
+    /// Returns the captured credential generation.
+    #[must_use]
+    pub const fn generation(&self) -> CredentialGeneration {
+        self.generation
+    }
+
+    /// Returns the non-secret principal reference.
+    #[must_use]
+    pub fn principal_ref(&self) -> &str {
+        &self.principal_ref
+    }
+
+    /// Returns the captured tenant scope.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the captured site scope.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+}
+
+/// Deterministic identity rejection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IdentityDenied {
+    /// No authenticated binding exists for an operation that requires one.
+    AuthRequired,
+    /// Session, scope, or credential combination differs from the binding.
+    BindingMismatch,
+    /// The server-side absolute lease has expired.
+    SessionExpired,
+}
+
+impl IdentityDenied {
+    /// Maps the denial to its stable audit reason code.
+    #[must_use]
+    pub const fn reason_code(self) -> ReasonCode {
+        match self {
+            Self::AuthRequired => ReasonCode::AuthRequired,
+            Self::BindingMismatch => ReasonCode::AuthBindingMismatch,
+            Self::SessionExpired => ReasonCode::AuthSessionExpired,
+        }
+    }
+}
+
+impl fmt::Display for IdentityDenied {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.reason_code().as_str())
+    }
+}
+
+impl std::error::Error for IdentityDenied {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn credentials(value: &str) -> BTreeMap<CredentialSlot, CredentialFingerprint> {
+        [(
+            CredentialSlot::Cookie,
+            CredentialFingerprint::parse(value).unwrap(),
+        )]
+        .into_iter()
+        .collect()
+    }
+
+    fn binding() -> AuthBinding {
+        AuthBinding::new(
+            AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+            WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+            TenantId::parse("tenant_a").unwrap(),
+            SiteId::parse("site_a").unwrap(),
+            "principal_a",
+            AuthEpoch::new(4),
+            CredentialGeneration::new(2),
+            credentials(A),
+            UnixSeconds::new(200),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn new_session_is_anonymous_and_empty() {
+        let session = AnonymousSession::new(
+            WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000003").unwrap(),
+            SiteId::parse("site_a").unwrap(),
+            UnixSeconds::new(200),
+        );
+
+        assert_eq!(session.grant_count(), 0);
+        assert_eq!(
+            session.require_authenticated(),
+            Err(IdentityDenied::AuthRequired)
+        );
+        assert!(
+            session
+                .verify(&SiteId::parse("site_a").unwrap(), UnixSeconds::new(199))
+                .is_ok()
+        );
+        assert_eq!(
+            session.verify(&SiteId::parse("site_b").unwrap(), UnixSeconds::new(100)),
+            Err(IdentityDenied::BindingMismatch)
+        );
+        assert_eq!(
+            session.verify(&SiteId::parse("site_a").unwrap(), UnixSeconds::new(200)),
+            Err(IdentityDenied::SessionExpired)
+        );
+    }
+
+    #[test]
+    fn exact_bound_combination_creates_snapshot() {
+        let binding = binding();
+        let snapshot = binding
+            .verify(
+                &TenantId::parse("tenant_a").unwrap(),
+                &SiteId::parse("site_a").unwrap(),
+                &WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+                &credentials(A),
+                UnixSeconds::new(199),
+            )
+            .unwrap();
+
+        assert_eq!(snapshot.principal_ref(), "principal_a");
+        assert_eq!(snapshot.epoch(), AuthEpoch::new(4));
+    }
+
+    #[test]
+    fn rejects_substitution_extra_credentials_scope_and_expiry() {
+        let binding = binding();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let session = WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap();
+        assert_eq!(
+            binding.verify(
+                &tenant,
+                &site,
+                &session,
+                &credentials(B),
+                UnixSeconds::new(100)
+            ),
+            Err(IdentityDenied::BindingMismatch)
+        );
+
+        let mut conflicting = credentials(A);
+        conflicting.insert(
+            CredentialSlot::Bearer,
+            CredentialFingerprint::parse(B).unwrap(),
+        );
+        assert_eq!(
+            binding.verify(
+                &tenant,
+                &site,
+                &session,
+                &conflicting,
+                UnixSeconds::new(100)
+            ),
+            Err(IdentityDenied::BindingMismatch)
+        );
+        assert_eq!(
+            binding.verify(
+                &TenantId::parse("tenant_b").unwrap(),
+                &site,
+                &session,
+                &credentials(A),
+                UnixSeconds::new(100),
+            ),
+            Err(IdentityDenied::BindingMismatch)
+        );
+        assert_eq!(
+            binding.verify(
+                &tenant,
+                &site,
+                &session,
+                &credentials(A),
+                UnixSeconds::new(200)
+            ),
+            Err(IdentityDenied::SessionExpired)
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_canonical_and_redacted() {
+        assert!(CredentialFingerprint::parse(A).is_ok());
+        assert!(CredentialFingerprint::parse(&A.to_uppercase()).is_err());
+        assert_eq!(
+            format!("{:?}", CredentialFingerprint::parse(A).unwrap()),
+            "CredentialFingerprint([REDACTED])"
+        );
+    }
+}
