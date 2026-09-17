@@ -1,5 +1,11 @@
 # 变更记录
 
+## Unreleased
+
+- 建立 Rust Cargo workspace 与 M0 核心领域边界。
+- 实现禁用站点的可审计 `NOT_CONFIGURED` 阶段树和失败关闭测试。
+- 增加独立管理身份、Mock ports 及 Rust/文档联合 CI。
+
 ## 3.0 — 2026-09-17
 项目正式命名Xshield，Rust主语言。整合前置JS/加密接管、受控回退、严格界面来源准入、资源操作账本、WAF与业务认证强绑定、分享例外与AI适配。
 

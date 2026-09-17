@@ -15,7 +15,7 @@ def valid(schema: dict, instance: object) -> bool:
     return not list(Draft202012Validator(schema,format_checker=FormatChecker()).iter_errors(instance))
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
-        if 'validation' in p.parts: continue
+        if 'validation' in p.parts or 'target' in p.parts: continue
         try: json.loads(p.read_text(encoding='utf-8'));check(f'json:{p.relative_to(ROOT)}',True)
         except (ValueError,OSError) as exc: check(f'json:{p.name}',False,str(exc))
     for p in sorted(ROOT.rglob('*.yaml')):

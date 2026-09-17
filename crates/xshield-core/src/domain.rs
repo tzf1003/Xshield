@@ -1,0 +1,135 @@
+//! Validated domain values shared by the M0 request flow.
+
+use std::fmt;
+
+/// A rejected value at an external boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidValue {
+    field: &'static str,
+}
+
+impl InvalidValue {
+    pub(crate) const fn new(field: &'static str) -> Self {
+        Self { field }
+    }
+}
+
+impl fmt::Display for InvalidValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid {}", self.field)
+    }
+}
+
+impl std::error::Error for InvalidValue {}
+
+fn valid_scoped_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn valid_v7_id(value: &str, prefix: &str) -> bool {
+    let Some(uuid) = value.strip_prefix(prefix) else {
+        return false;
+    };
+    let bytes = uuid.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [8, 13, 18, 23].contains(&index) || matches!(byte, b'0'..=b'9' | b'a'..=b'f')
+        })
+        && bytes[14] == b'7'
+        && matches!(bytes[19].to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b')
+}
+
+macro_rules! scoped_name {
+    ($name:ident, $field:literal) => {
+        /// A validated tenant-scoped name.
+        #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Validates and owns a non-secret scoped name.
+            ///
+            /// # Errors
+            /// Returns [`InvalidValue`] for an empty, oversized, or unsupported value.
+            pub fn parse(value: impl Into<String>) -> Result<Self, InvalidValue> {
+                let value = value.into();
+                valid_scoped_name(&value)
+                    .then_some(Self(value))
+                    .ok_or_else(|| InvalidValue::new($field))
+            }
+
+            #[must_use]
+            /// Returns the validated wire value.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+    };
+}
+
+macro_rules! v7_id {
+    ($name:ident, $prefix:literal, $field:literal) => {
+        /// A validated Xshield-prefixed `UUIDv7` identifier.
+        #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Parses an Xshield-prefixed `UUIDv7` identifier.
+            ///
+            /// # Errors
+            /// Returns [`InvalidValue`] when the prefix or `UUIDv7` shape is invalid.
+            pub fn parse(value: impl Into<String>) -> Result<Self, InvalidValue> {
+                let value = value.into();
+                valid_v7_id(&value, $prefix)
+                    .then_some(Self(value))
+                    .ok_or_else(|| InvalidValue::new($field))
+            }
+
+            #[must_use]
+            /// Returns the validated wire value.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+    };
+}
+
+scoped_name!(TenantId, "tenant_id");
+scoped_name!(SiteId, "site_id");
+scoped_name!(PolicyRevision, "policy_revision");
+v7_id!(RequestId, "req_", "request_id");
+v7_id!(EventId, "ev_", "event_id");
+v7_id!(StageExecutionId, "stg_", "stage_execution_id");
+
+#[cfg(test)]
+mod tests {
+    use super::{RequestId, TenantId};
+
+    #[test]
+    fn validates_boundary_identifiers() {
+        assert!(RequestId::parse("req_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_ok());
+        assert!(RequestId::parse("req_01a0afa6-3320-458a-9554-d0d3b561b8c6").is_err());
+        assert!(RequestId::parse("req_01A0AFA6-3320-758a-9554-d0d3b561b8c6").is_err());
+        assert!(RequestId::parse("ev_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_err());
+        assert!(TenantId::parse("tenant_demo").is_ok());
+        assert!(TenantId::parse("tenant/demo").is_err());
+    }
+}
