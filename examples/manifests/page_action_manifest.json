@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "artifact_id": "art_01a0afa6-3320-76ea-aedf-457ae9c1af51",
+  "request_id": "req_01a0afa6-3320-758a-9554-d0d3b561b8c6",
+  "tenant_id": "tenant_demo",
+  "site_id": "demo",
+  "kind": "page_action_manifest",
+  "content_type": "application/json",
+  "capture_status": "complete",
+  "fidelity": "semantic",
+  "bytes_observed": 327,
+  "bytes_saved": 327,
+  "classification": "SYNTHETIC",
+  "example_only": true,
+  "storage": {
+    "profile": "fixture_none",
+    "locator": "examples/evidence/page_action_manifest.json",
+    "key_ref": null
+  },
+  "integrity": {
+    "algorithm": "sha256_fixture",
+    "digest": "71b13751bb022bc350118dce8cfd37679fdddd4ad03fa9dcc8ecde527a238b1b"
+  },
+  "parent_refs": [],
+  "expires_at": "2026-09-18T13:55:00Z"
+}

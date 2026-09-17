@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xshield.invalid/schemas/model-call.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model_call_id",
+    "request_id",
+    "example_only",
+    "provider",
+    "model_revision",
+    "prompt_revision",
+    "input_artifact_id",
+    "output_artifact_id",
+    "question_type",
+    "result",
+    "probabilities",
+    "provider_confidence",
+    "confidence_status",
+    "probability_semantics",
+    "usage",
+    "duration_ms",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "model_call_id": {
+      "type": "string",
+      "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "example_only": {
+      "type": "boolean"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model_revision": {
+      "type": "string"
+    },
+    "prompt_revision": {
+      "type": "string"
+    },
+    "input_artifact_id": {
+      "type": "string",
+      "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "output_artifact_id": {
+      "type": "string",
+      "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "question_type": {
+      "enum": [
+        "choice",
+        "score",
+        "noul"
+      ]
+    },
+    "result": {
+      "type": [
+        "string",
+        "number",
+        "null"
+      ]
+    },
+    "probabilities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    "provider_confidence": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "confidence_status": {
+      "enum": [
+        "provided",
+        "not_applicable",
+        "not_provided",
+        "unavailable"
+      ]
+    },
+    "probability_semantics": {
+      "enum": [
+        "provider_reported_uncalibrated",
+        "locally_calibrated",
+        "synthetic_example"
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "source"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "source": {
+          "enum": [
+            "provider",
+            "estimated",
+            "unavailable",
+            "synthetic"
+          ]
+        }
+      }
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "status": {
+      "enum": [
+        "success",
+        "timeout",
+        "error",
+        "cancelled",
+        "cached"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "question_type": {
+            "const": "noul"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider_confidence": {
+            "type": "null"
+          },
+          "confidence_status": {
+            "const": "not_applicable"
+          },
+          "result": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    }
+  ]
+}

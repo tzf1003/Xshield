@@ -1,0 +1,20 @@
+{
+  "baseline_version": "3.0",
+  "date": "2026-09-17",
+  "priority": "latest user decisions in the current conversation",
+  "source_files": [
+    {
+      "name": "context_aware_waf_implementation_zh.md",
+      "sha256": "1696f2181cc3f2760c12e646baa5620a6589fcdc861fab4e62fa79c8b1769b2f"
+    },
+    {
+      "name": "context_aware_waf_implementation_zh_v2.md",
+      "sha256": "e396583b8e550995ca27218c02de8aef05c30bd3e0a2ba3b24c5326e4100f9a9"
+    },
+    {
+      "name": "waf_site_policy_v2.example.yaml",
+      "sha256": "4172e1211f0a6e439f623fd28a97d72e4b01f93b1a1fa68c8a3ffd22a575a62b"
+    }
+  ],
+  "not_included": "Historical drafts are not copied into the active docs to avoid conflicting defaults."
+}

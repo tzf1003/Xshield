@@ -1,0 +1,25 @@
+{
+  "example_only": true,
+  "state": {
+    "request_operation": "user.password.admin_reset",
+    "target": "U200",
+    "available_actions": [
+      "change_self_password",
+      "open_public_profile"
+    ],
+    "auth_binding_ref": "SYNTHETIC_A",
+    "untrusted_content": {}
+  },
+  "questions": {
+    "action_match": {
+      "type": "choice",
+      "instructions": "本次请求是否精确对应允许候选中的某个动作？不匹配选 NONE，证据不足选 UNKNOWN。",
+      "criteria": {
+        "change_self_password": "仅修改当前用户密码",
+        "open_public_profile": "仅读取用户公开资料",
+        "NONE": "不对应任何候选",
+        "UNKNOWN": "证据不足"
+      }
+    }
+  }
+}

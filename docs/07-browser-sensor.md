@@ -1,0 +1,31 @@
+# 07 自动注入探针、心跳与请求关联
+
+## 7.1 部署与职责
+
+使用 TypeScript 开发、发布固定版本普通 JS。网关只改写已识别 HTML/批准 JS；不要求业务方修改代码。注入、Hook、错误提示、页面实例和请求关联是探针职责；实际放行、身份、资格和秘密钥匙由 WAF 控制。
+
+探针资源走同源固定路径，bootstrap 动态内容 no-store。静态 HTML 不嵌入跨会话共享的凭证。压缩、ETag、Content-Length、缓存、CSP nonce、script-src/connect-src 与 SRI 必须同步适配；不能为注入而全局关闭 CSP/SRI。SRI 会检查资源内容，改写后须维护对应完整性信息。[S13]
+
+## 7.2 事件契约
+
+字段：sensor_version、build_ref、page_handle、navigation_id、action_hint、client_request_id、client_event_seq、visibility、event_type、callsite_fingerprint。WAF 另生成 request_id，且用服务端时间判定期限。客户端 action_hint 不等于已授予的 action_id。
+
+同一次 action 可以产生多个请求。服务端关联键包含 site、auth_binding、epoch、page、request；不能只使用“最新心跳”。HTTP 与 WSS 到达乱序时记录 pending/unknown，严格票据可通过 HTTPS prepare 建立屏障。
+
+## 7.3 WSS/HTTPS
+
+初始建议活跃页 15 秒心跳加抖动，单消息 16 KiB、单页短时 64 条摘要。HTTPS 批量上报作为后备。浏览器后台冻结会暂停 JS 执行，因此缺心跳不自动等于攻击，也不能保证网页永远在线。[S14]
+
+WSS 限制 Origin、连接票据、身份代际、消息率和长度，连接失效要关闭/重认证。[S12] 原始 Cookie 仅在握手等适用请求中自动传送，后续消息以服务端连接上下文关联。
+
+## 7.4 Hook 的覆盖声明
+
+按站优先完整请求封装入口，保持 Promise、类型、错误语义及密钥轮换。预先保存的函数引用、Worker、WASM、iframe、Service Worker 缓存等需逐项测试。不在“全局 fetch Hook 安装成功”后声称所有加密已接管。
+
+前端调用栈仅作调用点线索，不是函数入参内存快照。所谓明文必须来自实际接管的请求实体或可信转换，而不是仅来自客户端报告。
+
+## 7.5 采集与体验
+
+默认不记录逐键输入和鼠标轨迹。可追溯界面优先来自 WAF 实际响应与结构化操作描述；客户端 DOM 快照若用于调试须明确 client_claimed，进入受限证据库。前端审计日志不能带密码、OTP、原始 Cookie。
+
+拒绝响应由网关产生，探针仅展示原因码和安全恢复入口。弹窗不能遮挡已交付的敏感信息后声称拦截成功。request_id 可提供给用户报障，但不构成读取后台日志的访问凭证。

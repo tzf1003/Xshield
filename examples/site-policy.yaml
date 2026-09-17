@@ -1,0 +1,101 @@
+# Xshield 自定义 DSL 草案；尚无解释器，不能直接作为生产 WAF 配置。
+# activation=disabled；来源与 UI 映射必须经站点验证后启用。
+schema_version: 3
+activation: disabled
+site_id: demo
+revision: demo-r3
+mode: enforce
+identity:
+  profile: site_specific_verified_session_v1
+  ordinary_replacement: deny
+  conflicting_credentials: deny
+  approved_refresh_only: true
+session:
+  cookie_name: __Host-xshield_sid
+  absolute_ttl_seconds: 86400
+  server_expiry_enforced: true
+  epoch_on_context_change: true
+crypto:
+  mode: enforce
+  invalid_envelope_action: deny
+  client_can_select_fallback: false
+  grant_on_opaque: false
+audit:
+  required_events_sampling: 1
+  capture_profile: full_protected
+  required_durability: local_durable
+  secret_policy: mandatory_secret_exclusions_v1
+  raw_retention_hours: 24
+  metadata_retention_days: 30
+  on_durability_failure: retry_later
+model:
+  provider_profile: local_openjev_candidate
+  mode: shadow
+  can_override_hard_deny: false
+  can_mint_unbounded_grants: false
+  context_budget_tokens: 8000
+operations:
+- id: login.page
+  method: GET
+  path: /login
+  admission: PUBLIC
+  source_action: null
+- id: auth.login
+  method: POST
+  path: /api/login
+  admission: AUTH_ENTRY
+  source_action: null
+- id: page.home
+  method: GET
+  path: /app
+  admission: FLOW_ROOT_AUTHENTICATED
+  source_action: null
+- id: orders.list
+  method: GET
+  path: /api/orders
+  admission: UI_ACTION_REQUIRED
+  source_action: home.orders_list
+  target_constraint: customerId == verified_principal
+  grant_source:
+    enabled: false
+    approved: false
+    items_path: $.data.orders[*].id
+    resource_type: order
+    operation: orders.read
+    view: customer_detail
+    max_items: 1000
+    ttl_seconds: 86400
+- id: orders.read
+  method: GET
+  path: /api/orders/{id}
+  admission: UI_ACTION_REQUIRED
+  source_action: orders_list.open_order
+  target_constraint: exact_active_order_read_grant
+- id: profile.public.read
+  method: GET
+  path: /api/users/{id}/public
+  admission: UI_ACTION_REQUIRED
+  source_action: comments.open_author
+  target_constraint: exact_public_profile_read_grant
+- id: user.password.change_self
+  method: POST
+  path: /api/password/change
+  admission: UI_ACTION_REQUIRED
+  source_action: settings.change_self_password
+  target_constraint: target_user == verified_principal
+  field_profile: self_password_fields
+  high_risk: true
+- id: user.password.admin_reset
+  method: POST
+  path: /api/admin/password/reset
+  admission: UI_ACTION_REQUIRED
+  source_action: approved_admin_page.reset_target
+  target_constraint: exact_action_target_scope
+  field_profile: admin_reset_fields
+  high_risk: true
+- id: records.share.read
+  method: GET
+  path: /share/records/{token}
+  admission: SHARE_ENTRY
+  source_action: null
+  target_constraint: verified_share_scope

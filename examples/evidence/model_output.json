@@ -1,0 +1,16 @@
+{
+  "example_only": true,
+  "answers": {
+    "action_match": {
+      "choice": "NONE",
+      "probabilities": {
+        "change_self_password": 0.02,
+        "open_public_profile": 0.01,
+        "NONE": 0.95,
+        "UNKNOWN": 0.02
+      },
+      "confidence": 0.86
+    }
+  },
+  "note": "纯合成样例，非真实 Jev 调用结果"
+}

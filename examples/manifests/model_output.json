@@ -1,0 +1,28 @@
+{
+  "schema_version": 3,
+  "artifact_id": "art_01a0afa6-3320-7965-bece-c5bd0756e90e",
+  "request_id": "req_01a0afa6-3320-758a-9554-d0d3b561b8c6",
+  "tenant_id": "tenant_demo",
+  "site_id": "demo",
+  "kind": "model_output",
+  "content_type": "application/json",
+  "capture_status": "complete",
+  "fidelity": "semantic",
+  "bytes_observed": 337,
+  "bytes_saved": 337,
+  "classification": "SYNTHETIC",
+  "example_only": true,
+  "storage": {
+    "profile": "fixture_none",
+    "locator": "examples/evidence/model_output.json",
+    "key_ref": null
+  },
+  "integrity": {
+    "algorithm": "sha256_fixture",
+    "digest": "b2fdbb72986af5a08a8dec766136013f683a579fb30a099d3a971c4905d1158f"
+  },
+  "parent_refs": [
+    "art_01a0afa6-3320-7eb6-a53e-99b1314a1431"
+  ],
+  "expires_at": "2026-09-18T13:55:00Z"
+}

@@ -1,0 +1,19 @@
+{
+  "example_only": true,
+  "method": "POST",
+  "path": "/api/admin/password/reset",
+  "headers": [
+    [
+      "Content-Type",
+      "application/json"
+    ],
+    [
+      "Cookie",
+      "[REDACTED:credential]"
+    ]
+  ],
+  "body": {
+    "target_user": "U200",
+    "new_password": "[REDACTED:password]"
+  }
+}

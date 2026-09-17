@@ -1,0 +1,815 @@
+{
+  "schema_version": 1,
+  "status": "planned_not_executed",
+  "total": 78,
+  "cases": [
+    {
+      "id": "AUTH-01",
+      "group": "AUTH",
+      "title": "A/B凭证串用",
+      "steps": [
+        "建立 WAF_A/Session_A 和 WAF_B/Session_B",
+        "发送 WAF_A/Session_B"
+      ],
+      "expected": "拒绝 AUTH_BINDING_MISMATCH，不换绑不继承资格",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-02",
+      "group": "AUTH",
+      "title": "合法同身份续期",
+      "steps": [
+        "在绑定刷新端点使用原 refresh token",
+        "取得同身份同范围新 token"
+      ],
+      "expected": "验证继承链并原子更新，保留仍有效资格",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-03",
+      "group": "AUTH",
+      "title": "B刷新凭证污染A",
+      "steps": [
+        "WAF_A 搭配 B 的 refresh token 发起刷新"
+      ],
+      "expected": "请求阶段拒绝，不因源站成功响应继承 A 账本",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-04",
+      "group": "AUTH",
+      "title": "同值Session换账号",
+      "steps": [
+        "原站复用 Session 值但完成 A→B 登录"
+      ],
+      "expected": "更新 auth_epoch，旧资格失效",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-05",
+      "group": "AUTH",
+      "title": "旧响应晚到",
+      "steps": [
+        "A 发出列表",
+        "切换 B",
+        "A 响应返回"
+      ],
+      "expected": "旧认证快照不得写入 B 账本",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-06",
+      "group": "AUTH",
+      "title": "冲突身份来源",
+      "steps": [
+        "Cookie=A、Bearer=B",
+        "源站优先级与适配配置不同"
+      ],
+      "expected": "拒绝歧义，不能各认不同身份",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-07",
+      "group": "AUTH",
+      "title": "新Cookie匿名",
+      "steps": [
+        "删除 WAF Cookie 后直访私有 API"
+      ],
+      "expected": "新匿名空账本，不能触发首次免检",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-08",
+      "group": "AUTH",
+      "title": "服务器过期",
+      "steps": [
+        "显式重发已超过服务器租期的 Cookie"
+      ],
+      "expected": "拒绝；不依赖浏览器自行删除",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-09",
+      "group": "AUTH",
+      "title": "完整凭证复制",
+      "steps": [
+        "复制完整 A 的有效业务和 WAF 凭证"
+      ],
+      "expected": "标注会话盗用边界，不把绑定通过称作原设备证明",
+      "status": "planned"
+    },
+    {
+      "id": "AUTH-10",
+      "group": "AUTH",
+      "title": "并发刷新",
+      "steps": [
+        "两个标签同时刷新",
+        "旧响应最后到"
+      ],
+      "expected": "受控版本顺序，不回滚绑定、不无限扩大凭证组合",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-01",
+      "group": "FLOW",
+      "title": "评论到管理员改密",
+      "steps": [
+        "看到 B 的评论和 ID",
+        "调用重置 B 密码"
+      ],
+      "expected": "无改密动作来源，拒绝且源站未收到",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-02",
+      "group": "FLOW",
+      "title": "有实际权限但无来源",
+      "steps": [
+        "管理员新会话直接调用管理操作"
+      ],
+      "expected": "按选定严格流程拒绝",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-03",
+      "group": "FLOW",
+      "title": "已获资格直接打开",
+      "steps": [
+        "先通过列表取得 O1 读取资格",
+        "有效期内粘贴 O1 URL"
+      ],
+      "expected": "允许流程关；不要求重复点击",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-04",
+      "group": "FLOW",
+      "title": "未知ID直达",
+      "steps": [
+        "会话只有 O1",
+        "直接访问 O2"
+      ],
+      "expected": "拒绝；不声称已确认源站越权漏洞",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-05",
+      "group": "FLOW",
+      "title": "新浏览器共享资源",
+      "steps": [
+        "换浏览器未列出新共享资源",
+        "直接访问"
+      ],
+      "expected": "拒绝；经认可列表或分享入口后才可访问",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-06",
+      "group": "FLOW",
+      "title": "管理页自证循环",
+      "steps": [
+        "直接请求脆弱管理页面",
+        "尝试凭返回按钮发资格"
+      ],
+      "expected": "前置页面本身未获准，不发行资格",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-07",
+      "group": "FLOW",
+      "title": "公共JS含管理组件",
+      "steps": [
+        "公共 bundle 含 reset 代码",
+        "普通用户 UI 未实例化该动作"
+      ],
+      "expected": "不能仅凭代码存在授权",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-08",
+      "group": "FLOW",
+      "title": "伪造DOM与堆栈",
+      "steps": [
+        "客户端添加管理按钮并上报点击堆栈"
+      ],
+      "expected": "只作不可信观察，不发行管理资格",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-09",
+      "group": "FLOW",
+      "title": "自行改密变目标",
+      "steps": [
+        "获得 self_password 动作",
+        "target_user 改为别人"
+      ],
+      "expected": "精确目标约束拒绝",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-10",
+      "group": "FLOW",
+      "title": "用户文本假按钮",
+      "steps": [
+        "评论插入“重置密码”文字或HTML",
+        "模型读入"
+      ],
+      "expected": "用户内容不能变成批准的动作来源",
+      "status": "planned"
+    },
+    {
+      "id": "FLOW-11",
+      "group": "FLOW",
+      "title": "合法弹窗延迟加载",
+      "steps": [
+        "由认可页面按有效规则加载弹窗和操作数据"
+      ],
+      "expected": "同代际建立具体候选，未知状态先拒绝",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-01",
+      "group": "GRANT",
+      "title": "只读不能写",
+      "steps": [
+        "取得 orders.read",
+        "调用 update/refund"
+      ],
+      "expected": "操作维度不匹配，拒绝",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-02",
+      "group": "GRANT",
+      "title": "列表入口越权",
+      "steps": [
+        "A 的 customerId 改 B",
+        "源站返回 B 列表"
+      ],
+      "expected": "范围约束先拒绝，不洗白发行",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-03",
+      "group": "GRANT",
+      "title": "创建后立即读取",
+      "steps": [
+        "创建业务成功",
+        "响应刚返回立即详情"
+      ],
+      "expected": "资格已原子提交；不等异步日志",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-04",
+      "group": "GRANT",
+      "title": "200业务失败",
+      "steps": [
+        "列表200但业务错误或登录页"
+      ],
+      "expected": "不发行资格",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-05",
+      "group": "GRANT",
+      "title": "分页与过滤",
+      "steps": [
+        "列表只返回当前页",
+        "访问未取得资格的下一页资源"
+      ],
+      "expected": "拒绝直访；先从认可列表取资格",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-06",
+      "group": "GRANT",
+      "title": "数组混入其他资源",
+      "steps": [
+        "批量请求最后一个 ID 无资格"
+      ],
+      "expected": "逐资源检查，不能只查首项",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-07",
+      "group": "GRANT",
+      "title": "字段注入",
+      "steps": [
+        "允许改昵称",
+        "同时提交 role/password"
+      ],
+      "expected": "字段白名单拒绝",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-08",
+      "group": "GRANT",
+      "title": "嵌套父子关系",
+      "steps": [
+        "分别见过订单A和条目B但B不属A"
+      ],
+      "expected": "检查组合关系，不以独立存在代替关系",
+      "status": "planned"
+    },
+    {
+      "id": "GRANT-09",
+      "group": "GRANT",
+      "title": "容量与过期",
+      "steps": [
+        "账本容量耗尽或资格到期"
+      ],
+      "expected": "明确拒绝/重建，不退化为全资源允许",
+      "status": "planned"
+    },
+    {
+      "id": "SHARE-01",
+      "group": "SHARE",
+      "title": "限权分享",
+      "steps": [
+        "有效病例摘要分享 token",
+        "取同患者完整病历"
+      ],
+      "expected": "超视图/资源范围拒绝",
+      "status": "planned"
+    },
+    {
+      "id": "SHARE-02",
+      "group": "SHARE",
+      "title": "任意ID补签名",
+      "steps": [
+        "无分享资格者要求给任意资源生成分享链接"
+      ],
+      "expected": "拒绝发行，不能包装原有漏洞",
+      "status": "planned"
+    },
+    {
+      "id": "SHARE-03",
+      "group": "SHARE",
+      "title": "例外仍审计",
+      "steps": [
+        "通过公开分享入口请求带攻击内容"
+      ],
+      "expected": "保留内容检查和完整审计链",
+      "status": "planned"
+    },
+    {
+      "id": "SHARE-04",
+      "group": "SHARE",
+      "title": "视频重复读取",
+      "steps": [
+        "有效限权分享进行合法Range/分片"
+      ],
+      "expected": "按资源协议允许重复，不误套一次性票据",
+      "status": "planned"
+    },
+    {
+      "id": "SENSOR-01",
+      "group": "SENSOR",
+      "title": "心跳断开",
+      "steps": [
+        "页面休眠、后台冻结、WSS断线"
+      ],
+      "expected": "保留身份/资格检查，状态变stale，不凭心跳缺失定攻击",
+      "status": "planned"
+    },
+    {
+      "id": "SENSOR-02",
+      "group": "SENSOR",
+      "title": "HTTP先于WSS",
+      "steps": [
+        "延迟遥测，让业务请求先到"
+      ],
+      "expected": "不串配最新心跳；按缺失/prepare规则",
+      "status": "planned"
+    },
+    {
+      "id": "SENSOR-03",
+      "group": "SENSOR",
+      "title": "多标签分离",
+      "steps": [
+        "并发页面动作和不同业务身份"
+      ],
+      "expected": "按page和auth快照关联，不用单一最新页面",
+      "status": "planned"
+    },
+    {
+      "id": "SENSOR-04",
+      "group": "SENSOR",
+      "title": "CSP/SRI与旧缓存",
+      "steps": [
+        "注入新版本，保留旧缓存、SRI及Worker"
+      ],
+      "expected": "按站验证兼容，不全局关闭安全策略",
+      "status": "planned"
+    },
+    {
+      "id": "CRYPTO-01",
+      "group": "CRYPTO",
+      "title": "镜像与实包不一致",
+      "steps": [
+        "上报良性明文",
+        "实际封包含其他参数"
+      ],
+      "expected": "以真实解包P检查并重建，不相信镜像",
+      "status": "planned"
+    },
+    {
+      "id": "CRYPTO-02",
+      "group": "CRYPTO",
+      "title": "原密文绕开Hook",
+      "steps": [
+        "关闭JS走原格式",
+        "端点为enforce"
+      ],
+      "expected": "不得静默回退",
+      "status": "planned"
+    },
+    {
+      "id": "CRYPTO-03",
+      "group": "CRYPTO",
+      "title": "无效认证标签",
+      "steps": [
+        "修改WAF封包AAD/tag/版本"
+      ],
+      "expected": "拒绝，不透传给源站",
+      "status": "planned"
+    },
+    {
+      "id": "CRYPTO-04",
+      "group": "CRYPTO",
+      "title": "响应不可见",
+      "steps": [
+        "请求解密成功、列表响应解密失败"
+      ],
+      "expected": "单独记录响应覆盖缺口，不发资格",
+      "status": "planned"
+    },
+    {
+      "id": "CRYPTO-05",
+      "group": "CRYPTO",
+      "title": "合法兼容回退",
+      "steps": [
+        "服务端批准该端点compatibility",
+        "不支持格式"
+      ],
+      "expected": "标记未覆盖，保留可执行检查，不从回退发资格",
+      "status": "planned"
+    },
+    {
+      "id": "CRYPTO-06",
+      "group": "CRYPTO",
+      "title": "解析分歧",
+      "steps": [
+        "重复JSON键、查询覆盖、编码变体"
+      ],
+      "expected": "与源站语义一致或拒绝歧义",
+      "status": "planned"
+    },
+    {
+      "id": "CRYPTO-07",
+      "group": "CRYPTO",
+      "title": "插件修改已查参数",
+      "steps": [
+        "决策后适配器改变业务目标"
+      ],
+      "expected": "不满足同一冻结P不变量，禁止转发并告警",
+      "status": "planned"
+    },
+    {
+      "id": "CRYPTO-08",
+      "group": "CRYPTO",
+      "title": "高风险非幂等重试",
+      "steps": [
+        "源站写请求发出后连接中断"
+      ],
+      "expected": "记录origin_unknown，不自动重发",
+      "status": "planned"
+    },
+    {
+      "id": "MODEL-01",
+      "group": "MODEL",
+      "title": "模型选错候选",
+      "steps": [
+        "注入高置信但目标不符的模型输出"
+      ],
+      "expected": "确定性目标/字段验证仍拒绝",
+      "status": "planned"
+    },
+    {
+      "id": "MODEL-02",
+      "group": "MODEL",
+      "title": "Noul没有置信度",
+      "steps": [
+        "接收Noul数值结果"
+      ],
+      "expected": "confidence=null且not_applicable，不伪造100%",
+      "status": "planned"
+    },
+    {
+      "id": "MODEL-03",
+      "group": "MODEL",
+      "title": "规则没有置信度",
+      "steps": [
+        "确定性绑定拒绝"
+      ],
+      "expected": "proof_kind=deterministic，confidence=null",
+      "status": "planned"
+    },
+    {
+      "id": "MODEL-04",
+      "group": "MODEL",
+      "title": "实际输入闭合",
+      "steps": [
+        "模型使用模板+检索+工具结果+预算裁剪"
+      ],
+      "expected": "保存最终送达的实际逻辑输入和来源引用，裁剪明示",
+      "status": "planned"
+    },
+    {
+      "id": "MODEL-05",
+      "group": "MODEL",
+      "title": "缓存与重试",
+      "steps": [
+        "模型超时重试后缓存命中"
+      ],
+      "expected": "每次实际调用独立attempt，命中引用原证据及当前上下文摘要",
+      "status": "planned"
+    },
+    {
+      "id": "MODEL-06",
+      "group": "MODEL",
+      "title": "提示注入",
+      "steps": [
+        "页面/代码/返回内容要求允许或扩权"
+      ],
+      "expected": "不能执行指令改权限，记录偏移与硬约束结果",
+      "status": "planned"
+    },
+    {
+      "id": "MODEL-07",
+      "group": "MODEL",
+      "title": "供应商隐藏内容",
+      "steps": [
+        "供应商不返回内部推理或token明细"
+      ],
+      "expected": "标记不可用，不编造隐藏思维或真实用量",
+      "status": "planned"
+    },
+    {
+      "id": "AGENT-01",
+      "group": "AGENT",
+      "title": "适配扩权提案",
+      "steps": [
+        "Agent提出扩大root或管理范围"
+      ],
+      "expected": "必须独立审批，不自动发布",
+      "status": "planned"
+    },
+    {
+      "id": "AGENT-02",
+      "group": "AGENT",
+      "title": "恶意适配代码",
+      "steps": [
+        "候选尝试读宿主秘密或任意联网"
+      ],
+      "expected": "隔离、资源和网络策略阻断；保留工具调用审计",
+      "status": "planned"
+    },
+    {
+      "id": "AGENT-03",
+      "group": "AGENT",
+      "title": "调查工具越界",
+      "steps": [
+        "调查Agent请求其他tenant或生产写操作"
+      ],
+      "expected": "查询AST和权限拒绝，无生产执行能力",
+      "status": "planned"
+    },
+    {
+      "id": "AGENT-04",
+      "group": "AGENT",
+      "title": "版本回滚",
+      "steps": [
+        "灰度适配错误",
+        "回滚到已验证包"
+      ],
+      "expected": "记录批准者、版本、受影响流量，旧新请求各固定版本",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-01",
+      "group": "AUDIT",
+      "title": "单ID证据闭合",
+      "steps": [
+        "用request_id打开详情"
+      ],
+      "expected": "返回阶段、决策、身份、资格、模型和转换证据图",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-02",
+      "group": "AUDIT",
+      "title": "跳过层也可见",
+      "steps": [
+        "早期硬拒绝后未跑模型"
+      ],
+      "expected": "记录SKIPPED与cause，不记模型正常",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-03",
+      "group": "AUDIT",
+      "title": "截断与脱敏",
+      "steps": [
+        "请求超过capture上限或含秘密"
+      ],
+      "expected": "分别显示捕获状态和fidelity，不能标原始完整包",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-04",
+      "group": "AUDIT",
+      "title": "索引滞后",
+      "steps": [
+        "暂停ClickHouse消费者但journal健康"
+      ],
+      "expected": "显示watermark，必要走持久索引；不声称日志丢失",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-05",
+      "group": "AUDIT",
+      "title": "本地journal写失败",
+      "steps": [
+        "磁盘满/fsync失败",
+        "高危新请求"
+      ],
+      "expected": "不满足耐久要求就503/不转发；保留告警与恢复记录",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-06",
+      "group": "AUDIT",
+      "title": "远端耐久失败",
+      "steps": [
+        "remote_durable端点副本确认失败"
+      ],
+      "expected": "不以仅本地ACK冒充远端耐久",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-07",
+      "group": "AUDIT",
+      "title": "崩溃恢复",
+      "steps": [
+        "forward_intent后进程崩溃"
+      ],
+      "expected": "恢复产生不确定/补偿终态，不能捏造业务失败或成功",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-08",
+      "group": "AUDIT",
+      "title": "重复消费",
+      "steps": [
+        "重新投递相同event_id"
+      ],
+      "expected": "逻辑去重，原始审计不覆盖，计数不重复",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-09",
+      "group": "AUDIT",
+      "title": "证据篡改",
+      "steps": [
+        "修改存储对象一字节"
+      ],
+      "expected": "完整性失败，禁止当作可信证据展示",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-10",
+      "group": "AUDIT",
+      "title": "租户ID越权",
+      "steps": [
+        "管理员操作者只属T1",
+        "提交T2合法request_id"
+      ],
+      "expected": "授权拒绝，ID不是凭证",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-11",
+      "group": "AUDIT",
+      "title": "看日志的审计",
+      "steps": [
+        "申请解密、查看敏感证据、导出"
+      ],
+      "expected": "均记录操作者、目的、审批、范围与结果",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-12",
+      "group": "AUDIT",
+      "title": "删除与保留冲突",
+      "steps": [
+        "对象被hold且到期",
+        "元数据TTL到期"
+      ],
+      "expected": "按hold与分层规则处理，显示保留原因，不承诺TTL即时删除",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-13",
+      "group": "AUDIT",
+      "title": "回放隔离",
+      "steps": [
+        "调查者回放密码重置原请求"
+      ],
+      "expected": "只进行离线策略评估，不重新发送源站",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-14",
+      "group": "AUDIT",
+      "title": "控制台日志XSS",
+      "steps": [
+        "报文含HTML/脚本/超长恶意行"
+      ],
+      "expected": "纯文本安全渲染，有界预览，不运行源站页面",
+      "status": "planned"
+    },
+    {
+      "id": "AUDIT-15",
+      "group": "AUDIT",
+      "title": "日志秘密泄漏",
+      "steps": [
+        "Cookie/Authorization/password/privatekey穿过各层"
+      ],
+      "expected": "普通日志与模型禁止；证据fidelity明确脱敏",
+      "status": "planned"
+    },
+    {
+      "id": "DEV-01",
+      "group": "DEV",
+      "title": "模块依赖",
+      "steps": [
+        "领域代码引用数据库/HTTP SDK"
+      ],
+      "expected": "依赖图CI拒绝违规",
+      "status": "planned"
+    },
+    {
+      "id": "DEV-02",
+      "group": "DEV",
+      "title": "缺失审计分支",
+      "steps": [
+        "新增拒绝或异常分支无原因码事件"
+      ],
+      "expected": "评审与覆盖测试失败",
+      "status": "planned"
+    },
+    {
+      "id": "DEV-03",
+      "group": "DEV",
+      "title": "性能基线",
+      "steps": [
+        "使用真实长度分布和并发压测"
+      ],
+      "expected": "分别测规则、解密、持久化、模型，不用共享状态QPS冒充业务吞吐",
+      "status": "planned"
+    },
+    {
+      "id": "DEV-04",
+      "group": "DEV",
+      "title": "取消与资源上限",
+      "steps": [
+        "大量超时/大包/队列满"
+      ],
+      "expected": "有界资源和取消清理，无无限任务/内存增长",
+      "status": "planned"
+    },
+    {
+      "id": "DEV-05",
+      "group": "DEV",
+      "title": "Schema兼容性",
+      "steps": [
+        "旧消费者读取新minor字段",
+        "未知major"
+      ],
+      "expected": "规定的前向兼容/拒绝策略；迁移有版本测试",
+      "status": "planned"
+    },
+    {
+      "id": "DEV-06",
+      "group": "DEV",
+      "title": "注释与秘密Debug",
+      "steps": [
+        "公开port无说明或Secret实现明文Debug"
+      ],
+      "expected": "开发门禁拒绝",
+      "status": "planned"
+    }
+  ]
+}

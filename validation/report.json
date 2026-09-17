@@ -1,0 +1,1144 @@
+{
+  "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
+  "passed": true,
+  "checks_total": 227,
+  "passed_count": 227,
+  "planned_security_test_cases": 78,
+  "checks": [
+    {
+      "name": "json:MANIFEST.sha256.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/acceptance-cases.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/evidence/model_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/evidence/model_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/evidence/noul_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/evidence/noul_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/evidence/page_action_manifest.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/evidence/request_ingress.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/evidence/response_to_client.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/manifests/model_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/manifests/model_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/manifests/noul_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/manifests/noul_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/manifests/page_action_manifest.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/manifests/request_ingress.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/manifests/response_to_client.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/model-call-choice.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/model-call-noul.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/request-index.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:reference/input-provenance.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:reference/sources.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:schemas/artifact-manifest.schema.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:schemas/audit-event.schema.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:schemas/model-call.schema.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:schemas/site-policy.schema.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "yaml:examples/site-policy.yaml",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "schema:artifact-manifest",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "schema:audit-event",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "schema:model-call",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "schema:site-policy",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "policy:positive",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "negative:client_selected_fallback_rejected",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "negative:ordinary_replacement_rejected",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "events:unique_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "events:producer_sequence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manifest_schema:model_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_exists:model_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_digest:model_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_length:model_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manifest_schema:model_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_exists:model_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_digest:model_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_length:model_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manifest_schema:noul_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_exists:noul_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_digest:noul_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_length:noul_input.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manifest_schema:noul_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_exists:noul_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_digest:noul_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_length:noul_output.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manifest_schema:page_action_manifest.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_exists:page_action_manifest.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_digest:page_action_manifest.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_length:page_action_manifest.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manifest_schema:request_ingress.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_exists:request_ingress.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_digest:request_ingress.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_length:request_ingress.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manifest_schema:response_to_client.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_exists:response_to_client.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_digest:response_to_client.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_length:response_to_client.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_parent_refs:model_input",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_parent_refs:model_output",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_parent_refs:noul_input",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_parent_refs:noul_output",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_parent_refs:page_action_manifest",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_parent_refs:request_ingress",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "artifact_parent_refs:response_to_client",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_schema:ev_01a0afa6-3320-7b4b-949c-01e52ddb7875",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_references:ev_01a0afa6-3320-7b4b-949c-01e52ddb7875",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_schema:ev_01a0afa6-3320-7b35-b90d-a3a666eec13a",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_references:ev_01a0afa6-3320-7b35-b90d-a3a666eec13a",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_schema:ev_01a0afa6-3320-7fce-81f6-40b7e4729b49",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_references:ev_01a0afa6-3320-7fce-81f6-40b7e4729b49",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_schema:ev_01a0afa6-3320-7f8a-8b08-b5531fcacdab",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_references:ev_01a0afa6-3320-7f8a-8b08-b5531fcacdab",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_schema:ev_01a0afa6-3320-739d-bcfb-ec78f5564afe",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_references:ev_01a0afa6-3320-739d-bcfb-ec78f5564afe",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_schema:ev_01a0afa6-3320-7683-a5ff-cfb81e6f0919",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_references:ev_01a0afa6-3320-7683-a5ff-cfb81e6f0919",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_schema:ev_01a0afa6-3320-7451-b762-5a6da49081b2",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "event_references:ev_01a0afa6-3320-7451-b762-5a6da49081b2",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_schema:model-call-choice.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_evidence:model-call-choice.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_probability_sum:model-call-choice.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_schema:model-call-noul.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_evidence:model-call-noul.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "negative:deterministic_fake_confidence_rejected",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "negative:noul_fake_confidence_rejected",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "request_index:events",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "request_index:artifacts",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fixture:all_synthetic",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "requirements:20_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "requirements:traceability",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "invariants:20_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:count",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:not_falsely_executed",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:unique_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:00-product-requirements.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:00-product-requirements.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:00-product-requirements.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:01-threat-model-and-invariants.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:01-threat-model-and-invariants.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:01-threat-model-and-invariants.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:02-system-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:02-system-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:02-system-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:03-request-response-pipeline.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:03-request-response-pipeline.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:03-request-response-pipeline.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:04-auth-session-binding.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:04-auth-session-binding.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:04-auth-session-binding.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:05-ui-action-provenance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:05-ui-action-provenance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:05-ui-action-provenance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:06-capability-ledger.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:06-capability-ledger.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:06-capability-ledger.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:07-browser-sensor.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:07-browser-sensor.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:07-browser-sensor.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:08-crypto-takeover.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:08-crypto-takeover.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:08-crypto-takeover.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:09-policy-engine.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:09-policy-engine.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:09-policy-engine.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:13-audit-storage-reliability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:13-audit-storage-reliability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:13-audit-storage-reliability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:14-investigation-query-replay.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:14-investigation-query-replay.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:14-investigation-query-replay.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:16-rust-code-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:16-rust-code-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:16-rust-code-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:17-development-standards.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:17-development-standards.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:17-development-standards.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:18-api-and-data-models.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:18-api-and-data-models.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:18-api-and-data-models.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:19-deployment-operations.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:19-deployment-operations.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:19-deployment-operations.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:21-performance-capacity.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:21-performance-capacity.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:21-performance-capacity.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:22-delivery-roadmap.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:22-delivery-roadmap.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:22-delivery-roadmap.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:23-risks-and-open-decisions.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:23-risks-and-open-decisions.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:23-risks-and-open-decisions.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:24-adrs.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:24-adrs.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:24-adrs.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:25-source-register.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:25-source-register.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:25-source-register.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:26-runbooks.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:26-runbooks.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:26-runbooks.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:27-rule-authoring-cookbook.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:27-rule-authoring-cookbook.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:27-rule-authoring-cookbook.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:28-conversation-decisions-and-traceability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:28-conversation-decisions-and-traceability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:28-conversation-decisions-and-traceability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "sources:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:Xshield_Design_Book_v3.0.docx",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:START_HERE.html",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/00-product-requirements.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/28-conversation-decisions-and-traceability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:AGENTS.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/00-product-requirements.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/01-threat-model-and-invariants.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/02-system-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/03-request-response-pipeline.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/04-auth-session-binding.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/05-ui-action-provenance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/06-capability-ledger.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/07-browser-sensor.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/08-crypto-takeover.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/09-policy-engine.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/13-audit-storage-reliability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/14-investigation-query-replay.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/16-rust-code-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/17-development-standards.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/18-api-and-data-models.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/19-deployment-operations.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/21-performance-capacity.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/22-delivery-roadmap.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/23-risks-and-open-decisions.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/24-adrs.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/25-source-register.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/26-runbooks.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/27-rule-authoring-cookbook.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/28-conversation-decisions-and-traceability.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:validation/report.md",
+      "passed": true,
+      "detail": "generated by this validator"
+    },
+    {
+      "name": "link:README.md:CHANGELOG.md",
+      "passed": true,
+      "detail": ""
+    }
+  ]
+}

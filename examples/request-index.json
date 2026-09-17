@@ -1,0 +1,29 @@
+{
+  "example_only": true,
+  "request_id": "req_01a0afa6-3320-758a-9554-d0d3b561b8c6",
+  "trace_id": "780fb2eaff051b0c746d0d3a39e8f3f5",
+  "model_call_id": "mdl_01a0afa6-3320-7791-8f45-b4d5a34ffb57",
+  "event_ids": [
+    "ev_01a0afa6-3320-7b4b-949c-01e52ddb7875",
+    "ev_01a0afa6-3320-7b35-b90d-a3a666eec13a",
+    "ev_01a0afa6-3320-7fce-81f6-40b7e4729b49",
+    "ev_01a0afa6-3320-7f8a-8b08-b5531fcacdab",
+    "ev_01a0afa6-3320-739d-bcfb-ec78f5564afe",
+    "ev_01a0afa6-3320-7683-a5ff-cfb81e6f0919",
+    "ev_01a0afa6-3320-7451-b762-5a6da49081b2"
+  ],
+  "artifact_ids": [
+    "art_01a0afa6-3320-7eb6-a53e-99b1314a1431",
+    "art_01a0afa6-3320-7965-bece-c5bd0756e90e",
+    "art_01a0afa6-3320-7eb6-890b-96c529d66eee",
+    "art_01a0afa6-3320-7eb6-9b23-520f68429e8f",
+    "art_01a0afa6-3320-76ea-aedf-457ae9c1af51",
+    "art_01a0afa6-3320-70f3-8e7c-4761bc393710",
+    "art_01a0afa6-3320-70b2-9b23-0026bd123960"
+  ],
+  "scenario": "普通用户查看评论后尝试重置其他用户密码；没有相应界面操作资格，未向源站发送。",
+  "additional_model_call_ids": [
+    "mdl_01a0afa6-3320-753b-847d-cc2821e16cf2"
+  ],
+  "fixture_scope": "节选的关键决策事件，不代表生产完整生命周期；完整性义务见第11章。Noul 为独立契约示例，不参与本次拒绝。"
+}

@@ -1,0 +1,8 @@
+{
+  "example_only": true,
+  "status": 403,
+  "body": {
+    "error": "UI_ACTION_NOT_AVAILABLE",
+    "request_id": "req_01a0afa6-3320-758a-9554-d0d3b561b8c6"
+  }
+}

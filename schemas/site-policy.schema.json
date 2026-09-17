@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xshield.invalid/schemas/site-policy.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "activation",
+    "site_id",
+    "revision",
+    "mode",
+    "identity",
+    "session",
+    "crypto",
+    "audit",
+    "model",
+    "operations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "activation": {
+      "enum": [
+        "disabled",
+        "enabled"
+      ]
+    },
+    "site_id": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "observe",
+        "compatibility",
+        "enforce"
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "profile",
+        "ordinary_replacement",
+        "conflicting_credentials",
+        "approved_refresh_only"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string"
+        },
+        "ordinary_replacement": {
+          "const": "deny"
+        },
+        "conflicting_credentials": {
+          "const": "deny"
+        },
+        "approved_refresh_only": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "session": {
+      "type": "object",
+      "required": [
+        "cookie_name",
+        "absolute_ttl_seconds",
+        "server_expiry_enforced",
+        "epoch_on_context_change"
+      ],
+      "properties": {
+        "cookie_name": {
+          "const": "__Host-xshield_sid"
+        },
+        "absolute_ttl_seconds": {
+          "type": "integer",
+          "minimum": 60
+        },
+        "server_expiry_enforced": {
+          "const": true
+        },
+        "epoch_on_context_change": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "crypto": {
+      "type": "object",
+      "required": [
+        "mode",
+        "invalid_envelope_action",
+        "client_can_select_fallback",
+        "grant_on_opaque"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "observe",
+            "compatibility",
+            "enforce"
+          ]
+        },
+        "invalid_envelope_action": {
+          "const": "deny"
+        },
+        "client_can_select_fallback": {
+          "const": false
+        },
+        "grant_on_opaque": {
+          "const": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "audit": {
+      "type": "object",
+      "required": [
+        "required_events_sampling",
+        "capture_profile",
+        "required_durability",
+        "secret_policy",
+        "raw_retention_hours",
+        "metadata_retention_days",
+        "on_durability_failure"
+      ],
+      "properties": {
+        "required_events_sampling": {
+          "const": 1
+        },
+        "capture_profile": {
+          "enum": [
+            "full_protected",
+            "forensic_raw"
+          ]
+        },
+        "required_durability": {
+          "enum": [
+            "local_durable",
+            "remote_durable"
+          ]
+        },
+        "secret_policy": {
+          "type": "string"
+        },
+        "raw_retention_hours": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata_retention_days": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "on_durability_failure": {
+          "const": "retry_later"
+        }
+      },
+      "additionalProperties": false
+    },
+    "model": {
+      "type": "object",
+      "required": [
+        "provider_profile",
+        "mode",
+        "can_override_hard_deny",
+        "can_mint_unbounded_grants",
+        "context_budget_tokens"
+      ],
+      "properties": {
+        "provider_profile": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "shadow",
+            "enforce"
+          ]
+        },
+        "can_override_hard_deny": {
+          "const": false
+        },
+        "can_mint_unbounded_grants": {
+          "const": false
+        },
+        "context_budget_tokens": {
+          "type": "integer",
+          "minimum": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "method",
+          "path",
+          "admission",
+          "source_action"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/"
+          },
+          "admission": {
+            "enum": [
+              "PUBLIC",
+              "AUTH_ENTRY",
+              "FLOW_ROOT_AUTHENTICATED",
+              "UI_ACTION_REQUIRED",
+              "SHARE_ENTRY",
+              "SERVICE_IDENTITY"
+            ]
+          },
+          "source_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_constraint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "field_profile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grant_source": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "high_risk": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

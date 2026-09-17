@@ -1,0 +1,24 @@
+{
+  "schema_version": 3,
+  "model_call_id": "mdl_01a0afa6-3320-753b-847d-cc2821e16cf2",
+  "request_id": "req_01a0afa6-3320-758a-9554-d0d3b561b8c6",
+  "example_only": true,
+  "provider": "synthetic_fixture",
+  "model_revision": "not_a_real_model_run",
+  "prompt_revision": "ui_match_example_v3",
+  "input_artifact_id": "art_01a0afa6-3320-7eb6-890b-96c529d66eee",
+  "output_artifact_id": "art_01a0afa6-3320-7eb6-9b23-520f68429e8f",
+  "question_type": "noul",
+  "result": 0.97,
+  "probabilities": {},
+  "provider_confidence": null,
+  "confidence_status": "not_applicable",
+  "probability_semantics": "synthetic_example",
+  "usage": {
+    "input_tokens": null,
+    "output_tokens": null,
+    "source": "unavailable"
+  },
+  "duration_ms": 84.0,
+  "status": "success"
+}

@@ -1,0 +1,16 @@
+{
+  "example_only": true,
+  "approved_page": "personal_settings",
+  "actions": [
+    {
+      "id": "change_self_password",
+      "operation": "user.password.change_self",
+      "target": "current_user"
+    },
+    {
+      "id": "open_public_profile",
+      "operation": "profile.public.read",
+      "target": "U200"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "artifact": "Xshield_Design_Book_v3.0.docx",
+  "sha256": "e0f5dc40c7becfa9c93e2b669a4db1f0cf44a5178b06aac8af305dcffcd36a8a",
+  "pages": 48,
+  "rendered_with": "docx skill render_docx.py using LibreOffice",
+  "visual_review": "All rendered pages reviewed; edited pages re-rendered and reviewed; unchanged pages verified by pixel comparison.",
+  "checks": [
+    "Chinese glyphs visible",
+    "No clipped text or overlapping elements",
+    "Table header repetition",
+    "Code blocks kept together when bounded",
+    "Header/footer and page numbers",
+    "Internal chapter navigation bookmarks"
+  ],
+  "not_product_test": true
+}

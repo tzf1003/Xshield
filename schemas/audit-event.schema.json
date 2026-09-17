@@ -1,0 +1,350 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xshield.invalid/schemas/audit-event.schema.json",
+  "title": "Xshield Audit Event v3",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "event_type": {
+      "type": "string",
+      "minLength": 3
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "site_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "span_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "producer_id": {
+      "type": "string"
+    },
+    "producer_boot_id": {
+      "type": "string"
+    },
+    "producer_seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "request_seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "policy_revision": {
+      "type": "string"
+    },
+    "example_only": {
+      "type": "boolean"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "uniqueItems": true
+    },
+    "cause_event_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "uniqueItems": true
+    },
+    "payload": {
+      "type": "object"
+    },
+    "sensitivity": {
+      "enum": [
+        "PUBLIC",
+        "INTERNAL",
+        "SENSITIVE",
+        "RESTRICTED",
+        "SYNTHETIC"
+      ]
+    },
+    "integrity": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "pending",
+            "sealed",
+            "fixture_unsealed"
+          ]
+        },
+        "previous_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "connection_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agent_run_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "tenant_id",
+    "site_id",
+    "request_id",
+    "trace_id",
+    "span_id",
+    "producer_id",
+    "producer_boot_id",
+    "producer_seq",
+    "request_seq",
+    "occurred_at",
+    "observed_at",
+    "policy_revision",
+    "example_only",
+    "evidence_refs",
+    "cause_event_ids",
+    "payload",
+    "sensitivity",
+    "integrity"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "stage": {
+      "type": "object",
+      "required": [
+        "stage",
+        "stage_execution_id",
+        "outcome",
+        "reason_code",
+        "proof_kind",
+        "confidence",
+        "confidence_status",
+        "duration_us"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string"
+        },
+        "stage_execution_id": {
+          "type": "string",
+          "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "outcome": {
+          "enum": [
+            "PASS",
+            "DENY",
+            "UNKNOWN",
+            "ERROR",
+            "SKIPPED",
+            "CANCELLED"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "proof_kind": {
+          "enum": [
+            "deterministic",
+            "model",
+            "observation",
+            "none"
+          ]
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "confidence_status": {
+          "enum": [
+            "provided",
+            "not_applicable",
+            "not_provided",
+            "unavailable"
+          ]
+        },
+        "duration_us": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rule_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_call_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "facts": {
+          "type": "object"
+        },
+        "coverage": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "proof_kind": {
+                "const": "deterministic"
+              }
+            },
+            "required": [
+              "proof_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "confidence": {
+                "type": "null"
+              },
+              "confidence_status": {
+                "const": "not_applicable"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "SKIPPED",
+                  "CANCELLED"
+                ]
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "confidence": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "stage.completed",
+              "stage.skipped"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/stage"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "integrity": {
+            "properties": {
+              "state": {
+                "const": "fixture_unsealed"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "example_only": {
+            "const": true
+          },
+          "sensitivity": {
+            "const": "SYNTHETIC"
+          }
+        }
+      }
+    }
+  ]
+}

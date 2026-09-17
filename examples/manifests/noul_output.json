@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "artifact_id": "art_01a0afa6-3320-7eb6-9b23-520f68429e8f",
+  "request_id": "req_01a0afa6-3320-758a-9554-d0d3b561b8c6",
+  "tenant_id": "tenant_demo",
+  "site_id": "demo",
+  "kind": "noul_output",
+  "content_type": "application/json",
+  "capture_status": "complete",
+  "fidelity": "semantic",
+  "bytes_observed": 124,
+  "bytes_saved": 124,
+  "classification": "SYNTHETIC",
+  "example_only": true,
+  "storage": {
+    "profile": "fixture_none",
+    "locator": "examples/evidence/noul_output.json",
+    "key_ref": null
+  },
+  "integrity": {
+    "algorithm": "sha256_fixture",
+    "digest": "4e26631f4596cb135153b969942c9a827a3660133c6115ebea7bcde8b875088b"
+  },
+  "parent_refs": [],
+  "expires_at": "2026-09-18T13:55:00Z"
+}

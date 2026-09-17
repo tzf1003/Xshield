@@ -1,0 +1,191 @@
+[
+  {
+    "id": "S01",
+    "title": "OWASP Authorization Cheat Sheet",
+    "url": "https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html",
+    "verified_at": "2026-09-17",
+    "purpose": "默认拒绝、每请求授权、资源/操作与外部执行位置。"
+  },
+  {
+    "id": "S02",
+    "title": "OWASP Transaction Authorization Cheat Sheet",
+    "url": "https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html",
+    "verified_at": "2026-09-17",
+    "purpose": "服务端状态顺序、执行前授权及检查/执行边界。"
+  },
+  {
+    "id": "S03",
+    "title": "Cloudflare Pingora 官方仓库",
+    "url": "https://github.com/cloudflare/pingora",
+    "verified_at": "2026-09-17",
+    "purpose": "Rust 网络框架、HTTP/1/2、TLS 后端及实验性/平台支持说明。"
+  },
+  {
+    "id": "S04",
+    "title": "Axum 官方 crate 文档",
+    "url": "https://docs.rs/axum/latest/axum/",
+    "verified_at": "2026-09-17",
+    "purpose": "管理 API 框架候选。"
+  },
+  {
+    "id": "S05",
+    "title": "SQLx 官方 crate 文档",
+    "url": "https://docs.rs/sqlx/latest/sqlx/",
+    "verified_at": "2026-09-17",
+    "purpose": "Rust 数据库访问组件。"
+  },
+  {
+    "id": "S06",
+    "title": "OpenTelemetry Rust 官方文档",
+    "url": "https://opentelemetry.io/docs/languages/rust/",
+    "verified_at": "2026-09-17",
+    "purpose": "Traces/Metrics/Logs 文档状态为 Beta；版本边界需隔离。"
+  },
+  {
+    "id": "S07",
+    "title": "tracing 官方 crate 文档",
+    "url": "https://docs.rs/tracing/latest/tracing/",
+    "verified_at": "2026-09-17",
+    "purpose": "结构化事件、span 和异步跟踪。"
+  },
+  {
+    "id": "S08",
+    "title": "PostgreSQL Explicit Locking",
+    "url": "https://www.postgresql.org/docs/current/explicit-locking.html",
+    "verified_at": "2026-09-17",
+    "purpose": "行锁、事务并发与持锁期限。"
+  },
+  {
+    "id": "S09",
+    "title": "OWASP LLM Prompt Injection Prevention",
+    "url": "https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html",
+    "verified_at": "2026-09-17",
+    "purpose": "外部内容不可信、工具与模型权限边界。"
+  },
+  {
+    "id": "S10",
+    "title": "OWASP Session Management",
+    "url": "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html",
+    "verified_at": "2026-09-17",
+    "purpose": "会话标识、期限、身份改变与轮换。"
+  },
+  {
+    "id": "S11",
+    "title": "RFC 8725: JWT Best Current Practices",
+    "url": "https://www.rfc-editor.org/rfc/rfc8725.html",
+    "verified_at": "2026-09-17",
+    "purpose": "令牌验证、用途和上下文混淆防护。"
+  },
+  {
+    "id": "S12",
+    "title": "OWASP WebSocket Security",
+    "url": "https://cheatsheetseries.owasp.org/cheatsheets/WebSocket_Security_Cheat_Sheet.html",
+    "verified_at": "2026-09-17",
+    "purpose": "Origin、消息、会话与长连接约束。"
+  },
+  {
+    "id": "S13",
+    "title": "MDN Subresource Integrity",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Subresource_Integrity",
+    "verified_at": "2026-09-17",
+    "purpose": "被修改脚本的完整性匹配。"
+  },
+  {
+    "id": "S14",
+    "title": "Chrome Page Lifecycle API",
+    "url": "https://developer.chrome.com/docs/web-platform/page-lifecycle-api",
+    "verified_at": "2026-09-17",
+    "purpose": "后台页面冻结、丢弃与执行暂停。"
+  },
+  {
+    "id": "S15",
+    "title": "TypeSafe Primitives (Questions)",
+    "url": "https://docs.typesafe.ai/primitives",
+    "verified_at": "2026-09-17",
+    "purpose": "Choice/Score/Noul、有限问题与约 32k 请求预算。"
+  },
+  {
+    "id": "S16",
+    "title": "TypeSafe Confidence",
+    "url": "https://docs.typesafe.ai/confidence",
+    "verified_at": "2026-09-17",
+    "purpose": "概率分布、confidence 含义及任务校准。"
+  },
+  {
+    "id": "S17",
+    "title": "TheoLeeCJ/OpenJev 官方仓库",
+    "url": "https://github.com/TheoLeeCJ/openjev",
+    "verified_at": "2026-09-17",
+    "purpose": "独立开放实现，不是官方 Jev 权重。"
+  },
+  {
+    "id": "S18",
+    "title": "TypeSafe State",
+    "url": "https://docs.typesafe.ai/concepts/state",
+    "verified_at": "2026-09-17",
+    "purpose": "模型 state 输入组织和支持边界。"
+  },
+  {
+    "id": "S19",
+    "title": "Wasmtime Security",
+    "url": "https://docs.wasmtime.dev/security.html",
+    "verified_at": "2026-09-17",
+    "purpose": "WASM 沙箱与宿主能力边界。"
+  },
+  {
+    "id": "S20",
+    "title": "RFC 9562: UUID",
+    "url": "https://www.rfc-editor.org/rfc/rfc9562.html",
+    "verified_at": "2026-09-17",
+    "purpose": "UUIDv7 格式、时间局部性与安全考虑。"
+  },
+  {
+    "id": "S21",
+    "title": "W3C Trace Context",
+    "url": "https://www.w3.org/TR/trace-context/",
+    "verified_at": "2026-09-17",
+    "purpose": "traceparent、trace-id、parent-id 互操作格式。"
+  },
+  {
+    "id": "S22",
+    "title": "OWASP Logging Cheat Sheet",
+    "url": "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html",
+    "verified_at": "2026-09-17",
+    "purpose": "事件关联、完整性、敏感数据、故障及日志保护。"
+  },
+  {
+    "id": "S23",
+    "title": "Amazon S3 Object Lock",
+    "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html",
+    "verified_at": "2026-09-17",
+    "purpose": "WORM 保留、治理与合规模式边界。"
+  },
+  {
+    "id": "S24",
+    "title": "ClickHouse MergeTree",
+    "url": "https://clickhouse.com/docs/reference/engines/table-engines/mergetree-family/mergetree",
+    "verified_at": "2026-09-17",
+    "purpose": "排序、稀疏索引、分区和后台 TTL 合并。"
+  },
+  {
+    "id": "S25",
+    "title": "Cargo Workspaces",
+    "url": "https://doc.rust-lang.org/cargo/reference/workspaces.html",
+    "verified_at": "2026-09-17",
+    "purpose": "workspace 依赖、包和构建组织。"
+  },
+  {
+    "id": "S26",
+    "title": "Rust API Guidelines",
+    "url": "https://rust-lang.github.io/api-guidelines/",
+    "verified_at": "2026-09-17",
+    "purpose": "公共接口设计规范参考。"
+  },
+  {
+    "id": "S27",
+    "title": "Clippy Lints",
+    "url": "https://rust-lang.github.io/rust-clippy/master/index.html",
+    "verified_at": "2026-09-17",
+    "purpose": "Rust 静态检查与 lint 配置。"
+  }
+]

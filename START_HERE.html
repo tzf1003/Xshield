@@ -1,0 +1,1810 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Xshield 设计与开发文档库 v3.0</title><style>
+:root{color-scheme:light;--ink:#18283e;--accent:#087b84}*{box-sizing:border-box}body{margin:0;color:var(--ink);font:16px/1.8 system-ui,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;background:#f3f6fa}aside{position:fixed;inset:0 auto 0 0;width:300px;padding:26px 20px;overflow:auto;background:#17283d;color:white}aside h2{font-size:25px;margin:0}aside p{font-size:13px;color:#c3d8e5}aside a{display:block;color:#e7f0f4;text-decoration:none;padding:5px 0;font-size:13px;line-height:1.6}aside a:hover{color:#76dfd7}main{margin-left:300px;max-width:1240px;padding:48px 46px 80px}header,section{background:white;padding:30px 36px;margin-bottom:24px;border:1px solid #dce5ed;border-radius:6px}h1{font-size:29px;line-height:1.4;border-bottom:3px solid var(--accent);padding-bottom:15px}h2{font-size:22px;margin-top:28px}h3{font-size:18px}a{color:var(--accent);overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;font-size:14px;margin:18px 0}th,td{border:1px solid #dbe4eb;padding:9px 12px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#e8f3f5}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f0f4f7;padding:18px;border-left:3px solid var(--accent);font-size:13px;line-height:1.6}code{font-family:"Noto Sans Mono CJK SC",Consolas,monospace}p code,li code,td code{background:#eef3f5;padding:1px 4px;font-size:.9em}blockquote{border-left:4px solid var(--accent);margin:20px 0;padding:5px 18px;background:#f0f8f8}.sourcefile{font-size:12px;color:#536779;border-top:1px solid #eee;padding-top:15px}.badge{color:var(--accent);font-weight:600}section{scroll-margin-top:12px}@media(max-width:900px){aside{position:relative;width:auto;max-height:350px}main{margin:0;padding:15px}section,header{padding:20px}h1{font-size:24px}}@media print{aside{display:none}main{margin:0;padding:0;max-width:none}section{border:0;break-before:page}pre,table{font-size:10px}body{background:white}}
+</style><aside><h2>Xshield</h2><p>设计基线 v3.0 · 2026-09-17<br>30个专题 · 本地离线阅读</p><a href="#ch00">00 产品定位与需求基线</a><a href="#ch01">01 威胁模型与安全不变量</a><a href="#ch02">02 总体架构与技术选型</a><a href="#ch03">03 请求、响应及提交时序</a><a href="#ch04">04 身份与会话绑定</a><a href="#ch05">05 界面操作来源验证：Xshield 核心准入机制</a><a href="#ch06">06 资格账本、根入口及分享</a><a href="#ch07">07 自动注入探针、心跳与请求关联</a><a href="#ch08">08 双向应用层加密接管</a><a href="#ch09">09 策略引擎与判定合成</a><a href="#ch10">10 Jev、OpenJev 与分析 Agent</a><a href="#ch11">11 全链路审计事件与 ID 契约</a><a href="#ch12">12 内容证据采集、秘密隔离与加密证据库</a><a href="#ch13">13 审计存储、耐久性、完整性与容灾</a><a href="#ch14">14 按 ID 检索、证据分析与安全回放</a><a href="#ch15">15 管理后台与调查 API</a><a href="#ch16">16 Rust 代码架构与模块边界</a><a href="#ch17">17 开发规范：必须进入代码评审与 CI</a><a href="#ch18">18 数据模型、契约版本及存储责任</a><a href="#ch19">19 部署、隔离、升级与运行策略</a><a href="#ch20">20 测试策略与验收矩阵</a><a href="#ch21">21 性能、容量与成本模型</a><a href="#ch22">22 分阶段实施与交付物</a><a href="#ch23">23 剩余风险与待验证决策</a><a href="#ch24">24 架构决策记录（ADR）</a><a href="#ch25">25 来源与核验登记</a><a href="#ch26">26 运维与调查 Runbook</a><a href="#ch27">27 站点规则编写指南与评审清单</a><a href="#ch28">28 对话决策汇总与需求追踪</a><a href="#ch29">29 控制 API 与审计责任清单</a></aside><main><header><span class="badge">ARCHITECTURE / SECURITY / AUDIT / ENGINEERING</span><h1>Xshield 设计与开发文档库</h1><p>纯前置 WAF、界面操作来源准入、Rust 主干与完整审计体系。正文、数据契约和实施规范统一以 v3.0 为基线。</p><p><strong>文档状态：</strong>设计与合成样例，不是已部署产品或真实模型测评。机器可读材料、验证脚本和验收计划位于同目录对应子文件夹。</p><p>浏览器可用 Ctrl+F / ⌘F 搜索全文。开发入口：<a href="README.md">README</a>、<a href="AGENTS.md">AGENTS.md</a>、<a href="validation/report.md">验证结果</a>。</p></header><section id="ch00"><h1>00 产品定位与需求基线</h1>
+<p>版本：3.0｜基线日期：2026-09-17｜状态：设计规格，尚非实现或实测报告。</p>
+<h2>0.1 最终定义</h2>
+<p>Xshield 是以前置反向代理为部署形态、以 Rust 为主要实现语言的上下文增强 WAF。它结合自动注入的 JS 探针、可选的站点加密协议接管、业务认证强绑定、界面操作来源图、资源操作资格账本、确定性检查、Jev/OpenJev 语义判别及全链路审计。</p>
+<p>核心目标不是推断源站隐藏的全部 ACL，而是执行站点明确接受的附加准入规则：<strong>除批准的入口外，没有当前认证上下文中的可追溯界面操作依据，就不执行受保护请求；即使该用户在源站实际拥有权限，也不例外。</strong></p>
+<p>“可追溯”指来源、映射、目标与约束可由 WAF 验证，不表示证明用户亲手点击过按钮。真实浏览器、在线心跳和客户端堆栈不能自行授予资格。</p>
+<h2>0.2 已确定的产品约束</h2>
+<table>
+<thead>
+<tr>
+<th>编号</th>
+<th>约束</th>
+<th>落地含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RQ-01</td>
+<td>项目名 Xshield，Rust 主语言</td>
+<td>网关、策略、账本、审计、控制 API、任务编排用 Rust</td>
+</tr>
+<tr>
+<td>RQ-02</td>
+<td>不要求接入业务 SDK</td>
+<td>自动注入普通 JS；按站适配；源站改造不是首版前提</td>
+</tr>
+<tr>
+<td>RQ-03</td>
+<td>接管双向流量</td>
+<td>请求和响应均有独立检查、转换及覆盖状态</td>
+</tr>
+<tr>
+<td>RQ-04</td>
+<td>前端心跳与操作关联</td>
+<td>WSS/HTTPS、页面实例、动作和请求 ID，不以最新心跳代替因果</td>
+</tr>
+<tr>
+<td>RQ-05</td>
+<td>可接管应用层加密</td>
+<td>原协议解密、密钥封装接管或请求封装 Hook；检查与实际转发内容一致</td>
+</tr>
+<tr>
+<td>RQ-06</td>
+<td>允许受控兼容回退</td>
+<td>由服务端选择范围；不能因客户端故障声明自动放宽</td>
+</tr>
+<tr>
+<td>RQ-07</td>
+<td>无资格默认拒绝</td>
+<td>换浏览器、未查询的新资源必须重新走认可入口</td>
+</tr>
+<tr>
+<td>RQ-08</td>
+<td>资格有有效期</td>
+<td>一天是会话最长租期示例；有效期内已有资格可复用</td>
+</tr>
+<tr>
+<td>RQ-09</td>
+<td>业务凭证强绑定</td>
+<td>WAF Cookie、实际 Session/JWT、身份代际、资格账本绑定</td>
+</tr>
+<tr>
+<td>RQ-10</td>
+<td>认证更新区分性质</td>
+<td>合法续期可保留相同权限上下文；换账号隔离；未知替换拒绝</td>
+</tr>
+<tr>
+<td>RQ-11</td>
+<td>操作而非 ID 授权</td>
+<td>评论作者 ID 不发行密码重置资格；读写、字段、视图分离</td>
+</tr>
+<tr>
+<td>RQ-12</td>
+<td>界面来源作为强制前提</td>
+<td>无相关入口拒绝；Jev 匹配候选，不凭自由输出发明权限</td>
+</tr>
+<tr>
+<td>RQ-13</td>
+<td>明确例外入口</td>
+<td>公开、认证、分享、服务身份等独立策略，全部仍受审计</td>
+</tr>
+<tr>
+<td>RQ-14</td>
+<td>AI 持续适配</td>
+<td>监测版本，分析候选，独立测试，灰度与签名发布</td>
+</tr>
+<tr>
+<td>RQ-15</td>
+<td>每个请求可审计</td>
+<td>接收、各层结果、最终动作、响应、失败与跳过原因</td>
+</tr>
+<tr>
+<td>RQ-16</td>
+<td>模型及 Agent 完整调用证据</td>
+<td>实际逻辑输入、输出、工具调用、版本、用量、证据来源</td>
+</tr>
+<tr>
+<td>RQ-17</td>
+<td>解密和转换证据</td>
+<td>原始实体、解密/标准化版本、重建请求、响应转换可关联</td>
+</tr>
+<tr>
+<td>RQ-18</td>
+<td>ID 快速调查</td>
+<td>请求、追踪、事件、资格、证据、模型调用、Agent 运行均可查</td>
+</tr>
+<tr>
+<td>RQ-19</td>
+<td>可维护的分层代码</td>
+<td>领域纯逻辑、端口、应用编排、适配器、入口单向依赖</td>
+</tr>
+<tr>
+<td>RQ-20</td>
+<td>注释、日志与测试为交付要求</td>
+<td>新增安全分支必须带原因码、结构化审计和测试</td>
+</tr>
+</tbody>
+</table>
+<h2>0.3 首版覆盖</h2>
+<p>首版选择一个测试站点，覆盖认证、列表、详情、创建、资料修改、管理员密码重置、评论、分享，以及一组双向加密 API。支持有界 HTTP/1.1、HTTP/2 请求响应与探针 WSS；业务 WebSocket 每消息授权、任意流式响应、任意 WASM 加密、HTTP/3 为单独适配项，不宣称自动继承覆盖。</p>
+<p>新接入先 observe 验证，再 enforce；产品目标为强制模式。compatibility 仅是明确登记的局部豁免，不改变认证绑定、已知资格和审计要求。客户端删 Cookie、改版本、禁用 JS 都不能选择模式。</p>
+<h2>0.4 成功标准与不做的承诺</h2>
+<p>成功标准：无来源请求在进入源站前被拒绝；实际内容检查可重建；A/B 凭证串用被拒绝；每个处理阶段有可检索证据；协议更新不会静默扩大资格；故障行为有可测试定义。</p>
+<p>不承诺：永久无人绕过、通用自动解密、模型概率等于正确率、完整凭证盗用免疫、无源站配合的数据库事务级撤权或 exactly-once。源站通过正常受认可界面错误暴露了高权限功能时，仅靠流程存在无法发现全部业务授权缺陷；控制台必须显示这是流程准入，不是完整 ACL 认证。[S01][S02]</p>
+<h2>0.5 文档优先级</h2>
+<p>本 v3 基线覆盖此前 v1 的“默认后端 Guard/业务 SDK”和 v2 的“直接访问兼容恢复优先”等建议。最新版用户选择是首要产品约束。源站 Guard 可作为未来插件，但首版不依赖它。禁止用旧示例默认 120 秒资源 TTL 覆盖本版可配置的一天会话租期；资源和操作可有更短 TTL。</p>
+<p class="sourcefile">源文件：docs/00-product-requirements.md</p></section><section id="ch01"><h1>01 威胁模型与安全不变量</h1>
+<h2>1.1 信任边界</h2>
+<p>客户端可操纵 JS、DOM、Cookie、自有 JWT、代理重放、用户生成内容和调用栈。源站是业务内容来源，但源站可能存在越权、错误页面暴露、回显与解析缺陷；“来源于源站”不等于“业务权限正确”。模型输入包含攻击者文本，输出存在误差。控制台操作者也按最小权限分离，不允许普通调查员读取所有原始凭证或发布规则。</p>
+<p>可信根限定为：批准的站点配置、经验证的业务认证关系、经批准的入口与操作映射、网关实际观察的报文字节，以及持久提交的资格状态。将内容来源、业务权威性与密码学完整性作为三个不同字段保存。</p>
+<h2>1.2 威胁与控制</h2>
+<table>
+<thead>
+<tr>
+<th>威胁</th>
+<th>主要控制</th>
+<th>残余边界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A 的 WAF Cookie + B 的业务凭证</td>
+<td>每请求认证组合绑定</td>
+<td>整套 A 凭证复制不是串用</td>
+</tr>
+<tr>
+<td>看评论得到 ID 后调用高权限接口</td>
+<td>页面动作 + operation + target + fields 精确资格</td>
+<td>正常认可流程错误提供该动作需额外策略</td>
+</tr>
+<tr>
+<td>修改列表主体，污染资格账本</td>
+<td>先验证资格来源请求及范围，再提取指定响应字段</td>
+<td>不能信任任意 200</td>
+</tr>
+<tr>
+<td>提交良性明文镜像、转发恶意密文</td>
+<td>以实际接管封包得到的冻结参数重建源站请求</td>
+<td>不可适配则显式不可见</td>
+</tr>
+<tr>
+<td>诱导加密回退</td>
+<td>站点服务端模式、异常类别分离</td>
+<td>兼容路径仍有声明的覆盖缺口</td>
+</tr>
+<tr>
+<td>修改 UI 遥测/提示注入</td>
+<td>遥测不直接发行资格；固定候选和规则</td>
+<td>语义识别本身必须评估</td>
+</tr>
+<tr>
+<td>日志中的 XSS、SQL 注入、Agent 越权</td>
+<td>日志按数据渲染；参数化查询；只读调查工具</td>
+<td>证据系统成为高价值目标</td>
+</tr>
+<tr>
+<td>删除、替换或漏记证据</td>
+<td>持久日志、签名段、独立锚点、完整性清单</td>
+<td>被控制的生产者在记录前伪造无法仅靠哈希识别</td>
+</tr>
+<tr>
+<td>请求洪峰耗尽 GPU/磁盘</td>
+<td>有界队列、预算、配额、严格故障策略</td>
+<td>完整审计与可用性存在成本取舍</td>
+</tr>
+</tbody>
+</table>
+<h2>1.3 MUST 不变量</h2>
+<p>INV-01：Cookie 新建只产生匿名空账本，不自动产生认证或业务资格。</p>
+<p>INV-02：每次请求用源站实际生效的认证方式匹配绑定。冲突的认证组合不能由不同层各自挑选。</p>
+<p>INV-03：只有认可的认证转换能换绑。账号、租户或权限上下文变化不得继承旧操作资格。</p>
+<p>INV-04：资格至少限定认证绑定、代际、资源类型、资源引用、operation、字段/视图、范围、来源、有效期。</p>
+<p>INV-05：缺少认可 UI 操作来源时，强制端点拒绝；未发现不等于已证明恶意。</p>
+<p>INV-06：观察到 ID、JS 公共包中的按钮、用户生成内容、任意成功响应不能直接发行资格。</p>
+<p>INV-07：根入口必须显式批准；资格发行链不能从一次被拒绝或不受认可的访问开始。</p>
+<p>INV-08：安全判定使用的业务参数与向源站重建的参数一致，后续插件不能替换目标。</p>
+<p>INV-09：请求和响应可见性分别标注，截断、未解密、未验证不得标记 complete。</p>
+<p>INV-10：Jev 只能在服务端构造的有限候选中提供信号，不直接写账本或覆盖硬拒绝。</p>
+<p>INV-11：资格提交使用原请求身份快照；旧响应不能污染新账号，也不能复活已撤销资格。</p>
+<p>INV-12：分享/登录/公开入口不是全路径免检，后续数据仍有视图与操作边界。</p>
+<p>INV-13：日志和证据记录与业务准入分离；普通日志故障不静默跳过认证，严格审计故障不静默丢记录后继续高危执行。</p>
+<p>INV-14：硬规则 confidence=null；没有执行的阶段记录 skipped/cancelled，而非伪造通过与置信度。</p>
+<p>INV-15：安全审计事件不受 tracing 采样影响；证据缺失、删除和不可用均有显式状态。</p>
+<p>INV-16：保密、脱敏、完整性和耐久性是不同维度，不能用“加密了”替代访问控制与完整性验证。</p>
+<p>INV-17：调查、导出、解密、回放、策略发布本身必须被审计。</p>
+<p>INV-18：回放默认无网络和业务副作用；源站执行结果未知时不自动重试非幂等操作。</p>
+<p>INV-19：第三方库、AI 产出和插件不因写成 Rust 就自动可信；解析差异、依赖漏洞与逻辑缺陷仍须测试。</p>
+<p>INV-20：所有性能数值、配额、阈值均为设计起点；通过真实负载与攻击矩阵后方能作为产品承诺。</p>
+<h2>1.4 安全评审方法</h2>
+<p>每次新端点、新来源、新插件同时回答：输入来自哪里、攻击者能修改什么、谁发资格、拒绝发生在哪个副作用之前、如何退回安全状态、日志是否能证明当时的依据。测试将信任边界当作断言，而非仅验证 HTTP 成功码。[S01][S02][S09]</p>
+<p class="sourcefile">源文件：docs/01-threat-model-and-invariants.md</p></section><section id="ch02"><h1>02 总体架构与技术选型</h1>
+<h2>2.1 四个平面</h2>
+<pre><code class="language-text">浏览器/代理/脚本
+       |
+[数据面 xshield-edge / Rust]
+ TLS、HTTP规范化、探针注入、身份绑定、协议转换
+ 资格与流程检查、基础WAF、模型路由、源站转发
+       |                 |                |
+[状态面]            [智能工作面]       [审计证据面]
+ PostgreSQL          xshield-worker     专用持久journal
+ 会话/资格/版本       Jev服务适配        ClickHouse索引
+ 可选有界缓存        隔离分析Agent      加密对象证据库
+       |                 |                |
+[控制面 xshield-control / Rust + Web Console]
+ 站点/策略/身份/审批/检索/回放/告警/版本发布
+       |
+源站：保持既有应用协议，不要求接入SDK
+</code></pre>
+<p>平面表示权限和职责边界，不强制每模块一个微服务。初版三个 Rust 可执行程序：edge、control、worker。审计 journal 为 edge 内受控组件并可独立进程化；日志索引和远端证据存储可以独立扩展。模型推理及浏览器运行使用隔离伴随进程。</p>
+<h2>2.2 推荐基线</h2>
+<table>
+<thead>
+<tr>
+<th>部位</th>
+<th>选择</th>
+<th>约束</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>反向代理</td>
+<td>Rust Pingora</td>
+<td>先验证可等待的请求/响应完整缓冲钩子；禁止在检测前发送 body</td>
+</tr>
+<tr>
+<td>业务与管理运行时</td>
+<td>Tokio；Axum 管理 API</td>
+<td>Axum 不承担自研 HTTP 协议解析器</td>
+</tr>
+<tr>
+<td>核心策略</td>
+<td>Rust 强类型纯函数 + 编译后的站点规则</td>
+<td>不在热路径解释任意脚本或拼接自然语言策略</td>
+</tr>
+<tr>
+<td>事务状态</td>
+<td>PostgreSQL + SQLx</td>
+<td>会话代际、资格提交、撤销与 outbox 事务一致</td>
+</tr>
+<tr>
+<td>大规模审计检索</td>
+<td>ClickHouse</td>
+<td>仅检索/统计，不作为在线授权真值</td>
+</tr>
+<tr>
+<td>大对象证据</td>
+<td>S3 兼容对象存储 + 信封加密</td>
+<td>支持版本/保留锁时按能力启用，不能假设所有兼容服务等价</td>
+</tr>
+<tr>
+<td>耐久缓冲</td>
+<td>加密、分段、带校验的本地 journal</td>
+<td>不是 stdout；严格级别可增加远端持久确认</td>
+</tr>
+<tr>
+<td>遥测</td>
+<td>tracing + 独立 AuditSink + OTel 适配</td>
+<td>安全日志不依赖 OTel 采样及 exporter 成功</td>
+</tr>
+<tr>
+<td>探针</td>
+<td>TypeScript 编译成同源普通 JS</td>
+<td>自动注入，业务方不安装 SDK</td>
+</tr>
+<tr>
+<td>管理台</td>
+<td>TypeScript + React</td>
+<td>独立认证，不接收站点用户 Cookie 作为管理身份</td>
+</tr>
+<tr>
+<td>AI 推理</td>
+<td>Rust ModelPort；OpenJev 可用 Python/CUDA 伴随服务</td>
+<td>不是把模型全栈强行重写为 Rust</td>
+</tr>
+<tr>
+<td>适配测试</td>
+<td>Rust 编排 + Playwright 浏览器执行器</td>
+<td>仅受控测试账户/环境；生产写入回放默认关闭</td>
+</tr>
+<tr>
+<td>插件</td>
+<td>声明式优先；受限 WASM；复杂 JS 隔离进程</td>
+<td>网络、文件、密钥能力按清单授予</td>
+</tr>
+</tbody>
+</table>
+<p>Pingora 官方提供 HTTP/1、HTTP/2 和 WebSocket 代理能力；其 rustls 与缓存集成存在实验性标记，Linux 为主要平台。因此首版 Linux 容器运行，TLS 后端选经过本项目验证的受支持构建，不默认使用实验性缓存，更不直接据此宣称 Xshield 的吞吐。[S03] Axum、SQLx 提供对应 Web 与数据库组件。[S04][S05]</p>
+<p>OTel Rust 当前文档将主要信号标为 Beta，需封装版本边界；tracing 适合结构化事件和 span，但不是耐久审计数据库。[S06][S07]</p>
+<h2>2.3 基础 WAF 规则接入</h2>
+<p>保持已有规则引擎，不为了“全 Rust”在首版重新发明成熟 SQLi/XSS 规则库。定义 BaselineInspectionPort，可接既有网关规则服务或隔离的现有引擎；确需非 Rust 依赖时限于适配器/伴随进程，单独记录版本、预算与失败策略。规则引擎尚未确定时，控制台必须显示 baseline=not_configured，不能用模型替代后声称传统规则已启用。</p>
+<h2>2.4 数据权威性</h2>
+<p>PostgreSQL 是配置与资格的首版权威状态；ClickHouse 是可重建的查询副本；对象库与签名 manifest 是内容证据；本地 journal 是远端不可达时的耐久缓冲。Redis 仅在确有必要时加速遥测和非授权计数，不能用一个未说明一致性的 Redis 缓存承担全部撤权。</p>
+<h2>2.5 伸缩边界</h2>
+<p>以 site_id 划分配置与限额，以 auth_binding_id 定位资格。首版单区域事务状态，edge 可多副本。跨区域先明确主区域路由、延迟和分区策略，再扩展；不以“分布式缓存同步”承诺立即全局撤权。控制面故障可使用已签名且未过期配置，但身份与资格不可验证时严格端点仍拒绝。</p>
+<p class="sourcefile">源文件：docs/02-system-architecture.md</p></section><section id="ch03"><h1>03 请求、响应及提交时序</h1>
+<h2>3.1 一条请求的标准阶段</h2>
+<table>
+<thead>
+<tr>
+<th>stage_id</th>
+<th>阶段</th>
+<th>关键产物</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ingress</td>
+<td>接收与请求标识</td>
+<td>request_id、trace_id、连接上下文、受限原始证据</td>
+</tr>
+<tr>
+<td>framing</td>
+<td>HTTP/压缩/尺寸校验</td>
+<td>规范化版本、歧义或超限原因</td>
+</tr>
+<tr>
+<td>route</td>
+<td>站点与实际操作识别</td>
+<td>固定 policy_revision、operation_id</td>
+</tr>
+<tr>
+<td>identity_pre</td>
+<td>明文头中的认证预检查</td>
+<td>认证候选，非最终授权</td>
+</tr>
+<tr>
+<td>crypto_decode</td>
+<td>实际请求解密/协议接管</td>
+<td>明文证据、覆盖状态</td>
+</tr>
+<tr>
+<td>identity_bind</td>
+<td>实际有效业务凭证验证</td>
+<td>不可变 AuthSnapshot</td>
+</tr>
+<tr>
+<td>request_binding</td>
+<td>CSRF/可选票据/nonce</td>
+<td>请求绑定结果</td>
+</tr>
+<tr>
+<td>ui_provenance</td>
+<td>对应认可界面动作</td>
+<td>action_id、候选、来源证据</td>
+</tr>
+<tr>
+<td>capability</td>
+<td>资源、动作、字段、范围资格</td>
+<td>精确匹配及拒绝原因</td>
+</tr>
+<tr>
+<td>baseline</td>
+<td>Schema、基础规则及速率</td>
+<td>各检测项结果</td>
+</tr>
+<tr>
+<td>model</td>
+<td>按预算执行有限语义判别</td>
+<td>model_call_id、原始概率与适用性</td>
+</tr>
+<tr>
+<td>compose</td>
+<td>合成最终准入结果</td>
+<td>decision_id、原因图、冻结载荷摘要</td>
+</tr>
+<tr>
+<td>audit_commit</td>
+<td>转发前耐久提交</td>
+<td>journal_receipt、证据持久状态</td>
+</tr>
+<tr>
+<td>origin_send</td>
+<td>按冻结内容重建与发送</td>
+<td>实际上游请求摘要、发送状态</td>
+</tr>
+<tr>
+<td>response_decode</td>
+<td>响应验证、解密及安全解析</td>
+<td>响应各版本证据</td>
+</tr>
+<tr>
+<td>grant_commit</td>
+<td>认可来源的资格写入</td>
+<td>grant_id、outbox_id、代际校验</td>
+</tr>
+<tr>
+<td>client_release</td>
+<td>注入/重加密/返回</td>
+<td>实际发送字节、返回状态</td>
+</tr>
+<tr>
+<td>finalization</td>
+<td>终态、耗时及完整性清单</td>
+<td>request.completed / aborted / outcome_unknown</td>
+</tr>
+</tbody>
+</table>
+<p>阶段有依赖关系，未必全部串行。必须保留每个计划阶段的终态，包括 skipped_by_hard_deny、not_applicable、cancelled、timeout。不能把早期拒绝之后未做的模型检查记录为“通过”。</p>
+<h2>3.2 转发前后的责任边界</h2>
+<p>先保存输入证据、阶段结果及 forward_intent，再向源站发送。记录准入允许不等于源站执行成功；记录发送完成也不等于业务成功。origin_result 分为 not_sent、send_attempted、response_received、business_confirmed、unknown。</p>
+<p>请求转换后的实体由 CheckedRequest 私有构造器生成，任何适配器不能在签发后改变业务目标。重建过程中生成的 nonce/时间戳可以变化，但必须与同一冻结语义绑定，记录适配版本与输出摘要。发现语义变化重新决策，不复用旧 allow。</p>
+<h2>3.3 资格写入时序</h2>
+<p>获准列表/创建响应：完整解密和验证 → 使用原请求 AuthSnapshot → 锁定/比较当前 epoch → 写入资格与 outbox → 提交事务 → 交付可触发后续请求的数据。来源请求的准入失败、兼容不可见或来源未批准时不发行资格。</p>
+<p>不要在数据库事务中等待模型、浏览器或源站网络请求。先获得外部证据，再进行短事务重验版本；冲突则拒绝发行或重新评估。事务锁用于 Xshield 自身一致性，并不锁住源站数据库。[S08]</p>
+<h2>3.4 缓存、流式及取消</h2>
+<p>敏感内容不放跨身份共享缓存。缓存命中也经过准入；304 必须关联同一安全上下文中仍有效的受验证版本。浏览器缓存不能在新会话复活旧资格。</p>
+<p>首版私有 JSON 响应采用有界完整缓冲；HTTP 流式、SSE、超大附件和业务 WS 必须声明各自的记录、决策和释放粒度。不可能在最后一字节尚未到达时声称已完整检查全部内容。将部分转发记为 response.partially_released，不能称为完全阻断。</p>
+<p>客户端中断、上游超时、节点退出都留下可调和终态。由后台 reconciler 扫描只有 request.accepted 而无终态的请求，追加 incomplete/outcome_unknown；不伪造成功记录。</p>
+<h2>3.5 重放与重试</h2>
+<p>每个网络尝试独立 attempt_id。高危请求可使用短期票据绑定准确方法、路由、实体摘要、身份代际和 nonce。nonce 消费原子化。源站不支持幂等键时，不自动重试写请求；“WAF 保留了请求”不代表可以安全重发。审计回放与真实业务重放是两个不同权限。</p>
+<p class="sourcefile">源文件：docs/03-request-response-pipeline.md</p></section><section id="ch04"><h1>04 身份与会话绑定</h1>
+<h2>4.1 标识及生命周期</h2>
+<p>WAF 签发随机不透明 Cookie，建议 256 位随机材料：</p>
+<pre><code class="language-http">Set-Cookie: __Host-xshield_sid=&lt;opaque&gt;; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400
+</code></pre>
+<p>一天是建议初始最长会话期限，不是无限滑动续期。服务端记录 absolute_expires_at；Cookie 本身的浏览器期限不是安全验证。按站测试 SSO、跨域、子域及 SameSite；不以 Cookie 属性取代 CSRF 控制。SSO 跨域必须通过受控一次性引导完成，不放宽 Cookie Domain 为所有子域共享凭证。[S10]</p>
+<p>身份上下文：site_id、waf_session_id、auth_binding_id、principal_ref、tenant_ref、auth_epoch、credential_generation。秘密凭证只在必要执行内存/秘密存储中使用，账本索引用租户隔离的 HMAC 指纹。</p>
+<h2>4.2 状态机</h2>
+<pre><code class="language-text">ANONYMOUS
+  --verified_login--&gt; AUTHENTICATED(epoch=n)
+  --verified_share--&gt; LIMITED_SHARE(scope)
+AUTHENTICATED
+  --verified_refresh_same_context--&gt; AUTHENTICATED(epoch=n, generation+1)
+  --account_or_tenant_change--&gt; AUTHENTICATED(epoch=n+1, new_ledger)
+  --logout/revoke/expire--&gt; INVALID
+ordinary_credential_substitution --&gt; DENY（不自动换绑）
+</code></pre>
+<p>授权作用域变化即使 sub 相同，也要重新评估或新 epoch。源站沿用同一个 Session 字符串而身份已改变时，也必须轮换 epoch。refresh token 参与刷新链的绑定，不能以 B 的 refresh token 为 A 的账本续期。</p>
+<h2>4.3 实际认证方式</h2>
+<p>认证 profile 按站点和端点定义 Cookie、Authorization、body token 的优先级和共同条件。Cookie=Session_A 与 Bearer=JWT_B 冲突时拒绝；只有经证实源站的接受规则与 WAF 一致才允许多凭证。</p>
+<p>JWT 可作为不透明字符串精确匹配；使用 claims 建立身份时验证签名、算法白名单、issuer、audience、用途和期限，不接受仅解码。多个合法 JWT 签发方/受众用互斥配置，避免令牌跨用途替换。[S11]</p>
+<h2>4.4 合法更新</h2>
+<p>验证旧 WAF 会话与旧认证链 → 请求认可的认证端点 → 识别真实业务成功 → 提取新凭证 → 验证继承关系和权限范围 → 原子更新 generation/epoch → 轮换必要 Cookie → 向客户端释放响应。</p>
+<p>并发刷新采用 compare-and-swap 或行锁与版本字段。新旧兼容窗口只存明确合法的凭证组合，不能把同用户历史上的所有 WAF Cookie 与所有 Token 做笛卡尔组合。未知替换记录 AUTH_BINDING_MISMATCH，不改变原账本。</p>
+<h2>4.5 异步响应与 WSS</h2>
+<p>每条请求保存 AuthSnapshot。A 的列表晚于切换 B 的响应返回时，只能针对 A 的旧快照尝试发行，epoch 不再有效就丢弃发行动作并审计。不同 tab 使用不同 Bearer token 时按 profile 隔离绑定；不能只靠同域 Cookie 合并身份。</p>
+<p>WSS 握手及消息处理检查绑定、Origin、票据和消息 Schema。登录/登出时重认证或断开，不让旧连接把页面证据关联给新用户。[S12]</p>
+<h2>4.6 边界与日志</h2>
+<p>绑定阻止 A/B 凭证拼接，不识别完整有效 A 凭证被复制后的设备冒用。每日过期缩短暴露时间但不等于防盗用。</p>
+<p>必须记录 binding.created、refresh.verified、binding.mismatch、epoch.changed、binding.revoked，以及新旧非秘密指纹、来源认证请求 ID、轮换原因。禁止在普通日志中写原始 Cookie/JWT 或将其传给 Jev。</p>
+<p class="sourcefile">源文件：docs/04-auth-session-binding.md</p></section><section id="ch05"><h1>05 界面操作来源验证：Xshield 核心准入机制</h1>
+<h2>5.1 语义</h2>
+<p>Xshield 执行 UI 流程准入，不要求还原完整业务 ACL。当前身份即便具有源站权限，没有通过当前有效会话中认可的界面入口取得对应操作依据，也拒绝。已有有效资格内的再次访问可以通过，不必每次出现新的鼠标点击。</p>
+<p>“返回界面”必须指 WAF 确认来自批准流程的 HTML、组件所需数据及已验证构建映射。客户端截图、DOM 上报和 Error.stack 只提供线索，不是远程真实性证明。[S01][S02]</p>
+<h2>5.2 三种对象</h2>
+<p>PageEvidence：站点、页面实例、认证快照、来源请求、响应对象、构建指纹、有效期、验证状态。</p>
+<p>ActionDescriptor：action_id、页面模板、业务 operation、方法与路由、目标提取及约束、允许字段、状态前提、证据引用、mapping_revision。</p>
+<p>ActionGrant：当前主体在特定 scope、期限和使用次数内可以使用哪个 ActionDescriptor；随后与资源操作资格共同检查。</p>
+<p>根入口由策略显式批准。一般链路为：登录/公开/分享等根 → 获准页面 → 列表/查询/创建等动作 → 精确资源 → 详情或写动作。链路可以复用，但不能从一次被拒绝的访问自行补出前置资格。</p>
+<h2>5.3 发行流水线</h2>
+<ol>
+<li>WAF 先准入页面/数据请求；响应验真、解密、格式和构建校验通过。</li>
+<li>站点适配器从可信模板位置提取操作候选，排除用户内容和未启用组件。</li>
+<li>Jev 可在固定候选中判断语义对应，保存全分布和证据；NONE/UNKNOWN 不发行。</li>
+<li>代码验证候选属于已批准 mapping、目标和字段不扩张、身份快照未过期。</li>
+<li>写入 ActionGrant 与资源资格，附带 page_evidence_id/model_call_id/rule_revision。</li>
+<li>提交完成后交付页面或必要的后续操作描述。延迟过高的站点预先编译映射，不每次全页在线分析。</li>
+</ol>
+<p>模型识别界面动作是允许的；模型直接编造新动作或只因高分扩大 scope 是禁止的。首版高危动作必须对应独立验证的操作模板。对模型只能识别、无法确定验证的动态 UI，强制模式拒绝或要求重新走已支持入口。</p>
+<h2>5.4 页面中存在代码不等于存在入口</h2>
+<p>公共 bundle 中的管理员组件、隐藏模板、注释、广告、评论和用户富文本不自动构成当前会话的操作来源。SPA 的菜单/弹窗应结合获得它的受控请求、服务器返回的功能数据与固定构建映射。若展示条件只能来自可任意修改的本地状态，没有其他约束，记录 evidence_quality=client_claimed，不当作强制资格来源。</p>
+<p>CSS 可见性也不是最终安全判据；通过受控映射确认哪类操作被提供给当前流程。按钮名称相同不代表路由、对象和字段相同。</p>
+<h2>5.5 高权限操作示例</h2>
+<p>A 浏览 B 的评论：产生 comment.read:C1，按规则可产生 profile.public.read:B；不会产生 user.password.admin_reset:B。</p>
+<p>A 的设置页面提供 change_self_password：目标约束必须是当前已验证主体；把目标换成 B 即 TARGET_SCOPE_MISMATCH。页面没有 admin_reset 候选则 UI_ACTION_NOT_AVAILABLE；即使 A 在业务系统是真管理员也拒绝。</p>
+<p>管理员页面为 B 提供 reset action：只发行该 scope 的资格，不能重置 C 或隐藏增加 role 字段。若配置允许一个管理列表针对列表中的多个对象执行同类操作，则明确记录该集合、范围和创建规则。</p>
+<h2>5.6 异常与失效</h2>
+<p>新构建、页面规则升级、账号变更、权限上下文变化、来源撤销或 TTL 到期使相关资格失效或重新评估。后台页冻结不直接撤销已有有效资格。新浏览器没有旧账本，必须重新获取；这属于产品规则，不属于误报。</p>
+<p>若认可流程本身向普通用户错误地提供了高权限按钮且没有任何可靠限制，流程检查无法恢复隐藏的真实 ACL。这类站点需显式限制高危入口/映射；没有证据时不让模型补全。日志区分 FLOW_ADMITTED 与 BUSINESS_AUTHZ_VERIFIED，不将两者混成一个“已鉴权”。</p>
+<p class="sourcefile">源文件：docs/05-ui-action-provenance.md</p></section><section id="ch06"><h1>06 资格账本、根入口及分享</h1>
+<h2>6.1 授权键</h2>
+<pre><code class="language-text">site_id + auth_binding_id + auth_epoch + tenant_ref
++ resource_type + canonical_resource_ref
++ operation_id + view_profile + scope_hash
+</code></pre>
+<p>action_grant_id、source_request_id、source_rule_revision、source_evidence_ids、issued_at、expires_at、revocation_version、use_policy、status 是必要证明字段。禁止只以 URL、ID 或 Cookie 为唯一授权索引。</p>
+<p>观察记录 observations、有效资格 grants、模型信号 model_signals 三者隔离。全文检索、向量相似度及 Bloom 正结果不能代替精确查表。多个资源批量请求逐项检查；父子资源检查关系，不允许把独立认识的两个 ID 任意组合。</p>
+<h2>6.2 入口分类</h2>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>起点依据</th>
+<th>约束</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PUBLIC</td>
+<td>明确公开 operation/视图</td>
+<td>不豁免所有同路径方法</td>
+</tr>
+<tr>
+<td>AUTH_ENTRY</td>
+<td>登录/代码兑换/认证回调</td>
+<td>成功验证前仍匿名</td>
+</tr>
+<tr>
+<td>FLOW_ROOT_AUTHENTICATED</td>
+<td>认证后的批准首页或受范围约束的初始列表</td>
+<td>仅发行配置允许的下一步资格</td>
+</tr>
+<tr>
+<td>UI_ACTION_REQUIRED</td>
+<td>页面动作与精确资源资格</td>
+<td>缺少来源即拒绝</td>
+</tr>
+<tr>
+<td>SHARE_ENTRY</td>
+<td>有效分享凭证或明确公开资源</td>
+<td>资源、视图、操作与期限受限</td>
+</tr>
+<tr>
+<td>SERVICE_IDENTITY</td>
+<td>已验证服务凭证与操作范围</td>
+<td>不由 User-Agent 触发豁免</td>
+</tr>
+</tbody>
+</table>
+<p>所有入口继续执行内容、协议、配额和审计。WAF 内部 bootstrap/events 路径使用独立保留命名空间，只能操作本会话的受限元数据，不能代理任意 URL 或发行业务资格。</p>
+<h2>6.3 来源规则</h2>
+<p>列表请求中的主体/租户必须先受约束；返回经过预期上游、业务成功码、Schema 与解密校验。只从批准的结构路径提取资源，不扫描任意正文中的 ID。创建响应只有在创建操作被事先允许且业务确认成功时才发行资格。</p>
+<p>PageEvidence 必须关联认可来源；源站返回 200 不是授权证明。若列表本身可越权，不先约束列表就会污染整个账本。来源策略应有双身份及权限范围测试。</p>
+<h2>6.4 事务与容量</h2>
+<p>PostgreSQL 首版使用短事务校验 auth_epoch 与 policy_revision，幂等写入发行事件并写 outbox。相同 source_request_id/source_rule/resource/operation 的重复消费不重复增权。普通查询永不无限续租；最长资格期限不得超过当前会话和来源证据期限。</p>
+<p>首版可配置每会话最多 5000 条资格、单响应 1000 条、写操作更短 TTL；这些是待测限额。超额返回重新获取/明确拒绝，不授予 wildcard。删除旧观察记录不应误删仍有效资格；撤销资格也不删除历史证据。</p>
+<h2>6.5 分享</h2>
+<p>分享可以是明确公开的 GET 视图，或由有资格的发行者签发限资源凭证。随机长字符串只有在发行、验证、范围和到期语义可靠时才是分享凭证。不能收到任意私有 ID 就由 WAF 自动补签名。</p>
+<p>兑换后为接收者建立 LIMITED_SHARE 上下文，与分享者 Cookie 不必相同；不会扩大为完整用户身份。只读不等于可转分享，病例摘要不等于患者全量信息。附件、视频分片、Range 访问需单独或可证明收缩的子资格。重复读取与单次写请求 nonce 分离。</p>
+<h2>6.6 缺失处理</h2>
+<p>已认证且无对应流程资格：403，UI 提示重新从认可入口打开。未认证：API 401 或顶层页面跳固定登录入口。存储不可用：503，不把基础设施故障记作越权。策略可用统一 404 隐藏对象存在性。</p>
+<p>bookmarks、手工粘贴 ID、换浏览器、未刷新共享列表，只有已有有效资格或例外入口时才通过。没有则拒绝，是预期行为。CAPABILITY_MISSING 与 CONFIRMED_BUSINESS_DENY、MODEL_SUSPECTED_ENUMERATION 分别记录。</p>
+<p class="sourcefile">源文件：docs/06-capability-ledger.md</p></section><section id="ch07"><h1>07 自动注入探针、心跳与请求关联</h1>
+<h2>7.1 部署与职责</h2>
+<p>使用 TypeScript 开发、发布固定版本普通 JS。网关只改写已识别 HTML/批准 JS；不要求业务方修改代码。注入、Hook、错误提示、页面实例和请求关联是探针职责；实际放行、身份、资格和秘密钥匙由 WAF 控制。</p>
+<p>探针资源走同源固定路径，bootstrap 动态内容 no-store。静态 HTML 不嵌入跨会话共享的凭证。压缩、ETag、Content-Length、缓存、CSP nonce、script-src/connect-src 与 SRI 必须同步适配；不能为注入而全局关闭 CSP/SRI。SRI 会检查资源内容，改写后须维护对应完整性信息。[S13]</p>
+<h2>7.2 事件契约</h2>
+<p>字段：sensor_version、build_ref、page_handle、navigation_id、action_hint、client_request_id、client_event_seq、visibility、event_type、callsite_fingerprint。WAF 另生成 request_id，且用服务端时间判定期限。客户端 action_hint 不等于已授予的 action_id。</p>
+<p>同一次 action 可以产生多个请求。服务端关联键包含 site、auth_binding、epoch、page、request；不能只使用“最新心跳”。HTTP 与 WSS 到达乱序时记录 pending/unknown，严格票据可通过 HTTPS prepare 建立屏障。</p>
+<h2>7.3 WSS/HTTPS</h2>
+<p>初始建议活跃页 15 秒心跳加抖动，单消息 16 KiB、单页短时 64 条摘要。HTTPS 批量上报作为后备。浏览器后台冻结会暂停 JS 执行，因此缺心跳不自动等于攻击，也不能保证网页永远在线。[S14]</p>
+<p>WSS 限制 Origin、连接票据、身份代际、消息率和长度，连接失效要关闭/重认证。[S12] 原始 Cookie 仅在握手等适用请求中自动传送，后续消息以服务端连接上下文关联。</p>
+<h2>7.4 Hook 的覆盖声明</h2>
+<p>按站优先完整请求封装入口，保持 Promise、类型、错误语义及密钥轮换。预先保存的函数引用、Worker、WASM、iframe、Service Worker 缓存等需逐项测试。不在“全局 fetch Hook 安装成功”后声称所有加密已接管。</p>
+<p>前端调用栈仅作调用点线索，不是函数入参内存快照。所谓明文必须来自实际接管的请求实体或可信转换，而不是仅来自客户端报告。</p>
+<h2>7.5 采集与体验</h2>
+<p>默认不记录逐键输入和鼠标轨迹。可追溯界面优先来自 WAF 实际响应与结构化操作描述；客户端 DOM 快照若用于调试须明确 client_claimed，进入受限证据库。前端审计日志不能带密码、OTP、原始 Cookie。</p>
+<p>拒绝响应由网关产生，探针仅展示原因码和安全恢复入口。弹窗不能遮挡已交付的敏感信息后声称拦截成功。request_id 可提供给用户报障，但不构成读取后台日志的访问凭证。</p>
+<p class="sourcefile">源文件：docs/07-browser-sensor.md</p></section><section id="ch08"><h1>08 双向应用层加密接管</h1>
+<h2>8.1 三条路径</h2>
+<p>DIRECT_DECRYPT：协议、密钥取得方式和密钥使用授权已明确，WAF 解密实际请求/响应，必要时重建。</p>
+<p>KEY_REWRAP：在经过验证的混合加密协议中替换可接管的公钥分发；WAF 解出内容密钥，检查实际内容，再用源站公钥重封装。签名、AAD、key-id、响应密钥与会话状态都要核对；不能只知道 AES/RSA 名称就认定兼容。</p>
+<p>ENVELOPE_HOOK：注入 JS 在稳定业务封装入口将参数按 Xshield 协议封装；WAF 解开实际封包，检查 P，再由固定适配器仅使用同一 P 重建原站请求。</p>
+<p>网页仍使用 HTTPS。应用层额外封包采用成熟库和固定协议版本，不自研密码算法。以算法识别代替协议复刻、以前端镜像代替实际内容，均不符合本设计。</p>
+<h2>8.2 适配包内容</h2>
+<p>站点与端点、构建指纹、序列化/压缩/编码、请求及响应格式、密钥来源与作用域、算法参数、签名覆盖、AAD、nonce/计数器、时间窗口、异常路径、版本并行、测试向量和回滚目标。</p>
+<p>密钥调用经 KeyAccessPort 限定站点、用途、有效期；推理模型和普通日志无读取密钥权限。适配器不能代理任意 URL、任意签名或跨站密钥使用。</p>
+<h2>8.3 不可变转换链</h2>
+<pre><code class="language-text">ingress_entity → decoded_plaintext → canonical_business_request
+  → checked_request → rebuilt_origin_entity
+origin_entity → decoded_response → canonical_response
+  → grants_commit → rebuilt_client_entity
+</code></pre>
+<p>每一边均有 artifact_id、transform_id、input_refs、output_refs、adapter_revision、算法元数据、质量状态与摘要。实际请求身份若在加密 body 内，必须解出后再完成最终认证绑定。</p>
+<p>不能在 model 检查 P 后继续转发客户端独立提供的其他密文。已校验参数禁止被后续插件或模板自由修改；输出变化必须解释为协议元数据变化或重新决策。</p>
+<h2>8.4 失败与回退</h2>
+<p>observe：原有流量流程，记录候选，新资格不用于强制放行。</p>
+<p>compatibility：服务端批准的端点/构建范围可透传原协议；保留已经能执行的身份、路由、规则和审计，标记 opaque。该链路不得为未知内容发行新资格。</p>
+<p>enforce：依赖解密取得目标/动作的请求无法检查就拒绝/暂不可用。无效 Xshield 封包、认证标签错误、伪造版本一律拒绝，不能落到兼容原包透传。</p>
+<p>客户端自称 Hook 失败、关闭 JS 或生成大量异常不能更改模式。真正的站点构建变化由 WAF 取证及独立验证后触发控制面决策。</p>
+<h2>8.5 动态维护</h2>
+<p>按 JS/协议指纹、提取失败和成功流量分布触发分析；合并重复任务、限制预算。Agent 的产出是候选适配包，先隔离单元向量与测试站闭环、再 shadow/canary。修改字段映射可以走受控低风险发布；扩大入口、资格或目标范围必须审批。</p>
+<p>随机加密不能用每次密文逐字节相等作为唯一测试。应使用隔离测试向量或验证解出的业务内容和原站接受结果；不得把固定 nonce 带到生产。超大、不支持或截断包的覆盖状态必须显式，见证据分册。</p>
+<p class="sourcefile">源文件：docs/08-crypto-takeover.md</p></section><section id="ch09"><h1>09 策略引擎与判定合成</h1>
+<h2>9.1 决策类型</h2>
+<p>Decision：ALLOW、DENY、RETRY_LATER、STEP_UP。Coverage 为独立结构，不能通过 ALLOW 推出“所有检测已完成”。business_authz、flow_admission、attack_signal 和 origin_result 分开保存。</p>
+<p>StageOutcome：PASS、DENY、UNKNOWN、ERROR、SKIPPED、CANCELLED。每个结果记录 reason_code、规则版本、输入证据、输出事实和单调耗时。规则检查使用 proof_kind=deterministic，confidence=null。</p>
+<h2>9.2 硬约束优先</h2>
+<pre><code class="language-text">协议或认证绑定不合法       → DENY
+必要界面/资源/动作资格缺失 → DENY
+业务明确拒绝              → DENY
+必要基础设施不可用         → RETRY_LATER
+内容规则拒绝              → DENY
+其余                       → 按已批准模型策略及覆盖要求合成
+</code></pre>
+<p>模型的 ALLOW/低风险不能覆盖硬拒绝。FlowAllowed 只是附加流程准入，不绕过源站的已有权限。原始模型概率、阈值与命中规则保存，以便解释合成，不把数值简单取平均生成“总体安全率”。</p>
+<h2>9.3 模式独立</h2>
+<p>site_mode、crypto_mode、model_mode、audit_mode 独立但发布时验证组合。严格 UI 资格的必要目标隐藏在不支持密文时，不允许通过 crypto compatibility 隐式跳过 UI 资格。要允许此覆盖缺口，必须显式登记该 endpoint 的兼容豁免，控制台醒目标注。</p>
+<p>model_required_for_action_mapping=true 且没有有效缓存描述时，模型超时即不能发行该资格；已经经确定性规则验证的现有资格不因无关模型停机自动丢失。分开“模型是本次准入必要条件”和“模型只做附加风险分析”。</p>
+<h2>9.4 DSL 与编译</h2>
+<p>配置经 JSON Schema/类型校验 → 引用解析 → 来源图验证 → 循环/不可达规则检查 → 权限扩张 diff → 测试 → 签名版本发布。规则只能访问明确的 request/auth/page/grant 字段，不提供 eval 或任意网络请求。</p>
+<p>入口需至少限定站点、方法、真实路由或 RPC operation。JSON 重复键、重复 ID、方法覆盖、解码差异和路由重写必须拒绝歧义或与源站严格一致。批量和 GraphQL 按真实子操作检查，不白名单整个 /graphql。</p>
+<h2>9.5 规则版本与冲突</h2>
+<p>请求开始固定 policy_revision、schema_revision、adapter_revision、model_policy_revision；中途热更新不改变正在执行的引用。显式 emergency deny 可以作为额外只收紧屏障，记录其独立版本。</p>
+<p>allow 与 deny 冲突按 deny 优先；来源规则发行范围必须是预批准范围的子集。修改字段、目标、有效期、公开入口及兼容范围均需可视化 diff。回滚不能把已撤销的身份或资格复活。</p>
+<h2>9.6 原因码最低集</h2>
+<p>AUTH_REQUIRED、AUTH_BINDING_MISMATCH、AUTH_EPOCH_CHANGED、UI_ACTION_NOT_AVAILABLE、UI_EVIDENCE_UNVERIFIED、CAPABILITY_MISSING、OPERATION_NOT_GRANTED、TARGET_SCOPE_MISMATCH、FIELD_NOT_ALLOWED、GRANT_SOURCE_UNTRUSTED、SHARE_SCOPE_MISMATCH、PARSE_AMBIGUOUS、CRYPTO_INVALID_ENVELOPE、PAYLOAD_OPAQUE、MODEL_UNAVAILABLE、MODEL_LOW_CONFIDENCE、AUDIT_DURABILITY_UNAVAILABLE、EVIDENCE_CAPTURE_INCOMPLETE、ORIGIN_OUTCOME_UNKNOWN。</p>
+<p>稳定 code 用英文枚举，用户可见描述中文可本地化。禁止通过解析 log message 来驱动业务逻辑。</p>
+<p class="sourcefile">源文件：docs/09-policy-engine.md</p></section><section id="ch10"><h1>10 Jev、OpenJev 与分析 Agent</h1>
+<h2>10.1 职责分离</h2>
+<p>RuntimeJudge：对当前相关证据做有限候选选择、内容攻击信号和流程一致性判断；无生产网络工具、无密钥读取、无资格写入、无规则发布权。</p>
+<p>AdaptationAgent：分析 JS/协议变化，生成适配候选及测试；只访问批准样本与隔离测试环境。</p>
+<p>InvestigationAgent：在操作者已有权限内读取日志证据、构建时间线、提出原因和测试建议；不能自行解锁原始凭证、执行生产请求或修改策略。</p>
+<p>Rust 统一 ModelPort/AgentJobPort；OpenJev 可由 Python/CUDA 伴随进程执行，生成式 Agent 可替换供应商。不要把 Jev 的有限输出能力当成任意代码生成工具。</p>
+<h2>10.2 已核验能力与契约</h2>
+<p>2026-09-17 核验：Jev 文档包含 Choice、Score、Noul。Choice/Score 有 probabilities 与 confidence；Noul 返回 noul，没有独立 confidence。官方 primitives 页面说明 state 与 questions 共享约 32k token 预算；不可按无限全历史设计。[S15][S16]</p>
+<p>OpenJev 复刻接口思路，不是官方 Jev 权重或训练；实际上下文、性能和校准取决于底座及部署，必须单独测量。[S17] 文档不把官网宣传或共享状态基准当作 Xshield 实测。</p>
+<p>本项目 JudgeRequest 为内部契约；供应商适配器负责转换。记录转换前内部证据包与转换后实际 API 逻辑载荷，不能事后仅凭模板和摘要重建冒充当时真实输入。</p>
+<h2>10.3 输入结构</h2>
+<p>trusted_policy：固定规则、操作候选、必要限制与版本。</p>
+<p>auth_facts：脱敏后的当前身份绑定与资格查询结果。</p>
+<p>page_evidence：经过认可流程取得的响应片段、构建与动作映射引用。</p>
+<p>untrusted_content：需要检测的实际业务字段、评论等攻击者可控文本。</p>
+<p>coverage：各输入是否完整、截断、隐藏、不可用及原因。</p>
+<p>trace_context：request_id、model_call_id、对应 input_artifact_id，不放原始 Session/JWT。</p>
+<p>禁止把全部站点历史无条件发送；以 request → source chain 检索必要证据。初始内部预算 2k–8k token，最终以实际供应商 token 计算和上限验证为准。图像输入支持必须按 provider capability 声明，不能假定 Jev 接受截图。[S18]</p>
+<h2>10.4 任务拆分</h2>
+<p>UI action match：在预批准候选中选择 action_id/NONE/UNKNOWN。</p>
+<p>semantic consistency：请求目标和业务语义与所选动作是否一致。</p>
+<p>content risk：SQLi、命令注入、路径风险等独立检测项；不把所有攻击强制单选。</p>
+<p>workflow anomaly：已知来源图中的异常跳转/批量枚举特征。</p>
+<p>签名、时间、ID 存在性、方法、字段集合、资源 scope 仍由代码检查。模型不得改变请求内的身份或替代精确账本。</p>
+<h2>10.5 输出与校准</h2>
+<p>记录原始供应商响应、selected_option、完整 probabilities、provider_confidence、probability_semantics、calibration_revision、threshold_policy_revision、abstained 和 schema_validation。模型/供应商无返回置信度时填 null + not_provided，不填 1，也不把 HTTP 200 当作高置信度。</p>
+<p>confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试集校准阈值；记录可靠性、误放率、误拒率、unknown 比例和成本。Jev 官方也要求按任务验证阈值。[S16]</p>
+<h2>10.6 失败、缓存与重试</h2>
+<p>固定 deadline、每站预算、并发 semaphore、熔断和取消。缓存键包括模型具体版本、模板、全部决策相关输入摘要和安全域；不缓存“用户一直安全”。缓存命中要引用原 model_call_id 与新调用采用原因。</p>
+<p>重试独立 attempt_id，记录每次输入是否相同、供应商 request id、耗时与用量。只有最终成功请求不能代表之前失败未计费；拿不到 token/cost 时标 unknown。外部模型动态升级后，记录 resolved_model_revision=unavailable，禁止声称可逐位复现。</p>
+<h2>10.7 Agent 全调用取证</h2>
+<p>一个 agent_run 关联任务触发、批准范围、模型消息、检索 manifest、工具 Schema、实际调用参数、结果、stdout/stderr 限制、退出码、文件变更、产出工件及审批。工具输出超限分块保存，索引保存摘要与缺失标记，不把截断后的字符串标为完整结果。</p>
+<p>记录供应商实际可见的推理/说明输出；不能获取的内部思考过程不伪造。供应商的通用 system prompt 或内部检索不可见时标 provider_internal_unavailable。</p>
+<h2>10.8 提示注入与发布</h2>
+<p>所有网页、日志、代码、评论都作为不可信数据。调查 Agent 不执行日志里出现的命令；自然语言查询只能编译为受限查询 AST。权限扩张、入口公开、兼容范围扩大必须经人工/独立策略审批后签名发布，不由模型自批。[S09]</p>
+<p>离线适配只在批准测试环境运行。WASM 插件明确 host capabilities、内存与 fuel 限额，复杂 JS 再加进程/容器隔离；Wasmtime 的沙箱仍需要正确约束宿主接口，不是允许任意 hostcall。[S19]</p>
+<p class="sourcefile">源文件：docs/10-jev-and-agents.md</p></section><section id="ch11"><h1>11 全链路审计事件与 ID 契约</h1>
+<h2>11.1 审计目标</h2>
+<p>输入一个请求 ID，调查者能够回答：收到什么、使用哪个身份绑定、经过哪些层、每层依据是什么、规则/模型怎么判、为什么跳过某层、是否降级、实际转发了什么、源站返回什么、给客户端返回什么、是否发行新资格、完整证据保存到哪里。</p>
+<p>所有被 Xshield 解析接收的 HTTP 请求均有 request.accepted 和最终/补偿状态；包括正常、拒绝、静态资源、内部管理、模型调用及失败请求。连接在形成 HTTP 请求前失败时记 connection/security 事件并带 connection_id，不虚构完整请求。业务 WS 支持时，每个业务消息有 message_id，与连接握手请求分开。</p>
+<h2>11.2 ID 体系</h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>作用</th>
+<th>生成与安全</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>request_id</td>
+<td>一次边缘请求</td>
+<td>服务器生成 req_ + UUIDv7；客户端值另存不可信引用</td>
+</tr>
+<tr>
+<td>trace_id/span_id</td>
+<td>分布式关联</td>
+<td>采用 W3C 格式；外部 traceparent 不得覆盖内部安全 ID</td>
+</tr>
+<tr>
+<td>event_id</td>
+<td>一条不可变审计事件</td>
+<td>ev_ + UUIDv7，重发不换 ID</td>
+</tr>
+<tr>
+<td>decision_id</td>
+<td>一次决策合成</td>
+<td>dec_ + UUIDv7</td>
+</tr>
+<tr>
+<td>stage_execution_id</td>
+<td>阶段一次执行</td>
+<td>区分重试、并发与取消</td>
+</tr>
+<tr>
+<td>artifact_id</td>
+<td>一份内容证据或 manifest</td>
+<td>art_ + UUIDv7，不是公开下载凭证</td>
+</tr>
+<tr>
+<td>transform_id</td>
+<td>解密/标准化/重建关系</td>
+<td>关联输入、输出及配置版本</td>
+</tr>
+<tr>
+<td>model_call_id</td>
+<td>一次实际模型调用尝试</td>
+<td>mdl_ + UUIDv7；另有 logical_call_id</td>
+</tr>
+<tr>
+<td>agent_run_id/tool_call_id</td>
+<td>Agent 运行及工具调用</td>
+<td>agt_/tool_，父子运行明确关联</td>
+</tr>
+<tr>
+<td>grant_id/page_evidence_id</td>
+<td>资格与界面来源</td>
+<td>用于完整追溯发行链</td>
+</tr>
+<tr>
+<td>case_id/export_id/replay_id</td>
+<td>调查案、导出与回放</td>
+<td>各自审批、权限和审计</td>
+</tr>
+</tbody>
+</table>
+<p>UUIDv7 可提供时间局部性，但 ID 不是身份凭证或严格全局事件顺序。[S20] trace/span 使用标准互操作字段；对外传入追踪信息视为不可信，限制 baggage 且不承载秘密。[S21]</p>
+<p>所有查询先限定操作者可访问 tenant/site，再查 ID。ID 再长也不能替代后台授权。</p>
+<h2>11.3 事件公共字段</h2>
+<p>schema_version、event_type、event_id、tenant_id、site_id、request_id/subject_refs、trace_id/span_id、producer_id、producer_boot_id、producer_seq、request_seq、occurred_at、observed_at、monotonic_duration_us、policy_revision、sensitivity、payload、evidence_refs、prev_event_hash、event_hash。</p>
+<p>occurred_at 是服务器 UTC，浏览器时间另存 client_reported_at；时区只影响显示。producer_seq 用于发现本生产者序列缺口；request_seq 由单一请求协调器分配。跨服务以因果 links 和 span 树表达，不伪装为严格全局时间顺序。</p>
+<p>原始 append-only 事件不可修改；聚合的 request summary 可以以 revision 更新，但必须能回到原事件。</p>
+<h2>11.4 阶段结果契约</h2>
+<pre><code class="language-json">{
+  &quot;stage&quot;: &quot;capability&quot;,
+  &quot;outcome&quot;: &quot;DENY&quot;,
+  &quot;reason_code&quot;: &quot;OPERATION_NOT_GRANTED&quot;,
+  &quot;proof_kind&quot;: &quot;deterministic&quot;,
+  &quot;confidence&quot;: null,
+  &quot;confidence_status&quot;: &quot;not_applicable&quot;,
+  &quot;rule_revision&quot;: &quot;policy-demo-r3&quot;,
+  &quot;input_refs&quot;: [&quot;art_example&quot;],
+  &quot;facts&quot;: {&quot;required_operation&quot;:&quot;user.password.admin_reset&quot;},
+  &quot;duration_us&quot;: 320
+}
+</code></pre>
+<p>值为纯语义示例，完整机器 Schema 见 schemas。不得对规则检查硬填 100% 置信度。<code>severity</code>、<code>risk_score</code>、<code>probability</code>、<code>confidence</code>、<code>coverage</code> 不共用字段。</p>
+<p>模型结果另存全概率、Noul 值或评分、供应商置信度、校准版本、阈值和采取的动作。可解释文本是独立 explanation，不等同于决策事实；如果来自另一个模型，必须有另一条 model_call_id。</p>
+<h2>11.5 必须记录的事件族</h2>
+<p>request.accepted/completed/aborted；stage.started/completed/skipped；identity.bound/refreshed/revoked/mismatch；page.accepted/rejected；grant.issued/denied/expired/revoked；crypto.decode/encode/failed/fallback；model.requested/responded/timeout/cache_hit；agent.started/tool_called/tool_result/artifact_created/finished；origin.forward_intent/response/unknown；evidence.captured/sealed/expired/deleted/read；policy.proposed/tested/approved/published/rolled_back；audit.gap/backpressure/durability_failed；console.query/export/decrypt/replay。</p>
+<p>不可采样事件：每请求最小记录、每个实际安全判定、资格变更、模型调用、Agent 工具调用、管理动作、证据访问与完整性异常。调试 span 和性能采样可独立配置，但不能让 required 审计消失。</p>
+<h2>11.6 可解释拒绝图</h2>
+<p>final decision 保存 cause_event_ids、required_checks、completed_checks、skipped_checks、coverage_gaps 和 origin_state。后台展示“身份通过 → 无相应页面动作 → 拒绝 → 模型未执行”，而不是“模型没有发现异常”。明确区分 WAF 策略拒绝、已验证业务拒绝、疑似攻击及内部服务失败。</p>
+<p>审计字段的一致性、来源质量和敏感内容处理参考 OWASP 的日志设计原则；本事件格式是 Xshield 自定义契约。[S22]</p>
+<p class="sourcefile">源文件：docs/11-audit-event-contract.md</p></section><section id="ch12"><h1>12 内容证据采集、秘密隔离与加密证据库</h1>
+<h2>12.1 “全量”分为事件完整与内容完整</h2>
+<p>事件完整：每个被接收的请求、每个实际判定和每次模型/工具调用必须有记录，不因结果正常被抽样丢弃。</p>
+<p>内容完整：对已配置的受保护 API、HTML、Jev/Agent 逻辑输入输出及解密结果，保存全部可取得内容；对认证秘密、超限、未支持、未取得的部分显式标记，绝不默认为完整。全量不是所有秘密明文复制到 ClickHouse 或 stdout。</p>
+<p>默认 full_protected：受保护业务请求/响应、页面证据、模型和 Agent 逻辑载荷全量进入加密证据库；公开二进制静态资源按内容寻址引用已保存版本。业务密码、OTP、原始认证凭证、分享秘密、密钥等走强制秘密排除/替代策略。受批准的短时 forensic_raw 可提高指定业务载荷的保真度，但永不将 Xshield 主密钥、供应商 API key、KMS 解封密钥或进程完整环境变量写入证据。</p>
+<p>任何脱敏或排除都输出清单并将 fidelity=redacted，而不是标 byte_exact。用户要求逐字节取证的端点必须在启用前明确其秘密策略、期限、审批和容量；不暗中改变采集语义。[S22]</p>
+<h2>12.2 请求和响应证据版本</h2>
+<table>
+<thead>
+<tr>
+<th>kind</th>
+<th>内容</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>request_ingress</td>
+<td>网关收到的 HTTP 语义头及实体</td>
+<td>还原真实输入、重复头和编码</td>
+</tr>
+<tr>
+<td>request_decoded</td>
+<td>业务解密后、标准化前的载荷</td>
+<td>检查真实明文和转换正确性</td>
+</tr>
+<tr>
+<td>request_normalized</td>
+<td>带解析版本的业务对象</td>
+<td>对应资格、Schema 与模型证据</td>
+</tr>
+<tr>
+<td>request_to_origin</td>
+<td>实际重建发送的请求</td>
+<td>检查内容是否被偷偷更换</td>
+</tr>
+<tr>
+<td>response_from_origin</td>
+<td>源站返回的头与实体</td>
+<td>原始响应来源</td>
+</tr>
+<tr>
+<td>response_decoded</td>
+<td>解密/解析后的真实响应</td>
+<td>页面和资格发行证据</td>
+</tr>
+<tr>
+<td>response_to_client</td>
+<td>改写/再加密后实际返回内容</td>
+<td>确认是否已释放敏感内容</td>
+</tr>
+<tr>
+<td>model_input/output</td>
+<td>实际 API 逻辑载荷及输出</td>
+<td>调用复核，不事后猜模板</td>
+</tr>
+<tr>
+<td>agent_tool_input/output</td>
+<td>调用参数、结果、文件清单</td>
+<td>重建 Agent 行为</td>
+</tr>
+<tr>
+<td>page/action_manifest</td>
+<td>页面来源和动作候选</td>
+<td>验证有迹可循的依据</td>
+</tr>
+</tbody>
+</table>
+<p>HTTP/2/3 经库解析后的头顺序、压缩帧不是完整线缆级报文；本方案记录 application_semantics/entity_bytes，不自称 PCAP。需要线缆抓包另设严格取证能力，非首版默认。</p>
+<h2>12.3 采集点与对照</h2>
+<p>每个内容产物记录 artifact_id、kind、content_type、content_encoding、byte_length_observed、byte_length_saved、fidelity、capture_status、redaction_manifest_ref、plaintext_commitment、ciphertext_digest、transform_parent_refs 和 policy_revision。</p>
+<p>capture_status：complete、partial_limit、partial_cancelled、unavailable、not_applicable、excluded_policy、expired、deleted、corrupt。相同字节不重复存多份，可引用同一证据但保留用途；去重限制在同安全域及相同保密策略内，避免跨租户存在性泄露。</p>
+<p>原文中的攻击语句在普通业务字段可保存用于审计，不应因“看起来危险”被清理成良性样本。秘密字段的脱敏是单独、有记录的操作。模型实际输入是在发送前固定的版本，记录的是发送的那一份，而不是脱敏规则更新后的版本。</p>
+<h2>12.4 大体积与流式</h2>
+<p>小内容按对象保存；大内容分块压缩并独立 AEAD 加密，manifest 记录 chunk 序号、长度、散列、状态和最终结束标记。缺任一 chunk 均不能标 complete。解压有绝对上限与压缩比上限，防止压缩炸弹。</p>
+<p>建议初始 capture 上限：普通请求 1 MiB、普通响应 8 MiB、模型逻辑载荷按 provider 限制、单工具输出 16 MiB；限额可按端点调整。严格需全量检查的端点超限不放行；可流式端点按明确粒度检查并显示覆盖。提前拒绝恶意超大 body 不要求为了“全量日志”继续无限读取；保存收到部分和拒绝原因。</p>
+<h2>12.5 信封加密与访问</h2>
+<p>每证据对象/分块使用独立随机数据密钥或经审查的密钥派生，AEAD 绑定 tenant/site/artifact/version/chunk 作为 AAD，nonce 保证密钥范围内唯一。数据密钥由 KMS 管理的 KEK 包裹；master key 和解密权限与日志写入者分离。</p>
+<p>对象名不包含真实姓名、病历 ID、账号、Cookie 或 Token。普通索引只有脱敏摘要、受限引用和密文摘要；低熵秘密不得用公开 SHA256 充当匿名化，关联用租户隔离 HMAC。</p>
+<p>使用 EvidenceReadPort 统一授权：读元数据、读脱敏内容、读敏感原文、导出是不同权限。访问前记审批/目的/范围，访问后记实际对象和字节数。敏感原文的临时访问授权短期有效，不能靠长期公开下载 URL。</p>
+<h2>12.6 保留与删除</h2>
+<p>建议初始：解密业务原文 24 小时，脱敏证据和模型调用 7 天，决策索引 30 天，已封存调查案按案设置；这些是工程默认，不是合规结论。所有期限由站点确认，不能无限保存“以后也许有用”的病历和凭证。</p>
+<p>证据到期后查询层立即禁止读取，后台再删除对象/副本并记录 tombstone。对象锁的保留期与删除计划需一致；不要把所有敏感原文默认锁定多年。保留锁可防止指定期限内删除/覆盖，但不证明内容在产生时真实。[S23]</p>
+<p>日志管理人员不能直接解除所有原文加密或抹除完整性告警。既有导出副本和已读取数据无法通过删除原对象收回，文档不得声称可全面撤回泄露内容。</p>
+<p class="sourcefile">源文件：docs/12-evidence-capture-and-vault.md</p></section><section id="ch13"><h1>13 审计存储、耐久性、完整性与容灾</h1>
+<h2>13.1 推荐数据流</h2>
+<pre><code class="language-text">业务阶段生成强类型事件/证据
+    → 隐私分类与内容引用
+    → 有界 AuditSink + 加密本地 journal
+    → 持久确认（按端点等级）
+    → 异步批量投递
+       ├─ ClickHouse：事件/请求/模型检索
+       ├─ 对象库：加密内容、manifest、签名段
+       └─ PostgreSQL：配置、案件、审批、资格 outbox
+    → 索引水位、缺口检测和完整性验证
+</code></pre>
+<p>事件/证据耐久提交与索引可搜索是不同状态。ClickHouse 暂不可用不一定要阻断业务，只要所需 journal 耐久级别和容量仍满足策略；证据不可恢复时不能报告“已完整存档”。</p>
+<h2>13.2 耐久级别</h2>
+<table>
+<thead>
+<tr>
+<th>等级</th>
+<th>确认条件</th>
+<th>能声称什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>memory_only</td>
+<td>仅在有界内存队列</td>
+<td>仅调试，不满足生产安全审计</td>
+</tr>
+<tr>
+<td>local_durable</td>
+<td>加密 journal 的相应数据已持久写入并得到确认</td>
+<td>可承受进程重启；本地磁盘/整机损坏仍有损失窗口</td>
+</tr>
+<tr>
+<td>remote_durable</td>
+<td>另一个受信故障域的持久日志/对象存储完成确认</td>
+<td>按部署模型减少节点丢失窗口，仍须故障测试</td>
+</tr>
+</tbody>
+</table>
+<p>首版受保护请求至少 local_durable；高危请求可要求 remote_durable。生产者记录 durability_ack_at、required_level、achieved_level 和 receipt_id。fsync/磁盘写在专门线程池或进程中执行，绝不阻塞 Tokio worker。</p>
+<h2>13.3 转发前审计屏障</h2>
+<p>ALLOW 的高危请求至少在转发前耐久记录：request.accepted、必要输入证据 manifest、所有必需阶段结果、final decision、origin.forward_intent、实际重建请求引用。没有 receipt 就不向源站释放该请求。</p>
+<p>不能把源站网络发送与 journal 写入变成跨系统原子事务。进程可能在发送成功后、结果事件落盘前崩溃，因此明确 outcome_unknown，由 reconciler 标记；不得自动重发写请求或补造成功日志。</p>
+<p>DENY 也应记录；磁盘耗尽时预留独立的小型紧急事件区。若紧急区也失败，节点退出就绪状态并触发独立监控，不能许诺物理故障下 100% 永不丢失。</p>
+<h2>13.4 journal 实现契约</h2>
+<p>分段追加；段头含 format、producer_boot_id、key_id；记录有长度、CRC/校验、event_id 与密文；定期 seal。启动恢复扫描最后段，识别不完整尾部，保存损坏范围并生成恢复事件。必须有独立配额和高水位，不与系统盘无界争抢。</p>
+<p>投递采用至少一次，event_id 在重试中不变。消费者按事件 ID/版本去重，并验证重复内容一致；相同 ID 不同内容触发 integrity.conflict。ClickHouse 普通 MergeTree 不提供全局唯一约束，不能只靠表主键宣称去重。[S24]</p>
+<p>推荐初版使用查询视图进行基于 event_id 的确定性去重；若换 ReplacingMergeTree，也要处理后台合并前重复。聚合统计从去重逻辑输入产生，不把重试重复计费或重复算攻击。</p>
+<p>避免审计递归：AuditSink 自己的写入、投递和重试不得重新进入用户请求审计管线，否则会无限生成“记录日志的日志”。存储传输按批次/receipt 记录控制事件，故障使用独立紧急通道；管理人员查看、导出或解密证据仍必须产生一次明确的访问审计。AI 对日志的分析也要有任务预算和来源标记，不能让分析产生的日志自动触发无限自分析。</p>
+<h2>13.5 outbox 与资格发行</h2>
+<p>资格与 grant_event outbox 同 PostgreSQL 事务提交，publisher 按 ID 重试发送审计。审计不能独立失败导致“有资格但永无来源事件”。响应释放前等待资格事务成功及该请求要求的审计耐久屏障。</p>
+<p>Xshield 事务只保护本系统状态，不覆盖原站数据库或外部支付。长时模型/网络工作在事务外完成，提交时再验 epoch 和策略版本。[S08]</p>
+<h2>13.6 防篡改</h2>
+<p>每个 producer/shard 的事件形成规范编码的 hash chain，段封存记录末尾序号与链头。对封存 manifest 做数字签名，并将周期性根摘要写到独立控制权限的审计位置。证据密文单独校验摘要，签名密钥不在普通 edge 日志写权限里。</p>
+<p>规范化哈希需排除签名字段并固定字段顺序/编码，版本明确。不同 producer 之间不造全局链；通过请求 DAG 与段清单联接。hash chain 能检测已锚定范围内的改写、缺口或替换，但不能证明生产者记录前未撒谎、也不能识别从未进入系统的流量。</p>
+<h2>13.7 容灾与保留</h2>
+<p>journal 重启恢复、异地副本与 KMS 恢复流程都必须测试。热索引可从加密事件段重建；恢复时保留原 ID、版本和事件时间，新增恢复来源标记。</p>
+<p>ClickHouse TTL 在后台合并时清除数据，不是到秒精确删除；查询与 EvidenceReadPort 必须先执行过期策略，不依赖后台清理及时发生。[S24] 已批准案件可 pin 对象并设置受控保留；解除保留也需要审计。</p>
+<h2>13.8 故障策略</h2>
+<table>
+<thead>
+<tr>
+<th>故障</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ClickHouse 慢/断开</td>
+<td>journal 继续，显示索引水位；积压到配额则背压</td>
+</tr>
+<tr>
+<td>对象库不可用</td>
+<td>内容进入受限本地证据 spool；严格远端级别请求不执行</td>
+</tr>
+<tr>
+<td>journal 磁盘高水位</td>
+<td>限流、停止非必要调试采集、告警；不静默删除必需审计</td>
+</tr>
+<tr>
+<td>required journal 无法持久写</td>
+<td>高危/强制审计端点 503；记录独立紧急事件</td>
+</tr>
+<tr>
+<td>KMS 不可用</td>
+<td>不回退明文；按现有授权缓存密钥的限定寿命或拒绝</td>
+</tr>
+<tr>
+<td>索引有记录但对象缺失</td>
+<td>evidence.missing 告警，禁止伪造空内容为完整</td>
+</tr>
+<tr>
+<td>签名/摘要失败</td>
+<td>隔离证据，标记 corrupt，保留调查痕迹</td>
+</tr>
+</tbody>
+</table>
+<p>严格拒绝与可用性之间的选择写入 site policy 并审批；不可用不自动等同于“用户攻击”。</p>
+<p class="sourcefile">源文件：docs/13-audit-storage-reliability.md</p></section><section id="ch14"><h1>14 按 ID 检索、证据分析与安全回放</h1>
+<h2>14.1 统一调查入口</h2>
+<p>后台顶部全局搜索支持 req_/ev_/dec_/art_/mdl_/agt_/grant_/case_ 以及标准 trace_id。解析 ID 类型后先鉴权，再定位安全域与数据分区。不得凭 ID 中时间或租户字段相信客户端授权。</p>
+<p>request_id 查询返回请求摘要、身份快照、阶段树、来源页面与资格链、解密转换图、模型/Agent 关联、最终动作、源站结果、证据可用性及索引水位。用户从一条模型调用或资格 ID 也能反向定位关联请求。</p>
+<p>新事件尚未进入 ClickHouse 时，查询接口显示 pending + indexed_through，并可按权限从已持久 journal/manifest 读取最近证据；不把“索引还未到”误显示为“没有发生”。</p>
+<h2>14.2 查询能力</h2>
+<p>结构化过滤：时间、站点、operation、decision、reason_code、auth_binding_ref、grant_id、model_version、低置信区间、回退类型、证据完整性、源站结果、延迟范围。</p>
+<p>请求排序分页使用稳定游标与唯一 ID，不使用无上限 OFFSET。限制每次时间窗、扫描字节、行数和执行时间；结果包含实际扫描量和截断标记。</p>
+<p>精确 ID 查询通过 typed ID 的时间局部性和索引桶缩小范围；原始 trace_id 不携时间，用索引中的关联表。首版不为每个事件在 PostgreSQL 建百万级重复 locator；按规模使用 ClickHouse 的次序、查询表/物化视图以及有界热目录。标明 ORDER BY 主要服务的查询路径并实测，而不是依赖一个 Bloom 索引解决所有检索。[S24]</p>
+<h2>14.3 自然语言检索</h2>
+<p>操作者可输入“找出这个版本上线后因 UI 来源缺失而拒绝的改密请求”。Agent 生成可展示的 QueryPlan：时间、站点、过滤、聚合、限制。QueryPlan 经 allowlist AST 校验、权限注入和成本预算后执行，不直接接受 Agent 任意 SQL。</p>
+<p>所有调查工具读取权限不高于发起操作者，结果的字段级脱敏不可被 prompt 关闭。需要敏感内容时新建显式审批，不让 Agent 因“分析需要”自行解锁。回答必须引用 request_id/event_id/artifact_id 和具体片段，区分观察事实、规则解释与推测。</p>
+<h2>14.4 四种回放</h2>
+<p>EVIDENCE_VIEW：展示当时保存的内容、规则、结果；不重新判定。</p>
+<p>DETERMINISTIC_REPLAY：使用冻结的身份/资格快照、规则/适配版本、Clock 输入和原参数，在无网络环境重算硬规则。结果与原记录对比；依赖缺失则 incomplete，不声称复现。</p>
+<p>MODEL_REEVALUATION：同一证据发送给指定模型/模板，形成新的 model_call_id/replay_id，比较概率和结果；不覆盖原结果。供应商版本不可固定时明确不可保证逐次一致。</p>
+<p>SANDBOX_PROTOCOL_REPLAY：隔离测试源站验证协议转换；生产凭证被替代，目的域白名单，写操作需明确测试资源。生产请求重放不是默认功能，另需强审批与副作用检查。</p>
+<h2>14.5 调查包导出</h2>
+<p>包内容：case manifest、事件 JSONL、请求/响应各版本、转换关系、模型输入输出、规则/适配/构建引用、证据摘要及签名验证说明、脱敏与缺失清单。包默认加密，下载授权短时，记录操作者、目的、范围、批准者和字节数。</p>
+<p>导出包不默认附带 live Cookie、API key 或生产连接串。导出有过期和次数限制，但已下载副本不能远程保证删除。证据对照可给安全文本视图或十六进制视图，绝不在后台同源执行被捕获 HTML/JS。</p>
+<h2>14.6 查询性能目标</h2>
+<p>待验证目标：已入热索引的单 request_id 元数据 P95 ≤ 1 秒；完整阶段树 ≤ 2 秒；大原文按大小单独度量。不是所有历史和冷对象都承诺秒开。索引延迟目标、冷存储恢复与并发配额分别在控制台显示。</p>
+<p>必须测试跨租户 ID 探测、任意对象路径、复杂查询耗尽、恶意正则和日志中的提示注入。用户看到 request_id 不等于获得案件或原文访问权。</p>
+<p class="sourcefile">源文件：docs/14-investigation-query-replay.md</p></section><section id="ch15"><h1>15 管理后台与调查 API</h1>
+<h2>15.1 信息架构</h2>
+<p>Overview：防护状态、未覆盖端点、拒绝趋势、证据完整率、journal/索引水位、模型成本。</p>
+<p>Sites：域名与上游、认证 profile、根入口、UI 映射、资格来源、加密版本、模式与覆盖。</p>
+<p>Requests：全请求检索、保存过滤器、详情时间线与关联证据。</p>
+<p>Identity &amp; Grants：认证绑定、代际、资格来源图、过期/撤销与异常串用。</p>
+<p>Models &amp; Agents：调用列表、概率分布、输入/输出、工具链、成本、失败重试与评估。</p>
+<p>Evidence &amp; Cases：敏感证据审批、调查案、保留、验证与导出。</p>
+<p>Rules &amp; Releases：差异、测试、审批、签名、灰度、回滚。</p>
+<p>Operations：节点、队列、存储、密钥引用、告警与审计访问。</p>
+<h2>15.2 请求详情布局</h2>
+<p>顶部摘要：request_id、站点、方法/路由、decision、主要原因、发生时间、身份引用、是否转发、业务结果是否已确认。</p>
+<p>左侧阶段树：每层 outcome、耗时、证明类型、概率/置信度（适用时）、未执行原因。点击节点定位右侧证据。</p>
+<p>内容页签：输入与输出；界面来源；资源操作资格；加密转换；Jev 判别；Agent 关联；审计完整性。</p>
+<p>原文默认脱敏折叠；解密查看单独授权。字节版本与 JSON 视图可对照，展示截断长度、字符编码、格式化是否改变字节。风险颜色不代替文字标签，界面“ALLOW”旁明确实际检查范围。</p>
+<h2>15.3 后台身份与权限</h2>
+<p>Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据；SensitiveEvidenceReader：审批范围内读原文；PolicyAuthor：提交候选；PolicyApprover：审批；ReleaseOperator：发布已签名工件；AuditAdministrator：保留与完整性运维；SystemAdmin：基础配置但不自动获得全部原文读取权。</p>
+<p>高危原文导出、全站降级、权限扩大、关键签名操作要求再认证及独立审批。拒绝作者自批高危变更。控制台 MFA、CSRF、会话超时、每站访问范围、管理员操作审计为首版要求。</p>
+<h2>15.4 API 最小集（自定义契约）</h2>
+<table>
+<thead>
+<tr>
+<th>方法与路径</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>POST /control/v1/search</td>
+<td>结构化 QueryPlan，返回游标和水位</td>
+</tr>
+<tr>
+<td>GET /control/v1/requests/{request_id}</td>
+<td>聚合摘要、阶段、覆盖和关联</td>
+</tr>
+<tr>
+<td>GET /control/v1/requests/{request_id}/events</td>
+<td>不可变事件分页</td>
+</tr>
+<tr>
+<td>GET /control/v1/model-calls/{model_call_id}</td>
+<td>逻辑调用与实际尝试、输入输出引用</td>
+</tr>
+<tr>
+<td>GET /control/v1/agent-runs/{agent_run_id}</td>
+<td>子调用、工具、产物和权限快照</td>
+</tr>
+<tr>
+<td>GET /control/v1/artifacts/{id}</td>
+<td>证据状态、长度、保密和完整性</td>
+</tr>
+<tr>
+<td>POST /control/v1/artifacts/{id}/access</td>
+<td>申请受限原文访问</td>
+</tr>
+<tr>
+<td>POST /control/v1/cases</td>
+<td>建立调查案与证据集合</td>
+</tr>
+<tr>
+<td>POST /control/v1/replays</td>
+<td>异步安全回放任务</td>
+</tr>
+<tr>
+<td>POST /control/v1/exports</td>
+<td>加密调查包导出任务</td>
+</tr>
+<tr>
+<td>POST /control/v1/candidates/{id}/validate</td>
+<td>类型、依赖、扩权和覆盖检查</td>
+</tr>
+<tr>
+<td>POST /control/v1/candidates/{id}/publish</td>
+<td>发布已审批工件，不直接接受自由脚本</td>
+</tr>
+</tbody>
+</table>
+<p>浏览器探针仅能访问 /__xshield/v1/bootstrap/events/prepare，不能访问管理 API。API path 中的 ID 均需按 tenant/site 和资源权限再验，不使用“知道 ID 就可读取”。</p>
+<h2>15.5 交互和错误语义</h2>
+<p>查询成功但索引未完成：200 + completeness/pending，并提供可重试水位；长任务 202 + job_id。后台未认证/无权限分别 401/403；扫描超限 429/422；依赖不可用 503。响应不泄露敏感对象是否存在。</p>
+<p>所有列表使用游标和受限排序字段。多租户筛选在服务端注入，不信任页面传来的 tenant_id。查询、解密查看、导出和回放均有自己的 request_id 并写管理审计，避免审计工具成为无记录旁路。</p>
+<h2>15.6 第一版不做</h2>
+<p>不内嵌可执行源站页面，不提供任意 SQL 控制台，不一键重放生产写请求，不默认开放跨站原文全文搜索，不让 Agent 自动对流量下发永久封禁或发布新权限规则。可增加经过批准的自动告警，不等于赋予自动修改准入权。</p>
+<p class="sourcefile">源文件：docs/15-console-and-api.md</p></section><section id="ch16"><h1>16 Rust 代码架构与模块边界</h1>
+<h2>16.1 Workspace 结构</h2>
+<pre><code class="language-text">xshield/
+  crates/
+    xshield-domain/          # 值对象、不变量、纯判定、领域事件
+    xshield-contracts/       # API/事件DTO、Schema、协议版本
+    xshield-ports/           # 状态、模型、秘密、证据、时钟接口
+    xshield-application/     # 请求/响应/会话/资格用例编排
+    xshield-policy/          # 规则编译、图检查、确定性执行
+    xshield-provenance/      # 页面、动作、资源映射验证
+    xshield-protocol/        # 内容解析与加密适配编排
+    xshield-audit/           # 必需审计API、journal、manifest
+    xshield-adapters/        # pg/clickhouse/s3/model/keys/wasm
+    xshield-edge/            # Pingora入口及HTTP生命周期
+    xshield-control/         # Axum管理API和管理鉴权
+    xshield-worker/          # 任务、索引、分析Agent及恢复
+  web/console/              # TS/React；只调用控制API
+  web/sensor/               # TS→普通JS；按站注入
+  plugins/                  # 签名的声明式/WASM/隔离JS适配包
+  schemas/ migrations/ config/ docs/ tests/ xtask/
+</code></pre>
+<p>这是目标源码布局，不是要求首日创建几十个空 crate。首版可先合并相近内部模块，只有形成独立测试、依赖或发布边界才拆 crate。Cargo workspace 共享依赖、锁文件和工具配置，避免各 crate 漂移。[S25]</p>
+<h2>16.2 单向依赖</h2>
+<p>领域层不能依赖 HTTP、数据库、模型 SDK、异步运行时或管理 UI。DTO 不直接成为领域对象，边界必须显式校验。ports 只依赖 domain；application 依赖 domain/ports/policy；adapter 实现 ports；可执行程序负责装配。contract 与 domain 通过显式转换连接，不把 serde_json::Value 传遍全系统。</p>
+<pre><code class="language-text">入口/装配 → application → domain
+                  ↓
+                 ports ← adapters
+policy/provenance → domain
+</code></pre>
+<p>禁止 domain → adapters，禁止 policy 直接查询 ClickHouse，禁止 evidence reader 调用浏览器 UI，禁止通过全局 ServiceLocator 绕过端口。构建图检查在 CI 执行；测试替身实现同一 ports。</p>
+<h2>16.3 强类型与不可变上下文</h2>
+<p>RequestId、AuthBindingId、Epoch、OperationId、GrantId、ArtifactRef、TenantId 使用 newtype，避免字符串互换。Secret 不实现明文 Debug/Display，使用明确生命周期的秘密包装。</p>
+<p>RawRequest、DecodedRequest、AuthenticatedRequest、CheckedRequest 分别表达处理状态；CheckedRequest 构造器仅由成功的政策用例调用。OriginSender 只接受 CheckedRequest 或显式受批准的 CompatibilityRequest，后者必须携带覆盖缺口和批准引用。</p>
+<p>RequestContext 保存不可变的身份快照、配置版本、取消令牌、deadline 和 AuditContext。阶段输出新对象，不在一个巨大的 mutable context 中到处改字段。</p>
+<h2>16.4 Port 契约</h2>
+<p>IdentityVerifier 验证本次认证及继承；GrantStore 精确查询/条件提交；ActionResolver 返回有限候选；ProtocolAdapter decode/encode；ModelJudge 返回类型化信号；EvidenceVault 保存/读取受限证据；AuditSink 提交并返回耐久 receipt；Clock 提供 wall/monotonic 时间；OriginSender 控制转发。</p>
+<p>每个 Port 明确错误类型、超时、可重试性、幂等、线程安全、取消语义、审计责任和资源预算。借 trait 复用能力，不为只有一个简单函数的模块强造泛化层。</p>
+<h2>16.5 错误与资源</h2>
+<p>领域错误用具体 enum 表达违反约束；应用错误区分 invalid_input/denied/dependency_unavailable/timeout/cancelled/internal。thiserror 等仅作实现选择；不以错误 message 字符串分支。顶层附加 context 不得自动打印完整请求或秘密。</p>
+<p>避免在 async 中持有锁跨 await；不在 Tokio worker 做 fsync、CPU 大解析或同步压缩。所有队列有界，获得并发许可后再分配大缓冲。网络、模型、数据库和插件 deadline 从请求预算衍生；取消后要收敛任务并生成终态审计。</p>
+<h2>16.6 可复用性</h2>
+<p>将身份验证、协议转换、规则判定、证据保存分别抽象；禁止复制整套业务流程只为新增站点。站点差异放签名 profile/adapter，不散布 <code>if site == ...</code>。字段解析器、编码器、脱敏器和证据 manifest 共用稳定契约，未知版本拒绝或明确升级。</p>
+<p>库默认无 unsafe；确需 FFI/unsafe 的模块需独立边界、SAFETY 注释、测试及审查。Rust 内存安全不能代替协议和授权测试。</p>
+<p class="sourcefile">源文件：docs/16-rust-code-architecture.md</p></section><section id="ch17"><h1>17 开发规范：必须进入代码评审与 CI</h1>
+<h2>17.1 规范用词</h2>
+<p>MUST 为合并门槛；SHOULD 为默认做法，偏离需解释；MAY 为可选。模块职责、外部效果、失败和日志都属于设计的一部分，不能以“后面再补”为借口合并关键路径。</p>
+<h2>17.2 结构与命名</h2>
+<p>MUST：一模块一项主要职责，依赖单向；业务语义使用领域名字。<code>utils.rs</code>、<code>common.rs</code> 不作为不明职责的堆场；共享代码须有明确主题和至少一个合理复用点。</p>
+<p>SHOULD：普通业务函数控制在约 80 行以内、模块约 500 行以内；解析器、状态机表和生成代码可例外，但 PR 解释边界。限制用于促使拆分，不以机械切函数替代清晰逻辑。</p>
+<p>MUST：保持入口薄、用例编排清晰、纯计算可独立测试；不为“高扩展”提前做自定义消息总线、反射容器和无限泛型。crate 公共 API 最小化，优先 pub(crate)。</p>
+<h2>17.3 注释与文档</h2>
+<p>每个 crate/module 说明职责、信任边界、主要类型、允许依赖和外部效果。公共 API 写 rustdoc：输入、返回、不变量、错误、是否会产生副作用与简短用例。</p>
+<p>身份轮换、nonce、资格发行、状态检查、加密 AAD、证据落盘屏障必须解释“为什么”和并发边界，不能只写“调用函数”。所有 unsafe 块有 SAFETY 前提和证明责任；TODO 必须关联 issue/验收项，不留无主 TODO。</p>
+<p>复杂状态转换用表格/测试链接替代长篇流水账。代码变更同时更新相关协议与设计；文档示例来自可验证 fixture。Rust API 习惯与公共接口一致性可参照官方 API Guidelines。[S26]</p>
+<h2>17.4 日志规范</h2>
+<p>业务日志用 tracing 结构化字段，MUST 不使用 println!/dbg! 输出生产日志。必需安全事件只走 AuditSink，不依赖日志级别或 span 采样。异步 span 采用正确的 instrument/传播方式，不跨 await 长持 entered guard。[S07]</p>
+<p>每个安全分支至少包含 request_id、stage、outcome、reason_code、policy_revision、duration 和 evidence_refs。异常记录 error_kind/retryable，不泄露原始 body、凭证或连接串。日志消息说明发生了什么，字段说明谁/哪条请求/依据何在，避免同一错误逐层重复堆栈。</p>
+<p>禁止 <code>#[instrument]</code> 自动捕获整个 request、token 或密钥；默认 <code>skip_all</code> 再白名单字段。普通 Debug 类型也不得包含未标注秘密。生产 panic 处理器、崩溃转储、临时文件与 stderr 同样受秘密政策约束。</p>
+<h2>17.5 错误处理与取消</h2>
+<p>生产外部输入路径禁止 unwrap/expect/panic；确有不可达不变量需说明并测试，测试代码可适用例外。禁止吞错 <code>let _ = ...</code>，尤其 AuditSink、资格写入和证据保存失败必须有策略。</p>
+<p>错误只在负责处理/映射的边界记录一次主要日志。所有可重试操作定义上限、指数退避和抖动；请求转发不得自动重试非幂等动作。每个后台任务有 owner、取消、deadline 和结束事件。</p>
+<h2>17.6 数据与安全</h2>
+<p>输入验证在边界完成，领域对象构造器拒绝非法状态。SQL 参数化，租户域从已认证操作者注入，不由客户端 JSON 直接指定。路径、URL、主机名与文件名均经用途校验，防 SSRF/路径穿越。</p>
+<p>禁止自研密码学、硬编码生产密钥、关闭 TLS 验证、允许任意插件 hostcall。秘密类型不序列化；必要证据保留使用专用受限路径。逻辑日志记录资格引用，不打印整个资格所属的用户资料。</p>
+<h2>17.7 测试和合并门槛</h2>
+<p>每个安全规则至少：允许、拒绝、缺失、过期/撤销、跨身份、并发/重试、依赖故障、审计断言。关键解析/转换使用 property testing 与 fuzz。状态和 replay 使用可注入 Clock 与固定 fixture，测试不访问生产服务。</p>
+<p>CI：fmt、clippy、cargo test、doc test、schema/example validation、依赖图、依赖/许可证审查、secret scan、迁移验证、接口兼容检查。Clippy lint 按 workspace 管理；不能为了通过 CI 全局 allow 警告。[S27]</p>
+<p>覆盖率只辅助。新安全分支需要断言覆盖，关键不变量用性质测试；不以总体行覆盖率替代边界测试。压力/模糊/浏览器矩阵可夜间执行，但影响安全语义的最小回归必须阻止合并。</p>
+<h2>17.8 分支与 Agent 开发规范</h2>
+<p>每项任务一个有边界的工作单元。先读本库与 AGENTS.md，再改协议/代码；不得用 mock 测试冒充真实集成通过。临时 worktree、构建产物和下载模型设配额，任务结束清理自有临时资源，不删除他人工作或未合并分支。</p>
+<p>AI 生成的代码与人工代码同门槛。修改授权根、秘密处理、加密、审计耐久和回退策略需要额外审查。不得通过跳过测试、降低保护模式、关闭日志来“修复”失败。</p>
+<h2>17.9 Definition of Done</h2>
+<p>行为与失败路径实现；契约及文档一致；单元/集成/安全测试通过；必需日志和证据可检索；没有秘密泄露；超时/配额/取消有效；迁移和回滚已验证；PR 说明残余风险与尚未执行的测试。未完成项标清，不宣称部署就绪。</p>
+<p class="sourcefile">源文件：docs/17-development-standards.md</p></section><section id="ch18"><h1>18 数据模型、契约版本及存储责任</h1>
+<h2>18.1 主实体</h2>
+<p>Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签名；AuthBinding/CredentialGeneration：认证组合、epoch 与期限；PageEvidence/ActionDescriptor/ActionGrant：界面操作来源；ResourceGrant：精确操作资格；RequestRecord/StageEvent：执行事实；Artifact/Transform：内容与转换；ModelCall/AgentRun：AI 调用；Case/Approval/Export/Replay：调查生命周期。</p>
+<p>实体不能以数据库自增 ID 暴露跨租户信息。业务 user/order ID 作为带类型的受限引用，不和 Xshield 自己的管理 ID 混用。对外展示脱敏引用，原值按保密策略加密。</p>
+<h2>18.2 存储分工</h2>
+<table>
+<thead>
+<tr>
+<th>存储</th>
+<th>保存</th>
+<th>不保存/不负责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PostgreSQL</td>
+<td>配置、认证、资格、短事务、审批、案件、outbox</td>
+<td>不用于每个大报文全文扫描</td>
+</tr>
+<tr>
+<td>ClickHouse</td>
+<td>事件、请求摘要、模型调用统计、按 ID 和时间查询</td>
+<td>不提供在线资格真值、全局唯一保证</td>
+</tr>
+<tr>
+<td>对象证据库</td>
+<td>加密报文、模型/Agent 载荷、页面、manifest、签名段</td>
+<td>不直接公开下载、不充当可搜索明文日志</td>
+</tr>
+<tr>
+<td>本地 journal/spool</td>
+<td>远端中断期间的耐久缓冲</td>
+<td>不作为无限容量长期唯一副本</td>
+</tr>
+<tr>
+<td>运行时缓存</td>
+<td>短时已验证配置、候选、遥测</td>
+<td>不恢复过期或已撤销身份</td>
+</tr>
+</tbody>
+</table>
+<h2>18.3 事务边界</h2>
+<p>资格发行与 outbox 一起提交；更新认证 epoch 与关闭旧资格的逻辑关联同事务或通过 epoch 校验使旧资格立即不可用。只更新 status 字段的异步删除不能成为唯一撤销机制。</p>
+<p>附带 SQL 是可审查草案，生产前需迁移测试、并发隔离和索引验证。RLS 可作防御纵深，但应用仍必须使用完整 tenant/site 作用域；连接池中租户会话设置使用事务局部机制，避免连接复用串域。</p>
+<h2>18.4 协议规则</h2>
+<p>外部 API 与 audit event 含 schema_version。未知 critical enum 或版本拒绝；可扩展 metadata 只能保存非授权数据。金额、资源 ID、期限等使用明确类型，不靠浮点或 JS 自动类型转换。</p>
+<p>时间 UTC RFC3339，内部单调耗时单独保存。可选字段区分 null/not_provided/not_applicable/unavailable，不能空字符串兼任所有状态。概率在 [0,1]，分布和允许数值误差、NaN/Infinity 拒绝需专门校验。</p>
+<h2>18.5 Schema 清单</h2>
+<p>schemas/audit-event.schema.json：强类型审计公共字段与 outcome/信心约束。</p>
+<p>schemas/artifact-manifest.schema.json：加密证据、长度、fidelity、保留与转换引用。</p>
+<p>schemas/model-call.schema.json：实际输入输出引用、概率、置信度与版本。</p>
+<p>schemas/site-policy.schema.json：入口、认证、模式、来源与采集策略。</p>
+<p>examples 仅合成数据；scripts/validate_library.py 检查语法、Schema、引用和演示链。校验通过不代表数据库/网关/模型已实现。</p>
+<h2>18.6 兼容演进</h2>
+<p>增加字段优先可选并给清晰默认；改变授权语义升 major。每个版本带读写兼容矩阵、迁移脚本和回放测试。旧证据保持原版本，可用只读转换器展示新视图，但不能改写历史事实。策略和解析器的版本与数据库迁移版本独立记录。</p>
+<p class="sourcefile">源文件：docs/18-api-and-data-models.md</p></section><section id="ch19"><h1>19 部署、隔离、升级与运行策略</h1>
+<h2>19.1 首版部署</h2>
+<p>生产目标 Linux x86_64/aarch64 容器。macOS 可开发，Windows 使用 Linux 容器/WSL；不宣称所有 Pingora 平台具有同等支持。[S03]</p>
+<p>基础部署：edge、control、worker；PostgreSQL；ClickHouse；S3 兼容证据库；可选独立 OpenJev 推理服务。所有版本固定镜像 digest、Cargo.lock、模型 revision 与适配包哈希，不使用 floating latest 作为发布依据。</p>
+<h2>19.2 网络与源站</h2>
+<p>域名流量进入 Xshield，源站限制直连/备用入口；API 子域、下载与业务 WS 列入覆盖表。入口与控制台分域/分网络，管理 API 不通过业务用户会话访问。内部调用认证并限制网络目的地，模型 worker 无源站管理网络权限。</p>
+<p>WAF 终止 TLS 并重新验证上游证书，固定 upstream allowlist，不接受客户端任意 Host 变成开放代理。浏览器→WAF 与 WAF→源站的信任变化必须在站点接入说明中体现。</p>
+<h2>19.3 密钥与秘密</h2>
+<p>独立管理 TLS、协议适配、WAF session HMAC、票据签名、证据 KEK、日志签名、模型 API key。按用途和站点隔离，轮换带 key_id、并行验证期、撤销与审计；不得把所有密钥装进一个共享配置 JSON。</p>
+<p>密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取，KMS 故障不能退回硬编码默认密钥或明文证据。</p>
+<h2>19.4 配置与升级</h2>
+<p>草稿 → validate → 独立测试 → 审批 → 签名 → shadow → canary → active。数据面固定版本读，旧新构建并行范围明确。控制面丢失连接可使用未过期签名配置，但不得跳过身份/资格存储不可用。</p>
+<p>数据库采用 expand-contract 迁移，先兼容再删旧字段；回滚版本不得复活撤销 epoch。每次升级验证队列 drain、journal seal、未完成请求、插件终止与模型取消。</p>
+<h2>19.5 运行状态</h2>
+<p>liveness 仅说明进程存活；readiness 根据必要配置、状态存储和审计耐久性判断；推理不可用是否撤 readiness 依赖该节点承接的模型必需端点。拒绝流量尖峰不自动认定业务故障或自动降级。</p>
+<p>自动化指标：资格发行失败、绑定串用、无来源操作、解密覆盖、兼容比例、模型低信心/超时、journal 剩余空间、索引延迟、证据缺失/摘要失败、原文读取与大导出。</p>
+<h2>19.6 备份与恢复</h2>
+<p>PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与独立权限复制；签名验证材料和 KMS 恢复流程同样不可缺少。恢复演练包括身份 epoch、过期资格、保留 tombstone、未完成请求和重复投递。密钥丢失导致证据不可读应记录为不可恢复，而不是显示空白。</p>
+<p>首版不作跨区域强一致承诺。新增多区域时先给出故障域、RPO/RTO、网络分区策略和实际演练报告。</p>
+<p class="sourcefile">源文件：docs/19-deployment-operations.md</p></section><section id="ch20"><h1>20 测试策略与验收矩阵</h1>
+<h2>20.1 分层测试</h2>
+<p>单元：纯政策、ID/时间/字段校验、同主体续期与换账号隔离。性质测试：任意目标/动作扩张不应通过精确资格；不同租户同 ID 不串域；输入排序/重复键不会引入解析差异。Fuzz：HTTP/JSON/压缩/协议适配/插件/事件解码。</p>
+<p>集成：PostgreSQL 条件提交、outbox、journal 崩溃恢复、ClickHouse 重复事件和水位、证据加密/读取授权、模型 timeout/cancel。端到端：受控浏览器 + 含有已知授权缺陷的测试源站，验证 Xshield 附加流程，不访问真实业务用户数据。</p>
+<p>审计测试是功能测试的一部分：每个结果的 event_id、stage、cause、input/output refs 与完整性清单均有断言。stdout 中没有报文，不代表证据库已留存；二者分别验证。</p>
+<h2>20.2 关键验收组</h2>
+<table>
+<thead>
+<tr>
+<th>组</th>
+<th>用例范围</th>
+<th>必须满足</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>IDENTITY</td>
+<td>新 Cookie、A/B 拼接、冲突认证、刷新、换租户、旧响应</td>
+<td>认证链不能混搭或继承错误账本</td>
+</tr>
+<tr>
+<td>FLOW</td>
+<td>列表/创建、无来源直达、TTL 内复用、共享、隐藏组件</td>
+<td>只认可有效动作与目标</td>
+</tr>
+<tr>
+<td>CRYPTO</td>
+<td>三种接管、响应不可见、版本变更、AAD/签名失败</td>
+<td>实际检查/重建内容一致，失败不被洗成兼容</td>
+</tr>
+<tr>
+<td>POLICY</td>
+<td>读写、字段、批量、父子对象、GraphQL、角色功能</td>
+<td>不把见过 ID 扩展为操作权</td>
+</tr>
+<tr>
+<td>MODEL</td>
+<td>NONE、低信心、Noul、提示注入、超时、缓存、版本变动</td>
+<td>不伪造 confidence，不覆盖硬拒绝</td>
+</tr>
+<tr>
+<td>AUDIT</td>
+<td>每层、跳过、证据链、断网、磁盘满、重启、去重</td>
+<td>必需事件可追溯，缺失可见</td>
+</tr>
+<tr>
+<td>CONSOLE</td>
+<td>ID 横向访问、原文审批、导出、自然语言查询</td>
+<td>不绕过租户/敏感权限，查看本身可审计</td>
+</tr>
+<tr>
+<td>RECOVERY</td>
+<td>重放、取消、未知源站结果、撤权、备份恢复</td>
+<td>不重发非幂等写，不复活旧资格</td>
+</tr>
+</tbody>
+</table>
+<p>机器化验收目录见 examples/acceptance-cases.json，包含独立 case_id、步骤、期望和关联不变量；这里只提供设计用例，不声称已经对运行产品执行。</p>
+<h2>20.3 误拒与安全收益</h2>
+<p>本产品主动禁止的无资格直达、换浏览器未重获资格，不计为违反需求的误报；应另计 intentional_flow_denial 与恢复体验。被认可流程中的正常请求因竞态/映射错误拒绝，才是实现误拒。</p>
+<p>固定测试身份、源站版本和授权/流程矩阵，分别比较 baseline、加密可见性、确定性资格、UI 来源、模型增量。不要把账本收益全部算作 JEV 模型收益。</p>
+<h2>20.4 并发/故障必测</h2>
+<p>登录切换与旧列表响应；双刷新乱序；授权查询与撤销交叉；多个 edge 重复消费 nonce；资格事务提交但 outbox publisher 崩溃；转发后终态日志未写；内容已持久但索引未到；对象丢块/重复 event_id 不同内容；模型请求已计费但响应超时；节点 journal 与 KMS 同时不可用。</p>
+<p>每个故障注入注明实际故障范围，进程 kill 测试不等于整盘损坏测试，单节点测试不等于跨区域一致性测试。</p>
+<h2>20.5 发布闸门</h2>
+<p>P0 硬不变量全部通过；无资格与凭证串用拒绝可解释；秘密不进入普通日志；审计断网恢复有测试；高危操作模型停机策略明确；真实业务协议闭环通过；性能和容量达批准预算；未知项在控制台可见；可回滚版本已验证。</p>
+<p>Schema/Markdown/示例校验只是文档质量检查，不能替代以上产品验收。</p>
+<p class="sourcefile">源文件：docs/20-testing-and-acceptance.md</p></section><section id="ch21"><h1>21 性能、容量与成本模型</h1>
+<h2>21.1 先度量，再承诺</h2>
+<p>模型并行判断数不能代替独立 HTTP QPS。每请求延迟分解：代理、解密/解析、身份、账本、UI 映射、规则、模型队列+计算、审计耐久屏障、源站网络、响应资格提交和内容写入。</p>
+<p>初始目标：无模型的常规新增 P95 不超过 15 ms；模型同步路径按端点单独给预算；热 request_id 查询 P95 ≤1 秒；索引可见延迟 P95 ≤5 秒。均为待测目标，远端耐久、正文大小和硬件会显著影响结果，不是已验证指标。</p>
+<h2>21.2 队列和隔离</h2>
+<p>每站点请求并发、模型 token、Agent 总预算、WSS 连接、证据写带宽、最大解压字节、查询扫描量分开限额。日志的关键事件和普通调试队列分离。严格级别依赖失败时背压/拒绝，不能为了吞吐悄悄采样掉全请求安全事件。</p>
+<p>模型调用比例应由端点策略与已缓存有效动作映射决定，不每个心跳调用一次。保留随机影子样本评价普通请求，避免只测试规则已发现的攻击。</p>
+<h2>21.3 存储计算示例</h2>
+<p>示例假设（非实测）：每请求摘要 2 KiB；12 个阶段事件各 0.75 KiB；请求/响应等内容合计 60 KiB；10% 请求模型附加 8 KiB。平均约 71.8 KiB/请求，未压缩、未计副本、数据库索引与重复证据。</p>
+<p>10 QPS：86.4 万请求/天，约 63.5 GB/天。</p>
+<p>100 QPS：864 万请求/天，约 635.2 GB/天。</p>
+<p>1000 QPS：8640 万请求/天，约 6.35 TB/天。</p>
+<p>十进制 GB/TB；计算式为 QPS × 86400 × 71.8 × 1024。全量证据成本不可按普通 nginx access log 的体积估计。压缩率、内容去重、模型概率大小与每层记录长度必须用真实样本测量。</p>
+<h2>21.4 长期容量</h2>
+<p>metadata_bytes/day = requests/day × (summary_bytes + stage_count × event_bytes)。</p>
+<p>content_bytes/day = Σ按端点请求数 × 实际保留内容大小。</p>
+<p>journal_capacity ≥ 峰值必需写入速率 × 允许远端中断时间 × 余量。</p>
+<p>storage_capacity = Σ每日量 × 保留天数 × 副本系数 + 索引/恢复余量。</p>
+<p>模型成本按实际输入/输出/缓存/请求费与所用 provider 计量；记录报价版本和计量缺失，不在文档固定臆测价格。用户全量审计需求优先通过分层、保留与压缩满足，而不是静默抽样请求。</p>
+<h2>21.5 账本与连接</h2>
+<p>10 万会话 × 每会话 1000 条资格 = 1 亿条；按每条裸数据 128 字节约 12.8 GB，尚未计索引/JSON/副本。需要限制活跃资格数，避免每次看列表生成无限重复记录。</p>
+<p>10 万活跃页，15 秒一次 1 KB 心跳约 6667 条/秒，全天原样留存约 576 GB。遥测可按短时聚合保存，必要调用和用于决策的证据片段保留；聚合不影响全请求审计。</p>
+<h2>21.6 压测报告要求</h2>
+<p>记录硬件、Rust/依赖版本、TLS 后端、请求长度分布、协议、站点数、会话数、模型配置、日志级别/耐久级别、加密方式、冷/热缓存、失败比例。报告 P50/P95/P99、最大内存、CPU/GPU、写放大、队列水位与拒绝原因。测试环境的峰值不直接作为生产保证。</p>
+<p class="sourcefile">源文件：docs/21-performance-capacity.md</p></section><section id="ch22"><h1>22 分阶段实施与交付物</h1>
+<h2>M0 基础契约与骨架</h2>
+<p>交付：Cargo workspace、领域类型、原因码、阶段事件与证据 Schema、Mock Ports、管理身份、站点禁用默认配置、CI/文档校验。审计从第一阶段开始，不等主功能结束后补 printf。</p>
+<p>验收：同一合成 request_id 可看到阶段树，未实现功能显式 not_configured；示例不会被误认为运行网关。</p>
+<h2>M1 身份与有迹可循闭环</h2>
+<p>交付：真实业务认证绑定、合法刷新/账号切换、根入口、列表/创建资源资格、UI 动作模板、目标/字段校验、有效期、默认拒绝、分享例外。</p>
+<p>验收：A/B Cookie 拼接、评论作者 ID 改密、无来源直达、旧响应污染等被拒绝；同会话有效资格可复用；新浏览器必须重获。</p>
+<h2>M2 双向协议接管</h2>
+<p>交付：一种真实加密请求/响应适配、冻结载荷重建、三种覆盖模式、探针及保留策略、构建版本共存。</p>
+<p>验收：实际解密内容与源站接收语义一致，Hook 关闭不会给强制路径降级；请求/响应可见性分别展示。</p>
+<h2>M3 完整日志后台</h2>
+<p>交付：journal、ClickHouse、对象证据库、签名 manifest、全请求检索、阶段树、原文审批、转换对照、导出、故障恢复和索引水位。</p>
+<p>验收：按任一请求/模型/资格 ID 完整追链；每个缺失有状态；查看与导出也记录；高危审计失败不继续无证据执行。</p>
+<h2>M4 模型与调查</h2>
+<p>交付：Jev/OpenJev Provider adapter、有限候选匹配、校准、概率日志、调查 Agent、QueryPlan、只读回放；固定模型和模板版本。</p>
+<p>验收：模型输出不覆盖硬拒绝，Noul 不伪造 confidence；实际模型输入输出可查看；模型停机行为按端点策略执行；没有实测不宣称检测率。</p>
+<h2>M5 持续适配与产品化</h2>
+<p>交付：构建监测、隔离 Agent、候选协议/UI 映射、双身份测试、签名发布、灰度回滚；容量调优与部署指南。</p>
+<p>验收：改变 JS 名称、封装和密钥分发后可验证适配或安全失败；扩大资格的变更不自动发布。</p>
+<h2>依赖关系与并行</h2>
+<p>日志 Schema、核心身份/资格和基础后台可并行，但运行时所有行为须使用同一事件契约。协议、UI 和模型团队不得各造一套 request_id。以里程碑验收而非预估天数承诺；每项任务提供输入、接口、失败矩阵、测试和 DoD。</p>
+<p>首个演示站点应包含公开评论、私有订单、自己改密、管理员重置、共享和故意不安全的源站接口，以证明 Xshield 的控制，而非只展示正常业务。</p>
+<p class="sourcefile">源文件：docs/22-delivery-roadmap.md</p></section><section id="ch23"><h1>23 剩余风险与待验证决策</h1>
+<h2>23.1 不能靠调整措辞消除的边界</h2>
+<p>流程自洽不等于业务 ACL 正确；已认可的页面错误暴露管理动作时需要显式高危映射约束。完整凭证可复制，双 Cookie 绑定不是设备证明。前端被冻结，不能保证心跳永续。看不到的源站撤权不能立即推断。源站副作用与 WAF 日志不构成跨系统原子事务。</p>
+<p>这些边界不否定用户选择的严格流程规则；它们必须作为 coverage/assurance 单独显示，避免销售和后台把 FLOW_ALLOWED 写成 BUSINESS_AUTHZ_PROVEN。</p>
+<h2>23.2 待验证列表</h2>
+<table>
+<thead>
+<tr>
+<th>决策</th>
+<th>首版方向</th>
+<th>完成条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pingora 请求/响应等待点</td>
+<td>Rust 数据面首选</td>
+<td>验证无提前转发、取消和缓冲限制；不满足则替换适配层</td>
+</tr>
+<tr>
+<td>基础规则引擎</td>
+<td>复用既有受测引擎</td>
+<td>许可证、性能、检测覆盖和故障策略确认</td>
+</tr>
+<tr>
+<td>TLS 后端</td>
+<td>受支持且测试通过的构建</td>
+<td>不将实验性选项当默认稳定能力</td>
+</tr>
+<tr>
+<td>Jev/OpenJev</td>
+<td>可替换，先影子测试</td>
+<td>任务级误放、误拒、延迟和成本可接受</td>
+</tr>
+<tr>
+<td>UI 动态状态</td>
+<td>编译映射 + 受验证响应</td>
+<td>仅客户端可控状态不升级成可信证据</td>
+</tr>
+<tr>
+<td>全量原文保留</td>
+<td>加密库、秘密排除、24h 初始值</td>
+<td>站点明确范围、体积、访问与期限</td>
+</tr>
+<tr>
+<td>高危审计耐久</td>
+<td>可要求 remote_durable</td>
+<td>故障域与延迟预算通过测试</td>
+</tr>
+<tr>
+<td>热资格缓存</td>
+<td>首版使用事务状态</td>
+<td>撤销语义明确后再引入缓存</td>
+</tr>
+<tr>
+<td>多区域</td>
+<td>首版不强制</td>
+<td>主权威区/分区/恢复方案与实测</td>
+</tr>
+<tr>
+<td>HTTP3/业务流式</td>
+<td>后续独立适配</td>
+<td>每消息/字节释放前检查的覆盖定义</td>
+</tr>
+</tbody>
+</table>
+<h2>23.3 不用的捷径</h2>
+<p>不以模型高分替代绑定；不全局关闭 CSP；不让无效封包回退明文；不以 source response=200 自动授予权限；不把日志原文直接喂给可操作生产的 Agent；不把实时 stdout 当耐久证据；不声称 hash chain 无条件防删；不把 JSON 语法校验当上线验收。</p>
+<h2>23.4 决策更新</h2>
+<p>待验证事项由 owner、实验记录、ADR、通过标准和结论管理。产品名、Rust 主语言、无业务 SDK、无来源拒绝是已确定约束，不反复提为待选。变更这些约束需明确新的产品决定。</p>
+<p class="sourcefile">源文件：docs/23-risks-and-open-decisions.md</p></section><section id="ch24"><h1>24 架构决策记录（ADR）</h1>
+<h2>ADR-001｜采用附加 UI 流程准入而非推断全部 ACL</h2>
+<p>状态：采纳。理由：符合“不走认可入口就拒绝”的明确产品规则。后果：部分原有直达流程被有意拒绝；普通用户在完全获准流程中错误获得高权按钮仍需补规则。既有源站权限保留，不能由 WAF 放行覆盖。</p>
+<h2>ADR-002｜认证与资格强绑定并版本化</h2>
+<p>状态：采纳。Cookie 只作随机索引；以实际业务凭证、epoch 和 scope 验证。合法同上下文刷新与换账号分离。后果：需要认证适配器、并发版本和旧响应防污染。</p>
+<h2>ADR-003｜Rust 主干，允许边界明确的非 Rust 组件</h2>
+<p>状态：采纳。三 Rust 程序 + 独立 TS 探针/管理台；OpenJev 或浏览器执行器可用生态原语言。后果：跨语言边界通过版本化 API，核心授权不分散到脚本。</p>
+<h2>ADR-004｜冻结实际解密参数后重建源站请求</h2>
+<p>状态：采纳。避免明文镜像与实际密文不一致。后果：要验证完整协议、响应方向和重建语义；不兼容必须显示缺口。</p>
+<h2>ADR-005｜精确资格由代码执行，Jev 只选受限候选</h2>
+<p>状态：采纳。模型可参与 UI 语义识别，但不自行扩大操作或目标。后果：部分动态站点需模板特调；低置信/无匹配不发行资格。</p>
+<h2>ADR-006｜全请求审计与内容证据分层</h2>
+<p>状态：采纳。必要事件不采样；大报文、实际模型/Agent 载荷入加密对象库；秘密和超限显式标记。后果：有持久化成本、权限与保留管理，不把全量等同于明文日志。</p>
+<h2>ADR-007｜审计 journal 独立于 tracing/OTel</h2>
+<p>状态：采纳。安全事件需要耐久、去重和证据状态，不能依赖调试日志采样。后果：增加 AuditSink 与恢复逻辑；OTel 继续提供性能关联。</p>
+<h2>ADR-008｜PostgreSQL 授权真值，ClickHouse 查询副本</h2>
+<p>状态：采纳。授权需要精确版本与条件提交，分析需要扫描聚合。后果：outbox、索引水位与至少一次去重必须实现。</p>
+<h2>ADR-009｜按端点配置严格/兼容，不由客户端降级</h2>
+<p>状态：采纳。保留用户要求的 Hook 失败回退，但限制为服务端已批准范围。后果：兼容阶段的检查缺口不能假装安全或发资格。</p>
+<h2>ADR-010｜默认只读回放与受控适配发布</h2>
+<p>状态：采纳。调查和复现实验不能重复执行生产副作用。后果：协议测试使用测试源站，权限扩张与原文读取需要审批。</p>
+<h2>ADR-011｜模块化单仓优先于微服务堆叠</h2>
+<p>状态：采纳。以清晰 crate/trait/进程权限边界形成高内聚低耦合。后果：不要求每领域单独服务，性能或权限需要出现后再拆分部署。</p>
+<h2>ADR-012｜不把规则命中伪装成模型置信度</h2>
+<p>状态：采纳。proof_kind、outcome、概率、confidence、风险和覆盖独立。后果：前后端必须支持 null/不适用与未知，不能要求每层都有一个百分数。</p>
+<p class="sourcefile">源文件：docs/24-adrs.md</p></section><section id="ch25"><h1>25 来源与核验登记</h1>
+<p>核验日期：2026-09-17。以下均为一手官方文档、标准或项目维护者材料。此处登记技术依据，不表示这些来源已经实现 Xshield。本库的数据结构、阈值、流程组合、部署和验收均为项目设计。版本会变化，实施时固定并复核依赖。</p>
+<h2>S01｜OWASP Authorization Cheat Sheet</h2>
+<p>https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html</p>
+<p>用途：默认拒绝、每请求授权、资源/操作与外部执行位置。</p>
+<h2>S02｜OWASP Transaction Authorization Cheat Sheet</h2>
+<p>https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html</p>
+<p>用途：服务端状态顺序、执行前授权及检查/执行边界。</p>
+<h2>S03｜Cloudflare Pingora 官方仓库</h2>
+<p>https://github.com/cloudflare/pingora</p>
+<p>用途：Rust 网络框架、HTTP/1/2、TLS 后端及实验性/平台支持说明。</p>
+<h2>S04｜Axum 官方 crate 文档</h2>
+<p>https://docs.rs/axum/latest/axum/</p>
+<p>用途：管理 API 框架候选。</p>
+<h2>S05｜SQLx 官方 crate 文档</h2>
+<p>https://docs.rs/sqlx/latest/sqlx/</p>
+<p>用途：Rust 数据库访问组件。</p>
+<h2>S06｜OpenTelemetry Rust 官方文档</h2>
+<p>https://opentelemetry.io/docs/languages/rust/</p>
+<p>用途：Traces/Metrics/Logs 文档状态为 Beta；版本边界需隔离。</p>
+<h2>S07｜tracing 官方 crate 文档</h2>
+<p>https://docs.rs/tracing/latest/tracing/</p>
+<p>用途：结构化事件、span 和异步跟踪。</p>
+<h2>S08｜PostgreSQL Explicit Locking</h2>
+<p>https://www.postgresql.org/docs/current/explicit-locking.html</p>
+<p>用途：行锁、事务并发与持锁期限。</p>
+<h2>S09｜OWASP LLM Prompt Injection Prevention</h2>
+<p>https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html</p>
+<p>用途：外部内容不可信、工具与模型权限边界。</p>
+<h2>S10｜OWASP Session Management</h2>
+<p>https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html</p>
+<p>用途：会话标识、期限、身份改变与轮换。</p>
+<h2>S11｜RFC 8725: JWT Best Current Practices</h2>
+<p>https://www.rfc-editor.org/rfc/rfc8725.html</p>
+<p>用途：令牌验证、用途和上下文混淆防护。</p>
+<h2>S12｜OWASP WebSocket Security</h2>
+<p>https://cheatsheetseries.owasp.org/cheatsheets/WebSocket_Security_Cheat_Sheet.html</p>
+<p>用途：Origin、消息、会话与长连接约束。</p>
+<h2>S13｜MDN Subresource Integrity</h2>
+<p>https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Subresource_Integrity</p>
+<p>用途：被修改脚本的完整性匹配。</p>
+<h2>S14｜Chrome Page Lifecycle API</h2>
+<p>https://developer.chrome.com/docs/web-platform/page-lifecycle-api</p>
+<p>用途：后台页面冻结、丢弃与执行暂停。</p>
+<h2>S15｜TypeSafe Primitives (Questions)</h2>
+<p>https://docs.typesafe.ai/primitives</p>
+<p>用途：Choice/Score/Noul、有限问题与约 32k 请求预算。</p>
+<h2>S16｜TypeSafe Confidence</h2>
+<p>https://docs.typesafe.ai/confidence</p>
+<p>用途：概率分布、confidence 含义及任务校准。</p>
+<h2>S17｜TheoLeeCJ/OpenJev 官方仓库</h2>
+<p>https://github.com/TheoLeeCJ/openjev</p>
+<p>用途：独立开放实现，不是官方 Jev 权重。</p>
+<h2>S18｜TypeSafe State</h2>
+<p>https://docs.typesafe.ai/concepts/state</p>
+<p>用途：模型 state 输入组织和支持边界。</p>
+<h2>S19｜Wasmtime Security</h2>
+<p>https://docs.wasmtime.dev/security.html</p>
+<p>用途：WASM 沙箱与宿主能力边界。</p>
+<h2>S20｜RFC 9562: UUID</h2>
+<p>https://www.rfc-editor.org/rfc/rfc9562.html</p>
+<p>用途：UUIDv7 格式、时间局部性与安全考虑。</p>
+<h2>S21｜W3C Trace Context</h2>
+<p>https://www.w3.org/TR/trace-context/</p>
+<p>用途：traceparent、trace-id、parent-id 互操作格式。</p>
+<h2>S22｜OWASP Logging Cheat Sheet</h2>
+<p>https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html</p>
+<p>用途：事件关联、完整性、敏感数据、故障及日志保护。</p>
+<h2>S23｜Amazon S3 Object Lock</h2>
+<p>https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html</p>
+<p>用途：WORM 保留、治理与合规模式边界。</p>
+<h2>S24｜ClickHouse MergeTree</h2>
+<p>https://clickhouse.com/docs/reference/engines/table-engines/mergetree-family/mergetree</p>
+<p>用途：排序、稀疏索引、分区和后台 TTL 合并。</p>
+<h2>S25｜Cargo Workspaces</h2>
+<p>https://doc.rust-lang.org/cargo/reference/workspaces.html</p>
+<p>用途：workspace 依赖、包和构建组织。</p>
+<h2>S26｜Rust API Guidelines</h2>
+<p>https://rust-lang.github.io/api-guidelines/</p>
+<p>用途：公共接口设计规范参考。</p>
+<h2>S27｜Clippy Lints</h2>
+<p>https://rust-lang.github.io/rust-clippy/master/index.html</p>
+<p>用途：Rust 静态检查与 lint 配置。</p>
+<h2>历史输入</h2>
+<p>用户当前对话的最后决定优先于早期建议。已完整读取 v2 设计及示例配置，并结合后续会话绑定、UI 操作来源、Rust 与全量审计要求重构。旧文件仅作为来源，不作为新版并行规范。文件哈希见 reference/input-provenance.json。</p>
+<p class="sourcefile">源文件：docs/25-source-register.md</p></section><section id="ch26"><h1>26 运维与调查 Runbook</h1>
+<h2>RB-01 用户提供 request_id，排查被拦截</h2>
+<p>先验操作者 site 权限 → 查询 request summary 与索引水位 → 看主要 cause_event_ids → 区分绑定、来源、资源范围、模型、基础设施拒绝 → 打开对应界面/资格/模型证据 → 比较 policy/adapter/build 版本 → 判断是预期流程拒绝还是实现误拒 → 建案/候选修复。不得直接给该用户 wildcard 资格或关闭全站检查。</p>
+<p>成功输出：原始事实、当时规则、主要原因、证据引用、可执行的安全恢复入口和是否需要配置修复。调查报告中的推测单列。</p>
+<h2>RB-02 JS 更新后大量 UI_ACTION_NOT_AVAILABLE</h2>
+<p>核实 WAF 观察到的真实构建指纹；按版本/端点分组，而非相信客户端声称的版本。比较旧动作映射；触发隔离适配；测试通过后灰度。必要兼容回退由审批限定站点、构建、操作和期限，仍保持身份及审计，结束时验证覆盖恢复。</p>
+<h2>RB-03 解密失败突增</h2>
+<p>区分无效 Xshield 封包与已确认源站协议变更；前者不得回退。查看 transform_id、适配版本和原始/响应覆盖；验证密钥轮换、AAD、序列和并发。模型不负责猜解密成功，验签失败不保存为有效明文。</p>
+<h2>RB-04 journal 高水位或对象库断连</h2>
+<p>检查剩余空间、写速率与可支撑中断时间；确认远端持久状态；限制非必要调试并增加受控资源；不得删除未确认投递的必需段。达到严格阈值让相关节点停止接收高危请求。恢复后按 event_id 去重投递并验证无缺口。</p>
+<h2>RB-05 证据读取/导出</h2>
+<p>确认目的、案件、范围和操作者权限；申请敏感等级；批准后由 EvidenceReadPort 解密返回；操作写审计。导出提供加密包、签名/摘要和缺失清单。日志 HTML 以安全文本显示，不在控制台同源渲染。</p>
+<h2>RB-06 模型误放或提示注入嫌疑</h2>
+<p>固定原 model_call_id、input/output artifact、模型/模板/阈值版本；核对模型是否越过代码硬约束；使用只读副本重复评估；新的结果写新调用，不改旧记录。临时关闭某项模型自动采用可以，但不能同步关闭确定性资格。</p>
+<h2>RB-07 源站执行结果未知</h2>
+<p>有 forward_intent 无确认业务结果时，标 outcome_unknown；不根据 WAF 允许推断成功，不自动重放非幂等请求。优先原站已有幂等/状态查询流程；没有则由业务方核实。保留发送字节和中断位置，不能声称 WAF 已保证 exactly-once。</p>
+<h2>RB-08 密钥或凭证泄露</h2>
+<p>定位 secret 类型和影响域 → 撤销/轮换 → 失效相关绑定/epoch → 关闭受影响读取权限 → 调查谁读过/导出过证据 → 记录泄露窗口与不可撤回副本。不能只删除一条日志就宣布风险消失。</p>
+<h2>RB-09 备份恢复</h2>
+<p>恢复状态/证据/密钥引用 → 验证签名段 → 重放 outbox/journal 至索引 → 过期/撤销检查 → 处理未完成请求 → 受控 canary → 恢复流量。恢复时间与数据缺口实测记录，不以备份文件存在判定恢复成功。</p>
+<p class="sourcefile">源文件：docs/26-runbooks.md</p></section><section id="ch27"><h1>27 站点规则编写指南与评审清单</h1>
+<h2>27.1 一个站点从哪里开始</h2>
+<p>登记域名/上游与备用入口，确认真实业务认证方式；先识别根页面、列表、详情、创建、共享与高危动作。每个 operation 给出方法/路由、输入 Schema、目标提取和字段视图，拒绝模糊“所有 /api 都一样”的配置。</p>
+<p>在真实 UI 流程中采集受控测试流量，用至少 A/B 两账号及必要管理账号验证。前端可见的代码和文案用于发现候选，不自动代表当前身份可使用。</p>
+<h2>27.2 订单链</h2>
+<p>根入口：已认证首页返回订单列表入口；列表请求的 customerId 受当前主体或已批准关系约束；成功响应指定路径提取 order.id；只发行 orders.read/customer_detail；创建成功可发行新订单读取资格。更新/退款必须有各自页面动作与字段条件，不能由读取资格继承。</p>
+<h2>27.3 评论与改密反例</h2>
+<p>评论读取返回 authorId 时仅增加观察关系，公开资料读取若允许需明确额外发行映射。普通设置 change_self_password 限定 current_principal。不存在 admin_reset 候选即拒绝，即使 ID 已出现。管理员页面进入本身也要来自已认可根链，不能先直接打开漏洞页面再用按钮洗白。</p>
+<h2>27.4 分享</h2>
+<p>仅 GET 指定分享视图为公开例外，或验证有效限资源分享凭证后建立 LIMITED_SHARE。患者 ID、附件 ID、关联订单等不要泛化为同主体所有资源。分享发行操作和只读资格分开，不能收到任意 ID 就补签。</p>
+<h2>27.5 请求/响应和缓存</h2>
+<p>响应必须来自预期上游并符合业务成功 Schema。数据由 request snapshot 固定给正确 epoch，先提交资格再向客户端交付。304 与缓存仅恢复同安全域、已验证、未过期的证据；新浏览器缓存不能跳过入口。</p>
+<h2>27.6 评审问题</h2>
+<p>这条规则最初从哪里获得可信前提？攻击者能改列表主体或 UI 字段吗？哪些数据可以发行资格、哪些只是内容？是否有读→写、对象→关联对象、同租户→跨租户扩张？模型不确定时是否拒绝？原始协议和 Hook 都必须满足什么？发生密钥变化或日志失败时会怎样？有没有 A/B、字段夹带、批量、重放、旧响应测试？</p>
+<h2>27.7 发布工件</h2>
+<p>config、入口图、认证 profile、UI mapping、crypto adapter、测试向量、通过报告、model policy、审计保留规则、权限扩张 diff、批准者、签名、回滚目标一并固定。样例 activation=disabled，在解释器实现和站点测试通过前不能直接当生产配置加载。</p>
+<p class="sourcefile">源文件：docs/27-rule-authoring-cookbook.md</p></section><section id="ch28"><h1>28 对话决策汇总与需求追踪</h1>
+<h2>28.1 最终决策，不回退到旧建议</h2>
+<table>
+<thead>
+<tr>
+<th>讨论主题</th>
+<th>最终采用</th>
+<th>明确不采用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>部署</td>
+<td>前置代理、自动注入普通 JS、按站适配</td>
+<td>强制业务引入前后端 SDK</td>
+</tr>
+<tr>
+<td>心跳和堆栈</td>
+<td>关联与风险证据</td>
+<td>在线、点击或堆栈即证明权限</td>
+</tr>
+<tr>
+<td>加密</td>
+<td>实际协议终止/替换后重建，双向可见</td>
+<td>一份明文镜像证明另一份密文内容</td>
+</tr>
+<tr>
+<td>适配失败</td>
+<td>站点/端点受控 compatibility</td>
+<td>客户端声称 Hook 失败就自动放行</td>
+</tr>
+<tr>
+<td>资格</td>
+<td>当前身份绑定下的资源、操作、字段和视图</td>
+<td>ID 出现过就得到该对象全部权限</td>
+</tr>
+<tr>
+<td>一天会话</td>
+<td>服务端与 Cookie 双重到期，可配置</td>
+<td>仅靠浏览器过期，或一天内换身份仍继承</td>
+</tr>
+<tr>
+<td>直接 URL</td>
+<td>已有有效资格可复用，无资格拒绝</td>
+<td>为无依据的书签、粘贴 ID 自动放宽</td>
+</tr>
+<tr>
+<td>新浏览器与新资源</td>
+<td>重新通过认可入口取得资格</td>
+<td>自动迁移旧浏览器账本或猜测未展示资源</td>
+</tr>
+<tr>
+<td>创建成功</td>
+<td>原认证快照下提交资格，再返回响应</td>
+<td>等异步日志稍后推导权限</td>
+</tr>
+<tr>
+<td>分享</td>
+<td>明确例外入口，限权发行，继续记录</td>
+<td>分享路径下所有请求免检、所有 ID 授权</td>
+</tr>
+<tr>
+<td>身份串用</td>
+<td>WAF Cookie 和有效业务凭证强绑定</td>
+<td>WAF_A 与 Session_B 混用或静默换绑</td>
+</tr>
+<tr>
+<td>凭证更新</td>
+<td>验证继承链；续期与换账号分别处理</td>
+<td>看到任何新 Cookie 就继承全部账本</td>
+</tr>
+<tr>
+<td>垂直/操作越权</td>
+<td>对应界面操作来源 + 精确操作/目标约束</td>
+<td>根据评论作者 ID 推导密码重置权限</td>
+</tr>
+<tr>
+<td>用户有真实权限但无界面来源</td>
+<td>严格模式仍然拒绝</td>
+<td>为恢复隐藏 ACL 而无依据放行</td>
+</tr>
+<tr>
+<td>JEV</td>
+<td>有限候选语义匹配、风险信号、置信记录</td>
+<td>全历史精确查 ID、直接任意发放资格</td>
+</tr>
+<tr>
+<td>AI 进化</td>
+<td>适配候选、独立验证、受控发布</td>
+<td>在线错误触发自动扩权、生产副作用测试</td>
+</tr>
+<tr>
+<td>日志</td>
+<td>每请求、每层、AI 与转换内容均可关联</td>
+<td>普通 log 一把打印所有秘密，或采样安全审计</td>
+</tr>
+<tr>
+<td>主语言</td>
+<td>Rust 主干；TS、必要模型/浏览器运行时边界</td>
+<td>为语言统一重新发明密码学/模型引擎</td>
+</tr>
+</tbody>
+</table>
+<p>这份记录整理的是本会话确定的产品选择，而非声称这些机制已运行。历史 v1/v2 文件哈希保存在 reference/input-provenance.json；不将旧稿复制为并列有效规格。</p>
+<h2>28.2 需求到实现文档</h2>
+<table>
+<thead>
+<tr>
+<th>需求</th>
+<th>主文档</th>
+<th>验收组</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RQ-01、RQ-19、RQ-20</td>
+<td>02、16、17、22</td>
+<td>DEV</td>
+</tr>
+<tr>
+<td>RQ-02、RQ-04</td>
+<td>07</td>
+<td>SENSOR</td>
+</tr>
+<tr>
+<td>RQ-03、RQ-05、RQ-06、RQ-17</td>
+<td>03、08、12</td>
+<td>CRYPTO</td>
+</tr>
+<tr>
+<td>RQ-07、RQ-08、RQ-11、RQ-12</td>
+<td>05、06、09、27</td>
+<td>FLOW、GRANT</td>
+</tr>
+<tr>
+<td>RQ-09、RQ-10</td>
+<td>04</td>
+<td>AUTH</td>
+</tr>
+<tr>
+<td>RQ-13</td>
+<td>06、09、27</td>
+<td>SHARE</td>
+</tr>
+<tr>
+<td>RQ-14</td>
+<td>10、19</td>
+<td>AGENT</td>
+</tr>
+<tr>
+<td>RQ-15、RQ-16、RQ-18</td>
+<td>11、12、13、14、15</td>
+<td>AUDIT、MODEL</td>
+</tr>
+</tbody>
+</table>
+<p>完整机器可读验收用例见 examples/acceptance-cases.json；其中 planned 表示待实现测试，不能计入当前文档验证的通过数量。</p>
+<h2>28.3 边界接受记录</h2>
+<p>用户主动接受“未走认可流程就拒绝”的可用性取舍。设计保留安全恢复入口，但它只是重新取得资格，不是绕过资格。</p>
+<p>仍需验证的边界：站点是否错误地通过正常界面提供敏感操作；原认证是否有可信验证来源；加密是否可适配；端点覆盖是否完整；隐式撤权是否可及时观察；长流和大包如何保证捕获；模型是否达到本站误匹配预算。不能通过日志或更大上下文消除这些信息与一致性缺口。</p>
+<h2>28.4 阅读和维护规则</h2>
+<p>产品改变先更新本章与 RQ/INV，再通过 ADR 记录原因，随后改 Schema/配置/测试。文档、模板、演示默认值必须一致。源站更新只允许修复映射，不得把未批准的管理入口自动加入 root。最终评审应检查“原来要拦的路径，是否因兼容处理被重新打开”。</p>
+<p class="sourcefile">源文件：docs/28-conversation-decisions-and-traceability.md</p></section><section id="ch29"><h1>29 控制 API 与审计责任清单</h1>
+<p>本章为自定义接口设计，不是已运行服务。所有 <code>/control/v1</code> 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。</p>
+<table>
+<thead>
+<tr>
+<th>方法与路径</th>
+<th>用途</th>
+<th>必需审计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET /control/v1/requests/{request_id}</td>
+<td>请求概要和完整性状态</td>
+<td>console.request.read</td>
+</tr>
+<tr>
+<td>GET /control/v1/requests/{request_id}/events</td>
+<td>事件游标分页和阶段树</td>
+<td>console.events.read</td>
+</tr>
+<tr>
+<td>GET /control/v1/requests/{request_id}/evidence</td>
+<td>证据manifest清单</td>
+<td>console.manifest.read</td>
+</tr>
+<tr>
+<td>GET /control/v1/model-calls/{model_call_id}</td>
+<td>模型调用、实际输入输出引用</td>
+<td>console.model.read</td>
+</tr>
+<tr>
+<td>GET /control/v1/agent-runs/{agent_run_id}</td>
+<td>Agent 运行及工具树</td>
+<td>console.agent.read</td>
+</tr>
+<tr>
+<td>GET /control/v1/artifacts/{id}</td>
+<td>单个证据manifest</td>
+<td>console.manifest.read</td>
+</tr>
+<tr>
+<td>POST /control/v1/search</td>
+<td>受限查询AST，非任意SQL</td>
+<td>console.query.executed</td>
+</tr>
+<tr>
+<td>POST /control/v1/artifacts/{id}/access</td>
+<td>申请解密/原文查看能力</td>
+<td>evidence.access.requested</td>
+</tr>
+<tr>
+<td>GET /control/v1/artifacts/{id}/content</td>
+<td>获批后读取，短时作用域能力</td>
+<td>evidence.read，含批准引用</td>
+</tr>
+<tr>
+<td>POST /control/v1/cases</td>
+<td>建立调查案例</td>
+<td>case.created</td>
+</tr>
+<tr>
+<td>POST /control/v1/cases/{id}/items</td>
+<td>把获准证据加入案例</td>
+<td>case.evidence.added</td>
+</tr>
+<tr>
+<td>POST /control/v1/cases/{id}/analyze</td>
+<td>启动只读调查Agent</td>
+<td>agent.started，工具/模型独立事件</td>
+</tr>
+<tr>
+<td>POST /control/v1/replays</td>
+<td>离线规则评估，不送原站</td>
+<td>replay.requested/completed</td>
+</tr>
+<tr>
+<td>POST /control/v1/exports</td>
+<td>带用途/范围/审批的导出任务</td>
+<td>export.requested/approved/downloaded</td>
+</tr>
+<tr>
+<td>GET /control/v1/jobs/{id}</td>
+<td>查看任务进度与错误</td>
+<td>console.job.read</td>
+</tr>
+<tr>
+<td>POST /control/v1/sites/{id}/candidates</td>
+<td>提交配置候选</td>
+<td>policy.proposed</td>
+</tr>
+<tr>
+<td>POST /control/v1/candidates/{id}/validate</td>
+<td>受控验证</td>
+<td>policy.tested</td>
+</tr>
+<tr>
+<td>POST /control/v1/candidates/{id}/approve</td>
+<td>审批不等于部署</td>
+<td>policy.approved</td>
+</tr>
+<tr>
+<td>POST /control/v1/candidates/{id}/publish</td>
+<td>灰度签名发布</td>
+<td>policy.published</td>
+</tr>
+<tr>
+<td>POST /control/v1/sites/{id}/rollback</td>
+<td>回退已验证版本</td>
+<td>policy.rolled_back</td>
+</tr>
+<tr>
+<td>GET /control/v1/audit/health</td>
+<td>各层watermark、gap与存储状态</td>
+<td>console.health.read</td>
+</tr>
+</tbody>
+</table>
+<h2>29.1 查询契约</h2>
+<p>请求包含 tenant/site（服务端仍校验）、时间窗、类型化过滤器、允许的sort、limit、cursor。禁止自由SQL或可注入表达式。request_id精确查找不要求用户猜日期；先经热定位目录到所属时间桶。返回 index_watermark、as_of、has_gaps、next_cursor。分页令牌绑定调用者作用域和查询摘要，不能跨租户复用。</p>
+<p>对未获权ID返回不泄露存在性的统一结果。证据读取另走授权，不因能查摘要就能解密原包。大内容预览与下载分离，浏览器不执行证据中的脚本。</p>
+<h2>29.2 任务语义</h2>
+<p>长任务返回202和job_id，调用方查询进度。任务状态为queued/running/succeeded/failed/cancelled；失败附稳定原因码、可重试性和最后耐久点。幂等键绑定主体、动作和参数摘要；不同参数不复用。取消保留此前产生的审计证据，禁止删掉历史伪装任务没有发生。</p>
+<h2>29.3 权限角色</h2>
+<p>Observer 看脱敏概要；Investigator 执行受限查询和申请证据；SensitiveEvidenceReader 在审批范围看受限内容；PolicyAuthor 提交候选；PolicyApprover 批准；ReleaseOperator 发布；AuditAdministrator 管理保留与完整性；KeyAdministrator 管理密钥但默认不能解密业务证据。支持职责分离和紧急break-glass，但紧急操作也须理由、短时权限和独立审计。</p>
+<h2>29.4 错误契约</h2>
+<p>统一结构包含error_code、message_safe、request_id、retryable、next_action；禁止堆栈、凭证、资源归属和内部SQL进入客户端错误。401用于管理认证要求，403用于已认证的禁止操作，409用于代际/修订冲突，429用于预算限制，503用于必需依赖不可用。具体重试不自动重新执行生产业务。</p>
+<p class="sourcefile">源文件：docs/29-api-endpoint-catalog.md</p></section></main></html>

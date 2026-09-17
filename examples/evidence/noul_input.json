@@ -1,0 +1,11 @@
+{
+  "example_only": true,
+  "note": "Xshield 内部归一化示例，非真实供应商 HTTP 契约",
+  "state": {
+    "operation": "user.password.admin_reset"
+  },
+  "question": {
+    "type": "noul",
+    "prompt": "本次操作的敏感程度"
+  }
+}
