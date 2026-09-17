@@ -56,6 +56,12 @@ pub struct OperationPolicy {
 }
 
 impl OperationPolicy {
+    /// Returns the stable operation identifier compiled into this policy.
+    #[must_use]
+    pub const fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
+
     /// Validates cross-field admission policy invariants.
     ///
     /// # Errors

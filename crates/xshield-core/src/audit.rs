@@ -138,6 +138,16 @@ pub enum ReasonCode {
     SkippedBySiteUnavailable,
     /// Required audit durability was not obtained.
     AuditDurabilityFailed,
+    /// A truncated crash tail was repaired before accepting traffic.
+    AuditTailRecovered,
+    /// The forward intent reached the required durability boundary.
+    OriginForwardIntentRecorded,
+    /// A response was received from the selected origin.
+    OriginResponseReceived,
+    /// Origin side effects cannot be determined after a proxy failure.
+    OriginOutcomeUnknown,
+    /// Trusted wall-clock time was unavailable for admission.
+    ClockUnavailable,
     /// The request ended without an active site implementation.
     RequestNotConfigured,
 }
@@ -184,6 +194,11 @@ impl ReasonCode {
             Self::SiteConfigUnavailable => "SITE_CONFIG_UNAVAILABLE",
             Self::SkippedBySiteUnavailable => "SKIPPED_BY_SITE_UNAVAILABLE",
             Self::AuditDurabilityFailed => "AUDIT_DURABILITY_FAILED",
+            Self::AuditTailRecovered => "AUDIT_TAIL_RECOVERED",
+            Self::OriginForwardIntentRecorded => "ORIGIN_FORWARD_INTENT_RECORDED",
+            Self::OriginResponseReceived => "ORIGIN_RESPONSE_RECEIVED",
+            Self::OriginOutcomeUnknown => "ORIGIN_OUTCOME_UNKNOWN",
+            Self::ClockUnavailable => "CLOCK_UNAVAILABLE",
             Self::RequestNotConfigured => "REQUEST_NOT_CONFIGURED",
         }
     }

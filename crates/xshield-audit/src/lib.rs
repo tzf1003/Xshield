@@ -306,6 +306,18 @@ impl LocalJournal {
             healthy: self.healthy,
         }
     }
+
+    /// Returns the producer boot ID stored in the active segment header.
+    #[must_use]
+    pub fn producer_boot_id(&self) -> String {
+        Uuid::from_bytes(self.identity.boot_id).to_string()
+    }
+
+    /// Returns the next sequence available to a caller holding exclusive access.
+    #[must_use]
+    pub const fn next_sequence(&self) -> Option<u64> {
+        self.sequence.checked_add(1)
+    }
 }
 
 fn prepare_directory(directory: &Path) -> Result<(), JournalError> {

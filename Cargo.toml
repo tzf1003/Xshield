@@ -10,6 +10,7 @@ rust-version = "1.94"
 [workspace.dependencies]
 async-trait = "0.1"
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crc32fast = "1"
 openssl = "0.10"
 pingora = { version = "=0.9.0", default-features = false, features = ["openssl", "proxy"] }

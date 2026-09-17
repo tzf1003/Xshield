@@ -1,44 +1,42 @@
+mod durable_audit;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora::{
     Result as PingoraResult,
+    http::ResponseHeader,
     proxy::{ProxyHttp, Session, http_proxy_service},
     server::Server,
     upstreams::peer::HttpPeer,
 };
-use serde::Serialize;
 use std::{
     env,
     error::Error,
     fs,
-    io::{self, Write},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+use xshield_audit::JournalKey;
 use xshield_core::{audit::ReasonCode, identity::UnixSeconds};
-use xshield_gateway::{GatewayConfig, GatewayDecision, MAX_CONFIG_BYTES};
+use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome, MAX_CONFIG_BYTES};
+use zeroize::Zeroizing;
+
+use crate::durable_audit::{
+    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, new_trace_id,
+};
 
 struct Gateway {
     config: Arc<GatewayConfig>,
+    audit: DurableAudit,
 }
 
 struct RequestContext {
     request_id: String,
+    trace_id: String,
+    started_at: Instant,
     decision: Option<GatewayDecision>,
-}
-
-#[derive(Serialize)]
-struct DecisionLog<'a> {
-    event_type: &'static str,
-    request_id: &'a str,
-    method: &'a str,
-    terminal_state: &'static str,
-    admission_outcome: &'static str,
-    admission_reason_code: &'static str,
-    origin_state: &'static str,
-    status: u16,
-    durability: &'static str,
+    admission_audit: Option<AdmissionAudit>,
 }
 
 #[async_trait]
@@ -48,7 +46,10 @@ impl ProxyHttp for Gateway {
     fn new_ctx(&self) -> Self::CTX {
         RequestContext {
             request_id: format!("req_{}", Uuid::now_v7()),
+            trace_id: new_trace_id(),
+            started_at: Instant::now(),
             decision: None,
+            admission_audit: None,
         }
     }
 
@@ -57,19 +58,59 @@ impl ProxyHttp for Gateway {
         session: &mut Session,
         context: &mut Self::CTX,
     ) -> PingoraResult<bool> {
+        if !self.audit.is_ready() {
+            respond_denial(
+                session,
+                503,
+                &context.request_id,
+                ReasonCode::AuditDurabilityFailed,
+            )
+            .await?;
+            return Ok(true);
+        }
         let request = session.req_header();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(UnixSeconds::new(0), |duration| {
-                UnixSeconds::new(duration.as_secs())
-            });
-        let decision = self
-            .config
-            .admit(request.method.as_str(), request.uri.path(), now);
-        context.decision = Some(decision);
-        if let GatewayDecision::Denied(reason) = decision {
-            let body = denial_body(&context.request_id, reason);
-            session.respond_error_with_body(403, body).await?;
+        let method = request.method.as_str().to_owned();
+        let path = request.uri.path().to_owned();
+        let Ok(wall_time) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            respond_denial(
+                session,
+                503,
+                &context.request_id,
+                ReasonCode::ClockUnavailable,
+            )
+            .await?;
+            return Ok(true);
+        };
+        let now = UnixSeconds::new(wall_time.as_secs());
+        let decision = self.config.admit(&method, &path, now);
+        let audit_result = self
+            .audit
+            .commit_admission(AdmissionFacts {
+                request_id: &context.request_id,
+                trace_id: &context.trace_id,
+                method: &method,
+                decision: &decision,
+                duration_us: elapsed_us(context.started_at),
+            })
+            .await;
+        let admission_audit = match audit_result {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.audit.observe_failure(&error);
+                respond_denial(
+                    session,
+                    503,
+                    &context.request_id,
+                    ReasonCode::AuditDurabilityFailed,
+                )
+                .await?;
+                return Ok(true);
+            }
+        };
+        context.decision = Some(decision.clone());
+        context.admission_audit = Some(admission_audit);
+        if decision.outcome == GatewayOutcome::Denied {
+            respond_denial(session, 403, &context.request_id, decision.reason_code).await?;
             return Ok(true);
         }
         Ok(false)
@@ -117,36 +158,51 @@ impl ProxyHttp for Gateway {
         let status = session
             .response_written()
             .map_or(0, |response| response.status.as_u16());
-        let decision = context
-            .decision
-            .unwrap_or(GatewayDecision::Denied(ReasonCode::RequestNotConfigured));
-        let (admission_outcome, reason, origin_state) = match decision {
-            GatewayDecision::Allowed(reason) if error.is_some() => ("ALLOW", reason, "unknown"),
-            GatewayDecision::Allowed(reason) => ("ALLOW", reason, "response_received"),
-            GatewayDecision::Denied(reason) => ("DENY", reason, "not_sent"),
+        let Some(decision) = context.decision.as_ref() else {
+            return;
         };
-        let request = session.req_header();
-        let event = DecisionLog {
-            event_type: "request.completed",
-            request_id: &context.request_id,
-            method: request.method.as_str(),
-            terminal_state: if error.is_some() {
-                "proxy_error"
-            } else {
-                "completed"
-            },
-            admission_outcome,
-            admission_reason_code: reason.as_str(),
-            origin_state,
-            status,
-            durability: "memory_only",
+        let Some(admission) = context.admission_audit.as_ref() else {
+            return;
         };
-        let mut stderr = io::stderr().lock();
-        if serde_json::to_writer(&mut stderr, &event).is_ok() {
-            let _result = writeln!(stderr);
-            let _result = stderr.flush();
+        let result = self
+            .audit
+            .finalize(FinalFacts {
+                request_id: &context.request_id,
+                trace_id: &context.trace_id,
+                method: session.req_header().method.as_str(),
+                decision,
+                admission,
+                status,
+                duration_us: elapsed_us(context.started_at),
+                proxy_error: error.is_some(),
+            })
+            .await;
+        if let Err(error) = result {
+            self.audit.observe_failure(&error);
         }
     }
+}
+
+fn elapsed_us(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+async fn respond_denial(
+    session: &mut Session,
+    status: u16,
+    request_id: &str,
+    reason: ReasonCode,
+) -> PingoraResult<()> {
+    let body = denial_body(request_id, reason);
+    let mut response = ResponseHeader::build(status, Some(4))?;
+    response.insert_header("Content-Type", "application/json")?;
+    response.insert_header("Cache-Control", "private, no-store")?;
+    response.insert_header("X-Xshield-Request-Id", request_id)?;
+    response.set_content_length(body.len())?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session.write_response_body(Some(body), true).await
 }
 
 fn denial_body(request_id: &str, reason: ReasonCode) -> Bytes {
@@ -170,12 +226,15 @@ fn load_config() -> Result<GatewayConfig, Box<dyn Error>> {
 
 fn run() -> Result<(), Box<dyn Error>> {
     let config = Arc::new(load_config()?);
+    let key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
+    let audit = DurableAudit::open(&config, JournalKey::from_hex(&key_hex)?)?;
     let mut server = Server::new(None)?;
     server.bootstrap();
     let mut proxy = http_proxy_service(
         &server.configuration,
         Gateway {
             config: Arc::clone(&config),
+            audit,
         },
     );
     proxy.add_tcp(&config.listen().to_string());

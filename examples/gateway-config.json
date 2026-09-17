@@ -7,6 +7,14 @@
   },
   "tenant_id": "tenant_demo",
   "site_id": "site_demo",
+  "policy_revision": "demo-r4",
+  "audit": {
+    "directory": "target/xshield-audit-demo",
+    "key_id": "journal-key-r1",
+    "producer_id": "edge-demo",
+    "max_bytes": 16777216,
+    "high_watermark_bytes": 12582912
+  },
   "operations": [
     {
       "operation_id": "health.read",

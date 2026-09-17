@@ -7,7 +7,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     net::SocketAddr,
+    path::{Component, Path, PathBuf},
 };
+use xshield_audit::JournalLimits;
 use xshield_core::{
     admission::{
         AdmissionClass, AdmissionProof, AdmissionRequest, CapabilityPolicy, OperationPolicy,
@@ -28,6 +30,8 @@ pub struct GatewayConfig {
     origin: Origin,
     tenant_id: TenantId,
     site_id: SiteId,
+    policy_revision: xshield_core::domain::PolicyRevision,
+    audit: AuditConfig,
     operations: BTreeMap<(String, String), CompiledOperation>,
 }
 
@@ -36,6 +40,14 @@ struct Origin {
     address: SocketAddr,
     server_name: String,
     tls: bool,
+}
+
+#[derive(Debug)]
+struct AuditConfig {
+    directory: PathBuf,
+    key_id: String,
+    producer_id: String,
+    limits: JournalLimits,
 }
 
 #[derive(Debug)]
@@ -52,7 +64,19 @@ struct ConfigDto {
     origin: OriginDto,
     tenant_id: String,
     site_id: String,
+    policy_revision: String,
+    audit: AuditDto,
     operations: Vec<OperationDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuditDto {
+    directory: String,
+    key_id: String,
+    producer_id: String,
+    max_bytes: u64,
+    high_watermark_bytes: u64,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +135,17 @@ impl GatewayConfig {
         }
         let tenant_id = TenantId::parse(dto.tenant_id).map_err(ConfigError::Domain)?;
         let site_id = SiteId::parse(dto.site_id).map_err(ConfigError::Domain)?;
+        let policy_revision = xshield_core::domain::PolicyRevision::parse(dto.policy_revision)
+            .map_err(ConfigError::Domain)?;
+        let audit_directory = validate_audit_directory(dto.audit.directory)?;
+        if !valid_scoped_value(&dto.audit.key_id) {
+            return Err(ConfigError::Invalid("audit.key_id"));
+        }
+        if !valid_scoped_value(&dto.audit.producer_id) {
+            return Err(ConfigError::Invalid("audit.producer_id"));
+        }
+        let audit_limits = JournalLimits::new(dto.audit.max_bytes, dto.audit.high_watermark_bytes)
+            .map_err(ConfigError::Journal)?;
         if dto.operations.is_empty() {
             return Err(ConfigError::Invalid("operations"));
         }
@@ -131,6 +166,13 @@ impl GatewayConfig {
             },
             tenant_id,
             site_id,
+            policy_revision,
+            audit: AuditConfig {
+                directory: audit_directory,
+                key_id: dto.audit.key_id,
+                producer_id: dto.audit.producer_id,
+                limits: audit_limits,
+            },
             operations,
         })
     }
@@ -159,6 +201,48 @@ impl GatewayConfig {
         self.origin.tls
     }
 
+    /// Returns the tenant selected by trusted startup configuration.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the site selected by trusted startup configuration.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+
+    /// Returns the immutable policy revision used for every request.
+    #[must_use]
+    pub const fn policy_revision(&self) -> &xshield_core::domain::PolicyRevision {
+        &self.policy_revision
+    }
+
+    /// Returns the private local journal directory.
+    #[must_use]
+    pub fn audit_directory(&self) -> &Path {
+        &self.audit.directory
+    }
+
+    /// Returns the identifier for the externally supplied journal key.
+    #[must_use]
+    pub fn audit_key_id(&self) -> &str {
+        &self.audit.key_id
+    }
+
+    /// Returns the deployment-scoped audit producer identifier.
+    #[must_use]
+    pub fn audit_producer_id(&self) -> &str {
+        &self.audit.producer_id
+    }
+
+    /// Returns the validated journal capacity settings.
+    #[must_use]
+    pub const fn audit_limits(&self) -> JournalLimits {
+        self.audit.limits
+    }
+
     /// Applies the compiled exact-operation policy with no client-created proof.
     ///
     /// This MVP adapter can admit only public and authentication-entry routes.
@@ -167,7 +251,11 @@ impl GatewayConfig {
     #[must_use]
     pub fn admit(&self, method: &str, path: &str, now: UnixSeconds) -> GatewayDecision {
         let Some(operation) = self.operations.get(&(method.to_owned(), path.to_owned())) else {
-            return GatewayDecision::Denied(ReasonCode::OperationNotMatched);
+            return GatewayDecision {
+                outcome: GatewayOutcome::Denied,
+                operation_id: None,
+                reason_code: ReasonCode::OperationNotMatched,
+            };
         };
         let target = ActionTarget::None;
         let fields = BTreeSet::new();
@@ -182,8 +270,16 @@ impl GatewayConfig {
             now,
         };
         match operation.policy.admit(request, AdmissionProof::None) {
-            Ok(decision) => GatewayDecision::Allowed(decision.reason_code),
-            Err(error) => GatewayDecision::Denied(error.reason_code()),
+            Ok(decision) => GatewayDecision {
+                outcome: GatewayOutcome::Allowed,
+                operation_id: Some(decision.operation_id),
+                reason_code: decision.reason_code,
+            },
+            Err(error) => GatewayDecision {
+                outcome: GatewayOutcome::Denied,
+                operation_id: Some(operation.policy.operation_id().clone()),
+                reason_code: error.reason_code(),
+            },
         }
     }
 }
@@ -247,6 +343,34 @@ fn valid_server_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
+fn valid_scoped_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn validate_audit_directory(value: String) -> Result<PathBuf, ConfigError> {
+    if value.is_empty() || value.len() > 1024 || value.as_bytes().contains(&0) {
+        return Err(ConfigError::Invalid("audit.directory"));
+    }
+    let path = PathBuf::from(value);
+    let mut has_normal_component = false;
+    if path.components().any(|component| match component {
+        Component::ParentDir => true,
+        Component::Normal(_) => {
+            has_normal_component = true;
+            false
+        }
+        _ => false,
+    }) || !has_normal_component
+    {
+        return Err(ConfigError::Invalid("audit.directory"));
+    }
+    Ok(path)
+}
+
 impl From<AdmissionDto> for AdmissionClass {
     fn from(value: AdmissionDto) -> Self {
         match value {
@@ -260,13 +384,24 @@ impl From<AdmissionDto> for AdmissionClass {
     }
 }
 
-/// Terminal admission result exposed to the network adapter.
+/// Admission outcome exposed to the network and audit adapters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GatewayDecision {
-    /// The exact route can be forwarded.
-    Allowed(ReasonCode),
+pub enum GatewayOutcome {
+    /// The exact route may proceed to the durability barrier.
+    Allowed,
     /// The request must terminate before origin dispatch.
-    Denied(ReasonCode),
+    Denied,
+}
+
+/// Terminal deterministic admission result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayDecision {
+    /// Allow or deny result.
+    pub outcome: GatewayOutcome,
+    /// Exact configured operation, or `None` when routing did not match.
+    pub operation_id: Option<OperationId>,
+    /// Stable machine-readable decision reason.
+    pub reason_code: ReasonCode,
 }
 
 /// Startup configuration rejection.
@@ -282,6 +417,8 @@ pub enum ConfigError {
     Provenance(xshield_core::provenance::ProvenanceError),
     /// Admission fields form an incoherent policy.
     Policy(xshield_core::admission::OperationPolicyError),
+    /// Journal capacity settings are incoherent.
+    Journal(xshield_audit::JournalError),
     /// Two operations claim the same method and exact path.
     DuplicateRoute,
 }
@@ -294,6 +431,7 @@ impl fmt::Display for ConfigError {
             Self::Domain(error) => error.fmt(formatter),
             Self::Provenance(error) => error.fmt(formatter),
             Self::Policy(error) => error.fmt(formatter),
+            Self::Journal(error) => error.fmt(formatter),
             Self::DuplicateRoute => formatter.write_str("duplicate operation method and path"),
         }
     }
@@ -306,6 +444,7 @@ impl std::error::Error for ConfigError {
             Self::Domain(error) => Some(error),
             Self::Provenance(error) => Some(error),
             Self::Policy(error) => Some(error),
+            Self::Journal(error) => Some(error),
             Self::Invalid(_) | Self::DuplicateRoute => None,
         }
     }
@@ -320,6 +459,8 @@ mod tests {
       "origin":{"address":"127.0.0.1:8080","server_name":"origin.example","tls":false},
       "tenant_id":"tenant_demo",
       "site_id":"site_demo",
+      "policy_revision":"policy-r1",
+      "audit":{"directory":"target/xshield-audit-test","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432},
       "operations":[
         {"operation_id":"catalog.read","method":"GET","path":"/catalog","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null},
         {"operation_id":"account.update","method":"POST","path":"/account","admission":"UI_ACTION_REQUIRED","source_action":"account_form.submit","resource_type":null,"view_profile":null}
@@ -329,18 +470,17 @@ mod tests {
     #[test]
     fn admits_only_exact_unprotected_routes() {
         let config = GatewayConfig::from_json(CONFIG.as_bytes()).unwrap();
-        assert_eq!(
-            config.admit("GET", "/catalog", UnixSeconds::new(1)),
-            GatewayDecision::Allowed(ReasonCode::PublicEntryAllowed)
-        );
-        assert_eq!(
-            config.admit("POST", "/account", UnixSeconds::new(1)),
-            GatewayDecision::Denied(ReasonCode::UiActionNotAvailable)
-        );
-        assert_eq!(
-            config.admit("GET", "/catalog/1", UnixSeconds::new(1)),
-            GatewayDecision::Denied(ReasonCode::OperationNotMatched)
-        );
+        let public = config.admit("GET", "/catalog", UnixSeconds::new(1));
+        assert_eq!(public.outcome, GatewayOutcome::Allowed);
+        assert_eq!(public.reason_code, ReasonCode::PublicEntryAllowed);
+        assert_eq!(public.operation_id.unwrap().as_str(), "catalog.read");
+        let protected = config.admit("POST", "/account", UnixSeconds::new(1));
+        assert_eq!(protected.outcome, GatewayOutcome::Denied);
+        assert_eq!(protected.reason_code, ReasonCode::UiActionNotAvailable);
+        let unknown = config.admit("GET", "/catalog/1", UnixSeconds::new(1));
+        assert_eq!(unknown.outcome, GatewayOutcome::Denied);
+        assert_eq!(unknown.reason_code, ReasonCode::OperationNotMatched);
+        assert!(unknown.operation_id.is_none());
     }
 
     #[test]
@@ -357,6 +497,11 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(template.as_bytes()),
             Err(ConfigError::Invalid("operations.path"))
+        ));
+        let traversal = CONFIG.replace("target/xshield-audit-test", "../target/xshield-audit-test");
+        assert!(matches!(
+            GatewayConfig::from_json(traversal.as_bytes()),
+            Err(ConfigError::Invalid("audit.directory"))
         ));
     }
 }
