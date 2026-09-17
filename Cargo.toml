@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/xshield-audit", "crates/xshield-core", "crates/xshield-gateway", "crates/xshield-postgres", "crates/xshield-worker"]
+members = ["crates/xshield-audit", "crates/xshield-control", "crates/xshield-core", "crates/xshield-gateway", "crates/xshield-postgres", "crates/xshield-worker"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,7 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 async-trait = "0.1"
+axum = "0.8"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clickhouse = { version = "=0.15.2", default-features = false, features = ["chrono", "rustls-tls-native-roots", "rustls-tls-ring"] }
@@ -18,7 +19,8 @@ pingora = { version = "=0.9.0", default-features = false, features = ["openssl",
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sqlx = { version = "=0.9.0", default-features = false, features = ["json", "postgres", "runtime-tokio", "tls-rustls-ring-native-roots"] }
-tokio = { version = "~1.51", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "~1.51", features = ["macros", "net", "rt-multi-thread"] }
+tower = "0.5"
 uuid = { version = "1", features = ["v7"] }
 zeroize = "1"
 
