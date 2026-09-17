@@ -13,7 +13,8 @@
     "key_id": "journal-key-r1",
     "producer_id": "edge-demo",
     "max_bytes": 16777216,
-    "high_watermark_bytes": 12582912
+    "high_watermark_bytes": 12582912,
+    "segment_max_bytes": 4194304
   },
   "identity_store": {
     "max_connections": 4,

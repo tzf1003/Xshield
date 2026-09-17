@@ -6,7 +6,7 @@
 
 ## 实现状态
 
-M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关可按可信 JSON 配置转发精确 `PUBLIC` / `AUTH_ENTRY` 操作；配置身份存储后，`AUTHENTICATED_ROOT` 会用租户隔离 HMAC 核对 `__Host-xshield_sid`、Bearer 凭证、当前 generation、epoch 和服务端期限。`UI_ACTION_REQUIRED` 会按不透明动作引用重验当前策略、页面证据和动作描述；GET 查询资源操作还会从实际 URI 严格提取资源与字段，以租户、站点和资源类型带域 HMAC 精确匹配资格账本。缺失、替换、退休、过期、资源偏差、字段扩张或歧义查询均在源站前拒绝。WAF Cookie 与边缘动作头在访问源站前剥离。网关已接入加密分段 journal：准入、阶段、判定和转发意图必须批量持久化成功后才能访问源站，配额、写入或恢复失败均关闭转发。关闭段现可离线重验 AEAD、CRC 和哈希链，生成包含整段摘要与链头的规范 Ed25519 签名清单，并以不覆盖方式持久化到独立私有位置。周期轮转、自动封存/发布与未知源站结果对账、正文及路径资源适配器、分享和服务身份证明持久化仍在后续闭环中。
+M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关可按可信 JSON 配置转发精确 `PUBLIC` / `AUTH_ENTRY` 操作；配置身份存储后，`AUTHENTICATED_ROOT` 会用租户隔离 HMAC 核对 `__Host-xshield_sid`、Bearer 凭证、当前 generation、epoch 和服务端期限。`UI_ACTION_REQUIRED` 会按不透明动作引用重验当前策略、页面证据和动作描述；GET 查询资源操作还会从实际 URI 严格提取资源与字段，以租户、站点和资源类型带域 HMAC 精确匹配资格账本。缺失、替换、退休、过期、资源偏差、字段扩张或歧义查询均在源站前拒绝。WAF Cookie 与边缘动作头在访问源站前剥离。网关已接入加密分段 journal：准入、阶段、判定和转发意图必须批量持久化成功后才能访问源站，配额、写入或恢复失败均关闭转发。journal 按 `segment_max_bytes` 自动关闭并轮转；独立封存命令可在 edge 持续写入时重验关闭段的 AEAD、CRC 与哈希链，生成包含整段摘要和链头的 Ed25519 签名清单，并以不覆盖方式持久化到独立私有位置。远端发布与索引水位、未知源站结果对账、正文及路径资源适配器、分享和服务身份证明持久化仍在后续闭环中。
 
 ```bash
 cargo test --workspace --all-targets
@@ -19,9 +19,17 @@ XSHIELD_JOURNAL_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
 XSHIELD_DATABASE_URL="$YOUR_POSTGRES_URL" \
 XSHIELD_FINGERPRINT_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
 cargo run -p xshield-gateway
+
+install -d -m 0700 target/xshield-audit-manifests
+XSHIELD_JOURNAL_KEY_ID="journal-key-r1" \
+XSHIELD_JOURNAL_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
+XSHIELD_SEAL_KEY_ID="seal-key-r1" \
+XSHIELD_SEAL_KEY_HEX="$YOUR_ED25519_SEED_AS_64_LOWERCASE_HEX" \
+cargo run -p xshield-audit --bin xshield-audit-seal -- \
+  target/xshield-audit-demo target/xshield-audit-manifests
 ```
 
-身份存储由可选的 `identity_store` 配置启用；`AUTHENTICATED_ROOT` 或 `UI_ACTION_REQUIRED` 路由存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。UI 动作由自动注入探针通过 `X-Xshield-Action-Ref` 携带服务端发行的不透明引用；网关只信任 PostgreSQL 中与当前认证代际和活动策略精确匹配的记录。生产环境应由秘密管理器注入并按租户轮换，不写入配置文件或日志。
+身份存储由可选的 `identity_store` 配置启用；`AUTHENTICATED_ROOT` 或 `UI_ACTION_REQUIRED` 路由存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。UI 动作由自动注入探针通过 `X-Xshield-Action-Ref` 携带服务端发行的不透明引用；网关只信任 PostgreSQL 中与当前认证代际和活动策略精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
 
 ## Rust 运行时依赖
 

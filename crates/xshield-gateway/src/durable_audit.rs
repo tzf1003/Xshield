@@ -688,7 +688,8 @@ mod tests {
                 "key_id": "journal-key-r1",
                 "producer_id": "edge-test",
                 "max_bytes": max_bytes,
-                "high_watermark_bytes": max_bytes / 2
+                "high_watermark_bytes": max_bytes / 2,
+                "segment_max_bytes": max_bytes
             },
             "operations": [{
                 "operation_id": "health.read",

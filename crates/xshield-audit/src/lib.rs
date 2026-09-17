@@ -16,10 +16,11 @@ use openssl::{
     symm::{Cipher, Crypter, Mode},
 };
 use std::{
+    collections::BTreeSet,
     fmt, fs,
     fs::{File, OpenOptions, TryLockError},
     io::{self, Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 use uuid::Uuid;
 use xshield_core::domain::EventId;
@@ -42,6 +43,7 @@ const MAX_RECORD_BYTES: usize = MAX_EVENT_BYTES + 256;
 const ZERO_HASH: [u8; HASH_BYTES] = [0; HASH_BYTES];
 const ED25519_BYTES: usize = 32;
 const ED25519_SIGNATURE_BYTES: usize = 64;
+const MAX_SEAL_MANIFEST_BYTES: u64 = 1024;
 
 /// AES-256 key used only for local journal encryption.
 pub struct JournalKey([u8; 32]);
@@ -183,8 +185,9 @@ const fn hex_nibble(byte: u8) -> u8 {
 /// Hard capacity and warning threshold for one journal directory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JournalLimits {
-    max_bytes: u64,
-    high_watermark_bytes: u64,
+    max: u64,
+    high_watermark: u64,
+    segment_max: u64,
 }
 
 impl JournalLimits {
@@ -192,13 +195,23 @@ impl JournalLimits {
     ///
     /// # Errors
     /// Returns [`JournalError::InvalidLimits`] for incoherent byte limits.
-    pub const fn new(max_bytes: u64, high_watermark_bytes: u64) -> Result<Self, JournalError> {
-        if max_bytes == 0 || high_watermark_bytes == 0 || high_watermark_bytes > max_bytes {
+    pub const fn new(
+        max_bytes: u64,
+        high_watermark_bytes: u64,
+        segment_max_bytes: u64,
+    ) -> Result<Self, JournalError> {
+        if max_bytes == 0
+            || high_watermark_bytes == 0
+            || high_watermark_bytes > max_bytes
+            || segment_max_bytes == 0
+            || segment_max_bytes > max_bytes
+        {
             return Err(JournalError::InvalidLimits);
         }
         Ok(Self {
-            max_bytes,
-            high_watermark_bytes,
+            max: max_bytes,
+            high_watermark: high_watermark_bytes,
+            segment_max: segment_max_bytes,
         })
     }
 }
@@ -377,6 +390,71 @@ pub fn verify_sealed_segment(
     Ok(actual)
 }
 
+/// Verifies and signs every closed segment into a separately controlled directory.
+///
+/// Existing manifests are verified in place, making repeated runs idempotent.
+/// Active segments are ignored until journal rotation closes them. No event
+/// plaintext is returned or written.
+///
+/// # Errors
+/// Returns [`JournalError`] if either directory is unsafe, a closed segment or
+/// existing manifest is invalid, signing fails, or durable manifest creation fails.
+pub fn seal_closed_segments(
+    journal_directory: impl AsRef<Path>,
+    manifest_directory: impl AsRef<Path>,
+    expected_journal_key_id: &str,
+    journal_key: &JournalKey,
+    seal_key: &SealSigningKey,
+) -> Result<Vec<VerifiedSegment>, JournalError> {
+    let journal_directory = journal_directory.as_ref();
+    let manifest_directory = manifest_directory.as_ref();
+    prepare_existing_private_directory(journal_directory)?;
+    prepare_existing_private_directory(manifest_directory)?;
+    let verifier = seal_key.verifying_key()?;
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(journal_directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with("segment-") && name.ends_with(".closed.xja") {
+            if !entry.file_type()?.is_file() {
+                return Err(JournalError::UnsafePath);
+            }
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+
+    // ponytail: linear verification is simplest; add a signed checkpoint index
+    // when retained segment count makes periodic scans measurably expensive.
+    let mut sealed = Vec::with_capacity(paths.len());
+    for path in paths {
+        let segment = verify_segment(&path, expected_journal_key_id, journal_key)?;
+        let manifest_path =
+            manifest_directory.join(format!("segment-{}.xjs", segment.producer_boot_id));
+        match fs::symlink_metadata(&manifest_path) {
+            Ok(_) => {
+                let manifest = read_private_bounded(&manifest_path, MAX_SEAL_MANIFEST_BYTES)?;
+                verify_sealed_segment(
+                    &path,
+                    expected_journal_key_id,
+                    journal_key,
+                    &manifest,
+                    &verifier,
+                )?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                SignedSegmentManifest::sign(&segment, seal_key)?.write_new(&manifest_path)?;
+            }
+            Err(error) => return Err(JournalError::Io(error)),
+        }
+        sealed.push(segment);
+    }
+    Ok(sealed)
+}
+
 fn encode_seal_payload(
     segment: &VerifiedSegment,
     seal_key_id: &str,
@@ -537,11 +615,14 @@ struct SegmentIdentity {
 /// reached the operating system's durable-file acknowledgement boundary.
 pub struct LocalJournal {
     _writer_lock: File,
+    directory: PathBuf,
     file: File,
+    active_path: PathBuf,
     identity: SegmentIdentity,
     key: JournalKey,
     limits: JournalLimits,
     used_bytes: u64,
+    segment_bytes: u64,
     sequence: u64,
     previous_hash: [u8; HASH_BYTES],
     healthy: bool,
@@ -583,19 +664,22 @@ impl LocalJournal {
         used_bytes = used_bytes
             .checked_add(header_bytes)
             .ok_or(JournalError::Full)?;
-        if used_bytes > limits.max_bytes {
+        if used_bytes > limits.max {
             return Err(JournalError::Full);
         }
 
-        let file = create_segment(directory, &boot_uuid.to_string(), &header)?;
+        let (file, active_path) = create_segment(directory, &boot_uuid.to_string(), &header)?;
         Ok((
             Self {
                 _writer_lock: writer_lock,
+                directory: directory.to_owned(),
                 file,
+                active_path,
                 identity,
                 key,
                 limits,
                 used_bytes,
+                segment_bytes: header_bytes,
                 sequence: 0,
                 previous_hash: ZERO_HASH,
                 healthy: true,
@@ -659,7 +743,11 @@ impl LocalJournal {
             .used_bytes
             .checked_add(batch_bytes)
             .ok_or(JournalError::Full)?;
-        if new_used > self.limits.max_bytes {
+        let new_segment_bytes = self
+            .segment_bytes
+            .checked_add(batch_bytes)
+            .ok_or(JournalError::Full)?;
+        if new_used > self.limits.max {
             return Err(JournalError::Full);
         }
         if let Err(error) = self
@@ -671,8 +759,15 @@ impl LocalJournal {
             return Err(JournalError::Io(error));
         }
         self.used_bytes = new_used;
+        self.segment_bytes = new_segment_bytes;
         self.sequence = sequence;
         self.previous_hash = previous_hash;
+        if self.segment_bytes >= self.limits.segment_max
+            && let Err(error) = self.rotate()
+        {
+            self.healthy = false;
+            return Err(error);
+        }
         Ok(receipts)
     }
 
@@ -681,8 +776,8 @@ impl LocalJournal {
     pub const fn status(&self) -> JournalStatus {
         JournalStatus {
             used_bytes: self.used_bytes,
-            max_bytes: self.limits.max_bytes,
-            high_watermark_reached: self.used_bytes >= self.limits.high_watermark_bytes,
+            max_bytes: self.limits.max,
+            high_watermark_reached: self.used_bytes >= self.limits.high_watermark,
             healthy: self.healthy,
         }
     }
@@ -697,6 +792,47 @@ impl LocalJournal {
     #[must_use]
     pub const fn next_sequence(&self) -> Option<u64> {
         self.sequence.checked_add(1)
+    }
+
+    fn rotate(&mut self) -> Result<(), JournalError> {
+        let boot_uuid = Uuid::now_v7();
+        let identity = SegmentIdentity {
+            boot_id: *boot_uuid.as_bytes(),
+            key_id: self.identity.key_id.clone(),
+        };
+        let header = encode_header(&identity)?;
+        let header_bytes = u64::try_from(header.len()).map_err(|_| JournalError::InvalidLimits)?;
+        let new_used = self
+            .used_bytes
+            .checked_add(header_bytes)
+            .ok_or(JournalError::Full)?;
+        if new_used > self.limits.max {
+            return Err(JournalError::Full);
+        }
+        let (file, active_path) =
+            match create_segment(&self.directory, &boot_uuid.to_string(), &header) {
+                Ok(created) => created,
+                Err(error) => {
+                    self.healthy = false;
+                    return Err(error);
+                }
+            };
+        let closed_path = closed_segment_path(&self.active_path, &self.identity)?;
+        if let Err(error) = fs::rename(&self.active_path, &closed_path)
+            .and_then(|()| make_closed_segment_read_only(&closed_path))
+            .and_then(|()| File::open(&self.directory)?.sync_all())
+        {
+            self.healthy = false;
+            return Err(JournalError::Io(error));
+        }
+        self.file = file;
+        self.active_path = active_path;
+        self.identity = identity;
+        self.used_bytes = new_used;
+        self.segment_bytes = header_bytes;
+        self.sequence = 0;
+        self.previous_hash = ZERO_HASH;
+        Ok(())
     }
 }
 
@@ -736,6 +872,27 @@ fn prepare_existing_private_directory(directory: &Path) -> Result<(), JournalErr
         return Err(JournalError::UnsafePermissions);
     }
     Ok(())
+}
+
+fn read_private_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, JournalError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > max_bytes
+    {
+        return Err(JournalError::UnsafePath);
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(JournalError::UnsafePermissions);
+    }
+    fs::read(path).map_err(JournalError::Io)
+}
+
+fn make_closed_segment_read_only(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o400))?;
+    File::open(path)?.sync_all()
 }
 
 fn parent_or_current(path: &Path) -> &Path {
@@ -790,7 +947,11 @@ fn private_new_file(path: &Path) -> Result<File, JournalError> {
     Ok(options.open(path)?)
 }
 
-fn create_segment(directory: &Path, boot_id: &str, header: &[u8]) -> Result<File, JournalError> {
+fn create_segment(
+    directory: &Path,
+    boot_id: &str,
+    header: &[u8],
+) -> Result<(File, PathBuf), JournalError> {
     let final_path = directory.join(format!("segment-{boot_id}.xja"));
     let temporary_path = directory.join(format!("segment-{boot_id}.xja.tmp"));
     let mut file = private_new_file(&temporary_path)?;
@@ -803,7 +964,33 @@ fn create_segment(directory: &Path, boot_id: &str, header: &[u8]) -> Result<File
     }
     fs::rename(temporary_path, final_path)?;
     sync_directory(directory)?;
-    Ok(file)
+    let active_path = directory.join(format!("segment-{boot_id}.xja"));
+    Ok((file, active_path))
+}
+
+fn segment_path_state(path: &Path, identity: &SegmentIdentity) -> Result<bool, JournalError> {
+    let directory = path.parent().ok_or(JournalError::UnsafePath)?;
+    let boot_id = Uuid::from_bytes(identity.boot_id);
+    let active = directory.join(format!("segment-{boot_id}.xja"));
+    if path == active {
+        return Ok(false);
+    }
+    let closed = directory.join(format!("segment-{boot_id}.closed.xja"));
+    if path == closed {
+        return Ok(true);
+    }
+    Err(JournalError::Corrupt("segment filename"))
+}
+
+fn closed_segment_path(path: &Path, identity: &SegmentIdentity) -> Result<PathBuf, JournalError> {
+    if segment_path_state(path, identity)? {
+        return Err(JournalError::Corrupt("segment already closed"));
+    }
+    let directory = path.parent().ok_or(JournalError::UnsafePath)?;
+    Ok(directory.join(format!(
+        "segment-{}.closed.xja",
+        Uuid::from_bytes(identity.boot_id)
+    )))
 }
 
 fn recover_directory(
@@ -840,9 +1027,20 @@ fn recover_directory(
 
     let mut report = RecoveryReport::default();
     let mut used_bytes = 0_u64;
+    let mut boot_ids = BTreeSet::new();
+    let mut pending_closures = Vec::new();
     let last_index = paths.len().saturating_sub(1);
     for (index, path) in paths.into_iter().enumerate() {
         let recovered = recover_segment(&path, key_id, key, index == last_index)?;
+        if !boot_ids.insert(recovered.identity.boot_id) {
+            return Err(JournalError::Corrupt("duplicate producer boot id"));
+        }
+        if !segment_path_state(&path, &recovered.identity)? {
+            pending_closures.push((
+                path.clone(),
+                closed_segment_path(&path, &recovered.identity)?,
+            ));
+        }
         report.recovered_records = report
             .recovered_records
             .checked_add(recovered.report.recovered_records)
@@ -854,6 +1052,19 @@ fn recover_directory(
         used_bytes = used_bytes
             .checked_add(fs::metadata(path)?.len())
             .ok_or(JournalError::Full)?;
+    }
+    let closed_any = !pending_closures.is_empty();
+    for (active, closed) in pending_closures {
+        match fs::symlink_metadata(&closed) {
+            Ok(_) => return Err(JournalError::Corrupt("duplicate producer boot id")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(JournalError::Io(error)),
+        }
+        fs::rename(active, &closed)?;
+        make_closed_segment_read_only(&closed)?;
+    }
+    if closed_any {
+        sync_directory(directory)?;
     }
     Ok((report, used_bytes))
 }
@@ -870,11 +1081,21 @@ fn recover_segment(
     key: &JournalKey,
     allow_tail_repair: bool,
 ) -> Result<RecoveredSegment, JournalError> {
+    let closed_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".closed.xja"));
     #[cfg(unix)]
-    if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
-        return Err(JournalError::UnsafePermissions);
+    {
+        let mode = fs::metadata(path)?.permissions().mode();
+        if mode & 0o077 != 0 || (closed_name && mode & 0o222 != 0) {
+            return Err(JournalError::UnsafePermissions);
+        }
     }
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let repair_tail = allow_tail_repair && !closed_name;
+    let mut options = OpenOptions::new();
+    options.read(true).write(repair_tail);
+    let mut file = options.open(path)?;
     let identity = read_header(&mut file)?;
     if identity.key_id != expected_key_id {
         return Err(JournalError::KeyMismatch);
@@ -890,7 +1111,7 @@ fn recover_segment(
             break;
         }
         if read < length.len() {
-            if !allow_tail_repair {
+            if !repair_tail {
                 return Err(JournalError::Corrupt("non-final segment tail"));
             }
             report.truncated_bytes = truncate_tail(&mut file, record_start)?;
@@ -904,7 +1125,7 @@ fn recover_segment(
         let mut body = vec![0; body_len];
         let read = read_until_full_or_eof(&mut file, &mut body)?;
         if read < body_len {
-            if !allow_tail_repair {
+            if !repair_tail {
                 return Err(JournalError::Corrupt("non-final segment tail"));
             }
             report.truncated_bytes = truncate_tail(&mut file, record_start)?;
@@ -1321,7 +1542,7 @@ mod tests {
     }
 
     fn limits() -> JournalLimits {
-        JournalLimits::new(1024 * 1024, 768 * 1024).unwrap()
+        JournalLimits::new(1024 * 1024, 768 * 1024, 256 * 1024).unwrap()
     }
 
     fn segment(directory: &Path) -> PathBuf {
@@ -1408,10 +1629,14 @@ mod tests {
             .filter(|path| path.extension().is_some_and(|extension| extension == "xja"))
             .collect::<Vec<_>>();
         segments.sort();
+        #[cfg(unix)]
+        fs::set_permissions(&segments[0], fs::Permissions::from_mode(0o600)).unwrap();
         let mut old_segment = OpenOptions::new().append(true).open(&segments[0]).unwrap();
         old_segment.write_all(&[32, 0]).unwrap();
         old_segment.sync_all().unwrap();
         drop(old_segment);
+        #[cfg(unix)]
+        fs::set_permissions(&segments[0], fs::Permissions::from_mode(0o400)).unwrap();
         assert!(matches!(
             LocalJournal::open(&directory, "journal-key-r1", key(), limits()),
             Err(JournalError::Corrupt("non-final segment tail"))
@@ -1450,7 +1675,7 @@ mod tests {
         fs::remove_dir_all(&directory).unwrap();
 
         let directory = test_directory();
-        let tiny = JournalLimits::new(128, 32).unwrap();
+        let tiny = JournalLimits::new(128, 32, 64).unwrap();
         let (mut journal, _) =
             LocalJournal::open(&directory, "journal-key-r1", key(), tiny).unwrap();
         assert!(journal.status().high_watermark_reached);
@@ -1545,6 +1770,82 @@ mod tests {
         assert!(matches!(
             SignedSegmentManifest::verify(&tampered, &verifier),
             Err(JournalError::Corrupt("seal signature"))
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rotates_and_idempotently_seals_closed_segments() {
+        let directory = test_directory();
+        let manifest_directory = test_directory();
+        fs::create_dir(&manifest_directory).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&manifest_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let event = EventId::parse(EVENT).unwrap();
+        let rotating_limits = JournalLimits::new(1024 * 1024, 768 * 1024, 1).unwrap();
+        let (mut journal, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), rotating_limits).unwrap();
+        let first_boot = journal.producer_boot_id();
+        journal
+            .append_batch(&[JournalRecord {
+                event_id: &event,
+                plaintext: b"rotation event",
+            }])
+            .unwrap();
+        assert_ne!(journal.producer_boot_id(), first_boot);
+
+        let signer = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY_HEX).unwrap();
+        let sealed = seal_closed_segments(
+            &directory,
+            &manifest_directory,
+            "journal-key-r1",
+            &key(),
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].producer_boot_id, first_boot);
+        assert_eq!(
+            seal_closed_segments(
+                &directory,
+                &manifest_directory,
+                "journal-key-r1",
+                &key(),
+                &signer,
+            )
+            .unwrap(),
+            sealed
+        );
+        assert_eq!(
+            fs::read_dir(&manifest_directory).unwrap().count(),
+            sealed.len()
+        );
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(manifest_directory).unwrap();
+    }
+
+    #[test]
+    fn rotation_failure_poisons_the_durable_boundary() {
+        let directory = test_directory();
+        let event = EventId::parse(EVENT).unwrap();
+        let limits = JournalLimits::new(230, 100, 1).unwrap();
+        let (mut journal, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), limits).unwrap();
+        assert!(matches!(
+            journal.append_batch(&[JournalRecord {
+                event_id: &event,
+                plaintext: b"x",
+            }]),
+            Err(JournalError::Full)
+        ));
+        assert!(!journal.status().healthy);
+        assert!(matches!(
+            journal.append_batch(&[JournalRecord {
+                event_id: &event,
+                plaintext: b"x",
+            }]),
+            Err(JournalError::Poisoned)
         ));
         fs::remove_dir_all(directory).unwrap();
     }

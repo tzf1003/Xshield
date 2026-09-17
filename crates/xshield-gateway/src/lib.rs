@@ -97,6 +97,7 @@ struct AuditDto {
     producer_id: String,
     max_bytes: u64,
     high_watermark_bytes: u64,
+    segment_max_bytes: u64,
 }
 
 #[derive(Deserialize)]
@@ -172,8 +173,12 @@ impl GatewayConfig {
         if !valid_scoped_value(&dto.audit.producer_id) {
             return Err(ConfigError::Invalid("audit.producer_id"));
         }
-        let audit_limits = JournalLimits::new(dto.audit.max_bytes, dto.audit.high_watermark_bytes)
-            .map_err(ConfigError::Journal)?;
+        let audit_limits = JournalLimits::new(
+            dto.audit.max_bytes,
+            dto.audit.high_watermark_bytes,
+            dto.audit.segment_max_bytes,
+        )
+        .map_err(ConfigError::Journal)?;
         let identity_store = dto
             .identity_store
             .map(|identity| {
@@ -621,7 +626,7 @@ mod tests {
       "tenant_id":"tenant_demo",
       "site_id":"site_demo",
       "policy_revision":"policy-r1",
-      "audit":{"directory":"target/xshield-audit-test","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432},
+      "audit":{"directory":"target/xshield-audit-test","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
       "identity_store":{"max_connections":4,"acquire_timeout_ms":1000},
       "operations":[
         {"operation_id":"catalog.read","method":"GET","path":"/catalog","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null},
@@ -688,6 +693,17 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(missing.as_bytes()),
             Err(ConfigError::Invalid("identity_store"))
+        ));
+
+        let invalid_segment = CONFIG.replace(
+            "\"segment_max_bytes\":262144",
+            "\"segment_max_bytes\":2097152",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(invalid_segment.as_bytes()),
+            Err(ConfigError::Journal(
+                xshield_audit::JournalError::InvalidLimits
+            ))
         ));
     }
 
