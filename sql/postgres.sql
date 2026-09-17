@@ -81,6 +81,28 @@ CREATE TABLE xshield.service_identities (
 );
 CREATE UNIQUE INDEX service_identity_active_credential ON xshield.service_identities
  (tenant_id,site_id,credential_fingerprint) WHERE status='active';
+CREATE TABLE xshield.share_grants (
+ tenant_id text NOT NULL, site_id text NOT NULL, share_id text NOT NULL,
+ issuer_binding_id text NOT NULL, token_fingerprint bytea NOT NULL,
+ resource_type text NOT NULL, resource_key_hmac bytea NOT NULL,
+ operation_id text NOT NULL, view_id text NOT NULL,
+ use_policy text NOT NULL CHECK(use_policy='reusable_read'),
+ source_event_id text NOT NULL, policy_revision text NOT NULL,
+ status text NOT NULL CHECK(status IN ('active','revoked','expired')),
+ issued_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
+ PRIMARY KEY(tenant_id,site_id,share_id),
+ CHECK(octet_length(token_fingerprint)=32),
+ CHECK(octet_length(resource_key_hmac)=32), CHECK(expires_at>issued_at),
+ FOREIGN KEY(tenant_id,site_id,issuer_binding_id)
+ REFERENCES xshield.auth_bindings(tenant_id,site_id,binding_id),
+ FOREIGN KEY(tenant_id,site_id,policy_revision)
+ REFERENCES xshield.policy_revisions(tenant_id,site_id,revision)
+);
+CREATE UNIQUE INDEX share_grant_active_token ON xshield.share_grants
+ (tenant_id,site_id,token_fingerprint) WHERE status='active';
+CREATE INDEX share_grant_exact_lookup ON xshield.share_grants
+ (tenant_id,site_id,token_fingerprint,resource_type,resource_key_hmac,operation_id,view_id,expires_at)
+ WHERE status='active';
 -- 与认证/资格事务一起写入；传输可至少一次，消费者按event_id去重。
 CREATE TABLE xshield.audit_outbox (
  event_id text PRIMARY KEY, tenant_id text NOT NULL, site_id text NOT NULL,

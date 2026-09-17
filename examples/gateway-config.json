@@ -58,6 +58,16 @@
       "source_action": null,
       "resource_type": null,
       "view_profile": null
+    },
+    {
+      "operation_id": "records.share.read",
+      "method": "GET",
+      "path": "/shared-record",
+      "admission": "SHARE_ENTRY",
+      "source_action": null,
+      "resource_type": "record",
+      "view_profile": "shared_summary",
+      "resource_query_parameter": "record_id"
     }
   ]
 }

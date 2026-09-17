@@ -222,6 +222,7 @@ impl GatewayConfig {
                     operation.policy.admission_class(),
                     AdmissionClass::AuthenticatedRoot
                         | AdmissionClass::UiActionRequired
+                        | AdmissionClass::ShareEntry
                         | AdmissionClass::ServiceIdentity
                 )
             })

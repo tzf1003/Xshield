@@ -2,7 +2,7 @@
 
 ## 18.1 主实体
 
-Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签名；AuthBinding/CredentialGeneration：认证组合、epoch 与期限；PageEvidence/ActionDescriptor/ActionGrant：界面操作来源；ResourceGrant：精确操作资格；ServiceIdentity：租户/站点、凭证指纹、有限操作集合、状态与期限；RequestRecord/StageEvent：执行事实；Artifact/Transform：内容与转换；ModelCall/AgentRun：AI 调用；Case/Approval/Export/Replay：调查生命周期。
+Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签名；AuthBinding/CredentialGeneration：认证组合、epoch 与期限；PageEvidence/ActionDescriptor/ActionGrant：界面操作来源；ResourceGrant：精确操作资格；ServiceIdentity：租户/站点、凭证指纹、有限操作集合、状态与期限；ShareGrant：发行者绑定、凭证指纹、精确资源/操作/视图、使用策略、状态与期限；RequestRecord/StageEvent：执行事实；Artifact/Transform：内容与转换；ModelCall/AgentRun：AI 调用；Case/Approval/Export/Replay：调查生命周期。
 
 实体不能以数据库自增 ID 暴露跨租户信息。业务 user/order ID 作为带类型的受限引用，不和 Xshield 自己的管理 ID 混用。对外展示脱敏引用，原值按保密策略加密。
 

@@ -31,6 +31,7 @@ fingerprint_key="777777777777777777777777777777777777777777777777777777777777777
 session_id="ses_018f2a3b-4c5d-7000-8000-000000000902"
 bearer="verified-business-token"
 service_credential="verified-service-token"
+share_token="verified-share-token"
 session_fingerprint=$(printf '%s' "$session_id" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary | od -An -tx1 | tr -d ' \n')
 bearer_fingerprint=$(printf '%s' "$bearer" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary | od -An -tx1 | tr -d ' \n')
 resource_fingerprint=$(printf '%s\0%s\0%s\0%s\0%s\0' \
@@ -41,12 +42,22 @@ service_fingerprint=$(printf '%s\0%s\0%s\0%s\0' \
     'xshield-service-credential-v1' 'tenant_gateway' 'site_gateway' "$service_credential" \
     | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
     | od -An -tx1 | tr -d ' \n')
+share_fingerprint=$(printf '%s\0%s\0%s\0%s\0' \
+    'xshield-share-token-v1' 'tenant_gateway' 'site_gateway' "$share_token" \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
+share_resource_fingerprint=$(printf '%s\0%s\0%s\0%s\0%s\0' \
+    'xshield-resource-v1' 'tenant_gateway' 'site_gateway' 'record' 'record-123' \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
 
 psql -X -v ON_ERROR_STOP=1 -d "$test_database" \
     -v session_fingerprint="$session_fingerprint" \
     -v bearer_fingerprint="$bearer_fingerprint" \
     -v resource_fingerprint="$resource_fingerprint" \
-    -v service_fingerprint="$service_fingerprint" <<'SQL' >/dev/null
+    -v service_fingerprint="$service_fingerprint" \
+    -v share_fingerprint="$share_fingerprint" \
+    -v share_resource_fingerprint="$share_resource_fingerprint" <<'SQL' >/dev/null
 INSERT INTO xshield.policy_revisions (
     tenant_id, site_id, revision, status, content_digest, artifact_ref
 ) VALUES (
@@ -157,6 +168,18 @@ INSERT INTO xshield.service_identities (
     decode(:'service_fingerprint', 'hex'), ARRAY['reports.ingest'],
     'active', now() - interval '1 minute', now() + interval '30 minutes'
 );
+INSERT INTO xshield.share_grants (
+    tenant_id, site_id, share_id, issuer_binding_id, token_fingerprint,
+    resource_type, resource_key_hmac, operation_id, view_id, use_policy,
+    source_event_id, policy_revision, status, issued_at, expires_at
+) VALUES (
+    'tenant_gateway', 'site_gateway',
+    'share_018f2a3b-4c5d-7000-8000-000000000908',
+    'auth_018f2a3b-4c5d-7000-8000-000000000901', decode(:'share_fingerprint', 'hex'),
+    'record', decode(:'share_resource_fingerprint', 'hex'), 'records.share.read',
+    'shared_summary', 'reusable_read', 'ev_018f2a3b-4c5d-7000-8000-000000000909',
+    'policy-r1', 'active', now() - interval '1 minute', now() + interval '30 minutes'
+);
 SQL
 
 cat >"$test_dir/config.json" <<JSON
@@ -172,7 +195,8 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
-    {"operation_id":"reports.ingest","method":"POST","path":"/service/report","admission":"SERVICE_IDENTITY","source_action":null,"resource_type":null,"view_profile":null,"resource_query_parameter":null}
+    {"operation_id":"reports.ingest","method":"POST","path":"/service/report","admission":"SERVICE_IDENTITY","source_action":null,"resource_type":null,"view_profile":null,"resource_query_parameter":null},
+    {"operation_id":"records.share.read","method":"GET","path":"/shared-record","admission":"SHARE_ENTRY","source_action":null,"resource_type":"record","view_profile":"shared_summary","resource_query_parameter":"record_id"}
   ]
 }
 JSON
@@ -194,6 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             output.write(f"Authorization={self.headers.get('Authorization', '')}\n")
             output.write(f"ActionRef={self.headers.get('X-Xshield-Action-Ref', '')}\n")
             output.write(f"ServiceCredential={self.headers.get('X-Xshield-Service-Credential', '')}\n")
+            output.write(f"ShareToken={self.headers.get('X-Xshield-Share-Token', '')}\n")
         self.send_response(404)
         self.end_headers()
 
@@ -331,6 +356,39 @@ revoked_service_status=$(curl -sS -o "$test_dir/revoked-service.json" -w '%{http
 [[ "$revoked_service_status" == "403" ]]
 grep -q '"reason_code":"SERVICE_IDENTITY_MISMATCH"' "$test_dir/revoked-service.json"
 
+missing_share_status=$(curl -sS -o "$test_dir/missing-share.json" -w '%{http_code}' \
+    'http://127.0.0.1:6288/shared-record?record_id=record-123')
+[[ "$missing_share_status" == "403" ]]
+grep -q '"reason_code":"SHARE_SCOPE_MISMATCH"' "$test_dir/missing-share.json"
+
+invalid_share_status=$(curl -sS -o "$test_dir/invalid-share.json" -w '%{http_code}' \
+    -H 'X-Xshield-Share-Token: substituted-share-token' \
+    'http://127.0.0.1:6288/shared-record?record_id=record-123')
+[[ "$invalid_share_status" == "403" ]]
+
+wrong_share_resource_status=$(curl -sS -o "$test_dir/wrong-share-resource.json" -w '%{http_code}' \
+    -H "X-Xshield-Share-Token: $share_token" \
+    'http://127.0.0.1:6288/shared-record?record_id=record-999')
+[[ "$wrong_share_resource_status" == "403" ]]
+
+expanded_share_status=$(curl -sS -o "$test_dir/expanded-share.json" -w '%{http_code}' \
+    -H "X-Xshield-Share-Token: $share_token" \
+    'http://127.0.0.1:6288/shared-record?record_id=record-123&expand=full')
+[[ "$expanded_share_status" == "403" ]]
+
+valid_share_status=$(curl -sS -o "$test_dir/valid-share.body" -w '%{http_code}' \
+    -H "X-Xshield-Share-Token: $share_token" \
+    'http://127.0.0.1:6288/shared-record?record_id=record-123')
+[[ "$valid_share_status" == "404" ]]
+
+psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+    "UPDATE xshield.share_grants SET status = 'revoked' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND share_id = 'share_018f2a3b-4c5d-7000-8000-000000000908'" >/dev/null
+revoked_share_status=$(curl -sS -o "$test_dir/revoked-share.json" -w '%{http_code}' \
+    -H "X-Xshield-Share-Token: $share_token" \
+    'http://127.0.0.1:6288/shared-record?record_id=record-123')
+[[ "$revoked_share_status" == "403" ]]
+grep -q '"reason_code":"SHARE_SCOPE_MISMATCH"' "$test_dir/revoked-share.json"
+
 kill -KILL "$gateway_pid"
 wait "$gateway_pid" 2>/dev/null || true
 gateway_pid=""
@@ -341,9 +399,11 @@ origin_pid=""
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "1" ]]
 ! grep -q '__Host-xshield_sid' "$test_dir/origin.log"
 ! grep -q 'ActionRef=action_' "$test_dir/origin.log"
 ! grep -q 'ServiceCredential=verified-' "$test_dir/origin.log"
+! grep -q 'ShareToken=verified-' "$test_dir/origin.log"
 grep -q 'Authorization=Bearer verified-business-token' "$test_dir/origin.log"
 [[ -n $(find "$test_dir/journal" -name 'segment-*.xaj' -type f -print -quit) ]]
 

@@ -11,6 +11,7 @@ mod grant_read;
 mod identity_read;
 mod provenance;
 mod service_identity_read;
+mod share_grant_read;
 
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};

@@ -29,6 +29,8 @@ use xshield_gateway::{
 use xshield_postgres::{PostgresIdentityStore, StoreError};
 use zeroize::Zeroizing;
 
+mod share_entry;
+
 const WAF_COOKIE: &str = "__Host-xshield_sid";
 const ACTION_HEADER: &str = "x-xshield-action-ref";
 const SERVICE_CREDENTIAL_HEADER: &str = "x-xshield-service-credential";
@@ -59,6 +61,7 @@ pub(crate) fn strip_edge_proofs(request: &mut RequestHeader) -> PingoraResult<()
     }
     request.remove_header(ACTION_HEADER);
     request.remove_header(SERVICE_CREDENTIAL_HEADER);
+    request.remove_header(share_entry::SHARE_TOKEN_HEADER);
     Ok(())
 }
 
@@ -109,6 +112,11 @@ impl ProtectedIdentity {
         if class == Some(AdmissionClass::ServiceIdentity) {
             return self
                 .admit_service_identity(config, request, method, path, now)
+                .await;
+        }
+        if class == Some(AdmissionClass::ShareEntry) {
+            return self
+                .admit_share_entry(config, request, method, path, now)
                 .await;
         }
         if !matches!(
@@ -753,6 +761,9 @@ mod tests {
         request
             .insert_header(SERVICE_CREDENTIAL_HEADER, "service-secret")
             .unwrap();
+        request
+            .insert_header(share_entry::SHARE_TOKEN_HEADER, "share-secret")
+            .unwrap();
         strip_edge_proofs(&mut request).unwrap();
         assert_eq!(
             request.headers.get("cookie").unwrap().to_str().unwrap(),
@@ -760,6 +771,11 @@ mod tests {
         );
         assert!(!request.headers.contains_key(ACTION_HEADER));
         assert!(!request.headers.contains_key(SERVICE_CREDENTIAL_HEADER));
+        assert!(
+            !request
+                .headers
+                .contains_key(share_entry::SHARE_TOKEN_HEADER)
+        );
     }
 
     #[test]

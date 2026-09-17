@@ -1,7 +1,10 @@
 //! Side-effect boundaries used by the request application service.
 
 use crate::{
-    access::{AccessDenied, ServiceCredentialFingerprint, ServiceIdentity},
+    access::{
+        AccessDenied, ServiceCredentialFingerprint, ServiceIdentity, ShareGrant,
+        ShareTokenFingerprint,
+    },
     audit::AuditEvent,
     domain::{
         ActionRef, EventId, OperationId, PolicyRevision, ResourceType, SiteId, StageExecutionId,
@@ -179,6 +182,50 @@ pub trait ServiceIdentityProofStore {
         &'a self,
         query: ServiceIdentityProofQuery<'a>,
     ) -> impl Future<Output = Result<ServiceIdentityProofState, Self::Error>> + Send + 'a;
+}
+
+/// Scoped request for one exact persisted limited-share grant.
+pub struct ShareGrantProofQuery<'a> {
+    /// Tenant fixed by the trusted listener configuration.
+    pub tenant_id: &'a TenantId,
+    /// Site fixed by the trusted listener configuration.
+    pub site_id: &'a SiteId,
+    /// Tenant- and site-isolated digest of the presented share token.
+    pub token_fingerprint: &'a ShareTokenFingerprint,
+    /// Resource type fixed by the trusted operation configuration.
+    pub resource_type: &'a ResourceType,
+    /// Resource digest derived from the actual request target.
+    pub resource_key: &'a ResourceKeyHmac,
+    /// Exact operation fixed by route selection.
+    pub operation_id: &'a OperationId,
+    /// Exact response view fixed by policy.
+    pub view_profile: &'a ViewProfile,
+    /// Trusted server time frozen for this request.
+    pub now: UnixSeconds,
+}
+
+/// Authoritative limited-share lookup result.
+#[derive(Debug)]
+pub enum ShareGrantProofState {
+    /// Active reusable read grant matching every requested scope dimension.
+    Verified(Box<ShareGrant>),
+    /// No active exact limited-share grant exists.
+    Denied(AccessDenied),
+}
+
+/// Reads limited-share grants only from an authoritative scoped store.
+pub trait ShareGrantProofStore {
+    /// Adapter-specific lookup failure.
+    type Error;
+
+    /// Loads a reusable read grant for the exact token and resource scope.
+    ///
+    /// # Errors
+    /// Returns the adapter error when authoritative state cannot be read safely.
+    fn load_share_grant<'a>(
+        &'a self,
+        query: ShareGrantProofQuery<'a>,
+    ) -> impl Future<Output = Result<ShareGrantProofState, Self::Error>> + Send + 'a;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
