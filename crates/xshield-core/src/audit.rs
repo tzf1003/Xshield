@@ -110,6 +110,20 @@ pub enum ReasonCode {
     UiActionAlreadyIssued,
     /// An action reference was reused with different semantics.
     UiActionIssuanceConflict,
+    /// The exact public operation entry was approved.
+    PublicEntryAllowed,
+    /// The exact authentication operation entry was approved.
+    AuthEntryAllowed,
+    /// The authenticated root operation was approved.
+    FlowRootAllowed,
+    /// Exact UI action and resource requirements passed.
+    UiActionAllowed,
+    /// Method or route does not match the frozen operation policy.
+    OperationNotMatched,
+    /// Share proof does not match the exact resource, view, operation, or lease.
+    ShareScopeMismatch,
+    /// Service identity proof does not match the exact operation scope.
+    ServiceIdentityMismatch,
     /// No site policy exists for the requested scope.
     SiteNotConfigured,
     /// The scoped site policy is explicitly disabled.
@@ -152,6 +166,13 @@ impl ReasonCode {
             Self::UiActionIssued => "UI_ACTION_ISSUED",
             Self::UiActionAlreadyIssued => "UI_ACTION_ALREADY_ISSUED",
             Self::UiActionIssuanceConflict => "UI_ACTION_ISSUANCE_CONFLICT",
+            Self::PublicEntryAllowed => "PUBLIC_ENTRY_ALLOWED",
+            Self::AuthEntryAllowed => "AUTH_ENTRY_ALLOWED",
+            Self::FlowRootAllowed => "FLOW_ROOT_ALLOWED",
+            Self::UiActionAllowed => "UI_ACTION_ALLOWED",
+            Self::OperationNotMatched => "OPERATION_NOT_MATCHED",
+            Self::ShareScopeMismatch => "SHARE_SCOPE_MISMATCH",
+            Self::ServiceIdentityMismatch => "SERVICE_IDENTITY_MISMATCH",
             Self::SiteNotConfigured => "SITE_NOT_CONFIGURED",
             Self::SiteDisabled => "SITE_DISABLED",
             Self::SiteConfigUnavailable => "SITE_CONFIG_UNAVAILABLE",

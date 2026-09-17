@@ -7,6 +7,7 @@
 #![warn(missing_docs)]
 
 pub mod admin;
+pub mod admission;
 pub mod application;
 pub mod audit;
 pub mod domain;
