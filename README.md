@@ -6,7 +6,7 @@
 
 ## 实现状态
 
-M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关可按可信 JSON 配置转发精确 `PUBLIC` / `AUTH_ENTRY` 操作；配置身份存储后，`AUTHENTICATED_ROOT` 会用租户隔离 HMAC 核对 `__Host-xshield_sid`、Bearer 凭证、当前 generation、epoch 和服务端期限。`UI_ACTION_REQUIRED` 会按不透明动作引用重验当前策略、页面证据和动作描述；GET 查询资源操作还会从实际 URI 严格提取资源与字段，以租户、站点和资源类型带域 HMAC 精确匹配资格账本。缺失、替换、退休、过期、资源偏差、字段扩张或歧义查询均在源站前拒绝。WAF Cookie 与边缘动作头在访问源站前剥离。网关已接入加密分段 journal：准入、阶段、判定和转发意图必须批量持久化成功后才能访问源站，配额、写入或恢复失败均关闭转发。journal 按 `segment_max_bytes` 自动关闭并轮转；独立封存命令可在 edge 持续写入时重验关闭段的 AEAD、CRC 与哈希链，生成包含整段摘要和链头的 Ed25519 签名清单，并以不覆盖方式持久化到独立私有位置。发布读取边界只在清单与完整关闭段精确匹配后流式释放事件，每条记录再次验证并携带正文摘要供下游幂等冲突检测。ClickHouse 投递与索引水位、未知源站结果对账、正文及路径资源适配器、分享和服务身份证明持久化仍在后续闭环中。
+M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、六类 operation 入口准入、页面证据与精确动作来源、有界资源资格账本，以及对应 PostgreSQL 约束和原子事务。Pingora MVP 网关可按可信 JSON 配置转发精确 `PUBLIC` / `AUTH_ENTRY` 操作；配置身份存储后，`AUTHENTICATED_ROOT` 会用租户隔离 HMAC 核对 `__Host-xshield_sid`、Bearer 凭证、当前 generation、epoch 和服务端期限。`UI_ACTION_REQUIRED` 会按不透明动作引用重验当前策略、页面证据和动作描述；GET 查询资源操作还会从实际 URI 严格提取资源与字段，以租户、站点和资源类型带域 HMAC 精确匹配资格账本。缺失、替换、退休、过期、资源偏差、字段扩张或歧义查询均在源站前拒绝。WAF Cookie 与边缘动作头在访问源站前剥离。网关已接入加密分段 journal：准入、阶段、判定和转发意图必须批量持久化成功后才能访问源站，配额、写入或恢复失败均关闭转发。journal 按 `segment_max_bytes` 自动关闭并轮转；独立封存命令可在 edge 持续写入时重验关闭段的 AEAD、CRC 与哈希链，生成包含整段摘要和链头的 Ed25519 签名清单，并以不覆盖方式持久化到独立私有位置。`xshield-worker` 按段顺序重新认证并解析事件，投递前后检查稳定 `event_id` 的正文摘要，ClickHouse 确认同步插入后才原子推进目标绑定的本地水位；同 ID 不同正文、缺失清单或水位冲突均停止后续段。未知源站结果对账、正文及路径资源适配器、分享和服务身份证明持久化仍在后续闭环中。
 
 ```bash
 cargo test --workspace --all-targets
@@ -27,6 +27,19 @@ XSHIELD_SEAL_KEY_ID="seal-key-r1" \
 XSHIELD_SEAL_KEY_HEX="$YOUR_ED25519_SEED_AS_64_LOWERCASE_HEX" \
 cargo run -p xshield-audit --bin xshield-audit-seal -- \
   target/xshield-audit-demo target/xshield-audit-manifests
+
+XSHIELD_JOURNAL_KEY_ID="journal-key-r1" \
+XSHIELD_JOURNAL_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
+XSHIELD_SEAL_KEY_ID="seal-key-r1" \
+XSHIELD_SEAL_PUBLIC_KEY_HEX="$YOUR_ED25519_PUBLIC_KEY_AS_64_LOWERCASE_HEX" \
+XSHIELD_CLICKHOUSE_URL="https://clickhouse.example.invalid:8443" \
+XSHIELD_CLICKHOUSE_DATABASE="xshield" \
+XSHIELD_CLICKHOUSE_USER="xshield_publisher" \
+XSHIELD_CLICKHOUSE_PASSWORD="$YOUR_CLICKHOUSE_PASSWORD" \
+XSHIELD_INDEX_TARGET_ID="clickhouse-primary" \
+XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES="67108864" \
+cargo run -p xshield-worker -- \
+  target/xshield-audit-demo target/xshield-audit-manifests target/xshield-index-checkpoints
 ```
 
 身份存储由可选的 `identity_store` 配置启用；`AUTHENTICATED_ROOT` 或 `UI_ACTION_REQUIRED` 路由存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。UI 动作由自动注入探针通过 `X-Xshield-Action-Ref` 携带服务端发行的不透明引用；网关只信任 PostgreSQL 中与当前认证代际和活动策略精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
@@ -37,6 +50,7 @@ cargo run -p xshield-audit --bin xshield-audit-seal -- \
 |---|---|---|
 | Pingora 0.9.0 + OpenSSL backend | HTTP 代理生命周期、固定源站连接、请求过滤、journal AES-256-GCM 及段清单 Ed25519 签名 | Apache-2.0；精确版本并锁文件，部署同步审查 OpenSSL 版本与许可证，升级先复跑协议歧义、加密恢复、签名验证、转发和故障测试 |
 | SQLx 0.9.0 | PostgreSQL 异步事务和连接池 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 migration、回滚和并发测试 |
+| clickhouse 0.15.2 | 已封存审计段的类型化查询、同步批量投递与传输加密 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 RowBinary schema、重复投递、并发冲突和故障水位测试 |
 | Tokio 1.51 LTS | SQLx 异步运行时 | MIT；跟随 1.51 LTS 补丁，变更 minor 前执行故障与负载回归 |
 | serde / serde_json 1.x | 类型化配置 DTO 与 outbox JSON | MIT OR Apache-2.0；锁文件固定，补丁升级执行配置和契约测试 |
 | UUID 1.x | 生成服务器侧 UUIDv7 请求 ID | MIT OR Apache-2.0；锁文件固定，补丁升级执行 ID 契约测试 |
@@ -104,7 +118,7 @@ cargo run -p xshield-audit --bin xshield-audit-seal -- \
 |---|---|
 | schemas/ | 4份自定义 JSON Schema：审计事件、证据manifest、模型调用、站点策略 |
 | examples/ | 禁用状态的站点配置，合成审计事件与证据，78项待实施验收用例 |
-| sql/ | PostgreSQL与ClickHouse数据模型草案，未执行数据库集成验证 |
+| sql/ | PostgreSQL migration 与 ClickHouse 部署 schema；真实 ClickHouse 集成验证尚待执行 |
 | templates/ | PR、ADR、crate说明和只读调查Agent约束 |
 | scripts/ | 可重复运行的文档/Schema/合成证据验证脚本 |
 | reference/ | 原始资料来源、旧输入文件哈希和决策基线 |

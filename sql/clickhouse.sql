@@ -1,5 +1,5 @@
--- Xshield v3 分析索引草案，尚未在真实ClickHouse执行。
--- MergeTree主键不唯一；入库可重复，精确调查需按event_id核对/去重。
+-- Xshield v3 分析索引。MergeTree主键不唯一；发布器执行摘要冲突检查，
+-- 查询仍须按event_id去重，并监控audit_event_conflicts应始终为空。
 -- ClickHouse不是资格账本/认证真值。TTL后台执行，不承诺即时删除。
 CREATE DATABASE IF NOT EXISTS xshield;
 CREATE TABLE IF NOT EXISTS xshield.audit_events (
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS xshield.audit_events (
  policy_revision String, model_revision String,
  evidence_refs Array(String), cause_event_ids Array(String),
  sensitivity LowCardinality(String), payload_json String,
- event_hash String, ingest_revision UInt64
+ event_hash String, content_digest FixedString(64), ingest_revision UInt64
 ) ENGINE=MergeTree
 PARTITION BY toYYYYMM(occurred_at)
 ORDER BY (tenant_id,site_id,request_id,request_seq,event_id)
@@ -27,6 +27,12 @@ ORDER BY (tenant_id,site_id,toDate(occurred_at),reason_code,occurred_at,event_id
 TTL occurred_at + INTERVAL 30 DAY DELETE;
 CREATE MATERIALIZED VIEW IF NOT EXISTS xshield.mv_events_by_time
 TO xshield.events_by_time AS SELECT * FROM xshield.audit_events;
+-- 同一event_id出现不同正文即审计完整性事故；物理重复但摘要相同不进入此视图。
+CREATE VIEW IF NOT EXISTS xshield.audit_event_conflicts AS
+SELECT event_id, groupUniqArray(content_digest) AS content_digests, count() AS deliveries
+FROM xshield.audit_events
+GROUP BY event_id
+HAVING uniqExact(content_digest) > 1;
 -- 实际查询API必须加入授权的tenant/site，参数绑定，行数/时间/字节上限。
 -- 聚合必须采用已去重视图或由消费者保证逻辑幂等，不直接把重复行COUNT作请求数。
 -- 例：单请求按阶段顺序读取，exact-result层仍以event_id去重。
