@@ -24,7 +24,8 @@ use xshield_core::{
     provenance::ActionTarget,
 };
 use xshield_gateway::{
-    GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, ResourceOperation,
+    GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, ResourceLocation,
+    ResourceOperation,
 };
 use xshield_postgres::{PostgresIdentityStore, StoreError};
 use zeroize::Zeroizing;
@@ -308,8 +309,9 @@ impl ProtectedIdentity {
         operation: ResourceOperation<'_>,
     ) -> Result<GatewayDecision, IdentityRuntimeError> {
         let Ok(scope) = RequestResource::parse(
+            request.uri.path(),
             request.uri.query(),
-            operation.query_parameter,
+            operation.location,
             operation.resource_type,
             &self.fingerprint_key,
             config,
@@ -372,13 +374,35 @@ struct RequestResource {
 
 impl RequestResource {
     fn parse(
+        path: &str,
         query: Option<&str>,
-        wanted: &FieldName,
+        location: ResourceLocation<'_>,
         resource_type: &ResourceType,
         key: &[u8; 32],
         config: &GatewayConfig,
     ) -> Result<Self, ()> {
-        let (resource, fields) = parse_query(query.ok_or(())?, wanted)?;
+        let (resource, fields) = match location {
+            ResourceLocation::Query(parameter) => parse_query(query.ok_or(())?, parameter)?,
+            ResourceLocation::FinalPathSegment { prefix, parameter } => {
+                if query.is_some() {
+                    return Err(());
+                }
+                let raw = path.strip_prefix(prefix).ok_or(())?;
+                if raw.is_empty() || raw.len() > MAX_QUERY_COMPONENT_BYTES || raw.contains('/') {
+                    return Err(());
+                }
+                let resource = decode_path_segment(raw)?;
+                if resource.is_empty()
+                    || resource.len() > MAX_RESOURCE_BYTES
+                    || resource
+                        .bytes()
+                        .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
+                {
+                    return Err(());
+                }
+                (resource, BTreeSet::from([parameter.clone()]))
+            }
+        };
         let mut canonical = Vec::with_capacity(128 + resource.len());
         for component in [
             "xshield-resource-v1",
@@ -400,6 +424,26 @@ impl RequestResource {
             fields,
         })
     }
+}
+
+fn decode_path_segment(value: &str) -> Result<String, ()> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let pair = bytes.get(index + 1..index + 3).ok_or(())?;
+            decoded.push((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+        if decoded.len() > MAX_RESOURCE_BYTES {
+            return Err(());
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| ())
 }
 
 fn denied(
@@ -826,5 +870,63 @@ mod tests {
         assert!(parse_query("order_id=%GG", &wanted).is_err());
         assert!(parse_query("order_id=order+123", &wanted).is_err());
         assert!(parse_query("order_id=one;view=full", &wanted).is_err());
+    }
+
+    #[test]
+    fn path_adapter_hashes_one_strict_final_segment() {
+        let config = service_config("site_path");
+        let parameter = FieldName::parse("order_id").unwrap();
+        let resource_type = ResourceType::parse("order").unwrap();
+        let query = RequestResource::parse(
+            "/orders",
+            Some("order_id=order-123"),
+            ResourceLocation::Query(&parameter),
+            &resource_type,
+            &KEY,
+            &config,
+        )
+        .unwrap();
+        let path = RequestResource::parse(
+            "/orders/order%2D123",
+            None,
+            ResourceLocation::FinalPathSegment {
+                prefix: "/orders/",
+                parameter: &parameter,
+            },
+            &resource_type,
+            &KEY,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(query.key.as_bytes(), path.key.as_bytes());
+        assert_eq!(path.fields, BTreeSet::from([parameter.clone()]));
+        assert!(
+            RequestResource::parse(
+                "/orders/order%2F123",
+                None,
+                ResourceLocation::FinalPathSegment {
+                    prefix: "/orders/",
+                    parameter: &parameter,
+                },
+                &resource_type,
+                &KEY,
+                &config,
+            )
+            .is_err()
+        );
+        assert!(
+            RequestResource::parse(
+                "/orders/order-123",
+                Some("expand=admin"),
+                ResourceLocation::FinalPathSegment {
+                    prefix: "/orders/",
+                    parameter: &parameter,
+                },
+                &resource_type,
+                &KEY,
+                &config,
+            )
+            .is_err()
+        );
     }
 }

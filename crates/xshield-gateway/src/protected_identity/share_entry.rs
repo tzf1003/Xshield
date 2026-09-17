@@ -27,8 +27,9 @@ impl ProtectedIdentity {
             return Ok(denied(config, method, path, now));
         };
         let Ok(scope) = RequestResource::parse(
+            request.uri.path(),
             request.uri.query(),
-            operation.query_parameter,
+            operation.location,
             operation.resource_type,
             &self.fingerprint_key,
             config,

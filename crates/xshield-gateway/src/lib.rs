@@ -29,6 +29,7 @@ pub mod share_token;
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 /// Maximum complete private JSON response accepted by the MVP adapter.
 pub const MAX_BUFFERED_JSON_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 
 /// Fully validated gateway configuration selected at process startup.
 #[derive(Debug)]
@@ -41,6 +42,7 @@ pub struct GatewayConfig {
     audit: AuditConfig,
     identity_store: Option<IdentityStoreConfig>,
     operations: BTreeMap<(String, String), CompiledOperation>,
+    path_resource_operations: Vec<CompiledOperation>,
 }
 
 #[derive(Debug)]
@@ -70,16 +72,37 @@ pub struct IdentityStoreConfig {
 struct CompiledOperation {
     method: HttpMethod,
     route: RouteTemplate,
+    route_match: CompiledRouteMatch,
     policy: OperationPolicy,
     resource: Option<CompiledResource>,
     buffered_json_max_bytes: Option<usize>,
+}
+
+struct CompiledOperations {
+    exact: BTreeMap<(String, String), CompiledOperation>,
+    path_resources: Vec<CompiledOperation>,
+}
+
+#[derive(Debug)]
+enum CompiledRouteMatch {
+    Exact(String),
+    FinalResourceSegment { prefix: String },
 }
 
 #[derive(Debug)]
 struct CompiledResource {
     resource_type: ResourceType,
     view_profile: ViewProfile,
-    query_parameter: FieldName,
+    location: CompiledResourceLocation,
+}
+
+#[derive(Debug)]
+enum CompiledResourceLocation {
+    Query(FieldName),
+    FinalPathSegment {
+        prefix: String,
+        parameter: FieldName,
+    },
 }
 
 #[derive(Deserialize)]
@@ -139,6 +162,7 @@ struct OperationDto {
     resource_type: Option<String>,
     view_profile: Option<String>,
     resource_query_parameter: Option<String>,
+    resource_path_parameter: Option<String>,
     response: Option<ResponseDto>,
 }
 
@@ -171,7 +195,7 @@ impl GatewayConfig {
     ///
     /// # Errors
     /// Returns [`ConfigError`] for malformed JSON, invalid identifiers, unsafe
-    /// network values, non-exact paths, incoherent policies, or duplicate routes.
+    /// network values, unsafe paths, incoherent policies, or ambiguous routes.
     pub fn from_json(bytes: &[u8]) -> Result<Self, ConfigError> {
         if bytes.is_empty() || bytes.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError::Invalid("configuration size"));
@@ -225,27 +249,21 @@ impl GatewayConfig {
                 })
             })
             .transpose()?;
-        if dto.operations.is_empty() {
-            return Err(ConfigError::Invalid("operations"));
-        }
-
-        let mut operations = BTreeMap::new();
-        for operation in dto.operations {
-            let (key, compiled) = compile_operation(operation)?;
-            if operations.insert(key, compiled).is_some() {
-                return Err(ConfigError::DuplicateRoute);
-            }
-        }
+        let compiled_operations = compile_operations(dto.operations)?;
         if identity_store.is_none()
-            && operations.values().any(|operation| {
-                matches!(
-                    operation.policy.admission_class(),
-                    AdmissionClass::AuthenticatedRoot
-                        | AdmissionClass::UiActionRequired
-                        | AdmissionClass::ShareEntry
-                        | AdmissionClass::ServiceIdentity
-                )
-            })
+            && compiled_operations
+                .exact
+                .values()
+                .chain(compiled_operations.path_resources.iter())
+                .any(|operation| {
+                    matches!(
+                        operation.policy.admission_class(),
+                        AdmissionClass::AuthenticatedRoot
+                            | AdmissionClass::UiActionRequired
+                            | AdmissionClass::ShareEntry
+                            | AdmissionClass::ServiceIdentity
+                    )
+                })
         {
             return Err(ConfigError::Invalid("identity_store"));
         }
@@ -267,7 +285,8 @@ impl GatewayConfig {
                 reconcile_max_records: dto.audit.reconcile_max_records,
             },
             identity_store,
-            operations,
+            operations: compiled_operations.exact,
+            path_resource_operations: compiled_operations.path_resources,
         })
     }
 
@@ -361,30 +380,32 @@ impl GatewayConfig {
     /// Returns the proof class for an exact configured operation.
     #[must_use]
     pub fn admission_class(&self, method: &str, path: &str) -> Option<AdmissionClass> {
-        self.operations
-            .get(&(method.to_owned(), path.to_owned()))
+        self.operation(method, path)
             .map(|operation| operation.policy.admission_class())
     }
 
-    /// Returns the trusted query adapter for an exact resource operation.
+    /// Returns the trusted query or path adapter for a matched resource operation.
     #[must_use]
     pub fn resource_operation(&self, method: &str, path: &str) -> Option<ResourceOperation<'_>> {
-        let operation = self.operations.get(&(method.to_owned(), path.to_owned()))?;
+        let operation = self.operation(method, path)?;
         let resource = operation.resource.as_ref()?;
         Some(ResourceOperation {
             operation_id: operation.policy.operation_id(),
             resource_type: &resource.resource_type,
             view_profile: &resource.view_profile,
-            query_parameter: &resource.query_parameter,
+            location: match &resource.location {
+                CompiledResourceLocation::Query(parameter) => ResourceLocation::Query(parameter),
+                CompiledResourceLocation::FinalPathSegment { prefix, parameter } => {
+                    ResourceLocation::FinalPathSegment { prefix, parameter }
+                }
+            },
         })
     }
 
     /// Returns the complete-buffer limit for an exact private JSON response.
     #[must_use]
     pub fn buffered_json_max_bytes(&self, method: &str, path: &str) -> Option<usize> {
-        self.operations
-            .get(&(method.to_owned(), path.to_owned()))?
-            .buffered_json_max_bytes
+        self.operation(method, path)?.buffered_json_max_bytes
     }
 
     /// Applies the compiled exact-operation policy with authoritative loaded proof.
@@ -414,7 +435,7 @@ impl GatewayConfig {
         resource_key: Option<&ResourceKeyHmac>,
         proof: AdmissionProof<'_>,
     ) -> GatewayDecision {
-        let Some(operation) = self.operations.get(&(method.to_owned(), path.to_owned())) else {
+        let Some(operation) = self.operation(method, path) else {
             return GatewayDecision {
                 outcome: GatewayOutcome::Denied,
                 operation_id: None,
@@ -450,9 +471,67 @@ impl GatewayConfig {
             },
         }
     }
+
+    fn operation(&self, method: &str, path: &str) -> Option<&CompiledOperation> {
+        self.operations
+            .get(&(method.to_owned(), path.to_owned()))
+            .or_else(|| {
+                self.path_resource_operations
+                    .iter()
+                    .find(|operation| operation.matches_text(method, path))
+            })
+    }
 }
 
-/// Trusted resource semantics compiled for one exact operation.
+fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperations, ConfigError> {
+    if operations.is_empty() {
+        return Err(ConfigError::Invalid("operations"));
+    }
+    let mut exact = BTreeMap::new();
+    let mut path_resources = Vec::new();
+    for operation in operations {
+        let compiled = compile_operation(operation)?;
+        match &compiled.route_match {
+            CompiledRouteMatch::Exact(path) => {
+                let path = path.clone();
+                if path_resources
+                    .iter()
+                    .any(|candidate: &CompiledOperation| candidate.matches(compiled.method, &path))
+                    || exact
+                        .insert((compiled.method.as_str().to_owned(), path), compiled)
+                        .is_some()
+                {
+                    return Err(ConfigError::DuplicateRoute);
+                }
+            }
+            CompiledRouteMatch::FinalResourceSegment { prefix } => {
+                if path_resources.len() >= MAX_PATH_RESOURCE_OPERATIONS {
+                    return Err(ConfigError::Invalid("operations"));
+                }
+                if path_resources.iter().any(|candidate| {
+                    candidate.method == compiled.method
+                        && matches!(
+                            &candidate.route_match,
+                            CompiledRouteMatch::FinalResourceSegment {
+                                prefix: candidate_prefix
+                            } if candidate_prefix == prefix
+                        )
+                }) || exact.iter().any(|((method, path), _)| {
+                    method == compiled.method.as_str() && compiled.matches(compiled.method, path)
+                }) {
+                    return Err(ConfigError::DuplicateRoute);
+                }
+                path_resources.push(compiled);
+            }
+        }
+    }
+    Ok(CompiledOperations {
+        exact,
+        path_resources,
+    })
+}
+
+/// Trusted resource semantics compiled for one matched operation.
 #[derive(Clone, Copy, Debug)]
 pub struct ResourceOperation<'a> {
     /// Exact operation selected by method and path.
@@ -461,8 +540,22 @@ pub struct ResourceOperation<'a> {
     pub resource_type: &'a ResourceType,
     /// Exact view required by the resource grant.
     pub view_profile: &'a ViewProfile,
-    /// Query field containing the canonical resource reference.
-    pub query_parameter: &'a FieldName,
+    /// Versioned location containing the canonical resource reference.
+    pub location: ResourceLocation<'a>,
+}
+
+/// Trusted resource-reference location compiled from one operation.
+#[derive(Clone, Copy, Debug)]
+pub enum ResourceLocation<'a> {
+    /// One strict query parameter on an exact path.
+    Query(&'a FieldName),
+    /// One strict final path segment following a fixed prefix.
+    FinalPathSegment {
+        /// Fixed raw path prefix ending in `/`.
+        prefix: &'a str,
+        /// Field identity used by the action field policy.
+        parameter: &'a FieldName,
+    },
 }
 
 impl IdentityStoreConfig {
@@ -479,11 +572,9 @@ impl IdentityStoreConfig {
     }
 }
 
-fn compile_operation(
-    dto: OperationDto,
-) -> Result<((String, String), CompiledOperation), ConfigError> {
+fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError> {
     let method = parse_method(&dto.method).ok_or(ConfigError::Invalid("operations.method"))?;
-    if dto.path.contains(['{', '}']) {
+    if dto.path.contains(['{', '}']) && dto.resource_path_parameter.is_none() {
         return Err(ConfigError::Invalid("operations.path"));
     }
     let route = RouteTemplate::parse(dto.path.clone()).map_err(ConfigError::Provenance)?;
@@ -492,13 +583,18 @@ fn compile_operation(
         .map(ActionId::parse)
         .transpose()
         .map_err(ConfigError::Domain)?;
-    let (capability, resource) = match (
+    let (capability, resource, route_match) = match (
         dto.resource_type,
         dto.view_profile,
         dto.resource_query_parameter,
+        dto.resource_path_parameter,
     ) {
-        (None, None, None) => (CapabilityPolicy::None, None),
-        (Some(resource_type), Some(view_profile), Some(query_parameter))
+        (None, None, None, None) if !dto.path.contains(['{', '}']) => (
+            CapabilityPolicy::None,
+            None,
+            CompiledRouteMatch::Exact(dto.path.clone()),
+        ),
+        (Some(resource_type), Some(view_profile), Some(query_parameter), None)
             if method == HttpMethod::Get =>
         {
             let resource_type = ResourceType::parse(resource_type).map_err(ConfigError::Domain)?;
@@ -512,8 +608,32 @@ fn compile_operation(
                 Some(CompiledResource {
                     resource_type,
                     view_profile,
-                    query_parameter,
+                    location: CompiledResourceLocation::Query(query_parameter),
                 }),
+                CompiledRouteMatch::Exact(dto.path.clone()),
+            )
+        }
+        (Some(resource_type), Some(view_profile), None, Some(path_parameter))
+            if method == HttpMethod::Get =>
+        {
+            let resource_type = ResourceType::parse(resource_type).map_err(ConfigError::Domain)?;
+            let view_profile = ViewProfile::parse(view_profile).map_err(ConfigError::Domain)?;
+            let parameter = FieldName::parse(path_parameter).map_err(ConfigError::Domain)?;
+            let prefix = final_resource_prefix(&dto.path, &parameter)?;
+            (
+                CapabilityPolicy::ExactResource {
+                    resource_type: resource_type.clone(),
+                    view_profile: view_profile.clone(),
+                },
+                Some(CompiledResource {
+                    resource_type,
+                    view_profile,
+                    location: CompiledResourceLocation::FinalPathSegment {
+                        prefix: prefix.clone(),
+                        parameter,
+                    },
+                }),
+                CompiledRouteMatch::FinalResourceSegment { prefix },
             )
         }
         _ => return Err(ConfigError::Invalid("operation capability")),
@@ -540,16 +660,49 @@ fn compile_operation(
             }
         })
         .transpose()?;
-    Ok((
-        (method.as_str().to_owned(), dto.path),
-        CompiledOperation {
-            method,
-            route,
-            policy,
-            resource,
-            buffered_json_max_bytes,
-        },
-    ))
+    Ok(CompiledOperation {
+        method,
+        route,
+        route_match,
+        policy,
+        resource,
+        buffered_json_max_bytes,
+    })
+}
+
+impl CompiledOperation {
+    fn matches_text(&self, method: &str, path: &str) -> bool {
+        self.method.as_str() == method && self.matches(self.method, path)
+    }
+
+    fn matches(&self, method: HttpMethod, path: &str) -> bool {
+        if self.method != method {
+            return false;
+        }
+        match &self.route_match {
+            CompiledRouteMatch::Exact(expected) => expected == path,
+            CompiledRouteMatch::FinalResourceSegment { prefix } => path
+                .strip_prefix(prefix)
+                .is_some_and(|segment| !segment.is_empty() && !segment.contains('/')),
+        }
+    }
+}
+
+fn final_resource_prefix(path: &str, parameter: &FieldName) -> Result<String, ConfigError> {
+    let marker = format!("{{{}}}", parameter.as_str());
+    let Some(prefix) = path.strip_suffix(&marker) else {
+        return Err(ConfigError::Invalid("operations.path"));
+    };
+    if !prefix.ends_with('/')
+        || prefix.contains(['{', '}', '%'])
+        || prefix.contains("//")
+        || prefix
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(ConfigError::Invalid("operations.path"));
+    }
+    Ok(prefix.to_owned())
 }
 
 fn parse_method(value: &str) -> Option<HttpMethod> {
@@ -788,7 +941,10 @@ mod tests {
             );
         let config = GatewayConfig::from_json(resource.as_bytes()).unwrap();
         let operation = config.resource_operation("GET", "/account").unwrap();
-        assert_eq!(operation.query_parameter.as_str(), "account_id");
+        assert!(matches!(
+            operation.location,
+            ResourceLocation::Query(parameter) if parameter.as_str() == "account_id"
+        ));
 
         let non_get = resource.replace(
             "\"method\":\"GET\",\"path\":\"/account\"",
@@ -796,6 +952,59 @@ mod tests {
         );
         assert!(matches!(
             GatewayConfig::from_json(non_get.as_bytes()),
+            Err(ConfigError::Invalid("operation capability"))
+        ));
+    }
+
+    #[test]
+    fn compiles_one_final_path_resource_segment() {
+        let resource = CONFIG
+            .replace(
+                "\"method\":\"POST\",\"path\":\"/account\"",
+                "\"method\":\"GET\",\"path\":\"/account/{account_id}\"",
+            )
+            .replace(
+                "\"resource_type\":null,\"view_profile\":null}\n      ]",
+                "\"resource_type\":\"account\",\"view_profile\":\"summary\",\"resource_path_parameter\":\"account_id\"}\n      ]",
+            );
+        let config = GatewayConfig::from_json(resource.as_bytes()).unwrap();
+        let operation = config
+            .resource_operation("GET", "/account/account-123")
+            .unwrap();
+        assert!(matches!(
+            operation.location,
+            ResourceLocation::FinalPathSegment { prefix: "/account/", parameter }
+                if parameter.as_str() == "account_id"
+        ));
+        assert_eq!(
+            config
+                .admit("GET", "/account/account-123", UnixSeconds::new(1))
+                .reason_code,
+            ReasonCode::UiActionNotAvailable
+        );
+        assert!(
+            config
+                .resource_operation("GET", "/account/nested/account-123")
+                .is_none()
+        );
+
+        let ambiguous =
+            resource.replace("\"path\":\"/catalog\"", "\"path\":\"/account/account-123\"");
+        assert!(matches!(
+            GatewayConfig::from_json(ambiguous.as_bytes()),
+            Err(ConfigError::DuplicateRoute)
+        ));
+        let wrong_marker = resource.replace("{account_id}", "{other_id}");
+        assert!(matches!(
+            GatewayConfig::from_json(wrong_marker.as_bytes()),
+            Err(ConfigError::Invalid("operations.path"))
+        ));
+        let two_locations = resource.replace(
+            "\"resource_path_parameter\":\"account_id\"",
+            "\"resource_query_parameter\":\"account_id\",\"resource_path_parameter\":\"account_id\"",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(two_locations.as_bytes()),
             Err(ConfigError::Invalid("operation capability"))
         ));
     }

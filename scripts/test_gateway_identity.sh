@@ -101,6 +101,16 @@ INSERT INTO xshield.action_descriptors (
     '{"kind":"resource","resource_type":"order"}', '["order_id"]',
     'customer_detail', 'policy-r1', 'mapping-r1', 'approved'
 );
+INSERT INTO xshield.action_descriptors (
+    tenant_id, site_id, action_id, page_template, operation_id, method,
+    route_template, target_rule, allowed_fields, field_profile,
+    policy_revision, mapping_revision, status
+) VALUES (
+    'tenant_gateway', 'site_gateway', 'orders.path.open', 'settings_page',
+    'orders.path.read', 'GET', '/path-orders/{order_id}',
+    '{"kind":"resource","resource_type":"order"}', '["order_id"]',
+    'customer_detail', 'policy-r1', 'mapping-r1', 'approved'
+);
 INSERT INTO xshield.page_evidence (
     tenant_id, site_id, page_evidence_id, binding_id, auth_epoch,
     source_request_id, response_artifact_ref, page_template, build_fingerprint,
@@ -159,6 +169,37 @@ INSERT INTO xshield.resource_grants (
     'orders-primary-r1', 'policy-r1', 'active',
     now() - interval '20 seconds', now() + interval '10 minutes'
 );
+INSERT INTO xshield.ui_actions (
+    tenant_id, site_id, action_ref, binding_id, auth_epoch,
+    source_request_id, page_evidence_id, source_action_ref, operation_id,
+    target_constraints, field_profile, source_rule, policy_revision,
+    status, issued_at, expires_at, mapping_revision, method, route_template,
+    allowed_fields
+) VALUES (
+    'tenant_gateway', 'site_gateway', 'action_order_path_primary',
+    'auth_018f2a3b-4c5d-7000-8000-000000000901', 1,
+    'req_018f2a3b-4c5d-7000-8000-000000000904',
+    'page_018f2a3b-4c5d-7000-8000-000000000903', 'orders.path.open',
+    'orders.path.read', jsonb_build_object(
+        'kind', 'resource', 'resource_type', 'order',
+        'resource_key_hmac', :'resource_fingerprint'
+    ), 'customer_detail', 'mapping-r1', 'policy-r1', 'active',
+    now() - interval '30 seconds', now() + interval '15 minutes',
+    'mapping-r1', 'GET', '/path-orders/{order_id}', '["order_id"]'
+);
+INSERT INTO xshield.resource_grants (
+    tenant_id, site_id, grant_id, binding_id, auth_epoch, action_ref,
+    resource_type, resource_key_hmac, operation_id, view_id, constraints,
+    source_event_id, issuance_key, policy_revision, status, issued_at, expires_at
+) VALUES (
+    'tenant_gateway', 'site_gateway',
+    'grant_018f2a3b-4c5d-7000-8000-000000000915',
+    'auth_018f2a3b-4c5d-7000-8000-000000000901', 1, 'action_order_path_primary',
+    'order', decode(:'resource_fingerprint', 'hex'), 'orders.path.read',
+    'customer_detail', '{}', 'ev_018f2a3b-4c5d-7000-8000-000000000916',
+    'orders-path-primary-r1', 'policy-r1', 'active',
+    now() - interval '20 seconds', now() + interval '10 minutes'
+);
 INSERT INTO xshield.service_identities (
     tenant_id, site_id, service_id, credential_fingerprint,
     operation_ids, status, issued_at, expires_at
@@ -195,6 +236,7 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
+    {"operation_id":"orders.path.read","method":"GET","path":"/path-orders/{order_id}","admission":"UI_ACTION_REQUIRED","source_action":"orders.path.open","resource_type":"order","view_profile":"customer_detail","resource_path_parameter":"order_id"},
     {"operation_id":"reports.ingest","method":"POST","path":"/service/report","admission":"SERVICE_IDENTITY","source_action":null,"resource_type":null,"view_profile":null,"resource_query_parameter":null},
     {"operation_id":"records.share.read","method":"GET","path":"/shared-record","admission":"SHARE_ENTRY","source_action":null,"resource_type":"record","view_profile":"shared_summary","resource_query_parameter":"record_id"},
     {"operation_id":"buffered.valid","method":"GET","path":"/buffered-valid","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":64}},
@@ -333,6 +375,29 @@ valid_resource_status=$(curl -sS -o "$test_dir/valid-resource.body" -w '%{http_c
     'http://127.0.0.1:6288/orders?order_id=order-123')
 [[ "$valid_resource_status" == "404" ]]
 
+valid_path_resource_status=$(curl -sS -o "$test_dir/valid-path-resource.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_order_path_primary" \
+    'http://127.0.0.1:6288/path-orders/order%2D123')
+[[ "$valid_path_resource_status" == "404" ]]
+
+unknown_path_resource_status=$(curl -sS -o "$test_dir/unknown-path-resource.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_order_path_primary" \
+    'http://127.0.0.1:6288/path-orders/order-999')
+[[ "$unknown_path_resource_status" == "403" ]]
+grep -q '"reason_code":"CAPABILITY_MISSING"' "$test_dir/unknown-path-resource.json"
+
+encoded_slash_status=$(curl --path-as-is -sS -o "$test_dir/encoded-slash.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_order_path_primary" \
+    'http://127.0.0.1:6288/path-orders/order%2F123')
+[[ "$encoded_slash_status" == "403" ]]
+grep -q '"reason_code":"CAPABILITY_MISSING"' "$test_dir/encoded-slash.json"
+
 unknown_resource_status=$(curl -sS -o "$test_dir/unknown-resource.json" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$session_id" \
     -H "Authorization: Bearer $bearer" \
@@ -432,6 +497,7 @@ origin_pid=""
 [[ $(grep -c 'GET /account' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /path-orders/order%2D123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /buffered-valid' "$test_dir/origin.log") == "1" ]]

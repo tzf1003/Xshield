@@ -10,7 +10,7 @@ site_id + auth_binding_id + auth_epoch + tenant_ref
 
 action_grant_id、source_request_id、source_rule_revision、source_evidence_ids、issued_at、expires_at、revocation_version、use_policy、status 是必要证明字段。禁止只以 URL、ID 或 Cookie 为唯一授权索引。
 
-当前 GET 查询适配器由策略显式声明 `resource_query_parameter`。网关对实际转发 URI 的查询串执行一次严格解码，拒绝重复字段、分号分隔、非法百分号、超限和控制字符，以租户、站点、资源类型和值的带域 HMAC 生成 `resource_key_hmac`，并把全部查询字段同时交给 ActionGrant 校验。资源值、operation、view、action、binding、auth_epoch、策略和期限精确命中活动 ResourceGrant 后才可转发；原始资源值不进入账本或审计。该适配器只覆盖 GET 查询语义，其他协议形态由对应版本化站点适配器冻结后接入。
+当前 GET 资源适配器由策略显式且互斥地声明 `resource_query_parameter` 或 `resource_path_parameter`。查询适配器对实际转发 URI 的查询串严格解码一次，拒绝重复字段、分号分隔、非法百分号、超限和控制字符；路径适配器只接受固定前缀后的一个最终段，严格解码一次，并拒绝额外查询、嵌套段、编码斜杠、控制字符、模板错配和路由歧义。两者均以租户、站点、资源类型和值的带域 HMAC 生成 `resource_key_hmac`，并把实际资源字段交给 ActionGrant 校验。资源值、operation、view、action、binding、auth_epoch、策略和期限精确命中活动 ResourceGrant 后才可转发；原始资源值不进入账本或审计。其他协议形态由对应版本化站点适配器冻结后接入。
 
 观察记录 observations、有效资格 grants、模型信号 model_signals 三者隔离。全文检索、向量相似度及 Bloom 正结果不能代替精确查表。多个资源批量请求逐项检查；父子资源检查关系，不允许把独立认识的两个 ID 任意组合。
 
