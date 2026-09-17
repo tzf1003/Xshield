@@ -122,6 +122,8 @@ v7_id!(WafSessionId, "ses_", "waf_session_id");
 v7_id!(AuthBindingId, "auth_", "auth_binding_id");
 v7_id!(GrantId, "grant_", "grant_id");
 v7_id!(PageEvidenceId, "page_", "page_evidence_id");
+v7_id!(ShareGrantId, "share_", "share_grant_id");
+v7_id!(ServiceIdentityId, "svc_", "service_identity_id");
 scoped_name!(OperationId, "operation_id");
 scoped_name!(ResourceType, "resource_type");
 scoped_name!(ViewProfile, "view_profile");

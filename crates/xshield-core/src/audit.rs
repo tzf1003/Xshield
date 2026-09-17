@@ -124,6 +124,10 @@ pub enum ReasonCode {
     ShareScopeMismatch,
     /// Service identity proof does not match the exact operation scope.
     ServiceIdentityMismatch,
+    /// Exact limited-share proof passed.
+    ShareEntryAllowed,
+    /// Exact service identity operation scope passed.
+    ServiceIdentityAllowed,
     /// No site policy exists for the requested scope.
     SiteNotConfigured,
     /// The scoped site policy is explicitly disabled.
@@ -173,6 +177,8 @@ impl ReasonCode {
             Self::OperationNotMatched => "OPERATION_NOT_MATCHED",
             Self::ShareScopeMismatch => "SHARE_SCOPE_MISMATCH",
             Self::ServiceIdentityMismatch => "SERVICE_IDENTITY_MISMATCH",
+            Self::ShareEntryAllowed => "SHARE_ENTRY_ALLOWED",
+            Self::ServiceIdentityAllowed => "SERVICE_IDENTITY_ALLOWED",
             Self::SiteNotConfigured => "SITE_NOT_CONFIGURED",
             Self::SiteDisabled => "SITE_DISABLED",
             Self::SiteConfigUnavailable => "SITE_CONFIG_UNAVAILABLE",

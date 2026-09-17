@@ -6,6 +6,7 @@
 
 #![warn(missing_docs)]
 
+pub mod access;
 pub mod admin;
 pub mod admission;
 pub mod application;

@@ -1,8 +1,12 @@
 //! Deterministic operation-entry admission composed from existing identity and grant domains.
 
 use crate::{
+    access::{
+        AccessDenied, ServiceCredentialFingerprint, ServiceIdentity, ShareGrant,
+        ShareTokenFingerprint,
+    },
     audit::ReasonCode,
-    domain::{ActionId, FieldName, OperationId, ResourceType, ViewProfile},
+    domain::{ActionId, FieldName, OperationId, ResourceType, SiteId, TenantId, ViewProfile},
     grant::{GrantDenied, GrantLedger, GrantQuery, ResourceKeyHmac},
     identity::{AuthBinding, AuthSnapshot, IdentityDenied, UnixSeconds},
     provenance::{ActionGrant, ActionTarget, HttpMethod, ProvenanceError, RouteTemplate},
@@ -65,10 +69,19 @@ impl OperationPolicy {
         source_action: Option<ActionId>,
         capability: CapabilityPolicy,
     ) -> Result<Self, OperationPolicyError> {
-        let ui_required = admission == AdmissionClass::UiActionRequired;
-        if ui_required != source_action.is_some()
-            || (!ui_required && capability != CapabilityPolicy::None)
-        {
+        let source_valid =
+            (admission == AdmissionClass::UiActionRequired) == source_action.is_some();
+        let capability_valid = match admission {
+            AdmissionClass::UiActionRequired => true,
+            AdmissionClass::ShareEntry => {
+                matches!(capability, CapabilityPolicy::ExactResource { .. })
+            }
+            AdmissionClass::Public
+            | AdmissionClass::AuthenticationEntry
+            | AdmissionClass::AuthenticatedRoot
+            | AdmissionClass::ServiceIdentity => capability == CapabilityPolicy::None,
+        };
+        if !source_valid || !capability_valid {
             return Err(OperationPolicyError);
         }
         Ok(Self {
@@ -133,9 +146,56 @@ impl OperationPolicy {
                 self.authorize_resource(binding, snapshot, grants, &request)?;
                 ReasonCode::UiActionAllowed
             }
-            AdmissionClass::ShareEntry => return Err(AdmissionError::ShareScopeMismatch),
+            AdmissionClass::ShareEntry => {
+                let AdmissionProof::Share {
+                    grant,
+                    token_fingerprint,
+                } = proof
+                else {
+                    return Err(AdmissionError::ShareScopeMismatch);
+                };
+                let CapabilityPolicy::ExactResource {
+                    resource_type,
+                    view_profile,
+                } = &self.capability
+                else {
+                    return Err(AdmissionError::ShareScopeMismatch);
+                };
+                let Some(resource) = request.resource else {
+                    return Err(AdmissionError::ShareScopeMismatch);
+                };
+                grant.authorize(
+                    request.tenant_id,
+                    request.site_id,
+                    token_fingerprint,
+                    resource_type,
+                    resource.resource_key,
+                    &self.operation_id,
+                    view_profile,
+                    request.method,
+                    request.now,
+                )?;
+                if resource.resource_type != resource_type {
+                    return Err(AdmissionError::ShareScopeMismatch);
+                }
+                ReasonCode::ShareEntryAllowed
+            }
             AdmissionClass::ServiceIdentity => {
-                return Err(AdmissionError::ServiceIdentityMismatch);
+                let AdmissionProof::Service {
+                    identity,
+                    credential_fingerprint,
+                } = proof
+                else {
+                    return Err(AdmissionError::ServiceIdentityMismatch);
+                };
+                identity.authorize(
+                    request.tenant_id,
+                    request.site_id,
+                    credential_fingerprint,
+                    &self.operation_id,
+                    request.now,
+                )?;
+                ReasonCode::ServiceIdentityAllowed
             }
         };
         Ok(AdmissionDecision {
@@ -186,6 +246,10 @@ impl OperationPolicy {
 /// Request facts produced by trusted routing and DTO validation.
 #[derive(Clone, Copy, Debug)]
 pub struct AdmissionRequest<'a> {
+    /// Tenant selected by trusted edge configuration.
+    pub tenant_id: &'a TenantId,
+    /// Site selected by trusted edge configuration.
+    pub site_id: &'a SiteId,
     /// Canonical method selected by the route adapter.
     pub method: HttpMethod,
     /// Matched canonical route template, not an attacker-provided policy key.
@@ -232,6 +296,20 @@ pub enum AdmissionProof<'a> {
         /// Resource grant ledger when required by policy.
         grants: Option<&'a GrantLedger>,
     },
+    /// Exact limited-share grant and presented token fingerprint.
+    Share {
+        /// Server-side limited-share record.
+        grant: &'a ShareGrant,
+        /// Fingerprint of the presented share token.
+        token_fingerprint: &'a ShareTokenFingerprint,
+    },
+    /// Exact service identity and presented credential fingerprint.
+    Service {
+        /// Server-side service identity record.
+        identity: &'a ServiceIdentity,
+        /// Fingerprint of the presented service credential.
+        credential_fingerprint: &'a ServiceCredentialFingerprint,
+    },
 }
 
 /// Successful deterministic entry decision.
@@ -276,6 +354,8 @@ pub enum AdmissionError {
     Provenance(ProvenanceError),
     /// Exact resource operation grant is absent or out of scope.
     Capability(GrantDenied),
+    /// Dedicated share or service proof is outside its exact scope.
+    Access(AccessDenied),
 }
 
 impl AdmissionError {
@@ -291,6 +371,7 @@ impl AdmissionError {
             Self::Identity(error) => error.reason_code(),
             Self::Provenance(error) => error.reason_code(),
             Self::Capability(error) => error.reason_code(),
+            Self::Access(error) => error.reason_code(),
         }
     }
 }
@@ -313,6 +394,12 @@ impl From<GrantDenied> for AdmissionError {
     }
 }
 
+impl From<AccessDenied> for AdmissionError {
+    fn from(value: AccessDenied) -> Self {
+        Self::Access(value)
+    }
+}
+
 impl fmt::Display for AdmissionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.reason_code().as_str())
@@ -327,7 +414,8 @@ mod tests {
     use crate::{
         domain::{
             ActionRef, AuthBindingId, GrantId, IssuanceKey, MappingRevision, PageEvidenceId,
-            PageTemplate, PolicyRevision, RequestId, SiteId, TenantId, WafSessionId,
+            PageTemplate, PolicyRevision, RequestId, ServiceIdentityId, ShareGrantId, SiteId,
+            TenantId, WafSessionId,
         },
         grant::{GrantDraft, GrantLedger},
         identity::{AuthEpoch, CredentialFingerprint, CredentialGeneration, CredentialSlot},
@@ -475,6 +563,8 @@ mod tests {
 
     fn request<'a>(fixture: &'a Fixture, resource: &'a ResourceKeyHmac) -> AdmissionRequest<'a> {
         AdmissionRequest {
+            tenant_id: fixture.snapshot.tenant_id(),
+            site_id: fixture.snapshot.site_id(),
             method: HttpMethod::Get,
             route: &fixture.route,
             target: &fixture.target,
@@ -602,14 +692,88 @@ mod tests {
     #[test]
     fn share_and_service_entries_require_dedicated_proof() {
         let fixture = fixture();
-        assert_eq!(
-            policy(AdmissionClass::ShareEntry, CapabilityPolicy::None)
-                .admit(request(&fixture, &fixture.resource_a), AdmissionProof::None),
-            Err(AdmissionError::ShareScopeMismatch)
+        let share_token = ShareTokenFingerprint::parse(
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+        let share = ShareGrant::new_read_only(
+            ShareGrantId::parse("share_018f2a3b-4c5d-7000-8000-000000000506").unwrap(),
+            fixture.snapshot.tenant_id().clone(),
+            fixture.snapshot.site_id().clone(),
+            share_token.clone(),
+            fixture.resource_type.clone(),
+            fixture.resource_a.clone(),
+            OperationId::parse("orders.read").unwrap(),
+            ViewProfile::parse("customer_detail").unwrap(),
+            UnixSeconds::new(180),
+            UnixSeconds::new(100),
+        )
+        .unwrap();
+        let share_policy = policy(
+            AdmissionClass::ShareEntry,
+            CapabilityPolicy::ExactResource {
+                resource_type: fixture.resource_type.clone(),
+                view_profile: ViewProfile::parse("customer_detail").unwrap(),
+            },
         );
         assert_eq!(
-            policy(AdmissionClass::ServiceIdentity, CapabilityPolicy::None)
-                .admit(request(&fixture, &fixture.resource_a), AdmissionProof::None),
+            share_policy
+                .admit(
+                    request(&fixture, &fixture.resource_a),
+                    AdmissionProof::Share {
+                        grant: &share,
+                        token_fingerprint: &share_token,
+                    },
+                )
+                .unwrap()
+                .reason_code,
+            ReasonCode::ShareEntryAllowed
+        );
+        let wrong_share_token = ShareTokenFingerprint::parse(
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        )
+        .unwrap();
+        assert_eq!(
+            share_policy.admit(
+                request(&fixture, &fixture.resource_a),
+                AdmissionProof::Share {
+                    grant: &share,
+                    token_fingerprint: &wrong_share_token,
+                },
+            ),
+            Err(AdmissionError::Access(AccessDenied::ShareScopeMismatch))
+        );
+
+        let service_credential = ServiceCredentialFingerprint::parse(
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        )
+        .unwrap();
+        let service = ServiceIdentity::new(
+            ServiceIdentityId::parse("svc_018f2a3b-4c5d-7000-8000-000000000507").unwrap(),
+            fixture.snapshot.tenant_id().clone(),
+            fixture.snapshot.site_id().clone(),
+            service_credential.clone(),
+            BTreeSet::from([OperationId::parse("orders.read").unwrap()]),
+            UnixSeconds::new(180),
+            UnixSeconds::new(100),
+        )
+        .unwrap();
+        let service_policy = policy(AdmissionClass::ServiceIdentity, CapabilityPolicy::None);
+        assert_eq!(
+            service_policy
+                .admit(
+                    request(&fixture, &fixture.resource_a),
+                    AdmissionProof::Service {
+                        identity: &service,
+                        credential_fingerprint: &service_credential,
+                    },
+                )
+                .unwrap()
+                .reason_code,
+            ReasonCode::ServiceIdentityAllowed
+        );
+        assert_eq!(
+            service_policy.admit(request(&fixture, &fixture.resource_a), AdmissionProof::None),
             Err(AdmissionError::ServiceIdentityMismatch)
         );
     }
