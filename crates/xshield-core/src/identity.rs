@@ -2,7 +2,7 @@
 
 use crate::{
     audit::ReasonCode,
-    domain::{AuthBindingId, SiteId, TenantId, WafSessionId},
+    domain::{AuthBindingId, SiteId, TenantId, WafSessionId, parse_lower_hex_32},
 };
 use std::{collections::BTreeMap, fmt};
 
@@ -66,32 +66,15 @@ impl CredentialFingerprint {
     /// # Errors
     /// Returns [`IdentityInputError`] for malformed or uppercase input.
     pub fn parse(value: &str) -> Result<Self, IdentityInputError> {
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        {
-            return Err(IdentityInputError::CredentialFingerprint);
-        }
-        let mut bytes = [0; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-            bytes[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
-        }
-        Ok(Self(bytes))
+        parse_lower_hex_32(value)
+            .map(Self)
+            .ok_or(IdentityInputError::CredentialFingerprint)
     }
 }
 
 impl fmt::Debug for CredentialFingerprint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("CredentialFingerprint([REDACTED])")
-    }
-}
-
-const fn hex_nibble(byte: u8) -> u8 {
-    match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        _ => 0,
     }
 }
 
@@ -358,6 +341,25 @@ impl AuthBinding {
         snapshot: &AuthSnapshot,
         now: UnixSeconds,
     ) -> Result<(), IdentityDenied> {
+        self.validate_epoch(snapshot, now)?;
+        if self.generation != snapshot.generation {
+            return Err(IdentityDenied::CredentialGenerationChanged);
+        }
+        Ok(())
+    }
+
+    /// Checks the stable identity epoch while allowing same-context refreshes.
+    ///
+    /// Grant authorization and response issuance use this check so a verified
+    /// credential rotation preserves the ledger while an account switch does not.
+    ///
+    /// # Errors
+    /// Returns [`IdentityDenied`] when scope, epoch, expiry, or status changed.
+    pub fn validate_epoch(
+        &self,
+        snapshot: &AuthSnapshot,
+        now: UnixSeconds,
+    ) -> Result<(), IdentityDenied> {
         if self.status == BindingStatus::Revoked {
             return Err(IdentityDenied::BindingRevoked);
         }
@@ -372,9 +374,6 @@ impl AuthBinding {
         }
         if self.epoch != snapshot.epoch {
             return Err(IdentityDenied::EpochChanged);
-        }
-        if self.generation != snapshot.generation {
-            return Err(IdentityDenied::CredentialGenerationChanged);
         }
         if self.principal_ref != snapshot.principal_ref {
             return Err(IdentityDenied::BindingMismatch);
@@ -398,6 +397,12 @@ impl AuthBinding {
     #[must_use]
     pub const fn status(&self) -> BindingStatus {
         self.status
+    }
+
+    /// Returns the server-enforced absolute session expiry.
+    #[must_use]
+    pub const fn absolute_expires_at(&self) -> UnixSeconds {
+        self.absolute_expires_at
     }
 }
 

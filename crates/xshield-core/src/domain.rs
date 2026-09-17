@@ -120,6 +120,34 @@ v7_id!(EventId, "ev_", "event_id");
 v7_id!(StageExecutionId, "stg_", "stage_execution_id");
 v7_id!(WafSessionId, "ses_", "waf_session_id");
 v7_id!(AuthBindingId, "auth_", "auth_binding_id");
+v7_id!(GrantId, "grant_", "grant_id");
+scoped_name!(OperationId, "operation_id");
+scoped_name!(ResourceType, "resource_type");
+scoped_name!(ViewProfile, "view_profile");
+scoped_name!(IssuanceKey, "issuance_key");
+
+pub(crate) fn parse_lower_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let mut bytes = [0; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
+    }
+    Some(bytes)
+}
+
+const fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => 0,
+    }
+}
 
 #[cfg(test)]
 mod tests {

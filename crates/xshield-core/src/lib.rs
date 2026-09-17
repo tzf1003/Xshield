@@ -10,5 +10,6 @@ pub mod admin;
 pub mod application;
 pub mod audit;
 pub mod domain;
+pub mod grant;
 pub mod identity;
 pub mod ports;

@@ -78,6 +78,16 @@ pub enum ReasonCode {
     AuthBindingRevoked,
     /// The server-side session lease has expired.
     AuthSessionExpired,
+    /// No active exact grant exists for the requested resource.
+    CapabilityMissing,
+    /// A grant exists for the resource but not the requested operation or view.
+    OperationNotGranted,
+    /// The grant ledger reached its configured hard capacity.
+    GrantCapacityExceeded,
+    /// A grant draft has invalid time bounds.
+    GrantExpiryInvalid,
+    /// An idempotency key was reused with different authorization semantics.
+    GrantIssuanceConflict,
     /// No site policy exists for the requested scope.
     SiteNotConfigured,
     /// The scoped site policy is explicitly disabled.
@@ -104,6 +114,11 @@ impl ReasonCode {
             Self::AuthCredentialGenerationChanged => "AUTH_CREDENTIAL_GENERATION_CHANGED",
             Self::AuthBindingRevoked => "AUTH_BINDING_REVOKED",
             Self::AuthSessionExpired => "AUTH_SESSION_EXPIRED",
+            Self::CapabilityMissing => "CAPABILITY_MISSING",
+            Self::OperationNotGranted => "OPERATION_NOT_GRANTED",
+            Self::GrantCapacityExceeded => "GRANT_CAPACITY_EXCEEDED",
+            Self::GrantExpiryInvalid => "GRANT_EXPIRY_INVALID",
+            Self::GrantIssuanceConflict => "GRANT_ISSUANCE_CONFLICT",
             Self::SiteNotConfigured => "SITE_NOT_CONFIGURED",
             Self::SiteDisabled => "SITE_DISABLED",
             Self::SiteConfigUnavailable => "SITE_CONFIG_UNAVAILABLE",
