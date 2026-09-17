@@ -237,7 +237,7 @@ cat >"$test_dir/config.json" <<JSON
   "audit":{"directory":"$test_dir/journal","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
   "identity_store":{"max_connections":2,"acquire_timeout_ms":2000},
   "operations":[
-    {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
+    {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
     {"operation_id":"orders.path.read","method":"GET","path":"/path-orders/{order_id}","admission":"UI_ACTION_REQUIRED","source_action":"orders.path.open","resource_type":"order","view_profile":"customer_detail","resource_path_parameter":"order_id"},
@@ -329,12 +329,18 @@ oversize_status=$(curl -sS -o "$test_dir/buffered-oversize.body" -w '%{http_code
 [[ "$oversize_status" == "502" ]]
 ! grep -q 'must-not-release' "$test_dir/buffered-oversize.body"
 
-valid_status=$(curl -sS -o "$test_dir/valid.body" -w '%{http_code}' \
+valid_status=$(curl -sS -D "$test_dir/valid.headers" -o "$test_dir/valid.body" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$session_id" \
     -H "Authorization: Bearer $bearer" \
     http://127.0.0.1:6288/account)
 [[ "$valid_status" == "200" ]]
-[[ $(<"$test_dir/valid.body") == '{"orders":[{"id":"order-456"}]}' ]]
+grep -qi '^cache-control: private, no-store' "$test_dir/valid.headers"
+grep -qi '^transfer-encoding: chunked' "$test_dir/valid.headers"
+! grep -qi '^content-length:' "$test_dir/valid.headers"
+response_action_ref=$(python3 -c \
+    'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["orders"][0]["_xshield_action_ref"])' \
+    "$test_dir/valid.body")
+[[ "$response_action_ref" == action.* ]]
 
 committed_response_grants=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
     -v resource_fingerprint="$response_resource_fingerprint" <<'SQL'
@@ -360,6 +366,13 @@ WHERE evidence.tenant_id = 'tenant_gateway'
 SQL
 )
 [[ "$committed_response_grants" == "1" ]]
+
+response_grant_status=$(curl -sS -o "$test_dir/response-grant.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: $response_action_ref" \
+    'http://127.0.0.1:6288/orders?order_id=order-456')
+[[ "$response_grant_status" == "404" ]]
 
 invalid_status=$(curl -sS -o "$test_dir/invalid.json" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$session_id" \
@@ -528,6 +541,7 @@ origin_pid=""
 [[ $(grep -c 'GET /account' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /orders?order_id=order-456' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /path-orders/order%2D123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "1" ]]

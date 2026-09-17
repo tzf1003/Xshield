@@ -20,6 +20,7 @@ impl BufferedJsonResponse {
         if matches!(response.status.as_u16(), 101 | 204 | 304)
             || !single_json_content_type(response)
             || !identity_encoding(response)
+            || response.headers.contains_key("trailer")
         {
             return Err(ReasonCode::ResponseValidationFailed);
         }
@@ -171,6 +172,12 @@ mod tests {
         encoded.insert_header("Content-Encoding", "gzip").unwrap();
         assert_eq!(
             BufferedJsonResponse::begin(&encoded, 64, &budget()).err(),
+            Some(ReasonCode::ResponseValidationFailed)
+        );
+        let mut trailer = response("application/json", None);
+        trailer.insert_header("Trailer", "Digest").unwrap();
+        assert_eq!(
+            BufferedJsonResponse::begin(&trailer, 64, &budget()).err(),
             Some(ReasonCode::ResponseValidationFailed)
         );
 

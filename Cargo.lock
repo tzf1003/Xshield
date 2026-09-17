@@ -3216,6 +3216,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "http",
  "openssl",
  "pingora",
  "serde",

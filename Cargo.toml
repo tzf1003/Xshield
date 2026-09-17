@@ -14,6 +14,7 @@ bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clickhouse = { version = "=0.15.2", default-features = false, features = ["chrono", "rustls-tls-native-roots", "rustls-tls-ring"] }
 crc32fast = "1"
+http = "1"
 openssl = "0.10"
 pingora = { version = "=0.9.0", default-features = false, features = ["openssl", "proxy"] }
 serde = { version = "1", features = ["derive"] }

@@ -32,14 +32,16 @@ impl ProtectedIdentity {
         response_status: u16,
         body: &[u8],
         now: UnixSeconds,
-    ) -> Result<(), ReasonCode> {
+    ) -> Result<Option<Vec<ActionRef>>, ReasonCode> {
         let resources = match operation
             .rule
             .extract(response_status, body)
             .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)?
         {
-            ResponseGrantExtraction::NotApplicable => return Ok(()),
-            ResponseGrantExtraction::Resources(resources) if resources.is_empty() => return Ok(()),
+            ResponseGrantExtraction::NotApplicable => return Ok(None),
+            ResponseGrantExtraction::Resources(resources) if resources.is_empty() => {
+                return Ok(None);
+            }
             ResponseGrantExtraction::Resources(resources) => resources,
         };
         let store = self
@@ -188,9 +190,13 @@ impl ProtectedIdentity {
             .await
             .map_err(|_| ReasonCode::IdentityStoreUnavailable)?;
         match outcome {
-            ResponseGrantWriteOutcome::Created(_) | ResponseGrantWriteOutcome::Existing(_) => {
-                Ok(())
-            }
+            ResponseGrantWriteOutcome::Created(committed)
+            | ResponseGrantWriteOutcome::Existing(committed) => Ok(Some(
+                committed
+                    .into_iter()
+                    .map(|grant| grant.action_ref)
+                    .collect(),
+            )),
             denied => Err(denied.reason_code()),
         }
     }

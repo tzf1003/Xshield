@@ -9,6 +9,7 @@ rust-version.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+http.workspace = true
 openssl.workspace = true
 pingora.workspace = true
 serde.workspace = true

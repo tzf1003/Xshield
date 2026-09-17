@@ -203,7 +203,16 @@ impl ProxyHttp for Gateway {
                     limit,
                     &self.buffered_json_budget,
                 ) {
-                    Ok(buffer) => context.buffered_response = Some(buffer),
+                    Ok(buffer) => {
+                        if self
+                            .config
+                            .response_grant_operation(request.method.as_str(), request.uri.path())
+                            .is_some()
+                        {
+                            prepare_grant_response_headers(upstream_response)?;
+                        }
+                        context.buffered_response = Some(buffer);
+                    }
                     Err(reason) => {
                         context.response_failure = Some(reason);
                         return response_error(reason);
@@ -226,18 +235,33 @@ impl ProxyHttp for Gateway {
             return Ok(None);
         };
         match buffer.filter(body, end_of_stream) {
-            Ok(Some(complete)) => {
-                if let Err(reason) = self.commit_response_grants(session, context, &complete) {
+            Ok(Some(complete)) => match self.commit_response_grants(session, context, complete) {
+                Ok(released) => *body = Some(released),
+                Err(reason) => {
                     context.response_failure = Some(reason);
                     return response_error(reason);
                 }
-                *body = Some(complete);
-            }
+            },
             Ok(None) => {}
             Err(reason) => {
                 context.response_failure = Some(reason);
                 return response_error(reason);
             }
+        }
+        Ok(None)
+    }
+
+    async fn response_trailer_filter(
+        &self,
+        _session: &mut Session,
+        upstream_trailers: &mut http::HeaderMap,
+        context: &mut Self::CTX,
+    ) -> PingoraResult<Option<Bytes>> {
+        if let Err(reason) =
+            filter_response_trailers(context.buffered_response.is_some(), upstream_trailers)
+        {
+            context.response_failure = Some(reason);
+            return response_error(reason);
         }
         Ok(None)
     }
@@ -283,14 +307,14 @@ impl Gateway {
         &self,
         session: &Session,
         context: &RequestContext,
-        body: &[u8],
-    ) -> Result<(), ReasonCode> {
+        body: Bytes,
+    ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
         let Some(operation) = self
             .config
             .response_grant_operation(request.method.as_str(), request.uri.path())
         else {
-            return Ok(());
+            return Ok(body);
         };
         let identity = self
             .identity
@@ -316,7 +340,7 @@ impl Gateway {
             .map_err(|_| ReasonCode::ClockUnavailable)?;
         // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
         // barrier to an async body hook when the proxy API provides one.
-        tokio::task::block_in_place(|| {
+        let action_refs = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(identity.commit_response_grants(
                 &self.config,
                 response_identity,
@@ -324,11 +348,49 @@ impl Gateway {
                 &request_id,
                 source_operation_id,
                 response_status,
-                body,
+                &body,
                 now,
             ))
-        })
+        })?;
+        let Some(action_refs) = action_refs else {
+            return Ok(body);
+        };
+        operation
+            .rule
+            .inject_action_refs(&body, &action_refs)
+            .map(Bytes::from)
+            .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)
     }
+}
+
+fn prepare_grant_response_headers(response: &mut ResponseHeader) -> PingoraResult<()> {
+    for name in [
+        "Content-Length",
+        "ETag",
+        "Last-Modified",
+        "Content-MD5",
+        "Digest",
+        "Content-Digest",
+        "Repr-Digest",
+        "Accept-Ranges",
+        "Content-Range",
+        "Trailer",
+    ] {
+        response.remove_header(name);
+    }
+    response.insert_header("Transfer-Encoding", "chunked")?;
+    response.insert_header("Cache-Control", "private, no-store")
+}
+
+fn filter_response_trailers(
+    buffered: bool,
+    trailers: &mut http::HeaderMap,
+) -> Result<(), ReasonCode> {
+    if !buffered {
+        return Ok(());
+    }
+    trailers.clear();
+    Err(ReasonCode::ResponseValidationFailed)
 }
 
 fn response_error<T>(reason: ReasonCode) -> PingoraResult<T> {
@@ -407,5 +469,21 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("xshield gateway startup failed: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_and_clears_trailers_for_buffered_responses() {
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("Digest", "sha-256=origin".parse().unwrap());
+        assert_eq!(
+            filter_response_trailers(true, &mut trailers),
+            Err(ReasonCode::ResponseValidationFailed)
+        );
+        assert!(trailers.is_empty());
     }
 }

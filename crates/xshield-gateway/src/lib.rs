@@ -194,6 +194,7 @@ struct ResponseGrantDto {
     success_status: u16,
     items_pointer: String,
     resource_pointer: String,
+    action_ref_field: String,
     target_operation_id: String,
     target_mapping_revision: String,
     ttl_seconds: u64,
@@ -805,6 +806,8 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
                 success_status: grant.success_status,
                 items_pointer: grant.items_pointer,
                 resource_pointer: grant.resource_pointer,
+                action_ref_field: FieldName::parse(grant.action_ref_field)
+                    .map_err(ConfigError::Domain)?,
                 target_operation_id: OperationId::parse(grant.target_operation_id)
                     .map_err(ConfigError::Domain)?,
                 target_mapping_revision: MappingRevision::parse(grant.target_mapping_revision)
@@ -1229,6 +1232,7 @@ mod tests {
                             "success_status": 200,
                             "items_pointer": "/orders",
                             "resource_pointer": "/id",
+                            "action_ref_field": "_xshield_action_ref",
                             "target_operation_id": "orders.read",
                             "target_mapping_revision": "mapping-r1",
                             "ttl_seconds": 900,

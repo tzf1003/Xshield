@@ -5,7 +5,7 @@ use serde_json::{Map, Number, Value};
 use std::{collections::BTreeSet, fmt};
 use xshield_core::{
     audit::ReasonCode,
-    domain::{MappingRevision, OperationId},
+    domain::{ActionRef, FieldName, MappingRevision, OperationId},
 };
 use zeroize::Zeroizing;
 
@@ -18,6 +18,7 @@ pub struct ResponseGrantRule {
     pub(crate) success_status: u16,
     pub(crate) items_pointer: String,
     pub(crate) resource_pointer: String,
+    pub(crate) action_ref_field: FieldName,
     pub(crate) target_operation_id: OperationId,
     pub(crate) target_mapping_revision: MappingRevision,
     pub(crate) ttl_seconds: u64,
@@ -53,6 +54,10 @@ impl ResponseGrantRule {
         let mut unique = BTreeSet::new();
         let mut resources = Vec::with_capacity(items.len());
         for item in items {
+            let object = item.as_object().ok_or(ResponseGrantError::Shape)?;
+            if object.contains_key(self.action_ref_field.as_str()) {
+                return Err(ResponseGrantError::ActionRefCollision);
+            }
             let resource = item
                 .pointer(&self.resource_pointer)
                 .and_then(Value::as_str)
@@ -69,6 +74,42 @@ impl ResponseGrantRule {
             resources.push(ExtractedResource(Zeroizing::new(resource.to_owned())));
         }
         Ok(ResponseGrantExtraction::Resources(resources))
+    }
+
+    /// Injects committed opaque action references into their matching response items.
+    ///
+    /// The configured field must be absent so origin data cannot be mistaken for an
+    /// edge-issued reference. The returned body is a newly serialized JSON value.
+    ///
+    /// # Errors
+    /// Returns [`ResponseGrantError`] when the item shape or reference count differs,
+    /// or when the origin already supplied the reserved field.
+    pub fn inject_action_refs(
+        &self,
+        body: &[u8],
+        action_refs: &[ActionRef],
+    ) -> Result<Vec<u8>, ResponseGrantError> {
+        let mut value = strict_json(body)?;
+        let items = value
+            .pointer_mut(&self.items_pointer)
+            .and_then(Value::as_array_mut)
+            .ok_or(ResponseGrantError::Shape)?;
+        if items.len() != action_refs.len() {
+            return Err(ResponseGrantError::Shape);
+        }
+        for (item, action_ref) in items.iter_mut().zip(action_refs) {
+            let object = item.as_object_mut().ok_or(ResponseGrantError::Shape)?;
+            if object
+                .insert(
+                    self.action_ref_field.as_str().to_owned(),
+                    Value::String(action_ref.as_str().to_owned()),
+                )
+                .is_some()
+            {
+                return Err(ResponseGrantError::ActionRefCollision);
+            }
+        }
+        serde_json::to_vec(&value).map_err(|_| ResponseGrantError::Json)
     }
 
     /// Returns the exact operation granted for each extracted resource.
@@ -128,6 +169,8 @@ pub enum ResponseGrantError {
     TooManyResources,
     /// The same resource appears more than once in one response.
     DuplicateResource,
+    /// The origin used the field reserved for an edge-issued action reference.
+    ActionRefCollision,
 }
 
 impl ResponseGrantError {
@@ -286,6 +329,7 @@ mod tests {
             success_status: 200,
             items_pointer: "/orders".to_owned(),
             resource_pointer: "/id".to_owned(),
+            action_ref_field: FieldName::parse("_xshield_action_ref").unwrap(),
             target_operation_id: OperationId::parse("orders.read").unwrap(),
             target_mapping_revision: MappingRevision::parse("mapping-r1").unwrap(),
             ttl_seconds: 900,
@@ -320,10 +364,43 @@ mod tests {
             rule(2).extract(200, br#"{"orders":[{"id":"a"},{"id":"a"}]}"#),
             Err(ResponseGrantError::DuplicateResource)
         ));
+        assert!(matches!(
+            rule(2).extract(
+                200,
+                br#"{"orders":[{"id":"a","_xshield_action_ref":"origin"}]}"#
+            ),
+            Err(ResponseGrantError::ActionRefCollision)
+        ));
         let oversized_tree = format!("[{}]", vec!["0"; MAX_JSON_NODES].join(","));
         assert!(matches!(
             validate_strict_json(oversized_tree.as_bytes()),
             Err(ResponseGrantError::Json)
         ));
+    }
+
+    #[test]
+    fn injects_only_committed_action_references() {
+        let action_refs = [
+            ActionRef::parse("action.order-1").unwrap(),
+            ActionRef::parse("action.order-2").unwrap(),
+        ];
+        let body = rule(2)
+            .inject_action_refs(
+                br#"{"orders":[{"id":"order-1"},{"id":"order-2"}]}"#,
+                &action_refs,
+            )
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value.pointer("/orders/1/_xshield_action_ref"),
+            Some(&Value::String("action.order-2".to_owned()))
+        );
+        assert_eq!(
+            rule(1).inject_action_refs(
+                br#"{"orders":[{"id":"order-1","_xshield_action_ref":"origin"}]}"#,
+                &action_refs[..1],
+            ),
+            Err(ResponseGrantError::ActionRefCollision)
+        );
     }
 }
