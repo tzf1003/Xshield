@@ -43,7 +43,7 @@ impl BufferedJsonResponse {
         &mut self,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
-    ) -> Result<(), ReasonCode> {
+    ) -> Result<Option<Bytes>, ReasonCode> {
         if let Some(chunk) = body.take() {
             let length = self
                 .bytes
@@ -56,11 +56,10 @@ impl BufferedJsonResponse {
             self.bytes.extend_from_slice(&chunk);
         }
         if !end_of_stream {
-            return Ok(());
+            return Ok(None);
         }
         validate_strict_json(&self.bytes).map_err(ResponseGrantError::reason_code)?;
-        *body = Some(Bytes::from(std::mem::take(&mut self.bytes)));
-        Ok(())
+        Ok(Some(Bytes::from(std::mem::take(&mut self.bytes))))
     }
 }
 
@@ -150,12 +149,15 @@ mod tests {
         )
         .unwrap();
         let mut first = Some(Bytes::from_static(br#"{"ok":"#));
-        buffer.filter(&mut first, false).unwrap();
+        assert!(buffer.filter(&mut first, false).unwrap().is_none());
         assert!(first.is_none());
 
         let mut last = Some(Bytes::from_static(br"true}"));
-        buffer.filter(&mut last, true).unwrap();
-        assert_eq!(last.unwrap(), Bytes::from_static(br#"{"ok":true}"#));
+        assert_eq!(
+            buffer.filter(&mut last, true).unwrap().unwrap(),
+            Bytes::from_static(br#"{"ok":true}"#)
+        );
+        assert!(last.is_none());
     }
 
     #[test]

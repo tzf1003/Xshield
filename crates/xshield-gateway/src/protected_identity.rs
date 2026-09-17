@@ -30,6 +30,7 @@ use xshield_gateway::{
 use xshield_postgres::{PostgresIdentityStore, StoreError};
 use zeroize::Zeroizing;
 
+mod response_issue;
 mod share_entry;
 
 const WAF_COOKIE: &str = "__Host-xshield_sid";
@@ -74,6 +75,25 @@ pub(crate) struct ProtectedIdentity {
     fingerprint_key: Zeroizing<[u8; 32]>,
 }
 
+pub(crate) struct ResponseIdentity {
+    pub(crate) binding: Box<AuthBinding>,
+    pub(crate) snapshot: AuthSnapshot,
+}
+
+pub(crate) struct ProtectedAdmission {
+    pub(crate) decision: GatewayDecision,
+    pub(crate) response_identity: Option<ResponseIdentity>,
+}
+
+impl ProtectedAdmission {
+    fn without_identity(decision: GatewayDecision) -> Self {
+        Self {
+            decision,
+            response_identity: None,
+        }
+    }
+}
+
 impl ProtectedIdentity {
     pub(crate) fn from_env(config: IdentityStoreConfig) -> Result<Self, IdentityRuntimeError> {
         let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
@@ -108,43 +128,47 @@ impl ProtectedIdentity {
         method: &str,
         path: &str,
         now: UnixSeconds,
-    ) -> Result<GatewayDecision, IdentityRuntimeError> {
+    ) -> Result<ProtectedAdmission, IdentityRuntimeError> {
         let class = config.admission_class(method, path);
         if class == Some(AdmissionClass::ServiceIdentity) {
             return self
                 .admit_service_identity(config, request, method, path, now)
-                .await;
+                .await
+                .map(ProtectedAdmission::without_identity);
         }
         if class == Some(AdmissionClass::ShareEntry) {
             return self
                 .admit_share_entry(config, request, method, path, now)
-                .await;
+                .await
+                .map(ProtectedAdmission::without_identity);
         }
         if !matches!(
             class,
             Some(AdmissionClass::AuthenticatedRoot | AdmissionClass::UiActionRequired)
         ) {
-            return Ok(config.admit(method, path, now));
+            return Ok(ProtectedAdmission::without_identity(
+                config.admit(method, path, now),
+            ));
         }
         let presented = match PresentedIdentity::parse(request, &self.fingerprint_key) {
             Ok(presented) => presented,
             Err(IdentityRuntimeError::Missing) => {
-                return Ok(denied(
+                return Ok(ProtectedAdmission::without_identity(denied(
                     config,
                     method,
                     path,
                     now,
                     IdentityDenied::AuthRequired,
-                ));
+                )));
             }
             Err(IdentityRuntimeError::Malformed) => {
-                return Ok(denied(
+                return Ok(ProtectedAdmission::without_identity(denied(
                     config,
                     method,
                     path,
                     now,
                     IdentityDenied::BindingMismatch,
-                ));
+                )));
             }
             Err(error) => return Err(error),
         };
@@ -160,25 +184,33 @@ impl ProtectedIdentity {
             })
             .await?;
         Ok(match state {
-            IdentityProofState::Verified { binding, snapshot } => match class {
-                Some(AdmissionClass::AuthenticatedRoot) => config.admit_with_proof(
-                    method,
-                    path,
-                    now,
-                    AdmissionProof::Authenticated {
-                        binding: &binding,
-                        snapshot: &snapshot,
-                    },
-                ),
-                Some(AdmissionClass::UiActionRequired) => {
-                    self.admit_ui_action(
-                        config, store, request, method, path, now, &binding, &snapshot,
-                    )
-                    .await?
+            IdentityProofState::Verified { binding, snapshot } => {
+                let decision = match class {
+                    Some(AdmissionClass::AuthenticatedRoot) => config.admit_with_proof(
+                        method,
+                        path,
+                        now,
+                        AdmissionProof::Authenticated {
+                            binding: &binding,
+                            snapshot: &snapshot,
+                        },
+                    ),
+                    Some(AdmissionClass::UiActionRequired) => {
+                        self.admit_ui_action(
+                            config, store, request, method, path, now, &binding, &snapshot,
+                        )
+                        .await?
+                    }
+                    _ => config.admit(method, path, now),
+                };
+                ProtectedAdmission {
+                    decision,
+                    response_identity: Some(ResponseIdentity { binding, snapshot }),
                 }
-                _ => config.admit(method, path, now),
-            },
-            IdentityProofState::Denied(error) => denied(config, method, path, now, error),
+            }
+            IdentityProofState::Denied(error) => {
+                ProtectedAdmission::without_identity(denied(config, method, path, now, error))
+            }
         })
     }
 

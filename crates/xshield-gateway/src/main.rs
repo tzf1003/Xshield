@@ -21,7 +21,7 @@ use std::{
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use xshield_audit::JournalKey;
-use xshield_core::{audit::ReasonCode, identity::UnixSeconds};
+use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome, MAX_CONFIG_BYTES};
 use zeroize::Zeroizing;
 
@@ -29,7 +29,9 @@ use crate::buffered_json::BufferedJsonResponse;
 use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, new_trace_id,
 };
-use crate::protected_identity::{ProtectedIdentity, store_failure_reason, strip_edge_proofs};
+use crate::protected_identity::{
+    ProtectedIdentity, ResponseIdentity, store_failure_reason, strip_edge_proofs,
+};
 
 const BUFFERED_JSON_IN_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -47,6 +49,7 @@ struct RequestContext {
     decision: Option<GatewayDecision>,
     admission_audit: Option<AdmissionAudit>,
     buffered_response: Option<BufferedJsonResponse>,
+    response_identity: Option<ResponseIdentity>,
     response_failure: Option<ReasonCode>,
     origin_status: Option<u16>,
 }
@@ -63,6 +66,7 @@ impl ProxyHttp for Gateway {
             decision: None,
             admission_audit: None,
             buffered_response: None,
+            response_identity: None,
             response_failure: None,
             origin_status: None,
         }
@@ -99,11 +103,12 @@ impl ProxyHttp for Gateway {
         let now = UnixSeconds::new(wall_time.as_secs());
         let decision = match self.identity.as_ref() {
             Some(identity) => {
-                if let Ok(decision) = identity
+                if let Ok(admission) = identity
                     .admit(&self.config, request, &method, &path, now)
                     .await
                 {
-                    decision
+                    context.response_identity = admission.response_identity;
+                    admission.decision
                 } else {
                     let mut decision = self.config.admit(&method, &path, now);
                     decision.outcome = GatewayOutcome::Denied;
@@ -212,7 +217,7 @@ impl ProxyHttp for Gateway {
 
     fn response_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
         context: &mut Self::CTX,
@@ -220,9 +225,19 @@ impl ProxyHttp for Gateway {
         let Some(buffer) = context.buffered_response.as_mut() else {
             return Ok(None);
         };
-        if let Err(reason) = buffer.filter(body, end_of_stream) {
-            context.response_failure = Some(reason);
-            return response_error(reason);
+        match buffer.filter(body, end_of_stream) {
+            Ok(Some(complete)) => {
+                if let Err(reason) = self.commit_response_grants(session, context, &complete) {
+                    context.response_failure = Some(reason);
+                    return response_error(reason);
+                }
+                *body = Some(complete);
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                context.response_failure = Some(reason);
+                return response_error(reason);
+            }
         }
         Ok(None)
     }
@@ -260,6 +275,59 @@ impl ProxyHttp for Gateway {
         if let Err(error) = result {
             self.audit.observe_failure(&error);
         }
+    }
+}
+
+impl Gateway {
+    fn commit_response_grants(
+        &self,
+        session: &Session,
+        context: &RequestContext,
+        body: &[u8],
+    ) -> Result<(), ReasonCode> {
+        let request = session.req_header();
+        let Some(operation) = self
+            .config
+            .response_grant_operation(request.method.as_str(), request.uri.path())
+        else {
+            return Ok(());
+        };
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or(ReasonCode::GrantSourceIneligible)?;
+        let response_identity = context
+            .response_identity
+            .as_ref()
+            .ok_or(ReasonCode::GrantSourceIneligible)?;
+        let source_operation_id = context
+            .decision
+            .as_ref()
+            .and_then(|decision| decision.operation_id.as_ref())
+            .ok_or(ReasonCode::GrantSourceIneligible)?;
+        let request_id = RequestId::parse(&context.request_id)
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let response_status = context
+            .origin_status
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| UnixSeconds::new(duration.as_secs()))
+            .map_err(|_| ReasonCode::ClockUnavailable)?;
+        // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
+        // barrier to an async body hook when the proxy API provides one.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(identity.commit_response_grants(
+                &self.config,
+                response_identity,
+                operation,
+                &request_id,
+                source_operation_id,
+                response_status,
+                body,
+                now,
+            ))
+        })
     }
 }
 

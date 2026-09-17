@@ -38,6 +38,10 @@ resource_fingerprint=$(printf '%s\0%s\0%s\0%s\0%s\0' \
     'xshield-resource-v1' 'tenant_gateway' 'site_gateway' 'order' 'order-123' \
     | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
     | od -An -tx1 | tr -d ' \n')
+response_resource_fingerprint=$(printf '%s\0%s\0%s\0%s\0%s\0' \
+    'xshield-resource-v1' 'tenant_gateway' 'site_gateway' 'order' 'order-456' \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
 service_fingerprint=$(printf '%s\0%s\0%s\0%s\0' \
     'xshield-service-credential-v1' 'tenant_gateway' 'site_gateway' "$service_credential" \
     | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
@@ -233,7 +237,7 @@ cat >"$test_dir/config.json" <<JSON
   "audit":{"directory":"$test_dir/journal","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
   "identity_store":{"max_connections":2,"acquire_timeout_ms":2000},
   "operations":[
-    {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
+    {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
     {"operation_id":"orders.path.read","method":"GET","path":"/path-orders/{order_id}","admission":"UI_ACTION_REQUIRED","source_action":"orders.path.open","resource_type":"order","view_profile":"customer_detail","resource_path_parameter":"order_id"},
@@ -265,6 +269,7 @@ class Handler(BaseHTTPRequestHandler):
             output.write(f"ServiceCredential={self.headers.get('X-Xshield-Service-Credential', '')}\n")
             output.write(f"ShareToken={self.headers.get('X-Xshield-Share-Token', '')}\n")
         responses = {
+            "/account": b'{"orders":[{"id":"order-456"}]}',
             "/buffered-valid": b'{"ok":true}',
             "/buffered-invalid": b'private-invalid-json',
             "/buffered-oversize": b'{"private":"must-not-release"}',
@@ -328,7 +333,33 @@ valid_status=$(curl -sS -o "$test_dir/valid.body" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$session_id" \
     -H "Authorization: Bearer $bearer" \
     http://127.0.0.1:6288/account)
-[[ "$valid_status" == "404" ]]
+[[ "$valid_status" == "200" ]]
+[[ $(<"$test_dir/valid.body") == '{"orders":[{"id":"order-456"}]}' ]]
+
+committed_response_grants=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v resource_fingerprint="$response_resource_fingerprint" <<'SQL'
+SELECT count(*)
+FROM xshield.response_evidence evidence
+JOIN xshield.ui_actions action
+  USING (tenant_id, site_id, response_evidence_id)
+JOIN xshield.resource_grants resource_grant
+  ON resource_grant.tenant_id = action.tenant_id
+ AND resource_grant.site_id = action.site_id
+ AND resource_grant.action_ref = action.action_ref
+JOIN xshield.audit_outbox outbox
+  ON outbox.event_id = resource_grant.source_event_id
+WHERE evidence.tenant_id = 'tenant_gateway'
+  AND evidence.site_id = 'site_gateway'
+  AND evidence.source_operation_id = 'account.root'
+  AND evidence.target_operation_id = 'orders.read'
+  AND evidence.candidate_count = 1
+  AND action.page_evidence_id IS NULL
+  AND resource_grant.resource_key_hmac = decode(:'resource_fingerprint', 'hex')
+  AND outbox.event_type = 'response_grant.issued'
+  AND outbox.envelope->>'resource_key_hmac' = :'resource_fingerprint';
+SQL
+)
+[[ "$committed_response_grants" == "1" ]]
 
 invalid_status=$(curl -sS -o "$test_dir/invalid.json" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$session_id" \
