@@ -189,7 +189,7 @@ impl fmt::Display for ResponseGrantError {
 
 impl std::error::Error for ResponseGrantError {}
 
-fn strict_json(body: &[u8]) -> Result<Value, ResponseGrantError> {
+pub(crate) fn strict_json(body: &[u8]) -> Result<Value, ResponseGrantError> {
     let mut deserializer = serde_json::Deserializer::from_slice(body);
     let mut remaining_nodes = MAX_JSON_NODES;
     let value = StrictSeed {

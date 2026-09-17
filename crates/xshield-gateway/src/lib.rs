@@ -25,10 +25,12 @@ use xshield_core::{
     provenance::{ActionTarget, HttpMethod, RouteTemplate},
 };
 
+pub mod auth_binding;
 pub mod response_grant;
 pub mod share_issue;
 pub mod share_token;
 
+use auth_binding::AuthBindingRule;
 use response_grant::ResponseGrantRule;
 
 /// Maximum accepted gateway configuration size.
@@ -89,6 +91,7 @@ struct CompiledOperation {
 struct CompiledResponse {
     max_bytes: usize,
     grant: Option<ResponseGrantRule>,
+    auth_binding: Option<AuthBindingRule>,
 }
 
 struct CompiledOperations {
@@ -186,6 +189,18 @@ struct ResponseDto {
     max_bytes: usize,
     #[serde(default)]
     resource_grant: Option<ResponseGrantDto>,
+    #[serde(default)]
+    auth_binding: Option<AuthBindingDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthBindingDto {
+    success_status: u16,
+    principal_pointer: String,
+    bearer_pointer: String,
+    credential_ttl_seconds: u64,
+    session_ttl_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +227,7 @@ enum ResponseModeDto {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum AdmissionDto {
     Public,
+    #[serde(rename = "AUTH_ENTRY")]
     AuthenticationEntry,
     AuthenticatedRoot,
     UiActionRequired,
@@ -291,7 +307,10 @@ impl GatewayConfig {
                             | AdmissionClass::UiActionRequired
                             | AdmissionClass::ShareEntry
                             | AdmissionClass::ServiceIdentity
-                    )
+                    ) || operation
+                        .response
+                        .as_ref()
+                        .is_some_and(|response| response.auth_binding.is_some())
                 })
         {
             return Err(ConfigError::Invalid("identity_store"));
@@ -466,6 +485,16 @@ impl GatewayConfig {
         })
     }
 
+    /// Returns the authentication-response rule for one exact entry operation.
+    #[must_use]
+    pub fn auth_binding_rule(&self, method: &str, path: &str) -> Option<&AuthBindingRule> {
+        self.operation(method, path)?
+            .response
+            .as_ref()?
+            .auth_binding
+            .as_ref()
+    }
+
     /// Applies the compiled exact-operation policy with authoritative loaded proof.
     #[must_use]
     pub fn admit_with_proof(
@@ -594,19 +623,27 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
             }
         }
     }
-    validate_response_grants(&exact, &path_resources)?;
+    validate_response_contracts(&exact, &path_resources)?;
     Ok(CompiledOperations {
         exact,
         path_resources,
     })
 }
 
-fn validate_response_grants(
+fn validate_response_contracts(
     exact: &BTreeMap<(String, String), CompiledOperation>,
     path_resources: &[CompiledOperation],
 ) -> Result<(), ConfigError> {
     let operations = exact.values().chain(path_resources);
     for source in operations.clone() {
+        if source
+            .response
+            .as_ref()
+            .is_some_and(|response| response.auth_binding.is_some())
+            && source.policy.admission_class() != AdmissionClass::AuthenticationEntry
+        {
+            return Err(ConfigError::Invalid("operations.response.auth_binding"));
+        }
         let Some(rule) = source
             .response
             .as_ref()
@@ -818,9 +855,36 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
             })
         })
         .transpose()?;
+    let auth_binding = dto
+        .auth_binding
+        .map(|binding| {
+            if !(200..=299).contains(&binding.success_status)
+                || binding.success_status == 204
+                || !valid_json_pointer(&binding.principal_pointer)
+                || !valid_json_pointer(&binding.bearer_pointer)
+                || binding.principal_pointer == binding.bearer_pointer
+                || !(1..=86_400).contains(&binding.credential_ttl_seconds)
+                || !(1..=86_400).contains(&binding.session_ttl_seconds)
+                || binding.credential_ttl_seconds > binding.session_ttl_seconds
+            {
+                return Err(ConfigError::Invalid("operations.response.auth_binding"));
+            }
+            Ok(AuthBindingRule {
+                success_status: binding.success_status,
+                principal_pointer: binding.principal_pointer,
+                bearer_pointer: binding.bearer_pointer,
+                credential_ttl_seconds: binding.credential_ttl_seconds,
+                session_ttl_seconds: binding.session_ttl_seconds,
+            })
+        })
+        .transpose()?;
+    if grant.is_some() && auth_binding.is_some() {
+        return Err(ConfigError::Invalid("operations.response"));
+    }
     Ok(CompiledResponse {
         max_bytes: dto.max_bytes,
         grant,
+        auth_binding,
     })
 }
 
@@ -1286,6 +1350,64 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(&serde_json::to_vec(&duplicate_id).unwrap()),
             Err(ConfigError::Invalid("operations.operation_id"))
+        ));
+    }
+
+    #[test]
+    fn compiles_authentication_response_only_for_auth_entry() {
+        let config = serde_json::json!({
+            "listen": "127.0.0.1:6188",
+            "origin": {"address": "127.0.0.1:8080", "server_name": "origin.example", "tls": false},
+            "tenant_id": "tenant_demo",
+            "site_id": "site_demo",
+            "policy_revision": "policy-r1",
+            "audit": {
+                "directory": "target/xshield-auth-binding-test",
+                "key_id": "journal-key-r1",
+                "producer_id": "edge-test",
+                "max_bytes": 1_048_576,
+                "high_watermark_bytes": 786_432,
+                "segment_max_bytes": 262_144
+            },
+            "identity_store": {"max_connections": 4, "acquire_timeout_ms": 1_000},
+            "operations": [{
+                "operation_id": "auth.login",
+                "method": "POST",
+                "path": "/login",
+                "admission": "AUTH_ENTRY",
+                "source_action": null,
+                "resource_type": null,
+                "view_profile": null,
+                "response": {
+                    "mode": "BUFFERED_JSON",
+                    "max_bytes": 4_096,
+                    "auth_binding": {
+                        "success_status": 200,
+                        "principal_pointer": "/identity/id",
+                        "bearer_pointer": "/access_token",
+                        "credential_ttl_seconds": 900,
+                        "session_ttl_seconds": 3_600
+                    }
+                }
+            }]
+        });
+        let compiled = GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).unwrap();
+        let rule = compiled.auth_binding_rule("POST", "/login").unwrap();
+        assert_eq!(rule.credential_ttl_seconds(), 900);
+        assert_eq!(rule.session_ttl_seconds(), 3_600);
+
+        let mut public = config.clone();
+        public["operations"][0]["admission"] = serde_json::json!("PUBLIC");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&public).unwrap()),
+            Err(ConfigError::Invalid("operations.response.auth_binding"))
+        ));
+        let mut incoherent = config;
+        incoherent["operations"][0]["response"]["auth_binding"]["credential_ttl_seconds"] =
+            serde_json::json!(7200);
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&incoherent).unwrap()),
+            Err(ConfigError::Invalid("operations.response.auth_binding"))
         ));
     }
 }

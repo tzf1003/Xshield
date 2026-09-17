@@ -237,6 +237,9 @@ cat >"$test_dir/config.json" <<JSON
   "audit":{"directory":"$test_dir/journal","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
   "identity_store":{"max_connections":2,"acquire_timeout_ms":2000},
   "operations":[
+    {"operation_id":"auth.login","method":"POST","path":"/login","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
+    {"operation_id":"auth.login.invalid","method":"POST","path":"/login-invalid","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
+    {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
@@ -269,6 +272,8 @@ class Handler(BaseHTTPRequestHandler):
             output.write(f"ServiceCredential={self.headers.get('X-Xshield-Service-Credential', '')}\n")
             output.write(f"ShareToken={self.headers.get('X-Xshield-Share-Token', '')}\n")
         responses = {
+            "/login": b'{"identity":{"id":"principal_login"},"access_token":"login-business-token"}',
+            "/login-invalid": b'{"identity":{"id":"principal_invalid"}}',
             "/account": b'{"orders":[{"id":"order-456"}]}',
             "/buffered-valid": b'{"ok":true}',
             "/buffered-invalid": b'private-invalid-json',
@@ -310,6 +315,69 @@ for _ in {1..50}; do
 done
 [[ $(<"$test_dir/missing.status") == "403" ]]
 grep -q '"reason_code":"AUTH_REQUIRED"' "$test_dir/missing.json"
+
+login_status=$(curl -sS -D "$test_dir/login.headers" -o "$test_dir/login.body" -w '%{http_code}' \
+    -X POST http://127.0.0.1:6288/login)
+[[ "$login_status" == "200" ]]
+grep -qi '^cache-control: private, no-store' "$test_dir/login.headers"
+grep -qi '^pragma: no-cache' "$test_dir/login.headers"
+grep -qi '^set-cookie: __Host-xshield_sid=.*; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600' \
+    "$test_dir/login.headers"
+login_session_id=$(sed -n \
+    's/^[Ss]et-[Cc]ookie: __Host-xshield_sid=\([^;]*\).*/\1/p' \
+    "$test_dir/login.headers")
+login_bearer=$(python3 -c \
+    'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["access_token"])' \
+    "$test_dir/login.body")
+[[ "$login_session_id" == ses_* ]]
+[[ "$login_bearer" == "login-business-token" ]]
+login_session_fingerprint=$(printf '%s' "$login_session_id" \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
+login_bearer_fingerprint=$(printf '%s' "$login_bearer" \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
+login_binding_count=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v session_fingerprint="$login_session_fingerprint" \
+    -v bearer_fingerprint="$login_bearer_fingerprint" <<'SQL'
+SELECT count(*)
+FROM xshield.auth_bindings binding
+JOIN xshield.credential_bindings credential
+  USING (tenant_id, site_id, binding_id)
+JOIN xshield.audit_outbox outbox
+  ON outbox.aggregate_ref = binding.binding_id
+WHERE binding.tenant_id = 'tenant_gateway'
+  AND binding.site_id = 'site_gateway'
+  AND binding.principal_ref = 'principal_login'
+  AND binding.auth_epoch = 1
+  AND binding.credential_generation = 1
+  AND binding.waf_sid_fingerprint = decode(:'session_fingerprint', 'hex')
+  AND credential.credential_kind = 'bearer'
+  AND credential.fingerprint = decode(:'bearer_fingerprint', 'hex')
+  AND outbox.event_type = 'binding.created';
+SQL
+)
+[[ "$login_binding_count" == "1" ]]
+
+new_account_status=$(curl -sS -o "$test_dir/new-account.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    http://127.0.0.1:6288/new-account)
+[[ "$new_account_status" == "404" ]]
+
+set +e
+curl -sS -o "$test_dir/login-invalid.body" \
+    -X POST http://127.0.0.1:6288/login-invalid >/dev/null 2>&1
+invalid_login_exit=$?
+set -e
+[[ "$invalid_login_exit" != "0" ]]
+invalid_login_binding_count=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT count(*) FROM xshield.auth_bindings
+WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+  AND principal_ref = 'principal_invalid';
+SQL
+)
+[[ "$invalid_login_binding_count" == "0" ]]
 
 buffered_status=$(curl -sS -o "$test_dir/buffered-valid.json" -w '%{http_code}' \
     http://127.0.0.1:6288/buffered-valid)
@@ -539,6 +607,9 @@ kill "$origin_pid"
 wait "$origin_pid" 2>/dev/null || true
 origin_pid=""
 [[ $(grep -c 'GET /account' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^POST /login$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^POST /login-invalid$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^GET /new-account$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-456' "$test_dir/origin.log") == "1" ]]

@@ -29,9 +29,55 @@ use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 use xshield_core::{
     domain::EventId,
     identity::{
-        AuthSnapshot, CredentialFingerprint, CredentialGeneration, CredentialSlot, UnixSeconds,
+        AuthBinding, AuthEpoch, AuthSnapshot, BindingStatus, CredentialFingerprint,
+        CredentialGeneration, CredentialSlot, UnixSeconds,
     },
 };
+
+/// One verified authentication result ready for atomic binding establishment.
+pub struct BindingEstablishment<'a> {
+    binding: &'a AuthBinding,
+    session_fingerprint: &'a [u8; 32],
+    credentials_expire_at: UnixSeconds,
+    now: UnixSeconds,
+    event_id: &'a EventId,
+    event_envelope: &'a Value,
+}
+
+impl<'a> BindingEstablishment<'a> {
+    /// Validates an initial binding persistence command.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidCommand`] when the binding is not a fresh
+    /// active generation, expiry bounds are incoherent, or the event is invalid.
+    pub fn new(
+        binding: &'a AuthBinding,
+        session_fingerprint: &'a [u8; 32],
+        credentials_expire_at: UnixSeconds,
+        now: UnixSeconds,
+        event_id: &'a EventId,
+        event_envelope: &'a Value,
+    ) -> Result<Self, StoreError> {
+        if binding.status() != BindingStatus::Active
+            || binding.epoch() != AuthEpoch::new(1)
+            || binding.generation() != CredentialGeneration::new(1)
+            || binding.absolute_expires_at() <= now
+            || credentials_expire_at <= now
+            || credentials_expire_at > binding.absolute_expires_at()
+            || !event_envelope.is_object()
+        {
+            return Err(StoreError::InvalidCommand);
+        }
+        Ok(Self {
+            binding,
+            session_fingerprint,
+            credentials_expire_at,
+            now,
+            event_id,
+            event_envelope,
+        })
+    }
+}
 
 /// Complete replacement credential set for a verified same-context refresh.
 pub struct CredentialRefresh<'a> {
@@ -116,6 +162,81 @@ impl PostgresIdentityStore {
     #[must_use]
     pub const fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Atomically creates one authenticated binding, its credential generation,
+    /// and the corresponding outbox event.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when numeric bounds, uniqueness, or database
+    /// durability prevents the complete transaction from committing.
+    pub async fn establish_binding(
+        &self,
+        command: BindingEstablishment<'_>,
+    ) -> Result<(), StoreError> {
+        let epoch = to_i64(command.binding.epoch().value(), "auth_epoch")?;
+        let generation = to_i64(
+            command.binding.generation().value(),
+            "credential_generation",
+        )?;
+        let now = to_i64(command.now.value(), "now")?;
+        let absolute_expires_at = to_i64(
+            command.binding.absolute_expires_at().value(),
+            "absolute_expires_at",
+        )?;
+        let credentials_expire_at = to_i64(
+            command.credentials_expire_at.value(),
+            "credentials_expire_at",
+        )?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO xshield.auth_bindings (
+                tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
+                auth_epoch, credential_generation, status, absolute_expires_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', to_timestamp($8), to_timestamp($9))",
+        )
+        .bind(command.binding.tenant_id().as_str())
+        .bind(command.binding.site_id().as_str())
+        .bind(command.binding.binding_id().as_str())
+        .bind(command.session_fingerprint.as_slice())
+        .bind(command.binding.principal_ref())
+        .bind(epoch)
+        .bind(generation)
+        .bind(absolute_expires_at)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        for (slot, fingerprint) in command.binding.credentials() {
+            sqlx::query(
+                "INSERT INTO xshield.credential_bindings (
+                    tenant_id, site_id, binding_id, generation, credential_kind,
+                    fingerprint, expires_at, status
+                 ) VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7), 'active')",
+            )
+            .bind(command.binding.tenant_id().as_str())
+            .bind(command.binding.site_id().as_str())
+            .bind(command.binding.binding_id().as_str())
+            .bind(generation)
+            .bind(slot.as_str())
+            .bind(fingerprint.as_bytes().as_slice())
+            .bind(credentials_expire_at)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO xshield.audit_outbox (
+                event_id, tenant_id, site_id, aggregate_ref, event_type, envelope
+             ) VALUES ($1, $2, $3, $4, 'binding.created', $5)",
+        )
+        .bind(command.event_id.as_str())
+        .bind(command.binding.tenant_id().as_str())
+        .bind(command.binding.site_id().as_str())
+        .bind(command.binding.binding_id().as_str())
+        .bind(command.event_envelope)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Atomically advances a same-context credential generation and writes its outbox event.

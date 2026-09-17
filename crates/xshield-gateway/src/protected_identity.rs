@@ -5,11 +5,12 @@ use std::{
     env, fmt,
     time::Duration,
 };
+use uuid::Uuid;
 use xshield_core::{
     access::ServiceCredentialFingerprint,
     admission::{AdmissionClass, AdmissionProof},
     audit::ReasonCode,
-    domain::{ActionRef, FieldName, ResourceType, WafSessionId},
+    domain::{ActionRef, AuthBindingId, EventId, FieldName, RequestId, ResourceType, WafSessionId},
     grant::ResourceKeyHmac,
     identity::{
         AuthBinding, AuthSnapshot, CredentialFingerprint, CredentialSlot, IdentityDenied,
@@ -25,15 +26,15 @@ use xshield_core::{
 };
 use xshield_gateway::{
     GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, ResourceLocation,
-    ResourceOperation,
+    ResourceOperation, auth_binding::AuthBindingRule,
 };
-use xshield_postgres::{PostgresIdentityStore, StoreError};
+use xshield_postgres::{BindingEstablishment, PostgresIdentityStore, StoreError};
 use zeroize::Zeroizing;
 
 mod response_issue;
 mod share_entry;
 
-const WAF_COOKIE: &str = "__Host-xshield_sid";
+pub(crate) const WAF_COOKIE: &str = "__Host-xshield_sid";
 const ACTION_HEADER: &str = "x-xshield-action-ref";
 const SERVICE_CREDENTIAL_HEADER: &str = "x-xshield-service-credential";
 const MAX_SESSION_BYTES: usize = 256;
@@ -80,6 +81,26 @@ pub(crate) struct ResponseIdentity {
     pub(crate) snapshot: AuthSnapshot,
 }
 
+pub(crate) struct PendingAuthBinding {
+    binding_id: AuthBindingId,
+    session_id: WafSessionId,
+    event_id: EventId,
+    issued_at: UnixSeconds,
+    credential_expires_at: UnixSeconds,
+    absolute_expires_at: UnixSeconds,
+    session_ttl_seconds: u64,
+}
+
+impl PendingAuthBinding {
+    pub(crate) fn cookie_header_value(&self) -> String {
+        format!(
+            "{WAF_COOKIE}={}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+            self.session_id.as_str(),
+            self.session_ttl_seconds
+        )
+    }
+}
+
 pub(crate) struct ProtectedAdmission {
     pub(crate) decision: GatewayDecision,
     pub(crate) response_identity: Option<ResponseIdentity>,
@@ -119,6 +140,93 @@ impl ProtectedIdentity {
             })
             .await
             .map_err(Into::into)
+    }
+
+    pub(crate) fn prepare_auth_binding(
+        rule: &AuthBindingRule,
+        now: UnixSeconds,
+    ) -> Result<PendingAuthBinding, ReasonCode> {
+        let absolute_expires_at = now
+            .value()
+            .checked_add(rule.session_ttl_seconds())
+            .map(UnixSeconds::new)
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let credential_expires_at = now
+            .value()
+            .checked_add(rule.credential_ttl_seconds())
+            .map(UnixSeconds::new)
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        Ok(PendingAuthBinding {
+            binding_id: AuthBindingId::parse(format!("auth_{}", Uuid::now_v7()))
+                .map_err(|_| ReasonCode::ResponseValidationFailed)?,
+            session_id: WafSessionId::parse(format!("ses_{}", Uuid::now_v7()))
+                .map_err(|_| ReasonCode::ResponseValidationFailed)?,
+            event_id: EventId::parse(format!("ev_{}", Uuid::now_v7()))
+                .map_err(|_| ReasonCode::ResponseValidationFailed)?,
+            issued_at: now,
+            credential_expires_at,
+            absolute_expires_at,
+            session_ttl_seconds: rule.session_ttl_seconds(),
+        })
+    }
+
+    pub(crate) async fn commit_auth_binding(
+        &self,
+        config: &GatewayConfig,
+        rule: &AuthBindingRule,
+        pending: &PendingAuthBinding,
+        request_id: &RequestId,
+        body: &[u8],
+    ) -> Result<(), ReasonCode> {
+        let authentication = rule
+            .extract(body)
+            .map_err(xshield_gateway::auth_binding::AuthBindingError::reason_code)?;
+        let session_fingerprint = fingerprint(
+            &self.fingerprint_key,
+            pending.session_id.as_str().as_bytes(),
+        )
+        .map_err(|_| ReasonCode::IdentityStoreUnavailable)?;
+        let bearer_fingerprint = CredentialFingerprint::from_bytes(
+            fingerprint(&self.fingerprint_key, authentication.bearer().as_bytes())
+                .map_err(|_| ReasonCode::IdentityStoreUnavailable)?,
+        );
+        let credentials = BTreeMap::from([(CredentialSlot::Bearer, bearer_fingerprint)]);
+        let binding = AuthBinding::new(
+            pending.binding_id.clone(),
+            pending.session_id.clone(),
+            config.tenant_id().clone(),
+            config.site_id().clone(),
+            authentication.principal_ref(),
+            xshield_core::identity::AuthEpoch::new(1),
+            xshield_core::identity::CredentialGeneration::new(1),
+            credentials,
+            pending.absolute_expires_at,
+        )
+        .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let envelope = serde_json::json!({
+            "schema_version": 3,
+            "event_type": "binding.created",
+            "event_id": pending.event_id.as_str(),
+            "request_id": request_id.as_str(),
+            "binding_id": pending.binding_id.as_str(),
+            "auth_epoch": 1,
+            "credential_generation": 1,
+        });
+        let command = BindingEstablishment::new(
+            &binding,
+            &session_fingerprint,
+            pending.credential_expires_at,
+            pending.issued_at,
+            &pending.event_id,
+            &envelope,
+        )
+        .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        self.store()
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)?
+            .establish_binding(command)
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)
     }
 
     pub(crate) async fn admit(

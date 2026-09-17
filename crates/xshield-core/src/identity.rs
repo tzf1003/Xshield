@@ -446,6 +446,36 @@ impl AuthBinding {
     pub const fn absolute_expires_at(&self) -> UnixSeconds {
         self.absolute_expires_at
     }
+
+    /// Returns the server-issued binding identifier.
+    #[must_use]
+    pub const fn binding_id(&self) -> &AuthBindingId {
+        &self.binding_id
+    }
+
+    /// Returns the tenant scope fixed when the binding was established.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the site scope fixed when the binding was established.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+
+    /// Returns the verified non-secret principal reference.
+    #[must_use]
+    pub fn principal_ref(&self) -> &str {
+        &self.principal_ref
+    }
+
+    /// Returns the exact credential fingerprints for the current generation.
+    #[must_use]
+    pub const fn credentials(&self) -> &BTreeMap<CredentialSlot, CredentialFingerprint> {
+        &self.credentials
+    }
 }
 
 fn validate_principal_ref(value: String) -> Result<String, IdentityInputError> {

@@ -30,7 +30,8 @@ use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, new_trace_id,
 };
 use crate::protected_identity::{
-    ProtectedIdentity, ResponseIdentity, store_failure_reason, strip_edge_proofs,
+    PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE, store_failure_reason,
+    strip_edge_proofs,
 };
 
 const BUFFERED_JSON_IN_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
@@ -50,6 +51,7 @@ struct RequestContext {
     admission_audit: Option<AdmissionAudit>,
     buffered_response: Option<BufferedJsonResponse>,
     response_identity: Option<ResponseIdentity>,
+    pending_auth_binding: Option<PendingAuthBinding>,
     response_failure: Option<ReasonCode>,
     origin_status: Option<u16>,
 }
@@ -67,6 +69,7 @@ impl ProxyHttp for Gateway {
             admission_audit: None,
             buffered_response: None,
             response_identity: None,
+            pending_auth_binding: None,
             response_failure: None,
             origin_status: None,
         }
@@ -204,7 +207,30 @@ impl ProxyHttp for Gateway {
                     &self.buffered_json_budget,
                 ) {
                     Ok(buffer) => {
-                        if self
+                        if let Some(rule) = self
+                            .config
+                            .auth_binding_rule(request.method.as_str(), request.uri.path())
+                        {
+                            prepare_auth_response_headers(upstream_response)?;
+                            if rule.applies(upstream_response.status.as_u16()) {
+                                let now = system_time()?;
+                                let pending = ProtectedIdentity::prepare_auth_binding(rule, now)
+                                    .map_err(|reason| {
+                                        PingoraError::explain(
+                                            ErrorType::HTTPStatus(502),
+                                            reason.as_str(),
+                                        )
+                                    })?;
+                                // Pingora fixes response headers before its synchronous body
+                                // filter runs. This cookie names only an unbound session until
+                                // the buffered authentication body commits successfully.
+                                append_waf_cookie(
+                                    upstream_response,
+                                    &pending.cookie_header_value(),
+                                )?;
+                                context.pending_auth_binding = Some(pending);
+                            }
+                        } else if self
                             .config
                             .response_grant_operation(request.method.as_str(), request.uri.path())
                             .is_some()
@@ -235,13 +261,18 @@ impl ProxyHttp for Gateway {
             return Ok(None);
         };
         match buffer.filter(body, end_of_stream) {
-            Ok(Some(complete)) => match self.commit_response_grants(session, context, complete) {
-                Ok(released) => *body = Some(released),
-                Err(reason) => {
-                    context.response_failure = Some(reason);
-                    return response_error(reason);
+            Ok(Some(complete)) => {
+                let released = self
+                    .commit_auth_binding(session, context, complete)
+                    .and_then(|body| self.commit_response_grants(session, context, body));
+                match released {
+                    Ok(released) => *body = Some(released),
+                    Err(reason) => {
+                        context.response_failure = Some(reason);
+                        return response_error(reason);
+                    }
                 }
-            },
+            }
             Ok(None) => {}
             Err(reason) => {
                 context.response_failure = Some(reason);
@@ -303,6 +334,40 @@ impl ProxyHttp for Gateway {
 }
 
 impl Gateway {
+    fn commit_auth_binding(
+        &self,
+        session: &Session,
+        context: &mut RequestContext,
+        body: Bytes,
+    ) -> Result<Bytes, ReasonCode> {
+        let Some(pending) = context.pending_auth_binding.take() else {
+            return Ok(body);
+        };
+        let request = session.req_header();
+        let rule = self
+            .config
+            .auth_binding_rule(request.method.as_str(), request.uri.path())
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or(ReasonCode::IdentityStoreUnavailable)?;
+        let request_id = RequestId::parse(&context.request_id)
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
+        // barrier to an async body hook when the proxy API provides one.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(identity.commit_auth_binding(
+                &self.config,
+                rule,
+                &pending,
+                &request_id,
+                &body,
+            ))
+        })?;
+        Ok(body)
+    }
+
     fn commit_response_grants(
         &self,
         session: &Session,
@@ -380,6 +445,42 @@ fn prepare_grant_response_headers(response: &mut ResponseHeader) -> PingoraResul
     }
     response.insert_header("Transfer-Encoding", "chunked")?;
     response.insert_header("Cache-Control", "private, no-store")
+}
+
+fn prepare_auth_response_headers(response: &mut ResponseHeader) -> PingoraResult<()> {
+    for name in ["ETag", "Last-Modified", "Accept-Ranges", "Content-Range"] {
+        response.remove_header(name);
+    }
+    response.insert_header("Cache-Control", "private, no-store")?;
+    response.insert_header("Pragma", "no-cache")
+}
+
+fn append_waf_cookie(response: &mut ResponseHeader, value: &str) -> PingoraResult<()> {
+    for header in response.headers.get_all("set-cookie") {
+        let Ok(header) = header.to_str() else {
+            return response_error(ReasonCode::ResponseValidationFailed);
+        };
+        let pair = header.split_once(';').map_or(header, |(pair, _)| pair);
+        if pair
+            .split_once('=')
+            .is_some_and(|(name, _)| name.trim() == WAF_COOKIE)
+        {
+            return response_error(ReasonCode::ResponseValidationFailed);
+        }
+    }
+    response.append_header("Set-Cookie", value).map(drop)
+}
+
+fn system_time() -> Result<UnixSeconds, Box<PingoraError>> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| UnixSeconds::new(duration.as_secs()))
+        .map_err(|_| {
+            PingoraError::explain(
+                ErrorType::HTTPStatus(502),
+                ReasonCode::ClockUnavailable.as_str(),
+            )
+        })
 }
 
 fn filter_response_trailers(
@@ -485,5 +586,14 @@ mod tests {
             Err(ReasonCode::ResponseValidationFailed)
         );
         assert!(trailers.is_empty());
+    }
+
+    #[test]
+    fn rejects_origin_collision_with_edge_session_cookie() {
+        let mut response = ResponseHeader::build(200, Some(1)).unwrap();
+        response
+            .append_header("Set-Cookie", "__Host-xshield_sid=origin; Secure; Path=/")
+            .unwrap();
+        assert!(append_waf_cookie(&mut response, "edge=value").is_err());
     }
 }
