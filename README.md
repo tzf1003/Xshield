@@ -11,6 +11,7 @@ M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身�
 ```bash
 cargo test --workspace --all-targets
 cargo run -p xshield-core --example m0_stage_tree
+scripts/test_postgres.sh
 ```
 
 ## 开始阅读
