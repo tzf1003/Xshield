@@ -24,6 +24,12 @@ impl ResourceKeyHmac {
             .map(Self)
             .ok_or(GrantError::ResourceKeyInvalid)
     }
+
+    /// Borrows the tenant-isolated resource key for persistence.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 impl fmt::Debug for ResourceKeyHmac {

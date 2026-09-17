@@ -125,6 +125,7 @@ scoped_name!(OperationId, "operation_id");
 scoped_name!(ResourceType, "resource_type");
 scoped_name!(ViewProfile, "view_profile");
 scoped_name!(IssuanceKey, "issuance_key");
+scoped_name!(ActionRef, "action_ref");
 
 pub(crate) fn parse_lower_hex_32(value: &str) -> Option<[u8; 32]> {
     if value.len() != 64

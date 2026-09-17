@@ -5,6 +5,10 @@
 
 #![warn(missing_docs)]
 
+mod grant;
+
+pub use grant::{GrantPersistence, GrantWriteOutcome};
+
 use serde_json::Value;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
@@ -225,6 +229,8 @@ pub enum StoreError {
     InvalidCommand,
     /// Unsigned domain value cannot fit the `PostgreSQL` signed integer column.
     NumericRange(&'static str),
+    /// A stored value violates the adapter's domain contract.
+    CorruptData(&'static str),
     /// `SQLx` connection, statement, or transaction failure.
     Database(sqlx::Error),
 }
@@ -239,8 +245,9 @@ impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPoolConfig => formatter.write_str("invalid PostgreSQL pool configuration"),
-            Self::InvalidCommand => formatter.write_str("invalid identity persistence command"),
+            Self::InvalidCommand => formatter.write_str("invalid persistence command"),
             Self::NumericRange(field) => write!(formatter, "{field} exceeds PostgreSQL range"),
+            Self::CorruptData(field) => write!(formatter, "invalid stored {field}"),
             Self::Database(_) => formatter.write_str("PostgreSQL operation failed"),
         }
     }
@@ -250,7 +257,10 @@ impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::InvalidPoolConfig | Self::InvalidCommand | Self::NumericRange(_) => None,
+            Self::InvalidPoolConfig
+            | Self::InvalidCommand
+            | Self::NumericRange(_)
+            | Self::CorruptData(_) => None,
         }
     }
 }

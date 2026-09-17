@@ -6,7 +6,7 @@
 
 ## 实现状态
 
-M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、身份生命周期、有界精确资格账本，以及同上下文刷新与 outbox 的 PostgreSQL 原子事务；网络入口、资格事务适配、持久审计和源站转发仍在后续闭环中。
+M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、身份生命周期、有界精确资格账本，以及身份刷新、资格发行与 outbox 的 PostgreSQL 原子事务；网络入口、持久审计和源站转发仍在后续闭环中。
 
 ```bash
 cargo test --workspace --all-targets

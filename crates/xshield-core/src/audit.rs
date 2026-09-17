@@ -88,6 +88,12 @@ pub enum ReasonCode {
     GrantExpiryInvalid,
     /// An idempotency key was reused with different authorization semantics.
     GrantIssuanceConflict,
+    /// A new exact grant and its issuance event committed.
+    GrantIssued,
+    /// An identical issuance key resolved to the original grant.
+    GrantAlreadyIssued,
+    /// The identity, approved action, policy, or lease cannot issue a grant.
+    GrantSourceIneligible,
     /// No site policy exists for the requested scope.
     SiteNotConfigured,
     /// The scoped site policy is explicitly disabled.
@@ -119,6 +125,9 @@ impl ReasonCode {
             Self::GrantCapacityExceeded => "GRANT_CAPACITY_EXCEEDED",
             Self::GrantExpiryInvalid => "GRANT_EXPIRY_INVALID",
             Self::GrantIssuanceConflict => "GRANT_ISSUANCE_CONFLICT",
+            Self::GrantIssued => "GRANT_ISSUED",
+            Self::GrantAlreadyIssued => "GRANT_ALREADY_ISSUED",
+            Self::GrantSourceIneligible => "GRANT_SOURCE_INELIGIBLE",
             Self::SiteNotConfigured => "SITE_NOT_CONFIGURED",
             Self::SiteDisabled => "SITE_DISABLED",
             Self::SiteConfigUnavailable => "SITE_CONFIG_UNAVAILABLE",

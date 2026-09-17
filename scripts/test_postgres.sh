@@ -16,4 +16,4 @@ psql -X -v ON_ERROR_STOP=1 -d "$test_database" \
 
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-postgres --test identity_refresh -- --ignored
+    cargo test -p xshield-postgres --tests -- --ignored
