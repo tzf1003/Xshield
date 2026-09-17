@@ -113,14 +113,54 @@ async fn seed_eligibility(pool: &PgPool, fixture: &Fixture) {
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO xshield.page_evidence (
+            tenant_id, site_id, page_evidence_id, binding_id, auth_epoch,
+            source_request_id, response_artifact_ref, page_template, build_fingerprint,
+            policy_revision, mapping_revision, status, verified_at, expires_at
+         ) VALUES (
+            $1, $2, 'page_018f2a3b-4c5d-7000-8000-000000000211', $3, 4,
+            $4, 'artifact_page_grant', 'orders_page', $5,
+            'policy-r1', 'mapping-r1', 'verified', to_timestamp($6), to_timestamp($7)
+         )",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.binding_id.as_str())
+    .bind("req_018f2a3b-4c5d-7000-8000-000000000210")
+    .bind([34_u8; 32].as_slice())
+    .bind(i64::try_from(NOW - 1).unwrap())
+    .bind(i64::try_from(SESSION_EXPIRES).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO xshield.action_descriptors (
+            tenant_id, site_id, action_id, page_template, operation_id, method,
+            route_template, target_rule, allowed_fields, field_profile,
+            policy_revision, mapping_revision, status
+         ) VALUES (
+            $1, $2, 'orders.open', 'orders_page', 'orders.read', 'GET',
+            '/api/orders/{id}', '{\"kind\":\"resource\",\"resource_type\":\"order\"}',
+            '[]', 'customer_detail', 'policy-r1', 'mapping-r1', 'approved'
+         )",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO xshield.ui_actions (
             tenant_id, site_id, action_ref, binding_id, auth_epoch,
             source_request_id, page_evidence_id, operation_id, target_constraints,
-            field_profile, source_rule, policy_revision, status, issued_at, expires_at
+            field_profile, source_rule, policy_revision, status, issued_at, expires_at,
+            source_action_ref, mapping_revision, method, route_template, allowed_fields
          ) VALUES (
-            $1, $2, $3, $4, 4, $5, 'page_fixture', 'orders.read', '{}',
+            $1, $2, $3, $4, 4, $5,
+            'page_018f2a3b-4c5d-7000-8000-000000000211', 'orders.read', '{}',
             'customer_detail', 'orders-list-r1', 'policy-r1', 'active',
-            to_timestamp($6), to_timestamp($7)
+            to_timestamp($6), to_timestamp($7), 'orders.open', 'mapping-r1',
+            'GET', '/api/orders/{id}', '[]'
          )",
     )
     .bind(fixture.tenant.as_str())

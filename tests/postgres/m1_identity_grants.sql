@@ -55,18 +55,72 @@ UPDATE xshield.auth_bindings
 SET status = 'revoked'
 WHERE binding_id = 'auth_018f2a3b-4c5d-7000-8000-000000000098';
 
+INSERT INTO xshield.page_evidence (
+    tenant_id, site_id, page_evidence_id, binding_id, auth_epoch,
+    source_request_id, response_artifact_ref, page_template, build_fingerprint,
+    policy_revision, mapping_revision, status, verified_at, expires_at
+) VALUES (
+    'tenant_a', 'site_a', 'page_018f2a3b-4c5d-7000-8000-000000000011',
+    'auth_018f2a3b-4c5d-7000-8000-000000000001', 4,
+    'req_018f2a3b-4c5d-7000-8000-000000000010', 'artifact_page_1',
+    'orders_page', decode(repeat('55', 32), 'hex'), 'policy-r1', 'mapping-r1',
+    'verified', now(), now() + interval '45 minutes'
+);
+
+INSERT INTO xshield.action_descriptors (
+    tenant_id, site_id, action_id, page_template, operation_id, method,
+    route_template, target_rule, allowed_fields, field_profile,
+    policy_revision, mapping_revision, status
+) VALUES (
+    'tenant_a', 'site_a', 'orders.open', 'orders_page', 'orders.read', 'GET',
+    '/api/orders/{id}', '{"kind":"resource","resource_type":"order"}', '[]',
+    'customer_detail', 'policy-r1', 'mapping-r1', 'approved'
+);
+
 INSERT INTO xshield.ui_actions (
     tenant_id, site_id, action_ref, binding_id, auth_epoch,
     source_request_id, page_evidence_id, source_action_ref, operation_id,
     target_constraints, field_profile, source_rule, policy_revision,
-    status, issued_at, expires_at
+    status, issued_at, expires_at, mapping_revision, method, route_template,
+    allowed_fields
 ) VALUES (
     'tenant_a', 'site_a', 'action_order_1',
     'auth_018f2a3b-4c5d-7000-8000-000000000001', 4,
-    'req_018f2a3b-4c5d-7000-8000-000000000010', 'page_fixture_1',
+    'req_018f2a3b-4c5d-7000-8000-000000000010',
+    'page_018f2a3b-4c5d-7000-8000-000000000011',
     'orders.open', 'orders.read', '{"resource":"order-1"}', 'customer_detail',
-    'orders-list-r1', 'policy-r1', 'active', now(), now() + interval '30 minutes'
+    'orders-list-r1', 'policy-r1', 'active', now(), now() + interval '30 minutes',
+    'mapping-r1', 'GET', '/api/orders/{id}', '[]'
 );
+
+DO $$
+DECLARE
+    rejected boolean := false;
+BEGIN
+    BEGIN
+        INSERT INTO xshield.ui_actions (
+            tenant_id, site_id, action_ref, binding_id, auth_epoch,
+            source_request_id, page_evidence_id, source_action_ref, operation_id,
+            target_constraints, field_profile, source_rule, policy_revision,
+            status, issued_at, expires_at, mapping_revision, method, route_template,
+            allowed_fields
+        ) VALUES (
+            'tenant_a', 'site_a', 'action_unapproved',
+            'auth_018f2a3b-4c5d-7000-8000-000000000001', 4,
+            'req_018f2a3b-4c5d-7000-8000-000000000010',
+            'page_018f2a3b-4c5d-7000-8000-000000000011',
+            'orders.unknown', 'orders.read', '{}', 'customer_detail',
+            'orders-list-r1', 'policy-r1', 'active', now(), now() + interval '5 minutes',
+            'mapping-r1', 'GET', '/api/orders/{id}', '[]'
+        );
+    EXCEPTION WHEN foreign_key_violation THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'action grant accepted an unapproved descriptor';
+    END IF;
+END
+$$;
 
 INSERT INTO xshield.resource_grants (
     tenant_id, site_id, grant_id, binding_id, auth_epoch, action_ref,

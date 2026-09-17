@@ -10,8 +10,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 createdb "$test_database"
+for migration in "$repo_root"/migrations/*.sql; do
+    psql -X -v ON_ERROR_STOP=1 -d "$test_database" -f "$migration"
+done
 psql -X -v ON_ERROR_STOP=1 -d "$test_database" \
-    -f "$repo_root/migrations/0001_m1_identity_grants.sql" \
     -f "$repo_root/tests/postgres/m1_identity_grants.sql"
 
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}

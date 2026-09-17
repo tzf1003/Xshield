@@ -1,4 +1,4 @@
--- Xshield v3 完整数据模型草案；M1 已实现部分以 migrations/0001_m1_identity_grants.sql 为准。
+-- Xshield v3 完整数据模型草案；M1 已实现部分以 migrations/*.sql 为准。
 -- 本文件没有执行数据库集成测试。角色、RLS、分区、备份及迁移回滚另行配置。
 -- 所有跨表引用包含tenant/site；生产查询仍需应用层授权。
 BEGIN;
