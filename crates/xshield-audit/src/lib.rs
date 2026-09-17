@@ -19,7 +19,7 @@ use std::{
     collections::BTreeSet,
     fmt, fs,
     fs::{File, OpenOptions, TryLockError},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -253,6 +253,187 @@ pub struct VerifiedSegment {
     pub segment_bytes: u64,
     /// SHA-256 digest of the entire segment file.
     pub segment_digest: [u8; HASH_BYTES],
+}
+
+/// One event released from a fully authenticated and signed journal segment.
+///
+/// Plaintext remains owned by this value and is zeroized when dropped. The
+/// record digest lets an at-least-once consumer reject the same event ID with
+/// different canonical bytes.
+pub struct AuthenticatedJournalRecord {
+    event_id: EventId,
+    receipt_id: String,
+    producer_sequence: u64,
+    plaintext_digest: [u8; HASH_BYTES],
+    plaintext: Zeroizing<Vec<u8>>,
+}
+
+impl AuthenticatedJournalRecord {
+    /// Returns the immutable event ID retained across publisher retries.
+    #[must_use]
+    pub const fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    /// Returns the local durability receipt committed by record AAD.
+    #[must_use]
+    pub fn receipt_id(&self) -> &str {
+        &self.receipt_id
+    }
+
+    /// Returns the producer-local sequence committed by record AAD.
+    #[must_use]
+    pub const fn producer_sequence(&self) -> u64 {
+        self.producer_sequence
+    }
+
+    /// Returns SHA-256 over the exact canonical plaintext bytes.
+    #[must_use]
+    pub const fn plaintext_digest(&self) -> &[u8; HASH_BYTES] {
+        &self.plaintext_digest
+    }
+
+    /// Borrows the canonical event bytes without copying secret-bearing data.
+    #[must_use]
+    pub fn plaintext(&self) -> &[u8] {
+        &self.plaintext
+    }
+}
+
+/// Streaming reader for one closed segment paired with its signed manifest.
+///
+/// Construction validates the complete immutable segment before any event
+/// plaintext becomes available. Each subsequent record is authenticated again
+/// while it is decrypted, and its plaintext is zeroized on drop.
+pub struct SealedSegmentReader<'a> {
+    snapshot: Cursor<Zeroizing<Vec<u8>>>,
+    identity: SegmentIdentity,
+    key: &'a JournalKey,
+    segment: VerifiedSegment,
+    remaining_records: u64,
+    next_sequence: u64,
+    previous_hash: [u8; HASH_BYTES],
+}
+
+impl<'a> SealedSegmentReader<'a> {
+    /// Opens an immutable in-memory snapshot after verifying its signed manifest.
+    ///
+    /// The segment must be a private regular file named for its producer boot
+    /// ID. Active or writable closed segments are rejected. `max_segment_bytes`
+    /// is a caller-owned memory ceiling and must cover the signed segment length.
+    ///
+    /// # Errors
+    /// Returns [`JournalError`] for unsafe paths, key mismatch, an invalid
+    /// signature, corruption, or a manifest/segment mismatch.
+    pub fn open(
+        path: impl AsRef<Path>,
+        max_segment_bytes: u64,
+        expected_journal_key_id: &str,
+        journal_key: &'a JournalKey,
+        manifest: &[u8],
+        seal_key: &SealVerifyingKey,
+    ) -> Result<Self, JournalError> {
+        let path = path.as_ref();
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(JournalError::UnsafePath);
+        }
+        #[cfg(unix)]
+        if metadata.permissions().mode() & 0o277 != 0 {
+            return Err(JournalError::UnsafePermissions);
+        }
+        if max_segment_bytes == 0 || metadata.len() > max_segment_bytes {
+            return Err(JournalError::ReadLimitExceeded);
+        }
+        let segment = verify_sealed_segment(
+            path,
+            expected_journal_key_id,
+            journal_key,
+            manifest,
+            seal_key,
+        )?;
+        if segment.segment_bytes > max_segment_bytes {
+            return Err(JournalError::ReadLimitExceeded);
+        }
+        let mut file = File::open(path)?;
+        let opened_metadata = file.metadata()?;
+        if !opened_metadata.file_type().is_file() || opened_metadata.len() != segment.segment_bytes
+        {
+            return Err(JournalError::Corrupt("seal segment changed"));
+        }
+        #[cfg(unix)]
+        if opened_metadata.permissions().mode() & 0o277 != 0 {
+            return Err(JournalError::UnsafePermissions);
+        }
+        let snapshot_len =
+            usize::try_from(segment.segment_bytes).map_err(|_| JournalError::ReadLimitExceeded)?;
+        let mut bytes = Zeroizing::new(vec![0; snapshot_len]);
+        file.read_exact(&mut bytes)?;
+        if sha256(&bytes) != segment.segment_digest {
+            return Err(JournalError::Corrupt("seal segment changed"));
+        }
+        let mut snapshot = Cursor::new(bytes);
+        let identity = read_header(&mut snapshot)?;
+        if identity.key_id != expected_journal_key_id {
+            return Err(JournalError::KeyMismatch);
+        }
+        if !segment_path_state(path, &identity)? {
+            return Err(JournalError::Corrupt("segment not closed"));
+        }
+        Ok(Self {
+            snapshot,
+            identity,
+            key: journal_key,
+            remaining_records: segment.record_count,
+            segment,
+            next_sequence: 1,
+            previous_hash: ZERO_HASH,
+        })
+    }
+
+    /// Returns the authenticated segment summary used as the publication scope.
+    #[must_use]
+    pub const fn segment(&self) -> &VerifiedSegment {
+        &self.segment
+    }
+
+    /// Authenticates and decrypts the next record in producer order.
+    ///
+    /// # Errors
+    /// Returns [`JournalError`] if a snapshot record fails its CRC, AEAD,
+    /// sequence, or hash-chain proof.
+    pub fn next_record(&mut self) -> Result<Option<AuthenticatedJournalRecord>, JournalError> {
+        if self.remaining_records == 0 {
+            return Ok(None);
+        }
+        let mut length = [0; 4];
+        if read_until_full_or_eof(&mut self.snapshot, &mut length)? != length.len() {
+            return Err(JournalError::Corrupt("sealed record length"));
+        }
+        let body_len = usize::try_from(u32::from_le_bytes(length))
+            .map_err(|_| JournalError::Corrupt("record length"))?;
+        if body_len == 0 || body_len > MAX_RECORD_BYTES {
+            return Err(JournalError::Corrupt("record length"));
+        }
+        let mut body = vec![0; body_len];
+        if read_until_full_or_eof(&mut self.snapshot, &mut body)? != body_len {
+            return Err(JournalError::Corrupt("sealed record body"));
+        }
+        let decoded = decode_record(
+            &self.identity,
+            self.key,
+            &body,
+            self.next_sequence,
+            self.previous_hash,
+        )?;
+        self.previous_hash = sha256(&body);
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(JournalError::Corrupt("record sequence"))?;
+        self.remaining_records -= 1;
+        Ok(Some(decoded))
+    }
 }
 
 /// Canonically encoded Ed25519-signed segment manifest.
@@ -570,6 +751,11 @@ fn seal_take<'a>(cursor: &mut &'a [u8], count: usize) -> Result<&'a [u8], Journa
 
 fn hash_file(path: &Path) -> Result<[u8; HASH_BYTES], JournalError> {
     let mut file = File::open(path)?;
+    hash_open_file(&mut file)
+}
+
+fn hash_open_file(file: &mut File) -> Result<[u8; HASH_BYTES], JournalError> {
+    file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0; 16 * 1024];
     loop {
@@ -579,7 +765,9 @@ fn hash_file(path: &Path) -> Result<[u8; HASH_BYTES], JournalError> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(hasher.finish())
+    let digest = hasher.finish();
+    file.seek(SeekFrom::Start(0))?;
+    Ok(digest)
 }
 
 /// Result of validating old segments before opening a new producer segment.
@@ -1157,7 +1345,7 @@ fn truncate_tail(file: &mut File, valid_end: u64) -> Result<u64, JournalError> {
         .ok_or(JournalError::Corrupt("tail offset"))
 }
 
-fn read_until_full_or_eof(file: &mut File, output: &mut [u8]) -> Result<usize, JournalError> {
+fn read_until_full_or_eof(file: &mut impl Read, output: &mut [u8]) -> Result<usize, JournalError> {
     let mut read = 0;
     while read < output.len() {
         match file.read(&mut output[read..]) {
@@ -1182,7 +1370,7 @@ fn encode_header(identity: &SegmentIdentity) -> Result<Vec<u8>, JournalError> {
     Ok(header)
 }
 
-fn read_header(file: &mut File) -> Result<SegmentIdentity, JournalError> {
+fn read_header(file: &mut (impl Read + Seek)) -> Result<SegmentIdentity, JournalError> {
     file.seek(SeekFrom::Start(0))?;
     let mut fixed = [0; 28];
     if read_until_full_or_eof(file, &mut fixed)? != fixed.len() {
@@ -1270,6 +1458,23 @@ fn validate_record(
     expected_sequence: u64,
     expected_previous_hash: [u8; HASH_BYTES],
 ) -> Result<(), JournalError> {
+    decode_record(
+        identity,
+        key,
+        body,
+        expected_sequence,
+        expected_previous_hash,
+    )?;
+    Ok(())
+}
+
+fn decode_record(
+    identity: &SegmentIdentity,
+    key: &JournalKey,
+    body: &[u8],
+    expected_sequence: u64,
+    expected_previous_hash: [u8; HASH_BYTES],
+) -> Result<AuthenticatedJournalRecord, JournalError> {
     if body.len() < 80 {
         return Err(JournalError::Corrupt("record body"));
     }
@@ -1300,7 +1505,8 @@ fn validate_record(
     let event_id_bytes = take(&mut cursor, event_id_len)?;
     let event_id =
         std::str::from_utf8(event_id_bytes).map_err(|_| JournalError::Corrupt("event id"))?;
-    EventId::parse(event_id.to_owned()).map_err(|_| JournalError::Corrupt("event id"))?;
+    let event_id =
+        EventId::parse(event_id.to_owned()).map_err(|_| JournalError::Corrupt("event id"))?;
     let receipt_id_len = usize::from(u16::from_le_bytes(
         take(&mut cursor, 2)?
             .try_into()
@@ -1341,8 +1547,15 @@ fn validate_record(
         receipt_id_bytes,
         &previous_hash,
     )?;
-    decrypt(&key.0, &nonce, &aad, ciphertext, &tag)?;
-    Ok(())
+    let plaintext = decrypt(&key.0, &nonce, &aad, ciphertext, &tag)?;
+    let plaintext_digest = sha256(&plaintext);
+    Ok(AuthenticatedJournalRecord {
+        event_id,
+        receipt_id: receipt_id.to_owned(),
+        producer_sequence: sequence,
+        plaintext_digest,
+        plaintext,
+    })
 }
 
 fn take<'a>(cursor: &mut &'a [u8], count: usize) -> Result<&'a [u8], JournalError> {
@@ -1405,7 +1618,7 @@ fn decrypt(
     aad: &[u8],
     ciphertext: &[u8],
     tag: &[u8; TAG_BYTES],
-) -> Result<(), JournalError> {
+) -> Result<Zeroizing<Vec<u8>>, JournalError> {
     let cipher = Cipher::aes_256_gcm();
     let mut crypter = Crypter::new(cipher, Mode::Decrypt, key, Some(nonce))?;
     crypter.pad(false);
@@ -1415,7 +1628,7 @@ fn decrypt(
     let mut written = crypter.update(ciphertext, &mut plaintext)?;
     written += crypter.finalize(&mut plaintext[written..])?;
     plaintext.truncate(written);
-    Ok(())
+    Ok(plaintext)
 }
 
 fn valid_key_id(value: &str) -> bool {
@@ -1448,6 +1661,8 @@ pub enum JournalError {
     InvalidBatch,
     /// Event bytes are empty or exceed the per-record bound.
     InvalidEvent,
+    /// A signed segment exceeds the caller's bounded publication-read limit.
+    ReadLimitExceeded,
     /// Journal directory or segment resolves to an unsafe object type.
     UnsafePath,
     /// Journal storage is visible to group or other Unix users.
@@ -1483,6 +1698,7 @@ impl fmt::Display for JournalError {
             Self::InvalidLimits => formatter.write_str("invalid journal limits"),
             Self::InvalidBatch => formatter.write_str("invalid journal batch"),
             Self::InvalidEvent => formatter.write_str("invalid journal event"),
+            Self::ReadLimitExceeded => formatter.write_str("journal read limit exceeded"),
             Self::UnsafePath => formatter.write_str("unsafe journal path"),
             Self::UnsafePermissions => formatter.write_str("unsafe journal permissions"),
             Self::KeyMismatch => formatter.write_str("journal key id mismatch"),
@@ -1820,6 +2036,97 @@ mod tests {
             fs::read_dir(&manifest_directory).unwrap().count(),
             sealed.len()
         );
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(manifest_directory).unwrap();
+    }
+
+    #[test]
+    fn streams_only_authenticated_records_from_a_signed_closed_segment() {
+        let directory = test_directory();
+        let manifest_directory = test_directory();
+        fs::create_dir(&manifest_directory).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&manifest_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let event = EventId::parse(EVENT).unwrap();
+        let rotating_limits = JournalLimits::new(1024 * 1024, 768 * 1024, 1).unwrap();
+        let (mut journal, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), rotating_limits).unwrap();
+        journal
+            .append_batch(&[
+                JournalRecord {
+                    event_id: &event,
+                    plaintext: b"first canonical event",
+                },
+                JournalRecord {
+                    event_id: &event,
+                    plaintext: b"conflicting canonical event",
+                },
+            ])
+            .unwrap();
+
+        let signer = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY_HEX).unwrap();
+        let verifier = signer.verifying_key().unwrap();
+        let sealed = seal_closed_segments(
+            &directory,
+            &manifest_directory,
+            "journal-key-r1",
+            &key(),
+            &signer,
+        )
+        .unwrap();
+        let summary = &sealed[0];
+        let segment_path =
+            directory.join(format!("segment-{}.closed.xja", summary.producer_boot_id));
+        let manifest =
+            fs::read(manifest_directory.join(format!("segment-{}.xjs", summary.producer_boot_id)))
+                .unwrap();
+        let journal_key = key();
+        assert!(matches!(
+            SealedSegmentReader::open(
+                &segment_path,
+                summary.segment_bytes - 1,
+                "journal-key-r1",
+                &journal_key,
+                &manifest,
+                &verifier,
+            ),
+            Err(JournalError::ReadLimitExceeded)
+        ));
+        let mut reader = SealedSegmentReader::open(
+            &segment_path,
+            1024 * 1024,
+            "journal-key-r1",
+            &journal_key,
+            &manifest,
+            &verifier,
+        )
+        .unwrap();
+        assert_eq!(reader.segment(), summary);
+        #[cfg(unix)]
+        fs::set_permissions(&segment_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut changed = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&segment_path)
+            .unwrap();
+        changed.seek(SeekFrom::End(-1)).unwrap();
+        let mut final_byte = [0];
+        changed.read_exact(&mut final_byte).unwrap();
+        changed.seek(SeekFrom::End(-1)).unwrap();
+        changed.write_all(&[final_byte[0] ^ 1]).unwrap();
+        changed.sync_all().unwrap();
+        drop(changed);
+        let first = reader.next_record().unwrap().unwrap();
+        let second = reader.next_record().unwrap().unwrap();
+        assert_eq!(first.event_id(), &event);
+        assert_eq!(first.receipt_id().len(), 44);
+        assert_eq!(first.producer_sequence(), 1);
+        assert_eq!(first.plaintext(), b"first canonical event");
+        assert_eq!(second.event_id(), &event);
+        assert_ne!(first.plaintext_digest(), second.plaintext_digest());
+        assert!(reader.next_record().unwrap().is_none());
+
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
         fs::remove_dir_all(manifest_directory).unwrap();
