@@ -28,6 +28,7 @@ jobs:
       PGPORT: 5432
       PGUSER: postgres
       PGPASSWORD: postgres
+      XSHIELD_TEST_DATABASE_BASE_URL: postgresql://postgres:postgres@localhost:5432
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

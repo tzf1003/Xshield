@@ -9,6 +9,8 @@
 - 实现同上下文凭证刷新、身份 epoch 轮换、撤销和旧响应失效规则。
 - 实现资源、操作、视图和身份 epoch 精确匹配的有界幂等资格账本。
 - 增加 M1 PostgreSQL 版本化 migration、CAS/epoch/outbox 集成验证及 CI 服务。
+- 增加 SQLx PostgreSQL 身份刷新适配器，原子提交 generation、凭证状态和 outbox。
+- MSRV 更新为 Rust 1.94；锁定 SQLx 0.9.0 与 Tokio 1.51 LTS 依赖线。
 
 ## 3.0 — 2026-09-17
 项目正式命名Xshield，Rust主语言。整合前置JS/加密接管、受控回退、严格界面来源准入、资源操作账本、WAF与业务认证强绑定、分享例外与AI适配。

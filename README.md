@@ -6,13 +6,23 @@
 
 ## 实现状态
 
-M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、身份生命周期和有界精确资格账本领域规则；网络入口、PostgreSQL 持久化、持久审计和源站转发仍在后续闭环中。
+M0 已提供 Cargo workspace、强类型 ID、稳定原因码、独立管理身份、审计端口及禁用站点的 `NOT_CONFIGURED` 阶段树。M1 已实现 WAF 会话与业务凭证的精确组合绑定、身份生命周期、有界精确资格账本，以及同上下文刷新与 outbox 的 PostgreSQL 原子事务；网络入口、资格事务适配、持久审计和源站转发仍在后续闭环中。
 
 ```bash
 cargo test --workspace --all-targets
 cargo run -p xshield-core --example m0_stage_tree
 scripts/test_postgres.sh
 ```
+
+## Rust 运行时依赖
+
+| 依赖 | 用途 | 许可证与更新策略 |
+|---|---|---|
+| SQLx 0.9.0 | PostgreSQL 异步事务和连接池 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 migration、回滚和并发测试 |
+| Tokio 1.51 LTS | SQLx 异步运行时 | MIT；跟随 1.51 LTS 补丁，变更 minor 前执行故障与负载回归 |
+| serde_json 1.x | 类型化 outbox JSON 参数 | MIT OR Apache-2.0；锁文件固定，补丁升级执行契约测试 |
+
+当前 workspace MSRV 为 Rust 1.94，与 SQLx 0.9.0 一致。生产依赖升级需审查许可证、安全公告和 Cargo.lock 差异。
 
 ## 开始阅读
 

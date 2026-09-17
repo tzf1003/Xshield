@@ -16,6 +16,12 @@ impl UnixSeconds {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    /// Returns whole Unix seconds for persistence adapters.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// Monotonic identity generation within one binding.
@@ -27,6 +33,12 @@ impl CredentialGeneration {
     #[must_use]
     pub const fn new(value: u64) -> Self {
         Self(value)
+    }
+
+    /// Returns the monotonic counter for persistence comparisons.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
     }
 }
 
@@ -40,6 +52,12 @@ impl AuthEpoch {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    /// Returns the epoch counter for persistence comparisons.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// Authentication credential location selected by the site profile.
@@ -51,6 +69,18 @@ pub enum CredentialSlot {
     Bearer,
     /// A body-carried token for an explicitly configured operation.
     BodyToken,
+}
+
+impl CredentialSlot {
+    /// Returns the database contract value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cookie => "cookie",
+            Self::Bearer => "bearer",
+            Self::BodyToken => "body_token",
+        }
+    }
 }
 
 /// Tenant-isolated fingerprint of one verified credential.
@@ -69,6 +99,12 @@ impl CredentialFingerprint {
         parse_lower_hex_32(value)
             .map(Self)
             .ok_or(IdentityInputError::CredentialFingerprint)
+    }
+
+    /// Borrows the tenant-isolated fingerprint bytes for persistence.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
