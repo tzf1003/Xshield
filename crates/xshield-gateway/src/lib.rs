@@ -220,7 +220,9 @@ impl GatewayConfig {
             && operations.values().any(|operation| {
                 matches!(
                     operation.policy.admission_class(),
-                    AdmissionClass::AuthenticatedRoot | AdmissionClass::UiActionRequired
+                    AdmissionClass::AuthenticatedRoot
+                        | AdmissionClass::UiActionRequired
+                        | AdmissionClass::ServiceIdentity
                 )
             })
         {

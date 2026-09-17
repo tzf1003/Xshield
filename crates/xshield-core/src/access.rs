@@ -19,6 +19,12 @@ macro_rules! fingerprint {
         pub struct $name([u8; 32]);
 
         impl $name {
+            /// Constructs a fingerprint from an authenticated digest.
+            #[must_use]
+            pub const fn from_bytes(value: [u8; 32]) -> Self {
+                Self(value)
+            }
+
             /// Parses a canonical lowercase 64-character hexadecimal fingerprint.
             ///
             /// # Errors

@@ -49,6 +49,15 @@
       "resource_type": "order",
       "view_profile": "customer_detail",
       "resource_query_parameter": "order_id"
+    },
+    {
+      "operation_id": "reports.ingest",
+      "method": "POST",
+      "path": "/service/report",
+      "admission": "SERVICE_IDENTITY",
+      "source_action": null,
+      "resource_type": null,
+      "view_profile": null
     }
   ]
 }

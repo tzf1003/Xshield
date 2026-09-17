@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 use xshield_core::{
+    access::ServiceCredentialFingerprint,
     admission::{AdmissionClass, AdmissionProof},
     audit::ReasonCode,
     domain::{ActionRef, FieldName, ResourceType, WafSessionId},
@@ -16,8 +17,9 @@ use xshield_core::{
     },
     ports::{
         IdentityProofQuery, IdentityProofState, IdentityProofStore, ResourceProofQuery,
-        ResourceProofState, ResourceProofStore, UiActionProofQuery, UiActionProofState,
-        UiActionProofStore,
+        ResourceProofState, ResourceProofStore, ServiceIdentityProofQuery,
+        ServiceIdentityProofState, ServiceIdentityProofStore, UiActionProofQuery,
+        UiActionProofState, UiActionProofStore,
     },
     provenance::ActionTarget,
 };
@@ -29,6 +31,7 @@ use zeroize::Zeroizing;
 
 const WAF_COOKIE: &str = "__Host-xshield_sid";
 const ACTION_HEADER: &str = "x-xshield-action-ref";
+const SERVICE_CREDENTIAL_HEADER: &str = "x-xshield-service-credential";
 const MAX_SESSION_BYTES: usize = 256;
 const MAX_BEARER_BYTES: usize = 8192;
 const MAX_QUERY_BYTES: usize = 8192;
@@ -55,6 +58,7 @@ pub(crate) fn strip_edge_proofs(request: &mut RequestHeader) -> PingoraResult<()
         request.insert_header("Cookie", retained.join("; "))?;
     }
     request.remove_header(ACTION_HEADER);
+    request.remove_header(SERVICE_CREDENTIAL_HEADER);
     Ok(())
 }
 
@@ -102,6 +106,11 @@ impl ProtectedIdentity {
         now: UnixSeconds,
     ) -> Result<GatewayDecision, IdentityRuntimeError> {
         let class = config.admission_class(method, path);
+        if class == Some(AdmissionClass::ServiceIdentity) {
+            return self
+                .admit_service_identity(config, request, method, path, now)
+                .await;
+        }
         if !matches!(
             class,
             Some(AdmissionClass::AuthenticatedRoot | AdmissionClass::UiActionRequired)
@@ -161,6 +170,53 @@ impl ProtectedIdentity {
                 _ => config.admit(method, path, now),
             },
             IdentityProofState::Denied(error) => denied(config, method, path, now, error),
+        })
+    }
+
+    async fn admit_service_identity(
+        &self,
+        config: &GatewayConfig,
+        request: &RequestHeader,
+        method: &str,
+        path: &str,
+        now: UnixSeconds,
+    ) -> Result<GatewayDecision, IdentityRuntimeError> {
+        let credential = match service_credential(request, &self.fingerprint_key, config) {
+            Ok(credential) => credential,
+            Err(IdentityRuntimeError::Missing | IdentityRuntimeError::Malformed) => {
+                return Ok(denied_reason(
+                    config,
+                    method,
+                    path,
+                    now,
+                    ReasonCode::ServiceIdentityMismatch,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let state = self
+            .store()
+            .await?
+            .load_service_identity(ServiceIdentityProofQuery {
+                tenant_id: config.tenant_id(),
+                site_id: config.site_id(),
+                credential_fingerprint: &credential,
+                now,
+            })
+            .await?;
+        Ok(match state {
+            ServiceIdentityProofState::Verified(identity) => config.admit_with_proof(
+                method,
+                path,
+                now,
+                AdmissionProof::Service {
+                    identity: &identity,
+                    credential_fingerprint: &credential,
+                },
+            ),
+            ServiceIdentityProofState::Denied(error) => {
+                denied_reason(config, method, path, now, error.reason_code())
+            }
         })
     }
 
@@ -437,6 +493,37 @@ fn unique_action_ref(request: &RequestHeader) -> Result<ActionRef, IdentityRunti
     .map_err(|_| IdentityRuntimeError::Malformed)
 }
 
+fn service_credential(
+    request: &RequestHeader,
+    key: &[u8; 32],
+    config: &GatewayConfig,
+) -> Result<ServiceCredentialFingerprint, IdentityRuntimeError> {
+    let mut values = request.headers.get_all(SERVICE_CREDENTIAL_HEADER).iter();
+    let value = values.next().ok_or(IdentityRuntimeError::Missing)?;
+    if values.next().is_some() {
+        return Err(IdentityRuntimeError::Malformed);
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| IdentityRuntimeError::Malformed)?;
+    if value.is_empty() || value.len() > MAX_BEARER_BYTES {
+        return Err(IdentityRuntimeError::Malformed);
+    }
+    let mut canonical = Vec::with_capacity(64 + value.len());
+    for component in [
+        "xshield-service-credential-v1",
+        config.tenant_id().as_str(),
+        config.site_id().as_str(),
+        value,
+    ] {
+        canonical.extend_from_slice(component.as_bytes());
+        canonical.push(0);
+    }
+    Ok(ServiceCredentialFingerprint::from_bytes(fingerprint(
+        key, &canonical,
+    )?))
+}
+
 fn parse_query(query: &str, wanted: &FieldName) -> Result<(String, BTreeSet<FieldName>), ()> {
     if query.is_empty() || query.len() > MAX_QUERY_BYTES || query.contains(';') {
         return Err(());
@@ -607,6 +694,36 @@ mod tests {
         request
     }
 
+    fn service_config(site_id: &str) -> GatewayConfig {
+        let json = serde_json::json!({
+            "listen": "127.0.0.1:6188",
+            "origin": {"address": "127.0.0.1:8080", "server_name": "origin.example", "tls": false},
+            "tenant_id": "tenant_test",
+            "site_id": site_id,
+            "policy_revision": "policy-r1",
+            "audit": {
+                "directory": "target/xshield-service-test",
+                "key_id": "journal-key-r1",
+                "producer_id": "edge-test",
+                "max_bytes": 1_048_576,
+                "high_watermark_bytes": 786_432,
+                "segment_max_bytes": 262_144
+            },
+            "identity_store": {"max_connections": 2, "acquire_timeout_ms": 1000},
+            "operations": [{
+                "operation_id": "reports.ingest",
+                "method": "POST",
+                "path": "/service/report",
+                "admission": "SERVICE_IDENTITY",
+                "source_action": null,
+                "resource_type": null,
+                "view_profile": null,
+                "resource_query_parameter": null
+            }]
+        });
+        GatewayConfig::from_json(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+
     #[test]
     fn parses_exact_session_and_bearer_combination() {
         let identity = PresentedIdentity::parse(&request(), &KEY).unwrap();
@@ -633,12 +750,35 @@ mod tests {
         request
             .insert_header(ACTION_HEADER, "action_settings_primary")
             .unwrap();
+        request
+            .insert_header(SERVICE_CREDENTIAL_HEADER, "service-secret")
+            .unwrap();
         strip_edge_proofs(&mut request).unwrap();
         assert_eq!(
             request.headers.get("cookie").unwrap().to_str().unwrap(),
             "theme=dark"
         );
         assert!(!request.headers.contains_key(ACTION_HEADER));
+        assert!(!request.headers.contains_key(SERVICE_CREDENTIAL_HEADER));
+    }
+
+    #[test]
+    fn service_credential_is_exact_bounded_and_site_scoped() {
+        let mut request = RequestHeader::build("POST", b"/service/report", Some(1)).unwrap();
+        request
+            .insert_header(SERVICE_CREDENTIAL_HEADER, "service-secret")
+            .unwrap();
+        let first = service_credential(&request, &KEY, &service_config("site_first")).unwrap();
+        let second = service_credential(&request, &KEY, &service_config("site_second")).unwrap();
+        assert_ne!(first.as_bytes(), second.as_bytes());
+
+        request
+            .append_header(SERVICE_CREDENTIAL_HEADER, "substituted-secret")
+            .unwrap();
+        assert!(matches!(
+            service_credential(&request, &KEY, &service_config("site_first")),
+            Err(IdentityRuntimeError::Malformed)
+        ));
     }
 
     #[test]

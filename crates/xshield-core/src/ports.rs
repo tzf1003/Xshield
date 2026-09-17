@@ -1,6 +1,7 @@
 //! Side-effect boundaries used by the request application service.
 
 use crate::{
+    access::{AccessDenied, ServiceCredentialFingerprint, ServiceIdentity},
     audit::AuditEvent,
     domain::{
         ActionRef, EventId, OperationId, PolicyRevision, ResourceType, SiteId, StageExecutionId,
@@ -142,6 +143,42 @@ pub trait ResourceProofStore {
         &'a self,
         query: ResourceProofQuery<'a>,
     ) -> impl Future<Output = Result<ResourceProofState, Self::Error>> + Send + 'a;
+}
+
+/// Scoped request for one authoritative service identity.
+pub struct ServiceIdentityProofQuery<'a> {
+    /// Tenant fixed by the trusted listener configuration.
+    pub tenant_id: &'a TenantId,
+    /// Site fixed by the trusted listener configuration.
+    pub site_id: &'a SiteId,
+    /// Tenant- and site-isolated digest of the presented edge credential.
+    pub credential_fingerprint: &'a ServiceCredentialFingerprint,
+    /// Trusted server time frozen for this request.
+    pub now: UnixSeconds,
+}
+
+/// Authoritative service-identity lookup result.
+#[derive(Debug)]
+pub enum ServiceIdentityProofState {
+    /// Active identity with its complete finite operation set.
+    Verified(Box<ServiceIdentity>),
+    /// No active identity matches the exact scoped credential.
+    Denied(AccessDenied),
+}
+
+/// Reads service identities only from an authoritative scoped store.
+pub trait ServiceIdentityProofStore {
+    /// Adapter-specific lookup failure.
+    type Error;
+
+    /// Loads an active service identity for the exact tenant, site, and credential.
+    ///
+    /// # Errors
+    /// Returns the adapter error when authoritative state cannot be read safely.
+    fn load_service_identity<'a>(
+        &'a self,
+        query: ServiceIdentityProofQuery<'a>,
+    ) -> impl Future<Output = Result<ServiceIdentityProofState, Self::Error>> + Send + 'a;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

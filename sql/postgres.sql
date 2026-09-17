@@ -69,6 +69,18 @@ CREATE TABLE xshield.resource_grants (
 CREATE INDEX grant_exact_lookup ON xshield.resource_grants
  (tenant_id,site_id,binding_id,auth_epoch,resource_type,resource_key_hmac,operation_id,view_id,expires_at)
  WHERE status='active';
+CREATE TABLE xshield.service_identities (
+ tenant_id text NOT NULL, site_id text NOT NULL, service_id text NOT NULL,
+ credential_fingerprint bytea NOT NULL, operation_ids text[] NOT NULL,
+ status text NOT NULL CHECK(status IN ('active','revoked','expired')),
+ issued_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
+ PRIMARY KEY(tenant_id,site_id,service_id),
+ CHECK(octet_length(credential_fingerprint)=32),
+ CHECK(cardinality(operation_ids) BETWEEN 1 AND 256),
+ CHECK(expires_at>issued_at)
+);
+CREATE UNIQUE INDEX service_identity_active_credential ON xshield.service_identities
+ (tenant_id,site_id,credential_fingerprint) WHERE status='active';
 -- 与认证/资格事务一起写入；传输可至少一次，消费者按event_id去重。
 CREATE TABLE xshield.audit_outbox (
  event_id text PRIMARY KEY, tenant_id text NOT NULL, site_id text NOT NULL,

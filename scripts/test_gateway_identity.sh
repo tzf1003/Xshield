@@ -30,17 +30,23 @@ done
 fingerprint_key="7777777777777777777777777777777777777777777777777777777777777777"
 session_id="ses_018f2a3b-4c5d-7000-8000-000000000902"
 bearer="verified-business-token"
+service_credential="verified-service-token"
 session_fingerprint=$(printf '%s' "$session_id" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary | od -An -tx1 | tr -d ' \n')
 bearer_fingerprint=$(printf '%s' "$bearer" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary | od -An -tx1 | tr -d ' \n')
 resource_fingerprint=$(printf '%s\0%s\0%s\0%s\0%s\0' \
     'xshield-resource-v1' 'tenant_gateway' 'site_gateway' 'order' 'order-123' \
     | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
     | od -An -tx1 | tr -d ' \n')
+service_fingerprint=$(printf '%s\0%s\0%s\0%s\0' \
+    'xshield-service-credential-v1' 'tenant_gateway' 'site_gateway' "$service_credential" \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
 
 psql -X -v ON_ERROR_STOP=1 -d "$test_database" \
     -v session_fingerprint="$session_fingerprint" \
     -v bearer_fingerprint="$bearer_fingerprint" \
-    -v resource_fingerprint="$resource_fingerprint" <<'SQL' >/dev/null
+    -v resource_fingerprint="$resource_fingerprint" \
+    -v service_fingerprint="$service_fingerprint" <<'SQL' >/dev/null
 INSERT INTO xshield.policy_revisions (
     tenant_id, site_id, revision, status, content_digest, artifact_ref
 ) VALUES (
@@ -142,6 +148,15 @@ INSERT INTO xshield.resource_grants (
     'orders-primary-r1', 'policy-r1', 'active',
     now() - interval '20 seconds', now() + interval '10 minutes'
 );
+INSERT INTO xshield.service_identities (
+    tenant_id, site_id, service_id, credential_fingerprint,
+    operation_ids, status, issued_at, expires_at
+) VALUES (
+    'tenant_gateway', 'site_gateway',
+    'svc_018f2a3b-4c5d-7000-8000-000000000907',
+    decode(:'service_fingerprint', 'hex'), ARRAY['reports.ingest'],
+    'active', now() - interval '1 minute', now() + interval '30 minutes'
+);
 SQL
 
 cat >"$test_dir/config.json" <<JSON
@@ -156,7 +171,8 @@ cat >"$test_dir/config.json" <<JSON
   "operations":[
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
-    {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"}
+    {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
+    {"operation_id":"reports.ingest","method":"POST","path":"/service/report","admission":"SERVICE_IDENTITY","source_action":null,"resource_type":null,"view_profile":null,"resource_query_parameter":null}
   ]
 }
 JSON
@@ -168,11 +184,16 @@ import sys
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        self.record()
+    def do_POST(self):
+        self.record()
+    def record(self):
         with open(sys.argv[1], "a", encoding="utf-8") as output:
             output.write(f"{self.command} {self.path}\n")
             output.write(f"Cookie={self.headers.get('Cookie', '')}\n")
             output.write(f"Authorization={self.headers.get('Authorization', '')}\n")
             output.write(f"ActionRef={self.headers.get('X-Xshield-Action-Ref', '')}\n")
+            output.write(f"ServiceCredential={self.headers.get('X-Xshield-Service-Credential', '')}\n")
         self.send_response(404)
         self.end_headers()
 
@@ -286,6 +307,30 @@ revoked_resource_status=$(curl -sS -o "$test_dir/revoked-resource.json" -w '%{ht
 [[ "$revoked_resource_status" == "403" ]]
 grep -q '"reason_code":"CAPABILITY_MISSING"' "$test_dir/revoked-resource.json"
 
+missing_service_status=$(curl -sS -o "$test_dir/missing-service.json" -w '%{http_code}' \
+    -X POST http://127.0.0.1:6288/service/report)
+[[ "$missing_service_status" == "403" ]]
+grep -q '"reason_code":"SERVICE_IDENTITY_MISMATCH"' "$test_dir/missing-service.json"
+
+invalid_service_status=$(curl -sS -o "$test_dir/invalid-service.json" -w '%{http_code}' \
+    -X POST -H 'X-Xshield-Service-Credential: substituted-service-token' \
+    http://127.0.0.1:6288/service/report)
+[[ "$invalid_service_status" == "403" ]]
+grep -q '"reason_code":"SERVICE_IDENTITY_MISMATCH"' "$test_dir/invalid-service.json"
+
+valid_service_status=$(curl -sS -o "$test_dir/valid-service.body" -w '%{http_code}' \
+    -X POST -H "X-Xshield-Service-Credential: $service_credential" \
+    http://127.0.0.1:6288/service/report)
+[[ "$valid_service_status" == "404" ]]
+
+psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+    "UPDATE xshield.service_identities SET status = 'revoked' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND service_id = 'svc_018f2a3b-4c5d-7000-8000-000000000907'" >/dev/null
+revoked_service_status=$(curl -sS -o "$test_dir/revoked-service.json" -w '%{http_code}' \
+    -X POST -H "X-Xshield-Service-Credential: $service_credential" \
+    http://127.0.0.1:6288/service/report)
+[[ "$revoked_service_status" == "403" ]]
+grep -q '"reason_code":"SERVICE_IDENTITY_MISMATCH"' "$test_dir/revoked-service.json"
+
 kill -KILL "$gateway_pid"
 wait "$gateway_pid" 2>/dev/null || true
 gateway_pid=""
@@ -295,8 +340,10 @@ origin_pid=""
 [[ $(grep -c 'GET /account' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
 ! grep -q '__Host-xshield_sid' "$test_dir/origin.log"
 ! grep -q 'ActionRef=action_' "$test_dir/origin.log"
+! grep -q 'ServiceCredential=verified-' "$test_dir/origin.log"
 grep -q 'Authorization=Bearer verified-business-token' "$test_dir/origin.log"
 [[ -n $(find "$test_dir/journal" -name 'segment-*.xaj' -type f -print -quit) ]]
 
