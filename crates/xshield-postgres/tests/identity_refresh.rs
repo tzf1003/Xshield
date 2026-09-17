@@ -5,8 +5,9 @@ use xshield_core::{
     domain::{AuthBindingId, EventId, SiteId, TenantId, WafSessionId},
     identity::{
         AuthBinding, AuthEpoch, AuthSnapshot, CredentialFingerprint, CredentialGeneration,
-        CredentialSlot, UnixSeconds,
+        CredentialSlot, IdentityDenied, UnixSeconds,
     },
+    ports::{IdentityProofQuery, IdentityProofState, IdentityProofStore},
 };
 use xshield_postgres::{CredentialRefresh, PostgresIdentityStore, RefreshOutcome, StoreError};
 
@@ -14,11 +15,13 @@ const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const NOW: u64 = 1_800_000_000;
 const EXPIRES: u64 = 4_102_444_700;
+const SESSION_FINGERPRINT: [u8; 32] = [17; 32];
 
 struct Fixture {
     tenant: TenantId,
     site: SiteId,
     binding_id: AuthBindingId,
+    session_id: WafSessionId,
     snapshot: AuthSnapshot,
     new_credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
 }
@@ -54,6 +57,7 @@ fn fixture() -> Fixture {
         tenant,
         site,
         binding_id,
+        session_id,
         snapshot,
         new_credentials: credentials(NEW),
     }
@@ -80,7 +84,7 @@ async fn seed_binding(pool: &PgPool, fixture: &Fixture) {
     .bind(fixture.tenant.as_str())
     .bind(fixture.site.as_str())
     .bind(fixture.binding_id.as_str())
-    .bind([17_u8; 32].as_slice())
+    .bind(SESSION_FINGERPRINT.as_slice())
     .bind("principal_rust")
     .bind(4_102_444_800_i64)
     .execute(pool)
@@ -138,6 +142,24 @@ async fn refresh(
             &envelope,
         )?)
         .await
+}
+
+async fn load_identity(
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    credentials: &BTreeMap<CredentialSlot, CredentialFingerprint>,
+) -> IdentityProofState {
+    store
+        .load_identity(IdentityProofQuery {
+            tenant_id: &fixture.tenant,
+            site_id: &fixture.site,
+            session_id: &fixture.session_id,
+            session_fingerprint: &SESSION_FINGERPRINT,
+            credentials,
+            now: UnixSeconds::new(NOW),
+        })
+        .await
+        .unwrap()
 }
 
 async fn generation(pool: &PgPool, fixture: &Fixture) -> i64 {
@@ -224,6 +246,16 @@ async fn refresh_is_atomic_and_compare_and_swap() {
         .expect("assertion pool connects");
     let fixture = fixture();
     seed_binding(&pool, &fixture).await;
+    let old_credentials = credentials(OLD);
+    assert!(matches!(
+        load_identity(&store, &fixture, &old_credentials).await,
+        IdentityProofState::Verified { snapshot, .. }
+            if snapshot.generation() == CredentialGeneration::new(2)
+    ));
+    assert!(matches!(
+        load_identity(&store, &fixture, &fixture.new_credentials).await,
+        IdentityProofState::Denied(IdentityDenied::BindingMismatch)
+    ));
 
     let duplicate_event = event_id(103);
     seed_duplicate_event(&pool, &fixture, &duplicate_event).await;
@@ -246,4 +278,13 @@ async fn refresh_is_atomic_and_compare_and_swap() {
         RefreshOutcome::Conflict
     );
     assert_committed_state(&pool, &fixture, &committed_event).await;
+    assert!(matches!(
+        load_identity(&store, &fixture, &fixture.new_credentials).await,
+        IdentityProofState::Verified { snapshot, .. }
+            if snapshot.generation() == CredentialGeneration::new(3)
+    ));
+    assert!(matches!(
+        load_identity(&store, &fixture, &old_credentials).await,
+        IdentityProofState::Denied(IdentityDenied::BindingMismatch)
+    ));
 }

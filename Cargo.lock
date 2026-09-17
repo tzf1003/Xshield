@@ -2887,6 +2887,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "openssl",
  "pingora",
  "serde",
  "serde_json",
@@ -2894,6 +2895,7 @@ dependencies = [
  "uuid",
  "xshield-audit",
  "xshield-core",
+ "xshield-postgres",
  "zeroize",
 ]
 

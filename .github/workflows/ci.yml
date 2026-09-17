@@ -44,4 +44,5 @@ jobs:
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
       - run: scripts/test_postgres.sh
+      - run: scripts/test_gateway_identity.sh
       - run: python scripts/validate_library.py

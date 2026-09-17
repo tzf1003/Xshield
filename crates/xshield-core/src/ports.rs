@@ -2,9 +2,58 @@
 
 use crate::{
     audit::AuditEvent,
-    domain::{EventId, SiteId, StageExecutionId, TenantId},
+    domain::{EventId, SiteId, StageExecutionId, TenantId, WafSessionId},
+    identity::{
+        AuthBinding, AuthSnapshot, CredentialFingerprint, CredentialSlot, IdentityDenied,
+        UnixSeconds,
+    },
 };
-use std::{cell::RefCell, fmt};
+use std::{cell::RefCell, collections::BTreeMap, fmt, future::Future};
+
+/// Scoped request for an authoritative identity and exact credential combination.
+pub struct IdentityProofQuery<'a> {
+    /// Tenant fixed by the trusted listener configuration.
+    pub tenant_id: &'a TenantId,
+    /// Site fixed by the trusted listener configuration.
+    pub site_id: &'a SiteId,
+    /// Opaque WAF session identifier presented by the client.
+    pub session_id: &'a WafSessionId,
+    /// Tenant-isolated HMAC of the presented WAF session value.
+    pub session_fingerprint: &'a [u8; 32],
+    /// Complete credential set selected by the site authentication profile.
+    pub credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
+    /// Trusted server time frozen for this request.
+    pub now: UnixSeconds,
+}
+
+/// Authoritative result of loading and verifying one request identity.
+#[derive(Debug)]
+pub enum IdentityProofState {
+    /// Binding and immutable request snapshot passed exact verification.
+    Verified {
+        /// Current binding used for later epoch checks.
+        binding: Box<AuthBinding>,
+        /// Immutable identity captured for the request.
+        snapshot: AuthSnapshot,
+    },
+    /// Missing, stale, expired, revoked, or mismatched identity state.
+    Denied(IdentityDenied),
+}
+
+/// Reads identity state only from an authoritative scoped store.
+pub trait IdentityProofStore {
+    /// Adapter-specific lookup failure.
+    type Error;
+
+    /// Loads and verifies the complete session and business credential combination.
+    ///
+    /// # Errors
+    /// Returns the adapter error when authoritative state cannot be read safely.
+    fn load_identity<'a>(
+        &'a self,
+        query: IdentityProofQuery<'a>,
+    ) -> impl Future<Output = Result<IdentityProofState, Self::Error>> + Send + 'a;
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Runtime activation state implemented by M0.

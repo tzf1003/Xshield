@@ -1,4 +1,5 @@
 mod durable_audit;
+mod protected_identity;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -25,10 +26,12 @@ use zeroize::Zeroizing;
 use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, new_trace_id,
 };
+use crate::protected_identity::{ProtectedIdentity, store_failure_reason, strip_waf_cookie};
 
 struct Gateway {
     config: Arc<GatewayConfig>,
     audit: DurableAudit,
+    identity: Option<ProtectedIdentity>,
 }
 
 struct RequestContext {
@@ -82,7 +85,22 @@ impl ProxyHttp for Gateway {
             return Ok(true);
         };
         let now = UnixSeconds::new(wall_time.as_secs());
-        let decision = self.config.admit(&method, &path, now);
+        let decision = match self.identity.as_ref() {
+            Some(identity) => {
+                if let Ok(decision) = identity
+                    .admit(&self.config, request, &method, &path, now)
+                    .await
+                {
+                    decision
+                } else {
+                    let mut decision = self.config.admit(&method, &path, now);
+                    decision.outcome = GatewayOutcome::Denied;
+                    decision.reason_code = store_failure_reason();
+                    decision
+                }
+            }
+            None => self.config.admit(&method, &path, now),
+        };
         let audit_result = self
             .audit
             .commit_admission(AdmissionFacts {
@@ -110,7 +128,12 @@ impl ProxyHttp for Gateway {
         context.decision = Some(decision.clone());
         context.admission_audit = Some(admission_audit);
         if decision.outcome == GatewayOutcome::Denied {
-            respond_denial(session, 403, &context.request_id, decision.reason_code).await?;
+            let status = if decision.reason_code == ReasonCode::IdentityStoreUnavailable {
+                503
+            } else {
+                403
+            };
+            respond_denial(session, status, &context.request_id, decision.reason_code).await?;
             return Ok(true);
         }
         Ok(false)
@@ -134,6 +157,7 @@ impl ProxyHttp for Gateway {
         upstream_request: &mut pingora::http::RequestHeader,
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
+        strip_waf_cookie(upstream_request)?;
         upstream_request.insert_header("Host", self.config.origin_server_name())?;
         upstream_request.insert_header("X-Xshield-Request-Id", &context.request_id)?;
         Ok(())
@@ -228,6 +252,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let config = Arc::new(load_config()?);
     let key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let audit = DurableAudit::open(&config, JournalKey::from_hex(&key_hex)?)?;
+    let identity = config
+        .identity_store()
+        .map(ProtectedIdentity::from_env)
+        .transpose()?;
     let mut server = Server::new(None)?;
     server.bootstrap();
     let mut proxy = http_proxy_service(
@@ -235,6 +263,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Gateway {
             config: Arc::clone(&config),
             audit,
+            identity,
         },
     );
     proxy.add_tcp(&config.listen().to_string());

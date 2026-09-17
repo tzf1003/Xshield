@@ -62,6 +62,12 @@ impl OperationPolicy {
         &self.operation_id
     }
 
+    /// Returns the configured proof class for this operation.
+    #[must_use]
+    pub const fn admission_class(&self) -> AdmissionClass {
+        self.admission
+    }
+
     /// Validates cross-field admission policy invariants.
     ///
     /// # Errors

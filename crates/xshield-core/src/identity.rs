@@ -91,6 +91,12 @@ impl CredentialSlot {
 pub struct CredentialFingerprint([u8; 32]);
 
 impl CredentialFingerprint {
+    /// Wraps a fingerprint produced by a trusted tenant-isolated HMAC adapter.
+    #[must_use]
+    pub const fn from_bytes(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+
     /// Parses a lowercase 64-character hexadecimal HMAC fingerprint.
     ///
     /// # Errors

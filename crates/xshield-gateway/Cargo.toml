@@ -9,6 +9,7 @@ rust-version.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+openssl.workspace = true
 pingora.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -16,6 +17,7 @@ tokio.workspace = true
 uuid.workspace = true
 xshield-audit = { path = "../xshield-audit" }
 xshield-core = { path = "../xshield-core" }
+xshield-postgres = { path = "../xshield-postgres" }
 zeroize.workspace = true
 
 [lints]

@@ -148,6 +148,8 @@ pub enum ReasonCode {
     OriginOutcomeUnknown,
     /// Trusted wall-clock time was unavailable for admission.
     ClockUnavailable,
+    /// Authoritative identity state could not be read safely.
+    IdentityStoreUnavailable,
     /// The request ended without an active site implementation.
     RequestNotConfigured,
 }
@@ -199,6 +201,7 @@ impl ReasonCode {
             Self::OriginResponseReceived => "ORIGIN_RESPONSE_RECEIVED",
             Self::OriginOutcomeUnknown => "ORIGIN_OUTCOME_UNKNOWN",
             Self::ClockUnavailable => "CLOCK_UNAVAILABLE",
+            Self::IdentityStoreUnavailable => "IDENTITY_STORE_UNAVAILABLE",
             Self::RequestNotConfigured => "REQUEST_NOT_CONFIGURED",
         }
     }

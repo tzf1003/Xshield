@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 mod grant;
+mod identity_read;
 mod provenance;
 
 pub use grant::{GrantPersistence, GrantWriteOutcome};

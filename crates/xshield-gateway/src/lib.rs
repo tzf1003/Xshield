@@ -32,6 +32,7 @@ pub struct GatewayConfig {
     site_id: SiteId,
     policy_revision: xshield_core::domain::PolicyRevision,
     audit: AuditConfig,
+    identity_store: Option<IdentityStoreConfig>,
     operations: BTreeMap<(String, String), CompiledOperation>,
 }
 
@@ -50,6 +51,13 @@ struct AuditConfig {
     limits: JournalLimits,
 }
 
+/// Bounded `PostgreSQL` identity lookup settings for protected roots.
+#[derive(Clone, Copy, Debug)]
+pub struct IdentityStoreConfig {
+    max_connections: u32,
+    acquire_timeout_ms: u64,
+}
+
 #[derive(Debug)]
 struct CompiledOperation {
     method: HttpMethod,
@@ -66,6 +74,8 @@ struct ConfigDto {
     site_id: String,
     policy_revision: String,
     audit: AuditDto,
+    #[serde(default)]
+    identity_store: Option<IdentityStoreDto>,
     operations: Vec<OperationDto>,
 }
 
@@ -77,6 +87,13 @@ struct AuditDto {
     producer_id: String,
     max_bytes: u64,
     high_watermark_bytes: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityStoreDto {
+    max_connections: u32,
+    acquire_timeout_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +163,22 @@ impl GatewayConfig {
         }
         let audit_limits = JournalLimits::new(dto.audit.max_bytes, dto.audit.high_watermark_bytes)
             .map_err(ConfigError::Journal)?;
+        let identity_store = dto
+            .identity_store
+            .map(|identity| {
+                if identity.max_connections == 0
+                    || identity.max_connections > 64
+                    || identity.acquire_timeout_ms == 0
+                    || identity.acquire_timeout_ms > 30_000
+                {
+                    return Err(ConfigError::Invalid("identity_store"));
+                }
+                Ok(IdentityStoreConfig {
+                    max_connections: identity.max_connections,
+                    acquire_timeout_ms: identity.acquire_timeout_ms,
+                })
+            })
+            .transpose()?;
         if dto.operations.is_empty() {
             return Err(ConfigError::Invalid("operations"));
         }
@@ -156,6 +189,13 @@ impl GatewayConfig {
             if operations.insert(key, compiled).is_some() {
                 return Err(ConfigError::DuplicateRoute);
             }
+        }
+        if identity_store.is_none()
+            && operations.values().any(|operation| {
+                operation.policy.admission_class() == AdmissionClass::AuthenticatedRoot
+            })
+        {
+            return Err(ConfigError::Invalid("identity_store"));
         }
         Ok(Self {
             listen,
@@ -173,6 +213,7 @@ impl GatewayConfig {
                 producer_id: dto.audit.producer_id,
                 limits: audit_limits,
             },
+            identity_store,
             operations,
         })
     }
@@ -243,6 +284,12 @@ impl GatewayConfig {
         self.audit.limits
     }
 
+    /// Returns bounded identity-store settings when protected roots are enabled.
+    #[must_use]
+    pub const fn identity_store(&self) -> Option<IdentityStoreConfig> {
+        self.identity_store
+    }
+
     /// Applies the compiled exact-operation policy with no client-created proof.
     ///
     /// This MVP adapter can admit only public and authentication-entry routes.
@@ -250,6 +297,26 @@ impl GatewayConfig {
     /// authoritative proof loaders are connected.
     #[must_use]
     pub fn admit(&self, method: &str, path: &str, now: UnixSeconds) -> GatewayDecision {
+        self.admit_with_proof(method, path, now, AdmissionProof::None)
+    }
+
+    /// Returns the proof class for an exact configured operation.
+    #[must_use]
+    pub fn admission_class(&self, method: &str, path: &str) -> Option<AdmissionClass> {
+        self.operations
+            .get(&(method.to_owned(), path.to_owned()))
+            .map(|operation| operation.policy.admission_class())
+    }
+
+    /// Applies the compiled exact-operation policy with authoritative loaded proof.
+    #[must_use]
+    pub fn admit_with_proof(
+        &self,
+        method: &str,
+        path: &str,
+        now: UnixSeconds,
+        proof: AdmissionProof<'_>,
+    ) -> GatewayDecision {
         let Some(operation) = self.operations.get(&(method.to_owned(), path.to_owned())) else {
             return GatewayDecision {
                 outcome: GatewayOutcome::Denied,
@@ -269,7 +336,7 @@ impl GatewayConfig {
             resource: None,
             now,
         };
-        match operation.policy.admit(request, AdmissionProof::None) {
+        match operation.policy.admit(request, proof) {
             Ok(decision) => GatewayDecision {
                 outcome: GatewayOutcome::Allowed,
                 operation_id: Some(decision.operation_id),
@@ -281,6 +348,20 @@ impl GatewayConfig {
                 reason_code: error.reason_code(),
             },
         }
+    }
+}
+
+impl IdentityStoreConfig {
+    /// Returns the maximum number of `PostgreSQL` connections.
+    #[must_use]
+    pub const fn max_connections(self) -> u32 {
+        self.max_connections
+    }
+
+    /// Returns the bounded pool acquisition timeout in milliseconds.
+    #[must_use]
+    pub const fn acquire_timeout_ms(self) -> u64 {
+        self.acquire_timeout_ms
     }
 }
 
@@ -502,6 +583,33 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(traversal.as_bytes()),
             Err(ConfigError::Invalid("audit.directory"))
+        ));
+    }
+
+    #[test]
+    fn validates_identity_store_bounds() {
+        let configured = CONFIG.replace(
+            "\"operations\":[",
+            "\"identity_store\":{\"max_connections\":4,\"acquire_timeout_ms\":1000},\"operations\":[",
+        );
+        let config = GatewayConfig::from_json(configured.as_bytes()).unwrap();
+        let identity = config.identity_store().unwrap();
+        assert_eq!(identity.max_connections(), 4);
+        assert_eq!(identity.acquire_timeout_ms(), 1000);
+
+        let invalid = configured.replace("\"max_connections\":4", "\"max_connections\":0");
+        assert!(matches!(
+            GatewayConfig::from_json(invalid.as_bytes()),
+            Err(ConfigError::Invalid("identity_store"))
+        ));
+
+        let missing = CONFIG.replace(
+            "\"admission\":\"PUBLIC\"",
+            "\"admission\":\"AUTHENTICATED_ROOT\"",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(missing.as_bytes()),
+            Err(ConfigError::Invalid("identity_store"))
         ));
     }
 }
