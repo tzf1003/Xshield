@@ -26,8 +26,8 @@ use xshield_core::{
     },
 };
 use xshield_postgres::{
-    PostgresIdentityStore, ResponseGrantItem, ResponseGrantPersistence, ResponseGrantWriteOutcome,
-    StoreError,
+    PostgresIdentityStore, ResponseActionDescriptorQuery, ResponseGrantItem,
+    ResponseGrantPersistence, ResponseGrantWriteOutcome, StoreError,
 };
 
 const NOW: u64 = 1_800_000_000;
@@ -284,6 +284,7 @@ async fn count(pool: &PgPool, table: &str) -> i64 {
 
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
 async fn response_grant_batch_is_atomic_replayable_and_usable() {
     let database_url = env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL required");
     let store = PostgresIdentityStore::connect(&database_url, 4, Duration::from_secs(5))
@@ -292,6 +293,36 @@ async fn response_grant_batch_is_atomic_replayable_and_usable() {
     let pool = PgPool::connect(&database_url).await.unwrap();
     let fixture = fixture();
     seed(&pool, &fixture).await;
+    let policy_revision = PolicyRevision::parse("policy-r1").unwrap();
+
+    assert!(
+        store
+            .load_response_action_descriptor(ResponseActionDescriptorQuery {
+                tenant_id: &fixture.tenant,
+                site_id: &fixture.site,
+                action_id: fixture.descriptor.action_id(),
+                operation_id: fixture.descriptor.operation_id(),
+                policy_revision: &policy_revision,
+                mapping_revision: &MappingRevision::parse("mapping-r1").unwrap(),
+            })
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .load_response_action_descriptor(ResponseActionDescriptorQuery {
+                tenant_id: &fixture.tenant,
+                site_id: &fixture.site,
+                action_id: fixture.descriptor.action_id(),
+                operation_id: fixture.descriptor.operation_id(),
+                policy_revision: &policy_revision,
+                mapping_revision: &MappingRevision::parse("mapping-r2").unwrap(),
+            })
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let first = batch(&fixture, 620);
     assert_eq!(

@@ -31,7 +31,7 @@ action_grant_id、source_request_id、source_rule_revision、source_evidence_ids
 
 列表请求中的主体/租户必须先受约束；返回经过预期上游、业务成功码、Schema 与解密校验。只从批准的结构路径提取资源，不扫描任意正文中的 ID。创建响应只有在创建操作被事先允许且业务确认成功时才发行资格。
 
-首个 JSON 响应提取契约在来源 operation 的 `response.resource_grant` 中显式声明业务成功状态、列表 JSON Pointer、相对资源 JSON Pointer、唯一目标 operation、TTL、单响应数量与会话容量。来源只能是已认证根或已验证 UI 动作，目标必须是带精确资源适配器的 `UI_ACTION_REQUIRED` operation；operation ID 在站点配置内唯一。完整正文按无重复对象键的严格 JSON 解析，形状、类型、数量、资源长度或唯一性偏差均不产生候选资格。
+首个 JSON 响应提取契约在来源 operation 的 `response.resource_grant` 中显式声明业务成功状态、列表 JSON Pointer、相对资源 JSON Pointer、唯一目标 operation、目标 mapping revision、TTL、单响应数量与会话容量。来源只能是已认证根或已验证 UI 动作，目标必须是带精确资源适配器的 `UI_ACTION_REQUIRED` operation；operation ID 在站点配置内唯一。完整正文按无重复对象键的严格 JSON 解析，形状、类型、数量、资源长度或唯一性偏差均不产生候选资格。
 
 PageEvidence 必须关联认可来源；源站返回 200 不是授权证明。若列表本身可越权，不先约束列表就会污染整个账本。来源策略应有双身份及权限范围测试。
 

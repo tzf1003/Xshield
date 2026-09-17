@@ -16,7 +16,10 @@ use xshield_core::{
         ResourceAccess,
     },
     audit::ReasonCode,
-    domain::{ActionId, FieldName, OperationId, ResourceType, SiteId, TenantId, ViewProfile},
+    domain::{
+        ActionId, FieldName, MappingRevision, OperationId, ResourceType, SiteId, TenantId,
+        ViewProfile,
+    },
     grant::ResourceKeyHmac,
     identity::UnixSeconds,
     provenance::{ActionTarget, HttpMethod, RouteTemplate},
@@ -192,6 +195,7 @@ struct ResponseGrantDto {
     items_pointer: String,
     resource_pointer: String,
     target_operation_id: String,
+    target_mapping_revision: String,
     ttl_seconds: u64,
     max_items: usize,
     max_active_grants: u32,
@@ -454,6 +458,7 @@ impl GatewayConfig {
         Some(ResponseGrantOperation {
             rule,
             target_action_id: target.source_action.as_ref()?,
+            target_mapping_revision: rule.target_mapping_revision(),
             resource_type: &resource.resource_type,
             view_profile: &resource.view_profile,
             target_field,
@@ -666,6 +671,8 @@ pub struct ResponseGrantOperation<'a> {
     pub rule: &'a ResponseGrantRule,
     /// Descriptor that creates the target action grant.
     pub target_action_id: &'a ActionId,
+    /// Exact versioned action mapping selected by trusted configuration.
+    pub target_mapping_revision: &'a MappingRevision,
     /// Canonical resource type shared by action and resource grants.
     pub resource_type: &'a ResourceType,
     /// Exact view shared by action and resource grants.
@@ -799,6 +806,8 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
                 items_pointer: grant.items_pointer,
                 resource_pointer: grant.resource_pointer,
                 target_operation_id: OperationId::parse(grant.target_operation_id)
+                    .map_err(ConfigError::Domain)?,
+                target_mapping_revision: MappingRevision::parse(grant.target_mapping_revision)
                     .map_err(ConfigError::Domain)?,
                 ttl_seconds: grant.ttl_seconds,
                 max_items: grant.max_items,
@@ -1221,6 +1230,7 @@ mod tests {
                             "items_pointer": "/orders",
                             "resource_pointer": "/id",
                             "target_operation_id": "orders.read",
+                            "target_mapping_revision": "mapping-r1",
                             "ttl_seconds": 900,
                             "max_items": 100,
                             "max_active_grants": 5_000
@@ -1243,6 +1253,7 @@ mod tests {
         let compiled = GatewayConfig::from_json(&bytes).unwrap();
         let operation = compiled.response_grant_operation("GET", "/orders").unwrap();
         assert_eq!(operation.target_action_id.as_str(), "orders.open");
+        assert_eq!(operation.target_mapping_revision.as_str(), "mapping-r1");
         assert_eq!(operation.resource_type.as_str(), "order");
         assert_eq!(operation.view_profile.as_str(), "customer_detail");
         assert_eq!(operation.target_field.as_str(), "order_id");

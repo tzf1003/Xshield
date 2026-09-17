@@ -3,7 +3,10 @@
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::{collections::BTreeSet, fmt};
-use xshield_core::{audit::ReasonCode, domain::OperationId};
+use xshield_core::{
+    audit::ReasonCode,
+    domain::{MappingRevision, OperationId},
+};
 use zeroize::Zeroizing;
 
 const MAX_RESOURCE_BYTES: usize = 512;
@@ -16,6 +19,7 @@ pub struct ResponseGrantRule {
     pub(crate) items_pointer: String,
     pub(crate) resource_pointer: String,
     pub(crate) target_operation_id: OperationId,
+    pub(crate) target_mapping_revision: MappingRevision,
     pub(crate) ttl_seconds: u64,
     pub(crate) max_items: usize,
     pub(crate) max_active_grants: u32,
@@ -71,6 +75,12 @@ impl ResponseGrantRule {
     #[must_use]
     pub const fn target_operation_id(&self) -> &OperationId {
         &self.target_operation_id
+    }
+
+    /// Returns the exact active action mapping revision used for issuance.
+    #[must_use]
+    pub const fn target_mapping_revision(&self) -> &MappingRevision {
+        &self.target_mapping_revision
     }
 
     /// Returns the configured lease length in seconds.
@@ -277,6 +287,7 @@ mod tests {
             items_pointer: "/orders".to_owned(),
             resource_pointer: "/id".to_owned(),
             target_operation_id: OperationId::parse("orders.read").unwrap(),
+            target_mapping_revision: MappingRevision::parse("mapping-r1").unwrap(),
             ttl_seconds: 900,
             max_items,
             max_active_grants: 5_000,

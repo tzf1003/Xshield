@@ -15,6 +15,7 @@ mod service_identity_read;
 mod share_grant_issue;
 mod share_grant_read;
 
+pub use action_read::ResponseActionDescriptorQuery;
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
 pub use response_grant::{

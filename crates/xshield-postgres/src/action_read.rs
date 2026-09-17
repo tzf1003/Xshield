@@ -5,8 +5,8 @@ use sqlx::Row;
 use std::collections::BTreeSet;
 use xshield_core::{
     domain::{
-        ActionId, FieldName, MappingRevision, OperationId, PageEvidenceId, PageTemplate, RequestId,
-        ResourceType, ResponseEvidenceId, ViewProfile,
+        ActionId, FieldName, MappingRevision, OperationId, PageEvidenceId, PageTemplate,
+        PolicyRevision, RequestId, ResourceType, ResponseEvidenceId, SiteId, TenantId, ViewProfile,
     },
     grant::ResourceKeyHmac,
     identity::UnixSeconds,
@@ -17,6 +17,22 @@ use xshield_core::{
         RouteTemplate,
     },
 };
+
+/// Exact versioned descriptor lookup used before response-derived issuance.
+pub struct ResponseActionDescriptorQuery<'a> {
+    /// Tenant fixed by trusted listener configuration.
+    pub tenant_id: &'a TenantId,
+    /// Site fixed by trusted listener configuration.
+    pub site_id: &'a SiteId,
+    /// Action selected by the target operation configuration.
+    pub action_id: &'a ActionId,
+    /// Exact operation the response may qualify.
+    pub operation_id: &'a OperationId,
+    /// Active policy revision fixed by gateway configuration.
+    pub policy_revision: &'a PolicyRevision,
+    /// Exact versioned UI mapping fixed by response configuration.
+    pub mapping_revision: &'a MappingRevision,
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -37,6 +53,61 @@ enum TargetDto {
         resource_type: String,
         resource_key_hmac: String,
     },
+}
+
+impl PostgresIdentityStore {
+    /// Loads one exact approved target descriptor for response-derived issuance.
+    ///
+    /// The issuance transaction rechecks every returned field under a row lock,
+    /// so retirement between this read and commit cannot create authority.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database failures or corrupt persisted values.
+    pub async fn load_response_action_descriptor(
+        &self,
+        query: ResponseActionDescriptorQuery<'_>,
+    ) -> Result<Option<ActionDescriptor>, StoreError> {
+        let row = sqlx::query(
+            "SELECT page_template, method, route_template, target_rule,
+                    allowed_fields, field_profile
+             FROM xshield.action_descriptors
+             WHERE tenant_id = $1 AND site_id = $2 AND action_id = $3
+               AND operation_id = $4 AND policy_revision = $5
+               AND mapping_revision = $6 AND status = 'approved'",
+        )
+        .bind(query.tenant_id.as_str())
+        .bind(query.site_id.as_str())
+        .bind(query.action_id.as_str())
+        .bind(query.operation_id.as_str())
+        .bind(query.policy_revision.as_str())
+        .bind(query.mapping_revision.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ActionDescriptor::approved(
+                query.action_id.clone(),
+                parse(
+                    row.try_get("page_template")?,
+                    "page_template",
+                    PageTemplate::parse,
+                )?,
+                query.operation_id.clone(),
+                method(row.try_get("method")?)?,
+                RouteTemplate::parse(row.try_get::<&str, _>("route_template")?)
+                    .map_err(|_| StoreError::CorruptData("route_template"))?,
+                target_rule(row.try_get("target_rule")?)?,
+                fields(row.try_get("allowed_fields")?, "allowed_fields")?,
+                parse(
+                    row.try_get("field_profile")?,
+                    "field_profile",
+                    ViewProfile::parse,
+                )?,
+                query.policy_revision.clone(),
+                query.mapping_revision.clone(),
+            ))
+        })
+        .transpose()
+    }
 }
 
 impl UiActionProofStore for PostgresIdentityStore {
