@@ -104,6 +104,12 @@ pub enum ReasonCode {
     FieldNotAllowed,
     /// An action grant has invalid time bounds.
     UiActionExpiryInvalid,
+    /// Verified page evidence and a new exact action grant committed.
+    UiActionIssued,
+    /// An identical action grant was already committed.
+    UiActionAlreadyIssued,
+    /// An action reference was reused with different semantics.
+    UiActionIssuanceConflict,
     /// No site policy exists for the requested scope.
     SiteNotConfigured,
     /// The scoped site policy is explicitly disabled.
@@ -143,6 +149,9 @@ impl ReasonCode {
             Self::TargetScopeMismatch => "TARGET_SCOPE_MISMATCH",
             Self::FieldNotAllowed => "FIELD_NOT_ALLOWED",
             Self::UiActionExpiryInvalid => "UI_ACTION_EXPIRY_INVALID",
+            Self::UiActionIssued => "UI_ACTION_ISSUED",
+            Self::UiActionAlreadyIssued => "UI_ACTION_ALREADY_ISSUED",
+            Self::UiActionIssuanceConflict => "UI_ACTION_ISSUANCE_CONFLICT",
             Self::SiteNotConfigured => "SITE_NOT_CONFIGURED",
             Self::SiteDisabled => "SITE_DISABLED",
             Self::SiteConfigUnavailable => "SITE_CONFIG_UNAVAILABLE",

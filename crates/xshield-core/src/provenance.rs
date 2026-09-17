@@ -117,6 +117,7 @@ pub struct PageEvidence {
     build_fingerprint: BuildFingerprint,
     policy_revision: PolicyRevision,
     mapping_revision: MappingRevision,
+    verified_at: UnixSeconds,
     expires_at: UnixSeconds,
     status: EvidenceStatus,
 }
@@ -125,10 +126,12 @@ impl PageEvidence {
     /// Creates evidence after the application verified origin response and build mapping.
     ///
     /// # Errors
-    /// Returns [`ProvenanceError::EvidenceUnverified`] for an elapsed lease.
+    /// Returns [`ProvenanceError::EvidenceUnverified`] for stale identity or a
+    /// lease outside the active authentication session.
     #[allow(clippy::too_many_arguments)]
     pub fn verified(
         evidence_id: PageEvidenceId,
+        binding: &AuthBinding,
         snapshot: AuthSnapshot,
         source_request_id: RequestId,
         page_template: PageTemplate,
@@ -138,7 +141,8 @@ impl PageEvidence {
         expires_at: UnixSeconds,
         now: UnixSeconds,
     ) -> Result<Self, ProvenanceError> {
-        if expires_at <= now {
+        binding.validate_epoch(&snapshot, now)?;
+        if expires_at <= now || expires_at > binding.absolute_expires_at() {
             return Err(ProvenanceError::EvidenceUnverified);
         }
         Ok(Self {
@@ -149,6 +153,7 @@ impl PageEvidence {
             build_fingerprint,
             policy_revision,
             mapping_revision,
+            verified_at: now,
             expires_at,
             status: EvidenceStatus::Verified,
         })
@@ -163,6 +168,12 @@ impl PageEvidence {
     #[must_use]
     pub const fn evidence_id(&self) -> &PageEvidenceId {
         &self.evidence_id
+    }
+
+    /// Returns the identity snapshot frozen at verification.
+    #[must_use]
+    pub const fn snapshot(&self) -> &AuthSnapshot {
+        &self.snapshot
     }
 
     /// Returns the request whose verified response produced this evidence.
@@ -193,6 +204,12 @@ impl PageEvidence {
     #[must_use]
     pub const fn mapping_revision(&self) -> &MappingRevision {
         &self.mapping_revision
+    }
+
+    /// Returns the verification time.
+    #[must_use]
+    pub const fn verified_at(&self) -> UnixSeconds {
+        self.verified_at
     }
 
     /// Returns the server-side evidence expiry.
@@ -662,6 +679,7 @@ mod tests {
             .unwrap();
         let evidence = PageEvidence::verified(
             PageEvidenceId::parse("page_018f2a3b-4c5d-7000-8000-000000000303").unwrap(),
+            &binding,
             snapshot.clone(),
             RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000304").unwrap(),
             PageTemplate::parse("settings_page").unwrap(),
@@ -842,6 +860,26 @@ mod tests {
                 UnixSeconds::new(110),
             ),
             Err(ProvenanceError::Identity(IdentityDenied::EpochChanged))
+        );
+    }
+
+    #[test]
+    fn evidence_lease_cannot_exceed_session() {
+        let fixture = fixture();
+        assert_eq!(
+            PageEvidence::verified(
+                PageEvidenceId::parse("page_018f2a3b-4c5d-7000-8000-000000000305").unwrap(),
+                &fixture.binding,
+                fixture.snapshot.clone(),
+                fixture.evidence.source_request_id().clone(),
+                fixture.evidence.page_template().clone(),
+                fixture.evidence.build_fingerprint().clone(),
+                fixture.evidence.policy_revision().clone(),
+                fixture.evidence.mapping_revision().clone(),
+                UnixSeconds::new(301),
+                UnixSeconds::new(100),
+            ),
+            Err(ProvenanceError::EvidenceUnverified)
         );
     }
 }

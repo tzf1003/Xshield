@@ -6,8 +6,10 @@
 #![warn(missing_docs)]
 
 mod grant;
+mod provenance;
 
 pub use grant::{GrantPersistence, GrantWriteOutcome};
+pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
 
 use serde_json::Value;
 use sqlx::{PgPool, postgres::PgPoolOptions};
