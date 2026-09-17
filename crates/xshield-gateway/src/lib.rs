@@ -22,6 +22,8 @@ use xshield_core::{
     provenance::{ActionTarget, HttpMethod, RouteTemplate},
 };
 
+pub mod share_token;
+
 /// Maximum accepted gateway configuration size.
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 

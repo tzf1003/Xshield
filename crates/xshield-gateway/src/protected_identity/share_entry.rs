@@ -1,6 +1,5 @@
 use super::{
     IdentityRuntimeError, MAX_BEARER_BYTES, ProtectedIdentity, RequestResource, denied_reason,
-    fingerprint,
 };
 use pingora::http::RequestHeader;
 use xshield_core::{
@@ -10,8 +9,8 @@ use xshield_core::{
     identity::UnixSeconds,
     ports::{ShareGrantProofQuery, ShareGrantProofState, ShareGrantProofStore},
 };
+use xshield_gateway::share_token::fingerprint_share_token;
 use xshield_gateway::{GatewayConfig, GatewayDecision};
-use zeroize::Zeroizing;
 
 pub(super) const SHARE_TOKEN_HEADER: &str = "x-xshield-share-token";
 
@@ -98,19 +97,8 @@ fn share_token(
     if value.is_empty() || value.len() > MAX_BEARER_BYTES {
         return Err(IdentityRuntimeError::Malformed);
     }
-    let mut canonical = Zeroizing::new(Vec::with_capacity(64 + value.len()));
-    for component in [
-        "xshield-share-token-v1",
-        config.tenant_id().as_str(),
-        config.site_id().as_str(),
-        value,
-    ] {
-        canonical.extend_from_slice(component.as_bytes());
-        canonical.push(0);
-    }
-    Ok(ShareTokenFingerprint::from_bytes(fingerprint(
-        key, &canonical,
-    )?))
+    fingerprint_share_token(key, config.tenant_id(), config.site_id(), value)
+        .map_err(|_| IdentityRuntimeError::Crypto)
 }
 
 #[cfg(test)]
