@@ -38,6 +38,8 @@ storage_capacity = Σ每日量 × 保留天数 × 副本系数 + 索引/恢复�
 
 ## 21.5 账本与连接
 
+匿名会话用 `identity_store.max_active_anonymous_sessions` 设置每 tenant/site 活动上限，用 `anonymous_session_ttl_seconds` 限制服务端绝对期限；`anonymous_session_rate_window_seconds` 与来源/站点创建上限先在 edge 限制数据库尝试，再由 PostgreSQL tenant/site advisory lock 串行化分布式计数、清理与插入。配置校验要求 `站点窗口上限 × (ceil(TTL/窗口)+1) ≤ 活动容量`，覆盖窗口边界突发。来源/站点速率达到上限时返回 429，活动容量达到上限时返回 503，不以无状态 Cookie 绕过服务端记录。
+
 10 万会话 × 每会话 1000 条资格 = 1 亿条；按每条裸数据 128 字节约 12.8 GB，尚未计索引/JSON/副本。需要限制活跃资格数，避免每次看列表生成无限重复记录。
 
 10 万活跃页，15 秒一次 1 KB 心跳约 6667 条/秒，全天原样留存约 576 GB。遥测可按短时聚合保存，必要调用和用于决策的证据片段保留；聚合不影响全请求审计。

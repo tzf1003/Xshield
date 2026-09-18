@@ -10,6 +10,8 @@ Set-Cookie: __Host-xshield_sid=<opaque>; Secure; HttpOnly; SameSite=Lax; Path=/;
 
 一天是建议初始最长会话期限，不是无限滑动续期。服务端记录 absolute_expires_at；Cookie 本身的浏览器期限不是安全验证。按站测试 SSO、跨域、子域及 SameSite；不以 Cookie 属性取代 CSRF 控制。SSO 跨域必须通过受控一次性引导完成，不放宽 Cookie Domain 为所有子域共享凭证。[S10]
 
+受保护请求缺少 WAF Cookie 时，边缘先持久提交匿名 binding 与 `session.created` outbox，再以 401 返回新 Cookie。匿名记录的主体与授权上下文为空、epoch/generation 为 0，且没有 credential 行或业务资格。`identity_store.anonymous_session_ttl_seconds` 限制服务端租期，`anonymous_session_rate_window_seconds` 与 `max_anonymous_session_creations_per_source/site` 限制固定窗口创建速率，`max_active_anonymous_sessions` 限制每 tenant/site 活动数量；配置必须保证按站点速率持续创建也不会在过期前超过容量。速率或容量耗尽均安全失败。已有匿名 Cookie 不重复签发；任意 Bearer 不能把匿名记录升级为认证身份。
+
 身份上下文：site_id、waf_session_id、auth_binding_id、principal_ref、authorization_context_ref、auth_epoch、credential_generation。`authorization_context_ref` 是站点适配器从业务 tenant、角色或权限集合派生的有界非秘密稳定引用，不接受客户端自行声明。秘密凭证只在必要执行内存/秘密存储中使用，账本索引用租户隔离的 HMAC 指纹。
 
 ## 4.2 状态机

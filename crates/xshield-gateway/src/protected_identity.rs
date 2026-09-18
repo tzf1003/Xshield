@@ -3,6 +3,8 @@ use pingora::{Result as PingoraResult, http::RequestHeader};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fmt,
+    net::IpAddr,
+    sync::Mutex,
     time::Duration,
 };
 use uuid::Uuid;
@@ -13,8 +15,8 @@ use xshield_core::{
     domain::{ActionRef, AuthBindingId, EventId, FieldName, RequestId, ResourceType, WafSessionId},
     grant::ResourceKeyHmac,
     identity::{
-        AuthBinding, AuthSnapshot, AuthorizationContextRef, CredentialFingerprint, CredentialSlot,
-        IdentityDenied, UnixSeconds,
+        AnonymousSession, AuthBinding, AuthSnapshot, AuthorizationContextRef,
+        CredentialFingerprint, CredentialSlot, IdentityDenied, UnixSeconds,
     },
     ports::{
         IdentityProofQuery, IdentityProofState, IdentityProofStore, ResourceProofQuery,
@@ -30,8 +32,9 @@ use xshield_gateway::{
     auth_binding::{AuthBindingRule, AuthTransitionRule},
 };
 use xshield_postgres::{
-    BindingEstablishment, ContextSwitchOutcome, CredentialTransition, IdentityContextSwitch,
-    PostgresIdentityStore, RefreshOutcome, StoreError,
+    AnonymousSessionEstablishment, AnonymousSessionWriteOutcome, BindingEstablishment,
+    ContextSwitchOutcome, CredentialTransition, IdentityContextSwitch, PostgresIdentityStore,
+    RefreshOutcome, StoreError,
 };
 use zeroize::Zeroizing;
 
@@ -78,6 +81,27 @@ pub(crate) struct ProtectedIdentity {
     acquire_timeout: Duration,
     store: tokio::sync::OnceCell<PostgresIdentityStore>,
     fingerprint_key: Zeroizing<[u8; 32]>,
+    anonymous_creation_window: Mutex<Option<AnonymousCreationWindow>>,
+}
+
+#[derive(Clone, Copy)]
+struct AnonymousCreationWindow {
+    started_at: UnixSeconds,
+    used: u32,
+}
+
+impl AnonymousCreationWindow {
+    fn take(&mut self, now: UnixSeconds, window_seconds: u64, limit: u32) -> bool {
+        if now.value().saturating_sub(self.started_at.value()) >= window_seconds {
+            self.started_at = now;
+            self.used = 0;
+        }
+        if self.used >= limit {
+            return false;
+        }
+        self.used += 1;
+        true
+    }
 }
 
 pub(crate) struct ResponseIdentity {
@@ -108,6 +132,7 @@ impl PendingAuthBinding {
 pub(crate) struct ProtectedAdmission {
     pub(crate) decision: GatewayDecision,
     pub(crate) response_identity: Option<ResponseIdentity>,
+    pub(crate) anonymous_session_cookie: Option<String>,
 }
 
 impl ProtectedAdmission {
@@ -115,8 +140,15 @@ impl ProtectedAdmission {
         Self {
             decision,
             response_identity: None,
+            anonymous_session_cookie: None,
         }
     }
+}
+
+enum AnonymousAdmission {
+    Created(String),
+    RateExceeded,
+    CapacityExceeded,
 }
 
 impl ProtectedIdentity {
@@ -129,7 +161,28 @@ impl ProtectedIdentity {
             acquire_timeout: Duration::from_millis(config.acquire_timeout_ms()),
             store: tokio::sync::OnceCell::new(),
             fingerprint_key: Zeroizing::new(parse_key(&key_hex)?),
+            anonymous_creation_window: Mutex::new(None),
         })
+    }
+
+    fn take_local_anonymous_creation(
+        &self,
+        settings: IdentityStoreConfig,
+        now: UnixSeconds,
+    ) -> Result<bool, IdentityRuntimeError> {
+        let mut window = self
+            .anonymous_creation_window
+            .lock()
+            .map_err(|_| IdentityRuntimeError::LocalRateState)?;
+        let window = window.get_or_insert(AnonymousCreationWindow {
+            started_at: now,
+            used: 0,
+        });
+        Ok(window.take(
+            now,
+            settings.anonymous_session_rate_window_seconds(),
+            settings.max_anonymous_session_creations_per_site(),
+        ))
     }
 
     async fn store(&self) -> Result<&PostgresIdentityStore, IdentityRuntimeError> {
@@ -144,6 +197,150 @@ impl ProtectedIdentity {
             })
             .await
             .map_err(Into::into)
+    }
+
+    async fn establish_anonymous_session(
+        &self,
+        config: &GatewayConfig,
+        request_id: &RequestId,
+        source_fingerprint: &[u8; 32],
+        now: UnixSeconds,
+    ) -> Result<AnonymousAdmission, IdentityRuntimeError> {
+        let settings = config
+            .identity_store()
+            .ok_or(IdentityRuntimeError::Store(StoreError::InvalidCommand))?;
+        let absolute_expires_at = now
+            .value()
+            .checked_add(settings.anonymous_session_ttl_seconds())
+            .map(UnixSeconds::new)
+            .ok_or(IdentityRuntimeError::Store(StoreError::InvalidCommand))?;
+        let binding_id = AuthBindingId::parse(format!("auth_{}", Uuid::now_v7()))
+            .map_err(|_| IdentityRuntimeError::Store(StoreError::InvalidCommand))?;
+        let session_id = WafSessionId::parse(format!("ses_{}", Uuid::now_v7()))
+            .map_err(|_| IdentityRuntimeError::Store(StoreError::InvalidCommand))?;
+        let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7()))
+            .map_err(|_| IdentityRuntimeError::Store(StoreError::InvalidCommand))?;
+        let session =
+            AnonymousSession::new(session_id, config.site_id().clone(), absolute_expires_at);
+        let session_fingerprint = fingerprint(
+            &self.fingerprint_key,
+            session.session_id().as_str().as_bytes(),
+        )?;
+        let envelope = serde_json::json!({
+            "schema_version": 3,
+            "event_type": "session.created",
+            "event_id": event_id.as_str(),
+            "request_id": request_id.as_str(),
+            "binding_id": binding_id.as_str(),
+            "status": "anonymous",
+            "auth_epoch": 0,
+            "credential_generation": 0,
+            "reason_code": ReasonCode::AuthRequired.as_str(),
+        });
+        let command = AnonymousSessionEstablishment::new(
+            config.tenant_id(),
+            &binding_id,
+            &session,
+            &session_fingerprint,
+            source_fingerprint,
+            settings.max_active_anonymous_sessions(),
+            settings.anonymous_session_rate_window_seconds(),
+            settings.max_anonymous_session_creations_per_source(),
+            settings.max_anonymous_session_creations_per_site(),
+            now,
+            &event_id,
+            &envelope,
+        )?;
+        match self
+            .store()
+            .await?
+            .establish_anonymous_session(command)
+            .await?
+        {
+            AnonymousSessionWriteOutcome::Created => Ok(AnonymousAdmission::Created(format!(
+                "{WAF_COOKIE}={}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+                session.session_id().as_str(),
+                settings.anonymous_session_ttl_seconds()
+            ))),
+            AnonymousSessionWriteOutcome::RateExceeded => Ok(AnonymousAdmission::RateExceeded),
+            AnonymousSessionWriteOutcome::CapacityExceeded => {
+                Ok(AnonymousAdmission::CapacityExceeded)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_missing_session(
+        &self,
+        config: &GatewayConfig,
+        request: &RequestHeader,
+        method: &str,
+        path: &str,
+        request_id: &RequestId,
+        client_ip: Option<IpAddr>,
+        now: UnixSeconds,
+    ) -> Result<Option<ProtectedAdmission>, IdentityRuntimeError> {
+        match unique_cookie(request, WAF_COOKIE) {
+            Ok(_) => return Ok(None),
+            Err(IdentityRuntimeError::Malformed) => {
+                return Ok(Some(ProtectedAdmission::without_identity(denied(
+                    config,
+                    method,
+                    path,
+                    now,
+                    IdentityDenied::BindingMismatch,
+                ))));
+            }
+            Err(IdentityRuntimeError::Missing) => {}
+            Err(error) => return Err(error),
+        }
+        let settings = config
+            .identity_store()
+            .ok_or(IdentityRuntimeError::Store(StoreError::InvalidCommand))?;
+        if !self.take_local_anonymous_creation(settings, now)? {
+            return Ok(Some(ProtectedAdmission::without_identity(denied_reason(
+                config,
+                method,
+                path,
+                now,
+                ReasonCode::AnonymousSessionRateExceeded,
+            ))));
+        }
+        let source_fingerprint = anonymous_source_fingerprint(
+            &self.fingerprint_key,
+            config,
+            client_ip.ok_or(IdentityRuntimeError::ClientAddressUnavailable)?,
+        )?;
+        Ok(Some(
+            match self
+                .establish_anonymous_session(config, request_id, &source_fingerprint, now)
+                .await?
+            {
+                AnonymousAdmission::Created(cookie) => ProtectedAdmission {
+                    decision: denied(config, method, path, now, IdentityDenied::AuthRequired),
+                    response_identity: None,
+                    anonymous_session_cookie: Some(cookie),
+                },
+                AnonymousAdmission::RateExceeded => {
+                    ProtectedAdmission::without_identity(denied_reason(
+                        config,
+                        method,
+                        path,
+                        now,
+                        ReasonCode::AnonymousSessionRateExceeded,
+                    ))
+                }
+                AnonymousAdmission::CapacityExceeded => {
+                    ProtectedAdmission::without_identity(denied_reason(
+                        config,
+                        method,
+                        path,
+                        now,
+                        ReasonCode::AnonymousSessionCapacityExceeded,
+                    ))
+                }
+            },
+        ))
     }
 
     pub(crate) fn prepare_auth_binding(
@@ -424,10 +621,12 @@ impl ProtectedIdentity {
         &self,
         config: &GatewayConfig,
         request: &RequestHeader,
-        method: &str,
-        path: &str,
+        request_id: &RequestId,
+        client_ip: Option<IpAddr>,
         now: UnixSeconds,
     ) -> Result<ProtectedAdmission, IdentityRuntimeError> {
+        let method = request.method.as_str();
+        let path = request.uri.path();
         let class = config.admission_class(method, path);
         if class == Some(AdmissionClass::ServiceIdentity) {
             return self
@@ -448,6 +647,12 @@ impl ProtectedIdentity {
             return Ok(ProtectedAdmission::without_identity(
                 config.admit(method, path, now),
             ));
+        }
+        if let Some(admission) = self
+            .admit_missing_session(config, request, method, path, request_id, client_ip, now)
+            .await?
+        {
+            return Ok(admission);
         }
         let presented = match PresentedIdentity::parse(request, &self.fingerprint_key) {
             Ok(presented) => presented,
@@ -505,6 +710,7 @@ impl ProtectedIdentity {
                 ProtectedAdmission {
                     decision,
                     response_identity: Some(ResponseIdentity { binding, snapshot }),
+                    anonymous_session_cookie: None,
                 }
             }
             IdentityProofState::Denied(error) => {
@@ -979,6 +1185,30 @@ fn fingerprint(key: &[u8; 32], value: &[u8]) -> Result<[u8; 32], IdentityRuntime
         .map_err(|_| IdentityRuntimeError::Crypto)
 }
 
+fn anonymous_source_fingerprint(
+    key: &[u8; 32],
+    config: &GatewayConfig,
+    client_ip: IpAddr,
+) -> Result<[u8; 32], IdentityRuntimeError> {
+    let mut material = Vec::with_capacity(128);
+    material.extend_from_slice(b"xshield-anonymous-source-v1\0");
+    material.extend_from_slice(config.tenant_id().as_str().as_bytes());
+    material.push(0);
+    material.extend_from_slice(config.site_id().as_str().as_bytes());
+    material.push(0);
+    match client_ip {
+        IpAddr::V4(address) => {
+            material.push(4);
+            material.extend_from_slice(&address.octets());
+        }
+        IpAddr::V6(address) => {
+            material.push(6);
+            material.extend_from_slice(&(u128::from(address) & (u128::MAX << 64)).to_be_bytes());
+        }
+    }
+    fingerprint(key, &material)
+}
+
 fn credential_audit_values(
     credentials: &BTreeMap<CredentialSlot, CredentialFingerprint>,
 ) -> Vec<serde_json::Value> {
@@ -1032,6 +1262,8 @@ pub(crate) enum IdentityRuntimeError {
     Malformed,
     InvalidKey,
     Crypto,
+    ClientAddressUnavailable,
+    LocalRateState,
     Environment(env::VarError),
     OpenSsl(openssl::error::ErrorStack),
     Store(StoreError),
@@ -1062,6 +1294,8 @@ impl fmt::Display for IdentityRuntimeError {
             Self::Malformed => formatter.write_str("identity input malformed"),
             Self::InvalidKey => formatter.write_str("invalid fingerprint key"),
             Self::Crypto | Self::OpenSsl(_) => formatter.write_str("credential fingerprint failed"),
+            Self::ClientAddressUnavailable => formatter.write_str("client address unavailable"),
+            Self::LocalRateState => formatter.write_str("anonymous rate state unavailable"),
             Self::Environment(_) => formatter.write_str("identity environment unavailable"),
             Self::Store(error) => error.fmt(formatter),
         }
@@ -1074,7 +1308,12 @@ impl std::error::Error for IdentityRuntimeError {
             Self::Environment(error) => Some(error),
             Self::OpenSsl(error) => Some(error),
             Self::Store(error) => Some(error),
-            Self::Missing | Self::Malformed | Self::InvalidKey | Self::Crypto => None,
+            Self::Missing
+            | Self::Malformed
+            | Self::InvalidKey
+            | Self::Crypto
+            | Self::ClientAddressUnavailable
+            | Self::LocalRateState => None,
         }
     }
 }
@@ -1137,6 +1376,30 @@ mod tests {
         assert_eq!(identity.session_id.as_str(), SESSION);
         assert_eq!(identity.credentials.len(), 1);
         assert!(identity.credentials.contains_key(&CredentialSlot::Bearer));
+    }
+
+    #[test]
+    fn anonymous_creation_budget_resets_and_ipv6_uses_prefix() {
+        let mut window = AnonymousCreationWindow {
+            started_at: UnixSeconds::new(100),
+            used: 0,
+        };
+        assert!(window.take(UnixSeconds::new(100), 60, 1));
+        assert!(!window.take(UnixSeconds::new(159), 60, 1));
+        assert!(window.take(UnixSeconds::new(160), 60, 1));
+
+        let config = service_config("site_source_scope");
+        let first = "2001:db8:1:2::1".parse().unwrap();
+        let second = "2001:db8:1:2::ffff".parse().unwrap();
+        let other = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(
+            anonymous_source_fingerprint(&KEY, &config, first).unwrap(),
+            anonymous_source_fingerprint(&KEY, &config, second).unwrap()
+        );
+        assert_ne!(
+            anonymous_source_fingerprint(&KEY, &config, first).unwrap(),
+            anonymous_source_fingerprint(&KEY, &config, other).unwrap()
+        );
     }
 
     #[test]

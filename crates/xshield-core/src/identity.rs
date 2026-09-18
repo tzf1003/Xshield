@@ -231,6 +231,18 @@ impl AnonymousSession {
     pub const fn session_id(&self) -> &WafSessionId {
         &self.session_id
     }
+
+    /// Returns the site that owns this anonymous session.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+
+    /// Returns the server-enforced absolute session expiry.
+    #[must_use]
+    pub const fn absolute_expires_at(&self) -> UnixSeconds {
+        self.absolute_expires_at
+    }
 }
 
 /// Active binding between a WAF session and the exact effective credentials.

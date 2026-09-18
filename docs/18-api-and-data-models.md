@@ -18,6 +18,8 @@ Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签�
 
 ## 18.3 事务边界
 
+匿名会话创建按 tenant/site 取得事务级 advisory lock，以不保存原始 IP 的来源 HMAC 和站点作用域原子消费固定窗口计数，清理已过期匿名 binding 并重验配置容量后，提交无主体、无授权上下文、无凭证、epoch/generation 为 0 的 AuthBinding 与 `session.created` outbox。容量拒绝仍提交已消费的速率计数，速率拒绝回滚到既有上限；提交完成前不向客户端签发 Cookie，任一拒绝不创建部分身份状态。
+
 认证建立将 AuthBinding（含主体与授权上下文引用）、初始 CredentialGeneration 与 `binding.created` outbox 一起提交，提交前响应正文保持缓冲。同上下文刷新在同一事务中 CAS 重验 binding、主体、授权上下文、auth epoch、generation、完整旧凭证集合及期限，撤销旧 generation，并提交新 CredentialGeneration 与 `identity.refreshed` outbox；epoch 不变，使仍有效资格继续可用。身份上下文切换同样按旧 snapshot 与完整旧凭证集合 CAS，但在一个事务内更新主体/授权上下文、推进 auth epoch 与 generation、撤销旧 generation、写入新 generation 及 `epoch.changed` outbox；旧资格通过 epoch 校验立即失效，物理清理不参与在线授权。引入授权上下文字段的迁移会撤销无法证明该字段的既有活动绑定。资格发行与 outbox 一起提交；响应派生资格须在同一短事务中重验 binding、auth epoch、活动策略、动作描述、证据期限和整批容量，并原子写入 ResponseEvidence、ActionGrant、ResourceGrant 与 outbox。资源分享还须在同一短事务中重验发行者 binding、auth epoch、精确资源资格、活动策略、发行规则、TTL 和容量。只更新 status 字段的异步删除不能成为唯一撤销机制。
 
 附带 SQL 是可审查草案，生产前需迁移测试、并发隔离和索引验证。RLS 可作防御纵深，但应用仍必须使用完整 tenant/site 作用域；连接池中租户会话设置使用事务局部机制，避免连接复用串域。

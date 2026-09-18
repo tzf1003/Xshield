@@ -74,6 +74,11 @@ struct AuditConfig {
 pub struct IdentityStoreConfig {
     max_connections: u32,
     acquire_timeout_ms: u64,
+    anonymous_session_ttl_seconds: u64,
+    max_active_anonymous_sessions: u32,
+    anonymous_session_rate_window_seconds: u64,
+    max_anonymous_session_creations_per_source: u32,
+    max_anonymous_session_creations_per_site: u32,
 }
 
 #[derive(Debug)]
@@ -159,6 +164,76 @@ const fn default_reconcile_max_records() -> u64 {
 struct IdentityStoreDto {
     max_connections: u32,
     acquire_timeout_ms: u64,
+    #[serde(default = "default_anonymous_session_ttl_seconds")]
+    anonymous_session_ttl_seconds: u64,
+    #[serde(default = "default_max_active_anonymous_sessions")]
+    max_active_anonymous_sessions: u32,
+    #[serde(default = "default_anonymous_session_rate_window_seconds")]
+    anonymous_session_rate_window_seconds: u64,
+    #[serde(default = "default_max_anonymous_session_creations_per_source")]
+    max_anonymous_session_creations_per_source: u32,
+    #[serde(default = "default_max_anonymous_session_creations_per_site")]
+    max_anonymous_session_creations_per_site: u32,
+}
+
+const fn default_anonymous_session_ttl_seconds() -> u64 {
+    3_600
+}
+
+const fn default_max_active_anonymous_sessions() -> u32 {
+    100_000
+}
+
+const fn default_anonymous_session_rate_window_seconds() -> u64 {
+    60
+}
+
+const fn default_max_anonymous_session_creations_per_source() -> u32 {
+    10
+}
+
+const fn default_max_anonymous_session_creations_per_site() -> u32 {
+    1_000
+}
+
+fn validate_identity_store(
+    identity: &IdentityStoreDto,
+) -> Result<IdentityStoreConfig, ConfigError> {
+    let active_windows = identity
+        .anonymous_session_ttl_seconds
+        .div_ceil(identity.anonymous_session_rate_window_seconds.max(1))
+        .saturating_add(1);
+    if identity.max_connections == 0
+        || identity.max_connections > 64
+        || identity.acquire_timeout_ms == 0
+        || identity.acquire_timeout_ms > 30_000
+        || identity.anonymous_session_ttl_seconds == 0
+        || identity.anonymous_session_ttl_seconds > 86_400
+        || identity.max_active_anonymous_sessions == 0
+        || identity.max_active_anonymous_sessions > 1_000_000
+        || identity.anonymous_session_rate_window_seconds == 0
+        || identity.anonymous_session_rate_window_seconds > 3_600
+        || identity.max_anonymous_session_creations_per_source == 0
+        || identity.max_anonymous_session_creations_per_source
+            > identity.max_anonymous_session_creations_per_site
+        || identity.max_anonymous_session_creations_per_site == 0
+        || identity.max_anonymous_session_creations_per_site > 1_000_000
+        || u64::from(identity.max_anonymous_session_creations_per_site)
+            .saturating_mul(active_windows)
+            > u64::from(identity.max_active_anonymous_sessions)
+    {
+        return Err(ConfigError::Invalid("identity_store"));
+    }
+    Ok(IdentityStoreConfig {
+        max_connections: identity.max_connections,
+        acquire_timeout_ms: identity.acquire_timeout_ms,
+        anonymous_session_ttl_seconds: identity.anonymous_session_ttl_seconds,
+        max_active_anonymous_sessions: identity.max_active_anonymous_sessions,
+        anonymous_session_rate_window_seconds: identity.anonymous_session_rate_window_seconds,
+        max_anonymous_session_creations_per_source: identity
+            .max_anonymous_session_creations_per_source,
+        max_anonymous_session_creations_per_site: identity.max_anonymous_session_creations_per_site,
+    })
 }
 
 #[derive(Deserialize)]
@@ -297,19 +372,8 @@ impl GatewayConfig {
         }
         let identity_store = dto
             .identity_store
-            .map(|identity| {
-                if identity.max_connections == 0
-                    || identity.max_connections > 64
-                    || identity.acquire_timeout_ms == 0
-                    || identity.acquire_timeout_ms > 30_000
-                {
-                    return Err(ConfigError::Invalid("identity_store"));
-                }
-                Ok(IdentityStoreConfig {
-                    max_connections: identity.max_connections,
-                    acquire_timeout_ms: identity.acquire_timeout_ms,
-                })
-            })
+            .as_ref()
+            .map(validate_identity_store)
             .transpose()?;
         let compiled_operations = compile_operations(dto.operations)?;
         if identity_store.is_none()
@@ -790,6 +854,36 @@ impl IdentityStoreConfig {
     pub const fn acquire_timeout_ms(self) -> u64 {
         self.acquire_timeout_ms
     }
+
+    /// Returns the server-side anonymous-session lease in seconds.
+    #[must_use]
+    pub const fn anonymous_session_ttl_seconds(self) -> u64 {
+        self.anonymous_session_ttl_seconds
+    }
+
+    /// Returns the active anonymous-session bound per tenant and site.
+    #[must_use]
+    pub const fn max_active_anonymous_sessions(self) -> u32 {
+        self.max_active_anonymous_sessions
+    }
+
+    /// Returns the anonymous-session creation-rate window in seconds.
+    #[must_use]
+    pub const fn anonymous_session_rate_window_seconds(self) -> u64 {
+        self.anonymous_session_rate_window_seconds
+    }
+
+    /// Returns the creation bound for one normalized client source.
+    #[must_use]
+    pub const fn max_anonymous_session_creations_per_source(self) -> u32 {
+        self.max_anonymous_session_creations_per_source
+    }
+
+    /// Returns the creation bound for this tenant and site.
+    #[must_use]
+    pub const fn max_anonymous_session_creations_per_site(self) -> u32 {
+        self.max_anonymous_session_creations_per_site
+    }
 }
 
 fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError> {
@@ -1236,10 +1330,42 @@ mod tests {
         let identity = config.identity_store().unwrap();
         assert_eq!(identity.max_connections(), 4);
         assert_eq!(identity.acquire_timeout_ms(), 1000);
+        assert_eq!(identity.anonymous_session_ttl_seconds(), 3_600);
+        assert_eq!(identity.max_active_anonymous_sessions(), 100_000);
+        assert_eq!(identity.anonymous_session_rate_window_seconds(), 60);
+        assert_eq!(identity.max_anonymous_session_creations_per_source(), 10);
+        assert_eq!(identity.max_anonymous_session_creations_per_site(), 1_000);
 
         let invalid = configured.replace("\"max_connections\":4", "\"max_connections\":0");
         assert!(matches!(
             GatewayConfig::from_json(invalid.as_bytes()),
+            Err(ConfigError::Invalid("identity_store"))
+        ));
+
+        let invalid_ttl = configured.replace(
+            "\"acquire_timeout_ms\":1000",
+            "\"acquire_timeout_ms\":1000,\"anonymous_session_ttl_seconds\":86401",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(invalid_ttl.as_bytes()),
+            Err(ConfigError::Invalid("identity_store"))
+        ));
+
+        let invalid_capacity = configured.replace(
+            "\"acquire_timeout_ms\":1000",
+            "\"acquire_timeout_ms\":1000,\"max_active_anonymous_sessions\":1000001",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(invalid_capacity.as_bytes()),
+            Err(ConfigError::Invalid("identity_store"))
+        ));
+
+        let invalid_rate = configured.replace(
+            "\"acquire_timeout_ms\":1000",
+            "\"acquire_timeout_ms\":1000,\"max_anonymous_session_creations_per_source\":1001",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(invalid_rate.as_bytes()),
             Err(ConfigError::Invalid("identity_store"))
         ));
 

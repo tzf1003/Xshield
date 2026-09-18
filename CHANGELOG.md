@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 实现受保护入口缺失 WAF Cookie 时的有界匿名空会话、原子 `session.created` 审计、401 安全 Cookie 响应，以及进程内、分布式来源/站点速率和并发容量控制。
 - 建立 Rust Cargo workspace 与 M0 核心领域边界。
 - 实现禁用站点的可审计 `NOT_CONFIGURED` 阶段树和失败关闭测试。
 - 增加独立管理身份、Mock ports 及 Rust/文档联合 CI。

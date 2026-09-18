@@ -33,6 +33,8 @@
 
 ## 3.3 资格写入时序
 
+缺少 WAF Cookie 的受保护请求：先消耗当前 edge 的站点创建预算 → 取传输层对端地址（IPv6 归一到 /64）并以租户/站点隔离 HMAC 计算来源指纹 → 生成随机不透明 session/binding/event ID 与会话指纹 → PostgreSQL 短事务按 tenant/site 串行化来源/站点固定窗口计数、清理已过期匿名记录并检查容量 → 原子写入 epoch=0、generation=0、无主体/上下文/凭证的匿名 binding 与 `session.created` outbox → 提交后以 401 拒绝原请求并签发边缘 Cookie。速率耗尽返回 429，容量耗尽或事务失败安全关闭；这些结果均不签发 Cookie，也不访问源站。携带匿名 Cookie 的后续请求仍无认证资格；登录成功另外轮换为新的认证会话。
+
 认可认证入口的成功响应：完整严格 JSON → 提取配置指针指定的主体、授权上下文引用与 Bearer → 生成新的边缘会话和 binding → 原子写入 binding、初始 credential generation 与 outbox → 提交事务 → 释放携带业务凭证的响应正文。WAF Cookie 由边缘使用保留名称签发；源站响应不得预占该名称。响应校验或提交失败时该会话没有活动绑定，不能访问受保护入口。
 
 同上下文刷新响应：请求阶段精确验证旧 WAF 会话与旧 Bearer 并保存 AuthSnapshot → 完整严格 JSON 提取同一主体、同一授权上下文引用的新 Bearer → 按当前绝对会话期限收窄新凭证期限 → 短事务 CAS 重验 binding、主体、授权上下文、epoch、generation、完整旧凭证集合与旧凭证期限 → 撤销旧 generation 并写入新 generation 与 outbox → 提交后释放正文。epoch 保持不变；并发晚到响应、上下文变化、旧凭证过期或集合偏差均回滚。

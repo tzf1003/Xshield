@@ -236,7 +236,7 @@ cat >"$test_dir/config.json" <<JSON
   "site_id":"site_gateway",
   "policy_revision":"policy-r1",
   "audit":{"directory":"$test_dir/journal","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
-  "identity_store":{"max_connections":2,"acquire_timeout_ms":2000},
+  "identity_store":{"max_connections":2,"acquire_timeout_ms":2000,"anonymous_session_ttl_seconds":300,"max_active_anonymous_sessions":10,"anonymous_session_rate_window_seconds":60,"max_anonymous_session_creations_per_source":1,"max_anonymous_session_creations_per_site":1},
   "operations":[
     {"operation_id":"auth.login","method":"POST","path":"/login","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
     {"operation_id":"auth.login.invalid","method":"POST","path":"/login-invalid","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
@@ -330,8 +330,75 @@ for _ in {1..50}; do
     fi
     sleep 0.1
 done
-[[ $(<"$test_dir/missing.status") == "403" ]]
+[[ $(<"$test_dir/missing.status") == "401" ]]
 grep -q '"reason_code":"AUTH_REQUIRED"' "$test_dir/missing.json"
+
+anonymous_status=$(curl -sS -D "$test_dir/anonymous.headers" \
+    -o "$test_dir/anonymous.json" -w '%{http_code}' \
+    http://127.0.0.1:6288/account)
+[[ "$anonymous_status" == "401" ]]
+grep -q '"reason_code":"AUTH_REQUIRED"' "$test_dir/anonymous.json"
+grep -qi '^set-cookie: __Host-xshield_sid=.*; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=300' \
+    "$test_dir/anonymous.headers"
+anonymous_session_id=$(sed -n \
+    's/^[Ss]et-[Cc]ookie: __Host-xshield_sid=\([^;]*\).*/\1/p' \
+    "$test_dir/anonymous.headers")
+[[ "$anonymous_session_id" == ses_* ]]
+anonymous_session_fingerprint=$(printf '%s' "$anonymous_session_id" \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
+anonymous_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v session_fingerprint="$anonymous_session_fingerprint" <<'SQL'
+SELECT binding.status, binding.principal_ref IS NULL,
+       binding.authorization_context_ref IS NULL,
+       binding.auth_epoch, binding.credential_generation,
+       (SELECT count(*) FROM xshield.credential_bindings credential
+        WHERE credential.tenant_id = binding.tenant_id
+          AND credential.site_id = binding.site_id
+          AND credential.binding_id = binding.binding_id),
+       (SELECT count(*) FROM xshield.audit_outbox outbox
+        WHERE outbox.tenant_id = binding.tenant_id
+          AND outbox.site_id = binding.site_id
+          AND outbox.aggregate_ref = binding.binding_id
+          AND outbox.event_type = 'session.created'
+          AND outbox.envelope->>'status' = 'anonymous'
+          AND outbox.envelope->>'reason_code' = 'AUTH_REQUIRED')
+FROM xshield.auth_bindings binding
+WHERE binding.tenant_id = 'tenant_gateway'
+  AND binding.site_id = 'site_gateway'
+  AND binding.waf_sid_fingerprint = decode(:'session_fingerprint', 'hex');
+SQL
+)
+[[ "$anonymous_state" == "anonymous|t|t|0|0|0|1" ]]
+
+anonymous_rate_status=$(curl -sS -D "$test_dir/anonymous-rate.headers" \
+    -o "$test_dir/anonymous-rate.json" -w '%{http_code}' \
+    http://127.0.0.1:6288/account)
+[[ "$anonymous_rate_status" == "429" ]]
+grep -q '"reason_code":"ANONYMOUS_SESSION_RATE_EXCEEDED"' \
+    "$test_dir/anonymous-rate.json"
+! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/anonymous-rate.headers"
+anonymous_rate_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT count(*), min(used), max(used)
+FROM xshield.anonymous_session_rate_limits
+WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway';
+SQL
+)
+[[ "$anonymous_rate_state" == "2|1|1" ]]
+
+anonymous_repeat_status=$(curl -sS -D "$test_dir/anonymous-repeat.headers" \
+    -o "$test_dir/anonymous-repeat.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$anonymous_session_id" \
+    http://127.0.0.1:6288/account)
+[[ "$anonymous_repeat_status" == "401" ]]
+! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/anonymous-repeat.headers"
+anonymous_substitution_status=$(curl -sS -o "$test_dir/anonymous-substitution.json" \
+    -w '%{http_code}' -H "Cookie: __Host-xshield_sid=$anonymous_session_id" \
+    -H 'Authorization: Bearer unbound-business-token' \
+    http://127.0.0.1:6288/account)
+[[ "$anonymous_substitution_status" == "403" ]]
+grep -q '"reason_code":"AUTH_BINDING_MISMATCH"' \
+    "$test_dir/anonymous-substitution.json"
 
 login_status=$(curl -sS -D "$test_dir/login.headers" -o "$test_dir/login.body" -w '%{http_code}' \
     -X POST http://127.0.0.1:6288/login)

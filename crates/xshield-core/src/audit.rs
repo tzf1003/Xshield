@@ -64,6 +64,10 @@ impl Outcome {
 /// Stable machine-readable reasons for the implemented M0 branches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReasonCode {
+    /// The anonymous-session quota is full for this tenant and site.
+    AnonymousSessionCapacityExceeded,
+    /// Anonymous-session creation exceeded its bounded rate.
+    AnonymousSessionRateExceeded,
     /// The request has no authenticated binding.
     AuthRequired,
     /// Presented credentials do not match the bound combination.
@@ -177,6 +181,8 @@ impl ReasonCode {
     /// Returns the stable machine-readable code.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AnonymousSessionCapacityExceeded => "ANONYMOUS_SESSION_CAPACITY_EXCEEDED",
+            Self::AnonymousSessionRateExceeded => "ANONYMOUS_SESSION_RATE_EXCEEDED",
             Self::AuthRequired => "AUTH_REQUIRED",
             Self::AuthBindingMismatch => "AUTH_BINDING_MISMATCH",
             Self::AuthBindingValid => "AUTH_BINDING_VALID",

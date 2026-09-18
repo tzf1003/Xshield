@@ -27,12 +27,77 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 use xshield_core::{
-    domain::EventId,
+    domain::{AuthBindingId, EventId, SiteId, TenantId},
     identity::{
-        AuthBinding, AuthEpoch, AuthSnapshot, AuthorizationContextRef, BindingStatus,
-        CredentialFingerprint, CredentialGeneration, CredentialSlot, UnixSeconds,
+        AnonymousSession, AuthBinding, AuthEpoch, AuthSnapshot, AuthorizationContextRef,
+        BindingStatus, CredentialFingerprint, CredentialGeneration, CredentialSlot, UnixSeconds,
     },
 };
+
+/// One empty anonymous WAF session ready for bounded persistence.
+pub struct AnonymousSessionEstablishment<'a> {
+    tenant_id: &'a TenantId,
+    binding_id: &'a AuthBindingId,
+    session: &'a AnonymousSession,
+    session_fingerprint: &'a [u8; 32],
+    source_fingerprint: &'a [u8; 32],
+    max_active_sessions: u32,
+    rate_window_seconds: u64,
+    max_creations_per_source: u32,
+    max_creations_per_site: u32,
+    now: UnixSeconds,
+    event_id: &'a EventId,
+    event_envelope: &'a Value,
+}
+
+impl<'a> AnonymousSessionEstablishment<'a> {
+    /// Validates an anonymous-session persistence command.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidCommand`] for an expired session, a zero
+    /// capacity, or a non-object audit envelope.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        tenant_id: &'a TenantId,
+        binding_id: &'a AuthBindingId,
+        session: &'a AnonymousSession,
+        session_fingerprint: &'a [u8; 32],
+        source_fingerprint: &'a [u8; 32],
+        max_active_sessions: u32,
+        rate_window_seconds: u64,
+        max_creations_per_source: u32,
+        max_creations_per_site: u32,
+        now: UnixSeconds,
+        event_id: &'a EventId,
+        event_envelope: &'a Value,
+    ) -> Result<Self, StoreError> {
+        session
+            .verify(session.site_id(), now)
+            .map_err(|_| StoreError::InvalidCommand)?;
+        if max_active_sessions == 0
+            || rate_window_seconds == 0
+            || max_creations_per_source == 0
+            || max_creations_per_source > max_creations_per_site
+            || !event_envelope.is_object()
+        {
+            return Err(StoreError::InvalidCommand);
+        }
+        Ok(Self {
+            tenant_id,
+            binding_id,
+            session,
+            session_fingerprint,
+            source_fingerprint,
+            max_active_sessions,
+            rate_window_seconds,
+            max_creations_per_source,
+            max_creations_per_site,
+            now,
+            event_id,
+            event_envelope,
+        })
+    }
+}
 
 /// One verified authentication result ready for atomic binding establishment.
 pub struct BindingEstablishment<'a> {
@@ -192,6 +257,17 @@ pub enum ContextSwitchOutcome {
     Conflict,
 }
 
+/// Result of creating a bounded anonymous WAF session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnonymousSessionWriteOutcome {
+    /// The empty session and its outbox event committed atomically.
+    Created,
+    /// The configured active anonymous-session bound is already reached.
+    CapacityExceeded,
+    /// The source or site creation-rate bound is already reached.
+    RateExceeded,
+}
+
 /// PostgreSQL-backed identity state writer.
 #[derive(Clone, Debug)]
 pub struct PostgresIdentityStore {
@@ -223,6 +299,116 @@ impl PostgresIdentityStore {
     #[must_use]
     pub const fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Atomically creates one empty anonymous session and its outbox event.
+    ///
+    /// A transaction-scoped advisory lock serializes capacity checks per
+    /// tenant/site. Expired anonymous rows are removed before counting; they
+    /// cannot own credentials or grants through this API.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when numeric conversion, persistence, or audit
+    /// durability prevents a complete transaction.
+    pub async fn establish_anonymous_session(
+        &self,
+        command: AnonymousSessionEstablishment<'_>,
+    ) -> Result<AnonymousSessionWriteOutcome, StoreError> {
+        let now = to_i64(command.now.value(), "now")?;
+        let absolute_expires_at = to_i64(
+            command.session.absolute_expires_at().value(),
+            "absolute_expires_at",
+        )?;
+        let rate_cutoff = to_i64(
+            command
+                .now
+                .value()
+                .saturating_sub(command.rate_window_seconds),
+            "rate_cutoff",
+        )?;
+        let rate_cleanup_cutoff = to_i64(
+            command
+                .now
+                .value()
+                .saturating_sub(command.rate_window_seconds.saturating_mul(2)),
+            "rate_cleanup_cutoff",
+        )?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(
+                 'xshield-anonymous-v1:' || $1 || ':' || $2, 0
+             ))",
+        )
+        .bind(command.tenant_id.as_str())
+        .bind(command.session.site_id().as_str())
+        .execute(&mut *transaction)
+        .await?;
+        if !consume_anonymous_rates(
+            &mut transaction,
+            &command,
+            rate_cutoff,
+            rate_cleanup_cutoff,
+            now,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(AnonymousSessionWriteOutcome::RateExceeded);
+        }
+        sqlx::query(
+            "DELETE FROM xshield.auth_bindings
+             WHERE tenant_id = $1 AND site_id = $2 AND status = 'anonymous'
+               AND absolute_expires_at <= to_timestamp($3)",
+        )
+        .bind(command.tenant_id.as_str())
+        .bind(command.session.site_id().as_str())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM xshield.auth_bindings
+             WHERE tenant_id = $1 AND site_id = $2 AND status = 'anonymous'
+               AND absolute_expires_at > to_timestamp($3)",
+        )
+        .bind(command.tenant_id.as_str())
+        .bind(command.session.site_id().as_str())
+        .bind(now)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active >= i64::from(command.max_active_sessions) {
+            transaction.commit().await?;
+            return Ok(AnonymousSessionWriteOutcome::CapacityExceeded);
+        }
+        sqlx::query(
+            "INSERT INTO xshield.auth_bindings (
+                tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
+                authorization_context_ref, auth_epoch, credential_generation, status,
+                absolute_expires_at, updated_at
+             ) VALUES ($1, $2, $3, $4, NULL, NULL, 0, 0, 'anonymous',
+                       to_timestamp($5), to_timestamp($6))",
+        )
+        .bind(command.tenant_id.as_str())
+        .bind(command.session.site_id().as_str())
+        .bind(command.binding_id.as_str())
+        .bind(command.session_fingerprint.as_slice())
+        .bind(absolute_expires_at)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO xshield.audit_outbox (
+                event_id, tenant_id, site_id, aggregate_ref, event_type, envelope
+             ) VALUES ($1, $2, $3, $4, 'session.created', $5)",
+        )
+        .bind(command.event_id.as_str())
+        .bind(command.tenant_id.as_str())
+        .bind(command.session.site_id().as_str())
+        .bind(command.binding_id.as_str())
+        .bind(command.event_envelope)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(AnonymousSessionWriteOutcome::Created)
     }
 
     /// Atomically creates one authenticated binding, its credential generation,
@@ -490,6 +676,94 @@ impl PostgresIdentityStore {
             ),
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn consume_anonymous_rate(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    scope_kind: &str,
+    scope_fingerprint: &[u8; 32],
+    cutoff: i64,
+    now: i64,
+    limit: u32,
+) -> Result<bool, StoreError> {
+    let used: i64 = sqlx::query_scalar(
+        "INSERT INTO xshield.anonymous_session_rate_limits (
+            tenant_id, site_id, scope_kind, scope_fingerprint,
+            window_started_at, used, updated_at
+         ) VALUES ($1, $2, $3, $4, to_timestamp($5), 1, to_timestamp($5))
+         ON CONFLICT (tenant_id, site_id, scope_kind, scope_fingerprint)
+         DO UPDATE SET
+            window_started_at = CASE
+                WHEN xshield.anonymous_session_rate_limits.window_started_at
+                     <= to_timestamp($6)
+                THEN excluded.window_started_at
+                ELSE xshield.anonymous_session_rate_limits.window_started_at
+            END,
+            used = CASE
+                WHEN xshield.anonymous_session_rate_limits.window_started_at
+                     <= to_timestamp($6)
+                THEN 1
+                ELSE xshield.anonymous_session_rate_limits.used + 1
+            END,
+            updated_at = excluded.updated_at
+         RETURNING used",
+    )
+    .bind(tenant_id.as_str())
+    .bind(site_id.as_str())
+    .bind(scope_kind)
+    .bind(scope_fingerprint.as_slice())
+    .bind(now)
+    .bind(cutoff)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(used <= i64::from(limit))
+}
+
+async fn consume_anonymous_rates(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AnonymousSessionEstablishment<'_>,
+    cutoff: i64,
+    cleanup_cutoff: i64,
+    now: i64,
+) -> Result<bool, StoreError> {
+    sqlx::query(
+        "DELETE FROM xshield.anonymous_session_rate_limits
+         WHERE tenant_id = $1 AND site_id = $2
+           AND window_started_at <= to_timestamp($3)",
+    )
+    .bind(command.tenant_id.as_str())
+    .bind(command.session.site_id().as_str())
+    .bind(cleanup_cutoff)
+    .execute(&mut **transaction)
+    .await?;
+    if !consume_anonymous_rate(
+        transaction,
+        command.tenant_id,
+        command.session.site_id(),
+        "source",
+        command.source_fingerprint,
+        cutoff,
+        now,
+        command.max_creations_per_source,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    consume_anonymous_rate(
+        transaction,
+        command.tenant_id,
+        command.session.site_id(),
+        "site",
+        &[0; 32],
+        cutoff,
+        now,
+        command.max_creations_per_site,
+    )
+    .await
 }
 
 struct CredentialReplacement<'a> {

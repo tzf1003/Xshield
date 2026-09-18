@@ -4,17 +4,23 @@ use std::{collections::BTreeMap, env, time::Duration};
 use xshield_core::{
     domain::{AuthBindingId, EventId, SiteId, TenantId, WafSessionId},
     identity::{
-        AuthBinding, AuthEpoch, CredentialFingerprint, CredentialGeneration, CredentialSlot,
-        UnixSeconds,
+        AnonymousSession, AuthBinding, AuthEpoch, CredentialFingerprint, CredentialGeneration,
+        CredentialSlot, UnixSeconds,
     },
     ports::{IdentityProofQuery, IdentityProofState, IdentityProofStore},
 };
-use xshield_postgres::{BindingEstablishment, PostgresIdentityStore, StoreError};
+use xshield_postgres::{
+    AnonymousSessionEstablishment, AnonymousSessionWriteOutcome, BindingEstablishment,
+    PostgresIdentityStore, StoreError,
+};
 
 const NOW: u64 = 1_800_000_000;
 const CREDENTIAL_EXPIRES: u64 = 1_800_003_600;
 const SESSION_EXPIRES: u64 = 1_800_086_400;
 const SESSION_FINGERPRINT: [u8; 32] = [41; 32];
+const SECOND_SESSION_FINGERPRINT: [u8; 32] = [43; 32];
+const SOURCE_FINGERPRINT: [u8; 32] = [44; 32];
+const SECOND_SOURCE_FINGERPRINT: [u8; 32] = [45; 32];
 
 fn fixture() -> (AuthBinding, WafSessionId) {
     let session_id = WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000b02").unwrap();
@@ -65,6 +71,193 @@ fn establishment_requires_fresh_bounded_state() {
         ),
         Err(StoreError::InvalidCommand)
     ));
+}
+
+#[test]
+fn anonymous_establishment_requires_live_bounded_state() {
+    let tenant = TenantId::parse("tenant_anonymous").unwrap();
+    let binding_id = AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000a01").unwrap();
+    let session = AnonymousSession::new(
+        WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000a02").unwrap(),
+        SiteId::parse("site_anonymous").unwrap(),
+        UnixSeconds::new(SESSION_EXPIRES),
+    );
+    let event_id = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000a03").unwrap();
+    let envelope = json!({"schema_version": 3, "event_type": "session.created"});
+    assert!(
+        AnonymousSessionEstablishment::new(
+            &tenant,
+            &binding_id,
+            &session,
+            &SESSION_FINGERPRINT,
+            &SOURCE_FINGERPRINT,
+            1,
+            60,
+            1,
+            2,
+            UnixSeconds::new(NOW),
+            &event_id,
+            &envelope,
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        AnonymousSessionEstablishment::new(
+            &tenant,
+            &binding_id,
+            &session,
+            &SESSION_FINGERPRINT,
+            &SOURCE_FINGERPRINT,
+            0,
+            60,
+            1,
+            2,
+            UnixSeconds::new(NOW),
+            &event_id,
+            &envelope,
+        ),
+        Err(StoreError::InvalidCommand)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn anonymous_establishment_is_empty_audited_rate_and_capacity_bounded() {
+    let database_url =
+        env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
+    let store = PostgresIdentityStore::connect(&database_url, 2, Duration::from_secs(5))
+        .await
+        .expect("test database connects");
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("assertion pool connects");
+    let tenant = TenantId::parse("tenant_anonymous").unwrap();
+    let site = SiteId::parse("site_anonymous").unwrap();
+    let first_binding = AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000a11").unwrap();
+    let first_session = AnonymousSession::new(
+        WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000a12").unwrap(),
+        site.clone(),
+        UnixSeconds::new(SESSION_EXPIRES),
+    );
+    let first_event = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000a13").unwrap();
+    let first_envelope = json!({"schema_version": 3, "event_type": "session.created"});
+    let first = AnonymousSessionEstablishment::new(
+        &tenant,
+        &first_binding,
+        &first_session,
+        &SESSION_FINGERPRINT,
+        &SOURCE_FINGERPRINT,
+        1,
+        60,
+        1,
+        2,
+        UnixSeconds::new(NOW),
+        &first_event,
+        &first_envelope,
+    )
+    .unwrap();
+    let second_binding = AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000a21").unwrap();
+    let second_session = AnonymousSession::new(
+        WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000a22").unwrap(),
+        site.clone(),
+        UnixSeconds::new(SESSION_EXPIRES),
+    );
+    let second_event = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000a23").unwrap();
+    let second_envelope = json!({"schema_version": 3, "event_type": "session.created"});
+    let second = AnonymousSessionEstablishment::new(
+        &tenant,
+        &second_binding,
+        &second_session,
+        &SECOND_SESSION_FINGERPRINT,
+        &SOURCE_FINGERPRINT,
+        1,
+        60,
+        1,
+        2,
+        UnixSeconds::new(NOW),
+        &second_event,
+        &second_envelope,
+    )
+    .unwrap();
+    let (first_outcome, second_outcome) = tokio::join!(
+        store.establish_anonymous_session(first),
+        store.establish_anonymous_session(second)
+    );
+    let outcomes = [first_outcome.unwrap(), second_outcome.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == AnonymousSessionWriteOutcome::Created)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == AnonymousSessionWriteOutcome::RateExceeded)
+            .count(),
+        1
+    );
+
+    let third_binding = AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000a31").unwrap();
+    let third_session = AnonymousSession::new(
+        WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000a32").unwrap(),
+        site,
+        UnixSeconds::new(SESSION_EXPIRES),
+    );
+    let third_event = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000a33").unwrap();
+    let third_envelope = json!({"schema_version": 3, "event_type": "session.created"});
+    let third = AnonymousSessionEstablishment::new(
+        &tenant,
+        &third_binding,
+        &third_session,
+        &SECOND_SESSION_FINGERPRINT,
+        &SECOND_SOURCE_FINGERPRINT,
+        1,
+        60,
+        1,
+        2,
+        UnixSeconds::new(NOW),
+        &third_event,
+        &third_envelope,
+    )
+    .unwrap();
+    assert_eq!(
+        store.establish_anonymous_session(third).await.unwrap(),
+        AnonymousSessionWriteOutcome::CapacityExceeded
+    );
+
+    let state: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*),
+                count(*) FILTER (WHERE status = 'anonymous'),
+                (SELECT count(*) FROM xshield.credential_bindings credential
+                 WHERE credential.tenant_id = $1 AND credential.site_id = $2),
+                (SELECT count(*) FROM xshield.audit_outbox outbox
+                 WHERE outbox.tenant_id = $1 AND outbox.site_id = $2
+                   AND outbox.event_type = 'session.created'),
+                coalesce(max(auth_epoch), -1)
+         FROM xshield.auth_bindings
+         WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(tenant.as_str())
+    .bind(second_session.site_id().as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, (1, 1, 0, 1, 0));
+
+    let rate_state: (i64, i64) = sqlx::query_as(
+        "SELECT count(*), coalesce(max(used) FILTER (WHERE scope_kind = 'site'), 0)
+         FROM xshield.anonymous_session_rate_limits
+         WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(tenant.as_str())
+    .bind(third_session.site_id().as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rate_state, (3, 2));
 }
 
 #[tokio::test]

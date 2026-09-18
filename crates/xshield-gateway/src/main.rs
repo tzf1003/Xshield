@@ -51,6 +51,7 @@ struct RequestContext {
     admission_audit: Option<AdmissionAudit>,
     buffered_response: Option<BufferedJsonResponse>,
     response_identity: Option<ResponseIdentity>,
+    anonymous_session_cookie: Option<String>,
     pending_auth_binding: Option<PendingAuthBinding>,
     response_failure: Option<ReasonCode>,
     origin_status: Option<u16>,
@@ -69,6 +70,7 @@ impl ProxyHttp for Gateway {
             admission_audit: None,
             buffered_response: None,
             response_identity: None,
+            anonymous_session_cookie: None,
             pending_auth_binding: None,
             response_failure: None,
             origin_status: None,
@@ -86,10 +88,16 @@ impl ProxyHttp for Gateway {
                 503,
                 &context.request_id,
                 ReasonCode::AuditDurabilityFailed,
+                None,
             )
             .await?;
             return Ok(true);
         }
+        let client_ip = session
+            .as_downstream()
+            .client_addr()
+            .and_then(|address| address.as_inet())
+            .map(std::net::SocketAddr::ip);
         let request = session.req_header();
         let method = request.method.as_str().to_owned();
         let path = request.uri.path().to_owned();
@@ -99,18 +107,31 @@ impl ProxyHttp for Gateway {
                 503,
                 &context.request_id,
                 ReasonCode::ClockUnavailable,
+                None,
             )
             .await?;
             return Ok(true);
         };
         let now = UnixSeconds::new(wall_time.as_secs());
+        let Ok(request_id) = RequestId::parse(&context.request_id) else {
+            respond_denial(
+                session,
+                503,
+                &context.request_id,
+                ReasonCode::RequestIncomplete,
+                None,
+            )
+            .await?;
+            return Ok(true);
+        };
         let decision = match self.identity.as_ref() {
             Some(identity) => {
                 if let Ok(admission) = identity
-                    .admit(&self.config, request, &method, &path, now)
+                    .admit(&self.config, request, &request_id, client_ip, now)
                     .await
                 {
                     context.response_identity = admission.response_identity;
+                    context.anonymous_session_cookie = admission.anonymous_session_cookie;
                     admission.decision
                 } else {
                     let mut decision = self.config.admit(&method, &path, now);
@@ -140,6 +161,7 @@ impl ProxyHttp for Gateway {
                     503,
                     &context.request_id,
                     ReasonCode::AuditDurabilityFailed,
+                    None,
                 )
                 .await?;
                 return Ok(true);
@@ -148,12 +170,14 @@ impl ProxyHttp for Gateway {
         context.decision = Some(decision.clone());
         context.admission_audit = Some(admission_audit);
         if decision.outcome == GatewayOutcome::Denied {
-            let status = if decision.reason_code == ReasonCode::IdentityStoreUnavailable {
-                503
-            } else {
-                403
-            };
-            respond_denial(session, status, &context.request_id, decision.reason_code).await?;
+            respond_denial(
+                session,
+                denial_status(decision.reason_code),
+                &context.request_id,
+                decision.reason_code,
+                context.anonymous_session_cookie.as_deref(),
+            )
+            .await?;
             return Ok(true);
         }
         Ok(false)
@@ -579,17 +603,30 @@ fn elapsed_us(started_at: Instant) -> u64 {
     u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+const fn denial_status(reason: ReasonCode) -> u16 {
+    match reason {
+        ReasonCode::AuthRequired => 401,
+        ReasonCode::AnonymousSessionRateExceeded => 429,
+        ReasonCode::AnonymousSessionCapacityExceeded | ReasonCode::IdentityStoreUnavailable => 503,
+        _ => 403,
+    }
+}
+
 async fn respond_denial(
     session: &mut Session,
     status: u16,
     request_id: &str,
     reason: ReasonCode,
+    session_cookie: Option<&str>,
 ) -> PingoraResult<()> {
     let body = denial_body(request_id, reason);
     let mut response = ResponseHeader::build(status, Some(4))?;
     response.insert_header("Content-Type", "application/json")?;
     response.insert_header("Cache-Control", "private, no-store")?;
     response.insert_header("X-Xshield-Request-Id", request_id)?;
+    if let Some(cookie) = session_cookie {
+        response.append_header("Set-Cookie", cookie)?;
+    }
     response.set_content_length(body.len())?;
     session
         .write_response_header(Box::new(response), false)
@@ -669,5 +706,16 @@ mod tests {
             .append_header("Set-Cookie", "__Host-xshield_sid=origin; Secure; Path=/")
             .unwrap();
         assert!(append_waf_cookie(&mut response, "edge=value").is_err());
+    }
+
+    #[test]
+    fn maps_identity_denials_to_client_and_dependency_statuses() {
+        assert_eq!(denial_status(ReasonCode::AuthRequired), 401);
+        assert_eq!(denial_status(ReasonCode::AnonymousSessionRateExceeded), 429);
+        assert_eq!(
+            denial_status(ReasonCode::AnonymousSessionCapacityExceeded),
+            503
+        );
+        assert_eq!(denial_status(ReasonCode::AuthBindingMismatch), 403);
     }
 }
