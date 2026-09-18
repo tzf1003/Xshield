@@ -45,6 +45,8 @@ pub const MAX_BUFFERED_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES: usize = MAX_BUFFERED_JSON_BYTES * 2 + 4096;
 // Size-independent adapter metadata, digests, and the AES output block.
 const RESPONSE_CRYPTO_FIXED_IN_FLIGHT_BYTES: usize = 4096 + 16;
+// Adapter metadata, AAD, digests, and small parser allocations.
+const REQUEST_CRYPTO_FIXED_IN_FLIGHT_BYTES: usize = 4096;
 /// Aggregate budget covering one maximum encrypted response transformation.
 pub const MAX_BUFFERED_BODY_IN_FLIGHT_BYTES: usize = MAX_BUFFERED_JSON_BYTES * 2
     + MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES
@@ -1205,6 +1207,13 @@ fn compile_request_crypto(
                 max_message_age_seconds,
                 max_future_skew_seconds,
                 max_active_messages,
+                // 3E covers read overlap and the later envelope/tree/ciphertext/
+                // plaintext peaks because validated plaintext is at most E/2.
+                max_in_flight_bytes: max_envelope_bytes
+                    .checked_mul(3)
+                    .and_then(|bytes| bytes.checked_add(REQUEST_CRYPTO_FIXED_IN_FLIGHT_BYTES))
+                    .filter(|bytes| *bytes <= MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)
+                    .ok_or(ConfigError::Invalid("operations.request_crypto"))?,
             }))
         }
     }
@@ -2030,6 +2039,7 @@ mod tests {
         let compiled = GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).unwrap();
         let rule = compiled.request_crypto_rule("POST", "/account").unwrap();
         assert_eq!(rule.adapter_revision(), "account-json-r1");
+        assert_eq!(rule.max_in_flight_bytes(), 16_384);
         assert_eq!(compiled.request_crypto_key_id(), Some("request-key-r1"));
 
         config["operations"][1]["admission"] = serde_json::json!("UI_ACTION_REQUIRED");

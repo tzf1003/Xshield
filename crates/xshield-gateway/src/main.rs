@@ -559,12 +559,15 @@ impl Gateway {
         let method = session.req_header().method.as_str().to_owned();
         let path = session.req_header().uri.path().to_owned();
         session.as_mut().enable_retry_buffering();
-        let permits = u32::try_from(rule.max_envelope_bytes())
+        let permits = u32::try_from(rule.max_in_flight_bytes())
             .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
         let _permit = Arc::clone(&self.buffered_body_budget)
             .try_acquire_many_owned(permits)
             .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
         let mut envelope = Vec::new();
+        envelope
+            .try_reserve_exact(rule.max_envelope_bytes())
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
         while let Some(chunk) = session
             .read_request_body()
             .await

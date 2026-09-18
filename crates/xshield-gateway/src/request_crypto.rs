@@ -59,6 +59,7 @@ pub struct RequestCryptoRule {
     pub(crate) max_message_age_seconds: u64,
     pub(crate) max_future_skew_seconds: u64,
     pub(crate) max_active_messages: u32,
+    pub(crate) max_in_flight_bytes: usize,
 }
 
 /// Exact scope presented to the secret-access port.
@@ -240,6 +241,12 @@ impl RequestCryptoRule {
     #[must_use]
     pub const fn max_active_messages(&self) -> u32 {
         self.max_active_messages
+    }
+
+    /// Returns the shared-memory reservation required before buffering.
+    #[must_use]
+    pub const fn max_in_flight_bytes(&self) -> usize {
+        self.max_in_flight_bytes
     }
 
     /// Authenticates, decrypts, validates, and freezes one request entity.
@@ -524,6 +531,7 @@ mod tests {
             max_message_age_seconds: 5,
             max_future_skew_seconds: 1,
             max_active_messages: 100,
+            max_in_flight_bytes: 16_384,
             key_not_before: UnixSeconds::new(1),
             key_expires_at: UnixSeconds::new(10),
         }
