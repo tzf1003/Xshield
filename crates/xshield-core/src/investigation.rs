@@ -23,6 +23,180 @@ pub enum EvidenceAccessKind {
     SensitiveRaw,
 }
 
+/// Terminal decision applied by an independent evidence approver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvidenceAccessDecisionKind {
+    /// Grants a bounded, short-lived content capability.
+    Approved,
+    /// Closes the request without a content capability.
+    Denied,
+}
+
+impl EvidenceAccessDecisionKind {
+    /// Returns the stable storage value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+        }
+    }
+
+    /// Returns the corresponding immutable audit event type.
+    #[must_use]
+    pub const fn event_type(self) -> &'static str {
+        match self {
+            Self::Approved => "evidence.access.approved",
+            Self::Denied => "evidence.access.denied",
+        }
+    }
+
+    /// Returns the corresponding stable terminal reason.
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::Approved => "EVIDENCE_ACCESS_APPROVED",
+            Self::Denied => "EVIDENCE_ACCESS_DENIED",
+        }
+    }
+}
+
+/// A validated terminal decision for one pending evidence-access request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceAccessDecisionDraft {
+    tenant_id: TenantId,
+    site_id: SiteId,
+    access_request_id: EvidenceAccessRequestId,
+    decided_by: String,
+    kind: EvidenceAccessDecisionKind,
+    reason: String,
+    requested_ttl_seconds: Option<u32>,
+}
+
+impl EvidenceAccessDecisionDraft {
+    /// Builds an approval that requests a non-zero bounded lease.
+    ///
+    /// The application layer supplies the configured upper bound; persistence
+    /// clamps the resulting lease to the evidence object's current expiry.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] for invalid approver text, reason text, or TTL.
+    pub fn approve(
+        tenant_id: TenantId,
+        site_id: SiteId,
+        access_request_id: EvidenceAccessRequestId,
+        decided_by: impl Into<String>,
+        reason: impl Into<String>,
+        requested_ttl_seconds: u32,
+        max_ttl_seconds: u32,
+    ) -> Result<Self, InvalidValue> {
+        if requested_ttl_seconds == 0 || requested_ttl_seconds > max_ttl_seconds {
+            return Err(InvalidValue::new("evidence_access_ttl_seconds"));
+        }
+        Self::new(
+            tenant_id,
+            site_id,
+            access_request_id,
+            decided_by,
+            EvidenceAccessDecisionKind::Approved,
+            reason,
+            Some(requested_ttl_seconds),
+        )
+    }
+
+    /// Builds a denial, which never carries a content lease.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] for invalid approver or reason text.
+    pub fn deny(
+        tenant_id: TenantId,
+        site_id: SiteId,
+        access_request_id: EvidenceAccessRequestId,
+        decided_by: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<Self, InvalidValue> {
+        Self::new(
+            tenant_id,
+            site_id,
+            access_request_id,
+            decided_by,
+            EvidenceAccessDecisionKind::Denied,
+            reason,
+            None,
+        )
+    }
+
+    fn new(
+        tenant_id: TenantId,
+        site_id: SiteId,
+        access_request_id: EvidenceAccessRequestId,
+        decided_by: impl Into<String>,
+        kind: EvidenceAccessDecisionKind,
+        reason: impl Into<String>,
+        requested_ttl_seconds: Option<u32>,
+    ) -> Result<Self, InvalidValue> {
+        let decided_by = decided_by.into();
+        let reason = reason.into();
+        if !valid_text(&decided_by, SUBJECT_MAX) {
+            return Err(InvalidValue::new("evidence_access_decider"));
+        }
+        if !valid_text(&reason, JUSTIFICATION_MAX) || reason.trim() != reason {
+            return Err(InvalidValue::new("evidence_access_decision_reason"));
+        }
+        Ok(Self {
+            tenant_id,
+            site_id,
+            access_request_id,
+            decided_by,
+            kind,
+            reason,
+            requested_ttl_seconds,
+        })
+    }
+
+    /// Returns the trusted tenant scope.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the trusted site scope.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+
+    /// Returns the target access-request identity.
+    #[must_use]
+    pub const fn access_request_id(&self) -> &EvidenceAccessRequestId {
+        &self.access_request_id
+    }
+
+    /// Returns the independently authenticated decision subject.
+    #[must_use]
+    pub fn decided_by(&self) -> &str {
+        &self.decided_by
+    }
+
+    /// Returns the terminal decision.
+    #[must_use]
+    pub const fn kind(&self) -> EvidenceAccessDecisionKind {
+        self.kind
+    }
+
+    /// Returns the bounded decision reason.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// Returns the requested lease for approvals.
+    #[must_use]
+    pub const fn requested_ttl_seconds(&self) -> Option<u32> {
+        self.requested_ttl_seconds
+    }
+}
+
 impl EvidenceAccessKind {
     /// Returns the stable storage and audit value.
     #[must_use]
@@ -199,7 +373,10 @@ fn valid_text(value: &str, max: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{EvidenceAccessKind, EvidenceAccessRequestDraft, InvestigationCaseDraft};
+    use super::{
+        EvidenceAccessDecisionDraft, EvidenceAccessDecisionKind, EvidenceAccessKind,
+        EvidenceAccessRequestDraft, InvestigationCaseDraft,
+    };
     use crate::domain::{ArtifactId, CaseId, EvidenceAccessRequestId, SiteId, TenantId};
 
     #[test]
@@ -266,6 +443,42 @@ mod tests {
                 " padded ",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn evidence_access_decision_is_terminal_and_bounded() {
+        let tenant = TenantId::parse("tenant_case").unwrap();
+        let site = SiteId::parse("site_case").unwrap();
+        let access =
+            EvidenceAccessRequestId::parse("access_018f2a3b-4c5d-7000-8000-000000000913").unwrap();
+        let approved = EvidenceAccessDecisionDraft::approve(
+            tenant.clone(),
+            site.clone(),
+            access.clone(),
+            "approver-1",
+            "Required for incident verification",
+            300,
+            900,
+        )
+        .unwrap();
+        assert_eq!(approved.kind(), EvidenceAccessDecisionKind::Approved);
+        assert_eq!(approved.requested_ttl_seconds(), Some(300));
+        assert!(
+            EvidenceAccessDecisionDraft::approve(
+                tenant.clone(),
+                site.clone(),
+                access.clone(),
+                "approver-1",
+                "Reason",
+                901,
+                900,
+            )
+            .is_err()
+        );
+        assert!(
+            EvidenceAccessDecisionDraft::deny(tenant, site, access, "approver-1", " padded ",)
+                .is_err()
         );
     }
 }

@@ -57,7 +57,7 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 
 `GET /control/v1/artifacts/{artifact_id}` 复用同一 Observer 与服务端 tenant/site 作用域，精确返回一个 active、未删除、未过期的 typed manifest。不存在、已删除、已过期和其他作用域统一返回 `found=false`，避免对象存在性探测；响应与审计保留请求目标，只有实际返回的对象进入 `evidence_refs`。该接口同样不访问对象内容。
 
-`POST /control/v1/cases` 已提供敏感访问审批所需的目的与案件基础记录。`POST /control/v1/artifacts/{artifact_id}/access` 要求 Investigator、自己拥有的 open 案件、同作用域 active 未过期证据、严格原文访问类型与理由；pending 申请和 `evidence.access.requested` outbox 原子提交并受主体级容量约束。两者均不授予或释放内容；独立审批和短时 EvidenceReadPort 能力仍是读取前提。
+`POST /control/v1/cases` 已提供敏感访问审批所需的目的与案件基础记录。`POST /control/v1/artifacts/{artifact_id}/access` 要求 Investigator、自己拥有的 open 案件、同作用域 active 未过期证据、严格原文访问类型与理由；pending 申请和 `evidence.access.requested` outbox 原子提交并受主体级容量约束。独立 `SensitiveEvidenceApprover` 通过批准/拒绝端点执行一次性终态，申请人自批被拒绝；批准事务重新锁定 open 案件和 active 未过期 artifact，将客户端 TTL 限制在服务配置与对象期限内，并原子提交 `evidence.access.approved` outbox。批准记录是服务端短时资格真值，实际内容读取仍须 `SensitiveEvidenceReader` 与 EvidenceReadPort 重验该资格和对象完整性。
 
 ## 12.6 保留与删除
 

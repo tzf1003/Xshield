@@ -61,6 +61,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let max_open_cases = env::var("XSHIELD_CONTROL_MAX_OPEN_CASES")?.parse()?;
     let max_pending_evidence_access_requests =
         env::var("XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS")?.parse()?;
+    let max_evidence_access_ttl_seconds =
+        env::var("XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS")?.parse()?;
     let listen: SocketAddr = env::var("XSHIELD_CONTROL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9443".to_owned())
         .parse()?;
@@ -91,6 +93,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         max_query_artifacts,
         max_open_cases,
         max_pending_evidence_access_requests,
+        max_evidence_access_ttl_seconds,
     )?;
     let config = ControlConfig::new(
         credential,
@@ -152,6 +155,7 @@ fn parse_roles(value: &str) -> Result<BTreeSet<ManagementRole>, &'static str> {
             "observer" => ManagementRole::Observer,
             "investigator" => ManagementRole::Investigator,
             "sensitive_evidence_reader" => ManagementRole::SensitiveEvidenceReader,
+            "sensitive_evidence_approver" => ManagementRole::SensitiveEvidenceApprover,
             "policy_author" => ManagementRole::PolicyAuthor,
             "policy_approver" => ManagementRole::PolicyApprover,
             "release_operator" => ManagementRole::ReleaseOperator,
@@ -183,9 +187,11 @@ mod tests {
 
     #[test]
     fn roles_are_explicit_and_bounded() {
-        let roles = parse_roles("observer,audit_administrator").unwrap();
+        let roles =
+            parse_roles("observer,audit_administrator,sensitive_evidence_approver").unwrap();
         assert!(roles.contains(&ManagementRole::Observer));
         assert!(roles.contains(&ManagementRole::AuditAdministrator));
+        assert!(roles.contains(&ManagementRole::SensitiveEvidenceApprover));
         assert!(parse_roles("observer,unknown").is_err());
         assert!(parse_roles("").is_err());
     }

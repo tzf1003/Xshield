@@ -20,7 +20,7 @@
 
 ## RB-05 证据读取/导出
 
-确认目的、案件、范围和操作者权限；申请敏感等级；批准后由 EvidenceReadPort 解密返回；操作写审计。导出提供加密包、签名/摘要和缺失清单。日志 HTML 以安全文本显示，不在控制台同源渲染。
+确认目的、案件、范围和操作者权限；Investigator 发起申请，由不同主体的 SensitiveEvidenceApprover 给出有理由、短时且不超过对象期限的决定；批准后仅允许同一申请主体以 SensitiveEvidenceReader 身份经 EvidenceReadPort 解密返回。每次尝试写审计。导出提供加密包、签名/摘要和缺失清单。日志 HTML 以安全文本显示，不在控制台同源渲染。
 
 ## RB-06 模型误放或提示注入嫌疑
 

@@ -66,3 +66,5 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control case_creation_is_idempotent_bounded_and_audited -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control evidence_access_request_is_idempotent_bounded_and_audited -- --ignored
+XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+    cargo test -p xshield-control evidence_access_decision_is_independent_short_lived_and_audited -- --ignored

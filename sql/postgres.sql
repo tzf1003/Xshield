@@ -199,18 +199,39 @@ CREATE TABLE xshield.evidence_access_requests (
  status text NOT NULL CHECK(status IN ('pending','approved','denied','expired','revoked')),
  idempotency_digest bytea NOT NULL CHECK(octet_length(idempotency_digest)=32),
  request_digest bytea NOT NULL CHECK(octet_length(request_digest)=32),
- requested_event_id text NOT NULL UNIQUE,
+ requested_event_id text NOT NULL UNIQUE CHECK(requested_event_id ~ '^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
  requested_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ decided_by text CHECK(decided_by IS NULL OR (octet_length(decided_by) BETWEEN 1 AND 256 AND decided_by !~ '[[:cntrl:]]')),
+ decision_reason text CHECK(decision_reason IS NULL OR (octet_length(decision_reason) BETWEEN 1 AND 512 AND decision_reason !~ '[[:cntrl:]]' AND decision_reason=btrim(decision_reason))),
+ decision_ttl_seconds integer CHECK(decision_ttl_seconds IS NULL OR decision_ttl_seconds>0),
+ decision_idempotency_digest bytea CHECK(decision_idempotency_digest IS NULL OR octet_length(decision_idempotency_digest)=32),
+ decision_request_digest bytea CHECK(decision_request_digest IS NULL OR octet_length(decision_request_digest)=32),
+ decision_event_id text CHECK(decision_event_id IS NULL OR decision_event_id ~ '^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+ decided_at timestamptz,
+ access_expires_at timestamptz,
  PRIMARY KEY(tenant_id,site_id,access_request_id),
  UNIQUE(tenant_id,site_id,requested_by,idempotency_digest),
  FOREIGN KEY(tenant_id,site_id,case_id)
  REFERENCES xshield.investigation_cases(tenant_id,site_id,case_id),
  FOREIGN KEY(tenant_id,site_id,artifact_id)
- REFERENCES xshield.artifact_catalog(tenant_id,site_id,artifact_id)
+ REFERENCES xshield.artifact_catalog(tenant_id,site_id,artifact_id),
+ CHECK(
+  (status='pending' AND decided_by IS NULL AND decision_reason IS NULL AND decision_ttl_seconds IS NULL AND decision_idempotency_digest IS NULL AND decision_request_digest IS NULL AND decision_event_id IS NULL AND decided_at IS NULL AND access_expires_at IS NULL)
+  OR (status='denied' AND decided_by IS NOT NULL AND decided_by<>requested_by AND decision_reason IS NOT NULL AND decision_ttl_seconds IS NULL AND decision_idempotency_digest IS NOT NULL AND decision_request_digest IS NOT NULL AND decision_event_id IS NOT NULL AND decided_at IS NOT NULL AND access_expires_at IS NULL)
+  OR (status IN ('approved','expired','revoked') AND decided_by IS NOT NULL AND decided_by<>requested_by AND decision_reason IS NOT NULL AND decision_ttl_seconds IS NOT NULL AND decision_idempotency_digest IS NOT NULL AND decision_request_digest IS NOT NULL AND decision_event_id IS NOT NULL AND decided_at IS NOT NULL AND access_expires_at>decided_at)
+ )
 );
 CREATE INDEX evidence_access_pending_lookup ON xshield.evidence_access_requests
  (tenant_id,site_id,requested_by,requested_at,access_request_id)
  WHERE status='pending';
+CREATE UNIQUE INDEX evidence_access_decision_idempotency ON xshield.evidence_access_requests
+ (tenant_id,site_id,decided_by,decision_idempotency_digest)
+ WHERE decision_idempotency_digest IS NOT NULL;
+CREATE UNIQUE INDEX evidence_access_decision_event ON xshield.evidence_access_requests(decision_event_id)
+ WHERE decision_event_id IS NOT NULL;
+CREATE INDEX evidence_access_capability_lookup ON xshield.evidence_access_requests
+ (tenant_id,site_id,requested_by,access_request_id,access_expires_at)
+ WHERE status='approved';
 COMMIT;
 -- 发行资格用例（应用事务逻辑，不是单靠这些表获得正确性）：
 -- 1. SELECT ... FROM auth_bindings WHERE tenant/site/binding 匹配 FOR UPDATE;

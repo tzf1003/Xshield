@@ -29,10 +29,14 @@ use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealV
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{ArtifactId, CaseId, EventId, EvidenceAccessRequestId, RequestId, SiteId, TenantId},
-    investigation::{EvidenceAccessKind, EvidenceAccessRequestDraft, InvestigationCaseDraft},
+    investigation::{
+        EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
+        InvestigationCaseDraft,
+    },
 };
 use xshield_evidence::EvidenceManifest;
 use xshield_postgres::{
+    EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord, EvidenceAccessDecisionWriteOutcome,
     EvidenceAccessRequestCreate, EvidenceAccessRequestRecord, EvidenceAccessRequestWriteOutcome,
     EvidenceCatalogArtifactQuery, EvidenceCatalogPage, EvidenceCatalogQuery,
     InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
@@ -51,6 +55,10 @@ const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
 const REQUEST_EVIDENCE_PATH: &str = "/control/v1/requests/{request_id}/evidence";
 const ARTIFACT_PATH: &str = "/control/v1/artifacts/{artifact_id}";
 const EVIDENCE_ACCESS_PATH: &str = "/control/v1/artifacts/{artifact_id}/access";
+const EVIDENCE_ACCESS_APPROVE_PATH: &str =
+    "/control/v1/evidence-access-requests/{access_request_id}/approve";
+const EVIDENCE_ACCESS_DENY_PATH: &str =
+    "/control/v1/evidence-access-requests/{access_request_id}/deny";
 const CASES_PATH: &str = "/control/v1/cases";
 const RATE_WINDOW: Duration = Duration::from_mins(1);
 const TOKEN_BYTES_MAX: usize = 512;
@@ -59,6 +67,7 @@ const MAX_QUERY_EVENTS: u16 = 1_000;
 const MAX_QUERY_ARTIFACTS: u16 = 128;
 const MAX_OPEN_CASES: u32 = 10_000;
 const MAX_PENDING_EVIDENCE_ACCESS_REQUESTS: u32 = 10_000;
+const MAX_EVIDENCE_ACCESS_TTL_SECONDS: u32 = 24 * 60 * 60;
 const CASE_BODY_BYTES_MAX: usize = 4 * 1024;
 const CURSOR_BYTES_MAX: usize = 160;
 const CURSOR_VERSION: &str = "v1";
@@ -113,6 +122,18 @@ const EVIDENCE_ACCESS_REQUEST: AccessAction = AccessAction {
     path: EVIDENCE_ACCESS_PATH,
     role: ManagementRole::Investigator,
 };
+const EVIDENCE_ACCESS_APPROVE: AccessAction = AccessAction {
+    event_type: "evidence.access.approved",
+    method: "POST",
+    path: EVIDENCE_ACCESS_APPROVE_PATH,
+    role: ManagementRole::SensitiveEvidenceApprover,
+};
+const EVIDENCE_ACCESS_DENY: AccessAction = AccessAction {
+    event_type: "evidence.access.denied",
+    method: "POST",
+    path: EVIDENCE_ACCESS_DENY_PATH,
+    role: ManagementRole::SensitiveEvidenceApprover,
+};
 
 /// Time-bounded management bearer material reduced to a one-way digest.
 pub struct ManagementCredential {
@@ -161,6 +182,7 @@ pub struct ControlLimits {
     max_query_artifacts: u16,
     max_open_cases: u32,
     max_pending_evidence_access_requests: u32,
+    max_evidence_access_ttl_seconds: u32,
 }
 
 impl ControlLimits {
@@ -174,6 +196,7 @@ impl ControlLimits {
         max_query_artifacts: u16,
         max_open_cases: u32,
         max_pending_evidence_access_requests: u32,
+        max_evidence_access_ttl_seconds: u32,
     ) -> Result<Self, ControlError> {
         if requests_per_minute == 0
             || !(1..=MAX_QUERY_EVENTS).contains(&max_query_events)
@@ -181,6 +204,7 @@ impl ControlLimits {
             || !(1..=MAX_OPEN_CASES).contains(&max_open_cases)
             || !(1..=MAX_PENDING_EVIDENCE_ACCESS_REQUESTS)
                 .contains(&max_pending_evidence_access_requests)
+            || !(1..=MAX_EVIDENCE_ACCESS_TTL_SECONDS).contains(&max_evidence_access_ttl_seconds)
         {
             return Err(ControlError::InvalidConfig);
         }
@@ -190,6 +214,7 @@ impl ControlLimits {
             max_query_artifacts,
             max_open_cases,
             max_pending_evidence_access_requests,
+            max_evidence_access_ttl_seconds,
         })
     }
 }
@@ -1253,6 +1278,316 @@ impl ControlPlane {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
+    async fn decide_evidence_access(
+        self: Arc<Self>,
+        action: AccessAction,
+        authorization: Option<String>,
+        idempotency_key: Option<String>,
+        target_access_request_id: String,
+        input: Option<EvidenceAccessDecisionInput>,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(authorization.as_deref(), &auth_request_id, action)
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Some(idempotency_key) = idempotency_key.filter(|value| valid_idempotency_key(value))
+        else {
+            return self
+                .audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_IDEMPOTENCY_KEY_INVALID",
+                    "a valid idempotency key is required",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Ok(access_request_id) = EvidenceAccessRequestId::parse(target_access_request_id) else {
+            return self
+                .audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_EVIDENCE_ACCESS_REQUEST_ID_INVALID",
+                    "invalid evidence access request identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Some(input) = input else {
+            return self
+                .audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    Some(access_request_id),
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_EVIDENCE_ACCESS_DECISION_INVALID",
+                    "invalid evidence access decision",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let decision = match input {
+            EvidenceAccessDecisionInput::Approve(payload) => EvidenceAccessDecisionDraft::approve(
+                self.config.tenant_id.clone(),
+                self.config.site_id.clone(),
+                access_request_id.clone(),
+                subject.clone(),
+                payload.reason,
+                payload.ttl_seconds,
+                self.config.limits.max_evidence_access_ttl_seconds,
+            ),
+            EvidenceAccessDecisionInput::Deny(payload) => EvidenceAccessDecisionDraft::deny(
+                self.config.tenant_id.clone(),
+                self.config.site_id.clone(),
+                access_request_id.clone(),
+                subject.clone(),
+                payload.reason,
+            ),
+        };
+        let Ok(decision) = decision else {
+            return self
+                .audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    Some(access_request_id),
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_EVIDENCE_ACCESS_DECISION_INVALID",
+                    "invalid evidence access decision",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Some((idempotency_digest, request_digest)) =
+            self.evidence_access_decision_digests(&subject, idempotency_key.as_bytes(), &decision)
+        else {
+            return self
+                .audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    Some(access_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_IDEMPOTENCY_UNAVAILABLE",
+                    "evidence access decision is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let Ok(typed_request_id) = RequestId::parse(request_id.clone()) else {
+            return internal_error(&request_id);
+        };
+        let Ok(event_id) = EventId::parse(format!("ev_{}", Uuid::now_v7())) else {
+            return internal_error(&request_id);
+        };
+        let envelope = evidence_access_decision_envelope(
+            &event_id,
+            &typed_request_id,
+            &decision,
+            &request_digest,
+        );
+        let Ok(command) = EvidenceAccessDecisionCreate::new(
+            &decision,
+            &idempotency_digest,
+            &request_digest,
+            &typed_request_id,
+            &event_id,
+            &envelope,
+        ) else {
+            return internal_error(&request_id);
+        };
+        let outcome = self.catalog.decide_evidence_access(command).await;
+        let Ok(outcome) = outcome else {
+            return self
+                .audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    Some(access_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_EVIDENCE_ACCESS_DECISION_STORE_UNAVAILABLE",
+                    "evidence access decision store is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        match outcome {
+            EvidenceAccessDecisionWriteOutcome::Created(record) => {
+                self.complete_evidence_access_decision(request_id, subject, action, record, false)
+                    .await
+            }
+            EvidenceAccessDecisionWriteOutcome::Existing(record) => {
+                self.complete_evidence_access_decision(request_id, subject, action, record, true)
+                    .await
+            }
+            EvidenceAccessDecisionWriteOutcome::Conflict => {
+                self.audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    Some(access_request_id),
+                    StatusCode::CONFLICT,
+                    "CONTROL_EVIDENCE_ACCESS_DECISION_CONFLICT",
+                    "evidence access request already has another decision",
+                    false,
+                    "use_original_decision",
+                )
+                .await
+            }
+            EvidenceAccessDecisionWriteOutcome::TargetUnavailable => {
+                self.audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    Some(access_request_id),
+                    StatusCode::NOT_FOUND,
+                    "CONTROL_EVIDENCE_ACCESS_DECISION_TARGET_UNAVAILABLE",
+                    "evidence access request is unavailable",
+                    false,
+                    "verify_scope",
+                )
+                .await
+            }
+            EvidenceAccessDecisionWriteOutcome::SelfApprovalDenied => {
+                self.audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    Some(access_request_id),
+                    StatusCode::FORBIDDEN,
+                    "CONTROL_EVIDENCE_ACCESS_SELF_APPROVAL_DENIED",
+                    "independent approval is required",
+                    false,
+                    "use_independent_approver",
+                )
+                .await
+            }
+        }
+    }
+
+    async fn complete_evidence_access_decision(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        action: AccessAction,
+        record: EvidenceAccessDecisionRecord,
+        replayed: bool,
+    ) -> EndpointResult {
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_artifact_id = record.artifact_id().clone();
+        let audit_case_id = record.case_id().clone();
+        let audit_access_request_id = record.access_request_id().clone();
+        let reason_code = match (record.status(), replayed) {
+            ("approved", false) => "CONTROL_EVIDENCE_ACCESS_APPROVED",
+            ("denied", false) => "CONTROL_EVIDENCE_ACCESS_DENIED",
+            _ => "CONTROL_EVIDENCE_ACCESS_DECISION_REPLAYED",
+        };
+        let audited = tokio::task::spawn_blocking(move || {
+            audit_control.append_access_event_with_evidence(
+                &audit_request_id,
+                Some(&audit_subject),
+                action,
+                None,
+                Some(&audit_artifact_id),
+                Some(&audit_case_id),
+                Some(&audit_access_request_id),
+                "PASS",
+                reason_code,
+                &[audit_artifact_id.as_str()],
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        EndpointResult::EvidenceAccessDecision(EvidenceAccessDecisionResponse {
+            request_id,
+            tenant_id: self.config.tenant_id.as_str().to_owned(),
+            site_id: self.config.site_id.as_str().to_owned(),
+            access_request_id: record.access_request_id().as_str().to_owned(),
+            case_id: record.case_id().as_str().to_owned(),
+            artifact_id: record.artifact_id().as_str().to_owned(),
+            requested_by: record.requested_by().to_owned(),
+            decided_by: record.decided_by().to_owned(),
+            status: record.status(),
+            decided_at: record
+                .decided_at()
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            access_expires_at: record
+                .access_expires_at()
+                .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true)),
+            replayed,
+        })
+    }
+
+    fn evidence_access_decision_digests(
+        &self,
+        subject: &str,
+        idempotency_key: &[u8],
+        decision: &EvidenceAccessDecisionDraft,
+    ) -> Option<([u8; 32], [u8; 32])> {
+        let common = [
+            subject.as_bytes(),
+            self.config.tenant_id.as_str().as_bytes(),
+            self.config.site_id.as_str().as_bytes(),
+        ];
+        let idempotency_digest = component_signature(
+            &self.config.idempotency_key.0,
+            &[
+                b"xshield-control-evidence-access-decision-idempotency-v1",
+                common[0],
+                common[1],
+                common[2],
+                idempotency_key,
+            ],
+        )
+        .ok()?;
+        let ttl = decision
+            .requested_ttl_seconds()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let request_digest = component_signature(
+            &self.config.idempotency_key.0,
+            &[
+                b"xshield-control-evidence-access-decision-request-v1",
+                common[0],
+                common[1],
+                common[2],
+                idempotency_key,
+                decision.access_request_id().as_str().as_bytes(),
+                decision.kind().as_str().as_bytes(),
+                decision.reason().as_bytes(),
+                ttl.as_bytes(),
+            ],
+        )
+        .ok()?;
+        Some((idempotency_digest, request_digest))
+    }
+
     fn evidence_access_digests(
         &self,
         subject: &str,
@@ -1802,6 +2137,55 @@ impl ControlPlane {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn audited_evidence_decision_error_async(
+        self: &Arc<Self>,
+        request_id: String,
+        subject: String,
+        action: AccessAction,
+        target_access_request_id: Option<EvidenceAccessRequestId>,
+        status: StatusCode,
+        reason_code: &'static str,
+        message_safe: &'static str,
+        retryable: bool,
+        next_action: &'static str,
+    ) -> EndpointResult {
+        let control = Arc::clone(self);
+        let fallback_request_id = request_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            if control
+                .append_access_event_with_evidence(
+                    &request_id,
+                    Some(&subject),
+                    action,
+                    None,
+                    None,
+                    None,
+                    target_access_request_id.as_ref(),
+                    "DENY",
+                    reason_code,
+                    &[],
+                )
+                .is_err()
+            {
+                return audit_unavailable(&request_id);
+            }
+            api_error(
+                &request_id,
+                status,
+                reason_code,
+                message_safe,
+                retryable,
+                next_action,
+            )
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => internal_error(&fallback_request_id),
+        }
+    }
+
     fn authorize(
         &self,
         authorization: Option<&str>,
@@ -2070,6 +2454,14 @@ pub fn router(control: ControlPlane) -> Router {
         .route(REQUEST_EVIDENCE_PATH, get(request_evidence_handler))
         .route(ARTIFACT_PATH, get(artifact_handler))
         .route(
+            EVIDENCE_ACCESS_APPROVE_PATH,
+            post(evidence_access_approve_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+        )
+        .route(
+            EVIDENCE_ACCESS_DENY_PATH,
+            post(evidence_access_deny_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+        )
+        .route(
             EVIDENCE_ACCESS_PATH,
             post(evidence_access_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
         )
@@ -2078,6 +2470,62 @@ pub fn router(control: ControlPlane) -> Router {
             post(create_case_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
         )
         .with_state(Arc::new(control))
+}
+
+async fn evidence_access_approve_handler(
+    State(control): State<Arc<ControlPlane>>,
+    Path(access_request_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<ApproveEvidenceAccess>, JsonRejection>,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .decide_evidence_access(
+            EVIDENCE_ACCESS_APPROVE,
+            authorization,
+            idempotency_key,
+            access_request_id,
+            payload
+                .ok()
+                .map(|Json(payload)| EvidenceAccessDecisionInput::Approve(payload)),
+        )
+        .await
+        .into_response()
+}
+
+async fn evidence_access_deny_handler(
+    State(control): State<Arc<ControlPlane>>,
+    Path(access_request_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<DenyEvidenceAccess>, JsonRejection>,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .decide_evidence_access(
+            EVIDENCE_ACCESS_DENY,
+            authorization,
+            idempotency_key,
+            access_request_id,
+            payload
+                .ok()
+                .map(|Json(payload)| EvidenceAccessDecisionInput::Deny(payload)),
+        )
+        .await
+        .into_response()
 }
 
 async fn evidence_access_handler(
@@ -2209,6 +2657,7 @@ enum EndpointResult {
     Artifact(ArtifactResponse),
     Case(StatusCode, CreateCaseResponse),
     EvidenceAccessRequest(StatusCode, EvidenceAccessRequestResponse),
+    EvidenceAccessDecision(EvidenceAccessDecisionResponse),
     Error(StatusCode, ErrorResponse),
 }
 
@@ -2223,6 +2672,9 @@ impl IntoResponse for EndpointResult {
             Self::Case(status, response) => (status, Json(response)).into_response(),
             Self::EvidenceAccessRequest(status, response) => {
                 (status, Json(response)).into_response()
+            }
+            Self::EvidenceAccessDecision(response) => {
+                (StatusCode::OK, Json(response)).into_response()
             }
             Self::Error(status, response) => (status, Json(response)).into_response(),
         })
@@ -2397,6 +2849,52 @@ fn evidence_access_requested_envelope(
             "request_digest": lower_hex(request_digest),
             "outcome": "PASS",
             "reason_code": "EVIDENCE_ACCESS_REQUESTED"
+        },
+        "sensitivity": "INTERNAL",
+        "integrity": {
+            "state": "pending",
+            "previous_hash": null,
+            "event_hash": null
+        }
+    })
+}
+
+fn evidence_access_decision_envelope(
+    event_id: &EventId,
+    request_id: &RequestId,
+    decision: &EvidenceAccessDecisionDraft,
+    request_digest: &[u8; 32],
+) -> serde_json::Value {
+    let occurred_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let trace_id = Uuid::now_v7().simple().to_string();
+    serde_json::json!({
+        "schema_version": 3,
+        "event_id": event_id.as_str(),
+        "event_type": decision.kind().event_type(),
+        "tenant_id": decision.tenant_id().as_str(),
+        "site_id": decision.site_id().as_str(),
+        "request_id": request_id.as_str(),
+        "trace_id": trace_id,
+        "span_id": &trace_id[..16],
+        "producer_id": "xshield-control",
+        "producer_boot_id": request_id.as_str(),
+        "producer_seq": 1,
+        "request_seq": 1,
+        "occurred_at": occurred_at,
+        "observed_at": occurred_at,
+        "policy_revision": "control-v1",
+        "example_only": false,
+        "evidence_refs": [],
+        "cause_event_ids": [],
+        "payload": {
+            "stage": "evidence_access_decision",
+            "access_request_id": decision.access_request_id().as_str(),
+            "subject_ref": decision.decided_by(),
+            "decision": decision.kind().as_str(),
+            "ttl_seconds": decision.requested_ttl_seconds(),
+            "request_digest": lower_hex(request_digest),
+            "outcome": "PASS",
+            "reason_code": decision.kind().reason_code()
         },
         "sensitivity": "INTERNAL",
         "integrity": {
@@ -2629,6 +3127,40 @@ struct EvidenceAccessRequestResponse {
     replayed: bool,
 }
 
+enum EvidenceAccessDecisionInput {
+    Approve(ApproveEvidenceAccess),
+    Deny(DenyEvidenceAccess),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApproveEvidenceAccess {
+    reason: String,
+    ttl_seconds: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DenyEvidenceAccess {
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct EvidenceAccessDecisionResponse {
+    request_id: String,
+    tenant_id: String,
+    site_id: String,
+    access_request_id: String,
+    case_id: String,
+    artifact_id: String,
+    requested_by: String,
+    decided_by: String,
+    status: &'static str,
+    decided_at: String,
+    access_expires_at: Option<String>,
+    replayed: bool,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error_code: &'static str,
@@ -2830,13 +3362,15 @@ mod tests {
             &CursorKey::from_hex(CURSOR_KEY).unwrap(),
             &IdempotencyKey::from_hex(IDEMPOTENCY_KEY).unwrap(),
         ));
-        assert!(ControlLimits::new(0, 100, 1, 1, 1).is_err());
-        assert!(ControlLimits::new(1, 1_001, 1, 1, 1).is_err());
-        assert!(ControlLimits::new(1, 1, 129, 1, 1).is_err());
-        assert!(ControlLimits::new(1, 1, 1, 0, 1).is_err());
-        assert!(ControlLimits::new(1, 1, 1, 10_001, 1).is_err());
-        assert!(ControlLimits::new(1, 1, 1, 1, 0).is_err());
-        assert!(ControlLimits::new(1, 1, 1, 1, 10_001).is_err());
+        assert!(ControlLimits::new(0, 100, 1, 1, 1, 1).is_err());
+        assert!(ControlLimits::new(1, 1_001, 1, 1, 1, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 129, 1, 1, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 1, 0, 1, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 1, 10_001, 1, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 1, 1, 0, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 1, 1, 10_001, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 1, 1, 1, 0).is_err());
+        assert!(ControlLimits::new(1, 1, 1, 1, 1, 86_401).is_err());
         assert!(
             ManagementCredential::new(
                 TOKEN,
@@ -3399,6 +3933,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evidence_access_decision_enforces_role_input_and_store_availability() {
+        let invalid = Fixture::new(10, ManagementRole::SensitiveEvidenceApprover);
+        let response = router(invalid.control)
+            .oneshot(evidence_access_decision_request(
+                "not-an-access-request",
+                "approve",
+                "evidence-decision-key-0001",
+                r#"{"reason":"Approve review","ttl_seconds":300}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_access_events(
+            &invalid.access_directory,
+            1,
+            "evidence.access.approved",
+            None,
+        );
+
+        let unknown = Fixture::new(10, ManagementRole::SensitiveEvidenceApprover);
+        let response = router(unknown.control)
+            .oneshot(evidence_access_decision_request(
+                "access_018f2a3b-4c5d-7000-8000-000000000970",
+                "approve",
+                "evidence-decision-key-0002",
+                r#"{"reason":"Approve review","ttl_seconds":300,"scope":"untrusted"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let forbidden = Fixture::new(10, ManagementRole::Investigator);
+        let response = router(forbidden.control)
+            .oneshot(evidence_access_decision_request(
+                "access_018f2a3b-4c5d-7000-8000-000000000970",
+                "deny",
+                "evidence-decision-key-0003",
+                r#"{"reason":"Reject review"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://xshield:xshield@127.0.0.1:1/xshield")
+            .unwrap();
+        pool.close().await;
+        let unavailable = Fixture::with_decision_catalog(
+            PostgresIdentityStore::from_pool(pool),
+            "approver-1",
+            ManagementRole::SensitiveEvidenceApprover,
+        );
+        let access_request_id = "access_018f2a3b-4c5d-7000-8000-000000000970";
+        let response = router(unavailable.control)
+            .oneshot(evidence_access_decision_request(
+                access_request_id,
+                "approve",
+                "evidence-decision-key-0004",
+                r#"{"reason":"Approve review","ttl_seconds":300}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["error_code"],
+            "CONTROL_EVIDENCE_ACCESS_DECISION_STORE_UNAVAILABLE"
+        );
+        assert_access_event_targets_and_evidence(
+            &unavailable.access_directory,
+            "evidence.access.approved",
+            &[None],
+            &[None],
+            &[None],
+            &[Some(access_request_id)],
+            &[0],
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
     #[allow(clippy::too_many_lines)]
     async fn evidence_access_request_is_idempotent_bounded_and_audited() {
@@ -3558,6 +4173,278 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+    #[allow(clippy::too_many_lines)]
+    async fn evidence_access_decision_is_independent_short_lived_and_audited() {
+        let database_url =
+            std::env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
+        let catalog = PostgresIdentityStore::connect(&database_url, 4, Duration::from_secs(5))
+            .await
+            .expect("evidence decision store connects");
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("assertion pool connects");
+        seed_control_decision_targets(&pool).await;
+        let approve_id = "access_018f2a3b-4c5d-7000-8000-000000000972";
+        let case_id = "case_018f2a3b-4c5d-7000-8000-000000000970";
+        let artifact_id = "artifact_018f2a3b-4c5d-7000-8000-000000000971";
+        let approve_body = r#"{"reason":"Approved incident verification","ttl_seconds":600}"#;
+
+        let approved_fixture = Fixture::with_decision_catalog(
+            catalog.clone(),
+            "approver-1",
+            ManagementRole::SensitiveEvidenceApprover,
+        );
+        let approved = router(approved_fixture.control)
+            .oneshot(evidence_access_decision_request(
+                approve_id,
+                "approve",
+                "evidence-decision-key-1001",
+                approve_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        assert_eq!(approved.headers()["cache-control"], "private, no-store");
+        let approved: Value =
+            serde_json::from_slice(&to_bytes(approved.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(approved["status"], "approved");
+        assert_eq!(approved["requested_by"], "operator-1");
+        assert_eq!(approved["decided_by"], "approver-1");
+        assert!(approved["access_expires_at"].is_string());
+        assert_eq!(approved["replayed"], false);
+        assert_access_event_targets_and_evidence(
+            &approved_fixture.access_directory,
+            "evidence.access.approved",
+            &[None],
+            &[Some(artifact_id)],
+            &[Some(case_id)],
+            &[Some(approve_id)],
+            &[1],
+        );
+
+        sqlx::query(
+            "UPDATE xshield.artifact_catalog
+             SET status = 'deleted', deleted_at = clock_timestamp()
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a' AND artifact_id = $1",
+        )
+        .bind(artifact_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let replay_fixture = Fixture::with_decision_catalog(
+            catalog.clone(),
+            "approver-1",
+            ManagementRole::SensitiveEvidenceApprover,
+        );
+        let replay = router(replay_fixture.control)
+            .oneshot(evidence_access_decision_request(
+                approve_id,
+                "approve",
+                "evidence-decision-key-1001",
+                approve_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: Value =
+            serde_json::from_slice(&to_bytes(replay.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["access_request_id"], approve_id);
+
+        let conflict_fixture = Fixture::with_decision_catalog(
+            catalog.clone(),
+            "approver-1",
+            ManagementRole::SensitiveEvidenceApprover,
+        );
+        let conflict = router(conflict_fixture.control)
+            .oneshot(evidence_access_decision_request(
+                approve_id,
+                "approve",
+                "evidence-decision-key-1001",
+                r#"{"reason":"Approved incident verification","ttl_seconds":300}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+        let self_fixture = Fixture::with_decision_catalog(
+            catalog.clone(),
+            "operator-1",
+            ManagementRole::SensitiveEvidenceApprover,
+        );
+        let self_approval = router(self_fixture.control)
+            .oneshot(evidence_access_decision_request(
+                "access_018f2a3b-4c5d-7000-8000-000000000973",
+                "approve",
+                "evidence-decision-key-1002",
+                r#"{"reason":"Self approval","ttl_seconds":300}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(self_approval.status(), StatusCode::FORBIDDEN);
+
+        let denied_fixture = Fixture::with_decision_catalog(
+            catalog.clone(),
+            "approver-2",
+            ManagementRole::SensitiveEvidenceApprover,
+        );
+        let denied = router(denied_fixture.control)
+            .oneshot(evidence_access_decision_request(
+                "access_018f2a3b-4c5d-7000-8000-000000000974",
+                "deny",
+                "evidence-decision-key-1003",
+                r#"{"reason":"Insufficient justification"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::OK);
+        let denied: Value =
+            serde_json::from_slice(&to_bytes(denied.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(denied["status"], "denied");
+        assert!(denied["access_expires_at"].is_null());
+
+        let stale_fixture = Fixture::with_decision_catalog(
+            catalog,
+            "approver-3",
+            ManagementRole::SensitiveEvidenceApprover,
+        );
+        let stale = router(stale_fixture.control)
+            .oneshot(evidence_access_decision_request(
+                "access_018f2a3b-4c5d-7000-8000-000000000975",
+                "approve",
+                "evidence-decision-key-1004",
+                r#"{"reason":"Stale target","ttl_seconds":300}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+
+        let envelope: Value = sqlx::query_scalar(
+            "SELECT envelope FROM xshield.audit_outbox
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a'
+               AND aggregate_ref = $1 AND event_type = 'evidence.access.approved'",
+        )
+        .bind(approve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let envelope_text = envelope.to_string();
+        assert_eq!(envelope["payload"]["subject_ref"], "approver-1");
+        assert_eq!(envelope["payload"]["decision"], "approved");
+        assert!(!envelope_text.contains("evidence-decision-key"));
+        assert!(!envelope_text.contains("Approved incident verification"));
+        cleanup_control_decision_targets(&pool).await;
+    }
+
+    async fn seed_control_decision_targets(pool: &sqlx::PgPool) {
+        cleanup_control_decision_targets(pool).await;
+        sqlx::query(
+            "INSERT INTO xshield.investigation_cases (
+                tenant_id, site_id, case_id, owner_ref, purpose, status,
+                idempotency_digest, request_digest, created_event_id
+             ) VALUES (
+                'tenant_a', 'site_a',
+                'case_018f2a3b-4c5d-7000-8000-000000000970',
+                'operator-1', 'Decision control test', 'open',
+                decode(repeat('41', 32), 'hex'), decode(repeat('42', 32), 'hex'),
+                'ev_018f2a3b-4c5d-7000-8000-000000000969'
+             )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO xshield.artifact_catalog (
+                tenant_id, site_id, artifact_id, request_id, schema_version, kind,
+                content_type, capture_status, fidelity, bytes_observed, bytes_saved,
+                classification, example_only, storage_profile, storage_locator,
+                key_ref, integrity_algorithm, integrity_digest, parent_refs,
+                recorded_at, expires_at, catalog_event_id, status, deleted_at
+             ) VALUES (
+                'tenant_a', 'site_a',
+                'artifact_018f2a3b-4c5d-7000-8000-000000000971',
+                'req_018f2a3b-4c5d-7000-8000-000000000968', 3,
+                'response_from_origin', 'application/json', 'complete', 'entity_exact', 2, 2,
+                'RESTRICTED', false, 'aead_envelope_v1',
+                'artifact_018f2a3b-4c5d-7000-8000-000000000971.xev',
+                'evidence-key-r1', 'sha256_ciphertext', repeat('c', 64), '{}',
+                clock_timestamp(), clock_timestamp() + interval '20 minutes',
+                'ev_018f2a3b-4c5d-7000-8000-000000000967', 'active', NULL
+             )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        for suffix in [
+            "000000000972",
+            "000000000973",
+            "000000000974",
+            "000000000975",
+        ] {
+            sqlx::query(
+                "INSERT INTO xshield.evidence_access_requests (
+                    tenant_id, site_id, access_request_id, case_id, artifact_id,
+                    requested_by, access_kind, justification, status,
+                    idempotency_digest, request_digest, requested_event_id
+                 ) VALUES (
+                    'tenant_a', 'site_a', $1,
+                    'case_018f2a3b-4c5d-7000-8000-000000000970',
+                    'artifact_018f2a3b-4c5d-7000-8000-000000000971',
+                    'operator-1', 'sensitive_raw', 'Decision fixture', 'pending',
+                    decode(md5($1) || md5($1), 'hex'),
+                    decode(md5($1 || 'request') || md5($1 || 'request'), 'hex'),
+                    'ev_018f2a3b-4c5d-7000-8000-' || right($1, 12)
+                 )",
+            )
+            .bind(format!("access_018f2a3b-4c5d-7000-8000-{suffix}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn cleanup_control_decision_targets(pool: &sqlx::PgPool) {
+        sqlx::query(
+            "DELETE FROM xshield.evidence_access_requests
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a'
+               AND access_request_id >= 'access_018f2a3b-4c5d-7000-8000-000000000972'
+               AND access_request_id <= 'access_018f2a3b-4c5d-7000-8000-000000000975'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "DELETE FROM xshield.artifact_catalog
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a'
+               AND artifact_id = 'artifact_018f2a3b-4c5d-7000-8000-000000000971'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "DELETE FROM xshield.investigation_cases
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a'
+               AND case_id = 'case_018f2a3b-4c5d-7000-8000-000000000970'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "DELETE FROM xshield.audit_outbox
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a'
+               AND aggregate_ref >= 'access_018f2a3b-4c5d-7000-8000-000000000972'
+               AND aggregate_ref <= 'access_018f2a3b-4c5d-7000-8000-000000000975'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
     async fn evidence_manifests_are_scoped_paginated_and_audited() {
         let database_url =
             std::env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -3686,6 +4573,22 @@ mod tests {
             .header("idempotency-key", idempotency_key)
             .body(Body::from(body))
             .unwrap()
+    }
+
+    fn evidence_access_decision_request(
+        access_request_id: &str,
+        decision: &str,
+        idempotency_key: &str,
+        body: &str,
+    ) -> Request<Body> {
+        Request::post(format!(
+            "/control/v1/evidence-access-requests/{access_request_id}/{decision}"
+        ))
+        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", idempotency_key)
+        .body(Body::from(body.to_owned()))
+        .unwrap()
     }
 
     async fn assert_artifact_endpoints(app: &axum::Router, artifact_id: &str) {
@@ -3893,6 +4796,28 @@ mod tests {
             )
         }
 
+        fn with_decision_catalog(
+            catalog: PostgresIdentityStore,
+            subject: &str,
+            role: ManagementRole,
+        ) -> Self {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            Self::with_subject_dependencies(
+                10,
+                subject,
+                role,
+                now - 1,
+                now + 3600,
+                Client::default(),
+                catalog,
+                1,
+                10_000,
+            )
+        }
+
         fn with_window(
             rate_limit: u64,
             role: ManagementRole,
@@ -3938,6 +4863,31 @@ mod tests {
             max_query_artifacts: u16,
             max_open_cases: u32,
         ) -> Self {
+            Self::with_subject_dependencies(
+                rate_limit,
+                "operator-1",
+                role,
+                token_issued_at,
+                token_expires_at,
+                index,
+                catalog,
+                max_query_artifacts,
+                max_open_cases,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn with_subject_dependencies(
+            rate_limit: u64,
+            subject: &str,
+            role: ManagementRole,
+            token_issued_at: u64,
+            token_expires_at: u64,
+            index: Client,
+            catalog: PostgresIdentityStore,
+            max_query_artifacts: u16,
+            max_open_cases: u32,
+        ) -> Self {
             let root =
                 std::env::temp_dir().join(format!("xshield-control-test-{}", Uuid::now_v7()));
             let source = root.join("source");
@@ -3967,7 +4917,7 @@ mod tests {
             let tenant = TenantId::parse("tenant_a").unwrap();
             let site = SiteId::parse("site_a").unwrap();
             let principal =
-                ManagementPrincipal::new("operator-1", [role], [(tenant.clone(), site.clone())])
+                ManagementPrincipal::new(subject, [role], [(tenant.clone(), site.clone())])
                     .unwrap();
             let publisher = PublisherConfig::new(
                 source,
@@ -3990,7 +4940,8 @@ mod tests {
                 site,
                 publisher,
                 "journal-key-r1",
-                ControlLimits::new(rate_limit, 1, max_query_artifacts, max_open_cases, 1).unwrap(),
+                ControlLimits::new(rate_limit, 1, max_query_artifacts, max_open_cases, 1, 900)
+                    .unwrap(),
             )
             .unwrap();
             let seal_key = test_seal_key();
@@ -4137,7 +5088,13 @@ mod tests {
             assert_eq!(event["event_type"], event_type);
             assert_eq!(
                 event["payload"]["method"],
-                if matches!(event_type, "case.created" | "evidence.access.requested") {
+                if matches!(
+                    event_type,
+                    "case.created"
+                        | "evidence.access.requested"
+                        | "evidence.access.approved"
+                        | "evidence.access.denied"
+                ) {
                     "POST"
                 } else {
                     "GET"

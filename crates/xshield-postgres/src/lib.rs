@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 mod action_read;
+mod evidence_access_decision;
 mod evidence_access_request;
 mod evidence_catalog;
 mod grant;
@@ -20,6 +21,9 @@ mod share_grant_issue;
 mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
+pub use evidence_access_decision::{
+    EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord, EvidenceAccessDecisionWriteOutcome,
+};
 pub use evidence_access_request::{
     EvidenceAccessRequestCreate, EvidenceAccessRequestRecord, EvidenceAccessRequestWriteOutcome,
 };

@@ -12,6 +12,8 @@ pub enum ManagementRole {
     Investigator,
     /// Reads approved sensitive evidence.
     SensitiveEvidenceReader,
+    /// Approves or denies sensitive-evidence access for another subject.
+    SensitiveEvidenceApprover,
     /// Submits policy candidates.
     PolicyAuthor,
     /// Approves policy candidates authored by another subject.
