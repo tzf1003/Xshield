@@ -8,6 +8,7 @@ use std::{
     fmt,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
+    str::FromStr,
 };
 use xshield_audit::JournalLimits;
 use xshield_core::{
@@ -29,6 +30,7 @@ pub mod auth_binding;
 pub mod request_crypto;
 pub mod response_crypto;
 pub mod response_grant;
+pub mod sensor;
 pub mod share_issue;
 pub mod share_token;
 
@@ -64,6 +66,7 @@ pub const SENSOR_PREPARE_PATH: &str = "/__xshield/v1/events/prepare";
 pub const SENSOR_VERSION: &str = "1.0.0";
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
 const SENSOR_BOOTSTRAP_OPERATION_ID: &str = "xshield.sensor.bootstrap";
+const SENSOR_PREPARE_OPERATION_ID: &str = "xshield.sensor.prepare";
 const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
 
 /// Local edge response selected from the reserved Xshield namespace.
@@ -73,6 +76,8 @@ pub enum InternalResponse {
     SensorAsset,
     /// A per-navigation browser sensor bootstrap document.
     SensorBootstrap,
+    /// A session-bound browser observation preparation request.
+    SensorPrepare,
 }
 
 /// Fully validated gateway configuration selected at process startup.
@@ -93,6 +98,7 @@ pub struct GatewayConfig {
 /// Validated server-owned browser sensor bootstrap policy.
 #[derive(Clone, Debug)]
 pub struct SensorConfig {
+    origin: String,
     build_ref: String,
     heartbeat_seconds: u16,
 }
@@ -193,6 +199,7 @@ struct ConfigDto {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SensorDto {
+    origin: String,
     build_ref: String,
     heartbeat_seconds: u16,
 }
@@ -477,38 +484,27 @@ impl GatewayConfig {
             .as_ref()
             .map(validate_identity_store)
             .transpose()?;
-        let sensor = dto
-            .sensor
-            .map(|sensor| {
-                BuildFingerprint::parse(&sensor.build_ref).map_err(ConfigError::Provenance)?;
-                if !(5..=300).contains(&sensor.heartbeat_seconds) {
-                    return Err(ConfigError::Invalid("sensor.heartbeat_seconds"));
-                }
-                Ok(SensorConfig {
-                    build_ref: sensor.build_ref,
-                    heartbeat_seconds: sensor.heartbeat_seconds,
-                })
-            })
-            .transpose()?;
+        let sensor = dto.sensor.map(validate_sensor).transpose()?;
         let compiled_operations = compile_operations(dto.operations)?;
         if identity_store.is_none()
-            && compiled_operations
-                .exact
-                .values()
-                .chain(compiled_operations.path_resources.iter())
-                .any(|operation| {
-                    matches!(
-                        operation.policy.admission_class(),
-                        AdmissionClass::AuthenticatedRoot
-                            | AdmissionClass::UiActionRequired
-                            | AdmissionClass::ShareEntry
-                            | AdmissionClass::ServiceIdentity
-                    ) || operation
-                        .response
-                        .as_ref()
-                        .is_some_and(|response| response.auth_binding.is_some())
-                        || operation.request_crypto.is_some()
-                })
+            && (sensor.is_some()
+                || compiled_operations
+                    .exact
+                    .values()
+                    .chain(compiled_operations.path_resources.iter())
+                    .any(|operation| {
+                        matches!(
+                            operation.policy.admission_class(),
+                            AdmissionClass::AuthenticatedRoot
+                                | AdmissionClass::UiActionRequired
+                                | AdmissionClass::ShareEntry
+                                | AdmissionClass::ServiceIdentity
+                        ) || operation
+                            .response
+                            .as_ref()
+                            .is_some_and(|response| response.auth_binding.is_some())
+                            || operation.request_crypto.is_some()
+                    }))
         {
             return Err(ConfigError::Invalid("identity_store"));
         }
@@ -620,24 +616,54 @@ impl GatewayConfig {
         self.sensor.as_ref()
     }
 
+    /// Admits the reserved prepare operation after the identity adapter loaded
+    /// an exact current WAF session.
+    ///
+    /// The result authorizes metadata ingestion only. It is not an
+    /// [`AdmissionProof`] and cannot admit a configured business operation.
+    #[must_use]
+    pub fn admit_sensor_session(&self, method: &str, path: &str) -> GatewayDecision {
+        if self.internal_response(method, path) != Some(InternalResponse::SensorPrepare) {
+            return GatewayDecision {
+                outcome: GatewayOutcome::Denied,
+                operation_id: None,
+                reason_code: ReasonCode::OperationNotMatched,
+            };
+        }
+        match OperationId::parse(SENSOR_PREPARE_OPERATION_ID) {
+            Ok(operation_id) => GatewayDecision {
+                outcome: GatewayOutcome::Allowed,
+                operation_id: Some(operation_id),
+                reason_code: ReasonCode::SensorObservationAccepted,
+            },
+            Err(_) => GatewayDecision {
+                outcome: GatewayOutcome::Denied,
+                operation_id: None,
+                reason_code: ReasonCode::RequestIncomplete,
+            },
+        }
+    }
+
     /// Returns whether request admission or response binding needs identity state.
     #[must_use]
     pub fn requires_identity_runtime(&self) -> bool {
-        self.operations
-            .values()
-            .chain(self.path_resource_operations.iter())
-            .any(|operation| {
-                matches!(
-                    operation.policy.admission_class(),
-                    AdmissionClass::AuthenticatedRoot
-                        | AdmissionClass::UiActionRequired
-                        | AdmissionClass::ShareEntry
-                        | AdmissionClass::ServiceIdentity
-                ) || operation
-                    .response
-                    .as_ref()
-                    .is_some_and(|response| response.auth_binding.is_some())
-            })
+        self.sensor.is_some()
+            || self
+                .operations
+                .values()
+                .chain(self.path_resource_operations.iter())
+                .any(|operation| {
+                    matches!(
+                        operation.policy.admission_class(),
+                        AdmissionClass::AuthenticatedRoot
+                            | AdmissionClass::UiActionRequired
+                            | AdmissionClass::ShareEntry
+                            | AdmissionClass::ServiceIdentity
+                    ) || operation
+                        .response
+                        .as_ref()
+                        .is_some_and(|response| response.auth_binding.is_some())
+                })
     }
 
     /// Applies the compiled exact-operation policy with no client-created proof.
@@ -652,8 +678,13 @@ impl GatewayConfig {
     /// Returns the proof class for an exact configured operation.
     #[must_use]
     pub fn admission_class(&self, method: &str, path: &str) -> Option<AdmissionClass> {
-        if self.internal_response(method, path).is_some() {
-            return Some(AdmissionClass::Public);
+        if let Some(response) = self.internal_response(method, path) {
+            return Some(match response {
+                InternalResponse::SensorPrepare => AdmissionClass::AuthenticatedRoot,
+                InternalResponse::SensorAsset | InternalResponse::SensorBootstrap => {
+                    AdmissionClass::Public
+                }
+            });
         }
         self.operation(method, path)
             .map(|operation| operation.policy.admission_class())
@@ -662,13 +693,13 @@ impl GatewayConfig {
     /// Returns a server-owned response for an exact reserved route.
     #[must_use]
     pub fn internal_response(&self, method: &str, path: &str) -> Option<InternalResponse> {
-        if method != "GET" {
-            return None;
-        }
-        match path {
-            SENSOR_ASSET_PATH => Some(InternalResponse::SensorAsset),
-            SENSOR_BOOTSTRAP_PATH if self.sensor.is_some() => {
+        match (method, path) {
+            ("GET", SENSOR_ASSET_PATH) => Some(InternalResponse::SensorAsset),
+            ("GET", SENSOR_BOOTSTRAP_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorBootstrap)
+            }
+            ("POST", SENSOR_PREPARE_PATH) if self.sensor.is_some() => {
+                Some(InternalResponse::SensorPrepare)
             }
             _ => None,
         }
@@ -845,6 +876,13 @@ impl GatewayConfig {
             let operation = match response {
                 InternalResponse::SensorAsset => SENSOR_ASSET_OPERATION_ID,
                 InternalResponse::SensorBootstrap => SENSOR_BOOTSTRAP_OPERATION_ID,
+                InternalResponse::SensorPrepare => {
+                    return GatewayDecision {
+                        outcome: GatewayOutcome::Denied,
+                        operation_id: OperationId::parse(SENSOR_PREPARE_OPERATION_ID).ok(),
+                        reason_code: ReasonCode::AuthRequired,
+                    };
+                }
             };
             return match OperationId::parse(operation) {
                 Ok(operation_id) => GatewayDecision {
@@ -1150,6 +1188,12 @@ impl IdentityStoreConfig {
 }
 
 impl SensorConfig {
+    /// Returns the exact browser origin permitted to submit observations.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
     /// Returns the server-approved page build fingerprint exposed to the sensor.
     #[must_use]
     pub fn build_ref(&self) -> &str {
@@ -1161,6 +1205,31 @@ impl SensorConfig {
     pub const fn heartbeat_seconds(&self) -> u16 {
         self.heartbeat_seconds
     }
+}
+
+fn validate_sensor(sensor: SensorDto) -> Result<SensorConfig, ConfigError> {
+    BuildFingerprint::parse(&sensor.build_ref).map_err(ConfigError::Provenance)?;
+    if !(5..=300).contains(&sensor.heartbeat_seconds) {
+        return Err(ConfigError::Invalid("sensor.heartbeat_seconds"));
+    }
+    let uri =
+        http::Uri::from_str(&sensor.origin).map_err(|_| ConfigError::Invalid("sensor.origin"))?;
+    let scheme = uri
+        .scheme_str()
+        .ok_or(ConfigError::Invalid("sensor.origin"))?;
+    let authority = uri
+        .authority()
+        .ok_or(ConfigError::Invalid("sensor.origin"))?;
+    let canonical = format!("{scheme}://{authority}");
+    let loopback = matches!(authority.host(), "localhost" | "127.0.0.1" | "[::1]");
+    if sensor.origin != canonical || (scheme != "https" && !(scheme == "http" && loopback)) {
+        return Err(ConfigError::Invalid("sensor.origin"));
+    }
+    Ok(SensorConfig {
+        origin: sensor.origin,
+        build_ref: sensor.build_ref,
+        heartbeat_seconds: sensor.heartbeat_seconds,
+    })
 }
 
 fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError> {
@@ -1712,7 +1781,7 @@ mod tests {
       "policy_revision":"policy-r1",
       "audit":{"directory":"target/xshield-audit-test","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
       "identity_store":{"max_connections":4,"acquire_timeout_ms":1000},
-      "sensor":{"build_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","heartbeat_seconds":15},
+      "sensor":{"origin":"https://app.example","build_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","heartbeat_seconds":15},
       "operations":[
         {"operation_id":"catalog.read","method":"GET","path":"/catalog","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null},
         {"operation_id":"account.update","method":"POST","path":"/account","admission":"UI_ACTION_REQUIRED","source_action":"account_form.submit","resource_type":null,"view_profile":null}
@@ -1767,6 +1836,12 @@ mod tests {
                 .internal_response("POST", SENSOR_BOOTSTRAP_PATH)
                 .is_none()
         );
+        let prepare = config.admit("POST", SENSOR_PREPARE_PATH, UnixSeconds::new(1));
+        assert_eq!(prepare.outcome, GatewayOutcome::Denied);
+        assert_eq!(prepare.reason_code, ReasonCode::AuthRequired);
+        let prepare = config.admit_sensor_session("POST", SENSOR_PREPARE_PATH);
+        assert_eq!(prepare.outcome, GatewayOutcome::Allowed);
+        assert_eq!(prepare.reason_code, ReasonCode::SensorObservationAccepted);
     }
 
     #[test]
@@ -1808,6 +1883,11 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(invalid_build.as_bytes()),
             Err(ConfigError::Provenance(_))
+        ));
+        let invalid_origin = CONFIG.replace("https://app.example", "http://app.example");
+        assert!(matches!(
+            GatewayConfig::from_json(invalid_origin.as_bytes()),
+            Err(ConfigError::Invalid("sensor.origin"))
         ));
     }
 

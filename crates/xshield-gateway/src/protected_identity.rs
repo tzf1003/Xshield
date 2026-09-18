@@ -29,14 +29,14 @@ use xshield_core::{
     provenance::{ActionTarget, BuildFingerprint},
 };
 use xshield_gateway::{
-    GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, ResourceLocation,
-    ResourceOperation,
+    GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, InternalResponse,
+    ResourceLocation, ResourceOperation,
     auth_binding::{AuthBindingRule, AuthTransitionRule},
 };
 use xshield_postgres::{
     AnonymousSessionEstablishment, AnonymousSessionWriteOutcome, BindingEstablishment,
     ContextSwitchOutcome, CredentialTransition, IdentityContextSwitch, PostgresIdentityStore,
-    RefreshOutcome, StoreError,
+    RefreshOutcome, SensorSession, SensorSessionQuery, SensorSessionState, StoreError,
 };
 use zeroize::Zeroizing;
 
@@ -133,6 +133,7 @@ pub(crate) struct ProtectedAdmission {
     pub(crate) response_identity: Option<ResponseIdentity>,
     pub(crate) anonymous_session_cookie: Option<String>,
     pub(crate) compatibility_evidence: Option<CompatibilityEvidence>,
+    pub(crate) sensor_session: Option<SensorSession>,
 }
 
 pub(crate) struct CompatibilityEvidence {
@@ -152,6 +153,7 @@ impl ProtectedAdmission {
             response_identity: None,
             anonymous_session_cookie: None,
             compatibility_evidence: None,
+            sensor_session: None,
         }
     }
 }
@@ -320,6 +322,7 @@ impl ProtectedIdentity {
                     response_identity: None,
                     anonymous_session_cookie: Some(cookie),
                     compatibility_evidence: None,
+                    sensor_session: None,
                 },
                 AnonymousAdmission::RateExceeded => {
                     ProtectedAdmission::without_identity(denied_reason(
@@ -617,6 +620,7 @@ impl ProtectedIdentity {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn admit(
         &self,
         config: &GatewayConfig,
@@ -627,6 +631,11 @@ impl ProtectedIdentity {
     ) -> Result<ProtectedAdmission, IdentityRuntimeError> {
         let method = request.method.as_str();
         let path = request.uri.path();
+        if config.internal_response(method, path) == Some(InternalResponse::SensorPrepare) {
+            return self
+                .admit_sensor_prepare(config, request, method, path, now)
+                .await;
+        }
         let class = config.admission_class(method, path);
         if class == Some(AdmissionClass::ServiceIdentity) {
             return self
@@ -717,11 +726,80 @@ impl ProtectedIdentity {
                     response_identity: Some(ResponseIdentity { binding, snapshot }),
                     anonymous_session_cookie: None,
                     compatibility_evidence,
+                    sensor_session: None,
                 }
             }
             IdentityProofState::Denied(error) => {
                 ProtectedAdmission::without_identity(denied(config, method, path, now, error))
             }
+        })
+    }
+
+    async fn admit_sensor_prepare(
+        &self,
+        config: &GatewayConfig,
+        request: &RequestHeader,
+        method: &str,
+        path: &str,
+        now: UnixSeconds,
+    ) -> Result<ProtectedAdmission, IdentityRuntimeError> {
+        let session = match unique_cookie(request, WAF_COOKIE) {
+            Ok(session) if session.len() <= MAX_SESSION_BYTES => session,
+            Ok(_) | Err(IdentityRuntimeError::Malformed) => {
+                return Ok(ProtectedAdmission::without_identity(denied(
+                    config,
+                    method,
+                    path,
+                    now,
+                    IdentityDenied::BindingMismatch,
+                )));
+            }
+            Err(IdentityRuntimeError::Missing) => {
+                return Ok(ProtectedAdmission::without_identity(denied(
+                    config,
+                    method,
+                    path,
+                    now,
+                    IdentityDenied::AuthRequired,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
+        if WafSessionId::parse(session).is_err() {
+            return Ok(ProtectedAdmission::without_identity(denied(
+                config,
+                method,
+                path,
+                now,
+                IdentityDenied::BindingMismatch,
+            )));
+        }
+        let session_fingerprint = fingerprint(&self.fingerprint_key, session.as_bytes())?;
+        let state = self
+            .store()
+            .await?
+            .load_sensor_session(SensorSessionQuery {
+                tenant_id: config.tenant_id(),
+                site_id: config.site_id(),
+                session_fingerprint: &session_fingerprint,
+                now,
+            })
+            .await?;
+        Ok(match state {
+            SensorSessionState::Verified(sensor_session) => ProtectedAdmission {
+                decision: config.admit_sensor_session(method, path),
+                response_identity: None,
+                anonymous_session_cookie: None,
+                compatibility_evidence: None,
+                sensor_session: Some(sensor_session),
+            },
+            SensorSessionState::Denied => ProtectedAdmission::without_identity(denied(
+                config,
+                method,
+                path,
+                now,
+                IdentityDenied::BindingMismatch,
+            )),
         })
     }
 

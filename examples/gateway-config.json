@@ -27,6 +27,7 @@
     "max_anonymous_session_creations_per_site": 1000
   },
   "sensor": {
+    "origin": "https://app.example",
     "build_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "heartbeat_seconds": 15
   },

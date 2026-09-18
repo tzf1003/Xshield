@@ -36,6 +36,7 @@ gateway_port=$(free_port)
 capture="$test_dir/origin-bodies"
 request_key="7777777777777777777777777777777777777777777777777777777777777777"
 response_key="9999999999999999999999999999999999999999999999999999999999999999"
+fingerprint_key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
 database_url="$database_base_url/$test_database"
 
@@ -79,7 +80,7 @@ cat >"$test_dir/config.json" <<JSON
   "policy_revision":"policy-r1",
   "audit":{"directory":"$test_dir/audit","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
   "identity_store":{"max_connections":2,"acquire_timeout_ms":2000},
-  "sensor":{"build_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","heartbeat_seconds":15},
+  "sensor":{"origin":"http://127.0.0.1:$gateway_port","build_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","heartbeat_seconds":15},
   "operations":[{
     "operation_id":"orders.create",
     "method":"POST",
@@ -108,6 +109,7 @@ XSHIELD_CONFIG="$test_dir/config.json" \
 XSHIELD_JOURNAL_KEY_HEX="8888888888888888888888888888888888888888888888888888888888888888" \
 XSHIELD_REQUEST_DECRYPTION_KEY_HEX="$request_key" \
 XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX="$response_key" \
+XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
 XSHIELD_DATABASE_URL="$database_url" \
     "$repo_root/target/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!

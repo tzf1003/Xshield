@@ -52,7 +52,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | POST /control/v1/candidates/{id}/publish | 发布已审批工件，不直接接受自由脚本 |
 | GET /control/v1/audit/health | 已认证的连续索引水位、缺口与本地存储状态 |
 
-浏览器探针仅能访问 /__xshield/v1/bootstrap/events/prepare，不能访问管理 API。API path 中的 ID 均需按 tenant/site 和资源权限再验，不使用“知道 ID 就可读取”。
+浏览器探针仅能访问 `/__xshield/v1/bootstrap` 和 `/__xshield/v1/events/prepare`，不能访问管理 API。API path 中的 ID 均需按 tenant/site 和资源权限再验，不使用“知道 ID 就可读取”。
 
 ## 15.5 交互和错误语义
 

@@ -262,6 +262,7 @@ cat >"$test_dir/config.json" <<JSON
   "policy_revision":"policy-r1",
   "audit":{"directory":"$test_dir/journal","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
   "identity_store":{"max_connections":2,"acquire_timeout_ms":2000,"anonymous_session_ttl_seconds":300,"max_active_anonymous_sessions":10,"anonymous_session_rate_window_seconds":60,"max_anonymous_session_creations_per_source":1,"max_anonymous_session_creations_per_site":1},
+  "sensor":{"origin":"http://127.0.0.1:6288","build_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","heartbeat_seconds":15},
   "operations":[
     {"operation_id":"auth.login","method":"POST","path":"/login","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
     {"operation_id":"auth.login.invalid","method":"POST","path":"/login-invalid","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
@@ -473,6 +474,57 @@ WHERE binding.tenant_id = 'tenant_gateway'
 SQL
 )
 [[ "$login_binding_count" == "1" ]]
+
+curl -sS -o "$test_dir/sensor-bootstrap.json" \
+    http://127.0.0.1:6288/__xshield/v1/bootstrap
+python3 - "$test_dir/sensor-bootstrap.json" "$test_dir/sensor-event.json" <<'PY'
+import json
+import pathlib
+import sys
+
+bootstrap = json.loads(pathlib.Path(sys.argv[1]).read_text())
+event = {
+    "events": [{
+        "sensor_version": bootstrap["sensor_version"],
+        "build_ref": bootstrap["build_ref"],
+        "page_handle": bootstrap["page_handle"],
+        "navigation_id": bootstrap["navigation_id"],
+        "action_hint": None,
+        "client_request_id": None,
+        "client_event_seq": 1,
+        "visibility": "visible",
+        "event_type": "PAGE_READY",
+        "callsite_fingerprint": None,
+    }]
+}
+pathlib.Path(sys.argv[2]).write_text(json.dumps(event, separators=(",", ":")))
+PY
+sensor_prepare_status=$(curl -sS -D "$test_dir/sensor-prepare.headers" \
+    -o "$test_dir/sensor-prepare.json" -w '%{http_code}' \
+    -H 'Origin: http://127.0.0.1:6288' \
+    -H 'Content-Type: application/json' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    --data-binary @"$test_dir/sensor-event.json" \
+    http://127.0.0.1:6288/__xshield/v1/events/prepare)
+[[ "$sensor_prepare_status" == "202" ]]
+grep -q '"status":"accepted"' "$test_dir/sensor-prepare.json"
+grep -qi '^cache-control: private, no-store' "$test_dir/sensor-prepare.headers"
+sensor_wrong_origin_status=$(curl -sS -o "$test_dir/sensor-wrong-origin.json" \
+    -w '%{http_code}' -H 'Origin: https://attacker.example' \
+    -H 'Content-Type: application/json' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    --data-binary @"$test_dir/sensor-event.json" \
+    http://127.0.0.1:6288/__xshield/v1/events/prepare)
+[[ "$sensor_wrong_origin_status" == "400" ]]
+grep -q 'SENSOR_OBSERVATION_INVALID' "$test_dir/sensor-wrong-origin.json"
+sensor_missing_session_status=$(curl -sS -o "$test_dir/sensor-missing-session.json" \
+    -w '%{http_code}' -H 'Origin: http://127.0.0.1:6288' \
+    -H 'Content-Type: application/json' \
+    --data-binary @"$test_dir/sensor-event.json" \
+    http://127.0.0.1:6288/__xshield/v1/events/prepare)
+[[ "$sensor_missing_session_status" == "401" ]]
+grep -q 'AUTH_REQUIRED' "$test_dir/sensor-missing-session.json"
+! grep -q '/__xshield/v1/events/prepare' "$test_dir/origin.log"
 
 new_account_status=$(curl -sS -o "$test_dir/new-account.body" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \

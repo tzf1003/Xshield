@@ -28,19 +28,21 @@ use xshield_gateway::request_crypto::{
 use xshield_gateway::response_crypto::{
     ENCRYPTED_RESPONSE_CONTENT_TYPE, ResponseKeyAccessPort, ResponseKeyAccessQuery,
 };
+use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
 use xshield_gateway::{
     GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
     MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_CONFIG_BYTES, SENSOR_PREPARE_PATH,
 };
 use xshield_postgres::{
-    PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, StoreError,
+    PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, SensorSession,
+    StoreError,
 };
 use zeroize::Zeroizing;
 
 use crate::buffered_json::BufferedJsonResponse;
 use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RequestCryptoAudit,
-    ResponseCryptoAudit, ResponseSource, new_trace_id,
+    ResponseCryptoAudit, ResponseSource, SensorObservationAudit, new_trace_id,
 };
 use crate::protected_identity::{
     CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE,
@@ -49,6 +51,42 @@ use crate::protected_identity::{
 
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
 const SENSOR_ASSET: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
+
+fn validate_sensor_observation_headers(
+    request: &pingora::http::RequestHeader,
+    expected_origin: &str,
+) -> Result<usize, ReasonCode> {
+    if request.uri.query().is_some()
+        || request.headers.contains_key("Content-Encoding")
+        || request.headers.contains_key("Transfer-Encoding")
+        || request.headers.contains_key("Trailer")
+    {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut origins = request.headers.get_all("Origin").iter();
+    if origins.next().and_then(|value| value.to_str().ok()) != Some(expected_origin)
+        || origins.next().is_some()
+    {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut content_types = request.headers.get_all("Content-Type").iter();
+    if content_types.next().and_then(|value| value.to_str().ok()) != Some("application/json")
+        || content_types.next().is_some()
+    {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut lengths = request.headers.get_all("Content-Length").iter();
+    let length = lengths
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|length| (1..=MAX_SENSOR_OBSERVATION_BYTES).contains(length))
+        .ok_or(ReasonCode::SensorObservationInvalid)?;
+    if lengths.next().is_some() {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    Ok(length)
+}
 
 struct Gateway {
     config: Arc<GatewayConfig>,
@@ -104,6 +142,8 @@ struct RequestContext {
     buffered_response: Option<BufferedJsonResponse>,
     response_identity: Option<ResponseIdentity>,
     compatibility_evidence: Option<CompatibilityEvidence>,
+    sensor_session: Option<SensorSession>,
+    sensor_observation_audit: Vec<SensorObservationAudit>,
     anonymous_session_cookie: Option<String>,
     pending_auth_binding: Option<PendingAuthBinding>,
     response_failure: Option<ReasonCode>,
@@ -129,6 +169,8 @@ impl ProxyHttp for Gateway {
             buffered_response: None,
             response_identity: None,
             compatibility_evidence: None,
+            sensor_session: None,
+            sensor_observation_audit: Vec::new(),
             anonymous_session_cookie: None,
             pending_auth_binding: None,
             response_failure: None,
@@ -197,6 +239,7 @@ impl ProxyHttp for Gateway {
                     context.response_identity = admission.response_identity;
                     context.anonymous_session_cookie = admission.anonymous_session_cookie;
                     context.compatibility_evidence = admission.compatibility_evidence;
+                    context.sensor_session = admission.sensor_session;
                     admission.decision
                 } else {
                     let mut decision = self.config.admit(&method, &path, now);
@@ -207,6 +250,8 @@ impl ProxyHttp for Gateway {
             }
             None => self.config.admit(&method, &path, now),
         };
+        self.apply_sensor_observation(session, context, internal_response, &mut decision)
+            .await;
         self.apply_request_crypto(session, context, &method, &path, now, &mut decision)
             .await;
         let audit_result = self
@@ -218,6 +263,7 @@ impl ProxyHttp for Gateway {
                 decision: &decision,
                 duration_us: elapsed_us(context.started_at),
                 request_crypto: context.request_crypto_audit.as_ref(),
+                sensor_observations: &context.sensor_observation_audit,
                 forward_origin: internal_response.is_none(),
             })
             .await;
@@ -263,6 +309,9 @@ impl ProxyHttp for Gateway {
                         )
                     })?;
                     respond_sensor_bootstrap(session, &context.request_id, sensor).await?;
+                }
+                InternalResponse::SensorPrepare => {
+                    respond_sensor_observation(session, &context.request_id).await?;
                 }
             }
             return Ok(true);
@@ -527,6 +576,77 @@ impl ProxyHttp for Gateway {
 }
 
 impl Gateway {
+    async fn apply_sensor_observation(
+        &self,
+        session: &mut Session,
+        context: &mut RequestContext,
+        internal_response: Option<InternalResponse>,
+        decision: &mut GatewayDecision,
+    ) {
+        if internal_response != Some(InternalResponse::SensorPrepare)
+            || decision.outcome != GatewayOutcome::Allowed
+        {
+            return;
+        }
+        let result = self.read_sensor_observation(session, context).await;
+        match result {
+            Ok(audit) => context.sensor_observation_audit = audit,
+            Err(reason) => {
+                decision.outcome = GatewayOutcome::Denied;
+                decision.reason_code = reason;
+            }
+        }
+    }
+
+    async fn read_sensor_observation(
+        &self,
+        session: &mut Session,
+        context: &RequestContext,
+    ) -> Result<Vec<SensorObservationAudit>, ReasonCode> {
+        let sensor = self
+            .config
+            .sensor()
+            .ok_or(ReasonCode::SensorObservationInvalid)?;
+        let expected_len =
+            validate_sensor_observation_headers(session.req_header(), sensor.origin())?;
+        let permits = u32::try_from(MAX_SENSOR_OBSERVATION_BYTES)
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        let _permit = Arc::clone(&self.buffered_body_budget)
+            .try_acquire_many_owned(permits)
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        let mut body = Vec::new();
+        body.try_reserve_exact(expected_len)
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        while let Some(chunk) = session
+            .read_request_body()
+            .await
+            .map_err(|_| ReasonCode::SensorObservationInvalid)?
+        {
+            if body.len().saturating_add(chunk.len()) > expected_len {
+                return Err(ReasonCode::SensorObservationInvalid);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if body.len() != expected_len {
+            return Err(ReasonCode::SensorObservationInvalid);
+        }
+        let batch = SensorObservationBatch::from_json(
+            &body,
+            xshield_gateway::SENSOR_VERSION,
+            sensor.build_ref(),
+        )
+        .map_err(|_| ReasonCode::SensorObservationInvalid)?;
+        let sensor_session = context
+            .sensor_session
+            .as_ref()
+            .ok_or(ReasonCode::AuthBindingMismatch)?;
+        Ok(batch
+            .observations()
+            .iter()
+            .map(|observation| SensorObservationAudit::new(sensor_session, observation))
+            .collect())
+    }
+
     async fn apply_request_crypto(
         &self,
         session: &mut Session,
@@ -1094,6 +1214,27 @@ async fn respond_sensor_bootstrap(
     response.insert_header("Content-Type", "application/json")?;
     response.insert_header("Cache-Control", "private, no-store")?;
     response.insert_header("Pragma", "no-cache")?;
+    response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
+    response.insert_header("X-Content-Type-Options", "nosniff")?;
+    response.insert_header("X-Xshield-Request-Id", request_id)?;
+    response.set_content_length(body.len())?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session.write_response_body(Some(body), true).await
+}
+
+async fn respond_sensor_observation(session: &mut Session, request_id: &str) -> PingoraResult<()> {
+    let body = Bytes::from(
+        serde_json::json!({
+            "status": "accepted",
+            "request_id": request_id,
+        })
+        .to_string(),
+    );
+    let mut response = ResponseHeader::build(202, Some(6))?;
+    response.insert_header("Content-Type", "application/json")?;
+    response.insert_header("Cache-Control", "private, no-store")?;
     response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
     response.insert_header("X-Content-Type-Options", "nosniff")?;
     response.insert_header("X-Xshield-Request-Id", request_id)?;

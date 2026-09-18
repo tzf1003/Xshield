@@ -2,13 +2,62 @@ use crate::{PostgresIdentityStore, StoreError};
 use sqlx::Row;
 use std::collections::BTreeMap;
 use xshield_core::{
-    domain::AuthBindingId,
+    domain::{AuthBindingId, SiteId, TenantId},
     identity::{
         AuthBinding, AuthEpoch, AuthorizationContextRef, CredentialFingerprint,
         CredentialGeneration, CredentialSlot, IdentityDenied, UnixSeconds,
     },
     ports::{IdentityProofQuery, IdentityProofState, IdentityProofStore},
 };
+
+/// Session-only proof query for restricted sensor metadata ingestion.
+pub struct SensorSessionQuery<'a> {
+    /// Tenant selected by trusted gateway configuration.
+    pub tenant_id: &'a TenantId,
+    /// Site selected by trusted gateway configuration.
+    pub site_id: &'a SiteId,
+    /// Tenant-scoped fingerprint of the `HttpOnly` WAF session cookie.
+    pub session_fingerprint: &'a [u8; 32],
+    /// Server time used for expiry checks.
+    pub now: UnixSeconds,
+}
+
+/// Current identity coordinates attached to a sensor observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SensorSession {
+    binding_id: AuthBindingId,
+    epoch: AuthEpoch,
+    authenticated: bool,
+}
+
+impl SensorSession {
+    /// Returns the current binding identifier.
+    #[must_use]
+    pub const fn binding_id(&self) -> &AuthBindingId {
+        &self.binding_id
+    }
+
+    /// Returns the current identity epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> AuthEpoch {
+        self.epoch
+    }
+
+    /// Returns whether this is an active authenticated binding.
+    #[must_use]
+    pub const fn authenticated(&self) -> bool {
+        self.authenticated
+    }
+}
+
+/// Result of a session-only sensor lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SensorSessionState {
+    /// An active or anonymous unexpired WAF session matched exactly.
+    Verified(SensorSession),
+    /// No current session matched the presented cookie fingerprint.
+    Denied,
+}
 
 impl IdentityProofStore for PostgresIdentityStore {
     type Error = StoreError;
@@ -111,6 +160,51 @@ impl IdentityProofStore for PostgresIdentityStore {
             }),
             Err(error) => Ok(IdentityProofState::Denied(error)),
         }
+    }
+}
+
+impl PostgresIdentityStore {
+    /// Loads current session coordinates without accepting business operations.
+    ///
+    /// This lookup is reserved for sensor metadata. It never returns a full
+    /// authentication proof and cannot satisfy normal operation admission.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database or stored-data failures.
+    pub async fn load_sensor_session(
+        &self,
+        query: SensorSessionQuery<'_>,
+    ) -> Result<SensorSessionState, StoreError> {
+        let now = i64::try_from(query.now.value()).map_err(|_| StoreError::NumericRange("now"))?;
+        let row = sqlx::query(
+            "SELECT binding_id, auth_epoch, status
+             FROM xshield.auth_bindings
+             WHERE tenant_id = $1 AND site_id = $2 AND waf_sid_fingerprint = $3
+               AND status IN ('anonymous', 'active')
+               AND absolute_expires_at > to_timestamp($4)",
+        )
+        .bind(query.tenant_id.as_str())
+        .bind(query.site_id.as_str())
+        .bind(query.session_fingerprint.as_slice())
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(SensorSessionState::Denied);
+        };
+        let binding_id = AuthBindingId::parse(row.try_get::<&str, _>("binding_id")?)
+            .map_err(|_| StoreError::CorruptData("binding_id"))?;
+        let epoch = AuthEpoch::new(nonnegative(row.try_get("auth_epoch")?, "auth_epoch")?);
+        let authenticated = match row.try_get::<&str, _>("status")? {
+            "active" => true,
+            "anonymous" => false,
+            _ => return Err(StoreError::CorruptData("binding_status")),
+        };
+        Ok(SensorSessionState::Verified(SensorSession {
+            binding_id,
+            epoch,
+            authenticated,
+        }))
     }
 }
 

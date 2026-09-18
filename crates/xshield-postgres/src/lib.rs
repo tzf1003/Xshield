@@ -18,6 +18,7 @@ mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
 pub use grant::{GrantPersistence, GrantWriteOutcome};
+pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
 pub use request_replay::{RequestCryptoMessage, RequestCryptoMessageOutcome};
 pub use response_grant::{

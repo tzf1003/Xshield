@@ -162,6 +162,10 @@ pub enum ReasonCode {
     SensorAssetServed,
     /// A dynamic browser sensor bootstrap was served by the edge.
     SensorBootstrapServed,
+    /// A session-bound browser observation was durably accepted.
+    SensorObservationAccepted,
+    /// Browser observation framing or content failed strict validation.
+    SensorObservationInvalid,
     /// A configured private response exceeded its complete-buffer bound.
     ResponseBodyTooLarge,
     /// Aggregate private-response buffering capacity was unavailable.
@@ -272,6 +276,8 @@ impl ReasonCode {
             Self::OriginResponseReceived => "ORIGIN_RESPONSE_RECEIVED",
             Self::SensorAssetServed => "SENSOR_ASSET_SERVED",
             Self::SensorBootstrapServed => "SENSOR_BOOTSTRAP_SERVED",
+            Self::SensorObservationAccepted => "SENSOR_OBSERVATION_ACCEPTED",
+            Self::SensorObservationInvalid => "SENSOR_OBSERVATION_INVALID",
             Self::ResponseBodyTooLarge => "RESPONSE_BODY_TOO_LARGE",
             Self::ResponseBufferCapacityExhausted => "RESPONSE_BUFFER_CAPACITY_EXHAUSTED",
             Self::ResponseValidationFailed => "RESPONSE_VALIDATION_FAILED",

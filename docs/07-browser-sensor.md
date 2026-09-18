@@ -6,7 +6,7 @@
 
 探针资源走同源固定路径，bootstrap 动态内容 no-store。静态 HTML 不嵌入跨会话共享的凭证。压缩、ETag、Content-Length、缓存、CSP nonce、script-src/connect-src 与 SRI 必须同步适配；不能为注入而全局关闭 CSP/SRI。SRI 会检查资源内容，改写后须维护对应完整性信息。[S13]
 
-网关在固定版本路径 `/__xshield/v1/sensor/1.0.0.js` 直接提供普通 JavaScript，使用长期 immutable 缓存、同源资源隔离、`nosniff`、固定版本头和 WAF request_id。启用站点 sensor 配置后，`/__xshield/v1/bootstrap` 以 `private, no-store` 返回服务端固定的页面构建指纹、心跳间隔、prepare 路径及每次请求生成的页面/导航句柄；内容不携带业务凭证，也不产生页面证据或资格。两条路径均属于保留命名空间，站点 operation 不能覆盖，不生成源站转发意图，并以各自稳定原因进入耐久审计。探针只接受同源 prepare URL 和有界 bootstrap 字段，发送 `PAGE_READY`、`HEARTBEAT` 与可见性观测。HTML 注入、prepare 接收与 PageEvidence 发行继续按本章约束接入。
+网关在固定版本路径 `/__xshield/v1/sensor/1.0.0.js` 直接提供普通 JavaScript，使用长期 immutable 缓存、同源资源隔离、`nosniff`、固定版本头和 WAF request_id。启用站点 sensor 配置后，`/__xshield/v1/bootstrap` 以 `private, no-store` 返回服务端固定的页面构建指纹、心跳间隔、prepare 路径及每次请求生成的页面/导航句柄；内容不携带业务凭证，也不产生页面证据或资格。`POST /__xshield/v1/events/prepare` 仅接收匹配配置 Origin、当前版本和构建的严格 JSON 批次，要求当前未过期 WAF 会话，限制为 16 KiB、16 条连续事件；记录绑定、身份代际和 `client_claimed` 观测，但不产生授权效果。三条路径均属于保留命名空间，站点 operation 不能覆盖，不生成源站转发意图，并以各自稳定原因进入耐久审计。HTML 注入与 PageEvidence 发行继续按本章约束接入。
 
 ## 7.2 事件契约
 

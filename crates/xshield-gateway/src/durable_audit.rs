@@ -23,7 +23,9 @@ use xshield_gateway::request_crypto::{
     RequestCryptoRule,
 };
 use xshield_gateway::response_crypto::{ResponseCryptoEvidence, ResponseCryptoRule};
+use xshield_gateway::sensor::SensorObservation;
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome};
+use xshield_postgres::SensorSession;
 
 #[derive(Clone)]
 pub(crate) struct DurableAudit {
@@ -50,7 +52,45 @@ pub(crate) struct AdmissionFacts<'a> {
     pub(crate) decision: &'a GatewayDecision,
     pub(crate) duration_us: u64,
     pub(crate) request_crypto: Option<&'a RequestCryptoAudit>,
+    pub(crate) sensor_observations: &'a [SensorObservationAudit],
     pub(crate) forward_origin: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SensorObservationAudit {
+    binding_id: String,
+    auth_epoch: u64,
+    authenticated: bool,
+    build_ref: String,
+    page_handle: String,
+    navigation_id: String,
+    action_hint: Option<String>,
+    client_request_id: Option<String>,
+    client_event_seq: u32,
+    visibility: &'static str,
+    event_type: &'static str,
+    callsite_fingerprint: Option<String>,
+}
+
+impl SensorObservationAudit {
+    pub(crate) fn new(session: &SensorSession, observation: &SensorObservation) -> Self {
+        Self {
+            binding_id: session.binding_id().as_str().to_owned(),
+            auth_epoch: session.epoch().value(),
+            authenticated: session.authenticated(),
+            build_ref: observation.build_ref().to_owned(),
+            page_handle: observation.page_handle().to_owned(),
+            navigation_id: observation.navigation_id().to_owned(),
+            action_hint: observation.action_hint().map(str::to_owned),
+            client_request_id: observation
+                .client_request_id()
+                .map(|request_id| request_id.as_str().to_owned()),
+            client_event_seq: observation.client_event_seq(),
+            visibility: observation.visibility().as_str(),
+            event_type: observation.event_type().as_str(),
+            callsite_fingerprint: observation.callsite_fingerprint().map(str::to_owned),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -417,6 +457,34 @@ impl DurableAudit {
                 },
             ));
             last_stage_id = String::from(crypto_id.as_str());
+            request_sequence += 1;
+        }
+        for observation in facts.sensor_observations {
+            let observation_id = new_event_id()?;
+            let previous_stage_id = last_stage_id;
+            events.push(PendingEvent::new(
+                observation_id.clone(),
+                "sensor.observation",
+                request_sequence,
+                vec![previous_stage_id],
+                Payload::SensorObservation {
+                    binding_id: observation.binding_id.clone(),
+                    auth_epoch: observation.auth_epoch,
+                    authenticated: observation.authenticated,
+                    build_ref: observation.build_ref.clone(),
+                    page_handle: observation.page_handle.clone(),
+                    navigation_id: observation.navigation_id.clone(),
+                    action_hint: observation.action_hint.clone(),
+                    client_request_id: observation.client_request_id.clone(),
+                    client_event_seq: observation.client_event_seq,
+                    visibility: observation.visibility,
+                    sensor_event_type: observation.event_type,
+                    callsite_fingerprint: observation.callsite_fingerprint.clone(),
+                    claim_status: "client_claimed",
+                    authorization_effect: "none",
+                },
+            ));
+            last_stage_id = String::from(observation_id.as_str());
             request_sequence += 1;
         }
         events.push(PendingEvent::new(
@@ -870,15 +938,15 @@ fn completion_reason(facts: &FinalFacts<'_>) -> &'static str {
 }
 
 fn edge_response_reason(facts: &FinalFacts<'_>) -> ReasonCode {
-    if facts
+    let operation = facts
         .decision
         .operation_id
         .as_ref()
-        .is_some_and(|operation| operation.as_str() == "xshield.sensor.bootstrap")
-    {
-        ReasonCode::SensorBootstrapServed
-    } else {
-        ReasonCode::SensorAssetServed
+        .map(xshield_core::domain::OperationId::as_str);
+    match operation {
+        Some("xshield.sensor.bootstrap") => ReasonCode::SensorBootstrapServed,
+        Some("xshield.sensor.prepare") => ReasonCode::SensorObservationAccepted,
+        _ => ReasonCode::SensorAssetServed,
     }
 }
 
@@ -1122,6 +1190,22 @@ enum Payload {
         reason_code: &'static str,
         status: Option<u16>,
     },
+    SensorObservation {
+        binding_id: String,
+        auth_epoch: u64,
+        authenticated: bool,
+        build_ref: String,
+        page_handle: String,
+        navigation_id: String,
+        action_hint: Option<String>,
+        client_request_id: Option<String>,
+        client_event_seq: u32,
+        visibility: &'static str,
+        sensor_event_type: &'static str,
+        callsite_fingerprint: Option<String>,
+        claim_status: &'static str,
+        authorization_effect: &'static str,
+    },
     RequestCompleted {
         decision: String,
         reason_code: String,
@@ -1272,7 +1356,8 @@ mod tests {
     use std::{fs, path::PathBuf};
     use xshield_core::identity::UnixSeconds;
     use xshield_gateway::{
-        SENSOR_ASSET_PATH, SENSOR_BOOTSTRAP_PATH, request_crypto::RequestCryptoPolicy,
+        SENSOR_ASSET_PATH, SENSOR_BOOTSTRAP_PATH, SENSOR_PREPARE_PATH,
+        request_crypto::RequestCryptoPolicy,
     };
 
     const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
@@ -1306,6 +1391,7 @@ mod tests {
                 "acquire_timeout_ms": 1000
             },
             "sensor": {
+                "origin": "https://app.example",
                 "build_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "heartbeat_seconds": 15
             },
@@ -1450,6 +1536,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                sensor_observations: &[],
                 forward_origin: true,
             })
             .await
@@ -1481,6 +1568,7 @@ mod tests {
                 decision: &denied,
                 duration_us: 10,
                 request_crypto: None,
+                sensor_observations: &[],
                 forward_origin: true,
             })
             .await
@@ -1518,32 +1606,69 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn records_edge_sensor_deliveries_without_origin_intent() {
         let directory = directory();
         let config = config(&directory, 1024 * 1024);
         let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let observation = SensorObservationAudit {
+            binding_id: "auth_018f2a3b-4c5d-7000-8000-000000000023".to_owned(),
+            auth_epoch: 1,
+            authenticated: true,
+            build_ref: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            page_handle: "pgh_018f2a3b-4c5d-7000-8000-000000000024".to_owned(),
+            navigation_id: "nav_018f2a3b-4c5d-7000-8000-000000000025".to_owned(),
+            action_hint: None,
+            client_request_id: None,
+            client_event_seq: 1,
+            visibility: "visible",
+            event_type: "PAGE_READY",
+            callsite_fingerprint: None,
+        };
         let cases = [
             (
+                "GET",
                 SENSOR_ASSET_PATH,
                 "req_018f2a3b-4c5d-7000-8000-000000000021",
                 ReasonCode::SensorAssetServed,
+                4,
             ),
             (
+                "GET",
                 SENSOR_BOOTSTRAP_PATH,
                 "req_018f2a3b-4c5d-7000-8000-000000000022",
                 ReasonCode::SensorBootstrapServed,
+                4,
+            ),
+            (
+                "POST",
+                SENSOR_PREPARE_PATH,
+                "req_018f2a3b-4c5d-7000-8000-000000000026",
+                ReasonCode::SensorObservationAccepted,
+                5,
             ),
         ];
-        for &(path, request_id, _) in &cases {
-            let decision = config.admit("GET", path, UnixSeconds::new(1));
+        for &(method, path, request_id, _, _) in &cases {
+            let decision = if path == SENSOR_PREPARE_PATH {
+                config.admit_sensor_session(method, path)
+            } else {
+                config.admit(method, path, UnixSeconds::new(1))
+            };
+            let sensor_observations = if path == SENSOR_PREPARE_PATH {
+                std::slice::from_ref(&observation)
+            } else {
+                &[]
+            };
             let admission = audit
                 .commit_admission(AdmissionFacts {
                     request_id,
                     trace_id: "21212121212121212121212121212121",
-                    method: "GET",
+                    method,
                     decision: &decision,
                     duration_us: 10,
                     request_crypto: None,
+                    sensor_observations,
                     forward_origin: false,
                 })
                 .await
@@ -1553,7 +1678,7 @@ mod tests {
                 .finalize(FinalFacts {
                     request_id,
                     trace_id: "21212121212121212121212121212121",
-                    method: "GET",
+                    method,
                     decision: &decision,
                     admission: &admission,
                     status: 200,
@@ -1577,32 +1702,44 @@ mod tests {
         )
         .unwrap();
         let mut terminal = Vec::new();
+        let mut observations = Vec::new();
         journal
             .visit_closed_records(100, |record| {
                 let event: serde_json::Value = serde_json::from_slice(record.plaintext())
                     .map_err(|_| JournalError::InvalidEvent)?;
+                if event["event_type"] == "sensor.observation" {
+                    observations.push(event.clone());
+                }
                 if matches!(
                     event["event_type"].as_str(),
                     Some("edge.response" | "request.completed")
                 ) && cases
                     .iter()
-                    .any(|(_, request_id, _)| event["request_id"] == *request_id)
+                    .any(|(_, _, request_id, _, _)| event["request_id"] == *request_id)
                 {
                     terminal.push(event);
                 }
                 Ok(())
             })
             .unwrap();
-        assert_eq!(terminal.len(), 4);
-        for (index, (_, _, reason)) in cases.iter().enumerate() {
+        assert_eq!(terminal.len(), 6);
+        for (index, (_, _, _, reason, edge_sequence)) in cases.iter().enumerate() {
             let edge = &terminal[index * 2];
             let completed = &terminal[index * 2 + 1];
             assert_eq!(edge["event_type"], "edge.response");
-            assert_eq!(edge["request_seq"], 4);
+            assert_eq!(edge["request_seq"], *edge_sequence);
             assert_eq!(edge["payload"]["reason_code"], reason.as_str());
             assert_eq!(completed["payload"]["origin_state"], "not_sent");
             assert_eq!(completed["payload"]["reason_code"], reason.as_str());
         }
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0]["request_seq"], 3);
+        assert_eq!(
+            observations[0]["payload"]["binding_id"],
+            observation.binding_id
+        );
+        assert_eq!(observations[0]["payload"]["claim_status"], "client_claimed");
+        assert_eq!(observations[0]["payload"]["authorization_effect"], "none");
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1629,6 +1766,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: Some(&crypto),
+                sensor_observations: &[],
                 forward_origin: true,
             })
             .await
@@ -1691,6 +1829,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: Some(&crypto),
+                sensor_observations: &[],
                 forward_origin: true,
             })
             .await
@@ -1778,6 +1917,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                sensor_observations: &[],
                 forward_origin: true,
             })
             .await
@@ -1864,6 +2004,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                sensor_observations: &[],
                 forward_origin: true,
             })
             .await
@@ -1927,6 +2068,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                sensor_observations: &[],
                 forward_origin: true,
             })
             .await
@@ -2041,6 +2183,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                sensor_observations: &[],
                 forward_origin: true,
             })
             .await

@@ -11,7 +11,7 @@ use xshield_core::{
 };
 use xshield_postgres::{
     AnonymousSessionEstablishment, AnonymousSessionWriteOutcome, BindingEstablishment,
-    PostgresIdentityStore, StoreError,
+    PostgresIdentityStore, SensorSessionQuery, SensorSessionState, StoreError,
 };
 
 const NOW: u64 = 1_800_000_000;
@@ -307,6 +307,39 @@ async fn establishment_commits_binding_credentials_and_outbox_atomically() {
                 && snapshot.authorization_context_ref() == binding.authorization_context_ref()
                 && snapshot.generation() == CredentialGeneration::new(1)
     ));
+    let sensor_session = store
+        .load_sensor_session(SensorSessionQuery {
+            tenant_id: binding.tenant_id(),
+            site_id: binding.site_id(),
+            session_fingerprint: &SESSION_FINGERPRINT,
+            now: UnixSeconds::new(NOW),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        sensor_session,
+        SensorSessionState::Verified(session)
+            if session.binding_id() == binding.binding_id()
+                && session.epoch() == AuthEpoch::new(1)
+                && session.authenticated()
+    ));
+    for (fingerprint, now) in [
+        ([0; 32], UnixSeconds::new(NOW)),
+        (SESSION_FINGERPRINT, UnixSeconds::new(SESSION_EXPIRES)),
+    ] {
+        assert_eq!(
+            store
+                .load_sensor_session(SensorSessionQuery {
+                    tenant_id: binding.tenant_id(),
+                    site_id: binding.site_id(),
+                    session_fingerprint: &fingerprint,
+                    now,
+                })
+                .await
+                .unwrap(),
+            SensorSessionState::Denied
+        );
+    }
     let outbox: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM xshield.audit_outbox
          WHERE event_id = $1 AND event_type = 'binding.created'",

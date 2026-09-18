@@ -22,8 +22,8 @@ const context = (prepareUrl = "/__xshield/v1/events/prepare") => {
     setTimeout: () => 1,
     __XSHIELD_BOOTSTRAP__: {
       sensor_version: "1.0.0",
-      build_ref: "build-2026-09-18",
-      page_handle: "page_018f2a3b-4c5d-7000-8000-000000000001",
+      build_ref: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      page_handle: "pgh_018f2a3b-4c5d-7000-8000-000000000001",
       navigation_id: "nav_018f2a3b-4c5d-7000-8000-000000000002",
       heartbeat_seconds: 15,
       prepare_url: prepareUrl,
