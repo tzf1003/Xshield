@@ -14,7 +14,7 @@
 
 身份上下文切换端点可配置 `auth_context_switch`：请求仍以旧上下文的完整认证组合准入，成功响应必须提供主体或授权上下文引用的变化及新 Bearer；网关在释放正文前原子更新上下文、auth epoch 与 credential generation，撤销旧凭证并提交 `epoch.changed` outbox。同主体的租户/角色变化也会隔离旧 epoch，切换期间晚到的旧响应不能发行资格；WAF 会话 Cookie 与绝对期限保持不变。升级迁移会撤销缺少已验证授权上下文的活动绑定，客户端需重新认证。
 
-`xshield-control` 已提供独立管理接口：固定从服务端配置注入 tenant/site 作用域，以常量时间摘要比对管理 Bearer 凭证，执行每分钟有界限流，并在返回前写独立加密管理审计。`GET /control/v1/audit/health` 仅允许 `AuditAdministrator`；请求摘要、事件时间线和证据 manifest 查询允许 `Observer`。manifest 列表和单 artifact 查询只访问 PostgreSQL 中 active、未删除且按数据库时钟未过期的元数据；列表使用 HMAC 游标绑定主体、作用域、目标请求和页大小，单项查询把缺失、过期、删除和作用域偏差统一为 `found=false`，两者均不读取或解密证据内容。`POST /control/v1/cases` 仅允许 `Investigator` 在固定作用域创建有界调查案；主体与请求参数绑定的幂等摘要、案件行和 `case.created` outbox 原子提交，原始幂等键不入库。
+`xshield-control` 已提供独立管理接口：固定从服务端配置注入 tenant/site 作用域，以常量时间摘要比对管理 Bearer 凭证，执行每分钟有界限流，并在返回前写独立加密管理审计。`GET /control/v1/audit/health` 仅允许 `AuditAdministrator`；请求摘要、事件时间线和证据 manifest 查询允许 `Observer`。manifest 列表和单 artifact 查询只访问 PostgreSQL 中 active、未删除且按数据库时钟未过期的元数据；列表使用 HMAC 游标绑定主体、作用域、目标请求和页大小，单项查询把缺失、过期、删除和作用域偏差统一为 `found=false`，两者均不读取或解密证据内容。`POST /control/v1/cases` 仅允许 `Investigator` 在固定作用域创建有界调查案；`POST /control/v1/artifacts/{artifact_id}/access` 只为同一主体拥有的 open 案件和 active 未过期证据建立有界 pending 原文访问申请。两类请求均以主体与参数绑定的独立 HMAC 摘要实现精确幂等，并把状态行与对应 outbox 原子提交；申请本身不解密或释放内容。
 
 `xshield-evidence` 已提供本地加密证据库 MVP：只打开预建的私有目录，对每个 artifact 以 tenant/site/request/artifact/kind/chunk AAD 和独立 HMAC 派生数据密钥执行 AES-256-GCM，密文对象、typed manifest 与 manifest HMAC 均不覆盖耐久写入。manifest 读取使用库内当前时钟重验作用域、期限与 key-id，内容读取额外重验密文摘要与 AEAD；未知、过期和跨作用域对象返回相同不可用状态。整对象模式硬限制 64 MiB，业务配置只能继续收紧。当前闭环用于验证存储不变量，后续接入网关采集、审批端口与 S3/KMS adapter。
 
@@ -75,6 +75,7 @@ XSHIELD_CONTROL_TOKEN_EXPIRES_AT="$TOKEN_EXPIRY_UNIX_SECONDS" \
 XSHIELD_CONTROL_REQUESTS_PER_MINUTE="30" \
 XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS="64" \
 XSHIELD_CONTROL_MAX_OPEN_CASES="1000" \
+XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS="1000" \
 XSHIELD_CONTROL_LISTEN="127.0.0.1:9443" \
 XSHIELD_DATABASE_URL="$YOUR_POSTGRES_URL" \
 XSHIELD_CONTROL_DATABASE_MAX_CONNECTIONS="4" \
@@ -101,7 +102,7 @@ cargo run -p xshield-control -- \
   target/xshield-index-checkpoints target/xshield-control-audit
 ```
 
-身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；PostgreSQL 账号只授予 catalog 查询及案件创建所需的表、序列和 advisory-lock 权限。请求摘要、脱敏事件和证据 manifest 查询均使用服务端作用域并写独立管理审计。事件与 manifest 游标由同一独立分页密钥按不同用途域签名，不能跨接口、主体、作用域或目标请求复用；案件幂等摘要使用另一独立密钥。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
+身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；PostgreSQL 账号只授予 catalog 查询、案件与证据访问申请写入、outbox 及 advisory-lock 所需权限。请求摘要、脱敏事件和证据 manifest 查询均使用服务端作用域并写独立管理审计。事件与 manifest 游标由同一独立分页密钥按不同用途域签名，不能跨接口、主体、作用域或目标请求复用；管理变更幂等摘要使用另一独立密钥并继续按动作分域。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
 
 ## Rust 运行时依赖
 

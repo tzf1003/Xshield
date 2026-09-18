@@ -59,6 +59,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let max_query_events = env::var("XSHIELD_CONTROL_MAX_QUERY_EVENTS")?.parse()?;
     let max_query_artifacts = env::var("XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS")?.parse()?;
     let max_open_cases = env::var("XSHIELD_CONTROL_MAX_OPEN_CASES")?.parse()?;
+    let max_pending_evidence_access_requests =
+        env::var("XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS")?.parse()?;
     let listen: SocketAddr = env::var("XSHIELD_CONTROL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9443".to_owned())
         .parse()?;
@@ -88,6 +90,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         max_query_events,
         max_query_artifacts,
         max_open_cases,
+        max_pending_evidence_access_requests,
     )?;
     let config = ControlConfig::new(
         credential,
