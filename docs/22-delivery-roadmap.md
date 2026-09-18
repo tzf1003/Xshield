@@ -14,7 +14,7 @@
 
 ## M2 双向协议接管
 
-当前增量：已完成一种双向 enforce `DIRECT_DECRYPT` / `DIRECT_ENCRYPT` AES-256-GCM 协议、消息时效、请求共享原子防重放、双向冻结载荷重建、稳定失败终态、转换摘要审计及 Gateway↔Origin 反例测试；三覆盖模式、探针、保留策略和构建版本共存继续迭代。
+当前增量：已完成一种双向 enforce `DIRECT_DECRYPT` / `DIRECT_ENCRYPT` AES-256-GCM 协议、消息时效、请求共享原子防重放、双向冻结载荷重建、稳定失败终态、转换摘要审计及 Gateway↔Origin 反例测试；observe 已支持服务端固定的 opaque 透传与覆盖审计，并禁止从未知内容签发身份/资格。compatibility、探针、保留策略和构建版本共存继续迭代。
 
 交付：一种真实加密请求/响应适配、冻结载荷重建、三种覆盖模式、探针及保留策略、构建版本共存。
 

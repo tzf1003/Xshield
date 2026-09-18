@@ -15,6 +15,29 @@ const ORIGIN_CONTENT_TYPE: &str = "application/json";
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 
+/// Server-selected request protocol coverage for one operation.
+#[derive(Debug)]
+pub enum RequestCryptoPolicy {
+    /// Authenticated decryption is mandatory and failures are terminal.
+    Enforce(RequestCryptoRule),
+    /// The original entity remains opaque and is forwarded unchanged.
+    Observe(RequestCryptoObserveRule),
+}
+
+/// Validated metadata for an opaque observe-only request path.
+#[derive(Debug)]
+pub struct RequestCryptoObserveRule {
+    pub(crate) adapter_revision: String,
+}
+
+impl RequestCryptoObserveRule {
+    /// Returns the server-selected candidate adapter revision.
+    #[must_use]
+    pub fn adapter_revision(&self) -> &str {
+        &self.adapter_revision
+    }
+}
+
 struct ParsedEnvelope {
     message_id: String,
     issued_at: UnixSeconds,

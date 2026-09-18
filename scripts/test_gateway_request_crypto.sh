@@ -89,6 +89,15 @@ cat >"$test_dir/config.json" <<JSON
     "view_profile":null,
     "request_crypto":{"mode":"DIRECT_DECRYPT","adapter_revision":"orders-json-r1","key_id":"request-key-r1","key_not_before":1,"key_expires_at":4102444800,"max_envelope_bytes":4096,"max_plaintext_bytes":1024,"max_message_age_seconds":60,"max_future_skew_seconds":5,"max_active_messages":1000},
     "response":{"mode":"BUFFERED_JSON","max_bytes":1024,"crypto":{"mode":"DIRECT_ENCRYPT","adapter_revision":"orders-response-r1","key_id":"response-key-r1","key_not_before":1,"key_expires_at":4102444800,"message_ttl_seconds":60,"max_envelope_bytes":3072}}
+  },{
+    "operation_id":"orders.observe",
+    "method":"POST",
+    "path":"/orders-observe",
+    "admission":"PUBLIC",
+    "source_action":null,
+    "resource_type":null,
+    "view_profile":null,
+    "request_crypto":{"mode":"OBSERVE","adapter_revision":"orders-candidate-r2"}
   }]
 }
 JSON
@@ -266,5 +275,11 @@ status=$(curl --silent --output "$test_dir/query-response" --write-out '%{http_c
 [[ "$status" == "400" ]]
 grep -q 'REQUEST_ENVELOPE_INVALID' "$test_dir/query-response"
 [[ "$(wc -l < "$capture" | tr -d ' ')" == "1" ]]
+
+opaque='legacy-protocol-body'
+curl --fail --silent --show-error --output "$test_dir/observe-response" \
+    -H 'Content-Type: application/octet-stream' \
+    --data-binary "$opaque" "http://127.0.0.1:$gateway_port/orders-observe"
+[[ "$(tail -n 1 "$capture")" == "$opaque" ]]
 
 echo "gateway request crypto E2E passed"

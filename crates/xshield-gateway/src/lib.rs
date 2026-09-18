@@ -33,7 +33,7 @@ pub mod share_issue;
 pub mod share_token;
 
 use auth_binding::{AuthBindingRule, AuthTransitionRule};
-use request_crypto::RequestCryptoRule;
+use request_crypto::{RequestCryptoObserveRule, RequestCryptoPolicy, RequestCryptoRule};
 use response_crypto::ResponseCryptoRule;
 use response_grant::ResponseGrantRule;
 
@@ -103,7 +103,7 @@ struct CompiledOperation {
     policy: OperationPolicy,
     source_action: Option<ActionId>,
     resource: Option<CompiledResource>,
-    request_crypto: Option<RequestCryptoRule>,
+    request_crypto: Option<RequestCryptoPolicy>,
     response: Option<CompiledResponse>,
 }
 
@@ -278,24 +278,22 @@ struct OperationDto {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RequestCryptoDto {
-    mode: RequestCryptoModeDto,
-    adapter_revision: String,
-    key_id: String,
-    key_not_before: u64,
-    key_expires_at: u64,
-    max_envelope_bytes: usize,
-    max_plaintext_bytes: usize,
-    max_message_age_seconds: u64,
-    max_future_skew_seconds: u64,
-    max_active_messages: u32,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum RequestCryptoModeDto {
-    DirectDecrypt,
+#[serde(tag = "mode", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+enum RequestCryptoDto {
+    DirectDecrypt {
+        adapter_revision: String,
+        key_id: String,
+        key_not_before: u64,
+        key_expires_at: u64,
+        max_envelope_bytes: usize,
+        max_plaintext_bytes: usize,
+        max_message_age_seconds: u64,
+        max_future_skew_seconds: u64,
+        max_active_messages: u32,
+    },
+    Observe {
+        adapter_revision: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -619,8 +617,17 @@ impl GatewayConfig {
 
     /// Returns the server-selected request decryption rule for an exact operation.
     #[must_use]
-    pub fn request_crypto_rule(&self, method: &str, path: &str) -> Option<&RequestCryptoRule> {
+    pub fn request_crypto_policy(&self, method: &str, path: &str) -> Option<&RequestCryptoPolicy> {
         self.operation(method, path)?.request_crypto.as_ref()
+    }
+
+    /// Returns the mandatory decryption rule for an exact enforce operation.
+    #[must_use]
+    pub fn request_crypto_rule(&self, method: &str, path: &str) -> Option<&RequestCryptoRule> {
+        match self.request_crypto_policy(method, path)? {
+            RequestCryptoPolicy::Enforce(rule) => Some(rule),
+            RequestCryptoPolicy::Observe(_) => None,
+        }
     }
 
     /// Returns the sole request-decryption key identifier required at startup.
@@ -629,11 +636,9 @@ impl GatewayConfig {
         self.operations
             .values()
             .chain(self.path_resource_operations.iter())
-            .find_map(|operation| {
-                operation
-                    .request_crypto
-                    .as_ref()
-                    .map(RequestCryptoRule::key_id)
+            .find_map(|operation| match operation.request_crypto.as_ref()? {
+                RequestCryptoPolicy::Enforce(rule) => Some(rule.key_id()),
+                RequestCryptoPolicy::Observe(_) => None,
             })
     }
 
@@ -861,7 +866,10 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
             operation
                 .request_crypto
                 .as_ref()
-                .map(RequestCryptoRule::key_id)
+                .and_then(|policy| match policy {
+                    RequestCryptoPolicy::Enforce(rule) => Some(rule.key_id()),
+                    RequestCryptoPolicy::Observe(_) => None,
+                })
         })
         .collect::<BTreeSet<_>>();
     if request_key_ids.len() > 1 {
@@ -1120,6 +1128,17 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         .map(|rule| compile_request_crypto(rule, method, dto.admission))
         .transpose()?;
     let response = dto.response.map(compile_response).transpose()?;
+    if matches!(request_crypto, Some(RequestCryptoPolicy::Observe(_)))
+        && response.as_ref().is_some_and(|response| {
+            response.crypto.is_some()
+                || response.grant.is_some()
+                || response.auth_binding.is_some()
+                || response.auth_refresh.is_some()
+                || response.auth_context_switch.is_some()
+        })
+    {
+        return Err(ConfigError::Invalid("operations.request_crypto"));
+    }
     Ok(CompiledOperation {
         method,
         route,
@@ -1136,36 +1155,59 @@ fn compile_request_crypto(
     dto: RequestCryptoDto,
     method: HttpMethod,
     admission: AdmissionDto,
-) -> Result<RequestCryptoRule, ConfigError> {
-    if !matches!(dto.mode, RequestCryptoModeDto::DirectDecrypt)
-        || !matches!(
-            method,
-            HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
-        )
-        || matches!(admission, AdmissionDto::UiActionRequired)
-        || !valid_scoped_value(&dto.adapter_revision)
-        || !valid_scoped_value(&dto.key_id)
-        || dto.key_not_before >= dto.key_expires_at
-        || !(1..=MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES).contains(&dto.max_envelope_bytes)
-        || dto.max_plaintext_bytes == 0
-        || dto.max_plaintext_bytes > dto.max_envelope_bytes / 2
-        || !(1..=3_600).contains(&dto.max_message_age_seconds)
-        || dto.max_future_skew_seconds > 300
-        || !(1..=1_000_000).contains(&dto.max_active_messages)
+) -> Result<RequestCryptoPolicy, ConfigError> {
+    if !matches!(
+        method,
+        HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
+    ) || matches!(admission, AdmissionDto::UiActionRequired)
     {
         return Err(ConfigError::Invalid("operations.request_crypto"));
     }
-    Ok(RequestCryptoRule {
-        adapter_revision: dto.adapter_revision,
-        key_id: dto.key_id,
-        key_not_before: UnixSeconds::new(dto.key_not_before),
-        key_expires_at: UnixSeconds::new(dto.key_expires_at),
-        max_envelope_bytes: dto.max_envelope_bytes,
-        max_plaintext_bytes: dto.max_plaintext_bytes,
-        max_message_age_seconds: dto.max_message_age_seconds,
-        max_future_skew_seconds: dto.max_future_skew_seconds,
-        max_active_messages: dto.max_active_messages,
-    })
+    match dto {
+        RequestCryptoDto::Observe { adapter_revision } => {
+            if !valid_scoped_value(&adapter_revision) {
+                return Err(ConfigError::Invalid("operations.request_crypto"));
+            }
+            Ok(RequestCryptoPolicy::Observe(RequestCryptoObserveRule {
+                adapter_revision,
+            }))
+        }
+        RequestCryptoDto::DirectDecrypt {
+            adapter_revision,
+            key_id,
+            key_not_before,
+            key_expires_at,
+            max_envelope_bytes,
+            max_plaintext_bytes,
+            max_message_age_seconds,
+            max_future_skew_seconds,
+            max_active_messages,
+        } => {
+            if !valid_scoped_value(&adapter_revision)
+                || !valid_scoped_value(&key_id)
+                || key_not_before >= key_expires_at
+                || !(1..=MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES).contains(&max_envelope_bytes)
+                || max_plaintext_bytes == 0
+                || max_plaintext_bytes > max_envelope_bytes / 2
+                || !(1..=3_600).contains(&max_message_age_seconds)
+                || max_future_skew_seconds > 300
+                || !(1..=1_000_000).contains(&max_active_messages)
+            {
+                return Err(ConfigError::Invalid("operations.request_crypto"));
+            }
+            Ok(RequestCryptoPolicy::Enforce(RequestCryptoRule {
+                adapter_revision,
+                key_id,
+                key_not_before: UnixSeconds::new(key_not_before),
+                key_expires_at: UnixSeconds::new(key_expires_at),
+                max_envelope_bytes,
+                max_plaintext_bytes,
+                max_message_age_seconds,
+                max_future_skew_seconds,
+                max_active_messages,
+            }))
+        }
+    }
 }
 
 fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
@@ -1996,6 +2038,43 @@ mod tests {
 
         config["operations"][1]["request_crypto"]["max_envelope_bytes"] =
             serde_json::json!(MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES + 1);
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
+            Err(ConfigError::Invalid("operations.request_crypto"))
+        ));
+    }
+
+    #[test]
+    fn observe_forwards_only_without_response_qualification_side_effects() {
+        let mut config: serde_json::Value = serde_json::from_str(CONFIG).unwrap();
+        config["operations"][1]["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
+        config["operations"][1]["source_action"] = serde_json::Value::Null;
+        config["operations"][1]["request_crypto"] = serde_json::json!({
+            "mode": "OBSERVE",
+            "adapter_revision": "account-candidate-r2"
+        });
+        let compiled = GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).unwrap();
+        assert!(matches!(
+            compiled.request_crypto_policy("POST", "/account"),
+            Some(RequestCryptoPolicy::Observe(rule))
+                if rule.adapter_revision() == "account-candidate-r2"
+        ));
+        assert!(compiled.request_crypto_rule("POST", "/account").is_none());
+        assert_eq!(compiled.request_crypto_key_id(), None);
+
+        config["operations"][1]["admission"] = serde_json::json!("AUTH_ENTRY");
+        config["operations"][1]["response"] = serde_json::json!({
+            "mode": "BUFFERED_JSON",
+            "max_bytes": 1024,
+            "auth_binding": {
+                "success_status": 200,
+                "principal_pointer": "/identity/id",
+                "authorization_context_pointer": "/identity/context",
+                "bearer_pointer": "/access_token",
+                "credential_ttl_seconds": 900,
+                "session_ttl_seconds": 3600
+            }
+        });
         assert!(matches!(
             GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
             Err(ConfigError::Invalid("operations.request_crypto"))

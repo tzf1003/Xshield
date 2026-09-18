@@ -22,7 +22,9 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 use xshield_audit::JournalKey;
 use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
-use xshield_gateway::request_crypto::{FrozenRequest, KeyAccessPort, KeyAccessQuery};
+use xshield_gateway::request_crypto::{
+    FrozenRequest, KeyAccessPort, KeyAccessQuery, RequestCryptoPolicy,
+};
 use xshield_gateway::response_crypto::{
     ENCRYPTED_RESPONSE_CONTENT_TYPE, ResponseKeyAccessPort, ResponseKeyAccessQuery,
 };
@@ -510,8 +512,15 @@ impl Gateway {
         if decision.outcome != GatewayOutcome::Allowed {
             return;
         }
-        let Some(rule) = self.config.request_crypto_rule(method, path) else {
+        let Some(policy) = self.config.request_crypto_policy(method, path) else {
             return;
+        };
+        let rule = match policy {
+            RequestCryptoPolicy::Observe(rule) => {
+                context.request_crypto_audit = Some(RequestCryptoAudit::observed(rule));
+                return;
+            }
+            RequestCryptoPolicy::Enforce(rule) => rule,
         };
         let started_at = Instant::now();
         match self

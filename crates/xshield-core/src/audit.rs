@@ -174,6 +174,8 @@ pub enum ReasonCode {
     RequestCryptoAuthenticationFailed,
     /// Authenticated plaintext was validated and frozen for origin rebuilding.
     RequestCryptoDecoded,
+    /// The server-selected observe mode forwarded the original opaque entity.
+    RequestCryptoObservedOpaque,
     /// The scoped request-decryption key could not be obtained.
     RequestCryptoKeyUnavailable,
     /// The authenticated request message expired before replay consumption.
@@ -266,6 +268,7 @@ impl ReasonCode {
             Self::RequestEnvelopeInvalid => "REQUEST_ENVELOPE_INVALID",
             Self::RequestCryptoAuthenticationFailed => "REQUEST_CRYPTO_AUTHENTICATION_FAILED",
             Self::RequestCryptoDecoded => "REQUEST_CRYPTO_DECODED",
+            Self::RequestCryptoObservedOpaque => "REQUEST_CRYPTO_OBSERVED_OPAQUE",
             Self::RequestCryptoKeyUnavailable => "REQUEST_CRYPTO_KEY_UNAVAILABLE",
             Self::RequestCryptoMessageExpired => "REQUEST_CRYPTO_MESSAGE_EXPIRED",
             Self::RequestCryptoMessageFromFuture => "REQUEST_CRYPTO_MESSAGE_FROM_FUTURE",

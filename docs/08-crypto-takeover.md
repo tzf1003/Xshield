@@ -8,7 +8,9 @@
 
 响应侧 enforce `DIRECT_ENCRYPT` 接在完整 `BUFFERED_JSON` 链末端：源站 JSON 先完成校验、身份或资格事务及动作引用重建，随后才以独立 response key 生成随机 12 字节 nonce、规范 message-id 和短时有效封包。响应 AAD 绑定 tenant、site、operation、request-id、method、path、源站 status、adapter revision、key-id、消息时间窗和两端 Content-Type；客户端只收到同一冻结密文。配置按 operation 固定 key lease、消息 TTL、明文与封包上限，启动时拒绝请求/响应 key-id 或实际密钥复用。共享内存配额按接收分块、明文缓冲、密文及预分配封包的峰值计费，十六进制密文直接写入封包，容量不足时在分配前关闭响应。随机源、密钥、时钟、JSON 或容量失败均中止响应；`crypto_encode` 在源站终态之后、请求终态之前记录输入/输出摘要和非秘密协议元数据。
 
-该增量尚未声明解密字段到 UI 动作字段映射、observe/compatibility、KEY_REWRAP、ENVELOPE_HOOK、构建版本共存和证据库原文保留完成；因此配置会拒绝在 `UI_ACTION_REQUIRED` operation 启用当前请求适配器，这些能力继续按本章后续约束迭代。
+请求侧已实现服务端配置的 `OBSERVE` 最小闭环：只允许 POST/PUT/PATCH 且非 `UI_ACTION_REQUIRED` 的 operation，原始实体不解密、不重建地进入既有源站流程；`crypto_decode` 审计记录候选 adapter revision、`coverage_mode=OBSERVE`、`request_crypto_checked=false` 和 `origin_entity_rebuilt=false`。observe operation 在配置期禁止响应加密及身份、资格、刷新或上下文切换提交，因此 opaque 内容不能产生新资格。模式不读取任何客户端声明，enforce 的无效封包也不会回退到 observe。
+
+该增量尚未声明解密字段到 UI 动作字段映射、compatibility、KEY_REWRAP、ENVELOPE_HOOK、构建版本共存和证据库原文保留完成；因此配置会拒绝在 `UI_ACTION_REQUIRED` operation 启用当前请求适配器，这些能力继续按本章后续约束迭代。
 
 ## 8.1 三条路径
 

@@ -18,7 +18,9 @@ use xshield_audit::{
 use xshield_core::audit::ReasonCode;
 use xshield_core::domain::{EventId, InvalidValue};
 
-use xshield_gateway::request_crypto::{RequestCryptoEvidence, RequestCryptoRule};
+use xshield_gateway::request_crypto::{
+    RequestCryptoEvidence, RequestCryptoObserveRule, RequestCryptoRule,
+};
 use xshield_gateway::response_crypto::{ResponseCryptoEvidence, ResponseCryptoRule};
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome};
 
@@ -51,9 +53,10 @@ pub(crate) struct AdmissionFacts<'a> {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RequestCryptoAudit {
-    algorithm: &'static str,
+    coverage_mode: &'static str,
+    algorithm: Option<&'static str>,
     adapter_revision: String,
-    key_id: String,
+    key_id: Option<String>,
     message_id: Option<String>,
     nonce_sha256: Option<String>,
     issued_at: Option<u64>,
@@ -68,9 +71,10 @@ pub(crate) struct RequestCryptoAudit {
 impl RequestCryptoAudit {
     pub(crate) fn passed(evidence: &RequestCryptoEvidence, duration_us: u64) -> Self {
         Self {
-            algorithm: evidence.algorithm(),
+            coverage_mode: "ENFORCE",
+            algorithm: Some(evidence.algorithm()),
             adapter_revision: evidence.adapter_revision().to_owned(),
-            key_id: evidence.key_id().to_owned(),
+            key_id: Some(evidence.key_id().to_owned()),
             message_id: Some(evidence.message_id().to_owned()),
             nonce_sha256: Some(evidence.nonce_sha256().to_owned()),
             issued_at: Some(evidence.issued_at().value()),
@@ -80,6 +84,24 @@ impl RequestCryptoAudit {
             outcome: "PASS",
             reason_code: ReasonCode::RequestCryptoDecoded,
             duration_us,
+        }
+    }
+
+    pub(crate) fn observed(rule: &RequestCryptoObserveRule) -> Self {
+        Self {
+            coverage_mode: "OBSERVE",
+            algorithm: None,
+            adapter_revision: rule.adapter_revision().to_owned(),
+            key_id: None,
+            message_id: None,
+            nonce_sha256: None,
+            issued_at: None,
+            expires_at: None,
+            envelope_sha256: None,
+            rebuilt_sha256: None,
+            outcome: "PASS",
+            reason_code: ReasonCode::RequestCryptoObservedOpaque,
+            duration_us: 0,
         }
     }
 
@@ -95,9 +117,10 @@ impl RequestCryptoAudit {
             _ => "DENY",
         };
         Self {
-            algorithm: rule.algorithm(),
+            coverage_mode: "ENFORCE",
+            algorithm: Some(rule.algorithm()),
             adapter_revision: rule.adapter_revision().to_owned(),
-            key_id: rule.key_id().to_owned(),
+            key_id: Some(rule.key_id().to_owned()),
             message_id: None,
             nonce_sha256: None,
             issued_at: None,
@@ -308,6 +331,7 @@ impl DurableAudit {
                     model_call_id: None,
                     facts: CryptoStageFacts {
                         operation_id: operation_id.clone(),
+                        coverage_mode: crypto.coverage_mode,
                         algorithm: crypto.algorithm,
                         adapter_revision: crypto.adapter_revision.clone(),
                         key_id: crypto.key_id.clone(),
@@ -319,7 +343,7 @@ impl DurableAudit {
                         rebuilt_sha256: crypto.rebuilt_sha256.clone(),
                     },
                     coverage: CryptoStageCoverage {
-                        request_crypto_checked: true,
+                        request_crypto_checked: crypto.coverage_mode == "ENFORCE",
                         origin_entity_rebuilt: crypto.rebuilt_sha256.is_some(),
                     },
                 },
@@ -646,9 +670,10 @@ fn response_crypto_event(
             model_call_id: None,
             facts: CryptoStageFacts {
                 operation_id,
-                algorithm: crypto.algorithm,
+                coverage_mode: "ENFORCE",
+                algorithm: Some(crypto.algorithm),
                 adapter_revision: crypto.adapter_revision.clone(),
-                key_id: crypto.key_id.clone(),
+                key_id: Some(crypto.key_id.clone()),
                 message_id: crypto.message_id.clone(),
                 nonce_sha256: crypto.nonce_sha256.clone(),
                 issued_at: crypto.issued_at,
@@ -974,9 +999,10 @@ struct StageCoverage {
 #[derive(Serialize)]
 struct CryptoStageFacts {
     operation_id: Option<String>,
-    algorithm: &'static str,
+    coverage_mode: &'static str,
+    algorithm: Option<&'static str>,
     adapter_revision: String,
-    key_id: String,
+    key_id: Option<String>,
     message_id: Option<String>,
     nonce_sha256: Option<String>,
     issued_at: Option<u64>,
@@ -1093,6 +1119,7 @@ mod tests {
     use super::*;
     use std::{fs, path::PathBuf};
     use xshield_core::identity::UnixSeconds;
+    use xshield_gateway::request_crypto::RequestCryptoPolicy;
 
     const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 
@@ -1165,6 +1192,19 @@ mod tests {
                         "max_message_age_seconds": 60,
                         "max_future_skew_seconds": 5,
                         "max_active_messages": 1000
+                    }
+                },
+                {
+                    "operation_id": "orders.observe",
+                    "method": "POST",
+                    "path": "/orders-observe",
+                    "admission": "PUBLIC",
+                    "source_action": null,
+                    "resource_type": null,
+                    "view_profile": null,
+                    "request_crypto": {
+                        "mode": "OBSERVE",
+                        "adapter_revision": "orders-candidate-r2"
                     }
                 }
             ]
@@ -1351,6 +1391,75 @@ mod tests {
         );
         assert_eq!(
             crypto_stage["payload"]["coverage"]["origin_entity_rebuilt"],
+            false
+        );
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn records_opaque_observe_coverage_before_forward_intent() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("POST", "/orders-observe", UnixSeconds::new(1));
+        let policy = config
+            .request_crypto_policy("POST", "/orders-observe")
+            .unwrap();
+        let RequestCryptoPolicy::Observe(rule) = policy else {
+            panic!("expected observe policy");
+        };
+        let crypto = RequestCryptoAudit::observed(rule);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000019";
+        let admission = audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "19191919191919191919191919191919",
+                method: "POST",
+                decision: &decision,
+                duration_us: 10,
+                request_crypto: Some(&crypto),
+            })
+            .await
+            .unwrap();
+        assert!(admission.forward_intent_event_id.is_some());
+        drop(audit);
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut observed = None;
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id && event["payload"]["stage"] == "crypto_decode"
+                {
+                    observed = Some(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let observed = observed.unwrap();
+        assert_eq!(observed["payload"]["facts"]["coverage_mode"], "OBSERVE");
+        assert_eq!(
+            observed["payload"]["facts"]["algorithm"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            observed["payload"]["reason_code"],
+            ReasonCode::RequestCryptoObservedOpaque.as_str()
+        );
+        assert_eq!(
+            observed["payload"]["coverage"]["request_crypto_checked"],
+            false
+        );
+        assert_eq!(
+            observed["payload"]["coverage"]["origin_entity_rebuilt"],
             false
         );
         drop(journal);
