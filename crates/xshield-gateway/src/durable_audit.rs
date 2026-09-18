@@ -708,6 +708,7 @@ fn delivery_event(
     event_id: EventId,
     request_sequence: u32,
 ) -> PendingEvent {
+    let edge_reason = edge_response_reason(facts);
     let operation_id = facts
         .decision
         .operation_id
@@ -752,7 +753,7 @@ fn delivery_event(
                 reason_code: if facts.proxy_error {
                     ReasonCode::RequestIncomplete.as_str()
                 } else {
-                    ReasonCode::SensorAssetServed.as_str()
+                    edge_reason.as_str()
                 },
                 status: (facts.status != 0).then_some(facts.status),
             },
@@ -848,7 +849,7 @@ fn completion_reason(facts: &FinalFacts<'_>) -> &'static str {
                 if facts.proxy_error {
                     ReasonCode::RequestIncomplete.as_str()
                 } else {
-                    ReasonCode::SensorAssetServed.as_str()
+                    edge_response_reason(facts).as_str()
                 }
             },
             ReasonCode::as_str,
@@ -866,6 +867,19 @@ fn completion_reason(facts: &FinalFacts<'_>) -> &'static str {
         },
         ReasonCode::as_str,
     )
+}
+
+fn edge_response_reason(facts: &FinalFacts<'_>) -> ReasonCode {
+    if facts
+        .decision
+        .operation_id
+        .as_ref()
+        .is_some_and(|operation| operation.as_str() == "xshield.sensor.bootstrap")
+    {
+        ReasonCode::SensorBootstrapServed
+    } else {
+        ReasonCode::SensorAssetServed
+    }
 }
 
 fn append_locked(
@@ -1257,7 +1271,9 @@ mod tests {
     use super::*;
     use std::{fs, path::PathBuf};
     use xshield_core::identity::UnixSeconds;
-    use xshield_gateway::{SENSOR_ASSET_PATH, request_crypto::RequestCryptoPolicy};
+    use xshield_gateway::{
+        SENSOR_ASSET_PATH, SENSOR_BOOTSTRAP_PATH, request_crypto::RequestCryptoPolicy,
+    };
 
     const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 
@@ -1265,6 +1281,7 @@ mod tests {
         std::env::temp_dir().join(format!("xshield-gateway-audit-{}", Uuid::now_v7()))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn config(directory: &std::path::Path, max_bytes: u64) -> GatewayConfig {
         let json = serde_json::json!({
             "listen": "127.0.0.1:6188",
@@ -1287,6 +1304,10 @@ mod tests {
             "identity_store": {
                 "max_connections": 2,
                 "acquire_timeout_ms": 1000
+            },
+            "sensor": {
+                "build_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "heartbeat_seconds": 15
             },
             "operations": [
                 {
@@ -1497,42 +1518,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn records_edge_sensor_delivery_without_origin_intent() {
+    async fn records_edge_sensor_deliveries_without_origin_intent() {
         let directory = directory();
         let config = config(&directory, 1024 * 1024);
-        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000021";
         let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
-        let decision = config.admit("GET", SENSOR_ASSET_PATH, UnixSeconds::new(1));
-        let admission = audit
-            .commit_admission(AdmissionFacts {
-                request_id,
-                trace_id: "21212121212121212121212121212121",
-                method: "GET",
-                decision: &decision,
-                duration_us: 10,
-                request_crypto: None,
-                forward_origin: false,
-            })
-            .await
-            .unwrap();
-        assert!(admission.forward_intent_event_id.is_none());
-        audit
-            .finalize(FinalFacts {
-                request_id,
-                trace_id: "21212121212121212121212121212121",
-                method: "GET",
-                decision: &decision,
-                admission: &admission,
-                status: 200,
-                duration_us: 20,
-                proxy_error: false,
-                response_failure: None,
-                origin_status: None,
-                response_crypto: None,
-                response_source: ResponseSource::Edge,
-            })
-            .await
-            .unwrap();
+        let cases = [
+            (
+                SENSOR_ASSET_PATH,
+                "req_018f2a3b-4c5d-7000-8000-000000000021",
+                ReasonCode::SensorAssetServed,
+            ),
+            (
+                SENSOR_BOOTSTRAP_PATH,
+                "req_018f2a3b-4c5d-7000-8000-000000000022",
+                ReasonCode::SensorBootstrapServed,
+            ),
+        ];
+        for &(path, request_id, _) in &cases {
+            let decision = config.admit("GET", path, UnixSeconds::new(1));
+            let admission = audit
+                .commit_admission(AdmissionFacts {
+                    request_id,
+                    trace_id: "21212121212121212121212121212121",
+                    method: "GET",
+                    decision: &decision,
+                    duration_us: 10,
+                    request_crypto: None,
+                    forward_origin: false,
+                })
+                .await
+                .unwrap();
+            assert!(admission.forward_intent_event_id.is_none());
+            audit
+                .finalize(FinalFacts {
+                    request_id,
+                    trace_id: "21212121212121212121212121212121",
+                    method: "GET",
+                    decision: &decision,
+                    admission: &admission,
+                    status: 200,
+                    duration_us: 20,
+                    proxy_error: false,
+                    response_failure: None,
+                    origin_status: None,
+                    response_crypto: None,
+                    response_source: ResponseSource::Edge,
+                })
+                .await
+                .unwrap();
+        }
         drop(audit);
 
         let (journal, _) = LocalJournal::open(
@@ -1547,25 +1581,28 @@ mod tests {
             .visit_closed_records(100, |record| {
                 let event: serde_json::Value = serde_json::from_slice(record.plaintext())
                     .map_err(|_| JournalError::InvalidEvent)?;
-                if event["request_id"] == request_id
-                    && matches!(
-                        event["event_type"].as_str(),
-                        Some("edge.response" | "request.completed")
-                    )
+                if matches!(
+                    event["event_type"].as_str(),
+                    Some("edge.response" | "request.completed")
+                ) && cases
+                    .iter()
+                    .any(|(_, request_id, _)| event["request_id"] == *request_id)
                 {
                     terminal.push(event);
                 }
                 Ok(())
             })
             .unwrap();
-        assert_eq!(terminal.len(), 2);
-        assert_eq!(terminal[0]["event_type"], "edge.response");
-        assert_eq!(terminal[0]["request_seq"], 4);
-        assert_eq!(
-            terminal[0]["payload"]["reason_code"],
-            ReasonCode::SensorAssetServed.as_str()
-        );
-        assert_eq!(terminal[1]["payload"]["origin_state"], "not_sent");
+        assert_eq!(terminal.len(), 4);
+        for (index, (_, _, reason)) in cases.iter().enumerate() {
+            let edge = &terminal[index * 2];
+            let completed = &terminal[index * 2 + 1];
+            assert_eq!(edge["event_type"], "edge.response");
+            assert_eq!(edge["request_seq"], 4);
+            assert_eq!(edge["payload"]["reason_code"], reason.as_str());
+            assert_eq!(completed["payload"]["origin_state"], "not_sent");
+            assert_eq!(completed["payload"]["reason_code"], reason.as_str());
+        }
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }

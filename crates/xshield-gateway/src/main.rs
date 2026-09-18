@@ -30,7 +30,7 @@ use xshield_gateway::response_crypto::{
 };
 use xshield_gateway::{
     GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
-    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_CONFIG_BYTES,
+    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_CONFIG_BYTES, SENSOR_PREPARE_PATH,
 };
 use xshield_postgres::{
     PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, StoreError,
@@ -249,9 +249,22 @@ impl ProxyHttp for Gateway {
             .await?;
             return Ok(true);
         }
-        if internal_response == Some(InternalResponse::SensorAsset) {
+        if let Some(internal_response) = internal_response {
             context.response_source = ResponseSource::Edge;
-            respond_sensor_asset(session, &context.request_id).await?;
+            match internal_response {
+                InternalResponse::SensorAsset => {
+                    respond_sensor_asset(session, &context.request_id).await?;
+                }
+                InternalResponse::SensorBootstrap => {
+                    let sensor = self.config.sensor().ok_or_else(|| {
+                        PingoraError::explain(
+                            ErrorType::HTTPStatus(500),
+                            "sensor bootstrap policy missing",
+                        )
+                    })?;
+                    respond_sensor_bootstrap(session, &context.request_id, sensor).await?;
+                }
+            }
             return Ok(true);
         }
         Ok(false)
@@ -1052,6 +1065,37 @@ async fn respond_sensor_asset(session: &mut Session, request_id: &str) -> Pingor
     response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
     response.insert_header("X-Content-Type-Options", "nosniff")?;
     response.insert_header("X-Xshield-Sensor-Version", xshield_gateway::SENSOR_VERSION)?;
+    response.insert_header("X-Xshield-Request-Id", request_id)?;
+    response.set_content_length(body.len())?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session.write_response_body(Some(body), true).await
+}
+
+async fn respond_sensor_bootstrap(
+    session: &mut Session,
+    request_id: &str,
+    sensor: &xshield_gateway::SensorConfig,
+) -> PingoraResult<()> {
+    let body = Bytes::from(
+        serde_json::json!({
+            "sensor_version": xshield_gateway::SENSOR_VERSION,
+            "build_ref": sensor.build_ref(),
+            "page_handle": format!("pgh_{}", Uuid::now_v7()),
+            "navigation_id": format!("nav_{}", Uuid::now_v7()),
+            "prepare_url": SENSOR_PREPARE_PATH,
+            "heartbeat_seconds": sensor.heartbeat_seconds(),
+            "request_id": request_id,
+        })
+        .to_string(),
+    );
+    let mut response = ResponseHeader::build(200, Some(7))?;
+    response.insert_header("Content-Type", "application/json")?;
+    response.insert_header("Cache-Control", "private, no-store")?;
+    response.insert_header("Pragma", "no-cache")?;
+    response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
+    response.insert_header("X-Content-Type-Options", "nosniff")?;
     response.insert_header("X-Xshield-Request-Id", request_id)?;
     response.set_content_length(body.len())?;
     session

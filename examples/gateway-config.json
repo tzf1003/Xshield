@@ -26,6 +26,10 @@
     "max_anonymous_session_creations_per_source": 10,
     "max_anonymous_session_creations_per_site": 1000
   },
+  "sensor": {
+    "build_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "heartbeat_seconds": 15
+  },
   "operations": [
     {
       "operation_id": "health.read",

@@ -22,7 +22,7 @@ use xshield_core::{
     },
     grant::ResourceKeyHmac,
     identity::UnixSeconds,
-    provenance::{ActionTarget, HttpMethod, RouteTemplate},
+    provenance::{ActionTarget, BuildFingerprint, HttpMethod, RouteTemplate},
 };
 
 pub mod auth_binding;
@@ -56,9 +56,14 @@ pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 /// Versioned same-origin browser sensor asset.
 pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
+/// Dynamic browser sensor bootstrap document.
+pub const SENSOR_BOOTSTRAP_PATH: &str = "/__xshield/v1/bootstrap";
+/// Same-origin observation preparation endpoint advertised by bootstrap.
+pub const SENSOR_PREPARE_PATH: &str = "/__xshield/v1/events/prepare";
 /// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
 pub const SENSOR_VERSION: &str = "1.0.0";
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
+const SENSOR_BOOTSTRAP_OPERATION_ID: &str = "xshield.sensor.bootstrap";
 const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
 
 /// Local edge response selected from the reserved Xshield namespace.
@@ -66,6 +71,8 @@ const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
 pub enum InternalResponse {
     /// The immutable browser sensor JavaScript asset.
     SensorAsset,
+    /// A per-navigation browser sensor bootstrap document.
+    SensorBootstrap,
 }
 
 /// Fully validated gateway configuration selected at process startup.
@@ -78,8 +85,16 @@ pub struct GatewayConfig {
     policy_revision: xshield_core::domain::PolicyRevision,
     audit: AuditConfig,
     identity_store: Option<IdentityStoreConfig>,
+    sensor: Option<SensorConfig>,
     operations: BTreeMap<(String, String), CompiledOperation>,
     path_resource_operations: Vec<CompiledOperation>,
+}
+
+/// Validated server-owned browser sensor bootstrap policy.
+#[derive(Clone, Debug)]
+pub struct SensorConfig {
+    build_ref: String,
+    heartbeat_seconds: u16,
 }
 
 #[derive(Debug)]
@@ -170,7 +185,16 @@ struct ConfigDto {
     audit: AuditDto,
     #[serde(default)]
     identity_store: Option<IdentityStoreDto>,
+    #[serde(default)]
+    sensor: Option<SensorDto>,
     operations: Vec<OperationDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SensorDto {
+    build_ref: String,
+    heartbeat_seconds: u16,
 }
 
 #[derive(Deserialize)]
@@ -453,6 +477,19 @@ impl GatewayConfig {
             .as_ref()
             .map(validate_identity_store)
             .transpose()?;
+        let sensor = dto
+            .sensor
+            .map(|sensor| {
+                BuildFingerprint::parse(&sensor.build_ref).map_err(ConfigError::Provenance)?;
+                if !(5..=300).contains(&sensor.heartbeat_seconds) {
+                    return Err(ConfigError::Invalid("sensor.heartbeat_seconds"));
+                }
+                Ok(SensorConfig {
+                    build_ref: sensor.build_ref,
+                    heartbeat_seconds: sensor.heartbeat_seconds,
+                })
+            })
+            .transpose()?;
         let compiled_operations = compile_operations(dto.operations)?;
         if identity_store.is_none()
             && compiled_operations
@@ -493,6 +530,7 @@ impl GatewayConfig {
                 reconcile_max_records: dto.audit.reconcile_max_records,
             },
             identity_store,
+            sensor,
             operations: compiled_operations.exact,
             path_resource_operations: compiled_operations.path_resources,
         })
@@ -576,6 +614,12 @@ impl GatewayConfig {
         self.identity_store
     }
 
+    /// Returns the optional browser sensor bootstrap policy.
+    #[must_use]
+    pub const fn sensor(&self) -> Option<&SensorConfig> {
+        self.sensor.as_ref()
+    }
+
     /// Returns whether request admission or response binding needs identity state.
     #[must_use]
     pub fn requires_identity_runtime(&self) -> bool {
@@ -618,7 +662,16 @@ impl GatewayConfig {
     /// Returns a server-owned response for an exact reserved route.
     #[must_use]
     pub fn internal_response(&self, method: &str, path: &str) -> Option<InternalResponse> {
-        (method == "GET" && path == SENSOR_ASSET_PATH).then_some(InternalResponse::SensorAsset)
+        if method != "GET" {
+            return None;
+        }
+        match path {
+            SENSOR_ASSET_PATH => Some(InternalResponse::SensorAsset),
+            SENSOR_BOOTSTRAP_PATH if self.sensor.is_some() => {
+                Some(InternalResponse::SensorBootstrap)
+            }
+            _ => None,
+        }
     }
 
     /// Returns the trusted query or path adapter for a matched resource operation.
@@ -788,8 +841,12 @@ impl GatewayConfig {
         resource_key: Option<&ResourceKeyHmac>,
         proof: AdmissionProof<'_>,
     ) -> GatewayDecision {
-        if self.internal_response(method, path).is_some() {
-            return match OperationId::parse(SENSOR_ASSET_OPERATION_ID) {
+        if let Some(response) = self.internal_response(method, path) {
+            let operation = match response {
+                InternalResponse::SensorAsset => SENSOR_ASSET_OPERATION_ID,
+                InternalResponse::SensorBootstrap => SENSOR_BOOTSTRAP_OPERATION_ID,
+            };
+            return match OperationId::parse(operation) {
                 Ok(operation_id) => GatewayDecision {
                     outcome: GatewayOutcome::Allowed,
                     operation_id: Some(operation_id),
@@ -1089,6 +1146,20 @@ impl IdentityStoreConfig {
     #[must_use]
     pub const fn max_anonymous_session_creations_per_site(self) -> u32 {
         self.max_anonymous_session_creations_per_site
+    }
+}
+
+impl SensorConfig {
+    /// Returns the server-approved page build fingerprint exposed to the sensor.
+    #[must_use]
+    pub fn build_ref(&self) -> &str {
+        &self.build_ref
+    }
+
+    /// Returns the configured active-page heartbeat interval.
+    #[must_use]
+    pub const fn heartbeat_seconds(&self) -> u16 {
+        self.heartbeat_seconds
     }
 }
 
@@ -1641,6 +1712,7 @@ mod tests {
       "policy_revision":"policy-r1",
       "audit":{"directory":"target/xshield-audit-test","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
       "identity_store":{"max_connections":4,"acquire_timeout_ms":1000},
+      "sensor":{"build_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","heartbeat_seconds":15},
       "operations":[
         {"operation_id":"catalog.read","method":"GET","path":"/catalog","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null},
         {"operation_id":"account.update","method":"POST","path":"/account","admission":"UI_ACTION_REQUIRED","source_action":"account_form.submit","resource_type":null,"view_profile":null}
@@ -1677,6 +1749,24 @@ mod tests {
                 .internal_response("POST", SENSOR_ASSET_PATH)
                 .is_none()
         );
+        let bootstrap = config.admit("GET", SENSOR_BOOTSTRAP_PATH, UnixSeconds::new(1));
+        assert_eq!(bootstrap.outcome, GatewayOutcome::Allowed);
+        assert_eq!(
+            bootstrap.operation_id.unwrap().as_str(),
+            SENSOR_BOOTSTRAP_OPERATION_ID
+        );
+        assert_eq!(
+            config.internal_response("GET", SENSOR_BOOTSTRAP_PATH),
+            Some(InternalResponse::SensorBootstrap)
+        );
+        let sensor = config.sensor().unwrap();
+        assert_eq!(sensor.heartbeat_seconds(), 15);
+        assert_eq!(sensor.build_ref().len(), 64);
+        assert!(
+            config
+                .internal_response("POST", SENSOR_BOOTSTRAP_PATH)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1703,6 +1793,21 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(reserved.as_bytes()),
             Err(ConfigError::Invalid("operations.path"))
+        ));
+
+        let invalid_heartbeat =
+            CONFIG.replace("\"heartbeat_seconds\":15", "\"heartbeat_seconds\":4");
+        assert!(matches!(
+            GatewayConfig::from_json(invalid_heartbeat.as_bytes()),
+            Err(ConfigError::Invalid("sensor.heartbeat_seconds"))
+        ));
+        let invalid_build = CONFIG.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "not-a-build",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(invalid_build.as_bytes()),
+            Err(ConfigError::Provenance(_))
         ));
     }
 

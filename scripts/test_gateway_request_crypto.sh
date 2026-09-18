@@ -79,6 +79,7 @@ cat >"$test_dir/config.json" <<JSON
   "policy_revision":"policy-r1",
   "audit":{"directory":"$test_dir/audit","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
   "identity_store":{"max_connections":2,"acquire_timeout_ms":2000},
+  "sensor":{"build_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","heartbeat_seconds":15},
   "operations":[{
     "operation_id":"orders.create",
     "method":"POST",
@@ -129,6 +130,30 @@ grep -qi '^cross-origin-resource-policy: same-origin' "$test_dir/sensor-headers"
 grep -qi '^x-content-type-options: nosniff' "$test_dir/sensor-headers"
 grep -qi '^x-xshield-sensor-version: 1.0.0' "$test_dir/sensor-headers"
 grep -qi '^x-xshield-request-id: req_' "$test_dir/sensor-headers"
+
+curl --fail --silent --show-error -D "$test_dir/bootstrap-headers" \
+    -o "$test_dir/bootstrap.json" \
+    "http://127.0.0.1:$gateway_port/__xshield/v1/bootstrap"
+grep -qi '^content-type: application/json' "$test_dir/bootstrap-headers"
+grep -qi '^cache-control: private, no-store' "$test_dir/bootstrap-headers"
+grep -qi '^pragma: no-cache' "$test_dir/bootstrap-headers"
+grep -qi '^cross-origin-resource-policy: same-origin' "$test_dir/bootstrap-headers"
+grep -qi '^x-content-type-options: nosniff' "$test_dir/bootstrap-headers"
+grep -qi '^x-xshield-request-id: req_' "$test_dir/bootstrap-headers"
+python3 - "$test_dir/bootstrap.json" <<'PY'
+import json
+import pathlib
+import sys
+
+bootstrap = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert bootstrap["sensor_version"] == "1.0.0"
+assert bootstrap["build_ref"] == "a" * 64
+assert bootstrap["heartbeat_seconds"] == 15
+assert bootstrap["prepare_url"] == "/__xshield/v1/events/prepare"
+assert bootstrap["page_handle"].startswith("pgh_")
+assert bootstrap["navigation_id"].startswith("nav_")
+assert bootstrap["request_id"].startswith("req_")
+PY
 
 plaintext='{"sku":"A-1","quantity":2}'
 now=$(date +%s)
