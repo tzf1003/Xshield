@@ -245,7 +245,29 @@ pub(crate) struct FinalFacts<'a> {
     pub(crate) response_failure: Option<ReasonCode>,
     pub(crate) origin_status: Option<u16>,
     pub(crate) response_crypto: Option<&'a ResponseCryptoAudit>,
+    pub(crate) sensor_html: Option<&'a SensorHtmlAudit>,
     pub(crate) response_source: ResponseSource,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SensorHtmlAudit {
+    adapter_revision: String,
+    origin_sha256: String,
+    injected_sha256: String,
+}
+
+impl SensorHtmlAudit {
+    pub(crate) fn new(
+        adapter_revision: String,
+        origin_sha256: String,
+        injected_sha256: String,
+    ) -> Self {
+        Self {
+            adapter_revision,
+            origin_sha256,
+            injected_sha256,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -573,6 +595,23 @@ impl DurableAudit {
                 .checked_add(1)
                 .ok_or(DurableAuditError::SequenceExhausted)?;
         }
+        if let Some(sensor_html) = facts.sensor_html {
+            let (event_id, event) = sensor_html_event(
+                sensor_html,
+                facts
+                    .decision
+                    .operation_id
+                    .as_ref()
+                    .map(|operation| operation.as_str().to_owned()),
+                request_sequence,
+                completion_causes.clone(),
+            )?;
+            events.push(event);
+            completion_causes.push(event_id.as_str().to_owned());
+            request_sequence = request_sequence
+                .checked_add(1)
+                .ok_or(DurableAuditError::SequenceExhausted)?;
+        }
         let completion_id = new_event_id()?;
         events.push(PendingEvent::new(
             completion_id,
@@ -876,6 +915,43 @@ fn response_crypto_event(
     Ok((event_id, event))
 }
 
+fn sensor_html_event(
+    sensor_html: &SensorHtmlAudit,
+    operation_id: Option<String>,
+    request_sequence: u32,
+    cause_event_ids: Vec<String>,
+) -> Result<(EventId, PendingEvent), DurableAuditError> {
+    let event_id = new_event_id()?;
+    let event = PendingEvent::new(
+        event_id.clone(),
+        "stage.completed",
+        request_sequence,
+        cause_event_ids,
+        Payload::SensorHtmlStageCompleted {
+            stage: "sensor_html_inject",
+            stage_execution_id: format!("stg_{}", Uuid::now_v7()),
+            outcome: "PASS",
+            reason_code: ReasonCode::SensorHtmlInjected.as_str(),
+            proof_kind: "deterministic",
+            confidence: None,
+            confidence_status: "not_applicable",
+            duration_us: 0,
+            rule_revision: Some(sensor_html.adapter_revision.clone()),
+            model_call_id: None,
+            facts: SensorHtmlStageFacts {
+                operation_id,
+                origin_sha256: sensor_html.origin_sha256.clone(),
+                injected_sha256: sensor_html.injected_sha256.clone(),
+            },
+            coverage: SensorHtmlStageCoverage {
+                origin_entity_verified: true,
+                sensor_scripts_injected: true,
+            },
+        },
+    );
+    Ok((event_id, event))
+}
+
 fn final_origin(facts: &FinalFacts<'_>) -> FinalOrigin {
     if facts.decision.outcome == GatewayOutcome::Denied {
         return FinalOrigin {
@@ -945,6 +1021,7 @@ fn edge_response_reason(facts: &FinalFacts<'_>) -> ReasonCode {
         .map(xshield_core::domain::OperationId::as_str);
     match operation {
         Some("xshield.sensor.bootstrap") => ReasonCode::SensorBootstrapServed,
+        Some("xshield.sensor.loader") => ReasonCode::SensorLoaderServed,
         Some("xshield.sensor.prepare") => ReasonCode::SensorObservationAccepted,
         _ => ReasonCode::SensorAssetServed,
     }
@@ -1206,6 +1283,20 @@ enum Payload {
         claim_status: &'static str,
         authorization_effect: &'static str,
     },
+    SensorHtmlStageCompleted {
+        stage: &'static str,
+        stage_execution_id: String,
+        outcome: &'static str,
+        reason_code: &'static str,
+        proof_kind: &'static str,
+        confidence: Option<f64>,
+        confidence_status: &'static str,
+        duration_us: u64,
+        rule_revision: Option<String>,
+        model_call_id: Option<String>,
+        facts: SensorHtmlStageFacts,
+        coverage: SensorHtmlStageCoverage,
+    },
     RequestCompleted {
         decision: String,
         reason_code: String,
@@ -1218,6 +1309,19 @@ enum Payload {
         truncated_bytes: u64,
         reason_code: &'static str,
     },
+}
+
+#[derive(Serialize)]
+struct SensorHtmlStageFacts {
+    operation_id: Option<String>,
+    origin_sha256: String,
+    injected_sha256: String,
+}
+
+#[derive(Serialize)]
+struct SensorHtmlStageCoverage {
+    origin_entity_verified: bool,
+    sensor_scripts_injected: bool,
 }
 
 #[derive(Serialize)]
@@ -1356,7 +1460,7 @@ mod tests {
     use std::{fs, path::PathBuf};
     use xshield_core::identity::UnixSeconds;
     use xshield_gateway::{
-        SENSOR_ASSET_PATH, SENSOR_BOOTSTRAP_PATH, SENSOR_PREPARE_PATH,
+        SENSOR_ASSET_PATH, SENSOR_BOOTSTRAP_PATH, SENSOR_LOADER_PATH, SENSOR_PREPARE_PATH,
         request_crypto::RequestCryptoPolicy,
     };
 
@@ -1469,10 +1573,99 @@ mod tests {
                             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         ]
                     }
+                },
+                {
+                    "operation_id": "home.read",
+                    "method": "GET",
+                    "path": "/home",
+                    "admission": "PUBLIC",
+                    "source_action": null,
+                    "resource_type": null,
+                    "view_profile": null,
+                    "response": {
+                        "mode": "SENSOR_HTML",
+                        "max_bytes": 128,
+                        "adapter_revision": "home-r1",
+                        "origin_sha256": "8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a",
+                        "injection_offset": 27
+                    }
                 }
             ]
         });
         GatewayConfig::from_json(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn records_exact_sensor_html_transformation() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000028";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", "/home", UnixSeconds::new(1));
+        let admission = audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "28282828282828282828282828282828",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+                request_crypto: None,
+                sensor_observations: &[],
+                forward_origin: true,
+            })
+            .await
+            .unwrap();
+        let transformation = SensorHtmlAudit::new(
+            "home-r1".to_owned(),
+            "8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a".to_owned(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        );
+        audit
+            .finalize(FinalFacts {
+                request_id,
+                trace_id: "28282828282828282828282828282828",
+                method: "GET",
+                decision: &decision,
+                admission: &admission,
+                status: 200,
+                duration_us: 20,
+                proxy_error: false,
+                response_failure: None,
+                origin_status: Some(200),
+                response_crypto: None,
+                sensor_html: Some(&transformation),
+                response_source: ResponseSource::Origin,
+            })
+            .await
+            .unwrap();
+        drop(audit);
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut stage = None;
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id
+                    && event["payload"]["stage"] == "sensor_html_inject"
+                {
+                    stage = Some(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let stage = stage.unwrap();
+        assert_eq!(stage["payload"]["reason_code"], "SENSOR_HTML_INJECTED");
+        assert_eq!(stage["payload"]["rule_revision"], "home-r1");
+        assert_eq!(stage["payload"]["confidence"], serde_json::Value::Null);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn append_accepted_prefix(
@@ -1555,6 +1748,7 @@ mod tests {
                 response_failure: None,
                 origin_status: Some(200),
                 response_crypto: None,
+                sensor_html: None,
                 response_source: ResponseSource::Origin,
             })
             .await
@@ -1587,6 +1781,7 @@ mod tests {
                 response_failure: None,
                 origin_status: None,
                 response_crypto: None,
+                sensor_html: None,
                 response_source: ResponseSource::Origin,
             })
             .await
@@ -1642,6 +1837,13 @@ mod tests {
                 4,
             ),
             (
+                "GET",
+                SENSOR_LOADER_PATH,
+                "req_018f2a3b-4c5d-7000-8000-000000000027",
+                ReasonCode::SensorLoaderServed,
+                4,
+            ),
+            (
                 "POST",
                 SENSOR_PREPARE_PATH,
                 "req_018f2a3b-4c5d-7000-8000-000000000026",
@@ -1687,6 +1889,7 @@ mod tests {
                     response_failure: None,
                     origin_status: None,
                     response_crypto: None,
+                    sensor_html: None,
                     response_source: ResponseSource::Edge,
                 })
                 .await
@@ -1722,7 +1925,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(terminal.len(), 6);
+        assert_eq!(terminal.len(), 8);
         for (index, (_, _, _, reason, edge_sequence)) in cases.iter().enumerate() {
             let edge = &terminal[index * 2];
             let completed = &terminal[index * 2 + 1];
@@ -1940,6 +2143,7 @@ mod tests {
                 response_failure: Some(ReasonCode::ResponseValidationFailed),
                 origin_status: Some(200),
                 response_crypto: Some(&response_crypto),
+                sensor_html: None,
                 response_source: ResponseSource::Origin,
             })
             .await

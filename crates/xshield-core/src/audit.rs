@@ -160,12 +160,18 @@ pub enum ReasonCode {
     OriginResponseReceived,
     /// The versioned browser sensor asset was served by the edge.
     SensorAssetServed,
+    /// The immutable browser sensor bootstrap loader was served by the edge.
+    SensorLoaderServed,
     /// A dynamic browser sensor bootstrap was served by the edge.
     SensorBootstrapServed,
     /// A session-bound browser observation was durably accepted.
     SensorObservationAccepted,
     /// Browser observation framing or content failed strict validation.
     SensorObservationInvalid,
+    /// An exact approved HTML entity received versioned sensor scripts.
+    SensorHtmlInjected,
+    /// HTML sensor injection validation or rewriting failed closed.
+    SensorHtmlValidationFailed,
     /// A configured private response exceeded its complete-buffer bound.
     ResponseBodyTooLarge,
     /// Aggregate private-response buffering capacity was unavailable.
@@ -275,9 +281,12 @@ impl ReasonCode {
             Self::OriginForwardIntentRecorded => "ORIGIN_FORWARD_INTENT_RECORDED",
             Self::OriginResponseReceived => "ORIGIN_RESPONSE_RECEIVED",
             Self::SensorAssetServed => "SENSOR_ASSET_SERVED",
+            Self::SensorLoaderServed => "SENSOR_LOADER_SERVED",
             Self::SensorBootstrapServed => "SENSOR_BOOTSTRAP_SERVED",
             Self::SensorObservationAccepted => "SENSOR_OBSERVATION_ACCEPTED",
             Self::SensorObservationInvalid => "SENSOR_OBSERVATION_INVALID",
+            Self::SensorHtmlInjected => "SENSOR_HTML_INJECTED",
+            Self::SensorHtmlValidationFailed => "SENSOR_HTML_VALIDATION_FAILED",
             Self::ResponseBodyTooLarge => "RESPONSE_BODY_TOO_LARGE",
             Self::ResponseBufferCapacityExhausted => "RESPONSE_BUFFER_CAPACITY_EXHAUSTED",
             Self::ResponseValidationFailed => "RESPONSE_VALIDATION_FAILED",

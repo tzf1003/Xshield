@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await readFile(new URL("../src/sensor.ts", import.meta.url), "utf8");
+const loaderSource = await readFile(new URL("../src/loader.ts", import.meta.url), "utf8");
 
 const context = (prepareUrl = "/__xshield/v1/events/prepare") => {
   const requests = [];
@@ -59,4 +60,22 @@ test("rejects cross-origin event destinations", () => {
   assert.equal(requests.length, 0);
   assert.equal(sandbox.XshieldSensor.start(sandbox.__XSHIELD_BOOTSTRAP__), false);
   assert.equal(context("http://[").requests.length, 0);
+});
+
+test("loader starts the sensor from the same-origin bootstrap", async () => {
+  const starts = [];
+  const sandbox = {
+    XshieldSensor: { start: (bootstrap) => starts.push(bootstrap) },
+    fetch: (url, init) => {
+      assert.equal(url, "/__xshield/v1/bootstrap");
+      assert.equal(init.credentials, "same-origin");
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ sensor_version: "1.0.0" }),
+      });
+    },
+  };
+  vm.runInNewContext(loaderSource, sandbox);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(starts, [{ sensor_version: "1.0.0" }]);
 });

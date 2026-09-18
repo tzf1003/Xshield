@@ -54,6 +54,17 @@ port = int(sys.argv[1])
 capture = pathlib.Path(sys.argv[2])
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"<!doctype html><html><head></head><body>ok</body></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("ETag", '"origin-home-r1"')
+        if self.path == "/home-csp":
+            self.send_header("Content-Security-Policy", "default-src 'self'")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         with capture.open("ab") as output:
@@ -100,6 +111,24 @@ cat >"$test_dir/config.json" <<JSON
     "resource_type":null,
     "view_profile":null,
     "request_crypto":{"mode":"OBSERVE","adapter_revision":"orders-candidate-r2"}
+  },{
+    "operation_id":"home.read",
+    "method":"GET",
+    "path":"/home",
+    "admission":"PUBLIC",
+    "source_action":null,
+    "resource_type":null,
+    "view_profile":null,
+    "response":{"mode":"SENSOR_HTML","max_bytes":128,"adapter_revision":"home-r1","origin_sha256":"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a","injection_offset":27}
+  },{
+    "operation_id":"home-csp.read",
+    "method":"GET",
+    "path":"/home-csp",
+    "admission":"PUBLIC",
+    "source_action":null,
+    "resource_type":null,
+    "view_profile":null,
+    "response":{"mode":"SENSOR_HTML","max_bytes":128,"adapter_revision":"home-r1","origin_sha256":"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a","injection_offset":27}
   }]
 }
 JSON
@@ -132,6 +161,21 @@ grep -qi '^cross-origin-resource-policy: same-origin' "$test_dir/sensor-headers"
 grep -qi '^x-content-type-options: nosniff' "$test_dir/sensor-headers"
 grep -qi '^x-xshield-sensor-version: 1.0.0' "$test_dir/sensor-headers"
 grep -qi '^x-xshield-request-id: req_' "$test_dir/sensor-headers"
+
+curl --fail --silent --show-error -D "$test_dir/loader-headers" \
+    -o "$test_dir/loader.js" \
+    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.0.0-loader.js"
+cmp "$repo_root/sensor/src/loader.ts" "$test_dir/loader.js"
+grep -qi '^cache-control: public, max-age=31536000, immutable' "$test_dir/loader-headers"
+
+curl --fail --silent --show-error -D "$test_dir/home-headers" \
+    -o "$test_dir/home.html" "http://127.0.0.1:$gateway_port/home"
+grep -q '<script defer src="/__xshield/v1/sensor/1.0.0.js"></script><script defer src="/__xshield/v1/sensor/1.0.0-loader.js"></script></head>' "$test_dir/home.html"
+grep -qi '^cache-control: private, no-store' "$test_dir/home-headers"
+! grep -qi '^etag:' "$test_dir/home-headers"
+home_csp_status=$(curl --silent --show-error -o "$test_dir/home-csp.body" \
+    -w '%{http_code}' "http://127.0.0.1:$gateway_port/home-csp")
+[[ "$home_csp_status" == "502" ]]
 
 curl --fail --silent --show-error -D "$test_dir/bootstrap-headers" \
     -o "$test_dir/bootstrap.json" \

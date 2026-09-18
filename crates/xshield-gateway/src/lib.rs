@@ -31,6 +31,7 @@ pub mod request_crypto;
 pub mod response_crypto;
 pub mod response_grant;
 pub mod sensor;
+pub mod sensor_html;
 pub mod share_issue;
 pub mod share_token;
 
@@ -58,6 +59,8 @@ pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 /// Versioned same-origin browser sensor asset.
 pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
+/// Immutable browser sensor bootstrap loader.
+pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.0.0-loader.js";
 /// Dynamic browser sensor bootstrap document.
 pub const SENSOR_BOOTSTRAP_PATH: &str = "/__xshield/v1/bootstrap";
 /// Same-origin observation preparation endpoint advertised by bootstrap.
@@ -65,6 +68,7 @@ pub const SENSOR_PREPARE_PATH: &str = "/__xshield/v1/events/prepare";
 /// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
 pub const SENSOR_VERSION: &str = "1.0.0";
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
+const SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.loader";
 const SENSOR_BOOTSTRAP_OPERATION_ID: &str = "xshield.sensor.bootstrap";
 const SENSOR_PREPARE_OPERATION_ID: &str = "xshield.sensor.prepare";
 const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
@@ -74,6 +78,8 @@ const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
 pub enum InternalResponse {
     /// The immutable browser sensor JavaScript asset.
     SensorAsset,
+    /// The immutable browser sensor bootstrap loader.
+    SensorLoader,
     /// A per-navigation browser sensor bootstrap document.
     SensorBootstrap,
     /// A session-bound browser observation preparation request.
@@ -145,12 +151,19 @@ struct CompiledOperation {
 
 #[derive(Debug)]
 struct CompiledResponse {
+    kind: ResponseKind,
     max_bytes: usize,
     crypto: Option<ResponseCryptoRule>,
     grant: Option<ResponseGrantRule>,
     auth_binding: Option<AuthBindingRule>,
     auth_refresh: Option<AuthTransitionRule>,
     auth_context_switch: Option<AuthTransitionRule>,
+}
+
+#[derive(Debug)]
+enum ResponseKind {
+    BufferedJson,
+    SensorHtml(sensor_html::SensorHtmlRule),
 }
 
 struct CompiledOperations {
@@ -354,6 +367,12 @@ struct ResponseDto {
     mode: ResponseModeDto,
     max_bytes: usize,
     #[serde(default)]
+    adapter_revision: Option<String>,
+    #[serde(default)]
+    origin_sha256: Option<String>,
+    #[serde(default)]
+    injection_offset: Option<usize>,
+    #[serde(default)]
     crypto: Option<ResponseCryptoDto>,
     #[serde(default)]
     resource_grant: Option<ResponseGrantDto>,
@@ -422,6 +441,7 @@ struct ResponseGrantDto {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum ResponseModeDto {
     BufferedJson,
+    SensorHtml,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -486,6 +506,19 @@ impl GatewayConfig {
             .transpose()?;
         let sensor = dto.sensor.map(validate_sensor).transpose()?;
         let compiled_operations = compile_operations(dto.operations)?;
+        if sensor.is_none()
+            && compiled_operations
+                .exact
+                .values()
+                .chain(compiled_operations.path_resources.iter())
+                .any(|operation| {
+                    operation.response.as_ref().is_some_and(|response| {
+                        matches!(response.kind, ResponseKind::SensorHtml(_))
+                    })
+                })
+        {
+            return Err(ConfigError::Invalid("sensor"));
+        }
         if identity_store.is_none()
             && (sensor.is_some()
                 || compiled_operations
@@ -681,9 +714,9 @@ impl GatewayConfig {
         if let Some(response) = self.internal_response(method, path) {
             return Some(match response {
                 InternalResponse::SensorPrepare => AdmissionClass::AuthenticatedRoot,
-                InternalResponse::SensorAsset | InternalResponse::SensorBootstrap => {
-                    AdmissionClass::Public
-                }
+                InternalResponse::SensorAsset
+                | InternalResponse::SensorLoader
+                | InternalResponse::SensorBootstrap => AdmissionClass::Public,
             });
         }
         self.operation(method, path)
@@ -695,6 +728,7 @@ impl GatewayConfig {
     pub fn internal_response(&self, method: &str, path: &str) -> Option<InternalResponse> {
         match (method, path) {
             ("GET", SENSOR_ASSET_PATH) => Some(InternalResponse::SensorAsset),
+            ("GET", SENSOR_LOADER_PATH) => Some(InternalResponse::SensorLoader),
             ("GET", SENSOR_BOOTSTRAP_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorBootstrap)
             }
@@ -726,7 +760,24 @@ impl GatewayConfig {
     /// Returns the complete-buffer limit for an exact private JSON response.
     #[must_use]
     pub fn buffered_json_max_bytes(&self, method: &str, path: &str) -> Option<usize> {
-        Some(self.operation(method, path)?.response.as_ref()?.max_bytes)
+        let response = self.operation(method, path)?.response.as_ref()?;
+        matches!(response.kind, ResponseKind::BufferedJson).then_some(response.max_bytes)
+    }
+
+    /// Returns the complete-buffer response policy for one exact operation.
+    #[must_use]
+    pub fn buffered_response_policy(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<BufferedResponsePolicy<'_>> {
+        let response = self.operation(method, path)?.response.as_ref()?;
+        Some(match &response.kind {
+            ResponseKind::BufferedJson => BufferedResponsePolicy::Json {
+                max_bytes: response.max_bytes,
+            },
+            ResponseKind::SensorHtml(rule) => BufferedResponsePolicy::SensorHtml(rule),
+        })
     }
 
     /// Returns the server-selected request decryption rule for an exact operation.
@@ -875,6 +926,7 @@ impl GatewayConfig {
         if let Some(response) = self.internal_response(method, path) {
             let operation = match response {
                 InternalResponse::SensorAsset => SENSOR_ASSET_OPERATION_ID,
+                InternalResponse::SensorLoader => SENSOR_LOADER_OPERATION_ID,
                 InternalResponse::SensorBootstrap => SENSOR_BOOTSTRAP_OPERATION_ID,
                 InternalResponse::SensorPrepare => {
                     return GatewayDecision {
@@ -1126,6 +1178,38 @@ pub enum ResourceLocation<'a> {
     },
 }
 
+/// Complete-buffer response behavior selected by trusted operation configuration.
+#[derive(Clone, Copy)]
+pub enum BufferedResponsePolicy<'a> {
+    /// Strict JSON validation and optional response-side qualification.
+    Json {
+        /// Maximum complete entity size.
+        max_bytes: usize,
+    },
+    /// Exact-build HTML sensor injection.
+    SensorHtml(&'a sensor_html::SensorHtmlRule),
+}
+
+impl BufferedResponsePolicy<'_> {
+    /// Returns the maximum accepted source entity size.
+    #[must_use]
+    pub const fn max_bytes(self) -> usize {
+        match self {
+            Self::Json { max_bytes } => max_bytes,
+            Self::SensorHtml(rule) => rule.max_bytes(),
+        }
+    }
+
+    /// Returns the conservative source/rewrite memory reservation.
+    #[must_use]
+    pub fn max_in_flight_bytes(self) -> Option<usize> {
+        match self {
+            Self::Json { max_bytes } => max_bytes.checked_mul(2),
+            Self::SensorHtml(rule) => rule.max_in_flight_bytes(),
+        }
+    }
+}
+
 /// Approved response extraction rule resolved to one exact UI resource operation.
 #[derive(Clone, Copy, Debug)]
 pub struct ResponseGrantOperation<'a> {
@@ -1309,7 +1393,7 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         capability,
     )
     .map_err(ConfigError::Policy)?;
-    let response = dto.response.map(compile_response).transpose()?;
+    let response = compile_optional_response(dto.response, method)?;
     let response_has_side_effects = response.as_ref().is_some_and(|response| {
         response.crypto.is_some()
             || response.grant.is_some()
@@ -1436,12 +1520,22 @@ fn compile_request_crypto(
     }
 }
 
-fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
-    if !matches!(dto.mode, ResponseModeDto::BufferedJson)
-        || !(1..=MAX_BUFFERED_JSON_BYTES).contains(&dto.max_bytes)
-    {
+fn compile_optional_response(
+    dto: Option<ResponseDto>,
+    method: HttpMethod,
+) -> Result<Option<CompiledResponse>, ConfigError> {
+    dto.map(|response| compile_response(response, method))
+        .transpose()
+}
+
+fn compile_response(
+    mut dto: ResponseDto,
+    method: HttpMethod,
+) -> Result<CompiledResponse, ConfigError> {
+    if !(1..=MAX_BUFFERED_JSON_BYTES).contains(&dto.max_bytes) {
         return Err(ConfigError::Invalid("operations.response.max_bytes"));
     }
+    let kind = compile_response_kind(&mut dto, method)?;
     let crypto = dto
         .crypto
         .map(|crypto| compile_response_crypto(crypto, dto.max_bytes))
@@ -1516,6 +1610,7 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
         return Err(ConfigError::Invalid("operations.response"));
     }
     Ok(CompiledResponse {
+        kind,
         max_bytes: dto.max_bytes,
         crypto,
         grant,
@@ -1523,6 +1618,55 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
         auth_refresh,
         auth_context_switch,
     })
+}
+
+fn compile_response_kind(
+    dto: &mut ResponseDto,
+    method: HttpMethod,
+) -> Result<ResponseKind, ConfigError> {
+    match dto.mode {
+        ResponseModeDto::BufferedJson => {
+            if dto.adapter_revision.is_some()
+                || dto.origin_sha256.is_some()
+                || dto.injection_offset.is_some()
+            {
+                return Err(ConfigError::Invalid("operations.response"));
+            }
+            Ok(ResponseKind::BufferedJson)
+        }
+        ResponseModeDto::SensorHtml => {
+            if method != HttpMethod::Get
+                || dto.crypto.is_some()
+                || dto.resource_grant.is_some()
+                || dto.auth_binding.is_some()
+                || dto.auth_refresh.is_some()
+                || dto.auth_context_switch.is_some()
+            {
+                return Err(ConfigError::Invalid("operations.response"));
+            }
+            let adapter_revision = dto
+                .adapter_revision
+                .take()
+                .filter(|value| valid_scoped_value(value))
+                .ok_or(ConfigError::Invalid("operations.response.adapter_revision"))?;
+            let origin_sha256 = dto
+                .origin_sha256
+                .take()
+                .ok_or(ConfigError::Invalid("operations.response.origin_sha256"))?;
+            BuildFingerprint::parse(&origin_sha256).map_err(ConfigError::Provenance)?;
+            let injection_offset = dto
+                .injection_offset
+                .take()
+                .filter(|offset| *offset < dto.max_bytes)
+                .ok_or(ConfigError::Invalid("operations.response.injection_offset"))?;
+            Ok(ResponseKind::SensorHtml(sensor_html::SensorHtmlRule::new(
+                adapter_revision,
+                dto.max_bytes,
+                origin_sha256,
+                injection_offset,
+            )))
+        }
+    }
 }
 
 fn compile_response_crypto(
@@ -1813,6 +1957,10 @@ mod tests {
             config.internal_response("GET", SENSOR_ASSET_PATH),
             Some(InternalResponse::SensorAsset)
         );
+        assert_eq!(
+            config.internal_response("GET", SENSOR_LOADER_PATH),
+            Some(InternalResponse::SensorLoader)
+        );
         assert!(
             config
                 .internal_response("POST", SENSOR_ASSET_PATH)
@@ -1842,6 +1990,29 @@ mod tests {
         let prepare = config.admit_sensor_session("POST", SENSOR_PREPARE_PATH);
         assert_eq!(prepare.outcome, GatewayOutcome::Allowed);
         assert_eq!(prepare.reason_code, ReasonCode::SensorObservationAccepted);
+    }
+
+    #[test]
+    fn compiles_exact_sensor_html_response_adapter() {
+        let configured = CONFIG.replace(
+            "{\"operation_id\":\"catalog.read\",\"method\":\"GET\",\"path\":\"/catalog\",\"admission\":\"PUBLIC\",\"source_action\":null,\"resource_type\":null,\"view_profile\":null}",
+            "{\"operation_id\":\"catalog.read\",\"method\":\"GET\",\"path\":\"/catalog\",\"admission\":\"PUBLIC\",\"source_action\":null,\"resource_type\":null,\"view_profile\":null,\"response\":{\"mode\":\"SENSOR_HTML\",\"max_bytes\":128,\"adapter_revision\":\"home-r1\",\"origin_sha256\":\"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a\",\"injection_offset\":27}}",
+        );
+        let config = GatewayConfig::from_json(configured.as_bytes()).unwrap();
+        assert!(matches!(
+            config.buffered_response_policy("GET", "/catalog"),
+            Some(BufferedResponsePolicy::SensorHtml(rule))
+                if rule.adapter_revision() == "home-r1" && rule.max_bytes() == 128
+        ));
+
+        let missing_sensor = configured.replace(
+            "      \"sensor\":{\"origin\":\"https://app.example\",\"build_ref\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"heartbeat_seconds\":15},\n",
+            "",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(missing_sensor.as_bytes()),
+            Err(ConfigError::Invalid("sensor"))
+        ));
     }
 
     #[test]

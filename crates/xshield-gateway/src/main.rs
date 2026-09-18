@@ -30,7 +30,7 @@ use xshield_gateway::response_crypto::{
 };
 use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
 use xshield_gateway::{
-    GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
+    BufferedResponsePolicy, GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
     MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_CONFIG_BYTES, SENSOR_PREPARE_PATH,
 };
 use xshield_postgres::{
@@ -39,10 +39,10 @@ use xshield_postgres::{
 };
 use zeroize::Zeroizing;
 
-use crate::buffered_json::BufferedJsonResponse;
+use crate::buffered_json::BufferedResponse;
 use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RequestCryptoAudit,
-    ResponseCryptoAudit, ResponseSource, SensorObservationAudit, new_trace_id,
+    ResponseCryptoAudit, ResponseSource, SensorHtmlAudit, SensorObservationAudit, new_trace_id,
 };
 use crate::protected_identity::{
     CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE,
@@ -51,6 +51,7 @@ use crate::protected_identity::{
 
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
 const SENSOR_ASSET: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
+const SENSOR_LOADER: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
 
 fn validate_sensor_observation_headers(
     request: &pingora::http::RequestHeader,
@@ -139,7 +140,8 @@ struct RequestContext {
     rebuilt_request_len: Option<usize>,
     request_crypto_audit: Option<RequestCryptoAudit>,
     response_crypto_audit: Option<ResponseCryptoAudit>,
-    buffered_response: Option<BufferedJsonResponse>,
+    sensor_html_audit: Option<SensorHtmlAudit>,
+    buffered_response: Option<BufferedResponse>,
     response_identity: Option<ResponseIdentity>,
     compatibility_evidence: Option<CompatibilityEvidence>,
     sensor_session: Option<SensorSession>,
@@ -166,6 +168,7 @@ impl ProxyHttp for Gateway {
             rebuilt_request_len: None,
             request_crypto_audit: None,
             response_crypto_audit: None,
+            sensor_html_audit: None,
             buffered_response: None,
             response_identity: None,
             compatibility_evidence: None,
@@ -301,6 +304,9 @@ impl ProxyHttp for Gateway {
                 InternalResponse::SensorAsset => {
                     respond_sensor_asset(session, &context.request_id).await?;
                 }
+                InternalResponse::SensorLoader => {
+                    respond_sensor_loader(session, &context.request_id).await?;
+                }
                 InternalResponse::SensorBootstrap => {
                     let sensor = self.config.sensor().ok_or_else(|| {
                         PingoraError::explain(
@@ -386,13 +392,13 @@ impl ProxyHttp for Gateway {
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
         let request = session.req_header();
-        let buffered_json_limit = self
+        let buffered_policy = self
             .config
-            .buffered_json_max_bytes(request.method.as_str(), request.uri.path());
+            .buffered_response_policy(request.method.as_str(), request.uri.path());
         let response_crypto_rule = self
             .config
             .response_crypto_rule(request.method.as_str(), request.uri.path());
-        if upstream_response.status.as_u16() == 101 && buffered_json_limit.is_some() {
+        if upstream_response.status.as_u16() == 101 && buffered_policy.is_some() {
             context.origin_status = Some(101);
             context.response_failure = Some(ReasonCode::ResponseValidationFailed);
             if let Some(rule) = response_crypto_rule {
@@ -406,14 +412,20 @@ impl ProxyHttp for Gateway {
         }
         if !upstream_response.status.is_informational() {
             context.origin_status = Some(upstream_response.status.as_u16());
-            if let Some(limit) = buffered_json_limit {
-                match BufferedJsonResponse::begin(
+            if let Some(policy) = buffered_policy {
+                let reservation_bytes = response_crypto_rule
+                    .map(xshield_gateway::response_crypto::ResponseCryptoRule::max_in_flight_bytes)
+                    .or_else(|| policy.max_in_flight_bytes())
+                    .ok_or_else(|| {
+                        PingoraError::explain(
+                            ErrorType::HTTPStatus(502),
+                            ReasonCode::ResponseBufferCapacityExhausted.as_str(),
+                        )
+                    })?;
+                match BufferedResponse::begin(
                     upstream_response,
-                    limit,
-                    response_crypto_rule.map_or(
-                        limit,
-                        xshield_gateway::response_crypto::ResponseCryptoRule::max_in_flight_bytes,
-                    ),
+                    policy,
+                    reservation_bytes,
                     &self.buffered_body_budget,
                 ) {
                     Ok(buffer) => {
@@ -462,6 +474,8 @@ impl ProxyHttp for Gateway {
                         }
                         if response_crypto_rule.is_some() {
                             prepare_encrypted_response_headers(upstream_response)?;
+                        } else if matches!(policy, BufferedResponsePolicy::SensorHtml(_)) {
+                            prepare_sensor_html_response_headers(upstream_response)?;
                         }
                         context.buffered_response = Some(buffer);
                     }
@@ -492,8 +506,15 @@ impl ProxyHttp for Gateway {
         };
         match buffer.filter(body, end_of_stream) {
             Ok(Some(complete)) => {
+                if let Some(transformation) = complete.sensor_html {
+                    context.sensor_html_audit = Some(SensorHtmlAudit::new(
+                        transformation.adapter_revision,
+                        transformation.origin_sha256,
+                        transformation.injected_sha256,
+                    ));
+                }
                 let released = self
-                    .commit_auth_binding(session, context, complete)
+                    .commit_auth_binding(session, context, complete.body)
                     .and_then(|body| self.commit_auth_transition(session, context, body))
                     .and_then(|body| self.commit_response_grants(session, context, body))
                     .and_then(|body| self.encrypt_response(session, context, body));
@@ -566,6 +587,7 @@ impl ProxyHttp for Gateway {
                 response_failure: context.response_failure,
                 origin_status: context.origin_status,
                 response_crypto: context.response_crypto_audit.as_ref(),
+                sensor_html: context.sensor_html_audit.as_ref(),
                 response_source: context.response_source,
             })
             .await;
@@ -1049,6 +1071,24 @@ fn prepare_grant_response_headers(response: &mut ResponseHeader) -> PingoraResul
     response.insert_header("Cache-Control", "private, no-store")
 }
 
+fn prepare_sensor_html_response_headers(response: &mut ResponseHeader) -> PingoraResult<()> {
+    for name in [
+        "Content-Length",
+        "ETag",
+        "Last-Modified",
+        "Content-MD5",
+        "Digest",
+        "Content-Digest",
+        "Repr-Digest",
+        "Accept-Ranges",
+        "Content-Range",
+        "Trailer",
+    ] {
+        response.remove_header(name);
+    }
+    response.insert_header("Cache-Control", "private, no-store")
+}
+
 fn prepare_encrypted_response_headers(response: &mut ResponseHeader) -> PingoraResult<()> {
     for name in [
         "Content-Length",
@@ -1179,6 +1219,22 @@ async fn respond_denial(
 
 async fn respond_sensor_asset(session: &mut Session, request_id: &str) -> PingoraResult<()> {
     let body = Bytes::from_static(SENSOR_ASSET);
+    let mut response = ResponseHeader::build(200, Some(7))?;
+    response.insert_header("Content-Type", "text/javascript; charset=utf-8")?;
+    response.insert_header("Cache-Control", "public, max-age=31536000, immutable")?;
+    response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
+    response.insert_header("X-Content-Type-Options", "nosniff")?;
+    response.insert_header("X-Xshield-Sensor-Version", xshield_gateway::SENSOR_VERSION)?;
+    response.insert_header("X-Xshield-Request-Id", request_id)?;
+    response.set_content_length(body.len())?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session.write_response_body(Some(body), true).await
+}
+
+async fn respond_sensor_loader(session: &mut Session, request_id: &str) -> PingoraResult<()> {
+    let body = Bytes::from_static(SENSOR_LOADER);
     let mut response = ResponseHeader::build(200, Some(7))?;
     response.insert_header("Content-Type", "text/javascript; charset=utf-8")?;
     response.insert_header("Cache-Control", "public, max-age=31536000, immutable")?;
