@@ -3,14 +3,14 @@ use serde_json::json;
 use sqlx::PgPool;
 use std::{env, fs, path::PathBuf, time::Duration};
 use uuid::Uuid;
-use xshield_core::domain::{EventId, RequestId, SiteId, TenantId};
+use xshield_core::domain::{ArtifactId, EventId, RequestId, SiteId, TenantId};
 use xshield_evidence::{
     EvidenceClassification, EvidenceFidelity, EvidenceKey, EvidenceVaultConfig, EvidenceWrite,
     LocalEvidenceVault, VerifiedEvidenceManifest,
 };
 use xshield_postgres::{
-    EvidenceCatalogPublish, EvidenceCatalogQuery, EvidenceCatalogWriteOutcome,
-    PostgresIdentityStore,
+    EvidenceCatalogArtifactQuery, EvidenceCatalogPublish, EvidenceCatalogQuery,
+    EvidenceCatalogWriteOutcome, PostgresIdentityStore,
 };
 
 const KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -78,6 +78,8 @@ async fn catalog_publish_is_atomic_idempotent_scoped_and_bounded() {
     );
 
     assert_scoped_query(&store, &verified, &tenant, &site, &request).await;
+    assert_scoped_artifact_lookup(&store, &verified, &tenant, &site).await;
+    assert_deleted_is_hidden(&pool, &store, &verified, &tenant, &site).await;
 
     sqlx::query(
         "UPDATE xshield.artifact_catalog
@@ -91,16 +93,7 @@ async fn catalog_publish_is_atomic_idempotent_scoped_and_bounded() {
     .execute(&pool)
     .await
     .unwrap();
-    assert!(
-        store
-            .list_request_artifacts(
-                EvidenceCatalogQuery::new(&tenant, &site, &request, None, 16).unwrap()
-            )
-            .await
-            .unwrap()
-            .artifacts()
-            .is_empty()
-    );
+    assert_expired_is_hidden(&store, &verified, &tenant, &site, &request).await;
     assert_eq!(
         store
             .publish_evidence_manifest(
@@ -113,6 +106,123 @@ async fn catalog_publish_is_atomic_idempotent_scoped_and_bounded() {
 
     assert_expired_publication_is_rejected(&store, &vault, &tenant, &site, &request).await;
     fs::remove_dir_all(root).unwrap();
+}
+
+async fn assert_expired_is_hidden(
+    store: &PostgresIdentityStore,
+    verified: &VerifiedEvidenceManifest,
+    tenant: &TenantId,
+    site: &SiteId,
+    request: &RequestId,
+) {
+    assert!(
+        store
+            .list_request_artifacts(
+                EvidenceCatalogQuery::new(tenant, site, request, None, 16).unwrap()
+            )
+            .await
+            .unwrap()
+            .artifacts()
+            .is_empty()
+    );
+    let artifact_id = ArtifactId::parse(&verified.manifest().artifact_id).unwrap();
+    assert!(
+        store
+            .find_artifact(EvidenceCatalogArtifactQuery::new(
+                tenant,
+                site,
+                &artifact_id,
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn assert_deleted_is_hidden(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    verified: &VerifiedEvidenceManifest,
+    tenant: &TenantId,
+    site: &SiteId,
+) {
+    let artifact_id = ArtifactId::parse(&verified.manifest().artifact_id).unwrap();
+    sqlx::query(
+        "UPDATE xshield.artifact_catalog
+         SET status = 'deleted', deleted_at = clock_timestamp()
+         WHERE tenant_id = $1 AND site_id = $2 AND artifact_id = $3",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .bind(artifact_id.as_str())
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(
+        store
+            .find_artifact(EvidenceCatalogArtifactQuery::new(
+                tenant,
+                site,
+                &artifact_id,
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sqlx::query(
+        "UPDATE xshield.artifact_catalog
+         SET status = 'active', deleted_at = NULL
+         WHERE tenant_id = $1 AND site_id = $2 AND artifact_id = $3",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .bind(artifact_id.as_str())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn assert_scoped_artifact_lookup(
+    store: &PostgresIdentityStore,
+    verified: &VerifiedEvidenceManifest,
+    tenant: &TenantId,
+    site: &SiteId,
+) {
+    let artifact_id = ArtifactId::parse(&verified.manifest().artifact_id).unwrap();
+    let artifact = store
+        .find_artifact(EvidenceCatalogArtifactQuery::new(
+            tenant,
+            site,
+            &artifact_id,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(artifact.manifest(), verified.manifest());
+    let other_tenant = TenantId::parse("tenant_other").unwrap();
+    assert!(
+        store
+            .find_artifact(EvidenceCatalogArtifactQuery::new(
+                &other_tenant,
+                site,
+                &artifact_id,
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let other_site = SiteId::parse("site_other").unwrap();
+    assert!(
+        store
+            .find_artifact(EvidenceCatalogArtifactQuery::new(
+                tenant,
+                &other_site,
+                &artifact_id,
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 async fn assert_expired_publication_is_rejected(

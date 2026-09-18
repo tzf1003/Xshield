@@ -44,7 +44,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | GET /control/v1/requests/{request_id}/evidence | 作用域内证据 manifest 分页，不读取内容 |
 | GET /control/v1/model-calls/{model_call_id} | 逻辑调用与实际尝试、输入输出引用 |
 | GET /control/v1/agent-runs/{agent_run_id} | 子调用、工具、产物和权限快照 |
-| GET /control/v1/artifacts/{id} | 证据状态、长度、保密和完整性 |
+| GET /control/v1/artifacts/{artifact_id} | 作用域内单个证据状态、长度、保密和完整性，不读取内容 |
 | POST /control/v1/artifacts/{id}/access | 申请受限原文访问 |
 | POST /control/v1/cases | 建立调查案与证据集合 |
 | POST /control/v1/replays | 异步安全回放任务 |

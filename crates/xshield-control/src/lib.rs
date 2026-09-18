@@ -31,7 +31,9 @@ use xshield_core::{
     domain::{ArtifactId, EventId, RequestId, SiteId, TenantId},
 };
 use xshield_evidence::EvidenceManifest;
-use xshield_postgres::{EvidenceCatalogPage, EvidenceCatalogQuery, PostgresIdentityStore};
+use xshield_postgres::{
+    EvidenceCatalogArtifactQuery, EvidenceCatalogPage, EvidenceCatalogQuery, PostgresIdentityStore,
+};
 use xshield_worker::{
     IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEventPosition,
     RequestEvents, RequestSummary, inspect_publication_health, query_request_events,
@@ -43,6 +45,7 @@ const HEALTH_PATH: &str = "/control/v1/audit/health";
 const REQUEST_SUMMARY_PATH: &str = "/control/v1/requests/{request_id}";
 const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
 const REQUEST_EVIDENCE_PATH: &str = "/control/v1/requests/{request_id}/evidence";
+const ARTIFACT_PATH: &str = "/control/v1/artifacts/{artifact_id}";
 const RATE_WINDOW: Duration = Duration::from_mins(1);
 const TOKEN_BYTES_MAX: usize = 512;
 const TOKEN_LIFETIME_MAX_SECONDS: u64 = 24 * 60 * 60;
@@ -76,6 +79,11 @@ const REQUEST_SUMMARY_ACCESS: AccessAction = AccessAction {
 const REQUEST_EVIDENCE_ACCESS: AccessAction = AccessAction {
     event_type: "console.manifest.read",
     path: REQUEST_EVIDENCE_PATH,
+    role: ManagementRole::Observer,
+};
+const ARTIFACT_ACCESS: AccessAction = AccessAction {
+    event_type: "console.manifest.read",
+    path: ARTIFACT_PATH,
     role: ManagementRole::Observer,
 };
 
@@ -552,6 +560,7 @@ impl ControlPlane {
                 Some(&audit_subject),
                 REQUEST_EVIDENCE_ACCESS,
                 Some(&audit_target),
+                None,
                 "PASS",
                 "CONTROL_MANIFESTS_READ",
                 &evidence_refs,
@@ -569,6 +578,95 @@ impl ControlPlane {
             truncated: next_cursor.is_some(),
             next_cursor,
             artifacts,
+        })
+    }
+
+    async fn artifact(
+        self: Arc<Self>,
+        authorization: Option<String>,
+        target_artifact_id: String,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(authorization.as_deref(), &auth_request_id, ARTIFACT_ACCESS)
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Ok(target_artifact_id) = ArtifactId::parse(target_artifact_id) else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    ARTIFACT_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_ARTIFACT_ID_INVALID",
+                    "invalid artifact identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let artifact = self
+            .catalog
+            .find_artifact(EvidenceCatalogArtifactQuery::new(
+                &self.config.tenant_id,
+                &self.config.site_id,
+                &target_artifact_id,
+            ))
+            .await;
+        let Ok(artifact) = artifact else {
+            return self
+                .audited_artifact_error_async(
+                    request_id,
+                    subject,
+                    target_artifact_id,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_CATALOG_UNAVAILABLE",
+                    "evidence catalog is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let found = artifact.is_some();
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_artifact_id = target_artifact_id.clone();
+        let audited = tokio::task::spawn_blocking(move || {
+            let evidence_refs = found
+                .then_some(audit_artifact_id.as_str())
+                .into_iter()
+                .collect::<Vec<_>>();
+            audit_control.append_access_event_with_evidence(
+                &audit_request_id,
+                Some(&audit_subject),
+                ARTIFACT_ACCESS,
+                None,
+                Some(&audit_artifact_id),
+                "PASS",
+                "CONTROL_MANIFEST_READ",
+                &evidence_refs,
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        EndpointResult::Artifact(ArtifactResponse {
+            request_id,
+            tenant_id: self.config.tenant_id.as_str().to_owned(),
+            site_id: self.config.site_id.as_str().to_owned(),
+            source_artifact_id: target_artifact_id.as_str().to_owned(),
+            found,
+            artifact: artifact.as_ref().map(evidence_artifact_response),
         })
     }
 
@@ -947,6 +1045,52 @@ impl ControlPlane {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn audited_artifact_error_async(
+        self: &Arc<Self>,
+        request_id: String,
+        subject: String,
+        target_artifact_id: ArtifactId,
+        status: StatusCode,
+        reason_code: &'static str,
+        message_safe: &'static str,
+        retryable: bool,
+        next_action: &'static str,
+    ) -> EndpointResult {
+        let control = Arc::clone(self);
+        let fallback_request_id = request_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            if control
+                .append_access_event_with_evidence(
+                    &request_id,
+                    Some(&subject),
+                    ARTIFACT_ACCESS,
+                    None,
+                    Some(&target_artifact_id),
+                    "DENY",
+                    reason_code,
+                    &[],
+                )
+                .is_err()
+            {
+                return audit_unavailable(&request_id);
+            }
+            api_error(
+                &request_id,
+                status,
+                reason_code,
+                message_safe,
+                retryable,
+                next_action,
+            )
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => internal_error(&fallback_request_id),
+        }
+    }
+
     fn authorize(
         &self,
         authorization: Option<&str>,
@@ -1117,6 +1261,7 @@ impl ControlPlane {
             subject_ref,
             action,
             target_request_id,
+            None,
             outcome,
             reason_code,
             &[],
@@ -1130,6 +1275,7 @@ impl ControlPlane {
         subject_ref: Option<&str>,
         action: AccessAction,
         target_request_id: Option<&RequestId>,
+        target_artifact_id: Option<&ArtifactId>,
         outcome: &'static str,
         reason_code: &'static str,
         evidence_refs: &[&str],
@@ -1171,6 +1317,7 @@ impl ControlPlane {
                 path: action.path,
                 subject_ref,
                 target_request_id: target_request_id.map(RequestId::as_str),
+                target_artifact_id: target_artifact_id.map(ArtifactId::as_str),
                 outcome,
                 reason_code,
             },
@@ -1201,6 +1348,7 @@ pub fn router(control: ControlPlane) -> Router {
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
         .route(REQUEST_EVIDENCE_PATH, get(request_evidence_handler))
+        .route(ARTIFACT_PATH, get(artifact_handler))
         .with_state(Arc::new(control))
 }
 
@@ -1262,11 +1410,27 @@ async fn request_evidence_handler(
         .into_response()
 }
 
+async fn artifact_handler(
+    State(control): State<Arc<ControlPlane>>,
+    Path(artifact_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .artifact(authorization, artifact_id)
+        .await
+        .into_response()
+}
+
 enum EndpointResult {
     Success(HealthResponse),
     RequestSummary(RequestSummaryResponse),
     RequestEvents(RequestEventsResponse),
     RequestEvidence(RequestEvidenceResponse),
+    Artifact(ArtifactResponse),
     Error(StatusCode, ErrorResponse),
 }
 
@@ -1277,6 +1441,7 @@ impl IntoResponse for EndpointResult {
             Self::RequestSummary(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::Artifact(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Error(status, response) => (status, Json(response)).into_response(),
         })
     }
@@ -1509,6 +1674,27 @@ struct EvidenceArtifactResponse {
     manifest: EvidenceManifest,
 }
 
+fn evidence_artifact_response(
+    artifact: &xshield_postgres::CatalogArtifact,
+) -> EvidenceArtifactResponse {
+    EvidenceArtifactResponse {
+        recorded_at: artifact
+            .recorded_at()
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
+        manifest: artifact.manifest().clone(),
+    }
+}
+
+#[derive(Serialize)]
+struct ArtifactResponse {
+    request_id: String,
+    tenant_id: String,
+    site_id: String,
+    source_artifact_id: String,
+    found: bool,
+    artifact: Option<EvidenceArtifactResponse>,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error_code: &'static str,
@@ -1577,6 +1763,7 @@ struct AccessPayload<'a> {
     path: &'a str,
     subject_ref: Option<&'a str>,
     target_request_id: Option<&'a str>,
+    target_artifact_id: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
 }
@@ -1690,6 +1877,7 @@ mod tests {
     const SEAL_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     const CURSOR_KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
     const TOKEN: &str = "test-control-token-32-bytes-long-value";
+    const MISSING_ARTIFACT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000999";
 
     #[tokio::test]
     async fn enforces_auth_scope_rate_limit_and_health_contract() {
@@ -2004,6 +2192,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_lookup_validates_identity_and_audits_catalog_failure() {
+        let invalid_fixture = Fixture::new(10, ManagementRole::Observer);
+        let invalid = router(invalid_fixture.control)
+            .oneshot(authenticated_path("/control/v1/artifacts/not-an-artifact"))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_access_event_targets_and_evidence(
+            &invalid_fixture.access_directory,
+            "console.manifest.read",
+            &[None],
+            &[None],
+            &[0],
+        );
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://xshield:xshield@127.0.0.1:1/xshield")
+            .unwrap();
+        pool.close().await;
+        let unavailable_fixture = Fixture::with_catalog(
+            10,
+            ManagementRole::Observer,
+            PostgresIdentityStore::from_pool(pool),
+            1,
+        );
+        let artifact_id = "artifact_018f2a3b-4c5d-7000-8000-000000000998";
+        let unavailable = router(unavailable_fixture.control)
+            .oneshot(authenticated_path(&format!(
+                "/control/v1/artifacts/{artifact_id}"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(unavailable.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "CONTROL_CATALOG_UNAVAILABLE");
+        assert_access_event_targets_and_evidence(
+            &unavailable_fixture.access_directory,
+            "console.manifest.read",
+            &[None],
+            &[Some(artifact_id)],
+            &[0],
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
     async fn evidence_manifests_are_scoped_paginated_and_audited() {
         let database_url =
@@ -2061,6 +2295,7 @@ mod tests {
         assert_eq!(wrong_scope.status(), StatusCode::BAD_REQUEST);
 
         let second_page = app
+            .clone()
             .oneshot(authenticated_path(&format!("{path}?cursor={cursor}")))
             .await
             .unwrap();
@@ -2071,6 +2306,8 @@ mod tests {
         assert_ne!(body["artifacts"][0]["artifact_id"], returned);
         assert_eq!(body["truncated"], false);
         assert!(body["next_cursor"].is_null());
+
+        assert_artifact_endpoints(&app, &first).await;
         assert_access_event_targets_and_evidence(
             &fixture.access_directory,
             "console.manifest.read",
@@ -2078,8 +2315,17 @@ mod tests {
                 Some(request.as_str()),
                 Some(other_request.as_str()),
                 Some(request.as_str()),
+                None,
+                None,
             ],
-            &[1, 0, 1],
+            &[
+                None,
+                None,
+                None,
+                Some(first.as_str()),
+                Some(MISSING_ARTIFACT_ID),
+            ],
+            &[1, 0, 1, 1, 0],
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -2089,6 +2335,38 @@ mod tests {
             .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
             .body(Body::empty())
             .unwrap()
+    }
+
+    async fn assert_artifact_endpoints(app: &axum::Router, artifact_id: &str) {
+        let artifact = app
+            .clone()
+            .oneshot(authenticated_path(&format!(
+                "/control/v1/artifacts/{artifact_id}"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(artifact.status(), StatusCode::OK);
+        assert_eq!(artifact.headers()["cache-control"], "private, no-store");
+        let body = to_bytes(artifact.into_body(), 32 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["source_artifact_id"], artifact_id);
+        assert_eq!(body["found"], true);
+        assert_eq!(body["artifact"]["artifact_id"], artifact_id);
+        assert!(body["artifact"].get("plaintext").is_none());
+
+        let missing = app
+            .clone()
+            .oneshot(authenticated_path(&format!(
+                "/control/v1/artifacts/{MISSING_ARTIFACT_ID}"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::OK);
+        let body = to_bytes(missing.into_body(), 32 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["source_artifact_id"], MISSING_ARTIFACT_ID);
+        assert_eq!(body["found"], false);
+        assert!(body["artifact"].is_null());
     }
 
     async fn publish_test_artifact(
@@ -2388,6 +2666,7 @@ mod tests {
             directory,
             event_type,
             target_request_ids,
+            &vec![None; target_request_ids.len()],
             &vec![0; target_request_ids.len()],
         );
     }
@@ -2396,9 +2675,11 @@ mod tests {
         directory: &Path,
         event_type: &str,
         target_request_ids: &[Option<&str>],
+        target_artifact_ids: &[Option<&str>],
         evidence_counts: &[usize],
     ) {
         assert_eq!(target_request_ids.len(), evidence_counts.len());
+        assert_eq!(target_artifact_ids.len(), evidence_counts.len());
         let manifests = directory.parent().unwrap().join("access-manifests");
         private_directory(&manifests);
         let signing = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY).unwrap();
@@ -2412,9 +2693,10 @@ mod tests {
         .unwrap();
         assert_eq!(segments.len(), target_request_ids.len());
         let verifier = signing.verifying_key().unwrap();
-        for ((segment, target_request_id), evidence_count) in segments
+        for (((segment, target_request_id), target_artifact_id), evidence_count) in segments
             .into_iter()
             .zip(target_request_ids)
+            .zip(target_artifact_ids)
             .zip(evidence_counts)
         {
             let path = directory.join(format!("segment-{}.closed.xja", segment.producer_boot_id));
@@ -2442,6 +2724,10 @@ mod tests {
             assert_eq!(
                 event["payload"]["target_request_id"],
                 target_request_id.map_or(Value::Null, Value::from)
+            );
+            assert_eq!(
+                event["payload"]["target_artifact_id"],
+                target_artifact_id.map_or(Value::Null, Value::from)
             );
             assert!(reader.next_record().unwrap().is_none());
         }

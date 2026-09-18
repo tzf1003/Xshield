@@ -51,6 +51,29 @@ pub struct EvidenceCatalogQuery<'a> {
     limit: u16,
 }
 
+/// Exact-scope lookup for one catalog artifact.
+pub struct EvidenceCatalogArtifactQuery<'a> {
+    tenant: &'a TenantId,
+    site: &'a SiteId,
+    artifact: &'a ArtifactId,
+}
+
+impl<'a> EvidenceCatalogArtifactQuery<'a> {
+    /// Binds a typed artifact identity to the authenticated service scope.
+    #[must_use]
+    pub const fn new(
+        tenant_id: &'a TenantId,
+        site_id: &'a SiteId,
+        artifact_id: &'a ArtifactId,
+    ) -> Self {
+        Self {
+            tenant: tenant_id,
+            site: site_id,
+            artifact: artifact_id,
+        }
+    }
+}
+
 impl<'a> EvidenceCatalogQuery<'a> {
     /// Creates a query returning at most 128 active, unexpired manifests.
     ///
@@ -225,6 +248,33 @@ impl PostgresIdentityStore {
             artifacts,
             next_artifact_id,
         })
+    }
+
+    /// Returns one active, unexpired manifest in the exact service scope.
+    ///
+    /// `PostgreSQL` supplies the current time. Missing, deleted, expired, and
+    /// differently scoped identities all return `None`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database failure or corrupt durable metadata.
+    pub async fn find_artifact(
+        &self,
+        query: EvidenceCatalogArtifactQuery<'_>,
+    ) -> Result<Option<CatalogArtifact>, StoreError> {
+        sqlx::query(
+            "SELECT * FROM xshield.artifact_catalog
+             WHERE tenant_id = $1 AND site_id = $2 AND artifact_id = $3
+               AND status = 'active' AND deleted_at IS NULL
+               AND expires_at > clock_timestamp()",
+        )
+        .bind(query.tenant.as_str())
+        .bind(query.site.as_str())
+        .bind(query.artifact.as_str())
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(catalog_artifact)
+        .transpose()
     }
 }
 

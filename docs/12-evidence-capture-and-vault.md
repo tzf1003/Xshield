@@ -55,6 +55,8 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 
 控制面 `GET /control/v1/requests/{request_id}/evidence` 已接入该 catalog：仅向精确作用域的 Observer 返回 typed manifest 与 catalog 时间，不访问对象内容。列表按 artifact UUIDv7 身份稳定排序，服务端页大小上限 128；下一页游标以独立分页密钥和用途域 HMAC 绑定管理主体、tenant/site、目标 request、页大小及最后 artifact，错误作用域或接口不能复用。每次成功、拒绝或依赖失败均写 `console.manifest.read` 管理审计。
 
+`GET /control/v1/artifacts/{artifact_id}` 复用同一 Observer 与服务端 tenant/site 作用域，精确返回一个 active、未删除、未过期的 typed manifest。不存在、已删除、已过期和其他作用域统一返回 `found=false`，避免对象存在性探测；响应与审计保留请求目标，只有实际返回的对象进入 `evidence_refs`。该接口同样不访问对象内容。
+
 ## 12.6 保留与删除
 
 建议初始：解密业务原文 24 小时，脱敏证据和模型调用 7 天，决策索引 30 天，已封存调查案按案设置；这些是工程默认，不是合规结论。所有期限由站点确认，不能无限保存“以后也许有用”的病历和凭证。
