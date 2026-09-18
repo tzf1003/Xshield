@@ -1323,7 +1323,9 @@ mod tests {
         admin::{ManagementPrincipal, ManagementRole},
         domain::{EventId, RequestId, SiteId, TenantId},
     };
-    use xshield_worker::{AuditEventSummary, PublisherConfig, RequestEventPosition};
+    use xshield_worker::{
+        AuditEventSummary, PublisherConfig, RequestEventPosition, RequestStageSummary,
+    };
 
     const JOURNAL_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const SEAL_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -1579,6 +1581,18 @@ mod tests {
             forwarded: 1,
             terminal: 1,
         }]));
+        mock.add(test::handlers::provide([RequestStageSummary {
+            stage: "admission".to_owned(),
+            outcome: "PASS".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            proof_kind: "deterministic".to_owned(),
+            confidence: None,
+            confidence_status: "not_applicable".to_owned(),
+            first_request_seq: 2,
+            last_request_seq: 2,
+            duration_us: 10,
+            event_count: 1,
+        }]));
         mock.add(test::handlers::provide(Vec::<SummaryRow>::new()));
         let fixture = Fixture::with_index(
             10,
@@ -1604,6 +1618,7 @@ mod tests {
         assert_eq!(body["completeness"], "complete");
         assert_eq!(body["summary"]["method"], "POST");
         assert_eq!(body["summary"]["business_result_confirmed"], true);
+        assert_eq!(body["summary"]["stages"][0]["stage"], "admission");
         assert!(body["summary"].get("payload_json").is_none());
         let missing = app
             .oneshot(

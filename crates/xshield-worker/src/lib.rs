@@ -27,6 +27,7 @@ const MANIFEST_BYTES_MAX: u64 = 1024;
 const LIST_ITEMS_MAX: usize = 256;
 const NAME_BYTES_MAX: usize = 128;
 const MAX_METADATA_RETENTION_DAYS: u16 = 3_650;
+const MAX_REQUEST_STAGES: usize = 128;
 
 /// Immutable publication settings for one analytical destination.
 #[derive(Clone, Debug)]
@@ -213,6 +214,33 @@ pub struct RequestSummary {
     pub terminal: bool,
     /// Whether the terminal event confirms an origin response.
     pub business_result_confirmed: bool,
+    /// Observed stage aggregates ordered by their first request sequence.
+    pub stages: Vec<RequestStageSummary>,
+}
+
+/// Latest redacted outcome and ordering facts for one observed request stage.
+#[derive(Clone, Debug, Deserialize, Serialize, Row)]
+pub struct RequestStageSummary {
+    /// Validated stage identifier.
+    pub stage: String,
+    /// Latest stage outcome.
+    pub outcome: String,
+    /// Latest stable stage reason.
+    pub reason_code: String,
+    /// Latest stage proof class.
+    pub proof_kind: String,
+    /// Latest provider confidence when permitted by the proof contract.
+    pub confidence: Option<f64>,
+    /// Explicit confidence availability state.
+    pub confidence_status: String,
+    /// First request-local sequence observed for this stage.
+    pub first_request_seq: u32,
+    /// Latest request-local sequence observed for this stage.
+    pub last_request_seq: u32,
+    /// Latest stage duration in microseconds.
+    pub duration_us: u64,
+    /// Number of retained events associated with this stage.
+    pub event_count: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Row)]
@@ -272,7 +300,80 @@ pub async fn query_request_summary(
         .with_setting("max_rows_to_read", "1000000")
         .fetch_optional::<RequestSummaryRow>()
         .await?;
-    row.map(RequestSummary::try_from).transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let mut summary = RequestSummary::try_from(row)?;
+    summary.stages = query_request_stages(config, client, tenant_id, site_id, request_id).await?;
+    Ok(Some(summary))
+}
+
+async fn query_request_stages(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    request_id: &RequestId,
+) -> Result<Vec<RequestStageSummary>, PublishError> {
+    let mut stages = client
+        .query(
+            "SELECT stage,argMax(outcome,tuple(request_seq,event_id)) AS outcome,\
+             argMax(reason_code,tuple(request_seq,event_id)) AS reason_code,\
+             argMax(proof_kind,tuple(request_seq,event_id)) AS proof_kind,\
+             argMax(confidence,tuple(request_seq,event_id)) AS confidence,\
+             argMax(confidence_status,tuple(request_seq,event_id)) AS confidence_status,\
+             min(request_seq) AS first_request_seq,max(request_seq) AS last_request_seq,\
+             argMax(duration_us,tuple(request_seq,event_id)) AS duration_us,\
+             count() AS event_count FROM ? WHERE tenant_id = ? AND site_id = ? \
+             AND request_id = ? AND stage != '' GROUP BY stage \
+             ORDER BY first_request_seq,stage LIMIT ?",
+        )
+        .bind(Identifier(&config.active_view))
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(request_id.as_str())
+        .bind(MAX_REQUEST_STAGES + 1)
+        .with_setting("max_execution_time", "2")
+        .with_setting("max_rows_to_read", "1000000")
+        .fetch_all::<RequestStageSummary>()
+        .await?;
+    if stages.len() > MAX_REQUEST_STAGES {
+        return Err(PublishError::InvalidEvent);
+    }
+    for stage in &stages {
+        validate_stage_summary(stage)?;
+    }
+    stages.shrink_to_fit();
+    Ok(stages)
+}
+
+fn validate_stage_summary(stage: &RequestStageSummary) -> Result<(), PublishError> {
+    if !valid_name(&stage.stage)
+        || !matches!(
+            stage.outcome.as_str(),
+            "PASS" | "DENY" | "UNKNOWN" | "ERROR" | "SKIPPED" | "CANCELLED"
+        )
+        || !valid_name(&stage.reason_code)
+        || !matches!(
+            stage.proof_kind.as_str(),
+            "deterministic" | "model" | "observation" | "none"
+        )
+        || !matches!(
+            stage.confidence_status.as_str(),
+            "provided" | "not_applicable" | "not_provided" | "unavailable"
+        )
+        || stage
+            .confidence
+            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        || (stage.proof_kind == "deterministic"
+            && (stage.confidence.is_some() || stage.confidence_status != "not_applicable"))
+        || stage.first_request_seq == 0
+        || stage.last_request_seq < stage.first_request_seq
+        || stage.event_count == 0
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    Ok(())
 }
 
 impl TryFrom<RequestSummaryRow> for RequestSummary {
@@ -319,6 +420,7 @@ impl TryFrom<RequestSummaryRow> for RequestSummary {
             duration_us: terminal.then_some(row.duration_us),
             forwarded: row.forwarded == 1,
             terminal,
+            stages: Vec::new(),
         })
     }
 }
@@ -1485,7 +1587,7 @@ impl From<clickhouse::error::Error> for PublishError {
 mod tests {
     use super::{
         AuditEventSummary, Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError,
-        PublisherConfig, RequestSummaryRow, TimeDelta, closed_segment_paths,
+        PublisherConfig, RequestStageSummary, RequestSummaryRow, TimeDelta, closed_segment_paths,
         inspect_publication_health, prepare_private_directory, publish_sealed_segments,
         query_request_events, query_request_summary, read_private_bounded, write_checkpoint,
     };
@@ -1727,6 +1829,18 @@ mod tests {
             forwarded: 1,
             terminal: 1,
         }]));
+        mock.add(test::handlers::provide([RequestStageSummary {
+            stage: "admission".to_owned(),
+            outcome: "PASS".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            proof_kind: "deterministic".to_owned(),
+            confidence: None,
+            confidence_status: "not_applicable".to_owned(),
+            first_request_seq: 2,
+            last_request_seq: 2,
+            duration_us: 10,
+            event_count: 1,
+        }]));
         mock.add(test::handlers::provide(Vec::<RequestSummaryRow>::new()));
         let client = Client::default().with_mock(&mock);
         let tenant = TenantId::parse("tenant_a").unwrap();
@@ -1741,6 +1855,10 @@ mod tests {
         assert!(summary.forwarded);
         assert!(summary.terminal);
         assert!(summary.business_result_confirmed);
+        assert_eq!(summary.stages[0].stage, "admission");
+        let mut invalid_stage = summary.stages[0].clone();
+        invalid_stage.first_request_seq = 0;
+        assert!(super::validate_stage_summary(&invalid_stage).is_err());
         assert!(
             query_request_summary(&fixture.config, &client, &tenant, &site, &request)
                 .await
