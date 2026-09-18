@@ -22,7 +22,7 @@
 
 ## M3 完整日志后台
 
-当前增量：控制服务已提供单 request_id 的脱敏聚合摘要、受限阶段聚合与事件时间线，强制 Observer 角色与服务端 tenant/site 作用域，只查询 retention-aware 去重视图。摘要由发布器校验后提取的固定列生成，显式区分 complete、pending、pending_index 与 not_found；阶段按首次序列排序并再次校验结果、证明和 confidence 契约；事件结果采用稳定键集游标分页，游标以独立 HMAC 密钥绑定主体、作用域、目标请求、查询版本和页大小。各类查询均携带索引完整性状态并写独立耐久审计。证据 manifest 与对象内容审批继续迭代。
+当前增量：控制服务已提供单 request_id 的脱敏聚合摘要、受限阶段聚合与事件时间线，强制 Observer 角色与服务端 tenant/site 作用域，只查询 retention-aware 去重视图。摘要由发布器校验后提取的固定列生成，显式区分 complete、pending、pending_index 与 not_found；阶段按首次序列排序并再次校验结果、证明和 confidence 契约；事件结果采用稳定键集游标分页，游标以独立 HMAC 密钥绑定主体、作用域、目标请求、查询版本和页大小。各类查询均携带索引完整性状态并写独立耐久审计。本地证据库已形成单对象 AES-256-GCM、artifact 作用域派生密钥、typed manifest HMAC、私有耐久写、到期/跨域统一拒读和篡改检测闭环；网关采集、catalog、远端对象 adapter 与内容审批继续迭代。
 
 交付：journal、ClickHouse、对象证据库、签名 manifest、全请求检索、阶段树、原文审批、转换对照、导出、故障恢复和索引水位。
 

@@ -13,6 +13,7 @@ xshield/
     xshield-provenance/      # 页面、动作、资源映射验证
     xshield-protocol/        # 内容解析与加密适配编排
     xshield-audit/           # 必需审计API、journal、manifest
+    xshield-evidence/        # 加密证据对象、typed manifest、期限与完整性
     xshield-adapters/        # pg/clickhouse/s3/model/keys/wasm
     xshield-edge/            # Pingora入口及HTTP生命周期
     xshield-control/         # Axum管理API和管理鉴权
