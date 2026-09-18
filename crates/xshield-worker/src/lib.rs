@@ -179,6 +179,44 @@ pub struct RequestEvents {
     pub events: Vec<AuditEventSummary>,
     /// True when additional rows exist beyond this bounded result.
     pub truncated: bool,
+    /// Validated last row used to continue a truncated page.
+    #[serde(skip)]
+    pub next_position: Option<RequestEventPosition>,
+}
+
+/// Stable keyset position for one request-event page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestEventPosition {
+    request_seq: u32,
+    event_id: EventId,
+}
+
+impl RequestEventPosition {
+    /// Builds a position from already validated analytical row fields.
+    ///
+    /// # Errors
+    /// Returns [`PublishError::InvalidEvent`] when the sequence is zero.
+    pub fn new(request_seq: u32, event_id: EventId) -> Result<Self, PublishError> {
+        if request_seq == 0 {
+            return Err(PublishError::InvalidEvent);
+        }
+        Ok(Self {
+            request_seq,
+            event_id,
+        })
+    }
+
+    /// Returns the request-local sequence component.
+    #[must_use]
+    pub const fn request_seq(&self) -> u32 {
+        self.request_seq
+    }
+
+    /// Returns the stable event identity component.
+    #[must_use]
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
 }
 
 /// Reads a redacted request timeline from the deduplicated, retention-aware view.
@@ -195,32 +233,66 @@ pub async fn query_request_events(
     tenant_id: &TenantId,
     site_id: &SiteId,
     request_id: &RequestId,
+    after: Option<&RequestEventPosition>,
     limit: u16,
 ) -> Result<RequestEvents, PublishError> {
     if limit == 0 {
         return Err(PublishError::InvalidConfig);
     }
     let fetch_limit = u64::from(limit) + 1;
-    let mut events = client
-        .query(
-            "SELECT event_id,event_type,stage,outcome,reason_code,proof_kind,confidence,\
+    let query = match after {
+        Some(position) => client
+            .query(
+                "SELECT event_id,event_type,stage,outcome,reason_code,proof_kind,confidence,\
+                 confidence_status,occurred_at,request_seq,duration_us,policy_revision,\
+                 model_revision,evidence_refs,cause_event_ids,sensitivity FROM ? \
+                 WHERE tenant_id = ? AND site_id = ? AND request_id = ? \
+                 AND (request_seq > ? OR (request_seq = ? AND event_id > ?)) \
+                 ORDER BY request_seq,event_id LIMIT ?",
+            )
+            .bind(Identifier(&config.active_view))
+            .bind(tenant_id.as_str())
+            .bind(site_id.as_str())
+            .bind(request_id.as_str())
+            .bind(position.request_seq())
+            .bind(position.request_seq())
+            .bind(position.event_id().as_str())
+            .bind(fetch_limit),
+        None => client
+            .query(
+                "SELECT event_id,event_type,stage,outcome,reason_code,proof_kind,confidence,\
              confidence_status,occurred_at,request_seq,duration_us,policy_revision,\
              model_revision,evidence_refs,cause_event_ids,sensitivity FROM ? \
              WHERE tenant_id = ? AND site_id = ? AND request_id = ? \
              ORDER BY request_seq,event_id LIMIT ?",
-        )
-        .bind(Identifier(&config.active_view))
-        .bind(tenant_id.as_str())
-        .bind(site_id.as_str())
-        .bind(request_id.as_str())
-        .bind(fetch_limit)
+            )
+            .bind(Identifier(&config.active_view))
+            .bind(tenant_id.as_str())
+            .bind(site_id.as_str())
+            .bind(request_id.as_str())
+            .bind(fetch_limit),
+    };
+    let mut events = query
         .with_setting("max_execution_time", "2")
         .with_setting("max_rows_to_read", "1000000")
         .fetch_all::<AuditEventSummary>()
         .await?;
     let truncated = events.len() > usize::from(limit);
     events.truncate(usize::from(limit));
-    Ok(RequestEvents { events, truncated })
+    let next_position = if truncated {
+        let last = events.last().ok_or(PublishError::InvalidEvent)?;
+        Some(RequestEventPosition::new(
+            last.request_seq,
+            EventId::parse(&last.event_id).map_err(|_| PublishError::InvalidEvent)?,
+        )?)
+    } else {
+        None
+    };
+    Ok(RequestEvents {
+        events,
+        truncated,
+        next_position,
+    })
 }
 
 /// Inspects sealed segments and exact checkpoints without querying `ClickHouse`.
@@ -1401,6 +1473,10 @@ mod tests {
             event_summary("ev_018f2a3b-4c5d-7000-8000-000000000001", 1),
             event_summary("ev_018f2a3b-4c5d-7000-8000-000000000002", 2),
         ]));
+        mock.add(test::handlers::provide([event_summary(
+            "ev_018f2a3b-4c5d-7000-8000-000000000002",
+            2,
+        )]));
         let client = Client::default().with_mock(&mock);
         let result = query_request_events(
             &fixture.config,
@@ -1408,6 +1484,7 @@ mod tests {
             &TenantId::parse("tenant_a").unwrap(),
             &SiteId::parse("site_a").unwrap(),
             &RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+            None,
             1,
         )
         .await
@@ -1415,6 +1492,26 @@ mod tests {
         assert!(result.truncated);
         assert_eq!(result.events.len(), 1);
         assert_eq!(result.events[0].request_seq, 1);
+        assert_eq!(
+            result
+                .next_position
+                .as_ref()
+                .map(|position| (position.request_seq(), position.event_id().as_str())),
+            Some((1, "ev_018f2a3b-4c5d-7000-8000-000000000001"))
+        );
+        let next = query_request_events(
+            &fixture.config,
+            &client,
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_a").unwrap(),
+            &RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+            result.next_position.as_ref(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(!next.truncated);
+        assert_eq!(next.events[0].request_seq, 2);
         assert!(matches!(
             query_request_events(
                 &fixture.config,
@@ -1422,6 +1519,7 @@ mod tests {
                 &TenantId::parse("tenant_a").unwrap(),
                 &SiteId::parse("site_a").unwrap(),
                 &RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+                None,
                 0,
             )
             .await,

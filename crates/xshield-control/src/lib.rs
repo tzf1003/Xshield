@@ -7,7 +7,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL},
@@ -17,7 +17,7 @@ use axum::{
 };
 use chrono::{SecondsFormat, Utc};
 use clickhouse::Client;
-use openssl::{memcmp, sha::sha256};
+use openssl::{hash::MessageDigest, memcmp, pkey::PKey, sha::sha256, sign::Signer};
 use serde::Serialize;
 use std::{
     fmt,
@@ -31,9 +31,10 @@ use xshield_core::{
     domain::{EventId, RequestId, SiteId, TenantId},
 };
 use xshield_worker::{
-    IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEvents,
-    inspect_publication_health, query_request_events,
+    IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEventPosition,
+    RequestEvents, inspect_publication_health, query_request_events,
 };
+use zeroize::Zeroizing;
 
 const HEALTH_PATH: &str = "/control/v1/audit/health";
 const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
@@ -41,6 +42,8 @@ const RATE_WINDOW: Duration = Duration::from_mins(1);
 const TOKEN_BYTES_MAX: usize = 512;
 const TOKEN_LIFETIME_MAX_SECONDS: u64 = 24 * 60 * 60;
 const MAX_QUERY_EVENTS: u16 = 1_000;
+const CURSOR_BYTES_MAX: usize = 160;
+const CURSOR_VERSION: &str = "v1";
 
 #[derive(Clone, Copy)]
 struct AccessAction {
@@ -65,6 +68,22 @@ pub struct ManagementCredential {
     token_digest: [u8; 32],
     issued_at: u64,
     expires_at: u64,
+}
+
+/// Dedicated HMAC key for scope-bound event pagination cursors.
+pub struct CursorKey(Zeroizing<[u8; 32]>);
+
+impl CursorKey {
+    /// Parses one 32-byte lowercase hexadecimal cursor key.
+    ///
+    /// # Errors
+    /// Returns [`ControlError::InvalidConfig`] for malformed key material.
+    pub fn from_hex(value: &str) -> Result<Self, ControlError> {
+        parse_lower_hex_32(value)
+            .map(Zeroizing::new)
+            .map(Self)
+            .ok_or(ControlError::InvalidConfig)
+    }
 }
 
 /// Validated request-rate and query-result ceilings for one control process.
@@ -116,6 +135,7 @@ impl ManagementCredential {
 /// Validated dependencies and security policy for the health endpoint.
 pub struct ControlConfig {
     credential: ManagementCredential,
+    cursor_key: CursorKey,
     principal: ManagementPrincipal,
     tenant_id: TenantId,
     site_id: SiteId,
@@ -132,8 +152,10 @@ impl ControlConfig {
     ///
     /// # Errors
     /// Returns [`ControlError::InvalidConfig`] for a weak or malformed scalar.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         credential: ManagementCredential,
+        cursor_key: CursorKey,
         principal: ManagementPrincipal,
         tenant_id: TenantId,
         site_id: SiteId,
@@ -150,6 +172,7 @@ impl ControlConfig {
         }
         Ok(Self {
             credential,
+            cursor_key,
             principal,
             tenant_id,
             site_id,
@@ -243,6 +266,7 @@ impl ControlPlane {
         self: Arc<Self>,
         authorization: Option<String>,
         target_request_id: String,
+        raw_query: Option<String>,
     ) -> EndpointResult {
         let request_id = format!("req_{}", Uuid::now_v7());
         let auth_control = Arc::clone(&self);
@@ -275,12 +299,50 @@ impl ControlPlane {
                 )
                 .await;
         };
+        let after = match parse_cursor_query(raw_query.as_deref()).and_then(|cursor| {
+            cursor
+                .map(|cursor| self.decode_cursor(&subject, &target_request_id, cursor))
+                .transpose()
+        }) {
+            Ok(after) => after,
+            Err(CursorError::Invalid) => {
+                return self
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        REQUEST_EVENTS_ACCESS,
+                        Some(target_request_id),
+                        StatusCode::BAD_REQUEST,
+                        "CONTROL_CURSOR_INVALID",
+                        "invalid pagination cursor",
+                        false,
+                        "restart_query",
+                    )
+                    .await;
+            }
+            Err(CursorError::Unavailable) => {
+                return self
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        REQUEST_EVENTS_ACCESS,
+                        Some(target_request_id),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_CURSOR_UNAVAILABLE",
+                        "pagination service is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+        };
         let Ok(events) = query_request_events(
             &self.config.publisher,
             &self.index,
             &self.config.tenant_id,
             &self.config.site_id,
             &target_request_id,
+            after.as_ref(),
             self.config.limits.max_query_events,
         )
         .await
@@ -335,6 +397,27 @@ impl ControlPlane {
                 )
                 .await;
         };
+        let next_cursor = match events.next_position.as_ref() {
+            Some(position) => match self.encode_cursor(&subject, &target_request_id, position) {
+                Ok(cursor) => Some(cursor),
+                Err(()) => {
+                    return self
+                        .audited_error_async(
+                            request_id,
+                            Some(subject),
+                            REQUEST_EVENTS_ACCESS,
+                            Some(target_request_id),
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "CONTROL_CURSOR_UNAVAILABLE",
+                            "pagination service is temporarily unavailable",
+                            true,
+                            "retry_later",
+                        )
+                        .await;
+                }
+            },
+            None => None,
+        };
         let audit_control = Arc::clone(&self);
         let audit_request_id = request_id.clone();
         let audit_subject = subject.clone();
@@ -361,8 +444,74 @@ impl ControlPlane {
             as_of: health.as_of,
             index_watermark: health.index_watermark,
             has_gaps: health.has_gaps,
+            next_cursor,
             events,
         })
+    }
+
+    fn encode_cursor(
+        &self,
+        subject: &str,
+        request_id: &RequestId,
+        position: &RequestEventPosition,
+    ) -> Result<String, ()> {
+        let signature = cursor_signature(
+            &self.config.cursor_key.0,
+            &self.config.credential.token_digest,
+            subject,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            request_id,
+            self.config.limits.max_query_events,
+            position,
+        )?;
+        Ok(format!(
+            "{CURSOR_VERSION}.{}.{}.{}",
+            position.request_seq(),
+            position.event_id().as_str(),
+            lower_hex(&signature)
+        ))
+    }
+
+    fn decode_cursor(
+        &self,
+        subject: &str,
+        request_id: &RequestId,
+        cursor: &str,
+    ) -> Result<RequestEventPosition, CursorError> {
+        let mut parts = cursor.split('.');
+        let (Some(version), Some(sequence), Some(event_id), Some(signature)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(CursorError::Invalid);
+        };
+        if parts.next().is_some() || version != CURSOR_VERSION {
+            return Err(CursorError::Invalid);
+        }
+        let request_seq = sequence
+            .parse::<u32>()
+            .ok()
+            .filter(|value| value.to_string() == sequence)
+            .ok_or(CursorError::Invalid)?;
+        let event_id = EventId::parse(event_id).map_err(|_| CursorError::Invalid)?;
+        let supplied_signature = parse_lower_hex_32(signature).ok_or(CursorError::Invalid)?;
+        let position =
+            RequestEventPosition::new(request_seq, event_id).map_err(|_| CursorError::Invalid)?;
+        let expected_signature = cursor_signature(
+            &self.config.cursor_key.0,
+            &self.config.credential.token_digest,
+            subject,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            request_id,
+            self.config.limits.max_query_events,
+            &position,
+        )
+        .map_err(|()| CursorError::Unavailable)?;
+        if !memcmp::eq(&supplied_signature, &expected_signature) {
+            return Err(CursorError::Invalid);
+        }
+        Ok(position)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -647,6 +796,7 @@ async fn health_handler(State(control): State<Arc<ControlPlane>>, headers: Heade
 async fn request_events_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(request_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let authorization = headers
@@ -654,7 +804,7 @@ async fn request_events_handler(
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     control
-        .request_events(authorization, request_id)
+        .request_events(authorization, request_id, raw_query)
         .await
         .into_response()
 }
@@ -680,6 +830,92 @@ fn no_store(mut response: Response) -> Response {
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     response
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CursorError {
+    Invalid,
+    Unavailable,
+}
+
+fn parse_cursor_query(raw_query: Option<&str>) -> Result<Option<&str>, CursorError> {
+    let Some(raw_query) = raw_query else {
+        return Ok(None);
+    };
+    let cursor = raw_query
+        .strip_prefix("cursor=")
+        .filter(|cursor| !cursor.is_empty() && cursor.len() <= CURSOR_BYTES_MAX)
+        .ok_or(CursorError::Invalid)?;
+    Ok(Some(cursor))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cursor_signature(
+    key: &[u8; 32],
+    credential_digest: &[u8; 32],
+    subject: &str,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    request_id: &RequestId,
+    limit: u16,
+    position: &RequestEventPosition,
+) -> Result<[u8; 32], ()> {
+    let key = PKey::hmac(key).map_err(|_| ())?;
+    let mut signer = Signer::new(MessageDigest::sha256(), &key).map_err(|_| ())?;
+    for component in [
+        b"xshield-control-events-cursor-v1".as_slice(),
+        credential_digest,
+        subject.as_bytes(),
+        tenant_id.as_str().as_bytes(),
+        site_id.as_str().as_bytes(),
+        request_id.as_str().as_bytes(),
+        &limit.to_be_bytes(),
+        &position.request_seq().to_be_bytes(),
+        position.event_id().as_str().as_bytes(),
+    ] {
+        signer
+            .update(&(component.len() as u64).to_be_bytes())
+            .map_err(|_| ())?;
+        signer.update(component).map_err(|_| ())?;
+    }
+    signer
+        .sign_to_vec()
+        .map_err(|_| ())?
+        .try_into()
+        .map_err(|_| ())
+}
+
+fn parse_lower_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let mut decoded = [0; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        decoded[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
+    }
+    Some(decoded)
+}
+
+const fn hex_nibble(value: u8) -> u8 {
+    match value {
+        b'0'..=b'9' => value - b'0',
+        b'a'..=b'f' => value - b'a' + 10,
+        _ => 0,
+    }
+}
+
+fn lower_hex(value: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in value {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn audit_unavailable(request_id: &str) -> EndpointResult {
@@ -742,6 +978,7 @@ struct RequestEventsResponse {
     as_of: String,
     index_watermark: Option<IndexWatermark>,
     has_gaps: bool,
+    next_cursor: Option<String>,
     #[serde(flatten)]
     events: RequestEvents,
 }
@@ -886,7 +1123,9 @@ impl From<serde_json::Error> for ControlError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlConfig, ControlLimits, ControlPlane, ManagementCredential, router};
+    use super::{
+        ControlConfig, ControlLimits, ControlPlane, CursorKey, ManagementCredential, router,
+    };
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header::AUTHORIZATION},
@@ -907,16 +1146,18 @@ mod tests {
     };
     use xshield_core::{
         admin::{ManagementPrincipal, ManagementRole},
-        domain::{SiteId, TenantId},
+        domain::{EventId, RequestId, SiteId, TenantId},
     };
-    use xshield_worker::{AuditEventSummary, PublisherConfig};
+    use xshield_worker::{AuditEventSummary, PublisherConfig, RequestEventPosition};
 
     const JOURNAL_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const SEAL_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const CURSOR_KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
     const TOKEN: &str = "test-control-token-32-bytes-long-value";
 
     #[tokio::test]
     async fn enforces_auth_scope_rate_limit_and_health_contract() {
+        assert!(CursorKey::from_hex("not-a-key").is_err());
         assert!(ControlLimits::new(0, 100).is_err());
         assert!(ControlLimits::new(1, 1_001).is_err());
         assert!(
@@ -988,33 +1229,50 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn request_events_are_scoped_bounded_and_audited() {
         let mock = test::Mock::new();
-        mock.add(test::handlers::provide([AuditEventSummary {
-            event_id: "ev_018f2a3b-4c5d-7000-8000-000000000002".to_owned(),
-            event_type: "stage.completed".to_owned(),
-            stage: "admission".to_owned(),
-            outcome: "PASS".to_owned(),
-            reason_code: "POLICY_ALLOWED".to_owned(),
-            proof_kind: "deterministic".to_owned(),
-            confidence: None,
-            confidence_status: "not_applicable".to_owned(),
-            occurred_at: Utc::now(),
-            request_seq: 2,
-            duration_us: 10,
-            policy_revision: "policy-r1".to_owned(),
-            model_revision: String::new(),
-            evidence_refs: Vec::new(),
-            cause_event_ids: Vec::new(),
-            sensitivity: "INTERNAL".to_owned(),
-        }]));
+        mock.add(test::handlers::provide([
+            event_summary("ev_018f2a3b-4c5d-7000-8000-000000000001", 1),
+            event_summary("ev_018f2a3b-4c5d-7000-8000-000000000002", 2),
+        ]));
+        mock.add(test::handlers::provide([event_summary(
+            "ev_018f2a3b-4c5d-7000-8000-000000000002",
+            2,
+        )]));
         let fixture = Fixture::with_index(
             10,
             ManagementRole::Observer,
             Client::default().with_mock(&mock),
         );
+        let position = RequestEventPosition::new(
+            1,
+            EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+        )
+        .unwrap();
+        let target = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
+        let cursor = fixture
+            .control
+            .encode_cursor("operator-1", &target, &position)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .control
+                .decode_cursor("operator-1", &target, &cursor)
+                .unwrap(),
+            position
+        );
+        let other_target = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000002").unwrap();
+        assert!(
+            fixture
+                .control
+                .decode_cursor("operator-1", &other_target, &cursor)
+                .is_err()
+        );
         let path = "/control/v1/requests/req_018f2a3b-4c5d-7000-8000-000000000001/events";
-        let response = router(fixture.control)
+        let app = router(fixture.control);
+        let response = app
+            .clone()
             .oneshot(
                 Request::get(path)
                     .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
@@ -1029,8 +1287,10 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["tenant_id"], "tenant_a");
         assert_eq!(body["site_id"], "site_a");
-        assert_eq!(body["events"][0]["request_seq"], 2);
-        assert_eq!(body["truncated"], false);
+        assert_eq!(body["events"][0]["request_seq"], 1);
+        assert_eq!(body["truncated"], true);
+        let returned_cursor = body["next_cursor"].as_str().unwrap();
+        assert_eq!(returned_cursor, cursor);
         assert!(body["events"][0].get("payload_json").is_none());
         assert_access_events(
             &fixture.access_directory,
@@ -1038,6 +1298,40 @@ mod tests {
             "console.events.read",
             Some("req_018f2a3b-4c5d-7000-8000-000000000001"),
         );
+        let next_page = app
+            .clone()
+            .oneshot(
+                Request::get(format!("{path}?cursor={returned_cursor}"))
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_page.status(), StatusCode::OK);
+        let body = to_bytes(next_page.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["events"][0]["request_seq"], 2);
+        assert_eq!(body["truncated"], false);
+        assert!(body["next_cursor"].is_null());
+        let wrong_scope_cursor = app
+            .oneshot(
+                Request::get(format!(
+                    "/control/v1/requests/{}/events?cursor={cursor}",
+                    other_target.as_str()
+                ))
+                .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_scope_cursor.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(wrong_scope_cursor.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
 
         let forbidden = router(Fixture::new(10, ManagementRole::AuditAdministrator).control)
             .oneshot(
@@ -1098,6 +1392,27 @@ mod tests {
             .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
             .body(Body::empty())
             .unwrap()
+    }
+
+    fn event_summary(event_id: &str, request_seq: u32) -> AuditEventSummary {
+        AuditEventSummary {
+            event_id: event_id.to_owned(),
+            event_type: "stage.completed".to_owned(),
+            stage: "admission".to_owned(),
+            outcome: "PASS".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            proof_kind: "deterministic".to_owned(),
+            confidence: None,
+            confidence_status: "not_applicable".to_owned(),
+            occurred_at: Utc::now(),
+            request_seq,
+            duration_us: 10,
+            policy_revision: "policy-r1".to_owned(),
+            model_revision: String::new(),
+            evidence_refs: Vec::new(),
+            cause_event_ids: Vec::new(),
+            sensitivity: "INTERNAL".to_owned(),
+        }
     }
 
     struct Fixture {
@@ -1189,12 +1504,13 @@ mod tests {
                 ManagementCredential::new(TOKEN, token_issued_at, token_expires_at).unwrap();
             let config = ControlConfig::new(
                 credential,
+                CursorKey::from_hex(CURSOR_KEY).unwrap(),
                 principal,
                 tenant,
                 site,
                 publisher,
                 "journal-key-r1",
-                ControlLimits::new(rate_limit, 100).unwrap(),
+                ControlLimits::new(rate_limit, 1).unwrap(),
             )
             .unwrap();
             let seal_key = test_seal_key();

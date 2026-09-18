@@ -1,7 +1,9 @@
 use clickhouse::Client;
 use std::{collections::BTreeSet, env, error::Error, net::SocketAddr, path::PathBuf};
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
-use xshield_control::{ControlConfig, ControlLimits, ControlPlane, ManagementCredential, router};
+use xshield_control::{
+    ControlConfig, ControlLimits, ControlPlane, CursorKey, ManagementCredential, router,
+};
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{SiteId, TenantId},
@@ -11,6 +13,7 @@ use zeroize::Zeroizing;
 
 const USAGE: &str = "usage: xshield-control JOURNAL_DIRECTORY MANIFEST_DIRECTORY CHECKPOINT_DIRECTORY CONTROL_AUDIT_DIRECTORY";
 
+#[allow(clippy::too_many_lines)]
 async fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os();
     let _program = arguments.next();
@@ -21,12 +24,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if arguments.next().is_some() {
         return Err(USAGE.into());
     }
-
     let tenant_id = TenantId::parse(env::var("XSHIELD_TENANT_ID")?)?;
     let site_id = SiteId::parse(env::var("XSHIELD_SITE_ID")?)?;
     let subject = env::var("XSHIELD_CONTROL_SUBJECT")?;
     let roles = parse_roles(&env::var("XSHIELD_CONTROL_ROLES")?)?;
     let token = Zeroizing::new(env::var("XSHIELD_CONTROL_TOKEN")?);
+    let cursor_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_CURSOR_KEY_HEX")?);
     let source_key_id = env::var("XSHIELD_JOURNAL_KEY_ID")?;
     let source_key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let seal_key_id = env::var("XSHIELD_SEAL_KEY_ID")?;
@@ -67,9 +70,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         max_segment_bytes,
     )?;
     let credential = ManagementCredential::new(&token, token_issued_at, token_expires_at)?;
+    let cursor_key = CursorKey::from_hex(&cursor_key_hex)?;
     let control_limits = ControlLimits::new(rate_limit, max_query_events)?;
     let config = ControlConfig::new(
         credential,
+        cursor_key,
         principal,
         tenant_id,
         site_id,
