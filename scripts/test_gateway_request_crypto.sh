@@ -119,6 +119,17 @@ for _ in $(seq 1 100); do
 done
 kill -0 "$gateway_pid"
 
+curl --fail --silent --show-error -D "$test_dir/sensor-headers" \
+    -o "$test_dir/sensor.js" \
+    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.0.0.js"
+cmp "$repo_root/sensor/src/sensor.ts" "$test_dir/sensor.js"
+grep -qi '^content-type: text/javascript; charset=utf-8' "$test_dir/sensor-headers"
+grep -qi '^cache-control: public, max-age=31536000, immutable' "$test_dir/sensor-headers"
+grep -qi '^cross-origin-resource-policy: same-origin' "$test_dir/sensor-headers"
+grep -qi '^x-content-type-options: nosniff' "$test_dir/sensor-headers"
+grep -qi '^x-xshield-sensor-version: 1.0.0' "$test_dir/sensor-headers"
+grep -qi '^x-xshield-request-id: req_' "$test_dir/sensor-headers"
+
 plaintext='{"sku":"A-1","quantity":2}'
 now=$(date +%s)
 

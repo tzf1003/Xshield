@@ -50,6 +50,7 @@ pub(crate) struct AdmissionFacts<'a> {
     pub(crate) decision: &'a GatewayDecision,
     pub(crate) duration_us: u64,
     pub(crate) request_crypto: Option<&'a RequestCryptoAudit>,
+    pub(crate) forward_origin: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +205,13 @@ pub(crate) struct FinalFacts<'a> {
     pub(crate) response_failure: Option<ReasonCode>,
     pub(crate) origin_status: Option<u16>,
     pub(crate) response_crypto: Option<&'a ResponseCryptoAudit>,
+    pub(crate) response_source: ResponseSource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResponseSource {
+    Origin,
+    Edge,
 }
 
 #[derive(Clone, Debug)]
@@ -423,29 +431,30 @@ impl DurableAudit {
             },
         ));
         request_sequence += 1;
-        let forward_intent_id = if facts.decision.outcome == GatewayOutcome::Allowed {
-            let event_id = new_event_id()?;
-            events.push(PendingEvent::new(
-                event_id.clone(),
-                "origin.forward_intent",
-                request_sequence,
-                vec![decision_id.as_str().to_owned()],
-                Payload::Origin {
-                    method: facts.method.to_owned(),
-                    operation_id: facts
-                        .decision
-                        .operation_id
-                        .as_ref()
-                        .map(|operation| operation.as_str().to_owned()),
-                    origin_state: "not_sent",
-                    reason_code: ReasonCode::OriginForwardIntentRecorded.as_str(),
-                    status: None,
-                },
-            ));
-            Some(event_id.as_str().to_owned())
-        } else {
-            None
-        };
+        let forward_intent_id =
+            if facts.decision.outcome == GatewayOutcome::Allowed && facts.forward_origin {
+                let event_id = new_event_id()?;
+                events.push(PendingEvent::new(
+                    event_id.clone(),
+                    "origin.forward_intent",
+                    request_sequence,
+                    vec![decision_id.as_str().to_owned()],
+                    Payload::Origin {
+                        method: facts.method.to_owned(),
+                        operation_id: facts
+                            .decision
+                            .operation_id
+                            .as_ref()
+                            .map(|operation| operation.as_str().to_owned()),
+                        origin_state: "not_sent",
+                        reason_code: ReasonCode::OriginForwardIntentRecorded.as_str(),
+                        status: None,
+                    },
+                ));
+                Some(event_id.as_str().to_owned())
+            } else {
+                None
+            };
         let context = BatchContext {
             request_id: Some(facts.request_id.to_owned()),
             trace_id: facts.trace_id.to_owned(),
@@ -455,7 +464,9 @@ impl DurableAudit {
             decision_event_id: decision_id.as_str().to_owned(),
             forward_intent_event_id: forward_intent_id,
             next_request_sequence: request_sequence
-                + u32::from(facts.decision.outcome == GatewayOutcome::Allowed),
+                + u32::from(
+                    facts.decision.outcome == GatewayOutcome::Allowed && facts.forward_origin,
+                ),
         })
     }
 
@@ -465,31 +476,14 @@ impl DurableAudit {
         let mut request_sequence = facts.admission.next_request_sequence;
         let mut completion_causes = vec![facts.admission.decision_event_id.clone()];
         if facts.decision.outcome == GatewayOutcome::Allowed {
-            let origin_id = new_event_id()?;
-            let forward_cause = facts
-                .admission
-                .forward_intent_event_id
-                .iter()
-                .cloned()
-                .collect();
-            events.push(PendingEvent::new(
-                origin_id.clone(),
-                origin.event_type,
+            let delivery_id = new_event_id()?;
+            events.push(delivery_event(
+                &facts,
+                &origin,
+                delivery_id.clone(),
                 request_sequence,
-                forward_cause,
-                Payload::Origin {
-                    method: facts.method.to_owned(),
-                    operation_id: facts
-                        .decision
-                        .operation_id
-                        .as_ref()
-                        .map(|operation| operation.as_str().to_owned()),
-                    origin_state: origin.state,
-                    reason_code: origin.reason_code,
-                    status: origin.status,
-                },
             ));
-            completion_causes.push(origin_id.as_str().to_owned());
+            completion_causes.push(delivery_id.as_str().to_owned());
             request_sequence = request_sequence
                 .checked_add(1)
                 .ok_or(DurableAuditError::SequenceExhausted)?;
@@ -528,7 +522,10 @@ impl DurableAudit {
                 },
                 reason_code: completion_reason(&facts).to_owned(),
                 status: (facts.status != 0).then_some(facts.status),
-                origin_state: origin.state.to_owned(),
+                origin_state: match facts.response_source {
+                    ResponseSource::Origin => origin.state.to_owned(),
+                    ResponseSource::Edge => "not_sent".to_owned(),
+                },
                 duration_us: facts.duration_us,
             },
         ));
@@ -705,6 +702,64 @@ impl DurableAudit {
     }
 }
 
+fn delivery_event(
+    facts: &FinalFacts<'_>,
+    origin: &FinalOrigin,
+    event_id: EventId,
+    request_sequence: u32,
+) -> PendingEvent {
+    let operation_id = facts
+        .decision
+        .operation_id
+        .as_ref()
+        .map(|operation| operation.as_str().to_owned());
+    match facts.response_source {
+        ResponseSource::Origin => PendingEvent::new(
+            event_id,
+            origin.event_type,
+            request_sequence,
+            facts
+                .admission
+                .forward_intent_event_id
+                .iter()
+                .cloned()
+                .collect(),
+            Payload::Origin {
+                method: facts.method.to_owned(),
+                operation_id,
+                origin_state: origin.state,
+                reason_code: origin.reason_code,
+                status: origin.status,
+            },
+        ),
+        ResponseSource::Edge => PendingEvent::new(
+            event_id,
+            if facts.proxy_error {
+                "edge.unknown"
+            } else {
+                "edge.response"
+            },
+            request_sequence,
+            vec![facts.admission.decision_event_id.clone()],
+            Payload::Edge {
+                method: facts.method.to_owned(),
+                operation_id,
+                edge_state: if facts.proxy_error {
+                    "unknown"
+                } else {
+                    "response_served"
+                },
+                reason_code: if facts.proxy_error {
+                    ReasonCode::RequestIncomplete.as_str()
+                } else {
+                    ReasonCode::SensorAssetServed.as_str()
+                },
+                status: (facts.status != 0).then_some(facts.status),
+            },
+        ),
+    }
+}
+
 fn response_crypto_event(
     crypto: &ResponseCryptoAudit,
     operation_id: Option<String>,
@@ -787,6 +842,18 @@ fn final_origin(facts: &FinalFacts<'_>) -> FinalOrigin {
 }
 
 fn completion_reason(facts: &FinalFacts<'_>) -> &'static str {
+    if facts.response_source == ResponseSource::Edge {
+        return facts.response_failure.map_or_else(
+            || {
+                if facts.proxy_error {
+                    ReasonCode::RequestIncomplete.as_str()
+                } else {
+                    ReasonCode::SensorAssetServed.as_str()
+                }
+            },
+            ReasonCode::as_str,
+        );
+    }
     facts.response_failure.map_or_else(
         || {
             if facts.decision.outcome == GatewayOutcome::Denied {
@@ -1034,6 +1101,13 @@ enum Payload {
         reason_code: &'static str,
         status: Option<u16>,
     },
+    Edge {
+        method: String,
+        operation_id: Option<String>,
+        edge_state: &'static str,
+        reason_code: &'static str,
+        status: Option<u16>,
+    },
     RequestCompleted {
         decision: String,
         reason_code: String,
@@ -1183,7 +1257,7 @@ mod tests {
     use super::*;
     use std::{fs, path::PathBuf};
     use xshield_core::identity::UnixSeconds;
-    use xshield_gateway::request_crypto::RequestCryptoPolicy;
+    use xshield_gateway::{SENSOR_ASSET_PATH, request_crypto::RequestCryptoPolicy};
 
     const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 
@@ -1355,6 +1429,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                forward_origin: true,
             })
             .await
             .unwrap();
@@ -1372,6 +1447,7 @@ mod tests {
                 response_failure: None,
                 origin_status: Some(200),
                 response_crypto: None,
+                response_source: ResponseSource::Origin,
             })
             .await
             .unwrap();
@@ -1384,6 +1460,7 @@ mod tests {
                 decision: &denied,
                 duration_us: 10,
                 request_crypto: None,
+                forward_origin: true,
             })
             .await
             .unwrap();
@@ -1401,6 +1478,7 @@ mod tests {
                 response_failure: None,
                 origin_status: None,
                 response_crypto: None,
+                response_source: ResponseSource::Origin,
             })
             .await
             .unwrap();
@@ -1414,6 +1492,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.recovered_records, 10);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn records_edge_sensor_delivery_without_origin_intent() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000021";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", SENSOR_ASSET_PATH, UnixSeconds::new(1));
+        let admission = audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "21212121212121212121212121212121",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+                request_crypto: None,
+                forward_origin: false,
+            })
+            .await
+            .unwrap();
+        assert!(admission.forward_intent_event_id.is_none());
+        audit
+            .finalize(FinalFacts {
+                request_id,
+                trace_id: "21212121212121212121212121212121",
+                method: "GET",
+                decision: &decision,
+                admission: &admission,
+                status: 200,
+                duration_us: 20,
+                proxy_error: false,
+                response_failure: None,
+                origin_status: None,
+                response_crypto: None,
+                response_source: ResponseSource::Edge,
+            })
+            .await
+            .unwrap();
+        drop(audit);
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut terminal = Vec::new();
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id
+                    && matches!(
+                        event["event_type"].as_str(),
+                        Some("edge.response" | "request.completed")
+                    )
+                {
+                    terminal.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(terminal.len(), 2);
+        assert_eq!(terminal[0]["event_type"], "edge.response");
+        assert_eq!(terminal[0]["request_seq"], 4);
+        assert_eq!(
+            terminal[0]["payload"]["reason_code"],
+            ReasonCode::SensorAssetServed.as_str()
+        );
+        assert_eq!(terminal[1]["payload"]["origin_state"], "not_sent");
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1440,6 +1592,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: Some(&crypto),
+                forward_origin: true,
             })
             .await
             .unwrap();
@@ -1501,6 +1654,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: Some(&crypto),
+                forward_origin: true,
             })
             .await
             .unwrap();
@@ -1587,6 +1741,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                forward_origin: true,
             })
             .await
             .unwrap();
@@ -1608,6 +1763,7 @@ mod tests {
                 response_failure: Some(ReasonCode::ResponseValidationFailed),
                 origin_status: Some(200),
                 response_crypto: Some(&response_crypto),
+                response_source: ResponseSource::Origin,
             })
             .await
             .unwrap();
@@ -1671,6 +1827,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                forward_origin: true,
             })
             .await
             .unwrap();
@@ -1733,6 +1890,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                forward_origin: true,
             })
             .await
             .unwrap();
@@ -1846,6 +2004,7 @@ mod tests {
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
+                forward_origin: true,
             })
             .await
             .unwrap_err();

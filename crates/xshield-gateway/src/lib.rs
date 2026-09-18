@@ -54,6 +54,19 @@ pub const MAX_BUFFERED_BODY_IN_FLIGHT_BYTES: usize = MAX_BUFFERED_JSON_BYTES * 2
 /// Pingora retry-buffer ceiling used to replace a pre-read encrypted entity.
 pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
+/// Versioned same-origin browser sensor asset.
+pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
+/// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
+pub const SENSOR_VERSION: &str = "1.0.0";
+const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
+const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
+
+/// Local edge response selected from the reserved Xshield namespace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalResponse {
+    /// The immutable browser sensor JavaScript asset.
+    SensorAsset,
+}
 
 /// Fully validated gateway configuration selected at process startup.
 #[derive(Debug)]
@@ -595,8 +608,17 @@ impl GatewayConfig {
     /// Returns the proof class for an exact configured operation.
     #[must_use]
     pub fn admission_class(&self, method: &str, path: &str) -> Option<AdmissionClass> {
+        if self.internal_response(method, path).is_some() {
+            return Some(AdmissionClass::Public);
+        }
         self.operation(method, path)
             .map(|operation| operation.policy.admission_class())
+    }
+
+    /// Returns a server-owned response for an exact reserved route.
+    #[must_use]
+    pub fn internal_response(&self, method: &str, path: &str) -> Option<InternalResponse> {
+        (method == "GET" && path == SENSOR_ASSET_PATH).then_some(InternalResponse::SensorAsset)
     }
 
     /// Returns the trusted query or path adapter for a matched resource operation.
@@ -766,6 +788,20 @@ impl GatewayConfig {
         resource_key: Option<&ResourceKeyHmac>,
         proof: AdmissionProof<'_>,
     ) -> GatewayDecision {
+        if self.internal_response(method, path).is_some() {
+            return match OperationId::parse(SENSOR_ASSET_OPERATION_ID) {
+                Ok(operation_id) => GatewayDecision {
+                    outcome: GatewayOutcome::Allowed,
+                    operation_id: Some(operation_id),
+                    reason_code: ReasonCode::PublicEntryAllowed,
+                },
+                Err(_) => GatewayDecision {
+                    outcome: GatewayOutcome::Denied,
+                    operation_id: None,
+                    reason_code: ReasonCode::RequestIncomplete,
+                },
+            };
+        }
         let Some(operation) = self.operation(method, path) else {
             return GatewayDecision {
                 outcome: GatewayOutcome::Denied,
@@ -1058,7 +1094,9 @@ impl IdentityStoreConfig {
 
 fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError> {
     let method = parse_method(&dto.method).ok_or(ConfigError::Invalid("operations.method"))?;
-    if dto.path.contains(['{', '}']) && dto.resource_path_parameter.is_none() {
+    if dto.path.starts_with(INTERNAL_PATH_PREFIX)
+        || dto.path.contains(['{', '}']) && dto.resource_path_parameter.is_none()
+    {
         return Err(ConfigError::Invalid("operations.path"));
     }
     let route = RouteTemplate::parse(dto.path.clone()).map_err(ConfigError::Provenance)?;
@@ -1623,6 +1661,22 @@ mod tests {
         assert_eq!(unknown.outcome, GatewayOutcome::Denied);
         assert_eq!(unknown.reason_code, ReasonCode::OperationNotMatched);
         assert!(unknown.operation_id.is_none());
+        let sensor = config.admit("GET", SENSOR_ASSET_PATH, UnixSeconds::new(1));
+        assert_eq!(sensor.outcome, GatewayOutcome::Allowed);
+        assert_eq!(sensor.reason_code, ReasonCode::PublicEntryAllowed);
+        assert_eq!(
+            sensor.operation_id.unwrap().as_str(),
+            SENSOR_ASSET_OPERATION_ID
+        );
+        assert_eq!(
+            config.internal_response("GET", SENSOR_ASSET_PATH),
+            Some(InternalResponse::SensorAsset)
+        );
+        assert!(
+            config
+                .internal_response("POST", SENSOR_ASSET_PATH)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1644,6 +1698,11 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(traversal.as_bytes()),
             Err(ConfigError::Invalid("audit.directory"))
+        ));
+        let reserved = CONFIG.replace("/catalog", SENSOR_ASSET_PATH);
+        assert!(matches!(
+            GatewayConfig::from_json(reserved.as_bytes()),
+            Err(ConfigError::Invalid("operations.path"))
         ));
     }
 

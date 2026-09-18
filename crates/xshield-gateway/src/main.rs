@@ -29,8 +29,8 @@ use xshield_gateway::response_crypto::{
     ENCRYPTED_RESPONSE_CONTENT_TYPE, ResponseKeyAccessPort, ResponseKeyAccessQuery,
 };
 use xshield_gateway::{
-    GatewayConfig, GatewayDecision, GatewayOutcome, MAX_BUFFERED_BODY_IN_FLIGHT_BYTES,
-    MAX_CONFIG_BYTES,
+    GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
+    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_CONFIG_BYTES,
 };
 use xshield_postgres::{
     PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, StoreError,
@@ -40,7 +40,7 @@ use zeroize::Zeroizing;
 use crate::buffered_json::BufferedJsonResponse;
 use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RequestCryptoAudit,
-    ResponseCryptoAudit, new_trace_id,
+    ResponseCryptoAudit, ResponseSource, new_trace_id,
 };
 use crate::protected_identity::{
     CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE,
@@ -48,6 +48,7 @@ use crate::protected_identity::{
 };
 
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
+const SENSOR_ASSET: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
 
 struct Gateway {
     config: Arc<GatewayConfig>,
@@ -107,6 +108,7 @@ struct RequestContext {
     pending_auth_binding: Option<PendingAuthBinding>,
     response_failure: Option<ReasonCode>,
     origin_status: Option<u16>,
+    response_source: ResponseSource,
 }
 
 #[async_trait]
@@ -131,6 +133,7 @@ impl ProxyHttp for Gateway {
             pending_auth_binding: None,
             response_failure: None,
             origin_status: None,
+            response_source: ResponseSource::Origin,
         }
     }
 
@@ -161,6 +164,7 @@ impl ProxyHttp for Gateway {
         let request = session.req_header();
         let method = request.method.as_str().to_owned();
         let path = request.uri.path().to_owned();
+        let internal_response = self.config.internal_response(&method, &path);
         let Ok(wall_time) = SystemTime::now().duration_since(UNIX_EPOCH) else {
             respond_denial(
                 session,
@@ -214,6 +218,7 @@ impl ProxyHttp for Gateway {
                 decision: &decision,
                 duration_us: elapsed_us(context.started_at),
                 request_crypto: context.request_crypto_audit.as_ref(),
+                forward_origin: internal_response.is_none(),
             })
             .await;
         let admission_audit = match audit_result {
@@ -242,6 +247,11 @@ impl ProxyHttp for Gateway {
                 context.anonymous_session_cookie.as_deref(),
             )
             .await?;
+            return Ok(true);
+        }
+        if internal_response == Some(InternalResponse::SensorAsset) {
+            context.response_source = ResponseSource::Edge;
+            respond_sensor_asset(session, &context.request_id).await?;
             return Ok(true);
         }
         Ok(false)
@@ -494,6 +504,7 @@ impl ProxyHttp for Gateway {
                 response_failure: context.response_failure,
                 origin_status: context.origin_status,
                 response_crypto: context.response_crypto_audit.as_ref(),
+                response_source: context.response_source,
             })
             .await;
         if let Err(error) = result {
@@ -1026,6 +1037,22 @@ async fn respond_denial(
     if let Some(cookie) = session_cookie {
         response.append_header("Set-Cookie", cookie)?;
     }
+    response.set_content_length(body.len())?;
+    session
+        .write_response_header(Box::new(response), false)
+        .await?;
+    session.write_response_body(Some(body), true).await
+}
+
+async fn respond_sensor_asset(session: &mut Session, request_id: &str) -> PingoraResult<()> {
+    let body = Bytes::from_static(SENSOR_ASSET);
+    let mut response = ResponseHeader::build(200, Some(7))?;
+    response.insert_header("Content-Type", "text/javascript; charset=utf-8")?;
+    response.insert_header("Cache-Control", "public, max-age=31536000, immutable")?;
+    response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
+    response.insert_header("X-Content-Type-Options", "nosniff")?;
+    response.insert_header("X-Xshield-Sensor-Version", xshield_gateway::SENSOR_VERSION)?;
+    response.insert_header("X-Xshield-Request-Id", request_id)?;
     response.set_content_length(body.len())?;
     session
         .write_response_header(Box::new(response), false)

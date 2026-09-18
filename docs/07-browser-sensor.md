@@ -6,6 +6,8 @@
 
 探针资源走同源固定路径，bootstrap 动态内容 no-store。静态 HTML 不嵌入跨会话共享的凭证。压缩、ETag、Content-Length、缓存、CSP nonce、script-src/connect-src 与 SRI 必须同步适配；不能为注入而全局关闭 CSP/SRI。SRI 会检查资源内容，改写后须维护对应完整性信息。[S13]
 
+当前首个增量由网关在固定版本路径 `/__xshield/v1/sensor/1.0.0.js` 直接提供普通 JavaScript，使用长期 immutable 缓存、同源资源隔离、`nosniff`、固定版本头和 WAF request_id。该路径属于保留命名空间，站点配置不能覆盖，也不会生成源站转发意图；资产交付和终态进入耐久审计。探针只接受同源 prepare URL 和有界 bootstrap 字段，发送 `PAGE_READY`、`HEARTBEAT` 与可见性观测；这些客户端事件不产生业务资格。HTML 注入、动态 bootstrap、prepare 接收与 PageEvidence 发行继续按本章约束接入。
+
 ## 7.2 事件契约
 
 字段：sensor_version、build_ref、page_handle、navigation_id、action_hint、client_request_id、client_event_seq、visibility、event_type、callsite_fingerprint。WAF 另生成 request_id，且用服务端时间判定期限。客户端 action_hint 不等于已授予的 action_id。

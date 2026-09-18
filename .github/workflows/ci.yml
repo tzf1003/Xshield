@@ -38,11 +38,16 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: pip install -r scripts/requirements.txt
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
+      - run: node --test sensor/test/sensor.test.mjs
       - run: scripts/test_postgres.sh
       - run: scripts/test_gateway_identity.sh
+      - run: scripts/test_gateway_request_crypto.sh
       - run: python scripts/validate_library.py
