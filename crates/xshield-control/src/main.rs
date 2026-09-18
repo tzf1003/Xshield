@@ -1,5 +1,7 @@
 use clickhouse::Client;
-use std::{collections::BTreeSet, env, error::Error, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::BTreeSet, env, error::Error, net::SocketAddr, path::PathBuf, time::Duration,
+};
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
 use xshield_control::{
     ControlConfig, ControlLimits, ControlPlane, CursorKey, ManagementCredential, router,
@@ -8,6 +10,7 @@ use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{SiteId, TenantId},
 };
+use xshield_postgres::PostgresIdentityStore;
 use xshield_worker::PublisherConfig;
 use zeroize::Zeroizing;
 
@@ -42,12 +45,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let clickhouse_database = env::var("XSHIELD_CLICKHOUSE_DATABASE")?;
     let clickhouse_user = env::var("XSHIELD_CLICKHOUSE_USER")?;
     let clickhouse_password = Zeroizing::new(env::var("XSHIELD_CLICKHOUSE_PASSWORD")?);
+    let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
+    let database_max_connections = env::var("XSHIELD_CONTROL_DATABASE_MAX_CONNECTIONS")?.parse()?;
+    let database_acquire_timeout =
+        Duration::from_millis(env::var("XSHIELD_CONTROL_DATABASE_ACQUIRE_TIMEOUT_MS")?.parse()?);
     let metadata_retention_days = env::var("XSHIELD_AUDIT_METADATA_RETENTION_DAYS")?.parse()?;
     let max_segment_bytes = env::var("XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES")?.parse()?;
     let token_issued_at = env::var("XSHIELD_CONTROL_TOKEN_ISSUED_AT")?.parse()?;
     let token_expires_at = env::var("XSHIELD_CONTROL_TOKEN_EXPIRES_AT")?.parse()?;
     let rate_limit = env::var("XSHIELD_CONTROL_REQUESTS_PER_MINUTE")?.parse()?;
     let max_query_events = env::var("XSHIELD_CONTROL_MAX_QUERY_EVENTS")?.parse()?;
+    let max_query_artifacts = env::var("XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS")?.parse()?;
     let listen: SocketAddr = env::var("XSHIELD_CONTROL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9443".to_owned())
         .parse()?;
@@ -71,7 +79,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     )?;
     let credential = ManagementCredential::new(&token, token_issued_at, token_expires_at)?;
     let cursor_key = CursorKey::from_hex(&cursor_key_hex)?;
-    let control_limits = ControlLimits::new(rate_limit, max_query_events)?;
+    let control_limits = ControlLimits::new(rate_limit, max_query_events, max_query_artifacts)?;
     let config = ControlConfig::new(
         credential,
         cursor_key,
@@ -102,6 +110,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_user(clickhouse_user)
         .with_password(&*clickhouse_password)
         .with_setting("readonly", "1");
+    let catalog = PostgresIdentityStore::connect(
+        &database_url,
+        database_max_connections,
+        database_acquire_timeout,
+    )
+    .await?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
     axum::serve(
         listener,
@@ -110,6 +124,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             source_key,
             seal_key,
             index,
+            catalog,
             access_journal,
         )),
     )

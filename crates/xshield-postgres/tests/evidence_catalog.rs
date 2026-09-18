@@ -94,10 +94,11 @@ async fn catalog_publish_is_atomic_idempotent_scoped_and_bounded() {
     assert!(
         store
             .list_request_artifacts(
-                EvidenceCatalogQuery::new(&tenant, &site, &request, 16).unwrap()
+                EvidenceCatalogQuery::new(&tenant, &site, &request, None, 16).unwrap()
             )
             .await
             .unwrap()
+            .artifacts()
             .is_empty()
     );
     assert_eq!(
@@ -196,39 +197,43 @@ async fn assert_scoped_query(
     request: &RequestId,
 ) {
     let entries = store
-        .list_request_artifacts(EvidenceCatalogQuery::new(tenant, site, request, 16).unwrap())
+        .list_request_artifacts(EvidenceCatalogQuery::new(tenant, site, request, None, 16).unwrap())
         .await
         .unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].manifest(), verified.manifest());
+    assert_eq!(entries.artifacts().len(), 1);
+    assert_eq!(entries.artifacts()[0].manifest(), verified.manifest());
+    assert!(entries.next_artifact_id().is_none());
     let other_tenant = TenantId::parse("tenant_other").unwrap();
     assert!(
         store
             .list_request_artifacts(
-                EvidenceCatalogQuery::new(&other_tenant, site, request, 16).unwrap()
+                EvidenceCatalogQuery::new(&other_tenant, site, request, None, 16).unwrap()
             )
             .await
             .unwrap()
+            .artifacts()
             .is_empty()
     );
     let other_site = SiteId::parse("site_other").unwrap();
     assert!(
         store
             .list_request_artifacts(
-                EvidenceCatalogQuery::new(tenant, &other_site, request, 16).unwrap()
+                EvidenceCatalogQuery::new(tenant, &other_site, request, None, 16).unwrap()
             )
             .await
             .unwrap()
+            .artifacts()
             .is_empty()
     );
     let other_request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000903").unwrap();
     assert!(
         store
             .list_request_artifacts(
-                EvidenceCatalogQuery::new(tenant, site, &other_request, 16).unwrap()
+                EvidenceCatalogQuery::new(tenant, site, &other_request, None, 16).unwrap()
             )
             .await
             .unwrap()
+            .artifacts()
             .is_empty()
     );
 }

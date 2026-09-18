@@ -2,7 +2,7 @@ use crate::{PostgresIdentityStore, StoreError};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
-use xshield_core::domain::{EventId, RequestId, SiteId, TenantId};
+use xshield_core::domain::{ArtifactId, EventId, RequestId, SiteId, TenantId};
 use xshield_evidence::{
     EvidenceClassification, EvidenceFidelity, EvidenceIntegrity, EvidenceManifest, EvidenceStorage,
     VerifiedEvidenceManifest,
@@ -47,6 +47,7 @@ pub struct EvidenceCatalogQuery<'a> {
     tenant_id: &'a TenantId,
     site_id: &'a SiteId,
     request_id: &'a RequestId,
+    after_artifact_id: Option<&'a ArtifactId>,
     limit: u16,
 }
 
@@ -59,6 +60,7 @@ impl<'a> EvidenceCatalogQuery<'a> {
         tenant_id: &'a TenantId,
         site_id: &'a SiteId,
         request_id: &'a RequestId,
+        after_artifact_id: Option<&'a ArtifactId>,
         limit: u16,
     ) -> Result<Self, StoreError> {
         if !(1..=REQUEST_ARTIFACTS_MAX).contains(&limit) {
@@ -68,6 +70,7 @@ impl<'a> EvidenceCatalogQuery<'a> {
             tenant_id,
             site_id,
             request_id,
+            after_artifact_id,
             limit,
         })
     }
@@ -100,6 +103,7 @@ impl EvidenceCatalogWriteOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogArtifact {
     manifest: EvidenceManifest,
+    artifact_id: ArtifactId,
     recorded_at: DateTime<Utc>,
 }
 
@@ -111,10 +115,36 @@ impl CatalogArtifact {
         &self.manifest
     }
 
+    /// Returns the validated catalog ordering identity.
+    #[must_use]
+    pub const fn artifact_id(&self) -> &ArtifactId {
+        &self.artifact_id
+    }
+
     /// Returns when the manifest was durably cataloged.
     #[must_use]
     pub const fn recorded_at(&self) -> DateTime<Utc> {
         self.recorded_at
+    }
+}
+
+/// One stable page of request-scoped catalog metadata.
+pub struct EvidenceCatalogPage {
+    artifacts: Vec<CatalogArtifact>,
+    next_artifact_id: Option<ArtifactId>,
+}
+
+impl EvidenceCatalogPage {
+    /// Returns the active typed artifact metadata in stable identity order.
+    #[must_use]
+    pub fn artifacts(&self) -> &[CatalogArtifact] {
+        &self.artifacts
+    }
+
+    /// Returns the last emitted identity when another page is available.
+    #[must_use]
+    pub const fn next_artifact_id(&self) -> Option<&ArtifactId> {
+        self.next_artifact_id.as_ref()
     }
 }
 
@@ -160,22 +190,41 @@ impl PostgresIdentityStore {
     pub async fn list_request_artifacts(
         &self,
         query: EvidenceCatalogQuery<'_>,
-    ) -> Result<Vec<CatalogArtifact>, StoreError> {
+    ) -> Result<EvidenceCatalogPage, StoreError> {
+        let fetch_limit = i64::from(query.limit) + 1;
         let rows = sqlx::query(
             "SELECT * FROM xshield.artifact_catalog
              WHERE tenant_id = $1 AND site_id = $2 AND request_id = $3
                AND status = 'active' AND deleted_at IS NULL
                AND expires_at > clock_timestamp()
-             ORDER BY recorded_at, artifact_id
-             LIMIT $4",
+               AND ($4::text IS NULL OR artifact_id > $4)
+             ORDER BY artifact_id
+             LIMIT $5",
         )
         .bind(query.tenant_id.as_str())
         .bind(query.site_id.as_str())
         .bind(query.request_id.as_str())
-        .bind(i64::from(query.limit))
+        .bind(query.after_artifact_id.map(ArtifactId::as_str))
+        .bind(fetch_limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(catalog_artifact).collect()
+        let mut artifacts = rows
+            .iter()
+            .map(catalog_artifact)
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = artifacts.len() > usize::from(query.limit);
+        artifacts.truncate(usize::from(query.limit));
+        let next_artifact_id = has_more
+            .then(|| {
+                artifacts
+                    .last()
+                    .map(|artifact| artifact.artifact_id.clone())
+            })
+            .flatten();
+        Ok(EvidenceCatalogPage {
+            artifacts,
+            next_artifact_id,
+        })
     }
 }
 
@@ -380,8 +429,11 @@ fn catalog_artifact(row: &PgRow) -> Result<CatalogArtifact, StoreError> {
     manifest
         .validate_catalog_shape(recorded_at)
         .map_err(|_| StoreError::CorruptData("artifact_manifest"))?;
+    let artifact_id = ArtifactId::parse(&manifest.artifact_id)
+        .map_err(|_| StoreError::CorruptData("artifact_id"))?;
     Ok(CatalogArtifact {
         manifest,
+        artifact_id,
         recorded_at,
     })
 }
@@ -413,13 +465,13 @@ mod tests {
         let tenant = TenantId::parse("tenant_catalog").unwrap();
         let site = SiteId::parse("site_catalog").unwrap();
         let request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000901").unwrap();
-        assert!(EvidenceCatalogQuery::new(&tenant, &site, &request, 1).is_ok());
+        assert!(EvidenceCatalogQuery::new(&tenant, &site, &request, None, 1).is_ok());
         assert!(matches!(
-            EvidenceCatalogQuery::new(&tenant, &site, &request, 0),
+            EvidenceCatalogQuery::new(&tenant, &site, &request, None, 0),
             Err(StoreError::InvalidCommand)
         ));
         assert!(matches!(
-            EvidenceCatalogQuery::new(&tenant, &site, &request, REQUEST_ARTIFACTS_MAX + 1),
+            EvidenceCatalogQuery::new(&tenant, &site, &request, None, REQUEST_ARTIFACTS_MAX + 1),
             Err(StoreError::InvalidCommand)
         ));
     }

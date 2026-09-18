@@ -19,7 +19,8 @@ mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
 pub use evidence_catalog::{
-    CatalogArtifact, EvidenceCatalogPublish, EvidenceCatalogQuery, EvidenceCatalogWriteOutcome,
+    CatalogArtifact, EvidenceCatalogPage, EvidenceCatalogPublish, EvidenceCatalogQuery,
+    EvidenceCatalogWriteOutcome,
 };
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};

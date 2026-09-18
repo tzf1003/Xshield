@@ -53,6 +53,8 @@ capture_status：complete、partial_limit、partial_cancelled、unavailable、no
 
 PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 wire struct 不能进入发布命令。首次发布把显式列与 `evidence.cataloged` outbox 事件原子提交；精确重放返回 existing，同 artifact 绑定不同 manifest 或事件返回 conflict。按 request 查询强制 tenant/site/request 三元组、数据库当前时钟、active/deleted 条件与 128 条上限。catalog 用于检索，内容释放仍必须由 vault 认证对象侧 manifest HMAC、ciphertext digest 与 AEAD，并经过独立 EvidenceReadPort 审批。
 
+控制面 `GET /control/v1/requests/{request_id}/evidence` 已接入该 catalog：仅向精确作用域的 Observer 返回 typed manifest 与 catalog 时间，不访问对象内容。列表按 artifact UUIDv7 身份稳定排序，服务端页大小上限 128；下一页游标以独立分页密钥和用途域 HMAC 绑定管理主体、tenant/site、目标 request、页大小及最后 artifact，错误作用域或接口不能复用。每次成功、拒绝或依赖失败均写 `console.manifest.read` 管理审计。
+
 ## 12.6 保留与删除
 
 建议初始：解密业务原文 24 小时，脱敏证据和模型调用 7 天，决策索引 30 天，已封存调查案按案设置；这些是工程默认，不是合规结论。所有期限由站点确认，不能无限保存“以后也许有用”的病历和凭证。

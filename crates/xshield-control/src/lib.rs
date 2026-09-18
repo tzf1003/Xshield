@@ -28,8 +28,10 @@ use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
-    domain::{EventId, RequestId, SiteId, TenantId},
+    domain::{ArtifactId, EventId, RequestId, SiteId, TenantId},
 };
+use xshield_evidence::EvidenceManifest;
+use xshield_postgres::{EvidenceCatalogPage, EvidenceCatalogQuery, PostgresIdentityStore};
 use xshield_worker::{
     IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEventPosition,
     RequestEvents, RequestSummary, inspect_publication_health, query_request_events,
@@ -40,10 +42,12 @@ use zeroize::Zeroizing;
 const HEALTH_PATH: &str = "/control/v1/audit/health";
 const REQUEST_SUMMARY_PATH: &str = "/control/v1/requests/{request_id}";
 const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
+const REQUEST_EVIDENCE_PATH: &str = "/control/v1/requests/{request_id}/evidence";
 const RATE_WINDOW: Duration = Duration::from_mins(1);
 const TOKEN_BYTES_MAX: usize = 512;
 const TOKEN_LIFETIME_MAX_SECONDS: u64 = 24 * 60 * 60;
 const MAX_QUERY_EVENTS: u16 = 1_000;
+const MAX_QUERY_ARTIFACTS: u16 = 128;
 const CURSOR_BYTES_MAX: usize = 160;
 const CURSOR_VERSION: &str = "v1";
 
@@ -67,6 +71,11 @@ const REQUEST_EVENTS_ACCESS: AccessAction = AccessAction {
 const REQUEST_SUMMARY_ACCESS: AccessAction = AccessAction {
     event_type: "console.request.read",
     path: REQUEST_SUMMARY_PATH,
+    role: ManagementRole::Observer,
+};
+const REQUEST_EVIDENCE_ACCESS: AccessAction = AccessAction {
+    event_type: "console.manifest.read",
+    path: REQUEST_EVIDENCE_PATH,
     role: ManagementRole::Observer,
 };
 
@@ -98,20 +107,29 @@ impl CursorKey {
 pub struct ControlLimits {
     requests_per_minute: u64,
     max_query_events: u16,
+    max_query_artifacts: u16,
 }
 
 impl ControlLimits {
-    /// Validates non-zero management budgets and the hard event-query ceiling.
+    /// Validates non-zero management budgets and hard query ceilings.
     ///
     /// # Errors
     /// Returns [`ControlError::InvalidConfig`] when a limit is outside its bound.
-    pub fn new(requests_per_minute: u64, max_query_events: u16) -> Result<Self, ControlError> {
-        if requests_per_minute == 0 || !(1..=MAX_QUERY_EVENTS).contains(&max_query_events) {
+    pub fn new(
+        requests_per_minute: u64,
+        max_query_events: u16,
+        max_query_artifacts: u16,
+    ) -> Result<Self, ControlError> {
+        if requests_per_minute == 0
+            || !(1..=MAX_QUERY_EVENTS).contains(&max_query_events)
+            || !(1..=MAX_QUERY_ARTIFACTS).contains(&max_query_artifacts)
+        {
             return Err(ControlError::InvalidConfig);
         }
         Ok(Self {
             requests_per_minute,
             max_query_events,
+            max_query_artifacts,
         })
     }
 }
@@ -196,6 +214,7 @@ pub struct ControlPlane {
     source_journal_key: JournalKey,
     seal_key: SealVerifyingKey,
     index: Client,
+    catalog: PostgresIdentityStore,
     access_journal: Mutex<LocalJournal>,
     unauthenticated_rate: Mutex<RateWindow>,
     rate: Mutex<RateWindow>,
@@ -209,6 +228,7 @@ impl ControlPlane {
         source_journal_key: JournalKey,
         seal_key: SealVerifyingKey,
         index: Client,
+        catalog: PostgresIdentityStore,
         access_journal: LocalJournal,
     ) -> Self {
         let rate_limit = config.limits.requests_per_minute;
@@ -219,6 +239,7 @@ impl ControlPlane {
             source_journal_key,
             seal_key,
             index,
+            catalog,
             access_journal: Mutex::new(access_journal),
         }
     }
@@ -370,6 +391,185 @@ impl ControlPlane {
         };
         self.complete_request_events(request_id, subject, target_request_id, events)
             .await
+    }
+
+    async fn request_evidence(
+        self: Arc<Self>,
+        authorization: Option<String>,
+        target_request_id: String,
+        raw_query: Option<String>,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(
+                authorization.as_deref(),
+                &auth_request_id,
+                REQUEST_EVIDENCE_ACCESS,
+            )
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Ok(target_request_id) = RequestId::parse(target_request_id) else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    REQUEST_EVIDENCE_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_REQUEST_ID_INVALID",
+                    "invalid request identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let after = match parse_cursor_query(raw_query.as_deref()).and_then(|cursor| {
+            cursor
+                .map(|cursor| self.decode_evidence_cursor(&subject, &target_request_id, cursor))
+                .transpose()
+        }) {
+            Ok(after) => after,
+            Err(CursorError::Invalid) => {
+                return self
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        REQUEST_EVIDENCE_ACCESS,
+                        Some(target_request_id),
+                        StatusCode::BAD_REQUEST,
+                        "CONTROL_CURSOR_INVALID",
+                        "invalid pagination cursor",
+                        false,
+                        "restart_query",
+                    )
+                    .await;
+            }
+            Err(CursorError::Unavailable) => {
+                return self
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        REQUEST_EVIDENCE_ACCESS,
+                        Some(target_request_id),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_CURSOR_UNAVAILABLE",
+                        "pagination service is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+        };
+        let query = EvidenceCatalogQuery::new(
+            &self.config.tenant_id,
+            &self.config.site_id,
+            &target_request_id,
+            after.as_ref(),
+            self.config.limits.max_query_artifacts,
+        );
+        let Ok(query) = query else {
+            return internal_error(&request_id);
+        };
+        let Ok(page) = self.catalog.list_request_artifacts(query).await else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    REQUEST_EVIDENCE_ACCESS,
+                    Some(target_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_CATALOG_UNAVAILABLE",
+                    "evidence catalog is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        self.complete_request_evidence(request_id, subject, target_request_id, page)
+            .await
+    }
+
+    async fn complete_request_evidence(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        target_request_id: RequestId,
+        page: EvidenceCatalogPage,
+    ) -> EndpointResult {
+        let next_cursor = match page.next_artifact_id() {
+            Some(artifact_id) => {
+                match self.encode_evidence_cursor(&subject, &target_request_id, artifact_id) {
+                    Ok(cursor) => Some(cursor),
+                    Err(()) => {
+                        return self
+                            .audited_error_async(
+                                request_id,
+                                Some(subject),
+                                REQUEST_EVIDENCE_ACCESS,
+                                Some(target_request_id),
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "CONTROL_CURSOR_UNAVAILABLE",
+                                "pagination service is temporarily unavailable",
+                                true,
+                                "retry_later",
+                            )
+                            .await;
+                    }
+                }
+            }
+            None => None,
+        };
+        let artifact_refs = page
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.artifact_id().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let artifacts = page
+            .artifacts()
+            .iter()
+            .map(|artifact| EvidenceArtifactResponse {
+                recorded_at: artifact
+                    .recorded_at()
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+                manifest: artifact.manifest().clone(),
+            })
+            .collect();
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_target = target_request_id.clone();
+        let audited = tokio::task::spawn_blocking(move || {
+            let evidence_refs = artifact_refs.iter().map(String::as_str).collect::<Vec<_>>();
+            audit_control.append_access_event_with_evidence(
+                &audit_request_id,
+                Some(&audit_subject),
+                REQUEST_EVIDENCE_ACCESS,
+                Some(&audit_target),
+                "PASS",
+                "CONTROL_MANIFESTS_READ",
+                &evidence_refs,
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        EndpointResult::RequestEvidence(RequestEvidenceResponse {
+            request_id,
+            tenant_id: self.config.tenant_id.as_str().to_owned(),
+            site_id: self.config.site_id.as_str().to_owned(),
+            source_request_id: target_request_id.as_str().to_owned(),
+            truncated: next_cursor.is_some(),
+            next_cursor,
+            artifacts,
+        })
     }
 
     async fn request_summary(
@@ -655,6 +855,63 @@ impl ControlPlane {
         Ok(position)
     }
 
+    fn encode_evidence_cursor(
+        &self,
+        subject: &str,
+        request_id: &RequestId,
+        artifact_id: &ArtifactId,
+    ) -> Result<String, ()> {
+        let signature = evidence_cursor_signature(
+            &self.config.cursor_key.0,
+            &self.config.credential.token_digest,
+            subject,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            request_id,
+            self.config.limits.max_query_artifacts,
+            artifact_id,
+        )?;
+        Ok(format!(
+            "{CURSOR_VERSION}.{}.{}",
+            artifact_id.as_str(),
+            lower_hex(&signature)
+        ))
+    }
+
+    fn decode_evidence_cursor(
+        &self,
+        subject: &str,
+        request_id: &RequestId,
+        cursor: &str,
+    ) -> Result<ArtifactId, CursorError> {
+        let mut parts = cursor.split('.');
+        let (Some(version), Some(artifact_id), Some(signature)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(CursorError::Invalid);
+        };
+        if parts.next().is_some() || version != CURSOR_VERSION {
+            return Err(CursorError::Invalid);
+        }
+        let artifact_id = ArtifactId::parse(artifact_id).map_err(|_| CursorError::Invalid)?;
+        let supplied_signature = parse_lower_hex_32(signature).ok_or(CursorError::Invalid)?;
+        let expected_signature = evidence_cursor_signature(
+            &self.config.cursor_key.0,
+            &self.config.credential.token_digest,
+            subject,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            request_id,
+            self.config.limits.max_query_artifacts,
+            &artifact_id,
+        )
+        .map_err(|()| CursorError::Unavailable)?;
+        if !memcmp::eq(&supplied_signature, &expected_signature) {
+            return Err(CursorError::Invalid);
+        }
+        Ok(artifact_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn audited_error_async(
         self: &Arc<Self>,
@@ -855,6 +1112,28 @@ impl ControlPlane {
         outcome: &'static str,
         reason_code: &'static str,
     ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence(
+            request_id,
+            subject_ref,
+            action,
+            target_request_id,
+            outcome,
+            reason_code,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_access_event_with_evidence(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        action: AccessAction,
+        target_request_id: Option<&RequestId>,
+        outcome: &'static str,
+        reason_code: &'static str,
+        evidence_refs: &[&str],
+    ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
             .lock()
@@ -885,7 +1164,7 @@ impl ControlPlane {
             observed_at: &occurred_at,
             policy_revision: "control-v1",
             example_only: false,
-            evidence_refs: &[],
+            evidence_refs,
             cause_event_ids: &[],
             payload: AccessPayload {
                 method: "GET",
@@ -921,6 +1200,7 @@ pub fn router(control: ControlPlane) -> Router {
         .route(HEALTH_PATH, get(health_handler))
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
+        .route(REQUEST_EVIDENCE_PATH, get(request_evidence_handler))
         .with_state(Arc::new(control))
 }
 
@@ -966,10 +1246,27 @@ async fn request_events_handler(
         .into_response()
 }
 
+async fn request_evidence_handler(
+    State(control): State<Arc<ControlPlane>>,
+    Path(request_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .request_evidence(authorization, request_id, raw_query)
+        .await
+        .into_response()
+}
+
 enum EndpointResult {
     Success(HealthResponse),
     RequestSummary(RequestSummaryResponse),
     RequestEvents(RequestEventsResponse),
+    RequestEvidence(RequestEvidenceResponse),
     Error(StatusCode, ErrorResponse),
 }
 
@@ -979,6 +1276,7 @@ impl IntoResponse for EndpointResult {
             Self::Success(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestSummary(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Error(status, response) => (status, Json(response)).into_response(),
         })
     }
@@ -1019,19 +1317,55 @@ fn cursor_signature(
     limit: u16,
     position: &RequestEventPosition,
 ) -> Result<[u8; 32], ()> {
+    let limit = limit.to_be_bytes();
+    let request_seq = position.request_seq().to_be_bytes();
+    component_signature(
+        key,
+        &[
+            b"xshield-control-events-cursor-v1".as_slice(),
+            credential_digest,
+            subject.as_bytes(),
+            tenant_id.as_str().as_bytes(),
+            site_id.as_str().as_bytes(),
+            request_id.as_str().as_bytes(),
+            &limit,
+            &request_seq,
+            position.event_id().as_str().as_bytes(),
+        ],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evidence_cursor_signature(
+    key: &[u8; 32],
+    credential_digest: &[u8; 32],
+    subject: &str,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    request_id: &RequestId,
+    limit: u16,
+    artifact_id: &ArtifactId,
+) -> Result<[u8; 32], ()> {
+    let limit = limit.to_be_bytes();
+    component_signature(
+        key,
+        &[
+            b"xshield-control-evidence-cursor-v1",
+            credential_digest,
+            subject.as_bytes(),
+            tenant_id.as_str().as_bytes(),
+            site_id.as_str().as_bytes(),
+            request_id.as_str().as_bytes(),
+            &limit,
+            artifact_id.as_str().as_bytes(),
+        ],
+    )
+}
+
+fn component_signature(key: &[u8; 32], components: &[&[u8]]) -> Result<[u8; 32], ()> {
     let key = PKey::hmac(key).map_err(|_| ())?;
     let mut signer = Signer::new(MessageDigest::sha256(), &key).map_err(|_| ())?;
-    for component in [
-        b"xshield-control-events-cursor-v1".as_slice(),
-        credential_digest,
-        subject.as_bytes(),
-        tenant_id.as_str().as_bytes(),
-        site_id.as_str().as_bytes(),
-        request_id.as_str().as_bytes(),
-        &limit.to_be_bytes(),
-        &position.request_seq().to_be_bytes(),
-        position.event_id().as_str().as_bytes(),
-    ] {
+    for component in components {
         signer
             .update(&(component.len() as u64).to_be_bytes())
             .map_err(|_| ())?;
@@ -1155,6 +1489,24 @@ struct RequestSummaryResponse {
     found: bool,
     completeness: &'static str,
     summary: Option<RequestSummary>,
+}
+
+#[derive(Serialize)]
+struct RequestEvidenceResponse {
+    request_id: String,
+    tenant_id: String,
+    site_id: String,
+    source_request_id: String,
+    truncated: bool,
+    next_cursor: Option<String>,
+    artifacts: Vec<EvidenceArtifactResponse>,
+}
+
+#[derive(Serialize)]
+struct EvidenceArtifactResponse {
+    recorded_at: String,
+    #[serde(flatten)]
+    manifest: EvidenceManifest,
 }
 
 #[derive(Serialize)]
@@ -1304,14 +1656,14 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode, header::AUTHORIZATION},
     };
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, SecondsFormat, Utc};
     use clickhouse::{Client, Row, test};
     use serde::Serialize;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use std::{
         fs,
         path::Path,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -1322,6 +1674,13 @@ mod tests {
     use xshield_core::{
         admin::{ManagementPrincipal, ManagementRole},
         domain::{EventId, RequestId, SiteId, TenantId},
+    };
+    use xshield_evidence::{
+        EvidenceClassification, EvidenceFidelity, EvidenceKey, EvidenceVaultConfig, EvidenceWrite,
+        LocalEvidenceVault,
+    };
+    use xshield_postgres::{
+        EvidenceCatalogPublish, EvidenceCatalogWriteOutcome, PostgresIdentityStore,
     };
     use xshield_worker::{
         AuditEventSummary, PublisherConfig, RequestEventPosition, RequestStageSummary,
@@ -1335,8 +1694,9 @@ mod tests {
     #[tokio::test]
     async fn enforces_auth_scope_rate_limit_and_health_contract() {
         assert!(CursorKey::from_hex("not-a-key").is_err());
-        assert!(ControlLimits::new(0, 100).is_err());
-        assert!(ControlLimits::new(1, 1_001).is_err());
+        assert!(ControlLimits::new(0, 100, 1).is_err());
+        assert!(ControlLimits::new(1, 1_001, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 129).is_err());
         assert!(
             ManagementCredential::new(
                 TOKEN,
@@ -1643,6 +2003,160 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+    async fn evidence_manifests_are_scoped_paginated_and_audited() {
+        let database_url =
+            std::env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
+        let catalog = PostgresIdentityStore::connect(&database_url, 3, Duration::from_secs(5))
+            .await
+            .expect("catalog connects");
+        let fixture = Fixture::with_catalog(10, ManagementRole::Observer, catalog.clone(), 1);
+        let root =
+            std::env::temp_dir().join(format!("xshield-control-evidence-{}", Uuid::now_v7()));
+        private_directory(&root);
+        let vault = LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(&root, "evidence-key-control", 1024, 30).unwrap(),
+            EvidenceKey::from_hex(
+                "4444444444444444444444444444444444444444444444444444444444444444",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000111").unwrap();
+        let first = publish_test_artifact(&catalog, &vault, &tenant, &site, &request, 1).await;
+        let second = publish_test_artifact(&catalog, &vault, &tenant, &site, &request, 2).await;
+
+        let path = format!("/control/v1/requests/{}/evidence", request.as_str());
+        let app = router(fixture.control);
+        let first_page = app
+            .clone()
+            .oneshot(authenticated_path(&path))
+            .await
+            .unwrap();
+        assert_eq!(first_page.status(), StatusCode::OK);
+        assert_eq!(first_page.headers()["cache-control"], "private, no-store");
+        let body = to_bytes(first_page.into_body(), 32 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["tenant_id"], tenant.as_str());
+        assert_eq!(body["site_id"], site.as_str());
+        assert_eq!(body["artifacts"].as_array().unwrap().len(), 1);
+        assert_eq!(body["truncated"], true);
+        let returned = body["artifacts"][0]["artifact_id"].as_str().unwrap();
+        assert!(returned == first || returned == second);
+        assert!(body["artifacts"][0].get("plaintext").is_none());
+        let cursor = body["next_cursor"].as_str().unwrap();
+
+        let other_request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000112").unwrap();
+        let wrong_scope = app
+            .clone()
+            .oneshot(authenticated_path(&format!(
+                "/control/v1/requests/{}/evidence?cursor={cursor}",
+                other_request.as_str()
+            )))
+            .await
+            .unwrap();
+        assert_eq!(wrong_scope.status(), StatusCode::BAD_REQUEST);
+
+        let second_page = app
+            .oneshot(authenticated_path(&format!("{path}?cursor={cursor}")))
+            .await
+            .unwrap();
+        assert_eq!(second_page.status(), StatusCode::OK);
+        let body = to_bytes(second_page.into_body(), 32 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["artifacts"].as_array().unwrap().len(), 1);
+        assert_ne!(body["artifacts"][0]["artifact_id"], returned);
+        assert_eq!(body["truncated"], false);
+        assert!(body["next_cursor"].is_null());
+        assert_access_event_targets_and_evidence(
+            &fixture.access_directory,
+            "console.manifest.read",
+            &[
+                Some(request.as_str()),
+                Some(other_request.as_str()),
+                Some(request.as_str()),
+            ],
+            &[1, 0, 1],
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn authenticated_path(path: &str) -> Request<Body> {
+        Request::get(path)
+            .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn publish_test_artifact(
+        catalog: &PostgresIdentityStore,
+        vault: &LocalEvidenceVault,
+        tenant: &TenantId,
+        site: &SiteId,
+        request: &RequestId,
+        sequence: u64,
+    ) -> String {
+        let verified = vault
+            .write(&EvidenceWrite {
+                tenant_id: tenant,
+                site_id: site,
+                request_id: request,
+                kind: "request_decoded",
+                content_type: "application/json",
+                fidelity: EvidenceFidelity::EntityExact,
+                classification: EvidenceClassification::Restricted,
+                parent_refs: &[],
+                expires_at: Utc::now() + chrono::TimeDelta::minutes(10),
+                plaintext: br#"{"approved":true}"#,
+            })
+            .unwrap();
+        let artifact_id = verified.manifest().artifact_id.clone();
+        let event = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+        let trace_id = Uuid::now_v7().simple().to_string();
+        let occurred_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let envelope = json!({
+            "schema_version": 3,
+            "event_id": event.as_str(),
+            "event_type": "evidence.cataloged",
+            "tenant_id": tenant.as_str(),
+            "site_id": site.as_str(),
+            "request_id": request.as_str(),
+            "trace_id": trace_id,
+            "span_id": &trace_id[..16],
+            "producer_id": "xshield-control-test",
+            "producer_boot_id": "control-test",
+            "producer_seq": sequence,
+            "request_seq": sequence,
+            "occurred_at": occurred_at,
+            "observed_at": occurred_at,
+            "policy_revision": "policy-test-r1",
+            "example_only": false,
+            "evidence_refs": [artifact_id],
+            "cause_event_ids": [],
+            "payload": {
+                "stage": "evidence_catalog",
+                "outcome": "PASS",
+                "reason_code": "EVIDENCE_CATALOG_PUBLISHED",
+                "artifact_id": artifact_id
+            },
+            "sensitivity": "RESTRICTED",
+            "integrity": {"state": "pending", "previous_hash": null, "event_hash": null}
+        });
+        assert_eq!(
+            catalog
+                .publish_evidence_manifest(
+                    EvidenceCatalogPublish::new(&verified, &event, &envelope).unwrap()
+                )
+                .await
+                .unwrap(),
+            EvidenceCatalogWriteOutcome::Published
+        );
+        artifact_id
+    }
+
     fn authenticated_request() -> Request<Body> {
         Request::get(super::HEALTH_PATH)
             .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
@@ -1711,6 +2225,27 @@ mod tests {
             Self::with_window_and_index(rate_limit, role, now - 1, now + 3600, index)
         }
 
+        fn with_catalog(
+            rate_limit: u64,
+            role: ManagementRole,
+            catalog: PostgresIdentityStore,
+            max_query_artifacts: u16,
+        ) -> Self {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            Self::with_dependencies(
+                rate_limit,
+                role,
+                now - 1,
+                now + 3600,
+                Client::default(),
+                catalog,
+                max_query_artifacts,
+            )
+        }
+
         fn with_window(
             rate_limit: u64,
             role: ManagementRole,
@@ -1732,6 +2267,27 @@ mod tests {
             token_issued_at: u64,
             token_expires_at: u64,
             index: Client,
+        ) -> Self {
+            Self::with_dependencies(
+                rate_limit,
+                role,
+                token_issued_at,
+                token_expires_at,
+                index,
+                lazy_catalog(),
+                1,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn with_dependencies(
+            rate_limit: u64,
+            role: ManagementRole,
+            token_issued_at: u64,
+            token_expires_at: u64,
+            index: Client,
+            catalog: PostgresIdentityStore,
+            max_query_artifacts: u16,
         ) -> Self {
             let root =
                 std::env::temp_dir().join(format!("xshield-control-test-{}", Uuid::now_v7()));
@@ -1784,7 +2340,7 @@ mod tests {
                 site,
                 publisher,
                 "journal-key-r1",
-                ControlLimits::new(rate_limit, 1).unwrap(),
+                ControlLimits::new(rate_limit, 1, max_query_artifacts).unwrap(),
             )
             .unwrap();
             let seal_key = test_seal_key();
@@ -1794,6 +2350,7 @@ mod tests {
                     JournalKey::from_hex(JOURNAL_KEY).unwrap(),
                     seal_key,
                     index,
+                    catalog,
                     access_journal,
                 ),
                 access_directory: access,
@@ -1804,6 +2361,13 @@ mod tests {
     fn test_seal_key() -> SealVerifyingKey {
         let signing = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY).unwrap();
         signing.verifying_key().unwrap()
+    }
+
+    fn lazy_catalog() -> PostgresIdentityStore {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://xshield:xshield@127.0.0.1:1/xshield")
+            .unwrap();
+        PostgresIdentityStore::from_pool(pool)
     }
 
     fn assert_access_events(
@@ -1820,6 +2384,21 @@ mod tests {
         event_type: &str,
         target_request_ids: &[Option<&str>],
     ) {
+        assert_access_event_targets_and_evidence(
+            directory,
+            event_type,
+            target_request_ids,
+            &vec![0; target_request_ids.len()],
+        );
+    }
+
+    fn assert_access_event_targets_and_evidence(
+        directory: &Path,
+        event_type: &str,
+        target_request_ids: &[Option<&str>],
+        evidence_counts: &[usize],
+    ) {
+        assert_eq!(target_request_ids.len(), evidence_counts.len());
         let manifests = directory.parent().unwrap().join("access-manifests");
         private_directory(&manifests);
         let signing = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY).unwrap();
@@ -1833,7 +2412,11 @@ mod tests {
         .unwrap();
         assert_eq!(segments.len(), target_request_ids.len());
         let verifier = signing.verifying_key().unwrap();
-        for (segment, target_request_id) in segments.into_iter().zip(target_request_ids) {
+        for ((segment, target_request_id), evidence_count) in segments
+            .into_iter()
+            .zip(target_request_ids)
+            .zip(evidence_counts)
+        {
             let path = directory.join(format!("segment-{}.closed.xja", segment.producer_boot_id));
             let manifest =
                 fs::read(manifests.join(format!("segment-{}.xjs", segment.producer_boot_id)))
@@ -1851,6 +2434,10 @@ mod tests {
             let record = reader.next_record().unwrap().unwrap();
             let event: Value = serde_json::from_slice(record.plaintext()).unwrap();
             assert_eq!(event["event_type"], event_type);
+            assert_eq!(
+                event["evidence_refs"].as_array().unwrap().len(),
+                *evidence_count
+            );
             assert!(event["payload"]["reason_code"].is_string());
             assert_eq!(
                 event["payload"]["target_request_id"],

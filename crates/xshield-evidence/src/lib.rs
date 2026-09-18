@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
-use xshield_core::domain::{RequestId, SiteId, TenantId};
+use xshield_core::domain::{ArtifactId, RequestId, SiteId, TenantId};
 use zeroize::Zeroizing;
 
 #[cfg(unix)]
@@ -708,17 +708,9 @@ fn hide_absence(error: EvidenceError) -> EvidenceError {
 }
 
 fn validate_artifact_id(value: &str) -> Result<(), EvidenceError> {
-    let Some(uuid) = value.strip_prefix("artifact_") else {
-        return Err(EvidenceError::NotAvailable);
-    };
-    let uuid = Uuid::parse_str(uuid).map_err(|_| EvidenceError::NotAvailable)?;
-    if uuid.get_version_num() != 7
-        || uuid.get_variant() != uuid::Variant::RFC4122
-        || value != format!("artifact_{uuid}")
-    {
-        return Err(EvidenceError::NotAvailable);
-    }
-    Ok(())
+    ArtifactId::parse(value)
+        .map(|_| ())
+        .map_err(|_| EvidenceError::NotAvailable)
 }
 
 fn valid_name(value: &str) -> bool {

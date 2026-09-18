@@ -16,12 +16,15 @@ tokio.workspace = true
 uuid.workspace = true
 xshield-audit = { path = "../xshield-audit" }
 xshield-core = { path = "../xshield-core" }
+xshield-evidence = { path = "../xshield-evidence" }
+xshield-postgres = { path = "../xshield-postgres" }
 xshield-worker = { path = "../xshield-worker" }
 zeroize.workspace = true
 
 [dev-dependencies]
 clickhouse = { workspace = true, features = ["test-util"] }
 tower.workspace = true
+sqlx.workspace = true
 
 [lints]
 workspace = true

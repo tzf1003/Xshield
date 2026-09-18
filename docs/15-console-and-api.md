@@ -41,6 +41,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | POST /control/v1/search | 结构化 QueryPlan，返回游标和水位 |
 | GET /control/v1/requests/{request_id} | 聚合摘要、阶段、覆盖和关联 |
 | GET /control/v1/requests/{request_id}/events | 不可变事件分页 |
+| GET /control/v1/requests/{request_id}/evidence | 作用域内证据 manifest 分页，不读取内容 |
 | GET /control/v1/model-calls/{model_call_id} | 逻辑调用与实际尝试、输入输出引用 |
 | GET /control/v1/agent-runs/{agent_run_id} | 子调用、工具、产物和权限快照 |
 | GET /control/v1/artifacts/{id} | 证据状态、长度、保密和完整性 |
