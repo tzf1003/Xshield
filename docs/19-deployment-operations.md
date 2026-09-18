@@ -26,7 +26,7 @@ edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的
 
 草稿 → validate → 独立测试 → 审批 → 签名 → shadow → canary → active。数据面固定版本读，旧新构建并行范围明确。控制面丢失连接可使用未过期签名配置，但不得跳过身份/资格存储不可用。
 
-数据库采用 expand-contract 迁移，先兼容再删旧字段；回滚版本不得复活撤销 epoch。每次升级验证队列 drain、journal seal、未完成请求、插件终止与模型取消。
+数据库采用 expand-contract 迁移，先兼容再删旧字段；回滚版本不得复活撤销 epoch。ClickHouse 保留策略升级先执行 `retention_expires_at` 扩展和 active 视图 DDL，再部署显式写期限的新 worker；旧行沿用 30 天默认值。每次升级验证队列 drain、journal seal、未完成请求、插件终止与模型取消。
 
 ## 19.5 运行状态
 

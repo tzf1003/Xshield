@@ -33,6 +33,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let control_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_AUDIT_KEY_HEX")?);
     let target_id = env::var("XSHIELD_INDEX_TARGET_ID")?;
     let table = env::var("XSHIELD_CLICKHOUSE_TABLE").unwrap_or_else(|_| "audit_events".to_owned());
+    let metadata_retention_days = env::var("XSHIELD_AUDIT_METADATA_RETENTION_DAYS")?.parse()?;
     let max_segment_bytes = env::var("XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES")?.parse()?;
     let token_issued_at = env::var("XSHIELD_CONTROL_TOKEN_ISSUED_AT")?.parse()?;
     let token_expires_at = env::var("XSHIELD_CONTROL_TOKEN_EXPIRES_AT")?.parse()?;
@@ -58,6 +59,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         checkpoint_directory,
         target_id,
         table,
+        metadata_retention_days,
         max_segment_bytes,
     )?;
     let credential = ManagementCredential::new(&token, token_issued_at, token_expires_at)?;

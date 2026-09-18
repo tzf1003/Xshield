@@ -27,6 +27,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let password = Zeroizing::new(env::var("XSHIELD_CLICKHOUSE_PASSWORD")?);
     let target_id = env::var("XSHIELD_INDEX_TARGET_ID")?;
     let table = env::var("XSHIELD_CLICKHOUSE_TABLE").unwrap_or_else(|_| "audit_events".to_owned());
+    let metadata_retention_days = env::var("XSHIELD_AUDIT_METADATA_RETENTION_DAYS")?.parse()?;
     let max_segment_bytes = env::var("XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES")?.parse()?;
 
     let config = PublisherConfig::new(
@@ -35,6 +36,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         checkpoint_directory,
         target_id,
         table,
+        metadata_retention_days,
         max_segment_bytes,
     )?;
     let journal_key = JournalKey::from_hex(&journal_key_hex)?;

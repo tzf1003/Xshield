@@ -677,6 +677,7 @@ mod tests {
         assert_eq!(body["tenant_id"], "tenant_a");
         assert_eq!(body["site_id"], "site_a");
         assert_eq!(body["closed_segments"], 0);
+        assert_eq!(body["metadata_retention_days"], 30);
 
         let limited = app.oneshot(authenticated_request()).await.unwrap();
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -765,6 +766,7 @@ mod tests {
                 checkpoints,
                 "clickhouse-primary",
                 "audit_events",
+                30,
                 1024 * 1024,
             )
             .unwrap();

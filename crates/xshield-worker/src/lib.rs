@@ -2,7 +2,7 @@
 
 #![warn(missing_docs)]
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use clickhouse::{Client, Row, sql::Identifier};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -26,6 +26,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 const MANIFEST_BYTES_MAX: u64 = 1024;
 const LIST_ITEMS_MAX: usize = 256;
 const NAME_BYTES_MAX: usize = 128;
+const MAX_METADATA_RETENTION_DAYS: u16 = 3_650;
 
 /// Immutable publication settings for one analytical destination.
 #[derive(Clone, Debug)]
@@ -35,11 +36,13 @@ pub struct PublisherConfig {
     checkpoint_directory: PathBuf,
     target_id: String,
     table: String,
+    metadata_retention_days: u16,
+    metadata_retention: TimeDelta,
     max_segment_bytes: u64,
 }
 
 impl PublisherConfig {
-    /// Validates paths, target identity, table name, and the segment memory ceiling.
+    /// Validates paths, target identity, table name, retention, and the segment memory ceiling.
     ///
     /// # Errors
     /// Returns [`PublishError::InvalidConfig`] for an unsafe scalar setting.
@@ -49,10 +52,14 @@ impl PublisherConfig {
         checkpoint_directory: impl Into<PathBuf>,
         target_id: impl Into<String>,
         table: impl Into<String>,
+        metadata_retention_days: u16,
         max_segment_bytes: u64,
     ) -> Result<Self, PublishError> {
         let target_id = target_id.into();
         let table = table.into();
+        let metadata_retention = TimeDelta::try_days(i64::from(metadata_retention_days))
+            .filter(|_| (1..=MAX_METADATA_RETENTION_DAYS).contains(&metadata_retention_days))
+            .ok_or(PublishError::InvalidConfig)?;
         if !valid_name(&target_id) || !valid_name(&table) || max_segment_bytes == 0 {
             return Err(PublishError::InvalidConfig);
         }
@@ -62,6 +69,8 @@ impl PublisherConfig {
             checkpoint_directory: checkpoint_directory.into(),
             target_id,
             table,
+            metadata_retention_days,
+            metadata_retention,
             max_segment_bytes,
         })
     }
@@ -100,6 +109,8 @@ pub struct PublicationHealth {
     pub table: String,
     /// UTC observation time for this snapshot.
     pub as_of: String,
+    /// Configured query-visible metadata lifetime.
+    pub metadata_retention_days: u16,
     /// Number of immutable closed journal segments.
     pub closed_segments: usize,
     /// Total bytes occupied by immutable closed journal segments.
@@ -146,6 +157,7 @@ pub fn inspect_publication_health(
         target_id: config.target_id.clone(),
         table: config.table.clone(),
         as_of: Utc::now().to_rfc3339(),
+        metadata_retention_days: config.metadata_retention_days,
         closed_segments: paths.len(),
         closed_segment_bytes: 0,
         published_segments: 0,
@@ -272,6 +284,7 @@ pub async fn publish_sealed_segments(
                 record.producer_sequence(),
                 &segment.producer_boot_id,
                 digest,
+                config.metadata_retention,
             )?);
         }
         reject_remote_conflicts(client, &config.table, &local_digests).await?;
@@ -311,6 +324,8 @@ struct IndexRow {
     occurred_at: DateTime<Utc>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
     observed_at: DateTime<Utc>,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+    retention_expires_at: DateTime<Utc>,
     producer_id: String,
     producer_boot_id: String,
     producer_seq: u64,
@@ -334,6 +349,7 @@ impl IndexRow {
         authenticated_sequence: u64,
         authenticated_boot_id: &str,
         digest: String,
+        metadata_retention: TimeDelta,
     ) -> Result<Self, PublishError> {
         let event: WireEvent = serde_json::from_slice(bytes)?;
         let event_id =
@@ -373,6 +389,9 @@ impl IndexRow {
         let observed_at = DateTime::parse_from_rfc3339(&event.observed_at)
             .map_err(|_| PublishError::InvalidEvent)?
             .with_timezone(&Utc);
+        let retention_expires_at = occurred_at
+            .checked_add_signed(metadata_retention)
+            .ok_or(PublishError::InvalidEvent)?;
         let summary = PayloadSummary::parse(&event.event_type, event.payload.get())?;
         let ingest_revision = digest_revision(&digest)?;
         Ok(Self {
@@ -390,6 +409,7 @@ impl IndexRow {
             confidence_status: summary.confidence_status,
             occurred_at,
             observed_at,
+            retention_expires_at,
             producer_id: event.producer_id,
             producer_boot_id: event.producer_boot_id,
             producer_seq: event.producer_seq,
@@ -1118,7 +1138,7 @@ impl From<clickhouse::error::Error> for PublishError {
 mod tests {
     use super::{
         Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError, PublisherConfig,
-        closed_segment_paths, inspect_publication_health, prepare_private_directory,
+        TimeDelta, closed_segment_paths, inspect_publication_health, prepare_private_directory,
         publish_sealed_segments, read_private_bounded, write_checkpoint,
     };
     use clickhouse::{Client, test};
@@ -1197,6 +1217,7 @@ mod tests {
                 checkpoint_directory,
                 "clickhouse-primary",
                 "audit_events",
+                30,
                 1024 * 1024,
             )
             .unwrap();
@@ -1255,6 +1276,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event_id, fixture.event_ids[0]);
         assert_eq!(rows[0].content_digest.len(), 64);
+        assert_eq!(
+            rows[0].retention_expires_at,
+            rows[0].occurred_at + TimeDelta::try_days(30).unwrap()
+        );
         assert_eq!(fixture.checkpoint_count(), 1);
 
         let second = publish_sealed_segments(
@@ -1268,6 +1293,24 @@ mod tests {
         .unwrap();
         assert_eq!(second.published_segments, 0);
         assert_eq!(second.checkpointed_segments, 1);
+    }
+
+    #[test]
+    fn metadata_retention_is_bounded() {
+        for days in [0, 3_651] {
+            assert!(matches!(
+                PublisherConfig::new(
+                    "journal",
+                    "manifests",
+                    "checkpoints",
+                    "clickhouse-primary",
+                    "audit_events",
+                    days,
+                    1024,
+                ),
+                Err(PublishError::InvalidConfig)
+            ));
+        }
     }
 
     #[tokio::test]
@@ -1354,6 +1397,7 @@ mod tests {
             2,
             &boot_id,
             "1".repeat(64),
+            TimeDelta::try_days(30).unwrap(),
         )
         .unwrap_err();
         assert!(matches!(sequence_error, PublishError::InvalidEvent));
@@ -1365,6 +1409,7 @@ mod tests {
             1,
             &boot_id,
             "1".repeat(64),
+            TimeDelta::try_days(30).unwrap(),
         )
         .unwrap_err();
         assert!(matches!(synthetic_error, PublishError::InvalidEvent));
