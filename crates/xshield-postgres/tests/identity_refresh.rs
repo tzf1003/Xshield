@@ -9,7 +9,7 @@ use xshield_core::{
     },
     ports::{IdentityProofQuery, IdentityProofState, IdentityProofStore},
 };
-use xshield_postgres::{CredentialRefresh, PostgresIdentityStore, RefreshOutcome, StoreError};
+use xshield_postgres::{CredentialTransition, PostgresIdentityStore, RefreshOutcome, StoreError};
 
 const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -136,7 +136,7 @@ async fn refresh(
 ) -> Result<RefreshOutcome, StoreError> {
     let envelope = json!({"schema_version": 3, "event_type": "identity.refreshed"});
     store
-        .refresh_same_context(CredentialRefresh::new(
+        .refresh_same_context(CredentialTransition::new(
             &fixture.snapshot,
             &fixture.old_credentials,
             &fixture.new_credentials,
@@ -213,7 +213,7 @@ fn refresh_requires_a_complete_credential_set() {
     let event_id = event_id(106);
     let envelope = json!({"schema_version": 3, "event_type": "identity.refreshed"});
     assert!(matches!(
-        CredentialRefresh::new(
+        CredentialTransition::new(
             &fixture.snapshot,
             &fixture.old_credentials,
             &BTreeMap::new(),
@@ -267,7 +267,7 @@ async fn refresh_is_atomic_and_compare_and_swap() {
     assert_eq!(
         store
             .refresh_same_context(
-                CredentialRefresh::new(
+                CredentialTransition::new(
                     &fixture.snapshot,
                     &credentials(WRONG),
                     &fixture.new_credentials,

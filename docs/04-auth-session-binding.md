@@ -41,6 +41,8 @@ JWT 可作为不透明字符串精确匹配；使用 claims 建立身份时验�
 
 同身份 Bearer 刷新适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_refresh`：成功状态、主体 JSON Pointer、Bearer JSON Pointer 和凭证 TTL 在启动时验证。请求仍须携带当前 WAF Cookie 与旧 Bearer；响应主体必须等于请求 AuthSnapshot 的主体，新 Bearer 必须改变。事务按旧 snapshot CAS，并重新锁定、比较完整旧凭证集合及期限；成功只推进 generation，保留 epoch 和仍有效资格，新凭证期限不超过绝对会话期限。
 
+账号切换适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_context_switch`，并以旧账号的当前 WAF Cookie 与 Bearer 准入。成功响应必须给出不同主体和新 Bearer；短事务按旧 snapshot CAS，在同一提交中替换主体、推进 epoch 与 generation、撤销完整旧凭证集合、写入新凭证和 `epoch.changed` outbox。WAF 会话及绝对期限不延长。相同主体、旧凭证偏差、过期或并发版本变化均不改变绑定，也不释放成功正文。
+
 并发刷新采用 compare-and-swap 与行锁。新旧兼容窗口只存明确合法的凭证组合，不能把同用户历史上的所有 WAF Cookie 与所有 Token 做笛卡尔组合。未知替换记录 AUTH_BINDING_MISMATCH，不改变原账本。
 
 ## 4.5 异步响应与 WSS

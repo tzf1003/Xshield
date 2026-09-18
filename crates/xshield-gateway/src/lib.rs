@@ -30,7 +30,7 @@ pub mod response_grant;
 pub mod share_issue;
 pub mod share_token;
 
-use auth_binding::{AuthBindingRule, AuthRefreshRule};
+use auth_binding::{AuthBindingRule, AuthTransitionRule};
 use response_grant::ResponseGrantRule;
 
 /// Maximum accepted gateway configuration size.
@@ -92,7 +92,8 @@ struct CompiledResponse {
     max_bytes: usize,
     grant: Option<ResponseGrantRule>,
     auth_binding: Option<AuthBindingRule>,
-    auth_refresh: Option<AuthRefreshRule>,
+    auth_refresh: Option<AuthTransitionRule>,
+    auth_context_switch: Option<AuthTransitionRule>,
 }
 
 struct CompiledOperations {
@@ -194,6 +195,8 @@ struct ResponseDto {
     auth_binding: Option<AuthBindingDto>,
     #[serde(default)]
     auth_refresh: Option<AuthRefreshDto>,
+    #[serde(default)]
+    auth_context_switch: Option<AuthRefreshDto>,
 }
 
 #[derive(Deserialize)]
@@ -509,11 +512,25 @@ impl GatewayConfig {
 
     /// Returns the same-context authentication refresh rule for one exact operation.
     #[must_use]
-    pub fn auth_refresh_rule(&self, method: &str, path: &str) -> Option<&AuthRefreshRule> {
+    pub fn auth_refresh_rule(&self, method: &str, path: &str) -> Option<&AuthTransitionRule> {
         self.operation(method, path)?
             .response
             .as_ref()?
             .auth_refresh
+            .as_ref()
+    }
+
+    /// Returns the account-context transition rule for one exact operation.
+    #[must_use]
+    pub fn auth_context_switch_rule(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<&AuthTransitionRule> {
+        self.operation(method, path)?
+            .response
+            .as_ref()?
+            .auth_context_switch
             .as_ref()
     }
 
@@ -673,6 +690,16 @@ fn validate_response_contracts(
             && source.policy.admission_class() != AdmissionClass::AuthenticatedRoot
         {
             return Err(ConfigError::Invalid("operations.response.auth_refresh"));
+        }
+        if source
+            .response
+            .as_ref()
+            .is_some_and(|response| response.auth_context_switch.is_some())
+            && source.policy.admission_class() != AdmissionClass::AuthenticatedRoot
+        {
+            return Err(ConfigError::Invalid(
+                "operations.response.auth_context_switch",
+            ));
         }
         let Some(rule) = source
             .response
@@ -908,29 +935,16 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
             })
         })
         .transpose()?;
-    let auth_refresh = dto
-        .auth_refresh
-        .map(|refresh| {
-            if !(200..=299).contains(&refresh.success_status)
-                || refresh.success_status == 204
-                || !valid_json_pointer(&refresh.principal_pointer)
-                || !valid_json_pointer(&refresh.bearer_pointer)
-                || refresh.principal_pointer == refresh.bearer_pointer
-                || !(1..=86_400).contains(&refresh.credential_ttl_seconds)
-            {
-                return Err(ConfigError::Invalid("operations.response.auth_refresh"));
-            }
-            Ok(AuthRefreshRule {
-                success_status: refresh.success_status,
-                principal_pointer: refresh.principal_pointer,
-                bearer_pointer: refresh.bearer_pointer,
-                credential_ttl_seconds: refresh.credential_ttl_seconds,
-            })
-        })
-        .transpose()?;
+    let auth_refresh =
+        compile_auth_transition(dto.auth_refresh, "operations.response.auth_refresh")?;
+    let auth_context_switch = compile_auth_transition(
+        dto.auth_context_switch,
+        "operations.response.auth_context_switch",
+    )?;
     if usize::from(grant.is_some())
         + usize::from(auth_binding.is_some())
         + usize::from(auth_refresh.is_some())
+        + usize::from(auth_context_switch.is_some())
         > 1
     {
         return Err(ConfigError::Invalid("operations.response"));
@@ -940,7 +954,33 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
         grant,
         auth_binding,
         auth_refresh,
+        auth_context_switch,
     })
+}
+
+fn compile_auth_transition(
+    transition: Option<AuthRefreshDto>,
+    field: &'static str,
+) -> Result<Option<AuthTransitionRule>, ConfigError> {
+    transition
+        .map(|transition| {
+            if !(200..=299).contains(&transition.success_status)
+                || transition.success_status == 204
+                || !valid_json_pointer(&transition.principal_pointer)
+                || !valid_json_pointer(&transition.bearer_pointer)
+                || transition.principal_pointer == transition.bearer_pointer
+                || !(1..=86_400).contains(&transition.credential_ttl_seconds)
+            {
+                return Err(ConfigError::Invalid(field));
+            }
+            Ok(AuthTransitionRule {
+                success_status: transition.success_status,
+                principal_pointer: transition.principal_pointer,
+                bearer_pointer: transition.bearer_pointer,
+                credential_ttl_seconds: transition.credential_ttl_seconds,
+            })
+        })
+        .transpose()
 }
 
 fn valid_json_pointer(value: &str) -> bool {
@@ -1408,9 +1448,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn compiles_authentication_response_only_for_auth_entry() {
-        let config = serde_json::json!({
+    fn auth_response_config() -> serde_json::Value {
+        serde_json::json!({
             "listen": "127.0.0.1:6188",
             "origin": {"address": "127.0.0.1:8080", "server_name": "origin.example", "tls": false},
             "tenant_id": "tenant_demo",
@@ -1445,7 +1484,12 @@ mod tests {
                     }
                 }
             }]
-        });
+        })
+    }
+
+    #[test]
+    fn compiles_authentication_response_only_for_auth_entry() {
+        let config = auth_response_config();
         let compiled = GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).unwrap();
         let rule = compiled.auth_binding_rule("POST", "/login").unwrap();
         assert_eq!(rule.credential_ttl_seconds(), 900);
@@ -1485,6 +1529,36 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(&serde_json::to_vec(&refresh).unwrap()),
             Err(ConfigError::Invalid("operations.response.auth_refresh"))
+        ));
+
+        let mut context_switch = config.clone();
+        context_switch["operations"][0]["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
+        let response = context_switch["operations"][0]["response"]
+            .as_object_mut()
+            .unwrap();
+        response.remove("auth_binding");
+        response.insert(
+            "auth_context_switch".to_owned(),
+            serde_json::json!({
+                "success_status": 200,
+                "principal_pointer": "/identity/id",
+                "bearer_pointer": "/access_token",
+                "credential_ttl_seconds": 900
+            }),
+        );
+        let compiled =
+            GatewayConfig::from_json(&serde_json::to_vec(&context_switch).unwrap()).unwrap();
+        assert!(
+            compiled
+                .auth_context_switch_rule("POST", "/login")
+                .is_some()
+        );
+        context_switch["operations"][0]["admission"] = serde_json::json!("AUTH_ENTRY");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&context_switch).unwrap()),
+            Err(ConfigError::Invalid(
+                "operations.response.auth_context_switch"
+            ))
         ));
 
         let mut incoherent = config;

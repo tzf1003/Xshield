@@ -79,8 +79,8 @@ impl<'a> BindingEstablishment<'a> {
     }
 }
 
-/// Complete replacement credential set for a verified same-context refresh.
-pub struct CredentialRefresh<'a> {
+/// Complete replacement credential set for a verified identity transition.
+pub struct CredentialTransition<'a> {
     snapshot: &'a AuthSnapshot,
     previous_credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
     credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
@@ -90,8 +90,14 @@ pub struct CredentialRefresh<'a> {
     event_envelope: &'a Value,
 }
 
-impl<'a> CredentialRefresh<'a> {
-    /// Validates a refresh persistence command.
+/// Verified replacement identity and credentials for one existing WAF binding.
+pub struct IdentityContextSwitch<'a> {
+    transition: CredentialTransition<'a>,
+    principal_ref: &'a str,
+}
+
+impl<'a> CredentialTransition<'a> {
+    /// Validates a credential transition persistence command.
     ///
     /// # Errors
     /// Returns [`StoreError::InvalidCommand`] when the credential set is empty,
@@ -125,11 +131,54 @@ impl<'a> CredentialRefresh<'a> {
     }
 }
 
+impl<'a> IdentityContextSwitch<'a> {
+    /// Validates an identity-context switch persistence command.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidCommand`] when the principal or credential
+    /// transition is not a real context change, expiry is invalid, or the event
+    /// envelope is not an object.
+    pub fn new(
+        transition: CredentialTransition<'a>,
+        principal_ref: &'a str,
+    ) -> Result<Self, StoreError> {
+        if principal_ref == transition.snapshot.principal_ref()
+            || principal_ref.is_empty()
+            || principal_ref.len() > 256
+            || principal_ref.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(StoreError::InvalidCommand);
+        }
+        Ok(Self {
+            transition,
+            principal_ref,
+        })
+    }
+}
+
 /// Result of an optimistic identity refresh transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefreshOutcome {
     /// Binding, credentials, and outbox event committed atomically.
     Updated {
+        /// Generation required by the command.
+        previous_generation: CredentialGeneration,
+        /// Newly committed generation.
+        current_generation: CredentialGeneration,
+    },
+    /// Binding state no longer matches the request snapshot.
+    Conflict,
+}
+
+/// Result of an optimistic identity-context switch transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextSwitchOutcome {
+    /// Principal, epoch, credentials, and outbox event committed atomically.
+    Updated {
+        /// Epoch required by the command.
+        previous_epoch: AuthEpoch,
+        /// Newly committed epoch.
+        current_epoch: AuthEpoch,
         /// Generation required by the command.
         previous_generation: CredentialGeneration,
         /// Newly committed generation.
@@ -257,7 +306,7 @@ impl PostgresIdentityStore {
     /// Returns [`StoreError`] for invalid numeric bounds or a database failure.
     pub async fn refresh_same_context(
         &self,
-        command: CredentialRefresh<'_>,
+        command: CredentialTransition<'_>,
     ) -> Result<RefreshOutcome, StoreError> {
         let expected_generation = to_i64(
             command.snapshot.generation().value(),
@@ -300,58 +349,26 @@ impl PostgresIdentityStore {
             return Ok(RefreshOutcome::Conflict);
         }
 
-        let stored_credentials =
-            lock_active_credentials(&mut transaction, command.snapshot, expected_generation, now)
-                .await?;
-        if &stored_credentials != command.previous_credentials {
+        if !replace_credentials(
+            &mut transaction,
+            CredentialReplacement {
+                snapshot: command.snapshot,
+                previous_credentials: command.previous_credentials,
+                credentials: command.credentials,
+                expected_generation,
+                current_generation,
+                credentials_expire_at,
+                now,
+                event_id: command.event_id,
+                event_type: "identity.refreshed",
+                event_envelope: command.event_envelope,
+            },
+        )
+        .await?
+        {
             transaction.rollback().await?;
             return Ok(RefreshOutcome::Conflict);
         }
-
-        sqlx::query(
-            "UPDATE xshield.credential_bindings
-             SET status = 'revoked'
-             WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
-               AND generation = $4 AND status IN ('active', 'transition')",
-        )
-        .bind(command.snapshot.tenant_id().as_str())
-        .bind(command.snapshot.site_id().as_str())
-        .bind(command.snapshot.binding_id().as_str())
-        .bind(expected_generation)
-        .execute(&mut *transaction)
-        .await?;
-
-        for (slot, fingerprint) in command.credentials {
-            sqlx::query(
-                "INSERT INTO xshield.credential_bindings (
-                    tenant_id, site_id, binding_id, generation, credential_kind,
-                    fingerprint, predecessor_generation, expires_at, status
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8), 'active')",
-            )
-            .bind(command.snapshot.tenant_id().as_str())
-            .bind(command.snapshot.site_id().as_str())
-            .bind(command.snapshot.binding_id().as_str())
-            .bind(current_generation)
-            .bind(slot.as_str())
-            .bind(fingerprint.as_bytes().as_slice())
-            .bind(expected_generation)
-            .bind(credentials_expire_at)
-            .execute(&mut *transaction)
-            .await?;
-        }
-
-        sqlx::query(
-            "INSERT INTO xshield.audit_outbox (
-                event_id, tenant_id, site_id, aggregate_ref, event_type, envelope
-             ) VALUES ($1, $2, $3, $4, 'identity.refreshed', $5)",
-        )
-        .bind(command.event_id.as_str())
-        .bind(command.snapshot.tenant_id().as_str())
-        .bind(command.snapshot.site_id().as_str())
-        .bind(command.snapshot.binding_id().as_str())
-        .bind(command.event_envelope)
-        .execute(&mut *transaction)
-        .await?;
 
         transaction.commit().await?;
         Ok(RefreshOutcome::Updated {
@@ -365,6 +382,176 @@ impl PostgresIdentityStore {
             ),
         })
     }
+
+    /// Atomically changes the principal, epoch, and credential generation.
+    ///
+    /// The old request snapshot and complete active credential set are checked
+    /// under row locks. Advancing the epoch makes prior grants immediately
+    /// ineligible; physical grant cleanup may happen independently.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for invalid numeric bounds or a database failure.
+    pub async fn switch_identity_context(
+        &self,
+        command: IdentityContextSwitch<'_>,
+    ) -> Result<ContextSwitchOutcome, StoreError> {
+        let transition = command.transition;
+        let previous_epoch = to_i64(transition.snapshot.epoch().value(), "auth_epoch")?;
+        let current_epoch = previous_epoch
+            .checked_add(1)
+            .ok_or(StoreError::NumericRange("auth_epoch"))?;
+        let previous_generation = to_i64(
+            transition.snapshot.generation().value(),
+            "credential_generation",
+        )?;
+        let current_generation = previous_generation
+            .checked_add(1)
+            .ok_or(StoreError::NumericRange("credential_generation"))?;
+        let now = to_i64(transition.now.value(), "now")?;
+        let credentials_expire_at = to_i64(
+            transition.credentials_expire_at.value(),
+            "credentials_expire_at",
+        )?;
+        let mut transaction = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE xshield.auth_bindings
+             SET principal_ref = $1, auth_epoch = $2, credential_generation = $3,
+                 updated_at = to_timestamp($4)
+             WHERE tenant_id = $5 AND site_id = $6 AND binding_id = $7
+               AND principal_ref = $8 AND auth_epoch = $9
+               AND credential_generation = $10 AND status = 'active'
+               AND absolute_expires_at > to_timestamp($4)
+               AND absolute_expires_at >= to_timestamp($11)",
+        )
+        .bind(command.principal_ref)
+        .bind(current_epoch)
+        .bind(current_generation)
+        .bind(now)
+        .bind(transition.snapshot.tenant_id().as_str())
+        .bind(transition.snapshot.site_id().as_str())
+        .bind(transition.snapshot.binding_id().as_str())
+        .bind(transition.snapshot.principal_ref())
+        .bind(previous_epoch)
+        .bind(previous_generation)
+        .bind(credentials_expire_at)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(ContextSwitchOutcome::Conflict);
+        }
+        if !replace_credentials(
+            &mut transaction,
+            CredentialReplacement {
+                snapshot: transition.snapshot,
+                previous_credentials: transition.previous_credentials,
+                credentials: transition.credentials,
+                expected_generation: previous_generation,
+                current_generation,
+                credentials_expire_at,
+                now,
+                event_id: transition.event_id,
+                event_type: "epoch.changed",
+                event_envelope: transition.event_envelope,
+            },
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(ContextSwitchOutcome::Conflict);
+        }
+        transaction.commit().await?;
+        Ok(ContextSwitchOutcome::Updated {
+            previous_epoch: AuthEpoch::new(
+                u64::try_from(previous_epoch)
+                    .map_err(|_| StoreError::NumericRange("auth_epoch"))?,
+            ),
+            current_epoch: AuthEpoch::new(
+                u64::try_from(current_epoch).map_err(|_| StoreError::NumericRange("auth_epoch"))?,
+            ),
+            previous_generation: CredentialGeneration::new(
+                u64::try_from(previous_generation)
+                    .map_err(|_| StoreError::NumericRange("credential_generation"))?,
+            ),
+            current_generation: CredentialGeneration::new(
+                u64::try_from(current_generation)
+                    .map_err(|_| StoreError::NumericRange("credential_generation"))?,
+            ),
+        })
+    }
+}
+
+struct CredentialReplacement<'a> {
+    snapshot: &'a AuthSnapshot,
+    previous_credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
+    credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
+    expected_generation: i64,
+    current_generation: i64,
+    credentials_expire_at: i64,
+    now: i64,
+    event_id: &'a EventId,
+    event_type: &'static str,
+    event_envelope: &'a Value,
+}
+
+async fn replace_credentials(
+    transaction: &mut Transaction<'_, Postgres>,
+    replacement: CredentialReplacement<'_>,
+) -> Result<bool, StoreError> {
+    let stored_credentials = lock_active_credentials(
+        transaction,
+        replacement.snapshot,
+        replacement.expected_generation,
+        replacement.now,
+    )
+    .await?;
+    if &stored_credentials != replacement.previous_credentials {
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE xshield.credential_bindings
+         SET status = 'revoked'
+         WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
+           AND generation = $4 AND status IN ('active', 'transition')",
+    )
+    .bind(replacement.snapshot.tenant_id().as_str())
+    .bind(replacement.snapshot.site_id().as_str())
+    .bind(replacement.snapshot.binding_id().as_str())
+    .bind(replacement.expected_generation)
+    .execute(&mut **transaction)
+    .await?;
+    for (slot, fingerprint) in replacement.credentials {
+        sqlx::query(
+            "INSERT INTO xshield.credential_bindings (
+                tenant_id, site_id, binding_id, generation, credential_kind,
+                fingerprint, predecessor_generation, expires_at, status
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8), 'active')",
+        )
+        .bind(replacement.snapshot.tenant_id().as_str())
+        .bind(replacement.snapshot.site_id().as_str())
+        .bind(replacement.snapshot.binding_id().as_str())
+        .bind(replacement.current_generation)
+        .bind(slot.as_str())
+        .bind(fingerprint.as_bytes().as_slice())
+        .bind(replacement.expected_generation)
+        .bind(replacement.credentials_expire_at)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO xshield.audit_outbox (
+            event_id, tenant_id, site_id, aggregate_ref, event_type, envelope
+         ) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(replacement.event_id.as_str())
+    .bind(replacement.snapshot.tenant_id().as_str())
+    .bind(replacement.snapshot.site_id().as_str())
+    .bind(replacement.snapshot.binding_id().as_str())
+    .bind(replacement.event_type)
+    .bind(replacement.event_envelope)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(true)
 }
 
 async fn lock_active_credentials(

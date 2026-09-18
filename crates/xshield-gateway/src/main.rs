@@ -234,6 +234,13 @@ impl ProxyHttp for Gateway {
                             .config
                             .auth_refresh_rule(request.method.as_str(), request.uri.path())
                             .is_some()
+                            || self
+                                .config
+                                .auth_context_switch_rule(
+                                    request.method.as_str(),
+                                    request.uri.path(),
+                                )
+                                .is_some()
                         {
                             prepare_auth_response_headers(upstream_response)?;
                         } else if self
@@ -270,7 +277,7 @@ impl ProxyHttp for Gateway {
             Ok(Some(complete)) => {
                 let released = self
                     .commit_auth_binding(session, context, complete)
-                    .and_then(|body| self.commit_auth_refresh(session, context, body))
+                    .and_then(|body| self.commit_auth_transition(session, context, body))
                     .and_then(|body| self.commit_response_grants(session, context, body));
                 match released {
                     Ok(released) => *body = Some(released),
@@ -434,17 +441,20 @@ impl Gateway {
             .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)
     }
 
-    fn commit_auth_refresh(
+    fn commit_auth_transition(
         &self,
         session: &Session,
         context: &RequestContext,
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
-        let Some(rule) = self
+        let refresh = self
             .config
-            .auth_refresh_rule(request.method.as_str(), request.uri.path())
-        else {
+            .auth_refresh_rule(request.method.as_str(), request.uri.path());
+        let context_switch = self
+            .config
+            .auth_context_switch_rule(request.method.as_str(), request.uri.path());
+        let Some(rule) = refresh.or(context_switch) else {
             return Ok(body);
         };
         let status = context
@@ -470,13 +480,23 @@ impl Gateway {
         // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
         // barrier to an async body hook when the proxy API provides one.
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(identity.commit_auth_refresh(
-                rule,
-                response_identity,
-                &request_id,
-                &body,
-                now,
-            ))
+            tokio::runtime::Handle::current().block_on(async {
+                if context_switch.is_some() {
+                    identity
+                        .commit_auth_context_switch(
+                            rule,
+                            response_identity,
+                            &request_id,
+                            &body,
+                            now,
+                        )
+                        .await
+                } else {
+                    identity
+                        .commit_auth_refresh(rule, response_identity, &request_id, &body, now)
+                        .await
+                }
+            })
         })?;
         Ok(body)
     }

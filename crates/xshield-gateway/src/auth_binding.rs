@@ -18,9 +18,9 @@ pub struct AuthBindingRule {
     pub(crate) session_ttl_seconds: u64,
 }
 
-/// Validated same-context credential-refresh response semantics.
+/// Validated credential-transition response semantics for an existing binding.
 #[derive(Debug)]
-pub struct AuthRefreshRule {
+pub struct AuthTransitionRule {
     pub(crate) success_status: u16,
     pub(crate) principal_pointer: String,
     pub(crate) bearer_pointer: String,
@@ -59,8 +59,8 @@ impl AuthBindingRule {
     }
 }
 
-impl AuthRefreshRule {
-    /// Returns whether this origin response can refresh the current binding.
+impl AuthTransitionRule {
+    /// Returns whether this origin response can transition the current binding.
     #[must_use]
     pub const fn applies(&self, status: u16) -> bool {
         status == self.success_status

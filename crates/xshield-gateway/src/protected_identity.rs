@@ -27,10 +27,11 @@ use xshield_core::{
 use xshield_gateway::{
     GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, ResourceLocation,
     ResourceOperation,
-    auth_binding::{AuthBindingRule, AuthRefreshRule},
+    auth_binding::{AuthBindingRule, AuthTransitionRule},
 };
 use xshield_postgres::{
-    BindingEstablishment, CredentialRefresh, PostgresIdentityStore, RefreshOutcome, StoreError,
+    BindingEstablishment, ContextSwitchOutcome, CredentialTransition, IdentityContextSwitch,
+    PostgresIdentityStore, RefreshOutcome, StoreError,
 };
 use zeroize::Zeroizing;
 
@@ -234,7 +235,7 @@ impl ProtectedIdentity {
 
     pub(crate) async fn commit_auth_refresh(
         &self,
-        rule: &AuthRefreshRule,
+        rule: &AuthTransitionRule,
         identity: &ResponseIdentity,
         request_id: &RequestId,
         body: &[u8],
@@ -286,7 +287,7 @@ impl ProtectedIdentity {
             "credentials": current_credentials,
             "rotation_reason": "same_context_refresh",
         });
-        let command = CredentialRefresh::new(
+        let command = CredentialTransition::new(
             &identity.snapshot,
             identity.binding.credentials(),
             &credentials,
@@ -306,6 +307,92 @@ impl ProtectedIdentity {
         {
             RefreshOutcome::Updated { .. } => Ok(()),
             RefreshOutcome::Conflict => Err(ReasonCode::AuthCredentialGenerationChanged),
+        }
+    }
+
+    pub(crate) async fn commit_auth_context_switch(
+        &self,
+        rule: &AuthTransitionRule,
+        identity: &ResponseIdentity,
+        request_id: &RequestId,
+        body: &[u8],
+        now: UnixSeconds,
+    ) -> Result<(), ReasonCode> {
+        let authentication = rule
+            .extract(body)
+            .map_err(xshield_gateway::auth_binding::AuthBindingError::reason_code)?;
+        if authentication.principal_ref() == identity.snapshot.principal_ref() {
+            return Err(ReasonCode::AuthBindingMismatch);
+        }
+        let bearer_fingerprint = CredentialFingerprint::from_bytes(
+            fingerprint(&self.fingerprint_key, authentication.bearer().as_bytes())
+                .map_err(|_| ReasonCode::IdentityStoreUnavailable)?,
+        );
+        let credentials = BTreeMap::from([(CredentialSlot::Bearer, bearer_fingerprint)]);
+        if &credentials == identity.binding.credentials() {
+            return Err(ReasonCode::AuthBindingMismatch);
+        }
+        let requested_expiry = now
+            .value()
+            .checked_add(rule.credential_ttl_seconds())
+            .map(UnixSeconds::new)
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let credentials_expire_at = requested_expiry.min(identity.binding.absolute_expires_at());
+        if credentials_expire_at <= now {
+            return Err(ReasonCode::AuthSessionExpired);
+        }
+        let current_epoch = identity
+            .snapshot
+            .epoch()
+            .value()
+            .checked_add(1)
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let current_generation = identity
+            .snapshot
+            .generation()
+            .value()
+            .checked_add(1)
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7()))
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let envelope = serde_json::json!({
+            "schema_version": 3,
+            "event_type": "epoch.changed",
+            "event_id": event_id.as_str(),
+            "request_id": request_id.as_str(),
+            "binding_id": identity.snapshot.binding_id().as_str(),
+            "previous_principal_ref": identity.snapshot.principal_ref(),
+            "principal_ref": authentication.principal_ref(),
+            "previous_auth_epoch": identity.snapshot.epoch().value(),
+            "auth_epoch": current_epoch,
+            "previous_credential_generation": identity.snapshot.generation().value(),
+            "credential_generation": current_generation,
+            "previous_credentials": credential_audit_values(identity.binding.credentials()),
+            "credentials": credential_audit_values(&credentials),
+            "rotation_reason": "account_context_changed",
+        });
+        let transition = CredentialTransition::new(
+            &identity.snapshot,
+            identity.binding.credentials(),
+            &credentials,
+            credentials_expire_at,
+            now,
+            &event_id,
+            &envelope,
+        )
+        .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let command = IdentityContextSwitch::new(transition, authentication.principal_ref())
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        match self
+            .store()
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)?
+            .switch_identity_context(command)
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)?
+        {
+            ContextSwitchOutcome::Updated { .. } => Ok(()),
+            ContextSwitchOutcome::Conflict => Err(ReasonCode::AuthEpochChanged),
         }
     }
 

@@ -241,7 +241,11 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"auth.login.invalid","method":"POST","path":"/login-invalid","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
     {"operation_id":"auth.refresh","method":"POST","path":"/refresh","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
     {"operation_id":"auth.refresh.switch","method":"POST","path":"/refresh-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"auth.context.switch","method":"POST","path":"/account-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"auth.context.switch.same","method":"POST","path":"/account-switch-same","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
     {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
+    {"operation_id":"account.slow","method":"GET","path":"/slow-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
+    {"operation_id":"account.current","method":"GET","path":"/whoami","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
@@ -257,8 +261,9 @@ JSON
 
 cargo build -p xshield-gateway >/dev/null
 cat >"$test_dir/origin.py" <<'PY'
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import sys
+import time
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -278,7 +283,10 @@ class Handler(BaseHTTPRequestHandler):
             "/login-invalid": b'{"identity":{"id":"principal_invalid"}}',
             "/refresh": b'{"identity":{"id":"principal_login"},"access_token":"refreshed-business-token"}',
             "/refresh-switch": b'{"identity":{"id":"principal_other"},"access_token":"other-business-token"}',
+            "/account-switch": b'{"identity":{"id":"principal_account_b"},"access_token":"account-b-business-token"}',
+            "/account-switch-same": b'{"identity":{"id":"principal_login"},"access_token":"other-business-token"}',
             "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
+            "/slow-account": b'{"orders":[{"id":"order-late"}]}',
             "/account": b'{"orders":[{"id":"order-456"}]}',
             "/buffered-valid": b'{"ok":true}',
             "/buffered-invalid": b'private-invalid-json',
@@ -289,6 +297,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        if self.path == "/slow-account":
+            open(sys.argv[2], "w", encoding="utf-8").close()
+            time.sleep(1)
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -298,9 +309,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-HTTPServer(("127.0.0.1", 8180), Handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", 8180), Handler).serve_forever()
 PY
-python3 "$test_dir/origin.py" "$test_dir/origin.log" &
+python3 "$test_dir/origin.py" "$test_dir/origin.log" "$test_dir/slow.started" &
 origin_pid=$!
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
 XSHIELD_CONFIG="$test_dir/config.json" \
@@ -455,6 +466,106 @@ WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
 SQL
 )
 [[ "$refresh_generation" == "2" ]]
+
+curl -sS -o "$test_dir/account-switch-same.body" -X POST \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $refreshed_bearer" \
+    http://127.0.0.1:6288/account-switch-same >/dev/null 2>&1 || true
+[[ ! -s "$test_dir/account-switch-same.body" ]]
+refresh_generation_after_same=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT credential_generation FROM xshield.auth_bindings
+WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+  AND principal_ref = 'principal_login';
+SQL
+)
+[[ "$refresh_generation_after_same" == "2" ]]
+
+(
+    curl -sS -o "$test_dir/slow-account.body" \
+        -H "Cookie: __Host-xshield_sid=$login_session_id" \
+        -H "Authorization: Bearer $refreshed_bearer" \
+        http://127.0.0.1:6288/slow-account >/dev/null 2>&1 || true
+) &
+slow_request_pid=$!
+for _ in {1..50}; do
+    [[ -f "$test_dir/slow.started" ]] && break
+    sleep 0.02
+done
+[[ -f "$test_dir/slow.started" ]]
+
+account_switch_status=$(curl -sS -D "$test_dir/account-switch.headers" \
+    -o "$test_dir/account-switch.body" -w '%{http_code}' -X POST \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $refreshed_bearer" \
+    http://127.0.0.1:6288/account-switch)
+[[ "$account_switch_status" == "200" ]]
+grep -qi '^cache-control: private, no-store' "$test_dir/account-switch.headers"
+! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/account-switch.headers"
+account_b_bearer=$(python3 -c \
+    'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["access_token"])' \
+    "$test_dir/account-switch.body")
+[[ "$account_b_bearer" == "account-b-business-token" ]]
+account_b_fingerprint=$(printf '%s' "$account_b_bearer" \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
+switch_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v old_fingerprint="$refreshed_bearer_fingerprint" \
+    -v new_fingerprint="$account_b_fingerprint" <<'SQL'
+SELECT binding.principal_ref, binding.auth_epoch, binding.credential_generation,
+       (SELECT count(*) FROM xshield.credential_bindings credential
+        WHERE credential.tenant_id = binding.tenant_id
+          AND credential.site_id = binding.site_id
+          AND credential.binding_id = binding.binding_id
+          AND credential.generation = 2 AND credential.status = 'revoked'
+          AND credential.fingerprint = decode(:'old_fingerprint', 'hex')),
+       (SELECT count(*) FROM xshield.credential_bindings credential
+        WHERE credential.tenant_id = binding.tenant_id
+          AND credential.site_id = binding.site_id
+          AND credential.binding_id = binding.binding_id
+          AND credential.generation = 3 AND credential.status = 'active'
+          AND credential.fingerprint = decode(:'new_fingerprint', 'hex')),
+       (SELECT count(*) FROM xshield.audit_outbox outbox
+        WHERE outbox.aggregate_ref = binding.binding_id
+          AND outbox.event_type = 'epoch.changed'
+          AND outbox.envelope->>'previous_principal_ref' = 'principal_login'
+          AND outbox.envelope->>'principal_ref' = 'principal_account_b'
+          AND outbox.envelope->>'previous_auth_epoch' = '1'
+          AND outbox.envelope->>'auth_epoch' = '2')
+FROM xshield.auth_bindings binding
+WHERE binding.tenant_id = 'tenant_gateway'
+  AND binding.site_id = 'site_gateway'
+  AND binding.principal_ref = 'principal_account_b';
+SQL
+)
+[[ "$switch_state" == "principal_account_b|2|3|1|1|1" ]]
+
+wait "$slow_request_pid"
+[[ ! -s "$test_dir/slow-account.body" ]]
+late_grant_count=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT count(*) FROM xshield.response_evidence
+WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+  AND source_operation_id = 'account.slow';
+SQL
+)
+[[ "$late_grant_count" == "0" ]]
+
+account_a_after_switch=$(curl -sS -o "$test_dir/account-a-after-switch.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $refreshed_bearer" \
+    http://127.0.0.1:6288/whoami)
+[[ "$account_a_after_switch" == "403" ]]
+account_b_status=$(curl -sS -o "$test_dir/account-b.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $account_b_bearer" \
+    http://127.0.0.1:6288/whoami)
+[[ "$account_b_status" == "404" ]]
+old_epoch_grant_status=$(curl -sS -o "$test_dir/old-epoch-grant.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $account_b_bearer" \
+    -H "X-Xshield-Action-Ref: $login_action_ref" \
+    'http://127.0.0.1:6288/orders?order_id=order-refresh')
+[[ "$old_epoch_grant_status" == "403" ]]
+grep -q '"reason_code":"UI_ACTION_NOT_AVAILABLE"' "$test_dir/old-epoch-grant.json"
 
 set +e
 curl -sS -o "$test_dir/login-invalid.body" \
@@ -703,6 +814,10 @@ origin_pid=""
 [[ $(grep -c '^GET /new-account$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^POST /refresh$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^POST /refresh-switch$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^POST /account-switch$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^POST /account-switch-same$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^GET /slow-account$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^GET /whoami$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-456' "$test_dir/origin.log") == "1" ]]
