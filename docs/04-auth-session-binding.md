@@ -10,7 +10,7 @@ Set-Cookie: __Host-xshield_sid=<opaque>; Secure; HttpOnly; SameSite=Lax; Path=/;
 
 一天是建议初始最长会话期限，不是无限滑动续期。服务端记录 absolute_expires_at；Cookie 本身的浏览器期限不是安全验证。按站测试 SSO、跨域、子域及 SameSite；不以 Cookie 属性取代 CSRF 控制。SSO 跨域必须通过受控一次性引导完成，不放宽 Cookie Domain 为所有子域共享凭证。[S10]
 
-身份上下文：site_id、waf_session_id、auth_binding_id、principal_ref、tenant_ref、auth_epoch、credential_generation。秘密凭证只在必要执行内存/秘密存储中使用，账本索引用租户隔离的 HMAC 指纹。
+身份上下文：site_id、waf_session_id、auth_binding_id、principal_ref、authorization_context_ref、auth_epoch、credential_generation。`authorization_context_ref` 是站点适配器从业务 tenant、角色或权限集合派生的有界非秘密稳定引用，不接受客户端自行声明。秘密凭证只在必要执行内存/秘密存储中使用，账本索引用租户隔离的 HMAC 指纹。
 
 ## 4.2 状态机
 
@@ -37,11 +37,11 @@ JWT 可作为不透明字符串精确匹配；使用 claims 建立身份时验�
 
 验证旧 WAF 会话与旧认证链 → 请求认可的认证端点 → 识别真实业务成功 → 提取新凭证 → 验证继承关系和权限范围 → 原子更新 generation/epoch → 轮换必要 Cookie → 向客户端释放响应。
 
-首个 Bearer 认证适配器要求 `AUTH_ENTRY` 配置 `BUFFERED_JSON` 与 `auth_binding`：成功状态、主体 JSON Pointer、Bearer JSON Pointer、凭证 TTL 和绝对会话 TTL 均在启动时验证。只在完整严格 JSON 与业务成功状态同时匹配后建立新 binding；事务将初始 credential generation 与 `binding.created` outbox 一起提交。源站返回的 `Set-Cookie` 不得使用边缘保留的 `__Host-xshield_sid` 名称。
+首个 Bearer 认证适配器要求 `AUTH_ENTRY` 配置 `BUFFERED_JSON` 与 `auth_binding`：成功状态、主体/授权上下文/Bearer JSON Pointer、凭证 TTL 和绝对会话 TTL 均在启动时验证。只在完整严格 JSON 与业务成功状态同时匹配后建立新 binding；事务将初始 credential generation 与 `binding.created` outbox 一起提交。源站返回的 `Set-Cookie` 不得使用边缘保留的 `__Host-xshield_sid` 名称。
 
-同身份 Bearer 刷新适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_refresh`：成功状态、主体 JSON Pointer、Bearer JSON Pointer 和凭证 TTL 在启动时验证。请求仍须携带当前 WAF Cookie 与旧 Bearer；响应主体必须等于请求 AuthSnapshot 的主体，新 Bearer 必须改变。事务按旧 snapshot CAS，并重新锁定、比较完整旧凭证集合及期限；成功只推进 generation，保留 epoch 和仍有效资格，新凭证期限不超过绝对会话期限。
+同身份 Bearer 刷新适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_refresh`：成功状态、主体/授权上下文/Bearer JSON Pointer 和凭证 TTL 在启动时验证。请求仍须携带当前 WAF Cookie 与旧 Bearer；响应主体及授权上下文必须等于请求 AuthSnapshot，新 Bearer 必须改变。事务按旧 snapshot CAS，并重新锁定、比较完整旧凭证集合及期限；成功只推进 generation，保留 epoch 和仍有效资格，新凭证期限不超过绝对会话期限。
 
-账号切换适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_context_switch`，并以旧账号的当前 WAF Cookie 与 Bearer 准入。成功响应必须给出不同主体和新 Bearer；短事务按旧 snapshot CAS，在同一提交中替换主体、推进 epoch 与 generation、撤销完整旧凭证集合、写入新凭证和 `epoch.changed` outbox。WAF 会话及绝对期限不延长。相同主体、旧凭证偏差、过期或并发版本变化均不改变绑定，也不释放成功正文。
+身份上下文切换适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_context_switch`，并以旧上下文的当前 WAF Cookie 与 Bearer 准入。成功响应必须给出主体或授权上下文变化以及新 Bearer；短事务按旧 snapshot CAS，在同一提交中替换上下文、推进 epoch 与 generation、撤销完整旧凭证集合、写入新凭证和 `epoch.changed` outbox。WAF 会话及绝对期限不延长。主体和授权上下文均未变化、旧凭证偏差、过期或并发版本变化均不改变绑定，也不释放成功正文。
 
 并发刷新采用 compare-and-swap 与行锁。新旧兼容窗口只存明确合法的凭证组合，不能把同用户历史上的所有 WAF Cookie 与所有 Token 做笛卡尔组合。未知替换记录 AUTH_BINDING_MISMATCH，不改变原账本。
 

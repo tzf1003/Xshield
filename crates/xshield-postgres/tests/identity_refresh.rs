@@ -40,6 +40,7 @@ fn fixture() -> Fixture {
         tenant.clone(),
         site.clone(),
         "principal_rust",
+        xshield_core::identity::AuthorizationContextRef::parse("context_rust").unwrap(),
         AuthEpoch::new(4),
         CredentialGeneration::new(2),
         old_credentials.clone(),
@@ -81,8 +82,9 @@ async fn seed_binding(pool: &PgPool, fixture: &Fixture) {
     sqlx::query(
         "INSERT INTO xshield.auth_bindings (
             tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
-            auth_epoch, credential_generation, status, absolute_expires_at
-         ) VALUES ($1, $2, $3, $4, $5, 4, 2, 'active', to_timestamp($6))",
+            authorization_context_ref, auth_epoch, credential_generation, status,
+            absolute_expires_at
+         ) VALUES ($1, $2, $3, $4, $5, 'context_rust', 4, 2, 'active', to_timestamp($6))",
     )
     .bind(fixture.tenant.as_str())
     .bind(fixture.site.as_str())
@@ -261,6 +263,31 @@ async fn refresh_is_atomic_and_compare_and_swap() {
         load_identity(&store, &fixture, &fixture.new_credentials).await,
         IdentityProofState::Denied(IdentityDenied::BindingMismatch)
     ));
+
+    sqlx::query(
+        "UPDATE xshield.auth_bindings SET authorization_context_ref = 'context_changed'
+         WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.binding_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        refresh(&store, &fixture, &event_id(101)).await.unwrap(),
+        RefreshOutcome::Conflict
+    );
+    sqlx::query(
+        "UPDATE xshield.auth_bindings SET authorization_context_ref = 'context_rust'
+         WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.binding_id.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let mismatched_event = event_id(102);
     let mismatched_envelope = json!({"schema_version": 3, "event_type": "identity.refreshed"});

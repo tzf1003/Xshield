@@ -246,6 +246,7 @@ impl ResponseEvidence {
             || self.snapshot.binding_id() != snapshot.binding_id()
             || self.snapshot.epoch() != snapshot.epoch()
             || self.snapshot.principal_ref() != snapshot.principal_ref()
+            || self.snapshot.authorization_context_ref() != snapshot.authorization_context_ref()
         {
             return Err(ProvenanceError::EvidenceUnverified);
         }
@@ -358,6 +359,7 @@ impl PageEvidence {
             || self.snapshot.binding_id() != snapshot.binding_id()
             || self.snapshot.epoch() != snapshot.epoch()
             || self.snapshot.principal_ref() != snapshot.principal_ref()
+            || self.snapshot.authorization_context_ref() != snapshot.authorization_context_ref()
         {
             return Err(ProvenanceError::EvidenceUnverified);
         }
@@ -664,6 +666,8 @@ impl ActionGrant {
             || self.snapshot.site_id() != snapshot.site_id()
             || self.snapshot.binding_id() != snapshot.binding_id()
             || self.snapshot.epoch() != snapshot.epoch()
+            || self.snapshot.principal_ref() != snapshot.principal_ref()
+            || self.snapshot.authorization_context_ref() != snapshot.authorization_context_ref()
             || &self.operation_id != operation_id
             || self.method != method
             || &self.route != route
@@ -861,6 +865,7 @@ mod tests {
             tenant.clone(),
             site.clone(),
             "principal_a",
+            crate::identity::AuthorizationContextRef::parse("context_a").unwrap(),
             AuthEpoch::new(4),
             CredentialGeneration::new(2),
             credentials(CREDENTIAL_A),
@@ -1043,6 +1048,7 @@ mod tests {
             .switch_context(
                 &changed.snapshot,
                 "principal_b",
+                crate::identity::AuthorizationContextRef::parse("context_b").unwrap(),
                 credentials(CREDENTIAL_B),
                 UnixSeconds::new(110),
             )

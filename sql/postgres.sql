@@ -13,6 +13,7 @@ CREATE TABLE xshield.policy_revisions (
 CREATE TABLE xshield.auth_bindings (
  tenant_id text NOT NULL, site_id text NOT NULL, binding_id text NOT NULL,
  waf_sid_fingerprint bytea NOT NULL, principal_ref text NOT NULL,
+ authorization_context_ref text NOT NULL,
  auth_epoch bigint NOT NULL CHECK(auth_epoch>=0), credential_generation bigint NOT NULL,
  status text NOT NULL CHECK(status IN ('anonymous','active','revoked','expired')),
  expires_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),

@@ -28,6 +28,7 @@ fn fixture() -> (AuthBinding, WafSessionId) {
         TenantId::parse("tenant_establish").unwrap(),
         SiteId::parse("site_establish").unwrap(),
         "principal_establish",
+        xshield_core::identity::AuthorizationContextRef::parse("context_establish").unwrap(),
         AuthEpoch::new(1),
         CredentialGeneration::new(1),
         credentials,
@@ -110,6 +111,7 @@ async fn establishment_commits_binding_credentials_and_outbox_atomically() {
         state,
         IdentityProofState::Verified { snapshot, .. }
             if snapshot.binding_id() == binding.binding_id()
+                && snapshot.authorization_context_ref() == binding.authorization_context_ref()
                 && snapshot.generation() == CredentialGeneration::new(1)
     ));
     let outbox: i64 = sqlx::query_scalar(

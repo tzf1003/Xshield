@@ -29,8 +29,8 @@ use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 use xshield_core::{
     domain::EventId,
     identity::{
-        AuthBinding, AuthEpoch, AuthSnapshot, BindingStatus, CredentialFingerprint,
-        CredentialGeneration, CredentialSlot, UnixSeconds,
+        AuthBinding, AuthEpoch, AuthSnapshot, AuthorizationContextRef, BindingStatus,
+        CredentialFingerprint, CredentialGeneration, CredentialSlot, UnixSeconds,
     },
 };
 
@@ -94,6 +94,7 @@ pub struct CredentialTransition<'a> {
 pub struct IdentityContextSwitch<'a> {
     transition: CredentialTransition<'a>,
     principal_ref: &'a str,
+    authorization_context_ref: &'a AuthorizationContextRef,
 }
 
 impl<'a> CredentialTransition<'a> {
@@ -135,14 +136,16 @@ impl<'a> IdentityContextSwitch<'a> {
     /// Validates an identity-context switch persistence command.
     ///
     /// # Errors
-    /// Returns [`StoreError::InvalidCommand`] when the principal or credential
-    /// transition is not a real context change, expiry is invalid, or the event
-    /// envelope is not an object.
+    /// Returns [`StoreError::InvalidCommand`] when neither principal nor
+    /// authorization context changes, the principal is invalid, or the
+    /// credential transition is invalid.
     pub fn new(
         transition: CredentialTransition<'a>,
         principal_ref: &'a str,
+        authorization_context_ref: &'a AuthorizationContextRef,
     ) -> Result<Self, StoreError> {
-        if principal_ref == transition.snapshot.principal_ref()
+        if (principal_ref == transition.snapshot.principal_ref()
+            && authorization_context_ref == transition.snapshot.authorization_context_ref())
             || principal_ref.is_empty()
             || principal_ref.len() > 256
             || principal_ref.bytes().any(|byte| byte.is_ascii_control())
@@ -152,6 +155,7 @@ impl<'a> IdentityContextSwitch<'a> {
         Ok(Self {
             transition,
             principal_ref,
+            authorization_context_ref,
         })
     }
 }
@@ -249,14 +253,16 @@ impl PostgresIdentityStore {
         sqlx::query(
             "INSERT INTO xshield.auth_bindings (
                 tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
-                auth_epoch, credential_generation, status, absolute_expires_at, updated_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', to_timestamp($8), to_timestamp($9))",
+                authorization_context_ref, auth_epoch, credential_generation, status,
+                absolute_expires_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', to_timestamp($9), to_timestamp($10))",
         )
         .bind(command.binding.tenant_id().as_str())
         .bind(command.binding.site_id().as_str())
         .bind(command.binding.binding_id().as_str())
         .bind(command.session_fingerprint.as_slice())
         .bind(command.binding.principal_ref())
+        .bind(command.binding.authorization_context_ref().as_str())
         .bind(epoch)
         .bind(generation)
         .bind(absolute_expires_at)
@@ -328,9 +334,10 @@ impl PostgresIdentityStore {
              SET credential_generation = $1, updated_at = to_timestamp($2)
              WHERE tenant_id = $3 AND site_id = $4 AND binding_id = $5
                AND principal_ref = $6 AND auth_epoch = $7
-               AND credential_generation = $8 AND status = 'active'
+               AND authorization_context_ref = $8
+               AND credential_generation = $9 AND status = 'active'
                AND absolute_expires_at > to_timestamp($2)
-               AND absolute_expires_at >= to_timestamp($9)",
+               AND absolute_expires_at >= to_timestamp($10)",
         )
         .bind(current_generation)
         .bind(now)
@@ -339,6 +346,7 @@ impl PostgresIdentityStore {
         .bind(command.snapshot.binding_id().as_str())
         .bind(command.snapshot.principal_ref())
         .bind(epoch)
+        .bind(command.snapshot.authorization_context_ref().as_str())
         .bind(expected_generation)
         .bind(credentials_expire_at)
         .execute(&mut *transaction)
@@ -415,15 +423,17 @@ impl PostgresIdentityStore {
         let mut transaction = self.pool.begin().await?;
         let updated = sqlx::query(
             "UPDATE xshield.auth_bindings
-             SET principal_ref = $1, auth_epoch = $2, credential_generation = $3,
-                 updated_at = to_timestamp($4)
-             WHERE tenant_id = $5 AND site_id = $6 AND binding_id = $7
-               AND principal_ref = $8 AND auth_epoch = $9
-               AND credential_generation = $10 AND status = 'active'
-               AND absolute_expires_at > to_timestamp($4)
-               AND absolute_expires_at >= to_timestamp($11)",
+             SET principal_ref = $1, authorization_context_ref = $2,
+                 auth_epoch = $3, credential_generation = $4,
+                 updated_at = to_timestamp($5)
+             WHERE tenant_id = $6 AND site_id = $7 AND binding_id = $8
+               AND principal_ref = $9 AND authorization_context_ref = $10
+               AND auth_epoch = $11 AND credential_generation = $12
+               AND status = 'active' AND absolute_expires_at > to_timestamp($5)
+               AND absolute_expires_at >= to_timestamp($13)",
         )
         .bind(command.principal_ref)
+        .bind(command.authorization_context_ref.as_str())
         .bind(current_epoch)
         .bind(current_generation)
         .bind(now)
@@ -431,6 +441,7 @@ impl PostgresIdentityStore {
         .bind(transition.snapshot.site_id().as_str())
         .bind(transition.snapshot.binding_id().as_str())
         .bind(transition.snapshot.principal_ref())
+        .bind(transition.snapshot.authorization_context_ref().as_str())
         .bind(previous_epoch)
         .bind(previous_generation)
         .bind(credentials_expire_at)

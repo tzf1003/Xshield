@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use xshield_core::{
     domain::AuthBindingId,
     identity::{
-        AuthBinding, AuthEpoch, CredentialFingerprint, CredentialGeneration, CredentialSlot,
-        IdentityDenied, UnixSeconds,
+        AuthBinding, AuthEpoch, AuthorizationContextRef, CredentialFingerprint,
+        CredentialGeneration, CredentialSlot, IdentityDenied, UnixSeconds,
     },
     ports::{IdentityProofQuery, IdentityProofState, IdentityProofStore},
 };
@@ -19,7 +19,8 @@ impl IdentityProofStore for PostgresIdentityStore {
     ) -> Result<IdentityProofState, StoreError> {
         let now = i64::try_from(query.now.value()).map_err(|_| StoreError::NumericRange("now"))?;
         let row = sqlx::query(
-            "SELECT binding_id, principal_ref, auth_epoch, credential_generation,
+            "SELECT binding_id, principal_ref, authorization_context_ref,
+                    auth_epoch, credential_generation,
                     extract(epoch FROM absolute_expires_at)::bigint AS absolute_expires_at
              FROM xshield.auth_bindings
              WHERE tenant_id = $1 AND site_id = $2 AND waf_sid_fingerprint = $3
@@ -38,6 +39,9 @@ impl IdentityProofStore for PostgresIdentityStore {
         let binding_id = AuthBindingId::parse(row.try_get::<&str, _>("binding_id")?)
             .map_err(|_| StoreError::CorruptData("binding_id"))?;
         let principal_ref = row.try_get::<&str, _>("principal_ref")?;
+        let authorization_context_ref =
+            AuthorizationContextRef::parse(row.try_get::<&str, _>("authorization_context_ref")?)
+                .map_err(|_| StoreError::CorruptData("authorization_context_ref"))?;
         let epoch = nonnegative(row.try_get("auth_epoch")?, "auth_epoch")?;
         let generation = nonnegative(
             row.try_get("credential_generation")?,
@@ -87,6 +91,7 @@ impl IdentityProofStore for PostgresIdentityStore {
             query.tenant_id.clone(),
             query.site_id.clone(),
             principal_ref,
+            authorization_context_ref,
             AuthEpoch::new(epoch),
             CredentialGeneration::new(generation),
             stored_credentials,

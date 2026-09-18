@@ -469,6 +469,7 @@ mod tests {
             tenant.clone(),
             site.clone(),
             "principal_a",
+            crate::identity::AuthorizationContextRef::parse("context_a").unwrap(),
             AuthEpoch::new(4),
             CredentialGeneration::new(2),
             credentials.clone(),

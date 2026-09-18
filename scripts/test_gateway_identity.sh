@@ -70,11 +70,12 @@ INSERT INTO xshield.policy_revisions (
 );
 INSERT INTO xshield.auth_bindings (
     tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
-    auth_epoch, credential_generation, status, absolute_expires_at
+    authorization_context_ref, auth_epoch, credential_generation, status,
+    absolute_expires_at
 ) VALUES (
     'tenant_gateway', 'site_gateway',
     'auth_018f2a3b-4c5d-7000-8000-000000000901',
-    decode(:'session_fingerprint', 'hex'), 'principal_gateway',
+    decode(:'session_fingerprint', 'hex'), 'principal_gateway', 'tenant_gateway:user',
     1, 1, 'active', now() + interval '1 hour'
 );
 INSERT INTO xshield.credential_bindings (
@@ -237,12 +238,12 @@ cat >"$test_dir/config.json" <<JSON
   "audit":{"directory":"$test_dir/journal","key_id":"journal-key-r1","producer_id":"edge-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
   "identity_store":{"max_connections":2,"acquire_timeout_ms":2000},
   "operations":[
-    {"operation_id":"auth.login","method":"POST","path":"/login","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
-    {"operation_id":"auth.login.invalid","method":"POST","path":"/login-invalid","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
-    {"operation_id":"auth.refresh","method":"POST","path":"/refresh","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
-    {"operation_id":"auth.refresh.switch","method":"POST","path":"/refresh-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
-    {"operation_id":"auth.context.switch","method":"POST","path":"/account-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
-    {"operation_id":"auth.context.switch.same","method":"POST","path":"/account-switch-same","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"auth.login","method":"POST","path":"/login","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
+    {"operation_id":"auth.login.invalid","method":"POST","path":"/login-invalid","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
+    {"operation_id":"auth.refresh","method":"POST","path":"/refresh","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"auth.refresh.switch","method":"POST","path":"/refresh-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"auth.context.switch","method":"POST","path":"/account-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"auth.context.switch.same","method":"POST","path":"/account-switch-same","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
     {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.slow","method":"GET","path":"/slow-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.current","method":"GET","path":"/whoami","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
@@ -279,12 +280,12 @@ class Handler(BaseHTTPRequestHandler):
             output.write(f"ServiceCredential={self.headers.get('X-Xshield-Service-Credential', '')}\n")
             output.write(f"ShareToken={self.headers.get('X-Xshield-Share-Token', '')}\n")
         responses = {
-            "/login": b'{"identity":{"id":"principal_login"},"access_token":"login-business-token"}',
-            "/login-invalid": b'{"identity":{"id":"principal_invalid"}}',
-            "/refresh": b'{"identity":{"id":"principal_login"},"access_token":"refreshed-business-token"}',
-            "/refresh-switch": b'{"identity":{"id":"principal_other"},"access_token":"other-business-token"}',
-            "/account-switch": b'{"identity":{"id":"principal_account_b"},"access_token":"account-b-business-token"}',
-            "/account-switch-same": b'{"identity":{"id":"principal_login"},"access_token":"other-business-token"}',
+            "/login": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"login-business-token"}',
+            "/login-invalid": b'{"identity":{"id":"principal_invalid","authorization_context":"tenant_gateway:user"}}',
+            "/refresh": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"refreshed-business-token"}',
+            "/refresh-switch": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:admin"},"access_token":"other-business-token"}',
+            "/account-switch": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:admin"},"access_token":"context-admin-business-token"}',
+            "/account-switch-same": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"other-business-token"}',
             "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
             "/slow-account": b'{"orders":[{"id":"order-late"}]}',
             "/account": b'{"orders":[{"id":"order-456"}]}',
@@ -365,6 +366,7 @@ JOIN xshield.audit_outbox outbox
 WHERE binding.tenant_id = 'tenant_gateway'
   AND binding.site_id = 'site_gateway'
   AND binding.principal_ref = 'principal_login'
+  AND binding.authorization_context_ref = 'tenant_gateway:user'
   AND binding.auth_epoch = 1
   AND binding.credential_generation = 1
   AND binding.waf_sid_fingerprint = decode(:'session_fingerprint', 'hex')
@@ -421,6 +423,7 @@ SELECT binding.credential_generation,
           AND outbox.tenant_id = binding.tenant_id
           AND outbox.site_id = binding.site_id
           AND outbox.event_type = 'identity.refreshed'
+          AND outbox.envelope->>'authorization_context_ref' = 'tenant_gateway:user'
           AND outbox.envelope->>'previous_credential_generation' = '1'
           AND outbox.envelope->>'credential_generation' = '2'
           AND outbox.envelope->'previous_credentials' @>
@@ -501,17 +504,18 @@ account_switch_status=$(curl -sS -D "$test_dir/account-switch.headers" \
 [[ "$account_switch_status" == "200" ]]
 grep -qi '^cache-control: private, no-store' "$test_dir/account-switch.headers"
 ! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/account-switch.headers"
-account_b_bearer=$(python3 -c \
+context_admin_bearer=$(python3 -c \
     'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["access_token"])' \
     "$test_dir/account-switch.body")
-[[ "$account_b_bearer" == "account-b-business-token" ]]
-account_b_fingerprint=$(printf '%s' "$account_b_bearer" \
+[[ "$context_admin_bearer" == "context-admin-business-token" ]]
+context_admin_fingerprint=$(printf '%s' "$context_admin_bearer" \
     | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
     | od -An -tx1 | tr -d ' \n')
 switch_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" \
     -v old_fingerprint="$refreshed_bearer_fingerprint" \
-    -v new_fingerprint="$account_b_fingerprint" <<'SQL'
-SELECT binding.principal_ref, binding.auth_epoch, binding.credential_generation,
+    -v new_fingerprint="$context_admin_fingerprint" <<'SQL'
+SELECT binding.principal_ref, binding.authorization_context_ref,
+       binding.auth_epoch, binding.credential_generation,
        (SELECT count(*) FROM xshield.credential_bindings credential
         WHERE credential.tenant_id = binding.tenant_id
           AND credential.site_id = binding.site_id
@@ -528,16 +532,18 @@ SELECT binding.principal_ref, binding.auth_epoch, binding.credential_generation,
         WHERE outbox.aggregate_ref = binding.binding_id
           AND outbox.event_type = 'epoch.changed'
           AND outbox.envelope->>'previous_principal_ref' = 'principal_login'
-          AND outbox.envelope->>'principal_ref' = 'principal_account_b'
+          AND outbox.envelope->>'principal_ref' = 'principal_login'
+          AND outbox.envelope->>'previous_authorization_context_ref' = 'tenant_gateway:user'
+          AND outbox.envelope->>'authorization_context_ref' = 'tenant_gateway:admin'
           AND outbox.envelope->>'previous_auth_epoch' = '1'
           AND outbox.envelope->>'auth_epoch' = '2')
 FROM xshield.auth_bindings binding
 WHERE binding.tenant_id = 'tenant_gateway'
   AND binding.site_id = 'site_gateway'
-  AND binding.principal_ref = 'principal_account_b';
+  AND binding.principal_ref = 'principal_login';
 SQL
 )
-[[ "$switch_state" == "principal_account_b|2|3|1|1|1" ]]
+[[ "$switch_state" == "principal_login|tenant_gateway:admin|2|3|1|1|1" ]]
 
 wait "$slow_request_pid"
 [[ ! -s "$test_dir/slow-account.body" ]]
@@ -554,14 +560,14 @@ account_a_after_switch=$(curl -sS -o "$test_dir/account-a-after-switch.json" -w 
     -H "Authorization: Bearer $refreshed_bearer" \
     http://127.0.0.1:6288/whoami)
 [[ "$account_a_after_switch" == "403" ]]
-account_b_status=$(curl -sS -o "$test_dir/account-b.body" -w '%{http_code}' \
+context_admin_status=$(curl -sS -o "$test_dir/context-admin.body" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \
-    -H "Authorization: Bearer $account_b_bearer" \
+    -H "Authorization: Bearer $context_admin_bearer" \
     http://127.0.0.1:6288/whoami)
-[[ "$account_b_status" == "404" ]]
+[[ "$context_admin_status" == "404" ]]
 old_epoch_grant_status=$(curl -sS -o "$test_dir/old-epoch-grant.json" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \
-    -H "Authorization: Bearer $account_b_bearer" \
+    -H "Authorization: Bearer $context_admin_bearer" \
     -H "X-Xshield-Action-Ref: $login_action_ref" \
     'http://127.0.0.1:6288/orders?order_id=order-refresh')
 [[ "$old_epoch_grant_status" == "403" ]]

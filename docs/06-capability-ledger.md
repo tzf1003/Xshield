@@ -3,12 +3,14 @@
 ## 6.1 授权键
 
 ```text
-site_id + auth_binding_id + auth_epoch + tenant_ref
+site_id + auth_binding_id + auth_epoch + authorization_context_ref
 + resource_type + canonical_resource_ref
 + operation_id + view_profile + scope_hash
 ```
 
 action_grant_id、source_request_id、source_rule_revision、source_evidence_ids、issued_at、expires_at、revocation_version、use_policy、status 是必要证明字段。禁止只以 URL、ID 或 Cookie 为唯一授权索引。
+
+`authorization_context_ref` 随 AuthSnapshot 捕获，并由当前 binding 的主体、上下文与 epoch 共同重验；资格表可用 binding + epoch 作为其不可变持久键，不重复存放上下文文本。
 
 当前 GET 资源适配器由策略显式且互斥地声明 `resource_query_parameter` 或 `resource_path_parameter`。查询适配器对实际转发 URI 的查询串严格解码一次，拒绝重复字段、分号分隔、非法百分号、超限和控制字符；路径适配器只接受固定前缀后的一个最终段，严格解码一次，并拒绝额外查询、嵌套段、编码斜杠、控制字符、模板错配和路由歧义。两者均以租户、站点、资源类型和值的带域 HMAC 生成 `resource_key_hmac`，并把实际资源字段交给 ActionGrant 校验。资源值、operation、view、action、binding、auth_epoch、策略和期限精确命中活动 ResourceGrant 后才可转发；原始资源值不进入账本或审计。其他协议形态由对应版本化站点适配器冻结后接入。
 
@@ -37,7 +39,7 @@ PageEvidence 必须关联认可来源；源站返回 200 不是授权证明。�
 
 ## 6.4 事务与容量
 
-PostgreSQL 首版在同一短事务中锁定当前 binding，重验 auth_epoch、活动策略和精确动作描述，再把完整响应证据、逐资源 ActionGrant、ResourceGrant 与 outbox 整批提交。整批任一写入失败、会话容量不足或资格变化均不留下部分授权；相同来源响应的精确重放返回原有引用，语义变化则冲突。响应证据只保存受限 artifact 引用和带域 HMAC，不保存原始资源值。普通查询永不无限续租；最长资格期限不得超过当前会话和来源证据期限。
+PostgreSQL 首版在同一短事务中锁定当前 binding，重验主体、授权上下文、auth_epoch、活动策略和精确动作描述，再把完整响应证据、逐资源 ActionGrant、ResourceGrant 与 outbox 整批提交。整批任一写入失败、会话容量不足或资格变化均不留下部分授权；相同来源响应的精确重放返回原有引用，语义变化则冲突。响应证据只保存受限 artifact 引用和带域 HMAC，不保存原始资源值。普通查询永不无限续租；最长资格期限不得超过当前会话和来源证据期限。
 
 首版可配置每会话最多 5000 条资格、单响应 1000 条、写操作更短 TTL；这些是待测限额。超额返回重新获取/明确拒绝，不授予 wildcard。删除旧观察记录不应误删仍有效资格；撤销资格也不删除历史证据。
 

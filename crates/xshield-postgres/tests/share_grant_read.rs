@@ -111,8 +111,10 @@ async fn seed(
     sqlx::query(
         "INSERT INTO xshield.auth_bindings (
             tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
-            auth_epoch, credential_generation, status, absolute_expires_at
-         ) VALUES ($1, $2, $3, $4, 'principal_share', 1, 1, 'active', to_timestamp($5))",
+            authorization_context_ref, auth_epoch, credential_generation, status,
+            absolute_expires_at
+         ) VALUES ($1, $2, $3, $4, 'principal_share', 'context_share',
+                   1, 1, 'active', to_timestamp($5))",
     )
     .bind(tenant.as_str())
     .bind(site.as_str())

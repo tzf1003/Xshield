@@ -372,7 +372,10 @@ mod tests {
     use super::*;
     use crate::{
         domain::{AuthBindingId, SiteId, TenantId, WafSessionId},
-        identity::{AuthEpoch, CredentialFingerprint, CredentialGeneration, CredentialSlot},
+        identity::{
+            AuthEpoch, AuthorizationContextRef, CredentialFingerprint, CredentialGeneration,
+            CredentialSlot,
+        },
     };
     use std::collections::BTreeMap;
 
@@ -389,6 +392,7 @@ mod tests {
             TenantId::parse("tenant_a").unwrap(),
             SiteId::parse("site_a").unwrap(),
             "principal_a",
+            AuthorizationContextRef::parse("context_a").unwrap(),
             AuthEpoch::new(4),
             CredentialGeneration::new(2),
             BTreeMap::from([(
@@ -615,6 +619,7 @@ mod tests {
             .switch_context(
                 &current_snapshot,
                 "principal_b",
+                AuthorizationContextRef::parse("context_b").unwrap(),
                 BTreeMap::from([(
                     CredentialSlot::Cookie,
                     CredentialFingerprint::parse(B).unwrap(),

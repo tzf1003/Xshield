@@ -204,6 +204,7 @@ struct ResponseDto {
 struct AuthBindingDto {
     success_status: u16,
     principal_pointer: String,
+    authorization_context_pointer: String,
     bearer_pointer: String,
     credential_ttl_seconds: u64,
     session_ttl_seconds: u64,
@@ -214,6 +215,7 @@ struct AuthBindingDto {
 struct AuthRefreshDto {
     success_status: u16,
     principal_pointer: String,
+    authorization_context_pointer: String,
     bearer_pointer: String,
     credential_ttl_seconds: u64,
 }
@@ -917,9 +919,11 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
         .map(|binding| {
             if !(200..=299).contains(&binding.success_status)
                 || binding.success_status == 204
-                || !valid_json_pointer(&binding.principal_pointer)
-                || !valid_json_pointer(&binding.bearer_pointer)
-                || binding.principal_pointer == binding.bearer_pointer
+                || !valid_auth_pointers(
+                    &binding.principal_pointer,
+                    &binding.authorization_context_pointer,
+                    &binding.bearer_pointer,
+                )
                 || !(1..=86_400).contains(&binding.credential_ttl_seconds)
                 || !(1..=86_400).contains(&binding.session_ttl_seconds)
                 || binding.credential_ttl_seconds > binding.session_ttl_seconds
@@ -929,6 +933,7 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
             Ok(AuthBindingRule {
                 success_status: binding.success_status,
                 principal_pointer: binding.principal_pointer,
+                authorization_context_pointer: binding.authorization_context_pointer,
                 bearer_pointer: binding.bearer_pointer,
                 credential_ttl_seconds: binding.credential_ttl_seconds,
                 session_ttl_seconds: binding.session_ttl_seconds,
@@ -966,9 +971,11 @@ fn compile_auth_transition(
         .map(|transition| {
             if !(200..=299).contains(&transition.success_status)
                 || transition.success_status == 204
-                || !valid_json_pointer(&transition.principal_pointer)
-                || !valid_json_pointer(&transition.bearer_pointer)
-                || transition.principal_pointer == transition.bearer_pointer
+                || !valid_auth_pointers(
+                    &transition.principal_pointer,
+                    &transition.authorization_context_pointer,
+                    &transition.bearer_pointer,
+                )
                 || !(1..=86_400).contains(&transition.credential_ttl_seconds)
             {
                 return Err(ConfigError::Invalid(field));
@@ -976,11 +983,21 @@ fn compile_auth_transition(
             Ok(AuthTransitionRule {
                 success_status: transition.success_status,
                 principal_pointer: transition.principal_pointer,
+                authorization_context_pointer: transition.authorization_context_pointer,
                 bearer_pointer: transition.bearer_pointer,
                 credential_ttl_seconds: transition.credential_ttl_seconds,
             })
         })
         .transpose()
+}
+
+fn valid_auth_pointers(principal: &str, context: &str, bearer: &str) -> bool {
+    valid_json_pointer(principal)
+        && valid_json_pointer(context)
+        && valid_json_pointer(bearer)
+        && principal != context
+        && principal != bearer
+        && context != bearer
 }
 
 fn valid_json_pointer(value: &str) -> bool {
@@ -1478,6 +1495,7 @@ mod tests {
                     "auth_binding": {
                         "success_status": 200,
                         "principal_pointer": "/identity/id",
+                        "authorization_context_pointer": "/identity/authorization_context",
                         "bearer_pointer": "/access_token",
                         "credential_ttl_seconds": 900,
                         "session_ttl_seconds": 3_600
@@ -1502,6 +1520,14 @@ mod tests {
             Err(ConfigError::Invalid("operations.response.auth_binding"))
         ));
 
+        let mut aliased_context = config.clone();
+        aliased_context["operations"][0]["response"]["auth_binding"]["authorization_context_pointer"] =
+            serde_json::json!("/identity/id");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&aliased_context).unwrap()),
+            Err(ConfigError::Invalid("operations.response.auth_binding"))
+        ));
+
         let mut refresh = config.clone();
         refresh["operations"][0]["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
         let response = refresh["operations"][0]["response"]
@@ -1513,6 +1539,7 @@ mod tests {
             serde_json::json!({
                 "success_status": 200,
                 "principal_pointer": "/identity/id",
+                "authorization_context_pointer": "/identity/authorization_context",
                 "bearer_pointer": "/access_token",
                 "credential_ttl_seconds": 900
             }),
@@ -1542,6 +1569,7 @@ mod tests {
             serde_json::json!({
                 "success_status": 200,
                 "principal_pointer": "/identity/id",
+                "authorization_context_pointer": "/identity/authorization_context",
                 "bearer_pointer": "/access_token",
                 "credential_ttl_seconds": 900
             }),

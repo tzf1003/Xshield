@@ -210,15 +210,23 @@ async fn lock_binding(
     let eligible: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM xshield.auth_bindings
          WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
-           AND principal_ref = $4 AND auth_epoch = $5 AND status = 'active'
-           AND absolute_expires_at > to_timestamp($6)
-           AND absolute_expires_at >= to_timestamp($7)
+           AND principal_ref = $4 AND authorization_context_ref = $5
+           AND auth_epoch = $6 AND status = 'active'
+           AND absolute_expires_at > to_timestamp($7)
+           AND absolute_expires_at >= to_timestamp($8)
          FOR UPDATE",
     )
     .bind(command.action.snapshot().tenant_id().as_str())
     .bind(command.action.snapshot().site_id().as_str())
     .bind(command.action.snapshot().binding_id().as_str())
     .bind(command.action.snapshot().principal_ref())
+    .bind(
+        command
+            .action
+            .snapshot()
+            .authorization_context_ref()
+            .as_str(),
+    )
     .bind(epoch)
     .bind(now)
     .bind(evidence_expires_at)

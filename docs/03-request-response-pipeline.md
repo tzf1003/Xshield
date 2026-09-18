@@ -33,11 +33,11 @@
 
 ## 3.3 资格写入时序
 
-认可认证入口的成功响应：完整严格 JSON → 提取配置指针指定的主体与 Bearer → 生成新的边缘会话和 binding → 原子写入 binding、初始 credential generation 与 outbox → 提交事务 → 释放携带业务凭证的响应正文。WAF Cookie 由边缘使用保留名称签发；源站响应不得预占该名称。响应校验或提交失败时该会话没有活动绑定，不能访问受保护入口。
+认可认证入口的成功响应：完整严格 JSON → 提取配置指针指定的主体、授权上下文引用与 Bearer → 生成新的边缘会话和 binding → 原子写入 binding、初始 credential generation 与 outbox → 提交事务 → 释放携带业务凭证的响应正文。WAF Cookie 由边缘使用保留名称签发；源站响应不得预占该名称。响应校验或提交失败时该会话没有活动绑定，不能访问受保护入口。
 
-同上下文刷新响应：请求阶段精确验证旧 WAF 会话与旧 Bearer 并保存 AuthSnapshot → 完整严格 JSON 提取同一主体的新 Bearer → 按当前绝对会话期限收窄新凭证期限 → 短事务 CAS 重验 binding、主体、epoch、generation、完整旧凭证集合与旧凭证期限 → 撤销旧 generation 并写入新 generation 与 outbox → 提交后释放正文。epoch 保持不变；并发晚到响应、主体变化、旧凭证过期或集合偏差均回滚。
+同上下文刷新响应：请求阶段精确验证旧 WAF 会话与旧 Bearer 并保存 AuthSnapshot → 完整严格 JSON 提取同一主体、同一授权上下文引用的新 Bearer → 按当前绝对会话期限收窄新凭证期限 → 短事务 CAS 重验 binding、主体、授权上下文、epoch、generation、完整旧凭证集合与旧凭证期限 → 撤销旧 generation 并写入新 generation 与 outbox → 提交后释放正文。epoch 保持不变；并发晚到响应、上下文变化、旧凭证过期或集合偏差均回滚。
 
-账号切换响应：请求阶段以旧账号的完整组合保存 AuthSnapshot → 完整严格 JSON 提取不同主体与新 Bearer → 短事务 CAS 重验旧主体、epoch、generation、完整旧凭证集合、旧凭证期限和绝对会话期限 → 同时更新主体、推进 epoch 与 generation、撤销旧凭证、写入新凭证和 `epoch.changed` outbox → 提交后释放正文。旧 epoch 使既有资格立即不可用；切换前发出的列表即使之后成功返回，也只能携带旧快照尝试提交并被拒绝。
+身份上下文切换响应：请求阶段以旧上下文的完整组合保存 AuthSnapshot → 完整严格 JSON 提取主体、授权上下文引用与新 Bearer，要求主体或授权上下文发生变化 → 短事务 CAS 重验旧主体、旧授权上下文、epoch、generation、完整旧凭证集合、旧凭证期限和绝对会话期限 → 同时更新上下文、推进 epoch 与 generation、撤销旧凭证、写入新凭证和 `epoch.changed` outbox → 提交后释放正文。旧 epoch 使既有资格立即不可用；切换前发出的列表即使之后成功返回，也只能携带旧快照尝试提交并被拒绝。
 
 获准列表/创建响应：完整解密和验证 → 使用原请求 AuthSnapshot → 锁定/比较当前 epoch → 写入资格与 outbox → 提交事务 → 把已提交的不透明动作引用注入对应响应项 → 交付可触发后续请求的数据。来源请求的准入失败、兼容不可见、来源未批准或源站预占动作引用字段时不发行资格。
 

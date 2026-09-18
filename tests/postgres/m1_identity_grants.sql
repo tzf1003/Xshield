@@ -8,10 +8,12 @@ INSERT INTO xshield.policy_revisions (
 
 INSERT INTO xshield.auth_bindings (
     tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
-    auth_epoch, credential_generation, status, absolute_expires_at
+    authorization_context_ref, auth_epoch, credential_generation, status,
+    absolute_expires_at
 ) VALUES (
     'tenant_a', 'site_a', 'auth_018f2a3b-4c5d-7000-8000-000000000001',
-    decode(repeat('11', 32), 'hex'), 'principal_a', 4, 2, 'active', now() + interval '1 day'
+    decode(repeat('11', 32), 'hex'), 'principal_a', 'tenant_a:user',
+    4, 2, 'active', now() + interval '1 day'
 );
 
 INSERT INTO xshield.credential_bindings (
@@ -145,7 +147,8 @@ INSERT INTO xshield.audit_outbox (
 DO $$
 BEGIN
     IF (SELECT count(*) FROM xshield.resource_grants) <> 1
-        OR (SELECT count(*) FROM xshield.audit_outbox) <> 1 THEN
+        OR (SELECT count(*) FROM xshield.audit_outbox
+            WHERE event_type = 'grant.issued') <> 1 THEN
         RAISE EXCEPTION 'grant and outbox were not committed together';
     END IF;
 END

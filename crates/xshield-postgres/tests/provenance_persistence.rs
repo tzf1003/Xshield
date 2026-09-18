@@ -60,6 +60,7 @@ fn fixture() -> Fixture {
         tenant.clone(),
         site.clone(),
         "principal_provenance",
+        xshield_core::identity::AuthorizationContextRef::parse("context_provenance").unwrap(),
         AuthEpoch::new(4),
         CredentialGeneration::new(2),
         credentials(),
@@ -153,8 +154,10 @@ async fn seed_policy_binding_and_descriptor(pool: &PgPool, fixture: &Fixture) {
     sqlx::query(
         "INSERT INTO xshield.auth_bindings (
             tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
-            auth_epoch, credential_generation, status, absolute_expires_at
-         ) VALUES ($1, $2, $3, $4, 'principal_provenance', 4, 2, 'active', to_timestamp($5))",
+            authorization_context_ref, auth_epoch, credential_generation, status,
+            absolute_expires_at
+         ) VALUES ($1, $2, $3, $4, 'principal_provenance', 'context_provenance',
+                   4, 2, 'active', to_timestamp($5))",
     )
     .bind(fixture.tenant.as_str())
     .bind(fixture.site.as_str())

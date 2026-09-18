@@ -6,11 +6,11 @@
 
 ## 实现状态
 
-`AUTH_ENTRY` 已支持首个 Bearer 认证建立闭环：有界严格 JSON 成功响应提供配置指针指定的主体与 Bearer，网关在释放正文前原子写入新 binding、初始 credential generation 和 `binding.created` outbox，并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。源站同名 Cookie、响应形状偏差或事务失败均不建立身份；端到端测试已使用新签发的 WAF Cookie 与业务 Bearer 访问受保护根入口。
+`AUTH_ENTRY` 已支持首个 Bearer 认证建立闭环：有界严格 JSON 成功响应提供配置指针指定的主体、授权上下文引用与 Bearer，网关在释放正文前原子写入新 binding、初始 credential generation 和 `binding.created` outbox，并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。源站同名 Cookie、响应形状偏差或事务失败均不建立身份；端到端测试已使用新签发的 WAF Cookie 与业务 Bearer 访问受保护根入口。
 
-`AUTHENTICATED_ROOT` 刷新端点可配置 `auth_refresh`：请求先用旧 WAF Cookie 与旧 Bearer 精确加载身份，成功响应只接受同一主体的新 Bearer；提交事务再次比较 binding、主体、epoch、generation、完整旧凭证集合及旧凭证期限，随后撤销旧 generation、写入新 generation 与 `identity.refreshed` outbox。CAS 冲突、主体变化、原凭证过期或响应偏差均不释放成功正文；刷新保持 auth epoch，因此刷新前已提交且仍有效的资源资格可继续使用。
+`AUTHENTICATED_ROOT` 刷新端点可配置 `auth_refresh`：请求先用旧 WAF Cookie 与旧 Bearer 精确加载身份，成功响应只接受同一主体、同一授权上下文引用的新 Bearer；提交事务再次比较 binding、主体、授权上下文、epoch、generation、完整旧凭证集合及旧凭证期限，随后撤销旧 generation、写入新 generation 与 `identity.refreshed` outbox。CAS 冲突、身份上下文变化、原凭证过期或响应偏差均不释放成功正文；刷新保持 auth epoch，因此刷新前已提交且仍有效的资源资格可继续使用。
 
-账号切换端点可配置 `auth_context_switch`：请求仍以旧账号的完整认证组合准入，成功响应必须提供不同主体与新 Bearer；网关在释放正文前原子更新主体、auth epoch 与 credential generation，撤销旧凭证并提交 `epoch.changed` outbox。旧账号凭证和旧 epoch 资格立即失效，切换期间晚到的旧响应也不能发行资格；WAF 会话 Cookie 与绝对期限保持不变。
+身份上下文切换端点可配置 `auth_context_switch`：请求仍以旧上下文的完整认证组合准入，成功响应必须提供主体或授权上下文引用的变化及新 Bearer；网关在释放正文前原子更新上下文、auth epoch 与 credential generation，撤销旧凭证并提交 `epoch.changed` outbox。同主体的租户/角色变化也会隔离旧 epoch，切换期间晚到的旧响应不能发行资格；WAF 会话 Cookie 与绝对期限保持不变。升级迁移会撤销缺少已验证授权上下文的活动绑定，客户端需重新认证。
 
 `xshield-control` 已提供首个独立管理接口 `GET /control/v1/audit/health`：固定从服务端配置注入 tenant/site 作用域，以常量时间摘要比对管理 Bearer 凭证，仅允许 `AuditAdministrator`，执行每分钟有界限流，并在返回前把 `console.health.read` 结果写入独立加密 journal。
 

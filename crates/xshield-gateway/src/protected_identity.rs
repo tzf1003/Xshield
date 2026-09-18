@@ -13,8 +13,8 @@ use xshield_core::{
     domain::{ActionRef, AuthBindingId, EventId, FieldName, RequestId, ResourceType, WafSessionId},
     grant::ResourceKeyHmac,
     identity::{
-        AuthBinding, AuthSnapshot, CredentialFingerprint, CredentialSlot, IdentityDenied,
-        UnixSeconds,
+        AuthBinding, AuthSnapshot, AuthorizationContextRef, CredentialFingerprint, CredentialSlot,
+        IdentityDenied, UnixSeconds,
     },
     ports::{
         IdentityProofQuery, IdentityProofState, IdentityProofStore, ResourceProofQuery,
@@ -195,12 +195,16 @@ impl ProtectedIdentity {
                 .map_err(|_| ReasonCode::IdentityStoreUnavailable)?,
         );
         let credentials = BTreeMap::from([(CredentialSlot::Bearer, bearer_fingerprint)]);
+        let authorization_context_ref =
+            AuthorizationContextRef::parse(authentication.authorization_context_ref())
+                .map_err(|_| ReasonCode::ResponseValidationFailed)?;
         let binding = AuthBinding::new(
             pending.binding_id.clone(),
             pending.session_id.clone(),
             config.tenant_id().clone(),
             config.site_id().clone(),
             authentication.principal_ref(),
+            authorization_context_ref,
             xshield_core::identity::AuthEpoch::new(1),
             xshield_core::identity::CredentialGeneration::new(1),
             credentials,
@@ -213,6 +217,8 @@ impl ProtectedIdentity {
             "event_id": pending.event_id.as_str(),
             "request_id": request_id.as_str(),
             "binding_id": pending.binding_id.as_str(),
+            "principal_ref": authentication.principal_ref(),
+            "authorization_context_ref": authentication.authorization_context_ref(),
             "auth_epoch": 1,
             "credential_generation": 1,
         });
@@ -245,6 +251,11 @@ impl ProtectedIdentity {
             .extract(body)
             .map_err(xshield_gateway::auth_binding::AuthBindingError::reason_code)?;
         if authentication.principal_ref() != identity.snapshot.principal_ref() {
+            return Err(ReasonCode::AuthBindingMismatch);
+        }
+        if authentication.authorization_context_ref()
+            != identity.snapshot.authorization_context_ref().as_str()
+        {
             return Err(ReasonCode::AuthBindingMismatch);
         }
         let bearer_fingerprint = CredentialFingerprint::from_bytes(
@@ -280,6 +291,8 @@ impl ProtectedIdentity {
             "event_id": event_id.as_str(),
             "request_id": request_id.as_str(),
             "binding_id": identity.snapshot.binding_id().as_str(),
+            "principal_ref": identity.snapshot.principal_ref(),
+            "authorization_context_ref": identity.snapshot.authorization_context_ref().as_str(),
             "auth_epoch": identity.snapshot.epoch().value(),
             "previous_credential_generation": identity.snapshot.generation().value(),
             "credential_generation": current_generation,
@@ -321,7 +334,12 @@ impl ProtectedIdentity {
         let authentication = rule
             .extract(body)
             .map_err(xshield_gateway::auth_binding::AuthBindingError::reason_code)?;
-        if authentication.principal_ref() == identity.snapshot.principal_ref() {
+        let authorization_context_ref =
+            AuthorizationContextRef::parse(authentication.authorization_context_ref())
+                .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        if authentication.principal_ref() == identity.snapshot.principal_ref()
+            && &authorization_context_ref == identity.snapshot.authorization_context_ref()
+        {
             return Err(ReasonCode::AuthBindingMismatch);
         }
         let bearer_fingerprint = CredentialFingerprint::from_bytes(
@@ -363,6 +381,8 @@ impl ProtectedIdentity {
             "binding_id": identity.snapshot.binding_id().as_str(),
             "previous_principal_ref": identity.snapshot.principal_ref(),
             "principal_ref": authentication.principal_ref(),
+            "previous_authorization_context_ref": identity.snapshot.authorization_context_ref().as_str(),
+            "authorization_context_ref": authorization_context_ref.as_str(),
             "previous_auth_epoch": identity.snapshot.epoch().value(),
             "auth_epoch": current_epoch,
             "previous_credential_generation": identity.snapshot.generation().value(),
@@ -381,8 +401,12 @@ impl ProtectedIdentity {
             &envelope,
         )
         .map_err(|_| ReasonCode::ResponseValidationFailed)?;
-        let command = IdentityContextSwitch::new(transition, authentication.principal_ref())
-            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let command = IdentityContextSwitch::new(
+            transition,
+            authentication.principal_ref(),
+            &authorization_context_ref,
+        )
+        .map_err(|_| ReasonCode::ResponseValidationFailed)?;
         match self
             .store()
             .await

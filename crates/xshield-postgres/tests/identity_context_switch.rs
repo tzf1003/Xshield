@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, env, time::Duration};
 use xshield_core::{
     domain::{AuthBindingId, EventId, SiteId, TenantId, WafSessionId},
     identity::{
-        AuthBinding, AuthEpoch, CredentialFingerprint, CredentialGeneration, CredentialSlot,
-        UnixSeconds,
+        AuthBinding, AuthEpoch, AuthorizationContextRef, CredentialFingerprint,
+        CredentialGeneration, CredentialSlot, UnixSeconds,
     },
     ports::{IdentityProofQuery, IdentityProofState, IdentityProofStore},
 };
@@ -25,6 +25,7 @@ struct Fixture {
     session_id: WafSessionId,
     old_credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
     new_credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
+    new_context: AuthorizationContextRef,
 }
 
 fn credentials(byte: u8) -> BTreeMap<CredentialSlot, CredentialFingerprint> {
@@ -43,6 +44,7 @@ fn fixture() -> Fixture {
         TenantId::parse("tenant_switch").unwrap(),
         SiteId::parse("site_switch").unwrap(),
         "principal_a",
+        AuthorizationContextRef::parse("tenant_a:role_user").unwrap(),
         AuthEpoch::new(4),
         CredentialGeneration::new(2),
         old_credentials.clone(),
@@ -64,6 +66,7 @@ fn fixture() -> Fixture {
         session_id,
         old_credentials,
         new_credentials: credentials(42),
+        new_context: AuthorizationContextRef::parse("tenant_b:role_user").unwrap(),
     }
 }
 
@@ -86,15 +89,17 @@ fn command<'a>(
         event_id,
         envelope,
     )?;
-    IdentityContextSwitch::new(transition, "principal_b")
+    IdentityContextSwitch::new(transition, "principal_a", &fixture.new_context)
 }
 
 async fn seed(pool: &PgPool, fixture: &Fixture) {
     sqlx::query(
         "INSERT INTO xshield.auth_bindings (
             tenant_id, site_id, binding_id, waf_sid_fingerprint, principal_ref,
-            auth_epoch, credential_generation, status, absolute_expires_at
-         ) VALUES ($1, $2, $3, $4, 'principal_a', 4, 2, 'active', to_timestamp($5))",
+            authorization_context_ref, auth_epoch, credential_generation, status,
+            absolute_expires_at
+         ) VALUES ($1, $2, $3, $4, 'principal_a', 'tenant_a:role_user',
+                   4, 2, 'active', to_timestamp($5))",
     )
     .bind(fixture.binding.tenant_id().as_str())
     .bind(fixture.binding.site_id().as_str())
@@ -124,9 +129,9 @@ async fn seed(pool: &PgPool, fixture: &Fixture) {
     .unwrap();
 }
 
-async fn binding_state(pool: &PgPool, fixture: &Fixture) -> (String, i64, i64) {
+async fn binding_state(pool: &PgPool, fixture: &Fixture) -> (String, String, i64, i64) {
     let row = sqlx::query(
-        "SELECT principal_ref, auth_epoch, credential_generation
+        "SELECT principal_ref, authorization_context_ref, auth_epoch, credential_generation
          FROM xshield.auth_bindings
          WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3",
     )
@@ -138,6 +143,7 @@ async fn binding_state(pool: &PgPool, fixture: &Fixture) -> (String, i64, i64) {
     .unwrap();
     (
         row.get("principal_ref"),
+        row.get("authorization_context_ref"),
         row.get("auth_epoch"),
         row.get("credential_generation"),
     )
@@ -178,7 +184,12 @@ async fn assert_duplicate_event_rolls_back(
     ));
     assert_eq!(
         binding_state(pool, fixture).await,
-        ("principal_a".to_owned(), 4, 2)
+        (
+            "principal_a".to_owned(),
+            "tenant_a:role_user".to_owned(),
+            4,
+            2
+        )
     );
 }
 
@@ -204,14 +215,15 @@ async fn assert_identity_access(store: &PostgresIdentityStore, fixture: &Fixture
             .await
             .unwrap(),
         IdentityProofState::Verified { snapshot, .. }
-            if snapshot.principal_ref() == "principal_b"
+            if snapshot.principal_ref() == "principal_a"
+                && snapshot.authorization_context_ref() == &fixture.new_context
                 && snapshot.epoch() == AuthEpoch::new(5)
                 && snapshot.generation() == CredentialGeneration::new(3)
     ));
 }
 
 #[test]
-fn context_switch_requires_a_new_principal_and_credential() {
+fn context_switch_requires_a_new_context_and_credential() {
     let fixture = fixture();
     let event_id = event_id(201);
     let envelope = json!({"schema_version": 3, "event_type": "epoch.changed"});
@@ -228,6 +240,7 @@ fn context_switch_requires_a_new_principal_and_credential() {
             )
             .unwrap(),
             "principal_a",
+            fixture.snapshot.authorization_context_ref(),
         ),
         Err(StoreError::InvalidCommand)
     ));
@@ -262,7 +275,12 @@ async fn context_switch_is_atomic_and_invalidates_the_old_identity() {
     );
     assert_eq!(
         binding_state(&pool, &fixture).await,
-        ("principal_a".to_owned(), 4, 2)
+        (
+            "principal_a".to_owned(),
+            "tenant_a:role_user".to_owned(),
+            4,
+            2
+        )
     );
 
     let committed_event = event_id(203);
@@ -288,7 +306,12 @@ async fn context_switch_is_atomic_and_invalidates_the_old_identity() {
     );
     assert_eq!(
         binding_state(&pool, &fixture).await,
-        ("principal_b".to_owned(), 5, 3)
+        (
+            "principal_a".to_owned(),
+            "tenant_b:role_user".to_owned(),
+            5,
+            3
+        )
     );
 
     let stale_event = event_id(204);

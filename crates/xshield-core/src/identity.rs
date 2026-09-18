@@ -60,6 +60,35 @@ impl AuthEpoch {
     }
 }
 
+/// Non-secret reference to the verified business authorization scope.
+///
+/// A site adapter derives this value from tenant, role, permission-set, or
+/// equivalent origin facts. Equality means grants may survive a credential
+/// refresh; a changed value requires a new authentication epoch.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AuthorizationContextRef(String);
+
+impl AuthorizationContextRef {
+    /// Parses one bounded authorization-context reference.
+    ///
+    /// # Errors
+    /// Returns [`IdentityInputError::AuthorizationContextRef`] for empty,
+    /// oversized, or control-bearing input.
+    pub fn parse(value: impl Into<String>) -> Result<Self, IdentityInputError> {
+        let value = value.into();
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(IdentityInputError::AuthorizationContextRef);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the adapter-defined, non-secret context reference.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Authentication credential location selected by the site profile.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CredentialSlot {
@@ -123,6 +152,8 @@ impl fmt::Debug for CredentialFingerprint {
 /// Invalid data rejected while constructing identity domain values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityInputError {
+    /// Authorization context is empty, oversized, or contains control data.
+    AuthorizationContextRef,
     /// Credential fingerprint is not canonical lowercase SHA-256/HMAC hex.
     CredentialFingerprint,
     /// An authenticated binding has no effective verified credential.
@@ -134,6 +165,7 @@ pub enum IdentityInputError {
 impl fmt::Display for IdentityInputError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::AuthorizationContextRef => "invalid authorization context reference",
             Self::CredentialFingerprint => "invalid credential fingerprint",
             Self::EmptyCredentialSet => "authenticated binding requires a credential",
             Self::PrincipalRef => "invalid principal reference",
@@ -209,6 +241,7 @@ pub struct AuthBinding {
     tenant_id: TenantId,
     site_id: SiteId,
     principal_ref: String,
+    authorization_context_ref: AuthorizationContextRef,
     epoch: AuthEpoch,
     generation: CredentialGeneration,
     credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
@@ -228,6 +261,7 @@ impl AuthBinding {
         tenant_id: TenantId,
         site_id: SiteId,
         principal_ref: impl Into<String>,
+        authorization_context_ref: AuthorizationContextRef,
         epoch: AuthEpoch,
         generation: CredentialGeneration,
         credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
@@ -243,6 +277,7 @@ impl AuthBinding {
             tenant_id,
             site_id,
             principal_ref,
+            authorization_context_ref,
             epoch,
             generation,
             credentials,
@@ -282,6 +317,7 @@ impl AuthBinding {
             tenant_id: self.tenant_id.clone(),
             site_id: self.site_id.clone(),
             principal_ref: self.principal_ref.clone(),
+            authorization_context_ref: self.authorization_context_ref.clone(),
             epoch: self.epoch,
             generation: self.generation,
         })
@@ -304,6 +340,9 @@ impl AuthBinding {
         self.validate_snapshot(snapshot, now)?;
         if credentials.is_empty() {
             return Err(IdentityInputError::EmptyCredentialSet.into());
+        }
+        if credentials == self.credentials {
+            return Err(IdentityTransitionError::CredentialUnchanged);
         }
         let next_generation = self
             .generation
@@ -334,6 +373,7 @@ impl AuthBinding {
         &mut self,
         snapshot: &AuthSnapshot,
         principal_ref: impl Into<String>,
+        authorization_context_ref: AuthorizationContextRef,
         credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
         now: UnixSeconds,
     ) -> Result<IdentityTransition, IdentityTransitionError> {
@@ -341,6 +381,14 @@ impl AuthBinding {
         let principal_ref = validate_principal_ref(principal_ref.into())?;
         if credentials.is_empty() {
             return Err(IdentityInputError::EmptyCredentialSet.into());
+        }
+        if credentials == self.credentials {
+            return Err(IdentityTransitionError::CredentialUnchanged);
+        }
+        if principal_ref == self.principal_ref
+            && authorization_context_ref == self.authorization_context_ref
+        {
+            return Err(IdentityTransitionError::ContextUnchanged);
         }
         let next_epoch = self
             .epoch
@@ -360,6 +408,7 @@ impl AuthBinding {
             current_generation: CredentialGeneration(next_generation),
         };
         self.principal_ref = principal_ref;
+        self.authorization_context_ref = authorization_context_ref;
         self.credentials = credentials;
         self.epoch = transition.current_epoch;
         self.generation = transition.current_generation;
@@ -420,6 +469,9 @@ impl AuthBinding {
         if self.principal_ref != snapshot.principal_ref {
             return Err(IdentityDenied::BindingMismatch);
         }
+        if self.authorization_context_ref != snapshot.authorization_context_ref {
+            return Err(IdentityDenied::BindingMismatch);
+        }
         Ok(())
     }
 
@@ -469,6 +521,12 @@ impl AuthBinding {
     #[must_use]
     pub fn principal_ref(&self) -> &str {
         &self.principal_ref
+    }
+
+    /// Returns the verified business authorization scope.
+    #[must_use]
+    pub const fn authorization_context_ref(&self) -> &AuthorizationContextRef {
+        &self.authorization_context_ref
     }
 
     /// Returns the exact credential fingerprints for the current generation.
@@ -521,6 +579,10 @@ pub struct IdentityTransition {
 /// Rejected identity state transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityTransitionError {
+    /// Principal and authorization context both match the current binding.
+    ContextUnchanged,
+    /// A verified refresh or switch did not replace the credential set.
+    CredentialUnchanged,
     /// New binding data is invalid.
     InvalidInput(IdentityInputError),
     /// The captured request identity is stale or belongs to another binding.
@@ -544,6 +606,8 @@ impl From<IdentityDenied> for IdentityTransitionError {
 impl fmt::Display for IdentityTransitionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ContextUnchanged => formatter.write_str("identity context is unchanged"),
+            Self::CredentialUnchanged => formatter.write_str("identity credential is unchanged"),
             Self::InvalidInput(error) => error.fmt(formatter),
             Self::Denied(error) => error.fmt(formatter),
             Self::CounterExhausted => formatter.write_str("identity counter exhausted"),
@@ -560,6 +624,7 @@ pub struct AuthSnapshot {
     tenant_id: TenantId,
     site_id: SiteId,
     principal_ref: String,
+    authorization_context_ref: AuthorizationContextRef,
     epoch: AuthEpoch,
     generation: CredentialGeneration,
 }
@@ -587,6 +652,12 @@ impl AuthSnapshot {
     #[must_use]
     pub fn principal_ref(&self) -> &str {
         &self.principal_ref
+    }
+
+    /// Returns the captured business authorization scope.
+    #[must_use]
+    pub const fn authorization_context_ref(&self) -> &AuthorizationContextRef {
+        &self.authorization_context_ref
     }
 
     /// Returns the captured tenant scope.
@@ -666,6 +737,7 @@ mod tests {
             TenantId::parse("tenant_a").unwrap(),
             SiteId::parse("site_a").unwrap(),
             "principal_a",
+            AuthorizationContextRef::parse("tenant_scope_a:role_user").unwrap(),
             AuthEpoch::new(4),
             CredentialGeneration::new(2),
             credentials(A),
@@ -716,6 +788,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.principal_ref(), "principal_a");
+        assert_eq!(
+            snapshot.authorization_context_ref().as_str(),
+            "tenant_scope_a:role_user"
+        );
         assert_eq!(snapshot.epoch(), AuthEpoch::new(4));
     }
 
@@ -796,6 +872,10 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(
+            binding.refresh_same_context(&snapshot, credentials(A), UnixSeconds::new(100)),
+            Err(IdentityTransitionError::CredentialUnchanged)
+        );
         let transition = binding
             .refresh_same_context(&snapshot, credentials(C), UnixSeconds::new(100))
             .unwrap();
@@ -836,6 +916,7 @@ mod tests {
             .switch_context(
                 &snapshot,
                 "principal_b",
+                AuthorizationContextRef::parse("tenant_scope_b:role_user").unwrap(),
                 credentials(B),
                 UnixSeconds::new(100),
             )
@@ -844,7 +925,41 @@ mod tests {
         assert_eq!(binding.epoch(), AuthEpoch::new(5));
         assert_eq!(binding.generation(), CredentialGeneration::new(3));
         assert_eq!(
+            binding.authorization_context_ref().as_str(),
+            "tenant_scope_b:role_user"
+        );
+        assert_eq!(
             binding.validate_snapshot(&snapshot, UnixSeconds::new(100)),
+            Err(IdentityDenied::EpochChanged)
+        );
+    }
+
+    #[test]
+    fn same_principal_context_switch_still_advances_epoch() {
+        let mut binding = binding();
+        let snapshot = binding
+            .verify(
+                &TenantId::parse("tenant_a").unwrap(),
+                &SiteId::parse("site_a").unwrap(),
+                &WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+                &credentials(A),
+                UnixSeconds::new(100),
+            )
+            .unwrap();
+
+        binding
+            .switch_context(
+                &snapshot,
+                "principal_a",
+                AuthorizationContextRef::parse("tenant_scope_a:role_admin").unwrap(),
+                credentials(B),
+                UnixSeconds::new(100),
+            )
+            .unwrap();
+
+        assert_eq!(binding.epoch(), AuthEpoch::new(5));
+        assert_eq!(
+            binding.validate_epoch(&snapshot, UnixSeconds::new(100)),
             Err(IdentityDenied::EpochChanged)
         );
     }

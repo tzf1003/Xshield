@@ -6,6 +6,7 @@ use xshield_core::audit::ReasonCode;
 use zeroize::Zeroizing;
 
 const MAX_PRINCIPAL_BYTES: usize = 256;
+const MAX_AUTHORIZATION_CONTEXT_BYTES: usize = 256;
 const MAX_BEARER_BYTES: usize = 8192;
 
 /// Validated authentication-response semantics from trusted configuration.
@@ -13,6 +14,7 @@ const MAX_BEARER_BYTES: usize = 8192;
 pub struct AuthBindingRule {
     pub(crate) success_status: u16,
     pub(crate) principal_pointer: String,
+    pub(crate) authorization_context_pointer: String,
     pub(crate) bearer_pointer: String,
     pub(crate) credential_ttl_seconds: u64,
     pub(crate) session_ttl_seconds: u64,
@@ -23,6 +25,7 @@ pub struct AuthBindingRule {
 pub struct AuthTransitionRule {
     pub(crate) success_status: u16,
     pub(crate) principal_pointer: String,
+    pub(crate) authorization_context_pointer: String,
     pub(crate) bearer_pointer: String,
     pub(crate) credential_ttl_seconds: u64,
 }
@@ -34,16 +37,21 @@ impl AuthBindingRule {
         status == self.success_status
     }
 
-    /// Extracts a bounded principal and bearer from one complete strict JSON value.
+    /// Extracts a bounded principal, authorization context, and bearer.
     ///
     /// The bearer is held in a zeroizing buffer and must only be fingerprinted or
     /// returned to the client. It must not enter ordinary logs or audit envelopes.
     ///
     /// # Errors
     /// Returns [`AuthBindingError`] for malformed JSON, an unexpected response
-    /// shape, or an unusable principal or bearer value.
+    /// shape, or an unusable identity-context or bearer value.
     pub fn extract(&self, body: &[u8]) -> Result<VerifiedAuthentication, AuthBindingError> {
-        extract_authentication(body, &self.principal_pointer, &self.bearer_pointer)
+        extract_authentication(
+            body,
+            &self.principal_pointer,
+            &self.authorization_context_pointer,
+            &self.bearer_pointer,
+        )
     }
 
     /// Returns the server-enforced credential lifetime.
@@ -66,13 +74,18 @@ impl AuthTransitionRule {
         status == self.success_status
     }
 
-    /// Extracts a bounded principal and bearer from one complete strict JSON value.
+    /// Extracts a bounded principal, authorization context, and bearer.
     ///
     /// # Errors
     /// Returns [`AuthBindingError`] for malformed JSON, an unexpected response
-    /// shape, or an unusable principal or bearer value.
+    /// shape, or an unusable identity-context or bearer value.
     pub fn extract(&self, body: &[u8]) -> Result<VerifiedAuthentication, AuthBindingError> {
-        extract_authentication(body, &self.principal_pointer, &self.bearer_pointer)
+        extract_authentication(
+            body,
+            &self.principal_pointer,
+            &self.authorization_context_pointer,
+            &self.bearer_pointer,
+        )
     }
 
     /// Returns the server-enforced credential lifetime.
@@ -85,6 +98,7 @@ impl AuthTransitionRule {
 fn extract_authentication(
     body: &[u8],
     principal_pointer: &str,
+    authorization_context_pointer: &str,
     bearer_pointer: &str,
 ) -> Result<VerifiedAuthentication, AuthBindingError> {
     let value = strict_json(body)?;
@@ -92,6 +106,12 @@ fn extract_authentication(
         .pointer(principal_pointer)
         .and_then(serde_json::Value::as_str)
         .filter(|value| valid_value(value, MAX_PRINCIPAL_BYTES))
+        .ok_or(AuthBindingError)?
+        .to_owned();
+    let authorization_context_ref = value
+        .pointer(authorization_context_pointer)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| valid_value(value, MAX_AUTHORIZATION_CONTEXT_BYTES))
         .ok_or(AuthBindingError)?
         .to_owned();
     let bearer = value
@@ -102,6 +122,7 @@ fn extract_authentication(
         .to_owned();
     Ok(VerifiedAuthentication {
         principal_ref,
+        authorization_context_ref,
         bearer: Zeroizing::new(bearer),
     })
 }
@@ -113,6 +134,7 @@ fn valid_value(value: &str, limit: usize) -> bool {
 /// Verified origin authentication facts ready for binding establishment.
 pub struct VerifiedAuthentication {
     principal_ref: String,
+    authorization_context_ref: String,
     bearer: Zeroizing<String>,
 }
 
@@ -121,6 +143,12 @@ impl VerifiedAuthentication {
     #[must_use]
     pub fn principal_ref(&self) -> &str {
         &self.principal_ref
+    }
+
+    /// Returns the non-secret authorization context asserted by the adapter.
+    #[must_use]
+    pub fn authorization_context_ref(&self) -> &str {
+        &self.authorization_context_ref
     }
 
     /// Returns the bearer only for immediate fingerprinting.
@@ -164,6 +192,7 @@ mod tests {
         AuthBindingRule {
             success_status: 200,
             principal_pointer: "/identity/id".to_owned(),
+            authorization_context_pointer: "/identity/authorization_context".to_owned(),
             bearer_pointer: "/access_token".to_owned(),
             credential_ttl_seconds: 900,
             session_ttl_seconds: 3600,
@@ -173,18 +202,24 @@ mod tests {
     #[test]
     fn extracts_only_bounded_strict_authentication_facts() {
         let extracted = rule()
-            .extract(br#"{"identity":{"id":"principal-1"},"access_token":"token-1"}"#)
+            .extract(br#"{"identity":{"id":"principal-1","authorization_context":"tenant-a:user"},"access_token":"token-1"}"#)
             .unwrap();
         assert_eq!(extracted.principal_ref(), "principal-1");
+        assert_eq!(extracted.authorization_context_ref(), "tenant-a:user");
         assert_eq!(extracted.bearer(), "token-1");
         assert!(
             rule()
-                .extract(br#"{"identity":{"id":"principal-1"},"access_token":""}"#)
+                .extract(br#"{"identity":{"id":"principal-1","authorization_context":"tenant-a:user"},"access_token":""}"#)
                 .is_err()
         );
         assert!(
             rule()
-                .extract(br#"{"identity":{"id":"a","id":"b"},"access_token":"token"}"#)
+                .extract(br#"{"identity":{"id":"a","id":"b","authorization_context":"tenant-a:user"},"access_token":"token"}"#)
+                .is_err()
+        );
+        assert!(
+            rule()
+                .extract(br#"{"identity":{"id":"a"},"access_token":"token"}"#)
                 .is_err()
         );
     }
