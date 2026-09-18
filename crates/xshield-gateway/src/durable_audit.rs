@@ -254,6 +254,7 @@ pub(crate) struct SensorHtmlAudit {
     adapter_revision: String,
     origin_sha256: String,
     injected_sha256: String,
+    csp_nonce_applied: bool,
 }
 
 impl SensorHtmlAudit {
@@ -261,11 +262,13 @@ impl SensorHtmlAudit {
         adapter_revision: String,
         origin_sha256: String,
         injected_sha256: String,
+        csp_nonce_applied: bool,
     ) -> Self {
         Self {
             adapter_revision,
             origin_sha256,
             injected_sha256,
+            csp_nonce_applied,
         }
     }
 }
@@ -942,6 +945,7 @@ fn sensor_html_event(
                 operation_id,
                 origin_sha256: sensor_html.origin_sha256.clone(),
                 injected_sha256: sensor_html.injected_sha256.clone(),
+                csp_nonce_applied: sensor_html.csp_nonce_applied,
             },
             coverage: SensorHtmlStageCoverage {
                 origin_entity_verified: true,
@@ -1316,6 +1320,7 @@ struct SensorHtmlStageFacts {
     operation_id: Option<String>,
     origin_sha256: String,
     injected_sha256: String,
+    csp_nonce_applied: bool,
 }
 
 #[derive(Serialize)]
@@ -1619,6 +1624,7 @@ mod tests {
             "home-r1".to_owned(),
             "8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a".to_owned(),
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            false,
         );
         audit
             .finalize(FinalFacts {
@@ -1663,6 +1669,7 @@ mod tests {
         let stage = stage.unwrap();
         assert_eq!(stage["payload"]["reason_code"], "SENSOR_HTML_INJECTED");
         assert_eq!(stage["payload"]["rule_revision"], "home-r1");
+        assert_eq!(stage["payload"]["facts"]["csp_nonce_applied"], false);
         assert_eq!(stage["payload"]["confidence"], serde_json::Value::Null);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();

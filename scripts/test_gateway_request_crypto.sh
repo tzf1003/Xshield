@@ -65,7 +65,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("ETag", '"origin-home-r1"')
         if self.path == "/home-csp":
-            self.send_header("Content-Security-Policy", "default-src 'self'")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; script-src 'self'; object-src 'none'",
+            )
+        if self.path == "/home-csp-report":
+            self.send_header("Content-Security-Policy-Report-Only", "script-src 'self'")
         self.end_headers()
         self.wfile.write(body)
 
@@ -133,6 +138,15 @@ cat >"$test_dir/config.json" <<JSON
     "resource_type":null,
     "view_profile":null,
     "response":{"mode":"SENSOR_HTML","max_bytes":128,"adapter_revision":"home-r1","origin_sha256":"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a","injection_offset":27}
+  },{
+    "operation_id":"home-csp-report.read",
+    "method":"GET",
+    "path":"/home-csp-report",
+    "admission":"PUBLIC",
+    "source_action":null,
+    "resource_type":null,
+    "view_profile":null,
+    "response":{"mode":"SENSOR_HTML","max_bytes":128,"adapter_revision":"home-r1","origin_sha256":"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a","injection_offset":27}
   }]
 }
 JSON
@@ -180,9 +194,21 @@ grep -qi '^cache-control: private, no-store' "$test_dir/home-headers"
 curl --fail --silent --show-error -o "$test_dir/home-v2.html" \
     "http://127.0.0.1:$gateway_port/home?build=2"
 grep -q '<meta charset="utf-8"><script defer src="/__xshield/v1/sensor/1.0.0.js"></script><script defer src="/__xshield/v1/sensor/1.0.0-loader.js"></script></head>' "$test_dir/home-v2.html"
-home_csp_status=$(curl --silent --show-error -o "$test_dir/home-csp.body" \
-    -w '%{http_code}' "http://127.0.0.1:$gateway_port/home-csp")
-[[ "$home_csp_status" == "502" ]]
+curl --fail --silent --show-error -D "$test_dir/home-csp.headers" \
+    -o "$test_dir/home-csp.html" "http://127.0.0.1:$gateway_port/home-csp"
+python3 - "$test_dir/home-csp.headers" "$test_dir/home-csp.html" <<'PY'
+import pathlib
+import re
+import sys
+
+headers = pathlib.Path(sys.argv[1]).read_text()
+body = pathlib.Path(sys.argv[2]).read_text()
+nonce = re.search(r"'nonce-([0-9a-f]{32})'", headers).group(1)
+assert body.count(f'nonce="{nonce}"') == 2
+PY
+home_csp_report_status=$(curl --silent --show-error -o "$test_dir/home-csp-report.body" \
+    -w '%{http_code}' "http://127.0.0.1:$gateway_port/home-csp-report")
+[[ "$home_csp_report_status" == "502" ]]
 
 curl --fail --silent --show-error -D "$test_dir/bootstrap-headers" \
     -o "$test_dir/bootstrap.json" \

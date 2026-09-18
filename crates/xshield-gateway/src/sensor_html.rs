@@ -2,7 +2,15 @@
 
 use openssl::sha::sha256;
 
-const INJECTION: &str = "<script defer src=\"/__xshield/v1/sensor/1.0.0.js\"></script><script defer src=\"/__xshield/v1/sensor/1.0.0-loader.js\"></script>";
+const SENSOR_SCRIPT: &str = "<script defer src=\"/__xshield/v1/sensor/1.0.0.js\"";
+const LOADER_SCRIPT: &str = "<script defer src=\"/__xshield/v1/sensor/1.0.0-loader.js\"";
+const SCRIPT_END: &str = "></script>";
+const NONCE_ATTRIBUTE_OVERHEAD: usize = " nonce=\"\"".len();
+const NONCE_BYTES: usize = 32;
+const MAX_INJECTION_BYTES: usize = SENSOR_SCRIPT.len()
+    + LOADER_SCRIPT.len()
+    + SCRIPT_END.len() * 2
+    + (NONCE_ATTRIBUTE_OVERHEAD + NONCE_BYTES) * 2;
 
 /// Exact static HTML adapter approved by trusted configuration.
 #[derive(Clone, Debug)]
@@ -44,7 +52,9 @@ impl SensorHtmlRule {
     /// Returns the maximum memory held while source and rewritten entities overlap.
     #[must_use]
     pub fn max_in_flight_bytes(&self) -> Option<usize> {
-        self.max_bytes.checked_mul(2)?.checked_add(INJECTION.len())
+        self.max_bytes
+            .checked_mul(2)?
+            .checked_add(MAX_INJECTION_BYTES)
     }
 
     /// Injects versioned same-origin scripts into the approved HTML entity.
@@ -52,7 +62,11 @@ impl SensorHtmlRule {
     /// # Errors
     /// Returns [`SensorHtmlError`] when the entity differs from the approved
     /// digest or the configured insertion point is not a UTF-8 `</head>` tag.
-    pub fn inject(&self, source: &[u8]) -> Result<InjectedSensorHtml, SensorHtmlError> {
+    pub fn inject(
+        &self,
+        source: &[u8],
+        nonce: Option<&str>,
+    ) -> Result<InjectedSensorHtml, SensorHtmlError> {
         if source.len() > self.max_bytes || std::str::from_utf8(source).is_err() {
             return Err(SensorHtmlError);
         }
@@ -65,16 +79,17 @@ impl SensorHtmlRule {
         if source.get(adapter.injection_offset..adapter.injection_offset + 7) != Some(b"</head>") {
             return Err(SensorHtmlError);
         }
+        let injection = build_injection(nonce)?;
         let capacity = source
             .len()
-            .checked_add(INJECTION.len())
+            .checked_add(injection.len())
             .ok_or(SensorHtmlError)?;
         let mut output = Vec::new();
         output
             .try_reserve_exact(capacity)
             .map_err(|_| SensorHtmlError)?;
         output.extend_from_slice(&source[..adapter.injection_offset]);
-        output.extend_from_slice(INJECTION.as_bytes());
+        output.extend_from_slice(injection.as_bytes());
         output.extend_from_slice(&source[adapter.injection_offset..]);
         let injected_sha256 = encode_hex(sha256(&output));
         Ok(InjectedSensorHtml {
@@ -84,6 +99,36 @@ impl SensorHtmlRule {
             injected_sha256,
         })
     }
+}
+
+fn build_injection(nonce: Option<&str>) -> Result<String, SensorHtmlError> {
+    if nonce.is_some_and(|value| {
+        value.len() != NONCE_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    }) {
+        return Err(SensorHtmlError);
+    }
+    let nonce_bytes = nonce.map_or(0, str::len);
+    let capacity = SENSOR_SCRIPT.len()
+        + LOADER_SCRIPT.len()
+        + SCRIPT_END.len() * 2
+        + (nonce_bytes + NONCE_ATTRIBUTE_OVERHEAD) * usize::from(nonce.is_some()) * 2;
+    let mut output = String::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| SensorHtmlError)?;
+    for script in [SENSOR_SCRIPT, LOADER_SCRIPT] {
+        output.push_str(script);
+        if let Some(nonce) = nonce {
+            output.push_str(" nonce=\"");
+            output.push_str(nonce);
+            output.push('"');
+        }
+        output.push_str(SCRIPT_END);
+    }
+    Ok(output)
 }
 
 /// Rewritten HTML entity and its audit digest.
@@ -141,8 +186,8 @@ mod tests {
 
     #[test]
     fn injects_only_the_exact_approved_html() {
-        assert!(INJECTION.contains(crate::SENSOR_ASSET_PATH));
-        assert!(INJECTION.contains(crate::SENSOR_LOADER_PATH));
+        assert!(SENSOR_SCRIPT.contains(crate::SENSOR_ASSET_PATH));
+        assert!(LOADER_SCRIPT.contains(crate::SENSOR_LOADER_PATH));
         let source = b"<!doctype html><html><head></head><body>ok</body></html>";
         let alternate = b"<!doctype html><head></head>";
         let rule = SensorHtmlRule::new(
@@ -152,14 +197,20 @@ mod tests {
                 ("home-r2".to_owned(), encode_hex(sha256(alternate)), 21),
             ],
         );
-        let result = rule.inject(source).unwrap();
+        let result = rule.inject(source, None).unwrap();
         assert_eq!(result.adapter_revision(), "home-r1");
         let injected = result.into_body();
-        assert_eq!(&injected[27..27 + INJECTION.len()], INJECTION.as_bytes());
+        assert!(
+            injected
+                .windows(SENSOR_SCRIPT.len())
+                .any(|part| part == SENSOR_SCRIPT.as_bytes())
+        );
         assert_eq!(
-            rule.inject(alternate).unwrap().adapter_revision(),
+            rule.inject(alternate, Some("0123456789abcdef0123456789abcdef"))
+                .unwrap()
+                .adapter_revision(),
             "home-r2"
         );
-        assert!(rule.inject(b"<!doctype html><html></html>").is_err());
+        assert!(rule.inject(b"<!doctype html><html></html>", None).is_err());
     }
 }

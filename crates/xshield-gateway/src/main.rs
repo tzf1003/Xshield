@@ -511,6 +511,7 @@ impl ProxyHttp for Gateway {
                         transformation.adapter_revision,
                         transformation.origin_sha256,
                         transformation.injected_sha256,
+                        transformation.csp_nonce_applied,
                     ));
                 }
                 let released = self

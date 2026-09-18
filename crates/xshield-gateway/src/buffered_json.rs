@@ -1,6 +1,7 @@
 use bytes::Bytes;
+use openssl::rand::rand_bytes;
 use pingora::http::ResponseHeader;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use xshield_core::audit::ReasonCode;
 use xshield_gateway::response_grant::{ResponseGrantError, validate_strict_json};
@@ -22,16 +23,17 @@ pub(crate) struct SensorHtmlTransformation {
     pub(crate) adapter_revision: String,
     pub(crate) origin_sha256: String,
     pub(crate) injected_sha256: String,
+    pub(crate) csp_nonce_applied: bool,
 }
 
 enum BufferedResponseKind {
     Json,
-    SensorHtml(SensorHtmlRule),
+    SensorHtml(SensorHtmlRule, Option<String>),
 }
 
 impl BufferedResponse {
     pub(crate) fn begin(
-        response: &ResponseHeader,
+        response: &mut ResponseHeader,
         policy: BufferedResponsePolicy<'_>,
         reservation_bytes: usize,
         budget: &Arc<Semaphore>,
@@ -44,10 +46,13 @@ impl BufferedResponse {
             BufferedResponsePolicy::Json { max_bytes } if single_json_content_type(response) => {
                 (max_bytes, BufferedResponseKind::Json)
             }
-            BufferedResponsePolicy::SensorHtml(rule) if valid_html_response(response) => (
-                rule.max_bytes(),
-                BufferedResponseKind::SensorHtml(rule.clone()),
-            ),
+            BufferedResponsePolicy::SensorHtml(rule) if valid_html_response(response) => {
+                let nonce = prepare_csp_nonce(response)?;
+                (
+                    rule.max_bytes(),
+                    BufferedResponseKind::SensorHtml(rule.clone(), nonce),
+                )
+            }
             _ => return Err(validation_reason),
         };
         if matches!(response.status.as_u16(), 101 | 204 | 304)
@@ -109,14 +114,15 @@ impl BufferedResponse {
                     sensor_html: None,
                 }))
             }
-            BufferedResponseKind::SensorHtml(rule) => {
+            BufferedResponseKind::SensorHtml(rule, nonce) => {
                 let injected = rule
-                    .inject(&self.bytes)
+                    .inject(&self.bytes, nonce.as_deref())
                     .map_err(|_| ReasonCode::SensorHtmlValidationFailed)?;
                 let transformation = SensorHtmlTransformation {
                     adapter_revision: injected.adapter_revision().to_owned(),
                     origin_sha256: injected.origin_sha256().to_owned(),
                     injected_sha256: injected.injected_sha256().to_owned(),
+                    csp_nonce_applied: nonce.is_some(),
                 };
                 Ok(Some(BufferedEntity {
                     body: Bytes::from(injected.into_body()),
@@ -129,7 +135,6 @@ impl BufferedResponse {
 
 fn valid_html_response(response: &ResponseHeader) -> bool {
     if response.status.as_u16() != 200
-        || response.headers.contains_key("content-security-policy")
         || response
             .headers
             .contains_key("content-security-policy-report-only")
@@ -149,6 +154,104 @@ fn valid_html_response(response: &ResponseHeader) -> bool {
                         && value.trim().eq_ignore_ascii_case("utf-8")
                 })
         })
+}
+
+fn prepare_csp_nonce(response: &mut ResponseHeader) -> Result<Option<String>, ReasonCode> {
+    let policies = response
+        .headers
+        .get_all("content-security-policy")
+        .iter()
+        .map(|value| value.to_str().map(str::to_owned))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ReasonCode::SensorHtmlValidationFailed)?;
+    if policies.is_empty() {
+        return Ok(None);
+    }
+    if policies.len() > 4 || policies.iter().any(|policy| policy.len() > 4096) {
+        return Err(ReasonCode::SensorHtmlValidationFailed);
+    }
+    let mut random = [0_u8; 16];
+    rand_bytes(&mut random).map_err(|_| ReasonCode::SensorHtmlValidationFailed)?;
+    let nonce = hex(&random);
+    let rewritten = policies
+        .iter()
+        .map(|policy| rewrite_csp_policy(policy, &nonce))
+        .collect::<Result<Vec<_>, _>>()?;
+    response.remove_header("content-security-policy");
+    for policy in rewritten {
+        response
+            .append_header("Content-Security-Policy", policy)
+            .map_err(|_| ReasonCode::SensorHtmlValidationFailed)?;
+    }
+    Ok(Some(nonce))
+}
+
+fn rewrite_csp_policy(policy: &str, nonce: &str) -> Result<String, ReasonCode> {
+    if policy.is_empty() || policy.contains(',') {
+        return Err(ReasonCode::SensorHtmlValidationFailed);
+    }
+    let directives = policy
+        .split(';')
+        .map(str::trim)
+        .filter(|directive| !directive.is_empty())
+        .map(|directive| directive.split_ascii_whitespace().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut names = BTreeSet::new();
+    for directive in &directives {
+        let Some(name) = directive.first() else {
+            return Err(ReasonCode::SensorHtmlValidationFailed);
+        };
+        let sandbox_blocks_scripts = name.eq_ignore_ascii_case("sandbox")
+            && !directive
+                .iter()
+                .skip(1)
+                .any(|value| value.eq_ignore_ascii_case("allow-scripts"));
+        if !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || !names.insert(name.to_ascii_lowercase())
+            || name.eq_ignore_ascii_case("require-sri-for")
+                && directive
+                    .iter()
+                    .skip(1)
+                    .any(|value| value.eq_ignore_ascii_case("script"))
+            || sandbox_blocks_scripts
+        {
+            return Err(ReasonCode::SensorHtmlValidationFailed);
+        }
+    }
+    let has_script_policy = directives.iter().any(|directive| {
+        directive[0].eq_ignore_ascii_case("script-src-elem")
+            || directive[0].eq_ignore_ascii_case("script-src")
+    });
+    if !has_script_policy {
+        return Err(ReasonCode::SensorHtmlValidationFailed);
+    }
+    let nonce_source = format!("'nonce-{nonce}'");
+    Ok(directives
+        .iter()
+        .map(|directive| {
+            let mut rendered = directive.join(" ");
+            if directive[0].eq_ignore_ascii_case("script-src-elem")
+                || directive[0].eq_ignore_ascii_case("script-src")
+            {
+                rendered.push(' ');
+                rendered.push_str(&nonce_source);
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join("; "))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn single_json_content_type(response: &ResponseHeader) -> bool {
@@ -234,7 +337,7 @@ mod tests {
     #[test]
     fn withholds_chunks_until_one_valid_complete_json_body() {
         let mut buffer = BufferedResponse::begin(
-            &response("application/json; charset=utf-8", Some(11)),
+            &mut response("application/json; charset=utf-8", Some(11)),
             BufferedResponsePolicy::Json { max_bytes: 64 },
             128,
             &budget(),
@@ -256,7 +359,7 @@ mod tests {
     fn rejects_oversize_encoded_or_invalid_json_without_releasing_a_chunk() {
         assert_eq!(
             BufferedResponse::begin(
-                &response("application/json", Some(65)),
+                &mut response("application/json", Some(65)),
                 BufferedResponsePolicy::Json { max_bytes: 64 },
                 128,
                 &budget(),
@@ -268,7 +371,7 @@ mod tests {
         encoded.insert_header("Content-Encoding", "gzip").unwrap();
         assert_eq!(
             BufferedResponse::begin(
-                &encoded,
+                &mut encoded,
                 BufferedResponsePolicy::Json { max_bytes: 64 },
                 128,
                 &budget(),
@@ -280,7 +383,7 @@ mod tests {
         trailer.insert_header("Trailer", "Digest").unwrap();
         assert_eq!(
             BufferedResponse::begin(
-                &trailer,
+                &mut trailer,
                 BufferedResponsePolicy::Json { max_bytes: 64 },
                 128,
                 &budget(),
@@ -290,7 +393,7 @@ mod tests {
         );
 
         let mut buffer = BufferedResponse::begin(
-            &response("application/json", None),
+            &mut response("application/json", None),
             BufferedResponsePolicy::Json { max_bytes: 64 },
             128,
             &budget(),
@@ -304,7 +407,7 @@ mod tests {
         assert!(body.is_none());
 
         let mut ambiguous = BufferedResponse::begin(
-            &response("application/json", None),
+            &mut response("application/json", None),
             BufferedResponsePolicy::Json { max_bytes: 64 },
             128,
             &budget(),
@@ -321,7 +424,7 @@ mod tests {
     fn rejects_ambiguous_content_type_parameters() {
         assert!(
             BufferedResponse::begin(
-                &response("application/json; charset=utf-8; charset=utf-8", None),
+                &mut response("application/json; charset=utf-8; charset=utf-8", None),
                 BufferedResponsePolicy::Json { max_bytes: 64 },
                 128,
                 &budget()
@@ -334,7 +437,7 @@ mod tests {
     fn holds_and_releases_aggregate_buffer_capacity() {
         let budget = Arc::new(Semaphore::new(192));
         let mut first = BufferedResponse::begin(
-            &response("application/json", None),
+            &mut response("application/json", None),
             BufferedResponsePolicy::Json { max_bytes: 64 },
             192,
             &budget,
@@ -344,7 +447,7 @@ mod tests {
         first.filter(&mut body, true).unwrap();
         assert_eq!(
             BufferedResponse::begin(
-                &response("application/json", None),
+                &mut response("application/json", None),
                 BufferedResponsePolicy::Json { max_bytes: 1 },
                 2,
                 &budget,
@@ -354,7 +457,7 @@ mod tests {
         );
         drop(first);
         BufferedResponse::begin(
-            &response("application/json", None),
+            &mut response("application/json", None),
             BufferedResponsePolicy::Json { max_bytes: 64 },
             192,
             &budget,
@@ -363,7 +466,7 @@ mod tests {
         let undersized_budget = Arc::new(Semaphore::new(127));
         assert_eq!(
             BufferedResponse::begin(
-                &response("application/json", None),
+                &mut response("application/json", None),
                 BufferedResponsePolicy::Json { max_bytes: 64 },
                 64,
                 &undersized_budget,
@@ -389,7 +492,8 @@ mod tests {
         .unwrap();
         let policy = config.buffered_response_policy("GET", "/").unwrap();
         let mut html_response = response("text/html; charset=utf-8", Some(HTML.len()));
-        let mut buffer = BufferedResponse::begin(&html_response, policy, 512, &budget()).unwrap();
+        let mut buffer =
+            BufferedResponse::begin(&mut html_response, policy, 512, &budget()).unwrap();
         let mut body = Some(Bytes::from_static(HTML));
         let complete = buffer.filter(&mut body, true).unwrap().unwrap();
         assert!(complete.sensor_html.is_some());
@@ -399,11 +503,49 @@ mod tests {
                 .contains(SENSOR_LOADER_PATH)
         );
 
+        let mut csp_response = response("text/html; charset=utf-8", Some(HTML.len()));
+        csp_response
+            .insert_header(
+                "Content-Security-Policy",
+                "default-src 'none'; script-src 'self'; object-src 'none'",
+            )
+            .unwrap();
+        csp_response
+            .append_header("Content-Security-Policy", "script-src-elem 'none'")
+            .unwrap();
+        let mut buffer =
+            BufferedResponse::begin(&mut csp_response, policy, 512, &budget()).unwrap();
+        let policies = csp_response
+            .headers
+            .get_all("content-security-policy")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(policies.len(), 2);
+        let nonce = policies[0]
+            .split_ascii_whitespace()
+            .find_map(|value| {
+                value
+                    .trim_end_matches(';')
+                    .strip_prefix("'nonce-")?
+                    .strip_suffix('\'')
+            })
+            .unwrap();
+        assert!(policies.iter().all(|policy| policy.contains(nonce)));
+        let mut body = Some(Bytes::from_static(HTML));
+        let complete = buffer.filter(&mut body, true).unwrap().unwrap();
+        assert!(complete.sensor_html.unwrap().csp_nonce_applied);
+        assert!(
+            std::str::from_utf8(&complete.body)
+                .unwrap()
+                .contains(&format!("nonce=\"{nonce}\""))
+        );
+
         html_response
             .insert_header("Content-Security-Policy", "default-src 'self'")
             .unwrap();
         assert!(matches!(
-            BufferedResponse::begin(&html_response, policy, 512, &budget()),
+            BufferedResponse::begin(&mut html_response, policy, 512, &budget()),
             Err(ReasonCode::SensorHtmlValidationFailed)
         ));
     }
