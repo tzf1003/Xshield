@@ -56,7 +56,16 @@
       "resource_query_parameter": "order_id",
       "response": {
         "mode": "BUFFERED_JSON",
-        "max_bytes": 1048576
+        "max_bytes": 1048576,
+        "crypto": {
+          "mode": "DIRECT_ENCRYPT",
+          "adapter_revision": "orders-response-json-r1",
+          "key_id": "response-key-r1",
+          "key_not_before": 1,
+          "key_expires_at": 4102444800,
+          "message_ttl_seconds": 60,
+          "max_envelope_bytes": 2098176
+        }
       }
     },
     {

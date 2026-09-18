@@ -6,7 +6,9 @@
 
 每个 operation 必须由服务端配置 `DIRECT_DECRYPT`、adapter revision、key-id、密钥生效/失效时间、消息最大寿命、未来时钟偏差、活跃消息容量、封包上限和明文上限；当前 Pingora 重放边界将封包上限硬限制为 64 KiB，同一进程只允许一个 request key-id，且加密 operation 拒绝未纳入 AAD 的查询串。请求侧加密 operation 必须配置 PostgreSQL 存储；所有实例共享双唯一防重放账本，过期记录在容量检查前清理。密钥从独立环境秘密注入后仍须通过 tenant/site/purpose/time 精确匹配的 `KeyAccessPort` 才能使用。无效封包、认证失败、过期、超前、重放、账本不可用或容量耗尽均以稳定原因终止，不转发原封包。审计 `crypto_decode` 阶段记录确定性终态、适配版本、算法、非秘密 key-id、message-id、nonce 摘要、消息时间窗及输入/重建 SHA-256，不记录密钥或明文。
 
-该增量尚未声明解密字段到 UI 动作字段映射、响应侧接管、observe/compatibility、KEY_REWRAP、ENVELOPE_HOOK、构建版本共存和证据库原文保留完成；因此配置会拒绝在 `UI_ACTION_REQUIRED` operation 启用当前适配器，这些能力继续按本章后续约束迭代。
+响应侧 enforce `DIRECT_ENCRYPT` 接在完整 `BUFFERED_JSON` 链末端：源站 JSON 先完成校验、身份或资格事务及动作引用重建，随后才以独立 response key 生成随机 12 字节 nonce、规范 message-id 和短时有效封包。响应 AAD 绑定 tenant、site、operation、request-id、method、path、源站 status、adapter revision、key-id、消息时间窗和两端 Content-Type；客户端只收到同一冻结密文。配置按 operation 固定 key lease、消息 TTL、明文与封包上限，启动时拒绝请求/响应 key-id 或实际密钥复用。共享内存配额按接收分块、明文缓冲、密文及预分配封包的峰值计费，十六进制密文直接写入封包，容量不足时在分配前关闭响应。随机源、密钥、时钟、JSON 或容量失败均中止响应；`crypto_encode` 在源站终态之后、请求终态之前记录输入/输出摘要和非秘密协议元数据。
+
+该增量尚未声明解密字段到 UI 动作字段映射、observe/compatibility、KEY_REWRAP、ENVELOPE_HOOK、构建版本共存和证据库原文保留完成；因此配置会拒绝在 `UI_ACTION_REQUIRED` operation 启用当前请求适配器，这些能力继续按本章后续约束迭代。
 
 ## 8.1 三条路径
 

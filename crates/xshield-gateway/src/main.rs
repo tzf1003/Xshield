@@ -23,7 +23,13 @@ use uuid::Uuid;
 use xshield_audit::JournalKey;
 use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
 use xshield_gateway::request_crypto::{FrozenRequest, KeyAccessPort, KeyAccessQuery};
-use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome, MAX_CONFIG_BYTES};
+use xshield_gateway::response_crypto::{
+    ENCRYPTED_RESPONSE_CONTENT_TYPE, ResponseKeyAccessPort, ResponseKeyAccessQuery,
+};
+use xshield_gateway::{
+    GatewayConfig, GatewayDecision, GatewayOutcome, MAX_BUFFERED_BODY_IN_FLIGHT_BYTES,
+    MAX_CONFIG_BYTES,
+};
 use xshield_postgres::{
     PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, StoreError,
 };
@@ -31,14 +37,14 @@ use zeroize::Zeroizing;
 
 use crate::buffered_json::BufferedJsonResponse;
 use crate::durable_audit::{
-    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RequestCryptoAudit, new_trace_id,
+    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RequestCryptoAudit,
+    ResponseCryptoAudit, new_trace_id,
 };
 use crate::protected_identity::{
     PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE, store_failure_reason,
     strip_edge_proofs,
 };
 
-const BUFFERED_JSON_IN_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
 
 struct Gateway {
@@ -46,6 +52,7 @@ struct Gateway {
     audit: DurableAudit,
     identity: Option<ProtectedIdentity>,
     request_key: Option<EnvRequestKey>,
+    response_key: Option<EnvResponseKey>,
     postgres: Option<Arc<PostgresRuntime>>,
     buffered_body_budget: Arc<Semaphore>,
 }
@@ -90,6 +97,7 @@ struct RequestContext {
     rebuilt_request_body: Option<Bytes>,
     rebuilt_request_len: Option<usize>,
     request_crypto_audit: Option<RequestCryptoAudit>,
+    response_crypto_audit: Option<ResponseCryptoAudit>,
     buffered_response: Option<BufferedJsonResponse>,
     response_identity: Option<ResponseIdentity>,
     anonymous_session_cookie: Option<String>,
@@ -112,6 +120,7 @@ impl ProxyHttp for Gateway {
             rebuilt_request_body: None,
             rebuilt_request_len: None,
             request_crypto_audit: None,
+            response_crypto_audit: None,
             buffered_response: None,
             response_identity: None,
             anonymous_session_cookie: None,
@@ -303,9 +312,19 @@ impl ProxyHttp for Gateway {
         let buffered_json_limit = self
             .config
             .buffered_json_max_bytes(request.method.as_str(), request.uri.path());
+        let response_crypto_rule = self
+            .config
+            .response_crypto_rule(request.method.as_str(), request.uri.path());
         if upstream_response.status.as_u16() == 101 && buffered_json_limit.is_some() {
             context.origin_status = Some(101);
             context.response_failure = Some(ReasonCode::ResponseValidationFailed);
+            if let Some(rule) = response_crypto_rule {
+                context.response_crypto_audit = Some(ResponseCryptoAudit::failed(
+                    rule,
+                    ReasonCode::ResponseValidationFailed,
+                    0,
+                ));
+            }
             return response_error(ReasonCode::ResponseValidationFailed);
         }
         if !upstream_response.status.is_informational() {
@@ -314,6 +333,10 @@ impl ProxyHttp for Gateway {
                 match BufferedJsonResponse::begin(
                     upstream_response,
                     limit,
+                    response_crypto_rule.map_or(
+                        limit,
+                        xshield_gateway::response_crypto::ResponseCryptoRule::max_in_flight_bytes,
+                    ),
                     &self.buffered_body_budget,
                 ) {
                     Ok(buffer) => {
@@ -360,10 +383,17 @@ impl ProxyHttp for Gateway {
                         {
                             prepare_grant_response_headers(upstream_response)?;
                         }
+                        if response_crypto_rule.is_some() {
+                            prepare_encrypted_response_headers(upstream_response)?;
+                        }
                         context.buffered_response = Some(buffer);
                     }
                     Err(reason) => {
                         context.response_failure = Some(reason);
+                        if let Some(rule) = response_crypto_rule {
+                            context.response_crypto_audit =
+                                Some(ResponseCryptoAudit::failed(rule, reason, 0));
+                        }
                         return response_error(reason);
                     }
                 }
@@ -388,7 +418,8 @@ impl ProxyHttp for Gateway {
                 let released = self
                     .commit_auth_binding(session, context, complete)
                     .and_then(|body| self.commit_auth_transition(session, context, body))
-                    .and_then(|body| self.commit_response_grants(session, context, body));
+                    .and_then(|body| self.commit_response_grants(session, context, body))
+                    .and_then(|body| self.encrypt_response(session, context, body));
                 match released {
                     Ok(released) => *body = Some(released),
                     Err(reason) => {
@@ -400,6 +431,14 @@ impl ProxyHttp for Gateway {
             Ok(None) => {}
             Err(reason) => {
                 context.response_failure = Some(reason);
+                let request = session.req_header();
+                if let Some(rule) = self
+                    .config
+                    .response_crypto_rule(request.method.as_str(), request.uri.path())
+                {
+                    context.response_crypto_audit =
+                        Some(ResponseCryptoAudit::failed(rule, reason, 0));
+                }
                 return response_error(reason);
             }
         }
@@ -449,6 +488,7 @@ impl ProxyHttp for Gateway {
                 proxy_error: error.is_some(),
                 response_failure: context.response_failure,
                 origin_status: context.origin_status,
+                response_crypto: context.response_crypto_audit.as_ref(),
             })
             .await;
         if let Err(error) = result {
@@ -575,6 +615,69 @@ impl Gateway {
             RequestCryptoMessageOutcome::Replayed => Err(ReasonCode::RequestCryptoReplayDetected),
             RequestCryptoMessageOutcome::CapacityExceeded => {
                 Err(ReasonCode::RequestCryptoReplayCapacityExceeded)
+            }
+        }
+    }
+
+    fn encrypt_response(
+        &self,
+        session: &Session,
+        context: &mut RequestContext,
+        body: Bytes,
+    ) -> Result<Bytes, ReasonCode> {
+        let request = session.req_header();
+        let Some(rule) = self
+            .config
+            .response_crypto_rule(request.method.as_str(), request.uri.path())
+        else {
+            return Ok(body);
+        };
+        let started_at = Instant::now();
+        let result = (|| {
+            let operation_id = context
+                .decision
+                .as_ref()
+                .and_then(|decision| decision.operation_id.as_ref())
+                .ok_or(ReasonCode::ResponseCryptoEncodingFailed)?;
+            let status = context
+                .origin_status
+                .ok_or(ReasonCode::ResponseCryptoEncodingFailed)?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| UnixSeconds::new(duration.as_secs()))
+                .map_err(|_| ReasonCode::ClockUnavailable)?;
+            let keys = self
+                .response_key
+                .as_ref()
+                .ok_or(ReasonCode::ResponseCryptoKeyUnavailable)?;
+            rule.encode(
+                self.config.tenant_id().as_str(),
+                self.config.site_id().as_str(),
+                operation_id.as_str(),
+                &context.request_id,
+                request.method.as_str(),
+                request.uri.path(),
+                status,
+                now,
+                &body,
+                keys,
+            )
+        })();
+        match result {
+            Ok(encrypted) => {
+                context.response_crypto_audit = Some(ResponseCryptoAudit::passed(
+                    encrypted.evidence(),
+                    elapsed_us(started_at),
+                ));
+                Ok(encrypted.into_body())
+            }
+            Err(reason) => {
+                context.response_crypto_audit = Some(ResponseCryptoAudit::failed(
+                    rule,
+                    reason,
+                    elapsed_us(started_at),
+                ));
+                Err(reason)
             }
         }
     }
@@ -752,6 +855,27 @@ fn prepare_grant_response_headers(response: &mut ResponseHeader) -> PingoraResul
     response.insert_header("Cache-Control", "private, no-store")
 }
 
+fn prepare_encrypted_response_headers(response: &mut ResponseHeader) -> PingoraResult<()> {
+    for name in [
+        "Content-Length",
+        "Content-Encoding",
+        "ETag",
+        "Last-Modified",
+        "Content-MD5",
+        "Digest",
+        "Content-Digest",
+        "Repr-Digest",
+        "Accept-Ranges",
+        "Content-Range",
+        "Trailer",
+    ] {
+        response.remove_header(name);
+    }
+    response.insert_header("Content-Type", ENCRYPTED_RESPONSE_CONTENT_TYPE)?;
+    response.insert_header("Transfer-Encoding", "chunked")?;
+    response.insert_header("Cache-Control", "private, no-store")
+}
+
 fn prepare_auth_response_headers(response: &mut ResponseHeader) -> PingoraResult<()> {
     for name in ["ETag", "Last-Modified", "Accept-Ranges", "Content-Range"] {
         response.remove_header(name);
@@ -891,7 +1015,7 @@ impl EnvRequestKey {
             return Ok(None);
         };
         let value = Zeroizing::new(env::var("XSHIELD_REQUEST_DECRYPTION_KEY_HEX")?);
-        let key = parse_request_key(&value).ok_or("invalid request decryption key")?;
+        let key = parse_crypto_key(&value).ok_or("invalid request decryption key")?;
         Ok(Some(Self {
             tenant_id: config.tenant_id().as_str().to_owned(),
             site_id: config.site_id().as_str().to_owned(),
@@ -918,7 +1042,47 @@ impl KeyAccessPort for EnvRequestKey {
     }
 }
 
-fn parse_request_key(value: &str) -> Option<[u8; 32]> {
+struct EnvResponseKey {
+    tenant_id: String,
+    site_id: String,
+    key_id: String,
+    key: Zeroizing<[u8; 32]>,
+}
+
+impl EnvResponseKey {
+    fn from_env(config: &GatewayConfig) -> Result<Option<Self>, Box<dyn Error>> {
+        let Some(key_id) = config.response_crypto_key_id() else {
+            return Ok(None);
+        };
+        let value = Zeroizing::new(env::var("XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX")?);
+        let key = parse_crypto_key(&value).ok_or("invalid response encryption key")?;
+        Ok(Some(Self {
+            tenant_id: config.tenant_id().as_str().to_owned(),
+            site_id: config.site_id().as_str().to_owned(),
+            key_id: key_id.to_owned(),
+            key: Zeroizing::new(key),
+        }))
+    }
+}
+
+impl ResponseKeyAccessPort for EnvResponseKey {
+    fn response_encryption_key(
+        &self,
+        query: ResponseKeyAccessQuery<'_>,
+    ) -> Result<Zeroizing<[u8; 32]>, ReasonCode> {
+        if query.tenant_id != self.tenant_id
+            || query.site_id != self.site_id
+            || query.key_id != self.key_id
+            || query.purpose != "response_direct_encrypt"
+            || query.at == UnixSeconds::new(0)
+        {
+            return Err(ReasonCode::ResponseCryptoKeyUnavailable);
+        }
+        Ok(Zeroizing::new(*self.key))
+    }
+}
+
+fn parse_crypto_key(value: &str) -> Option<[u8; 32]> {
     if value.len() != 64
         || !value
             .bytes()
@@ -987,6 +1151,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         })
         .transpose()?;
     let request_key = EnvRequestKey::from_env(&config)?;
+    let response_key = EnvResponseKey::from_env(&config)?;
+    if request_key
+        .as_ref()
+        .zip(response_key.as_ref())
+        .is_some_and(|(request, response)| request.key.as_ref() == response.key.as_ref())
+    {
+        return Err("request and response encryption keys must differ".into());
+    }
     let mut server = Server::new(None)?;
     server.bootstrap();
     let mut proxy = http_proxy_service(
@@ -996,8 +1168,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             audit,
             identity,
             request_key,
+            response_key,
             postgres,
-            buffered_body_budget: Arc::new(Semaphore::new(BUFFERED_JSON_IN_FLIGHT_BYTES)),
+            buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
         },
     );
     proxy.add_tcp(&config.listen().to_string());

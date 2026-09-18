@@ -35,6 +35,7 @@ origin_port=$(free_port)
 gateway_port=$(free_port)
 capture="$test_dir/origin-bodies"
 request_key="7777777777777777777777777777777777777777777777777777777777777777"
+response_key="9999999999999999999999999999999999999999999999999999999999999999"
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
 database_url="$database_base_url/$test_database"
 
@@ -86,7 +87,8 @@ cat >"$test_dir/config.json" <<JSON
     "source_action":null,
     "resource_type":null,
     "view_profile":null,
-    "request_crypto":{"mode":"DIRECT_DECRYPT","adapter_revision":"orders-json-r1","key_id":"request-key-r1","key_not_before":1,"key_expires_at":4102444800,"max_envelope_bytes":4096,"max_plaintext_bytes":1024,"max_message_age_seconds":60,"max_future_skew_seconds":5,"max_active_messages":1000}
+    "request_crypto":{"mode":"DIRECT_DECRYPT","adapter_revision":"orders-json-r1","key_id":"request-key-r1","key_not_before":1,"key_expires_at":4102444800,"max_envelope_bytes":4096,"max_plaintext_bytes":1024,"max_message_age_seconds":60,"max_future_skew_seconds":5,"max_active_messages":1000},
+    "response":{"mode":"BUFFERED_JSON","max_bytes":1024,"crypto":{"mode":"DIRECT_ENCRYPT","adapter_revision":"orders-response-r1","key_id":"response-key-r1","key_not_before":1,"key_expires_at":4102444800,"message_ttl_seconds":60,"max_envelope_bytes":3072}}
   }]
 }
 JSON
@@ -95,6 +97,7 @@ cargo build --quiet --manifest-path "$repo_root/Cargo.toml" -p xshield-gateway -
 XSHIELD_CONFIG="$test_dir/config.json" \
 XSHIELD_JOURNAL_KEY_HEX="8888888888888888888888888888888888888888888888888888888888888888" \
 XSHIELD_REQUEST_DECRYPTION_KEY_HEX="$request_key" \
+XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX="$response_key" \
 XSHIELD_DATABASE_URL="$database_url" \
     "$repo_root/target/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!
@@ -157,10 +160,46 @@ message_id="msg_018f2a3b-4c5d-7000-8000-000000000901"
 nonce="030303030303030303030303"
 envelope=$(make_envelope "$nonce" "$message_id" "$((now - 1))" "$((now + 30))")
 
-valid_response=$(curl --fail --silent --show-error \
+curl --fail --silent --show-error -D "$test_dir/valid-headers" -o "$test_dir/valid-response" \
     -H 'Content-Type: application/vnd.xshield.encrypted+json' \
-    --data-binary "$envelope" "http://127.0.0.1:$gateway_port/orders")
-[[ "$valid_response" == "$plaintext" ]]
+    --data-binary "$envelope" "http://127.0.0.1:$gateway_port/orders"
+grep -qi '^content-type: application/vnd.xshield.encrypted+json' "$test_dir/valid-headers"
+response_request_id=$(awk 'tolower($1) == "x-xshield-request-id:" {gsub("\r", ""); print $2}' \
+    "$test_dir/valid-headers")
+python3 - "$response_key" "$response_request_id" "$plaintext" "$test_dir/valid-response" <<'PY'
+import json
+import pathlib
+import struct
+import sys
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+key = bytes.fromhex(sys.argv[1])
+request_id = sys.argv[2]
+expected = sys.argv[3].encode()
+envelope = json.loads(pathlib.Path(sys.argv[4]).read_text())
+values = [
+    "xshield.response.direct-encrypt.v1",
+    "tenant_crypto",
+    "site_crypto",
+    "orders.create",
+    request_id,
+    "POST",
+    "/orders",
+    "200",
+    "orders-response-r1",
+    "response-key-r1",
+    envelope["message_id"],
+    str(envelope["issued_at"]),
+    str(envelope["expires_at"]),
+    "application/json",
+    "application/vnd.xshield.encrypted+json",
+]
+aad = b"".join(struct.pack(">I", len(value.encode())) + value.encode() for value in values)
+sealed = bytes.fromhex(envelope["ciphertext"] + envelope["tag"])
+assert AESGCM(key).decrypt(bytes.fromhex(envelope["nonce"]), sealed, aad) == expected
+assert envelope["message_id"].startswith("msg_")
+assert envelope["expires_at"] > envelope["issued_at"]
+PY
 [[ "$(cat "$capture")" == "$plaintext" ]]
 
 status=$(curl --silent --output "$test_dir/replay-response" --write-out '%{http_code}' \

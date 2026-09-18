@@ -27,18 +27,28 @@ use xshield_core::{
 
 pub mod auth_binding;
 pub mod request_crypto;
+pub mod response_crypto;
 pub mod response_grant;
 pub mod share_issue;
 pub mod share_token;
 
 use auth_binding::{AuthBindingRule, AuthTransitionRule};
 use request_crypto::RequestCryptoRule;
+use response_crypto::ResponseCryptoRule;
 use response_grant::ResponseGrantRule;
 
 /// Maximum accepted gateway configuration size.
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 /// Maximum complete private JSON response accepted by the MVP adapter.
 pub const MAX_BUFFERED_JSON_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum serialized direct-encryption response envelope.
+pub const MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES: usize = MAX_BUFFERED_JSON_BYTES * 2 + 4096;
+// Size-independent adapter metadata, digests, and the AES output block.
+const RESPONSE_CRYPTO_FIXED_IN_FLIGHT_BYTES: usize = 4096 + 16;
+/// Aggregate budget covering one maximum encrypted response transformation.
+pub const MAX_BUFFERED_BODY_IN_FLIGHT_BYTES: usize = MAX_BUFFERED_JSON_BYTES * 2
+    + MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES
+    + RESPONSE_CRYPTO_FIXED_IN_FLIGHT_BYTES;
 /// Pingora retry-buffer ceiling used to replace a pre-read encrypted entity.
 pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
@@ -100,6 +110,7 @@ struct CompiledOperation {
 #[derive(Debug)]
 struct CompiledResponse {
     max_bytes: usize,
+    crypto: Option<ResponseCryptoRule>,
     grant: Option<ResponseGrantRule>,
     auth_binding: Option<AuthBindingRule>,
     auth_refresh: Option<AuthTransitionRule>,
@@ -293,6 +304,8 @@ struct ResponseDto {
     mode: ResponseModeDto,
     max_bytes: usize,
     #[serde(default)]
+    crypto: Option<ResponseCryptoDto>,
+    #[serde(default)]
     resource_grant: Option<ResponseGrantDto>,
     #[serde(default)]
     auth_binding: Option<AuthBindingDto>,
@@ -300,6 +313,24 @@ struct ResponseDto {
     auth_refresh: Option<AuthRefreshDto>,
     #[serde(default)]
     auth_context_switch: Option<AuthRefreshDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseCryptoDto {
+    mode: ResponseCryptoModeDto,
+    adapter_revision: String,
+    key_id: String,
+    key_not_before: u64,
+    key_expires_at: u64,
+    message_ttl_seconds: u64,
+    max_envelope_bytes: usize,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum ResponseCryptoModeDto {
+    DirectEncrypt,
 }
 
 #[derive(Deserialize)]
@@ -606,6 +637,32 @@ impl GatewayConfig {
             })
     }
 
+    /// Returns the response encryption rule for one exact operation.
+    #[must_use]
+    pub fn response_crypto_rule(&self, method: &str, path: &str) -> Option<&ResponseCryptoRule> {
+        self.operation(method, path)?
+            .response
+            .as_ref()?
+            .crypto
+            .as_ref()
+    }
+
+    /// Returns the sole response-encryption key identifier required at startup.
+    #[must_use]
+    pub fn response_crypto_key_id(&self) -> Option<&str> {
+        self.operations
+            .values()
+            .chain(self.path_resource_operations.iter())
+            .find_map(|operation| {
+                operation
+                    .response
+                    .as_ref()?
+                    .crypto
+                    .as_ref()
+                    .map(ResponseCryptoRule::key_id)
+            })
+    }
+
     /// Returns one validated response extraction rule and its exact target operation.
     #[must_use]
     pub fn response_grant_operation(
@@ -809,6 +866,21 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
         .collect::<BTreeSet<_>>();
     if request_key_ids.len() > 1 {
         return Err(ConfigError::Invalid("operations.request_crypto.key_id"));
+    }
+    let response_key_ids = exact
+        .values()
+        .chain(path_resources.iter())
+        .filter_map(|operation| operation.response.as_ref()?.crypto.as_ref())
+        .map(ResponseCryptoRule::key_id)
+        .collect::<BTreeSet<_>>();
+    if response_key_ids.len() > 1 {
+        return Err(ConfigError::Invalid("operations.response.crypto.key_id"));
+    }
+    if request_key_ids
+        .iter()
+        .any(|key_id| response_key_ids.contains(key_id))
+    {
+        return Err(ConfigError::Invalid("operations.response.crypto.key_id"));
     }
     validate_response_contracts(&exact, &path_resources)?;
     Ok(CompiledOperations {
@@ -1102,6 +1174,10 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
     {
         return Err(ConfigError::Invalid("operations.response.max_bytes"));
     }
+    let crypto = dto
+        .crypto
+        .map(|crypto| compile_response_crypto(crypto, dto.max_bytes))
+        .transpose()?;
     let grant = dto
         .resource_grant
         .map(|grant| {
@@ -1173,10 +1249,45 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
     }
     Ok(CompiledResponse {
         max_bytes: dto.max_bytes,
+        crypto,
         grant,
         auth_binding,
         auth_refresh,
         auth_context_switch,
+    })
+}
+
+fn compile_response_crypto(
+    crypto: ResponseCryptoDto,
+    max_plaintext_bytes: usize,
+) -> Result<ResponseCryptoRule, ConfigError> {
+    let minimum_envelope_bytes = max_plaintext_bytes
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(1024))
+        .ok_or(ConfigError::Invalid("operations.response.crypto"))?;
+    if !matches!(crypto.mode, ResponseCryptoModeDto::DirectEncrypt)
+        || !valid_scoped_value(&crypto.adapter_revision)
+        || !valid_scoped_value(&crypto.key_id)
+        || crypto.key_not_before >= crypto.key_expires_at
+        || !(1..=3_600).contains(&crypto.message_ttl_seconds)
+        || crypto.max_envelope_bytes < minimum_envelope_bytes
+        || crypto.max_envelope_bytes > MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES
+    {
+        return Err(ConfigError::Invalid("operations.response.crypto"));
+    }
+    Ok(ResponseCryptoRule {
+        adapter_revision: crypto.adapter_revision,
+        key_id: crypto.key_id,
+        key_not_before: UnixSeconds::new(crypto.key_not_before),
+        key_expires_at: UnixSeconds::new(crypto.key_expires_at),
+        message_ttl_seconds: crypto.message_ttl_seconds,
+        max_envelope_bytes: crypto.max_envelope_bytes,
+        max_in_flight_bytes: max_plaintext_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(crypto.max_envelope_bytes))
+            .and_then(|bytes| bytes.checked_add(RESPONSE_CRYPTO_FIXED_IN_FLIGHT_BYTES))
+            .filter(|bytes| *bytes <= MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)
+            .ok_or(ConfigError::Invalid("operations.response.crypto"))?,
     })
 }
 
@@ -1612,6 +1723,16 @@ mod tests {
             Some(4096)
         );
         assert_eq!(config.buffered_json_max_bytes("POST", "/account"), None);
+
+        let encrypted = buffered.replace(
+            "\"max_bytes\":4096",
+            "\"max_bytes\":4096,\"crypto\":{\"mode\":\"DIRECT_ENCRYPT\",\"adapter_revision\":\"catalog-response-r1\",\"key_id\":\"response-key-r1\",\"key_not_before\":1,\"key_expires_at\":4102444800,\"message_ttl_seconds\":60,\"max_envelope_bytes\":9216}",
+        );
+        let encrypted = GatewayConfig::from_json(encrypted.as_bytes()).unwrap();
+        let crypto = encrypted.response_crypto_rule("GET", "/catalog").unwrap();
+        assert_eq!(crypto.key_id(), "response-key-r1");
+        assert_eq!(crypto.max_in_flight_bytes(), 21_520);
+        assert_eq!(encrypted.response_crypto_key_id(), Some("response-key-r1"));
 
         let oversized = buffered.replace("\"max_bytes\":4096", "\"max_bytes\":16777217");
         assert!(matches!(

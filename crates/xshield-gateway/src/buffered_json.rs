@@ -15,6 +15,7 @@ impl BufferedJsonResponse {
     pub(crate) fn begin(
         response: &ResponseHeader,
         limit: usize,
+        reservation_bytes: usize,
         budget: &Arc<Semaphore>,
     ) -> Result<Self, ReasonCode> {
         if matches!(response.status.as_u16(), 101 | 204 | 304)
@@ -29,12 +30,21 @@ impl BufferedJsonResponse {
         {
             return Err(ReasonCode::ResponseBodyTooLarge);
         }
-        let permits = u32::try_from(limit).map_err(|_| ReasonCode::ResponseBodyTooLarge)?;
+        let minimum_reservation = limit
+            .checked_mul(2)
+            .ok_or(ReasonCode::ResponseBufferCapacityExhausted)?;
+        let reservation_bytes = reservation_bytes.max(minimum_reservation);
+        let permits = u32::try_from(reservation_bytes)
+            .map_err(|_| ReasonCode::ResponseBufferCapacityExhausted)?;
         let permit = Arc::clone(budget)
             .try_acquire_many_owned(permits)
             .map_err(|_| ReasonCode::ResponseBufferCapacityExhausted)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(limit)
+            .map_err(|_| ReasonCode::ResponseBufferCapacityExhausted)?;
         Ok(Self {
-            bytes: Vec::new(),
+            bytes,
             limit,
             _permit: permit,
         })
@@ -146,6 +156,7 @@ mod tests {
         let mut buffer = BufferedJsonResponse::begin(
             &response("application/json; charset=utf-8", Some(11)),
             64,
+            128,
             &budget(),
         )
         .unwrap();
@@ -164,25 +175,30 @@ mod tests {
     #[test]
     fn rejects_oversize_encoded_or_invalid_json_without_releasing_a_chunk() {
         assert_eq!(
-            BufferedJsonResponse::begin(&response("application/json", Some(65)), 64, &budget())
-                .err(),
+            BufferedJsonResponse::begin(
+                &response("application/json", Some(65)),
+                64,
+                128,
+                &budget(),
+            )
+            .err(),
             Some(ReasonCode::ResponseBodyTooLarge)
         );
         let mut encoded = response("application/json", None);
         encoded.insert_header("Content-Encoding", "gzip").unwrap();
         assert_eq!(
-            BufferedJsonResponse::begin(&encoded, 64, &budget()).err(),
+            BufferedJsonResponse::begin(&encoded, 64, 128, &budget()).err(),
             Some(ReasonCode::ResponseValidationFailed)
         );
         let mut trailer = response("application/json", None);
         trailer.insert_header("Trailer", "Digest").unwrap();
         assert_eq!(
-            BufferedJsonResponse::begin(&trailer, 64, &budget()).err(),
+            BufferedJsonResponse::begin(&trailer, 64, 128, &budget()).err(),
             Some(ReasonCode::ResponseValidationFailed)
         );
 
         let mut buffer =
-            BufferedJsonResponse::begin(&response("application/json", None), 64, &budget())
+            BufferedJsonResponse::begin(&response("application/json", None), 64, 128, &budget())
                 .unwrap();
         let mut body = Some(Bytes::from_static(b"not-json"));
         assert_eq!(
@@ -192,7 +208,7 @@ mod tests {
         assert!(body.is_none());
 
         let mut ambiguous =
-            BufferedJsonResponse::begin(&response("application/json", None), 64, &budget())
+            BufferedJsonResponse::begin(&response("application/json", None), 64, 128, &budget())
                 .unwrap();
         let mut body = Some(Bytes::from_static(br#"{"id":"a","id":"b"}"#));
         assert_eq!(
@@ -207,6 +223,7 @@ mod tests {
             BufferedJsonResponse::begin(
                 &response("application/json; charset=utf-8; charset=utf-8", None),
                 64,
+                128,
                 &budget()
             )
             .is_err()
@@ -215,16 +232,28 @@ mod tests {
 
     #[test]
     fn holds_and_releases_aggregate_buffer_capacity() {
-        let budget = Arc::new(Semaphore::new(64));
+        let budget = Arc::new(Semaphore::new(192));
         let mut first =
-            BufferedJsonResponse::begin(&response("application/json", None), 64, &budget).unwrap();
+            BufferedJsonResponse::begin(&response("application/json", None), 64, 192, &budget)
+                .unwrap();
         let mut body = Some(Bytes::from_static(br#"{"ok":true}"#));
         first.filter(&mut body, true).unwrap();
         assert_eq!(
-            BufferedJsonResponse::begin(&response("application/json", None), 1, &budget).err(),
+            BufferedJsonResponse::begin(&response("application/json", None), 1, 2, &budget).err(),
             Some(ReasonCode::ResponseBufferCapacityExhausted)
         );
         drop(first);
-        BufferedJsonResponse::begin(&response("application/json", None), 64, &budget).unwrap();
+        BufferedJsonResponse::begin(&response("application/json", None), 64, 192, &budget).unwrap();
+        let undersized_budget = Arc::new(Semaphore::new(127));
+        assert_eq!(
+            BufferedJsonResponse::begin(
+                &response("application/json", None),
+                64,
+                64,
+                &undersized_budget,
+            )
+            .err(),
+            Some(ReasonCode::ResponseBufferCapacityExhausted)
+        );
     }
 }

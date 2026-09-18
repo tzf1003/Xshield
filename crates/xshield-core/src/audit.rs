@@ -186,6 +186,14 @@ pub enum ReasonCode {
     RequestCryptoReplayStoreUnavailable,
     /// The authoritative replay ledger reached its configured active bound.
     RequestCryptoReplayCapacityExceeded,
+    /// The transformed origin response was encrypted for the client.
+    ResponseCryptoEncoded,
+    /// The scoped response-encryption key could not be obtained.
+    ResponseCryptoKeyUnavailable,
+    /// Response encryption or required randomness failed.
+    ResponseCryptoEncodingFailed,
+    /// The encrypted response exceeded its configured serialized bound.
+    ResponseCryptoEnvelopeTooLarge,
     /// Origin side effects cannot be determined after a proxy failure.
     OriginOutcomeUnknown,
     /// A durable request prefix ended before a release decision or forward intent committed.
@@ -264,6 +272,10 @@ impl ReasonCode {
             Self::RequestCryptoReplayDetected => "REQUEST_CRYPTO_REPLAY_DETECTED",
             Self::RequestCryptoReplayStoreUnavailable => "REQUEST_CRYPTO_REPLAY_STORE_UNAVAILABLE",
             Self::RequestCryptoReplayCapacityExceeded => "REQUEST_CRYPTO_REPLAY_CAPACITY_EXCEEDED",
+            Self::ResponseCryptoEncoded => "RESPONSE_CRYPTO_ENCODED",
+            Self::ResponseCryptoKeyUnavailable => "RESPONSE_CRYPTO_KEY_UNAVAILABLE",
+            Self::ResponseCryptoEncodingFailed => "RESPONSE_CRYPTO_ENCODING_FAILED",
+            Self::ResponseCryptoEnvelopeTooLarge => "RESPONSE_CRYPTO_ENVELOPE_TOO_LARGE",
             Self::OriginOutcomeUnknown => "ORIGIN_OUTCOME_UNKNOWN",
             Self::RequestIncomplete => "REQUEST_INCOMPLETE",
             Self::ClockUnavailable => "CLOCK_UNAVAILABLE",

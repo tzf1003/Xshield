@@ -19,6 +19,7 @@ use xshield_core::audit::ReasonCode;
 use xshield_core::domain::{EventId, InvalidValue};
 
 use xshield_gateway::request_crypto::{RequestCryptoEvidence, RequestCryptoRule};
+use xshield_gateway::response_crypto::{ResponseCryptoEvidence, ResponseCryptoRule};
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome};
 
 #[derive(Clone)]
@@ -121,6 +122,63 @@ pub(crate) struct FinalFacts<'a> {
     pub(crate) proxy_error: bool,
     pub(crate) response_failure: Option<ReasonCode>,
     pub(crate) origin_status: Option<u16>,
+    pub(crate) response_crypto: Option<&'a ResponseCryptoAudit>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResponseCryptoAudit {
+    algorithm: &'static str,
+    adapter_revision: String,
+    key_id: String,
+    message_id: Option<String>,
+    nonce_sha256: Option<String>,
+    issued_at: Option<u64>,
+    expires_at: Option<u64>,
+    origin_sha256: Option<String>,
+    envelope_sha256: Option<String>,
+    outcome: &'static str,
+    reason_code: ReasonCode,
+    duration_us: u64,
+}
+
+impl ResponseCryptoAudit {
+    pub(crate) fn passed(evidence: &ResponseCryptoEvidence, duration_us: u64) -> Self {
+        Self {
+            algorithm: evidence.algorithm(),
+            adapter_revision: evidence.adapter_revision().to_owned(),
+            key_id: evidence.key_id().to_owned(),
+            message_id: Some(evidence.message_id().to_owned()),
+            nonce_sha256: Some(evidence.nonce_sha256().to_owned()),
+            issued_at: Some(evidence.issued_at().value()),
+            expires_at: Some(evidence.expires_at().value()),
+            origin_sha256: Some(evidence.origin_sha256().to_owned()),
+            envelope_sha256: Some(evidence.envelope_sha256().to_owned()),
+            outcome: "PASS",
+            reason_code: ReasonCode::ResponseCryptoEncoded,
+            duration_us,
+        }
+    }
+
+    pub(crate) fn failed(
+        rule: &ResponseCryptoRule,
+        reason_code: ReasonCode,
+        duration_us: u64,
+    ) -> Self {
+        Self {
+            algorithm: rule.algorithm(),
+            adapter_revision: rule.adapter_revision().to_owned(),
+            key_id: rule.key_id().to_owned(),
+            message_id: None,
+            nonce_sha256: None,
+            issued_at: None,
+            expires_at: None,
+            origin_sha256: None,
+            envelope_sha256: None,
+            outcome: "ERROR",
+            reason_code,
+            duration_us,
+        }
+    }
 }
 
 struct FinalOrigin {
@@ -352,6 +410,23 @@ impl DurableAudit {
                 .checked_add(1)
                 .ok_or(DurableAuditError::SequenceExhausted)?;
         }
+        if let Some(crypto) = facts.response_crypto {
+            let (crypto_id, event) = response_crypto_event(
+                crypto,
+                facts
+                    .decision
+                    .operation_id
+                    .as_ref()
+                    .map(|operation| operation.as_str().to_owned()),
+                request_sequence,
+                completion_causes.clone(),
+            )?;
+            events.push(event);
+            completion_causes.push(crypto_id.as_str().to_owned());
+            request_sequence = request_sequence
+                .checked_add(1)
+                .ok_or(DurableAuditError::SequenceExhausted)?;
+        }
         let completion_id = new_event_id()?;
         events.push(PendingEvent::new(
             completion_id,
@@ -544,6 +619,50 @@ impl DurableAudit {
             }
         }
     }
+}
+
+fn response_crypto_event(
+    crypto: &ResponseCryptoAudit,
+    operation_id: Option<String>,
+    request_sequence: u32,
+    cause_event_ids: Vec<String>,
+) -> Result<(EventId, PendingEvent), DurableAuditError> {
+    let event_id = new_event_id()?;
+    let event = PendingEvent::new(
+        event_id.clone(),
+        "stage.completed",
+        request_sequence,
+        cause_event_ids,
+        Payload::ResponseCryptoStageCompleted {
+            stage: "crypto_encode",
+            stage_execution_id: format!("stg_{}", Uuid::now_v7()),
+            outcome: crypto.outcome,
+            reason_code: crypto.reason_code.as_str(),
+            proof_kind: "deterministic",
+            confidence: None,
+            confidence_status: "not_applicable",
+            duration_us: crypto.duration_us,
+            rule_revision: Some(crypto.adapter_revision.clone()),
+            model_call_id: None,
+            facts: CryptoStageFacts {
+                operation_id,
+                algorithm: crypto.algorithm,
+                adapter_revision: crypto.adapter_revision.clone(),
+                key_id: crypto.key_id.clone(),
+                message_id: crypto.message_id.clone(),
+                nonce_sha256: crypto.nonce_sha256.clone(),
+                issued_at: crypto.issued_at,
+                expires_at: crypto.expires_at,
+                envelope_sha256: crypto.envelope_sha256.clone(),
+                rebuilt_sha256: crypto.origin_sha256.clone(),
+            },
+            coverage: ResponseCryptoStageCoverage {
+                response_crypto_checked: true,
+                client_entity_rebuilt: crypto.envelope_sha256.is_some(),
+            },
+        },
+    );
+    Ok((event_id, event))
 }
 
 fn final_origin(facts: &FinalFacts<'_>) -> FinalOrigin {
@@ -802,6 +921,20 @@ enum Payload {
         facts: CryptoStageFacts,
         coverage: CryptoStageCoverage,
     },
+    ResponseCryptoStageCompleted {
+        stage: &'static str,
+        stage_execution_id: String,
+        outcome: &'static str,
+        reason_code: &'static str,
+        proof_kind: &'static str,
+        confidence: Option<f64>,
+        confidence_status: &'static str,
+        duration_us: u64,
+        rule_revision: Option<String>,
+        model_call_id: Option<String>,
+        facts: CryptoStageFacts,
+        coverage: ResponseCryptoStageCoverage,
+    },
     Decision {
         decision: &'static str,
         reason_code: &'static str,
@@ -856,6 +989,12 @@ struct CryptoStageFacts {
 struct CryptoStageCoverage {
     request_crypto_checked: bool,
     origin_entity_rebuilt: bool,
+}
+
+#[derive(Serialize)]
+struct ResponseCryptoStageCoverage {
+    response_crypto_checked: bool,
+    client_entity_rebuilt: bool,
 }
 
 #[derive(Serialize)]
@@ -992,7 +1131,20 @@ mod tests {
                     "admission": "PUBLIC",
                     "source_action": null,
                     "resource_type": null,
-                    "view_profile": null
+                    "view_profile": null,
+                    "response": {
+                        "mode": "BUFFERED_JSON",
+                        "max_bytes": 1024,
+                        "crypto": {
+                            "mode": "DIRECT_ENCRYPT",
+                            "adapter_revision": "health-response-r1",
+                            "key_id": "response-key-r1",
+                            "key_not_before": 1,
+                            "key_expires_at": 4_102_444_800_u64,
+                            "message_ttl_seconds": 60,
+                            "max_envelope_bytes": 3072
+                        }
+                    }
                 },
                 {
                     "operation_id": "orders.create",
@@ -1097,6 +1249,7 @@ mod tests {
                 proxy_error: false,
                 response_failure: None,
                 origin_status: Some(200),
+                response_crypto: None,
             })
             .await
             .unwrap();
@@ -1125,6 +1278,7 @@ mod tests {
                 proxy_error: false,
                 response_failure: None,
                 origin_status: None,
+                response_crypto: None,
             })
             .await
             .unwrap();
@@ -1221,6 +1375,11 @@ mod tests {
             })
             .await
             .unwrap();
+        let response_crypto = ResponseCryptoAudit::failed(
+            config.response_crypto_rule("GET", "/health").unwrap(),
+            ReasonCode::ResponseValidationFailed,
+            5,
+        );
         audit
             .finalize(FinalFacts {
                 request_id,
@@ -1233,6 +1392,7 @@ mod tests {
                 proxy_error: true,
                 response_failure: Some(ReasonCode::ResponseValidationFailed),
                 origin_status: Some(200),
+                response_crypto: Some(&response_crypto),
             })
             .await
             .unwrap();
@@ -1246,6 +1406,7 @@ mod tests {
         )
         .unwrap();
         let mut terminal = Vec::new();
+        let mut crypto_stage = None;
         journal
             .visit_closed_records(100, |record| {
                 let event: serde_json::Value = serde_json::from_slice(record.plaintext())
@@ -1257,11 +1418,19 @@ mod tests {
                     )
                 {
                     terminal.push(event);
+                } else if event["request_id"] == request_id
+                    && event["payload"]["stage"] == "crypto_encode"
+                {
+                    crypto_stage = Some(event);
                 }
                 Ok(())
             })
             .unwrap();
         assert_eq!(terminal.len(), 2);
+        assert_eq!(
+            crypto_stage.unwrap()["payload"]["reason_code"],
+            ReasonCode::ResponseValidationFailed.as_str()
+        );
         assert_eq!(terminal[0]["payload"]["origin_state"], "response_received");
         assert_eq!(terminal[0]["payload"]["status"], 200);
         assert_eq!(
