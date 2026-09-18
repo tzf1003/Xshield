@@ -13,6 +13,7 @@ use xshield_postgres::{CredentialRefresh, PostgresIdentityStore, RefreshOutcome,
 
 const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const WRONG: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const NOW: u64 = 1_800_000_000;
 const EXPIRES: u64 = 4_102_444_700;
 const SESSION_FINGERPRINT: [u8; 32] = [17; 32];
@@ -23,6 +24,7 @@ struct Fixture {
     binding_id: AuthBindingId,
     session_id: WafSessionId,
     snapshot: AuthSnapshot,
+    old_credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
     new_credentials: BTreeMap<CredentialSlot, CredentialFingerprint>,
 }
 
@@ -59,6 +61,7 @@ fn fixture() -> Fixture {
         binding_id,
         session_id,
         snapshot,
+        old_credentials,
         new_credentials: credentials(NEW),
     }
 }
@@ -135,6 +138,7 @@ async fn refresh(
     store
         .refresh_same_context(CredentialRefresh::new(
             &fixture.snapshot,
+            &fixture.old_credentials,
             &fixture.new_credentials,
             UnixSeconds::new(EXPIRES),
             UnixSeconds::new(NOW),
@@ -211,6 +215,7 @@ fn refresh_requires_a_complete_credential_set() {
     assert!(matches!(
         CredentialRefresh::new(
             &fixture.snapshot,
+            &fixture.old_credentials,
             &BTreeMap::new(),
             UnixSeconds::new(EXPIRES),
             UnixSeconds::new(NOW),
@@ -256,6 +261,28 @@ async fn refresh_is_atomic_and_compare_and_swap() {
         load_identity(&store, &fixture, &fixture.new_credentials).await,
         IdentityProofState::Denied(IdentityDenied::BindingMismatch)
     ));
+
+    let mismatched_event = event_id(102);
+    let mismatched_envelope = json!({"schema_version": 3, "event_type": "identity.refreshed"});
+    assert_eq!(
+        store
+            .refresh_same_context(
+                CredentialRefresh::new(
+                    &fixture.snapshot,
+                    &credentials(WRONG),
+                    &fixture.new_credentials,
+                    UnixSeconds::new(EXPIRES),
+                    UnixSeconds::new(NOW),
+                    &mismatched_event,
+                    &mismatched_envelope,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap(),
+        RefreshOutcome::Conflict
+    );
+    assert_eq!(generation(&pool, &fixture).await, 2);
 
     let duplicate_event = event_id(103);
     seed_duplicate_event(&pool, &fixture, &duplicate_event).await;

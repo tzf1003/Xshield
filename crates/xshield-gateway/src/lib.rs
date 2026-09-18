@@ -30,7 +30,7 @@ pub mod response_grant;
 pub mod share_issue;
 pub mod share_token;
 
-use auth_binding::AuthBindingRule;
+use auth_binding::{AuthBindingRule, AuthRefreshRule};
 use response_grant::ResponseGrantRule;
 
 /// Maximum accepted gateway configuration size.
@@ -92,6 +92,7 @@ struct CompiledResponse {
     max_bytes: usize,
     grant: Option<ResponseGrantRule>,
     auth_binding: Option<AuthBindingRule>,
+    auth_refresh: Option<AuthRefreshRule>,
 }
 
 struct CompiledOperations {
@@ -191,6 +192,8 @@ struct ResponseDto {
     resource_grant: Option<ResponseGrantDto>,
     #[serde(default)]
     auth_binding: Option<AuthBindingDto>,
+    #[serde(default)]
+    auth_refresh: Option<AuthRefreshDto>,
 }
 
 #[derive(Deserialize)]
@@ -201,6 +204,15 @@ struct AuthBindingDto {
     bearer_pointer: String,
     credential_ttl_seconds: u64,
     session_ttl_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthRefreshDto {
+    success_status: u16,
+    principal_pointer: String,
+    bearer_pointer: String,
+    credential_ttl_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -495,6 +507,16 @@ impl GatewayConfig {
             .as_ref()
     }
 
+    /// Returns the same-context authentication refresh rule for one exact operation.
+    #[must_use]
+    pub fn auth_refresh_rule(&self, method: &str, path: &str) -> Option<&AuthRefreshRule> {
+        self.operation(method, path)?
+            .response
+            .as_ref()?
+            .auth_refresh
+            .as_ref()
+    }
+
     /// Applies the compiled exact-operation policy with authoritative loaded proof.
     #[must_use]
     pub fn admit_with_proof(
@@ -643,6 +665,14 @@ fn validate_response_contracts(
             && source.policy.admission_class() != AdmissionClass::AuthenticationEntry
         {
             return Err(ConfigError::Invalid("operations.response.auth_binding"));
+        }
+        if source
+            .response
+            .as_ref()
+            .is_some_and(|response| response.auth_refresh.is_some())
+            && source.policy.admission_class() != AdmissionClass::AuthenticatedRoot
+        {
+            return Err(ConfigError::Invalid("operations.response.auth_refresh"));
         }
         let Some(rule) = source
             .response
@@ -878,13 +908,38 @@ fn compile_response(dto: ResponseDto) -> Result<CompiledResponse, ConfigError> {
             })
         })
         .transpose()?;
-    if grant.is_some() && auth_binding.is_some() {
+    let auth_refresh = dto
+        .auth_refresh
+        .map(|refresh| {
+            if !(200..=299).contains(&refresh.success_status)
+                || refresh.success_status == 204
+                || !valid_json_pointer(&refresh.principal_pointer)
+                || !valid_json_pointer(&refresh.bearer_pointer)
+                || refresh.principal_pointer == refresh.bearer_pointer
+                || !(1..=86_400).contains(&refresh.credential_ttl_seconds)
+            {
+                return Err(ConfigError::Invalid("operations.response.auth_refresh"));
+            }
+            Ok(AuthRefreshRule {
+                success_status: refresh.success_status,
+                principal_pointer: refresh.principal_pointer,
+                bearer_pointer: refresh.bearer_pointer,
+                credential_ttl_seconds: refresh.credential_ttl_seconds,
+            })
+        })
+        .transpose()?;
+    if usize::from(grant.is_some())
+        + usize::from(auth_binding.is_some())
+        + usize::from(auth_refresh.is_some())
+        > 1
+    {
         return Err(ConfigError::Invalid("operations.response"));
     }
     Ok(CompiledResponse {
         max_bytes: dto.max_bytes,
         grant,
         auth_binding,
+        auth_refresh,
     })
 }
 
@@ -1402,6 +1457,36 @@ mod tests {
             GatewayConfig::from_json(&serde_json::to_vec(&public).unwrap()),
             Err(ConfigError::Invalid("operations.response.auth_binding"))
         ));
+
+        let mut refresh = config.clone();
+        refresh["operations"][0]["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
+        let response = refresh["operations"][0]["response"]
+            .as_object_mut()
+            .unwrap();
+        response.remove("auth_binding");
+        response.insert(
+            "auth_refresh".to_owned(),
+            serde_json::json!({
+                "success_status": 200,
+                "principal_pointer": "/identity/id",
+                "bearer_pointer": "/access_token",
+                "credential_ttl_seconds": 900
+            }),
+        );
+        let compiled = GatewayConfig::from_json(&serde_json::to_vec(&refresh).unwrap()).unwrap();
+        assert_eq!(
+            compiled
+                .auth_refresh_rule("POST", "/login")
+                .unwrap()
+                .credential_ttl_seconds(),
+            900
+        );
+        refresh["operations"][0]["admission"] = serde_json::json!("AUTH_ENTRY");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&refresh).unwrap()),
+            Err(ConfigError::Invalid("operations.response.auth_refresh"))
+        ));
+
         let mut incoherent = config;
         incoherent["operations"][0]["response"]["auth_binding"]["credential_ttl_seconds"] =
             serde_json::json!(7200);

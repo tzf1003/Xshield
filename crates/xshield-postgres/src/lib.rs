@@ -24,7 +24,7 @@ pub use response_grant::{
 pub use share_grant_issue::{ShareGrantPersistence, ShareGrantWriteOutcome};
 
 use serde_json::Value;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 use xshield_core::{
     domain::EventId,
@@ -82,6 +82,7 @@ impl<'a> BindingEstablishment<'a> {
 /// Complete replacement credential set for a verified same-context refresh.
 pub struct CredentialRefresh<'a> {
     snapshot: &'a AuthSnapshot,
+    previous_credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
     credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
     credentials_expire_at: UnixSeconds,
     now: UnixSeconds,
@@ -97,17 +98,24 @@ impl<'a> CredentialRefresh<'a> {
     /// already expired, or the event envelope is not a JSON object.
     pub fn new(
         snapshot: &'a AuthSnapshot,
+        previous_credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
         credentials: &'a BTreeMap<CredentialSlot, CredentialFingerprint>,
         credentials_expire_at: UnixSeconds,
         now: UnixSeconds,
         event_id: &'a EventId,
         event_envelope: &'a Value,
     ) -> Result<Self, StoreError> {
-        if credentials.is_empty() || credentials_expire_at <= now || !event_envelope.is_object() {
+        if previous_credentials.is_empty()
+            || credentials.is_empty()
+            || previous_credentials == credentials
+            || credentials_expire_at <= now
+            || !event_envelope.is_object()
+        {
             return Err(StoreError::InvalidCommand);
         }
         Ok(Self {
             snapshot,
+            previous_credentials,
             credentials,
             credentials_expire_at,
             now,
@@ -292,6 +300,14 @@ impl PostgresIdentityStore {
             return Ok(RefreshOutcome::Conflict);
         }
 
+        let stored_credentials =
+            lock_active_credentials(&mut transaction, command.snapshot, expected_generation, now)
+                .await?;
+        if &stored_credentials != command.previous_credentials {
+            transaction.rollback().await?;
+            return Ok(RefreshOutcome::Conflict);
+        }
+
         sqlx::query(
             "UPDATE xshield.credential_bindings
              SET status = 'revoked'
@@ -349,6 +365,47 @@ impl PostgresIdentityStore {
             ),
         })
     }
+}
+
+async fn lock_active_credentials(
+    transaction: &mut Transaction<'_, Postgres>,
+    snapshot: &AuthSnapshot,
+    generation: i64,
+    now: i64,
+) -> Result<BTreeMap<CredentialSlot, CredentialFingerprint>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT credential_kind, fingerprint
+         FROM xshield.credential_bindings
+         WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
+           AND generation = $4 AND status = 'active'
+           AND expires_at > to_timestamp($5)
+         FOR UPDATE",
+    )
+    .bind(snapshot.tenant_id().as_str())
+    .bind(snapshot.site_id().as_str())
+    .bind(snapshot.binding_id().as_str())
+    .bind(generation)
+    .bind(now)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut credentials = BTreeMap::new();
+    for row in rows {
+        let slot = match row.try_get::<&str, _>("credential_kind")? {
+            "cookie" => CredentialSlot::Cookie,
+            "bearer" => CredentialSlot::Bearer,
+            "body_token" => CredentialSlot::BodyToken,
+            _ => return Err(StoreError::CorruptData("credential_kind")),
+        };
+        let fingerprint = CredentialFingerprint::from_bytes(
+            row.try_get::<Vec<u8>, _>("fingerprint")?
+                .try_into()
+                .map_err(|_| StoreError::CorruptData("credential_fingerprint"))?,
+        );
+        if credentials.insert(slot, fingerprint).is_some() {
+            return Err(StoreError::CorruptData("duplicate_credential_kind"));
+        }
+    }
+    Ok(credentials)
 }
 
 fn to_i64(value: u64, field: &'static str) -> Result<i64, StoreError> {

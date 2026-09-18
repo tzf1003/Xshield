@@ -239,7 +239,9 @@ cat >"$test_dir/config.json" <<JSON
   "operations":[
     {"operation_id":"auth.login","method":"POST","path":"/login","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
     {"operation_id":"auth.login.invalid","method":"POST","path":"/login-invalid","admission":"AUTH_ENTRY","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_binding":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800,"session_ttl_seconds":3600}}},
-    {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
+    {"operation_id":"auth.refresh","method":"POST","path":"/refresh","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"auth.refresh.switch","method":"POST","path":"/refresh-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
@@ -274,6 +276,9 @@ class Handler(BaseHTTPRequestHandler):
         responses = {
             "/login": b'{"identity":{"id":"principal_login"},"access_token":"login-business-token"}',
             "/login-invalid": b'{"identity":{"id":"principal_invalid"}}',
+            "/refresh": b'{"identity":{"id":"principal_login"},"access_token":"refreshed-business-token"}',
+            "/refresh-switch": b'{"identity":{"id":"principal_other"},"access_token":"other-business-token"}',
+            "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
             "/account": b'{"orders":[{"id":"order-456"}]}',
             "/buffered-valid": b'{"ok":true}',
             "/buffered-invalid": b'private-invalid-json',
@@ -363,7 +368,93 @@ new_account_status=$(curl -sS -o "$test_dir/new-account.body" -w '%{http_code}' 
     -H "Cookie: __Host-xshield_sid=$login_session_id" \
     -H "Authorization: Bearer $login_bearer" \
     http://127.0.0.1:6288/new-account)
-[[ "$new_account_status" == "404" ]]
+[[ "$new_account_status" == "200" ]]
+login_action_ref=$(python3 -c \
+    'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["orders"][0]["_xshield_action_ref"])' \
+    "$test_dir/new-account.body")
+[[ "$login_action_ref" == action.* ]]
+
+refresh_status=$(curl -sS -D "$test_dir/refresh.headers" -o "$test_dir/refresh.body" \
+    -w '%{http_code}' -X POST \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    http://127.0.0.1:6288/refresh)
+[[ "$refresh_status" == "200" ]]
+grep -qi '^cache-control: private, no-store' "$test_dir/refresh.headers"
+! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/refresh.headers"
+refreshed_bearer=$(python3 -c \
+    'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["access_token"])' \
+    "$test_dir/refresh.body")
+[[ "$refreshed_bearer" == "refreshed-business-token" ]]
+refreshed_bearer_fingerprint=$(printf '%s' "$refreshed_bearer" \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
+refresh_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v old_fingerprint="$login_bearer_fingerprint" \
+    -v new_fingerprint="$refreshed_bearer_fingerprint" <<'SQL'
+SELECT binding.credential_generation,
+       (SELECT count(*) FROM xshield.credential_bindings credential
+        WHERE credential.tenant_id = binding.tenant_id
+          AND credential.site_id = binding.site_id
+          AND credential.binding_id = binding.binding_id
+          AND credential.generation = 1 AND credential.status = 'revoked'
+          AND credential.fingerprint = decode(:'old_fingerprint', 'hex')),
+       (SELECT count(*) FROM xshield.credential_bindings credential
+        WHERE credential.tenant_id = binding.tenant_id
+          AND credential.site_id = binding.site_id
+          AND credential.binding_id = binding.binding_id
+          AND credential.generation = 2 AND credential.status = 'active'
+          AND credential.fingerprint = decode(:'new_fingerprint', 'hex')),
+       (SELECT count(*) FROM xshield.audit_outbox outbox
+        WHERE outbox.aggregate_ref = binding.binding_id
+          AND outbox.tenant_id = binding.tenant_id
+          AND outbox.site_id = binding.site_id
+          AND outbox.event_type = 'identity.refreshed'
+          AND outbox.envelope->>'previous_credential_generation' = '1'
+          AND outbox.envelope->>'credential_generation' = '2'
+          AND outbox.envelope->'previous_credentials' @>
+            jsonb_build_array(jsonb_build_object(
+              'kind', 'bearer', 'fingerprint', :'old_fingerprint'))
+          AND outbox.envelope->'credentials' @>
+            jsonb_build_array(jsonb_build_object(
+              'kind', 'bearer', 'fingerprint', :'new_fingerprint')))
+FROM xshield.auth_bindings binding
+WHERE binding.tenant_id = 'tenant_gateway'
+  AND binding.site_id = 'site_gateway'
+  AND binding.principal_ref = 'principal_login';
+SQL
+)
+[[ "$refresh_state" == "2|1|1|1" ]]
+
+old_bearer_status=$(curl -sS -o "$test_dir/old-bearer.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    http://127.0.0.1:6288/new-account)
+[[ "$old_bearer_status" == "403" ]]
+grep -q '"reason_code":"AUTH_BINDING_MISMATCH"' "$test_dir/old-bearer.json"
+
+refreshed_grant_status=$(curl -sS -o "$test_dir/refreshed-grant.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $refreshed_bearer" \
+    -H "X-Xshield-Action-Ref: $login_action_ref" \
+    'http://127.0.0.1:6288/orders?order_id=order-refresh')
+[[ "$refreshed_grant_status" == "404" ]]
+
+set +e
+curl -sS -o "$test_dir/refresh-switch.body" -X POST \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $refreshed_bearer" \
+    http://127.0.0.1:6288/refresh-switch >/dev/null 2>&1
+refresh_switch_exit=$?
+set -e
+[[ "$refresh_switch_exit" != "0" ]]
+refresh_generation=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT credential_generation FROM xshield.auth_bindings
+WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+  AND principal_ref = 'principal_login';
+SQL
+)
+[[ "$refresh_generation" == "2" ]]
 
 set +e
 curl -sS -o "$test_dir/login-invalid.body" \
@@ -610,9 +701,12 @@ origin_pid=""
 [[ $(grep -c '^POST /login$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^POST /login-invalid$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^GET /new-account$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^POST /refresh$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^POST /refresh-switch$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-456' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /orders?order_id=order-refresh' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /path-orders/order%2D123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "1" ]]

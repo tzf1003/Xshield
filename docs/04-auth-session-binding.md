@@ -39,7 +39,9 @@ JWT 可作为不透明字符串精确匹配；使用 claims 建立身份时验�
 
 首个 Bearer 认证适配器要求 `AUTH_ENTRY` 配置 `BUFFERED_JSON` 与 `auth_binding`：成功状态、主体 JSON Pointer、Bearer JSON Pointer、凭证 TTL 和绝对会话 TTL 均在启动时验证。只在完整严格 JSON 与业务成功状态同时匹配后建立新 binding；事务将初始 credential generation 与 `binding.created` outbox 一起提交。源站返回的 `Set-Cookie` 不得使用边缘保留的 `__Host-xshield_sid` 名称。
 
-并发刷新采用 compare-and-swap 或行锁与版本字段。新旧兼容窗口只存明确合法的凭证组合，不能把同用户历史上的所有 WAF Cookie 与所有 Token 做笛卡尔组合。未知替换记录 AUTH_BINDING_MISMATCH，不改变原账本。
+同身份 Bearer 刷新适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_refresh`：成功状态、主体 JSON Pointer、Bearer JSON Pointer 和凭证 TTL 在启动时验证。请求仍须携带当前 WAF Cookie 与旧 Bearer；响应主体必须等于请求 AuthSnapshot 的主体，新 Bearer 必须改变。事务按旧 snapshot CAS，并重新锁定、比较完整旧凭证集合及期限；成功只推进 generation，保留 epoch 和仍有效资格，新凭证期限不超过绝对会话期限。
+
+并发刷新采用 compare-and-swap 与行锁。新旧兼容窗口只存明确合法的凭证组合，不能把同用户历史上的所有 WAF Cookie 与所有 Token 做笛卡尔组合。未知替换记录 AUTH_BINDING_MISMATCH，不改变原账本。
 
 ## 4.5 异步响应与 WSS
 

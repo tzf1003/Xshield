@@ -18,6 +18,15 @@ pub struct AuthBindingRule {
     pub(crate) session_ttl_seconds: u64,
 }
 
+/// Validated same-context credential-refresh response semantics.
+#[derive(Debug)]
+pub struct AuthRefreshRule {
+    pub(crate) success_status: u16,
+    pub(crate) principal_pointer: String,
+    pub(crate) bearer_pointer: String,
+    pub(crate) credential_ttl_seconds: u64,
+}
+
 impl AuthBindingRule {
     /// Returns whether this origin response can establish a binding.
     #[must_use]
@@ -34,23 +43,7 @@ impl AuthBindingRule {
     /// Returns [`AuthBindingError`] for malformed JSON, an unexpected response
     /// shape, or an unusable principal or bearer value.
     pub fn extract(&self, body: &[u8]) -> Result<VerifiedAuthentication, AuthBindingError> {
-        let value = strict_json(body)?;
-        let principal_ref = value
-            .pointer(&self.principal_pointer)
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| valid_value(value, MAX_PRINCIPAL_BYTES))
-            .ok_or(AuthBindingError)?
-            .to_owned();
-        let bearer = value
-            .pointer(&self.bearer_pointer)
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| valid_value(value, MAX_BEARER_BYTES))
-            .ok_or(AuthBindingError)?
-            .to_owned();
-        Ok(VerifiedAuthentication {
-            principal_ref,
-            bearer: Zeroizing::new(bearer),
-        })
+        extract_authentication(body, &self.principal_pointer, &self.bearer_pointer)
     }
 
     /// Returns the server-enforced credential lifetime.
@@ -64,6 +57,53 @@ impl AuthBindingRule {
     pub const fn session_ttl_seconds(&self) -> u64 {
         self.session_ttl_seconds
     }
+}
+
+impl AuthRefreshRule {
+    /// Returns whether this origin response can refresh the current binding.
+    #[must_use]
+    pub const fn applies(&self, status: u16) -> bool {
+        status == self.success_status
+    }
+
+    /// Extracts a bounded principal and bearer from one complete strict JSON value.
+    ///
+    /// # Errors
+    /// Returns [`AuthBindingError`] for malformed JSON, an unexpected response
+    /// shape, or an unusable principal or bearer value.
+    pub fn extract(&self, body: &[u8]) -> Result<VerifiedAuthentication, AuthBindingError> {
+        extract_authentication(body, &self.principal_pointer, &self.bearer_pointer)
+    }
+
+    /// Returns the server-enforced credential lifetime.
+    #[must_use]
+    pub const fn credential_ttl_seconds(&self) -> u64 {
+        self.credential_ttl_seconds
+    }
+}
+
+fn extract_authentication(
+    body: &[u8],
+    principal_pointer: &str,
+    bearer_pointer: &str,
+) -> Result<VerifiedAuthentication, AuthBindingError> {
+    let value = strict_json(body)?;
+    let principal_ref = value
+        .pointer(principal_pointer)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| valid_value(value, MAX_PRINCIPAL_BYTES))
+        .ok_or(AuthBindingError)?
+        .to_owned();
+    let bearer = value
+        .pointer(bearer_pointer)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| valid_value(value, MAX_BEARER_BYTES))
+        .ok_or(AuthBindingError)?
+        .to_owned();
+    Ok(VerifiedAuthentication {
+        principal_ref,
+        bearer: Zeroizing::new(bearer),
+    })
 }
 
 fn valid_value(value: &str, limit: usize) -> bool {

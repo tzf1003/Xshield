@@ -26,9 +26,12 @@ use xshield_core::{
 };
 use xshield_gateway::{
     GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, ResourceLocation,
-    ResourceOperation, auth_binding::AuthBindingRule,
+    ResourceOperation,
+    auth_binding::{AuthBindingRule, AuthRefreshRule},
 };
-use xshield_postgres::{BindingEstablishment, PostgresIdentityStore, StoreError};
+use xshield_postgres::{
+    BindingEstablishment, CredentialRefresh, PostgresIdentityStore, RefreshOutcome, StoreError,
+};
 use zeroize::Zeroizing;
 
 mod response_issue;
@@ -227,6 +230,83 @@ impl ProtectedIdentity {
             .establish_binding(command)
             .await
             .map_err(|_| ReasonCode::IdentityStoreUnavailable)
+    }
+
+    pub(crate) async fn commit_auth_refresh(
+        &self,
+        rule: &AuthRefreshRule,
+        identity: &ResponseIdentity,
+        request_id: &RequestId,
+        body: &[u8],
+        now: UnixSeconds,
+    ) -> Result<(), ReasonCode> {
+        let authentication = rule
+            .extract(body)
+            .map_err(xshield_gateway::auth_binding::AuthBindingError::reason_code)?;
+        if authentication.principal_ref() != identity.snapshot.principal_ref() {
+            return Err(ReasonCode::AuthBindingMismatch);
+        }
+        let bearer_fingerprint = CredentialFingerprint::from_bytes(
+            fingerprint(&self.fingerprint_key, authentication.bearer().as_bytes())
+                .map_err(|_| ReasonCode::IdentityStoreUnavailable)?,
+        );
+        let credentials = BTreeMap::from([(CredentialSlot::Bearer, bearer_fingerprint)]);
+        if &credentials == identity.binding.credentials() {
+            return Err(ReasonCode::ResponseValidationFailed);
+        }
+        let requested_expiry = now
+            .value()
+            .checked_add(rule.credential_ttl_seconds())
+            .map(UnixSeconds::new)
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let credentials_expire_at = requested_expiry.min(identity.binding.absolute_expires_at());
+        if credentials_expire_at <= now {
+            return Err(ReasonCode::AuthSessionExpired);
+        }
+        let current_generation = identity
+            .snapshot
+            .generation()
+            .value()
+            .checked_add(1)
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7()))
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let previous_credentials = credential_audit_values(identity.binding.credentials());
+        let current_credentials = credential_audit_values(&credentials);
+        let envelope = serde_json::json!({
+            "schema_version": 3,
+            "event_type": "identity.refreshed",
+            "event_id": event_id.as_str(),
+            "request_id": request_id.as_str(),
+            "binding_id": identity.snapshot.binding_id().as_str(),
+            "auth_epoch": identity.snapshot.epoch().value(),
+            "previous_credential_generation": identity.snapshot.generation().value(),
+            "credential_generation": current_generation,
+            "previous_credentials": previous_credentials,
+            "credentials": current_credentials,
+            "rotation_reason": "same_context_refresh",
+        });
+        let command = CredentialRefresh::new(
+            &identity.snapshot,
+            identity.binding.credentials(),
+            &credentials,
+            credentials_expire_at,
+            now,
+            &event_id,
+            &envelope,
+        )
+        .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        match self
+            .store()
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)?
+            .refresh_same_context(command)
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)?
+        {
+            RefreshOutcome::Updated { .. } => Ok(()),
+            RefreshOutcome::Conflict => Err(ReasonCode::AuthCredentialGenerationChanged),
+        }
     }
 
     pub(crate) async fn admit(
@@ -786,6 +866,30 @@ fn fingerprint(key: &[u8; 32], value: &[u8]) -> Result<[u8; 32], IdentityRuntime
         .sign_to_vec()?
         .try_into()
         .map_err(|_| IdentityRuntimeError::Crypto)
+}
+
+fn credential_audit_values(
+    credentials: &BTreeMap<CredentialSlot, CredentialFingerprint>,
+) -> Vec<serde_json::Value> {
+    credentials
+        .iter()
+        .map(|(slot, fingerprint)| {
+            serde_json::json!({
+                "kind": slot.as_str(),
+                "fingerprint": lower_hex(fingerprint.as_bytes()),
+            })
+        })
+        .collect()
+}
+
+fn lower_hex(value: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn parse_key(value: &str) -> Result<[u8; 32], IdentityRuntimeError> {

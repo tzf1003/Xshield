@@ -232,6 +232,12 @@ impl ProxyHttp for Gateway {
                             }
                         } else if self
                             .config
+                            .auth_refresh_rule(request.method.as_str(), request.uri.path())
+                            .is_some()
+                        {
+                            prepare_auth_response_headers(upstream_response)?;
+                        } else if self
+                            .config
                             .response_grant_operation(request.method.as_str(), request.uri.path())
                             .is_some()
                         {
@@ -264,6 +270,7 @@ impl ProxyHttp for Gateway {
             Ok(Some(complete)) => {
                 let released = self
                     .commit_auth_binding(session, context, complete)
+                    .and_then(|body| self.commit_auth_refresh(session, context, body))
                     .and_then(|body| self.commit_response_grants(session, context, body));
                 match released {
                     Ok(released) => *body = Some(released),
@@ -425,6 +432,53 @@ impl Gateway {
             .inject_action_refs(&body, &action_refs)
             .map(Bytes::from)
             .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)
+    }
+
+    fn commit_auth_refresh(
+        &self,
+        session: &Session,
+        context: &RequestContext,
+        body: Bytes,
+    ) -> Result<Bytes, ReasonCode> {
+        let request = session.req_header();
+        let Some(rule) = self
+            .config
+            .auth_refresh_rule(request.method.as_str(), request.uri.path())
+        else {
+            return Ok(body);
+        };
+        let status = context
+            .origin_status
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        if !rule.applies(status) {
+            return Ok(body);
+        }
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or(ReasonCode::IdentityStoreUnavailable)?;
+        let response_identity = context
+            .response_identity
+            .as_ref()
+            .ok_or(ReasonCode::AuthBindingMismatch)?;
+        let request_id = RequestId::parse(&context.request_id)
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| UnixSeconds::new(duration.as_secs()))
+            .map_err(|_| ReasonCode::ClockUnavailable)?;
+        // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
+        // barrier to an async body hook when the proxy API provides one.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(identity.commit_auth_refresh(
+                rule,
+                response_identity,
+                &request_id,
+                &body,
+                now,
+            ))
+        })?;
+        Ok(body)
     }
 }
 
