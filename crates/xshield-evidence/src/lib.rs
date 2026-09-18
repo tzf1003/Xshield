@@ -205,6 +205,50 @@ pub struct EvidenceIntegrity {
     pub digest: String,
 }
 
+/// Manifest produced or authenticated by an evidence vault.
+///
+/// The private wrapper prevents persistence adapters from accepting an
+/// untrusted struct that merely has the same public wire fields.
+pub struct VerifiedEvidenceManifest(EvidenceManifest);
+
+impl VerifiedEvidenceManifest {
+    /// Returns authenticated, non-plaintext manifest metadata.
+    #[must_use]
+    pub const fn manifest(&self) -> &EvidenceManifest {
+        &self.0
+    }
+}
+
+impl EvidenceManifest {
+    /// Validates catalog metadata decoded from durable storage.
+    ///
+    /// This checks structure only and does not authenticate the manifest or
+    /// authorize content access.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError`] when a field violates the manifest contract or
+    /// the entry was already expired when cataloged.
+    pub fn validate_catalog_shape(&self, recorded_at: DateTime<Utc>) -> Result<(), EvidenceError> {
+        let tenant_id =
+            TenantId::parse(&self.tenant_id).map_err(|_| EvidenceError::CorruptEvidence)?;
+        let site_id = SiteId::parse(&self.site_id).map_err(|_| EvidenceError::CorruptEvidence)?;
+        validate_artifact_id(&self.artifact_id).map_err(|_| EvidenceError::CorruptEvidence)?;
+        let key_id = self
+            .storage
+            .key_ref
+            .as_deref()
+            .ok_or(EvidenceError::CorruptEvidence)?;
+        validate_manifest(
+            self,
+            &tenant_id,
+            &site_id,
+            &self.artifact_id,
+            key_id,
+            recorded_at,
+        )
+    }
+}
+
 /// Private local implementation of encrypted evidence storage.
 pub struct LocalEvidenceVault {
     config: EvidenceVaultConfig,
@@ -231,7 +275,10 @@ impl LocalEvidenceVault {
     /// # Errors
     /// Returns [`EvidenceError`] for invalid input, capacity, crypto, or storage
     /// failures. Existing objects are never overwritten.
-    pub fn write(&self, command: &EvidenceWrite<'_>) -> Result<EvidenceManifest, EvidenceError> {
+    pub fn write(
+        &self,
+        command: &EvidenceWrite<'_>,
+    ) -> Result<VerifiedEvidenceManifest, EvidenceError> {
         validate_write(
             command,
             self.config.max_artifact_bytes,
@@ -293,7 +340,7 @@ impl LocalEvidenceVault {
         write_new_synced(&self.config.root, &manifest_locator, &manifest_bytes)?;
         write_new_synced(&self.config.root, &manifest_auth_locator, &manifest_auth)?;
         sync_directory(&self.config.root)?;
-        Ok(manifest)
+        Ok(VerifiedEvidenceManifest(manifest))
     }
 
     /// Loads and validates one scoped manifest without reading plaintext content.
@@ -306,7 +353,7 @@ impl LocalEvidenceVault {
         tenant_id: &TenantId,
         site_id: &SiteId,
         artifact_id: &str,
-    ) -> Result<EvidenceManifest, EvidenceError> {
+    ) -> Result<VerifiedEvidenceManifest, EvidenceError> {
         self.read_manifest_at(tenant_id, site_id, artifact_id, Utc::now())
     }
 
@@ -316,7 +363,7 @@ impl LocalEvidenceVault {
         site_id: &SiteId,
         artifact_id: &str,
         now: DateTime<Utc>,
-    ) -> Result<EvidenceManifest, EvidenceError> {
+    ) -> Result<VerifiedEvidenceManifest, EvidenceError> {
         validate_artifact_id(artifact_id)?;
         let filename = format!("{artifact_id}.manifest.json");
         let bytes = read_private_bounded(&self.config.root.join(filename), MANIFEST_BYTES_MAX)
@@ -343,7 +390,7 @@ impl LocalEvidenceVault {
             &self.config.key_id,
             now,
         )?;
-        Ok(manifest)
+        Ok(VerifiedEvidenceManifest(manifest))
     }
 
     /// Authenticates and decrypts one unexpired object in the supplied scope.
@@ -370,7 +417,8 @@ impl LocalEvidenceVault {
         artifact_id: &str,
         now: DateTime<Utc>,
     ) -> Result<Zeroizing<Vec<u8>>, EvidenceError> {
-        let manifest = self.read_manifest_at(tenant_id, site_id, artifact_id, now)?;
+        let verified = self.read_manifest_at(tenant_id, site_id, artifact_id, now)?;
+        let manifest = verified.manifest();
         let max_envelope = u64::try_from(self.config.max_artifact_bytes)
             .map_err(|_| EvidenceError::InvalidConfig)?
             .checked_add(
@@ -456,12 +504,19 @@ fn validate_manifest(
         || RequestId::parse(&manifest.request_id).is_err()
         || !valid_name(&manifest.kind)
         || manifest.content_type.is_empty()
+        || manifest.content_type.len() > CONTENT_TYPE_BYTES_MAX
+        || manifest
+            .content_type
+            .bytes()
+            .any(|byte| byte.is_ascii_control())
         || manifest.capture_status != "complete"
         || manifest.bytes_observed != manifest.bytes_saved
+        || manifest.bytes_saved > MAX_SINGLE_ARTIFACT_BYTES as u64
         || manifest.example_only
         || manifest.storage.profile != "aead_envelope_v1"
         || manifest.storage.locator != format!("{artifact_id}.xev")
         || manifest.storage.key_ref.as_deref() != Some(key_id)
+        || !valid_name(key_id)
         || manifest.integrity.algorithm != "sha256_ciphertext"
         || !valid_lower_hex(&manifest.integrity.digest, DIGEST_HEX_BYTES)
         || manifest.parent_refs.len() > PARENT_REFS_MAX
@@ -657,7 +712,10 @@ fn validate_artifact_id(value: &str) -> Result<(), EvidenceError> {
         return Err(EvidenceError::NotAvailable);
     };
     let uuid = Uuid::parse_str(uuid).map_err(|_| EvidenceError::NotAvailable)?;
-    if uuid.get_version_num() != 7 || uuid.get_variant() != uuid::Variant::RFC4122 {
+    if uuid.get_version_num() != 7
+        || uuid.get_variant() != uuid::Variant::RFC4122
+        || value != format!("artifact_{uuid}")
+    {
         return Err(EvidenceError::NotAvailable);
     }
     Ok(())
@@ -803,7 +861,7 @@ mod tests {
         let request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
         let expires_at = Utc::now() + TimeDelta::minutes(5);
         let secret = b"sensitive-body";
-        let manifest = vault
+        let verified = vault
             .write(&EvidenceWrite {
                 tenant_id: &tenant,
                 site_id: &site,
@@ -817,6 +875,7 @@ mod tests {
                 plaintext: secret,
             })
             .unwrap();
+        let manifest = verified.manifest();
         assert_eq!(manifest.capture_status, "complete");
         assert_eq!(manifest.bytes_saved, secret.len() as u64);
         assert_eq!(manifest.integrity.digest.len(), 64);

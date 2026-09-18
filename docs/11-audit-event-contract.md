@@ -15,7 +15,7 @@
 | event_id | 一条不可变审计事件 | ev_ + UUIDv7，重发不换 ID |
 | decision_id | 一次决策合成 | dec_ + UUIDv7 |
 | stage_execution_id | 阶段一次执行 | 区分重试、并发与取消 |
-| artifact_id | 一份内容证据或 manifest | art_ + UUIDv7，不是公开下载凭证 |
+| artifact_id | 一份内容证据或 manifest | artifact_ + UUIDv7，不是公开下载凭证 |
 | transform_id | 解密/标准化/重建关系 | 关联输入、输出及配置版本 |
 | model_call_id | 一次实际模型调用尝试 | mdl_ + UUIDv7；另有 logical_call_id |
 | agent_run_id/tool_call_id | Agent 运行及工具调用 | agt_/tool_，父子运行明确关联 |
@@ -45,7 +45,7 @@ occurred_at 是服务器 UTC，浏览器时间另存 client_reported_at；时区
   "confidence": null,
   "confidence_status": "not_applicable",
   "rule_revision": "policy-demo-r3",
-  "input_refs": ["art_example"],
+  "input_refs": ["artifact_example"],
   "facts": {"required_operation":"user.password.admin_reset"},
   "duration_us": 320
 }
@@ -57,7 +57,7 @@ occurred_at 是服务器 UTC，浏览器时间另存 client_reported_at；时区
 
 ## 11.5 必须记录的事件族
 
-request.accepted/completed/aborted；stage.started/completed/skipped；identity.bound/refreshed/revoked/mismatch；page.accepted/rejected；grant.issued/denied/expired/revoked；crypto.decode/encode/failed/fallback；model.requested/responded/timeout/cache_hit；agent.started/tool_called/tool_result/artifact_created/finished；origin.forward_intent/response/unknown；evidence.captured/sealed/expired/deleted/read；policy.proposed/tested/approved/published/rolled_back；audit.gap/backpressure/durability_failed；console.query/export/decrypt/replay。
+request.accepted/completed/aborted；stage.started/completed/skipped；identity.bound/refreshed/revoked/mismatch；page.accepted/rejected；grant.issued/denied/expired/revoked；crypto.decode/encode/failed/fallback；model.requested/responded/timeout/cache_hit；agent.started/tool_called/tool_result/artifact_created/finished；origin.forward_intent/response/unknown；evidence.captured/sealed/cataloged/expired/deleted/read；policy.proposed/tested/approved/published/rolled_back；audit.gap/backpressure/durability_failed；console.query/export/decrypt/replay。
 
 恢复补偿产生的 request.aborted 允许 `status=null`，并以 cause_event_ids 指向已知的 decision、request.accepted、origin.response 或新追加的 origin.unknown；准入批次只留下 accepted 前缀时使用 `decision=UNKNOWN` 与 `reason_code=REQUEST_INCOMPLETE`。它表达审计终态，不虚构客户端实际收到的状态码。
 

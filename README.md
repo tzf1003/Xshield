@@ -16,7 +16,9 @@
 
 `xshield-control` 已提供首个独立管理接口 `GET /control/v1/audit/health`：固定从服务端配置注入 tenant/site 作用域，以常量时间摘要比对管理 Bearer 凭证，仅允许 `AuditAdministrator`，执行每分钟有界限流，并在返回前把 `console.health.read` 结果写入独立加密 journal。
 
-`xshield-evidence` 已提供本地加密证据库 MVP：只打开预建的私有目录，对每个 artifact 以 tenant/site/request/artifact/kind/chunk AAD 和独立 HMAC 派生数据密钥执行 AES-256-GCM，密文对象、typed manifest 与 manifest HMAC 均不覆盖耐久写入。manifest 读取使用库内当前时钟重验作用域、期限与 key-id，内容读取额外重验密文摘要与 AEAD；未知、过期和跨作用域对象返回相同不可用状态。整对象模式硬限制 64 MiB，业务配置只能继续收紧。当前闭环用于验证存储不变量，后续接入网关采集、PostgreSQL catalog、审批端口与 S3/KMS adapter。
+`xshield-evidence` 已提供本地加密证据库 MVP：只打开预建的私有目录，对每个 artifact 以 tenant/site/request/artifact/kind/chunk AAD 和独立 HMAC 派生数据密钥执行 AES-256-GCM，密文对象、typed manifest 与 manifest HMAC 均不覆盖耐久写入。manifest 读取使用库内当前时钟重验作用域、期限与 key-id，内容读取额外重验密文摘要与 AEAD；未知、过期和跨作用域对象返回相同不可用状态。整对象模式硬限制 64 MiB，业务配置只能继续收紧。当前闭环用于验证存储不变量，后续接入网关采集、审批端口与 S3/KMS adapter。
+
+PostgreSQL catalog 只接受证据库产生或认证的 manifest 类型，按 artifact 身份执行精确幂等发布，并与 `evidence.cataloged` outbox 事件同事务提交；同 ID 元数据冲突返回稳定冲突终态，审计写入失败不留下 catalog 行。request 查询固定绑定 tenant/site/request，使用数据库当前时钟排除过期或删除对象，最多返回 128 条 typed manifest；catalog 元数据不能替代对象侧 HMAC、摘要和 AEAD 复验。
 
 M2 已落地 `DIRECT_DECRYPT` / `DIRECT_ENCRYPT` 双向 AES-256-GCM 垂直闭环。请求侧 AAD 绑定租户、站点、operation、HTTP 语义、适配版本、独立 key-id、规范 message-id 与时效；认证成功后由 PostgreSQL 原子消费 key 作用域的 message-id 和 nonce，重复、过期或超前消息不会到达源站。响应侧先完成严格 JSON 校验、身份/资格提交与确定性正文重建，再用独立用途密钥、随机 nonce 和短时 message-id 封装冻结客户端实体；AAD 额外绑定请求 ID 和源站状态，旧 Content-Length、编码、摘要及缓存验证头不会沿用。双向共享内存配额覆盖接收、解析、明文、密文和预分配封包峰值，容量不足时在分配前关闭。服务端可为非 UI 动作操作选择 `OBSERVE`，也可为 `UI_ACTION_REQUIRED` 操作配置 `COMPATIBILITY`；后者必须同时通过既有动作资格、页面证据中的精确构建指纹、服务端批准引用和绝对到期检查。两种 opaque 路径均禁止响应加密及身份/资格签发，Xshield 封包不会进入 compatibility。网关已在保留命名空间提供版本化同源探针与 loader、动态 no-store bootstrap，以及绑定当前 WAF 会话和身份代际的严格 HTTPS prepare 批量接收；观测以 `client_claimed` 写入耐久审计且不产生授权效果。`SENSOR_HTML` 响应适配器可在同一 operation 有界并存至多 16 个批准构建，按完整源站 SHA-256 选择各自固定 `</head>` 偏移；注入标签以 SHA-384 SRI 绑定网关实际提供的版本化资源，强制 CSP 使用逐响应 128 位随机 nonce 同步改写所有脚本指令和注入标签，构建、类型或策略偏差在正文释放前关闭，并记录选中修订、nonce 应用状态和注入前后摘要。ClickHouse 元数据索引按配置固化绝对保留期限，active 视图按 `event_id` 合并重投并先于后台 TTL 隐藏过期行。动态 HTML、原文对象保留与案件 pin 继续迭代。
 

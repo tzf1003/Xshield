@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 mod action_read;
+mod evidence_catalog;
 mod grant;
 mod grant_read;
 mod identity_read;
@@ -17,6 +18,9 @@ mod share_grant_issue;
 mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
+pub use evidence_catalog::{
+    CatalogArtifact, EvidenceCatalogPublish, EvidenceCatalogQuery, EvidenceCatalogWriteOutcome,
+};
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};

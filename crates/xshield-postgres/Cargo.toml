@@ -6,13 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 xshield-core = { path = "../xshield-core" }
+xshield-evidence = { path = "../xshield-evidence" }
 
 [dev-dependencies]
 tokio.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

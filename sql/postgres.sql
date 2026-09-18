@@ -139,14 +139,28 @@ CREATE INDEX outbox_pending ON xshield.audit_outbox(created_at,event_id)
  WHERE published_at IS NULL;
 CREATE TABLE xshield.artifact_catalog (
  tenant_id text NOT NULL, site_id text NOT NULL, artifact_id text NOT NULL,
- request_id text, manifest jsonb NOT NULL, classification text NOT NULL,
- capture_status text NOT NULL, fidelity text NOT NULL,
- created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz,
- legal_hold boolean NOT NULL DEFAULT false, deleted_at timestamptz,
+ request_id text NOT NULL, schema_version smallint NOT NULL CHECK(schema_version=3),
+ kind text NOT NULL, content_type text NOT NULL,
+ classification text NOT NULL CHECK(classification IN ('INTERNAL','SENSITIVE','RESTRICTED')),
+ capture_status text NOT NULL CHECK(capture_status='complete'),
+ fidelity text NOT NULL CHECK(fidelity IN ('entity_exact','semantic','redacted')),
+ bytes_observed bigint NOT NULL CHECK(bytes_observed BETWEEN 0 AND 67108864),
+ bytes_saved bigint NOT NULL CHECK(bytes_saved=bytes_observed),
+ example_only boolean NOT NULL CHECK(NOT example_only),
+ storage_profile text NOT NULL CHECK(storage_profile='aead_envelope_v1'),
+ storage_locator text NOT NULL, key_ref text NOT NULL,
+ integrity_algorithm text NOT NULL CHECK(integrity_algorithm='sha256_ciphertext'),
+ integrity_digest text NOT NULL, parent_refs text[] NOT NULL,
+ recorded_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
+ catalog_event_id text NOT NULL UNIQUE,
+ status text NOT NULL CHECK(status IN ('active','deleted')), deleted_at timestamptz,
+ CHECK(storage_locator=artifact_id||'.xev'), CHECK(expires_at>recorded_at),
+ CHECK((status='active' AND deleted_at IS NULL) OR (status='deleted' AND deleted_at IS NOT NULL)),
  PRIMARY KEY(tenant_id,site_id,artifact_id)
 );
 CREATE INDEX artifact_request_lookup ON xshield.artifact_catalog
- (tenant_id,site_id,request_id,created_at);
+ (tenant_id,site_id,request_id,recorded_at,artifact_id)
+ WHERE status='active' AND deleted_at IS NULL;
 CREATE TABLE xshield.investigation_cases (
  tenant_id text NOT NULL, case_id text NOT NULL, owner_ref text NOT NULL,
  status text NOT NULL, purpose text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
