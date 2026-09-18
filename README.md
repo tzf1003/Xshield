@@ -61,6 +61,7 @@ install -d -m 0700 target/xshield-control-audit
 XSHIELD_TENANT_ID="tenant_demo" \
 XSHIELD_SITE_ID="site_demo" \
 XSHIELD_CONTROL_SUBJECT="audit-operator" \
+XSHIELD_CONTROL_ROLES="observer,audit_administrator" \
 XSHIELD_CONTROL_TOKEN="$YOUR_RANDOM_MANAGEMENT_TOKEN" \
 XSHIELD_CONTROL_TOKEN_ISSUED_AT="$TOKEN_ISSUED_UNIX_SECONDS" \
 XSHIELD_CONTROL_TOKEN_EXPIRES_AT="$TOKEN_EXPIRY_UNIX_SECONDS" \
@@ -75,15 +76,20 @@ XSHIELD_CONTROL_AUDIT_KEY_HEX="$YOUR_DISTINCT_64_CHAR_LOWERCASE_HEX_KEY" \
 XSHIELD_CONTROL_AUDIT_MAX_BYTES="1073741824" \
 XSHIELD_CONTROL_AUDIT_HIGH_WATERMARK_BYTES="858993459" \
 XSHIELD_CONTROL_AUDIT_SEGMENT_MAX_BYTES="67108864" \
+XSHIELD_CLICKHOUSE_URL="https://clickhouse.example.invalid:8443" \
+XSHIELD_CLICKHOUSE_DATABASE="xshield" \
+XSHIELD_CLICKHOUSE_USER="xshield_reader" \
+XSHIELD_CLICKHOUSE_PASSWORD="$YOUR_CLICKHOUSE_PASSWORD" \
 XSHIELD_INDEX_TARGET_ID="clickhouse-primary" \
 XSHIELD_AUDIT_METADATA_RETENTION_DAYS="30" \
 XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES="67108864" \
+XSHIELD_CONTROL_MAX_QUERY_EVENTS="100" \
 cargo run -p xshield-control -- \
   target/xshield-audit-demo target/xshield-audit-manifests \
   target/xshield-index-checkpoints target/xshield-control-audit
 ```
 
-身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
+身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；`GET /control/v1/requests/{request_id}/events` 返回固定上限的脱敏事件摘要、连续索引水位和 gap 状态，并写独立管理审计。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
 
 ## Rust 运行时依赖
 

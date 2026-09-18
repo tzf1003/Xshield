@@ -7,7 +7,7 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL},
@@ -16,6 +16,7 @@ use axum::{
     routing::get,
 };
 use chrono::{SecondsFormat, Utc};
+use clickhouse::Client;
 use openssl::{memcmp, sha::sha256};
 use serde::Serialize;
 use std::{
@@ -27,22 +28,66 @@ use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
-    domain::{EventId, SiteId, TenantId},
+    domain::{EventId, RequestId, SiteId, TenantId},
 };
 use xshield_worker::{
-    PublicationHealth, PublishError, PublisherConfig, inspect_publication_health,
+    IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEvents,
+    inspect_publication_health, query_request_events,
 };
 
 const HEALTH_PATH: &str = "/control/v1/audit/health";
+const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
 const RATE_WINDOW: Duration = Duration::from_mins(1);
 const TOKEN_BYTES_MAX: usize = 512;
 const TOKEN_LIFETIME_MAX_SECONDS: u64 = 24 * 60 * 60;
+const MAX_QUERY_EVENTS: u16 = 1_000;
+
+#[derive(Clone, Copy)]
+struct AccessAction {
+    event_type: &'static str,
+    path: &'static str,
+    role: ManagementRole,
+}
+
+const HEALTH_ACCESS: AccessAction = AccessAction {
+    event_type: "console.health.read",
+    path: HEALTH_PATH,
+    role: ManagementRole::AuditAdministrator,
+};
+const REQUEST_EVENTS_ACCESS: AccessAction = AccessAction {
+    event_type: "console.events.read",
+    path: REQUEST_EVENTS_PATH,
+    role: ManagementRole::Observer,
+};
 
 /// Time-bounded management bearer material reduced to a one-way digest.
 pub struct ManagementCredential {
     token_digest: [u8; 32],
     issued_at: u64,
     expires_at: u64,
+}
+
+/// Validated request-rate and query-result ceilings for one control process.
+#[derive(Clone, Copy)]
+pub struct ControlLimits {
+    requests_per_minute: u64,
+    max_query_events: u16,
+}
+
+impl ControlLimits {
+    /// Validates non-zero management budgets and the hard event-query ceiling.
+    ///
+    /// # Errors
+    /// Returns [`ControlError::InvalidConfig`] when a limit is outside its bound.
+    pub fn new(requests_per_minute: u64, max_query_events: u16) -> Result<Self, ControlError> {
+        if requests_per_minute == 0 || !(1..=MAX_QUERY_EVENTS).contains(&max_query_events) {
+            return Err(ControlError::InvalidConfig);
+        }
+        Ok(Self {
+            requests_per_minute,
+            max_query_events,
+        })
+    }
 }
 
 impl ManagementCredential {
@@ -76,7 +121,7 @@ pub struct ControlConfig {
     site_id: SiteId,
     publisher: PublisherConfig,
     source_journal_key_id: String,
-    rate_limit: u64,
+    limits: ControlLimits,
 }
 
 impl ControlConfig {
@@ -94,13 +139,12 @@ impl ControlConfig {
         site_id: SiteId,
         publisher: PublisherConfig,
         source_journal_key_id: impl Into<String>,
-        rate_limit: u64,
+        limits: ControlLimits,
     ) -> Result<Self, ControlError> {
         let source_journal_key_id = source_journal_key_id.into();
         if source_journal_key_id.is_empty()
             || source_journal_key_id.len() > 128
             || source_journal_key_id.chars().any(char::is_control)
-            || rate_limit == 0
         {
             return Err(ControlError::InvalidConfig);
         }
@@ -111,7 +155,7 @@ impl ControlConfig {
             site_id,
             publisher,
             source_journal_key_id,
-            rate_limit,
+            limits,
         })
     }
 }
@@ -121,6 +165,7 @@ pub struct ControlPlane {
     config: ControlConfig,
     source_journal_key: JournalKey,
     seal_key: SealVerifyingKey,
+    index: Client,
     access_journal: Mutex<LocalJournal>,
     unauthenticated_rate: Mutex<RateWindow>,
     rate: Mutex<RateWindow>,
@@ -133,49 +178,27 @@ impl ControlPlane {
         config: ControlConfig,
         source_journal_key: JournalKey,
         seal_key: SealVerifyingKey,
+        index: Client,
         access_journal: LocalJournal,
     ) -> Self {
-        let rate_limit = config.rate_limit;
+        let rate_limit = config.limits.requests_per_minute;
         Self {
             unauthenticated_rate: Mutex::new(RateWindow::new(rate_limit)),
             rate: Mutex::new(RateWindow::new(rate_limit)),
             config,
             source_journal_key,
             seal_key,
+            index,
             access_journal: Mutex::new(access_journal),
         }
     }
 
     fn health(&self, authorization: Option<&str>) -> EndpointResult {
         let request_id = format!("req_{}", Uuid::now_v7());
-        let subject = match self.authenticated_subject(authorization, &request_id) {
+        let subject = match self.authorize(authorization, &request_id, HEALTH_ACCESS) {
             Ok(subject) => subject,
             Err(response) => return *response,
         };
-        let Ok(mut rate) = self.rate.lock() else {
-            return self.audited_error(
-                &request_id,
-                Some(subject),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CONTROL_RATE_UNAVAILABLE",
-                "management service unavailable",
-                true,
-                "retry_later",
-            );
-        };
-        let within_budget = rate.take(Instant::now());
-        drop(rate);
-        if !within_budget {
-            return self.audited_error(
-                &request_id,
-                Some(subject),
-                StatusCode::TOO_MANY_REQUESTS,
-                "CONTROL_RATE_LIMITED",
-                "management request rate exceeded",
-                true,
-                "retry_later",
-            );
-        }
 
         let Ok(health) = inspect_publication_health(
             &self.config.publisher,
@@ -185,7 +208,9 @@ impl ControlPlane {
         ) else {
             return self.audited_error(
                 &request_id,
-                Some(subject),
+                Some(&subject),
+                HEALTH_ACCESS,
+                None,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "CONTROL_HEALTH_UNAVAILABLE",
                 "audit health is temporarily unavailable",
@@ -194,7 +219,14 @@ impl ControlPlane {
             );
         };
         if self
-            .append_access_event(&request_id, Some(subject), "PASS", "CONTROL_HEALTH_READ")
+            .append_access_event(
+                &request_id,
+                Some(&subject),
+                HEALTH_ACCESS,
+                None,
+                "PASS",
+                "CONTROL_HEALTH_READ",
+            )
             .is_err()
         {
             return audit_unavailable(&request_id);
@@ -207,14 +239,216 @@ impl ControlPlane {
         })
     }
 
+    async fn request_events(
+        self: Arc<Self>,
+        authorization: Option<String>,
+        target_request_id: String,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(
+                authorization.as_deref(),
+                &auth_request_id,
+                REQUEST_EVENTS_ACCESS,
+            )
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Ok(target_request_id) = RequestId::parse(target_request_id) else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    REQUEST_EVENTS_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_REQUEST_ID_INVALID",
+                    "invalid request identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Ok(events) = query_request_events(
+            &self.config.publisher,
+            &self.index,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            &target_request_id,
+            self.config.limits.max_query_events,
+        )
+        .await
+        else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    REQUEST_EVENTS_ACCESS,
+                    Some(target_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_INDEX_UNAVAILABLE",
+                    "audit index is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        self.complete_request_events(request_id, subject, target_request_id, events)
+            .await
+    }
+
+    async fn complete_request_events(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        target_request_id: RequestId,
+        events: RequestEvents,
+    ) -> EndpointResult {
+        let health_control = Arc::clone(&self);
+        let Ok(Ok(health)) = tokio::task::spawn_blocking(move || {
+            inspect_publication_health(
+                &health_control.config.publisher,
+                &health_control.config.source_journal_key_id,
+                &health_control.source_journal_key,
+                &health_control.seal_key,
+            )
+        })
+        .await
+        else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    REQUEST_EVENTS_ACCESS,
+                    Some(target_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_HEALTH_UNAVAILABLE",
+                    "audit health is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_target = target_request_id.clone();
+        let audited = tokio::task::spawn_blocking(move || {
+            audit_control.append_access_event(
+                &audit_request_id,
+                Some(&audit_subject),
+                REQUEST_EVENTS_ACCESS,
+                Some(&audit_target),
+                "PASS",
+                "CONTROL_EVENTS_READ",
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        EndpointResult::RequestEvents(RequestEventsResponse {
+            request_id,
+            tenant_id: self.config.tenant_id.as_str().to_owned(),
+            site_id: self.config.site_id.as_str().to_owned(),
+            source_request_id: target_request_id.as_str().to_owned(),
+            as_of: health.as_of,
+            index_watermark: health.index_watermark,
+            has_gaps: health.has_gaps,
+            events,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn audited_error_async(
+        self: &Arc<Self>,
+        request_id: String,
+        subject: Option<String>,
+        action: AccessAction,
+        target_request_id: Option<RequestId>,
+        status: StatusCode,
+        reason_code: &'static str,
+        message_safe: &'static str,
+        retryable: bool,
+        next_action: &'static str,
+    ) -> EndpointResult {
+        let control = Arc::clone(self);
+        let fallback_request_id = request_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            control.audited_error(
+                &request_id,
+                subject.as_deref(),
+                action,
+                target_request_id.as_ref(),
+                status,
+                reason_code,
+                message_safe,
+                retryable,
+                next_action,
+            )
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => internal_error(&fallback_request_id),
+        }
+    }
+
+    fn authorize(
+        &self,
+        authorization: Option<&str>,
+        request_id: &str,
+        action: AccessAction,
+    ) -> Result<String, Box<EndpointResult>> {
+        let subject = self.authenticated_subject(authorization, request_id, action)?;
+        let Ok(mut rate) = self.rate.lock() else {
+            return Err(Box::new(self.audited_error(
+                request_id,
+                Some(subject),
+                action,
+                None,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONTROL_RATE_UNAVAILABLE",
+                "management service unavailable",
+                true,
+                "retry_later",
+            )));
+        };
+        let within_budget = rate.take(Instant::now());
+        drop(rate);
+        if !within_budget {
+            return Err(Box::new(self.audited_error(
+                request_id,
+                Some(subject),
+                action,
+                None,
+                StatusCode::TOO_MANY_REQUESTS,
+                "CONTROL_RATE_LIMITED",
+                "management request rate exceeded",
+                true,
+                "retry_later",
+            )));
+        }
+        Ok(subject.to_owned())
+    }
+
     fn authenticated_subject<'a>(
         &'a self,
         authorization: Option<&str>,
         request_id: &str,
+        action: AccessAction,
     ) -> Result<&'a str, Box<EndpointResult>> {
         let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
             return Err(Box::new(self.audited_error(
                 request_id,
+                None,
+                action,
                 None,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "CONTROL_CLOCK_UNAVAILABLE",
@@ -253,6 +487,8 @@ impl ControlPlane {
             return Err(Box::new(self.audited_error(
                 request_id,
                 None,
+                action,
+                None,
                 StatusCode::UNAUTHORIZED,
                 "CONTROL_AUTH_REQUIRED",
                 "management authentication required",
@@ -263,13 +499,15 @@ impl ControlPlane {
 
         let subject = self.config.principal.subject();
         if !self.config.principal.authorizes(
-            ManagementRole::AuditAdministrator,
+            action.role,
             &self.config.tenant_id,
             &self.config.site_id,
         ) {
             return Err(Box::new(self.audited_error(
                 request_id,
                 Some(subject),
+                action,
+                None,
                 StatusCode::FORBIDDEN,
                 "CONTROL_SCOPE_DENIED",
                 "management operation forbidden",
@@ -285,6 +523,8 @@ impl ControlPlane {
         &self,
         request_id: &str,
         subject: Option<&str>,
+        action: AccessAction,
+        target_request_id: Option<&RequestId>,
         status: StatusCode,
         reason_code: &'static str,
         message_safe: &'static str,
@@ -292,7 +532,14 @@ impl ControlPlane {
         next_action: &'static str,
     ) -> EndpointResult {
         if self
-            .append_access_event(request_id, subject, "DENY", reason_code)
+            .append_access_event(
+                request_id,
+                subject,
+                action,
+                target_request_id,
+                "DENY",
+                reason_code,
+            )
             .is_err()
         {
             return audit_unavailable(request_id);
@@ -313,6 +560,8 @@ impl ControlPlane {
         &self,
         request_id: &str,
         subject_ref: Option<&str>,
+        action: AccessAction,
+        target_request_id: Option<&RequestId>,
         outcome: &'static str,
         reason_code: &'static str,
     ) -> Result<(), ControlError> {
@@ -332,7 +581,7 @@ impl ControlPlane {
         let event = AccessEvent {
             schema_version: 3,
             event_id: event_id.as_str(),
-            event_type: "console.health.read",
+            event_type: action.event_type,
             tenant_id: self.config.tenant_id.as_str(),
             site_id: self.config.site_id.as_str(),
             request_id,
@@ -350,8 +599,9 @@ impl ControlPlane {
             cause_event_ids: &[],
             payload: AccessPayload {
                 method: "GET",
-                path: HEALTH_PATH,
+                path: action.path,
                 subject_ref,
+                target_request_id: target_request_id.map(RequestId::as_str),
                 outcome,
                 reason_code,
             },
@@ -379,6 +629,7 @@ impl ControlPlane {
 pub fn router(control: ControlPlane) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health_handler))
+        .route(REQUEST_EVENTS_PATH, get(request_events_handler))
         .with_state(Arc::new(control))
 }
 
@@ -389,24 +640,28 @@ async fn health_handler(State(control): State<Arc<ControlPlane>>, headers: Heade
         .map(str::to_owned);
     match tokio::task::spawn_blocking(move || control.health(authorization.as_deref())).await {
         Ok(result) => result.into_response(),
-        Err(_) => no_store(
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    error_code: "CONTROL_INTERNAL",
-                    message_safe: "management service unavailable",
-                    request_id: format!("req_{}", Uuid::now_v7()),
-                    retryable: true,
-                    next_action: "retry_later",
-                }),
-            )
-                .into_response(),
-        ),
+        Err(_) => internal_error(&format!("req_{}", Uuid::now_v7())).into_response(),
     }
+}
+
+async fn request_events_handler(
+    State(control): State<Arc<ControlPlane>>,
+    Path(request_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .request_events(authorization, request_id)
+        .await
+        .into_response()
 }
 
 enum EndpointResult {
     Success(HealthResponse),
+    RequestEvents(RequestEventsResponse),
     Error(StatusCode, ErrorResponse),
 }
 
@@ -414,6 +669,7 @@ impl IntoResponse for EndpointResult {
     fn into_response(self) -> Response {
         no_store(match self {
             Self::Success(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Error(status, response) => (status, Json(response)).into_response(),
         })
     }
@@ -432,6 +688,17 @@ fn audit_unavailable(request_id: &str) -> EndpointResult {
         StatusCode::SERVICE_UNAVAILABLE,
         "AUDIT_DURABILITY_FAILED",
         "required management audit is unavailable",
+        true,
+        "retry_later",
+    )
+}
+
+fn internal_error(request_id: &str) -> EndpointResult {
+    api_error(
+        request_id,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "CONTROL_INTERNAL",
+        "management service unavailable",
         true,
         "retry_later",
     )
@@ -464,6 +731,19 @@ struct HealthResponse {
     site_id: String,
     #[serde(flatten)]
     health: PublicationHealth,
+}
+
+#[derive(Serialize)]
+struct RequestEventsResponse {
+    request_id: String,
+    tenant_id: String,
+    site_id: String,
+    source_request_id: String,
+    as_of: String,
+    index_watermark: Option<IndexWatermark>,
+    has_gaps: bool,
+    #[serde(flatten)]
+    events: RequestEvents,
 }
 
 #[derive(Serialize)]
@@ -533,6 +813,7 @@ struct AccessPayload<'a> {
     method: &'a str,
     path: &'a str,
     subject_ref: Option<&'a str>,
+    target_request_id: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
 }
@@ -605,11 +886,13 @@ impl From<serde_json::Error> for ControlError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlConfig, ControlPlane, ManagementCredential, router};
+    use super::{ControlConfig, ControlLimits, ControlPlane, ManagementCredential, router};
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header::AUTHORIZATION},
     };
+    use chrono::Utc;
+    use clickhouse::{Client, test};
     use serde_json::Value;
     use std::{
         fs,
@@ -626,7 +909,7 @@ mod tests {
         admin::{ManagementPrincipal, ManagementRole},
         domain::{SiteId, TenantId},
     };
-    use xshield_worker::PublisherConfig;
+    use xshield_worker::{AuditEventSummary, PublisherConfig};
 
     const JOURNAL_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const SEAL_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -634,6 +917,8 @@ mod tests {
 
     #[tokio::test]
     async fn enforces_auth_scope_rate_limit_and_health_contract() {
+        assert!(ControlLimits::new(0, 100).is_err());
+        assert!(ControlLimits::new(1, 1_001).is_err());
         assert!(
             ManagementCredential::new(
                 TOKEN,
@@ -681,7 +966,7 @@ mod tests {
 
         let limited = app.oneshot(authenticated_request()).await.unwrap();
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_access_events(&fixture.access_directory, 3);
+        assert_access_events(&fixture.access_directory, 3, "console.health.read", None);
 
         let forbidden = router(Fixture::new(10, ManagementRole::Observer).control)
             .oneshot(authenticated_request())
@@ -700,6 +985,112 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn request_events_are_scoped_bounded_and_audited() {
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide([AuditEventSummary {
+            event_id: "ev_018f2a3b-4c5d-7000-8000-000000000002".to_owned(),
+            event_type: "stage.completed".to_owned(),
+            stage: "admission".to_owned(),
+            outcome: "PASS".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            proof_kind: "deterministic".to_owned(),
+            confidence: None,
+            confidence_status: "not_applicable".to_owned(),
+            occurred_at: Utc::now(),
+            request_seq: 2,
+            duration_us: 10,
+            policy_revision: "policy-r1".to_owned(),
+            model_revision: String::new(),
+            evidence_refs: Vec::new(),
+            cause_event_ids: Vec::new(),
+            sensitivity: "INTERNAL".to_owned(),
+        }]));
+        let fixture = Fixture::with_index(
+            10,
+            ManagementRole::Observer,
+            Client::default().with_mock(&mock),
+        );
+        let path = "/control/v1/requests/req_018f2a3b-4c5d-7000-8000-000000000001/events";
+        let response = router(fixture.control)
+            .oneshot(
+                Request::get(path)
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["tenant_id"], "tenant_a");
+        assert_eq!(body["site_id"], "site_a");
+        assert_eq!(body["events"][0]["request_seq"], 2);
+        assert_eq!(body["truncated"], false);
+        assert!(body["events"][0].get("payload_json").is_none());
+        assert_access_events(
+            &fixture.access_directory,
+            1,
+            "console.events.read",
+            Some("req_018f2a3b-4c5d-7000-8000-000000000001"),
+        );
+
+        let forbidden = router(Fixture::new(10, ManagementRole::AuditAdministrator).control)
+            .oneshot(
+                Request::get(path)
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let invalid_fixture = Fixture::new(10, ManagementRole::Observer);
+        let invalid = router(invalid_fixture.control)
+            .oneshot(
+                Request::get("/control/v1/requests/not-a-request/events")
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_access_events(
+            &invalid_fixture.access_directory,
+            1,
+            "console.events.read",
+            None,
+        );
+
+        let failing_mock = test::Mock::new();
+        failing_mock.add(test::handlers::exception(209));
+        let failing_fixture = Fixture::with_index(
+            10,
+            ManagementRole::Observer,
+            Client::default().with_mock(&failing_mock),
+        );
+        let unavailable = router(failing_fixture.control)
+            .oneshot(
+                Request::get(path)
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_access_events(
+            &failing_fixture.access_directory,
+            1,
+            "console.events.read",
+            Some("req_018f2a3b-4c5d-7000-8000-000000000001"),
+        );
     }
 
     fn authenticated_request() -> Request<Body> {
@@ -723,11 +1114,35 @@ mod tests {
             Self::with_window(rate_limit, role, now - 1, now + 3600)
         }
 
+        fn with_index(rate_limit: u64, role: ManagementRole, index: Client) -> Self {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            Self::with_window_and_index(rate_limit, role, now - 1, now + 3600, index)
+        }
+
         fn with_window(
             rate_limit: u64,
             role: ManagementRole,
             token_issued_at: u64,
             token_expires_at: u64,
+        ) -> Self {
+            Self::with_window_and_index(
+                rate_limit,
+                role,
+                token_issued_at,
+                token_expires_at,
+                Client::default(),
+            )
+        }
+
+        fn with_window_and_index(
+            rate_limit: u64,
+            role: ManagementRole,
+            token_issued_at: u64,
+            token_expires_at: u64,
+            index: Client,
         ) -> Self {
             let root =
                 std::env::temp_dir().join(format!("xshield-control-test-{}", Uuid::now_v7()));
@@ -779,7 +1194,7 @@ mod tests {
                 site,
                 publisher,
                 "journal-key-r1",
-                rate_limit,
+                ControlLimits::new(rate_limit, 100).unwrap(),
             )
             .unwrap();
             let seal_key = test_seal_key();
@@ -788,6 +1203,7 @@ mod tests {
                     config,
                     JournalKey::from_hex(JOURNAL_KEY).unwrap(),
                     seal_key,
+                    index,
                     access_journal,
                 ),
                 access_directory: access,
@@ -800,7 +1216,12 @@ mod tests {
         signing.verifying_key().unwrap()
     }
 
-    fn assert_access_events(directory: &Path, expected: usize) {
+    fn assert_access_events(
+        directory: &Path,
+        expected: usize,
+        event_type: &str,
+        target_request_id: Option<&str>,
+    ) {
         let manifests = directory.parent().unwrap().join("access-manifests");
         private_directory(&manifests);
         let signing = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY).unwrap();
@@ -831,8 +1252,12 @@ mod tests {
             .unwrap();
             let record = reader.next_record().unwrap().unwrap();
             let event: Value = serde_json::from_slice(record.plaintext()).unwrap();
-            assert_eq!(event["event_type"], "console.health.read");
+            assert_eq!(event["event_type"], event_type);
             assert!(event["payload"]["reason_code"].is_string());
+            assert_eq!(
+                event["payload"]["target_request_id"],
+                target_request_id.map_or(Value::Null, Value::from)
+            );
             assert!(reader.next_record().unwrap().is_none());
         }
     }

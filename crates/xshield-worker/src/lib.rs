@@ -36,6 +36,7 @@ pub struct PublisherConfig {
     checkpoint_directory: PathBuf,
     target_id: String,
     table: String,
+    active_view: String,
     metadata_retention_days: u16,
     metadata_retention: TimeDelta,
     max_segment_bytes: u64,
@@ -57,10 +58,15 @@ impl PublisherConfig {
     ) -> Result<Self, PublishError> {
         let target_id = target_id.into();
         let table = table.into();
+        let active_view = format!("{table}_active");
         let metadata_retention = TimeDelta::try_days(i64::from(metadata_retention_days))
             .filter(|_| (1..=MAX_METADATA_RETENTION_DAYS).contains(&metadata_retention_days))
             .ok_or(PublishError::InvalidConfig)?;
-        if !valid_name(&target_id) || !valid_name(&table) || max_segment_bytes == 0 {
+        if !valid_name(&target_id)
+            || !valid_name(&table)
+            || !valid_name(&active_view)
+            || max_segment_bytes == 0
+        {
             return Err(PublishError::InvalidConfig);
         }
         Ok(Self {
@@ -69,6 +75,7 @@ impl PublisherConfig {
             checkpoint_directory: checkpoint_directory.into(),
             target_id,
             table,
+            active_view,
             metadata_retention_days,
             metadata_retention,
             max_segment_bytes,
@@ -125,6 +132,95 @@ pub struct PublicationHealth {
     pub has_gaps: bool,
     /// Latest continuously published segment, excluding any later island.
     pub index_watermark: Option<IndexWatermark>,
+}
+
+/// Redacted analytical event returned by the request timeline query.
+#[derive(Clone, Debug, Deserialize, Serialize, Row)]
+pub struct AuditEventSummary {
+    /// Stable immutable event identity.
+    pub event_id: String,
+    /// Versioned event kind.
+    pub event_type: String,
+    /// Pipeline stage extracted by the publisher adapter.
+    pub stage: String,
+    /// Stable stage outcome.
+    pub outcome: String,
+    /// Stable decision or failure reason.
+    pub reason_code: String,
+    /// Deterministic, model, agent, or client-claimed proof class.
+    pub proof_kind: String,
+    /// Provider confidence when the proof contract permits one.
+    pub confidence: Option<f64>,
+    /// Explicit confidence availability state.
+    pub confidence_status: String,
+    /// Authenticated producer occurrence time.
+    #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+    pub occurred_at: DateTime<Utc>,
+    /// Request-local event order.
+    pub request_seq: u32,
+    /// Stage duration in microseconds when available.
+    pub duration_us: u64,
+    /// Policy revision used for the recorded decision.
+    pub policy_revision: String,
+    /// Model revision when the event was model-derived.
+    pub model_revision: String,
+    /// Opaque evidence references; content requires separate authorization.
+    pub evidence_refs: Vec<String>,
+    /// Earlier event identities that directly caused this event.
+    pub cause_event_ids: Vec<String>,
+    /// Data classification for downstream redaction decisions.
+    pub sensitivity: String,
+}
+
+/// One bounded request-timeline result from the active analytical view.
+#[derive(Clone, Debug, Serialize)]
+pub struct RequestEvents {
+    /// Events ordered by request sequence and stable event identity.
+    pub events: Vec<AuditEventSummary>,
+    /// True when additional rows exist beyond this bounded result.
+    pub truncated: bool,
+}
+
+/// Reads a redacted request timeline from the deduplicated, retention-aware view.
+///
+/// Tenant and site come from the authenticated management scope. The query has
+/// fixed execution and scan ceilings and returns at most `limit` rows.
+///
+/// # Errors
+/// Returns [`PublishError::InvalidConfig`] for a zero limit and
+/// [`PublishError::ClickHouse`] when the analytical index is unavailable.
+pub async fn query_request_events(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    request_id: &RequestId,
+    limit: u16,
+) -> Result<RequestEvents, PublishError> {
+    if limit == 0 {
+        return Err(PublishError::InvalidConfig);
+    }
+    let fetch_limit = u64::from(limit) + 1;
+    let mut events = client
+        .query(
+            "SELECT event_id,event_type,stage,outcome,reason_code,proof_kind,confidence,\
+             confidence_status,occurred_at,request_seq,duration_us,policy_revision,\
+             model_revision,evidence_refs,cause_event_ids,sensitivity FROM ? \
+             WHERE tenant_id = ? AND site_id = ? AND request_id = ? \
+             ORDER BY request_seq,event_id LIMIT ?",
+        )
+        .bind(Identifier(&config.active_view))
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(request_id.as_str())
+        .bind(fetch_limit)
+        .with_setting("max_execution_time", "2")
+        .with_setting("max_rows_to_read", "1000000")
+        .fetch_all::<AuditEventSummary>()
+        .await?;
+    let truncated = events.len() > usize::from(limit);
+    events.truncate(usize::from(limit));
+    Ok(RequestEvents { events, truncated })
 }
 
 /// Inspects sealed segments and exact checkpoints without querying `ClickHouse`.
@@ -1137,10 +1233,12 @@ impl From<clickhouse::error::Error> for PublishError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError, PublisherConfig,
-        TimeDelta, closed_segment_paths, inspect_publication_health, prepare_private_directory,
-        publish_sealed_segments, read_private_bounded, write_checkpoint,
+        AuditEventSummary, Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError,
+        PublisherConfig, TimeDelta, closed_segment_paths, inspect_publication_health,
+        prepare_private_directory, publish_sealed_segments, query_request_events,
+        read_private_bounded, write_checkpoint,
     };
+    use chrono::Utc;
     use clickhouse::{Client, test};
     use std::{
         fs,
@@ -1151,7 +1249,7 @@ mod tests {
         JournalKey, JournalLimits, JournalRecord, LocalJournal, SealSigningKey,
         seal_closed_segments,
     };
-    use xshield_core::domain::EventId;
+    use xshield_core::domain::{EventId, RequestId, SiteId, TenantId};
 
     const JOURNAL_KEY_HEX: &str =
         "1111111111111111111111111111111111111111111111111111111111111111";
@@ -1293,6 +1391,63 @@ mod tests {
         .unwrap();
         assert_eq!(second.published_segments, 0);
         assert_eq!(second.checkpointed_segments, 1);
+    }
+
+    #[tokio::test]
+    async fn request_event_query_is_bounded() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide([
+            event_summary("ev_018f2a3b-4c5d-7000-8000-000000000001", 1),
+            event_summary("ev_018f2a3b-4c5d-7000-8000-000000000002", 2),
+        ]));
+        let client = Client::default().with_mock(&mock);
+        let result = query_request_events(
+            &fixture.config,
+            &client,
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_a").unwrap(),
+            &RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].request_seq, 1);
+        assert!(matches!(
+            query_request_events(
+                &fixture.config,
+                &client,
+                &TenantId::parse("tenant_a").unwrap(),
+                &SiteId::parse("site_a").unwrap(),
+                &RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+                0,
+            )
+            .await,
+            Err(PublishError::InvalidConfig)
+        ));
+    }
+
+    fn event_summary(event_id: &str, request_seq: u32) -> AuditEventSummary {
+        AuditEventSummary {
+            event_id: event_id.to_owned(),
+            event_type: "stage.completed".to_owned(),
+            stage: "admission".to_owned(),
+            outcome: "PASS".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            proof_kind: "deterministic".to_owned(),
+            confidence: None,
+            confidence_status: "not_applicable".to_owned(),
+            occurred_at: Utc::now(),
+            request_seq,
+            duration_us: 10,
+            policy_revision: "policy-r1".to_owned(),
+            model_revision: String::new(),
+            evidence_refs: Vec::new(),
+            cause_event_ids: Vec::new(),
+            sensitivity: "INTERNAL".to_owned(),
+        }
     }
 
     #[test]

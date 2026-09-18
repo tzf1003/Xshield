@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 axum.workspace = true
 chrono.workspace = true
+clickhouse.workspace = true
 openssl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +20,7 @@ xshield-worker = { path = "../xshield-worker" }
 zeroize.workspace = true
 
 [dev-dependencies]
+clickhouse = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 
 [lints]
