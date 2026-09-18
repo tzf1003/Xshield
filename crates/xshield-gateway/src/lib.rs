@@ -26,17 +26,21 @@ use xshield_core::{
 };
 
 pub mod auth_binding;
+pub mod request_crypto;
 pub mod response_grant;
 pub mod share_issue;
 pub mod share_token;
 
 use auth_binding::{AuthBindingRule, AuthTransitionRule};
+use request_crypto::RequestCryptoRule;
 use response_grant::ResponseGrantRule;
 
 /// Maximum accepted gateway configuration size.
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 /// Maximum complete private JSON response accepted by the MVP adapter.
 pub const MAX_BUFFERED_JSON_BYTES: usize = 16 * 1024 * 1024;
+/// Pingora retry-buffer ceiling used to replace a pre-read encrypted entity.
+pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 
 /// Fully validated gateway configuration selected at process startup.
@@ -89,6 +93,7 @@ struct CompiledOperation {
     policy: OperationPolicy,
     source_action: Option<ActionId>,
     resource: Option<CompiledResource>,
+    request_crypto: Option<RequestCryptoRule>,
     response: Option<CompiledResponse>,
 }
 
@@ -256,7 +261,30 @@ struct OperationDto {
     view_profile: Option<String>,
     resource_query_parameter: Option<String>,
     resource_path_parameter: Option<String>,
+    #[serde(default)]
+    request_crypto: Option<RequestCryptoDto>,
     response: Option<ResponseDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestCryptoDto {
+    mode: RequestCryptoModeDto,
+    adapter_revision: String,
+    key_id: String,
+    key_not_before: u64,
+    key_expires_at: u64,
+    max_envelope_bytes: usize,
+    max_plaintext_bytes: usize,
+    max_message_age_seconds: u64,
+    max_future_skew_seconds: u64,
+    max_active_messages: u32,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum RequestCryptoModeDto {
+    DirectDecrypt,
 }
 
 #[derive(Deserialize)]
@@ -392,6 +420,7 @@ impl GatewayConfig {
                         .response
                         .as_ref()
                         .is_some_and(|response| response.auth_binding.is_some())
+                        || operation.request_crypto.is_some()
                 })
         {
             return Err(ConfigError::Invalid("identity_store"));
@@ -497,6 +526,26 @@ impl GatewayConfig {
         self.identity_store
     }
 
+    /// Returns whether request admission or response binding needs identity state.
+    #[must_use]
+    pub fn requires_identity_runtime(&self) -> bool {
+        self.operations
+            .values()
+            .chain(self.path_resource_operations.iter())
+            .any(|operation| {
+                matches!(
+                    operation.policy.admission_class(),
+                    AdmissionClass::AuthenticatedRoot
+                        | AdmissionClass::UiActionRequired
+                        | AdmissionClass::ShareEntry
+                        | AdmissionClass::ServiceIdentity
+                ) || operation
+                    .response
+                    .as_ref()
+                    .is_some_and(|response| response.auth_binding.is_some())
+            })
+    }
+
     /// Applies the compiled exact-operation policy with no client-created proof.
     ///
     /// Protected entries fail closed until their authoritative proof loader
@@ -535,6 +584,26 @@ impl GatewayConfig {
     #[must_use]
     pub fn buffered_json_max_bytes(&self, method: &str, path: &str) -> Option<usize> {
         Some(self.operation(method, path)?.response.as_ref()?.max_bytes)
+    }
+
+    /// Returns the server-selected request decryption rule for an exact operation.
+    #[must_use]
+    pub fn request_crypto_rule(&self, method: &str, path: &str) -> Option<&RequestCryptoRule> {
+        self.operation(method, path)?.request_crypto.as_ref()
+    }
+
+    /// Returns the sole request-decryption key identifier required at startup.
+    #[must_use]
+    pub fn request_crypto_key_id(&self) -> Option<&str> {
+        self.operations
+            .values()
+            .chain(self.path_resource_operations.iter())
+            .find_map(|operation| {
+                operation
+                    .request_crypto
+                    .as_ref()
+                    .map(RequestCryptoRule::key_id)
+            })
     }
 
     /// Returns one validated response extraction rule and its exact target operation.
@@ -727,6 +796,19 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
                 path_resources.push(compiled);
             }
         }
+    }
+    let request_key_ids = exact
+        .values()
+        .chain(path_resources.iter())
+        .filter_map(|operation| {
+            operation
+                .request_crypto
+                .as_ref()
+                .map(RequestCryptoRule::key_id)
+        })
+        .collect::<BTreeSet<_>>();
+    if request_key_ids.len() > 1 {
+        return Err(ConfigError::Invalid("operations.request_crypto.key_id"));
     }
     validate_response_contracts(&exact, &path_resources)?;
     Ok(CompiledOperations {
@@ -961,6 +1043,10 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         capability,
     )
     .map_err(ConfigError::Policy)?;
+    let request_crypto = dto
+        .request_crypto
+        .map(|rule| compile_request_crypto(rule, method, dto.admission))
+        .transpose()?;
     let response = dto.response.map(compile_response).transpose()?;
     Ok(CompiledOperation {
         method,
@@ -969,7 +1055,44 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         policy,
         source_action,
         resource,
+        request_crypto,
         response,
+    })
+}
+
+fn compile_request_crypto(
+    dto: RequestCryptoDto,
+    method: HttpMethod,
+    admission: AdmissionDto,
+) -> Result<RequestCryptoRule, ConfigError> {
+    if !matches!(dto.mode, RequestCryptoModeDto::DirectDecrypt)
+        || !matches!(
+            method,
+            HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
+        )
+        || matches!(admission, AdmissionDto::UiActionRequired)
+        || !valid_scoped_value(&dto.adapter_revision)
+        || !valid_scoped_value(&dto.key_id)
+        || dto.key_not_before >= dto.key_expires_at
+        || !(1..=MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES).contains(&dto.max_envelope_bytes)
+        || dto.max_plaintext_bytes == 0
+        || dto.max_plaintext_bytes > dto.max_envelope_bytes / 2
+        || !(1..=3_600).contains(&dto.max_message_age_seconds)
+        || dto.max_future_skew_seconds > 300
+        || !(1..=1_000_000).contains(&dto.max_active_messages)
+    {
+        return Err(ConfigError::Invalid("operations.request_crypto"));
+    }
+    Ok(RequestCryptoRule {
+        adapter_revision: dto.adapter_revision,
+        key_id: dto.key_id,
+        key_not_before: UnixSeconds::new(dto.key_not_before),
+        key_expires_at: UnixSeconds::new(dto.key_expires_at),
+        max_envelope_bytes: dto.max_envelope_bytes,
+        max_plaintext_bytes: dto.max_plaintext_bytes,
+        max_message_age_seconds: dto.max_message_age_seconds,
+        max_future_skew_seconds: dto.max_future_skew_seconds,
+        max_active_messages: dto.max_active_messages,
     })
 }
 
@@ -1721,6 +1844,40 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(&serde_json::to_vec(&incoherent).unwrap()),
             Err(ConfigError::Invalid("operations.response.auth_binding"))
+        ));
+    }
+
+    #[test]
+    fn compiles_one_bounded_direct_decryption_adapter() {
+        let mut config: serde_json::Value = serde_json::from_str(CONFIG).unwrap();
+        config["operations"][1]["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
+        config["operations"][1]["source_action"] = serde_json::Value::Null;
+        config["operations"][1]["request_crypto"] = serde_json::json!({
+            "mode": "DIRECT_DECRYPT",
+            "adapter_revision": "account-json-r1",
+            "key_id": "request-key-r1",
+            "key_not_before": 1,
+            "key_expires_at": 4_102_444_800_u64,
+            "max_envelope_bytes": 4096,
+            "max_plaintext_bytes": 1024,
+            "max_message_age_seconds": 60,
+            "max_future_skew_seconds": 5,
+            "max_active_messages": 1000
+        });
+        let compiled = GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).unwrap();
+        let rule = compiled.request_crypto_rule("POST", "/account").unwrap();
+        assert_eq!(rule.adapter_revision(), "account-json-r1");
+        assert_eq!(compiled.request_crypto_key_id(), Some("request-key-r1"));
+
+        config["operations"][1]["admission"] = serde_json::json!("UI_ACTION_REQUIRED");
+        assert!(GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).is_err());
+        config["operations"][1]["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
+
+        config["operations"][1]["request_crypto"]["max_envelope_bytes"] =
+            serde_json::json!(MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES + 1);
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
+            Err(ConfigError::Invalid("operations.request_crypto"))
         ));
     }
 }

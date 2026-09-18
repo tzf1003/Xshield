@@ -164,6 +164,28 @@ pub enum ReasonCode {
     ResponseBufferCapacityExhausted,
     /// A configured private response failed framing, encoding, media-type, or JSON validation.
     ResponseValidationFailed,
+    /// A configured encrypted request exceeded its complete-buffer bound.
+    RequestBodyTooLarge,
+    /// Aggregate encrypted-request buffering capacity was unavailable.
+    RequestBufferCapacityExhausted,
+    /// The encrypted request framing, media type, envelope, version, or plaintext was invalid.
+    RequestEnvelopeInvalid,
+    /// The encrypted request failed authenticated decryption.
+    RequestCryptoAuthenticationFailed,
+    /// Authenticated plaintext was validated and frozen for origin rebuilding.
+    RequestCryptoDecoded,
+    /// The scoped request-decryption key could not be obtained.
+    RequestCryptoKeyUnavailable,
+    /// The authenticated request message expired before replay consumption.
+    RequestCryptoMessageExpired,
+    /// The authenticated request message was issued beyond the configured skew.
+    RequestCryptoMessageFromFuture,
+    /// The authenticated request nonce or message identifier was already consumed.
+    RequestCryptoReplayDetected,
+    /// The authoritative replay ledger could not consume the message safely.
+    RequestCryptoReplayStoreUnavailable,
+    /// The authoritative replay ledger reached its configured active bound.
+    RequestCryptoReplayCapacityExceeded,
     /// Origin side effects cannot be determined after a proxy failure.
     OriginOutcomeUnknown,
     /// A durable request prefix ended before a release decision or forward intent committed.
@@ -231,6 +253,17 @@ impl ReasonCode {
             Self::ResponseBodyTooLarge => "RESPONSE_BODY_TOO_LARGE",
             Self::ResponseBufferCapacityExhausted => "RESPONSE_BUFFER_CAPACITY_EXHAUSTED",
             Self::ResponseValidationFailed => "RESPONSE_VALIDATION_FAILED",
+            Self::RequestBodyTooLarge => "REQUEST_BODY_TOO_LARGE",
+            Self::RequestBufferCapacityExhausted => "REQUEST_BUFFER_CAPACITY_EXHAUSTED",
+            Self::RequestEnvelopeInvalid => "REQUEST_ENVELOPE_INVALID",
+            Self::RequestCryptoAuthenticationFailed => "REQUEST_CRYPTO_AUTHENTICATION_FAILED",
+            Self::RequestCryptoDecoded => "REQUEST_CRYPTO_DECODED",
+            Self::RequestCryptoKeyUnavailable => "REQUEST_CRYPTO_KEY_UNAVAILABLE",
+            Self::RequestCryptoMessageExpired => "REQUEST_CRYPTO_MESSAGE_EXPIRED",
+            Self::RequestCryptoMessageFromFuture => "REQUEST_CRYPTO_MESSAGE_FROM_FUTURE",
+            Self::RequestCryptoReplayDetected => "REQUEST_CRYPTO_REPLAY_DETECTED",
+            Self::RequestCryptoReplayStoreUnavailable => "REQUEST_CRYPTO_REPLAY_STORE_UNAVAILABLE",
+            Self::RequestCryptoReplayCapacityExceeded => "REQUEST_CRYPTO_REPLAY_CAPACITY_EXCEEDED",
             Self::OriginOutcomeUnknown => "ORIGIN_OUTCOME_UNKNOWN",
             Self::RequestIncomplete => "REQUEST_INCOMPLETE",
             Self::ClockUnavailable => "CLOCK_UNAVAILABLE",

@@ -1,5 +1,13 @@
 # 08 双向应用层加密接管
 
+## 8.0 当前实现边界
+
+首个可运行增量实现请求侧 enforce `DIRECT_DECRYPT`：`application/vnd.xshield.encrypted+json` v1 封包使用 AES-256-GCM，必须携带规范 `msg_<UUIDv7>`、`issued_at`、`expires_at`，nonce 固定 12 字节、tag 固定 16 字节，二进制字段采用小写十六进制。AAD 以长度前缀绑定 tenant、site、operation、method、实际 path、adapter revision、key-id、message-id、消息时间窗和重建 Content-Type。网关在任何源站连接前认证解密，严格校验有界 JSON object，再通过 PostgreSQL 原子消费同一 key 作用域的 message-id 与 nonce，随后只把这份已验证且未重放的明文冻结并重建为 `application/json` 请求。
+
+每个 operation 必须由服务端配置 `DIRECT_DECRYPT`、adapter revision、key-id、密钥生效/失效时间、消息最大寿命、未来时钟偏差、活跃消息容量、封包上限和明文上限；当前 Pingora 重放边界将封包上限硬限制为 64 KiB，同一进程只允许一个 request key-id，且加密 operation 拒绝未纳入 AAD 的查询串。请求侧加密 operation 必须配置 PostgreSQL 存储；所有实例共享双唯一防重放账本，过期记录在容量检查前清理。密钥从独立环境秘密注入后仍须通过 tenant/site/purpose/time 精确匹配的 `KeyAccessPort` 才能使用。无效封包、认证失败、过期、超前、重放、账本不可用或容量耗尽均以稳定原因终止，不转发原封包。审计 `crypto_decode` 阶段记录确定性终态、适配版本、算法、非秘密 key-id、message-id、nonce 摘要、消息时间窗及输入/重建 SHA-256，不记录密钥或明文。
+
+该增量尚未声明解密字段到 UI 动作字段映射、响应侧接管、observe/compatibility、KEY_REWRAP、ENVELOPE_HOOK、构建版本共存和证据库原文保留完成；因此配置会拒绝在 `UI_ACTION_REQUIRED` operation 启用当前适配器，这些能力继续按本章后续约束迭代。
+
 ## 8.1 三条路径
 
 DIRECT_DECRYPT：协议、密钥取得方式和密钥使用授权已明确，WAF 解密实际请求/响应，必要时重建。

@@ -16,18 +16,22 @@ use std::{
     error::Error,
     fs,
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use xshield_audit::JournalKey;
 use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
+use xshield_gateway::request_crypto::{FrozenRequest, KeyAccessPort, KeyAccessQuery};
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome, MAX_CONFIG_BYTES};
+use xshield_postgres::{
+    PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, StoreError,
+};
 use zeroize::Zeroizing;
 
 use crate::buffered_json::BufferedJsonResponse;
 use crate::durable_audit::{
-    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, new_trace_id,
+    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RequestCryptoAudit, new_trace_id,
 };
 use crate::protected_identity::{
     PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE, store_failure_reason,
@@ -35,12 +39,46 @@ use crate::protected_identity::{
 };
 
 const BUFFERED_JSON_IN_FLIGHT_BYTES: usize = 64 * 1024 * 1024;
+const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
 
 struct Gateway {
     config: Arc<GatewayConfig>,
     audit: DurableAudit,
     identity: Option<ProtectedIdentity>,
-    buffered_json_budget: Arc<Semaphore>,
+    request_key: Option<EnvRequestKey>,
+    postgres: Option<Arc<PostgresRuntime>>,
+    buffered_body_budget: Arc<Semaphore>,
+}
+
+struct PostgresRuntime {
+    database_url: Zeroizing<String>,
+    max_connections: u32,
+    acquire_timeout: Duration,
+    store: tokio::sync::OnceCell<PostgresIdentityStore>,
+}
+
+impl PostgresRuntime {
+    fn from_env(config: xshield_gateway::IdentityStoreConfig) -> Result<Self, env::VarError> {
+        Ok(Self {
+            database_url: Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?),
+            max_connections: config.max_connections(),
+            acquire_timeout: Duration::from_millis(config.acquire_timeout_ms()),
+            store: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    async fn store(&self) -> Result<&PostgresIdentityStore, StoreError> {
+        self.store
+            .get_or_try_init(|| async {
+                PostgresIdentityStore::connect(
+                    &self.database_url,
+                    self.max_connections,
+                    self.acquire_timeout,
+                )
+                .await
+            })
+            .await
+    }
 }
 
 struct RequestContext {
@@ -49,6 +87,9 @@ struct RequestContext {
     started_at: Instant,
     decision: Option<GatewayDecision>,
     admission_audit: Option<AdmissionAudit>,
+    rebuilt_request_body: Option<Bytes>,
+    rebuilt_request_len: Option<usize>,
+    request_crypto_audit: Option<RequestCryptoAudit>,
     buffered_response: Option<BufferedJsonResponse>,
     response_identity: Option<ResponseIdentity>,
     anonymous_session_cookie: Option<String>,
@@ -68,6 +109,9 @@ impl ProxyHttp for Gateway {
             started_at: Instant::now(),
             decision: None,
             admission_audit: None,
+            rebuilt_request_body: None,
+            rebuilt_request_len: None,
+            request_crypto_audit: None,
             buffered_response: None,
             response_identity: None,
             anonymous_session_cookie: None,
@@ -77,6 +121,9 @@ impl ProxyHttp for Gateway {
         }
     }
 
+    // Admission, request transformation, and the durable forward barrier stay
+    // contiguous so no later refactor can dispatch between those checks.
+    #[allow(clippy::too_many_lines)]
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -124,7 +171,7 @@ impl ProxyHttp for Gateway {
             .await?;
             return Ok(true);
         };
-        let decision = match self.identity.as_ref() {
+        let mut decision = match self.identity.as_ref() {
             Some(identity) => {
                 if let Ok(admission) = identity
                     .admit(&self.config, request, &request_id, client_ip, now)
@@ -142,6 +189,8 @@ impl ProxyHttp for Gateway {
             }
             None => self.config.admit(&method, &path, now),
         };
+        self.apply_request_crypto(session, context, &method, &path, now, &mut decision)
+            .await;
         let audit_result = self
             .audit
             .commit_admission(AdmissionFacts {
@@ -150,6 +199,7 @@ impl ProxyHttp for Gateway {
                 method: &method,
                 decision: &decision,
                 duration_us: elapsed_us(context.started_at),
+                request_crypto: context.request_crypto_audit.as_ref(),
             })
             .await;
         let admission_audit = match audit_result {
@@ -202,8 +252,44 @@ impl ProxyHttp for Gateway {
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
         strip_edge_proofs(upstream_request)?;
+        if let Some(length) = context.rebuilt_request_len {
+            for name in [
+                "Transfer-Encoding",
+                "Content-Encoding",
+                "Expect",
+                "Trailer",
+                "Content-MD5",
+                "Digest",
+                "Content-Digest",
+                "Repr-Digest",
+            ] {
+                upstream_request.remove_header(name);
+            }
+            upstream_request.insert_header("Content-Type", "application/json")?;
+            upstream_request.insert_header("Content-Length", length.to_string())?;
+        }
         upstream_request.insert_header("Host", self.config.origin_server_name())?;
         upstream_request.insert_header("X-Xshield-Request-Id", &context.request_id)?;
+        Ok(())
+    }
+
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        context: &mut Self::CTX,
+    ) -> PingoraResult<()> {
+        if context.rebuilt_request_len.is_none() {
+            return Ok(());
+        }
+        if !end_of_stream {
+            return request_error(ReasonCode::RequestEnvelopeInvalid);
+        }
+        let rebuilt = context.rebuilt_request_body.take().ok_or_else(|| {
+            PingoraError::explain(ErrorType::HTTPStatus(502), "rebuilt body missing")
+        })?;
+        *body = Some(rebuilt);
         Ok(())
     }
 
@@ -228,7 +314,7 @@ impl ProxyHttp for Gateway {
                 match BufferedJsonResponse::begin(
                     upstream_response,
                     limit,
-                    &self.buffered_json_budget,
+                    &self.buffered_body_budget,
                 ) {
                     Ok(buffer) => {
                         if let Some(rule) = self
@@ -372,6 +458,127 @@ impl ProxyHttp for Gateway {
 }
 
 impl Gateway {
+    async fn apply_request_crypto(
+        &self,
+        session: &mut Session,
+        context: &mut RequestContext,
+        method: &str,
+        path: &str,
+        now: UnixSeconds,
+        decision: &mut GatewayDecision,
+    ) {
+        if decision.outcome != GatewayOutcome::Allowed {
+            return;
+        }
+        let Some(rule) = self.config.request_crypto_rule(method, path) else {
+            return;
+        };
+        let started_at = Instant::now();
+        match self
+            .decrypt_request(session, rule, now, decision, &context.request_id)
+            .await
+        {
+            Ok(frozen) => {
+                context.rebuilt_request_len = Some(frozen.body_len());
+                context.request_crypto_audit = Some(RequestCryptoAudit::passed(
+                    frozen.evidence(),
+                    elapsed_us(started_at),
+                ));
+                context.rebuilt_request_body = Some(frozen.into_body());
+            }
+            Err(reason) => {
+                context.request_crypto_audit = Some(RequestCryptoAudit::failed(
+                    rule,
+                    reason,
+                    elapsed_us(started_at),
+                ));
+                decision.outcome = GatewayOutcome::Denied;
+                decision.reason_code = reason;
+            }
+        }
+    }
+
+    async fn decrypt_request(
+        &self,
+        session: &mut Session,
+        rule: &xshield_gateway::request_crypto::RequestCryptoRule,
+        now: UnixSeconds,
+        decision: &GatewayDecision,
+        request_id: &str,
+    ) -> Result<FrozenRequest, ReasonCode> {
+        validate_encrypted_request_headers(session.req_header(), rule.max_envelope_bytes())?;
+        let method = session.req_header().method.as_str().to_owned();
+        let path = session.req_header().uri.path().to_owned();
+        session.as_mut().enable_retry_buffering();
+        let permits = u32::try_from(rule.max_envelope_bytes())
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        let _permit = Arc::clone(&self.buffered_body_budget)
+            .try_acquire_many_owned(permits)
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        let mut envelope = Vec::new();
+        while let Some(chunk) = session
+            .read_request_body()
+            .await
+            .map_err(|_| ReasonCode::RequestEnvelopeInvalid)?
+        {
+            if envelope.len().saturating_add(chunk.len()) > rule.max_envelope_bytes() {
+                return Err(ReasonCode::RequestBodyTooLarge);
+            }
+            envelope.extend_from_slice(&chunk);
+        }
+        let operation_id = decision
+            .operation_id
+            .as_ref()
+            .ok_or(ReasonCode::RequestEnvelopeInvalid)?;
+        let keys = self
+            .request_key
+            .as_ref()
+            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let frozen = rule.decode(
+            self.config.tenant_id().as_str(),
+            self.config.site_id().as_str(),
+            operation_id.as_str(),
+            &method,
+            &path,
+            now,
+            &envelope,
+            keys,
+        )?;
+        let request_id = RequestId::parse(request_id)
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let postgres = self
+            .postgres
+            .as_ref()
+            .ok_or(ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let message = RequestCryptoMessage::new(
+            self.config.tenant_id(),
+            self.config.site_id(),
+            rule.key_id(),
+            frozen.message_id(),
+            frozen.nonce(),
+            &request_id,
+            frozen.expires_at(),
+            now,
+            rule.max_active_messages(),
+        )
+        .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let store = postgres
+            .store()
+            .await
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        match store
+            .consume_request_crypto_message(message)
+            .await
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?
+        {
+            RequestCryptoMessageOutcome::Consumed => Ok(frozen),
+            RequestCryptoMessageOutcome::Replayed => Err(ReasonCode::RequestCryptoReplayDetected),
+            RequestCryptoMessageOutcome::CapacityExceeded => {
+                Err(ReasonCode::RequestCryptoReplayCapacityExceeded)
+            }
+        }
+    }
+
     fn commit_auth_binding(
         &self,
         session: &Session,
@@ -599,6 +806,13 @@ fn response_error<T>(reason: ReasonCode) -> PingoraResult<T> {
     ))
 }
 
+fn request_error<T>(reason: ReasonCode) -> PingoraResult<T> {
+    Err(PingoraError::explain(
+        ErrorType::HTTPStatus(400),
+        reason.as_str(),
+    ))
+}
+
 fn elapsed_us(started_at: Instant) -> u64 {
     u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -607,7 +821,18 @@ const fn denial_status(reason: ReasonCode) -> u16 {
     match reason {
         ReasonCode::AuthRequired => 401,
         ReasonCode::AnonymousSessionRateExceeded => 429,
-        ReasonCode::AnonymousSessionCapacityExceeded | ReasonCode::IdentityStoreUnavailable => 503,
+        ReasonCode::RequestBodyTooLarge => 413,
+        ReasonCode::AnonymousSessionCapacityExceeded
+        | ReasonCode::IdentityStoreUnavailable
+        | ReasonCode::RequestBufferCapacityExhausted
+        | ReasonCode::RequestCryptoKeyUnavailable
+        | ReasonCode::RequestCryptoReplayStoreUnavailable
+        | ReasonCode::RequestCryptoReplayCapacityExceeded => 503,
+        ReasonCode::RequestEnvelopeInvalid
+        | ReasonCode::RequestCryptoAuthenticationFailed
+        | ReasonCode::RequestCryptoMessageExpired
+        | ReasonCode::RequestCryptoMessageFromFuture => 400,
+        ReasonCode::RequestCryptoReplayDetected => 409,
         _ => 403,
     }
 }
@@ -653,14 +878,115 @@ fn load_config() -> Result<GatewayConfig, Box<dyn Error>> {
     Ok(GatewayConfig::from_json(&bytes)?)
 }
 
+struct EnvRequestKey {
+    tenant_id: String,
+    site_id: String,
+    key_id: String,
+    key: Zeroizing<[u8; 32]>,
+}
+
+impl EnvRequestKey {
+    fn from_env(config: &GatewayConfig) -> Result<Option<Self>, Box<dyn Error>> {
+        let Some(key_id) = config.request_crypto_key_id() else {
+            return Ok(None);
+        };
+        let value = Zeroizing::new(env::var("XSHIELD_REQUEST_DECRYPTION_KEY_HEX")?);
+        let key = parse_request_key(&value).ok_or("invalid request decryption key")?;
+        Ok(Some(Self {
+            tenant_id: config.tenant_id().as_str().to_owned(),
+            site_id: config.site_id().as_str().to_owned(),
+            key_id: key_id.to_owned(),
+            key: Zeroizing::new(key),
+        }))
+    }
+}
+
+impl KeyAccessPort for EnvRequestKey {
+    fn request_decryption_key(
+        &self,
+        query: KeyAccessQuery<'_>,
+    ) -> Result<Zeroizing<[u8; 32]>, ReasonCode> {
+        if query.tenant_id != self.tenant_id
+            || query.site_id != self.site_id
+            || query.key_id != self.key_id
+            || query.purpose != "request_direct_decrypt"
+            || query.at == UnixSeconds::new(0)
+        {
+            return Err(ReasonCode::RequestCryptoKeyUnavailable);
+        }
+        Ok(Zeroizing::new(*self.key))
+    }
+}
+
+fn parse_request_key(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let mut key = [0; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let nibble = |byte| match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => 0,
+        };
+        key[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
+    }
+    Some(key)
+}
+
+fn validate_encrypted_request_headers(
+    request: &pingora::http::RequestHeader,
+    max_bytes: usize,
+) -> Result<(), ReasonCode> {
+    if request.uri.query().is_some()
+        || request
+            .headers
+            .get("Content-Type")
+            .and_then(|value| value.to_str().ok())
+            != Some(ENCRYPTED_REQUEST_CONTENT_TYPE)
+        || request.headers.contains_key("Content-Encoding")
+        || request.headers.contains_key("Trailer")
+    {
+        return Err(ReasonCode::RequestEnvelopeInvalid);
+    }
+    if let Some(length) = request.headers.get("Content-Length") {
+        let length = length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or(ReasonCode::RequestEnvelopeInvalid)?;
+        if length > max_bytes {
+            return Err(ReasonCode::RequestBodyTooLarge);
+        }
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     let config = Arc::new(load_config()?);
     let key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let audit = DurableAudit::open(&config, JournalKey::from_hex(&key_hex)?)?;
-    let identity = config
+    let postgres = config
         .identity_store()
-        .map(ProtectedIdentity::from_env)
+        .map(PostgresRuntime::from_env)
+        .transpose()?
+        .map(Arc::new);
+    let identity = config
+        .requires_identity_runtime()
+        .then(|| {
+            postgres
+                .clone()
+                .ok_or("identity store runtime unavailable")
+                .and_then(|store| {
+                    ProtectedIdentity::from_env(store).map_err(|_| "identity runtime unavailable")
+                })
+        })
         .transpose()?;
+    let request_key = EnvRequestKey::from_env(&config)?;
     let mut server = Server::new(None)?;
     server.bootstrap();
     let mut proxy = http_proxy_service(
@@ -669,7 +995,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             config: Arc::clone(&config),
             audit,
             identity,
-            buffered_json_budget: Arc::new(Semaphore::new(BUFFERED_JSON_IN_FLIGHT_BYTES)),
+            request_key,
+            postgres,
+            buffered_body_budget: Arc::new(Semaphore::new(BUFFERED_JSON_IN_FLIGHT_BYTES)),
         },
     );
     proxy.add_tcp(&config.listen().to_string());

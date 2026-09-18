@@ -7,7 +7,7 @@
   },
   "tenant_id": "tenant_demo",
   "site_id": "site_demo",
-  "policy_revision": "demo-r4",
+  "policy_revision": "demo-r5",
   "audit": {
     "directory": "target/xshield-audit-demo",
     "key_id": "journal-key-r1",
@@ -77,6 +77,27 @@
       "source_action": null,
       "resource_type": null,
       "view_profile": null
+    },
+    {
+      "operation_id": "orders.create",
+      "method": "POST",
+      "path": "/orders/create",
+      "admission": "AUTHENTICATED_ROOT",
+      "source_action": null,
+      "resource_type": null,
+      "view_profile": null,
+      "request_crypto": {
+        "mode": "DIRECT_DECRYPT",
+        "adapter_revision": "orders-create-json-r1",
+        "key_id": "request-key-r1",
+        "key_not_before": 1,
+        "key_expires_at": 4102444800,
+        "max_envelope_bytes": 65536,
+        "max_plaintext_bytes": 16384,
+        "max_message_age_seconds": 60,
+        "max_future_skew_seconds": 5,
+        "max_active_messages": 100000
+      }
     },
     {
       "operation_id": "records.share.read",

@@ -4,8 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fmt,
     net::IpAddr,
-    sync::Mutex,
-    time::Duration,
+    sync::{Arc, Mutex},
 };
 use uuid::Uuid;
 use xshield_core::{
@@ -76,10 +75,7 @@ pub(crate) fn strip_edge_proofs(request: &mut RequestHeader) -> PingoraResult<()
 }
 
 pub(crate) struct ProtectedIdentity {
-    database_url: Zeroizing<String>,
-    max_connections: u32,
-    acquire_timeout: Duration,
-    store: tokio::sync::OnceCell<PostgresIdentityStore>,
+    store: Arc<crate::PostgresRuntime>,
     fingerprint_key: Zeroizing<[u8; 32]>,
     anonymous_creation_window: Mutex<Option<AnonymousCreationWindow>>,
 }
@@ -152,14 +148,12 @@ enum AnonymousAdmission {
 }
 
 impl ProtectedIdentity {
-    pub(crate) fn from_env(config: IdentityStoreConfig) -> Result<Self, IdentityRuntimeError> {
-        let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
+    pub(crate) fn from_env(
+        store: Arc<crate::PostgresRuntime>,
+    ) -> Result<Self, IdentityRuntimeError> {
         let key_hex = Zeroizing::new(env::var("XSHIELD_FINGERPRINT_KEY_HEX")?);
         Ok(Self {
-            database_url,
-            max_connections: config.max_connections(),
-            acquire_timeout: Duration::from_millis(config.acquire_timeout_ms()),
-            store: tokio::sync::OnceCell::new(),
+            store,
             fingerprint_key: Zeroizing::new(parse_key(&key_hex)?),
             anonymous_creation_window: Mutex::new(None),
         })
@@ -186,17 +180,7 @@ impl ProtectedIdentity {
     }
 
     async fn store(&self) -> Result<&PostgresIdentityStore, IdentityRuntimeError> {
-        self.store
-            .get_or_try_init(|| async {
-                PostgresIdentityStore::connect(
-                    &self.database_url,
-                    self.max_connections,
-                    self.acquire_timeout,
-                )
-                .await
-            })
-            .await
-            .map_err(Into::into)
+        self.store.store().await.map_err(Into::into)
     }
 
     async fn establish_anonymous_session(

@@ -18,6 +18,7 @@ use xshield_audit::{
 use xshield_core::audit::ReasonCode;
 use xshield_core::domain::{EventId, InvalidValue};
 
+use xshield_gateway::request_crypto::{RequestCryptoEvidence, RequestCryptoRule};
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome};
 
 #[derive(Clone)]
@@ -44,6 +45,69 @@ pub(crate) struct AdmissionFacts<'a> {
     pub(crate) method: &'a str,
     pub(crate) decision: &'a GatewayDecision,
     pub(crate) duration_us: u64,
+    pub(crate) request_crypto: Option<&'a RequestCryptoAudit>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RequestCryptoAudit {
+    algorithm: &'static str,
+    adapter_revision: String,
+    key_id: String,
+    message_id: Option<String>,
+    nonce_sha256: Option<String>,
+    issued_at: Option<u64>,
+    expires_at: Option<u64>,
+    envelope_sha256: Option<String>,
+    rebuilt_sha256: Option<String>,
+    outcome: &'static str,
+    reason_code: ReasonCode,
+    duration_us: u64,
+}
+
+impl RequestCryptoAudit {
+    pub(crate) fn passed(evidence: &RequestCryptoEvidence, duration_us: u64) -> Self {
+        Self {
+            algorithm: evidence.algorithm(),
+            adapter_revision: evidence.adapter_revision().to_owned(),
+            key_id: evidence.key_id().to_owned(),
+            message_id: Some(evidence.message_id().to_owned()),
+            nonce_sha256: Some(evidence.nonce_sha256().to_owned()),
+            issued_at: Some(evidence.issued_at().value()),
+            expires_at: Some(evidence.expires_at().value()),
+            envelope_sha256: Some(evidence.envelope_sha256().to_owned()),
+            rebuilt_sha256: Some(evidence.rebuilt_sha256().to_owned()),
+            outcome: "PASS",
+            reason_code: ReasonCode::RequestCryptoDecoded,
+            duration_us,
+        }
+    }
+
+    pub(crate) fn failed(
+        rule: &RequestCryptoRule,
+        reason_code: ReasonCode,
+        duration_us: u64,
+    ) -> Self {
+        let outcome = match reason_code {
+            ReasonCode::RequestBufferCapacityExhausted
+            | ReasonCode::RequestCryptoKeyUnavailable
+            | ReasonCode::RequestCryptoReplayStoreUnavailable => "ERROR",
+            _ => "DENY",
+        };
+        Self {
+            algorithm: rule.algorithm(),
+            adapter_revision: rule.adapter_revision().to_owned(),
+            key_id: rule.key_id().to_owned(),
+            message_id: None,
+            nonce_sha256: None,
+            issued_at: None,
+            expires_at: None,
+            envelope_sha256: None,
+            rebuilt_sha256: None,
+            outcome,
+            reason_code,
+            duration_us,
+        }
+    }
 }
 
 pub(crate) struct FinalFacts<'a> {
@@ -111,6 +175,9 @@ impl DurableAudit {
         self.ready.store(false, Ordering::Release);
     }
 
+    // The event sequence stays visible here so its causal and request ordering
+    // can be reviewed as one durability transaction.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn commit_admission(
         &self,
         facts: AdmissionFacts<'_>,
@@ -152,30 +219,74 @@ impl DurableAudit {
                     duration_us: facts.duration_us,
                     rule_revision: Some(self.policy_revision.clone()),
                     model_call_id: None,
-                    facts: StageFacts { operation_id },
+                    facts: StageFacts {
+                        operation_id: operation_id.clone(),
+                    },
                     coverage: StageCoverage {
                         admission_checked: true,
                     },
                 },
             ),
-            PendingEvent::new(
-                decision_id.clone(),
-                "decision.composed",
-                3,
-                vec![stage_id.as_str().to_owned()],
-                Payload::Decision {
-                    decision,
-                    reason_code: facts.decision.reason_code.as_str(),
-                    origin_state: "not_sent",
-                },
-            ),
         ];
+        let mut last_stage_id = stage_id.as_str().to_owned();
+        let mut request_sequence = 3;
+        if let Some(crypto) = facts.request_crypto {
+            let crypto_id = new_event_id()?;
+            events.push(PendingEvent::new(
+                crypto_id.clone(),
+                "stage.completed",
+                request_sequence,
+                vec![last_stage_id],
+                Payload::CryptoStageCompleted {
+                    stage: "crypto_decode",
+                    stage_execution_id: format!("stg_{}", Uuid::now_v7()),
+                    outcome: crypto.outcome,
+                    reason_code: crypto.reason_code.as_str(),
+                    proof_kind: "deterministic",
+                    confidence: None,
+                    confidence_status: "not_applicable",
+                    duration_us: crypto.duration_us,
+                    rule_revision: Some(crypto.adapter_revision.clone()),
+                    model_call_id: None,
+                    facts: CryptoStageFacts {
+                        operation_id: operation_id.clone(),
+                        algorithm: crypto.algorithm,
+                        adapter_revision: crypto.adapter_revision.clone(),
+                        key_id: crypto.key_id.clone(),
+                        message_id: crypto.message_id.clone(),
+                        nonce_sha256: crypto.nonce_sha256.clone(),
+                        issued_at: crypto.issued_at,
+                        expires_at: crypto.expires_at,
+                        envelope_sha256: crypto.envelope_sha256.clone(),
+                        rebuilt_sha256: crypto.rebuilt_sha256.clone(),
+                    },
+                    coverage: CryptoStageCoverage {
+                        request_crypto_checked: true,
+                        origin_entity_rebuilt: crypto.rebuilt_sha256.is_some(),
+                    },
+                },
+            ));
+            last_stage_id = String::from(crypto_id.as_str());
+            request_sequence += 1;
+        }
+        events.push(PendingEvent::new(
+            decision_id.clone(),
+            "decision.composed",
+            request_sequence,
+            vec![last_stage_id],
+            Payload::Decision {
+                decision,
+                reason_code: facts.decision.reason_code.as_str(),
+                origin_state: "not_sent",
+            },
+        ));
+        request_sequence += 1;
         let forward_intent_id = if facts.decision.outcome == GatewayOutcome::Allowed {
             let event_id = new_event_id()?;
             events.push(PendingEvent::new(
                 event_id.clone(),
                 "origin.forward_intent",
-                4,
+                request_sequence,
                 vec![decision_id.as_str().to_owned()],
                 Payload::Origin {
                     method: facts.method.to_owned(),
@@ -201,11 +312,8 @@ impl DurableAudit {
         Ok(AdmissionAudit {
             decision_event_id: decision_id.as_str().to_owned(),
             forward_intent_event_id: forward_intent_id,
-            next_request_sequence: if facts.decision.outcome == GatewayOutcome::Allowed {
-                5
-            } else {
-                4
-            },
+            next_request_sequence: request_sequence
+                + u32::from(facts.decision.outcome == GatewayOutcome::Allowed),
         })
     }
 
@@ -680,6 +788,20 @@ enum Payload {
         facts: StageFacts,
         coverage: StageCoverage,
     },
+    CryptoStageCompleted {
+        stage: &'static str,
+        stage_execution_id: String,
+        outcome: &'static str,
+        reason_code: &'static str,
+        proof_kind: &'static str,
+        confidence: Option<f64>,
+        confidence_status: &'static str,
+        duration_us: u64,
+        rule_revision: Option<String>,
+        model_call_id: Option<String>,
+        facts: CryptoStageFacts,
+        coverage: CryptoStageCoverage,
+    },
     Decision {
         decision: &'static str,
         reason_code: &'static str,
@@ -714,6 +836,26 @@ struct StageFacts {
 #[derive(Serialize)]
 struct StageCoverage {
     admission_checked: bool,
+}
+
+#[derive(Serialize)]
+struct CryptoStageFacts {
+    operation_id: Option<String>,
+    algorithm: &'static str,
+    adapter_revision: String,
+    key_id: String,
+    message_id: Option<String>,
+    nonce_sha256: Option<String>,
+    issued_at: Option<u64>,
+    expires_at: Option<u64>,
+    envelope_sha256: Option<String>,
+    rebuilt_sha256: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CryptoStageCoverage {
+    request_crypto_checked: bool,
+    origin_entity_rebuilt: bool,
 }
 
 #[derive(Serialize)]
@@ -838,15 +980,42 @@ mod tests {
                 "high_watermark_bytes": max_bytes / 2,
                 "segment_max_bytes": max_bytes
             },
-            "operations": [{
-                "operation_id": "health.read",
-                "method": "GET",
-                "path": "/health",
-                "admission": "PUBLIC",
-                "source_action": null,
-                "resource_type": null,
-                "view_profile": null
-            }]
+            "identity_store": {
+                "max_connections": 2,
+                "acquire_timeout_ms": 1000
+            },
+            "operations": [
+                {
+                    "operation_id": "health.read",
+                    "method": "GET",
+                    "path": "/health",
+                    "admission": "PUBLIC",
+                    "source_action": null,
+                    "resource_type": null,
+                    "view_profile": null
+                },
+                {
+                    "operation_id": "orders.create",
+                    "method": "POST",
+                    "path": "/orders",
+                    "admission": "PUBLIC",
+                    "source_action": null,
+                    "resource_type": null,
+                    "view_profile": null,
+                    "request_crypto": {
+                        "mode": "DIRECT_DECRYPT",
+                        "adapter_revision": "orders-json-r1",
+                        "key_id": "request-key-r1",
+                        "key_not_before": 1,
+                        "key_expires_at": 4_102_444_800_u64,
+                        "max_envelope_bytes": 4096,
+                        "max_plaintext_bytes": 1024,
+                        "max_message_age_seconds": 60,
+                        "max_future_skew_seconds": 5,
+                        "max_active_messages": 1000
+                    }
+                }
+            ]
         });
         GatewayConfig::from_json(&serde_json::to_vec(&json).unwrap()).unwrap()
     }
@@ -911,6 +1080,7 @@ mod tests {
                 method: "GET",
                 decision: &decision,
                 duration_us: 10,
+                request_crypto: None,
             })
             .await
             .unwrap();
@@ -938,6 +1108,7 @@ mod tests {
                 method: "GET",
                 decision: &denied,
                 duration_us: 10,
+                request_crypto: None,
             })
             .await
             .unwrap();
@@ -972,6 +1143,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn records_crypto_denial_before_decision_without_forward_intent() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let mut decision = config.admit("POST", "/orders", UnixSeconds::new(1));
+        decision.outcome = GatewayOutcome::Denied;
+        decision.reason_code = ReasonCode::RequestCryptoAuthenticationFailed;
+        let crypto = RequestCryptoAudit::failed(
+            config.request_crypto_rule("POST", "/orders").unwrap(),
+            decision.reason_code,
+            7,
+        );
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000009";
+        let admission = audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "99999999999999999999999999999999",
+                method: "POST",
+                decision: &decision,
+                duration_us: 10,
+                request_crypto: Some(&crypto),
+            })
+            .await
+            .unwrap();
+        assert!(admission.forward_intent_event_id.is_none());
+        drop(audit);
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut crypto_stage = None;
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id && event["payload"]["stage"] == "crypto_decode"
+                {
+                    crypto_stage = Some(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let crypto_stage = crypto_stage.unwrap();
+        assert_eq!(crypto_stage["request_seq"], 3);
+        assert_eq!(
+            crypto_stage["payload"]["reason_code"],
+            ReasonCode::RequestCryptoAuthenticationFailed.as_str()
+        );
+        assert_eq!(
+            crypto_stage["payload"]["coverage"]["origin_entity_rebuilt"],
+            false
+        );
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn records_response_validation_failure_as_received_and_aborted() {
         let directory = directory();
         let config = config(&directory, 1024 * 1024);
@@ -985,6 +1217,7 @@ mod tests {
                 method: "GET",
                 decision: &decision,
                 duration_us: 10,
+                request_crypto: None,
             })
             .await
             .unwrap();
@@ -1053,6 +1286,7 @@ mod tests {
                 method: "GET",
                 decision: &decision,
                 duration_us: 10,
+                request_crypto: None,
             })
             .await
             .unwrap();
@@ -1114,6 +1348,7 @@ mod tests {
                 method: "GET",
                 decision: &decision,
                 duration_us: 10,
+                request_crypto: None,
             })
             .await
             .unwrap();
@@ -1226,6 +1461,7 @@ mod tests {
                 method: "GET",
                 decision: &decision,
                 duration_us: 10,
+                request_crypto: None,
             })
             .await
             .unwrap_err();
