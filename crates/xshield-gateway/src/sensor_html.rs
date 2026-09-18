@@ -1,15 +1,25 @@
 //! Exact-build browser sensor HTML injection.
 
-use openssl::sha::sha256;
+use openssl::{
+    base64::encode_block,
+    sha::{sha256, sha384},
+};
+use std::sync::LazyLock;
 
 const SENSOR_SCRIPT: &str = "<script defer src=\"/__xshield/v1/sensor/1.0.0.js\"";
 const LOADER_SCRIPT: &str = "<script defer src=\"/__xshield/v1/sensor/1.0.0-loader.js\"";
 const SCRIPT_END: &str = "></script>";
 const NONCE_ATTRIBUTE_OVERHEAD: usize = " nonce=\"\"".len();
 const NONCE_BYTES: usize = 32;
+const INTEGRITY_ATTRIBUTE_OVERHEAD: usize = " integrity=\"\"".len();
+const SHA384_INTEGRITY_BYTES: usize = "sha384-".len() + 64;
+static SENSOR_INTEGRITY: LazyLock<String> = LazyLock::new(|| sri_sha384(crate::SENSOR_ASSET_BYTES));
+static LOADER_INTEGRITY: LazyLock<String> =
+    LazyLock::new(|| sri_sha384(crate::SENSOR_LOADER_BYTES));
 const MAX_INJECTION_BYTES: usize = SENSOR_SCRIPT.len()
     + LOADER_SCRIPT.len()
     + SCRIPT_END.len() * 2
+    + (INTEGRITY_ATTRIBUTE_OVERHEAD + SHA384_INTEGRITY_BYTES) * 2
     + (NONCE_ATTRIBUTE_OVERHEAD + NONCE_BYTES) * 2;
 
 /// Exact static HTML adapter approved by trusted configuration.
@@ -114,13 +124,20 @@ fn build_injection(nonce: Option<&str>) -> Result<String, SensorHtmlError> {
     let capacity = SENSOR_SCRIPT.len()
         + LOADER_SCRIPT.len()
         + SCRIPT_END.len() * 2
+        + (INTEGRITY_ATTRIBUTE_OVERHEAD + SHA384_INTEGRITY_BYTES) * 2
         + (nonce_bytes + NONCE_ATTRIBUTE_OVERHEAD) * usize::from(nonce.is_some()) * 2;
     let mut output = String::new();
     output
         .try_reserve_exact(capacity)
         .map_err(|_| SensorHtmlError)?;
-    for script in [SENSOR_SCRIPT, LOADER_SCRIPT] {
+    for (script, integrity) in [
+        (SENSOR_SCRIPT, SENSOR_INTEGRITY.as_str()),
+        (LOADER_SCRIPT, LOADER_INTEGRITY.as_str()),
+    ] {
         output.push_str(script);
+        output.push_str(" integrity=\"");
+        output.push_str(integrity);
+        output.push('"');
         if let Some(nonce) = nonce {
             output.push_str(" nonce=\"");
             output.push_str(nonce);
@@ -129,6 +146,10 @@ fn build_injection(nonce: Option<&str>) -> Result<String, SensorHtmlError> {
         output.push_str(SCRIPT_END);
     }
     Ok(output)
+}
+
+fn sri_sha384(bytes: &[u8]) -> String {
+    format!("sha384-{}", encode_block(&sha384(bytes)))
 }
 
 /// Rewritten HTML entity and its audit digest.
@@ -205,6 +226,9 @@ mod tests {
                 .windows(SENSOR_SCRIPT.len())
                 .any(|part| part == SENSOR_SCRIPT.as_bytes())
         );
+        let injected = std::str::from_utf8(&injected).unwrap();
+        assert!(injected.contains(&format!("integrity=\"{}\"", *SENSOR_INTEGRITY)));
+        assert!(injected.contains(&format!("integrity=\"{}\"", *LOADER_INTEGRITY)));
         assert_eq!(
             rule.inject(alternate, Some("0123456789abcdef0123456789abcdef"))
                 .unwrap()

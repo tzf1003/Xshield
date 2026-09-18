@@ -61,6 +61,10 @@ const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
 /// Immutable browser sensor bootstrap loader.
 pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.0.0-loader.js";
+/// Exact versioned sensor bytes served by the gateway and bound into HTML SRI.
+pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
+/// Exact versioned loader bytes served by the gateway and bound into HTML SRI.
+pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
 /// Dynamic browser sensor bootstrap document.
 pub const SENSOR_BOOTSTRAP_PATH: &str = "/__xshield/v1/bootstrap";
 /// Same-origin observation preparation endpoint advertised by bootstrap.

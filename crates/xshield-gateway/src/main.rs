@@ -31,7 +31,8 @@ use xshield_gateway::response_crypto::{
 use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
 use xshield_gateway::{
     BufferedResponsePolicy, GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
-    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_CONFIG_BYTES, SENSOR_PREPARE_PATH,
+    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_CONFIG_BYTES, SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES,
+    SENSOR_PREPARE_PATH,
 };
 use xshield_postgres::{
     PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, SensorSession,
@@ -50,9 +51,6 @@ use crate::protected_identity::{
 };
 
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
-const SENSOR_ASSET: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
-const SENSOR_LOADER: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
-
 fn validate_sensor_observation_headers(
     request: &pingora::http::RequestHeader,
     expected_origin: &str,
@@ -1219,7 +1217,7 @@ async fn respond_denial(
 }
 
 async fn respond_sensor_asset(session: &mut Session, request_id: &str) -> PingoraResult<()> {
-    let body = Bytes::from_static(SENSOR_ASSET);
+    let body = Bytes::from_static(SENSOR_ASSET_BYTES);
     let mut response = ResponseHeader::build(200, Some(7))?;
     response.insert_header("Content-Type", "text/javascript; charset=utf-8")?;
     response.insert_header("Cache-Control", "public, max-age=31536000, immutable")?;
@@ -1235,7 +1233,7 @@ async fn respond_sensor_asset(session: &mut Session, request_id: &str) -> Pingor
 }
 
 async fn respond_sensor_loader(session: &mut Session, request_id: &str) -> PingoraResult<()> {
-    let body = Bytes::from_static(SENSOR_LOADER);
+    let body = Bytes::from_static(SENSOR_LOADER_BYTES);
     let mut response = ResponseHeader::build(200, Some(7))?;
     response.insert_header("Content-Type", "text/javascript; charset=utf-8")?;
     response.insert_header("Cache-Control", "public, max-age=31536000, immutable")?;

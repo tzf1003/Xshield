@@ -67,7 +67,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/home-csp":
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'none'; script-src 'self'; object-src 'none'",
+                "default-src 'none'; script-src 'self'; require-sri-for script; object-src 'none'",
             )
         if self.path == "/home-csp-report":
             self.send_header("Content-Security-Policy-Report-Only", "script-src 'self'")
@@ -188,23 +188,55 @@ grep -qi '^cache-control: public, max-age=31536000, immutable' "$test_dir/loader
 
 curl --fail --silent --show-error -D "$test_dir/home-headers" \
     -o "$test_dir/home.html" "http://127.0.0.1:$gateway_port/home"
-grep -q '<script defer src="/__xshield/v1/sensor/1.0.0.js"></script><script defer src="/__xshield/v1/sensor/1.0.0-loader.js"></script></head>' "$test_dir/home.html"
 grep -qi '^cache-control: private, no-store' "$test_dir/home-headers"
 ! grep -qi '^etag:' "$test_dir/home-headers"
 curl --fail --silent --show-error -o "$test_dir/home-v2.html" \
     "http://127.0.0.1:$gateway_port/home?build=2"
-grep -q '<meta charset="utf-8"><script defer src="/__xshield/v1/sensor/1.0.0.js"></script><script defer src="/__xshield/v1/sensor/1.0.0-loader.js"></script></head>' "$test_dir/home-v2.html"
 curl --fail --silent --show-error -D "$test_dir/home-csp.headers" \
     -o "$test_dir/home-csp.html" "http://127.0.0.1:$gateway_port/home-csp"
-python3 - "$test_dir/home-csp.headers" "$test_dir/home-csp.html" <<'PY'
+python3 - "$test_dir/sensor.js" "$test_dir/loader.js" "$test_dir/home.html" \
+    "$test_dir/home-v2.html" "$test_dir/home-csp.headers" "$test_dir/home-csp.html" <<'PY'
+import base64
+import hashlib
 import pathlib
 import re
 import sys
+from html.parser import HTMLParser
 
-headers = pathlib.Path(sys.argv[1]).read_text()
-body = pathlib.Path(sys.argv[2]).read_text()
+sensor_integrity = "sha384-" + base64.b64encode(
+    hashlib.sha384(pathlib.Path(sys.argv[1]).read_bytes()).digest()
+).decode()
+loader_integrity = "sha384-" + base64.b64encode(
+    hashlib.sha384(pathlib.Path(sys.argv[2]).read_bytes()).digest()
+).decode()
+expected = {
+    "/__xshield/v1/sensor/1.0.0.js": sensor_integrity,
+    "/__xshield/v1/sensor/1.0.0-loader.js": loader_integrity,
+}
+
+class Scripts(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.scripts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self.scripts.append(dict(attrs))
+
+for path in sys.argv[3:5]:
+    parser = Scripts()
+    parser.feed(pathlib.Path(path).read_text())
+    assert {item["src"]: item["integrity"] for item in parser.scripts} == expected
+    assert all("nonce" not in item for item in parser.scripts)
+
+headers = pathlib.Path(sys.argv[5]).read_text()
+body = pathlib.Path(sys.argv[6]).read_text()
 nonce = re.search(r"'nonce-([0-9a-f]{32})'", headers).group(1)
-assert body.count(f'nonce="{nonce}"') == 2
+assert "require-sri-for script" in headers
+parser = Scripts()
+parser.feed(body)
+assert {item["src"]: item["integrity"] for item in parser.scripts} == expected
+assert all(item["nonce"] == nonce for item in parser.scripts)
 PY
 home_csp_report_status=$(curl --silent --show-error -o "$test_dir/home-csp-report.body" \
     -w '%{http_code}' "http://127.0.0.1:$gateway_port/home-csp-report")

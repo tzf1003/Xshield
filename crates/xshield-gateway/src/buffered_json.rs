@@ -210,11 +210,6 @@ fn rewrite_csp_policy(policy: &str, nonce: &str) -> Result<String, ReasonCode> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
             || !names.insert(name.to_ascii_lowercase())
-            || name.eq_ignore_ascii_case("require-sri-for")
-                && directive
-                    .iter()
-                    .skip(1)
-                    .any(|value| value.eq_ignore_ascii_case("script"))
             || sandbox_blocks_scripts
         {
             return Err(ReasonCode::SensorHtmlValidationFailed);
@@ -507,7 +502,7 @@ mod tests {
         csp_response
             .insert_header(
                 "Content-Security-Policy",
-                "default-src 'none'; script-src 'self'; object-src 'none'",
+                "default-src 'none'; script-src 'self'; require-sri-for script; object-src 'none'",
             )
             .unwrap();
         csp_response
