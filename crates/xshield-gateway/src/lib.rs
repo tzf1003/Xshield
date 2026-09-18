@@ -373,6 +373,8 @@ struct ResponseDto {
     #[serde(default)]
     injection_offset: Option<usize>,
     #[serde(default)]
+    additional_adapters: Vec<SensorHtmlAdapterDto>,
+    #[serde(default)]
     crypto: Option<ResponseCryptoDto>,
     #[serde(default)]
     resource_grant: Option<ResponseGrantDto>,
@@ -382,6 +384,14 @@ struct ResponseDto {
     auth_refresh: Option<AuthRefreshDto>,
     #[serde(default)]
     auth_context_switch: Option<AuthRefreshDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SensorHtmlAdapterDto {
+    adapter_revision: String,
+    origin_sha256: String,
+    injection_offset: usize,
 }
 
 #[derive(Deserialize)]
@@ -1629,6 +1639,7 @@ fn compile_response_kind(
             if dto.adapter_revision.is_some()
                 || dto.origin_sha256.is_some()
                 || dto.injection_offset.is_some()
+                || !dto.additional_adapters.is_empty()
             {
                 return Err(ConfigError::Invalid("operations.response"));
             }
@@ -1659,11 +1670,43 @@ fn compile_response_kind(
                 .take()
                 .filter(|offset| *offset < dto.max_bytes)
                 .ok_or(ConfigError::Invalid("operations.response.injection_offset"))?;
+            if dto.additional_adapters.len() > 15 {
+                return Err(ConfigError::Invalid(
+                    "operations.response.additional_adapters",
+                ));
+            }
+            let mut adapters = vec![(adapter_revision, origin_sha256, injection_offset)];
+            for adapter in std::mem::take(&mut dto.additional_adapters) {
+                if !valid_scoped_value(&adapter.adapter_revision)
+                    || BuildFingerprint::parse(&adapter.origin_sha256).is_err()
+                    || adapter.injection_offset >= dto.max_bytes
+                {
+                    return Err(ConfigError::Invalid(
+                        "operations.response.additional_adapters",
+                    ));
+                }
+                adapters.push((
+                    adapter.adapter_revision,
+                    adapter.origin_sha256,
+                    adapter.injection_offset,
+                ));
+            }
+            let unique_revisions = adapters
+                .iter()
+                .map(|(revision, _, _)| revision)
+                .collect::<BTreeSet<_>>();
+            let unique_digests = adapters
+                .iter()
+                .map(|(_, digest, _)| digest)
+                .collect::<BTreeSet<_>>();
+            if unique_revisions.len() != adapters.len() || unique_digests.len() != adapters.len() {
+                return Err(ConfigError::Invalid(
+                    "operations.response.additional_adapters",
+                ));
+            }
             Ok(ResponseKind::SensorHtml(sensor_html::SensorHtmlRule::new(
-                adapter_revision,
                 dto.max_bytes,
-                origin_sha256,
-                injection_offset,
+                adapters,
             )))
         }
     }
@@ -1996,13 +2039,24 @@ mod tests {
     fn compiles_exact_sensor_html_response_adapter() {
         let configured = CONFIG.replace(
             "{\"operation_id\":\"catalog.read\",\"method\":\"GET\",\"path\":\"/catalog\",\"admission\":\"PUBLIC\",\"source_action\":null,\"resource_type\":null,\"view_profile\":null}",
-            "{\"operation_id\":\"catalog.read\",\"method\":\"GET\",\"path\":\"/catalog\",\"admission\":\"PUBLIC\",\"source_action\":null,\"resource_type\":null,\"view_profile\":null,\"response\":{\"mode\":\"SENSOR_HTML\",\"max_bytes\":128,\"adapter_revision\":\"home-r1\",\"origin_sha256\":\"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a\",\"injection_offset\":27}}",
+            "{\"operation_id\":\"catalog.read\",\"method\":\"GET\",\"path\":\"/catalog\",\"admission\":\"PUBLIC\",\"source_action\":null,\"resource_type\":null,\"view_profile\":null,\"response\":{\"mode\":\"SENSOR_HTML\",\"max_bytes\":128,\"adapter_revision\":\"home-r1\",\"origin_sha256\":\"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a\",\"injection_offset\":27,\"additional_adapters\":[{\"adapter_revision\":\"home-r2\",\"origin_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"injection_offset\":21}]}}",
         );
         let config = GatewayConfig::from_json(configured.as_bytes()).unwrap();
         assert!(matches!(
             config.buffered_response_policy("GET", "/catalog"),
             Some(BufferedResponsePolicy::SensorHtml(rule))
-                if rule.adapter_revision() == "home-r1" && rule.max_bytes() == 128
+                if rule.max_bytes() == 128
+        ));
+
+        let duplicate_digest = configured.replace(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(duplicate_digest.as_bytes()),
+            Err(ConfigError::Invalid(
+                "operations.response.additional_adapters"
+            ))
         ));
 
         let missing_sensor = configured.replace(

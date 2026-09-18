@@ -55,7 +55,11 @@ capture = pathlib.Path(sys.argv[2])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = b"<!doctype html><html><head></head><body>ok</body></html>"
+        body = (
+            b'<!doctype html><html><head><meta charset="utf-8"></head><body>v2</body></html>'
+            if self.path == "/home?build=2"
+            else b"<!doctype html><html><head></head><body>ok</body></html>"
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -119,7 +123,7 @@ cat >"$test_dir/config.json" <<JSON
     "source_action":null,
     "resource_type":null,
     "view_profile":null,
-    "response":{"mode":"SENSOR_HTML","max_bytes":128,"adapter_revision":"home-r1","origin_sha256":"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a","injection_offset":27}
+    "response":{"mode":"SENSOR_HTML","max_bytes":128,"adapter_revision":"home-r1","origin_sha256":"8afe2e0204ebb1d838fdd6ce33cfb526ad18ca0d3877cc1a3768a778332c054a","injection_offset":27,"additional_adapters":[{"adapter_revision":"home-r2","origin_sha256":"6b4a57c5b8f040a713e1692702de199600126a862b020f36b33bfe6616e8afd6","injection_offset":49}]}
   },{
     "operation_id":"home-csp.read",
     "method":"GET",
@@ -173,6 +177,9 @@ curl --fail --silent --show-error -D "$test_dir/home-headers" \
 grep -q '<script defer src="/__xshield/v1/sensor/1.0.0.js"></script><script defer src="/__xshield/v1/sensor/1.0.0-loader.js"></script></head>' "$test_dir/home.html"
 grep -qi '^cache-control: private, no-store' "$test_dir/home-headers"
 ! grep -qi '^etag:' "$test_dir/home-headers"
+curl --fail --silent --show-error -o "$test_dir/home-v2.html" \
+    "http://127.0.0.1:$gateway_port/home?build=2"
+grep -q '<meta charset="utf-8"><script defer src="/__xshield/v1/sensor/1.0.0.js"></script><script defer src="/__xshield/v1/sensor/1.0.0-loader.js"></script></head>' "$test_dir/home-v2.html"
 home_csp_status=$(curl --silent --show-error -o "$test_dir/home-csp.body" \
     -w '%{http_code}' "http://127.0.0.1:$gateway_port/home-csp")
 [[ "$home_csp_status" == "502" ]]

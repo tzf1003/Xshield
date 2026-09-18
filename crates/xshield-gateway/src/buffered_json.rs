@@ -114,8 +114,8 @@ impl BufferedResponse {
                     .inject(&self.bytes)
                     .map_err(|_| ReasonCode::SensorHtmlValidationFailed)?;
                 let transformation = SensorHtmlTransformation {
-                    adapter_revision: rule.adapter_revision().to_owned(),
-                    origin_sha256: rule.origin_sha256().to_owned(),
+                    adapter_revision: injected.adapter_revision().to_owned(),
+                    origin_sha256: injected.origin_sha256().to_owned(),
                     injected_sha256: injected.injected_sha256().to_owned(),
                 };
                 Ok(Some(BufferedEntity {

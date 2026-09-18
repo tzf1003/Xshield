@@ -7,43 +7,38 @@ const INJECTION: &str = "<script defer src=\"/__xshield/v1/sensor/1.0.0.js\"></s
 /// Exact static HTML adapter approved by trusted configuration.
 #[derive(Clone, Debug)]
 pub struct SensorHtmlRule {
-    adapter_revision: String,
     max_bytes: usize,
+    adapters: Vec<SensorHtmlAdapter>,
+}
+
+#[derive(Clone, Debug)]
+struct SensorHtmlAdapter {
+    revision: String,
     origin_sha256: String,
     injection_offset: usize,
 }
 
 impl SensorHtmlRule {
-    pub(crate) fn new(
-        adapter_revision: String,
-        max_bytes: usize,
-        origin_sha256: String,
-        injection_offset: usize,
-    ) -> Self {
+    pub(crate) fn new(max_bytes: usize, adapters: Vec<(String, String, usize)>) -> Self {
         Self {
-            adapter_revision,
             max_bytes,
-            origin_sha256,
-            injection_offset,
+            adapters: adapters
+                .into_iter()
+                .map(
+                    |(revision, origin_sha256, injection_offset)| SensorHtmlAdapter {
+                        revision,
+                        origin_sha256,
+                        injection_offset,
+                    },
+                )
+                .collect(),
         }
-    }
-
-    /// Returns the versioned adapter revision.
-    #[must_use]
-    pub fn adapter_revision(&self) -> &str {
-        &self.adapter_revision
     }
 
     /// Returns the maximum accepted source HTML size.
     #[must_use]
     pub const fn max_bytes(&self) -> usize {
         self.max_bytes
-    }
-
-    /// Returns the approved source entity digest.
-    #[must_use]
-    pub fn origin_sha256(&self) -> &str {
-        &self.origin_sha256
     }
 
     /// Returns the maximum memory held while source and rewritten entities overlap.
@@ -58,11 +53,16 @@ impl SensorHtmlRule {
     /// Returns [`SensorHtmlError`] when the entity differs from the approved
     /// digest or the configured insertion point is not a UTF-8 `</head>` tag.
     pub fn inject(&self, source: &[u8]) -> Result<InjectedSensorHtml, SensorHtmlError> {
-        if source.len() > self.max_bytes
-            || encode_hex(sha256(source)) != self.origin_sha256
-            || source.get(self.injection_offset..self.injection_offset + 7) != Some(b"</head>")
-            || std::str::from_utf8(source).is_err()
-        {
+        if source.len() > self.max_bytes || std::str::from_utf8(source).is_err() {
+            return Err(SensorHtmlError);
+        }
+        let origin_sha256 = encode_hex(sha256(source));
+        let adapter = self
+            .adapters
+            .iter()
+            .find(|adapter| adapter.origin_sha256 == origin_sha256)
+            .ok_or(SensorHtmlError)?;
+        if source.get(adapter.injection_offset..adapter.injection_offset + 7) != Some(b"</head>") {
             return Err(SensorHtmlError);
         }
         let capacity = source
@@ -73,12 +73,14 @@ impl SensorHtmlRule {
         output
             .try_reserve_exact(capacity)
             .map_err(|_| SensorHtmlError)?;
-        output.extend_from_slice(&source[..self.injection_offset]);
+        output.extend_from_slice(&source[..adapter.injection_offset]);
         output.extend_from_slice(INJECTION.as_bytes());
-        output.extend_from_slice(&source[self.injection_offset..]);
+        output.extend_from_slice(&source[adapter.injection_offset..]);
         let injected_sha256 = encode_hex(sha256(&output));
         Ok(InjectedSensorHtml {
             body: output,
+            adapter_revision: adapter.revision.clone(),
+            origin_sha256,
             injected_sha256,
         })
     }
@@ -88,6 +90,8 @@ impl SensorHtmlRule {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InjectedSensorHtml {
     body: Vec<u8>,
+    adapter_revision: String,
+    origin_sha256: String,
     injected_sha256: String,
 }
 
@@ -102,6 +106,18 @@ impl InjectedSensorHtml {
     #[must_use]
     pub fn injected_sha256(&self) -> &str {
         &self.injected_sha256
+    }
+
+    /// Returns the selected adapter revision.
+    #[must_use]
+    pub fn adapter_revision(&self) -> &str {
+        &self.adapter_revision
+    }
+
+    /// Returns the verified source entity SHA-256 digest.
+    #[must_use]
+    pub fn origin_sha256(&self) -> &str {
+        &self.origin_sha256
     }
 }
 
@@ -128,9 +144,22 @@ mod tests {
         assert!(INJECTION.contains(crate::SENSOR_ASSET_PATH));
         assert!(INJECTION.contains(crate::SENSOR_LOADER_PATH));
         let source = b"<!doctype html><html><head></head><body>ok</body></html>";
-        let rule = SensorHtmlRule::new("home-r1".to_owned(), 128, encode_hex(sha256(source)), 27);
-        let injected = rule.inject(source).unwrap().into_body();
+        let alternate = b"<!doctype html><head></head>";
+        let rule = SensorHtmlRule::new(
+            128,
+            vec![
+                ("home-r1".to_owned(), encode_hex(sha256(source)), 27),
+                ("home-r2".to_owned(), encode_hex(sha256(alternate)), 21),
+            ],
+        );
+        let result = rule.inject(source).unwrap();
+        assert_eq!(result.adapter_revision(), "home-r1");
+        let injected = result.into_body();
         assert_eq!(&injected[27..27 + INJECTION.len()], INJECTION.as_bytes());
+        assert_eq!(
+            rule.inject(alternate).unwrap().adapter_revision(),
+            "home-r2"
+        );
         assert!(rule.inject(b"<!doctype html><html></html>").is_err());
     }
 }
