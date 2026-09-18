@@ -90,7 +90,7 @@ cargo run -p xshield-control -- \
   target/xshield-index-checkpoints target/xshield-control-audit
 ```
 
-身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；`GET /control/v1/requests/{request_id}/events` 返回固定上限的脱敏事件摘要、连续索引水位、gap 状态和作用域绑定的 HMAC 游标，并写独立管理审计。游标密钥独立于管理 Bearer 和审计密钥。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
+身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；`GET /control/v1/requests/{request_id}` 返回脱敏聚合与完整性状态，`GET /control/v1/requests/{request_id}/events` 返回固定上限的脱敏事件、连续索引水位、gap 状态和作用域绑定的 HMAC 游标，两者均写独立管理审计。游标密钥独立于管理 Bearer 和审计密钥。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
 
 ## Rust 运行时依赖
 

@@ -32,11 +32,13 @@ use xshield_core::{
 };
 use xshield_worker::{
     IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEventPosition,
-    RequestEvents, inspect_publication_health, query_request_events,
+    RequestEvents, RequestSummary, inspect_publication_health, query_request_events,
+    query_request_summary,
 };
 use zeroize::Zeroizing;
 
 const HEALTH_PATH: &str = "/control/v1/audit/health";
+const REQUEST_SUMMARY_PATH: &str = "/control/v1/requests/{request_id}";
 const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
 const RATE_WINDOW: Duration = Duration::from_mins(1);
 const TOKEN_BYTES_MAX: usize = 512;
@@ -60,6 +62,11 @@ const HEALTH_ACCESS: AccessAction = AccessAction {
 const REQUEST_EVENTS_ACCESS: AccessAction = AccessAction {
     event_type: "console.events.read",
     path: REQUEST_EVENTS_PATH,
+    role: ManagementRole::Observer,
+};
+const REQUEST_SUMMARY_ACCESS: AccessAction = AccessAction {
+    event_type: "console.request.read",
+    path: REQUEST_SUMMARY_PATH,
     role: ManagementRole::Observer,
 };
 
@@ -363,6 +370,140 @@ impl ControlPlane {
         };
         self.complete_request_events(request_id, subject, target_request_id, events)
             .await
+    }
+
+    async fn request_summary(
+        self: Arc<Self>,
+        authorization: Option<String>,
+        target_request_id: String,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(
+                authorization.as_deref(),
+                &auth_request_id,
+                REQUEST_SUMMARY_ACCESS,
+            )
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Ok(target_request_id) = RequestId::parse(target_request_id) else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    REQUEST_SUMMARY_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_REQUEST_ID_INVALID",
+                    "invalid request identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Ok(summary) = query_request_summary(
+            &self.config.publisher,
+            &self.index,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            &target_request_id,
+        )
+        .await
+        else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    REQUEST_SUMMARY_ACCESS,
+                    Some(target_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_INDEX_UNAVAILABLE",
+                    "audit index is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        self.complete_request_summary(request_id, subject, target_request_id, summary)
+            .await
+    }
+
+    async fn complete_request_summary(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        target_request_id: RequestId,
+        summary: Option<RequestSummary>,
+    ) -> EndpointResult {
+        let health_control = Arc::clone(&self);
+        let Ok(Ok(health)) = tokio::task::spawn_blocking(move || {
+            inspect_publication_health(
+                &health_control.config.publisher,
+                &health_control.config.source_journal_key_id,
+                &health_control.source_journal_key,
+                &health_control.seal_key,
+            )
+        })
+        .await
+        else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    REQUEST_SUMMARY_ACCESS,
+                    Some(target_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_HEALTH_UNAVAILABLE",
+                    "audit health is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let completeness = match summary.as_ref() {
+            Some(value) if value.terminal => "complete",
+            Some(_) => "pending",
+            None if health.pending_segments > 0 || health.has_gaps => "pending_index",
+            None => "not_found",
+        };
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_target = target_request_id.clone();
+        let audited = tokio::task::spawn_blocking(move || {
+            audit_control.append_access_event(
+                &audit_request_id,
+                Some(&audit_subject),
+                REQUEST_SUMMARY_ACCESS,
+                Some(&audit_target),
+                "PASS",
+                "CONTROL_REQUEST_READ",
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        EndpointResult::RequestSummary(RequestSummaryResponse {
+            request_id,
+            tenant_id: self.config.tenant_id.as_str().to_owned(),
+            site_id: self.config.site_id.as_str().to_owned(),
+            source_request_id: target_request_id.as_str().to_owned(),
+            as_of: health.as_of,
+            index_watermark: health.index_watermark,
+            has_gaps: health.has_gaps,
+            pending_segments: health.pending_segments,
+            found: summary.is_some(),
+            completeness,
+            summary,
+        })
     }
 
     async fn complete_request_events(
@@ -778,8 +919,24 @@ impl ControlPlane {
 pub fn router(control: ControlPlane) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health_handler))
+        .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
         .with_state(Arc::new(control))
+}
+
+async fn request_summary_handler(
+    State(control): State<Arc<ControlPlane>>,
+    Path(request_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .request_summary(authorization, request_id)
+        .await
+        .into_response()
 }
 
 async fn health_handler(State(control): State<Arc<ControlPlane>>, headers: HeaderMap) -> Response {
@@ -811,6 +968,7 @@ async fn request_events_handler(
 
 enum EndpointResult {
     Success(HealthResponse),
+    RequestSummary(RequestSummaryResponse),
     RequestEvents(RequestEventsResponse),
     Error(StatusCode, ErrorResponse),
 }
@@ -819,6 +977,7 @@ impl IntoResponse for EndpointResult {
     fn into_response(self) -> Response {
         no_store(match self {
             Self::Success(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::RequestSummary(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Error(status, response) => (status, Json(response)).into_response(),
         })
@@ -984,6 +1143,21 @@ struct RequestEventsResponse {
 }
 
 #[derive(Serialize)]
+struct RequestSummaryResponse {
+    request_id: String,
+    tenant_id: String,
+    site_id: String,
+    source_request_id: String,
+    as_of: String,
+    index_watermark: Option<IndexWatermark>,
+    has_gaps: bool,
+    pending_segments: usize,
+    found: bool,
+    completeness: &'static str,
+    summary: Option<RequestSummary>,
+}
+
+#[derive(Serialize)]
 struct ErrorResponse {
     error_code: &'static str,
     message_safe: &'static str,
@@ -1130,8 +1304,9 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode, header::AUTHORIZATION},
     };
-    use chrono::Utc;
-    use clickhouse::{Client, test};
+    use chrono::{DateTime, Utc};
+    use clickhouse::{Client, Row, test};
+    use serde::Serialize;
     use serde_json::Value;
     use std::{
         fs,
@@ -1387,6 +1562,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn request_summary_reports_completeness_and_is_audited() {
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide([SummaryRow {
+            event_count: 4,
+            first_occurred_at: Utc::now(),
+            last_occurred_at: Utc::now(),
+            method: "POST".to_owned(),
+            operation_id: "orders.create".to_owned(),
+            decision: "ALLOW".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            status: Some(201),
+            origin_state: "response_received".to_owned(),
+            duration_us: 42,
+            forwarded: 1,
+            terminal: 1,
+        }]));
+        mock.add(test::handlers::provide(Vec::<SummaryRow>::new()));
+        let fixture = Fixture::with_index(
+            10,
+            ManagementRole::Observer,
+            Client::default().with_mock(&mock),
+        );
+        let path = "/control/v1/requests/req_018f2a3b-4c5d-7000-8000-000000000001";
+        let app = router(fixture.control);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["found"], true);
+        assert_eq!(body["completeness"], "complete");
+        assert_eq!(body["summary"]["method"], "POST");
+        assert_eq!(body["summary"]["business_result_confirmed"], true);
+        assert!(body["summary"].get("payload_json").is_none());
+        let missing = app
+            .oneshot(
+                Request::get("/control/v1/requests/req_018f2a3b-4c5d-7000-8000-000000000002")
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(missing.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["found"], false);
+        assert_eq!(body["completeness"], "not_found");
+        assert_access_event_targets(
+            &fixture.access_directory,
+            "console.request.read",
+            &[
+                Some("req_018f2a3b-4c5d-7000-8000-000000000001"),
+                Some("req_018f2a3b-4c5d-7000-8000-000000000002"),
+            ],
+        );
+    }
+
     fn authenticated_request() -> Request<Body> {
         Request::get(super::HEALTH_PATH)
             .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
@@ -1413,6 +1654,24 @@ mod tests {
             cause_event_ids: Vec::new(),
             sensitivity: "INTERNAL".to_owned(),
         }
+    }
+
+    #[derive(Clone, Debug, Row, Serialize)]
+    struct SummaryRow {
+        event_count: u64,
+        #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+        first_occurred_at: DateTime<Utc>,
+        #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+        last_occurred_at: DateTime<Utc>,
+        method: String,
+        operation_id: String,
+        decision: String,
+        reason_code: String,
+        status: Option<u16>,
+        origin_state: String,
+        duration_us: u64,
+        forwarded: u8,
+        terminal: u8,
     }
 
     struct Fixture {
@@ -1538,6 +1797,14 @@ mod tests {
         event_type: &str,
         target_request_id: Option<&str>,
     ) {
+        assert_access_event_targets(directory, event_type, &vec![target_request_id; expected]);
+    }
+
+    fn assert_access_event_targets(
+        directory: &Path,
+        event_type: &str,
+        target_request_ids: &[Option<&str>],
+    ) {
         let manifests = directory.parent().unwrap().join("access-manifests");
         private_directory(&manifests);
         let signing = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY).unwrap();
@@ -1549,9 +1816,9 @@ mod tests {
             &signing,
         )
         .unwrap();
-        assert_eq!(segments.len(), expected);
+        assert_eq!(segments.len(), target_request_ids.len());
         let verifier = signing.verifying_key().unwrap();
-        for segment in segments {
+        for (segment, target_request_id) in segments.into_iter().zip(target_request_ids) {
             let path = directory.join(format!("segment-{}.closed.xja", segment.producer_boot_id));
             let manifest =
                 fs::read(manifests.join(format!("segment-{}.xjs", segment.producer_boot_id)))

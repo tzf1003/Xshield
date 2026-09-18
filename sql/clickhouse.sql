@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS xshield.audit_events (
  occurred_at DateTime64(6,'UTC'), observed_at DateTime64(6,'UTC'),
  retention_expires_at DateTime64(6,'UTC'),
  producer_id String, producer_boot_id String, producer_seq UInt64,
- request_seq UInt32, duration_us UInt64,
+ request_seq UInt32, method String, operation_id String,
+ origin_state LowCardinality(String), http_status Nullable(UInt16),
+ is_terminal UInt8, duration_us UInt64,
  policy_revision String, model_revision String,
  evidence_refs Array(String), cause_event_ids Array(String),
  sensitivity LowCardinality(String), payload_json String,
@@ -36,8 +38,22 @@ ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS
  retention_expires_at DateTime64(6,'UTC') DEFAULT occurred_at + INTERVAL 30 DAY
  AFTER observed_at;
 ALTER TABLE xshield.audit_events MODIFY TTL retention_expires_at DELETE;
+-- Expand redacted request facts before deploying a publisher that emits them.
+-- Upgrade the materialized-view target first so SELECT * remains insertable.
+ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS method String DEFAULT '' AFTER request_seq;
+ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS operation_id String DEFAULT '' AFTER method;
+ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS origin_state LowCardinality(String) DEFAULT '' AFTER operation_id;
+ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS http_status Nullable(UInt16) DEFAULT NULL AFTER origin_state;
+ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS is_terminal UInt8 DEFAULT 0 AFTER http_status;
+ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS method String DEFAULT '' AFTER request_seq;
+ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS operation_id String DEFAULT '' AFTER method;
+ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS origin_state LowCardinality(String) DEFAULT '' AFTER operation_id;
+ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS http_status Nullable(UInt16) DEFAULT NULL AFTER origin_state;
+ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS is_terminal UInt8 DEFAULT 0 AFTER http_status;
 CREATE MATERIALIZED VIEW IF NOT EXISTS xshield.mv_events_by_time
 TO xshield.events_by_time AS SELECT * FROM xshield.audit_events;
+ALTER TABLE xshield.mv_events_by_time MODIFY QUERY
+SELECT * FROM xshield.audit_events;
 -- APIs query these views so retries collapse by event_id and an expired row is
 -- hidden before asynchronous TTL merges physically remove it. The earliest
 -- deadline wins, so replay after a policy change cannot extend visibility.

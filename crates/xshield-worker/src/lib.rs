@@ -184,6 +184,158 @@ pub struct RequestEvents {
     pub next_position: Option<RequestEventPosition>,
 }
 
+/// Redacted aggregate facts for one request in the active analytical view.
+#[derive(Clone, Debug, Serialize)]
+pub struct RequestSummary {
+    /// Number of retained, deduplicated events represented by this summary.
+    pub event_count: u64,
+    /// First authenticated producer occurrence time.
+    pub first_occurred_at: DateTime<Utc>,
+    /// Latest authenticated producer occurrence time.
+    pub last_occurred_at: DateTime<Utc>,
+    /// Validated HTTP method when a retained event supplied it.
+    pub method: Option<String>,
+    /// Validated operation identifier when available.
+    pub operation_id: Option<String>,
+    /// Terminal request decision when a terminal event is retained.
+    pub decision: Option<String>,
+    /// Terminal stable reason code when a terminal event is retained.
+    pub reason_code: Option<String>,
+    /// Terminal HTTP status when available.
+    pub status: Option<u16>,
+    /// Terminal origin state when available.
+    pub origin_state: Option<String>,
+    /// Terminal duration in microseconds when available.
+    pub duration_us: Option<u64>,
+    /// Whether a validated origin-forward intent is retained.
+    pub forwarded: bool,
+    /// Whether a terminal request event is retained.
+    pub terminal: bool,
+    /// Whether the terminal event confirms an origin response.
+    pub business_result_confirmed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Row)]
+struct RequestSummaryRow {
+    event_count: u64,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+    first_occurred_at: DateTime<Utc>,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+    last_occurred_at: DateTime<Utc>,
+    method: String,
+    operation_id: String,
+    decision: String,
+    reason_code: String,
+    status: Option<u16>,
+    origin_state: String,
+    duration_us: u64,
+    forwarded: u8,
+    terminal: u8,
+}
+
+/// Reads one scoped request aggregate from the deduplicated retention-aware view.
+///
+/// The result contains only publisher-validated redacted columns. Tenant and site
+/// are supplied from authenticated management scope, and an absent group returns
+/// `None` without consulting payload JSON.
+///
+/// # Errors
+/// Returns [`PublishError::ClickHouse`] when the index is unavailable and
+/// [`PublishError::InvalidEvent`] when an analytical row violates its contract.
+pub async fn query_request_summary(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    request_id: &RequestId,
+) -> Result<Option<RequestSummary>, PublishError> {
+    let row = client
+        .query(
+            "SELECT count() AS event_count,min(occurred_at) AS first_occurred_at,\
+             max(occurred_at) AS last_occurred_at,\
+             argMinIf(method,tuple(request_seq,event_id),method != '') AS method,\
+             argMinIf(operation_id,tuple(request_seq,event_id),operation_id != '') AS operation_id,\
+             argMaxIf(outcome,tuple(request_seq,event_id),is_terminal = 1) AS decision,\
+             argMaxIf(reason_code,tuple(request_seq,event_id),is_terminal = 1) AS reason_code,\
+             argMaxIf(http_status,tuple(request_seq,event_id),is_terminal = 1) AS status,\
+             argMaxIf(origin_state,tuple(request_seq,event_id),is_terminal = 1) AS origin_state,\
+             argMaxIf(duration_us,tuple(request_seq,event_id),is_terminal = 1) AS duration_us,\
+             toUInt8(countIf(event_type = 'origin.forward_intent') > 0) AS forwarded,\
+             max(is_terminal) AS terminal FROM ? WHERE tenant_id = ? AND site_id = ? \
+             AND request_id = ? GROUP BY request_id LIMIT 1",
+        )
+        .bind(Identifier(&config.active_view))
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(request_id.as_str())
+        .with_setting("max_execution_time", "2")
+        .with_setting("max_rows_to_read", "1000000")
+        .fetch_optional::<RequestSummaryRow>()
+        .await?;
+    row.map(RequestSummary::try_from).transpose()
+}
+
+impl TryFrom<RequestSummaryRow> for RequestSummary {
+    type Error = PublishError;
+
+    fn try_from(row: RequestSummaryRow) -> Result<Self, Self::Error> {
+        let method = optional_validated(row.method, valid_method)?;
+        let operation_id = optional_validated(row.operation_id, valid_name)?;
+        let decision = optional_validated(row.decision, |value| {
+            matches!(value, "ALLOW" | "DENY" | "UNKNOWN")
+        })?;
+        let reason_code = optional_validated(row.reason_code, valid_name)?;
+        let origin_state = optional_validated(row.origin_state, |value| {
+            matches!(value, "not_sent" | "unknown" | "response_received")
+        })?;
+        if row.event_count == 0
+            || row.forwarded > 1
+            || row.terminal > 1
+            || row
+                .status
+                .is_some_and(|status| !(100..=599).contains(&status))
+            || (row.terminal == 0
+                && (decision.is_some()
+                    || reason_code.is_some()
+                    || row.status.is_some()
+                    || origin_state.is_some()
+                    || row.duration_us != 0))
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        let terminal = row.terminal == 1;
+        Ok(Self {
+            event_count: row.event_count,
+            first_occurred_at: row.first_occurred_at,
+            last_occurred_at: row.last_occurred_at,
+            method,
+            operation_id,
+            decision,
+            reason_code,
+            status: row.status,
+            business_result_confirmed: terminal
+                && origin_state.as_deref() == Some("response_received"),
+            origin_state,
+            duration_us: terminal.then_some(row.duration_us),
+            forwarded: row.forwarded == 1,
+            terminal,
+        })
+    }
+}
+
+fn optional_validated(
+    value: String,
+    predicate: impl FnOnce(&str) -> bool,
+) -> Result<Option<String>, PublishError> {
+    if value.is_empty() {
+        Ok(None)
+    } else if predicate(&value) {
+        Ok(Some(value))
+    } else {
+        Err(PublishError::InvalidEvent)
+    }
+}
+
 /// Stable keyset position for one request-event page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestEventPosition {
@@ -498,6 +650,11 @@ struct IndexRow {
     producer_boot_id: String,
     producer_seq: u64,
     request_seq: u32,
+    method: String,
+    operation_id: String,
+    origin_state: String,
+    http_status: Option<u16>,
+    is_terminal: u8,
     duration_us: u64,
     policy_revision: String,
     model_revision: String,
@@ -582,6 +739,11 @@ impl IndexRow {
             producer_boot_id: event.producer_boot_id,
             producer_seq: event.producer_seq,
             request_seq: event.request_seq,
+            method: summary.method,
+            operation_id: summary.operation_id,
+            origin_state: summary.origin_state,
+            http_status: summary.http_status,
+            is_terminal: u8::from(summary.is_terminal),
             duration_us: summary.duration_us,
             policy_revision: event.policy_revision,
             model_revision: String::new(),
@@ -638,6 +800,11 @@ struct PayloadSummary {
     proof_kind: String,
     confidence: Option<f64>,
     confidence_status: String,
+    method: String,
+    operation_id: String,
+    origin_state: String,
+    http_status: Option<u16>,
+    is_terminal: bool,
     duration_us: u64,
 }
 
@@ -648,10 +815,7 @@ impl PayloadSummary {
                 let payload: StagePayload = serde_json::from_str(json)?;
                 payload.validate()
             }
-            "request.accepted" => {
-                serde_json::from_str::<RequestAcceptedPayload>(json)?.validate()?;
-                Ok(Self::default())
-            }
+            "request.accepted" => serde_json::from_str::<RequestAcceptedPayload>(json)?.validate(),
             "decision.composed" => {
                 let payload: DecisionPayload = serde_json::from_str(json)?;
                 payload.validate()
@@ -680,7 +844,7 @@ struct RequestAcceptedPayload {
 }
 
 impl RequestAcceptedPayload {
-    fn validate(self) -> Result<(), PublishError> {
+    fn validate(self) -> Result<PayloadSummary, PublishError> {
         if !valid_method(&self.method)
             || self
                 .operation_id
@@ -690,7 +854,12 @@ impl RequestAcceptedPayload {
         {
             return Err(PublishError::InvalidEvent);
         }
-        Ok(())
+        Ok(PayloadSummary {
+            method: self.method,
+            operation_id: self.operation_id.unwrap_or_default(),
+            origin_state: self.origin_state,
+            ..PayloadSummary::default()
+        })
     }
 }
 
@@ -759,7 +928,9 @@ impl StagePayload {
             proof_kind: self.proof_kind,
             confidence: self.confidence,
             confidence_status: self.confidence_status,
+            operation_id: self.facts.operation_id.unwrap_or_default(),
             duration_us: self.duration_us,
+            ..PayloadSummary::default()
         })
     }
 }
@@ -795,6 +966,7 @@ impl DecisionPayload {
         Ok(PayloadSummary {
             outcome: self.decision,
             reason_code: self.reason_code,
+            origin_state: self.origin_state,
             ..PayloadSummary::default()
         })
     }
@@ -829,8 +1001,12 @@ impl OriginPayload {
             return Err(PublishError::InvalidEvent);
         }
         Ok(PayloadSummary {
-            outcome: self.origin_state,
+            outcome: self.origin_state.clone(),
             reason_code: self.reason_code,
+            method: self.method,
+            operation_id: self.operation_id.unwrap_or_default(),
+            origin_state: self.origin_state,
+            http_status: self.status,
             ..PayloadSummary::default()
         })
     }
@@ -865,6 +1041,9 @@ impl CompletionPayload {
         Ok(PayloadSummary {
             outcome: self.decision,
             reason_code: self.reason_code,
+            origin_state: self.origin_state,
+            http_status: self.status,
+            is_terminal: true,
             duration_us: self.duration_us,
             ..PayloadSummary::default()
         })
@@ -1306,9 +1485,9 @@ impl From<clickhouse::error::Error> for PublishError {
 mod tests {
     use super::{
         AuditEventSummary, Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError,
-        PublisherConfig, TimeDelta, closed_segment_paths, inspect_publication_health,
-        prepare_private_directory, publish_sealed_segments, query_request_events,
-        read_private_bounded, write_checkpoint,
+        PublisherConfig, RequestSummaryRow, TimeDelta, closed_segment_paths,
+        inspect_publication_health, prepare_private_directory, publish_sealed_segments,
+        query_request_events, query_request_summary, read_private_bounded, write_checkpoint,
     };
     use chrono::Utc;
     use clickhouse::{Client, test};
@@ -1445,6 +1624,9 @@ mod tests {
         assert_eq!(report.published_events, 1);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event_id, fixture.event_ids[0]);
+        assert_eq!(rows[0].method, "GET");
+        assert_eq!(rows[0].origin_state, "not_sent");
+        assert_eq!(rows[0].is_terminal, 0);
         assert_eq!(rows[0].content_digest.len(), 64);
         assert_eq!(
             rows[0].retention_expires_at,
@@ -1525,6 +1707,46 @@ mod tests {
             .await,
             Err(PublishError::InvalidConfig)
         ));
+    }
+
+    #[tokio::test]
+    async fn request_summary_is_scoped_and_validated() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide([RequestSummaryRow {
+            event_count: 4,
+            first_occurred_at: Utc::now(),
+            last_occurred_at: Utc::now(),
+            method: "POST".to_owned(),
+            operation_id: "orders.create".to_owned(),
+            decision: "ALLOW".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            status: Some(201),
+            origin_state: "response_received".to_owned(),
+            duration_us: 42,
+            forwarded: 1,
+            terminal: 1,
+        }]));
+        mock.add(test::handlers::provide(Vec::<RequestSummaryRow>::new()));
+        let client = Client::default().with_mock(&mock);
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
+        let summary = query_request_summary(&fixture.config, &client, &tenant, &site, &request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.method.as_deref(), Some("POST"));
+        assert_eq!(summary.status, Some(201));
+        assert!(summary.forwarded);
+        assert!(summary.terminal);
+        assert!(summary.business_result_confirmed);
+        assert!(
+            query_request_summary(&fixture.config, &client, &tenant, &site, &request)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn event_summary(event_id: &str, request_seq: u32) -> AuditEventSummary {
