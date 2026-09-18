@@ -10,6 +10,7 @@ mod evidence_catalog;
 mod grant;
 mod grant_read;
 mod identity_read;
+mod investigation_case;
 mod provenance;
 mod request_replay;
 mod response_grant;
@@ -24,6 +25,9 @@ pub use evidence_catalog::{
 };
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
+pub use investigation_case::{
+    InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
+};
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
 pub use request_replay::{RequestCryptoMessage, RequestCryptoMessageOutcome};
 pub use response_grant::{

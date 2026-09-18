@@ -7,18 +7,18 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, RawQuery, State},
+    extract::{DefaultBodyLimit, Path, RawQuery, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL},
     },
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{SecondsFormat, Utc};
 use clickhouse::Client;
 use openssl::{hash::MessageDigest, memcmp, pkey::PKey, sha::sha256, sign::Signer};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     sync::{Arc, Mutex},
@@ -28,11 +28,14 @@ use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
-    domain::{ArtifactId, EventId, RequestId, SiteId, TenantId},
+    domain::{ArtifactId, CaseId, EventId, RequestId, SiteId, TenantId},
+    investigation::InvestigationCaseDraft,
 };
 use xshield_evidence::EvidenceManifest;
 use xshield_postgres::{
-    EvidenceCatalogArtifactQuery, EvidenceCatalogPage, EvidenceCatalogQuery, PostgresIdentityStore,
+    EvidenceCatalogArtifactQuery, EvidenceCatalogPage, EvidenceCatalogQuery,
+    InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
+    PostgresIdentityStore,
 };
 use xshield_worker::{
     IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEventPosition,
@@ -46,45 +49,60 @@ const REQUEST_SUMMARY_PATH: &str = "/control/v1/requests/{request_id}";
 const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
 const REQUEST_EVIDENCE_PATH: &str = "/control/v1/requests/{request_id}/evidence";
 const ARTIFACT_PATH: &str = "/control/v1/artifacts/{artifact_id}";
+const CASES_PATH: &str = "/control/v1/cases";
 const RATE_WINDOW: Duration = Duration::from_mins(1);
 const TOKEN_BYTES_MAX: usize = 512;
 const TOKEN_LIFETIME_MAX_SECONDS: u64 = 24 * 60 * 60;
 const MAX_QUERY_EVENTS: u16 = 1_000;
 const MAX_QUERY_ARTIFACTS: u16 = 128;
+const MAX_OPEN_CASES: u32 = 10_000;
+const CASE_BODY_BYTES_MAX: usize = 4 * 1024;
 const CURSOR_BYTES_MAX: usize = 160;
 const CURSOR_VERSION: &str = "v1";
 
 #[derive(Clone, Copy)]
 struct AccessAction {
     event_type: &'static str,
+    method: &'static str,
     path: &'static str,
     role: ManagementRole,
 }
 
 const HEALTH_ACCESS: AccessAction = AccessAction {
     event_type: "console.health.read",
+    method: "GET",
     path: HEALTH_PATH,
     role: ManagementRole::AuditAdministrator,
 };
 const REQUEST_EVENTS_ACCESS: AccessAction = AccessAction {
     event_type: "console.events.read",
+    method: "GET",
     path: REQUEST_EVENTS_PATH,
     role: ManagementRole::Observer,
 };
 const REQUEST_SUMMARY_ACCESS: AccessAction = AccessAction {
     event_type: "console.request.read",
+    method: "GET",
     path: REQUEST_SUMMARY_PATH,
     role: ManagementRole::Observer,
 };
 const REQUEST_EVIDENCE_ACCESS: AccessAction = AccessAction {
     event_type: "console.manifest.read",
+    method: "GET",
     path: REQUEST_EVIDENCE_PATH,
     role: ManagementRole::Observer,
 };
 const ARTIFACT_ACCESS: AccessAction = AccessAction {
     event_type: "console.manifest.read",
+    method: "GET",
     path: ARTIFACT_PATH,
     role: ManagementRole::Observer,
+};
+const CASE_CREATE_ACCESS: AccessAction = AccessAction {
+    event_type: "case.created",
+    method: "POST",
+    path: CASES_PATH,
+    role: ManagementRole::Investigator,
 };
 
 /// Time-bounded management bearer material reduced to a one-way digest.
@@ -110,12 +128,29 @@ impl CursorKey {
     }
 }
 
+/// Dedicated HMAC key for management mutation idempotency.
+pub struct IdempotencyKey(Zeroizing<[u8; 32]>);
+
+impl IdempotencyKey {
+    /// Parses one 32-byte lowercase hexadecimal idempotency key.
+    ///
+    /// # Errors
+    /// Returns [`ControlError::InvalidConfig`] for malformed key material.
+    pub fn from_hex(value: &str) -> Result<Self, ControlError> {
+        parse_lower_hex_32(value)
+            .map(Zeroizing::new)
+            .map(Self)
+            .ok_or(ControlError::InvalidConfig)
+    }
+}
+
 /// Validated request-rate and query-result ceilings for one control process.
 #[derive(Clone, Copy)]
 pub struct ControlLimits {
     requests_per_minute: u64,
     max_query_events: u16,
     max_query_artifacts: u16,
+    max_open_cases: u32,
 }
 
 impl ControlLimits {
@@ -127,10 +162,12 @@ impl ControlLimits {
         requests_per_minute: u64,
         max_query_events: u16,
         max_query_artifacts: u16,
+        max_open_cases: u32,
     ) -> Result<Self, ControlError> {
         if requests_per_minute == 0
             || !(1..=MAX_QUERY_EVENTS).contains(&max_query_events)
             || !(1..=MAX_QUERY_ARTIFACTS).contains(&max_query_artifacts)
+            || !(1..=MAX_OPEN_CASES).contains(&max_open_cases)
         {
             return Err(ControlError::InvalidConfig);
         }
@@ -138,6 +175,7 @@ impl ControlLimits {
             requests_per_minute,
             max_query_events,
             max_query_artifacts,
+            max_open_cases,
         })
     }
 }
@@ -169,6 +207,7 @@ impl ManagementCredential {
 pub struct ControlConfig {
     credential: ManagementCredential,
     cursor_key: CursorKey,
+    idempotency_key: IdempotencyKey,
     principal: ManagementPrincipal,
     tenant_id: TenantId,
     site_id: SiteId,
@@ -189,6 +228,7 @@ impl ControlConfig {
     pub fn new(
         credential: ManagementCredential,
         cursor_key: CursorKey,
+        idempotency_key: IdempotencyKey,
         principal: ManagementPrincipal,
         tenant_id: TenantId,
         site_id: SiteId,
@@ -197,7 +237,8 @@ impl ControlConfig {
         limits: ControlLimits,
     ) -> Result<Self, ControlError> {
         let source_journal_key_id = source_journal_key_id.into();
-        if source_journal_key_id.is_empty()
+        if !distinct_control_keys(&cursor_key, &idempotency_key)
+            || source_journal_key_id.is_empty()
             || source_journal_key_id.len() > 128
             || source_journal_key_id.chars().any(char::is_control)
         {
@@ -206,6 +247,7 @@ impl ControlConfig {
         Ok(Self {
             credential,
             cursor_key,
+            idempotency_key,
             principal,
             tenant_id,
             site_id,
@@ -214,6 +256,10 @@ impl ControlConfig {
             limits,
         })
     }
+}
+
+fn distinct_control_keys(cursor_key: &CursorKey, idempotency_key: &IdempotencyKey) -> bool {
+    !memcmp::eq(&cursor_key.0[..], &idempotency_key.0[..])
 }
 
 /// Runtime state for the authenticated audit-health endpoint.
@@ -561,6 +607,7 @@ impl ControlPlane {
                 REQUEST_EVIDENCE_ACCESS,
                 Some(&audit_target),
                 None,
+                None,
                 "PASS",
                 "CONTROL_MANIFESTS_READ",
                 &evidence_refs,
@@ -651,6 +698,7 @@ impl ControlPlane {
                 ARTIFACT_ACCESS,
                 None,
                 Some(&audit_artifact_id),
+                None,
                 "PASS",
                 "CONTROL_MANIFEST_READ",
                 &evidence_refs,
@@ -668,6 +716,266 @@ impl ControlPlane {
             found,
             artifact: artifact.as_ref().map(evidence_artifact_response),
         })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn create_case(
+        self: Arc<Self>,
+        authorization: Option<String>,
+        idempotency_key: Option<String>,
+        payload: Option<CreateCaseRequest>,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(
+                authorization.as_deref(),
+                &auth_request_id,
+                CASE_CREATE_ACCESS,
+            )
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Some(idempotency_key) = idempotency_key.filter(|value| valid_idempotency_key(value))
+        else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    CASE_CREATE_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_IDEMPOTENCY_KEY_INVALID",
+                    "a valid idempotency key is required",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Some(payload) = payload else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    CASE_CREATE_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_CASE_REQUEST_INVALID",
+                    "invalid case request",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Ok(case_id) = CaseId::parse(format!("case_{}", Uuid::now_v7())) else {
+            return internal_error(&request_id);
+        };
+        let Ok(draft) = InvestigationCaseDraft::new(
+            case_id,
+            self.config.tenant_id.clone(),
+            self.config.site_id.clone(),
+            subject.clone(),
+            payload.purpose,
+        ) else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    CASE_CREATE_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_CASE_REQUEST_INVALID",
+                    "invalid case request",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Some((idempotency_digest, request_digest)) = self.case_digests(
+            &subject,
+            idempotency_key.as_bytes(),
+            draft.purpose().as_bytes(),
+        ) else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    CASE_CREATE_ACCESS,
+                    None,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_IDEMPOTENCY_UNAVAILABLE",
+                    "case creation is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let Ok(typed_request_id) = RequestId::parse(request_id.clone()) else {
+            return internal_error(&request_id);
+        };
+        let Ok(event_id) = EventId::parse(format!("ev_{}", Uuid::now_v7())) else {
+            return internal_error(&request_id);
+        };
+        let envelope = case_created_envelope(&event_id, &typed_request_id, &draft, &request_digest);
+        let command = InvestigationCaseCreate::new(
+            &draft,
+            &idempotency_digest,
+            &request_digest,
+            &typed_request_id,
+            &event_id,
+            &envelope,
+            self.config.limits.max_open_cases,
+        );
+        let Ok(command) = command else {
+            return internal_error(&request_id);
+        };
+        let outcome = self.catalog.create_investigation_case(command).await;
+        let Ok(outcome) = outcome else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    CASE_CREATE_ACCESS,
+                    None,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_CASE_STORE_UNAVAILABLE",
+                    "case store is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        match outcome {
+            InvestigationCaseWriteOutcome::Created(case) => {
+                self.complete_case(request_id, subject, case, StatusCode::CREATED, false)
+                    .await
+            }
+            InvestigationCaseWriteOutcome::Existing(case) => {
+                self.complete_case(request_id, subject, case, StatusCode::OK, true)
+                    .await
+            }
+            InvestigationCaseWriteOutcome::Conflict => {
+                self.audited_error_async(
+                    request_id,
+                    Some(subject),
+                    CASE_CREATE_ACCESS,
+                    None,
+                    StatusCode::CONFLICT,
+                    "CONTROL_IDEMPOTENCY_CONFLICT",
+                    "idempotency key is already bound to another request",
+                    false,
+                    "use_original_request",
+                )
+                .await
+            }
+            InvestigationCaseWriteOutcome::CapacityExceeded => {
+                self.audited_error_async(
+                    request_id,
+                    Some(subject),
+                    CASE_CREATE_ACCESS,
+                    None,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "CONTROL_CASE_CAPACITY_EXCEEDED",
+                    "open case capacity is exhausted",
+                    true,
+                    "close_or_reuse_case",
+                )
+                .await
+            }
+        }
+    }
+
+    async fn complete_case(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        case: InvestigationCaseRecord,
+        status: StatusCode,
+        replayed: bool,
+    ) -> EndpointResult {
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_case_id = case.case_id().clone();
+        let reason_code = if replayed {
+            "CONTROL_CASE_ALREADY_CREATED"
+        } else {
+            "CONTROL_CASE_CREATED"
+        };
+        let audited = tokio::task::spawn_blocking(move || {
+            audit_control.append_access_event_with_evidence(
+                &audit_request_id,
+                Some(&audit_subject),
+                CASE_CREATE_ACCESS,
+                None,
+                None,
+                Some(&audit_case_id),
+                "PASS",
+                reason_code,
+                &[],
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        EndpointResult::Case(
+            status,
+            CreateCaseResponse {
+                request_id,
+                tenant_id: self.config.tenant_id.as_str().to_owned(),
+                site_id: self.config.site_id.as_str().to_owned(),
+                case_id: case.case_id().as_str().to_owned(),
+                status: case.status(),
+                purpose: case.purpose().to_owned(),
+                created_at: case
+                    .created_at()
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+                replayed,
+            },
+        )
+    }
+
+    fn case_digests(
+        &self,
+        subject: &str,
+        idempotency_key: &[u8],
+        purpose: &[u8],
+    ) -> Option<([u8; 32], [u8; 32])> {
+        let common = [
+            subject.as_bytes(),
+            self.config.tenant_id.as_str().as_bytes(),
+            self.config.site_id.as_str().as_bytes(),
+        ];
+        let idempotency_digest = component_signature(
+            &self.config.idempotency_key.0,
+            &[
+                b"xshield-control-case-idempotency-v1",
+                common[0],
+                common[1],
+                common[2],
+                idempotency_key,
+            ],
+        )
+        .ok()?;
+        let request_digest = component_signature(
+            &self.config.idempotency_key.0,
+            &[
+                b"xshield-control-case-request-v1",
+                common[0],
+                common[1],
+                common[2],
+                idempotency_key,
+                purpose,
+            ],
+        )
+        .ok()?;
+        Some((idempotency_digest, request_digest))
     }
 
     async fn request_summary(
@@ -1067,6 +1375,7 @@ impl ControlPlane {
                     ARTIFACT_ACCESS,
                     None,
                     Some(&target_artifact_id),
+                    None,
                     "DENY",
                     reason_code,
                     &[],
@@ -1262,6 +1571,7 @@ impl ControlPlane {
             action,
             target_request_id,
             None,
+            None,
             outcome,
             reason_code,
             &[],
@@ -1276,6 +1586,7 @@ impl ControlPlane {
         action: AccessAction,
         target_request_id: Option<&RequestId>,
         target_artifact_id: Option<&ArtifactId>,
+        target_case_id: Option<&CaseId>,
         outcome: &'static str,
         reason_code: &'static str,
         evidence_refs: &[&str],
@@ -1313,11 +1624,12 @@ impl ControlPlane {
             evidence_refs,
             cause_event_ids: &[],
             payload: AccessPayload {
-                method: "GET",
+                method: action.method,
                 path: action.path,
                 subject_ref,
                 target_request_id: target_request_id.map(RequestId::as_str),
                 target_artifact_id: target_artifact_id.map(ArtifactId::as_str),
+                target_case_id: target_case_id.map(CaseId::as_str),
                 outcome,
                 reason_code,
             },
@@ -1340,8 +1652,10 @@ impl ControlPlane {
     }
 }
 
-/// Builds the v1 management router. The route performs no production replay or
-/// mutation; its only side effect is the required durable access event.
+/// Builds the v1 management router.
+///
+/// Read routes have no production side effects. Mutations use their documented
+/// transactional outbox and every route writes the required management audit.
 pub fn router(control: ControlPlane) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health_handler))
@@ -1349,7 +1663,34 @@ pub fn router(control: ControlPlane) -> Router {
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
         .route(REQUEST_EVIDENCE_PATH, get(request_evidence_handler))
         .route(ARTIFACT_PATH, get(artifact_handler))
+        .route(
+            CASES_PATH,
+            post(create_case_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+        )
         .with_state(Arc::new(control))
+}
+
+async fn create_case_handler(
+    State(control): State<Arc<ControlPlane>>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateCaseRequest>, JsonRejection>,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .create_case(
+            authorization,
+            idempotency_key,
+            payload.ok().map(|Json(payload)| payload),
+        )
+        .await
+        .into_response()
 }
 
 async fn request_summary_handler(
@@ -1431,6 +1772,7 @@ enum EndpointResult {
     RequestEvents(RequestEventsResponse),
     RequestEvidence(RequestEvidenceResponse),
     Artifact(ArtifactResponse),
+    Case(StatusCode, CreateCaseResponse),
     Error(StatusCode, ErrorResponse),
 }
 
@@ -1442,6 +1784,7 @@ impl IntoResponse for EndpointResult {
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Artifact(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::Case(status, response) => (status, Json(response)).into_response(),
             Self::Error(status, response) => (status, Json(response)).into_response(),
         })
     }
@@ -1525,6 +1868,57 @@ fn evidence_cursor_signature(
             artifact_id.as_str().as_bytes(),
         ],
     )
+}
+
+fn valid_idempotency_key(value: &str) -> bool {
+    (16..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn case_created_envelope(
+    event_id: &EventId,
+    request_id: &RequestId,
+    draft: &InvestigationCaseDraft,
+    request_digest: &[u8; 32],
+) -> serde_json::Value {
+    let occurred_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let trace_id = Uuid::now_v7().simple().to_string();
+    serde_json::json!({
+        "schema_version": 3,
+        "event_id": event_id.as_str(),
+        "event_type": "case.created",
+        "tenant_id": draft.tenant_id().as_str(),
+        "site_id": draft.site_id().as_str(),
+        "request_id": request_id.as_str(),
+        "trace_id": trace_id,
+        "span_id": &trace_id[..16],
+        "producer_id": "xshield-control",
+        "producer_boot_id": request_id.as_str(),
+        "producer_seq": 1,
+        "request_seq": 1,
+        "occurred_at": occurred_at,
+        "observed_at": occurred_at,
+        "policy_revision": "control-v1",
+        "example_only": false,
+        "evidence_refs": [],
+        "cause_event_ids": [],
+        "payload": {
+            "stage": "case_management",
+            "case_id": draft.case_id().as_str(),
+            "subject_ref": draft.owner_ref(),
+            "request_digest": lower_hex(request_digest),
+            "outcome": "PASS",
+            "reason_code": "CASE_CREATED"
+        },
+        "sensitivity": "INTERNAL",
+        "integrity": {
+            "state": "pending",
+            "previous_hash": null,
+            "event_hash": null
+        }
+    })
 }
 
 fn component_signature(key: &[u8; 32], components: &[&[u8]]) -> Result<[u8; 32], ()> {
@@ -1695,6 +2089,24 @@ struct ArtifactResponse {
     artifact: Option<EvidenceArtifactResponse>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateCaseRequest {
+    purpose: String,
+}
+
+#[derive(Serialize)]
+struct CreateCaseResponse {
+    request_id: String,
+    tenant_id: String,
+    site_id: String,
+    case_id: String,
+    status: &'static str,
+    purpose: String,
+    created_at: String,
+    replayed: bool,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error_code: &'static str,
@@ -1764,6 +2176,7 @@ struct AccessPayload<'a> {
     subject_ref: Option<&'a str>,
     target_request_id: Option<&'a str>,
     target_artifact_id: Option<&'a str>,
+    target_case_id: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
 }
@@ -1837,7 +2250,8 @@ impl From<serde_json::Error> for ControlError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlConfig, ControlLimits, ControlPlane, CursorKey, ManagementCredential, router,
+        ControlConfig, ControlLimits, ControlPlane, CursorKey, IdempotencyKey,
+        ManagementCredential, router,
     };
     use axum::{
         body::{Body, to_bytes},
@@ -1876,15 +2290,28 @@ mod tests {
     const JOURNAL_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const SEAL_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     const CURSOR_KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const IDEMPOTENCY_KEY: &str =
+        "4444444444444444444444444444444444444444444444444444444444444444";
     const TOKEN: &str = "test-control-token-32-bytes-long-value";
     const MISSING_ARTIFACT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000999";
 
     #[tokio::test]
     async fn enforces_auth_scope_rate_limit_and_health_contract() {
         assert!(CursorKey::from_hex("not-a-key").is_err());
-        assert!(ControlLimits::new(0, 100, 1).is_err());
-        assert!(ControlLimits::new(1, 1_001, 1).is_err());
-        assert!(ControlLimits::new(1, 1, 129).is_err());
+        assert!(IdempotencyKey::from_hex("not-a-key").is_err());
+        assert!(!super::distinct_control_keys(
+            &CursorKey::from_hex(CURSOR_KEY).unwrap(),
+            &IdempotencyKey::from_hex(CURSOR_KEY).unwrap(),
+        ));
+        assert!(super::distinct_control_keys(
+            &CursorKey::from_hex(CURSOR_KEY).unwrap(),
+            &IdempotencyKey::from_hex(IDEMPOTENCY_KEY).unwrap(),
+        ));
+        assert!(ControlLimits::new(0, 100, 1, 1).is_err());
+        assert!(ControlLimits::new(1, 1_001, 1, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 129, 1).is_err());
+        assert!(ControlLimits::new(1, 1, 1, 0).is_err());
+        assert!(ControlLimits::new(1, 1, 1, 10_001).is_err());
         assert!(
             ManagementCredential::new(
                 TOKEN,
@@ -2204,6 +2631,7 @@ mod tests {
             "console.manifest.read",
             &[None],
             &[None],
+            &[None],
             &[0],
         );
 
@@ -2233,7 +2661,156 @@ mod tests {
             "console.manifest.read",
             &[None],
             &[Some(artifact_id)],
+            &[None],
             &[0],
+        );
+    }
+
+    #[tokio::test]
+    async fn case_creation_enforces_role_input_and_store_availability() {
+        let invalid_key = Fixture::new(10, ManagementRole::Investigator);
+        let response = router(invalid_key.control)
+            .oneshot(case_request("short", r#"{"purpose":"Review anomaly"}"#))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_case_access_events(&invalid_key.access_directory, &[None]);
+
+        let invalid_body = Fixture::new(10, ManagementRole::Investigator);
+        let response = router(invalid_body.control)
+            .oneshot(case_request(
+                "case-request-key-0001",
+                r#"{"purpose":"Review anomaly","scope":"untrusted"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_case_access_events(&invalid_body.access_directory, &[None]);
+
+        let forbidden = Fixture::new(10, ManagementRole::Observer);
+        let response = router(forbidden.control)
+            .oneshot(case_request(
+                "case-request-key-0002",
+                r#"{"purpose":"Review anomaly"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_case_access_events(&forbidden.access_directory, &[None]);
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://xshield:xshield@127.0.0.1:1/xshield")
+            .unwrap();
+        pool.close().await;
+        let unavailable = Fixture::with_case_catalog(PostgresIdentityStore::from_pool(pool), 1);
+        let response = router(unavailable.control)
+            .oneshot(case_request(
+                "case-request-key-0003",
+                r#"{"purpose":"Review anomaly"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "CONTROL_CASE_STORE_UNAVAILABLE");
+        assert_case_access_events(&unavailable.access_directory, &[None]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+    async fn case_creation_is_idempotent_bounded_and_audited() {
+        let database_url =
+            std::env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
+        let catalog = PostgresIdentityStore::connect(&database_url, 3, Duration::from_secs(5))
+            .await
+            .expect("case store connects");
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("assertion pool connects");
+        sqlx::query(
+            "DELETE FROM xshield.investigation_cases
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "DELETE FROM xshield.audit_outbox
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a'
+               AND event_type = 'case.created'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let fixture = Fixture::with_case_catalog(catalog, 1);
+        let app = router(fixture.control);
+        let first = app
+            .clone()
+            .oneshot(case_request(
+                "case-request-key-1001",
+                r#"{"purpose":"Review evidence anomaly"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(first.headers()["cache-control"], "private, no-store");
+        let first: Value =
+            serde_json::from_slice(&to_bytes(first.into_body(), 16 * 1024).await.unwrap()).unwrap();
+        let case_id = first["case_id"].as_str().unwrap().to_owned();
+        assert_eq!(first["status"], "open");
+        assert_eq!(first["replayed"], false);
+
+        let retry = app
+            .clone()
+            .oneshot(case_request(
+                "case-request-key-1001",
+                r#"{"purpose":"Review evidence anomaly"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retry: Value =
+            serde_json::from_slice(&to_bytes(retry.into_body(), 16 * 1024).await.unwrap()).unwrap();
+        assert_eq!(retry["case_id"], case_id);
+        assert_eq!(retry["replayed"], true);
+
+        let conflict = app
+            .clone()
+            .oneshot(case_request(
+                "case-request-key-1001",
+                r#"{"purpose":"Different purpose"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let capacity = app
+            .oneshot(case_request(
+                "case-request-key-1002",
+                r#"{"purpose":"Second case"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(capacity.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let envelope: Value = sqlx::query_scalar(
+            "SELECT envelope FROM xshield.audit_outbox
+             WHERE tenant_id = 'tenant_a' AND site_id = 'site_a'
+               AND aggregate_ref = $1 AND event_type = 'case.created'",
+        )
+        .bind(&case_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(envelope["payload"]["case_id"], case_id);
+        assert_eq!(envelope["payload"]["subject_ref"], "operator-1");
+        assert_eq!(envelope["payload"]["reason_code"], "CASE_CREATED");
+        assert!(envelope["payload"]["request_digest"].as_str().is_some());
+        assert!(!envelope.to_string().contains("case-request-key"));
+        assert_case_access_events(
+            &fixture.access_directory,
+            &[Some(&case_id), Some(&case_id), None, None],
         );
     }
 
@@ -2325,6 +2902,7 @@ mod tests {
                 Some(first.as_str()),
                 Some(MISSING_ARTIFACT_ID),
             ],
+            &[None, None, None, None, None],
             &[1, 0, 1, 1, 0],
         );
         fs::remove_dir_all(root).unwrap();
@@ -2334,6 +2912,15 @@ mod tests {
         Request::get(path)
             .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
             .body(Body::empty())
+            .unwrap()
+    }
+
+    fn case_request(idempotency_key: &str, body: &'static str) -> Request<Body> {
+        Request::post(super::CASES_PATH)
+            .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", idempotency_key)
+            .body(Body::from(body))
             .unwrap()
     }
 
@@ -2521,6 +3108,24 @@ mod tests {
                 Client::default(),
                 catalog,
                 max_query_artifacts,
+                10_000,
+            )
+        }
+
+        fn with_case_catalog(catalog: PostgresIdentityStore, max_open_cases: u32) -> Self {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            Self::with_dependencies(
+                10,
+                ManagementRole::Investigator,
+                now - 1,
+                now + 3600,
+                Client::default(),
+                catalog,
+                1,
+                max_open_cases,
             )
         }
 
@@ -2554,6 +3159,7 @@ mod tests {
                 index,
                 lazy_catalog(),
                 1,
+                10_000,
             )
         }
 
@@ -2566,6 +3172,7 @@ mod tests {
             index: Client,
             catalog: PostgresIdentityStore,
             max_query_artifacts: u16,
+            max_open_cases: u32,
         ) -> Self {
             let root =
                 std::env::temp_dir().join(format!("xshield-control-test-{}", Uuid::now_v7()));
@@ -2613,12 +3220,13 @@ mod tests {
             let config = ControlConfig::new(
                 credential,
                 CursorKey::from_hex(CURSOR_KEY).unwrap(),
+                IdempotencyKey::from_hex(IDEMPOTENCY_KEY).unwrap(),
                 principal,
                 tenant,
                 site,
                 publisher,
                 "journal-key-r1",
-                ControlLimits::new(rate_limit, 1, max_query_artifacts).unwrap(),
+                ControlLimits::new(rate_limit, 1, max_query_artifacts, max_open_cases).unwrap(),
             )
             .unwrap();
             let seal_key = test_seal_key();
@@ -2667,7 +3275,19 @@ mod tests {
             event_type,
             target_request_ids,
             &vec![None; target_request_ids.len()],
+            &vec![None; target_request_ids.len()],
             &vec![0; target_request_ids.len()],
+        );
+    }
+
+    fn assert_case_access_events(directory: &Path, target_case_ids: &[Option<&str>]) {
+        assert_access_event_targets_and_evidence(
+            directory,
+            "case.created",
+            &vec![None; target_case_ids.len()],
+            &vec![None; target_case_ids.len()],
+            target_case_ids,
+            &vec![0; target_case_ids.len()],
         );
     }
 
@@ -2676,10 +3296,12 @@ mod tests {
         event_type: &str,
         target_request_ids: &[Option<&str>],
         target_artifact_ids: &[Option<&str>],
+        target_case_ids: &[Option<&str>],
         evidence_counts: &[usize],
     ) {
         assert_eq!(target_request_ids.len(), evidence_counts.len());
         assert_eq!(target_artifact_ids.len(), evidence_counts.len());
+        assert_eq!(target_case_ids.len(), evidence_counts.len());
         let manifests = directory.parent().unwrap().join("access-manifests");
         private_directory(&manifests);
         let signing = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY).unwrap();
@@ -2693,10 +3315,14 @@ mod tests {
         .unwrap();
         assert_eq!(segments.len(), target_request_ids.len());
         let verifier = signing.verifying_key().unwrap();
-        for (((segment, target_request_id), target_artifact_id), evidence_count) in segments
+        for (
+            (((segment, target_request_id), target_artifact_id), target_case_id),
+            evidence_count,
+        ) in segments
             .into_iter()
             .zip(target_request_ids)
             .zip(target_artifact_ids)
+            .zip(target_case_ids)
             .zip(evidence_counts)
         {
             let path = directory.join(format!("segment-{}.closed.xja", segment.producer_boot_id));
@@ -2717,6 +3343,14 @@ mod tests {
             let event: Value = serde_json::from_slice(record.plaintext()).unwrap();
             assert_eq!(event["event_type"], event_type);
             assert_eq!(
+                event["payload"]["method"],
+                if event_type == "case.created" {
+                    "POST"
+                } else {
+                    "GET"
+                }
+            );
+            assert_eq!(
                 event["evidence_refs"].as_array().unwrap().len(),
                 *evidence_count
             );
@@ -2728,6 +3362,10 @@ mod tests {
             assert_eq!(
                 event["payload"]["target_artifact_id"],
                 target_artifact_id.map_or(Value::Null, Value::from)
+            );
+            assert_eq!(
+                event["payload"]["target_case_id"],
+                target_case_id.map_or(Value::Null, Value::from)
             );
             assert!(reader.next_record().unwrap().is_none());
         }

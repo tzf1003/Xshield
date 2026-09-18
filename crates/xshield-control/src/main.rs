@@ -4,7 +4,8 @@ use std::{
 };
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
 use xshield_control::{
-    ControlConfig, ControlLimits, ControlPlane, CursorKey, ManagementCredential, router,
+    ControlConfig, ControlLimits, ControlPlane, CursorKey, IdempotencyKey, ManagementCredential,
+    router,
 };
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
@@ -33,6 +34,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let roles = parse_roles(&env::var("XSHIELD_CONTROL_ROLES")?)?;
     let token = Zeroizing::new(env::var("XSHIELD_CONTROL_TOKEN")?);
     let cursor_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_CURSOR_KEY_HEX")?);
+    let idempotency_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX")?);
     let source_key_id = env::var("XSHIELD_JOURNAL_KEY_ID")?;
     let source_key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let seal_key_id = env::var("XSHIELD_SEAL_KEY_ID")?;
@@ -56,6 +58,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let rate_limit = env::var("XSHIELD_CONTROL_REQUESTS_PER_MINUTE")?.parse()?;
     let max_query_events = env::var("XSHIELD_CONTROL_MAX_QUERY_EVENTS")?.parse()?;
     let max_query_artifacts = env::var("XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS")?.parse()?;
+    let max_open_cases = env::var("XSHIELD_CONTROL_MAX_OPEN_CASES")?.parse()?;
     let listen: SocketAddr = env::var("XSHIELD_CONTROL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9443".to_owned())
         .parse()?;
@@ -79,10 +82,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
     )?;
     let credential = ManagementCredential::new(&token, token_issued_at, token_expires_at)?;
     let cursor_key = CursorKey::from_hex(&cursor_key_hex)?;
-    let control_limits = ControlLimits::new(rate_limit, max_query_events, max_query_artifacts)?;
+    let idempotency_key = IdempotencyKey::from_hex(&idempotency_key_hex)?;
+    let control_limits = ControlLimits::new(
+        rate_limit,
+        max_query_events,
+        max_query_artifacts,
+        max_open_cases,
+    )?;
     let config = ControlConfig::new(
         credential,
         cursor_key,
+        idempotency_key,
         principal,
         tenant_id,
         site_id,

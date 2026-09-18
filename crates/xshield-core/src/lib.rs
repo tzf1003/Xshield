@@ -14,5 +14,6 @@ pub mod audit;
 pub mod domain;
 pub mod grant;
 pub mod identity;
+pub mod investigation;
 pub mod ports;
 pub mod provenance;

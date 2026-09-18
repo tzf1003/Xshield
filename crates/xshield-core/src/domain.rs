@@ -118,6 +118,7 @@ scoped_name!(PolicyRevision, "policy_revision");
 v7_id!(RequestId, "req_", "request_id");
 v7_id!(EventId, "ev_", "event_id");
 v7_id!(ArtifactId, "artifact_", "artifact_id");
+v7_id!(CaseId, "case_", "case_id");
 v7_id!(StageExecutionId, "stg_", "stage_execution_id");
 v7_id!(WafSessionId, "ses_", "waf_session_id");
 v7_id!(AuthBindingId, "auth_", "auth_binding_id");
@@ -162,7 +163,7 @@ const fn hex_nibble(byte: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactId, RequestId, TenantId};
+    use super::{ArtifactId, CaseId, RequestId, TenantId};
 
     #[test]
     fn validates_boundary_identifiers() {
@@ -172,6 +173,7 @@ mod tests {
         assert!(RequestId::parse("ev_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_err());
         assert!(ArtifactId::parse("artifact_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_ok());
         assert!(ArtifactId::parse("art_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_err());
+        assert!(CaseId::parse("case_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_ok());
         assert!(TenantId::parse("tenant_demo").is_ok());
         assert!(TenantId::parse("tenant/demo").is_err());
     }
