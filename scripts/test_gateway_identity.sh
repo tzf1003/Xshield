@@ -101,6 +101,15 @@ INSERT INTO xshield.action_descriptors (
     route_template, target_rule, allowed_fields, field_profile,
     policy_revision, mapping_revision, status
 ) VALUES (
+    'tenant_gateway', 'site_gateway', 'settings.legacy.submit', 'settings_page',
+    'settings.legacy.submit', 'POST', '/settings-legacy', '{"kind":"none"}', '[]',
+    'no_fields', 'policy-r1', 'mapping-r1', 'approved'
+);
+INSERT INTO xshield.action_descriptors (
+    tenant_id, site_id, action_id, page_template, operation_id, method,
+    route_template, target_rule, allowed_fields, field_profile,
+    policy_revision, mapping_revision, status
+) VALUES (
     'tenant_gateway', 'site_gateway', 'orders.open', 'settings_page',
     'orders.read', 'GET', '/orders',
     '{"kind":"resource","resource_type":"order"}', '["order_id"]',
@@ -142,6 +151,21 @@ INSERT INTO xshield.ui_actions (
     'settings.open', '{"kind":"none"}', 'no_fields', 'mapping-r1',
     'policy-r1', 'active', now() - interval '30 seconds', now() + interval '15 minutes',
     'mapping-r1', 'GET', '/settings', '[]'
+);
+INSERT INTO xshield.ui_actions (
+    tenant_id, site_id, action_ref, binding_id, auth_epoch,
+    source_request_id, page_evidence_id, source_action_ref, operation_id,
+    target_constraints, field_profile, source_rule, policy_revision,
+    status, issued_at, expires_at, mapping_revision, method, route_template,
+    allowed_fields
+) VALUES (
+    'tenant_gateway', 'site_gateway', 'action_settings_legacy',
+    'auth_018f2a3b-4c5d-7000-8000-000000000901', 1,
+    'req_018f2a3b-4c5d-7000-8000-000000000904',
+    'page_018f2a3b-4c5d-7000-8000-000000000903', 'settings.legacy.submit',
+    'settings.legacy.submit', '{"kind":"none"}', 'no_fields', 'mapping-r1',
+    'policy-r1', 'active', now() - interval '30 seconds', now() + interval '15 minutes',
+    'mapping-r1', 'POST', '/settings-legacy', '[]'
 );
 INSERT INTO xshield.ui_actions (
     tenant_id, site_id, action_ref, binding_id, auth_epoch,
@@ -228,6 +252,7 @@ INSERT INTO xshield.share_grants (
 );
 SQL
 
+compatibility_expires_at=$(($(date +%s) + 600))
 cat >"$test_dir/config.json" <<JSON
 {
   "listen":"127.0.0.1:6288",
@@ -249,6 +274,7 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"account.current","method":"GET","path":"/whoami","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
+    {"operation_id":"settings.legacy.submit","method":"POST","path":"/settings-legacy","admission":"UI_ACTION_REQUIRED","source_action":"settings.legacy.submit","resource_type":null,"view_profile":null,"request_crypto":{"mode":"COMPATIBILITY","adapter_revision":"settings-legacy-r1","approval_ref":"approval-42","expires_at":$compatibility_expires_at,"build_fingerprints":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
     {"operation_id":"orders.path.read","method":"GET","path":"/path-orders/{order_id}","admission":"UI_ACTION_REQUIRED","source_action":"orders.path.open","resource_type":"order","view_profile":"customer_detail","resource_path_parameter":"order_id"},
     {"operation_id":"reports.ingest","method":"POST","path":"/service/report","admission":"SERVICE_IDENTITY","source_action":null,"resource_type":null,"view_profile":null,"resource_query_parameter":null},
@@ -272,6 +298,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.record()
     def record(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        request_body = self.rfile.read(length) if length else b""
         with open(sys.argv[1], "a", encoding="utf-8") as output:
             output.write(f"{self.command} {self.path}\n")
             output.write(f"Cookie={self.headers.get('Cookie', '')}\n")
@@ -279,6 +307,7 @@ class Handler(BaseHTTPRequestHandler):
             output.write(f"ActionRef={self.headers.get('X-Xshield-Action-Ref', '')}\n")
             output.write(f"ServiceCredential={self.headers.get('X-Xshield-Service-Credential', '')}\n")
             output.write(f"ShareToken={self.headers.get('X-Xshield-Share-Token', '')}\n")
+            output.write(f"Body={request_body.decode('utf-8', errors='replace')}\n")
         responses = {
             "/login": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"login-business-token"}',
             "/login-invalid": b'{"identity":{"id":"principal_invalid","authorization_context":"tenant_gateway:user"}}',
@@ -289,6 +318,7 @@ class Handler(BaseHTTPRequestHandler):
             "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
             "/slow-account": b'{"orders":[{"id":"order-late"}]}',
             "/account": b'{"orders":[{"id":"order-456"}]}',
+            "/settings-legacy": b'{"ok":true}',
             "/buffered-valid": b'{"ok":true}',
             "/buffered-invalid": b'private-invalid-json',
             "/buffered-oversize": b'{"private":"must-not-release"}',
@@ -745,6 +775,38 @@ valid_action_status=$(curl -sS -o "$test_dir/valid-action.body" -w '%{http_code}
     http://127.0.0.1:6288/settings)
 [[ "$valid_action_status" == "404" ]]
 
+compatibility_status=$(curl -sS -o "$test_dir/compatibility.body" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/octet-stream' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_settings_legacy" \
+    --data-binary 'legacy=on&value=1' \
+    http://127.0.0.1:6288/settings-legacy)
+[[ "$compatibility_status" == "200" ]]
+[[ "$(<"$test_dir/compatibility.body")" == '{"ok":true}' ]]
+
+encrypted_fallback_status=$(curl -sS -o "$test_dir/encrypted-fallback.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/vnd.xshield.encrypted+json; charset=utf-8' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_settings_legacy" \
+    --data-binary '{"invalid":"envelope"}' \
+    http://127.0.0.1:6288/settings-legacy)
+[[ "$encrypted_fallback_status" == "400" ]]
+grep -q '"reason_code":"REQUEST_ENVELOPE_INVALID"' "$test_dir/encrypted-fallback.json"
+
+psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+    "UPDATE xshield.page_evidence SET build_fingerprint = decode(repeat('c', 64), 'hex') WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND page_evidence_id = 'page_018f2a3b-4c5d-7000-8000-000000000903'" >/dev/null
+unapproved_build_status=$(curl -sS -o "$test_dir/unapproved-build.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/octet-stream' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H "X-Xshield-Action-Ref: action_settings_legacy" \
+    --data-binary 'legacy=changed' \
+    http://127.0.0.1:6288/settings-legacy)
+[[ "$unapproved_build_status" == "403" ]]
+grep -q '"reason_code":"REQUEST_CRYPTO_BUILD_NOT_APPROVED"' "$test_dir/unapproved-build.json"
+
 psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
     "UPDATE xshield.action_descriptors SET status = 'retired' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND action_id = 'settings.open'" >/dev/null
 retired_action_status=$(curl -sS -o "$test_dir/retired-action.json" -w '%{http_code}' \
@@ -892,6 +954,8 @@ origin_pid=""
 [[ $(grep -c '^GET /slow-account$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^GET /whoami$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^POST /settings-legacy$' "$test_dir/origin.log") == "1" ]]
+grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-456' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /orders?order_id=order-refresh' "$test_dir/origin.log") == "1" ]]

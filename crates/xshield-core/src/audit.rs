@@ -176,6 +176,12 @@ pub enum ReasonCode {
     RequestCryptoDecoded,
     /// The server-selected observe mode forwarded the original opaque entity.
     RequestCryptoObservedOpaque,
+    /// An approved compatibility scope forwarded the original opaque entity.
+    RequestCryptoCompatibilityOpaque,
+    /// The compatibility approval expired before request admission.
+    RequestCryptoCompatibilityExpired,
+    /// Verified page evidence does not match an approved compatibility build.
+    RequestCryptoBuildNotApproved,
     /// The scoped request-decryption key could not be obtained.
     RequestCryptoKeyUnavailable,
     /// The authenticated request message expired before replay consumption.
@@ -269,6 +275,9 @@ impl ReasonCode {
             Self::RequestCryptoAuthenticationFailed => "REQUEST_CRYPTO_AUTHENTICATION_FAILED",
             Self::RequestCryptoDecoded => "REQUEST_CRYPTO_DECODED",
             Self::RequestCryptoObservedOpaque => "REQUEST_CRYPTO_OBSERVED_OPAQUE",
+            Self::RequestCryptoCompatibilityOpaque => "REQUEST_CRYPTO_COMPATIBILITY_OPAQUE",
+            Self::RequestCryptoCompatibilityExpired => "REQUEST_CRYPTO_COMPATIBILITY_EXPIRED",
+            Self::RequestCryptoBuildNotApproved => "REQUEST_CRYPTO_BUILD_NOT_APPROVED",
             Self::RequestCryptoKeyUnavailable => "REQUEST_CRYPTO_KEY_UNAVAILABLE",
             Self::RequestCryptoMessageExpired => "REQUEST_CRYPTO_MESSAGE_EXPIRED",
             Self::RequestCryptoMessageFromFuture => "REQUEST_CRYPTO_MESSAGE_FROM_FUTURE",

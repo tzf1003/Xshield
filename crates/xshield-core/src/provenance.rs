@@ -525,6 +525,7 @@ pub struct ActionGrant {
     snapshot: AuthSnapshot,
     source_request_id: RequestId,
     evidence_ref: ActionEvidenceRef,
+    source_build_fingerprint: Option<BuildFingerprint>,
     operation_id: OperationId,
     method: HttpMethod,
     route: RouteTemplate,
@@ -576,6 +577,7 @@ impl ActionGrant {
             snapshot: snapshot.clone(),
             source_request_id: evidence.source_request_id.clone(),
             evidence_ref: ActionEvidenceRef::Page(evidence.evidence_id.clone()),
+            source_build_fingerprint: Some(evidence.build_fingerprint.clone()),
             operation_id: descriptor.operation_id.clone(),
             method: descriptor.method,
             route: descriptor.route.clone(),
@@ -626,6 +628,7 @@ impl ActionGrant {
             snapshot: snapshot.clone(),
             source_request_id: evidence.source_request_id.clone(),
             evidence_ref: ActionEvidenceRef::Response(evidence.evidence_id.clone()),
+            source_build_fingerprint: None,
             operation_id: descriptor.operation_id.clone(),
             method: descriptor.method,
             route: descriptor.route.clone(),
@@ -720,6 +723,12 @@ impl ActionGrant {
             ActionEvidenceRef::Page(value) => Some(value),
             ActionEvidenceRef::Response(_) => None,
         }
+    }
+
+    /// Returns the verified page build that produced a page-derived action.
+    #[must_use]
+    pub const fn source_build_fingerprint(&self) -> Option<&BuildFingerprint> {
+        self.source_build_fingerprint.as_ref()
     }
 
     /// Returns the exact operation.
@@ -951,6 +960,10 @@ mod tests {
             draft("principal_a", &["current_password", "new_password"]),
         )
         .unwrap();
+        assert_eq!(
+            grant.source_build_fingerprint(),
+            Some(fixture.evidence.build_fingerprint())
+        );
         fixture
             .binding
             .refresh_same_context(
@@ -1117,6 +1130,7 @@ mod tests {
             grant.evidence_ref(),
             ActionEvidenceRef::Response(_)
         ));
+        assert_eq!(grant.source_build_fingerprint(), None);
 
         fixture.descriptor.operation_id = OperationId::parse("user.password.reset").unwrap();
         assert_eq!(

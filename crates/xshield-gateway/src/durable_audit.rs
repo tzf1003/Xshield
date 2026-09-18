@@ -16,10 +16,11 @@ use xshield_audit::{
     JournalError, JournalKey, JournalReceipt, JournalRecord, LocalJournal, RecoveryReport,
 };
 use xshield_core::audit::ReasonCode;
-use xshield_core::domain::{EventId, InvalidValue};
+use xshield_core::domain::{EventId, InvalidValue, PageEvidenceId};
 
 use xshield_gateway::request_crypto::{
-    RequestCryptoEvidence, RequestCryptoObserveRule, RequestCryptoRule,
+    RequestCryptoCompatibilityRule, RequestCryptoEvidence, RequestCryptoObserveRule,
+    RequestCryptoRule,
 };
 use xshield_gateway::response_crypto::{ResponseCryptoEvidence, ResponseCryptoRule};
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome};
@@ -57,6 +58,8 @@ pub(crate) struct RequestCryptoAudit {
     algorithm: Option<&'static str>,
     adapter_revision: String,
     key_id: Option<String>,
+    approval_ref: Option<String>,
+    source_evidence_ref: Option<String>,
     message_id: Option<String>,
     nonce_sha256: Option<String>,
     issued_at: Option<u64>,
@@ -75,6 +78,8 @@ impl RequestCryptoAudit {
             algorithm: Some(evidence.algorithm()),
             adapter_revision: evidence.adapter_revision().to_owned(),
             key_id: Some(evidence.key_id().to_owned()),
+            approval_ref: None,
+            source_evidence_ref: None,
             message_id: Some(evidence.message_id().to_owned()),
             nonce_sha256: Some(evidence.nonce_sha256().to_owned()),
             issued_at: Some(evidence.issued_at().value()),
@@ -93,6 +98,8 @@ impl RequestCryptoAudit {
             algorithm: None,
             adapter_revision: rule.adapter_revision().to_owned(),
             key_id: None,
+            approval_ref: None,
+            source_evidence_ref: None,
             message_id: None,
             nonce_sha256: None,
             issued_at: None,
@@ -102,6 +109,55 @@ impl RequestCryptoAudit {
             outcome: "PASS",
             reason_code: ReasonCode::RequestCryptoObservedOpaque,
             duration_us: 0,
+        }
+    }
+
+    pub(crate) fn compatible(
+        rule: &RequestCryptoCompatibilityRule,
+        page_evidence_id: &PageEvidenceId,
+        duration_us: u64,
+    ) -> Self {
+        Self {
+            coverage_mode: "COMPATIBILITY",
+            algorithm: None,
+            adapter_revision: rule.adapter_revision().to_owned(),
+            key_id: None,
+            approval_ref: Some(rule.approval_ref().to_owned()),
+            source_evidence_ref: Some(page_evidence_id.as_str().to_owned()),
+            message_id: None,
+            nonce_sha256: None,
+            issued_at: None,
+            expires_at: None,
+            envelope_sha256: None,
+            rebuilt_sha256: None,
+            outcome: "PASS",
+            reason_code: ReasonCode::RequestCryptoCompatibilityOpaque,
+            duration_us,
+        }
+    }
+
+    pub(crate) fn compatibility_failed(
+        rule: &RequestCryptoCompatibilityRule,
+        page_evidence_id: Option<&PageEvidenceId>,
+        reason_code: ReasonCode,
+        duration_us: u64,
+    ) -> Self {
+        Self {
+            coverage_mode: "COMPATIBILITY",
+            algorithm: None,
+            adapter_revision: rule.adapter_revision().to_owned(),
+            key_id: None,
+            approval_ref: Some(rule.approval_ref().to_owned()),
+            source_evidence_ref: page_evidence_id.map(|value| value.as_str().to_owned()),
+            message_id: None,
+            nonce_sha256: None,
+            issued_at: None,
+            expires_at: None,
+            envelope_sha256: None,
+            rebuilt_sha256: None,
+            outcome: "DENY",
+            reason_code,
+            duration_us,
         }
     }
 
@@ -121,6 +177,8 @@ impl RequestCryptoAudit {
             algorithm: Some(rule.algorithm()),
             adapter_revision: rule.adapter_revision().to_owned(),
             key_id: Some(rule.key_id().to_owned()),
+            approval_ref: None,
+            source_evidence_ref: None,
             message_id: None,
             nonce_sha256: None,
             issued_at: None,
@@ -335,6 +393,8 @@ impl DurableAudit {
                         algorithm: crypto.algorithm,
                         adapter_revision: crypto.adapter_revision.clone(),
                         key_id: crypto.key_id.clone(),
+                        approval_ref: crypto.approval_ref.clone(),
+                        source_evidence_ref: crypto.source_evidence_ref.clone(),
                         message_id: crypto.message_id.clone(),
                         nonce_sha256: crypto.nonce_sha256.clone(),
                         issued_at: crypto.issued_at,
@@ -674,6 +734,8 @@ fn response_crypto_event(
                 algorithm: Some(crypto.algorithm),
                 adapter_revision: crypto.adapter_revision.clone(),
                 key_id: Some(crypto.key_id.clone()),
+                approval_ref: None,
+                source_evidence_ref: None,
                 message_id: crypto.message_id.clone(),
                 nonce_sha256: crypto.nonce_sha256.clone(),
                 issued_at: crypto.issued_at,
@@ -1003,6 +1065,8 @@ struct CryptoStageFacts {
     algorithm: Option<&'static str>,
     adapter_revision: String,
     key_id: Option<String>,
+    approval_ref: Option<String>,
+    source_evidence_ref: Option<String>,
     message_id: Option<String>,
     nonce_sha256: Option<String>,
     issued_at: Option<u64>,
@@ -1205,6 +1269,24 @@ mod tests {
                     "request_crypto": {
                         "mode": "OBSERVE",
                         "adapter_revision": "orders-candidate-r2"
+                    }
+                },
+                {
+                    "operation_id": "orders.compatibility",
+                    "method": "POST",
+                    "path": "/orders-legacy",
+                    "admission": "UI_ACTION_REQUIRED",
+                    "source_action": "orders.legacy.submit",
+                    "resource_type": null,
+                    "view_profile": null,
+                    "request_crypto": {
+                        "mode": "COMPATIBILITY",
+                        "adapter_revision": "orders-legacy-r1",
+                        "approval_ref": "approval-42",
+                        "expires_at": 4_102_444_800_u64,
+                        "build_fingerprints": [
+                            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        ]
                     }
                 }
             ]
@@ -1464,6 +1546,30 @@ mod tests {
         );
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn compatibility_audit_keeps_the_server_approval_and_page_evidence() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let policy = config
+            .request_crypto_policy("POST", "/orders-legacy")
+            .unwrap();
+        let RequestCryptoPolicy::Compatibility(rule) = policy else {
+            panic!("expected compatibility policy");
+        };
+        let evidence = PageEvidenceId::parse("page_018f2a3b-4c5d-7000-8000-000000000020").unwrap();
+        let audit = RequestCryptoAudit::compatible(rule, &evidence, 7);
+        assert_eq!(audit.coverage_mode, "COMPATIBILITY");
+        assert_eq!(audit.approval_ref.as_deref(), Some("approval-42"));
+        assert_eq!(
+            audit.source_evidence_ref.as_deref(),
+            Some(evidence.as_str())
+        );
+        assert_eq!(
+            audit.reason_code,
+            ReasonCode::RequestCryptoCompatibilityOpaque
+        );
     }
 
     #[tokio::test]

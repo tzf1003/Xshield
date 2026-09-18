@@ -10,7 +10,9 @@
 
 请求侧已实现服务端配置的 `OBSERVE` 最小闭环：只允许 POST/PUT/PATCH 且非 `UI_ACTION_REQUIRED` 的 operation，原始实体不解密、不重建地进入既有源站流程；`crypto_decode` 审计记录候选 adapter revision、`coverage_mode=OBSERVE`、`request_crypto_checked=false` 和 `origin_entity_rebuilt=false`。observe operation 在配置期禁止响应加密及身份、资格、刷新或上下文切换提交，因此 opaque 内容不能产生新资格。模式不读取任何客户端声明，enforce 的无效封包也不会回退到 observe。
 
-该增量尚未声明解密字段到 UI 动作字段映射、compatibility、KEY_REWRAP、ENVELOPE_HOOK、构建版本共存和证据库原文保留完成；因此配置会拒绝在 `UI_ACTION_REQUIRED` operation 启用当前请求适配器，这些能力继续按本章后续约束迭代。
+`COMPATIBILITY` 只允许配置在 POST/PUT/PATCH 的 `UI_ACTION_REQUIRED` operation。请求必须先以当前业务凭证、WAF 会话、epoch 和动作引用完成严格准入；该动作还必须来自 PageEvidence，且其中由 WAF 验证的构建指纹精确命中服务端批准列表。批准配置同时绑定 operation、adapter revision、approval ref 和绝对到期，列表最多 16 个构建；到期、构建偏差、响应证据派生动作或缺少页面证据均终止。compatibility 原包透传并以 `coverage_mode=COMPATIBILITY`、批准引用和 PageEvidence 引用审计为 opaque；配置期禁止响应转换及任何身份/资格提交。任何声明 Xshield 加密媒体类型的请求仍按无效封包终止，不进入原协议透传。
+
+该增量尚未声明解密字段到 UI 动作字段映射、KEY_REWRAP、ENVELOPE_HOOK、适配构建并行和证据库原文保留完成；这些能力继续按本章后续约束迭代。
 
 ## 8.1 三条路径
 

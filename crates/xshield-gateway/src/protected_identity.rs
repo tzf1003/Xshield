@@ -11,7 +11,10 @@ use xshield_core::{
     access::ServiceCredentialFingerprint,
     admission::{AdmissionClass, AdmissionProof},
     audit::ReasonCode,
-    domain::{ActionRef, AuthBindingId, EventId, FieldName, RequestId, ResourceType, WafSessionId},
+    domain::{
+        ActionRef, AuthBindingId, EventId, FieldName, PageEvidenceId, RequestId, ResourceType,
+        WafSessionId,
+    },
     grant::ResourceKeyHmac,
     identity::{
         AnonymousSession, AuthBinding, AuthSnapshot, AuthorizationContextRef,
@@ -23,7 +26,7 @@ use xshield_core::{
         ServiceIdentityProofState, ServiceIdentityProofStore, UiActionProofQuery,
         UiActionProofState, UiActionProofStore,
     },
-    provenance::ActionTarget,
+    provenance::{ActionTarget, BuildFingerprint},
 };
 use xshield_gateway::{
     GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, ResourceLocation,
@@ -129,6 +132,17 @@ pub(crate) struct ProtectedAdmission {
     pub(crate) decision: GatewayDecision,
     pub(crate) response_identity: Option<ResponseIdentity>,
     pub(crate) anonymous_session_cookie: Option<String>,
+    pub(crate) compatibility_evidence: Option<CompatibilityEvidence>,
+}
+
+pub(crate) struct CompatibilityEvidence {
+    pub(crate) page_evidence_id: PageEvidenceId,
+    pub(crate) build_fingerprint: BuildFingerprint,
+}
+
+struct UiActionAdmission {
+    decision: GatewayDecision,
+    compatibility_evidence: Option<CompatibilityEvidence>,
 }
 
 impl ProtectedAdmission {
@@ -137,6 +151,7 @@ impl ProtectedAdmission {
             decision,
             response_identity: None,
             anonymous_session_cookie: None,
+            compatibility_evidence: None,
         }
     }
 }
@@ -304,6 +319,7 @@ impl ProtectedIdentity {
                     decision: denied(config, method, path, now, IdentityDenied::AuthRequired),
                     response_identity: None,
                     anonymous_session_cookie: Some(cookie),
+                    compatibility_evidence: None,
                 },
                 AnonymousAdmission::RateExceeded => {
                     ProtectedAdmission::without_identity(denied_reason(
@@ -673,28 +689,34 @@ impl ProtectedIdentity {
             .await?;
         Ok(match state {
             IdentityProofState::Verified { binding, snapshot } => {
-                let decision = match class {
-                    Some(AdmissionClass::AuthenticatedRoot) => config.admit_with_proof(
-                        method,
-                        path,
-                        now,
-                        AdmissionProof::Authenticated {
-                            binding: &binding,
-                            snapshot: &snapshot,
-                        },
+                let (decision, compatibility_evidence) = match class {
+                    Some(AdmissionClass::AuthenticatedRoot) => (
+                        config.admit_with_proof(
+                            method,
+                            path,
+                            now,
+                            AdmissionProof::Authenticated {
+                                binding: &binding,
+                                snapshot: &snapshot,
+                            },
+                        ),
+                        None,
                     ),
                     Some(AdmissionClass::UiActionRequired) => {
-                        self.admit_ui_action(
-                            config, store, request, method, path, now, &binding, &snapshot,
-                        )
-                        .await?
+                        let admission = self
+                            .admit_ui_action(
+                                config, store, request, method, path, now, &binding, &snapshot,
+                            )
+                            .await?;
+                        (admission.decision, admission.compatibility_evidence)
                     }
-                    _ => config.admit(method, path, now),
+                    _ => (config.admit(method, path, now), None),
                 };
                 ProtectedAdmission {
                     decision,
                     response_identity: Some(ResponseIdentity { binding, snapshot }),
                     anonymous_session_cookie: None,
+                    compatibility_evidence,
                 }
             }
             IdentityProofState::Denied(error) => {
@@ -761,11 +783,14 @@ impl ProtectedIdentity {
         now: UnixSeconds,
         binding: &AuthBinding,
         snapshot: &AuthSnapshot,
-    ) -> Result<GatewayDecision, IdentityRuntimeError> {
+    ) -> Result<UiActionAdmission, IdentityRuntimeError> {
         let action_ref = match unique_action_ref(request) {
             Ok(action_ref) => action_ref,
             Err(IdentityRuntimeError::Missing | IdentityRuntimeError::Malformed) => {
-                return Ok(config.admit(method, path, now));
+                return Ok(UiActionAdmission {
+                    decision: config.admit(method, path, now),
+                    compatibility_evidence: None,
+                });
             }
             Err(error) => return Err(error),
         };
@@ -779,40 +804,59 @@ impl ProtectedIdentity {
             })
             .await?
         else {
-            return Ok(denied_reason(
-                config,
-                method,
-                path,
-                now,
-                ReasonCode::UiActionNotAvailable,
-            ));
-        };
-        let Some(operation) = config.resource_operation(method, path) else {
-            if request.uri.query().is_some() {
-                return Ok(denied_reason(
+            return Ok(UiActionAdmission {
+                decision: denied_reason(
                     config,
                     method,
                     path,
                     now,
-                    ReasonCode::FieldNotAllowed,
-                ));
-            }
-            return Ok(config.admit_with_proof(
-                method,
-                path,
-                now,
-                AdmissionProof::UiAction {
-                    binding,
-                    snapshot,
-                    action: &action,
-                    grants: None,
-                },
-            ));
+                    ReasonCode::UiActionNotAvailable,
+                ),
+                compatibility_evidence: None,
+            });
         };
-        self.admit_resource_action(
-            config, store, request, method, path, now, binding, snapshot, &action, operation,
-        )
-        .await
+        let compatibility_evidence = action
+            .page_evidence_id()
+            .zip(action.source_build_fingerprint())
+            .map(
+                |(page_evidence_id, build_fingerprint)| CompatibilityEvidence {
+                    page_evidence_id: page_evidence_id.clone(),
+                    build_fingerprint: build_fingerprint.clone(),
+                },
+            );
+        let Some(operation) = config.resource_operation(method, path) else {
+            if request.uri.query().is_some() {
+                return Ok(UiActionAdmission {
+                    decision: denied_reason(config, method, path, now, ReasonCode::FieldNotAllowed),
+                    compatibility_evidence: None,
+                });
+            }
+            return Ok(UiActionAdmission {
+                decision: config.admit_with_proof(
+                    method,
+                    path,
+                    now,
+                    AdmissionProof::UiAction {
+                        binding,
+                        snapshot,
+                        action: &action,
+                        grants: None,
+                    },
+                ),
+                compatibility_evidence,
+            });
+        };
+        let decision = self
+            .admit_resource_action(
+                config, store, request, method, path, now, binding, snapshot, &action, operation,
+            )
+            .await?;
+        Ok(UiActionAdmission {
+            compatibility_evidence: (decision.outcome == GatewayOutcome::Allowed)
+                .then_some(compatibility_evidence)
+                .flatten(),
+            decision,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

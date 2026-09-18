@@ -4,6 +4,7 @@ use bytes::Bytes;
 use openssl::{sha::sha256, symm::Cipher};
 use serde_json::Value;
 use uuid::Uuid;
+use xshield_core::provenance::BuildFingerprint;
 use xshield_core::{audit::ReasonCode, identity::UnixSeconds};
 use zeroize::Zeroizing;
 
@@ -22,6 +23,54 @@ pub enum RequestCryptoPolicy {
     Enforce(RequestCryptoRule),
     /// The original entity remains opaque and is forwarded unchanged.
     Observe(RequestCryptoObserveRule),
+    /// A time-bound approved page build may use its original protocol.
+    Compatibility(RequestCryptoCompatibilityRule),
+}
+
+/// Validated server approval for one bounded compatibility scope.
+#[derive(Debug)]
+pub struct RequestCryptoCompatibilityRule {
+    pub(crate) adapter_revision: String,
+    pub(crate) approval_ref: String,
+    pub(crate) expires_at: UnixSeconds,
+    pub(crate) build_fingerprints: Vec<BuildFingerprint>,
+}
+
+impl RequestCryptoCompatibilityRule {
+    /// Returns the compatibility candidate adapter revision.
+    #[must_use]
+    pub fn adapter_revision(&self) -> &str {
+        &self.adapter_revision
+    }
+
+    /// Returns the server-side approval reference used for audit.
+    #[must_use]
+    pub fn approval_ref(&self) -> &str {
+        &self.approval_ref
+    }
+
+    /// Checks the approval lease and exact verified page build.
+    ///
+    /// # Errors
+    /// Returns a stable reason when the approval expired or the page build is
+    /// absent from the configured allowlist.
+    pub fn authorize(
+        &self,
+        now: UnixSeconds,
+        build_fingerprint: &BuildFingerprint,
+    ) -> Result<(), ReasonCode> {
+        if now >= self.expires_at {
+            return Err(ReasonCode::RequestCryptoCompatibilityExpired);
+        }
+        if !self
+            .build_fingerprints
+            .iter()
+            .any(|approved| approved == build_fingerprint)
+        {
+            return Err(ReasonCode::RequestCryptoBuildNotApproved);
+        }
+        Ok(())
+    }
 }
 
 /// Validated metadata for an opaque observe-only request path.
@@ -643,5 +692,32 @@ mod tests {
             ),
             Err(ReasonCode::RequestCryptoAuthenticationFailed)
         ));
+    }
+
+    #[test]
+    fn compatibility_requires_an_approved_live_build() {
+        let approved = BuildFingerprint::parse(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let other = BuildFingerprint::parse(
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+        let rule = RequestCryptoCompatibilityRule {
+            adapter_revision: "orders-legacy-r1".to_owned(),
+            approval_ref: "approval-42".to_owned(),
+            expires_at: UnixSeconds::new(10),
+            build_fingerprints: vec![approved.clone()],
+        };
+        assert_eq!(rule.authorize(UnixSeconds::new(9), &approved), Ok(()));
+        assert_eq!(
+            rule.authorize(UnixSeconds::new(9), &other),
+            Err(ReasonCode::RequestCryptoBuildNotApproved)
+        );
+        assert_eq!(
+            rule.authorize(UnixSeconds::new(10), &approved),
+            Err(ReasonCode::RequestCryptoCompatibilityExpired)
+        );
     }
 }

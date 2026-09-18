@@ -296,6 +296,12 @@ enum RequestCryptoDto {
     Observe {
         adapter_revision: String,
     },
+    Compatibility {
+        adapter_revision: String,
+        approval_ref: String,
+        expires_at: u64,
+        build_fingerprints: Vec<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -628,7 +634,7 @@ impl GatewayConfig {
     pub fn request_crypto_rule(&self, method: &str, path: &str) -> Option<&RequestCryptoRule> {
         match self.request_crypto_policy(method, path)? {
             RequestCryptoPolicy::Enforce(rule) => Some(rule),
-            RequestCryptoPolicy::Observe(_) => None,
+            RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
         }
     }
 
@@ -640,7 +646,7 @@ impl GatewayConfig {
             .chain(self.path_resource_operations.iter())
             .find_map(|operation| match operation.request_crypto.as_ref()? {
                 RequestCryptoPolicy::Enforce(rule) => Some(rule.key_id()),
-                RequestCryptoPolicy::Observe(_) => None,
+                RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
             })
     }
 
@@ -870,7 +876,7 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
                 .as_ref()
                 .and_then(|policy| match policy {
                     RequestCryptoPolicy::Enforce(rule) => Some(rule.key_id()),
-                    RequestCryptoPolicy::Observe(_) => None,
+                    RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
                 })
         })
         .collect::<BTreeSet<_>>();
@@ -1125,22 +1131,18 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         capability,
     )
     .map_err(ConfigError::Policy)?;
+    let response = dto.response.map(compile_response).transpose()?;
+    let response_has_side_effects = response.as_ref().is_some_and(|response| {
+        response.crypto.is_some()
+            || response.grant.is_some()
+            || response.auth_binding.is_some()
+            || response.auth_refresh.is_some()
+            || response.auth_context_switch.is_some()
+    });
     let request_crypto = dto
         .request_crypto
-        .map(|rule| compile_request_crypto(rule, method, dto.admission))
+        .map(|rule| compile_request_crypto(rule, method, dto.admission, response_has_side_effects))
         .transpose()?;
-    let response = dto.response.map(compile_response).transpose()?;
-    if matches!(request_crypto, Some(RequestCryptoPolicy::Observe(_)))
-        && response.as_ref().is_some_and(|response| {
-            response.crypto.is_some()
-                || response.grant.is_some()
-                || response.auth_binding.is_some()
-                || response.auth_refresh.is_some()
-                || response.auth_context_switch.is_some()
-        })
-    {
-        return Err(ConfigError::Invalid("operations.request_crypto"));
-    }
     Ok(CompiledOperation {
         method,
         route,
@@ -1157,22 +1159,58 @@ fn compile_request_crypto(
     dto: RequestCryptoDto,
     method: HttpMethod,
     admission: AdmissionDto,
+    response_has_side_effects: bool,
 ) -> Result<RequestCryptoPolicy, ConfigError> {
     if !matches!(
         method,
         HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
-    ) || matches!(admission, AdmissionDto::UiActionRequired)
-    {
+    ) {
         return Err(ConfigError::Invalid("operations.request_crypto"));
     }
     match dto {
         RequestCryptoDto::Observe { adapter_revision } => {
-            if !valid_scoped_value(&adapter_revision) {
+            if matches!(admission, AdmissionDto::UiActionRequired)
+                || response_has_side_effects
+                || !valid_scoped_value(&adapter_revision)
+            {
                 return Err(ConfigError::Invalid("operations.request_crypto"));
             }
             Ok(RequestCryptoPolicy::Observe(RequestCryptoObserveRule {
                 adapter_revision,
             }))
+        }
+        RequestCryptoDto::Compatibility {
+            adapter_revision,
+            approval_ref,
+            expires_at,
+            build_fingerprints,
+        } => {
+            let unique_builds = build_fingerprints.iter().collect::<BTreeSet<_>>();
+            if !matches!(admission, AdmissionDto::UiActionRequired)
+                || response_has_side_effects
+                || !valid_scoped_value(&adapter_revision)
+                || !valid_scoped_value(&approval_ref)
+                || expires_at == 0
+                || !(1..=16).contains(&build_fingerprints.len())
+                || unique_builds.len() != build_fingerprints.len()
+            {
+                return Err(ConfigError::Invalid("operations.request_crypto"));
+            }
+            let build_fingerprints = build_fingerprints
+                .iter()
+                .map(|value| {
+                    xshield_core::provenance::BuildFingerprint::parse(value)
+                        .map_err(ConfigError::Provenance)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(RequestCryptoPolicy::Compatibility(
+                request_crypto::RequestCryptoCompatibilityRule {
+                    adapter_revision,
+                    approval_ref,
+                    expires_at: UnixSeconds::new(expires_at),
+                    build_fingerprints,
+                },
+            ))
         }
         RequestCryptoDto::DirectDecrypt {
             adapter_revision,
@@ -1185,7 +1223,8 @@ fn compile_request_crypto(
             max_future_skew_seconds,
             max_active_messages,
         } => {
-            if !valid_scoped_value(&adapter_revision)
+            if matches!(admission, AdmissionDto::UiActionRequired)
+                || !valid_scoped_value(&adapter_revision)
                 || !valid_scoped_value(&key_id)
                 || key_not_before >= key_expires_at
                 || !(1..=MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES).contains(&max_envelope_bytes)
@@ -2085,6 +2124,54 @@ mod tests {
                 "session_ttl_seconds": 3600
             }
         });
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
+            Err(ConfigError::Invalid("operations.request_crypto"))
+        ));
+    }
+
+    #[test]
+    fn compatibility_is_ui_build_approval_scoped() {
+        let mut config: serde_json::Value = serde_json::from_str(CONFIG).unwrap();
+        config["operations"][1]["request_crypto"] = serde_json::json!({
+            "mode": "COMPATIBILITY",
+            "adapter_revision": "account-legacy-r2",
+            "approval_ref": "approval-42",
+            "expires_at": 4_102_444_800_u64,
+            "build_fingerprints": [
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ]
+        });
+        let compiled = GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).unwrap();
+        assert!(matches!(
+            compiled.request_crypto_policy("POST", "/account"),
+            Some(RequestCryptoPolicy::Compatibility(rule))
+                if rule.approval_ref() == "approval-42"
+        ));
+
+        config["operations"][1]["response"] = serde_json::json!({
+            "mode": "BUFFERED_JSON",
+            "max_bytes": 1024,
+            "crypto": {
+                "mode": "DIRECT_ENCRYPT",
+                "adapter_revision": "account-response-r1",
+                "key_id": "response-key-r1",
+                "key_not_before": 1,
+                "key_expires_at": 4_102_444_800_u64,
+                "message_ttl_seconds": 60,
+                "max_envelope_bytes": 3072
+            }
+        });
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
+            Err(ConfigError::Invalid("operations.request_crypto"))
+        ));
+        config["operations"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("response");
+        config["operations"][1]["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
+        config["operations"][1]["source_action"] = serde_json::Value::Null;
         assert!(matches!(
             GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
             Err(ConfigError::Invalid("operations.request_crypto"))

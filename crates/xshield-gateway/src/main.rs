@@ -43,8 +43,8 @@ use crate::durable_audit::{
     ResponseCryptoAudit, new_trace_id,
 };
 use crate::protected_identity::{
-    PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE, store_failure_reason,
-    strip_edge_proofs,
+    CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE,
+    store_failure_reason, strip_edge_proofs,
 };
 
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
@@ -102,6 +102,7 @@ struct RequestContext {
     response_crypto_audit: Option<ResponseCryptoAudit>,
     buffered_response: Option<BufferedJsonResponse>,
     response_identity: Option<ResponseIdentity>,
+    compatibility_evidence: Option<CompatibilityEvidence>,
     anonymous_session_cookie: Option<String>,
     pending_auth_binding: Option<PendingAuthBinding>,
     response_failure: Option<ReasonCode>,
@@ -125,6 +126,7 @@ impl ProxyHttp for Gateway {
             response_crypto_audit: None,
             buffered_response: None,
             response_identity: None,
+            compatibility_evidence: None,
             anonymous_session_cookie: None,
             pending_auth_binding: None,
             response_failure: None,
@@ -190,6 +192,7 @@ impl ProxyHttp for Gateway {
                 {
                     context.response_identity = admission.response_identity;
                     context.anonymous_session_cookie = admission.anonymous_session_cookie;
+                    context.compatibility_evidence = admission.compatibility_evidence;
                     admission.decision
                 } else {
                     let mut decision = self.config.admit(&method, &path, now);
@@ -518,6 +521,41 @@ impl Gateway {
         let rule = match policy {
             RequestCryptoPolicy::Observe(rule) => {
                 context.request_crypto_audit = Some(RequestCryptoAudit::observed(rule));
+                return;
+            }
+            RequestCryptoPolicy::Compatibility(rule) => {
+                let started_at = Instant::now();
+                let evidence = context.compatibility_evidence.as_ref();
+                let result = if is_xshield_encrypted_content_type(session.req_header()) {
+                    Err(ReasonCode::RequestEnvelopeInvalid)
+                } else {
+                    evidence
+                        .ok_or(ReasonCode::RequestCryptoBuildNotApproved)
+                        .and_then(|evidence| {
+                            rule.authorize(now, &evidence.build_fingerprint)
+                                .map(|()| evidence)
+                        })
+                };
+                match result {
+                    Ok(evidence) => {
+                        context.request_crypto_audit = Some(RequestCryptoAudit::compatible(
+                            rule,
+                            &evidence.page_evidence_id,
+                            elapsed_us(started_at),
+                        ));
+                    }
+                    Err(reason) => {
+                        context.request_crypto_audit =
+                            Some(RequestCryptoAudit::compatibility_failed(
+                                rule,
+                                evidence.map(|value| &value.page_evidence_id),
+                                reason,
+                                elapsed_us(started_at),
+                            ));
+                        decision.outcome = GatewayOutcome::Denied;
+                        decision.reason_code = reason;
+                    }
+                }
                 return;
             }
             RequestCryptoPolicy::Enforce(rule) => rule,
@@ -1140,6 +1178,19 @@ fn validate_encrypted_request_headers(
         }
     }
     Ok(())
+}
+
+fn is_xshield_encrypted_content_type(request: &pingora::http::RequestHeader) -> bool {
+    request
+        .headers
+        .get("Content-Type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| {
+            value
+                .trim()
+                .eq_ignore_ascii_case(ENCRYPTED_REQUEST_CONTENT_TYPE)
+        })
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
