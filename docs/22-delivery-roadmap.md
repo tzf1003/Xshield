@@ -14,7 +14,7 @@
 
 ## M2 双向协议接管
 
-当前增量：已完成一种双向 enforce `DIRECT_DECRYPT` / `DIRECT_ENCRYPT` AES-256-GCM 协议、消息时效、请求共享原子防重放、双向冻结载荷重建、稳定失败终态、转换摘要审计及 Gateway↔Origin 反例测试；observe 已支持服务端固定的 opaque 透传。compatibility 已绑定严格 UI 动作资格、WAF 验证的页面构建指纹、服务端批准引用与绝对到期；两种 opaque 路径均禁止从未知内容签发身份/资格。网关已提供版本化同源探针与 loader、动态 no-store bootstrap、绑定当前 WAF 会话和身份代际的严格 HTTPS prepare 批量接收，以及独立耐久审计；客户端观测明确不产生授权效果。`SENSOR_HTML` 适配器可在同一 operation 有界并存至多 16 个批准构建，按完整源站摘要选择各自固定偏移；注入标签以 SHA-384 SRI 精确绑定实际静态资源，强制 CSP 使用逐响应随机 nonce 同步改写脚本指令和注入标签，构建或策略偏差在正文释放前关闭，并记录选中修订和转换摘要。ClickHouse 元数据索引已按配置固化绝对保留期限，active 视图先于后台 TTL 隐藏过期行。动态 HTML、原文对象保留与案件 pin 继续迭代。
+当前增量：已完成一种双向 enforce `DIRECT_DECRYPT` / `DIRECT_ENCRYPT` AES-256-GCM 协议、消息时效、请求共享原子防重放、双向冻结载荷重建、稳定失败终态、转换摘要审计及 Gateway↔Origin 反例测试；observe 已支持服务端固定的 opaque 透传。compatibility 已绑定严格 UI 动作资格、WAF 验证的页面构建指纹、服务端批准引用与绝对到期；两种 opaque 路径均禁止从未知内容签发身份/资格。网关已提供版本化同源探针与 loader、动态 no-store bootstrap、绑定当前 WAF 会话和身份代际的严格 HTTPS prepare 批量接收，以及独立耐久审计；客户端观测明确不产生授权效果。`SENSOR_HTML` 适配器可在同一 operation 有界并存至多 16 个批准构建，按完整源站摘要选择各自固定偏移；注入标签以 SHA-384 SRI 精确绑定实际静态资源，强制 CSP 使用逐响应随机 nonce 同步改写脚本指令和注入标签，构建或策略偏差在正文释放前关闭，并记录选中修订和转换摘要。ClickHouse 元数据索引已按配置固化绝对保留期限，active 视图按 `event_id` 合并至少一次重投并先于后台 TTL 隐藏过期行。动态 HTML、原文对象保留与案件 pin 继续迭代。
 
 交付：一种真实加密请求/响应适配、冻结载荷重建、三种覆盖模式、探针及保留策略、构建版本共存。
 

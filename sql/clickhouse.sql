@@ -38,12 +38,29 @@ ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS
 ALTER TABLE xshield.audit_events MODIFY TTL retention_expires_at DELETE;
 CREATE MATERIALIZED VIEW IF NOT EXISTS xshield.mv_events_by_time
 TO xshield.events_by_time AS SELECT * FROM xshield.audit_events;
--- APIs query these views so an expired row is hidden before asynchronous TTL
--- merges physically remove it.
+-- APIs query these views so retries collapse by event_id and an expired row is
+-- hidden before asynchronous TTL merges physically remove it. The earliest
+-- deadline wins, so replay after a policy change cannot extend visibility.
 CREATE VIEW IF NOT EXISTS xshield.audit_events_active AS
-SELECT * FROM xshield.audit_events WHERE retention_expires_at > now64(6);
+SELECT * FROM (
+ SELECT * FROM xshield.audit_events
+ ORDER BY retention_expires_at,event_id LIMIT 1 BY event_id
+) WHERE retention_expires_at > now64(6);
+ALTER TABLE xshield.audit_events_active MODIFY QUERY
+SELECT * FROM (
+ SELECT * FROM xshield.audit_events
+ ORDER BY retention_expires_at,event_id LIMIT 1 BY event_id
+) WHERE retention_expires_at > now64(6);
 CREATE VIEW IF NOT EXISTS xshield.events_by_time_active AS
-SELECT * FROM xshield.events_by_time WHERE retention_expires_at > now64(6);
+SELECT * FROM (
+ SELECT * FROM xshield.events_by_time
+ ORDER BY retention_expires_at,event_id LIMIT 1 BY event_id
+) WHERE retention_expires_at > now64(6);
+ALTER TABLE xshield.events_by_time_active MODIFY QUERY
+SELECT * FROM (
+ SELECT * FROM xshield.events_by_time
+ ORDER BY retention_expires_at,event_id LIMIT 1 BY event_id
+) WHERE retention_expires_at > now64(6);
 -- 同一event_id出现不同正文即审计完整性事故；物理重复但摘要相同不进入此视图。
 CREATE VIEW IF NOT EXISTS xshield.audit_event_conflicts AS
 SELECT event_id, groupUniqArray(content_digest) AS content_digests, count() AS deliveries
