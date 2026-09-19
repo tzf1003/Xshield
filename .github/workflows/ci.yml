@@ -68,6 +68,7 @@ jobs:
         run: |
           cargo test -p xshield-worker --lib real_schema_publisher -- --ignored
           cargo test -p xshield-worker --test clickhouse_search -- --ignored
+          cargo test -p xshield-control --lib management_audit -- --ignored
         timeout-minutes: 5
       - run: scripts/test_gateway_identity.sh
       - run: scripts/test_gateway_request_crypto.sh

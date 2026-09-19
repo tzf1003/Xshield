@@ -20,6 +20,7 @@ use xshield_audit::{
 };
 use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 
+mod control_audit;
 pub mod model_eval;
 mod search;
 pub use search::{
@@ -844,7 +845,11 @@ impl IndexRow {
         let retention_expires_at = occurred_at
             .checked_add_signed(metadata_retention)
             .ok_or(PublishError::InvalidEvent)?;
-        let summary = PayloadSummary::parse(&event.event_type, event.payload.get())?;
+        let summary = if control_audit::supports(&event.event_type) {
+            control_audit::parse(&event)?
+        } else {
+            PayloadSummary::parse(&event.event_type, event.payload.get())?
+        };
         let ingest_revision = digest_revision(&digest)?;
         Ok(Self {
             tenant_id: event.tenant_id,

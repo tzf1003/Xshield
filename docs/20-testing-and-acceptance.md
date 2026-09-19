@@ -87,3 +87,9 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 `scripts/test_postgres.sh` 应用迁移 0018 后运行存储幂等、归属、作用域、并发和 outbox 故障回滚测试，以及 `case_close_is_durable_revokes_new_access_and_survives_disconnect`。HTTP 闭环从创建案件、关联真实 vault/catalog 证据、独立批准和读取开始，验证关闭后集合保留、后续关联/访问申请/读取拒绝、证据期限与批准历史保持、open 容量释放；另验证客户端在案件锁等待时断连后提交与终态审计、管理审计失败后的幂等恢复。这些集成测试默认 ignored，由脚本在独立临时数据库执行。
 
 存储组合回归还验证 pending 配额恢复：申请占满额度后关闭案件，另一 open 案件的新申请仍受限；独立审批人拒绝 closed 案件的原申请后，新申请成功，原申请的 denied 历史保留。
+
+## 20.11 管理审计发布回归
+
+`cargo test -p xshield-worker --lib control_audit` 覆盖严格 DTO、事件/方法/路由绑定、主体和目标 ID、成功/拒绝/依赖失败、查询摘要、读取字节数、证据引用及确定性空置信度；损坏或事务 outbox 形状不会被当作管理访问日志接受。
+
+`cargo test -p xshield-control --lib management_audit` 由实际管理事件生产者及 HTTP 路由写入 journal，经封存和现有发布器验证报文兼容与 checkpoint 重用。配置 20.6 的专用 ClickHouse 后，执行 `cargo test -p xshield-control --lib management_audit -- --ignored`，在独占数据库运行同一路径并读回索引、时间线、有界搜索及跨租户/站点隔离。该真实数据库测试纳入 CI；普通 workspace 测试只编译并跳过其服务调用。

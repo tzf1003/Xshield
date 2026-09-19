@@ -74,3 +74,11 @@ request.accepted/completed/aborted；stage.started/completed/skipped；identity.
 final decision 保存 cause_event_ids、required_checks、completed_checks、skipped_checks、coverage_gaps 和 origin_state。后台展示“身份通过 → 无相应页面动作 → 拒绝 → 模型未执行”，而不是“模型没有发现异常”。明确区分 WAF 策略拒绝、已验证业务拒绝、疑似攻击及内部服务失败。
 
 审计字段的一致性、来源质量和敏感内容处理参考 OWASP 的日志设计原则；本事件格式是 Xshield 自定义契约。[S22]
+
+## 11.7 已实现的管理访问审计发布
+
+封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.query.executed`、`console.case.read`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
+
+索引阶段为 `control_access`，保留实际 `PASS/DENY/ERROR`、稳定原因码及方法，证明为 `deterministic`、`confidence=null/not_applicable`。管理尝试不设置业务 `is_terminal`，不推导源站结果或客户端实际收到的 HTTP 状态。可通过管理响应的 request_id 查询事件时间线，或通过有界 QueryPlan 按 event_type、stage、reason_code、outcome 检索；业务请求摘要的完整性标记不作为管理操作完成凭证。
+
+目标 case/access/model/request、主体、query_digest 与 bytes_read 保留在受限的原始事件载荷；当前脱敏查询返回通用摘要和证据引用，不提供按案件/主体目标过滤，也不直接返回该载荷。引用可检索不扩大证据读取权限。管理 journal 描述接口访问尝试和重试；未认证请求超出限流预算时直接返回 `CONTROL_RATE_LIMITED`，不追加逐请求访问日志。PostgreSQL 同名 outbox 记录事务状态转换，两者 event_id 与载荷契约不同；此发布入口消费已认证封存 journal，outbox 消费发布器仍待独立交付。

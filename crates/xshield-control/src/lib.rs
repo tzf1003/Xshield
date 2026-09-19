@@ -4057,6 +4057,7 @@ impl From<serde_json::Error> for ControlError {
 
 #[cfg(test)]
 mod tests {
+    mod audit_publish;
     mod case_close;
     mod case_collection;
     mod case_items;

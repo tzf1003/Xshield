@@ -44,6 +44,8 @@ DENY 也应记录；磁盘耗尽时预留独立的小型紧急事件区。若紧
 
 避免审计递归：AuditSink 自己的写入、投递和重试不得重新进入用户请求审计管线，否则会无限生成“记录日志的日志”。存储传输按批次/receipt 记录控制事件，故障使用独立紧急通道；管理人员查看、导出或解密证据仍必须产生一次明确的访问审计。AI 对日志的分析也要有任务预算和来源标记，不能让分析产生的日志自动触发无限自分析。
 
+管理 journal 可复用 `xshield-audit-seal` 与 `xshield-worker` 的封存和发布流程。运行时将 worker 的 journal key-id/key 指向对应 `XSHIELD_CONTROL_AUDIT_KEY_ID` / `XSHIELD_CONTROL_AUDIT_KEY_HEX`，为该源预建独立私有 manifest、checkpoint 目录，并使用匹配的独立封存签名公钥；保留期、表和目标配置仍由服务端注入。不要将网关、模型与管理日志的目录或水位混用；健康结果只描述配置的那个 journal 源，不代表其他源已追平。发布直接写分析索引，查询接口产生的访问事件由下一次发布处理，不触发自动自查询。
+
 ## 13.5 outbox 与资格发行
 
 资格与 grant_event outbox 同 PostgreSQL 事务提交，publisher 按 ID 重试发送审计。审计不能独立失败导致“有资格但永无来源事件”。响应释放前等待资格事务成功及该请求要求的审计耐久屏障。
