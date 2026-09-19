@@ -339,12 +339,15 @@ async fn execute(
         // The object is a complete capture document; its body coverage is explicit.
         // An integer array preserves arbitrary provider bytes, including invalid UTF-8.
         let document = Zeroizing::new(
-            serde_json::to_vec(&json!({
-                "schema_version":1, "representation":"entity_bytes_array",
-                "capture_status":exchange.capture_status, "http_status":exchange.status,
-                "bytes_observed":exchange.bytes_observed, "bytes_saved":exchange.body.len(),
-                "body":&*exchange.body,
-            }))
+            serde_json::to_vec(&ModelOutputCapture {
+                schema_version: 1,
+                representation: "entity_bytes_array",
+                capture_status: exchange.capture_status,
+                http_status: exchange.status,
+                bytes_observed: exchange.bytes_observed,
+                bytes_saved: exchange.body.len(),
+                body: &exchange.body,
+            })
             .map_err(|_| "MODEL_EVIDENCE_UNAVAILABLE")?,
         );
         attempt.output = Some(
@@ -371,25 +374,49 @@ async fn execute(
         },
         |response| response.confidence_status,
     );
-    let record = Zeroizing::new(serde_json::to_vec(&json!({
-        "schema_version":3, "model_call_id":attempt.call.as_str(), "request_id":attempt.request.as_str(),
-        "example_only":false, "provider":"typesafe", "model_revision":input.model_revision(),
-        "resolved_model_revision":parsed.map(|r| r.model_revision.as_str()),
-        "prompt_revision":input.prompt_revision(), "input_artifact_id":attempt.input,
-        "output_artifact_id":attempt.output, "question_type":input.question_type(),
-        "result":parsed.map(|r| &r.result),
-        "probabilities":parsed.map_or(&BTreeMap::new(), |r| &r.probabilities),
-        "provider_confidence":parsed.and_then(|r| r.provider_confidence),
-        "confidence_status":confidence_status, "probability_semantics":"provider_reported_uncalibrated",
-        "usage":{"input_tokens":parsed.and_then(|r| r.input_tokens), "output_tokens":parsed.and_then(|r| r.output_tokens),
-            "source":parsed.map_or("unavailable", |r| r.usage_source)},
-        "duration_ms":duration_ms,
-        "status":status, "reason_code":reason, "http_status":exchange.status,
-        "capture_status":exchange.capture_status, "retry_after_seconds":exchange.retry_after_seconds,
-        "provider_request_id":exchange.provider_request_id,
-        "schema_validation":if parsed.is_some() {"valid"} else if exchange.failure.is_none() {"invalid"} else {"unavailable"},
-        "provider_internal":"unavailable"
-    })).map_err(|_| "MODEL_EVIDENCE_UNAVAILABLE")?);
+    let input_artifact_id = attempt.input.clone().ok_or("MODEL_EVIDENCE_UNAVAILABLE")?;
+    let record = Zeroizing::new(
+        serde_json::to_vec(&ModelCallRecord {
+            schema_version: 3,
+            model_call_id: attempt.call.as_str().to_owned(),
+            request_id: attempt.request.as_str().to_owned(),
+            example_only: false,
+            provider: "typesafe",
+            model_revision: input.model_revision().to_owned(),
+            resolved_model_revision: parsed.map(|response| response.model_revision.clone()),
+            prompt_revision: input.prompt_revision().to_owned(),
+            input_artifact_id,
+            output_artifact_id: attempt.output.clone(),
+            question_type: input.question_type(),
+            result: parsed.map(|response| response.result.clone()),
+            probabilities: parsed
+                .map_or_else(BTreeMap::new, |response| response.probabilities.clone()),
+            provider_confidence: parsed.and_then(|response| response.provider_confidence),
+            confidence_status,
+            probability_semantics: "provider_reported_uncalibrated",
+            usage: UsageRecord {
+                input_tokens: parsed.and_then(|response| response.input_tokens),
+                output_tokens: parsed.and_then(|response| response.output_tokens),
+                source: parsed.map_or("unavailable", |response| response.usage_source),
+            },
+            duration_ms,
+            status,
+            reason_code: reason,
+            http_status: exchange.status,
+            capture_status: exchange.capture_status,
+            retry_after_seconds: exchange.retry_after_seconds,
+            provider_request_id: exchange.provider_request_id.clone(),
+            schema_validation: if parsed.is_some() {
+                "valid"
+            } else if exchange.failure.is_none() {
+                "invalid"
+            } else {
+                "unavailable"
+            },
+            provider_internal: "unavailable",
+        })
+        .map_err(|_| "MODEL_EVIDENCE_UNAVAILABLE")?,
+    );
     attempt.record = Some(
         storage
             .capture(
@@ -403,6 +430,54 @@ async fn execute(
             .await?,
     );
     Ok((status, reason, response.ok()))
+}
+
+#[derive(Serialize)]
+struct ModelOutputCapture<'a> {
+    schema_version: u8,
+    representation: &'static str,
+    capture_status: &'static str,
+    http_status: Option<u16>,
+    bytes_observed: u64,
+    bytes_saved: usize,
+    body: &'a [u8],
+}
+
+#[derive(Serialize)]
+struct ModelCallRecord {
+    schema_version: u8,
+    model_call_id: String,
+    request_id: String,
+    example_only: bool,
+    provider: &'static str,
+    model_revision: String,
+    resolved_model_revision: Option<String>,
+    prompt_revision: String,
+    input_artifact_id: String,
+    output_artifact_id: Option<String>,
+    question_type: &'static str,
+    result: Option<wire::ResultValue>,
+    probabilities: BTreeMap<String, f64>,
+    provider_confidence: Option<f64>,
+    confidence_status: &'static str,
+    probability_semantics: &'static str,
+    usage: UsageRecord,
+    duration_ms: u64,
+    status: &'static str,
+    reason_code: &'static str,
+    http_status: Option<u16>,
+    capture_status: &'static str,
+    retry_after_seconds: Option<u32>,
+    provider_request_id: Option<String>,
+    schema_validation: &'static str,
+    provider_internal: &'static str,
+}
+
+#[derive(Serialize)]
+struct UsageRecord {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    source: &'static str,
 }
 
 /// Closed model lifecycle metadata. Kept typed at both journal boundaries.

@@ -284,7 +284,7 @@ pub(super) struct Response {
 }
 
 /// Serializes a primitive result using its provider-native scalar type.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(untagged)]
 pub(super) enum ResultValue {
     /// The highest-probability approved candidate.
