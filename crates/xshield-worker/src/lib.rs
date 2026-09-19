@@ -18,7 +18,7 @@ use uuid::{Uuid, Version};
 use xshield_audit::{
     JournalError, JournalKey, SealVerifyingKey, SealedSegmentReader, verify_sealed_segment,
 };
-use xshield_core::domain::{EventId, PolicyRevision, RequestId, SiteId, TenantId};
+use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 
 mod search;
 pub use search::{AuditSearchResult, SearchEventSummary, SearchPosition, query_audit_events};
@@ -318,12 +318,14 @@ async fn query_request_stages(
     site_id: &SiteId,
     request_id: &RequestId,
 ) -> Result<Vec<RequestStageSummary>, PublishError> {
+    // argMax skips bare NULLs; the tuple keeps confidence and its availability
+    // status on the same latest event even when that confidence is NULL.
     let mut stages = client
         .query(
             "SELECT stage,argMax(outcome,tuple(request_seq,event_id)) AS outcome,\
              argMax(reason_code,tuple(request_seq,event_id)) AS reason_code,\
              argMax(proof_kind,tuple(request_seq,event_id)) AS proof_kind,\
-             argMax(confidence,tuple(request_seq,event_id)) AS confidence,\
+             argMax(tuple(confidence),tuple(request_seq,event_id)).1 AS confidence,\
              argMax(confidence_status,tuple(request_seq,event_id)) AS confidence_status,\
              min(request_seq) AS first_request_seq,max(request_seq) AS last_request_seq,\
              argMax(duration_us,tuple(request_seq,event_id)) AS duration_us,\
@@ -361,15 +363,12 @@ fn validate_stage_summary(stage: &RequestStageSummary) -> Result<(), PublishErro
             stage.proof_kind.as_str(),
             "deterministic" | "model" | "observation" | "none"
         )
-        || !matches!(
-            stage.confidence_status.as_str(),
-            "provided" | "not_applicable" | "not_provided" | "unavailable"
+        || !valid_confidence(
+            &stage.proof_kind,
+            &stage.outcome,
+            stage.confidence,
+            &stage.confidence_status,
         )
-        || stage
-            .confidence
-            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
-        || (stage.proof_kind == "deterministic"
-            && (stage.confidence.is_some() || stage.confidence_status != "not_applicable"))
         || stage.first_request_seq == 0
         || stage.last_request_seq < stage.first_request_seq
         || stage.event_count == 0
@@ -534,6 +533,21 @@ pub async fn query_request_events(
         .with_setting("max_rows_to_read", "1000000")
         .fetch_all::<AuditEventSummary>()
         .await?;
+    for event in &events {
+        if matches!(
+            event.event_type.as_str(),
+            "stage.completed" | "stage.skipped"
+        ) && (!valid_confidence(
+            &event.proof_kind,
+            &event.outcome,
+            event.confidence,
+            &event.confidence_status,
+        ) || (!event.model_revision.is_empty()
+            && (event.proof_kind != "model" || !valid_name(&event.model_revision))))
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+    }
     let truncated = events.len() > usize::from(limit);
     events.truncate(usize::from(limit));
     let next_position = if truncated {
@@ -856,7 +870,7 @@ impl IndexRow {
             is_terminal: u8::from(summary.is_terminal),
             duration_us: summary.duration_us,
             policy_revision: event.policy_revision,
-            model_revision: String::new(),
+            model_revision: summary.model_revision,
             evidence_refs: event.evidence_refs,
             cause_event_ids: event.cause_event_ids,
             sensitivity: event.sensitivity,
@@ -963,6 +977,7 @@ struct PayloadSummary {
     proof_kind: String,
     confidence: Option<f64>,
     confidence_status: String,
+    model_revision: String,
     method: String,
     operation_id: String,
     origin_state: String,
@@ -1034,11 +1049,13 @@ struct StagePayload {
     outcome: String,
     reason_code: String,
     proof_kind: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     confidence: Option<f64>,
     confidence_status: String,
     duration_us: u64,
     rule_revision: Option<String>,
     model_call_id: Option<String>,
+    model_revision: Option<String>,
     facts: StageFacts,
     coverage: StageCoverage,
 }
@@ -1056,17 +1073,12 @@ impl StagePayload {
                 self.proof_kind.as_str(),
                 "deterministic" | "model" | "observation" | "none"
             )
-            || !matches!(
-                self.confidence_status.as_str(),
-                "provided" | "not_applicable" | "not_provided" | "unavailable"
+            || !valid_confidence(
+                &self.proof_kind,
+                &self.outcome,
+                self.confidence,
+                &self.confidence_status,
             )
-            || self
-                .confidence
-                .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
-            || (self.proof_kind == "deterministic"
-                && (self.confidence.is_some() || self.confidence_status != "not_applicable"))
-            || (matches!(self.outcome.as_str(), "SKIPPED" | "CANCELLED")
-                && self.confidence.is_some())
             || self
                 .rule_revision
                 .as_deref()
@@ -1074,7 +1086,12 @@ impl StagePayload {
             || self
                 .model_call_id
                 .as_deref()
-                .is_some_and(|value| valid_prefixed_v7(value, "model_").is_err())
+                .is_some_and(|value| ModelCallId::parse(value).is_err())
+            || (self.proof_kind == "model") != self.model_call_id.is_some()
+            || self
+                .model_revision
+                .as_deref()
+                .is_some_and(|value| self.proof_kind != "model" || !valid_name(value))
             || self
                 .facts
                 .operation_id
@@ -1091,6 +1108,7 @@ impl StagePayload {
             proof_kind: self.proof_kind,
             confidence: self.confidence,
             confidence_status: self.confidence_status,
+            model_revision: self.model_revision.unwrap_or_default(),
             operation_id: self.facts.operation_id.unwrap_or_default(),
             duration_us: self.duration_us,
             ..PayloadSummary::default()
@@ -1526,6 +1544,21 @@ fn valid_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
+fn valid_confidence(
+    proof_kind: &str,
+    outcome: &str,
+    confidence: Option<f64>,
+    status: &str,
+) -> bool {
+    matches!(
+        status,
+        "provided" | "not_applicable" | "not_provided" | "unavailable"
+    ) && confidence.is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+        && (confidence.is_some() == (status == "provided"))
+        && (proof_kind != "deterministic" || (confidence.is_none() && status == "not_applicable"))
+        && (!matches!(outcome, "SKIPPED" | "CANCELLED") || confidence.is_none())
+}
+
 fn valid_event_type(value: &str) -> bool {
     (3..=NAME_BYTES_MAX).contains(&value.len())
         && value.bytes().all(|byte| {
@@ -1706,6 +1739,40 @@ mod tests {
             fixture
         }
 
+        fn with_model_stage(revision: Option<&str>) -> Self {
+            let (mut fixture, mut journal) = Self::with_open_journal(0);
+            let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+            let mut event: serde_json::Value =
+                serde_json::from_str(&event_json(event_id.as_str(), &journal.producer_boot_id()))
+                    .unwrap();
+            event["event_type"] = "stage.completed".into();
+            let now = Utc::now().to_rfc3339();
+            event["occurred_at"] = now.clone().into();
+            event["observed_at"] = now.into();
+            event["payload"] = model_stage_payload();
+            if let Some(revision) = revision {
+                event["payload"]["model_revision"] = revision.into();
+            }
+            let plaintext = serde_json::to_vec(&event).unwrap();
+            journal
+                .append_batch(&[JournalRecord {
+                    event_id: &event_id,
+                    plaintext: &plaintext,
+                }])
+                .unwrap();
+            seal_closed_segments(
+                &fixture.config.journal_directory,
+                &fixture.config.manifest_directory,
+                "journal-key-r1",
+                &fixture.journal_key,
+                &fixture.seal_key,
+            )
+            .unwrap();
+            fixture.event_ids.push(event_id.as_str().to_owned());
+            drop(journal);
+            fixture
+        }
+
         fn with_open_journal(event_count: usize) -> (Self, LocalJournal) {
             let root = std::env::temp_dir().join(format!("xshield-worker-test-{}", Uuid::now_v7()));
             let journal_directory = root.join("journal");
@@ -1879,6 +1946,7 @@ mod tests {
                     .unwrap();
             }
             assert_real_publisher(&client).await;
+            assert_real_model_stage_publication(&client).await;
         })
         .await;
         let cleanup = admin
@@ -1993,6 +2061,66 @@ mod tests {
         assert_eq!(row_count, 1);
     }
 
+    async fn assert_real_model_stage_publication(client: &Client) {
+        let revisions = [Some("jev-1.13.0"), None];
+        let fixtures = revisions.map(Fixture::with_model_stage);
+        for (fixture, revision) in fixtures.iter().zip(revisions) {
+            let report = publish_sealed_segments(
+                &fixture.config,
+                client,
+                "journal-key-r1",
+                &fixture.journal_key,
+                &fixture.seal_key.verifying_key().unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.published_events, 1);
+            let rows = client
+                .query("SELECT ?fields FROM audit_events WHERE event_id = ?")
+                .bind(&fixture.event_ids[0])
+                .fetch_all::<IndexRow>()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].proof_kind, "model");
+            assert_eq!(rows[0].model_revision, revision.unwrap_or_default());
+            let payload: serde_json::Value = serde_json::from_str(&rows[0].payload_json).unwrap();
+            assert_eq!(
+                payload["model_call_id"],
+                model_stage_payload()["model_call_id"]
+            );
+            assert_eq!(fixture.checkpoint_count(), 1);
+        }
+        let now = u64::try_from(Utc::now().timestamp()).unwrap();
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(now - 60), UnixSeconds::new(now + 60)).unwrap(),
+            vec![QueryFilter::Text {
+                field: QueryTextField::ModelRevision,
+                value: "jev-1.13.0".to_owned(),
+            }],
+            QuerySort::OccurredAtAsc,
+            10,
+        )
+        .unwrap();
+        let found = query_audit_events(
+            &fixtures[0].config,
+            client,
+            &TenantId::parse("tenant_demo").unwrap(),
+            &SiteId::parse("site_demo").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.events.len(), 1);
+        assert_eq!(found.events[0].event_id, fixtures[0].event_ids[0]);
+        assert_eq!(
+            found.events[0].model_revision.as_deref(),
+            Some("jev-1.13.0")
+        );
+        assert!(!found.truncated);
+    }
+
     #[tokio::test]
     async fn acknowledges_then_reuses_exact_checkpoint() {
         let fixture = Fixture::new();
@@ -2040,6 +2168,120 @@ mod tests {
         .unwrap();
         assert_eq!(second.published_segments, 0);
         assert_eq!(second.checkpointed_segments, 1);
+    }
+
+    #[tokio::test]
+    async fn publishes_model_stage_with_optional_revision() {
+        for revision in [Some("jev-1.13.0"), None] {
+            let fixture = Fixture::with_model_stage(revision);
+            let mock = test::Mock::new();
+            mock.add(test::handlers::provide(Vec::<ExistingDigest>::new()));
+            let insertion = mock.add(test::handlers::record::<IndexRow>());
+            mock.add(test::handlers::provide(Vec::<ExistingDigest>::new()));
+            let report = publish_sealed_segments(
+                &fixture.config,
+                &Client::default().with_mock(&mock),
+                "journal-key-r1",
+                &fixture.journal_key,
+                &fixture.seal_key.verifying_key().unwrap(),
+            )
+            .await
+            .unwrap();
+            let rows: Vec<IndexRow> = insertion.collect().await;
+            assert_eq!(report.published_events, 1);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].event_id, fixture.event_ids[0]);
+            assert_eq!(rows[0].proof_kind, "model");
+            assert_eq!(rows[0].confidence, Some(0.75));
+            assert_eq!(rows[0].confidence_status, "provided");
+            assert_eq!(rows[0].model_revision, revision.unwrap_or_default());
+            assert_eq!(fixture.checkpoint_count(), 1);
+        }
+    }
+
+    #[test]
+    fn model_stage_rejects_inconsistent_identity_revision_and_confidence() {
+        for changes in [
+            serde_json::json!({"model_call_id": null}),
+            serde_json::json!({"model_call_id": "model_01a0afa6-3320-7791-8f45-b4d5a34ffb57"}),
+            serde_json::json!({"model_call_id": "mdl_01a0afa6-3320-4791-8f45-b4d5a34ffb57"}),
+            serde_json::json!({"model_call_id": "mdl_01A0afa6-3320-7791-8f45-b4d5a34ffb57"}),
+            serde_json::json!({"model_revision": ""}),
+            serde_json::json!({"model_revision": "x".repeat(129)}),
+            serde_json::json!({"model_revision": "model/revision"}),
+            serde_json::json!({"proof_kind": "none"}),
+            serde_json::json!({"proof_kind": "observation"}),
+            serde_json::json!({"proof_kind": "observation", "model_call_id": null, "model_revision": "r1"}),
+            serde_json::json!({"proof_kind": "deterministic", "model_call_id": null}),
+            serde_json::json!({"proof_kind": "deterministic", "model_call_id": null, "confidence": null, "confidence_status": "not_provided"}),
+            serde_json::json!({"confidence": null}),
+            serde_json::json!({"confidence": -0.01}),
+            serde_json::json!({"confidence": 1.01}),
+            serde_json::json!({"confidence_status": "not_applicable"}),
+            serde_json::json!({"confidence_status": "not_provided"}),
+            serde_json::json!({"confidence_status": "unavailable"}),
+            serde_json::json!({"outcome": "SKIPPED"}),
+            serde_json::json!({"outcome": "CANCELLED"}),
+        ] {
+            let mut payload = model_stage_payload();
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(changes.as_object().unwrap().clone());
+            assert!(
+                matches!(
+                    PayloadSummary::parse("stage.completed", &payload.to_string()),
+                    Err(PublishError::InvalidEvent)
+                ),
+                "{changes}"
+            );
+        }
+        let mut payload = model_stage_payload();
+        payload.as_object_mut().unwrap().remove("model_call_id");
+        assert!(PayloadSummary::parse("stage.completed", &payload.to_string()).is_err());
+        let mut payload = model_stage_payload();
+        payload.as_object_mut().unwrap().remove("confidence");
+        payload["confidence_status"] = "not_provided".into();
+        assert!(PayloadSummary::parse("stage.completed", &payload.to_string()).is_err());
+    }
+
+    #[test]
+    fn model_stage_preserves_explicit_absent_confidence_and_legacy_deterministic_events() {
+        for status in ["not_applicable", "not_provided", "unavailable"] {
+            let mut payload = model_stage_payload();
+            payload["confidence"] = serde_json::Value::Null;
+            payload["confidence_status"] = status.into();
+            let summary = PayloadSummary::parse("stage.completed", &payload.to_string()).unwrap();
+            assert_eq!(summary.confidence, None);
+            assert_eq!(summary.confidence_status, status);
+            assert!(summary.model_revision.is_empty());
+        }
+        let mut payload = model_stage_payload();
+        payload["proof_kind"] = "deterministic".into();
+        payload["model_call_id"] = serde_json::Value::Null;
+        payload["confidence"] = serde_json::Value::Null;
+        payload["confidence_status"] = "not_applicable".into();
+        let summary = PayloadSummary::parse("stage.completed", &payload.to_string()).unwrap();
+        assert_eq!(summary.confidence, None);
+        assert_eq!(summary.confidence_status, "not_applicable");
+        assert!(summary.model_revision.is_empty());
+    }
+
+    fn model_stage_payload() -> serde_json::Value {
+        serde_json::json!({
+            "stage": "ui_semantic_match",
+            "stage_execution_id": "stg_01a0afa6-3320-7637-b792-f997e8a40536",
+            "outcome": "PASS",
+            "reason_code": "CANDIDATE_CLASSIFICATION_COMPLETE",
+            "proof_kind": "model",
+            "confidence": 0.75,
+            "confidence_status": "provided",
+            "duration_us": 120,
+            "rule_revision": null,
+            "model_call_id": "mdl_01a0afa6-3320-7791-8f45-b4d5a34ffb57",
+            "facts": {"operation_id": "orders.detail"},
+            "coverage": {"admission_checked": true}
+        })
     }
 
     #[tokio::test]
@@ -2102,6 +2344,55 @@ mod tests {
             .await,
             Err(PublishError::InvalidConfig)
         ));
+    }
+
+    #[tokio::test]
+    async fn request_event_query_validates_model_stage_metadata_before_pagination() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let client = Client::default().with_mock(&mock);
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
+        let mut valid = event_summary("ev_018f2a3b-4c5d-7000-8000-000000000001", 1);
+        valid.proof_kind = "model".to_owned();
+        valid.confidence = Some(0.75);
+        valid.confidence_status = "provided".to_owned();
+        valid.model_revision = "jev-1.13.0".to_owned();
+        mock.add(test::handlers::provide([valid.clone()]));
+        let result =
+            query_request_events(&fixture.config, &client, &tenant, &site, &request, None, 1)
+                .await
+                .unwrap();
+        assert_eq!(result.events[0].model_revision, "jev-1.13.0");
+
+        let mutations: [fn(&mut AuditEventSummary); 8] = [
+            |row| row.confidence = None,
+            |row| row.confidence = Some(f64::NAN),
+            |row| row.confidence_status = "unavailable".to_owned(),
+            |row| row.outcome = "CANCELLED".to_owned(),
+            |row| {
+                row.event_type = "stage.skipped".to_owned();
+                row.outcome = "SKIPPED".to_owned();
+            },
+            |row| row.model_revision = "model/revision".to_owned(),
+            |row| row.proof_kind = "observation".to_owned(),
+            |row| {
+                row.proof_kind = "deterministic".to_owned();
+                row.confidence = None;
+                row.confidence_status = "not_applicable".to_owned();
+            },
+        ];
+        for mutate in mutations {
+            let mut invalid = valid.clone();
+            mutate(&mut invalid);
+            mock.add(test::handlers::provide([valid.clone(), invalid]));
+            assert!(matches!(
+                query_request_events(&fixture.config, &client, &tenant, &site, &request, None, 1,)
+                    .await,
+                Err(PublishError::InvalidEvent)
+            ));
+        }
     }
 
     #[tokio::test]
@@ -2583,11 +2874,47 @@ mod tests {
         let mut invalid_stage = summary.stages[0].clone();
         invalid_stage.first_request_seq = 0;
         assert!(super::validate_stage_summary(&invalid_stage).is_err());
+        for (outcome, confidence, status) in [
+            ("PASS", None, "provided"),
+            ("PASS", Some(0.75), "not_provided"),
+            ("SKIPPED", Some(0.75), "provided"),
+            ("CANCELLED", Some(0.75), "provided"),
+        ] {
+            let mut invalid_stage = summary.stages[0].clone();
+            invalid_stage.proof_kind = "model".to_owned();
+            invalid_stage.outcome = outcome.to_owned();
+            invalid_stage.confidence = confidence;
+            invalid_stage.confidence_status = status.to_owned();
+            assert!(super::validate_stage_summary(&invalid_stage).is_err());
+        }
         assert!(
             query_request_summary(&fixture.config, &client, &tenant, &site, &request)
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn request_stage_summary_keeps_latest_null_confidence() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let recorded = mock.add(test::handlers::record_ddl());
+        let stages = super::query_request_stages(
+            &fixture.config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_a").unwrap(),
+            &RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(stages.is_empty());
+        assert!(
+            recorded
+                .query()
+                .await
+                .contains("argMax(tuple(confidence),tuple(request_seq,event_id)).1 AS confidence")
         );
     }
 

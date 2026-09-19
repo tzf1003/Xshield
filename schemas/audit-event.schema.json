@@ -240,12 +240,18 @@
           "anyOf": [
             {
               "type": "string",
-              "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              "pattern": "^mdl_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
             },
             {
               "type": "null"
             }
           ]
+        },
+        "model_revision": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "facts": {
           "type": "object"
@@ -256,6 +262,30 @@
       },
       "additionalProperties": false,
       "allOf": [
+        {
+          "if": {
+            "properties": {"confidence_status": {"const": "provided"}},
+            "required": ["confidence_status"]
+          },
+          "then": {"properties": {"confidence": {"type": "number"}}},
+          "else": {"properties": {"confidence": {"type": "null"}}}
+        },
+        {
+          "if": {
+            "properties": {"proof_kind": {"const": "model"}},
+            "required": ["proof_kind"]
+          },
+          "then": {
+            "required": ["model_call_id"],
+            "properties": {"model_call_id": {"type": "string"}}
+          },
+          "else": {
+            "properties": {
+              "model_call_id": {"type": "null"},
+              "model_revision": {"type": "null"}
+            }
+          }
+        },
         {
           "if": {
             "properties": {

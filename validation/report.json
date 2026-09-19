@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 234,
-  "passed_count": 234,
+  "checks_total": 258,
+  "passed_count": 258,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -462,6 +462,116 @@
     },
     {
       "name": "negative:noul_fake_confidence_rejected",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:resolved_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:unavailable_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:missing_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:noul_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:timeout",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:wrong_call_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:null_model_call",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:non_model_call",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:provided_null",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:unavailable_value",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:not_provided_value",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:cancelled_value",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:skipped_value",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:empty_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:oversized_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:invalid_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:non_model_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:missing_model_call",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_stage:missing_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_call:wrong_call_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_call:provided_null",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_call:not_provided_value",
       "passed": true,
       "detail": ""
     },
@@ -967,6 +1077,16 @@
     },
     {
       "name": "no_tool_tokens:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/20-testing-and-acceptance.md",
       "passed": true,
       "detail": ""
     },

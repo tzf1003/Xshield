@@ -56,6 +56,41 @@ def main() -> int:
     det['payload']['confidence']=1.0;check('negative:deterministic_fake_confidence_rejected',not valid(schemas['audit-event'],det))
     n=copy.deepcopy(next(c for c in calls if c['question_type']=='noul'));n['provider_confidence']=.99
     check('negative:noul_fake_confidence_rejected',not valid(schemas['model-call'],n))
+    model_stage=next(e for e in events if e['event_type']=='stage.completed' and e['payload']['proof_kind']=='model')
+    for label, fields, expected in [
+        ('resolved_revision', {'model_revision':'jev-1.13.0'}, True),
+        ('unavailable_revision', {'model_revision':None}, True),
+        ('missing_confidence', {'confidence':None, 'confidence_status':'not_provided'}, True),
+        ('noul_confidence', {'confidence':None, 'confidence_status':'not_applicable'}, True),
+        ('timeout', {'outcome':'ERROR', 'confidence':None, 'confidence_status':'unavailable'}, True),
+        ('wrong_call_prefix', {'model_call_id':model_stage['payload']['model_call_id'].replace('mdl_', 'model_')}, False),
+        ('null_model_call', {'model_call_id':None}, False),
+        ('non_model_call', {'proof_kind':'none'}, False),
+        ('provided_null', {'confidence':None}, False),
+        ('unavailable_value', {'confidence_status':'unavailable'}, False),
+        ('not_provided_value', {'confidence_status':'not_provided'}, False),
+        ('cancelled_value', {'outcome':'CANCELLED'}, False),
+        ('skipped_value', {'outcome':'SKIPPED'}, False),
+        ('empty_revision', {'model_revision':''}, False),
+        ('oversized_revision', {'model_revision':'r'*129}, False),
+        ('invalid_revision', {'model_revision':'invalid revision'}, False),
+        ('non_model_revision', {'proof_kind':'none', 'model_call_id':None, 'model_revision':'model-r1'}, False),
+    ]:
+        event=copy.deepcopy(model_stage);event['payload'].update(fields)
+        check('model_stage:'+label,valid(schemas['audit-event'],event)==expected)
+    missing_call=copy.deepcopy(model_stage);del missing_call['payload']['model_call_id']
+    check('model_stage:missing_model_call',not valid(schemas['audit-event'],missing_call))
+    missing_confidence=copy.deepcopy(model_stage);del missing_confidence['payload']['confidence']
+    missing_confidence['payload']['confidence_status']='not_provided'
+    check('model_stage:missing_confidence',not valid(schemas['audit-event'],missing_confidence))
+    choice=next(c for c in calls if c['question_type']=='choice')
+    for label, fields in [
+        ('wrong_call_prefix', {'model_call_id':choice['model_call_id'].replace('mdl_', 'model_')}),
+        ('provided_null', {'provider_confidence':None}),
+        ('not_provided_value', {'confidence_status':'not_provided'}),
+    ]:
+        call=copy.deepcopy(choice);call.update(fields)
+        check('model_call:'+label,not valid(schemas['model-call'],call))
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))
     check('fixture:all_synthetic',all(e['example_only'] for e in events) and all(c['example_only'] for c in calls))

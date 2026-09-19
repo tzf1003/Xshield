@@ -29,7 +29,7 @@
     },
     "model_call_id": {
       "type": "string",
-      "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      "pattern": "^mdl_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "request_id": {
       "type": "string",
@@ -147,6 +147,14 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {"confidence_status": {"const": "provided"}},
+        "required": ["confidence_status"]
+      },
+      "then": {"properties": {"provider_confidence": {"type": "number"}}},
+      "else": {"properties": {"provider_confidence": {"type": "null"}}}
+    },
     {
       "if": {
         "properties": {

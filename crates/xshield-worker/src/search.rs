@@ -1,7 +1,9 @@
 //! Bounded, scoped analytical queries. Only typed plans enter this adapter;
 //! values are bound parameters, and callers must audit attempts and results.
 
-use super::{PublishError, PublisherConfig, valid_event_type, valid_name, validate_id_list};
+use super::{
+    PublishError, PublisherConfig, valid_confidence, valid_event_type, valid_name, validate_id_list,
+};
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row, sql::Identifier};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -348,6 +350,17 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
     EventId::parse(&event.event_id).map_err(|_| PublishError::InvalidEvent)?;
     validate_id_list(&event.evidence_refs, None)?;
     validate_id_list(&event.cause_event_ids, Some("ev_"))?;
+    let confidence_valid = event.confidence_status.as_deref().map_or(
+        event.confidence.is_none() && event.proof_kind.as_deref() != Some("deterministic"),
+        |status| {
+            valid_confidence(
+                event.proof_kind.as_deref().unwrap_or_default(),
+                event.outcome.as_deref().unwrap_or_default(),
+                event.confidence,
+                status,
+            )
+        },
+    );
     if !valid_event_type(&event.event_type)
         || event
             .stage
@@ -375,27 +388,13 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
         || event.proof_kind.as_deref().is_some_and(|value| {
             !matches!(value, "deterministic" | "model" | "observation" | "none")
         })
-        || event.confidence_status.as_deref().is_some_and(|value| {
-            !matches!(
-                value,
-                "provided" | "not_applicable" | "not_provided" | "unavailable"
-            )
-        })
-        || event
-            .confidence
-            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
-        || (event.confidence.is_some() != (event.confidence_status.as_deref() == Some("provided")))
-        || (event.proof_kind.as_deref() == Some("deterministic")
-            && (event.confidence.is_some()
-                || event.confidence_status.as_deref() != Some("not_applicable")))
-        || (matches!(event.outcome.as_deref(), Some("SKIPPED" | "CANCELLED"))
-            && event.confidence.is_some())
+        || !confidence_valid
         || event.request_seq == 0
         || !valid_name(&event.policy_revision)
         || event
             .model_revision
             .as_deref()
-            .is_some_and(|value| !valid_name(value))
+            .is_some_and(|value| !valid_name(value) || event.proof_kind.as_deref() != Some("model"))
         || !matches!(
             event.sensitivity.as_str(),
             "PUBLIC" | "INTERNAL" | "SENSITIVE" | "RESTRICTED"
@@ -408,8 +407,45 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
 
 #[cfg(test)]
 mod tests {
-    use super::{PublishError, query_error};
+    use super::{PublishError, SearchEventSummary, query_error, validate_search_event};
     use clickhouse::error::Error;
+
+    #[test]
+    fn model_search_metadata_keeps_revision_and_confidence_semantics() {
+        let mut event: SearchEventSummary = serde_json::from_str(
+            r#"{
+            "request_id":"req_018f2a3b-4c5d-7000-8000-000000000001",
+            "event_id":"ev_018f2a3b-4c5d-7000-8000-000000000001",
+            "event_type":"stage.completed","stage":"ui_semantic_match",
+            "outcome":"PASS","reason_code":"CANDIDATE_CLASSIFICATION_COMPLETE",
+            "proof_kind":"model","confidence":0.86,"confidence_status":"provided",
+            "occurred_at":"2026-09-19T00:00:00Z","request_seq":1,"duration_us":120,
+            "policy_revision":"policy-r1","model_revision":"jev-1.13.0",
+            "evidence_refs":[],"cause_event_ids":[],"sensitivity":"RESTRICTED"
+        }"#,
+        )
+        .unwrap();
+        assert!(validate_search_event(&event).is_ok());
+        for proof in [Some("deterministic"), Some("none"), None] {
+            let mut invalid = event.clone();
+            invalid.proof_kind = proof.map(str::to_owned);
+            invalid.confidence = None;
+            invalid.confidence_status = Some("not_applicable".to_owned());
+            assert!(validate_search_event(&invalid).is_err());
+        }
+        for status in ["not_applicable", "not_provided", "unavailable"] {
+            event.confidence_status = Some(status.to_owned());
+            event.confidence = Some(0.86);
+            assert!(validate_search_event(&event).is_err());
+            event.confidence = None;
+            assert!(validate_search_event(&event).is_ok());
+        }
+        event.model_revision = None;
+        assert!(validate_search_event(&event).is_ok());
+        event.proof_kind = Some("deterministic".to_owned());
+        event.confidence_status = None;
+        assert!(validate_search_event(&event).is_err());
+    }
 
     #[test]
     fn query_failures_use_only_canonical_wire_codes() {

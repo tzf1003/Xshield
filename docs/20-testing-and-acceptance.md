@@ -58,4 +58,6 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 发布回归从加密 journal 与签名清单开始，验证真实 `FixedString` 编码、两张物理表的精确摘要和微秒时间读回、同步确认后的水位提交与 checkpoint 重用；继续追加同 event_id 的不同内容时，发布器必须返回完整性冲突，保留原水位并显示待投递段。
 
+模型阶段回归由实际加密 journal 经封存和发布入库，验证 `mdl_` 调用引用、已知/缺失模型版本以及有界模型版本过滤。阶段汇总回归在同一阶段先写数值置信度，再写 `not_applicable`、`not_provided` 或 `unavailable` 的 null，确认两套 active 视图都返回最新 null 与匹配状态。常规测试另覆盖置信度矛盾、非法模型引用和版本、时间线分页预读行校验；这些合成事件验证审计链路，不代表实际模型推理或准确率测量。
+
 查询预算测试以同一小数据集收紧服务端结果行数上限，验证真实预算异常映射为 `QueryBudgetExceeded`。普通 `cargo test --workspace --all-targets` 会编译这些测试但按 `ignored` 跳过服务调用，必须执行上述命令才能形成真实数据库验证结果。执行时间/扫描/内存预算、集群故障和生产规模容量仍须分别验证。

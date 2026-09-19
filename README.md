@@ -6,6 +6,8 @@
 
 ## 实现状态
 
+模型阶段审计已支持 `mdl_` 强类型调用引用与可选模型版本索引，缺失版本保持未知。发布、阶段汇总及查询统一校验置信度状态，最新 null 不继承旧数值；真实 journal→封存→ClickHouse 回归与升级边界见 [11.4](docs/11-audit-event-contract.md#114-阶段结果契约) 和 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归)。实际模型供应商调用仍在 M4 后续增量中。
+
 缺少 WAF Cookie 的受保护根/API 请求会先原子创建一条有服务端绝对期限的匿名空 binding 与 `session.created` outbox，再以 401 拒绝并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。匿名 binding 的 epoch/generation 均为 0，不含主体、授权上下文、业务凭证或资格；重复携带该 Cookie 不会扩增记录，附加任意 Bearer 也不能升级身份。匿名 TTL、来源/站点创建速率与每租户/站点活动容量由 `identity_store` 有界配置；进程内预算先限制数据库调用，PostgreSQL 短事务再以传输层对端地址的租户/站点隔离 HMAC 实施分布式来源/站点限流。速率超限返回 429，容量超限返回 503，均不签发 Cookie。
 
 `AUTH_ENTRY` 已支持首个 Bearer 认证建立闭环：有界严格 JSON 成功响应提供配置指针指定的主体、授权上下文引用与 Bearer，网关在释放正文前原子写入新 binding、初始 credential generation 和 `binding.created` outbox，并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。源站同名 Cookie、响应形状偏差或事务失败均不建立身份；端到端测试已使用新签发的 WAF Cookie 与业务 Bearer 访问受保护根入口。

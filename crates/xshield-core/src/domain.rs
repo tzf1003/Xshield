@@ -116,6 +116,7 @@ scoped_name!(TenantId, "tenant_id");
 scoped_name!(SiteId, "site_id");
 scoped_name!(PolicyRevision, "policy_revision");
 v7_id!(RequestId, "req_", "request_id");
+v7_id!(ModelCallId, "mdl_", "model_call_id");
 v7_id!(EventId, "ev_", "event_id");
 v7_id!(ArtifactId, "artifact_", "artifact_id");
 v7_id!(CaseId, "case_", "case_id");
@@ -168,7 +169,7 @@ const fn hex_nibble(byte: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactId, CaseId, EvidenceAccessRequestId, RequestId, TenantId};
+    use super::{ArtifactId, CaseId, EvidenceAccessRequestId, ModelCallId, RequestId, TenantId};
 
     #[test]
     fn validates_boundary_identifiers() {
@@ -176,6 +177,15 @@ mod tests {
         assert!(RequestId::parse("req_01a0afa6-3320-458a-9554-d0d3b561b8c6").is_err());
         assert!(RequestId::parse("req_01A0AFA6-3320-758a-9554-d0d3b561b8c6").is_err());
         assert!(RequestId::parse("ev_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_err());
+        assert!(ModelCallId::parse("mdl_01a0afa6-3320-7791-8f45-b4d5a34ffb57").is_ok());
+        for id in [
+            "model_01a0afa6-3320-7791-8f45-b4d5a34ffb57",
+            "req_01a0afa6-3320-7791-8f45-b4d5a34ffb57",
+            "mdl_01a0afa6-3320-4791-8f45-b4d5a34ffb57",
+            "mdl_01A0afa6-3320-7791-8f45-b4d5a34ffb57",
+        ] {
+            assert!(ModelCallId::parse(id).is_err());
+        }
         assert!(ArtifactId::parse("artifact_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_ok());
         assert!(ArtifactId::parse("art_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_err());
         assert!(CaseId::parse("case_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_ok());

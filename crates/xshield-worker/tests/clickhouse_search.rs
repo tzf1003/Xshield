@@ -15,6 +15,7 @@ use xshield_core::{
 };
 use xshield_worker::{
     AuditSearchResult, PublishError, PublisherConfig, SearchEventSummary, query_audit_events,
+    query_request_summary,
 };
 
 const REQUEST_A: &str = "req_018f2a3b-4c5d-7000-8000-000000000001";
@@ -94,6 +95,7 @@ async fn real_schema_search_is_scoped_typed_paginated_and_retention_aware() {
             .unwrap();
             assert_search(&reader, &config, window, &expected).await;
         }
+        assert_latest_stage_null_confidence(&client, &reader).await;
     })
     .await;
     let cleanup = admin
@@ -153,6 +155,74 @@ async fn apply_schema(client: &Client, database: &str) {
                 .await,
             "stop test-table TTL merges",
         );
+    }
+}
+
+async fn assert_latest_stage_null_confidence(writer: &Client, reader: &Client) {
+    let now = Utc::now();
+    let mut rows = Vec::new();
+    // Every stage used to report a numeric value. The latest event must replace
+    // that value with NULL, including when the provider or call is unavailable.
+    for (offset, status) in ["not_applicable", "not_provided", "unavailable"]
+        .into_iter()
+        .enumerate()
+    {
+        let sequence = u32::try_from(offset).unwrap() * 2 + 100;
+        let mut previous = TestEvent::new(sequence, now, now + TimeDelta::hours(1));
+        previous.request_id = "req_018f2a3b-4c5d-7000-8000-000000000099";
+        previous.stage = status;
+        previous.proof_kind = "model";
+        previous.model_revision = "jev-1.13.0";
+        previous.confidence = Some(0.99);
+        previous.confidence_status = "provided";
+        let mut latest = previous.clone();
+        latest.event_id = event_id(sequence + 1);
+        latest.request_seq = sequence + 1;
+        latest.producer_seq = u64::from(sequence + 1);
+        latest.confidence = None;
+        latest.confidence_status = status;
+        if status == "unavailable" {
+            latest.outcome = "ERROR";
+            latest.reason_code = "MODEL_UNAVAILABLE";
+        }
+        rows.extend([previous, latest]);
+    }
+    let mut insert = writer.insert::<TestEvent>("audit_events").await.unwrap();
+    for row in &rows {
+        insert.write(row).await.unwrap();
+    }
+    insert.end().await.unwrap();
+    for table in ["audit_events", "events_by_time"] {
+        let config = PublisherConfig::new(
+            "unused-journal",
+            "unused-manifests",
+            "unused-checkpoints",
+            "clickhouse-test",
+            table,
+            30,
+            1024,
+        )
+        .unwrap();
+        let summary = query_request_summary(
+            &config,
+            reader,
+            &TenantId::parse("tenant_search").unwrap(),
+            &SiteId::parse("site_search").unwrap(),
+            &RequestId::parse(rows[0].request_id).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(summary.event_count, 6);
+        assert_eq!(summary.stages.len(), 3);
+        for (stage, expected) in summary.stages.iter().zip(rows.iter().skip(1).step_by(2)) {
+            assert_eq!(stage.stage, expected.stage);
+            assert_eq!(stage.confidence, None);
+            assert_eq!(stage.confidence_status, expected.confidence_status);
+            assert_eq!(stage.outcome, expected.outcome);
+            assert_eq!(stage.last_request_seq, expected.request_seq);
+            assert_eq!(stage.event_count, 2);
+        }
     }
 }
 
