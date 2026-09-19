@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -18,6 +18,7 @@
 | POST /control/v1/cases | 建立调查案例 | case.created |
 | POST /control/v1/cases/{id}/items | 把获准证据加入案例 | case.evidence.added |
 | GET /control/v1/cases/{id}/items | 查询本人案件证据引用集合 | console.case.read |
+| POST /control/v1/cases/{id}/close | 关闭本人案件并保留调查历史 | case.closed |
 | POST /control/v1/cases/{id}/analyze | 启动只读调查Agent | agent.started，工具/模型独立事件 |
 | POST /control/v1/replays | 离线规则评估，不送原站 | replay.requested/completed |
 | POST /control/v1/exports | 带用途/范围/审批的导出任务 | export.requested/approved/downloaded |
@@ -157,7 +158,7 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 已准入操作在客户端断连后继续数据库终态与管理审计，许可覆盖至审计完成；本地 fsync 依赖健康存储，15 秒只限制数据库操作，进程退出仍是故障边界。每次可审计尝试写独立加密 `case.evidence.added` 管理事件，以 payload 的 outcome/reason 区分成功、拒绝和依赖故障；事务 outbox 只记录实际新增关联。经强类型校验的 case/artifact 进入目标字段，成功/精确重试的 artifact 进入 evidence_refs。管理审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留成功响应；已提交的事务及 outbox 保留，可用原请求重试确认。响应统一 `Cache-Control: private, no-store`。
 
-部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。保留锁及案件生命周期管理另行交付；集合浏览见 [29.17](#2917-已实现的案件证据集合查询契约)。
+部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。保留锁另行交付；集合浏览见 [29.17](#2917-已实现的案件证据集合查询契约)，关闭案件见 [29.18](#2918-已实现的案件关闭契约)。
 
 ## 29.17 已实现的案件证据集合查询契约
 
@@ -168,3 +169,17 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 成功响应为 `schema_version=3`，包含管理 `request_id`、固定 tenant/site、案件 `case_id/status/purpose/created_at`、数据库 `as_of`、`items`、`truncated` 和 `next_cursor`。每项只包含 artifact ID、历史 `added_by/added_at` 和 catalog 状态：`active`（按同一 `as_of` 尚未到期）、`expired`、`deleted`（优先于到期）或 `unavailable`（防御性缺 catalog 状态；0017 外键和 retention tombstone 使正常路径使用 `deleted`）；不返回 manifest、storage locator、hash、key ref、请求元数据、密文或读取资格。读取不更新案件、membership、catalog、保留期限或审批状态。
 
 成功、目标不可用、游标/鉴权拒绝及依赖故障均写独立 `console.case.read` 管理审计；成功事件的 `evidence_refs` 仅包含本页 artifact ID，拒绝/故障为空。审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果。查询与 POST 关联共享单实例有界许可，繁忙返回 `CONTROL_CASE_EVIDENCE_BUSY`/429；数据库故障/超时返回 `CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE`/503。已准入查询在客户端断连后继续到数据库和管理审计终态，响应统一 `Cache-Control: private, no-store`。
+
+## 29.18 已实现的案件关闭契约
+
+`POST /control/v1/cases/{case_id}/close` 要求服务端固定 tenant/site 内的 `Investigator`、管理机器凭证和当前本人 owner。路径须为规范 case UUIDv7；请求体上限 4 KiB，严格接受 `{"reason":"..."}`，理由为 1–512 UTF-8 字节、无控制字符及首尾空白。单个 `Idempotency-Key` 必填，沿用 16–128 字节 ASCII 字母、数字、`-_.:` 规则；作用域和主体均由服务端确定。
+
+幂等摘要使用既有管理幂等密钥及独立关闭用途域，绑定 owner、tenant/site 和键；参数摘要再绑定 case 与 reason。事务先取得与创建相同的主体容量 advisory lock，再锁本人案件行。首次关闭将 `status=closed`、`case_closures` 和 `case.closed` outbox 同时提交，释放该主体的 open 案件容量。成功与精确重试均返回 200，响应含 `schema_version=3`、管理 request_id、tenant/site、case_id、status、数据库 closed_at 和 replayed；精确重试返回原 closed_at，并重验当前归属、closed 状态及原 outbox 绑定。
+
+同键更换案件/理由返回 `CONTROL_CASE_CLOSE_CONFLICT`/409；不存在、跨作用域、非本人，以及用另一键关闭已终结案件，统一返回 `CONTROL_CASE_NOT_AVAILABLE`/404。严格路径、DTO 或幂等键错误为带稳定原因码的 400。关闭与证据关联/集合读取共享单实例一个在途许可，繁忙返回 `CONTROL_CASE_CLOSE_BUSY`/429；数据库整体操作含池等待限 15 秒，单 SQL/锁等待限 5 秒，故障或超时返回 `CONTROL_CASE_STORE_UNAVAILABLE`/503。提交结果不确定时使用相同键和参数确认结果。
+
+每次可审计尝试写独立加密 `case.closed` 管理事件，通过 outcome/reason 区分成功、重试、拒绝和依赖故障；事务 outbox 只记录实际状态转换。合法 case ID 进入目标字段，evidence_refs 为空；自由文本理由仅保存于案件关闭表，outbox 保存参数摘要。管理审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，已提交事务和 outbox 保留。已准入操作在客户端断连后继续到数据库和审计终态，许可覆盖审计 fsync；进程退出仍是故障边界。所有响应为 `private, no-store`。
+
+部署先应用 `0018_m3_case_lifecycle.sql`，该扩展保留既有 open/closed 记录。回滚应用版本时保留关闭表、closed 状态和 outbox，避免恢复已终结案件的访问条件。关闭保留历史证据关联、catalog、审批行和原始保留期限；后续新增关联、访问申请/批准及读取资格校验要求案件仍 open。已有审批的幂等查询只返回历史决策；内容读取仍重验当前案件状态。已完成资格校验的在途读取可能继续，已释放内容不能通过关闭收回。本人 closed 案件的引用集合继续通过 29.17 查询。
+
+关闭时已有的 `pending` 原文访问申请保持待决，并继续占用申请主体的 pending 配额。独立 `SensitiveEvidenceApprover` 可通过 29.12 的拒绝接口终结 closed 案件的申请、释放该配额并保留决策历史；关闭操作本身仅释放 open 案件配额。

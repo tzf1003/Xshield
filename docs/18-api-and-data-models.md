@@ -30,6 +30,8 @@ Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签�
 
 案件证据集合读取使用 tenant/site/case/owner 的单条 PostgreSQL 只读快照，并把案件授权、成员行、`case.evidence.added` outbox 关联和 catalog 状态一并解码；不存在、跨作用域及非本人案件统一不可用。游标只定位 artifact ID，绑定管理凭证摘要、主体、作用域、案件和页大小，坏游标在访问数据库前拒绝。读取不锁定业务行、不延长期限、不读取内容；数据库当前时间决定 active/expired，deleted 优先，缺 catalog 为防御性 unavailable 状态（`case_items` 外键和 retention tombstone 使正常路径使用 deleted），open 与 closed 均保留历史引用。结果释放前必须写独立 `console.case.read` 管理审计，审计失败不返回查询结果。
 
+案件关闭复用创建时的 tenant/site/owner advisory lock，再锁定本人案件行；`status=closed`、`case_closures` 和 `case.closed` outbox 同事务提交，因此关闭与 open 容量创建有明确先后关系，案件行锁同时串行化证据关联和审批。自然唯一键为 tenant/site/case，幂等键绑定作用域、owner 和关闭用途；精确重试重验当前归属、closed 状态及原 outbox 完整绑定。关闭保留既有 membership、catalog 和访问审批历史，后续资格校验通过案件状态拒绝读取；已获准在途读取沿用其校验快照。自由文本理由留在受限案件表，outbox 保存请求摘要，管理事件记录目标与结果。
+
 本地证据到期清理使用两段短事务：先按 tenant/site/key 和数据库当前时间锁定候选，将删除意图与 outbox 原子提交；文件系统认证、删除与目录同步后，再锁定并比较相同 manifest/意图，提交 catalog tombstone 与完成 outbox。无 catalog 的本地孤儿复用同一根目录排他锁和两段事务，按稳定长度/mtime 观察提交意图，按 artifact 全局检查迟到 catalog，并在 sidecar/摘要复验后写入 `evidence.orphan.deleted` 或失败事件。数据库事务不跨文件操作持锁；两事务之间由本地根目录排他锁约束写入者。中断恢复依赖耐久意图和保留的签名 manifest，不把数据库提交与文件删除描述为一个原子事务。
 
 ## 18.4 协议规则

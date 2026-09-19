@@ -26,6 +26,77 @@ pub struct CaseEvidenceDraft {
     added_by: String,
 }
 
+/// A validated request to close an owned investigation case.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvestigationCaseCloseDraft {
+    tenant_id: TenantId,
+    site_id: SiteId,
+    case_id: CaseId,
+    owner_ref: String,
+    reason: String,
+}
+
+impl InvestigationCaseCloseDraft {
+    /// Binds a case closure to the authenticated owner and an explicit reason.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] for empty, oversized or control-containing text,
+    /// or a padded reason. Construction has no storage or audit side effects.
+    pub fn new(
+        tenant_id: TenantId,
+        site_id: SiteId,
+        case_id: CaseId,
+        owner_ref: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<Self, InvalidValue> {
+        let owner_ref = owner_ref.into();
+        let reason = reason.into();
+        if !valid_text(&owner_ref, SUBJECT_MAX) {
+            return Err(InvalidValue::new("case_close_owner_ref"));
+        }
+        if !valid_text(&reason, JUSTIFICATION_MAX) || reason.trim() != reason {
+            return Err(InvalidValue::new("case_close_reason"));
+        }
+        Ok(Self {
+            tenant_id,
+            site_id,
+            case_id,
+            owner_ref,
+            reason,
+        })
+    }
+
+    /// Returns the trusted tenant scope.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the trusted site scope.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+
+    /// Returns the case being closed.
+    #[must_use]
+    pub const fn case_id(&self) -> &CaseId {
+        &self.case_id
+    }
+
+    /// Returns the authenticated case owner.
+    #[must_use]
+    pub fn owner_ref(&self) -> &str {
+        &self.owner_ref
+    }
+
+    /// Returns the bounded closure reason.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
 impl CaseEvidenceDraft {
     /// Binds one evidence reference to an authenticated case owner and scope.
     ///
@@ -445,7 +516,8 @@ fn valid_text(value: &str, max: usize) -> bool {
 mod tests {
     use super::{
         CaseEvidenceDraft, EvidenceAccessDecisionDraft, EvidenceAccessDecisionKind,
-        EvidenceAccessKind, EvidenceAccessRequestDraft, InvestigationCaseDraft,
+        EvidenceAccessKind, EvidenceAccessRequestDraft, InvestigationCaseCloseDraft,
+        InvestigationCaseDraft,
     };
     use crate::domain::{ArtifactId, CaseId, EvidenceAccessRequestId, SiteId, TenantId};
 
@@ -506,6 +578,38 @@ mod tests {
             InvestigationCaseDraft::new(case_id, tenant, site, "investigator-1", "x".repeat(513))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn case_close_draft_requires_owner_and_reason() {
+        let case = CaseId::parse("case_018f2a3b-4c5d-7000-8000-000000000903").unwrap();
+        let tenant = TenantId::parse("tenant_case").unwrap();
+        let site = SiteId::parse("site_case").unwrap();
+        let draft = InvestigationCaseCloseDraft::new(
+            tenant.clone(),
+            site.clone(),
+            case.clone(),
+            "investigator-1",
+            "review complete",
+        )
+        .unwrap();
+        assert_eq!(draft.reason(), "review complete");
+        for (owner, reason) in [
+            ("", "review complete"),
+            ("investigator-1", ""),
+            ("investigator-1", " padded "),
+        ] {
+            assert!(
+                InvestigationCaseCloseDraft::new(
+                    tenant.clone(),
+                    site.clone(),
+                    case.clone(),
+                    owner,
+                    reason,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

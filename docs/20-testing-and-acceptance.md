@@ -79,3 +79,11 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 ## 20.9 案件证据集合查询回归
 
 控制层回归覆盖坏路径、坏/越界游标、跨案件/主体 HMAC 绑定、鉴权与速率、共享在途许可、数据库故障以及审计失败扣留结果。真实 PostgreSQL 回归验证单快照下的 open/closed 案件归属、跨租户/站点与非本人统一不可用、稳定 artifact 游标分页、active/expired/deleted catalog 状态、成员顺序/128 项上限以及缺失或错绑 outbox 的拒绝；`unavailable` 仅作为防御性 catalog 缺失分支保留并由纯函数状态测试覆盖。查询为只读，不改变 membership、期限或内容授权。
+
+## 20.10 案件关闭回归
+
+`cargo test -p xshield-control case_close` 覆盖强类型路径、严格 DTO/重复字段、重复幂等头、4 KiB 上限、角色/作用域/凭证期限/速率、共享在途容量、数据库故障与审计失败扣留响应。
+
+`scripts/test_postgres.sh` 应用迁移 0018 后运行存储幂等、归属、作用域、并发和 outbox 故障回滚测试，以及 `case_close_is_durable_revokes_new_access_and_survives_disconnect`。HTTP 闭环从创建案件、关联真实 vault/catalog 证据、独立批准和读取开始，验证关闭后集合保留、后续关联/访问申请/读取拒绝、证据期限与批准历史保持、open 容量释放；另验证客户端在案件锁等待时断连后提交与终态审计、管理审计失败后的幂等恢复。这些集成测试默认 ignored，由脚本在独立临时数据库执行。
+
+存储组合回归还验证 pending 配额恢复：申请占满额度后关闭案件，另一 open 案件的新申请仍受限；独立审批人拒绝 closed 案件的原申请后，新申请成功，原申请的 denied 历史保留。

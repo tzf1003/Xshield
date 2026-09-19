@@ -5,6 +5,7 @@
 
 #![warn(missing_docs)]
 
+mod case_close;
 mod case_collection;
 mod case_items;
 mod search;
@@ -3143,6 +3144,10 @@ pub fn router(control: ControlPlane) -> Router {
                 .get(case_collection::handler)
                 .layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
         )
+        .route(
+            case_close::PATH,
+            post(case_close::handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+        )
         .with_state(Arc::new(control))
 }
 
@@ -4052,6 +4057,7 @@ impl From<serde_json::Error> for ControlError {
 
 #[cfg(test)]
 mod tests {
+    mod case_close;
     mod case_collection;
     mod case_items;
 

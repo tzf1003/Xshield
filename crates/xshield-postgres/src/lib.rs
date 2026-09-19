@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 mod action_read;
+mod case_close;
 mod case_evidence;
 mod case_evidence_read;
 mod evidence_access_decision;
@@ -25,6 +26,9 @@ mod share_grant_issue;
 mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
+pub use case_close::{
+    InvestigationCaseClose, InvestigationCaseCloseRecord, InvestigationCaseCloseWriteOutcome,
+};
 pub use case_evidence::{
     CASE_EVIDENCE_ITEMS_MAX, CaseEvidenceAdd, CaseEvidenceRecord, CaseEvidenceWriteOutcome,
 };
