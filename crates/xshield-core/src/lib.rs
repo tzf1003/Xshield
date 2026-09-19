@@ -17,3 +17,4 @@ pub mod identity;
 pub mod investigation;
 pub mod ports;
 pub mod provenance;
+pub mod query;

@@ -20,6 +20,9 @@ use xshield_audit::{
 };
 use xshield_core::domain::{EventId, PolicyRevision, RequestId, SiteId, TenantId};
 
+mod search;
+pub use search::{AuditSearchResult, SearchEventSummary, SearchPosition, query_audit_events};
+
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -1517,6 +1520,10 @@ pub enum PublishError {
     SegmentLimitExceeded,
     /// The adapter does not recognize the versioned event type.
     UnsupportedEventType,
+    /// An analytical query exceeded a server or local response budget.
+    QueryBudgetExceeded,
+    /// An analytical query exceeded its client deadline.
+    QueryTimeout,
     /// Local journal authentication or decryption failed.
     Journal(JournalError),
     /// Local durable storage failed.
@@ -1539,6 +1546,8 @@ impl fmt::Display for PublishError {
             Self::InvalidEvent => formatter.write_str("invalid authenticated audit event"),
             Self::SegmentLimitExceeded => formatter.write_str("audit segment read limit exceeded"),
             Self::UnsupportedEventType => formatter.write_str("unsupported audit event type"),
+            Self::QueryBudgetExceeded => formatter.write_str("audit query budget exceeded"),
+            Self::QueryTimeout => formatter.write_str("audit query timed out"),
             Self::Journal(error) => error.fmt(formatter),
             Self::Io(_) => formatter.write_str("publisher storage failed"),
             Self::Json(_) => formatter.write_str("publisher JSON processing failed"),
@@ -1587,11 +1596,12 @@ impl From<clickhouse::error::Error> for PublishError {
 mod tests {
     use super::{
         AuditEventSummary, Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError,
-        PublisherConfig, RequestStageSummary, RequestSummaryRow, TimeDelta, closed_segment_paths,
-        inspect_publication_health, prepare_private_directory, publish_sealed_segments,
+        PublisherConfig, RequestStageSummary, RequestSummaryRow, SearchEventSummary,
+        SearchPosition, TimeDelta, closed_segment_paths, inspect_publication_health,
+        prepare_private_directory, publish_sealed_segments, query_audit_events,
         query_request_events, query_request_summary, read_private_bounded, write_checkpoint,
     };
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use clickhouse::{Client, test};
     use std::{
         fs,
@@ -1602,7 +1612,14 @@ mod tests {
         JournalKey, JournalLimits, JournalRecord, LocalJournal, SealSigningKey,
         seal_closed_segments,
     };
-    use xshield_core::domain::{EventId, RequestId, SiteId, TenantId};
+    use xshield_core::{
+        domain::{EventId, RequestId, SiteId, TenantId},
+        identity::UnixSeconds,
+        query::{
+            ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
+            QueryWindow,
+        },
+    };
 
     const JOURNAL_KEY_HEX: &str =
         "1111111111111111111111111111111111111111111111111111111111111111";
@@ -1812,6 +1829,437 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_request_query_is_typed_and_keyset_bounded() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide_with_summary(
+            [
+                search_event("req_018f2a3b-4c5d-7000-8000-000000000001", 1),
+                search_event("req_018f2a3b-4c5d-7000-8000-000000000002", 2),
+            ],
+            r#"{"read_rows":"13","read_bytes":"2048"}"#,
+        ));
+        mock.add(test::handlers::provide([search_event(
+            "req_018f2a3b-4c5d-7000-8000-000000000002",
+            2,
+        )]));
+        let client = Client::default().with_mock(&mock);
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            vec![QueryFilter::Text {
+                field: QueryTextField::ReasonCode,
+                value: "POLICY_ALLOWED".to_owned(),
+            }],
+            QuerySort::OccurredAtAsc,
+            1,
+        )
+        .unwrap();
+        let result = query_audit_events(
+            &fixture.config,
+            &client,
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_a").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.scanned_rows, Some(13));
+        assert_eq!(result.scanned_bytes, Some(2048));
+        let json = serde_json::to_value(&result.events[0]).unwrap();
+        assert_eq!(json["occurred_at"], "1970-01-01T00:00:20.000123Z");
+        let decoded: SearchEventSummary = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.occurred_at, result.events[0].occurred_at);
+        let next = query_audit_events(
+            &fixture.config,
+            &client,
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_a").unwrap(),
+            &plan,
+            result.next_position.as_ref(),
+        )
+        .await
+        .unwrap();
+        assert!(!next.truncated);
+        assert!(next.next_position.is_none());
+        assert_eq!(next.scanned_rows, None);
+        assert_eq!(next.scanned_bytes, None);
+        assert_eq!(
+            next.events[0].request_id.as_deref(),
+            Some("req_018f2a3b-4c5d-7000-8000-000000000002")
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_binds_scope_predicates_and_keyset() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let client = Client::default().with_mock(&mock);
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_b").unwrap();
+        let request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
+        let event = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000002").unwrap();
+        let position = SearchPosition::new(
+            DateTime::from_timestamp_micros(20_000_123).unwrap(),
+            event.clone(),
+        )
+        .unwrap();
+        for (sort, operator, order) in [
+            (QuerySort::OccurredAtAsc, ">", "ASC"),
+            (QuerySort::OccurredAtDesc, "<", "DESC"),
+        ] {
+            let recorded = mock.add(test::handlers::record_ddl());
+            let plan = QueryPlan::new(
+                QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+                vec![
+                    QueryFilter::RequestId(request.clone()),
+                    QueryFilter::EventId(event.clone()),
+                    QueryFilter::Text {
+                        field: QueryTextField::EventType,
+                        value: "stage.completed".to_owned(),
+                    },
+                    QueryFilter::Text {
+                        field: QueryTextField::Stage,
+                        value: "admission".to_owned(),
+                    },
+                    QueryFilter::Text {
+                        field: QueryTextField::OperationId,
+                        value: "orders.detail".to_owned(),
+                    },
+                    QueryFilter::Text {
+                        field: QueryTextField::ModelRevision,
+                        value: "model-r1".to_owned(),
+                    },
+                    QueryFilter::Outcome(QueryOutcome::Allow),
+                    QueryFilter::ConfidenceAtMost(ConfidenceThreshold::new(8_250).unwrap()),
+                ],
+                sort,
+                7,
+            )
+            .unwrap();
+            let result = query_audit_events(
+                &fixture.config,
+                &client,
+                &tenant,
+                &site,
+                &plan,
+                Some(&position),
+            )
+            .await
+            .unwrap();
+            assert!(result.events.is_empty());
+            let sql = recorded.query().await;
+            for fragment in [
+                "FROM `audit_events_active` WHERE tenant_id = 'tenant_a' AND site_id = 'site_b'",
+                "occurred_at >= fromUnixTimestamp64Micro(1000000) AND occurred_at < fromUnixTimestamp64Micro(61000000)",
+                "request_id = 'req_018f2a3b-4c5d-7000-8000-000000000001'",
+                "event_id = 'ev_018f2a3b-4c5d-7000-8000-000000000002'",
+                "event_type = 'stage.completed'",
+                "stage = 'admission'",
+                "operation_id = 'orders.detail'",
+                "model_revision = 'model-r1'",
+                "outcome = 'ALLOW'",
+                "confidence <= 0.825",
+            ] {
+                assert!(sql.contains(fragment), "{fragment}: {sql}");
+            }
+            assert!(sql.contains(&format!("tuple(occurred_at,event_id) {operator} tuple(fromUnixTimestamp64Micro(20000123),'ev_018f2a3b-4c5d-7000-8000-000000000002')")));
+            assert!(sql.contains(&format!(
+                "ORDER BY occurred_at {order},event_id {order} LIMIT 8"
+            )));
+            assert!(!sql.contains("payload_json"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_descends_and_preserves_optional_fields() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let first = search_event("req_018f2a3b-4c5d-7000-8000-000000000001", 1);
+        let mut second = search_event("req_018f2a3b-4c5d-7000-8000-000000000002", 2);
+        second.event_type = "request.completed".to_owned();
+        second.outcome = Some("ALLOW".to_owned());
+        second.stage = None;
+        second.proof_kind = None;
+        second.confidence_status = None;
+        let mut third = search_event("req_018f2a3b-4c5d-7000-8000-000000000003", 3);
+        third.event_type = "audit.recovered".to_owned();
+        third.request_id = None;
+        third.stage = None;
+        third.outcome = None;
+        third.proof_kind = None;
+        third.confidence_status = None;
+        mock.add(test::handlers::provide([third, second.clone()]));
+        mock.add(test::handlers::provide([second, first]));
+        let client = Client::default().with_mock(&mock);
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            Vec::new(),
+            QuerySort::OccurredAtDesc,
+            1,
+        )
+        .unwrap();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let result = query_audit_events(&fixture.config, &client, &tenant, &site, &plan, None)
+            .await
+            .unwrap();
+        assert_eq!(result.events[0].request_seq, 3);
+        assert_eq!(result.events[0].request_id, None);
+        assert_eq!(result.events[0].outcome, None);
+        let next = query_audit_events(
+            &fixture.config,
+            &client,
+            &tenant,
+            &site,
+            &plan,
+            result.next_position.as_ref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.events[0].request_seq, 2);
+        assert_eq!(next.events[0].outcome.as_deref(), Some("ALLOW"));
+        assert_eq!(next.events[0].proof_kind, None);
+        assert!(next.truncated);
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_rejects_invalid_rows() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let client = Client::default().with_mock(&mock);
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            Vec::new(),
+            QuerySort::OccurredAtAsc,
+            1,
+        )
+        .unwrap();
+        let mutations: [fn(&mut SearchEventSummary); 12] = [
+            |row| row.confidence = Some(f64::NAN),
+            |row| row.request_id = Some("invalid".to_owned()),
+            |row| row.event_id = "invalid".to_owned(),
+            |row| row.stage = Some("invalid stage".to_owned()),
+            |row| row.outcome = Some("GRANTED".to_owned()),
+            |row| row.proof_kind = Some("trusted".to_owned()),
+            |row| row.confidence_status = Some("provided".to_owned()),
+            |row| row.confidence = Some(0.5),
+            |row| row.request_seq = 0,
+            |row| row.model_revision = Some(String::new()),
+            |row| row.sensitivity = "UNKNOWN".to_owned(),
+            |row| row.evidence_refs = vec!["invalid".to_owned()],
+        ];
+        for mutate in mutations {
+            let mut invalid = search_event("req_018f2a3b-4c5d-7000-8000-000000000001", 1);
+            mutate(&mut invalid);
+            mock.add(test::handlers::provide([invalid]));
+            assert!(matches!(
+                query_audit_events(
+                    &fixture.config,
+                    &client,
+                    &TenantId::parse("tenant_a").unwrap(),
+                    &SiteId::parse("site_a").unwrap(),
+                    &plan,
+                    None,
+                )
+                .await,
+                Err(PublishError::InvalidEvent)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_rejects_invalid_order_and_window() {
+        let fixture = Fixture::new();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let first = search_event("req_018f2a3b-4c5d-7000-8000-000000000001", 1);
+        let second = search_event("req_018f2a3b-4c5d-7000-8000-000000000002", 2);
+        let mut early = first.clone();
+        early.occurred_at = DateTime::from_timestamp(0, 0).unwrap();
+        let mut end = first.clone();
+        end.occurred_at = DateTime::from_timestamp(61, 0).unwrap();
+        let mut repeated_id = first.clone();
+        repeated_id.occurred_at = DateTime::from_timestamp(21, 0).unwrap();
+        let after =
+            SearchPosition::new(first.occurred_at, EventId::parse(&first.event_id).unwrap())
+                .unwrap();
+        for (sort, rows, position) in [
+            (
+                QuerySort::OccurredAtAsc,
+                vec![first.clone(), first.clone()],
+                None,
+            ),
+            (
+                QuerySort::OccurredAtAsc,
+                vec![second.clone(), first.clone()],
+                None,
+            ),
+            (
+                QuerySort::OccurredAtDesc,
+                vec![first.clone(), second.clone()],
+                None,
+            ),
+            (QuerySort::OccurredAtAsc, vec![early], None),
+            (QuerySort::OccurredAtAsc, vec![end], None),
+            (
+                QuerySort::OccurredAtAsc,
+                vec![first.clone(), repeated_id.clone()],
+                None,
+            ),
+            (
+                QuerySort::OccurredAtAsc,
+                vec![repeated_id],
+                Some(after.clone()),
+            ),
+            (
+                QuerySort::OccurredAtAsc,
+                vec![first.clone()],
+                Some(after.clone()),
+            ),
+            (QuerySort::OccurredAtDesc, vec![second.clone()], Some(after)),
+            // A malformed lookahead must fail the whole page, including valid rows.
+            (
+                QuerySort::OccurredAtAsc,
+                vec![first.clone(), second.clone(), second],
+                None,
+            ),
+        ] {
+            let mock = test::Mock::new();
+            mock.add(test::handlers::provide(rows));
+            let client = Client::default().with_mock(&mock);
+            let plan = QueryPlan::new(
+                QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+                Vec::new(),
+                sort,
+                1,
+            )
+            .unwrap();
+            assert!(matches!(
+                query_audit_events(
+                    &fixture.config,
+                    &client,
+                    &tenant,
+                    &site,
+                    &plan,
+                    position.as_ref()
+                )
+                .await,
+                Err(PublishError::InvalidEvent)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_validates_cursor_before_index_access() {
+        let fixture = Fixture::new();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let event_id = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
+        let mock = test::Mock::new();
+        let client = Client::default().with_mock(&mock);
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            Vec::new(),
+            QuerySort::OccurredAtAsc,
+            1,
+        )
+        .unwrap();
+        let outside =
+            SearchPosition::new(DateTime::from_timestamp(61, 0).unwrap(), event_id.clone())
+                .unwrap();
+        assert!(matches!(
+            query_audit_events(
+                &fixture.config,
+                &client,
+                &tenant,
+                &site,
+                &plan,
+                Some(&outside)
+            )
+            .await,
+            Err(PublishError::InvalidConfig)
+        ));
+        for timestamp in [(20, 1), (59, 1_000_000_000)] {
+            assert!(
+                SearchPosition::new(
+                    DateTime::from_timestamp(timestamp.0, timestamp.1).unwrap(),
+                    event_id.clone()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_classifies_budget_and_dependency_failures() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let client = Client::default().with_mock(&mock);
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            Vec::new(),
+            QuerySort::OccurredAtAsc,
+            1,
+        )
+        .unwrap();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        for code in [158, 159, 241, 209] {
+            mock.add(test::handlers::exception(code));
+            let error = query_audit_events(&fixture.config, &client, &tenant, &site, &plan, None)
+                .await
+                .unwrap_err();
+            if code == 209 {
+                assert!(matches!(error, PublishError::ClickHouse(_)));
+            } else {
+                assert!(matches!(error, PublishError::QueryBudgetExceeded));
+            }
+        }
+        let mut oversized = search_event("req_018f2a3b-4c5d-7000-8000-000000000001", 1);
+        oversized.event_type = "x".repeat(16 * 1024 * 1024);
+        mock.add(test::handlers::provide([oversized]));
+        assert!(matches!(
+            query_audit_events(&fixture.config, &client, &tenant, &site, &plan, None).await,
+            Err(PublishError::QueryBudgetExceeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_deadline_bounds_stalled_connection() {
+        let fixture = Fixture::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client =
+            Client::default().with_url(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            Vec::new(),
+            QuerySort::OccurredAtAsc,
+            1,
+        )
+        .unwrap();
+        let result = query_audit_events(
+            &fixture.config,
+            &client,
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_a").unwrap(),
+            &plan,
+            None,
+        )
+        .await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert!(matches!(result, Err(PublishError::QueryTimeout)));
+    }
+
+    #[tokio::test]
     async fn request_summary_is_scoped_and_validated() {
         let fixture = Fixture::new();
         let mock = test::Mock::new();
@@ -1882,6 +2330,28 @@ mod tests {
             duration_us: 10,
             policy_revision: "policy-r1".to_owned(),
             model_revision: String::new(),
+            evidence_refs: Vec::new(),
+            cause_event_ids: Vec::new(),
+            sensitivity: "INTERNAL".to_owned(),
+        }
+    }
+
+    fn search_event(request_id: &str, request_seq: u32) -> SearchEventSummary {
+        SearchEventSummary {
+            request_id: Some(request_id.to_owned()),
+            event_id: format!("ev_018f2a3b-4c5d-7000-8000-{request_seq:012x}"),
+            event_type: "stage.completed".to_owned(),
+            stage: Some("admission".to_owned()),
+            outcome: Some("PASS".to_owned()),
+            reason_code: Some("POLICY_ALLOWED".to_owned()),
+            proof_kind: Some("deterministic".to_owned()),
+            confidence: None,
+            confidence_status: Some("not_applicable".to_owned()),
+            occurred_at: DateTime::from_timestamp(20, 123_000).unwrap(),
+            request_seq,
+            duration_us: 10,
+            policy_revision: "policy-r1".to_owned(),
+            model_revision: None,
             evidence_refs: Vec::new(),
             cause_event_ids: Vec::new(),
             sensitivity: "INTERNAL".to_owned(),

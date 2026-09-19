@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -107,3 +107,27 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 成功响应为 `application/octet-stream` 的 `attachment`，设置 `Cache-Control: private, no-store` 与 `X-Content-Type-Options: nosniff`，不返回下载 URL。内容释放前写入独立加密管理审计 `evidence.read`，绑定 access request、artifact 和 evidence ref，并记录实际字节数；审计、数据库、vault 或完整性依赖失败返回 503，响应正文不泄露资源归属或内部错误。
 
 本地整对象 MVP 每个 EvidenceReadPort 同时保留一个读取/响应对象：许可在调度解密前获取，并随清零明文缓冲交给 HTTP 响应，直到最后一个响应字节引用释放；取消请求不会提前归还仍在执行的解密许可。容量占满返回带独立审计的 `CONTROL_EVIDENCE_READ_CAPACITY_EXHAUSTED`/503。缓冲直接移交给响应，避免额外完整明文复制；需要并发大对象下载时再引入按字节计费的共享预算和分块读取。
+
+## 29.14 已实现的受限调查查询契约
+
+`POST /control/v1/search` 要求固定 tenant/site 作用域内的 `Investigator` 和管理 Bearer。请求体上限 8 KiB，严格接受 `schema_version=3`、UTC RFC3339 的 `start`/`end`、`sort`、`limit`、可选 `cursor` 及有界 `filters`。时间边界采用整秒，半开区间 `[start,end)` 最长 31 天且位于 1970-01-01 至 2300-01-01；单页受 `XSHIELD_CONTROL_MAX_QUERY_EVENTS` 限制，硬上限 1000 行，最多 8 个过滤器。过滤器只对同一事件做 AND 匹配：规范 request/event ID、`event_type`/`stage`/`reason_code`/`operation_id`/`model_revision` 精确文本、`PASS/ALLOW/DENY/UNKNOWN/ERROR/SKIPPED/CANCELLED` outcome 枚举和 0–10000 整数 basis-points 置信度上限。规则事件的空置信度不会匹配数值阈值；当前接口不做跨事件关联、聚合或自然语言编译。未知字段、版本、控制字符和自由表达式均拒绝。
+
+```json
+{
+  "schema_version": 3,
+  "start": "2026-09-19T00:00:00Z",
+  "end": "2026-09-20T00:00:00Z",
+  "sort": "occurred_at_desc",
+  "limit": 25,
+  "filters": [
+    {"kind": "text", "field": "stage", "value": "admission"},
+    {"kind": "outcome", "value": "DENY"}
+  ]
+}
+```
+
+服务端将认证作用域注入参数化 ClickHouse retention-aware 视图，配置 2 秒执行预算、100 万扫描行、64 MiB 扫描字节、16 MiB 结果和 256 MiB 内存上限，并以 5 秒客户端 deadline 限制连接/响应停滞。索引 deadline 不包含现有本地段完整性扫描和审计 fsync；二者耗时须按保留数据量与磁盘情况另行度量。单个控制实例同一时刻执行一个 search；客户端断开后已开始的有界查询继续完成终态审计并释放许可。多实例部署仍须为 ClickHouse 账户配置共享配额；进程退出恢复不属于该同步接口的保证。
+
+结果只包含脱敏摘要和证据引用，不读取 `payload_json` 或解密对象；可选字段缺省返回 null，事件时间为 UTC RFC3339。按 `occurred_at,event_id` 稳定升/降序分页，HMAC 游标绑定主体、管理凭证摘要、tenant/site、完整 QueryPlan 摘要和微秒位置，不能跨查询或作用域复用。响应携带 `schema_version=3`、`query_digest`、`as_of`、`index_watermark`、`has_gaps`、`pending_segments`、`scanned_rows`/`scanned_bytes`、`truncated` 和 `next_cursor`。扫描统计来自索引响应，未报告时为 null；分页期间的新发布/到期可能改变后续可见集合，游标不表示冻结快照。
+
+无效计划返回 `CONTROL_QUERY_INVALID`/422，无效游标返回 `CONTROL_CURSOR_INVALID`/400，均在索引访问前拒绝。确定的查询预算耗尽返回 `CONTROL_QUERY_BUDGET_EXCEEDED`/429、`retryable=false`、`next_action=narrow_query`；单实例容量占满返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，客户端超时返回 `CONTROL_QUERY_TIMEOUT`/503，依赖故障返回对应 503。可审计尝试均写 `console.query.executed`；通过计划校验后的成功或失败审计携带 `query_digest`，不保存原始查询文本或游标。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果；响应统一 `Cache-Control: private, no-store`。

@@ -5,6 +5,8 @@
 
 #![warn(missing_docs)]
 
+mod search;
+
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -378,6 +380,7 @@ pub struct ControlPlane {
     source_journal_key: JournalKey,
     seal_key: SealVerifyingKey,
     index: Client,
+    search_capacity: Arc<Semaphore>,
     catalog: PostgresIdentityStore,
     evidence_read: Option<Arc<EvidenceReadPort>>,
     access_journal: Mutex<LocalJournal>,
@@ -404,6 +407,9 @@ impl ControlPlane {
             source_journal_key,
             seal_key,
             index,
+            // ponytail: one analytical search per control instance; share a
+            // tenant budget across replicas when measured load requires it.
+            search_capacity: Arc::new(Semaphore::new(1)),
             catalog,
             evidence_read: None,
             access_journal: Mutex::new(access_journal),
@@ -1574,6 +1580,7 @@ impl ControlPlane {
                 "CONTROL_EVIDENCE_READ",
                 &[audit_artifact_id.as_str()],
                 Some(bytes_read),
+                None,
             )
         })
         .await;
@@ -2735,6 +2742,34 @@ impl ControlPlane {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn append_query_event(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        action: AccessAction,
+        target_request_id: Option<&RequestId>,
+        outcome: &'static str,
+        reason_code: &'static str,
+        query_digest: &[u8; 32],
+    ) -> Result<(), ControlError> {
+        let query_digest = lower_hex(query_digest);
+        self.append_access_event_with_evidence_bytes(
+            request_id,
+            subject_ref,
+            action,
+            target_request_id,
+            None,
+            None,
+            None,
+            outcome,
+            reason_code,
+            &[],
+            None,
+            Some(&query_digest),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn append_access_event_with_evidence(
         &self,
         request_id: &str,
@@ -2760,6 +2795,7 @@ impl ControlPlane {
             reason_code,
             evidence_refs,
             None,
+            None,
         )
     }
 
@@ -2777,6 +2813,7 @@ impl ControlPlane {
         reason_code: &'static str,
         evidence_refs: &[&str],
         bytes_read: Option<u64>,
+        query_digest: Option<&str>,
     ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
@@ -2819,6 +2856,7 @@ impl ControlPlane {
                 target_case_id: target_case_id.map(CaseId::as_str),
                 target_access_request_id: target_access_request_id
                     .map(EvidenceAccessRequestId::as_str),
+                query_digest,
                 outcome,
                 reason_code,
                 bytes_read,
@@ -2851,6 +2889,10 @@ pub fn router(control: ControlPlane) -> Router {
         .route(HEALTH_PATH, get(health_handler))
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
+        .route(
+            search::SEARCH_PATH,
+            post(search::handler).layer(DefaultBodyLimit::max(search::SEARCH_BODY_BYTES_MAX)),
+        )
         .route(REQUEST_EVIDENCE_PATH, get(request_evidence_handler))
         .route(ARTIFACT_PATH, get(artifact_handler))
         .route(EVIDENCE_CONTENT_PATH, get(evidence_content_handler))
@@ -3073,6 +3115,7 @@ enum EndpointResult {
     Success(HealthResponse),
     RequestSummary(RequestSummaryResponse),
     RequestEvents(RequestEventsResponse),
+    Search(search::SearchResponse),
     RequestEvidence(RequestEvidenceResponse),
     Artifact(ArtifactResponse),
     Case(StatusCode, CreateCaseResponse),
@@ -3088,6 +3131,7 @@ impl IntoResponse for EndpointResult {
             Self::Success(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestSummary(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::Search(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Artifact(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Case(status, response) => (status, Json(response)).into_response(),
@@ -3654,6 +3698,8 @@ struct AccessPayload<'a> {
     target_artifact_id: Option<&'a str>,
     target_case_id: Option<&'a str>,
     target_access_request_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query_digest: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3728,6 +3774,7 @@ impl From<serde_json::Error> for ControlError {
 
 #[cfg(test)]
 mod tests {
+    use super::search::SearchRequest;
     use super::{
         ControlConfig, ControlLimits, ControlPlane, CursorKey, EVIDENCE_ACCESS_REQUEST_HEADER,
         EvidenceReadPort, IdempotencyKey, ManagementCredential, router,
@@ -5688,26 +5735,15 @@ mod tests {
         assert_eq!(target_artifact_ids.len(), evidence_counts.len());
         assert_eq!(target_case_ids.len(), evidence_counts.len());
         assert_eq!(target_access_request_ids.len(), evidence_counts.len());
-        let manifests = directory.parent().unwrap().join("access-manifests");
-        private_directory(&manifests);
-        let signing = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY).unwrap();
-        let segments = seal_closed_segments(
-            directory,
-            &manifests,
-            "control-key-r1",
-            &JournalKey::from_hex(JOURNAL_KEY).unwrap(),
-            &signing,
-        )
-        .unwrap();
-        assert_eq!(segments.len(), target_request_ids.len());
-        let verifier = signing.verifying_key().unwrap();
+        let events = read_access_events(directory);
+        assert_eq!(events.len(), target_request_ids.len());
         for (
             (
-                (((segment, target_request_id), target_artifact_id), target_case_id),
+                (((event, target_request_id), target_artifact_id), target_case_id),
                 target_access_request_id,
             ),
             evidence_count,
-        ) in segments
+        ) in events
             .into_iter()
             .zip(target_request_ids)
             .zip(target_artifact_ids)
@@ -5715,22 +5751,6 @@ mod tests {
             .zip(target_access_request_ids)
             .zip(evidence_counts)
         {
-            let path = directory.join(format!("segment-{}.closed.xja", segment.producer_boot_id));
-            let manifest =
-                fs::read(manifests.join(format!("segment-{}.xjs", segment.producer_boot_id)))
-                    .unwrap();
-            let journal_key = JournalKey::from_hex(JOURNAL_KEY).unwrap();
-            let mut reader = SealedSegmentReader::open(
-                path,
-                1024 * 1024,
-                "control-key-r1",
-                &journal_key,
-                &manifest,
-                &verifier,
-            )
-            .unwrap();
-            let record = reader.next_record().unwrap().unwrap();
-            let event: Value = serde_json::from_slice(record.plaintext()).unwrap();
             assert_eq!(event["event_type"], event_type);
             assert_eq!(
                 event["payload"]["method"],
@@ -5740,6 +5760,7 @@ mod tests {
                         | "evidence.access.requested"
                         | "evidence.access.approved"
                         | "evidence.access.denied"
+                        | "console.query.executed"
                 ) {
                     "POST"
                 } else {
@@ -5777,8 +5798,561 @@ mod tests {
                 event["payload"]["target_access_request_id"],
                 target_access_request_id.map_or(Value::Null, Value::from)
             );
-            assert!(reader.next_record().unwrap().is_none());
         }
+    }
+
+    fn read_access_events(directory: &Path) -> Vec<Value> {
+        let manifests = directory.parent().unwrap().join("access-manifests");
+        private_directory(&manifests);
+        let signing = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY).unwrap();
+        let segments = seal_closed_segments(
+            directory,
+            &manifests,
+            "control-key-r1",
+            &JournalKey::from_hex(JOURNAL_KEY).unwrap(),
+            &signing,
+        )
+        .unwrap();
+        let verifier = signing.verifying_key().unwrap();
+        segments
+            .into_iter()
+            .map(|segment| {
+                let path =
+                    directory.join(format!("segment-{}.closed.xja", segment.producer_boot_id));
+                let manifest =
+                    fs::read(manifests.join(format!("segment-{}.xjs", segment.producer_boot_id)))
+                        .unwrap();
+                let journal_key = JournalKey::from_hex(JOURNAL_KEY).unwrap();
+                let mut reader = SealedSegmentReader::open(
+                    path,
+                    1024 * 1024,
+                    "control-key-r1",
+                    &journal_key,
+                    &manifest,
+                    &verifier,
+                )
+                .unwrap();
+                let record = reader.next_record().unwrap().unwrap();
+                let event: Value = serde_json::from_slice(record.plaintext()).unwrap();
+                assert!(reader.next_record().unwrap().is_none());
+                event
+            })
+            .collect()
+    }
+
+    #[test]
+    fn search_request_converts_only_bounded_typed_filters() {
+        let request: SearchRequest = serde_json::from_value(json!({
+            "schema_version": 3,
+            "start": "1970-01-01T00:00:10Z",
+            "end": "1970-01-01T00:01:10Z",
+            "filters": [
+                {"kind": "text", "field": "reason_code", "value": "UI_SOURCE_MISSING"},
+                {"kind": "outcome", "value": "DENY"},
+                {"kind": "confidence_at_most", "basis_points": 7500}
+            ],
+            "sort": "occurred_at_asc",
+            "limit": 25
+        }))
+        .unwrap();
+        let plan = request.into_plan(1000).unwrap();
+        assert_eq!(plan.filters().len(), 3);
+        assert_eq!(plan.limit(), 25);
+        assert!(
+            serde_json::from_value::<SearchRequest>(json!({
+                "schema_version": 3,
+                "start": "1970-01-01T00:00:10Z",
+                "end": "1970-01-01T00:01:10Z",
+                "filters": [{"kind": "text", "field": "stage", "value": "stage;drop"}],
+                "sort": "occurred_at_asc",
+                "limit": 25
+            }))
+            .unwrap()
+            .into_plan(1000)
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SearchRequest>(json!({
+                "schema_version": 3,
+                "start": "1970-01-01T00:00:10Z",
+                "end": "1970-01-01T00:01:10Z",
+                "sort": "occurred_at_asc",
+                "limit": 1001
+            }))
+            .unwrap()
+            .into_plan(1000)
+            .is_err()
+        );
+    }
+
+    fn search_payload() -> Value {
+        json!({
+            "schema_version": 3,
+            "start": "1970-01-01T00:00:10Z",
+            "end": "1970-01-01T00:01:10Z",
+            "sort": "occurred_at_asc",
+            "limit": 1,
+            "filters": [{"kind": "request_id", "value": "req_018f2a3b-4c5d-7000-8000-000000000001"}]
+        })
+    }
+
+    fn search_http_request(payload: &Value) -> Request<Body> {
+        Request::post(super::search::SEARCH_PATH)
+            .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap()
+    }
+
+    fn search_event(event_id: &str, seconds: i64) -> xshield_worker::SearchEventSummary {
+        xshield_worker::SearchEventSummary {
+            request_id: Some("req_018f2a3b-4c5d-7000-8000-000000000001".to_owned()),
+            event_id: event_id.to_owned(),
+            event_type: "stage.completed".to_owned(),
+            stage: Some("admission".to_owned()),
+            outcome: Some("PASS".to_owned()),
+            reason_code: Some("POLICY_ALLOWED".to_owned()),
+            proof_kind: Some("deterministic".to_owned()),
+            confidence: None,
+            confidence_status: Some("not_applicable".to_owned()),
+            occurred_at: DateTime::from_timestamp(seconds, 0).unwrap(),
+            request_seq: 1,
+            duration_us: 10,
+            policy_revision: "policy-r1".to_owned(),
+            model_revision: None,
+            evidence_refs: Vec::new(),
+            cause_event_ids: Vec::new(),
+            sensitivity: "INTERNAL".to_owned(),
+        }
+    }
+
+    fn assert_search_audit(directory: &Path, reason: &str, digest: Option<&str>) {
+        let events = read_access_events(directory);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event["event_type"], "console.query.executed");
+        assert_eq!(event["payload"]["method"], "POST");
+        assert_eq!(event["payload"]["path"], super::search::SEARCH_PATH);
+        assert_eq!(event["payload"]["reason_code"], reason);
+        assert_eq!(
+            event["payload"]["query_digest"],
+            digest.map_or(Value::Null, Value::from)
+        );
+        assert!(event["payload"].get("filters").is_none());
+        assert!(event["payload"].get("cursor").is_none());
+    }
+
+    #[tokio::test]
+    async fn search_pages_have_scope_completeness_and_durable_audit() {
+        let mock = test::Mock::new();
+        let first_id = "ev_018f2a3b-4c5d-7000-8000-000000000001";
+        let second_id = "ev_018f2a3b-4c5d-7000-8000-000000000002";
+        mock.add(test::handlers::provide_with_summary(
+            [search_event(first_id, 20), search_event(second_id, 30)],
+            r#"{"read_rows":"42","read_bytes":"512"}"#,
+        ));
+        mock.add(test::handlers::provide([search_event(second_id, 30)]));
+        let fixture = Fixture::with_index(
+            10,
+            ManagementRole::Investigator,
+            Client::default().with_mock(&mock),
+        );
+        let mut payload = search_payload();
+        let app = router(fixture.control);
+        let response = app
+            .clone()
+            .oneshot(search_http_request(&payload))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(body["schema_version"], 3);
+        assert_eq!(body["tenant_id"], "tenant_a");
+        assert_eq!(body["site_id"], "site_a");
+        assert_eq!(body["truncated"], true);
+        assert_eq!(body["pending_segments"], 0);
+        assert_eq!(body["has_gaps"], false);
+        assert!(body["index_watermark"].is_null());
+        assert!(body["as_of"].is_string());
+        assert_eq!(body["scanned_rows"], 42);
+        assert_eq!(body["scanned_bytes"], 512);
+        assert_eq!(body["events"][0]["event_id"], first_id);
+        assert_eq!(
+            body["events"][0]["occurred_at"],
+            "1970-01-01T00:00:20.000000Z"
+        );
+        assert!(body["events"][0]["confidence"].is_null());
+        assert!(body["events"][0].get("payload_json").is_none());
+        let digest = body["query_digest"].as_str().unwrap();
+        assert!(super::parse_lower_hex_32(digest).is_some());
+        assert_search_audit(
+            &fixture.access_directory,
+            "CONTROL_QUERY_EXECUTED",
+            Some(digest),
+        );
+        payload["cursor"] = body["next_cursor"].clone();
+        let response = app.oneshot(search_http_request(&payload)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(page["query_digest"], digest);
+        assert_eq!(page["events"][0]["event_id"], second_id);
+        assert_eq!(page["truncated"], false);
+        assert!(page["next_cursor"].is_null());
+        assert!(page["scanned_rows"].is_null());
+        assert_access_events(
+            &fixture.access_directory,
+            2,
+            "console.query.executed",
+            Some("req_018f2a3b-4c5d-7000-8000-000000000001"),
+        );
+    }
+
+    #[tokio::test]
+    async fn search_rejects_unauthorized_or_invalid_plans_before_index_access() {
+        for (role, authenticated, expected) in [
+            (
+                ManagementRole::Investigator,
+                false,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (ManagementRole::Observer, true, StatusCode::FORBIDDEN),
+        ] {
+            let fixture = Fixture::new(10, role);
+            let mut request = search_http_request(&search_payload());
+            if !authenticated {
+                request.headers_mut().remove(AUTHORIZATION);
+            }
+            let response = router(fixture.control).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            assert_access_events(&fixture.access_directory, 1, "console.query.executed", None);
+        }
+        for (field, value) in [
+            ("schema_version", json!(4)),
+            ("start", json!("1969-12-31T23:59:59Z")),
+            ("start", json!("1970-01-01T00:00:10.1Z")),
+            ("start", json!("1970-01-01T01:00:10+01:00")),
+            ("end", json!("2300-01-01T00:00:01Z")),
+            ("end", json!("1970-01-01T00:00:10Z")),
+            ("end", json!("1970-03-01T00:00:00Z")),
+            ("limit", json!(0)),
+            ("limit", json!(2)),
+            ("tenant_id", json!("tenant_b")),
+            ("sort", json!("duration_desc")),
+            (
+                "filters",
+                json!([{"kind":"confidence_at_most","basis_points":10001}]),
+            ),
+            (
+                "filters",
+                json!([{"kind":"text","field":"payload_json","value":"x"}]),
+            ),
+            (
+                "filters",
+                json!([{"kind":"outcome","value":"ALLOW","sql":"1=1"}]),
+            ),
+            (
+                "filters",
+                json!(vec![json!({"kind":"outcome","value":"ALLOW"}); 9]),
+            ),
+            (
+                "filters",
+                json!([{"kind":"text","field":"stage","value":"x;SELECT"}]),
+            ),
+        ] {
+            let fixture = Fixture::new(10, ManagementRole::Investigator);
+            let mut payload = search_payload();
+            payload[field] = value;
+            let response = router(fixture.control)
+                .oneshot(search_http_request(&payload))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{payload}"
+            );
+            assert_search_audit(&fixture.access_directory, "CONTROL_QUERY_INVALID", None);
+        }
+        let fixture = Fixture::new(10, ManagementRole::Investigator);
+        let mut payload = search_payload();
+        payload["cursor"] = json!("x".repeat(super::search::SEARCH_BODY_BYTES_MAX));
+        let response = router(fixture.control)
+            .oneshot(search_http_request(&payload))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_search_audit(&fixture.access_directory, "CONTROL_QUERY_INVALID", None);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn search_cursor_binds_scope_credential_plan_and_microsecond_position() {
+        let fixture = Fixture::new(10, ManagementRole::Investigator);
+        let mut control = fixture.control;
+        let payload = search_payload();
+        let plan = serde_json::from_value::<SearchRequest>(payload.clone())
+            .unwrap()
+            .into_plan(1000)
+            .unwrap();
+        let position = xshield_worker::SearchPosition::new(
+            DateTime::from_timestamp_micros(20_123_456).unwrap(),
+            EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+        )
+        .unwrap();
+        let cursor = control
+            .encode_search_cursor("operator-1", &plan, &position)
+            .unwrap();
+        assert_eq!(
+            control
+                .decode_search_cursor("operator-1", &plan, &cursor)
+                .unwrap(),
+            position
+        );
+        assert!(
+            control
+                .decode_search_cursor("operator-2", &plan, &cursor)
+                .is_err()
+        );
+        for (field, value) in [
+            ("start", json!("1970-01-01T00:00:11Z")),
+            ("end", json!("1970-01-01T00:01:11Z")),
+            ("sort", json!("occurred_at_desc")),
+            ("limit", json!(2)),
+            ("filters", json!([])),
+        ] {
+            let mut different = payload.clone();
+            different[field] = value;
+            let different = serde_json::from_value::<SearchRequest>(different)
+                .unwrap()
+                .into_plan(1000)
+                .unwrap();
+            assert!(
+                control
+                    .decode_search_cursor("operator-1", &different, &cursor)
+                    .is_err()
+            );
+        }
+        control.config.tenant_id = TenantId::parse("tenant_b").unwrap();
+        assert!(
+            control
+                .decode_search_cursor("operator-1", &plan, &cursor)
+                .is_err()
+        );
+        control.config.tenant_id = TenantId::parse("tenant_a").unwrap();
+        control.config.site_id = SiteId::parse("site_b").unwrap();
+        assert!(
+            control
+                .decode_search_cursor("operator-1", &plan, &cursor)
+                .is_err()
+        );
+        control.config.site_id = SiteId::parse("site_a").unwrap();
+        control.config.credential.token_digest[0] ^= 1;
+        assert!(
+            control
+                .decode_search_cursor("operator-1", &plan, &cursor)
+                .is_err()
+        );
+        control.config.credential.token_digest[0] ^= 1;
+        for seconds in [9, 70] {
+            let out_of_window = xshield_worker::SearchPosition::new(
+                DateTime::from_timestamp(seconds, 0).unwrap(),
+                position.event_id().clone(),
+            )
+            .unwrap();
+            let invalid = control
+                .encode_search_cursor("operator-1", &plan, &out_of_window)
+                .unwrap();
+            assert!(
+                control
+                    .decode_search_cursor("operator-1", &plan, &invalid)
+                    .is_err()
+            );
+        }
+        for invalid in [
+            format!("{cursor}.extra"),
+            cursor.replace("20123456", "20123457"),
+            "x".repeat(161),
+        ] {
+            assert!(
+                control
+                    .decode_search_cursor("operator-1", &plan, &invalid)
+                    .is_err()
+            );
+        }
+        let mut invalid_payload = payload;
+        invalid_payload["cursor"] = json!("invalid");
+        let response = router(control)
+            .oneshot(search_http_request(&invalid_payload))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let events = read_access_events(&fixture.access_directory);
+        assert_eq!(
+            events[0]["payload"]["reason_code"],
+            "CONTROL_CURSOR_INVALID"
+        );
+        assert!(
+            super::parse_lower_hex_32(events[0]["payload"]["query_digest"].as_str().unwrap())
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn search_distinguishes_query_budgets_from_index_failures() {
+        for code in [158, 159, 241, 209] {
+            let mock = test::Mock::new();
+            mock.add(test::handlers::exception(code));
+            let fixture = Fixture::with_index(
+                10,
+                ManagementRole::Investigator,
+                Client::default().with_mock(&mock),
+            );
+            let response = router(fixture.control)
+                .oneshot(search_http_request(&search_payload()))
+                .await
+                .unwrap();
+            let budget = code != 209;
+            assert_eq!(
+                response.status(),
+                if budget {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            );
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(
+                body["error_code"],
+                if budget {
+                    "CONTROL_QUERY_BUDGET_EXCEEDED"
+                } else {
+                    "CONTROL_INDEX_UNAVAILABLE"
+                }
+            );
+            assert_eq!(body["retryable"], !budget);
+            assert_eq!(
+                body["next_action"],
+                if budget {
+                    "narrow_query"
+                } else {
+                    "retry_later"
+                }
+            );
+            let events = read_access_events(&fixture.access_directory);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["payload"]["reason_code"], body["error_code"]);
+            assert!(
+                super::parse_lower_hex_32(events[0]["payload"]["query_digest"].as_str().unwrap())
+                    .is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_audit_failure_withholds_index_results() {
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide([search_event(
+            "ev_018f2a3b-4c5d-7000-8000-000000000001",
+            20,
+        )]));
+        let fixture = Fixture::with_index(
+            10,
+            ManagementRole::Investigator,
+            Client::default().with_mock(&mock),
+        );
+        std::thread::scope(|scope| {
+            let journal = &fixture.control.access_journal;
+            assert!(
+                scope
+                    .spawn(move || {
+                        let _guard = journal.lock().unwrap();
+                        panic!("simulate failed audit writer");
+                    })
+                    .join()
+                    .is_err()
+            );
+        });
+        let response = router(fixture.control)
+            .oneshot(search_http_request(&search_payload()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error_code"], "AUDIT_DURABILITY_FAILED");
+        assert!(body.get("events").is_none());
+    }
+
+    #[tokio::test]
+    async fn search_disconnect_keeps_capacity_until_terminal_audit() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let released = std::sync::Arc::new(tokio::sync::Notify::new());
+        let handler_started = started.clone();
+        let handler_released = released.clone();
+        let index = axum::Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let started = handler_started.clone();
+                let released = handler_released.clone();
+                async move {
+                    started.notify_one();
+                    released.notified().await;
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, index).await.unwrap();
+        });
+        let fixture = Fixture::with_index(
+            10,
+            ManagementRole::Investigator,
+            Client::default()
+                .with_url(format!("http://{address}"))
+                .with_validation(false),
+        );
+        let capacity = fixture.control.search_capacity.clone();
+        let app = router(fixture.control);
+        let client = tokio::spawn(app.clone().oneshot(search_http_request(&search_payload())));
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        client.abort();
+        assert!(client.await.unwrap_err().is_cancelled());
+        assert_eq!(capacity.available_permits(), 0);
+        let response = app
+            .oneshot(search_http_request(&search_payload()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        released.notify_one();
+        let _permit = tokio::time::timeout(Duration::from_secs(2), capacity.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        let events = read_access_events(&fixture.access_directory);
+        assert_eq!(events.len(), 2);
+        let reasons = events
+            .iter()
+            .map(|event| event["payload"]["reason_code"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            reasons,
+            std::collections::BTreeSet::from([
+                "CONTROL_QUERY_CAPACITY_EXHAUSTED",
+                "CONTROL_QUERY_EXECUTED"
+            ])
+        );
+        server.abort();
     }
 
     fn private_directory(path: &Path) {
