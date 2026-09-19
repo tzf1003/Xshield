@@ -1,4 +1,5 @@
 use super::*;
+use xshield_core::domain::{ArtifactId, CaseId};
 
 const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000951";
 
@@ -52,6 +53,57 @@ async fn case_collection_validates_path_and_cursor_before_storage() {
             .iter()
             .all(|event| event["evidence_refs"] == json!([]))
     );
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn case_collection_rejects_cursor_reuse_across_case_and_subject() {
+    let other_case = "case_018f2a3b-4c5d-7000-8000-000000000952";
+    let artifact = ArtifactId::parse(MISSING_ARTIFACT_ID).unwrap();
+    let case_id = CaseId::parse(CASE).unwrap();
+
+    let fixture = Fixture::new(10, ManagementRole::Investigator);
+    let cursor = fixture
+        .control
+        .encode_case_cursor("operator-1", &case_id, &artifact)
+        .unwrap();
+    let result = response_json(
+        router(fixture.control)
+            .oneshot(collection_request(&format!(
+                "/control/v1/cases/{other_case}/items?cursor={cursor}"
+            )))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(result["error_code"], "CONTROL_CURSOR_INVALID");
+
+    let mut fixture = Fixture::new(10, ManagementRole::Investigator);
+    let cursor = fixture
+        .control
+        .encode_case_cursor("operator-1", &case_id, &artifact)
+        .unwrap();
+    fixture.control.config.principal = ManagementPrincipal::new(
+        "operator-2",
+        [ManagementRole::Investigator],
+        [(
+            TenantId::parse("tenant_a").unwrap(),
+            SiteId::parse("site_a").unwrap(),
+        )],
+    )
+    .unwrap();
+    let result = response_json(
+        router(fixture.control)
+            .oneshot(collection_request(&format!(
+                "/control/v1/cases/{CASE}/items?cursor={cursor}"
+            )))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(result["error_code"], "CONTROL_CURSOR_INVALID");
     fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
 }
 
@@ -166,6 +218,39 @@ async fn case_collection_bounds_inflight_work_and_reports_store_failure() {
 }
 
 #[tokio::test]
+async fn case_collection_withholds_dependency_result_when_audit_fails() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://xshield:xshield@127.0.0.1:1/xshield")
+        .unwrap();
+    pool.close().await;
+    let fixture = Fixture::with_case_catalog(PostgresIdentityStore::from_pool(pool), 1);
+    std::thread::scope(|scope| {
+        let journal = &fixture.control.access_journal;
+        assert!(
+            scope
+                .spawn(move || {
+                    let _guard = journal.lock().unwrap();
+                    panic!("simulate audit failure");
+                })
+                .join()
+                .is_err()
+        );
+    });
+    let result = response_json(
+        router(fixture.control)
+            .oneshot(collection_request(&format!(
+                "/control/v1/cases/{CASE}/items"
+            )))
+            .await
+            .unwrap(),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_eq!(result["error_code"], "AUDIT_DURABILITY_FAILED");
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)]
 async fn case_collection_success_is_scoped_and_audited() {
@@ -175,11 +260,9 @@ async fn case_collection_success_is_scoped_and_audited() {
         .await
         .unwrap();
     let fixture = Fixture::with_catalog(10, ManagementRole::Investigator, catalog, 1);
-    let artifact = format!("artifact_{}", Uuid::now_v7());
+    let artifact = "artifact_018f2a3b-4c5d-7000-8000-000000000951";
+    let second_artifact = "artifact_018f2a3b-4c5d-7000-8000-000000000952";
     let case_event = format!("ev_{}", Uuid::now_v7());
-    let item_event = format!("ev_{}", Uuid::now_v7());
-    let request = format!("req_{}", Uuid::now_v7());
-    let catalog_event = format!("ev_{}", Uuid::now_v7());
     sqlx::query(
         "INSERT INTO xshield.investigation_cases (
              tenant_id, site_id, case_id, owner_ref, purpose, status,
@@ -192,6 +275,85 @@ async fn case_collection_success_is_scoped_and_audited() {
     .execute(&pool)
     .await
     .unwrap();
+    insert_collection_item(&pool, CASE, artifact, 12).await;
+    insert_collection_item(&pool, CASE, second_artifact, 13).await;
+
+    let app = router(fixture.control);
+    let result = response_json(
+        app.clone()
+            .oneshot(collection_request(&format!(
+                "/control/v1/cases/{CASE}/items"
+            )))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(result["case"]["case_id"], CASE);
+    assert_eq!(result["case"]["status"], "open");
+    assert_eq!(result["items"][0]["artifact_id"], artifact);
+    assert_eq!(result["items"][0]["catalog_status"], "active");
+    assert_eq!(result["truncated"], true);
+    let cursor = result["next_cursor"].as_str().unwrap();
+    let next = response_json(
+        app.clone()
+            .oneshot(collection_request(&format!(
+                "/control/v1/cases/{CASE}/items?cursor={cursor}"
+            )))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(next["items"][0]["artifact_id"], second_artifact);
+    assert_eq!(next["truncated"], false);
+    assert!(next["next_cursor"].is_null());
+    drop(app);
+    let access_directory = fixture.access_directory;
+    let events = read_access_events(&access_directory);
+    assert_eq!(events.len(), 2);
+    assert!(
+        events
+            .iter()
+            .all(|event| event["event_type"] == "console.case.read")
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event["payload"]["outcome"] == "PASS")
+    );
+    assert_eq!(events[0]["evidence_refs"], json!([artifact]));
+    assert_eq!(events[1]["evidence_refs"], json!([second_artifact]));
+
+    sqlx::query("DELETE FROM xshield.case_items WHERE case_id = $1")
+        .bind(CASE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for artifact in [artifact, second_artifact] {
+        sqlx::query("DELETE FROM xshield.artifact_catalog WHERE artifact_id = $1")
+            .bind(artifact)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("DELETE FROM xshield.investigation_cases WHERE case_id = $1")
+        .bind(CASE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM xshield.audit_outbox WHERE aggregate_ref = $1")
+        .bind(CASE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    fs::remove_dir_all(access_directory.parent().unwrap()).unwrap();
+}
+
+async fn insert_collection_item(pool: &sqlx::PgPool, case: &str, artifact: &str, nonce: u8) {
+    let request = format!("req_{}", Uuid::now_v7());
+    let catalog_event = format!("ev_{}", Uuid::now_v7());
+    let item_event = format!("ev_{}", Uuid::now_v7());
     sqlx::query(
         "INSERT INTO xshield.artifact_catalog (
              tenant_id, site_id, artifact_id, request_id, schema_version, kind,
@@ -206,10 +368,10 @@ async fn case_collection_success_is_scoped_and_audited() {
              clock_timestamp() - interval '1 minute', clock_timestamp() + interval '1 hour',
              $3, 'active', NULL)",
     )
-    .bind(&artifact)
-    .bind(&request)
-    .bind(&catalog_event)
-    .execute(&pool)
+    .bind(artifact)
+    .bind(request)
+    .bind(catalog_event)
+    .execute(pool)
     .await
     .unwrap();
     sqlx::query(
@@ -218,67 +380,21 @@ async fn case_collection_success_is_scoped_and_audited() {
              idempotency_digest, request_digest, added_event_id
          ) VALUES ('tenant_a', 'site_a', $1, $2, 'operator-1', $3, $3, $4)",
     )
-    .bind(CASE)
-    .bind(&artifact)
-    .bind([12_u8; 32])
+    .bind(case)
+    .bind(artifact)
+    .bind([nonce; 32])
     .bind(&item_event)
-    .execute(&pool)
+    .execute(pool)
     .await
     .unwrap();
     sqlx::query(
         "INSERT INTO xshield.audit_outbox
          (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope)
-         VALUES ($1, 'tenant_a', 'site_a', $2, $3, '{}')",
+         VALUES ($1, 'tenant_a', 'site_a', $2, 'case.evidence.added', '{}')",
     )
-    .bind(&item_event)
-    .bind(CASE)
-    .bind("case.evidence.added")
-    .execute(&pool)
+    .bind(item_event)
+    .bind(case)
+    .execute(pool)
     .await
     .unwrap();
-
-    let result = response_json(
-        router(fixture.control)
-            .oneshot(collection_request(&format!(
-                "/control/v1/cases/{CASE}/items"
-            )))
-            .await
-            .unwrap(),
-        StatusCode::OK,
-    )
-    .await;
-    assert_eq!(result["case"]["case_id"], CASE);
-    assert_eq!(result["case"]["status"], "open");
-    assert_eq!(result["items"][0]["artifact_id"], artifact);
-    assert_eq!(result["items"][0]["catalog_status"], "active");
-    assert_eq!(result["truncated"], false);
-    assert!(result["next_cursor"].is_null());
-    let access_directory = fixture.access_directory;
-    let events = read_access_events(&access_directory);
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["event_type"], "console.case.read");
-    assert_eq!(events[0]["payload"]["outcome"], "PASS");
-    assert_eq!(events[0]["evidence_refs"], json!([artifact]));
-
-    sqlx::query("DELETE FROM xshield.case_items WHERE case_id = $1")
-        .bind(CASE)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM xshield.artifact_catalog WHERE artifact_id = $1")
-        .bind(&artifact)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM xshield.investigation_cases WHERE case_id = $1")
-        .bind(CASE)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM xshield.audit_outbox WHERE aggregate_ref = $1")
-        .bind(CASE)
-        .execute(&pool)
-        .await
-        .unwrap();
-    fs::remove_dir_all(access_directory.parent().unwrap()).unwrap();
 }

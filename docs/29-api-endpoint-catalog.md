@@ -165,6 +165,6 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 查询允许 open 与 closed 的本人案件；跨租户/站点、非本人和不存在案件统一返回 `CONTROL_CASE_NOT_AVAILABLE`/404，不泄露案件存在性。PostgreSQL 使用一条只读快照同时校验案件归属、成员行和 `case.evidence.added` outbox 关联，并按 artifact ID 升序取 `max_query_artifacts`（1–128）项及一个 lookahead；SQL 语句和锁等待各限 5 秒，连接池/事务整体限 15 秒。缺失或错绑 outbox、成员顺序/演员字段异常等可见持久化损坏返回 `CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE`/503，不返回部分页面。
 
-成功响应为 `schema_version=3`，包含管理 `request_id`、固定 tenant/site、案件 `case_id/status/purpose/created_at`、数据库 `as_of`、`items`、`truncated` 和 `next_cursor`。每项只包含 artifact ID、历史 `added_by/added_at` 和 catalog 状态：`active`（按同一 `as_of` 尚未到期）、`expired`、`deleted`（优先于到期）或 `unavailable`（无 catalog）；不返回 manifest、storage locator、hash、key ref、请求元数据、密文或读取资格。读取不更新案件、membership、catalog、保留期限或审批状态。
+成功响应为 `schema_version=3`，包含管理 `request_id`、固定 tenant/site、案件 `case_id/status/purpose/created_at`、数据库 `as_of`、`items`、`truncated` 和 `next_cursor`。每项只包含 artifact ID、历史 `added_by/added_at` 和 catalog 状态：`active`（按同一 `as_of` 尚未到期）、`expired`、`deleted`（优先于到期）或 `unavailable`（防御性缺 catalog 状态；0017 外键和 retention tombstone 使正常路径使用 `deleted`）；不返回 manifest、storage locator、hash、key ref、请求元数据、密文或读取资格。读取不更新案件、membership、catalog、保留期限或审批状态。
 
 成功、目标不可用、游标/鉴权拒绝及依赖故障均写独立 `console.case.read` 管理审计；成功事件的 `evidence_refs` 仅包含本页 artifact ID，拒绝/故障为空。审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果。查询与 POST 关联共享单实例有界许可，繁忙返回 `CONTROL_CASE_EVIDENCE_BUSY`/429；数据库故障/超时返回 `CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE`/503。已准入查询在客户端断连后继续到数据库和管理审计终态，响应统一 `Cache-Control: private, no-store`。

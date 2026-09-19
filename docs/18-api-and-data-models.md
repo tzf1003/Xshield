@@ -28,7 +28,7 @@ Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签�
 
 案件证据关联按 tenant/site/actor 取得用途隔离 advisory lock，再锁定本人 open 案件，串行化幂等和每案 128 项容量；新关联另锁定 active artifact，并在取得锁后及插入时按数据库时钟重验期限。`case_items` 与 `case.evidence.added` outbox 同事务提交；自然唯一键绑定 tenant/site/case/artifact，幂等唯一键绑定 tenant/site/actor/摘要。精确重试仍重验当前案件归属及 open 状态，再返回历史关联时间；artifact 到期或删除后该关联也不产生内容能力或保留锁。
 
-案件证据集合读取使用 tenant/site/case/owner 的单条 PostgreSQL 只读快照，并把案件授权、成员行、`case.evidence.added` outbox 关联和 catalog 状态一并解码；不存在、跨作用域及非本人案件统一不可用。游标只定位 artifact ID，绑定管理凭证摘要、主体、作用域、案件和页大小，坏游标在访问数据库前拒绝。读取不锁定业务行、不延长期限、不读取内容；数据库当前时间决定 active/expired，deleted 优先，缺 catalog 为 unavailable，open 与 closed 均保留历史引用。结果释放前必须写独立 `console.case.read` 管理审计，审计失败不返回查询结果。
+案件证据集合读取使用 tenant/site/case/owner 的单条 PostgreSQL 只读快照，并把案件授权、成员行、`case.evidence.added` outbox 关联和 catalog 状态一并解码；不存在、跨作用域及非本人案件统一不可用。游标只定位 artifact ID，绑定管理凭证摘要、主体、作用域、案件和页大小，坏游标在访问数据库前拒绝。读取不锁定业务行、不延长期限、不读取内容；数据库当前时间决定 active/expired，deleted 优先，缺 catalog 为防御性 unavailable 状态（`case_items` 外键和 retention tombstone 使正常路径使用 deleted），open 与 closed 均保留历史引用。结果释放前必须写独立 `console.case.read` 管理审计，审计失败不返回查询结果。
 
 本地证据到期清理使用两段短事务：先按 tenant/site/key 和数据库当前时间锁定候选，将删除意图与 outbox 原子提交；文件系统认证、删除与目录同步后，再锁定并比较相同 manifest/意图，提交 catalog tombstone 与完成 outbox。无 catalog 的本地孤儿复用同一根目录排他锁和两段事务，按稳定长度/mtime 观察提交意图，按 artifact 全局检查迟到 catalog，并在 sidecar/摘要复验后写入 `evidence.orphan.deleted` 或失败事件。数据库事务不跨文件操作持锁；两事务之间由本地根目录排他锁约束写入者。中断恢复依赖耐久意图和保留的签名 manifest，不把数据库提交与文件删除描述为一个原子事务。
 

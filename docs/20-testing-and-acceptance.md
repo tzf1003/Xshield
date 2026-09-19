@@ -78,4 +78,4 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 ## 20.9 案件证据集合查询回归
 
-控制层回归覆盖坏路径、坏/越界/跨用途游标、鉴权与速率、共享在途许可、数据库故障、断连后终态审计和审计失败扣留结果。真实 PostgreSQL 回归验证单快照下的 open/closed 案件归属、跨租户/站点与非本人统一不可用、稳定 artifact 游标分页、active/expired/deleted/unavailable catalog 状态、成员顺序/128 项上限以及缺失或错绑 outbox 的拒绝；查询为只读，不改变 membership、期限或内容授权。
+控制层回归覆盖坏路径、坏/越界游标、跨案件/主体 HMAC 绑定、鉴权与速率、共享在途许可、数据库故障以及审计失败扣留结果。真实 PostgreSQL 回归验证单快照下的 open/closed 案件归属、跨租户/站点与非本人统一不可用、稳定 artifact 游标分页、active/expired/deleted catalog 状态、成员顺序/128 项上限以及缺失或错绑 outbox 的拒绝；`unavailable` 仅作为防御性 catalog 缺失分支保留并由纯函数状态测试覆盖。查询为只读，不改变 membership、期限或内容授权。
