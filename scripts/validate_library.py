@@ -13,6 +13,119 @@ def load(path: str):
     return json.loads((ROOT / path).read_text(encoding='utf-8'))
 def valid(schema: dict, instance: object) -> bool:
     return not list(Draft202012Validator(schema,format_checker=FormatChecker()).iter_errors(instance))
+
+def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: dict) -> None:
+    """Exercise the implemented offline lifecycle and provider capture record."""
+    model_event = copy.deepcopy(model_stage)
+    model_event['event_type'] = 'model.responded'
+    model_event['payload'] = {
+        'model_call_id': choice['model_call_id'], 'model_revision': 'jev-1.13.0',
+        'prompt_revision': 'evaluation-r1', 'question_type': 'choice', 'status': 'success',
+        'reason_code': 'MODEL_EVALUATED', 'confidence': 0.6, 'confidence_status': 'provided',
+        'duration_us': 1200,
+        'input_artifact_id': choice['input_artifact_id'].replace('art_', 'artifact_'),
+        'output_artifact_id': choice['output_artifact_id'].replace('art_', 'artifact_'),
+        'call_artifact_id': 'artifact_01a0afa6-3320-7001-8000-000000000001',
+    }
+    for event_type, status in [
+        ('model.started', 'started'), ('model.requested', 'requested'),
+        ('model.responded', 'success'), ('model.failed', 'error'),
+        ('model.timeout', 'timeout'), ('model.cancelled', 'cancelled'),
+    ]:
+        event = copy.deepcopy(model_event)
+        event['event_type'] = event_type
+        event['payload']['status'] = status
+        if status != 'success':
+            event['payload'].update(confidence=None, confidence_status='unavailable',
+                                    output_artifact_id=None, call_artifact_id=None)
+            if status != 'requested': event['payload']['input_artifact_id'] = None
+        check('model_lifecycle:' + status, valid(schemas['audit-event'], event))
+        event['payload']['status'] = 'requested' if status == 'started' else 'started'
+        check('model_lifecycle:status_mismatch_' + status, not valid(schemas['audit-event'], event))
+    for label, fields, expected in [
+        ('confidence_absent', {'confidence': None, 'confidence_status': 'not_provided'}, True),
+        ('noul', {'question_type': 'noul', 'confidence': None, 'confidence_status': 'not_applicable'}, True),
+        ('wrong_call_prefix', {'model_call_id': choice['model_call_id'].replace('mdl_', 'model_')}, False),
+        ('unsupported_primitive', {'question_type': 'score'}, False),
+        ('empty_revision', {'model_revision': ''}, False),
+        ('oversized_revision', {'model_revision': 'r' * 129}, False),
+        ('newline_revision', {'model_revision': 'jev-1.13.0\n'}, False),
+        ('invalid_prompt_revision', {'prompt_revision': 'prompt/revision'}, False),
+        ('invalid_reason', {'reason_code': 'invalid reason'}, False),
+        ('provided_null', {'confidence': None}, False),
+        ('out_of_range_confidence', {'confidence': 1.1}, False),
+        ('absent_confidence_with_value', {'confidence_status': 'not_provided'}, False),
+        ('noul_confidence', {'question_type': 'noul'}, False),
+        ('noul_status', {'question_type': 'noul', 'confidence': None, 'confidence_status': 'not_provided'}, False),
+        ('null_input', {'input_artifact_id': None}, False),
+        ('null_output', {'output_artifact_id': None}, False),
+        ('null_call', {'call_artifact_id': None}, False),
+        ('wrong_artifact_prefix', {'input_artifact_id': choice['input_artifact_id']}, False),
+        ('unknown_field', {'provider_body': 'synthetic'}, False),
+    ]:
+        event = copy.deepcopy(model_event)
+        event['payload'].update(fields)
+        check('model_lifecycle:' + label, valid(schemas['audit-event'], event) == expected)
+    for field in ['confidence', 'input_artifact_id', 'output_artifact_id', 'call_artifact_id']:
+        event = copy.deepcopy(model_event)
+        del event['payload'][field]
+        check('model_lifecycle:missing_' + field, not valid(schemas['audit-event'], event))
+    for field in ['tenant_id', 'site_id', 'policy_revision', 'producer_id']:
+        event = copy.deepcopy(model_event)
+        event[field] = 'invalid scope'
+        check('model_lifecycle:invalid_' + field, not valid(schemas['audit-event'], event))
+    event = copy.deepcopy(model_event)
+    event['event_type'] = 'model.requested'
+    event['payload'].update(status='requested', confidence=None, confidence_status='unavailable', input_artifact_id=None)
+    check('model_lifecycle:requested_requires_input', not valid(schemas['audit-event'], event))
+    event = copy.deepcopy(model_event)
+    event['event_type'] = 'model.started'
+    event['payload']['status'] = 'started'
+    check('model_lifecycle:started_confidence_rejected', not valid(schemas['audit-event'], event))
+    event = copy.deepcopy(model_event)
+    event['request_id'] = None
+    check('model_lifecycle:request_required', not valid(schemas['audit-event'], event))
+
+    record = copy.deepcopy(choice)
+    record.update(provider='typesafe', model_revision='jev-1.13.0', prompt_revision='evaluation-r1',
+                  resolved_model_revision='jev-1.13.0', reason_code='MODEL_EVALUATED', http_status=200,
+                  capture_status='complete', retry_after_seconds=None, provider_request_id=None,
+                  schema_validation='valid', provider_internal='unavailable')
+    check('model_capture:success', valid(schemas['model-call'], record))
+    for status in ['error', 'timeout', 'cancelled']:
+        failure = copy.deepcopy(record)
+        failure.update(status=status, output_artifact_id=None, result=None, probabilities={},
+                       provider_confidence=None, confidence_status='unavailable',
+                       resolved_model_revision=None, reason_code='MODEL_TRANSPORT_ERROR',
+                       http_status=None, capture_status='unavailable', schema_validation='unavailable')
+        check('model_capture:unavailable_' + status, valid(schemas['model-call'], failure))
+    for capture in ['complete', 'partial_limit', 'partial_timeout', 'partial_transport', 'excluded_policy']:
+        failure = copy.deepcopy(record)
+        failure.update(status='error', provider_confidence=None, confidence_status='unavailable',
+                       capture_status=capture, reason_code='MODEL_RESPONSE_INVALID', schema_validation='invalid')
+        check('model_capture:error_' + capture, valid(schemas['model-call'], failure))
+    for label, fields in [
+        ('success_requires_output', {'output_artifact_id': None}),
+        ('success_requires_complete', {'capture_status': 'partial_timeout'}),
+        ('success_capture_unavailable', {'capture_status': 'unavailable'}),
+        ('invalid_resolved_revision', {'resolved_model_revision': 'model/version'}),
+        ('newline_resolved_revision', {'resolved_model_revision': 'jev-1.13.0\n'}),
+        ('invalid_reason', {'reason_code': 'invalid reason'}),
+        ('invalid_http_status', {'http_status': 99}),
+        ('oversized_http_status', {'http_status': 1000}),
+        ('negative_retry', {'retry_after_seconds': -1}),
+        ('oversized_retry', {'retry_after_seconds': 86401}),
+        ('invalid_request_id', {'provider_request_id': 'https://example.invalid'}),
+        ('invalid_capture_status', {'capture_status': 'unknown'}),
+        ('invalid_validation_status', {'schema_validation': 'unknown'}),
+        ('invalid_provider_internal', {'provider_internal': 'complete'}),
+        ('unknown_usage_field', {'usage': dict(record['usage'], extra=1)}),
+        ('unknown_field', {'provider_body': 'synthetic'}),
+    ]:
+        invalid = copy.deepcopy(record)
+        invalid.update(fields)
+        check('model_capture:' + label, not valid(schemas['model-call'], invalid))
+
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
         if 'validation' in p.parts or 'target' in p.parts: continue
@@ -91,6 +204,7 @@ def main() -> int:
     ]:
         call=copy.deepcopy(choice);call.update(fields)
         check('model_call:'+label,not valid(schemas['model-call'],call))
+    check_model_evaluation_contracts(schemas, model_stage, choice)
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))
     check('fixture:all_synthetic',all(e['example_only'] for e in events) and all(c['example_only'] for c in calls))

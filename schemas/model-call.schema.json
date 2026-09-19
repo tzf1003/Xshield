@@ -3,6 +3,14 @@
   "$id": "https://xshield.invalid/schemas/model-call.schema.json",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "scoped_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {"pattern": "[^A-Za-z0-9_.-]"}
+    }
+  },
   "required": [
     "schema_version",
     "model_call_id",
@@ -29,6 +37,7 @@
     },
     "model_call_id": {
       "type": "string",
+      "maxLength": 40,
       "pattern": "^mdl_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "request_id": {
@@ -39,21 +48,62 @@
       "type": "boolean"
     },
     "provider": {
-      "type": "string"
+      "$ref": "#/$defs/scoped_name"
     },
     "model_revision": {
-      "type": "string"
+      "$ref": "#/$defs/scoped_name"
     },
     "prompt_revision": {
-      "type": "string"
+      "$ref": "#/$defs/scoped_name"
     },
     "input_artifact_id": {
       "type": "string",
       "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "output_artifact_id": {
-      "type": "string",
+      "type": ["string", "null"],
       "pattern": "^[a-z]+_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "resolved_model_revision": {
+      "anyOf": [
+        {"$ref": "#/$defs/scoped_name"},
+        {"type": "null"}
+      ]
+    },
+    "reason_code": {
+      "$ref": "#/$defs/scoped_name"
+    },
+    "http_status": {
+      "type": ["integer", "null"],
+      "minimum": 100,
+      "maximum": 999
+    },
+    "capture_status": {
+      "enum": [
+        "complete",
+        "unavailable",
+        "excluded_policy",
+        "partial_limit",
+        "partial_timeout",
+        "partial_transport"
+      ]
+    },
+    "retry_after_seconds": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 86400
+    },
+    "provider_request_id": {
+      "anyOf": [
+        {"$ref": "#/$defs/scoped_name"},
+        {"type": "null"}
+      ]
+    },
+    "schema_validation": {
+      "enum": ["valid", "invalid", "unavailable"]
+    },
+    "provider_internal": {
+      "const": "unavailable"
     },
     "question_type": {
       "enum": [
@@ -102,6 +152,7 @@
     },
     "usage": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "input_tokens",
         "output_tokens",
@@ -147,6 +198,22 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"enum": ["success", "cached"]}},
+        "required": ["status"]
+      },
+      "then": {"properties": {"output_artifact_id": {"type": "string"}}}
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "success"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {"capture_status": {"const": "complete"}}
+      }
+    },
     {
       "if": {
         "properties": {"confidence_status": {"const": "provided"}},

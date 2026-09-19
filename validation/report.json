@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 258,
-  "passed_count": 258,
+  "checks_total": 329,
+  "passed_count": 329,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -576,6 +576,341 @@
       "detail": ""
     },
     {
+      "name": "model_lifecycle:started",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:status_mismatch_started",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:requested",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:status_mismatch_requested",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:success",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:status_mismatch_success",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:error",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:status_mismatch_error",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:timeout",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:status_mismatch_timeout",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:cancelled",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:status_mismatch_cancelled",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:confidence_absent",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:noul",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:wrong_call_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:unsupported_primitive",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:empty_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:oversized_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:newline_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:invalid_prompt_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:invalid_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:provided_null",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:out_of_range_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:absent_confidence_with_value",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:noul_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:noul_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:null_input",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:null_output",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:null_call",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:wrong_artifact_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:unknown_field",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:missing_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:missing_input_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:missing_output_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:missing_call_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:invalid_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:invalid_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:invalid_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:invalid_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:requested_requires_input",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:started_confidence_rejected",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:request_required",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:success",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:unavailable_error",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:unavailable_timeout",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:unavailable_cancelled",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:error_complete",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:error_partial_limit",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:error_partial_timeout",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:error_partial_transport",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:error_excluded_policy",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:success_requires_output",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:success_requires_complete",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:success_capture_unavailable",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:invalid_resolved_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:newline_resolved_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:invalid_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:invalid_http_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:oversized_http_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:negative_retry",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:oversized_retry",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:invalid_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:invalid_capture_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:invalid_validation_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:invalid_provider_internal",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:unknown_usage_field",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_capture:unknown_field",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "request_index:events",
       "passed": true,
       "detail": ""
@@ -1081,6 +1416,16 @@
       "detail": ""
     },
     {
+      "name": "link:README.md:docs/10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/26-runbooks.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:docs/11-audit-event-contract.md",
       "passed": true,
       "detail": ""
@@ -1292,6 +1637,16 @@
     },
     {
       "name": "link:README.md:CHANGELOG.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/11-audit-event-contract.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/22-delivery-roadmap.md:10-jev-and-agents.md",
       "passed": true,
       "detail": ""
     }

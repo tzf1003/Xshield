@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 实现单次 Jev 离线评估 CLI、严格 Choice/Noul 转换、固定 HTTPS、限流/超时/取消终态、加密输入输出证据与目录审计，以及中断恢复和 `model.*` 索引解析。
+
 - 实现受保护入口缺失 WAF Cookie 时的有界匿名空会话、原子 `session.created` 审计、401 安全 Cookie 响应，以及进程内、分布式来源/站点速率和并发容量控制。
 - 建立 Rust Cargo workspace 与 M0 核心领域边界。
 - 实现禁用站点的可审计 `NOT_CONFIGURED` 阶段树和失败关闭测试。

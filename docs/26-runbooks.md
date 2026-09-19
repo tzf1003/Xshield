@@ -43,3 +43,31 @@
 确认站点批准的保留计划、tenant/site、根目录与 key-id 对应关系，完成迁移 0015/0016；需要案件 pin 的站点先等待该能力落地。停止共享该根目录的网关写入者，保留现有私有目录权限，使用秘密管理设施注入维护环境变量，可按现场计划设置 `XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS`（无效值会在任何删除前拒绝）。执行 `cargo run -p xshield-worker --bin xshield-evidence-retain -- TENANT_ID SITE_ID 32`，检查 `selected/deleted/failed`、`orphan_selected/orphan_deleted/orphan_failed` 和 outbox 中的 `evidence.purge_requested`、`evidence.deleted`、`evidence.purge_failed`、`evidence.orphan.purge_requested`、`evidence.orphan.deleted`、`evidence.orphan.purge_failed`。每次每类最多 32 个，成功后按维护计划重复至各项 selected=0，再启动网关重新计量配额。
 
 BUSY 表示目录仍有写入/维护所有者；TIMEOUT 或 COMPLETION_UNAVAILABLE 时保留签名 sidecar/孤儿意图并重试同一作用域，文件已经删除也可完成 tombstone。REJECTED 对象保留现场并调查 HMAC、摘要、路径、mtime 或 sidecar 状态，不手改 catalog/HMAC 来通过检查。此操作实际移除密文，不能靠 tombstone 还原内容；签名元数据不含正文。备份/副本按各自批准计划处置，不能把本地成功解释为所有副本已消失。
+
+## RB-11 一次性模型离线评估
+
+先批准外发范围并脱敏，仅在受控离线评估账号执行；输入文件须为普通文件，Unix 权限 0600。以下是输入形状，实际任务应填写对应批准、策略和模板引用：
+
+```json
+{
+  "schema_version": 1,
+  "approval_ref": "approved-evaluation-r1",
+  "model_revision": "jev-1.13.0",
+  "policy_revision": "policy-r1",
+  "prompt_revision": "prompt-r1",
+  "untrusted_content": "待评估的已批准脱敏文本",
+  "question": {
+    "type": "choice",
+    "instructions": "仅按候选描述选择；证据不足选择 UNKNOWN。",
+    "criteria": {"NONE": "无候选适用", "UNKNOWN": "证据不足"}
+  }
+}
+```
+
+Noul 使用 `question={"type":"noul","instructions":"所需判断的问题"}`。指令最多 1024 字符，候选描述最多 512 字符，候选名为最多 128 字节的 ASCII scoped name；所有层级拒绝未知字段与重复键。
+
+完成 PostgreSQL 全部迁移；复用控制服务可访问的 vault/key，预建 0700 evidence 根目录并暂停共享该根目录的其他写入/清理者。journal 使用本评估器专属私有目录。通过秘密管理器注入 `XSHIELD_TENANT_ID`、`XSHIELD_SITE_ID`、`XSHIELD_DATABASE_URL`、`XSHIELD_JEV_API_KEY`、`XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_KEY_HEX`、`XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`、`XSHIELD_MODEL_JOURNAL_DIRECTORY`、`XSHIELD_JOURNAL_KEY_ID`、`XSHIELD_JOURNAL_KEY_HEX`、`XSHIELD_AUDIT_MAX_BYTES`。证据与 journal 密钥独立；证据预算需至少能容纳四个 512 KiB 对象及 sidecar，journal 预算范围 1 MiB–1 GiB，并保留至少 64 KiB 终态空间。
+
+执行 `cargo run -p xshield-worker --bin xshield-model-eval -- --approved-input /private/approved-evaluation.json`。stdout 仅包含 request/model-call ID、终态与 artifact 引用，非成功退出码为 1；SIGINT 请求取消并等待取证/终态完成。429/529 后检查调用记录中的 HTTP 状态及 Retry-After，由批准流程决定是否发起新的独立调用，旧调用不变。强制终止后重新启动会补记结果未知，再执行本次新任务，可能已发生的供应商计费需另行核对。
+
+每个 journal 事件即时关闭段，可用既有 `xshield-audit-seal` 与 `xshield-worker` 封存/发布，使用独立目标绑定 checkpoint；证据目录发布采用 PostgreSQL outbox。维护时接近 10000 条记录，应先完成未终结调用恢复、封存与投递，再切换到新的专用 journal 目录；保留旧目录及水位作为审计材料，不删除未投递段。正文通过现有管理案件/申请/批准/读取链路查看；24 小时后按 RB-10 清理，需更长保留的评估计划应先调整并验证实现。

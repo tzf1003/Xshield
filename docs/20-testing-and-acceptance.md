@@ -47,7 +47,7 @@ CI 使用固定版本 `clickhouse/clickhouse-server:25.8.29.51`，开发机可�
 
 ```bash
 XSHIELD_TEST_CLICKHOUSE_URL=http://127.0.0.1:8123 \
-cargo test -p xshield-worker --lib -- --ignored
+cargo test -p xshield-worker --lib real_schema_publisher -- --ignored
 XSHIELD_TEST_CLICKHOUSE_URL=http://127.0.0.1:8123 \
 cargo test -p xshield-worker --test clickhouse_search -- --ignored
 ```
@@ -61,3 +61,9 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 模型阶段回归由实际加密 journal 经封存和发布入库，验证 `mdl_` 调用引用、已知/缺失模型版本以及有界模型版本过滤。阶段汇总回归在同一阶段先写数值置信度，再写 `not_applicable`、`not_provided` 或 `unavailable` 的 null，确认两套 active 视图都返回最新 null 与匹配状态。常规测试另覆盖置信度矛盾、非法模型引用和版本、时间线分页预读行校验；这些合成事件验证审计链路，不代表实际模型推理或准确率测量。
 
 查询预算测试以同一小数据集收紧服务端结果行数上限，验证真实预算异常映射为 `QueryBudgetExceeded`。普通 `cargo test --workspace --all-targets` 会编译这些测试但按 `ignored` 跳过服务调用，必须执行上述命令才能形成真实数据库验证结果。执行时间/扫描/内存预算、集群故障和生产规模容量仍须分别验证。
+
+## 20.7 模型评估回归
+
+`cargo test -p xshield-worker --lib model_eval` 运行严格 DTO、重复键、版本、候选/概率/置信度、文本/字节上限及真实 loopback HTTP 传输测试；覆盖固定目标、单次 429/529/重定向、超时、取消、响应前缀和 API key 排除。另验证私有输入、目录排他/容量与中断终态恢复。
+
+`scripts/test_postgres.sh` 在独立临时库迁移后运行 `model_eval::tests::postgres_evaluation`：实际 HTTP 字节与解密输入证据一致，供应商输出捕获、规范化记录和目录均可读取，所有 `model.*` journal 事件通过生产索引解析；验证成功、429、非法响应和秘密排除，并注入 catalog/outbox 写入失败确认 HTTP 未调用。该测试单独运行需要 `XSHIELD_TEST_DATABASE_URL`，默认常规测试会跳过。全部样本和 API key 均为合成数据；真实供应商推理、计费、检测率与校准另行批准和测量。

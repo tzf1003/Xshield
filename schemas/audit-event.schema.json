@@ -169,6 +169,104 @@
   ],
   "additionalProperties": false,
   "$defs": {
+    "scoped_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {"pattern": "[^A-Za-z0-9_.-]"}
+    },
+    "model_artifact_ref": {
+      "type": ["string", "null"],
+      "maxLength": 45,
+      "pattern": "^artifact_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_call_id",
+        "model_revision",
+        "prompt_revision",
+        "question_type",
+        "status",
+        "reason_code",
+        "confidence",
+        "confidence_status",
+        "duration_us"
+      ],
+      "properties": {
+        "model_call_id": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^mdl_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "model_revision": {"$ref": "#/$defs/scoped_name"},
+        "prompt_revision": {"$ref": "#/$defs/scoped_name"},
+        "question_type": {"enum": ["choice", "noul"]},
+        "status": {
+          "enum": ["started", "requested", "success", "timeout", "error", "cancelled"]
+        },
+        "reason_code": {"$ref": "#/$defs/scoped_name"},
+        "confidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "confidence_status": {
+          "enum": ["provided", "not_applicable", "not_provided", "unavailable"]
+        },
+        "duration_us": {"type": "integer", "minimum": 0},
+        "input_artifact_id": {"$ref": "#/$defs/model_artifact_ref"},
+        "output_artifact_id": {"$ref": "#/$defs/model_artifact_ref"},
+        "call_artifact_id": {"$ref": "#/$defs/model_artifact_ref"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"confidence_status": {"const": "provided"}},
+            "required": ["confidence_status"]
+          },
+          "then": {"properties": {"confidence": {"type": "number"}}},
+          "else": {"properties": {"confidence": {"type": "null"}}}
+        },
+        {
+          "if": {
+            "properties": {"question_type": {"const": "noul"}},
+            "required": ["question_type"]
+          },
+          "then": {
+            "properties": {
+              "confidence": {"type": "null"},
+              "confidence_status": {"const": "not_applicable"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"status": {"const": "success"}},
+            "required": ["status"]
+          },
+          "then": {
+            "required": ["output_artifact_id", "call_artifact_id"],
+            "properties": {
+              "output_artifact_id": {"type": "string"},
+              "call_artifact_id": {"type": "string"}
+            }
+          },
+          "else": {"properties": {"confidence": {"type": "null"}}}
+        },
+        {
+          "if": {
+            "properties": {"status": {"enum": ["requested", "success"]}},
+            "required": ["status"]
+          },
+          "then": {
+            "required": ["input_artifact_id"],
+            "properties": {"input_artifact_id": {"type": "string"}}
+          }
+        }
+      ]
+    },
     "stage": {
       "type": "object",
       "required": [
@@ -334,6 +432,75 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "model.started",
+              "model.requested",
+              "model.responded",
+              "model.failed",
+              "model.timeout",
+              "model.cancelled"
+            ]
+          }
+        },
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {"$ref": "#/$defs/model"},
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "policy_revision": {"$ref": "#/$defs/scoped_name"},
+          "producer_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {
+            "type": "string",
+            "maxLength": 40,
+            "pattern": "^req_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "event_type": {"const": "model.started"},
+              "payload": {"properties": {"status": {"const": "started"}}}
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "model.requested"},
+              "payload": {"properties": {"status": {"const": "requested"}}}
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "model.responded"},
+              "payload": {"properties": {"status": {"const": "success"}}}
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "model.failed"},
+              "payload": {"properties": {"status": {"const": "error"}}}
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "model.timeout"},
+              "payload": {"properties": {"status": {"const": "timeout"}}}
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "model.cancelled"},
+              "payload": {"properties": {"status": {"const": "cancelled"}}}
+            }
+          }
+        ]
+      }
+    },
     {
       "if": {
         "properties": {

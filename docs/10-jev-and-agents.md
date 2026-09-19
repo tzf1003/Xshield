@@ -69,3 +69,17 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 所有网页、日志、代码、评论都作为不可信数据。调查 Agent 不执行日志里出现的命令；自然语言查询只能编译为受限查询 AST。权限扩张、入口公开、兼容范围扩大必须经人工/独立策略审批后签名发布，不由模型自批。[S09]
 
 离线适配只在批准测试环境运行。WASM 插件明确 host capabilities、内存与 fuel 限额，复杂 JS 再加进程/容器隔离；Wasmtime 的沙箱仍需要正确约束宿主接口，不是允许任意 hostcall。[S19]
+
+## 10.9 已实现一次性离线评估
+
+`xshield-model-eval --approved-input PRIVATE_JSON_FILE` 接受操作员已批准对外披露、预先脱敏的单个私有 JSON 文件。`approval_ref` 是关联批准记录的标识，不是权限证明；部署账号、文件权限和外发审批由操作者保证。tenant/site 来自可信环境，request/model-call ID 由服务端生成。CLI 只产出评估证据，不连接网关资格写入路径；`MODEL_EVALUATED/PASS` 表示调用与取证完成，不表示业务操作获准。
+
+固定请求 `https://api.typesafe.ai/v1/systemone`，Bearer 由独立环境秘密注入；使用原生 TLS 信任根，拒绝重定向和动态目标。当前只接受版本 `jev-1.13.0`，响应版本必须精确匹配；版本依据 [TypeSafe Models](https://docs.typesafe.ai/models) 与 [API reference](https://docs.typesafe.ai/api) 于 2026-09-19 复核。支持单题 Choice 与 Noul；Choice 要求 2–32 个候选，包含 NONE/UNKNOWN，返回完整候选概率且最高概率选项匹配。Noul 的 confidence 始终为 `null/not_applicable`。缺少用量保持 unknown，不估造 token 或成本。
+
+闭环顺序：`model.started` → 内部输入证据 → 冻结实际 API JSON 证据 → `model.requested` → 单次 HTTP → 响应捕获及规范化调用记录 → `model.responded/failed/timeout/cancelled`。每个证据对象先在 vault 耐久落盘，再与 `evidence.cataloged` outbox 原子提交目录。输入目录或审计屏障失败会阻止 HTTP；调用后的取证失败产生依赖失败终态。终态自身持久失败时退出非零，下次启动将未完成调用补记为 `MODEL_OUTCOME_UNKNOWN`，供应商是否已计费保持未知。
+
+四类对象分别为 `model_internal_input`、`model_input`、`model_output`、`model_call`，通过 parent_refs 和事件 evidence_refs 关联。输入保存内部 typed DTO 与实际发送的 JSON。输出对象为 `representation=entity_bytes_array` 的完整 JSON 捕获文档，body 保存实际收到的字节数组，`capture_status/bytes_observed/bytes_saved/http_status` 描述供应商实体的覆盖；对象 manifest 的 complete 只代表捕获文档完整。超限/断流/超时保留有界前缀；响应不可用或命中 API key 排除策略时 output_artifact_id 为 null，调用记录仍明确说明原因。普通审计仅保存版本、状态、置信度与证据引用。正文沿用独立申请、批准与 SensitiveEvidenceReader 读取流程。
+
+资源上限：输入与实际 API JSON 各 8 KiB，文本合计最多 6144 字符，响应最多 64 KiB，每个证据文档最多 512 KiB、保留 24 小时；发送至读体总期限 10 秒，catalog 操作每步 5 秒。证据根目录排他锁限制一次一个任务，预留四对象最坏空间，目录最多 100000 文件。429 记 `MODEL_RATE_LIMITED`、529 记 `MODEL_OVERLOADED`，保留合法 Retry-After 秒数供操作员决策；每次 CLI 调用至多一次 HTTP。重启认证扫描最多 10000 条专用 journal 记录，补记中断终态并保留因果引用；接近上限时按 RB-11 轮换目录。
+
+后续增量包括网关自动采用、Score、缓存、多实例站点预算、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。当前未执行真实供应商推理或准确率/校准测试。

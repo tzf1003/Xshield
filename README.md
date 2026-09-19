@@ -6,7 +6,9 @@
 
 ## 实现状态
 
-模型阶段审计已支持 `mdl_` 强类型调用引用与可选模型版本索引，缺失版本保持未知。发布、阶段汇总及查询统一校验置信度状态，最新 null 不继承旧数值；真实 journal→封存→ClickHouse 回归与升级边界见 [11.4](docs/11-audit-event-contract.md#114-阶段结果契约) 和 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归)。实际模型供应商调用仍在 M4 后续增量中。
+`xshield-model-eval` 已实现操作员批准的一次性 Jev 离线评估：严格 Choice/Noul 契约、固定 HTTPS 供应商端点、实际请求/响应加密证据、PostgreSQL catalog/outbox 和 `model.*` 耐久终态。429/529、超时、取消、超限和中断恢复均有明确结果；使用方法与运行边界见 [10.9](docs/10-jev-and-agents.md#109-已实现一次性离线评估) 和 [RB-11](docs/26-runbooks.md#rb-11-一次性模型离线评估)。当前验证使用合成 loopback 供应商，不代表真实模型质量、计费或外部服务可用性；网关模型策略、校准及调查 Agent 继续迭代。
+
+模型阶段及调用审计支持 `mdl_` 强类型引用和模型版本索引；阶段汇总保留最新 null 置信度。发布与查询边界见 [11.4](docs/11-audit-event-contract.md#114-阶段结果契约) 和 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归)。
 
 缺少 WAF Cookie 的受保护根/API 请求会先原子创建一条有服务端绝对期限的匿名空 binding 与 `session.created` outbox，再以 401 拒绝并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。匿名 binding 的 epoch/generation 均为 0，不含主体、授权上下文、业务凭证或资格；重复携带该 Cookie 不会扩增记录，附加任意 Bearer 也不能升级身份。匿名 TTL、来源/站点创建速率与每租户/站点活动容量由 `identity_store` 有界配置；进程内预算先限制数据库调用，PostgreSQL 短事务再以传输层对端地址的租户/站点隔离 HMAC 实施分布式来源/站点限流。速率超限返回 429，容量超限返回 503，均不签发 Cookie。
 
@@ -119,6 +121,7 @@ cargo run -p xshield-control -- \
 | Pingora 0.9.0 + OpenSSL backend | HTTP 代理生命周期、固定源站连接、请求过滤、journal AES-256-GCM 及段清单 Ed25519 签名 | Apache-2.0；精确版本并锁文件，部署同步审查 OpenSSL 版本与许可证，升级先复跑协议歧义、加密恢复、签名验证、转发和故障测试 |
 | SQLx 0.9.0 | PostgreSQL 异步事务和连接池 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 migration、回滚和并发测试 |
 | clickhouse 0.15.2 | 已封存审计段的类型化查询、同步批量投递与传输加密 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 RowBinary schema、重复投递、并发冲突和故障水位测试 |
+| hyper 1.x / hyper-util 0.1.x / http-body-util 0.1.x / hyper-rustls 0.27.x | 复用已锁定依赖提供单次 Jev HTTPS、原生信任根和有界响应读取 | hyper 系列为 MIT，hyper-rustls 为 Apache-2.0 OR ISC OR MIT；锁文件固定，升级复跑 TLS 配置、精确报文、取消、超时、限流与秘密排除回归 |
 | Tokio 1.51 LTS | SQLx 异步运行时 | MIT；跟随 1.51 LTS 补丁，变更 minor 前执行故障与负载回归 |
 | serde / serde_json 1.x | 类型化配置 DTO 与 outbox JSON | MIT OR Apache-2.0；锁文件固定，补丁升级执行配置和契约测试 |
 | UUID 1.x | 生成服务器侧 UUIDv7 请求 ID | MIT OR Apache-2.0；锁文件固定，补丁升级执行 ID 契约测试 |

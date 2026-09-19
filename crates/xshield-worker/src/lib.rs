@@ -20,6 +20,7 @@ use xshield_audit::{
 };
 use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 
+pub mod model_eval;
 mod search;
 pub use search::{AuditSearchResult, SearchEventSummary, SearchPosition, query_audit_events};
 
@@ -828,6 +829,9 @@ impl IndexRow {
         }
         validate_id_list(&event.evidence_refs, None)?;
         validate_id_list(&event.cause_event_ids, Some("ev_"))?;
+        if event.event_type.starts_with("model.") {
+            model_eval::ModelEvent::validate_envelope(&event)?;
+        }
         let occurred_at = DateTime::parse_from_rfc3339(&event.occurred_at)
             .map_err(|_| PublishError::InvalidEvent)?
             .with_timezone(&Utc);
@@ -989,6 +993,10 @@ struct PayloadSummary {
 impl PayloadSummary {
     fn parse(event_type: &str, json: &str) -> Result<Self, PublishError> {
         match event_type {
+            "model.started" | "model.requested" | "model.responded" | "model.failed"
+            | "model.timeout" | "model.cancelled" => {
+                serde_json::from_str::<model_eval::ModelEvent>(json)?.validate(event_type)
+            }
             "stage.completed" | "stage.skipped" => {
                 let payload: StagePayload = serde_json::from_str(json)?;
                 payload.validate()

@@ -65,6 +65,8 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-worker --test evidence_retention -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+    cargo test -p xshield-worker --lib model_eval::tests::postgres_evaluation -- --ignored
+XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control evidence_manifests_are_scoped_paginated_and_audited -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control case_creation_is_idempotent_bounded_and_audited -- --ignored

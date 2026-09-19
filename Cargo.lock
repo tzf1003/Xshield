@@ -3270,8 +3270,14 @@ dependencies = [
 name = "xshield-worker"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "clickhouse",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "serde",
  "serde_json",
  "sqlx",

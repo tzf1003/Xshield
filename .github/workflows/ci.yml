@@ -66,7 +66,7 @@ jobs:
       - run: scripts/test_postgres.sh
       - name: ClickHouse publication and search integration
         run: |
-          cargo test -p xshield-worker --lib -- --ignored
+          cargo test -p xshield-worker --lib real_schema_publisher -- --ignored
           cargo test -p xshield-worker --test clickhouse_search -- --ignored
         timeout-minutes: 5
       - run: scripts/test_gateway_identity.sh
