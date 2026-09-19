@@ -217,7 +217,9 @@ impl PostgresIdentityStore {
         Ok(())
     }
 
-    async fn retention_transaction(&self) -> Result<Transaction<'_, Postgres>, StoreError> {
+    pub(crate) async fn retention_transaction(
+        &self,
+    ) -> Result<Transaction<'_, Postgres>, StoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '5s'")
             .execute(&mut *tx)

@@ -8,7 +8,9 @@ use xshield_evidence::{
     EvidenceClassification, EvidenceFidelity, EvidenceKey, EvidencePurgeOutcome,
     EvidenceVaultConfig, EvidenceWrite, LocalEvidenceVault, VerifiedEvidenceManifest,
 };
-use xshield_postgres::{EvidenceCatalogPublish, EvidencePurgeResult, PostgresIdentityStore};
+use xshield_postgres::{
+    EvidenceCatalogPublish, EvidenceOrphanPurgeResult, EvidencePurgeResult, PostgresIdentityStore,
+};
 
 const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 
@@ -199,6 +201,116 @@ async fn expired_ciphertext_cleanup_is_scoped_audited_exclusive_and_recoverable(
     assert!(run_cli(&database, &root, 32).status.success());
     assert_eq!(event_count(&pool, "evidence.purge_requested").await, 2);
     assert_eq!(event_count(&pool, "evidence.deleted").await, 2);
+    let orphan_id = format!("artifact_{}", Uuid::now_v7());
+    let orphan_path = root.join(format!("{orphan_id}.xev"));
+    fs::write(&orphan_path, b"crashed-before-manifest").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&orphan_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let orphan_lock = File::open(&root).unwrap();
+    orphan_lock.try_lock().unwrap();
+    let candidate = vault
+        .list_orphan_candidates(&tenant, &site, Duration::from_secs(1), 32)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.artifact_id() == orphan_id)
+        .unwrap();
+    let orphan_jobs = store
+        .prepare_evidence_orphan_purge(&tenant, &site, std::slice::from_ref(&candidate))
+        .await
+        .unwrap();
+    assert_eq!(orphan_jobs.len(), 1);
+    let retry_jobs = store
+        .prepare_evidence_orphan_purge(&tenant, &site, std::slice::from_ref(&candidate))
+        .await
+        .unwrap();
+    assert_eq!(
+        retry_jobs[0].intent_event_id(),
+        orphan_jobs[0].intent_event_id()
+    );
+    assert_eq!(
+        event_count(&pool, "evidence.orphan.purge_requested").await,
+        1
+    );
+    let orphan_removed = vault.purge_orphan(&tenant, &site, &candidate).unwrap();
+    assert_eq!(orphan_removed, EvidencePurgeOutcome::Removed);
+    sqlx::query(
+        "ALTER TABLE xshield.audit_outbox ADD CONSTRAINT test_orphan_completion_failure
+        CHECK (tenant_id <> 'tenant_retention' OR event_type <> 'evidence.orphan.deleted')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        store
+            .finish_evidence_orphan_purge(
+                &orphan_jobs[0],
+                EvidenceOrphanPurgeResult::Deleted(orphan_removed),
+            )
+            .await
+            .is_err()
+    );
+    let orphan_status: String = sqlx::query_scalar(
+        "SELECT status FROM xshield.evidence_orphan_purges
+         WHERE tenant_id = 'tenant_retention' AND site_id = 'site_retention' AND artifact_id = $1",
+    )
+    .bind(&orphan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(orphan_status, "pending");
+    assert_eq!(event_count(&pool, "evidence.orphan.deleted").await, 0);
+    sqlx::query("ALTER TABLE xshield.audit_outbox DROP CONSTRAINT test_orphan_completion_failure")
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop(orphan_lock);
+    let recovered = run_cli(&database, &root, 32);
+    assert!(recovered.status.success(), "{recovered:?}");
+    assert!(!orphan_path.exists());
+    assert_eq!(
+        event_count(&pool, "evidence.orphan.purge_requested").await,
+        1
+    );
+    assert_eq!(event_count(&pool, "evidence.orphan.deleted").await, 1);
+    let orphan_reason: String = sqlx::query_scalar(
+        "SELECT envelope->'payload'->>'reason_code' FROM xshield.audit_outbox
+         WHERE tenant_id = 'tenant_retention' AND event_type = 'evidence.orphan.deleted'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(orphan_reason, "EVIDENCE_ORPHAN_DELETE_ALREADY_ABSENT");
+    store
+        .finish_evidence_orphan_purge(
+            &orphan_jobs[0],
+            EvidenceOrphanPurgeResult::Deleted(orphan_removed),
+        )
+        .await
+        .unwrap();
+    assert_eq!(event_count(&pool, "evidence.orphan.deleted").await, 1);
+    // A cataloged object can sort before a real orphan; the cursor must still
+    // advance within the same bounded maintenance pass.
+    let later_orphan_id = format!("artifact_{}", Uuid::now_v7());
+    let later_orphan_path = root.join(format!("{later_orphan_id}.xev"));
+    fs::write(&later_orphan_path, b"later-orphan").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&later_orphan_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let paged = run_cli(&database, &root, 1);
+    assert!(paged.status.success(), "{paged:?}");
+    assert!(!later_orphan_path.exists());
+    assert_eq!(
+        event_count(&pool, "evidence.orphan.purge_requested").await,
+        2
+    );
+    assert_eq!(event_count(&pool, "evidence.orphan.deleted").await, 2);
     for retained in [&live, &foreign, &foreign_site] {
         assert!(root.join(&retained.manifest().storage.locator).exists());
         assert_eq!(
@@ -233,6 +345,7 @@ fn run_cli(database: &str, root: &Path, limit: u16) -> std::process::Output {
         .env("XSHIELD_EVIDENCE_ROOT", root)
         .env("XSHIELD_EVIDENCE_KEY_ID", "retention-r1")
         .env("XSHIELD_EVIDENCE_KEY_HEX", KEY)
+        .env("XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS", "1")
         .output()
         .unwrap()
 }

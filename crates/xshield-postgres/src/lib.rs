@@ -9,6 +9,7 @@ mod action_read;
 mod evidence_access_decision;
 mod evidence_access_request;
 mod evidence_catalog;
+mod evidence_orphan;
 mod evidence_retention;
 mod grant;
 mod grant_read;
@@ -33,6 +34,7 @@ pub use evidence_catalog::{
     CatalogArtifact, EvidenceCatalogArtifactQuery, EvidenceCatalogPage, EvidenceCatalogPublish,
     EvidenceCatalogQuery, EvidenceCatalogWriteOutcome,
 };
+pub use evidence_orphan::{EvidenceOrphanPurgeJob, EvidenceOrphanPurgeResult};
 pub use evidence_retention::{EvidencePurgeJob, EvidencePurgeResult};
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};

@@ -40,6 +40,6 @@
 
 ## RB-10 本地到期证据清理
 
-确认站点批准的保留计划、tenant/site、根目录与 key-id 对应关系，完成迁移 0015；需要案件 pin 的站点先等待该能力落地。停止共享该根目录的网关写入者，保留现有私有目录权限，使用秘密管理设施注入上述四个维护环境变量。执行 `cargo run -p xshield-worker --bin xshield-evidence-retain -- TENANT_ID SITE_ID 32`，检查 `selected/deleted/failed` 和 outbox 中的 `evidence.purge_requested`、`evidence.deleted`、`evidence.purge_failed`。每次最多 32 个，成功后按维护计划重复至 selected=0，再启动网关重新计量配额。
+确认站点批准的保留计划、tenant/site、根目录与 key-id 对应关系，完成迁移 0015/0016；需要案件 pin 的站点先等待该能力落地。停止共享该根目录的网关写入者，保留现有私有目录权限，使用秘密管理设施注入维护环境变量，可按现场计划设置 `XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS`（无效值会在任何删除前拒绝）。执行 `cargo run -p xshield-worker --bin xshield-evidence-retain -- TENANT_ID SITE_ID 32`，检查 `selected/deleted/failed`、`orphan_selected/orphan_deleted/orphan_failed` 和 outbox 中的 `evidence.purge_requested`、`evidence.deleted`、`evidence.purge_failed`、`evidence.orphan.purge_requested`、`evidence.orphan.deleted`、`evidence.orphan.purge_failed`。每次每类最多 32 个，成功后按维护计划重复至各项 selected=0，再启动网关重新计量配额。
 
-BUSY 表示目录仍有写入/维护所有者；TIMEOUT 或 COMPLETION_UNAVAILABLE 时保留签名 sidecar 并重试同一作用域，文件已经删除也可完成 tombstone。REJECTED 对象保留现场并调查 HMAC、摘要、路径或时钟差异，不手改 catalog/HMAC 来通过检查。此操作实际移除密文，不能靠 tombstone 还原内容；签名元数据不含正文。备份/副本按各自批准计划处置，不能把本地成功解释为所有副本已消失。
+BUSY 表示目录仍有写入/维护所有者；TIMEOUT 或 COMPLETION_UNAVAILABLE 时保留签名 sidecar/孤儿意图并重试同一作用域，文件已经删除也可完成 tombstone。REJECTED 对象保留现场并调查 HMAC、摘要、路径、mtime 或 sidecar 状态，不手改 catalog/HMAC 来通过检查。此操作实际移除密文，不能靠 tombstone 还原内容；签名元数据不含正文。备份/副本按各自批准计划处置，不能把本地成功解释为所有副本已消失。

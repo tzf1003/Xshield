@@ -86,20 +86,20 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 
 采集点位于完整 JSON 校验后、身份/资格提交和响应加密前，只转换证据副本。对象 kind=response_decoded、classification=RESTRICTED、fidelity=redacted，content_type=application/vnd.xshield.captured-json+json；密文内的版本 1 文档含 value、profile_revision、source_representation=application_json、source_bytes_observed、excluded_http_headers=true 和逐路径 exclusions（EVIDENCE_SECRET_EXCLUDED），被排除值为 null。manifest 的 bytes_observed/bytes_saved 是该文档长度，源实体长度在文档中；complete 只表示这一受限表示完整。单路径最长 1024 字节，排除清单最多 1024 项，序列化文档最多 4 MiB；重复键、超限或解析失败关闭正文释放。当前不采集 HTTP 头、请求、最终客户端封包、HTML 或流式实体；全站 full_protected 覆盖仍待后续采集点实现。
 
-启用采集必须配置 identity_store 和 `XSHIELD_DATABASE_URL`。部署 Unix 本地文件系统，预建独立私有证据根目录（0700），注入 `XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、独立 32 字节小写 hex 的 `XSHIELD_EVIDENCE_KEY_HEX` 及 `XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`（4259901 字节至 1 TiB）。根目录只允许一个网关写入者；同根控制面只读，共享文件系统部署需另行验证锁语义。启动时计入所有已有常规文件，包括孤儿对象，最多 100000 文件；每次写入先保守预留文档、最大 manifest 与认证侧车占用，失败也保留预留。进程内一个采集许可覆盖解析、加密、落盘、catalog 和 journal，忙时立即拒绝。到期立即禁止读取；已登记密文可按 12.8 的维护流程清理，重启网关后重新计算余量。自动孤儿回收仍待实现。
+启用采集必须配置 identity_store 和 `XSHIELD_DATABASE_URL`。部署 Unix 本地文件系统，预建独立私有证据根目录（0700），注入 `XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、独立 32 字节小写 hex 的 `XSHIELD_EVIDENCE_KEY_HEX` 及 `XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`（4259901 字节至 1 TiB）。根目录只允许一个网关写入者；同根控制面只读，共享文件系统部署需另行验证锁语义。启动时计入所有已有常规文件，包括孤儿对象，最多 100000 文件；每次写入先保守预留文档、最大 manifest 与认证侧车占用，失败也保留预留。进程内一个采集许可覆盖解析、加密、落盘、catalog 和 journal，忙时立即拒绝。到期立即禁止读取；已登记密文和超过宽限期的孤儿 `.xev` 可按 12.8 的维护流程清理，重启网关后重新计算余量。
 
 释放顺序为：加密对象及侧车耐久写入 → PostgreSQL catalog 与 evidence.cataloged outbox 原子提交 → 本地 evidence.captured 耐久审计 → 后续响应处理和正文释放。catalog 操作的整体等待受 identity_store.acquire_timeout_ms 约束；事务结果不确定时也保留独立 request_seq，避免终态复用序号。事件只含受限引用、版本和结果，正文不进入索引或普通日志；规则 confidence=null。EVIDENCE_CAPTURE_INVALID、EVIDENCE_CAPTURE_LIMIT_EXCEEDED、EVIDENCE_CAPTURE_CAPACITY_EXHAUSTED、EVIDENCE_CAPTURE_UNAVAILABLE 形成 request.aborted；必需 journal 失败关闭网关就绪状态并在重启恢复缺失终态。源站已返回和客户端已释放是独立事实，失败不触发业务重放。落盘后目录或审计失败可能保留有界对象，已登记对象沿用独立审批读取流程。
 
 `scripts/test_postgres.sh` 包含真实 HTTP→vault→catalog/outbox→journal 集成测试：原正文保持、秘密排除、业务攻击文本保留、超限关闭、数据库约束故障/锁等待超时关闭、事件引用及失败后重启。单测覆盖采集配置、目录单写者、在途许可、磁盘配额和重启孤儿计费。本阶段复用 workspace 的 xshield-evidence（Apache-2.0）及既有 SQLx/Tokio，仅启用 Tokio time；第三方依赖版本与锁文件更新策略沿用 workspace。
 
-## 12.8 已实现：到期密文维护与故障重试
+## 12.8 已实现：到期密文、孤儿维护与故障重试
 
-迁移 `0015_m3_evidence_retention.sql` 为 catalog 增加删除意图/完成事件引用与有界检索索引。`xshield-evidence-retain TENANT_ID SITE_ID BATCH_LIMIT` 是一次性维护命令，批量为 1–32；复用 `XSHIELD_DATABASE_URL`、`XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_KEY_HEX`。根目录须为 Unix 私有本地目录，与该 catalog/key 对应的唯一活动存储位置。命令取得与网关写入者相同的排他目录锁，需先停对应网关；控制面到期检查继续有效。具体步骤见 RB-10。
+迁移 `0015_m3_evidence_retention.sql` 为 catalog 增加删除意图/完成事件引用与有界检索索引，`0016_m3_evidence_orphan_retention.sql` 为无 catalog 的本地孤儿观察增加意图表。`xshield-evidence-retain TENANT_ID SITE_ID BATCH_LIMIT` 是一次性维护命令，批量为 1–32；复用 `XSHIELD_DATABASE_URL`、`XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_KEY_HEX`，可用 `XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS` 调整 1 秒至 30 天的孤儿宽限期（默认 1 小时）。根目录须为 Unix 私有本地目录，与该 catalog/key 对应的唯一活动存储位置。命令取得与网关写入者相同的排他目录锁，需先停对应网关；控制面到期检查继续有效。具体步骤见 RB-10。
 
 流程：按完整 tenant/site/key 与数据库时钟选择 active 到期行 → 行锁内原子提交 `evidence.purge_requested` outbox 与意图引用 → 本地重验 manifest HMAC、全部 catalog 字段、作用域、key、期限、私有常规文件与密文摘要 → 只删除精确 `.xev` 并同步目录 → 重验 catalog 快照，原子提交 `status=deleted`、`deleted_at`、完成引用和 `evidence.deleted` outbox。读取已在过期时关闭，不依赖本流程执行及时性。删除不解密对象，最多读取单对象 64 MiB 加封包开销；一次只有一个对象在途。
 
-既有意图重试复用事件 ID。删除后崩溃或完成事务失败时，下一次命令用仍在的签名 sidecar 证明同一对象，再同步目录并以 `EVIDENCE_DELETE_ALREADY_ABSENT` 完成；实际首次删除使用 `EVIDENCE_DELETED`。签名、摘要、期限或路径偏差保持文件并提交 `EVIDENCE_PURGE_REJECTED`；存储失败提交 `EVIDENCE_PURGE_UNAVAILABLE`，失败行保持可重试。意图/终态入库失败直接停止，CLI 输出稳定原因码且非零退出；提交结果不确定时保留意图供重试。SQL 单语句/锁等待限 5 秒，每次数据库操作整体限 15 秒。文件操作依赖健康的本地文件系统，运维须监控进程运行时间与存储故障。
+既有意图重试复用事件 ID。删除后崩溃或完成事务失败时，下一次命令用仍在的签名 sidecar 证明同一对象，再同步目录并以 `EVIDENCE_DELETE_ALREADY_ABSENT` 完成；实际首次删除使用 `EVIDENCE_DELETED`。孤儿流程只接受精确 `.xev`、稳定的文件长度/mtime 和专用根目录；完整 sidecar 集合先通过 manifest HMAC、作用域/key，提交删除意图后再重验密文摘要；没有 sidecar 的对象或完整有效集合才会进入删除意图。catalog 行按 artifact 全局优先于孤儿观察，partial/损坏 sidecar（含符号链接）保留调查。孤儿删除以 `evidence.orphan.purge_requested` 和 `evidence.orphan.deleted` 记录，数据库意图在物理删除前提交；进程中断后从 pending 意图恢复，已删文件以 `EVIDENCE_ORPHAN_DELETE_ALREADY_ABSENT` 收敛。签名、摘要、期限、路径或 mtime 偏差保持文件并提交 `EVIDENCE_ORPHAN_PURGE_REJECTED`；孤儿存储失败提交 `EVIDENCE_ORPHAN_PURGE_UNAVAILABLE`，失败行保持可重试。意图/终态入库失败直接停止，CLI 输出稳定原因码且非零退出；提交结果不确定时保留意图供重试。SQL 单语句/锁等待限 5 秒，每次数据库操作整体限 15 秒。文件操作依赖健康的本地文件系统，运维须监控进程运行时间与存储故障。
 
-保留 catalog tombstone、manifest JSON 与 HMAC 作为恢复和调查元数据；它们继续占用网关的 100000 文件上限，达到上限前需安排元数据保留功能迭代。当前清理不涵盖孤儿对象、远端副本、备份与已导出内容。案件或原文访问批准不延长对象期限；需要案件 pin 的站点在该独立能力完成前不启用此删除流程。损坏对象需隔离调查，若连续失败填满批次，先处理这些对象再继续维护。复用既有 UUID/SQLx 和内部 Apache-2.0 crates，未引入新第三方依赖；更新策略沿用 workspace 锁文件。
+保留 catalog tombstone、manifest JSON/HMAC 和孤儿意图表作为恢复和调查元数据；只有本地目录中的文件继续占用网关的 100000 文件上限，达到上限前需安排元数据保留功能迭代。当前清理不涵盖远端副本、备份与已导出内容。案件或原文访问批准不延长对象期限；需要案件 pin 的站点在该独立能力完成前不启用此删除流程。损坏对象需隔离调查，若连续失败填满批次，先处理这些对象再继续维护。复用既有 UUID/SQLx 和内部 Apache-2.0 crates，未引入新第三方依赖；更新策略沿用 workspace 锁文件。
 
-真实 PostgreSQL 与 CLI 测试覆盖批量边界、租户/站点/key 隔离、目录锁、意图和完成 outbox 故障回滚、删除后重启、幂等完成、损坏密文保留与重试、篡改 catalog 提前期限拒绝；库单测覆盖未到期、错误密钥、错误作用域、符号链接、HMAC 与摘要异常。
+真实 PostgreSQL 与 CLI 测试覆盖批量边界、租户/站点/key 隔离、目录锁、意图和完成 outbox 故障回滚、删除后重启、幂等完成、损坏密文保留与重试、孤儿宽限/审计/删除、篡改 catalog 提前期限拒绝；库单测覆盖未到期、错误密钥、错误作用域、符号链接、HMAC、摘要和 partial-sidecar 保留。

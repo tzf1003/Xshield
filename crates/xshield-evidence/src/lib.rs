@@ -19,6 +19,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use xshield_core::domain::{ArtifactId, RequestId, SiteId, TenantId};
@@ -36,6 +37,9 @@ const CONTENT_TYPE_BYTES_MAX: usize = 256;
 const PARENT_REFS_MAX: usize = 64;
 const MANIFEST_BYTES_MAX: u64 = 64 * 1024;
 const MAX_SINGLE_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SINGLE_ENVELOPE_BYTES: u64 =
+    MAX_SINGLE_ARTIFACT_BYTES as u64 + 1 + NONCE_BYTES as u64 + TAG_BYTES as u64;
+const MAX_VAULT_FILES: usize = 100_000;
 const MAX_RETENTION_DAYS: u16 = 3_650;
 type EnvelopeParts<'a> = (&'a [u8; NONCE_BYTES], &'a [u8; TAG_BYTES], &'a [u8]);
 
@@ -276,6 +280,68 @@ pub enum EvidencePurgeOutcome {
     AlreadyAbsent,
 }
 
+/// A bounded local observation of a ciphertext with no catalog row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceOrphanCandidate {
+    artifact_id: String,
+    authenticated_manifest: bool,
+    observed_bytes: u64,
+    observed_modified_seconds: u64,
+    observed_modified_nanos: u32,
+}
+
+impl EvidenceOrphanCandidate {
+    /// Returns the artifact identity encoded by the opaque filename.
+    #[must_use]
+    pub fn artifact_id(&self) -> &str {
+        &self.artifact_id
+    }
+
+    /// Returns whether both sidecars were authenticated at observation time.
+    #[must_use]
+    pub const fn authenticated_manifest(&self) -> bool {
+        self.authenticated_manifest
+    }
+
+    /// Returns the observed ciphertext byte length.
+    #[must_use]
+    pub const fn observed_bytes(&self) -> u64 {
+        self.observed_bytes
+    }
+
+    /// Returns the observed modification timestamp as Unix seconds and nanos.
+    #[must_use]
+    pub const fn observed_modified(&self) -> (u64, u32) {
+        (self.observed_modified_seconds, self.observed_modified_nanos)
+    }
+
+    /// Reconstructs a candidate from a durable database observation.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::InvalidWrite`] for malformed identity or
+    /// impossible byte/time values.
+    pub fn from_observation(
+        artifact_id: impl Into<String>,
+        authenticated_manifest: bool,
+        observed_bytes: u64,
+        observed_modified_seconds: u64,
+        observed_modified_nanos: u32,
+    ) -> Result<Self, EvidenceError> {
+        let artifact_id = artifact_id.into();
+        validate_artifact_id(&artifact_id).map_err(|_| EvidenceError::InvalidWrite)?;
+        if observed_bytes > MAX_SINGLE_ENVELOPE_BYTES || observed_modified_nanos >= 1_000_000_000 {
+            return Err(EvidenceError::InvalidWrite);
+        }
+        Ok(Self {
+            artifact_id,
+            authenticated_manifest,
+            observed_bytes,
+            observed_modified_seconds,
+            observed_modified_nanos,
+        })
+    }
+}
+
 impl LocalEvidenceVault {
     /// Opens an existing private vault directory.
     ///
@@ -438,6 +504,212 @@ impl LocalEvidenceVault {
         expected: &EvidenceManifest,
     ) -> Result<EvidencePurgeOutcome, EvidenceError> {
         self.purge_expired_at(tenant_id, site_id, expected, Utc::now())
+    }
+
+    /// Finds old ciphertexts which have no catalog entry and are safe to hand
+    /// to the durable retention adapter. A complete, authenticated sidecar set
+    /// is accepted; partial or malformed sidecars are deliberately skipped.
+    ///
+    /// The root must already be exclusively locked by the caller. The scan is
+    /// bounded by the configured file ceiling and the requested batch size.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError`] for an unsafe root or an invalid bound.
+    pub fn list_orphan_candidates(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        grace: Duration,
+        limit: u16,
+    ) -> Result<Vec<EvidenceOrphanCandidate>, EvidenceError> {
+        self.list_orphan_candidates_after(tenant_id, site_id, grace, limit, None)
+    }
+
+    /// Finds the next lexical page of old ciphertexts after an artifact ID.
+    /// The cursor lets the database adapter skip cataloged files without
+    /// starving later local orphans behind a bounded page.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError`] for an unsafe root, invalid bound, or cursor.
+    pub fn list_orphan_candidates_after(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        grace: Duration,
+        limit: u16,
+        after: Option<&str>,
+    ) -> Result<Vec<EvidenceOrphanCandidate>, EvidenceError> {
+        if !(1..=32).contains(&limit) || grace.is_zero() || grace > Duration::from_hours(720) {
+            return Err(EvidenceError::InvalidConfig);
+        }
+        if after.is_some_and(|cursor| validate_artifact_id(cursor).is_err()) {
+            return Err(EvidenceError::InvalidConfig);
+        }
+        validate_private_directory(&self.config.root)?;
+        let now = SystemTime::now();
+        let mut names = Vec::new();
+        let mut file_count = 0usize;
+        for entry in fs::read_dir(&self.config.root)? {
+            let entry = entry?;
+            file_count = file_count.checked_add(1).ok_or(EvidenceError::UnsafePath)?;
+            if file_count > MAX_VAULT_FILES {
+                return Err(EvidenceError::UnsafePath);
+            }
+            let metadata = entry.path().symlink_metadata()?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(EvidenceError::UnsafePath);
+            }
+            if metadata.len() > self.max_envelope_bytes() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some((artifact_id, extension)) = name.rsplit_once('.') else {
+                continue;
+            };
+            if extension.as_bytes() == b"xev" && !artifact_id.is_empty() {
+                names.push((name, metadata));
+            }
+        }
+        names.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut candidates = Vec::new();
+        for (name, metadata) in names {
+            if candidates.len() == usize::from(limit) {
+                break;
+            }
+            let modified = metadata.modified().map_err(EvidenceError::Io)?;
+            if now.duration_since(modified).unwrap_or_default() < grace {
+                continue;
+            }
+            let artifact_id = name.strip_suffix(".xev").unwrap_or_default();
+            if validate_artifact_id(artifact_id).is_err() {
+                continue;
+            }
+            if after.is_some_and(|cursor| artifact_id <= cursor) {
+                continue;
+            }
+            let has_manifest = sidecar_present(
+                &self
+                    .config
+                    .root
+                    .join(format!("{artifact_id}.manifest.json")),
+            )?;
+            let has_hmac = sidecar_present(
+                &self
+                    .config
+                    .root
+                    .join(format!("{artifact_id}.manifest.hmac")),
+            )?;
+            let authenticated_manifest = match (has_manifest, has_hmac) {
+                (false, false) => false,
+                (true, true) => {
+                    let Ok(manifest) = self.load_authenticated_manifest(artifact_id) else {
+                        continue;
+                    };
+                    if validate_manifest_fields(
+                        &manifest,
+                        tenant_id,
+                        site_id,
+                        artifact_id,
+                        &self.config.key_id,
+                    )
+                    .is_err()
+                    {
+                        continue;
+                    }
+                    true
+                }
+                _ => continue,
+            };
+            let modified = modified
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| EvidenceError::UnsafePath)?;
+            candidates.push(EvidenceOrphanCandidate {
+                artifact_id: artifact_id.to_owned(),
+                authenticated_manifest,
+                observed_bytes: metadata.len(),
+                observed_modified_seconds: modified.as_secs(),
+                observed_modified_nanos: modified.subsec_nanos(),
+            });
+        }
+        Ok(candidates)
+    }
+
+    /// Removes one previously observed orphan ciphertext after rechecking its
+    /// path, size, timestamp and optional authenticated sidecars.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError`] when the file was replaced, sidecars changed,
+    /// or the local storage is unsafe. An absent ciphertext is idempotent.
+    pub fn purge_orphan(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        candidate: &EvidenceOrphanCandidate,
+    ) -> Result<EvidencePurgeOutcome, EvidenceError> {
+        validate_private_directory(&self.config.root)?;
+        let path = self
+            .config
+            .root
+            .join(format!("{}.xev", candidate.artifact_id));
+        let metadata = match path.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(EvidencePurgeOutcome::AlreadyAbsent);
+            }
+            Err(error) => return Err(EvidenceError::Io(error)),
+        };
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != candidate.observed_bytes
+        {
+            return Err(EvidenceError::UnsafePath);
+        }
+        #[cfg(unix)]
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(EvidenceError::UnsafePermissions);
+        }
+        let modified = metadata
+            .modified()
+            .map_err(EvidenceError::Io)?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| EvidenceError::UnsafePath)?;
+        if (modified.as_secs(), modified.subsec_nanos()) != candidate.observed_modified() {
+            return Err(EvidenceError::UnsafePath);
+        }
+        if candidate.authenticated_manifest {
+            let manifest = self.load_authenticated_manifest(&candidate.artifact_id)?;
+            validate_manifest_fields(
+                &manifest,
+                tenant_id,
+                site_id,
+                &candidate.artifact_id,
+                &self.config.key_id,
+            )?;
+            let envelope = read_private_bounded(&path, self.max_envelope_bytes())?;
+            if lower_hex(&sha256(&envelope)) != manifest.integrity.digest {
+                return Err(EvidenceError::CorruptEvidence);
+            }
+        } else {
+            for suffix in ["manifest.json", "manifest.hmac"] {
+                if sidecar_present(
+                    &self
+                        .config
+                        .root
+                        .join(format!("{}.{}", candidate.artifact_id, suffix)),
+                )? {
+                    return Err(EvidenceError::CorruptEvidence);
+                }
+            }
+        }
+        fs::remove_file(path)?;
+        sync_directory(&self.config.root)?;
+        Ok(EvidencePurgeOutcome::Removed)
+    }
+
+    fn max_envelope_bytes(&self) -> u64 {
+        self.config.max_artifact_bytes as u64 + 1 + NONCE_BYTES as u64 + TAG_BYTES as u64
     }
 
     fn purge_expired_at(
@@ -782,6 +1054,14 @@ fn read_private_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Evidence
     Ok(bytes)
 }
 
+fn sidecar_present(path: &Path) -> Result<bool, EvidenceError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(EvidenceError::Io(error)),
+    }
+}
+
 fn validate_private_directory(path: &Path) -> Result<(), EvidenceError> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_dir() {
@@ -931,11 +1211,11 @@ impl From<openssl::error::ErrorStack> for EvidenceError {
 #[cfg(test)]
 mod tests {
     use super::{
-        EvidenceClassification, EvidenceError, EvidenceFidelity, EvidenceKey, EvidenceVaultConfig,
-        EvidenceWrite, LocalEvidenceVault, MAX_SINGLE_ARTIFACT_BYTES,
+        EvidenceClassification, EvidenceError, EvidenceFidelity, EvidenceKey, EvidencePurgeOutcome,
+        EvidenceVaultConfig, EvidenceWrite, LocalEvidenceVault, MAX_SINGLE_ARTIFACT_BYTES,
     };
     use chrono::{TimeDelta, Utc};
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, time::Duration};
     use uuid::Uuid;
     use xshield_core::domain::{RequestId, SiteId, TenantId};
 
@@ -1166,6 +1446,85 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn orphan_scan_is_bounded_and_keeps_partial_sidecars() {
+        let root = private_temp_directory();
+        let vault = LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(&root, "evidence-key-r1", 1024, 30).unwrap(),
+            EvidenceKey::from_hex(KEY).unwrap(),
+        )
+        .unwrap();
+        let tenant = TenantId::parse("tenant_orphan").unwrap();
+        let site = SiteId::parse("site_orphan").unwrap();
+        let request = RequestId::parse(format!("req_{}", Uuid::now_v7())).unwrap();
+        let complete = vault
+            .write(&EvidenceWrite {
+                tenant_id: &tenant,
+                site_id: &site,
+                request_id: &request,
+                kind: "response_decoded",
+                content_type: "application/json",
+                fidelity: EvidenceFidelity::Redacted,
+                classification: EvidenceClassification::Restricted,
+                parent_refs: &[],
+                expires_at: Utc::now() + TimeDelta::hours(1),
+                plaintext: b"{}",
+            })
+            .unwrap();
+        let raw_id = format!("artifact_{}", Uuid::now_v7());
+        fs::write(root.join(format!("{raw_id}.xev")), b"orphan").unwrap();
+        let partial_id = format!("artifact_{}", Uuid::now_v7());
+        fs::write(root.join(format!("{partial_id}.xev")), b"partial").unwrap();
+        fs::write(root.join(format!("{partial_id}.manifest.json")), b"partial").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [
+                root.join(format!("{raw_id}.xev")),
+                root.join(format!("{partial_id}.xev")),
+                root.join(format!("{partial_id}.manifest.json")),
+            ] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1_100));
+        let candidates = vault
+            .list_orphan_candidates(&tenant, &site, Duration::from_secs(1), 2)
+            .unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.artifact_id() == raw_id)
+        );
+        assert!(candidates.iter().any(|candidate| {
+            candidate.artifact_id() == complete.manifest().artifact_id
+                && candidate.authenticated_manifest()
+        }));
+        let raw = candidates
+            .iter()
+            .find(|candidate| candidate.artifact_id() == raw_id)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                root.join("missing-manifest"),
+                root.join(format!("{raw_id}.manifest.json")),
+            )
+            .unwrap();
+            assert!(vault.purge_orphan(&tenant, &site, raw).is_err());
+            fs::remove_file(root.join(format!("{raw_id}.manifest.json"))).unwrap();
+        }
+        assert_eq!(
+            vault.purge_orphan(&tenant, &site, raw).unwrap(),
+            EvidencePurgeOutcome::Removed
+        );
+        assert!(!root.join(format!("{raw_id}.xev")).exists());
+        assert!(root.join(format!("{partial_id}.xev")).exists());
+        assert!(root.join(format!("{partial_id}.manifest.json")).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
