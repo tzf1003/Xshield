@@ -477,7 +477,7 @@ pub(crate) fn catalog_artifact(row: &PgRow) -> Result<CatalogArtifact, StoreErro
         expires_at: expires_at.to_rfc3339_opts(SecondsFormat::Millis, true),
     };
     manifest
-        .validate_catalog_shape(recorded_at)
+        .validate_catalog_structure()
         .map_err(|_| StoreError::CorruptData("artifact_manifest"))?;
     let artifact_id = ArtifactId::parse(&manifest.artifact_id)
         .map_err(|_| StoreError::CorruptData("artifact_id"))?;

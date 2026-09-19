@@ -220,15 +220,15 @@ impl VerifiedEvidenceManifest {
 }
 
 impl EvidenceManifest {
-    /// Validates catalog metadata decoded from durable storage.
+    /// Validates catalog fields while leaving the current expiry clock to the caller.
     ///
-    /// This checks structure only and does not authenticate the manifest or
-    /// authorize content access.
+    /// Retention workers use this for an already-expired row; content reads and
+    /// publication must still use [`Self::validate_catalog_shape`].
     ///
     /// # Errors
-    /// Returns [`EvidenceError`] when a field violates the manifest contract or
-    /// the entry was already expired when cataloged.
-    pub fn validate_catalog_shape(&self, recorded_at: DateTime<Utc>) -> Result<(), EvidenceError> {
+    /// Returns [`EvidenceError`] when typed identity, storage, or manifest
+    /// invariants are malformed.
+    pub fn validate_catalog_structure(&self) -> Result<(), EvidenceError> {
         let tenant_id =
             TenantId::parse(&self.tenant_id).map_err(|_| EvidenceError::CorruptEvidence)?;
         let site_id = SiteId::parse(&self.site_id).map_err(|_| EvidenceError::CorruptEvidence)?;
@@ -238,14 +238,26 @@ impl EvidenceManifest {
             .key_ref
             .as_deref()
             .ok_or(EvidenceError::CorruptEvidence)?;
-        validate_manifest(
-            self,
-            &tenant_id,
-            &site_id,
-            &self.artifact_id,
-            key_id,
-            recorded_at,
-        )
+        validate_manifest_fields(self, &tenant_id, &site_id, &self.artifact_id, key_id).map(|_| ())
+    }
+
+    /// Validates catalog metadata decoded from durable storage.
+    ///
+    /// This checks structure only and does not authenticate the manifest or
+    /// authorize content access.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError`] when a field violates the manifest contract or
+    /// the entry was already expired when cataloged.
+    pub fn validate_catalog_shape(&self, recorded_at: DateTime<Utc>) -> Result<(), EvidenceError> {
+        self.validate_catalog_structure()?;
+        let expires_at = DateTime::parse_from_rfc3339(&self.expires_at)
+            .map_err(|_| EvidenceError::CorruptEvidence)?
+            .with_timezone(&Utc);
+        if expires_at <= recorded_at {
+            return Err(EvidenceError::NotAvailable);
+        }
+        Ok(())
     }
 }
 
@@ -253,6 +265,15 @@ impl EvidenceManifest {
 pub struct LocalEvidenceVault {
     config: EvidenceVaultConfig,
     root_key: EvidenceKey,
+}
+
+/// Durable result of removing an expired ciphertext while retaining its signed metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvidencePurgeOutcome {
+    /// The authenticated ciphertext was removed and the directory synced.
+    Removed,
+    /// Ciphertext was already absent; authenticated metadata and directory sync succeeded.
+    AlreadyAbsent,
 }
 
 impl LocalEvidenceVault {
@@ -343,7 +364,7 @@ impl LocalEvidenceVault {
         Ok(VerifiedEvidenceManifest(manifest))
     }
 
-    /// Loads and validates one scoped manifest without reading plaintext content.
+    /// Loads and validates one scoped manifest while leaving plaintext unread.
     ///
     /// # Errors
     /// Returns [`EvidenceError::NotAvailable`] uniformly for unknown, expired, or
@@ -364,6 +385,22 @@ impl LocalEvidenceVault {
         artifact_id: &str,
         now: DateTime<Utc>,
     ) -> Result<VerifiedEvidenceManifest, EvidenceError> {
+        let manifest = self.load_authenticated_manifest(artifact_id)?;
+        validate_manifest(
+            &manifest,
+            tenant_id,
+            site_id,
+            artifact_id,
+            &self.config.key_id,
+            now,
+        )?;
+        Ok(VerifiedEvidenceManifest(manifest))
+    }
+
+    fn load_authenticated_manifest(
+        &self,
+        artifact_id: &str,
+    ) -> Result<EvidenceManifest, EvidenceError> {
         validate_artifact_id(artifact_id)?;
         let filename = format!("{artifact_id}.manifest.json");
         let bytes = read_private_bounded(&self.config.root.join(filename), MANIFEST_BYTES_MAX)
@@ -380,17 +417,70 @@ impl LocalEvidenceVault {
         if authentication.len() != expected.len() || !memcmp::eq(&authentication, &expected) {
             return Err(EvidenceError::CorruptEvidence);
         }
-        let manifest: EvidenceManifest =
-            serde_json::from_slice(&bytes).map_err(|_| EvidenceError::CorruptEvidence)?;
-        validate_manifest(
+        serde_json::from_slice(&bytes).map_err(|_| EvidenceError::CorruptEvidence)
+    }
+
+    /// Removes only expired ciphertext matching the exact catalog manifest.
+    ///
+    /// The caller must hold the exclusive vault-directory lock and durably audit
+    /// deletion intent before calling. Signed sidecars remain for crash retries;
+    /// this does not erase backups, exported copies, or catalog metadata.
+    /// Reads at most one configured-size ciphertext; never decrypts content.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError`] on unexpired, mismatched, unsafe or corrupt
+    /// evidence, or failed removal/sync. A sync failure may follow removal;
+    /// retry with the same expected manifest before declaring completion.
+    pub fn purge_expired(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        expected: &EvidenceManifest,
+    ) -> Result<EvidencePurgeOutcome, EvidenceError> {
+        self.purge_expired_at(tenant_id, site_id, expected, Utc::now())
+    }
+
+    fn purge_expired_at(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        expected: &EvidenceManifest,
+        now: DateTime<Utc>,
+    ) -> Result<EvidencePurgeOutcome, EvidenceError> {
+        validate_private_directory(&self.config.root)?;
+        let manifest = self.load_authenticated_manifest(&expected.artifact_id)?;
+        let expires_at = validate_manifest_fields(
             &manifest,
             tenant_id,
             site_id,
-            artifact_id,
+            &expected.artifact_id,
             &self.config.key_id,
-            now,
         )?;
-        Ok(VerifiedEvidenceManifest(manifest))
+        if &manifest != expected {
+            return Err(EvidenceError::CorruptEvidence);
+        }
+        if expires_at > now {
+            return Err(EvidenceError::NotAvailable);
+        }
+        let path = self.config.root.join(&manifest.storage.locator);
+        let outcome = match read_private_bounded(
+            &path,
+            self.config.max_artifact_bytes as u64 + 1 + NONCE_BYTES as u64 + TAG_BYTES as u64,
+        ) {
+            Ok(envelope) => {
+                if lower_hex(&sha256(&envelope)) != manifest.integrity.digest {
+                    return Err(EvidenceError::CorruptEvidence);
+                }
+                fs::remove_file(path)?;
+                EvidencePurgeOutcome::Removed
+            }
+            Err(EvidenceError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                EvidencePurgeOutcome::AlreadyAbsent
+            }
+            Err(error) => return Err(error),
+        };
+        sync_directory(&self.config.root)?;
+        Ok(outcome)
     }
 
     /// Authenticates and decrypts one unexpired object in the supplied scope.
@@ -489,13 +579,24 @@ fn validate_manifest(
     key_id: &str,
     now: DateTime<Utc>,
 ) -> Result<(), EvidenceError> {
+    let expires_at = validate_manifest_fields(manifest, tenant_id, site_id, artifact_id, key_id)?;
+    if expires_at <= now {
+        return Err(EvidenceError::NotAvailable);
+    }
+    Ok(())
+}
+
+fn validate_manifest_fields(
+    manifest: &EvidenceManifest,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    artifact_id: &str,
+    key_id: &str,
+) -> Result<DateTime<Utc>, EvidenceError> {
     let expires_at = DateTime::parse_from_rfc3339(&manifest.expires_at)
         .map_err(|_| EvidenceError::CorruptEvidence)?
         .with_timezone(&Utc);
-    if manifest.tenant_id != tenant_id.as_str()
-        || manifest.site_id != site_id.as_str()
-        || expires_at <= now
-    {
+    if manifest.tenant_id != tenant_id.as_str() || manifest.site_id != site_id.as_str() {
         return Err(EvidenceError::NotAvailable);
     }
     let unique_parents = manifest.parent_refs.iter().collect::<BTreeSet<_>>();
@@ -528,7 +629,7 @@ fn validate_manifest(
     {
         return Err(EvidenceError::CorruptEvidence);
     }
-    Ok(())
+    Ok(expires_at)
 }
 
 fn aad(
@@ -958,6 +1059,113 @@ mod tests {
             }),
             Err(EvidenceError::InvalidWrite)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn purge_requires_exact_authenticated_expiry_and_retries_after_removal() {
+        let root = private_temp_directory();
+        let vault = LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(&root, "evidence-key-r1", 1024, 30).unwrap(),
+            EvidenceKey::from_hex(KEY).unwrap(),
+        )
+        .unwrap();
+        let tenant = TenantId::parse("tenant_purge").unwrap();
+        let site = SiteId::parse("site_purge").unwrap();
+        let request = RequestId::parse(format!("req_{}", Uuid::now_v7())).unwrap();
+        let expires = Utc::now() + TimeDelta::minutes(5);
+        let verified = vault
+            .write(&EvidenceWrite {
+                tenant_id: &tenant,
+                site_id: &site,
+                request_id: &request,
+                kind: "response_decoded",
+                content_type: "application/json",
+                fidelity: EvidenceFidelity::Redacted,
+                classification: EvidenceClassification::Restricted,
+                parent_refs: &[],
+                expires_at: expires,
+                plaintext: b"{}",
+            })
+            .unwrap();
+        let manifest = verified.manifest();
+        let after = expires + TimeDelta::seconds(1);
+        let path = root.join(&manifest.storage.locator);
+        let original = fs::read(&path).unwrap();
+        assert!(vault.purge_expired(&tenant, &site, manifest).is_err());
+        assert!(
+            vault
+                .purge_expired_at(
+                    &TenantId::parse("tenant_other").unwrap(),
+                    &site,
+                    manifest,
+                    after
+                )
+                .is_err()
+        );
+        let wrong_key = LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(&root, "evidence-key-r1", 1024, 30).unwrap(),
+            EvidenceKey::from_hex(&"22".repeat(32)).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            wrong_key
+                .purge_expired_at(&tenant, &site, manifest, after)
+                .is_err()
+        );
+        let mut changed = manifest.clone();
+        changed.expires_at = Utc::now().to_rfc3339();
+        assert!(
+            vault
+                .purge_expired_at(&tenant, &site, &changed, after)
+                .is_err()
+        );
+        fs::write(&path, b"corrupt").unwrap();
+        assert!(matches!(
+            vault.purge_expired_at(&tenant, &site, manifest, after),
+            Err(EvidenceError::CorruptEvidence)
+        ));
+        assert!(path.exists());
+        fs::write(&path, &original).unwrap();
+        #[cfg(unix)]
+        {
+            let backup = root.join("backup.xev");
+            fs::rename(&path, &backup).unwrap();
+            std::os::unix::fs::symlink(&backup, &path).unwrap();
+            assert!(
+                vault
+                    .purge_expired_at(&tenant, &site, manifest, after)
+                    .is_err()
+            );
+            assert_eq!(fs::read(&backup).unwrap(), original);
+            fs::remove_file(&path).unwrap();
+            fs::rename(&backup, &path).unwrap();
+        }
+        assert_eq!(
+            vault
+                .purge_expired_at(&tenant, &site, manifest, after)
+                .unwrap(),
+            super::EvidencePurgeOutcome::Removed
+        );
+        assert!(!path.exists());
+        assert_eq!(
+            vault
+                .purge_expired_at(&tenant, &site, manifest, after)
+                .unwrap(),
+            super::EvidencePurgeOutcome::AlreadyAbsent
+        );
+        fs::write(
+            root.join(format!("{}.manifest.hmac", manifest.artifact_id)),
+            [0; 32],
+        )
+        .unwrap();
+        assert!(
+            vault
+                .purge_expired_at(&tenant, &site, manifest, after)
+                .is_err()
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
         fs::remove_dir_all(root).unwrap();
     }
 

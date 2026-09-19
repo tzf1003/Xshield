@@ -3274,10 +3274,13 @@ dependencies = [
  "clickhouse",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "uuid",
  "xshield-audit",
  "xshield-core",
+ "xshield-evidence",
+ "xshield-postgres",
  "zeroize",
 ]
 

@@ -37,3 +37,9 @@
 ## RB-09 备份恢复
 
 恢复状态/证据/密钥引用 → 验证签名段 → 重放 outbox/journal 至索引 → 过期/撤销检查 → 处理未完成请求 → 受控 canary → 恢复流量。恢复时间与数据缺口实测记录，不以备份文件存在判定恢复成功。
+
+## RB-10 本地到期证据清理
+
+确认站点批准的保留计划、tenant/site、根目录与 key-id 对应关系，完成迁移 0015；需要案件 pin 的站点先等待该能力落地。停止共享该根目录的网关写入者，保留现有私有目录权限，使用秘密管理设施注入上述四个维护环境变量。执行 `cargo run -p xshield-worker --bin xshield-evidence-retain -- TENANT_ID SITE_ID 32`，检查 `selected/deleted/failed` 和 outbox 中的 `evidence.purge_requested`、`evidence.deleted`、`evidence.purge_failed`。每次最多 32 个，成功后按维护计划重复至 selected=0，再启动网关重新计量配额。
+
+BUSY 表示目录仍有写入/维护所有者；TIMEOUT 或 COMPLETION_UNAVAILABLE 时保留签名 sidecar 并重试同一作用域，文件已经删除也可完成 tombstone。REJECTED 对象保留现场并调查 HMAC、摘要、路径或时钟差异，不手改 catalog/HMAC 来通过检查。此操作实际移除密文，不能靠 tombstone 还原内容；签名元数据不含正文。备份/副本按各自批准计划处置，不能把本地成功解释为所有副本已消失。

@@ -26,6 +26,8 @@ Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签�
 
 附带 SQL 是可审查草案，生产前需迁移测试、并发隔离和索引验证。RLS 可作防御纵深，但应用仍必须使用完整 tenant/site 作用域；连接池中租户会话设置使用事务局部机制，避免连接复用串域。
 
+本地证据到期清理使用两段短事务：先按 tenant/site/key 和数据库当前时间锁定候选，将删除意图与 outbox 原子提交；文件系统认证、删除与目录同步后，再锁定并比较相同 manifest/意图，提交 catalog tombstone 与完成 outbox。数据库事务不跨文件操作持锁；两事务之间由本地根目录排他锁约束写入者。中断恢复依赖耐久意图和保留的签名 manifest，不把数据库提交与文件删除描述为一个原子事务。
+
 ## 18.4 协议规则
 
 外部 API 与 audit event 含 schema_version。未知 critical enum 或版本拒绝；可扩展 metadata 只能保存非授权数据。金额、资源 ID、期限等使用明确类型，不靠浮点或 JS 自动类型转换。
