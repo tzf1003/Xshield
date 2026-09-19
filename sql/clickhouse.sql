@@ -57,22 +57,16 @@ SELECT * FROM xshield.audit_events;
 -- APIs query these views so retries collapse by event_id and an expired row is
 -- hidden before asynchronous TTL merges physically remove it. The earliest
 -- deadline wins, so replay after a policy change cannot extend visibility.
-CREATE VIEW IF NOT EXISTS xshield.audit_events_active AS
+-- Ordinary views use CREATE OR REPLACE for repeatable definition upgrades.
+-- The deployment identity retains source SELECT; readers receive only view SELECT.
+CREATE OR REPLACE VIEW xshield.audit_events_active
+DEFINER = CURRENT_USER SQL SECURITY DEFINER AS
 SELECT * FROM (
  SELECT * FROM xshield.audit_events
  ORDER BY retention_expires_at,event_id LIMIT 1 BY event_id
 ) WHERE retention_expires_at > now64(6);
-ALTER TABLE xshield.audit_events_active MODIFY QUERY
-SELECT * FROM (
- SELECT * FROM xshield.audit_events
- ORDER BY retention_expires_at,event_id LIMIT 1 BY event_id
-) WHERE retention_expires_at > now64(6);
-CREATE VIEW IF NOT EXISTS xshield.events_by_time_active AS
-SELECT * FROM (
- SELECT * FROM xshield.events_by_time
- ORDER BY retention_expires_at,event_id LIMIT 1 BY event_id
-) WHERE retention_expires_at > now64(6);
-ALTER TABLE xshield.events_by_time_active MODIFY QUERY
+CREATE OR REPLACE VIEW xshield.events_by_time_active
+DEFINER = CURRENT_USER SQL SECURITY DEFINER AS
 SELECT * FROM (
  SELECT * FROM xshield.events_by_time
  ORDER BY retention_expires_at,event_id LIMIT 1 BY event_id

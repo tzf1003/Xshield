@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 232,
-  "passed_count": 232,
+  "checks_total": 234,
+  "passed_count": 234,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -981,6 +981,11 @@
       "detail": ""
     },
     {
+      "name": "link:README.md:docs/20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:Xshield_Design_Book_v3.0.docx",
       "passed": true,
       "detail": ""
@@ -1152,6 +1157,11 @@
     },
     {
       "name": "link:README.md:docs/29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/20-testing-and-acceptance.md",
       "passed": true,
       "detail": ""
     },

@@ -736,7 +736,7 @@ struct IndexRow {
     tenant_id: String,
     site_id: String,
     request_id: String,
-    trace_id: String,
+    trace_id: [u8; 32],
     event_id: String,
     event_type: String,
     stage: String,
@@ -768,7 +768,8 @@ struct IndexRow {
     sensitivity: String,
     payload_json: String,
     event_hash: String,
-    content_digest: String,
+    #[serde(with = "fixed_bytes")]
+    content_digest: [u8; 64],
     ingest_revision: u64,
 }
 
@@ -828,7 +829,11 @@ impl IndexRow {
             tenant_id: event.tenant_id,
             site_id: event.site_id,
             request_id: event.request_id.unwrap_or_default(),
-            trace_id: event.trace_id,
+            trace_id: event
+                .trace_id
+                .as_bytes()
+                .try_into()
+                .map_err(|_| PublishError::InvalidEvent)?,
             event_id: event.event_id,
             event_type: event.event_type,
             stage: summary.stage,
@@ -856,10 +861,63 @@ impl IndexRow {
             cause_event_ids: event.cause_event_ids,
             sensitivity: event.sensitivity,
             payload_json: event.payload.get().to_owned(),
-            event_hash: digest.clone(),
-            content_digest: digest,
+            content_digest: digest
+                .as_bytes()
+                .try_into()
+                .map_err(|_| PublishError::InvalidEvent)?,
+            event_hash: digest,
             ingest_revision,
         })
+    }
+}
+
+// FixedString uses exactly N bytes; RowBinary strings include a length prefix.
+mod fixed_bytes {
+    use serde::{
+        Deserializer, Serializer,
+        de::{Error, SeqAccess, Visitor},
+        ser::SerializeTuple,
+    };
+    use std::fmt;
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        bytes: &[u8; N],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut tuple = serializer.serialize_tuple(N)?;
+        for byte in bytes {
+            tuple.serialize_element(byte)?;
+        }
+        tuple.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        deserializer: D,
+    ) -> Result<[u8; N], D::Error> {
+        struct BytesVisitor<const N: usize>;
+
+        impl<'de, const N: usize> Visitor<'de> for BytesVisitor<N> {
+            type Value = [u8; N];
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "exactly {N} bytes")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut bytes = [0; N];
+                for (index, byte) in bytes.iter_mut().enumerate() {
+                    *byte = sequence
+                        .next_element()?
+                        .ok_or_else(|| A::Error::invalid_length(index, &self))?;
+                }
+                Ok(bytes)
+            }
+        }
+
+        deserializer.deserialize_tuple(N, BytesVisitor::<N>)
     }
 }
 
@@ -1179,7 +1237,8 @@ impl RecoveryPayload {
 #[derive(Clone, Debug, Deserialize, Serialize, Row)]
 struct ExistingDigest {
     event_id: String,
-    content_digest: String,
+    #[serde(with = "fixed_bytes")]
+    content_digest: [u8; 64],
     digest_count: u64,
 }
 
@@ -1194,8 +1253,8 @@ async fn reject_remote_conflicts(
     let ids = expected.keys().cloned().collect::<Vec<_>>();
     let existing = client
         .query(
-            "SELECT event_id, any(content_digest) AS content_digest, \
-             uniqExact(content_digest) AS digest_count FROM ? \
+            "SELECT event_id, any(events.content_digest) AS content_digest, \
+             uniqExact(events.content_digest) AS digest_count FROM ? AS events \
              WHERE event_id IN ? GROUP BY event_id",
         )
         .bind(Identifier(table))
@@ -1203,7 +1262,10 @@ async fn reject_remote_conflicts(
         .fetch_all::<ExistingDigest>()
         .await?;
     for row in existing {
-        if row.digest_count != 1 || expected.get(&row.event_id) != Some(&row.content_digest) {
+        if row.digest_count != 1
+            || expected.get(&row.event_id).map(String::as_bytes)
+                != Some(row.content_digest.as_slice())
+        {
             return Err(PublishError::IntegrityConflict);
         }
     }
@@ -1602,7 +1664,7 @@ mod tests {
         query_request_events, query_request_summary, read_private_bounded, write_checkpoint,
     };
     use chrono::{DateTime, Utc};
-    use clickhouse::{Client, test};
+    use clickhouse::{Client, sql::Identifier, test};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1610,7 +1672,7 @@ mod tests {
     use uuid::Uuid;
     use xshield_audit::{
         JournalKey, JournalLimits, JournalRecord, LocalJournal, SealSigningKey,
-        seal_closed_segments,
+        SealedSegmentReader, seal_closed_segments,
     };
     use xshield_core::{
         domain::{EventId, RequestId, SiteId, TenantId},
@@ -1639,6 +1701,12 @@ mod tests {
         }
 
         fn with_events(event_count: usize) -> Self {
+            let (fixture, journal) = Self::with_open_journal(event_count);
+            drop(journal);
+            fixture
+        }
+
+        fn with_open_journal(event_count: usize) -> (Self, LocalJournal) {
             let root = std::env::temp_dir().join(format!("xshield-worker-test-{}", Uuid::now_v7()));
             let journal_directory = root.join("journal");
             let manifest_directory = root.join("manifests");
@@ -1669,7 +1737,6 @@ mod tests {
                     .unwrap();
                 event_ids.push(event_id);
             }
-            drop(journal);
             let seal_key = SealSigningKey::from_hex("seal-key-r1", SEAL_KEY_HEX).unwrap();
             seal_closed_segments(
                 &journal_directory,
@@ -1689,13 +1756,16 @@ mod tests {
                 1024 * 1024,
             )
             .unwrap();
-            Self {
-                root,
-                config,
-                journal_key,
-                seal_key,
-                event_ids,
-            }
+            (
+                Self {
+                    root,
+                    config,
+                    journal_key,
+                    seal_key,
+                    event_ids,
+                },
+                journal,
+            )
         }
 
         fn checkpoint_count(&self) -> usize {
@@ -1712,12 +1782,215 @@ mod tests {
                     .count()
             })
         }
+
+        fn first_content_digest(&self) -> String {
+            let paths = closed_segment_paths(&self.config.journal_directory).unwrap();
+            let boot_id = super::segment_boot_id(&paths[0]).unwrap();
+            let manifest = read_private_bounded(
+                &self
+                    .config
+                    .manifest_directory
+                    .join(format!("segment-{boot_id}.xjs")),
+                super::MANIFEST_BYTES_MAX,
+            )
+            .unwrap();
+            let mut reader = SealedSegmentReader::open(
+                &paths[0],
+                self.config.max_segment_bytes,
+                "journal-key-r1",
+                &self.journal_key,
+                &manifest,
+                &self.seal_key.verifying_key().unwrap(),
+            )
+            .unwrap();
+            super::hex(reader.next_record().unwrap().unwrap().plaintext_digest())
+        }
+
+        fn append_conflicting_event(&self, journal: &mut LocalJournal) {
+            let event_id = EventId::parse(self.event_ids[0].clone()).unwrap();
+            let plaintext = event_json(event_id.as_str(), &journal.producer_boot_id())
+                .replace("\"method\":\"GET\"", "\"method\":\"POST\"");
+            journal
+                .append_batch(&[JournalRecord {
+                    event_id: &event_id,
+                    plaintext: plaintext.as_bytes(),
+                }])
+                .unwrap();
+            seal_closed_segments(
+                &self.config.journal_directory,
+                &self.config.manifest_directory,
+                "journal-key-r1",
+                &self.journal_key,
+                &self.seal_key,
+            )
+            .unwrap();
+        }
     }
 
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires XSHIELD_TEST_CLICKHOUSE_URL"]
+    async fn real_schema_publisher_preserves_digests_replay_and_conflicts() {
+        let url = std::env::var("XSHIELD_TEST_CLICKHOUSE_URL")
+            .expect("XSHIELD_TEST_CLICKHOUSE_URL must identify a test ClickHouse server");
+        let mut admin = Client::default().with_url(url);
+        if let Ok(user) = std::env::var("XSHIELD_TEST_CLICKHOUSE_USER") {
+            admin = admin.with_user(user);
+        }
+        if let Ok(password) = std::env::var("XSHIELD_TEST_CLICKHOUSE_PASSWORD") {
+            admin = admin.with_password(password);
+        }
+        let database = format!("xshield_publisher_test_{}", Uuid::now_v7().simple());
+        // CREATE succeeds only for a database exclusively owned by this test.
+        admin
+            .query("CREATE DATABASE ?")
+            .bind(Identifier(&database))
+            .execute()
+            .await
+            .expect("create isolated publisher database");
+        let client = admin.clone().with_database(database.clone());
+        let schema_database = database.clone();
+        // Capture assertions and setup panics so cleanup is awaited by the owner.
+        let outcome = tokio::spawn(async move {
+            let schema = include_str!("../../../sql/clickhouse.sql")
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("xshield.", &format!("{schema_database}."));
+            for statement in schema.split(';').map(str::trim) {
+                if statement.is_empty() || statement == "CREATE DATABASE IF NOT EXISTS xshield" {
+                    continue;
+                }
+                client.query(statement).execute().await.unwrap();
+            }
+            // The fixture has a fixed timestamp; retain raw rows for digest checks.
+            for table in ["audit_events", "events_by_time"] {
+                client
+                    .query("SYSTEM STOP TTL MERGES ?")
+                    .bind(Identifier(table))
+                    .execute()
+                    .await
+                    .unwrap();
+            }
+            assert_real_publisher(&client).await;
+        })
+        .await;
+        let cleanup = admin
+            .query("DROP DATABASE ? SYNC")
+            .bind(Identifier(&database))
+            .execute()
+            .await;
+        assert!(
+            cleanup.is_ok(),
+            "cleanup failed for owned database {database}"
+        );
+        if let Err(error) = outcome {
+            if error.is_panic() {
+                std::panic::resume_unwind(error.into_panic());
+            }
+            panic!("ClickHouse publisher regression task was cancelled");
+        }
+    }
+
+    async fn assert_real_publisher(client: &Client) {
+        let (fixture, mut journal) = Fixture::with_open_journal(1);
+        let verifier = fixture.seal_key.verifying_key().unwrap();
+        let paths = closed_segment_paths(&fixture.config.journal_directory).unwrap();
+        let boot_id = super::segment_boot_id(&paths[0]).unwrap();
+        let expected_digest = fixture.first_content_digest();
+        let published = publish_sealed_segments(
+            &fixture.config,
+            client,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .await
+        .unwrap();
+        assert_eq!(published.published_segments, 1);
+        assert_eq!(published.published_events, 1);
+        assert_eq!(
+            published.watermark_producer_boot_id.as_deref(),
+            Some(boot_id.as_str())
+        );
+        assert_eq!(published.watermark_producer_sequence, 1);
+        assert_eq!(fixture.checkpoint_count(), 1);
+        for table in ["audit_events", "events_by_time"] {
+            let rows = client
+                .query("SELECT ?fields FROM ?")
+                .bind(Identifier(table))
+                .fetch_all::<IndexRow>()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].event_id, fixture.event_ids[0]);
+            assert_eq!(&rows[0].trace_id, b"01a0afa63320758a9554d0d3b561b8c6");
+            assert_eq!(
+                rows[0].content_digest.as_slice(),
+                expected_digest.as_bytes()
+            );
+            assert_eq!(rows[0].event_hash, expected_digest);
+            assert_eq!(rows[0].method, "GET");
+            assert_eq!(rows[0].occurred_at.timestamp_subsec_micros(), 123_000);
+            assert_eq!(
+                rows[0].retention_expires_at,
+                rows[0].occurred_at + fixture.config.metadata_retention
+            );
+        }
+        let replayed = publish_sealed_segments(
+            &fixture.config,
+            client,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed.published_segments, 0);
+        assert_eq!(replayed.published_events, 0);
+        assert_eq!(replayed.checkpointed_segments, 1);
+        assert_eq!(
+            replayed.watermark_producer_boot_id,
+            published.watermark_producer_boot_id
+        );
+        assert_eq!(
+            replayed.watermark_producer_sequence,
+            published.watermark_producer_sequence
+        );
+        fixture.append_conflicting_event(&mut journal);
+        let error = publish_sealed_segments(
+            &fixture.config,
+            client,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, PublishError::IntegrityConflict));
+        assert_eq!(fixture.checkpoint_count(), 1);
+        let health = inspect_publication_health(
+            &fixture.config,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .unwrap();
+        assert_eq!(health.published_segments, 1);
+        assert_eq!(health.pending_segments, 1);
+        assert_eq!(health.index_watermark.unwrap().producer_boot_id, boot_id);
+        let row_count = client
+            .query("SELECT count() FROM audit_events")
+            .fetch_one::<u64>()
+            .await
+            .unwrap();
+        assert_eq!(row_count, 1);
     }
 
     #[tokio::test]
@@ -1746,7 +2019,10 @@ mod tests {
         assert_eq!(rows[0].method, "GET");
         assert_eq!(rows[0].origin_state, "not_sent");
         assert_eq!(rows[0].is_terminal, 0);
-        assert_eq!(rows[0].content_digest.len(), 64);
+        assert_eq!(
+            rows[0].content_digest.as_slice(),
+            fixture.first_content_digest().as_bytes()
+        );
         assert_eq!(
             rows[0].retention_expires_at,
             rows[0].occurred_at + TimeDelta::try_days(30).unwrap()
@@ -2403,7 +2679,7 @@ mod tests {
         let mock = test::Mock::new();
         mock.add(test::handlers::provide([ExistingDigest {
             event_id: fixture.event_ids[0].clone(),
-            content_digest: "0".repeat(64),
+            content_digest: [b'0'; 64],
             digest_count: 1,
         }]));
         let client = Client::default().with_mock(&mock);
@@ -2429,7 +2705,7 @@ mod tests {
         let insertion = mock.add(test::handlers::record::<IndexRow>());
         mock.add(test::handlers::provide([ExistingDigest {
             event_id: fixture.event_ids[0].clone(),
-            content_digest: "0".repeat(64),
+            content_digest: [b'0'; 64],
             digest_count: 1,
         }]));
         let client = Client::default().with_mock(&mock);

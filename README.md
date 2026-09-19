@@ -125,6 +125,7 @@ cargo run -p xshield-control -- \
 | crc32fast / zeroize 1.x | journal 快速损坏检测与秘密缓冲清零 | MIT OR Apache-2.0；锁文件固定，升级执行篡改、恢复和秘密生命周期测试 |
 | chrono 0.4.x | 生成审计契约要求的 UTC RFC 3339 时间戳 | MIT OR Apache-2.0；锁文件固定，补丁升级执行审计契约与时钟异常测试 |
 | Python cryptography 49.0.0（仅测试） | 生成 Gateway→Origin 加密请求测试向量，不进入产品运行时 | Apache-2.0 OR BSD-3-Clause；精确版本，升级先执行认证失败、不回退与源站不可见反例 |
+| ClickHouse Server 25.8.29.51 LTS（集成测试服务） | 执行实际部署 DDL、RowBinary 与查询回归 | Apache-2.0；CI 固定版本，升级先复跑建库/重入、发布、权限、分页和保留回归，运行方式见 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归) |
 
 当前 workspace MSRV 为 Rust 1.94，与 SQLx 0.9.0 一致。生产依赖升级需审查许可证、安全公告和 Cargo.lock 差异。
 
@@ -186,7 +187,7 @@ cargo run -p xshield-control -- \
 |---|---|
 | schemas/ | 4份自定义 JSON Schema：审计事件、证据manifest、模型调用、站点策略 |
 | examples/ | 禁用状态的站点配置，合成审计事件与证据，78项待实施验收用例 |
-| sql/ | PostgreSQL migration 与 ClickHouse 部署 schema；真实 ClickHouse 集成验证尚待执行 |
+| sql/ | PostgreSQL migration 与 ClickHouse 部署 schema；真实数据库回归见 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归) |
 | templates/ | PR、ADR、crate说明和只读调查Agent约束 |
 | scripts/ | 可重复运行的文档/Schema/合成证据验证脚本 |
 | reference/ | 原始资料来源、旧输入文件哈希和决策基线 |

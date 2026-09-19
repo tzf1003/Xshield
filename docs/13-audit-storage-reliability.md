@@ -62,6 +62,8 @@ journal 重启恢复、异地副本与 KMS 恢复流程都必须测试。热索�
 
 ClickHouse TTL 在后台合并时清除数据，不是到秒精确删除；查询与 EvidenceReadPort 必须先执行过期策略，不依赖后台清理及时发生。[S24] 当前发布器要求 1–3650 天的元数据保留配置，按事件发生时间把绝对 `retention_expires_at` 固化到每个索引行；DDL 以该字段执行后台 TTL，并提供按 `event_id` 去重、按当前时间过滤的 `audit_events_active` / `events_by_time_active` 视图，重复投递采用最早期限，查询 API 只能使用 active 视图。升级时旧行以原 30 天策略扩展字段，新发布器显式写入配置期限。已批准案件可 pin 对象并设置受控保留；解除保留也需要审计，案件 pin 与原文对象保留在对象证据库阶段实现。
 
+两个 active 视图通过 `CREATE OR REPLACE VIEW` 更新，以执行 DDL 的账号作为 `SQL SECURITY DEFINER`。该账号必须在运行期保持有效并保留对应底表的 `SELECT`；生产控制账号仅获 active 视图的 `SELECT`，不能直接读取尚未物理删除的过期行。重新执行 DDL 会更新 definer，部署时须核验账号生命周期与权限。视图约束保留期限，API 仍负责注入认证后的 tenant/site 作用域。
+
 ## 13.8 故障策略
 
 | 故障 | 行为 |

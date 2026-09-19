@@ -69,8 +69,8 @@ def main() -> int:
     check('acceptance:not_falsely_executed',all(c['status']=='planned' for c in tests['cases']))
     check('acceptance:unique_ids',len({c['id'] for c in tests['cases']})==len(tests['cases']))
     clickhouse=(ROOT/'sql/clickhouse.sql').read_text()
-    check('clickhouse:active_views_deduplicate',clickhouse.count('LIMIT 1 BY event_id')==4)
-    check('clickhouse:active_views_filter_expiry',clickhouse.count('WHERE retention_expires_at > now64(6)')==4)
+    check('clickhouse:active_views_deduplicate',clickhouse.count('LIMIT 1 BY event_id')==2)
+    check('clickhouse:active_views_filter_expiry',clickhouse.count('WHERE retention_expires_at > now64(6)')==2)
     reg=(ROOT/'docs/25-source-register.md').read_text();known=set(re.findall(r'S\d{2}',reg))
     for p in sorted(ROOT.glob('docs/*.md')):
         text=p.read_text();used=set(re.findall(r'\[(S\d{2})\]',text));check('sources:'+p.name,used<=known)

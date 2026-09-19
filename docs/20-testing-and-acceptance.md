@@ -40,3 +40,22 @@
 P0 硬不变量全部通过；无资格与凭证串用拒绝可解释；秘密不进入普通日志；审计断网恢复有测试；高危操作模型停机策略明确；真实业务协议闭环通过；性能和容量达批准预算；未知项在控制台可见；可回滚版本已验证。
 
 Schema/Markdown/示例校验只是文档质量检查，不能替代以上产品验收。
+
+## 20.6 ClickHouse 真实集成回归
+
+CI 使用固定版本 `clickhouse/clickhouse-server:25.8.29.51`，开发机可连接同版本的专用测试服务。测试账号需要创建/删除测试库、表、视图及用户、授予测试视图读取权限和暂停测试表 TTL 合并的权限；生产控制账号继续只读取 active 视图。
+
+```bash
+XSHIELD_TEST_CLICKHOUSE_URL=http://127.0.0.1:8123 \
+cargo test -p xshield-worker --lib -- --ignored
+XSHIELD_TEST_CLICKHOUSE_URL=http://127.0.0.1:8123 \
+cargo test -p xshield-worker --test clickhouse_search -- --ignored
+```
+
+需要认证时另设 `XSHIELD_TEST_CLICKHOUSE_USER` 和 `XSHIELD_TEST_CLICKHOUSE_PASSWORD`。测试使用 UUID 命名的独占数据库，直接加载 `sql/clickhouse.sql` 并重复执行完整 DDL。普通视图采用 `CREATE OR REPLACE VIEW` 更新定义。断言失败后仍同步清理测试创建的资源；进程被强制终止时由测试服务的生命周期回收资源。
+
+查询回归覆盖 `audit_events_active` 和通过物化视图填充的 `events_by_time_active`：租户/站点隔离、可空 LowCardinality 字段、`ALLOW`、微秒及同时间戳 keyset 双向分页、闭开时间窗口、全部类型过滤器与同事件 AND 语义、重复事件合并、最早期限优先及物理 TTL 清理前隐藏过期行。查询使用只获两个 active 视图 `SELECT` 的独占测试账号，同时断言直接读取两张底表返回权限拒绝。
+
+发布回归从加密 journal 与签名清单开始，验证真实 `FixedString` 编码、两张物理表的精确摘要和微秒时间读回、同步确认后的水位提交与 checkpoint 重用；继续追加同 event_id 的不同内容时，发布器必须返回完整性冲突，保留原水位并显示待投递段。
+
+查询预算测试以同一小数据集收紧服务端结果行数上限，验证真实预算异常映射为 `QueryBudgetExceeded`。普通 `cargo test --workspace --all-targets` 会编译这些测试但按 `ignored` 跳过服务调用，必须执行上述命令才能形成真实数据库验证结果。执行时间/扫描/内存预算、集群故障和生产规模容量仍须分别验证。
