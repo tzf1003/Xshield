@@ -1,13 +1,13 @@
 //! Typed adapters for transactional `PostgreSQL` outbox facts.
 //!
 //! Outbox envelopes are a different producer contract from sealed journal
-//! records. This module only accepts the complete `case.*` envelopes emitted by
-//! the control store; other outbox families remain explicitly unsupported until
-//! their producers expose the same validated fields.
+//! records. This module only accepts the complete case and evidence-catalog
+//! envelopes emitted by their typed producers; other outbox families remain
+//! explicitly unsupported until their producers expose validated fields.
 
 use super::{
     IndexRow, PayloadSummary, PublishError, WireEvent, hex, insert_rows, reject_remote_conflicts,
-    valid_lower_hex, valid_name, valid_prefixed_v7,
+    valid_lower_hex, valid_name, valid_prefixed_v7, valid_uuid_v7,
 };
 use chrono::TimeDelta;
 use clickhouse::Client;
@@ -25,11 +25,34 @@ const INVALID_EVENT_CODE: &str = "OUTBOX_INVALID_EVENT";
 const INDEX_UNAVAILABLE_CODE: &str = "OUTBOX_INDEX_UNAVAILABLE";
 const INTEGRITY_CONFLICT_CODE: &str = "OUTBOX_INTEGRITY_CONFLICT";
 const CASE_EVENT_TYPES: &[&str] = &["case.created", "case.closed", "case.evidence.added"];
+const EVIDENCE_CATALOG_EVENT_TYPES: &[&str] = &["evidence.cataloged"];
+
+#[derive(Clone, Copy)]
+enum OutboxFamily {
+    Case,
+    EvidenceCatalog,
+}
+
+impl OutboxFamily {
+    const fn event_types(self) -> &'static [&'static str] {
+        match self {
+            Self::Case => CASE_EVENT_TYPES,
+            Self::EvidenceCatalog => EVIDENCE_CATALOG_EVENT_TYPES,
+        }
+    }
+
+    const fn aggregate_field(self) -> &'static str {
+        match self {
+            Self::Case => "case_id",
+            Self::EvidenceCatalog => "artifact_id",
+        }
+    }
+}
 
 pub(super) fn supports(event_type: &str) -> bool {
     matches!(
         event_type,
-        "case.created" | "case.closed" | "case.evidence.added"
+        "case.created" | "case.closed" | "case.evidence.added" | "evidence.cataloged"
     )
 }
 
@@ -114,8 +137,36 @@ pub async fn publish_case_outbox_batch(
     scope: &OutboxScope,
     config: &OutboxPublisherConfig,
 ) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::Case).await
+}
+
+/// Publishes one bounded batch of `evidence.cataloged` outbox envelopes.
+///
+/// Gateway capture and model evaluation use different producer identities but
+/// the same strict catalog payload. The catalog row remains a reference only;
+/// content access still requires the separate evidence authorization path.
+///
+/// # Errors
+/// Returns the same lease, event, and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_evidence_catalog_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::EvidenceCatalog).await
+}
+
+async fn publish_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+    family: OutboxFamily,
+) -> Result<OutboxPublishReport, PublishError> {
     let leases = store
-        .claim_outbox_batch_for_types(scope, config.lease, CASE_EVENT_TYPES)
+        .claim_outbox_batch_for_types(scope, config.lease, family.event_types())
         .await?;
     let claimed = leases.len();
     let mut report = OutboxPublishReport {
@@ -123,7 +174,7 @@ pub async fn publish_case_outbox_batch(
         published: 0,
     };
     for lease in leases {
-        if let Err(error) = publish_one(store, client, scope, config, &lease).await {
+        if let Err(error) = publish_one(store, client, scope, config, family, &lease).await {
             if !matches!(
                 error,
                 PublishError::Postgres(_) | PublishError::OutboxLeaseLost
@@ -145,6 +196,7 @@ async fn publish_one(
     client: &Client,
     scope: &OutboxScope,
     config: &OutboxPublisherConfig,
+    family: OutboxFamily,
     lease: &OutboxEvent,
 ) -> Result<(), PublishError> {
     if lease.tenant_id != *scope.tenant_id() || lease.site_id != *scope.site_id() {
@@ -153,6 +205,13 @@ async fn publish_one(
     let bytes = serde_json::to_vec(&lease.envelope)?;
     if bytes.is_empty() || bytes.len() > MAX_OUTBOX_EVENT_BYTES {
         return Err(PublishError::InvalidEvent);
+    }
+    if !family
+        .event_types()
+        .iter()
+        .any(|event_type| *event_type == lease.event_type)
+    {
+        return Err(PublishError::UnsupportedEventType);
     }
     let event: WireEvent = serde_json::from_slice(&bytes)?;
     let producer_boot_id = event.producer_boot_id.clone();
@@ -168,7 +227,7 @@ async fn publish_one(
     let aggregate_ref = lease
         .envelope
         .get("payload")
-        .and_then(|payload| payload.get("case_id"))
+        .and_then(|payload| payload.get(family.aggregate_field()))
         .and_then(serde_json::Value::as_str);
     if row.event_id != lease.event_id.as_str()
         || row.tenant_id != scope.tenant_id().as_str()
@@ -241,6 +300,9 @@ struct CasePayload {
 }
 
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if event.event_type == "evidence.cataloged" {
+        return parse_evidence_catalog(event);
+    }
     if event.producer_id != "xshield-control"
         || event.policy_revision != "control-v1"
         || valid_prefixed_v7(&event.producer_boot_id, "req_").is_err()
@@ -254,6 +316,47 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
     }
     let payload: CasePayload = serde_json::from_str(event.payload.get())?;
     payload.validate(event)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceCatalogPayload {
+    stage: String,
+    outcome: String,
+    reason_code: String,
+    artifact_id: String,
+}
+
+fn parse_evidence_catalog(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if !matches!(
+        event.producer_id.as_str(),
+        "gateway-evidence-catalog" | "model-eval"
+    ) || valid_uuid_v7(&event.producer_boot_id).is_err()
+        || event.request_id.is_none()
+        || event.producer_seq != 1
+        || event.sensitivity != "RESTRICTED"
+        || event.cause_event_ids.len() != 1
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    let payload: EvidenceCatalogPayload = serde_json::from_str(event.payload.get())?;
+    if payload.stage != "evidence_catalog"
+        || payload.outcome != "PASS"
+        || payload.reason_code != "EVIDENCE_CATALOG_PUBLISHED"
+        || valid_prefixed_v7(&payload.artifact_id, "artifact_").is_err()
+        || event.evidence_refs.len() != 1
+        || event.evidence_refs[0] != payload.artifact_id
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    Ok(PayloadSummary {
+        stage: payload.stage,
+        outcome: payload.outcome,
+        reason_code: payload.reason_code,
+        proof_kind: "deterministic".to_owned(),
+        confidence_status: "not_applicable".to_owned(),
+        ..PayloadSummary::default()
+    })
 }
 
 impl CasePayload {
@@ -324,9 +427,11 @@ mod tests {
 
     const EVENT: &str = "ev_018f2a3b-4c5d-7000-8000-000000000001";
     const BOOT: &str = "req_018f2a3b-4c5d-7000-8000-000000000002";
+    const CATALOG_BOOT: &str = "018f2a3b-4c5d-7000-8000-000000000006";
     const REQUEST: &str = "req_018f2a3b-4c5d-7000-8000-000000000003";
     const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000004";
     const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000005";
+    const CAUSE: &str = "ev_018f2a3b-4c5d-7000-8000-000000000007";
 
     fn event(event_type: &str) -> Value {
         let artifact = (event_type == "case.evidence.added").then_some(ARTIFACT);
@@ -355,14 +460,37 @@ mod tests {
     }
 
     fn parse(event: &Value) -> Result<IndexRow, PublishError> {
+        parse_with_boot(event, BOOT)
+    }
+
+    fn parse_with_boot(event: &Value, boot: &str) -> Result<IndexRow, PublishError> {
         IndexRow::parse_outbox(
             &serde_json::to_vec(event).unwrap(),
             &EventId::parse(EVENT).unwrap(),
             1,
-            BOOT,
+            boot,
             "0".repeat(64),
             chrono::TimeDelta::days(30),
         )
+    }
+
+    fn catalog_event(producer_id: &str) -> Value {
+        json!({
+            "schema_version": 3, "event_id": EVENT, "event_type": "evidence.cataloged",
+            "tenant_id": "tenant_demo", "site_id": "site_demo", "request_id": REQUEST,
+            "trace_id": "018f2a3b4c5d70008000000000000003", "span_id": "018f2a3b4c5d7000",
+            "producer_id": producer_id, "producer_boot_id": CATALOG_BOOT,
+            "producer_seq": 1, "request_seq": 2,
+            "occurred_at": "2026-09-19T00:00:00.123Z", "observed_at": "2026-09-19T00:00:00.123Z",
+            "policy_revision": "policy-r1", "example_only": false,
+            "evidence_refs": [ARTIFACT], "cause_event_ids": [CAUSE],
+            "payload": {
+                "stage": "evidence_catalog", "outcome": "PASS",
+                "reason_code": "EVIDENCE_CATALOG_PUBLISHED", "artifact_id": ARTIFACT
+            },
+            "sensitivity": "RESTRICTED",
+            "integrity": {"state": "pending", "previous_hash": null, "event_hash": null}
+        })
     }
 
     #[test]
@@ -456,5 +584,45 @@ mod tests {
             .expect("payload object")
             .remove("artifact_id");
         assert!(parse(&closed).is_ok());
+    }
+
+    #[test]
+    fn accepts_gateway_and_model_evidence_catalog_shapes() {
+        for producer in ["gateway-evidence-catalog", "model-eval"] {
+            let row = parse_with_boot(&catalog_event(producer), CATALOG_BOOT).unwrap();
+            assert_eq!(row.stage, "evidence_catalog");
+            assert_eq!(row.outcome, "PASS");
+            assert_eq!(row.reason_code, "EVIDENCE_CATALOG_PUBLISHED");
+            assert_eq!(row.proof_kind, "deterministic");
+            assert_eq!(row.confidence, None);
+            assert_eq!(row.confidence_status, "not_applicable");
+            assert_eq!(row.is_terminal, 0);
+        }
+    }
+
+    #[test]
+    fn rejects_evidence_catalog_contract_drift() {
+        for (pointer, value) in [
+            ("/producer_id", json!("xshield-control")),
+            ("/producer_boot_id", json!(BOOT)),
+            ("/sensitivity", json!("INTERNAL")),
+            ("/cause_event_ids", json!([])),
+            ("/evidence_refs", json!([])),
+            ("/payload/artifact_id", json!(CASE)),
+            (
+                "/payload/reason_code",
+                json!("EVIDENCE_CATALOG_PUBLISHED_EXTRA"),
+            ),
+        ] {
+            let mut value_to_reject = catalog_event("gateway-evidence-catalog");
+            *value_to_reject.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                parse_with_boot(&value_to_reject, CATALOG_BOOT).is_err(),
+                "accepted {pointer}"
+            );
+        }
+        let mut unknown = catalog_event("model-eval");
+        unknown["payload"]["extra"] = json!(true);
+        assert!(parse_with_boot(&unknown, CATALOG_BOOT).is_err());
     }
 }

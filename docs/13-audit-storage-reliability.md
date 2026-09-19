@@ -48,7 +48,7 @@ DENY 也应记录；磁盘耗尽时预留独立的小型紧急事件区。若紧
 
 ## 13.5 outbox 与资格发行
 
-资格与 grant_event outbox 同 PostgreSQL 事务提交，publisher 按 ID 重试发送审计。当前发布器先交付完整 `case.*` 垂直闭环：租约字段与业务状态同库但不与 ClickHouse 网络共持事务锁，消费者在独立 ClickHouse 写入和 event_id/content_digest 冲突复核成功后，才以精确 tenant/site/event/token 更新 `published_at`。连接失败、结构无效和完整性冲突都保留原行并写稳定 `last_error_code`，不把日志或 ClickHouse 结果当授权真值。响应释放前等待资格事务成功及该请求要求的审计耐久屏障；尚未适配的 outbox 族继续可见地积压，不得静默丢弃或按 journal 契约解释。
+资格与 grant_event outbox 同 PostgreSQL 事务提交，publisher 按 ID 重试发送审计。当前发布器先交付 `case.*` 与 `evidence.cataloged` 两条完整垂直闭环：租约字段与业务状态同库但不与 ClickHouse 网络共持事务锁，消费者在独立 ClickHouse 写入和 event_id/content_digest 冲突复核成功后，才以精确 tenant/site/event/token 更新 `published_at`。连接失败、结构无效和完整性冲突都保留原行并写稳定 `last_error_code`，不把日志或 ClickHouse 结果当授权真值。响应释放前等待资格事务成功及该请求要求的审计耐久屏障；尚未适配的 outbox 族继续可见地积压，不得静默丢弃或按 journal 契约解释。
 
 Xshield 事务只保护本系统状态，不覆盖原站数据库或外部支付。长时模型/网络工作在事务外完成，提交时再验 epoch 和策略版本。[S08]
 

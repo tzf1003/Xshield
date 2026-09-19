@@ -1,13 +1,16 @@
-//! Publishes one bounded batch of transactional `case.*` outbox events.
+//! Publishes one bounded batch of a selected transactional outbox event family.
 
 use clickhouse::Client;
 use std::{env, error::Error, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
 use xshield_postgres::{OutboxLeaseConfig, OutboxScope, PostgresIdentityStore};
-use xshield_worker::{OutboxPublisherConfig, publish_case_outbox_batch};
+use xshield_worker::{
+    OutboxPublisherConfig, publish_case_outbox_batch, publish_evidence_catalog_outbox_batch,
+};
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID";
+const USAGE: &str =
+    "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog)";
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
@@ -28,6 +31,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if arguments.next().is_some() {
         return Err(USAGE.into());
     }
+    let family = env::var("XSHIELD_OUTBOX_FAMILY").unwrap_or_else(|_| "case".to_owned());
 
     let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
     let database_max_connections: u32 =
@@ -65,15 +69,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_password(clickhouse_password.as_str())
         .with_setting("max_execution_time", "30")
         .with_product_info("xshield-outbox-worker", env!("CARGO_PKG_VERSION"));
-    let report = publish_case_outbox_batch(
-        &store,
-        &client,
-        &OutboxScope::new(&tenant_id, &site_id),
-        &config,
-    )
-    .await?;
+    let scope = OutboxScope::new(&tenant_id, &site_id);
+    let report = match family.as_str() {
+        "case" => publish_case_outbox_batch(&store, &client, &scope, &config).await?,
+        "evidence_catalog" => {
+            publish_evidence_catalog_outbox_batch(&store, &client, &scope, &config).await?
+        }
+        _ => return Err(USAGE.into()),
+    };
     println!(
-        "claimed={} published={} table={}",
+        "family={} claimed={} published={} table={}",
+        family,
         report.claimed,
         report.published,
         config.table(),

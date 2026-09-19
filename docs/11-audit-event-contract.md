@@ -83,8 +83,8 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 目标 case/access/model/request、主体、query_digest 与 bytes_read 保留在受限的原始事件载荷；当前脱敏查询返回通用摘要和证据引用，不提供按案件/主体目标过滤，也不直接返回该载荷。引用可检索不扩大证据读取权限。管理 journal 描述接口访问尝试和重试；未认证请求超出限流预算时直接返回 `CONTROL_RATE_LIMITED`，不追加逐请求访问日志。PostgreSQL 同名 outbox 记录事务状态转换，两者 event_id 与载荷契约不同；journal 发布器与下述 outbox 发布器分别绑定各自来源和契约。
 
-## 11.8 已实现的 `case.*` outbox 发布
+## 11.8 已实现的按事件族 outbox 发布
 
 `xshield-outbox-worker` 是一次有界发布 pass，按固定 tenant/site 作用域从 `xshield.audit_outbox` 领取最多 256 行及 64 MiB JSON 字节，并以 PostgreSQL `clock_timestamp()` 设置最长一小时租约。候选行使用 `FOR UPDATE SKIP LOCKED`；ClickHouse 网络操作不持有 PostgreSQL 事务锁。确认必须携带同一 event_id、作用域和未过期 lease token，旧 token 或跨作用域确认统一拒绝。发布成功后才写 `published_at`；失败释放租约、保存 `OUTBOX_INVALID_EVENT`、`OUTBOX_INDEX_UNAVAILABLE` 或 `OUTBOX_INTEGRITY_CONFLICT` 并按有界延迟重试。
 
-当前适配器只接受控制服务产生的完整 `case.created`、`case.closed`、`case.evidence.added` v3 envelope：producer、policy、请求/序号、case/artifact 目标、请求摘要、确定性 proof 和 evidence 引用均重新校验，重复键、未知字段、列与 envelope 不一致或其他 outbox 族不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。`session.*`、`binding.*`、grant、evidence access 等其他事务 outbox 仍是待交付适配器，不得据此声称全量 outbox 已索引。
+当前适配器按租约领取族隔离：`case.created`、`case.closed`、`case.evidence.added` 只接受控制服务的完整 v3 envelope；`evidence.cataloged` 只接受 `gateway-evidence-catalog` 或 `model-eval` 的完整 envelope，并重新校验 UUIDv7 producer boot、单因果、`RESTRICTED` 分类以及 artifact/evidence_refs/aggregate_ref 三方一致。两族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。`session.*`、`binding.*`、grant、evidence access 等其他事务 outbox 仍是待交付适配器，不得据此声称全量 outbox 已索引。

@@ -94,8 +94,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-control --lib management_audit` 由实际管理事件生产者及 HTTP 路由写入 journal，经封存和现有发布器验证报文兼容与 checkpoint 重用。配置 20.6 的专用 ClickHouse 后，执行 `cargo test -p xshield-control --lib management_audit -- --ignored`，在独占数据库运行同一路径并读回索引、时间线、有界搜索及跨租户/站点隔离。该真实数据库测试纳入 CI；普通 workspace 测试只编译并跳过其服务调用。
 
-## 20.12 `case.*` outbox 发布回归
+## 20.12 outbox 发布回归
 
-`cargo test -p xshield-postgres --lib outbox` 覆盖领取上限、服务端租约配置、稳定错误码和非法 token；具备 PostgreSQL 的环境还应执行现有临时库脚本，验证 tenant/site 过滤、`SKIP LOCKED` 并发、过期租约重新领取、精确 token 确认、旧 token 拒绝以及失败后的 `next_attempt_at`/`last_error_code`。`cargo test -p xshield-worker --lib outbox` 覆盖三个 `case.*` 族、关闭事件的确定性 proof 字段、重复/未知键、目标错绑和非 case 族拒绝。
+`cargo test -p xshield-postgres --lib outbox` 覆盖领取上限、服务端租约配置、稳定错误码和非法 token；具备 PostgreSQL 的环境还应执行现有临时库脚本，验证 tenant/site 过滤、`SKIP LOCKED` 并发、过期租约重新领取、精确 token 确认、旧 token 拒绝以及失败后的 `next_attempt_at`/`last_error_code`。`cargo test -p xshield-worker --lib outbox` 覆盖三个 `case.*` 族、`evidence.cataloged` 的两个真实 producer、确定性 proof 字段、重复/未知键、artifact 三方错绑和跨族拒绝。
 
-在同时提供 PostgreSQL 与 ClickHouse 的专用测试服务时，使用 `xshield-outbox-worker` 的同一 API 做一次真实回归：事务插入合成 `case.created`/`case.closed`/`case.evidence.added` envelope，领取后断开 ClickHouse 确认重试，再恢复服务确认底表和 active 视图各一条去重行、正确 SHA-256 digest 与 `published_at`；插入同 event_id 的不同正文必须保持 `OUTBOX_INTEGRITY_CONFLICT`，旧租约确认必须保持 rejected。当前工作区未声称在缺少 ClickHouse 服务时已执行该真实回归。
+在同时提供 PostgreSQL 与 ClickHouse 的专用测试服务时，使用 `XSHIELD_OUTBOX_FAMILY=case` 和 `XSHIELD_OUTBOX_FAMILY=evidence_catalog` 分别运行同一 worker API 做真实回归：事务插入对应 envelope，领取后断开 ClickHouse 确认重试，再恢复服务确认底表和 active 视图各一条去重行、正确 SHA-256 digest 与 `published_at`；插入同 event_id 的不同正文必须保持 `OUTBOX_INTEGRITY_CONFLICT`，旧租约确认必须保持 rejected。当前工作区未声称在缺少 ClickHouse 服务时已执行该真实回归。

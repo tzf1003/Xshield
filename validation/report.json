@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 358,
-  "passed_count": 358,
+  "checks_total": 366,
+  "passed_count": 366,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -997,6 +997,46 @@
     },
     {
       "name": "model_capture:unknown_field",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:evidence_catalog:gateway-evidence-catalog",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:evidence_catalog:model-eval",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:evidence_catalog_reject_wrong_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:evidence_catalog_reject_wrong_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:evidence_catalog_reject_wrong_boot",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:evidence_catalog_reject_wrong_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:evidence_catalog_reject_missing_cause",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:evidence_catalog_reject_unknown_payload",
       "passed": true,
       "detail": ""
     },

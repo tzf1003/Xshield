@@ -27,7 +27,10 @@ mod control_audit;
 pub mod model_eval;
 mod outbox;
 mod search;
-pub use outbox::{OutboxPublishReport, OutboxPublisherConfig, publish_case_outbox_batch};
+pub use outbox::{
+    OutboxPublishReport, OutboxPublisherConfig, publish_case_outbox_batch,
+    publish_evidence_catalog_outbox_batch,
+};
 pub use search::{
     AuditSearchResult, ModelCallEventSummary, ModelCallSummary, SearchEventSummary, SearchPosition,
     query_audit_events, query_model_call,

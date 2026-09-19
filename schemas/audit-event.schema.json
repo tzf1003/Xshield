@@ -432,9 +432,47 @@
           }
         }
       ]
+    },
+    "evidence_catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "outcome", "reason_code", "artifact_id"],
+      "properties": {
+        "stage": {"const": "evidence_catalog"},
+        "outcome": {"const": "PASS"},
+        "reason_code": {"const": "EVIDENCE_CATALOG_PUBLISHED"},
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^artifact_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      }
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {"event_type": {"const": "evidence.cataloged"}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {"$ref": "#/$defs/evidence_catalog"},
+          "producer_id": {"enum": ["gateway-evidence-catalog", "model-eval"]},
+          "producer_boot_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "producer_seq": {"const": 1},
+          "request_id": {
+            "type": "string",
+            "pattern": "^req_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "evidence_refs": {"minItems": 1, "maxItems": 1},
+          "cause_event_ids": {"minItems": 1, "maxItems": 1},
+          "sensitivity": {"const": "RESTRICTED"}
+        }
+      }
+    },
     {
       "if": {
         "properties": {

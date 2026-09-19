@@ -130,6 +130,43 @@ def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: d
         invalid.update(fields)
         check('model_capture:' + label, not valid(schemas['model-call'], invalid))
 
+def check_outbox_contracts(schemas: dict) -> None:
+    """Exercise the strict evidence-catalog outbox envelope shape."""
+    artifact = 'artifact_018f2a3b-4c5d-7000-8000-000000000005'
+    base = {
+        'schema_version': 3, 'event_id': 'ev_018f2a3b-4c5d-7000-8000-000000000001',
+        'event_type': 'evidence.cataloged', 'tenant_id': 'tenant_demo', 'site_id': 'site_demo',
+        'request_id': 'req_018f2a3b-4c5d-7000-8000-000000000003',
+        'trace_id': '018f2a3b4c5d70008000000000000003', 'span_id': '018f2a3b4c5d7000',
+        'producer_id': 'gateway-evidence-catalog',
+        'producer_boot_id': '018f2a3b-4c5d-7000-8000-000000000006',
+        'producer_seq': 1, 'request_seq': 2,
+        'occurred_at': '2026-09-19T00:00:00.123Z', 'observed_at': '2026-09-19T00:00:00.123Z',
+        'policy_revision': 'policy-r1', 'example_only': False,
+        'evidence_refs': [artifact],
+        'cause_event_ids': ['ev_018f2a3b-4c5d-7000-8000-000000000007'],
+        'payload': {'stage': 'evidence_catalog', 'outcome': 'PASS',
+                    'reason_code': 'EVIDENCE_CATALOG_PUBLISHED', 'artifact_id': artifact},
+        'sensitivity': 'RESTRICTED',
+        'integrity': {'state': 'pending', 'previous_hash': None, 'event_hash': None},
+    }
+    for producer in ['gateway-evidence-catalog', 'model-eval']:
+        event = copy.deepcopy(base)
+        event['producer_id'] = producer
+        check('outbox:evidence_catalog:' + producer, valid(schemas['audit-event'], event))
+    for label, fields in [
+        ('wrong_producer', {'producer_id': 'xshield-control'}),
+        ('wrong_sensitivity', {'sensitivity': 'INTERNAL'}),
+        ('wrong_boot', {'producer_boot_id': 'req_018f2a3b-4c5d-7000-8000-000000000002'}),
+        ('wrong_producer_seq', {'producer_seq': 2}),
+        ('missing_cause', {'cause_event_ids': []}),
+        ('unknown_payload', {'payload': dict(base['payload'], extra=True)}),
+    ]:
+        event = copy.deepcopy(base)
+        event.update(fields)
+        check('outbox:evidence_catalog_reject_' + label,
+              not valid(schemas['audit-event'], event))
+
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
         if 'validation' in p.parts or 'target' in p.parts: continue
@@ -209,6 +246,7 @@ def main() -> int:
         call=copy.deepcopy(choice);call.update(fields)
         check('model_call:'+label,not valid(schemas['model-call'],call))
     check_model_evaluation_contracts(schemas, model_stage, choice)
+    check_outbox_contracts(schemas)
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))
     check('fixture:all_synthetic',all(e['example_only'] for e in events) and all(c['example_only'] for c in calls))
