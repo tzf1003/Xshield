@@ -60,6 +60,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 模型阶段回归由实际加密 journal 经封存和发布入库，验证 `mdl_` 调用引用、已知/缺失模型版本以及有界模型版本过滤。阶段汇总回归在同一阶段先写数值置信度，再写 `not_applicable`、`not_provided` 或 `unavailable` 的 null，确认两套 active 视图都返回最新 null 与匹配状态。常规测试另覆盖置信度矛盾、非法模型引用和版本、时间线分页预读行校验；这些合成事件验证审计链路，不代表实际模型推理或准确率测量。
 
+模型调用回归在同一隔离测试库封存并发布 `started → requested → responded`，通过生产 `query_model_call` 验证 tenant/site 隔离、版本、置信度、四类证据引用与因果链完整性；模型完成仍保持业务请求未终结，精确重投复用三段 checkpoint 且物理行数不增加。常规 worker 测试覆盖可见前缀/后缀/中间缺失、发出前失败、Noul 空置信度、畸形生命周期及响应上限；控制测试覆盖 Observer 权限、非法 UTF-8 路径、未命中、审计故障扣留结果、查询预算和 search/model 共用许可在客户端断连后保持到终态审计。
+
 查询预算测试以同一小数据集收紧服务端结果行数上限，验证真实预算异常映射为 `QueryBudgetExceeded`。普通 `cargo test --workspace --all-targets` 会编译这些测试但按 `ignored` 跳过服务调用，必须执行上述命令才能形成真实数据库验证结果。执行时间/扫描/内存预算、集群故障和生产规模容量仍须分别验证。
 
 ## 20.7 模型评估回归

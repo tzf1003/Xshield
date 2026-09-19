@@ -10,7 +10,10 @@ mod search;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, RawQuery, State, rejection::JsonRejection},
+    extract::{
+        DefaultBodyLimit, Path, RawQuery, State,
+        rejection::{JsonRejection, PathRejection},
+    },
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE},
@@ -32,7 +35,10 @@ use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
-    domain::{ArtifactId, CaseId, EventId, EvidenceAccessRequestId, RequestId, SiteId, TenantId},
+    domain::{
+        ArtifactId, CaseId, EventId, EvidenceAccessRequestId, ModelCallId, RequestId, SiteId,
+        TenantId,
+    },
     investigation::{
         EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
         InvestigationCaseDraft,
@@ -47,9 +53,9 @@ use xshield_postgres::{
     InvestigationCaseWriteOutcome, PostgresIdentityStore,
 };
 use xshield_worker::{
-    IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEventPosition,
-    RequestEvents, RequestSummary, inspect_publication_health, query_request_events,
-    query_request_summary,
+    IndexWatermark, ModelCallSummary, PublicationHealth, PublishError, PublisherConfig,
+    RequestEventPosition, RequestEvents, RequestSummary, inspect_publication_health,
+    query_model_call, query_request_events, query_request_summary,
 };
 use zeroize::Zeroizing;
 
@@ -57,6 +63,7 @@ const HEALTH_PATH: &str = "/control/v1/audit/health";
 const REQUEST_SUMMARY_PATH: &str = "/control/v1/requests/{request_id}";
 const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
 const REQUEST_EVIDENCE_PATH: &str = "/control/v1/requests/{request_id}/evidence";
+const MODEL_CALL_PATH: &str = "/control/v1/model-calls/{model_call_id}";
 const ARTIFACT_PATH: &str = "/control/v1/artifacts/{artifact_id}";
 const EVIDENCE_ACCESS_PATH: &str = "/control/v1/artifacts/{artifact_id}/access";
 const EVIDENCE_ACCESS_APPROVE_PATH: &str =
@@ -108,6 +115,12 @@ const REQUEST_EVIDENCE_ACCESS: AccessAction = AccessAction {
     event_type: "console.manifest.read",
     method: "GET",
     path: REQUEST_EVIDENCE_PATH,
+    role: ManagementRole::Observer,
+};
+const MODEL_CALL_ACCESS: AccessAction = AccessAction {
+    event_type: "console.model.read",
+    method: "GET",
+    path: MODEL_CALL_PATH,
     role: ManagementRole::Observer,
 };
 const ARTIFACT_ACCESS: AccessAction = AccessAction {
@@ -407,7 +420,7 @@ impl ControlPlane {
             source_journal_key,
             seal_key,
             index,
-            // ponytail: one analytical search per control instance; share a
+            // ponytail: one analytical query per control instance; share a
             // tenant budget across replicas when measured load requires it.
             search_capacity: Arc::new(Semaphore::new(1)),
             catalog,
@@ -673,6 +686,182 @@ impl ControlPlane {
         };
         self.complete_request_evidence(request_id, subject, target_request_id, page)
             .await
+    }
+
+    async fn model_call(
+        self: Arc<Self>,
+        authorization: Option<String>,
+        target_model_call_id: Option<String>,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(
+                authorization.as_deref(),
+                &auth_request_id,
+                MODEL_CALL_ACCESS,
+            )
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Some(target_model_call_id) =
+            target_model_call_id.and_then(|id| ModelCallId::parse(id).ok())
+        else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    MODEL_CALL_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_MODEL_CALL_ID_INVALID",
+                    "invalid model call identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Ok(permit) = Arc::clone(&self.search_capacity).try_acquire_owned() else {
+            return self
+                .finish_model_call(
+                    request_id,
+                    subject,
+                    target_model_call_id,
+                    Err(search::SearchFailure::Capacity),
+                )
+                .await;
+        };
+        let task_request_id = request_id.clone();
+        // Like search, an admitted lookup retains its permit through terminal
+        // audit even if its HTTP client disconnects.
+        match tokio::spawn(async move {
+            let _permit = permit;
+            let result = self.run_model_call(&target_model_call_id).await;
+            self.finish_model_call(task_request_id, subject, target_model_call_id, result)
+                .await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => internal_error(&request_id),
+        }
+    }
+
+    async fn run_model_call(
+        self: &Arc<Self>,
+        target: &ModelCallId,
+    ) -> Result<(Option<ModelCallSummary>, PublicationHealth), search::SearchFailure> {
+        // This health describes only the configured journal, not every producer
+        // contributing to the index. It cannot prove a missing call never existed.
+        let control = Arc::clone(self);
+        let health = tokio::task::spawn_blocking(move || {
+            inspect_publication_health(
+                &control.config.publisher,
+                &control.config.source_journal_key_id,
+                &control.source_journal_key,
+                &control.seal_key,
+            )
+        })
+        .await
+        .map_err(|_| search::SearchFailure::HealthUnavailable)?
+        .map_err(|_| search::SearchFailure::HealthUnavailable)?;
+        let model_call = query_model_call(
+            &self.config.publisher,
+            &self.index,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            target,
+        )
+        .await
+        .map_err(|error| match error {
+            PublishError::QueryBudgetExceeded => search::SearchFailure::Budget,
+            PublishError::QueryTimeout => search::SearchFailure::Timeout,
+            _ => search::SearchFailure::IndexUnavailable,
+        })?;
+        Ok((model_call, health))
+    }
+
+    async fn finish_model_call(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        target_model_call_id: ModelCallId,
+        result: Result<(Option<ModelCallSummary>, PublicationHealth), search::SearchFailure>,
+    ) -> EndpointResult {
+        let evidence_refs = result
+            .as_ref()
+            .ok()
+            .and_then(|(summary, _)| summary.as_ref())
+            .map(model_call_evidence_refs)
+            .unwrap_or_default();
+        let reason = result
+            .as_ref()
+            .map_or_else(search::SearchFailure::reason, |_| "CONTROL_MODEL_CALL_READ");
+        let outcome = match &result {
+            Ok(_) => "PASS",
+            Err(search::SearchFailure::Capacity | search::SearchFailure::Budget) => "DENY",
+            Err(_) => "ERROR",
+        };
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_model_call_id = target_model_call_id.clone();
+        let audited = tokio::task::spawn_blocking(move || {
+            let refs = evidence_refs.iter().map(String::as_str).collect::<Vec<_>>();
+            audit_control.append_model_access_event(
+                &audit_request_id,
+                Some(&audit_subject),
+                &audit_model_call_id,
+                outcome,
+                reason,
+                &refs,
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        let (model_call, health) = match result {
+            Ok(result) => result,
+            Err(search::SearchFailure::Budget) => {
+                return api_error(
+                    &request_id,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "CONTROL_QUERY_BUDGET_EXCEEDED",
+                    "model call lookup exceeded its query budget",
+                    false,
+                    "contact_operator",
+                );
+            }
+            Err(error) => return error.response(request_id),
+        };
+        let completeness = match model_call.as_ref() {
+            Some(summary) if summary.lifecycle_complete => "complete",
+            Some(summary) if matches!(summary.status.as_str(), "started" | "requested") => {
+                "pending"
+            }
+            Some(_) => "partial",
+            None => "not_indexed",
+        };
+        EndpointResult::ModelCall(ModelCallResponse {
+            request_id,
+            tenant_id: self.config.tenant_id.as_str().to_owned(),
+            site_id: self.config.site_id.as_str().to_owned(),
+            source_model_call_id: target_model_call_id.as_str().to_owned(),
+            watermark_scope: "configured_journal",
+            as_of: health.as_of,
+            index_watermark: health.index_watermark,
+            has_gaps: health.has_gaps,
+            pending_segments: health.pending_segments,
+            found: model_call.is_some(),
+            completeness,
+            model_call,
+        })
     }
 
     async fn complete_request_evidence(
@@ -1576,6 +1765,7 @@ impl ControlPlane {
                 Some(&audit_artifact_id),
                 None,
                 Some(&audit_access_request_id),
+                None,
                 "PASS",
                 "CONTROL_EVIDENCE_READ",
                 &[audit_artifact_id.as_str()],
@@ -2761,6 +2951,7 @@ impl ControlPlane {
             None,
             None,
             None,
+            None,
             outcome,
             reason_code,
             &[],
@@ -2791,6 +2982,33 @@ impl ControlPlane {
             target_artifact_id,
             target_case_id,
             target_access_request_id,
+            None,
+            outcome,
+            reason_code,
+            evidence_refs,
+            None,
+            None,
+        )
+    }
+
+    fn append_model_access_event(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        target_model_call_id: &ModelCallId,
+        outcome: &'static str,
+        reason_code: &'static str,
+        evidence_refs: &[&str],
+    ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence_bytes(
+            request_id,
+            subject_ref,
+            MODEL_CALL_ACCESS,
+            None,
+            None,
+            None,
+            None,
+            Some(target_model_call_id),
             outcome,
             reason_code,
             evidence_refs,
@@ -2809,6 +3027,7 @@ impl ControlPlane {
         target_artifact_id: Option<&ArtifactId>,
         target_case_id: Option<&CaseId>,
         target_access_request_id: Option<&EvidenceAccessRequestId>,
+        target_model_call_id: Option<&ModelCallId>,
         outcome: &'static str,
         reason_code: &'static str,
         evidence_refs: &[&str],
@@ -2856,6 +3075,7 @@ impl ControlPlane {
                 target_case_id: target_case_id.map(CaseId::as_str),
                 target_access_request_id: target_access_request_id
                     .map(EvidenceAccessRequestId::as_str),
+                target_model_call_id: target_model_call_id.map(ModelCallId::as_str),
                 query_digest,
                 outcome,
                 reason_code,
@@ -2889,6 +3109,7 @@ pub fn router(control: ControlPlane) -> Router {
         .route(HEALTH_PATH, get(health_handler))
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
+        .route(MODEL_CALL_PATH, get(model_call_handler))
         .route(
             search::SEARCH_PATH,
             post(search::handler).layer(DefaultBodyLimit::max(search::SEARCH_BODY_BYTES_MAX)),
@@ -3061,6 +3282,21 @@ async fn request_events_handler(
         .into_response()
 }
 
+async fn model_call_handler(
+    State(control): State<Arc<ControlPlane>>,
+    path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .model_call(authorization, path.ok().map(|Path(id)| id))
+        .await
+        .into_response()
+}
+
 async fn request_evidence_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(request_id): Path<String>,
@@ -3115,6 +3351,7 @@ enum EndpointResult {
     Success(HealthResponse),
     RequestSummary(RequestSummaryResponse),
     RequestEvents(RequestEventsResponse),
+    ModelCall(ModelCallResponse),
     Search(search::SearchResponse),
     RequestEvidence(RequestEvidenceResponse),
     Artifact(ArtifactResponse),
@@ -3131,6 +3368,7 @@ impl IntoResponse for EndpointResult {
             Self::Success(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestSummary(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::ModelCall(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Search(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Artifact(response) => (StatusCode::OK, Json(response)).into_response(),
@@ -3486,6 +3724,34 @@ struct RequestEventsResponse {
 }
 
 #[derive(Serialize)]
+struct ModelCallResponse {
+    request_id: String,
+    tenant_id: String,
+    site_id: String,
+    source_model_call_id: String,
+    watermark_scope: &'static str,
+    as_of: String,
+    index_watermark: Option<IndexWatermark>,
+    has_gaps: bool,
+    pending_segments: usize,
+    found: bool,
+    completeness: &'static str,
+    model_call: Option<ModelCallSummary>,
+}
+
+fn model_call_evidence_refs(summary: &ModelCallSummary) -> Vec<String> {
+    // The query validates that all top-level artifacts occur in these envelopes.
+    let mut refs: Vec<_> = summary
+        .events
+        .iter()
+        .flat_map(|event| event.evidence_refs.iter().cloned())
+        .collect();
+    refs.sort_unstable();
+    refs.dedup();
+    refs
+}
+
+#[derive(Serialize)]
 struct RequestSummaryResponse {
     request_id: String,
     tenant_id: String,
@@ -3699,6 +3965,8 @@ struct AccessPayload<'a> {
     target_case_id: Option<&'a str>,
     target_access_request_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_model_call_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
@@ -3822,6 +4090,7 @@ mod tests {
     const IDEMPOTENCY_KEY: &str =
         "4444444444444444444444444444444444444444444444444444444444444444";
     const TOKEN: &str = "test-control-token-32-bytes-long-value";
+    const MODEL_CALL_ID: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
     const MISSING_ARTIFACT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000999";
 
     #[test]
@@ -3955,6 +4224,152 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn model_call_endpoint_returns_refs_and_audits_scope() {
+        let model_call_id = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
+        let input_id = "artifact_018f2a3b-4c5d-7000-8000-000000000001";
+        let output_id = "artifact_018f2a3b-4c5d-7000-8000-000000000002";
+        let call_id = "artifact_018f2a3b-4c5d-7000-8000-000000000003";
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000001";
+        let payload = serde_json::json!({
+            "model_call_id": model_call_id,
+            "model_revision": "jev-1.13.0",
+            "prompt_revision": "evaluation-r1",
+            "question_type": "choice",
+            "status": "success",
+            "reason_code": "MODEL_EVALUATED",
+            "confidence": 0.8,
+            "confidence_status": "provided",
+            "duration_us": 1200,
+            "input_artifact_id": input_id,
+            "output_artifact_id": output_id,
+            "call_artifact_id": call_id
+        })
+        .to_string();
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide([ModelRow {
+            event_id: "ev_018f2a3b-4c5d-7000-8000-000000000001".to_owned(),
+            event_type: "model.responded".to_owned(),
+            request_id: request_id.to_owned(),
+            occurred_at: Utc::now(),
+            request_seq: 1,
+            evidence_refs: vec![
+                input_id.to_owned(),
+                output_id.to_owned(),
+                call_id.to_owned(),
+            ],
+            cause_event_ids: vec!["ev_018f2a3b-4c5d-7000-8000-000000000002".into()],
+            sensitivity: "RESTRICTED".to_owned(),
+            payload_json: payload,
+        }]));
+        let fixture = Fixture::with_index(
+            10,
+            ManagementRole::Observer,
+            Client::default().with_mock(&mock),
+        );
+        let response = router(fixture.control)
+            .oneshot(
+                Request::get(format!("/control/v1/model-calls/{model_call_id}"))
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        let body = to_bytes(response.into_body(), 32 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["found"], true);
+        assert_eq!(body["completeness"], "partial");
+        assert_eq!(body["watermark_scope"], "configured_journal");
+        assert_eq!(body["model_call"]["input_artifact_id"], input_id);
+        assert_eq!(body["model_call"]["output_artifact_id"], output_id);
+        assert_eq!(body["model_call"]["call_artifact_id"], call_id);
+        let audit = read_access_events(&fixture.access_directory);
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0]["event_type"], "console.model.read");
+        assert_eq!(audit[0]["evidence_refs"].as_array().unwrap().len(), 3);
+        assert_eq!(audit[0]["payload"]["target_model_call_id"], model_call_id);
+    }
+
+    #[tokio::test]
+    async fn model_call_rejects_unauthorized_and_invalid_ids_before_index_access() {
+        for (role, authenticated, id, expected) in [
+            (
+                ManagementRole::Observer,
+                false,
+                "%FF",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                ManagementRole::AuditAdministrator,
+                true,
+                MODEL_CALL_ID,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                ManagementRole::Observer,
+                true,
+                "invalid",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ManagementRole::Observer,
+                true,
+                "%FF",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mock = test::Mock::new();
+            let fixture = Fixture::with_index(10, role, Client::default().with_mock(&mock));
+            let mut request = Request::get(format!("/control/v1/model-calls/{id}"))
+                .body(Body::empty())
+                .unwrap();
+            if authenticated {
+                request
+                    .headers_mut()
+                    .insert(AUTHORIZATION, format!("Bearer {TOKEN}").parse().unwrap());
+            }
+            let response = router(fixture.control).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            if expected == StatusCode::BAD_REQUEST {
+                assert_eq!(body["error_code"], "CONTROL_MODEL_CALL_ID_INVALID");
+            }
+            assert_access_events(&fixture.access_directory, 1, "console.model.read", None);
+        }
+    }
+
+    #[tokio::test]
+    async fn model_call_miss_is_not_a_producer_absence_claim() {
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide(Vec::<ModelRow>::new()));
+        let fixture = Fixture::with_index(
+            10,
+            ManagementRole::Observer,
+            Client::default().with_mock(&mock),
+        );
+        let response = router(fixture.control)
+            .oneshot(analytical_http_request(true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["found"], false);
+        assert_eq!(body["completeness"], "not_indexed");
+        assert_eq!(body["watermark_scope"], "configured_journal");
+        assert!(body["model_call"].is_null());
+        let events = read_access_events(&fixture.access_directory);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["payload"]["target_model_call_id"], MODEL_CALL_ID);
+        assert_eq!(events[0]["evidence_refs"], json!([]));
     }
 
     #[tokio::test]
@@ -5423,6 +5838,20 @@ mod tests {
         terminal: u8,
     }
 
+    #[derive(Clone, Debug, Row, Serialize)]
+    struct ModelRow {
+        event_id: String,
+        event_type: String,
+        request_id: String,
+        #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+        occurred_at: DateTime<Utc>,
+        request_seq: u32,
+        evidence_refs: Vec<String>,
+        cause_event_ids: Vec<String>,
+        sensitivity: String,
+        payload_json: String,
+    }
+
     struct Fixture {
         control: ControlPlane,
         access_directory: std::path::PathBuf,
@@ -5904,6 +6333,17 @@ mod tests {
             .unwrap()
     }
 
+    fn analytical_http_request(model_lookup: bool) -> Request<Body> {
+        if model_lookup {
+            Request::get(format!("/control/v1/model-calls/{MODEL_CALL_ID}"))
+                .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap()
+        } else {
+            search_http_request(&search_payload())
+        }
+    }
+
     fn search_event(event_id: &str, seconds: i64) -> xshield_worker::SearchEventSummary {
         xshield_worker::SearchEventSummary {
             request_id: Some("req_018f2a3b-4c5d-7000-8000-000000000001".to_owned()),
@@ -6203,156 +6643,199 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_distinguishes_query_budgets_from_index_failures() {
+    async fn analytical_queries_distinguish_budgets_from_index_failures() {
         for code in [158, 159, 241, 209] {
-            let mock = test::Mock::new();
-            mock.add(test::handlers::exception(code));
-            let fixture = Fixture::with_index(
-                10,
-                ManagementRole::Investigator,
-                Client::default().with_mock(&mock),
-            );
-            let response = router(fixture.control)
-                .oneshot(search_http_request(&search_payload()))
-                .await
-                .unwrap();
-            let budget = code != 209;
-            assert_eq!(
-                response.status(),
-                if budget {
-                    StatusCode::TOO_MANY_REQUESTS
-                } else {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-            );
-            let body: Value =
-                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+            for model_lookup in [false, true] {
+                let mock = test::Mock::new();
+                mock.add(test::handlers::exception(code));
+                let fixture = Fixture::with_index(
+                    10,
+                    if model_lookup {
+                        ManagementRole::Observer
+                    } else {
+                        ManagementRole::Investigator
+                    },
+                    Client::default().with_mock(&mock),
+                );
+                let response = router(fixture.control)
+                    .oneshot(analytical_http_request(model_lookup))
+                    .await
                     .unwrap();
-            assert_eq!(
-                body["error_code"],
-                if budget {
-                    "CONTROL_QUERY_BUDGET_EXCEEDED"
+                let budget = code != 209;
+                assert_eq!(
+                    response.status(),
+                    if budget {
+                        StatusCode::TOO_MANY_REQUESTS
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                );
+                let body: Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                        .unwrap();
+                assert_eq!(
+                    body["error_code"],
+                    if budget {
+                        "CONTROL_QUERY_BUDGET_EXCEEDED"
+                    } else {
+                        "CONTROL_INDEX_UNAVAILABLE"
+                    }
+                );
+                assert_eq!(body["retryable"], !budget);
+                assert_eq!(
+                    body["next_action"],
+                    if budget {
+                        if model_lookup {
+                            "contact_operator"
+                        } else {
+                            "narrow_query"
+                        }
+                    } else {
+                        "retry_later"
+                    }
+                );
+                let events = read_access_events(&fixture.access_directory);
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0]["payload"]["reason_code"], body["error_code"]);
+                if model_lookup {
+                    assert_eq!(events[0]["payload"]["target_model_call_id"], MODEL_CALL_ID);
                 } else {
-                    "CONTROL_INDEX_UNAVAILABLE"
+                    assert!(
+                        super::parse_lower_hex_32(
+                            events[0]["payload"]["query_digest"].as_str().unwrap()
+                        )
+                        .is_some()
+                    );
                 }
-            );
-            assert_eq!(body["retryable"], !budget);
-            assert_eq!(
-                body["next_action"],
-                if budget {
-                    "narrow_query"
-                } else {
-                    "retry_later"
-                }
-            );
-            let events = read_access_events(&fixture.access_directory);
-            assert_eq!(events.len(), 1);
-            assert_eq!(events[0]["payload"]["reason_code"], body["error_code"]);
-            assert!(
-                super::parse_lower_hex_32(events[0]["payload"]["query_digest"].as_str().unwrap())
-                    .is_some()
-            );
+            }
         }
     }
 
     #[tokio::test]
-    async fn search_audit_failure_withholds_index_results() {
-        let mock = test::Mock::new();
-        mock.add(test::handlers::provide([search_event(
-            "ev_018f2a3b-4c5d-7000-8000-000000000001",
-            20,
-        )]));
-        let fixture = Fixture::with_index(
-            10,
-            ManagementRole::Investigator,
-            Client::default().with_mock(&mock),
-        );
-        std::thread::scope(|scope| {
-            let journal = &fixture.control.access_journal;
-            assert!(
-                scope
-                    .spawn(move || {
-                        let _guard = journal.lock().unwrap();
-                        panic!("simulate failed audit writer");
-                    })
-                    .join()
-                    .is_err()
+    async fn analytical_query_audit_failure_withholds_index_results() {
+        for model_lookup in [false, true] {
+            let mock = test::Mock::new();
+            if model_lookup {
+                mock.add(test::handlers::provide(Vec::<ModelRow>::new()));
+            } else {
+                mock.add(test::handlers::provide([search_event(
+                    "ev_018f2a3b-4c5d-7000-8000-000000000001",
+                    20,
+                )]));
+            }
+            let fixture = Fixture::with_index(
+                10,
+                if model_lookup {
+                    ManagementRole::Observer
+                } else {
+                    ManagementRole::Investigator
+                },
+                Client::default().with_mock(&mock),
             );
-        });
-        let response = router(fixture.control)
-            .oneshot(search_http_request(&search_payload()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(body["error_code"], "AUDIT_DURABILITY_FAILED");
-        assert!(body.get("events").is_none());
+            std::thread::scope(|scope| {
+                let journal = &fixture.control.access_journal;
+                assert!(
+                    scope
+                        .spawn(move || {
+                            let _guard = journal.lock().unwrap();
+                            panic!("simulate failed audit writer");
+                        })
+                        .join()
+                        .is_err()
+                );
+            });
+            let response = router(fixture.control)
+                .oneshot(analytical_http_request(model_lookup))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["error_code"], "AUDIT_DURABILITY_FAILED");
+            assert!(body.get("events").is_none());
+            assert!(body.get("model_call").is_none());
+        }
     }
 
     #[tokio::test]
-    async fn search_disconnect_keeps_capacity_until_terminal_audit() {
-        let started = std::sync::Arc::new(tokio::sync::Notify::new());
-        let released = std::sync::Arc::new(tokio::sync::Notify::new());
-        let handler_started = started.clone();
-        let handler_released = released.clone();
-        let index = axum::Router::new().route(
-            "/",
-            axum::routing::post(move || {
-                let started = handler_started.clone();
-                let released = handler_released.clone();
-                async move {
-                    started.notify_one();
-                    released.notified().await;
-                    StatusCode::OK
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, index).await.unwrap();
-        });
-        let fixture = Fixture::with_index(
-            10,
-            ManagementRole::Investigator,
-            Client::default()
-                .with_url(format!("http://{address}"))
-                .with_validation(false),
-        );
-        let capacity = fixture.control.search_capacity.clone();
-        let app = router(fixture.control);
-        let client = tokio::spawn(app.clone().oneshot(search_http_request(&search_payload())));
-        tokio::time::timeout(Duration::from_secs(2), started.notified())
-            .await
+    async fn analytical_queries_keep_shared_capacity_through_disconnect_and_audit() {
+        for model_lookup in [false, true] {
+            let started = std::sync::Arc::new(tokio::sync::Notify::new());
+            let released = std::sync::Arc::new(tokio::sync::Notify::new());
+            let handler_started = started.clone();
+            let handler_released = released.clone();
+            let index = axum::Router::new().route(
+                "/",
+                axum::routing::post(move || {
+                    let started = handler_started.clone();
+                    let released = handler_released.clone();
+                    async move {
+                        started.notify_one();
+                        released.notified().await;
+                        StatusCode::OK
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, index).await.unwrap();
+            });
+            let mut fixture = Fixture::with_index(
+                10,
+                ManagementRole::Investigator,
+                Client::default()
+                    .with_url(format!("http://{address}"))
+                    .with_validation(false),
+            );
+            fixture.control.config.principal = ManagementPrincipal::new(
+                "operator-1",
+                [ManagementRole::Observer, ManagementRole::Investigator],
+                [(
+                    fixture.control.config.tenant_id.clone(),
+                    fixture.control.config.site_id.clone(),
+                )],
+            )
             .unwrap();
-        client.abort();
-        assert!(client.await.unwrap_err().is_cancelled());
-        assert_eq!(capacity.available_permits(), 0);
-        let response = app
-            .oneshot(search_http_request(&search_payload()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        released.notify_one();
-        let _permit = tokio::time::timeout(Duration::from_secs(2), capacity.acquire())
-            .await
-            .unwrap()
-            .unwrap();
-        let events = read_access_events(&fixture.access_directory);
-        assert_eq!(events.len(), 2);
-        let reasons = events
-            .iter()
-            .map(|event| event["payload"]["reason_code"].as_str().unwrap())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            reasons,
-            std::collections::BTreeSet::from([
-                "CONTROL_QUERY_CAPACITY_EXHAUSTED",
-                "CONTROL_QUERY_EXECUTED"
-            ])
-        );
-        server.abort();
+            let capacity = fixture.control.search_capacity.clone();
+            let app = router(fixture.control);
+            let client = tokio::spawn(app.clone().oneshot(analytical_http_request(model_lookup)));
+            tokio::time::timeout(Duration::from_secs(2), started.notified())
+                .await
+                .unwrap();
+            client.abort();
+            assert!(client.await.unwrap_err().is_cancelled());
+            assert_eq!(capacity.available_permits(), 0);
+            let response = app
+                .oneshot(analytical_http_request(!model_lookup))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            released.notify_one();
+            let _permit = tokio::time::timeout(Duration::from_secs(2), capacity.acquire())
+                .await
+                .unwrap()
+                .unwrap();
+            let events = read_access_events(&fixture.access_directory);
+            assert_eq!(events.len(), 2);
+            let reasons = events
+                .iter()
+                .map(|event| event["payload"]["reason_code"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                reasons,
+                std::collections::BTreeSet::from([
+                    "CONTROL_QUERY_CAPACITY_EXHAUSTED",
+                    if model_lookup {
+                        "CONTROL_MODEL_CALL_READ"
+                    } else {
+                        "CONTROL_QUERY_EXECUTED"
+                    }
+                ])
+            );
+            server.abort();
+        }
     }
 
     fn private_directory(path: &Path) {

@@ -192,7 +192,10 @@
         "reason_code",
         "confidence",
         "confidence_status",
-        "duration_us"
+        "duration_us",
+        "input_artifact_id",
+        "output_artifact_id",
+        "call_artifact_id"
       ],
       "properties": {
         "model_call_id": {

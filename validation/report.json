@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 329,
-  "passed_count": 329,
+  "checks_total": 348,
+  "passed_count": 348,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -581,12 +581,42 @@
       "detail": ""
     },
     {
+      "name": "model_lifecycle:started_missing_input_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:started_missing_output_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:started_missing_call_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "model_lifecycle:status_mismatch_started",
       "passed": true,
       "detail": ""
     },
     {
       "name": "model_lifecycle:requested",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:requested_missing_input_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:requested_missing_output_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:requested_missing_call_artifact_id",
       "passed": true,
       "detail": ""
     },
@@ -601,12 +631,42 @@
       "detail": ""
     },
     {
+      "name": "model_lifecycle:success_missing_input_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:success_missing_output_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:success_missing_call_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "model_lifecycle:status_mismatch_success",
       "passed": true,
       "detail": ""
     },
     {
       "name": "model_lifecycle:error",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:error_missing_input_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:error_missing_output_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:error_missing_call_artifact_id",
       "passed": true,
       "detail": ""
     },
@@ -621,12 +681,42 @@
       "detail": ""
     },
     {
+      "name": "model_lifecycle:timeout_missing_input_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:timeout_missing_output_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:timeout_missing_call_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "model_lifecycle:status_mismatch_timeout",
       "passed": true,
       "detail": ""
     },
     {
       "name": "model_lifecycle:cancelled",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:cancelled_missing_input_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:cancelled_missing_output_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "model_lifecycle:cancelled_missing_call_artifact_id",
       "passed": true,
       "detail": ""
     },
@@ -1432,6 +1522,11 @@
     },
     {
       "name": "link:README.md:docs/20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
       "passed": true,
       "detail": ""
     },

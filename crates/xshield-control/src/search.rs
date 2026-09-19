@@ -550,7 +550,7 @@ pub(super) struct SearchResponse {
     events: Vec<SearchEventSummary>,
 }
 
-enum SearchFailure {
+pub(super) enum SearchFailure {
     InvalidCursor,
     CursorUnavailable,
     Capacity,
@@ -561,7 +561,7 @@ enum SearchFailure {
 }
 
 impl SearchFailure {
-    const fn reason(&self) -> &'static str {
+    pub(super) const fn reason(&self) -> &'static str {
         match self {
             Self::InvalidCursor => "CONTROL_CURSOR_INVALID",
             Self::CursorUnavailable => "CONTROL_CURSOR_UNAVAILABLE",
@@ -573,7 +573,7 @@ impl SearchFailure {
         }
     }
 
-    fn response(&self, request_id: String) -> EndpointResult {
+    pub(super) fn response(&self, request_id: String) -> EndpointResult {
         let (status, message_safe, retryable, next_action) = match self {
             Self::InvalidCursor => (
                 StatusCode::BAD_REQUEST,

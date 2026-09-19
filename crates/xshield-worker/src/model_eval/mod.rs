@@ -483,23 +483,35 @@ struct UsageRecord {
 /// Closed model lifecycle metadata. Kept typed at both journal boundaries.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ModelEvent {
-    model_call_id: String,
-    model_revision: String,
-    prompt_revision: String,
-    question_type: String,
-    status: String,
-    reason_code: String,
+pub(crate) struct ModelEvent {
+    pub(crate) model_call_id: String,
+    pub(crate) model_revision: String,
+    pub(crate) prompt_revision: String,
+    pub(crate) question_type: String,
+    pub(crate) status: String,
+    pub(crate) reason_code: String,
     #[serde(deserialize_with = "Option::deserialize")]
-    confidence: Option<f64>,
-    confidence_status: String,
-    duration_us: u64,
-    input_artifact_id: Option<String>,
-    output_artifact_id: Option<String>,
-    call_artifact_id: Option<String>,
+    pub(crate) confidence: Option<f64>,
+    pub(crate) confidence_status: String,
+    pub(crate) duration_us: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) input_artifact_id: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) output_artifact_id: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) call_artifact_id: Option<String>,
 }
 
 impl ModelEvent {
+    pub(crate) fn parse_query_event(
+        payload: &str,
+        event_type: &str,
+    ) -> Result<Self, crate::PublishError> {
+        let event: Self = serde_json::from_str(payload)?;
+        event.clone().validate(event_type)?;
+        Ok(event)
+    }
+
     pub(super) fn validate_envelope(event: &crate::WireEvent) -> Result<(), crate::PublishError> {
         let payload: Self = serde_json::from_str(event.payload.get())?;
         if event.request_id.is_none()

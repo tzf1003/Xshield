@@ -22,7 +22,10 @@ use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, Site
 
 pub mod model_eval;
 mod search;
-pub use search::{AuditSearchResult, SearchEventSummary, SearchPosition, query_audit_events};
+pub use search::{
+    AuditSearchResult, ModelCallEventSummary, ModelCallSummary, SearchEventSummary, SearchPosition,
+    query_audit_events, query_model_call,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -1701,7 +1704,7 @@ mod tests {
         AuditEventSummary, Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError,
         PublisherConfig, RequestStageSummary, RequestSummaryRow, SearchEventSummary,
         SearchPosition, TimeDelta, closed_segment_paths, inspect_publication_health,
-        prepare_private_directory, publish_sealed_segments, query_audit_events,
+        prepare_private_directory, publish_sealed_segments, query_audit_events, query_model_call,
         query_request_events, query_request_summary, read_private_bounded, write_checkpoint,
     };
     use chrono::{DateTime, Utc};
@@ -1716,7 +1719,7 @@ mod tests {
         SealedSegmentReader, seal_closed_segments,
     };
     use xshield_core::{
-        domain::{EventId, RequestId, SiteId, TenantId},
+        domain::{EventId, ModelCallId, RequestId, SiteId, TenantId},
         identity::UnixSeconds,
         query::{
             ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
@@ -1955,6 +1958,7 @@ mod tests {
             }
             assert_real_publisher(&client).await;
             assert_real_model_stage_publication(&client).await;
+            assert_real_model_call_publication(&client).await;
         })
         .await;
         let cleanup = admin
@@ -2127,6 +2131,183 @@ mod tests {
             Some("jev-1.13.0")
         );
         assert!(!found.truncated);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn assert_real_model_call_publication(client: &Client) {
+        let (mut fixture, mut journal) = Fixture::with_open_journal(0);
+        let call = ModelCallId::parse(format!("mdl_{}", Uuid::now_v7())).unwrap();
+        let request = RequestId::parse(format!("req_{}", Uuid::now_v7())).unwrap();
+        let refs: [String; 4] = std::array::from_fn(|_| format!("artifact_{}", Uuid::now_v7()));
+        for (event_type, status, reason, request_seq, ref_count, confidence) in [
+            (
+                "model.started",
+                "started",
+                "MODEL_EVALUATION_STARTED",
+                1,
+                0,
+                None,
+            ),
+            (
+                "model.requested",
+                "requested",
+                "MODEL_REQUESTED",
+                4,
+                2,
+                None,
+            ),
+            (
+                "model.responded",
+                "success",
+                "MODEL_EVALUATED",
+                7,
+                4,
+                Some(0.8),
+            ),
+        ] {
+            let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+            let mut event: serde_json::Value =
+                serde_json::from_str(&event_json(event_id.as_str(), &journal.producer_boot_id()))
+                    .unwrap();
+            let now = Utc::now().to_rfc3339();
+            event["event_type"] = event_type.into();
+            event["producer_id"] = "model-eval".into();
+            event["producer_seq"] = journal.next_sequence().unwrap().into();
+            event["request_id"] = request.as_str().into();
+            event["request_seq"] = request_seq.into();
+            event["occurred_at"] = now.clone().into();
+            event["observed_at"] = now.into();
+            event["sensitivity"] = "RESTRICTED".into();
+            event["evidence_refs"] = serde_json::json!(&refs[..ref_count]);
+            event["cause_event_ids"] =
+                serde_json::json!(fixture.event_ids.last().into_iter().collect::<Vec<_>>());
+            event["payload"] = serde_json::json!({
+                "model_call_id": call.as_str(),
+                "model_revision": "jev-1.13.0",
+                "prompt_revision": "evaluation-r1",
+                "question_type": "choice",
+                "status": status,
+                "reason_code": reason,
+                "confidence": confidence,
+                "confidence_status": if confidence.is_some() { "provided" } else { "unavailable" },
+                "duration_us": if confidence.is_some() { 1200 } else { 0 },
+                "input_artifact_id": (ref_count >= 2).then_some(&refs[1]),
+                "output_artifact_id": (ref_count == 4).then_some(&refs[2]),
+                "call_artifact_id": (ref_count == 4).then_some(&refs[3]),
+            });
+            journal
+                .append_batch(&[JournalRecord {
+                    event_id: &event_id,
+                    plaintext: &serde_json::to_vec(&event).unwrap(),
+                }])
+                .unwrap();
+            fixture.event_ids.push(event_id.as_str().to_owned());
+        }
+        drop(journal);
+        seal_closed_segments(
+            &fixture.config.journal_directory,
+            &fixture.config.manifest_directory,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &fixture.seal_key,
+        )
+        .unwrap();
+        let verifier = fixture.seal_key.verifying_key().unwrap();
+        let published = publish_sealed_segments(
+            &fixture.config,
+            client,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .await
+        .unwrap();
+        assert_eq!(published.published_segments, 3);
+        assert_eq!(published.published_events, 3);
+        assert_eq!(fixture.checkpoint_count(), 3);
+        let tenant = TenantId::parse("tenant_demo").unwrap();
+        let site = SiteId::parse("site_demo").unwrap();
+        let summary = query_model_call(&fixture.config, client, &tenant, &site, &call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.model_call_id, call.as_str());
+        assert_eq!(summary.request_id, request.as_str());
+        assert_eq!(summary.status, "success");
+        assert_eq!(summary.model_revision, "jev-1.13.0");
+        assert_eq!(summary.prompt_revision, "evaluation-r1");
+        assert_eq!(summary.confidence, Some(0.8));
+        assert!(summary.lifecycle_complete);
+        assert_eq!(summary.input_artifact_id.as_deref(), Some(refs[1].as_str()));
+        assert_eq!(
+            summary.output_artifact_id.as_deref(),
+            Some(refs[2].as_str())
+        );
+        assert_eq!(summary.call_artifact_id.as_deref(), Some(refs[3].as_str()));
+        assert_eq!(summary.events.len(), 3);
+        for (event, event_id) in summary.events.iter().zip(&fixture.event_ids) {
+            assert_eq!(&event.event_id, event_id);
+        }
+        assert_eq!(summary.events[1].evidence_refs, refs[..2]);
+        assert_eq!(summary.events[2].evidence_refs, refs);
+        for (other_tenant, other_site) in
+            [("tenant_other", "site_demo"), ("tenant_demo", "site_other")]
+        {
+            assert!(
+                query_model_call(
+                    &fixture.config,
+                    client,
+                    &TenantId::parse(other_tenant).unwrap(),
+                    &SiteId::parse(other_site).unwrap(),
+                    &call,
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+        }
+        let request_summary =
+            query_request_summary(&fixture.config, client, &tenant, &site, &request)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(request_summary.event_count, 3);
+        assert!(!request_summary.terminal);
+        assert!(!request_summary.forwarded);
+        assert!(!request_summary.business_result_confirmed);
+        assert!(request_summary.decision.is_none());
+        let replayed = publish_sealed_segments(
+            &fixture.config,
+            client,
+            "journal-key-r1",
+            &fixture.journal_key,
+            &verifier,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed.published_events, 0);
+        assert_eq!(replayed.published_segments, 0);
+        assert_eq!(replayed.checkpointed_segments, 3);
+        assert_eq!(
+            replayed.watermark_producer_boot_id,
+            published.watermark_producer_boot_id
+        );
+        assert_eq!(
+            replayed.watermark_producer_sequence,
+            published.watermark_producer_sequence
+        );
+        assert_eq!(fixture.checkpoint_count(), 3);
+        let rows = client
+            .query("SELECT ?fields FROM audit_events WHERE request_id = ? ORDER BY request_seq")
+            .bind(request.as_str())
+            .fetch_all::<IndexRow>()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.is_terminal == 0));
+        assert!(rows[0].cause_event_ids.is_empty());
+        assert_eq!(rows[1].cause_event_ids, fixture.event_ids[..1]);
+        assert_eq!(rows[2].cause_event_ids, fixture.event_ids[1..2]);
     }
 
     #[tokio::test]
@@ -2803,7 +2984,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_request_query_deadline_bounds_stalled_connection() {
+    async fn analytical_query_deadlines_bound_stalled_connections() {
         let fixture = Fixture::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client =
@@ -2820,18 +3001,17 @@ mod tests {
             1,
         )
         .unwrap();
-        let result = query_audit_events(
-            &fixture.config,
-            &client,
-            &TenantId::parse("tenant_a").unwrap(),
-            &SiteId::parse("site_a").unwrap(),
-            &plan,
-            None,
-        )
-        .await;
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let model_call = ModelCallId::parse("mdl_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
+        let (result, model_result) = tokio::join!(
+            query_audit_events(&fixture.config, &client, &tenant, &site, &plan, None),
+            query_model_call(&fixture.config, &client, &tenant, &site, &model_call),
+        );
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
         assert!(matches!(result, Err(PublishError::QueryTimeout)));
+        assert!(matches!(model_result, Err(PublishError::QueryTimeout)));
     }
 
     #[tokio::test]

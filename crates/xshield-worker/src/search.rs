@@ -9,7 +9,7 @@ use clickhouse::{Client, Row, sql::Identifier};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use xshield_core::{
-    domain::{EventId, RequestId, SiteId, TenantId},
+    domain::{EventId, ModelCallId, RequestId, SiteId, TenantId},
     query::{QueryFilter, QueryPlan, QuerySort},
 };
 
@@ -54,6 +54,103 @@ pub struct SearchEventSummary {
     pub cause_event_ids: Vec<String>,
     /// Data classification for downstream redaction decisions.
     pub sensitivity: String,
+}
+
+/// One redacted lifecycle entry for a model call.
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelCallEventSummary {
+    /// Immutable audit event identity.
+    pub event_id: String,
+    /// Typed lifecycle event kind.
+    pub event_type: String,
+    /// Request that initiated the model attempt.
+    pub request_id: String,
+    /// Authenticated occurrence time.
+    #[serde(serialize_with = "serialize_event_time")]
+    pub occurred_at: DateTime<Utc>,
+    /// Request-local event order.
+    pub request_seq: u32,
+    /// Typed model lifecycle status.
+    pub status: String,
+    /// Versioned model identifier.
+    pub model_revision: String,
+    /// Versioned prompt identifier.
+    pub prompt_revision: String,
+    /// Jev question type.
+    pub question_type: String,
+    /// Stable lifecycle reason code.
+    pub reason_code: String,
+    /// Provider confidence when the contract permits one.
+    pub confidence: Option<f64>,
+    /// Explicit confidence availability state.
+    pub confidence_status: String,
+    /// Attempt duration in microseconds.
+    pub duration_us: u64,
+    /// Input evidence reference, when persisted at this lifecycle point.
+    pub input_artifact_id: Option<String>,
+    /// Output evidence reference, when persisted at this lifecycle point.
+    pub output_artifact_id: Option<String>,
+    /// Typed call-record evidence reference, when persisted at this lifecycle point.
+    pub call_artifact_id: Option<String>,
+    /// All evidence refs authenticated on the enclosing event.
+    pub evidence_refs: Vec<String>,
+    /// Immediate predecessor, when the call has progressed beyond its start.
+    pub cause_event_ids: Vec<String>,
+    /// Event sensitivity classification.
+    pub sensitivity: String,
+}
+
+/// One bounded model-call view assembled from its authenticated lifecycle.
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelCallSummary {
+    /// Stable model attempt identity.
+    pub model_call_id: String,
+    /// Request that initiated the model attempt.
+    pub request_id: String,
+    /// Versioned model identifier.
+    pub model_revision: String,
+    /// Versioned prompt identifier.
+    pub prompt_revision: String,
+    /// Supported Jev question type.
+    pub question_type: String,
+    /// Latest lifecycle status.
+    pub status: String,
+    /// Latest lifecycle reason code.
+    pub reason_code: String,
+    /// Latest provider confidence under the typed contract.
+    pub confidence: Option<f64>,
+    /// Latest confidence availability state.
+    pub confidence_status: String,
+    /// Latest observed duration in microseconds.
+    pub duration_us: u64,
+    /// Stable input evidence reference.
+    pub input_artifact_id: Option<String>,
+    /// Stable output evidence reference.
+    pub output_artifact_id: Option<String>,
+    /// Stable model-call record evidence reference.
+    pub call_artifact_id: Option<String>,
+    /// Ordered, redacted lifecycle entries.
+    pub events: Vec<ModelCallEventSummary>,
+    /// True only when the visible prefix contains start, send, and terminal
+    /// (or start and a pre-send failure). Retention may hide an earlier prefix.
+    pub lifecycle_complete: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Row)]
+struct ModelCallRow {
+    event_id: String,
+    event_type: String,
+    request_id: String,
+    #[serde(
+        deserialize_with = "deserialize_event_time",
+        serialize_with = "serialize_event_time"
+    )]
+    occurred_at: DateTime<Utc>,
+    request_seq: u32,
+    evidence_refs: Vec<String>,
+    cause_event_ids: Vec<String>,
+    sensitivity: String,
+    payload_json: String,
 }
 
 fn serialize_event_time<S: Serializer>(
@@ -162,6 +259,256 @@ pub async fn query_audit_events(
     )
     .await
     .map_err(|_| PublishError::QueryTimeout)?
+}
+
+/// Reads one model-call lifecycle from the retention-aware analytical view.
+///
+/// The lookup is exact to the authenticated tenant/site scope and returns only
+/// typed lifecycle metadata and evidence references. Model payload JSON is
+/// parsed and validated before any field is exposed; provider bodies remain in
+/// the separately authorized evidence vault.
+///
+/// # Errors
+/// Returns [`PublishError::InvalidEvent`] for an inconsistent lifecycle or
+/// [`PublishError::QueryTimeout`] / [`PublishError::ClickHouse`] for index
+/// dependency failures, or [`PublishError::QueryBudgetExceeded`] for exhausted
+/// scan/response budgets. Callers own admission and terminal access audit.
+pub async fn query_model_call(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    model_call_id: &ModelCallId,
+) -> Result<Option<ModelCallSummary>, PublishError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        execute_model_call(config, client, tenant_id, site_id, model_call_id),
+    )
+    .await
+    .map_err(|_| PublishError::QueryTimeout)?
+}
+
+#[allow(clippy::too_many_lines)]
+async fn execute_model_call(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    model_call_id: &ModelCallId,
+) -> Result<Option<ModelCallSummary>, PublishError> {
+    // ponytail: bounded payload scan; materialize a model-call lookup column
+    // when measured retention volumes exceed this adapter's scan budget.
+    let mut cursor = client
+        .query(
+            "SELECT event_id,event_type,request_id,occurred_at,request_seq,
+             evidence_refs,cause_event_ids,sensitivity,payload_json FROM ?
+             WHERE tenant_id = ? AND site_id = ?
+               AND event_type IN ('model.started','model.requested','model.responded',
+                                  'model.failed','model.timeout','model.cancelled')
+               AND JSONExtractString(payload_json,'model_call_id') = ?
+             ORDER BY request_seq,event_id LIMIT 4",
+        )
+        .bind(Identifier(&config.active_view))
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(model_call_id.as_str())
+        .with_setting("max_execution_time", "2")
+        .with_setting("timeout_before_checking_execution_speed", "0")
+        .with_setting("max_rows_to_read", "1000000")
+        .with_setting("max_bytes_to_read", "67108864")
+        .with_setting("read_overflow_mode", "throw")
+        .with_setting("timeout_overflow_mode", "throw")
+        .with_setting("max_result_bytes", "131072")
+        .with_setting("result_overflow_mode", "throw")
+        .with_setting("max_memory_usage", "268435456")
+        .with_setting("max_threads", "2")
+        .with_setting("wait_end_of_query", "1")
+        .fetch::<ModelCallRow>()
+        .map_err(query_error)?;
+    let mut events = Vec::with_capacity(3);
+    let mut seen_event_ids = BTreeSet::new();
+    let mut seen_event_types = BTreeSet::new();
+    let mut evidence_ids = BTreeSet::new();
+    let mut terminal_seen = false;
+    let mut continuous = true;
+    while let Some(row) = cursor.next().await.map_err(query_error)? {
+        if cursor.decoded_bytes() > 128 * 1024 || row.payload_json.len() > 8192 {
+            return Err(PublishError::QueryBudgetExceeded);
+        }
+        if events.len() == 3
+            || !seen_event_ids.insert(row.event_id.clone())
+            || !seen_event_types.insert(row.event_type.clone())
+            || !matches!(
+                row.event_type.as_str(),
+                "model.started"
+                    | "model.requested"
+                    | "model.responded"
+                    | "model.failed"
+                    | "model.timeout"
+                    | "model.cancelled"
+            )
+            || !matches!(
+                row.sensitivity.as_str(),
+                "PUBLIC" | "INTERNAL" | "SENSITIVE" | "RESTRICTED"
+            )
+            || row.request_seq == 0
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        validate_id_list(&row.evidence_refs, None)?;
+        validate_id_list(&row.cause_event_ids, Some("ev_"))?;
+        evidence_ids.extend(row.evidence_refs.iter().cloned());
+        // The caller records every returned reference in one access event.
+        if evidence_ids.len() > super::LIST_ITEMS_MAX {
+            return Err(PublishError::InvalidEvent);
+        }
+        let event_id =
+            EventId::parse(row.event_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
+        let request_id =
+            RequestId::parse(row.request_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
+        let payload =
+            super::model_eval::ModelEvent::parse_query_event(&row.payload_json, &row.event_type)?;
+        if payload.model_call_id != model_call_id.as_str()
+            || row.cause_event_ids.len() != usize::from(payload.status != "started")
+            || row.cause_event_ids.contains(&row.event_id)
+            || payload
+                .input_artifact_id
+                .as_deref()
+                .is_some_and(|id| !row.evidence_refs.iter().any(|reference| reference == id))
+            || payload
+                .output_artifact_id
+                .as_deref()
+                .is_some_and(|id| !row.evidence_refs.iter().any(|reference| reference == id))
+            || payload
+                .call_artifact_id
+                .as_deref()
+                .is_some_and(|id| !row.evidence_refs.iter().any(|reference| reference == id))
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        let terminal = matches!(
+            row.event_type.as_str(),
+            "model.responded" | "model.failed" | "model.timeout" | "model.cancelled"
+        );
+        // request_seq survives clock rollback. A retained suffix is valid, but
+        // duplicate/reversed states and any event after a terminal are corrupt.
+        if terminal_seen
+            || events
+                .last()
+                .is_some_and(|previous: &ModelCallEventSummary| {
+                    row.request_seq <= previous.request_seq
+                        || row.event_type == "model.started"
+                        || (previous.status == "requested"
+                            && payload.input_artifact_id != previous.input_artifact_id)
+                        // There is no intervening model state before a send or
+                        // after it. Both visible endpoints must link directly.
+                        || ((previous.status == "requested" || payload.status == "requested")
+                            && row.cause_event_ids != [previous.event_id.clone()])
+                        || (previous.status == "started"
+                            && row.cause_event_ids == [previous.event_id.clone()]
+                            && !matches!(payload.status.as_str(), "requested" | "error"))
+                })
+            || (payload.status == "started"
+                && (payload.input_artifact_id.is_some()
+                    || payload.output_artifact_id.is_some()
+                    || payload.call_artifact_id.is_some()))
+            || (payload.status == "requested"
+                && (payload.output_artifact_id.is_some() || payload.call_artifact_id.is_some()))
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        if let Some(previous) = events.last() {
+            continuous &= row.cause_event_ids == [previous.event_id.clone()];
+        }
+        terminal_seen |= terminal;
+        events.push(ModelCallEventSummary {
+            event_id: event_id.as_str().to_owned(),
+            event_type: row.event_type,
+            request_id: request_id.as_str().to_owned(),
+            occurred_at: row.occurred_at,
+            request_seq: row.request_seq,
+            status: payload.status,
+            model_revision: payload.model_revision,
+            prompt_revision: payload.prompt_revision,
+            question_type: payload.question_type,
+            reason_code: payload.reason_code,
+            confidence: payload.confidence,
+            confidence_status: payload.confidence_status,
+            duration_us: payload.duration_us,
+            input_artifact_id: payload.input_artifact_id,
+            output_artifact_id: payload.output_artifact_id,
+            call_artifact_id: payload.call_artifact_id,
+            evidence_refs: row.evidence_refs,
+            cause_event_ids: row.cause_event_ids,
+            sensitivity: row.sensitivity,
+        });
+    }
+    if events.is_empty() {
+        return Ok(None);
+    }
+    // A retained suffix may reference an absent predecessor, but a cause that
+    // is visible at the same or a later sequence proves a contradiction.
+    if events.iter().enumerate().any(|(index, event)| {
+        event
+            .cause_event_ids
+            .iter()
+            .any(|cause| events[index..].iter().any(|later| &later.event_id == cause))
+    }) {
+        return Err(PublishError::InvalidEvent);
+    }
+    let first = events.first().ok_or(PublishError::InvalidEvent)?;
+    let request_id = first.request_id.clone();
+    let model_call_id = model_call_id.as_str().to_owned();
+    let model_revision = first.model_revision.clone();
+    let prompt_revision = first.prompt_revision.clone();
+    let question_type = first.question_type.clone();
+    let lifecycle_complete = first.status == "started" && terminal_seen && continuous;
+    for event in &events {
+        if event.request_id != request_id
+            || event.model_revision != model_revision
+            || event.prompt_revision != prompt_revision
+            || event.question_type != question_type
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+    }
+    let mut input_artifact_id = None;
+    let mut output_artifact_id = None;
+    let mut call_artifact_id = None;
+    for event in &events {
+        input_artifact_id = merge_model_ref(input_artifact_id, event.input_artifact_id.clone())?;
+        output_artifact_id = merge_model_ref(output_artifact_id, event.output_artifact_id.clone())?;
+        call_artifact_id = merge_model_ref(call_artifact_id, event.call_artifact_id.clone())?;
+    }
+    let latest_payload = events.last().ok_or(PublishError::InvalidEvent)?;
+    Ok(Some(ModelCallSummary {
+        model_call_id,
+        request_id,
+        model_revision,
+        prompt_revision,
+        question_type,
+        status: latest_payload.status.clone(),
+        reason_code: latest_payload.reason_code.clone(),
+        confidence: latest_payload.confidence,
+        confidence_status: latest_payload.confidence_status.clone(),
+        duration_us: latest_payload.duration_us,
+        input_artifact_id,
+        output_artifact_id,
+        call_artifact_id,
+        events,
+        lifecycle_complete,
+    }))
+}
+
+fn merge_model_ref(
+    current: Option<String>,
+    next: Option<String>,
+) -> Result<Option<String>, PublishError> {
+    match (current, next) {
+        (Some(current), Some(next)) if current != next => Err(PublishError::InvalidEvent),
+        (Some(current), _) => Ok(Some(current)),
+        (None, next) => Ok(next),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -407,8 +754,51 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
 
 #[cfg(test)]
 mod tests {
-    use super::{PublishError, SearchEventSummary, query_error, validate_search_event};
-    use clickhouse::error::Error;
+    use super::{
+        ModelCallRow, ModelCallSummary, PublishError, SearchEventSummary, query_error,
+        query_model_call, validate_search_event,
+    };
+    use crate::PublisherConfig;
+    use chrono::{DateTime, Utc};
+    use clickhouse::{Client, error::Error, test};
+    use xshield_core::domain::{ModelCallId, SiteId, TenantId};
+
+    const MODEL_CALL_ID: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
+    const REQUEST_ID: &str = "req_018f2a3b-4c5d-7000-8000-000000000001";
+    const INPUT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000001";
+    const OUTPUT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000002";
+    const CALL_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000003";
+
+    fn model_row(
+        event_id: &str,
+        event_type: &str,
+        request_seq: u32,
+        payload: &str,
+        refs: Vec<String>,
+    ) -> ModelCallRow {
+        ModelCallRow {
+            event_id: event_id.to_owned(),
+            event_type: event_type.to_owned(),
+            request_id: REQUEST_ID.to_owned(),
+            occurred_at: DateTime::parse_from_rfc3339(&format!(
+                "2026-09-19T00:00:0{request_seq}.000Z"
+            ))
+            .unwrap()
+            .with_timezone(&Utc),
+            request_seq,
+            evidence_refs: refs,
+            cause_event_ids: if event_type == "model.started" {
+                vec![]
+            } else {
+                vec![format!(
+                    "ev_018f2a3b-4c5d-7000-8000-{:012}",
+                    request_seq - 1
+                )]
+            },
+            sensitivity: "RESTRICTED".to_owned(),
+            payload_json: payload.to_owned(),
+        }
+    }
 
     #[test]
     fn model_search_metadata_keeps_revision_and_confidence_semantics() {
@@ -485,6 +875,261 @@ mod tests {
         assert!(matches!(
             query_error(Error::TimedOut),
             PublishError::QueryTimeout
+        ));
+    }
+
+    fn model_rows() -> Vec<ModelCallRow> {
+        let started = serde_json::json!({
+            "model_call_id": MODEL_CALL_ID,
+            "model_revision": "jev-1.13.0",
+            "prompt_revision": "evaluation-r1",
+            "question_type": "choice",
+            "status": "started",
+            "reason_code": "MODEL_EVALUATION_STARTED",
+            "confidence": null,
+            "confidence_status": "unavailable",
+            "duration_us": 0,
+            "input_artifact_id": null,
+            "output_artifact_id": null,
+            "call_artifact_id": null
+        })
+        .to_string();
+        let responded = serde_json::json!({
+            "model_call_id": MODEL_CALL_ID,
+            "model_revision": "jev-1.13.0",
+            "prompt_revision": "evaluation-r1",
+            "question_type": "choice",
+            "status": "success",
+            "reason_code": "MODEL_EVALUATED",
+            "confidence": 0.8,
+            "confidence_status": "provided",
+            "duration_us": 1200,
+            "input_artifact_id": INPUT_ID,
+            "output_artifact_id": OUTPUT_ID,
+            "call_artifact_id": CALL_ID
+        })
+        .to_string();
+        let mut requested: serde_json::Value = serde_json::from_str(&started).unwrap();
+        requested["status"] = "requested".into();
+        requested["reason_code"] = "MODEL_REQUEST_SENT".into();
+        requested["input_artifact_id"] = INPUT_ID.into();
+        vec![
+            model_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000001",
+                "model.started",
+                1,
+                &started,
+                vec![],
+            ),
+            model_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000002",
+                "model.requested",
+                2,
+                &requested.to_string(),
+                vec![INPUT_ID.to_owned()],
+            ),
+            model_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000003",
+                "model.responded",
+                3,
+                &responded,
+                vec![
+                    INPUT_ID.to_owned(),
+                    OUTPUT_ID.to_owned(),
+                    CALL_ID.to_owned(),
+                ],
+            ),
+        ]
+    }
+
+    async fn query_model_rows(
+        rows: Vec<ModelCallRow>,
+    ) -> Result<Option<ModelCallSummary>, PublishError> {
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide(rows));
+        let config = PublisherConfig::new(
+            "/tmp/xshield-model-query-journal",
+            "/tmp/xshield-model-query-manifest",
+            "/tmp/xshield-model-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        query_model_call(
+            &config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_demo").unwrap(),
+            &SiteId::parse("site_demo").unwrap(),
+            &ModelCallId::parse(MODEL_CALL_ID).unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn model_call_query_returns_typed_lifecycle_and_refs() {
+        let summary = query_model_rows(model_rows()).await.unwrap().unwrap();
+        assert_eq!(summary.status, "success");
+        assert_eq!(summary.events.len(), 3);
+        assert!(summary.lifecycle_complete);
+        assert_eq!(summary.input_artifact_id.as_deref(), Some(INPUT_ID));
+        assert_eq!(summary.output_artifact_id.as_deref(), Some(OUTPUT_ID));
+        assert_eq!(summary.call_artifact_id.as_deref(), Some(CALL_ID));
+    }
+
+    #[tokio::test]
+    async fn model_call_query_distinguishes_partial_pending_and_presend_failure() {
+        assert!(query_model_rows(vec![]).await.unwrap().is_none());
+        for omitted in [0, 1, 2] {
+            let mut rows = model_rows();
+            rows.remove(omitted);
+            assert!(
+                !query_model_rows(rows)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .lifecycle_complete
+            );
+        }
+        let mut rows = model_rows();
+        rows.truncate(2);
+        rows[1].event_type = "model.failed".to_owned();
+        let mut payload: serde_json::Value = serde_json::from_str(&rows[1].payload_json).unwrap();
+        payload["status"] = "error".into();
+        payload["reason_code"] = "MODEL_EVIDENCE_UNAVAILABLE".into();
+        rows[1].payload_json = payload.to_string();
+        assert!(
+            query_model_rows(rows)
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle_complete
+        );
+
+        let mut noul = model_rows();
+        for row in &mut noul {
+            let mut payload: serde_json::Value = serde_json::from_str(&row.payload_json).unwrap();
+            payload["question_type"] = "noul".into();
+            payload["confidence"] = serde_json::Value::Null;
+            payload["confidence_status"] = "not_applicable".into();
+            row.payload_json = payload.to_string();
+        }
+        let summary = query_model_rows(noul).await.unwrap().unwrap();
+        assert!(summary.lifecycle_complete);
+        assert_eq!(summary.confidence, None);
+        assert_eq!(summary.confidence_status, "not_applicable");
+    }
+
+    #[tokio::test]
+    async fn model_call_query_rejects_corrupt_lifecycle_and_bounds_payloads() {
+        for field in [
+            "confidence",
+            "input_artifact_id",
+            "output_artifact_id",
+            "call_artifact_id",
+        ] {
+            let mut rows = model_rows();
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&rows[0].payload_json).unwrap();
+            payload.as_object_mut().unwrap().remove(field);
+            rows[0].payload_json = payload.to_string();
+            assert!(query_model_rows(rows).await.is_err(), "missing {field}");
+        }
+        for mutation in 0..11 {
+            let mut rows = model_rows();
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&rows[2].payload_json).unwrap();
+            match mutation {
+                0 => payload["model_call_id"] = "mdl_018f2a3b-4c5d-7000-8000-000000000002".into(),
+                1 => rows[2].request_id = "req_018f2a3b-4c5d-7000-8000-000000000002".into(),
+                2 => payload["prompt_revision"] = "other-prompt".into(),
+                3 => rows[2].evidence_refs.clear(),
+                4 => rows[2].event_id = "ev_018f2a3b-4c5d-7000-8000-000000000001".into(),
+                5 => rows[2].request_seq = 2,
+                6 => rows[2].cause_event_ids = vec![rows[2].event_id.clone()],
+                7 => rows[2].sensitivity = "invalid".into(),
+                8 => payload["unexpected"] = true.into(),
+                9 => {
+                    rows[2].event_type = "model.failed".into();
+                    payload["status"] = "error".into();
+                    payload["confidence"] = serde_json::Value::Null;
+                    payload["confidence_status"] = "unavailable".into();
+                    payload["input_artifact_id"] = serde_json::Value::Null;
+                }
+                _ => payload["question_type"] = "noul".into(),
+            }
+            rows[2].payload_json = payload.to_string();
+            assert!(query_model_rows(rows).await.is_err(), "mutation {mutation}");
+        }
+        for (event_type, status) in [
+            ("model.timeout", "timeout"),
+            ("model.cancelled", "cancelled"),
+        ] {
+            let mut rows = model_rows();
+            rows.truncate(2);
+            rows[1].event_type = event_type.into();
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&rows[1].payload_json).unwrap();
+            payload["status"] = status.into();
+            payload["input_artifact_id"] = serde_json::Value::Null;
+            rows[1].payload_json = payload.to_string();
+            assert!(matches!(
+                query_model_rows(rows).await,
+                Err(PublishError::InvalidEvent)
+            ));
+        }
+        let mut rows = model_rows();
+        rows.push(model_rows().remove(2));
+        assert!(matches!(
+            query_model_rows(rows).await,
+            Err(PublishError::InvalidEvent)
+        ));
+        let mut rows = model_rows();
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.evidence_refs.extend((0..128).map(|offset| {
+                format!(
+                    "artifact_018f2a3b-4c5d-7000-8000-{:012}",
+                    100 + index * 128 + offset
+                )
+            }));
+        }
+        assert!(matches!(
+            query_model_rows(rows).await,
+            Err(PublishError::InvalidEvent)
+        ));
+        let mut rows = model_rows();
+        rows[0].payload_json.push_str(&" ".repeat(8192));
+        assert!(matches!(
+            query_model_rows(rows).await,
+            Err(PublishError::QueryBudgetExceeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_call_query_rejects_conflicting_causes_in_complete_and_partial_history() {
+        for (index, cause) in [(1, 2), (2, 0)] {
+            let mut rows = model_rows();
+            rows[index].cause_event_ids = vec![rows[cause].event_id.clone()];
+            assert!(matches!(
+                query_model_rows(rows).await,
+                Err(PublishError::InvalidEvent)
+            ));
+        }
+        for index in [1, 2] {
+            let mut rows = model_rows();
+            rows[index].cause_event_ids = vec!["ev_018f2a3b-4c5d-7000-8000-000000000004".into()];
+            assert!(matches!(
+                query_model_rows(rows).await,
+                Err(PublishError::InvalidEvent)
+            ));
+        }
+        let mut suffix = model_rows();
+        suffix.remove(0);
+        suffix[0].cause_event_ids = vec![suffix[1].event_id.clone()];
+        assert!(matches!(
+            query_model_rows(suffix).await,
+            Err(PublishError::InvalidEvent)
         ));
     }
 }

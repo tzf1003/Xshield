@@ -40,6 +40,10 @@ def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: d
                                     output_artifact_id=None, call_artifact_id=None)
             if status != 'requested': event['payload']['input_artifact_id'] = None
         check('model_lifecycle:' + status, valid(schemas['audit-event'], event))
+        for field in ['input_artifact_id', 'output_artifact_id', 'call_artifact_id']:
+            missing = copy.deepcopy(event)
+            del missing['payload'][field]
+            check(f'model_lifecycle:{status}_missing_{field}', not valid(schemas['audit-event'], missing))
         event['payload']['status'] = 'requested' if status == 'started' else 'started'
         check('model_lifecycle:status_mismatch_' + status, not valid(schemas['audit-event'], event))
     for label, fields, expected in [

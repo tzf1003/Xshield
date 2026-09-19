@@ -71,3 +71,5 @@ Noul 使用 `question={"type":"noul","instructions":"所需判断的问题"}`。
 执行 `cargo run -p xshield-worker --bin xshield-model-eval -- --approved-input /private/approved-evaluation.json`。stdout 仅包含 request/model-call ID、终态与 artifact 引用，非成功退出码为 1；SIGINT 请求取消并等待取证/终态完成。429/529 后检查调用记录中的 HTTP 状态及 Retry-After，由批准流程决定是否发起新的独立调用，旧调用不变。强制终止后重新启动会补记结果未知，再执行本次新任务，可能已发生的供应商计费需另行核对。
 
 每个 journal 事件即时关闭段，可用既有 `xshield-audit-seal` 与 `xshield-worker` 封存/发布，使用独立目标绑定 checkpoint；证据目录发布采用 PostgreSQL outbox。维护时接近 10000 条记录，应先完成未终结调用恢复、封存与投递，再切换到新的专用 journal 目录；保留旧目录及水位作为审计材料，不删除未投递段。正文通过现有管理案件/申请/批准/读取链路查看；24 小时后按 RB-10 清理，需更长保留的评估计划应先调整并验证实现。
+
+使用同一 tenant/site 的 `Observer` 调用 `GET /control/v1/model-calls/{model_call_id}` 检查模型摘要和证据引用；`completeness` 说明可见生命周期是否完整。`not_indexed` 表示 active 索引当前未命中，需核对模型专属 journal 的封存、发布、水位与保留期限；`partial` 需核对缺失事件及保留情况。控制响应中的 `watermark_scope=configured_journal` 只覆盖该控制实例配置的 source journal/manifests/checkpoints：需要模型投递水位时，将这些路径及对应验证密钥指向该模型发布源；网关日志水位不能证明模型发布已追平。查询超出扫描预算时联系操作员核对保留规模与索引计划，按当前记录的调用 ID 排查即可。
