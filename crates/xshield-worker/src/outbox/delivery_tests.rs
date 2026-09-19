@@ -398,7 +398,7 @@ async fn postgres_gateway_identity_outbox_publishing() {
     pool.close().await;
 }
 
-async fn insert_event(
+pub(super) async fn insert_event(
     pool: &PgPool,
     scope: &OutboxScope,
     family: OutboxFamily,

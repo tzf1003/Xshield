@@ -63,7 +63,8 @@ jobs:
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
       - run: node --test sensor/test/sensor.test.mjs
-      - run: scripts/test_postgres.sh
+      - name: PostgreSQL and transactional Outbox integration
+        run: scripts/test_postgres.sh
       - name: ClickHouse publication and search integration
         run: |
           cargo test -p xshield-worker --lib real_schema_publisher -- --ignored

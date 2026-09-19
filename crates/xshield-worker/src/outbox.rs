@@ -20,6 +20,8 @@ use xshield_postgres::{
 };
 
 #[cfg(test)]
+mod clickhouse_tests;
+#[cfg(test)]
 mod delivery_tests;
 mod identity;
 

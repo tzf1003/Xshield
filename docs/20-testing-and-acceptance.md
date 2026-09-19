@@ -102,4 +102,6 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `scripts/test_gateway_identity.sh` 通过真实网关、合成源站和专有 PostgreSQL 库执行匿名创建、登录、刷新与同主体上下文切换，保留原有认证、CAS、旧资格隔离及错误响应断言，同时检查生产 v3 envelope 与请求 ID。脚本结束前运行 `postgres_gateway_identity_outbox_publishing`，将实际生产的四种身份事务通过 worker 投递给受控 ClickHouse HTTP 服务，核对 RowBinary 索引、摘要、确认和重复运行空批次；该测试只接受脚本拥有的 `xshield_gateway_*` 数据库。
 
-真实 ClickHouse 验收需要 PostgreSQL 与 ClickHouse 专用测试服务：使用 `XSHIELD_OUTBOX_FAMILY=case`、`evidence_catalog`、`evidence_access` 和 `identity` 分别运行发布 API，验证重试后 active 视图的唯一事件、SHA-256 digest 与 PostgreSQL `published_at`；相同 event_id 的不同正文保持 `OUTBOX_INTEGRITY_CONFLICT`，旧租约确认保持 rejected。此服务级 Outbox 回归仍待执行。
+配置 20.6 的 `XSHIELD_TEST_CLICKHOUSE_URL` 及测试账户后，`scripts/test_postgres.sh` 还会运行 `real_outbox_clickhouse_delivery`：在专有 PostgreSQL 临时库和独占 ClickHouse 数据库内重复应用生产 DDL，通过四族发布 API 投递十二组按生产契约构造的合成 envelope，读回两个底表及两个 active 视图，核对作用域、事件引用、SHA-256 digest、微秒时间、保留期限、确定性空置信度和非业务终态，并逐行检查 PostgreSQL 精确确认与重复运行空批次。该回归已在 ClickHouse `25.8.29.51` 执行通过并接入 CI；普通 workspace 测试将其标为 ignored，脚本未配置 ClickHouse URL 时明确报告跳过。
+
+故障回归以数据库时间强制租约过期，验证索引写入成功后旧 token 确认被拒绝，重新领取可确认且底表重复行在 active 视图合并为一条。真实缺失目标表返回 `OUTBOX_INDEX_UNAVAILABLE`，延迟期间不领取，到期并恢复目标后重试成功；同一 event_id 修改合成正文返回 `OUTBOX_INTEGRITY_CONFLICT` 并保持未确认。断言失败后仍等待清理本测试所属的双库数据。该回归验证数据库集成与故障注入，不覆盖进程崩溃、网络分区或生产负载。

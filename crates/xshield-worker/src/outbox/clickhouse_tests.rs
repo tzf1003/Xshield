@@ -1,0 +1,382 @@
+//! Real transactional outbox delivery against the production `ClickHouse` DDL.
+
+use super::{delivery_tests::insert_event, tests::*, *};
+use chrono::{DateTime, SecondsFormat, Timelike, Utc};
+use clickhouse::sql::Identifier;
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use uuid::Uuid;
+use xshield_core::domain::{SiteId, TenantId};
+
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL and XSHIELD_TEST_CLICKHOUSE_URL"]
+async fn real_outbox_clickhouse_delivery() {
+    let pool = PgPool::connect(&std::env::var("XSHIELD_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let mut admin =
+        Client::default().with_url(std::env::var("XSHIELD_TEST_CLICKHOUSE_URL").unwrap());
+    if let Ok(user) = std::env::var("XSHIELD_TEST_CLICKHOUSE_USER") {
+        admin = admin.with_user(user);
+    }
+    if let Ok(password) = std::env::var("XSHIELD_TEST_CLICKHOUSE_PASSWORD") {
+        admin = admin.with_password(password);
+    }
+    let owner = Uuid::now_v7().simple().to_string();
+    let database = format!("xshield_outbox_test_{owner}");
+    let scope = OutboxScope::new(
+        &TenantId::parse(format!("tenant_outbox_{owner}")).unwrap(),
+        &SiteId::parse("site_outbox_clickhouse").unwrap(),
+    );
+    admin
+        .query("CREATE DATABASE ?")
+        .bind(Identifier(&database))
+        .execute()
+        .await
+        .unwrap();
+    let client = admin.clone().with_database(database.clone());
+    let schema_database = database.clone();
+    let test_pool = pool.clone();
+    let test_scope = scope.clone();
+    // The owner awaits cleanup even if DDL setup or an assertion panics.
+    let outcome = tokio::spawn(async move {
+        let schema = include_str!("../../../../sql/clickhouse.sql")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("xshield.", &format!("{schema_database}."));
+        for _ in 0..2 {
+            for statement in schema.split(';').map(str::trim) {
+                if !statement.is_empty() && statement != "CREATE DATABASE IF NOT EXISTS xshield" {
+                    client.query(statement).execute().await.unwrap();
+                }
+            }
+        }
+        exercise_delivery(&test_pool, &test_scope, &client).await;
+    })
+    .await;
+    let postgres_cleanup =
+        sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id = $1 AND site_id = $2")
+            .bind(scope.tenant_id().as_str())
+            .bind(scope.site_id().as_str())
+            .execute(&pool)
+            .await;
+    let clickhouse_cleanup = admin
+        .query("DROP DATABASE ? SYNC")
+        .bind(Identifier(&database))
+        .execute()
+        .await;
+    pool.close().await;
+    assert!(postgres_cleanup.is_ok(), "owned outbox rows cleanup failed");
+    assert!(
+        clickhouse_cleanup.is_ok(),
+        "owned ClickHouse database cleanup failed"
+    );
+    if let Err(error) = outcome {
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+        panic!("Outbox ClickHouse regression task was cancelled");
+    }
+}
+
+async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) {
+    let store = PostgresIdentityStore::from_pool(pool.clone());
+    let config = OutboxPublisherConfig::new(
+        "audit_events",
+        30,
+        OutboxLeaseConfig::new(16, 64 * 1024, Duration::from_mins(1)).unwrap(),
+        Duration::from_hours(1),
+    )
+    .unwrap();
+    let mut expected = BTreeMap::new();
+    for (family, envelopes) in [
+        (
+            OutboxFamily::Case,
+            CASE_EVENT_TYPES.iter().map(|kind| event(kind)).collect(),
+        ),
+        (
+            OutboxFamily::EvidenceCatalog,
+            vec![
+                catalog_event("gateway-evidence-catalog"),
+                catalog_event("model-eval"),
+            ],
+        ),
+        (
+            OutboxFamily::EvidenceAccess,
+            vec![
+                access_request_event(),
+                access_decision_event("evidence.access.approved"),
+                access_decision_event("evidence.access.denied"),
+            ],
+        ),
+        (
+            OutboxFamily::Identity,
+            identity::EVENT_TYPES
+                .iter()
+                .map(|kind| identity::tests::event(kind))
+                .collect(),
+        ),
+    ] {
+        for envelope in envelopes {
+            let stored = insert_event(pool, scope, family, current_event(envelope)).await;
+            expected.insert(stored["event_id"].as_str().unwrap().to_owned(), stored);
+        }
+    }
+    for (family, count) in [
+        (OutboxFamily::Case, 3),
+        (OutboxFamily::EvidenceCatalog, 2),
+        (OutboxFamily::EvidenceAccess, 3),
+        (OutboxFamily::Identity, 4),
+    ] {
+        assert_eq!(
+            publish_family(&store, client, scope, &config, family).await,
+            OutboxPublishReport {
+                claimed: count,
+                published: count
+            }
+        );
+        assert_eq!(
+            publish_family(&store, client, scope, &config, family).await,
+            OutboxPublishReport {
+                claimed: 0,
+                published: 0
+            }
+        );
+    }
+    for id in expected.keys() {
+        assert_acknowledged(pool, id, 1).await;
+    }
+    assert_index_rows(client, scope, &expected).await;
+    exercise_retry_and_conflict(pool, scope, client, &store, &config).await;
+}
+
+async fn assert_index_rows(
+    client: &Client,
+    scope: &OutboxScope,
+    expected: &BTreeMap<String, Value>,
+) {
+    for table in [
+        "audit_events",
+        "events_by_time",
+        "audit_events_active",
+        "events_by_time_active",
+    ] {
+        let rows = client
+            .query("SELECT ?fields FROM ?")
+            .bind(Identifier(table))
+            .fetch_all::<IndexRow>()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), expected.len());
+        for row in rows {
+            let envelope = &expected[&row.event_id];
+            let digest = hex(&sha256_digest(&serde_json::to_vec(envelope).unwrap()));
+            assert_eq!(row.content_digest.as_slice(), digest.as_bytes());
+            assert_eq!(row.event_hash, digest);
+            assert_eq!(row.tenant_id, scope.tenant_id().as_str());
+            assert_eq!(row.site_id, scope.site_id().as_str());
+            assert_eq!(row.event_type, envelope["event_type"]);
+            assert_eq!(row.producer_id, envelope["producer_id"]);
+            assert_eq!(row.request_id, envelope["request_id"]);
+            assert_eq!(
+                serde_json::to_value(&row.evidence_refs).unwrap(),
+                envelope["evidence_refs"]
+            );
+            assert_eq!(
+                serde_json::to_value(&row.cause_event_ids).unwrap(),
+                envelope["cause_event_ids"]
+            );
+            assert_eq!(
+                row.occurred_at,
+                DateTime::parse_from_rfc3339(envelope["occurred_at"].as_str().unwrap()).unwrap()
+            );
+            assert_eq!(row.observed_at, row.occurred_at);
+            assert_eq!(row.occurred_at.timestamp_subsec_micros(), 123_456);
+            assert_eq!(
+                row.retention_expires_at,
+                row.occurred_at + TimeDelta::days(30)
+            );
+            assert_eq!(row.confidence, None);
+            assert_eq!(row.confidence_status, "not_applicable");
+            assert_eq!(row.proof_kind, "deterministic");
+            assert_eq!(row.is_terminal, 0);
+            assert_eq!(
+                serde_json::from_str::<Value>(&row.payload_json).unwrap(),
+                envelope["payload"]
+            );
+        }
+    }
+}
+
+async fn publish_family(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+    family: OutboxFamily,
+) -> OutboxPublishReport {
+    match family {
+        OutboxFamily::Case => publish_case_outbox_batch(store, client, scope, config).await,
+        OutboxFamily::EvidenceCatalog => {
+            publish_evidence_catalog_outbox_batch(store, client, scope, config).await
+        }
+        OutboxFamily::EvidenceAccess => {
+            publish_evidence_access_outbox_batch(store, client, scope, config).await
+        }
+        OutboxFamily::Identity => publish_identity_outbox_batch(store, client, scope, config).await,
+    }
+    .unwrap()
+}
+
+// Keep the lost-ack, retry, and conflict transitions in execution order.
+#[allow(clippy::too_many_lines)]
+async fn exercise_retry_and_conflict(
+    pool: &PgPool,
+    scope: &OutboxScope,
+    client: &Client,
+    store: &PostgresIdentityStore,
+    config: &OutboxPublisherConfig,
+) {
+    let replay = insert_event(
+        pool,
+        scope,
+        OutboxFamily::Case,
+        current_event(event("case.created")),
+    )
+    .await;
+    let id = replay["event_id"].as_str().unwrap();
+    let leases = store
+        .claim_outbox_batch_for_types(scope, config.lease, CASE_EVENT_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(leases.len(), 1);
+    // Expiration before ACK models a completed index write whose lease was lost.
+    sqlx::query("UPDATE xshield.audit_outbox SET lease_until = clock_timestamp() - interval '1 second' WHERE event_id = $1")
+        .bind(id).execute(pool).await.unwrap();
+    assert!(matches!(
+        publish_one(store, client, scope, config, OutboxFamily::Case, &leases[0]).await,
+        Err(PublishError::OutboxLeaseLost)
+    ));
+    let pending: bool = sqlx::query_scalar("SELECT published_at IS NULL AND lease_token = $2 AND delivery_attempts = 1 FROM xshield.audit_outbox WHERE event_id = $1")
+        .bind(id).bind(&leases[0].lease_token).fetch_one(pool).await.unwrap();
+    assert!(pending);
+    assert_eq!(
+        store
+            .ack_outbox_event(scope, &leases[0].event_id, &leases[0].lease_token)
+            .await
+            .unwrap(),
+        OutboxAckOutcome::Rejected
+    );
+    assert_eq!(
+        publish_case_outbox_batch(store, client, scope, config)
+            .await
+            .unwrap()
+            .published,
+        1
+    );
+    assert_acknowledged(pool, id, 2).await;
+    for (table, count) in [
+        ("audit_events", 2),
+        ("events_by_time", 2),
+        ("audit_events_active", 1),
+        ("events_by_time_active", 1),
+    ] {
+        let actual = client
+            .query("SELECT count() FROM ? WHERE event_id = ?")
+            .bind(Identifier(table))
+            .bind(id)
+            .fetch_one::<u64>()
+            .await
+            .unwrap();
+        assert_eq!(actual, count);
+    }
+
+    let retry = insert_event(
+        pool,
+        scope,
+        OutboxFamily::Case,
+        current_event(event("case.closed")),
+    )
+    .await;
+    let retry_id = retry["event_id"].as_str().unwrap();
+    let unavailable = OutboxPublisherConfig {
+        table: "unavailable_audit_events".to_owned(),
+        ..config.clone()
+    };
+    assert!(matches!(
+        publish_case_outbox_batch(store, client, scope, &unavailable).await,
+        Err(PublishError::ClickHouse(_))
+    ));
+    assert_failure(pool, retry_id, INDEX_UNAVAILABLE_CODE).await;
+    assert_eq!(
+        publish_case_outbox_batch(store, client, scope, config)
+            .await
+            .unwrap()
+            .claimed,
+        0
+    );
+    sqlx::query("UPDATE xshield.audit_outbox SET next_attempt_at = clock_timestamp() - interval '1 second' WHERE event_id = $1")
+        .bind(retry_id).execute(pool).await.unwrap();
+    assert_eq!(
+        publish_case_outbox_batch(store, client, scope, config)
+            .await
+            .unwrap()
+            .published,
+        1
+    );
+    assert_acknowledged(pool, retry_id, 2).await;
+
+    // Mutating this synthetic source row exercises immutable-ID conflict detection.
+    let mut conflicting = replay;
+    conflicting["payload"]["subject_ref"] = json!("investigator-conflict");
+    let conflict_id = conflicting["event_id"].as_str().unwrap();
+    sqlx::query("UPDATE xshield.audit_outbox SET published_at = NULL, envelope = $2, next_attempt_at = clock_timestamp() WHERE event_id = $1")
+        .bind(conflict_id).bind(&conflicting).execute(pool).await.unwrap();
+    assert!(matches!(
+        publish_case_outbox_batch(store, client, scope, config).await,
+        Err(PublishError::IntegrityConflict)
+    ));
+    assert_failure(pool, conflict_id, INTEGRITY_CONFLICT_CODE).await;
+    for table in ["audit_events", "events_by_time"] {
+        let counts = client
+            .query("SELECT count(), uniqExact(content_digest) FROM ? WHERE event_id = ?")
+            .bind(Identifier(table))
+            .bind(conflict_id)
+            .fetch_one::<(u64, u64)>()
+            .await
+            .unwrap();
+        assert_eq!(counts, (2, 1));
+    }
+    assert_eq!(
+        client
+            .query("SELECT count() FROM audit_event_conflicts")
+            .fetch_one::<u64>()
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+fn current_event(mut envelope: Value) -> Value {
+    let now = Utc::now()
+        .with_nanosecond(123_456_000)
+        .unwrap()
+        .to_rfc3339_opts(SecondsFormat::Micros, true);
+    envelope["occurred_at"] = json!(now);
+    envelope["observed_at"] = envelope["occurred_at"].clone();
+    envelope
+}
+
+async fn assert_acknowledged(pool: &PgPool, id: &str, attempts: i32) {
+    let acknowledged: bool = sqlx::query_scalar("SELECT published_at IS NOT NULL AND lease_token IS NULL AND lease_until IS NULL AND delivery_attempts = $2 FROM xshield.audit_outbox WHERE event_id = $1")
+        .bind(id).bind(attempts).fetch_one(pool).await.unwrap();
+    assert!(acknowledged);
+}
+
+async fn assert_failure(pool: &PgPool, id: &str, code: &str) {
+    let retryable: bool = sqlx::query_scalar("SELECT published_at IS NULL AND lease_token IS NULL AND lease_until IS NULL AND next_attempt_at > clock_timestamp() AND last_error_code = $2 FROM xshield.audit_outbox WHERE event_id = $1")
+        .bind(id).bind(code).fetch_one(pool).await.unwrap();
+    assert!(retryable);
+}

@@ -68,6 +68,12 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-worker --lib model_eval::tests::postgres_evaluation -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-worker --lib postgres_outbox_publishing -- --ignored
+if [[ -n "${XSHIELD_TEST_CLICKHOUSE_URL:-}" ]]; then
+    XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+        cargo test -p xshield-worker --lib real_outbox_clickhouse_delivery -- --ignored
+else
+    printf '%s\n' 'ClickHouse outbox integration skipped: XSHIELD_TEST_CLICKHOUSE_URL is not configured.'
+fi
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control evidence_manifests_are_scoped_paginated_and_audited -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
