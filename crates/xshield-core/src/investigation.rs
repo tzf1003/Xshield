@@ -16,6 +16,76 @@ pub struct InvestigationCaseDraft {
     purpose: String,
 }
 
+/// A scoped evidence membership request; content access remains independent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaseEvidenceDraft {
+    tenant_id: TenantId,
+    site_id: SiteId,
+    case_id: CaseId,
+    artifact_id: ArtifactId,
+    added_by: String,
+}
+
+impl CaseEvidenceDraft {
+    /// Binds one evidence reference to an authenticated case owner and scope.
+    ///
+    /// Persistence rechecks ownership, case state, and artifact availability.
+    /// Membership neither authorizes content access nor extends retention.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] for an empty, oversized, or control-containing
+    /// actor reference. Construction has no storage or audit side effects.
+    pub fn new(
+        tenant_id: TenantId,
+        site_id: SiteId,
+        case_id: CaseId,
+        artifact_id: ArtifactId,
+        added_by: impl Into<String>,
+    ) -> Result<Self, InvalidValue> {
+        let added_by = added_by.into();
+        if !valid_text(&added_by, SUBJECT_MAX) {
+            return Err(InvalidValue::new("case_evidence_actor"));
+        }
+        Ok(Self {
+            tenant_id,
+            site_id,
+            case_id,
+            artifact_id,
+            added_by,
+        })
+    }
+
+    /// Returns the trusted tenant scope.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the trusted site scope.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+
+    /// Returns the owning investigation case.
+    #[must_use]
+    pub const fn case_id(&self) -> &CaseId {
+        &self.case_id
+    }
+
+    /// Returns the evidence object to associate.
+    #[must_use]
+    pub const fn artifact_id(&self) -> &ArtifactId {
+        &self.artifact_id
+    }
+
+    /// Returns the independently authenticated actor.
+    #[must_use]
+    pub fn added_by(&self) -> &str {
+        &self.added_by
+    }
+}
+
 /// Content scope requested for one evidence-access approval.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EvidenceAccessKind {
@@ -374,10 +444,31 @@ fn valid_text(value: &str, max: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        EvidenceAccessDecisionDraft, EvidenceAccessDecisionKind, EvidenceAccessKind,
-        EvidenceAccessRequestDraft, InvestigationCaseDraft,
+        CaseEvidenceDraft, EvidenceAccessDecisionDraft, EvidenceAccessDecisionKind,
+        EvidenceAccessKind, EvidenceAccessRequestDraft, InvestigationCaseDraft,
     };
     use crate::domain::{ArtifactId, CaseId, EvidenceAccessRequestId, SiteId, TenantId};
+
+    #[test]
+    fn case_evidence_actor_is_bounded() {
+        let draft = |actor: &str| {
+            CaseEvidenceDraft::new(
+                TenantId::parse("tenant_case").unwrap(),
+                SiteId::parse("site_case").unwrap(),
+                CaseId::parse("case_018f2a3b-4c5d-7000-8000-000000000901").unwrap(),
+                ArtifactId::parse("artifact_018f2a3b-4c5d-7000-8000-000000000912").unwrap(),
+                actor,
+            )
+        };
+        assert_eq!(
+            draft("investigator-1").unwrap().added_by(),
+            "investigator-1"
+        );
+        for invalid in [String::new(), "x".repeat(257), "actor\n".to_owned()] {
+            assert!(draft(&invalid).is_err());
+        }
+        assert!(draft(&"x".repeat(256)).is_ok());
+    }
 
     #[test]
     fn case_draft_is_scoped_and_bounded() {

@@ -280,7 +280,7 @@ fn case_event_matches(
         && payload.get("reason_code").and_then(Value::as_str) == Some(CASE_CREATED_REASON)
 }
 
-fn lower_hex(value: &[u8; 32]) -> String {
+pub(crate) fn lower_hex(value: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(64);
     for byte in value {

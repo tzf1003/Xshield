@@ -69,3 +69,9 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 `cargo test -p xshield-worker --lib model_eval` 运行严格 DTO、重复键、版本、候选/概率/置信度、文本/字节上限及真实 loopback HTTP 传输测试；覆盖固定目标、单次 429/529/重定向、超时、取消、响应前缀和 API key 排除。另验证私有输入、目录排他/容量与中断终态恢复。
 
 `scripts/test_postgres.sh` 在独立临时库迁移后运行 `model_eval::tests::postgres_evaluation`：实际 HTTP 字节与解密输入证据一致，供应商输出捕获、规范化记录和目录均可读取，所有 `model.*` journal 事件通过生产索引解析；验证成功、429、非法响应和秘密排除，并注入 catalog/outbox 写入失败确认 HTTP 未调用。该测试单独运行需要 `XSHIELD_TEST_DATABASE_URL`，默认常规测试会跳过。全部样本和 API key 均为合成数据；真实供应商推理、计费、检测率与校准另行批准和测量。
+
+## 20.8 案件证据关联回归
+
+`cargo test -p xshield-control case_evidence --lib` 验证机器凭证、角色、作用域、过期身份、速率限制、严格 DTO、重复字段/幂等头、非法 UTF-8 路径、4 KiB 请求上限、在途容量与存储故障的审计和安全错误。
+
+`scripts/test_postgres.sh` 应用迁移 0017 后执行存储并发/反例测试及 `case_evidence_is_durable_idempotent_and_disconnect_safe`：真实案件创建、vault/catalog 发布、加入证据、精确重试、冲突、缺失目标、客户端在行锁等待时断连后继续提交与终态审计、管理审计失败后的 outbox 保留及幂等确认。回归确认关联不改变对象到期时间、不创建原文审批，单有案件关联的 Reader 仍无法读取正文。独立数据库测试验证跨租户/站点、非本人/关闭案件、到期/删除对象、容量竞争与 outbox 故障回滚；这些测试默认 ignored，需可用 PostgreSQL 环境运行。

@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -145,3 +145,15 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 当前按有界生命周期 payload 扫描精确 ID，读取最多 4 行以识别超出三事件生命周期的冲突。单 payload 上限 8 KiB，解码/服务端结果上限 128 KiB，跨事件证据引用去重后最多 256 个；配置 2 秒执行预算、100 万扫描行、64 MiB 扫描字节、256 MiB 内存和 5 秒客户端 deadline。deadline 只覆盖索引查询，本地健康检查及审计 fsync 另行度量。与 search 共用单实例执行许可，已准入请求在客户端断连后继续终态审计。
 
 通过认证且路径校验成功的尝试以 `target_model_call_id` 绑定目标，实际返回的 artifact 引用进入 `evidence_refs`；可审计的成功、未命中、拒绝及依赖故障均写独立加密 `console.model.read`。无效 ID（含无法解码的 UTF-8 路径）返回 `CONTROL_MODEL_CALL_ID_INVALID`/400。预算耗尽返回 `CONTROL_QUERY_BUDGET_EXCEEDED`/429、`retryable=false`、`next_action=contact_operator`；许可占满返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，客户端 deadline 返回 `CONTROL_QUERY_TIMEOUT`/503，索引/健康依赖故障返回对应 503。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，所有响应设置 `Cache-Control: private, no-store`。
+
+## 29.16 已实现的案件证据关联契约
+
+`POST /control/v1/cases/{case_id}/items` 要求固定 tenant/site 内的 `Investigator` 与管理机器凭证。请求体上限 4 KiB，严格接受 `{"artifact_id":"artifact_UUIDv7"}`；case/artifact 均为规范强类型 ID，未知或重复字段拒绝。`Idempotency-Key` 必须单值且为 16–128 字节 ASCII 字母、数字、`-_.:`。复用管理变更专用密钥、独立用途域 HMAC，将键及请求摘要绑定主体、作用域、case 和 artifact；原始键不入库或审计。
+
+事务先按 actor 串行化幂等，再锁定本人 open 案件；新关联要求同作用域 active、未删除的 artifact，取得行锁后及插入时重验数据库当前期限。每案最多 128 项，复合主键保证同案同证据唯一；关联与 `case.evidence.added` outbox 同事务提交。首次返回 201，响应只含 schema_version、request_id、固定作用域、case_id、artifact_id、added_by、added_at 和 replayed。精确重试返回 200、原 added_at 和 replayed=true，仍重验当前案件归属与 open 状态；即使 artifact 此后到期或删除，历史关联元数据也可返回，不表示证据仍可读取。
+
+同键换参数，或同案同证据改用另一键，返回 `CONTROL_CASE_EVIDENCE_CONFLICT`/409，调用者应保留原键与请求。不存在、跨作用域、非本人/关闭案件及新关联的到期/删除证据统一为 `CONTROL_CASE_EVIDENCE_TARGET_UNAVAILABLE`/404。每案上限返回 `CONTROL_CASE_EVIDENCE_LIMIT_EXCEEDED`/429、retryable=false；单实例同时一个关联操作，忙时返回 `CONTROL_CASE_EVIDENCE_BUSY`/429、retryable=true。SQL 单语句和锁等待限 5 秒，包含连接池等待的数据库操作整体限 15 秒；故障或超时返回 `CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE`/503，应使用相同键和参数确认结果。超时可能发生在 COMMIT 已耐久之后，不能据此认定操作未发生。
+
+已准入操作在客户端断连后继续数据库终态与管理审计，许可覆盖至审计完成；本地 fsync 依赖健康存储，15 秒只限制数据库操作，进程退出仍是故障边界。每次可审计尝试写独立加密 `case.evidence.added` 管理事件，以 payload 的 outcome/reason 区分成功、拒绝和依赖故障；事务 outbox 只记录实际新增关联。经强类型校验的 case/artifact 进入目标字段，成功/精确重试的 artifact 进入 evidence_refs。管理审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留成功响应；已提交的事务及 outbox 保留，可用原请求重试确认。响应统一 `Cache-Control: private, no-store`。
+
+部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。集合浏览、保留锁及案件生命周期管理另行交付。

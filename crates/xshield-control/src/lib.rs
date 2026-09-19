@@ -5,6 +5,7 @@
 
 #![warn(missing_docs)]
 
+mod case_items;
 mod search;
 
 use axum::{
@@ -394,6 +395,7 @@ pub struct ControlPlane {
     seal_key: SealVerifyingKey,
     index: Client,
     search_capacity: Arc<Semaphore>,
+    case_evidence_capacity: Arc<Semaphore>,
     catalog: PostgresIdentityStore,
     evidence_read: Option<Arc<EvidenceReadPort>>,
     access_journal: Mutex<LocalJournal>,
@@ -423,6 +425,7 @@ impl ControlPlane {
             // ponytail: one analytical query per control instance; share a
             // tenant budget across replicas when measured load requires it.
             search_capacity: Arc::new(Semaphore::new(1)),
+            case_evidence_capacity: Arc::new(Semaphore::new(1)),
             catalog,
             evidence_read: None,
             access_journal: Mutex::new(access_journal),
@@ -3133,6 +3136,10 @@ pub fn router(control: ControlPlane) -> Router {
             CASES_PATH,
             post(create_case_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
         )
+        .route(
+            case_items::PATH,
+            post(case_items::handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+        )
         .with_state(Arc::new(control))
 }
 
@@ -4042,6 +4049,8 @@ impl From<serde_json::Error> for ControlError {
 
 #[cfg(test)]
 mod tests {
+    mod case_items;
+
     use super::search::SearchRequest;
     use super::{
         ControlConfig, ControlLimits, ControlPlane, CursorKey, EVIDENCE_ACCESS_REQUEST_HEADER,

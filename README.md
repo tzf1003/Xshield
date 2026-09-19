@@ -12,6 +12,8 @@
 
 `GET /control/v1/model-calls/{model_call_id}` 已提供固定作用域的模型调用摘要、因果链完整性与输入/输出证据引用，要求 `Observer` 并写独立耐久访问审计。查询预算、索引可见性及配置日志水位语义见 [29.15](docs/29-api-endpoint-catalog.md#2915-已实现的模型调用查询契约)。
 
+`POST /control/v1/cases/{case_id}/items` 已支持 Investigator 将同作用域有效证据引用加入本人开放案件：每案最多 128 项，关联与 outbox 原子提交，精确幂等重试，并在客户端断连后完成已准入操作的终态审计。先应用迁移 `0017_m3_case_evidence.sql`；关联只建立调查上下文，内容读取与保留期限仍独立校验，详见 [29.16](docs/29-api-endpoint-catalog.md#2916-已实现的案件证据关联契约)。
+
 缺少 WAF Cookie 的受保护根/API 请求会先原子创建一条有服务端绝对期限的匿名空 binding 与 `session.created` outbox，再以 401 拒绝并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。匿名 binding 的 epoch/generation 均为 0，不含主体、授权上下文、业务凭证或资格；重复携带该 Cookie 不会扩增记录，附加任意 Bearer 也不能升级身份。匿名 TTL、来源/站点创建速率与每租户/站点活动容量由 `identity_store` 有界配置；进程内预算先限制数据库调用，PostgreSQL 短事务再以传输层对端地址的租户/站点隔离 HMAC 实施分布式来源/站点限流。速率超限返回 429，容量超限返回 503，均不签发 Cookie。
 
 `AUTH_ENTRY` 已支持首个 Bearer 认证建立闭环：有界严格 JSON 成功响应提供配置指针指定的主体、授权上下文引用与 Bearer，网关在释放正文前原子写入新 binding、初始 credential generation 和 `binding.created` outbox，并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。源站同名 Cookie、响应形状偏差或事务失败均不建立身份；端到端测试已使用新签发的 WAF Cookie 与业务 Bearer 访问受保护根入口。
