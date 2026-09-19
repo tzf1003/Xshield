@@ -5,12 +5,12 @@ use std::{env, error::Error, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
 use xshield_postgres::{OutboxLeaseConfig, OutboxScope, PostgresIdentityStore};
 use xshield_worker::{
-    OutboxPublisherConfig, publish_case_outbox_batch, publish_evidence_catalog_outbox_batch,
+    OutboxPublisherConfig, publish_case_outbox_batch, publish_evidence_access_outbox_batch,
+    publish_evidence_catalog_outbox_batch,
 };
 use zeroize::Zeroizing;
 
-const USAGE: &str =
-    "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog)";
+const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access)";
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
@@ -31,7 +31,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if arguments.next().is_some() {
         return Err(USAGE.into());
     }
-    let family = env::var("XSHIELD_OUTBOX_FAMILY").unwrap_or_else(|_| "case".to_owned());
+    let family = match env::var("XSHIELD_OUTBOX_FAMILY") {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => "case".to_owned(),
+        Err(env::VarError::NotUnicode(_)) => return Err(USAGE.into()),
+    };
+    if !matches!(
+        family.as_str(),
+        "case" | "evidence_catalog" | "evidence_access"
+    ) {
+        return Err(USAGE.into());
+    }
 
     let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
     let database_max_connections: u32 =
@@ -74,6 +84,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "case" => publish_case_outbox_batch(&store, &client, &scope, &config).await?,
         "evidence_catalog" => {
             publish_evidence_catalog_outbox_batch(&store, &client, &scope, &config).await?
+        }
+        "evidence_access" => {
+            publish_evidence_access_outbox_batch(&store, &client, &scope, &config).await?
         }
         _ => return Err(USAGE.into()),
     };

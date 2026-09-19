@@ -96,6 +96,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 ## 20.12 outbox 发布回归
 
-`cargo test -p xshield-postgres --lib outbox` 覆盖领取上限、服务端租约配置、稳定错误码和非法 token；具备 PostgreSQL 的环境还应执行现有临时库脚本，验证 tenant/site 过滤、`SKIP LOCKED` 并发、过期租约重新领取、精确 token 确认、旧 token 拒绝以及失败后的 `next_attempt_at`/`last_error_code`。`cargo test -p xshield-worker --lib outbox` 覆盖三个 `case.*` 族、`evidence.cataloged` 的两个真实 producer、确定性 proof 字段、重复/未知键、artifact 三方错绑和跨族拒绝。
+`cargo test -p xshield-worker --lib outbox` 覆盖三个 `case.*` 类型、`evidence.cataloged` 的两个真实 producer、`evidence.access.*` 的请求/批准/拒绝三种形状、显式 nullable TTL、目标与请求/boot 绑定、重复/未知键和 journal/outbox 来源隔离；索引摘要固定为确定性空置信度，不设置业务终态。
 
-在同时提供 PostgreSQL 与 ClickHouse 的专用测试服务时，使用 `XSHIELD_OUTBOX_FAMILY=case` 和 `XSHIELD_OUTBOX_FAMILY=evidence_catalog` 分别运行同一 worker API 做真实回归：事务插入对应 envelope，领取后断开 ClickHouse 确认重试，再恢复服务确认底表和 active 视图各一条去重行、正确 SHA-256 digest 与 `published_at`；插入同 event_id 的不同正文必须保持 `OUTBOX_INTEGRITY_CONFLICT`，旧租约确认必须保持 rejected。当前工作区未声称在缺少 ClickHouse 服务时已执行该真实回归。
+`scripts/test_postgres.sh` 在专有临时数据库运行 `xshield-postgres --test outbox_delivery` 及 worker 的 `postgres_outbox_publishing` ignored 测试。存储层用显式行锁和数据库时间验证按族/tenant/site 领取、行/字节预算、`SKIP LOCKED` 并发、过期租约重领、旧 token/跨作用域拒绝、精确确认及有界重试。worker 使用真实 PostgreSQL 与受控 ClickHouse HTTP 响应，验证八组按生产契约构造的合成 envelope 的索引字段/摘要、确认后不再领取、未适配族不被修改、索引失败后重试成功、插入前后完整性冲突和 aggregate 错绑保留未确认状态。该回归不验证真实 ClickHouse DDL、去重和 active 视图。
+
+真实 ClickHouse 验收需要 PostgreSQL 与 ClickHouse 专用测试服务：使用 `XSHIELD_OUTBOX_FAMILY=case`、`evidence_catalog` 和 `evidence_access` 分别运行发布 API，验证重试后 active 视图的唯一事件、SHA-256 digest 与 PostgreSQL `published_at`；相同 event_id 的不同正文保持 `OUTBOX_INTEGRITY_CONFLICT`，旧租约确认保持 rejected。此服务级 Outbox 回归仍待执行。

@@ -1,7 +1,7 @@
 //! Typed adapters for transactional `PostgreSQL` outbox facts.
 //!
 //! Outbox envelopes are a different producer contract from sealed journal
-//! records. This module only accepts the complete case and evidence-catalog
+//! records. This module only accepts the complete case, catalog, and access
 //! envelopes emitted by their typed producers; other outbox families remain
 //! explicitly unsupported until their producers expose validated fields.
 
@@ -19,6 +19,9 @@ use xshield_postgres::{
     PostgresIdentityStore,
 };
 
+#[cfg(test)]
+mod delivery_tests;
+
 const MAX_OUTBOX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_RETRY_SECONDS: u64 = 3_600;
 const INVALID_EVENT_CODE: &str = "OUTBOX_INVALID_EVENT";
@@ -26,11 +29,17 @@ const INDEX_UNAVAILABLE_CODE: &str = "OUTBOX_INDEX_UNAVAILABLE";
 const INTEGRITY_CONFLICT_CODE: &str = "OUTBOX_INTEGRITY_CONFLICT";
 const CASE_EVENT_TYPES: &[&str] = &["case.created", "case.closed", "case.evidence.added"];
 const EVIDENCE_CATALOG_EVENT_TYPES: &[&str] = &["evidence.cataloged"];
+const EVIDENCE_ACCESS_EVENT_TYPES: &[&str] = &[
+    "evidence.access.requested",
+    "evidence.access.approved",
+    "evidence.access.denied",
+];
 
 #[derive(Clone, Copy)]
 enum OutboxFamily {
     Case,
     EvidenceCatalog,
+    EvidenceAccess,
 }
 
 impl OutboxFamily {
@@ -38,6 +47,7 @@ impl OutboxFamily {
         match self {
             Self::Case => CASE_EVENT_TYPES,
             Self::EvidenceCatalog => EVIDENCE_CATALOG_EVENT_TYPES,
+            Self::EvidenceAccess => EVIDENCE_ACCESS_EVENT_TYPES,
         }
     }
 
@@ -45,6 +55,7 @@ impl OutboxFamily {
         match self {
             Self::Case => "case_id",
             Self::EvidenceCatalog => "artifact_id",
+            Self::EvidenceAccess => "access_request_id",
         }
     }
 }
@@ -52,7 +63,13 @@ impl OutboxFamily {
 pub(super) fn supports(event_type: &str) -> bool {
     matches!(
         event_type,
-        "case.created" | "case.closed" | "case.evidence.added" | "evidence.cataloged"
+        "case.created"
+            | "case.closed"
+            | "case.evidence.added"
+            | "evidence.cataloged"
+            | "evidence.access.requested"
+            | "evidence.access.approved"
+            | "evidence.access.denied"
     )
 }
 
@@ -156,6 +173,23 @@ pub async fn publish_evidence_catalog_outbox_batch(
     config: &OutboxPublisherConfig,
 ) -> Result<OutboxPublishReport, PublishError> {
     publish_outbox_batch(store, client, scope, config, OutboxFamily::EvidenceCatalog).await
+}
+
+/// Publishes one bounded batch of evidence-access request and decision events.
+///
+/// Requests and independent decisions use separate payload contracts but share
+/// the authenticated control producer and access-request aggregate.
+///
+/// # Errors
+/// Returns the same lease, event, and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_evidence_access_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::EvidenceAccess).await
 }
 
 async fn publish_outbox_batch(
@@ -306,13 +340,16 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
     if event.producer_id != "xshield-control"
         || event.policy_revision != "control-v1"
         || valid_prefixed_v7(&event.producer_boot_id, "req_").is_err()
-        || event.request_id.is_none()
+        || event.request_id.as_deref() != Some(event.producer_boot_id.as_str())
         || event.request_seq != 1
         || event.producer_seq != 1
         || !event.cause_event_ids.is_empty()
         || event.sensitivity != "INTERNAL"
     {
         return Err(PublishError::InvalidEvent);
+    }
+    if EVIDENCE_ACCESS_EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return parse_evidence_access(event);
     }
     let payload: CasePayload = serde_json::from_str(event.payload.get())?;
     payload.validate(event)
@@ -346,6 +383,100 @@ fn parse_evidence_catalog(event: &WireEvent) -> Result<PayloadSummary, PublishEr
         || valid_prefixed_v7(&payload.artifact_id, "artifact_").is_err()
         || event.evidence_refs.len() != 1
         || event.evidence_refs[0] != payload.artifact_id
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    Ok(PayloadSummary {
+        stage: payload.stage,
+        outcome: payload.outcome,
+        reason_code: payload.reason_code,
+        proof_kind: "deterministic".to_owned(),
+        confidence_status: "not_applicable".to_owned(),
+        ..PayloadSummary::default()
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceAccessRequestPayload {
+    access_request_id: String,
+    case_id: String,
+    artifact_id: String,
+    subject_ref: String,
+    access_kind: String,
+    stage: String,
+    request_digest: String,
+    outcome: String,
+    reason_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceAccessDecisionPayload {
+    access_request_id: String,
+    subject_ref: String,
+    decision: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    ttl_seconds: Option<u32>,
+    request_digest: String,
+    stage: String,
+    outcome: String,
+    reason_code: String,
+}
+
+fn parse_evidence_access(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if event.event_type == "evidence.access.requested" {
+        let payload: EvidenceAccessRequestPayload = serde_json::from_str(event.payload.get())?;
+        if payload.stage != "evidence_access"
+            || payload.outcome != "PASS"
+            || payload.reason_code != "EVIDENCE_ACCESS_REQUESTED"
+            || payload.access_kind != "sensitive_raw"
+            || valid_prefixed_v7(&payload.access_request_id, "access_").is_err()
+            || valid_prefixed_v7(&payload.case_id, "case_").is_err()
+            || valid_prefixed_v7(&payload.artifact_id, "artifact_").is_err()
+            || !valid_subject(&payload.subject_ref)
+            || !valid_lower_hex(&payload.request_digest, 64)
+            || event.evidence_refs.len() != 1
+            || event.evidence_refs[0] != payload.artifact_id
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        return Ok(PayloadSummary {
+            stage: payload.stage,
+            outcome: payload.outcome,
+            reason_code: payload.reason_code,
+            proof_kind: "deterministic".to_owned(),
+            confidence_status: "not_applicable".to_owned(),
+            ..PayloadSummary::default()
+        });
+    }
+    if !matches!(
+        event.event_type.as_str(),
+        "evidence.access.approved" | "evidence.access.denied"
+    ) {
+        return Err(PublishError::UnsupportedEventType);
+    }
+    if !event.evidence_refs.is_empty() {
+        return Err(PublishError::InvalidEvent);
+    }
+    let payload: EvidenceAccessDecisionPayload = serde_json::from_str(event.payload.get())?;
+    let is_approved = event.event_type == "evidence.access.approved";
+    if payload.stage != "evidence_access_decision"
+        || payload.outcome != "PASS"
+        || payload.reason_code
+            != if is_approved {
+                "EVIDENCE_ACCESS_APPROVED"
+            } else {
+                "EVIDENCE_ACCESS_DENIED"
+            }
+        || payload.decision != if is_approved { "approved" } else { "denied" }
+        || valid_prefixed_v7(&payload.access_request_id, "access_").is_err()
+        || !valid_subject(&payload.subject_ref)
+        || !valid_lower_hex(&payload.request_digest, 64)
+        || (is_approved != payload.ttl_seconds.is_some())
+        || payload
+            .ttl_seconds
+            .is_some_and(|value| !(1..=86_400).contains(&value))
     {
         return Err(PublishError::InvalidEvent);
     }
@@ -426,14 +557,15 @@ mod tests {
     use xshield_core::domain::EventId;
 
     const EVENT: &str = "ev_018f2a3b-4c5d-7000-8000-000000000001";
-    const BOOT: &str = "req_018f2a3b-4c5d-7000-8000-000000000002";
+    const BOOT: &str = REQUEST;
     const CATALOG_BOOT: &str = "018f2a3b-4c5d-7000-8000-000000000006";
     const REQUEST: &str = "req_018f2a3b-4c5d-7000-8000-000000000003";
     const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000004";
     const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000005";
     const CAUSE: &str = "ev_018f2a3b-4c5d-7000-8000-000000000007";
+    const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000008";
 
-    fn event(event_type: &str) -> Value {
+    pub(super) fn event(event_type: &str) -> Value {
         let artifact = (event_type == "case.evidence.added").then_some(ARTIFACT);
         json!({
             "schema_version": 3, "event_id": EVENT, "event_type": event_type,
@@ -474,7 +606,7 @@ mod tests {
         )
     }
 
-    fn catalog_event(producer_id: &str) -> Value {
+    pub(super) fn catalog_event(producer_id: &str) -> Value {
         json!({
             "schema_version": 3, "event_id": EVENT, "event_type": "evidence.cataloged",
             "tenant_id": "tenant_demo", "site_id": "site_demo", "request_id": REQUEST,
@@ -489,6 +621,50 @@ mod tests {
                 "reason_code": "EVIDENCE_CATALOG_PUBLISHED", "artifact_id": ARTIFACT
             },
             "sensitivity": "RESTRICTED",
+            "integrity": {"state": "pending", "previous_hash": null, "event_hash": null}
+        })
+    }
+
+    pub(super) fn access_request_event() -> Value {
+        json!({
+            "schema_version": 3, "event_id": EVENT, "event_type": "evidence.access.requested",
+            "tenant_id": "tenant_demo", "site_id": "site_demo", "request_id": REQUEST,
+            "trace_id": "018f2a3b4c5d70008000000000000003", "span_id": "018f2a3b4c5d7000",
+            "producer_id": "xshield-control", "producer_boot_id": REQUEST,
+            "producer_seq": 1, "request_seq": 1,
+            "occurred_at": "2026-09-19T00:00:00.123Z", "observed_at": "2026-09-19T00:00:00.123Z",
+            "policy_revision": "control-v1", "example_only": false,
+            "evidence_refs": [ARTIFACT], "cause_event_ids": [],
+            "payload": {
+                "access_request_id": ACCESS, "case_id": CASE, "artifact_id": ARTIFACT,
+                "subject_ref": "investigator-1", "access_kind": "sensitive_raw",
+                "stage": "evidence_access", "request_digest": "b".repeat(64),
+                "outcome": "PASS", "reason_code": "EVIDENCE_ACCESS_REQUESTED"
+            },
+            "sensitivity": "INTERNAL",
+            "integrity": {"state": "pending", "previous_hash": null, "event_hash": null}
+        })
+    }
+
+    pub(super) fn access_decision_event(event_type: &str) -> Value {
+        let approved = event_type == "evidence.access.approved";
+        json!({
+            "schema_version": 3, "event_id": EVENT, "event_type": event_type,
+            "tenant_id": "tenant_demo", "site_id": "site_demo", "request_id": REQUEST,
+            "trace_id": "018f2a3b4c5d70008000000000000003", "span_id": "018f2a3b4c5d7000",
+            "producer_id": "xshield-control", "producer_boot_id": REQUEST,
+            "producer_seq": 1, "request_seq": 1,
+            "occurred_at": "2026-09-19T00:00:00.123Z", "observed_at": "2026-09-19T00:00:00.123Z",
+            "policy_revision": "control-v1", "example_only": false,
+            "evidence_refs": [], "cause_event_ids": [],
+            "payload": {
+                "access_request_id": ACCESS, "subject_ref": "approver-1",
+                "decision": if approved { "approved" } else { "denied" },
+                "ttl_seconds": approved.then_some(300), "stage": "evidence_access_decision",
+                "request_digest": "c".repeat(64), "outcome": "PASS",
+                "reason_code": if approved { "EVIDENCE_ACCESS_APPROVED" } else { "EVIDENCE_ACCESS_DENIED" }
+            },
+            "sensitivity": "INTERNAL",
             "integrity": {"state": "pending", "previous_hash": null, "event_hash": null}
         })
     }
@@ -624,5 +800,152 @@ mod tests {
         let mut unknown = catalog_event("model-eval");
         unknown["payload"]["extra"] = json!(true);
         assert!(parse_with_boot(&unknown, CATALOG_BOOT).is_err());
+    }
+
+    #[test]
+    fn accepts_evidence_access_request_and_decision_families() {
+        for event in [
+            access_request_event(),
+            access_decision_event("evidence.access.approved"),
+            access_decision_event("evidence.access.denied"),
+        ] {
+            let row = parse_with_boot(&event, REQUEST).unwrap();
+            assert_eq!(row.outcome, "PASS");
+            assert_eq!(row.proof_kind, "deterministic");
+            assert_eq!(row.confidence, None);
+            assert_eq!(row.confidence_status, "not_applicable");
+            assert_eq!(row.is_terminal, 0);
+        }
+    }
+
+    #[test]
+    fn rejects_evidence_access_contract_drift() {
+        for (pointer, value) in [
+            ("/payload/access_kind", json!("all_content")),
+            ("/payload/access_request_id", json!(CASE)),
+            ("/payload/case_id", json!(ACCESS)),
+            (
+                "/payload/artifact_id",
+                json!("artifact_018f2a3b-4c5d-7000-8000-000000000099"),
+            ),
+            ("/payload/subject_ref", json!("actor\n1")),
+            ("/payload/request_digest", json!("A".repeat(64))),
+            ("/payload/reason_code", json!("EVIDENCE_ACCESS_APPROVED")),
+            ("/payload/outcome", json!("DENY")),
+            ("/evidence_refs", json!([])),
+            ("/cause_event_ids", json!([CAUSE])),
+            (
+                "/request_id",
+                json!("req_018f2a3b-4c5d-7000-8000-000000000099"),
+            ),
+            ("/producer_id", json!("model-eval")),
+            ("/policy_revision", json!("control-v2")),
+            ("/sensitivity", json!("PUBLIC")),
+        ] {
+            let mut request = access_request_event();
+            *request.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                parse_with_boot(&request, REQUEST).is_err(),
+                "accepted {pointer}"
+            );
+        }
+        for event_type in ["evidence.access.approved", "evidence.access.denied"] {
+            let event = access_decision_event(event_type);
+            for field in event["payload"].as_object().unwrap().keys() {
+                let mut missing = event.clone();
+                missing["payload"].as_object_mut().unwrap().remove(field);
+                assert!(
+                    parse_with_boot(&missing, REQUEST).is_err(),
+                    "missing {field}"
+                );
+            }
+            for value in [json!(0), json!(86_401), json!(-1), json!(1.5)] {
+                let mut invalid = event.clone();
+                invalid["payload"]["ttl_seconds"] = value;
+                assert!(parse_with_boot(&invalid, REQUEST).is_err());
+            }
+            let mut wrong_reason = event.clone();
+            wrong_reason["payload"]["reason_code"] = json!("EVIDENCE_ACCESS_REQUESTED");
+            assert!(parse_with_boot(&wrong_reason, REQUEST).is_err());
+            let mut unknown = event;
+            unknown["payload"]["extra"] = json!(true);
+            assert!(parse_with_boot(&unknown, REQUEST).is_err());
+        }
+        for ttl in [1, 86_400] {
+            let mut approved = access_decision_event("evidence.access.approved");
+            approved["payload"]["ttl_seconds"] = json!(ttl);
+            assert!(parse_with_boot(&approved, REQUEST).is_ok());
+            let mut denied = access_decision_event("evidence.access.denied");
+            denied["payload"]["ttl_seconds"] = json!(ttl);
+            assert!(parse_with_boot(&denied, REQUEST).is_err());
+        }
+    }
+
+    #[test]
+    fn evidence_access_journal_and_outbox_contracts_are_separate() {
+        for (mut event, path) in [
+            (
+                access_request_event(),
+                "/control/v1/artifacts/{artifact_id}/access",
+            ),
+            (
+                access_decision_event("evidence.access.approved"),
+                "/control/v1/evidence-access-requests/{access_request_id}/approve",
+            ),
+            (
+                access_decision_event("evidence.access.denied"),
+                "/control/v1/evidence-access-requests/{access_request_id}/deny",
+            ),
+        ] {
+            let outbox = serde_json::to_vec(&event).unwrap();
+            assert!(
+                IndexRow::parse(
+                    &outbox,
+                    &EventId::parse(EVENT).unwrap(),
+                    1,
+                    REQUEST,
+                    "0".repeat(64),
+                    chrono::TimeDelta::days(30)
+                )
+                .is_err()
+            );
+            event["payload"] = json!({
+                "method": "POST", "path": path, "subject_ref": "operator-1",
+                "target_case_id": CASE, "target_artifact_id": ARTIFACT,
+                "target_access_request_id": ACCESS, "outcome": "PASS",
+                "reason_code": "CONTROL_EVIDENCE_ACCESS_REQUESTED"
+            });
+            event["evidence_refs"] = json!([ARTIFACT]);
+            let journal = serde_json::to_vec(&event).unwrap();
+            assert_eq!(
+                IndexRow::parse(
+                    &journal,
+                    &EventId::parse(EVENT).unwrap(),
+                    1,
+                    REQUEST,
+                    "0".repeat(64),
+                    chrono::TimeDelta::days(30)
+                )
+                .unwrap()
+                .stage,
+                "control_access"
+            );
+            assert!(parse_with_boot(&event, REQUEST).is_err());
+            let duplicate = String::from_utf8(outbox).unwrap().replace(
+                r#""subject_ref":"#,
+                r#""subject_ref":"duplicate","subject_ref":"#,
+            );
+            assert!(
+                IndexRow::parse_outbox(
+                    duplicate.as_bytes(),
+                    &EventId::parse(EVENT).unwrap(),
+                    1,
+                    REQUEST,
+                    "0".repeat(64),
+                    chrono::TimeDelta::days(30)
+                )
+                .is_err()
+            );
+        }
     }
 }
