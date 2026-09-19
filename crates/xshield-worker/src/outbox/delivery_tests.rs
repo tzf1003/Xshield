@@ -69,6 +69,13 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
                 access_decision_event("evidence.access.denied"),
             ],
         ),
+        (
+            OutboxFamily::Identity,
+            identity::EVENT_TYPES
+                .iter()
+                .map(|kind| identity::tests::event(kind))
+                .collect(),
+        ),
     ] {
         for envelope in envelopes {
             let stored = insert_event(pool, scope, family, envelope).await;
@@ -79,7 +86,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         }
     }
     let other_id = format!("ev_{}", Uuid::now_v7());
-    sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,'anonymous','session.created','{}')")
+    sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,'grant','grant.issued','{}')")
         .bind(&other_id).bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str())
         .execute(pool).await.unwrap();
 
@@ -87,6 +94,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         (OutboxFamily::Case, 3),
         (OutboxFamily::EvidenceCatalog, 2),
         (OutboxFamily::EvidenceAccess, 3),
+        (OutboxFamily::Identity, 4),
     ] {
         let mock = test::Mock::new();
         let mut insertions = Vec::new();
@@ -127,7 +135,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
     }
     let published: i64 = sqlx::query_scalar("SELECT count(*) FROM xshield.audit_outbox WHERE tenant_id = $1 AND published_at IS NOT NULL AND lease_token IS NULL")
         .bind(scope.tenant_id().as_str()).fetch_one(pool).await.unwrap();
-    assert_eq!(published, 8);
+    assert_eq!(published, 12);
     let attempts: i32 = sqlx::query_scalar(
         "SELECT delivery_attempts FROM xshield.audit_outbox WHERE event_id = $1",
     )
@@ -244,6 +252,150 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         Err(PublishError::InvalidEvent)
     ));
     assert_failure(pool, invalid_id, INVALID_EVENT_CODE).await;
+
+    for field in [
+        "binding_id",
+        "tenant_id",
+        "site_id",
+        "event_id",
+        "event_type",
+    ] {
+        let mut envelope = identity::tests::event("binding.created");
+        if field == "binding_id" {
+            envelope["payload"]["binding_id"] = json!(format!("auth_{}", Uuid::now_v7()));
+        }
+        let stored = insert_event(pool, scope, OutboxFamily::Identity, envelope).await;
+        let id = stored["event_id"].as_str().unwrap();
+        let mut mismatched = stored.clone();
+        if field == "binding_id" {
+            mismatched["payload"][field] = json!(format!("auth_{}", Uuid::now_v7()));
+        } else {
+            mismatched[field] = match field {
+                "event_id" => json!(format!("ev_{}", Uuid::now_v7())),
+                "event_type" => json!("epoch.changed"),
+                _ => json!("other_scope"),
+            };
+        }
+        sqlx::query("UPDATE xshield.audit_outbox SET envelope = $2 WHERE event_id = $1")
+            .bind(id)
+            .bind(mismatched)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mock = test::Mock::new();
+        assert!(
+            publish_identity_outbox_batch(
+                &store,
+                &Client::default().with_mock(&mock),
+                scope,
+                &config
+            )
+            .await
+            .is_err()
+        );
+        assert_failure(pool, id, INVALID_EVENT_CODE).await;
+    }
+
+    let legacy_id = format!("ev_{}", Uuid::now_v7());
+    let legacy = json!({"schema_version":3,"event_id":legacy_id,"event_type":"session.created","binding_id":"auth_018f2a3b-4c5d-7000-8000-000000000011"});
+    sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,$4,'session.created',$5)")
+        .bind(&legacy_id).bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str())
+        .bind(legacy["binding_id"].as_str().unwrap()).bind(&legacy).execute(pool).await.unwrap();
+    let mock = test::Mock::new();
+    assert!(
+        publish_identity_outbox_batch(&store, &Client::default().with_mock(&mock), scope, &config)
+            .await
+            .is_err()
+    );
+    assert_failure(pool, &legacy_id, INVALID_EVENT_CODE).await;
+    let preserved: Value =
+        sqlx::query_scalar("SELECT envelope FROM xshield.audit_outbox WHERE event_id = $1")
+            .bind(&legacy_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(preserved, legacy);
+}
+
+/// Consumes the real synthetic transactions left by `test_gateway_identity.sh`.
+#[tokio::test]
+#[ignore = "requires the private database owned by scripts/test_gateway_identity.sh"]
+async fn postgres_gateway_identity_outbox_publishing() {
+    let url = std::env::var("XSHIELD_TEST_DATABASE_URL").unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(database.starts_with("xshield_gateway_"));
+    let scope = OutboxScope::new(
+        &TenantId::parse("tenant_gateway").unwrap(),
+        &SiteId::parse("site_gateway").unwrap(),
+    );
+    let envelopes: Vec<Value> = sqlx::query_scalar("SELECT envelope FROM xshield.audit_outbox WHERE tenant_id = $1 AND site_id = $2 AND event_type = ANY($3) ORDER BY created_at, event_id")
+        .bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str()).bind(identity::EVENT_TYPES)
+        .fetch_all(&pool).await.unwrap();
+    assert!((4..=256).contains(&envelopes.len()));
+    for kind in identity::EVENT_TYPES {
+        assert!(
+            envelopes
+                .iter()
+                .any(|envelope| envelope["event_type"] == *kind),
+            "missing {kind}"
+        );
+    }
+    let expected = envelopes
+        .iter()
+        .map(|envelope| {
+            (
+                envelope["event_id"].as_str().unwrap().to_owned(),
+                hex(&sha256_digest(&serde_json::to_vec(envelope).unwrap())),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mock = test::Mock::new();
+    let mut insertions = Vec::new();
+    for _ in &envelopes {
+        mock.add(test::handlers::provide(Vec::<ExistingDigest>::new()));
+        insertions.push(mock.add(test::handlers::record::<IndexRow>()));
+        mock.add(test::handlers::provide(Vec::<ExistingDigest>::new()));
+    }
+    let config = OutboxPublisherConfig::new(
+        "audit_events",
+        30,
+        OutboxLeaseConfig::new(256, 1_048_576, Duration::from_mins(1)).unwrap(),
+        Duration::from_mins(1),
+    )
+    .unwrap();
+    let store = PostgresIdentityStore::from_pool(pool.clone());
+    let report =
+        publish_identity_outbox_batch(&store, &Client::default().with_mock(&mock), &scope, &config)
+            .await
+            .unwrap();
+    assert_eq!(report.published, expected.len());
+    for insertion in insertions {
+        let rows = insertion.collect::<Vec<IndexRow>>().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].content_digest.as_slice(),
+            expected[&rows[0].event_id].as_bytes()
+        );
+        assert_eq!(rows[0].stage, "identity_lifecycle");
+        assert_eq!(rows[0].is_terminal, 0);
+        assert_eq!(rows[0].confidence, None);
+    }
+    assert_eq!(
+        publish_identity_outbox_batch(&store, &Client::default().with_mock(&mock), &scope, &config)
+            .await
+            .unwrap()
+            .claimed,
+        0
+    );
+    let published: i64 = sqlx::query_scalar("SELECT count(*) FROM xshield.audit_outbox WHERE tenant_id = $1 AND site_id = $2 AND event_type = ANY($3) AND published_at IS NOT NULL AND lease_token IS NULL")
+        .bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str()).bind(identity::EVENT_TYPES)
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(published, i64::try_from(expected.len()).unwrap());
+    pool.close().await;
 }
 
 async fn insert_event(

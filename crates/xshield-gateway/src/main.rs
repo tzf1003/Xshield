@@ -236,7 +236,14 @@ impl ProxyHttp for Gateway {
         let mut decision = match self.identity.as_ref() {
             Some(identity) => {
                 if let Ok(admission) = identity
-                    .admit(&self.config, request, &request_id, client_ip, now)
+                    .admit(
+                        &self.config,
+                        request,
+                        &request_id,
+                        &context.trace_id,
+                        client_ip,
+                        now,
+                    )
                     .await
                 {
                     context.response_identity = admission.response_identity;
@@ -966,6 +973,7 @@ impl Gateway {
                 rule,
                 &pending,
                 &request_id,
+                &context.trace_id,
                 &body,
             ))
         })?;
@@ -1074,16 +1082,26 @@ impl Gateway {
                 if context_switch.is_some() {
                     identity
                         .commit_auth_context_switch(
+                            &self.config,
                             rule,
                             response_identity,
                             &request_id,
+                            &context.trace_id,
                             &body,
                             now,
                         )
                         .await
                 } else {
                     identity
-                        .commit_auth_refresh(rule, response_identity, &request_id, &body, now)
+                        .commit_auth_refresh(
+                            &self.config,
+                            rule,
+                            response_identity,
+                            &request_id,
+                            &context.trace_id,
+                            &body,
+                            now,
+                        )
                         .await
                 }
             })

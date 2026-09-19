@@ -131,7 +131,7 @@ def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: d
         check('model_capture:' + label, not valid(schemas['model-call'], invalid))
 
 def check_outbox_contracts(schemas: dict) -> None:
-    """Exercise the strict evidence-catalog outbox envelope shape."""
+    """Exercise the implemented catalog and identity outbox wire shapes."""
     artifact = 'artifact_018f2a3b-4c5d-7000-8000-000000000005'
     base = {
         'schema_version': 3, 'event_id': 'ev_018f2a3b-4c5d-7000-8000-000000000001',
@@ -166,6 +166,157 @@ def check_outbox_contracts(schemas: dict) -> None:
         event.update(fields)
         check('outbox:evidence_catalog_reject_' + label,
               not valid(schemas['audit-event'], event))
+    check_identity_outbox_contracts(schemas['audit-event'], base)
+
+def check_identity_outbox_contracts(schema: dict, base: dict) -> None:
+    """Check JSON Schema boundaries; cross-field state transitions stay in Rust."""
+    events = {}
+    reasons = {
+        'session.created': 'SESSION_CREATED', 'binding.created': 'BINDING_CREATED',
+        'identity.refreshed': 'IDENTITY_REFRESHED', 'epoch.changed': 'IDENTITY_CONTEXT_CHANGED',
+    }
+    for event_type, reason in reasons.items():
+        event = copy.deepcopy(base)
+        event.update(event_type=event_type, producer_id='gateway-identity',
+                     producer_boot_id=event['request_id'], request_seq=1,
+                     evidence_refs=[], cause_event_ids=[], sensitivity='SENSITIVE')
+        event['payload'] = {
+            'stage': 'identity_lifecycle', 'outcome': 'PASS', 'reason_code': reason,
+            'binding_id': 'auth_018f2a3b-4c5d-7000-8000-000000000011',
+            'auth_epoch': 1, 'credential_generation': 1,
+        }
+        payload = event['payload']
+        if event_type == 'session.created':
+            payload.update(status='anonymous', auth_epoch=0, credential_generation=0)
+        else:
+            payload.update(principal_ref='principal-new', authorization_context_ref='context-new')
+        if event_type in ['identity.refreshed', 'epoch.changed']:
+            payload.update(previous_credential_generation=1, credential_generation=2,
+                           previous_credentials=[{'kind': 'bearer', 'fingerprint': 'a' * 64}],
+                           credentials=[{'kind': 'bearer', 'fingerprint': 'b' * 64}],
+                           rotation_reason='same_context_refresh' if event_type == 'identity.refreshed'
+                           else 'account_context_changed')
+        if event_type == 'epoch.changed':
+            payload.update(previous_principal_ref='principal-old',
+                           previous_authorization_context_ref='context-old',
+                           previous_auth_epoch=1, auth_epoch=2)
+        events[event_type] = event
+        prefix = 'outbox:identity:' + event_type + ':'
+        check(prefix + 'valid', valid(schema, event))
+        for field in event:
+            missing = copy.deepcopy(event)
+            del missing[field]
+            check(prefix + 'missing_envelope_' + field, not valid(schema, missing))
+        for field in payload:
+            missing = copy.deepcopy(event)
+            del missing['payload'][field]
+            check(prefix + 'missing_payload_' + field, not valid(schema, missing))
+        for field, value in [
+            ('stage', 'identity'), ('outcome', 'DENY'), ('reason_code', 'AUTH_REQUIRED'),
+            ('binding_id', event['request_id']), ('binding_id', payload['binding_id'] + '\n'),
+            ('extra', None), ('cookie', 'synthetic'), ('bearer', 'synthetic'), ('confidence', None),
+        ]:
+            invalid = copy.deepcopy(event)
+            invalid['payload'][field] = value
+            label = 'binding_newline' if isinstance(value, str) and value.endswith('\n') else field
+            check(prefix + 'reject_payload_' + label, not valid(schema, invalid))
+        for field, value in [
+            ('producer_id', 'xshield-control'), ('producer_boot_id', event['event_id']),
+            ('request_id', None), ('producer_seq', 2), ('request_seq', 2),
+            ('sensitivity', 'INTERNAL'), ('example_only', True),
+            ('evidence_refs', [base['payload']['artifact_id']]),
+            ('cause_event_ids', [event['event_id']]),
+            ('event_id', event['request_id']), ('trace_id', event['trace_id'] + '\n'),
+            ('span_id', event['span_id'] + '\n'), ('connection_id', None), ('agent_run_id', None),
+            ('extra', None), ('tenant_id', 'invalid scope'), ('site_id', 'invalid scope'),
+            ('policy_revision', ''),
+        ]:
+            invalid = copy.deepcopy(event)
+            invalid[field] = value
+            check(prefix + 'reject_envelope_' + field, not valid(schema, invalid))
+        for field in ['previous_hash', 'event_hash']:
+            invalid = copy.deepcopy(event)
+            del invalid['integrity'][field]
+            check(prefix + 'optional_integrity_' + field, valid(schema, invalid))
+            invalid['integrity'][field] = 'a' * 64
+            check(prefix + 'reject_integrity_' + field, not valid(schema, invalid))
+        invalid = copy.deepcopy(event)
+        invalid['integrity']['state'] = 'sealed'
+        check(prefix + 'reject_sealed_integrity', not valid(schema, invalid))
+        sparse = dict(payload, **{key: event[key] for key in [
+            'schema_version', 'event_type', 'event_id', 'request_id',
+        ]})
+        check(prefix + 'reject_legacy_sparse', not valid(schema, sparse))
+        for field in ['auth_epoch', 'credential_generation']:
+            for label, value in [('negative', -1), ('fractional', 1.5), ('bigint_overflow', 2**63)]:
+                invalid = copy.deepcopy(event)
+                invalid['payload'][field] = value
+                check(prefix + field + '_' + label, not valid(schema, invalid))
+        for field in ['principal_ref', 'authorization_context_ref',
+                      'previous_principal_ref', 'previous_authorization_context_ref']:
+            if field not in payload:
+                continue
+            for label, value, expected in [
+                ('empty', '', False), ('too_long', 'a' * 257, False),
+                ('c0_control', 'bad\x00ref', False), ('c1_control', 'bad\u0085ref', False),
+                ('ascii_boundary', 'a' * 256, True), ('unicode_boundary', 'é' * 128, True),
+            ]:
+                changed = copy.deepcopy(event)
+                changed['payload'][field] = value
+                check(prefix + field + '_' + label, valid(schema, changed) == expected)
+
+    for event_type in ['session.created', 'binding.created']:
+        for field in ['auth_epoch', 'credential_generation']:
+            invalid = copy.deepcopy(events[event_type])
+            invalid['payload'][field] += 1
+            check(f'outbox:identity:{event_type}:reject_initial_{field}', not valid(schema, invalid))
+    invalid = copy.deepcopy(events['session.created'])
+    invalid['payload']['status'] = 'active'
+    check('outbox:identity:session.created:reject_active_status', not valid(schema, invalid))
+
+    for event_type in ['identity.refreshed', 'epoch.changed']:
+        prefix = 'outbox:identity:' + event_type + ':'
+        event = events[event_type]
+        for field in ['previous_credentials', 'credentials']:
+            for label, values in [
+                ('empty', []), ('too_many', [{'kind': 'bearer', 'fingerprint': 'a' * 64}] * 4),
+                ('unknown_kind', [{'kind': 'unknown', 'fingerprint': 'a' * 64}]),
+                ('uppercase', [{'kind': 'bearer', 'fingerprint': 'A' * 64}]),
+                ('short', [{'kind': 'bearer', 'fingerprint': 'a' * 63}]),
+                ('newline', [{'kind': 'bearer', 'fingerprint': 'a' * 64 + '\n'}]),
+                ('unknown_field', [{'kind': 'bearer', 'fingerprint': 'a' * 64, 'token': 'synthetic'}]),
+                ('missing_kind', [{'fingerprint': 'a' * 64}]),
+                ('missing_fingerprint', [{'kind': 'bearer'}]),
+                ('duplicate_kind', [{'kind': 'bearer', 'fingerprint': 'a' * 64},
+                                    {'kind': 'bearer', 'fingerprint': 'b' * 64}]),
+            ]:
+                invalid = copy.deepcopy(event)
+                invalid['payload'][field] = values
+                check(prefix + field + '_' + label, not valid(schema, invalid))
+        complete = copy.deepcopy(event)
+        complete['payload']['previous_credentials'] = [
+            {'kind': kind, 'fingerprint': 'a' * 64} for kind in ['cookie', 'bearer', 'body_token']
+        ]
+        complete['payload']['credentials'] = [
+            {'kind': kind, 'fingerprint': 'b' * 64} for kind in ['body_token', 'bearer', 'cookie']
+        ]
+        check(prefix + 'all_credential_kinds', valid(schema, complete))
+        maximum = copy.deepcopy(event)
+        maximum['payload'].update(previous_credential_generation=2**63 - 2,
+                                  credential_generation=2**63 - 1)
+        if event_type == 'epoch.changed':
+            maximum['payload'].update(previous_auth_epoch=2**63 - 2, auth_epoch=2**63 - 1)
+        check(prefix + 'bigint_boundary', valid(schema, maximum))
+        for field in ['previous_credential_generation', 'previous_auth_epoch']:
+            if field not in event['payload']:
+                continue
+            for label, value in [('zero', 0), ('fractional', 1.5), ('no_successor', 2**63 - 1)]:
+                invalid = copy.deepcopy(event)
+                invalid['payload'][field] = value
+                check(prefix + field + '_' + label, not valid(schema, invalid))
+        invalid = copy.deepcopy(event)
+        invalid['payload']['rotation_reason'] = 'ordinary_replacement'
+        check(prefix + 'reject_rotation_reason', not valid(schema, invalid))
 
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):

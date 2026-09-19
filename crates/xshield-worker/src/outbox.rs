@@ -1,7 +1,7 @@
 //! Typed adapters for transactional `PostgreSQL` outbox facts.
 //!
 //! Outbox envelopes are a different producer contract from sealed journal
-//! records. This module only accepts the complete case, catalog, and access
+//! records. This module only accepts complete case, catalog, access, and identity
 //! envelopes emitted by their typed producers; other outbox families remain
 //! explicitly unsupported until their producers expose validated fields.
 
@@ -21,6 +21,7 @@ use xshield_postgres::{
 
 #[cfg(test)]
 mod delivery_tests;
+mod identity;
 
 const MAX_OUTBOX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_RETRY_SECONDS: u64 = 3_600;
@@ -40,6 +41,7 @@ enum OutboxFamily {
     Case,
     EvidenceCatalog,
     EvidenceAccess,
+    Identity,
 }
 
 impl OutboxFamily {
@@ -48,6 +50,7 @@ impl OutboxFamily {
             Self::Case => CASE_EVENT_TYPES,
             Self::EvidenceCatalog => EVIDENCE_CATALOG_EVENT_TYPES,
             Self::EvidenceAccess => EVIDENCE_ACCESS_EVENT_TYPES,
+            Self::Identity => identity::EVENT_TYPES,
         }
     }
 
@@ -56,21 +59,23 @@ impl OutboxFamily {
             Self::Case => "case_id",
             Self::EvidenceCatalog => "artifact_id",
             Self::EvidenceAccess => "access_request_id",
+            Self::Identity => "binding_id",
         }
     }
 }
 
 pub(super) fn supports(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "case.created"
-            | "case.closed"
-            | "case.evidence.added"
-            | "evidence.cataloged"
-            | "evidence.access.requested"
-            | "evidence.access.approved"
-            | "evidence.access.denied"
-    )
+    identity::EVENT_TYPES.contains(&event_type)
+        || matches!(
+            event_type,
+            "case.created"
+                | "case.closed"
+                | "case.evidence.added"
+                | "evidence.cataloged"
+                | "evidence.access.requested"
+                | "evidence.access.approved"
+                | "evidence.access.denied"
+        )
 }
 
 /// Immutable settings for one bounded `PostgreSQL` outbox pass.
@@ -190,6 +195,26 @@ pub async fn publish_evidence_access_outbox_batch(
     config: &OutboxPublisherConfig,
 ) -> Result<OutboxPublishReport, PublishError> {
     publish_outbox_batch(store, client, scope, config, OutboxFamily::EvidenceAccess).await
+}
+
+/// Publishes one bounded batch of gateway identity lifecycle transactions.
+///
+/// Only complete v3 envelopes are accepted. Historical sparse records remain
+/// unacknowledged with `OUTBOX_INVALID_EVENT`; timestamps and producer facts
+/// are never inferred from current identity state. Identity references and
+/// credential HMACs remain in the `SENSITIVE` payload, which public query
+/// summaries do not expose; publication never grants authentication authority.
+///
+/// # Errors
+/// Returns the same lease, event, and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_identity_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::Identity).await
 }
 
 async fn publish_outbox_batch(
@@ -334,6 +359,9 @@ struct CasePayload {
 }
 
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if identity::EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return identity::parse(event);
+    }
     if event.event_type == "evidence.cataloged" {
         return parse_evidence_catalog(event);
     }

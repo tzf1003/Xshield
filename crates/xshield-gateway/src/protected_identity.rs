@@ -1,3 +1,4 @@
+use chrono::{SecondsFormat, Utc};
 use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use pingora::{Result as PingoraResult, http::RequestHeader};
 use std::{
@@ -204,6 +205,7 @@ impl ProtectedIdentity {
         &self,
         config: &GatewayConfig,
         request_id: &RequestId,
+        trace_id: &str,
         source_fingerprint: &[u8; 32],
         now: UnixSeconds,
     ) -> Result<AnonymousAdmission, IdentityRuntimeError> {
@@ -227,17 +229,24 @@ impl ProtectedIdentity {
             &self.fingerprint_key,
             session.session_id().as_str().as_bytes(),
         )?;
-        let envelope = serde_json::json!({
-            "schema_version": 3,
-            "event_type": "session.created",
-            "event_id": event_id.as_str(),
-            "request_id": request_id.as_str(),
+        let payload = serde_json::json!({
+            "stage": "identity_lifecycle",
+            "outcome": "PASS",
+            "reason_code": "SESSION_CREATED",
             "binding_id": binding_id.as_str(),
             "status": "anonymous",
             "auth_epoch": 0,
             "credential_generation": 0,
-            "reason_code": ReasonCode::AuthRequired.as_str(),
         });
+        let envelope = identity_envelope(
+            config,
+            request_id,
+            trace_id,
+            &event_id,
+            "session.created",
+            &payload,
+        )
+        .map_err(|_| IdentityRuntimeError::Store(StoreError::InvalidCommand))?;
         let command = AnonymousSessionEstablishment::new(
             config.tenant_id(),
             &binding_id,
@@ -278,6 +287,7 @@ impl ProtectedIdentity {
         method: &str,
         path: &str,
         request_id: &RequestId,
+        trace_id: &str,
         client_ip: Option<IpAddr>,
         now: UnixSeconds,
     ) -> Result<Option<ProtectedAdmission>, IdentityRuntimeError> {
@@ -314,7 +324,7 @@ impl ProtectedIdentity {
         )?;
         Ok(Some(
             match self
-                .establish_anonymous_session(config, request_id, &source_fingerprint, now)
+                .establish_anonymous_session(config, request_id, trace_id, &source_fingerprint, now)
                 .await?
             {
                 AnonymousAdmission::Created(cookie) => ProtectedAdmission {
@@ -374,12 +384,16 @@ impl ProtectedIdentity {
         })
     }
 
+    /// Atomically persist the verified login and its request-bound v3 audit event.
+    /// Validation or persistence failure prevents releasing the authentication body.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn commit_auth_binding(
         &self,
         config: &GatewayConfig,
         rule: &AuthBindingRule,
         pending: &PendingAuthBinding,
         request_id: &RequestId,
+        trace_id: &str,
         body: &[u8],
     ) -> Result<(), ReasonCode> {
         let authentication = rule
@@ -411,17 +425,24 @@ impl ProtectedIdentity {
             pending.absolute_expires_at,
         )
         .map_err(|_| ReasonCode::ResponseValidationFailed)?;
-        let envelope = serde_json::json!({
-            "schema_version": 3,
-            "event_type": "binding.created",
-            "event_id": pending.event_id.as_str(),
-            "request_id": request_id.as_str(),
+        let payload = serde_json::json!({
+            "stage": "identity_lifecycle",
+            "outcome": "PASS",
+            "reason_code": "BINDING_CREATED",
             "binding_id": pending.binding_id.as_str(),
             "principal_ref": authentication.principal_ref(),
             "authorization_context_ref": authentication.authorization_context_ref(),
             "auth_epoch": 1,
             "credential_generation": 1,
         });
+        let envelope = identity_envelope(
+            config,
+            request_id,
+            trace_id,
+            &pending.event_id,
+            "binding.created",
+            &payload,
+        )?;
         let command = BindingEstablishment::new(
             &binding,
             &session_fingerprint,
@@ -439,11 +460,16 @@ impl ProtectedIdentity {
             .map_err(|_| ReasonCode::IdentityStoreUnavailable)
     }
 
+    /// Commit same-context credential rotation and its request-bound audit event.
+    /// Snapshot conflicts and storage errors prevent releasing the authentication body.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn commit_auth_refresh(
         &self,
+        config: &GatewayConfig,
         rule: &AuthTransitionRule,
         identity: &ResponseIdentity,
         request_id: &RequestId,
+        trace_id: &str,
         body: &[u8],
         now: UnixSeconds,
     ) -> Result<(), ReasonCode> {
@@ -485,11 +511,10 @@ impl ProtectedIdentity {
             .map_err(|_| ReasonCode::ResponseValidationFailed)?;
         let previous_credentials = credential_audit_values(identity.binding.credentials());
         let current_credentials = credential_audit_values(&credentials);
-        let envelope = serde_json::json!({
-            "schema_version": 3,
-            "event_type": "identity.refreshed",
-            "event_id": event_id.as_str(),
-            "request_id": request_id.as_str(),
+        let payload = serde_json::json!({
+            "stage": "identity_lifecycle",
+            "outcome": "PASS",
+            "reason_code": "IDENTITY_REFRESHED",
             "binding_id": identity.snapshot.binding_id().as_str(),
             "principal_ref": identity.snapshot.principal_ref(),
             "authorization_context_ref": identity.snapshot.authorization_context_ref().as_str(),
@@ -500,6 +525,14 @@ impl ProtectedIdentity {
             "credentials": current_credentials,
             "rotation_reason": "same_context_refresh",
         });
+        let envelope = identity_envelope(
+            config,
+            request_id,
+            trace_id,
+            &event_id,
+            "identity.refreshed",
+            &payload,
+        )?;
         let command = CredentialTransition::new(
             &identity.snapshot,
             identity.binding.credentials(),
@@ -523,11 +556,16 @@ impl ProtectedIdentity {
         }
     }
 
+    /// Commit a verified context change, epoch rotation and request-bound audit.
+    /// Snapshot conflicts and storage errors prevent releasing the authentication body.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn commit_auth_context_switch(
         &self,
+        config: &GatewayConfig,
         rule: &AuthTransitionRule,
         identity: &ResponseIdentity,
         request_id: &RequestId,
+        trace_id: &str,
         body: &[u8],
         now: UnixSeconds,
     ) -> Result<(), ReasonCode> {
@@ -573,11 +611,10 @@ impl ProtectedIdentity {
             .ok_or(ReasonCode::ResponseValidationFailed)?;
         let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7()))
             .map_err(|_| ReasonCode::ResponseValidationFailed)?;
-        let envelope = serde_json::json!({
-            "schema_version": 3,
-            "event_type": "epoch.changed",
-            "event_id": event_id.as_str(),
-            "request_id": request_id.as_str(),
+        let payload = serde_json::json!({
+            "stage": "identity_lifecycle",
+            "outcome": "PASS",
+            "reason_code": "IDENTITY_CONTEXT_CHANGED",
             "binding_id": identity.snapshot.binding_id().as_str(),
             "previous_principal_ref": identity.snapshot.principal_ref(),
             "principal_ref": authentication.principal_ref(),
@@ -591,6 +628,14 @@ impl ProtectedIdentity {
             "credentials": credential_audit_values(&credentials),
             "rotation_reason": "account_context_changed",
         });
+        let envelope = identity_envelope(
+            config,
+            request_id,
+            trace_id,
+            &event_id,
+            "epoch.changed",
+            &payload,
+        )?;
         let transition = CredentialTransition::new(
             &identity.snapshot,
             identity.binding.credentials(),
@@ -620,12 +665,13 @@ impl ProtectedIdentity {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub(crate) async fn admit(
         &self,
         config: &GatewayConfig,
         request: &RequestHeader,
         request_id: &RequestId,
+        trace_id: &str,
         client_ip: Option<IpAddr>,
         now: UnixSeconds,
     ) -> Result<ProtectedAdmission, IdentityRuntimeError> {
@@ -658,7 +704,9 @@ impl ProtectedIdentity {
             ));
         }
         if let Some(admission) = self
-            .admit_missing_session(config, request, method, path, request_id, client_ip, now)
+            .admit_missing_session(
+                config, request, method, path, request_id, trace_id, client_ip, now,
+            )
             .await?
         {
             return Ok(admission);
@@ -1315,6 +1363,52 @@ fn anonymous_source_fingerprint(
     fingerprint(key, &material)
 }
 
+fn identity_envelope(
+    config: &GatewayConfig,
+    request_id: &RequestId,
+    trace_id: &str,
+    event_id: &EventId,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, ReasonCode> {
+    if trace_id.len() != 32
+        || !trace_id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(ReasonCode::ResponseValidationFailed);
+    }
+    let span_id = trace_id
+        .get(..16)
+        .ok_or(ReasonCode::ResponseValidationFailed)?;
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    // Each identity transaction is a separate outbox producer run. Its local
+    // sequence does not advance the independent gateway journal sequence.
+    Ok(serde_json::json!({
+        "schema_version": 3,
+        "event_type": event_type,
+        "event_id": event_id.as_str(),
+        "tenant_id": config.tenant_id().as_str(),
+        "site_id": config.site_id().as_str(),
+        "request_id": request_id.as_str(),
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "producer_id": "gateway-identity",
+        "producer_boot_id": request_id.as_str(),
+        "producer_seq": 1,
+        "request_seq": 1,
+        "occurred_at": now,
+        "observed_at": now,
+        "policy_revision": config.policy_revision().as_str(),
+        "example_only": false,
+        "payload": payload,
+        "cause_event_ids": [],
+        "evidence_refs": [],
+        "sensitivity": "SENSITIVE",
+        "integrity": {"state": "pending", "previous_hash": null, "event_hash": null},
+    }))
+}
+
 fn credential_audit_values(
     credentials: &BTreeMap<CredentialSlot, CredentialFingerprint>,
 ) -> Vec<serde_json::Value> {
@@ -1474,6 +1568,59 @@ mod tests {
             }]
         });
         GatewayConfig::from_json(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn identity_envelope_preserves_request_context_and_validates_trace() {
+        let config = service_config("site_identity");
+        let request_id = RequestId::parse(format!("req_{}", Uuid::now_v7())).unwrap();
+        let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+        let trace_id = "0123456789abcdef0123456789abcdef";
+        let payload = serde_json::json!({
+            "stage": "identity_lifecycle", "outcome": "PASS", "reason_code": "SESSION_CREATED",
+            "binding_id": "auth_018f2a3b-4c5d-7000-8000-000000000901",
+            "status": "anonymous", "auth_epoch": 0, "credential_generation": 0,
+        });
+        let before = Utc::now() - chrono::TimeDelta::milliseconds(1);
+        let envelope = identity_envelope(
+            &config,
+            &request_id,
+            trace_id,
+            &event_id,
+            "session.created",
+            &payload,
+        )
+        .unwrap();
+        let timestamp = envelope["occurred_at"].as_str().unwrap();
+        let occurred_at = chrono::DateTime::parse_from_rfc3339(timestamp).unwrap();
+        assert!(occurred_at >= before && occurred_at <= Utc::now());
+        assert!(timestamp.ends_with('Z'));
+        assert_eq!(
+            envelope,
+            serde_json::json!({
+                "schema_version": 3, "event_type": "session.created", "event_id": event_id.as_str(),
+                "tenant_id": "tenant_test", "site_id": "site_identity", "request_id": request_id.as_str(),
+                "trace_id": trace_id, "span_id": "0123456789abcdef",
+                "producer_id": "gateway-identity", "producer_boot_id": request_id.as_str(),
+                "producer_seq": 1, "request_seq": 1, "occurred_at": timestamp, "observed_at": timestamp,
+                "policy_revision": "policy-r1", "example_only": false,
+                "payload": payload, "cause_event_ids": [], "evidence_refs": [], "sensitivity": "SENSITIVE",
+                "integrity": {"state": "pending", "previous_hash": null, "event_hash": null},
+            })
+        );
+        for invalid_trace in ["", "0123456789abcdef", "ABCDEF0123456789ABCDEF0123456789AB"] {
+            assert_eq!(
+                identity_envelope(
+                    &config,
+                    &request_id,
+                    invalid_trace,
+                    &event_id,
+                    "session.created",
+                    &payload,
+                ),
+                Err(ReasonCode::ResponseValidationFailed)
+            );
+        }
     }
 
     #[test]

@@ -58,3 +58,5 @@ WSS 握手及消息处理检查绑定、Origin、票据和消息 Schema。登录
 绑定阻止 A/B 凭证拼接，不识别完整有效 A 凭证被复制后的设备冒用。每日过期缩短暴露时间但不等于防盗用。
 
 必须记录 binding.created、refresh.verified、binding.mismatch、epoch.changed、binding.revoked，以及新旧非秘密指纹、来源认证请求 ID、轮换原因。禁止在普通日志中写原始 Cookie/JWT 或将其传给 Jev。
+
+已实现的身份事务生产者为 `gateway-identity`：`session.created`、`binding.created`、`identity.refreshed`、`epoch.changed` 与身份状态原子提交完整 v3 envelope，携带原请求的 request_id/trace_id、实际策略修订和服务器 UTC。`identity_lifecycle` 阶段分别记录 `SESSION_CREATED`、`BINDING_CREATED`、`IDENTITY_REFRESHED`、`IDENTITY_CONTEXT_CHANGED`；PASS 只表示身份事务提交成功，匿名创建后的请求仍返回 AUTH_REQUIRED/401。刷新和切换保留新旧凭证 HMAC、代际及轮换原因，整个载荷归类 `SENSITIVE`。发布配置、旧记录处理与独立序列语义见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)。

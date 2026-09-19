@@ -433,6 +433,134 @@
         }
       ]
     },
+    "identity_request_id": {
+      "type": "string",
+      "maxLength": 40,
+      "pattern": "^req_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "identity_subject": {
+      "$comment": "The Rust boundary additionally enforces a 256-byte UTF-8 limit; JSON Schema maxLength counts Unicode code points.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "not": {"pattern": "[\u0000-\u001f\u007f-\u009f]"}
+    },
+    "identity_counter": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "identity_credentials": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "fingerprint"],
+        "properties": {
+          "kind": {"enum": ["cookie", "bearer", "body_token"]},
+          "fingerprint": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "contains": {"properties": {"kind": {"const": "cookie"}}, "required": ["kind"]},
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": {"properties": {"kind": {"const": "bearer"}}, "required": ["kind"]},
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": {"properties": {"kind": {"const": "body_token"}}, "required": ["kind"]},
+          "minContains": 0,
+          "maxContains": 1
+        }
+      ]
+    },
+    "identity_payload": {
+      "type": "object",
+      "required": ["stage", "outcome", "reason_code", "binding_id", "auth_epoch", "credential_generation"],
+      "properties": {
+        "stage": {"const": "identity_lifecycle"},
+        "outcome": {"const": "PASS"},
+        "reason_code": {"$ref": "#/$defs/scoped_name"},
+        "binding_id": {
+          "type": "string",
+          "maxLength": 41,
+          "pattern": "^auth_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "auth_epoch": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "credential_generation": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}
+      }
+    },
+    "identity_session_created": {
+      "allOf": [{"$ref": "#/$defs/identity_payload"}],
+      "unevaluatedProperties": false,
+      "required": ["status"],
+      "properties": {
+        "reason_code": {"const": "SESSION_CREATED"},
+        "status": {"const": "anonymous"},
+        "auth_epoch": {"const": 0},
+        "credential_generation": {"const": 0}
+      }
+    },
+    "identity_binding_created": {
+      "allOf": [{"$ref": "#/$defs/identity_payload"}],
+      "unevaluatedProperties": false,
+      "required": ["principal_ref", "authorization_context_ref"],
+      "properties": {
+        "reason_code": {"const": "BINDING_CREATED"},
+        "principal_ref": {"$ref": "#/$defs/identity_subject"},
+        "authorization_context_ref": {"$ref": "#/$defs/identity_subject"},
+        "auth_epoch": {"const": 1},
+        "credential_generation": {"const": 1}
+      }
+    },
+    "identity_rotation": {
+      "$comment": "The Rust adapter checks exact counter succession and that credential sets and switched contexts actually change.",
+      "allOf": [{"$ref": "#/$defs/identity_payload"}],
+      "required": ["principal_ref", "authorization_context_ref", "previous_credential_generation", "previous_credentials", "credentials", "rotation_reason"],
+      "properties": {
+        "principal_ref": {"$ref": "#/$defs/identity_subject"},
+        "authorization_context_ref": {"$ref": "#/$defs/identity_subject"},
+        "auth_epoch": {"$ref": "#/$defs/identity_counter"},
+        "credential_generation": {"$ref": "#/$defs/identity_counter", "minimum": 2},
+        "previous_credential_generation": {"$ref": "#/$defs/identity_counter", "maximum": 9223372036854775806},
+        "previous_credentials": {"$ref": "#/$defs/identity_credentials"},
+        "credentials": {"$ref": "#/$defs/identity_credentials"},
+        "rotation_reason": {"enum": ["same_context_refresh", "account_context_changed"]}
+      }
+    },
+    "identity_refreshed": {
+      "allOf": [{"$ref": "#/$defs/identity_rotation"}],
+      "unevaluatedProperties": false,
+      "properties": {
+        "reason_code": {"const": "IDENTITY_REFRESHED"},
+        "rotation_reason": {"const": "same_context_refresh"}
+      }
+    },
+    "identity_epoch_changed": {
+      "allOf": [{"$ref": "#/$defs/identity_rotation"}],
+      "unevaluatedProperties": false,
+      "required": ["previous_principal_ref", "previous_authorization_context_ref", "previous_auth_epoch"],
+      "properties": {
+        "reason_code": {"const": "IDENTITY_CONTEXT_CHANGED"},
+        "previous_principal_ref": {"$ref": "#/$defs/identity_subject"},
+        "previous_authorization_context_ref": {"$ref": "#/$defs/identity_subject"},
+        "previous_auth_epoch": {"$ref": "#/$defs/identity_counter", "maximum": 9223372036854775806},
+        "auth_epoch": {"minimum": 2},
+        "rotation_reason": {"const": "account_context_changed"}
+      }
+    },
     "evidence_catalog": {
       "type": "object",
       "additionalProperties": false,
@@ -449,6 +577,51 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {"event_type": {"enum": ["session.created", "binding.created", "identity.refreshed", "epoch.changed"]}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "This is the gateway identity outbox shape. The publisher separately enforces request/boot equality, row scope/aggregate binding, source isolation and duplicate JSON keys.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "policy_revision": {"$ref": "#/$defs/scoped_name"},
+          "producer_id": {"const": "gateway-identity"},
+          "producer_boot_id": {"$ref": "#/$defs/identity_request_id"},
+          "request_id": {"$ref": "#/$defs/identity_request_id"},
+          "trace_id": {"maxLength": 32},
+          "span_id": {"maxLength": 16},
+          "producer_seq": {"const": 1},
+          "request_seq": {"const": 1},
+          "example_only": {"const": false},
+          "evidence_refs": {"maxItems": 0},
+          "cause_event_ids": {"maxItems": 0},
+          "sensitivity": {"const": "SENSITIVE"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        },
+        "oneOf": [
+          {"properties": {"event_type": {"const": "session.created"}, "payload": {"$ref": "#/$defs/identity_session_created"}}},
+          {"properties": {"event_type": {"const": "binding.created"}, "payload": {"$ref": "#/$defs/identity_binding_created"}}},
+          {"properties": {"event_type": {"const": "identity.refreshed"}, "payload": {"$ref": "#/$defs/identity_refreshed"}}},
+          {"properties": {"event_type": {"const": "epoch.changed"}, "payload": {"$ref": "#/$defs/identity_epoch_changed"}}}
+        ]
+      }
+    },
     {
       "if": {
         "properties": {"event_type": {"const": "evidence.cataloged"}},

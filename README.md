@@ -20,7 +20,7 @@
 
 管理访问 journal 已接通封存段发布器：当前控制端点的访问尝试按严格契约进入 `control_access` 索引阶段，可通过管理 request_id 时间线及有界事件检索复核；独立日志源的部署、水位及 outbox 边界见 [11.7](docs/11-audit-event-contract.md#117-已实现的管理访问审计发布)。
 
-PostgreSQL outbox 已接通按事件族隔离的发布闭环：`xshield-outbox-worker TENANT_ID SITE_ID` 默认处理 `case.*`，设置 `XSHIELD_OUTBOX_FAMILY=evidence_catalog` 或 `evidence_access` 可分别处理证据目录或证据访问请求/审批事件；各族均使用 tenant/site 绑定的 `FOR UPDATE SKIP LOCKED` 租约、服务端时钟、行/字节上限和精确 token 确认，严格解析后按 event_id/content_digest 至少一次写入 ClickHouse。失败只记录稳定错误码并延迟重试，`session.*`、`binding.*`、grant 等其他 outbox 事件族保持明确未支持。配置与运行边界见 [11.8](docs/11-audit-event-contract.md#118-已实现的按事件族-outbox-发布) 和 [20.12](docs/20-testing-and-acceptance.md#2012-outbox-发布回归)。
+PostgreSQL outbox 已接通按事件族隔离的发布闭环：`xshield-outbox-worker TENANT_ID SITE_ID` 默认处理 `case.*`，设置 `XSHIELD_OUTBOX_FAMILY=evidence_catalog`、`evidence_access` 或 `identity` 可分别处理证据目录、证据访问请求/审批，以及会话创建、认证建立、凭证刷新和身份上下文切换；各族均使用 tenant/site 绑定的 `FOR UPDATE SKIP LOCKED` 租约、服务端时钟、行/字节上限和精确 token 确认，严格解析后按 event_id/content_digest 至少一次写入 ClickHouse。失败只记录稳定错误码并延迟重试，历史稀疏身份记录保持未确认，grant、`binding.revoked` 等其他 outbox 事件仍待适配。配置与升级边界见 [11.8](docs/11-audit-event-contract.md#118-已实现的按事件族-outbox-发布) 和 [20.12](docs/20-testing-and-acceptance.md#2012-outbox-发布回归)。
 
 缺少 WAF Cookie 的受保护根/API 请求会先原子创建一条有服务端绝对期限的匿名空 binding 与 `session.created` outbox，再以 401 拒绝并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。匿名 binding 的 epoch/generation 均为 0，不含主体、授权上下文、业务凭证或资格；重复携带该 Cookie 不会扩增记录，附加任意 Bearer 也不能升级身份。匿名 TTL、来源/站点创建速率与每租户/站点活动容量由 `identity_store` 有界配置；进程内预算先限制数据库调用，PostgreSQL 短事务再以传输层对端地址的租户/站点隔离 HMAC 实施分布式来源/站点限流。速率超限返回 429，容量超限返回 503，均不签发 Cookie。
 

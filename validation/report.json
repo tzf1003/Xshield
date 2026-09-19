@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 366,
-  "passed_count": 366,
+  "checks_total": 762,
+  "passed_count": 762,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -1041,6 +1041,1976 @@
       "detail": ""
     },
     {
+      "name": "outbox:identity:session.created:valid",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_envelope_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_payload_auth_epoch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_payload_credential_generation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:missing_payload_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_binding_newline",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_extra",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_cookie",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_bearer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_payload_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_connection_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_agent_run_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_extra",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:optional_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:optional_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_sealed_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_legacy_sparse",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:auth_epoch_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:auth_epoch_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:auth_epoch_bigint_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:credential_generation_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:credential_generation_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:credential_generation_bigint_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:valid",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_envelope_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_payload_auth_epoch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_payload_credential_generation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_payload_principal_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:missing_payload_authorization_context_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_binding_newline",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_extra",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_cookie",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_bearer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_payload_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_connection_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_agent_run_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_extra",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:optional_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:optional_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_sealed_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_legacy_sparse",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:auth_epoch_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:auth_epoch_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:auth_epoch_bigint_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:credential_generation_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:credential_generation_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:credential_generation_bigint_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:principal_ref_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:principal_ref_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:principal_ref_c0_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:principal_ref_c1_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:principal_ref_ascii_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:principal_ref_unicode_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:authorization_context_ref_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:authorization_context_ref_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:authorization_context_ref_c0_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:authorization_context_ref_c1_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:authorization_context_ref_ascii_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:authorization_context_ref_unicode_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:valid",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_envelope_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_auth_epoch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_credential_generation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_principal_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_authorization_context_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_previous_credential_generation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_previous_credentials",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_credentials",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:missing_payload_rotation_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_binding_newline",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_extra",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_cookie",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_bearer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_payload_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_connection_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_agent_run_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_extra",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:optional_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:optional_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_sealed_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_legacy_sparse",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:auth_epoch_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:auth_epoch_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:auth_epoch_bigint_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credential_generation_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credential_generation_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credential_generation_bigint_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:principal_ref_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:principal_ref_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:principal_ref_c0_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:principal_ref_c1_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:principal_ref_ascii_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:principal_ref_unicode_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:authorization_context_ref_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:authorization_context_ref_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:authorization_context_ref_c0_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:authorization_context_ref_c1_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:authorization_context_ref_ascii_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:authorization_context_ref_unicode_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:valid",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_envelope_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_auth_epoch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_credential_generation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_principal_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_authorization_context_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_previous_credential_generation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_previous_credentials",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_credentials",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_rotation_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_previous_principal_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_previous_authorization_context_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:missing_payload_previous_auth_epoch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_binding_newline",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_extra",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_cookie",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_bearer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_payload_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_connection_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_agent_run_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_extra",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:optional_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:optional_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_sealed_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_legacy_sparse",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:auth_epoch_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:auth_epoch_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:auth_epoch_bigint_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credential_generation_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credential_generation_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credential_generation_bigint_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:principal_ref_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:principal_ref_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:principal_ref_c0_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:principal_ref_c1_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:principal_ref_ascii_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:principal_ref_unicode_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:authorization_context_ref_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:authorization_context_ref_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:authorization_context_ref_c0_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:authorization_context_ref_c1_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:authorization_context_ref_ascii_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:authorization_context_ref_unicode_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_principal_ref_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_principal_ref_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_principal_ref_c0_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_principal_ref_c1_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_principal_ref_ascii_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_principal_ref_unicode_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_authorization_context_ref_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_authorization_context_ref_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_authorization_context_ref_c0_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_authorization_context_ref_c1_control",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_authorization_context_ref_ascii_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_authorization_context_ref_unicode_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_initial_auth_epoch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_initial_credential_generation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_initial_auth_epoch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:binding.created:reject_initial_credential_generation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:session.created:reject_active_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_too_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_unknown_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_uppercase",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_short",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_newline",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_unknown_field",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_missing_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_missing_fingerprint",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credentials_duplicate_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_too_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_unknown_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_uppercase",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_short",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_newline",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_unknown_field",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_missing_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_missing_fingerprint",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:credentials_duplicate_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:all_credential_kinds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:bigint_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credential_generation_zero",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credential_generation_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:previous_credential_generation_no_successor",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:identity.refreshed:reject_rotation_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_too_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_unknown_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_uppercase",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_short",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_newline",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_unknown_field",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_missing_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_missing_fingerprint",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credentials_duplicate_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_too_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_unknown_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_uppercase",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_short",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_newline",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_unknown_field",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_missing_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_missing_fingerprint",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:credentials_duplicate_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:all_credential_kinds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:bigint_boundary",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credential_generation_zero",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credential_generation_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_credential_generation_no_successor",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_auth_epoch_zero",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_auth_epoch_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:previous_auth_epoch_no_successor",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:identity:epoch.changed:reject_rotation_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "request_index:events",
       "passed": true,
       "detail": ""
@@ -1806,7 +3776,17 @@
       "detail": ""
     },
     {
+      "name": "link:docs/04-auth-session-binding.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/11-audit-event-contract.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/13-audit-storage-reliability.md:11-audit-event-contract.md",
       "passed": true,
       "detail": ""
     },

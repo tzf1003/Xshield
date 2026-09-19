@@ -392,8 +392,7 @@ SELECT binding.status, binding.principal_ref IS NULL,
           AND outbox.site_id = binding.site_id
           AND outbox.aggregate_ref = binding.binding_id
           AND outbox.event_type = 'session.created'
-          AND outbox.envelope->>'status' = 'anonymous'
-          AND outbox.envelope->>'reason_code' = 'AUTH_REQUIRED')
+          AND outbox.envelope->'payload' @> '{"status":"anonymous","auth_epoch":0,"credential_generation":0,"reason_code":"SESSION_CREATED"}')
 FROM xshield.auth_bindings binding
 WHERE binding.tenant_id = 'tenant_gateway'
   AND binding.site_id = 'site_gateway'
@@ -470,7 +469,8 @@ WHERE binding.tenant_id = 'tenant_gateway'
   AND binding.waf_sid_fingerprint = decode(:'session_fingerprint', 'hex')
   AND credential.credential_kind = 'bearer'
   AND credential.fingerprint = decode(:'bearer_fingerprint', 'hex')
-  AND outbox.event_type = 'binding.created';
+  AND outbox.event_type = 'binding.created'
+  AND outbox.envelope->'payload' @> '{"principal_ref":"principal_login","authorization_context_ref":"tenant_gateway:user","auth_epoch":1,"credential_generation":1,"reason_code":"BINDING_CREATED"}';
 SQL
 )
 [[ "$login_binding_count" == "1" ]]
@@ -572,13 +572,11 @@ SELECT binding.credential_generation,
           AND outbox.tenant_id = binding.tenant_id
           AND outbox.site_id = binding.site_id
           AND outbox.event_type = 'identity.refreshed'
-          AND outbox.envelope->>'authorization_context_ref' = 'tenant_gateway:user'
-          AND outbox.envelope->>'previous_credential_generation' = '1'
-          AND outbox.envelope->>'credential_generation' = '2'
-          AND outbox.envelope->'previous_credentials' @>
+          AND outbox.envelope->'payload' @> '{"principal_ref":"principal_login","authorization_context_ref":"tenant_gateway:user","auth_epoch":1,"previous_credential_generation":1,"credential_generation":2,"rotation_reason":"same_context_refresh","reason_code":"IDENTITY_REFRESHED"}'
+          AND outbox.envelope->'payload'->'previous_credentials' @>
             jsonb_build_array(jsonb_build_object(
               'kind', 'bearer', 'fingerprint', :'old_fingerprint'))
-          AND outbox.envelope->'credentials' @>
+          AND outbox.envelope->'payload'->'credentials' @>
             jsonb_build_array(jsonb_build_object(
               'kind', 'bearer', 'fingerprint', :'new_fingerprint')))
 FROM xshield.auth_bindings binding
@@ -680,12 +678,15 @@ SELECT binding.principal_ref, binding.authorization_context_ref,
        (SELECT count(*) FROM xshield.audit_outbox outbox
         WHERE outbox.aggregate_ref = binding.binding_id
           AND outbox.event_type = 'epoch.changed'
-          AND outbox.envelope->>'previous_principal_ref' = 'principal_login'
-          AND outbox.envelope->>'principal_ref' = 'principal_login'
-          AND outbox.envelope->>'previous_authorization_context_ref' = 'tenant_gateway:user'
-          AND outbox.envelope->>'authorization_context_ref' = 'tenant_gateway:admin'
-          AND outbox.envelope->>'previous_auth_epoch' = '1'
-          AND outbox.envelope->>'auth_epoch' = '2')
+          AND outbox.tenant_id = binding.tenant_id
+          AND outbox.site_id = binding.site_id
+          AND outbox.envelope->'payload' @> '{"previous_principal_ref":"principal_login","principal_ref":"principal_login","previous_authorization_context_ref":"tenant_gateway:user","authorization_context_ref":"tenant_gateway:admin","previous_auth_epoch":1,"auth_epoch":2,"previous_credential_generation":2,"credential_generation":3,"rotation_reason":"account_context_changed","reason_code":"IDENTITY_CONTEXT_CHANGED"}'
+          AND outbox.envelope->'payload'->'previous_credentials' @>
+            jsonb_build_array(jsonb_build_object(
+              'kind', 'bearer', 'fingerprint', :'old_fingerprint'))
+          AND outbox.envelope->'payload'->'credentials' @>
+            jsonb_build_array(jsonb_build_object(
+              'kind', 'bearer', 'fingerprint', :'new_fingerprint')))
 FROM xshield.auth_bindings binding
 WHERE binding.tenant_id = 'tenant_gateway'
   AND binding.site_id = 'site_gateway'
@@ -1023,5 +1024,43 @@ grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 ! grep -q 'ShareToken=verified-' "$test_dir/origin.log"
 grep -q 'Authorization=Bearer verified-business-token' "$test_dir/origin.log"
 [[ -n $(find "$test_dir/journal" -name 'segment-*.xaj' -type f -print -quit) ]]
+
+identity_envelope_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v anonymous_request_id="$(awk 'tolower($1) == "x-xshield-request-id:" {gsub("\r", "", $2); print $2}' "$test_dir/anonymous.headers")" \
+    -v login_request_id="$(awk 'tolower($1) == "x-xshield-request-id:" {gsub("\r", "", $2); print $2}' "$test_dir/login.headers")" \
+    -v refresh_request_id="$(awk 'tolower($1) == "x-xshield-request-id:" {gsub("\r", "", $2); print $2}' "$test_dir/refresh.headers")" \
+    -v switch_request_id="$(awk 'tolower($1) == "x-xshield-request-id:" {gsub("\r", "", $2); print $2}' "$test_dir/account-switch.headers")" <<'SQL'
+SELECT count(*), count(*) FILTER (WHERE
+    envelope @> '{"schema_version":3,"producer_id":"gateway-identity","producer_seq":1,"request_seq":1,"policy_revision":"policy-r1","example_only":false,"sensitivity":"SENSITIVE","integrity":{"state":"pending","previous_hash":null,"event_hash":null},"payload":{"stage":"identity_lifecycle","outcome":"PASS"}}'
+    AND envelope->>'event_id' = event_id
+    AND envelope->>'event_type' = event_type
+    AND envelope->>'tenant_id' = tenant_id
+    AND envelope->>'site_id' = site_id
+    AND envelope->'payload'->>'binding_id' = aggregate_ref
+    AND envelope->>'request_id' = CASE event_type
+        WHEN 'session.created' THEN :'anonymous_request_id'
+        WHEN 'binding.created' THEN :'login_request_id'
+        WHEN 'identity.refreshed' THEN :'refresh_request_id'
+        WHEN 'epoch.changed' THEN :'switch_request_id' END
+    AND envelope->>'producer_boot_id' = envelope->>'request_id'
+    AND envelope->>'request_id' ~ '^req_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    AND envelope->>'trace_id' ~ '^[0-9a-f]{32}$'
+    AND envelope->>'span_id' = left(envelope->>'trace_id', 16)
+    AND envelope->'cause_event_ids' = '[]'::jsonb
+    AND envelope->'evidence_refs' = '[]'::jsonb
+    AND envelope->>'observed_at' = envelope->>'occurred_at'
+    AND envelope->>'occurred_at' ~ 'Z$'
+    AND (envelope->>'occurred_at')::timestamptz BETWEEN
+        created_at - interval '1 minute' AND created_at + interval '1 minute'
+)
+FROM xshield.audit_outbox
+WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+  AND event_type IN ('session.created', 'binding.created', 'identity.refreshed', 'epoch.changed');
+SQL
+)
+[[ "$identity_envelope_state" == "4|4" ]]
+
+XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+    cargo test -p xshield-worker --lib postgres_gateway_identity_outbox_publishing -- --ignored
 
 echo "gateway identity integration passed"
