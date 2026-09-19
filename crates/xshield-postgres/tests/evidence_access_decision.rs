@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::{env, time::Duration};
 use xshield_core::{
-    domain::{EventId, EvidenceAccessRequestId, RequestId, SiteId, TenantId},
+    domain::{ArtifactId, EventId, EvidenceAccessRequestId, RequestId, SiteId, TenantId},
     investigation::{EvidenceAccessDecisionDraft, EvidenceAccessDecisionKind},
 };
 use xshield_postgres::{
@@ -35,6 +35,35 @@ async fn evidence_access_decision_is_independent_atomic_and_idempotent() {
     assert_eq!(record.status(), "approved");
     assert_eq!(record.decided_by(), "approver-1");
     assert!(record.access_expires_at().is_some());
+    let tenant = TenantId::parse("tenant_decision").unwrap();
+    let site = SiteId::parse("site_decision").unwrap();
+    let artifact = ArtifactId::parse("artifact_018f2a3b-4c5d-7000-8000-000000000978").unwrap();
+    let capability = store
+        .find_evidence_access_capability(
+            &tenant,
+            &site,
+            record.access_request_id(),
+            &artifact,
+            "investigator-1",
+        )
+        .await
+        .expect("capability lookup succeeds")
+        .expect("approved capability is live");
+    assert_eq!(capability.requested_by(), "investigator-1");
+    assert_eq!(capability.artifact().artifact_id(), &artifact);
+    assert!(
+        store
+            .find_evidence_access_capability(
+                &tenant,
+                &site,
+                record.access_request_id(),
+                &artifact,
+                "approver-1",
+            )
+            .await
+            .expect("wrong subject lookup succeeds")
+            .is_none()
+    );
 
     sqlx::query(
         "UPDATE xshield.artifact_catalog
@@ -44,6 +73,19 @@ async fn evidence_access_decision_is_independent_atomic_and_idempotent() {
     .execute(&pool)
     .await
     .unwrap();
+    assert!(
+        store
+            .find_evidence_access_capability(
+                &tenant,
+                &site,
+                record.access_request_id(),
+                &artifact,
+                "investigator-1",
+            )
+            .await
+            .expect("deleted capability lookup succeeds")
+            .is_none()
+    );
     assert!(matches!(
         apply(&store, &approval, [1; 32], [2; 32], "000000000983").await,
         EvidenceAccessDecisionWriteOutcome::Existing(_)

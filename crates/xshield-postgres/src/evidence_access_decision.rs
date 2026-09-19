@@ -1,5 +1,6 @@
 //! Atomic evidence-access decisions and short-lived capability metadata.
 
+use crate::evidence_catalog::{CatalogArtifact, catalog_artifact};
 use crate::{PostgresIdentityStore, StoreError};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::Value;
@@ -56,6 +57,48 @@ pub struct EvidenceAccessDecisionRecord {
     status: &'static str,
     decided_at: DateTime<Utc>,
     access_expires_at: Option<DateTime<Utc>>,
+}
+
+/// An approved, still-valid capability bound to one reader subject and object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceAccessCapability {
+    access_request_id: EvidenceAccessRequestId,
+    case_id: CaseId,
+    artifact: CatalogArtifact,
+    requested_by: String,
+    access_expires_at: DateTime<Utc>,
+}
+
+impl EvidenceAccessCapability {
+    /// Returns the approved request identity.
+    #[must_use]
+    pub const fn access_request_id(&self) -> &EvidenceAccessRequestId {
+        &self.access_request_id
+    }
+
+    /// Returns the open investigation case bound to the capability.
+    #[must_use]
+    pub const fn case_id(&self) -> &CaseId {
+        &self.case_id
+    }
+
+    /// Returns the authenticated catalog artifact metadata.
+    #[must_use]
+    pub const fn artifact(&self) -> &CatalogArtifact {
+        &self.artifact
+    }
+
+    /// Returns the subject allowed to consume the capability.
+    #[must_use]
+    pub fn requested_by(&self) -> &str {
+        &self.requested_by
+    }
+
+    /// Returns the exclusive capability expiry from the database clock.
+    #[must_use]
+    pub const fn access_expires_at(&self) -> DateTime<Utc> {
+        self.access_expires_at
+    }
 }
 
 impl EvidenceAccessDecisionRecord {
@@ -124,6 +167,76 @@ pub enum EvidenceAccessDecisionWriteOutcome {
 }
 
 impl PostgresIdentityStore {
+    /// Loads one approved capability while rechecking its complete live scope.
+    ///
+    /// The query binds the authenticated reader, access request, artifact,
+    /// tenant, and site. `PostgreSQL`'s clock, open case, active catalog row,
+    /// artifact expiry, and capability expiry are checked together before the
+    /// vault is allowed to authenticate and decrypt the object.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database failure or corrupt catalog state.
+    pub async fn find_evidence_access_capability(
+        &self,
+        tenant_id: &xshield_core::domain::TenantId,
+        site_id: &xshield_core::domain::SiteId,
+        access_request_id: &EvidenceAccessRequestId,
+        artifact_id: &ArtifactId,
+        requested_by: &str,
+    ) -> Result<Option<EvidenceAccessCapability>, StoreError> {
+        let row = sqlx::query(
+            "SELECT access_request.access_request_id AS capability_access_request_id,
+                    access_request.case_id AS capability_case_id,
+                    access_request.requested_by AS capability_requested_by,
+                    access_request.access_expires_at AS capability_expires_at,
+                    artifact.*
+             FROM xshield.evidence_access_requests access_request
+             JOIN xshield.investigation_cases case_record
+               ON case_record.tenant_id = access_request.tenant_id
+              AND case_record.site_id = access_request.site_id
+              AND case_record.case_id = access_request.case_id
+              AND case_record.owner_ref = access_request.requested_by
+              AND case_record.status = 'open'
+             JOIN xshield.artifact_catalog artifact
+               ON artifact.tenant_id = access_request.tenant_id
+              AND artifact.site_id = access_request.site_id
+              AND artifact.artifact_id = access_request.artifact_id
+              AND artifact.status = 'active'
+              AND artifact.deleted_at IS NULL
+              AND artifact.expires_at > clock_timestamp()
+             WHERE access_request.tenant_id = $1
+               AND access_request.site_id = $2
+               AND access_request.access_request_id = $3
+               AND access_request.artifact_id = $4
+               AND access_request.requested_by = $5
+               AND access_request.status = 'approved'
+               AND access_request.access_expires_at > clock_timestamp()
+             FOR SHARE OF access_request, case_record, artifact",
+        )
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(access_request_id.as_str())
+        .bind(artifact_id.as_str())
+        .bind(requested_by)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let artifact = catalog_artifact(&row)?;
+            Ok(EvidenceAccessCapability {
+                access_request_id: EvidenceAccessRequestId::parse(
+                    row.try_get::<&str, _>("capability_access_request_id")?,
+                )
+                .map_err(|_| StoreError::CorruptData("evidence_access_request_id"))?,
+                case_id: CaseId::parse(row.try_get::<&str, _>("capability_case_id")?)
+                    .map_err(|_| StoreError::CorruptData("evidence_access_case_id"))?,
+                requested_by: row.try_get("capability_requested_by")?,
+                access_expires_at: row.try_get("capability_expires_at")?,
+                artifact,
+            })
+        })
+        .transpose()
+    }
+
     /// Applies one independent terminal decision to a pending access request.
     ///
     /// Exact retries are resolved before current target checks. Approvals lock

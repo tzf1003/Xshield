@@ -49,7 +49,7 @@ capture_status：complete、partial_limit、partial_cancelled、unavailable、no
 
 使用 EvidenceReadPort 统一授权：读元数据、读脱敏内容、读敏感原文、导出是不同权限。访问前记审批/目的/范围，访问后记实际对象和字节数。敏感原文的临时访问授权短期有效，不能靠长期公开下载 URL。
 
-当前 `xshield-evidence` 本地 MVP 只接受完整且在配置容量/最长保留期内的单对象写入，整对象硬上限 64 MiB，业务配置只能继续收紧。对象使用随机 nonce 与 artifact 作用域 HMAC 派生数据密钥执行 AES-256-GCM，AAD 绑定 tenant/site/request/artifact/kind 和最终 chunk 标记；typed manifest 另以用途隔离 HMAC 认证。manifest 读取使用库内当前时钟重验私有路径、作用域、期限与 key-id，内容读取额外重验密文摘要和 AEAD。对象先于 manifest 耐久发布，崩溃最多留下不可达孤儿密文，不会产生指向缺失密文的已返回 manifest；远端 catalog reconciliation、分块、S3/KMS 与审批读取在后续 adapter 闭环实现。
+当前 `xshield-evidence` 本地 MVP 只接受完整且在配置容量/最长保留期内的单对象写入，整对象硬上限 64 MiB，业务配置只能继续收紧。对象使用随机 nonce 与 artifact 作用域 HMAC 派生数据密钥执行 AES-256-GCM，AAD 绑定 tenant/site/request/artifact/kind 和最终 chunk 标记；typed manifest 另以用途隔离 HMAC 认证。manifest 读取使用库内当前时钟重验私有路径、作用域、期限与 key-id，内容读取额外重验密文摘要和 AEAD。对象先于 manifest 耐久发布，崩溃最多留下不可达孤儿密文，不会产生指向缺失密文的已返回 manifest；远端 catalog reconciliation、分块与 S3/KMS 在后续 adapter 闭环实现。
 
 PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 wire struct 不能进入发布命令。首次发布把显式列与 `evidence.cataloged` outbox 事件原子提交；精确重放返回 existing，同 artifact 绑定不同 manifest 或事件返回 conflict。按 request 查询强制 tenant/site/request 三元组、数据库当前时钟、active/deleted 条件与 128 条上限。catalog 用于检索，内容释放仍必须由 vault 认证对象侧 manifest HMAC、ciphertext digest 与 AEAD，并经过独立 EvidenceReadPort 审批。
 
@@ -57,7 +57,9 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 
 `GET /control/v1/artifacts/{artifact_id}` 复用同一 Observer 与服务端 tenant/site 作用域，精确返回一个 active、未删除、未过期的 typed manifest。不存在、已删除、已过期和其他作用域统一返回 `found=false`，避免对象存在性探测；响应与审计保留请求目标，只有实际返回的对象进入 `evidence_refs`。该接口同样不访问对象内容。
 
-`POST /control/v1/cases` 已提供敏感访问审批所需的目的与案件基础记录。`POST /control/v1/artifacts/{artifact_id}/access` 要求 Investigator、自己拥有的 open 案件、同作用域 active 未过期证据、严格原文访问类型与理由；pending 申请和 `evidence.access.requested` outbox 原子提交并受主体级容量约束。独立 `SensitiveEvidenceApprover` 通过批准/拒绝端点执行一次性终态，申请人自批被拒绝；批准事务重新锁定 open 案件和 active 未过期 artifact，将客户端 TTL 限制在服务配置与对象期限内，并原子提交 `evidence.access.approved` outbox。批准记录是服务端短时资格真值，实际内容读取仍须 `SensitiveEvidenceReader` 与 EvidenceReadPort 重验该资格和对象完整性。
+`POST /control/v1/cases` 已提供敏感访问审批所需的目的与案件基础记录。`POST /control/v1/artifacts/{artifact_id}/access` 要求 Investigator、自己拥有的 open 案件、同作用域 active 未过期证据、严格原文访问类型与理由；pending 申请和 `evidence.access.requested` outbox 原子提交并受主体级容量约束。独立 `SensitiveEvidenceApprover` 通过批准/拒绝端点执行一次性终态，申请人自批被拒绝；批准事务重新锁定 open 案件和 active 未过期 artifact，将客户端 TTL 限制在服务配置与对象期限内，并原子提交 `evidence.access.approved` outbox。`GET /control/v1/artifacts/{artifact_id}/content` 要求同一申请主体的 `SensitiveEvidenceReader` 及 `X-Xshield-Evidence-Access-Request`，EvidenceReadPort 先在 PostgreSQL 重验批准资格、open 案件和 active catalog，再在 vault 侧重验 scope、期限、manifest HMAC、ciphertext digest 与 AEAD；内容以附件形式返回前写入包含实际字节数的 `evidence.read` 管理审计。
+
+本地控制面每个 EvidenceReadPort 只允许一个整对象读取或保留响应在途，覆盖解密、审计与 HTTP 缓冲生命周期；超过容量的尝试以 503 和稳定原因码审计拒绝。响应直接持有清零明文及读取许可，最后引用释放后归还容量。该上限优先约束敏感下载峰值，后续并发扩展需同时提供共享字节预算。
 
 ## 12.6 保留与删除
 

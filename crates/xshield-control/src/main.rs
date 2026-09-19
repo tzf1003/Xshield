@@ -4,13 +4,14 @@ use std::{
 };
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
 use xshield_control::{
-    ControlConfig, ControlLimits, ControlPlane, CursorKey, IdempotencyKey, ManagementCredential,
-    router,
+    ControlConfig, ControlLimits, ControlPlane, CursorKey, EvidenceReadPort, IdempotencyKey,
+    ManagementCredential, router,
 };
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{SiteId, TenantId},
 };
+use xshield_evidence::{EvidenceKey, EvidenceVaultConfig, LocalEvidenceVault};
 use xshield_postgres::PostgresIdentityStore;
 use xshield_worker::PublisherConfig;
 use zeroize::Zeroizing;
@@ -63,6 +64,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         env::var("XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS")?.parse()?;
     let max_evidence_access_ttl_seconds =
         env::var("XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS")?.parse()?;
+    let evidence_root = PathBuf::from(env::var("XSHIELD_EVIDENCE_ROOT")?);
+    let evidence_key_id = env::var("XSHIELD_EVIDENCE_KEY_ID")?;
+    let evidence_key_hex = Zeroizing::new(env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
+    let evidence_max_artifact_bytes = env::var("XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES")?.parse()?;
+    let evidence_max_retention_days = env::var("XSHIELD_EVIDENCE_MAX_RETENTION_DAYS")?.parse()?;
     let listen: SocketAddr = env::var("XSHIELD_CONTROL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9443".to_owned())
         .parse()?;
@@ -109,6 +115,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let source_key = JournalKey::from_hex(&source_key_hex)?;
     let seal_key = SealVerifyingKey::from_hex(seal_key_id, &seal_key_hex)?;
     let control_key = JournalKey::from_hex(&control_key_hex)?;
+    let evidence_vault = LocalEvidenceVault::open(
+        EvidenceVaultConfig::new(
+            evidence_root,
+            evidence_key_id,
+            evidence_max_artifact_bytes,
+            evidence_max_retention_days,
+        )?,
+        EvidenceKey::from_hex(&evidence_key_hex)?,
+    )?;
     let journal_limits = JournalLimits::new(
         env::var("XSHIELD_CONTROL_AUDIT_MAX_BYTES")?.parse()?,
         env::var("XSHIELD_CONTROL_AUDIT_HIGH_WATERMARK_BYTES")?.parse()?,
@@ -135,14 +150,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
     axum::serve(
         listener,
-        router(ControlPlane::new(
-            config,
-            source_key,
-            seal_key,
-            index,
-            catalog,
-            access_journal,
-        )),
+        router(
+            ControlPlane::new(config, source_key, seal_key, index, catalog, access_journal)
+                .with_evidence_read_port(EvidenceReadPort::new(evidence_vault)),
+        ),
     )
     .await?;
     Ok(())

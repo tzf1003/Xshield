@@ -429,7 +429,7 @@ fn catalog_event_matches(
         && payload.get("artifact_id").and_then(Value::as_str) == Some(manifest.artifact_id.as_str())
 }
 
-fn catalog_artifact(row: &PgRow) -> Result<CatalogArtifact, StoreError> {
+pub(crate) fn catalog_artifact(row: &PgRow) -> Result<CatalogArtifact, StoreError> {
     let recorded_at = row.try_get::<DateTime<Utc>, _>("recorded_at")?;
     let expires_at = row.try_get::<DateTime<Utc>, _>("expires_at")?;
     let schema_version = u8::try_from(row.try_get::<i16, _>("schema_version")?)

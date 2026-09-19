@@ -7,10 +7,11 @@
 
 use axum::{
     Json, Router,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, RawQuery, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, CACHE_CONTROL},
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE},
     },
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -24,6 +25,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
 use xshield_core::{
@@ -34,13 +36,13 @@ use xshield_core::{
         InvestigationCaseDraft,
     },
 };
-use xshield_evidence::EvidenceManifest;
+use xshield_evidence::{EvidenceError, EvidenceManifest, LocalEvidenceVault};
 use xshield_postgres::{
-    EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord, EvidenceAccessDecisionWriteOutcome,
-    EvidenceAccessRequestCreate, EvidenceAccessRequestRecord, EvidenceAccessRequestWriteOutcome,
-    EvidenceCatalogArtifactQuery, EvidenceCatalogPage, EvidenceCatalogQuery,
-    InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
-    PostgresIdentityStore,
+    EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,
+    EvidenceAccessDecisionWriteOutcome, EvidenceAccessRequestCreate, EvidenceAccessRequestRecord,
+    EvidenceAccessRequestWriteOutcome, EvidenceCatalogArtifactQuery, EvidenceCatalogPage,
+    EvidenceCatalogQuery, InvestigationCaseCreate, InvestigationCaseRecord,
+    InvestigationCaseWriteOutcome, PostgresIdentityStore,
 };
 use xshield_worker::{
     IndexWatermark, PublicationHealth, PublishError, PublisherConfig, RequestEventPosition,
@@ -59,6 +61,8 @@ const EVIDENCE_ACCESS_APPROVE_PATH: &str =
     "/control/v1/evidence-access-requests/{access_request_id}/approve";
 const EVIDENCE_ACCESS_DENY_PATH: &str =
     "/control/v1/evidence-access-requests/{access_request_id}/deny";
+const EVIDENCE_CONTENT_PATH: &str = "/control/v1/artifacts/{artifact_id}/content";
+const EVIDENCE_ACCESS_REQUEST_HEADER: &str = "x-xshield-evidence-access-request";
 const CASES_PATH: &str = "/control/v1/cases";
 const RATE_WINDOW: Duration = Duration::from_mins(1);
 const TOKEN_BYTES_MAX: usize = 512;
@@ -134,6 +138,12 @@ const EVIDENCE_ACCESS_DENY: AccessAction = AccessAction {
     path: EVIDENCE_ACCESS_DENY_PATH,
     role: ManagementRole::SensitiveEvidenceApprover,
 };
+const EVIDENCE_CONTENT_ACCESS: AccessAction = AccessAction {
+    event_type: "evidence.read",
+    method: "GET",
+    path: EVIDENCE_CONTENT_PATH,
+    role: ManagementRole::SensitiveEvidenceReader,
+};
 
 /// Time-bounded management bearer material reduced to a one-way digest.
 pub struct ManagementCredential {
@@ -171,6 +181,67 @@ impl IdempotencyKey {
             .map(Zeroizing::new)
             .map(Self)
             .ok_or(ControlError::InvalidConfig)
+    }
+}
+
+/// Vault-backed port that consumes an already validated evidence capability.
+pub struct EvidenceReadPort {
+    vault: LocalEvidenceVault,
+    capacity: Arc<Semaphore>,
+}
+
+impl EvidenceReadPort {
+    /// Opens the content boundary with one whole-object read in flight.
+    ///
+    /// The reservation covers decryption, audit, and all response-buffer clones.
+    /// Saturated reads receive an audited retryable error before vault I/O.
+    #[must_use]
+    pub fn new(vault: LocalEvidenceVault) -> Self {
+        Self {
+            vault,
+            // ponytail: one retained object per port; use a weighted byte budget
+            // when measured download throughput requires parallel reads.
+            capacity: Arc::new(Semaphore::new(1)),
+        }
+    }
+
+    fn read_content(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        capability: &EvidenceAccessCapability,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<EvidenceContent, EvidenceError> {
+        let manifest = self.vault.read_manifest(
+            tenant_id,
+            site_id,
+            capability.artifact().artifact_id().as_str(),
+        )?;
+        if manifest.manifest() != capability.artifact().manifest() {
+            return Err(EvidenceError::CorruptEvidence);
+        }
+        let bytes = self.vault.read_content(
+            tenant_id,
+            site_id,
+            capability.artifact().artifact_id().as_str(),
+        )?;
+        Ok(EvidenceContent {
+            bytes,
+            _permit: permit,
+        })
+    }
+}
+
+// Keep admission and plaintext together even after HTTP yields a body frame.
+// Bytes::from_owner retains this owner until its last buffer clone is dropped.
+struct EvidenceContent {
+    bytes: Zeroizing<Vec<u8>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl AsRef<[u8]> for EvidenceContent {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -308,6 +379,7 @@ pub struct ControlPlane {
     seal_key: SealVerifyingKey,
     index: Client,
     catalog: PostgresIdentityStore,
+    evidence_read: Option<Arc<EvidenceReadPort>>,
     access_journal: Mutex<LocalJournal>,
     unauthenticated_rate: Mutex<RateWindow>,
     rate: Mutex<RateWindow>,
@@ -333,8 +405,16 @@ impl ControlPlane {
             seal_key,
             index,
             catalog,
+            evidence_read: None,
             access_journal: Mutex::new(access_journal),
         }
+    }
+
+    /// Installs the vault-backed content port at the trusted composition root.
+    #[must_use]
+    pub fn with_evidence_read_port(mut self, port: EvidenceReadPort) -> Self {
+        self.evidence_read = Some(Arc::new(port));
+        self
     }
 
     fn health(&self, authorization: Option<&str>) -> EndpointResult {
@@ -1279,6 +1359,246 @@ impl ControlPlane {
     }
 
     #[allow(clippy::too_many_lines)]
+    async fn read_evidence_content(
+        self: Arc<Self>,
+        authorization: Option<String>,
+        target_artifact_id: String,
+        access_request_id: Option<String>,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(
+                authorization.as_deref(),
+                &auth_request_id,
+                EVIDENCE_CONTENT_ACCESS,
+            )
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Ok(artifact_id) = ArtifactId::parse(target_artifact_id) else {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    None,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_EVIDENCE_ARTIFACT_ID_INVALID",
+                    "invalid evidence artifact identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Some(access_request_id) = access_request_id else {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_EVIDENCE_ACCESS_REQUEST_REQUIRED",
+                    "an approved evidence access request is required",
+                    false,
+                    "provide_access_request",
+                )
+                .await;
+        };
+        let Ok(access_request_id) = EvidenceAccessRequestId::parse(access_request_id) else {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_EVIDENCE_ACCESS_REQUEST_ID_INVALID",
+                    "invalid evidence access request identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let capability = match self
+            .catalog
+            .find_evidence_access_capability(
+                &self.config.tenant_id,
+                &self.config.site_id,
+                &access_request_id,
+                &artifact_id,
+                &subject,
+            )
+            .await
+        {
+            Ok(Some(capability)) => capability,
+            Ok(None) => {
+                return self
+                    .audited_evidence_read_error_async(
+                        request_id,
+                        subject,
+                        Some(artifact_id),
+                        Some(access_request_id),
+                        StatusCode::NOT_FOUND,
+                        "CONTROL_EVIDENCE_READ_NOT_AVAILABLE",
+                        "evidence content is unavailable",
+                        false,
+                        "verify_access",
+                    )
+                    .await;
+            }
+            Err(_) => {
+                return self
+                    .audited_evidence_read_error_async(
+                        request_id,
+                        subject,
+                        Some(artifact_id),
+                        Some(access_request_id),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EVIDENCE_READ_STORE_UNAVAILABLE",
+                        "evidence access is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+        };
+        let Some(port) = self.evidence_read.clone() else {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    Some(access_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_EVIDENCE_READ_UNAVAILABLE",
+                    "evidence content is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let tenant_id = self.config.tenant_id.clone();
+        let site_id = self.config.site_id.clone();
+        let read_capability = capability.clone();
+        let Ok(permit) = Arc::clone(&port.capacity).try_acquire_owned() else {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    Some(access_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_EVIDENCE_READ_CAPACITY_EXHAUSTED",
+                    "evidence read capacity is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        // Move admission into the blocking task: cancelling its async caller
+        // must not admit another object while decryption is still running.
+        let content = match tokio::task::spawn_blocking(move || {
+            port.read_content(&tenant_id, &site_id, &read_capability, permit)
+        })
+        .await
+        {
+            Ok(Ok(content)) => content,
+            Ok(Err(EvidenceError::NotAvailable)) => {
+                return self
+                    .audited_evidence_read_error_async(
+                        request_id,
+                        subject,
+                        Some(artifact_id),
+                        Some(access_request_id),
+                        StatusCode::NOT_FOUND,
+                        "CONTROL_EVIDENCE_READ_NOT_AVAILABLE",
+                        "evidence content is unavailable",
+                        false,
+                        "verify_access",
+                    )
+                    .await;
+            }
+            Ok(Err(_)) | Err(_) => {
+                return self
+                    .audited_evidence_read_error_async(
+                        request_id,
+                        subject,
+                        Some(artifact_id),
+                        Some(access_request_id),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EVIDENCE_READ_CORRUPT",
+                        "evidence content is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+        };
+        let Ok(bytes_read) = u64::try_from(content.as_ref().len()) else {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    Some(access_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_EVIDENCE_READ_TOO_LARGE",
+                    "evidence content is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_artifact_id = artifact_id.clone();
+        let audit_access_request_id = access_request_id.clone();
+        let audited = tokio::task::spawn_blocking(move || {
+            audit_control.append_access_event_with_evidence_bytes(
+                &audit_request_id,
+                Some(&audit_subject),
+                EVIDENCE_CONTENT_ACCESS,
+                None,
+                Some(&audit_artifact_id),
+                None,
+                Some(&audit_access_request_id),
+                "PASS",
+                "CONTROL_EVIDENCE_READ",
+                &[audit_artifact_id.as_str()],
+                Some(bytes_read),
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        let mut response = Response::new(Body::from(Bytes::from_owner(content)));
+        *response.status_mut() = StatusCode::OK;
+        let headers = response.headers_mut();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"evidence.bin\""),
+        );
+        headers.insert(
+            "x-content-type-options",
+            HeaderValue::from_static("nosniff"),
+        );
+        EndpointResult::Raw(no_store(response))
+    }
+
+    #[allow(clippy::too_many_lines)]
     async fn decide_evidence_access(
         self: Arc<Self>,
         action: AccessAction,
@@ -2186,6 +2506,55 @@ impl ControlPlane {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn audited_evidence_read_error_async(
+        self: &Arc<Self>,
+        request_id: String,
+        subject: String,
+        target_artifact_id: Option<ArtifactId>,
+        target_access_request_id: Option<EvidenceAccessRequestId>,
+        status: StatusCode,
+        reason_code: &'static str,
+        message_safe: &'static str,
+        retryable: bool,
+        next_action: &'static str,
+    ) -> EndpointResult {
+        let control = Arc::clone(self);
+        let fallback_request_id = request_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            if control
+                .append_access_event_with_evidence(
+                    &request_id,
+                    Some(&subject),
+                    EVIDENCE_CONTENT_ACCESS,
+                    None,
+                    target_artifact_id.as_ref(),
+                    None,
+                    target_access_request_id.as_ref(),
+                    "DENY",
+                    reason_code,
+                    &[],
+                )
+                .is_err()
+            {
+                return audit_unavailable(&request_id);
+            }
+            api_error(
+                &request_id,
+                status,
+                reason_code,
+                message_safe,
+                retryable,
+                next_action,
+            )
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => internal_error(&fallback_request_id),
+        }
+    }
+
     fn authorize(
         &self,
         authorization: Option<&str>,
@@ -2379,6 +2748,36 @@ impl ControlPlane {
         reason_code: &'static str,
         evidence_refs: &[&str],
     ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence_bytes(
+            request_id,
+            subject_ref,
+            action,
+            target_request_id,
+            target_artifact_id,
+            target_case_id,
+            target_access_request_id,
+            outcome,
+            reason_code,
+            evidence_refs,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_access_event_with_evidence_bytes(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        action: AccessAction,
+        target_request_id: Option<&RequestId>,
+        target_artifact_id: Option<&ArtifactId>,
+        target_case_id: Option<&CaseId>,
+        target_access_request_id: Option<&EvidenceAccessRequestId>,
+        outcome: &'static str,
+        reason_code: &'static str,
+        evidence_refs: &[&str],
+        bytes_read: Option<u64>,
+    ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
             .lock()
@@ -2422,6 +2821,7 @@ impl ControlPlane {
                     .map(EvidenceAccessRequestId::as_str),
                 outcome,
                 reason_code,
+                bytes_read,
             },
             sensitivity: "INTERNAL",
             integrity: PendingIntegrity {
@@ -2453,6 +2853,7 @@ pub fn router(control: ControlPlane) -> Router {
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
         .route(REQUEST_EVIDENCE_PATH, get(request_evidence_handler))
         .route(ARTIFACT_PATH, get(artifact_handler))
+        .route(EVIDENCE_CONTENT_PATH, get(evidence_content_handler))
         .route(
             EVIDENCE_ACCESS_APPROVE_PATH,
             post(evidence_access_approve_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
@@ -2649,6 +3050,25 @@ async fn artifact_handler(
         .into_response()
 }
 
+async fn evidence_content_handler(
+    State(control): State<Arc<ControlPlane>>,
+    Path(artifact_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let access_request_id = headers
+        .get(EVIDENCE_ACCESS_REQUEST_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .read_evidence_content(authorization, artifact_id, access_request_id)
+        .await
+        .into_response()
+}
+
 enum EndpointResult {
     Success(HealthResponse),
     RequestSummary(RequestSummaryResponse),
@@ -2658,6 +3078,7 @@ enum EndpointResult {
     Case(StatusCode, CreateCaseResponse),
     EvidenceAccessRequest(StatusCode, EvidenceAccessRequestResponse),
     EvidenceAccessDecision(EvidenceAccessDecisionResponse),
+    Raw(Response),
     Error(StatusCode, ErrorResponse),
 }
 
@@ -2676,6 +3097,7 @@ impl IntoResponse for EndpointResult {
             Self::EvidenceAccessDecision(response) => {
                 (StatusCode::OK, Json(response)).into_response()
             }
+            Self::Raw(response) => response,
             Self::Error(status, response) => (status, Json(response)).into_response(),
         })
     }
@@ -3234,6 +3656,8 @@ struct AccessPayload<'a> {
     target_access_request_id: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_read: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -3305,12 +3729,15 @@ impl From<serde_json::Error> for ControlError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlConfig, ControlLimits, ControlPlane, CursorKey, IdempotencyKey,
-        ManagementCredential, router,
+        ControlConfig, ControlLimits, ControlPlane, CursorKey, EVIDENCE_ACCESS_REQUEST_HEADER,
+        EvidenceReadPort, IdempotencyKey, ManagementCredential, router,
     };
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode, header::AUTHORIZATION},
+        http::{
+            Request, StatusCode,
+            header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE},
+        },
     };
     use chrono::{DateTime, SecondsFormat, Utc};
     use clickhouse::{Client, Row, test};
@@ -3349,6 +3776,50 @@ mod tests {
         "4444444444444444444444444444444444444444444444444444444444444444";
     const TOKEN: &str = "test-control-token-32-bytes-long-value";
     const MISSING_ARTIFACT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000999";
+
+    #[test]
+    fn evidence_response_owns_plaintext_and_admission_until_last_clone() {
+        for plaintext in [vec![], vec![7; 1024]] {
+            let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+            let pointer = plaintext.as_ptr();
+            let content = super::EvidenceContent {
+                bytes: zeroize::Zeroizing::new(plaintext),
+                _permit: capacity.clone().try_acquire_owned().unwrap(),
+            };
+            let bytes = axum::body::Bytes::from_owner(content);
+            assert_eq!(bytes.as_ptr(), pointer, "plaintext must not be copied");
+            let retained = bytes.clone();
+            drop(bytes);
+            assert!(capacity.clone().try_acquire_owned().is_err());
+            drop(retained);
+            assert_eq!(capacity.available_permits(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_evidence_task_keeps_admission_until_blocking_work_finishes() {
+        let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity.clone().try_acquire_owned().unwrap();
+        let (started, start) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let (finished, finish) = tokio::sync::oneshot::channel();
+        let task = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(5)).unwrap();
+            drop(super::EvidenceContent {
+                bytes: zeroize::Zeroizing::new(vec![7; 1024]),
+                _permit: permit,
+            });
+            finished.send(()).unwrap();
+        });
+        start.await.unwrap();
+        task.abort();
+        drop(task);
+        assert!(capacity.clone().try_acquire_owned().is_err());
+        release.send(()).unwrap();
+        finish.await.unwrap();
+        assert_eq!(capacity.available_permits(), 1);
+    }
 
     #[tokio::test]
     async fn enforces_auth_scope_rate_limit_and_health_contract() {
@@ -3933,6 +4404,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evidence_content_enforces_role_input_and_store_availability() {
+        let access_id = "access_018f2a3b-4c5d-7000-8000-000000000981";
+        let forbidden = Fixture::new(10, ManagementRole::Observer);
+        let response = router(forbidden.control)
+            .oneshot(evidence_content_request(MISSING_ARTIFACT_ID, access_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let invalid = Fixture::new(10, ManagementRole::SensitiveEvidenceReader);
+        let app = router(invalid.control);
+        for (artifact, access, expected) in [
+            (
+                "bad",
+                Some(access_id),
+                "CONTROL_EVIDENCE_ARTIFACT_ID_INVALID",
+            ),
+            (
+                MISSING_ARTIFACT_ID,
+                None,
+                "CONTROL_EVIDENCE_ACCESS_REQUEST_REQUIRED",
+            ),
+            (
+                MISSING_ARTIFACT_ID,
+                Some("bad"),
+                "CONTROL_EVIDENCE_ACCESS_REQUEST_ID_INVALID",
+            ),
+        ] {
+            let mut request = evidence_content_request(artifact, access.unwrap_or(""));
+            if access.is_none() {
+                request.headers_mut().remove(EVIDENCE_ACCESS_REQUEST_HEADER);
+            }
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let error: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(error["error_code"], expected);
+        }
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://xshield:xshield@127.0.0.1:1/xshield")
+            .unwrap();
+        pool.close().await;
+        let unavailable = Fixture::with_decision_catalog(
+            PostgresIdentityStore::from_pool(pool),
+            "operator-1",
+            ManagementRole::SensitiveEvidenceReader,
+        );
+        let response = router(unavailable.control)
+            .oneshot(evidence_content_request(MISSING_ARTIFACT_ID, access_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            error["error_code"],
+            "CONTROL_EVIDENCE_READ_STORE_UNAVAILABLE"
+        );
+        assert_access_event_targets_and_evidence(
+            &unavailable.access_directory,
+            "evidence.read",
+            &[None],
+            &[Some(MISSING_ARTIFACT_ID)],
+            &[None],
+            &[Some(access_id)],
+            &[0],
+        );
+    }
+
+    #[tokio::test]
     async fn evidence_access_decision_enforces_role_input_and_store_availability() {
         let invalid = Fixture::new(10, ManagementRole::SensitiveEvidenceApprover);
         let response = router(invalid.control)
@@ -4059,7 +4603,7 @@ mod tests {
         let artifact_id =
             publish_test_artifact(&catalog, &vault, &tenant, &site, &source_request, 1).await;
 
-        let fixture = Fixture::with_case_catalog(catalog, 10);
+        let fixture = Fixture::with_case_catalog(catalog.clone(), 10);
         let app = router(fixture.control);
         let body = format!(
             r#"{{"case_id":"{case_id}","access_kind":"sensitive_raw","justification":"Verify the source response"}}"#
@@ -4130,6 +4674,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let approver_fixture = Fixture::with_decision_catalog(
+            catalog.clone(),
+            "approver-1",
+            ManagementRole::SensitiveEvidenceApprover,
+        );
+        let approved = router(approver_fixture.control)
+            .oneshot(evidence_access_decision_request(
+                &access_request_id,
+                "approve",
+                "evidence-content-decision-1001",
+                r#"{"reason":"Read source response","ttl_seconds":600}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        let reader_fixture = Fixture::with_decision_catalog(
+            catalog,
+            "operator-1",
+            ManagementRole::SensitiveEvidenceReader,
+        )
+        .with_evidence_read_port(EvidenceReadPort::new(vault));
+        let reader_app = router(reader_fixture.control);
+        let content = reader_app
+            .clone()
+            .oneshot(evidence_content_request(&artifact_id, &access_request_id))
+            .await
+            .unwrap();
+        assert_eq!(content.status(), StatusCode::OK);
+        assert_eq!(content.headers()[CONTENT_TYPE], "application/octet-stream");
+        assert_eq!(content.headers()["cache-control"], "private, no-store");
+        assert_eq!(content.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            content.headers()[CONTENT_DISPOSITION],
+            "attachment; filename=\"evidence.bin\""
+        );
+        let saturated = reader_app
+            .clone()
+            .oneshot(evidence_content_request(&artifact_id, &access_request_id))
+            .await
+            .unwrap();
+        assert_eq!(saturated.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error: Value =
+            serde_json::from_slice(&to_bytes(saturated.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            error["error_code"],
+            "CONTROL_EVIDENCE_READ_CAPACITY_EXHAUSTED"
+        );
+        let content = to_bytes(content.into_body(), 1024).await.unwrap();
+        assert_eq!(&content[..], br#"{"approved":true}"#);
+        drop(content);
+        let retry = reader_app
+            .clone()
+            .oneshot(evidence_content_request(&artifact_id, &access_request_id))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        drop(retry);
+
+        let object = root.join(format!("{artifact_id}.xev"));
+        let ciphertext = fs::read(&object).unwrap();
+        fs::write(&object, b"corrupt").unwrap();
+        let corrupt = reader_app
+            .clone()
+            .oneshot(evidence_content_request(&artifact_id, &access_request_id))
+            .await
+            .unwrap();
+        assert_eq!(corrupt.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error: Value =
+            serde_json::from_slice(&to_bytes(corrupt.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(error["error_code"], "CONTROL_EVIDENCE_READ_CORRUPT");
+        fs::write(&object, ciphertext).unwrap();
+        let recovered = reader_app
+            .oneshot(evidence_content_request(&artifact_id, &access_request_id))
+            .await
+            .unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
+        drop(recovered);
+        assert_access_event_targets_and_evidence(
+            &reader_fixture.access_directory,
+            "evidence.read",
+            &[None; 5],
+            &[Some(artifact_id.as_str()); 5],
+            &[None; 5],
+            &[Some(access_request_id.as_str()); 5],
+            &[1, 0, 1, 0, 1],
+        );
 
         let envelope: Value = sqlx::query_scalar(
             "SELECT envelope FROM xshield.audit_outbox
@@ -4591,6 +5224,14 @@ mod tests {
         .unwrap()
     }
 
+    fn evidence_content_request(artifact_id: &str, access_request_id: &str) -> Request<Body> {
+        Request::get(format!("/control/v1/artifacts/{artifact_id}/content"))
+            .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(EVIDENCE_ACCESS_REQUEST_HEADER, access_request_id)
+            .body(Body::empty())
+            .unwrap()
+    }
+
     async fn assert_artifact_endpoints(app: &axum::Router, artifact_id: &str) {
         let artifact = app
             .clone()
@@ -4957,6 +5598,11 @@ mod tests {
                 access_directory: access,
             }
         }
+
+        fn with_evidence_read_port(mut self, port: EvidenceReadPort) -> Self {
+            self.control = self.control.with_evidence_read_port(port);
+            self
+        }
     }
 
     fn test_seal_key() -> SealVerifyingKey {
@@ -5105,6 +5751,16 @@ mod tests {
                 *evidence_count
             );
             assert!(event["payload"]["reason_code"].is_string());
+            if event_type == "evidence.read" {
+                if *evidence_count == 1 {
+                    assert_eq!(
+                        event["payload"]["bytes_read"],
+                        br#"{"approved":true}"#.len()
+                    );
+                } else {
+                    assert!(event["payload"].get("bytes_read").is_none());
+                }
+            }
             assert_eq!(
                 event["payload"]["target_request_id"],
                 target_request_id.map_or(Value::Null, Value::from)

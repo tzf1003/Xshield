@@ -22,7 +22,8 @@ mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
 pub use evidence_access_decision::{
-    EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord, EvidenceAccessDecisionWriteOutcome,
+    EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,
+    EvidenceAccessDecisionWriteOutcome,
 };
 pub use evidence_access_request::{
     EvidenceAccessRequestCreate, EvidenceAccessRequestRecord, EvidenceAccessRequestWriteOutcome,

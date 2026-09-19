@@ -14,9 +14,9 @@
 
 身份上下文切换端点可配置 `auth_context_switch`：请求仍以旧上下文的完整认证组合准入，成功响应必须提供主体或授权上下文引用的变化及新 Bearer；网关在释放正文前原子更新上下文、auth epoch 与 credential generation，撤销旧凭证并提交 `epoch.changed` outbox。同主体的租户/角色变化也会隔离旧 epoch，切换期间晚到的旧响应不能发行资格；WAF 会话 Cookie 与绝对期限保持不变。升级迁移会撤销缺少已验证授权上下文的活动绑定，客户端需重新认证。
 
-`xshield-control` 已提供独立管理接口：固定从服务端配置注入 tenant/site 作用域，以常量时间摘要比对管理 Bearer 凭证，执行每分钟有界限流，并在返回前写独立加密管理审计。`GET /control/v1/audit/health` 仅允许 `AuditAdministrator`；请求摘要、事件时间线和证据 manifest 查询允许 `Observer`。manifest 列表和单 artifact 查询只访问 PostgreSQL 中 active、未删除且按数据库时钟未过期的元数据；列表使用 HMAC 游标绑定主体、作用域、目标请求和页大小，单项查询把缺失、过期、删除和作用域偏差统一为 `found=false`，两者均不读取或解密证据内容。`POST /control/v1/cases` 仅允许 `Investigator` 在固定作用域创建有界调查案；`POST /control/v1/artifacts/{artifact_id}/access` 只为同一主体拥有的 open 案件和 active 未过期证据建立有界 pending 原文访问申请。独立 `SensitiveEvidenceApprover` 可批准或拒绝申请，数据库拒绝申请人自批；批准会产生绑定申请人、案件、artifact 且不超过对象期限的短时服务端读取资格。所有管理变更均使用主体与参数绑定的用途隔离 HMAC 摘要实现精确幂等，并把状态转换与对应 outbox 原子提交；当前仍不解密或释放内容。
+`xshield-control` 已提供独立管理接口：固定从服务端配置注入 tenant/site 作用域，以常量时间摘要比对管理 Bearer 凭证，执行每分钟有界限流，并在返回前写独立加密管理审计。`GET /control/v1/audit/health` 仅允许 `AuditAdministrator`；请求摘要、事件时间线和证据 manifest 查询允许 `Observer`。manifest 列表和单 artifact 查询只访问 PostgreSQL 中 active、未删除且按数据库时钟未过期的元数据；列表使用 HMAC 游标绑定主体、作用域、目标请求和页大小，单项查询把缺失、过期、删除和作用域偏差统一为 `found=false`，两者均不读取或解密证据内容。`POST /control/v1/cases` 仅允许 `Investigator` 在固定作用域创建有界调查案；`POST /control/v1/artifacts/{artifact_id}/access` 只为同一主体拥有的 open 案件和 active 未过期证据建立有界 pending 原文访问申请。独立 `SensitiveEvidenceApprover` 可批准或拒绝申请，数据库拒绝申请人自批；批准会产生绑定申请人、案件、artifact 且不超过对象期限的短时服务端读取资格。`GET /control/v1/artifacts/{artifact_id}/content` 要求同一申请主体的 `SensitiveEvidenceReader`，以 `X-Xshield-Evidence-Access-Request` 指定已批准申请，重新校验案件、目录、数据库时钟、vault manifest、密文摘要和 AEAD 后才返回附件，并把实际字节数写入 `evidence.read` 管理审计。所有管理变更均使用主体与参数绑定的用途隔离 HMAC 摘要实现精确幂等，并把状态转换与对应 outbox 原子提交。
 
-`xshield-evidence` 已提供本地加密证据库 MVP：只打开预建的私有目录，对每个 artifact 以 tenant/site/request/artifact/kind/chunk AAD 和独立 HMAC 派生数据密钥执行 AES-256-GCM，密文对象、typed manifest 与 manifest HMAC 均不覆盖耐久写入。manifest 读取使用库内当前时钟重验作用域、期限与 key-id，内容读取额外重验密文摘要与 AEAD；未知、过期和跨作用域对象返回相同不可用状态。整对象模式硬限制 64 MiB，业务配置只能继续收紧。当前闭环用于验证存储不变量，后续接入网关采集、审批端口与 S3/KMS adapter。
+`xshield-evidence` 已提供本地加密证据库 MVP：只打开预建的私有目录，对每个 artifact 以 tenant/site/request/artifact/kind/chunk AAD 和独立 HMAC 派生数据密钥执行 AES-256-GCM，密文对象、typed manifest 与 manifest HMAC 均不覆盖耐久写入。manifest 读取使用库内当前时钟重验作用域、期限与 key-id，内容读取额外重验密文摘要与 AEAD；未知、过期和跨作用域对象返回相同不可用状态。`xshield-control` 的 EvidenceReadPort 已把 PostgreSQL 批准资格与 vault 侧复验接成内容读取闭环。整对象模式硬限制 64 MiB，业务配置只能继续收紧；网关采集、远端对象 adapter 与分块仍继续迭代。
 
 PostgreSQL catalog 只接受证据库产生或认证的 manifest 类型，按 artifact 身份执行精确幂等发布，并与 `evidence.cataloged` outbox 事件同事务提交；同 ID 元数据冲突返回稳定冲突终态，审计写入失败不留下 catalog 行。request 查询固定绑定 tenant/site/request，使用数据库当前时钟排除过期或删除对象，最多返回 128 条 typed manifest；catalog 元数据不能替代对象侧 HMAC、摘要和 AEAD 复验。
 
@@ -62,7 +62,7 @@ XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES="67108864" \
 cargo run -p xshield-worker -- \
   target/xshield-audit-demo target/xshield-audit-manifests target/xshield-index-checkpoints
 
-install -d -m 0700 target/xshield-control-audit
+install -d -m 0700 target/xshield-control-audit target/xshield-evidence
 XSHIELD_TENANT_ID="tenant_demo" \
 XSHIELD_SITE_ID="site_demo" \
 XSHIELD_CONTROL_SUBJECT="audit-operator" \
@@ -77,6 +77,11 @@ XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS="64" \
 XSHIELD_CONTROL_MAX_OPEN_CASES="1000" \
 XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS="1000" \
 XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS="3600" \
+XSHIELD_EVIDENCE_ROOT="target/xshield-evidence" \
+XSHIELD_EVIDENCE_KEY_ID="evidence-key-r1" \
+XSHIELD_EVIDENCE_KEY_HEX="$YOUR_DISTINCT_64_CHAR_LOWERCASE_HEX_KEY" \
+XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES="67108864" \
+XSHIELD_EVIDENCE_MAX_RETENTION_DAYS="30" \
 XSHIELD_CONTROL_LISTEN="127.0.0.1:9443" \
 XSHIELD_DATABASE_URL="$YOUR_POSTGRES_URL" \
 XSHIELD_CONTROL_DATABASE_MAX_CONNECTIONS="4" \
