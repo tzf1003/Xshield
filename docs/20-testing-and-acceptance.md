@@ -75,3 +75,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 `cargo test -p xshield-control case_evidence --lib` 验证机器凭证、角色、作用域、过期身份、速率限制、严格 DTO、重复字段/幂等头、非法 UTF-8 路径、4 KiB 请求上限、在途容量与存储故障的审计和安全错误。
 
 `scripts/test_postgres.sh` 应用迁移 0017 后执行存储并发/反例测试及 `case_evidence_is_durable_idempotent_and_disconnect_safe`：真实案件创建、vault/catalog 发布、加入证据、精确重试、冲突、缺失目标、客户端在行锁等待时断连后继续提交与终态审计、管理审计失败后的 outbox 保留及幂等确认。回归确认关联不改变对象到期时间、不创建原文审批，单有案件关联的 Reader 仍无法读取正文。独立数据库测试验证跨租户/站点、非本人/关闭案件、到期/删除对象、容量竞争与 outbox 故障回滚；这些测试默认 ignored，需可用 PostgreSQL 环境运行。
+
+## 20.9 案件证据集合查询回归
+
+控制层回归覆盖坏路径、坏/越界/跨用途游标、鉴权与速率、共享在途许可、数据库故障、断连后终态审计和审计失败扣留结果。真实 PostgreSQL 回归验证单快照下的 open/closed 案件归属、跨租户/站点与非本人统一不可用、稳定 artifact 游标分页、active/expired/deleted/unavailable catalog 状态、成员顺序/128 项上限以及缺失或错绑 outbox 的拒绝；查询为只读，不改变 membership、期限或内容授权。

@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -17,6 +17,7 @@
 | GET /control/v1/artifacts/{id}/content | 获批后读取，短时作用域能力 | evidence.read，含批准引用 |
 | POST /control/v1/cases | 建立调查案例 | case.created |
 | POST /control/v1/cases/{id}/items | 把获准证据加入案例 | case.evidence.added |
+| GET /control/v1/cases/{id}/items | 查询本人案件证据引用集合 | console.case.read |
 | POST /control/v1/cases/{id}/analyze | 启动只读调查Agent | agent.started，工具/模型独立事件 |
 | POST /control/v1/replays | 离线规则评估，不送原站 | replay.requested/completed |
 | POST /control/v1/exports | 带用途/范围/审批的导出任务 | export.requested/approved/downloaded |
@@ -156,4 +157,14 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 已准入操作在客户端断连后继续数据库终态与管理审计，许可覆盖至审计完成；本地 fsync 依赖健康存储，15 秒只限制数据库操作，进程退出仍是故障边界。每次可审计尝试写独立加密 `case.evidence.added` 管理事件，以 payload 的 outcome/reason 区分成功、拒绝和依赖故障；事务 outbox 只记录实际新增关联。经强类型校验的 case/artifact 进入目标字段，成功/精确重试的 artifact 进入 evidence_refs。管理审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留成功响应；已提交的事务及 outbox 保留，可用原请求重试确认。响应统一 `Cache-Control: private, no-store`。
 
-部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。集合浏览、保留锁及案件生命周期管理另行交付。
+部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。保留锁及案件生命周期管理另行交付；集合浏览见 [29.17](#2917-已实现的案件证据集合查询契约)。
+
+## 29.17 已实现的案件证据集合查询契约
+
+`GET /control/v1/cases/{case_id}/items` 要求固定 tenant/site 内的 `Investigator`、管理机器凭证和本人 owner。路径 case 使用规范强类型 ID；可选查询串只接受单个 `cursor`，其值为不透明 HMAC 游标，绑定管理凭证摘要、主体、服务端 tenant/site、case、查询版本/页大小和最后一个 artifact ID。缺失、越界、跨接口、跨主体、跨案件或签名不匹配的游标在访问 PostgreSQL 前统一返回 `CONTROL_CURSOR_INVALID`/400。
+
+查询允许 open 与 closed 的本人案件；跨租户/站点、非本人和不存在案件统一返回 `CONTROL_CASE_NOT_AVAILABLE`/404，不泄露案件存在性。PostgreSQL 使用一条只读快照同时校验案件归属、成员行和 `case.evidence.added` outbox 关联，并按 artifact ID 升序取 `max_query_artifacts`（1–128）项及一个 lookahead；SQL 语句和锁等待各限 5 秒，连接池/事务整体限 15 秒。缺失或错绑 outbox、成员顺序/演员字段异常等可见持久化损坏返回 `CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE`/503，不返回部分页面。
+
+成功响应为 `schema_version=3`，包含管理 `request_id`、固定 tenant/site、案件 `case_id/status/purpose/created_at`、数据库 `as_of`、`items`、`truncated` 和 `next_cursor`。每项只包含 artifact ID、历史 `added_by/added_at` 和 catalog 状态：`active`（按同一 `as_of` 尚未到期）、`expired`、`deleted`（优先于到期）或 `unavailable`（无 catalog）；不返回 manifest、storage locator、hash、key ref、请求元数据、密文或读取资格。读取不更新案件、membership、catalog、保留期限或审批状态。
+
+成功、目标不可用、游标/鉴权拒绝及依赖故障均写独立 `console.case.read` 管理审计；成功事件的 `evidence_refs` 仅包含本页 artifact ID，拒绝/故障为空。审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果。查询与 POST 关联共享单实例有界许可，繁忙返回 `CONTROL_CASE_EVIDENCE_BUSY`/429；数据库故障/超时返回 `CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE`/503。已准入查询在客户端断连后继续到数据库和管理审计终态，响应统一 `Cache-Control: private, no-store`。

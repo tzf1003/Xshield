@@ -7,7 +7,8 @@ use xshield_core::{
     investigation::CaseEvidenceDraft,
 };
 use xshield_postgres::{
-    CASE_EVIDENCE_ITEMS_MAX, CaseEvidenceAdd, CaseEvidenceWriteOutcome, PostgresIdentityStore,
+    CASE_EVIDENCE_ITEMS_MAX, CaseEvidenceAdd, CaseEvidenceAvailability, CaseEvidenceQuery,
+    CaseEvidenceWriteOutcome, PostgresIdentityStore,
 };
 
 const TENANT: &str = "tenant_case_evidence";
@@ -593,6 +594,254 @@ async fn seed_artifact(pool: &PgPool) -> ArtifactId {
     .bind(artifact.as_str())
     .bind(format!("req_{}", Uuid::now_v7()))
     .bind(format!("ev_{}", Uuid::now_v7()))
+    .execute(pool)
+    .await
+    .unwrap();
+    artifact
+}
+
+#[test]
+fn collection_query_rejects_unbounded_or_invalid_owner() {
+    let tenant = TenantId::parse(TENANT).unwrap();
+    let site = SiteId::parse(SITE).unwrap();
+    let case_id = CaseId::parse(format!("case_{}", Uuid::now_v7())).unwrap();
+    let artifact_id = ArtifactId::parse(format!("artifact_{}", Uuid::now_v7())).unwrap();
+    for (owner, limit) in [("", 1), ("owner\n", 1), ("owner", 0), ("owner", 129)] {
+        assert!(
+            CaseEvidenceQuery::new(&tenant, &site, &case_id, owner, Some(&artifact_id), limit,)
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn collection_query_is_scoped_snapshot_paginated_and_availability_aware() {
+    let url = env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
+    let store = PostgresIdentityStore::connect(&url, 4, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let suffix = Uuid::now_v7().to_string().replace('-', "");
+    let tenant = format!("tenant_case_read_{suffix}");
+    let site = format!("site_case_read_{suffix}");
+    let owner = "investigator-read";
+    let tenant_id = TenantId::parse(&tenant).unwrap();
+    let site_id = SiteId::parse(&site).unwrap();
+    let case_id = CaseId::parse(format!("case_{}", Uuid::now_v7())).unwrap();
+    insert_read_case(&pool, &tenant, &site, &case_id, owner).await;
+
+    let first = insert_read_artifact(&pool, &tenant, &site, &case_id, owner, "active", 1).await;
+    let second = insert_read_artifact(&pool, &tenant, &site, &case_id, owner, "expired", 2).await;
+    let third = insert_read_artifact(&pool, &tenant, &site, &case_id, owner, "deleted", 3).await;
+    let query = CaseEvidenceQuery::new(&tenant_id, &site_id, &case_id, owner, None, 2).unwrap();
+    let page = store.list_case_evidence(query).await.unwrap().unwrap();
+    assert_eq!(page.case_status(), "open");
+    assert_eq!(page.case().purpose(), "Read case collection");
+    assert_eq!(page.items().len(), 2);
+    assert_eq!(page.items()[0].record().artifact_id(), &first);
+    assert_eq!(
+        page.items()[0].availability(),
+        CaseEvidenceAvailability::Active
+    );
+    assert_eq!(page.items()[1].record().artifact_id(), &second);
+    assert_eq!(
+        page.items()[1].availability(),
+        CaseEvidenceAvailability::Expired
+    );
+    let cursor = page.next_artifact_id().cloned().expect("lookahead cursor");
+
+    let fourth = insert_read_artifact(&pool, &tenant, &site, &case_id, owner, "active", 4).await;
+    let query =
+        CaseEvidenceQuery::new(&tenant_id, &site_id, &case_id, owner, Some(&cursor), 2).unwrap();
+    let page = store.list_case_evidence(query).await.unwrap().unwrap();
+    assert_eq!(page.items().len(), 2);
+    assert_eq!(page.items()[0].record().artifact_id(), &third);
+    assert_eq!(
+        page.items()[0].availability(),
+        CaseEvidenceAvailability::Deleted
+    );
+    assert_eq!(page.items()[1].record().artifact_id(), &fourth);
+    assert_eq!(
+        page.items()[1].availability(),
+        CaseEvidenceAvailability::Active
+    );
+    assert!(page.next_artifact_id().is_none());
+
+    sqlx::query("UPDATE xshield.investigation_cases SET status = 'closed' WHERE tenant_id = $1 AND site_id = $2 AND case_id = $3")
+        .bind(&tenant)
+        .bind(&site)
+        .bind(case_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let query = CaseEvidenceQuery::new(&tenant_id, &site_id, &case_id, owner, None, 1).unwrap();
+    assert_eq!(
+        store
+            .list_case_evidence(query)
+            .await
+            .unwrap()
+            .unwrap()
+            .case_status(),
+        "closed"
+    );
+
+    let wrong_owner =
+        CaseEvidenceQuery::new(&tenant_id, &site_id, &case_id, "other-owner", None, 1).unwrap();
+    assert!(
+        store
+            .list_case_evidence(wrong_owner)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let missing = CaseId::parse(format!("case_{}", Uuid::now_v7())).unwrap();
+    let missing = CaseEvidenceQuery::new(&tenant_id, &site_id, &missing, owner, None, 1).unwrap();
+    assert!(store.list_case_evidence(missing).await.unwrap().is_none());
+    let foreign_tenant = TenantId::parse(format!("tenant_foreign_{suffix}")).unwrap();
+    let foreign =
+        CaseEvidenceQuery::new(&foreign_tenant, &site_id, &case_id, owner, None, 1).unwrap();
+    assert!(store.list_case_evidence(foreign).await.unwrap().is_none());
+
+    sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id = $1 AND site_id = $2 AND aggregate_ref = $3 AND event_type = 'case.evidence.added'")
+        .bind(&tenant)
+        .bind(&site)
+        .bind(case_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let corrupt = CaseEvidenceQuery::new(&tenant_id, &site_id, &case_id, owner, None, 1).unwrap();
+    assert!(matches!(
+        store.list_case_evidence(corrupt).await,
+        Err(xshield_postgres::StoreError::CorruptData(
+            "case_evidence_outbox"
+        ))
+    ));
+
+    sqlx::query("DELETE FROM xshield.case_items WHERE tenant_id = $1 AND site_id = $2")
+        .bind(&tenant)
+        .bind(&site)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM xshield.artifact_catalog WHERE tenant_id = $1 AND site_id = $2")
+        .bind(&tenant)
+        .bind(&site)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM xshield.investigation_cases WHERE tenant_id = $1 AND site_id = $2")
+        .bind(&tenant)
+        .bind(&site)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id = $1 AND site_id = $2")
+        .bind(&tenant)
+        .bind(&site)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_read_case(pool: &PgPool, tenant: &str, site: &str, case: &CaseId, owner: &str) {
+    let event = format!("ev_{}", Uuid::now_v7());
+    sqlx::query(
+        "INSERT INTO xshield.investigation_cases (
+             tenant_id, site_id, case_id, owner_ref, purpose, status,
+             idempotency_digest, request_digest, created_event_id
+         ) VALUES ($1, $2, $3, $4, 'Read case collection', 'open', $5, $5, $6)",
+    )
+    .bind(tenant)
+    .bind(site)
+    .bind(case.as_str())
+    .bind(owner)
+    .bind([11_u8; 32].as_slice())
+    .bind(&event)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO xshield.audit_outbox
+         (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope)
+         VALUES ($1, $2, $3, $4, 'case.created', '{}')",
+    )
+    .bind(event)
+    .bind(tenant)
+    .bind(site)
+    .bind(case.as_str())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_read_artifact(
+    pool: &PgPool,
+    tenant: &str,
+    site: &str,
+    case: &CaseId,
+    owner: &str,
+    state: &str,
+    nonce: u8,
+) -> ArtifactId {
+    let artifact = ArtifactId::parse(format!("artifact_{}", Uuid::now_v7())).unwrap();
+    let request = format!("req_{}", Uuid::now_v7());
+    let catalog_event = format!("ev_{}", Uuid::now_v7());
+    let added_event = format!("ev_{}", Uuid::now_v7());
+    sqlx::query(
+        "INSERT INTO xshield.artifact_catalog (
+             tenant_id, site_id, artifact_id, request_id, schema_version, kind,
+             content_type, capture_status, fidelity, bytes_observed, bytes_saved,
+             classification, example_only, storage_profile, storage_locator,
+             key_ref, integrity_algorithm, integrity_digest, parent_refs,
+             recorded_at, expires_at, catalog_event_id, status, deleted_at
+         ) VALUES ($1, $2, $3, $4, 3, 'response_from_origin',
+             'application/json', 'complete', 'entity_exact', 2, 2,
+             'RESTRICTED', false, 'aead_envelope_v1', $3 || '.xev',
+             'evidence-key-r1', 'sha256_ciphertext', repeat('a', 64), '{}',
+             clock_timestamp() - interval '2 hours',
+             CASE WHEN $6 = 'expired'
+                  THEN clock_timestamp() - interval '1 hour'
+                  ELSE clock_timestamp() + interval '1 hour' END,
+             $5,
+             CASE WHEN $6 = 'deleted' THEN 'deleted' ELSE 'active' END,
+             CASE WHEN $6 = 'deleted' THEN clock_timestamp() ELSE NULL END)",
+    )
+    .bind(tenant)
+    .bind(site)
+    .bind(artifact.as_str())
+    .bind(request)
+    .bind(catalog_event)
+    .bind(state)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO xshield.case_items (
+             tenant_id, site_id, case_id, artifact_id, added_by,
+             idempotency_digest, request_digest, added_event_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $6, $7)",
+    )
+    .bind(tenant)
+    .bind(site)
+    .bind(case.as_str())
+    .bind(artifact.as_str())
+    .bind(owner)
+    .bind([nonce; 32])
+    .bind(&added_event)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO xshield.audit_outbox
+         (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope)
+         VALUES ($1, $2, $3, $4, 'case.evidence.added', '{}')",
+    )
+    .bind(added_event)
+    .bind(tenant)
+    .bind(site)
+    .bind(case.as_str())
     .execute(pool)
     .await
     .unwrap();

@@ -55,9 +55,9 @@ impl<'a> CaseEvidenceAdd<'a> {
 /// Durable membership metadata returned by addition and exact retries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaseEvidenceRecord {
-    artifact_id: ArtifactId,
-    added_by: String,
-    added_at: DateTime<Utc>,
+    pub(super) artifact_id: ArtifactId,
+    pub(super) added_by: String,
+    pub(super) added_at: DateTime<Utc>,
 }
 
 impl CaseEvidenceRecord {

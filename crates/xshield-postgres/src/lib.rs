@@ -7,6 +7,7 @@
 
 mod action_read;
 mod case_evidence;
+mod case_evidence_read;
 mod evidence_access_decision;
 mod evidence_access_request;
 mod evidence_catalog;
@@ -26,6 +27,9 @@ mod share_grant_read;
 pub use action_read::ResponseActionDescriptorQuery;
 pub use case_evidence::{
     CASE_EVIDENCE_ITEMS_MAX, CaseEvidenceAdd, CaseEvidenceRecord, CaseEvidenceWriteOutcome,
+};
+pub use case_evidence_read::{
+    CaseEvidenceAvailability, CaseEvidenceItem, CaseEvidencePage, CaseEvidenceQuery,
 };
 pub use evidence_access_decision::{
     EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,

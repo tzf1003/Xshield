@@ -22,7 +22,7 @@
 
 ## M3 完整日志后台
 
-当前增量：控制服务已提供单 request_id 的脱敏聚合摘要、受限阶段聚合、事件时间线、证据 manifest 列表及单 artifact 元数据查询，强制 Observer 角色与服务端 tenant/site 作用域。摘要和事件只查询 retention-aware 去重视图；manifest 只查询 PostgreSQL active、未删除、按数据库时钟未过期的 catalog 行，单项查询对缺失、到期、删除和作用域偏差返回统一不存在语义。事件与 manifest 列表均采用稳定游标分页，游标以独立 HMAC 密钥和不同用途域绑定主体、作用域、目标请求、查询版本/页大小和最后位置。各类查询均写独立耐久管理审计，ClickHouse 查询还携带索引完整性状态。本地证据库已形成单对象 AES-256-GCM、artifact 作用域派生密钥、typed manifest HMAC、私有耐久写、到期/跨域统一拒读和篡改检测闭环；PostgreSQL catalog 支持认证 manifest 与 outbox 原子幂等发布，并提供有界到期密文与孤儿对象维护的删除意图、排他本地锁、tombstone、mtime/sidecar 复验与故障重试。调查案件创建、敏感原文申请和独立决策已形成固定作用域、主体级容量、精确幂等、禁止自批和 outbox 原子提交闭环；批准时重验目标并建立不超过 artifact 期限的短时服务端资格。EvidenceReadPort 内容读取已接入 `/control/v1/artifacts/{artifact_id}/content`：Reader 只能消费与自身主体绑定的批准行，读取前重验 PostgreSQL 案件/catalog 与 vault 侧 manifest、摘要、AEAD，释放前写入实际字节数审计。网关采集与远端对象 adapter 继续迭代。
+当前增量：控制服务已提供单 request_id 的脱敏聚合摘要、受限阶段聚合、事件时间线、证据 manifest 列表及单 artifact 元数据查询，强制 Observer 角色与服务端 tenant/site 作用域。摘要和事件只查询 retention-aware 去重视图；manifest 只查询 PostgreSQL active、未删除、按数据库时钟未过期的 catalog 行，单项查询对缺失、到期、删除和作用域偏差返回统一不存在语义。事件、manifest 和案件证据集合列表均采用稳定游标分页，游标以独立 HMAC 密钥和不同用途域绑定主体、凭证摘要、作用域、目标、查询版本/页大小和最后位置。案件集合在单 PostgreSQL 只读快照内返回案件摘要、成员引用和 active/expired/deleted/unavailable 状态，不暴露内容元数据或授权能力。各类查询均写独立耐久管理审计，ClickHouse 查询还携带索引完整性状态。本地证据库已形成单对象 AES-256-GCM、artifact 作用域派生密钥、typed manifest HMAC、私有耐久写、到期/跨域统一拒读和篡改检测闭环；PostgreSQL catalog 支持认证 manifest 与 outbox 原子幂等发布，并提供有界到期密文与孤儿对象维护的删除意图、排他本地锁、tombstone、mtime/sidecar 复验与故障重试。调查案件创建、证据关联、集合查询、敏感原文申请和独立决策已形成固定作用域、主体级容量、精确幂等、禁止自批和 outbox 原子提交闭环；批准时重验目标并建立不超过 artifact 期限的短时服务端资格。EvidenceReadPort 内容读取已接入 `/control/v1/artifacts/{artifact_id}/content`：Reader 只能消费与自身主体绑定的批准行，读取前重验 PostgreSQL 案件/catalog 与 vault 侧 manifest、摘要、AEAD，释放前写入实际字节数审计。网关采集与远端对象 adapter 继续迭代。
 
 交付：journal、ClickHouse、对象证据库、签名 manifest、全请求检索、阶段树、原文审批、转换对照、导出、故障恢复和索引水位。
 
@@ -30,7 +30,7 @@
 
 ## M4 模型与调查
 
-案件增量：`POST /control/v1/cases/{case_id}/items` 已形成本人开放案件、同作用域有效证据、每案容量、精确幂等与事务 outbox 闭环，并覆盖已准入操作的断连终态审计。当前持久化证据引用；案件 pin、集合浏览、调查 Agent 与导出继续独立交付，关联本身不扩大内容权限或保留期。
+案件增量：`POST /control/v1/cases/{case_id}/items` 与 `GET /control/v1/cases/{case_id}/items` 已形成关联、单快照集合浏览、catalog 状态和审计闭环，并覆盖已准入操作的断连终态审计。当前持久化证据引用与只读集合；案件 pin、调查 Agent 与导出继续独立交付，关联和浏览本身不扩大内容权限或保留期。
 
 当前增量：已落地有界 QueryPlan AST、固定作用域的参数化 ClickHouse 事件查询、稳定 HMAC 游标和 `console.query.executed` 审计。查询返回脱敏事件摘要、实际扫描量及索引水位/gap，实施单实例并发上限和客户端 deadline；超预算计划须缩小范围。当前为同一事件的 AND 过滤，模型接入、调查 Agent、跨事件关联和只读回放继续按垂直闭环推进。
 

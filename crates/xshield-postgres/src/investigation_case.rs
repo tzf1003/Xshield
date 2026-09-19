@@ -57,10 +57,10 @@ impl<'a> InvestigationCaseCreate<'a> {
 /// Durable investigation-case metadata returned by creation and retries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvestigationCaseRecord {
-    case_id: CaseId,
-    status: &'static str,
-    purpose: String,
-    created_at: DateTime<Utc>,
+    pub(super) case_id: CaseId,
+    pub(super) status: &'static str,
+    pub(super) purpose: String,
+    pub(super) created_at: DateTime<Utc>,
 }
 
 impl InvestigationCaseRecord {

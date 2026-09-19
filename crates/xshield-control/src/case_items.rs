@@ -127,7 +127,7 @@ impl ControlPlane {
                     .await;
             }
         };
-        // ponytail: one membership operation per process; increase only with a
+        // ponytail: one case evidence operation per process; increase only with a
         // shared outstanding-write budget if measured investigator load needs it.
         let Ok(permit) = Arc::clone(&self.case_evidence_capacity).try_acquire_owned() else {
             return self
