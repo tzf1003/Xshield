@@ -18,8 +18,12 @@ tokio.workspace = true
 uuid.workspace = true
 xshield-audit = { path = "../xshield-audit" }
 xshield-core = { path = "../xshield-core" }
+xshield-evidence = { path = "../xshield-evidence" }
 xshield-postgres = { path = "../xshield-postgres" }
 zeroize.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
 
 [lints]
 workspace = true

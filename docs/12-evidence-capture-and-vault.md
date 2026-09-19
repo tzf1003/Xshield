@@ -68,3 +68,26 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 证据到期后查询层立即禁止读取，后台再删除对象/副本并记录 tombstone。对象锁的保留期与删除计划需一致；不要把所有敏感原文默认锁定多年。保留锁可防止指定期限内删除/覆盖，但不证明内容在产生时真实。[S23]
 
 日志管理人员不能直接解除所有原文加密或抹除完整性告警。既有导出副本和已读取数据无法通过删除原对象收回，文档不得声称可全面撤回泄露内容。
+
+## 12.7 已实现：有界 JSON 响应采集屏障
+
+网关可在可信启动配置的 `operations[].response` 中为 `BUFFERED_JSON` 显式启用下列版本化采集策略；该配置须经站点秘密路径审查并随 `policy_revision` 批准：
+
+```json
+"evidence_capture": {
+  "profile_revision": "orders-capture-r1",
+  "max_bytes": 1048576,
+  "retention_seconds": 3600,
+  "secret_pointers": ["/session/credential", "/payment/authorization_code"]
+}
+```
+
+`max_bytes` 为原响应 JSON 上限（1 字节至 1 MiB，且不超过 response.max_bytes）；保留期为 1–86400 秒。最多 64 个 RFC 6901 秘密路径，支持对象键转义及精确数组下标。适配器另外在任意深度强制排除大小写不敏感的 password/passwd/pwd/otp/token/access_token/refresh_token/authorization/cookie/set-cookie/secret/api_key/share_token 字段，并自动合并同一响应认证建立、刷新或上下文切换规则的 bearer_pointer。保留字段名不能替代站点完整的秘密清单；新增或变更业务秘密路径须先更新批准配置。普通业务字段中的攻击文本保留供调查使用。
+
+采集点位于完整 JSON 校验后、身份/资格提交和响应加密前，只转换证据副本。对象 kind=response_decoded、classification=RESTRICTED、fidelity=redacted，content_type=application/vnd.xshield.captured-json+json；密文内的版本 1 文档含 value、profile_revision、source_representation=application_json、source_bytes_observed、excluded_http_headers=true 和逐路径 exclusions（EVIDENCE_SECRET_EXCLUDED），被排除值为 null。manifest 的 bytes_observed/bytes_saved 是该文档长度，源实体长度在文档中；complete 只表示这一受限表示完整。单路径最长 1024 字节，排除清单最多 1024 项，序列化文档最多 4 MiB；重复键、超限或解析失败关闭正文释放。当前不采集 HTTP 头、请求、最终客户端封包、HTML 或流式实体；全站 full_protected 覆盖仍待后续采集点实现。
+
+启用采集必须配置 identity_store 和 `XSHIELD_DATABASE_URL`。部署 Unix 本地文件系统，预建独立私有证据根目录（0700），注入 `XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、独立 32 字节小写 hex 的 `XSHIELD_EVIDENCE_KEY_HEX` 及 `XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`（4259901 字节至 1 TiB）。根目录只允许一个网关写入者；同根控制面只读，共享文件系统部署需另行验证锁语义。启动时计入所有已有常规文件，包括孤儿对象，最多 100000 文件；每次写入先保守预留文档、最大 manifest 与认证侧车占用，失败也保留预留。进程内一个采集许可覆盖解析、加密、落盘、catalog 和 journal，忙时立即拒绝。到期立即禁止读取，物理删除与自动孤儿回收尚待实现；由运维按保留流程清理后重启重新计算余量，当前代码不主动删除对象。
+
+释放顺序为：加密对象及侧车耐久写入 → PostgreSQL catalog 与 evidence.cataloged outbox 原子提交 → 本地 evidence.captured 耐久审计 → 后续响应处理和正文释放。catalog 操作的整体等待受 identity_store.acquire_timeout_ms 约束；事务结果不确定时也保留独立 request_seq，避免终态复用序号。事件只含受限引用、版本和结果，正文不进入索引或普通日志；规则 confidence=null。EVIDENCE_CAPTURE_INVALID、EVIDENCE_CAPTURE_LIMIT_EXCEEDED、EVIDENCE_CAPTURE_CAPACITY_EXHAUSTED、EVIDENCE_CAPTURE_UNAVAILABLE 形成 request.aborted；必需 journal 失败关闭网关就绪状态并在重启恢复缺失终态。源站已返回和客户端已释放是独立事实，失败不触发业务重放。落盘后目录或审计失败可能保留有界对象，已登记对象沿用独立审批读取流程。
+
+`scripts/test_postgres.sh` 包含真实 HTTP→vault→catalog/outbox→journal 集成测试：原正文保持、秘密排除、业务攻击文本保留、超限关闭、数据库约束故障/锁等待超时关闭、事件引用及失败后重启。单测覆盖采集配置、目录单写者、在途许可、磁盘配额和重启孤儿计费。本阶段复用 workspace 的 xshield-evidence（Apache-2.0）及既有 SQLx/Tokio，仅启用 Tokio time；第三方依赖版本与锁文件更新策略沿用 workspace。

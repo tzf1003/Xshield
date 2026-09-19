@@ -178,6 +178,14 @@ pub enum ReasonCode {
     ResponseBufferCapacityExhausted,
     /// A configured private response failed framing, encoding, media-type, or JSON validation.
     ResponseValidationFailed,
+    /// Evidence capture failed strict parsing or secret-policy validation.
+    EvidenceCaptureInvalid,
+    /// Evidence source, output, or exclusion manifest exceeded its bound.
+    EvidenceCaptureLimitExceeded,
+    /// Evidence capture concurrency, byte quota, or file quota is exhausted.
+    EvidenceCaptureCapacityExhausted,
+    /// Required encrypted evidence storage or catalog publication failed.
+    EvidenceCaptureUnavailable,
     /// A configured encrypted request exceeded its complete-buffer bound.
     RequestBodyTooLarge,
     /// Aggregate encrypted-request buffering capacity was unavailable.
@@ -290,6 +298,10 @@ impl ReasonCode {
             Self::ResponseBodyTooLarge => "RESPONSE_BODY_TOO_LARGE",
             Self::ResponseBufferCapacityExhausted => "RESPONSE_BUFFER_CAPACITY_EXHAUSTED",
             Self::ResponseValidationFailed => "RESPONSE_VALIDATION_FAILED",
+            Self::EvidenceCaptureInvalid => "EVIDENCE_CAPTURE_INVALID",
+            Self::EvidenceCaptureLimitExceeded => "EVIDENCE_CAPTURE_LIMIT_EXCEEDED",
+            Self::EvidenceCaptureCapacityExhausted => "EVIDENCE_CAPTURE_CAPACITY_EXHAUSTED",
+            Self::EvidenceCaptureUnavailable => "EVIDENCE_CAPTURE_UNAVAILABLE",
             Self::RequestBodyTooLarge => "REQUEST_BODY_TOO_LARGE",
             Self::RequestBufferCapacityExhausted => "REQUEST_BUFFER_CAPACITY_EXHAUSTED",
             Self::RequestEnvelopeInvalid => "REQUEST_ENVELOPE_INVALID",

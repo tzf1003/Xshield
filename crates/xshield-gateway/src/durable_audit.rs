@@ -686,20 +686,17 @@ impl DurableAudit {
             let mut events = Vec::new();
             let (event_type, completion_cause, reason_code, status, origin_state) =
                 if let Some(origin) = request.origin {
-                    let event_type = if origin.state == "response_received" {
+                    let event_type = if origin.state == "response_received"
+                        && origin.reason_code == ReasonCode::OriginResponseReceived.as_str()
+                    {
                         "request.completed"
                     } else {
                         "request.aborted"
                     };
-                    let reason_code = if origin.state == "response_received" {
-                        ReasonCode::OriginResponseReceived.as_str()
-                    } else {
-                        ReasonCode::OriginOutcomeUnknown.as_str()
-                    };
                     (
                         event_type,
                         origin.event_id,
-                        reason_code.to_owned(),
+                        origin.reason_code,
                         origin.status,
                         origin.state,
                     )
@@ -768,6 +765,41 @@ impl DurableAudit {
                 &events,
             )?;
         }
+        Ok(())
+    }
+
+    pub(crate) async fn record_evidence_capture(
+        &self,
+        request_id: &str,
+        trace_id: &str,
+        admission: &AdmissionAudit,
+        artifact_id: &str,
+        catalog_event_id: &str,
+        profile_revision: &str,
+    ) -> Result<(), DurableAuditError> {
+        let mut event = PendingEvent::new(
+            new_event_id()?,
+            "evidence.captured",
+            admission.next_request_sequence,
+            vec![catalog_event_id.to_owned()],
+            Payload::EvidenceCaptured {
+                stage: "evidence_capture",
+                outcome: "PASS",
+                reason_code: "EVIDENCE_CAPTURED",
+                proof_kind: "deterministic",
+                confidence: None,
+                profile_revision: profile_revision.to_owned(),
+            },
+        );
+        event.evidence_refs.push(artifact_id.to_owned());
+        self.append(
+            BatchContext {
+                request_id: Some(request_id.to_owned()),
+                trace_id: trace_id.to_owned(),
+            },
+            vec![event],
+        )
+        .await?;
         Ok(())
     }
 
@@ -1107,7 +1139,7 @@ fn encode_event(
         observed_at: &event.occurred_at,
         policy_revision: context.policy_revision,
         example_only: false,
-        evidence_refs: &[],
+        evidence_refs: &event.evidence_refs,
         cause_event_ids: &event.cause_event_ids,
         payload: &event.payload,
         sensitivity: "INTERNAL",
@@ -1179,6 +1211,7 @@ struct PendingEvent {
     occurred_at: String,
     span_id: String,
     cause_event_ids: Vec<String>,
+    evidence_refs: Vec<String>,
     payload: Payload,
 }
 
@@ -1197,6 +1230,7 @@ impl PendingEvent {
             occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             span_id: new_span_id(),
             cause_event_ids,
+            evidence_refs: Vec::new(),
             payload,
         }
     }
@@ -1205,6 +1239,14 @@ impl PendingEvent {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Payload {
+    EvidenceCaptured {
+        stage: &'static str,
+        outcome: &'static str,
+        reason_code: &'static str,
+        proof_kind: &'static str,
+        confidence: Option<f64>,
+        profile_revision: String,
+    },
     RequestAccepted {
         method: String,
         operation_id: Option<String>,
@@ -1393,7 +1435,7 @@ struct WireAuditEvent<'a> {
     observed_at: &'a str,
     policy_revision: &'a str,
     example_only: bool,
-    evidence_refs: &'a [&'a str],
+    evidence_refs: &'a [String],
     cause_event_ids: &'a [String],
     payload: &'a Payload,
     sensitivity: &'a str,
@@ -2197,6 +2239,9 @@ mod tests {
             ReasonCode::ResponseValidationFailed.as_str()
         );
         drop(journal);
+        let restarted = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        assert!(restarted.is_ready());
+        drop(restarted);
         fs::remove_dir_all(directory).unwrap();
     }
 

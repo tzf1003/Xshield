@@ -1,5 +1,6 @@
 mod buffered_json;
 mod durable_audit;
+mod evidence_writer;
 mod protected_identity;
 
 use async_trait::async_trait;
@@ -95,6 +96,7 @@ struct Gateway {
     response_key: Option<EnvResponseKey>,
     postgres: Option<Arc<PostgresRuntime>>,
     buffered_body_budget: Arc<Semaphore>,
+    evidence: Option<evidence_writer::EvidenceWriter>,
 }
 
 struct PostgresRuntime {
@@ -513,7 +515,8 @@ impl ProxyHttp for Gateway {
                     ));
                 }
                 let released = self
-                    .commit_auth_binding(session, context, complete.body)
+                    .capture_response(session, context, complete.body)
+                    .and_then(|body| self.commit_auth_binding(session, context, body))
                     .and_then(|body| self.commit_auth_transition(session, context, body))
                     .and_then(|body| self.commit_response_grants(session, context, body))
                     .and_then(|body| self.encrypt_response(session, context, body));
@@ -597,6 +600,44 @@ impl ProxyHttp for Gateway {
 }
 
 impl Gateway {
+    fn capture_response(
+        &self,
+        session: &Session,
+        context: &mut RequestContext,
+        body: Bytes,
+    ) -> Result<Bytes, ReasonCode> {
+        let request = session.req_header();
+        let Some(rule) = self
+            .config
+            .evidence_capture_rule(request.method.as_str(), request.uri.path())
+        else {
+            return Ok(body);
+        };
+        let writer = self
+            .evidence
+            .as_ref()
+            .ok_or(ReasonCode::EvidenceCaptureUnavailable)?;
+        let postgres = self
+            .postgres
+            .as_ref()
+            .ok_or(ReasonCode::EvidenceCaptureUnavailable)?;
+        let admission = context
+            .admission_audit
+            .as_mut()
+            .ok_or(ReasonCode::EvidenceCaptureUnavailable)?;
+        writer.capture(
+            &self.config,
+            postgres,
+            &self.audit,
+            &context.request_id,
+            &context.trace_id,
+            admission,
+            rule,
+            &body,
+        )?;
+        Ok(body)
+    }
+
     async fn apply_sensor_observation(
         &self,
         session: &mut Session,
@@ -1482,6 +1523,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .transpose()?;
     let request_key = EnvRequestKey::from_env(&config)?;
     let response_key = EnvResponseKey::from_env(&config)?;
+    let evidence = evidence_writer::EvidenceWriter::from_env(&config)?;
     if request_key
         .as_ref()
         .zip(response_key.as_ref())
@@ -1499,6 +1541,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             identity,
             request_key,
             response_key,
+            evidence,
             postgres,
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
         },

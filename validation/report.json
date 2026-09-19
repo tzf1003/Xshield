@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 230,
-  "passed_count": 230,
+  "checks_total": 231,
+  "passed_count": 231,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -967,6 +967,11 @@
     },
     {
       "name": "no_tool_tokens:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/12-evidence-capture-and-vault.md",
       "passed": true,
       "detail": ""
     },

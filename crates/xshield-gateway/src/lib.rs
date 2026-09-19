@@ -27,6 +27,7 @@ use xshield_core::{
 };
 
 pub mod auth_binding;
+pub mod evidence_capture;
 pub mod request_crypto;
 pub mod response_crypto;
 pub mod response_grant;
@@ -36,6 +37,7 @@ pub mod share_issue;
 pub mod share_token;
 
 use auth_binding::{AuthBindingRule, AuthTransitionRule};
+use evidence_capture::{EvidenceCaptureDto, EvidenceCaptureRule};
 use request_crypto::{RequestCryptoObserveRule, RequestCryptoPolicy, RequestCryptoRule};
 use response_crypto::ResponseCryptoRule;
 use response_grant::ResponseGrantRule;
@@ -162,6 +164,7 @@ struct CompiledResponse {
     auth_binding: Option<AuthBindingRule>,
     auth_refresh: Option<AuthTransitionRule>,
     auth_context_switch: Option<AuthTransitionRule>,
+    evidence_capture: Option<EvidenceCaptureRule>,
 }
 
 #[derive(Debug)]
@@ -388,6 +391,8 @@ struct ResponseDto {
     auth_refresh: Option<AuthRefreshDto>,
     #[serde(default)]
     auth_context_switch: Option<AuthRefreshDto>,
+    #[serde(default)]
+    evidence_capture: Option<EvidenceCaptureDto>,
 }
 
 #[derive(Deserialize)]
@@ -546,11 +551,9 @@ impl GatewayConfig {
                                 | AdmissionClass::UiActionRequired
                                 | AdmissionClass::ShareEntry
                                 | AdmissionClass::ServiceIdentity
-                        ) || operation
-                            .response
-                            .as_ref()
-                            .is_some_and(|response| response.auth_binding.is_some())
-                            || operation.request_crypto.is_some()
+                        ) || operation.response.as_ref().is_some_and(|response| {
+                            response.auth_binding.is_some() || response.evidence_capture.is_some()
+                        }) || operation.request_crypto.is_some()
                     }))
         {
             return Err(ConfigError::Invalid("identity_store"));
@@ -829,6 +832,30 @@ impl GatewayConfig {
             .as_ref()?
             .crypto
             .as_ref()
+    }
+
+    /// Returns the approved evidence-copy policy for this operation's JSON response.
+    #[must_use]
+    pub fn evidence_capture_rule(&self, method: &str, path: &str) -> Option<&EvidenceCaptureRule> {
+        self.operation(method, path)?
+            .response
+            .as_ref()?
+            .evidence_capture
+            .as_ref()
+    }
+
+    /// Whether startup must open the bounded evidence writer and catalog store.
+    #[must_use]
+    pub fn requires_evidence_capture(&self) -> bool {
+        self.operations
+            .values()
+            .chain(self.path_resource_operations.iter())
+            .any(|operation| {
+                operation
+                    .response
+                    .as_ref()
+                    .is_some_and(|response| response.evidence_capture.is_some())
+            })
     }
 
     /// Returns the sole response-encryption key identifier required at startup.
@@ -1542,6 +1569,7 @@ fn compile_optional_response(
         .transpose()
 }
 
+#[allow(clippy::too_many_lines)]
 fn compile_response(
     mut dto: ResponseDto,
     method: HttpMethod,
@@ -1623,6 +1651,30 @@ fn compile_response(
     {
         return Err(ConfigError::Invalid("operations.response"));
     }
+    let bearer_pointer = auth_binding
+        .as_ref()
+        .map(|rule| rule.bearer_pointer.as_str())
+        .or_else(|| {
+            auth_refresh
+                .as_ref()
+                .map(|rule| rule.bearer_pointer.as_str())
+        })
+        .or_else(|| {
+            auth_context_switch
+                .as_ref()
+                .map(|rule| rule.bearer_pointer.as_str())
+        });
+    let evidence_capture = dto
+        .evidence_capture
+        .map(|capture| {
+            if capture.max_bytes > dto.max_bytes {
+                return Err(ConfigError::Invalid(
+                    "operations.response.evidence_capture.max_bytes",
+                ));
+            }
+            EvidenceCaptureRule::compile(capture, bearer_pointer)
+        })
+        .transpose()?;
     Ok(CompiledResponse {
         kind,
         max_bytes: dto.max_bytes,
@@ -1631,6 +1683,7 @@ fn compile_response(
         auth_binding,
         auth_refresh,
         auth_context_switch,
+        evidence_capture,
     })
 }
 
@@ -1656,6 +1709,7 @@ fn compile_response_kind(
                 || dto.auth_binding.is_some()
                 || dto.auth_refresh.is_some()
                 || dto.auth_context_switch.is_some()
+                || dto.evidence_capture.is_some()
             {
                 return Err(ConfigError::Invalid("operations.response"));
             }
@@ -2301,6 +2355,29 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(oversized.as_bytes()),
             Err(ConfigError::Invalid("operations.response.max_bytes"))
+        ));
+    }
+
+    #[test]
+    fn capture_requires_bounded_json_and_a_catalog_store() {
+        let mut json: serde_json::Value = serde_json::from_str(CONFIG).unwrap();
+        json["operations"][0]["response"] = serde_json::json!({
+            "mode":"BUFFERED_JSON", "max_bytes":4096,
+            "evidence_capture":{"profile_revision":"capture-r1", "max_bytes":1024,
+                "retention_seconds":3600, "secret_pointers":["/credential"]}
+        });
+        json["operations"].as_array_mut().unwrap().truncate(1);
+        json.as_object_mut().unwrap().remove("sensor");
+        let config = GatewayConfig::from_json(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(config.requires_evidence_capture());
+        assert!(config.evidence_capture_rule("GET", "/catalog").is_some());
+        json["operations"][0]["response"]["evidence_capture"]["max_bytes"] = 4097.into();
+        assert!(GatewayConfig::from_json(&serde_json::to_vec(&json).unwrap()).is_err());
+        json["operations"][0]["response"]["evidence_capture"]["max_bytes"] = 1024.into();
+        json.as_object_mut().unwrap().remove("identity_store");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&json).unwrap()),
+            Err(ConfigError::Invalid("identity_store"))
         ));
     }
 

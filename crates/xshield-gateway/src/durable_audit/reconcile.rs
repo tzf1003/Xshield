@@ -50,6 +50,7 @@ pub(super) struct RecoveredOrigin {
     operation_id: Option<String>,
     pub(super) state: String,
     pub(super) status: Option<u16>,
+    pub(super) reason_code: String,
 }
 
 struct RecoveredTerminal {
@@ -252,7 +253,7 @@ fn apply_request_event(
             let payload: HistoricalOrigin = serde_json::from_str(event.payload.get())?;
             let valid_response = event.event_type == "origin.response"
                 && payload.origin_state == "response_received"
-                && payload.reason_code == ReasonCode::OriginResponseReceived.as_str()
+                && valid_reason_code(&payload.reason_code)
                 && payload
                     .status
                     .is_some_and(|status| (100..=599).contains(&status));
@@ -273,6 +274,7 @@ fn apply_request_event(
                 operation_id: payload.operation_id,
                 state: payload.origin_state,
                 status: payload.status,
+                reason_code: payload.reason_code,
             });
         }
         "request.completed" | "request.aborted" => {
@@ -347,10 +349,15 @@ fn validate_recovery_state(request: &RecoveryState) -> Result<(), DurableAuditEr
         (Some(origin), Some(decision))
             if decision.outcome == "ALLOW" && origin.state == "response_received" =>
         {
-            terminal.event_type == "request.completed"
-                && terminal.origin_state == origin.state
-                && terminal.reason_code == ReasonCode::OriginResponseReceived.as_str()
-                && terminal.status == origin.status
+            // A complete upstream response can still fail the response barrier
+            // or downstream delivery. Preserve that recorded abort on restart.
+            terminal.origin_state == origin.state
+                && terminal.reason_code == origin.reason_code
+                && ((terminal.event_type == "request.aborted"
+                    && origin.reason_code != ReasonCode::OriginResponseReceived.as_str())
+                    || (terminal.event_type == "request.completed"
+                        && terminal.reason_code == ReasonCode::OriginResponseReceived.as_str()
+                        && terminal.status == origin.status))
         }
         (Some(origin), Some(decision))
             if decision.outcome == "ALLOW" && origin.state == "unknown" =>

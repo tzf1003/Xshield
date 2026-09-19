@@ -20,7 +20,7 @@ pingora = { version = "=0.9.0", default-features = false, features = ["openssl",
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sqlx = { version = "=0.9.0", default-features = false, features = ["chrono", "json", "postgres", "runtime-tokio", "tls-rustls-ring-native-roots"] }
-tokio = { version = "~1.51", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { version = "~1.51", features = ["macros", "net", "rt-multi-thread", "time"] }
 tower = "0.5"
 uuid = { version = "1", features = ["v7"] }
 zeroize = "1"
