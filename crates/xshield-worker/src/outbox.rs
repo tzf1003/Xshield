@@ -24,6 +24,7 @@ const MAX_RETRY_SECONDS: u64 = 3_600;
 const INVALID_EVENT_CODE: &str = "OUTBOX_INVALID_EVENT";
 const INDEX_UNAVAILABLE_CODE: &str = "OUTBOX_INDEX_UNAVAILABLE";
 const INTEGRITY_CONFLICT_CODE: &str = "OUTBOX_INTEGRITY_CONFLICT";
+const CASE_EVENT_TYPES: &[&str] = &["case.created", "case.closed", "case.evidence.added"];
 
 pub(super) fn supports(event_type: &str) -> bool {
     matches!(
@@ -113,7 +114,9 @@ pub async fn publish_case_outbox_batch(
     scope: &OutboxScope,
     config: &OutboxPublisherConfig,
 ) -> Result<OutboxPublishReport, PublishError> {
-    let leases = store.claim_outbox_batch(scope, config.lease).await?;
+    let leases = store
+        .claim_outbox_batch_for_types(scope, config.lease, CASE_EVENT_TYPES)
+        .await?;
     let claimed = leases.len();
     let mut report = OutboxPublishReport {
         claimed,

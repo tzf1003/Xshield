@@ -154,6 +154,31 @@ pub async fn claim_outbox_batch(
     scope: &OutboxScope,
     config: OutboxLeaseConfig,
 ) -> Result<Vec<OutboxLease>, StoreError> {
+    claim_outbox_batch_for_types(pool, scope, config, &[]).await
+}
+
+/// Claims a bounded set of ready events restricted to explicit event families.
+///
+/// An empty family list preserves the generic all-family behavior. Non-empty
+/// lists are validated before SQL construction so a family-specific worker
+/// cannot lease and mutate another producer's rows.
+///
+/// # Errors
+/// Returns [`StoreError`] for invalid bounds/families, database failures, or
+/// corrupt stored rows.
+pub async fn claim_outbox_batch_for_types(
+    pool: &PgPool,
+    scope: &OutboxScope,
+    config: OutboxLeaseConfig,
+    event_types: &[&str],
+) -> Result<Vec<OutboxLease>, StoreError> {
+    let event_types = event_types
+        .iter()
+        .map(|event_type| {
+            validate_event_type(event_type)?;
+            Ok((*event_type).to_owned())
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
     let lease_seconds = i64::try_from(config.lease_for.as_secs())
         .map_err(|_| StoreError::NumericRange("lease_for"))?;
     let max_bytes =
@@ -184,6 +209,7 @@ pub async fn claim_outbox_batch(
                AND outbox.published_at IS NULL
                AND outbox.next_attempt_at <= db_clock.now
                AND (outbox.lease_until IS NULL OR outbox.lease_until <= db_clock.now)
+               AND (cardinality($7::text[]) = 0 OR outbox.event_type = ANY($7::text[]))
              ORDER BY outbox.created_at, outbox.event_id
              LIMIT $3
              FOR UPDATE SKIP LOCKED
@@ -215,6 +241,7 @@ pub async fn claim_outbox_batch(
     .bind(&token)
     .bind(lease_seconds)
     .bind(max_bytes)
+    .bind(event_types)
     .fetch_all(&mut *transaction)
     .await?;
     let leases = rows
@@ -322,6 +349,20 @@ impl PostgresIdentityStore {
         claim_outbox_batch(&self.pool, scope, config).await
     }
 
+    /// Claims outbox rows restricted to explicit event families.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for invalid bounds/families, database failures,
+    /// or corrupt stored rows.
+    pub async fn claim_outbox_batch_for_types(
+        &self,
+        scope: &OutboxScope,
+        config: OutboxLeaseConfig,
+        event_types: &[&str],
+    ) -> Result<Vec<OutboxLease>, StoreError> {
+        claim_outbox_batch_for_types(&self.pool, scope, config, event_types).await
+    }
+
     /// Acknowledges an outbox row using this store's pool.
     ///
     /// # Errors
@@ -422,6 +463,17 @@ fn validate_text(value: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn validate_event_type(value: &str) -> Result<(), StoreError> {
+    if validate_text(value).is_err()
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.')
+        })
+    {
+        return Err(StoreError::InvalidCommand);
+    }
+    Ok(())
+}
+
 fn validate_error_code(error_code: &str) -> Result<(), StoreError> {
     if error_code.is_empty()
         || error_code.len() > 128
@@ -452,5 +504,7 @@ mod tests {
         assert!(validate_token("lease\n").is_err());
         assert!(validate_error_code("publisher\0error").is_err());
         assert!(validate_error_code("DELIVERY_TIMEOUT").is_ok());
+        assert!(validate_event_type("case.created").is_ok());
+        assert!(validate_event_type("CASE.CREATED").is_err());
     }
 }

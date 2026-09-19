@@ -56,7 +56,8 @@ pub use investigation_case::{
 };
 pub use outbox::{
     OutboxAckOutcome, OutboxEvent, OutboxFailureOutcome, OutboxLease, OutboxLeaseConfig,
-    OutboxScope, ack_outbox_event, claim_outbox_batch, fail_outbox_event,
+    OutboxScope, ack_outbox_event, claim_outbox_batch, claim_outbox_batch_for_types,
+    fail_outbox_event,
 };
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
 pub use request_replay::{RequestCryptoMessage, RequestCryptoMessageOutcome};
