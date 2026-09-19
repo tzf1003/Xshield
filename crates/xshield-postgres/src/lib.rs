@@ -18,6 +18,7 @@ mod grant;
 mod grant_read;
 mod identity_read;
 mod investigation_case;
+mod outbox;
 mod provenance;
 mod request_replay;
 mod response_grant;
@@ -52,6 +53,10 @@ pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
 pub use investigation_case::{
     InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
+};
+pub use outbox::{
+    OutboxAckOutcome, OutboxEvent, OutboxFailureOutcome, OutboxLease, OutboxLeaseConfig,
+    OutboxScope, ack_outbox_event, claim_outbox_batch, fail_outbox_event,
 };
 pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
 pub use request_replay::{RequestCryptoMessage, RequestCryptoMessageOutcome};

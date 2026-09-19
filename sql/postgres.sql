@@ -133,9 +133,14 @@ CREATE TABLE xshield.audit_outbox (
  event_id text PRIMARY KEY, tenant_id text NOT NULL, site_id text NOT NULL,
  aggregate_ref text NOT NULL, event_type text NOT NULL, envelope jsonb NOT NULL,
  created_at timestamptz NOT NULL DEFAULT now(), published_at timestamptz,
- lease_until timestamptz, delivery_attempts integer NOT NULL DEFAULT 0
+ lease_until timestamptz, lease_token text,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(), last_error_code text,
+ delivery_attempts integer NOT NULL DEFAULT 0
 );
 CREATE INDEX outbox_pending ON xshield.audit_outbox(created_at,event_id)
+ WHERE published_at IS NULL;
+CREATE INDEX outbox_delivery_ready
+ ON xshield.audit_outbox(tenant_id,site_id,next_attempt_at,created_at,event_id)
  WHERE published_at IS NULL;
 CREATE TABLE xshield.artifact_catalog (
  tenant_id text NOT NULL, site_id text NOT NULL, artifact_id text NOT NULL,

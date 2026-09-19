@@ -4,7 +4,10 @@
 
 use chrono::{DateTime, TimeDelta, Utc};
 use clickhouse::{Client, Row, sql::Identifier};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, MapAccess, SeqAccess, Visitor},
+};
 use serde_json::value::RawValue;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,7 +25,9 @@ use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, Site
 
 mod control_audit;
 pub mod model_eval;
+mod outbox;
 mod search;
+pub use outbox::{OutboxPublishReport, OutboxPublisherConfig, publish_case_outbox_batch};
 pub use search::{
     AuditSearchResult, ModelCallEventSummary, ModelCallSummary, SearchEventSummary, SearchPosition,
     query_audit_events, query_model_call,
@@ -792,6 +797,12 @@ struct IndexRow {
     ingest_revision: u64,
 }
 
+#[derive(Clone, Copy)]
+enum ParseSource {
+    Journal,
+    Outbox,
+}
+
 impl IndexRow {
     fn parse(
         bytes: &[u8],
@@ -801,6 +812,46 @@ impl IndexRow {
         digest: String,
         metadata_retention: TimeDelta,
     ) -> Result<Self, PublishError> {
+        Self::parse_with(
+            bytes,
+            authenticated_event_id,
+            authenticated_sequence,
+            authenticated_boot_id,
+            digest,
+            metadata_retention,
+            ParseSource::Journal,
+        )
+    }
+
+    fn parse_outbox(
+        bytes: &[u8],
+        authenticated_event_id: &EventId,
+        authenticated_sequence: u64,
+        authenticated_boot_id: &str,
+        digest: String,
+        metadata_retention: TimeDelta,
+    ) -> Result<Self, PublishError> {
+        Self::parse_with(
+            bytes,
+            authenticated_event_id,
+            authenticated_sequence,
+            authenticated_boot_id,
+            digest,
+            metadata_retention,
+            ParseSource::Outbox,
+        )
+    }
+
+    fn parse_with(
+        bytes: &[u8],
+        authenticated_event_id: &EventId,
+        authenticated_sequence: u64,
+        authenticated_boot_id: &str,
+        digest: String,
+        metadata_retention: TimeDelta,
+        source: ParseSource,
+    ) -> Result<Self, PublishError> {
+        reject_duplicate_json(bytes)?;
         let event: WireEvent = serde_json::from_slice(bytes)?;
         let event_id =
             EventId::parse(event.event_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
@@ -845,10 +896,13 @@ impl IndexRow {
         let retention_expires_at = occurred_at
             .checked_add_signed(metadata_retention)
             .ok_or(PublishError::InvalidEvent)?;
-        let summary = if control_audit::supports(&event.event_type) {
-            control_audit::parse(&event)?
-        } else {
-            PayloadSummary::parse(&event.event_type, event.payload.get())?
+        let summary = match source {
+            ParseSource::Journal if control_audit::supports(&event.event_type) => {
+                control_audit::parse(&event)?
+            }
+            ParseSource::Journal => PayloadSummary::parse(&event.event_type, event.payload.get())?,
+            ParseSource::Outbox if outbox::supports(&event.event_type) => outbox::parse(&event)?,
+            ParseSource::Outbox => return Err(PublishError::UnsupportedEventType),
         };
         let ingest_revision = digest_revision(&digest)?;
         Ok(Self {
@@ -971,6 +1025,84 @@ struct WireEvent {
     payload: Box<RawValue>,
     sensitivity: String,
     integrity: Integrity,
+}
+
+struct UniqueJson;
+
+impl<'de> Deserialize<'de> for UniqueJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct UniqueVisitor;
+
+        impl<'de> Visitor<'de> for UniqueVisitor {
+            type Value = UniqueJson;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("JSON with unique object keys")
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+
+            fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while sequence.next_element::<UniqueJson>()?.is_some() {}
+                Ok(UniqueJson)
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut keys = BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !keys.insert(key) {
+                        return Err(de::Error::custom("duplicate JSON object key"));
+                    }
+                    map.next_value::<UniqueJson>()?;
+                }
+                Ok(UniqueJson)
+            }
+        }
+
+        deserializer.deserialize_any(UniqueVisitor)
+    }
+}
+
+fn reject_duplicate_json(bytes: &[u8]) -> Result<(), PublishError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    UniqueJson::deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1643,6 +1775,10 @@ pub enum PublishError {
     Json(serde_json::Error),
     /// `ClickHouse` query or insert failed.
     ClickHouse(clickhouse::error::Error),
+    /// `PostgreSQL` outbox lease or acknowledgement failed.
+    Postgres(xshield_postgres::StoreError),
+    /// A claimed outbox row no longer belongs to this publisher lease.
+    OutboxLeaseLost,
 }
 
 impl fmt::Display for PublishError {
@@ -1663,6 +1799,8 @@ impl fmt::Display for PublishError {
             Self::Io(_) => formatter.write_str("publisher storage failed"),
             Self::Json(_) => formatter.write_str("publisher JSON processing failed"),
             Self::ClickHouse(_) => formatter.write_str("audit index unavailable"),
+            Self::Postgres(_) => formatter.write_str("outbox store unavailable"),
+            Self::OutboxLeaseLost => formatter.write_str("outbox delivery lease lost"),
         }
     }
 }
@@ -1674,6 +1812,7 @@ impl std::error::Error for PublishError {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::ClickHouse(error) => Some(error),
+            Self::Postgres(error) => Some(error),
             _ => None,
         }
     }
@@ -1700,6 +1839,12 @@ impl From<serde_json::Error> for PublishError {
 impl From<clickhouse::error::Error> for PublishError {
     fn from(value: clickhouse::error::Error) -> Self {
         Self::ClickHouse(value)
+    }
+}
+
+impl From<xshield_postgres::StoreError> for PublishError {
+    fn from(value: xshield_postgres::StoreError) -> Self {
+        Self::Postgres(value)
     }
 }
 

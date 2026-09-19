@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 356,
-  "passed_count": 356,
+  "checks_total": 358,
+  "passed_count": 358,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -1547,6 +1547,16 @@
     },
     {
       "name": "link:README.md:docs/11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/20-testing-and-acceptance.md",
       "passed": true,
       "detail": ""
     },

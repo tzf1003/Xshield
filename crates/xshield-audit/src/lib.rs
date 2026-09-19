@@ -45,6 +45,16 @@ const ED25519_BYTES: usize = 32;
 const ED25519_SIGNATURE_BYTES: usize = 64;
 const MAX_SEAL_MANIFEST_BYTES: u64 = 1024;
 
+/// Computes the SHA-256 digest used to bind a durable event to its publisher row.
+///
+/// This is intentionally a small, allocation-free adapter around the journal's
+/// existing cryptographic primitive so other trusted publication ports cannot
+/// substitute a weaker digest implementation.
+#[must_use]
+pub fn sha256_digest(bytes: &[u8]) -> [u8; HASH_BYTES] {
+    sha256(bytes)
+}
+
 /// AES-256 key used only for local journal encryption.
 pub struct JournalKey([u8; 32]);
 

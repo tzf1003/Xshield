@@ -1,0 +1,457 @@
+//! Typed adapters for transactional `PostgreSQL` outbox facts.
+//!
+//! Outbox envelopes are a different producer contract from sealed journal
+//! records. This module only accepts the complete `case.*` envelopes emitted by
+//! the control store; other outbox families remain explicitly unsupported until
+//! their producers expose the same validated fields.
+
+use super::{
+    IndexRow, PayloadSummary, PublishError, WireEvent, hex, insert_rows, reject_remote_conflicts,
+    valid_lower_hex, valid_name, valid_prefixed_v7,
+};
+use chrono::TimeDelta;
+use clickhouse::Client;
+use serde::Deserialize;
+use std::{collections::BTreeMap, time::Duration};
+use xshield_audit::sha256_digest;
+use xshield_postgres::{
+    OutboxAckOutcome, OutboxEvent, OutboxFailureOutcome, OutboxLeaseConfig, OutboxScope,
+    PostgresIdentityStore,
+};
+
+const MAX_OUTBOX_EVENT_BYTES: usize = 64 * 1024;
+const MAX_RETRY_SECONDS: u64 = 3_600;
+const INVALID_EVENT_CODE: &str = "OUTBOX_INVALID_EVENT";
+const INDEX_UNAVAILABLE_CODE: &str = "OUTBOX_INDEX_UNAVAILABLE";
+const INTEGRITY_CONFLICT_CODE: &str = "OUTBOX_INTEGRITY_CONFLICT";
+
+pub(super) fn supports(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "case.created" | "case.closed" | "case.evidence.added"
+    )
+}
+
+/// Immutable settings for one bounded `PostgreSQL` outbox pass.
+#[derive(Clone, Debug)]
+pub struct OutboxPublisherConfig {
+    table: String,
+    metadata_retention: TimeDelta,
+    lease: OutboxLeaseConfig,
+    retry_after: Duration,
+}
+
+impl OutboxPublisherConfig {
+    /// Validates the destination table, retention, lease, and retry bounds.
+    ///
+    /// # Errors
+    /// Returns [`PublishError::InvalidConfig`] for an unsafe table name,
+    /// unsupported retention, or an unbounded retry interval.
+    pub fn new(
+        table: impl Into<String>,
+        metadata_retention_days: u16,
+        lease: OutboxLeaseConfig,
+        retry_after: Duration,
+    ) -> Result<Self, PublishError> {
+        let table = table.into();
+        let metadata_retention = TimeDelta::try_days(i64::from(metadata_retention_days))
+            .filter(|_| (1..=3_650).contains(&metadata_retention_days))
+            .ok_or(PublishError::InvalidConfig)?;
+        if OutboxLeaseConfig::new(lease.max_events, lease.max_bytes, lease.lease_for).is_err()
+            || !valid_name(&table)
+            || retry_after.as_secs() == 0
+            || retry_after.as_secs() > MAX_RETRY_SECONDS
+            || retry_after.subsec_nanos() != 0
+        {
+            return Err(PublishError::InvalidConfig);
+        }
+        Ok(Self {
+            table,
+            metadata_retention,
+            lease,
+            retry_after,
+        })
+    }
+
+    /// Returns the `ClickHouse` destination table.
+    #[must_use]
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    /// Returns the maximum rows/bytes and lease duration for one claim.
+    #[must_use]
+    pub const fn lease(&self) -> OutboxLeaseConfig {
+        self.lease
+    }
+}
+
+/// Counts committed and acknowledged rows in one outbox pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutboxPublishReport {
+    /// Rows claimed from `PostgreSQL`.
+    pub claimed: usize,
+    /// Rows acknowledged after successful `ClickHouse` publication.
+    pub published: usize,
+}
+
+/// Publishes one bounded batch of complete `case.*` outbox envelopes.
+///
+/// `PostgreSQL` owns the lease and publication acknowledgement. `ClickHouse` is
+/// written before the acknowledgement, so retries are at-least-once and the
+/// stable event ID/content digest conflict check remains authoritative. Other
+/// outbox families are rejected without falling back to the journal adapter.
+///
+/// # Errors
+/// Returns [`PublishError::InvalidEvent`] for a malformed or mismatched row,
+/// [`PublishError::ClickHouse`] for an unavailable index,
+/// [`PublishError::Postgres`] for lease operations, or
+/// [`PublishError::OutboxLeaseLost`] when a concurrent worker owns the row.
+pub async fn publish_case_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    let leases = store.claim_outbox_batch(scope, config.lease).await?;
+    let claimed = leases.len();
+    let mut report = OutboxPublishReport {
+        claimed,
+        published: 0,
+    };
+    for lease in leases {
+        if let Err(error) = publish_one(store, client, scope, config, &lease).await {
+            if !matches!(
+                error,
+                PublishError::Postgres(_) | PublishError::OutboxLeaseLost
+            ) {
+                schedule_failure(store, scope, &lease, &error, config.retry_after).await?;
+            }
+            return Err(error);
+        }
+        report.published = report
+            .published
+            .checked_add(1)
+            .ok_or(PublishError::InvalidEvent)?;
+    }
+    Ok(report)
+}
+
+async fn publish_one(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+    lease: &OutboxEvent,
+) -> Result<(), PublishError> {
+    if lease.tenant_id != *scope.tenant_id() || lease.site_id != *scope.site_id() {
+        return Err(PublishError::InvalidEvent);
+    }
+    let bytes = serde_json::to_vec(&lease.envelope)?;
+    if bytes.is_empty() || bytes.len() > MAX_OUTBOX_EVENT_BYTES {
+        return Err(PublishError::InvalidEvent);
+    }
+    let event: WireEvent = serde_json::from_slice(&bytes)?;
+    let producer_boot_id = event.producer_boot_id.clone();
+    let digest = hex(&sha256_digest(&bytes));
+    let row = IndexRow::parse_outbox(
+        &bytes,
+        &lease.event_id,
+        event.producer_seq,
+        &producer_boot_id,
+        digest.clone(),
+        config.metadata_retention,
+    )?;
+    let aggregate_ref = lease
+        .envelope
+        .get("payload")
+        .and_then(|payload| payload.get("case_id"))
+        .and_then(serde_json::Value::as_str);
+    if row.event_id != lease.event_id.as_str()
+        || row.tenant_id != scope.tenant_id().as_str()
+        || row.site_id != scope.site_id().as_str()
+        || row.event_type != lease.event_type
+        || aggregate_ref != Some(lease.aggregate_ref.as_str())
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    let mut expected = BTreeMap::new();
+    expected.insert(lease.event_id.as_str().to_owned(), digest);
+    reject_remote_conflicts(client, config.table(), &expected).await?;
+    insert_rows(
+        client,
+        config.table(),
+        &format!("outbox-{}", lease.event_id.as_str()),
+        std::slice::from_ref(&row),
+    )
+    .await?;
+    reject_remote_conflicts(client, config.table(), &expected).await?;
+    match store
+        .ack_outbox_event(scope, &lease.event_id, &lease.lease_token)
+        .await?
+    {
+        OutboxAckOutcome::Acknowledged => Ok(()),
+        OutboxAckOutcome::Rejected => Err(PublishError::OutboxLeaseLost),
+    }
+}
+
+async fn schedule_failure(
+    store: &PostgresIdentityStore,
+    scope: &OutboxScope,
+    lease: &OutboxEvent,
+    error: &PublishError,
+    retry_after: Duration,
+) -> Result<(), PublishError> {
+    let error_code = match error {
+        PublishError::IntegrityConflict => INTEGRITY_CONFLICT_CODE,
+        PublishError::ClickHouse(_) => INDEX_UNAVAILABLE_CODE,
+        _ => INVALID_EVENT_CODE,
+    };
+    match store
+        .fail_outbox_event(
+            scope,
+            &lease.event_id,
+            &lease.lease_token,
+            error_code,
+            retry_after,
+        )
+        .await?
+    {
+        OutboxFailureOutcome::Scheduled => Ok(()),
+        OutboxFailureOutcome::Rejected => Err(PublishError::OutboxLeaseLost),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CasePayload {
+    stage: String,
+    case_id: String,
+    artifact_id: Option<String>,
+    subject_ref: String,
+    request_digest: String,
+    outcome: String,
+    reason_code: String,
+    proof_kind: Option<String>,
+    confidence: Option<f64>,
+    confidence_status: Option<String>,
+}
+
+pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if event.producer_id != "xshield-control"
+        || event.policy_revision != "control-v1"
+        || valid_prefixed_v7(&event.producer_boot_id, "req_").is_err()
+        || event.request_id.is_none()
+        || event.request_seq != 1
+        || event.producer_seq != 1
+        || !event.cause_event_ids.is_empty()
+        || event.sensitivity != "INTERNAL"
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    let payload: CasePayload = serde_json::from_str(event.payload.get())?;
+    payload.validate(event)
+}
+
+impl CasePayload {
+    fn validate(self, event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+        let is_add = event.event_type == "case.evidence.added";
+        let expected_reason = match event.event_type.as_str() {
+            "case.created" => "CASE_CREATED",
+            "case.closed" => "CASE_CLOSED",
+            "case.evidence.added" => "CASE_EVIDENCE_ADDED",
+            _ => return Err(PublishError::UnsupportedEventType),
+        };
+        if self.stage != "case_management"
+            || valid_prefixed_v7(&self.case_id, "case_").is_err()
+            || self
+                .artifact_id
+                .as_deref()
+                .is_some_and(|value| valid_prefixed_v7(value, "artifact_").is_err())
+            || (is_add != self.artifact_id.is_some())
+            || !valid_subject(&self.subject_ref)
+            || !valid_lower_hex(&self.request_digest, 64)
+            || self.outcome != "PASS"
+            || self.reason_code != expected_reason
+            || !valid_proof_fields(
+                self.proof_kind.as_deref(),
+                self.confidence,
+                self.confidence_status.as_deref(),
+            )
+            || !event.evidence_refs.iter().all(|value| {
+                valid_prefixed_v7(value, "artifact_").is_ok()
+                    && self.artifact_id.as_deref() == Some(value.as_str())
+            })
+            || (is_add && event.evidence_refs.len() != 1)
+            || (!is_add && !event.evidence_refs.is_empty())
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        Ok(PayloadSummary {
+            stage: self.stage,
+            outcome: self.outcome,
+            reason_code: self.reason_code,
+            proof_kind: "deterministic".to_owned(),
+            confidence_status: "not_applicable".to_owned(),
+            ..PayloadSummary::default()
+        })
+    }
+}
+
+fn valid_proof_fields(
+    proof_kind: Option<&str>,
+    confidence: Option<f64>,
+    confidence_status: Option<&str>,
+) -> bool {
+    match (proof_kind, confidence_status) {
+        (None, None) | (Some("deterministic"), Some("not_applicable")) => confidence.is_none(),
+        _ => false,
+    }
+}
+
+fn valid_subject(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{IndexRow, PublishError};
+    use serde_json::{Value, json};
+    use xshield_core::domain::EventId;
+
+    const EVENT: &str = "ev_018f2a3b-4c5d-7000-8000-000000000001";
+    const BOOT: &str = "req_018f2a3b-4c5d-7000-8000-000000000002";
+    const REQUEST: &str = "req_018f2a3b-4c5d-7000-8000-000000000003";
+    const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000004";
+    const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000005";
+
+    fn event(event_type: &str) -> Value {
+        let artifact = (event_type == "case.evidence.added").then_some(ARTIFACT);
+        json!({
+            "schema_version": 3, "event_id": EVENT, "event_type": event_type,
+            "tenant_id": "tenant_demo", "site_id": "site_demo", "request_id": REQUEST,
+            "trace_id": "018f2a3b4c5d70008000000000000003", "span_id": "018f2a3b4c5d7000",
+            "producer_id": "xshield-control", "producer_boot_id": BOOT,
+            "producer_seq": 1, "request_seq": 1,
+            "occurred_at": "2026-09-19T00:00:00.123Z", "observed_at": "2026-09-19T00:00:00.123Z",
+            "policy_revision": "control-v1", "example_only": false,
+            "evidence_refs": artifact.into_iter().collect::<Vec<_>>(), "cause_event_ids": [],
+            "payload": {
+                "stage": "case_management", "case_id": CASE,
+                "artifact_id": artifact, "subject_ref": "investigator-1",
+                "request_digest": "a".repeat(64), "outcome": "PASS",
+                "reason_code": match event_type {
+                    "case.created" => "CASE_CREATED",
+                    "case.closed" => "CASE_CLOSED",
+                    _ => "CASE_EVIDENCE_ADDED"
+                }
+            },
+            "sensitivity": "INTERNAL",
+            "integrity": {"state": "pending", "previous_hash": null, "event_hash": null}
+        })
+    }
+
+    fn parse(event: &Value) -> Result<IndexRow, PublishError> {
+        IndexRow::parse_outbox(
+            &serde_json::to_vec(event).unwrap(),
+            &EventId::parse(EVENT).unwrap(),
+            1,
+            BOOT,
+            "0".repeat(64),
+            chrono::TimeDelta::days(30),
+        )
+    }
+
+    #[test]
+    fn accepts_the_three_complete_case_outbox_families() {
+        for kind in ["case.created", "case.closed", "case.evidence.added"] {
+            let row = parse(&event(kind)).unwrap();
+            assert_eq!(row.stage, "case_management");
+            assert_eq!(row.outcome, "PASS");
+            assert_eq!(row.reason_code, kind.replace('.', "_").to_uppercase());
+            assert_eq!(row.proof_kind, "deterministic");
+            assert_eq!(row.confidence, None);
+            assert_eq!(row.confidence_status, "not_applicable");
+            assert_eq!(row.is_terminal, 0);
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_targets_and_payload_contracts() {
+        for (pointer, value) in [
+            ("/event_type", json!("case.unknown")),
+            ("/payload/stage", json!("evidence_access")),
+            ("/payload/case_id", json!(ARTIFACT)),
+            ("/payload/subject_ref", json!("operator\n1")),
+            ("/payload/outcome", json!("DENY")),
+            ("/payload/request_digest", json!("A".repeat(64))),
+            ("/payload/reason_code", json!("CASE_CREATED_EXTRA")),
+            ("/evidence_refs", json!([ARTIFACT])),
+        ] {
+            let mut value_to_reject = event("case.created");
+            *value_to_reject.pointer_mut(pointer).unwrap() = value;
+            assert!(parse(&value_to_reject).is_err(), "accepted {pointer}");
+        }
+        let mut missing_artifact = event("case.evidence.added");
+        missing_artifact["payload"]["artifact_id"] = Value::Null;
+        missing_artifact["evidence_refs"] = json!([]);
+        assert!(parse(&missing_artifact).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_duplicate_and_non_case_outbox_shapes() {
+        let serialized = serde_json::to_string(&event("case.created")).unwrap();
+        for (index, replacement) in [
+            r#""reason_code":"CASE_CREATED","extra":1"#,
+            r#""reason_code":"CASE_CREATED","reason_code":"CASE_CREATED""#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let malformed = serialized.replace(r#""reason_code":"CASE_CREATED""#, replacement);
+            assert!(
+                IndexRow::parse_outbox(
+                    malformed.as_bytes(),
+                    &EventId::parse(EVENT).unwrap(),
+                    1,
+                    BOOT,
+                    "0".repeat(64),
+                    chrono::TimeDelta::days(30),
+                )
+                .is_err(),
+                "accepted malformed case payload {index}"
+            );
+        }
+        let mut management = event("case.created");
+        management["payload"] = json!({
+            "method": "GET", "path": "/control/v1/cases/{case_id}/items",
+            "subject_ref": "investigator-1", "target_case_id": CASE,
+            "outcome": "PASS", "reason_code": "CONTROL_CASE_READ"
+        });
+        assert!(parse(&management).is_err());
+    }
+
+    #[test]
+    fn accepts_production_optional_case_shapes() {
+        let mut created = event("case.created");
+        created["payload"]
+            .as_object_mut()
+            .expect("payload object")
+            .remove("artifact_id");
+        assert!(parse(&created).is_ok());
+
+        let mut closed = event("case.closed");
+        closed["payload"] = json!({
+            "stage": "case_management", "case_id": CASE,
+            "subject_ref": "investigator-1", "request_digest": "a".repeat(64),
+            "outcome": "PASS", "reason_code": "CASE_CLOSED",
+            "proof_kind": "deterministic", "confidence": null,
+            "confidence_status": "not_applicable"
+        });
+        closed["payload"]
+            .as_object_mut()
+            .expect("payload object")
+            .remove("artifact_id");
+        assert!(parse(&closed).is_ok());
+    }
+}
