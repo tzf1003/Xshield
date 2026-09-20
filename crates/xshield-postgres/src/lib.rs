@@ -39,8 +39,9 @@ pub use case_evidence::{
 };
 pub use case_evidence_holds::{
     CASE_EVIDENCE_HOLD_ACTIVE_MAX, CASE_EVIDENCE_HOLD_HISTORY_MAX, CASE_EVIDENCE_HOLD_MAX_DAYS,
-    CaseEvidenceHoldCreate, CaseEvidenceHoldCreateOutcome, CaseEvidenceHoldRecord,
-    CaseEvidenceHoldRelease, CaseEvidenceHoldReleaseOutcome,
+    CaseEvidenceHoldCreate, CaseEvidenceHoldCreateOutcome, CaseEvidenceHoldPage,
+    CaseEvidenceHoldQuery, CaseEvidenceHoldRecord, CaseEvidenceHoldRelease,
+    CaseEvidenceHoldReleaseOutcome,
 };
 pub use case_evidence_read::{
     CaseEvidenceAvailability, CaseEvidenceItem, CaseEvidencePage, CaseEvidenceQuery,

@@ -169,6 +169,134 @@ def check_outbox_contracts(schemas: dict) -> None:
     check_retention_outbox_contracts(schemas['audit-event'], base)
     check_hold_outbox_contracts(schemas['audit-event'], base)
     check_identity_outbox_contracts(schemas['audit-event'], base)
+    check_control_hold_access_contracts(schemas['audit-event'], base)
+
+def check_control_hold_access_contracts(schema: dict, base: dict) -> None:
+    """Validate hold journal access attempts and their transaction boundary."""
+    hold = 'ev_018f2a3b-4c5d-7000-8000-00000000000b'
+    case = 'case_018f2a3b-4c5d-7000-8000-000000000004'
+    routes = [
+        ('console.evidence.hold.created', 'POST', '/control/v1/cases/{case_id}/holds',
+         ['CONTROL_EVIDENCE_HOLD_CREATED', 'CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED']),
+        ('console.evidence.hold.released', 'POST', '/control/v1/evidence-holds/{hold_id}/release',
+         ['CONTROL_EVIDENCE_HOLD_RELEASED', 'CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED']),
+        ('console.evidence.hold.read', 'GET', '/control/v1/cases/{case_id}/holds',
+         ['CONTROL_EVIDENCE_HOLD_READ']),
+    ]
+    for kind, method, path, reasons in routes:
+        listing = kind.endswith('.read')
+        event = copy.deepcopy(base)
+        event.update(event_type=kind, producer_id='xshield-control', request_seq=1,
+                     policy_revision='control-v1', sensitivity='INTERNAL', cause_event_ids=[])
+        event['payload'] = {
+            'method': method, 'path': path, 'subject_ref': 'audit-operator',
+            'target_request_id': None, 'target_artifact_id': None if listing else base['evidence_refs'][0],
+            'target_case_id': case, 'target_access_request_id': None,
+            'outcome': 'PASS', 'reason_code': reasons[0],
+        }
+        if not listing:
+            event['payload']['target_hold_id'] = hold
+        prefix = 'control_hold:' + kind + ':'
+        for reason in reasons:
+            accepted = copy.deepcopy(event)
+            accepted['payload']['reason_code'] = reason
+            check(prefix + reason, valid(schema, accepted))
+        required = ['method', 'path', 'outcome', 'reason_code', 'subject_ref', 'target_case_id']
+        if not listing:
+            required += ['target_artifact_id', 'target_hold_id']
+        for field in required:
+            missing = copy.deepcopy(event)
+            del missing['payload'][field]
+            check(prefix + 'missing_' + field, not valid(schema, missing))
+            missing['payload'][field] = None
+            check(prefix + 'null_' + field, not valid(schema, missing))
+        for field, value in [
+            ('method', 'GET' if method == 'POST' else 'POST'), ('path', '/control/v1/cases'),
+            ('reason_code', 'CONTROL_EVIDENCE_HOLD_UNKNOWN'), ('reason_code', 'invalid'),
+            ('reason_code', 'CONTROL_READ\n'), ('reason_code', 'A' * 129),
+            ('subject_ref', ''), ('subject_ref', 'actor\nname'), ('subject_ref', 'a' * 257),
+            ('target_request_id', base['request_id']), ('target_case_id', hold),
+            ('target_hold_id', case), ('target_hold_id', hold.upper()),
+            ('target_hold_id', hold.replace('-7000-', '-4000-')),
+            ('target_hold_id', hold + '\n'), ('target_access_request_id', hold),
+            ('target_model_call_id', hold), ('target_grant_id', hold), ('target_binding_id', hold),
+            ('query_digest', 'a' * 64), ('bytes_read', 0), ('confidence', None),
+            ('stage', 'evidence_hold'), ('hold_until', '2026-09-20T00:00:00.123Z'),
+            ('unknown', None),
+        ]:
+            invalid = copy.deepcopy(event)
+            invalid['payload'][field] = value
+            check(prefix + 'invalid_payload_' + field + '_' + str(value), not valid(schema, invalid))
+        for field, value in [
+            ('producer_id', 'evidence-hold'), ('policy_revision', 'evidence-hold-v1'),
+            ('request_id', None), ('request_id', hold), ('request_seq', 2),
+            ('sensitivity', 'RESTRICTED'), ('cause_event_ids', [hold]),
+            ('example_only', True), ('schema_version', 2), ('event_id', case),
+            ('evidence_refs', [hold]), ('evidence_refs', base['evidence_refs'] * 2),
+            ('connection_id', None), ('agent_run_id', None), ('unknown', None),
+        ]:
+            invalid = copy.deepcopy(event)
+            invalid[field] = value
+            check(prefix + 'invalid_envelope_' + field + '_' + str(value), not valid(schema, invalid))
+        for refs in [[], base['evidence_refs'] + ['artifact_018f2a3b-4c5d-7000-8000-000000000006']]:
+            changed = copy.deepcopy(event)
+            changed['evidence_refs'] = refs
+            check(prefix + 'evidence_count_' + str(len(refs)), valid(schema, changed) == listing)
+        for field in ['target_model_call_id', 'target_grant_id', 'target_binding_id', 'query_digest', 'bytes_read']:
+            nullable = copy.deepcopy(event)
+            nullable['payload'][field] = None
+            check(prefix + 'optional_null_' + field, valid(schema, nullable))
+        if listing:
+            for field, value in [('target_hold_id', hold), ('target_artifact_id', base['evidence_refs'][0])]:
+                invalid = copy.deepcopy(event)
+                invalid['payload'][field] = value
+                check(prefix + 'list_target_' + field, not valid(schema, invalid))
+        for outcome in ['DENY', 'ERROR']:
+            failure = copy.deepcopy(event)
+            failure['payload'].update(outcome=outcome, reason_code='CONTROL_INVALID_INPUT')
+            check(prefix + outcome + '_reject_refs', not valid(schema, failure))
+            failure['evidence_refs'] = []
+            check(prefix + outcome + '_validated_targets', valid(schema, failure))
+            for field in ['subject_ref', 'target_case_id', 'target_artifact_id', 'target_hold_id']:
+                failure['payload'][field] = None
+                check(prefix + outcome + '_null_' + field, valid(schema, failure))
+                del failure['payload'][field]
+                check(prefix + outcome + '_absent_' + field, valid(schema, failure))
+            failure['payload']['target_hold_id'] = case
+            check(prefix + outcome + '_invalid_target', not valid(schema, failure))
+        for field, value in [('state', 'sealed'), ('previous_hash', 'a' * 64), ('event_hash', 'b' * 64)]:
+            invalid = copy.deepcopy(event)
+            invalid['integrity'][field] = value
+            check(prefix + 'integrity_' + field, not valid(schema, invalid))
+        crossed = copy.deepcopy(event)
+        crossed['payload'] = {
+            'stage': 'evidence_hold', 'outcome': 'PASS', 'reason_code': 'EVIDENCE_HOLD_CREATED',
+            'hold_id': hold, 'case_id': case, 'artifact_id': base['evidence_refs'][0],
+        }
+        check(prefix + 'transaction_payload', not valid(schema, crossed))
+        crossed = copy.deepcopy(event)
+        crossed['event_type'] = 'evidence.hold.created'
+        check(prefix + 'transaction_event_type', not valid(schema, crossed))
+        # Field-shape schemas cannot compare two values or count UTF-8 bytes.
+        mismatch = copy.deepcopy(event)
+        mismatch['evidence_refs'] = ['artifact_018f2a3b-4c5d-7000-8000-000000000006']
+        mismatch['payload']['subject_ref'] = '\u754c' * 86
+        check(prefix + 'rust_only_equality_and_utf8', valid(schema, mismatch))
+
+    for kind in ['console.health.read', 'console.request.read', 'console.events.read',
+                 'console.manifest.read', 'console.model.read', 'console.grant.read',
+                 'console.binding.read', 'console.query.executed', 'console.case.read',
+                 'case.created', 'case.closed', 'case.evidence.added',
+                 'evidence.access.requested', 'evidence.access.approved', 'evidence.access.denied',
+                 'evidence.read']:
+        legacy = copy.deepcopy(base)
+        legacy['event_type'] = kind
+        legacy['payload'] = {'outcome': 'DENY', 'reason_code': 'CONTROL_INVALID_INPUT'}
+        check('control_hold:legacy_absent:' + kind, valid(schema, legacy))
+        legacy['payload']['target_hold_id'] = None
+        check('control_hold:legacy_null:' + kind, valid(schema, legacy))
+        legacy['payload']['target_hold_id'] = hold
+        check('control_hold:legacy_reject_target:' + kind, not valid(schema, legacy))
 
 def check_hold_outbox_contracts(schema: dict, base: dict) -> None:
     """Check hold field shapes; Rust owns clock arithmetic and cross-field binding."""
@@ -251,11 +379,18 @@ def check_hold_outbox_contracts(schema: dict, base: dict) -> None:
             check(prefix + 'reject_integrity_' + field, not valid(schema, invalid))
         for timestamp in ['invalid', '2026-09-19T00:00:00Z', '2026-09-19T00:00:00.123456Z',
                           '2026-09-19T00:00:00.123+00:00', '2026-09-19T08:00:00.123+08:00',
+                          '2026-09-19T00:00:60.000Z', '2026-09-19T00:00:60.999Z',
                           '2026-09-19T00:00:00.123Z\n']:
             for field in ['occurred_at', 'observed_at', 'hold_until']:
                 invalid = copy.deepcopy(event)
                 (invalid['payload'] if field == 'hold_until' else invalid)[field] = timestamp
                 check(prefix + 'timestamp_' + field + '_' + timestamp, not valid(schema, invalid))
+        for timestamp in ['2026-09-19T00:00:59.000Z', '2026-09-19T00:00:59.999Z',
+                          '2026-09-19T00:01:00.000Z']:
+            for field in ['occurred_at', 'observed_at', 'hold_until']:
+                accepted = copy.deepcopy(event)
+                (accepted['payload'] if field == 'hold_until' else accepted)[field] = timestamp
+                check(prefix + 'ordinary_second_' + field + '_' + timestamp, valid(schema, accepted))
 
         # JSON Schema describes local shape. The Rust tests reject these bindings,
         # deadlines and UTF-8 byte bounds; no cross-event completeness is inferred.

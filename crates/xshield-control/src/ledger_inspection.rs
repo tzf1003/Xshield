@@ -367,6 +367,7 @@ impl ControlPlane {
                     Some(Target::Binding(id)) => Some(id),
                     _ => None,
                 },
+                None,
             )?;
             Ok::<_, super::ControlError>(result)
         })

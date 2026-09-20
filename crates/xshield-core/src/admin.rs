@@ -43,14 +43,19 @@ impl ManagementPrincipal {
     /// Builds a management principal from independently authenticated claims.
     ///
     /// # Errors
-    /// Returns [`InvalidValue`] when the subject is empty or oversized.
+    /// Returns [`InvalidValue`] for an empty, oversized, control-bearing, or
+    /// edge-whitespace subject. Identity text is never silently normalized.
     pub fn new(
         subject: impl Into<String>,
         roles: impl IntoIterator<Item = ManagementRole>,
         scopes: impl IntoIterator<Item = (TenantId, SiteId)>,
     ) -> Result<Self, InvalidValue> {
         let subject = subject.into();
-        if subject.is_empty() || subject.len() > 256 || subject.chars().any(char::is_control) {
+        if subject.is_empty()
+            || subject.len() > 256
+            || subject.trim() != subject
+            || subject.chars().any(char::is_control)
+        {
             return Err(InvalidValue::new("management_subject"));
         }
         Ok(Self {
@@ -77,6 +82,25 @@ impl ManagementPrincipal {
 mod tests {
     use super::{ManagementPrincipal, ManagementRole};
     use crate::domain::{SiteId, TenantId};
+
+    #[test]
+    fn subject_is_canonical_without_changing_identity() {
+        for subject in [
+            "",
+            " ",
+            " operator",
+            "operator ",
+            "\u{2003}operator",
+            "operator\n",
+        ] {
+            assert!(ManagementPrincipal::new(subject, [], []).is_err());
+        }
+        assert!(ManagementPrincipal::new("界".repeat(86), [], []).is_err());
+        for subject in ["operator", "operator name", "管理主体"] {
+            let principal = ManagementPrincipal::new(subject, [], []).unwrap();
+            assert_eq!(principal.subject(), subject);
+        }
+    }
 
     #[test]
     fn requires_role_and_exact_scope() {

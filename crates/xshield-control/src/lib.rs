@@ -7,6 +7,7 @@
 
 mod case_close;
 mod case_collection;
+mod case_holds;
 mod case_items;
 mod ledger_inspection;
 mod search;
@@ -1779,6 +1780,7 @@ impl ControlPlane {
                 None,
                 None,
                 None,
+                None,
             )
         })
         .await;
@@ -2967,6 +2969,7 @@ impl ControlPlane {
             Some(&query_digest),
             None,
             None,
+            None,
         )
     }
 
@@ -3000,6 +3003,7 @@ impl ControlPlane {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3028,6 +3032,7 @@ impl ControlPlane {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3049,6 +3054,7 @@ impl ControlPlane {
         query_digest: Option<&str>,
         target_grant_id: Option<&GrantId>,
         target_binding_id: Option<&AuthBindingId>,
+        target_hold_id: Option<&EventId>,
     ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
@@ -3094,6 +3100,7 @@ impl ControlPlane {
                 target_model_call_id: target_model_call_id.map(ModelCallId::as_str),
                 target_grant_id: target_grant_id.map(GrantId::as_str),
                 target_binding_id: target_binding_id.map(AuthBindingId::as_str),
+                target_hold_id: target_hold_id.map(EventId::as_str),
                 query_digest,
                 outcome,
                 reason_code,
@@ -3168,6 +3175,16 @@ pub fn router(control: ControlPlane) -> Router {
         .route(
             case_close::PATH,
             post(case_close::handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+        )
+        .route(
+            case_holds::PATH,
+            post(case_holds::create_handler)
+                .get(case_holds::list_handler)
+                .layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+        )
+        .route(
+            case_holds::RELEASE_PATH,
+            post(case_holds::release_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
         )
         .with_state(Arc::new(control))
 }
@@ -4007,6 +4024,8 @@ struct AccessPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_binding_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_hold_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
@@ -4085,6 +4104,8 @@ mod tests {
     mod audit_publish;
     mod case_close;
     mod case_collection;
+    mod case_holds;
+    mod case_holds_postgres;
     mod case_items;
     mod ledger_inspection;
     mod search_references;

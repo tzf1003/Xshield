@@ -640,7 +640,40 @@
         "artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"},
         "subject_ref": {"$ref": "#/$defs/identity_subject", "not": {"pattern": "^\\s|\\s$"}},
         "request_digest": {"$ref": "#/$defs/grant/properties/constraints_digest"},
-        "hold_until": {"$ref": "#/$defs/utc_millisecond"}
+        "hold_until": {"$ref": "#/$defs/hold_utc_millisecond"}
+      }
+    },
+    "hold_utc_millisecond": {
+      "$comment": "Hold clocks use ordinary UTC seconds; leap seconds are rejected consistently by input, storage and publication boundaries.",
+      "$ref": "#/$defs/utc_millisecond",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "control_hold_access": {
+      "$comment": "Authenticated management access-attempt payload. Rust additionally checks UTF-8 subject byte length and exact evidence_refs/target_artifact_id equality; journal source identity and duplicate JSON keys are verified before parsing.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path", "outcome", "reason_code"],
+      "properties": {
+        "method": {"enum": ["GET", "POST"]},
+        "path": {"enum": ["/control/v1/cases/{case_id}/holds", "/control/v1/evidence-holds/{hold_id}/release"]},
+        "subject_ref": {"anyOf": [{"$ref": "#/$defs/identity_subject"}, {"type": "null"}]},
+        "target_request_id": {"type": "null"},
+        "target_artifact_id": {"$ref": "#/$defs/model_artifact_ref"},
+        "target_case_id": {"anyOf": [{"$ref": "#/$defs/evidence_hold/properties/case_id"}, {"type": "null"}]},
+        "target_access_request_id": {"type": "null"},
+        "target_model_call_id": {"type": "null"},
+        "target_grant_id": {"type": "null"},
+        "target_binding_id": {"type": "null"},
+        "target_hold_id": {"anyOf": [{"$ref": "#/$defs/evidence_hold/properties/hold_id"}, {"type": "null"}]},
+        "query_digest": {"type": "null"},
+        "bytes_read": {"type": "null"},
+        "outcome": {"enum": ["PASS", "DENY", "ERROR"]},
+        "reason_code": {"type": "string", "minLength": 1, "maxLength": 128, "not": {"pattern": "[^A-Z0-9_]"}}
+      },
+      "if": {"properties": {"outcome": {"const": "PASS"}}},
+      "then": {
+        "required": ["subject_ref", "target_case_id"],
+        "properties": {"subject_ref": {"type": "string"}, "target_case_id": {"type": "string"}}
       }
     },
     "utc_second": {
@@ -860,6 +893,87 @@
   "allOf": [
     {
       "if": {
+        "properties": {"event_type": {"enum": ["console.health.read", "console.request.read", "console.events.read", "console.manifest.read", "console.model.read", "console.grant.read", "console.binding.read", "console.query.executed", "console.case.read", "case.created", "case.closed", "case.evidence.added", "evidence.access.requested", "evidence.access.approved", "evidence.access.denied", "evidence.read"]}},
+        "required": ["event_type"]
+      },
+      "then": {"properties": {"payload": {"properties": {"target_hold_id": {"type": "null"}}}}}
+    },
+    {
+      "if": {
+        "properties": {"event_type": {"enum": ["console.evidence.hold.created", "console.evidence.hold.released", "console.evidence.hold.read"]}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Control journal attempts have independent request identities and INTERNAL classification. They are distinct from evidence.hold.* committed outbox facts and do not establish business-request completion. The journal reader authenticates producer boot/sequence and validates artifact target equality and duplicate keys.",
+        "properties": {
+          "event_id": {"$ref": "#/$defs/evidence_hold/properties/hold_id"},
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"$ref": "#/$defs/identity_request_id"},
+          "trace_id": {"maxLength": 32},
+          "span_id": {"maxLength": 16},
+          "producer_id": {"const": "xshield-control"},
+          "request_seq": {"const": 1},
+          "policy_revision": {"const": "control-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {"maxItems": 256, "items": {"$ref": "#/$defs/model_artifact_ref", "type": "string"}},
+          "cause_event_ids": {"maxItems": 0},
+          "payload": {"$ref": "#/$defs/control_hold_access"},
+          "sensitivity": {"const": "INTERNAL"},
+          "integrity": {"properties": {"state": {"const": "pending"}, "previous_hash": {"type": "null"}, "event_hash": {"type": "null"}}},
+          "connection_id": false,
+          "agent_run_id": false
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"payload": {"properties": {"outcome": {"const": "PASS"}}}}},
+            "else": {"properties": {"evidence_refs": {"maxItems": 0}}}
+          },
+          {
+            "if": {"properties": {"event_type": {"const": "console.evidence.hold.read"}}},
+            "then": {
+              "properties": {"payload": {"properties": {
+                "method": {"const": "GET"}, "path": {"const": "/control/v1/cases/{case_id}/holds"},
+                "target_artifact_id": {"type": "null"}, "target_hold_id": {"type": "null"}
+              }}},
+              "if": {"properties": {"payload": {"properties": {"outcome": {"const": "PASS"}}}}},
+              "then": {"properties": {"payload": {"properties": {"reason_code": {"const": "CONTROL_EVIDENCE_HOLD_READ"}}}}}
+            },
+            "else": {
+              "properties": {"payload": {"properties": {"method": {"const": "POST"}}}},
+              "if": {"properties": {"payload": {"properties": {"outcome": {"const": "PASS"}}}}},
+              "then": {
+                "properties": {
+                  "evidence_refs": {"minItems": 1, "maxItems": 1},
+                  "payload": {
+                    "required": ["target_artifact_id", "target_hold_id"],
+                    "properties": {"target_artifact_id": {"type": "string"}, "target_hold_id": {"type": "string"}}
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {"properties": {"event_type": {"const": "console.evidence.hold.created"}}},
+            "then": {
+              "properties": {"payload": {"properties": {"path": {"const": "/control/v1/cases/{case_id}/holds"}}}},
+              "if": {"properties": {"payload": {"properties": {"outcome": {"const": "PASS"}}}}},
+              "then": {"properties": {"payload": {"properties": {"reason_code": {"enum": ["CONTROL_EVIDENCE_HOLD_CREATED", "CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED"]}}}}}
+            }
+          },
+          {
+            "if": {"properties": {"event_type": {"const": "console.evidence.hold.released"}}},
+            "then": {
+              "properties": {"payload": {"properties": {"path": {"const": "/control/v1/evidence-holds/{hold_id}/release"}}}},
+              "if": {"properties": {"payload": {"properties": {"outcome": {"const": "PASS"}}}}},
+              "then": {"properties": {"payload": {"properties": {"reason_code": {"enum": ["CONTROL_EVIDENCE_HOLD_RELEASED", "CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED"]}}}}}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
         "properties": {"event_type": {"enum": ["evidence.hold.created", "evidence.hold.released"]}},
         "required": ["event_type"]
       },
@@ -876,8 +990,8 @@
           "producer_boot_id": {"$ref": "#/$defs/evidence_hold/properties/hold_id"},
           "producer_seq": {"const": 1},
           "request_seq": {"const": 1},
-          "occurred_at": {"$ref": "#/$defs/utc_millisecond"},
-          "observed_at": {"$ref": "#/$defs/utc_millisecond"},
+          "occurred_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "observed_at": {"$ref": "#/$defs/hold_utc_millisecond"},
           "policy_revision": {"const": "evidence-hold-v1"},
           "example_only": {"const": false},
           "evidence_refs": {

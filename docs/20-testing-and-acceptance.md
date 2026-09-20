@@ -100,9 +100,15 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-control --lib management_audit` 由实际管理事件生产者及 HTTP 路由写入 journal，经封存和现有发布器验证报文兼容与 checkpoint 重用。配置 20.6 的专用 ClickHouse 后，执行 `cargo test -p xshield-control --lib management_audit -- --ignored`，在独占数据库运行同一路径并读回索引、时间线、有界搜索及跨租户/站点隔离。该真实数据库测试纳入 CI；普通 workspace 测试只编译并跳过其服务调用。
 
+保留锁管理的三类 `console.evidence.hold.*` 也走同一生产 journal、封存和投递回归，覆盖创建/释放及精确重试原因、空列表、拒绝和依赖故障；worker 与 Schema 同时拒绝目标/方法/路由错绑、越权携带 hold 目标及未知字段。
+
+`cargo test -p xshield-control case_holds` 覆盖严格路径/JSON/UTC 毫秒（含闰秒反例）、重复认证和幂等头、4 KiB/UTF-8 长度、权限/作用域/凭证期限/速率、在途上限、存储故障及审计扣留。`scripts/test_postgres.sh` 另执行 `case_holds_are_scoped_idempotent_paginated_and_audited`：真实 vault/catalog/案件关联后由独立管理员创建、释放和分页，检查幂等冲突、过期/超长新期限、目标隔离、游标全部绑定、同对象多条历史去重引用、关闭后释放与查询、原期限和审批保持、提交后审计故障恢复及断连后的提交/审计。核心主体测试检查启动身份规范且保持原值。
+
 ## 20.12 outbox 发布回归
 
 `scripts/test_postgres.sh` 的 `case_evidence_holds` 回归使用真实加密 vault、catalog 发布和案件成员事务，覆盖创建/释放幂等、作用域和目标状态、历史/活动容量、outbox 故障回滚及损坏事实拒绝。`pg_blocking_pids` 确认创建和清理两种锁顺序，检查活动锁阻止新删除意图、释放/到期恢复、多个案件共享对象和既有意图拒绝新锁；原始期限与过期拒读单独断言。测试只操作脚本拥有的数据库与独占临时文件。
+
+同一存储回归覆盖保留历史的单 SQL 快照、1–128 页界、空/缺失/跨域案件、closed/过期/已释放记录、创建及释放 outbox 缺失/错绑/损坏（含预读行）整页拒绝，并在释放提交前后读取一致历史。查询前后对相关持久表作完整快照比较，确认只读。
 
 `cargo test -p xshield-worker --lib outbox::hold` 覆盖两类保留锁完整事件、未知/重复/缺失字段、主体与目标、创建/释放因果、规范 UTC 毫秒和 30 天期限。真实清理 producer 回归另创建并释放案件锁，同一发布测试消费实际生成的两类 hold 及六类删除事实；维护族的其余确认、查询和故障行为沿用下述检查。
 

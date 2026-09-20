@@ -16,6 +16,7 @@ use xshield_worker::{
 
 const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000951";
 const ACCESS_REQUEST: &str = "access_018f2a3b-4c5d-7000-8000-000000000952";
+const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-000000000955";
 
 struct AccessJournal {
     root: PathBuf,
@@ -78,6 +79,7 @@ impl Drop for AccessJournal {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn access_journal() -> AccessJournal {
     let mock = test::Mock::new();
     mock.add(test::handlers::provide(Vec::<SearchEventSummary>::new()));
@@ -89,7 +91,11 @@ async fn access_journal() -> AccessJournal {
     );
     fixture.control.config.principal = ManagementPrincipal::new(
         "operator-1",
-        [ManagementRole::Investigator, ManagementRole::Observer],
+        [
+            ManagementRole::Investigator,
+            ManagementRole::Observer,
+            ManagementRole::AuditAdministrator,
+        ],
         [(
             TenantId::parse("tenant_a").unwrap(),
             SiteId::parse("site_a").unwrap(),
@@ -112,6 +118,7 @@ async fn access_journal() -> AccessJournal {
         events: Vec::new(),
     };
     append_access_contracts(&fixture.control);
+    append_hold_access_contracts(&fixture.control);
     let app = router(fixture.control);
     for (method, path, body) in [
         (
@@ -134,6 +141,21 @@ async fn access_journal() -> AccessJournal {
             "POST",
             format!("/control/v1/cases/{CASE}/close"),
             r#"{"reason":"review complete"}"#.to_owned(),
+        ),
+        (
+            "POST",
+            "/control/v1/cases/bad/holds".to_owned(),
+            "{}".to_owned(),
+        ),
+        (
+            "POST",
+            "/control/v1/evidence-holds/bad/release".to_owned(),
+            "{}".to_owned(),
+        ),
+        (
+            "GET",
+            "/control/v1/cases/bad/holds".to_owned(),
+            String::new(),
         ),
     ] {
         for authorized in [false, true] {
@@ -188,6 +210,9 @@ fn assert_access_families(events: &[Value]) {
             "console.binding.read",
             "console.query.executed",
             "console.case.read",
+            "console.evidence.hold.created",
+            "console.evidence.hold.released",
+            "console.evidence.hold.read",
             "case.created",
             "case.closed",
             "case.evidence.added",
@@ -233,6 +258,7 @@ fn append_access_contracts(control: &ControlPlane) {
             None,
             Some(&GrantId::parse("grant_018f2a3b-4c5d-7000-8000-000000000953").unwrap()),
             None,
+            None,
         )
         .unwrap();
     control
@@ -254,6 +280,7 @@ fn append_access_contracts(control: &ControlPlane) {
             Some(
                 &crate::AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000954").unwrap(),
             ),
+            None,
         )
         .unwrap();
     for action in [
@@ -406,8 +433,95 @@ fn append_access_contracts(control: &ControlPlane) {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
+    }
+}
+
+fn append_hold_access_contracts(control: &ControlPlane) {
+    let create = crate::AccessAction {
+        event_type: "console.evidence.hold.created",
+        method: "POST",
+        path: "/control/v1/cases/{case_id}/holds",
+        role: ManagementRole::AuditAdministrator,
+    };
+    let release = crate::AccessAction {
+        event_type: "console.evidence.hold.released",
+        method: "POST",
+        path: "/control/v1/evidence-holds/{hold_id}/release",
+        role: ManagementRole::AuditAdministrator,
+    };
+    let read = crate::AccessAction {
+        event_type: "console.evidence.hold.read",
+        method: "GET",
+        path: "/control/v1/cases/{case_id}/holds",
+        role: ManagementRole::AuditAdministrator,
+    };
+    let case = CaseId::parse(CASE).unwrap();
+    let hold = EventId::parse(HOLD).unwrap();
+    let artifact = ArtifactId::parse(MISSING_ARTIFACT_ID).unwrap();
+    for (action, reason, evidence) in [
+        (create, "CONTROL_EVIDENCE_HOLD_CREATED", true),
+        (create, "CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED", true),
+        (release, "CONTROL_EVIDENCE_HOLD_RELEASED", true),
+        (release, "CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED", true),
+        (read, "CONTROL_EVIDENCE_HOLD_READ", true),
+        (read, "CONTROL_EVIDENCE_HOLD_READ", false),
+    ] {
+        let mutation = action.method == "POST";
+        let refs = if evidence {
+            vec![artifact.as_str()]
+        } else {
+            vec![]
+        };
+        control
+            .append_access_event_with_evidence_bytes(
+                &format!("req_{}", Uuid::now_v7()),
+                Some("operator-1"),
+                action,
+                None,
+                mutation.then_some(&artifact),
+                Some(&case),
+                None,
+                None,
+                "PASS",
+                reason,
+                &refs,
+                None,
+                None,
+                None,
+                None,
+                mutation.then_some(&hold),
+            )
+            .unwrap();
+    }
+    for action in [create, release, read] {
+        for (outcome, reason) in [
+            ("DENY", "CONTROL_AUTH_REQUIRED"),
+            ("ERROR", "CONTROL_EVIDENCE_HOLD_STORE_UNAVAILABLE"),
+        ] {
+            control
+                .append_access_event_with_evidence_bytes(
+                    &format!("req_{}", Uuid::now_v7()),
+                    Some("operator-1"),
+                    action,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    outcome,
+                    reason,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
     }
 }
 

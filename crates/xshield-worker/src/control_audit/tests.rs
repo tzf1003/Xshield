@@ -13,6 +13,27 @@ const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000007";
 const MODEL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000008";
 const GRANT: &str = "grant_018f2a3b-4c5d-7000-8000-000000000009";
 const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-00000000000a";
+const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-00000000000b";
+const HOLD_ACTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "console.evidence.hold.created",
+        "POST",
+        "/control/v1/cases/{case_id}/holds",
+        "CONTROL_EVIDENCE_HOLD_CREATED",
+    ),
+    (
+        "console.evidence.hold.released",
+        "POST",
+        "/control/v1/evidence-holds/{hold_id}/release",
+        "CONTROL_EVIDENCE_HOLD_RELEASED",
+    ),
+    (
+        "console.evidence.hold.read",
+        "GET",
+        "/control/v1/cases/{case_id}/holds",
+        "CONTROL_EVIDENCE_HOLD_READ",
+    ),
+];
 
 // This envelope represents one case-collection access attempt, including the
 // null target fields emitted by the control producer before optional additions.
@@ -466,5 +487,280 @@ fn transactional_facts_do_not_parse_as_same_named_management_attempts() {
             matches!(index(&event), Err(PublishError::Json(_))),
             "{kind}"
         );
+    }
+}
+
+fn hold_event(kind: &str, method: &str, path: &str, reason: &str) -> Value {
+    let mut event = event();
+    event["event_type"] = kind.into();
+    event["payload"]["method"] = method.into();
+    event["payload"]["path"] = path.into();
+    event["payload"]["reason_code"] = reason.into();
+    if kind != "console.evidence.hold.read" {
+        event["payload"]["target_hold_id"] = HOLD.into();
+        event["payload"]["target_artifact_id"] = ARTIFACT.into();
+    }
+    event
+}
+
+#[test]
+fn hold_management_successes_bind_targets_and_keep_journal_semantics() {
+    for &(kind, method, path, reason) in HOLD_ACTIONS {
+        let mut value = hold_event(kind, method, path, reason);
+        for reason in [
+            reason,
+            match kind {
+                "console.evidence.hold.created" => "CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED",
+                "console.evidence.hold.released" => "CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED",
+                _ => reason,
+            },
+        ] {
+            value["payload"]["reason_code"] = reason.into();
+            let row = index(&value).unwrap();
+            assert_eq!(row.stage, "control_access");
+            assert_eq!(row.method, method);
+            assert_eq!(row.reason_code, reason);
+            assert_eq!(row.proof_kind, "deterministic");
+            assert_eq!(row.confidence, None);
+            assert_eq!(row.confidence_status, "not_applicable");
+            assert_eq!(row.is_terminal, 0);
+            assert_eq!(row.http_status, None);
+            assert_eq!(row.request_id, REQUEST);
+            assert_eq!(row.evidence_refs, [ARTIFACT]);
+            assert!(row.origin_state.is_empty());
+            assert!(row.operation_id.is_empty());
+            assert!(
+                IndexRow::parse_outbox(
+                    &serde_json::to_vec(&value).unwrap(),
+                    &EventId::parse(EVENT).unwrap(),
+                    1,
+                    BOOT,
+                    "1".repeat(64),
+                    TimeDelta::days(30),
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn hold_management_requires_exact_routes_targets_and_success_reasons() {
+    for &(kind, method, path, reason) in HOLD_ACTIONS {
+        let value = hold_event(kind, method, path, reason);
+        let mut required = vec![
+            "method",
+            "path",
+            "outcome",
+            "reason_code",
+            "subject_ref",
+            "target_case_id",
+        ];
+        if kind != "console.evidence.hold.read" {
+            required.extend(["target_artifact_id", "target_hold_id"]);
+        }
+        for field in required {
+            let mut missing = value.clone();
+            missing["payload"].as_object_mut().unwrap().remove(field);
+            rejected(&missing, &format!("{kind} missing {field}"));
+            missing["payload"][field] = Value::Null;
+            rejected(&missing, &format!("{kind} null {field}"));
+        }
+        for (field, replacement) in [
+            (
+                "method",
+                json!(if method == "POST" { "GET" } else { "POST" }),
+            ),
+            ("path", json!("/control/v1/cases/{case_id}/items")),
+            ("reason_code", json!("CONTROL_EVIDENCE_HOLD_UNKNOWN")),
+            ("target_case_id", json!(HOLD)),
+            ("target_request_id", json!(REQUEST)),
+            ("target_access_request_id", json!(ACCESS)),
+            ("target_model_call_id", json!(MODEL)),
+            ("target_grant_id", json!(GRANT)),
+            ("target_binding_id", json!(BINDING)),
+            ("bytes_read", json!(0)),
+            ("query_digest", json!("a".repeat(64))),
+            ("confidence", Value::Null),
+            ("stage", json!("evidence_hold")),
+            ("hold_until", json!("2026-09-20T00:00:00.123Z")),
+        ] {
+            let mut invalid = value.clone();
+            invalid["payload"][field] = replacement;
+            rejected(&invalid, &format!("{kind} {field}"));
+        }
+        for invalid_hold in [
+            json!(CASE),
+            json!(HOLD.to_uppercase()),
+            json!(HOLD.replace("-7000-", "-4000-")),
+            json!("invalid"),
+        ] {
+            let mut invalid = value.clone();
+            invalid["payload"]["target_hold_id"] = invalid_hold;
+            rejected(&invalid, "invalid hold target");
+        }
+        for refs in [json!([ARTIFACT, ARTIFACT]), json!([HOLD])] {
+            let mut invalid = value.clone();
+            invalid["evidence_refs"] = refs;
+            rejected(&invalid, "hold management evidence shape");
+        }
+        for refs in [
+            json!([]),
+            json!([OTHER_ARTIFACT]),
+            json!([ARTIFACT, OTHER_ARTIFACT]),
+        ] {
+            let mut changed = value.clone();
+            changed["evidence_refs"] = refs;
+            assert_eq!(
+                index(&changed).is_ok(),
+                kind == "console.evidence.hold.read"
+            );
+        }
+        if kind == "console.evidence.hold.read" {
+            for (field, target) in [("target_artifact_id", ARTIFACT), ("target_hold_id", HOLD)] {
+                let mut invalid = value.clone();
+                invalid["payload"][field] = target.into();
+                rejected(&invalid, "list only binds its case target");
+            }
+        }
+    }
+}
+
+#[test]
+fn hold_management_failures_retain_only_validated_targets_and_no_evidence() {
+    for &(kind, method, path, reason) in HOLD_ACTIONS {
+        for outcome in ["DENY", "ERROR"] {
+            let mut value = hold_event(kind, method, path, reason);
+            value["payload"]["outcome"] = outcome.into();
+            value["payload"]["reason_code"] = "CONTROL_INVALID_INPUT".into();
+            rejected(&value, "failed hold attempt carrying evidence");
+            value["evidence_refs"] = json!([]);
+            assert!(index(&value).is_ok());
+            for field in [
+                "subject_ref",
+                "target_case_id",
+                "target_artifact_id",
+                "target_hold_id",
+            ] {
+                value["payload"][field] = Value::Null;
+                assert!(index(&value).is_ok(), "{kind} optional {field}");
+                value["payload"].as_object_mut().unwrap().remove(field);
+                assert!(index(&value).is_ok(), "{kind} omitted {field}");
+            }
+            value["payload"]["target_hold_id"] = json!(CASE);
+            rejected(&value, "invalid failure hold target");
+        }
+    }
+}
+
+#[test]
+fn existing_management_actions_accept_absent_or_null_hold_targets() {
+    for (kind, method, path) in [
+        ("console.health.read", "GET", "/control/v1/audit/health"),
+        (
+            "console.request.read",
+            "GET",
+            "/control/v1/requests/{request_id}",
+        ),
+        (
+            "console.events.read",
+            "GET",
+            "/control/v1/requests/{request_id}/events",
+        ),
+        (
+            "console.manifest.read",
+            "GET",
+            "/control/v1/requests/{request_id}/evidence",
+        ),
+        (
+            "console.manifest.read",
+            "GET",
+            "/control/v1/artifacts/{artifact_id}",
+        ),
+        (
+            "console.model.read",
+            "GET",
+            "/control/v1/model-calls/{model_call_id}",
+        ),
+        ("console.grant.read", "GET", "/control/v1/grants/{grant_id}"),
+        (
+            "console.binding.read",
+            "GET",
+            "/control/v1/auth-bindings/{binding_id}",
+        ),
+        ("console.query.executed", "POST", "/control/v1/search"),
+        (
+            "console.case.read",
+            "GET",
+            "/control/v1/cases/{case_id}/items",
+        ),
+        ("case.created", "POST", "/control/v1/cases"),
+        ("case.closed", "POST", "/control/v1/cases/{case_id}/close"),
+        (
+            "case.evidence.added",
+            "POST",
+            "/control/v1/cases/{case_id}/items",
+        ),
+        (
+            "evidence.access.requested",
+            "POST",
+            "/control/v1/artifacts/{artifact_id}/access",
+        ),
+        (
+            "evidence.access.approved",
+            "POST",
+            "/control/v1/evidence-access-requests/{access_request_id}/approve",
+        ),
+        (
+            "evidence.access.denied",
+            "POST",
+            "/control/v1/evidence-access-requests/{access_request_id}/deny",
+        ),
+        (
+            "evidence.read",
+            "GET",
+            "/control/v1/artifacts/{artifact_id}/content",
+        ),
+    ] {
+        let mut value = event();
+        value["event_type"] = kind.into();
+        value["payload"]["method"] = method.into();
+        value["payload"]["path"] = path.into();
+        value["payload"]["outcome"] = "DENY".into();
+        value["payload"]["target_case_id"] = Value::Null;
+        value["evidence_refs"] = json!([]);
+        assert!(index(&value).is_ok(), "{kind} absent hold target");
+        value["payload"]["target_hold_id"] = Value::Null;
+        assert!(index(&value).is_ok(), "{kind} null hold target");
+        value["payload"]["target_hold_id"] = HOLD.into();
+        rejected(&value, &format!("{kind} unexpected hold target"));
+    }
+}
+
+#[test]
+fn hold_management_rejects_duplicate_fields_and_transactional_payloads() {
+    for &(kind, method, path, reason) in HOLD_ACTIONS {
+        let value = hold_event(kind, method, path, reason);
+        let bytes = serde_json::to_string(&value).unwrap();
+        let duplicate = bytes.replace(
+            r#""outcome":"PASS""#,
+            r#""target_hold_id":null,"outcome":"PASS","target_hold_id":null"#,
+        );
+        assert!(matches!(
+            index_bytes(duplicate.as_bytes()),
+            Err(PublishError::Json(_))
+        ));
+        let mut crossed = value;
+        crossed["payload"] = json!({
+            "stage":"evidence_hold", "outcome":"PASS", "reason_code":"EVIDENCE_HOLD_CREATED",
+            "proof_kind":"deterministic", "confidence":null, "confidence_status":"not_applicable",
+            "hold_id":HOLD, "case_id":CASE, "artifact_id":ARTIFACT, "subject_ref":"audit-operator",
+            "request_digest":"a".repeat(64), "hold_until":"2026-09-20T00:00:00.123Z"
+        });
+        rejected(&crossed, "transactional payload on management event");
+        crossed["payload"] = json!({"method":method, "path":path, "outcome":"DENY", "reason_code":"CONTROL_INVALID_INPUT"});
+        crossed["event_type"] = "evidence.hold.created".into();
+        crossed["evidence_refs"] = json!([]);
+        assert!(index(&crossed).is_err());
     }
 }

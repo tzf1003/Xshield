@@ -34,7 +34,7 @@
 
 ## M4 模型与调查
 
-案件增量：`POST /control/v1/cases/{case_id}/items` 与 `GET /control/v1/cases/{case_id}/items` 已形成关联、单快照集合浏览、catalog 状态和审计闭环。`POST /control/v1/cases/{case_id}/close` 已提供所有者终结、容量释放、精确重试及事务 outbox，历史集合与审批保留，后续原文资格校验受 closed 状态约束；新增关联和关闭已覆盖断连终态审计回归。案件保留锁已完成有界存储、清理屏障及事件发布（见 12.9），其管理 HTTP 入口、调查 Agent 与导出继续交付，案件生命周期本身不扩大内容权限或保留期。
+案件增量：`POST /control/v1/cases/{case_id}/items` 与 `GET /control/v1/cases/{case_id}/items` 已形成关联、单快照集合浏览、catalog 状态和审计闭环。`POST /control/v1/cases/{case_id}/close` 已提供所有者终结、容量释放、精确重试及事务 outbox，历史集合与审批保留，后续原文资格校验受 closed 状态约束；新增关联和关闭已覆盖断连终态审计回归。案件保留锁已完成有界存储、清理屏障、事件发布及 AuditAdministrator 创建/释放/历史查询 HTTP 闭环（见 12.9、29.21）；调查 Agent 与导出继续交付。保留锁延缓物理删除，案件生命周期与保留操作均不扩大原文权限或读取期限。
 
 当前增量：已落地有界 QueryPlan AST、固定作用域的参数化 ClickHouse 事件查询、稳定 HMAC 游标和 `console.query.executed` 审计。查询返回脱敏事件摘要、实际扫描量及索引水位/gap，实施单实例并发上限和客户端 deadline；超预算计划须缩小范围。当前为同一事件的 AND 过滤，模型接入、调查 Agent、跨事件关联和只读回放继续按垂直闭环推进。
 

@@ -68,7 +68,10 @@ pub(super) fn decode_hold(row: &PgRow) -> Result<CaseEvidenceHoldRecord, StoreEr
 
 // Reconstruct the complete immutable fact on retries. Existence alone cannot
 // prove that a successful transition was durably audited with these parameters.
-fn event(row: &PgRow, released: bool) -> Result<(EventId, &'static str, Value), StoreError> {
+pub(super) fn event(
+    row: &PgRow,
+    released: bool,
+) -> Result<(EventId, &'static str, Value), StoreError> {
     let record = decode_hold(row)?;
     let (event_id, event_type, reason, actor, at, digest, causes) = if released {
         (

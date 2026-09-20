@@ -292,6 +292,20 @@ fn subjects_and_request_digests_are_bounded() {
 }
 
 #[test]
+fn hold_clock_rejects_leap_seconds_and_accepts_adjacent_milliseconds() {
+    for timestamp in ["2026-09-19T00:00:60.000Z", "2026-09-19T00:00:60.999Z"] {
+        assert!(super::utc_millis(timestamp).is_err(), "{timestamp}");
+    }
+    for timestamp in [
+        "2026-09-19T00:00:59.000Z",
+        "2026-09-19T00:00:59.999Z",
+        "2026-09-19T00:01:00.000Z",
+    ] {
+        assert!(super::utc_millis(timestamp).is_ok(), "{timestamp}");
+    }
+}
+
+#[test]
 fn clocks_and_creation_deadlines_keep_frozen_millisecond_bounds() {
     for kind in EVENT_TYPES {
         for timestamp in [
@@ -301,6 +315,8 @@ fn clocks_and_creation_deadlines_keep_frozen_millisecond_bounds() {
             "2026-09-19T00:00:00.123+00:00",
             "2026-09-19T08:00:00.123+08:00",
             "2026-09-19T00:00:00.123Z\n",
+            "2026-09-19T00:00:60.000Z",
+            "2026-09-19T00:00:60.999Z",
             "2026-02-30T00:00:00.123Z",
             "1969-12-31T23:59:59.999Z",
             "2263-01-01T00:00:00.000Z",

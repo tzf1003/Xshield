@@ -16,7 +16,9 @@ pub const CASE_EVIDENCE_HOLD_HISTORY_MAX: i64 = 128;
 /// Maximum simultaneous active holds per tenant/site.
 pub const CASE_EVIDENCE_HOLD_ACTIVE_MAX: i64 = 1_000;
 
+mod read;
 mod record;
+pub use read::{CaseEvidenceHoldPage, CaseEvidenceHoldQuery};
 use record::{decode_hold, insert_event, verify_events};
 
 /// Validated request to create or replay a case evidence hold.
@@ -417,5 +419,6 @@ fn valid_text(value: &str, max: usize) -> bool {
 fn valid_time(value: DateTime<Utc>) -> bool {
     value.timestamp() >= 0
         && value.timestamp_nanos_opt().is_some()
+        && value.timestamp_subsec_nanos() < 1_000_000_000
         && value.timestamp_subsec_nanos().is_multiple_of(1_000_000)
 }

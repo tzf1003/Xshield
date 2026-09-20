@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -21,6 +21,9 @@
 | POST /control/v1/cases/{id}/items | 把获准证据加入案例 | case.evidence.added |
 | GET /control/v1/cases/{id}/items | 查询本人案件证据引用集合 | console.case.read |
 | POST /control/v1/cases/{id}/close | 关闭本人案件并保留调查历史 | case.closed |
+| POST /control/v1/cases/{case_id}/holds | 管理员保留案件成员证据 | console.evidence.hold.created |
+| POST /control/v1/evidence-holds/{hold_id}/release | 管理员释放保留锁 | console.evidence.hold.released |
+| GET /control/v1/cases/{case_id}/holds | 管理员分页查询保留历史 | console.evidence.hold.read |
 | POST /control/v1/cases/{id}/analyze | 启动只读调查Agent | agent.started，工具/模型独立事件 |
 | POST /control/v1/replays | 离线规则评估，不送原站 | replay.requested/completed |
 | POST /control/v1/exports | 带用途/范围/审批的导出任务 | export.requested/approved/downloaded |
@@ -164,7 +167,7 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 已准入操作在客户端断连后继续数据库终态与管理审计，许可覆盖至审计完成；本地 fsync 依赖健康存储，15 秒只限制数据库操作，进程退出仍是故障边界。每次可审计尝试写独立加密 `case.evidence.added` 管理事件，以 payload 的 outcome/reason 区分成功、拒绝和依赖故障；事务 outbox 只记录实际新增关联。经强类型校验的 case/artifact 进入目标字段，成功/精确重试的 artifact 进入 evidence_refs。管理审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留成功响应；已提交的事务及 outbox 保留，可用原请求重试确认。响应统一 `Cache-Control: private, no-store`。
 
-部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。保留锁存储与发布见 [12.9](12-evidence-capture-and-vault.md#129-案件证据保留锁存储与发布)，管理 HTTP 入口另行交付；集合浏览见 [29.17](#2917-已实现的案件证据集合查询契约)，关闭案件见 [29.18](#2918-已实现的案件关闭契约)。
+部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。保留锁存储与发布见 [12.9](12-evidence-capture-and-vault.md#129-案件证据保留锁存储与发布)，管理入口见 [29.21](#2921-已实现的案件保留锁管理契约)；集合浏览见 [29.17](#2917-已实现的案件证据集合查询契约)，关闭案件见 [29.18](#2918-已实现的案件关闭契约)。
 
 ## 29.17 已实现的案件证据集合查询契约
 
@@ -217,3 +220,21 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 数据库整体操作含池等待限 15 秒，单语句和锁等待限 5 秒，与资格/search/model-call 共用单实例查询许可。忙时返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，数据库故障、超时或损坏返回 `CONTROL_BINDING_STORE_UNAVAILABLE`/503。已准入请求在断连后继续完成数据库操作和审计，许可覆盖终态审计；进程退出仍是故障边界。响应统一为 `Cache-Control: private, no-store`。
 
 每次可审计尝试写 `console.binding.read`，通过路径校验的目标写入 target_binding_id；成功（含未找到）原因为 `CONTROL_BINDING_READ`，evidence_refs 为空，审计中不保存查询快照。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果。部署需给控制数据库角色配置 `auth_bindings` 所需 SELECT，先升级管理 journal 发布器，再启用端点；无新增 migration 或依赖。
+
+## 29.21 已实现的案件保留锁管理契约
+
+创建、释放和历史列表均要求独立管理 Bearer、`AuditAdministrator` 及服务端固定 tenant/site。该角色可管理同作用域内其他所有者案件；保留只推迟物理删除，原始 catalog/vault expires_at、敏感内容审批与到期拒读继续生效。
+
+`POST /control/v1/cases/{case_id}/holds` 严格接受 `artifact_id`、`reason`、`hold_until`；`POST /control/v1/evidence-holds/{hold_id}/release` 严格接受 `reason`。路径使用规范 case/ev UUIDv7，artifact 使用规范 artifact UUIDv7；JSON 上限 4 KiB，拒绝未知或重复字段、查询参数和重复认证头。理由为 1–512 UTF-8 字节、无首尾空白或控制字符。期限只接受可表示为有符号纳秒、Unix 起点之后的 `YYYY-MM-DDTHH:MM:SS.sssZ`（秒为 00–59）；新建时另按数据库时钟要求未来 720 小时内。过期的原期限可用于精确重试。
+
+两个 POST 要求单值 `Idempotency-Key`，允许 16–128 字节 ASCII 字母、数字、`-_.:`。使用管理幂等密钥和创建/释放各自用途域，摘要绑定主体、作用域、键及全部参数；原键不入库或审计。首次创建返回 201，精确创建重试及释放返回 200。响应含 schema_version=3、管理 request_id、tenant/site、hold_id、case_id、artifact_id、created_by、reason、created_at、hold_until、可空 released_event_id/released_by/released_reason/released_at 和 replayed。重试返回已提交记录及当前释放事实，保持原始期限，不建立新锁。
+
+新建须为同域 open 案件、已有成员、active catalog 且没有删除意图；对象内容到期不阻止保留。每案累计 128 条历史、每作用域 1000 条活动锁，过期但未释放的同案同证据记录仍占自然唯一位置。释放允许案件关闭、内容到期或删除。缺失、跨域及不可用目标统一为 `CONTROL_EVIDENCE_HOLD_TARGET_UNAVAILABLE`/404；同键参数偏差、未释放的同案同证据或另一释放请求占用目标为 `CONTROL_EVIDENCE_HOLD_CONFLICT`/409。期限/DTO 错误为 `CONTROL_EVIDENCE_HOLD_REQUEST_INVALID`/400，容量耗尽为 `CONTROL_EVIDENCE_HOLD_LIMIT_EXCEEDED`/429、retryable=false。
+
+`GET /control/v1/cases/{case_id}/holds` 只接受可选 `cursor`，HMAC 用途域绑定凭证摘要、主体、作用域、案件、页大小及最后 hold ID。页大小复用 `XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS`（1–128）；缺失/越界/错绑游标在查库前返回 `CONTROL_CURSOR_INVALID`/400。单条只读 SQL 快照按 hold ID 升序读取历史，包含 open/closed、过期/已释放记录；同时验证创建/释放的完整 outbox 绑定，包括多取的一条预读记录，损坏时整页失败。现有空案件返回空 items，缺失或跨域案件统一 404。响应为 schema_version=3、request_id、tenant/site、case_id、case_status、数据库微秒 as_of、items（上述保留记录字段）、truncated 和 next_cursor。每页是实时快照，原始期限和释放时间供调查使用，不返回内容元数据、读取资格、摘要或 outbox 正文。
+
+三个入口与案件关联/关闭/集合查询共享单实例在途许可，繁忙为 `CONTROL_EVIDENCE_HOLD_BUSY`/429。数据库整体含池等待最多 15 秒，SQL 与锁等待最多 5 秒；数据库故障、损坏和超时为 `CONTROL_EVIDENCE_HOLD_STORE_UNAVAILABLE`/503。许可覆盖最终审计；已准入操作在客户端断连后继续到数据库和审计终态，进程退出仍为故障边界。事务提交可能先于超时或审计故障，使用原键和完整参数确认结果。
+
+每次可审计尝试分别写 `console.evidence.hold.created/released/read`。创建/释放成功原因依次为 `CONTROL_EVIDENCE_HOLD_CREATED`、`CONTROL_EVIDENCE_HOLD_RELEASED`，重试为 `CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED`、`CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED`，列表为 `CONTROL_EVIDENCE_HOLD_READ`；失败使用对应稳定原因。写成功绑定 case/artifact/hold 及唯一 artifact 引用，列表只绑定 case 和本页去重 artifact 引用，失败只保留已校验目标且引用为空。管理 journal 不记录自由理由、期限、原键或响应正文；事务 outbox 独立记录实际状态转换。审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，已提交事务保留。所有响应 `private, no-store`。
+
+部署遵循 12.9 的迁移 0020 和清理升级顺序，并先升级管理 journal 发布器再开放三个端点，旧发布器遇到新事件会保留待发布段并停止推进。复用已有幂等与游标密钥，跨实例须保持一致；本增量无新依赖或 migration。管理主体启动校验现拒绝首尾空白；升级前核对 `XSHIELD_CONTROL_SUBJECT` 为原始规范身份，程序不会自动去空白以改变身份。

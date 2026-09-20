@@ -20,6 +20,9 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.binding.read"
             | "console.query.executed"
             | "console.case.read"
+            | "console.evidence.hold.created"
+            | "console.evidence.hold.released"
+            | "console.evidence.hold.read"
             | "case.created"
             | "case.closed"
             | "case.evidence.added"
@@ -43,6 +46,7 @@ struct AccessPayload {
     target_model_call_id: Option<String>,
     target_grant_id: Option<String>,
     target_binding_id: Option<String>,
+    target_hold_id: Option<String>,
     query_digest: Option<String>,
     outcome: String,
     reason_code: String,
@@ -77,7 +81,20 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
 impl AccessPayload {
     fn validate(&self, event: &WireEvent) -> Result<(), PublishError> {
         let success = self.outcome == "PASS";
+        let valid_reason = match event.event_type.as_str() {
+            "console.evidence.hold.created" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_EVIDENCE_HOLD_CREATED" | "CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED"
+            ),
+            "console.evidence.hold.released" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_EVIDENCE_HOLD_RELEASED" | "CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED"
+            ),
+            "console.evidence.hold.read" => self.reason_code == "CONTROL_EVIDENCE_HOLD_READ",
+            _ => true,
+        };
         if !matches!(self.outcome.as_str(), "PASS" | "DENY" | "ERROR")
+            || success && !valid_reason
             || self.reason_code.is_empty()
             || self.reason_code.len() > 128
             || !self
@@ -118,7 +135,7 @@ impl AccessPayload {
 
     fn validate_targets(&self, event_type: &str, success: bool) -> Result<(), PublishError> {
         // Keep the field order explicit: request, artifact, case, access request,
-        // model call, grant, binding. Denials retain only validated targets.
+        // model call, grant, binding, hold. Denials retain validated targets.
         let targets = [
             (&self.target_request_id, "req_"),
             (&self.target_artifact_id, "artifact_"),
@@ -127,35 +144,43 @@ impl AccessPayload {
             (&self.target_model_call_id, "mdl_"),
             (&self.target_grant_id, "grant_"),
             (&self.target_binding_id, "auth_"),
+            (&self.target_hold_id, "ev_"),
         ];
         let allowed = match (event_type, self.method.as_str(), self.path.as_str()) {
-            ("console.health.read", "GET", "/control/v1/audit/health") => [false; 7],
+            ("console.health.read", "GET", "/control/v1/audit/health") => [false; 8],
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")
             | ("console.events.read", "GET", "/control/v1/requests/{request_id}/events")
             | ("console.manifest.read", "GET", "/control/v1/requests/{request_id}/evidence") => {
-                [true, false, false, false, false, false, false]
+                [true, false, false, false, false, false, false, false]
             }
             ("console.manifest.read", "GET", "/control/v1/artifacts/{artifact_id}") => {
-                [false, true, false, false, false, false, false]
+                [false, true, false, false, false, false, false, false]
             }
             ("console.model.read", "GET", "/control/v1/model-calls/{model_call_id}") => {
-                [false, false, false, false, true, false, false]
+                [false, false, false, false, true, false, false, false]
             }
             ("console.grant.read", "GET", "/control/v1/grants/{grant_id}") => {
-                [false, false, false, false, false, true, false]
+                [false, false, false, false, false, true, false, false]
             }
             ("console.binding.read", "GET", "/control/v1/auth-bindings/{binding_id}") => {
-                [false, false, false, false, false, false, true]
+                [false, false, false, false, false, false, true, false]
             }
             ("case.created", "POST", "/control/v1/cases")
             | ("case.closed", "POST", "/control/v1/cases/{case_id}/close")
-            | ("console.case.read", "GET", "/control/v1/cases/{case_id}/items") => {
-                [false, false, true, false, false, false, false]
+            | ("console.case.read", "GET", "/control/v1/cases/{case_id}/items")
+            | ("console.evidence.hold.read", "GET", "/control/v1/cases/{case_id}/holds") => {
+                [false, false, true, false, false, false, false, false]
             }
             ("case.evidence.added", "POST", "/control/v1/cases/{case_id}/items") => {
-                [false, true, true, false, false, false, false]
+                [false, true, true, false, false, false, false, false]
             }
+            ("console.evidence.hold.created", "POST", "/control/v1/cases/{case_id}/holds")
+            | (
+                "console.evidence.hold.released",
+                "POST",
+                "/control/v1/evidence-holds/{hold_id}/release",
+            ) => [false, true, true, false, false, false, false, true],
             ("evidence.access.requested", "POST", "/control/v1/artifacts/{artifact_id}/access")
             | (
                 "evidence.access.approved",
@@ -166,9 +191,9 @@ impl AccessPayload {
                 "evidence.access.denied",
                 "POST",
                 "/control/v1/evidence-access-requests/{access_request_id}/deny",
-            ) => [false, true, true, true, false, false, false],
+            ) => [false, true, true, true, false, false, false, false],
             ("evidence.read", "GET", "/control/v1/artifacts/{artifact_id}/content") => {
-                [false, true, false, true, false, false, false]
+                [false, true, false, true, false, false, false, false]
             }
             _ => return Err(PublishError::InvalidEvent),
         };
@@ -190,6 +215,8 @@ impl AccessPayload {
             | "evidence.access.requested"
             | "evidence.access.approved"
             | "evidence.access.denied"
+            | "console.evidence.hold.created"
+            | "console.evidence.hold.released"
             | "evidence.read" => {
                 event.evidence_refs.len() == 1
                     && self.target_artifact_id.as_ref() == event.evidence_refs.first()
@@ -203,6 +230,7 @@ impl AccessPayload {
             | "console.events.read"
             | "console.model.read"
             | "console.case.read"
+            | "console.evidence.hold.read"
             | "console.query.executed" => true,
             _ => event.evidence_refs.is_empty(),
         };

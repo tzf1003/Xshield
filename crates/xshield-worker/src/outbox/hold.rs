@@ -107,6 +107,9 @@ fn utc_millis(value: &str) -> Result<DateTime<Utc>, PublishError> {
     if value.len() != 24
         || parsed.to_rfc3339_opts(SecondsFormat::Millis, true) != value
         || parsed.timestamp() < 0
+        // Chrono represents leap seconds with overflowing subseconds; persisted
+        // hold clocks use ordinary UTC seconds consistently across boundaries.
+        || parsed.timestamp_subsec_nanos() >= 1_000_000_000
         || parsed.timestamp_nanos_opt().is_none()
     {
         return Err(PublishError::InvalidEvent);

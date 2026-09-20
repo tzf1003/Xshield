@@ -15,7 +15,7 @@ use xshield_evidence::{
 };
 use xshield_postgres::{
     CaseEvidenceAdd, CaseEvidenceHoldCreate, CaseEvidenceHoldCreateOutcome as CreateOutcome,
-    CaseEvidenceHoldRecord, CaseEvidenceHoldRelease,
+    CaseEvidenceHoldPage, CaseEvidenceHoldQuery, CaseEvidenceHoldRecord, CaseEvidenceHoldRelease,
     CaseEvidenceHoldReleaseOutcome as ReleaseOutcome, CaseEvidenceWriteOutcome,
     EvidenceCatalogArtifactQuery, EvidenceCatalogPublish, EvidenceCatalogWriteOutcome,
     EvidencePurgeResult, PostgresIdentityStore, StoreError,
@@ -37,6 +37,9 @@ fn hold_commands_reject_noncanonical_time_and_unbounded_text() {
         DateTime::from_timestamp_millis(-1).unwrap(),
         deadline + TimeDelta::microseconds(1),
         DateTime::<Utc>::MAX_UTC,
+        DateTime::parse_from_rfc3339("2030-01-01T23:59:60.000Z")
+            .unwrap()
+            .with_timezone(&Utc),
     ] {
         assert!(
             CaseEvidenceHoldCreate::new(
@@ -67,6 +70,20 @@ fn hold_commands_reject_noncanonical_time_and_unbounded_text() {
             )
             .is_err()
         );
+    }
+}
+
+#[test]
+fn hold_history_query_bounds_are_enforced() {
+    let tenant = TenantId::parse("tenant_hold_constructor").unwrap();
+    let site = SiteId::parse("site_hold_constructor").unwrap();
+    let case = CaseId::parse(format!("case_{}", Uuid::now_v7())).unwrap();
+    let after = event_id();
+    for limit in [0, 129, u16::MAX] {
+        assert!(CaseEvidenceHoldQuery::new(&tenant, &site, &case, Some(&after), limit).is_err());
+    }
+    for limit in [1, 128] {
+        assert!(CaseEvidenceHoldQuery::new(&tenant, &site, &case, None, limit).is_ok());
     }
 }
 
@@ -197,6 +214,10 @@ async fn case_evidence_holds_are_atomic_scoped_bounded_and_serialize_with_purge(
 
 async fn run_regressions(mut f: Fixture) {
     assert_idempotency_and_scope(&f).await;
+    f.site = SiteId::parse("site_hold_read").unwrap();
+    assert_history_pages(&f).await;
+    f.site = SiteId::parse("site_hold_read_snapshot").unwrap();
+    assert_release_read_snapshot(&f).await;
     f.site = SiteId::parse("site_hold_state").unwrap();
     assert_target_state_and_read_expiry(&f).await;
     f.site = SiteId::parse("site_hold_fault").unwrap();
@@ -415,6 +436,214 @@ impl Fixture {
                      AND event_type IN ('evidence.hold.created','evidence.hold.released'))",
         ).bind(self.tenant.as_str()).bind(self.site.as_str()).fetch_one(&self.pool).await.unwrap()
     }
+
+    async fn page(
+        &self,
+        case: &CaseId,
+        after: Option<&EventId>,
+        limit: u16,
+    ) -> CaseEvidenceHoldPage {
+        self.store
+            .list_case_evidence_holds(
+                CaseEvidenceHoldQuery::new(&self.tenant, &self.site, case, after, limit).unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn assert_history_pages(f: &Fixture) {
+    let case = f.case().await;
+    let empty = f.page(&case, None, 1).await;
+    assert_eq!(empty.case_id(), &case);
+    assert_eq!(empty.case_status(), "open");
+    assert!(empty.items().is_empty());
+    assert!(empty.next_hold_id().is_none());
+    let missing = CaseId::parse(format!("case_{}", Uuid::now_v7())).unwrap();
+    let foreign_tenant = TenantId::parse("tenant_hold_read_other").unwrap();
+    let foreign_site = SiteId::parse("site_hold_read_other").unwrap();
+    for (tenant, site, target) in [
+        (&f.tenant, &f.site, &missing),
+        (&foreign_tenant, &f.site, &case),
+        (&f.tenant, &foreign_site, &case),
+    ] {
+        assert!(
+            f.store
+                .list_case_evidence_holds(
+                    CaseEvidenceHoldQuery::new(tenant, site, target, None, 128).unwrap(),
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    let mut requests = Vec::new();
+    let mut records = Vec::new();
+    for index in 0..3 {
+        let artifact = f.artifact().await;
+        f.member(&case, &artifact).await;
+        let mut hold = f.hold(&case, &artifact).await;
+        if index == 2 {
+            hold.until = f.now().await + TimeDelta::milliseconds(300);
+        }
+        records.push(f.created(&hold).await);
+        requests.push(hold);
+    }
+    let release = ReleaseRequest::new(&requests[1]);
+    records[1] = f.released(&release).await;
+    wait_until(f, requests[2].until).await;
+    assert!(
+        records
+            .windows(2)
+            .all(|pair| pair[0].created_event_id.as_str() < pair[1].created_event_id.as_str())
+    );
+    let before = history_snapshot(f).await;
+    let page_one = f.page(&case, None, 1).await;
+    assert_eq!(page_one.items(), &records[..1]);
+    assert_eq!(page_one.next_hold_id(), Some(&records[0].created_event_id));
+    let page_two = f.page(&case, page_one.next_hold_id(), 1).await;
+    assert_eq!(page_two.items(), &records[1..2]);
+    assert_eq!(page_two.next_hold_id(), Some(&records[1].created_event_id));
+    let page_three = f.page(&case, page_two.next_hold_id(), 1).await;
+    assert_eq!(page_three.items(), &records[2..]);
+    assert!(page_three.next_hold_id().is_none());
+    assert!(page_three.as_of() >= records[2].hold_until);
+    assert!(page_one.as_of() <= page_two.as_of() && page_two.as_of() <= page_three.as_of());
+    let after_last = f.page(&case, Some(&records[2].created_event_id), 128).await;
+    assert!(after_last.items().is_empty());
+    assert!(after_last.next_hold_id().is_none());
+    let all = f.page(&case, None, 128).await;
+    assert_eq!(all.items(), records);
+    assert!(all.next_hold_id().is_none());
+    assert_eq!(
+        before,
+        history_snapshot(f).await,
+        "history reads preserve all scoped rows"
+    );
+    sqlx::query("UPDATE xshield.investigation_cases SET status='closed' WHERE case_id=$1")
+        .bind(case.as_str())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let before = history_snapshot(f).await;
+    let closed = f.page(&case, None, 128).await;
+    assert_eq!(closed.case_status(), "closed");
+    assert_eq!(closed.items(), records);
+    assert_eq!(before, history_snapshot(f).await);
+    assert_lookahead_integrity(f, &requests[1], &release).await;
+}
+
+async fn history_snapshot(f: &Fixture) -> Value {
+    sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+            'cases',(SELECT jsonb_agg(to_jsonb(c) ORDER BY case_id) FROM xshield.investigation_cases c WHERE tenant_id=$1 AND site_id=$2),
+            'holds',(SELECT jsonb_agg(to_jsonb(h) ORDER BY created_event_id) FROM xshield.case_evidence_holds h WHERE tenant_id=$1 AND site_id=$2),
+            'items',(SELECT jsonb_agg(to_jsonb(i) ORDER BY case_id,artifact_id) FROM xshield.case_items i WHERE tenant_id=$1 AND site_id=$2),
+            'catalog',(SELECT jsonb_agg(to_jsonb(a) ORDER BY artifact_id) FROM xshield.artifact_catalog a WHERE tenant_id=$1 AND site_id=$2),
+            'outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY event_id) FROM xshield.audit_outbox o WHERE tenant_id=$1 AND site_id=$2))",
+    ).bind(f.tenant.as_str()).bind(f.site.as_str()).fetch_one(&f.pool).await.unwrap()
+}
+
+async fn assert_bad_history(f: &Fixture, case: &CaseId) {
+    assert!(matches!(
+        f.store
+            .list_case_evidence_holds(
+                CaseEvidenceHoldQuery::new(&f.tenant, &f.site, case, None, 1).unwrap(),
+            )
+            .await,
+        Err(StoreError::CorruptData("hold_outbox"))
+    ));
+}
+
+async fn assert_lookahead_integrity(
+    f: &Fixture,
+    lookahead: &HoldRequest,
+    release: &ReleaseRequest,
+) {
+    for id in [&lookahead.event, &release.event] {
+        let (aggregate, event_type, envelope) = f.event(id).await;
+        for mutation in ["tenant", "site", "aggregate", "type", "envelope", "missing"] {
+            let statement = match mutation {
+                "tenant" => Some(
+                    "UPDATE xshield.audit_outbox SET tenant_id='tenant_other' WHERE event_id=$1",
+                ),
+                "site" => {
+                    Some("UPDATE xshield.audit_outbox SET site_id='site_other' WHERE event_id=$1")
+                }
+                "aggregate" => Some(
+                    "UPDATE xshield.audit_outbox SET aggregate_ref='wrong-target' WHERE event_id=$1",
+                ),
+                "type" => {
+                    Some("UPDATE xshield.audit_outbox SET event_type='fixture' WHERE event_id=$1")
+                }
+                "envelope" => Some(
+                    "UPDATE xshield.audit_outbox SET envelope=jsonb_set(envelope,'{producer_seq}','99') WHERE event_id=$1",
+                ),
+                "missing" => None,
+                _ => unreachable!(),
+            };
+            if let Some(statement) = statement {
+                sqlx::query(statement)
+                    .bind(id.as_str())
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+            } else {
+                delete_event(f, id).await;
+            }
+            assert_bad_history(f, &lookahead.case).await;
+            sqlx::query(
+                "INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope)
+                 VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (event_id)
+                 DO UPDATE SET tenant_id=$2,site_id=$3,aggregate_ref=$4,event_type=$5,envelope=$6",
+            ).bind(id.as_str()).bind(f.tenant.as_str()).bind(f.site.as_str())
+                .bind(&aggregate).bind(&event_type).bind(&envelope).execute(&f.pool).await.unwrap();
+        }
+    }
+    sqlx::query("UPDATE xshield.case_evidence_holds SET hold_until=hold_until+interval '1 millisecond' WHERE created_event_id=$1")
+        .bind(lookahead.event.as_str()).execute(&f.pool).await.unwrap();
+    assert_bad_history(f, &lookahead.case).await;
+    sqlx::query("UPDATE xshield.case_evidence_holds SET hold_until=$2 WHERE created_event_id=$1")
+        .bind(lookahead.event.as_str())
+        .bind(lookahead.until)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(f.page(&lookahead.case, None, 1).await.items().len(), 1);
+}
+
+async fn assert_release_read_snapshot(f: &Fixture) {
+    let hold = f.target().await;
+    let original = f.created(&hold).await;
+    let release = ReleaseRequest::new(&hold);
+    let (pool, store, pid) = actor_pool(&f.url).await;
+    let mut blocker = f.pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope)
+         VALUES ($1,$2,$3,'collision','fixture','{}')",
+    ).bind(release.event.as_str()).bind(f.tenant.as_str()).bind(f.site.as_str())
+        .execute(&mut *blocker).await.unwrap();
+    let (released, ()) = tokio::join!(store.release_case_evidence_hold(release.command()), async {
+        wait_blocked(&f.pool, pid, blocker_pid).await;
+        // The production transaction has changed its hold row and is waiting
+        // to insert outbox. The reader must see the complete preceding state.
+        let preceding = tokio::time::timeout(Duration::from_secs(2), f.page(&hold.case, None, 128))
+            .await
+            .unwrap();
+        assert_eq!(preceding.items(), std::slice::from_ref(&original));
+        blocker.rollback().await.unwrap();
+    },);
+    let ReleaseOutcome::Released(record) = released.unwrap() else {
+        panic!("release commits after the fixture collision rolls back");
+    };
+    assert_eq!(f.page(&hold.case, None, 128).await.items(), &[record]);
+    pool.close().await;
 }
 
 #[allow(clippy::too_many_lines)]

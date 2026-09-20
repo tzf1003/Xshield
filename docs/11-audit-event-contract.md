@@ -83,6 +83,8 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 `console.binding.read` 对应 `GET /control/v1/auth-bindings/{binding_id}`，按相同规则使用独立可选 `target_binding_id`。成功（含未找到）必须绑定规范 `auth_` UUIDv7；其他路由不能携带该目标。事件只记录访问结果与原因，不含身份快照，evidence_refs 为空。启用端点前须升级管理 journal 发布器。
 
+管理发布器还支持 `console.evidence.hold.created/released/read`，分别绑定保留锁创建、释放和历史查询路由（29.21）。创建/释放成功要求 case/artifact/hold 三个目标及唯一 artifact evidence ref；列表成功只要求 case，引用为本页 artifact 去重集合。失败仅保留已校验的对应目标、引用为空；成功原因精确区分创建、释放、两者重试及读取。新增 `target_hold_id` 为规范 `ev_` UUIDv7，其他管理事件只允许缺省/null。理由与期限不进入管理日志，事务 `evidence.hold.*` 继续由独立 outbox 来源发布。须先升级管理 journal 发布器再启用新路由。
+
 索引阶段为 `control_access`，保留实际 `PASS/DENY/ERROR`、稳定原因码及方法，证明为 `deterministic`、`confidence=null/not_applicable`。管理尝试不设置业务 `is_terminal`，不推导源站结果或客户端实际收到的 HTTP 状态。可通过管理响应的 request_id 查询事件时间线，或通过有界 QueryPlan 按 event_type、stage、reason_code、outcome 检索；业务请求摘要的完整性标记不作为管理操作完成凭证。
 
 目标 case/access/model/request、主体、query_digest 与 bytes_read 保留在受限的原始事件载荷；当前脱敏查询返回通用摘要和证据引用，不提供按案件/主体目标过滤，也不直接返回该载荷。引用可检索不扩大证据读取权限。管理 journal 描述接口访问尝试和重试；未认证请求超出限流预算时直接返回 `CONTROL_RATE_LIMITED`，不追加逐请求访问日志。PostgreSQL 同名 outbox 记录事务状态转换，两者 event_id 与载荷契约不同；journal 发布器与下述 outbox 发布器分别绑定各自来源和契约。
@@ -107,7 +109,7 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 八族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。身份族现同时严格接收 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed` 与 `binding.revoked`；撤销事件只记录非秘密主体/上下文引用、epoch/generation 与 `explicit_logout` 原因，凭证仍保持在敏感载荷之外。
 
-`evidence_retention` 同时领取 `evidence.hold.created` 与 `evidence.hold.released`。两种事件采用 `evidence-hold` / `evidence-hold-v1`，event_id 等于 producer_boot_id，UUID 去连字符得到 trace，span 为其前 16 位。封闭载荷固定 `evidence_hold/PASS`、对应 `EVIDENCE_HOLD_CREATED` 或 `EVIDENCE_HOLD_RELEASED`、hold/case/artifact、主体引用、请求摘要与原 hold_until。创建事件等于 hold ID、无 cause，期限在发生时间后 30 天内；释放事件引用一个不同于自身的 hold ID，可释放已到期锁。时间为规范 UTC 毫秒，request_id 显式 null，确定性 confidence 显式 null，分类 RESTRICTED；自由文本理由只存受限数据库表。摘要保持非业务终态，索引不作为保留或访问授权真值。
+`evidence_retention` 同时领取 `evidence.hold.created` 与 `evidence.hold.released`。两种事件采用 `evidence-hold` / `evidence-hold-v1`，event_id 等于 producer_boot_id，UUID 去连字符得到 trace，span 为其前 16 位。封闭载荷固定 `evidence_hold/PASS`、对应 `EVIDENCE_HOLD_CREATED` 或 `EVIDENCE_HOLD_RELEASED`、hold/case/artifact、主体引用、请求摘要与原 hold_until。创建事件等于 hold ID、无 cause，期限在发生时间后 30 天内；释放事件引用一个不同于自身的 hold ID，可释放已到期锁。时间为规范 UTC 毫秒（秒为 00–59），request_id 显式 null，确定性 confidence 显式 null，分类 RESTRICTED；自由文本理由存受限数据库并经管理员 API 返回，不进入事件。摘要保持非业务终态，索引不作为保留或访问授权真值。
 
 升级后可为既有完整清理事件启用 `evidence_retention` 调度；案件保留锁及升级后的清理任务须先应用迁移 `0020_m3_case_evidence_holds.sql`（见 12.9）。索引保留期仍从原始 occurred_at 起算，积压中已超期事件在 active 视图不可见。所有 v3 来源均要求 envelope 显式包含 request_id（可为 null，具体族另有限制），缺失字段的历史畸形记录按既有错误/水位规则保留待处理，不补造请求身份。
 
