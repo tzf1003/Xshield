@@ -62,6 +62,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
+      - name: Rust to console HTTP wire contract
+        run: cargo test -p xshield-control --lib console_client_reads_real_http_wire_contract -- --ignored
       - run: node --test sensor/test/sensor.test.mjs
       - name: PostgreSQL and transactional Outbox integration
         run: scripts/test_postgres.sh
@@ -74,3 +76,22 @@ jobs:
       - run: scripts/test_gateway_identity.sh
       - run: scripts/test_gateway_request_crypto.sh
       - run: python scripts/validate_library.py
+
+  console:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web/console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/console/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium --only-shell
+      - run: npm run test:e2e

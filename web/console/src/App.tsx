@@ -1,0 +1,492 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { FormEvent, KeyboardEvent } from "react";
+import { ApiError, ControlClient } from "./api";
+import type {
+  ArtifactResponse,
+  EventsResponse,
+  EvidenceResponse,
+  SummaryResponse,
+} from "./api";
+import {
+  ArtifactDetail,
+  EventDetail,
+  EventTable,
+  EvidenceTable,
+  RequestOverview,
+  WatermarkNotice,
+} from "./panels";
+
+type Problem = { message: string; code: string; requestId?: string | null };
+type Channel = "query" | "events" | "evidence" | "artifact";
+const idleMs = 15 * 60 * 1000;
+
+function Failure({ problem }: { problem: Problem | null }) {
+  return (
+    problem && (
+      <div className="notice danger" role="alert">
+        <div>
+          {problem.message}
+          <small className="mono">
+            {problem.code}
+            {problem.requestId ? ` · ${problem.requestId}` : ""}
+          </small>
+        </div>
+      </div>
+    )
+  );
+}
+
+export function App() {
+  const client = useRef<ControlClient | null>(null);
+  const lifetime = useRef(new AbortController());
+  const epoch = useRef(0);
+  const operations = useRef<Record<Channel, number>>({
+    query: 0,
+    events: 0,
+    evidence: 0,
+    artifact: 0,
+  });
+  const scope = useRef<{ tenant_id: string; site_id: string } | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [token, setToken] = useState("");
+  const [requestId, setRequestId] = useState("");
+  const [summary, setSummary] = useState<SummaryResponse | null>(null);
+  const [events, setEvents] = useState<EventsResponse | null>(null);
+  const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
+  const [artifact, setArtifact] = useState<ArtifactResponse | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [tab, setTab] = useState<"events" | "evidence">("events");
+  const [busy, setBusy] = useState<Partial<Record<Channel, boolean>>>({});
+  const [problems, setProblems] = useState<Partial<Record<Channel, Problem>>>(
+    {},
+  );
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+
+  const clearResults = useCallback(() => {
+    lifetime.current.abort();
+    lifetime.current = new AbortController();
+    epoch.current += 1;
+    setSummary(null);
+    setEvents(null);
+    setEvidence(null);
+    setArtifact(null);
+    setSelected(null);
+    setTab("events");
+    setProblems({});
+    setBusy({});
+  }, []);
+
+  const disconnect = useCallback(
+    (notice: string | null = null) => {
+      clearResults();
+      client.current = null;
+      scope.current = null;
+      setConnected(false);
+      setToken("");
+      setRequestId("");
+      setSessionNotice(notice);
+    },
+    [clearResults],
+  );
+
+  useEffect(() => {
+    if (!connected) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const reset = () => {
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => disconnect("会话已因闲置断开，请重新连接。"),
+        idleMs,
+      );
+    };
+    const leave = () => disconnect();
+    reset();
+    window.addEventListener("pointerdown", reset);
+    window.addEventListener("keydown", reset);
+    window.addEventListener("pagehide", leave);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("pointerdown", reset);
+      window.removeEventListener("keydown", reset);
+      window.removeEventListener("pagehide", leave);
+    };
+  }, [connected, disconnect]);
+  useEffect(() => () => lifetime.current.abort(), []);
+
+  // Every response belongs to a query generation and one authenticated scope.
+  // Abort alone cannot stop already-resolved promises from repainting old data.
+  async function run<T extends { tenant_id: string; site_id: string }>(
+    channel: Channel,
+    fetcher: (api: ControlClient, signal: AbortSignal) => Promise<T>,
+    apply: (response: T) => void,
+  ) {
+    const api = client.current;
+    if (!api) return;
+    const generation = epoch.current;
+    const operation = ++operations.current[channel];
+    const signal = lifetime.current.signal;
+    const current = () =>
+      epoch.current === generation &&
+      operations.current[channel] === operation &&
+      !signal.aborted;
+    setBusy((value) => ({ ...value, [channel]: true }));
+    setProblems((value) => ({ ...value, [channel]: undefined }));
+    try {
+      const response = await fetcher(api, signal);
+      if (!current()) return;
+      if (
+        scope.current &&
+        (scope.current.tenant_id !== response.tenant_id ||
+          scope.current.site_id !== response.site_id)
+      ) {
+        disconnect("响应范围校验失败，连接已断开。");
+        return;
+      }
+      scope.current = {
+        tenant_id: response.tenant_id,
+        site_id: response.site_id,
+      };
+      apply(response);
+    } catch (error) {
+      if (!current()) return;
+      if (error instanceof ApiError && error.status === 401) {
+        disconnect("管理凭证已失效，请重新连接。");
+      } else {
+        const problem =
+          error instanceof ApiError
+            ? {
+                message: error.message,
+                code: error.code,
+                requestId: error.requestId,
+              }
+            : {
+                message: "查询未完成，请稍后重试。",
+                code: "CONSOLE_REQUEST_FAILED",
+              };
+        setProblems((value) => ({ ...value, [channel]: problem }));
+      }
+    } finally {
+      if (current()) setBusy((value) => ({ ...value, [channel]: false }));
+    }
+  }
+
+  function connect(event: FormEvent) {
+    event.preventDefault();
+    try {
+      client.current = new ControlClient(token);
+    } catch {
+      setSessionNotice("请输入有效的管理凭证。");
+      return;
+    }
+    lifetime.current = new AbortController();
+    setToken("");
+    setSessionNotice(null);
+    setConnected(true);
+  }
+  function clearArtifact() {
+    operations.current.artifact += 1;
+    setArtifact(null);
+    setBusy((value) => ({ ...value, artifact: false }));
+    setProblems((value) => ({ ...value, artifact: undefined }));
+  }
+  function loadEvents(target: string, cursor?: string) {
+    setEvents(null);
+    setSelected(null);
+    clearArtifact();
+    void run(
+      "events",
+      (api, signal) => api.events(target, cursor, signal),
+      (response) => {
+        setEvents(response);
+        setSelected(response.events.at(-1)?.event_id ?? null);
+      },
+    );
+  }
+  function query(event: FormEvent) {
+    event.preventDefault();
+    clearResults();
+    const target = requestId.trim();
+    setRequestId(target);
+    void run(
+      "query",
+      (api, signal) => api.summary(target, signal),
+      (response) => {
+        setSummary(response);
+        loadEvents(target);
+      },
+    );
+  }
+  function loadEvidence(cursor?: string) {
+    if (!summary) return;
+    setEvidence(null);
+    clearArtifact();
+    void run(
+      "evidence",
+      (api, signal) => api.evidence(summary.source_request_id, cursor, signal),
+      (response) => setEvidence(response),
+    );
+  }
+  function openArtifact(id: string) {
+    setArtifact(null);
+    void run(
+      "artifact",
+      (api, signal) => api.artifact(id, signal),
+      (response) => setArtifact(response),
+    );
+  }
+  function switchTab(next: "events" | "evidence") {
+    clearArtifact();
+    setTab(next);
+    if (next === "evidence" && !evidence && !busy.evidence) loadEvidence();
+  }
+  function tabKey(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next =
+      event.key === "Home"
+        ? "events"
+        : event.key === "End"
+          ? "evidence"
+          : tab === "events"
+            ? "evidence"
+            : "events";
+    switchTab(next);
+    document.getElementById(`${next}-tab`)?.focus();
+  }
+  const event = events?.events.find((value) => value.event_id === selected);
+
+  return (
+    <>
+      <header className="topbar">
+        <span className="brand">Xshield</span>
+        <span className="nav-title">请求调查</span>
+        <span className="muted console-label">只读控制台</span>
+        <div className="connection">
+          <span className="mono scope">
+            {scope.current
+              ? `${scope.current.tenant_id} / ${scope.current.site_id}`
+              : connected
+                ? "等待查询验证范围"
+                : "尚未连接"}
+          </span>
+          {connected && (
+            <button className="outline" onClick={() => disconnect()}>
+              断开连接
+            </button>
+          )}
+        </div>
+      </header>
+      <main>
+        <h1>请求调查</h1>
+        <p className="lead">沿着请求时间线，核对每一次判定与证据。</p>
+        {sessionNotice && (
+          <div className="notice" role="status">
+            {sessionNotice}
+          </div>
+        )}
+        {!connected ? (
+          <section
+            className="panel connect-panel"
+            aria-labelledby="connect-title"
+          >
+            <h2 id="connect-title">连接管理服务</h2>
+            <p className="muted">
+              使用当前站点的 Observer 管理凭证。访问范围由服务端校验。
+            </p>
+            <form onSubmit={connect}>
+              <label htmlFor="token">管理凭证</label>
+              <input
+                id="token"
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                maxLength={4096}
+                required
+              />
+              <button type="submit">连接</button>
+            </form>
+            <p className="footnote">
+              凭证仅保存在当前页面内存中。刷新、断开连接或闲置 15
+              分钟后需重新连接。
+            </p>
+          </section>
+        ) : (
+          <>
+            <form className="panel query-form" onSubmit={query}>
+              <label htmlFor="request-id">请求 ID</label>
+              <input
+                id="request-id"
+                className="mono"
+                placeholder="req_…"
+                value={requestId}
+                onChange={(e) => setRequestId(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                maxLength={40}
+                required
+                pattern="req_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+                title="请输入规范的 req_ 前缀 UUIDv7"
+              />
+              <button type="submit" disabled={busy.query}>
+                {busy.query ? "查询中…" : "查询"}
+              </button>
+            </form>
+            <Failure problem={problems.query ?? null} />
+            {summary ? (
+              <>
+                <WatermarkNotice summary={summary} events={events} />
+                <RequestOverview response={summary} />
+                <div
+                  className="tabs"
+                  role="tablist"
+                  aria-label="调查内容"
+                  onKeyDown={tabKey}
+                >
+                  <button
+                    id="events-tab"
+                    role="tab"
+                    tabIndex={tab === "events" ? 0 : -1}
+                    aria-selected={tab === "events"}
+                    aria-controls="investigation-panel"
+                    onClick={() => switchTab("events")}
+                  >
+                    事件时间线
+                  </button>
+                  <button
+                    id="evidence-tab"
+                    role="tab"
+                    tabIndex={tab === "evidence" ? 0 : -1}
+                    aria-selected={tab === "evidence"}
+                    aria-controls="investigation-panel"
+                    onClick={() => switchTab("evidence")}
+                  >
+                    证据引用
+                  </button>
+                </div>
+                <div className="investigation-grid">
+                  <section
+                    className="panel"
+                    id="investigation-panel"
+                    role="tabpanel"
+                    aria-labelledby={`${tab}-tab`}
+                    aria-busy={Boolean(busy[tab])}
+                  >
+                    <div className="panel-heading">
+                      <h2>{tab === "events" ? "事件时间线" : "证据引用"}</h2>
+                      <span className="muted">
+                        本页{" "}
+                        {tab === "events"
+                          ? (events?.events.length ?? 0)
+                          : (evidence?.artifacts.length ?? 0)}{" "}
+                        条
+                      </span>
+                    </div>
+                    <Failure problem={problems[tab] ?? null} />
+                    {problems[tab] ? null : busy[tab] ? (
+                      <p className="empty" role="status">
+                        正在读取{tab === "events" ? "事件" : "证据目录"}…
+                      </p>
+                    ) : tab === "events" ? (
+                      <EventTable
+                        events={events?.events ?? []}
+                        selected={selected}
+                        onSelect={(id) => {
+                          clearArtifact();
+                          setSelected(id);
+                        }}
+                      />
+                    ) : (
+                      <EvidenceTable
+                        artifacts={evidence?.artifacts ?? []}
+                        onOpen={openArtifact}
+                      />
+                    )}
+                    <div className="pagination">
+                      <button
+                        className="outline"
+                        disabled={
+                          Boolean(busy[tab]) ||
+                          !(tab === "events"
+                            ? events?.next_cursor
+                            : evidence?.next_cursor)
+                        }
+                        onClick={() => {
+                          if (tab === "events" && events?.next_cursor)
+                            loadEvents(
+                              summary.source_request_id,
+                              events.next_cursor,
+                            );
+                          if (tab === "evidence" && evidence?.next_cursor)
+                            loadEvidence(evidence.next_cursor);
+                        }}
+                      >
+                        下一页
+                      </button>
+                      <span className="muted">
+                        {tab === "events" ? "按事件序号分页" : "按目录记录分页"}
+                      </span>
+                      {problems[tab] && (
+                        <button
+                          className="text-button"
+                          onClick={() =>
+                            tab === "events"
+                              ? loadEvents(summary.source_request_id)
+                              : loadEvidence()
+                          }
+                        >
+                          重新加载首页
+                        </button>
+                      )}
+                    </div>
+                  </section>
+                  <aside className="panel detail-panel" aria-live="polite">
+                    <div className="panel-heading">
+                      <h2>
+                        {artifact || busy.artifact || problems.artifact
+                          ? "证据详情"
+                          : "事件详情"}
+                      </h2>
+                      {(artifact || problems.artifact || busy.artifact) && (
+                        <button className="text-button" onClick={clearArtifact}>
+                          返回事件
+                        </button>
+                      )}
+                    </div>
+                    <Failure problem={problems.artifact ?? null} />
+                    {busy.artifact ? (
+                      <p className="empty" role="status">
+                        正在读取证据元数据…
+                      </p>
+                    ) : artifact ? (
+                      <ArtifactDetail response={artifact} />
+                    ) : (
+                      !problems.artifact &&
+                      (event ? (
+                        <EventDetail event={event} onOpen={openArtifact} />
+                      ) : (
+                        <p className="empty">选择一条事件或证据查看详情。</p>
+                      ))
+                    )}
+                  </aside>
+                </div>
+              </>
+            ) : (
+              !busy.query &&
+              !problems.query && (
+                <section className="panel empty-state">
+                  <h2>从一个请求开始</h2>
+                  <p className="muted">
+                    输入请求 ID，读取判定摘要、事件时间线与证据目录。
+                  </p>
+                </section>
+              )
+            )}
+          </>
+        )}
+        <footer>历史记录用于调查，当前访问资格由服务端独立校验。</footer>
+      </main>
+    </>
+  );
+}

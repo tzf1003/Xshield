@@ -1,2 +1,8 @@
 /target/
 .DS_Store
+/web/console/node_modules/
+/web/console/dist/
+/web/console/test-results/
+/web/console/playwright-report/
+/web/console/.env
+/web/console/.env.*

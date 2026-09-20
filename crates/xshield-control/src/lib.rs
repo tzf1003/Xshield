@@ -6906,6 +6906,120 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[ignore = "requires Node.js 22"]
+    #[allow(clippy::too_many_lines)]
+    async fn console_client_reads_real_http_wire_contract() {
+        let occurred_at = DateTime::parse_from_rfc3339("2026-09-20T08:10:30.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide([SummaryRow {
+            event_count: 2,
+            first_occurred_at: occurred_at,
+            last_occurred_at: occurred_at,
+            method: "POST".to_owned(),
+            operation_id: "orders.create".to_owned(),
+            decision: "ALLOW".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            status: Some(201),
+            origin_state: "response_received".to_owned(),
+            duration_us: 42,
+            forwarded: 1,
+            terminal: 1,
+        }]));
+        mock.add(test::handlers::provide([RequestStageSummary {
+            stage: "admission".to_owned(),
+            outcome: "PASS".to_owned(),
+            reason_code: "POLICY_ALLOWED".to_owned(),
+            proof_kind: "deterministic".to_owned(),
+            confidence: None,
+            confidence_status: "not_applicable".to_owned(),
+            first_request_seq: 1,
+            last_request_seq: 1,
+            duration_us: 10,
+            event_count: 1,
+        }]));
+        let mut first = event_summary("ev_018f2a3b-4c5d-7000-8000-000000000001", 1);
+        first.occurred_at = occurred_at;
+        first.evidence_refs = vec![
+            "artifact_018f2a3b-4c5d-7000-8000-000000000011".to_owned(),
+            "stg_018f2a3b-4c5d-7000-8000-000000000012".to_owned(),
+        ];
+        let mut last = event_summary("ev_018f2a3b-4c5d-7000-8000-000000000002", 2);
+        last.occurred_at = occurred_at;
+        last.event_type = "origin.response".to_owned();
+        last.outcome = "response_received".to_owned();
+        last.stage.clear();
+        last.proof_kind.clear();
+        last.confidence_status.clear();
+        mock.add(test::handlers::provide([first, last.clone()]));
+        mock.add(test::handlers::provide([last]));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut fixture = Fixture::with_index(
+            20,
+            ManagementRole::Observer,
+            Client::default().with_mock(&mock),
+        );
+        // A closed pool gives catalog routes deterministic dependency failures.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://xshield:xshield@127.0.0.1:1/xshield")
+            .unwrap();
+        pool.close().await;
+        fixture.control.catalog = PostgresIdentityStore::from_pool(pool);
+        let root = fixture.access_directory.parent().unwrap().to_path_buf();
+        let access = fixture.access_directory;
+        let server =
+            tokio::spawn(async move { axum::serve(listener, router(fixture.control)).await });
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/console/tests/control-wire.ts");
+        let result = tokio::task::spawn_blocking(move || {
+            let mut child = std::process::Command::new("node")
+                .arg("--experimental-strip-types")
+                .arg(script)
+                .env("XSHIELD_CONSOLE_TEST_ORIGIN", format!("http://{address}"))
+                .env("XSHIELD_CONSOLE_TEST_TOKEN", TOKEN)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|_| "Node.js 22 is required")?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    _ => {
+                        child.kill().map_err(|_| "Node cleanup failed")?;
+                        child.wait().map_err(|_| "Node wait failed")?;
+                        return Err("Node contract test exceeded its execution budget");
+                    }
+                }
+            }
+        })
+        .await;
+        server.abort();
+        let stopped = server.await;
+        let events = read_access_events(&access);
+        // This root belongs exclusively to the fixture created above.
+        fs::remove_dir_all(&root).unwrap();
+        assert!(stopped.is_err_and(|error| error.is_cancelled()));
+        let status = result.unwrap().unwrap();
+        assert!(
+            status.success(),
+            "console wire contract failed; phase={:?}",
+            status.code()
+        );
+        assert_eq!(events.len(), 6);
+        assert_eq!(
+            events.last().unwrap()["payload"]["reason_code"],
+            "CONTROL_AUTH_REQUIRED"
+        );
+    }
+
     fn private_directory(path: &Path) {
         fs::create_dir_all(path).unwrap();
         #[cfg(unix)]
