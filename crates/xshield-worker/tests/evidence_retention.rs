@@ -1,15 +1,21 @@
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use std::{env, fs, fs::File, path::Path, process::Command, time::Duration};
 use uuid::Uuid;
-use xshield_core::domain::{EventId, RequestId, SiteId, TenantId};
+use xshield_core::{
+    domain::{ArtifactId, CaseId, EventId, RequestId, SiteId, TenantId},
+    investigation::{CaseEvidenceDraft, InvestigationCaseDraft},
+};
 use xshield_evidence::{
     EvidenceClassification, EvidenceFidelity, EvidenceKey, EvidencePurgeOutcome,
     EvidenceVaultConfig, EvidenceWrite, LocalEvidenceVault, VerifiedEvidenceManifest,
 };
 use xshield_postgres::{
-    EvidenceCatalogPublish, EvidenceOrphanPurgeResult, EvidencePurgeResult, PostgresIdentityStore,
+    CaseEvidenceAdd, CaseEvidenceHoldCreate, CaseEvidenceHoldCreateOutcome,
+    CaseEvidenceHoldRelease, CaseEvidenceHoldReleaseOutcome, CaseEvidenceWriteOutcome,
+    EvidenceCatalogPublish, EvidenceOrphanPurgeResult, EvidencePurgeResult,
+    InvestigationCaseCreate, InvestigationCaseWriteOutcome, PostgresIdentityStore,
 };
 
 const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
@@ -38,6 +44,7 @@ async fn expired_ciphertext_cleanup_is_scoped_audited_exclusive_and_recoverable(
     let tenant = TenantId::parse("tenant_retention").unwrap();
     let site = SiteId::parse("site_retention").unwrap();
     let first = publish(&store, &vault, &tenant, &site, 5).await;
+    create_and_release_hold(&store, &tenant, &site, &first).await;
     let second = publish(&store, &vault, &tenant, &site, 5).await;
     let live = publish(&store, &vault, &tenant, &site, 600).await;
     let foreign = publish(
@@ -355,6 +362,126 @@ fn run_cli(database: &str, root: &Path, limit: u16) -> std::process::Output {
         .env("XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS", "1")
         .output()
         .unwrap()
+}
+
+// Real case/membership and hold transactions leave both hold event types for
+// the ClickHouse delivery regression after the original purge recovery flow.
+#[allow(clippy::too_many_lines)]
+async fn create_and_release_hold(
+    store: &PostgresIdentityStore,
+    tenant: &TenantId,
+    site: &SiteId,
+    artifact: &VerifiedEvidenceManifest,
+) {
+    let case = CaseId::parse(format!("case_{}", Uuid::now_v7())).unwrap();
+    let artifact_id = ArtifactId::parse(&artifact.manifest().artifact_id).unwrap();
+    let request = RequestId::parse(format!("req_{}", Uuid::now_v7())).unwrap();
+    let event = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+    let draft = InvestigationCaseDraft::new(
+        case.clone(),
+        tenant.clone(),
+        site.clone(),
+        "retention-investigator",
+        "Review retained evidence",
+    )
+    .unwrap();
+    let mut envelope = json!({
+        "schema_version": 3, "event_id": event.as_str(), "event_type": "case.created",
+        "tenant_id": tenant.as_str(), "site_id": site.as_str(), "request_id": request.as_str(),
+        "evidence_refs": [], "payload": {
+            "case_id": case.as_str(), "subject_ref": draft.owner_ref(),
+            "stage": "case_management", "request_digest": "02".repeat(32),
+            "outcome": "PASS", "reason_code": "CASE_CREATED"
+        }
+    });
+    assert!(matches!(
+        store
+            .create_investigation_case(
+                InvestigationCaseCreate::new(
+                    &draft, &[1; 32], &[2; 32], &request, &event, &envelope, 1
+                )
+                .unwrap()
+            )
+            .await
+            .unwrap(),
+        InvestigationCaseWriteOutcome::Created(_)
+    ));
+    let event = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+    let membership = CaseEvidenceDraft::new(
+        tenant.clone(),
+        site.clone(),
+        case.clone(),
+        artifact_id.clone(),
+        draft.owner_ref(),
+    )
+    .unwrap();
+    envelope["event_id"] = json!(event.as_str());
+    envelope["event_type"] = json!("case.evidence.added");
+    envelope["evidence_refs"] = json!([artifact_id.as_str()]);
+    envelope["payload"]["artifact_id"] = json!(artifact_id.as_str());
+    envelope["payload"]["reason_code"] = json!("CASE_EVIDENCE_ADDED");
+    envelope["payload"]["request_digest"] = json!("04".repeat(32));
+    assert!(matches!(
+        store
+            .add_case_evidence(
+                CaseEvidenceAdd::new(&membership, &[3; 32], &[4; 32], &request, &event, &envelope)
+                    .unwrap()
+            )
+            .await
+            .unwrap(),
+        CaseEvidenceWriteOutcome::Added(_)
+    ));
+
+    let hold = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+    let hold_until = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap()
+        + TimeDelta::hours(1);
+    let created = store
+        .create_case_evidence_hold(
+            CaseEvidenceHoldCreate::new(
+                tenant,
+                site,
+                &case,
+                &artifact_id,
+                "retention-admin",
+                "Preserve case evidence",
+                &[5; 32],
+                &[6; 32],
+                &hold,
+                hold_until,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let CaseEvidenceHoldCreateOutcome::Created(created) = created else {
+        panic!("hold must be created");
+    };
+    assert_eq!(created.created_event_id, hold);
+    assert_eq!(created.artifact_id, artifact_id);
+    assert_eq!(created.hold_until, hold_until);
+    let released = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+    let outcome = store
+        .release_case_evidence_hold(
+            CaseEvidenceHoldRelease::new(
+                tenant,
+                site,
+                &hold,
+                "retention-admin",
+                "Evidence review complete",
+                &[7; 32],
+                &[8; 32],
+                &released,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let CaseEvidenceHoldReleaseOutcome::Released(record) = outcome else {
+        panic!("hold must be released");
+    };
+    assert_eq!(record.created_event_id, hold);
+    assert_eq!(record.released_event_id, Some(released));
+    assert_eq!(record.hold_until, hold_until);
 }
 
 async fn publish(

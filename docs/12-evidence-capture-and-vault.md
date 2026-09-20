@@ -105,3 +105,15 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 清理事实通过 `XSHIELD_OUTBOX_FAMILY=evidence_retention` 独立发布：六类事件进入 ClickHouse 的 `evidence_retention` 或 `evidence_orphan_retention` 阶段，可按事件 ID、类型、原因或阶段进行有界脱敏检索，结果保留 artifact 与 cause 引用。原请求 ID 只保留在 catalog 事件受限载荷中，维护事件的 request_id 为 null；发布失败按既有 outbox 租约规则重试，不再次执行物理清理。契约、配置和升级见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)。
 
 真实 PostgreSQL 与 CLI 测试覆盖批量边界、租户/站点/key 隔离、目录锁、意图和完成 outbox 故障回滚、删除后重启、幂等完成、损坏密文保留与重试、孤儿宽限/审计/删除、篡改 catalog 提前期限拒绝；库单测覆盖未到期、错误密钥、错误作用域、符号链接、HMAC、摘要和 partial-sidecar 保留。配置 ClickHouse 后，同一脚本继续把实际清理生产者的六类事件投递至真实生产 DDL 并验证脱敏查询、精确确认、重投去重、故障恢复及内容冲突，执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。
+
+## 12.9 案件证据保留锁存储与发布
+
+迁移 `0020_m3_case_evidence_holds.sql` 和 `PostgresIdentityStore` 的创建/释放入口已实现案件级保留锁。调用方须先认证精确 tenant/site 的 AuditAdministrator 并审计操作尝试；管理 HTTP 入口和锁列表仍待交付。锁只暂停指定 artifact 的物理删除，catalog/vault 原始 expires_at、读取审批和到期拒读规则保持有效。创建要求 open 案件、已有案件成员、active catalog 且尚未提交删除意图；已过期但尚未进入删除意图的对象可保留供后续合规处置。
+
+hold_until 使用规范 UTC 毫秒，创建时按数据库时钟限制为未来 720 小时（30×24 小时）内；每案累计最多 128 条历史，每 tenant/site 最多 1000 条活动锁。相同案件/artifact 的未释放记录保持唯一，过期后需显式释放才能新建；释放允许案件关闭、对象到期和对象已删除。创建和释放分别按作用域、主体、用途幂等摘要精确重试，返回已提交历史，不延长锁；参数偏差返回冲突。自由文本理由仅存受限表，事件保存请求摘要及目标引用。
+
+事务先取得作用域 advisory lock，再锁案件和 catalog。清理选择候选时排除活动锁，取得 catalog 锁后使用新语句快照重验；创建与删除意图因此有明确先后顺序。已有耐久意图永久阻止新增锁，恢复该意图时不会因时钟回退使旧锁重新活动而阻塞。多个案件持有同一 artifact 时，所有活动锁释放或到期后才能创建删除意图；关闭案件不自动释放锁。
+
+锁行与完整 `evidence.hold.created` / `evidence.hold.released` outbox 同事务提交，精确重试重新校验已存事实的完整绑定。两种事件由现有 `evidence_retention` 族发布至 ClickHouse 的 `evidence_hold` 阶段，释放事件引用原创建事件；查询摘要保持空请求、空置信度、非业务终态。
+
+升级顺序：暂停全部旧版清理任务 → 应用 `0020` → 升级清理任务及发布器 → 启用保留锁调用方 → 恢复清理。旧版清理代码不检查此表，存在保留锁后禁止恢复旧版清理实例。SQL 权限按服务职责授予，当前维护进程需要保留锁表 SELECT。需要管理端保留操作的站点仍须等待 HTTP 入口及其认证/审计验收，再启用清理调度。

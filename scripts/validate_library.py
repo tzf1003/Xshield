@@ -131,7 +131,7 @@ def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: d
         check('model_capture:' + label, not valid(schemas['model-call'], invalid))
 
 def check_outbox_contracts(schemas: dict) -> None:
-    """Exercise the implemented catalog, retention and identity outbox shapes."""
+    """Exercise the implemented catalog, retention, hold and identity outbox shapes."""
     artifact = 'artifact_018f2a3b-4c5d-7000-8000-000000000005'
     base = {
         'schema_version': 3, 'event_id': 'ev_018f2a3b-4c5d-7000-8000-000000000001',
@@ -167,7 +167,122 @@ def check_outbox_contracts(schemas: dict) -> None:
         check('outbox:evidence_catalog_reject_' + label,
               not valid(schemas['audit-event'], event))
     check_retention_outbox_contracts(schemas['audit-event'], base)
+    check_hold_outbox_contracts(schemas['audit-event'], base)
     check_identity_outbox_contracts(schemas['audit-event'], base)
+
+def check_hold_outbox_contracts(schema: dict, base: dict) -> None:
+    """Check hold field shapes; Rust owns clock arithmetic and cross-field binding."""
+    for kind, reason in [('evidence.hold.created', 'EVIDENCE_HOLD_CREATED'),
+                         ('evidence.hold.released', 'EVIDENCE_HOLD_RELEASED')]:
+        created = kind.endswith('created')
+        hold_id = base['event_id'] if created else base['cause_event_ids'][0]
+        event = copy.deepcopy(base)
+        event.update(event_type=kind, producer_id='evidence-hold', request_id=None,
+                     producer_boot_id=base['event_id'], request_seq=1,
+                     trace_id=base['event_id'][3:].replace('-', ''),
+                     policy_revision='evidence-hold-v1', cause_event_ids=[] if created else [hold_id])
+        event['payload'] = {
+            'stage': 'evidence_hold', 'outcome': 'PASS', 'reason_code': reason,
+            'proof_kind': 'deterministic', 'confidence': None, 'confidence_status': 'not_applicable',
+            'hold_id': hold_id, 'case_id': 'case_018f2a3b-4c5d-7000-8000-000000000004',
+            'artifact_id': base['payload']['artifact_id'], 'subject_ref': 'investigator-1',
+            'request_digest': 'a' * 64, 'hold_until': '2026-09-20T00:00:00.123Z',
+        }
+        prefix = 'outbox:hold:' + kind + ':'
+        check(prefix + 'valid', valid(schema, event))
+        for path in ['', 'payload', 'integrity']:
+            target = event[path] if path else event
+            for field in target:
+                missing = copy.deepcopy(event)
+                del (missing[path] if path else missing)[field]
+                optional_hash = path == 'integrity' and field in ['previous_hash', 'event_hash']
+                check(prefix + 'missing_' + path + '_' + field,
+                      valid(schema, missing) == optional_hash)
+                wrong_type = copy.deepcopy(event)
+                (wrong_type[path] if path else wrong_type)[field] = (
+                    'invalid' if isinstance(target[field], list) else [])
+                check(prefix + 'wrong_type_' + path + '_' + field, not valid(schema, wrong_type))
+            unknown = copy.deepcopy(event)
+            (unknown[path] if path else unknown)['extra'] = None
+            check(prefix + 'unknown_' + path, not valid(schema, unknown))
+        for field, value in [
+            ('producer_id', 'evidence-retention'), ('producer_boot_id', base['request_id']),
+            ('producer_boot_id', base['producer_boot_id']), ('producer_boot_id', base['event_id'].upper()),
+            ('request_id', base['request_id']), ('producer_seq', 0), ('producer_seq', 2),
+            ('request_seq', 0), ('request_seq', 2), ('sensitivity', 'INTERNAL'),
+            ('policy_revision', 'policy-r1'), ('example_only', True), ('schema_version', 2),
+            ('event_id', base['request_id']), ('tenant_id', 'invalid scope'), ('site_id', 'invalid scope'),
+            ('trace_id', event['trace_id'] + '\n'), ('span_id', event['span_id'] + '\n'),
+            ('evidence_refs', []), ('evidence_refs', [base['request_id']]),
+            ('evidence_refs', base['evidence_refs'] * 2),
+            ('cause_event_ids', [hold_id] if created else []),
+            ('cause_event_ids', [hold_id, hold_id]), ('cause_event_ids', base['evidence_refs']),
+            ('connection_id', None), ('agent_run_id', None),
+        ]:
+            invalid = copy.deepcopy(event)
+            invalid[field] = value
+            check(prefix + 'reject_envelope_' + field + '_' + str(value), not valid(schema, invalid))
+        for field, value in [
+            ('stage', 'evidence_retention'), ('outcome', 'ERROR'),
+            ('reason_code', 'EVIDENCE_HOLD_RELEASED' if created else 'EVIDENCE_HOLD_CREATED'),
+            ('proof_kind', 'model'), ('confidence', 0.0), ('confidence_status', 'provided'),
+            ('hold_id', base['request_id']), ('hold_id', hold_id.upper()),
+            ('hold_id', hold_id.replace('-7000-', '-4000-')),
+            ('case_id', base['event_id']), ('case_id', event['payload']['case_id'] + '\n'),
+            ('artifact_id', None), ('artifact_id', base['request_id']),
+            ('artifact_id', base['payload']['artifact_id'] + '\n'),
+            ('subject_ref', ''), ('subject_ref', 'a' * 257), ('subject_ref', ' actor'),
+            ('subject_ref', 'actor '), ('subject_ref', '\u2003actor'),
+            ('subject_ref', 'actor\nname'), ('subject_ref', 'actor\u0085name'),
+            ('request_digest', 'a' * 63), ('request_digest', 'a' * 65),
+            ('request_digest', 'A' * 64), ('request_digest', 'g' * 64),
+            ('body', 'synthetic'), ('storage_locator', '/private/synthetic.xev'),
+        ]:
+            invalid = copy.deepcopy(event)
+            invalid['payload'][field] = value
+            check(prefix + 'reject_payload_' + field + '_' + str(value), not valid(schema, invalid))
+        for subject in ['a' * 256, '\u754c' * 85, 'actor name']:
+            accepted = copy.deepcopy(event)
+            accepted['payload']['subject_ref'] = subject
+            check(prefix + 'subject_boundary_' + subject, valid(schema, accepted))
+        for field, value in [('state', 'sealed'), ('previous_hash', 'a' * 64), ('event_hash', 'b' * 64)]:
+            invalid = copy.deepcopy(event)
+            invalid['integrity'][field] = value
+            check(prefix + 'reject_integrity_' + field, not valid(schema, invalid))
+        for timestamp in ['invalid', '2026-09-19T00:00:00Z', '2026-09-19T00:00:00.123456Z',
+                          '2026-09-19T00:00:00.123+00:00', '2026-09-19T08:00:00.123+08:00',
+                          '2026-09-19T00:00:00.123Z\n']:
+            for field in ['occurred_at', 'observed_at', 'hold_until']:
+                invalid = copy.deepcopy(event)
+                (invalid['payload'] if field == 'hold_until' else invalid)[field] = timestamp
+                check(prefix + 'timestamp_' + field + '_' + timestamp, not valid(schema, invalid))
+
+        # JSON Schema describes local shape. The Rust tests reject these bindings,
+        # deadlines and UTF-8 byte bounds; no cross-event completeness is inferred.
+        for field, value in [
+            ('producer_boot_id', 'ev_018f2a3b-4c5d-7000-8000-000000000009'),
+            ('trace_id', 'a' * 32), ('span_id', 'a' * 16),
+            ('observed_at', '2026-09-19T00:00:00.124Z'),
+            ('evidence_refs', ['artifact_018f2a3b-4c5d-7000-8000-000000000008']),
+        ]:
+            mismatch = copy.deepcopy(event)
+            mismatch[field] = value
+            check(prefix + 'rust_only_binding_' + field, valid(schema, mismatch))
+        for field, value in [('hold_id', base['cause_event_ids'][0] if created else base['event_id']),
+                             ('hold_until', '1969-12-31T23:59:59.999Z'), ('subject_ref', '\u754c' * 86)]:
+            mismatch = copy.deepcopy(event)
+            mismatch['payload'][field] = value
+            check(prefix + 'rust_only_payload_' + field, valid(schema, mismatch))
+        for timestamp in ['2026-09-19T00:00:00.123Z', '2026-09-19T00:00:00.124Z',
+                          '2026-10-19T00:00:00.123Z', '2026-10-19T00:00:00.124Z',
+                          '1970-01-01T00:00:00.000Z']:
+            deadline = copy.deepcopy(event)
+            deadline['payload']['hold_until'] = timestamp
+            check(prefix + 'rust_only_deadline_' + timestamp, valid(schema, deadline))
+        if not created:
+            mismatch = copy.deepcopy(event)
+            mismatch['cause_event_ids'] = [event['event_id']]
+            check(prefix + 'rust_only_cause_binding', valid(schema, mismatch))
 
 def check_retention_outbox_contracts(schema: dict, base: dict) -> None:
     """Check six maintenance events; Rust owns equality and source/row binding."""

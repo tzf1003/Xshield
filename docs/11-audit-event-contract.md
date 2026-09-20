@@ -107,7 +107,9 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 八族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。身份族现同时严格接收 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed` 与 `binding.revoked`；撤销事件只记录非秘密主体/上下文引用、epoch/generation 与 `explicit_logout` 原因，凭证仍保持在敏感载荷之外。
 
-升级后可为既有完整清理事件启用 `evidence_retention` 调度，无需新增迁移或依赖；索引保留期仍从原始 occurred_at 起算，积压中已超期事件在 active 视图不可见。所有 v3 来源均要求 envelope 显式包含 request_id（可为 null，具体族另有限制），缺失字段的历史畸形记录按既有错误/水位规则保留待处理，不补造请求身份。
+`evidence_retention` 同时领取 `evidence.hold.created` 与 `evidence.hold.released`。两种事件采用 `evidence-hold` / `evidence-hold-v1`，event_id 等于 producer_boot_id，UUID 去连字符得到 trace，span 为其前 16 位。封闭载荷固定 `evidence_hold/PASS`、对应 `EVIDENCE_HOLD_CREATED` 或 `EVIDENCE_HOLD_RELEASED`、hold/case/artifact、主体引用、请求摘要与原 hold_until。创建事件等于 hold ID、无 cause，期限在发生时间后 30 天内；释放事件引用一个不同于自身的 hold ID，可释放已到期锁。时间为规范 UTC 毫秒，request_id 显式 null，确定性 confidence 显式 null，分类 RESTRICTED；自由文本理由只存受限数据库表。摘要保持非业务终态，索引不作为保留或访问授权真值。
+
+升级后可为既有完整清理事件启用 `evidence_retention` 调度；案件保留锁及升级后的清理任务须先应用迁移 `0020_m3_case_evidence_holds.sql`（见 12.9）。索引保留期仍从原始 occurred_at 起算，积压中已超期事件在 active 视图不可见。所有 v3 来源均要求 envelope 显式包含 request_id（可为 null，具体族另有限制），缺失字段的历史畸形记录按既有错误/水位规则保留待处理，不补造请求身份。
 
 身份事务使用 request_id 作为独立 producer_boot_id，producer_seq/request_seq 均为 1，保留原网关请求 trace 与配置修订；两种序列不推进 journal 的序列，也不表示跨来源全序。当前时间线按 `(request_seq,event_id)` 排序，调查时应结合生产者与发生时间理解身份事件，不能以该位置推断源站先后。`identity_lifecycle` 的 PASS 是事务结果，`is_terminal=0`，不推断业务执行状态；确定性结果保持 `confidence=null/not_applicable`。主体/上下文引用与新旧凭证 HMAC 保留在 `SENSITIVE` payload_json，脱敏查询摘要不返回该载荷，普通检索不授予认证权力。
 

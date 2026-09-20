@@ -34,6 +34,8 @@ Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签�
 
 本地证据到期清理使用两段短事务：先按 tenant/site/key 和数据库当前时间锁定候选，将删除意图与 outbox 原子提交；文件系统认证、删除与目录同步后，再锁定并比较相同 manifest/意图，提交 catalog tombstone 与完成 outbox。无 catalog 的本地孤儿复用同一根目录排他锁和两段事务，按稳定长度/mtime 观察提交意图，按 artifact 全局检查迟到 catalog，并在 sidecar/摘要复验后写入 `evidence.orphan.deleted` 或失败事件。数据库事务不跨文件操作持锁；两事务之间由本地根目录排他锁约束写入者。中断恢复依赖耐久意图和保留的签名 manifest，不把数据库提交与文件删除描述为一个原子事务。
 
+案件保留锁使用 `case_evidence_holds`，创建事件 ID 即稳定 hold ID。关联外键绑定完整 tenant/site/case/artifact，未释放目标、创建幂等键和释放幂等键分别唯一；创建/释放与各自完整 outbox 原子提交。作用域 advisory lock 串行化容量，案件/catalog 行锁串行化状态与删除意图。保留期限与原文读取期限独立，边界及部署次序见 [12.9](12-evidence-capture-and-vault.md#129-案件证据保留锁存储与发布)。
+
 ## 18.4 协议规则
 
 外部 API 与 audit event 含 schema_version。未知 critical enum 或版本拒绝；可扩展 metadata 只能保存非授权数据。金额、资源 ID、期限等使用明确类型，不靠浮点或 JS 自动类型转换。

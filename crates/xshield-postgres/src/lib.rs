@@ -9,6 +9,7 @@ mod action_read;
 mod binding_inspection;
 mod case_close;
 mod case_evidence;
+mod case_evidence_holds;
 mod case_evidence_read;
 mod evidence_access_decision;
 mod evidence_access_request;
@@ -35,6 +36,11 @@ pub use case_close::{
 };
 pub use case_evidence::{
     CASE_EVIDENCE_ITEMS_MAX, CaseEvidenceAdd, CaseEvidenceRecord, CaseEvidenceWriteOutcome,
+};
+pub use case_evidence_holds::{
+    CASE_EVIDENCE_HOLD_ACTIVE_MAX, CASE_EVIDENCE_HOLD_HISTORY_MAX, CASE_EVIDENCE_HOLD_MAX_DAYS,
+    CaseEvidenceHoldCreate, CaseEvidenceHoldCreateOutcome, CaseEvidenceHoldRecord,
+    CaseEvidenceHoldRelease, CaseEvidenceHoldReleaseOutcome,
 };
 pub use case_evidence_read::{
     CaseEvidenceAvailability, CaseEvidenceItem, CaseEvidencePage, CaseEvidenceQuery,

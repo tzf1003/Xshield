@@ -615,6 +615,34 @@
         "authenticated_manifest": {"type": "boolean"}
       }
     },
+    "evidence_hold": {
+      "$comment": "The Rust boundary also validates the subject's UTF-8 byte length, epoch-or-later clocks within signed nanosecond range, and the created deadline delta in (0, 720 hours]. Releases retain the original deadline and may occur after it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "outcome", "reason_code", "proof_kind", "confidence", "confidence_status", "hold_id", "case_id", "artifact_id", "subject_ref", "request_digest", "hold_until"],
+      "properties": {
+        "stage": {"const": "evidence_hold"},
+        "outcome": {"const": "PASS"},
+        "reason_code": {"enum": ["EVIDENCE_HOLD_CREATED", "EVIDENCE_HOLD_RELEASED"]},
+        "proof_kind": {"const": "deterministic"},
+        "confidence": {"type": "null"},
+        "confidence_status": {"const": "not_applicable"},
+        "hold_id": {
+          "type": "string",
+          "maxLength": 39,
+          "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "case_id": {
+          "type": "string",
+          "maxLength": 41,
+          "pattern": "^case_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"},
+        "subject_ref": {"$ref": "#/$defs/identity_subject", "not": {"pattern": "^\\s|\\s$"}},
+        "request_digest": {"$ref": "#/$defs/grant/properties/constraints_digest"},
+        "hold_until": {"$ref": "#/$defs/utc_millisecond"}
+      }
+    },
     "utc_second": {
       "type": "string",
       "minLength": 20,
@@ -830,6 +858,64 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {"event_type": {"enum": ["evidence.hold.created", "evidence.hold.released"]}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Committed evidence-hold outbox facts. Rust additionally checks producer_boot_id == event_id, trace_id == the event UUID without hyphens, span_id == its first 16 digits, equal occurred_at/observed_at, artifact/evidence_refs/aggregate equality, hold/event/cause bindings, duplicate keys and exact leased row/source identity. These local checks do not establish cross-event history or grant content access. Shared pending integrity hashes remain optional/null.",
+        "properties": {
+          "event_id": {"$ref": "#/$defs/evidence_hold/properties/hold_id"},
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"type": "null"},
+          "trace_id": {"maxLength": 32},
+          "span_id": {"maxLength": 16},
+          "producer_id": {"const": "evidence-hold"},
+          "producer_boot_id": {"$ref": "#/$defs/evidence_hold/properties/hold_id"},
+          "producer_seq": {"const": 1},
+          "request_seq": {"const": 1},
+          "occurred_at": {"$ref": "#/$defs/utc_millisecond"},
+          "observed_at": {"$ref": "#/$defs/utc_millisecond"},
+          "policy_revision": {"const": "evidence-hold-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/model_artifact_ref", "type": "string"}
+          },
+          "cause_event_ids": {
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/evidence_hold/properties/hold_id"}
+          },
+          "payload": {"$ref": "#/$defs/evidence_hold"},
+          "sensitivity": {"const": "RESTRICTED"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        },
+        "if": {"properties": {"event_type": {"const": "evidence.hold.created"}}},
+        "then": {
+          "properties": {
+            "cause_event_ids": {"maxItems": 0},
+            "payload": {"properties": {"reason_code": {"const": "EVIDENCE_HOLD_CREATED"}}}
+          }
+        },
+        "else": {
+          "properties": {
+            "cause_event_ids": {"minItems": 1},
+            "payload": {"properties": {"reason_code": {"const": "EVIDENCE_HOLD_RELEASED"}}}
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {

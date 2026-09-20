@@ -58,6 +58,7 @@ impl PostgresIdentityStore {
     /// Returns [`StoreError`] for invalid bounds, corrupt state or database
     /// failures. Statements/lock waits are capped at five seconds. No job is
     /// returned before commit; an uncertain commit is safe to retry.
+    #[allow(clippy::too_many_lines)]
     pub async fn prepare_evidence_purge(
         &self,
         tenant: &TenantId,
@@ -79,6 +80,14 @@ impl PostgresIdentityStore {
             "SELECT * FROM xshield.artifact_catalog
              WHERE tenant_id = $1 AND site_id = $2 AND key_ref = $3
                AND status = 'active' AND expires_at <= clock_timestamp()
+               AND (purge_requested_event_id IS NOT NULL OR NOT EXISTS (
+                   SELECT 1 FROM xshield.case_evidence_holds hold
+                   WHERE hold.tenant_id = artifact_catalog.tenant_id
+                     AND hold.site_id = artifact_catalog.site_id
+                     AND hold.artifact_id = artifact_catalog.artifact_id
+                     AND hold.released_at IS NULL
+                     AND hold.hold_until > clock_timestamp()
+               ))
              ORDER BY expires_at, artifact_id LIMIT $4 FOR UPDATE",
         )
         .bind(tenant.as_str())
@@ -90,6 +99,30 @@ impl PostgresIdentityStore {
         let mut jobs = Vec::with_capacity(rows.len());
         for row in rows {
             let artifact = catalog_artifact(&row)?;
+            // The catalog row is already locked. Recheck the hold in this
+            // statement snapshot after that lock to avoid a stale pre-lock
+            // NOT EXISTS decision under READ COMMITTED.
+            let held: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                     SELECT 1 FROM xshield.case_evidence_holds
+                     WHERE tenant_id = $1 AND site_id = $2 AND artifact_id = $3
+                       AND released_at IS NULL AND hold_until > clock_timestamp()
+                 )",
+            )
+            .bind(tenant.as_str())
+            .bind(site.as_str())
+            .bind(artifact.artifact_id().as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+            // A durable intent already excludes future holds. After a crash,
+            // retry it even if clock rollback makes an old expired hold active.
+            if held
+                && row
+                    .try_get::<Option<&str>, _>("purge_requested_event_id")?
+                    .is_none()
+            {
+                continue;
+            }
             let intent_event_id =
                 if let Some(id) = row.try_get::<Option<String>, _>("purge_requested_event_id")? {
                     let id = EventId::parse(id)

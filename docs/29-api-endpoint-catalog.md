@@ -164,7 +164,7 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 已准入操作在客户端断连后继续数据库终态与管理审计，许可覆盖至审计完成；本地 fsync 依赖健康存储，15 秒只限制数据库操作，进程退出仍是故障边界。每次可审计尝试写独立加密 `case.evidence.added` 管理事件，以 payload 的 outcome/reason 区分成功、拒绝和依赖故障；事务 outbox 只记录实际新增关联。经强类型校验的 case/artifact 进入目标字段，成功/精确重试的 artifact 进入 evidence_refs。管理审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留成功响应；已提交的事务及 outbox 保留，可用原请求重试确认。响应统一 `Cache-Control: private, no-store`。
 
-部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。保留锁另行交付；集合浏览见 [29.17](#2917-已实现的案件证据集合查询契约)，关闭案件见 [29.18](#2918-已实现的案件关闭契约)。
+部署前应用 `0017_m3_case_evidence.sql`，新增 `case_items` 及其约束。关联仅用于调查上下文，不授予 manifest/内容/导出权限，不改变对象期限、不建立 pin；原文读取继续走独立申请、批准和 EvidenceReadPort。保留锁存储与发布见 [12.9](12-evidence-capture-and-vault.md#129-案件证据保留锁存储与发布)，管理 HTTP 入口另行交付；集合浏览见 [29.17](#2917-已实现的案件证据集合查询契约)，关闭案件见 [29.18](#2918-已实现的案件关闭契约)。
 
 ## 29.17 已实现的案件证据集合查询契约
 

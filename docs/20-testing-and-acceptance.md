@@ -102,6 +102,10 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 ## 20.12 outbox 发布回归
 
+`scripts/test_postgres.sh` 的 `case_evidence_holds` 回归使用真实加密 vault、catalog 发布和案件成员事务，覆盖创建/释放幂等、作用域和目标状态、历史/活动容量、outbox 故障回滚及损坏事实拒绝。`pg_blocking_pids` 确认创建和清理两种锁顺序，检查活动锁阻止新删除意图、释放/到期恢复、多个案件共享对象和既有意图拒绝新锁；原始期限与过期拒读单独断言。测试只操作脚本拥有的数据库与独占临时文件。
+
+`cargo test -p xshield-worker --lib outbox::hold` 覆盖两类保留锁完整事件、未知/重复/缺失字段、主体与目标、创建/释放因果、规范 UTC 毫秒和 30 天期限。真实清理 producer 回归另创建并释放案件锁，同一发布测试消费实际生成的两类 hold 及六类删除事实；维护族的其余确认、查询和故障行为沿用下述检查。
+
 `cargo test -p xshield-worker --lib outbox` 覆盖三个 `case.*` 类型、`evidence.cataloged` 的两个真实 producer、`evidence.access.*` 的请求/批准/拒绝、五种身份事务形状、`grant.issued`、`response_grant.issued`、`share.issued` 以及六种清理事件。反例包含显式 nullable TTL、目标与请求/boot 绑定、匿名/认证初态、代际递增与 bigint 上限、上下文变化、重复凭证 kind、非法指纹、重复/未知键及 journal/outbox 来源隔离；响应资格另覆盖封闭 payload、批内序号/candidate_count、ID/动作引用、单字段/GET/2xx（排除 204）约束、HMAC/正文摘要、TTL 和规范 UTC 整秒与发行时间的一致性。通用资源资格另覆盖 event/boot、来源请求/策略一致、scoped action_ref、约束摘要和整秒/TTL 约束。分享另覆盖 event/boot/share 绑定、独立发行序号、来源资格与规则形状、GET/reusable_read、秘密字段拒绝和整秒/TTL 约束。清理另覆盖十种原因/outcome、独立 boot、显式 null request_id/confidence、artifact/cause、catalog/孤儿形状隔离、UTC 毫秒与失败尝试时钟倒退。索引摘要固定为确定性空置信度，不设置业务终态。
 
 `scripts/test_postgres.sh` 在专有临时数据库运行 `xshield-postgres --test outbox_delivery` 及 worker 的 `postgres_outbox_publishing` ignored 测试。存储层用显式行锁和数据库时间验证按族/tenant/site 领取、行/字节预算、`SKIP LOCKED` 并发、过期租约重领、旧 token/跨作用域拒绝、精确确认及有界重试。worker 使用真实 PostgreSQL 与受控 ClickHouse HTTP 响应，验证十六组按生产契约构造的合成 envelope 的索引字段/摘要、确认后不再领取、未适配族不被修改、索引失败后重试成功、插入前后完整性冲突、scope/aggregate 错绑和历史稀疏身份/通用资源资格/响应资格/分享行保留未确认状态。该回归不验证真实 ClickHouse DDL、去重和 active 视图。

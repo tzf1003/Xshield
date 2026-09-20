@@ -1,4 +1,4 @@
-//! Real retention producer transactions delivered through the production index.
+//! Real retention and hold transactions delivered through the production index.
 
 use super::{clickhouse_tests::with_clickhouse, *};
 use chrono::DateTime;
@@ -39,7 +39,7 @@ async fn exercise_delivery(pool: &PgPool, client: &Client) {
         &SiteId::parse("site_retention").unwrap(),
     );
     let records = sqlx::query("SELECT event_id, aggregate_ref, envelope FROM xshield.audit_outbox WHERE tenant_id=$1 AND site_id=$2 AND event_type=ANY($3::text[]) ORDER BY created_at,event_id")
-        .bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str()).bind(retention::EVENT_TYPES)
+        .bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str()).bind(EVIDENCE_RETENTION_EVENT_TYPES)
         .fetch_all(pool).await.unwrap();
     let expected: BTreeMap<String, Value> = records
         .iter()
@@ -57,7 +57,7 @@ async fn exercise_delivery(pool: &PgPool, client: &Client) {
             .values()
             .map(|event| event["event_type"].as_str().unwrap())
             .collect::<BTreeSet<_>>(),
-        retention::EVENT_TYPES.iter().copied().collect()
+        EVIDENCE_RETENTION_EVENT_TYPES.iter().copied().collect()
     );
     let untouched = unrelated_rows(pool).await;
     let store = PostgresIdentityStore::from_pool(pool.clone());
@@ -92,7 +92,7 @@ async fn exercise_delivery(pool: &PgPool, client: &Client) {
     }
     assert_eq!(published, expected.len());
     let acknowledged: i64 = sqlx::query_scalar("SELECT count(*) FROM xshield.audit_outbox WHERE tenant_id=$1 AND site_id=$2 AND event_type=ANY($3::text[]) AND published_at IS NOT NULL AND lease_token IS NULL AND lease_until IS NULL")
-        .bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str()).bind(retention::EVENT_TYPES).fetch_one(pool).await.unwrap();
+        .bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str()).bind(EVIDENCE_RETENTION_EVENT_TYPES).fetch_one(pool).await.unwrap();
     assert_eq!(usize::try_from(acknowledged).unwrap(), expected.len());
     assert_eq!(unrelated_rows(pool).await, untouched);
     assert_index_and_query(client, &scope, &expected).await;
@@ -117,12 +117,16 @@ async fn exercise_delivery(pool: &PgPool, client: &Client) {
             .unwrap();
         assert_eq!(actual, count);
     }
-    assert_scope_and_conflict(pool, client, &store, &scope, &config, &expected[&failed]).await;
+    let deletion = expected
+        .values()
+        .find(|event| event["payload"]["stage"] == "evidence_retention")
+        .unwrap();
+    assert_scope_and_conflict(pool, client, &store, &scope, &config, deletion).await;
 }
 
 async fn unrelated_rows(pool: &PgPool) -> Vec<(String, i32)> {
     sqlx::query_as("SELECT event_id,delivery_attempts FROM xshield.audit_outbox WHERE event_type <> ALL($1::text[]) ORDER BY event_id")
-        .bind(retention::EVENT_TYPES).fetch_all(pool).await.unwrap()
+        .bind(EVIDENCE_RETENTION_EVENT_TYPES).fetch_all(pool).await.unwrap()
 }
 
 async fn make_ready(pool: &PgPool, event_id: &str) {
@@ -163,7 +167,7 @@ async fn assert_index_and_query(
         assert_eq!(row.stage, event["payload"]["stage"]);
         assert_eq!(row.reason_code, event["payload"]["reason_code"]);
         assert_eq!(row.outcome, event["payload"]["outcome"]);
-        assert_eq!(row.producer_id, "evidence-retention");
+        assert_eq!(row.producer_id, event["producer_id"]);
         assert_eq!(row.tenant_id, scope.tenant_id().as_str());
         assert_eq!(row.site_id, scope.site_id().as_str());
         assert!(row.request_id.is_empty());

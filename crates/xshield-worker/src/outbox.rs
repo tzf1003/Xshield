@@ -26,6 +26,7 @@ mod delivery_tests;
 mod grant;
 #[cfg(test)]
 mod grant_producer_tests;
+mod hold;
 mod identity;
 mod response_grant;
 mod retention;
@@ -44,6 +45,16 @@ const EVIDENCE_ACCESS_EVENT_TYPES: &[&str] = &[
     "evidence.access.requested",
     "evidence.access.approved",
     "evidence.access.denied",
+];
+const EVIDENCE_RETENTION_EVENT_TYPES: &[&str] = &[
+    "evidence.purge_requested",
+    "evidence.deleted",
+    "evidence.purge_failed",
+    "evidence.orphan.purge_requested",
+    "evidence.orphan.deleted",
+    "evidence.orphan.purge_failed",
+    "evidence.hold.created",
+    "evidence.hold.released",
 ];
 
 #[derive(Clone, Copy)]
@@ -68,7 +79,7 @@ impl OutboxFamily {
             Self::Grant => grant::EVENT_TYPES,
             Self::ResponseGrant => response_grant::EVENT_TYPES,
             Self::ShareGrant => share_grant::EVENT_TYPES,
-            Self::EvidenceRetention => retention::EVENT_TYPES,
+            Self::EvidenceRetention => EVIDENCE_RETENTION_EVENT_TYPES,
         }
     }
 
@@ -90,6 +101,7 @@ pub(super) fn supports(event_type: &str) -> bool {
         || response_grant::EVENT_TYPES.contains(&event_type)
         || share_grant::EVENT_TYPES.contains(&event_type)
         || retention::EVENT_TYPES.contains(&event_type)
+        || hold::EVENT_TYPES.contains(&event_type)
         || matches!(
             event_type,
             "case.created"
@@ -298,7 +310,7 @@ pub async fn publish_share_grant_outbox_batch(
     publish_outbox_batch(store, client, scope, config, OutboxFamily::ShareGrant).await
 }
 
-/// Publishes a bounded batch of catalog and orphan evidence-deletion attempts.
+/// Publishes a bounded batch of evidence holds and catalog/orphan deletion facts.
 ///
 /// Intent, completion and failed attempts retain their original evidence and
 /// cause references. Index acknowledgement never performs physical removal,
@@ -467,6 +479,9 @@ struct CasePayload {
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
     if retention::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return retention::parse(event);
+    }
+    if hold::EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return hold::parse(event);
     }
     if grant::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return grant::parse(event);
