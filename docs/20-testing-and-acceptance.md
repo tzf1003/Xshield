@@ -100,6 +100,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `scripts/test_postgres.sh` 在专有临时数据库运行 `xshield-postgres --test outbox_delivery` 及 worker 的 `postgres_outbox_publishing` ignored 测试。存储层用显式行锁和数据库时间验证按族/tenant/site 领取、行/字节预算、`SKIP LOCKED` 并发、过期租约重领、旧 token/跨作用域拒绝、精确确认及有界重试。worker 使用真实 PostgreSQL 与受控 ClickHouse HTTP 响应，验证十四组按生产契约构造的合成 envelope 的索引字段/摘要、确认后不再领取、未适配族不被修改、索引失败后重试成功、插入前后完整性冲突、scope/aggregate 错绑和历史稀疏身份/响应资格/分享行保留未确认状态。该回归不验证真实 ClickHouse DDL、去重和 active 视图。
 
+同一脚本的 `grant_issue` 集成测试还覆盖通用 ResourceGrant 的实时 lease 边界：动作或 binding 在冻结命令时间之后到期时拒绝发行，跨等待到期不会留下账本或 outbox；精确重放若只改变 envelope 正文返回冲突。该测试使用数据库实时钟读取候选期限，避免把未来的请求时间误当作当前授权。
+
 `scripts/test_gateway_identity.sh` 通过真实网关、合成源站和专有 PostgreSQL 库执行匿名创建、登录、刷新与同主体上下文切换，保留原有认证、CAS、旧资格隔离及错误响应断言，同时检查生产 v3 envelope 与请求 ID。脚本结束前运行 `postgres_gateway_identity_outbox_publishing`，将实际生产的四种身份事务通过 worker 投递给受控 ClickHouse HTTP 服务，核对 RowBinary 索引、摘要、确认和重复运行空批次；该测试只接受脚本拥有的 `xshield_gateway_*` 数据库。
 
 配置 20.6 的 `XSHIELD_TEST_CLICKHOUSE_URL` 及测试账户后，同一网关脚本还会运行 `real_gateway_response_grant_outbox_delivery`。脚本产生两个响应、三个实际响应资格事件，其中一个响应含两个资源；测试把 envelope 与 PostgreSQL 响应证据、动作及资源资格行逐项比对，检查批内连续序号，再通过生产发布器写入真实 ClickHouse，读回两个底表与两个 active 视图，验证精确确认和重复运行空批次。该链路已在真实 PostgreSQL 与 ClickHouse 联调通过；入口仅接受脚本拥有的数据库，未配置 ClickHouse URL 时明确报告跳过。

@@ -112,8 +112,14 @@ impl PostgresIdentityStore {
             return Ok(GrantWriteOutcome::Ineligible);
         }
 
+        // Row-lock predicates may have run before waiting for another writer.
+        // A frozen request timestamp must never extend any authority lease.
+        if !lease_is_live(&mut transaction, expires_at).await? {
+            transaction.rollback().await?;
+            return Ok(GrantWriteOutcome::Ineligible);
+        }
         if let Some(outcome) =
-            existing_outcome(&mut transaction, &command, epoch, expires_at).await?
+            existing_outcome(&mut transaction, &command, epoch, now, expires_at).await?
         {
             transaction.rollback().await?;
             return Ok(outcome);
@@ -126,9 +132,24 @@ impl PostgresIdentityStore {
         }
 
         insert_grant_and_event(&mut transaction, &command, epoch, now, expires_at).await?;
+        // Inserts can wait on uniqueness/FK constraints. Discard both rows if
+        // that wait exhausted the requested lease before the commit boundary.
+        if !lease_is_live(&mut transaction, expires_at).await? {
+            transaction.rollback().await?;
+            return Ok(GrantWriteOutcome::Ineligible);
+        }
         transaction.commit().await?;
         Ok(GrantWriteOutcome::Created(command.draft.grant_id.clone()))
     }
+}
+
+async fn lease_is_live(connection: &mut PgConnection, expires_at: i64) -> Result<bool, StoreError> {
+    Ok(
+        sqlx::query_scalar("SELECT to_timestamp($1) > clock_timestamp()")
+            .bind(expires_at)
+            .fetch_one(connection)
+            .await?,
+    )
 }
 
 async fn lock_eligible_binding(
@@ -143,8 +164,9 @@ async fn lock_eligible_binding(
          WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
            AND principal_ref = $4 AND authorization_context_ref = $5
            AND auth_epoch = $6 AND status = 'active'
-           AND absolute_expires_at > to_timestamp($7)
+           AND absolute_expires_at > GREATEST(to_timestamp($7), clock_timestamp())
            AND absolute_expires_at >= to_timestamp($8)
+           AND to_timestamp($8) > clock_timestamp()
          FOR UPDATE",
     )
     .bind(command.snapshot.tenant_id().as_str())
@@ -180,8 +202,10 @@ async fn action_is_eligible(
            AND action.operation_id = $7 AND action.field_profile = $8
            AND action.policy_revision = $9
            AND action.status = 'active' AND policy.status = 'active'
-           AND action.expires_at > to_timestamp($10)
-           AND action.expires_at >= to_timestamp($11)",
+           AND action.expires_at > GREATEST(to_timestamp($10), clock_timestamp())
+           AND action.expires_at >= to_timestamp($11)
+           AND to_timestamp($11) > clock_timestamp()
+         FOR SHARE OF action, policy",
     )
     .bind(command.snapshot.tenant_id().as_str())
     .bind(command.snapshot.site_id().as_str())
@@ -203,15 +227,30 @@ async fn existing_outcome(
     connection: &mut PgConnection,
     command: &GrantPersistence<'_>,
     epoch: i64,
+    issued_at: i64,
     expires_at: i64,
 ) -> Result<Option<GrantWriteOutcome>, StoreError> {
     let existing = sqlx::query(
-        "SELECT grant_id, binding_id, auth_epoch, action_ref, resource_type,
-                resource_key_hmac, operation_id, view_id, constraints,
-                source_event_id, policy_revision,
-                extract(epoch FROM expires_at)::bigint AS expires_at
-         FROM xshield.resource_grants
-         WHERE tenant_id = $1 AND site_id = $2 AND issuance_key = $3",
+        "SELECT resource_grant.grant_id, resource_grant.binding_id, resource_grant.auth_epoch,
+                resource_grant.action_ref, resource_grant.resource_type,
+                resource_grant.resource_key_hmac, resource_grant.operation_id,
+                resource_grant.view_id, resource_grant.constraints,
+                resource_grant.source_event_id, resource_grant.policy_revision,
+                resource_grant.status,
+                extract(epoch FROM resource_grant.issued_at)::bigint AS issued_at,
+                extract(epoch FROM resource_grant.expires_at)::bigint AS expires_at,
+                outbox.envelope AS stored_envelope,
+                outbox.aggregate_ref AS stored_aggregate_ref,
+                outbox.event_type AS stored_event_type
+         FROM xshield.resource_grants resource_grant
+         LEFT JOIN xshield.audit_outbox outbox
+           ON outbox.tenant_id = resource_grant.tenant_id
+          AND outbox.site_id = resource_grant.site_id
+          AND outbox.event_id = resource_grant.source_event_id
+         WHERE resource_grant.tenant_id = $1
+           AND resource_grant.site_id = $2
+           AND resource_grant.issuance_key = $3
+         FOR SHARE OF resource_grant",
     )
     .bind(command.snapshot.tenant_id().as_str())
     .bind(command.snapshot.site_id().as_str())
@@ -223,6 +262,17 @@ async fn existing_outcome(
     };
     let grant_id = GrantId::parse(row.try_get::<&str, _>("grant_id")?)
         .map_err(|_| StoreError::CorruptData("grant_id"))?;
+    if row.try_get::<&str, _>("status")? != "active" {
+        return Ok(Some(GrantWriteOutcome::Ineligible));
+    }
+    let stored_envelope = row
+        .try_get::<Option<Value>, _>("stored_envelope")?
+        .ok_or(StoreError::CorruptData("grant_outbox"))?;
+    if row.try_get::<Option<&str>, _>("stored_aggregate_ref")? != Some(grant_id.as_str())
+        || row.try_get::<Option<&str>, _>("stored_event_type")? != Some("grant.issued")
+    {
+        return Err(StoreError::CorruptData("grant_outbox"));
+    }
     let same = row.try_get::<&str, _>("binding_id")? == command.snapshot.binding_id().as_str()
         && row.try_get::<i64, _>("auth_epoch")? == epoch
         && row.try_get::<&str, _>("action_ref")? == command.action_ref.as_str()
@@ -234,7 +284,9 @@ async fn existing_outcome(
         && row.try_get::<Value, _>("constraints")? == *command.constraints
         && row.try_get::<&str, _>("source_event_id")? == command.event_id.as_str()
         && row.try_get::<&str, _>("policy_revision")? == command.draft.policy_revision.as_str()
-        && row.try_get::<i64, _>("expires_at")? == expires_at;
+        && row.try_get::<i64, _>("issued_at")? == issued_at
+        && row.try_get::<i64, _>("expires_at")? == expires_at
+        && &stored_envelope == command.event_envelope;
     Ok(Some(if same {
         GrantWriteOutcome::Existing(grant_id)
     } else {
@@ -252,7 +304,7 @@ async fn active_grant_count(
         "SELECT count(*) FROM xshield.resource_grants
          WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
            AND auth_epoch = $4 AND status = 'active'
-           AND expires_at > to_timestamp($5)",
+           AND expires_at > GREATEST(to_timestamp($5), clock_timestamp())",
     )
     .bind(command.snapshot.tenant_id().as_str())
     .bind(command.snapshot.site_id().as_str())

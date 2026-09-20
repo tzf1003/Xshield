@@ -188,8 +188,20 @@ async fn issue(
     event_id: &EventId,
     capacity: u32,
 ) -> Result<GrantWriteOutcome, StoreError> {
-    let constraints = json!({});
     let envelope = json!({"schema_version": 3, "event_type": "grant.issued"});
+    issue_with_envelope(store, fixture, draft, event_id, capacity, NOW, &envelope).await
+}
+
+async fn issue_with_envelope(
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    draft: &GrantDraft,
+    event_id: &EventId,
+    capacity: u32,
+    now: u64,
+    envelope: &serde_json::Value,
+) -> Result<GrantWriteOutcome, StoreError> {
+    let constraints = json!({});
     store
         .issue_grant(GrantPersistence::new(
             &fixture.snapshot,
@@ -197,8 +209,8 @@ async fn issue(
             &fixture.action_ref,
             &constraints,
             event_id,
-            &envelope,
-            UnixSeconds::new(NOW),
+            envelope,
+            UnixSeconds::new(now),
             capacity,
         )?)
         .await
@@ -352,6 +364,61 @@ async fn assert_resource_grant_reads(
     ));
 }
 
+async fn assert_live_expiry_rejected(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    // A frozen command time must not keep a grant eligible after its live
+    // binding/action lease has elapsed while the request was in flight.
+    sqlx::query(
+        "UPDATE xshield.auth_bindings SET auth_epoch = 4,
+                absolute_expires_at = clock_timestamp() + interval '1 second'
+         WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.binding_id.as_str())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE xshield.ui_actions SET status = 'active',
+                issued_at = clock_timestamp() - interval '1 second',
+                expires_at = clock_timestamp() + interval '1 second'
+         WHERE tenant_id = $1 AND site_id = $2 AND action_ref = $3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.action_ref.as_str())
+    .execute(pool)
+    .await
+    .unwrap();
+    let current_epoch: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let live_expiry = u64::try_from(current_epoch + 1).unwrap();
+    let mut expiring_draft = draft(231, "issue-live-expiry", '7');
+    expiring_draft.expires_at = UnixSeconds::new(live_expiry);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        issue_with_envelope(
+            store,
+            fixture,
+            &expiring_draft,
+            &event_id(232),
+            2,
+            u64::try_from(current_epoch - 10).unwrap(),
+            &json!({"schema_version": 3, "event_type": "grant.issued"}),
+        )
+        .await
+        .unwrap(),
+        GrantWriteOutcome::Ineligible
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
 async fn grant_issue_is_atomic_idempotent_and_capacity_bounded() {
@@ -381,6 +448,25 @@ async fn grant_issue_is_atomic_idempotent_and_capacity_bounded() {
             .await
             .unwrap(),
         GrantWriteOutcome::Existing(first_draft.grant_id.clone())
+    );
+    let changed_envelope = json!({
+        "schema_version": 3,
+        "event_type": "grant.issued",
+        "payload": "changed"
+    });
+    assert_eq!(
+        issue_with_envelope(
+            &store,
+            &fixture,
+            &first_draft,
+            &first_event,
+            1,
+            NOW,
+            &changed_envelope,
+        )
+        .await
+        .unwrap(),
+        GrantWriteOutcome::Conflict
     );
     assert_resource_grant_reads(&store, &fixture, &first_draft).await;
     assert_eq!(
@@ -420,4 +506,6 @@ async fn grant_issue_is_atomic_idempotent_and_capacity_bounded() {
         .unwrap(),
         GrantWriteOutcome::Ineligible
     );
+
+    assert_live_expiry_rejected(&pool, &store, &fixture).await;
 }
