@@ -575,6 +575,46 @@
         }
       }
     },
+    "utc_millisecond": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "retention_payload": {
+      "type": "object",
+      "required": ["stage", "outcome", "reason_code", "proof_kind", "confidence", "confidence_status", "artifact_id"],
+      "properties": {
+        "stage": {"enum": ["evidence_retention", "evidence_orphan_retention"]},
+        "outcome": {"enum": ["PASS", "ERROR"]},
+        "reason_code": {"$ref": "#/$defs/scoped_name"},
+        "proof_kind": {"const": "deterministic"},
+        "confidence": {"type": "null"},
+        "confidence_status": {"const": "not_applicable"},
+        "artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"}
+      }
+    },
+    "catalog_retention": {
+      "allOf": [{"$ref": "#/$defs/retention_payload"}],
+      "unevaluatedProperties": false,
+      "required": ["source_request_id", "expires_at", "retained_metadata"],
+      "properties": {
+        "stage": {"const": "evidence_retention"},
+        "source_request_id": {"$ref": "#/$defs/identity_request_id"},
+        "expires_at": {"$ref": "#/$defs/utc_millisecond"},
+        "retained_metadata": {"const": true}
+      }
+    },
+    "orphan_retention": {
+      "allOf": [{"$ref": "#/$defs/retention_payload"}],
+      "unevaluatedProperties": false,
+      "required": ["authenticated_manifest"],
+      "properties": {
+        "stage": {"const": "evidence_orphan_retention"},
+        "authenticated_manifest": {"type": "boolean"}
+      }
+    },
     "utc_second": {
       "type": "string",
       "minLength": 20,
@@ -790,6 +830,125 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {"enum": ["evidence.purge_requested", "evidence.deleted", "evidence.purge_failed", "evidence.orphan.purge_requested", "evidence.orphan.deleted", "evidence.orphan.purge_failed"]}
+        },
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Committed evidence-retention outbox metadata only. Rust additionally requires equal occurred_at/observed_at, span_id equal to the trace prefix, artifact/evidence_refs/aggregate equality, a non-self cause, duplicate-key rejection and exact leased row/source binding. It preserves the existing optional-null integrity hash fields. Maintenance events are not business request terminals and do not grant content access.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"type": "null"},
+          "trace_id": {"maxLength": 32},
+          "span_id": {"maxLength": 16},
+          "producer_id": {"const": "evidence-retention"},
+          "producer_boot_id": {
+            "type": "string",
+            "maxLength": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "producer_seq": {"const": 1},
+          "request_seq": {"const": 1},
+          "occurred_at": {"$ref": "#/$defs/utc_millisecond"},
+          "observed_at": {"$ref": "#/$defs/utc_millisecond"},
+          "policy_revision": {"const": "evidence-retention-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/model_artifact_ref", "type": "string"}
+          },
+          "cause_event_ids": {
+            "maxItems": 1,
+            "items": {
+              "type": "string",
+              "maxLength": 39,
+              "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "sensitivity": {"const": "RESTRICTED"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        },
+        "allOf": [{
+          "if": {"properties": {"event_type": {"enum": ["evidence.purge_requested", "evidence.orphan.purge_requested"]}}},
+          "then": {"properties": {"cause_event_ids": {"maxItems": 0}}},
+          "else": {"properties": {"cause_event_ids": {"minItems": 1}}}
+        }],
+        "oneOf": [
+          {
+            "properties": {
+              "event_type": {"const": "evidence.purge_requested"},
+              "payload": {
+                "$ref": "#/$defs/catalog_retention",
+                "properties": {"outcome": {"const": "PASS"}, "reason_code": {"const": "EVIDENCE_PURGE_REQUESTED"}}
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "evidence.deleted"},
+              "payload": {
+                "$ref": "#/$defs/catalog_retention",
+                "properties": {"outcome": {"const": "PASS"}, "reason_code": {"enum": ["EVIDENCE_DELETED", "EVIDENCE_DELETE_ALREADY_ABSENT"]}}
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "evidence.purge_failed"},
+              "payload": {
+                "$ref": "#/$defs/catalog_retention",
+                "properties": {"outcome": {"const": "ERROR"}, "reason_code": {"enum": ["EVIDENCE_PURGE_REJECTED", "EVIDENCE_PURGE_UNAVAILABLE"]}}
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "evidence.orphan.purge_requested"},
+              "payload": {
+                "$ref": "#/$defs/orphan_retention",
+                "properties": {"outcome": {"const": "PASS"}, "reason_code": {"const": "EVIDENCE_ORPHAN_PURGE_REQUESTED"}}
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "evidence.orphan.deleted"},
+              "payload": {
+                "$ref": "#/$defs/orphan_retention",
+                "properties": {"outcome": {"const": "PASS"}, "reason_code": {"enum": ["EVIDENCE_ORPHAN_DELETED", "EVIDENCE_ORPHAN_DELETE_ALREADY_ABSENT"]}}
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "evidence.orphan.purge_failed"},
+              "payload": {
+                "$ref": "#/$defs/orphan_retention",
+                "properties": {"outcome": {"const": "ERROR"}, "reason_code": {"enum": ["EVIDENCE_ORPHAN_PURGE_REJECTED", "EVIDENCE_ORPHAN_PURGE_UNAVAILABLE"]}}
+              }
+            }
+          }
+        ]
+      }
+    },
     {
       "if": {
         "properties": {"event_type": {"const": "grant.issued"}},

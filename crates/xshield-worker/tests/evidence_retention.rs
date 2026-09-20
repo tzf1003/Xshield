@@ -235,6 +235,13 @@ async fn expired_ciphertext_cleanup_is_scoped_audited_exclusive_and_recoverable(
         event_count(&pool, "evidence.orphan.purge_requested").await,
         1
     );
+    // Inject a storage failure result before removal: the intent remains
+    // retryable, and its failure must be publishable alongside the later success.
+    store
+        .finish_evidence_orphan_purge(&orphan_jobs[0], EvidenceOrphanPurgeResult::Unavailable)
+        .await
+        .unwrap();
+    assert_eq!(event_count(&pool, "evidence.orphan.purge_failed").await, 1);
     let orphan_removed = vault.purge_orphan(&tenant, &site, &candidate).unwrap();
     assert_eq!(orphan_removed, EvidencePurgeOutcome::Removed);
     sqlx::query(

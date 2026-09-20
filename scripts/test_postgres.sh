@@ -72,6 +72,8 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-worker --lib postgres_outbox_publishing -- --ignored
 if [[ -n "${XSHIELD_TEST_CLICKHOUSE_URL:-}" ]]; then
     XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+        cargo test -p xshield-worker --lib real_retention_outbox_clickhouse_delivery -- --ignored
+    XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
         cargo test -p xshield-worker --lib real_outbox_clickhouse_delivery -- --ignored
 else
     printf '%s\n' 'ClickHouse outbox integration skipped: XSHIELD_TEST_CLICKHOUSE_URL is not configured.'

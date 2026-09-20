@@ -102,4 +102,6 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 
 保留 catalog tombstone、manifest JSON/HMAC 和孤儿意图表作为恢复和调查元数据；只有本地目录中的文件继续占用网关的 100000 文件上限，达到上限前需安排元数据保留功能迭代。当前清理不涵盖远端副本、备份与已导出内容。案件或原文访问批准不延长对象期限；需要案件 pin 的站点在该独立能力完成前不启用此删除流程。损坏对象需隔离调查，若连续失败填满批次，先处理这些对象再继续维护。复用既有 UUID/SQLx 和内部 Apache-2.0 crates，未引入新第三方依赖；更新策略沿用 workspace 锁文件。
 
-真实 PostgreSQL 与 CLI 测试覆盖批量边界、租户/站点/key 隔离、目录锁、意图和完成 outbox 故障回滚、删除后重启、幂等完成、损坏密文保留与重试、孤儿宽限/审计/删除、篡改 catalog 提前期限拒绝；库单测覆盖未到期、错误密钥、错误作用域、符号链接、HMAC、摘要和 partial-sidecar 保留。
+清理事实通过 `XSHIELD_OUTBOX_FAMILY=evidence_retention` 独立发布：六类事件进入 ClickHouse 的 `evidence_retention` 或 `evidence_orphan_retention` 阶段，可按事件 ID、类型、原因或阶段进行有界脱敏检索，结果保留 artifact 与 cause 引用。原请求 ID 只保留在 catalog 事件受限载荷中，维护事件的 request_id 为 null；发布失败按既有 outbox 租约规则重试，不再次执行物理清理。契约、配置和升级见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)。
+
+真实 PostgreSQL 与 CLI 测试覆盖批量边界、租户/站点/key 隔离、目录锁、意图和完成 outbox 故障回滚、删除后重启、幂等完成、损坏密文保留与重试、孤儿宽限/审计/删除、篡改 catalog 提前期限拒绝；库单测覆盖未到期、错误密钥、错误作用域、符号链接、HMAC、摘要和 partial-sidecar 保留。配置 ClickHouse 后，同一脚本继续把实际清理生产者的六类事件投递至真实生产 DDL 并验证脱敏查询、精确确认、重投去重、故障恢复及内容冲突，执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。

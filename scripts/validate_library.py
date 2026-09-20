@@ -131,7 +131,7 @@ def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: d
         check('model_capture:' + label, not valid(schemas['model-call'], invalid))
 
 def check_outbox_contracts(schemas: dict) -> None:
-    """Exercise the implemented catalog and identity outbox wire shapes."""
+    """Exercise the implemented catalog, retention and identity outbox shapes."""
     artifact = 'artifact_018f2a3b-4c5d-7000-8000-000000000005'
     base = {
         'schema_version': 3, 'event_id': 'ev_018f2a3b-4c5d-7000-8000-000000000001',
@@ -166,7 +166,126 @@ def check_outbox_contracts(schemas: dict) -> None:
         event.update(fields)
         check('outbox:evidence_catalog_reject_' + label,
               not valid(schemas['audit-event'], event))
+    check_retention_outbox_contracts(schemas['audit-event'], base)
     check_identity_outbox_contracts(schemas['audit-event'], base)
+
+def check_retention_outbox_contracts(schema: dict, base: dict) -> None:
+    """Check six maintenance events; Rust owns equality and source/row binding."""
+    variants = {
+        'evidence.purge_requested': ['EVIDENCE_PURGE_REQUESTED'],
+        'evidence.deleted': ['EVIDENCE_DELETED', 'EVIDENCE_DELETE_ALREADY_ABSENT'],
+        'evidence.purge_failed': ['EVIDENCE_PURGE_REJECTED', 'EVIDENCE_PURGE_UNAVAILABLE'],
+        'evidence.orphan.purge_requested': ['EVIDENCE_ORPHAN_PURGE_REQUESTED'],
+        'evidence.orphan.deleted': ['EVIDENCE_ORPHAN_DELETED', 'EVIDENCE_ORPHAN_DELETE_ALREADY_ABSENT'],
+        'evidence.orphan.purge_failed': ['EVIDENCE_ORPHAN_PURGE_REJECTED', 'EVIDENCE_ORPHAN_PURGE_UNAVAILABLE'],
+    }
+    for kind, reasons in variants.items():
+        orphan = kind.startswith('evidence.orphan.')
+        intent = kind.endswith('purge_requested')
+        event = copy.deepcopy(base)
+        event.update(event_type=kind, producer_id='evidence-retention', request_id=None,
+                     request_seq=1, policy_revision='evidence-retention-v1',
+                     cause_event_ids=[] if intent else base['cause_event_ids'])
+        event['payload'] = {
+            'stage': 'evidence_orphan_retention' if orphan else 'evidence_retention',
+            'outcome': 'ERROR' if kind.endswith('purge_failed') else 'PASS',
+            'reason_code': reasons[0], 'artifact_id': base['payload']['artifact_id'],
+            'proof_kind': 'deterministic', 'confidence': None,
+            'confidence_status': 'not_applicable',
+        }
+        if orphan:
+            event['payload']['authenticated_manifest'] = True
+        else:
+            event['payload'].update(source_request_id=base['request_id'],
+                                    expires_at='2026-09-18T00:00:00.123Z', retained_metadata=True)
+        prefix = 'outbox:retention:' + kind + ':'
+        for reason in reasons:
+            variant = copy.deepcopy(event)
+            variant['payload']['reason_code'] = reason
+            check(prefix + reason, valid(schema, variant))
+            for other_kind in variants:
+                if other_kind == kind:
+                    continue
+                mismatch = copy.deepcopy(variant)
+                mismatch['event_type'] = other_kind
+                check(prefix + reason + '_reject_' + other_kind, not valid(schema, mismatch))
+
+        for path in ['', 'payload', 'integrity']:
+            target = event[path] if path else event
+            for field in target:
+                missing = copy.deepcopy(event)
+                del (missing[path] if path else missing)[field]
+                optional_hash = path == 'integrity' and field in ['previous_hash', 'event_hash']
+                check(prefix + 'missing_' + path + '_' + field,
+                      valid(schema, missing) == optional_hash)
+                wrong_type = copy.deepcopy(event)
+                (wrong_type[path] if path else wrong_type)[field] = (
+                    'invalid' if isinstance(target[field], list) else [])
+                check(prefix + 'wrong_type_' + path + '_' + field, not valid(schema, wrong_type))
+            unknown = copy.deepcopy(event)
+            (unknown[path] if path else unknown)['extra'] = None
+            check(prefix + 'unknown_' + path, not valid(schema, unknown))
+
+        for field, value in [
+            ('producer_id', 'gateway-evidence-catalog'), ('producer_boot_id', base['request_id']),
+            ('producer_boot_id', '018f2a3b-4c5d-4000-8000-000000000006'),
+            ('producer_boot_id', base['producer_boot_id'].upper()),
+            ('request_id', base['request_id']), ('producer_seq', 2), ('request_seq', 2),
+            ('sensitivity', 'SENSITIVE'), ('policy_revision', 'policy-r1'),
+            ('example_only', True), ('event_id', base['request_id']),
+            ('tenant_id', 'invalid scope'), ('site_id', 'invalid scope'),
+            ('trace_id', base['trace_id'] + '\n'), ('span_id', base['span_id'] + '\n'),
+            ('evidence_refs', []), ('evidence_refs', [base['request_id']]),
+            ('evidence_refs', base['evidence_refs'] * 2),
+            ('cause_event_ids', base['cause_event_ids'] if intent else []),
+            ('cause_event_ids', base['cause_event_ids'] * 2),
+            ('cause_event_ids', base['evidence_refs']), ('connection_id', None), ('agent_run_id', None),
+        ]:
+            invalid = copy.deepcopy(event)
+            invalid[field] = value
+            check(prefix + 'reject_envelope_' + field + '_' + str(value), not valid(schema, invalid))
+        for field, value in [
+            ('stage', 'request_completed'), ('outcome', 'DENY'), ('reason_code', 'EVIDENCE_UNKNOWN'),
+            ('outcome', 'PASS' if kind.endswith('purge_failed') else 'ERROR'),
+            ('proof_kind', 'model'), ('confidence', 0.0), ('confidence_status', 'provided'),
+            ('artifact_id', None), ('artifact_id', base['request_id']),
+            ('artifact_id', base['payload']['artifact_id'] + '\n'),
+            ('body', 'synthetic'), ('storage_locator', '/private/synthetic.xev'),
+            ('source_request_id', base['request_id'] if orphan else base['payload']['artifact_id']),
+            ('retained_metadata', True if orphan else False),
+        ]:
+            invalid = copy.deepcopy(event)
+            invalid['payload'][field] = value
+            check(prefix + 'reject_payload_' + field + '_' + str(value), not valid(schema, invalid))
+        if orphan:
+            manifest_absent = copy.deepcopy(event)
+            manifest_absent['payload']['authenticated_manifest'] = False
+            check(prefix + 'unauthenticated_manifest', valid(schema, manifest_absent))
+        else:
+            crossed = copy.deepcopy(event)
+            crossed['payload']['authenticated_manifest'] = True
+            check(prefix + 'reject_orphan_field', not valid(schema, crossed))
+        for field, value in [('state', 'sealed'), ('previous_hash', 'a' * 64), ('event_hash', 'b' * 64)]:
+            invalid = copy.deepcopy(event)
+            invalid['integrity'][field] = value
+            check(prefix + 'reject_integrity_' + field, not valid(schema, invalid))
+        for timestamp in ['invalid', '2026-09-19T00:00:00Z', '2026-09-19T00:00:00.123456Z',
+                          '2026-09-19T00:00:00.123+00:00', '2026-09-19T08:00:00.123+08:00',
+                          '2026-09-19T00:00:00.123Z\n']:
+            for field in ['occurred_at', 'observed_at'] + ([] if orphan else ['expires_at']):
+                invalid = copy.deepcopy(event)
+                (invalid['payload'] if field == 'expires_at' else invalid)[field] = timestamp
+                check(prefix + 'timestamp_' + field + '_' + timestamp, not valid(schema, invalid))
+
+        # Schema checks field shapes; the Rust publisher rejects these unequal
+        # evidence, trace/span, clock and self-cause values before indexing.
+        mismatch = copy.deepcopy(event)
+        mismatch['evidence_refs'] = ['artifact_018f2a3b-4c5d-7000-8000-000000000008']
+        mismatch['span_id'] = 'a' * 16
+        mismatch['observed_at'] = '2026-09-19T00:00:00.124Z'
+        if not intent:
+            mismatch['cause_event_ids'] = [event['event_id']]
+        check(prefix + 'rust_only_cross_field_checks', valid(schema, mismatch))
 
 def check_identity_outbox_contracts(schema: dict, base: dict) -> None:
     """Check JSON Schema boundaries; cross-field state transitions stay in Rust."""

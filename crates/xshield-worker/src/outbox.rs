@@ -2,7 +2,7 @@
 //!
 //! Outbox envelopes are a different producer contract from sealed journal
 //! records. This module only accepts complete case, catalog, access, identity,
-//! response-grant, share-grant, and generic grant envelopes emitted by their typed producers.
+//! response-grant, share-grant, generic grant and retention envelopes from their producers.
 //! Other families remain unsupported until their producers expose validated fields.
 
 use super::{
@@ -28,6 +28,9 @@ mod grant;
 mod grant_producer_tests;
 mod identity;
 mod response_grant;
+mod retention;
+#[cfg(test)]
+mod retention_delivery_tests;
 mod share_grant;
 
 const MAX_OUTBOX_EVENT_BYTES: usize = 64 * 1024;
@@ -52,6 +55,7 @@ enum OutboxFamily {
     Grant,
     ResponseGrant,
     ShareGrant,
+    EvidenceRetention,
 }
 
 impl OutboxFamily {
@@ -64,13 +68,14 @@ impl OutboxFamily {
             Self::Grant => grant::EVENT_TYPES,
             Self::ResponseGrant => response_grant::EVENT_TYPES,
             Self::ShareGrant => share_grant::EVENT_TYPES,
+            Self::EvidenceRetention => retention::EVENT_TYPES,
         }
     }
 
     const fn aggregate_field(self) -> &'static str {
         match self {
             Self::Case => "case_id",
-            Self::EvidenceCatalog => "artifact_id",
+            Self::EvidenceCatalog | Self::EvidenceRetention => "artifact_id",
             Self::EvidenceAccess => "access_request_id",
             Self::Identity => "binding_id",
             Self::Grant | Self::ResponseGrant => "grant_id",
@@ -84,6 +89,7 @@ pub(super) fn supports(event_type: &str) -> bool {
         || grant::EVENT_TYPES.contains(&event_type)
         || response_grant::EVENT_TYPES.contains(&event_type)
         || share_grant::EVENT_TYPES.contains(&event_type)
+        || retention::EVENT_TYPES.contains(&event_type)
         || matches!(
             event_type,
             "case.created"
@@ -292,6 +298,31 @@ pub async fn publish_share_grant_outbox_batch(
     publish_outbox_batch(store, client, scope, config, OutboxFamily::ShareGrant).await
 }
 
+/// Publishes a bounded batch of catalog and orphan evidence-deletion attempts.
+///
+/// Intent, completion and failed attempts retain their original evidence and
+/// cause references. Index acknowledgement never performs physical removal,
+/// changes retention, or creates content-read authority.
+///
+/// # Errors
+/// Returns the same scoped lease, event and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_evidence_retention_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(
+        store,
+        client,
+        scope,
+        config,
+        OutboxFamily::EvidenceRetention,
+    )
+    .await
+}
+
 async fn publish_outbox_batch(
     store: &PostgresIdentityStore,
     client: &Client,
@@ -434,6 +465,9 @@ struct CasePayload {
 }
 
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if retention::EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return retention::parse(event);
+    }
     if grant::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return grant::parse(event);
     }

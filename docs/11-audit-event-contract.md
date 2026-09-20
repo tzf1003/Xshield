@@ -91,7 +91,7 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 `xshield-outbox-worker` 是一次有界发布 pass，按固定 tenant/site 作用域从 `xshield.audit_outbox` 领取最多 256 行及 64 MiB JSON 字节，并以 PostgreSQL `clock_timestamp()` 设置最长一小时租约。候选行使用 `FOR UPDATE SKIP LOCKED`；ClickHouse 网络操作不持有 PostgreSQL 事务锁。确认必须携带同一 event_id、作用域和未过期 lease token，旧 token 或跨作用域确认统一拒绝。发布成功后才写 `published_at`；失败释放租约、保存 `OUTBOX_INVALID_EVENT`、`OUTBOX_INDEX_UNAVAILABLE` 或 `OUTBOX_INTEGRITY_CONFLICT` 并按有界延迟重试。
 
-部署先应用 `0019_m3_outbox_delivery.sql`，然后运行 `xshield-outbox-worker TENANT_ID SITE_ID`。`XSHIELD_OUTBOX_FAMILY` 可设为 `case`（默认）、`evidence_catalog`、`evidence_access`、`identity`、`grant`、`response_grant` 或 `share_grant`，每次只领取该族。数据库配置为 `XSHIELD_DATABASE_URL`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`；索引配置为 `XSHIELD_CLICKHOUSE_URL/DATABASE/USER/PASSWORD` 和可选 `XSHIELD_CLICKHOUSE_TABLE`（默认 `audit_events`）。秘密只通过部署环境注入。
+部署先应用 `0019_m3_outbox_delivery.sql`，然后运行 `xshield-outbox-worker TENANT_ID SITE_ID`。`XSHIELD_OUTBOX_FAMILY` 可设为 `case`（默认）、`evidence_catalog`、`evidence_access`、`evidence_retention`、`identity`、`grant`、`response_grant` 或 `share_grant`，每次只领取该族。数据库配置为 `XSHIELD_DATABASE_URL`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`；索引配置为 `XSHIELD_CLICKHOUSE_URL/DATABASE/USER/PASSWORD` 和可选 `XSHIELD_CLICKHOUSE_TABLE`（默认 `audit_events`）。秘密只通过部署环境注入。
 
 必须配置 `XSHIELD_AUDIT_METADATA_RETENTION_DAYS`（1–3650）、`XSHIELD_OUTBOX_MAX_EVENTS`（1–256）、`XSHIELD_OUTBOX_MAX_BYTES`（1–67108864）、`XSHIELD_OUTBOX_LEASE_SECONDS` 和 `XSHIELD_OUTBOX_RETRY_SECONDS`（均为 1–3600）。一条 envelope 另受 64 KiB 解析上限约束。该命令执行一次后退出；调度器按固定作用域和族再次运行，遇错误保留退出失败供告警。当前 pass 在首个错误处停止，已领取的后续行等待租约到期再处理。
 
@@ -103,7 +103,11 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 `share_grant` 精确领取 `share.issued`，只接受 `gateway-share-grant` 的完整 v3 envelope，`aggregate_ref` 必须等于 payload 的 `share_id`，share ID 的 UUID 部分必须等于 event ID。封闭 payload 包含 `share_grant/PASS/SHARE_ISSUED`、分享 ID、发行者 binding/epoch/来源 grant/规则、来源与目标 operation/view、资源类型及 HMAC、`GET/reusable_read` 和发行/到期秒数；强类型 ID、scoped name、lowercase hex、正 bigint epoch、1–86400 秒 TTL 均重新校验。凭证、凭证指纹、issuance key 和原始资源值不进入事件。
 
-七族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。身份族现同时严格接收 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed` 与 `binding.revoked`；撤销事件只记录非秘密主体/上下文引用、epoch/generation 与 `explicit_logout` 原因，凭证仍保持在敏感载荷之外。
+`evidence_retention` 精确领取 `evidence.purge_requested`、`evidence.deleted`、`evidence.purge_failed` 及对应三个 `evidence.orphan.*` 类型，只接受 `evidence-retention` / `evidence-retention-v1` 的完整 v3 envelope。每条事件有独立 UUIDv7 boot，两个序号均为 1，`request_id` 显式为 null；occurred_at/observed_at 为相同的规范 UTC 毫秒时间，trace 前 16 位等于 span。catalog payload 固定 `evidence_retention` 阶段，保留 source_request_id、原始 expires_at 和 `retained_metadata=true`；孤儿 payload 固定 `evidence_orphan_retention` 阶段及 authenticated_manifest 布尔值。两种封闭载荷分别校验，artifact 与唯一 evidence_ref 及 aggregate_ref 一致。意图无 cause，完成或失败恰有一个不同于自身的意图事件引用；十种稳定原因与事件/outcome 精确绑定。引用检查验证事件形状，不对跨存储历史完整性作证明。摘要为 `confidence=null/not_applicable`、`is_terminal=0`，分类为 `RESTRICTED`；维护事件按事件 ID、类型、原因或阶段查询，脱敏结果保留 artifact/cause 引用且不返回 payload。事件只描述删除事务与尝试，不恢复内容、延长原文权限或证明远端副本已删除。
+
+八族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。身份族现同时严格接收 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed` 与 `binding.revoked`；撤销事件只记录非秘密主体/上下文引用、epoch/generation 与 `explicit_logout` 原因，凭证仍保持在敏感载荷之外。
+
+升级后可为既有完整清理事件启用 `evidence_retention` 调度，无需新增迁移或依赖；索引保留期仍从原始 occurred_at 起算，积压中已超期事件在 active 视图不可见。所有 v3 来源均要求 envelope 显式包含 request_id（可为 null，具体族另有限制），缺失字段的历史畸形记录按既有错误/水位规则保留待处理，不补造请求身份。
 
 身份事务使用 request_id 作为独立 producer_boot_id，producer_seq/request_seq 均为 1，保留原网关请求 trace 与配置修订；两种序列不推进 journal 的序列，也不表示跨来源全序。当前时间线按 `(request_seq,event_id)` 排序，调查时应结合生产者与发生时间理解身份事件，不能以该位置推断源站先后。`identity_lifecycle` 的 PASS 是事务结果，`is_terminal=0`，不推断业务执行状态；确定性结果保持 `confidence=null/not_applicable`。主体/上下文引用与新旧凭证 HMAC 保留在 `SENSITIVE` payload_json，脱敏查询摘要不返回该载荷，普通检索不授予认证权力。
 

@@ -6,13 +6,13 @@ use xshield_core::domain::{SiteId, TenantId};
 use xshield_postgres::{OutboxLeaseConfig, OutboxScope, PostgresIdentityStore};
 use xshield_worker::{
     OutboxPublisherConfig, publish_case_outbox_batch, publish_evidence_access_outbox_batch,
-    publish_evidence_catalog_outbox_batch, publish_grant_outbox_batch,
-    publish_identity_outbox_batch, publish_response_grant_outbox_batch,
+    publish_evidence_catalog_outbox_batch, publish_evidence_retention_outbox_batch,
+    publish_grant_outbox_batch, publish_identity_outbox_batch, publish_response_grant_outbox_batch,
     publish_share_grant_outbox_batch,
 };
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|identity|grant|response_grant|share_grant)";
+const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|evidence_retention|identity|grant|response_grant|share_grant)";
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
@@ -43,6 +43,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "case"
             | "evidence_catalog"
             | "evidence_access"
+            | "evidence_retention"
             | "identity"
             | "grant"
             | "response_grant"
@@ -97,6 +98,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
             publish_evidence_access_outbox_batch(&store, &client, &scope, &config).await?
         }
         "identity" => publish_identity_outbox_batch(&store, &client, &scope, &config).await?,
+        "evidence_retention" => {
+            publish_evidence_retention_outbox_batch(&store, &client, &scope, &config).await?
+        }
         "grant" => publish_grant_outbox_batch(&store, &client, &scope, &config).await?,
         "response_grant" => {
             publish_response_grant_outbox_batch(&store, &client, &scope, &config).await?
@@ -105,8 +109,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         _ => return Err(USAGE.into()),
     };
     println!(
-        "family={} claimed={} published={} table={}",
-        family,
+        "family={family} claimed={} published={} table={}",
         report.claimed,
         report.published,
         config.table(),

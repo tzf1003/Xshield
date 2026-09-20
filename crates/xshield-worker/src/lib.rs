@@ -30,7 +30,8 @@ mod search;
 pub use outbox::{
     OutboxPublishReport, OutboxPublisherConfig, publish_case_outbox_batch,
     publish_evidence_access_outbox_batch, publish_evidence_catalog_outbox_batch,
-    publish_grant_outbox_batch, publish_identity_outbox_batch, publish_response_grant_outbox_batch,
+    publish_evidence_retention_outbox_batch, publish_grant_outbox_batch,
+    publish_identity_outbox_batch, publish_response_grant_outbox_batch,
     publish_share_grant_outbox_batch,
 };
 pub use search::{
@@ -1018,6 +1019,7 @@ struct WireEvent {
     event_type: String,
     tenant_id: String,
     site_id: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     request_id: Option<String>,
     trace_id: String,
     span_id: String,
