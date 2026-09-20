@@ -233,8 +233,9 @@ pub struct AuditSearchResult {
 /// The tenant and site are always supplied by the authenticated control-plane
 /// composition root. Every predicate is selected from a closed enum and every
 /// value is bound separately; no caller-provided SQL fragment is accepted.
-/// Grant and binding filters inspect fixed fields of validated outbox event
-/// families. They locate historical facts, not current authorization state.
+/// Reference filters inspect evidence refs and fixed fields of validated event
+/// families. They locate direct historical references, not current access rights
+/// or transitive case membership. Management targets include failed attempts.
 /// The read has a five-second client deadline, server execution/scan/memory
 /// budgets, and a 16 MiB decoded response ceiling. Dropping the future cancels
 /// local work; the caller owns terminal audit and concurrency admission.
@@ -563,6 +564,25 @@ async fn execute_query(
                   OR (event_type = 'share.issued' \
                   AND JSONExtractString(payload_json,'issuer_binding_id') = ?))",
             ),
+            QueryFilter::CaseId(_) => sql.push_str(
+                "((tuple(stage,event_type) IN (('case_management','case.created'),\
+                  ('case_management','case.closed'),('case_management','case.evidence.added'),\
+                  ('evidence_access','evidence.access.requested'),\
+                  ('evidence_hold','evidence.hold.created'),('evidence_hold','evidence.hold.released')) \
+                  AND JSONExtractString(payload_json,'case_id') = ?) \
+                  OR (stage = 'control_access' AND event_type IN ('case.created','case.closed',\
+                  'case.evidence.added','console.case.read','evidence.access.requested',\
+                  'evidence.access.approved','evidence.access.denied','console.evidence.hold.created',\
+                  'console.evidence.hold.released','console.evidence.hold.read') \
+                  AND JSONExtractString(payload_json,'target_case_id') = ?))",
+            ),
+            QueryFilter::ArtifactId(_) => sql.push_str(
+                "(has(evidence_refs,?) OR (stage = 'control_access' \
+                  AND event_type IN ('console.manifest.read','case.evidence.added',\
+                  'evidence.access.requested','evidence.access.approved','evidence.access.denied',\
+                  'evidence.read','console.evidence.hold.created','console.evidence.hold.released') \
+                  AND JSONExtractString(payload_json,'target_artifact_id') = ?))",
+            ),
             QueryFilter::Text { field, .. } => {
                 sql.push_str(field.as_str());
                 sql.push_str(" = ?");
@@ -598,6 +618,8 @@ async fn execute_query(
             QueryFilter::EventId(value) => query.bind(value.as_str()),
             QueryFilter::GrantId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::AuthBindingId(value) => query.bind(value.as_str()).bind(value.as_str()),
+            QueryFilter::CaseId(value) => query.bind(value.as_str()).bind(value.as_str()),
+            QueryFilter::ArtifactId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::Text { value, .. } => query.bind(value),
             QueryFilter::Outcome(value) => query.bind(value.as_str()),
             QueryFilter::ConfidenceAtMost(value) => query.bind(value.as_f64()),

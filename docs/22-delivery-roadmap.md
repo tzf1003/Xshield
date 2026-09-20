@@ -26,7 +26,7 @@
 
 交付：journal、ClickHouse、对象证据库、签名 manifest、全请求检索、阶段树、原文审批、转换对照、导出、故障恢复和索引水位。
 
-管理审计增量：现有控制端点的独立 journal 已接通严格封存发布契约，可检索访问尝试、稳定原因和证据引用；管理结果与业务请求终态分离，使用独立源目录和水位。PostgreSQL outbox 已交付案件、证据目录、证据访问、证据清理、身份生命周期、通用资源资格、响应资格和分享发行八族消费发布闭环，包含按族租约、精确确认、失败重试和 ClickHouse 内容冲突检查。身份生产者已把会话创建、登录、刷新、上下文切换和显式撤销接入完整 v3 契约，并经真实网关/源站/PostgreSQL 回归；身份发布器已严格接收 `binding.revoked`。通用 `GrantPersistence` 库入口构造并原子提交完整 `grant.issued`，其 HTTP 发行适配器仍待交付。响应资格生产者随整批资格事务提交完整 `response_grant.issued` envelope；分享库 API 原子提交完整 `share.issued`，绑定稳定 event/share ID、冻结时间和精确重试正文；HTTP `response.share_issue` 已接通独立获准分享操作、完整 JSON 校验、当前来源资格复验及提交后凭证注入。历史稀疏身份、通用资源资格、响应资格及分享记录保留未确认。清理族保留六类 catalog/孤儿删除意图、完成与失败事实，以独立维护阶段、artifact/cause 引用及空请求进入脱敏检索。各族合成契约与实际生产者的数据库覆盖及执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。管理目标字段查询、调查包导出及控制台界面继续交付。
+管理审计增量：现有控制端点的独立 journal 已接通严格封存发布契约，可检索访问尝试、稳定原因和证据引用；管理结果与业务请求终态分离，使用独立源目录和水位。PostgreSQL outbox 已交付案件、证据目录、证据访问、证据清理、身份生命周期、通用资源资格、响应资格和分享发行八族消费发布闭环，包含按族租约、精确确认、失败重试和 ClickHouse 内容冲突检查。身份生产者已把会话创建、登录、刷新、上下文切换和显式撤销接入完整 v3 契约，并经真实网关/源站/PostgreSQL 回归；身份发布器已严格接收 `binding.revoked`。通用 `GrantPersistence` 库入口构造并原子提交完整 `grant.issued`，其 HTTP 发行适配器仍待交付。响应资格生产者随整批资格事务提交完整 `response_grant.issued` envelope；分享库 API 原子提交完整 `share.issued`，绑定稳定 event/share ID、冻结时间和精确重试正文；HTTP `response.share_issue` 已接通独立获准分享操作、完整 JSON 校验、当前来源资格复验及提交后凭证注入。历史稀疏身份、通用资源资格、响应资格及分享记录保留未确认。清理族保留六类 catalog/孤儿删除意图、完成与失败事实，以独立维护阶段、artifact/cause 引用及空请求进入脱敏检索。各族合成契约与实际生产者的数据库覆盖及执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。案件与证据目标过滤已交付，更多管理目标过滤、调查包导出及控制台界面继续交付。
 
 验收：按任一请求/模型/资格 ID 完整追链；每个缺失有状态；查看与导出也记录；高危审计失败不继续无证据执行。
 
@@ -36,7 +36,7 @@
 
 案件增量：`POST /control/v1/cases/{case_id}/items` 与 `GET /control/v1/cases/{case_id}/items` 已形成关联、单快照集合浏览、catalog 状态和审计闭环。`POST /control/v1/cases/{case_id}/close` 已提供所有者终结、容量释放、精确重试及事务 outbox，历史集合与审批保留，后续原文资格校验受 closed 状态约束；新增关联和关闭已覆盖断连终态审计回归。案件保留锁已完成有界存储、清理屏障、事件发布及 AuditAdministrator 创建/释放/历史查询 HTTP 闭环（见 12.9、29.21）；调查 Agent 与导出继续交付。保留锁延缓物理删除，案件生命周期与保留操作均不扩大原文权限或读取期限。
 
-当前增量：已落地有界 QueryPlan AST、固定作用域的参数化 ClickHouse 事件查询、稳定 HMAC 游标和 `console.query.executed` 审计。查询返回脱敏事件摘要、实际扫描量及索引水位/gap，实施单实例并发上限和客户端 deadline；超预算计划须缩小范围。当前为同一事件的 AND 过滤，模型接入、调查 Agent、跨事件关联和只读回放继续按垂直闭环推进。
+当前增量：已落地有界 QueryPlan AST、固定作用域的参数化 ClickHouse 事件查询、稳定 HMAC 游标和 `console.query.executed` 审计。查询返回脱敏事件摘要、实际扫描量及索引水位/gap，实施单实例并发上限和客户端 deadline；超预算计划须缩小范围。`case_id` 与 `artifact_id` 已覆盖直接引用的案件事实、审批管理尝试、保留锁及证据历史，复用既有索引与预算，固定映射见 29.14。检索权限沿用 Investigator 的 tenant/site 范围，当前案件、保留和内容权限仍各自校验。当前为同一事件的 AND 过滤，模型接入、调查 Agent、跨事件关联和只读回放继续按垂直闭环推进。
 
 模型增量：一次性 Jev 离线评估已接通严格 Choice/Noul DTO、固定 HTTPS 传输、实际请求/响应证据、catalog/outbox、`model.*` journal 与发布解析；429/529、超时、取消、容量和中断恢复具有明确终态。阶段索引统一 `mdl_`、模型版本与置信度状态，汇总保留最新 null。回归使用合成 loopback 供应商；网关自动采用、OpenJev/SemIf、跨实例预算、校准与真实供应商验收继续按 [10.9](10-jev-and-agents.md#109-已实现一次性离线评估) 推进。
 

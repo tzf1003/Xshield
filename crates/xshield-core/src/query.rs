@@ -6,7 +6,7 @@
 //! queries after injecting the authenticated tenant/site scope.
 
 use crate::{
-    domain::{AuthBindingId, EventId, GrantId, RequestId},
+    domain::{ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId},
     identity::UnixSeconds,
 };
 use std::fmt;
@@ -167,6 +167,12 @@ pub enum QueryFilter {
     /// Exact binding reference in identity or qualification issuance events.
     /// The caller's management scope is applied independently by the adapter.
     AuthBindingId(AuthBindingId),
+    /// Direct case reference in case facts or validated management attempts.
+    /// This selects history independently of current case access permissions.
+    CaseId(CaseId),
+    /// Exact evidence reference or validated management target.
+    /// Matching metadata does not grant access to the evidence content.
+    ArtifactId(ArtifactId),
     /// Exact equality on an allow-listed text column.
     Text {
         /// Column selected from [`QueryTextField`].
@@ -187,6 +193,8 @@ impl QueryFilter {
             | Self::EventId(_)
             | Self::GrantId(_)
             | Self::AuthBindingId(_)
+            | Self::CaseId(_)
+            | Self::ArtifactId(_)
             | Self::Outcome(_)
             | Self::ConfidenceAtMost(_) => Ok(()),
             Self::Text { value, .. } => {
@@ -319,7 +327,7 @@ mod tests {
         QueryPlan, QueryPlanError, QuerySort, QueryTextField, QueryWindow,
     };
     use crate::{
-        domain::{AuthBindingId, GrantId, RequestId},
+        domain::{ArtifactId, AuthBindingId, CaseId, GrantId, RequestId},
         identity::UnixSeconds,
     };
 
@@ -346,19 +354,31 @@ mod tests {
                 QueryFilter::AuthBindingId(
                     AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
                 ),
+                QueryFilter::CaseId(
+                    CaseId::parse("case_018f2a3b-4c5d-7000-8000-000000000003").unwrap(),
+                ),
+                QueryFilter::ArtifactId(
+                    ArtifactId::parse("artifact_018f2a3b-4c5d-7000-8000-000000000004").unwrap(),
+                ),
             ],
             QuerySort::OccurredAtAsc,
             50,
         )
         .unwrap();
         assert_eq!(plan.limit(), 50);
-        assert_eq!(plan.filters().len(), 6);
+        assert_eq!(plan.filters().len(), MAX_FILTERS);
         assert_eq!(
             plan.filters()[1],
             QueryFilter::Text {
                 field: QueryTextField::ReasonCode,
                 value: "UI_SOURCE_MISSING".to_owned(),
             }
+        );
+        let mut excess = plan.filters().to_vec();
+        excess.push(plan.filters()[MAX_FILTERS - 1].clone());
+        assert_eq!(
+            QueryPlan::new(plan.window(), excess, plan.sort(), plan.limit()),
+            Err(QueryPlanError::TooManyFilters)
         );
     }
 

@@ -62,6 +62,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 查询回归覆盖 `audit_events_active` 和通过物化视图填充的 `events_by_time_active`：租户/站点隔离、可空 LowCardinality 字段、`ALLOW`、微秒及同时间戳 keyset 双向分页、闭开时间窗口、全部类型过滤器与同事件 AND 语义、重复事件合并、最早期限优先及物理 TTL 清理前隐藏过期行。查询使用只获两个 active 视图 `SELECT` 的独占测试账号，同时断言直接读取两张底表返回权限拒绝。
 
+案件/证据过滤回归包含实际契约的事件/阶段与目标字段、evidence_refs 成员、失败管理目标、空/缺失/嵌套字段、无关类型/错配阶段、作用域和同事件 AND，以及双向 keyset 分页。控制层 `reference_search` 测试验证规范 ID、严格/重复字段、8 项预算、原有摘要兼容、每个 ID 与过滤顺序的游标绑定、返回脱敏和计划摘要审计。
+
 发布回归从加密 journal 与签名清单开始，验证真实 `FixedString` 编码、两张物理表的精确摘要和微秒时间读回、同步确认后的水位提交与 checkpoint 重用；继续追加同 event_id 的不同内容时，发布器必须返回完整性冲突，保留原水位并显示待投递段。
 
 模型阶段回归由实际加密 journal 经封存和发布入库，验证 `mdl_` 调用引用、已知/缺失模型版本以及有界模型版本过滤。阶段汇总回归在同一阶段先写数值置信度，再写 `not_applicable`、`not_provided` 或 `unavailable` 的 null，确认两套 active 视图都返回最新 null 与匹配状态。常规测试另覆盖置信度矛盾、非法模型引用和版本、时间线分页预读行校验；这些合成事件验证审计链路，不代表实际模型推理或准确率测量。
@@ -101,6 +103,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 `cargo test -p xshield-control --lib management_audit` 由实际管理事件生产者及 HTTP 路由写入 journal，经封存和现有发布器验证报文兼容与 checkpoint 重用。配置 20.6 的专用 ClickHouse 后，执行 `cargo test -p xshield-control --lib management_audit -- --ignored`，在独占数据库运行同一路径并读回索引、时间线、有界搜索及跨租户/站点隔离。该真实数据库测试纳入 CI；普通 workspace 测试只编译并跳过其服务调用。
 
 保留锁管理的三类 `console.evidence.hold.*` 也走同一生产 journal、封存和投递回归，覆盖创建/释放及精确重试原因、空列表、拒绝和依赖故障；worker 与 Schema 同时拒绝目标/方法/路由错绑、越权携带 hold 目标及未知字段。
+
+同一真实数据库回归通过 `/control/v1/search` 按 case_id、artifact_id 及两者组合双向逐页读取上述已发布管理事件，逐项与生产 journal 对照；检查已发布水位、脱敏字段、每页终态审计及查询日志再次发布。查询日志只保留计划摘要，目标 ID 不进入该访问日志。
 
 `cargo test -p xshield-control case_holds` 覆盖严格路径/JSON/UTC 毫秒（含闰秒反例）、重复认证和幂等头、4 KiB/UTF-8 长度、权限/作用域/凭证期限/速率、在途上限、存储故障及审计扣留。`scripts/test_postgres.sh` 另执行 `case_holds_are_scoped_idempotent_paginated_and_audited`：真实 vault/catalog/案件关联后由独立管理员创建、释放和分页，检查幂等冲突、过期/超长新期限、目标隔离、游标全部绑定、同对象多条历史去重引用、关闭后释放与查询、原期限和审批保持、提交后审计故障恢复及断连后的提交/审计。核心主体测试检查启动身份规范且保持原值。
 

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use xshield_core::{
     admin::ManagementRole,
-    domain::{AuthBindingId, EventId, GrantId, RequestId, SiteId, TenantId},
+    domain::{ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId, SiteId, TenantId},
     identity::UnixSeconds,
     query::{
         ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
@@ -349,6 +349,14 @@ fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
                 canonical.push_str("auth_binding_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::CaseId(value) => {
+                canonical.push_str("case_id=");
+                canonical.push_str(value.as_str());
+            }
+            QueryFilter::ArtifactId(value) => {
+                canonical.push_str("artifact_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::Text { field, value } => {
                 canonical.push_str(field.as_str());
                 canonical.push('=');
@@ -449,6 +457,12 @@ enum SearchFilterRequest {
     AuthBindingId {
         value: String,
     },
+    CaseId {
+        value: String,
+    },
+    ArtifactId {
+        value: String,
+    },
     Text {
         field: SearchTextFieldRequest,
         value: String,
@@ -475,6 +489,12 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::AuthBindingId { value } => AuthBindingId::parse(value)
                 .map(QueryFilter::AuthBindingId)
+                .map_err(|_| ()),
+            Self::CaseId { value } => CaseId::parse(value)
+                .map(QueryFilter::CaseId)
+                .map_err(|_| ()),
+            Self::ArtifactId { value } => ArtifactId::parse(value)
+                .map(QueryFilter::ArtifactId)
                 .map_err(|_| ()),
             Self::Text { field, value } => Ok(QueryFilter::Text {
                 field: field.into_domain(),

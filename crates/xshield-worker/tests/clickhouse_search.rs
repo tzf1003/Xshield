@@ -6,7 +6,7 @@ use serde::{Serialize, Serializer, ser::SerializeTuple};
 use std::{env, panic::resume_unwind};
 use uuid::Uuid;
 use xshield_core::{
-    domain::{AuthBindingId, EventId, GrantId, RequestId, SiteId, TenantId},
+    domain::{ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId, SiteId, TenantId},
     identity::UnixSeconds,
     query::{
         ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
@@ -87,6 +87,7 @@ async fn real_schema_search_is_scoped_typed_paginated_and_retention_aware() {
             assert_search(&reader, &config, window, &expected).await;
         }
         assert_grant_binding_search(&client, &reader).await;
+        assert_case_artifact_search(&client, &reader).await;
         assert_latest_stage_null_confidence(&client, &reader).await;
     })
     .await;
@@ -588,6 +589,314 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
                 assert_ids(&page, &[*id]);
                 assert_eq!(page.truncated, index + 1 < expected.len());
                 after = page.next_position;
+            }
+        }
+    }
+}
+
+// Exercise each production reference mapping and its shape boundaries together.
+#[allow(clippy::too_many_lines)]
+async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
+    const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000301";
+    const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000301";
+    let now_micros: i64 = checked(
+        writer
+            .query("SELECT toUnixTimestamp64Micro(now64(6))")
+            .fetch_one()
+            .await,
+        "read case reference test clock",
+    );
+    let now = DateTime::from_timestamp_micros(now_micros).unwrap();
+    let start = DateTime::from_timestamp(now.timestamp() - 60, 0).unwrap();
+    let expires = now + TimeDelta::hours(1);
+    let direct = serde_json::json!({"case_id": CASE, "artifact_id": ARTIFACT});
+    let targets = serde_json::json!({"target_case_id": CASE, "target_artifact_id": ARTIFACT});
+    let new_row = |sequence, kind, stage, payload: &serde_json::Value| {
+        // The two timestamp groups exercise both halves of the keyset tuple.
+        let mut row = TestEvent::new(
+            sequence,
+            start + TimeDelta::microseconds(i64::from(sequence >= 315)),
+            expires,
+        );
+        row.tenant_id = "tenant_case_search";
+        row.site_id = "site_case_search";
+        row.event_type = kind;
+        row.stage = stage;
+        row.payload_json = payload.to_string();
+        row
+    };
+    let mut rows = Vec::new();
+    for (sequence, kind, stage) in [
+        (301, "case.created", "case_management"),
+        (302, "case.closed", "case_management"),
+        (303, "case.evidence.added", "case_management"),
+        (304, "evidence.access.requested", "evidence_access"),
+        (305, "evidence.hold.created", "evidence_hold"),
+        (306, "evidence.hold.released", "evidence_hold"),
+    ] {
+        let mut row = new_row(sequence, kind, stage, &direct);
+        row.request_id = "";
+        if sequence >= 303 {
+            row.evidence_refs.push(ARTIFACT.to_owned());
+        }
+        rows.push(row);
+    }
+    for (sequence, kind, artifact_target, page_refs) in [
+        (311, "case.created", false, false),
+        (312, "case.closed", false, false),
+        (313, "case.evidence.added", true, false),
+        (314, "console.case.read", false, true),
+        (315, "evidence.access.requested", true, false),
+        (316, "evidence.access.approved", true, false),
+        (317, "evidence.access.denied", true, false),
+        (318, "console.evidence.hold.created", true, false),
+        (319, "console.evidence.hold.released", true, false),
+        (320, "console.evidence.hold.read", false, true),
+        (321, "console.manifest.read", true, false),
+        (322, "evidence.read", true, false),
+    ] {
+        let payload = serde_json::json!({
+            "target_case_id": (sequence <= 320).then_some(CASE),
+            "target_artifact_id": artifact_target.then_some(ARTIFACT),
+        });
+        let mut row = new_row(sequence, kind, "control_access", &payload);
+        if page_refs {
+            row.evidence_refs.push(ARTIFACT.to_owned());
+        } else {
+            // A validated failed target is searchable even with no evidence refs.
+            row.outcome = "DENY";
+            row.reason_code = "CONTROL_FORBIDDEN";
+        }
+        rows.push(row);
+    }
+    for (sequence, kind, stage) in [
+        (323, "stage.completed", "evidence_capture"),
+        (324, "model.responded", "model_evaluation"),
+        (325, "evidence.deleted", "evidence_retention"),
+        (326, "evidence.cataloged", "evidence_catalog"),
+        (327, "console.events.read", "control_access"),
+        (328, "console.model.read", "control_access"),
+        (329, "console.manifest.read", "control_access"),
+    ] {
+        let mut row = new_row(sequence, kind, stage, &serde_json::json!({}));
+        row.evidence_refs.push(ARTIFACT.to_owned());
+        rows.push(row);
+    }
+    for (sequence, kind, stage, payload) in [
+        (341, "stage.completed", "admission", direct.clone()),
+        (342, "case.created", "control_access", direct.clone()),
+        (343, "case.created", "case_management", targets.clone()),
+        (
+            344,
+            "evidence.access.approved",
+            "evidence_access_decision",
+            direct.clone(),
+        ),
+        (
+            345,
+            "evidence.access.denied",
+            "evidence_access_decision",
+            direct.clone(),
+        ),
+        (346, "case.closed", "evidence_hold", direct.clone()),
+        (347, "console.case.read", "admission", targets.clone()),
+        (
+            348,
+            "console.health.read",
+            "control_access",
+            targets.clone(),
+        ),
+        (
+            349,
+            "console.manifest.read",
+            "control_access",
+            direct.clone(),
+        ),
+        (
+            350,
+            "evidence.hold.created",
+            "evidence_hold",
+            serde_json::json!({"nested": direct}),
+        ),
+        (
+            351,
+            "case.evidence.added",
+            "control_access",
+            serde_json::json!({"nested": targets}),
+        ),
+        (
+            352,
+            "case.created",
+            "case_management",
+            serde_json::json!({}),
+        ),
+        (
+            353,
+            "case.evidence.added",
+            "control_access",
+            serde_json::json!({"target_case_id": null, "target_artifact_id": null}),
+        ),
+        (
+            354,
+            "case.created.spoofed",
+            "case_management",
+            direct.clone(),
+        ),
+        (
+            355,
+            "evidence.read.spoofed",
+            "control_access",
+            targets.clone(),
+        ),
+    ] {
+        rows.push(new_row(sequence, kind, stage, &payload));
+    }
+    let mut other_tenant = rows[2].clone();
+    other_tenant.event_id = event_id(361);
+    other_tenant.tenant_id = "tenant_other";
+    rows.push(other_tenant);
+    let mut other_site = rows[2].clone();
+    other_site.event_id = event_id(362);
+    other_site.site_id = "site_other";
+    rows.push(other_site);
+    let mut retired = rows[2].clone();
+    retired.event_id = event_id(363);
+    retired.retention_expires_at = now - TimeDelta::seconds(1);
+    rows.push(retired.clone());
+    retired.retention_expires_at = expires;
+    rows.push(retired);
+    let mut outside = rows[2].clone();
+    outside.event_id = event_id(364);
+    outside.occurred_at = start + TimeDelta::seconds(2);
+    rows.push(outside);
+    rows.push(rows[2].clone());
+    let mut insert = checked(
+        writer.insert::<TestEvent>("audit_events").await,
+        "insert case references",
+    );
+    for row in rows.iter().rev() {
+        checked(insert.write(row).await, "write case reference fixture");
+    }
+    checked(insert.end().await, "finish case reference fixtures");
+    let window = QueryWindow::new(
+        UnixSeconds::new(u64::try_from(start.timestamp()).unwrap()),
+        UnixSeconds::new(u64::try_from(start.timestamp() + 2).unwrap()),
+    )
+    .unwrap();
+    let case = QueryFilter::CaseId(CaseId::parse(CASE).unwrap());
+    let artifact = QueryFilter::ArtifactId(ArtifactId::parse(ARTIFACT).unwrap());
+    let case_ids: Vec<_> = (301..=306).chain(311..=320).collect();
+    let artifact_ids: Vec<_> = (303..=306).chain(313..=329).collect();
+    let combined_ids: Vec<_> = (303..=306).chain(313..=320).collect();
+    let tenant = TenantId::parse("tenant_case_search").unwrap();
+    let site = SiteId::parse("site_case_search").unwrap();
+    for table in ["audit_events", "events_by_time"] {
+        let config = query_config(table);
+        for (filters, ids) in [
+            (vec![case.clone()], case_ids.clone()),
+            (vec![artifact.clone()], artifact_ids.clone()),
+            (vec![case.clone(), artifact.clone()], combined_ids.clone()),
+            (
+                vec![
+                    case.clone(),
+                    text(QueryTextField::EventType, "evidence.read"),
+                ],
+                vec![],
+            ),
+            (
+                vec![
+                    artifact.clone(),
+                    text(QueryTextField::EventType, "case.created"),
+                ],
+                vec![],
+            ),
+            (
+                vec![
+                    case.clone(),
+                    QueryFilter::ArtifactId(
+                        ArtifactId::parse("artifact_018f2a3b-4c5d-7000-8000-000000000399").unwrap(),
+                    ),
+                ],
+                vec![],
+            ),
+            (
+                vec![
+                    QueryFilter::CaseId(
+                        CaseId::parse("case_018f2a3b-4c5d-7000-8000-000000000399").unwrap(),
+                    ),
+                    artifact.clone(),
+                ],
+                vec![],
+            ),
+        ] {
+            let plan = QueryPlan::new(window, filters, QuerySort::OccurredAtAsc, 100).unwrap();
+            let result =
+                queried(query_audit_events(&config, reader, &tenant, &site, &plan, None).await);
+            assert_ids(&result, &ids);
+            for event in result.events {
+                let json = serde_json::to_value(event).unwrap();
+                for field in [
+                    "payload_json",
+                    "case_id",
+                    "target_case_id",
+                    "target_artifact_id",
+                ] {
+                    assert!(json.get(field).is_none());
+                }
+            }
+        }
+        let plan = QueryPlan::new(
+            window,
+            vec![case.clone(), artifact.clone()],
+            QuerySort::OccurredAtAsc,
+            100,
+        )
+        .unwrap();
+        for (tenant, site, ids) in [
+            ("tenant_other", "site_case_search", vec![361]),
+            ("tenant_case_search", "site_other", vec![362]),
+            ("tenant_other", "site_other", vec![]),
+        ] {
+            let result = queried(
+                query_audit_events(
+                    &config,
+                    reader,
+                    &TenantId::parse(tenant).unwrap(),
+                    &SiteId::parse(site).unwrap(),
+                    &plan,
+                    None,
+                )
+                .await,
+            );
+            assert_ids(&result, &ids);
+        }
+        for filters in [
+            vec![case.clone()],
+            vec![artifact.clone()],
+            vec![case.clone(), artifact.clone()],
+        ] {
+            let ids = match filters.as_slice() {
+                [QueryFilter::CaseId(_)] => &case_ids,
+                [QueryFilter::ArtifactId(_)] => &artifact_ids,
+                _ => &combined_ids,
+            };
+            for sort in [QuerySort::OccurredAtAsc, QuerySort::OccurredAtDesc] {
+                let plan = QueryPlan::new(window, filters.clone(), sort, 3).unwrap();
+                let mut expected = ids.clone();
+                if sort == QuerySort::OccurredAtDesc {
+                    expected.reverse();
+                }
+                let mut after = None;
+                for (index, chunk) in expected.chunks(3).enumerate() {
+                    let page = queried(
+                        query_audit_events(&config, reader, &tenant, &site, &plan, after.as_ref())
+                            .await,
+                    );
+                    assert_ids(&page, chunk);
+                    assert_eq!(page.truncated, (index + 1) * 3 < expected.len());
+                    assert_eq!(page.next_position.is_some(), page.truncated);
+                    after = page.next_position;
+                }
             }
         }
     }

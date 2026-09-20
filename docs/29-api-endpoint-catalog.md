@@ -117,7 +117,7 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 ## 29.14 已实现的受限调查查询契约
 
-`POST /control/v1/search` 要求固定 tenant/site 作用域内的 `Investigator` 和管理 Bearer。请求体上限 8 KiB，严格接受 `schema_version=3`、UTC RFC3339 的 `start`/`end`、`sort`、`limit`、可选 `cursor` 及有界 `filters`。时间边界采用整秒，半开区间 `[start,end)` 最长 31 天且位于 1970-01-01 至 2300-01-01；单页受 `XSHIELD_CONTROL_MAX_QUERY_EVENTS` 限制，硬上限 1000 行，最多 8 个过滤器。过滤器只对同一事件做 AND 匹配：规范 request/event/grant/auth binding ID、`event_type`/`stage`/`reason_code`/`operation_id`/`model_revision` 精确文本、`PASS/ALLOW/DENY/UNKNOWN/ERROR/SKIPPED/CANCELLED` outcome 枚举和 0–10000 整数 basis-points 置信度上限。规则事件的空置信度不会匹配数值阈值；当前接口不做跨事件关联、聚合或自然语言编译。未知字段、版本、控制字符和自由表达式均拒绝。
+`POST /control/v1/search` 要求固定 tenant/site 作用域内的 `Investigator` 和管理 Bearer。请求体上限 8 KiB，严格接受 `schema_version=3`、UTC RFC3339 的 `start`/`end`、`sort`、`limit`、可选 `cursor` 及有界 `filters`。时间边界采用整秒，半开区间 `[start,end)` 最长 31 天且位于 1970-01-01 至 2300-01-01；单页受 `XSHIELD_CONTROL_MAX_QUERY_EVENTS` 限制，硬上限 1000 行，最多 8 个过滤器。过滤器只对同一事件做 AND 匹配：规范 request/event/grant/auth binding/case/artifact ID、`event_type`/`stage`/`reason_code`/`operation_id`/`model_revision` 精确文本、`PASS/ALLOW/DENY/UNKNOWN/ERROR/SKIPPED/CANCELLED` outcome 枚举和 0–10000 整数 basis-points 置信度上限。规则事件的空置信度不会匹配数值阈值；当前接口不做跨事件关联、聚合或自然语言编译。未知字段、版本、控制字符和自由表达式均拒绝。
 
 ```json
 {
@@ -140,6 +140,12 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 资格与身份定位分别使用 `{"kind":"grant_id","value":"grant_UUIDv7"}` 和 `{"kind":"auth_binding_id","value":"auth_UUIDv7"}`，value 必须为规范小写强类型 ID。资格过滤匹配 `grant.issued`、`response_grant.issued` 的 `grant_id` 及 `share.issued` 的 `issuer_grant_id`。身份过滤匹配 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed`、`binding.revoked`、`grant.issued`、`response_grant.issued` 的 `binding_id`，以及 `share.issued` 的 `issuer_binding_id`。事件族和 JSON 键由服务端固定，索引内有界读取这些 payload 字段参与过滤；其他事件中的同名键不构成关联。两类过滤可组合并继续占用原有 8 项预算，完整类型和值纳入 query_digest 和游标签名，访问审计仍仅记录计划摘要。
 
 定位结果是保留窗口内已发布的直接引用事件，可通过返回的 request_id 继续查看请求时间线；不会自动遍历关联请求或报告当前 binding/grant 的有效状态。空结果可能来自未发布、到期或作用域不匹配，不能证明发行从未发生。响应中的水位只覆盖当前配置的 journal 源，不代表独立 outbox 生产者已追平。当前复用有界 payload 扫描，超出预算要求缩小时间窗；大规模索引列物化需另行容量测量。
+
+案件使用 `{"kind":"case_id","value":"case_UUIDv7"}`，匹配固定阶段与事件组合中的直接引用：`case_management` 阶段的 `case.created/closed/evidence.added`、`evidence_access` 阶段的 `evidence.access.requested`、`evidence_hold` 阶段的 `evidence.hold.created/released` 读取 payload.case_id；`control_access` 阶段的 `case.created/closed/evidence.added`、`console.case.read`、`evidence.access.requested/approved/denied` 与 `console.evidence.hold.created/released/read` 读取 target_case_id。审批批准/拒绝事务 outbox 本身仅带申请引用，须通过其管理访问记录定位，不自动补关联。
+
+证据使用 `{"kind":"artifact_id","value":"artifact_UUIDv7"}`，匹配所有事件的 evidence_refs 精确成员；另匹配 `control_access` 中 `console.manifest.read`、`case.evidence.added`、`evidence.access.requested/approved/denied`、`evidence.read` 和 `console.evidence.hold.created/released` 的 target_artifact_id，包含已校验目标但未返回证据的失败尝试。其他 payload 同名字段及嵌套引用不参与匹配；集合查询只匹配该页实际审计的 evidence_refs。
+
+case/artifact 同样采用规范小写强类型校验、8 项总预算及完整计划摘要/游标绑定。组合要求同一事件直接引用两者，不展开案件成员的全部历史。检索沿用 Investigator 对固定 tenant/site 的脱敏审计权限，可观察该范围内其他主体的历史；当前案件集合仍单独检查所有者，保留管理与原文读取仍各自鉴权。关闭、到期、删除后保留的索引引用也可命中，不证明当前对象存在、可读或保留锁有效。新过滤器复用既有视图和事件，无需数据库迁移；新计划的管理日志仍只保存 query_digest。
 
 无效计划返回 `CONTROL_QUERY_INVALID`/422，无效游标返回 `CONTROL_CURSOR_INVALID`/400，均在索引访问前拒绝。确定的查询预算耗尽返回 `CONTROL_QUERY_BUDGET_EXCEEDED`/429、`retryable=false`、`next_action=narrow_query`；单实例容量占满返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，客户端超时返回 `CONTROL_QUERY_TIMEOUT`/503，依赖故障返回对应 503。可审计尝试均写 `console.query.executed`；通过计划校验后的成功或失败审计携带 `query_digest`，不保存原始查询文本或游标。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果；响应统一 `Cache-Control: private, no-store`。
 

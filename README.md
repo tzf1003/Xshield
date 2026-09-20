@@ -24,6 +24,8 @@
 
 `POST /control/v1/cases/{case_id}/close` 已支持所有者关闭案件：关闭记录、状态与 `case.closed` outbox 原子提交，释放 open 案件容量，后续新增关联、原文申请/批准与读取资格校验要求案件仍为 open。历史证据集合和审批记录保留，证据期限保持原值。部署先应用 `0018_m3_case_lifecycle.sql`；幂等、并发及审计边界见 [29.18](docs/29-api-endpoint-catalog.md#2918-已实现的案件关闭契约)。
 
+`POST /control/v1/search` 支持 `case_id`、`artifact_id` 历史检索，定位已发布的案件操作、审批管理尝试、保留锁及证据引用。固定事件字段、同事件 AND、查询预算和游标绑定沿用现有 QueryPlan；历史可检索与当前案件、保留及内容权限分开校验，详见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。
+
 管理访问 journal 已接通封存段发布器：当前控制端点的访问尝试按严格契约进入 `control_access` 索引阶段，可通过管理 request_id 时间线及有界事件检索复核；独立日志源的部署、水位及 outbox 边界见 [11.7](docs/11-audit-event-contract.md#117-已实现的管理访问审计发布)。
 
 案件保留锁已提供 AuditAdministrator 专属的创建、释放与分页历史 API，复用固定作用域、严格输入、幂等、容量和终态审计；活动锁暂停物理删除，内容读取仍遵守原期限与审批。接口与升级顺序见 [29.21](docs/29-api-endpoint-catalog.md#2921-已实现的案件保留锁管理契约)。

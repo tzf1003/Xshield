@@ -25,6 +25,24 @@ struct AccessJournal {
 }
 
 impl AccessJournal {
+    fn for_fixture(fixture: &Fixture) -> Self {
+        let root = fixture.access_directory.parent().unwrap().to_owned();
+        Self {
+            config: PublisherConfig::new(
+                &fixture.access_directory,
+                root.join("access-manifests"),
+                root.join("access-checkpoints"),
+                "control-index",
+                "audit_events",
+                30,
+                1024 * 1024,
+            )
+            .unwrap(),
+            root,
+            events: Vec::new(),
+        }
+    }
+
     async fn publish(&self, client: &Client) -> PublishReport {
         publish_sealed_segments(
             &self.config,
@@ -102,21 +120,7 @@ async fn access_journal() -> AccessJournal {
         )],
     )
     .unwrap();
-    let root = fixture.access_directory.parent().unwrap().to_owned();
-    let mut journal = AccessJournal {
-        config: PublisherConfig::new(
-            &fixture.access_directory,
-            root.join("access-manifests"),
-            root.join("access-checkpoints"),
-            "control-index",
-            "audit_events",
-            30,
-            1024 * 1024,
-        )
-        .unwrap(),
-        root,
-        events: Vec::new(),
-    };
+    let mut journal = AccessJournal::for_fixture(&fixture);
     append_access_contracts(&fixture.control);
     append_hold_access_contracts(&fixture.control);
     let app = router(fixture.control);
@@ -636,6 +640,111 @@ async fn assert_real_control_publication(client: &Client) {
     journal.assert_checkpointed(&journal.publish(client).await);
     assert_index_projections(&journal, client).await;
     assert_control_queries(&journal, client).await;
+    assert_reference_search_http(&journal, client).await;
+}
+
+/// Exercise the HTTP plan and cursor against published production access records.
+#[allow(clippy::too_many_lines)]
+async fn assert_reference_search_http(journal: &AccessJournal, client: &Client) {
+    let mut fixture = Fixture::with_index(200, ManagementRole::Investigator, client.clone());
+    let mut searches = AccessJournal::for_fixture(&fixture);
+    fixture.control.config.publisher = journal.config.clone();
+    fixture.control.config.source_journal_key_id = "control-key-r1".to_owned();
+    let app = router(fixture.control);
+    let now = Utc::now();
+    let start = (now - chrono::Duration::hours(1))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let end = (now + chrono::Duration::hours(1))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let mut query_count = 0;
+    for (by_case, by_artifact) in [(true, false), (false, true), (true, true)] {
+        let mut expected = journal
+            .events
+            .iter()
+            .filter(|event| {
+                let case_matches = event["payload"]["target_case_id"] == CASE;
+                let artifact_matches = event["payload"]["target_artifact_id"]
+                    == MISSING_ARTIFACT_ID
+                    || event["evidence_refs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|value| value == MISSING_ARTIFACT_ID);
+                (!by_case || case_matches) && (!by_artifact || artifact_matches)
+            })
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty());
+        expected.sort_by_key(|event| {
+            (
+                DateTime::parse_from_rfc3339(event["occurred_at"].as_str().unwrap()).unwrap(),
+                event["event_id"].as_str().unwrap(),
+            )
+        });
+        for descending in [false, true] {
+            let mut filters = Vec::new();
+            if by_case {
+                filters.push(json!({"kind": "case_id", "value": CASE}));
+            }
+            if by_artifact {
+                filters.push(json!({"kind": "artifact_id", "value": MISSING_ARTIFACT_ID}));
+            }
+            let mut payload = json!({
+                "schema_version": 3, "start": start, "end": end,
+                "sort": if descending { "occurred_at_desc" } else { "occurred_at_asc" },
+                "limit": 1, "filters": filters,
+            });
+            let mut expected_ids = expected
+                .iter()
+                .map(|event| event["event_id"].clone())
+                .collect::<Vec<_>>();
+            if descending {
+                expected_ids.reverse();
+            }
+            for (index, event_id) in expected_ids.iter().enumerate() {
+                let response = app
+                    .clone()
+                    .oneshot(search_http_request(&payload))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["cache-control"], "private, no-store");
+                let body: Value = serde_json::from_slice(
+                    &to_bytes(response.into_body(), 64 * 1024).await.unwrap(),
+                )
+                .unwrap();
+                query_count += 1;
+                assert_eq!(body["events"].as_array().unwrap().len(), 1);
+                assert_eq!(body["events"][0]["event_id"], *event_id);
+                assert!(body["events"][0].get("payload_json").is_none());
+                assert!(body["events"][0].get("target_case_id").is_none());
+                assert!(!body["index_watermark"].is_null());
+                assert_eq!(body["has_gaps"], false);
+                let more = index + 1 < expected_ids.len();
+                assert_eq!(body["truncated"], more);
+                assert_eq!(body["next_cursor"].is_string(), more);
+                payload["cursor"] = body["next_cursor"].clone();
+            }
+        }
+    }
+    drop(app);
+    searches.events = read_access_events(&fixture.access_directory);
+    assert_eq!(searches.events.len(), query_count);
+    for event in &searches.events {
+        assert_eq!(event["event_type"], "console.query.executed");
+        assert_eq!(event["payload"]["reason_code"], "CONTROL_QUERY_EXECUTED");
+        assert_eq!(event["payload"]["query_digest"].as_str().unwrap().len(), 64);
+        assert_eq!(event["evidence_refs"], json!([]));
+        let encoded = event.to_string();
+        assert!(!encoded.contains(CASE));
+        assert!(!encoded.contains(MISSING_ARTIFACT_ID));
+    }
+    assert_eq!(
+        searches.publish(client).await.published_events,
+        u64::try_from(query_count).unwrap()
+    );
+    searches.assert_checkpointed(&searches.publish(client).await);
 }
 
 async fn assert_index_projections(journal: &AccessJournal, client: &Client) {
