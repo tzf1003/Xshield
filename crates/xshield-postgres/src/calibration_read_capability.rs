@@ -5,7 +5,10 @@
 //! model record, a label, or a partition manifest. Console evidence access,
 //! cases, and approvals deliberately do not participate in this authority.
 
-use crate::{PostgresIdentityStore, StoreError};
+use crate::{
+    PostgresIdentityStore, StoreError,
+    evidence_catalog::{CatalogArtifact, catalog_artifact},
+};
 use chrono::{DateTime, SecondsFormat, Timelike, Utc};
 use openssl::{rand::rand_bytes, sha::sha256};
 use serde_json::{Value, json};
@@ -18,6 +21,7 @@ use xshield_core::{
     },
     domain::{CalibrationReadCapabilityId, CalibrationReadLeaseId, EventId, ModelRevision},
     identity::UnixSeconds,
+    ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
 };
 use zeroize::Zeroizing;
 
@@ -207,6 +211,49 @@ impl CalibrationEvidenceBatchBeginOutcome {
             Self::RecoveryExhausted => "CALIBRATION_READ_BATCH_RECOVERY_EXHAUSTED",
         }
     }
+}
+
+/// A storage-authorized calibration artifact ready for vault-side authentication.
+///
+/// This is not content and cannot be constructed by an evaluator. It carries
+/// the exact catalog manifest and semantic role observed in the same locked
+/// transaction that verified the durable capability and lease. A vault reader
+/// must still authenticate its local manifest, compare it to this catalog
+/// record, and verify ciphertext digest and AEAD before releasing plaintext.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedCalibrationEvidence {
+    artifact: CatalogArtifact,
+    role: CalibrationEvidenceRole,
+    sample_index: Option<u16>,
+}
+
+impl AuthorizedCalibrationEvidence {
+    /// Returns the authenticated catalog expectation for the vault reader.
+    #[must_use]
+    pub const fn artifact(&self) -> &CatalogArtifact {
+        &self.artifact
+    }
+
+    /// Returns the frozen semantic role under which this object may be read.
+    #[must_use]
+    pub const fn role(&self) -> CalibrationEvidenceRole {
+        self.role
+    }
+
+    /// Returns the frozen sample slot, absent for the four manifests.
+    #[must_use]
+    pub const fn sample_index(&self) -> Option<u16> {
+        self.sample_index
+    }
+}
+
+/// Closed result of revalidating one calibration evidence read at the database boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CalibrationEvidenceReadAuthorizationOutcome {
+    /// The exact current catalog artifact may proceed to vault authentication.
+    Authorized(Box<AuthorizedCalibrationEvidence>),
+    /// The capability, lease, member, or live catalog cannot authorize content.
+    Denied(CalibrationEvidenceReadDenied),
 }
 
 impl PostgresIdentityStore {
@@ -418,6 +465,65 @@ impl PostgresIdentityStore {
         )
         .map_err(|_| StoreError::CorruptData("issued_calibration_lease"))?;
         Ok(CalibrationEvidenceBatchBeginOutcome::Started(lease))
+    }
+
+    /// Revalidates one exact capability member immediately before vault access.
+    ///
+    /// This authorization is deliberately purpose-specific: it verifies the
+    /// private in-memory lease token against its durable digest, locks the
+    /// header, every frozen member, and every live catalog row, and checks the
+    /// complete frozen scope before selecting the requested member. It neither
+    /// opens evidence, consumes the batch, writes an audit event, nor treats a
+    /// console approval as equivalent authority.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for a database or corrupt durable-state failure.
+    /// Expected expired, revoked, mismatched, or unavailable authority returns
+    /// the closed [`CalibrationEvidenceReadAuthorizationOutcome::Denied`]
+    /// result so callers cannot distinguish artifact existence.
+    pub async fn authorize_calibration_evidence_read(
+        &self,
+        request: &CalibrationEvidenceReadRequest<'_>,
+    ) -> Result<CalibrationEvidenceReadAuthorizationOutcome, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        set_short_timeouts(&mut transaction).await?;
+        let denied = || {
+            CalibrationEvidenceReadAuthorizationOutcome::Denied(
+                CalibrationEvidenceReadDenied::EvidenceNotAuthorized,
+            )
+        };
+
+        let Some(header) = find_capability(&mut transaction, request.capability()).await? else {
+            transaction.rollback().await?;
+            return Ok(denied());
+        };
+        if !durable_capability_matches(&mut transaction, &header, request.capability()).await? {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let Some(lease) =
+            active_lease_matches_request(&mut transaction, &header, request, now).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(denied());
+        };
+        if !members_match_live_catalog(&mut transaction, request.capability(), &header).await? {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        let Some(authorized) =
+            authorized_member_for_request(&mut transaction, request, lease).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(denied());
+        };
+        transaction.commit().await?;
+        Ok(CalibrationEvidenceReadAuthorizationOutcome::Authorized(
+            Box::new(authorized),
+        ))
     }
 }
 
@@ -1169,6 +1275,91 @@ async fn members_match_live_catalog(
         == u64::try_from(header.try_get::<i64, _>("frozen_total_bytes")?)
             .map_err(|_| StoreError::CorruptData("frozen_total_bytes"))?
         && total <= capability.max_total_bytes())
+}
+
+async fn active_lease_matches_request(
+    connection: &mut PgConnection,
+    header: &PgRow,
+    request: &CalibrationEvidenceReadRequest<'_>,
+    now: DateTime<Utc>,
+) -> Result<Option<PgRow>, StoreError> {
+    if header.try_get::<&str, _>("status")? != "leased"
+        || now < unix_timestamp(request.capability().not_before())?
+        || now >= unix_timestamp(request.capability().expires_at())?
+    {
+        return Ok(None);
+    }
+    let lease = sqlx::query(
+        "SELECT * FROM xshield.calibration_read_capability_leases
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 AND lease_id=$4
+         FOR UPDATE",
+    )
+    .bind(request.tenant_id().as_str())
+    .bind(request.site_id().as_str())
+    .bind(request.capability().capability_id().as_str())
+    .bind(request.session().lease().lease_id().as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(lease) = lease else {
+        return Ok(None);
+    };
+    let token_digest = sha256(request.session().lease().token());
+    if lease.try_get::<&str, _>("status")? != "active"
+        || lease
+            .try_get::<Vec<u8>, _>("lease_token_digest")?
+            .as_slice()
+            != token_digest
+        || lease.try_get::<DateTime<Utc>, _>("acquired_at")? > now
+        || lease.try_get::<DateTime<Utc>, _>("lease_until")? <= now
+    {
+        return Ok(None);
+    }
+    Ok(Some(lease))
+}
+
+async fn authorized_member_for_request(
+    connection: &mut PgConnection,
+    request: &CalibrationEvidenceReadRequest<'_>,
+    _lease: PgRow,
+) -> Result<Option<AuthorizedCalibrationEvidence>, StoreError> {
+    let row = sqlx::query(
+        "SELECT member.role AS calibration_role,
+                member.sample_index AS calibration_sample_index,
+                catalog.*
+         FROM xshield.calibration_read_capability_members member
+         JOIN xshield.artifact_catalog catalog
+           ON catalog.tenant_id=member.tenant_id AND catalog.site_id=member.site_id
+          AND catalog.artifact_id=member.artifact_id
+         WHERE member.tenant_id=$1 AND member.site_id=$2 AND member.capability_id=$3
+           AND member.artifact_id=$4
+         FOR SHARE OF member, catalog",
+    )
+    .bind(request.tenant_id().as_str())
+    .bind(request.site_id().as_str())
+    .bind(request.capability().capability_id().as_str())
+    .bind(request.evidence_ref().artifact_id().as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let role = role_from_storage(row.try_get("calibration_role")?)?;
+    let sample_index = row
+        .try_get::<Option<i32>, _>("calibration_sample_index")?
+        .map(|value| {
+            u16::try_from(value).map_err(|_| StoreError::CorruptData("calibration_sample_index"))
+        })
+        .transpose()?;
+    if role != request.evidence_ref().role()
+        || sample_index != request.evidence_ref().sample_index()
+    {
+        return Ok(None);
+    }
+    Ok(Some(AuthorizedCalibrationEvidence {
+        artifact: catalog_artifact(&row)?,
+        role,
+        sample_index,
+    }))
 }
 
 async fn resolve_live_or_recovery(

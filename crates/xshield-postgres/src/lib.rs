@@ -36,7 +36,8 @@ mod share_grant_read;
 pub use action_read::ResponseActionDescriptorQuery;
 pub use binding_inspection::BindingInspection;
 pub use calibration_read_capability::{
-    CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
+    AuthorizedCalibrationEvidence, CalibrationEvidenceBatchBegin,
+    CalibrationEvidenceBatchBeginOutcome, CalibrationEvidenceReadAuthorizationOutcome,
     CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome,
     CalibrationReadCapabilityRecord,
 };

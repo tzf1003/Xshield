@@ -21,10 +21,12 @@ use xshield_core::{
         SiteId, TaskRevision, TenantId, ThresholdPolicyRevision,
     },
     identity::UnixSeconds,
+    ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
 };
 use xshield_postgres::{
     CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
-    CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome, PostgresIdentityStore,
+    CalibrationEvidenceReadAuthorizationOutcome, CalibrationReadCapabilityIssue,
+    CalibrationReadCapabilityIssueOutcome, PostgresIdentityStore,
 };
 
 #[tokio::test]
@@ -125,6 +127,7 @@ async fn assert_exact_issuance_and_drift_rejection(
     assert_issued_envelope(pool, fixture, &capability, &record).await;
     assert_exact_retries(store, &capability, &event, &record).await;
     assert_concurrent_conflicting_issuers_return_conflict(store, fixture).await;
+    assert_exact_read_authorization_rechecks_lease_and_catalog(pool, store, fixture).await;
     assert_altered_capability_is_unavailable(store, fixture, &capability).await;
     assert_catalog_drift_is_unavailable(pool, store, fixture, &capability).await;
 }
@@ -225,6 +228,143 @@ async fn assert_concurrent_conflicting_issuers_return_conflict(
             || matches!(second, CalibrationReadCapabilityIssueOutcome::Conflict),
         "a conflicting concurrent issuer must receive the stable outcome"
     );
+}
+
+async fn assert_exact_read_authorization_rechecks_lease_and_catalog(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    let capability = fixture.capability(1_024);
+    assert!(matches!(
+        issue_capability(store, &capability, &event_id(), 11, 12).await,
+        CalibrationReadCapabilityIssueOutcome::Issued(_)
+    ));
+    let lease = match store
+        .begin_calibration_evidence_batch(
+            CalibrationEvidenceBatchBegin::new(&capability, "runner-read", Duration::from_secs(30))
+                .expect("read batch command is valid"),
+        )
+        .await
+        .expect("read batch begins")
+    {
+        CalibrationEvidenceBatchBeginOutcome::Started(lease) => lease,
+        outcome => panic!("expected read lease, got {}", outcome.reason_code()),
+    };
+    let now = UnixSeconds::new(u64::try_from(Utc::now().timestamp()).expect("current time"));
+    let session = capability
+        .bind_issued_batch_lease(lease, now)
+        .expect("durable lease binds the exact capability");
+    let reference = capability
+        .evidence_refs()
+        .into_iter()
+        .find(|reference| reference.role().as_str() == "model_call_record")
+        .expect("model record is present");
+    let request = CalibrationEvidenceReadRequest::new(
+        &session,
+        &capability,
+        &reference,
+        &fixture.tenant,
+        &fixture.site,
+        now,
+    )
+    .expect("exact request is valid");
+    let authorized = store
+        .authorize_calibration_evidence_read(&request)
+        .await
+        .expect("authorization query succeeds");
+    assert!(matches!(
+        authorized,
+        CalibrationEvidenceReadAuthorizationOutcome::Authorized(ref value)
+            if value.artifact().artifact_id() == reference.artifact_id()
+                && value.role() == reference.role()
+                && value.sample_index() == reference.sample_index()
+    ));
+
+    assert_fake_lease_is_denied(store, &capability, fixture, &reference, &session, now).await;
+    assert_catalog_drift_denies_read(pool, store, fixture, &reference, &request).await;
+}
+
+async fn assert_fake_lease_is_denied(
+    store: &PostgresIdentityStore,
+    capability: &CalibrationEvidenceReadCapability,
+    fixture: &Fixture,
+    reference: &xshield_core::calibration::read_capability::CalibrationEvidenceRef,
+    session: &xshield_core::calibration::read_capability::CalibrationEvidenceReadSession<'_>,
+    now: UnixSeconds,
+) {
+    let fake_lease =
+        xshield_core::calibration::read_capability::CalibrationEvidenceBatchLease::from_issued(
+            session.lease().lease_id().clone(),
+            capability.capability_id().clone(),
+            fixture.tenant.clone(),
+            fixture.site.clone(),
+            session.lease().not_before(),
+            session.lease().expires_at(),
+            [9; 32],
+        )
+        .expect("fake lease has valid local shape");
+    let fake_session = capability
+        .bind_issued_batch_lease(fake_lease, now)
+        .expect("fake session has valid local shape");
+    let fake_request = CalibrationEvidenceReadRequest::new(
+        &fake_session,
+        capability,
+        reference,
+        &fixture.tenant,
+        &fixture.site,
+        now,
+    )
+    .expect("fake request is locally valid");
+    assert!(matches!(
+        store
+            .authorize_calibration_evidence_read(&fake_request)
+            .await
+            .expect("fake lease resolves to denial"),
+        CalibrationEvidenceReadAuthorizationOutcome::Denied(
+            CalibrationEvidenceReadDenied::EvidenceNotAuthorized
+        )
+    ));
+}
+
+async fn assert_catalog_drift_denies_read(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    reference: &xshield_core::calibration::read_capability::CalibrationEvidenceRef,
+    request: &CalibrationEvidenceReadRequest<'_>,
+) {
+    sqlx::query(
+        "UPDATE xshield.artifact_catalog SET integrity_digest=$4
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(reference.artifact_id().as_str())
+    .bind("c".repeat(64))
+    .execute(pool)
+    .await
+    .expect("catalog drift updates");
+    assert!(matches!(
+        store
+            .authorize_calibration_evidence_read(request)
+            .await
+            .expect("drift resolves to denial"),
+        CalibrationEvidenceReadAuthorizationOutcome::Denied(
+            CalibrationEvidenceReadDenied::EvidenceNotAuthorized
+        )
+    ));
+    sqlx::query(
+        "UPDATE xshield.artifact_catalog SET integrity_digest=$4
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(reference.artifact_id().as_str())
+    .bind("a".repeat(64))
+    .execute(pool)
+    .await
+    .expect("catalog drift restores");
 }
 
 async fn assert_altered_capability_is_unavailable(
