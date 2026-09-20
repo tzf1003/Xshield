@@ -1049,6 +1049,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn score_call_query_keeps_provider_confidence_and_missing_confidence() {
+        for confidence in [Some(0.6), None] {
+            let mut rows = model_rows();
+            for row in &mut rows {
+                let mut payload: serde_json::Value =
+                    serde_json::from_str(&row.payload_json).unwrap();
+                payload["question_type"] = "score".into();
+                if row.event_type == "model.responded" {
+                    payload["confidence"] = serde_json::json!(confidence);
+                    payload["confidence_status"] = if confidence.is_some() {
+                        "provided"
+                    } else {
+                        "not_provided"
+                    }
+                    .into();
+                }
+                row.payload_json = payload.to_string();
+            }
+            let summary = query_model_rows(rows).await.unwrap().unwrap();
+            assert!(summary.lifecycle_complete);
+            assert_eq!(summary.question_type, "score");
+            assert_eq!(summary.confidence, confidence);
+            assert_eq!(
+                summary.confidence_status,
+                if confidence.is_some() {
+                    "provided"
+                } else {
+                    "not_provided"
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn model_call_query_rejects_provider_route_drift() {
         let mut rows = model_rows();
         for row in &mut rows {

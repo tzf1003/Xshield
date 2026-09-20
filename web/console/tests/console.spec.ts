@@ -185,6 +185,33 @@ test("queries model lifecycle and opens only reference metadata", async ({
   expect(runtimeErrors).toEqual([]);
 });
 
+test("Score query displays lifecycle and independent provider confidence", async ({
+  page,
+}) => {
+  await mockControl(page, (url) => {
+    if (!url.pathname.includes("/model-calls/")) return undefined;
+    const value = modelCallFixture();
+    for (const item of [value.model_call, ...value.model_call.events])
+      Object.assign(item, { question_type: "score", score: 73 });
+    return { body: value };
+  });
+  await connect(page);
+  await queryModel(page);
+  await expect(page.getByText("score", { exact: true })).toBeVisible();
+  await expect(page.getByText("0.8", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("73", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText("#3 · model.responded · success", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: ARTIFACT_ID, exact: true })
+    .first()
+    .click();
+  await expect(
+    page.getByRole("region", { name: "模型证据详情" }),
+  ).toContainText("application/json");
+});
+
 test("model query preserves partial Noul history and unknown absence", async ({
   page,
 }) => {

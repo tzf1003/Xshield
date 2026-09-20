@@ -397,6 +397,7 @@ async fn execute(
             result: parsed.map(|response| response.result.clone()),
             probabilities: parsed
                 .map_or_else(BTreeMap::new, |response| response.probabilities.clone()),
+            legend: parsed.and_then(|response| response.legend.clone()),
             provider_confidence: parsed.and_then(|response| response.provider_confidence),
             confidence_status,
             probability_semantics: "provider_reported_uncalibrated",
@@ -465,6 +466,8 @@ struct ModelCallRecord {
     question_type: &'static str,
     result: Option<wire::ResultValue>,
     probabilities: BTreeMap<String, f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legend: Option<BTreeMap<String, String>>,
     provider_confidence: Option<f64>,
     confidence_status: &'static str,
     probability_semantics: &'static str,
@@ -609,7 +612,7 @@ impl ModelEvent {
         if !crate::valid_name(&self.model_revision)
             || !crate::valid_name(&self.prompt_revision)
             || !crate::valid_name(&self.reason_code)
-            || !matches!(self.question_type.as_str(), "choice" | "noul")
+            || !matches!(self.question_type.as_str(), "choice" | "score" | "noul")
             || !crate::valid_confidence("model", outcome, self.confidence, &self.confidence_status)
             || (self.question_type == "noul" && self.confidence_status != "not_applicable")
             || (self.status != "success" && self.confidence.is_some())

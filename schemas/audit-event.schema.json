@@ -212,7 +212,7 @@
         },
         "model_revision": {"$ref": "#/$defs/scoped_name"},
         "prompt_revision": {"$ref": "#/$defs/scoped_name"},
-        "question_type": {"enum": ["choice", "noul"]},
+        "question_type": {"enum": ["choice", "score", "noul"]},
         "status": {
           "enum": ["started", "requested", "success", "timeout", "error", "cancelled"]
         },

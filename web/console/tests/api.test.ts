@@ -210,6 +210,38 @@ test("model call projection preserves lifecycle, missing history and Noul confid
   assert.deepEqual(await client.modelCall(MODEL_CALL_ID), missing);
 });
 
+test("Score lifecycle keeps confidence separate from score evidence", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const reportedConfidence of [0, 0.8, 1, null]) {
+    const value = modelCallFixture();
+    for (const item of [value.model_call, ...value.model_call.events]) {
+      item.question_type = "score";
+      if (item.status === "success") {
+        item.confidence = reportedConfidence;
+        item.confidence_status =
+          reportedConfidence === null ? "not_provided" : "provided";
+      }
+    }
+    const expected = structuredClone(value);
+    for (const item of [value.model_call, ...value.model_call.events])
+      Object.assign(item, { score: 73, probabilities: { "73": 1 } });
+    t.mock.method(globalThis, "fetch", async () => response(value));
+    assert.deepEqual(await client.modelCall(MODEL_CALL_ID), expected);
+  }
+  for (const invalidConfidence of [-1, 73]) {
+    const value = modelCallFixture();
+    for (const item of [value.model_call, ...value.model_call.events]) {
+      item.question_type = "score";
+      if (item.status === "success") item.confidence = invalidConfidence;
+    }
+    t.mock.method(globalThis, "fetch", async () => response(value));
+    await assert.rejects(
+      client.modelCall(MODEL_CALL_ID),
+      errorIs("INVALID_RESPONSE", 200),
+    );
+  }
+});
+
 test("model call projection accepts pending prefixes and pre-send failure", async (t) => {
   const client = new ControlClient(TOKEN);
   for (const length of [1, 2]) {
@@ -292,6 +324,13 @@ test("model call projection rejects contradictory lifecycle and malformed identi
       },
       (value) => {
         value.model_call.events[2]!.question_type = "noul";
+      },
+      (value) => {
+        for (const item of [value.model_call, ...value.model_call.events])
+          item.question_type = "unknown";
+      },
+      (value) => {
+        value.model_call.events[2]!.question_type = "score";
       },
       (value) => {
         value.model_call.events[2]!.event_type = "model.cancelled";

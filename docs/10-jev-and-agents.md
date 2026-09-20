@@ -74,7 +74,7 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 `xshield-model-eval --approved-input PRIVATE_JSON_FILE` 接受操作员已批准对外披露、预先脱敏的单个私有 JSON 文件。`approval_ref` 是关联批准记录的标识，不是权限证明；部署账号、文件权限和外发审批由操作者保证。tenant/site 来自可信环境，request/model-call ID 由服务端生成。CLI 只产出评估证据，不连接网关资格写入路径；`MODEL_EVALUATED/PASS` 表示调用与取证完成，不表示业务操作获准。
 
-默认请求固定发送到 `https://ai-gateway.vercel.sh/typesafe/v1/systemone`，wire model 为 `typesafe-ai/jev`，Bearer 由 `AI_GATEWAY_API_KEY` 独立注入；使用原生 TLS 信任根，拒绝重定向和动态目标。`XSHIELD_JEV_ROUTE=direct` 才启用兼容的 TypeSafe 直连（`XSHIELD_JEV_API_KEY`、`https://api.typesafe.ai/v1/systemone`、`jev-1.13.0`）。模型生命周期和调用记录分别保留 `provider` 与独立的 `provider_model_id`；内部审计仍记录固定 `jev-1.13.0`，Gateway 别名没有精确版本证明时 `resolved_model_revision=null`。支持单题 Choice 与 Noul；Choice 要求 2–32 个候选，包含 NONE/UNKNOWN，返回完整候选概率且最高概率选项匹配。Noul 的 confidence 始终为 `null/not_applicable`。缺少用量保持 unknown，不估造 token 或成本。
+默认请求固定发送到 `https://ai-gateway.vercel.sh/typesafe/v1/systemone`，wire model 为 `typesafe-ai/jev`，Bearer 由 `AI_GATEWAY_API_KEY` 独立注入；使用原生 TLS 信任根，拒绝重定向和动态目标。`XSHIELD_JEV_ROUTE=direct` 才启用兼容的 TypeSafe 直连（`XSHIELD_JEV_API_KEY`、`https://api.typesafe.ai/v1/systemone`、`jev-1.13.0`）。模型生命周期和调用记录分别保留 `provider` 与独立的 `provider_model_id`；内部审计仍记录固定 `jev-1.13.0`，Gateway 别名没有精确版本证明时 `resolved_model_revision=null`。支持单题 Choice、Score 与 Noul（Score 详见 10.11）；Choice 要求 2–32 个候选，包含 NONE/UNKNOWN，返回完整候选概率且最高概率选项匹配。Noul 的 confidence 始终为 `null/not_applicable`。缺少用量保持 unknown，不估造 token 或成本。
 
 闭环顺序：`model.started` → 内部输入证据 → 冻结实际 API JSON 证据 → `model.requested` → 单次 HTTP → 响应捕获及规范化调用记录 → `model.responded/failed/timeout/cancelled`。每个证据对象先在 vault 耐久落盘，再与 `evidence.cataloged` outbox 原子提交目录。输入目录或审计屏障失败会阻止 HTTP；调用后的取证失败产生依赖失败终态。终态自身持久失败时退出非零，下次启动将未完成调用补记为 `MODEL_OUTCOME_UNKNOWN`，供应商是否已计费保持未知。
 
@@ -82,7 +82,7 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 资源上限：输入与实际 API JSON 各 8 KiB，文本合计最多 6144 字符，响应最多 64 KiB，每个证据文档最多 512 KiB、保留 24 小时；发送至读体总期限 10 秒，catalog 操作每步 5 秒。证据根目录排他锁限制一次一个任务，预留四对象最坏空间，目录最多 100000 文件。429 记 `MODEL_RATE_LIMITED`、529 记 `MODEL_OVERLOADED`，保留合法 Retry-After 秒数供操作员决策；每次 CLI 调用至多一次 HTTP。重启认证扫描最多 10000 条专用 journal 记录，补记中断终态并保留因果引用；接近上限时按 RB-11 轮换目录。
 
-后续增量包括 Score、缓存、多实例站点预算、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。当前未执行真实供应商推理或准确率/校准测试。
+后续增量包括缓存、多实例站点预算、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。Score 增量见 10.11；当前未执行真实供应商推理或准确率/校准测试。
 
 ## 10.10 Jev 供应商接入决定
 
@@ -91,3 +91,15 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 秘密由运行环境管理，约定引用 `AI_GATEWAY_API_KEY`；仓库、前端构建、样例和审计只保留引用，禁止保存密钥值。macOS 本地开发可使用钥匙串服务 `Xshield.Jev.VercelAIGateway`、账号 `Xshield` 保存该秘密，并在适配器运行时由秘密端口读取或注入进程环境。
 
 已完成固定 Gateway 适配并将其作为默认路由；当前 CLI 仍不执行自动重试、fallback 或资格写入。`XSHIELD_JEV_API_KEY` 仅可在显式 `direct` 路由发往 TypeSafe 直连目标，不得注入 Gateway；Gateway 响应的 `provider_metadata.gateway.routing` 仅做有界契约校验，不把 alias 当作精确版本。外发输入审批、固定 HTTPS 目标、硬拒绝优先及 Noul 空置信度要求继续生效。
+
+## 10.11 已实现 Score 离线评估
+
+同一 `xshield-model-eval` 入口接受 `question={"type":"score","instructions":"按批准档位评估严重程度","criteria":["低","中","高"]}`。`criteria` 必须为 2–10 项有序字符串数组，位置对应零起始档位；每项最多 512 字符，指令最多 1024 字符，全部文本继续计入 6144 字符和 8 KiB 输入/API 预算。内部输入与实际外发载荷分别保存，批准与脱敏责任沿用 10.9。
+
+2026-09-20 核验的 [TypeSafe HTTP API](https://docs.typesafe.ai/api#score) 与 [Score 响应契约](https://docs.typesafe.ai/primitives/score#response-structure) 定义 `score` 为各档位编号的概率加权平均。响应必须提供精确匹配输入的 `legend`、完整 `probabilities`、有限且位于 `[0,n-1]` 的评分；档位键严格为 `0` 至 `n-1`，重复、缺失、额外或非规范键均拒绝。概率各在 `[0,1]`，总和与 1 的绝对误差最多 `1e-6`；评分与加权平均的绝对误差最多 `1e-5`。两项容差为本地序列化校验策略，供应商文档未承诺舍入精度。
+
+成功调用证据记录数值 `result`、完整 `legend` 与 `probabilities`。`provider_confidence` 保留供应商原值，缺失或 null 时为 `null/not_provided`；评分、概率和置信度分别表达不同事实。非法响应仍保存实际响应捕获文档，以 `MODEL_RESPONSE_INVALID` 收敛终态，规范化结果为 null；429 使用 `MODEL_RATE_LIMITED`，一次评估只发送一次，中断恢复补记 `MODEL_OUTCOME_UNKNOWN`。模型元数据查询与控制台可显示 Score 生命周期，评分和档位正文通过原文审批读取。
+
+Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 和 `cost`、`marketCost`、`surchargeCost`、`gatewayCost` 十进制字符串。标识最多 256 字节可见 ASCII，费用字符串最多 64 字节；同时保留已接受的 routing 字段。费用只校验并保存在原响应证据，不据此推算用量或结算，Gateway 别名仍保留未知精确版本。
+
+先升级模型 journal 发布器、控制查询服务及控制台，再启用 Score 生产者；旧版读取端只接受 Choice/Noul，遇到 Score 会严格拒绝。需要回退时先停止新增 Score 调用，保留已产生的 journal、证据、catalog 与水位，并继续用支持 Score 的读取/发布端处理历史。本次无需数据库迁移或新依赖。

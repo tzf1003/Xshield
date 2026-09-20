@@ -173,7 +173,7 @@ export type ModelCallFacts = {
   provider_model_id: string | null;
   model_revision: string;
   prompt_revision: string;
-  question_type: "choice" | "noul";
+  question_type: "choice" | "score" | "noul";
   status:
     | "started"
     | "requested"
@@ -399,7 +399,7 @@ function modelFacts(row: Record<string, unknown>): ModelCallFacts {
     provider_model_id,
     model_revision: name(row.model_revision),
     prompt_revision: name(row.prompt_revision),
-    question_type: choice(row.question_type, ["choice", "noul"]),
+    question_type: choice(row.question_type, ["choice", "score", "noul"]),
     status: choice(row.status, [
       "started",
       "requested",

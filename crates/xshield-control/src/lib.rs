@@ -7313,7 +7313,18 @@ mod tests {
         payload_object.insert("confidence".to_owned(), Value::Null);
         payload_object.insert("confidence_status".to_owned(), "not_applicable".into());
         historical.payload_json = payload.to_string();
+        let score_rows: Vec<_> = model_rows
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                let mut payload: Value = serde_json::from_str(&row.payload_json).unwrap();
+                payload["question_type"] = "score".into();
+                row.payload_json = payload.to_string();
+                row
+            })
+            .collect();
         mock.add(test::handlers::provide(model_rows));
+        mock.add(test::handlers::provide(score_rows));
         mock.add(test::handlers::provide([historical]));
         mock.add(test::handlers::provide(Vec::<ModelRow>::new()));
         mock.add(test::handlers::exception(158));
@@ -7347,27 +7358,27 @@ mod tests {
             "console wire contract failed; phase={:?}",
             status.code()
         );
-        assert_eq!(events.len(), 10);
+        assert_eq!(events.len(), 11);
         let model_reads: Vec<_> = events
             .iter()
             .filter(|event| event["event_type"] == "console.model.read")
             .collect();
-        assert_eq!(model_reads.len(), 4);
+        assert_eq!(model_reads.len(), 5);
         for event in &model_reads {
             assert_eq!(event["payload"]["target_model_call_id"], model_id);
         }
         assert!(
-            model_reads[..3]
+            model_reads[..4]
                 .iter()
                 .all(|event| { event["payload"]["reason_code"] == "CONTROL_MODEL_CALL_READ" })
         );
         assert_eq!(
-            model_reads[3]["payload"]["reason_code"],
+            model_reads[4]["payload"]["reason_code"],
             "CONTROL_QUERY_BUDGET_EXCEEDED"
         );
         assert_eq!(model_reads[0]["evidence_refs"].as_array().unwrap().len(), 3);
         assert!(
-            model_reads[2]["evidence_refs"]
+            model_reads[3]["evidence_refs"]
                 .as_array()
                 .unwrap()
                 .is_empty()

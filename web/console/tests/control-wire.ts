@@ -72,6 +72,7 @@ try {
   assert.equal(model.model_call?.provider, "vercel_ai_gateway");
   assert.equal(model.model_call?.provider_model_id, "typesafe-ai/jev");
   assert.equal(model.model_call?.model_revision, "jev-1.13.0");
+  assert.equal(model.model_call?.question_type, "choice");
   assert.equal(model.model_call?.confidence, 0.8);
   assert.deepEqual(
     model.model_call?.events.map((event) => event.status),
@@ -86,6 +87,20 @@ try {
     "artifact_018f2a3b-4c5d-7000-8000-000000000011",
   );
   phase = 6;
+  const score = await client.modelCall(modelId);
+  assert.equal(score.completeness, "complete");
+  assert.equal(score.model_call?.question_type, "score");
+  assert.equal(score.model_call?.confidence, 0.8);
+  assert.equal(score.model_call?.confidence_status, "provided");
+  assert.deepEqual(
+    score.model_call?.events.map((event) => [event.question_type, event.status]),
+    [
+      ["score", "started"],
+      ["score", "requested"],
+      ["score", "success"],
+    ],
+  );
+  phase = 7;
   const historical = await client.modelCall(modelId);
   assert.equal(historical.completeness, "partial");
   assert.equal(historical.model_call?.provider, null);
@@ -93,7 +108,7 @@ try {
   assert.equal(historical.model_call?.question_type, "noul");
   assert.equal(historical.model_call?.confidence, null);
   assert.equal(historical.model_call?.confidence_status, "not_applicable");
-  phase = 7;
+  phase = 8;
   const missing = await client.modelCall(modelId);
   assert.equal(missing.completeness, "not_indexed");
   assert.equal(missing.found, false);
@@ -105,22 +120,22 @@ try {
     assert.match(error.requestId ?? "", /^req_[0-9a-f-]+$/);
     return true;
   };
-  phase = 8;
+  phase = 9;
   await assert.rejects(
     client.modelCall(modelId),
     failure("CONTROL_QUERY_BUDGET_EXCEEDED", 429),
   );
-  phase = 9;
+  phase = 10;
   await assert.rejects(
     client.evidence(request),
     failure("CONTROL_CATALOG_UNAVAILABLE", 503),
   );
-  phase = 10;
+  phase = 11;
   await assert.rejects(
     client.artifact("artifact_018f2a3b-4c5d-7000-8000-000000000011"),
     failure("CONTROL_CATALOG_UNAVAILABLE", 503),
   );
-  phase = 11;
+  phase = 12;
   const unauthorized = new ControlClient(
     "synthetic-invalid-management-token-000000000000",
   );

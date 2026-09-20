@@ -10,6 +10,11 @@ use xshield_core::domain::{ArtifactId, ModelCallId, RequestId};
 
 use super::transport::{DIRECT_MODEL, GATEWAY_MODEL};
 
+mod gateway_metadata;
+use gateway_metadata::ProviderMetadata;
+#[cfg(test)]
+mod score_tests;
+
 const INPUT_INVALID: &str = "MODEL_INPUT_INVALID";
 const RESPONSE_INVALID: &str = "MODEL_RESPONSE_INVALID";
 const MODEL_REVISION: &str = "jev-1.13.0";
@@ -17,6 +22,9 @@ const INPUT_BYTES_MAX: usize = 8_192;
 const RESPONSE_BYTES_MAX: usize = 65_536;
 const TEXT_CHARS_MAX: usize = 6_144;
 const OPTIONS_MAX: usize = 32;
+const SCORE_LEVELS_MAX: usize = 10;
+// Provider decimal serialization may round each probability and the mean.
+const SCORE_MEAN_TOLERANCE: f64 = 1e-5;
 
 /// Validated operator input with a pinned model and bounded text.
 ///
@@ -43,6 +51,10 @@ enum Question {
         instructions: String,
         #[serde(deserialize_with = "unique_options")]
         criteria: BTreeMap<String, String>,
+    },
+    Score {
+        instructions: String,
+        criteria: Vec<String>,
     },
     Noul {
         instructions: String,
@@ -91,6 +103,22 @@ impl Input {
                     .map(|(key, description)| key.chars().count() + description.chars().count())
                     .sum::<usize>();
                 (instructions, chars)
+            }
+            Question::Score {
+                instructions,
+                criteria,
+            } => {
+                if !(2..=SCORE_LEVELS_MAX).contains(&criteria.len())
+                    || criteria
+                        .iter()
+                        .any(|description| !valid_text(description, 512))
+                {
+                    return Err(INPUT_INVALID);
+                }
+                (
+                    instructions,
+                    criteria.iter().map(|value| value.chars().count()).sum(),
+                )
             }
             Question::Noul { instructions } => (instructions, 0),
         };
@@ -210,6 +238,7 @@ impl Input {
     pub(super) fn question_type(&self) -> &'static str {
         match &self.0.question {
             Question::Choice { .. } => "choice",
+            Question::Score { .. } => "score",
             Question::Noul { .. } => "noul",
         }
     }
@@ -291,10 +320,12 @@ struct Questions<'a> {
 pub(super) struct Response {
     /// Provider model version, verified against the requested pinned revision.
     pub(super) model_revision: String,
-    /// Choice identifier or Noul yes-probability.
+    /// Choice identifier, Score expected level, or Noul yes-probability.
     pub(super) result: ResultValue,
-    /// Complete Choice distribution; empty for Noul.
+    /// Complete Choice/Score distribution; empty for Noul.
     pub(super) probabilities: BTreeMap<String, f64>,
+    /// Exact approved zero-based Score labels; other primitives have no legend.
+    pub(super) legend: Option<BTreeMap<String, String>>,
     /// Provider confidence as reported; Noul and missing values remain null.
     pub(super) provider_confidence: Option<f64>,
     /// `provided`, `not_provided`, or `not_applicable`.
@@ -314,6 +345,8 @@ pub(super) struct Response {
 pub(super) enum ResultValue {
     /// The highest-probability approved candidate.
     Choice(String),
+    /// Expected zero-based level on the approved ordered scale.
+    Score(f64),
     /// Provider yes-probability, bounded to the inclusive unit interval.
     Noul(f64),
 }
@@ -330,34 +363,6 @@ struct ResponseDto {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProviderMetadata {
-    gateway: Option<GatewayMetadata>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GatewayMetadata {
-    routing: Option<GatewayRouting>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GatewayRouting {
-    #[serde(rename = "originalModelId")]
-    original_model_id: Option<String>,
-    #[serde(rename = "resolvedProvider")]
-    resolved_provider: Option<String>,
-    #[serde(rename = "canonicalSlug")]
-    canonical_slug: Option<String>,
-    #[serde(rename = "finalProvider")]
-    final_provider: Option<String>,
-    #[serde(rename = "generationId")]
-    generation_id: Option<String>,
-    cost: Option<f64>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Answers {
     evaluation: Answer,
 }
@@ -367,6 +372,14 @@ struct Answers {
 enum Answer {
     Choice {
         choice: String,
+        #[serde(deserialize_with = "unique_options")]
+        probabilities: BTreeMap<String, f64>,
+        confidence: Option<f64>,
+    },
+    Score {
+        score: f64,
+        #[serde(deserialize_with = "unique_options")]
+        legend: BTreeMap<String, String>,
         #[serde(deserialize_with = "unique_options")]
         probabilities: BTreeMap<String, f64>,
         confidence: Option<f64>,
@@ -395,6 +408,7 @@ impl Response {
         Self::parse_for_model(bytes, input, DIRECT_MODEL)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn parse_for_model(
         bytes: &[u8],
         input: &Input,
@@ -416,7 +430,7 @@ impl Response {
         if let Some(metadata) = dto.provider_metadata {
             metadata.validate()?;
         }
-        let (result, probabilities, provider_confidence, confidence_status) =
+        let (result, probabilities, provider_confidence, confidence_status, legend) =
             match (dto.answers.evaluation, &input.0.question) {
                 (
                     Answer::Choice {
@@ -446,6 +460,29 @@ impl Response {
                         probabilities,
                         confidence,
                         status,
+                        None,
+                    )
+                }
+                (
+                    Answer::Score {
+                        score,
+                        legend,
+                        probabilities,
+                        confidence,
+                    },
+                    Question::Score { criteria, .. },
+                ) => {
+                    validate_score(score, &legend, &probabilities, confidence, criteria)?;
+                    (
+                        ResultValue::Score(score),
+                        probabilities,
+                        confidence,
+                        if confidence.is_some() {
+                            "provided"
+                        } else {
+                            "not_provided"
+                        },
+                        Some(legend),
                     )
                 }
                 (Answer::Noul { noul }, Question::Noul { .. }) if unit_interval(noul) => (
@@ -453,6 +490,7 @@ impl Response {
                     BTreeMap::new(),
                     None,
                     "not_applicable",
+                    None,
                 ),
                 _ => return Err(RESPONSE_INVALID),
             };
@@ -467,6 +505,7 @@ impl Response {
             resolved_model_revision: (provider_model == DIRECT_MODEL).then_some(dto.model),
             result,
             probabilities,
+            legend,
             provider_confidence,
             confidence_status,
             input_tokens: usage.input_tokens,
@@ -476,36 +515,40 @@ impl Response {
     }
 }
 
-impl ProviderMetadata {
-    fn validate(self) -> Result<(), &'static str> {
-        let Some(gateway) = self.gateway else {
-            return Ok(());
-        };
-        let Some(routing) = gateway.routing else {
-            return Ok(());
-        };
-        for value in [
-            routing.original_model_id,
-            routing.resolved_provider,
-            routing.canonical_slug,
-            routing.final_provider,
-            routing.generation_id,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if value.is_empty() || value.len() > 256 || !value.is_ascii() {
-                return Err(RESPONSE_INVALID);
-            }
-        }
-        if routing
-            .cost
-            .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
-        {
+// The scale is operator-approved; a provider cannot relabel levels or supply a
+// most-likely class in place of the documented probability-weighted mean.
+fn validate_score(
+    score: f64,
+    legend: &BTreeMap<String, String>,
+    probabilities: &BTreeMap<String, f64>,
+    confidence: Option<f64>,
+    criteria: &[String],
+) -> Result<(), &'static str> {
+    let levels = u32::try_from(criteria.len()).map_err(|_| RESPONSE_INVALID)?;
+    if !(2..=10).contains(&levels)
+        || !score.is_finite()
+        || !(0.0..=f64::from(levels - 1)).contains(&score)
+        || legend.len() != criteria.len()
+        || probabilities.len() != criteria.len()
+        || confidence.is_some_and(|value| !unit_interval(value))
+    {
+        return Err(RESPONSE_INVALID);
+    }
+    let mut mean = 0.0;
+    let mut sum = 0.0;
+    for (index, description) in criteria.iter().enumerate() {
+        let key = index.to_string();
+        let probability = probabilities.get(&key).ok_or(RESPONSE_INVALID)?;
+        if legend.get(&key) != Some(description) || !unit_interval(*probability) {
             return Err(RESPONSE_INVALID);
         }
-        Ok(())
+        mean += f64::from(u32::try_from(index).map_err(|_| RESPONSE_INVALID)?) * probability;
+        sum += probability;
     }
+    if (sum - 1.0).abs() > 1e-6 || (score - mean).abs() > SCORE_MEAN_TOLERANCE {
+        return Err(RESPONSE_INVALID);
+    }
+    Ok(())
 }
 
 fn unit_interval(value: f64) -> bool {

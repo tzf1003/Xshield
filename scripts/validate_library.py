@@ -50,7 +50,8 @@ def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: d
         ('confidence_absent', {'confidence': None, 'confidence_status': 'not_provided'}, True),
         ('noul', {'question_type': 'noul', 'confidence': None, 'confidence_status': 'not_applicable'}, True),
         ('wrong_call_prefix', {'model_call_id': choice['model_call_id'].replace('mdl_', 'model_')}, False),
-        ('unsupported_primitive', {'question_type': 'score'}, False),
+        ('score', {'question_type': 'score'}, True),
+        ('unsupported_primitive', {'question_type': 'unknown'}, False),
         ('empty_revision', {'model_revision': ''}, False),
         ('oversized_revision', {'model_revision': 'r' * 129}, False),
         ('newline_revision', {'model_revision': 'jev-1.13.0\n'}, False),
@@ -96,6 +97,27 @@ def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: d
                   capture_status='complete', retry_after_seconds=None, provider_request_id=None,
                   schema_validation='valid', provider_internal='unavailable')
     check('model_capture:success', valid(schemas['model-call'], record))
+    score = copy.deepcopy(record)
+    score.update(question_type='score', result=0.7,
+                 legend={'0': 'Low', '1': 'Medium', '2': 'High'},
+                 probabilities={'0': 0.6, '1': 0.1, '2': 0.3})
+    check('model_capture:score', valid(schemas['model-call'], score))
+    for label, fields in [
+        ('result_type', {'result': '0.7'}),
+        ('result_range', {'result': 10}),
+        ('result_null', {'result': None}),
+        ('legend_null', {'legend': None}),
+        ('legend_missing_level', {'legend': {'0': 'Low'}}),
+        ('legend_noncanonical', {'legend': {'0': 'Low', '01': 'High'}}),
+        ('distribution_empty', {'probabilities': {}}),
+        ('distribution_key', {'probabilities': {'0': 0.6, '01': 0.4}}),
+    ]:
+        invalid = copy.deepcopy(score)
+        invalid.update(fields)
+        check('model_capture:score_' + label, not valid(schemas['model-call'], invalid))
+    missing_legend = copy.deepcopy(score)
+    del missing_legend['legend']
+    check('model_capture:score_missing_legend', not valid(schemas['model-call'], missing_legend))
     for status in ['error', 'timeout', 'cancelled']:
         failure = copy.deepcopy(record)
         failure.update(status=status, output_artifact_id=None, result=None, probabilities={},
