@@ -167,6 +167,16 @@ impl JevClient {
         endpoint: &str,
         timeout: Duration,
     ) -> Result<Self, &'static str> {
+        Self::for_test_with_route(JevRoute::Direct, api_key, endpoint, timeout)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test_with_route(
+        route: JevRoute,
+        api_key: Zeroizing<String>,
+        endpoint: &str,
+        timeout: Duration,
+    ) -> Result<Self, &'static str> {
         validate_key(&api_key)?;
         let uri: Uri = endpoint.parse().map_err(|_| "MODEL_ENDPOINT_INVALID")?;
         let port = uri.port_u16().ok_or("MODEL_ENDPOINT_INVALID")?;
@@ -187,7 +197,7 @@ impl JevClient {
             api_key,
             endpoint: uri,
             timeout,
-            route: JevRoute::Direct,
+            route,
         })
     }
 
@@ -564,6 +574,33 @@ mod tests {
         assert_eq!(result.provider_request_id.as_deref(), Some("req_1.a-b"));
         assert_eq!(result.retry_after_seconds, Some(42));
         assert_eq!(result.bytes_observed, 2);
+    }
+
+    #[tokio::test]
+    async fn gateway_loopback_request_keeps_alias_and_bearer_binding() {
+        let response = response(200, "Content-Type: application/json\r\n", b"{}");
+        let (endpoint, server) = server(response, false).await;
+        let client = JevClient::for_test_with_route(
+            JevRoute::Gateway,
+            Zeroizing::new(KEY.to_owned()),
+            &endpoint,
+            DEADLINE,
+        )
+        .unwrap();
+        let (sender, mut cancel) = oneshot::channel();
+        let result = client
+            .send(
+                format!(r#"{{"model":"{GATEWAY_MODEL}"}}"#).as_bytes(),
+                &mut cancel,
+            )
+            .await;
+        drop(sender);
+        let request = server.await.unwrap();
+        let headers = std::str::from_utf8(&request).unwrap();
+        assert!(headers.starts_with("POST /v1/systemone HTTP/1.1\r\n"));
+        assert!(headers.contains(&format!("authorization: Bearer {KEY}\r\n")));
+        assert!(headers.ends_with(&format!(r#"{{"model":"{GATEWAY_MODEL}"}}"#)));
+        assert_eq!(result.failure, None);
     }
 
     #[tokio::test]
