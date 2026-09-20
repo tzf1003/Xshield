@@ -1,10 +1,40 @@
 /** Read-only control API boundary. Credentials remain in this client's memory. */
-export type Watermark = { producer_boot_id: string; producer_sequence: number };
-export type Envelope = {
-  request_id: string;
-  tenant_id: string;
-  site_id: string;
-};
+import {
+  ApiError,
+  messages,
+  uuid,
+  requestPattern,
+  artifactPattern,
+  modelCallPattern,
+  eventPattern,
+  cursorPattern,
+  ensure,
+  object,
+  text,
+  name,
+  id,
+  integer,
+  bool,
+  choice,
+  nullable,
+  list,
+  timestamp,
+  references,
+  envelope,
+  watermarked,
+  pagination,
+  confidence,
+} from "./api-contract.ts";
+import type { Envelope, Watermark, ErrorCode } from "./api-contract.ts";
+export { ApiError } from "./api-contract.ts";
+export type { Envelope, Watermark } from "./api-contract.ts";
+import {
+  validateSearchPlan,
+  validateSearchCursor,
+  searchPlanDigest,
+  decodeSearchResponse,
+} from "./search.ts";
+import type { SearchPlan, SearchResponse } from "./search.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -150,210 +180,7 @@ export type ModelCallResponse = Envelope & {
   model_call: ModelCall | null;
 };
 
-const messages = {
-  CONTROL_AUTH_REQUIRED: "管理凭证无效或已过期，请重新连接。",
-  CONTROL_SCOPE_DENIED: "当前身份没有此作用域的只读权限。",
-  CONTROL_RATE_LIMITED: "管理请求已达频率上限，请稍后重试。",
-  CONTROL_REQUEST_ID_INVALID: "请输入规范的请求 ID。",
-  CONTROL_ARTIFACT_ID_INVALID: "证据 ID 格式无效。",
-  CONTROL_MODEL_CALL_ID_INVALID: "请输入规范的模型调用 ID。",
-  CONTROL_QUERY_BUDGET_EXCEEDED: "查询超出服务预算，请联系管理员。",
-  CONTROL_QUERY_CAPACITY_EXHAUSTED: "调查查询服务繁忙，请稍后重试。",
-  CONTROL_QUERY_TIMEOUT: "调查查询超时，请稍后重试。",
-  CONTROL_CURSOR_INVALID: "分页凭证已失效，请重新查询。",
-  CONTROL_CURSOR_UNAVAILABLE: "分页服务暂时不可用，请稍后重试。",
-  CONTROL_INDEX_UNAVAILABLE: "审计索引暂时不可用，请稍后重试。",
-  CONTROL_CATALOG_UNAVAILABLE: "证据目录暂时不可用，请稍后重试。",
-  CONTROL_HEALTH_UNAVAILABLE: "索引水位暂时不可用，请稍后重试。",
-  CONTROL_RATE_UNAVAILABLE: "管理服务暂时不可用，请稍后重试。",
-  CONTROL_CLOCK_UNAVAILABLE: "管理服务暂时不可用，请稍后重试。",
-  CONTROL_INTERNAL: "管理服务暂时不可用，请稍后重试。",
-  AUDIT_DURABILITY_FAILED: "必需的访问审计暂时不可用，结果尚未释放。",
-  INVALID_CREDENTIAL: "请输入有效的管理凭证。",
-  INVALID_RESPONSE: "服务响应未通过契约校验，请联系管理员。",
-  RESPONSE_TOO_LARGE: "服务响应超过读取上限，请联系管理员。",
-  REQUEST_TIMEOUT: "查询超时，请稍后重试。",
-  REQUEST_ABORTED: "查询已取消。",
-  NETWORK_UNAVAILABLE: "无法连接管理服务，请检查连接后重试。",
-  HTTP_ERROR: "管理服务返回异常状态，请联系管理员。",
-} as const;
-type ErrorCode = keyof typeof messages;
-
-/** Safe diagnostics: server messages, response bodies and transport errors are never retained. */
-export class ApiError extends Error {
-  readonly code: ErrorCode;
-  readonly status: number;
-  readonly requestId: string | null;
-  constructor(code: ErrorCode, status = 0, requestId: string | null = null) {
-    super(messages[code]);
-    this.name = "ApiError";
-    this.code = code;
-    this.status = status;
-    this.requestId = requestId;
-  }
-}
-
-const uuid =
-  "[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
-const requestPattern = new RegExp(`^req_${uuid}$`);
-const artifactPattern = new RegExp(`^artifact_${uuid}$`);
-const modelCallPattern = new RegExp(`^mdl_${uuid}$`);
-const eventPattern = new RegExp(`^ev_${uuid}$`);
-const cursorPattern = /^[A-Za-z0-9_.-]{1,160}$/;
 const maxBytes = 16 * 1024 * 1024;
-
-function ensure(condition: unknown): asserts condition {
-  if (!condition) throw new ApiError("INVALID_RESPONSE");
-}
-function object(value: unknown): Record<string, unknown> {
-  ensure(value !== null && typeof value === "object" && !Array.isArray(value));
-  return value as Record<string, unknown>;
-}
-function text(value: unknown, max = 128, empty = false): string {
-  ensure(
-    typeof value === "string" &&
-      value.length <= max &&
-      (empty || value.length > 0),
-  );
-  ensure(!/[\u0000-\u001f\u007f]/.test(value));
-  return value;
-}
-function name(value: unknown, empty = false): string {
-  const result = text(value, 128, empty);
-  ensure((empty && result === "") || /^[A-Za-z0-9_.-]+$/.test(result));
-  return result;
-}
-function id(value: unknown, pattern: RegExp): string {
-  const result = text(value);
-  ensure(pattern.test(result));
-  return result;
-}
-function integer(
-  value: unknown,
-  min = 0,
-  max = Number.MAX_SAFE_INTEGER,
-): number {
-  ensure(
-    typeof value === "number" &&
-      Number.isSafeInteger(value) &&
-      value >= min &&
-      value <= max,
-  );
-  return value;
-}
-function bool(value: unknown): boolean {
-  ensure(typeof value === "boolean");
-  return value;
-}
-function choice<T extends string>(value: unknown, values: readonly T[]): T {
-  ensure(
-    typeof value === "string" && (values as readonly string[]).includes(value),
-  );
-  return value as T;
-}
-function nullable<T>(value: unknown, decode: (value: unknown) => T): T | null {
-  return value === null ? null : decode(value);
-}
-function list<T>(
-  value: unknown,
-  max: number,
-  decode: (value: unknown) => T,
-): T[] {
-  ensure(Array.isArray(value) && value.length <= max);
-  return value.map(decode);
-}
-function timestamp(value: unknown): string {
-  const result = text(value, 40);
-  ensure(
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)$/.test(
-      result,
-    ),
-  );
-  ensure(Number.isFinite(Date.parse(result)));
-  return result;
-}
-function references(value: unknown, pattern: RegExp, max = 256): string[] {
-  const result = list(value, max, (item) => id(item, pattern));
-  ensure(new Set(result).size === result.length);
-  return result;
-}
-function envelope(value: Record<string, unknown>): Envelope {
-  return {
-    request_id: id(value.request_id, requestPattern),
-    tenant_id: name(value.tenant_id),
-    site_id: name(value.site_id),
-  };
-}
-function watermarked(value: Record<string, unknown>) {
-  return {
-    as_of: timestamp(value.as_of),
-    has_gaps: bool(value.has_gaps),
-    index_watermark: nullable(value.index_watermark, (item) => {
-      const watermark = object(item);
-      return {
-        producer_boot_id: id(
-          watermark.producer_boot_id,
-          new RegExp(`^${uuid}$`),
-        ),
-        producer_sequence: integer(watermark.producer_sequence, 1),
-      };
-    }),
-  };
-}
-function pagination(value: Record<string, unknown>) {
-  const truncated = bool(value.truncated);
-  const next_cursor = nullable(value.next_cursor, (item) => {
-    const cursor = text(item, 160);
-    ensure(cursorPattern.test(cursor));
-    return cursor;
-  });
-  ensure(truncated === (next_cursor !== null));
-  return { truncated, next_cursor };
-}
-function confidence(value: Record<string, unknown>, allowEmpty = false) {
-  const proof_kind = choice(
-    value.proof_kind,
-    allowEmpty
-      ? (["", "deterministic", "model", "observation", "none"] as const)
-      : (["deterministic", "model", "observation", "none"] as const),
-  );
-  const confidence_status = choice(
-    value.confidence_status,
-    allowEmpty
-      ? ([
-          "",
-          "provided",
-          "not_applicable",
-          "not_provided",
-          "unavailable",
-        ] as const)
-      : ([
-          "provided",
-          "not_applicable",
-          "not_provided",
-          "unavailable",
-        ] as const),
-  );
-  const confidence = nullable(value.confidence, (item) => {
-    ensure(
-      typeof item === "number" &&
-        Number.isFinite(item) &&
-        item >= 0 &&
-        item <= 1,
-    );
-    return item;
-  });
-  ensure((confidence !== null) === (confidence_status === "provided"));
-  ensure(
-    proof_kind !== "deterministic" ||
-      (confidence === null && confidence_status === "not_applicable"),
-  );
-  ensure(
-    !["SKIPPED", "CANCELLED"].includes(String(value.outcome)) ||
-      confidence === null,
-  );
-  return { proof_kind, confidence, confidence_status };
-}
 function stage(value: unknown): Stage {
   const row = object(value);
   const first_request_seq = integer(row.first_request_seq, 1, 0xffff_ffff);
@@ -759,7 +586,7 @@ async function readJson(
   }
 }
 
-/** Fixed GET routes. Callers own session disposal and cross-response scope checks. */
+/** Fixed read endpoints. Callers own session disposal and cross-response scope checks. */
 export class ControlClient {
   #authorization: string;
   constructor(token: string) {
@@ -785,10 +612,11 @@ export class ControlClient {
     }
   }
 
-  async #get<T>(
+  async #request<T>(
     path: string,
     decode: (value: unknown) => T,
     signal?: AbortSignal,
+    body?: string,
   ): Promise<T> {
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), 15_000);
@@ -799,11 +627,13 @@ export class ControlClient {
     try {
       combined.throwIfAborted();
       const response = await fetch(`/control/v1/${path}`, {
-        method: "GET",
+        method: body === undefined ? "GET" : "POST",
         headers: {
           Authorization: this.#authorization,
           Accept: "application/json",
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         },
+        ...(body === undefined ? {} : { body }),
         credentials: "omit",
         cache: "no-store",
         redirect: "error",
@@ -847,7 +677,7 @@ export class ControlClient {
     signal?: AbortSignal,
   ): Promise<SummaryResponse> {
     this.#requestId(requestId);
-    return this.#get(
+    return this.#request(
       `requests/${requestId}`,
       (value) => {
         const row = object(value);
@@ -888,7 +718,7 @@ export class ControlClient {
     signal?: AbortSignal,
   ): Promise<EventsResponse> {
     this.#requestId(requestId);
-    return this.#get(
+    return this.#request(
       `requests/${requestId}/events${this.#cursor(cursor)}`,
       (value) => {
         const row = object(value);
@@ -926,7 +756,7 @@ export class ControlClient {
     signal?: AbortSignal,
   ): Promise<EvidenceResponse> {
     this.#requestId(requestId);
-    return this.#get(
+    return this.#request(
       `requests/${requestId}/evidence${this.#cursor(cursor)}`,
       (value) => {
         const row = object(value);
@@ -958,7 +788,7 @@ export class ControlClient {
   ): Promise<ArtifactResponse> {
     if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
       throw new ApiError("CONTROL_ARTIFACT_ID_INVALID");
-    return this.#get(
+    return this.#request(
       `artifacts/${artifactId}`,
       (value) => {
         const row = object(value);
@@ -988,7 +818,7 @@ export class ControlClient {
   ): Promise<ModelCallResponse> {
     if (typeof modelCallId !== "string" || !modelCallPattern.test(modelCallId))
       throw new ApiError("CONTROL_MODEL_CALL_ID_INVALID");
-    return this.#get(
+    return this.#request(
       `model-calls/${modelCallId}`,
       (value) => {
         const row = object(value);
@@ -1023,6 +853,34 @@ export class ControlClient {
         return result;
       },
       signal,
+    );
+  }
+
+  /** Execute an Investigator read query with durable server-side access audit.
+   * Copies the validated plan before asynchronous work, binds its response
+   * digest and cursor position, and shares the bounded credential-safe transport.
+   * Search permission never grants content or Observer access.
+   */
+  async search(
+    plan: SearchPlan,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<SearchResponse> {
+    const frozen = validateSearchPlan(plan);
+    validateSearchCursor(cursor, frozen);
+    if (signal?.aborted) throw new ApiError("REQUEST_ABORTED");
+    const digest = await searchPlanDigest(frozen);
+    const body = JSON.stringify({
+      ...frozen,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    if (new TextEncoder().encode(body).byteLength > 8 * 1024)
+      throw new ApiError("CONTROL_QUERY_INVALID");
+    return this.#request(
+      "search",
+      (value) => decodeSearchResponse(value, frozen, digest, cursor),
+      signal,
+      body,
     );
   }
 

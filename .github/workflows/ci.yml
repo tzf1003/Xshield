@@ -63,7 +63,7 @@ jobs:
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
       - name: Rust to console HTTP wire contract
-        run: cargo test -p xshield-control --lib console_client_reads_real_http_wire_contract -- --ignored
+        run: cargo test -p xshield-control --lib console_client_ -- --ignored
       - run: node --test sensor/test/sensor.test.mjs
       - name: PostgreSQL and transactional Outbox integration
         run: scripts/test_postgres.sh

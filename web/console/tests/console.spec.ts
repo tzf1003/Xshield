@@ -16,10 +16,16 @@ import {
   evidenceFixture,
   summaryFixture,
   modelCallFixture,
+  searchFixture,
+  SEARCH_PLAN,
 } from "./fixtures";
+import type { SearchPlan } from "../src/search";
 
 type Reply = { status?: number; body: unknown };
-type Override = (url: URL) => Reply | undefined | Promise<Reply | undefined>;
+type Override = (
+  url: URL,
+  request: Request,
+) => Reply | undefined | Promise<Reply | undefined>;
 
 /** Browser checks exercise the real client with explicit synthetic HTTP responses. */
 async function mockControl(page: Page, override?: Override) {
@@ -28,6 +34,7 @@ async function mockControl(page: Page, override?: Override) {
     method: string;
     authorized: boolean;
     cookie: string | null;
+    body: unknown;
   }[] = [];
   await page.route("**/control/v1/**", async (route) => {
     const request = route.request();
@@ -38,11 +45,15 @@ async function mockControl(page: Page, override?: Override) {
       authorized:
         (await request.headerValue("authorization")) === `Bearer ${TOKEN}`,
       cookie: await request.headerValue("cookie"),
+      body: request.postDataJSON(),
     });
-    const custom = await override?.(url);
+    const custom = await override?.(url, request);
     let reply: Reply;
     if (custom) reply = custom;
-    else if (url.pathname.startsWith("/control/v1/model-calls/")) {
+    else if (url.pathname === "/control/v1/search") {
+      const { cursor, ...plan } = request.postDataJSON();
+      reply = { body: await searchFixture(plan, Boolean(cursor)) };
+    } else if (url.pathname.startsWith("/control/v1/model-calls/")) {
       reply = { body: modelCallFixture(url.pathname.split("/").at(-1)) };
     } else if (url.pathname.startsWith("/control/v1/artifacts/")) {
       reply = { body: artifactFixture(url.pathname.split("/").at(-1)) };
@@ -295,7 +306,7 @@ test("model query budget failures remain explicit and require manual retry", asy
     "CONTROL_QUERY_BUDGET_EXCEEDED",
   );
   await expect(page.getByRole("alert")).toContainText(
-    "查询超出服务预算，请联系管理员。",
+    "查询超出服务预算，请缩小时间范围或细化条件",
   );
   await page.clock.fastForward(60_000);
   expect(calls).toHaveLength(1);
@@ -828,4 +839,512 @@ test("treats metadata text as data and keeps desktop and mobile layouts bounded"
       button && button.x >= 0 && button.x + button.width <= width,
     ).toBeTruthy();
   }
+});
+
+async function prepareSearch(page: Page) {
+  await page.getByLabel("查询类型", { exact: true }).selectOption("search");
+  await page
+    .getByLabel("开始时间（UTC，含）", { exact: true })
+    .fill("2026-09-20T00:00");
+  await page
+    .getByLabel("结束时间（UTC，不含）", { exact: true })
+    .fill("2026-09-21T00:00");
+  await page.getByLabel("每页条数", { exact: true }).fill("2");
+}
+
+async function search(page: Page) {
+  await page.getByRole("button", { name: "检索事件", exact: true }).click();
+}
+
+async function addSearchFilter(
+  page: Page,
+  index: number,
+  field: string,
+  value: string,
+) {
+  await page.getByRole("button", { name: "添加条件", exact: true }).click();
+  await page
+    .getByLabel(`条件 ${index} 字段`, { exact: true })
+    .selectOption(field);
+  const input = page.getByLabel(`条件 ${index} 值`, { exact: true });
+  if (field === "outcome") await input.selectOption(value);
+  else await input.fill(value);
+}
+
+test("search submits an allowlisted plan, freezes pagination and clears edited results", async ({
+  page,
+}) => {
+  const calls = await mockControl(page);
+  await connect(page);
+  await prepareSearch(page);
+  const filters: SearchPlan["filters"] = [
+    { kind: "request_id", value: REQUEST_ID },
+    { kind: "event_id", value: "ev_018f2a3b-4c5d-7000-8000-000000000001" },
+    { kind: "grant_id", value: "grant_018f2a3b-4c5d-7000-8000-000000000001" },
+    {
+      kind: "auth_binding_id",
+      value: "auth_018f2a3b-4c5d-7000-8000-000000000001",
+    },
+    { kind: "case_id", value: "case_018f2a3b-4c5d-7000-8000-000000000001" },
+    { kind: "artifact_id", value: ARTIFACT_ID },
+    { kind: "text", field: "stage", value: "admission" },
+    { kind: "outcome", value: "DENY" },
+  ];
+  for (const [index, filter] of filters.entries()) {
+    if (filter.kind === "confidence_at_most") continue;
+    await addSearchFilter(
+      page,
+      index + 1,
+      filter.kind === "text" ? filter.field : filter.kind,
+      filter.value,
+    );
+  }
+  await expect(
+    page.getByRole("button", { name: "添加条件", exact: true }),
+  ).toBeDisabled();
+  await search(page);
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toContainText("本页 2 条");
+  const plan = { ...SEARCH_PLAN, filters };
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({
+    path: "/control/v1/search",
+    method: "POST",
+    authorized: true,
+    cookie: null,
+    body: plan,
+  });
+  await page.getByText("已提交查询计划", { exact: true }).click();
+  await expect(
+    page.getByRole("region", { name: "已提交查询计划" }).locator("pre"),
+  ).toHaveText(JSON.stringify(plan, null, 2));
+  await expect(
+    page.getByText("2026-09-20T08:10:30.123457Z", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.locator("aside").getByText("未提供", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.locator("aside dl > div").filter({ hasText: "来源请求" }),
+  ).toContainText("未记录");
+  await expect(
+    page.getByRole("region", { name: "已提交查询计划" }),
+  ).toContainText("未知（索引未报告）");
+  await expect(
+    page.locator(".search-plan dl > div").filter({ hasText: "实际扫描字节" }),
+  ).toContainText("0");
+  await page.getByRole("button", { name: "下一页", exact: true }).click();
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toContainText("本页 1 条");
+  expect(calls[1]?.body).toEqual({
+    ...plan,
+    cursor: (await searchFixture(plan)).next_cursor,
+  });
+  await expect(
+    page.getByRole("button", { name: "下一页", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByText("2026-09-20T08:10:30.123455Z", { exact: true }),
+  ).toBeVisible();
+  await page.getByLabel("条件 1 值", { exact: true }).fill(OTHER_REQUEST_ID);
+  await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole("region", { name: "已提交查询计划" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "下一页", exact: true }),
+  ).toHaveCount(0);
+  await search(page);
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toBeVisible();
+  expect(calls[2]?.body).toEqual({
+    ...plan,
+    filters: [
+      { kind: "request_id", value: OTHER_REQUEST_ID },
+      ...filters.slice(1),
+    ],
+  });
+  expect(
+    await page.evaluate(() => [localStorage.length, sessionStorage.length]),
+  ).toEqual([0, 0]);
+});
+
+test("search validates whole UTC windows, field allowlists and numeric bounds before transport", async ({
+  page,
+}) => {
+  const calls = await mockControl(page);
+  await connect(page);
+  await prepareSearch(page);
+  await page
+    .getByLabel("结束时间（UTC，不含）", { exact: true })
+    .fill("2026-10-22T00:00");
+  await search(page);
+  await expect(page.getByRole("alert")).toContainText("CONTROL_QUERY_INVALID");
+  expect(calls).toHaveLength(0);
+  await page
+    .getByLabel("结束时间（UTC，不含）", { exact: true })
+    .fill("2026-09-20T00:00");
+  await search(page);
+  await expect(page.getByRole("alert")).toContainText("CONTROL_QUERY_INVALID");
+  await page
+    .getByLabel("结束时间（UTC，不含）", { exact: true })
+    .fill("2026-09-21T00:00");
+  for (const value of ["0", "1001", "1.5"]) {
+    await page.getByLabel("每页条数", { exact: true }).fill(value);
+    await search(page);
+    expect(calls).toHaveLength(0);
+  }
+  await page.getByLabel("每页条数", { exact: true }).fill("2");
+  for (const [index, field] of [
+    "event_type",
+    "stage",
+    "reason_code",
+    "operation_id",
+    "model_revision",
+  ].entries())
+    await addSearchFilter(page, index + 1, field, "audit.value");
+  await addSearchFilter(page, 6, "confidence_at_most", "10001");
+  await search(page);
+  expect(calls).toHaveLength(0);
+  await page.getByLabel("条件 6 值", { exact: true }).fill("0");
+  await page
+    .getByLabel("条件 1 值", { exact: true })
+    .fill("select * from events");
+  await search(page);
+  await expect(page.getByRole("alert")).toContainText("CONTROL_QUERY_INVALID");
+  expect(calls).toHaveLength(0);
+  await page.getByLabel("条件 1 值", { exact: true }).fill("audit.value");
+  await page
+    .getByLabel("事件时间排序", { exact: true })
+    .selectOption("occurred_at_asc");
+  await search(page);
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toBeVisible();
+  expect(calls[0]?.body).toEqual({
+    ...SEARCH_PLAN,
+    sort: "occurred_at_asc",
+    filters: [
+      ...[
+        "event_type",
+        "stage",
+        "reason_code",
+        "operation_id",
+        "model_revision",
+      ].map((field) => ({ kind: "text", field, value: "audit.value" })),
+      { kind: "confidence_at_most", basis_points: 0 },
+    ],
+  });
+  await page.getByLabel("条件 6 值", { exact: true }).fill("10000");
+  await search(page);
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toBeVisible();
+  expect((calls.at(-1)?.body as SearchPlan).filters.at(-1)).toEqual({
+    kind: "confidence_at_most",
+    basis_points: 10000,
+  });
+});
+
+test("search errors use safe messages, manual retries and clear the session on 401", async ({
+  page,
+}) => {
+  await page.clock.install();
+  let reply: Reply = {
+    status: 403,
+    body: errorFixture("CONTROL_SCOPE_DENIED"),
+  };
+  const calls = await mockControl(page, () => reply);
+  await connect(page);
+  await prepareSearch(page);
+  for (const [status, code] of [
+    [403, "CONTROL_SCOPE_DENIED"],
+    [429, "CONTROL_QUERY_BUDGET_EXCEEDED"],
+    [503, "CONTROL_QUERY_TIMEOUT"],
+    [400, "CONTROL_CURSOR_INVALID"],
+  ] as const) {
+    reply = { status, body: errorFixture(code) };
+    await search(page);
+    await expect(page.getByRole("alert")).toContainText(code);
+    await expect(
+      page.getByRole("region", { name: "搜索事件结果" }),
+    ).toHaveCount(0);
+  }
+  await page.clock.fastForward(60_000);
+  expect(calls).toHaveLength(4);
+  await expect(
+    page.getByText("Synthetic server detail must not be rendered"),
+  ).toHaveCount(0);
+  reply = { status: 401, body: errorFixture("CONTROL_AUTH_REQUIRED") };
+  await search(page);
+  await expect(page.getByRole("status")).toContainText("管理凭证已失效");
+  await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
+  await expect(
+    page.getByRole("region", { name: "已提交查询计划" }),
+  ).toHaveCount(0);
+});
+
+test("search empty results retain independent gaps, pending and unknown scan facts", async ({
+  page,
+}) => {
+  await mockControl(page, async (url, request) =>
+    url.pathname === "/control/v1/search"
+      ? {
+          body: {
+            ...(await searchFixture(request.postDataJSON())),
+            events: [],
+            truncated: false,
+            next_cursor: null,
+            index_watermark: null,
+          },
+        }
+      : undefined,
+  );
+  await connect(page);
+  await prepareSearch(page);
+  await search(page);
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toContainText("当前页暂无事件");
+  await expect(
+    page.getByRole("status", { name: "搜索索引状态" }),
+  ).toContainText("索引存在缺口 · 2 个待发布段");
+  await expect(
+    page.getByRole("region", { name: "已提交查询计划" }),
+  ).toContainText("未知（索引未报告）");
+  await page.getByText("查看搜索水位", { exact: true }).click();
+  await expect(
+    page.getByRole("status", { name: "搜索索引状态" }),
+  ).toContainText("尚不可用");
+  await expect(
+    page.getByRole("button", { name: "下一页", exact: true }),
+  ).toBeDisabled();
+});
+
+test("search and Observer detail permissions remain independent and scope drift disconnects", async ({
+  page,
+}) => {
+  let denyObserver = true;
+  let drift = false;
+  await mockControl(page, async (url, request) => {
+    if (url.pathname === "/control/v1/search")
+      return {
+        body: {
+          ...(await searchFixture(request.postDataJSON())),
+          site_id: drift ? "site_other" : "site_demo",
+        },
+      };
+    return denyObserver
+      ? { status: 403, body: errorFixture("CONTROL_SCOPE_DENIED") }
+      : undefined;
+  });
+  await connect(page);
+  await prepareSearch(page);
+  await search(page);
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: ARTIFACT_ID, exact: true }).click();
+  await expect(page.locator("aside").getByRole("alert")).toContainText(
+    "CONTROL_SCOPE_DENIED",
+  );
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "返回事件", exact: true }).click();
+  await page
+    .getByRole("radio", {
+      name: "ev_018f2a3b-4c5d-7000-8000-000000000002",
+      exact: true,
+    })
+    .check();
+  await page.getByRole("button", { name: REQUEST_ID, exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
+  await expect(
+    page.getByRole("heading", { name: "请求调查", exact: true }),
+  ).toBeVisible();
+  denyObserver = false;
+  await query(page);
+  await expect(
+    page.getByText("AUTH_BINDING_VALID", { exact: true }),
+  ).toBeVisible();
+  drift = true;
+  await prepareSearch(page);
+  await search(page);
+  await expect(page.getByRole("status")).toContainText("响应范围校验失败");
+  await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(
+    0,
+  );
+});
+
+test("editing, switching and disconnecting discard late search responses", async ({
+  page,
+}) => {
+  let release = () => {};
+  let arrive = () => {};
+  let delay = Promise.resolve();
+  await mockControl(page, async (url, request) => {
+    if (url.pathname !== "/control/v1/search") return undefined;
+    const plan = request.postDataJSON();
+    arrive();
+    await delay;
+    return { body: await searchFixture(plan) };
+  });
+  await connect(page);
+  for (const action of ["edit", "switch", "disconnect"] as const) {
+    await prepareSearch(page);
+    delay = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const arrived = new Promise<void>((resolve) => {
+      arrive = resolve;
+    });
+    const settled = requestSettled(page, "/control/v1/search");
+    await search(page);
+    await arrived;
+    if (action === "edit")
+      await page.getByLabel("每页条数", { exact: true }).fill("3");
+    else if (action === "switch")
+      await page
+        .getByLabel("查询类型", { exact: true })
+        .selectOption("request");
+    else
+      await page.getByRole("button", { name: "断开连接", exact: true }).click();
+    release();
+    await settled;
+    await paint(page);
+    await expect(
+      page.getByRole("region", { name: "搜索事件结果" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: "已提交查询计划" }),
+    ).toHaveCount(0);
+  }
+});
+
+test("search idle, pagehide and reload clear all in-memory search state", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await mockControl(page);
+  for (const action of ["idle", "pagehide", "reload"] as const) {
+    await connect(page);
+    await prepareSearch(page);
+    await search(page);
+    await expect(
+      page.getByRole("region", { name: "搜索事件结果" }),
+    ).toBeVisible();
+    if (action === "idle") await page.clock.fastForward(15 * 60_000 + 1);
+    else if (action === "pagehide")
+      await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+    else await page.reload();
+    await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
+    await expect(
+      page.getByRole("region", { name: "已提交查询计划" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: "搜索事件结果" }),
+    ).toHaveCount(0);
+  }
+});
+
+test("search rejects malicious metadata, drops raw fields and fits desktop and mobile", async ({
+  page,
+}) => {
+  const injected = '<img src=x onerror="window.xshieldInjected=true">';
+  let malicious = true;
+  const runtimeErrors: string[] = [];
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  page.on("console", (message) => {
+    if (["warning", "error"].includes(message.type()))
+      consoleErrors.push(message.text());
+  });
+  await mockControl(page, async (url, request) => {
+    if (url.pathname !== "/control/v1/search") return undefined;
+    const value = await searchFixture(request.postDataJSON());
+    if (malicious) value.events[0]!.policy_revision = injected;
+    return {
+      body: {
+        ...value,
+        payload_json: "RAW_PAYLOAD_SENTINEL",
+        storage: { locator: "PRIVATE_STORAGE_SENTINEL" },
+        events: value.events.map((event) => ({
+          ...event,
+          payload_json: "RAW_PAYLOAD_SENTINEL",
+        })),
+      },
+    };
+  });
+  await connect(page);
+  await prepareSearch(page);
+  await addSearchFilter(
+    page,
+    1,
+    "grant_id",
+    "grant_018f2a3b-4c5d-7000-8000-000000000001",
+  );
+  await search(page);
+  await expect(page.getByRole("alert")).toContainText("INVALID_RESPONSE");
+  await expect(page.getByText(injected, { exact: true })).toHaveCount(0);
+  malicious = false;
+  await search(page);
+  await expect(page).toHaveURL("http://127.0.0.1:5173/");
+  await expect(page).toHaveTitle(/Xshield/);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() => Reflect.get(window, "xshieldInjected")),
+  ).toBeUndefined();
+  await expect(page.locator("main img")).toHaveCount(0);
+  await expect(
+    page.getByText("RAW_PAYLOAD_SENTINEL", { exact: false }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("PRIVATE_STORAGE_SENTINEL", { exact: false }),
+  ).toHaveCount(0);
+  for (const width of [1536, 390]) {
+    await page.setViewportSize({ width, height: 1024 });
+    await expect(
+      page.getByRole("heading", { name: "结构化事件检索", exact: true }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+    for (const label of [
+      "开始时间（UTC，含）",
+      "结束时间（UTC，不含）",
+      "条件 1 值",
+    ]) {
+      const field = await page.getByLabel(label, { exact: true }).boundingBox();
+      expect(
+        field && field.x >= 0 && field.x + field.width <= width,
+      ).toBeTruthy();
+    }
+    const screenshotDirectory = process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR;
+    if (screenshotDirectory)
+      await page.screenshot({
+        path: resolve(screenshotDirectory, `search-${width}.png`),
+        fullPage: true,
+      });
+    if (screenshotDirectory) {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({
+        path: resolve(screenshotDirectory, `search-${width}-viewport.png`),
+        fullPage: false,
+      });
+    }
+  }
+  expect(runtimeErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
 });

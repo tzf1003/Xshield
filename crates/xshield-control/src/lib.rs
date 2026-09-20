@@ -7040,42 +7040,14 @@ mod tests {
         let access = fixture.access_directory;
         let server =
             tokio::spawn(async move { axum::serve(listener, router(fixture.control)).await });
-        let script =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/console/tests/control-wire.ts");
-        let result = tokio::task::spawn_blocking(move || {
-            let mut child = std::process::Command::new("node")
-                .arg("--experimental-strip-types")
-                .arg(script)
-                .env("XSHIELD_CONSOLE_TEST_ORIGIN", format!("http://{address}"))
-                .env("XSHIELD_CONSOLE_TEST_TOKEN", TOKEN)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|_| "Node.js 22 is required")?;
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => return Ok(status),
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    _ => {
-                        child.kill().map_err(|_| "Node cleanup failed")?;
-                        child.wait().map_err(|_| "Node wait failed")?;
-                        return Err("Node contract test exceeded its execution budget");
-                    }
-                }
-            }
-        })
-        .await;
+        let result = run_console_wire("control-wire.ts", address, None).await;
         server.abort();
         let stopped = server.await;
         let events = read_access_events(&access);
         // This root belongs exclusively to the fixture created above.
         fs::remove_dir_all(&root).unwrap();
         assert!(stopped.is_err_and(|error| error.is_cancelled()));
-        let status = result.unwrap().unwrap();
+        let status = result.unwrap();
         assert!(
             status.success(),
             "console wire contract failed; phase={:?}",
@@ -7110,6 +7082,160 @@ mod tests {
             events.last().unwrap()["payload"]["reason_code"],
             "CONTROL_AUTH_REQUIRED"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Node.js 22"]
+    #[allow(clippy::too_many_lines)]
+    async fn console_client_searches_real_http_wire_contract() {
+        let occurred_at = DateTime::parse_from_rfc3339("2026-09-20T08:10:30.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut first = search_event("ev_018f2a3b-4c5d-7000-8000-000000000003", 0);
+        first.occurred_at = occurred_at;
+        first.event_type = "grant.issued".to_owned();
+        first.request_id = None;
+        first.stage = None;
+        first.outcome = None;
+        first.reason_code = None;
+        first.proof_kind = None;
+        first.confidence_status = None;
+        let mut second = search_event("ev_018f2a3b-4c5d-7000-8000-000000000001", 0);
+        second.occurred_at = occurred_at + chrono::Duration::microseconds(333);
+        second.event_type = "grant.issued".to_owned();
+        let mut third = second.clone();
+        third.event_id = "ev_018f2a3b-4c5d-7000-8000-000000000002".to_owned();
+        // Synthetic index rows exercise the real control HTTP serialization.
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide_with_summary(
+            [first.clone(), second.clone(), third.clone()],
+            r#"{"read_rows":"42","read_bytes":"512"}"#,
+        ));
+        mock.add(test::handlers::provide([third.clone()]));
+        mock.add(test::handlers::provide([third, second, first.clone()]));
+        mock.add(test::handlers::provide([first]));
+        mock.add(test::handlers::exception(158));
+        let mut investigator = Fixture::with_index(
+            20,
+            ManagementRole::Investigator,
+            Client::default().with_mock(&mock),
+        );
+        investigator.control.config.limits.max_query_events = 2;
+        let observer = Fixture::new(20, ManagementRole::Observer);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let observer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let observer_address = observer_listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, router(investigator.control)).await });
+        let observer_server =
+            tokio::spawn(
+                async move { axum::serve(observer_listener, router(observer.control)).await },
+            );
+        let result = run_console_wire("search-wire.ts", address, Some(observer_address)).await;
+        server.abort();
+        observer_server.abort();
+        let stopped = server.await;
+        let observer_stopped = observer_server.await;
+        let mut events = read_access_events(&investigator.access_directory);
+        events.extend(read_access_events(&observer.access_directory));
+        for access in [&investigator.access_directory, &observer.access_directory] {
+            // Each root belongs exclusively to the fixture created above.
+            fs::remove_dir_all(access.parent().unwrap()).unwrap();
+        }
+        assert!(stopped.is_err_and(|error| error.is_cancelled()));
+        assert!(observer_stopped.is_err_and(|error| error.is_cancelled()));
+        let status = result.unwrap();
+        assert!(
+            status.success(),
+            "console search wire contract failed; phase={:?}",
+            status.code()
+        );
+        let digest = |sort| {
+            let canonical = format!(
+                "{}|{}|{sort}|2|event_type=grant.issued|grant_id=grant_018f2a3b-4c5d-7000-8000-000000000101|auth_binding_id=auth_018f2a3b-4c5d-7000-8000-000000000102",
+                occurred_at.timestamp() - 30,
+                occurred_at.timestamp() + 30,
+            );
+            super::lower_hex(&openssl::sha::sha256(canonical.as_bytes()))
+        };
+        let ascending = digest("asc");
+        let descending = digest("desc");
+        let expected = [
+            ("CONTROL_QUERY_EXECUTED", "PASS", Some(&ascending)),
+            ("CONTROL_QUERY_EXECUTED", "PASS", Some(&ascending)),
+            ("CONTROL_QUERY_EXECUTED", "PASS", Some(&descending)),
+            ("CONTROL_QUERY_EXECUTED", "PASS", Some(&descending)),
+            ("CONTROL_QUERY_BUDGET_EXCEEDED", "DENY", Some(&ascending)),
+            ("CONTROL_CURSOR_INVALID", "DENY", Some(&ascending)),
+            ("CONTROL_SCOPE_DENIED", "DENY", None),
+        ];
+        assert_eq!(events.len(), expected.len());
+        let mut request_ids = std::collections::BTreeSet::new();
+        for (event, (reason, outcome, digest)) in events.iter().zip(expected) {
+            assert_eq!(event["event_type"], "console.query.executed");
+            assert_eq!(event["tenant_id"], "tenant_a");
+            assert_eq!(event["site_id"], "site_a");
+            assert!(request_ids.insert(event["request_id"].as_str().unwrap()));
+            assert_eq!(event["payload"]["method"], "POST");
+            assert_eq!(event["payload"]["path"], super::search::SEARCH_PATH);
+            assert_eq!(event["payload"]["subject_ref"], "operator-1");
+            assert_eq!(event["payload"]["reason_code"], reason);
+            assert_eq!(event["payload"]["outcome"], outcome);
+            assert_eq!(
+                event["payload"]["query_digest"],
+                digest.map_or(Value::Null, |value| Value::from(value.as_str()))
+            );
+            assert!(event["payload"]["target_request_id"].is_null());
+            assert!(event["payload"].get("filters").is_none());
+            assert!(event["payload"].get("cursor").is_none());
+            assert_eq!(event["evidence_refs"], json!([]));
+        }
+    }
+
+    async fn run_console_wire(
+        script_name: &str,
+        address: std::net::SocketAddr,
+        observer_address: Option<std::net::SocketAddr>,
+    ) -> Result<std::process::ExitStatus, &'static str> {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../web/console/tests")
+            .join(script_name);
+        tokio::task::spawn_blocking(move || {
+            let mut command = std::process::Command::new("node");
+            if let Some(address) = observer_address {
+                command.env(
+                    "XSHIELD_CONSOLE_TEST_OBSERVER_ORIGIN",
+                    format!("http://{address}"),
+                );
+            }
+            let mut child = command
+                .arg("--experimental-strip-types")
+                .arg(script)
+                .env("XSHIELD_CONSOLE_TEST_ORIGIN", format!("http://{address}"))
+                .env("XSHIELD_CONSOLE_TEST_TOKEN", TOKEN)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|_| "Node.js 22 is required")?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    _ => {
+                        child.kill().map_err(|_| "Node cleanup failed")?;
+                        child.wait().map_err(|_| "Node wait failed")?;
+                        return Err("Node contract test exceeded its execution budget");
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| "Node contract task failed")?
     }
 
     fn private_directory(path: &Path) {

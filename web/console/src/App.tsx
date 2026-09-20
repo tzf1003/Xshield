@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
 import { ApiError, ControlClient } from "./api";
+import { validateSearchPlan } from "./search";
+import type { SearchPlan, SearchResponse } from "./search";
+import { SearchPanel } from "./SearchPanel";
 import type {
   ArtifactResponse,
   EventsResponse,
@@ -52,7 +55,11 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [token, setToken] = useState("");
   const [requestId, setRequestId] = useState("");
-  const [queryKind, setQueryKind] = useState<"request" | "model">("request");
+  const [queryKind, setQueryKind] = useState<"request" | "model" | "search">(
+    "request",
+  );
+  const [searchPlan, setSearchPlan] = useState<SearchPlan | null>(null);
+  const [search, setSearch] = useState<SearchResponse | null>(null);
   const [model, setModel] = useState<ModelCallResponse | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [events, setEvents] = useState<EventsResponse | null>(null);
@@ -72,6 +79,8 @@ export function App() {
     epoch.current += 1;
     setSummary(null);
     setModel(null);
+    setSearchPlan(null);
+    setSearch(null);
     setEvents(null);
     setEvidence(null);
     setArtifact(null);
@@ -210,6 +219,7 @@ export function App() {
   }
   function query(event: FormEvent) {
     event.preventDefault();
+    if (queryKind === "search") return;
     clearResults();
     const target = requestId.trim();
     setRequestId(target);
@@ -221,12 +231,30 @@ export function App() {
       );
       return;
     }
+    loadRequest(target);
+  }
+  function loadRequest(target: string) {
     void run(
       "query",
       (api, signal) => api.summary(target, signal),
       (response) => {
         setSummary(response);
         loadEvents(target);
+      },
+    );
+  }
+  function searchEvents(value: unknown, cursor?: string) {
+    clearResults();
+    void run(
+      "query",
+      (api, signal) => {
+        const plan = validateSearchPlan(value);
+        setSearchPlan(plan);
+        return api.search(plan, cursor, signal);
+      },
+      (response) => {
+        setSearch(response);
+        setSelected(response.events[0]?.event_id ?? null);
       },
     );
   }
@@ -267,15 +295,61 @@ export function App() {
     switchTab(next);
     document.getElementById(`${next}-tab`)?.focus();
   }
-  const event = events?.events.find((value) => value.event_id === selected);
+  const event = (search?.events ?? events?.events)?.find(
+    (value) => value.event_id === selected,
+  );
+  const title =
+    queryKind === "request"
+      ? "请求调查"
+      : queryKind === "model"
+        ? "模型调用调查"
+        : "结构化事件检索";
+  const eventDetails = (
+    <aside className="panel detail-panel" aria-live="polite">
+      <div className="panel-heading">
+        <h2>
+          {artifact || busy.artifact || problems.artifact
+            ? "证据详情"
+            : "事件详情"}
+        </h2>
+        {(artifact || problems.artifact || busy.artifact) && (
+          <button className="text-button" onClick={clearArtifact}>
+            返回事件
+          </button>
+        )}
+      </div>
+      <Failure problem={problems.artifact ?? null} />
+      {busy.artifact ? (
+        <p className="empty" role="status">
+          正在读取证据元数据…
+        </p>
+      ) : artifact ? (
+        <ArtifactDetail response={artifact} />
+      ) : (
+        !problems.artifact &&
+        (event ? (
+          <EventDetail
+            event={event}
+            onOpen={openArtifact}
+            onRequest={(id) => {
+              clearResults();
+              setQueryKind("request");
+              setRequestId(id);
+              loadRequest(id);
+            }}
+          />
+        ) : (
+          <p className="empty">选择一条事件或证据查看详情。</p>
+        ))
+      )}
+    </aside>
+  );
 
   return (
     <>
       <header className="topbar">
         <span className="brand">Xshield</span>
-        <span className="nav-title">
-          {queryKind === "request" ? "请求调查" : "模型调用调查"}
-        </span>
+        <span className="nav-title">{title}</span>
         <span className="muted console-label">只读控制台</span>
         <div className="connection">
           <span className="mono scope">
@@ -293,11 +367,13 @@ export function App() {
         </div>
       </header>
       <main>
-        <h1>{queryKind === "request" ? "请求调查" : "模型调用调查"}</h1>
+        <h1>{title}</h1>
         <p className="lead">
           {queryKind === "request"
             ? "沿着请求时间线，核对每一次判定与证据。"
-            : "核对模型调用生命周期、版本与证据引用。"}
+            : queryKind === "model"
+              ? "核对模型调用生命周期、版本与证据引用。"
+              : "按时间与事件字段检索，核对直接引用的历史事实。"}
         </p>
         {sessionNotice && (
           <div className="notice" role="status">
@@ -311,7 +387,8 @@ export function App() {
           >
             <h2 id="connect-title">连接管理服务</h2>
             <p className="muted">
-              使用当前站点的 Observer 管理凭证。访问范围由服务端校验。
+              使用当前站点的管理凭证。请求与模型详情需 Observer，结构化检索需
+              Investigator；访问范围由服务端校验。
             </p>
             <form onSubmit={connect}>
               <label htmlFor="token">管理凭证</label>
@@ -343,35 +420,62 @@ export function App() {
                   clearResults();
                   setRequestId("");
                   setQueryKind(
-                    event.target.value === "model" ? "model" : "request",
+                    event.target.value === "search"
+                      ? "search"
+                      : event.target.value === "model"
+                        ? "model"
+                        : "request",
                   );
                 }}
               >
                 <option value="request">请求</option>
                 <option value="model">模型调用</option>
+                <option value="search">结构化事件检索</option>
               </select>
-              <label htmlFor="request-id">
-                {queryKind === "request" ? "请求 ID" : "模型调用 ID"}
-              </label>
-              <input
-                id="request-id"
-                className="mono"
-                placeholder={queryKind === "request" ? "req_…" : "mdl_…"}
-                value={requestId}
-                onChange={(e) => setRequestId(e.target.value)}
-                autoComplete="off"
-                spellCheck={false}
-                maxLength={40}
-                required
-                pattern={`${queryKind === "request" ? "req" : "mdl"}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
-                title={`请输入规范的 ${queryKind === "request" ? "req" : "mdl"}_ 前缀 UUIDv7`}
-              />
-              <button type="submit" disabled={busy.query}>
-                {busy.query ? "查询中…" : "查询"}
-              </button>
+              {queryKind !== "search" && (
+                <>
+                  <label htmlFor="request-id">
+                    {queryKind === "request" ? "请求 ID" : "模型调用 ID"}
+                  </label>
+                  <input
+                    id="request-id"
+                    className="mono"
+                    placeholder={queryKind === "request" ? "req_…" : "mdl_…"}
+                    value={requestId}
+                    onChange={(e) => setRequestId(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    maxLength={40}
+                    required
+                    pattern={`${queryKind === "request" ? "req" : "mdl"}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
+                    title={`请输入规范的 ${queryKind === "request" ? "req" : "mdl"}_ 前缀 UUIDv7`}
+                  />
+                  <button type="submit" disabled={busy.query}>
+                    {busy.query ? "查询中…" : "查询"}
+                  </button>
+                </>
+              )}
             </form>
             <Failure problem={problems.query ?? null} />
-            {model ? (
+            {queryKind === "search" ? (
+              <SearchPanel
+                response={search}
+                plan={searchPlan}
+                busy={Boolean(busy.query)}
+                selected={selected}
+                details={eventDetails}
+                onEdit={clearResults}
+                onSubmit={searchEvents}
+                onNext={() => {
+                  if (searchPlan && search?.next_cursor)
+                    searchEvents(searchPlan, search.next_cursor);
+                }}
+                onSelect={(id) => {
+                  clearArtifact();
+                  setSelected(id);
+                }}
+              />
+            ) : model ? (
               <>
                 <ModelCallOverview response={model} onOpen={openArtifact} />
                 {(artifact || busy.artifact || problems.artifact) && (
@@ -504,35 +608,7 @@ export function App() {
                       )}
                     </div>
                   </section>
-                  <aside className="panel detail-panel" aria-live="polite">
-                    <div className="panel-heading">
-                      <h2>
-                        {artifact || busy.artifact || problems.artifact
-                          ? "证据详情"
-                          : "事件详情"}
-                      </h2>
-                      {(artifact || problems.artifact || busy.artifact) && (
-                        <button className="text-button" onClick={clearArtifact}>
-                          返回事件
-                        </button>
-                      )}
-                    </div>
-                    <Failure problem={problems.artifact ?? null} />
-                    {busy.artifact ? (
-                      <p className="empty" role="status">
-                        正在读取证据元数据…
-                      </p>
-                    ) : artifact ? (
-                      <ArtifactDetail response={artifact} />
-                    ) : (
-                      !problems.artifact &&
-                      (event ? (
-                        <EventDetail event={event} onOpen={openArtifact} />
-                      ) : (
-                        <p className="empty">选择一条事件或证据查看详情。</p>
-                      ))
-                    )}
-                  </aside>
+                  {eventDetails}
                 </div>
               </>
             ) : (

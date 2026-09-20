@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { SearchEvent } from "./search";
 import type {
   ArtifactResponse,
   AuditEvent,
@@ -24,8 +25,8 @@ const stateNames: Record<string, string> = {
   SENSITIVE: "敏感",
   RESTRICTED: "受限",
 };
-const stageName = (stage: string) =>
-  stageNames[stage] ?? (stage || "未记录阶段");
+const stageName = (stage: string | null) =>
+  (stage && stageNames[stage]) || stage || "未记录阶段";
 const label = (value: string) => stateNames[value] ?? value;
 function time(value: string | number) {
   const date = new Date(
@@ -38,7 +39,7 @@ function time(value: string | number) {
         .replace(/\.\d+Z$/, "")} UTC`
     : "时间不可用";
 }
-function Rows({ entries }: { entries: [string, ReactNode][] }) {
+export function Rows({ entries }: { entries: [string, ReactNode][] }) {
   return (
     <dl>
       {entries.map(([name, value]) => (
@@ -50,7 +51,7 @@ function Rows({ entries }: { entries: [string, ReactNode][] }) {
     </dl>
   );
 }
-function Badge({ value }: { value: string }) {
+function Badge({ value }: { value: string | null }) {
   return (
     <span
       className={`badge ${value === "DENY" || value === "ERROR" ? "denied" : value === "PASS" || value === "ALLOW" ? "passed" : ""}`}
@@ -387,7 +388,7 @@ export function EventTable({
   selected,
   onSelect,
 }: {
-  events: AuditEvent[];
+  events: (AuditEvent | SearchEvent)[];
   selected: string | null;
   onSelect: (id: string) => void;
 }) {
@@ -422,6 +423,9 @@ export function EventTable({
               <td>
                 <strong>{stageName(event.stage)}</strong>
                 <small className="mono">{event.event_id}</small>
+                {"request_id" in event && (
+                  <small className="mono">{event.event_type}</small>
+                )}
               </td>
               <td>
                 <Badge value={event.outcome} />
@@ -438,9 +442,11 @@ export function EventTable({
 export function EventDetail({
   event,
   onOpen,
+  onRequest,
 }: {
-  event: AuditEvent;
+  event: AuditEvent | SearchEvent;
   onOpen: (id: string) => void;
+  onRequest?: (id: string) => void;
 }) {
   return (
     <div className="detail-body">
@@ -448,6 +454,26 @@ export function EventDetail({
       <Rows
         entries={[
           ["事件 ID", <span className="mono">{event.event_id}</span>],
+          ...("request_id" in event
+            ? ([
+                [
+                  "来源请求",
+                  event.request_id ? (
+                    <button
+                      className="artifact-link mono"
+                      onClick={() =>
+                        event.request_id && onRequest?.(event.request_id)
+                      }
+                    >
+                      {event.request_id}
+                    </button>
+                  ) : (
+                    "未记录"
+                  ),
+                ],
+                ["事件时间", <span className="mono">{event.occurred_at}</span>],
+              ] as [string, ReactNode][])
+            : []),
           ["证明类型", event.proof_kind || "未记录"],
           [
             "置信度",
@@ -488,7 +514,12 @@ export function EventDetail({
         <Rows
           entries={[
             ["事件类型", <span className="mono">{event.event_type}</span>],
-            ["事件时间", time(event.occurred_at)],
+            ...(typeof event.occurred_at === "number"
+              ? ([["事件时间", time(event.occurred_at)]] as [
+                  string,
+                  ReactNode,
+                ][])
+              : []),
             ["事件序号", event.request_seq],
             ["置信度状态", event.confidence_status || "未记录"],
             [
@@ -496,6 +527,17 @@ export function EventDetail({
               <span className="mono">{event.model_revision || "未记录"}</span>,
             ],
             ["耗时", `${event.duration_us} μs`],
+            ["数据分级", label(event.sensitivity)],
+            [
+              "前驱事件",
+              event.cause_event_ids.length
+                ? event.cause_event_ids.map((id) => (
+                    <p className="mono" key={id}>
+                      {id}
+                    </p>
+                  ))
+                : "未记录",
+            ],
           ]}
         />
       </details>

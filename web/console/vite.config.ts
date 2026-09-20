@@ -48,7 +48,10 @@ export default defineConfig({
         },
         bypass(request, response) {
           const path = (request.url ?? "").split("?")[0] ?? "";
-          if (request.method !== "GET" || !readPath.test(path)) {
+          const allowed =
+            (request.method === "GET" && readPath.test(path)) ||
+            (request.method === "POST" && request.url === "/control/v1/search");
+          if (!allowed) {
             if (response) {
               response.statusCode = 404;
               response.end();

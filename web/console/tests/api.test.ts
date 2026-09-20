@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import { ApiError, ControlClient } from "../src/api.ts";
+import { validateSearchPlan, searchPlanDigest } from "../src/search.ts";
+import type { SearchPlan, SearchResponse } from "../src/search.ts";
 import {
   TOKEN,
   REQUEST_ID,
@@ -313,16 +316,16 @@ test("model call projection rejects contradictory lifecycle and malformed identi
       },
       (value) => {
         value.model_call.events.splice(0, 1);
-      Object.assign(value.model_call.events[1]!, {
+        Object.assign(value.model_call.events[1]!, {
           ...value.model_call.events[0]!,
           event_id: "ev_018f2a3b-4c5d-7000-8000-000000000003",
           request_seq: 3,
-        cause_event_ids: [value.model_call.events[0]!.event_id],
-      });
-      Object.assign(value.model_call, value.model_call.events[1], {
-        lifecycle_complete: false,
-      });
-      value.completeness = "pending";
+          cause_event_ids: [value.model_call.events[0]!.event_id],
+        });
+        Object.assign(value.model_call, value.model_call.events[1], {
+          lifecycle_complete: false,
+        });
+        value.completeness = "pending";
       },
     ];
   for (const mutate of mutations) {
@@ -397,6 +400,12 @@ test("malformed summary facts are rejected instead of filling missing data", asy
     },
     (value) => {
       value.as_of = "invalid";
+    },
+    (value) => {
+      value.as_of = "2026-02-30T08:10:30Z";
+    },
+    (value) => {
+      value.summary.first_occurred_at = "2026-09-20T24:00:00Z";
     },
     (value) => {
       value.found = false;
@@ -803,4 +812,444 @@ test("deadline also covers a stalled response body after headers arrive", async 
   assert.equal(reading, true);
   t.mock.timers.tick(15_000);
   await assert.rejects(pending, errorIs("REQUEST_TIMEOUT", 200));
+});
+
+function searchPlan(): SearchPlan {
+  return {
+    schema_version: 3,
+    start: "2026-09-20T00:00:00Z",
+    end: "2026-09-21T00:00:00Z",
+    filters: [],
+    sort: "occurred_at_asc",
+    limit: 2,
+  };
+}
+function searchCursor(event: SearchResponse["events"][number]): string {
+  const time =
+    BigInt(Date.parse(event.occurred_at.slice(0, 19) + "Z")) * 1000n +
+    BigInt(event.occurred_at.slice(20, 26));
+  return `v1.${time}.${event.event_id}.${"a".repeat(64)}`;
+}
+async function searchResponse(plan = searchPlan()): Promise<SearchResponse> {
+  const source = summaryFixture();
+  const events = [2, 1].map((id, index) => ({
+    request_id: null,
+    event_id: `ev_018f2a3b-4c5d-7000-8000-${String(id).padStart(12, "0")}`,
+    event_type: "origin.response",
+    stage: null,
+    outcome: null,
+    reason_code: null,
+    proof_kind: null,
+    confidence: null,
+    confidence_status: null,
+    occurred_at: `2026-09-20T08:10:30.12345${index + 6}Z`,
+    request_seq: index + 1,
+    duration_us: 0,
+    policy_revision: "policy-r1",
+    model_revision: null,
+    evidence_refs: [ARTIFACT_ID],
+    cause_event_ids: [],
+    sensitivity: "INTERNAL",
+  }));
+  if (plan.sort === "occurred_at_desc") events.reverse();
+  return {
+    schema_version: 3,
+    request_id: source.request_id,
+    tenant_id: source.tenant_id,
+    site_id: source.site_id,
+    as_of: source.as_of,
+    index_watermark: source.index_watermark,
+    has_gaps: true,
+    pending_segments: 2,
+    query_digest: await searchPlanDigest(plan),
+    scanned_rows: null,
+    scanned_bytes: 0,
+    truncated: true,
+    next_cursor: searchCursor(events.at(-1)!),
+    events,
+  };
+}
+
+test("search freezes a strict plan and posts only to its fixed audited read route", async (t) => {
+  const plan = searchPlan();
+  const original = structuredClone(plan);
+  const fixture = await searchResponse();
+  const fetch = t.mock.method(
+    globalThis,
+    "fetch",
+    async (path: string, options: RequestInit) => {
+      assert.equal(path, "/control/v1/search");
+      assert.equal(options.method, "POST");
+      assert.deepEqual(options.headers, {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      });
+      assert.deepEqual(JSON.parse(String(options.body)), original);
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.cache, "no-store");
+      assert.equal(options.redirect, "error");
+      assert.equal(options.referrerPolicy, "no-referrer");
+      assert.ok(options.signal instanceof AbortSignal);
+      return response({
+        ...fixture,
+        payload_json: TOKEN,
+        events: fixture.events.map((event) => ({
+          ...event,
+          payload_json: TOKEN,
+        })),
+      });
+    },
+  );
+  const pending = new ControlClient(TOKEN).search(plan);
+  plan.filters.push({ kind: "request_id", value: OTHER_REQUEST_ID });
+  plan.limit = 100;
+  const actual = await pending;
+  assert.deepEqual(actual, fixture);
+  assert.ok(!JSON.stringify(actual).includes(TOKEN));
+  assert.equal(fetch.mock.callCount(), 1);
+});
+
+test("search canonical digest covers every predicate and retained filter order", async () => {
+  const plan = searchPlan();
+  const suffix = "018f2a3b-4c5d-7000-8000-000000000001";
+  plan.filters = [
+    { kind: "request_id", value: REQUEST_ID },
+    { kind: "event_id", value: `ev_${suffix}` },
+    { kind: "grant_id", value: `grant_${suffix}` },
+    { kind: "auth_binding_id", value: `auth_${suffix}` },
+    { kind: "case_id", value: `case_${suffix}` },
+    { kind: "artifact_id", value: ARTIFACT_ID },
+    { kind: "text", field: "operation_id", value: "orders:read" },
+    { kind: "confidence_at_most", basis_points: 1234 },
+  ];
+  const canonical = `1789862400|1789948800|asc|2|request_id=${REQUEST_ID}|event_id=ev_${suffix}|grant_id=grant_${suffix}|auth_binding_id=auth_${suffix}|case_id=case_${suffix}|artifact_id=${ARTIFACT_ID}|operation_id=orders:read|confidence<=1234`;
+  const expected = createHash("sha256").update(canonical).digest("hex");
+  assert.equal(await searchPlanDigest(validateSearchPlan(plan)), expected);
+  plan.filters.reverse();
+  assert.notEqual(await searchPlanDigest(plan), expected);
+  plan.filters = [{ kind: "outcome", value: "DENY" }];
+  assert.equal(
+    await searchPlanDigest(plan),
+    createHash("sha256")
+      .update("1789862400|1789948800|asc|2|outcome=DENY")
+      .digest("hex"),
+  );
+  const normalized = validateSearchPlan({
+    ...plan,
+    start: "2026-09-20T00:00:00.000+00:00",
+  });
+  assert.equal(normalized.start, plan.start);
+  normalized.filters.length = 0;
+  assert.equal(plan.filters.length, 1);
+});
+
+test("invalid search inputs fail before network and preserve strict query budgets", async (t) => {
+  const network = t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("unexpected network");
+  });
+  const client = new ControlClient(TOKEN);
+  const invalid = [
+    { schema_version: 4 },
+    { tenant_id: "tenant_other" },
+    { sql: "SELECT 1" },
+    { cursor: "cursor" },
+    { start: "2026-02-30T00:00:00Z" },
+    { start: "2026-09-20T00:00:00.000001Z" },
+    { start: "2026-09-20T00:00:00+08:00" },
+    { start: "1969-12-31T23:59:59Z" },
+    { start: "2026-09-21T00:00:00Z" },
+    { end: "2026-10-22T00:00:00Z" },
+    { start: "2300-01-01T00:00:00Z", end: "2300-01-02T00:00:00Z" },
+    { limit: 0 },
+    { limit: 1001 },
+    { limit: 1.5 },
+    { sort: "duration_desc" },
+    { filters: undefined },
+    { filters: Array(9).fill({ kind: "outcome", value: "PASS" }) },
+    { filters: [{ kind: "sql", value: "SELECT 1" }] },
+    { filters: [{ kind: "outcome", value: "DENY", extra: true }] },
+    { filters: [{ kind: "outcome", value: "allow" }] },
+    { filters: [{ kind: "request_id", value: ARTIFACT_ID }] },
+    { filters: [{ kind: "text", field: "payload_json", value: "anything" }] },
+    { filters: [{ kind: "text", field: "stage", value: "a|b" }] },
+    { filters: [{ kind: "text", field: "stage", value: "a".repeat(129) }] },
+    { filters: [{ kind: "confidence_at_most", basis_points: 10001 }] },
+    { filters: [{ kind: "confidence_at_most", basis_points: 1.1 }] },
+  ];
+  for (const changes of invalid) {
+    await assert.rejects(
+      client.search({ ...searchPlan(), ...changes } as SearchPlan),
+      errorIs("CONTROL_QUERY_INVALID"),
+    );
+  }
+  for (const cursor of [
+    "",
+    "a".repeat(161),
+    "v1.0.ev_fake.signature",
+    "cursor&scope=other",
+  ]) {
+    await assert.rejects(
+      client.search(searchPlan(), cursor),
+      errorIs("CONTROL_CURSOR_INVALID"),
+    );
+  }
+  const cancelled = new AbortController();
+  cancelled.abort(TOKEN);
+  await assert.rejects(
+    client.search(searchPlan(), undefined, cancelled.signal),
+    errorIs("REQUEST_ABORTED"),
+  );
+  assert.equal(network.mock.callCount(), 0);
+});
+
+test("search pagination preserves nullable facts, microsecond ordering and both sort directions", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const sort of ["occurred_at_asc", "occurred_at_desc"] as const) {
+    const plan = { ...searchPlan(), sort };
+    const first = await searchResponse(plan);
+    t.mock.method(globalThis, "fetch", async () => response(first));
+    assert.deepEqual(await client.search(plan), first);
+    const next = structuredClone(first);
+    next.events = [
+      {
+        ...first.events[0]!,
+        event_id: "ev_018f2a3b-4c5d-7000-8000-000000000003",
+        occurred_at:
+          sort === "occurred_at_asc"
+            ? "2026-09-20T08:10:30.123458Z"
+            : "2026-09-20T08:10:30.123455Z",
+        proof_kind: "model",
+        model_revision: "model-r1",
+        confidence: 0.1,
+        confidence_status: "provided",
+      },
+    ];
+    next.truncated = false;
+    next.next_cursor = null;
+    next.scanned_rows = 0;
+    next.scanned_bytes = null;
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (_path: string, options: RequestInit) => {
+        assert.equal(
+          JSON.parse(String(options.body)).cursor,
+          first.next_cursor,
+        );
+        return response(next);
+      },
+    );
+    assert.deepEqual(await client.search(plan, first.next_cursor!), next);
+    next.events = [];
+    next.index_watermark = null;
+    assert.deepEqual(await client.search(plan, first.next_cursor!), next);
+  }
+  const plan = {
+    ...searchPlan(),
+    start: "2299-12-31T00:00:00Z",
+    end: "2300-01-01T00:00:00Z",
+  };
+  const future = await searchResponse(plan);
+  future.events.forEach((event, index) => {
+    event.occurred_at = `2299-12-31T23:59:59.99999${index + 8}Z`;
+  });
+  future.next_cursor = searchCursor(future.events.at(-1)!);
+  t.mock.method(globalThis, "fetch", async () => response(future));
+  assert.deepEqual(await client.search(plan), future);
+});
+
+test("search rejects contradictory digest, position, confidence and wire shapes", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const mutations: Array<(value: SearchResponse) => void> = [
+    (value) => {
+      value.query_digest = "f".repeat(64);
+    },
+    (value) => {
+      Object.assign(value, { schema_version: 4 });
+    },
+    (value) => {
+      value.scanned_bytes = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (value) => {
+      value.pending_segments = -1;
+    },
+    (value) => {
+      value.events[0]!.request_id = "unknown";
+    },
+    (value) => {
+      value.events[0]!.stage = "";
+    },
+    (value) => {
+      value.events[0]!.confidence = 0;
+    },
+    (value) => {
+      value.events[0]!.proof_kind = "deterministic";
+    },
+    (value) => {
+      value.events[0]!.model_revision = "jev-r1";
+    },
+    (value) => {
+      value.events[0]!.event_type = "<script>";
+    },
+    (value) => {
+      value.events[0]!.occurred_at = "2026-09-20T08:10:30.1234567Z";
+    },
+    (value) => {
+      value.events[0]!.occurred_at = "2026-09-20T08:10:30.123456+08:00";
+    },
+    (value) => {
+      value.events[0]!.occurred_at = "2026-02-30T08:10:30.123456Z";
+    },
+    (value) => {
+      value.events[0]!.occurred_at = "2026-09-19T23:59:59.999999Z";
+    },
+    (value) => {
+      value.events[1]!.occurred_at = "2026-09-21T00:00:00.000000Z";
+    },
+    (value) => {
+      value.events[1]!.occurred_at = value.events[0]!.occurred_at;
+    },
+    (value) => {
+      value.events.reverse();
+    },
+    (value) => {
+      value.events[1]!.event_id = value.events[0]!.event_id;
+    },
+    (value) => {
+      value.events.push(value.events[0]!);
+    },
+    (value) => {
+      value.events.pop();
+    },
+    (value) => {
+      value.truncated = false;
+    },
+    (value) => {
+      value.next_cursor = searchCursor(value.events[0]!);
+    },
+    (value) => {
+      value.next_cursor = "synthetic.cursor";
+    },
+  ];
+  for (const mutate of mutations) {
+    const value = await searchResponse();
+    mutate(value);
+    t.mock.method(globalThis, "fetch", async () => response(value));
+    await assert.rejects(
+      client.search(searchPlan()),
+      errorIs("INVALID_RESPONSE", 200),
+    );
+  }
+  const first = await searchResponse();
+  t.mock.method(globalThis, "fetch", async () => response(first));
+  await assert.rejects(
+    client.search(searchPlan(), first.next_cursor!),
+    errorIs("INVALID_RESPONSE", 200),
+  );
+});
+
+test("search shares bounded errors and cancellation while distinguishing plan budget denial", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const [status, code] of [
+    [422, "CONTROL_QUERY_INVALID"],
+    [400, "CONTROL_CURSOR_INVALID"],
+    [403, "CONTROL_SCOPE_DENIED"],
+    [401, "CONTROL_AUTH_REQUIRED"],
+    [429, "CONTROL_QUERY_BUDGET_EXCEEDED"],
+    [429, "CONTROL_QUERY_CAPACITY_EXHAUSTED"],
+    [503, "AUDIT_DURABILITY_FAILED"],
+  ] as const) {
+    t.mock.method(globalThis, "fetch", async () =>
+      response(errorFixture(code), status),
+    );
+    await assert.rejects(client.search(searchPlan()), errorIs(code, status));
+  }
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () =>
+      new Response("{}", {
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(16 * 1024 * 1024 + 1),
+        },
+      }),
+  );
+  await assert.rejects(
+    client.search(searchPlan()),
+    errorIs("RESPONSE_TOO_LARGE", 200),
+  );
+  let started!: () => void;
+  const reachedFetch = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  t.mock.method(
+    globalThis,
+    "fetch",
+    (_path: string, options: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        options.signal!.addEventListener(
+          "abort",
+          () => reject(new Error(TOKEN)),
+          { once: true },
+        );
+        started();
+      }),
+  );
+  const abort = new AbortController();
+  const pending = client.search(searchPlan(), undefined, abort.signal);
+  await reachedFetch;
+  abort.abort(TOKEN);
+  await assert.rejects(pending, errorIs("REQUEST_ABORTED"));
+  const stopped = t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("unexpected network");
+  });
+  t.mock.method(globalThis.crypto.subtle, "digest", async () => {
+    throw new Error(TOKEN);
+  });
+  await assert.rejects(
+    client.search(searchPlan()),
+    errorIs("QUERY_DIGEST_UNAVAILABLE"),
+  );
+  assert.equal(stopped.mock.callCount(), 0);
+});
+
+test("development proxy permits only the exact search POST alongside fixed GET reads", async () => {
+  const { default: config } = await import("../vite.config.ts");
+  const proxy = config.server?.proxy?.["/control/"];
+  assert.ok(proxy && typeof proxy !== "string" && proxy.bypass);
+  type Request = Parameters<typeof proxy.bypass>[0];
+  type Response = Parameters<typeof proxy.bypass>[1];
+  for (const [method, url, allowed] of [
+    ["POST", "/control/v1/search", true],
+    [
+      "GET",
+      `/control/v1/requests/${REQUEST_ID}/events?cursor=${EVENT_CURSOR}`,
+      true,
+    ],
+    ["POST", "/control/v1/search?scope=other", false],
+    ["POST", "/control/v1/search/", false],
+    ["GET", "/control/v1/search", false],
+    ["PUT", "/control/v1/search", false],
+    ["POST", "/control/v1/cases", false],
+    ["POST", `/control/v1/requests/${REQUEST_ID}`, false],
+    ["GET", `/control/v1/artifacts/${ARTIFACT_ID}/content`, false],
+  ] as const) {
+    const state = {
+      statusCode: 200,
+      ended: false,
+      end() {
+        this.ended = true;
+      },
+    };
+    const result: unknown = await proxy.bypass(
+      { method, url } as Request,
+      state as unknown as Response,
+      proxy,
+    );
+    assert.equal(result, allowed ? undefined : false);
+    assert.equal(state.statusCode, allowed ? 200 : 404);
+    assert.equal(state.ended, !allowed);
+  }
 });

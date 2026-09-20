@@ -193,8 +193,7 @@ export function modelCallFixture(modelCallId = MODEL_CALL_ID) {
     input_artifact_id: ARTIFACT_ID as string | null,
     output_artifact_id: OTHER_ARTIFACT_ID as string | null,
     call_artifact_id: "artifact_018f2a3b-4c5d-7000-8000-000000000013" as
-      | string
-      | null,
+      string | null,
   };
   const events = ["started", "requested", "success"].map((status, index) => ({
     ...facts,
@@ -241,5 +240,63 @@ export function modelCallFixture(modelCallId = MODEL_CALL_ID) {
       events,
       lifecycle_complete: true,
     },
+  };
+}
+
+import { searchPlanDigest } from "../src/search.ts";
+import type { SearchEvent, SearchPlan, SearchResponse } from "../src/search.ts";
+
+export const SEARCH_PLAN: SearchPlan = {
+  schema_version: 3,
+  start: "2026-09-20T00:00:00Z",
+  end: "2026-09-21T00:00:00Z",
+  filters: [],
+  sort: "occurred_at_desc",
+  limit: 2,
+};
+
+/** Synthetic HMAC bytes only model cursor shape; server signing is tested in Rust. */
+export async function searchFixture(
+  plan = SEARCH_PLAN,
+  nextPage = false,
+): Promise<SearchResponse> {
+  const events: SearchEvent[] = (nextPage ? [3] : [1, 2]).map((sequence) => ({
+    event_id: `ev_018f2a3b-4c5d-7000-8000-${String(sequence).padStart(12, "0")}`,
+    event_type: sequence === 1 ? "evidence.deleted" : "stage.completed",
+    request_id: sequence === 1 ? null : REQUEST_ID,
+    stage: sequence === 1 ? null : "admission",
+    outcome: sequence === 1 ? null : "DENY",
+    reason_code: sequence === 1 ? null : "SEARCH_SYNTHETIC_DENIAL",
+    proof_kind: sequence === 1 ? null : "deterministic",
+    confidence: null,
+    confidence_status: sequence === 1 ? null : "not_applicable",
+    occurred_at: `2026-09-20T08:10:30.${plan.sort === "occurred_at_asc" ? 123453 + sequence : 123458 - sequence}Z`,
+    request_seq: sequence,
+    duration_us: 24,
+    policy_revision: "policy-demo-r3",
+    model_revision: null,
+    evidence_refs: [ARTIFACT_ID],
+    cause_event_ids: [],
+    sensitivity: "INTERNAL",
+  }));
+  const last = events.at(-1)!;
+  const position =
+    BigInt(Date.parse(last.occurred_at.slice(0, 19) + "Z")) * 1000n +
+    BigInt(last.occurred_at.slice(20, 26));
+  return {
+    ...envelope(),
+    schema_version: 3,
+    query_digest: await searchPlanDigest(plan),
+    as_of: AS_OF,
+    index_watermark: summaryFixture().index_watermark,
+    has_gaps: true,
+    pending_segments: 2,
+    scanned_rows: null,
+    scanned_bytes: 0,
+    truncated: !nextPage,
+    next_cursor: nextPage
+      ? null
+      : `v1.${position}.${last.event_id}.${"0".repeat(64)}`,
+    events,
   };
 }

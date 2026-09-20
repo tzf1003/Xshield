@@ -236,6 +236,67 @@ main {
   min-width: 95px;
 }
 
+.search-form,
+.search-plan {
+  padding: 20px;
+  margin-bottom: 13px;
+}
+
+.search-window {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1.5fr)) minmax(100px, 0.6fr)
+    minmax(130px, 0.8fr);
+  gap: 15px;
+}
+
+.search-form label,
+.search-field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.search-form select {
+  width: 100%;
+  min-width: 0;
+}
+
+.search-filter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  gap: 15px;
+  align-items: end;
+  margin-top: 15px;
+}
+
+.search-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 15px;
+  margin-top: 18px;
+}
+
+.search-plan summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.search-plan pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.search-plan dl {
+  margin-top: 12px;
+}
+
+.search-empty {
+  margin: 0;
+  padding: 0 21px 18px;
+}
+
 .notice {
   color: #536274;
   background: #f1f5f7;
@@ -712,6 +773,16 @@ footer {
 }
 
 @media (width <= 760px) {
+  .search-window,
+  .search-filter {
+    grid-template-columns: 1fr;
+  }
+
+  .search-form,
+  .search-plan {
+    padding: 15px;
+  }
+
   .model-heading {
     align-items: flex-start;
     flex-direction: column;
