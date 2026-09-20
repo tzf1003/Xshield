@@ -615,8 +615,9 @@ impl PostgresIdentityStore {
                AND principal_ref = $6 AND auth_epoch = $7
                AND authorization_context_ref = $8
                AND credential_generation = $9 AND status = 'active'
-               AND absolute_expires_at > to_timestamp($2)
-               AND absolute_expires_at >= to_timestamp($10)",
+               AND absolute_expires_at > GREATEST(to_timestamp($2), clock_timestamp())
+               AND absolute_expires_at >= to_timestamp($10)
+               AND to_timestamp($10) > clock_timestamp()",
         )
         .bind(current_generation)
         .bind(now)
@@ -708,8 +709,10 @@ impl PostgresIdentityStore {
              WHERE tenant_id = $6 AND site_id = $7 AND binding_id = $8
                AND principal_ref = $9 AND authorization_context_ref = $10
                AND auth_epoch = $11 AND credential_generation = $12
-               AND status = 'active' AND absolute_expires_at > to_timestamp($5)
-               AND absolute_expires_at >= to_timestamp($13)",
+               AND status = 'active'
+               AND absolute_expires_at > GREATEST(to_timestamp($5), clock_timestamp())
+               AND absolute_expires_at >= to_timestamp($13)
+               AND to_timestamp($13) > clock_timestamp()",
         )
         .bind(command.principal_ref)
         .bind(command.authorization_context_ref.as_str())
@@ -1039,7 +1042,7 @@ async fn lock_active_credentials(
          FROM xshield.credential_bindings
          WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
            AND generation = $4 AND status = 'active'
-           AND expires_at > to_timestamp($5)
+           AND expires_at > GREATEST(to_timestamp($5), clock_timestamp())
          FOR UPDATE",
     )
     .bind(snapshot.tenant_id().as_str())

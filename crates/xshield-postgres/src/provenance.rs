@@ -212,8 +212,9 @@ async fn lock_binding(
          WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
            AND principal_ref = $4 AND authorization_context_ref = $5
            AND auth_epoch = $6 AND status = 'active'
-           AND absolute_expires_at > to_timestamp($7)
+           AND absolute_expires_at > GREATEST(to_timestamp($7), clock_timestamp())
            AND absolute_expires_at >= to_timestamp($8)
+           AND to_timestamp($8) > clock_timestamp()
          FOR UPDATE",
     )
     .bind(command.action.snapshot().tenant_id().as_str())

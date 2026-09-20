@@ -73,7 +73,8 @@ impl IdentityProofStore for PostgresIdentityStore {
                     extract(epoch FROM absolute_expires_at)::bigint AS absolute_expires_at
              FROM xshield.auth_bindings
              WHERE tenant_id = $1 AND site_id = $2 AND waf_sid_fingerprint = $3
-               AND status = 'active' AND absolute_expires_at > to_timestamp($4)",
+               AND status = 'active'
+               AND absolute_expires_at > GREATEST(to_timestamp($4), clock_timestamp())",
         )
         .bind(query.tenant_id.as_str())
         .bind(query.site_id.as_str())
@@ -103,7 +104,7 @@ impl IdentityProofStore for PostgresIdentityStore {
              FROM xshield.credential_bindings
              WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
                AND generation = $4 AND status = 'active'
-               AND expires_at > to_timestamp($5)",
+               AND expires_at > GREATEST(to_timestamp($5), clock_timestamp())",
         )
         .bind(query.tenant_id.as_str())
         .bind(query.site_id.as_str())
@@ -181,7 +182,7 @@ impl PostgresIdentityStore {
              FROM xshield.auth_bindings
              WHERE tenant_id = $1 AND site_id = $2 AND waf_sid_fingerprint = $3
                AND status IN ('anonymous', 'active')
-               AND absolute_expires_at > to_timestamp($4)",
+               AND absolute_expires_at > GREATEST(to_timestamp($4), clock_timestamp())",
         )
         .bind(query.tenant_id.as_str())
         .bind(query.site_id.as_str())
