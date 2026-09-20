@@ -318,7 +318,7 @@ class Handler(BaseHTTPRequestHandler):
             "/account-switch-same": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"other-business-token"}',
             "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
             "/slow-account": b'{"orders":[{"id":"order-late"}]}',
-            "/account": b'{"orders":[{"id":"order-456"}]}',
+            "/account": b'{"orders":[{"id":"order-456"},{"id":"order-457"}]}',
             "/settings-legacy": b'{"ok":true}',
             "/buffered-valid": b'{"ok":true}',
             "/buffered-invalid": b'private-invalid-json',
@@ -784,11 +784,11 @@ WHERE evidence.tenant_id = 'tenant_gateway'
   AND evidence.site_id = 'site_gateway'
   AND evidence.source_operation_id = 'account.root'
   AND evidence.target_operation_id = 'orders.read'
-  AND evidence.candidate_count = 1
+  AND evidence.candidate_count = 2
   AND action.page_evidence_id IS NULL
   AND resource_grant.resource_key_hmac = decode(:'resource_fingerprint', 'hex')
   AND outbox.event_type = 'response_grant.issued'
-  AND outbox.envelope->>'resource_key_hmac' = :'resource_fingerprint';
+  AND outbox.envelope->'payload'->>'resource_key_hmac' = :'resource_fingerprint';
 SQL
 )
 [[ "$committed_response_grants" == "1" ]]
@@ -1062,5 +1062,12 @@ SQL
 
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-worker --lib postgres_gateway_identity_outbox_publishing -- --ignored
+
+if [[ -n "${XSHIELD_TEST_CLICKHOUSE_URL:-}" ]]; then
+    XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+        cargo test -p xshield-worker --lib real_gateway_response_grant_outbox_delivery -- --ignored
+else
+    echo "real gateway response-grant ClickHouse delivery skipped: set XSHIELD_TEST_CLICKHOUSE_URL"
+fi
 
 echo "gateway identity integration passed"

@@ -1023,6 +1023,7 @@ impl Gateway {
                 response_identity,
                 operation,
                 &request_id,
+                &context.trace_id,
                 source_operation_id,
                 response_status,
                 &body,

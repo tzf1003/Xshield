@@ -30,7 +30,7 @@ mod search;
 pub use outbox::{
     OutboxPublishReport, OutboxPublisherConfig, publish_case_outbox_batch,
     publish_evidence_access_outbox_batch, publish_evidence_catalog_outbox_batch,
-    publish_identity_outbox_batch,
+    publish_identity_outbox_batch, publish_response_grant_outbox_batch,
 };
 pub use search::{
     AuditSearchResult, ModelCallEventSummary, ModelCallSummary, SearchEventSummary, SearchPosition,
@@ -294,12 +294,16 @@ pub async fn query_request_summary(
     site_id: &SiteId,
     request_id: &RequestId,
 ) -> Result<Option<RequestSummary>, PublishError> {
+    // Independent outbox producers may describe a future target operation.
+    // Only request-context events can establish the original method/operation.
     let row = client
         .query(
             "SELECT count() AS event_count,min(occurred_at) AS first_occurred_at,\
              max(occurred_at) AS last_occurred_at,\
-             argMinIf(method,tuple(request_seq,event_id),method != '') AS method,\
-             argMinIf(operation_id,tuple(request_seq,event_id),operation_id != '') AS operation_id,\
+             argMinIf(method,tuple(request_seq,event_id),method != '' AND \
+               (event_type = 'request.accepted' OR stage = 'control_access')) AS method,\
+             argMinIf(operation_id,tuple(request_seq,event_id),operation_id != '' AND \
+               event_type IN ('request.accepted','stage.completed','stage.skipped')) AS operation_id,\
              argMaxIf(outcome,tuple(request_seq,event_id),is_terminal = 1) AS decision,\
              argMaxIf(reason_code,tuple(request_seq,event_id),is_terminal = 1) AS reason_code,\
              argMaxIf(http_status,tuple(request_seq,event_id),is_terminal = 1) AS status,\

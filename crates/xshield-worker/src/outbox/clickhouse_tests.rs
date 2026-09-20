@@ -4,9 +4,10 @@ use super::{delivery_tests::insert_event, tests::*, *};
 use chrono::{DateTime, SecondsFormat, Timelike, Utc};
 use clickhouse::sql::Identifier;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
+use std::future::Future;
 use uuid::Uuid;
-use xshield_core::domain::{SiteId, TenantId};
+use xshield_core::domain::{EventId, RequestId, SiteId, TenantId};
 
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL and XSHIELD_TEST_CLICKHOUSE_URL"]
@@ -14,6 +15,31 @@ async fn real_outbox_clickhouse_delivery() {
     let pool = PgPool::connect(&std::env::var("XSHIELD_TEST_DATABASE_URL").unwrap())
         .await
         .unwrap();
+    let scope = OutboxScope::new(
+        &TenantId::parse(format!("tenant_outbox_{}", Uuid::now_v7().simple())).unwrap(),
+        &SiteId::parse("site_outbox_clickhouse").unwrap(),
+    );
+    let test_pool = pool.clone();
+    let test_scope = scope.clone();
+    let outcome = with_clickhouse(move |client| async move {
+        exercise_delivery(&test_pool, &test_scope, &client).await;
+    })
+    .await;
+    let cleanup =
+        sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id = $1 AND site_id = $2")
+            .bind(scope.tenant_id().as_str())
+            .bind(scope.site_id().as_str())
+            .execute(&pool)
+            .await;
+    pool.close().await;
+    cleanup.unwrap();
+    outcome.unwrap();
+}
+
+// Each check owns a database and awaits cleanup even if DDL or assertions panic.
+async fn with_clickhouse<F: Future<Output = ()> + Send + 'static>(
+    check: impl FnOnce(Client) -> F + Send + 'static,
+) -> Result<(), tokio::task::JoinError> {
     let mut admin =
         Client::default().with_url(std::env::var("XSHIELD_TEST_CLICKHOUSE_URL").unwrap());
     if let Ok(user) = std::env::var("XSHIELD_TEST_CLICKHOUSE_USER") {
@@ -24,10 +50,6 @@ async fn real_outbox_clickhouse_delivery() {
     }
     let owner = Uuid::now_v7().simple().to_string();
     let database = format!("xshield_outbox_test_{owner}");
-    let scope = OutboxScope::new(
-        &TenantId::parse(format!("tenant_outbox_{owner}")).unwrap(),
-        &SiteId::parse("site_outbox_clickhouse").unwrap(),
-    );
     admin
         .query("CREATE DATABASE ?")
         .bind(Identifier(&database))
@@ -36,9 +58,6 @@ async fn real_outbox_clickhouse_delivery() {
         .unwrap();
     let client = admin.clone().with_database(database.clone());
     let schema_database = database.clone();
-    let test_pool = pool.clone();
-    let test_scope = scope.clone();
-    // The owner awaits cleanup even if DDL setup or an assertion panics.
     let outcome = tokio::spawn(async move {
         let schema = include_str!("../../../../sql/clickhouse.sql")
             .lines()
@@ -53,32 +72,144 @@ async fn real_outbox_clickhouse_delivery() {
                 }
             }
         }
-        exercise_delivery(&test_pool, &test_scope, &client).await;
+        check(client).await;
     })
     .await;
-    let postgres_cleanup =
-        sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id = $1 AND site_id = $2")
-            .bind(scope.tenant_id().as_str())
-            .bind(scope.site_id().as_str())
-            .execute(&pool)
-            .await;
     let clickhouse_cleanup = admin
         .query("DROP DATABASE ? SYNC")
         .bind(Identifier(&database))
         .execute()
         .await;
-    pool.close().await;
-    assert!(postgres_cleanup.is_ok(), "owned outbox rows cleanup failed");
     assert!(
         clickhouse_cleanup.is_ok(),
         "owned ClickHouse database cleanup failed"
     );
-    if let Err(error) = outcome {
-        if error.is_panic() {
-            std::panic::resume_unwind(error.into_panic());
-        }
-        panic!("Outbox ClickHouse regression task was cancelled");
+    outcome
+}
+
+/// Publishes real gateway transactions from the script-owned `PostgreSQL` database.
+#[tokio::test]
+#[ignore = "requires scripts/test_gateway_identity.sh and XSHIELD_TEST_CLICKHOUSE_URL"]
+async fn real_gateway_response_grant_outbox_delivery() {
+    let pool = PgPool::connect(&std::env::var("XSHIELD_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(database.starts_with("xshield_gateway_"));
+    let test_pool = pool.clone();
+    let outcome = with_clickhouse(move |client| async move {
+        exercise_gateway_response_grants(&test_pool, &client).await;
+    })
+    .await;
+    pool.close().await;
+    outcome.unwrap();
+}
+
+// Keep source-row assertions and the ensuing publication/ACK in execution order.
+#[allow(clippy::too_many_lines)]
+async fn exercise_gateway_response_grants(pool: &PgPool, client: &Client) {
+    let scope = OutboxScope::new(
+        &TenantId::parse("tenant_gateway").unwrap(),
+        &SiteId::parse("site_gateway").unwrap(),
+    );
+    let rows = sqlx::query(r"
+        SELECT outbox.envelope, evidence.source_request_id, grant_row.policy_revision,
+          jsonb_build_object(
+            'stage', 'response_grant', 'outcome', 'PASS', 'reason_code', 'GRANT_ISSUED',
+            'grant_id', grant_row.grant_id, 'binding_id', grant_row.binding_id,
+            'auth_epoch', grant_row.auth_epoch, 'response_evidence_id', evidence.response_evidence_id,
+            'action_ref', action.action_ref, 'action_id', action.source_action_ref,
+            'source_operation_id', evidence.source_operation_id,
+            'operation_id', grant_row.operation_id, 'method', action.method,
+            'route_template', action.route_template, 'resource_type', grant_row.resource_type,
+            'resource_key_hmac', encode(grant_row.resource_key_hmac, 'hex'),
+            'view_profile', grant_row.view_id, 'fields', action.allowed_fields,
+            'mapping_revision', action.mapping_revision, 'response_status', evidence.response_status,
+            'response_body_sha256', substring(evidence.response_artifact_ref FROM 8),
+            'candidate_count', evidence.candidate_count,
+            'issued_at_unix', extract(epoch FROM grant_row.issued_at)::bigint,
+            'expires_at_unix', extract(epoch FROM grant_row.expires_at)::bigint
+          ) AS expected_payload
+        FROM xshield.audit_outbox outbox
+        JOIN xshield.resource_grants grant_row
+          ON grant_row.tenant_id = outbox.tenant_id AND grant_row.site_id = outbox.site_id
+         AND grant_row.source_event_id = outbox.event_id AND grant_row.grant_id = outbox.aggregate_ref
+        JOIN xshield.ui_actions action
+          ON action.tenant_id = grant_row.tenant_id AND action.site_id = grant_row.site_id
+         AND action.action_ref = grant_row.action_ref
+        JOIN xshield.response_evidence evidence
+          ON evidence.tenant_id = action.tenant_id AND evidence.site_id = action.site_id
+         AND evidence.response_evidence_id = action.response_evidence_id
+        WHERE outbox.tenant_id = $1 AND outbox.site_id = $2
+          AND outbox.event_type = 'response_grant.issued'
+    ")
+    .bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str())
+    .fetch_all(pool).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    let mut expected = BTreeMap::new();
+    let mut batches: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for row in rows {
+        let envelope: Value = row.get("envelope");
+        assert_eq!(envelope["payload"], row.get::<Value, _>("expected_payload"));
+        assert_eq!(
+            envelope["request_id"],
+            row.get::<String, _>("source_request_id")
+        );
+        assert_eq!(
+            envelope["policy_revision"],
+            row.get::<String, _>("policy_revision")
+        );
+        assert_eq!(
+            envelope["span_id"],
+            &envelope["trace_id"].as_str().unwrap()[..16]
+        );
+        batches
+            .entry(envelope["request_id"].as_str().unwrap().to_owned())
+            .or_default()
+            .push(envelope["request_seq"].as_u64().unwrap());
+        expected.insert(envelope["event_id"].as_str().unwrap().to_owned(), envelope);
     }
+    assert_eq!(batches.len(), 2);
+    for sequence in batches.values_mut() {
+        sequence.sort_unstable();
+        assert_eq!(
+            *sequence,
+            (1..=u64::try_from(sequence.len()).unwrap()).collect::<Vec<_>>()
+        );
+    }
+    let store = PostgresIdentityStore::from_pool(pool.clone());
+    let config = OutboxPublisherConfig::new(
+        "audit_events",
+        30,
+        OutboxLeaseConfig::new(16, 64 * 1024, Duration::from_mins(1)).unwrap(),
+        Duration::from_hours(1),
+    )
+    .unwrap();
+    assert_eq!(
+        publish_response_grant_outbox_batch(&store, client, &scope, &config)
+            .await
+            .unwrap(),
+        OutboxPublishReport {
+            claimed: expected.len(),
+            published: expected.len()
+        }
+    );
+    assert_index_rows(client, &scope, &expected).await;
+    for id in expected.keys() {
+        assert_acknowledged(pool, id, 1).await;
+    }
+    assert_eq!(
+        publish_response_grant_outbox_batch(&store, client, &scope, &config)
+            .await
+            .unwrap(),
+        OutboxPublishReport {
+            claimed: 0,
+            published: 0
+        }
+    );
 }
 
 async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) {
@@ -118,6 +249,10 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
                 .map(|kind| identity::tests::event(kind))
                 .collect(),
         ),
+        (
+            OutboxFamily::ResponseGrant,
+            vec![response_grant::tests::event()],
+        ),
     ] {
         for envelope in envelopes {
             let stored = insert_event(pool, scope, family, current_event(envelope)).await;
@@ -129,6 +264,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
         (OutboxFamily::EvidenceCatalog, 2),
         (OutboxFamily::EvidenceAccess, 3),
         (OutboxFamily::Identity, 4),
+        (OutboxFamily::ResponseGrant, 1),
     ] {
         assert_eq!(
             publish_family(&store, client, scope, &config, family).await,
@@ -149,7 +285,85 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
         assert_acknowledged(pool, id, 1).await;
     }
     assert_index_rows(client, scope, &expected).await;
+    let response = expected
+        .values()
+        .find(|value| value["event_type"] == "response_grant.issued")
+        .unwrap();
+    assert_source_request_summary(client, scope, response).await;
     exercise_retry_and_conflict(pool, scope, client, &store, &config).await;
+}
+
+async fn assert_source_request_summary(client: &Client, scope: &OutboxScope, response: &Value) {
+    let config = crate::PublisherConfig::new(
+        "unused-journal",
+        "unused-manifests",
+        "unused-checkpoints",
+        "clickhouse-test",
+        "audit_events",
+        30,
+        1024,
+    )
+    .unwrap();
+    let request = RequestId::parse(response["request_id"].as_str().unwrap()).unwrap();
+    let summary = crate::query_request_summary(
+        &config,
+        client,
+        scope.tenant_id(),
+        scope.site_id(),
+        &request,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(summary.method, None);
+    assert_eq!(summary.operation_id, None);
+
+    let mut accepted = response.clone();
+    accepted["event_id"] = json!(format!("ev_{}", Uuid::now_v7()));
+    accepted["event_type"] = json!("request.accepted");
+    accepted["producer_id"] = json!("edge-test");
+    accepted["producer_boot_id"] = json!(Uuid::now_v7().to_string());
+    accepted["payload"] =
+        json!({"method": "POST", "operation_id": "resource.list", "origin_state": "not_sent"});
+    // Both producers start at sequence one; the older target event must not win.
+    assert!(accepted["event_id"].as_str() > response["event_id"].as_str());
+    let bytes = serde_json::to_vec(&accepted).unwrap();
+    let row = IndexRow::parse(
+        &bytes,
+        &EventId::parse(accepted["event_id"].as_str().unwrap()).unwrap(),
+        1,
+        accepted["producer_boot_id"].as_str().unwrap(),
+        hex(&sha256_digest(&bytes)),
+        TimeDelta::days(30),
+    )
+    .unwrap();
+    insert_rows(client, "audit_events", "request-summary-source", &[row])
+        .await
+        .unwrap();
+    for table in ["audit_events", "events_by_time"] {
+        let config = crate::PublisherConfig::new(
+            "unused-journal",
+            "unused-manifests",
+            "unused-checkpoints",
+            "clickhouse-test",
+            table,
+            30,
+            1024,
+        )
+        .unwrap();
+        let summary = crate::query_request_summary(
+            &config,
+            client,
+            scope.tenant_id(),
+            scope.site_id(),
+            &request,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(summary.method.as_deref(), Some("POST"));
+        assert_eq!(summary.operation_id.as_deref(), Some("resource.list"));
+    }
 }
 
 async fn assert_index_rows(
@@ -193,7 +407,12 @@ async fn assert_index_rows(
                 DateTime::parse_from_rfc3339(envelope["occurred_at"].as_str().unwrap()).unwrap()
             );
             assert_eq!(row.observed_at, row.occurred_at);
-            assert_eq!(row.occurred_at.timestamp_subsec_micros(), 123_456);
+            let expected_micros = if envelope["event_type"] == "response_grant.issued" {
+                0
+            } else {
+                123_456
+            };
+            assert_eq!(row.occurred_at.timestamp_subsec_micros(), expected_micros);
             assert_eq!(
                 row.retention_expires_at,
                 row.occurred_at + TimeDelta::days(30)
@@ -226,6 +445,9 @@ async fn publish_family(
             publish_evidence_access_outbox_batch(store, client, scope, config).await
         }
         OutboxFamily::Identity => publish_identity_outbox_batch(store, client, scope, config).await,
+        OutboxFamily::ResponseGrant => {
+            publish_response_grant_outbox_batch(store, client, scope, config).await
+        }
     }
     .unwrap()
 }
@@ -360,6 +582,14 @@ async fn exercise_retry_and_conflict(
 }
 
 fn current_event(mut envelope: Value) -> Value {
+    if envelope["event_type"] == "response_grant.issued" {
+        let now = Utc::now();
+        envelope["occurred_at"] = json!(now.to_rfc3339_opts(SecondsFormat::Secs, true));
+        envelope["observed_at"] = envelope["occurred_at"].clone();
+        envelope["payload"]["issued_at_unix"] = json!(now.timestamp());
+        envelope["payload"]["expires_at_unix"] = json!(now.timestamp() + 3_600);
+        return envelope;
+    }
     let now = Utc::now()
         .with_nanosecond(123_456_000)
         .unwrap()

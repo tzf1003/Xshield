@@ -1,8 +1,8 @@
 //! Typed adapters for transactional `PostgreSQL` outbox facts.
 //!
 //! Outbox envelopes are a different producer contract from sealed journal
-//! records. This module only accepts complete case, catalog, access, and identity
-//! envelopes emitted by their typed producers; other outbox families remain
+//! records. This module only accepts complete case, catalog, access, identity,
+//! and response-grant envelopes emitted by their typed producers; other families remain
 //! explicitly unsupported until their producers expose validated fields.
 
 use super::{
@@ -24,6 +24,7 @@ mod clickhouse_tests;
 #[cfg(test)]
 mod delivery_tests;
 mod identity;
+mod response_grant;
 
 const MAX_OUTBOX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_RETRY_SECONDS: u64 = 3_600;
@@ -44,6 +45,7 @@ enum OutboxFamily {
     EvidenceCatalog,
     EvidenceAccess,
     Identity,
+    ResponseGrant,
 }
 
 impl OutboxFamily {
@@ -53,6 +55,7 @@ impl OutboxFamily {
             Self::EvidenceCatalog => EVIDENCE_CATALOG_EVENT_TYPES,
             Self::EvidenceAccess => EVIDENCE_ACCESS_EVENT_TYPES,
             Self::Identity => identity::EVENT_TYPES,
+            Self::ResponseGrant => response_grant::EVENT_TYPES,
         }
     }
 
@@ -62,12 +65,14 @@ impl OutboxFamily {
             Self::EvidenceCatalog => "artifact_id",
             Self::EvidenceAccess => "access_request_id",
             Self::Identity => "binding_id",
+            Self::ResponseGrant => "grant_id",
         }
     }
 }
 
 pub(super) fn supports(event_type: &str) -> bool {
     identity::EVENT_TYPES.contains(&event_type)
+        || response_grant::EVENT_TYPES.contains(&event_type)
         || matches!(
             event_type,
             "case.created"
@@ -219,6 +224,25 @@ pub async fn publish_identity_outbox_batch(
     publish_outbox_batch(store, client, scope, config, OutboxFamily::Identity).await
 }
 
+/// Publishes one bounded batch of gateway response-grant issuance transactions.
+///
+/// Complete v3 envelopes bind each grant to its request, identity epoch, target,
+/// and frozen issuance time. Historical sparse records remain unacknowledged
+/// with `OUTBOX_INVALID_EVENT`. Publication records issuance history only;
+/// current authorization still requires the transactional grant store.
+///
+/// # Errors
+/// Returns the same lease, event, and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_response_grant_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::ResponseGrant).await
+}
+
 async fn publish_outbox_batch(
     store: &PostgresIdentityStore,
     client: &Client,
@@ -361,6 +385,9 @@ struct CasePayload {
 }
 
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if response_grant::EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return response_grant::parse(event);
+    }
     if identity::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return identity::parse(event);
     }

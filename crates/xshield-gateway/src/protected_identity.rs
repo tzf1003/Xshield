@@ -1371,6 +1371,33 @@ fn identity_envelope(
     event_type: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, ReasonCode> {
+    transaction_envelope(
+        config,
+        request_id,
+        trace_id,
+        event_id,
+        event_type,
+        "gateway-identity",
+        1,
+        &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        payload,
+    )
+}
+
+// Gateway transaction producers share envelope metadata while retaining their
+// own closed payload contracts and producer-local sequence domains.
+#[allow(clippy::too_many_arguments)]
+fn transaction_envelope(
+    config: &GatewayConfig,
+    request_id: &RequestId,
+    trace_id: &str,
+    event_id: &EventId,
+    event_type: &str,
+    producer_id: &str,
+    sequence: u64,
+    timestamp: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, ReasonCode> {
     if trace_id.len() != 32
         || !trace_id
             .bytes()
@@ -1381,9 +1408,8 @@ fn identity_envelope(
     let span_id = trace_id
         .get(..16)
         .ok_or(ReasonCode::ResponseValidationFailed)?;
-    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    // Each identity transaction is a separate outbox producer run. Its local
-    // sequence does not advance the independent gateway journal sequence.
+    // Request IDs correlate independent outbox and journal producers. These
+    // sequence numbers do not advance the gateway journal's sequence.
     Ok(serde_json::json!({
         "schema_version": 3,
         "event_type": event_type,
@@ -1393,12 +1419,12 @@ fn identity_envelope(
         "request_id": request_id.as_str(),
         "trace_id": trace_id,
         "span_id": span_id,
-        "producer_id": "gateway-identity",
+        "producer_id": producer_id,
         "producer_boot_id": request_id.as_str(),
-        "producer_seq": 1,
-        "request_seq": 1,
-        "occurred_at": now,
-        "observed_at": now,
+        "producer_seq": sequence,
+        "request_seq": sequence,
+        "occurred_at": timestamp,
+        "observed_at": timestamp,
         "policy_revision": config.policy_revision().as_str(),
         "example_only": false,
         "payload": payload,

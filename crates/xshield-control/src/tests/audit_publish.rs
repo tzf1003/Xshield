@@ -524,6 +524,11 @@ async fn assert_control_queries(journal: &AccessJournal, client: &Client) {
     assert!(!summary.forwarded);
     assert!(!summary.business_result_confirmed);
     assert_eq!(summary.decision, None);
+    assert_eq!(
+        summary.method.as_deref(),
+        journal.events[0]["payload"]["method"].as_str()
+    );
+    assert_eq!(summary.operation_id, None);
     let now = u64::try_from(Utc::now().timestamp()).unwrap();
     let plan = QueryPlan::new(
         QueryWindow::new(UnixSeconds::new(now - 3600), UnixSeconds::new(now + 3600)).unwrap(),

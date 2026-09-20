@@ -41,6 +41,8 @@ PageEvidence 必须关联认可来源；源站返回 200 不是授权证明。�
 
 PostgreSQL 首版在同一短事务中锁定当前 binding，重验主体、授权上下文、auth_epoch、活动策略和精确动作描述，再把完整响应证据、逐资源 ActionGrant、ResourceGrant 与 outbox 整批提交。整批任一写入失败、会话容量不足或资格变化均不留下部分授权；相同来源响应的精确重放返回原有引用，语义变化则冲突。响应证据只保存受限 artifact 引用和带域 HMAC，不保存原始资源值。普通查询永不无限续租；最长资格期限不得超过当前会话和来源证据期限。
 
+网关逐资源提交 `gateway-response-grant` 生产者的完整 v3 `response_grant.issued` envelope，绑定原请求、身份代际、响应证据、动作与资源资格、目标和策略修订。批内序号从 1 开始，发行时间随事务输入冻结；`XSHIELD_OUTBOX_FAMILY=response_grant` 可独立发布这些事实，精确契约及历史稀疏行处理见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)。索引发布不改变资格状态、期限或响应释放屏障；后续授权继续查询当前 PostgreSQL 账本。
+
 首版可配置每会话最多 5000 条资格、单响应 1000 条、写操作更短 TTL；这些是待测限额。超额返回重新获取/明确拒绝，不授予 wildcard。删除旧观察记录不应误删仍有效资格；撤销资格也不删除历史证据。
 
 ## 6.5 分享

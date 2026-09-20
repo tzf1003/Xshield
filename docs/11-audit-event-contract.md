@@ -87,14 +87,20 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 `xshield-outbox-worker` 是一次有界发布 pass，按固定 tenant/site 作用域从 `xshield.audit_outbox` 领取最多 256 行及 64 MiB JSON 字节，并以 PostgreSQL `clock_timestamp()` 设置最长一小时租约。候选行使用 `FOR UPDATE SKIP LOCKED`；ClickHouse 网络操作不持有 PostgreSQL 事务锁。确认必须携带同一 event_id、作用域和未过期 lease token，旧 token 或跨作用域确认统一拒绝。发布成功后才写 `published_at`；失败释放租约、保存 `OUTBOX_INVALID_EVENT`、`OUTBOX_INDEX_UNAVAILABLE` 或 `OUTBOX_INTEGRITY_CONFLICT` 并按有界延迟重试。
 
-部署先应用 `0019_m3_outbox_delivery.sql`，然后运行 `xshield-outbox-worker TENANT_ID SITE_ID`。`XSHIELD_OUTBOX_FAMILY` 可设为 `case`（默认）、`evidence_catalog`、`evidence_access` 或 `identity`，每次只领取该族。数据库配置为 `XSHIELD_DATABASE_URL`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`；索引配置为 `XSHIELD_CLICKHOUSE_URL/DATABASE/USER/PASSWORD` 和可选 `XSHIELD_CLICKHOUSE_TABLE`（默认 `audit_events`）。秘密只通过部署环境注入。
+部署先应用 `0019_m3_outbox_delivery.sql`，然后运行 `xshield-outbox-worker TENANT_ID SITE_ID`。`XSHIELD_OUTBOX_FAMILY` 可设为 `case`（默认）、`evidence_catalog`、`evidence_access`、`identity` 或 `response_grant`，每次只领取该族。数据库配置为 `XSHIELD_DATABASE_URL`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`；索引配置为 `XSHIELD_CLICKHOUSE_URL/DATABASE/USER/PASSWORD` 和可选 `XSHIELD_CLICKHOUSE_TABLE`（默认 `audit_events`）。秘密只通过部署环境注入。
 
 必须配置 `XSHIELD_AUDIT_METADATA_RETENTION_DAYS`（1–3650）、`XSHIELD_OUTBOX_MAX_EVENTS`（1–256）、`XSHIELD_OUTBOX_MAX_BYTES`（1–67108864）、`XSHIELD_OUTBOX_LEASE_SECONDS` 和 `XSHIELD_OUTBOX_RETRY_SECONDS`（均为 1–3600）。一条 envelope 另受 64 KiB 解析上限约束。该命令执行一次后退出；调度器按固定作用域和族再次运行，遇错误保留退出失败供告警。当前 pass 在首个错误处停止，已领取的后续行等待租约到期再处理。
 
 当前适配器按租约领取族隔离：`case.created`、`case.closed`、`case.evidence.added` 只接受控制服务的完整 v3 envelope；`evidence.cataloged` 只接受 `gateway-evidence-catalog` 或 `model-eval` 的完整 envelope，并重新校验 UUIDv7 producer boot、单因果、`RESTRICTED` 分类以及 artifact/evidence_refs/aggregate_ref 三方一致；`evidence.access.requested/approved/denied` 接受控制服务的完整请求/独立审批 envelope，分别校验 artifact 引用、access request 目标、主体、审批决定和 TTL。`identity` 精确领取 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed`，只接受 `gateway-identity` 的完整事件，重新校验 `auth_` binding/aggregate、初始状态、代际递增、实际上下文变化、凭证 kind 唯一性及 HMAC 形状；计数受 PostgreSQL bigint 上限约束。
 
-四族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。grant、`binding.revoked` 及其他事务事件仍待交付，不得据此声称全量 outbox 已索引。
+`response_grant` 精确领取 `response_grant.issued`，只接受 `gateway-response-grant` 的完整 v3 envelope，且 `aggregate_ref` 必须等于 payload 的 `grant_id`。封闭 payload 包含 `response_grant/PASS/GRANT_ISSUED`、资格/binding/epoch/响应证据/动作引用、来源与目标 operation、GET 方法与路由、资源类型与 HMAC、view、单个 field、mapping revision、2xx 且非 204 的响应状态、正文 SHA-256、candidate_count 和发行/到期秒数。解析器重新校验强类型 ID、lowercase hex、正 epoch、1–1000 个候选及 1–86400 秒 TTL；引用或形状偏差均拒绝。
+
+五族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。其他 grant、`share.issued`、`binding.revoked` 及其他事务事件仍待交付，不得据此声称全量 outbox 已索引。
 
 身份事务使用 request_id 作为独立 producer_boot_id，producer_seq/request_seq 均为 1，保留原网关请求 trace 与配置修订；两种序列不推进 journal 的序列，也不表示跨来源全序。当前时间线按 `(request_seq,event_id)` 排序，调查时应结合生产者与发生时间理解身份事件，不能以该位置推断源站先后。`identity_lifecycle` 的 PASS 是事务结果，`is_terminal=0`，不推断业务执行状态；确定性结果保持 `confidence=null/not_applicable`。主体/上下文引用与新旧凭证 HMAC 保留在 `SENSITIVE` payload_json，脱敏查询摘要不返回该载荷，普通检索不授予认证权力。
 
-身份生产者升级把原顶层业务字段移至 `payload`，运行中的生产者与发布器应配套升级。本次不改写历史稀疏行、不从当前身份补造历史时间或来源；这类行保持未确认并记录 `OUTBOX_INVALID_EVENT`、延迟重试。上线前应盘点历史积压并保留原始证据，监控错误码及积压；当前首错停批会使已领取的后续行等待租约到期。发布器既不重放身份转换，也不回滚已提交的状态。
+响应资格事务同样使用原 request_id 作为独立 producer_boot_id，并保留 trace 与策略修订；同一响应每个候选的 producer_seq/request_seq 相等，从 1 开始且不超过 candidate_count。occurred_at 与 observed_at 必须同时等于 issued_at_unix 的规范 UTC 整秒编码（`YYYY-MM-DDTHH:mm:ssZ`），重试沿用冻结值。批内序号与 journal 序列独立，不能用时间线位置推导跨生产者全序。`response_grant` 阶段索引保留 `PASS/GRANT_ISSUED`、GET 和目标 operation，确定性结果为 `confidence=null/not_applicable`、`is_terminal=0`；敏感引用、HMAC 和正文摘要保留在 `SENSITIVE` payload_json，evidence_refs/cause_event_ids 为空。发行历史不证明资格当前有效，也不证明客户端收到成功响应。
+
+请求摘要的 method 仅来自 `request.accepted` 或 `control_access`，operation 仅来自 `request.accepted` 或请求阶段事实。资格事件中的目标方法与操作保留为事件字段；只有资格历史时，请求摘要中的来源方法与操作保持空值，等待请求上下文事件。
+
+身份与响应资格生产者升级把原顶层业务字段移至完整 envelope 的 `payload`，运行中的生产者与发布器应配套升级。历史稀疏行保留原文、保持未确认并记录 `OUTBOX_INVALID_EVENT`、延迟重试；不会以当前状态补造历史时间或来源。上线前应盘点历史积压并保留原始证据，监控错误码及积压；当前首错停批会使已领取的后续行等待租约到期。发布器不重放身份转换、不重新发行资格，也不回滚已提交的状态。

@@ -318,6 +318,194 @@ def check_identity_outbox_contracts(schema: dict, base: dict) -> None:
         invalid['payload']['rotation_reason'] = 'ordinary_replacement'
         check(prefix + 'reject_rotation_reason', not valid(schema, invalid))
 
+def check_response_grant_contracts(schema: dict) -> None:
+    """Exercise the complete response-grant envelope and payload boundary."""
+    issued = 1_789_776_000
+    base = {
+        'schema_version': 3,
+        'event_type': 'response_grant.issued',
+        'event_id': 'ev_018f2a3b-4c5d-7000-8000-000000000021',
+        'tenant_id': 'tenant_demo',
+        'site_id': 'site_demo',
+        'request_id': 'req_018f2a3b-4c5d-7000-8000-000000000023',
+        'trace_id': '018f2a3b4c5d70008000000000000023',
+        'span_id': '018f2a3b4c5d7023',
+        'producer_id': 'gateway-response-grant',
+        'producer_boot_id': 'req_018f2a3b-4c5d-7000-8000-000000000023',
+        'producer_seq': 1,
+        'request_seq': 1,
+        'occurred_at': '2026-09-19T00:00:00Z',
+        'observed_at': '2026-09-19T00:00:00Z',
+        'policy_revision': 'policy-r1',
+        'example_only': False,
+        'evidence_refs': [],
+        'cause_event_ids': [],
+        'payload': {
+            'stage': 'response_grant',
+            'outcome': 'PASS',
+            'reason_code': 'GRANT_ISSUED',
+            'grant_id': 'grant_018f2a3b-4c5d-7000-8000-000000000031',
+            'binding_id': 'auth_018f2a3b-4c5d-7000-8000-000000000032',
+            'auth_epoch': 1,
+            'response_evidence_id': 'response_018f2a3b-4c5d-7000-8000-000000000033',
+            'action_ref': 'action.' + 'a' * 64,
+            'action_id': 'profile.read',
+            'source_operation_id': 'profile.list',
+            'operation_id': 'profile.read',
+            'resource_type': 'profile',
+            'view_profile': 'public',
+            'mapping_revision': 'mapping-r1',
+            'method': 'GET',
+            'route_template': '/api/v1/profiles',
+            'resource_key_hmac': 'b' * 64,
+            'response_body_sha256': 'c' * 64,
+            'fields': ['display_name'],
+            'response_status': 200,
+            'candidate_count': 2,
+            'issued_at_unix': issued,
+            'expires_at_unix': issued + 60,
+        },
+        'sensitivity': 'SENSITIVE',
+        'integrity': {'state': 'pending', 'previous_hash': None, 'event_hash': None},
+    }
+    first = copy.deepcopy(base)
+    second = copy.deepcopy(base)
+    second['event_id'] = 'ev_018f2a3b-4c5d-7000-8000-000000000022'
+    second['producer_seq'] = second['request_seq'] = 2
+    second['payload']['grant_id'] = 'grant_018f2a3b-4c5d-7000-8000-000000000034'
+    second['payload']['resource_key_hmac'] = 'e' * 64
+    second['payload']['action_ref'] = 'action.' + 'd' * 64
+    check('outbox:response_grant:valid_first_candidate', valid(schema, first))
+    check('outbox:response_grant:valid_second_candidate', valid(schema, second))
+
+    for field in first:
+        missing = copy.deepcopy(first)
+        del missing[field]
+        check('outbox:response_grant:missing_envelope_' + field, not valid(schema, missing))
+    for field in first['payload']:
+        missing = copy.deepcopy(first)
+        del missing['payload'][field]
+        check('outbox:response_grant:missing_payload_' + field, not valid(schema, missing))
+    for field in ['previous_hash', 'event_hash']:
+        missing = copy.deepcopy(first)
+        del missing['integrity'][field]
+        check('outbox:response_grant:optional_integrity_' + field, valid(schema, missing))
+
+    for label, field, value in [
+        ('event_id_prefix', 'event_id', 'grant_018f2a3b-4c5d-7000-8000-000000000021'),
+        ('request_id_prefix', 'request_id', 'auth_018f2a3b-4c5d-7000-8000-000000000023'),
+        ('producer_boot_prefix', 'producer_boot_id', 'auth_018f2a3b-4c5d-7000-8000-000000000023'),
+        ('grant_id_prefix', 'grant_id', 'auth_018f2a3b-4c5d-7000-8000-000000000031'),
+        ('binding_id_prefix', 'binding_id', 'grant_018f2a3b-4c5d-7000-8000-000000000032'),
+        ('response_evidence_prefix', 'response_evidence_id', 'artifact_018f2a3b-4c5d-7000-8000-000000000033'),
+        ('action_ref_uppercase', 'action_ref', 'action.' + 'A' * 64),
+        ('action_ref_short', 'action_ref', 'action.' + 'a' * 63),
+        ('resource_hmac_uppercase', 'resource_key_hmac', 'A' * 64),
+        ('resource_hmac_short', 'resource_key_hmac', 'a' * 63),
+        ('body_hash_uppercase', 'response_body_sha256', 'C' * 64),
+        ('body_hash_short', 'response_body_sha256', 'c' * 63),
+    ]:
+        invalid = copy.deepcopy(first)
+        target = invalid['payload'] if field in invalid['payload'] else invalid
+        target[field] = value
+        check('outbox:response_grant:reject_' + label, not valid(schema, invalid))
+
+    domain_fields = [
+        'action_id', 'source_operation_id', 'operation_id', 'resource_type',
+        'view_profile', 'mapping_revision',
+    ]
+    for field in domain_fields:
+        for label, value in [('empty', ''), ('too_long', 'a' * 129),
+                             ('unicode', 'é'), ('control', 'bad\x00name')]:
+            invalid = copy.deepcopy(first)
+            invalid['payload'][field] = value
+            check(f'outbox:response_grant:{field}_{label}', not valid(schema, invalid))
+        boundary = copy.deepcopy(first)
+        boundary['payload'][field] = 'a' * 128
+        check(f'outbox:response_grant:{field}_ascii_boundary', valid(schema, boundary))
+
+    for label, value in [
+        ('missing_slash', 'api/v1/profiles'), ('query', '/api/v1/profiles?x=1'),
+        ('fragment', '/api/v1/profiles#x'), ('unicode', '/api/v1/profiles/é'),
+        ('control', '/api/v1/profiles\x00'), ('too_long', '/' + 'a' * 512),
+        ('trailing_newline', '/api/v1/profiles\n'),
+    ]:
+        invalid = copy.deepcopy(first)
+        invalid['payload']['route_template'] = value
+        check('outbox:response_grant:route_' + label, not valid(schema, invalid))
+    route_boundary = copy.deepcopy(first)
+    route_boundary['payload']['route_template'] = '/' + 'a' * 511
+    check('outbox:response_grant:route_ascii_512_bytes', valid(schema, route_boundary))
+    for label, value in [('lower_status', 199), ('upper_status', 300),
+                         ('empty_status', 204),
+                         ('fractional_status', 200.5)]:
+        invalid = copy.deepcopy(first)
+        invalid['payload']['response_status'] = value
+        check('outbox:response_grant:status_' + label, not valid(schema, invalid))
+    for label, value in [('zero', 0), ('too_many', 1001), ('fractional', 1.5)]:
+        invalid = copy.deepcopy(first)
+        invalid['payload']['candidate_count'] = value
+        check('outbox:response_grant:candidate_count_' + label, not valid(schema, invalid))
+    max_sequence = copy.deepcopy(first)
+    max_sequence['producer_seq'] = max_sequence['request_seq'] = 1000
+    max_sequence['payload']['candidate_count'] = 1000
+    check('outbox:response_grant:sequence_upper_boundary', valid(schema, max_sequence))
+    for label, value in [('zero', 0), ('too_large', 1001), ('fractional', 1.5)]:
+        invalid = copy.deepcopy(first)
+        invalid['producer_seq'] = invalid['request_seq'] = value
+        check('outbox:response_grant:sequence_' + label, not valid(schema, invalid))
+    for field in ['auth_epoch', 'issued_at_unix', 'expires_at_unix']:
+        for label, value in [('negative', -1), ('fractional', 1.5),
+                             ('bigint_overflow', 2 ** 63)]:
+            invalid = copy.deepcopy(first)
+            invalid['payload'][field] = value
+            check(f'outbox:response_grant:{field}_{label}', not valid(schema, invalid))
+
+    fields_empty = copy.deepcopy(first)
+    fields_empty['payload']['fields'] = []
+    check('outbox:response_grant:fields_empty', not valid(schema, fields_empty))
+    fields_many = copy.deepcopy(first)
+    fields_many['payload']['fields'] = ['display_name', 'email']
+    check('outbox:response_grant:fields_many', not valid(schema, fields_many))
+    fields_unknown = copy.deepcopy(first)
+    fields_unknown['payload']['fields'] = ['display/name']
+    check('outbox:response_grant:fields_unknown', not valid(schema, fields_unknown))
+    for label, fields in [
+        ('unknown_payload', {'extra': True}), ('unknown_envelope', {'extra': True}),
+    ]:
+        invalid = copy.deepcopy(first)
+        (invalid['payload'] if label.endswith('payload') else invalid).update(fields)
+        check('outbox:response_grant:' + label, not valid(schema, invalid))
+    for label, field, value in [
+        ('wrong_producer', 'producer_id', 'gateway-identity'),
+        ('wrong_sensitivity', 'sensitivity', 'INTERNAL'),
+        ('example_fixture', 'example_only', True),
+        ('nonempty_evidence_refs', 'evidence_refs', ['artifact_018f2a3b-4c5d-7000-8000-000000000001']),
+        ('nonempty_causes', 'cause_event_ids', ['ev_018f2a3b-4c5d-7000-8000-000000000002']),
+    ]:
+        invalid = copy.deepcopy(first)
+        invalid[field] = value
+        check('outbox:response_grant:' + label, not valid(schema, invalid))
+    for label, value in [('sealed', 'sealed'), ('fixture_unsealed', 'fixture_unsealed')]:
+        invalid = copy.deepcopy(first)
+        invalid['integrity']['state'] = value
+        check('outbox:response_grant:integrity_' + label, not valid(schema, invalid))
+
+    # These are intentionally accepted by the shape schema; Rust compares the
+    # values and rejects the mismatch or non-positive lease during publication.
+    mismatch = copy.deepcopy(first)
+    mismatch['producer_boot_id'] = 'req_018f2a3b-4c5d-7000-8000-000000000024'
+    mismatch['payload']['expires_at_unix'] = mismatch['payload']['issued_at_unix']
+    check('outbox:response_grant:rust_only_cross_field_checks', valid(schema, mismatch))
+    for label, value in [('fractional', '2026-09-19T00:00:00.1Z'),
+                         ('offset', '2026-09-19T08:00:00+08:00')]:
+        invalid = copy.deepcopy(first)
+        invalid['occurred_at'] = invalid['observed_at'] = value
+        check('outbox:response_grant:timestamp_' + label, not valid(schema, invalid))
+    sparse = dict(first['payload'], schema_version=3, event_type='response_grant.issued',
+                  event_id=first['event_id'], request_id=first['request_id'])
+    check('outbox:response_grant:reject_legacy_sparse', not valid(schema, sparse))
+
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
         if 'validation' in p.parts or 'target' in p.parts: continue
@@ -398,6 +586,7 @@ def main() -> int:
         check('model_call:'+label,not valid(schemas['model-call'],call))
     check_model_evaluation_contracts(schemas, model_stage, choice)
     check_outbox_contracts(schemas)
+    check_response_grant_contracts(schemas['audit-event'])
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))
     check('fixture:all_synthetic',all(e['example_only'] for e in events) and all(c['example_only'] for c in calls))
