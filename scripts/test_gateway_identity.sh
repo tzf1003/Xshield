@@ -1260,7 +1260,7 @@ SQL
 
 logout_status=$(curl -sS -D "$test_dir/logout.headers" -o "$test_dir/logout.body" -w '%{http_code}' \
     -X POST \
-    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
     -H "Authorization: Bearer $context_admin_bearer" \
     http://127.0.0.1:6288/logout)
 [[ "$logout_status" == "200" ]]
@@ -1287,7 +1287,7 @@ SQL
 )
 [[ "$logout_binding_state" == "revoked|3|1" ]]
 logout_secret_events=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
-    -v bearer="$context_admin_bearer" -v session_id="$session_id" <<'SQL'
+    -v bearer="$context_admin_bearer" -v session_id="$login_session_id" <<'SQL'
 SELECT count(*) FROM xshield.audit_outbox
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
   AND event_type = 'binding.revoked'
@@ -1298,7 +1298,7 @@ SQL
 [[ "$logout_secret_events" == "0" ]]
 set +e
 curl -sS -o "$test_dir/post-logout.body" -w '%{http_code}' \
-    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
     -H "Authorization: Bearer $context_admin_bearer" \
     http://127.0.0.1:6288/whoami >"$test_dir/post-logout.status"
 set -e

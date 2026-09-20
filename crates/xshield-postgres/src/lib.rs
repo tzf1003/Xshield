@@ -293,6 +293,7 @@ impl<'a> BindingRevocation<'a> {
         event_envelope: &'a Value,
     ) -> Result<Self, StoreError> {
         if snapshot.epoch().value() == 0
+            || snapshot.generation().value() == 0
             || i64::try_from(snapshot.epoch().value()).is_err()
             || i64::try_from(now.value()).is_err()
             || !event_envelope.is_object()
@@ -795,8 +796,8 @@ impl PostgresIdentityStore {
              WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
                AND principal_ref = $4 AND authorization_context_ref = $5
                AND auth_epoch = $6 AND status = 'active'
-               AND absolute_expires_at > to_timestamp($7)
-             FOR UPDATE",
+               AND absolute_expires_at > GREATEST(to_timestamp($7), clock_timestamp())
+               FOR UPDATE",
         )
         .bind(command.snapshot.tenant_id().as_str())
         .bind(command.snapshot.site_id().as_str())
