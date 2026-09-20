@@ -43,8 +43,9 @@ impl ResourceProofStore for PostgresIdentityStore {
                AND resource_grant.resource_key_hmac = $7 AND resource_grant.operation_id = $8
                AND resource_grant.view_id = $9 AND resource_grant.policy_revision = $10
                AND resource_grant.status = 'active'
-               AND resource_grant.expires_at > to_timestamp($11)
-               AND action.status = 'active' AND action.expires_at > to_timestamp($11)
+               AND resource_grant.expires_at > GREATEST(to_timestamp($11), clock_timestamp())
+               AND action.status = 'active'
+               AND action.expires_at > GREATEST(to_timestamp($11), clock_timestamp())
                AND policy.status = 'active'",
         )
         .bind(query.snapshot.tenant_id().as_str())
@@ -125,8 +126,9 @@ impl PostgresIdentityStore {
                   AND resource_grant.resource_key_hmac = $7
                   AND resource_grant.policy_revision = $8
                   AND resource_grant.status = 'active'
-                  AND resource_grant.expires_at > to_timestamp($9)
-                  AND action.status = 'active' AND action.expires_at > to_timestamp($9)
+                  AND resource_grant.expires_at > GREATEST(to_timestamp($9), clock_timestamp())
+                  AND action.status = 'active'
+                  AND action.expires_at > GREATEST(to_timestamp($9), clock_timestamp())
                   AND policy.status = 'active'
              )",
         )

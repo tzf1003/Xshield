@@ -1,4 +1,4 @@
-use crate::{PostgresIdentityStore, StoreError, to_i64};
+use crate::{PostgresIdentityStore, StoreError, lease_is_live, to_i64};
 use sqlx::Row;
 use xshield_core::{
     domain::{RequestId, SiteId, TenantId},
@@ -64,6 +64,8 @@ pub enum RequestCryptoMessageOutcome {
     Consumed,
     /// The nonce or message identifier was already consumed for this key.
     Replayed,
+    /// The database clock reached the frozen message deadline; nothing commits.
+    Expired,
     /// The configured active-message bound is already reached.
     CapacityExceeded,
 }
@@ -71,9 +73,12 @@ pub enum RequestCryptoMessageOutcome {
 impl PostgresIdentityStore {
     /// Atomically consumes a key-scoped message identifier and nonce.
     ///
-    /// Expired rows are removed before a site-wide capacity check. A
-    /// transaction advisory lock makes the check and dual unique constraints
-    /// deterministic across gateway instances.
+    /// Rows expired under both the application and database clocks are removed
+    /// before a site-wide capacity check. A transaction advisory lock makes the
+    /// check and dual unique constraints deterministic across gateway instances.
+    /// The database deadline is rechecked after the lock and before commit;
+    /// expiry rolls back cleanup and consumption. The caller must audit every
+    /// result before forwarding a consumed message to the origin.
     ///
     /// # Errors
     /// Returns [`StoreError`] when validation, conversion, or persistence fails.
@@ -93,10 +98,15 @@ impl PostgresIdentityStore {
         .bind(message.site_id.as_str())
         .execute(&mut *transaction)
         .await?;
+        if !lease_is_live(&mut transaction, expires_at).await? {
+            transaction.rollback().await?;
+            return Ok(RequestCryptoMessageOutcome::Expired);
+        }
+        // A fast edge must retain nonces that other edges can still accept.
         sqlx::query(
             "DELETE FROM xshield.request_crypto_messages
              WHERE tenant_id = $1 AND site_id = $2
-               AND expires_at <= to_timestamp($3)",
+               AND expires_at <= LEAST(to_timestamp($3), clock_timestamp())",
         )
         .bind(message.tenant_id.as_str())
         .bind(message.site_id.as_str())
@@ -135,6 +145,10 @@ impl PostgresIdentityStore {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
+        if !lease_is_live(&mut transaction, expires_at).await? {
+            transaction.rollback().await?;
+            return Ok(RequestCryptoMessageOutcome::Expired);
+        }
         transaction.commit().await?;
         Ok(if inserted == 1 {
             RequestCryptoMessageOutcome::Consumed

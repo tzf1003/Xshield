@@ -22,7 +22,7 @@ impl ShareGrantProofStore for PostgresIdentityStore {
                AND resource_type = $4 AND resource_key_hmac = $5
                AND operation_id = $6 AND view_id = $7
                AND use_policy = 'reusable_read' AND status = 'active'
-               AND expires_at > to_timestamp($8)",
+               AND expires_at > GREATEST(to_timestamp($8), clock_timestamp())",
         )
         .bind(query.tenant_id.as_str())
         .bind(query.site_id.as_str())

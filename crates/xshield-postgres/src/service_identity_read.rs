@@ -21,7 +21,8 @@ impl ServiceIdentityProofStore for PostgresIdentityStore {
                     extract(epoch FROM expires_at)::bigint AS expires_at
              FROM xshield.service_identities
              WHERE tenant_id = $1 AND site_id = $2 AND credential_fingerprint = $3
-               AND status = 'active' AND expires_at > to_timestamp($4)",
+               AND status = 'active'
+               AND expires_at > GREATEST(to_timestamp($4), clock_timestamp())",
         )
         .bind(query.tenant_id.as_str())
         .bind(query.site_id.as_str())

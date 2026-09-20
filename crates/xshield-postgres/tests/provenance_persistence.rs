@@ -1,5 +1,5 @@
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -18,7 +18,7 @@ use xshield_core::{
     ports::{UiActionProofQuery, UiActionProofState, UiActionProofStore},
     provenance::{
         ActionDescriptor, ActionGrant, ActionGrantDraft, ActionTarget, ActionTargetRule,
-        BuildFingerprint, HttpMethod, PageEvidence, RouteTemplate,
+        BuildFingerprint, HttpMethod, PageEvidence, ProvenanceError, RouteTemplate,
     },
 };
 use xshield_postgres::{
@@ -277,17 +277,81 @@ fn provenance_command_rejects_missing_artifact_reference() {
     ));
 }
 
+async fn assert_action_expiry_reads(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    action: &ActionGrant,
+) {
+    let query = |now| UiActionProofQuery {
+        binding: &fixture.binding,
+        snapshot: &fixture.snapshot,
+        action_ref: action.action_ref(),
+        policy_revision: action.policy_revision(),
+        now,
+    };
+    assert!(matches!(
+        store
+            .load_ui_action(query(action.expires_at()))
+            .await
+            .unwrap(),
+        UiActionProofState::Denied(ProvenanceError::ActionUnavailable)
+    ));
+    let database_now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    for (statement, reference) in [
+        (
+            "UPDATE xshield.ui_actions
+             SET issued_at = to_timestamp($4 - 120), expires_at = to_timestamp($4 - 1)
+             WHERE tenant_id = $1 AND site_id = $2 AND action_ref = $3",
+            action.action_ref().as_str(),
+        ),
+        (
+            "UPDATE xshield.page_evidence
+             SET verified_at = to_timestamp($4 - 120), expires_at = to_timestamp($4 - 1)
+             WHERE tenant_id = $1 AND site_id = $2 AND page_evidence_id = $3",
+            fixture.evidence.evidence_id().as_str(),
+        ),
+    ] {
+        // The single shared connection exposes each temporary expiry to the store.
+        sqlx::query("BEGIN").execute(pool).await.unwrap();
+        sqlx::query(statement)
+            .bind(fixture.tenant.as_str())
+            .bind(fixture.site.as_str())
+            .bind(reference)
+            .bind(database_now)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .load_ui_action(query(UnixSeconds::new(
+                    u64::try_from(database_now - 60).unwrap()
+                )))
+                .await
+                .unwrap(),
+            UiActionProofState::Denied(ProvenanceError::ActionUnavailable)
+        ));
+        sqlx::query("ROLLBACK").execute(pool).await.unwrap();
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
 async fn provenance_is_atomic_idempotent_and_epoch_bound() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
-    let store = PostgresIdentityStore::connect(&database_url, 3, Duration::from_secs(5))
-        .await
-        .expect("test database connects");
-    let pool = PgPool::connect(&database_url)
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&database_url)
         .await
         .expect("assertion pool connects");
+    let store = PostgresIdentityStore::from_pool(pool.clone());
     let fixture = fixture();
     seed_policy_binding_and_descriptor(&pool, &fixture).await;
     assert_outbox_failure_rolls_back(&pool, &store, &fixture).await;
@@ -317,6 +381,7 @@ async fn provenance_is_atomic_idempotent_and_epoch_bound() {
         .await
         .unwrap();
     assert!(matches!(loaded, UiActionProofState::Verified(found) if *found == action));
+    assert_action_expiry_reads(&pool, &store, &fixture, &action).await;
     let wrong_policy = PolicyRevision::parse("policy-r2").unwrap();
     assert!(matches!(
         store

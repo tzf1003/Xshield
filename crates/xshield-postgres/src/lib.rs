@@ -67,7 +67,7 @@ pub use response_grant::{
 pub use share_grant_issue::{ShareGrantPersistence, ShareGrantWriteOutcome};
 
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 use xshield_core::{
     domain::{AuthBindingId, EventId, SiteId, TenantId},
@@ -1029,6 +1029,17 @@ async fn replace_credentials(
     .execute(&mut **transaction)
     .await?;
     Ok(true)
+}
+
+// Recheck frozen leases after lock/constraint waits. Callers roll back their
+// transaction when this gate fails so expiry cannot commit new authority.
+async fn lease_is_live(connection: &mut PgConnection, expires_at: i64) -> Result<bool, StoreError> {
+    Ok(
+        sqlx::query_scalar("SELECT to_timestamp($1) > clock_timestamp()")
+            .bind(expires_at)
+            .fetch_one(connection)
+            .await?,
+    )
 }
 
 async fn lock_active_credentials(

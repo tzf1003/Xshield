@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{env, time::Duration};
 use xshield_core::{
     access::{AccessDenied, ShareTokenFingerprint},
@@ -14,15 +14,17 @@ const NOW: u64 = 1_800_000_000;
 
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
 async fn share_grant_is_exact_expiring_and_revocable() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
-    let store = PostgresIdentityStore::connect(&database_url, 2, Duration::from_secs(5))
-        .await
-        .expect("test database connects");
-    let pool = PgPool::connect(&database_url)
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&database_url)
         .await
         .expect("assertion pool connects");
+    let store = PostgresIdentityStore::from_pool(pool.clone());
     let tenant = TenantId::parse("tenant_share").unwrap();
     let site = SiteId::parse("site_share").unwrap();
     let token = ShareTokenFingerprint::from_bytes([51; 32]);
@@ -73,6 +75,47 @@ async fn share_grant_is_exact_expiring_and_revocable() {
             .unwrap(),
         ShareGrantProofState::Denied(AccessDenied::ShareScopeMismatch)
     ));
+
+    assert!(matches!(
+        store
+            .load_share_grant(ShareGrantProofQuery {
+                now: UnixSeconds::new(NOW + 600),
+                ..query()
+            })
+            .await
+            .unwrap(),
+        ShareGrantProofState::Denied(AccessDenied::ShareScopeMismatch)
+    ));
+    let database_now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    // The single shared connection exposes temporary expiry changes to the store.
+    sqlx::query("BEGIN").execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE xshield.share_grants
+         SET issued_at = to_timestamp($4 - 120), expires_at = to_timestamp($4 - 1)
+         WHERE tenant_id = $1 AND site_id = $2 AND share_id = $3",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .bind(grant.share_id().as_str())
+    .bind(database_now)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        store
+            .load_share_grant(ShareGrantProofQuery {
+                now: UnixSeconds::new(u64::try_from(database_now - 60).unwrap()),
+                ..query()
+            })
+            .await
+            .unwrap(),
+        ShareGrantProofState::Denied(AccessDenied::ShareScopeMismatch)
+    ));
+    sqlx::query("ROLLBACK").execute(&pool).await.unwrap();
 
     sqlx::query(
         "UPDATE xshield.share_grants SET status = 'revoked'

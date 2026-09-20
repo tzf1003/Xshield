@@ -5,6 +5,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/xshield-gateway-crypto.XXXXXX")
 origin_pid=""
 gateway_pid=""
+expiry_lock_pid=""
 test_database="xshield_crypto_${PPID}_${RANDOM}"
 
 cleanup() {
@@ -15,8 +16,10 @@ cleanup() {
     fi
     if [[ -n "$gateway_pid" ]]; then kill -KILL "$gateway_pid" 2>/dev/null || true; fi
     if [[ -n "$origin_pid" ]]; then kill "$origin_pid" 2>/dev/null || true; fi
+    if [[ -n "$expiry_lock_pid" ]]; then kill "$expiry_lock_pid" 2>/dev/null || true; fi
     wait "$gateway_pid" 2>/dev/null || true
     wait "$origin_pid" 2>/dev/null || true
+    wait "$expiry_lock_pid" 2>/dev/null || true
     dropdb --if-exists "$test_database" >/dev/null 2>&1 || true
     rm -r -- "$test_dir"
 }
@@ -422,6 +425,33 @@ status=$(curl --silent --output "$test_dir/query-response" --write-out '%{http_c
 [[ "$status" == "400" ]]
 grep -q 'REQUEST_ENVELOPE_INVALID' "$test_dir/query-response"
 [[ "$(wc -l < "$capture" | tr -d ' ')" == "1" ]]
+
+# Decode starts while the message is live; the shared replay lock expires it.
+expiry_lock_application="xshield-crypto-expiry-${PPID}-${RANDOM}"
+PGAPPNAME="$expiry_lock_application" psql -X -v ON_ERROR_STOP=1 -d "$test_database" \
+    -c "BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('xshield-request-crypto-v1:tenant_crypto:site_crypto', 0)); SELECT pg_sleep(5); COMMIT;" \
+    >"$test_dir/expiry-lock.log" 2>&1 &
+expiry_lock_pid=$!
+for _ in $(seq 1 100); do
+    expiry_lock_held=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
+        -c "SELECT EXISTS (SELECT 1 FROM pg_locks held JOIN pg_stat_activity activity ON activity.pid = held.pid WHERE activity.application_name = '$expiry_lock_application' AND held.locktype = 'advisory' AND held.granted)")
+    if [[ "$expiry_lock_held" == "t" ]]; then break; fi
+    sleep 0.02
+done
+[[ "$expiry_lock_held" == "t" ]]
+lock_now=$(date +%s)
+lock_envelope=$(make_envelope "070707070707070707070707" \
+    "msg_018f2a3b-4c5d-7000-8000-000000000905" "$((lock_now - 1))" "$((lock_now + 2))")
+status=$(curl --silent --max-time 10 --output "$test_dir/lock-expired-response" --write-out '%{http_code}' \
+    -H 'Content-Type: application/vnd.xshield.encrypted+json' \
+    --data-binary "$lock_envelope" "http://127.0.0.1:$gateway_port/orders")
+wait "$expiry_lock_pid"
+expiry_lock_pid=""
+[[ "$status" == "400" ]]
+grep -q 'REQUEST_CRYPTO_MESSAGE_EXPIRED' "$test_dir/lock-expired-response"
+[[ "$(wc -l < "$capture" | tr -d ' ')" == "1" ]]
+[[ "$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
+    -c "SELECT count(*) FROM xshield.request_crypto_messages WHERE tenant_id = 'tenant_crypto' AND site_id = 'site_crypto' AND message_id = 'msg_018f2a3b-4c5d-7000-8000-000000000905'")" == "0" ]]
 
 opaque='legacy-protocol-body'
 curl --fail --silent --show-error --output "$test_dir/observe-response" \

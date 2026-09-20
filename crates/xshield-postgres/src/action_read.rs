@@ -176,12 +176,14 @@ impl UiActionProofStore for PostgresIdentityStore {
              WHERE action.tenant_id = $1 AND action.site_id = $2
                AND action.action_ref = $3 AND action.binding_id = $4
                AND action.auth_epoch = $5 AND action.policy_revision = $6
-               AND action.status = 'active' AND action.expires_at > to_timestamp($7)
+               AND action.status = 'active'
+               AND action.expires_at > GREATEST(to_timestamp($7), clock_timestamp())
                AND ((page.page_evidence_id IS NOT NULL
-                     AND page.status = 'verified' AND page.expires_at > to_timestamp($7))
+                     AND page.status = 'verified'
+                     AND page.expires_at > GREATEST(to_timestamp($7), clock_timestamp()))
                     OR (response.response_evidence_id IS NOT NULL
                         AND response.status = 'verified'
-                        AND response.expires_at > to_timestamp($7)))
+                        AND response.expires_at > GREATEST(to_timestamp($7), clock_timestamp())))
                AND descriptor.status = 'approved' AND policy.status = 'active'",
         )
         .bind(query.snapshot.tenant_id().as_str())

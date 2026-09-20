@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -11,7 +11,7 @@ use xshield_core::{
         MappingRevision, OperationId, PageTemplate, PolicyRevision, RequestId, ResourceType,
         ResponseEvidenceId, SiteId, TenantId, ViewProfile, WafSessionId,
     },
-    grant::{GrantDraft, ResourceKeyHmac},
+    grant::{GrantDenied, GrantDraft, ResourceKeyHmac},
     identity::{
         AuthBinding, AuthEpoch, AuthSnapshot, CredentialFingerprint, CredentialGeneration,
         CredentialSlot, UnixSeconds,
@@ -22,7 +22,7 @@ use xshield_core::{
     },
     provenance::{
         ActionDescriptor, ActionGrant, ActionGrantDraft, ActionTarget, ActionTargetRule,
-        HttpMethod, ResponseEvidence, RouteTemplate,
+        HttpMethod, ProvenanceError, ResponseEvidence, RouteTemplate,
     },
 };
 use xshield_postgres::{
@@ -285,15 +285,136 @@ async fn count(pool: &PgPool, table: &str) -> i64 {
     }
 }
 
+#[allow(clippy::too_many_lines)]
+async fn assert_response_expiry_reads(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    batch: &Batch,
+    action_ref: &ActionRef,
+) {
+    let action_query = |now| UiActionProofQuery {
+        binding: &fixture.binding,
+        snapshot: &fixture.snapshot,
+        action_ref,
+        policy_revision: batch.evidence.policy_revision(),
+        now,
+    };
+    let resource_query = |now| ResourceProofQuery {
+        binding: &fixture.binding,
+        snapshot: &fixture.snapshot,
+        action_ref,
+        resource_type: &batch.grants[0].resource_type,
+        resource_key: &batch.grants[0].resource_key,
+        operation_id: &batch.grants[0].operation_id,
+        view_profile: &batch.grants[0].view_profile,
+        policy_revision: &batch.grants[0].policy_revision,
+        now,
+    };
+    assert!(matches!(
+        store
+            .load_ui_action(action_query(UnixSeconds::new(EXPIRES)))
+            .await
+            .unwrap(),
+        UiActionProofState::Denied(ProvenanceError::ActionUnavailable)
+    ));
+    assert!(matches!(
+        store
+            .load_resource_grant(resource_query(UnixSeconds::new(EXPIRES)))
+            .await
+            .unwrap(),
+        ResourceProofState::Denied(GrantDenied::CapabilityMissing)
+    ));
+    let database_now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let stale_now = UnixSeconds::new(u64::try_from(database_now - 60).unwrap());
+    for (statement, reference) in [
+        (
+            "UPDATE xshield.ui_actions
+             SET issued_at = to_timestamp($4 - 120), expires_at = to_timestamp($4 - 1)
+             WHERE tenant_id = $1 AND site_id = $2 AND action_ref = $3",
+            action_ref.as_str(),
+        ),
+        (
+            "UPDATE xshield.response_evidence
+             SET verified_at = to_timestamp($4 - 120), expires_at = to_timestamp($4 - 1)
+             WHERE tenant_id = $1 AND site_id = $2 AND response_evidence_id = $3",
+            batch.evidence.evidence_id().as_str(),
+        ),
+    ] {
+        // The single shared connection exposes each temporary expiry to the store.
+        sqlx::query("BEGIN").execute(pool).await.unwrap();
+        sqlx::query(statement)
+            .bind(fixture.tenant.as_str())
+            .bind(fixture.site.as_str())
+            .bind(reference)
+            .bind(database_now)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.load_ui_action(action_query(stale_now)).await.unwrap(),
+            UiActionProofState::Denied(ProvenanceError::ActionUnavailable)
+        ));
+        sqlx::query("ROLLBACK").execute(pool).await.unwrap();
+    }
+
+    sqlx::query("BEGIN").execute(pool).await.unwrap();
+    // Keep the issuance-order join valid so expiry is the reason this grant fails.
+    sqlx::query(
+        "UPDATE xshield.ui_actions SET issued_at = to_timestamp($4 - 120)
+         WHERE tenant_id = $1 AND site_id = $2 AND action_ref = $3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(action_ref.as_str())
+    .bind(database_now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE xshield.resource_grants
+         SET issued_at = to_timestamp($4 - 119), expires_at = to_timestamp($4 - 1)
+         WHERE tenant_id = $1 AND site_id = $2 AND action_ref = $3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(action_ref.as_str())
+    .bind(database_now)
+    .execute(pool)
+    .await
+    .unwrap();
+    let wrong_operation = OperationId::parse("orders.update").unwrap();
+    for operation_id in [&batch.grants[0].operation_id, &wrong_operation] {
+        assert!(matches!(
+            store
+                .load_resource_grant(ResourceProofQuery {
+                    operation_id,
+                    ..resource_query(stale_now)
+                })
+                .await
+                .unwrap(),
+            ResourceProofState::Denied(GrantDenied::CapabilityMissing)
+        ));
+    }
+    sqlx::query("ROLLBACK").execute(pool).await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)]
 async fn response_grant_batch_is_atomic_replayable_and_usable() {
     let database_url = env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL required");
-    let store = PostgresIdentityStore::connect(&database_url, 4, Duration::from_secs(5))
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&database_url)
         .await
         .unwrap();
-    let pool = PgPool::connect(&database_url).await.unwrap();
+    let store = PostgresIdentityStore::from_pool(pool.clone());
     let fixture = fixture();
     seed(&pool, &fixture).await;
     let policy_revision = PolicyRevision::parse("policy-r1").unwrap();
@@ -409,6 +530,7 @@ async fn response_grant_batch_is_atomic_replayable_and_usable() {
         .await
         .unwrap();
     assert!(matches!(resource_state, ResourceProofState::Verified(_)));
+    assert_response_expiry_reads(&pool, &store, &fixture, &first, &created[0].action_ref).await;
 
     sqlx::query(
         "UPDATE xshield.auth_bindings SET auth_epoch = 5

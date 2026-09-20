@@ -1,4 +1,4 @@
-use crate::{PostgresIdentityStore, StoreError, to_i64};
+use crate::{PostgresIdentityStore, StoreError, lease_is_live, to_i64};
 use chrono::{DateTime, SecondsFormat};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Row};
@@ -253,15 +253,6 @@ impl PostgresIdentityStore {
         transaction.commit().await?;
         Ok(GrantWriteOutcome::Created(command.draft.grant_id.clone()))
     }
-}
-
-async fn lease_is_live(connection: &mut PgConnection, expires_at: i64) -> Result<bool, StoreError> {
-    Ok(
-        sqlx::query_scalar("SELECT to_timestamp($1) > clock_timestamp()")
-            .bind(expires_at)
-            .fetch_one(connection)
-            .await?,
-    )
 }
 
 async fn lock_eligible_binding(

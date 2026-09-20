@@ -909,6 +909,7 @@ impl Gateway {
         {
             RequestCryptoMessageOutcome::Consumed => Ok(frozen),
             RequestCryptoMessageOutcome::Replayed => Err(ReasonCode::RequestCryptoReplayDetected),
+            RequestCryptoMessageOutcome::Expired => Err(ReasonCode::RequestCryptoMessageExpired),
             RequestCryptoMessageOutcome::CapacityExceeded => {
                 Err(ReasonCode::RequestCryptoReplayCapacityExceeded)
             }

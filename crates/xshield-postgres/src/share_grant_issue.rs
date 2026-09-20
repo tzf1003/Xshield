@@ -1,4 +1,4 @@
-use crate::{PostgresIdentityStore, StoreError, to_i64};
+use crate::{PostgresIdentityStore, StoreError, lease_is_live, to_i64};
 use serde_json::Value;
 use sqlx::{PgConnection, Row};
 use xshield_core::{
@@ -139,15 +139,6 @@ impl PostgresIdentityStore {
             command.draft.share_id.clone(),
         ))
     }
-}
-
-async fn lease_is_live(connection: &mut PgConnection, expires_at: i64) -> Result<bool, StoreError> {
-    Ok(
-        sqlx::query_scalar("SELECT to_timestamp($1) > clock_timestamp()")
-            .bind(expires_at)
-            .fetch_one(connection)
-            .await?,
-    )
 }
 
 async fn lock_eligible_binding(
