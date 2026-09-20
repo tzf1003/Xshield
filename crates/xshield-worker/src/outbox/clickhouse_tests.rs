@@ -7,7 +7,11 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use std::future::Future;
 use uuid::Uuid;
-use xshield_core::domain::{EventId, RequestId, SiteId, TenantId};
+use xshield_core::{
+    domain::{AuthBindingId, EventId, GrantId, RequestId, SiteId, TenantId},
+    identity::UnixSeconds,
+    query::{QueryFilter, QueryPlan, QuerySort, QueryWindow},
+};
 
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL and XSHIELD_TEST_CLICKHOUSE_URL"]
@@ -433,6 +437,74 @@ async fn assert_index_rows(
                 envelope["payload"]
             );
         }
+    }
+    for envelope in expected.values() {
+        assert_linkage_queries(client, scope, envelope).await;
+    }
+}
+
+async fn assert_linkage_queries(client: &Client, scope: &OutboxScope, envelope: &Value) {
+    let (grant_key, binding_key) = match envelope["event_type"].as_str().unwrap() {
+        "grant.issued" | "response_grant.issued" => (Some("grant_id"), "binding_id"),
+        "share.issued" => (Some("issuer_grant_id"), "issuer_binding_id"),
+        "session.created" | "binding.created" | "identity.refreshed" | "epoch.changed"
+        | "binding.revoked" => (None, "binding_id"),
+        _ => return,
+    };
+    let binding = AuthBindingId::parse(envelope["payload"][binding_key].as_str().unwrap()).unwrap();
+    let mut filters = vec![QueryFilter::AuthBindingId(binding)];
+    if let Some(key) = grant_key {
+        filters.push(QueryFilter::GrantId(
+            GrantId::parse(envelope["payload"][key].as_str().unwrap()).unwrap(),
+        ));
+    }
+    let occurred_at =
+        DateTime::parse_from_rfc3339(envelope["occurred_at"].as_str().unwrap()).unwrap();
+    let start = u64::try_from(occurred_at.timestamp()).unwrap();
+    let window = QueryWindow::new(UnixSeconds::new(start), UnixSeconds::new(start + 1)).unwrap();
+    let config = crate::PublisherConfig::new(
+        "unused-journal",
+        "unused-manifests",
+        "unused-checkpoints",
+        "clickhouse-test",
+        "audit_events",
+        30,
+        1024,
+    )
+    .unwrap();
+    for filter in filters {
+        let plan = QueryPlan::new(
+            window,
+            vec![
+                filter,
+                QueryFilter::EventId(
+                    EventId::parse(envelope["event_id"].as_str().unwrap()).unwrap(),
+                ),
+            ],
+            QuerySort::OccurredAtAsc,
+            1,
+        )
+        .unwrap();
+        let result = crate::query_audit_events(
+            &config,
+            client,
+            scope.tenant_id(),
+            scope.site_id(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(
+            result.events[0].event_id,
+            envelope["event_id"].as_str().unwrap()
+        );
+        assert_eq!(
+            result.events[0].request_id.as_deref(),
+            envelope["request_id"].as_str()
+        );
+        assert!(!result.truncated);
     }
 }
 

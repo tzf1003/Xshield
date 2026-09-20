@@ -233,6 +233,8 @@ pub struct AuditSearchResult {
 /// The tenant and site are always supplied by the authenticated control-plane
 /// composition root. Every predicate is selected from a closed enum and every
 /// value is bound separately; no caller-provided SQL fragment is accepted.
+/// Grant and binding filters inspect fixed fields of validated outbox event
+/// families. They locate historical facts, not current authorization state.
 /// The read has a five-second client deadline, server execution/scan/memory
 /// budgets, and a 16 MiB decoded response ceiling. Dropping the future cancels
 /// local work; the caller owns terminal audit and concurrency admission.
@@ -546,6 +548,21 @@ async fn execute_query(
         match filter {
             QueryFilter::RequestId(_) => sql.push_str("request_id = ?"),
             QueryFilter::EventId(_) => sql.push_str("event_id = ?"),
+            // ponytail: bounded payload scan; add indexed columns only when
+            // measured retention volumes exceed the existing scan budget.
+            QueryFilter::GrantId(_) => sql.push_str(
+                "((event_type IN ('grant.issued','response_grant.issued') \
+                  AND JSONExtractString(payload_json,'grant_id') = ?) \
+                  OR (event_type = 'share.issued' \
+                  AND JSONExtractString(payload_json,'issuer_grant_id') = ?))",
+            ),
+            QueryFilter::AuthBindingId(_) => sql.push_str(
+                "((event_type IN ('session.created','binding.created','identity.refreshed',\
+                  'epoch.changed','binding.revoked','grant.issued','response_grant.issued') \
+                  AND JSONExtractString(payload_json,'binding_id') = ?) \
+                  OR (event_type = 'share.issued' \
+                  AND JSONExtractString(payload_json,'issuer_binding_id') = ?))",
+            ),
             QueryFilter::Text { field, .. } => {
                 sql.push_str(field.as_str());
                 sql.push_str(" = ?");
@@ -579,6 +596,8 @@ async fn execute_query(
         query = match filter {
             QueryFilter::RequestId(value) => query.bind(value.as_str()),
             QueryFilter::EventId(value) => query.bind(value.as_str()),
+            QueryFilter::GrantId(value) => query.bind(value.as_str()).bind(value.as_str()),
+            QueryFilter::AuthBindingId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::Text { value, .. } => query.bind(value),
             QueryFilter::Outcome(value) => query.bind(value.as_str()),
             QueryFilter::ConfidenceAtMost(value) => query.bind(value.as_f64()),

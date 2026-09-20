@@ -19,7 +19,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use xshield_core::{
     admin::ManagementRole,
-    domain::{EventId, RequestId, SiteId, TenantId},
+    domain::{AuthBindingId, EventId, GrantId, RequestId, SiteId, TenantId},
     identity::UnixSeconds,
     query::{
         ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
@@ -341,6 +341,14 @@ fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
                 canonical.push_str("event_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::GrantId(value) => {
+                canonical.push_str("grant_id=");
+                canonical.push_str(value.as_str());
+            }
+            QueryFilter::AuthBindingId(value) => {
+                canonical.push_str("auth_binding_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::Text { field, value } => {
                 canonical.push_str(field.as_str());
                 canonical.push('=');
@@ -435,6 +443,12 @@ enum SearchFilterRequest {
     EventId {
         value: String,
     },
+    GrantId {
+        value: String,
+    },
+    AuthBindingId {
+        value: String,
+    },
     Text {
         field: SearchTextFieldRequest,
         value: String,
@@ -455,6 +469,12 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::EventId { value } => EventId::parse(value)
                 .map(QueryFilter::EventId)
+                .map_err(|_| ()),
+            Self::GrantId { value } => GrantId::parse(value)
+                .map(QueryFilter::GrantId)
+                .map_err(|_| ()),
+            Self::AuthBindingId { value } => AuthBindingId::parse(value)
+                .map(QueryFilter::AuthBindingId)
                 .map_err(|_| ()),
             Self::Text { field, value } => Ok(QueryFilter::Text {
                 field: field.into_domain(),

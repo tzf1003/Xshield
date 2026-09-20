@@ -4061,6 +4061,7 @@ mod tests {
     mod case_close;
     mod case_collection;
     mod case_items;
+    mod search_references;
 
     use super::search::SearchRequest;
     use super::{
@@ -6360,7 +6361,7 @@ mod tests {
                 .body(Body::empty())
                 .unwrap()
         } else {
-            search_http_request(&search_payload())
+            search_http_request(&search_references::reference_payload())
         }
     }
 

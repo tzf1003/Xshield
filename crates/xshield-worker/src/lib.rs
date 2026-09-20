@@ -1878,7 +1878,7 @@ mod tests {
         SealedSegmentReader, seal_closed_segments,
     };
     use xshield_core::{
-        domain::{EventId, ModelCallId, RequestId, SiteId, TenantId},
+        domain::{AuthBindingId, EventId, GrantId, ModelCallId, RequestId, SiteId, TenantId},
         identity::UnixSeconds,
         query::{
             ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
@@ -2886,6 +2886,48 @@ mod tests {
             )));
             assert!(!sql.contains("payload_json"));
         }
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_binds_historical_grant_and_identity_fields() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let captured = mock.add(test::handlers::record_ddl());
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            vec![
+                QueryFilter::GrantId(
+                    GrantId::parse("grant_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+                ),
+                QueryFilter::AuthBindingId(
+                    AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+                ),
+            ],
+            QuerySort::OccurredAtDesc,
+            2,
+        )
+        .unwrap();
+        query_audit_events(
+            &fixture.config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_b").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+        let sql = captured.query().await;
+        for fragment in [
+            "WHERE tenant_id = 'tenant_a' AND site_id = 'site_b'",
+            "occurred_at >= fromUnixTimestamp64Micro(1000000) AND occurred_at < fromUnixTimestamp64Micro(61000000)",
+            "AND ((event_type IN ('grant.issued','response_grant.issued') AND JSONExtractString(payload_json,'grant_id') = 'grant_018f2a3b-4c5d-7000-8000-000000000001') OR (event_type = 'share.issued' AND JSONExtractString(payload_json,'issuer_grant_id') = 'grant_018f2a3b-4c5d-7000-8000-000000000001'))",
+            "AND ((event_type IN ('session.created','binding.created','identity.refreshed','epoch.changed','binding.revoked','grant.issued','response_grant.issued') AND JSONExtractString(payload_json,'binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002') OR (event_type = 'share.issued' AND JSONExtractString(payload_json,'issuer_binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002'))",
+            "ORDER BY occurred_at DESC,event_id DESC LIMIT 3",
+        ] {
+            assert!(sql.contains(fragment), "missing query fragment: {fragment}");
+        }
+        assert!(!sql.split_once(" FROM ").unwrap().0.contains("payload_json"));
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ use serde::{Serialize, Serializer, ser::SerializeTuple};
 use std::{env, panic::resume_unwind};
 use uuid::Uuid;
 use xshield_core::{
-    domain::{EventId, RequestId, SiteId, TenantId},
+    domain::{AuthBindingId, EventId, GrantId, RequestId, SiteId, TenantId},
     identity::UnixSeconds,
     query::{
         ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
@@ -83,18 +83,10 @@ async fn real_schema_search_is_scoped_typed_paginated_and_retention_aware() {
                 .fetch_one::<u64>()
                 .await;
             assert!(matches!(raw_read, Err(ref error) if server_code(error) == Some(497)));
-            let config = PublisherConfig::new(
-                "unused-journal",
-                "unused-manifests",
-                "unused-checkpoints",
-                "clickhouse-test",
-                table,
-                30,
-                1024,
-            )
-            .unwrap();
+            let config = query_config(table);
             assert_search(&reader, &config, window, &expected).await;
         }
+        assert_grant_binding_search(&client, &reader).await;
         assert_latest_stage_null_confidence(&client, &reader).await;
     })
     .await;
@@ -193,16 +185,7 @@ async fn assert_latest_stage_null_confidence(writer: &Client, reader: &Client) {
     }
     insert.end().await.unwrap();
     for table in ["audit_events", "events_by_time"] {
-        let config = PublisherConfig::new(
-            "unused-journal",
-            "unused-manifests",
-            "unused-checkpoints",
-            "clickhouse-test",
-            table,
-            30,
-            1024,
-        )
-        .unwrap();
+        let config = query_config(table);
         let summary = query_request_summary(
             &config,
             reader,
@@ -261,7 +244,7 @@ struct TestEvent {
     evidence_refs: Vec<String>,
     cause_event_ids: Vec<String>,
     sensitivity: &'static str,
-    payload_json: &'static str,
+    payload_json: String,
     event_hash: String,
     #[serde(serialize_with = "serialize_digest")]
     content_digest: [u8; 64],
@@ -301,7 +284,7 @@ impl TestEvent {
             evidence_refs: Vec::new(),
             cause_event_ids: Vec::new(),
             sensitivity: "INTERNAL",
-            payload_json: "synthetic raw payload",
+            payload_json: "synthetic raw payload".to_owned(),
             event_hash: "0".repeat(64),
             content_digest: [b'0'; 64],
             ingest_revision: 1,
@@ -416,6 +399,198 @@ async fn insert_events(client: &Client) -> (QueryWindow, Vec<TestEvent>) {
     )
     .unwrap();
     (window, expected)
+}
+
+// Keep synthetic row variants and the ensuing scoped queries in execution order.
+#[allow(clippy::too_many_lines)]
+async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
+    const GRANT: &str = "grant_018f2a3b-4c5d-7000-8000-000000000201";
+    const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-000000000201";
+    let now_micros: i64 = checked(
+        writer
+            .query("SELECT toUnixTimestamp64Micro(now64(6))")
+            .fetch_one()
+            .await,
+        "read linkage test clock",
+    );
+    let now = DateTime::from_timestamp_micros(now_micros).unwrap();
+    let start = DateTime::from_timestamp(now.timestamp() - 60, 0).unwrap();
+    let expires = now + TimeDelta::hours(1);
+    let direct = serde_json::json!({"grant_id": GRANT, "binding_id": BINDING}).to_string();
+    let issuer =
+        serde_json::json!({"issuer_grant_id": GRANT, "issuer_binding_id": BINDING}).to_string();
+    let mut rows = Vec::new();
+    for (sequence, kind) in [
+        (201, "grant.issued"),
+        (202, "response_grant.issued"),
+        (203, "share.issued"),
+        (204, "session.created"),
+        (205, "binding.created"),
+        (206, "identity.refreshed"),
+        (207, "epoch.changed"),
+        (208, "binding.revoked"),
+    ] {
+        let mut row = TestEvent::new(sequence, start, expires);
+        row.tenant_id = "tenant_linkage";
+        row.site_id = "site_linkage";
+        row.event_type = kind;
+        row.payload_json = if kind == "share.issued" {
+            issuer.clone()
+        } else {
+            direct.clone()
+        };
+        rows.push(row);
+    }
+    // Equal JSON field names are meaningful only in the declared event family.
+    for (sequence, kind, payload) in [
+        (209, "stage.completed", direct.clone()),
+        (210, "case.closed", issuer.clone()),
+        (211, "grant.issued", issuer.clone()),
+        (212, "share.issued", direct.clone()),
+        (213, "grant.issued", "{}".to_owned()),
+        (214, "share.issued", "{}".to_owned()),
+        (215, "grant.issued.spoofed", direct.clone()),
+        (
+            221,
+            "grant.issued",
+            serde_json::json!({"nested": {"grant_id": GRANT, "binding_id": BINDING}}).to_string(),
+        ),
+    ] {
+        let mut row = rows[0].clone();
+        row.event_id = event_id(sequence);
+        row.event_type = kind;
+        row.payload_json = payload;
+        rows.push(row);
+    }
+    let mut other_tenant = rows[0].clone();
+    other_tenant.event_id = event_id(216);
+    other_tenant.tenant_id = "tenant_other";
+    rows.push(other_tenant);
+    let mut other_site = rows[2].clone();
+    other_site.event_id = event_id(217);
+    other_site.site_id = "site_other";
+    rows.push(other_site);
+    let mut past_deadline = rows[0].clone();
+    past_deadline.event_id = event_id(218);
+    past_deadline.retention_expires_at = now - TimeDelta::seconds(1);
+    rows.push(past_deadline.clone());
+    past_deadline.retention_expires_at = expires;
+    rows.push(past_deadline);
+    let mut duplicate = rows[0].clone();
+    duplicate.retention_expires_at += TimeDelta::hours(1);
+    rows.push(duplicate);
+    let mut outside = rows[0].clone();
+    outside.event_id = event_id(220);
+    outside.occurred_at = start + TimeDelta::seconds(2);
+    rows.push(outside);
+    let mut insert = checked(
+        writer.insert::<TestEvent>("audit_events").await,
+        "insert linkage fixtures",
+    );
+    for row in &rows {
+        checked(insert.write(row).await, "write linkage fixture");
+    }
+    checked(insert.end().await, "finish linkage fixtures");
+    let window = QueryWindow::new(
+        UnixSeconds::new(u64::try_from(start.timestamp()).unwrap()),
+        UnixSeconds::new(u64::try_from(start.timestamp() + 2).unwrap()),
+    )
+    .unwrap();
+    let grant = QueryFilter::GrantId(GrantId::parse(GRANT).unwrap());
+    let binding = QueryFilter::AuthBindingId(AuthBindingId::parse(BINDING).unwrap());
+    let tenant = TenantId::parse("tenant_linkage").unwrap();
+    let site = SiteId::parse("site_linkage").unwrap();
+    for table in ["audit_events", "events_by_time"] {
+        let config = query_config(table);
+        for (filters, ids) in [
+            (vec![grant.clone()], vec![201, 202, 203]),
+            (vec![binding.clone()], (201..=208).collect()),
+            (vec![grant.clone(), binding.clone()], vec![201, 202, 203]),
+            (
+                vec![
+                    grant.clone(),
+                    text(QueryTextField::EventType, "share.issued"),
+                ],
+                vec![203],
+            ),
+            (
+                vec![
+                    binding.clone(),
+                    text(QueryTextField::EventType, "binding.revoked"),
+                ],
+                vec![208],
+            ),
+            (
+                vec![
+                    QueryFilter::GrantId(
+                        GrantId::parse("grant_018f2a3b-4c5d-7000-8000-000000000299").unwrap(),
+                    ),
+                    binding.clone(),
+                ],
+                vec![],
+            ),
+            (
+                vec![
+                    grant.clone(),
+                    QueryFilter::AuthBindingId(
+                        AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000299").unwrap(),
+                    ),
+                ],
+                vec![],
+            ),
+        ] {
+            let plan = QueryPlan::new(window, filters, QuerySort::OccurredAtAsc, 100).unwrap();
+            let result =
+                queried(query_audit_events(&config, reader, &tenant, &site, &plan, None).await);
+            assert_ids(&result, &ids);
+            for event in &result.events {
+                let json = serde_json::to_value(event).unwrap();
+                assert!(json.get("payload_json").is_none());
+            }
+        }
+        let plan = QueryPlan::new(
+            window,
+            vec![grant.clone(), binding.clone()],
+            QuerySort::OccurredAtAsc,
+            100,
+        )
+        .unwrap();
+        for (tenant, site, expected) in [
+            ("tenant_other", "site_linkage", vec![216]),
+            ("tenant_linkage", "site_other", vec![217]),
+            ("tenant_other", "site_other", vec![]),
+        ] {
+            let result = queried(
+                query_audit_events(
+                    &config,
+                    reader,
+                    &TenantId::parse(tenant).unwrap(),
+                    &SiteId::parse(site).unwrap(),
+                    &plan,
+                    None,
+                )
+                .await,
+            );
+            assert_ids(&result, &expected);
+        }
+        for sort in [QuerySort::OccurredAtAsc, QuerySort::OccurredAtDesc] {
+            let plan = QueryPlan::new(window, vec![binding.clone()], sort, 1).unwrap();
+            let mut expected: Vec<_> = (201..=208).collect();
+            if sort == QuerySort::OccurredAtDesc {
+                expected.reverse();
+            }
+            let mut after = None;
+            for (index, id) in expected.iter().enumerate() {
+                let page = queried(
+                    query_audit_events(&config, reader, &tenant, &site, &plan, after.as_ref())
+                        .await,
+                );
+                assert_ids(&page, &[*id]);
+                assert_eq!(page.truncated, index + 1 < expected.len());
+                after = page.next_position;
+            }
+        }
+    }
 }
 
 async fn assert_search(
@@ -559,6 +734,19 @@ async fn assert_filters(client: &Client, config: &PublisherConfig, window: Query
         );
         assert_ids(&result, &ids);
     }
+}
+
+fn query_config(table: &str) -> PublisherConfig {
+    PublisherConfig::new(
+        "unused-journal",
+        "unused-manifests",
+        "unused-checkpoints",
+        "clickhouse-test",
+        table,
+        30,
+        1024,
+    )
+    .unwrap()
 }
 
 fn assert_summary(actual: &SearchEventSummary, expected: &TestEvent) {

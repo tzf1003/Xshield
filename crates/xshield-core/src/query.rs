@@ -6,7 +6,7 @@
 //! queries after injecting the authenticated tenant/site scope.
 
 use crate::{
-    domain::{EventId, RequestId},
+    domain::{AuthBindingId, EventId, GrantId, RequestId},
     identity::UnixSeconds,
 };
 use std::fmt;
@@ -161,6 +161,12 @@ pub enum QueryFilter {
     RequestId(RequestId),
     /// Exact immutable event identity.
     EventId(EventId),
+    /// Exact resource-grant reference in an issuance event or share source.
+    /// This selects historical facts, not the current grant's eligibility.
+    GrantId(GrantId),
+    /// Exact binding reference in identity or qualification issuance events.
+    /// The caller's management scope is applied independently by the adapter.
+    AuthBindingId(AuthBindingId),
     /// Exact equality on an allow-listed text column.
     Text {
         /// Column selected from [`QueryTextField`].
@@ -179,6 +185,8 @@ impl QueryFilter {
         match self {
             Self::RequestId(_)
             | Self::EventId(_)
+            | Self::GrantId(_)
+            | Self::AuthBindingId(_)
             | Self::Outcome(_)
             | Self::ConfidenceAtMost(_) => Ok(()),
             Self::Text { value, .. } => {
@@ -310,7 +318,10 @@ mod tests {
         ConfidenceThreshold, MAX_FILTERS, MAX_LIMIT, MAX_WINDOW_SECONDS, QueryFilter, QueryOutcome,
         QueryPlan, QueryPlanError, QuerySort, QueryTextField, QueryWindow,
     };
-    use crate::{domain::RequestId, identity::UnixSeconds};
+    use crate::{
+        domain::{AuthBindingId, GrantId, RequestId},
+        identity::UnixSeconds,
+    };
 
     fn window(seconds: u64) -> QueryWindow {
         QueryWindow::new(UnixSeconds::new(10), UnixSeconds::new(10 + seconds)).unwrap()
@@ -329,13 +340,19 @@ mod tests {
                 },
                 QueryFilter::Outcome(QueryOutcome::Deny),
                 QueryFilter::ConfidenceAtMost(ConfidenceThreshold::new(8_000).unwrap()),
+                QueryFilter::GrantId(
+                    GrantId::parse("grant_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+                ),
+                QueryFilter::AuthBindingId(
+                    AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+                ),
             ],
             QuerySort::OccurredAtAsc,
             50,
         )
         .unwrap();
         assert_eq!(plan.limit(), 50);
-        assert_eq!(plan.filters().len(), 4);
+        assert_eq!(plan.filters().len(), 6);
         assert_eq!(
             plan.filters()[1],
             QueryFilter::Text {
