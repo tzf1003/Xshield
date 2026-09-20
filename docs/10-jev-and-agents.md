@@ -103,3 +103,13 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 和 `cost`、`marketCost`、`surchargeCost`、`gatewayCost` 十进制字符串。标识最多 256 字节可见 ASCII，费用字符串最多 64 字节；同时保留已接受的 routing 字段。费用只校验并保存在原响应证据，不据此推算用量或结算，Gateway 别名仍保留未知精确版本。
 
 先升级模型 journal 发布器、控制查询服务及控制台，再启用 Score 生产者；旧版读取端只接受 Choice/Noul，遇到 Score 会严格拒绝。需要回退时先停止新增 Score 调用，保留已产生的 journal、证据、catalog 与水位，并继续用支持 Score 的读取/发布端处理历史。本次无需数据库迁移或新依赖。
+
+## 10.12 离线阈值评估内核
+
+`xshield_core::calibration` 提供无 I/O 的固定阈值评估：最多 10000 个唯一 `ModelCallId` 样本，真值为 benign/malicious/unknown，信号为已验证二元恶意概率或有原因的缺失。概率须有限且位于 `[0,1]`，阈值满足 `0 ≤ low < high ≤ 1`；`p ≤ low` 归为离线 allow 建议，`p ≥ high` 归为 deny，中间值及缺失归为 abstain。输出建议只用于统计，应用层仍执行确定性规则。
+
+报告保留真值与建议的九格计数，以及概率缺失原因、未知标签和可评分样本数。误放率分母是全部已知 malicious，误拒率分母是全部已知 benign，均包含概率缺失的样本；覆盖率与弃权率分母是全部样本。分母为零返回 `None`。Brier 与十个固定可靠性桶只使用真值已知且概率有效的样本，未知标签与缺失分别计数。所有比例提供原始分子和分母，便于判断样本覆盖。
+
+调用者负责通过获准证据读取路径组装样本，并冻结数据集/标签修订、任务、概率映射、模型与提示版本、阈值策略和训练/校准/评估分区。二元恶意概率需要按批准任务从 Choice 风险候选或 Score 风险档位的完整分布映射；供应商 confidence 与 Score 加权均值不具备这一含义。UNKNOWN 概率质量必须按预先约定处理，不能删除后重归一。网关别名的精确版本未知状态必须保留；重复调用拒绝只能防止调用 ID 重复，数据同源、重试相关性与分区泄漏仍需独立校验。
+
+运行 `cargo run -p xshield-core --example offline_threshold_evaluation` 可查看固定合成样本的分母和 Brier 计算；示例只输出合成指标。当前交付的是统计内核及其测试，获准证据组装、持久报告/审计、跨站独立数据集、阈值选择与真实校准继续交付。

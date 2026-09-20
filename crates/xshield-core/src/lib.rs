@@ -11,6 +11,7 @@ pub mod admin;
 pub mod admission;
 pub mod application;
 pub mod audit;
+pub mod calibration;
 pub mod domain;
 pub mod grant;
 pub mod identity;
