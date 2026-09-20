@@ -12,6 +12,7 @@ import type {
   AccessRequested,
 } from "./evidence-access";
 import { AccessDetails } from "./AccessDetails";
+import { AccessInbox } from "./AccessInbox";
 import { Rows } from "./panels";
 
 type Action = "request" | "approve" | "deny";
@@ -133,11 +134,12 @@ export function EvidenceAccessPanel({
     setDownloadNotice(null);
     revokeDownload();
   }
-  function browse() {
-    if (inFlight.current || !accessPattern.test(accessId)) return;
+  function browse(target = accessId) {
+    if (inFlight.current || busy || !accessPattern.test(target)) return;
     invalidateInspection();
+    setAccessId(target);
     void onRun<AccessInspection>(
-      (api, signal) => api.evidenceAccess(accessId, signal),
+      (api, signal) => api.evidenceAccess(target, signal),
       setInspection,
       setReadError,
     );
@@ -314,6 +316,8 @@ export function EvidenceAccessPanel({
           </p>
         </div>
       </div>
+      <AccessInbox active={active} busy={busy} onInvalidate={invalidateInspection}
+        onRun={onRun} onOpen={browse} />
       <div className="case-grid">
         <section className="panel" aria-label="证据访问操作">
           <div className="panel-heading">

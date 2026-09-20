@@ -1,5 +1,5 @@
 /** Synthetic contract fixtures for access workflow and binary transport tests. */
-import type { AccessRequested, AccessInspection, AccessDecision, AccessStatus } from "../src/evidence-access.ts";
+import type { AccessRequested, AccessInspection, AccessDecision, AccessStatus, AccessList, AccessListView } from "../src/evidence-access.ts";
 import { ARTIFACT_ID } from "./fixtures.ts";
 
 export const ACCESS_ID = "access_018f2a3b-4c5d-7000-8000-000000000041";
@@ -9,6 +9,15 @@ const base = {
   request_id: "req_018f2a3b-4c5d-7000-8000-000000000099",
   tenant_id: "tenant_demo", site_id: "site_demo",
 };
+export function accessListFixture(view: AccessListView = "mine"): AccessList {
+  const detail = accessInspectionFixture().access_request;
+  return { ...base, schema_version: 3, view, as_of: "2026-09-20T08:01:00.000000Z",
+    items: [{ access_request_id: detail.access_request_id, case_id: detail.case_id,
+      artifact_id: detail.artifact_id, requested_by: detail.requested_by,
+      access_kind: detail.access_kind, stored_status: detail.stored_status,
+      requested_at: detail.requested_at, requested_event_id: detail.requested_event_id }],
+    truncated: false, next_cursor: null };
+}
 export function accessRequestedFixture(): AccessRequested {
   return { ...base, access_request_id: ACCESS_ID, case_id: ACCESS_CASE_ID,
     artifact_id: ARTIFACT_ID, access_kind: "sensitive_raw", status: "pending",

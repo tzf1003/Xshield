@@ -61,9 +61,11 @@ import type {
 import {
   validateAccessId, decodeAccessRequested, decodeAccessInspection,
   decodeAccessDecision, accessPattern,
+  decodeAccessList, validateAccessListCursor, validateAccessListView,
 } from "./evidence-access.ts";
 import type {
   AccessRequested, AccessInspection, AccessDecision, EvidenceDownload,
+  AccessList, AccessListView,
 } from "./evidence-access.ts";
 export type Stage = {
   stage: string;
@@ -1146,6 +1148,18 @@ export class ControlClient {
     return this.#request(`artifacts/${artifactId}/access`,
       (value, status) => decodeAccessRequested(value, artifactId, caseId, status),
       signal, JSON.stringify({ case_id: caseId, access_kind: "sensitive_raw", justification }), key);
+  }
+
+  /** Read owned history or independent review work, bounded by a server-bound
+   * cursor. Every page is freshly authorized and audited; no automatic reads. */
+  async evidenceAccessList(view: AccessListView, cursor?: string, signal?: AbortSignal): Promise<AccessList> {
+    validateAccessListView(view);
+    validateAccessListCursor(cursor);
+    const query = `?view=${view}${cursor === undefined ? "" : `&cursor=${encodeURIComponent(cursor)}`}`;
+    return this.#request(`evidence-access-requests${query}`, (value, status) => {
+      ensure(status === 200);
+      return decodeAccessList(value, view, cursor);
+    }, signal);
   }
 
   /** Inspect one scoped historical record, with server-side access auditing. */

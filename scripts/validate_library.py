@@ -171,7 +171,102 @@ def check_outbox_contracts(schemas: dict) -> None:
     check_identity_outbox_contracts(schemas['audit-event'], base)
     check_control_hold_access_contracts(schemas['audit-event'], base)
     check_control_case_list_contracts(schemas['audit-event'], base)
+    check_control_access_list_contracts(schemas['audit-event'], base)
     check_control_access_detail_contracts(schemas['audit-event'], base)
+
+def check_control_access_list_contracts(schema: dict, base: dict) -> None:
+    """Request discovery journals contain scoped access facts and exact failure reasons."""
+    event = copy.deepcopy(base)
+    event.update(event_type='console.evidence.access.list', producer_id='xshield-control',
+                 request_seq=1, policy_revision='control-v1', sensitivity='INTERNAL',
+                 cause_event_ids=[], evidence_refs=[])
+    event['payload'] = {'method': 'GET', 'path': '/control/v1/evidence-access-requests',
+                        'subject_ref': 'audit-operator', 'outcome': 'PASS',
+                        'reason_code': 'CONTROL_EVIDENCE_ACCESS_LIST_READ'}
+    prefix = 'control_access_list:'
+    check(prefix + 'success', valid(schema, event))
+    for field in event['payload']:
+        missing = copy.deepcopy(event)
+        del missing['payload'][field]
+        check(prefix + 'missing_' + field, not valid(schema, missing))
+        missing['payload'][field] = None
+        check(prefix + 'null_' + field, not valid(schema, missing))
+    for index, (field, value) in enumerate([
+        ('method', 'POST'), ('path', '/control/v1/evidence-access-requests?view=mine'),
+        ('path', '/control/v1/evidence-access-requests/{access_request_id}'),
+        ('subject_ref', ''), ('subject_ref', 'actor\nname'), ('subject_ref', 'a' * 257),
+        ('outcome', 'UNKNOWN'), ('reason_code', 'CONTROL_EVIDENCE_ACCESS_READ'),
+        ('reason_code', 'CONTROL_EVIDENCE_ACCESS_LIST_READ\n'), ('reason_code', 'A' * 129),
+        ('view', 'mine'), ('cursor', 'opaque'), ('rows', []), ('items', []),
+        ('justification', 'synthetic'), ('decision_reason', 'synthetic'),
+        ('requested_by', 'other-actor'), ('decided_by', 'other-actor'), ('confidence', None),
+    ]):
+        invalid = copy.deepcopy(event)
+        invalid['payload'][field] = value
+        check(f'{prefix}invalid_payload_{index}_{field}', not valid(schema, invalid))
+    forbidden = ['target_request_id', 'target_artifact_id', 'target_case_id',
+                 'target_access_request_id', 'target_model_call_id', 'target_grant_id',
+                 'target_binding_id', 'target_hold_id', 'query_digest', 'bytes_read']
+    for field in forbidden:
+        optional = copy.deepcopy(event)
+        optional['payload'][field] = None
+        check(prefix + 'null_' + field, valid(schema, optional))
+        optional['payload'][field] = 0 if field == 'bytes_read' else base['event_id']
+        check(prefix + 'reject_' + field, not valid(schema, optional))
+    for index, (field, value) in enumerate([
+        ('producer_id', 'evidence-access'), ('producer_boot_id', base['event_id']),
+        ('request_seq', 2), ('policy_revision', 'evidence-access-v1'),
+        ('sensitivity', 'RESTRICTED'), ('request_id', None), ('request_id', base['event_id']),
+        ('tenant_id', 'tenant\n'), ('site_id', 'site\n'),
+        ('event_id', base['request_id']), ('example_only', True), ('schema_version', 2),
+        ('evidence_refs', base['evidence_refs']), ('cause_event_ids', [base['event_id']]),
+        ('connection_id', None), ('agent_run_id', None), ('unknown', None),
+    ]):
+        invalid = copy.deepcopy(event)
+        invalid[field] = value
+        check(f'{prefix}invalid_envelope_{index}_{field}', not valid(schema, invalid))
+    for field, value in [('state', 'sealed'), ('previous_hash', 'a' * 64), ('event_hash', 'b' * 64)]:
+        invalid = copy.deepcopy(event)
+        invalid['integrity'][field] = value
+        check(prefix + 'integrity_' + field, not valid(schema, invalid))
+    for outcome, reason in [
+        ('DENY', 'CONTROL_AUTH_REQUIRED'), ('DENY', 'CONTROL_SCOPE_DENIED'),
+        ('DENY', 'CONTROL_RATE_LIMITED'), ('DENY', 'CONTROL_CURSOR_INVALID'),
+        ('DENY', 'CONTROL_EVIDENCE_ACCESS_LIST_REQUEST_INVALID'),
+        ('DENY', 'CONTROL_EVIDENCE_ACCESS_BUSY'),
+        ('ERROR', 'CONTROL_CURSOR_UNAVAILABLE'),
+        ('ERROR', 'CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE'),
+        ('ERROR', 'CONTROL_RATE_UNAVAILABLE'), ('ERROR', 'CONTROL_CLOCK_UNAVAILABLE'),
+    ]:
+        failure = copy.deepcopy(event)
+        failure['payload'].update(outcome=outcome, reason_code=reason)
+        for subject in ['audit-operator', None]:
+            failure['payload']['subject_ref'] = subject
+            check(prefix + reason + '_subject_' + str(subject), valid(schema, failure))
+        del failure['payload']['subject_ref']
+        check(prefix + reason + '_subject_absent', valid(schema, failure))
+        for other in ['PASS', 'ERROR' if outcome == 'DENY' else 'DENY']:
+            invalid = copy.deepcopy(failure)
+            invalid['payload'].update(outcome=other, subject_ref='audit-operator')
+            check(prefix + reason + '_outcome_' + other, not valid(schema, invalid))
+        for invalid_reason in ['CONTROL_EVIDENCE_ACCESS_LIST_READ', 'CONTROL_UNKNOWN', 'CONTROL_AUDIT_UNAVAILABLE']:
+            invalid = copy.deepcopy(failure)
+            invalid['payload']['reason_code'] = invalid_reason
+            check(prefix + reason + '_reason_' + invalid_reason, not valid(schema, invalid))
+        for field in forbidden:
+            invalid = copy.deepcopy(failure)
+            invalid['payload'][field] = 0 if field == 'bytes_read' else base['event_id']
+            check(prefix + reason + '_target_' + field, not valid(schema, invalid))
+        failure['evidence_refs'] = base['evidence_refs']
+        check(prefix + reason + '_evidence', not valid(schema, failure))
+    crossed = copy.deepcopy(event)
+    crossed['payload'] = {'stage': 'evidence_access', 'outcome': 'PASS',
+                           'reason_code': 'EVIDENCE_ACCESS_APPROVED', 'access_request_id': 'synthetic'}
+    check(prefix + 'transaction_payload', not valid(schema, crossed))
+    # Duplicate JSON keys, journal sequence identity and UTF-8 byte caps are checked by Rust.
+    unicode_subject = copy.deepcopy(event)
+    unicode_subject['payload']['subject_ref'] = '\u754c' * 86
+    check(prefix + 'rust_only_utf8', valid(schema, unicode_subject))
 
 def check_control_access_detail_contracts(schema: dict, base: dict) -> None:
     """Validate scoped approval-detail observations and their failure shapes."""

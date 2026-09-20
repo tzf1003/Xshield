@@ -14,6 +14,7 @@ mod case_evidence_read;
 mod case_list;
 mod evidence_access_decision;
 mod evidence_access_inspection;
+mod evidence_access_list;
 mod evidence_access_request;
 mod evidence_catalog;
 mod evidence_orphan;
@@ -54,6 +55,9 @@ pub use evidence_access_decision::{
     EvidenceAccessDecisionWriteOutcome,
 };
 pub use evidence_access_inspection::EvidenceAccessInspection;
+pub use evidence_access_list::{
+    EvidenceAccessListQuery, EvidenceAccessListView, EvidenceAccessPage,
+};
 pub use evidence_access_request::{
     EvidenceAccessRequestCreate, EvidenceAccessRequestRecord, EvidenceAccessRequestWriteOutcome,
 };

@@ -989,6 +989,67 @@
       }
     },
     {
+      "if": {"properties": {"event_type": {"const": "console.evidence.access.list"}}, "required": ["event_type"]},
+      "then": {
+        "$comment": "Evidence access request discovery records only scoped access facts. Rust additionally verifies authenticated journal source identity, duplicate fields and the UTF-8 subject byte cap.",
+        "properties": {
+          "event_id": {"$ref": "#/$defs/evidence_hold/properties/hold_id"},
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"$ref": "#/$defs/identity_request_id"},
+          "trace_id": {"maxLength": 32},
+          "span_id": {"maxLength": 16},
+          "producer_id": {"const": "xshield-control"},
+          "producer_boot_id": {"type": "string", "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+          "request_seq": {"const": 1},
+          "policy_revision": {"const": "control-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {"maxItems": 0},
+          "cause_event_ids": {"maxItems": 0},
+          "sensitivity": {"const": "INTERNAL"},
+          "integrity": {"properties": {"state": {"const": "pending"}, "previous_hash": {"type": "null"}, "event_hash": {"type": "null"}}},
+          "connection_id": false,
+          "agent_run_id": false,
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["method", "path", "outcome", "reason_code"],
+            "properties": {
+              "method": {"const": "GET"},
+              "path": {"const": "/control/v1/evidence-access-requests"},
+              "subject_ref": {"anyOf": [{"$ref": "#/$defs/identity_subject"}, {"type": "null"}]},
+              "target_request_id": {"type": "null"},
+              "target_artifact_id": {"type": "null"},
+              "target_case_id": {"type": "null"},
+              "target_access_request_id": {"type": "null"},
+              "target_model_call_id": {"type": "null"},
+              "target_grant_id": {"type": "null"},
+              "target_binding_id": {"type": "null"},
+              "target_hold_id": {"type": "null"},
+              "query_digest": {"type": "null"},
+              "bytes_read": {"type": "null"},
+              "outcome": {"enum": ["PASS", "DENY", "ERROR"]},
+              "reason_code": {"type": "string", "minLength": 1, "maxLength": 128, "not": {"pattern": "[^A-Z0-9_]"}}
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"outcome": {"const": "PASS"}}},
+                "then": {"required": ["subject_ref"], "properties": {"subject_ref": {"type": "string"}, "reason_code": {"const": "CONTROL_EVIDENCE_ACCESS_LIST_READ"}}}
+              },
+              {
+                "if": {"properties": {"outcome": {"const": "DENY"}}},
+                "then": {"properties": {"reason_code": {"enum": ["CONTROL_AUTH_REQUIRED", "CONTROL_SCOPE_DENIED", "CONTROL_RATE_LIMITED", "CONTROL_CURSOR_INVALID", "CONTROL_EVIDENCE_ACCESS_LIST_REQUEST_INVALID", "CONTROL_EVIDENCE_ACCESS_BUSY"]}}}
+              },
+              {
+                "if": {"properties": {"outcome": {"const": "ERROR"}}},
+                "then": {"properties": {"reason_code": {"enum": ["CONTROL_CURSOR_UNAVAILABLE", "CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE", "CONTROL_RATE_UNAVAILABLE", "CONTROL_CLOCK_UNAVAILABLE"]}}}
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
       "if": {"properties": {"event_type": {"const": "console.case.list"}}, "required": ["event_type"]},
       "then": {
         "$comment": "Owner-scoped case listing access attempt. Rust additionally verifies journal source identity, duplicate fields and the UTF-8 subject byte cap. Pages and cursors are not persisted in this access event.",

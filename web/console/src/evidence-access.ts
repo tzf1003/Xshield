@@ -2,7 +2,7 @@
  * server records; every content read obtains fresh server authorization. */
 import {
   ApiError, artifactPattern, uuid, bool, choice, ensure, envelope, eventPattern,
-  id, integer, nullable, object, timestamp,
+  id, integer, list, nullable, object, pagination, timestamp,
 } from "./api-contract.ts";
 import type { Envelope } from "./api-contract.ts";
 import { casePattern, validCaseText } from "./cases.ts";
@@ -10,6 +10,71 @@ import { casePattern, validCaseText } from "./cases.ts";
 export const accessPattern = new RegExp(`^access_${uuid}(?![\\s\\S])`);
 const statuses = ["pending", "approved", "denied", "expired", "revoked"] as const;
 export type AccessStatus = (typeof statuses)[number];
+export type AccessListView = "mine" | "review";
+export type AccessList = Envelope & {
+  schema_version: 3;
+  view: AccessListView;
+  as_of: string;
+  items: Array<{
+    access_request_id: string;
+    case_id: string;
+    artifact_id: string;
+    requested_by: string;
+    access_kind: "sensitive_raw";
+    stored_status: AccessStatus;
+    requested_at: string;
+    requested_event_id: string;
+  }>;
+  truncated: boolean;
+  next_cursor: string | null;
+};
+const accessListCursorPattern = new RegExp(`^v1\\.(access_${uuid})\\.[0-9a-f]{64}(?![\\s\\S])`);
+
+/** Validate the client-visible cursor shape. The server authenticates its scope,
+ * subject and view binding anew; a cursor conveys no approval authority. */
+export function validateAccessListCursor(cursor?: string): string | undefined {
+  if (cursor === undefined) return undefined;
+  const match = typeof cursor === "string" ? accessListCursorPattern.exec(cursor) : null;
+  if (!match) throw new ApiError("CONTROL_CURSOR_INVALID");
+  return match[1];
+}
+export function validateAccessListView(view: unknown): asserts view is AccessListView {
+  if (view !== "mine" && view !== "review")
+    throw new ApiError("CONTROL_EVIDENCE_ACCESS_LIST_REQUEST_INVALID");
+}
+
+/** Bounded, projected metadata from a live page. Sorting follows identity,
+ * including across page boundaries; the next cursor must name the last row. */
+export function decodeAccessList(value: unknown, view: AccessListView, cursor?: string): AccessList {
+  const row = object(value);
+  ensure(row.schema_version === 3 && row.view === view);
+  const result: AccessList = {
+    ...envelope(row), schema_version: 3, view,
+    as_of: time(row.as_of, true),
+    items: list(row.items, 128, (value) => {
+      const item = object(value);
+      return {
+        ...targets(item), requested_by: subject(item.requested_by),
+        access_kind: choice(item.access_kind, ["sensitive_raw"]),
+        stored_status: choice(item.stored_status, statuses),
+        requested_at: time(item.requested_at, true),
+        requested_event_id: id(item.requested_event_id, eventPattern),
+      };
+    }),
+    ...pagination(row),
+  };
+  let previous = validateAccessListCursor(cursor);
+  for (const item of result.items) {
+    ensure(previous === undefined || item.access_request_id < previous);
+    ensure(view !== "review" || item.stored_status === "pending");
+    previous = item.access_request_id;
+  }
+  if (result.next_cursor !== null) {
+    const match = accessListCursorPattern.exec(result.next_cursor);
+    ensure(match && result.items.length > 0 && match[1] === previous);
+  }
+  return result;
+}
 export type AccessRequested = Envelope & {
   access_request_id: string;
   case_id: string;

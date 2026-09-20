@@ -6,6 +6,8 @@
 
 ## 实现状态
 
+证据访问工作台已提供“我的申请”和“审批待办”：通过 `GET /control/v1/evidence-access-requests` 分页发现本人历史或同作用域其他主体的 pending 申请，打开记录后重新读取详情。每页具有独立数据库观察时间、凭证/主体/视图绑定游标和 `console.evidence.access.list` 审计；申请及决策后显式刷新。启用前先应用迁移 0022 并升级管理 journal 发布器，契约与回滚边界见 [29.24](docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。
+
 `web/console` 已提供“证据访问”工作台：以案件和明确理由提交原文申请，读取详情后由独立审批人批准或拒绝，获批申请人显式下载 `.bin` 附件。写入保留冻结原键和参数以确认未知结果；下载核对服务端范围、目标及有界完整字节，沿会话生命周期隔离晚到响应。角色、当前状态与内容完整性由服务端重新验证；升级顺序及生产身份边界见 [15.9](docs/15-console-and-api.md#159-已实现证据访问工作台)。
 
 `GET /control/v1/evidence-access-requests/{access_request_id}` 已提供审批前的申请详情：申请人按独立 Investigator/Reader 角色查看本人记录，同站点 Approver 可复核申请与历史决策。返回理由、目标、持久状态与单次数据库时间观察，经独立 `console.evidence.access.read` 审计后释放；审批与下载仍重新校验，契约和发布器升级顺序见 [29.23](docs/29-api-endpoint-catalog.md#2923-已实现的证据访问申请详情契约)。

@@ -24,7 +24,7 @@ try {
   const requestIds = new Set<string>();
   globalThis.fetch = async (input, options) => {
     const path = String(input);
-    assert.match(path, /^\/control\/v1\/(?:cases|artifacts|evidence-access-requests)(?:\/|$)/);
+    assert.match(path, /^\/control\/v1\/(?:cases|artifacts|evidence-access-requests)(?:\/|\?|$)/);
     assert.equal(options?.credentials, "omit");
     assert.equal(options?.redirect, "error");
     assert.equal(options?.cache, "no-store");
@@ -45,7 +45,7 @@ try {
     } else {
       const raw = await response.clone().json();
       requestId = raw.request_id;
-      if (response.ok) {
+      if (response.ok && origin !== foreign) {
         assert.equal(raw.tenant_id, "tenant_console_access_wire");
         assert.equal(raw.site_id, "site_a");
       }
@@ -82,22 +82,29 @@ try {
   assert.equal(pending.access_request.justification, "Wire sensitive investigation");
   assert.equal(pending.access_request.decided_by, null);
   assert.equal(pending.access_request.access_expires_at, null);
+  assert.equal((await client.evidenceAccessList("mine")).items[0]?.access_request_id, access);
+  await assert.rejects(client.evidenceAccessList("review"), fails("CONTROL_SCOPE_DENIED", 403));
   await assert.rejects(client.downloadEvidence(artifact, access), fails("CONTROL_EVIDENCE_READ_NOT_AVAILABLE", 404));
   await assert.rejects(client.decideEvidenceAccess(access, "approve", "Wire independent approval", 300, "access-wire-role-key"), fails("CONTROL_SCOPE_DENIED", 403));
   phase = 3;
   origin = selfApprover;
+  assert.deepEqual((await client.evidenceAccessList("review")).items, []);
+  assert.equal((await client.evidenceAccessList("mine")).items[0]?.access_request_id, access);
   await assert.rejects(client.decideEvidenceAccess(access, "approve", "Wire independent approval", 300, "access-wire-self-key"), fails("CONTROL_EVIDENCE_ACCESS_SELF_APPROVAL_DENIED", 403));
   origin = foreign;
+  assert.deepEqual((await client.evidenceAccessList("review")).items, []);
   await assert.rejects(client.evidenceAccess(access), fails("CONTROL_EVIDENCE_ACCESS_READ_NOT_AVAILABLE", 404));
   await assert.rejects(client.decideEvidenceAccess(access, "approve", "Wire independent approval", 300, "access-wire-foreign-key"), fails("CONTROL_EVIDENCE_ACCESS_DECISION_TARGET_UNAVAILABLE", 404));
   await assert.rejects(client.downloadEvidence(artifact, access), fails("CONTROL_EVIDENCE_READ_NOT_AVAILABLE", 404));
   phase = 4;
   origin = approver;
+  assert.equal((await client.evidenceAccessList("review")).items[0]?.access_request_id, access);
   assert.equal((await client.evidenceAccess(access)).access_request.requested_by, "console-access-requester");
   const approved = await client.decideEvidenceAccess(access, "approve", "Wire independent approval", 300, "access-wire-approve-key");
   assert.equal(approved.status, "approved");
   assert.equal(approved.decided_by, "console-independent-approver");
   assert.equal(approved.replayed, false);
+  assert.deepEqual((await client.evidenceAccessList("review")).items, []);
   const repeated = await client.decideEvidenceAccess(access, "approve", "Wire independent approval", 300, "access-wire-approve-key");
   assert.equal(repeated.replayed, true);
   assert.equal(repeated.access_expires_at, approved.access_expires_at);
@@ -135,12 +142,23 @@ try {
   await assert.rejects(client.downloadEvidence(artifact, expiring.access_request_id), fails("CONTROL_EVIDENCE_READ_NOT_AVAILABLE", 404));
   phase = 8;
   await client.closeCase(caseId, "Wire review complete", "access-wire-close-key");
+  const history = await client.evidenceAccessList("mine");
+  assert.equal(history.items[0]?.access_request_id, expiring.access_request_id);
+  assert.equal(history.truncated, true);
+  const older = await client.evidenceAccessList("mine", history.next_cursor!);
+  assert.equal(older.items[0]?.access_request_id, denied.access_request_id);
+  const oldest = await client.evidenceAccessList("mine", older.next_cursor!);
+  assert.equal(oldest.items[0]?.access_request_id, access);
+  assert.equal(oldest.next_cursor, null);
+  assert.equal(oldest.truncated, false);
   assert.equal((await client.evidenceAccess(access)).access_request.case_status, "closed");
   await assert.rejects(client.downloadEvidence(artifact, access), fails("CONTROL_EVIDENCE_READ_NOT_AVAILABLE", 404));
   await assert.rejects(client.requestEvidenceAccess(artifact, caseId, "Review closed case", "access-wire-closed-key"), fails("CONTROL_EVIDENCE_ACCESS_TARGET_UNAVAILABLE", 404));
   phase = 9;
   origin = observer;
   for (const action of [
+    () => client.evidenceAccessList("mine"),
+    () => client.evidenceAccessList("review"),
     () => client.requestEvidenceAccess(artifact, caseId, "Review", "access-wire-observer-key"),
     () => client.evidenceAccess(access),
     () => client.decideEvidenceAccess(access, "deny", "Review", null, "access-wire-observer-key"),
@@ -149,6 +167,7 @@ try {
   phase = 10;
   origin = requester;
   const invalid = new ControlClient("synthetic-invalid-management-token-000000000000");
+  await assert.rejects(invalid.evidenceAccessList("mine"), fails("CONTROL_AUTH_REQUIRED", 401));
   await assert.rejects(invalid.evidenceAccess(access), fails("CONTROL_AUTH_REQUIRED", 401));
   await assert.rejects(invalid.downloadEvidence(artifact, access), fails("CONTROL_AUTH_REQUIRED", 401));
 } catch {

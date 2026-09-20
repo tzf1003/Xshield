@@ -24,6 +24,7 @@ fn fixture(pool: &sqlx::PgPool, subject: &str, roles: &[ManagementRole], tenant:
         .limits
         .max_pending_evidence_access_requests = 4;
     fixture.control.rate.lock().unwrap().limit = 100;
+    fixture.control.config.limits.max_query_artifacts = 1;
     fixture
 }
 
@@ -191,6 +192,7 @@ async fn console_access_client_mutates_postgres_and_reads_vault_http_contract() 
         "CONTROL_EVIDENCE_ACCESS_REQUESTED",
         "CONTROL_EVIDENCE_ACCESS_ALREADY_REQUESTED",
         "CONTROL_EVIDENCE_ACCESS_READ",
+        "CONTROL_EVIDENCE_ACCESS_LIST_READ",
         "CONTROL_EVIDENCE_READ",
         "CONTROL_EVIDENCE_READ_NOT_AVAILABLE",
     ] {
@@ -223,13 +225,28 @@ async fn console_access_client_mutates_postgres_and_reads_vault_http_contract() 
             .iter()
             .all(|event| event["payload"]["reason_code"] == "CONTROL_SCOPE_DENIED")
     );
-    assert_eq!(events[3].len(), 4);
-    assert_eq!(events[4].len(), 3);
+    assert_eq!(events[3].len(), 6);
+    assert_eq!(events[4].len(), 4);
     assert!(
         events[4]
             .iter()
+            .filter(|event| event["event_type"] != "console.evidence.access.list")
             .all(|event| event["payload"]["outcome"] == "DENY")
     );
+    let lists: Vec<_> = events
+        .iter()
+        .flatten()
+        .filter(|event| event["event_type"] == "console.evidence.access.list")
+        .collect();
+    assert_eq!(lists.len(), 13);
+    for event in lists {
+        assert_eq!(event["evidence_refs"], json!([]));
+        for (key, value) in event["payload"].as_object().unwrap() {
+            if key.starts_with("target_") || matches!(key.as_str(), "query_digest" | "bytes_read") {
+                assert!(value.is_null());
+            }
+        }
+    }
     let successful_reads: Vec<_> = events
         .iter()
         .flatten()

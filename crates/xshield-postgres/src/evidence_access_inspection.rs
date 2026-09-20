@@ -54,6 +54,42 @@ pub struct EvidenceAccessInspection {
     pub artifact_expires_at: DateTime<Utc>,
 }
 
+// Both detail and discovery validate exactly these request associations.
+pub(crate) const PROJECTION: &str = "access.access_request_id, access.case_id, access.artifact_id,
+                    access.requested_by, access.access_kind, access.justification,
+                    access.status, access.requested_at, access.requested_event_id,
+                    access.decided_by, access.decision_reason, access.decision_ttl_seconds,
+                    access.decision_event_id, access.decided_at, access.access_expires_at,
+                    case_record.owner_ref, case_record.status AS case_status,
+                    artifact.status AS artifact_status, artifact.expires_at AS artifact_expires_at,
+                    artifact.deleted_at,
+                    requested.event_id AS request_outbox_id, decided.event_id AS decision_outbox_id,
+                    (isfinite(access.requested_at) AND isfinite(artifact.expires_at)
+                     AND COALESCE(isfinite(access.decided_at), true)
+                     AND COALESCE(isfinite(access.access_expires_at), true)
+                     AND COALESCE(isfinite(artifact.deleted_at), true)) AS finite_timestamps,
+                    CASE WHEN access.status = 'pending' THEN
+                        access.decision_idempotency_digest IS NULL AND access.decision_request_digest IS NULL
+                    ELSE octet_length(access.decision_idempotency_digest) = 32
+                         AND octet_length(access.decision_request_digest) = 32 END AS decision_digests_valid";
+pub(crate) const JOINS: &str = "             LEFT JOIN xshield.investigation_cases case_record
+               ON case_record.tenant_id = access.tenant_id AND case_record.site_id = access.site_id
+              AND case_record.case_id = access.case_id
+             LEFT JOIN xshield.artifact_catalog artifact
+               ON artifact.tenant_id = access.tenant_id AND artifact.site_id = access.site_id
+              AND artifact.artifact_id = access.artifact_id
+             LEFT JOIN xshield.audit_outbox requested
+               ON requested.event_id = access.requested_event_id
+              AND requested.tenant_id = access.tenant_id AND requested.site_id = access.site_id
+              AND requested.aggregate_ref = access.access_request_id
+              AND requested.event_type = 'evidence.access.requested'
+             LEFT JOIN xshield.audit_outbox decided
+               ON decided.event_id = access.decision_event_id
+              AND decided.tenant_id = access.tenant_id AND decided.site_id = access.site_id
+              AND decided.aggregate_ref = access.access_request_id
+              AND decided.event_type = CASE WHEN access.status = 'denied' THEN 'evidence.access.denied'
+                  WHEN access.status IN ('approved', 'expired', 'revoked') THEN 'evidence.access.approved' END";
+
 impl PostgresIdentityStore {
     /// Reads one access request visible to its owner or an authorized reviewer.
     ///
@@ -92,48 +128,18 @@ impl PostgresIdentityStore {
         sqlx::query("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *tx)
             .await?;
-        let row = sqlx::query(
-            "SELECT statement_timestamp() AS as_of,
-                    access.access_request_id, access.case_id, access.artifact_id,
-                    access.requested_by, access.access_kind, access.justification,
-                    access.status, access.requested_at, access.requested_event_id,
-                    access.decided_by, access.decision_reason, access.decision_ttl_seconds,
-                    access.decision_event_id, access.decided_at, access.access_expires_at,
-                    case_record.owner_ref, case_record.status AS case_status,
-                    artifact.status AS artifact_status, artifact.expires_at AS artifact_expires_at,
-                    artifact.deleted_at,
-                    requested.event_id AS request_outbox_id, decided.event_id AS decision_outbox_id,
-                    (isfinite(access.requested_at) AND isfinite(artifact.expires_at)
-                     AND COALESCE(isfinite(access.decided_at), true)
-                     AND COALESCE(isfinite(access.access_expires_at), true)
-                     AND COALESCE(isfinite(artifact.deleted_at), true)) AS finite_timestamps,
-                    CASE WHEN access.status = 'pending' THEN
-                        access.decision_idempotency_digest IS NULL AND access.decision_request_digest IS NULL
-                    ELSE octet_length(access.decision_idempotency_digest) = 32
-                         AND octet_length(access.decision_request_digest) = 32 END AS decision_digests_valid
-             FROM xshield.evidence_access_requests access
-             LEFT JOIN xshield.investigation_cases case_record
-               ON case_record.tenant_id = access.tenant_id AND case_record.site_id = access.site_id
-              AND case_record.case_id = access.case_id
-             LEFT JOIN xshield.artifact_catalog artifact
-               ON artifact.tenant_id = access.tenant_id AND artifact.site_id = access.site_id
-              AND artifact.artifact_id = access.artifact_id
-             LEFT JOIN xshield.audit_outbox requested
-               ON requested.event_id = access.requested_event_id
-              AND requested.tenant_id = access.tenant_id AND requested.site_id = access.site_id
-              AND requested.aggregate_ref = access.access_request_id
-              AND requested.event_type = 'evidence.access.requested'
-             LEFT JOIN xshield.audit_outbox decided
-               ON decided.event_id = access.decision_event_id
-              AND decided.tenant_id = access.tenant_id AND decided.site_id = access.site_id
-              AND decided.aggregate_ref = access.access_request_id
-              AND decided.event_type = CASE WHEN access.status = 'denied' THEN 'evidence.access.denied'
-                  WHEN access.status IN ('approved', 'expired', 'revoked') THEN 'evidence.access.approved' END
-             WHERE access.tenant_id = $1 AND access.site_id = $2 AND access.access_request_id = $3
-               AND ($5 OR access.requested_by = $4)",
-        )
-        .bind(tenant.as_str()).bind(site.as_str()).bind(access.as_str())
-        .bind(subject).bind(can_review_all).fetch_optional(&mut *tx).await?;
+        let mut statement = sqlx::QueryBuilder::new("SELECT statement_timestamp() AS as_of, ");
+        statement.push(PROJECTION).push(" FROM xshield.evidence_access_requests access ")
+            .push(JOINS).push(" WHERE access.tenant_id = $1 AND access.site_id = $2 AND access.access_request_id = $3 AND ($5 OR access.requested_by = $4)");
+        let row = statement
+            .build()
+            .bind(tenant.as_str())
+            .bind(site.as_str())
+            .bind(access.as_str())
+            .bind(subject)
+            .bind(can_review_all)
+            .fetch_optional(&mut *tx)
+            .await?;
         let inspection = row
             .as_ref()
             .map(|row| decode(row, tenant, site))
@@ -149,7 +155,7 @@ impl PostgresIdentityStore {
     }
 }
 
-fn decode(
+pub(crate) fn decode(
     row: &PgRow,
     tenant: &TenantId,
     site: &SiteId,
@@ -301,14 +307,14 @@ fn validate_decision(
     Ok(())
 }
 
-fn valid_subject(value: &str) -> bool {
+pub(crate) fn valid_subject(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && value.trim() == value
         && !value.chars().any(char::is_control)
 }
 
-fn supported_time(value: DateTime<Utc>) -> Result<DateTime<Utc>, StoreError> {
+pub(crate) fn supported_time(value: DateTime<Utc>) -> Result<DateTime<Utc>, StoreError> {
     if value.timestamp() < 0
         || value.timestamp_nanos_opt().is_none()
         || value.timestamp_subsec_nanos() >= 1_000_000_000

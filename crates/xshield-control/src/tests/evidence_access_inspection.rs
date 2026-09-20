@@ -10,7 +10,7 @@ const JUSTIFICATION: &str = "Private investigation justification";
 const REASON: &str = "Private independent decision reason";
 const STORE_ERROR: &str = "CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE";
 // The table-lock fault must not overlap another history test in this module.
-static DATABASE_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) static DATABASE_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn request(id: &str) -> Request<Body> {
     Request::get(format!("/control/v1/evidence-access-requests/{id}"))
@@ -278,16 +278,16 @@ async fn evidence_access_inspection_auth_role_scope_rate_and_shared_capacity() {
     }
 }
 
-struct Context {
-    pool: sqlx::PgPool,
-    tenant: TenantId,
-    case: String,
-    artifact: String,
-    access: String,
+pub(super) struct Context {
+    pub(super) pool: sqlx::PgPool,
+    pub(super) tenant: TenantId,
+    pub(super) case: String,
+    pub(super) artifact: String,
+    pub(super) access: String,
     directory: std::path::PathBuf,
 }
 
-fn scope_fixture(
+pub(super) fn scope_fixture(
     fixture: &mut Fixture,
     tenant: &TenantId,
     subject: &str,
@@ -308,7 +308,7 @@ fn scope_fixture(
 }
 
 impl Context {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let pool = sqlx::PgPool::connect(&std::env::var("XSHIELD_TEST_DATABASE_URL").unwrap())
             .await
             .unwrap();
@@ -376,7 +376,12 @@ impl Context {
         }
     }
 
-    fn fixture(&self, pool: &sqlx::PgPool, subject: &str, roles: &[ManagementRole]) -> Fixture {
+    pub(super) fn fixture(
+        &self,
+        pool: &sqlx::PgPool,
+        subject: &str,
+        roles: &[ManagementRole],
+    ) -> Fixture {
         let mut fixture = Fixture::with_decision_catalog(
             PostgresIdentityStore::from_pool(pool.clone()),
             subject,
@@ -438,7 +443,7 @@ impl Context {
         result
     }
 
-    async fn decide(&self, access: &str, decision: &str) {
+    pub(super) async fn decide(&self, access: &str, decision: &str) {
         let fixture = self.fixture(
             &self.pool,
             "independent-approver",
@@ -465,7 +470,7 @@ impl Context {
         remove_fixture(&fixture.access_directory);
     }
 
-    async fn versions(&self) -> Vec<(String, String, String)> {
+    pub(super) async fn versions(&self) -> Vec<(String, String, String)> {
         sqlx::query_as("SELECT 'access', access_request_id, xmin::text FROM xshield.evidence_access_requests WHERE tenant_id=$1
             UNION ALL SELECT 'case', case_id, xmin::text FROM xshield.investigation_cases WHERE tenant_id=$1
             UNION ALL SELECT 'closure', case_id, xmin::text FROM xshield.case_closures WHERE tenant_id=$1
@@ -474,7 +479,7 @@ impl Context {
             .bind(self.tenant.as_str()).fetch_all(&self.pool).await.unwrap()
     }
 
-    async fn cleanup(self) {
+    pub(super) async fn cleanup(self) {
         for sql in [
             "DELETE FROM xshield.evidence_access_requests WHERE tenant_id=$1",
             "DELETE FROM xshield.artifact_catalog WHERE tenant_id=$1",

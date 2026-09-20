@@ -14,6 +14,7 @@
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
 | POST /control/v1/artifacts/{id}/access | 申请解密/原文查看能力 | evidence.access.requested |
+| GET /control/v1/evidence-access-requests | 本人申请历史与独立审批待办（已实现，29.24） | console.evidence.access.list |
 | GET /control/v1/evidence-access-requests/{access_request_id} | 申请理由、目标与历史决策详情（已实现，29.23） | console.evidence.access.read |
 | POST /control/v1/evidence-access-requests/{id}/approve | 独立批准并建立短时读取资格 | evidence.access.approved |
 | POST /control/v1/evidence-access-requests/{id}/deny | 独立拒绝并终结申请 | evidence.access.denied |
@@ -288,3 +289,17 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 详情与案件及原文访问共用单实例在途许可，繁忙为 `CONTROL_EVIDENCE_ACCESS_BUSY`/429；数据库操作含池等待限 15 秒，事务内语句/锁等待限 5 秒。数据库故障、超时或损坏为 `CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE`/503。已准入任务在客户端断连后继续到数据库结果和终态审计；事务结束后才写审计，许可持有至审计完成。进程退出和本地 fsync 仍是故障边界。
 
 每次可审计尝试写独立 `console.evidence.access.read` 管理事件，成功原因 `CONTROL_EVIDENCE_ACCESS_READ`，绑定申请、case、artifact 和唯一 artifact 引用；失败按 4xx/DENY、5xx/ERROR 记录，仅保留已验证的申请 ID。理由、历史决策人、期限和响应正文不进入管理 journal。审计失败为 `AUDIT_DURABILITY_FAILED`/503 并扣留详情；所有响应 `private, no-store`。部署先升级管理 journal 发布器再开放端点，旧发布器遇到新事件将停止推进并保留段；复用现有数据库查询权限、索引和依赖，无新迁移。
+
+## 29.24 已实现的证据访问申请列表契约
+
+`GET /control/v1/evidence-access-requests?view=mine` 用于发现当前主体的全部申请历史；同一固定 tenant/site 下具备 `Investigator`、`SensitiveEvidenceReader` 或 `SensitiveEvidenceApprover` 之一即可读取。`view=review` 仅允许 `SensitiveEvidenceApprover`，列出同作用域其他主体的 pending 申请。Observer 与 SystemAdmin 不隐含上述角色；每页重新校验单值管理 Bearer、凭证时效、作用域、角色和速率。历史 closed 案件、到期或 deleted artifact 的申请仍可发现；pending 只表示持久状态，批准与下载各自重验当前权限、目标及期限。
+
+请求必须显式提供规范 `view=mine` 或 `view=review`，随后可附一个 `&cursor=...`；缺少/未知视图、逆序或重复参数、附加参数、百分号编码的视图别名、空游标及非空正文为 `CONTROL_EVIDENCE_ACCESS_LIST_REQUEST_INVALID`/400。形状或签名无效的游标为 `CONTROL_CURSOR_INVALID`/400；二者均提示重新开始查询。游标采用独立用途域 `xshield-control-evidence-access-list-v1`，以 HMAC 绑定管理凭证摘要、主体、tenant/site、视图、服务端页大小和最后申请 ID，不能跨视图或接口复用；轮换凭证/游标密钥或改变页大小后需重开查询。游标签名依赖失败为 `CONTROL_CURSOR_UNAVAILABLE`/503。
+
+200 响应字段为 `schema_version=3`、管理 `request_id`、`tenant_id`、`site_id`、`view`、数据库微秒 UTC `as_of`、`items`、`truncated` 和可空 `next_cursor`。每个 item 仅投影 access_request_id、case_id、artifact_id、requested_by、access_kind、stored_status、requested_at、requested_event_id。access_kind 固定 sensitive_raw；mine 保留 pending/approved/denied/expired/revoked，review 固定 pending。申请理由、完整决策与目标状态由 29.23 详情端点获取；列表不提供内容访问资格。空页仍包含数据库观察时间。
+
+页大小沿用 `XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS`（1–128），按规范申请 ID 的 `C` 字节序严格降序，以最后 ID 排他续查，最多多取一条预读判断下一页。单 SQL 只读快照同时限制可见性并连接案件、catalog 和申请/决策 outbox，所有可见记录含预读均复用详情一致性校验；坏行使整页失败。每页独立观察，后续批准/拒绝可使 review 项消失，新增高位 ID 需刷新首页发现；游标不是跨页数据库快照，也不保证列表刷新可以确认未知写入。打开行重新读取详情，审批与内容读取继续独立授权。
+
+列表与案件及证据访问共用单实例在途许可，繁忙为 `CONTROL_EVIDENCE_ACCESS_BUSY`/429。数据库操作含连接池等待限 15 秒，事务内 SQL/锁等待限 5 秒；故障、超时或损坏为 `CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE`/503。只读事务结束后追加独立 `console.evidence.access.list` 管理审计，已准入任务断连后继续到结果和审计终态，许可覆盖审计；进程退出和本地 fsync 仍是故障边界。成功含空页为 `PASS/CONTROL_EVIDENCE_ACCESS_LIST_READ`；失败按 4xx/DENY、5xx/ERROR 使用 11.7 的精确原因集合。全部 target、query_digest 和 bytes_read 只允许缺省/null，evidence_refs 为空；事件只保存调用者与访问结果，列表视图、游标、记录及他人主体不进入载荷。必需审计失败为 `AUDIT_DURABILITY_FAILED`/503 并扣留响应数据，所有响应设置 `private, no-store`。
+
+部署先应用 `0022_m4_evidence_access_listing.sql`，为 tenant/site/requested_by/access ID 建立降序索引，并为 tenant/site/access ID 建立 pending 部分索引；再升级管理 journal 发布器、控制 API 和控制台。索引在事务内非并发构建，期间阻塞该表写入，大表需维护窗口。数据库角色沿用详情所需的 evidence_access_requests、investigation_cases、artifact_catalog 和 audit_outbox 查询权限；无需新增密钥或依赖。回滚时先停用新界面/路由，继续使用可识别新事件的发布器直到相关积压已处理；应用可回退并保留两个加法索引，或仅移除本迁移的索引，保留所有申请和 outbox 历史。旧发布器遇到新事件会停止推进并保留待发布段。

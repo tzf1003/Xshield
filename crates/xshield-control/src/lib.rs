@@ -11,6 +11,7 @@ mod case_holds;
 mod case_items;
 mod case_list;
 mod evidence_access_inspection;
+mod evidence_access_list;
 mod ledger_inspection;
 mod search;
 
@@ -3413,6 +3414,10 @@ pub fn router(control: ControlPlane) -> Router {
             get(evidence_access_inspection::handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(
+            evidence_access_list::PATH,
+            get(evidence_access_list::handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
             EVIDENCE_ACCESS_APPROVE_PATH,
             post(evidence_access_approve_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
         )
@@ -4382,6 +4387,7 @@ mod tests {
     mod case_items;
     mod case_list;
     mod evidence_access_inspection;
+    mod evidence_access_list;
     mod evidence_lifecycle;
     mod ledger_inspection;
     mod search_references;

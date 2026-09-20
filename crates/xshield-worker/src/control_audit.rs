@@ -22,6 +22,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.case.read"
             | "console.case.list"
             | "console.evidence.access.read"
+            | "console.evidence.access.list"
             | "console.evidence.hold.created"
             | "console.evidence.hold.released"
             | "console.evidence.hold.read"
@@ -85,6 +86,9 @@ impl AccessPayload {
         if event.event_type == "console.evidence.access.read" {
             self.validate_access_read_reason()?;
         }
+        if event.event_type == "console.evidence.access.list" {
+            self.validate_access_list_reason()?;
+        }
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
             "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
@@ -139,6 +143,34 @@ impl AccessPayload {
         Ok(())
     }
 
+    fn validate_access_list_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_EVIDENCE_ACCESS_LIST_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_CURSOR_INVALID"
+                    | "CONTROL_EVIDENCE_ACCESS_LIST_REQUEST_INVALID"
+                    | "CONTROL_EVIDENCE_ACCESS_BUSY"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CURSOR_UNAVAILABLE"
+                    | "CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
+    }
+
     fn validate_access_read_reason(&self) -> Result<(), PublishError> {
         let valid = match self.outcome.as_str() {
             "PASS" => self.reason_code == "CONTROL_EVIDENCE_ACCESS_READ",
@@ -191,7 +223,10 @@ impl AccessPayload {
         ];
         let allowed = match (event_type, self.method.as_str(), self.path.as_str()) {
             ("console.health.read", "GET", "/control/v1/audit/health")
-            | ("console.case.list", "GET", "/control/v1/cases") => [false; 8],
+            | ("console.case.list", "GET", "/control/v1/cases")
+            | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests") => {
+                [false; 8]
+            }
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")
             | ("console.events.read", "GET", "/control/v1/requests/{request_id}/events")

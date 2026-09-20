@@ -21,7 +21,7 @@ if (
   );
 }
 const readPath =
-  /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls\/mdl_[a-f0-9-]+|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|cases(?:\/case_[a-f0-9-]+\/items)?)$/;
+  /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls\/mdl_[a-f0-9-]+|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|evidence-access-requests|cases(?:\/case_[a-f0-9-]+\/items)?)$/;
 const writePath =
   /^\/control\/v1\/(?:cases|cases\/case_[a-f0-9-]+\/(?:items|close)|artifacts\/artifact_[a-f0-9-]+\/access|evidence-access-requests\/access_[a-f0-9-]+\/(?:approve|deny))$/;
 const accessReadPath =
