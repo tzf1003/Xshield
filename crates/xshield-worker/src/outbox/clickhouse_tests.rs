@@ -37,7 +37,7 @@ async fn real_outbox_clickhouse_delivery() {
 }
 
 // Each check owns a database and awaits cleanup even if DDL or assertions panic.
-async fn with_clickhouse<F: Future<Output = ()> + Send + 'static>(
+pub(super) async fn with_clickhouse<F: Future<Output = ()> + Send + 'static>(
     check: impl FnOnce(Client) -> F + Send + 'static,
 ) -> Result<(), tokio::task::JoinError> {
     let mut admin =
@@ -249,6 +249,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
                 .map(|kind| identity::tests::event(kind))
                 .collect(),
         ),
+        (OutboxFamily::Grant, vec![grant::tests::event()]),
         (
             OutboxFamily::ResponseGrant,
             vec![response_grant::tests::event()],
@@ -265,6 +266,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
         (OutboxFamily::EvidenceCatalog, 2),
         (OutboxFamily::EvidenceAccess, 3),
         (OutboxFamily::Identity, 4),
+        (OutboxFamily::Grant, 1),
         (OutboxFamily::ResponseGrant, 1),
         (OutboxFamily::ShareGrant, 1),
     ] {
@@ -411,7 +413,7 @@ async fn assert_index_rows(
             assert_eq!(row.observed_at, row.occurred_at);
             let expected_micros = if matches!(
                 envelope["event_type"].as_str(),
-                Some("response_grant.issued" | "share.issued")
+                Some("grant.issued" | "response_grant.issued" | "share.issued")
             ) {
                 0
             } else {
@@ -450,6 +452,7 @@ async fn publish_family(
             publish_evidence_access_outbox_batch(store, client, scope, config).await
         }
         OutboxFamily::Identity => publish_identity_outbox_batch(store, client, scope, config).await,
+        OutboxFamily::Grant => publish_grant_outbox_batch(store, client, scope, config).await,
         OutboxFamily::ResponseGrant => {
             publish_response_grant_outbox_batch(store, client, scope, config).await
         }
@@ -592,7 +595,7 @@ async fn exercise_retry_and_conflict(
 fn current_event(mut envelope: Value) -> Value {
     if matches!(
         envelope["event_type"].as_str(),
-        Some("response_grant.issued" | "share.issued")
+        Some("grant.issued" | "response_grant.issued" | "share.issued")
     ) {
         let now = Utc::now();
         envelope["occurred_at"] = json!(now.to_rfc3339_opts(SecondsFormat::Secs, true));
@@ -608,6 +611,44 @@ fn current_event(mut envelope: Value) -> Value {
     envelope["occurred_at"] = json!(now);
     envelope["observed_at"] = envelope["occurred_at"].clone();
     envelope
+}
+
+#[test]
+fn grant_clickhouse_fixture_preserves_frozen_envelope_contract() {
+    let original = grant::tests::event();
+    let envelope = current_event(original.clone());
+    let row = IndexRow::parse_outbox(
+        &serde_json::to_vec(&envelope).unwrap(),
+        &EventId::parse(envelope["event_id"].as_str().unwrap()).unwrap(),
+        1,
+        envelope["producer_boot_id"].as_str().unwrap(),
+        "0".repeat(64),
+        TimeDelta::days(30),
+    )
+    .unwrap();
+    assert_eq!(row.occurred_at.timestamp_subsec_micros(), 0);
+    assert_eq!(envelope["observed_at"], envelope["occurred_at"]);
+    assert_eq!(envelope["producer_boot_id"], envelope["event_id"]);
+    assert_eq!(
+        envelope["payload"]["source_request_id"],
+        envelope["request_id"]
+    );
+    assert_eq!(
+        envelope["payload"]["issued_at_unix"],
+        json!(row.occurred_at.timestamp())
+    );
+    assert_eq!(
+        envelope["payload"]["expires_at_unix"],
+        json!(row.occurred_at.timestamp() + 3_600)
+    );
+    let mut frozen = envelope;
+    for field in ["occurred_at", "observed_at"] {
+        frozen[field] = original[field].clone();
+    }
+    for field in ["issued_at_unix", "expires_at_unix"] {
+        frozen["payload"][field] = original["payload"][field].clone();
+    }
+    assert_eq!(frozen, original);
 }
 
 async fn assert_acknowledged(pool: &PgPool, id: &str, attempts: i32) {

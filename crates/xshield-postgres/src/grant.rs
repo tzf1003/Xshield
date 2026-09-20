@@ -1,6 +1,8 @@
 use crate::{PostgresIdentityStore, StoreError, to_i64};
-use serde_json::Value;
+use chrono::{DateTime, SecondsFormat};
+use serde_json::{Value, json};
 use sqlx::{PgConnection, Row};
+use std::io::Cursor;
 use xshield_core::{
     audit::ReasonCode,
     domain::{ActionRef, EventId, GrantId},
@@ -15,17 +17,25 @@ pub struct GrantPersistence<'a> {
     action_ref: &'a ActionRef,
     constraints: &'a Value,
     event_id: &'a EventId,
-    event_envelope: &'a Value,
+    trace_id: &'a str,
+    timestamp: String,
     now: UnixSeconds,
     max_active_grants: u32,
 }
 
 impl<'a> GrantPersistence<'a> {
-    /// Validates transaction-local bounds and JSON objects.
+    /// Validates and freezes the inputs for a complete v3 grant issuance fact.
+    ///
+    /// The source request, event, trace, grant ID, constraints and whole-second
+    /// issuance time must be frozen across retries. Constraints are approved
+    /// server-side data, bounded to 16 KiB in both input and `PostgreSQL` JSONB
+    /// text encoding. Issuance hashes the latter UTF-8 representation;
+    /// only that SHA-256 digest enters the event. The constructor performs no I/O.
     ///
     /// # Errors
-    /// Returns [`StoreError::InvalidCommand`] for an elapsed lease, zero
-    /// capacity, or a non-object constraints/event value.
+    /// Returns [`StoreError::InvalidCommand`] for an invalid trace/epoch,
+    /// non-object or oversized constraints, zero capacity, noncanonical time,
+    /// or a lease outside 1–86400 seconds. The caller owns request terminal audit.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         snapshot: &'a AuthSnapshot,
@@ -33,28 +43,99 @@ impl<'a> GrantPersistence<'a> {
         action_ref: &'a ActionRef,
         constraints: &'a Value,
         event_id: &'a EventId,
-        event_envelope: &'a Value,
+        trace_id: &'a str,
         now: UnixSeconds,
         max_active_grants: u32,
     ) -> Result<Self, StoreError> {
-        if draft.expires_at <= now
+        if !draft
+            .expires_at
+            .value()
+            .checked_sub(now.value())
+            .is_some_and(|ttl| (1..=86_400).contains(&ttl))
             || max_active_grants == 0
             || !constraints.is_object()
-            || !event_envelope.is_object()
+            || trace_id.len() != 32
+            || !trace_id
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            || snapshot.epoch().value() == 0
+            || i64::try_from(snapshot.epoch().value()).is_err()
+            || i64::try_from(draft.expires_at.value()).is_err()
         {
             return Err(StoreError::InvalidCommand);
         }
+        let timestamp = i64::try_from(now.value())
+            .ok()
+            .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+            .ok_or(StoreError::InvalidCommand)?
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        if timestamp.len() != 20 {
+            return Err(StoreError::InvalidCommand);
+        }
+        // Cursor refuses overflow before allocating beyond the fixed budget.
+        // serde_json's workspace configuration uses sorted object keys.
+        let mut bytes = Cursor::new([0_u8; 16 * 1024]);
+        serde_json::to_writer(&mut bytes, constraints).map_err(|_| StoreError::InvalidCommand)?;
         Ok(Self {
             snapshot,
             draft,
             action_ref,
             constraints,
             event_id,
-            event_envelope,
+            trace_id,
+            timestamp,
             now,
             max_active_grants,
         })
     }
+
+    fn event_envelope(&self, constraints_digest: &str) -> Value {
+        let Self {
+            snapshot,
+            draft,
+            action_ref,
+            event_id,
+            trace_id,
+            timestamp,
+            now,
+            ..
+        } = self;
+        json!({
+            "schema_version": 3, "event_id": event_id.as_str(), "event_type": "grant.issued",
+            "tenant_id": snapshot.tenant_id().as_str(), "site_id": snapshot.site_id().as_str(),
+            "request_id": draft.source_request_id.as_str(), "trace_id": trace_id,
+            "span_id": &trace_id[..16], "producer_id": "gateway-grant",
+            "producer_boot_id": event_id.as_str(), "producer_seq": 1, "request_seq": 1,
+            "occurred_at": timestamp, "observed_at": timestamp,
+            "policy_revision": draft.policy_revision.as_str(), "example_only": false,
+            "sensitivity": "SENSITIVE", "evidence_refs": [], "cause_event_ids": [],
+            "integrity": {"state": "pending", "previous_hash": null, "event_hash": null},
+            "payload": {
+                "stage": "grant", "outcome": "PASS", "reason_code": ReasonCode::GrantIssued.as_str(),
+                "grant_id": draft.grant_id.as_str(), "binding_id": snapshot.binding_id().as_str(),
+                "auth_epoch": snapshot.epoch().value(), "action_ref": action_ref.as_str(),
+                "source_request_id": draft.source_request_id.as_str(),
+                "resource_type": draft.resource_type.as_str(),
+                "resource_key_hmac": hex(draft.resource_key.as_bytes()),
+                "operation_id": draft.operation_id.as_str(), "view_profile": draft.view_profile.as_str(),
+                "policy_revision": draft.policy_revision.as_str(), "constraints_digest": constraints_digest,
+                "issued_at_unix": now.value(), "expires_at_unix": draft.expires_at.value()
+            }
+        })
+    }
+}
+
+fn hex(bytes: &[u8; 32]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                char::from(DIGITS[usize::from(byte >> 4)]),
+                char::from(DIGITS[usize::from(byte & 15)]),
+            ]
+        })
+        .collect()
 }
 
 /// Deterministic result of a serialized grant write.
@@ -91,11 +172,15 @@ impl PostgresIdentityStore {
     ///
     /// The binding row lock makes capacity checks deterministic across writers.
     /// Every query includes tenant and site scope. Existing issuance keys are
-    /// compared field-by-field and never extend the original expiry.
+    /// compared field-by-field and never extend the original expiry. Active
+    /// action/policy rows remain locked through commit; live-clock checks after
+    /// waits protect the frozen lease. Only Created commits a grant and its
+    /// audit fact. Other outcomes roll back; the caller writes terminal audit
+    /// using [`GrantWriteOutcome::reason_code`]. No index I/O occurs.
     ///
     /// # Errors
-    /// Returns [`StoreError`] for numeric overflow, corrupt stored identifiers,
-    /// or a database/transaction failure.
+    /// Returns [`StoreError`] for oversized JSONB text, numeric overflow,
+    /// corrupt stored identifiers, or a database/transaction failure.
     pub async fn issue_grant(
         &self,
         command: GrantPersistence<'_>,
@@ -103,6 +188,18 @@ impl PostgresIdentityStore {
         let epoch = to_i64(command.snapshot.epoch().value(), "auth_epoch")?;
         let now = to_i64(command.now.value(), "now")?;
         let expires_at = to_i64(command.draft.expires_at.value(), "expires_at")?;
+        // Hash the representation actually retained by JSONB: PostgreSQL may
+        // expand exponent numbers, so hashing the caller's JSON bytes would
+        // make persisted facts and exact retries disagree after a round trip.
+        let constraints_digest: Option<String> = sqlx::query_scalar(
+            "SELECT CASE WHEN octet_length($1::jsonb::text) <= 16384
+             THEN encode(sha256(convert_to($1::jsonb::text, 'UTF8')), 'hex') END",
+        )
+        .bind(command.constraints)
+        .fetch_one(&self.pool)
+        .await?;
+        let envelope =
+            command.event_envelope(&constraints_digest.ok_or(StoreError::InvalidCommand)?);
         let mut transaction = self.pool.begin().await?;
 
         if !lock_eligible_binding(&mut transaction, &command, epoch, now, expires_at).await?
@@ -112,15 +209,22 @@ impl PostgresIdentityStore {
             return Ok(GrantWriteOutcome::Ineligible);
         }
 
+        let existing = existing_outcome(
+            &mut transaction,
+            &command,
+            &envelope,
+            epoch,
+            now,
+            expires_at,
+        )
+        .await?;
         // Row-lock predicates may have run before waiting for another writer.
         // A frozen request timestamp must never extend any authority lease.
         if !lease_is_live(&mut transaction, expires_at).await? {
             transaction.rollback().await?;
             return Ok(GrantWriteOutcome::Ineligible);
         }
-        if let Some(outcome) =
-            existing_outcome(&mut transaction, &command, epoch, now, expires_at).await?
-        {
+        if let Some(outcome) = existing {
             transaction.rollback().await?;
             return Ok(outcome);
         }
@@ -131,7 +235,15 @@ impl PostgresIdentityStore {
             return Ok(GrantWriteOutcome::CapacityExceeded);
         }
 
-        insert_grant_and_event(&mut transaction, &command, epoch, now, expires_at).await?;
+        insert_grant_and_event(
+            &mut transaction,
+            &command,
+            &envelope,
+            epoch,
+            now,
+            expires_at,
+        )
+        .await?;
         // Inserts can wait on uniqueness/FK constraints. Discard both rows if
         // that wait exhausted the requested lease before the commit boundary.
         if !lease_is_live(&mut transaction, expires_at).await? {
@@ -202,6 +314,7 @@ async fn action_is_eligible(
            AND action.operation_id = $7 AND action.field_profile = $8
            AND action.policy_revision = $9
            AND action.status = 'active' AND policy.status = 'active'
+           AND action.issued_at <= to_timestamp($10)
            AND action.expires_at > GREATEST(to_timestamp($10), clock_timestamp())
            AND action.expires_at >= to_timestamp($11)
            AND to_timestamp($11) > clock_timestamp()
@@ -226,6 +339,7 @@ async fn action_is_eligible(
 async fn existing_outcome(
     connection: &mut PgConnection,
     command: &GrantPersistence<'_>,
+    envelope: &Value,
     epoch: i64,
     issued_at: i64,
     expires_at: i64,
@@ -234,11 +348,11 @@ async fn existing_outcome(
         "SELECT resource_grant.grant_id, resource_grant.binding_id, resource_grant.auth_epoch,
                 resource_grant.action_ref, resource_grant.resource_type,
                 resource_grant.resource_key_hmac, resource_grant.operation_id,
-                resource_grant.view_id, resource_grant.constraints,
+                resource_grant.view_id, resource_grant.constraints = $6::jsonb AS same_constraints,
                 resource_grant.source_event_id, resource_grant.policy_revision,
                 resource_grant.status,
-                extract(epoch FROM resource_grant.issued_at)::bigint AS issued_at,
-                extract(epoch FROM resource_grant.expires_at)::bigint AS expires_at,
+                resource_grant.issued_at = to_timestamp($4) AS same_issued_at,
+                resource_grant.expires_at = to_timestamp($5) AS same_expires_at,
                 outbox.envelope AS stored_envelope,
                 outbox.aggregate_ref AS stored_aggregate_ref,
                 outbox.event_type AS stored_event_type
@@ -255,6 +369,9 @@ async fn existing_outcome(
     .bind(command.snapshot.tenant_id().as_str())
     .bind(command.snapshot.site_id().as_str())
     .bind(command.draft.issuance_key.as_str())
+    .bind(issued_at)
+    .bind(expires_at)
+    .bind(command.constraints)
     .fetch_optional(connection)
     .await?;
     let Some(row) = existing else {
@@ -273,7 +390,8 @@ async fn existing_outcome(
     {
         return Err(StoreError::CorruptData("grant_outbox"));
     }
-    let same = row.try_get::<&str, _>("binding_id")? == command.snapshot.binding_id().as_str()
+    let same = grant_id == command.draft.grant_id
+        && row.try_get::<&str, _>("binding_id")? == command.snapshot.binding_id().as_str()
         && row.try_get::<i64, _>("auth_epoch")? == epoch
         && row.try_get::<&str, _>("action_ref")? == command.action_ref.as_str()
         && row.try_get::<&str, _>("resource_type")? == command.draft.resource_type.as_str()
@@ -281,12 +399,12 @@ async fn existing_outcome(
             == command.draft.resource_key.as_bytes()
         && row.try_get::<&str, _>("operation_id")? == command.draft.operation_id.as_str()
         && row.try_get::<&str, _>("view_id")? == command.draft.view_profile.as_str()
-        && row.try_get::<Value, _>("constraints")? == *command.constraints
+        && row.try_get::<bool, _>("same_constraints")?
         && row.try_get::<&str, _>("source_event_id")? == command.event_id.as_str()
         && row.try_get::<&str, _>("policy_revision")? == command.draft.policy_revision.as_str()
-        && row.try_get::<i64, _>("issued_at")? == issued_at
-        && row.try_get::<i64, _>("expires_at")? == expires_at
-        && &stored_envelope == command.event_envelope;
+        && row.try_get::<bool, _>("same_issued_at")?
+        && row.try_get::<bool, _>("same_expires_at")?
+        && stored_envelope == *envelope;
     Ok(Some(if same {
         GrantWriteOutcome::Existing(grant_id)
     } else {
@@ -318,6 +436,7 @@ async fn active_grant_count(
 async fn insert_grant_and_event(
     connection: &mut PgConnection,
     command: &GrantPersistence<'_>,
+    envelope: &Value,
     epoch: i64,
     now: i64,
     expires_at: i64,
@@ -360,7 +479,7 @@ async fn insert_grant_and_event(
     .bind(command.snapshot.tenant_id().as_str())
     .bind(command.snapshot.site_id().as_str())
     .bind(command.draft.grant_id.as_str())
-    .bind(command.event_envelope)
+    .bind(envelope)
     .execute(connection)
     .await?;
     Ok(())

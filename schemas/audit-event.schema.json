@@ -582,6 +582,53 @@
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
     },
+    "grant": {
+      "$comment": "Generic gateway resource-grant issuance. Rust additionally binds request/source IDs, policy revision, event boot identity, frozen timestamps, checked TTL arithmetic, duplicate-key rejection, and the leased aggregate row. Constraints remain in PostgreSQL; the envelope carries only their SHA-256 digest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage", "outcome", "reason_code", "grant_id", "binding_id", "auth_epoch",
+        "action_ref", "source_request_id", "resource_type", "resource_key_hmac",
+        "operation_id", "view_profile", "policy_revision", "constraints_digest",
+        "issued_at_unix", "expires_at_unix"
+      ],
+      "properties": {
+        "stage": {"const": "grant"},
+        "outcome": {"const": "PASS"},
+        "reason_code": {"const": "GRANT_ISSUED"},
+        "grant_id": {
+          "type": "string",
+          "maxLength": 42,
+          "pattern": "^grant_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "binding_id": {
+          "type": "string",
+          "maxLength": 41,
+          "pattern": "^auth_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "auth_epoch": {"$ref": "#/$defs/identity_counter"},
+        "action_ref": {"$ref": "#/$defs/scoped_name"},
+        "source_request_id": {"$ref": "#/$defs/identity_request_id"},
+        "resource_type": {"$ref": "#/$defs/scoped_name"},
+        "resource_key_hmac": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "operation_id": {"$ref": "#/$defs/scoped_name"},
+        "view_profile": {"$ref": "#/$defs/scoped_name"},
+        "policy_revision": {"$ref": "#/$defs/scoped_name"},
+        "constraints_digest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "issued_at_unix": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "expires_at_unix": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807}
+      }
+    },
     "share_grant": {
       "$comment": "Rust additionally requires producer_boot_id to equal event_id, share_id to be the same UUID suffix re-prefixed share_, and both canonical UTC timestamps to equal issued_at_unix. It checks a positive expiry delta <=86400 using checked arithmetic, rejects duplicate JSON keys, and binds the source, tenant/site, event type and share aggregate to the leased outbox row. JSON Schema validates field-local shape only; it does not infer cross-row ordering or current authorization.",
       "type": "object",
@@ -743,6 +790,50 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {"event_type": {"const": "grant.issued"}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Generic gateway resource-grant outbox shape. The publisher separately enforces source/row binding, exact policy/source request equality, duplicate JSON keys and frozen lease arithmetic.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"$ref": "#/$defs/identity_request_id"},
+          "producer_id": {"const": "gateway-grant"},
+          "producer_boot_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "producer_seq": {"const": 1},
+          "request_seq": {"const": 1},
+          "occurred_at": {"$ref": "#/$defs/utc_second"},
+          "observed_at": {"$ref": "#/$defs/utc_second"},
+          "policy_revision": {"$ref": "#/$defs/scoped_name"},
+          "example_only": {"const": false},
+          "evidence_refs": {"maxItems": 0},
+          "cause_event_ids": {"maxItems": 0},
+          "sensitivity": {"const": "SENSITIVE"},
+          "payload": {"$ref": "#/$defs/grant"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        }
+      }
+    },
     {
       "if": {
         "properties": {"event_type": {"enum": ["session.created", "binding.created", "identity.refreshed", "epoch.changed"]}},

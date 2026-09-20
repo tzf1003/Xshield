@@ -26,7 +26,7 @@
 
 交付：journal、ClickHouse、对象证据库、签名 manifest、全请求检索、阶段树、原文审批、转换对照、导出、故障恢复和索引水位。
 
-管理审计增量：现有控制端点的独立 journal 已接通严格封存发布契约，可检索访问尝试、稳定原因和证据引用；管理结果与业务请求终态分离，使用独立源目录和水位。PostgreSQL outbox 已交付案件、证据目录、证据访问、身份生命周期、响应资格和分享发行六族消费发布闭环，包含按族租约、精确确认、失败重试和 ClickHouse 内容冲突检查。身份生产者已把会话创建、登录、刷新和上下文切换接入完整 v3 契约，并经真实网关/源站/PostgreSQL 与受控 ClickHouse HTTP 回归。响应资格生产者随整批资格事务提交完整 `response_grant.issued` envelope；分享库 API 原子提交完整 `share.issued`，绑定稳定 event/share ID、冻结时间和精确重试正文，HTTP 响应发行适配器继续交付。历史稀疏身份、响应资格及分享记录保留未确认。六族十四组合成事件、实际网关响应资格及分享库 API 已通过真实 PostgreSQL 与 ClickHouse 生产 DDL 回归；覆盖范围及执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。其他 grant、`binding.revoked` 等 outbox 族、管理目标字段查询、调查包导出及控制台界面继续交付。
+管理审计增量：现有控制端点的独立 journal 已接通严格封存发布契约，可检索访问尝试、稳定原因和证据引用；管理结果与业务请求终态分离，使用独立源目录和水位。PostgreSQL outbox 已交付案件、证据目录、证据访问、身份生命周期、通用资源资格、响应资格和分享发行七族消费发布闭环，包含按族租约、精确确认、失败重试和 ClickHouse 内容冲突检查。身份生产者已把会话创建、登录、刷新和上下文切换接入完整 v3 契约，并经真实网关/源站/PostgreSQL 与受控 ClickHouse HTTP 回归。通用 `GrantPersistence` 库入口构造并原子提交完整 `grant.issued`，其 HTTP 发行适配器仍待交付。响应资格生产者随整批资格事务提交完整 `response_grant.issued` envelope；分享库 API 原子提交完整 `share.issued`，绑定稳定 event/share ID、冻结时间和精确重试正文，HTTP 响应发行适配器继续交付。历史稀疏身份、通用资源资格、响应资格及分享记录保留未确认。七族十五组合成事件、通用资源资格、实际网关响应资格及分享库 API 已通过真实 PostgreSQL 与 ClickHouse 生产 DDL 回归；覆盖范围及执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。`binding.revoked` 等 outbox 族、管理目标字段查询、调查包导出及控制台界面继续交付。
 
 验收：按任一请求/模型/资格 ID 完整追链；每个缺失有状态；查看与导出也记录；高危审计失败不继续无证据执行。
 

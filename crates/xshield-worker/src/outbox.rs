@@ -2,7 +2,7 @@
 //!
 //! Outbox envelopes are a different producer contract from sealed journal
 //! records. This module only accepts complete case, catalog, access, identity,
-//! response-grant, and share-grant envelopes emitted by their typed producers.
+//! response-grant, share-grant, and generic grant envelopes emitted by their typed producers.
 //! Other families remain unsupported until their producers expose validated fields.
 
 use super::{
@@ -23,6 +23,9 @@ use xshield_postgres::{
 mod clickhouse_tests;
 #[cfg(test)]
 mod delivery_tests;
+mod grant;
+#[cfg(test)]
+mod grant_producer_tests;
 mod identity;
 mod response_grant;
 mod share_grant;
@@ -46,6 +49,7 @@ enum OutboxFamily {
     EvidenceCatalog,
     EvidenceAccess,
     Identity,
+    Grant,
     ResponseGrant,
     ShareGrant,
 }
@@ -57,6 +61,7 @@ impl OutboxFamily {
             Self::EvidenceCatalog => EVIDENCE_CATALOG_EVENT_TYPES,
             Self::EvidenceAccess => EVIDENCE_ACCESS_EVENT_TYPES,
             Self::Identity => identity::EVENT_TYPES,
+            Self::Grant => grant::EVENT_TYPES,
             Self::ResponseGrant => response_grant::EVENT_TYPES,
             Self::ShareGrant => share_grant::EVENT_TYPES,
         }
@@ -68,7 +73,7 @@ impl OutboxFamily {
             Self::EvidenceCatalog => "artifact_id",
             Self::EvidenceAccess => "access_request_id",
             Self::Identity => "binding_id",
-            Self::ResponseGrant => "grant_id",
+            Self::Grant | Self::ResponseGrant => "grant_id",
             Self::ShareGrant => "share_id",
         }
     }
@@ -76,6 +81,7 @@ impl OutboxFamily {
 
 pub(super) fn supports(event_type: &str) -> bool {
     identity::EVENT_TYPES.contains(&event_type)
+        || grant::EVENT_TYPES.contains(&event_type)
         || response_grant::EVENT_TYPES.contains(&event_type)
         || share_grant::EVENT_TYPES.contains(&event_type)
         || matches!(
@@ -227,6 +233,25 @@ pub async fn publish_identity_outbox_batch(
     config: &OutboxPublisherConfig,
 ) -> Result<OutboxPublishReport, PublishError> {
     publish_outbox_batch(store, client, scope, config, OutboxFamily::Identity).await
+}
+
+/// Publishes generic gateway resource-grant issuance transactions.
+///
+/// Complete v3 envelopes bind one grant to its request, identity epoch,
+/// approved action, policy revision, resource HMAC, constraints digest, and
+/// frozen issuance time. Publication records history only; current
+/// authorization remains in the transactional grant store.
+///
+/// # Errors
+/// Returns the same lease, event, and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_grant_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::Grant).await
 }
 
 /// Publishes one bounded batch of gateway response-grant issuance transactions.
@@ -409,6 +434,9 @@ struct CasePayload {
 }
 
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if grant::EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return grant::parse(event);
+    }
     if share_grant::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return share_grant::parse(event);
     }

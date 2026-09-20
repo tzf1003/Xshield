@@ -506,6 +506,148 @@ def check_response_grant_contracts(schema: dict) -> None:
                   event_id=first['event_id'], request_id=first['request_id'])
     check('outbox:response_grant:reject_legacy_sparse', not valid(schema, sparse))
 
+def check_grant_contracts(schema: dict) -> None:
+    """Validate generic resource-grant issuance shape; Rust owns row binding."""
+    issued = 1_789_776_000
+    event_id = 'ev_018f2a3b-4c5d-7000-8000-000000000041'
+    base = {
+        'schema_version': 3, 'event_type': 'grant.issued', 'event_id': event_id,
+        'tenant_id': 'tenant_demo', 'site_id': 'site_demo',
+        'request_id': 'req_018f2a3b-4c5d-7000-8000-000000000043',
+        'trace_id': '018f2a3b4c5d70008000000000000043', 'span_id': '018f2a3b4c5d7043',
+        'producer_id': 'gateway-grant', 'producer_boot_id': event_id,
+        'producer_seq': 1, 'request_seq': 1,
+        'occurred_at': '2026-09-19T00:00:00Z', 'observed_at': '2026-09-19T00:00:00Z',
+        'policy_revision': 'policy-r1', 'example_only': False,
+        'evidence_refs': [], 'cause_event_ids': [], 'sensitivity': 'SENSITIVE',
+        'integrity': {'state': 'pending', 'previous_hash': None, 'event_hash': None},
+        'payload': {
+            'stage': 'grant', 'outcome': 'PASS', 'reason_code': 'GRANT_ISSUED',
+            'grant_id': 'grant_018f2a3b-4c5d-7000-8000-000000000041',
+            'binding_id': 'auth_018f2a3b-4c5d-7000-8000-000000000042',
+            'auth_epoch': 4, 'action_ref': 'action_order_read',
+            'source_request_id': 'req_018f2a3b-4c5d-7000-8000-000000000043',
+            'resource_type': 'order', 'resource_key_hmac': 'b' * 64,
+            'operation_id': 'orders.read', 'view_profile': 'customer_detail',
+            'policy_revision': 'policy-r1', 'constraints_digest': 'c' * 64,
+            'issued_at_unix': issued, 'expires_at_unix': issued + 60,
+        },
+    }
+    check('outbox:grant:valid', valid(schema, base))
+    for payload in [False, True]:
+        for field in base['payload'] if payload else base:
+            missing = copy.deepcopy(base)
+            del (missing['payload'] if payload else missing)[field]
+            check(f'outbox:grant:missing_{"payload" if payload else "envelope"}_{field}',
+                  not valid(schema, missing))
+    for label, field, value in [
+        ('producer', 'producer_id', 'gateway-response-grant'),
+        ('boot', 'producer_boot_id', base['request_id']),
+        ('request', 'request_id', event_id),
+        ('request_null', 'request_id', None),
+        ('source_request', 'source_request_id', event_id),
+        ('stage', 'stage', 'response_grant'), ('outcome', 'outcome', 'DENY'),
+        ('reason', 'reason_code', 'GRANT_DENIED'),
+        ('sensitivity', 'sensitivity', 'INTERNAL'),
+        ('example', 'example_only', True),
+        ('hmac', 'resource_key_hmac', 'B' * 64),
+        ('hmac_newline', 'resource_key_hmac', 'b' * 64 + '\n'),
+        ('digest', 'constraints_digest', 'c' * 63),
+        ('digest_uppercase', 'constraints_digest', 'C' * 64),
+        ('digest_newline', 'constraints_digest', 'c' * 64 + '\n'),
+        ('evidence_refs', 'evidence_refs', ['artifact_018f2a3b-4c5d-7000-8000-000000000001']),
+        ('causes', 'cause_event_ids', [event_id]),
+    ]:
+        invalid = copy.deepcopy(base)
+        (invalid['payload'] if field in invalid['payload'] else invalid)[field] = value
+        check('outbox:grant:reject_' + label, not valid(schema, invalid))
+    for field in ['grant_id', 'binding_id', 'action_ref', 'source_request_id', 'resource_type',
+                  'resource_key_hmac', 'operation_id', 'view_profile', 'policy_revision',
+                  'constraints_digest']:
+        invalid = copy.deepcopy(base)
+        invalid['payload'][field] = ''
+        check('outbox:grant:empty_' + field, not valid(schema, invalid))
+    for payload, field, values in [
+        (False, 'producer_seq', [0, 2, 1.5, 2 ** 64]),
+        (False, 'request_seq', [0, 2, 1.5, 2 ** 32]),
+        (True, 'auth_epoch', [0, -1, 1.5, 2 ** 63]),
+        (True, 'issued_at_unix', [-1, 1.5, 2 ** 63]),
+        (True, 'expires_at_unix', [0, -1, 1.5, 2 ** 63]),
+    ]:
+        for value in values:
+            invalid = copy.deepcopy(base)
+            (invalid['payload'] if payload else invalid)[field] = value
+            check('outbox:grant:range_' + field + '_' + str(value), not valid(schema, invalid))
+    for payload, field in [(False, 'event_id'), (False, 'producer_boot_id'),
+                           (False, 'request_id'), (True, 'grant_id'),
+                           (True, 'binding_id'), (True, 'source_request_id')]:
+        original = (base['payload'] if payload else base)[field]
+        for label, value in [
+            ('prefix', 'other_' + original.split('_', 1)[1]),
+            ('v4', original.replace('-7000-', '-4000-')),
+            ('variant', original.replace('-8000-', '-0000-')),
+            ('uppercase', original.upper()), ('newline', original + '\n'),
+        ]:
+            invalid = copy.deepcopy(base)
+            (invalid['payload'] if payload else invalid)[field] = value
+            check('outbox:grant:id_' + field + '_' + label, not valid(schema, invalid))
+    for payload, field in [(False, 'tenant_id'), (False, 'site_id'), (False, 'policy_revision'),
+                           (True, 'action_ref'), (True, 'resource_type'), (True, 'operation_id'),
+                           (True, 'view_profile'), (True, 'policy_revision')]:
+        for label, value in [('empty', ''), ('oversized', 'a' * 129), ('unicode', 'é'),
+                             ('newline', 'bad\n')]:
+            invalid = copy.deepcopy(base)
+            (invalid['payload'] if payload else invalid)[field] = value
+            check(f'outbox:grant:scoped_{payload}_{field}_{label}', not valid(schema, invalid))
+        boundary = copy.deepcopy(base)
+        (boundary['payload'] if payload else boundary)[field] = 'a' * 128
+        if field == 'policy_revision':
+            boundary['policy_revision'] = boundary['payload']['policy_revision'] = 'a' * 128
+        check(f'outbox:grant:scoped_{payload}_{field}_boundary', valid(schema, boundary))
+    for field, value in [('state', 'sealed'), ('event_hash', 'a' * 64),
+                         ('previous_hash', 'a' * 64)]:
+        invalid = copy.deepcopy(base)
+        invalid['integrity'][field] = value
+        check('outbox:grant:integrity_' + field, not valid(schema, invalid))
+    for field in ['previous_hash', 'event_hash']:
+        missing = copy.deepcopy(base)
+        del missing['integrity'][field]
+        check('outbox:grant:optional_integrity_' + field, valid(schema, missing))
+    for field in ['unknown', 'constraints', 'issuance_key', 'credential', 'token', 'confidence']:
+        invalid = copy.deepcopy(base)
+        invalid['payload'][field] = None
+        check('outbox:grant:unknown_payload_' + field, not valid(schema, invalid))
+    for field in ['connection_id', 'agent_run_id', 'extra']:
+        invalid = copy.deepcopy(base)
+        invalid[field] = None
+        check('outbox:grant:unknown_envelope_' + field, not valid(schema, invalid))
+    for field in ['occurred_at', 'observed_at']:
+        for label, value in [('fractional', '2026-09-19T00:00:00.1Z'),
+                             ('offset', '2026-09-19T08:00:00+08:00'), ('invalid', 'invalid')]:
+            invalid = copy.deepcopy(base)
+            invalid[field] = value
+            check('outbox:grant:timestamp_' + field + '_' + label, not valid(schema, invalid))
+    for ttl in [1, 86_400]:
+        boundary = copy.deepcopy(base)
+        boundary['payload']['expires_at_unix'] = issued + ttl
+        boundary['payload']['auth_epoch'] = 2 ** 63 - 1
+        check('outbox:grant:ttl_boundary_' + str(ttl), valid(schema, boundary))
+    # JSON Schema validates field shape; the Rust parser binds these values to
+    # each other and to the scoped outbox row before any ClickHouse insertion.
+    for label, payload, field, value in [
+        ('boot', False, 'producer_boot_id', event_id[:-2] + '99'),
+        ('source_request', True, 'source_request_id', base['request_id'][:-2] + '99'),
+        ('policy', True, 'policy_revision', 'policy-r2'),
+        ('zero_ttl', True, 'expires_at_unix', issued),
+        ('oversized_ttl', True, 'expires_at_unix', issued + 86_401),
+        ('frozen_time', False, 'observed_at', '2026-09-19T01:00:00Z'),
+    ]:
+        shaped = copy.deepcopy(base)
+        (shaped['payload'] if payload else shaped)[field] = value
+        check('outbox:grant:rust_cross_field_' + label, valid(schema, shaped))
+    sparse = dict(base['payload'], schema_version=3, event_type='grant.issued', event_id=event_id)
+    check('outbox:grant:reject_legacy_sparse', not valid(schema, sparse))
+
 def check_share_grant_contracts(schema: dict) -> None:
     """Validate share issuance shape; Rust owns row and cross-field checks."""
     issued = 1_789_776_000
@@ -715,6 +857,7 @@ def main() -> int:
     check_model_evaluation_contracts(schemas, model_stage, choice)
     check_outbox_contracts(schemas)
     check_response_grant_contracts(schemas['audit-event'])
+    check_grant_contracts(schemas['audit-event'])
     check_share_grant_contracts(schemas['audit-event'])
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))

@@ -76,6 +76,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
                 .map(|kind| identity::tests::event(kind))
                 .collect(),
         ),
+        (OutboxFamily::Grant, vec![grant::tests::event()]),
         (
             OutboxFamily::ResponseGrant,
             vec![response_grant::tests::event()],
@@ -91,7 +92,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         }
     }
     let other_id = format!("ev_{}", Uuid::now_v7());
-    sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,'grant','grant.issued','{}')")
+    sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,'binding','binding.revoked','{}')")
         .bind(&other_id).bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str())
         .execute(pool).await.unwrap();
 
@@ -100,6 +101,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         (OutboxFamily::EvidenceCatalog, 2),
         (OutboxFamily::EvidenceAccess, 3),
         (OutboxFamily::Identity, 4),
+        (OutboxFamily::Grant, 1),
         (OutboxFamily::ResponseGrant, 1),
         (OutboxFamily::ShareGrant, 1),
     ] {
@@ -142,7 +144,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
     }
     let published: i64 = sqlx::query_scalar("SELECT count(*) FROM xshield.audit_outbox WHERE tenant_id = $1 AND published_at IS NOT NULL AND lease_token IS NULL")
         .bind(scope.tenant_id().as_str()).fetch_one(pool).await.unwrap();
-    assert_eq!(published, 14);
+    assert_eq!(published, 15);
     let attempts: i32 = sqlx::query_scalar(
         "SELECT delivery_attempts FROM xshield.audit_outbox WHERE event_id = $1",
     )
@@ -324,6 +326,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
     assert_eq!(preserved, legacy);
 
     for (family, envelope) in [
+        (OutboxFamily::Grant, grant::tests::event()),
         (OutboxFamily::ResponseGrant, response_grant::tests::event()),
         (OutboxFamily::ShareGrant, share_grant::tests::event()),
     ] {
@@ -371,6 +374,39 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
                     .unwrap();
             assert_eq!(preserved, invalid);
         }
+    }
+
+    for field in ["tenant_id", "site_id"] {
+        let mut invalid =
+            insert_event(pool, scope, OutboxFamily::Grant, grant::tests::event()).await;
+        invalid[field] = json!("foreign_scope");
+        let id = invalid["event_id"].as_str().unwrap();
+        sqlx::query("UPDATE xshield.audit_outbox SET envelope = $2 WHERE event_id = $1")
+            .bind(id)
+            .bind(&invalid)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mock = test::Mock::new();
+        assert!(
+            publish_grant_outbox_batch(
+                &store,
+                &Client::default().with_mock(&mock),
+                scope,
+                &config,
+            )
+            .await
+            .is_err(),
+            "accepted cross-scope {field}"
+        );
+        assert_failure(pool, id, INVALID_EVENT_CODE).await;
+        let preserved: Value =
+            sqlx::query_scalar("SELECT envelope FROM xshield.audit_outbox WHERE event_id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved, invalid);
     }
 }
 
@@ -464,8 +500,10 @@ pub(super) async fn insert_event(
     event["event_id"] = json!(format!("ev_{}", Uuid::now_v7()));
     event["tenant_id"] = json!(scope.tenant_id().as_str());
     event["site_id"] = json!(scope.site_id().as_str());
-    if matches!(family, OutboxFamily::ShareGrant) {
+    if matches!(family, OutboxFamily::Grant | OutboxFamily::ShareGrant) {
         event["producer_boot_id"] = event["event_id"].clone();
+    }
+    if matches!(family, OutboxFamily::ShareGrant) {
         event["payload"]["share_id"] = json!(format!(
             "share_{}",
             event["event_id"]
