@@ -16,6 +16,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.events.read"
             | "console.manifest.read"
             | "console.model.read"
+            | "console.grant.read"
             | "console.query.executed"
             | "console.case.read"
             | "case.created"
@@ -39,6 +40,7 @@ struct AccessPayload {
     target_case_id: Option<String>,
     target_access_request_id: Option<String>,
     target_model_call_id: Option<String>,
+    target_grant_id: Option<String>,
     query_digest: Option<String>,
     outcome: String,
     reason_code: String,
@@ -114,35 +116,39 @@ impl AccessPayload {
 
     fn validate_targets(&self, event_type: &str, success: bool) -> Result<(), PublishError> {
         // Keep the field order explicit: request, artifact, case, access request,
-        // model call. Denials may have only the targets validated before failure.
+        // model call, grant. Denials retain only targets validated before failure.
         let targets = [
             (&self.target_request_id, "req_"),
             (&self.target_artifact_id, "artifact_"),
             (&self.target_case_id, "case_"),
             (&self.target_access_request_id, "access_"),
             (&self.target_model_call_id, "mdl_"),
+            (&self.target_grant_id, "grant_"),
         ];
         let allowed = match (event_type, self.method.as_str(), self.path.as_str()) {
-            ("console.health.read", "GET", "/control/v1/audit/health") => [false; 5],
+            ("console.health.read", "GET", "/control/v1/audit/health") => [false; 6],
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")
             | ("console.events.read", "GET", "/control/v1/requests/{request_id}/events")
             | ("console.manifest.read", "GET", "/control/v1/requests/{request_id}/evidence") => {
-                [true, false, false, false, false]
+                [true, false, false, false, false, false]
             }
             ("console.manifest.read", "GET", "/control/v1/artifacts/{artifact_id}") => {
-                [false, true, false, false, false]
+                [false, true, false, false, false, false]
             }
             ("console.model.read", "GET", "/control/v1/model-calls/{model_call_id}") => {
-                [false, false, false, false, true]
+                [false, false, false, false, true, false]
+            }
+            ("console.grant.read", "GET", "/control/v1/grants/{grant_id}") => {
+                [false, false, false, false, false, true]
             }
             ("case.created", "POST", "/control/v1/cases")
             | ("case.closed", "POST", "/control/v1/cases/{case_id}/close")
             | ("console.case.read", "GET", "/control/v1/cases/{case_id}/items") => {
-                [false, false, true, false, false]
+                [false, false, true, false, false, false]
             }
             ("case.evidence.added", "POST", "/control/v1/cases/{case_id}/items") => {
-                [false, true, true, false, false]
+                [false, true, true, false, false, false]
             }
             ("evidence.access.requested", "POST", "/control/v1/artifacts/{artifact_id}/access")
             | (
@@ -154,9 +160,9 @@ impl AccessPayload {
                 "evidence.access.denied",
                 "POST",
                 "/control/v1/evidence-access-requests/{access_request_id}/deny",
-            ) => [false, true, true, true, false],
+            ) => [false, true, true, true, false, false],
             ("evidence.read", "GET", "/control/v1/artifacts/{artifact_id}/content") => {
-                [false, true, false, true, false]
+                [false, true, false, true, false, false]
             }
             _ => return Err(PublishError::InvalidEvent),
         };

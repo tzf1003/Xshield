@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -8,6 +8,7 @@
 | GET /control/v1/requests/{request_id}/events | 事件游标分页和阶段树 | console.events.read |
 | GET /control/v1/requests/{request_id}/evidence | 证据manifest清单 | console.manifest.read |
 | GET /control/v1/model-calls/{model_call_id} | 模型调用、实际输入输出引用 | console.model.read |
+| GET /control/v1/grants/{grant_id} | 资格与当前绑定账本快照、来源请求引用 | console.grant.read |
 | GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树 | console.agent.read |
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
@@ -187,3 +188,17 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 部署先应用 `0018_m3_case_lifecycle.sql`，该扩展保留既有 open/closed 记录。回滚应用版本时保留关闭表、closed 状态和 outbox，避免恢复已终结案件的访问条件。关闭保留历史证据关联、catalog、审批行和原始保留期限；后续新增关联、访问申请/批准及读取资格校验要求案件仍 open。已有审批的幂等查询只返回历史决策；内容读取仍重验当前案件状态。已完成资格校验的在途读取可能继续，已释放内容不能通过关闭收回。本人 closed 案件的引用集合继续通过 29.17 查询。
 
 关闭时已有的 `pending` 原文访问申请保持待决，并继续占用申请主体的 pending 配额。独立 `SensitiveEvidenceApprover` 可通过 29.12 的拒绝接口终结 closed 案件的申请、释放该配额并保留决策历史；关闭操作本身仅释放 open 案件配额。
+
+## 29.19 已实现的资格账本调查契约
+
+`GET /control/v1/grants/{grant_id}` 要求 `Observer` 与服务端固定 tenant/site 的管理 Bearer。路径 ID 必须为规范小写 `grant_` UUIDv7；接口不接受查询参数。无效 ID 返回 `CONTROL_GRANT_ID_INVALID`/400，查询参数错误返回 `CONTROL_QUERY_INVALID`/400，均在数据库访问前拒绝。
+
+读取按完整作用域和 grant 主键执行，单条只读 SQL 快照连接 `resource_grants`、`auth_bindings` 和 `ui_actions`。返回 `schema_version=3`、独立管理 request_id、tenant/site、source_grant_id、found、数据库语句时间 as_of 和可选 grant。缺失与其他作用域统一为 200、found=false、as_of=null、grant=null；同域已过期或撤销的账本行仍可调查。关联或类型损坏关闭查询，不伪装成未找到。
+
+grant 含资格 ID、发行 auth_epoch、stored_status、issued_at/expires_at、resource_type、operation_id、view_id、policy_revision 及来源 event/request ID；内嵌 binding 仅含绑定 ID、当前 auth_epoch、stored_status、expires_at 和 epoch_matches_grant。两者独立以 `expires_at <= as_of` 计算 time_expired，保留数据库持久状态，因此尚未清理的 active 行也可能 time_expired=true。当前绑定后续缩短期限、撤销或推进代际仍可观察。响应不包含主体、认证上下文、凭证/资源指纹、动作引用、幂等键、constraints 或事件正文。
+
+这是调查时的账本观察，不是可转交给网关的准入结果；实际请求继续检查完整认证组合、动作/证据、策略、目标字段和当前期限。来源 request_id 可继续查询时间线，发行及分享历史通过 29.14 检索；详情不使用 ClickHouse 授权状态，也不附带其发布水位。独立身份详情、完整来源图与控制台展示继续交付。
+
+整体数据库操作含连接池等待最多 15 秒，单语句和锁等待最多 5 秒。与 search/model-call 调查查询共享单实例许可，繁忙返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429；数据库故障、超时或解码损坏返回 `CONTROL_GRANT_STORE_UNAVAILABLE`/503。已准入查询在客户端断连后继续到数据库与审计终态；许可覆盖审计 fsync，进程退出仍为故障边界。所有响应 `Cache-Control: private, no-store`。
+
+每次可审计尝试写 `console.grant.read`，已校验目标记录在 target_grant_id；成功（包括未找到）使用 `CONTROL_GRANT_READ`，不记录查询出的账本快照或业务来源请求作为管理请求目标，evidence_refs 为空。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果。部署须给控制数据库角色授予上述三表所需 SELECT；无需新增 migration，先升级支持该事件的管理 journal 发布器，再启用新端点。

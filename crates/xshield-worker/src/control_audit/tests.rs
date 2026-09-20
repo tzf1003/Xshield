@@ -11,6 +11,7 @@ const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000005";
 const OTHER_ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000006";
 const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000007";
 const MODEL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000008";
+const GRANT: &str = "grant_018f2a3b-4c5d-7000-8000-000000000009";
 
 // This envelope represents one case-collection access attempt, including the
 // null target fields emitted by the control producer before optional additions.
@@ -121,6 +122,9 @@ fn rejects_mismatched_actions_subjects_outcomes_and_reasons() {
     let mut event = event();
     event["payload"]["target_model_call_id"] = MODEL.into();
     rejected(&event, "model target on a case route");
+    let mut event = self::event();
+    event["payload"]["target_grant_id"] = GRANT.into();
+    rejected(&event, "grant target on a case route");
 }
 
 #[test]
@@ -160,6 +164,13 @@ fn required_target_ids_are_typed_canonical_and_bound_to_the_route() {
             "/control/v1/model-calls/{model_call_id}",
             "target_model_call_id",
             MODEL,
+        ),
+        (
+            "console.grant.read",
+            "GET",
+            "/control/v1/grants/{grant_id}",
+            "target_grant_id",
+            GRANT,
         ),
         (
             "case.created",

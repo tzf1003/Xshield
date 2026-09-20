@@ -5,7 +5,7 @@ use clickhouse::sql::Identifier;
 use serde::Deserialize;
 use std::{collections::BTreeSet, path::PathBuf};
 use xshield_core::{
-    domain::{ArtifactId, CaseId, EvidenceAccessRequestId, ModelCallId},
+    domain::{ArtifactId, CaseId, EvidenceAccessRequestId, GrantId, ModelCallId},
     identity::UnixSeconds,
     query::{QueryFilter, QueryPlan, QuerySort, QueryTextField, QueryWindow},
 };
@@ -82,11 +82,20 @@ async fn access_journal() -> AccessJournal {
     let mock = test::Mock::new();
     mock.add(test::handlers::provide(Vec::<SearchEventSummary>::new()));
     mock.add(test::handlers::exception(209));
-    let fixture = Fixture::with_index(
+    let mut fixture = Fixture::with_index(
         100,
         ManagementRole::Investigator,
         Client::default().with_mock(&mock),
     );
+    fixture.control.config.principal = ManagementPrincipal::new(
+        "operator-1",
+        [ManagementRole::Investigator, ManagementRole::Observer],
+        [(
+            TenantId::parse("tenant_a").unwrap(),
+            SiteId::parse("site_a").unwrap(),
+        )],
+    )
+    .unwrap();
     let root = fixture.access_directory.parent().unwrap().to_owned();
     let mut journal = AccessJournal {
         config: PublisherConfig::new(
@@ -110,6 +119,7 @@ async fn access_journal() -> AccessJournal {
             format!("/control/v1/cases/{CASE}/items?cursor=bad"),
             String::new(),
         ),
+        ("GET", "/control/v1/grants/bad".to_owned(), String::new()),
         (
             "POST",
             format!("/control/v1/cases/{CASE}/items"),
@@ -169,6 +179,7 @@ fn assert_access_families(events: &[Value]) {
             "console.events.read",
             "console.manifest.read",
             "console.model.read",
+            "console.grant.read",
             "console.query.executed",
             "console.case.read",
             "case.created",
@@ -199,6 +210,24 @@ fn append_access_contracts(control: &ControlPlane) {
     let artifact = ArtifactId::parse(MISSING_ARTIFACT_ID).unwrap();
     let case = CaseId::parse(CASE).unwrap();
     let access = EvidenceAccessRequestId::parse(ACCESS_REQUEST).unwrap();
+    control
+        .append_access_event_with_evidence_bytes(
+            &format!("req_{}", Uuid::now_v7()),
+            Some("operator-1"),
+            crate::grant_inspection::ACCESS,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "PASS",
+            "CONTROL_GRANT_READ",
+            &[],
+            None,
+            None,
+            Some(&GrantId::parse("grant_018f2a3b-4c5d-7000-8000-000000000953").unwrap()),
+        )
+        .unwrap();
     for action in [
         HEALTH_ACCESS,
         REQUEST_EVENTS_ACCESS,
@@ -346,6 +375,7 @@ fn append_access_contracts(control: &ControlPlane) {
                 "CONTROL_EVIDENCE_READ",
                 &[artifact.as_str()],
                 Some(bytes_read),
+                None,
                 None,
             )
             .unwrap();

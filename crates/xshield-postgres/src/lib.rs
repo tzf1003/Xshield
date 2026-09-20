@@ -15,6 +15,7 @@ mod evidence_catalog;
 mod evidence_orphan;
 mod evidence_retention;
 mod grant;
+mod grant_inspection;
 mod grant_read;
 mod identity_read;
 mod investigation_case;
@@ -50,6 +51,7 @@ pub use evidence_catalog::{
 pub use evidence_orphan::{EvidenceOrphanPurgeJob, EvidenceOrphanPurgeResult};
 pub use evidence_retention::{EvidencePurgeJob, EvidencePurgeResult};
 pub use grant::{GrantPersistence, GrantWriteOutcome};
+pub use grant_inspection::{BindingRecordStatus, GrantInspection, GrantRecordStatus};
 pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
 pub use investigation_case::{
     InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
