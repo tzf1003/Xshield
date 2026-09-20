@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::{env, time::Duration};
@@ -7,6 +8,7 @@ use xshield_core::{
 };
 use xshield_postgres::{
     EvidenceAccessRequestCreate, EvidenceAccessRequestWriteOutcome, PostgresIdentityStore,
+    StoreError,
 };
 
 #[tokio::test]
@@ -43,7 +45,117 @@ async fn evidence_access_request_is_atomic_idempotent_scoped_and_bounded() {
     assert_unavailable_targets(&store).await;
     assert_outbox_collision_rolls_back(&pool, &store).await;
     assert_concurrent_capacity(&store).await;
+    assert_lock_timeout_and_post_lock_expiry(&pool, &store).await;
+    let retried = store
+        .create_evidence_access_request(
+            EvidenceAccessRequestCreate::new(
+                &draft, &[1; 32], &[2; 32], &request, &event, &envelope, 1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let EvidenceAccessRequestWriteOutcome::Created(original) = created else {
+        panic!("request was created");
+    };
+    assert_eq!(
+        retried,
+        EvidenceAccessRequestWriteOutcome::Existing(original)
+    );
     cleanup_targets(&pool).await;
+}
+
+async fn assert_lock_timeout_and_post_lock_expiry(pool: &PgPool, store: &PostgresIdentityStore) {
+    for (index, expires_during_wait) in [false, true].into_iter().enumerate() {
+        let expiry: DateTime<Utc> = sqlx::query_scalar(
+            "UPDATE xshield.artifact_catalog
+             SET expires_at = clock_timestamp() + make_interval(secs => $1)
+             WHERE tenant_id = 'tenant_access' RETURNING expires_at",
+        )
+        .bind(if expires_during_wait { 2.0 } else { 3600.0 })
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let mut blocker = pool.begin().await.unwrap();
+        // A pure row lock never replaces the tuple: EvalPlanQual cannot hide
+        // a clock predicate evaluated before the lock wait.
+        let blocker_pid: i32 = sqlx::query_scalar(
+            "SELECT pg_backend_pid() FROM xshield.artifact_catalog
+             WHERE tenant_id = 'tenant_access' FOR UPDATE",
+        )
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+        let draft = access_draft(&format!("{:012}", 968 + index), "Wait for evidence lock");
+        let request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000970").unwrap();
+        let event =
+            EventId::parse(format!("ev_018f2a3b-4c5d-7000-8000-{:012}", 970 + index)).unwrap();
+        let envelope = access_envelope(&draft, &request, &event, &[21; 32]);
+        let command = EvidenceAccessRequestCreate::new(
+            &draft, &[20; 32], &[21; 32], &request, &event, &envelope, 10,
+        )
+        .unwrap();
+        let operation = store.create_evidence_access_request(command);
+        if expires_during_wait {
+            let release = async {
+                wait_until_blocked(pool, blocker_pid).await;
+                sqlx::query("SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM $1::timestamptz - clock_timestamp())) + 0.05)")
+                    .bind(expiry)
+                    .execute(&mut *blocker)
+                    .await
+                    .unwrap();
+                blocker.rollback().await.unwrap();
+            };
+            let (outcome, ()) = tokio::join!(operation, release);
+            assert_eq!(
+                outcome.unwrap(),
+                EvidenceAccessRequestWriteOutcome::TargetUnavailable
+            );
+        } else {
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(7), operation).await;
+            blocker.rollback().await.unwrap();
+            let StoreError::Database(sqlx::Error::Database(error)) = result
+                .expect("request lock wait is bounded")
+                .expect_err("locked request must time out")
+            else {
+                panic!("expected a PostgreSQL timeout");
+            };
+            assert!(matches!(error.code().as_deref(), Some("57014" | "55P03")));
+            assert!(started.elapsed() >= Duration::from_secs(4));
+        }
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM xshield.evidence_access_requests WHERE access_request_id = $1),
+                    (SELECT count(*) FROM xshield.audit_outbox WHERE event_id = $2)",
+        )
+        .bind(draft.access_request_id().as_str())
+        .bind(event.as_str())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(counts, (0, 0));
+    }
+}
+
+async fn wait_until_blocked(pool: &PgPool, blocker_pid: i32) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker_pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if blocked {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("operation reached the held row lock");
 }
 
 async fn cleanup_targets(pool: &PgPool) {

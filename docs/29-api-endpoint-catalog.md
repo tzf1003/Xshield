@@ -100,9 +100,13 @@ Observer 看脱敏概要；Investigator 执行受限查询和申请证据；Sens
 
 `POST /control/v1/artifacts/{artifact_id}/access` 要求固定 tenant/site 内的 `Investigator` 与管理机器凭证。请求体上限 4 KiB，严格接受 `case_id`、固定值 `access_kind=sensitive_raw` 和 1–512 UTF-8 字节且无首尾空白的 `justification`；路径 artifact、案件及申请 ID 均使用强类型 UUIDv7。`Idempotency-Key` 复用管理变更专用密钥但使用独立用途域，摘要绑定主体、作用域、路径 artifact、case、访问类型和理由，原始键不入库。
 
+申请与批准/拒绝接口要求单值 Authorization 和 Idempotency-Key，拒绝任何查询串；重复认证头按未认证处理，重复幂等头按无效键处理。严格输入校验先于数据库准入。申请、批准、拒绝和内容读取与案件操作共享单实例在途许可，繁忙返回 `CONTROL_EVIDENCE_ACCESS_BUSY`/429；原有 pending 容量限制继续独立生效。
+
 新申请必须引用请求主体自己拥有的 open 案件和同作用域 active、未删除、按数据库时钟未过期的 artifact。事务持有目标共享锁，按 tenant/site/subject 串行化精确重试与 pending 容量检查，并原子提交 `pending` 申请和 `evidence.access.requested` outbox。首次返回 201，精确重试返回原申请和 200，参数冲突 409，目标不可用统一 404，容量耗尽 429，依赖故障 503。
 
 成功与失败尝试均写独立加密管理审计；成功及精确重试携带 artifact、case、access_request 目标和 artifact evidence ref。申请只建立待审批事实，不调用 EvidenceReadPort、不解密对象、不返回内容；后续独立审批必须绑定另一主体、明确期限与同一作用域。
+
+申请与决策的数据库整体预算含连接池等待为 15 秒，事务内单语句和锁等待各限 5 秒。已准入任务在客户端断连后继续到数据库结果和管理审计终态，许可覆盖终态审计。超时、连接错误或审计失败不能证明事务未提交，应保留原键与完整参数确认结果；精确重试返回原记录。4xx 访问尝试记为 DENY，5xx 记为 ERROR；事务 outbox 与管理访问审计分别记录提交事实和接口尝试。进程退出仍是故障边界，预算不包含本地审计 fsync。
 
 ## 29.12 已实现的证据访问决策契约
 
@@ -112,13 +116,19 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 成功响应携带申请、case、artifact、申请人、决策人、终态、决策时间和可选资格期限。每次尝试写独立加密管理审计，成功与精确重试包含全部目标和 artifact evidence ref。批准行是后续 EvidenceReadPort 的服务端资格真值；当前端点不读取对象、不返回明文或下载 URL。
 
+申请锁定目标后重新检查 artifact 期限，并在写入时再次检查；批准取得目标行锁后读取新的数据库时间，重新验证对象期限并从该时间计算 TTL。锁等待前的时间与期限条件不能作为锁后的有效性证明；精确决策重试保持原决策时间和原期限。准入、断连、超时与失败审计沿用 29.11。
+
 ## 29.13 已实现的证据内容读取契约
 
 `GET /control/v1/artifacts/{artifact_id}/content` 要求固定 tenant/site 内的 `SensitiveEvidenceReader`、管理 Bearer，以及 `X-Xshield-Evidence-Access-Request` 头中的强类型 access request ID。服务端要求该申请的 `requested_by` 等于当前管理主体，状态为 `approved`，资格、案件和 catalog 均仍有效，且 artifact 仍 active、未删除并未过期；缺少、跨主体、跨作用域、拒绝、撤销、过期和删除统一返回 `CONTROL_EVIDENCE_READ_NOT_AVAILABLE`/404。数据库检查通过后，EvidenceReadPort 重新认证 vault manifest HMAC、scope、期限、key-id、ciphertext digest 与 AEAD；目录与 vault manifest 不一致或认证失败不会返回内容。
 
+Authorization 与访问申请头必须各自单值，不接受查询串；重复访问申请头按缺少申请引用拒绝，查询串返回 `CONTROL_EVIDENCE_READ_REQUEST_INVALID`/400。数据库授权读取的整体预算为 15 秒，短事务中语句/锁等待最多 5 秒，持有申请、案件与 catalog 共享锁后用新的数据库时间检查资格和对象两项期限。事务在访问 vault 前结束；获准在途读取沿用其授权观察，后续状态改变不撤回已经释放的字节。
+
 成功响应为 `application/octet-stream` 的 `attachment`，设置 `Cache-Control: private, no-store` 与 `X-Content-Type-Options: nosniff`，不返回下载 URL。内容释放前写入独立加密管理审计 `evidence.read`，绑定 access request、artifact 和 evidence ref，并记录实际字节数；审计、数据库、vault 或完整性依赖失败返回 503，响应正文不泄露资源归属或内部错误。
 
 本地整对象 MVP 每个 EvidenceReadPort 同时保留一个读取/响应对象：许可在调度解密前获取，并随清零明文缓冲交给 HTTP 响应，直到最后一个响应字节引用释放；取消请求不会提前归还仍在执行的解密许可。容量占满返回带独立审计的 `CONTROL_EVIDENCE_READ_CAPACITY_EXHAUSTED`/503。缓冲直接移交给响应，避免额外完整明文复制；需要并发大对象下载时再引入按字节计费的共享预算和分块读取。
+
+内容请求另持有 29.11 的共享操作许可，覆盖数据库授权、vault 解密及耐久读取审计；它在响应构造完成后释放，整对象许可继续随响应缓冲保留。已准入任务断连后仍完成终态审计并丢弃无人接收的清零缓冲，不记录为客户端已收到内容。15 秒预算仅覆盖数据库操作，本地有界文件读取、解密与审计 fsync 完成后才释放各自资源；审计失败始终扣留明文。
 
 ## 29.14 已实现的受限调查查询契约
 

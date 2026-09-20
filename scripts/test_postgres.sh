@@ -87,6 +87,8 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control evidence_access_decision_is_independent_short_lived_and_audited -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+    cargo test -p xshield-control --lib evidence_lifecycle -- --ignored
+XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control case_evidence_is_durable_idempotent_and_disconnect_safe -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control case_collection_success_is_scoped_and_audited -- --ignored

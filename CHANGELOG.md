@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 完善原文申请、审批及读取的有界执行与断连终态审计；锁等待后重新验证对象和资格期限，批准期限从锁后数据库时间计算，安全请求头按单值解析。
+
 - 增加 Investigator 本人案件发现闭环：PostgreSQL 有界降序键集分页、签名游标、独立访问审计和控制台列表/打开；迁移 0021 添加 owner/scope 排序索引，包含关闭案件及断连终态验证。
 
 - 接通 `AUTHENTICATED_ROOT` 的 `auth_revoke` 响应：冻结快照后原子撤销绑定及全部活动/过渡凭证，提交完整 `binding.revoked` outbox，并让身份发布器严格校验该事件；加入 HTTP/PostgreSQL 回归和秘密排除检查。

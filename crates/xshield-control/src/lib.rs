@@ -1445,6 +1445,53 @@ impl ControlPlane {
                 )
                 .await;
         };
+        let Ok(permit) = Arc::clone(&self.case_evidence_capacity).try_acquire_owned() else {
+            return self
+                .audited_evidence_access_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    Some(case_id),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "CONTROL_EVIDENCE_ACCESS_BUSY",
+                    "evidence access operation is already in progress",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let task_request = request_id.clone();
+        // Admission outlives HTTP cancellation so committed attempts still reach
+        // their mandatory audit. An uncertain response is recovered by exact retry.
+        match tokio::spawn(async move {
+            let _permit = permit;
+            self.persist_evidence_access_request(
+                task_request,
+                subject,
+                draft,
+                idempotency_digest,
+                request_digest,
+            )
+            .await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => internal_error(&request_id),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn persist_evidence_access_request(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        draft: EvidenceAccessRequestDraft,
+        idempotency_digest: [u8; 32],
+        request_digest: [u8; 32],
+    ) -> EndpointResult {
+        let artifact_id = draft.artifact_id().clone();
+        let case_id = draft.case_id().clone();
         let Ok(typed_request_id) = RequestId::parse(request_id.clone()) else {
             return internal_error(&request_id);
         };
@@ -1468,8 +1515,12 @@ impl ControlPlane {
         ) else {
             return internal_error(&request_id);
         };
-        let outcome = self.catalog.create_evidence_access_request(command).await;
-        let Ok(outcome) = outcome else {
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(15),
+            self.catalog.create_evidence_access_request(command),
+        )
+        .await;
+        let Ok(Ok(outcome)) = outcome else {
             return self
                 .audited_evidence_access_error_async(
                     request_id,
@@ -1615,6 +1666,7 @@ impl ControlPlane {
         authorization: Option<String>,
         target_artifact_id: String,
         access_request_id: Option<String>,
+        query_present: bool,
     ) -> EndpointResult {
         let request_id = format!("req_{}", Uuid::now_v7());
         let auth_control = Arc::clone(&self);
@@ -1662,6 +1714,21 @@ impl ControlPlane {
                 )
                 .await;
         };
+        if query_present {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_EVIDENCE_READ_REQUEST_INVALID",
+                    "invalid evidence content request",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        }
         let Ok(access_request_id) = EvidenceAccessRequestId::parse(access_request_id) else {
             return self
                 .audited_evidence_read_error_async(
@@ -1677,19 +1744,59 @@ impl ControlPlane {
                 )
                 .await;
         };
-        let capability = match self
-            .catalog
-            .find_evidence_access_capability(
+        let Ok(permit) = Arc::clone(&self.case_evidence_capacity).try_acquire_owned() else {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    Some(access_request_id),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "CONTROL_EVIDENCE_ACCESS_BUSY",
+                    "evidence access operation is already in progress",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let task_request = request_id.clone();
+        // Once admitted, authorization and any decrypted content reach a durable
+        // read audit even after disconnect. The vault permit separately follows
+        // the plaintext through its response-body lifetime.
+        match tokio::spawn(async move {
+            let _permit = permit;
+            self.complete_evidence_content(task_request, subject, artifact_id, access_request_id)
+                .await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => internal_error(&request_id),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn complete_evidence_content(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        artifact_id: ArtifactId,
+        access_request_id: EvidenceAccessRequestId,
+    ) -> EndpointResult {
+        let capability = match tokio::time::timeout(
+            Duration::from_secs(15),
+            self.catalog.find_evidence_access_capability(
                 &self.config.tenant_id,
                 &self.config.site_id,
                 &access_request_id,
                 &artifact_id,
                 &subject,
-            )
-            .await
+            ),
+        )
+        .await
         {
-            Ok(Some(capability)) => capability,
-            Ok(None) => {
+            Ok(Ok(Some(capability))) => capability,
+            Ok(Ok(None)) => {
                 return self
                     .audited_evidence_read_error_async(
                         request_id,
@@ -1704,7 +1811,7 @@ impl ControlPlane {
                     )
                     .await;
             }
-            Err(_) => {
+            Ok(Err(_)) | Err(_) => {
                 return self
                     .audited_evidence_read_error_async(
                         request_id,
@@ -1971,6 +2078,53 @@ impl ControlPlane {
                 )
                 .await;
         };
+        let Ok(permit) = Arc::clone(&self.case_evidence_capacity).try_acquire_owned() else {
+            return self
+                .audited_evidence_decision_error_async(
+                    request_id,
+                    subject,
+                    action,
+                    Some(access_request_id),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "CONTROL_EVIDENCE_ACCESS_BUSY",
+                    "evidence access operation is already in progress",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let task_request = request_id.clone();
+        // Decision commit and its access audit finish under the same admission,
+        // even when the caller stops waiting for the result.
+        match tokio::spawn(async move {
+            let _permit = permit;
+            self.persist_evidence_access_decision(
+                task_request,
+                subject,
+                action,
+                decision,
+                idempotency_digest,
+                request_digest,
+            )
+            .await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => internal_error(&request_id),
+        }
+    }
+
+    async fn persist_evidence_access_decision(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        action: AccessAction,
+        decision: EvidenceAccessDecisionDraft,
+        idempotency_digest: [u8; 32],
+        request_digest: [u8; 32],
+    ) -> EndpointResult {
+        let access_request_id = decision.access_request_id().clone();
         let Ok(typed_request_id) = RequestId::parse(request_id.clone()) else {
             return internal_error(&request_id);
         };
@@ -1993,8 +2147,12 @@ impl ControlPlane {
         ) else {
             return internal_error(&request_id);
         };
-        let outcome = self.catalog.decide_evidence_access(command).await;
-        let Ok(outcome) = outcome else {
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(15),
+            self.catalog.decide_evidence_access(command),
+        )
+        .await;
+        let Ok(Ok(outcome)) = outcome else {
             return self
                 .audited_evidence_decision_error_async(
                     request_id,
@@ -2689,7 +2847,11 @@ impl ControlPlane {
                     target_artifact_id.as_ref(),
                     target_case_id.as_ref(),
                     None,
-                    "DENY",
+                    if status.is_server_error() {
+                        "ERROR"
+                    } else {
+                        "DENY"
+                    },
                     reason_code,
                     &[],
                 )
@@ -2738,7 +2900,11 @@ impl ControlPlane {
                     None,
                     None,
                     target_access_request_id.as_ref(),
-                    "DENY",
+                    if status.is_server_error() {
+                        "ERROR"
+                    } else {
+                        "DENY"
+                    },
                     reason_code,
                     &[],
                 )
@@ -2787,7 +2953,11 @@ impl ControlPlane {
                     target_artifact_id.as_ref(),
                     None,
                     target_access_request_id.as_ref(),
-                    "DENY",
+                    if status.is_server_error() {
+                        "ERROR"
+                    } else {
+                        "DENY"
+                    },
                     reason_code,
                     &[],
                 )
@@ -3247,17 +3417,12 @@ pub fn router(control: ControlPlane) -> Router {
 async fn evidence_access_approve_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(access_request_id): Path<String>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
     payload: Result<Json<ApproveEvidenceAccess>, JsonRejection>,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let idempotency_key = headers
-        .get("idempotency-key")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
+    let idempotency_key = single_header(&headers, "idempotency-key");
     control
         .decide_evidence_access(
             EVIDENCE_ACCESS_APPROVE,
@@ -3266,6 +3431,7 @@ async fn evidence_access_approve_handler(
             access_request_id,
             payload
                 .ok()
+                .filter(|_| query.is_none())
                 .map(|Json(payload)| EvidenceAccessDecisionInput::Approve(payload)),
         )
         .await
@@ -3275,17 +3441,12 @@ async fn evidence_access_approve_handler(
 async fn evidence_access_deny_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(access_request_id): Path<String>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
     payload: Result<Json<DenyEvidenceAccess>, JsonRejection>,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let idempotency_key = headers
-        .get("idempotency-key")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
+    let idempotency_key = single_header(&headers, "idempotency-key");
     control
         .decide_evidence_access(
             EVIDENCE_ACCESS_DENY,
@@ -3294,6 +3455,7 @@ async fn evidence_access_deny_handler(
             access_request_id,
             payload
                 .ok()
+                .filter(|_| query.is_none())
                 .map(|Json(payload)| EvidenceAccessDecisionInput::Deny(payload)),
         )
         .await
@@ -3303,23 +3465,21 @@ async fn evidence_access_deny_handler(
 async fn evidence_access_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(artifact_id): Path<String>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
     payload: Result<Json<CreateEvidenceAccessRequest>, JsonRejection>,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let idempotency_key = headers
-        .get("idempotency-key")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
+    let idempotency_key = single_header(&headers, "idempotency-key");
     control
         .request_evidence_access(
             authorization,
             idempotency_key,
             artifact_id,
-            payload.ok().map(|Json(payload)| payload),
+            payload
+                .ok()
+                .filter(|_| query.is_none())
+                .map(|Json(payload)| payload),
         )
         .await
         .into_response()
@@ -3445,18 +3605,18 @@ async fn artifact_handler(
 async fn evidence_content_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(artifact_id): Path<String>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let access_request_id = headers
-        .get(EVIDENCE_ACCESS_REQUEST_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
+    let access_request_id = single_header(&headers, EVIDENCE_ACCESS_REQUEST_HEADER);
     control
-        .read_evidence_content(authorization, artifact_id, access_request_id)
+        .read_evidence_content(
+            authorization,
+            artifact_id,
+            access_request_id,
+            query.is_some(),
+        )
         .await
         .into_response()
 }
@@ -3577,6 +3737,17 @@ fn evidence_cursor_signature(
             artifact_id.as_str().as_bytes(),
         ],
     )
+}
+
+// Security-relevant fields must identify one value, including when duplicates
+// happen to carry the same bytes. Do not let HTTP intermediaries choose one.
+fn single_header(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut values = headers.get_all(name).iter();
+    values
+        .next()
+        .filter(|_| values.next().is_none())
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 fn valid_idempotency_key(value: &str) -> bool {
@@ -4170,6 +4341,7 @@ mod tests {
     mod case_holds_postgres;
     mod case_items;
     mod case_list;
+    mod evidence_lifecycle;
     mod ledger_inspection;
     mod search_references;
 

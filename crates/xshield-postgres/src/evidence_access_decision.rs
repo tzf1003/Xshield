@@ -172,7 +172,10 @@ impl PostgresIdentityStore {
     /// The query binds the authenticated reader, access request, artifact,
     /// tenant, and site. `PostgreSQL`'s clock, open case, active catalog row,
     /// artifact expiry, and capability expiry are checked together before the
-    /// vault is allowed to authenticate and decrypt the object.
+    /// vault is allowed to authenticate and decrypt the object. The read/write
+    /// transaction holds shared locks through a fresh database clock check and
+    /// changes no business data. Statements and lock waits are limited to 5
+    /// seconds; callers must bound the overall operation.
     ///
     /// # Errors
     /// Returns [`StoreError`] for database failure or corrupt catalog state.
@@ -184,6 +187,13 @@ impl PostgresIdentityStore {
         artifact_id: &ArtifactId,
         requested_by: &str,
     ) -> Result<Option<EvidenceAccessCapability>, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *transaction)
+            .await?;
         let row = sqlx::query(
             "SELECT access_request.access_request_id AS capability_access_request_id,
                     access_request.case_id AS capability_case_id,
@@ -203,14 +213,12 @@ impl PostgresIdentityStore {
               AND artifact.artifact_id = access_request.artifact_id
               AND artifact.status = 'active'
               AND artifact.deleted_at IS NULL
-              AND artifact.expires_at > clock_timestamp()
              WHERE access_request.tenant_id = $1
                AND access_request.site_id = $2
                AND access_request.access_request_id = $3
                AND access_request.artifact_id = $4
                AND access_request.requested_by = $5
                AND access_request.status = 'approved'
-               AND access_request.access_expires_at > clock_timestamp()
              FOR SHARE OF access_request, case_record, artifact",
         )
         .bind(tenant_id.as_str())
@@ -218,23 +226,35 @@ impl PostgresIdentityStore {
         .bind(access_request_id.as_str())
         .bind(artifact_id.as_str())
         .bind(requested_by)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-        row.map(|row| {
-            let artifact = catalog_artifact(&row)?;
-            Ok(EvidenceAccessCapability {
-                access_request_id: EvidenceAccessRequestId::parse(
-                    row.try_get::<&str, _>("capability_access_request_id")?,
-                )
-                .map_err(|_| StoreError::CorruptData("evidence_access_request_id"))?,
-                case_id: CaseId::parse(row.try_get::<&str, _>("capability_case_id")?)
-                    .map_err(|_| StoreError::CorruptData("evidence_access_case_id"))?,
-                requested_by: row.try_get("capability_requested_by")?,
-                access_expires_at: row.try_get("capability_expires_at")?,
-                artifact,
-            })
-        })
-        .transpose()
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        // Row locks can wait across either independent deadline without any
+        // tuple update. Obtain the clock only after all locks are held.
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let access_expires_at: DateTime<Utc> = row.try_get("capability_expires_at")?;
+        if row.try_get::<DateTime<Utc>, _>("expires_at")? <= now || access_expires_at <= now {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let capability = EvidenceAccessCapability {
+            access_request_id: EvidenceAccessRequestId::parse(
+                row.try_get::<&str, _>("capability_access_request_id")?,
+            )
+            .map_err(|_| StoreError::CorruptData("evidence_access_request_id"))?,
+            case_id: CaseId::parse(row.try_get::<&str, _>("capability_case_id")?)
+                .map_err(|_| StoreError::CorruptData("evidence_access_case_id"))?,
+            requested_by: row.try_get("capability_requested_by")?,
+            access_expires_at,
+            artifact: catalog_artifact(&row)?,
+        };
+        transaction.commit().await?;
+        Ok(Some(capability))
     }
 
     /// Applies one independent terminal decision to a pending access request.
@@ -242,7 +262,11 @@ impl PostgresIdentityStore {
     /// Exact retries are resolved before current target checks. Approvals lock
     /// and revalidate the requester-owned open case and active evidence object,
     /// then clamp the capability lease to the object's database expiry. Denials
-    /// close a pending request without producing a content capability.
+    /// close a pending request without producing a content capability. Decision
+    /// time and lease start are sampled after all target locks. Statements and
+    /// lock waits are limited to 5 seconds; callers bound the overall operation.
+    /// Cancellation rolls back uncommitted state; exact retries preserve the
+    /// original decision time and expiry after an uncertain commit.
     ///
     /// # Errors
     /// Returns [`StoreError`] for corrupt durable state or database failure.
@@ -251,6 +275,12 @@ impl PostgresIdentityStore {
         command: EvidenceAccessDecisionCreate<'_>,
     ) -> Result<EvidenceAccessDecisionWriteOutcome, StoreError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(hashtextextended(
                  'xshield-evidence-decision-v1:' || $1 || ':' || $2 || ':' || $3, 0
@@ -374,7 +404,7 @@ async fn lock_approval_targets(
     target: &LockedRequest,
 ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, StoreError> {
     let row = sqlx::query(
-        "SELECT clock_timestamp() AS decided_at, artifact.expires_at
+        "SELECT artifact.expires_at
          FROM xshield.investigation_cases case_record
          JOIN xshield.artifact_catalog artifact
            ON artifact.tenant_id = case_record.tenant_id
@@ -382,7 +412,6 @@ async fn lock_approval_targets(
           AND artifact.artifact_id = $5
           AND artifact.status = 'active'
           AND artifact.deleted_at IS NULL
-          AND artifact.expires_at > clock_timestamp()
          WHERE case_record.tenant_id = $1 AND case_record.site_id = $2
            AND case_record.case_id = $3 AND case_record.owner_ref = $4
            AND case_record.status = 'open'
@@ -395,8 +424,15 @@ async fn lock_approval_targets(
     .bind(target.artifact_id.as_str())
     .fetch_optional(&mut **transaction)
     .await?;
-    row.map(|row| Ok((row.try_get("decided_at")?, row.try_get("expires_at")?)))
-        .transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    // A locking query may evaluate its projection before waiting. Sampling in
+    // a new statement ensures both expiry validation and TTL use post-lock time.
+    let now = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **transaction)
+        .await?;
+    Ok(Some((now, row.try_get("expires_at")?)))
 }
 
 async fn update_decision(

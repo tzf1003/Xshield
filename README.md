@@ -32,6 +32,8 @@
 
 管理访问 journal 已接通封存段发布器：当前控制端点的访问尝试按严格契约进入 `control_access` 索引阶段，可通过管理 request_id 时间线及有界事件检索复核；独立日志源的部署、水位及 outbox 边界见 [11.7](docs/11-audit-event-contract.md#117-已实现的管理访问审计发布)。
 
+原文访问申请、独立审批与内容读取共用有界操作许可，已准入任务断连后继续完成数据库结果及访问审计；数据库操作含池等待限 15 秒、SQL/锁等待限 5 秒。锁等待后重新验证期限，批准 TTL 从锁后数据库时钟计算；内容明文另由响应生命周期许可约束。严格请求、安全错误、重试与本地 I/O 边界见 [29.11–29.13](docs/29-api-endpoint-catalog.md#2911-已实现的证据访问申请契约)。
+
 案件保留锁已提供 AuditAdministrator 专属的创建、释放与分页历史 API，复用固定作用域、严格输入、幂等、容量和终态审计；活动锁暂停物理删除，内容读取仍遵守原期限与审批。接口与升级顺序见 [29.21](docs/29-api-endpoint-catalog.md#2921-已实现的案件保留锁管理契约)。
 
 PostgreSQL outbox 已接通按事件族隔离的发布闭环：`xshield-outbox-worker TENANT_ID SITE_ID` 默认处理 `case.*`，设置 `XSHIELD_OUTBOX_FAMILY=evidence_catalog`、`evidence_access`、`evidence_retention`、`identity`、`grant`、`response_grant` 或 `share_grant` 可分别处理证据目录、证据访问请求/审批、证据清理、身份生命周期、通用资源资格、响应资格和分享发行；各族均使用 tenant/site 绑定的 `FOR UPDATE SKIP LOCKED` 租约、服务端时钟、行/字节上限和精确 token 确认，严格解析后按 event_id/content_digest 至少一次写入 ClickHouse。`GrantPersistence` 库入口从冻结的类型化命令构建并原子提交 `grant.issued`，其 HTTP 发行适配器仍待交付。`response_grant.issued` 由网关随资格事务提交完整 v3 envelope，保留原请求、批内序号和冻结发行时间；`ShareIssueApi` 原子提交 `share.issued`，绑定稳定 event/share ID 和精确重试正文；网关 `response.share_issue` 已将获准分享操作的完整响应接入发行与凭证交付。`AUTHENTICATED_ROOT` 的 `auth_revoke` 登出响应现已原子撤销绑定及全部活动/过渡凭证并写入 `binding.revoked`，身份发布器同步严格解析该事件；失败只记录稳定错误码并延迟重试，历史稀疏身份、通用资源资格、响应资格及分享记录保持未确认。证据清理族接收 catalog 与孤儿对象的六类删除意图/成功/失败事实，以及案件保留锁的创建/释放事实，保留 artifact 与因果引用、确定性空置信度和独立维护阶段；其脱敏检索不授予原文访问权。各族合成契约、通用资源资格、实际网关响应资格、分享库 API 及实际清理生产者的数据库覆盖见 [20.12](docs/20-testing-and-acceptance.md#2012-outbox-发布回归)，配置与升级边界见 [11.8](docs/11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)。

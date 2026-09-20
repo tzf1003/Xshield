@@ -102,7 +102,10 @@ impl PostgresIdentityStore {
     ///
     /// Exact retries are resolved before current target checks. New requests
     /// require an open case owned by the requester and an active, unexpired
-    /// artifact in the same tenant/site scope.
+    /// artifact in the same tenant/site scope. Expiry is checked after target
+    /// locks and again at insertion. Statements and lock waits are limited to
+    /// 5 seconds; callers must bound the overall operation. Cancellation rolls
+    /// back uncommitted state, and exact retries resolve uncertain commits.
     ///
     /// # Errors
     /// Returns [`StoreError`] for corrupt durable state or database failure.
@@ -111,6 +114,12 @@ impl PostgresIdentityStore {
         command: EvidenceAccessRequestCreate<'_>,
     ) -> Result<EvidenceAccessRequestWriteOutcome, StoreError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(hashtextextended(
                  'xshield-evidence-access-v1:' || $1 || ':' || $2 || ':' || $3, 0
@@ -126,30 +135,7 @@ impl PostgresIdentityStore {
             transaction.rollback().await?;
             return Ok(outcome);
         }
-        let target_available = sqlx::query_scalar::<_, i32>(
-            "SELECT 1
-             FROM xshield.investigation_cases case_record
-             JOIN xshield.artifact_catalog artifact
-               ON artifact.tenant_id = case_record.tenant_id
-              AND artifact.site_id = case_record.site_id
-              AND artifact.artifact_id = $5
-              AND artifact.status = 'active'
-              AND artifact.deleted_at IS NULL
-              AND artifact.expires_at > clock_timestamp()
-             WHERE case_record.tenant_id = $1 AND case_record.site_id = $2
-               AND case_record.case_id = $3 AND case_record.owner_ref = $4
-               AND case_record.status = 'open'
-             FOR SHARE OF case_record, artifact",
-        )
-        .bind(command.draft.tenant_id().as_str())
-        .bind(command.draft.site_id().as_str())
-        .bind(command.draft.case_id().as_str())
-        .bind(command.draft.requested_by())
-        .bind(command.draft.artifact_id().as_str())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .is_some();
-        if !target_available {
+        if !lock_request_targets(&mut transaction, command.draft).await? {
             transaction.rollback().await?;
             return Ok(EvidenceAccessRequestWriteOutcome::TargetUnavailable);
         }
@@ -168,12 +154,16 @@ impl PostgresIdentityStore {
             return Ok(EvidenceAccessRequestWriteOutcome::CapacityExceeded);
         }
 
-        let requested_at: DateTime<Utc> = sqlx::query_scalar(
+        let requested_at: Option<DateTime<Utc>> = sqlx::query_scalar(
             "INSERT INTO xshield.evidence_access_requests (
                 tenant_id, site_id, access_request_id, case_id, artifact_id,
                 requested_by, access_kind, justification, status,
                 idempotency_digest, request_digest, requested_event_id
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11)
+             ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11
+               FROM xshield.artifact_catalog
+               WHERE tenant_id = $1 AND site_id = $2 AND artifact_id = $5
+                 AND status = 'active' AND deleted_at IS NULL
+                 AND expires_at > clock_timestamp()
              RETURNING requested_at",
         )
         .bind(command.draft.tenant_id().as_str())
@@ -187,8 +177,12 @@ impl PostgresIdentityStore {
         .bind(command.idempotency_digest.as_slice())
         .bind(command.request_digest.as_slice())
         .bind(command.event_id.as_str())
-        .fetch_one(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await?;
+        let Some(requested_at) = requested_at else {
+            transaction.rollback().await?;
+            return Ok(EvidenceAccessRequestWriteOutcome::TargetUnavailable);
+        };
         sqlx::query(
             "INSERT INTO xshield.audit_outbox (
                 event_id, tenant_id, site_id, aggregate_ref, event_type, envelope
@@ -211,6 +205,37 @@ impl PostgresIdentityStore {
             },
         ))
     }
+}
+
+async fn lock_request_targets(
+    connection: &mut PgConnection,
+    draft: &EvidenceAccessRequestDraft,
+) -> Result<bool, StoreError> {
+    // Materialization keeps the expiry check after both locks, even when
+    // the blocking transaction releases its lock without updating a row.
+    Ok(sqlx::query_scalar(
+        "WITH locked AS MATERIALIZED (
+             SELECT artifact.expires_at
+             FROM xshield.investigation_cases case_record
+             JOIN xshield.artifact_catalog artifact
+               ON artifact.tenant_id = case_record.tenant_id
+              AND artifact.site_id = case_record.site_id
+              AND artifact.artifact_id = $5
+              AND artifact.status = 'active'
+              AND artifact.deleted_at IS NULL
+             WHERE case_record.tenant_id = $1 AND case_record.site_id = $2
+               AND case_record.case_id = $3 AND case_record.owner_ref = $4
+               AND case_record.status = 'open'
+             FOR SHARE OF case_record, artifact
+         ) SELECT EXISTS(SELECT 1 FROM locked WHERE expires_at > clock_timestamp())",
+    )
+    .bind(draft.tenant_id().as_str())
+    .bind(draft.site_id().as_str())
+    .bind(draft.case_id().as_str())
+    .bind(draft.requested_by())
+    .bind(draft.artifact_id().as_str())
+    .fetch_one(connection)
+    .await?)
 }
 
 async fn existing_request(
