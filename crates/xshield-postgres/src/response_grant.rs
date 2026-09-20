@@ -1,6 +1,6 @@
 //! Atomic persistence for response-derived action and resource grant batches.
 
-use crate::{PostgresIdentityStore, StoreError, to_i64};
+use crate::{PostgresIdentityStore, StoreError, lease_is_live, to_i64};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Row};
 use std::collections::BTreeSet;
@@ -105,7 +105,9 @@ impl<'a> ResponseGrantPersistence<'a> {
                 || item.action.field_profile() != &item.grant.view_profile
                 || item.action.policy_revision() != evidence.policy_revision()
                 || item.action.policy_revision() != &item.grant.policy_revision
-                || item.action.expires_at() != item.grant.expires_at
+                || item.action.expires_at() > evidence.expires_at()
+                || item.grant.expires_at > item.action.expires_at()
+                || now >= item.grant.expires_at
                 || item.action.issued_at() != evidence.verified_at()
                 || &item.grant.source_request_id != evidence.source_request_id()
                 || !target_matches
@@ -125,6 +127,16 @@ impl<'a> ResponseGrantPersistence<'a> {
             now,
             max_active_grants,
         })
+    }
+
+    fn earliest_expiry(&self) -> UnixSeconds {
+        self.items
+            .iter()
+            .fold(self.evidence.expires_at(), |earliest, item| {
+                earliest
+                    .min(item.action.expires_at())
+                    .min(item.grant.expires_at)
+            })
     }
 }
 
@@ -172,6 +184,10 @@ impl PostgresIdentityStore {
     /// The binding row serializes capacity and identity changes. Policy and
     /// descriptors are rechecked inside the same transaction; a replay must
     /// match the complete evidence batch before existing references are returned.
+    /// The earliest frozen evidence/action/grant deadline is checked after lock
+    /// waits and before either result is released. Expiry rolls back the batch.
+    /// Each item retains its own shorter deadlines; callers audit
+    /// [`ResponseGrantWriteOutcome::reason_code`] for every outcome.
     ///
     /// # Errors
     /// Returns [`StoreError`] for numeric overflow, corrupt persisted values,
@@ -184,6 +200,7 @@ impl PostgresIdentityStore {
         let now = to_i64(command.now.value(), "now")?;
         let verified_at = to_i64(command.evidence.verified_at().value(), "verified_at")?;
         let expires_at = to_i64(command.evidence.expires_at().value(), "expires_at")?;
+        let deadline = to_i64(command.earliest_expiry().value(), "expires_at")?;
         let candidate_count = i32::try_from(command.items.len())
             .map_err(|_| StoreError::NumericRange("candidate_count"))?;
         let mut transaction = self.pool.begin().await?;
@@ -200,8 +217,12 @@ impl PostgresIdentityStore {
                 return Ok(ResponseGrantWriteOutcome::Ineligible);
             }
         }
+        if !lease_is_live(&mut transaction, deadline).await? {
+            transaction.rollback().await?;
+            return Ok(ResponseGrantWriteOutcome::Ineligible);
+        }
 
-        match existing_evidence(
+        let evidence = existing_evidence(
             &mut transaction,
             &command,
             epoch,
@@ -209,16 +230,23 @@ impl PostgresIdentityStore {
             expires_at,
             candidate_count,
         )
-        .await?
-        {
+        .await?;
+        if !lease_is_live(&mut transaction, deadline).await? {
+            transaction.rollback().await?;
+            return Ok(ResponseGrantWriteOutcome::Ineligible);
+        }
+        match evidence {
             ExistingEvidence::Conflict => {
                 transaction.rollback().await?;
                 return Ok(ResponseGrantWriteOutcome::Conflict);
             }
             ExistingEvidence::Existing(evidence_id) => {
-                let Some(existing) =
-                    existing_batch(&mut transaction, &command, &evidence_id).await?
-                else {
+                let existing = existing_batch(&mut transaction, &command, &evidence_id).await?;
+                if !lease_is_live(&mut transaction, deadline).await? {
+                    transaction.rollback().await?;
+                    return Ok(ResponseGrantWriteOutcome::Ineligible);
+                }
+                let Some(existing) = existing else {
                     transaction.rollback().await?;
                     return Ok(ResponseGrantWriteOutcome::Conflict);
                 };
@@ -250,11 +278,15 @@ impl PostgresIdentityStore {
         let mut committed = Vec::with_capacity(command.items.len());
         // ponytail: bounded 1000-row transaction; batch SQL when measured commit latency needs it.
         for item in command.items {
-            insert_item(&mut transaction, &command, item, epoch, expires_at).await?;
+            insert_item(&mut transaction, &command, item, epoch).await?;
             committed.push(CommittedResponseGrant {
                 grant_id: item.grant.grant_id.clone(),
                 action_ref: item.action.action_ref().clone(),
             });
+        }
+        if !lease_is_live(&mut transaction, deadline).await? {
+            transaction.rollback().await?;
+            return Ok(ResponseGrantWriteOutcome::Ineligible);
         }
         transaction.commit().await?;
         Ok(ResponseGrantWriteOutcome::Created(committed))
@@ -455,7 +487,9 @@ async fn existing_item(
           AND action.action_ref = grant_row.action_ref
          JOIN xshield.audit_outbox event ON event.event_id = grant_row.source_event_id
          WHERE grant_row.tenant_id = $1 AND grant_row.site_id = $2
-           AND grant_row.issuance_key = $3",
+           AND grant_row.issuance_key = $3
+           AND grant_row.status = 'active' AND action.status = 'active'
+         FOR SHARE OF grant_row, action, event",
     )
     .bind(command.evidence.snapshot().tenant_id().as_str())
     .bind(command.evidence.snapshot().site_id().as_str())
@@ -571,7 +605,6 @@ async fn insert_item(
     command: &ResponseGrantPersistence<'_>,
     item: &ResponseGrantItem<'_>,
     epoch: i64,
-    expires_at: i64,
 ) -> Result<(), StoreError> {
     let target = target_value(item.action.target())?;
     sqlx::query(
@@ -601,7 +634,7 @@ async fn insert_item(
     .bind(command.evidence.source_operation_id().as_str())
     .bind(item.action.policy_revision().as_str())
     .bind(to_i64(item.action.issued_at().value(), "issued_at")?)
-    .bind(expires_at)
+    .bind(to_i64(item.action.expires_at().value(), "expires_at")?)
     .bind(item.action.mapping_revision().as_str())
     .bind(item.action.method().as_str())
     .bind(item.action.route().as_str())
@@ -634,7 +667,7 @@ async fn insert_item(
     .bind(item.grant.issuance_key.as_str())
     .bind(item.grant.policy_revision.as_str())
     .bind(to_i64(item.action.issued_at().value(), "issued_at")?)
-    .bind(expires_at)
+    .bind(to_i64(item.grant.expires_at.value(), "expires_at")?)
     .execute(&mut *connection)
     .await?;
 

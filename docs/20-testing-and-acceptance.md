@@ -39,6 +39,8 @@
 
 `scripts/test_postgres.sh` 另运行 `request_replay`：双唯一键与并发消费、快时钟实例的容量检查和 nonce 保留、慢时钟实例的过期拒绝，以及 advisory lock 和插入唯一键等待跨期。测试以 `pg_blocking_pids` 确认实际等待，期限后释放锁，断言消息未消费且清理同步回滚；正常消费仍清理过期行。`scripts/test_gateway_request_crypto.sh` 验证真实 HTTP 封包、稳定原因码及源站接收次数。
 
+资格发行回归通过 `provenance_waits_recheck_short_action_expiry_and_revocation` 验证短动作期限在身份、策略、描述、页面、已有动作与 outbox 等待后生效：过期写入整笔回滚，已有记录保留，后续有效发行成功；另覆盖策略/描述退休和页面/动作撤销的并发提交。响应批量回归核对各项实际落库期限，并覆盖最短项在身份锁、已有证据/资格锁或后项 outbox 唯一键等待时到期，验证整批资格和 outbox 的原子回滚及精确重试状态。锁等待均以 `pg_blocking_pids` 确认，数据库服务调用纳入 `scripts/test_postgres.sh`。
+
 ## 20.5 发布闸门
 
 P0 硬不变量全部通过；无资格与凭证串用拒绝可解释；秘密不进入普通日志；审计断网恢复有测试；高危操作模型停机策略明确；真实业务协议闭环通过；性能和容量达批准预算；未知项在控制台可见；可回滚版本已验证。

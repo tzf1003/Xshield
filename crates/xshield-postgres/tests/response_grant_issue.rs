@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -106,24 +106,45 @@ struct Batch {
 }
 
 fn batch(fixture: &Fixture, id_offset: u64) -> Batch {
+    timed_batch(
+        fixture,
+        id_offset,
+        610,
+        NOW,
+        EXPIRES,
+        [(EXPIRES, EXPIRES); 2],
+    )
+}
+
+fn timed_batch(
+    fixture: &Fixture,
+    id_offset: u64,
+    source_id: u64,
+    now: u64,
+    evidence_expires: u64,
+    item_expiries: [(u64, u64); 2],
+) -> Batch {
+    let source_request =
+        RequestId::parse(format!("req_018f2a3b-4c5d-7000-8000-{source_id:012x}")).unwrap();
     let evidence = ResponseEvidence::verified(
         ResponseEvidenceId::parse(format!("response_018f2a3b-4c5d-7000-8000-{id_offset:012x}"))
             .unwrap(),
         &fixture.binding,
         fixture.snapshot.clone(),
-        RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000610").unwrap(),
+        source_request.clone(),
         OperationId::parse("orders.list").unwrap(),
         OperationId::parse("orders.read").unwrap(),
         200,
         PolicyRevision::parse("policy-r1").unwrap(),
-        UnixSeconds::new(EXPIRES),
-        UnixSeconds::new(NOW),
+        UnixSeconds::new(evidence_expires),
+        UnixSeconds::new(now),
     )
     .unwrap();
     let mut actions = Vec::new();
     let mut grants = Vec::new();
     let mut event_ids = Vec::new();
-    for index in 0..2_u64 {
+    for (index, (action_expires, grant_expires)) in item_expiries.into_iter().enumerate() {
+        let index = u64::try_from(index).unwrap();
         let key = ResourceKeyHmac::parse(&format!("{}", index + 1).repeat(64)).unwrap();
         let action = ActionGrant::issue_from_response(
             &fixture.binding,
@@ -138,9 +159,9 @@ fn batch(fixture: &Fixture, id_offset: u64) -> Batch {
                     resource_key: key.clone(),
                 },
                 fields: BTreeSet::from([FieldName::parse("order_id").unwrap()]),
-                expires_at: UnixSeconds::new(EXPIRES),
+                expires_at: UnixSeconds::new(action_expires),
             },
-            UnixSeconds::new(NOW),
+            UnixSeconds::new(now),
         )
         .unwrap();
         actions.push(action);
@@ -150,18 +171,22 @@ fn batch(fixture: &Fixture, id_offset: u64) -> Batch {
                 id_offset + index + 100
             ))
             .unwrap(),
-            issuance_key: IssuanceKey::parse(format!("orders-list-item-{index}")).unwrap(),
+            issuance_key: IssuanceKey::parse(format!("orders-list-{source_id}-item-{index}"))
+                .unwrap(),
             resource_type: ResourceType::parse("order").unwrap(),
             resource_key: key,
             operation_id: OperationId::parse("orders.read").unwrap(),
             view_profile: ViewProfile::parse("customer_detail").unwrap(),
-            source_request_id: RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000610")
-                .unwrap(),
+            source_request_id: source_request.clone(),
             policy_revision: PolicyRevision::parse("policy-r1").unwrap(),
-            expires_at: UnixSeconds::new(EXPIRES),
+            expires_at: UnixSeconds::new(grant_expires),
         });
         event_ids.push(
-            EventId::parse(format!("ev_018f2a3b-4c5d-7000-8000-{:012x}", 700 + index)).unwrap(),
+            EventId::parse(format!(
+                "ev_018f2a3b-4c5d-7000-8001-{:012x}",
+                source_id + 1000 + index
+            ))
+            .unwrap(),
         );
     }
     Batch {
@@ -199,10 +224,67 @@ async fn issue(
             &batch.evidence,
             artifact,
             &items,
-            UnixSeconds::new(NOW),
+            batch.evidence.verified_at(),
             capacity,
         )?)
         .await
+}
+
+#[test]
+fn response_batch_rejects_expanded_or_elapsed_item_leases() {
+    let fixture = fixture();
+    for invalid in 0..3 {
+        let mut batch = timed_batch(
+            &fixture,
+            1700,
+            1700,
+            NOW,
+            NOW + 100,
+            [(NOW + 80, NOW + 60); 2],
+        );
+        match invalid {
+            0 => batch.grants[0].expires_at = UnixSeconds::new(NOW + 81),
+            1 => {
+                // Reusing an evidence ID must still preserve this command's shorter lease.
+                batch.evidence = ResponseEvidence::verified(
+                    batch.evidence.evidence_id().clone(),
+                    &fixture.binding,
+                    fixture.snapshot.clone(),
+                    batch.evidence.source_request_id().clone(),
+                    batch.evidence.source_operation_id().clone(),
+                    batch.evidence.target_operation_id().clone(),
+                    batch.evidence.response_status(),
+                    batch.evidence.policy_revision().clone(),
+                    UnixSeconds::new(NOW + 70),
+                    UnixSeconds::new(NOW),
+                )
+                .unwrap();
+            }
+            _ => batch.grants[0].expires_at = UnixSeconds::new(NOW),
+        }
+        let items = (0..batch.actions.len())
+            .map(|index| {
+                ResponseGrantItem::new(
+                    &batch.actions[index],
+                    &batch.grants[index],
+                    &batch.constraints[index],
+                    &batch.event_ids[index],
+                    &batch.envelopes[index],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            ResponseGrantPersistence::new(
+                &batch.evidence,
+                "artifact_invalid_lease",
+                &items,
+                UnixSeconds::new(NOW),
+                100,
+            ),
+            Err(StoreError::InvalidCommand)
+        ));
+    }
 }
 
 async fn seed(pool: &PgPool, fixture: &Fixture) {
@@ -403,6 +485,299 @@ async fn assert_response_expiry_reads(
     sqlx::query("ROLLBACK").execute(pool).await.unwrap();
 }
 
+async fn database_now(pool: &PgPool) -> u64 {
+    u64::try_from(
+        sqlx::query_scalar::<_, i64>("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+async fn assert_batch_rows(pool: &PgPool, batch: &Batch, expected: (i64, i64, i64, i64)) {
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+         (SELECT count(*) FROM xshield.response_evidence WHERE response_evidence_id = $1
+          AND tenant_id = $4 AND site_id = $5),
+         (SELECT count(*) FROM xshield.ui_actions WHERE response_evidence_id = $1
+          AND tenant_id = $4 AND site_id = $5),
+         (SELECT count(*) FROM xshield.resource_grants WHERE grant_id = ANY($2)
+          AND tenant_id = $4 AND site_id = $5),
+         (SELECT count(*) FROM xshield.audit_outbox WHERE event_id = ANY($3)
+          AND tenant_id = $4 AND site_id = $5)",
+    )
+    .bind(batch.evidence.evidence_id().as_str())
+    .bind(
+        batch
+            .grants
+            .iter()
+            .map(|grant| grant.grant_id.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        batch
+            .event_ids
+            .iter()
+            .map(EventId::as_str)
+            .collect::<Vec<_>>(),
+    )
+    .bind(batch.evidence.snapshot().tenant_id().as_str())
+    .bind(batch.evidence.snapshot().site_id().as_str())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, expected);
+}
+
+async fn wait_for_blocked_issuer(pool: &PgPool, blocker: &mut Transaction<'_, Postgres>) {
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut **blocker)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("issuer must reach the held lock");
+}
+
+async fn release_after_expiry(
+    pool: &PgPool,
+    mut blocker: Transaction<'_, Postgres>,
+    deadline: u64,
+) {
+    wait_for_blocked_issuer(pool, &mut blocker).await;
+    sqlx::query(
+        "SELECT pg_sleep(GREATEST(0, $1::double precision + 0.05 - extract(epoch FROM clock_timestamp())))",
+    )
+    .bind(i64::try_from(deadline).unwrap())
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    blocker.rollback().await.unwrap();
+}
+
+async fn assert_create_waits_expire_atomically(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    for outbox_wait in [false, true] {
+        let now = database_now(pool).await;
+        let deadline = now + 3;
+        let id = if outbox_wait { 1100 } else { 1000 };
+        let evidence_expires = if outbox_wait { now + 120 } else { deadline };
+        let pending = timed_batch(
+            fixture,
+            id,
+            id,
+            now,
+            evidence_expires,
+            [
+                (evidence_expires, evidence_expires),
+                (evidence_expires, deadline),
+            ],
+        );
+        let mut blocker = pool.begin().await.unwrap();
+        if outbox_wait {
+            // The second event blocks after earlier batch rows have been inserted.
+            sqlx::query(
+                "INSERT INTO xshield.audit_outbox
+                 (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope)
+                 VALUES ($1, $2, $3, 'fixture', 'fixture', '{}')",
+            )
+            .bind(pending.event_ids[1].as_str())
+            .bind(fixture.tenant.as_str())
+            .bind(fixture.site.as_str())
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        } else {
+            sqlx::query("SELECT 1 FROM xshield.auth_bindings WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3 FOR UPDATE")
+                .bind(fixture.tenant.as_str()).bind(fixture.site.as_str())
+                .bind(fixture.binding_id.as_str()).execute(&mut *blocker).await.unwrap();
+        }
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::join!(
+                issue(store, &pending, "artifact_expiring_response", 100),
+                release_after_expiry(pool, blocker, deadline),
+            )
+        })
+        .await
+        .expect("expired issuance must finish after lock release");
+        assert_eq!(outcome.unwrap(), ResponseGrantWriteOutcome::Ineligible);
+        assert_batch_rows(pool, &pending, (0, 0, 0, 0)).await;
+    }
+}
+
+async fn assert_existing_waits_recheck_expiry(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    for item_wait in [false, true] {
+        let now = database_now(pool).await;
+        let deadline = now + 3;
+        let id = if item_wait { 1400 } else { 1300 };
+        let batch = timed_batch(
+            fixture,
+            id,
+            id,
+            now,
+            now + 120,
+            [(now + 120, now + 120), (now + 120, deadline)],
+        );
+        assert!(matches!(
+            issue(store, &batch, "artifact_existing_response", 100)
+                .await
+                .unwrap(),
+            ResponseGrantWriteOutcome::Created(_)
+        ));
+        let mut blocker = pool.begin().await.unwrap();
+        let (statement, reference) = if item_wait {
+            (
+                "SELECT 1 FROM xshield.resource_grants WHERE grant_id = $1 FOR UPDATE",
+                batch.grants[1].grant_id.as_str(),
+            )
+        } else {
+            (
+                "SELECT 1 FROM xshield.response_evidence WHERE response_evidence_id = $1 FOR UPDATE",
+                batch.evidence.evidence_id().as_str(),
+            )
+        };
+        sqlx::query(statement)
+            .bind(reference)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::join!(
+                issue(store, &batch, "artifact_existing_response", 100),
+                release_after_expiry(pool, blocker, deadline),
+            )
+        })
+        .await
+        .expect("existing issuance must finish after lock release");
+        assert_eq!(outcome.unwrap(), ResponseGrantWriteOutcome::Ineligible);
+        assert_batch_rows(pool, &batch, (1, 2, 2, 2)).await;
+    }
+}
+
+async fn assert_existing_waits_for_revocation(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    for action_revoked in [false, true] {
+        let now = database_now(pool).await;
+        let id = if action_revoked { 1600 } else { 1500 };
+        let batch = timed_batch(fixture, id, id, now, now + 120, [(now + 120, now + 120); 2]);
+        assert!(matches!(
+            issue(store, &batch, "artifact_revocable_response", 100)
+                .await
+                .unwrap(),
+            ResponseGrantWriteOutcome::Created(_)
+        ));
+        let mut blocker = pool.begin().await.unwrap();
+        let (statement, reference) = if action_revoked {
+            (
+                "UPDATE xshield.ui_actions SET status = 'revoked' WHERE action_ref = $1",
+                batch.actions[1].action_ref().as_str(),
+            )
+        } else {
+            (
+                "UPDATE xshield.resource_grants SET status = 'revoked' WHERE grant_id = $1",
+                batch.grants[1].grant_id.as_str(),
+            )
+        };
+        sqlx::query(statement)
+            .bind(reference)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                issue(store, &batch, "artifact_revocable_response", 100),
+                async {
+                    wait_for_blocked_issuer(pool, &mut blocker).await;
+                    blocker.commit().await.unwrap();
+                }
+            )
+        })
+        .await
+        .expect("existing issuance must finish after revocation");
+        assert_eq!(outcome.unwrap(), ResponseGrantWriteOutcome::Conflict);
+        assert_batch_rows(pool, &batch, (1, 2, 2, 2)).await;
+    }
+}
+
+async fn assert_individual_leases(pool: &PgPool, store: &PostgresIdentityStore, fixture: &Fixture) {
+    let now = database_now(pool).await;
+    let batch = timed_batch(
+        fixture,
+        1200,
+        1200,
+        now,
+        now + 120,
+        [(now + 100, now + 90), (now + 80, now + 70)],
+    );
+    let created = issue(store, &batch, "artifact_short_items", 100)
+        .await
+        .unwrap();
+    let ResponseGrantWriteOutcome::Created(references) = created else {
+        panic!("live item-local leases must issue");
+    };
+    for (action, grant) in batch.actions.iter().zip(&batch.grants) {
+        let expires: (i64, i64) = sqlx::query_as(
+            "SELECT extract(epoch FROM action.expires_at)::bigint,
+                    extract(epoch FROM grant_row.expires_at)::bigint
+             FROM xshield.ui_actions action JOIN xshield.resource_grants grant_row
+               ON grant_row.action_ref = action.action_ref
+             WHERE grant_row.grant_id = $1",
+        )
+        .bind(grant.grant_id.as_str())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            expires,
+            (
+                i64::try_from(action.expires_at().value()).unwrap(),
+                i64::try_from(grant.expires_at.value()).unwrap()
+            )
+        );
+    }
+    assert_eq!(
+        issue(store, &batch, "artifact_short_items", 100)
+            .await
+            .unwrap(),
+        ResponseGrantWriteOutcome::Existing(references.clone())
+    );
+    assert_create_waits_expire_atomically(pool, store, fixture).await;
+    assert_existing_waits_recheck_expiry(pool, store, fixture).await;
+    assert_existing_waits_for_revocation(pool, store, fixture).await;
+    assert_eq!(
+        issue(store, &batch, "artifact_short_items", 100)
+            .await
+            .unwrap(),
+        ResponseGrantWriteOutcome::Existing(references)
+    );
+    assert_batch_rows(pool, &batch, (1, 2, 2, 2)).await;
+}
+
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)]
@@ -531,6 +906,10 @@ async fn response_grant_batch_is_atomic_replayable_and_usable() {
         .unwrap();
     assert!(matches!(resource_state, ResourceProofState::Verified(_)));
     assert_response_expiry_reads(&pool, &store, &fixture, &first, &created[0].action_ref).await;
+
+    let concurrent_pool = PgPool::connect(&database_url).await.unwrap();
+    assert_individual_leases(&concurrent_pool, &store, &fixture).await;
+    concurrent_pool.close().await;
 
     sqlx::query(
         "UPDATE xshield.auth_bindings SET auth_epoch = 5

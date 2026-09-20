@@ -1,4 +1,4 @@
-use crate::{PostgresIdentityStore, StoreError, to_i64};
+use crate::{PostgresIdentityStore, StoreError, lease_is_live, to_i64};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Row};
 use xshield_core::{
@@ -96,7 +96,11 @@ impl PostgresIdentityStore {
     /// Atomically persists verified page evidence, one action grant, and outbox event.
     ///
     /// The current binding row is locked before checking the active signed-policy
-    /// descriptor. Existing references are compared exactly and never extend TTL.
+    /// descriptor. Policy, descriptor and existing provenance rows remain locked
+    /// through the transaction. Existing references are compared exactly and
+    /// never extend TTL. The action deadline is no later than the evidence and
+    /// binding deadlines, and is rechecked before either success result; expiry
+    /// rolls back all writes. Callers audit [`ProvenanceWriteOutcome::reason_code`].
     ///
     /// # Errors
     /// Returns [`StoreError`] for numeric overflow or database failure.
@@ -120,6 +124,7 @@ impl PostgresIdentityStore {
 
         if !lock_binding(&mut transaction, &command, epoch, now, evidence_expires_at).await?
             || !descriptor_is_eligible(&mut transaction, &command, &target_rule, &fields).await?
+            || !lease_is_live(&mut transaction, action_expires_at).await?
         {
             transaction.rollback().await?;
             return Ok(ProvenanceWriteOutcome::Ineligible);
@@ -156,6 +161,10 @@ impl PostgresIdentityStore {
                 if !action_outbox_exists(&mut transaction, &command).await? {
                     return Err(StoreError::CorruptData("ui_action_outbox"));
                 }
+                if !lease_is_live(&mut transaction, action_expires_at).await? {
+                    transaction.rollback().await?;
+                    return Ok(ProvenanceWriteOutcome::Ineligible);
+                }
                 transaction.rollback().await?;
                 return Ok(ProvenanceWriteOutcome::Existing);
             }
@@ -176,6 +185,11 @@ impl PostgresIdentityStore {
             &fields,
         )
         .await?;
+        // Inserts may wait on FK/unique constraints after the initial checks.
+        if !lease_is_live(&mut transaction, action_expires_at).await? {
+            transaction.rollback().await?;
+            return Ok(ProvenanceWriteOutcome::Ineligible);
+        }
         transaction.commit().await?;
         Ok(ProvenanceWriteOutcome::Created)
     }
@@ -256,7 +270,8 @@ async fn descriptor_is_eligible(
            AND descriptor.allowed_fields @> $9
            AND descriptor.field_profile = $10 AND descriptor.policy_revision = $11
            AND descriptor.mapping_revision = $12
-           AND descriptor.status = 'approved' AND policy.status = 'active'",
+           AND descriptor.status = 'approved' AND policy.status = 'active'
+         FOR SHARE OF descriptor, policy",
     )
     .bind(command.action.snapshot().tenant_id().as_str())
     .bind(command.action.snapshot().site_id().as_str())
@@ -295,7 +310,8 @@ async fn persist_evidence(
                 status, extract(epoch FROM verified_at)::bigint AS verified_at,
                 extract(epoch FROM expires_at)::bigint AS expires_at
          FROM xshield.page_evidence
-         WHERE tenant_id = $1 AND site_id = $2 AND page_evidence_id = $3",
+         WHERE tenant_id = $1 AND site_id = $2 AND page_evidence_id = $3
+         FOR SHARE",
     )
     .bind(command.action.snapshot().tenant_id().as_str())
     .bind(command.action.snapshot().site_id().as_str())
@@ -372,7 +388,8 @@ async fn existing_action(
                 extract(epoch FROM issued_at)::bigint AS issued_at,
                 extract(epoch FROM expires_at)::bigint AS expires_at
          FROM xshield.ui_actions
-         WHERE tenant_id = $1 AND site_id = $2 AND action_ref = $3",
+         WHERE tenant_id = $1 AND site_id = $2 AND action_ref = $3
+         FOR SHARE",
     )
     .bind(command.action.snapshot().tenant_id().as_str())
     .bind(command.action.snapshot().site_id().as_str())

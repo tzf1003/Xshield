@@ -1,5 +1,5 @@
 use serde_json::json;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -26,10 +26,9 @@ use xshield_postgres::{
 };
 
 const NOW: u64 = 1_800_000_000;
-const EVIDENCE_EXPIRES: u64 = 1_800_001_500;
-const SESSION_EXPIRES: u64 = 1_800_002_000;
 
 struct Fixture {
+    now: u64,
     tenant: TenantId,
     site: SiteId,
     binding_id: AuthBindingId,
@@ -50,7 +49,11 @@ fn credentials() -> BTreeMap<CredentialSlot, CredentialFingerprint> {
 }
 
 fn fixture() -> Fixture {
-    let tenant = TenantId::parse("tenant_provenance").unwrap();
+    fixture_at("tenant_provenance", NOW)
+}
+
+fn fixture_at(tenant: &str, now: u64) -> Fixture {
+    let tenant = TenantId::parse(tenant).unwrap();
     let site = SiteId::parse("site_provenance").unwrap();
     let binding_id = AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000401").unwrap();
     let session = WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000402").unwrap();
@@ -64,7 +67,7 @@ fn fixture() -> Fixture {
         AuthEpoch::new(4),
         CredentialGeneration::new(2),
         credentials(),
-        UnixSeconds::new(SESSION_EXPIRES),
+        UnixSeconds::new(now + 2_000),
     )
     .unwrap();
     let snapshot = binding
@@ -73,7 +76,7 @@ fn fixture() -> Fixture {
             &site,
             &session,
             &credentials(),
-            UnixSeconds::new(NOW),
+            UnixSeconds::new(now),
         )
         .unwrap();
     let evidence = PageEvidence::verified(
@@ -86,8 +89,8 @@ fn fixture() -> Fixture {
             .unwrap(),
         PolicyRevision::parse("policy-r1").unwrap(),
         MappingRevision::parse("mapping-r1").unwrap(),
-        UnixSeconds::new(EVIDENCE_EXPIRES),
-        UnixSeconds::new(NOW),
+        UnixSeconds::new(now + 1_500),
+        UnixSeconds::new(now),
     )
     .unwrap();
     let descriptor = ActionDescriptor::approved(
@@ -106,6 +109,7 @@ fn fixture() -> Fixture {
         MappingRevision::parse("mapping-r1").unwrap(),
     );
     Fixture {
+        now,
         tenant,
         site,
         binding_id,
@@ -129,7 +133,7 @@ impl Fixture {
                 fields: BTreeSet::from([FieldName::parse("new_password").unwrap()]),
                 expires_at: UnixSeconds::new(expires_at),
             },
-            UnixSeconds::new(NOW),
+            UnixSeconds::new(self.now),
         )
         .unwrap()
     }
@@ -163,7 +167,7 @@ async fn seed_policy_binding_and_descriptor(pool: &PgPool, fixture: &Fixture) {
     .bind(fixture.site.as_str())
     .bind(fixture.binding_id.as_str())
     .bind([51_u8; 32].as_slice())
-    .bind(i64::try_from(SESSION_EXPIRES).unwrap())
+    .bind(i64::try_from(fixture.binding.absolute_expires_at().value()).unwrap())
     .execute(pool)
     .await
     .unwrap();
@@ -202,7 +206,7 @@ async fn persist(
             artifact_ref,
             event_id,
             &envelope,
-            UnixSeconds::new(NOW),
+            UnixSeconds::new(fixture.now),
         )?)
         .await
 }
@@ -447,4 +451,213 @@ async fn provenance_is_atomic_idempotent_and_epoch_bound() {
         .unwrap(),
         ProvenanceWriteOutcome::Ineligible
     );
+}
+
+async fn database_now(pool: &PgPool) -> u64 {
+    u64::try_from(
+        sqlx::query_scalar::<_, i64>("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+async fn provenance_counts(pool: &PgPool, fixture: &Fixture) -> (i64, i64, i64) {
+    sqlx::query_as(
+        "SELECT
+         (SELECT count(*) FROM xshield.page_evidence WHERE tenant_id = $1 AND site_id = $2),
+         (SELECT count(*) FROM xshield.ui_actions WHERE tenant_id = $1 AND site_id = $2),
+         (SELECT count(*) FROM xshield.audit_outbox WHERE tenant_id = $1 AND site_id = $2)",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn release_provenance_lock(
+    pool: &PgPool,
+    mut transaction: Transaction<'_, Postgres>,
+    fixture: &Fixture,
+    table: &str,
+    deadline: u64,
+    expiry: bool,
+) {
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("provenance issuer must reach the held row lock");
+    if expiry {
+        sqlx::query("SELECT pg_sleep(GREATEST(0, $1::double precision + 0.05 - extract(epoch FROM clock_timestamp())))")
+            .bind(i64::try_from(deadline).unwrap())
+            .execute(&mut *transaction).await.unwrap();
+        transaction.rollback().await.unwrap();
+    } else {
+        let status = if matches!(table, "policy_revisions" | "action_descriptors") {
+            "retired"
+        } else {
+            "revoked"
+        };
+        let statement = match table {
+            "policy_revisions" => {
+                "UPDATE xshield.policy_revisions SET status = $3 WHERE tenant_id = $1 AND site_id = $2"
+            }
+            "action_descriptors" => {
+                "UPDATE xshield.action_descriptors SET status = $3 WHERE tenant_id = $1 AND site_id = $2"
+            }
+            "page_evidence" => {
+                "UPDATE xshield.page_evidence SET status = $3 WHERE tenant_id = $1 AND site_id = $2"
+            }
+            "ui_actions" => {
+                "UPDATE xshield.ui_actions SET status = $3 WHERE tenant_id = $1 AND site_id = $2"
+            }
+            _ => panic!("unsupported revocation fixture"),
+        };
+        sqlx::query(statement)
+            .bind(fixture.tenant.as_str())
+            .bind(fixture.site.as_str())
+            .bind(status)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn provenance_waits_recheck_short_action_expiry_and_revocation() {
+    let database_url = env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL required");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let store = PostgresIdentityStore::from_pool(pool.clone());
+    for (index, (table, expiry)) in [
+        ("auth_bindings", true),
+        ("policy_revisions", true),
+        ("action_descriptors", true),
+        ("page_evidence", true),
+        ("ui_actions", true),
+        ("audit_outbox", true),
+        ("policy_revisions", false),
+        ("action_descriptors", false),
+        ("page_evidence", false),
+        ("ui_actions", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fixture = fixture_at(
+            &format!("tenant_provenance_wait_{index}"),
+            database_now(&pool).await,
+        );
+        seed_policy_binding_and_descriptor(&pool, &fixture).await;
+        let deadline = database_now(&pool).await + if expiry { 3 } else { 900 };
+        let action = fixture.action("action_wait", deadline);
+        let event = event_id(50_000 + u64::try_from(index).unwrap() * 10);
+        if table == "page_evidence" {
+            let prior = fixture.action("action_prior", fixture.now + 1_000);
+            assert_eq!(
+                persist(
+                    &store,
+                    &fixture,
+                    &prior,
+                    &event_id(60_000 + u64::try_from(index).unwrap()),
+                    "artifact_wait"
+                )
+                .await
+                .unwrap(),
+                ProvenanceWriteOutcome::Created
+            );
+        } else if table == "ui_actions" {
+            assert_eq!(
+                persist(&store, &fixture, &action, &event, "artifact_wait")
+                    .await
+                    .unwrap(),
+                ProvenanceWriteOutcome::Created
+            );
+        }
+        let before = provenance_counts(&pool, &fixture).await;
+        let mut transaction = pool.begin().await.unwrap();
+        if table == "audit_outbox" {
+            sqlx::query("INSERT INTO xshield.audit_outbox (tenant_id, site_id, event_id, aggregate_ref, event_type, envelope) VALUES ($1, $2, $3, 'blocker', 'fixture', '{}')")
+                .bind(fixture.tenant.as_str()).bind(fixture.site.as_str()).bind(event.as_str())
+                .execute(&mut *transaction).await.unwrap();
+        } else {
+            let statement = match table {
+                "auth_bindings" => {
+                    "SELECT 1 FROM xshield.auth_bindings WHERE tenant_id = $1 AND site_id = $2 FOR UPDATE"
+                }
+                "policy_revisions" => {
+                    "SELECT 1 FROM xshield.policy_revisions WHERE tenant_id = $1 AND site_id = $2 FOR UPDATE"
+                }
+                "action_descriptors" => {
+                    "SELECT 1 FROM xshield.action_descriptors WHERE tenant_id = $1 AND site_id = $2 FOR UPDATE"
+                }
+                "page_evidence" => {
+                    "SELECT 1 FROM xshield.page_evidence WHERE tenant_id = $1 AND site_id = $2 FOR UPDATE"
+                }
+                "ui_actions" => {
+                    "SELECT 1 FROM xshield.ui_actions WHERE tenant_id = $1 AND site_id = $2 FOR UPDATE"
+                }
+                _ => panic!("unsupported lock fixture"),
+            };
+            sqlx::query(statement)
+                .bind(fixture.tenant.as_str())
+                .bind(fixture.site.as_str())
+                .fetch_all(&mut *transaction)
+                .await
+                .unwrap();
+        }
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::join!(
+                persist(&store, &fixture, &action, &event, "artifact_wait"),
+                release_provenance_lock(&pool, transaction, &fixture, table, deadline, expiry),
+            )
+        })
+        .await
+        .expect("provenance issuer must finish after the held lock is released");
+        let expected = if expiry || matches!(table, "policy_revisions" | "action_descriptors") {
+            ProvenanceWriteOutcome::Ineligible
+        } else {
+            ProvenanceWriteOutcome::Conflict
+        };
+        assert_eq!(result.unwrap(), expected, "{table}, expiry={expiry}");
+        assert_eq!(provenance_counts(&pool, &fixture).await, before);
+        if expiry {
+            let valid = fixture.action("action_after_wait", fixture.now + 1_000);
+            assert_eq!(
+                persist(
+                    &store,
+                    &fixture,
+                    &valid,
+                    &event_id(70_000 + u64::try_from(index).unwrap()),
+                    "artifact_wait"
+                )
+                .await
+                .unwrap(),
+                ProvenanceWriteOutcome::Created
+            );
+        }
+    }
 }
