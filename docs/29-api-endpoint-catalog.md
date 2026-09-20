@@ -14,6 +14,7 @@
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
 | POST /control/v1/artifacts/{id}/access | 申请解密/原文查看能力 | evidence.access.requested |
+| GET /control/v1/evidence-access-requests/{access_request_id} | 申请理由、目标与历史决策详情（已实现，29.23） | console.evidence.access.read |
 | POST /control/v1/evidence-access-requests/{id}/approve | 独立批准并建立短时读取资格 | evidence.access.approved |
 | POST /control/v1/evidence-access-requests/{id}/deny | 独立拒绝并终结申请 | evidence.access.denied |
 | GET /control/v1/artifacts/{id}/content | 获批后读取，短时作用域能力 | evidence.read，含批准引用 |
@@ -156,7 +157,7 @@ Authorization 与访问申请头必须各自单值，不接受查询串；重复
 
 定位结果是保留窗口内已发布的直接引用事件，可通过返回的 request_id 继续查看请求时间线；不会自动遍历关联请求或报告当前 binding/grant 的有效状态。空结果可能来自未发布、到期或作用域不匹配，不能证明发行从未发生。响应中的水位只覆盖当前配置的 journal 源，不代表独立 outbox 生产者已追平。当前复用有界 payload 扫描，超出预算要求缩小时间窗；大规模索引列物化需另行容量测量。
 
-案件使用 `{"kind":"case_id","value":"case_UUIDv7"}`，匹配固定阶段与事件组合中的直接引用：`case_management` 阶段的 `case.created/closed/evidence.added`、`evidence_access` 阶段的 `evidence.access.requested`、`evidence_hold` 阶段的 `evidence.hold.created/released` 读取 payload.case_id；`control_access` 阶段的 `case.created/closed/evidence.added`、`console.case.read`、`evidence.access.requested/approved/denied` 与 `console.evidence.hold.created/released/read` 读取 target_case_id。审批批准/拒绝事务 outbox 本身仅带申请引用，须通过其管理访问记录定位，不自动补关联。
+案件使用 `{"kind":"case_id","value":"case_UUIDv7"}`，匹配固定阶段与事件组合中的直接引用：`case_management` 阶段的 `case.created/closed/evidence.added`、`evidence_access` 阶段的 `evidence.access.requested`、`evidence_hold` 阶段的 `evidence.hold.created/released` 读取 payload.case_id；`control_access` 阶段的 `case.created/closed/evidence.added`、`console.case.read`、`evidence.access.requested/approved/denied`、`console.evidence.access.read` 与 `console.evidence.hold.created/released/read` 读取 target_case_id。审批批准/拒绝事务 outbox 本身仅带申请引用，须通过其管理访问记录定位，不自动补关联。
 
 证据使用 `{"kind":"artifact_id","value":"artifact_UUIDv7"}`，匹配所有事件的 evidence_refs 精确成员；另匹配 `control_access` 中 `console.manifest.read`、`case.evidence.added`、`evidence.access.requested/approved/denied`、`evidence.read` 和 `console.evidence.hold.created/released` 的 target_artifact_id，包含已校验目标但未返回证据的失败尝试。其他 payload 同名字段及嵌套引用不参与匹配；集合查询只匹配该页实际审计的 evidence_refs。
 
@@ -271,3 +272,17 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 入口与案件创建、关联、关闭、集合及保留锁操作共用单实例在途许可，繁忙返回 `CONTROL_CASE_BUSY`/429。数据库整体含连接池等待最多 15 秒，SQL/锁等待最多 5 秒；依赖故障、超时或损坏为 `CONTROL_CASE_STORE_UNAVAILABLE`/503。已准入读取在客户端断连后继续到数据库和管理审计终态，许可覆盖审计；进程退出仍是故障边界。每次可审计尝试写 `console.case.list`，成功含空页为 `CONTROL_CASES_READ`；4xx 为 DENY、5xx 为 ERROR。所有 target 字段、query_digest、bytes_read 缺省或 null，evidence_refs 为空，不记录用途、游标或列表正文。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果；响应统一 `private, no-store`。
 
 部署先应用 `0021_m3_case_listing.sql` 的 tenant/site/owner/case ID 降序索引，并升级管理 journal 发布器，再启用 API 与界面。索引采用事务内非并发构建，期间阻塞案件写入，大表须安排维护窗口；可回滚应用并保留这个加法索引。控制数据库角色需对 investigation_cases 和 audit_outbox 提供已有查询所需 SELECT；复用现有游标密钥，无新增依赖。
+
+## 29.23 已实现的证据访问申请详情契约
+
+`GET /control/v1/evidence-access-requests/{access_request_id}` 返回审批所需的申请理由、目标及历史决策。单值管理 Bearer、凭证时效、角色、固定 tenant/site 和速率均由服务端校验。`Investigator` 或 `SensitiveEvidenceReader` 仅能查询自己发起的申请；`SensitiveEvidenceApprover` 可查询同作用域内的申请。审批人查看自身申请不改变禁止自批规则，Observer 与 SystemAdmin 不隐含这些角色。
+
+路径使用规范 access UUIDv7；任何查询串（包括空 `?`）及非空请求体均拒绝。无效 ID 为 `CONTROL_EVIDENCE_ACCESS_ID_INVALID`/400，查询或正文无效为 `CONTROL_EVIDENCE_ACCESS_READ_REQUEST_INVALID`/400；重复认证头按未认证处理。不存在、跨作用域及非本人且无审批角色的记录统一为 `CONTROL_EVIDENCE_ACCESS_READ_NOT_AVAILABLE`/404。
+
+200 响应包含 `schema_version=3`、管理 `request_id`、`tenant_id`、`site_id`、数据库微秒 UTC `as_of`、当前服务端 `max_approval_ttl_seconds` 和 `access_request` 对象。对象字段为 access_request_id、case_id、artifact_id、requested_by、access_kind、justification、stored_status、requested_at、requested_event_id、decided_by、decision_reason、decision_ttl_seconds、decision_event_id、decided_at、access_expires_at、case_status、artifact_status、artifact_expires_at、artifact_time_expired 和 capability_time_expired。可选决策字段显式为 null；pending/denied 的 capability_time_expired 为 null。对象及资格期限分别与 as_of 比较，持久状态不会由查询改写；到期 approved、expired、revoked、closed 案件和 deleted catalog 的历史记录仍可调查。所有时间保持 UTC 微秒。
+
+单条 PostgreSQL 只读快照在 SQL 内限定主体可见性，并同时连接案件、catalog 和申请/决策 outbox，验证 ID、归属、状态、规范文本、有限时间与事件绑定。内容、manifest、locator、密钥与摘要不进入查询投影。损坏可见记录使请求失败，读取不锁定业务行、不写 outbox、不延长期限；详情和配置 TTL 上限仅供复核，批准及下载仍各自重新鉴权和检查当前状态。
+
+详情与案件及原文访问共用单实例在途许可，繁忙为 `CONTROL_EVIDENCE_ACCESS_BUSY`/429；数据库操作含池等待限 15 秒，事务内语句/锁等待限 5 秒。数据库故障、超时或损坏为 `CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE`/503。已准入任务在客户端断连后继续到数据库结果和终态审计；事务结束后才写审计，许可持有至审计完成。进程退出和本地 fsync 仍是故障边界。
+
+每次可审计尝试写独立 `console.evidence.access.read` 管理事件，成功原因 `CONTROL_EVIDENCE_ACCESS_READ`，绑定申请、case、artifact 和唯一 artifact 引用；失败按 4xx/DENY、5xx/ERROR 记录，仅保留已验证的申请 ID。理由、历史决策人、期限和响应正文不进入管理 journal。审计失败为 `AUDIT_DURABILITY_FAILED`/503 并扣留详情；所有响应 `private, no-store`。部署先升级管理 journal 发布器再开放端点，旧发布器遇到新事件将停止推进并保留段；复用现有数据库查询权限、索引和依赖，无新迁移。

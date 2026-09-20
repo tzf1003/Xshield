@@ -77,9 +77,15 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 ## 11.7 已实现的管理访问审计发布
 
-封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.grant.read`、`console.binding.read`、`console.query.executed`、`console.case.read`、`console.case.list`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
+封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.grant.read`、`console.binding.read`、`console.query.executed`、`console.case.read`、`console.case.list`、`console.evidence.access.read`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
 
 `console.case.list` 固定对应 `GET /control/v1/cases`，成功（含空页）要求主体和 `CONTROL_CASES_READ`。全部 target 字段、query_digest、bytes_read 仅允许缺省/null，evidence_refs 为空；事件不保存案件用途、列表正文或游标。权限/输入/预算拒绝为 DENY，依赖失败为 ERROR；启用端点前先升级管理 journal 发布器。
+
+`console.evidence.access.read` 固定对应 `GET /control/v1/evidence-access-requests/{access_request_id}`，记录固定 tenant/site 作用域内的审批详情元数据观察。具备 `Investigator` 或 `SensitiveEvidenceReader` 的申请人可读取本人记录，`SensitiveEvidenceApprover` 可读取同作用域记录；案件已关闭、申请或证据已过期、证据已删除时仍可观察保留的审批历史。缺失、跨作用域和非本人且无审批角色统一返回 404 / `CONTROL_EVIDENCE_ACCESS_READ_NOT_AVAILABLE`。该查询保持原文权限和到期时间，读取审批详情不产生内容访问、期限延长或事务 outbox 记录。
+
+该事件由 `xshield-control` 写入独立加密管理 journal，`request_seq=1`、`policy_revision=control-v1`、`sensitivity=INTERNAL`、cause_event_ids 为空。成功为 `PASS/CONTROL_EVIDENCE_ACCESS_READ`，必须携带调用者 subject_ref，以及规范 UUIDv7 的 `target_access_request_id`、`target_case_id`、`target_artifact_id`；evidence_refs 恰为该 artifact。失败为 DENY 或 ERROR，只允许保留已完成校验的申请目标，case/artifact 目标及 evidence_refs 为空；鉴权、限流和时钟失败发生在目标解析前，全部目标为空。`CONTROL_EVIDENCE_ACCESS_ID_INVALID` 表示申请 ID 校验失败，全部目标也必须为空。其他 target、query_digest、bytes_read 仅允许缺省/null。事件只保留调用者与目标引用，申请理由、审批理由、他人主体、状态详情、秘密和内容均不得进入载荷。
+
+输入、查找和容量失败分别使用 `CONTROL_EVIDENCE_ACCESS_ID_INVALID`、`CONTROL_EVIDENCE_ACCESS_READ_REQUEST_INVALID`、`CONTROL_EVIDENCE_ACCESS_READ_NOT_AVAILABLE`、`CONTROL_EVIDENCE_ACCESS_BUSY`，并保留通用鉴权与限流原因；数据库故障和超时使用 `ERROR/CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE`（503）。通用限流服务与时钟失败分别为 `ERROR/CONTROL_RATE_UNAVAILABLE`、`ERROR/CONTROL_CLOCK_UNAVAILABLE`。查询复用案件操作的有界许可，数据库总期限为含连接池等待的 15 秒、SQL/锁等待为 5 秒；已准入任务在客户端断连后继续完成数据库观察和耐久审计。管理审计写入失败时返回审计不可用，响应本身不证明事件已保存。发布摘要沿用 `control_access`、`deterministic`、`confidence=null/not_applicable` 和非业务终态语义；须先升级管理 journal 发布器再启用端点。
 
 `console.grant.read` 仅对应 `GET /control/v1/grants/{grant_id}`；已校验的目标使用可选 `target_grant_id`，成功（含未找到）必须携带该字段。该目标只属于此路由，失败保留已完成校验的引用，其他路由保持字段缺省；不记录账本正文、资格状态或绑定快照。部署先升级管理 journal 发布器再启用新查询端点，旧发布器遇到新事件会停止推进并保留待发布段。
 

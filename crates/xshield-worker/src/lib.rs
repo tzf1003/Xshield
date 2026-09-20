@@ -2970,7 +2970,7 @@ mod tests {
             "occurred_at >= fromUnixTimestamp64Micro(1000000) AND occurred_at < fromUnixTimestamp64Micro(61000000)",
             "tuple(stage,event_type) IN (('case_management','case.created'),('case_management','case.closed'),('case_management','case.evidence.added'),('evidence_access','evidence.access.requested'),('evidence_hold','evidence.hold.created'),('evidence_hold','evidence.hold.released'))",
             "JSONExtractString(payload_json,'case_id') = 'case_018f2a3b-4c5d-7000-8000-000000000001'",
-            "stage = 'control_access' AND event_type IN ('case.created','case.closed','case.evidence.added','console.case.read','evidence.access.requested','evidence.access.approved','evidence.access.denied','console.evidence.hold.created','console.evidence.hold.released','console.evidence.hold.read')",
+            "stage = 'control_access' AND event_type IN ('case.created','case.closed','case.evidence.added','console.case.read','evidence.access.requested','evidence.access.approved','evidence.access.denied','console.evidence.hold.created','console.evidence.hold.released','console.evidence.hold.read','console.evidence.access.read')",
             "JSONExtractString(payload_json,'target_case_id') = 'case_018f2a3b-4c5d-7000-8000-000000000001'",
             "AND (has(evidence_refs,'artifact_018f2a3b-4c5d-7000-8000-000000000002') OR (stage = 'control_access' AND event_type IN ('console.manifest.read','case.evidence.added','evidence.access.requested','evidence.access.approved','evidence.access.denied','evidence.read','console.evidence.hold.created','console.evidence.hold.released')",
             "JSONExtractString(payload_json,'target_artifact_id') = 'artifact_018f2a3b-4c5d-7000-8000-000000000002'",

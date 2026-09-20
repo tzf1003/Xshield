@@ -21,6 +21,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.query.executed"
             | "console.case.read"
             | "console.case.list"
+            | "console.evidence.access.read"
             | "console.evidence.hold.created"
             | "console.evidence.hold.released"
             | "console.evidence.hold.read"
@@ -81,6 +82,9 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
 
 impl AccessPayload {
     fn validate(&self, event: &WireEvent) -> Result<(), PublishError> {
+        if event.event_type == "console.evidence.access.read" {
+            self.validate_access_read_reason()?;
+        }
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
             "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
@@ -131,6 +135,43 @@ impl AccessPayload {
         }
         if success {
             self.validate_evidence(event)?;
+        }
+        Ok(())
+    }
+
+    fn validate_access_read_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_EVIDENCE_ACCESS_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_EVIDENCE_ACCESS_ID_INVALID"
+                    | "CONTROL_EVIDENCE_ACCESS_READ_REQUEST_INVALID"
+                    | "CONTROL_EVIDENCE_ACCESS_READ_NOT_AVAILABLE"
+                    | "CONTROL_EVIDENCE_ACCESS_BUSY"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        let before_target = self.subject_ref.is_none()
+            || matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_EVIDENCE_ACCESS_ID_INVALID"
+            );
+        if !valid || before_target && self.target_access_request_id.is_some() {
+            return Err(PublishError::InvalidEvent);
         }
         Ok(())
     }
@@ -198,6 +239,11 @@ impl AccessPayload {
             ("evidence.read", "GET", "/control/v1/artifacts/{artifact_id}/content") => {
                 [false, true, false, true, false, false, false, false]
             }
+            (
+                "console.evidence.access.read",
+                "GET",
+                "/control/v1/evidence-access-requests/{access_request_id}",
+            ) => [false, success, success, true, false, false, false, false],
             _ => return Err(PublishError::InvalidEvent),
         };
         for ((target, prefix), allowed) in targets.into_iter().zip(allowed) {
@@ -218,6 +264,7 @@ impl AccessPayload {
             | "evidence.access.requested"
             | "evidence.access.approved"
             | "evidence.access.denied"
+            | "console.evidence.access.read"
             | "console.evidence.hold.created"
             | "console.evidence.hold.released"
             | "evidence.read" => {

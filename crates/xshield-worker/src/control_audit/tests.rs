@@ -155,6 +155,264 @@ fn case_listing_publishes_only_scoped_access_facts() {
     }
 }
 
+fn access_detail_event() -> Value {
+    let mut value = event();
+    value["event_type"] = "console.evidence.access.read".into();
+    value["payload"]["path"] = "/control/v1/evidence-access-requests/{access_request_id}".into();
+    value["payload"]["reason_code"] = "CONTROL_EVIDENCE_ACCESS_READ".into();
+    value["payload"]["target_artifact_id"] = ARTIFACT.into();
+    value["payload"]["target_access_request_id"] = ACCESS.into();
+    value
+}
+
+#[test]
+fn access_details_publish_scoped_metadata_only_from_the_management_journal() {
+    let value = access_detail_event();
+    for field in [
+        "target_request_id",
+        "target_model_call_id",
+        "target_grant_id",
+        "target_binding_id",
+        "target_hold_id",
+        "query_digest",
+        "bytes_read",
+    ] {
+        let mut nullable = value.clone();
+        nullable["payload"][field] = Value::Null;
+        assert!(index(&nullable).is_ok(), "{field}");
+    }
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    assert_eq!(row.method, "GET");
+    assert_eq!(row.reason_code, "CONTROL_EVIDENCE_ACCESS_READ");
+    assert_eq!(row.proof_kind, "deterministic");
+    assert_eq!(row.confidence, None);
+    assert_eq!(row.confidence_status, "not_applicable");
+    assert_eq!(row.request_id, REQUEST);
+    assert_eq!(row.evidence_refs, [ARTIFACT]);
+    assert_eq!(row.is_terminal, 0);
+    assert_eq!(row.http_status, None);
+    assert!(row.origin_state.is_empty());
+    assert!(
+        IndexRow::parse_outbox(
+            &serde_json::to_vec(&value).unwrap(),
+            &EventId::parse(EVENT).unwrap(),
+            1,
+            BOOT,
+            "1".repeat(64),
+            TimeDelta::days(30),
+        )
+        .is_err()
+    );
+    for (field, content) in [
+        ("producer_id", json!("evidence-access")),
+        ("request_id", Value::Null),
+        ("request_seq", json!(2)),
+        ("producer_seq", json!(2)),
+        ("producer_boot_id", json!(REQUEST)),
+        ("policy_revision", json!("evidence-access-v1")),
+        ("sensitivity", json!("RESTRICTED")),
+        ("cause_event_ids", json!([EVENT])),
+        ("example_only", json!(true)),
+        ("connection_id", Value::Null),
+        ("agent_run_id", Value::Null),
+    ] {
+        let mut invalid = value.clone();
+        invalid[field] = content;
+        rejected(&invalid, field);
+    }
+    let mut crossed = value;
+    crossed["payload"] = json!({
+        "stage": "evidence_access", "outcome": "PASS", "reason_code": "EVIDENCE_ACCESS_APPROVED",
+        "access_request_id": ACCESS, "case_id": CASE, "artifact_id": ARTIFACT,
+        "subject_ref": "audit-operator"
+    });
+    rejected(&crossed, "transactional payload on approval detail access");
+}
+
+#[test]
+fn access_details_require_exact_success_targets_route_and_evidence() {
+    let value = access_detail_event();
+    for field in [
+        "method",
+        "path",
+        "outcome",
+        "reason_code",
+        "subject_ref",
+        "target_access_request_id",
+        "target_case_id",
+        "target_artifact_id",
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"].as_object_mut().unwrap().remove(field);
+        rejected(&invalid, field);
+        invalid["payload"][field] = Value::Null;
+        rejected(&invalid, field);
+    }
+    for field in [
+        "target_access_request_id",
+        "target_case_id",
+        "target_artifact_id",
+    ] {
+        let target = value["payload"][field].as_str().unwrap();
+        for invalid_target in [
+            json!(REQUEST),
+            json!(target.to_uppercase()),
+            json!(target.replace("-7000-", "-4000-")),
+            json!(format!("{target}\n")),
+            json!("invalid"),
+        ] {
+            let mut invalid = value.clone();
+            invalid["payload"][field] = invalid_target;
+            rejected(&invalid, field);
+        }
+    }
+    for (field, content) in [
+        ("method", json!("POST")),
+        (
+            "path",
+            json!(format!("/control/v1/evidence-access-requests/{ACCESS}")),
+        ),
+        (
+            "path",
+            json!("/control/v1/evidence-access-requests/{access_request_id}/approve"),
+        ),
+        (
+            "path",
+            json!("/control/v1/evidence-access-requests/{access_request_id}?extra=1"),
+        ),
+        ("reason_code", json!("CONTROL_EVIDENCE_ACCESS_APPROVED")),
+        (
+            "reason_code",
+            json!("CONTROL_EVIDENCE_ACCESS_READ_NOT_AVAILABLE"),
+        ),
+        (
+            "reason_code",
+            json!("CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE"),
+        ),
+        ("subject_ref", json!("")),
+        ("subject_ref", json!("中".repeat(86))),
+        ("subject_ref", json!("actor\nname")),
+        ("target_request_id", json!(REQUEST)),
+        ("target_model_call_id", json!(MODEL)),
+        ("target_grant_id", json!(GRANT)),
+        ("target_binding_id", json!(BINDING)),
+        ("target_hold_id", json!(HOLD)),
+        ("query_digest", json!("a".repeat(64))),
+        ("bytes_read", json!(0)),
+        ("justification", json!("synthetic")),
+        ("decision_reason", json!("synthetic")),
+        ("requester_subject", json!("requester")),
+        ("decided_by_subject", json!("approver")),
+        ("status", json!("approved")),
+        ("content", json!("synthetic")),
+        ("confidence", Value::Null),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
+    }
+    for refs in [
+        json!([]),
+        json!([OTHER_ARTIFACT]),
+        json!([ARTIFACT, OTHER_ARTIFACT]),
+        json!([ARTIFACT, ARTIFACT]),
+        json!([ACCESS]),
+    ] {
+        let mut invalid = value.clone();
+        invalid["evidence_refs"] = refs;
+        rejected(&invalid, "approval detail evidence binding");
+    }
+}
+
+#[test]
+fn access_detail_failures_bind_only_validated_access_ids_and_exact_reasons() {
+    for (outcome, reason, before_target) in [
+        ("DENY", "CONTROL_AUTH_REQUIRED", true),
+        ("DENY", "CONTROL_SCOPE_DENIED", true),
+        ("DENY", "CONTROL_RATE_LIMITED", true),
+        ("ERROR", "CONTROL_RATE_UNAVAILABLE", true),
+        ("ERROR", "CONTROL_CLOCK_UNAVAILABLE", true),
+        ("DENY", "CONTROL_EVIDENCE_ACCESS_ID_INVALID", true),
+        (
+            "DENY",
+            "CONTROL_EVIDENCE_ACCESS_READ_REQUEST_INVALID",
+            false,
+        ),
+        ("DENY", "CONTROL_EVIDENCE_ACCESS_READ_NOT_AVAILABLE", false),
+        ("DENY", "CONTROL_EVIDENCE_ACCESS_BUSY", false),
+        (
+            "ERROR",
+            "CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE",
+            false,
+        ),
+    ] {
+        let mut value = access_detail_event();
+        value["payload"]["outcome"] = outcome.into();
+        value["payload"]["reason_code"] = reason.into();
+        rejected(&value, "failure with success targets and evidence");
+        value["evidence_refs"] = json!([]);
+        value["payload"]["target_case_id"] = Value::Null;
+        value["payload"]["target_artifact_id"] = Value::Null;
+        assert_eq!(index(&value).is_ok(), !before_target, "{reason}");
+        value["payload"]["target_access_request_id"] = Value::Null;
+        assert_eq!(index(&value).unwrap().outcome, outcome);
+        for field in ["target_case_id", "target_artifact_id"] {
+            let mut invalid = value.clone();
+            invalid["payload"][field] = access_detail_event()["payload"][field].clone();
+            rejected(&invalid, "failure with resolved target");
+        }
+        for reason in [
+            "CONTROL_EVIDENCE_ACCESS_READ",
+            "CONTROL_UNKNOWN",
+            "CONTROL_AUDIT_UNAVAILABLE",
+        ] {
+            let mut invalid = value.clone();
+            invalid["payload"]["reason_code"] = reason.into();
+            rejected(&invalid, "failure with invalid reason");
+        }
+        let mut crossed = value.clone();
+        crossed["payload"]["outcome"] = if outcome == "ERROR" { "DENY" } else { "ERROR" }.into();
+        rejected(&crossed, "failure outcome/reason mismatch");
+        for target in [
+            json!(REQUEST),
+            json!(ACCESS.to_uppercase()),
+            json!(ACCESS.replace("-7000-", "-4000-")),
+        ] {
+            value["payload"]["target_access_request_id"] = target;
+            rejected(&value, "invalid failure target");
+        }
+        value["payload"]["target_access_request_id"] = Value::Null;
+        for subject in [Value::Null, json!("audit-operator")] {
+            value["payload"]["subject_ref"] = subject;
+            assert!(index(&value).is_ok());
+        }
+        value["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("subject_ref");
+        assert!(index(&value).is_ok());
+        value["payload"]["target_access_request_id"] = ACCESS.into();
+        rejected(&value, "target before authentication");
+    }
+}
+
+#[test]
+fn access_detail_duplicate_fields_fail_before_indexing() {
+    let bytes = serde_json::to_string(&access_detail_event()).unwrap();
+    for addition in [
+        r#""outcome":"PASS","outcome":"PASS""#,
+        r#""outcome":"PASS","target_access_request_id":null"#,
+        r#""outcome":"PASS","unknown":null"#,
+    ] {
+        let invalid = bytes.replace(r#""outcome":"PASS""#, addition);
+        assert!(matches!(
+            index_bytes(invalid.as_bytes()),
+            Err(PublishError::Json(_))
+        ));
+    }
+}
+
 #[test]
 fn rejects_mismatched_actions_subjects_outcomes_and_reasons() {
     for (pointer, value) in [

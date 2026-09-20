@@ -48,6 +48,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | GET /control/v1/agent-runs/{agent_run_id} | 子调用、工具、产物和权限快照 |
 | GET /control/v1/artifacts/{artifact_id} | 作用域内单个证据状态、长度、保密和完整性，不读取内容 |
 | POST /control/v1/artifacts/{id}/access | 申请受限原文访问 |
+| GET /control/v1/evidence-access-requests/{access_request_id} | 按主体范围复核申请、目标及历史决策 |
 | POST /control/v1/evidence-access-requests/{id}/approve | 独立批准并建立短时读取资格 |
 | POST /control/v1/evidence-access-requests/{id}/deny | 独立拒绝并终结申请 |
 | POST /control/v1/cases | 建立调查案与证据集合 |
@@ -76,6 +77,8 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 原文访问申请接口同样要求 Investigator 与规范幂等键，只接受自己拥有的 open 案件、同作用域 active 未过期 artifact、固定 `sensitive_raw` 类型和有界理由。服务在事务内锁定目标、限制主体 pending 数，并原子提交申请与 `evidence.access.requested` outbox。批准/拒绝要求用途独立的 `SensitiveEvidenceApprover` 和规范幂等键；决策主体不能等于申请主体，申请只允许一次终态。批准时重新验证并锁定案件与 artifact，短时资格不超过请求 TTL、服务端 `XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS` 和 artifact 期限；拒绝不产生资格。内容端口通过 EvidenceReadPort 消费该资格，并在释放前重验数据库、vault 完整性及必需读取审计，详见 [29.13](29-api-endpoint-catalog.md#2913-已实现的证据内容读取契约)。
 
 ## 15.5 交互和错误语义
+
+申请详情 API 已提供原始申请理由、目标、决策理由/期限及同一数据库观察的案件和 catalog 状态。Investigator 或 Reader 仅查看本人申请，Approver 可复核同站点申请；历史关闭、到期及删除状态保留可见。详情读取写独立管理审计，后续批准及内容访问继续独立检查当前权限；字段和部署顺序见 [29.23](29-api-endpoint-catalog.md#2923-已实现的证据访问申请详情契约)。控制台审批与下载界面继续交付。
 
 查询成功但索引未完成：200 + completeness/pending，并提供可重试水位；长任务 202 + job_id。后台未认证/无权限分别 401/403；扫描超限 429/422；依赖不可用 503。响应不泄露敏感对象是否存在。
 

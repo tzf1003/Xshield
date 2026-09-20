@@ -589,7 +589,8 @@ async fn execute_query(
                   OR (stage = 'control_access' AND event_type IN ('case.created','case.closed',\
                   'case.evidence.added','console.case.read','evidence.access.requested',\
                   'evidence.access.approved','evidence.access.denied','console.evidence.hold.created',\
-                  'console.evidence.hold.released','console.evidence.hold.read') \
+                  'console.evidence.hold.released','console.evidence.hold.read',\
+                  'console.evidence.access.read') \
                   AND JSONExtractString(payload_json,'target_case_id') = ?))",
             ),
             QueryFilter::ArtifactId(_) => sql.push_str(
