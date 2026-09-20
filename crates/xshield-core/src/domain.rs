@@ -117,6 +117,7 @@ scoped_name!(SiteId, "site_id");
 scoped_name!(PolicyRevision, "policy_revision");
 v7_id!(RequestId, "req_", "request_id");
 v7_id!(ModelCallId, "mdl_", "model_call_id");
+v7_id!(CalibrationReportId, "calr_", "calibration_report_id");
 v7_id!(EventId, "ev_", "event_id");
 v7_id!(ArtifactId, "artifact_", "artifact_id");
 v7_id!(CaseId, "case_", "case_id");

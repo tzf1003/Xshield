@@ -511,6 +511,9 @@ impl fmt::Display for DatasetError {
 impl std::error::Error for DatasetError {}
 
 fn valid_provider_model_id(value: &str) -> bool {
+    if value.len() > 128 {
+        return false;
+    }
     let Some((provider, model)) = value.split_once('/') else {
         return valid_component(value);
     };

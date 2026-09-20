@@ -131,3 +131,11 @@ Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 
 此层不读取、解密或授权任何 evidence，不调用模型、不发布策略、不改变资格，也不写 audit、journal、catalog 或报告。artifact ID 不同只能证明本次提交的引用集合不同，不能证明 manifest 或外部样本内容没有重叠，亦不能排除同源数据、重试相关性、标签质量或分区泄漏。应用层必须经批准的证据读取路径验证作用域、保留期、记录身份、映射、标签审查和内容独立性，并将报告证据及终态写入独立审计链；不得复用 `model.*` 生命周期冒充校准报告。
 
 使用 `cargo test -p xshield-core --all-targets` 运行该契约的纯 Rust 回归。测试验证冻结 provenance 与来源三元关联顺序、未知 resolved revision 的保留、四份 manifest 与样本来源的引用隔离，以及样本 artifact、模型身份、映射修订和 `ModelCallId` 的反例；它们不是授权读取、持久化、供应商调用或真实校准验证。
+
+## 10.15 已实现校准报告发布元数据契约
+
+`xshield_core::calibration::publication::CalibrationReportPublication` 从已完成的 `EvaluationReport` 投影一个新的 `calr_` UUIDv7 report ID 和独立 report artifact。该不可变投影只保留 approval、dataset/label/task/threshold-policy/mapping revision、训练/校准/评估/标签四份 manifest 及 `ModelIdentity`；后者继续保留 provider、wire model、内部模型/提示修订和可选的 resolved provider revision。report artifact 不得与任一 manifest 或选中样本的模型记录/标签 artifact 同 ID；冲突固定返回 `CALIBRATION_REPORT_EVIDENCE_ALIASED`，成功原因固定为 `CALIBRATION_REPORTED`。
+
+该类型有意不投影 source tuple、`ModelCallId`、标签、概率、ground truth、统计指标、提示词或供应商正文，且不重新计算阈值评估。它不读写或授权 evidence、不创建 report artifact、不写 journal/catalog/outbox，也不选择、发布或改变阈值、策略、资格或模型。`calibration.reported` 的受限元数据 schema 与 outbox 消费端约束见 [11.9](11-audit-event-contract.md#119-已实现-calibrationreported-发布契约)；当前里程碑没有生成或持久化该事件的 producer，不能据此声称受控读取、耐久报告或真实校准已经完成。
+
+`cargo test -p xshield-core --all-targets` 的 publication 回归检查冻结身份和未知 resolved revision 的保留、report artifact 与全部 manifest/样本来源 artifact 的别名拒绝，以及稳定成功/错误原因。它不验证外部 artifact 内容、权限、report artifact 写入、outbox 事务或供应商质量。

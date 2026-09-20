@@ -30,7 +30,7 @@
 
 交付：journal、ClickHouse、对象证据库、签名 manifest、全请求检索、阶段树、原文审批、转换对照、导出、故障恢复和索引水位。
 
-管理审计增量：现有控制端点的独立 journal 已接通严格封存发布契约，可检索访问尝试、稳定原因和证据引用；管理结果与业务请求终态分离，使用独立源目录和水位。PostgreSQL outbox 已交付案件、证据目录、证据访问、证据清理、身份生命周期、通用资源资格、响应资格和分享发行八族消费发布闭环，包含按族租约、精确确认、失败重试和 ClickHouse 内容冲突检查。身份生产者已把会话创建、登录、刷新、上下文切换和显式撤销接入完整 v3 契约，并经真实网关/源站/PostgreSQL 回归；身份发布器已严格接收 `binding.revoked`。通用 `GrantPersistence` 库入口构造并原子提交完整 `grant.issued`，其 HTTP 发行适配器仍待交付。响应资格生产者随整批资格事务提交完整 `response_grant.issued` envelope；分享库 API 原子提交完整 `share.issued`，绑定稳定 event/share ID、冻结时间和精确重试正文；HTTP `response.share_issue` 已接通独立获准分享操作、完整 JSON 校验、当前来源资格复验及提交后凭证注入。历史稀疏身份、通用资源资格、响应资格及分享记录保留未确认。清理族保留六类 catalog/孤儿删除意图、完成与失败事实，以独立维护阶段、artifact/cause 引用及空请求进入脱敏检索。各族合成契约与实际生产者的数据库覆盖及执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。案件与证据目标过滤已交付，更多管理目标过滤、调查包导出及控制台界面继续交付。
+管理审计增量：现有控制端点的独立 journal 已接通严格封存发布契约，可检索访问尝试、稳定原因和证据引用；管理结果与业务请求终态分离，使用独立源目录和水位。PostgreSQL outbox 已交付案件、证据目录、证据访问、证据清理、校准报告元数据、身份生命周期、通用资源资格、响应资格和分享发行九族消费发布闭环，包含按族租约、精确确认、失败重试和 ClickHouse 内容冲突检查。校准族仅消费已形成的受限 `calibration.reported` 元数据，不生成报告或授予读取权限。身份生产者已把会话创建、登录、刷新、上下文切换和显式撤销接入完整 v3 契约，并经真实网关/源站/PostgreSQL 回归；身份发布器已严格接收 `binding.revoked`。通用 `GrantPersistence` 库入口构造并原子提交完整 `grant.issued`，其 HTTP 发行适配器仍待交付。响应资格生产者随整批资格事务提交完整 `response_grant.issued` envelope；分享库 API 原子提交完整 `share.issued`，绑定稳定 event/share ID、冻结时间和精确重试正文；HTTP `response.share_issue` 已接通独立获准分享操作、完整 JSON 校验、当前来源资格复验及提交后凭证注入。历史稀疏身份、通用资源资格、响应资格及分享记录保留未确认。清理族保留六类 catalog/孤儿删除意图、完成与失败事实，以独立维护阶段、artifact/cause 引用及空请求进入脱敏检索。各族合成契约与实际生产者的数据库覆盖及执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。案件与证据目标过滤已交付，更多管理目标过滤、调查包导出及控制台界面继续交付。
 
 验收：按任一请求/模型/资格 ID 完整追链；每个缺失有状态；查看与导出也记录；高危审计失败不继续无证据执行。
 
@@ -41,6 +41,8 @@
 阈值评估基础增量：纯 core 已提供二元恶意概率的固定双阈值计算、九格计数、缺失原因、正确分母、可靠性桶和 Brier。该层无 I/O；获准证据组装、数据分区隔离、耐久报告、阈值选择及真实校准按 [10.12](10-jev-and-agents.md#1012-离线阈值评估内核) 继续交付。
 
 校准数据集契约增量：`calibration::dataset` 已将每个离线样本分别绑定到模型调用记录和标签 artifact，冻结批准、数据集/标签/任务/映射/阈值、模型/提示/供应商修订及训练、校准、评估、标签四份不同 manifest。它拒绝 manifest 与样本来源、样本记录与标签角色之间的别名、重复调用/引用和模型或映射漂移，保留有序调用 ID—模型记录—标签证据三元关联、阈值和指标；实现保持无 I/O。引用集合不同不证明外部内容独立，受控 evidence 读取、内容去重/分区审查、独立报告 evidence、journal/outbox 终态和真实阈值选择仍需按 [10.14](10-jev-and-agents.md#1014-已实现校准数据集领域契约) 继续交付，不能借用 `model.*` 生命周期表示校准报告。
+
+校准报告发布契约增量：`calibration::publication` 已把已完成的 `EvaluationReport` 缩减为独立 `calr_` report ID、report artifact 与冻结 provenance/四份 manifest/ModelIdentity；它拒绝 report artifact 与 manifest 或样本来源 artifact 的别名，显式保留未知 resolved revision，且不暴露 source tuple、标签、概率、指标或供应商正文。`calibration.reported` 现仅规定同一最小元数据的 schema 与 outbox 消费契约，记录 `calibration_report/PASS/CALIBRATION_REPORTED` 的非业务终态，不授予权限或发布阈值/策略。受控 evidence 读取、report artifact 写入、producer 与原子 outbox 持久化、内容独立性审查及真实校准仍待交付；不得复用 `model.*` 生命周期，也不得以该契约宣称这些能力已完成。见 [10.15](10-jev-and-agents.md#1015-已实现校准报告发布元数据契约) 和 [11.9](11-audit-event-contract.md#119-已实现-calibrationreported-发布契约)。
 
 Score 增量：一次性离线评估已接入 2–10 档有序量表、完整档位/概率校验和加权评分；成功调用证据保留 `legend`，供应商置信度独立记录。模型生命周期发布、查询及控制台同步接受 Score，真实 PostgreSQL 与合成 Gateway HTTP 回归验证原始字节取证、catalog/outbox、非法响应、429 和中断恢复。Gateway 费用元数据兼容官方响应形状；真实供应商质量及校准仍需独立验收。
 

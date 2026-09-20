@@ -29,6 +29,8 @@
 
 同一命令还运行 `calibration::dataset` 回归：四份训练/校准/评估/标签 manifest 必须引用不同 artifact，且不能与任何样本模型调用或标签 evidence 复用；单样本模型调用与标签 evidence 不得别名；同角色重复 artifact、跨角色复用、重复 `ModelCallId`、模型身份或映射修订漂移均被拒绝。成功路径断言保留冻结 provenance、按输入顺序的调用 ID—模型记录—标签证据三元关联、显式阈值和未知的 resolved provider revision。该组只验证纯领域约束，不能验证 artifact 内容独立、证据读取授权/解密、标签审查、持久报告/审计或真实供应商质量。
 
+同一 core 命令还运行 `calibration::publication` 回归：新 `calr_` report ID 与 report artifact 会保留冻结的 approval、六项 revision、四份 manifest 和 ModelIdentity，未知 resolved revision 保持未知；report artifact 与任一 manifest 或任何已选模型记录/标签 artifact 的别名都被拒绝，成功及错误原因分别稳定为 `CALIBRATION_REPORTED` 与 `CALIBRATION_REPORT_EVIDENCE_ALIASED`。这些测试只验证无 I/O 的最小元数据投影；不验证 artifact 内容、受控读取、artifact 写入、outbox producer/事务、阈值/策略发布或真实校准。
+
 本产品主动禁止的无资格直达、换浏览器未重获资格，不计为违反需求的误报；应另计 intentional_flow_denial 与恢复体验。被认可流程中的正常请求因竞态/映射错误拒绝，才是实现误拒。
 
 固定测试身份、源站版本和授权/流程矩阵，分别比较 baseline、加密可见性、确定性资格、UI 来源、模型增量。不要把账本收益全部算作 JEV 模型收益。
@@ -122,9 +124,11 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-worker --lib outbox::hold` 覆盖两类保留锁完整事件、未知/重复/缺失字段、主体与目标、创建/释放因果、规范 UTC 毫秒和 30 天期限。真实清理 producer 回归另创建并释放案件锁，同一发布测试消费实际生成的两类 hold 及六类删除事实；维护族的其余确认、查询和故障行为沿用下述检查。
 
-`cargo test -p xshield-worker --lib outbox` 覆盖三个 `case.*` 类型、`evidence.cataloged` 的两个真实 producer、`evidence.access.*` 的请求/批准/拒绝、五种身份事务形状、`grant.issued`、`response_grant.issued`、`share.issued` 以及六种清理事件。反例包含显式 nullable TTL、目标与请求/boot 绑定、匿名/认证初态、代际递增与 bigint 上限、上下文变化、重复凭证 kind、非法指纹、重复/未知键及 journal/outbox 来源隔离；响应资格另覆盖封闭 payload、批内序号/candidate_count、ID/动作引用、单字段/GET/2xx（排除 204）约束、HMAC/正文摘要、TTL 和规范 UTC 整秒与发行时间的一致性。通用资源资格另覆盖 event/boot、来源请求/策略一致、scoped action_ref、约束摘要和整秒/TTL 约束。分享另覆盖 event/boot/share 绑定、独立发行序号、来源资格与规则形状、GET/reusable_read、秘密字段拒绝和整秒/TTL 约束。清理另覆盖十种原因/outcome、独立 boot、显式 null request_id/confidence、artifact/cause、catalog/孤儿形状隔离、UTC 毫秒与失败尝试时钟倒退。索引摘要固定为确定性空置信度，不设置业务终态。
+`cargo test -p xshield-worker --lib outbox` 覆盖三个 `case.*` 类型、`evidence.cataloged` 的两个真实 producer、`evidence.access.*` 的请求/批准/拒绝、`calibration.reported` 的受限元数据、五种身份事务形状、`grant.issued`、`response_grant.issued`、`share.issued` 以及六种清理事件。反例包含显式 nullable TTL、目标与请求/boot 绑定、匿名/认证初态、代际递增与 bigint 上限、上下文变化、重复凭证 kind、非法指纹、重复/未知键及 journal/outbox 来源隔离；响应资格另覆盖封闭 payload、批内序号/candidate_count、ID/动作引用、单字段/GET/2xx（排除 204）约束、HMAC/正文摘要、TTL 和规范 UTC 整秒与发行时间的一致性。通用资源资格另覆盖 event/boot、来源请求/策略一致、scoped action_ref、约束摘要和整秒/TTL 约束。分享另覆盖 event/boot/share 绑定、独立发行序号、来源资格与规则形状、GET/reusable_read、秘密字段拒绝和整秒/TTL 约束。清理另覆盖十种原因/outcome、独立 boot、显式 null request_id/confidence、artifact/cause、catalog/孤儿形状隔离、UTC 毫秒与失败尝试时钟倒退。索引摘要固定为确定性空置信度，不设置业务终态。
 
-`scripts/test_postgres.sh` 在专有临时数据库运行 `xshield-postgres --test outbox_delivery` 及 worker 的 `postgres_outbox_publishing` ignored 测试。存储层用显式行锁和数据库时间验证按族/tenant/site 领取、行/字节预算、`SKIP LOCKED` 并发、过期租约重领、旧 token/跨作用域拒绝、精确确认及有界重试。worker 使用真实 PostgreSQL 与受控 ClickHouse HTTP 响应，验证十六组按生产契约构造的合成 envelope 的索引字段/摘要、确认后不再领取、未适配族不被修改、索引失败后重试成功、插入前后完整性冲突、scope/aggregate 错绑和历史稀疏身份/通用资源资格/响应资格/分享行保留未确认状态。该回归不验证真实 ClickHouse DDL、去重和 active 视图。
+`cargo test -p xshield-worker --lib outbox::calibration` 还覆盖 `calibration.reported` 的完整受限 envelope：固定 producer/policy/聚合、report artifact 与唯一 evidence_ref、四份 manifest 的 distinctness、显式 null 或合法 resolved revision、UTC 毫秒、trace/span、非终态 deterministic 摘要，以及缺失、未知、重复 JSON 键、错误 identity/时钟、artifact 别名和敏感字段反例。该组验证 schema/消费端拒绝与索引摘要；它不是 `calibration-evaluator` producer、受控 evidence 读取、report artifact 持久化、阈值/策略发布或真实模型质量的验收。
+
+`scripts/test_postgres.sh` 在专有临时数据库运行 `xshield-postgres --test outbox_delivery` 及 worker 的 `postgres_outbox_publishing` ignored 测试。存储层用显式行锁和数据库时间验证按族/tenant/site 领取、行/字节预算、`SKIP LOCKED` 并发、过期租约重领、旧 token/跨作用域拒绝、精确确认及有界重试。worker 使用真实 PostgreSQL 与受控 ClickHouse HTTP 响应，验证十七组按生产契约构造的合成 envelope 的索引字段/摘要、确认后不再领取、未适配族不被修改、索引失败后重试成功、插入前后完整性冲突、scope/aggregate 错绑和历史稀疏身份/通用资源资格/响应资格/分享行保留未确认状态。该回归不验证真实 ClickHouse DDL、去重和 active 视图。
 
 同一脚本的 `grant_issue` 集成测试用数据库时钟和 `pg_blocking_pids` 确认真实锁等待，覆盖 binding、已有 grant 和 outbox 唯一键三个位置的跨期拒绝，失败不新增账本或 outbox。它还覆盖并发撤销后的重放拒绝、动作/策略失效、独立 grant ID/trace/冻结时间冲突（含存储子秒偏差），以及 outbox aggregate/type 错绑；批准约束含嵌套指数数字、小数、负零、Unicode 与大整数，并覆盖 JSONB 展开超限时原子拒绝。普通单测验证 trace、约束对象/16 KiB 上限、容量和 TTL/整秒时间范围。
 
@@ -134,7 +138,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 配置 20.6 的 `XSHIELD_TEST_CLICKHOUSE_URL` 及测试账户后，同一网关脚本还会运行 `real_gateway_response_grant_outbox_delivery`。脚本产生两个响应、三个实际响应资格事件，其中一个响应含两个资源；测试把 envelope 与 PostgreSQL 响应证据、动作及资源资格行逐项比对，检查批内连续序号，再通过生产发布器写入真实 ClickHouse，读回两个底表与两个 active 视图，验证精确确认和重复运行空批次。该链路已在真实 PostgreSQL 与 ClickHouse 联调通过；入口仅接受脚本拥有的数据库，未配置 ClickHouse URL 时明确报告跳过。
 
-配置同一 ClickHouse 环境后，`scripts/test_postgres.sh` 还会运行 `real_outbox_clickhouse_delivery`：在专有 PostgreSQL 临时库和独占 ClickHouse 数据库内重复应用生产 DDL，通过七族发布 API 投递十六组按生产契约构造的合成 envelope，读回两个底表及两个 active 视图，核对作用域、事件引用、SHA-256 digest、事件时间（通用资源资格、响应资格和分享为整秒，其他样本含微秒）、保留期限、确定性空置信度和非业务终态，并逐行检查 PostgreSQL 精确确认与重复运行空批次。该回归已在真实 PostgreSQL 与 ClickHouse 执行通过；真实数据库回归入口均纳入 CI。普通 workspace 测试将其标为 ignored，必须实际运行相应脚本才能形成验证结果。
+配置同一 ClickHouse 环境后，`scripts/test_postgres.sh` 还会运行 `real_outbox_clickhouse_delivery`：在专有 PostgreSQL 临时库和独占 ClickHouse 数据库内重复应用生产 DDL，通过八族发布 API 投递十七组按生产契约构造的合成 envelope，读回两个底表及两个 active 视图，核对作用域、事件引用、SHA-256 digest、事件时间（通用资源资格、响应资格和分享为整秒，其他样本含微秒）、保留期限、确定性空置信度和非业务终态，并逐行检查 PostgreSQL 精确确认与重复运行空批次。该回归已在真实 PostgreSQL 与 ClickHouse 执行通过；真实数据库回归入口均纳入 CI。普通 workspace 测试将其标为 ignored，必须实际运行相应脚本才能形成验证结果。
 
 同一脚本先执行实际 `evidence_retention` CLI/存储故障回归，再运行 `real_retention_outbox_clickhouse_delivery`，把原数据库中六种真实清理事件投递至独占 ClickHouse 生产 DDL。逐项检查阶段、原因、payload、时间、digest、artifact/cause、索引期限、null 请求和空置信度，并通过脱敏查询核对事件与跨租户隔离。测试验证按族领取、其他族保持原值、精确 ACK、重投去重、缺表后延迟重试及恢复；另用明确标记的合成副本注入跨作用域、正文冲突及无效载荷，确认失败保留未确认状态。入口只接受脚本拥有的 `xshield_test_*` 数据库，数据库和文件均随测试清理；未配置 ClickHouse 时明确跳过该发布链路。
 

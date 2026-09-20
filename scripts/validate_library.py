@@ -6,6 +6,9 @@ from pathlib import Path
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 ROOT = Path(__file__).resolve().parents[1]
+# Repository-owned contracts only. Local automation and package installations
+# may carry valid JSON/YAML with unrelated external links and schemas.
+DISCOVERY_EXCLUDED_PARTS = frozenset({'validation', 'target', '.codex', 'node_modules'})
 checks: list[dict[str, object]] = []
 def check(name: str, ok: bool, detail: str = '') -> None:
     checks.append({'name': name, 'passed': bool(ok), 'detail': detail})
@@ -1454,13 +1457,118 @@ def check_share_grant_contracts(schema: dict) -> None:
     sparse = dict(base['payload'], schema_version=3, event_type='share.issued', event_id=event_id)
     check('outbox:share_grant:reject_legacy_sparse', not valid(schema, sparse))
 
+def check_calibration_report_contract(schema: dict) -> None:
+    """Validate offline report metadata; Rust owns provenance equality checks."""
+    event_id = 'ev_018f2a3b-4c5d-7000-8000-000000000061'
+    report_id = 'calr_018f2a3b-4c5d-7000-8000-000000000062'
+    artifact = 'artifact_018f2a3b-4c5d-7000-8000-000000000063'
+    evaluation = 'artifact_018f2a3b-4c5d-7000-8000-000000000064'
+    training = 'artifact_018f2a3b-4c5d-7000-8000-000000000065'
+    calibration = 'artifact_018f2a3b-4c5d-7000-8000-000000000066'
+    labels = 'artifact_018f2a3b-4c5d-7000-8000-000000000067'
+    base = {
+        'schema_version': 3, 'event_type': 'calibration.reported', 'event_id': event_id,
+        'tenant_id': 'tenant_demo', 'site_id': 'site_demo', 'request_id': None,
+        'trace_id': report_id[5:].replace('-', ''),
+        'span_id': report_id[5:].replace('-', '')[:16],
+        'producer_id': 'calibration-evaluator', 'producer_boot_id': event_id,
+        'producer_seq': 1, 'request_seq': 1,
+        'occurred_at': '2026-09-20T00:00:00.123Z',
+        'observed_at': '2026-09-20T00:00:00.123Z',
+        'policy_revision': 'calibration-v1', 'example_only': False,
+        'evidence_refs': [artifact], 'cause_event_ids': [], 'sensitivity': 'RESTRICTED',
+        'integrity': {'state': 'pending', 'previous_hash': None, 'event_hash': None},
+        'payload': {
+            'stage': 'calibration_report', 'outcome': 'PASS',
+            'reason_code': 'CALIBRATION_REPORTED', 'report_id': report_id,
+            'report_artifact_id': artifact, 'approval_ref': 'approval-r1',
+            'dataset_revision': 'dataset-r1', 'label_revision': 'labels-r1',
+            'task_revision': 'task-r1', 'threshold_policy_revision': 'threshold-r1',
+            'mapping_revision': 'mapping-r1',
+            'evaluation_manifest_artifact_id': evaluation,
+            'training_manifest_artifact_id': training,
+            'calibration_manifest_artifact_id': calibration,
+            'label_manifest_artifact_id': labels,
+            'provider': 'vercel_ai_gateway', 'provider_model_id': 'typesafe-ai/jev',
+            'model_revision': 'jev-1.13.0', 'prompt_revision': 'prompt-r1',
+            'resolved_model_revision': None,
+        },
+    }
+    check('outbox:calibration:valid_unknown_resolved_revision', valid(schema, base))
+    known = copy.deepcopy(base)
+    known['payload']['resolved_model_revision'] = 'jev-1.13.0'
+    check('outbox:calibration:valid_known_resolved_revision', valid(schema, known))
+    for payload in [False, True]:
+        for field in base['payload'] if payload else base:
+            missing = copy.deepcopy(base)
+            del (missing['payload'] if payload else missing)[field]
+            check(f'outbox:calibration:missing_{"payload" if payload else "envelope"}_{field}',
+                  not valid(schema, missing))
+    for field in ['previous_hash', 'event_hash']:
+        missing = copy.deepcopy(base)
+        del missing['integrity'][field]
+        check('outbox:calibration:optional_integrity_' + field, valid(schema, missing))
+    for label, field, value in [
+        ('event_prefix', 'event_id', report_id), ('boot_prefix', 'producer_boot_id', report_id),
+        ('request', 'request_id', event_id), ('producer', 'producer_id', 'model-eval'),
+        ('sequence', 'producer_seq', 2), ('request_sequence', 'request_seq', 2),
+        ('policy', 'policy_revision', 'policy-r1'), ('example', 'example_only', True),
+        ('sensitivity', 'sensitivity', 'INTERNAL'), ('causes', 'cause_event_ids', [event_id]),
+        ('evidence_empty', 'evidence_refs', []),
+        ('evidence_many', 'evidence_refs', [artifact, evaluation]),
+        ('integrity', 'integrity', {'state': 'sealed', 'previous_hash': None, 'event_hash': None}),
+        ('stage', 'stage', 'calibration'), ('outcome', 'outcome', 'UNKNOWN'),
+        ('reason', 'reason_code', 'CALIBRATION_DATASET_EVALUATED'),
+        ('report_prefix', 'report_id', event_id),
+        ('report_artifact_prefix', 'report_artifact_id', report_id),
+        ('resolved_empty', 'resolved_model_revision', ''),
+        ('resolved_invalid', 'resolved_model_revision', 'bad revision'),
+        ('resolved_type', 'resolved_model_revision', True),
+    ]:
+        invalid = copy.deepcopy(base)
+        (invalid['payload'] if field in invalid['payload'] else invalid)[field] = value
+        check('outbox:calibration:reject_' + label, not valid(schema, invalid))
+    for field in ['approval_ref', 'dataset_revision', 'label_revision', 'task_revision',
+                  'threshold_policy_revision', 'mapping_revision', 'provider',
+                  'model_revision', 'prompt_revision']:
+        for label, value in [('empty', ''), ('oversized', 'a' * 129), ('unicode', 'é'),
+                             ('space', 'bad value')]:
+            invalid = copy.deepcopy(base)
+            invalid['payload'][field] = value
+            check(f'outbox:calibration:{field}_{label}', not valid(schema, invalid))
+    for label, value in [('extra_segment', 'typesafe-ai/jev/extra'),
+                         ('space', 'typesafe ai/jev'), ('oversized', 'a' * 129)]:
+        invalid = copy.deepcopy(base)
+        invalid['payload']['provider_model_id'] = value
+        check('outbox:calibration:provider_model_' + label, not valid(schema, invalid))
+    for field in ['occurred_at', 'observed_at']:
+        for label, value in [('fractional', '2026-09-20T00:00:00.1Z'),
+                             ('offset', '2026-09-20T08:00:00.123+08:00'),
+                             ('seconds', '2026-09-20T00:00:00Z')]:
+            invalid = copy.deepcopy(base)
+            invalid[field] = value
+            check(f'outbox:calibration:{field}_{label}', not valid(schema, invalid))
+    for label, field, value in [
+        ('trace', 'trace_id', '0' * 32), ('span', 'span_id', '0' * 16),
+        ('frozen_observation', 'observed_at', '2026-09-20T01:00:00.123Z'),
+        ('report_artifact_binding', 'report_artifact_id', evaluation),
+        ('report_manifest_alias', 'evaluation_manifest_artifact_id', artifact),
+        ('manifest_overlap', 'training_manifest_artifact_id', evaluation),
+    ]:
+        shaped = copy.deepcopy(base)
+        (shaped['payload'] if field in shaped['payload'] else shaped)[field] = value
+        check('outbox:calibration:rust_cross_field_' + label, valid(schema, shaped))
+    sparse = dict(base['payload'], schema_version=3, event_type='calibration.reported',
+                  event_id=event_id)
+    check('outbox:calibration:reject_legacy_sparse', not valid(schema, sparse))
+
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
-        if 'validation' in p.parts or 'target' in p.parts: continue
+        if DISCOVERY_EXCLUDED_PARTS.intersection(p.parts): continue
         try: json.loads(p.read_text(encoding='utf-8'));check(f'json:{p.relative_to(ROOT)}',True)
         except (ValueError,OSError) as exc: check(f'json:{p.name}',False,str(exc))
     for p in sorted(ROOT.rglob('*.yaml')):
-        if 'validation' in p.parts or 'target' in p.parts: continue
+        if DISCOVERY_EXCLUDED_PARTS.intersection(p.parts): continue
         try: yaml.safe_load(p.read_text(encoding='utf-8'));check(f'yaml:{p.relative_to(ROOT)}',True)
         except yaml.YAMLError as exc: check(f'yaml:{p.name}',False,str(exc))
     schemas = {p.stem.replace('.schema',''):json.loads(p.read_text()) for p in (ROOT/'schemas').glob('*.json')}
@@ -1537,6 +1645,7 @@ def main() -> int:
     check_response_grant_contracts(schemas['audit-event'])
     check_grant_contracts(schemas['audit-event'])
     check_share_grant_contracts(schemas['audit-event'])
+    check_calibration_report_contract(schemas['audit-event'])
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))
     check('fixture:all_synthetic',all(e['example_only'] for e in events) and all(c['example_only'] for c in calls))
@@ -1558,6 +1667,7 @@ def main() -> int:
         check('fences:'+p.name,len(re.findall(r'^```',text,re.M))%2==0)
         check('no_tool_tokens:'+p.name,'' not in text)
     for p in sorted(ROOT.rglob('*.md')):
+        if DISCOVERY_EXCLUDED_PARTS.intersection(p.parts): continue
         for target in re.findall(r'\]\(([^)]+)\)',p.read_text()):
             if '://' in target or target.startswith(('#','mailto:')):continue
             target=target.split('#')[0]

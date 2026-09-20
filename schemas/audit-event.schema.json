@@ -910,6 +910,64 @@
           "maximum": 9223372036854775807
         }
       }
+    },
+    "calibration_report": {
+      "$comment": "Offline calibration report metadata only. The report artifact contains protected detailed metrics and source evidence; this envelope never contains labels, probabilities, samples, prompts, credentials, or evidence contents.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "outcome",
+        "reason_code",
+        "report_id",
+        "report_artifact_id",
+        "approval_ref",
+        "dataset_revision",
+        "label_revision",
+        "task_revision",
+        "threshold_policy_revision",
+        "mapping_revision",
+        "evaluation_manifest_artifact_id",
+        "training_manifest_artifact_id",
+        "calibration_manifest_artifact_id",
+        "label_manifest_artifact_id",
+        "provider",
+        "provider_model_id",
+        "model_revision",
+        "prompt_revision",
+        "resolved_model_revision"
+      ],
+      "properties": {
+        "stage": {"const": "calibration_report"},
+        "outcome": {"const": "PASS"},
+        "reason_code": {"const": "CALIBRATION_REPORTED"},
+        "report_id": {
+          "type": "string",
+          "maxLength": 41,
+          "pattern": "^calr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "report_artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"},
+        "approval_ref": {"$ref": "#/$defs/scoped_name"},
+        "dataset_revision": {"$ref": "#/$defs/scoped_name"},
+        "label_revision": {"$ref": "#/$defs/scoped_name"},
+        "task_revision": {"$ref": "#/$defs/scoped_name"},
+        "threshold_policy_revision": {"$ref": "#/$defs/scoped_name"},
+        "mapping_revision": {"$ref": "#/$defs/scoped_name"},
+        "evaluation_manifest_artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"},
+        "training_manifest_artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"},
+        "calibration_manifest_artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"},
+        "label_manifest_artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"},
+        "provider": {"$ref": "#/$defs/scoped_name"},
+        "provider_model_id": {"$ref": "#/$defs/model/properties/provider_model_id"},
+        "model_revision": {"$ref": "#/$defs/scoped_name"},
+        "prompt_revision": {"$ref": "#/$defs/scoped_name"},
+        "resolved_model_revision": {
+          "anyOf": [
+            {"$ref": "#/$defs/scoped_name"},
+            {"type": "null"}
+          ]
+        }
+      }
     }
   },
   "allOf": [
@@ -1631,6 +1689,56 @@
           "cause_event_ids": {"maxItems": 0},
           "sensitivity": {"const": "SENSITIVE"},
           "payload": {"$ref": "#/$defs/share_grant"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"event_type": {"const": "calibration.reported"}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Committed offline calibration-report outbox metadata. Rust additionally binds report aggregate and report artifact to the leased row and evidence_refs, derives trace/span from report_id, rejects duplicate JSON keys, and preserves the producer's frozen UTC millisecond timestamp. The event records an offline report only; it neither grants authorization nor publishes a threshold or policy.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"type": "null"},
+          "trace_id": {"maxLength": 32},
+          "span_id": {"maxLength": 16},
+          "producer_id": {"const": "calibration-evaluator"},
+          "producer_boot_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "producer_seq": {"const": 1},
+          "request_seq": {"const": 1},
+          "occurred_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "observed_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "policy_revision": {"const": "calibration-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/model_artifact_ref", "type": "string"}
+          },
+          "cause_event_ids": {"maxItems": 0},
+          "payload": {"$ref": "#/$defs/calibration_report"},
+          "sensitivity": {"const": "RESTRICTED"},
           "integrity": {
             "properties": {
               "state": {"const": "pending"},

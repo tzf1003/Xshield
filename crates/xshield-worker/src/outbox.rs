@@ -2,7 +2,8 @@
 //!
 //! Outbox envelopes are a different producer contract from sealed journal
 //! records. This module only accepts complete case, catalog, access, identity,
-//! response-grant, share-grant, generic grant and retention envelopes from their producers.
+//! calibration-report, response-grant, share-grant, generic grant and retention envelopes from
+//! their producers.
 //! Other families remain unsupported until their producers expose validated fields.
 
 use super::{
@@ -19,6 +20,7 @@ use xshield_postgres::{
     PostgresIdentityStore,
 };
 
+mod calibration;
 #[cfg(test)]
 mod clickhouse_tests;
 #[cfg(test)]
@@ -62,6 +64,7 @@ enum OutboxFamily {
     Case,
     EvidenceCatalog,
     EvidenceAccess,
+    Calibration,
     Identity,
     Grant,
     ResponseGrant,
@@ -75,6 +78,7 @@ impl OutboxFamily {
             Self::Case => CASE_EVENT_TYPES,
             Self::EvidenceCatalog => EVIDENCE_CATALOG_EVENT_TYPES,
             Self::EvidenceAccess => EVIDENCE_ACCESS_EVENT_TYPES,
+            Self::Calibration => calibration::EVENT_TYPES,
             Self::Identity => identity::EVENT_TYPES,
             Self::Grant => grant::EVENT_TYPES,
             Self::ResponseGrant => response_grant::EVENT_TYPES,
@@ -88,6 +92,7 @@ impl OutboxFamily {
             Self::Case => "case_id",
             Self::EvidenceCatalog | Self::EvidenceRetention => "artifact_id",
             Self::EvidenceAccess => "access_request_id",
+            Self::Calibration => "report_id",
             Self::Identity => "binding_id",
             Self::Grant | Self::ResponseGrant => "grant_id",
             Self::ShareGrant => "share_id",
@@ -96,7 +101,8 @@ impl OutboxFamily {
 }
 
 pub(super) fn supports(event_type: &str) -> bool {
-    identity::EVENT_TYPES.contains(&event_type)
+    calibration::EVENT_TYPES.contains(&event_type)
+        || identity::EVENT_TYPES.contains(&event_type)
         || grant::EVENT_TYPES.contains(&event_type)
         || response_grant::EVENT_TYPES.contains(&event_type)
         || share_grant::EVENT_TYPES.contains(&event_type)
@@ -231,6 +237,24 @@ pub async fn publish_evidence_access_outbox_batch(
     config: &OutboxPublisherConfig,
 ) -> Result<OutboxPublishReport, PublishError> {
     publish_outbox_batch(store, client, scope, config, OutboxFamily::EvidenceAccess).await
+}
+
+/// Publishes one bounded batch of immutable offline calibration-report metadata.
+///
+/// The outbox event links a protected report artifact to frozen dataset, model,
+/// and partition provenance. It records a completed offline report only; it
+/// never reads evidence, changes thresholds, publishes policy, or grants access.
+///
+/// # Errors
+/// Returns the same lease, event, and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_calibration_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::Calibration).await
 }
 
 /// Publishes one bounded batch of gateway identity lifecycle transactions.
@@ -477,6 +501,9 @@ struct CasePayload {
 }
 
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if calibration::EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return calibration::parse(event);
+    }
     if retention::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return retention::parse(event);
     }

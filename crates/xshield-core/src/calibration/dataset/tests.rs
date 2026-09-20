@@ -107,6 +107,7 @@ fn identity_and_provenance_reject_invalid_model_or_overlapping_partitions() {
         "a/b/c",
         "model space",
         &"x".repeat(129),
+        &format!("{}/{}", "p".repeat(64), "m".repeat(64)),
     ] {
         assert_eq!(
             ModelIdentity::new(
@@ -125,6 +126,16 @@ fn identity_and_provenance_reject_invalid_model_or_overlapping_partitions() {
             ProviderId::parse("vercel_ai_gateway").unwrap(),
             "jev",
             ModelRevision::parse("jev-1.13.0").unwrap(),
+            PromptRevision::parse("prompt-r1").unwrap(),
+            None,
+        )
+        .is_ok()
+    );
+    assert!(
+        ModelIdentity::new(
+            ProviderId::parse("provider").unwrap(),
+            format!("{}/{}", "p".repeat(63), "m".repeat(64)),
+            ModelRevision::parse("model-r1").unwrap(),
             PromptRevision::parse("prompt-r1").unwrap(),
             None,
         )

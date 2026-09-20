@@ -18,6 +18,7 @@
 | artifact_id | 一份内容证据或 manifest | artifact_ + UUIDv7，不是公开下载凭证 |
 | transform_id | 解密/标准化/重建关系 | 关联输入、输出及配置版本 |
 | model_call_id | 一次实际模型调用尝试 | mdl_ + UUIDv7；另有 logical_call_id |
+| calibration_report_id | 一份独立的离线校准报告元数据投影 | calr_ + UUIDv7；不是 evidence 内容读取或阈值/策略发布凭证 |
 | agent_run_id/tool_call_id | Agent 运行及工具调用 | agt_/tool_，父子运行明确关联 |
 | grant_id/page_evidence_id | 资格与界面来源 | 用于完整追溯发行链 |
 | case_id/export_id/replay_id | 调查案、导出与回放 | 各自审批、权限和审计 |
@@ -105,7 +106,7 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 `xshield-outbox-worker` 是一次有界发布 pass，按固定 tenant/site 作用域从 `xshield.audit_outbox` 领取最多 256 行及 64 MiB JSON 字节，并以 PostgreSQL `clock_timestamp()` 设置最长一小时租约。候选行使用 `FOR UPDATE SKIP LOCKED`；ClickHouse 网络操作不持有 PostgreSQL 事务锁。确认必须携带同一 event_id、作用域和未过期 lease token，旧 token 或跨作用域确认统一拒绝。发布成功后才写 `published_at`；失败释放租约、保存 `OUTBOX_INVALID_EVENT`、`OUTBOX_INDEX_UNAVAILABLE` 或 `OUTBOX_INTEGRITY_CONFLICT` 并按有界延迟重试。
 
-部署先应用 `0019_m3_outbox_delivery.sql`，然后运行 `xshield-outbox-worker TENANT_ID SITE_ID`。`XSHIELD_OUTBOX_FAMILY` 可设为 `case`（默认）、`evidence_catalog`、`evidence_access`、`evidence_retention`、`identity`、`grant`、`response_grant` 或 `share_grant`，每次只领取该族。数据库配置为 `XSHIELD_DATABASE_URL`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`；索引配置为 `XSHIELD_CLICKHOUSE_URL/DATABASE/USER/PASSWORD` 和可选 `XSHIELD_CLICKHOUSE_TABLE`（默认 `audit_events`）。秘密只通过部署环境注入。
+部署先应用 `0019_m3_outbox_delivery.sql`，然后运行 `xshield-outbox-worker TENANT_ID SITE_ID`。`XSHIELD_OUTBOX_FAMILY` 可设为 `case`（默认）、`evidence_catalog`、`evidence_access`、`evidence_retention`、`calibration`、`identity`、`grant`、`response_grant` 或 `share_grant`，每次只领取该族。数据库配置为 `XSHIELD_DATABASE_URL`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`；索引配置为 `XSHIELD_CLICKHOUSE_URL/DATABASE/USER/PASSWORD` 和可选 `XSHIELD_CLICKHOUSE_TABLE`（默认 `audit_events`）。秘密只通过部署环境注入。
 
 必须配置 `XSHIELD_AUDIT_METADATA_RETENTION_DAYS`（1–3650）、`XSHIELD_OUTBOX_MAX_EVENTS`（1–256）、`XSHIELD_OUTBOX_MAX_BYTES`（1–67108864）、`XSHIELD_OUTBOX_LEASE_SECONDS` 和 `XSHIELD_OUTBOX_RETRY_SECONDS`（均为 1–3600）。一条 envelope 另受 64 KiB 解析上限约束。该命令执行一次后退出；调度器按固定作用域和族再次运行，遇错误保留退出失败供告警。当前 pass 在首个错误处停止，已领取的后续行等待租约到期再处理。
 
@@ -119,7 +120,7 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 `evidence_retention` 精确领取 `evidence.purge_requested`、`evidence.deleted`、`evidence.purge_failed` 及对应三个 `evidence.orphan.*` 类型，只接受 `evidence-retention` / `evidence-retention-v1` 的完整 v3 envelope。每条事件有独立 UUIDv7 boot，两个序号均为 1，`request_id` 显式为 null；occurred_at/observed_at 为相同的规范 UTC 毫秒时间，trace 前 16 位等于 span。catalog payload 固定 `evidence_retention` 阶段，保留 source_request_id、原始 expires_at 和 `retained_metadata=true`；孤儿 payload 固定 `evidence_orphan_retention` 阶段及 authenticated_manifest 布尔值。两种封闭载荷分别校验，artifact 与唯一 evidence_ref 及 aggregate_ref 一致。意图无 cause，完成或失败恰有一个不同于自身的意图事件引用；十种稳定原因与事件/outcome 精确绑定。引用检查验证事件形状，不对跨存储历史完整性作证明。摘要为 `confidence=null/not_applicable`、`is_terminal=0`，分类为 `RESTRICTED`；维护事件按事件 ID、类型、原因或阶段查询，脱敏结果保留 artifact/cause 引用且不返回 payload。事件只描述删除事务与尝试，不恢复内容、延长原文权限或证明远端副本已删除。
 
-八族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。身份族现同时严格接收 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed` 与 `binding.revoked`；撤销事件只记录非秘密主体/上下文引用、epoch/generation 与 `explicit_logout` 原因，凭证仍保持在敏感载荷之外。
+九族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。身份族现同时严格接收 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed` 与 `binding.revoked`；撤销事件只记录非秘密主体/上下文引用、epoch/generation 与 `explicit_logout` 原因，凭证仍保持在敏感载荷之外。
 
 `evidence_retention` 同时领取 `evidence.hold.created` 与 `evidence.hold.released`。两种事件采用 `evidence-hold` / `evidence-hold-v1`，event_id 等于 producer_boot_id，UUID 去连字符得到 trace，span 为其前 16 位。封闭载荷固定 `evidence_hold/PASS`、对应 `EVIDENCE_HOLD_CREATED` 或 `EVIDENCE_HOLD_RELEASED`、hold/case/artifact、主体引用、请求摘要与原 hold_until。创建事件等于 hold ID、无 cause，期限在发生时间后 30 天内；释放事件引用一个不同于自身的 hold ID，可释放已到期锁。时间为规范 UTC 毫秒（秒为 00–59），request_id 显式 null，确定性 confidence 显式 null，分类 RESTRICTED；自由文本理由存受限数据库并经管理员 API 返回，不进入事件。摘要保持非业务终态，索引不作为保留或访问授权真值。
 
@@ -136,3 +137,11 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 完整缓冲响应已经验证后发生客户端写失败时，网关保留 `origin.response/response_received` 及实际源站状态，终态为 `request.aborted/REQUEST_INCOMPLETE`。尚未取得完整响应的代理故障保持 `origin.unknown`；发行 outbox 只证明事务提交，不证明客户端接收完成。
 
 身份、通用资源资格、响应资格与分享发行生产者升级把业务字段放入完整 envelope 的 `payload`，运行中的生产者与发布器应配套升级。`GrantPersistence::new` 的 envelope 参数变更为冻结 trace_id，完整事件由持久化入口按 JSONB 约束表示生成；调用方须保留同一 event/grant ID、trace、时间与批准约束用于重试。历史稀疏行保留原文、保持未确认并记录 `OUTBOX_INVALID_EVENT`、延迟重试；不会以当前状态补造历史时间或来源。分享库 API 同时要求稳定 event/share ID 和完整精确重试正文，旧随机 share ID 或稀疏正文不匹配时拒绝重试，不重新发行凭证。上线前应盘点历史积压并保留原始证据，监控错误码及积压；当前首错停批会使已领取的后续行等待租约到期。发布器不重放身份转换、不重新发行资格，也不回滚已提交的状态。
+
+## 11.9 已实现 calibration.reported 发布契约
+
+`calibration` 族只接受 `calibration.reported` 的完整、受限元数据 envelope：producer 固定为 `calibration-evaluator`、policy revision 固定为 `calibration-v1`，聚合字段为 `calr_` UUIDv7 report ID；request_id 为 null，producer boot、两个序号、UTC 毫秒发生/观察时间、trace/span 与 report ID 的绑定均严格校验。封闭 payload 固定为 `calibration_report/PASS/CALIBRATION_REPORTED`，只含 report artifact、approval、dataset/label/task/threshold-policy/mapping revision、四份 manifest 和 ModelIdentity。report artifact 既是唯一 evidence_ref，也不得与四份 manifest 重复；resolved provider revision 只能是有效修订或显式 null，不能由当前路由推断。
+
+schema 与消费端拒绝未知/重复字段、错误 producer/aggregate/evidence 绑定、非规范 ID 或时间、别名 artifact、额外 cause，以及任何标签、概率、样本、ground truth、指标、提示词、凭证或 evidence 内容。索引摘要固定为 deterministic、`confidence=null/not_applicable`、非业务终态且不带 HTTP 方法、操作或源站状态；它记录一个离线报告元数据事实，不授予授权、读取 evidence、改变/发布阈值或策略，也不代表报告或模型质量。
+
+当前增量只提供领域投影、schema 和该族的有界 outbox 消费契约；没有 `calibration-evaluator` producer、受控 evidence 读取、report artifact 写入或报告事务持久化实现。部署者不得人工伪造事件来替代这些前置步骤；待 producer 交付后，必须在同一事务中证明 report artifact、冻结投影与 outbox 行的身份一致，再启用实际事件生成。

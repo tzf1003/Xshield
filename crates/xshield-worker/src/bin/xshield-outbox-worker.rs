@@ -5,15 +5,17 @@ use std::{env, error::Error, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
 use xshield_postgres::{OutboxLeaseConfig, OutboxScope, PostgresIdentityStore};
 use xshield_worker::{
-    OutboxPublisherConfig, publish_case_outbox_batch, publish_evidence_access_outbox_batch,
-    publish_evidence_catalog_outbox_batch, publish_evidence_retention_outbox_batch,
-    publish_grant_outbox_batch, publish_identity_outbox_batch, publish_response_grant_outbox_batch,
+    OutboxPublisherConfig, publish_calibration_outbox_batch, publish_case_outbox_batch,
+    publish_evidence_access_outbox_batch, publish_evidence_catalog_outbox_batch,
+    publish_evidence_retention_outbox_batch, publish_grant_outbox_batch,
+    publish_identity_outbox_batch, publish_response_grant_outbox_batch,
     publish_share_grant_outbox_batch,
 };
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|evidence_retention|identity|grant|response_grant|share_grant)";
+const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|evidence_retention|calibration|identity|grant|response_grant|share_grant)";
 
+#[allow(clippy::too_many_lines)] // Bounded fixed environment assembly keeps every operator input visible.
 async fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
     let tenant_id = TenantId::parse(
@@ -44,6 +46,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             | "evidence_catalog"
             | "evidence_access"
             | "evidence_retention"
+            | "calibration"
             | "identity"
             | "grant"
             | "response_grant"
@@ -51,7 +54,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     ) {
         return Err(USAGE.into());
     }
-
     let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
     let database_max_connections: u32 =
         env::var("XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS")?.parse()?;
@@ -67,7 +69,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let max_bytes: u64 = env::var("XSHIELD_OUTBOX_MAX_BYTES")?.parse()?;
     let lease_seconds: u64 = env::var("XSHIELD_OUTBOX_LEASE_SECONDS")?.parse()?;
     let retry_seconds: u64 = env::var("XSHIELD_OUTBOX_RETRY_SECONDS")?.parse()?;
-
     let lease = OutboxLeaseConfig::new(max_events, max_bytes, Duration::from_secs(lease_seconds))?;
     let config = OutboxPublisherConfig::new(
         table,
@@ -97,6 +98,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "evidence_access" => {
             publish_evidence_access_outbox_batch(&store, &client, &scope, &config).await?
         }
+        "calibration" => publish_calibration_outbox_batch(&store, &client, &scope, &config).await?,
         "identity" => publish_identity_outbox_batch(&store, &client, &scope, &config).await?,
         "evidence_retention" => {
             publish_evidence_retention_outbox_batch(&store, &client, &scope, &config).await?

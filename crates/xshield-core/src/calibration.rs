@@ -18,6 +18,7 @@ use std::{collections::BTreeSet, fmt};
 
 pub mod dataset;
 pub mod mapping;
+pub mod publication;
 
 /// Maximum samples accepted per evaluation; checked before any allocation.
 pub const MAX_SAMPLES: usize = 10_000;

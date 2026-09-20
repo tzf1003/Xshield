@@ -246,6 +246,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
                 access_decision_event("evidence.access.denied"),
             ],
         ),
+        (OutboxFamily::Calibration, vec![calibration::tests::event()]),
         (
             OutboxFamily::Identity,
             identity::EVENT_TYPES
@@ -269,6 +270,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
         (OutboxFamily::Case, 3),
         (OutboxFamily::EvidenceCatalog, 2),
         (OutboxFamily::EvidenceAccess, 3),
+        (OutboxFamily::Calibration, 1),
         (OutboxFamily::Identity, 5),
         (OutboxFamily::Grant, 1),
         (OutboxFamily::ResponseGrant, 1),
@@ -522,6 +524,9 @@ async fn publish_family(
         }
         OutboxFamily::EvidenceAccess => {
             publish_evidence_access_outbox_batch(store, client, scope, config).await
+        }
+        OutboxFamily::Calibration => {
+            publish_calibration_outbox_batch(store, client, scope, config).await
         }
         OutboxFamily::Identity => publish_identity_outbox_batch(store, client, scope, config).await,
         OutboxFamily::Grant => publish_grant_outbox_batch(store, client, scope, config).await,
