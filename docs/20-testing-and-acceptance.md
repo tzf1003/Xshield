@@ -108,6 +108,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-control case_holds` 覆盖严格路径/JSON/UTC 毫秒（含闰秒反例）、重复认证和幂等头、4 KiB/UTF-8 长度、权限/作用域/凭证期限/速率、在途上限、存储故障及审计扣留。`scripts/test_postgres.sh` 另执行 `case_holds_are_scoped_idempotent_paginated_and_audited`：真实 vault/catalog/案件关联后由独立管理员创建、释放和分页，检查幂等冲突、过期/超长新期限、目标隔离、游标全部绑定、同对象多条历史去重引用、关闭后释放与查询、原期限和审批保持、提交后审计故障恢复及断连后的提交/审计。核心主体测试检查启动身份规范且保持原值。
 
+保留管理控制台另以 Node 单测验证规范请求、目标和原参数关联、时间/状态/释放字段完整性、128 项上限及升序游标边界；Playwright 使用显式合成响应覆盖创建→查询→释放、冻结原请求恢复、权限与晚到响应、会话清态及响应式布局。`console_hold_client_mutates_postgres_http_contract`（纳入 `scripts/test_postgres.sh`）运行真实 PostgreSQL、Axum、Node 客户端和独立管理 journal，核对非案件所有者管理员的创建/释放、精确重试、参数冲突、跨租户/站点隔离、独立角色拒绝、关闭后释放及分页历史；同时验证 outbox 数量和目标、catalog 原期限、原文申请表与管理理由脱敏。它使用专有临时库与合成对象，未访问生产证据或企业身份服务。
+
 ## 20.12 outbox 发布回归
 
 `scripts/test_postgres.sh` 的 `case_evidence_holds` 回归使用真实加密 vault、catalog 发布和案件成员事务，覆盖创建/释放幂等、作用域和目标状态、历史/活动容量、outbox 故障回滚及损坏事实拒绝。`pg_blocking_pids` 确认创建和清理两种锁顺序，检查活动锁阻止新删除意图、释放/到期恢复、多个案件共享对象和既有意图拒绝新锁；原始期限与过期拒读单独断言。测试只操作脚本拥有的数据库与独占临时文件。

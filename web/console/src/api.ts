@@ -67,6 +67,11 @@ import type {
   AccessRequested, AccessInspection, AccessDecision, EvidenceDownload,
   AccessList, AccessListView,
 } from "./evidence-access.ts";
+import {
+  decodeHoldCreated, decodeHoldReleased, decodeHoldCollection,
+  validHoldReason, validateHoldUntil, validateHoldId, validateHoldCursor,
+} from "./evidence-holds.ts";
+import type { HoldMutation, HoldCollection } from "./evidence-holds.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -1131,6 +1136,42 @@ export class ControlClient {
       JSON.stringify({ reason }),
       key,
     );
+  }
+
+  /** Create a scoped retention hold. Preserve exact inputs and the key for
+   * uncertain outcomes; the server checks role, target state and new deadlines. */
+  async createEvidenceHold(caseId: string, artifactId: string, reason: string,
+    holdUntil: string, key: string, signal?: AbortSignal): Promise<HoldMutation> {
+    validateCaseId(caseId);
+    if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
+      throw new ApiError("CONTROL_ARTIFACT_ID_INVALID");
+    if (!validHoldReason(reason)) throw new ApiError("CONTROL_EVIDENCE_HOLD_REQUEST_INVALID");
+    validateHoldUntil(holdUntil);
+    this.#idempotencyKey(key);
+    return this.#request(`cases/${caseId}/holds`,
+      (value, status) => decodeHoldCreated(value, caseId, artifactId, reason, holdUntil, status),
+      signal, JSON.stringify({ artifact_id: artifactId, reason, hold_until: holdUntil }), key);
+  }
+
+  /** Release a hold once; an exact retry confirms any uncertain transaction. */
+  async releaseEvidenceHold(holdId: string, reason: string, key: string,
+    signal?: AbortSignal): Promise<HoldMutation> {
+    validateHoldId(holdId);
+    if (!validHoldReason(reason)) throw new ApiError("CONTROL_EVIDENCE_HOLD_REQUEST_INVALID");
+    this.#idempotencyKey(key);
+    return this.#request(`evidence-holds/${holdId}/release`,
+      (value, status) => decodeHoldReleased(value, holdId, reason, status),
+      signal, JSON.stringify({ reason }), key);
+  }
+
+  /** Read a bounded, independently authorized and audited hold-history page. */
+  async evidenceHolds(caseId: string, cursor?: string, signal?: AbortSignal): Promise<HoldCollection> {
+    validateCaseId(caseId);
+    validateHoldCursor(cursor);
+    return this.#request(`cases/${caseId}/holds${this.#cursor(cursor)}`, (value, status) => {
+      ensure(status === 200);
+      return decodeHoldCollection(value, caseId, cursor);
+    }, signal);
   }
 
   /** Submit one access application. Preserve its key and exact parameters for

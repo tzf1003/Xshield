@@ -8,6 +8,7 @@ import type { SearchPreset } from "./SearchPanel";
 import { LedgerPanel } from "./LedgerPanel";
 import { CasePanel } from "./CasePanel";
 import { EvidenceAccessPanel } from "./EvidenceAccessPanel";
+import { EvidenceHoldPanel } from "./EvidenceHoldPanel";
 import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
@@ -27,7 +28,7 @@ import {
 } from "./panels";
 
 type Problem = { message: string; code: string; requestId?: string | null };
-type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access";
+type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access" | "hold";
 type QueryKind =
   | "request"
   | "model"
@@ -35,7 +36,8 @@ type QueryKind =
   | "binding"
   | "search"
   | "case"
-  | "access";
+  | "access"
+  | "hold";
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
@@ -77,6 +79,7 @@ export function App() {
     artifact: 0,
     case: 0,
     access: 0,
+    hold: 0,
   });
   const scope = useRef<{ tenant_id: string; site_id: string } | null>(null);
   const [connected, setConnected] = useState(false);
@@ -257,7 +260,7 @@ export function App() {
     if (
       queryKind === "search" ||
       queryKind === "case" ||
-      queryKind === "access"
+      queryKind === "access" || queryKind === "hold"
     )
       return;
     clearResults();
@@ -373,6 +376,7 @@ export function App() {
     search: "结构化事件检索",
     case: "案件工作台",
     access: "证据访问",
+    hold: "证据保留",
   }[queryKind];
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
@@ -444,6 +448,8 @@ export function App() {
                   ? "建立本人调查案件，核对证据引用与案件状态。"
                   : queryKind === "access"
                     ? "复核访问申请，通过独立审批后按需下载证据原文。"
+                    : queryKind === "hold"
+                      ? "管理案件证据保留期限，核对创建与释放历史。"
                     : "核对当前账本的状态、代际与期限。"}
         </p>
         {sessionNotice && (
@@ -499,6 +505,8 @@ export function App() {
                         ? "case"
                         : event.target.value === "access"
                           ? "access"
+                          : event.target.value === "hold"
+                            ? "hold"
                           : event.target.value === "grant"
                             ? "grant"
                             : event.target.value === "binding"
@@ -516,10 +524,11 @@ export function App() {
                 <option value="search">结构化事件检索</option>
                 <option value="case">案件工作台</option>
                 <option value="access">证据访问</option>
+                <option value="hold">证据保留</option>
               </select>
               {queryKind !== "search" &&
                 queryKind !== "case" &&
-                queryKind !== "access" && (
+                queryKind !== "access" && queryKind !== "hold" && (
                   <>
                     <label htmlFor="request-id">{queryLabels[queryKind]}</label>
                     <input
@@ -571,7 +580,11 @@ export function App() {
                 }
               />
             </div>
-            {queryKind === "case" ||
+            <div hidden={queryKind !== "hold"}>
+              <EvidenceHoldPanel active={queryKind === "hold"} busy={Boolean(busy.hold)}
+                onInvalidate={clearResults} onRun={(fetcher, apply, fail) => run("hold", fetcher, apply, fail)} />
+            </div>
+            {queryKind === "case" || queryKind === "hold" ||
             queryKind === "access" ? null : queryKind === "search" ? (
               <SearchPanel
                 response={search}

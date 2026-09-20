@@ -368,7 +368,8 @@ main {
   min-width: 0;
 }
 
-.access-workbench textarea {
+.access-workbench textarea,
+.hold-workbench textarea {
   width: 100%;
   min-height: 90px;
   resize: vertical;

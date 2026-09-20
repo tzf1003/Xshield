@@ -8,6 +8,8 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 “我的申请”按本人主体发现历史记录，允许 Investigator、SensitiveEvidenceReader 或 SensitiveEvidenceApprover；“审批待办”要求 SensitiveEvidenceApprover，列出同作用域其他主体的 pending 申请。列表逐页替换，打开记录时重新读取详情；每页展示独立数据库观察时间和管理请求 ID。
 
+证据保留工作台使用独立 AuditAdministrator 角色，为案件成员创建保留锁、逐页核对历史及显式释放。保留管理控制物理删除资格，原文访问仍遵守原始期限及独立审批。
+
 ## 本地运行
 
 使用 Node.js 22.12+（22 系列）或 24+，在此目录执行：
@@ -19,7 +21,7 @@ npm run dev
 
 页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发固定调查 GET、案件列表/集合 GET、证据申请列表/详情/内容 GET、精确 `POST /control/v1/search` 及案件和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。证据申请列表仅接受规范 `view=mine` 或 `view=review` 及其后可选的单个 `cursor`。剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次成功响应后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、精确 `POST /control/v1/search` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。服务端要求证据申请列表使用规范 `view=mine` 或 `view=review` 及其后可选的单个 `cursor`，保留历史只接受可选游标。代理剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次成功响应后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
@@ -57,6 +59,14 @@ npm run dev
 
 控制服务须先升级以提供 29.13 的六个二进制身份/长度响应头，代理必须透传并禁止缓存与正文日志。详情和当前 approved 状态仅供复核，不代替内容端点的重新授权。企业身份、MFA、再认证及服务端浏览器会话仍为生产启用前置要求。
 
+## 证据保留工作台
+
+选择“证据保留”后，AuditAdministrator 按案件 ID 读取历史；新建须填写案件成员 artifact、理由和规范 UTC 毫秒期限，从列表选择记录或填写 hold ID 可执行释放。创建和释放由服务端重验作用域、目标、容量及期限；管理员可处理同作用域其他主体的案件。每页显示数据库微秒观察时间、原始保留期限及释放主体/理由/时间，按 hold ID 升序分页。新建期限最多为数据库当前时间之后 720 小时；过期原参数仍可用于精确重试。保留延缓物理删除，内容读取继续受原期限与独立审批限制。
+
+变更提交后冻结路径、原键和全部参数。超时、断网、响应契约失败及晚到结果保持未知，须按原请求显式重试；后续拒绝不能清除先前未知状态。首次拒绝或确认成功后可准备新操作，创建/释放后显式刷新历史。切换案件或调查类型使旧查询失效，冻结写入保留；会话结束清空内存并对未确认操作提示离页。重新鉴权后可勾选恢复请求并填写保存的原参数，页面不会把历史记录当作幂等确认。
+
+首次启用先暂停全部旧版清理任务，再应用迁移 0020、升级保留感知清理服务及 outbox/管理 journal 发布器、控制 API、控制台和同源代理路由，完成验收后恢复清理。界面回退保留已经提交的锁和历史，仍须使用支持保留锁的清理服务。保留管理复用现有管理身份边界，生产入口要求见下一节。
+
 ## 构建与部署边界
 
 ```sh
@@ -86,6 +96,7 @@ cargo test -p xshield-control --lib console_client_ -- --ignored
 cargo test -p xshield-control --lib console_ledger_client_reads_postgres_http_contract -- --ignored
 cargo test -p xshield-control --lib console_case_client_mutates_postgres_http_contract -- --ignored
 cargo test -p xshield-control --lib console_access_client_mutates_postgres_and_reads_vault_http_contract -- --ignored
+cargo test -p xshield-control --lib console_hold_client_mutates_postgres_http_contract -- --ignored
 # 或使用仓库的自动隔离建库、迁移和清理流程（包含上述账本 wire）：
 scripts/test_postgres.sh
 ```
@@ -101,6 +112,8 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
 案件 Node 回归验证固定路径与键、UTF-8/控制字符边界、目标/状态/分页一致性及显式重试；本人列表额外验证严格降序、游标位置和白名单投影。浏览器覆盖列表分页/打开、创建→浏览→关联→关闭、断网/超时与原键恢复、未知后再次拒绝、切换调查类型和目标后的冻结参数、401/闲置/刷新清态、独立 Observer 权限、文本注入及桌面/移动布局。案件 wire 使用真实 PostgreSQL、Axum 和 Node 客户端，覆盖本人 open/closed 列表、范围隔离、连接池整体超时、SQL 锁超时、断连创建恢复、幂等重试/冲突、关联及分页、关闭后约束、外部所有者不可用、401/403，并复核案件、outbox 和管理 journal。独立列表故障测试验证断连后完成审计、预读坏行整页拒绝和审计失败扣留结果。测试仅使用隔离合成记录。
 
 证据访问 Node 测试覆盖请求与决策的规范参数、精确重放、微秒期限和历史状态、未知字段投影、二进制目标/范围/安全响应头、实际长度、64 MiB 上限、单字节分块、取消与读体超时。浏览器使用合成响应验证申请→复核→批准/拒绝→精确字节下载、恢复未知操作、历史状态限制、会话清理、错绑/跨范围响应、晚到下载抑制、文本注入和桌面/移动布局。独立 wire 使用真实 PostgreSQL、Axum、Node 客户端和加密 vault，验证独立审批、幂等冲突、17 字节原文、过期/关闭约束及 outbox/管理审计；不访问生产证据或企业身份服务。
+
+保留管理 Node 回归检查固定路径、原始参数、毫秒期限和微秒观察、释放字段完整性、升序分页/游标绑定与安全错误。浏览器以合成响应验证创建、历史分页、释放、原键恢复、异步与会话隔离及桌面/移动布局。独立 `console_hold_client_mutates_postgres_http_contract` 使用真实 PostgreSQL、Axum、Node 客户端和管理 journal，验证独立管理员处理其他调查员案件、跨租户/站点与角色拒绝、幂等冲突、成员约束、关闭后释放、事务 outbox 及原始内容期限保持。所有数据为隔离测试记录，生产企业身份验收继续独立执行。
 
 ## 依赖与维护
 

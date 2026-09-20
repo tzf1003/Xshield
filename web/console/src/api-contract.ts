@@ -42,6 +42,13 @@ export const messages = {
     "案件存储暂时不可用；写入结果可能未知，请保留原键与参数。",
   CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE:
     "案件证据存储暂时不可用；写入结果可能未知，请保留原键与参数。",
+  CONTROL_EVIDENCE_HOLD_ID_INVALID: "请输入规范的保留锁 ID。",
+  CONTROL_EVIDENCE_HOLD_REQUEST_INVALID: "请填写 1–512 UTF-8 字节的规范理由与 UTC 毫秒保留期限。",
+  CONTROL_EVIDENCE_HOLD_STORE_UNAVAILABLE: "保留锁存储暂时不可用；写入结果可能未知，请保留原键与参数。",
+  CONTROL_EVIDENCE_HOLD_CONFLICT: "保留锁请求冲突，请核对原键、参数和现有保留记录。",
+  CONTROL_EVIDENCE_HOLD_TARGET_UNAVAILABLE: "当前范围内的案件、证据或保留锁不可用。",
+  CONTROL_EVIDENCE_HOLD_LIMIT_EXCEEDED: "保留锁已达容量上限，请先处理现有记录。",
+  CONTROL_EVIDENCE_HOLD_BUSY: "保留锁服务繁忙，请稍后使用原键与参数重试。",
   CONTROL_EVIDENCE_ACCESS_ID_INVALID: "请输入规范的访问申请 ID。",
   CONTROL_EVIDENCE_ACCESS_REQUEST_ID_INVALID: "访问申请 ID 格式无效。",
   CONTROL_EVIDENCE_ACCESS_REQUEST_INVALID: "请选择有效的案件，并填写 1–512 UTF-8 字节的规范访问理由。",

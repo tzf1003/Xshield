@@ -4389,6 +4389,7 @@ mod tests {
     mod evidence_access_inspection;
     mod evidence_access_list;
     mod evidence_lifecycle;
+    mod hold_console_wire;
     mod ledger_inspection;
     mod search_references;
 
