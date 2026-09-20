@@ -8,6 +8,8 @@ use std::{collections::BTreeMap, fmt, marker::PhantomData};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use xshield_core::domain::{ArtifactId, ModelCallId, RequestId};
 
+use super::transport::{DIRECT_MODEL, GATEWAY_MODEL};
+
 const INPUT_INVALID: &str = "MODEL_INPUT_INVALID";
 const RESPONSE_INVALID: &str = "MODEL_RESPONSE_INVALID";
 const MODEL_REVISION: &str = "jev-1.13.0";
@@ -124,17 +126,39 @@ impl Input {
     /// # Errors
     /// Returns `MODEL_INPUT_INVALID` for invalid trace IDs or a body over 8 KiB.
     /// The caller durably captures these bytes before sending them to Jev.
+    #[cfg(test)]
     pub(super) fn api_bytes(
         &self,
         request_id: &str,
         model_call_id: &str,
         internal_artifact_id: &str,
     ) -> Result<Vec<u8>, &'static str> {
+        self.api_bytes_for_model(
+            request_id,
+            model_call_id,
+            internal_artifact_id,
+            DIRECT_MODEL,
+        )
+    }
+
+    /// Produces the exact provider body for one compile-time approved model id.
+    /// The slash-bearing Gateway slug is kept on the wire only; internal model
+    /// revision and audit names remain the pinned `jev-1.13.0` revision.
+    pub(super) fn api_bytes_for_model(
+        &self,
+        request_id: &str,
+        model_call_id: &str,
+        internal_artifact_id: &str,
+        provider_model: &str,
+    ) -> Result<Vec<u8>, &'static str> {
+        if !matches!(provider_model, DIRECT_MODEL | GATEWAY_MODEL) {
+            return Err(INPUT_INVALID);
+        }
         RequestId::parse(request_id).map_err(|_| INPUT_INVALID)?;
         ModelCallId::parse(model_call_id).map_err(|_| INPUT_INVALID)?;
         ArtifactId::parse(internal_artifact_id).map_err(|_| INPUT_INVALID)?;
         bounded_input_bytes(&ApiRequest {
-            model: self.model_revision(),
+            model: provider_model,
             state: State {
                 trusted_policy: TrustedPolicy {
                     schema_version: 1,
@@ -281,6 +305,7 @@ pub(super) struct Response {
     pub(super) output_tokens: Option<u64>,
     /// `provider` when a count was reported, otherwise `unavailable`.
     pub(super) usage_source: &'static str,
+    pub(super) resolved_model_revision: Option<String>,
 }
 
 /// Serializes a primitive result using its provider-native scalar type.
@@ -299,6 +324,36 @@ struct ResponseDto {
     model: String,
     answers: Answers,
     usage: Option<Usage>,
+    #[serde(default)]
+    provider_metadata: Option<ProviderMetadata>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderMetadata {
+    gateway: Option<GatewayMetadata>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayMetadata {
+    routing: Option<GatewayRouting>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayRouting {
+    #[serde(rename = "originalModelId")]
+    original_model_id: Option<String>,
+    #[serde(rename = "resolvedProvider")]
+    resolved_provider: Option<String>,
+    #[serde(rename = "canonicalSlug")]
+    canonical_slug: Option<String>,
+    #[serde(rename = "finalProvider")]
+    final_provider: Option<String>,
+    #[serde(rename = "generationId")]
+    generation_id: Option<String>,
+    cost: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -335,13 +390,31 @@ impl Response {
     /// Returns `MODEL_RESPONSE_INVALID` for schema, model, primitive, candidate,
     /// probability, or usage errors. The caller records the response evidence
     /// and terminal audit state; this conversion performs no external effects.
+    #[cfg(test)]
     pub(super) fn parse(bytes: &[u8], input: &Input) -> Result<Self, &'static str> {
+        Self::parse_for_model(bytes, input, DIRECT_MODEL)
+    }
+
+    pub(super) fn parse_for_model(
+        bytes: &[u8],
+        input: &Input,
+        provider_model: &str,
+    ) -> Result<Self, &'static str> {
         if bytes.len() > RESPONSE_BYTES_MAX {
             return Err(RESPONSE_INVALID);
         }
-        let dto: ResponseDto = serde_json::from_slice(bytes).map_err(|_| RESPONSE_INVALID)?;
-        if dto.model != input.model_revision() {
+        if !matches!(provider_model, DIRECT_MODEL | GATEWAY_MODEL) {
             return Err(RESPONSE_INVALID);
+        }
+        let dto: ResponseDto = serde_json::from_slice(bytes).map_err(|_| RESPONSE_INVALID)?;
+        if dto.model != provider_model {
+            return Err(RESPONSE_INVALID);
+        }
+        if provider_model == DIRECT_MODEL && dto.provider_metadata.is_some() {
+            return Err(RESPONSE_INVALID);
+        }
+        if let Some(metadata) = dto.provider_metadata {
+            metadata.validate()?;
         }
         let (result, probabilities, provider_confidence, confidence_status) =
             match (dto.answers.evaluation, &input.0.question) {
@@ -390,7 +463,8 @@ impl Response {
             "unavailable"
         };
         Ok(Self {
-            model_revision: dto.model,
+            model_revision: input.model_revision().to_owned(),
+            resolved_model_revision: (provider_model == DIRECT_MODEL).then_some(dto.model),
             result,
             probabilities,
             provider_confidence,
@@ -399,6 +473,38 @@ impl Response {
             output_tokens: usage.output_tokens,
             usage_source,
         })
+    }
+}
+
+impl ProviderMetadata {
+    fn validate(self) -> Result<(), &'static str> {
+        let Some(gateway) = self.gateway else {
+            return Ok(());
+        };
+        let Some(routing) = gateway.routing else {
+            return Ok(());
+        };
+        for value in [
+            routing.original_model_id,
+            routing.resolved_provider,
+            routing.canonical_slug,
+            routing.final_provider,
+            routing.generation_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.is_empty() || value.len() > 256 || !value.is_ascii() {
+                return Err(RESPONSE_INVALID);
+            }
+        }
+        if routing
+            .cost
+            .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+        {
+            return Err(RESPONSE_INVALID);
+        }
+        Ok(())
     }
 }
 
@@ -496,6 +602,25 @@ mod tests {
             json!({"request_id": REQUEST_ID, "model_call_id": MODEL_CALL_ID,
                 "input_artifact_id": ARTIFACT_ID})
         );
+    }
+
+    #[test]
+    fn gateway_uses_alias_on_wire_but_keeps_internal_revision_unresolved() {
+        let input = Input::parse(CHOICE_INPUT.as_bytes()).unwrap();
+        let bytes = input
+            .api_bytes_for_model(REQUEST_ID, MODEL_CALL_ID, ARTIFACT_ID, GATEWAY_MODEL)
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["model"], GATEWAY_MODEL);
+        let response = CHOICE_RESPONSE
+            .replace("jev-1.13.0", GATEWAY_MODEL)
+            .replace(
+                "\"usage\":{",
+                "\"provider_metadata\":{\"gateway\":{\"routing\":{\"originalModelId\":\"typesafe-ai/jev\",\"resolvedProvider\":\"typesafe-ai\",\"canonicalSlug\":\"typesafe-ai/jev\",\"finalProvider\":\"typesafe-ai\",\"generationId\":\"gen_1\",\"cost\":0.0}}},\"usage\":{",
+            );
+        let parsed = Response::parse_for_model(response.as_bytes(), &input, GATEWAY_MODEL).unwrap();
+        assert_eq!(parsed.model_revision, MODEL_REVISION);
+        assert_eq!(parsed.resolved_model_revision, None);
     }
 
     #[test]

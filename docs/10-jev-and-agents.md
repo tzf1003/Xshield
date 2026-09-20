@@ -74,7 +74,7 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 `xshield-model-eval --approved-input PRIVATE_JSON_FILE` 接受操作员已批准对外披露、预先脱敏的单个私有 JSON 文件。`approval_ref` 是关联批准记录的标识，不是权限证明；部署账号、文件权限和外发审批由操作者保证。tenant/site 来自可信环境，request/model-call ID 由服务端生成。CLI 只产出评估证据，不连接网关资格写入路径；`MODEL_EVALUATED/PASS` 表示调用与取证完成，不表示业务操作获准。
 
-固定请求 `https://api.typesafe.ai/v1/systemone`，Bearer 由独立环境秘密注入；使用原生 TLS 信任根，拒绝重定向和动态目标。当前只接受版本 `jev-1.13.0`，响应版本必须精确匹配；版本依据 [TypeSafe Models](https://docs.typesafe.ai/models) 与 [API reference](https://docs.typesafe.ai/api) 于 2026-09-19 复核。支持单题 Choice 与 Noul；Choice 要求 2–32 个候选，包含 NONE/UNKNOWN，返回完整候选概率且最高概率选项匹配。Noul 的 confidence 始终为 `null/not_applicable`。缺少用量保持 unknown，不估造 token 或成本。
+默认请求固定发送到 `https://ai-gateway.vercel.sh/typesafe/v1/systemone`，wire model 为 `typesafe-ai/jev`，Bearer 由 `AI_GATEWAY_API_KEY` 独立注入；使用原生 TLS 信任根，拒绝重定向和动态目标。`XSHIELD_JEV_ROUTE=direct` 才启用兼容的 TypeSafe 直连（`XSHIELD_JEV_API_KEY`、`https://api.typesafe.ai/v1/systemone`、`jev-1.13.0`）。内部审计仍记录固定 `jev-1.13.0`；Gateway 别名没有精确版本证明时 `resolved_model_revision=null`，实际 wire slug 保留在冻结请求证据中。支持单题 Choice 与 Noul；Choice 要求 2–32 个候选，包含 NONE/UNKNOWN，返回完整候选概率且最高概率选项匹配。Noul 的 confidence 始终为 `null/not_applicable`。缺少用量保持 unknown，不估造 token 或成本。
 
 闭环顺序：`model.started` → 内部输入证据 → 冻结实际 API JSON 证据 → `model.requested` → 单次 HTTP → 响应捕获及规范化调用记录 → `model.responded/failed/timeout/cancelled`。每个证据对象先在 vault 耐久落盘，再与 `evidence.cataloged` outbox 原子提交目录。输入目录或审计屏障失败会阻止 HTTP；调用后的取证失败产生依赖失败终态。终态自身持久失败时退出非零，下次启动将未完成调用补记为 `MODEL_OUTCOME_UNKNOWN`，供应商是否已计费保持未知。
 
@@ -82,7 +82,7 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 资源上限：输入与实际 API JSON 各 8 KiB，文本合计最多 6144 字符，响应最多 64 KiB，每个证据文档最多 512 KiB、保留 24 小时；发送至读体总期限 10 秒，catalog 操作每步 5 秒。证据根目录排他锁限制一次一个任务，预留四对象最坏空间，目录最多 100000 文件。429 记 `MODEL_RATE_LIMITED`、529 记 `MODEL_OVERLOADED`，保留合法 Retry-After 秒数供操作员决策；每次 CLI 调用至多一次 HTTP。重启认证扫描最多 10000 条专用 journal 记录，补记中断终态并保留因果引用；接近上限时按 RB-11 轮换目录。
 
-后续增量包括网关自动采用、Score、缓存、多实例站点预算、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。当前未执行真实供应商推理或准确率/校准测试。
+后续增量包括 Score、缓存、多实例站点预算、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。当前未执行真实供应商推理或准确率/校准测试。
 
 ## 10.10 Jev 供应商接入决定
 
@@ -90,4 +90,4 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 秘密由运行环境管理，约定引用 `AI_GATEWAY_API_KEY`；仓库、前端构建、样例和审计只保留引用，禁止保存密钥值。macOS 本地开发可使用钥匙串服务 `Xshield.Jev.VercelAIGateway`、账号 `Xshield` 保存该秘密，并在适配器运行时由秘密端口读取或注入进程环境。
 
-此项记录供应商选择，尚未切换 10.9 的直连实现或执行外部推理。当前 CLI 的 `XSHIELD_JEV_API_KEY` 发往 TypeSafe 直连目标，不得注入 Gateway 凭证。Gateway 适配必须先验证请求/响应差异、实际返回版本、429/超时、用量与证据捕获契约，再替换运行入口；别名不能被记为已解析的精确模型版本。外发输入审批、固定 HTTPS 目标、硬拒绝优先及 Noul 空置信度要求继续生效。
+已完成固定 Gateway 适配并将其作为默认路由；当前 CLI 仍不执行自动重试、fallback 或资格写入。`XSHIELD_JEV_API_KEY` 仅可在显式 `direct` 路由发往 TypeSafe 直连目标，不得注入 Gateway；Gateway 响应的 `provider_metadata.gateway.routing` 仅做有界契约校验，不把 alias 当作精确版本。外发输入审批、固定 HTTPS 目标、硬拒绝优先及 Noul 空置信度要求继续生效。

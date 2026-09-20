@@ -30,7 +30,7 @@ mod transport;
 mod wire;
 
 use storage::Storage;
-use transport::{JevClient, ModelPort};
+use transport::{JevClient, JevRoute, ModelPort};
 use wire::{Input, Response};
 
 const CONFIG: &str = "MODEL_CONFIG_INVALID";
@@ -77,13 +77,14 @@ pub async fn evaluate_file(
     }
     let bytes = tokio::task::block_in_place(|| read_input(path))?;
     let input = Input::parse(&bytes)?;
-    let api_key = secret("XSHIELD_JEV_API_KEY")?;
+    let route = JevRoute::from_environment()?;
+    let api_key = secret(route.secret_name())?;
     let evidence_key = secret("XSHIELD_EVIDENCE_KEY_HEX")?;
     let journal_key = secret("XSHIELD_JOURNAL_KEY_HEX")?;
     if *api_key == *evidence_key || *api_key == *journal_key || *evidence_key == *journal_key {
         return Err(CONFIG);
     }
-    let client = JevClient::new(api_key)?;
+    let client = JevClient::new(route, api_key)?;
     if client.contains_secret(&bytes) {
         return Err("MODEL_SECRET_EXCLUDED");
     }
@@ -292,13 +293,14 @@ async fn execute(
             .await?,
     );
     let api = Zeroizing::new(
-        input.api_bytes(
+        input.api_bytes_for_model(
             attempt.request.as_str(),
             attempt.call.as_str(),
             attempt
                 .internal
                 .as_deref()
                 .ok_or("MODEL_EVIDENCE_UNAVAILABLE")?,
+            client.provider_model(),
         )?,
     );
     if client.contains_secret(&api) {
@@ -327,7 +329,7 @@ async fn execute(
     let response = if let Some(failure) = exchange.failure {
         Err(failure)
     } else {
-        Response::parse(&exchange.body, input)
+        Response::parse_for_model(&exchange.body, input, client.provider_model())
     };
     let (status, reason) = match &response {
         Ok(_) => ("success", "MODEL_EVALUATED"),
@@ -381,9 +383,10 @@ async fn execute(
             model_call_id: attempt.call.as_str().to_owned(),
             request_id: attempt.request.as_str().to_owned(),
             example_only: false,
-            provider: "typesafe",
+            provider: client.provider(),
             model_revision: input.model_revision().to_owned(),
-            resolved_model_revision: parsed.map(|response| response.model_revision.clone()),
+            resolved_model_revision: parsed
+                .and_then(|response| response.resolved_model_revision.clone()),
             prompt_revision: input.prompt_revision().to_owned(),
             input_artifact_id,
             output_artifact_id: attempt.output.clone(),

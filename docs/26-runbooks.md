@@ -68,7 +68,7 @@ BUSY 表示目录仍有写入/维护所有者；TIMEOUT 或 COMPLETION_UNAVAILAB
 
 Noul 使用 `question={"type":"noul","instructions":"所需判断的问题"}`。指令最多 1024 字符，候选描述最多 512 字符，候选名为最多 128 字节的 ASCII scoped name；所有层级拒绝未知字段与重复键。
 
-完成 PostgreSQL 全部迁移；复用控制服务可访问的 vault/key，预建 0700 evidence 根目录并暂停共享该根目录的其他写入/清理者。journal 使用本评估器专属私有目录。通过秘密管理器注入 `XSHIELD_TENANT_ID`、`XSHIELD_SITE_ID`、`XSHIELD_DATABASE_URL`、`XSHIELD_JEV_API_KEY`、`XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_KEY_HEX`、`XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`、`XSHIELD_MODEL_JOURNAL_DIRECTORY`、`XSHIELD_JOURNAL_KEY_ID`、`XSHIELD_JOURNAL_KEY_HEX`、`XSHIELD_AUDIT_MAX_BYTES`。证据与 journal 密钥独立；证据预算需至少能容纳四个 512 KiB 对象及 sidecar，journal 预算范围 1 MiB–1 GiB，并保留至少 64 KiB 终态空间。
+完成 PostgreSQL 全部迁移；复用控制服务可访问的 vault/key，预建 0700 evidence 根目录并暂停共享该根目录的其他写入/清理者。journal 使用本评估器专属私有目录。默认 Gateway 路由通过秘密管理器注入 `AI_GATEWAY_API_KEY`；只有显式 `XSHIELD_JEV_ROUTE=direct` 才注入 `XSHIELD_JEV_API_KEY`。两者均不得同时作为对方凭证使用。另注入 `XSHIELD_TENANT_ID`、`XSHIELD_SITE_ID`、`XSHIELD_DATABASE_URL`、`XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_KEY_HEX`、`XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`、`XSHIELD_MODEL_JOURNAL_DIRECTORY`、`XSHIELD_JOURNAL_KEY_ID`、`XSHIELD_JOURNAL_KEY_HEX`、`XSHIELD_AUDIT_MAX_BYTES`。证据与 journal 密钥独立；证据预算需至少能容纳四个 512 KiB 对象及 sidecar，journal 预算范围 1 MiB–1 GiB，并保留至少 64 KiB 终态空间。
 
 执行 `cargo run -p xshield-worker --bin xshield-model-eval -- --approved-input /private/approved-evaluation.json`。stdout 仅包含 request/model-call ID、终态与 artifact 引用，非成功退出码为 1；SIGINT 请求取消并等待取证/终态完成。429/529 后检查调用记录中的 HTTP 状态及 Retry-After，由批准流程决定是否发起新的独立调用，旧调用不变。强制终止后重新启动会补记结果未知，再执行本次新任务，可能已发生的供应商计费需另行核对。
 

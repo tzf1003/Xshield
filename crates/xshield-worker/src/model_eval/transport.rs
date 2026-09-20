@@ -12,7 +12,10 @@ use std::{future::Future, time::Duration};
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};
 
-const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+pub(super) const DIRECT_MODEL: &str = "jev-1.13.0";
+pub(super) const GATEWAY_MODEL: &str = "typesafe-ai/jev";
+const DIRECT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+const GATEWAY_ENDPOINT: &str = "https://ai-gateway.vercel.sh/typesafe/v1/systemone";
 const DEADLINE: Duration = Duration::from_secs(10);
 const RESPONSE_LIMIT: usize = 65_536;
 type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
@@ -64,6 +67,66 @@ pub(super) trait ModelPort {
 
     /// Detect literal or JSON-escaped keys before any evidence capture.
     fn contains_secret(&self, bytes: &[u8]) -> bool;
+
+    /// Fixed audit/provider identity selected by the validated route.
+    fn provider(&self) -> &'static str {
+        "typesafe"
+    }
+
+    /// Fixed wire model identifier; never comes from operator input.
+    fn provider_model(&self) -> &'static str {
+        DIRECT_MODEL
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum JevRoute {
+    Gateway,
+    Direct,
+}
+
+impl JevRoute {
+    pub(super) fn from_environment() -> Result<Self, &'static str> {
+        Self::parse(std::env::var("XSHIELD_JEV_ROUTE").ok().as_deref())
+    }
+
+    fn parse(value: Option<&str>) -> Result<Self, &'static str> {
+        match value.unwrap_or("gateway") {
+            "gateway" => Ok(Self::Gateway),
+            "direct" => Ok(Self::Direct),
+            _ => Err("MODEL_CONFIG_INVALID"),
+        }
+    }
+
+    fn endpoint(self) -> &'static str {
+        match self {
+            Self::Gateway => GATEWAY_ENDPOINT,
+            Self::Direct => DIRECT_ENDPOINT,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn provider(self) -> &'static str {
+        match self {
+            Self::Gateway => "vercel_ai_gateway",
+            Self::Direct => "typesafe",
+        }
+    }
+
+    #[allow(dead_code)]
+    fn provider_model(self) -> &'static str {
+        match self {
+            Self::Gateway => GATEWAY_MODEL,
+            Self::Direct => DIRECT_MODEL,
+        }
+    }
+
+    pub(super) fn secret_name(self) -> &'static str {
+        match self {
+            Self::Gateway => "AI_GATEWAY_API_KEY",
+            Self::Direct => "XSHIELD_JEV_API_KEY",
+        }
+    }
 }
 
 /// Fixed HTTPS destination with verified native TLS roots. Secrets and response
@@ -73,12 +136,14 @@ pub(super) struct JevClient {
     api_key: Zeroizing<String>,
     endpoint: Uri,
     timeout: Duration,
+    #[allow(dead_code)]
+    route: JevRoute,
 }
 
 impl JevClient {
     /// Validate the injected key and native trust store without network I/O.
     /// Failures are stable configuration codes; credentials are never returned.
-    pub(super) fn new(api_key: Zeroizing<String>) -> Result<Self, &'static str> {
+    pub(super) fn new(route: JevRoute, api_key: Zeroizing<String>) -> Result<Self, &'static str> {
         validate_key(&api_key)?;
         let connector = HttpsConnectorBuilder::new()
             .with_native_roots()
@@ -89,8 +154,9 @@ impl JevClient {
         Ok(Self {
             client: build_client(connector),
             api_key,
-            endpoint: Uri::from_static(ENDPOINT),
+            endpoint: Uri::from_static(route.endpoint()),
             timeout: DEADLINE,
+            route,
         })
     }
 
@@ -121,6 +187,7 @@ impl JevClient {
             api_key,
             endpoint: uri,
             timeout,
+            route: JevRoute::Direct,
         })
     }
 
@@ -247,6 +314,14 @@ impl ModelPort for JevClient {
 
     fn contains_secret(&self, bytes: &[u8]) -> bool {
         secret_in_bytes(bytes, self.api_key.as_bytes(), unclosed_json_string(bytes))
+    }
+
+    fn provider(&self) -> &'static str {
+        self.route.provider()
+    }
+
+    fn provider_model(&self) -> &'static str {
+        self.route.provider_model()
     }
 }
 
@@ -649,7 +724,7 @@ mod tests {
 
     #[test]
     fn request_secret_scan_decodes_json_escapes_and_retains_safe_prefixes() {
-        let mut client = JevClient::new(Zeroizing::new(KEY.to_owned())).unwrap();
+        let mut client = JevClient::new(JevRoute::Direct, Zeroizing::new(KEY.to_owned())).unwrap();
         for bytes in [
             br#"{"state":"test-key-\u0066or-jev-only"}"#.as_slice(),
             br#"invalid JSON "test-key-\u0066or-jev-only""#.as_slice(),
@@ -750,11 +825,20 @@ mod tests {
 
     #[tokio::test]
     async fn configuration_keeps_https_and_rejects_input_destination_or_invalid_key() {
-        let mut client = JevClient::new(Zeroizing::new(KEY.to_owned())).unwrap();
-        assert_eq!(client.endpoint, ENDPOINT);
+        let mut client = JevClient::new(JevRoute::Direct, Zeroizing::new(KEY.to_owned())).unwrap();
+        assert_eq!(client.endpoint, DIRECT_ENDPOINT);
         assert_eq!(client.timeout, DEADLINE);
         assert!(client.contains_secret(format!("before{KEY}after").as_bytes()));
         assert!(!client.contains_secret(b"a different value"));
+        let gateway = JevClient::new(JevRoute::Gateway, Zeroizing::new(KEY.to_owned())).unwrap();
+        assert_eq!(gateway.endpoint, GATEWAY_ENDPOINT);
+        assert_eq!(gateway.provider(), "vercel_ai_gateway");
+        assert_eq!(gateway.provider_model(), GATEWAY_MODEL);
+        assert_eq!(JevRoute::Gateway.secret_name(), "AI_GATEWAY_API_KEY");
+        assert_eq!(JevRoute::Direct.secret_name(), "XSHIELD_JEV_API_KEY");
+        assert_eq!(JevRoute::parse(None), Ok(JevRoute::Gateway));
+        assert_eq!(JevRoute::parse(Some("direct")), Ok(JevRoute::Direct));
+        assert_eq!(JevRoute::parse(Some("other")), Err("MODEL_CONFIG_INVALID"));
         for key in [
             "short".to_owned(),
             "x".repeat(513),
@@ -762,7 +846,7 @@ mod tests {
             "key-with-newline\n".to_owned(),
             "非ASCII-key-key-key".to_owned(),
         ] {
-            assert!(JevClient::new(Zeroizing::new(key)).is_err());
+            assert!(JevClient::new(JevRoute::Direct, Zeroizing::new(key)).is_err());
         }
         for endpoint in [
             "https://127.0.0.1:8080/v1/systemone",
