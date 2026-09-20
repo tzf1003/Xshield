@@ -4,6 +4,7 @@ import type {
   AuditEvent,
   EventsResponse,
   Manifest,
+  ModelCallResponse,
   SummaryResponse,
 } from "./api";
 
@@ -56,6 +57,183 @@ function Badge({ value }: { value: string }) {
     >
       {value || "未记录"}
     </span>
+  );
+}
+
+/** Model evidence remains reference-only; opening a reference reads its catalog metadata. */
+export function ModelCallOverview({
+  response,
+  onOpen,
+}: {
+  response: ModelCallResponse;
+  onOpen: (id: string) => void;
+}) {
+  const model = response.model_call;
+  const completeness = {
+    complete: "生命周期完整",
+    pending: "等待模型终态",
+    partial: "生命周期部分可见",
+    not_indexed: "当前索引未找到调用",
+  }[response.completeness];
+  return (
+    <>
+      <div
+        className={`notice ${response.has_gaps || response.pending_segments > 0 ? "warning" : ""}`}
+        role="status"
+      >
+        <div>
+          <strong>{completeness}</strong>
+          <p>
+            索引水位仅覆盖配置的日志源，不代表模型调用已全部追平；结果随发布与保留而变化。
+          </p>
+          <details>
+            <summary>查看模型查询水位</summary>
+            <Rows
+              entries={[
+                ["观察时间", time(response.as_of)],
+                ["水位范围", response.watermark_scope],
+                [
+                  "水位",
+                  response.index_watermark
+                    ? `${response.index_watermark.producer_boot_id} / ${response.index_watermark.producer_sequence}`
+                    : "尚不可用",
+                ],
+                ["待发布段", response.pending_segments],
+                ["索引缺口", response.has_gaps ? "存在" : "未观察到"],
+              ]}
+            />
+          </details>
+        </div>
+      </div>
+      <section className="panel" aria-label="模型调用详情">
+        <div className="panel-heading model-heading">
+          <h2>模型调用</h2>
+          <span className="mono">{response.source_model_call_id}</span>
+        </div>
+        {model ? (
+          <div className="detail-body">
+            <Rows
+              entries={[
+                ["来源请求", <span className="mono">{model.request_id}</span>],
+                ["生命周期状态", model.status],
+                ["原因", <span className="mono">{model.reason_code}</span>],
+                ["供应商路由", model.provider ?? "历史记录未提供"],
+                [
+                  "供应商模型 ID",
+                  <span className="mono">
+                    {model.provider_model_id ?? "历史记录未提供"}
+                  </span>,
+                ],
+                [
+                  "内部模型版本",
+                  <span className="mono">{model.model_revision}</span>,
+                ],
+                [
+                  "提示版本",
+                  <span className="mono">{model.prompt_revision}</span>,
+                ],
+                ["问题类型", model.question_type],
+                [
+                  "置信度",
+                  model.confidence === null
+                    ? model.confidence_status === "not_applicable"
+                      ? "不适用"
+                      : "未提供"
+                    : model.confidence,
+                ],
+                ["置信度状态", model.confidence_status],
+                ["耗时", `${model.duration_us} μs`],
+                ...(
+                  [
+                    ["输入证据", model.input_artifact_id],
+                    ["输出证据", model.output_artifact_id],
+                    ["调用记录", model.call_artifact_id],
+                  ] as const
+                ).map(([label, id]): [string, ReactNode] => [
+                  label,
+                  id ? (
+                    <button
+                      className="artifact-link mono"
+                      onClick={() => onOpen(id)}
+                    >
+                      {id}
+                    </button>
+                  ) : (
+                    "当前未记录"
+                  ),
+                ]),
+              ]}
+            />
+            <p className="footnote">
+              供应商模型 ID
+              是请求所用标识，不代表已解析的精确模型版本。生命周期完整不等于索引无缺口。评估完成不表示业务操作获准。
+            </p>
+            <h3 className="model-lifecycle-title">模型生命周期</h3>
+            {model.events.map((event) => (
+              <details className="model-event" key={event.event_id}>
+                <summary>
+                  <span className="mono">
+                    #{event.request_seq} · {event.event_type} · {event.status}
+                  </span>
+                </summary>
+                <Rows
+                  entries={[
+                    ["事件 ID", <span className="mono">{event.event_id}</span>],
+                    ["事件时间", time(event.occurred_at)],
+                    ["原因", <span className="mono">{event.reason_code}</span>],
+                    [
+                      "置信度",
+                      event.confidence === null
+                        ? event.confidence_status === "not_applicable"
+                          ? "不适用"
+                          : "未提供"
+                        : event.confidence,
+                    ],
+                    ["置信度状态", event.confidence_status],
+                    ["耗时", `${event.duration_us} μs`],
+                    ["数据分级", label(event.sensitivity)],
+                    [
+                      "前驱事件",
+                      event.cause_event_ids.length
+                        ? event.cause_event_ids.map((id) => (
+                            <p className="mono" key={id}>
+                              {id}
+                            </p>
+                          ))
+                        : "起始事件",
+                    ],
+                    [
+                      "证据引用",
+                      event.evidence_refs.length
+                        ? event.evidence_refs.map((id) =>
+                            id.startsWith("artifact_") ? (
+                              <button
+                                className="artifact-link mono"
+                                key={id}
+                                onClick={() => onOpen(id)}
+                              >
+                                {id}
+                              </button>
+                            ) : (
+                              <p className="mono" key={id}>
+                                {id}
+                              </p>
+                            ),
+                          )
+                        : "当前未记录",
+                    ],
+                  ]}
+                />
+              </details>
+            ))}
+          </div>
+        ) : (
+          <p className="empty">
+            尚未发布、不存在、已过期或不在当前作用域的调用均可能返回此状态；请结合日志源与保留策略核对。
+          </p>
+        )}
+      </section>
+    </>
   );
 }
 

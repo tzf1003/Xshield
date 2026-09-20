@@ -5,6 +5,7 @@ import type {
   ArtifactResponse,
   EventsResponse,
   EvidenceResponse,
+  ModelCallResponse,
   SummaryResponse,
 } from "./api";
 import {
@@ -12,6 +13,7 @@ import {
   EventDetail,
   EventTable,
   EvidenceTable,
+  ModelCallOverview,
   RequestOverview,
   WatermarkNotice,
 } from "./panels";
@@ -50,6 +52,8 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [token, setToken] = useState("");
   const [requestId, setRequestId] = useState("");
+  const [queryKind, setQueryKind] = useState<"request" | "model">("request");
+  const [model, setModel] = useState<ModelCallResponse | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [events, setEvents] = useState<EventsResponse | null>(null);
   const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
@@ -67,6 +71,7 @@ export function App() {
     lifetime.current = new AbortController();
     epoch.current += 1;
     setSummary(null);
+    setModel(null);
     setEvents(null);
     setEvidence(null);
     setArtifact(null);
@@ -84,6 +89,7 @@ export function App() {
       setConnected(false);
       setToken("");
       setRequestId("");
+      setQueryKind("request");
       setSessionNotice(notice);
     },
     [clearResults],
@@ -207,6 +213,14 @@ export function App() {
     clearResults();
     const target = requestId.trim();
     setRequestId(target);
+    if (queryKind === "model") {
+      void run(
+        "query",
+        (api, signal) => api.modelCall(target, signal),
+        (response) => setModel(response),
+      );
+      return;
+    }
     void run(
       "query",
       (api, signal) => api.summary(target, signal),
@@ -259,7 +273,9 @@ export function App() {
     <>
       <header className="topbar">
         <span className="brand">Xshield</span>
-        <span className="nav-title">请求调查</span>
+        <span className="nav-title">
+          {queryKind === "request" ? "请求调查" : "模型调用调查"}
+        </span>
         <span className="muted console-label">只读控制台</span>
         <div className="connection">
           <span className="mono scope">
@@ -277,8 +293,12 @@ export function App() {
         </div>
       </header>
       <main>
-        <h1>请求调查</h1>
-        <p className="lead">沿着请求时间线，核对每一次判定与证据。</p>
+        <h1>{queryKind === "request" ? "请求调查" : "模型调用调查"}</h1>
+        <p className="lead">
+          {queryKind === "request"
+            ? "沿着请求时间线，核对每一次判定与证据。"
+            : "核对模型调用生命周期、版本与证据引用。"}
+        </p>
         {sessionNotice && (
           <div className="notice" role="status">
             {sessionNotice}
@@ -315,26 +335,69 @@ export function App() {
         ) : (
           <>
             <form className="panel query-form" onSubmit={query}>
-              <label htmlFor="request-id">请求 ID</label>
+              <label htmlFor="query-kind">查询类型</label>
+              <select
+                id="query-kind"
+                value={queryKind}
+                onChange={(event) => {
+                  clearResults();
+                  setRequestId("");
+                  setQueryKind(
+                    event.target.value === "model" ? "model" : "request",
+                  );
+                }}
+              >
+                <option value="request">请求</option>
+                <option value="model">模型调用</option>
+              </select>
+              <label htmlFor="request-id">
+                {queryKind === "request" ? "请求 ID" : "模型调用 ID"}
+              </label>
               <input
                 id="request-id"
                 className="mono"
-                placeholder="req_…"
+                placeholder={queryKind === "request" ? "req_…" : "mdl_…"}
                 value={requestId}
                 onChange={(e) => setRequestId(e.target.value)}
                 autoComplete="off"
                 spellCheck={false}
                 maxLength={40}
                 required
-                pattern="req_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
-                title="请输入规范的 req_ 前缀 UUIDv7"
+                pattern={`${queryKind === "request" ? "req" : "mdl"}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
+                title={`请输入规范的 ${queryKind === "request" ? "req" : "mdl"}_ 前缀 UUIDv7`}
               />
               <button type="submit" disabled={busy.query}>
                 {busy.query ? "查询中…" : "查询"}
               </button>
             </form>
             <Failure problem={problems.query ?? null} />
-            {summary ? (
+            {model ? (
+              <>
+                <ModelCallOverview response={model} onOpen={openArtifact} />
+                {(artifact || busy.artifact || problems.artifact) && (
+                  <section
+                    className="panel detail-panel"
+                    aria-label="模型证据详情"
+                    aria-live="polite"
+                  >
+                    <div className="panel-heading">
+                      <h2>证据详情</h2>
+                      <button className="text-button" onClick={clearArtifact}>
+                        关闭详情
+                      </button>
+                    </div>
+                    <Failure problem={problems.artifact ?? null} />
+                    {busy.artifact ? (
+                      <p className="empty" role="status">
+                        正在读取证据元数据…
+                      </p>
+                    ) : (
+                      artifact && <ArtifactDetail response={artifact} />
+                    )}
+                  </section>
+                )}
+              </>
+            ) : summary ? (
               <>
                 <WatermarkNotice summary={summary} events={events} />
                 <RequestOverview response={summary} />
@@ -476,9 +539,15 @@ export function App() {
               !busy.query &&
               !problems.query && (
                 <section className="panel empty-state">
-                  <h2>从一个请求开始</h2>
+                  <h2>
+                    {queryKind === "request"
+                      ? "从一个请求开始"
+                      : "查询模型调用"}
+                  </h2>
                   <p className="muted">
-                    输入请求 ID，读取判定摘要、事件时间线与证据目录。
+                    {queryKind === "request"
+                      ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
+                      : "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"}
                   </p>
                 </section>
               )

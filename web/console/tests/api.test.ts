@@ -6,6 +6,8 @@ import {
   REQUEST_ID,
   OTHER_REQUEST_ID,
   ARTIFACT_ID,
+  MODEL_CALL_ID,
+  OTHER_MODEL_CALL_ID,
   EVENT_CURSOR,
   EVIDENCE_CURSOR,
   summaryFixture,
@@ -13,6 +15,7 @@ import {
   evidenceFixture,
   artifactFixture,
   errorFixture,
+  modelCallFixture,
 } from "./fixtures.ts";
 
 const response = (value: unknown, status = 200) =>
@@ -29,18 +32,20 @@ const errorIs = (code: string, status?: number) => (error: unknown) => {
   return true;
 };
 
-test("four fixed GET routes preserve wire semantics and safe display metadata", async (t) => {
+test("fixed GET routes preserve wire semantics and safe display metadata", async (t) => {
   const fixtures = [
     summaryFixture(),
     eventsFixture(),
     evidenceFixture(),
     artifactFixture(),
+    modelCallFixture(),
   ];
   const paths = [
     `/control/v1/requests/${REQUEST_ID}`,
     `/control/v1/requests/${REQUEST_ID}/events?cursor=${EVENT_CURSOR}`,
     `/control/v1/requests/${REQUEST_ID}/evidence?cursor=${EVIDENCE_CURSOR}`,
     `/control/v1/artifacts/${ARTIFACT_ID}`,
+    `/control/v1/model-calls/${MODEL_CALL_ID}`,
   ];
   let index = 0;
   t.mock.method(
@@ -83,7 +88,9 @@ test("four fixed GET routes preserve wire semantics and safe display metadata", 
     assert.ok(!("storage" in item));
     assert.ok(!("integrity" in item));
   }
-  assert.equal(index, 4);
+  const model = await client.modelCall(MODEL_CALL_ID);
+  assert.deepEqual(model, modelCallFixture());
+  assert.equal(index, 5);
 });
 
 test("invalid IDs, opaque cursor transport and credentials fail before network use", async (t) => {
@@ -128,6 +135,16 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
     client.artifact(REQUEST_ID),
     errorIs("CONTROL_ARTIFACT_ID_INVALID"),
   );
+  for (const value of [
+    REQUEST_ID,
+    MODEL_CALL_ID.toUpperCase(),
+    `${MODEL_CALL_ID}?extra=1`,
+    MODEL_CALL_ID.replace("-7000-", "-4000-"),
+  ])
+    await assert.rejects(
+      client.modelCall(value),
+      errorIs("CONTROL_MODEL_CALL_ID_INVALID"),
+    );
   for (const cursor of [
     "",
     "a".repeat(161),
@@ -147,6 +164,185 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
     );
   }
   assert.equal(network.mock.callCount(), 0);
+});
+
+test("model call projection preserves lifecycle, missing history and Noul confidence", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const value = modelCallFixture();
+  t.mock.method(globalThis, "fetch", async () => response(value));
+  assert.deepEqual(await client.modelCall(MODEL_CALL_ID), value);
+  for (const item of [value.model_call, ...value.model_call.events])
+    Object.assign(item, {
+      provider: null,
+      provider_model_id: null,
+      question_type: "noul",
+      confidence: null,
+      confidence_status: "not_applicable",
+    });
+  value.model_call.events = value.model_call.events.slice(-1);
+  value.model_call.lifecycle_complete = false;
+  value.completeness = "partial";
+  assert.deepEqual(await client.modelCall(MODEL_CALL_ID), value);
+  const missing = {
+    ...value,
+    found: false,
+    model_call: null,
+    completeness: "not_indexed",
+  };
+  t.mock.method(globalThis, "fetch", async () => response(missing));
+  assert.deepEqual(await client.modelCall(MODEL_CALL_ID), missing);
+});
+
+test("model call projection accepts pending prefixes and pre-send failure", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const length of [1, 2]) {
+    const value = modelCallFixture();
+    value.model_call.events = value.model_call.events.slice(0, length);
+    Object.assign(value.model_call, value.model_call.events.at(-1), {
+      lifecycle_complete: false,
+    });
+    value.completeness = "pending";
+    t.mock.method(globalThis, "fetch", async () => response(value));
+    const result = await client.modelCall(MODEL_CALL_ID);
+    assert.equal(result.completeness, "pending");
+    assert.equal(result.model_call?.events.length, length);
+  }
+  const value = modelCallFixture();
+  const failure = {
+    ...value.model_call.events[0]!,
+    status: "error",
+    event_type: "model.failed",
+    reason_code: "MODEL_EVIDENCE_UNAVAILABLE",
+    request_seq: 2,
+    event_id: value.model_call.events[1]!.event_id,
+    cause_event_ids: [value.model_call.events[0]!.event_id],
+  };
+  value.model_call.events = [value.model_call.events[0]!, failure];
+  Object.assign(value.model_call, failure);
+  t.mock.method(globalThis, "fetch", async () => response(value));
+  const result = await client.modelCall(MODEL_CALL_ID);
+  assert.equal(result.completeness, "complete");
+  assert.equal(result.model_call?.status, "error");
+  assert.equal(result.model_call?.input_artifact_id, null);
+});
+
+test("model call projection rejects contradictory lifecycle and malformed identity", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const mutations: Array<(value: ReturnType<typeof modelCallFixture>) => void> =
+    [
+      (value) => {
+        value.source_model_call_id = OTHER_MODEL_CALL_ID;
+      },
+      (value) => {
+        value.model_call.model_call_id = OTHER_MODEL_CALL_ID;
+      },
+      (value) => {
+        value.watermark_scope = "all_journals";
+      },
+      (value) => {
+        value.found = false;
+      },
+      (value) => {
+        value.completeness = "partial";
+      },
+      (value) => {
+        value.model_call.lifecycle_complete = false;
+      },
+      (value) => {
+        value.model_call.events = [];
+      },
+      (value) => {
+        value.model_call.events.reverse();
+      },
+      (value) => {
+        value.model_call.events[1]!.request_id = OTHER_REQUEST_ID;
+      },
+      (value) => {
+        value.model_call.events[1]!.provider_model_id = "jev-1.13.0";
+      },
+      (value) => {
+        Object.assign(value.model_call, { provider: null });
+      },
+      (value) => {
+        Reflect.deleteProperty(value.model_call, "provider");
+      },
+      (value) => {
+        value.model_call.confidence = 0.2;
+      },
+      (value) => {
+        value.model_call.events[0]!.confidence = 0.2;
+        value.model_call.events[0]!.confidence_status = "provided";
+      },
+      (value) => {
+        value.model_call.events[2]!.question_type = "noul";
+      },
+      (value) => {
+        value.model_call.events[2]!.event_type = "model.cancelled";
+      },
+      (value) => {
+        value.model_call.events[2]!.evidence_refs = [];
+      },
+      (value) => {
+        value.model_call.events[1]!.cause_event_ids = [];
+      },
+      (value) => {
+        value.model_call.events[2]!.cause_event_ids = [
+          value.model_call.events[0]!.event_id,
+        ];
+      },
+      (value) => {
+        value.model_call.events[1]!.request_seq = 1;
+      },
+      (value) => {
+        value.model_call.events[2]!.occurred_at = "invalid";
+      },
+      (value) => {
+        value.model_call.events[2]!.duration_us = Number.MAX_SAFE_INTEGER + 1;
+      },
+      (value) => {
+        value.model_call.output_artifact_id = ARTIFACT_ID;
+      },
+      (value) => {
+        value.model_call.events[0]!.input_artifact_id = ARTIFACT_ID;
+        value.model_call.events[0]!.evidence_refs = [ARTIFACT_ID];
+      },
+      (value) => {
+        value.model_call.events[2]!.cause_event_ids = [
+          value.model_call.events[2]!.event_id,
+        ];
+      },
+      (value) => {
+        value.model_call.events.splice(0, 1);
+      Object.assign(value.model_call.events[1]!, {
+          ...value.model_call.events[0]!,
+          event_id: "ev_018f2a3b-4c5d-7000-8000-000000000003",
+          request_seq: 3,
+        cause_event_ids: [value.model_call.events[0]!.event_id],
+      });
+      Object.assign(value.model_call, value.model_call.events[1], {
+        lifecycle_complete: false,
+      });
+      value.completeness = "pending";
+      },
+    ];
+  for (const mutate of mutations) {
+    const value = modelCallFixture();
+    mutate(value);
+    t.mock.method(globalThis, "fetch", async () => response(value));
+    await assert.rejects(
+      client.modelCall(MODEL_CALL_ID),
+      errorIs("INVALID_RESPONSE", 200),
+    );
+  }
+  const value = modelCallFixture();
+  Object.assign(value.model_call, {
+    payload_json: "synthetic-secret-body",
+    provider_response: "synthetic-raw-response",
+  });
+  t.mock.method(globalThis, "fetch", async () => response(value));
+  const projected = await client.modelCall(MODEL_CALL_ID);
+  assert.ok(!JSON.stringify(projected).includes("synthetic-secret-body"));
+  assert.ok(!JSON.stringify(projected).includes("synthetic-raw-response"));
 });
 
 test("missing and pending results retain honest completeness and nullable fields", async (t) => {
@@ -405,6 +601,9 @@ test("HTTP diagnostics preserve status and safe request ID while discarding serv
     [401, "CONTROL_AUTH_REQUIRED"],
     [403, "CONTROL_SCOPE_DENIED"],
     [429, "CONTROL_RATE_LIMITED"],
+    [429, "CONTROL_QUERY_BUDGET_EXCEEDED"],
+    [429, "CONTROL_QUERY_CAPACITY_EXHAUSTED"],
+    [503, "CONTROL_QUERY_TIMEOUT"],
     [503, "AUDIT_DURABILITY_FAILED"],
   ] as const) {
     t.mock.method(globalThis, "fetch", async () =>

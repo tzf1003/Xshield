@@ -61,6 +61,43 @@ try {
   assert.equal(next.events[0]?.proof_kind, "");
   assert.equal(next.next_cursor, null);
   phase = 5;
+  const modelId = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
+  const model = await client.modelCall(modelId);
+  assert.equal(model.source_model_call_id, modelId);
+  assert.equal(model.tenant_id, "tenant_a");
+  assert.equal(model.site_id, "site_a");
+  assert.equal(model.watermark_scope, "configured_journal");
+  assert.equal(model.completeness, "complete");
+  assert.equal(model.model_call?.request_id, request);
+  assert.equal(model.model_call?.provider, "vercel_ai_gateway");
+  assert.equal(model.model_call?.provider_model_id, "typesafe-ai/jev");
+  assert.equal(model.model_call?.model_revision, "jev-1.13.0");
+  assert.equal(model.model_call?.confidence, 0.8);
+  assert.deepEqual(
+    model.model_call?.events.map((event) => event.status),
+    ["started", "requested", "success"],
+  );
+  assert.equal(
+    model.model_call?.events[0]?.occurred_at,
+    "2026-09-20T08:10:30.123456Z",
+  );
+  assert.equal(
+    model.model_call?.input_artifact_id,
+    "artifact_018f2a3b-4c5d-7000-8000-000000000011",
+  );
+  phase = 6;
+  const historical = await client.modelCall(modelId);
+  assert.equal(historical.completeness, "partial");
+  assert.equal(historical.model_call?.provider, null);
+  assert.equal(historical.model_call?.provider_model_id, null);
+  assert.equal(historical.model_call?.question_type, "noul");
+  assert.equal(historical.model_call?.confidence, null);
+  assert.equal(historical.model_call?.confidence_status, "not_applicable");
+  phase = 7;
+  const missing = await client.modelCall(modelId);
+  assert.equal(missing.completeness, "not_indexed");
+  assert.equal(missing.found, false);
+  assert.equal(missing.model_call, null);
   const failure = (code: string, status: number) => (error: unknown) => {
     assert.ok(error instanceof ApiError);
     assert.equal(error.code, code);
@@ -68,16 +105,22 @@ try {
     assert.match(error.requestId ?? "", /^req_[0-9a-f-]+$/);
     return true;
   };
+  phase = 8;
+  await assert.rejects(
+    client.modelCall(modelId),
+    failure("CONTROL_QUERY_BUDGET_EXCEEDED", 429),
+  );
+  phase = 9;
   await assert.rejects(
     client.evidence(request),
     failure("CONTROL_CATALOG_UNAVAILABLE", 503),
   );
-  phase = 6;
+  phase = 10;
   await assert.rejects(
     client.artifact("artifact_018f2a3b-4c5d-7000-8000-000000000011"),
     failure("CONTROL_CATALOG_UNAVAILABLE", 503),
   );
-  phase = 7;
+  phase = 11;
   const unauthorized = new ControlClient(
     "synthetic-invalid-management-token-000000000000",
   );

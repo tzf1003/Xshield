@@ -6,6 +6,8 @@ import {
   EVENT_CURSOR,
   OTHER_ARTIFACT_ID,
   OTHER_REQUEST_ID,
+  MODEL_CALL_ID,
+  OTHER_MODEL_CALL_ID,
   REQUEST_ID,
   TOKEN,
   artifactFixture,
@@ -13,6 +15,7 @@ import {
   eventsFixture,
   evidenceFixture,
   summaryFixture,
+  modelCallFixture,
 } from "./fixtures";
 
 type Reply = { status?: number; body: unknown };
@@ -39,7 +42,9 @@ async function mockControl(page: Page, override?: Override) {
     const custom = await override?.(url);
     let reply: Reply;
     if (custom) reply = custom;
-    else if (url.pathname.startsWith("/control/v1/artifacts/")) {
+    else if (url.pathname.startsWith("/control/v1/model-calls/")) {
+      reply = { body: modelCallFixture(url.pathname.split("/").at(-1)) };
+    } else if (url.pathname.startsWith("/control/v1/artifacts/")) {
       reply = { body: artifactFixture(url.pathname.split("/").at(-1)) };
     } else {
       const id = url.pathname.split("/")[4];
@@ -68,6 +73,236 @@ async function query(page: Page, requestId = REQUEST_ID) {
   await page.getByLabel("请求 ID", { exact: true }).fill(requestId);
   await page.getByRole("button", { name: "查询", exact: true }).click();
 }
+
+async function queryModel(page: Page, modelCallId = MODEL_CALL_ID) {
+  await page.getByLabel("查询类型", { exact: true }).selectOption("model");
+  await page.getByLabel("模型调用 ID", { exact: true }).fill(modelCallId);
+  await page.getByRole("button", { name: "查询", exact: true }).click();
+}
+
+test("queries model lifecycle and opens only reference metadata", async ({
+  page,
+}) => {
+  const runtimeErrors: string[] = [];
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  const calls = await mockControl(page);
+  await connect(page);
+  await queryModel(page, "invalid-model-id");
+  expect(calls).toHaveLength(0);
+  await queryModel(page);
+  await expect(
+    page.getByRole("heading", { name: "模型调用调查", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("vercel_ai_gateway", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("typesafe-ai/jev", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("0.8", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/评估完成不表示业务操作获准/)).toBeVisible();
+  expect(calls.map((call) => call.path)).toEqual([
+    `/control/v1/model-calls/${MODEL_CALL_ID}`,
+  ]);
+  await page
+    .getByText("#3 · model.responded · success", { exact: true })
+    .click();
+  await expect(
+    page
+      .locator(".model-event[open]")
+      .getByText("ev_018f2a3b-4c5d-7000-8000-000000000002", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: ARTIFACT_ID, exact: true })
+    .first()
+    .click();
+  await expect(
+    page.getByRole("region", { name: "模型证据详情" }),
+  ).toContainText("application/json");
+  await page.getByRole("button", { name: "关闭详情", exact: true }).click();
+  await expect(page.getByRole("region", { name: "模型证据详情" })).toHaveCount(
+    0,
+  );
+  expect(
+    calls.every(
+      (call) =>
+        call.method === "GET" && call.authorized && call.cookie === null,
+    ),
+  ).toBe(true);
+  expect(calls.some((call) => call.path.endsWith("/content"))).toBe(false);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(
+    await page.evaluate(() => [localStorage.length, sessionStorage.length]),
+  ).toEqual([0, 0]);
+  for (const width of [1536, 390]) {
+    await page.setViewportSize({ width, height: 1024 });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+    if (width === 390) {
+      const heading = await page
+        .getByRole("heading", { name: "模型调用", exact: true })
+        .boundingBox();
+      const identity = await page
+        .locator(".model-heading > .mono")
+        .boundingBox();
+      expect(
+        heading && identity && heading.height < 30 && identity.y > heading.y,
+      ).toBeTruthy();
+    }
+    const screenshotDirectory = process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR;
+    if (screenshotDirectory)
+      await page.screenshot({
+        path: resolve(screenshotDirectory, `model-${width}.png`),
+        fullPage: true,
+      });
+  }
+  expect(runtimeErrors).toEqual([]);
+});
+
+test("model query preserves partial Noul history and unknown absence", async ({
+  page,
+}) => {
+  await mockControl(page, (url) => {
+    if (!url.pathname.includes("/model-calls/")) return undefined;
+    const value = modelCallFixture(url.pathname.split("/").at(-1));
+    if (url.pathname.endsWith(OTHER_MODEL_CALL_ID))
+      return {
+        body: {
+          ...value,
+          found: false,
+          completeness: "not_indexed",
+          model_call: null,
+        },
+      };
+    for (const item of [value.model_call, ...value.model_call.events])
+      Object.assign(item, {
+        provider: null,
+        provider_model_id: null,
+        question_type: "noul",
+        confidence: null,
+        confidence_status: "not_applicable",
+      });
+    value.model_call.events = value.model_call.events.slice(-1);
+    value.model_call.lifecycle_complete = false;
+    value.completeness = "partial";
+    return { body: value };
+  });
+  await connect(page);
+  await queryModel(page);
+  await expect(
+    page.getByText("生命周期部分可见", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("不适用", { exact: true }).first()).toBeVisible();
+  await expect(
+    page.getByText("历史记录未提供", { exact: true }).first(),
+  ).toBeVisible();
+  await queryModel(page, OTHER_MODEL_CALL_ID);
+  await expect(
+    page.getByText("当前索引未找到调用", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/尚未发布、不存在、已过期或不在当前作用域/),
+  ).toBeVisible();
+  await expect(page.getByText("MODEL_EVALUATED", { exact: true })).toHaveCount(
+    0,
+  );
+});
+
+test("model 401 and scope drift dispose the authenticated session", async ({
+  page,
+}) => {
+  let drift = false;
+  await mockControl(page, (url) =>
+    url.pathname.includes("/model-calls/")
+      ? drift
+        ? { body: { ...modelCallFixture(), site_id: "site_other" } }
+        : { status: 401, body: errorFixture("CONTROL_AUTH_REQUIRED") }
+      : undefined,
+  );
+  await connect(page);
+  await queryModel(page);
+  await expect(page.getByRole("status")).toContainText("管理凭证已失效");
+  await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
+  drift = true;
+  await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
+  await page.getByRole("button", { name: "连接", exact: true }).click();
+  await query(page);
+  await expect(
+    page.getByText("AUTH_BINDING_VALID", { exact: true }),
+  ).toBeVisible();
+  await queryModel(page);
+  await expect(page.getByRole("status")).toContainText("响应范围校验失败");
+  await expect(
+    page.getByText("vercel_ai_gateway", { exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByText(REQUEST_ID, { exact: true })).toHaveCount(0);
+});
+
+test("switching to a request discards a late model response", async ({
+  page,
+}) => {
+  let release = () => {};
+  const delayed = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let arrive = () => {};
+  const arrived = new Promise<void>((resolve) => {
+    arrive = resolve;
+  });
+  await mockControl(page, async (url) => {
+    if (!url.pathname.includes("/model-calls/")) return undefined;
+    arrive();
+    await delayed;
+    return { body: modelCallFixture() };
+  });
+  await connect(page);
+  const settled = requestSettled(
+    page,
+    `/control/v1/model-calls/${MODEL_CALL_ID}`,
+  );
+  await queryModel(page);
+  await arrived;
+  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  await query(page);
+  await expect(
+    page.getByText("AUTH_BINDING_VALID", { exact: true }),
+  ).toBeVisible();
+  release();
+  await settled;
+  await paint(page);
+  await expect(
+    page.getByText("vercel_ai_gateway", { exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByLabel("请求 ID", { exact: true })).toHaveValue(
+    REQUEST_ID,
+  );
+});
+
+test("model query budget failures remain explicit and require manual retry", async ({
+  page,
+}) => {
+  await page.clock.install();
+  const calls = await mockControl(page, () => ({
+    status: 429,
+    body: errorFixture("CONTROL_QUERY_BUDGET_EXCEEDED"),
+  }));
+  await connect(page);
+  await queryModel(page);
+  await expect(page.getByRole("alert")).toContainText(
+    "CONTROL_QUERY_BUDGET_EXCEEDED",
+  );
+  await expect(page.getByRole("alert")).toContainText(
+    "查询超出服务预算，请联系管理员。",
+  );
+  await page.clock.fastForward(60_000);
+  expect(calls).toHaveLength(1);
+  await expect(
+    page.getByText("Synthetic server detail must not be rendered"),
+  ).toHaveCount(0);
+});
 
 async function selectEvidenceEvent(page: Page) {
   const row = page

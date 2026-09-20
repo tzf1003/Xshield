@@ -6959,6 +6959,70 @@ mod tests {
         last.confidence_status.clear();
         mock.add(test::handlers::provide([first, last.clone()]));
         mock.add(test::handlers::provide([last]));
+        let model_id = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
+        let input = "artifact_018f2a3b-4c5d-7000-8000-000000000011";
+        let output = "artifact_018f2a3b-4c5d-7000-8000-000000000012";
+        let call = "artifact_018f2a3b-4c5d-7000-8000-000000000013";
+        let model_rows: Vec<_> = [
+            ("started", "model.started", "MODEL_EVALUATION_STARTED"),
+            ("requested", "model.requested", "MODEL_REQUESTED"),
+            ("success", "model.responded", "MODEL_EVALUATED"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (status, event_type, reason))| {
+            let evidence_refs = match index {
+                0 => vec![],
+                1 => vec![input.to_owned()],
+                _ => vec![input.to_owned(), output.to_owned(), call.to_owned()],
+            };
+            ModelRow {
+                event_id: format!("ev_018f2a3b-4c5d-7000-8000-{:012}", index + 21),
+                event_type: event_type.to_owned(),
+                request_id: "req_018f2a3b-4c5d-7000-8000-000000000001".to_owned(),
+                occurred_at,
+                request_seq: u32::try_from(index + 1).unwrap(),
+                evidence_refs,
+                cause_event_ids: if index == 0 {
+                    vec![]
+                } else {
+                    vec![format!("ev_018f2a3b-4c5d-7000-8000-{:012}", index + 20)]
+                },
+                sensitivity: "RESTRICTED".to_owned(),
+                payload_json: serde_json::json!({
+                    "model_call_id": model_id,
+                    "provider": "vercel_ai_gateway",
+                    "provider_model_id": "typesafe-ai/jev",
+                    "model_revision": "jev-1.13.0",
+                    "prompt_revision": "evaluation-r1",
+                    "question_type": "choice",
+                    "status": status,
+                    "reason_code": reason,
+                    "confidence": if index == 2 { Some(0.8) } else { None },
+                    "confidence_status": if index == 2 { "provided" } else { "unavailable" },
+                    "duration_us": 1200,
+                    "input_artifact_id": if index > 0 { Some(input) } else { None },
+                    "output_artifact_id": if index == 2 { Some(output) } else { None },
+                    "call_artifact_id": if index == 2 { Some(call) } else { None }
+                })
+                .to_string(),
+            }
+        })
+        .collect();
+        // A retained historical Noul suffix has no provider pair in its payload.
+        let mut historical = model_rows.last().unwrap().clone();
+        let mut payload: Value = serde_json::from_str(&historical.payload_json).unwrap();
+        let payload_object = payload.as_object_mut().unwrap();
+        payload_object.remove("provider");
+        payload_object.remove("provider_model_id");
+        payload_object.insert("question_type".to_owned(), "noul".into());
+        payload_object.insert("confidence".to_owned(), Value::Null);
+        payload_object.insert("confidence_status".to_owned(), "not_applicable".into());
+        historical.payload_json = payload.to_string();
+        mock.add(test::handlers::provide(model_rows));
+        mock.add(test::handlers::provide([historical]));
+        mock.add(test::handlers::provide(Vec::<ModelRow>::new()));
+        mock.add(test::handlers::exception(158));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut fixture = Fixture::with_index(
@@ -7017,7 +7081,31 @@ mod tests {
             "console wire contract failed; phase={:?}",
             status.code()
         );
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 10);
+        let model_reads: Vec<_> = events
+            .iter()
+            .filter(|event| event["event_type"] == "console.model.read")
+            .collect();
+        assert_eq!(model_reads.len(), 4);
+        for event in &model_reads {
+            assert_eq!(event["payload"]["target_model_call_id"], model_id);
+        }
+        assert!(
+            model_reads[..3]
+                .iter()
+                .all(|event| { event["payload"]["reason_code"] == "CONTROL_MODEL_CALL_READ" })
+        );
+        assert_eq!(
+            model_reads[3]["payload"]["reason_code"],
+            "CONTROL_QUERY_BUDGET_EXCEEDED"
+        );
+        assert_eq!(model_reads[0]["evidence_refs"].as_array().unwrap().len(), 3);
+        assert!(
+            model_reads[2]["evidence_refs"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             events.last().unwrap()["payload"]["reason_code"],
             "CONTROL_AUTH_REQUIRED"

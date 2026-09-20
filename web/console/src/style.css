@@ -24,7 +24,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -50,6 +51,7 @@ button:hover:not(:disabled) {
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 summary:focus-visible {
   outline-offset: 3px;
   outline: 3px solid #83bcb6;
@@ -64,6 +66,28 @@ input:not([type="radio"]) {
   border: 1px solid #cbd4de;
   border-radius: 4px;
   padding: 8px 13px;
+}
+
+select {
+  color: inherit;
+  background: #fff;
+  border: 1px solid #cbd4de;
+  border-radius: 4px;
+  min-height: 42px;
+  padding: 8px 13px;
+}
+
+.model-lifecycle-title {
+  margin-top: 24px;
+}
+
+.model-event {
+  border-top: 1px solid #e2e7ec;
+  padding: 12px 0;
+}
+
+.model-event summary {
+  cursor: pointer;
 }
 
 input[type="radio"] {
@@ -688,6 +712,12 @@ footer {
 }
 
 @media (width <= 760px) {
+  .model-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
   .topbar {
     flex-wrap: wrap;
     gap: 13px;
@@ -736,6 +766,10 @@ footer {
   }
 
   .query-form label {
+    grid-column: 1 / -1;
+  }
+
+  .query-form select {
     grid-column: 1 / -1;
   }
 

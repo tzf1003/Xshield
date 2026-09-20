@@ -101,6 +101,54 @@ export type ArtifactResponse = Envelope & {
   found: boolean;
   artifact: Manifest | null;
 };
+export type ModelCallFacts = {
+  provider: "typesafe" | "vercel_ai_gateway" | null;
+  provider_model_id: string | null;
+  model_revision: string;
+  prompt_revision: string;
+  question_type: "choice" | "noul";
+  status:
+    | "started"
+    | "requested"
+    | "success"
+    | "error"
+    | "timeout"
+    | "cancelled";
+  reason_code: string;
+  confidence: number | null;
+  confidence_status: string;
+  duration_us: number;
+  input_artifact_id: string | null;
+  output_artifact_id: string | null;
+  call_artifact_id: string | null;
+};
+export type ModelCallEvent = ModelCallFacts & {
+  event_id: string;
+  event_type: string;
+  request_id: string;
+  occurred_at: string;
+  request_seq: number;
+  evidence_refs: string[];
+  cause_event_ids: string[];
+  sensitivity: string;
+};
+export type ModelCall = ModelCallFacts & {
+  model_call_id: string;
+  request_id: string;
+  events: ModelCallEvent[];
+  lifecycle_complete: boolean;
+};
+export type ModelCallResponse = Envelope & {
+  source_model_call_id: string;
+  watermark_scope: "configured_journal";
+  as_of: string;
+  index_watermark: Watermark | null;
+  has_gaps: boolean;
+  pending_segments: number;
+  found: boolean;
+  completeness: "complete" | "pending" | "partial" | "not_indexed";
+  model_call: ModelCall | null;
+};
 
 const messages = {
   CONTROL_AUTH_REQUIRED: "管理凭证无效或已过期，请重新连接。",
@@ -108,6 +156,10 @@ const messages = {
   CONTROL_RATE_LIMITED: "管理请求已达频率上限，请稍后重试。",
   CONTROL_REQUEST_ID_INVALID: "请输入规范的请求 ID。",
   CONTROL_ARTIFACT_ID_INVALID: "证据 ID 格式无效。",
+  CONTROL_MODEL_CALL_ID_INVALID: "请输入规范的模型调用 ID。",
+  CONTROL_QUERY_BUDGET_EXCEEDED: "查询超出服务预算，请联系管理员。",
+  CONTROL_QUERY_CAPACITY_EXHAUSTED: "调查查询服务繁忙，请稍后重试。",
+  CONTROL_QUERY_TIMEOUT: "调查查询超时，请稍后重试。",
   CONTROL_CURSOR_INVALID: "分页凭证已失效，请重新查询。",
   CONTROL_CURSOR_UNAVAILABLE: "分页服务暂时不可用，请稍后重试。",
   CONTROL_INDEX_UNAVAILABLE: "审计索引暂时不可用，请稍后重试。",
@@ -145,6 +197,7 @@ const uuid =
   "[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const requestPattern = new RegExp(`^req_${uuid}$`);
 const artifactPattern = new RegExp(`^artifact_${uuid}$`);
+const modelCallPattern = new RegExp(`^mdl_${uuid}$`);
 const eventPattern = new RegExp(`^ev_${uuid}$`);
 const cursorPattern = /^[A-Za-z0-9_.-]{1,160}$/;
 const maxBytes = 16 * 1024 * 1024;
@@ -452,6 +505,212 @@ function manifest(
   return result;
 }
 
+const modelEventTypes = {
+  started: "model.started",
+  requested: "model.requested",
+  success: "model.responded",
+  error: "model.failed",
+  timeout: "model.timeout",
+  cancelled: "model.cancelled",
+} as const;
+function modelFacts(row: Record<string, unknown>): ModelCallFacts {
+  const { confidence: value, confidence_status } = confidence({
+    ...row,
+    proof_kind: "model",
+  });
+  const provider = nullable(row.provider, (item) =>
+    choice(item, ["typesafe", "vercel_ai_gateway"] as const),
+  );
+  const provider_model_id = nullable(row.provider_model_id, (item) =>
+    text(item),
+  );
+  ensure(
+    provider === null
+      ? provider_model_id === null
+      : provider_model_id ===
+          (provider === "typesafe" ? "jev-1.13.0" : "typesafe-ai/jev"),
+  );
+  const result: ModelCallFacts = {
+    provider,
+    provider_model_id,
+    model_revision: name(row.model_revision),
+    prompt_revision: name(row.prompt_revision),
+    question_type: choice(row.question_type, ["choice", "noul"]),
+    status: choice(row.status, [
+      "started",
+      "requested",
+      "success",
+      "error",
+      "timeout",
+      "cancelled",
+    ]),
+    reason_code: name(row.reason_code),
+    confidence: value,
+    confidence_status,
+    duration_us: integer(row.duration_us),
+    input_artifact_id: nullable(row.input_artifact_id, (item) =>
+      id(item, artifactPattern),
+    ),
+    output_artifact_id: nullable(row.output_artifact_id, (item) =>
+      id(item, artifactPattern),
+    ),
+    call_artifact_id: nullable(row.call_artifact_id, (item) =>
+      id(item, artifactPattern),
+    ),
+  };
+  ensure(
+    result.question_type !== "noul" ||
+      result.confidence_status === "not_applicable",
+  );
+  ensure(result.status === "success" || result.confidence === null);
+  ensure(
+    !["requested", "success"].includes(result.status) ||
+      result.input_artifact_id !== null,
+  );
+  ensure(
+    result.status !== "success" ||
+      (result.output_artifact_id !== null && result.call_artifact_id !== null),
+  );
+  return result;
+}
+function modelCall(value: unknown, target: string): ModelCall {
+  const row = object(value);
+  const result: ModelCall = {
+    ...modelFacts(row),
+    model_call_id: id(row.model_call_id, modelCallPattern),
+    request_id: id(row.request_id, requestPattern),
+    lifecycle_complete: bool(row.lifecycle_complete),
+    events: list(row.events, 3, (value) => {
+      const event = object(value);
+      const result: ModelCallEvent = {
+        ...modelFacts(event),
+        event_id: id(event.event_id, eventPattern),
+        event_type: name(event.event_type),
+        request_id: id(event.request_id, requestPattern),
+        occurred_at: timestamp(event.occurred_at),
+        request_seq: integer(event.request_seq, 1, 0xffff_ffff),
+        evidence_refs: references(
+          event.evidence_refs,
+          new RegExp(`^[a-z]+_${uuid}$`),
+        ),
+        cause_event_ids: references(event.cause_event_ids, eventPattern, 1),
+        sensitivity: choice(event.sensitivity, [
+          "PUBLIC",
+          "INTERNAL",
+          "SENSITIVE",
+          "RESTRICTED",
+        ]),
+      };
+      ensure(result.event_type === modelEventTypes[result.status]);
+      ensure(
+        result.cause_event_ids.length === (result.status === "started" ? 0 : 1),
+      );
+      for (const reference of [
+        result.input_artifact_id,
+        result.output_artifact_id,
+        result.call_artifact_id,
+      ])
+        ensure(reference === null || result.evidence_refs.includes(reference));
+      ensure(
+        result.status !== "started" ||
+          [
+            result.input_artifact_id,
+            result.output_artifact_id,
+            result.call_artifact_id,
+          ].every((item) => item === null),
+      );
+      ensure(
+        result.status !== "requested" ||
+          (result.output_artifact_id === null &&
+            result.call_artifact_id === null),
+      );
+      return result;
+    }),
+  };
+  ensure(result.model_call_id === target && result.events.length > 0);
+  const first = result.events[0]!;
+  const latest = result.events.at(-1)!;
+  const identity = [
+    "request_id",
+    "provider",
+    "provider_model_id",
+    "model_revision",
+    "prompt_revision",
+    "question_type",
+  ] as const;
+  const latestFacts = [
+    "status",
+    "reason_code",
+    "confidence",
+    "confidence_status",
+    "duration_us",
+  ] as const;
+  ensure(latestFacts.every((field) => result[field] === latest[field]));
+  ensure(
+    new Set(result.events.map((event) => event.event_id)).size ===
+      result.events.length,
+  );
+  ensure(
+    new Set(result.events.map((event) => event.event_type)).size ===
+      result.events.length,
+  );
+  ensure(
+    new Set(result.events.flatMap((event) => event.evidence_refs)).size <= 256,
+  );
+  let continuous = true;
+  // Retention may hide a predecessor. Visible send boundaries must still link
+  // directly, and request sequence stays authoritative across clock rollback.
+  for (let index = 0; index < result.events.length; index++) {
+    const event = result.events[index]!;
+    ensure(identity.every((field) => event[field] === result[field]));
+    ensure(
+      !result.events
+        .slice(index)
+        .some((later) => event.cause_event_ids.includes(later.event_id)),
+    );
+    if (index === 0) continue;
+    const previous = result.events[index - 1]!;
+    const direct = event.cause_event_ids[0] === previous.event_id;
+    ensure(
+      event.request_seq > previous.request_seq && event.status !== "started",
+    );
+    ensure(["started", "requested"].includes(previous.status));
+    ensure(
+      previous.status !== "requested" ||
+        event.input_artifact_id === previous.input_artifact_id,
+    );
+    ensure(
+      (previous.status !== "requested" && event.status !== "requested") ||
+        direct,
+    );
+    ensure(
+      previous.status !== "started" ||
+        !direct ||
+        ["requested", "error"].includes(event.status),
+    );
+    continuous &&= direct;
+  }
+  for (const field of [
+    "input_artifact_id",
+    "output_artifact_id",
+    "call_artifact_id",
+  ] as const) {
+    const refs = new Set(
+      result.events.map((event) => event[field]).filter((ref) => ref !== null),
+    );
+    ensure(
+      refs.size <= 1 && result[field] === (refs.values().next().value ?? null),
+    );
+  }
+  ensure(
+    result.lifecycle_complete ===
+      (first.status === "started" &&
+        !["started", "requested"].includes(latest.status) &&
+        continuous),
+  );
+  return result;
+}
+
 async function readJson(
   response: Response,
   signal: AbortSignal,
@@ -500,7 +759,7 @@ async function readJson(
   }
 }
 
-/** Four fixed GET routes. Callers own session disposal and cross-response scope checks. */
+/** Fixed GET routes. Callers own session disposal and cross-response scope checks. */
 export class ControlClient {
   #authorization: string;
   constructor(token: string) {
@@ -714,6 +973,53 @@ export class ControlClient {
           ),
         };
         ensure(result.found === (result.artifact !== null));
+        return result;
+      },
+      signal,
+    );
+  }
+
+  /** Read scoped lifecycle metadata; the server audits the lookup. Invalid IDs,
+   * contradictory history and bounded transport failures become safe ApiError values.
+   * Evidence bodies remain behind their separately authorized content endpoint. */
+  async modelCall(
+    modelCallId: string,
+    signal?: AbortSignal,
+  ): Promise<ModelCallResponse> {
+    if (typeof modelCallId !== "string" || !modelCallPattern.test(modelCallId))
+      throw new ApiError("CONTROL_MODEL_CALL_ID_INVALID");
+    return this.#get(
+      `model-calls/${modelCallId}`,
+      (value) => {
+        const row = object(value);
+        ensure(row.source_model_call_id === modelCallId);
+        const result: ModelCallResponse = {
+          ...envelope(row),
+          ...watermarked(row),
+          source_model_call_id: modelCallId,
+          watermark_scope: choice(row.watermark_scope, ["configured_journal"]),
+          pending_segments: integer(row.pending_segments),
+          found: bool(row.found),
+          completeness: choice(row.completeness, [
+            "complete",
+            "pending",
+            "partial",
+            "not_indexed",
+          ]),
+          model_call: nullable(row.model_call, (item) =>
+            modelCall(item, modelCallId),
+          ),
+        };
+        ensure(result.found === (result.model_call !== null));
+        const expected =
+          result.model_call === null
+            ? "not_indexed"
+            : result.model_call.lifecycle_complete
+              ? "complete"
+              : ["started", "requested"].includes(result.model_call.status)
+                ? "pending"
+                : "partial";
+        ensure(result.completeness === expected);
         return result;
       },
       signal,

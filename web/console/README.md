@@ -1,6 +1,6 @@
 # Xshield 只读调查控制台
 
-React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据。UI 只调用现有的四个 GET 端点；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。需要显式 `Observer` 角色，其他管理角色不隐含此权限。
+React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，或按模型调用 ID 读取脱敏生命周期与证据引用。UI 只调用现有的五类 GET 端点；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。需要显式 `Observer` 角色，其他管理角色不隐含此权限。
 
 ## 本地运行
 
@@ -13,16 +13,18 @@ npm run dev
 
 页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发四类只读 GET 路径，剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次查询返回后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发五类只读 GET 路径，剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次查询返回后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
 - 摘要后再读事件；证据目录和单项元数据按点击惰性读取。分页显式触发，每页替换前页，换请求重置游标。
+- 查询类型可切换为模型调用，接受 `mdl_` UUIDv7。结果显示 provider、请求所用 provider_model_id、内部模型/提示版本、置信度语义、因果生命周期及输入/输出/调用记录引用；点击引用沿用单项证据元数据查询。旧记录两项供应商字段均为空时显示“历史记录未提供”，Noul 置信度显示“不适用”。
+- 模型的 `complete/pending/partial/not_indexed` 分别表示可见生命周期完整、等待终态、终态前驱不全和当前索引未命中。索引水位只覆盖配置日志源，不表示模型已全部追平；供应商模型标识不代替精确解析版本，评估完成不授予业务操作资格。
 - `complete` 表示观察到保留的请求终态，不表示索引无缺口。页面分别显示摘要/事件水位和观察时间；水位只覆盖配置 journal，不覆盖所有 Outbox。
 - 转发意图不是源站已执行证明，确认源站响应不等于业务成功。缺失判定与 `UNKNOWN`、等待终态分开显示；确定性证明保持空置信度。
 - 证据 `found=false` 显示“当前不可用”，不推断对象存在性；manifest 不证明内容读取权或对象侧完整性。locator、密钥引用和密文摘要在客户端投影时丢弃。
 - Bearer 不写 URL、日志或浏览器持久存储；所有请求 `credentials: omit`、`cache: no-store`、禁止重定向，读取上限 16 MiB、全程期限 15 秒。凭证须可被浏览器原样编码为 Authorization 头。
-- 401、断连、页面离开、刷新或闲置 15 分钟清空会话。更换请求与详情选择会使旧响应失效；跨响应 tenant/site 偏差断连。客户端清态不等于服务端凭证撤销，JavaScript 也不提供秘密内存可靠清零保证。
+- 401、断连、页面离开、刷新或闲置 15 分钟清空会话。更换查询类型、目标与详情选择会使旧响应失效；跨响应 tenant/site 偏差断连。客户端清态不等于服务端凭证撤销，JavaScript 也不提供秘密内存可靠清零保证。
 - 403、429 和依赖失败显示固定安全文案、稳定代码及管理 request_id；用户显式重试，不自动重试或释放原文。
 
 ## 构建与部署边界
@@ -39,7 +41,7 @@ npm run build
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。证据内容审批、搜索、模型详情、案件与导出界面属于后续独立闭环。
+API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。证据内容审批、搜索、模型调用列表、案件与导出界面属于后续独立闭环。
 
 ## 验证
 
@@ -52,9 +54,9 @@ npm run test:e2e
 cargo test -p xshield-control --lib console_client_reads_real_http_wire_contract -- --ignored
 ```
 
-Node 单测覆盖请求/响应边界、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖分页、403/429、401/闲置/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
+Node 单测覆盖请求/响应边界、模型生命周期一致性、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖分页、模型查询与引用详情、Noul/历史空字段、403/429、401/闲置/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
 
-Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管理 journal，验证摘要、事件分页与微秒时间、目录依赖故障和 401。浏览器回归的 manifest 成功数据是合成契约，不代表已在生产数据源或企业 SSO 上验收。
+Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管理 journal，验证摘要、事件分页与微秒时间、目录依赖故障和 401，以及完整 Gateway Choice、旧记录 Noul 部分生命周期、模型未命中、预算 429 和模型访问审计。浏览器回归的 manifest 成功数据是合成契约，不代表已在生产数据源或企业 SSO 上验收。
 
 ## 依赖与维护
 

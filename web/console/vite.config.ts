@@ -21,7 +21,7 @@ if (
   );
 }
 const readPath =
-  /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+)$/;
+  /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls\/mdl_[a-f0-9-]+)$/;
 
 export default defineConfig({
   server: {

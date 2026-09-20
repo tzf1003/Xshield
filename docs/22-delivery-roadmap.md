@@ -22,7 +22,7 @@
 
 ## M3 完整日志后台
 
-界面增量：`web/console` 已交付 Observer 只读请求调查闭环，覆盖摘要、事件分页、水位/缺口、证据目录和单项安全元数据。内存凭证、闲置/401 清态、跨范围/晚到响应隔离均有回归；真实 Rust HTTP 与前端客户端的 wire 测试校验摘要/事件及失败路径。生产身份入口、结构化搜索、模型/案件和导出界面按 [15.7](15-console-and-api.md#157-已实现只读请求调查控制台) 继续交付。
+界面增量：`web/console` 已交付 Observer 只读请求和模型调用调查闭环，覆盖摘要、事件分页、水位/缺口、证据目录、模型生命周期/供应商标识/置信度和单项安全元数据。内存凭证、闲置/401 清态、跨范围/晚到响应隔离均有回归；真实 Rust HTTP 与前端客户端的 wire 测试校验摘要/事件、Gateway Choice、历史 Noul 部分生命周期、模型未命中及预算失败路径。生产身份入口、结构化搜索、模型列表/案件和导出界面按 [15.7](15-console-and-api.md#157-已实现只读请求调查控制台) 继续交付。
 
 当前增量：控制服务已提供单 request_id 的脱敏聚合摘要、受限阶段聚合、事件时间线、证据 manifest 列表及单 artifact 元数据查询，强制 Observer 角色与服务端 tenant/site 作用域。摘要和事件只查询 retention-aware 去重视图；manifest 只查询 PostgreSQL active、未删除、按数据库时钟未过期的 catalog 行，单项查询对缺失、到期、删除和作用域偏差返回统一不存在语义。事件、manifest 和案件证据集合列表均采用稳定游标分页，游标以独立 HMAC 密钥和不同用途域绑定主体、凭证摘要、作用域、目标、查询版本/页大小和最后位置。案件集合在单 PostgreSQL 只读快照内返回案件摘要、成员引用和 active/expired/deleted/unavailable 状态（正常 retention 使用 deleted tombstone，unavailable 保留为防御性一致性状态），不暴露内容元数据或授权能力。各类查询均写独立耐久管理审计，ClickHouse 查询还携带索引完整性状态。本地证据库已形成单对象 AES-256-GCM、artifact 作用域派生密钥、typed manifest HMAC、私有耐久写、到期/跨域统一拒读和篡改检测闭环；PostgreSQL catalog 支持认证 manifest 与 outbox 原子幂等发布，并提供有界到期密文与孤儿对象维护的删除意图、排他本地锁、tombstone、mtime/sidecar 复验与故障重试。调查案件创建、证据关联、集合查询、敏感原文申请和独立决策已形成固定作用域、主体级容量、精确幂等、禁止自批和 outbox 原子提交闭环；批准时重验目标并建立不超过 artifact 期限的短时服务端资格。EvidenceReadPort 内容读取已接入 `/control/v1/artifacts/{artifact_id}/content`：Reader 只能消费与自身主体绑定的批准行，读取前重验 PostgreSQL 案件/catalog 与 vault 侧 manifest、摘要、AEAD，释放前写入实际字节数审计。网关采集与远端对象 adapter 继续迭代。
 
