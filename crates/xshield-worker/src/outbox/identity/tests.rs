@@ -20,6 +20,7 @@ pub(crate) fn event(event_type: &str) -> Value {
             "binding.created" => "BINDING_CREATED",
             "identity.refreshed" => "IDENTITY_REFRESHED",
             "epoch.changed" => "IDENTITY_CONTEXT_CHANGED",
+            "binding.revoked" => "AUTH_BINDING_REVOKED",
             _ => unreachable!(),
         },
     });
@@ -49,6 +50,9 @@ pub(crate) fn event(event_type: &str) -> Value {
         event["payload"]["auth_epoch"] = json!(2);
         event["payload"]["previous_principal_ref"] = json!("principal-old");
         event["payload"]["previous_authorization_context_ref"] = json!("context-old");
+    }
+    if event_type == "binding.revoked" {
+        event["payload"]["rotation_reason"] = json!("explicit_logout");
     }
     event
 }
@@ -177,7 +181,12 @@ fn identity_source_and_state_constraints_fail_closed() {
             assert!(row(&invalid).is_err());
         }
     }
-    for event_type in ["binding.created", "identity.refreshed", "epoch.changed"] {
+    for event_type in [
+        "binding.created",
+        "identity.refreshed",
+        "epoch.changed",
+        "binding.revoked",
+    ] {
         for field in ["principal_ref", "authorization_context_ref"] {
             for invalid_ref in [String::new(), "a".repeat(257), "bad\u{0085}ref".to_owned()] {
                 let mut invalid = event(event_type);

@@ -37,7 +37,7 @@ pub mod share_issue;
 pub mod share_response;
 pub mod share_token;
 
-use auth_binding::{AuthBindingRule, AuthTransitionRule};
+use auth_binding::{AuthBindingRule, AuthRevokeRule, AuthTransitionRule};
 use evidence_capture::{EvidenceCaptureDto, EvidenceCaptureRule};
 use request_crypto::{RequestCryptoObserveRule, RequestCryptoPolicy, RequestCryptoRule};
 use response_crypto::ResponseCryptoRule;
@@ -165,6 +165,7 @@ struct CompiledResponse {
     grant: Option<ResponseGrantRule>,
     share_issue: Option<ResponseShareRule>,
     auth_binding: Option<AuthBindingRule>,
+    auth_revoke: Option<AuthRevokeRule>,
     auth_refresh: Option<AuthTransitionRule>,
     auth_context_switch: Option<AuthTransitionRule>,
     evidence_capture: Option<EvidenceCaptureRule>,
@@ -393,6 +394,8 @@ struct ResponseDto {
     #[serde(default)]
     auth_binding: Option<AuthBindingDto>,
     #[serde(default)]
+    auth_revoke: Option<AuthRevokeDto>,
+    #[serde(default)]
     auth_refresh: Option<AuthRefreshDto>,
     #[serde(default)]
     auth_context_switch: Option<AuthRefreshDto>,
@@ -445,6 +448,12 @@ struct AuthRefreshDto {
     authorization_context_pointer: String,
     bearer_pointer: String,
     credential_ttl_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthRevokeDto {
+    success_status: u16,
 }
 
 #[derive(Deserialize)]
@@ -568,7 +577,9 @@ impl GatewayConfig {
                                 | AdmissionClass::ShareEntry
                                 | AdmissionClass::ServiceIdentity
                         ) || operation.response.as_ref().is_some_and(|response| {
-                            response.auth_binding.is_some() || response.evidence_capture.is_some()
+                            response.auth_binding.is_some()
+                                || response.auth_revoke.is_some()
+                                || response.evidence_capture.is_some()
                         }) || operation.request_crypto.is_some()
                     }))
         {
@@ -725,10 +736,9 @@ impl GatewayConfig {
                             | AdmissionClass::UiActionRequired
                             | AdmissionClass::ShareEntry
                             | AdmissionClass::ServiceIdentity
-                    ) || operation
-                        .response
-                        .as_ref()
-                        .is_some_and(|response| response.auth_binding.is_some())
+                    ) || operation.response.as_ref().is_some_and(|response| {
+                        response.auth_binding.is_some() || response.auth_revoke.is_some()
+                    })
                 })
     }
 
@@ -960,6 +970,16 @@ impl GatewayConfig {
             .response
             .as_ref()?
             .auth_binding
+            .as_ref()
+    }
+
+    /// Returns the explicit logout/revocation response rule for one exact operation.
+    #[must_use]
+    pub fn auth_revoke_rule(&self, method: &str, path: &str) -> Option<&AuthRevokeRule> {
+        self.operation(method, path)?
+            .response
+            .as_ref()?
+            .auth_revoke
             .as_ref()
     }
 
@@ -1211,6 +1231,14 @@ fn validate_response_contracts(
             return Err(ConfigError::Invalid(
                 "operations.response.auth_context_switch",
             ));
+        }
+        if source
+            .response
+            .as_ref()
+            .is_some_and(|response| response.auth_revoke.is_some())
+            && source.policy.admission_class() != AdmissionClass::AuthenticatedRoot
+        {
+            return Err(ConfigError::Invalid("operations.response.auth_revoke"));
         }
         let Some(rule) = source
             .response
@@ -1545,6 +1573,7 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
             || response.grant.is_some()
             || response.share_issue.is_some()
             || response.auth_binding.is_some()
+            || response.auth_revoke.is_some()
             || response.auth_refresh.is_some()
             || response.auth_context_switch.is_some()
     });
@@ -1743,6 +1772,19 @@ fn compile_response(
             })
         })
         .transpose()?;
+    let auth_revoke = dto
+        .auth_revoke
+        .map(|revoke| {
+            if !(200..=299).contains(&revoke.success_status)
+                || matches!(revoke.success_status, 204..=206)
+            {
+                return Err(ConfigError::Invalid("operations.response.auth_revoke"));
+            }
+            Ok(AuthRevokeRule {
+                success_status: revoke.success_status,
+            })
+        })
+        .transpose()?;
     let share_issue = dto
         .share_issue
         .map(|share| {
@@ -1779,6 +1821,7 @@ fn compile_response(
     if usize::from(grant.is_some())
         + usize::from(share_issue.is_some())
         + usize::from(auth_binding.is_some())
+        + usize::from(auth_revoke.is_some())
         + usize::from(auth_refresh.is_some())
         + usize::from(auth_context_switch.is_some())
         > 1
@@ -1816,6 +1859,7 @@ fn compile_response(
         grant,
         share_issue,
         auth_binding,
+        auth_revoke,
         auth_refresh,
         auth_context_switch,
         evidence_capture,
@@ -1843,6 +1887,7 @@ fn compile_response_kind(
                 || dto.resource_grant.is_some()
                 || dto.share_issue.is_some()
                 || dto.auth_binding.is_some()
+                || dto.auth_revoke.is_some()
                 || dto.auth_refresh.is_some()
                 || dto.auth_context_switch.is_some()
                 || dto.evidence_capture.is_some()
@@ -2974,6 +3019,57 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(&serde_json::to_vec(&incoherent).unwrap()),
             Err(ConfigError::Invalid("operations.response.auth_binding"))
+        ));
+    }
+
+    #[test]
+    fn compiles_binding_revocation_only_for_authenticated_root() {
+        let mut config = auth_response_config();
+        config["operations"][0]["operation_id"] = serde_json::json!("auth.logout");
+        config["operations"][0]["path"] = serde_json::json!("/logout");
+        config["operations"][0]["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
+        config["operations"][0]["response"]
+            .as_object_mut()
+            .unwrap()
+            .remove("auth_binding");
+        config["operations"][0]["response"]["auth_revoke"] =
+            serde_json::json!({"success_status": 204});
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
+            Err(ConfigError::Invalid("operations.response.auth_revoke"))
+        ));
+        config["operations"][0]["response"]["auth_revoke"] =
+            serde_json::json!({"success_status": 200});
+        let compiled = GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).unwrap();
+        assert!(compiled.auth_revoke_rule("POST", "/logout").is_some());
+        assert!(compiled.requires_identity_runtime());
+
+        for status in [199, 204, 205, 206, 300] {
+            let mut invalid = config.clone();
+            invalid["operations"][0]["response"]["auth_revoke"]["success_status"] =
+                serde_json::json!(status);
+            assert!(matches!(
+                GatewayConfig::from_json(&serde_json::to_vec(&invalid).unwrap()),
+                Err(ConfigError::Invalid("operations.response.auth_revoke"))
+            ));
+        }
+        let mut public = config.clone();
+        public["operations"][0]["admission"] = serde_json::json!("PUBLIC");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&public).unwrap()),
+            Err(ConfigError::Invalid("operations.response.auth_revoke"))
+        ));
+        let mut combined = config;
+        combined["operations"][0]["response"]["auth_refresh"] = serde_json::json!({
+            "success_status": 200,
+            "principal_pointer": "/identity/id",
+            "authorization_context_pointer": "/identity/authorization_context",
+            "bearer_pointer": "/access_token",
+            "credential_ttl_seconds": 900
+        });
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&combined).unwrap()),
+            Err(ConfigError::Invalid("operations.response"))
         ));
     }
 

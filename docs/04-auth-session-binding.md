@@ -45,6 +45,8 @@ JWT 可作为不透明字符串精确匹配；使用 claims 建立身份时验�
 
 身份上下文切换适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_context_switch`，并以旧上下文的当前 WAF Cookie 与 Bearer 准入。成功响应必须给出主体或授权上下文变化以及新 Bearer；短事务按旧 snapshot CAS，在同一提交中替换上下文、推进 epoch 与 generation、撤销完整旧凭证集合、写入新凭证和 `epoch.changed` outbox。WAF 会话及绝对期限不延长。主体和授权上下文均未变化、旧凭证偏差、过期或并发版本变化均不改变绑定，也不释放成功正文。
 
+登出/显式撤销适配器要求 `AUTHENTICATED_ROOT` 配置 `BUFFERED_JSON` 与 `auth_revoke`，只接受当前完整身份快照。源站以配置成功状态返回且响应完整通过缓冲校验后，短事务按 binding、主体、授权上下文、epoch 和服务端绝对期限锁定绑定，同时撤销全部 `active`/`transition` 凭证并写入 `binding.revoked` outbox；已撤销、过期或并发代际变化统一冲突关闭，不释放成功正文。该端点不刷新 WAF Cookie，后续请求重新加载身份时失败关闭。
+
 并发刷新采用 compare-and-swap 与行锁。新旧兼容窗口只存明确合法的凭证组合，不能把同用户历史上的所有 WAF Cookie 与所有 Token 做笛卡尔组合。未知替换记录 AUTH_BINDING_MISMATCH，不改变原账本。
 
 ## 4.5 异步响应与 WSS
@@ -59,4 +61,4 @@ WSS 握手及消息处理检查绑定、Origin、票据和消息 Schema。登录
 
 必须记录 binding.created、refresh.verified、binding.mismatch、epoch.changed、binding.revoked，以及新旧非秘密指纹、来源认证请求 ID、轮换原因。禁止在普通日志中写原始 Cookie/JWT 或将其传给 Jev。
 
-已实现的身份事务生产者为 `gateway-identity`：`session.created`、`binding.created`、`identity.refreshed`、`epoch.changed` 与身份状态原子提交完整 v3 envelope，携带原请求的 request_id/trace_id、实际策略修订和服务器 UTC。`identity_lifecycle` 阶段分别记录 `SESSION_CREATED`、`BINDING_CREATED`、`IDENTITY_REFRESHED`、`IDENTITY_CONTEXT_CHANGED`；PASS 只表示身份事务提交成功，匿名创建后的请求仍返回 AUTH_REQUIRED/401。刷新和切换保留新旧凭证 HMAC、代际及轮换原因，整个载荷归类 `SENSITIVE`。发布配置、旧记录处理与独立序列语义见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)。
+已实现的身份事务生产者为 `gateway-identity`：`session.created`、`binding.created`、`identity.refreshed`、`epoch.changed`、`binding.revoked` 与身份状态原子提交完整 v3 envelope，携带原请求的 request_id/trace_id、实际策略修订和服务器 UTC。`identity_lifecycle` 阶段分别记录 `SESSION_CREATED`、`BINDING_CREATED`、`IDENTITY_REFRESHED`、`IDENTITY_CONTEXT_CHANGED`、`AUTH_BINDING_REVOKED`；PASS 只表示身份事务提交成功，匿名创建后的请求仍返回 AUTH_REQUIRED/401。刷新、切换和撤销保留非秘密代际/上下文事实及轮换原因，整个载荷归类 `SENSITIVE`，不写入原始 Cookie/Bearer。发布配置、旧记录处理与独立序列语义见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)。

@@ -32,13 +32,14 @@ use xshield_core::{
 use xshield_gateway::{
     GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, InternalResponse,
     ResourceLocation, ResourceOperation,
-    auth_binding::{AuthBindingRule, AuthTransitionRule},
+    auth_binding::{AuthBindingRule, AuthRevokeRule, AuthTransitionRule},
     share_token::ShareTokenIssuer,
 };
 use xshield_postgres::{
     AnonymousSessionEstablishment, AnonymousSessionWriteOutcome, BindingEstablishment,
-    ContextSwitchOutcome, CredentialTransition, IdentityContextSwitch, PostgresIdentityStore,
-    RefreshOutcome, SensorSession, SensorSessionQuery, SensorSessionState, StoreError,
+    BindingRevocation, BindingRevocationOutcome, ContextSwitchOutcome, CredentialTransition,
+    IdentityContextSwitch, PostgresIdentityStore, RefreshOutcome, SensorSession,
+    SensorSessionQuery, SensorSessionState, StoreError,
 };
 use zeroize::Zeroizing;
 
@@ -685,6 +686,58 @@ impl ProtectedIdentity {
         {
             ContextSwitchOutcome::Updated { .. } => Ok(()),
             ContextSwitchOutcome::Conflict => Err(ReasonCode::AuthEpochChanged),
+        }
+    }
+
+    /// Commit an explicit logout/revocation response and its request-bound audit event.
+    /// A stale or already revoked snapshot fails closed before the response is released.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn commit_auth_revoke(
+        &self,
+        config: &GatewayConfig,
+        rule: &AuthRevokeRule,
+        identity: &ResponseIdentity,
+        request_id: &RequestId,
+        trace_id: &str,
+        status: u16,
+        now: UnixSeconds,
+    ) -> Result<(), ReasonCode> {
+        if !rule.applies(status) {
+            return Ok(());
+        }
+        let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7()))
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let payload = serde_json::json!({
+            "stage": "identity_lifecycle",
+            "outcome": "PASS",
+            "reason_code": "AUTH_BINDING_REVOKED",
+            "binding_id": identity.snapshot.binding_id().as_str(),
+            "principal_ref": identity.snapshot.principal_ref(),
+            "authorization_context_ref": identity.snapshot.authorization_context_ref().as_str(),
+            "auth_epoch": identity.snapshot.epoch().value(),
+            "credential_generation": identity.snapshot.generation().value(),
+            "rotation_reason": "explicit_logout",
+        });
+        let envelope = identity_envelope(
+            config,
+            request_id,
+            trace_id,
+            &event_id,
+            "binding.revoked",
+            &payload,
+        )?;
+        let command = BindingRevocation::new(&identity.snapshot, now, &event_id, &envelope)
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        match self
+            .store()
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)?
+            .revoke_binding(command)
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)?
+        {
+            BindingRevocationOutcome::Revoked => Ok(()),
+            BindingRevocationOutcome::Conflict => Err(ReasonCode::AuthBindingRevoked),
         }
     }
 

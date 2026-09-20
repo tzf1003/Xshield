@@ -11,6 +11,7 @@ pub(super) const EVENT_TYPES: &[&str] = &[
     "binding.created",
     "identity.refreshed",
     "epoch.changed",
+    "binding.revoked",
 ];
 
 #[derive(Deserialize)]
@@ -77,12 +78,26 @@ struct EpochChanged {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BindingRevoked {
+    stage: String,
+    outcome: String,
+    reason_code: String,
+    binding_id: String,
+    principal_ref: String,
+    authorization_context_ref: String,
+    auth_epoch: u64,
+    credential_generation: u64,
+    rotation_reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CredentialAudit {
     kind: String,
     fingerprint: String,
 }
 
-// Keep the four closed wire grammars together for contract review.
+// Keep the closed wire grammars together for contract review.
 #[allow(clippy::too_many_lines)]
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
     // Each successful identity transaction is its own producer run. Its request
@@ -176,6 +191,23 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
                 value.binding_id,
             )
         }
+        "binding.revoked" => {
+            let value: BindingRevoked = serde_json::from_str(event.payload.get())?;
+            if !valid_counter(value.auth_epoch)
+                || !valid_counter(value.credential_generation)
+                || !valid_subject(&value.principal_ref)
+                || !valid_subject(&value.authorization_context_ref)
+                || value.rotation_reason != "explicit_logout"
+            {
+                return Err(PublishError::InvalidEvent);
+            }
+            (
+                value.stage,
+                value.outcome,
+                value.reason_code,
+                value.binding_id,
+            )
+        }
         _ => return Err(PublishError::UnsupportedEventType),
     };
     let expected_reason = match event.event_type.as_str() {
@@ -183,6 +215,7 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         "binding.created" => "BINDING_CREATED",
         "identity.refreshed" => "IDENTITY_REFRESHED",
         "epoch.changed" => "IDENTITY_CONTEXT_CHANGED",
+        "binding.revoked" => "AUTH_BINDING_REVOKED",
         _ => return Err(PublishError::UnsupportedEventType),
     };
     if stage != "identity_lifecycle"

@@ -265,7 +265,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
         (OutboxFamily::Case, 3),
         (OutboxFamily::EvidenceCatalog, 2),
         (OutboxFamily::EvidenceAccess, 3),
-        (OutboxFamily::Identity, 4),
+        (OutboxFamily::Identity, 5),
         (OutboxFamily::Grant, 1),
         (OutboxFamily::ResponseGrant, 1),
         (OutboxFamily::ShareGrant, 1),

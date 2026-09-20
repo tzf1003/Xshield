@@ -323,6 +323,7 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"auth.refresh.switch","method":"POST","path":"/refresh-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_refresh":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
     {"operation_id":"auth.context.switch","method":"POST","path":"/account-switch","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
     {"operation_id":"auth.context.switch.same","method":"POST","path":"/account-switch-same","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
+    {"operation_id":"auth.logout","method":"POST","path":"/logout","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"auth_revoke":{"success_status":200}}},
     {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.slow","method":"GET","path":"/slow-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.current","method":"GET","path":"/whoami","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
@@ -371,6 +372,7 @@ class Handler(BaseHTTPRequestHandler):
             "/refresh-switch": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:admin"},"access_token":"other-business-token"}',
             "/account-switch": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:admin"},"access_token":"context-admin-business-token"}',
             "/account-switch-same": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"other-business-token"}',
+            "/logout": b'{"logged_out":true}',
             "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
             "/slow-account": b'{"orders":[{"id":"order-late"}]}',
             "/account": b'{"orders":[{"id":"order-456"},{"id":"order-457"}]}',
@@ -1256,6 +1258,53 @@ SQL
 )
 [[ "$share_secret_events" == "0" ]]
 
+logout_status=$(curl -sS -D "$test_dir/logout.headers" -o "$test_dir/logout.body" -w '%{http_code}' \
+    -X POST \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $context_admin_bearer" \
+    http://127.0.0.1:6288/logout)
+[[ "$logout_status" == "200" ]]
+[[ "$(<"$test_dir/logout.body")" == '{"logged_out":true}' ]]
+grep -qi '^cache-control: private, no-store' "$test_dir/logout.headers"
+logout_binding_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT binding.status,
+       count(credential.*) FILTER (WHERE credential.status = 'revoked'),
+       count(outbox.*) FILTER (WHERE outbox.event_type = 'binding.revoked')
+FROM xshield.auth_bindings binding
+LEFT JOIN xshield.credential_bindings credential
+  ON credential.tenant_id = binding.tenant_id
+ AND credential.site_id = binding.site_id
+ AND credential.binding_id = binding.binding_id
+LEFT JOIN xshield.audit_outbox outbox
+  ON outbox.tenant_id = binding.tenant_id
+ AND outbox.site_id = binding.site_id
+ AND outbox.aggregate_ref = binding.binding_id
+WHERE binding.tenant_id = 'tenant_gateway'
+  AND binding.site_id = 'site_gateway'
+  AND binding.binding_id = 'auth_018f2a3b-4c5d-7000-8000-000000000901'
+GROUP BY binding.status;
+SQL
+)
+[[ "$logout_binding_state" == "revoked|3|1" ]]
+logout_secret_events=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v bearer="$context_admin_bearer" -v session_id="$session_id" <<'SQL'
+SELECT count(*) FROM xshield.audit_outbox
+WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+  AND event_type = 'binding.revoked'
+  AND (position(:'bearer' IN envelope::text) > 0
+       OR position(:'session_id' IN envelope::text) > 0);
+SQL
+)
+[[ "$logout_secret_events" == "0" ]]
+set +e
+curl -sS -o "$test_dir/post-logout.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $context_admin_bearer" \
+    http://127.0.0.1:6288/whoami >"$test_dir/post-logout.status"
+set -e
+[[ "$(<"$test_dir/post-logout.status")" == "403" ]]
+grep -q 'AUTH_BINDING_MISMATCH' "$test_dir/post-logout.body"
+
 kill -KILL "$gateway_pid"
 wait "$gateway_pid" 2>/dev/null || true
 gateway_pid=""
@@ -1270,6 +1319,7 @@ origin_pid=""
 [[ $(grep -c '^POST /refresh-switch$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^POST /account-switch$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^POST /account-switch-same$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^POST /logout$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^GET /slow-account$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^GET /whoami$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]

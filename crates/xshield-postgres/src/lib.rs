@@ -205,6 +205,14 @@ pub struct IdentityContextSwitch<'a> {
     authorization_context_ref: &'a AuthorizationContextRef,
 }
 
+/// One verified identity snapshot ready for atomic binding revocation.
+pub struct BindingRevocation<'a> {
+    snapshot: &'a AuthSnapshot,
+    now: UnixSeconds,
+    event_id: &'a EventId,
+    event_envelope: &'a Value,
+}
+
 impl<'a> CredentialTransition<'a> {
     /// Validates a credential transition persistence command.
     ///
@@ -268,6 +276,38 @@ impl<'a> IdentityContextSwitch<'a> {
     }
 }
 
+impl<'a> BindingRevocation<'a> {
+    /// Validates a binding-revocation persistence command.
+    ///
+    /// The complete v3 envelope is supplied by the trusted transaction
+    /// producer and is persisted byte-for-byte as JSONB. Binding liveness and
+    /// expiry are checked again while holding the database row lock.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidCommand`] for a zero/uncopiable epoch or a
+    /// non-object event envelope.
+    pub fn new(
+        snapshot: &'a AuthSnapshot,
+        now: UnixSeconds,
+        event_id: &'a EventId,
+        event_envelope: &'a Value,
+    ) -> Result<Self, StoreError> {
+        if snapshot.epoch().value() == 0
+            || i64::try_from(snapshot.epoch().value()).is_err()
+            || i64::try_from(now.value()).is_err()
+            || !event_envelope.is_object()
+        {
+            return Err(StoreError::InvalidCommand);
+        }
+        Ok(Self {
+            snapshot,
+            now,
+            event_id,
+            event_envelope,
+        })
+    }
+}
+
 /// Result of an optimistic identity refresh transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefreshOutcome {
@@ -296,6 +336,15 @@ pub enum ContextSwitchOutcome {
         /// Newly committed generation.
         current_generation: CredentialGeneration,
     },
+    /// Binding state no longer matches the request snapshot.
+    Conflict,
+}
+
+/// Result of an optimistic binding-revocation transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BindingRevocationOutcome {
+    /// Binding, credentials, and outbox event committed atomically.
+    Revoked,
     /// Binding state no longer matches the request snapshot.
     Conflict,
 }
@@ -718,6 +767,102 @@ impl PostgresIdentityStore {
                     .map_err(|_| StoreError::NumericRange("credential_generation"))?,
             ),
         })
+    }
+
+    /// Atomically revokes one active binding and all of its live credentials.
+    ///
+    /// The binding row is locked using the complete tenant/site, binding,
+    /// principal, authorization-context, and epoch snapshot. Current
+    /// active/transition credentials are then locked before both their status
+    /// and the binding status are changed. The supplied complete v3
+    /// `binding.revoked` envelope is inserted in the same transaction.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for invalid numeric bounds, corrupt stored
+    /// values, or a database/transaction failure. A failed insert or commit
+    /// leaves the binding and credentials unchanged.
+    pub async fn revoke_binding(
+        &self,
+        command: BindingRevocation<'_>,
+    ) -> Result<BindingRevocationOutcome, StoreError> {
+        let epoch = to_i64(command.snapshot.epoch().value(), "auth_epoch")?;
+        let now = to_i64(command.now.value(), "now")?;
+        let mut transaction = self.pool.begin().await?;
+
+        let binding = sqlx::query(
+            "SELECT binding_id
+             FROM xshield.auth_bindings
+             WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
+               AND principal_ref = $4 AND authorization_context_ref = $5
+               AND auth_epoch = $6 AND status = 'active'
+               AND absolute_expires_at > to_timestamp($7)
+             FOR UPDATE",
+        )
+        .bind(command.snapshot.tenant_id().as_str())
+        .bind(command.snapshot.site_id().as_str())
+        .bind(command.snapshot.binding_id().as_str())
+        .bind(command.snapshot.principal_ref())
+        .bind(command.snapshot.authorization_context_ref().as_str())
+        .bind(epoch)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(_) = binding else {
+            transaction.rollback().await?;
+            return Ok(BindingRevocationOutcome::Conflict);
+        };
+        // Lock every still-usable credential before revoking it. This includes
+        // transition rows from a previous rotation so no credential can remain
+        // usable after the binding reaches its terminal state.
+        sqlx::query(
+            "SELECT credential_kind
+             FROM xshield.credential_bindings
+             WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
+               AND status IN ('active', 'transition')
+             FOR UPDATE",
+        )
+        .bind(command.snapshot.tenant_id().as_str())
+        .bind(command.snapshot.site_id().as_str())
+        .bind(command.snapshot.binding_id().as_str())
+        .fetch_all(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            "UPDATE xshield.credential_bindings
+             SET status = 'revoked'
+             WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
+               AND status IN ('active', 'transition')",
+        )
+        .bind(command.snapshot.tenant_id().as_str())
+        .bind(command.snapshot.site_id().as_str())
+        .bind(command.snapshot.binding_id().as_str())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE xshield.auth_bindings
+             SET status = 'revoked', updated_at = to_timestamp($1)
+             WHERE tenant_id = $2 AND site_id = $3 AND binding_id = $4",
+        )
+        .bind(now)
+        .bind(command.snapshot.tenant_id().as_str())
+        .bind(command.snapshot.site_id().as_str())
+        .bind(command.snapshot.binding_id().as_str())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO xshield.audit_outbox (
+                event_id, tenant_id, site_id, aggregate_ref, event_type, envelope
+             ) VALUES ($1, $2, $3, $4, 'binding.revoked', $5)",
+        )
+        .bind(command.event_id.as_str())
+        .bind(command.snapshot.tenant_id().as_str())
+        .bind(command.snapshot.site_id().as_str())
+        .bind(command.snapshot.binding_id().as_str())
+        .bind(command.event_envelope)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(BindingRevocationOutcome::Revoked)
     }
 }
 

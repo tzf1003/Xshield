@@ -30,6 +30,20 @@ pub struct AuthTransitionRule {
     pub(crate) credential_ttl_seconds: u64,
 }
 
+/// Validated explicit logout/revocation response semantics for an existing binding.
+#[derive(Debug)]
+pub struct AuthRevokeRule {
+    pub(crate) success_status: u16,
+}
+
+impl AuthRevokeRule {
+    /// Returns whether this origin response authorizes binding revocation.
+    #[must_use]
+    pub const fn applies(&self, status: u16) -> bool {
+        status == self.success_status
+    }
+}
+
 impl AuthBindingRule {
     /// Returns whether this origin response can establish a binding.
     #[must_use]

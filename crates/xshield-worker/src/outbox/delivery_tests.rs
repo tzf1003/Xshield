@@ -92,7 +92,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         }
     }
     let other_id = format!("ev_{}", Uuid::now_v7());
-    sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,'binding','binding.revoked','{}')")
+    sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,'binding','future.event','{}')")
         .bind(&other_id).bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str())
         .execute(pool).await.unwrap();
 
@@ -100,7 +100,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         (OutboxFamily::Case, 3),
         (OutboxFamily::EvidenceCatalog, 2),
         (OutboxFamily::EvidenceAccess, 3),
-        (OutboxFamily::Identity, 4),
+        (OutboxFamily::Identity, 5),
         (OutboxFamily::Grant, 1),
         (OutboxFamily::ResponseGrant, 1),
         (OutboxFamily::ShareGrant, 1),
@@ -144,7 +144,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
     }
     let published: i64 = sqlx::query_scalar("SELECT count(*) FROM xshield.audit_outbox WHERE tenant_id = $1 AND published_at IS NOT NULL AND lease_token IS NULL")
         .bind(scope.tenant_id().as_str()).fetch_one(pool).await.unwrap();
-    assert_eq!(published, 15);
+    assert_eq!(published, 16);
     let attempts: i32 = sqlx::query_scalar(
         "SELECT delivery_attempts FROM xshield.audit_outbox WHERE event_id = $1",
     )

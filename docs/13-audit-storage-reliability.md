@@ -48,7 +48,7 @@ DENY 也应记录；磁盘耗尽时预留独立的小型紧急事件区。若紧
 
 ## 13.5 outbox 与资格发行
 
-资格与 grant_event outbox 同 PostgreSQL 事务提交，publisher 按 ID 重试发送审计。当前发布器已交付案件、证据目录、证据访问、身份生命周期、通用资源资格、响应资格发行和分享发行七族闭环，精确事件清单见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)：租约字段与业务状态同库但不与 ClickHouse 网络共持事务锁，消费者在独立 ClickHouse 写入和 event_id/content_digest 冲突复核成功后，才以精确 tenant/site/event/token 更新 `published_at`。连接失败、结构无效和完整性冲突都保留原行并写稳定 `last_error_code`，不把日志或 ClickHouse 结果当授权真值。通用资源资格库入口从冻结的类型化命令生成事件，只索引批准约束摘要；其 HTTP 发行适配器仍待交付。响应资格完整事件保留冻结发行时间与批内序号；分享库 API 保留稳定 event/share ID、冻结时间和精确重试正文，HTTP 发行适配器仍待接入。历史稀疏行以 `OUTBOX_INVALID_EVENT` 保持未确认，发布重试不会重新发行资格。响应释放前等待资格事务成功及该请求要求的审计耐久屏障；尚未适配的 outbox 族继续可见地积压，不得静默丢弃或按 journal 契约解释。
+资格与 grant_event outbox 同 PostgreSQL 事务提交，publisher 按 ID 重试发送审计。当前发布器已交付案件、证据目录、证据访问、身份生命周期、通用资源资格、响应资格发行和分享发行七族闭环，精确事件清单见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)：租约字段与业务状态同库但不与 ClickHouse 网络共持事务锁，消费者在独立 ClickHouse 写入和 event_id/content_digest 冲突复核成功后，才以精确 tenant/site/event/token 更新 `published_at`。连接失败、结构无效和完整性冲突都保留原行并写稳定 `last_error_code`，不把日志或 ClickHouse 结果当授权真值。通用资源资格库入口从冻结的类型化命令生成事件，只索引批准约束摘要；其 HTTP 发行适配器仍待交付。响应资格完整事件保留冻结发行时间与批内序号；分享库 API 保留稳定 event/share ID、冻结时间和精确重试正文。身份撤销与 HTTP 分享发行已接入，历史稀疏行以 `OUTBOX_INVALID_EVENT` 保持未确认，发布重试不会重新发行资格。响应释放前等待资格事务成功及该请求要求的审计耐久屏障；尚未适配的 outbox 族继续可见地积压，不得静默丢弃或按 journal 契约解释。
 
 Xshield 事务只保护本系统状态，不覆盖原站数据库或外部支付。长时模型/网络工作在事务外完成，提交时再验 epoch 和策略版本。[S08]
 
