@@ -77,7 +77,9 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 ## 11.7 已实现的管理访问审计发布
 
-封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.grant.read`、`console.binding.read`、`console.query.executed`、`console.case.read`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
+封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.grant.read`、`console.binding.read`、`console.query.executed`、`console.case.read`、`console.case.list`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
+
+`console.case.list` 固定对应 `GET /control/v1/cases`，成功（含空页）要求主体和 `CONTROL_CASES_READ`。全部 target 字段、query_digest、bytes_read 仅允许缺省/null，evidence_refs 为空；事件不保存案件用途、列表正文或游标。权限/输入/预算拒绝为 DENY，依赖失败为 ERROR；启用端点前先升级管理 journal 发布器。
 
 `console.grant.read` 仅对应 `GET /control/v1/grants/{grant_id}`；已校验的目标使用可选 `target_grant_id`，成功（含未找到）必须携带该字段。该目标只属于此路由，失败保留已完成校验的引用，其他路由保持字段缺省；不记录账本正文、资格状态或绑定快照。部署先升级管理 journal 发布器再启用新查询端点，旧发布器遇到新事件会停止推进并保留待发布段。
 

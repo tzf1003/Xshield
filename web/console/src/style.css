@@ -324,6 +324,28 @@ main {
   padding-top: 18px;
 }
 
+.case-list {
+  margin-bottom: 22px;
+}
+
+.case-list .panel-heading,
+.case-list-observation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.case-list > .footnote,
+.case-list-observation {
+  padding: 12px 22px;
+  overflow-wrap: anywhere;
+}
+
+.case-list-purpose {
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+}
+
 .case-grid {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr);

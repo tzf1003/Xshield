@@ -13,6 +13,7 @@ import type {
   CaseClosed,
 } from "./cases";
 import { Rows } from "./panels";
+import { CaseList } from "./CaseList";
 
 type Action = "create" | "add" | "close";
 type FrozenRequest = {
@@ -109,13 +110,13 @@ export function CasePanel({
     return () => window.removeEventListener("beforeunload", warn);
   }, [unresolved]);
 
-  function browse(cursor?: string) {
-    if (!casePattern.test(caseId) || inFlight.current) return;
+  function browse(cursor?: string, target = caseId) {
+    if (!casePattern.test(target) || inFlight.current) return;
     onInvalidate();
     setCollection(null);
     setReadError(null);
     void onRun<CaseCollection>(
-      (api, signal) => api.caseItems(caseId, cursor, signal),
+      (api, signal) => api.caseItems(target, cursor, signal),
       setCollection,
       setReadError,
     );
@@ -209,6 +210,20 @@ export function CasePanel({
           </p>
         </div>
       </div>
+      <CaseList
+        active={active}
+        busy={busy || attempt?.phase === "pending"}
+        onLoad={(cursor, apply, fail) => {
+          if (inFlight.current) return;
+          onInvalidate();
+          void onRun((api, signal) => api.cases(cursor, signal), apply, fail);
+        }}
+        onOpen={(target) => {
+          if (inFlight.current) return;
+          setCaseId(target);
+          browse(undefined, target);
+        }}
+      />
       <div className="case-grid">
         <section className="panel" aria-label="案件操作">
           <div className="panel-heading">

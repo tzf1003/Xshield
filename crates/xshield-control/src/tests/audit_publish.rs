@@ -127,6 +127,11 @@ async fn access_journal() -> AccessJournal {
     for (method, path, body) in [
         (
             "GET",
+            "/control/v1/cases?cursor=bad".to_owned(),
+            String::new(),
+        ),
+        (
+            "GET",
             format!("/control/v1/cases/{CASE}/items?cursor=bad"),
             String::new(),
         ),
@@ -214,6 +219,7 @@ fn assert_access_families(events: &[Value]) {
             "console.binding.read",
             "console.query.executed",
             "console.case.read",
+            "console.case.list",
             "console.evidence.hold.created",
             "console.evidence.hold.released",
             "console.evidence.hold.read",
@@ -289,6 +295,7 @@ fn append_access_contracts(control: &ControlPlane) {
         .unwrap();
     for action in [
         HEALTH_ACCESS,
+        crate::case_list::ACCESS,
         REQUEST_EVENTS_ACCESS,
         REQUEST_SUMMARY_ACCESS,
         REQUEST_EVIDENCE_ACCESS,
@@ -312,6 +319,15 @@ fn append_access_contracts(control: &ControlPlane) {
             .unwrap();
     }
     for (action, target_request, target_artifact, target_case, target_access, reason, refs) in [
+        (
+            crate::case_list::ACCESS,
+            None,
+            None,
+            None,
+            None,
+            "CONTROL_CASES_READ",
+            vec![],
+        ),
         (
             HEALTH_ACCESS,
             None,

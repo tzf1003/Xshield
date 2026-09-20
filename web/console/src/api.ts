@@ -42,15 +42,18 @@ import type { GrantResponse, BindingResponse } from "./ledger.ts";
 import {
   validateCaseId,
   validateCaseCursor,
+  validateCaseListCursor,
   validCaseText,
   validIdempotencyKey,
   decodeCaseCreated,
+  decodeCaseList,
   decodeCaseCollection,
   decodeCaseItemAdded,
   decodeCaseClosed,
 } from "./cases.ts";
 import type {
   CaseCreated,
+  CaseList,
   CaseCollection,
   CaseItemAdded,
   CaseClosed,
@@ -936,6 +939,21 @@ export class ControlClient {
       (value) => decodeSearchResponse(value, frozen, digest, cursor),
       signal,
       body,
+    );
+  }
+
+  /** List only the authenticated owner's cases in descending identity order.
+   * Each page is freshly authorized; the cursor cannot select a different scope.
+   */
+  async cases(cursor?: string, signal?: AbortSignal): Promise<CaseList> {
+    validateCaseListCursor(cursor);
+    return this.#request(
+      `cases${this.#cursor(cursor)}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeCaseList(value, cursor);
+      },
+      signal,
     );
   }
 

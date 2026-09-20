@@ -29,7 +29,7 @@ try {
   globalThis.fetch = async (input, options) => {
     assert.match(
       String(input),
-      /^\/control\/v1\/cases(?:\/case_[a-f0-9-]+\/(?:items|close)(?:\?cursor=[a-zA-Z0-9_.-]+)?)?$/,
+      /^\/control\/v1\/cases(?:\/case_[a-f0-9-]+\/(?:items|close))?(?:\?cursor=[a-zA-Z0-9_.-]+)?$/,
     );
     assert.equal(options?.credentials, "omit");
     assert.equal(options?.redirect, "error");
@@ -40,6 +40,41 @@ try {
     const raw = await response.clone().json();
     assert.ok(!requestIds.has(raw.request_id));
     requestIds.add(raw.request_id);
+    if (response.ok) {
+      assert.equal(raw.tenant_id, "tenant_console_case_wire");
+      assert.equal(raw.site_id, "site_a");
+    }
+    if (
+      response.ok &&
+      options?.method === "GET" &&
+      /^\/control\/v1\/cases(?:\?|$)/.test(String(input))
+    ) {
+      assert.deepEqual(
+        Object.keys(raw).sort(),
+        [
+          "schema_version",
+          "request_id",
+          "tenant_id",
+          "site_id",
+          "as_of",
+          "items",
+          "truncated",
+          "next_cursor",
+        ].sort(),
+      );
+      assert.match(raw.as_of, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+      for (const item of raw.items) {
+        assert.deepEqual(
+          Object.keys(item).sort(),
+          ["case_id", "status", "purpose", "created_at"].sort(),
+        );
+        assert.match(
+          item.created_at,
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+        );
+        assert.notEqual(item.case_id, foreignCase);
+      }
+    }
     for (const excluded of [
       "locator",
       "key_ref",
@@ -67,6 +102,13 @@ try {
     "case-wire-disconnect-key",
   );
   assert.equal(recovered.replayed, true);
+  const initial = await client.cases(undefined, new AbortController().signal);
+  assert.deepEqual(
+    initial.items.map((item) => item.case_id),
+    [recovered.case_id],
+  );
+  assert.equal(initial.next_cursor, null);
+  assert.equal(initial.truncated, false);
   phase = 3;
   const created = await client.createCase(
     "Wire investigation",
@@ -85,6 +127,33 @@ try {
   await assert.rejects(
     client.createCase("Changed purpose", "case-wire-create-key"),
     fails("CONTROL_IDEMPOTENCY_CONFLICT", 409),
+  );
+  const cases = await client.cases();
+  assert.deepEqual(cases.items, [
+    {
+      case_id: id,
+      status: "open",
+      purpose: "Wire investigation",
+      created_at: created.created_at,
+    },
+  ]);
+  assert.equal(cases.truncated, true);
+  assert.ok(cases.next_cursor);
+  assert.match(cases.next_cursor, new RegExp(`^v1\\.${id}\\.[a-f0-9]{64}$`));
+  const older = await client.cases(cases.next_cursor);
+  assert.deepEqual(
+    older.items.map((item) => item.case_id),
+    [recovered.case_id],
+  );
+  assert.ok(id > recovered.case_id);
+  assert.equal(older.truncated, false);
+  assert.equal(older.next_cursor, null);
+  await assert.rejects(
+    client.cases(
+      cases.next_cursor.slice(0, -1) +
+        (cases.next_cursor.endsWith("0") ? "1" : "0"),
+    ),
+    fails("CONTROL_CURSOR_INVALID", 400),
   );
   phase = 4;
   assert.deepEqual((await client.caseItems(id)).items, []);
@@ -147,6 +216,9 @@ try {
     fails("CONTROL_CASE_EVIDENCE_TARGET_UNAVAILABLE", 404),
   );
   assert.equal((await client.caseItems(id)).case.status, "closed");
+  const closedCases = await client.cases();
+  assert.equal(closedCases.items[0]?.case_id, id);
+  assert.equal(closedCases.items[0]?.status, "closed");
   assert.equal(
     (await client.createCase("Wire investigation", "case-wire-create-key"))
       .status,
@@ -160,16 +232,18 @@ try {
     invalid.caseItems(id),
     fails("CONTROL_AUTH_REQUIRED", 401),
   );
+  await assert.rejects(invalid.cases(), fails("CONTROL_AUTH_REQUIRED", 401));
   phase = 8;
   origin = observerOrigin;
   for (const action of [
     () => client.createCase("Review", "case-wire-denied-key"),
+    () => client.cases(),
     () => client.caseItems(id),
     () => client.addCaseItem(id, first, "case-wire-denied-key"),
     () => client.closeCase(id, "Review", "case-wire-denied-key"),
   ])
     await assert.rejects(action(), fails("CONTROL_SCOPE_DENIED", 403));
-  assert.equal(requestIds.size, 24);
+  assert.equal(requestIds.size, 31);
 } catch {
   // Only the phase leaves this process; never dump credentials or server data.
   process.exitCode = phase;

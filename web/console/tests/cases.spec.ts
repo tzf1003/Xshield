@@ -12,6 +12,8 @@ import {
   CASE_KEY,
   CASE_PURPOSE,
   CASE_CURSOR,
+  CASE_LIST_CURSOR,
+  caseListFixture,
   caseCreatedFixture,
   caseCollectionFixture,
   caseItemAddedFixture,
@@ -54,6 +56,252 @@ async function browseCase(page: Page, caseId = CASE_ID) {
   await page
     .getByRole("button", { name: "读取案件 / 刷新首页", exact: true })
     .click();
+}
+
+test("case list explicitly reads live pages and opens a freshly authorized collection", async ({
+  page,
+}) => {
+  const calls = await mockCases(page, async (route, url) => {
+    if (url.pathname.endsWith("/items")) {
+      const body = caseCollectionFixture();
+      body.case.status = "closed";
+      body.as_of = "2026-09-20T08:12:00.000001Z";
+      await route.fulfill({ json: body });
+    } else {
+      const body = caseListFixture();
+      if (url.search) {
+        expect(url.searchParams.get("cursor")).toBe(CASE_LIST_CURSOR);
+        body.items = [caseCollectionFixture().case];
+        body.as_of = "2026-09-20T08:11:00.000001Z";
+        body.truncated = false;
+        body.next_cursor = null;
+      }
+      await route.fulfill({ json: body });
+    }
+  });
+  await connectCases(page);
+  const list = page.getByRole("region", { name: "我的案件", exact: true });
+  await expect(
+    list.getByText("读取本人案件后，选择一项打开证据集合。"),
+  ).toBeVisible();
+  expect(calls).toHaveLength(0);
+  await list.getByRole("button", { name: "读取我的案件 / 刷新列表" }).click();
+  await expect(
+    list.getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` }),
+  ).toBeVisible();
+  await expect(
+    list.getByText("2026-09-20T08:10:30.123456Z", { exact: true }),
+  ).toBeVisible();
+  expect(calls).toEqual([
+    { path: "/control/v1/cases", method: "GET", key: null, body: null },
+  ]);
+  await list.getByRole("button", { name: "下一页案件" }).click();
+  await expect(
+    list.getByRole("button", { name: `打开案件 ${CASE_ID}` }),
+  ).toBeVisible();
+  await expect(
+    list.getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` }),
+  ).toHaveCount(0);
+  await expect(
+    list.getByText("2026-09-20T08:11:00.000001Z", { exact: true }),
+  ).toBeVisible();
+  await expect(list.getByRole("button", { name: "下一页案件" })).toBeDisabled();
+  expect(calls.at(-1)).toEqual({
+    path: `/control/v1/cases?cursor=${encodeURIComponent(CASE_LIST_CURSOR)}`,
+    method: "GET",
+    key: null,
+    body: null,
+  });
+  await list.getByRole("button", { name: `打开案件 ${CASE_ID}` }).click();
+  const collection = page.getByRole("region", {
+    name: "案件证据集合",
+    exact: true,
+  });
+  await expect(
+    collection.getByText("案件已关闭，历史证据引用仍可浏览。"),
+  ).toBeVisible();
+  await expect(
+    collection.getByText("2026-09-20T08:12:00.000001Z", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("案件 ID", { exact: true })).toHaveValue(
+    CASE_ID,
+  );
+  expect(calls.at(-1)?.path).toBe(`/control/v1/cases/${CASE_ID}/items`);
+  expect(calls).toHaveLength(3);
+  await list.getByRole("button", { name: "读取我的案件 / 刷新列表" }).click();
+  await expect(
+    list.getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` }),
+  ).toBeVisible();
+  expect(calls.at(-1)?.path).toBe("/control/v1/cases");
+  expect(calls).toHaveLength(4);
+});
+
+test("case list renders purpose as text with healthy desktop and mobile layouts", async ({
+  page,
+}) => {
+  const problems: string[] = [];
+  page.on("pageerror", (error) => problems.push(error.message));
+  page.on("console", (message) => {
+    if (["error", "warning"].includes(message.type()))
+      problems.push(message.text());
+  });
+  const injection = '<img src=x onerror="window.caseListInjected=true">';
+  await mockCases(page, async (route) => {
+    const body = caseListFixture();
+    body.items[0]!.purpose = injection;
+    body.items.push({ ...caseCollectionFixture().case, status: "closed" });
+    body.truncated = false;
+    body.next_cursor = null;
+    await route.fulfill({ json: body });
+  });
+  await connectCases(page);
+  await expect(page).toHaveURL("http://127.0.0.1:5173/");
+  await expect(page).toHaveTitle("调查控制台 · Xshield");
+  await page.getByRole("button", { name: "读取我的案件 / 刷新列表" }).click();
+  const list = page.getByRole("region", { name: "我的案件", exact: true });
+  await expect(list.getByText(injection, { exact: true })).toBeVisible();
+  await expect(list.getByText("open · 开放", { exact: true })).toBeVisible();
+  await expect(
+    list.getByText("closed · 已关闭", { exact: true }),
+  ).toBeVisible();
+  await expect(list.locator("img")).toHaveCount(0);
+  expect(await page.evaluate(() => "caseListInjected" in window)).toBe(false);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  for (const width of [1536, 390]) {
+    await page.setViewportSize({ width, height: 1024 });
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect(
+      page.getByRole("heading", { name: "案件工作台", exact: true }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    if (process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR)
+      await page.screenshot({
+        path: resolve(
+          process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR,
+          `case-list-${width}.png`,
+        ),
+        fullPage: true,
+      });
+  }
+  expect(problems).toEqual([]);
+});
+
+for (const field of ["tenant_id", "site_id"] as const) {
+  test(`case list ${field} mismatch disconnects and clears existing rows`, async ({
+    page,
+  }) => {
+    await mockCases(page, async (route, _url, count) => {
+      const body = caseListFixture();
+      if (count > 1) {
+        body[field] = "other_scope";
+        body.items[0]!.purpose = "cross-scope-purpose";
+      }
+      await route.fulfill({ json: body });
+    });
+    await connectCases(page);
+    const refresh = page.getByRole("button", {
+      name: "读取我的案件 / 刷新列表",
+    });
+    await refresh.click();
+    await expect(
+      page.getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` }),
+    ).toBeVisible();
+    await refresh.click();
+    await expect(
+      page.getByRole("heading", { name: "连接管理服务" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("响应范围校验失败，连接已断开。"),
+    ).toBeVisible();
+    await expect(
+      page.getByText("cross-scope-purpose", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: "我的案件", exact: true }),
+    ).toHaveCount(0);
+  });
+}
+
+test("case list late refresh cannot restore rows or cursor after leaving the view", async ({
+  page,
+}) => {
+  let release!: () => void;
+  const ready = new Promise<void>((resolveReady) => {
+    release = resolveReady;
+  });
+  const calls = await mockCases(page, async (route, _url, count) => {
+    if (count === 2) await ready;
+    await route.fulfill({ json: caseListFixture() });
+  });
+  await connectCases(page);
+  const refresh = page.getByRole("button", { name: "读取我的案件 / 刷新列表" });
+  await refresh.click();
+  await expect(
+    page.getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` }),
+  ).toBeVisible();
+  await refresh.click();
+  await expect.poll(() => calls.length).toBe(2);
+  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  release();
+  await page.getByLabel("查询类型", { exact: true }).selectOption("case");
+  await expect(
+    page.getByText("读取本人案件后，选择一项打开证据集合。"),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "下一页案件" })).toHaveCount(0);
+  expect(calls).toHaveLength(2);
+  await refresh.click();
+  await expect(
+    page.getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` }),
+  ).toBeVisible();
+  expect(calls).toHaveLength(3);
+  expect(calls.at(-1)?.path).toBe("/control/v1/cases");
+});
+
+for (const [status, code] of [
+  [403, "CONTROL_SCOPE_DENIED"],
+  [429, "CONTROL_CASE_BUSY"],
+  [503, "CONTROL_CASE_STORE_UNAVAILABLE"],
+] as const) {
+  test(`case list ${status} failure keeps diagnostics until an explicit refresh`, async ({
+    page,
+  }) => {
+    const calls = await mockCases(page, async (route, _url, count) => {
+      if (count === 1)
+        await route.fulfill({ status, json: errorFixture(code) });
+      else
+        await route.fulfill({
+          json: {
+            ...caseListFixture(),
+            items: [],
+            truncated: false,
+            next_cursor: null,
+          },
+        });
+    });
+    await connectCases(page);
+    const list = page.getByRole("region", { name: "我的案件", exact: true });
+    const refresh = list.getByRole("button", {
+      name: "读取我的案件 / 刷新列表",
+    });
+    await refresh.click();
+    await expect(list.getByRole("alert")).toContainText(code);
+    await expect(refresh).toBeEnabled();
+    expect(calls).toHaveLength(1);
+    await refresh.click();
+    await expect(list.getByText("当前页没有本人案件。")).toBeVisible();
+    await expect(list.getByRole("alert")).toHaveCount(0);
+    await expect(
+      list.getByRole("button", { name: "下一页案件" }),
+    ).toBeDisabled();
+    expect(calls).toHaveLength(2);
+  });
 }
 
 test("case create → browse → add → refresh → close → browse uses explicit requests", async ({
@@ -375,16 +623,26 @@ test("case close can be recovered after reconnect with the original key and reas
   });
 });
 
-for (const action of ["add", "close"] as const) {
-  test(`case ${action} retry stays bound to the original case after a new lookup`, async ({
+for (const [action, lookup] of [
+  ["add", "new lookup"],
+  ["close", "new lookup"],
+  ["add", "case list selection"],
+  ["close", "case list selection"],
+] as const) {
+  test(`case ${action} retry stays bound to the original case after a ${lookup}`, async ({
     page,
   }) => {
     const calls = await mockCases(page, async (route, url, count) => {
       if (route.request().method() === "GET")
         await route.fulfill({
-          json: caseCollectionFixture(
-            url.pathname.includes(OTHER_CASE_ID) ? OTHER_CASE_ID : CASE_ID,
-          ),
+          json:
+            url.pathname === "/control/v1/cases"
+              ? caseListFixture()
+              : caseCollectionFixture(
+                  url.pathname.includes(OTHER_CASE_ID)
+                    ? OTHER_CASE_ID
+                    : CASE_ID,
+                ),
         });
       else if (count === 2) await route.abort("connectionreset");
       else
@@ -414,16 +672,38 @@ for (const action of ["add", "close"] as const) {
     await expect(
       page.getByRole("heading", { name: "操作结果未知" }),
     ).toBeVisible();
-    await browseCase(page, OTHER_CASE_ID);
+    if (lookup === "case list selection") {
+      await page
+        .getByRole("button", { name: "读取我的案件 / 刷新列表" })
+        .click();
+      await page
+        .getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` })
+        .click();
+    } else await browseCase(page, OTHER_CASE_ID);
     await expect(
       page.getByText("当前案件尚无证据引用。", { exact: true }),
     ).toBeVisible();
+    await expect(page.getByLabel("案件 ID", { exact: true })).toHaveValue(
+      OTHER_CASE_ID,
+    );
+    await expect(
+      page.getByRole("heading", { name: "操作结果未知" }),
+    ).toBeVisible();
+    expect(calls[1]).toEqual({
+      path: `/control/v1/cases/${CASE_ID}/${action === "add" ? "items" : "close"}`,
+      method: "POST",
+      key: CASE_KEY,
+      body:
+        action === "add"
+          ? { artifact_id: ARTIFACT_ID }
+          : { reason: "原关闭理由" },
+    });
     await page.getByRole("button", { name: "原样重试" }).click();
     await expect(
       page.getByText("true（返回原操作结果）", { exact: true }),
     ).toBeVisible();
-    expect(calls[3]).toEqual(calls[1]);
-    expect(calls[3]?.path).toContain(CASE_ID);
+    expect(calls).toHaveLength(lookup === "case list selection" ? 5 : 4);
+    expect(calls.at(-1)).toEqual(calls[1]);
   });
 }
 

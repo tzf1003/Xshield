@@ -170,6 +170,68 @@ def check_outbox_contracts(schemas: dict) -> None:
     check_hold_outbox_contracts(schemas['audit-event'], base)
     check_identity_outbox_contracts(schemas['audit-event'], base)
     check_control_hold_access_contracts(schemas['audit-event'], base)
+    check_control_case_list_contracts(schemas['audit-event'], base)
+
+def check_control_case_list_contracts(schema: dict, base: dict) -> None:
+    """Owner-scoped discovery records access facts, independently of page contents."""
+    event = copy.deepcopy(base)
+    event.update(event_type='console.case.list', producer_id='xshield-control',
+                 request_seq=1, policy_revision='control-v1', sensitivity='INTERNAL',
+                 cause_event_ids=[], evidence_refs=[])
+    event['payload'] = {'method': 'GET', 'path': '/control/v1/cases',
+                        'subject_ref': 'audit-operator', 'outcome': 'PASS',
+                        'reason_code': 'CONTROL_CASES_READ'}
+    prefix = 'control_case_list:'
+    check(prefix + 'success', valid(schema, event))
+    for field in ['method', 'path', 'subject_ref', 'outcome', 'reason_code']:
+        missing = copy.deepcopy(event)
+        del missing['payload'][field]
+        check(prefix + 'missing_' + field, not valid(schema, missing))
+        missing['payload'][field] = None
+        check(prefix + 'null_' + field, not valid(schema, missing))
+    for field, value in [
+        ('method', 'POST'), ('path', '/control/v1/cases?cursor=opaque'),
+        ('subject_ref', ''), ('subject_ref', 'actor\nname'), ('subject_ref', 'a' * 257),
+        ('outcome', 'UNKNOWN'), ('reason_code', 'CONTROL_CASE_CREATED'),
+        ('reason_code', 'invalid'), ('reason_code', 'CONTROL_CASES_READ\n'),
+        ('reason_code', 'A' * 129), ('purpose', 'investigation'), ('cursor', 'opaque'),
+        ('items', []), ('confidence', None),
+    ]:
+        invalid = copy.deepcopy(event)
+        invalid['payload'][field] = value
+        check(prefix + 'invalid_payload_' + field + '_' + str(value), not valid(schema, invalid))
+    for field in ['target_request_id', 'target_artifact_id', 'target_case_id',
+                  'target_access_request_id', 'target_model_call_id', 'target_grant_id',
+                  'target_binding_id', 'target_hold_id', 'query_digest', 'bytes_read']:
+        optional = copy.deepcopy(event)
+        optional['payload'][field] = None
+        check(prefix + 'null_' + field, valid(schema, optional))
+        optional['payload'][field] = 0 if field == 'bytes_read' else base['event_id']
+        check(prefix + 'reject_' + field, not valid(schema, optional))
+    for field, value in [
+        ('producer_id', 'investigation-case'), ('request_seq', 2),
+        ('policy_revision', 'case-v1'), ('sensitivity', 'RESTRICTED'),
+        ('request_id', None), ('request_id', base['event_id']),
+        ('tenant_id', 'tenant\n'), ('site_id', 'site\n'),
+        ('event_id', base['request_id']), ('example_only', True), ('schema_version', 2),
+        ('evidence_refs', base['evidence_refs']), ('cause_event_ids', [base['event_id']]),
+        ('connection_id', None), ('agent_run_id', None), ('unknown', None),
+    ]:
+        invalid = copy.deepcopy(event)
+        invalid[field] = value
+        check(prefix + 'invalid_envelope_' + field + '_' + str(value), not valid(schema, invalid))
+    for field, value in [('state', 'sealed'), ('previous_hash', 'a' * 64), ('event_hash', 'b' * 64)]:
+        invalid = copy.deepcopy(event)
+        invalid['integrity'][field] = value
+        check(prefix + 'integrity_' + field, not valid(schema, invalid))
+    for outcome in ['DENY', 'ERROR']:
+        failure = copy.deepcopy(event)
+        failure['payload'].update(outcome=outcome, reason_code='CONTROL_CASE_STORE_UNAVAILABLE')
+        for subject in ['audit-operator', None]:
+            failure['payload']['subject_ref'] = subject
+            check(prefix + outcome + '_subject_' + str(subject), valid(schema, failure))
+        del failure['payload']['subject_ref']
+        check(prefix + outcome + '_subject_absent', valid(schema, failure))
 
 def check_control_hold_access_contracts(schema: dict, base: dict) -> None:
     """Validate hold journal access attempts and their transaction boundary."""

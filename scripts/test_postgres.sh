@@ -91,6 +91,8 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control case_collection_success_is_scoped_and_audited -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+    cargo test -p xshield-control case_list_is_scoped_paginated_audited_and_disconnect_safe -- --ignored
+XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control case_close_is_durable_revokes_new_access_and_survives_disconnect -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control case_holds_are_scoped_idempotent_paginated_and_audited -- --ignored

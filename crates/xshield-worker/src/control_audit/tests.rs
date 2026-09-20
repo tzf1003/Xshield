@@ -114,6 +114,48 @@ fn management_success_denial_and_error_have_deterministic_nonterminal_summaries(
 }
 
 #[test]
+fn case_listing_publishes_only_scoped_access_facts() {
+    let mut value = event();
+    value["event_type"] = "console.case.list".into();
+    value["payload"]["path"] = "/control/v1/cases".into();
+    value["payload"]["target_case_id"] = Value::Null;
+    value["payload"]["reason_code"] = "CONTROL_CASES_READ".into();
+    value["evidence_refs"] = json!([]);
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    assert_eq!(row.confidence, None);
+    assert_eq!(row.is_terminal, 0);
+    for (field, content) in [
+        ("method", json!("POST")),
+        ("path", json!("/control/v1/cases?cursor=opaque")),
+        ("subject_ref", Value::Null),
+        ("target_case_id", json!(CASE)),
+        ("target_artifact_id", json!(ARTIFACT)),
+        ("query_digest", json!("a".repeat(64))),
+        ("bytes_read", json!(0)),
+        ("reason_code", json!("CONTROL_CASE_CREATED")),
+        ("purpose", json!("excluded")),
+        ("cursor", json!("excluded")),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
+    }
+    let mut referenced = value.clone();
+    referenced["evidence_refs"] = json!([ARTIFACT]);
+    rejected(&referenced, "case listing has no evidence targets");
+    for (outcome, reason) in [
+        ("DENY", "CONTROL_SCOPE_DENIED"),
+        ("ERROR", "CONTROL_CASE_STORE_UNAVAILABLE"),
+    ] {
+        value["payload"]["subject_ref"] = Value::Null;
+        value["payload"]["outcome"] = outcome.into();
+        value["payload"]["reason_code"] = reason.into();
+        assert_eq!(index(&value).unwrap().outcome, outcome);
+    }
+}
+
+#[test]
 fn rejects_mismatched_actions_subjects_outcomes_and_reasons() {
     for (pointer, value) in [
         ("/event_type", json!("case.created")),

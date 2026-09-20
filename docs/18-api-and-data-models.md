@@ -38,6 +38,8 @@ Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签�
 
 保留锁历史按 AuditAdministrator 的精确 tenant/site 查询，允许 open/closed 及其他所有者案件。只读单 SQL 快照连接案件、hold 和创建/释放 outbox，按 hold ID 取有界页及一个预读行；所有可见记录（含预读）均校验完整 outbox envelope。原始期限与释放字段连同数据库 `as_of` 返回，分页为实时快照；游标绑定凭证、主体、作用域、案件、页大小和最后 hold ID。列表和操作结果释放前须写独立管理 journal；自由文本理由不进入 journal 或 outbox。管理主体构造统一拒绝首尾空白，避免已认证主体与存储身份规则不一致。
 
+本人案件列表在 tenant/site/owner 范围内按 case ID 的 `C` 排序降序键集分页，包含 open/closed；迁移 `0021_m3_case_listing.sql` 为相同前缀建立覆盖排序的索引。单条只读 SQL 同时取得数据库时间、摘要和创建 outbox 关联，包括用于判断下一页的预读记录；坏行或关联偏差使整页失败。空页仍包含数据库观察时间，各页为实时观察。读取不修改案件或生成事务 outbox，释放结果前写独立 `console.case.list` 管理审计。
+
 ## 18.4 协议规则
 
 外部 API 与 audit event 含 schema_version。未知 critical enum 或版本拒绝；可扩展 metadata 只能保存非授权数据。金额、资源 ID、期限等使用明确类型，不靠浮点或 JS 自动类型转换。

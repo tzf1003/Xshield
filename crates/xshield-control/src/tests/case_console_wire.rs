@@ -274,7 +274,7 @@ async fn console_case_client_mutates_postgres_http_contract() {
             ("Wire investigation".to_owned(), "closed".to_owned())
         ]
     );
-    assert_eq!(events.len(), 23);
+    assert_eq!(events.len(), 29);
     for event in &events[..2] {
         assert_eq!(
             event["payload"]["reason_code"],
@@ -282,7 +282,26 @@ async fn console_case_client_mutates_postgres_http_contract() {
         );
         assert_eq!(event["payload"]["outcome"], "ERROR");
     }
-    assert_eq!(denied_events.len(), 4);
+    assert_eq!(denied_events.len(), 5);
+    let list_events: Vec<_> = events
+        .iter()
+        .filter(|event| event["event_type"] == "console.case.list")
+        .collect();
+    assert_eq!(list_events.len(), 6);
+    assert_eq!(
+        list_events
+            .iter()
+            .filter(|event| event["payload"]["reason_code"] == "CONTROL_CASES_READ")
+            .count(),
+        4
+    );
+    for event in list_events {
+        assert_eq!(event["payload"]["method"], "GET");
+        assert_eq!(event["payload"]["path"], "/control/v1/cases");
+        assert_eq!(event["evidence_refs"], json!([]));
+        assert!(event["payload"]["target_case_id"].is_null());
+        assert!(event["payload"]["query_digest"].is_null());
+    }
     assert_eq!(
         events
             .iter()

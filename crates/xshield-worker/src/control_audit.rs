@@ -20,6 +20,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.binding.read"
             | "console.query.executed"
             | "console.case.read"
+            | "console.case.list"
             | "console.evidence.hold.created"
             | "console.evidence.hold.released"
             | "console.evidence.hold.read"
@@ -82,6 +83,7 @@ impl AccessPayload {
     fn validate(&self, event: &WireEvent) -> Result<(), PublishError> {
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
+            "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
             "console.evidence.hold.created" => matches!(
                 self.reason_code.as_str(),
                 "CONTROL_EVIDENCE_HOLD_CREATED" | "CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED"
@@ -147,7 +149,8 @@ impl AccessPayload {
             (&self.target_hold_id, "ev_"),
         ];
         let allowed = match (event_type, self.method.as_str(), self.path.as_str()) {
-            ("console.health.read", "GET", "/control/v1/audit/health") => [false; 8],
+            ("console.health.read", "GET", "/control/v1/audit/health")
+            | ("console.case.list", "GET", "/control/v1/cases") => [false; 8],
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")
             | ("console.events.read", "GET", "/control/v1/requests/{request_id}/events")

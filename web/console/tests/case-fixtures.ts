@@ -1,5 +1,6 @@
 /** Synthetic case observations; no production identities, evidence or secrets. */
 import type {
+  CaseList,
   CaseCollection,
   CaseCreated,
   CaseItemAdded,
@@ -12,6 +13,7 @@ export const OTHER_CASE_ID = "case_018f2a3b-4c5d-7000-8000-000000000032";
 export const CASE_KEY = "synthetic-case-operation-key-0001";
 export const CASE_PURPOSE = "核对合成请求的证据引用";
 export const CASE_CURSOR = `v1.${ARTIFACT_ID}.${"a".repeat(64)}`;
+export const CASE_LIST_CURSOR = `v1.${OTHER_CASE_ID}.${"b".repeat(64)}`;
 const envelope = {
   request_id: "req_018f2a3b-4c5d-7000-8000-000000000099",
   tenant_id: "tenant_demo",
@@ -46,6 +48,15 @@ export function caseCollectionFixture(caseId = CASE_ID): CaseCollection {
     items: [],
     truncated: false,
     next_cursor: null,
+  };
+}
+export function caseListFixture(): CaseList {
+  const { case: facts, ...collection } = caseCollectionFixture(OTHER_CASE_ID);
+  return {
+    ...collection,
+    items: [facts],
+    truncated: true,
+    next_cursor: CASE_LIST_CURSOR,
   };
 }
 export function caseItemAddedFixture(

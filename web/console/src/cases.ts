@@ -23,6 +23,9 @@ export const casePattern = new RegExp(`^case_${uuid}(?![\\s\\S])`);
 const caseCursorPattern = new RegExp(
   `^v1\\.(artifact_${uuid})\\.[a-f0-9]{64}(?![\\s\\S])`,
 );
+const caseListCursorPattern = new RegExp(
+  `^v1\\.(case_${uuid})\\.[a-f0-9]{64}(?![\\s\\S])`,
+);
 export type CaseFacts = {
   case_id: string;
   status: "open" | "closed";
@@ -30,6 +33,13 @@ export type CaseFacts = {
   created_at: string;
 };
 export type CaseCreated = Envelope & CaseFacts & { replayed: boolean };
+export type CaseList = Envelope & {
+  schema_version: 3;
+  as_of: string;
+  items: CaseFacts[];
+  truncated: boolean;
+  next_cursor: string | null;
+};
 export type CaseItem = {
   artifact_id: string;
   added_by: string;
@@ -92,6 +102,13 @@ export function validateCaseCursor(cursor?: string): string | undefined {
   if (!match) throw new ApiError("CONTROL_CURSOR_INVALID");
   return match[1];
 }
+export function validateCaseListCursor(cursor?: string): string | undefined {
+  if (cursor === undefined) return undefined;
+  const match =
+    typeof cursor === "string" ? caseListCursorPattern.exec(cursor) : null;
+  if (!match) throw new ApiError("CONTROL_CURSOR_INVALID");
+  return match[1];
+}
 function caseTime(value: unknown, micros = false): string {
   const result = timestamp(value);
   ensure((micros ? /\.\d{6}Z$/ : /\.\d{3}Z$/).test(result));
@@ -114,6 +131,31 @@ function added(value: Record<string, unknown>) {
     added_by: value.added_by,
     added_at: caseTime(value.added_at),
   };
+}
+
+/** Owned case pages use descending case identity, not creation-time ordering.
+ * Every page is a live database observation and carries no content capability.
+ */
+export function decodeCaseList(value: unknown, cursor?: string): CaseList {
+  const row = object(value);
+  ensure(row.schema_version === 3);
+  const result: CaseList = {
+    ...envelope(row),
+    schema_version: 3,
+    as_of: caseTime(row.as_of, true),
+    items: list(row.items, 128, facts),
+    ...pagination(row),
+  };
+  let previous = validateCaseListCursor(cursor);
+  for (const item of result.items) {
+    ensure(previous === undefined || item.case_id < previous);
+    previous = item.case_id;
+  }
+  if (result.next_cursor !== null) {
+    const match = caseListCursorPattern.exec(text(result.next_cursor, 160));
+    ensure(match && result.items.length > 0 && match[1] === previous);
+  }
+  return result;
 }
 
 /** Correlate the immutable creation input; exact replay may report a closed case. */

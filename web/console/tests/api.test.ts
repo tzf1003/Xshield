@@ -1575,7 +1575,11 @@ test("development proxy permits fixed reads and exact search/case POST routes", 
     ["POST", `/control/v1/cases/${CASE_ID}/items`, true],
     ["POST", `/control/v1/cases/${CASE_ID}/close`, true],
     ["GET", `/control/v1/cases/${CASE_ID}/items?cursor=${CASE_CURSOR}`, true],
-    ["GET", "/control/v1/cases", false],
+    ["GET", "/control/v1/cases", true],
+    ["GET", `/control/v1/cases?cursor=${CASE_LIST_CURSOR}`, true],
+    ["GET", "/control/v1/cases/", false],
+    ["GET", `/control/v1/cases/${CASE_ID}`, false],
+    ["DELETE", "/control/v1/cases", false],
     ["GET", `/control/v1/cases/${CASE_ID}/close`, false],
     ["POST", `/control/v1/cases/${CASE_ID}/holds`, false],
     ["POST", `/control/v1/cases/${CASE_ID}/close?reason=other`, false],
@@ -1609,6 +1613,7 @@ test("development proxy permits fixed reads and exact search/case POST routes", 
 const CASE_ID = "case_018f2a3b-4c5d-7000-8000-000000000951";
 const CASE_KEY = "synthetic-case-key-01";
 const CASE_CURSOR = `v1.${ARTIFACT_ID}.${"a".repeat(64)}`;
+const CASE_LIST_CURSOR = `v1.${CASE_ID}.${"b".repeat(64)}`;
 const caseEnvelope = {
   request_id: REQUEST_ID,
   tenant_id: "tenant_a",
@@ -1644,6 +1649,191 @@ const casePage = () => ({
   ],
   truncated: true,
   next_cursor: CASE_CURSOR as string | null,
+});
+const caseListPage = () => ({
+  ...caseEnvelope,
+  schema_version: 3,
+  as_of: casePage().as_of,
+  items: [caseFacts()],
+  truncated: true,
+  next_cursor: CASE_LIST_CURSOR as string | null,
+});
+
+test("case list uses fixed GET pages and projects only owner case metadata", async (t) => {
+  const first = caseListPage();
+  const second = {
+    ...first,
+    as_of: "2026-09-20T01:03:00.000001Z",
+    items: [
+      {
+        ...caseFacts(),
+        case_id: CASE_ID.replace(/951$/, "950"),
+        status: "closed",
+        // Creation clocks can move independently of the UUID ordering.
+        created_at: "2026-09-20T01:03:00.000Z",
+      },
+    ],
+    truncated: false,
+    next_cursor: null,
+  };
+  const pages = [first, second, { ...second, items: [] }];
+  let count = 0;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (path: string, options: RequestInit) => {
+      assert.equal(
+        path,
+        `/control/v1/cases${count === 1 ? `?cursor=${CASE_LIST_CURSOR}` : ""}`,
+      );
+      assert.equal(options.method, "GET");
+      assert.equal(options.body, undefined);
+      assert.deepEqual(options.headers, {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: "application/json",
+      });
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.cache, "no-store");
+      assert.equal(options.redirect, "error");
+      assert.equal(options.referrerPolicy, "no-referrer");
+      assert.ok(options.signal instanceof AbortSignal);
+      const page = pages[count++]!;
+      return response({
+        ...page,
+        owner_subject: "private-owner",
+        items: page.items.map((item) => ({
+          ...item,
+          content: "private-content",
+          storage: { locator: "private-locator" },
+          key_ref: "private-key",
+          evidence_access: "private-capability",
+        })),
+      });
+    },
+  );
+  const client = new ControlClient(TOKEN);
+  assert.deepEqual(await client.cases(), first);
+  assert.deepEqual(await client.cases(CASE_LIST_CURSOR), second);
+  assert.deepEqual(await client.cases(), pages[2]);
+  assert.equal(count, 3);
+});
+
+test("case list rejects malformed pages, oversized lists and unbound descending cursors", async (t) => {
+  const page = caseListPage();
+  const item = caseFacts();
+  const earlier = { ...item, case_id: CASE_ID.replace(/951$/, "950") };
+  const malformed = [
+    { schema_version: 2 },
+    { schema_version: "3" },
+    { request_id: REQUEST_ID + "\n" },
+    { tenant_id: "tenant/other" },
+    { site_id: null },
+    { as_of: null },
+    { as_of: "2026-02-30T01:02:05.006007Z" },
+    { as_of: "2026-09-20T01:02:05.006Z" },
+    { as_of: "2026-09-20T01:02:05.006007+00:00" },
+    { items: null },
+    { items: [null] },
+    {
+      items: Array.from({ length: 129 }, (_, index) => ({
+        ...item,
+        case_id: CASE_ID.replace(/951$/, String(951 - index)),
+      })),
+      truncated: false,
+      next_cursor: null,
+    },
+    { items: [{ ...item, case_id: ARTIFACT_ID }] },
+    { items: [{ ...item, case_id: CASE_ID.toUpperCase() }] },
+    { items: [{ ...item, case_id: CASE_ID.replace("-7000-", "-4000-") }] },
+    { items: [{ ...item, status: "active" }] },
+    { items: [{ ...item, purpose: "" }] },
+    { items: [{ ...item, purpose: " padded" }] },
+    { items: [{ ...item, purpose: "bad\u0085text" }] },
+    { items: [{ ...item, purpose: "界".repeat(171) }] },
+    { items: [{ ...item, created_at: "2026-09-20T01:02:03.004005Z" }] },
+    { items: [{ ...item, created_at: "2026-02-30T01:02:03.004Z" }] },
+    { items: [item, item] },
+    { items: [earlier, item] },
+    { items: [] },
+    { truncated: false },
+    { truncated: "true" },
+    { next_cursor: null },
+    { next_cursor: CASE_CURSOR },
+    { next_cursor: CASE_LIST_CURSOR.replace(CASE_ID, earlier.case_id) },
+    { next_cursor: CASE_LIST_CURSOR + "\n" },
+    { next_cursor: CASE_LIST_CURSOR.toUpperCase() },
+  ];
+  const client = new ControlClient(TOKEN);
+  for (const patch of malformed) {
+    t.mock.method(globalThis, "fetch", async () =>
+      response({ ...page, ...patch }),
+    );
+    await assert.rejects(client.cases(), errorIs("INVALID_RESPONSE", 200));
+  }
+  // A later page must begin strictly below the incoming position.
+  for (const case_id of [CASE_ID, CASE_ID.replace(/951$/, "952")]) {
+    t.mock.method(globalThis, "fetch", async () =>
+      response({
+        ...page,
+        items: [{ ...item, case_id }],
+        truncated: false,
+        next_cursor: null,
+      }),
+    );
+    await assert.rejects(
+      client.cases(CASE_LIST_CURSOR),
+      errorIs("INVALID_RESPONSE", 200),
+    );
+  }
+  for (const status of [201, 202, 206]) {
+    t.mock.method(globalThis, "fetch", async () => response(page, status));
+    await assert.rejects(client.cases(), errorIs("INVALID_RESPONSE", status));
+  }
+});
+
+test("case list validates cursor and cancellation before IO", async (t) => {
+  const network = t.mock.method(globalThis, "fetch", async () => response({}));
+  const client = new ControlClient(TOKEN);
+  for (const cursor of [
+    "",
+    "bad",
+    "x".repeat(161),
+    CASE_CURSOR,
+    CASE_LIST_CURSOR.toUpperCase(),
+    CASE_LIST_CURSOR.replace("-7000-", "-4000-"),
+    CASE_LIST_CURSOR.replace("v1.", "v2."),
+    CASE_LIST_CURSOR.slice(0, -1),
+    `${CASE_LIST_CURSOR}\n`,
+    `${CASE_LIST_CURSOR}\u2028`,
+    `${CASE_LIST_CURSOR}&tenant_id=other`,
+    `%76${CASE_LIST_CURSOR.slice(1)}`,
+  ])
+    await assert.rejects(
+      client.cases(cursor),
+      errorIs("CONTROL_CURSOR_INVALID"),
+    );
+  await assert.rejects(
+    client.cases(undefined, AbortSignal.abort()),
+    errorIs("REQUEST_ABORTED"),
+  );
+  assert.equal(network.mock.callCount(), 0);
+});
+
+test("case list surfaces bounded service failures once for explicit retry", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const [status, code] of [
+    [401, "CONTROL_AUTH_REQUIRED"],
+    [403, "CONTROL_SCOPE_DENIED"],
+    [429, "CONTROL_CASE_BUSY"],
+    [503, "CONTROL_CASE_STORE_UNAVAILABLE"],
+    [503, "AUDIT_DURABILITY_FAILED"],
+  ] as const) {
+    const network = t.mock.method(globalThis, "fetch", async () =>
+      response(errorFixture(code), status),
+    );
+    await assert.rejects(client.cases(), errorIs(code, status));
+    assert.equal(network.mock.callCount(), 1);
+  }
 });
 
 test("case transport freezes exact mutation inputs, keys and fixed response correlations", async (t) => {

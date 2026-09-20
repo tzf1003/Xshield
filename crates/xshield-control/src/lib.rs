@@ -9,6 +9,7 @@ mod case_close;
 mod case_collection;
 mod case_holds;
 mod case_items;
+mod case_list;
 mod ledger_inspection;
 mod search;
 
@@ -3216,7 +3217,9 @@ pub fn router(control: ControlPlane) -> Router {
         )
         .route(
             CASES_PATH,
-            post(create_case_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+            post(create_case_handler)
+                .get(case_list::handler)
+                .layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
         )
         .route(
             case_items::PATH,
@@ -4166,6 +4169,7 @@ mod tests {
     mod case_holds;
     mod case_holds_postgres;
     mod case_items;
+    mod case_list;
     mod ledger_inspection;
     mod search_references;
 

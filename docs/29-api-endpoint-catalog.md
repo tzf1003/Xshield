@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -18,6 +18,7 @@
 | POST /control/v1/evidence-access-requests/{id}/deny | 独立拒绝并终结申请 | evidence.access.denied |
 | GET /control/v1/artifacts/{id}/content | 获批后读取，短时作用域能力 | evidence.read，含批准引用 |
 | POST /control/v1/cases | 建立调查案例 | case.created |
+| GET /control/v1/cases | 分页发现本人开放和已关闭案件 | console.case.list |
 | POST /control/v1/cases/{id}/items | 把获准证据加入案例 | case.evidence.added |
 | GET /control/v1/cases/{id}/items | 查询本人案件证据引用集合 | console.case.read |
 | POST /control/v1/cases/{id}/close | 关闭本人案件并保留调查历史 | case.closed |
@@ -248,3 +249,15 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 每次可审计尝试分别写 `console.evidence.hold.created/released/read`。创建/释放成功原因依次为 `CONTROL_EVIDENCE_HOLD_CREATED`、`CONTROL_EVIDENCE_HOLD_RELEASED`，重试为 `CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED`、`CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED`，列表为 `CONTROL_EVIDENCE_HOLD_READ`；失败使用对应稳定原因。写成功绑定 case/artifact/hold 及唯一 artifact 引用，列表只绑定 case 和本页去重 artifact 引用，失败只保留已校验目标且引用为空。管理 journal 不记录自由理由、期限、原键或响应正文；事务 outbox 独立记录实际状态转换。审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，已提交事务保留。所有响应 `private, no-store`。
 
 部署遵循 12.9 的迁移 0020 和清理升级顺序，并先升级管理 journal 发布器再开放三个端点，旧发布器遇到新事件会保留待发布段并停止推进。复用已有幂等与游标密钥，跨实例须保持一致；本增量无新依赖或 migration。管理主体启动校验现拒绝首尾空白；升级前核对 `XSHIELD_CONTROL_SUBJECT` 为原始规范身份，程序不会自动去空白以改变身份。
+
+## 29.22 已实现的本人案件列表契约
+
+`GET /control/v1/cases` 要求独立管理 Bearer、`Investigator` 及服务端固定 tenant/site，只返回当前管理主体拥有的 open/closed 案件。请求仅允许缺省查询或单个 `cursor`，拒绝 owner、status、scope 等额外字段、重复参数及重复认证头。发现案件不授予内容访问或保留权限，打开案件集合及后续变更仍重新鉴权。
+
+返回 schema_version=3、管理 request_id、tenant_id、site_id、数据库微秒 UTC `as_of`、items、truncated 和可空 next_cursor。每项只有 case_id、status、purpose、毫秒 UTC created_at；空页仍返回数据库观察时间。按规范 case ID 的 `C` 排序降序，不声称按 created_at 排序。页大小复用 `XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS`（1–128），每页独立观察；分页期间新增的更大 ID 须刷新首页才能看到。
+
+游标为 `v1.case_UUIDv7.64lowerhex`，用途域 `xshield-control-cases-cursor-v1` 的 HMAC 绑定管理凭证摘要、主体、tenant/site、页大小和最后输出案件 ID。下一页只读取小于该 ID 的记录；游标不能跨凭证、作用域、配置或其他端点复用。坏游标查库前返回 `CONTROL_CURSOR_INVALID`/400，签名服务不可用返回 `CONTROL_CURSOR_UNAVAILABLE`/503。单 SQL 只读快照连接案件与创建 outbox，校验 ID、owner、用途、状态及 outbox 的作用域、类型和 aggregate 绑定；包括用于判定下一页的多取一行，任何损坏使整页失败。
+
+入口与案件创建、关联、关闭、集合及保留锁操作共用单实例在途许可，繁忙返回 `CONTROL_CASE_BUSY`/429。数据库整体含连接池等待最多 15 秒，SQL/锁等待最多 5 秒；依赖故障、超时或损坏为 `CONTROL_CASE_STORE_UNAVAILABLE`/503。已准入读取在客户端断连后继续到数据库和管理审计终态，许可覆盖审计；进程退出仍是故障边界。每次可审计尝试写 `console.case.list`，成功含空页为 `CONTROL_CASES_READ`；4xx 为 DENY、5xx 为 ERROR。所有 target 字段、query_digest、bytes_read 缺省或 null，evidence_refs 为空，不记录用途、游标或列表正文。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果；响应统一 `private, no-store`。
+
+部署先应用 `0021_m3_case_listing.sql` 的 tenant/site/owner/case ID 降序索引，并升级管理 journal 发布器，再启用 API 与界面。索引采用事务内非并发构建，期间阻塞案件写入，大表须安排维护窗口；可回滚应用并保留这个加法索引。控制数据库角色需对 investigation_cases 和 audit_outbox 提供已有查询所需 SELECT；复用现有游标密钥，无新增依赖。

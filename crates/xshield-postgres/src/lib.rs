@@ -11,6 +11,7 @@ mod case_close;
 mod case_evidence;
 mod case_evidence_holds;
 mod case_evidence_read;
+mod case_list;
 mod evidence_access_decision;
 mod evidence_access_request;
 mod evidence_catalog;
@@ -46,6 +47,7 @@ pub use case_evidence_holds::{
 pub use case_evidence_read::{
     CaseEvidenceAvailability, CaseEvidenceItem, CaseEvidencePage, CaseEvidenceQuery,
 };
+pub use case_list::{InvestigationCasePage, InvestigationCaseQuery};
 pub use evidence_access_decision::{
     EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,
     EvidenceAccessDecisionWriteOutcome,
