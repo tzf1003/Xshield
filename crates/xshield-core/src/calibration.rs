@@ -16,6 +16,7 @@
 use crate::domain::ModelCallId;
 use std::{collections::BTreeSet, fmt};
 
+pub mod dataset;
 pub mod mapping;
 
 /// Maximum samples accepted per evaluation; checked before any allocation.

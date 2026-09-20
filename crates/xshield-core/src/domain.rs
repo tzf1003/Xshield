@@ -143,6 +143,14 @@ scoped_name!(ActionId, "action_id");
 scoped_name!(PageTemplate, "page_template");
 scoped_name!(MappingRevision, "mapping_revision");
 scoped_name!(FieldName, "field_name");
+scoped_name!(ApprovalRef, "approval_ref");
+scoped_name!(DatasetRevision, "dataset_revision");
+scoped_name!(LabelRevision, "label_revision");
+scoped_name!(TaskRevision, "task_revision");
+scoped_name!(ThresholdPolicyRevision, "threshold_policy_revision");
+scoped_name!(ModelRevision, "model_revision");
+scoped_name!(PromptRevision, "prompt_revision");
+scoped_name!(ProviderId, "provider_id");
 
 pub(crate) fn parse_lower_hex_32(value: &str) -> Option<[u8; 32]> {
     if value.len() != 64

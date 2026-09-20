@@ -110,9 +110,9 @@ Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 
 
 报告保留真值与建议的九格计数，以及概率缺失原因、未知标签和可评分样本数。误放率分母是全部已知 malicious，误拒率分母是全部已知 benign，均包含概率缺失的样本；覆盖率与弃权率分母是全部样本。分母为零返回 `None`。Brier 与十个固定可靠性桶只使用真值已知且概率有效的样本，未知标签与缺失分别计数。所有比例提供原始分子和分母，便于判断样本覆盖。
 
-调用者负责通过获准证据读取路径组装样本，并冻结数据集/标签修订、任务、概率映射、模型与提示版本、阈值策略和训练/校准/评估分区。二元恶意概率需要按批准任务从 Choice 风险候选或 Score 风险档位的完整分布映射；供应商 confidence 与 Score 加权均值不具备这一含义。UNKNOWN 概率质量必须按预先约定处理，不能删除后重归一。网关别名的精确版本未知状态必须保留；重复调用拒绝只能防止调用 ID 重复，数据同源、重试相关性与分区泄漏仍需独立校验。
+二元恶意概率需要按批准任务从 Choice 风险候选或 Score 风险档位的完整分布映射；供应商 confidence 与 Score 加权均值不具备这一含义。UNKNOWN 概率质量必须按预先约定处理，不能删除后重归一。网关别名的精确版本未知状态必须保留。`calibration::dataset` 已负责冻结引用、版本和声明的分区边界，具体契约见 10.14；受控证据读取、内容独立性审查和耐久报告仍由后续应用层负责。
 
-运行 `cargo run -p xshield-core --example offline_threshold_evaluation` 可查看固定合成样本的分母和 Brier 计算；示例只输出合成指标。当前交付的是统计内核及其测试，获准证据组装、持久报告/审计、跨站独立数据集、阈值选择与真实校准继续交付。
+运行 `cargo run -p xshield-core --example offline_threshold_evaluation` 可查看固定合成样本的分母和 Brier 计算；示例只输出合成指标。当前交付包括统计内核和数据集领域契约；持久报告/审计、跨站独立数据集审查、阈值选择与真实校准继续交付。
 
 ## 10.13 已实现批准概率映射
 
@@ -121,3 +121,13 @@ Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 
 映射修订和类别保存在内部输入证据，实际外发题目保持供应商原始契约。成功响应经完整分布校验后按批准类别求和，调用证据新增 `risk_projection`，保存 `mapping_revision`、三类原始概率质量、`abstained` 和稳定原因 `MODEL_RISK_PROJECTED` / `MODEL_RISK_ABSTAINED`。任意正的 unknown 质量均弃权；质量不删除、不重归一。总和容差沿用 `1e-6`；类别和高于 1 仅允许 `32 * f64::EPSILON` 的计算舍入，原始质量保留，转换为阈值内核信号时仅夹紧此数值边界。失败响应不生成投影，原响应取证与终态沿用现有流程。
 
 纯计算端口位于 `calibration::mapping`，限定 2–32 个唯一档位，规范化键顺序后累加；阈值评估器消费投影信号，供应商 confidence 和 Score 均值独立保存。映射名称是批准记录引用，批准权限、任务语义、分区与模型版本仍由调用者验证。启用读取调用记录的消费者应先升级支持可选 `risk_projection`；关闭新增映射输入可停止生成该字段，历史证据继续保留。
+
+## 10.14 已实现校准数据集领域契约
+
+`xshield_core::calibration::dataset` 在调用纯阈值内核前构造 `EvaluationProvenance` 和 `DatasetSample`。前者冻结 `approval_ref`、dataset/label/task/mapping/threshold-policy 修订、训练/校准/评估/标签四份 manifest artifact，以及 `ModelIdentity`；模型身份包含 provider、provider wire model、内部模型修订、提示修订和可选的 resolved provider revision。无法证明 Gateway alias 的精确实现修订时，`resolved_model_revision=None` 会保留在报告中，而不会从当前路由推断版本。
+
+四份 manifest 必须是不同 artifact，且任一 manifest 不得复用为样本的模型调用记录或标签 artifact；每个样本的两类 artifact 也必须不同。评估前会拒绝同一角色的重复 artifact、跨模型记录/标签角色复用、重复 `ModelCallId`、样本模型身份与冻结身份不一致，以及样本映射修订漂移。成功结果保留按样本顺序的 `ModelCallId`、模型记录与标签证据三元关联、冻结 provenance、阈值和原始指标，并以 `CALIBRATION_DATASET_EVALUATED` 供调用方写入自己的耐久审计。
+
+此层不读取、解密或授权任何 evidence，不调用模型、不发布策略、不改变资格，也不写 audit、journal、catalog 或报告。artifact ID 不同只能证明本次提交的引用集合不同，不能证明 manifest 或外部样本内容没有重叠，亦不能排除同源数据、重试相关性、标签质量或分区泄漏。应用层必须经批准的证据读取路径验证作用域、保留期、记录身份、映射、标签审查和内容独立性，并将报告证据及终态写入独立审计链；不得复用 `model.*` 生命周期冒充校准报告。
+
+使用 `cargo test -p xshield-core --all-targets` 运行该契约的纯 Rust 回归。测试验证冻结 provenance 与来源三元关联顺序、未知 resolved revision 的保留、四份 manifest 与样本来源的引用隔离，以及样本 artifact、模型身份、映射修订和 `ModelCallId` 的反例；它们不是授权读取、持久化、供应商调用或真实校准验证。
