@@ -16,6 +16,8 @@
 use crate::domain::ModelCallId;
 use std::{collections::BTreeSet, fmt};
 
+pub mod mapping;
+
 /// Maximum samples accepted per evaluation; checked before any allocation.
 pub const MAX_SAMPLES: usize = 10_000;
 /// Number of fixed reliability intervals covering `[0, 1]`.

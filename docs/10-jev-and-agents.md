@@ -113,3 +113,11 @@ Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 
 调用者负责通过获准证据读取路径组装样本，并冻结数据集/标签修订、任务、概率映射、模型与提示版本、阈值策略和训练/校准/评估分区。二元恶意概率需要按批准任务从 Choice 风险候选或 Score 风险档位的完整分布映射；供应商 confidence 与 Score 加权均值不具备这一含义。UNKNOWN 概率质量必须按预先约定处理，不能删除后重归一。网关别名的精确版本未知状态必须保留；重复调用拒绝只能防止调用 ID 重复，数据同源、重试相关性与分区泄漏仍需独立校验。
 
 运行 `cargo run -p xshield-core --example offline_threshold_evaluation` 可查看固定合成样本的分母和 Brier 计算；示例只输出合成指标。当前交付的是统计内核及其测试，获准证据组装、持久报告/审计、跨站独立数据集、阈值选择与真实校准继续交付。
+
+## 10.13 已实现批准概率映射
+
+离线评估输入可选 `risk_mapping={"revision":"risk-map-r1","classes":{"0":"benign","1":"unknown","2":"malicious"}}`，该示例对应三档 Score。Choice 使用候选名称作为键，必须将 `UNKNOWN` 标为 `unknown`。所有批准候选/档位必须精确覆盖，每个只能属于 benign、malicious 或 unknown，且至少有一个 benign 与 malicious。Noul 不接受此映射；省略映射的既有输入保持原有行为。
+
+映射修订和类别保存在内部输入证据，实际外发题目保持供应商原始契约。成功响应经完整分布校验后按批准类别求和，调用证据新增 `risk_projection`，保存 `mapping_revision`、三类原始概率质量、`abstained` 和稳定原因 `MODEL_RISK_PROJECTED` / `MODEL_RISK_ABSTAINED`。任意正的 unknown 质量均弃权；质量不删除、不重归一。总和容差沿用 `1e-6`；类别和高于 1 仅允许 `32 * f64::EPSILON` 的计算舍入，原始质量保留，转换为阈值内核信号时仅夹紧此数值边界。失败响应不生成投影，原响应取证与终态沿用现有流程。
+
+纯计算端口位于 `calibration::mapping`，限定 2–32 个唯一档位，规范化键顺序后累加；阈值评估器消费投影信号，供应商 confidence 和 Score 均值独立保存。映射名称是批准记录引用，批准权限、任务语义、分区与模型版本仍由调用者验证。启用读取调用记录的消费者应先升级支持可选 `risk_projection`；关闭新增映射输入可停止生成该字段，历史证据继续保留。

@@ -70,6 +70,8 @@ Noul 使用 `question={"type":"noul","instructions":"所需判断的问题"}`。
 
 Score 使用 `question={"type":"score","instructions":"按有序档位评估","criteria":["低","中","高"]}`，档位数组为 2–10 项，每项最多 512 字符。返回评分是零起始档位的概率加权平均，独立于供应商置信度；完整档位及概率保存在调用证据中。启用前先升级模型发布器、控制服务及控制台，数值验证和回退边界见 [10.11](10-jev-and-agents.md#1011-已实现-score-离线评估)。
 
+需要二元风险统计时，在输入顶层增加经批准的 `risk_mapping`，精确覆盖题目全部候选/档位，形式与未知质量处理见 [10.13](10-jev-and-agents.md#1013-已实现批准概率映射)。映射保存在内部输入证据，成功调用记录保存投影；先升级消费模型调用记录的工具，再启用此可选字段。
+
 完成 PostgreSQL 全部迁移；复用控制服务可访问的 vault/key，预建 0700 evidence 根目录并暂停共享该根目录的其他写入/清理者。journal 使用本评估器专属私有目录。默认 Gateway 路由通过秘密管理器注入 `AI_GATEWAY_API_KEY`；只有显式 `XSHIELD_JEV_ROUTE=direct` 才注入 `XSHIELD_JEV_API_KEY`。两者均不得同时作为对方凭证使用。另注入 `XSHIELD_TENANT_ID`、`XSHIELD_SITE_ID`、`XSHIELD_DATABASE_URL`、`XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_KEY_HEX`、`XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`、`XSHIELD_MODEL_JOURNAL_DIRECTORY`、`XSHIELD_JOURNAL_KEY_ID`、`XSHIELD_JOURNAL_KEY_HEX`、`XSHIELD_AUDIT_MAX_BYTES`。证据与 journal 密钥独立；证据预算需至少能容纳四个 512 KiB 对象及 sidecar，journal 预算范围 1 MiB–1 GiB，并保留至少 64 KiB 终态空间。
 
 执行 `cargo run -p xshield-worker --bin xshield-model-eval -- --approved-input /private/approved-evaluation.json`。stdout 仅包含 request/model-call ID、终态与 artifact 引用，非成功退出码为 1；SIGINT 请求取消并等待取证/终态完成。429/529 后检查调用记录中的 HTTP 状态及 Retry-After，由批准流程决定是否发起新的独立调用，旧调用不变。强制终止后重新启动会补记结果未知，再执行本次新任务，可能已发生的供应商计费需另行核对。

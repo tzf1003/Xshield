@@ -133,6 +133,24 @@
         "maximum": 1
       }
     },
+    "risk_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mapping_revision", "malicious_probability", "benign_probability", "unknown_probability", "abstained", "reason_code"],
+      "properties": {
+        "mapping_revision": {"$ref": "#/$defs/scoped_name"},
+        "malicious_probability": {"type": "number", "minimum": 0, "maximum": 1.0000000000000071},
+        "benign_probability": {"type": "number", "minimum": 0, "maximum": 1.0000000000000071},
+        "unknown_probability": {"type": "number", "minimum": 0, "maximum": 1.0000000000000071},
+        "abstained": {"type": "boolean"},
+        "reason_code": {"enum": ["MODEL_RISK_PROJECTED", "MODEL_RISK_ABSTAINED"]}
+      },
+      "allOf": [{
+        "if": {"properties": {"abstained": {"const": true}}},
+        "then": {"properties": {"unknown_probability": {"exclusiveMinimum": 0}, "reason_code": {"const": "MODEL_RISK_ABSTAINED"}}},
+        "else": {"properties": {"unknown_probability": {"const": 0}, "reason_code": {"const": "MODEL_RISK_PROJECTED"}}}
+      }]
+    },
     "legend": {
       "type": "object",
       "minProperties": 2,
@@ -211,6 +229,10 @@
     }
   },
   "allOf": [
+    {
+      "if": {"required": ["risk_projection"]},
+      "then": {"properties": {"status": {"const": "success"}, "question_type": {"enum": ["choice", "score"]}}}
+    },
     {
       "if": {
         "properties": {"question_type": {"const": "score"}},

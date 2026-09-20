@@ -12,8 +12,11 @@ use super::transport::{DIRECT_MODEL, GATEWAY_MODEL};
 
 mod gateway_metadata;
 use gateway_metadata::ProviderMetadata;
+mod risk_mapping;
 #[cfg(test)]
 mod score_tests;
+use risk_mapping::MappingDto;
+pub(super) use risk_mapping::RiskProjection;
 
 const INPUT_INVALID: &str = "MODEL_INPUT_INVALID";
 const RESPONSE_INVALID: &str = "MODEL_RESPONSE_INVALID";
@@ -42,6 +45,8 @@ struct InputDto {
     prompt_revision: String,
     untrusted_content: String,
     question: Question,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    risk_mapping: Option<MappingDto>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -133,9 +138,13 @@ impl Input {
         .into_iter()
         .map(|value| value.chars().count())
         .sum::<usize>()
-            + criteria_chars;
+            + criteria_chars
+            + dto.risk_mapping.as_ref().map_or(0, MappingDto::text_chars);
         if !valid_text(instructions, 1_024) || text_chars > TEXT_CHARS_MAX {
             return Err(INPUT_INVALID);
+        }
+        if let Some(mapping) = &dto.risk_mapping {
+            mapping.validate(&dto.question)?;
         }
         Ok(Self(dto))
     }
@@ -326,6 +335,8 @@ pub(super) struct Response {
     pub(super) probabilities: BTreeMap<String, f64>,
     /// Exact approved zero-based Score labels; other primitives have no legend.
     pub(super) legend: Option<BTreeMap<String, String>>,
+    /// Approved binary-risk mapping, when explicitly configured on the input.
+    pub(super) risk_projection: Option<RiskProjection>,
     /// Provider confidence as reported; Noul and missing values remain null.
     pub(super) provider_confidence: Option<f64>,
     /// `provided`, `not_provided`, or `not_applicable`.
@@ -494,6 +505,12 @@ impl Response {
                 ),
                 _ => return Err(RESPONSE_INVALID),
             };
+        let risk_projection = input
+            .0
+            .risk_mapping
+            .as_ref()
+            .map(|mapping| mapping.project(&probabilities))
+            .transpose()?;
         let usage = dto.usage.unwrap_or_default();
         let usage_source = if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
             "provider"
@@ -506,6 +523,7 @@ impl Response {
             result,
             probabilities,
             legend,
+            risk_projection,
             provider_confidence,
             confidence_status,
             input_tokens: usage.input_tokens,

@@ -102,6 +102,18 @@ def check_model_evaluation_contracts(schemas: dict, model_stage: dict, choice: d
                  legend={'0': 'Low', '1': 'Medium', '2': 'High'},
                  probabilities={'0': 0.6, '1': 0.1, '2': 0.3})
     check('model_capture:score', valid(schemas['model-call'], score))
+    projected = copy.deepcopy(score)
+    projected['risk_projection'] = {
+        'mapping_revision': 'risk-map-r1', 'benign_probability': 0.6,
+        'unknown_probability': 0.1, 'malicious_probability': 0.3,
+        'abstained': True, 'reason_code': 'MODEL_RISK_ABSTAINED'}
+    check('model_capture:risk_projection', valid(schemas['model-call'], projected))
+    for field, value in [('abstained', False), ('unknown_probability', 0),
+                         ('malicious_probability', 1.1), ('mapping_revision', 'bad/revision'),
+                         ('reason_code', 'MODEL_RISK_PROJECTED')]:
+        invalid = copy.deepcopy(projected)
+        invalid['risk_projection'][field] = value
+        check('model_capture:risk_projection_' + field, not valid(schemas['model-call'], invalid))
     for label, fields in [
         ('result_type', {'result': '0.7'}),
         ('result_range', {'result': 10}),

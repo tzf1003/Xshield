@@ -398,6 +398,7 @@ async fn execute(
             probabilities: parsed
                 .map_or_else(BTreeMap::new, |response| response.probabilities.clone()),
             legend: parsed.and_then(|response| response.legend.clone()),
+            risk_projection: parsed.and_then(|response| response.risk_projection.clone()),
             provider_confidence: parsed.and_then(|response| response.provider_confidence),
             confidence_status,
             probability_semantics: "provider_reported_uncalibrated",
@@ -468,6 +469,8 @@ struct ModelCallRecord {
     probabilities: BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     legend: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    risk_projection: Option<wire::RiskProjection>,
     provider_confidence: Option<f64>,
     confidence_status: &'static str,
     probability_semantics: &'static str,

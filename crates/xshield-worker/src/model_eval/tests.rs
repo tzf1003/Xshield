@@ -32,6 +32,9 @@ fn score_input() -> Input {
         "instructions": "Score the synthetic content using the ordered criteria.",
         "criteria": ["Low risk.", "Medium risk.", "High risk."]
     });
+    approved["risk_mapping"] = json!({
+        "revision":"risk-map-r1", "classes":{"0":"benign","1":"unknown","2":"malicious"}
+    });
     Input::parse(&serde_json::to_vec(&approved).unwrap()).unwrap()
 }
 
@@ -678,6 +681,14 @@ async fn postgres_evaluation_score_preserves_gateway_evidence_and_failure_termin
         assert!(call["duration_ms"].as_u64().is_some());
         if successful {
             assert_eq!(call["result"], 0.7);
+            assert_eq!(
+                call["risk_projection"],
+                json!({
+                    "mapping_revision":"risk-map-r1", "benign_probability":0.6,
+                    "unknown_probability":0.1,"malicious_probability":0.3,
+                    "abstained":true,"reason_code":"MODEL_RISK_ABSTAINED"
+                })
+            );
             assert_eq!(call["legend"], response["answers"]["evaluation"]["legend"]);
             assert_eq!(
                 call["probabilities"],
@@ -688,6 +699,7 @@ async fn postgres_evaluation_score_preserves_gateway_evidence_and_failure_termin
             assert_eq!(call["usage"]["output_tokens"], 20);
             assert_eq!(call["usage"]["source"], "provider");
         } else {
+            assert!(call.get("risk_projection").is_none());
             assert!(call["result"].is_null());
             assert!(call.get("legend").is_none());
             assert_eq!(call["probabilities"], json!({}));
