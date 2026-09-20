@@ -1562,6 +1562,111 @@ def check_calibration_report_contract(schema: dict) -> None:
                   event_id=event_id)
     check('outbox:calibration:reject_legacy_sparse', not valid(schema, sparse))
 
+def check_calibration_read_capability_issued_contract(schema: dict) -> None:
+    """Validate restricted capability issuance fields; Rust owns cross-field binding."""
+    event_id = 'ev_018f2a3b-4c5d-7000-8000-000000000071'
+    capability_id = 'calcap_018f2a3b-4c5d-7000-8000-000000000072'
+    trace_id = capability_id[7:].replace('-', '')
+    base = {
+        'schema_version': 3, 'event_type': 'calibration.read_capability.issued',
+        'event_id': event_id, 'tenant_id': 'tenant_demo', 'site_id': 'site_demo',
+        'request_id': None, 'trace_id': trace_id, 'span_id': trace_id[:16],
+        'producer_id': 'calibration-capability-issuer', 'producer_boot_id': event_id,
+        'producer_seq': 1, 'request_seq': 1,
+        'occurred_at': '2026-09-20T00:00:00.123Z',
+        'observed_at': '2026-09-20T00:00:00.123Z',
+        'policy_revision': 'calibration-v1', 'example_only': False,
+        'evidence_refs': [], 'cause_event_ids': [], 'sensitivity': 'RESTRICTED',
+        'integrity': {'state': 'pending', 'previous_hash': None, 'event_hash': None},
+        'payload': {
+            'stage': 'calibration_read_capability', 'outcome': 'PASS',
+            'reason_code': 'CALIBRATION_READ_CAPABILITY_ISSUED',
+            'capability_id': capability_id, 'scope_digest': 'a' * 64,
+            'member_count': 6, 'frozen_total_bytes': 1,
+            'not_before_unix': 1_789_689_600, 'expires_at_unix': 1_789_693_200,
+        },
+    }
+    check('outbox:calibration_read_capability:valid', valid(schema, base))
+    for payload in [False, True]:
+        for field in base['payload'] if payload else base:
+            missing = copy.deepcopy(base)
+            del (missing['payload'] if payload else missing)[field]
+            check(f'outbox:calibration_read_capability:missing_{"payload" if payload else "envelope"}_{field}',
+                  not valid(schema, missing))
+    for field in ['previous_hash', 'event_hash']:
+        missing = copy.deepcopy(base)
+        del missing['integrity'][field]
+        check('outbox:calibration_read_capability:optional_integrity_' + field,
+              valid(schema, missing))
+    for field in ['unknown', 'connection_id', 'agent_run_id']:
+        invalid = copy.deepcopy(base)
+        invalid[field] = None
+        check('outbox:calibration_read_capability:unknown_envelope_' + field,
+              not valid(schema, invalid))
+    invalid = copy.deepcopy(base)
+    invalid['payload']['unknown'] = None
+    check('outbox:calibration_read_capability:unknown_payload', not valid(schema, invalid))
+    for label, field, value in [
+        ('event_prefix', 'event_id', capability_id),
+        ('boot_prefix', 'producer_boot_id', capability_id),
+        ('request', 'request_id', event_id),
+        ('producer', 'producer_id', 'calibration-evaluator'),
+        ('producer_sequence', 'producer_seq', 2),
+        ('request_sequence', 'request_seq', 2),
+        ('policy', 'policy_revision', 'policy-r1'),
+        ('example', 'example_only', True),
+        ('evidence', 'evidence_refs', ['artifact_018f2a3b-4c5d-7000-8000-000000000073']),
+        ('causes', 'cause_event_ids', [event_id]),
+        ('sensitivity', 'sensitivity', 'INTERNAL'),
+        ('integrity', 'integrity', {'state': 'sealed', 'previous_hash': None, 'event_hash': None}),
+        ('trace', 'trace_id', 'A' * 32),
+        ('span', 'span_id', 'a' * 15),
+        ('stage', 'stage', 'calibration'),
+        ('outcome', 'outcome', 'UNKNOWN'),
+        ('reason', 'reason_code', 'CALIBRATION_REPORTED'),
+        ('capability_prefix', 'capability_id', event_id),
+        ('scope_digest', 'scope_digest', 'A' * 64),
+        ('member_below_minimum', 'member_count', 5),
+        ('member_above_maximum', 'member_count', 20_005),
+        ('bytes_zero', 'frozen_total_bytes', 0),
+        ('bytes_above_maximum', 'frozen_total_bytes', 536_870_913),
+    ]:
+        invalid = copy.deepcopy(base)
+        (invalid['payload'] if field in invalid['payload'] else invalid)[field] = value
+        check('outbox:calibration_read_capability:reject_' + label, not valid(schema, invalid))
+    for field in ['not_before_unix', 'expires_at_unix']:
+        for label, value in [('negative', -1), ('fractional', 1.5), ('above_i64', 2 ** 63)]:
+            invalid = copy.deepcopy(base)
+            invalid['payload'][field] = value
+            check(f'outbox:calibration_read_capability:{field}_{label}',
+                  not valid(schema, invalid))
+    for field in ['occurred_at', 'observed_at']:
+        for label, value in [('fractional', '2026-09-20T00:00:00.1Z'),
+                             ('offset', '2026-09-20T08:00:00.123+08:00'),
+                             ('seconds', '2026-09-20T00:00:00Z')]:
+            invalid = copy.deepcopy(base)
+            invalid[field] = value
+            check(f'outbox:calibration_read_capability:{field}_{label}',
+                  not valid(schema, invalid))
+    # These comparisons require the parsed, leased producer contract. JSON
+    # Schema intentionally validates only each field's standalone shape.
+    for label, field, value in [
+        ('boot_mismatch', 'producer_boot_id', event_id[:-1] + '9'),
+        ('trace_derivation', 'trace_id', '0' * 32),
+        ('span_derivation', 'span_id', '0' * 16),
+        ('observed_mismatch', 'observed_at', '2026-09-20T01:00:00.123Z'),
+        ('odd_member_count', 'member_count', 7),
+        ('equal_lease_times', 'expires_at_unix', base['payload']['not_before_unix']),
+        ('reversed_lease_times', 'expires_at_unix', base['payload']['not_before_unix'] - 1),
+    ]:
+        shaped = copy.deepcopy(base)
+        (shaped['payload'] if field in shaped['payload'] else shaped)[field] = value
+        check('outbox:calibration_read_capability:rust_only_' + label,
+              valid(schema, shaped))
+    sparse = dict(base['payload'], schema_version=3,
+                  event_type='calibration.read_capability.issued', event_id=event_id)
+    check('outbox:calibration_read_capability:reject_legacy_sparse', not valid(schema, sparse))
+
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
         if DISCOVERY_EXCLUDED_PARTS.intersection(p.parts): continue
@@ -1646,6 +1751,7 @@ def main() -> int:
     check_grant_contracts(schemas['audit-event'])
     check_share_grant_contracts(schemas['audit-event'])
     check_calibration_report_contract(schemas['audit-event'])
+    check_calibration_read_capability_issued_contract(schemas['audit-event'])
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))
     check('fixture:all_synthetic',all(e['example_only'] for e in events) and all(c['example_only'] for c in calls))

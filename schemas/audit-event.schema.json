@@ -968,6 +968,50 @@
           ]
         }
       }
+    },
+    "calibration_read_capability_issued": {
+      "$comment": "Restricted metadata for a committed calibration batch-read capability. The frozen member set, manifest references, lease handle, and evidence content remain outside this envelope and must not become indexable payload fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "outcome",
+        "reason_code",
+        "capability_id",
+        "scope_digest",
+        "member_count",
+        "frozen_total_bytes",
+        "not_before_unix",
+        "expires_at_unix"
+      ],
+      "properties": {
+        "stage": {"const": "calibration_read_capability"},
+        "outcome": {"const": "PASS"},
+        "reason_code": {"const": "CALIBRATION_READ_CAPABILITY_ISSUED"},
+        "capability_id": {
+          "type": "string",
+          "maxLength": 43,
+          "pattern": "^calcap_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "scope_digest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "member_count": {"type": "integer", "minimum": 6, "maximum": 20004},
+        "frozen_total_bytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
+        "not_before_unix": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_at_unix": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
     }
   },
   "allOf": [
@@ -1738,6 +1782,62 @@
           },
           "cause_event_ids": {"maxItems": 0},
           "payload": {"$ref": "#/$defs/calibration_report"},
+          "sensitivity": {"const": "RESTRICTED"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"event_type": {"const": "calibration.read_capability.issued"}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Committed, purpose-limited calibration batch-read capability metadata. Rust additionally checks event/boot equality, trace/span derivation from capability_id, observed/occurred equality, member parity, strictly ordered lease clocks, duplicate JSON keys, and the leased capability aggregate. This event neither exposes evidence members nor grants console or business access.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"type": "null"},
+          "trace_id": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32,
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "span_id": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 16,
+            "pattern": "^[0-9a-f]{16}$"
+          },
+          "producer_id": {"const": "calibration-capability-issuer"},
+          "producer_boot_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "producer_seq": {"const": 1},
+          "request_seq": {"const": 1},
+          "occurred_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "observed_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "policy_revision": {"const": "calibration-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {"maxItems": 0},
+          "cause_event_ids": {"maxItems": 0},
+          "payload": {"$ref": "#/$defs/calibration_read_capability_issued"},
           "sensitivity": {"const": "RESTRICTED"},
           "integrity": {
             "properties": {

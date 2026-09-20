@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3499,
-  "passed_count": 3499,
+  "checks_total": 3580,
+  "passed_count": 3580,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -16456,6 +16456,406 @@
       "detail": ""
     },
     {
+      "name": "outbox:calibration_read_capability:valid",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_envelope_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_capability_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_scope_digest",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_member_count",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_frozen_total_bytes",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_not_before_unix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:missing_payload_expires_at_unix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:optional_integrity_previous_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:optional_integrity_event_hash",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:unknown_envelope_unknown",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:unknown_envelope_connection_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:unknown_envelope_agent_run_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:unknown_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_event_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_boot_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_request",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_producer_sequence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_request_sequence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_policy",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_example",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_evidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_causes",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_trace",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_span",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_capability_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_scope_digest",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_member_below_minimum",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_member_above_maximum",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_bytes_zero",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_bytes_above_maximum",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:not_before_unix_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:not_before_unix_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:not_before_unix_above_i64",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:expires_at_unix_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:expires_at_unix_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:expires_at_unix_above_i64",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:occurred_at_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:occurred_at_offset",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:occurred_at_seconds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:observed_at_fractional",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:observed_at_offset",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:observed_at_seconds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:rust_only_boot_mismatch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:rust_only_trace_derivation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:rust_only_span_derivation",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:rust_only_observed_mismatch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:rust_only_odd_member_count",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:rust_only_equal_lease_times",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:rust_only_reversed_lease_times",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:calibration_read_capability:reject_legacy_sparse",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "request_index:events",
       "passed": true,
       "detail": ""
@@ -16957,6 +17357,11 @@
     },
     {
       "name": "no_tool_tokens:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/10-jev-and-agents.md",
       "passed": true,
       "detail": ""
     },

@@ -8,7 +8,7 @@
 
 use super::{MAX_SAMPLES, dataset::EvaluationProvenance};
 use crate::{
-    domain::{ArtifactId, CalibrationReadCapabilityId, SiteId, TenantId},
+    domain::{ArtifactId, CalibrationReadCapabilityId, CalibrationReadLeaseId, SiteId, TenantId},
     identity::UnixSeconds,
 };
 use std::{collections::BTreeSet, fmt};
@@ -110,6 +110,153 @@ impl CalibrationEvidenceRef {
     #[must_use]
     pub const fn sample_index(&self) -> Option<u16> {
         self.sample_index
+    }
+}
+
+/// Opaque lease material returned by an authoritative calibration batch issuer.
+///
+/// A persistence adapter creates this handle only after its `begin_batch`
+/// transaction has frozen and claimed the complete capability. The core type
+/// binds that durable claim to a capability and keeps the lease token out of
+/// `Clone` and `Debug`; it does not itself prove that the claim was persisted
+/// or consumed. Adapters must revalidate the token and state before every
+/// object read.
+pub struct CalibrationEvidenceBatchLease {
+    lease_id: CalibrationReadLeaseId,
+    capability_id: CalibrationReadCapabilityId,
+    tenant_id: TenantId,
+    site_id: SiteId,
+    not_before: UnixSeconds,
+    expires_at: UnixSeconds,
+    token: [u8; 32],
+}
+
+impl CalibrationEvidenceBatchLease {
+    /// Wraps one lease returned by a durable, authoritative batch issuer.
+    ///
+    /// The caller must have already atomically recorded the exact frozen
+    /// capability set and lease token. This constructor validates only local
+    /// shape and has no persistence, authorization, or audit side effects.
+    ///
+    /// # Errors
+    /// Returns [`CalibrationReadCapabilityError::BatchLeaseInvalid`] for an
+    /// empty lease interval or all-zero token.
+    pub fn from_issued(
+        lease_id: CalibrationReadLeaseId,
+        capability_id: CalibrationReadCapabilityId,
+        tenant_id: TenantId,
+        site_id: SiteId,
+        not_before: UnixSeconds,
+        expires_at: UnixSeconds,
+        token: [u8; 32],
+    ) -> Result<Self, CalibrationReadCapabilityError> {
+        if not_before >= expires_at || token == [0; 32] {
+            return Err(CalibrationReadCapabilityError::BatchLeaseInvalid);
+        }
+        Ok(Self {
+            lease_id,
+            capability_id,
+            tenant_id,
+            site_id,
+            not_before,
+            expires_at,
+            token,
+        })
+    }
+
+    /// Returns the durable lease identity used for recovery and conditional updates.
+    #[must_use]
+    pub const fn lease_id(&self) -> &CalibrationReadLeaseId {
+        &self.lease_id
+    }
+
+    /// Returns the capability identity that the issuer bound to this lease.
+    #[must_use]
+    pub const fn capability_id(&self) -> &CalibrationReadCapabilityId {
+        &self.capability_id
+    }
+
+    /// Returns the tenant scope frozen by the issuer.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the site scope frozen by the issuer.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+
+    /// Returns the first instant at which the issuer permits the batch.
+    #[must_use]
+    pub const fn not_before(&self) -> UnixSeconds {
+        self.not_before
+    }
+
+    /// Returns the exclusive issuer lease deadline.
+    #[must_use]
+    pub const fn expires_at(&self) -> UnixSeconds {
+        self.expires_at
+    }
+
+    /// Borrows the opaque token for a persistence adapter's revalidation query.
+    ///
+    /// The token is intentionally neither cloneable nor formattable. Callers
+    /// must not log, serialize, or use it as an evidence or user-facing ID.
+    #[must_use]
+    pub const fn token(&self) -> &[u8; 32] {
+        &self.token
+    }
+}
+
+impl Drop for CalibrationEvidenceBatchLease {
+    fn drop(&mut self) {
+        self.token.fill(0);
+    }
+}
+
+/// A non-duplicable in-memory session binding a capability to one batch lease.
+///
+/// It is created by [`CalibrationEvidenceReadCapability::bind_issued_batch_lease`]
+/// after a storage adapter has durably begun a batch. It cannot be forged from
+/// a console approval and is intentionally neither `Clone` nor `Debug`.
+pub struct CalibrationEvidenceReadSession<'a> {
+    capability: &'a CalibrationEvidenceReadCapability,
+    lease: CalibrationEvidenceBatchLease,
+}
+
+impl<'a> CalibrationEvidenceReadSession<'a> {
+    /// Returns the exact in-memory capability bound to this session.
+    #[must_use]
+    pub const fn capability(&self) -> &'a CalibrationEvidenceReadCapability {
+        self.capability
+    }
+
+    /// Returns the opaque lease for adapter-owned durable revalidation.
+    #[must_use]
+    pub const fn lease(&self) -> &CalibrationEvidenceBatchLease {
+        &self.lease
+    }
+
+    pub(crate) fn authorizes_request(
+        &self,
+        capability: &CalibrationEvidenceReadCapability,
+        evidence_ref: &CalibrationEvidenceRef,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        now: UnixSeconds,
+    ) -> bool {
+        std::ptr::eq(self.capability, capability)
+            && self.lease.capability_id == capability.capability_id
+            && self.lease.tenant_id == *tenant_id
+            && self.lease.site_id == *site_id
+            && now >= self.lease.not_before
+            && now < self.lease.expires_at
+            && capability
+                .verify_read_scope(tenant_id, site_id, now)
+                .is_ok()
+            && capability.permits_evidence_ref(evidence_ref)
     }
 }
 
@@ -220,6 +367,44 @@ impl CalibrationEvidenceReadCapability {
             return Err(CalibrationReadCapabilityError::Expired);
         }
         Ok(())
+    }
+
+    /// Binds an authoritative batch lease to this exact in-memory capability.
+    ///
+    /// A persistence adapter must call this only after an atomic `begin_batch`
+    /// operation has validated and claimed the complete frozen set. This method
+    /// checks that the issuer's lease has the same identity and scope, is fully
+    /// contained in the capability lease, and is current at `now`; it cannot
+    /// replace durable issuance, single-use consumption, or recovery checks.
+    ///
+    /// # Errors
+    /// Returns [`CalibrationReadCapabilityError::BatchLeaseMismatch`] when the
+    /// capability identity or scope differs, and
+    /// [`CalibrationReadCapabilityError::BatchLeaseOutsideCapability`] when the
+    /// issuer lease extends outside the frozen capability lease or is not
+    /// current. No evidence object is read on either path.
+    pub fn bind_issued_batch_lease(
+        &self,
+        lease: CalibrationEvidenceBatchLease,
+        now: UnixSeconds,
+    ) -> Result<CalibrationEvidenceReadSession<'_>, CalibrationReadCapabilityError> {
+        if lease.capability_id != self.capability_id
+            || lease.tenant_id != self.tenant_id
+            || lease.site_id != self.site_id
+        {
+            return Err(CalibrationReadCapabilityError::BatchLeaseMismatch);
+        }
+        if lease.not_before < self.not_before
+            || lease.expires_at > self.expires_at
+            || now < lease.not_before
+            || now >= lease.expires_at
+        {
+            return Err(CalibrationReadCapabilityError::BatchLeaseOutsideCapability);
+        }
+        Ok(CalibrationEvidenceReadSession {
+            capability: self,
+            lease,
+        })
     }
 
     /// Returns the server-issued batch capability identity.
@@ -377,6 +562,12 @@ pub enum CalibrationReadCapabilityError {
     NotYetValid,
     /// The capability lease has ended.
     Expired,
+    /// A supposedly issued batch lease has an empty interval or empty token.
+    BatchLeaseInvalid,
+    /// A batch lease does not identify this capability or its tenant/site scope.
+    BatchLeaseMismatch,
+    /// A batch lease is outside the capability lease or is not currently valid.
+    BatchLeaseOutsideCapability,
 }
 
 impl CalibrationReadCapabilityError {
@@ -393,6 +584,9 @@ impl CalibrationReadCapabilityError {
             Self::ScopeMismatch => "CALIBRATION_READ_SCOPE_MISMATCH",
             Self::NotYetValid => "CALIBRATION_READ_NOT_YET_VALID",
             Self::Expired => "CALIBRATION_READ_EXPIRED",
+            Self::BatchLeaseInvalid => "CALIBRATION_READ_BATCH_LEASE_INVALID",
+            Self::BatchLeaseMismatch => "CALIBRATION_READ_BATCH_LEASE_MISMATCH",
+            Self::BatchLeaseOutsideCapability => "CALIBRATION_READ_BATCH_LEASE_OUTSIDE_CAPABILITY",
         }
     }
 }

@@ -87,12 +87,16 @@ impl OutboxFamily {
         }
     }
 
-    const fn aggregate_field(self) -> &'static str {
+    fn aggregate_field(self, event_type: &str) -> &'static str {
         match self {
             Self::Case => "case_id",
             Self::EvidenceCatalog | Self::EvidenceRetention => "artifact_id",
             Self::EvidenceAccess => "access_request_id",
-            Self::Calibration => "report_id",
+            Self::Calibration => match event_type {
+                "calibration.reported" => "report_id",
+                "calibration.read_capability.issued" => "capability_id",
+                _ => "",
+            },
             Self::Identity => "binding_id",
             Self::Grant | Self::ResponseGrant => "grant_id",
             Self::ShareGrant => "share_id",
@@ -428,7 +432,7 @@ async fn publish_one(
     let aggregate_ref = lease
         .envelope
         .get("payload")
-        .and_then(|payload| payload.get(family.aggregate_field()))
+        .and_then(|payload| payload.get(family.aggregate_field(&lease.event_type)))
         .and_then(serde_json::Value::as_str);
     if row.event_id != lease.event_id.as_str()
         || row.tenant_id != scope.tenant_id().as_str()

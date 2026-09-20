@@ -18,6 +18,8 @@
 | artifact_id | 一份内容证据或 manifest | artifact_ + UUIDv7，不是公开下载凭证 |
 | transform_id | 解密/标准化/重建关系 | 关联输入、输出及配置版本 |
 | model_call_id | 一次实际模型调用尝试 | mdl_ + UUIDv7；另有 logical_call_id |
+| calibration_read_capability_id | 一份目的限定的离线校准批量读取能力 | calcap_ + UUIDv7；冻结 scope，不是内容或业务授权凭证 |
+| calibration_read_lease_id | 一次校准批次会话的公开关联 ID | callease_ + UUIDv7；私有 lease handle 仅在运行中会话存在 |
 | calibration_report_id | 一份独立的离线校准报告元数据投影 | calr_ + UUIDv7；不是 evidence 内容读取或阈值/策略发布凭证 |
 | agent_run_id/tool_call_id | Agent 运行及工具调用 | agt_/tool_，父子运行明确关联 |
 | grant_id/page_evidence_id | 资格与界面来源 | 用于完整追溯发行链 |
@@ -143,5 +145,11 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 `calibration` 族只接受 `calibration.reported` 的完整、受限元数据 envelope：producer 固定为 `calibration-evaluator`、policy revision 固定为 `calibration-v1`，聚合字段为 `calr_` UUIDv7 report ID；request_id 为 null，producer boot、两个序号、UTC 毫秒发生/观察时间、trace/span 与 report ID 的绑定均严格校验。封闭 payload 固定为 `calibration_report/PASS/CALIBRATION_REPORTED`，只含 report artifact、approval、dataset/label/task/threshold-policy/mapping revision、四份 manifest 和 ModelIdentity。report artifact 既是唯一 evidence_ref，也不得与四份 manifest 重复；resolved provider revision 只能是有效修订或显式 null，不能由当前路由推断。
 
 schema 与消费端拒绝未知/重复字段、错误 producer/aggregate/evidence 绑定、非规范 ID 或时间、别名 artifact、额外 cause，以及任何标签、概率、样本、ground truth、指标、提示词、凭证或 evidence 内容。索引摘要固定为 deterministic、`confidence=null/not_applicable`、非业务终态且不带 HTTP 方法、操作或源站状态；它记录一个离线报告元数据事实，不授予授权、读取 evidence、改变/发布阈值或策略，也不代表报告或模型质量。
+
+## 11.10 已实现校准读取能力发行事实
+
+`calibration.read_capability.issued` 是耐久 batch capability 发行的受限 outbox 事实，独立于 `calibration.reported`。producer 固定为 `calibration-capability-issuer`、policy revision 为 `calibration-v1`，aggregate 为 `calcap_` UUIDv7 capability ID；request_id、evidence_refs 和 cause_event_ids 均为空。其确定性 payload 固定为 `calibration_read_capability/PASS/CALIBRATION_READ_CAPABILITY_ISSUED`，只含 capability ID、规范 scope digest、成员数、冻结总字节数以及 Unix 秒的起止期限。trace/span 从 capability UUID 导出；event ID 与 producer boot 相同，两个序号均为 1，发生/观察时间由数据库以 UTC 毫秒冻结。
+
+此事实与 capability header、完整成员 snapshot 同一 PostgreSQL 事务提交；成员行及其 catalog snapshot 留在受限关系表，不展开至 envelope。lease ID、私有 lease handle、artifact ID、批准/数据集/模型修订、标签、概率、内容、控制台主体和业务请求均不进入事实。它记录发行，不构成内容授权、消费完成、报告、模型质量、阈值/策略发布或业务终态。现有 calibration consumer 已严格解析该 event type，绑定 capability aggregate、producer、时钟、trace、空 evidence/cause 引用、64 位 scope digest 以及成员/字节/期限边界，并沿用族隔离的 at-least-once 发布；真实 ClickHouse 端到端投递仍需专有数据库验收。outbox 留存不能替代 durable header/members/lease 状态作为授权真值。
 
 当前增量只提供领域投影、schema 和该族的有界 outbox 消费契约；没有 `calibration-evaluator` producer、受控 evidence 读取、report artifact 写入或报告事务持久化实现。部署者不得人工伪造事件来替代这些前置步骤；待 producer 交付后，必须在同一事务中证明 report artifact、冻结投影与 outbox 行的身份一致，再启用实际事件生成。

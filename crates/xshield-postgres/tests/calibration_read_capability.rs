@@ -1,0 +1,526 @@
+//! `PostgreSQL` regressions for frozen calibration batch capability issuance.
+//!
+//! These tests use a caller-provisioned migrated `PostgreSQL` database. They
+//! verify persistence behavior only: no vault object is opened and no model is
+//! called.
+
+use chrono::Utc;
+use serde_json::Value;
+use sqlx::PgPool;
+use std::{env, time::Duration};
+use tokio::time::sleep;
+use uuid::Uuid;
+use xshield_core::{
+    calibration::{
+        dataset::{EvaluationProvenance, ModelIdentity},
+        read_capability::{CalibrationEvidenceReadCapability, CalibrationSampleReadScope},
+    },
+    domain::{
+        ApprovalRef, ArtifactId, CalibrationReadCapabilityId, DatasetRevision, EventId,
+        LabelRevision, MappingRevision, ModelRevision, PromptRevision, ProviderId, RequestId,
+        SiteId, TaskRevision, TenantId, ThresholdPolicyRevision,
+    },
+    identity::UnixSeconds,
+};
+use xshield_postgres::{
+    CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
+    CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome, PostgresIdentityStore,
+};
+
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0023"]
+async fn calibration_read_capability_is_atomic_exact_and_recovery_safe() {
+    let database_url =
+        env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
+    let store = PostgresIdentityStore::connect(&database_url, 4, Duration::from_secs(5))
+        .await
+        .expect("test database connects");
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("assertion pool connects");
+    let fixture = Fixture::new();
+    seed_catalog(&pool, &fixture).await;
+
+    assert_exact_issuance_and_drift_rejection(&pool, &store, &fixture).await;
+    assert_single_lease_and_recovery(&pool, &store, &fixture).await;
+
+    cleanup(&pool, &fixture).await;
+}
+
+struct Fixture {
+    tenant: TenantId,
+    site: SiteId,
+    artifacts: Vec<ArtifactId>,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        Self {
+            tenant: TenantId::parse(format!("tenant_calcap_{}", Uuid::now_v7().simple()))
+                .expect("tenant is bounded"),
+            site: SiteId::parse("site_calcap").expect("site is bounded"),
+            artifacts: (0..8).map(|_| artifact_id()).collect(),
+        }
+    }
+
+    fn capability(&self, max_total_bytes: u64) -> CalibrationEvidenceReadCapability {
+        let now = Utc::now().timestamp();
+        let not_before = u64::try_from(now - 10).expect("current time is positive");
+        let expires_at = u64::try_from(now + 120).expect("current time is positive");
+        CalibrationEvidenceReadCapability::new(
+            CalibrationReadCapabilityId::parse(format!("calcap_{}", Uuid::now_v7()))
+                .expect("capability id is valid"),
+            self.tenant.clone(),
+            self.site.clone(),
+            self.provenance(),
+            vec![CalibrationSampleReadScope::new(
+                self.artifacts[4].clone(),
+                self.artifacts[5].clone(),
+            )],
+            UnixSeconds::new(not_before),
+            UnixSeconds::new(expires_at),
+            max_total_bytes,
+        )
+        .expect("fixture capability is valid")
+    }
+
+    fn provenance(&self) -> EvaluationProvenance {
+        EvaluationProvenance::new(
+            ApprovalRef::parse("approval-r1").expect("approval is valid"),
+            DatasetRevision::parse("dataset-r1").expect("dataset is valid"),
+            LabelRevision::parse("labels-r1").expect("labels are valid"),
+            TaskRevision::parse("task-r1").expect("task is valid"),
+            ThresholdPolicyRevision::parse("threshold-r1").expect("threshold is valid"),
+            MappingRevision::parse("risk-map-r1").expect("mapping is valid"),
+            self.artifacts[0].clone(),
+            self.artifacts[1].clone(),
+            self.artifacts[2].clone(),
+            self.artifacts[3].clone(),
+            ModelIdentity::new(
+                ProviderId::parse("vercel_ai_gateway").expect("provider is valid"),
+                "typesafe-ai/jev",
+                ModelRevision::parse("jev-1.13.0").expect("model is valid"),
+                PromptRevision::parse("prompt-r1").expect("prompt is valid"),
+                None,
+            )
+            .expect("model identity is valid"),
+        )
+        .expect("provenance is valid")
+    }
+}
+
+async fn assert_exact_issuance_and_drift_rejection(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    let capability = fixture.capability(1_024);
+    let event = event_id();
+    let issued = issue_capability(store, &capability, &event, 1, 2).await;
+    let CalibrationReadCapabilityIssueOutcome::Issued(record) = issued else {
+        panic!("first exact capability must be issued");
+    };
+    assert_eq!(record.member_count(), 6);
+    assert_eq!(record.frozen_total_bytes(), 384);
+    assert_issued_envelope(pool, fixture, &capability, &record).await;
+    assert_exact_retries(store, &capability, &event, &record).await;
+    assert_concurrent_conflicting_issuers_return_conflict(store, fixture).await;
+    assert_altered_capability_is_unavailable(store, fixture, &capability).await;
+    assert_catalog_drift_is_unavailable(pool, store, fixture, &capability).await;
+}
+
+async fn assert_issued_envelope(
+    pool: &PgPool,
+    fixture: &Fixture,
+    capability: &CalibrationEvidenceReadCapability,
+    record: &xshield_postgres::CalibrationReadCapabilityRecord,
+) {
+    let stored: (String, Vec<u8>, i32, i64, Value) = sqlx::query_as(
+        "SELECT outbox.aggregate_ref, capability.scope_digest, capability.member_count,
+                capability.frozen_total_bytes, outbox.envelope
+         FROM xshield.calibration_read_capabilities capability
+         JOIN xshield.audit_outbox outbox ON outbox.event_id = capability.issued_event_id
+         WHERE capability.tenant_id=$1 AND capability.site_id=$2 AND capability.capability_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(capability.capability_id().as_str())
+    .fetch_one(pool)
+    .await
+    .expect("header and outbox are atomic");
+    assert_eq!(stored.0, capability.capability_id().as_str());
+    assert_eq!(stored.1.as_slice(), record.scope_digest());
+    assert_eq!(stored.2, 6);
+    assert_eq!(stored.3, 384);
+    assert_eq!(stored.4["event_type"], "calibration.read_capability.issued");
+    assert!(
+        stored.4["evidence_refs"]
+            .as_array()
+            .expect("envelope evidence refs are an array")
+            .is_empty()
+    );
+    assert_eq!(
+        stored.4["payload"]["capability_id"],
+        capability.capability_id().as_str()
+    );
+    assert_eq!(
+        stored.4["payload"]["scope_digest"]
+            .as_str()
+            .expect("digest is string")
+            .len(),
+        64
+    );
+}
+
+async fn assert_exact_retries(
+    store: &PostgresIdentityStore,
+    capability: &CalibrationEvidenceReadCapability,
+    event: &EventId,
+    record: &xshield_postgres::CalibrationReadCapabilityRecord,
+) {
+    assert!(matches!(
+        issue_capability(store, capability, event, 1, 2).await,
+        CalibrationReadCapabilityIssueOutcome::Existing(existing) if existing == *record
+    ));
+    assert!(matches!(
+        issue_capability(store, capability, event, 1, 3).await,
+        CalibrationReadCapabilityIssueOutcome::Conflict
+    ));
+}
+
+async fn assert_concurrent_conflicting_issuers_return_conflict(
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    let capability = fixture.capability(1_024);
+    let first_store = store.clone();
+    let second_store = store.clone();
+    let first_event = event_id();
+    let second_event = event_id();
+    let (first, second) = tokio::join!(
+        issue_capability_as(
+            &first_store,
+            &capability,
+            &first_event,
+            "calibration-fixture-one",
+            3,
+            4,
+        ),
+        issue_capability_as(
+            &second_store,
+            &capability,
+            &second_event,
+            "calibration-fixture-two",
+            5,
+            6,
+        )
+    );
+    assert!(
+        matches!(first, CalibrationReadCapabilityIssueOutcome::Issued(_))
+            ^ matches!(second, CalibrationReadCapabilityIssueOutcome::Issued(_)),
+        "one concurrent issuer must commit the frozen capability"
+    );
+    assert!(
+        matches!(first, CalibrationReadCapabilityIssueOutcome::Conflict)
+            || matches!(second, CalibrationReadCapabilityIssueOutcome::Conflict),
+        "a conflicting concurrent issuer must receive the stable outcome"
+    );
+}
+
+async fn assert_altered_capability_is_unavailable(
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    capability: &CalibrationEvidenceReadCapability,
+) {
+    let altered = CalibrationEvidenceReadCapability::new(
+        capability.capability_id().clone(),
+        fixture.tenant.clone(),
+        fixture.site.clone(),
+        fixture.provenance(),
+        vec![CalibrationSampleReadScope::new(
+            fixture.artifacts[4].clone(),
+            fixture.artifacts[5].clone(),
+        )],
+        capability.not_before(),
+        capability.expires_at(),
+        2_048,
+    )
+    .expect("altered test capability is syntactically valid");
+    assert!(matches!(
+        store
+            .begin_calibration_evidence_batch(
+                CalibrationEvidenceBatchBegin::new(
+                    &altered,
+                    "runner-altered",
+                    Duration::from_secs(1)
+                )
+                .expect("begin command is valid"),
+            )
+            .await
+            .expect("durable mismatch resolves"),
+        CalibrationEvidenceBatchBeginOutcome::Unavailable
+    ));
+}
+
+async fn assert_catalog_drift_is_unavailable(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    capability: &CalibrationEvidenceReadCapability,
+) {
+    sqlx::query(
+        "UPDATE xshield.artifact_catalog SET integrity_digest=$4
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.artifacts[4].as_str())
+    .bind("b".repeat(64))
+    .execute(pool)
+    .await
+    .expect("catalog drift fixture updates");
+    assert!(matches!(
+        store
+            .begin_calibration_evidence_batch(
+                CalibrationEvidenceBatchBegin::new(
+                    capability,
+                    "runner-drift",
+                    Duration::from_secs(1)
+                )
+                .expect("begin command is valid"),
+            )
+            .await
+            .expect("catalog drift resolves"),
+        CalibrationEvidenceBatchBeginOutcome::Unavailable
+    ));
+    sqlx::query(
+        "UPDATE xshield.artifact_catalog SET integrity_digest=$4
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.artifacts[4].as_str())
+    .bind("a".repeat(64))
+    .execute(pool)
+    .await
+    .expect("catalog fixture is restored");
+}
+
+async fn assert_single_lease_and_recovery(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    let capability = fixture.capability(1_024);
+    let event = event_id();
+    assert!(matches!(
+        issue_capability(store, &capability, &event, 8, 9).await,
+        CalibrationReadCapabilityIssueOutcome::Issued(_)
+    ));
+
+    let first_store = store.clone();
+    let second_store = store.clone();
+    let (first, second) = tokio::join!(
+        async {
+            first_store
+                .begin_calibration_evidence_batch(
+                    CalibrationEvidenceBatchBegin::new(
+                        &capability,
+                        "runner-one",
+                        Duration::from_secs(1),
+                    )
+                    .expect("begin command is valid"),
+                )
+                .await
+                .expect("first begin resolves")
+        },
+        async {
+            second_store
+                .begin_calibration_evidence_batch(
+                    CalibrationEvidenceBatchBegin::new(
+                        &capability,
+                        "runner-two",
+                        Duration::from_secs(1),
+                    )
+                    .expect("begin command is valid"),
+                )
+                .await
+                .expect("second begin resolves")
+        }
+    );
+    assert!(
+        matches!(first, CalibrationEvidenceBatchBeginOutcome::Started(_))
+            ^ matches!(second, CalibrationEvidenceBatchBeginOutcome::Started(_)),
+        "one concurrent claimant must receive the only active lease"
+    );
+    assert!(
+        matches!(first, CalibrationEvidenceBatchBeginOutcome::Busy)
+            || matches!(second, CalibrationEvidenceBatchBeginOutcome::Busy),
+        "the losing concurrent claimant must observe a live lease"
+    );
+
+    sleep(Duration::from_millis(1_100)).await;
+    assert!(matches!(
+        store
+            .begin_calibration_evidence_batch(
+                CalibrationEvidenceBatchBegin::new(
+                    &capability,
+                    "runner-recovery",
+                    Duration::from_secs(1)
+                )
+                .expect("recovery command is valid"),
+            )
+            .await
+            .expect("expired lease recovery resolves"),
+        CalibrationEvidenceBatchBeginOutcome::Started(_)
+    ));
+    let lease_states: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT lease_generation, status
+         FROM xshield.calibration_read_capability_leases
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3
+         ORDER BY lease_generation",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(capability.capability_id().as_str())
+    .fetch_all(pool)
+    .await
+    .expect("lease history is queryable");
+    assert_eq!(
+        lease_states,
+        vec![(1, "abandoned".to_owned()), (2, "active".to_owned())]
+    );
+}
+
+async fn issue_capability(
+    store: &PostgresIdentityStore,
+    capability: &CalibrationEvidenceReadCapability,
+    event: &EventId,
+    idempotency: u8,
+    request: u8,
+) -> CalibrationReadCapabilityIssueOutcome {
+    issue_capability_as(
+        store,
+        capability,
+        event,
+        "calibration-fixture",
+        idempotency,
+        request,
+    )
+    .await
+}
+
+async fn issue_capability_as(
+    store: &PostgresIdentityStore,
+    capability: &CalibrationEvidenceReadCapability,
+    event: &EventId,
+    issued_by: &str,
+    idempotency: u8,
+    request: u8,
+) -> CalibrationReadCapabilityIssueOutcome {
+    let idempotency_digest = [idempotency; 32];
+    let request_digest = [request; 32];
+    store
+        .issue_calibration_read_capability(
+            CalibrationReadCapabilityIssue::new(
+                capability,
+                issued_by,
+                &idempotency_digest,
+                &request_digest,
+                event,
+            )
+            .expect("issue command is valid"),
+        )
+        .await
+        .expect("issue resolves")
+}
+
+async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
+    for artifact in &fixture.artifacts {
+        sqlx::query(
+            "INSERT INTO xshield.artifact_catalog (
+                 tenant_id, site_id, artifact_id, request_id, schema_version, kind, content_type,
+                 capture_status, fidelity, bytes_observed, bytes_saved, classification,
+                 example_only, storage_profile, storage_locator, key_ref, integrity_algorithm,
+                 integrity_digest, parent_refs, recorded_at, expires_at, catalog_event_id, status,
+                 deleted_at
+             ) VALUES (
+                 $1,$2,$3,$4,3,'calibration_evidence','application/json','complete',
+                 'entity_exact',64,64,'RESTRICTED',false,'aead_envelope_v1',$5,
+                 'key-r1','sha256_ciphertext',$6,'{}',clock_timestamp(),
+                 clock_timestamp() + interval '10 minutes',$7,'active',NULL
+             )",
+        )
+        .bind(fixture.tenant.as_str())
+        .bind(fixture.site.as_str())
+        .bind(artifact.as_str())
+        .bind(request_id().as_str())
+        .bind(format!("{}.xev", artifact.as_str()))
+        .bind("a".repeat(64))
+        .bind(event_id().as_str())
+        .execute(pool)
+        .await
+        .expect("catalog fixture inserts");
+    }
+}
+
+async fn cleanup(pool: &PgPool, fixture: &Fixture) {
+    let mut transaction = pool.begin().await.expect("cleanup transaction starts");
+    sqlx::query(
+        "UPDATE xshield.calibration_read_capability_leases
+         SET status='abandoned', recovery_required_at=NULL, completed_at=NULL,
+             abandoned_at=date_trunc('milliseconds', clock_timestamp())
+         WHERE tenant_id=$1 AND status IN ('active', 'recovery_required')",
+    )
+    .bind(fixture.tenant.as_str())
+    .execute(&mut *transaction)
+    .await
+    .expect("cleanup retires leases");
+    sqlx::query(
+        "UPDATE xshield.calibration_read_capabilities
+         SET status='expired', recovery_required_at=NULL, consumed_at=NULL,
+             expired_at=date_trunc('milliseconds', clock_timestamp()), revoked_at=NULL
+         WHERE tenant_id=$1 AND status NOT IN ('consumed', 'expired', 'revoked')",
+    )
+    .bind(fixture.tenant.as_str())
+    .execute(&mut *transaction)
+    .await
+    .expect("cleanup retires capabilities");
+    for statement in [
+        "DELETE FROM xshield.calibration_read_capability_leases WHERE tenant_id=$1",
+        "DELETE FROM xshield.calibration_read_capability_members WHERE tenant_id=$1",
+        "DELETE FROM xshield.calibration_read_capabilities WHERE tenant_id=$1",
+    ] {
+        sqlx::query(statement)
+            .bind(fixture.tenant.as_str())
+            .execute(&mut *transaction)
+            .await
+            .expect("fixture cleanup succeeds");
+    }
+    transaction
+        .commit()
+        .await
+        .expect("capability cleanup commits");
+    for statement in [
+        "DELETE FROM xshield.artifact_catalog WHERE tenant_id=$1",
+        "DELETE FROM xshield.audit_outbox WHERE tenant_id=$1",
+    ] {
+        sqlx::query(statement)
+            .bind(fixture.tenant.as_str())
+            .execute(pool)
+            .await
+            .expect("fixture cleanup succeeds");
+    }
+}
+
+fn artifact_id() -> ArtifactId {
+    ArtifactId::parse(format!("artifact_{}", Uuid::now_v7())).expect("artifact id is valid")
+}
+
+fn event_id() -> EventId {
+    EventId::parse(format!("ev_{}", Uuid::now_v7())).expect("event id is valid")
+}
+
+fn request_id() -> RequestId {
+    RequestId::parse(format!("req_{}", Uuid::now_v7())).expect("request id is valid")
+}

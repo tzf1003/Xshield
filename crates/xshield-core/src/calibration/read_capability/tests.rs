@@ -2,9 +2,9 @@ use super::*;
 use crate::{
     calibration::dataset::{EvaluationProvenance, ModelIdentity},
     domain::{
-        ApprovalRef, ArtifactId, CalibrationReadCapabilityId, DatasetRevision, LabelRevision,
-        MappingRevision, ModelRevision, PromptRevision, ProviderId, TaskRevision,
-        ThresholdPolicyRevision,
+        ApprovalRef, ArtifactId, CalibrationReadCapabilityId, CalibrationReadLeaseId,
+        DatasetRevision, LabelRevision, MappingRevision, ModelRevision, PromptRevision, ProviderId,
+        TaskRevision, ThresholdPolicyRevision,
     },
     ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
 };
@@ -68,8 +68,10 @@ fn read_request_requires_current_scope_lease_and_exact_capability_reference() {
     let tenant = TenantId::parse("tenant_demo").unwrap();
     let site = SiteId::parse("site_demo").unwrap();
     let own_ref = capability.evidence_refs().pop().unwrap();
+    let session = session(&capability, 110, 190, [7; 32], 150).unwrap();
 
     let request = CalibrationEvidenceReadRequest::new(
+        &session,
         &capability,
         &own_ref,
         &tenant,
@@ -81,6 +83,8 @@ fn read_request_requires_current_scope_lease_and_exact_capability_reference() {
         request.capability().capability_id(),
         capability.capability_id()
     );
+    assert_eq!(request.session().capability(), &capability);
+    assert_eq!(request.session().lease().lease_id(), &lease_id(1));
     assert_eq!(request.evidence_ref(), &own_ref);
     assert_eq!(request.tenant_id(), &tenant);
     assert_eq!(request.site_id(), &site);
@@ -93,6 +97,7 @@ fn read_request_requires_current_scope_lease_and_exact_capability_reference() {
     ] {
         assert!(matches!(
             CalibrationEvidenceReadRequest::new(
+                &session,
                 &capability,
                 &own_ref,
                 &wrong_tenant,
@@ -114,6 +119,7 @@ fn read_request_requires_current_scope_lease_and_exact_capability_reference() {
     assert_eq!(own_ref.sample_index(), other_ref.sample_index());
     assert!(matches!(
         CalibrationEvidenceReadRequest::new(
+            &session,
             &capability,
             &other_ref,
             &tenant,
@@ -126,6 +132,136 @@ fn read_request_requires_current_scope_lease_and_exact_capability_reference() {
         CalibrationEvidenceReadDenied::EvidenceNotAuthorized.reason_code(),
         "CALIBRATION_EVIDENCE_NOT_AUTHORIZED"
     );
+}
+
+fn session(
+    capability: &CalibrationEvidenceReadCapability,
+    not_before: u64,
+    expires_at: u64,
+    token: [u8; 32],
+    now: u64,
+) -> Result<CalibrationEvidenceReadSession<'_>, CalibrationReadCapabilityError> {
+    capability.bind_issued_batch_lease(
+        CalibrationEvidenceBatchLease::from_issued(
+            lease_id(1),
+            capability.capability_id().clone(),
+            capability.tenant_id().clone(),
+            capability.site_id().clone(),
+            UnixSeconds::new(not_before),
+            UnixSeconds::new(expires_at),
+            token,
+        )?,
+        UnixSeconds::new(now),
+    )
+}
+
+fn lease_id(index: usize) -> CalibrationReadLeaseId {
+    CalibrationReadLeaseId::parse(format!("callease_018f2a3b-4c5d-7000-8000-{index:012x}")).unwrap()
+}
+
+#[test]
+fn read_request_requires_an_exact_issued_batch_session() {
+    let batch_capability = capability(vec![source(10, 11)]).unwrap();
+    let tenant = TenantId::parse("tenant_demo").unwrap();
+    let site = SiteId::parse("site_demo").unwrap();
+    let own_ref = batch_capability.evidence_refs().pop().unwrap();
+    let batch_session = session(&batch_capability, 110, 190, [7; 32], 150).unwrap();
+
+    let same_identity_different_value = capability(vec![source(10, 11)]).unwrap();
+    assert_eq!(
+        same_identity_different_value.capability_id(),
+        batch_capability.capability_id()
+    );
+    assert!(matches!(
+        CalibrationEvidenceReadRequest::new(
+            &batch_session,
+            &same_identity_different_value,
+            &own_ref,
+            &tenant,
+            &site,
+            UnixSeconds::new(150),
+        ),
+        Err(CalibrationEvidenceReadDenied::EvidenceNotAuthorized)
+    ));
+
+    let other_capability = capability_with_id(
+        CalibrationReadCapabilityId::parse("calcap_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+        vec![source(10, 11)],
+    )
+    .unwrap();
+    let other_session = session(&other_capability, 110, 190, [8; 32], 150).unwrap();
+    assert!(matches!(
+        CalibrationEvidenceReadRequest::new(
+            &other_session,
+            &batch_capability,
+            &own_ref,
+            &tenant,
+            &site,
+            UnixSeconds::new(150),
+        ),
+        Err(CalibrationEvidenceReadDenied::EvidenceNotAuthorized)
+    ));
+    let other_ref = other_capability.evidence_refs().pop().unwrap();
+    assert!(matches!(
+        CalibrationEvidenceReadRequest::new(
+            &batch_session,
+            &batch_capability,
+            &other_ref,
+            &tenant,
+            &site,
+            UnixSeconds::new(150),
+        ),
+        Err(CalibrationEvidenceReadDenied::EvidenceNotAuthorized)
+    ));
+}
+
+#[test]
+fn batch_session_rejects_invalid_mismatched_or_out_of_scope_issued_leases() {
+    let capability = capability(vec![source(10, 11)]).unwrap();
+    assert!(matches!(
+        CalibrationEvidenceBatchLease::from_issued(
+            lease_id(1),
+            capability.capability_id().clone(),
+            capability.tenant_id().clone(),
+            capability.site_id().clone(),
+            UnixSeconds::new(110),
+            UnixSeconds::new(110),
+            [7; 32],
+        ),
+        Err(CalibrationReadCapabilityError::BatchLeaseInvalid)
+    ));
+    assert!(matches!(
+        CalibrationEvidenceBatchLease::from_issued(
+            lease_id(1),
+            capability.capability_id().clone(),
+            capability.tenant_id().clone(),
+            capability.site_id().clone(),
+            UnixSeconds::new(110),
+            UnixSeconds::new(190),
+            [0; 32],
+        ),
+        Err(CalibrationReadCapabilityError::BatchLeaseInvalid)
+    ));
+    let wrong_scope = CalibrationEvidenceBatchLease::from_issued(
+        lease_id(1),
+        capability.capability_id().clone(),
+        TenantId::parse("tenant_other").unwrap(),
+        capability.site_id().clone(),
+        UnixSeconds::new(110),
+        UnixSeconds::new(190),
+        [7; 32],
+    )
+    .unwrap();
+    assert!(matches!(
+        capability.bind_issued_batch_lease(wrong_scope, UnixSeconds::new(150)),
+        Err(CalibrationReadCapabilityError::BatchLeaseMismatch)
+    ));
+    for (not_before, expires_at, now) in [(99, 190, 150), (110, 201, 150), (110, 190, 109)] {
+        assert!(matches!(
+            session(&capability, not_before, expires_at, [7; 32], now),
+            Err(CalibrationReadCapabilityError::BatchLeaseOutsideCapability)
+        ));
+    }
 }
 
 fn source(model: usize, label: usize) -> CalibrationSampleReadScope {

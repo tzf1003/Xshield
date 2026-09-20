@@ -333,10 +333,12 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         for sparse in [false, true] {
             let stored = insert_event(pool, scope, family, envelope.clone()).await;
             let id = stored["event_id"].as_str().unwrap();
+            let event_type = stored["event_type"].as_str().unwrap();
+            let aggregate_field = family.aggregate_field(event_type);
             let mut invalid = stored.clone();
             if sparse {
                 invalid = json!({"schema_version": 3, "event_type": stored["event_type"],
-                "event_id": id, family.aggregate_field(): stored["payload"][family.aggregate_field()]});
+                "event_id": id, aggregate_field: stored["payload"][aggregate_field]});
             } else {
                 sqlx::query(
                     "UPDATE xshield.audit_outbox SET aggregate_ref = $2 WHERE event_id = $1",
@@ -515,7 +517,7 @@ pub(super) async fn insert_event(
     }
     sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,$4,$5,$6)")
         .bind(event["event_id"].as_str().unwrap()).bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str())
-        .bind(event["payload"][family.aggregate_field()].as_str().unwrap()).bind(event["event_type"].as_str().unwrap())
+        .bind(event["payload"][family.aggregate_field(event["event_type"].as_str().unwrap())].as_str().unwrap()).bind(event["event_type"].as_str().unwrap())
         .bind(&event).execute(pool).await.unwrap();
     event
 }

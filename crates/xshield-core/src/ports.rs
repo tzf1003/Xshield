@@ -6,7 +6,9 @@ use crate::{
         ShareTokenFingerprint,
     },
     audit::AuditEvent,
-    calibration::read_capability::{CalibrationEvidenceReadCapability, CalibrationEvidenceRef},
+    calibration::read_capability::{
+        CalibrationEvidenceReadCapability, CalibrationEvidenceReadSession, CalibrationEvidenceRef,
+    },
     domain::{
         ActionRef, EventId, OperationId, PolicyRevision, ResourceType, SiteId, StageExecutionId,
         TenantId, ViewProfile, WafSessionId,
@@ -23,55 +25,56 @@ use std::{cell::RefCell, collections::BTreeMap, fmt, future::Future};
 /// A validated request to read exactly one artifact in a calibration batch.
 ///
 /// This request can only be constructed from a
-/// [`CalibrationEvidenceReadCapability`] and one of its exact exported
+/// [`CalibrationEvidenceReadSession`], its exact
+/// [`CalibrationEvidenceReadCapability`], and one of its exact exported
 /// [`CalibrationEvidenceRef`] values. It deliberately has no console
 /// `EvidenceAccessRequestId`, `ApprovalRef`, case, or management role: the
 /// control-plane single-artifact download flow cannot authorize an offline
 /// calibration batch.
 ///
-/// Construction only rejects obviously wrong scope, lease, or reference shape;
+/// Construction only rejects local session, scope, lease, or reference shape;
 /// it performs no storage, evidence, issuance, audit, or authorization side
-/// effects. Callers supply `now` from a trusted server clock.
+/// effects. The session must have been bound after an authoritative adapter
+/// began the batch, and callers supply `now` from a trusted server clock.
 pub struct CalibrationEvidenceReadRequest<'a> {
+    session: &'a CalibrationEvidenceReadSession<'a>,
     capability: &'a CalibrationEvidenceReadCapability,
     evidence_ref: &'a CalibrationEvidenceRef,
-    tenant_id: &'a TenantId,
-    site_id: &'a SiteId,
+    tenant_id: TenantId,
+    site_id: SiteId,
     now: UnixSeconds,
 }
 
 impl<'a> CalibrationEvidenceReadRequest<'a> {
     /// Validates the local, non-expandable batch scope for one future read.
     ///
-    /// A reference cloned from another capability is rejected even when its
+    /// A reference or session from another capability is rejected even when its
     /// artifact, role, and sample position are otherwise identical. To avoid
     /// turning this boundary into an evidence-enumeration oracle, every local
     /// mismatch maps to [`CalibrationEvidenceReadDenied::EvidenceNotAuthorized`].
     ///
     /// # Errors
     /// Returns [`CalibrationEvidenceReadDenied::EvidenceNotAuthorized`] when
-    /// the tenant/site, lease, capability identity, or exact role/reference
-    /// membership does not match the supplied capability. No reader is called
-    /// on this path.
+    /// the session, tenant/site, lease, capability identity, or exact
+    /// role/reference membership does not match. No reader is called on this
+    /// path.
     pub fn new(
+        session: &'a CalibrationEvidenceReadSession<'a>,
         capability: &'a CalibrationEvidenceReadCapability,
         evidence_ref: &'a CalibrationEvidenceRef,
         tenant_id: &'a TenantId,
         site_id: &'a SiteId,
         now: UnixSeconds,
     ) -> Result<Self, CalibrationEvidenceReadDenied> {
-        if capability
-            .verify_read_scope(tenant_id, site_id, now)
-            .is_err()
-            || !capability.permits_evidence_ref(evidence_ref)
-        {
+        if !session.authorizes_request(capability, evidence_ref, tenant_id, site_id, now) {
             return Err(CalibrationEvidenceReadDenied::EvidenceNotAuthorized);
         }
         Ok(Self {
+            session,
             capability,
             evidence_ref,
-            tenant_id,
-            site_id,
+            tenant_id: tenant_id.clone(),
+            site_id: site_id.clone(),
             now,
         })
     }
@@ -80,6 +83,12 @@ impl<'a> CalibrationEvidenceReadRequest<'a> {
     #[must_use]
     pub const fn capability(&self) -> &CalibrationEvidenceReadCapability {
         self.capability
+    }
+
+    /// Returns the non-duplicable batch session selected for this read.
+    #[must_use]
+    pub const fn session(&self) -> &CalibrationEvidenceReadSession<'a> {
+        self.session
     }
 
     /// Returns the exact frozen artifact and semantic role to read.
@@ -91,13 +100,13 @@ impl<'a> CalibrationEvidenceReadRequest<'a> {
     /// Returns the trusted tenant scope for this attempt.
     #[must_use]
     pub const fn tenant_id(&self) -> &TenantId {
-        self.tenant_id
+        &self.tenant_id
     }
 
     /// Returns the trusted site scope for this attempt.
     #[must_use]
     pub const fn site_id(&self) -> &SiteId {
-        self.site_id
+        &self.site_id
     }
 
     /// Returns the trusted server time at which the attempt was admitted.
@@ -145,8 +154,10 @@ pub enum CalibrationEvidenceReadState<Content> {
 ///
 /// This port is separate from the console's `EvidenceReadPort`: a console
 /// approval, `ApprovalRef`, or management role cannot be adapted into this
-/// request or authorize a batch read. It does not issue a capability, persist
-/// a report, publish a threshold or policy, or itself produce a durable audit.
+/// request or authorize a batch read. Each request also requires an exact,
+/// non-duplicable batch session bound after an authoritative `begin_batch`.
+/// The port does not issue a capability, persist a report, publish a threshold
+/// or policy, or itself produce a durable audit.
 ///
 /// Before returning [`CalibrationEvidenceReadState::Read`], an adapter MUST
 /// independently revalidate the capability issuance and current tenant/site

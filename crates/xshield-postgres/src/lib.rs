@@ -7,6 +7,7 @@
 
 mod action_read;
 mod binding_inspection;
+mod calibration_read_capability;
 mod case_close;
 mod case_evidence;
 mod case_evidence_holds;
@@ -34,6 +35,11 @@ mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
 pub use binding_inspection::BindingInspection;
+pub use calibration_read_capability::{
+    CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
+    CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome,
+    CalibrationReadCapabilityRecord,
+};
 pub use case_close::{
     InvestigationCaseClose, InvestigationCaseCloseRecord, InvestigationCaseCloseWriteOutcome,
 };
@@ -1117,6 +1123,8 @@ pub enum StoreError {
     NumericRange(&'static str),
     /// A stored value violates the adapter's domain contract.
     CorruptData(&'static str),
+    /// The operating system could not obtain required cryptographic entropy.
+    Entropy,
     /// `SQLx` connection, statement, or transaction failure.
     Database(sqlx::Error),
 }
@@ -1134,6 +1142,7 @@ impl fmt::Display for StoreError {
             Self::InvalidCommand => formatter.write_str("invalid persistence command"),
             Self::NumericRange(field) => write!(formatter, "{field} exceeds PostgreSQL range"),
             Self::CorruptData(field) => write!(formatter, "invalid stored {field}"),
+            Self::Entropy => formatter.write_str("cryptographic entropy unavailable"),
             Self::Database(_) => formatter.write_str("PostgreSQL operation failed"),
         }
     }
@@ -1146,7 +1155,8 @@ impl Error for StoreError {
             Self::InvalidPoolConfig
             | Self::InvalidCommand
             | Self::NumericRange(_)
-            | Self::CorruptData(_) => None,
+            | Self::CorruptData(_)
+            | Self::Entropy => None,
         }
     }
 }
