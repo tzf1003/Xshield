@@ -53,6 +53,8 @@ Observer 看脱敏概要；Investigator 执行受限查询和申请证据；Sens
 
 统一结构包含error_code、message_safe、request_id、retryable、next_action；禁止堆栈、凭证、资源归属和内部SQL进入客户端错误。401用于管理认证要求，403用于已认证的禁止操作，409用于代际/修订冲突，429用于预算限制，503用于必需依赖不可用。具体重试不自动重新执行生产业务。
 
+案件创建等端点使用的通用管理错误审计路径将 4xx 记为 `DENY`、5xx 记为 `ERROR`，区分输入/权限/预算拒绝与依赖故障；HTTP 状态和稳定原因码保持对应的端点契约。历史事件保留原记录。
+
 ## 29.5 已实现的审计健康契约
 
 `GET /control/v1/audit/health` 的 tenant/site 由服务启动配置固定注入，请求不能选择作用域。管理 Bearer 凭证只保存摘要并采用常量时间比对，签发和过期时间在启动时限制为最长 24 小时且每次请求重验；主体还须持有该精确作用域的 `AuditAdministrator`。服务仅监听 loopback，由独立管理 TLS 边界接入。
@@ -85,11 +87,13 @@ Observer 看脱敏概要；Investigator 执行受限查询和申请证据；Sens
 
 ## 29.10 已实现的调查案件创建契约
 
-`POST /control/v1/cases` 要求固定 tenant/site 作用域内的 `Investigator` 与管理机器凭证。请求体上限 4 KiB，只接受 `{"purpose":"..."}` 严格 JSON；purpose 去除首尾空白后必须保持原值，UTF-8 字节长度为 1–512。`Idempotency-Key` 必填，只允许 16–128 字节 ASCII 字母、数字、`-_.:`。tenant、site、owner 与 case UUIDv7 均由服务端确定。
+`POST /control/v1/cases` 要求固定 tenant/site 作用域内的 `Investigator` 与管理机器凭证。请求体上限 4 KiB，只接受 `{"purpose":"..."}` 严格 JSON；purpose 去除首尾空白后必须保持原值，UTF-8 字节长度为 1–512，拒绝控制字符。`Idempotency-Key` 必填且须单值，只允许 16–128 字节 ASCII 字母、数字、`-_.:`。tenant、site、owner 与 case UUIDv7 均由服务端确定。
 
 服务使用独立的 `XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX` 以用途域 HMAC 保存绑定主体、tenant/site、键和请求参数的摘要，不保存原始幂等键，也不复用分页密钥。每个 owner/tenant/site 的 open 案件数由 `XSHIELD_CONTROL_MAX_OPEN_CASES` 限制在 1–10000；并发服务实例必须使用相同上限。PostgreSQL 事务在同一锁域完成精确幂等检查、容量检查、案件写入和 `case.created` outbox。首次创建返回 201，精确重试返回原案件和 200，不同参数复用同一键返回 409，容量耗尽返回 429，依赖故障返回 503。
 
 所有尝试写管理审计；成功及精确重试携带 `target_case_id`，失败不猜测目标。事务 outbox 记录业务创建事实，管理审计记录接口尝试，两者均不包含原始幂等键。创建案件仅建立后续审批上下文，不授予 manifest、脱敏内容、敏感原文或导出权限；这些能力仍须独立授权。
+
+创建与案件关联/集合查询/关闭共享单实例一个执行许可，繁忙返回 `CONTROL_CASE_BUSY`/429。SQL 单语句及锁等待各限 5 秒，包含池等待的数据库整体操作限 15 秒；故障或超时为 `CONTROL_CASE_STORE_UNAVAILABLE`/503。准入后的任务在客户端断连后继续到数据库与耐久管理审计终态；许可持有至审计完成，本地 fsync 和进程退出仍为部署故障边界。超时或审计失败可能发生在事务提交之后，调用者须保留原键与 purpose 原样重试；不能由失败回复推断没有创建案件。创建响应保持既有无 schema_version 的契约；精确重试可返回已经 closed 的原案件。
 
 ## 29.11 已实现的证据访问申请契约
 

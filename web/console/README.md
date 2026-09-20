@@ -1,6 +1,8 @@
-# Xshield 只读调查控制台
+# Xshield 调查控制台
 
 React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用，按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件。UI 调用现有的七类 GET 端点及只读 `POST /control/v1/search`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。GET 详情需要显式 `Observer`，事件检索需要 `Investigator`，两种角色分别校验。
+
+案件工作台另外调用本人案件集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。
 
 ## 本地运行
 
@@ -13,7 +15,7 @@ npm run dev
 
 页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发七类只读 GET 路径和精确 `POST /control/v1/search` 路径，剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次查询返回后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发固定只读 GET、案件集合 GET、精确 `POST /control/v1/search` 及案件创建/关联/关闭路径；写路径拒绝附加查询串。剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次成功响应后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
@@ -33,6 +35,12 @@ npm run dev
 - 401、断连、页面离开、刷新或闲置 15 分钟清空会话。更换查询类型、目标与详情选择会使旧响应失效；跨响应 tenant/site 偏差断连。客户端清态不等于服务端凭证撤销，JavaScript 也不提供秘密内存可靠清零保证。
 - 403、429 和依赖失败显示固定安全文案、稳定代码及管理 request_id；用户显式重试，不自动重试或释放原文。
 
+## 案件工作台
+
+案件使用流程：选择“案件工作台”→填写用途与幂等键→创建→读取返回的案件 ID→加入 artifact 引用→显式刷新集合→填写理由关闭。集合分页显示 `active/expired/deleted/unavailable`，并保留数据库观察时间；状态不证明内容读取权或对象完整性。当前按 ID 恢复案件，案件列表继续迭代。
+
+写入后表单冻结原键、目标及参数。首次明确拒绝可重新准备操作，未知结果只能原样重试；后续拒绝不能消除早先未知结果。冻结请求在调查类型切换时保留，401、闲置、页面离开、刷新或断连后清空。未确认操作触发原生离页提醒；操作者须先安全保管界面显示的原路径、键和正文，重新鉴权后填写这些值恢复，禁止用新键推断重试不会产生重复创建。默认键来自浏览器随机 UUID，键不作为授权凭证。
+
 ## 构建与部署边界
 
 ```sh
@@ -47,7 +55,7 @@ npm run build
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。证据内容审批、模型调用列表、案件与导出界面属于后续独立闭环。
+API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。证据内容审批、模型调用列表、案件列表与导出界面属于后续独立闭环。
 
 ## 验证
 
@@ -60,6 +68,7 @@ npm run test:e2e
 cargo test -p xshield-control --lib console_client_ -- --ignored
 # 需要已应用迁移的隔离测试 PostgreSQL；设置 XSHIELD_TEST_DATABASE_URL：
 cargo test -p xshield-control --lib console_ledger_client_reads_postgres_http_contract -- --ignored
+cargo test -p xshield-control --lib console_case_client_mutates_postgres_http_contract -- --ignored
 # 或使用仓库的自动隔离建库、迁移和清理流程（包含上述账本 wire）：
 scripts/test_postgres.sh
 ```
@@ -71,6 +80,8 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
 搜索 wire 回归覆盖 nullable 字段、RFC3339 微秒、升降序游标、扫描统计与未知值、预算 429、篡改 HMAC 游标 400、Observer 查询 403，以及七次 `console.query.executed` 耐久审计。以上两项 wire 测试使用真实 HTTP 路由与合成索引，不执行外部模型调用。
 
 账本 Node 回归覆盖目标/版本/空值、状态与代际一致性、微秒到期边界、未知字段投影和固定错误诊断。浏览器验证资格→绑定/来源请求、显式历史检索、生命周期状态、权限失败与会话隔离。独立账本 wire 使用真实 PostgreSQL 测试数据、Axum 路由、Node 客户端和加密管理 journal；范围为隔离合成记录，不代表生产数据或企业身份入口验收。
+
+案件 Node 回归验证固定路径与键、UTF-8/控制字符边界、目标/状态/分页一致性及显式重试。浏览器覆盖创建→浏览→关联→关闭、断网/超时与原键恢复、未知后再次拒绝、切换调查类型和目标后的冻结参数、401/闲置/刷新清态、独立 Observer 权限、文本注入及桌面/移动布局。案件 wire 使用真实 PostgreSQL、Axum 和 Node 客户端，覆盖连接池整体超时、SQL 锁超时、断连创建恢复、幂等重试/冲突、关联及分页、关闭后约束、外部所有者不可用、401/403，并复核案件、outbox 和管理 journal。测试仅使用隔离合成记录。
 
 ## 依赖与维护
 

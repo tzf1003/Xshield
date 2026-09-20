@@ -7,7 +7,7 @@ export type Envelope = {
 };
 export const messages = {
   CONTROL_AUTH_REQUIRED: "管理凭证无效或已过期，请重新连接。",
-  CONTROL_SCOPE_DENIED: "当前身份没有此作用域的只读权限。",
+  CONTROL_SCOPE_DENIED: "当前身份没有此作用域的操作权限。",
   CONTROL_RATE_LIMITED: "管理请求已达频率上限，请稍后重试。",
   CONTROL_REQUEST_ID_INVALID: "请输入规范的请求 ID。",
   CONTROL_ARTIFACT_ID_INVALID: "证据 ID 格式无效。",
@@ -16,6 +16,32 @@ export const messages = {
   CONTROL_BINDING_ID_INVALID: "请输入规范的身份绑定 ID。",
   CONTROL_GRANT_STORE_UNAVAILABLE: "资格账本暂时不可用，请稍后重试。",
   CONTROL_BINDING_STORE_UNAVAILABLE: "身份账本暂时不可用，请稍后重试。",
+  CONTROL_CASE_ID_INVALID: "请输入规范的案件 ID。",
+  CONTROL_CASE_REQUEST_INVALID:
+    "案件用途须为 1–512 UTF-8 字节，且不含控制字符或首尾空白。",
+  CONTROL_CASE_CLOSE_REQUEST_INVALID:
+    "关闭理由须为 1–512 UTF-8 字节，且不含控制字符或首尾空白。",
+  CONTROL_CASE_EVIDENCE_REQUEST_INVALID: "请选择有效的案件与证据 ID。",
+  CONTROL_IDEMPOTENCY_KEY_INVALID:
+    "幂等键须为 16–128 个 ASCII 字母、数字或 -_.:。",
+  CONTROL_IDEMPOTENCY_CONFLICT: "幂等键已绑定其他参数，请核对原始请求。",
+  CONTROL_IDEMPOTENCY_UNAVAILABLE: "幂等服务暂时不可用，请保留原键与参数。",
+  CONTROL_CASE_NOT_AVAILABLE: "当前身份和范围内案件不可用。",
+  CONTROL_CASE_EVIDENCE_TARGET_UNAVAILABLE:
+    "当前案件或证据不可关联，请核对归属、案件状态及证据期限。",
+  CONTROL_CASE_EVIDENCE_CONFLICT:
+    "证据关联冲突，请核对原键、参数和现有案件集合。",
+  CONTROL_CASE_CLOSE_CONFLICT: "关闭请求冲突，请核对原键与参数。",
+  CONTROL_CASE_CAPACITY_EXCEEDED:
+    "开放案件已达容量上限，请关闭或复用现有案件。",
+  CONTROL_CASE_EVIDENCE_LIMIT_EXCEEDED: "案件证据引用已达容量上限。",
+  CONTROL_CASE_BUSY: "案件服务繁忙，请保留原键与参数后重试。",
+  CONTROL_CASE_EVIDENCE_BUSY: "案件证据服务繁忙，请稍后重试。",
+  CONTROL_CASE_CLOSE_BUSY: "案件关闭服务繁忙，请保留原键与参数后重试。",
+  CONTROL_CASE_STORE_UNAVAILABLE:
+    "案件存储暂时不可用；写入结果可能未知，请保留原键与参数。",
+  CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE:
+    "案件证据存储暂时不可用；写入结果可能未知，请保留原键与参数。",
   CONTROL_QUERY_INVALID: "查询计划无效，请检查 UTC 时间范围、条件和页大小。",
   CONTROL_QUERY_BUDGET_EXCEEDED:
     "查询超出服务预算，请缩小时间范围或细化条件；精确 ID 查询请联系管理员。",
@@ -33,8 +59,8 @@ export const messages = {
   INVALID_CREDENTIAL: "请输入有效的管理凭证。",
   INVALID_RESPONSE: "服务响应未通过契约校验，请联系管理员。",
   RESPONSE_TOO_LARGE: "服务响应超过读取上限，请联系管理员。",
-  REQUEST_TIMEOUT: "查询超时，请稍后重试。",
-  REQUEST_ABORTED: "查询已取消。",
+  REQUEST_TIMEOUT: "请求超时；写入结果可能未知，请使用原键与参数确认。",
+  REQUEST_ABORTED: "客户端请求已取消；已准入的服务端操作仍可能完成。",
   NETWORK_UNAVAILABLE: "无法连接管理服务，请检查连接后重试。",
   QUERY_DIGEST_UNAVAILABLE:
     "当前环境无法验证查询摘要，请使用 HTTPS 或本机浏览器。",

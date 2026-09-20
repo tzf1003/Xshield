@@ -1138,6 +1138,50 @@ impl ControlPlane {
                 )
                 .await;
         };
+        let Ok(permit) = Arc::clone(&self.case_evidence_capacity).try_acquire_owned() else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    CASE_CREATE_ACCESS,
+                    None,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "CONTROL_CASE_BUSY",
+                    "case operation is already in progress",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
+        let task_request = request_id.clone();
+        // Keep admission through the database result and mandatory audit even
+        // if the browser disconnects after a commit. Exact retries recover it.
+        match tokio::spawn(async move {
+            let _permit = permit;
+            self.persist_case(
+                task_request,
+                subject,
+                draft,
+                idempotency_digest,
+                request_digest,
+            )
+            .await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => internal_error(&request_id),
+        }
+    }
+
+    async fn persist_case(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        draft: InvestigationCaseDraft,
+        idempotency_digest: [u8; 32],
+        request_digest: [u8; 32],
+    ) -> EndpointResult {
         let Ok(typed_request_id) = RequestId::parse(request_id.clone()) else {
             return internal_error(&request_id);
         };
@@ -1157,8 +1201,12 @@ impl ControlPlane {
         let Ok(command) = command else {
             return internal_error(&request_id);
         };
-        let outcome = self.catalog.create_investigation_case(command).await;
-        let Ok(outcome) = outcome else {
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(15),
+            self.catalog.create_investigation_case(command),
+        )
+        .await;
+        let Ok(Ok(outcome)) = outcome else {
             return self
                 .audited_error_async(
                     request_id,
@@ -2899,7 +2947,11 @@ impl ControlPlane {
                 subject,
                 action,
                 target_request_id,
-                "DENY",
+                if status.is_server_error() {
+                    "ERROR"
+                } else {
+                    "DENY"
+                },
                 reason_code,
             )
             .is_err()
@@ -3279,10 +3331,16 @@ async fn create_case_handler(
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let idempotency_key = headers
-        .get("idempotency-key")
+    let mut keys = headers.get_all("idempotency-key").iter();
+    let idempotency_key = keys
+        .next()
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let idempotency_key = if keys.next().is_none() {
+        idempotency_key
+    } else {
+        None
+    };
     control
         .create_case(
             authorization,
@@ -4104,6 +4162,7 @@ mod tests {
     mod audit_publish;
     mod case_close;
     mod case_collection;
+    mod case_console_wire;
     mod case_holds;
     mod case_holds_postgres;
     mod case_items;
@@ -7198,11 +7257,21 @@ mod tests {
         address: std::net::SocketAddr,
         observer_address: Option<std::net::SocketAddr>,
     ) -> Result<std::process::ExitStatus, &'static str> {
+        run_console_wire_with_env(script_name, address, observer_address, Vec::new()).await
+    }
+
+    async fn run_console_wire_with_env(
+        script_name: &str,
+        address: std::net::SocketAddr,
+        observer_address: Option<std::net::SocketAddr>,
+        environment: Vec<(&'static str, String)>,
+    ) -> Result<std::process::ExitStatus, &'static str> {
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../web/console/tests")
             .join(script_name);
         tokio::task::spawn_blocking(move || {
             let mut command = std::process::Command::new("node");
+            command.envs(environment);
             if let Some(address) = observer_address {
                 command.env(
                     "XSHIELD_CONSOLE_TEST_OBSERVER_ORIGIN",

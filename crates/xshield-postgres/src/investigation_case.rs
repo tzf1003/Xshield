@@ -107,6 +107,8 @@ impl PostgresIdentityStore {
     ///
     /// A transaction advisory lock serializes idempotency and capacity checks
     /// for the same owner and scope. Exact retries return the original case.
+    /// Statements and lock waits are limited to 5 seconds; callers bound the
+    /// whole operation and retain original input to recover uncertain commits.
     ///
     /// # Errors
     /// Returns [`StoreError`] for corrupt durable state or database failure.
@@ -115,6 +117,12 @@ impl PostgresIdentityStore {
         command: InvestigationCaseCreate<'_>,
     ) -> Result<InvestigationCaseWriteOutcome, StoreError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '5s'")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(hashtextextended(
                  'xshield-case-v1:' || $1 || ':' || $2 || ':' || $3, 0

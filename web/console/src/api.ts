@@ -1,4 +1,4 @@
-/** Read-only control API boundary. Credentials remain in this client's memory. */
+/** Control API boundary. Credentials remain in this client's memory. */
 import {
   ApiError,
   messages,
@@ -39,6 +39,22 @@ import {
 import type { SearchPlan, SearchResponse } from "./search.ts";
 import { decodeGrantResponse, decodeBindingResponse } from "./ledger.ts";
 import type { GrantResponse, BindingResponse } from "./ledger.ts";
+import {
+  validateCaseId,
+  validateCaseCursor,
+  validCaseText,
+  validIdempotencyKey,
+  decodeCaseCreated,
+  decodeCaseCollection,
+  decodeCaseItemAdded,
+  decodeCaseClosed,
+} from "./cases.ts";
+import type {
+  CaseCreated,
+  CaseCollection,
+  CaseItemAdded,
+  CaseClosed,
+} from "./cases.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -590,7 +606,7 @@ async function readJson(
   }
 }
 
-/** Fixed read endpoints. Callers own session disposal and cross-response scope checks. */
+/** Fixed scoped endpoints. Callers own session disposal, scope checks and mutation retry input. */
 export class ControlClient {
   #authorization: string;
   constructor(token: string) {
@@ -618,9 +634,10 @@ export class ControlClient {
 
   async #request<T>(
     path: string,
-    decode: (value: unknown) => T,
+    decode: (value: unknown, status: number) => T,
     signal?: AbortSignal,
     body?: string,
+    idempotencyKey?: string,
   ): Promise<T> {
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), 15_000);
@@ -636,6 +653,9 @@ export class ControlClient {
           Authorization: this.#authorization,
           Accept: "application/json",
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(idempotencyKey === undefined
+            ? {}
+            : { "Idempotency-Key": idempotencyKey }),
         },
         ...(body === undefined ? {} : { body }),
         credentials: "omit",
@@ -662,7 +682,7 @@ export class ControlClient {
             : "HTTP_ERROR";
         throw new ApiError(code, status, requestId);
       }
-      return decode(value);
+      return decode(value, status);
     } catch (error) {
       if (signal?.aborted) throw new ApiError("REQUEST_ABORTED", status);
       if (deadline.signal.aborted)
@@ -919,6 +939,92 @@ export class ControlClient {
     );
   }
 
+  /** Create an owned investigation case; no automatic retries. Keep the original
+   * key and purpose until a durable response resolves any uncertain outcome.
+   */
+  async createCase(
+    purpose: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<CaseCreated> {
+    if (!validCaseText(purpose))
+      throw new ApiError("CONTROL_CASE_REQUEST_INVALID");
+    this.#idempotencyKey(key);
+    return this.#request(
+      "cases",
+      (value, status) => decodeCaseCreated(value, purpose, status),
+      signal,
+      JSON.stringify({ purpose }),
+      key,
+    );
+  }
+
+  /** Read one owned case page. This Investigator endpoint grants no Observer or content access. */
+  async caseItems(
+    caseId: string,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<CaseCollection> {
+    validateCaseId(caseId);
+    validateCaseCursor(cursor);
+    return this.#request(
+      `cases/${caseId}/items${this.#cursor(cursor)}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeCaseCollection(value, caseId, cursor);
+      },
+      signal,
+    );
+  }
+
+  /** Associate an active evidence reference. The server rechecks owner, scope,
+   * open state and capacity; callers retain the exact key and targets for retry.
+   */
+  async addCaseItem(
+    caseId: string,
+    artifactId: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<CaseItemAdded> {
+    validateCaseId(caseId);
+    if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
+      throw new ApiError("CONTROL_ARTIFACT_ID_INVALID");
+    this.#idempotencyKey(key);
+    return this.#request(
+      `cases/${caseId}/items`,
+      (value, status) => decodeCaseItemAdded(value, caseId, artifactId, status),
+      signal,
+      JSON.stringify({ artifact_id: artifactId }),
+      key,
+    );
+  }
+
+  /** Close an owned case with an explicit reason. An interrupted response is
+   * not evidence of rollback; only replay with the same key and parameters.
+   */
+  async closeCase(
+    caseId: string,
+    reason: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<CaseClosed> {
+    validateCaseId(caseId);
+    if (!validCaseText(reason))
+      throw new ApiError("CONTROL_CASE_CLOSE_REQUEST_INVALID");
+    this.#idempotencyKey(key);
+    return this.#request(
+      `cases/${caseId}/close`,
+      (value, status) => decodeCaseClosed(value, caseId, status),
+      signal,
+      JSON.stringify({ reason }),
+      key,
+    );
+  }
+
+  #idempotencyKey(key: string): void {
+    if (!validIdempotencyKey(key))
+      throw new ApiError("CONTROL_IDEMPOTENCY_KEY_INVALID");
+  }
   #requestId(requestId: string): void {
     if (typeof requestId !== "string" || !requestPattern.test(requestId))
       throw new ApiError("CONTROL_REQUEST_ID_INVALID");

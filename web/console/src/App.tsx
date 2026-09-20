@@ -6,6 +6,7 @@ import type { SearchPlan, SearchResponse } from "./search";
 import { SearchPanel } from "./SearchPanel";
 import type { SearchPreset } from "./SearchPanel";
 import { LedgerPanel } from "./LedgerPanel";
+import { CasePanel } from "./CasePanel";
 import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
@@ -25,8 +26,8 @@ import {
 } from "./panels";
 
 type Problem = { message: string; code: string; requestId?: string | null };
-type Channel = "query" | "events" | "evidence" | "artifact";
-type QueryKind = "request" | "model" | "grant" | "binding" | "search";
+type Channel = "query" | "events" | "evidence" | "artifact" | "case";
+type QueryKind = "request" | "model" | "grant" | "binding" | "search" | "case";
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
@@ -66,6 +67,7 @@ export function App() {
     events: 0,
     evidence: 0,
     artifact: 0,
+    case: 0,
   });
   const scope = useRef<{ tenant_id: string; site_id: string } | null>(null);
   const [connected, setConnected] = useState(false);
@@ -154,9 +156,10 @@ export function App() {
     channel: Channel,
     fetcher: (api: ControlClient, signal: AbortSignal) => Promise<T>,
     apply: (response: T) => void,
-  ) {
+    fail?: (error: unknown) => void,
+  ): Promise<boolean> {
     const api = client.current;
-    if (!api) return;
+    if (!api) return false;
     const generation = epoch.current;
     const operation = ++operations.current[channel];
     const signal = lifetime.current.signal;
@@ -168,25 +171,27 @@ export function App() {
     setProblems((value) => ({ ...value, [channel]: undefined }));
     try {
       const response = await fetcher(api, signal);
-      if (!current()) return;
+      if (!current()) return false;
       if (
         scope.current &&
         (scope.current.tenant_id !== response.tenant_id ||
           scope.current.site_id !== response.site_id)
       ) {
         disconnect("响应范围校验失败，连接已断开。");
-        return;
+        return false;
       }
       scope.current = {
         tenant_id: response.tenant_id,
         site_id: response.site_id,
       };
       apply(response);
+      return true;
     } catch (error) {
-      if (!current()) return;
+      if (!current()) return false;
       if (error instanceof ApiError && error.status === 401) {
         disconnect("管理凭证已失效，请重新连接。");
       } else {
+        fail?.(error);
         const problem =
           error instanceof ApiError
             ? {
@@ -200,6 +205,7 @@ export function App() {
               };
         setProblems((value) => ({ ...value, [channel]: problem }));
       }
+      return false;
     } finally {
       if (current()) setBusy((value) => ({ ...value, [channel]: false }));
     }
@@ -239,7 +245,7 @@ export function App() {
   }
   function query(event: FormEvent) {
     event.preventDefault();
-    if (queryKind === "search") return;
+    if (queryKind === "search" || queryKind === "case") return;
     clearResults();
     const target = requestId.trim();
     setRequestId(target);
@@ -351,6 +357,7 @@ export function App() {
     grant: "资格调查",
     binding: "身份绑定调查",
     search: "结构化事件检索",
+    case: "案件工作台",
   }[queryKind];
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
@@ -362,7 +369,7 @@ export function App() {
         </h2>
         {(artifact || problems.artifact || busy.artifact) && (
           <button className="text-button" onClick={clearArtifact}>
-            返回事件
+            {queryKind === "case" ? "关闭详情" : "返回事件"}
           </button>
         )}
       </div>
@@ -393,7 +400,7 @@ export function App() {
       <header className="topbar">
         <span className="brand">Xshield</span>
         <span className="nav-title">{title}</span>
-        <span className="muted console-label">只读控制台</span>
+        <span className="muted console-label">调查控制台</span>
         <div className="connection">
           <span className="mono scope">
             {scope.current
@@ -418,7 +425,9 @@ export function App() {
               ? "核对模型调用生命周期、版本与证据引用。"
               : queryKind === "search"
                 ? "按时间与事件字段检索，核对直接引用的历史事实。"
-                : "核对当前账本的状态、代际与期限。"}
+                : queryKind === "case"
+                  ? "建立本人调查案件，核对证据引用与案件状态。"
+                  : "核对当前账本的状态、代际与期限。"}
         </p>
         {sessionNotice && (
           <div className="notice" role="status">
@@ -432,7 +441,8 @@ export function App() {
           >
             <h2 id="connect-title">连接管理服务</h2>
             <p className="muted">
-              使用当前站点的管理凭证。详情查询需 Observer，结构化检索需
+              使用当前站点的管理凭证。详情查询需
+              Observer，结构化检索与案件操作需
               Investigator；访问范围由服务端校验。
             </p>
             <form onSubmit={connect}>
@@ -468,13 +478,15 @@ export function App() {
                   setQueryKind(
                     event.target.value === "search"
                       ? "search"
-                      : event.target.value === "grant"
-                        ? "grant"
-                        : event.target.value === "binding"
-                          ? "binding"
-                          : event.target.value === "model"
-                            ? "model"
-                            : "request",
+                      : event.target.value === "case"
+                        ? "case"
+                        : event.target.value === "grant"
+                          ? "grant"
+                          : event.target.value === "binding"
+                            ? "binding"
+                            : event.target.value === "model"
+                              ? "model"
+                              : "request",
                   );
                 }}
               >
@@ -483,8 +495,9 @@ export function App() {
                 <option value="grant">资格</option>
                 <option value="binding">身份绑定</option>
                 <option value="search">结构化事件检索</option>
+                <option value="case">案件工作台</option>
               </select>
-              {queryKind !== "search" && (
+              {queryKind !== "search" && queryKind !== "case" && (
                 <>
                   <label htmlFor="request-id">{queryLabels[queryKind]}</label>
                   <input
@@ -510,7 +523,23 @@ export function App() {
               )}
             </form>
             <Failure problem={problems.query ?? null} />
-            {queryKind === "search" ? (
+            <div hidden={queryKind !== "case"}>
+              <CasePanel
+                active={queryKind === "case"}
+                busy={Boolean(busy.case)}
+                onInvalidate={clearResults}
+                onRun={(fetcher, apply, fail) =>
+                  run("case", fetcher, apply, fail)
+                }
+                onArtifact={openArtifact}
+                artifactDetails={
+                  queryKind === "case" &&
+                  (artifact || busy.artifact || problems.artifact) &&
+                  eventDetails
+                }
+              />
+            </div>
+            {queryKind === "case" ? null : queryKind === "search" ? (
               <SearchPanel
                 response={search}
                 initialFilter={searchPreset}

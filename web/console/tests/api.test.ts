@@ -1552,7 +1552,7 @@ test("ledger failures retain safe diagnostics and cancelled requests do not star
   }
 });
 
-test("development proxy permits only the exact search POST alongside fixed GET reads", async () => {
+test("development proxy permits fixed reads and exact search/case POST routes", async () => {
   const { default: config } = await import("../vite.config.ts");
   const proxy = config.server?.proxy?.["/control/"];
   assert.ok(proxy && typeof proxy !== "string" && proxy.bypass);
@@ -1571,7 +1571,16 @@ test("development proxy permits only the exact search POST alongside fixed GET r
     ["POST", "/control/v1/search/", false],
     ["GET", "/control/v1/search", false],
     ["PUT", "/control/v1/search", false],
-    ["POST", "/control/v1/cases", false],
+    ["POST", "/control/v1/cases", true],
+    ["POST", `/control/v1/cases/${CASE_ID}/items`, true],
+    ["POST", `/control/v1/cases/${CASE_ID}/close`, true],
+    ["GET", `/control/v1/cases/${CASE_ID}/items?cursor=${CASE_CURSOR}`, true],
+    ["GET", "/control/v1/cases", false],
+    ["GET", `/control/v1/cases/${CASE_ID}/close`, false],
+    ["POST", `/control/v1/cases/${CASE_ID}/holds`, false],
+    ["POST", `/control/v1/cases/${CASE_ID}/close?reason=other`, false],
+    ["POST", "/control/v1/cases?tenant=other", false],
+    ["POST", "/control/v1/cases/", false],
     ["POST", `/control/v1/requests/${REQUEST_ID}`, false],
     ["GET", `/control/v1/artifacts/${ARTIFACT_ID}/content`, false],
     ["POST", `/control/v1/grants/${GRANT_ID}`, false],
@@ -1595,4 +1604,391 @@ test("development proxy permits only the exact search POST alongside fixed GET r
     assert.equal(state.statusCode, allowed ? 200 : 404);
     assert.equal(state.ended, !allowed);
   }
+});
+
+const CASE_ID = "case_018f2a3b-4c5d-7000-8000-000000000951";
+const CASE_KEY = "synthetic-case-key-01";
+const CASE_CURSOR = `v1.${ARTIFACT_ID}.${"a".repeat(64)}`;
+const caseEnvelope = {
+  request_id: REQUEST_ID,
+  tenant_id: "tenant_a",
+  site_id: "site_a",
+};
+const caseFacts = () => ({
+  case_id: CASE_ID,
+  status: "open",
+  purpose: "调查合成事件",
+  created_at: "2026-09-20T01:02:03.004Z",
+});
+const caseAdded = () => ({
+  ...caseEnvelope,
+  schema_version: 3,
+  case_id: CASE_ID,
+  artifact_id: ARTIFACT_ID,
+  added_by: "operator-1",
+  added_at: "2026-09-20T01:02:04.005Z",
+  replayed: false,
+});
+const casePage = () => ({
+  ...caseEnvelope,
+  schema_version: 3,
+  case: caseFacts(),
+  as_of: "2026-09-20T01:02:05.006007Z",
+  items: [
+    {
+      artifact_id: ARTIFACT_ID,
+      added_by: "operator-1",
+      added_at: "2026-09-20T01:02:04.005Z",
+      catalog_status: "active",
+    },
+  ],
+  truncated: true,
+  next_cursor: CASE_CURSOR as string | null,
+});
+
+test("case transport freezes exact mutation inputs, keys and fixed response correlations", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const created = { ...caseEnvelope, ...caseFacts(), replayed: false };
+  const closed = {
+    ...caseEnvelope,
+    schema_version: 3,
+    case_id: CASE_ID,
+    status: "closed",
+    closed_at: "2026-09-20T01:02:06.007Z",
+    replayed: false,
+  };
+  const calls: [string, unknown, unknown, number][] = [
+    ["cases", { purpose: caseFacts().purpose }, created, 201],
+    [`cases/${CASE_ID}/items`, { artifact_id: ARTIFACT_ID }, caseAdded(), 201],
+    [`cases/${CASE_ID}/close`, { reason: "Review complete" }, closed, 200],
+    [
+      "cases",
+      { purpose: caseFacts().purpose },
+      { ...created, status: "closed", replayed: true },
+      200,
+    ],
+    [
+      `cases/${CASE_ID}/items`,
+      { artifact_id: ARTIFACT_ID },
+      { ...caseAdded(), replayed: true },
+      200,
+    ],
+    [
+      `cases/${CASE_ID}/close`,
+      { reason: "Review complete" },
+      { ...closed, replayed: true },
+      200,
+    ],
+  ];
+  let count = 0;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (path: string, options: RequestInit) => {
+      const [expectedPath, body, result, status] = calls[count++]!;
+      assert.equal(path, `/control/v1/${expectedPath}`);
+      assert.equal(options.method, "POST");
+      assert.deepEqual(JSON.parse(String(options.body)), body);
+      assert.deepEqual(options.headers, {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": CASE_KEY,
+      });
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.cache, "no-store");
+      assert.equal(options.redirect, "error");
+      return response(
+        {
+          ...(result as object),
+          content: "excluded",
+          storage: { secret: "excluded" },
+        },
+        status,
+      );
+    },
+  );
+  for (const replayed of [false, true]) {
+    assert.deepEqual(await client.createCase(caseFacts().purpose, CASE_KEY), {
+      ...created,
+      status: replayed ? "closed" : "open",
+      replayed,
+    });
+    assert.deepEqual(await client.addCaseItem(CASE_ID, ARTIFACT_ID, CASE_KEY), {
+      ...caseAdded(),
+      replayed,
+    });
+    assert.deepEqual(
+      await client.closeCase(CASE_ID, "Review complete", CASE_KEY),
+      { ...closed, replayed },
+    );
+  }
+  assert.equal(count, 6);
+});
+
+test("case input validates UTF-8, controls, exact identifiers and single canonical keys before IO", async (t) => {
+  const network = t.mock.method(globalThis, "fetch", async () => response({}));
+  const client = new ControlClient(TOKEN);
+  for (const value of [
+    "",
+    " padded",
+    "padded ",
+    "x\n",
+    "x\u0085y",
+    "\u2000x",
+    "界".repeat(171),
+    "x".repeat(513),
+    "x\ud800",
+    "x\udc00",
+  ]) {
+    await assert.rejects(
+      client.createCase(value, CASE_KEY),
+      errorIs("CONTROL_CASE_REQUEST_INVALID"),
+    );
+    await assert.rejects(
+      client.closeCase(CASE_ID, value, CASE_KEY),
+      errorIs("CONTROL_CASE_CLOSE_REQUEST_INVALID"),
+    );
+  }
+  for (const key of [
+    "short",
+    "x".repeat(129),
+    `${CASE_KEY}\n`,
+    `${CASE_KEY}\u2028`,
+    `${CASE_KEY} `,
+    "a".repeat(15) + "界",
+    `${CASE_KEY}/path`,
+  ]) {
+    await assert.rejects(
+      client.createCase("Review", key),
+      errorIs("CONTROL_IDEMPOTENCY_KEY_INVALID"),
+    );
+    await assert.rejects(
+      client.addCaseItem(CASE_ID, ARTIFACT_ID, key),
+      errorIs("CONTROL_IDEMPOTENCY_KEY_INVALID"),
+    );
+    await assert.rejects(
+      client.closeCase(CASE_ID, "Review", key),
+      errorIs("CONTROL_IDEMPOTENCY_KEY_INVALID"),
+    );
+  }
+  for (const target of [
+    REQUEST_ID,
+    `${CASE_ID}\n`,
+    `${CASE_ID}\u2028`,
+    `${CASE_ID}?scope=other`,
+    CASE_ID.toUpperCase(),
+    "../cases",
+  ]) {
+    await assert.rejects(
+      client.caseItems(target),
+      errorIs("CONTROL_CASE_ID_INVALID"),
+    );
+    await assert.rejects(
+      client.addCaseItem(target, ARTIFACT_ID, CASE_KEY),
+      errorIs("CONTROL_CASE_ID_INVALID"),
+    );
+    await assert.rejects(
+      client.closeCase(target, "Review", CASE_KEY),
+      errorIs("CONTROL_CASE_ID_INVALID"),
+    );
+  }
+  for (const cursor of [
+    "bad",
+    `${CASE_CURSOR}\n`,
+    `${CASE_CURSOR}&scope=other`,
+    CASE_CURSOR.toUpperCase(),
+  ])
+    await assert.rejects(
+      client.caseItems(CASE_ID, cursor),
+      errorIs("CONTROL_CURSOR_INVALID"),
+    );
+  await assert.rejects(
+    client.addCaseItem(CASE_ID, `${ARTIFACT_ID}\n`, CASE_KEY),
+    errorIs("CONTROL_ARTIFACT_ID_INVALID"),
+  );
+  assert.equal(network.mock.callCount(), 0);
+});
+
+test("case collection keeps catalog status separate and binds ordered cursor pages", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const catalog_status of [
+    "active",
+    "expired",
+    "deleted",
+    "unavailable",
+  ]) {
+    const page = casePage();
+    page.items[0]!.catalog_status = catalog_status;
+    Object.assign(page.items[0]!, {
+      content: "excluded",
+      key_ref: "excluded",
+      locator: "excluded",
+    });
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (path: string, options: RequestInit) => {
+        assert.equal(path, `/control/v1/cases/${CASE_ID}/items`);
+        assert.equal(options.method, "GET");
+        assert.equal(new Headers(options.headers).get("idempotency-key"), null);
+        return response(page);
+      },
+    );
+    const result = await client.caseItems(CASE_ID);
+    assert.equal(result.items[0]?.catalog_status, catalog_status);
+    assert.equal(result.as_of, page.as_of);
+    assert.equal(result.next_cursor, CASE_CURSOR);
+    assert.ok(!JSON.stringify(result).includes("excluded"));
+  }
+  const last = {
+    ...casePage(),
+    items: [],
+    truncated: false,
+    next_cursor: null,
+  };
+  t.mock.method(globalThis, "fetch", async (path: string) => {
+    assert.equal(
+      path,
+      `/control/v1/cases/${CASE_ID}/items?cursor=${CASE_CURSOR}`,
+    );
+    return response(last);
+  });
+  assert.deepEqual(await client.caseItems(CASE_ID, CASE_CURSOR), last);
+});
+
+test("case decoders reject contradictory scope targets, replay statuses and pagination", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const patch of [
+    { schema_version: 2 },
+    { case: { ...caseFacts(), case_id: REQUEST_ID } },
+    { case: { ...caseFacts(), status: "active" } },
+    { case: { ...caseFacts(), purpose: "\u0085bad" } },
+    { case: { ...caseFacts(), created_at: "2026-02-30T01:00:00.000Z" } },
+    { as_of: "2026-09-20T01:02:05.006Z" },
+    { items: [...casePage().items, ...casePage().items] },
+    { items: [{ ...casePage().items[0], added_by: "界".repeat(86) }] },
+    { items: [{ ...casePage().items[0], catalog_status: "readable" }] },
+    { items: [] },
+    { truncated: false },
+    { next_cursor: CASE_CURSOR.replace(ARTIFACT_ID, REQUEST_ID) },
+  ]) {
+    t.mock.method(globalThis, "fetch", async () =>
+      response({ ...casePage(), ...patch }),
+    );
+    await assert.rejects(
+      client.caseItems(CASE_ID),
+      errorIs("INVALID_RESPONSE"),
+    );
+  }
+  t.mock.method(globalThis, "fetch", async () => response(casePage()));
+  await assert.rejects(
+    client.caseItems(CASE_ID, CASE_CURSOR),
+    errorIs("INVALID_RESPONSE"),
+  );
+  for (const [status, patch] of [
+    [200, {}],
+    [201, { replayed: true }],
+    [201, { status: "closed" }],
+    [201, { purpose: "changed" }],
+    [201, { replayed: null }],
+  ] as const) {
+    t.mock.method(globalThis, "fetch", async () =>
+      response(
+        { ...caseEnvelope, ...caseFacts(), replayed: false, ...patch },
+        status,
+      ),
+    );
+    await assert.rejects(
+      client.createCase(caseFacts().purpose, CASE_KEY),
+      errorIs("INVALID_RESPONSE"),
+    );
+  }
+  for (const patch of [
+    { case_id: REQUEST_ID },
+    { artifact_id: REQUEST_ID },
+    { replayed: true },
+    { schema_version: 1 },
+  ]) {
+    t.mock.method(globalThis, "fetch", async () =>
+      response({ ...caseAdded(), ...patch }, 201),
+    );
+    await assert.rejects(
+      client.addCaseItem(CASE_ID, ARTIFACT_ID, CASE_KEY),
+      errorIs("INVALID_RESPONSE"),
+    );
+  }
+  for (const patch of [
+    { case_id: REQUEST_ID },
+    { status: "open" },
+    { schema_version: 2 },
+    { closed_at: null },
+  ]) {
+    t.mock.method(globalThis, "fetch", async () =>
+      response({
+        ...caseEnvelope,
+        schema_version: 3,
+        case_id: CASE_ID,
+        status: "closed",
+        closed_at: caseFacts().created_at,
+        replayed: false,
+        ...patch,
+      }),
+    );
+    await assert.rejects(
+      client.closeCase(CASE_ID, "Review", CASE_KEY),
+      errorIs("INVALID_RESPONSE"),
+    );
+  }
+});
+
+test("case write failures do not retry; explicit retry retains original key and body", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const seen: string[] = [];
+  let failed = true;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (_path: string, options: RequestInit) => {
+      seen.push(
+        `${new Headers(options.headers).get("Idempotency-Key")}:${String(options.body)}`,
+      );
+      if (failed) throw new Error(TOKEN);
+      return response({ ...caseEnvelope, ...caseFacts(), replayed: true });
+    },
+  );
+  await assert.rejects(
+    client.createCase(caseFacts().purpose, CASE_KEY),
+    errorIs("NETWORK_UNAVAILABLE"),
+  );
+  assert.equal(seen.length, 1);
+  failed = false;
+  assert.equal(
+    (await client.createCase(caseFacts().purpose, CASE_KEY)).replayed,
+    true,
+  );
+  assert.equal(seen[0], seen[1]);
+  for (const [status, code] of [
+    [401, "CONTROL_AUTH_REQUIRED"],
+    [403, "CONTROL_SCOPE_DENIED"],
+    [409, "CONTROL_IDEMPOTENCY_CONFLICT"],
+    [429, "CONTROL_CASE_BUSY"],
+    [503, "CONTROL_CASE_STORE_UNAVAILABLE"],
+    [503, "AUDIT_DURABILITY_FAILED"],
+  ] as const) {
+    const network = t.mock.method(globalThis, "fetch", async () =>
+      response(errorFixture(code), status),
+    );
+    await assert.rejects(
+      client.createCase(caseFacts().purpose, CASE_KEY),
+      errorIs(code, status),
+    );
+    assert.equal(network.mock.callCount(), 1);
+  }
+  const network = t.mock.method(globalThis, "fetch", async () => response({}));
+  await assert.rejects(
+    client.createCase("Review", CASE_KEY, AbortSignal.abort()),
+    errorIs("REQUEST_ABORTED"),
+  );
+  assert.equal(network.mock.callCount(), 0);
 });
