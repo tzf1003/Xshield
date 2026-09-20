@@ -98,3 +98,5 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control grant_lookup_reads_redacted_history_and_survives_disconnect -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control binding_lookup_reads_redacted_history_and_survives_disconnect -- --ignored
+XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+    cargo test -p xshield-control --lib console_ledger_client_reads_postgres_http_contract -- --ignored

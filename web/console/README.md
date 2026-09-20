@@ -1,6 +1,6 @@
 # Xshield 只读调查控制台
 
-React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用，或用结构化条件检索事件。UI 调用现有的五类 GET 端点及只读 `POST /control/v1/search`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。GET 详情需要显式 `Observer`，事件检索需要 `Investigator`，两种角色分别校验。
+React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用，按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件。UI 调用现有的七类 GET 端点及只读 `POST /control/v1/search`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。GET 详情需要显式 `Observer`，事件检索需要 `Investigator`，两种角色分别校验。
 
 ## 本地运行
 
@@ -13,7 +13,7 @@ npm run dev
 
 页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发五类只读 GET 路径和精确 `POST /control/v1/search` 路径，剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次查询返回后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发七类只读 GET 路径和精确 `POST /control/v1/search` 路径，剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次查询返回后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
@@ -24,6 +24,8 @@ npm run dev
 - 搜索只读已发布历史事实；请求与证据引用可打开现有详情，但仍需 Observer，Investigator 不隐含该权限。当前资格/绑定有效性、案件归属与原文读取由对应服务分别校验。完整关联图、跨事件遍历与自然语言计划继续迭代。
 - 查询类型可切换为模型调用，接受 `mdl_` UUIDv7。结果显示 provider、请求所用 provider_model_id、内部模型/提示版本、置信度语义、因果生命周期及输入/输出/调用记录引用；点击引用沿用单项证据元数据查询。旧记录两项供应商字段均为空时显示“历史记录未提供”，Noul 置信度显示“不适用”。
 - 模型的 `complete/pending/partial/not_indexed` 分别表示可见生命周期完整、等待终态、终态前驱不全和当前索引未命中。索引水位只覆盖配置日志源，不表示模型已全部追平；供应商模型标识不代替精确解析版本，评估完成不授予业务操作资格。
+- 资格与身份绑定查询接受规范 `grant_` / `auth_` UUIDv7，展示数据库 `as_of`、持久状态和独立时间到期标志。资格记录包含发行代际、操作/视图、策略与来源引用，以及同一快照的当前绑定状态和代际是否一致；绑定详情还包含凭证代际与更新时间。UTC 微秒原样保留，客户端精确核对到期关系，超出 JavaScript 安全整数范围的代际值拒绝展示。匿名、撤销和过期记录可调查，`active` 标签不等于在线准入通过。
+- 资格可打开绑定详情和来源请求时间线；“准备历史检索”只预填对应 ID，须填写 UTC 时间窗并主动提交 Investigator 查询。账本观察不附带 ClickHouse 水位，后续查询不构成跨存储冻结快照。`found=false` 显示“当前账本未找到”，不推断历史不存在；主体、凭证、资源指纹、动作引用和约束正文均不进入展示对象。
 - `complete` 表示观察到保留的请求终态，不表示索引无缺口。页面分别显示摘要/事件水位和观察时间；水位只覆盖配置 journal，不覆盖所有 Outbox。
 - 转发意图不是源站已执行证明，确认源站响应不等于业务成功。缺失判定与 `UNKNOWN`、等待终态分开显示；确定性证明保持空置信度。
 - 证据 `found=false` 显示“当前不可用”，不推断对象存在性；manifest 不证明内容读取权或对象侧完整性。locator、密钥引用和密文摘要在客户端投影时丢弃。
@@ -56,6 +58,10 @@ npx playwright install chromium --only-shell
 npm run test:e2e
 # 从仓库根目录执行，Node.js 22 必须在 PATH：
 cargo test -p xshield-control --lib console_client_ -- --ignored
+# 需要已应用迁移的隔离测试 PostgreSQL；设置 XSHIELD_TEST_DATABASE_URL：
+cargo test -p xshield-control --lib console_ledger_client_reads_postgres_http_contract -- --ignored
+# 或使用仓库的自动隔离建库、迁移和清理流程（包含上述账本 wire）：
+scripts/test_postgres.sh
 ```
 
 Node 单测覆盖请求/响应边界、模型生命周期一致性、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖分页、模型查询与引用详情、Noul/历史空字段，以及搜索 POST 正文、冻结计划分页、编辑失效、输入边界、空结果与 gap、可空事实和独立 Observer 权限。共享回归覆盖 403/429/503、401/闲置/页面离开/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
@@ -63,6 +69,8 @@ Node 单测覆盖请求/响应边界、模型生命周期一致性、精度、�
 Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管理 journal，验证摘要、事件分页与微秒时间、目录依赖故障和 401，以及完整 Gateway Choice、旧记录 Noul 部分生命周期、模型未命中、预算 429 和模型访问审计。浏览器回归的 manifest 成功数据是合成契约，不代表已在生产数据源或企业 SSO 上验收。
 
 搜索 wire 回归覆盖 nullable 字段、RFC3339 微秒、升降序游标、扫描统计与未知值、预算 429、篡改 HMAC 游标 400、Observer 查询 403，以及七次 `console.query.executed` 耐久审计。以上两项 wire 测试使用真实 HTTP 路由与合成索引，不执行外部模型调用。
+
+账本 Node 回归覆盖目标/版本/空值、状态与代际一致性、微秒到期边界、未知字段投影和固定错误诊断。浏览器验证资格→绑定/来源请求、显式历史检索、生命周期状态、权限失败与会话隔离。独立账本 wire 使用真实 PostgreSQL 测试数据、Axum 路由、Node 客户端和加密管理 journal；范围为隔离合成记录，不代表生产数据或企业身份入口验收。
 
 ## 依赖与维护
 

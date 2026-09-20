@@ -12,6 +12,10 @@ export const messages = {
   CONTROL_REQUEST_ID_INVALID: "请输入规范的请求 ID。",
   CONTROL_ARTIFACT_ID_INVALID: "证据 ID 格式无效。",
   CONTROL_MODEL_CALL_ID_INVALID: "请输入规范的模型调用 ID。",
+  CONTROL_GRANT_ID_INVALID: "请输入规范的资格 ID。",
+  CONTROL_BINDING_ID_INVALID: "请输入规范的身份绑定 ID。",
+  CONTROL_GRANT_STORE_UNAVAILABLE: "资格账本暂时不可用，请稍后重试。",
+  CONTROL_BINDING_STORE_UNAVAILABLE: "身份账本暂时不可用，请稍后重试。",
   CONTROL_QUERY_INVALID: "查询计划无效，请检查 UTC 时间范围、条件和页大小。",
   CONTROL_QUERY_BUDGET_EXCEEDED:
     "查询超出服务预算，请缩小时间范围或细化条件；精确 ID 查询请联系管理员。",
@@ -54,10 +58,15 @@ export class ApiError extends Error {
 
 export const uuid =
   "[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
-export const requestPattern = new RegExp(`^req_${uuid}$`);
-export const artifactPattern = new RegExp(`^artifact_${uuid}$`);
-export const modelCallPattern = new RegExp(`^mdl_${uuid}$`);
-export const eventPattern = new RegExp(`^ev_${uuid}$`);
+// JavaScript's $ also matches before a trailing line terminator. IDs must
+// consume the entire input, both before transport and when decoding a reply.
+const endOfInput = "(?![\\s\\S])";
+export const requestPattern = new RegExp(`^req_${uuid}${endOfInput}`);
+export const artifactPattern = new RegExp(`^artifact_${uuid}${endOfInput}`);
+export const modelCallPattern = new RegExp(`^mdl_${uuid}${endOfInput}`);
+export const eventPattern = new RegExp(`^ev_${uuid}${endOfInput}`);
+export const grantPattern = new RegExp(`^grant_${uuid}${endOfInput}`);
+export const bindingPattern = new RegExp(`^auth_${uuid}${endOfInput}`);
 export const cursorPattern = /^[A-Za-z0-9_.-]{1,160}$/;
 
 export function ensure(condition: unknown): asserts condition {
@@ -83,7 +92,7 @@ export function name(value: unknown, empty = false): string {
 }
 export function id(value: unknown, pattern: RegExp): string {
   const result = text(value);
-  ensure(pattern.test(result));
+  ensure(pattern.exec(result)?.[0] === result);
   return result;
 }
 export function integer(

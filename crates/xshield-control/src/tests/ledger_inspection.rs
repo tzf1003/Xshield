@@ -3,6 +3,8 @@ use axum::Router;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+mod wire;
+
 #[path = "../../../xshield-postgres/tests/support/grant_inspection.rs"]
 mod ledger_fixture;
 use ledger_fixture::{BINDING, GRANT, SOURCE_REQUEST};

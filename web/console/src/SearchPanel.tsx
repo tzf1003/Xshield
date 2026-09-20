@@ -20,6 +20,10 @@ const fields = [
 ] as const;
 type Field = (typeof fields)[number][0];
 type DraftFilter = { id: number; field: Field; value: string };
+export type SearchPreset = {
+  kind: "grant_id" | "auth_binding_id";
+  value: string;
+};
 const outcomes = [
   "PASS",
   "ALLOW",
@@ -41,6 +45,7 @@ export function SearchPanel({
   onSubmit,
   onNext,
   onSelect,
+  initialFilter = null,
 }: {
   response: SearchResponse | null;
   plan: SearchPlan | null;
@@ -51,8 +56,10 @@ export function SearchPanel({
   onSubmit: (value: unknown) => void;
   onNext: () => void;
   onSelect: (id: string) => void;
+  initialFilter?: SearchPreset | null;
 }) {
   const [window, setWindow] = useState(() => {
+    if (initialFilter) return { start: "", end: "" };
     const end = Math.floor(Date.now() / 1000) * 1000;
     return {
       start: new Date(end - 86_400_000).toISOString().slice(0, 19),
@@ -61,7 +68,11 @@ export function SearchPanel({
   });
   const [limit, setLimit] = useState("25");
   const [sort, setSort] = useState<SearchPlan["sort"]>("occurred_at_desc");
-  const [filters, setFilters] = useState<DraftFilter[]>([]);
+  const [filters, setFilters] = useState<DraftFilter[]>(() =>
+    initialFilter
+      ? [{ id: 0, field: initialFilter.kind, value: initialFilter.value }]
+      : [],
+  );
   const filterId = useRef(0);
 
   function updateFilter(id: number, change: Partial<DraftFilter>) {
@@ -105,6 +116,11 @@ export function SearchPanel({
           });
         }}
       >
+        {initialFilter && !plan && (
+          <p className="search-preset-note" role="status">
+            已预填目标引用，请确认 UTC 时间窗后提交历史检索。
+          </p>
+        )}
         <div className="search-window">
           <label>
             开始时间（UTC，含）

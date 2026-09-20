@@ -297,6 +297,38 @@ main {
   padding: 0 21px 18px;
 }
 
+.ledger-heading {
+  flex-wrap: wrap;
+}
+
+.ledger-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 32px;
+  margin-top: 25px;
+}
+
+.ledger-grid > section,
+.ledger-record {
+  min-width: 0;
+}
+
+.ledger-record,
+.ledger-missing {
+  margin-top: 25px;
+}
+
+.ledger-history {
+  margin-top: 24px;
+  border-top: 1px solid #e0e6ec;
+  padding-top: 18px;
+}
+
+.search-preset-note {
+  margin-bottom: 18px;
+  color: #536274;
+}
+
 .notice {
   color: #536274;
   background: #f1f5f7;
@@ -773,6 +805,10 @@ footer {
 }
 
 @media (width <= 760px) {
+  .ledger-grid {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
   .search-window,
   .search-filter {
     grid-template-columns: 1fr;

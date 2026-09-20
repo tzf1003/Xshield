@@ -5,6 +5,14 @@ import { ApiError, ControlClient } from "../src/api.ts";
 import { validateSearchPlan, searchPlanDigest } from "../src/search.ts";
 import type { SearchPlan, SearchResponse } from "../src/search.ts";
 import {
+  BINDING_ID,
+  GRANT_ID,
+  OTHER_BINDING_ID,
+  OTHER_GRANT_ID,
+  bindingFixture,
+  grantFixture,
+} from "./ledger-fixtures.ts";
+import {
   TOKEN,
   REQUEST_ID,
   OTHER_REQUEST_ID,
@@ -120,6 +128,10 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
     REQUEST_ID.toUpperCase(),
     REQUEST_ID.replace("-7000-", "-4000-"),
     `${REQUEST_ID}?extra=1`,
+    `${REQUEST_ID}\n`,
+    `${REQUEST_ID}\r`,
+    `${REQUEST_ID}\u2028`,
+    `${REQUEST_ID}\u2029`,
   ]) {
     await assert.rejects(
       client.summary(request),
@@ -143,6 +155,8 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
     MODEL_CALL_ID.toUpperCase(),
     `${MODEL_CALL_ID}?extra=1`,
     MODEL_CALL_ID.replace("-7000-", "-4000-"),
+    `${MODEL_CALL_ID}\n`,
+    `${MODEL_CALL_ID}\u2028`,
   ])
     await assert.rejects(
       client.modelCall(value),
@@ -1215,6 +1229,329 @@ test("search shares bounded errors and cancellation while distinguishing plan bu
   assert.equal(stopped.mock.callCount(), 0);
 });
 
+test("ledger reads bind targets, preserve observations and project only display fields", async (t) => {
+  const grant = grantFixture();
+  const binding = bindingFixture();
+  const sent: string[] = [];
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (path: string, options: RequestInit) => {
+      sent.push(path);
+      assert.equal(options.method, "GET");
+      assert.equal(options.body, undefined);
+      assert.deepEqual(options.headers, {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: "application/json",
+      });
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.cache, "no-store");
+      assert.equal(options.redirect, "error");
+      assert.equal(options.referrerPolicy, "no-referrer");
+      assert.ok(options.signal instanceof AbortSignal);
+      return response(
+        path.includes("/grants/")
+          ? {
+              ...grant,
+              private_snapshot: "synthetic-private",
+              grant: {
+                ...grant.grant,
+                resource_key_hmac: "synthetic-private",
+                constraints: { secret: true },
+                binding: {
+                  ...grant.grant!.binding,
+                  principal_ref: "synthetic-private",
+                  credential: TOKEN,
+                },
+              },
+            }
+          : {
+              ...binding,
+              private_snapshot: "synthetic-private",
+              binding: {
+                ...binding.binding,
+                principal_ref: "synthetic-private",
+                waf_sid_fingerprint: TOKEN,
+              },
+            },
+      );
+    },
+  );
+  const client = new ControlClient(TOKEN);
+  assert.deepEqual(await client.grant(GRANT_ID), grant);
+  assert.deepEqual(await client.binding(BINDING_ID), binding);
+  assert.deepEqual(sent, [
+    `/control/v1/grants/${GRANT_ID}`,
+    `/control/v1/auth-bindings/${BINDING_ID}`,
+  ]);
+
+  for (const kind of ["grant", "binding"] as const) {
+    const target = kind === "grant" ? GRANT_ID : BINDING_ID;
+    const missing = {
+      ...(kind === "grant" ? grant : binding),
+      found: false,
+      as_of: null,
+      [kind]: null,
+    };
+    t.mock.method(globalThis, "fetch", async () => response(missing));
+    assert.deepEqual(await client[kind](target), missing);
+  }
+});
+
+test("ledger target validation rejects ambiguous IDs before any transport", async (t) => {
+  const network = t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("unexpected network");
+  });
+  const client = new ControlClient(TOKEN);
+  for (const [kind, target, code] of [
+    ["grant", GRANT_ID, "CONTROL_GRANT_ID_INVALID"],
+    ["binding", BINDING_ID, "CONTROL_BINDING_ID_INVALID"],
+  ] as const) {
+    for (const value of [
+      null,
+      undefined,
+      4,
+      {},
+      "",
+      REQUEST_ID,
+      target.toUpperCase(),
+      target.replace("-7000-", "-4000-"),
+      `${target}?tenant_id=other`,
+      `../${target}`,
+      ...["\n", "\r", "\r\n", "\u2028", "\u2029", " ", "/", "%0a"].map(
+        (end) => target + end,
+      ),
+    ])
+      await assert.rejects(client[kind](value as string), errorIs(code));
+  }
+  assert.equal(network.mock.callCount(), 0);
+});
+
+test("ledger expiry compares exact microseconds and stored states remain independent", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const asOf of [
+    "2026-09-20T08:10:30.123456Z",
+    "2299-09-20T08:10:30.123456Z",
+  ]) {
+    for (const [end, expired] of [
+      ["123455", true],
+      ["123456", true],
+      ["123457", false],
+    ] as const) {
+      const grant = grantFixture();
+      grant.as_of = asOf;
+      grant.grant!.expires_at = asOf.replace("123456", end);
+      grant.grant!.time_expired = expired;
+      grant.grant!.binding.expires_at = asOf.replace("123456", end);
+      grant.grant!.binding.time_expired = expired;
+      grant.grant!.binding.current_auth_epoch = 5;
+      grant.grant!.binding.epoch_matches_grant = false;
+      const binding = bindingFixture();
+      binding.as_of = asOf;
+      binding.binding!.expires_at = asOf.replace("123456", end);
+      binding.binding!.time_expired = expired;
+      // An update after expiry or the observation is possible after clock rollback.
+      binding.binding!.updated_at = "2299-12-31T23:59:59.999999Z";
+      t.mock.method(globalThis, "fetch", async (path: string) =>
+        response(path.includes("/grants/") ? grant : binding),
+      );
+      assert.deepEqual(await client.grant(GRANT_ID), grant);
+      assert.deepEqual(await client.binding(BINDING_ID), binding);
+    }
+  }
+  for (const state of ["anonymous", "active", "revoked", "expired"] as const) {
+    for (const expired of [false, true]) {
+      const binding = bindingFixture();
+      binding.binding!.stored_status = state;
+      binding.binding!.expires_at = expired
+        ? binding.as_of!
+        : "2026-09-20T09:00:00.000000Z";
+      binding.binding!.time_expired = expired;
+      if (state !== "active") {
+        binding.binding!.current_auth_epoch = 0;
+        binding.binding!.credential_generation = 0;
+      }
+      t.mock.method(globalThis, "fetch", async () => response(binding));
+      assert.deepEqual(await client.binding(BINDING_ID), binding);
+    }
+  }
+  for (const state of ["active", "revoked", "expired"] as const) {
+    const grant = grantFixture();
+    grant.grant!.stored_status = state;
+    grant.grant!.binding.stored_status = state;
+    grant.grant!.binding.expires_at = "2026-09-20T08:05:00.000000Z";
+    grant.grant!.binding.time_expired = true;
+    t.mock.method(globalThis, "fetch", async () => response(grant));
+    assert.deepEqual(await client.grant(GRANT_ID), grant);
+  }
+});
+
+test("ledger boundary rejects contradictory observations and malformed display facts", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const grant = grantFixture();
+  const binding = bindingFixture();
+  for (const [kind, target, fixture, record] of [
+    ["grant", GRANT_ID, grant, grant.grant],
+    ["binding", BINDING_ID, binding, binding.binding],
+  ] as const) {
+    const malformed = [
+      { ...fixture, schema_version: 2 },
+      { ...fixture, schema_version: "3" },
+      { ...fixture, found: "true" },
+      { ...fixture, found: false },
+      { ...fixture, as_of: null },
+      { ...fixture, as_of: undefined },
+      { ...fixture, [kind]: null },
+      { ...fixture, [kind]: undefined },
+      { ...fixture, [kind]: [] },
+      {
+        ...fixture,
+        [`source_${kind}_id`]:
+          kind === "grant" ? OTHER_GRANT_ID : OTHER_BINDING_ID,
+      },
+      {
+        ...fixture,
+        [kind]: {
+          ...record,
+          [kind === "grant" ? "grant_id" : "binding_id"]:
+            kind === "grant" ? OTHER_GRANT_ID : OTHER_BINDING_ID,
+        },
+      },
+      { ...fixture, request_id: REQUEST_ID + "\u2028" },
+      { ...fixture, tenant_id: "tenant/other" },
+    ];
+    for (const value of ["unknown", null, 3])
+      malformed.push({
+        ...fixture,
+        [kind]: { ...record, stored_status: value },
+      });
+    for (const value of ["false", null, 0, true])
+      malformed.push({
+        ...fixture,
+        [kind]: { ...record, time_expired: value },
+      });
+    for (const field of [
+      "as_of",
+      "expires_at",
+      kind === "grant" ? "issued_at" : "updated_at",
+    ]) {
+      for (const value of [
+        null,
+        "1969-12-31T23:59:59.999999Z",
+        "2026-02-30T08:00:00.000000Z",
+        "2026-09-20T24:00:00.000000Z",
+        "2026-09-20T08:10:30.123456+00:00",
+        "2026-09-20T08:10:30.123Z",
+        "2026-09-20T08:10:30.1234567Z",
+        "2026-09-20T08:10:30.123456Z\n",
+      ]) {
+        malformed.push(
+          field === "as_of"
+            ? { ...fixture, as_of: value }
+            : { ...fixture, [kind]: { ...record, [field]: value } },
+        );
+      }
+    }
+    for (const bad of malformed) {
+      t.mock.method(globalThis, "fetch", async () => response(bad));
+      await assert.rejects(
+        client[kind](target),
+        errorIs("INVALID_RESPONSE", 200),
+      );
+    }
+  }
+  const grantBad = [
+    { ...grant.grant, auth_epoch: 5 },
+    { ...grant.grant, auth_epoch: -1 },
+    { ...grant.grant, auth_epoch: Number.MAX_SAFE_INTEGER + 1 },
+    { ...grant.grant, issued_at: grant.grant!.expires_at },
+    { ...grant.grant, resource_type: "<svg/onload=alert(1)>" },
+    { ...grant.grant, operation_id: "orders/read" },
+    { ...grant.grant, view_id: "view\n" },
+    { ...grant.grant, policy_revision: "x".repeat(129) },
+    { ...grant.grant, source_event_id: GRANT_ID },
+    { ...grant.grant, source_request_id: BINDING_ID },
+    {
+      ...grant.grant,
+      binding: { ...grant.grant!.binding, epoch_matches_grant: false },
+    },
+    {
+      ...grant.grant,
+      binding: { ...grant.grant!.binding, current_auth_epoch: 3 },
+    },
+    {
+      ...grant.grant,
+      binding: { ...grant.grant!.binding, time_expired: true },
+    },
+    {
+      ...grant.grant,
+      binding: { ...grant.grant!.binding, binding_id: GRANT_ID },
+    },
+  ];
+  for (const data of grantBad) {
+    t.mock.method(globalThis, "fetch", async () =>
+      response({ ...grant, grant: data }),
+    );
+    await assert.rejects(
+      client.grant(GRANT_ID),
+      errorIs("INVALID_RESPONSE", 200),
+    );
+  }
+  for (const field of ["current_auth_epoch", "credential_generation"]) {
+    for (const value of [-1, 0, 1.5, "4", Number.MAX_SAFE_INTEGER + 1, null]) {
+      t.mock.method(globalThis, "fetch", async () =>
+        response({
+          ...binding,
+          binding: { ...binding.binding, [field]: value },
+        }),
+      );
+      await assert.rejects(
+        client.binding(BINDING_ID),
+        errorIs("INVALID_RESPONSE", 200),
+      );
+    }
+  }
+  t.mock.method(globalThis, "fetch", async () =>
+    response({
+      ...binding,
+      binding: { ...binding.binding, stored_status: "anonymous" },
+    }),
+  );
+  await assert.rejects(
+    client.binding(BINDING_ID),
+    errorIs("INVALID_RESPONSE", 200),
+  );
+});
+
+test("ledger failures retain safe diagnostics and cancelled requests do not start", async (t) => {
+  const client = new ControlClient(TOKEN);
+  for (const [kind, target, unavailable] of [
+    ["grant", GRANT_ID, "CONTROL_GRANT_STORE_UNAVAILABLE"],
+    ["binding", BINDING_ID, "CONTROL_BINDING_STORE_UNAVAILABLE"],
+  ] as const) {
+    for (const [status, code] of [
+      [401, "CONTROL_AUTH_REQUIRED"],
+      [403, "CONTROL_SCOPE_DENIED"],
+      [429, "CONTROL_QUERY_CAPACITY_EXHAUSTED"],
+      [503, unavailable],
+      [503, "AUDIT_DURABILITY_FAILED"],
+    ] as const) {
+      t.mock.method(globalThis, "fetch", async () =>
+        response(errorFixture(code), status),
+      );
+      await assert.rejects(client[kind](target), errorIs(code, status));
+    }
+    const network = t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("unexpected transport");
+    });
+    await assert.rejects(
+      client[kind](target, AbortSignal.abort(TOKEN)),
+      errorIs("REQUEST_ABORTED"),
+    );
+    assert.equal(network.mock.callCount(), 0);
+  }
+});
+
 test("development proxy permits only the exact search POST alongside fixed GET reads", async () => {
   const { default: config } = await import("../vite.config.ts");
   const proxy = config.server?.proxy?.["/control/"];
@@ -1223,6 +1560,8 @@ test("development proxy permits only the exact search POST alongside fixed GET r
   type Response = Parameters<typeof proxy.bypass>[1];
   for (const [method, url, allowed] of [
     ["POST", "/control/v1/search", true],
+    ["GET", `/control/v1/grants/${GRANT_ID}`, true],
+    ["GET", `/control/v1/auth-bindings/${BINDING_ID}`, true],
     [
       "GET",
       `/control/v1/requests/${REQUEST_ID}/events?cursor=${EVENT_CURSOR}`,
@@ -1235,6 +1574,10 @@ test("development proxy permits only the exact search POST alongside fixed GET r
     ["POST", "/control/v1/cases", false],
     ["POST", `/control/v1/requests/${REQUEST_ID}`, false],
     ["GET", `/control/v1/artifacts/${ARTIFACT_ID}/content`, false],
+    ["POST", `/control/v1/grants/${GRANT_ID}`, false],
+    ["DELETE", `/control/v1/auth-bindings/${BINDING_ID}`, false],
+    ["GET", `/control/v1/grants/${GRANT_ID}/revoke`, false],
+    ["GET", `/control/v1/auth-bindings/${BINDING_ID}/credentials`, false],
   ] as const) {
     const state = {
       statusCode: 200,

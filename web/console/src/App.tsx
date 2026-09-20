@@ -4,6 +4,9 @@ import { ApiError, ControlClient } from "./api";
 import { validateSearchPlan } from "./search";
 import type { SearchPlan, SearchResponse } from "./search";
 import { SearchPanel } from "./SearchPanel";
+import type { SearchPreset } from "./SearchPanel";
+import { LedgerPanel } from "./LedgerPanel";
+import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
   EventsResponse,
@@ -23,6 +26,19 @@ import {
 
 type Problem = { message: string; code: string; requestId?: string | null };
 type Channel = "query" | "events" | "evidence" | "artifact";
+type QueryKind = "request" | "model" | "grant" | "binding" | "search";
+const queryLabels = {
+  request: "请求 ID",
+  model: "模型调用 ID",
+  grant: "资格 ID",
+  binding: "身份绑定 ID",
+};
+const queryPrefixes = {
+  request: "req",
+  model: "mdl",
+  grant: "grant",
+  binding: "auth",
+};
 const idleMs = 15 * 60 * 1000;
 
 function Failure({ problem }: { problem: Problem | null }) {
@@ -55,9 +71,11 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [token, setToken] = useState("");
   const [requestId, setRequestId] = useState("");
-  const [queryKind, setQueryKind] = useState<"request" | "model" | "search">(
-    "request",
+  const [queryKind, setQueryKind] = useState<QueryKind>("request");
+  const [ledger, setLedger] = useState<GrantResponse | BindingResponse | null>(
+    null,
   );
+  const [searchPreset, setSearchPreset] = useState<SearchPreset | null>(null);
   const [searchPlan, setSearchPlan] = useState<SearchPlan | null>(null);
   const [search, setSearch] = useState<SearchResponse | null>(null);
   const [model, setModel] = useState<ModelCallResponse | null>(null);
@@ -79,6 +97,7 @@ export function App() {
     epoch.current += 1;
     setSummary(null);
     setModel(null);
+    setLedger(null);
     setSearchPlan(null);
     setSearch(null);
     setEvents(null);
@@ -99,6 +118,7 @@ export function App() {
       setToken("");
       setRequestId("");
       setQueryKind("request");
+      setSearchPreset(null);
       setSessionNotice(notice);
     },
     [clearResults],
@@ -231,7 +251,34 @@ export function App() {
       );
       return;
     }
+    if (queryKind === "grant") {
+      void run(
+        "query",
+        (api, signal) => api.grant(target, signal),
+        (response) => setLedger(response),
+      );
+      return;
+    }
+    if (queryKind === "binding") {
+      loadBinding(target);
+      return;
+    }
     loadRequest(target);
+  }
+  function loadBinding(target: string) {
+    void run(
+      "query",
+      (api, signal) => api.binding(target, signal),
+      (response) => setLedger(response),
+    );
+  }
+  function openTarget(kind: "request" | "binding", id: string) {
+    clearResults();
+    setSearchPreset(null);
+    setQueryKind(kind);
+    setRequestId(id);
+    if (kind === "request") loadRequest(id);
+    else loadBinding(id);
   }
   function loadRequest(target: string) {
     void run(
@@ -298,12 +345,13 @@ export function App() {
   const event = (search?.events ?? events?.events)?.find(
     (value) => value.event_id === selected,
   );
-  const title =
-    queryKind === "request"
-      ? "请求调查"
-      : queryKind === "model"
-        ? "模型调用调查"
-        : "结构化事件检索";
+  const title = {
+    request: "请求调查",
+    model: "模型调用调查",
+    grant: "资格调查",
+    binding: "身份绑定调查",
+    search: "结构化事件检索",
+  }[queryKind];
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
       <div className="panel-heading">
@@ -331,12 +379,7 @@ export function App() {
           <EventDetail
             event={event}
             onOpen={openArtifact}
-            onRequest={(id) => {
-              clearResults();
-              setQueryKind("request");
-              setRequestId(id);
-              loadRequest(id);
-            }}
+            onRequest={(id) => openTarget("request", id)}
           />
         ) : (
           <p className="empty">选择一条事件或证据查看详情。</p>
@@ -373,7 +416,9 @@ export function App() {
             ? "沿着请求时间线，核对每一次判定与证据。"
             : queryKind === "model"
               ? "核对模型调用生命周期、版本与证据引用。"
-              : "按时间与事件字段检索，核对直接引用的历史事实。"}
+              : queryKind === "search"
+                ? "按时间与事件字段检索，核对直接引用的历史事实。"
+                : "核对当前账本的状态、代际与期限。"}
         </p>
         {sessionNotice && (
           <div className="notice" role="status">
@@ -387,7 +432,7 @@ export function App() {
           >
             <h2 id="connect-title">连接管理服务</h2>
             <p className="muted">
-              使用当前站点的管理凭证。请求与模型详情需 Observer，结构化检索需
+              使用当前站点的管理凭证。详情查询需 Observer，结构化检索需
               Investigator；访问范围由服务端校验。
             </p>
             <form onSubmit={connect}>
@@ -419,36 +464,44 @@ export function App() {
                 onChange={(event) => {
                   clearResults();
                   setRequestId("");
+                  setSearchPreset(null);
                   setQueryKind(
                     event.target.value === "search"
                       ? "search"
-                      : event.target.value === "model"
-                        ? "model"
-                        : "request",
+                      : event.target.value === "grant"
+                        ? "grant"
+                        : event.target.value === "binding"
+                          ? "binding"
+                          : event.target.value === "model"
+                            ? "model"
+                            : "request",
                   );
                 }}
               >
                 <option value="request">请求</option>
                 <option value="model">模型调用</option>
+                <option value="grant">资格</option>
+                <option value="binding">身份绑定</option>
                 <option value="search">结构化事件检索</option>
               </select>
               {queryKind !== "search" && (
                 <>
-                  <label htmlFor="request-id">
-                    {queryKind === "request" ? "请求 ID" : "模型调用 ID"}
-                  </label>
+                  <label htmlFor="request-id">{queryLabels[queryKind]}</label>
                   <input
                     id="request-id"
                     className="mono"
-                    placeholder={queryKind === "request" ? "req_…" : "mdl_…"}
+                    placeholder={`${queryPrefixes[queryKind]}_…`}
                     value={requestId}
-                    onChange={(e) => setRequestId(e.target.value)}
+                    onChange={(e) => {
+                      clearResults();
+                      setRequestId(e.target.value);
+                    }}
                     autoComplete="off"
                     spellCheck={false}
-                    maxLength={40}
+                    maxLength={queryPrefixes[queryKind].length + 37}
                     required
-                    pattern={`${queryKind === "request" ? "req" : "mdl"}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
-                    title={`请输入规范的 ${queryKind === "request" ? "req" : "mdl"}_ 前缀 UUIDv7`}
+                    pattern={`${queryPrefixes[queryKind]}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
+                    title={`请输入规范的 ${queryPrefixes[queryKind]}_ 前缀 UUIDv7`}
                   />
                   <button type="submit" disabled={busy.query}>
                     {busy.query ? "查询中…" : "查询"}
@@ -460,6 +513,7 @@ export function App() {
             {queryKind === "search" ? (
               <SearchPanel
                 response={search}
+                initialFilter={searchPreset}
                 plan={searchPlan}
                 busy={Boolean(busy.query)}
                 selected={selected}
@@ -473,6 +527,18 @@ export function App() {
                 onSelect={(id) => {
                   clearArtifact();
                   setSelected(id);
+                }}
+              />
+            ) : ledger ? (
+              <LedgerPanel
+                response={ledger}
+                onBinding={(id) => openTarget("binding", id)}
+                onRequest={(id) => openTarget("request", id)}
+                onHistory={(preset) => {
+                  clearResults();
+                  setSearchPreset(preset);
+                  setRequestId("");
+                  setQueryKind("search");
                 }}
               />
             ) : model ? (
@@ -618,12 +684,16 @@ export function App() {
                   <h2>
                     {queryKind === "request"
                       ? "从一个请求开始"
-                      : "查询模型调用"}
+                      : queryKind === "model"
+                        ? "查询模型调用"
+                        : "查询账本记录"}
                   </h2>
                   <p className="muted">
                     {queryKind === "request"
                       ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
-                      : "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"}
+                      : queryKind === "model"
+                        ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
+                        : `输入${queryLabels[queryKind]}，读取当前状态、代际与期限。`}
                   </p>
                 </section>
               )

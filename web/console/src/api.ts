@@ -7,6 +7,8 @@ import {
   artifactPattern,
   modelCallPattern,
   eventPattern,
+  grantPattern,
+  bindingPattern,
   cursorPattern,
   ensure,
   object,
@@ -35,6 +37,8 @@ import {
   decodeSearchResponse,
 } from "./search.ts";
 import type { SearchPlan, SearchResponse } from "./search.ts";
+import { decodeGrantResponse, decodeBindingResponse } from "./ledger.ts";
+import type { GrantResponse, BindingResponse } from "./ledger.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -852,6 +856,37 @@ export class ControlClient {
         ensure(result.completeness === expected);
         return result;
       },
+      signal,
+    );
+  }
+
+  /** Read an Observer grant snapshot; online eligibility is checked separately.
+   * Rejects malformed IDs before transport, retains the server's audit boundary,
+   * and applies the shared timeout, byte cap and safe error contract.
+   */
+  async grant(grantId: string, signal?: AbortSignal): Promise<GrantResponse> {
+    if (typeof grantId !== "string" || !grantPattern.test(grantId))
+      throw new ApiError("CONTROL_GRANT_ID_INVALID");
+    return this.#request(
+      `grants/${grantId}`,
+      (value) => decodeGrantResponse(value, grantId),
+      signal,
+    );
+  }
+
+  /** Read an Observer identity-ledger snapshot, without reading credentials.
+   * Server authorization and audit remain mandatory; malformed observations
+   * and bounded transport failures return safe ApiError values.
+   */
+  async binding(
+    bindingId: string,
+    signal?: AbortSignal,
+  ): Promise<BindingResponse> {
+    if (typeof bindingId !== "string" || !bindingPattern.test(bindingId))
+      throw new ApiError("CONTROL_BINDING_ID_INVALID");
+    return this.#request(
+      `auth-bindings/${bindingId}`,
+      (value) => decodeBindingResponse(value, bindingId),
       signal,
     );
   }

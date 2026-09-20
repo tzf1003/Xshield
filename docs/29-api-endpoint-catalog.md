@@ -207,7 +207,7 @@ case/artifact 同样采用规范小写强类型校验、8 项总预算及完整�
 
 grant 含资格 ID、发行 auth_epoch、stored_status、issued_at/expires_at、resource_type、operation_id、view_id、policy_revision 及来源 event/request ID；内嵌 binding 仅含绑定 ID、当前 auth_epoch、stored_status、expires_at 和 epoch_matches_grant。两者独立以 `expires_at <= as_of` 计算 time_expired，保留数据库持久状态，因此尚未清理的 active 行也可能 time_expired=true。当前绑定后续缩短期限、撤销或推进代际仍可观察。响应不包含主体、认证上下文、凭证/资源指纹、动作引用、幂等键、constraints 或事件正文。
 
-这是调查时的账本观察，不是可转交给网关的准入结果；实际请求继续检查完整认证组合、动作/证据、策略、目标字段和当前期限。来源 request_id 可继续查询时间线，发行及分享历史通过 29.14 检索；详情不使用 ClickHouse 授权状态，也不附带其发布水位。身份绑定详情见 29.20；完整来源图与控制台展示继续交付。
+这是调查时的账本观察，不是可转交给网关的准入结果；实际请求继续检查完整认证组合、动作/证据、策略、目标字段和当前期限。来源 request_id 可继续查询时间线，发行及分享历史通过 29.14 检索；详情不使用 ClickHouse 授权状态，也不附带其发布水位。身份绑定详情见 29.20；控制台账本与引用导航见 15.7，完整来源图继续交付。
 
 整体数据库操作含连接池等待最多 15 秒，单语句和锁等待最多 5 秒。与 search/model-call 调查查询共享单实例许可，繁忙返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429；数据库故障、超时或解码损坏返回 `CONTROL_GRANT_STORE_UNAVAILABLE`/503。已准入查询在客户端断连后继续到数据库与审计终态；许可覆盖审计 fsync，进程退出仍为故障边界。所有响应 `Cache-Control: private, no-store`。
 

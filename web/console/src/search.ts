@@ -8,6 +8,8 @@ import {
   requestPattern,
   eventPattern,
   artifactPattern,
+  grantPattern,
+  bindingPattern,
   ensure,
   object,
   text,
@@ -44,8 +46,8 @@ const outcomes = [
 const idPatterns = {
   request_id: requestPattern,
   event_id: eventPattern,
-  grant_id: new RegExp(`^grant_${uuid}$`),
-  auth_binding_id: new RegExp(`^auth_${uuid}$`),
+  grant_id: grantPattern,
+  auth_binding_id: bindingPattern,
   case_id: new RegExp(`^case_${uuid}$`),
   artifact_id: artifactPattern,
 };
