@@ -16,6 +16,8 @@
 
 `GET /control/v1/grants/{grant_id}` 提供 Observer 可读的资格及当前绑定账本快照、数据库时间过期标志和来源请求/事件引用。过期、撤销和代际变化仍可调查；所有返回经过 `console.grant.read` 耐久审计，字段与部署权限见 [29.19](docs/29-api-endpoint-catalog.md#2919-已实现的资格账本调查契约)。
 
+`GET /control/v1/auth-bindings/{binding_id}` 已提供 Observer 可读的身份绑定详情：当前身份与凭证代际、持久状态、期限和更新时间，支持匿名、过期及撤销记录。响应经 `console.binding.read` 耐久审计，生命周期历史可通过绑定 ID 检索；字段和部署边界见 [29.20](docs/29-api-endpoint-catalog.md#2920-已实现的身份绑定调查契约)。
+
 `POST /control/v1/cases/{case_id}/items` 已支持 Investigator 将同作用域有效证据引用加入本人开放案件：每案最多 128 项，关联与 outbox 原子提交，精确幂等重试，并在客户端断连后完成已准入操作的终态审计。先应用迁移 `0017_m3_case_evidence.sql`；关联只建立调查上下文，内容读取与保留期限仍独立校验，详见 [29.16](docs/29-api-endpoint-catalog.md#2916-已实现的案件证据关联契约)。
 
 `GET /control/v1/cases/{case_id}/items` 已提供本人案件的有界证据集合查询：HMAC 游标绑定凭证、主体、作用域、案件和页大小，单 PostgreSQL 快照返回案件摘要、成员引用及 `active`/`expired`/`deleted`/`unavailable` catalog 状态（正常 retention 使用 deleted tombstone）；响应不包含 manifest、locator、hash、key ref 或内容，且所有结果均写 `console.case.read` 审计，详见 [29.17](docs/29-api-endpoint-catalog.md#2917-已实现的案件证据集合查询契约)。

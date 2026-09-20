@@ -8,7 +8,7 @@
 mod case_close;
 mod case_collection;
 mod case_items;
-mod grant_inspection;
+mod ledger_inspection;
 mod search;
 
 use axum::{
@@ -40,8 +40,8 @@ use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealV
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{
-        ArtifactId, CaseId, EventId, EvidenceAccessRequestId, GrantId, ModelCallId, RequestId,
-        SiteId, TenantId,
+        ArtifactId, AuthBindingId, CaseId, EventId, EvidenceAccessRequestId, GrantId, ModelCallId,
+        RequestId, SiteId, TenantId,
     },
     investigation::{
         EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
@@ -1778,6 +1778,7 @@ impl ControlPlane {
                 Some(bytes_read),
                 None,
                 None,
+                None,
             )
         })
         .await;
@@ -2965,6 +2966,7 @@ impl ControlPlane {
             None,
             Some(&query_digest),
             None,
+            None,
         )
     }
 
@@ -2997,6 +2999,7 @@ impl ControlPlane {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3024,6 +3027,7 @@ impl ControlPlane {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3044,6 +3048,7 @@ impl ControlPlane {
         bytes_read: Option<u64>,
         query_digest: Option<&str>,
         target_grant_id: Option<&GrantId>,
+        target_binding_id: Option<&AuthBindingId>,
     ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
@@ -3088,6 +3093,7 @@ impl ControlPlane {
                     .map(EvidenceAccessRequestId::as_str),
                 target_model_call_id: target_model_call_id.map(ModelCallId::as_str),
                 target_grant_id: target_grant_id.map(GrantId::as_str),
+                target_binding_id: target_binding_id.map(AuthBindingId::as_str),
                 query_digest,
                 outcome,
                 reason_code,
@@ -3122,7 +3128,14 @@ pub fn router(control: ControlPlane) -> Router {
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
         .route(MODEL_CALL_PATH, get(model_call_handler))
-        .route(grant_inspection::PATH, get(grant_inspection::handler))
+        .route(
+            ledger_inspection::GRANT_PATH,
+            get(ledger_inspection::grant_handler),
+        )
+        .route(
+            ledger_inspection::BINDING_PATH,
+            get(ledger_inspection::binding_handler),
+        )
         .route(
             search::SEARCH_PATH,
             post(search::handler).layer(DefaultBodyLimit::max(search::SEARCH_BODY_BYTES_MAX)),
@@ -3992,6 +4005,8 @@ struct AccessPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_grant_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_binding_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
@@ -4071,7 +4086,7 @@ mod tests {
     mod case_close;
     mod case_collection;
     mod case_items;
-    mod grant_inspection;
+    mod ledger_inspection;
     mod search_references;
 
     use super::search::SearchRequest;

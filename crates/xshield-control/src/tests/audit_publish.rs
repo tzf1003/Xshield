@@ -121,6 +121,11 @@ async fn access_journal() -> AccessJournal {
         ),
         ("GET", "/control/v1/grants/bad".to_owned(), String::new()),
         (
+            "GET",
+            "/control/v1/auth-bindings/bad".to_owned(),
+            String::new(),
+        ),
+        (
             "POST",
             format!("/control/v1/cases/{CASE}/items"),
             json!({"artifact_id": MISSING_ARTIFACT_ID}).to_string(),
@@ -180,6 +185,7 @@ fn assert_access_families(events: &[Value]) {
             "console.manifest.read",
             "console.model.read",
             "console.grant.read",
+            "console.binding.read",
             "console.query.executed",
             "console.case.read",
             "case.created",
@@ -214,7 +220,7 @@ fn append_access_contracts(control: &ControlPlane) {
         .append_access_event_with_evidence_bytes(
             &format!("req_{}", Uuid::now_v7()),
             Some("operator-1"),
-            crate::grant_inspection::ACCESS,
+            crate::ledger_inspection::GRANT_ACCESS,
             None,
             None,
             None,
@@ -226,6 +232,28 @@ fn append_access_contracts(control: &ControlPlane) {
             None,
             None,
             Some(&GrantId::parse("grant_018f2a3b-4c5d-7000-8000-000000000953").unwrap()),
+            None,
+        )
+        .unwrap();
+    control
+        .append_access_event_with_evidence_bytes(
+            &format!("req_{}", Uuid::now_v7()),
+            Some("operator-1"),
+            crate::ledger_inspection::BINDING_ACCESS,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "PASS",
+            "CONTROL_BINDING_READ",
+            &[],
+            None,
+            None,
+            None,
+            Some(
+                &crate::AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000954").unwrap(),
+            ),
         )
         .unwrap();
     for action in [
@@ -375,6 +403,7 @@ fn append_access_contracts(control: &ControlPlane) {
                 "CONTROL_EVIDENCE_READ",
                 &[artifact.as_str()],
                 Some(bytes_read),
+                None,
                 None,
                 None,
             )

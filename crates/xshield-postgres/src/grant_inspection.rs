@@ -51,6 +51,16 @@ pub enum BindingRecordStatus {
 }
 
 impl BindingRecordStatus {
+    pub(super) fn parse(value: &str) -> Result<Self, StoreError> {
+        match value {
+            "anonymous" => Ok(Self::Anonymous),
+            "active" => Ok(Self::Active),
+            "revoked" => Ok(Self::Revoked),
+            "expired" => Ok(Self::Expired),
+            _ => Err(StoreError::CorruptData("binding_status")),
+        }
+    }
+
     /// Returns the stable stored label without deriving an authorization result.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -198,13 +208,7 @@ fn decode_summary(row: &PgRow) -> Result<GrantInspection, StoreError> {
             .map_err(|_| StoreError::CorruptData("binding_id"))?,
         grant_epoch: epoch(row, "grant_epoch")?,
         binding_epoch: epoch(row, "binding_epoch")?,
-        binding_status: match row.try_get::<&str, _>("binding_status")? {
-            "anonymous" => BindingRecordStatus::Anonymous,
-            "active" => BindingRecordStatus::Active,
-            "revoked" => BindingRecordStatus::Revoked,
-            "expired" => BindingRecordStatus::Expired,
-            _ => return Err(StoreError::CorruptData("binding_status")),
-        },
+        binding_status: BindingRecordStatus::parse(row.try_get("binding_status")?)?,
         binding_expires_at: time(row, "binding_expires_at")?,
         grant_status: match row.try_get::<&str, _>("grant_status")? {
             "active" => GrantRecordStatus::Active,
@@ -261,13 +265,13 @@ fn validate_linkage(row: &PgRow, summary: &GrantInspection) -> Result<(), StoreE
     Ok(())
 }
 
-fn epoch(row: &PgRow, field: &'static str) -> Result<AuthEpoch, StoreError> {
+pub(super) fn epoch(row: &PgRow, field: &'static str) -> Result<AuthEpoch, StoreError> {
     u64::try_from(row.try_get::<i64, _>(field)?)
         .map(AuthEpoch::new)
         .map_err(|_| StoreError::CorruptData(field))
 }
 
-fn time(row: &PgRow, field: &'static str) -> Result<DateTime<Utc>, StoreError> {
+pub(super) fn time(row: &PgRow, field: &'static str) -> Result<DateTime<Utc>, StoreError> {
     let value = row.try_get::<DateTime<Utc>, _>(field)?;
     if value.timestamp() < 0 {
         return Err(StoreError::CorruptData(field));

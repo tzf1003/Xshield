@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access` 及证据访问批准/拒绝端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -9,6 +9,7 @@
 | GET /control/v1/requests/{request_id}/evidence | 证据manifest清单 | console.manifest.read |
 | GET /control/v1/model-calls/{model_call_id} | 模型调用、实际输入输出引用 | console.model.read |
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定账本快照、来源请求引用 | console.grant.read |
+| GET /control/v1/auth-bindings/{binding_id} | 当前身份与凭证代际、状态、期限 | console.binding.read |
 | GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树 | console.agent.read |
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
@@ -197,8 +198,22 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 grant 含资格 ID、发行 auth_epoch、stored_status、issued_at/expires_at、resource_type、operation_id、view_id、policy_revision 及来源 event/request ID；内嵌 binding 仅含绑定 ID、当前 auth_epoch、stored_status、expires_at 和 epoch_matches_grant。两者独立以 `expires_at <= as_of` 计算 time_expired，保留数据库持久状态，因此尚未清理的 active 行也可能 time_expired=true。当前绑定后续缩短期限、撤销或推进代际仍可观察。响应不包含主体、认证上下文、凭证/资源指纹、动作引用、幂等键、constraints 或事件正文。
 
-这是调查时的账本观察，不是可转交给网关的准入结果；实际请求继续检查完整认证组合、动作/证据、策略、目标字段和当前期限。来源 request_id 可继续查询时间线，发行及分享历史通过 29.14 检索；详情不使用 ClickHouse 授权状态，也不附带其发布水位。独立身份详情、完整来源图与控制台展示继续交付。
+这是调查时的账本观察，不是可转交给网关的准入结果；实际请求继续检查完整认证组合、动作/证据、策略、目标字段和当前期限。来源 request_id 可继续查询时间线，发行及分享历史通过 29.14 检索；详情不使用 ClickHouse 授权状态，也不附带其发布水位。身份绑定详情见 29.20；完整来源图与控制台展示继续交付。
 
 整体数据库操作含连接池等待最多 15 秒，单语句和锁等待最多 5 秒。与 search/model-call 调查查询共享单实例许可，繁忙返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429；数据库故障、超时或解码损坏返回 `CONTROL_GRANT_STORE_UNAVAILABLE`/503。已准入查询在客户端断连后继续到数据库与审计终态；许可覆盖审计 fsync，进程退出仍为故障边界。所有响应 `Cache-Control: private, no-store`。
 
 每次可审计尝试写 `console.grant.read`，已校验目标记录在 target_grant_id；成功（包括未找到）使用 `CONTROL_GRANT_READ`，不记录查询出的账本快照或业务来源请求作为管理请求目标，evidence_refs 为空。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果。部署须给控制数据库角色授予上述三表所需 SELECT；无需新增 migration，先升级支持该事件的管理 journal 发布器，再启用新端点。
+
+## 29.20 已实现的身份绑定调查契约
+
+`GET /control/v1/auth-bindings/{binding_id}` 要求 `Observer` 与服务端固定 tenant/site 的管理 Bearer。路径必须为规范小写 `auth_` UUIDv7，不接受查询参数；类型错误返回 `CONTROL_BINDING_ID_INVALID`/400，查询参数错误返回 `CONTROL_QUERY_INVALID`/400，均在数据库访问前拒绝。
+
+读取以完整作用域和 binding 主键查询 `auth_bindings`，单条只读快照仅投影绑定 ID、身份/凭证代际、持久状态、绝对期限和更新时间。返回 `schema_version=3`、管理 request_id、tenant_id/site_id、source_binding_id、found、数据库语句时间 as_of 和可选 binding。缺失及跨作用域统一返回 200、found=false、as_of=null、binding=null。保留在账本中的 anonymous/active/revoked/expired 行均可查询；已物理清理的匿名记录通过现有生命周期事件继续调查。
+
+binding 包含 binding_id、current_auth_epoch、credential_generation、stored_status、time_expired、expires_at、updated_at。time_expired 独立按 `expires_at <= as_of` 计算，时间字段为 UTC RFC3339；更新时间可能晚于期限。匿名代际须为 0，active 代际须为正数，撤销或过期允许保留匿名的 0 代际；未知状态、非法计数和非有限或 Unix 起点之前的时间均视为损坏，整次查询关闭。查询不读取主体、授权上下文、WAF SID 或凭证指纹，不读取或续期业务凭证。返回值是调查观察而非在线认证结果。
+
+使用 binding_id 可继续执行 29.14 的 auth_binding_id 历史检索，再从事件 request_id 打开时间线或从 grant_id 打开资格详情。查询本身不递归展开资格或历史、不附带 ClickHouse 水位；当前账本与后续历史查询不构成跨存储冻结快照。历史检索仍要求 Investigator 角色。
+
+数据库整体操作含池等待限 15 秒，单语句和锁等待限 5 秒，与资格/search/model-call 共用单实例查询许可。忙时返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，数据库故障、超时或损坏返回 `CONTROL_BINDING_STORE_UNAVAILABLE`/503。已准入请求在断连后继续完成数据库操作和审计，许可覆盖终态审计；进程退出仍是故障边界。响应统一为 `Cache-Control: private, no-store`。
+
+每次可审计尝试写 `console.binding.read`，通过路径校验的目标写入 target_binding_id；成功（含未找到）原因为 `CONTROL_BINDING_READ`，evidence_refs 为空，审计中不保存查询快照。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果。部署需给控制数据库角色配置 `auth_bindings` 所需 SELECT，先升级管理 journal 发布器，再启用端点；无新增 migration 或依赖。

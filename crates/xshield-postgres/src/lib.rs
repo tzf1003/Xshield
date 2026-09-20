@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 mod action_read;
+mod binding_inspection;
 mod case_close;
 mod case_evidence;
 mod case_evidence_read;
@@ -28,6 +29,7 @@ mod share_grant_issue;
 mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
+pub use binding_inspection::BindingInspection;
 pub use case_close::{
     InvestigationCaseClose, InvestigationCaseCloseRecord, InvestigationCaseCloseWriteOutcome,
 };
