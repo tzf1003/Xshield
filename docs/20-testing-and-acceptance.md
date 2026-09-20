@@ -31,6 +31,8 @@
 
 同一 core 命令还运行 `calibration::publication` 回归：新 `calr_` report ID 与 report artifact 会保留冻结的 approval、六项 revision、四份 manifest 和 ModelIdentity，未知 resolved revision 保持未知；report artifact 与任一 manifest 或任何已选模型记录/标签 artifact 的别名都被拒绝，成功及错误原因分别稳定为 `CALIBRATION_REPORTED` 与 `CALIBRATION_REPORT_EVIDENCE_ALIASED`。这些测试只验证无 I/O 的最小元数据投影；不验证 artifact 内容、受控读取、artifact 写入、outbox producer/事务、阈值/策略发布或真实校准。
 
+同一 core 命令还运行 `calibration::read_capability` 和 `CalibrationEvidenceReadPort` 契约回归：`calcap_` batch capability 只允许冻结 tenant/site、有效期、四份不同 manifest、按样本顺序的 model-record/label artifact 对及明确 role；空集、样本或 512 MiB 字节上限越界、无效期限、artifact 别名、跨 scope、尚未生效和到期均必须拒绝。`CalibrationEvidenceReadRequest::new` 的反例要求把 scope/租约偏差、来自另一 capability 的克隆 ref、集合外或 role/reference 不符的目标统一拒绝为 `EvidenceNotAuthorized`（`CALIBRATION_EVIDENCE_NOT_AUTHORIZED`），且不得以控制台 `EvidenceReadPort`、`ApprovalRef`、案件或审批记录授权 batch。它们只是纯领域/port 约束：不验证 capability 的独立发行与单次消费、真实 PostgreSQL catalog/期限/字节核算、vault digest/AEAD、内容 DTO、读取审计、报告写入/producer/outbox 或真实校准。
+
 本产品主动禁止的无资格直达、换浏览器未重获资格，不计为违反需求的误报；应另计 intentional_flow_denial 与恢复体验。被认可流程中的正常请求因竞态/映射错误拒绝，才是实现误拒。
 
 固定测试身份、源站版本和授权/流程矩阵，分别比较 baseline、加密可见性、确定性资格、UI 来源、模型增量。不要把账本收益全部算作 JEV 模型收益。

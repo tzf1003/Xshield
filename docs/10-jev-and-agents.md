@@ -128,7 +128,7 @@ Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 
 
 四份 manifest 必须是不同 artifact，且任一 manifest 不得复用为样本的模型调用记录或标签 artifact；每个样本的两类 artifact 也必须不同。评估前会拒绝同一角色的重复 artifact、跨模型记录/标签角色复用、重复 `ModelCallId`、样本模型身份与冻结身份不一致，以及样本映射修订漂移。成功结果保留按样本顺序的 `ModelCallId`、模型记录与标签证据三元关联、冻结 provenance、阈值和原始指标，并以 `CALIBRATION_DATASET_EVALUATED` 供调用方写入自己的耐久审计。
 
-此层不读取、解密或授权任何 evidence，不调用模型、不发布策略、不改变资格，也不写 audit、journal、catalog 或报告。artifact ID 不同只能证明本次提交的引用集合不同，不能证明 manifest 或外部样本内容没有重叠，亦不能排除同源数据、重试相关性、标签质量或分区泄漏。应用层必须经批准的证据读取路径验证作用域、保留期、记录身份、映射、标签审查和内容独立性，并将报告证据及终态写入独立审计链；不得复用 `model.*` 生命周期冒充校准报告。
+此层不读取、解密或授权任何 evidence，不调用模型、不发布策略、不改变资格，也不写 audit、journal、catalog 或报告。artifact ID 不同只能证明本次提交的引用集合不同，不能证明 manifest 或外部样本内容没有重叠，亦不能排除同源数据、重试相关性、标签质量或分区泄漏。后续应用层必须使用独立的校准批量能力和受控读取端口，重新验证作用域、保留期、记录身份、映射、标签审查和内容独立性，并将报告证据及终态写入独立审计链；不得复用 `model.*` 生命周期冒充校准报告。
 
 使用 `cargo test -p xshield-core --all-targets` 运行该契约的纯 Rust 回归。测试验证冻结 provenance 与来源三元关联顺序、未知 resolved revision 的保留、四份 manifest 与样本来源的引用隔离，以及样本 artifact、模型身份、映射修订和 `ModelCallId` 的反例；它们不是授权读取、持久化、供应商调用或真实校准验证。
 
@@ -139,3 +139,11 @@ Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 
 该类型有意不投影 source tuple、`ModelCallId`、标签、概率、ground truth、统计指标、提示词或供应商正文，且不重新计算阈值评估。它不读写或授权 evidence、不创建 report artifact、不写 journal/catalog/outbox，也不选择、发布或改变阈值、策略、资格或模型。`calibration.reported` 的受限元数据 schema 与 outbox 消费端约束见 [11.9](11-audit-event-contract.md#119-已实现-calibrationreported-发布契约)；当前里程碑没有生成或持久化该事件的 producer，不能据此声称受控读取、耐久报告或真实校准已经完成。
 
 `cargo test -p xshield-core --all-targets` 的 publication 回归检查冻结身份和未知 resolved revision 的保留、report artifact 与全部 manifest/样本来源 artifact 的别名拒绝，以及稳定成功/错误原因。它不验证外部 artifact 内容、权限、report artifact 写入、outbox 事务或供应商质量。
+
+## 10.16 已实现校准批量读取能力与端口契约
+
+`calibration::read_capability::CalibrationEvidenceReadCapability` 是由未来发行器提供给一次离线校准批次的精确、只读输入：独立 `calcap_` ID 冻结 tenant/site、`not_before`/`expires_at`、`EvaluationProvenance`、四份分区 manifest，以及每个样本位的 model-call record 和 reviewed-label artifact 对。`evidence_refs()` 只能导出这份封闭集合及其 `CalibrationEvidenceRole`；四份 manifest、每一对样本来源和跨样本来源均不得别名。能力的样本数受 `MAX_SAMPLES` 限制，聚合 catalog 字节预算必须为正且不超过 512 MiB；调用方还须在每次读取前以可信时钟重验 capability 的 tenant/site 和有效期。
+
+`CalibrationEvidenceReadPort` 只接收由 `CalibrationEvidenceReadRequest::new` 用 capability 导出的精确 artifact/role 引用构造的请求；构造器重验 tenant/site、租约和 capability 的完整成员关系，不能伪造或替换引用的 capability ID。所有本地 scope、期限、成员或 role/reference 不匹配统一映射为 `EvidenceNotAuthorized`（`CALIBRATION_EVIDENCE_NOT_AUTHORIZED`），避免成为 evidence 枚举 oracle。它不是 `xshield-control` 的单对象 `EvidenceReadPort`，也不接受控制台 `EvidenceAccessRequestId`、案件、`ApprovalRef` 或 Reader/Approver 角色作为校准批量授权；后者只可关联数据集 provenance，不能替代目的限定的 batch capability。即使 capability 的纯领域检查成功，未来适配器仍必须在每次打开对象前重新验证独立发行与允许的单次/恢复状态、catalog 的 tenant/site/有效期/大小、完整冻结集合和角色、manifest/记录/标签语义及 revision/digest，并由 vault 复验密文摘要和 AEAD；任一失败只可返回无内容的拒绝或依赖错误。未来应用层才负责为该终态写独立校准审计。
+
+当前实现**没有** capability 发行/持久化、消费状态、实际 catalog/vault reader、内容解密、读取审计、报告 artifact 写入或 `calibration.reported` producer/原子 outbox；端口及其纯能力测试不能证明任一对象被授权读取，更不是阈值/策略发布、业务资格发行或真实校准。下一垂直闭环必须先实现这些持久化和受控读取责任，再将已验证内容转换为严格模型/标签 DTO。

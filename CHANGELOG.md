@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 增加离线校准批量读取 capability/port 契约：`calcap_` 精确冻结 tenant/site、有效期、四份分区 manifest、model-record/label artifact 对及 role、样本和聚合字节上限；请求只接受 capability 导出的成员引用，拒绝跨 scope、过期、集合外、角色偏差及不同 capability 的引用。该边界与控制台单对象证据读取隔离，当前仍未实现 capability 发行/持久化、消费状态、catalog/vault 内容读取、读取审计或真实校准。
+
 - 增加离线校准报告发布元数据契约：`calr_` 报告 ID 和独立 report artifact 只投影冻结的批准、数据集/标签/任务/映射/阈值策略修订、四份 manifest 与模型身份；拒绝 report artifact 与 manifest 或样本来源 artifact 别名，保留显式未知的 resolved revision。`calibration.reported` 仅定义受限元数据 schema/消费契约，不包含样本、标签、概率、指标或供应商正文，也不实现 evidence 读取、报告持久化 producer、阈值/策略发布或真实校准。
 
 - 增加离线校准数据集领域契约：样本分别绑定模型调用和标签 artifact，冻结批准、数据集/标签/任务/映射/阈值、模型与提示修订及四份分区 manifest；拒绝分区与样本来源、样本角色之间的引用别名、重复、模型或映射漂移，并保留调用 ID、模型记录、标签证据三元关联。该纯 Rust 层不执行证据读取、持久报告或真实校准，引用不同也不证明外部内容独立。

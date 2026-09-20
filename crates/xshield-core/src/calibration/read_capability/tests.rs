@@ -1,0 +1,296 @@
+use super::*;
+use crate::{
+    calibration::dataset::{EvaluationProvenance, ModelIdentity},
+    domain::{
+        ApprovalRef, ArtifactId, CalibrationReadCapabilityId, DatasetRevision, LabelRevision,
+        MappingRevision, ModelRevision, PromptRevision, ProviderId, TaskRevision,
+        ThresholdPolicyRevision,
+    },
+    ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
+};
+
+fn artifact(index: usize) -> ArtifactId {
+    ArtifactId::parse(format!("artifact_018f2a3b-4c5d-7000-8000-{index:012x}")).unwrap()
+}
+
+fn provenance() -> EvaluationProvenance {
+    EvaluationProvenance::new(
+        ApprovalRef::parse("approval-r1").unwrap(),
+        DatasetRevision::parse("dataset-r1").unwrap(),
+        LabelRevision::parse("labels-r1").unwrap(),
+        TaskRevision::parse("task-r1").unwrap(),
+        ThresholdPolicyRevision::parse("threshold-r1").unwrap(),
+        MappingRevision::parse("risk-map-r1").unwrap(),
+        artifact(1),
+        artifact(2),
+        artifact(3),
+        artifact(4),
+        ModelIdentity::new(
+            ProviderId::parse("vercel_ai_gateway").unwrap(),
+            "typesafe-ai/jev",
+            ModelRevision::parse("jev-1.13.0").unwrap(),
+            PromptRevision::parse("prompt-r1").unwrap(),
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn capability(
+    sources: Vec<CalibrationSampleReadScope>,
+) -> Result<CalibrationEvidenceReadCapability, CalibrationReadCapabilityError> {
+    capability_with_id(
+        CalibrationReadCapabilityId::parse("calcap_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+        sources,
+    )
+}
+
+fn capability_with_id(
+    capability_id: CalibrationReadCapabilityId,
+    sources: Vec<CalibrationSampleReadScope>,
+) -> Result<CalibrationEvidenceReadCapability, CalibrationReadCapabilityError> {
+    CalibrationEvidenceReadCapability::new(
+        capability_id,
+        TenantId::parse("tenant_demo").unwrap(),
+        SiteId::parse("site_demo").unwrap(),
+        provenance(),
+        sources,
+        UnixSeconds::new(100),
+        UnixSeconds::new(200),
+        1024,
+    )
+}
+
+#[test]
+fn read_request_requires_current_scope_lease_and_exact_capability_reference() {
+    let capability = capability(vec![source(10, 11)]).unwrap();
+    let tenant = TenantId::parse("tenant_demo").unwrap();
+    let site = SiteId::parse("site_demo").unwrap();
+    let own_ref = capability.evidence_refs().pop().unwrap();
+
+    let request = CalibrationEvidenceReadRequest::new(
+        &capability,
+        &own_ref,
+        &tenant,
+        &site,
+        UnixSeconds::new(150),
+    )
+    .unwrap();
+    assert_eq!(
+        request.capability().capability_id(),
+        capability.capability_id()
+    );
+    assert_eq!(request.evidence_ref(), &own_ref);
+    assert_eq!(request.tenant_id(), &tenant);
+    assert_eq!(request.site_id(), &site);
+    assert_eq!(request.now(), UnixSeconds::new(150));
+
+    for (wrong_tenant, wrong_site, now) in [
+        (TenantId::parse("tenant_other").unwrap(), site.clone(), 150),
+        (tenant.clone(), site.clone(), 99),
+        (tenant.clone(), site.clone(), 200),
+    ] {
+        assert!(matches!(
+            CalibrationEvidenceReadRequest::new(
+                &capability,
+                &own_ref,
+                &wrong_tenant,
+                &wrong_site,
+                UnixSeconds::new(now),
+            ),
+            Err(CalibrationEvidenceReadDenied::EvidenceNotAuthorized)
+        ));
+    }
+
+    let other_capability = capability_with_id(
+        CalibrationReadCapabilityId::parse("calcap_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
+        vec![source(10, 11)],
+    )
+    .unwrap();
+    let other_ref = other_capability.evidence_refs().pop().unwrap();
+    assert_eq!(own_ref.artifact_id(), other_ref.artifact_id());
+    assert_eq!(own_ref.role(), other_ref.role());
+    assert_eq!(own_ref.sample_index(), other_ref.sample_index());
+    assert!(matches!(
+        CalibrationEvidenceReadRequest::new(
+            &capability,
+            &other_ref,
+            &tenant,
+            &site,
+            UnixSeconds::new(150),
+        ),
+        Err(CalibrationEvidenceReadDenied::EvidenceNotAuthorized)
+    ));
+    assert_eq!(
+        CalibrationEvidenceReadDenied::EvidenceNotAuthorized.reason_code(),
+        "CALIBRATION_EVIDENCE_NOT_AUTHORIZED"
+    );
+}
+
+fn source(model: usize, label: usize) -> CalibrationSampleReadScope {
+    CalibrationSampleReadScope::new(artifact(model), artifact(label))
+}
+
+#[test]
+fn capability_freezes_complete_ordered_batch_without_console_authority() {
+    let capability = capability(vec![source(10, 11), source(12, 13)]).unwrap();
+    assert_eq!(
+        capability.capability_id().as_str(),
+        "calcap_018f2a3b-4c5d-7000-8000-000000000001"
+    );
+    assert_eq!(
+        capability.provenance().approval_ref().as_str(),
+        "approval-r1"
+    );
+    assert_eq!(capability.sources(), [source(10, 11), source(12, 13)]);
+    assert_eq!(capability.max_total_bytes(), 1024);
+    let refs = capability.evidence_refs();
+    assert_eq!(refs.len(), 8);
+    assert_eq!(refs[0].role(), CalibrationEvidenceRole::TrainingManifest);
+    assert_eq!(refs[3].role(), CalibrationEvidenceRole::LabelManifest);
+    assert_eq!(refs[4].role(), CalibrationEvidenceRole::ModelCallRecord);
+    assert_eq!(refs[4].sample_index(), Some(0));
+    assert_eq!(refs[7].role(), CalibrationEvidenceRole::ReviewedLabel);
+    assert_eq!(refs[7].sample_index(), Some(1));
+    assert_eq!(refs[7].artifact_id(), &artifact(13));
+    assert_eq!(
+        CalibrationEvidenceRole::ReviewedLabel.as_str(),
+        "reviewed_label"
+    );
+}
+
+#[test]
+fn capability_rechecks_exact_scope_and_exclusive_lease() {
+    let capability = capability(vec![source(10, 11)]).unwrap();
+    let tenant = TenantId::parse("tenant_demo").unwrap();
+    let site = SiteId::parse("site_demo").unwrap();
+    assert_eq!(
+        capability.verify_read_scope(&tenant, &site, UnixSeconds::new(100)),
+        Ok(())
+    );
+    assert_eq!(
+        capability.verify_read_scope(&tenant, &site, UnixSeconds::new(199)),
+        Ok(())
+    );
+    assert_eq!(
+        capability.verify_read_scope(&tenant, &site, UnixSeconds::new(99)),
+        Err(CalibrationReadCapabilityError::NotYetValid)
+    );
+    assert_eq!(
+        capability.verify_read_scope(&tenant, &site, UnixSeconds::new(200)),
+        Err(CalibrationReadCapabilityError::Expired)
+    );
+    assert_eq!(
+        capability.verify_read_scope(
+            &TenantId::parse("tenant_other").unwrap(),
+            &site,
+            UnixSeconds::new(150)
+        ),
+        Err(CalibrationReadCapabilityError::ScopeMismatch)
+    );
+}
+
+#[test]
+fn capability_rejects_unbounded_or_aliased_source_sets() {
+    assert_eq!(
+        capability(vec![]),
+        Err(CalibrationReadCapabilityError::EmptySamples)
+    );
+    assert_eq!(
+        capability(vec![source(10, 10)]),
+        Err(CalibrationReadCapabilityError::SampleEvidenceAliased)
+    );
+    for sources in [
+        vec![source(1, 11)],
+        vec![source(10, 2)],
+        vec![source(10, 11), source(10, 12)],
+    ] {
+        assert_eq!(
+            capability(sources),
+            Err(CalibrationReadCapabilityError::EvidenceReferenceAliased)
+        );
+    }
+    let capability_id =
+        CalibrationReadCapabilityId::parse("calcap_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
+    let tenant = TenantId::parse("tenant_demo").unwrap();
+    let site = SiteId::parse("site_demo").unwrap();
+    for (not_before, expires_at, bytes, error) in [
+        (100, 100, 1024, CalibrationReadCapabilityError::LeaseInvalid),
+        (
+            100,
+            200,
+            0,
+            CalibrationReadCapabilityError::ByteLimitInvalid,
+        ),
+        (
+            100,
+            200,
+            MAX_CALIBRATION_BATCH_BYTES + 1,
+            CalibrationReadCapabilityError::ByteLimitInvalid,
+        ),
+    ] {
+        assert_eq!(
+            CalibrationEvidenceReadCapability::new(
+                capability_id.clone(),
+                tenant.clone(),
+                site.clone(),
+                provenance(),
+                vec![source(10, 11)],
+                UnixSeconds::new(not_before),
+                UnixSeconds::new(expires_at),
+                bytes,
+            ),
+            Err(error)
+        );
+    }
+    assert_eq!(
+        capability(vec![source(10, 11); MAX_SAMPLES + 1]),
+        Err(CalibrationReadCapabilityError::TooManySamples)
+    );
+}
+
+#[test]
+fn capability_errors_are_stable_and_payload_free() {
+    for (error, reason) in [
+        (
+            CalibrationReadCapabilityError::EmptySamples,
+            "CALIBRATION_READ_SAMPLES_EMPTY",
+        ),
+        (
+            CalibrationReadCapabilityError::TooManySamples,
+            "CALIBRATION_READ_SAMPLES_EXCEEDED",
+        ),
+        (
+            CalibrationReadCapabilityError::ByteLimitInvalid,
+            "CALIBRATION_READ_BYTES_INVALID",
+        ),
+        (
+            CalibrationReadCapabilityError::LeaseInvalid,
+            "CALIBRATION_READ_LEASE_INVALID",
+        ),
+        (
+            CalibrationReadCapabilityError::SampleEvidenceAliased,
+            "CALIBRATION_READ_SAMPLE_EVIDENCE_ALIASED",
+        ),
+        (
+            CalibrationReadCapabilityError::EvidenceReferenceAliased,
+            "CALIBRATION_READ_EVIDENCE_ALIASED",
+        ),
+        (
+            CalibrationReadCapabilityError::ScopeMismatch,
+            "CALIBRATION_READ_SCOPE_MISMATCH",
+        ),
+        (
+            CalibrationReadCapabilityError::NotYetValid,
+            "CALIBRATION_READ_NOT_YET_VALID",
+        ),
+        (
+            CalibrationReadCapabilityError::Expired,
+            "CALIBRATION_READ_EXPIRED",
+        ),
+    ] {
+        assert_eq!(error.reason_code(), reason);
+        assert_eq!(error.to_string(), reason);
+    }
+}

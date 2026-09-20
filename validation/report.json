@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3496,
-  "passed_count": 3496,
+  "checks_total": 3499,
+  "passed_count": 3499,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -16957,6 +16957,21 @@
     },
     {
       "name": "no_tool_tokens:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/16-rust-code-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/20-testing-and-acceptance.md",
       "passed": true,
       "detail": ""
     },

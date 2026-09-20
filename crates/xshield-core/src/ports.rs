@@ -6,6 +6,7 @@ use crate::{
         ShareTokenFingerprint,
     },
     audit::AuditEvent,
+    calibration::read_capability::{CalibrationEvidenceReadCapability, CalibrationEvidenceRef},
     domain::{
         ActionRef, EventId, OperationId, PolicyRevision, ResourceType, SiteId, StageExecutionId,
         TenantId, ViewProfile, WafSessionId,
@@ -18,6 +19,161 @@ use crate::{
     provenance::{ActionGrant, ProvenanceError},
 };
 use std::{cell::RefCell, collections::BTreeMap, fmt, future::Future};
+
+/// A validated request to read exactly one artifact in a calibration batch.
+///
+/// This request can only be constructed from a
+/// [`CalibrationEvidenceReadCapability`] and one of its exact exported
+/// [`CalibrationEvidenceRef`] values. It deliberately has no console
+/// `EvidenceAccessRequestId`, `ApprovalRef`, case, or management role: the
+/// control-plane single-artifact download flow cannot authorize an offline
+/// calibration batch.
+///
+/// Construction only rejects obviously wrong scope, lease, or reference shape;
+/// it performs no storage, evidence, issuance, audit, or authorization side
+/// effects. Callers supply `now` from a trusted server clock.
+pub struct CalibrationEvidenceReadRequest<'a> {
+    capability: &'a CalibrationEvidenceReadCapability,
+    evidence_ref: &'a CalibrationEvidenceRef,
+    tenant_id: &'a TenantId,
+    site_id: &'a SiteId,
+    now: UnixSeconds,
+}
+
+impl<'a> CalibrationEvidenceReadRequest<'a> {
+    /// Validates the local, non-expandable batch scope for one future read.
+    ///
+    /// A reference cloned from another capability is rejected even when its
+    /// artifact, role, and sample position are otherwise identical. To avoid
+    /// turning this boundary into an evidence-enumeration oracle, every local
+    /// mismatch maps to [`CalibrationEvidenceReadDenied::EvidenceNotAuthorized`].
+    ///
+    /// # Errors
+    /// Returns [`CalibrationEvidenceReadDenied::EvidenceNotAuthorized`] when
+    /// the tenant/site, lease, capability identity, or exact role/reference
+    /// membership does not match the supplied capability. No reader is called
+    /// on this path.
+    pub fn new(
+        capability: &'a CalibrationEvidenceReadCapability,
+        evidence_ref: &'a CalibrationEvidenceRef,
+        tenant_id: &'a TenantId,
+        site_id: &'a SiteId,
+        now: UnixSeconds,
+    ) -> Result<Self, CalibrationEvidenceReadDenied> {
+        if capability
+            .verify_read_scope(tenant_id, site_id, now)
+            .is_err()
+            || !capability.permits_evidence_ref(evidence_ref)
+        {
+            return Err(CalibrationEvidenceReadDenied::EvidenceNotAuthorized);
+        }
+        Ok(Self {
+            capability,
+            evidence_ref,
+            tenant_id,
+            site_id,
+            now,
+        })
+    }
+
+    /// Returns the independently issued batch capability to revalidate.
+    #[must_use]
+    pub const fn capability(&self) -> &CalibrationEvidenceReadCapability {
+        self.capability
+    }
+
+    /// Returns the exact frozen artifact and semantic role to read.
+    #[must_use]
+    pub const fn evidence_ref(&self) -> &CalibrationEvidenceRef {
+        self.evidence_ref
+    }
+
+    /// Returns the trusted tenant scope for this attempt.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        self.tenant_id
+    }
+
+    /// Returns the trusted site scope for this attempt.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        self.site_id
+    }
+
+    /// Returns the trusted server time at which the attempt was admitted.
+    #[must_use]
+    pub const fn now(&self) -> UnixSeconds {
+        self.now
+    }
+}
+
+/// A closed authorization denial for calibration evidence reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalibrationEvidenceReadDenied {
+    /// The exact batch capability cannot authorize this artifact read.
+    EvidenceNotAuthorized,
+}
+
+impl CalibrationEvidenceReadDenied {
+    /// Returns the stable, payload-free reason code for the caller-owned audit.
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::EvidenceNotAuthorized => "CALIBRATION_EVIDENCE_NOT_AUTHORIZED",
+        }
+    }
+}
+
+impl fmt::Display for CalibrationEvidenceReadDenied {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.reason_code())
+    }
+}
+
+impl std::error::Error for CalibrationEvidenceReadDenied {}
+
+/// The explicit result of one calibration evidence read attempt.
+#[derive(Debug)]
+pub enum CalibrationEvidenceReadState<Content> {
+    /// Content authenticated as the requested artifact by the implementing adapter.
+    Read(Content),
+    /// The batch capability does not authorize the requested read.
+    Denied(CalibrationEvidenceReadDenied),
+}
+
+/// Reads one exact calibration artifact through a purpose-specific batch capability.
+///
+/// This port is separate from the console's `EvidenceReadPort`: a console
+/// approval, `ApprovalRef`, or management role cannot be adapted into this
+/// request or authorize a batch read. It does not issue a capability, persist
+/// a report, publish a threshold or policy, or itself produce a durable audit.
+///
+/// Before returning [`CalibrationEvidenceReadState::Read`], an adapter MUST
+/// independently revalidate the capability issuance and current tenant/site
+/// scope; atomically consume it for exactly one batch or apply a documented
+/// recovery state; verify active catalog entries and the aggregate catalog-byte
+/// budget; authenticate each typed manifest and requested role; and verify the
+/// persisted object digest and AEAD before exposing content. The adapter MUST
+/// treat any failed recheck as a non-content result, and the application MUST
+/// write its required terminal audit without logging source payloads.
+pub trait CalibrationEvidenceReadPort {
+    /// Adapter-specific content representation. Implementations should retain
+    /// secret-buffer ownership and zeroization until the evaluator consumes it.
+    type Content;
+    /// Adapter-specific dependency, integrity, or cancellation failure.
+    type Error;
+
+    /// Reads the one artifact selected by a prevalidated exact batch request.
+    ///
+    /// # Errors
+    /// Returns `Error` only for dependency, integrity, deadline, cancellation,
+    /// or other adapter failures. An authorization denial is returned as
+    /// [`CalibrationEvidenceReadState::Denied`] with its stable reason code.
+    fn read_calibration_evidence<'a>(
+        &'a self,
+        request: CalibrationEvidenceReadRequest<'a>,
+    ) -> impl Future<Output = Result<CalibrationEvidenceReadState<Self::Content>, Self::Error>> + Send + 'a;
+}
 
 /// Scoped request for an authoritative identity and exact credential combination.
 pub struct IdentityProofQuery<'a> {

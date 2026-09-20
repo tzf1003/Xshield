@@ -53,6 +53,10 @@ IdentityVerifier 验证本次认证及继承；GrantStore 精确查询/条件提
 
 每个 Port 明确错误类型、超时、可重试性、幂等、线程安全、取消语义、审计责任和资源预算。借 trait 复用能力，不为只有一个简单函数的模块强造泛化层。
 
+校准批量读取是例外明确、目的受限的独立端口：`CalibrationEvidenceReadPort` 只接受 `CalibrationEvidenceReadRequest::new` 以 `CalibrationEvidenceReadCapability` 导出的精确 `CalibrationEvidenceRef` 构造的请求。构造器重验 scope、租约和完整 capability 成员关系，且 capability ID 不可由调用者替换；不得以 artifact 字符串、控制台 `EvidenceReadPort`、`EvidenceAccessRequestId`、案件、`ApprovalRef` 或管理 Reader/Approver 角色代替授权。capability 冻结 tenant/site、可信时钟的起止期限、四份分区 manifest、每个样本的 model-record/label 对及其 role、样本上限和聚合字节上限；它本身不带内容、业务资格或发布权限。
+
+此处目前只有领域 capability 和 port 契约，尚无发行/持久化、消费或恢复状态，也没有 PostgreSQL catalog/vault 适配器。端口将读取结果建模为 `Read(Content)`、`Denied(EvidenceNotAuthorized)` 或适配器错误；未来适配器在每次读取前必须重验 capability 发行与单次/恢复状态、tenant/site、期限、完整冻结集合、角色、catalog 大小预算、manifest/记录/标签语义与 digest，并在 vault 侧重验密文摘要和 AEAD；失败只能返回无内容拒绝或依赖错误，未来应用层再以稳定原因码写独立校准审计终态。该端口不能绕过控制台原文读取的独立授权，也不能被复用为阈值/策略发布或业务授权路径。
+
 ## 16.5 错误与资源
 
 领域错误用具体 enum 表达违反约束；应用错误区分 invalid_input/denied/dependency_unavailable/timeout/cancelled/internal。thiserror 等仅作实现选择；不以错误 message 字符串分支。顶层附加 context 不得自动打印完整请求或秘密。

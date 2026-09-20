@@ -6,6 +6,8 @@
 
 ## 实现状态
 
+`xshield_core::calibration::read_capability` 与 `ports::CalibrationEvidenceReadPort` 已为离线校准批量读取定义纯领域/端口边界：独立的 `calcap_` capability 冻结 tenant/site、可信有效期、四份分区 manifest、每个样本的 model-record/label artifact 对、语义 role、样本上限及 512 MiB 聚合字节上限。请求只接受该 capability 导出的精确引用，重验 scope、租约、capability ID 和成员关系；控制台单对象 `EvidenceReadPort`、案件、审批、`ApprovalRef` 或管理角色不能作为此批次授权。当前没有 capability 发行/持久化、消费状态、实际 catalog/vault reader、内容解密、读取审计、报告 artifact producer 或真实校准；适配器逐次重验及完整闭环见 [10.16](docs/10-jev-and-agents.md#1016-已实现校准批量读取能力与端口契约)、[16.4](docs/16-rust-code-architecture.md#164-port-契约) 与 [20.3](docs/20-testing-and-acceptance.md#203-误拒与安全收益)。
+
 `xshield_core::calibration::publication` 已定义离线校准报告的最小、无内容领域投影：独立的 `calr_` UUIDv7 报告 ID 与 report artifact 绑定，并冻结批准、数据集/标签/任务/映射/阈值策略修订、四份分区 manifest 和完整模型身份（含可未知的 resolved revision）。report artifact 不能复用 manifest 或已选模型记录/标签 artifact；投影不携带样本、标签、概率、指标、提示词或供应商正文，成功原因固定为 `CALIBRATION_REPORTED`。配套 `calibration.reported` 只规定受限元数据的 schema 与 outbox 消费契约；当前没有受控 evidence 读取、report artifact 持久化 producer、阈值/策略发布或真实校准。边界见 [10.15](docs/10-jev-and-agents.md#1015-已实现校准报告发布元数据契约)、[11.9](docs/11-audit-event-contract.md#119-已实现-calibrationreported-发布契约) 和 [20.3](docs/20-testing-and-acceptance.md#203-误拒与安全收益)。
 
 `xshield_core::calibration::dataset` 已为离线阈值评估提供无 I/O 的数据集领域契约：每个样本分别引用模型调用记录和标签证据，冻结批准、数据集/标签/任务/映射/阈值、provider、wire model、模型/提示修订及可未知的 resolved revision；训练、校准、评估和标签 manifest 必须是四个不同 artifact，且不能复用为样本来源。它拒绝样本证据别名、跨角色复用、重复引用以及模型或映射修订漂移，并在结果保留按输入顺序的调用 ID、模型记录、标签证据三元关联和统计指标。该契约只能比较提交的引用集合，不能证明外部内容互不重叠；受控证据读取、内容独立性审查、耐久报告/审计、阈值选择和真实校准仍待交付。详情与测试边界见 [10.14](docs/10-jev-and-agents.md#1014-已实现校准数据集领域契约) 和 [20.3](docs/20-testing-and-acceptance.md#203-误拒与安全收益)。
