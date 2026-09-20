@@ -6,7 +6,7 @@
 //! concurrency to one evaluation. Recovery closes interrupted attempts as unknown.
 
 use chrono::{SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -30,7 +30,7 @@ mod transport;
 mod wire;
 
 use storage::Storage;
-use transport::{JevClient, JevRoute, ModelPort};
+use transport::{DIRECT_MODEL, GATEWAY_MODEL, JevClient, JevRoute, ModelPort};
 use wire::{Input, Response};
 
 const CONFIG: &str = "MODEL_CONFIG_INVALID";
@@ -222,7 +222,8 @@ async fn evaluate(
         return Err("MODEL_SECRET_EXCLUDED");
     }
     let mut attempt = Attempt::new(input, tenant, site)?;
-    let mut event = ModelEvent::new(&attempt, input);
+    let mut event =
+        ModelEvent::new_for_provider(&attempt, input, client.provider(), client.provider_model());
     storage.event(&mut attempt, "model.started", &event)?;
     let started = Instant::now();
     let result = execute(
@@ -318,7 +319,8 @@ async fn execute(
             )
             .await?,
     );
-    let mut requested = ModelEvent::new(attempt, input);
+    let mut requested =
+        ModelEvent::new_for_provider(attempt, input, client.provider(), client.provider_model());
     "requested".clone_into(&mut requested.status);
     "MODEL_REQUESTED".clone_into(&mut requested.reason_code);
     requested.input_artifact_id.clone_from(&attempt.input);
@@ -384,6 +386,7 @@ async fn execute(
             request_id: attempt.request.as_str().to_owned(),
             example_only: false,
             provider: client.provider(),
+            provider_model_id: client.provider_model(),
             model_revision: input.model_revision().to_owned(),
             resolved_model_revision: parsed
                 .and_then(|response| response.resolved_model_revision.clone()),
@@ -453,6 +456,7 @@ struct ModelCallRecord {
     request_id: String,
     example_only: bool,
     provider: &'static str,
+    provider_model_id: &'static str,
     model_revision: String,
     resolved_model_revision: Option<String>,
     prompt_revision: String,
@@ -488,6 +492,10 @@ struct UsageRecord {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ModelEvent {
     pub(crate) model_call_id: String,
+    #[serde(default, deserialize_with = "deserialize_non_null_option")]
+    pub(crate) provider: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_non_null_option")]
+    pub(crate) provider_model_id: Option<String>,
     pub(crate) model_revision: String,
     pub(crate) prompt_revision: String,
     pub(crate) question_type: String,
@@ -503,6 +511,16 @@ pub(crate) struct ModelEvent {
     pub(crate) output_artifact_id: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub(crate) call_artifact_id: Option<String>,
+}
+
+fn deserialize_non_null_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("null is not an absent provider field"))
 }
 
 impl ModelEvent {
@@ -532,9 +550,21 @@ impl ModelEvent {
         Ok(())
     }
 
+    #[cfg(test)]
     fn new(attempt: &Attempt, input: &Input) -> Self {
+        Self::new_for_provider(attempt, input, "typesafe", DIRECT_MODEL)
+    }
+
+    fn new_for_provider(
+        attempt: &Attempt,
+        input: &Input,
+        provider: &str,
+        provider_model_id: &str,
+    ) -> Self {
         Self {
             model_call_id: attempt.call.as_str().to_owned(),
+            provider: Some(provider.to_owned()),
+            provider_model_id: Some(provider_model_id.to_owned()),
             model_revision: input.model_revision().to_owned(),
             prompt_revision: input.prompt_revision().to_owned(),
             question_type: input.question_type().to_owned(),
@@ -560,6 +590,15 @@ impl ModelEvent {
     ) -> Result<crate::PayloadSummary, crate::PublishError> {
         use crate::PublishError::InvalidEvent;
         ModelCallId::parse(&self.model_call_id).map_err(|_| InvalidEvent)?;
+        match (&self.provider, &self.provider_model_id) {
+            (None, None) => {}
+            (Some(provider), Some(provider_model_id))
+                if crate::valid_name(provider)
+                    && ((provider == "typesafe" && provider_model_id == DIRECT_MODEL)
+                        || (provider == "vercel_ai_gateway"
+                            && provider_model_id == GATEWAY_MODEL)) => {}
+            _ => return Err(InvalidEvent),
+        }
         let outcome = match (event_type, self.status.as_str()) {
             ("model.started", "started") | ("model.requested", "requested") => "UNKNOWN",
             ("model.responded", "success") => "PASS",

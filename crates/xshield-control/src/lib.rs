@@ -4303,6 +4303,8 @@ mod tests {
         let request_id = "req_018f2a3b-4c5d-7000-8000-000000000001";
         let payload = serde_json::json!({
             "model_call_id": model_call_id,
+            "provider": "vercel_ai_gateway",
+            "provider_model_id": "typesafe-ai/jev",
             "model_revision": "jev-1.13.0",
             "prompt_revision": "evaluation-r1",
             "question_type": "choice",
@@ -4356,6 +4358,8 @@ mod tests {
         assert_eq!(body["model_call"]["input_artifact_id"], input_id);
         assert_eq!(body["model_call"]["output_artifact_id"], output_id);
         assert_eq!(body["model_call"]["call_artifact_id"], call_id);
+        assert_eq!(body["model_call"]["provider"], "vercel_ai_gateway");
+        assert_eq!(body["model_call"]["provider_model_id"], "typesafe-ai/jev");
         let audit = read_access_events(&fixture.access_directory);
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0]["event_type"], "console.model.read");

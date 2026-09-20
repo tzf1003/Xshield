@@ -224,6 +224,18 @@ fn model_event_contract_rejects_confidence_and_lifecycle_contradictions() {
     let mut bad = event;
     "requested".clone_into(&mut bad.status);
     assert!(bad.validate("model.requested").is_err());
+    let mut bad = ModelEvent::new(&attempt, &input);
+    bad.provider_model_id = None;
+    assert!(bad.validate("model.started").is_err());
+    let mut bad = ModelEvent::new(&attempt, &input);
+    bad.provider_model_id = Some("untrusted/model".to_owned());
+    assert!(bad.validate("model.started").is_err());
+    let mut bad = ModelEvent::new(&attempt, &input);
+    bad.provider = Some("vercel_ai_gateway".to_owned());
+    assert!(bad.validate("model.started").is_err());
+    let mut null_fields = serde_json::to_value(ModelEvent::new(&attempt, &input)).unwrap();
+    null_fields["provider"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<ModelEvent>(null_fields).is_err());
 }
 
 async fn server(status: u16, body: &'static str) -> (String, tokio::task::JoinHandle<Vec<u8>>) {

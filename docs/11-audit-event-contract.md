@@ -55,11 +55,11 @@ occurred_at 是服务器 UTC，浏览器时间另存 client_reported_at；时区
 
 模型结果另存全概率、Noul 值或评分、供应商置信度、校准版本、阈值和采取的动作。可解释文本是独立 explanation，不等同于决策事实；如果来自另一个模型，必须有另一条 model_call_id。
 
-当前阶段发布契约：`proof_kind=model` 必须带 `mdl_` UUIDv7 调用引用；其他 proof 不携带模型调用或版本。可选 `model_revision` 为 1–128 字节的 ASCII 字母、数字、`_`、`-`、`.` 标识，写入独立索引列，供时间线与有界查询使用。旧事件缺失或显式 null 时保持未知（索引空值），不从当前配置补填历史版本。`confidence_status=provided` 与非空置信度一一对应，其他状态必须为 null；确定性结果继续为 `null/not_applicable`，SKIPPED/CANCELLED 不得携带数值。
+当前阶段发布契约：`proof_kind=model` 必须带 `mdl_` UUIDv7 调用引用；其他 proof 不携带模型调用或版本。可选 `model_revision` 为 1–128 字节的 ASCII 字母、数字、`_`、`-`、`.` 标识，写入独立索引列，供时间线与有界查询使用。旧事件的 `model_revision` 缺失或显式 null 时保持未知（索引空值），不从当前配置补填历史版本。provider 与 provider_model_id 必须成对出现，旧事件两者均缺失时保持兼容，查询字段序列化为 null。`confidence_status=provided` 与非空置信度一一对应，其他状态必须为 null；确定性结果继续为 `null/not_applicable`，SKIPPED/CANCELLED 不得携带数值。
 
 升级兼容：已有网关确定性事件无需改写。违反文档约定的 `model_` 前缀、非模型事件附带模型引用或置信度状态矛盾会被发布器以 InvalidEvent 拒绝并保持当前段水位；应检查生产者及受影响段，保留原始审计证据。阶段汇总使用同一最新事件的置信度，包括 null，避免沿用较早尝试的数值。
 
-一次性离线评估已接入 `model.started/requested/responded/failed/timeout/cancelled` 的 typed payload 与发布解析：model_call_id、模型/模板版本、问题类型、状态、原因、置信度、耗时及可空的输入/输出/调用证据引用。模型调用终态不设置业务请求 `is_terminal`，不表示源站已执行；完整边界见 [10.9](10-jev-and-agents.md#109-已实现一次性离线评估)。
+一次性离线评估已接入 `model.started/requested/responded/failed/timeout/cancelled` 的 typed payload 与发布解析：model_call_id、provider、独立的 provider_model_id（例如 `typesafe-ai/jev`）、内部模型/模板版本、问题类型、状态、原因、置信度、耗时及可空的输入/输出/调用证据引用。provider_model_id 只描述实际冻结 wire 标识，不替代内部 model_revision；Gateway alias 没有精确版本证明时 resolved_model_revision 保持 null。模型调用终态不设置业务请求 `is_terminal`，不表示源站已执行；完整边界见 [10.9](10-jev-and-agents.md#109-已实现一次性离线评估)。
 
 ## 11.5 必须记录的事件族
 

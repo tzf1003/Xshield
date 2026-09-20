@@ -65,6 +65,10 @@ pub struct ModelCallEventSummary {
     pub event_type: String,
     /// Request that initiated the model attempt.
     pub request_id: String,
+    /// Stable provider route name, when the lifecycle records it.
+    pub provider: Option<String>,
+    /// Exact wire model identifier, kept separate from internal revision.
+    pub provider_model_id: Option<String>,
     /// Authenticated occurrence time.
     #[serde(serialize_with = "serialize_event_time")]
     pub occurred_at: DateTime<Utc>,
@@ -107,6 +111,10 @@ pub struct ModelCallSummary {
     pub model_call_id: String,
     /// Request that initiated the model attempt.
     pub request_id: String,
+    /// Stable provider route name, when the lifecycle records it.
+    pub provider: Option<String>,
+    /// Exact wire model identifier, kept separate from internal revision.
+    pub provider_model_id: Option<String>,
     /// Versioned model identifier.
     pub model_revision: String,
     /// Versioned prompt identifier.
@@ -428,6 +436,8 @@ async fn execute_model_call(
             event_id: event_id.as_str().to_owned(),
             event_type: row.event_type,
             request_id: request_id.as_str().to_owned(),
+            provider: payload.provider,
+            provider_model_id: payload.provider_model_id,
             occurred_at: row.occurred_at,
             request_seq: row.request_seq,
             status: payload.status,
@@ -463,12 +473,16 @@ async fn execute_model_call(
     let request_id = first.request_id.clone();
     let model_call_id = model_call_id.as_str().to_owned();
     let model_revision = first.model_revision.clone();
+    let provider = first.provider.clone();
+    let provider_model_id = first.provider_model_id.clone();
     let prompt_revision = first.prompt_revision.clone();
     let question_type = first.question_type.clone();
     let lifecycle_complete = first.status == "started" && terminal_seen && continuous;
     for event in &events {
         if event.request_id != request_id
             || event.model_revision != model_revision
+            || event.provider != provider
+            || event.provider_model_id != provider_model_id
             || event.prompt_revision != prompt_revision
             || event.question_type != question_type
         {
@@ -487,6 +501,8 @@ async fn execute_model_call(
     Ok(Some(ModelCallSummary {
         model_call_id,
         request_id,
+        provider,
+        provider_model_id,
         model_revision,
         prompt_revision,
         question_type,
@@ -1010,13 +1026,44 @@ mod tests {
 
     #[tokio::test]
     async fn model_call_query_returns_typed_lifecycle_and_refs() {
-        let summary = query_model_rows(model_rows()).await.unwrap().unwrap();
+        let mut rows = model_rows();
+        for row in &mut rows {
+            let mut payload: serde_json::Value = serde_json::from_str(&row.payload_json).unwrap();
+            payload["provider"] = "vercel_ai_gateway".into();
+            payload["provider_model_id"] = "typesafe-ai/jev".into();
+            row.payload_json = payload.to_string();
+        }
+        let summary = query_model_rows(rows).await.unwrap().unwrap();
         assert_eq!(summary.status, "success");
         assert_eq!(summary.events.len(), 3);
         assert!(summary.lifecycle_complete);
+        assert_eq!(summary.provider.as_deref(), Some("vercel_ai_gateway"));
+        assert_eq!(
+            summary.provider_model_id.as_deref(),
+            Some("typesafe-ai/jev")
+        );
         assert_eq!(summary.input_artifact_id.as_deref(), Some(INPUT_ID));
         assert_eq!(summary.output_artifact_id.as_deref(), Some(OUTPUT_ID));
         assert_eq!(summary.call_artifact_id.as_deref(), Some(CALL_ID));
+    }
+
+    #[tokio::test]
+    async fn model_call_query_rejects_provider_route_drift() {
+        let mut rows = model_rows();
+        for row in &mut rows {
+            let mut payload: serde_json::Value = serde_json::from_str(&row.payload_json).unwrap();
+            payload["provider"] = "vercel_ai_gateway".into();
+            payload["provider_model_id"] = "typesafe-ai/jev".into();
+            row.payload_json = payload.to_string();
+        }
+        let mut drifted: serde_json::Value = serde_json::from_str(&rows[2].payload_json).unwrap();
+        drifted["provider"] = "typesafe".into();
+        drifted["provider_model_id"] = "jev-1.13.0".into();
+        rows[2].payload_json = drifted.to_string();
+        assert!(matches!(
+            query_model_rows(rows).await,
+            Err(PublishError::InvalidEvent)
+        ));
     }
 
     #[tokio::test]
@@ -1077,7 +1124,7 @@ mod tests {
             rows[0].payload_json = payload.to_string();
             assert!(query_model_rows(rows).await.is_err(), "missing {field}");
         }
-        for mutation in 0..11 {
+        for mutation in 0..13 {
             let mut rows = model_rows();
             let mut payload: serde_json::Value =
                 serde_json::from_str(&rows[2].payload_json).unwrap();
@@ -1098,7 +1145,9 @@ mod tests {
                     payload["confidence_status"] = "unavailable".into();
                     payload["input_artifact_id"] = serde_json::Value::Null;
                 }
-                _ => payload["question_type"] = "noul".into(),
+                10 => payload["question_type"] = "noul".into(),
+                11 => payload["provider"] = "typesafe".into(),
+                _ => payload["provider_model_id"] = "untrusted/model".into(),
             }
             rows[2].payload_json = payload.to_string();
             assert!(query_model_rows(rows).await.is_err(), "mutation {mutation}");

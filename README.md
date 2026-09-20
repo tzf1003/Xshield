@@ -10,7 +10,7 @@
 
 `xshield-model-eval` 已实现操作员批准的一次性 Jev 离线评估：严格 Choice/Noul 契约、固定 Vercel AI Gateway HTTPS 端点（显式 `direct` 可兼容 TypeSafe 直连）、实际请求/响应加密证据、PostgreSQL catalog/outbox 和 `model.*` 耐久终态。429/529、超时、取消、超限和中断恢复均有明确结果；使用方法与运行边界见 [10.9](docs/10-jev-and-agents.md#109-已实现一次性离线评估) 和 [RB-11](docs/26-runbooks.md#rb-11-一次性模型离线评估)。当前验证使用合成 loopback 供应商，不代表真实模型质量、计费或外部服务可用性；校准及调查 Agent 继续迭代。
 
-模型阶段及调用审计支持 `mdl_` 强类型引用和模型版本索引；阶段汇总保留最新 null 置信度。发布与查询边界见 [11.4](docs/11-audit-event-contract.md#114-阶段结果契约) 和 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归)。
+模型阶段及调用审计支持 `mdl_` 强类型引用、provider/provider_model_id 与内部模型版本索引；阶段汇总保留最新 null 置信度，Gateway alias 不伪造精确 resolved revision。发布与查询边界见 [11.4](docs/11-audit-event-contract.md#114-阶段结果契约) 和 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归)。
 
 `GET /control/v1/model-calls/{model_call_id}` 已提供固定作用域的模型调用摘要、因果链完整性与输入/输出证据引用，要求 `Observer` 并写独立耐久访问审计。查询预算、索引可见性及配置日志水位语义见 [29.15](docs/29-api-endpoint-catalog.md#2915-已实现的模型调用查询契约)。
 

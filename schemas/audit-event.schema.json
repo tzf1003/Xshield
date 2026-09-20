@@ -203,6 +203,13 @@
           "maxLength": 40,
           "pattern": "^mdl_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         },
+        "provider": {"$ref": "#/$defs/scoped_name"},
+        "provider_model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?$"
+        },
         "model_revision": {"$ref": "#/$defs/scoped_name"},
         "prompt_revision": {"$ref": "#/$defs/scoped_name"},
         "question_type": {"enum": ["choice", "noul"]},
@@ -224,6 +231,21 @@
         "call_artifact_id": {"$ref": "#/$defs/model_artifact_ref"}
       },
       "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": ["provider", "provider_model_id"]
+            },
+            {
+              "not": {
+                "anyOf": [
+                  {"required": ["provider"]},
+                  {"required": ["provider_model_id"]}
+                ]
+              }
+            }
+          ]
+        },
         {
           "if": {
             "properties": {"confidence_status": {"const": "provided"}},
