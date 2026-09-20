@@ -18,8 +18,8 @@ use xshield_core::{
     },
     audit::ReasonCode,
     domain::{
-        ActionId, FieldName, MappingRevision, OperationId, ResourceType, SiteId, TenantId,
-        ViewProfile,
+        ActionId, FieldName, MappingRevision, OperationId, ResourceType, ShareIssuanceRuleId,
+        SiteId, TenantId, ViewProfile,
     },
     grant::ResourceKeyHmac,
     identity::UnixSeconds,
@@ -34,6 +34,7 @@ pub mod response_grant;
 pub mod sensor;
 pub mod sensor_html;
 pub mod share_issue;
+pub mod share_response;
 pub mod share_token;
 
 use auth_binding::{AuthBindingRule, AuthTransitionRule};
@@ -41,6 +42,7 @@ use evidence_capture::{EvidenceCaptureDto, EvidenceCaptureRule};
 use request_crypto::{RequestCryptoObserveRule, RequestCryptoPolicy, RequestCryptoRule};
 use response_crypto::ResponseCryptoRule;
 use response_grant::ResponseGrantRule;
+use share_response::ResponseShareRule;
 
 /// Maximum accepted gateway configuration size.
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
@@ -161,6 +163,7 @@ struct CompiledResponse {
     max_bytes: usize,
     crypto: Option<ResponseCryptoRule>,
     grant: Option<ResponseGrantRule>,
+    share_issue: Option<ResponseShareRule>,
     auth_binding: Option<AuthBindingRule>,
     auth_refresh: Option<AuthTransitionRule>,
     auth_context_switch: Option<AuthTransitionRule>,
@@ -386,6 +389,8 @@ struct ResponseDto {
     #[serde(default)]
     resource_grant: Option<ResponseGrantDto>,
     #[serde(default)]
+    share_issue: Option<ResponseShareDto>,
+    #[serde(default)]
     auth_binding: Option<AuthBindingDto>,
     #[serde(default)]
     auth_refresh: Option<AuthRefreshDto>,
@@ -454,6 +459,17 @@ struct ResponseGrantDto {
     ttl_seconds: u64,
     max_items: usize,
     max_active_grants: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseShareDto {
+    success_status: u16,
+    token_field: String,
+    target_operation_id: String,
+    issuance_rule_id: String,
+    ttl_seconds: u64,
+    max_active_shares: u32,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -903,6 +919,40 @@ impl GatewayConfig {
         })
     }
 
+    /// Returns the fixed share scope compiled for one qualified source operation.
+    #[must_use]
+    pub fn response_share_operation(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<ResponseShareOperation<'_>> {
+        let source = self.operation(method, path)?;
+        let rule = source.response.as_ref()?.share_issue.as_ref()?;
+        let target = self.operation_by_id(rule.target_operation_id())?;
+        let resource = target.resource.as_ref()?;
+        Some(ResponseShareOperation {
+            rule,
+            source_operation_id: source.policy.operation_id(),
+            source_view_profile: &source.resource.as_ref()?.view_profile,
+            resource_type: &resource.resource_type,
+            view_profile: &resource.view_profile,
+        })
+    }
+
+    /// Whether startup requires the dedicated share-token derivation key.
+    #[must_use]
+    pub fn requires_share_issuance(&self) -> bool {
+        self.operations
+            .values()
+            .chain(self.path_resource_operations.iter())
+            .any(|operation| {
+                operation
+                    .response
+                    .as_ref()
+                    .is_some_and(|response| response.share_issue.is_some())
+            })
+    }
+
     /// Returns the authentication-response rule for one exact entry operation.
     #[must_use]
     pub fn auth_binding_rule(&self, method: &str, path: &str) -> Option<&AuthBindingRule> {
@@ -1135,6 +1185,7 @@ fn validate_response_contracts(
 ) -> Result<(), ConfigError> {
     let operations = exact.values().chain(path_resources);
     for source in operations.clone() {
+        validate_response_share_contract(source, exact, path_resources)?;
         if source
             .response
             .as_ref()
@@ -1188,6 +1239,45 @@ fn validate_response_contracts(
                 "operations.response.target_operation_id",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_response_share_contract(
+    source: &CompiledOperation,
+    exact: &BTreeMap<(String, String), CompiledOperation>,
+    path_resources: &[CompiledOperation],
+) -> Result<(), ConfigError> {
+    let Some(rule) = source
+        .response
+        .as_ref()
+        .and_then(|response| response.share_issue.as_ref())
+    else {
+        return Ok(());
+    };
+    let source_resource = source
+        .resource
+        .as_ref()
+        .filter(|_| {
+            source.policy.admission_class() == AdmissionClass::UiActionRequired
+                && source.method == HttpMethod::Get
+                && source.source_action.is_some()
+        })
+        .ok_or(ConfigError::Invalid("operations.response.share_issue"))?;
+    let target = exact
+        .values()
+        .chain(path_resources)
+        .find(|operation| operation.policy.operation_id() == rule.target_operation_id())
+        .ok_or(ConfigError::Invalid("operations.response.share_issue"))?;
+    if target.policy.admission_class() != AdmissionClass::ShareEntry
+        || target.method != HttpMethod::Get
+        || target.policy.operation_id() == source.policy.operation_id()
+        || !target.resource.as_ref().is_some_and(|resource| {
+            resource.resource_type == source_resource.resource_type
+                && matches!(resource.location, CompiledResourceLocation::Query(_))
+        })
+    {
+        return Err(ConfigError::Invalid("operations.response.share_issue"));
     }
     Ok(())
 }
@@ -1266,6 +1356,21 @@ pub struct ResponseGrantOperation<'a> {
     pub view_profile: &'a ViewProfile,
     /// Request field authorized by the generated target action.
     pub target_field: &'a FieldName,
+}
+
+/// Exact source and read-only target selected by a trusted share response rule.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseShareOperation<'a> {
+    /// Complete-response validation and independently approved issuance rule.
+    pub rule: &'a ResponseShareRule,
+    /// Dedicated issuer operation used by the request's exact resource grant.
+    pub source_operation_id: &'a OperationId,
+    /// Issuer view that the independent rule must approve.
+    pub source_view_profile: &'a ViewProfile,
+    /// Canonical resource type shared by source and target operations.
+    pub resource_type: &'a ResourceType,
+    /// Limited response view exposed at the fixed share entry.
+    pub view_profile: &'a ViewProfile,
 }
 
 impl IdentityStoreConfig {
@@ -1438,6 +1543,7 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
     let response_has_side_effects = response.as_ref().is_some_and(|response| {
         response.crypto.is_some()
             || response.grant.is_some()
+            || response.share_issue.is_some()
             || response.auth_binding.is_some()
             || response.auth_refresh.is_some()
             || response.auth_context_switch.is_some()
@@ -1637,13 +1743,41 @@ fn compile_response(
             })
         })
         .transpose()?;
+    let share_issue = dto
+        .share_issue
+        .map(|share| {
+            if !(200..=299).contains(&share.success_status)
+                || matches!(share.success_status, 204..=206)
+                || !(1..=86_400).contains(&share.ttl_seconds)
+                || !(1..=5_000).contains(&share.max_active_shares)
+            {
+                return Err(ConfigError::Invalid("operations.response.share_issue"));
+            }
+            Ok(ResponseShareRule {
+                success_status: share.success_status,
+                token_field: FieldName::parse(share.token_field).map_err(ConfigError::Domain)?,
+                target_operation_id: OperationId::parse(share.target_operation_id)
+                    .map_err(ConfigError::Domain)?,
+                issuance_rule_id: ShareIssuanceRuleId::parse(share.issuance_rule_id)
+                    .map_err(ConfigError::Domain)?,
+                ttl_seconds: share.ttl_seconds,
+                max_active_shares: share.max_active_shares,
+            })
+        })
+        .transpose()?;
     let auth_refresh =
         compile_auth_transition(dto.auth_refresh, "operations.response.auth_refresh")?;
     let auth_context_switch = compile_auth_transition(
         dto.auth_context_switch,
         "operations.response.auth_context_switch",
     )?;
+    // Share secrets stay in the fixed release buffer; the encryption adapter's
+    // JSON tree currently copies strings into ordinary, non-erasing allocations.
+    if share_issue.is_some() && crypto.is_some() {
+        return Err(ConfigError::Invalid("operations.response.share_issue"));
+    }
     if usize::from(grant.is_some())
+        + usize::from(share_issue.is_some())
         + usize::from(auth_binding.is_some())
         + usize::from(auth_refresh.is_some())
         + usize::from(auth_context_switch.is_some())
@@ -1680,6 +1814,7 @@ fn compile_response(
         max_bytes: dto.max_bytes,
         crypto,
         grant,
+        share_issue,
         auth_binding,
         auth_refresh,
         auth_context_switch,
@@ -1706,6 +1841,7 @@ fn compile_response_kind(
             if method != HttpMethod::Get
                 || dto.crypto.is_some()
                 || dto.resource_grant.is_some()
+                || dto.share_issue.is_some()
                 || dto.auth_binding.is_some()
                 || dto.auth_refresh.is_some()
                 || dto.auth_context_switch.is_some()
@@ -2473,6 +2609,239 @@ mod tests {
             GatewayConfig::from_json(&serde_json::to_vec(&duplicate_id).unwrap()),
             Err(ConfigError::Invalid("operations.operation_id"))
         ));
+    }
+
+    fn share_response_config() -> serde_json::Value {
+        let mut config: serde_json::Value = serde_json::from_str(CONFIG).unwrap();
+        config["operations"] = serde_json::json!([
+            {
+                "operation_id": "records.share.issue", "method": "GET", "path": "/share-issue",
+                "admission": "UI_ACTION_REQUIRED", "source_action": "records.share.open",
+                "resource_type": "record", "view_profile": "share_controls",
+                "resource_query_parameter": "record_id",
+                "response": {
+                    "mode": "BUFFERED_JSON", "max_bytes": 4096,
+                    "share_issue": {
+                        "success_status": 200, "token_field": "share_token",
+                        "target_operation_id": "records.share.read",
+                        "issuance_rule_id": "record-share-r1",
+                        "ttl_seconds": 300, "max_active_shares": 100
+                    }
+                }
+            },
+            {
+                "operation_id": "records.share.read", "method": "GET", "path": "/shared-record",
+                "admission": "SHARE_ENTRY", "source_action": null,
+                "resource_type": "record", "view_profile": "shared_summary",
+                "resource_query_parameter": "record_id"
+            }
+        ]);
+        config
+    }
+
+    #[test]
+    fn compiles_fixed_share_scope_and_independent_issuance_rule() {
+        let config = share_response_config();
+        let compiled = GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).unwrap();
+        let operation = compiled
+            .response_share_operation("GET", "/share-issue")
+            .unwrap();
+        assert!(compiled.requires_share_issuance());
+        assert_eq!(
+            operation.source_operation_id.as_str(),
+            "records.share.issue"
+        );
+        assert_eq!(operation.source_view_profile.as_str(), "share_controls");
+        assert_eq!(operation.resource_type.as_str(), "record");
+        assert_eq!(operation.view_profile.as_str(), "shared_summary");
+        assert_eq!(
+            operation.rule.target_operation_id().as_str(),
+            "records.share.read"
+        );
+        assert_eq!(
+            operation.rule.issuance_rule_id().as_str(),
+            "record-share-r1"
+        );
+        assert_eq!(operation.rule.success_status(), 200);
+        assert_eq!(operation.rule.ttl_seconds(), 300);
+        assert_eq!(operation.rule.max_active_shares(), 100);
+        assert!(
+            compiled
+                .response_share_operation("GET", "/shared-record")
+                .is_none()
+        );
+        assert!(
+            !GatewayConfig::from_json(CONFIG.as_bytes())
+                .unwrap()
+                .requires_share_issuance()
+        );
+
+        for (pointer, value) in [
+            ("/operations/0/source_action", serde_json::Value::Null),
+            (
+                "/operations/0/admission",
+                serde_json::json!("AUTHENTICATED_ROOT"),
+            ),
+            ("/operations/0/resource_type", serde_json::Value::Null),
+            ("/operations/1/admission", serde_json::json!("PUBLIC")),
+            ("/operations/1/resource_type", serde_json::json!("patient")),
+            ("/operations/1/method", serde_json::json!("POST")),
+            (
+                "/operations/0/response/share_issue/target_operation_id",
+                serde_json::json!("records.missing"),
+            ),
+            (
+                "/operations/0/response/share_issue/target_operation_id",
+                serde_json::json!("records.share.issue"),
+            ),
+            (
+                "/operations/0/response/mode",
+                serde_json::json!("SENSOR_HTML"),
+            ),
+        ] {
+            let mut invalid = config.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                GatewayConfig::from_json(&serde_json::to_vec(&invalid).unwrap()).is_err(),
+                "{pointer}"
+            );
+        }
+
+        let mut path_target = config;
+        path_target["operations"][1]["path"] = serde_json::json!("/shared-record/{record_id}");
+        path_target["operations"][1]["resource_path_parameter"] = serde_json::json!("record_id");
+        path_target["operations"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("resource_query_parameter");
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&path_target).unwrap()),
+            Err(ConfigError::Invalid("operations.response.share_issue"))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_share_response_rule_parameters() {
+        for (field, value) in [
+            ("issuance_rule_id", serde_json::json!("")),
+            ("token_field", serde_json::json!("bad field")),
+            ("success_status", serde_json::json!(204)),
+            ("success_status", serde_json::json!(205)),
+            ("success_status", serde_json::json!(206)),
+            ("success_status", serde_json::json!(500)),
+            ("ttl_seconds", serde_json::json!(0)),
+            ("ttl_seconds", serde_json::json!(86401)),
+            ("max_active_shares", serde_json::json!(0)),
+            ("max_active_shares", serde_json::json!(5001)),
+            ("client_target", serde_json::json!("records.read")),
+        ] {
+            let mut invalid = share_response_config();
+            invalid["operations"][0]["response"]["share_issue"][field] = value;
+            assert!(
+                GatewayConfig::from_json(&serde_json::to_vec(&invalid).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn share_issuance_is_exclusive_with_identity_and_resource_issuance() {
+        for (field, rule) in [
+            (
+                "resource_grant",
+                serde_json::json!({
+                    "success_status": 200, "items_pointer": "/items", "resource_pointer": "/id",
+                    "action_ref_field": "action_ref", "target_operation_id": "records.share.issue",
+                    "target_mapping_revision": "mapping-r1", "ttl_seconds": 300,
+                    "max_items": 10, "max_active_grants": 100
+                }),
+            ),
+            (
+                "auth_binding",
+                serde_json::json!({
+                    "success_status": 200, "principal_pointer": "/principal",
+                    "authorization_context_pointer": "/context", "bearer_pointer": "/bearer",
+                    "credential_ttl_seconds": 300, "session_ttl_seconds": 300
+                }),
+            ),
+            (
+                "auth_refresh",
+                serde_json::json!({
+                    "success_status": 200, "principal_pointer": "/principal",
+                    "authorization_context_pointer": "/context", "bearer_pointer": "/bearer",
+                    "credential_ttl_seconds": 300
+                }),
+            ),
+            (
+                "auth_context_switch",
+                serde_json::json!({
+                    "success_status": 200, "principal_pointer": "/principal",
+                    "authorization_context_pointer": "/context", "bearer_pointer": "/bearer",
+                    "credential_ttl_seconds": 300
+                }),
+            ),
+        ] {
+            let mut invalid = share_response_config();
+            invalid["operations"][0]["response"][field] = rule;
+            assert!(
+                matches!(
+                    GatewayConfig::from_json(&serde_json::to_vec(&invalid).unwrap()),
+                    Err(ConfigError::Invalid("operations.response"))
+                ),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn share_response_rejects_json_reparsing_encryption() {
+        let mut config = share_response_config();
+        config["operations"][0]["response"]["crypto"] = serde_json::json!({
+            "mode": "DIRECT_ENCRYPT", "adapter_revision": "share-response-r1",
+            "key_id": "response-key-r1", "key_not_before": 1,
+            "key_expires_at": 4_102_444_800_u64, "message_ttl_seconds": 60,
+            "max_envelope_bytes": 9216
+        });
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
+            Err(ConfigError::Invalid("operations.response.share_issue"))
+        ));
+        config["operations"][0]["response"]
+            .as_object_mut()
+            .unwrap()
+            .remove("share_issue");
+        assert!(GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn opaque_request_compilation_rejects_share_issuance_side_effects() {
+        for mode in ["OBSERVE", "COMPATIBILITY"] {
+            let mut invalid = share_response_config();
+            let operation = &mut invalid["operations"][0];
+            operation["method"] = serde_json::json!("POST");
+            for field in ["resource_type", "view_profile", "resource_query_parameter"] {
+                operation.as_object_mut().unwrap().remove(field);
+            }
+            operation["request_crypto"] = if mode == "COMPATIBILITY" {
+                serde_json::json!({
+                    "mode": mode, "adapter_revision": "share-opaque-r1", "approval_ref": "approval-r1",
+                    "expires_at": 4_102_444_800_u64, "build_fingerprints": ["a".repeat(64)]
+                })
+            } else {
+                operation["admission"] = serde_json::json!("AUTHENTICATED_ROOT");
+                operation["source_action"] = serde_json::Value::Null;
+                serde_json::json!({"mode": mode, "adapter_revision": "share-opaque-r1"})
+            };
+            assert!(matches!(
+                GatewayConfig::from_json(&serde_json::to_vec(&invalid).unwrap()),
+                Err(ConfigError::Invalid("operations.request_crypto"))
+            ));
+            invalid["operations"][0]["response"]
+                .as_object_mut()
+                .unwrap()
+                .remove("share_issue");
+            assert!(GatewayConfig::from_json(&serde_json::to_vec(&invalid).unwrap()).is_ok());
+        }
     }
 
     fn auth_response_config() -> serde_json::Value {

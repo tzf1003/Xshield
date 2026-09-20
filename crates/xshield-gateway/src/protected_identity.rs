@@ -13,10 +13,10 @@ use xshield_core::{
     admission::{AdmissionClass, AdmissionProof},
     audit::ReasonCode,
     domain::{
-        ActionRef, AuthBindingId, EventId, FieldName, PageEvidenceId, RequestId, ResourceType,
-        WafSessionId,
+        ActionRef, AuthBindingId, EventId, FieldName, GrantId, PageEvidenceId, RequestId,
+        ResourceType, WafSessionId,
     },
-    grant::ResourceKeyHmac,
+    grant::{GrantQuery, ResourceKeyHmac},
     identity::{
         AnonymousSession, AuthBinding, AuthSnapshot, AuthorizationContextRef,
         CredentialFingerprint, CredentialSlot, IdentityDenied, UnixSeconds,
@@ -33,6 +33,7 @@ use xshield_gateway::{
     GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, InternalResponse,
     ResourceLocation, ResourceOperation,
     auth_binding::{AuthBindingRule, AuthTransitionRule},
+    share_token::ShareTokenIssuer,
 };
 use xshield_postgres::{
     AnonymousSessionEstablishment, AnonymousSessionWriteOutcome, BindingEstablishment,
@@ -43,6 +44,7 @@ use zeroize::Zeroizing;
 
 mod response_issue;
 mod share_entry;
+mod share_issue;
 
 pub(crate) const WAF_COOKIE: &str = "__Host-xshield_sid";
 const ACTION_HEADER: &str = "x-xshield-action-ref";
@@ -81,6 +83,7 @@ pub(crate) fn strip_edge_proofs(request: &mut RequestHeader) -> PingoraResult<()
 pub(crate) struct ProtectedIdentity {
     store: Arc<crate::PostgresRuntime>,
     fingerprint_key: Zeroizing<[u8; 32]>,
+    share_tokens: Option<ShareTokenIssuer>,
     anonymous_creation_window: Mutex<Option<AnonymousCreationWindow>>,
 }
 
@@ -107,6 +110,14 @@ impl AnonymousCreationWindow {
 pub(crate) struct ResponseIdentity {
     pub(crate) binding: Box<AuthBinding>,
     pub(crate) snapshot: AuthSnapshot,
+    pub(crate) share_source: Option<ShareSource>,
+}
+
+/// Exact grant selected by this request's resource admission, never a client ID.
+pub(crate) struct ShareSource {
+    grant_id: GrantId,
+    resource_key: ResourceKeyHmac,
+    expires_at: UnixSeconds,
 }
 
 pub(crate) struct PendingAuthBinding {
@@ -145,6 +156,7 @@ pub(crate) struct CompatibilityEvidence {
 struct UiActionAdmission {
     decision: GatewayDecision,
     compatibility_evidence: Option<CompatibilityEvidence>,
+    share_source: Option<ShareSource>,
 }
 
 impl ProtectedAdmission {
@@ -168,11 +180,22 @@ enum AnonymousAdmission {
 impl ProtectedIdentity {
     pub(crate) fn from_env(
         store: Arc<crate::PostgresRuntime>,
+        share_issuance_enabled: bool,
     ) -> Result<Self, IdentityRuntimeError> {
         let key_hex = Zeroizing::new(env::var("XSHIELD_FINGERPRINT_KEY_HEX")?);
+        let share_tokens = if share_issuance_enabled {
+            let token_key = Zeroizing::new(env::var("XSHIELD_SHARE_TOKEN_KEY_HEX")?);
+            Some(
+                ShareTokenIssuer::from_hex(&token_key, &key_hex)
+                    .map_err(|_| IdentityRuntimeError::InvalidKey)?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             store,
             fingerprint_key: Zeroizing::new(parse_key(&key_hex)?),
+            share_tokens,
             anonymous_creation_window: Mutex::new(None),
         })
     }
@@ -746,7 +769,7 @@ impl ProtectedIdentity {
             .await?;
         Ok(match state {
             IdentityProofState::Verified { binding, snapshot } => {
-                let (decision, compatibility_evidence) = match class {
+                let (decision, compatibility_evidence, share_source) = match class {
                     Some(AdmissionClass::AuthenticatedRoot) => (
                         config.admit_with_proof(
                             method,
@@ -758,6 +781,7 @@ impl ProtectedIdentity {
                             },
                         ),
                         None,
+                        None,
                     ),
                     Some(AdmissionClass::UiActionRequired) => {
                         let admission = self
@@ -765,13 +789,21 @@ impl ProtectedIdentity {
                                 config, store, request, method, path, now, &binding, &snapshot,
                             )
                             .await?;
-                        (admission.decision, admission.compatibility_evidence)
+                        (
+                            admission.decision,
+                            admission.compatibility_evidence,
+                            admission.share_source,
+                        )
                     }
-                    _ => (config.admit(method, path, now), None),
+                    _ => (config.admit(method, path, now), None, None),
                 };
                 ProtectedAdmission {
                     decision,
-                    response_identity: Some(ResponseIdentity { binding, snapshot }),
+                    response_identity: Some(ResponseIdentity {
+                        binding,
+                        snapshot,
+                        share_source,
+                    }),
                     anonymous_session_cookie: None,
                     compatibility_evidence,
                     sensor_session: None,
@@ -916,6 +948,7 @@ impl ProtectedIdentity {
                 return Ok(UiActionAdmission {
                     decision: config.admit(method, path, now),
                     compatibility_evidence: None,
+                    share_source: None,
                 });
             }
             Err(error) => return Err(error),
@@ -939,6 +972,7 @@ impl ProtectedIdentity {
                     ReasonCode::UiActionNotAvailable,
                 ),
                 compatibility_evidence: None,
+                share_source: None,
             });
         };
         let compatibility_evidence = action
@@ -955,6 +989,7 @@ impl ProtectedIdentity {
                 return Ok(UiActionAdmission {
                     decision: denied_reason(config, method, path, now, ReasonCode::FieldNotAllowed),
                     compatibility_evidence: None,
+                    share_source: None,
                 });
             }
             return Ok(UiActionAdmission {
@@ -970,9 +1005,10 @@ impl ProtectedIdentity {
                     },
                 ),
                 compatibility_evidence,
+                share_source: None,
             });
         };
-        let decision = self
+        let (decision, share_source) = self
             .admit_resource_action(
                 config, store, request, method, path, now, binding, snapshot, &action, operation,
             )
@@ -982,6 +1018,7 @@ impl ProtectedIdentity {
                 .then_some(compatibility_evidence)
                 .flatten(),
             decision,
+            share_source,
         })
     }
 
@@ -998,7 +1035,7 @@ impl ProtectedIdentity {
         snapshot: &AuthSnapshot,
         action: &xshield_core::provenance::ActionGrant,
         operation: ResourceOperation<'_>,
-    ) -> Result<GatewayDecision, IdentityRuntimeError> {
+    ) -> Result<(GatewayDecision, Option<ShareSource>), IdentityRuntimeError> {
         let Ok(scope) = RequestResource::parse(
             request.uri.path(),
             request.uri.query(),
@@ -1007,12 +1044,9 @@ impl ProtectedIdentity {
             &self.fingerprint_key,
             config,
         ) else {
-            return Ok(denied_reason(
-                config,
-                method,
-                path,
-                now,
-                ReasonCode::CapabilityMissing,
+            return Ok((
+                denied_reason(config, method, path, now, ReasonCode::CapabilityMissing),
+                None,
             ));
         };
         let grants = match store
@@ -1031,16 +1065,13 @@ impl ProtectedIdentity {
         {
             ResourceProofState::Verified(grants) => grants,
             ResourceProofState::Denied(error) => {
-                return Ok(denied_reason(
-                    config,
-                    method,
-                    path,
-                    now,
-                    error.reason_code(),
+                return Ok((
+                    denied_reason(config, method, path, now, error.reason_code()),
+                    None,
                 ));
             }
         };
-        Ok(config.admit_scoped_with_proof(
+        let decision = config.admit_scoped_with_proof(
             method,
             path,
             now,
@@ -1053,7 +1084,35 @@ impl ProtectedIdentity {
                 action,
                 grants: Some(&grants),
             },
-        ))
+        );
+        // Preserve the admission-selected grant before edge proof headers and
+        // the temporary ledger are discarded. The issuance transaction checks
+        // this exact source again after the complete origin response arrives.
+        let share_source = if decision.outcome == GatewayOutcome::Allowed
+            && config.response_share_operation(method, path).is_some()
+        {
+            let grant = grants
+                .authorized_grant(
+                    binding,
+                    GrantQuery {
+                        snapshot,
+                        resource_type: operation.resource_type,
+                        resource_key: &scope.key,
+                        operation_id: operation.operation_id,
+                        view_profile: operation.view_profile,
+                        now,
+                    },
+                )
+                .map_err(|_| IdentityRuntimeError::Store(StoreError::InvalidCommand))?;
+            Some(ShareSource {
+                grant_id: grant.grant_id().clone(),
+                expires_at: grant.expires_at(),
+                resource_key: scope.key,
+            })
+        } else {
+            None
+        };
+        Ok((decision, share_source))
     }
 }
 

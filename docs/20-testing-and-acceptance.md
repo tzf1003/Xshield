@@ -110,7 +110,9 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 配置同一 ClickHouse 环境后，`scripts/test_postgres.sh` 还会运行 `real_outbox_clickhouse_delivery`：在专有 PostgreSQL 临时库和独占 ClickHouse 数据库内重复应用生产 DDL，通过七族发布 API 投递十五组按生产契约构造的合成 envelope，读回两个底表及两个 active 视图，核对作用域、事件引用、SHA-256 digest、事件时间（通用资源资格、响应资格和分享为整秒，其他样本含微秒）、保留期限、确定性空置信度和非业务终态，并逐行检查 PostgreSQL 精确确认与重复运行空批次。该回归已在真实 PostgreSQL 与 ClickHouse 执行通过；真实数据库回归入口均纳入 CI。普通 workspace 测试将其标为 ignored，必须实际运行相应脚本才能形成验证结果。
 
-同一脚本执行 `xshield-gateway --test share_issue`，直接调用真实 `ShareIssueApi`，核对返回凭证的账本读取、GET 与精确资源范围、并发精确重试、上下文/时间冲突、无效上下文、容量和 outbox 冲突回滚；事件 payload 与提交的 ShareGrant/规则逐项比对，秘密不进入 envelope。配置 ClickHouse 后，将这条实际库 API 生产事件通过分享发布器写入独占数据库，读回两表两视图、digest、冻结发行时间和确定性摘要，验证 ACK 与空重跑；未配置时明确报告该部分跳过。该测试已在双库执行通过，范围是库发行与消费/投递，HTTP 响应发行适配器仍待交付。
+同一脚本执行 `xshield-gateway --test share_issue`，直接调用真实 `ShareIssueApi`，核对返回凭证的账本读取、GET 与精确资源范围、并发精确重试、上下文/时间冲突、无效上下文、容量和 outbox 冲突回滚；事件 payload 与提交的 ShareGrant/规则逐项比对，秘密不进入 envelope。配置 ClickHouse 后，将这条实际库 API 生产事件通过分享发布器写入独占数据库，读回两表两视图、digest、冻结发行时间和确定性摘要，验证 ACK 与空重跑；未配置时明确报告该部分跳过。该测试已在双库执行通过，范围是库发行与消费/投递；HTTP 发行交付由下述独立网关回归覆盖。
+
+`scripts/test_gateway_identity.sh` 另覆盖 `response.share_issue`：独立 GET 分享来源、获准界面动作与精确资源资格、完整成功 JSON、64 字节凭证交付和固定分享入口访问。断言私有缓存策略、边缘凭证剥离、outbox 契约及秘密排除；字段碰撞、重复键、截断、注入后超限、缺失动作、资源偏差、规则退休、容量耗尽及等待响应期间的来源撤销/epoch 变化均检查资格与事件行数。该 HTTP 回归使用真实网关、合成源站和脚本拥有的 PostgreSQL 数据库。
 
 分享存储回归还检查同名规则跨策略版本拒绝、原 share/outbox 身份与正文精确一致、历史事件丢失的完整性故障、分享及来源动作撤销、等待来源行锁或 outbox 唯一键期间到期、等待分享撤销事务后重放拒绝。时钟由测试数据库读取并在单次发行内冻结；事务在取得授权锁后及插入后提交前按实时时钟重新检查期限。
 

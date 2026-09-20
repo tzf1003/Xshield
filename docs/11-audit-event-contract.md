@@ -107,6 +107,8 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 请求摘要的 method 仅来自 `request.accepted` 或 `control_access`，operation 仅来自 `request.accepted` 或请求阶段事实。资格事件中的目标方法与操作保留为事件字段；只有资格历史时，请求摘要中的来源方法与操作保持空值，等待请求上下文事件。
 
-分享发行库 API 用完整 event ID 作为独立 producer_boot_id，producer_seq/request_seq 均为 1；同一请求可产生多个独立分享，request_id 保留原请求。occurred_at/observed_at 同时等于冻结 issued_at_unix 的规范 UTC 整秒编码，重试沿用原值。`share_grant` 摘要保留 `PASS/SHARE_ISSUED`、GET 和目标 operation，`confidence=null/not_applicable`、`is_terminal=0`，不推导跨生产者全序或客户端收到凭证；`SENSITIVE` payload 的 evidence_refs/cause_event_ids 为空。HTTP 响应发行适配器仍待交付。
+分享发行库 API 用完整 event ID 作为独立 producer_boot_id，producer_seq/request_seq 均为 1；同一请求可产生多个独立分享，request_id 保留原请求。occurred_at/observed_at 同时等于冻结 issued_at_unix 的规范 UTC 整秒编码，重试沿用原值。`share_grant` 摘要保留 `PASS/SHARE_ISSUED`、GET 和目标 operation，`confidence=null/not_applicable`、`is_terminal=0`，不推导跨生产者全序或客户端收到凭证；`SENSITIVE` payload 的 evidence_refs/cause_event_ids 为空。HTTP `response.share_issue` 适配器每请求只发行一条分享，event/share ID 复用服务器 request ID 的 UUID 部分，并使用固定前缀区分类型；请求、trace、策略和发行时间在单次事务前冻结，新 HTTP 请求独立发行。
+
+完整缓冲响应已经验证后发生客户端写失败时，网关保留 `origin.response/response_received` 及实际源站状态，终态为 `request.aborted/REQUEST_INCOMPLETE`。尚未取得完整响应的代理故障保持 `origin.unknown`；发行 outbox 只证明事务提交，不证明客户端接收完成。
 
 身份、通用资源资格、响应资格与分享发行生产者升级把业务字段放入完整 envelope 的 `payload`，运行中的生产者与发布器应配套升级。`GrantPersistence::new` 的 envelope 参数变更为冻结 trace_id，完整事件由持久化入口按 JSONB 约束表示生成；调用方须保留同一 event/grant ID、trace、时间与批准约束用于重试。历史稀疏行保留原文、保持未确认并记录 `OUTBOX_INVALID_EVENT`、延迟重试；不会以当前状态补造历史时间或来源。分享库 API 同时要求稳定 event/share ID 和完整精确重试正文，旧随机 share ID 或稀疏正文不匹配时拒绝重试，不重新发行凭证。上线前应盘点历史积压并保留原始证据，监控错误码及积压；当前首错停批会使已领取的后续行等待租约到期。发布器不重放身份转换、不重新发行资格，也不回滚已提交的状态。

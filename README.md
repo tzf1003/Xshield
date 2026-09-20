@@ -20,7 +20,7 @@
 
 管理访问 journal 已接通封存段发布器：当前控制端点的访问尝试按严格契约进入 `control_access` 索引阶段，可通过管理 request_id 时间线及有界事件检索复核；独立日志源的部署、水位及 outbox 边界见 [11.7](docs/11-audit-event-contract.md#117-已实现的管理访问审计发布)。
 
-PostgreSQL outbox 已接通按事件族隔离的发布闭环：`xshield-outbox-worker TENANT_ID SITE_ID` 默认处理 `case.*`，设置 `XSHIELD_OUTBOX_FAMILY=evidence_catalog`、`evidence_access`、`identity`、`grant`、`response_grant` 或 `share_grant` 可分别处理证据目录、证据访问请求/审批、身份生命周期、通用资源资格、响应资格和分享发行；各族均使用 tenant/site 绑定的 `FOR UPDATE SKIP LOCKED` 租约、服务端时钟、行/字节上限和精确 token 确认，严格解析后按 event_id/content_digest 至少一次写入 ClickHouse。`GrantPersistence` 库入口从冻结的类型化命令构建并原子提交 `grant.issued`，其 HTTP 发行适配器仍待交付。`response_grant.issued` 由网关随资格事务提交完整 v3 envelope，保留原请求、批内序号和冻结发行时间；`ShareIssueApi` 库入口原子提交 `share.issued`，绑定稳定 event/share ID 和精确重试正文，HTTP 响应发行适配器仍待接入。失败只记录稳定错误码并延迟重试，历史稀疏身份、通用资源资格、响应资格及分享记录保持未确认；`binding.revoked` 等事件仍待适配。七族十五组合成事件、通用资源资格、实际网关响应资格及分享库 API 发行已通过真实 PostgreSQL + ClickHouse 回归，覆盖精确确认、重投去重、索引故障恢复和内容冲突，并接入 CI。配置与升级边界见 [11.8](docs/11-audit-event-contract.md#118-已实现的按事件族-outbox-发布) 和 [20.12](docs/20-testing-and-acceptance.md#2012-outbox-发布回归)。
+PostgreSQL outbox 已接通按事件族隔离的发布闭环：`xshield-outbox-worker TENANT_ID SITE_ID` 默认处理 `case.*`，设置 `XSHIELD_OUTBOX_FAMILY=evidence_catalog`、`evidence_access`、`identity`、`grant`、`response_grant` 或 `share_grant` 可分别处理证据目录、证据访问请求/审批、身份生命周期、通用资源资格、响应资格和分享发行；各族均使用 tenant/site 绑定的 `FOR UPDATE SKIP LOCKED` 租约、服务端时钟、行/字节上限和精确 token 确认，严格解析后按 event_id/content_digest 至少一次写入 ClickHouse。`GrantPersistence` 库入口从冻结的类型化命令构建并原子提交 `grant.issued`，其 HTTP 发行适配器仍待交付。`response_grant.issued` 由网关随资格事务提交完整 v3 envelope，保留原请求、批内序号和冻结发行时间；`ShareIssueApi` 原子提交 `share.issued`，绑定稳定 event/share ID 和精确重试正文；网关 `response.share_issue` 已将获准分享操作的完整响应接入发行与凭证交付。失败只记录稳定错误码并延迟重试，历史稀疏身份、通用资源资格、响应资格及分享记录保持未确认；`binding.revoked` 等事件仍待适配。七族十五组合成事件、通用资源资格、实际网关响应资格及分享库 API 发行已通过真实 PostgreSQL + ClickHouse 回归，覆盖精确确认、重投去重、索引故障恢复和内容冲突，并接入 CI。配置与升级边界见 [11.8](docs/11-audit-event-contract.md#118-已实现的按事件族-outbox-发布) 和 [20.12](docs/20-testing-and-acceptance.md#2012-outbox-发布回归)。
 
 缺少 WAF Cookie 的受保护根/API 请求会先原子创建一条有服务端绝对期限的匿名空 binding 与 `session.created` outbox，再以 401 拒绝并签发 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-xshield_sid`。匿名 binding 的 epoch/generation 均为 0，不含主体、授权上下文、业务凭证或资格；重复携带该 Cookie 不会扩增记录，附加任意 Bearer 也不能升级身份。匿名 TTL、来源/站点创建速率与每租户/站点活动容量由 `identity_store` 有界配置；进程内预算先限制数据库调用，PostgreSQL 短事务再以传输层对端地址的租户/站点隔离 HMAC 实施分布式来源/站点限流。速率超限返回 429，容量超限返回 503，均不签发 Cookie。
 
@@ -52,6 +52,7 @@ XSHIELD_CONFIG=examples/gateway-config.json \
 XSHIELD_JOURNAL_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
 XSHIELD_DATABASE_URL="$YOUR_POSTGRES_URL" \
 XSHIELD_FINGERPRINT_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
+XSHIELD_SHARE_TOKEN_KEY_HEX="$YOUR_DISTINCT_64_CHAR_LOWERCASE_HEX_KEY" \
 XSHIELD_REQUEST_DECRYPTION_KEY_HEX="$YOUR_DISTINCT_64_CHAR_LOWERCASE_HEX_KEY" \
 XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX="$YOUR_OTHER_DISTINCT_64_CHAR_LOWERCASE_HEX_KEY" \
 cargo run -p xshield-gateway
@@ -124,7 +125,7 @@ cargo run -p xshield-control -- \
   target/xshield-index-checkpoints target/xshield-control-audit
 ```
 
-身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；PostgreSQL 账号只授予 catalog 查询、案件、证据访问申请/决策、outbox 及 advisory-lock 所需权限。请求摘要、脱敏事件和证据 manifest 查询均使用服务端作用域并写独立管理审计。事件与 manifest 游标由同一独立分页密钥按不同用途域签名，不能跨接口、主体、作用域、目标请求或配置复用；管理变更幂等摘要使用另一独立密钥并继续按动作分域。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
+身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。配置 `response.share_issue` 时还须注入不同的 `XSHIELD_SHARE_TOKEN_KEY_HEX`；示例中的分享发行 GET 具有创建资格的副作用，须预先批准对应来源动作、资源资格及数据库发行规则，配置边界见 [6.5](docs/06-capability-ledger.md#65-分享)。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；PostgreSQL 账号只授予 catalog 查询、案件、证据访问申请/决策、outbox 及 advisory-lock 所需权限。请求摘要、脱敏事件和证据 manifest 查询均使用服务端作用域并写独立管理审计。事件与 manifest 游标由同一独立分页密钥按不同用途域签名，不能跨接口、主体、作用域、目标请求或配置复用；管理变更幂等摘要使用另一独立密钥并继续按动作分域。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
 
 ## Rust 运行时依赖
 

@@ -101,6 +101,12 @@ impl ResourceGrant {
         &self.draft.issuance_key
     }
 
+    /// Returns the immutable lease ceiling for a derived, independently approved grant.
+    #[must_use]
+    pub const fn expires_at(&self) -> UnixSeconds {
+        self.draft.expires_at
+    }
+
     fn same_issuance(&self, draft: &GrantDraft, snapshot: &AuthSnapshot) -> bool {
         self.binding_id == *snapshot.binding_id()
             && self.auth_epoch == snapshot.epoch()
@@ -239,12 +245,28 @@ impl GrantLedger {
         binding: &AuthBinding,
         query: GrantQuery<'_>,
     ) -> Result<(), GrantDenied> {
+        self.authorized_grant(binding, query).map(|_| ())
+    }
+
+    /// Returns the exact active grant used to authorize this immutable query.
+    ///
+    /// Callers may freeze its ID and lease for a derived issuance transaction,
+    /// which must revalidate current authority before committing its audit event.
+    /// This bounded lookup neither creates nor extends authorization.
+    ///
+    /// # Errors
+    /// Returns [`GrantDenied`] for a changed identity or missing exact active grant.
+    pub fn authorized_grant(
+        &self,
+        binding: &AuthBinding,
+        query: GrantQuery<'_>,
+    ) -> Result<&ResourceGrant, GrantDenied> {
         binding.validate_epoch(query.snapshot, query.now)?;
         // ponytail: bounded in-memory scan; the PostgreSQL adapter uses the exact composite index.
         let mut operation_mismatch = false;
         for grant in &self.grants {
             match grant.authorize(&query) {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(grant),
                 Err(GrantDenied::OperationNotGranted) => operation_mismatch = true,
                 Err(GrantDenied::CapabilityMissing) => {}
                 Err(GrantDenied::Identity(error)) => return Err(GrantDenied::Identity(error)),
@@ -495,6 +517,14 @@ mod tests {
             ),
             Ok(())
         );
+        let source = ledger
+            .authorized_grant(
+                &binding,
+                query(&snapshot, &resource_type, &resource, &operation, &view, 179),
+            )
+            .unwrap();
+        assert_eq!(source.grant_id(), &first.grant_id);
+        assert_eq!(source.expires_at(), UnixSeconds::new(180));
     }
 
     #[test]

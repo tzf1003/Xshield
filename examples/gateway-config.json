@@ -114,6 +114,28 @@
       }
     },
     {
+      "operation_id": "records.share.issue",
+      "method": "GET",
+      "path": "/share-issue",
+      "admission": "UI_ACTION_REQUIRED",
+      "source_action": "records.share.issue",
+      "resource_type": "record",
+      "view_profile": "share_controls",
+      "resource_query_parameter": "record_id",
+      "response": {
+        "mode": "BUFFERED_JSON",
+        "max_bytes": 4096,
+        "share_issue": {
+          "success_status": 200,
+          "token_field": "share_token",
+          "target_operation_id": "records.share.read",
+          "issuance_rule_id": "record-share-r1",
+          "ttl_seconds": 300,
+          "max_active_shares": 100
+        }
+      }
+    },
+    {
       "operation_id": "records.share.read",
       "method": "GET",
       "path": "/shared-record",

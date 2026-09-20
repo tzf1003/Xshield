@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 1248,
-  "passed_count": 1248,
+  "checks_total": 1249,
+  "passed_count": 1249,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -5997,6 +5997,11 @@
     },
     {
       "name": "link:README.md:docs/12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/06-capability-ledger.md",
       "passed": true,
       "detail": ""
     },

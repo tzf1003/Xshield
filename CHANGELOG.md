@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 接通限资源分享的 HTTP 响应发行：冻结本次准入的精确来源资格，完整 JSON 与注入大小校验后原子发行并返回凭证；加入用途独立密钥、固定目标规则、私有缓存策略与响应清零。
+
 - 实现通用资源资格 `grant.issued` 的完整 v3 生产契约、原子 outbox 和按族发布，加入真实 PostgreSQL/ClickHouse 回归；强化锁等待过期、撤销重放及冻结时间精度检查。`GrantPersistence::new` 接受冻结 trace_id，签发事务按 JSONB 约束表示生成事件；HTTP 发行适配器继续交付。
 - 实现单次 Jev 离线评估 CLI、严格 Choice/Noul 转换、固定 HTTPS、限流/超时/取消终态、加密输入输出证据与目录审计，以及中断恢复和 `model.*` 索引解析。
 

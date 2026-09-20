@@ -57,7 +57,13 @@ PostgreSQL 首版在同一短事务中锁定当前 binding，重验主体、授�
 
 分享发行使用独立的 `share_issuance_rules` 映射发行 operation/view 到有限读取 operation/view。事务重新锁定当前认证 binding，并精确核对发行者持有的活动 ResourceGrant、资源 HMAC、auth epoch、活动策略、规则和 TTL；分享期限不得超过认证、来源资格或规则上限。幂等 key 的全部授权语义一致时返回原 share ID，任何字段变化均冲突；每个发行者的活动分享容量在同一行锁下检查。ShareGrant 与 `share.issued` outbox 事件同事务提交，任一写入失败都不产生凭证记录。
 
-`ShareIssueApi` 库入口现在从已验证的发行事实构造完整 v3 事件，再执行上述事务；调用方不再传入任意 JSON envelope。share ID 使用稳定 event ID 的 UUID 部分，重试必须冻结 event ID、issuance key、request/trace、发行时间和全部授权字段；数据库同时核对原 share、发行时间及原 outbox 正文，检查当前撤销状态与数据库实时时钟。来源资格的策略版本必须等于发行版本，关联界面动作须活动且完整覆盖资格的身份、操作、view 与期限；这些授权行在事务内保持锁定，精确重试也等待分享撤销事务完成。取得授权锁后与插入后提交前重新检查期限，跨期等待会回滚发行。分享凭证明文仅在提交或精确重试成功后释放，事件不包含凭证、凭证指纹或 issuance key。历史随机 share ID 或稀疏事件不自动改写，也不据此重发凭证。库入口已提供，实际 HTTP 响应发行适配器仍待接入；现有分享读取入口保持独立。
+`ShareIssueApi` 库入口从已验证的发行事实构造完整 v3 事件，再执行上述事务。share ID 使用稳定 event ID 的 UUID 部分，重试必须冻结 event ID、issuance key、request/trace、发行时间和全部授权字段；数据库同时核对原 share、发行时间及原 outbox 正文，检查当前撤销状态与数据库实时时钟。来源资格的策略版本必须等于发行版本，关联界面动作须活动且完整覆盖资格的身份、操作、view 与期限；这些授权行在事务内保持锁定，精确重试也等待分享撤销事务完成。取得授权锁后与插入后提交前重新检查期限，跨期等待会回滚发行。分享凭证明文仅在提交或精确重试成功后释放，事件不包含凭证、凭证指纹或 issuance key。历史随机 share ID 或稀疏事件不自动改写，也不据此重发凭证。
+
+网关 `response.share_issue` 已接入 HTTP 响应发行：来源必须是独立 `UI_ACTION_REQUIRED` GET 资源操作，具备获准界面动作及精确 ResourceGrant；启动时固定 `issuance_rule_id`、目标 `SHARE_ENTRY` GET 单查询资源操作和有限 view，并要求资源类型一致。此 GET 操作会创建分享资格，应映射到明确的用户分享动作；页面预取或普通读取不应指向该操作。部署前须独立批准对应数据库规则，网关配置只引用规则。
+
+配置字段为 `success_status`、根对象 `token_field`、`target_operation_id`、`issuance_rule_id`、`ttl_seconds`（1–86400）和 `max_active_shares`（1–5000）。响应须为完整 `BUFFERED_JSON`、匹配携带实体的成功状态，且固定 token 字段不存在；严格拒绝重复 JSON 键，并在事务前预分配和检查注入后的正文不超过 `response.max_bytes`。原数据表示保留，凭证仅替换预留的固定槽。身份快照和本次准入选中的 grant ID/HMAC/期限跨源站响应保留，分享期限取配置、原身份及来源资格期限的最小值，当前规则与资格由事务复验。发行与登录、刷新、账号切换、资源批量发行及响应应用层加密规则互斥；结果设置 `private, no-store`，生产传输须使用 TLS。
+
+`XSHIELD_SHARE_TOKEN_KEY_HEX` 提供独立 32 字节 token 派生密钥，与入口使用的 `XSHIELD_FINGERPRINT_KEY_HEX` 必须不同，配置发行时缺失或复用会阻止启动。成功正文是新增 token 的交付面，原响应证据采集发生在注入前，网关拥有的 token/响应缓冲在释放后清零。每个新 HTTP 请求独立发行并消耗容量；当前适配器不提供跨请求重交付。提交后的连接中断可能留下已提交但未送达的分享记录，保留发行事件及请求失败终态，不据此自动重放源站。
 
 兑换后为接收者建立 LIMITED_SHARE 上下文，与分享者 Cookie 不必相同；不会扩大为完整用户身份。只读不等于可转分享，病例摘要不等于患者全量信息。附件、视频分片、Range 访问需单独或可证明收缩的子资格。重复读取与单次写请求 nonce 分离。
 

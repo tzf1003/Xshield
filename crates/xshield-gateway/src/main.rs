@@ -150,6 +150,7 @@ struct RequestContext {
     pending_auth_binding: Option<PendingAuthBinding>,
     response_failure: Option<ReasonCode>,
     origin_status: Option<u16>,
+    origin_response_complete: bool,
     response_source: ResponseSource,
 }
 
@@ -178,6 +179,7 @@ impl ProxyHttp for Gateway {
             pending_auth_binding: None,
             response_failure: None,
             origin_status: None,
+            origin_response_complete: false,
             response_source: ResponseSource::Origin,
         }
     }
@@ -419,6 +421,18 @@ impl ProxyHttp for Gateway {
         }
         if !upstream_response.status.is_informational() {
             context.origin_status = Some(upstream_response.status.as_u16());
+            if self
+                .config
+                .response_share_operation(request.method.as_str(), request.uri.path())
+                .is_some()
+                && (upstream_response.headers.contains_key("Content-Range")
+                    || upstream_response
+                        .headers
+                        .contains_key("Content-Disposition"))
+            {
+                context.response_failure = Some(ReasonCode::ResponseValidationFailed);
+                return response_error(ReasonCode::ResponseValidationFailed);
+            }
             if let Some(policy) = buffered_policy {
                 let reservation_bytes = response_crypto_rule
                     .map(xshield_gateway::response_crypto::ResponseCryptoRule::max_in_flight_bytes)
@@ -436,49 +450,11 @@ impl ProxyHttp for Gateway {
                     &self.buffered_body_budget,
                 ) {
                     Ok(buffer) => {
-                        if let Some(rule) = self
-                            .config
-                            .auth_binding_rule(request.method.as_str(), request.uri.path())
-                        {
-                            prepare_auth_response_headers(upstream_response)?;
-                            if rule.applies(upstream_response.status.as_u16()) {
-                                let now = system_time()?;
-                                let pending = ProtectedIdentity::prepare_auth_binding(rule, now)
-                                    .map_err(|reason| {
-                                        PingoraError::explain(
-                                            ErrorType::HTTPStatus(502),
-                                            reason.as_str(),
-                                        )
-                                    })?;
-                                // Pingora fixes response headers before its synchronous body
-                                // filter runs. This cookie names only an unbound session until
-                                // the buffered authentication body commits successfully.
-                                append_waf_cookie(
-                                    upstream_response,
-                                    &pending.cookie_header_value(),
-                                )?;
-                                context.pending_auth_binding = Some(pending);
-                            }
-                        } else if self
-                            .config
-                            .auth_refresh_rule(request.method.as_str(), request.uri.path())
-                            .is_some()
-                            || self
-                                .config
-                                .auth_context_switch_rule(
-                                    request.method.as_str(),
-                                    request.uri.path(),
-                                )
-                                .is_some()
-                        {
-                            prepare_auth_response_headers(upstream_response)?;
-                        } else if self
-                            .config
-                            .response_grant_operation(request.method.as_str(), request.uri.path())
-                            .is_some()
-                        {
-                            prepare_grant_response_headers(upstream_response)?;
-                        }
+                        self.prepare_response_issuance_headers(
+                            request,
+                            upstream_response,
+                            context,
+                        )?;
                         if response_crypto_rule.is_some() {
                             prepare_encrypted_response_headers(upstream_response)?;
                         } else if matches!(policy, BufferedResponsePolicy::SensorHtml(_)) {
@@ -513,6 +489,7 @@ impl ProxyHttp for Gateway {
         };
         match buffer.filter(body, end_of_stream) {
             Ok(Some(complete)) => {
+                context.origin_response_complete = true;
                 if let Some(transformation) = complete.sensor_html {
                     context.sensor_html_audit = Some(SensorHtmlAudit::new(
                         transformation.adapter_revision,
@@ -526,6 +503,7 @@ impl ProxyHttp for Gateway {
                     .and_then(|body| self.commit_auth_binding(session, context, body))
                     .and_then(|body| self.commit_auth_transition(session, context, body))
                     .and_then(|body| self.commit_response_grants(session, context, body))
+                    .and_then(|body| self.commit_response_share(session, context, body))
                     .and_then(|body| self.encrypt_response(session, context, body));
                 match released {
                     Ok(released) => *body = Some(released),
@@ -595,6 +573,7 @@ impl ProxyHttp for Gateway {
                 proxy_error: error.is_some(),
                 response_failure: context.response_failure,
                 origin_status: context.origin_status,
+                origin_response_complete: context.origin_response_complete,
                 response_crypto: context.response_crypto_audit.as_ref(),
                 sensor_html: context.sensor_html_audit.as_ref(),
                 response_source: context.response_source,
@@ -607,6 +586,55 @@ impl ProxyHttp for Gateway {
 }
 
 impl Gateway {
+    // Pingora fixes headers before the body commit barrier. Keep issuance-only
+    // cache and cookie preparation together across all response issuers.
+    fn prepare_response_issuance_headers(
+        &self,
+        request: &pingora::http::RequestHeader,
+        upstream_response: &mut ResponseHeader,
+        context: &mut RequestContext,
+    ) -> PingoraResult<()> {
+        if let Some(rule) = self
+            .config
+            .auth_binding_rule(request.method.as_str(), request.uri.path())
+        {
+            prepare_auth_response_headers(upstream_response)?;
+            if rule.applies(upstream_response.status.as_u16()) {
+                let now = system_time()?;
+                let pending =
+                    ProtectedIdentity::prepare_auth_binding(rule, now).map_err(|reason| {
+                        PingoraError::explain(ErrorType::HTTPStatus(502), reason.as_str())
+                    })?;
+                // Pingora fixes response headers before its synchronous body
+                // filter runs. This cookie names only an unbound session until
+                // the buffered authentication body commits successfully.
+                append_waf_cookie(upstream_response, &pending.cookie_header_value())?;
+                context.pending_auth_binding = Some(pending);
+            }
+        } else if self
+            .config
+            .auth_refresh_rule(request.method.as_str(), request.uri.path())
+            .is_some()
+            || self
+                .config
+                .auth_context_switch_rule(request.method.as_str(), request.uri.path())
+                .is_some()
+        {
+            prepare_auth_response_headers(upstream_response)?;
+        } else if self
+            .config
+            .response_grant_operation(request.method.as_str(), request.uri.path())
+            .is_some()
+            || self
+                .config
+                .response_share_operation(request.method.as_str(), request.uri.path())
+                .is_some()
+        {
+            prepare_grant_response_headers(upstream_response)?;
+        }
+        Ok(())
+    }
+
     fn capture_response(
         &self,
         session: &Session,
@@ -1038,6 +1066,65 @@ impl Gateway {
             .inject_action_refs(&body, &action_refs)
             .map(Bytes::from)
             .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)
+    }
+
+    fn commit_response_share(
+        &self,
+        session: &Session,
+        context: &RequestContext,
+        body: Bytes,
+    ) -> Result<Bytes, ReasonCode> {
+        let request = session.req_header();
+        let Some(operation) = self
+            .config
+            .response_share_operation(request.method.as_str(), request.uri.path())
+        else {
+            return Ok(body);
+        };
+        let status = context
+            .origin_status
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let max_bytes = self
+            .config
+            .buffered_json_max_bytes(request.method.as_str(), request.uri.path())
+            .ok_or(ReasonCode::ResponseValidationFailed)?;
+        let Some(prepared) = operation.rule.prepare(status, &body, max_bytes)? else {
+            return Ok(body);
+        };
+        // The complete output allocation and fixed token slot are checked before
+        // any side effect; release the original body before the transaction.
+        drop(body);
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or(ReasonCode::IdentityStoreUnavailable)?;
+        let response_identity = context
+            .response_identity
+            .as_ref()
+            .ok_or(ReasonCode::ShareSourceIneligible)?;
+        let request_id = RequestId::parse(&context.request_id)
+            .map_err(|_| ReasonCode::ResponseValidationFailed)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| UnixSeconds::new(duration.as_secs()))
+            .map_err(|_| ReasonCode::ClockUnavailable)?;
+        // ponytail: Pingora 0.9 has a synchronous body filter; use an async body
+        // hook when available, preserving this pre-release transaction barrier.
+        let token = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(identity.commit_response_share(
+                &self.config,
+                response_identity,
+                operation,
+                &request_id,
+                &context.trace_id,
+                now,
+            ))
+        })?;
+        // Transfer ownership without a plaintext clone; erase our response
+        // allocation when Pingora releases its last reference, including errors.
+        prepared
+            .finish(&token)
+            .map(|body| Bytes::from_owner(Zeroizing::new(body)))
     }
 
     fn commit_auth_transition(
@@ -1536,7 +1623,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .clone()
                 .ok_or("identity store runtime unavailable")
                 .and_then(|store| {
-                    ProtectedIdentity::from_env(store).map_err(|_| "identity runtime unavailable")
+                    ProtectedIdentity::from_env(store, config.requires_share_issuance())
+                        .map_err(|_| "identity runtime unavailable")
                 })
         })
         .transpose()?;

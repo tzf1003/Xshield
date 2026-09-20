@@ -244,6 +244,8 @@ pub(crate) struct FinalFacts<'a> {
     pub(crate) proxy_error: bool,
     pub(crate) response_failure: Option<ReasonCode>,
     pub(crate) origin_status: Option<u16>,
+    /// The entire buffered response was validated; this is not business confirmation.
+    pub(crate) origin_response_complete: bool,
     pub(crate) response_crypto: Option<&'a ResponseCryptoAudit>,
     pub(crate) sensor_html: Option<&'a SensorHtmlAudit>,
     pub(crate) response_source: ResponseSource,
@@ -1005,6 +1007,19 @@ fn final_origin(facts: &FinalFacts<'_>) -> FinalOrigin {
             status: facts.origin_status,
         };
     }
+    if facts.proxy_error
+        && facts.origin_response_complete
+        && let Some(status) = facts.origin_status
+    {
+        // A downstream failure cannot erase the fully received origin response.
+        // The request terminal separately records incomplete client delivery.
+        return FinalOrigin {
+            state: "response_received",
+            event_type: "origin.response",
+            reason_code: ReasonCode::OriginResponseReceived.as_str(),
+            status: Some(status),
+        };
+    }
     if facts.proxy_error {
         FinalOrigin {
             state: "unknown",
@@ -1039,6 +1054,11 @@ fn completion_reason(facts: &FinalFacts<'_>) -> &'static str {
         || {
             if facts.decision.outcome == GatewayOutcome::Denied {
                 facts.decision.reason_code.as_str()
+            } else if facts.proxy_error
+                && facts.origin_response_complete
+                && facts.origin_status.is_some()
+            {
+                ReasonCode::RequestIncomplete.as_str()
             } else if facts.proxy_error {
                 ReasonCode::OriginOutcomeUnknown.as_str()
             } else {
@@ -1680,6 +1700,7 @@ mod tests {
                 proxy_error: false,
                 response_failure: None,
                 origin_status: Some(200),
+                origin_response_complete: true,
                 response_crypto: None,
                 sensor_html: Some(&transformation),
                 response_source: ResponseSource::Origin,
@@ -1796,6 +1817,7 @@ mod tests {
                 proxy_error: false,
                 response_failure: None,
                 origin_status: Some(200),
+                origin_response_complete: true,
                 response_crypto: None,
                 sensor_html: None,
                 response_source: ResponseSource::Origin,
@@ -1829,6 +1851,7 @@ mod tests {
                 proxy_error: false,
                 response_failure: None,
                 origin_status: None,
+                origin_response_complete: false,
                 response_crypto: None,
                 sensor_html: None,
                 response_source: ResponseSource::Origin,
@@ -1937,6 +1960,7 @@ mod tests {
                     proxy_error: false,
                     response_failure: None,
                     origin_status: None,
+                    origin_response_complete: false,
                     response_crypto: None,
                     sensor_html: None,
                     response_source: ResponseSource::Edge,
@@ -2155,6 +2179,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn distinguishes_complete_response_delivery_failure_from_truncation() {
+        for (complete, event_type, origin_state, origin_reason, final_reason) in [
+            (
+                true,
+                "origin.response",
+                "response_received",
+                "ORIGIN_RESPONSE_RECEIVED",
+                "REQUEST_INCOMPLETE",
+            ),
+            (
+                false,
+                "origin.unknown",
+                "unknown",
+                "ORIGIN_OUTCOME_UNKNOWN",
+                "ORIGIN_OUTCOME_UNKNOWN",
+            ),
+        ] {
+            let directory = directory();
+            let config = config(&directory, 1024 * 1024);
+            let request_id = "req_018f2a3b-4c5d-7000-8000-000000000038";
+            let trace_id = "38383838383838383838383838383838";
+            let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+            let decision = config.admit("GET", "/health", UnixSeconds::new(1));
+            let admission = audit
+                .commit_admission(AdmissionFacts {
+                    request_id,
+                    trace_id,
+                    method: "GET",
+                    decision: &decision,
+                    duration_us: 10,
+                    request_crypto: None,
+                    sensor_observations: &[],
+                    forward_origin: true,
+                })
+                .await
+                .unwrap();
+            audit
+                .finalize(FinalFacts {
+                    request_id,
+                    trace_id,
+                    method: "GET",
+                    decision: &decision,
+                    admission: &admission,
+                    status: 502,
+                    duration_us: 20,
+                    proxy_error: true,
+                    response_failure: None,
+                    origin_status: Some(201),
+                    origin_response_complete: complete,
+                    response_crypto: None,
+                    sensor_html: None,
+                    response_source: ResponseSource::Origin,
+                })
+                .await
+                .unwrap();
+            drop(audit);
+            let (journal, _) = LocalJournal::open(
+                &directory,
+                "journal-key-r1",
+                JournalKey::from_hex(KEY).unwrap(),
+                config.audit_limits(),
+            )
+            .unwrap();
+            let mut terminal = Vec::new();
+            journal
+                .visit_closed_records(100, |record| {
+                    let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                        .map_err(|_| JournalError::InvalidEvent)?;
+                    if event["request_id"] == request_id
+                        && matches!(
+                            event["event_type"].as_str(),
+                            Some("origin.response" | "origin.unknown" | "request.aborted")
+                        )
+                    {
+                        terminal.push(event);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(terminal.len(), 2);
+            assert_eq!(terminal[0]["event_type"], event_type);
+            assert_eq!(terminal[0]["payload"]["origin_state"], origin_state);
+            assert_eq!(terminal[0]["payload"]["reason_code"], origin_reason);
+            assert_eq!(
+                terminal[0]["payload"]["status"],
+                if complete {
+                    serde_json::json!(201)
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert_eq!(terminal[1]["event_type"], "request.aborted");
+            assert_eq!(terminal[1]["payload"]["reason_code"], final_reason);
+            assert_eq!(terminal[1]["payload"]["origin_state"], origin_state);
+            assert_eq!(terminal[1]["payload"]["status"], 502);
+            drop(journal);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn records_response_validation_failure_as_received_and_aborted() {
         let directory = directory();
         let config = config(&directory, 1024 * 1024);
@@ -2191,6 +2316,7 @@ mod tests {
                 proxy_error: true,
                 response_failure: Some(ReasonCode::ResponseValidationFailed),
                 origin_status: Some(200),
+                origin_response_complete: false,
                 response_crypto: Some(&response_crypto),
                 sensor_html: None,
                 response_source: ResponseSource::Origin,

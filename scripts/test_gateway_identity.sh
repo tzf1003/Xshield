@@ -6,6 +6,7 @@ test_database="xshield_gateway_${PPID}_${RANDOM}"
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/xshield-gateway-identity.XXXXXX")
 origin_pid=""
 gateway_pid=""
+share_request_pid=""
 
 cleanup() {
     status=$?
@@ -15,8 +16,10 @@ cleanup() {
     fi
     if [[ -n "$gateway_pid" ]]; then kill -KILL "$gateway_pid" 2>/dev/null || true; fi
     if [[ -n "$origin_pid" ]]; then kill "$origin_pid" 2>/dev/null || true; fi
+    if [[ -n "$share_request_pid" ]]; then kill "$share_request_pid" 2>/dev/null || true; fi
     wait "$gateway_pid" 2>/dev/null || true
     wait "$origin_pid" 2>/dev/null || true
+    wait "$share_request_pid" 2>/dev/null || true
     dropdb --if-exists "$test_database" >/dev/null
     rm -r -- "$test_dir"
 }
@@ -28,6 +31,7 @@ for migration in "$repo_root"/migrations/*.sql; do
 done
 
 fingerprint_key="7777777777777777777777777777777777777777777777777777777777777777"
+share_token_key="9999999999999999999999999999999999999999999999999999999999999999"
 session_id="ses_018f2a3b-4c5d-7000-8000-000000000902"
 bearer="verified-business-token"
 service_credential="verified-service-token"
@@ -250,6 +254,55 @@ INSERT INTO xshield.share_grants (
     'shared_summary', 'reusable_read', 'ev_018f2a3b-4c5d-7000-8000-000000000909',
     'policy-r1', 'active', now() - interval '1 minute', now() + interval '30 minutes'
 );
+INSERT INTO xshield.action_descriptors (
+    tenant_id, site_id, action_id, page_template, operation_id, method,
+    route_template, target_rule, allowed_fields, field_profile,
+    policy_revision, mapping_revision, status
+) VALUES (
+    'tenant_gateway', 'site_gateway', 'records.share', 'settings_page',
+    'records.share.issue', 'GET', '/share-issue',
+    '{"kind":"resource","resource_type":"record"}', '["record_id"]',
+    'share_controls', 'policy-r1', 'mapping-r1', 'approved'
+);
+INSERT INTO xshield.ui_actions (
+    tenant_id, site_id, action_ref, binding_id, auth_epoch,
+    source_request_id, page_evidence_id, source_action_ref, operation_id,
+    target_constraints, field_profile, source_rule, policy_revision,
+    status, issued_at, expires_at, mapping_revision, method, route_template,
+    allowed_fields
+) VALUES (
+    'tenant_gateway', 'site_gateway', 'action_share_issue_primary',
+    'auth_018f2a3b-4c5d-7000-8000-000000000901', 1,
+    'req_018f2a3b-4c5d-7000-8000-000000000904',
+    'page_018f2a3b-4c5d-7000-8000-000000000903', 'records.share',
+    'records.share.issue', jsonb_build_object(
+        'kind', 'resource', 'resource_type', 'record',
+        'resource_key_hmac', :'share_resource_fingerprint'
+    ), 'share_controls', 'mapping-r1', 'policy-r1', 'active',
+    now() - interval '30 seconds', now() + interval '15 minutes',
+    'mapping-r1', 'GET', '/share-issue', '["record_id"]'
+);
+INSERT INTO xshield.resource_grants (
+    tenant_id, site_id, grant_id, binding_id, auth_epoch, action_ref,
+    resource_type, resource_key_hmac, operation_id, view_id, constraints,
+    source_event_id, issuance_key, policy_revision, status, issued_at, expires_at
+) VALUES (
+    'tenant_gateway', 'site_gateway',
+    'grant_018f2a3b-4c5d-7000-8000-000000000925',
+    'auth_018f2a3b-4c5d-7000-8000-000000000901', 1, 'action_share_issue_primary',
+    'record', decode(:'share_resource_fingerprint', 'hex'), 'records.share.issue',
+    'share_controls', '{}', 'ev_018f2a3b-4c5d-7000-8000-000000000926',
+    'share-issue-source-r1', 'policy-r1', 'active',
+    now() - interval '20 seconds', now() + interval '10 minutes'
+);
+INSERT INTO xshield.share_issuance_rules (
+    tenant_id, site_id, policy_revision, rule_id, issuer_operation_id,
+    issuer_view_id, share_operation_id, share_view_id, max_ttl_seconds, status
+) VALUES (
+    'tenant_gateway', 'site_gateway', 'policy-r1', 'record-share-r1',
+    'records.share.issue', 'share_controls', 'records.share.read',
+    'shared_summary', 300, 'active'
+);
 SQL
 
 compatibility_expires_at=$(($(date +%s) + 600))
@@ -280,6 +333,7 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"orders.path.read","method":"GET","path":"/path-orders/{order_id}","admission":"UI_ACTION_REQUIRED","source_action":"orders.path.open","resource_type":"order","view_profile":"customer_detail","resource_path_parameter":"order_id"},
     {"operation_id":"reports.ingest","method":"POST","path":"/service/report","admission":"SERVICE_IDENTITY","source_action":null,"resource_type":null,"view_profile":null,"resource_query_parameter":null},
     {"operation_id":"records.share.read","method":"GET","path":"/shared-record","admission":"SHARE_ENTRY","source_action":null,"resource_type":"record","view_profile":"shared_summary","resource_query_parameter":"record_id"},
+    {"operation_id":"records.share.issue","method":"GET","path":"/share-issue","admission":"UI_ACTION_REQUIRED","source_action":"records.share","resource_type":"record","view_profile":"share_controls","resource_query_parameter":"record_id","response":{"mode":"BUFFERED_JSON","max_bytes":512,"share_issue":{"success_status":200,"token_field":"share_token","target_operation_id":"records.share.read","issuance_rule_id":"record-share-r1","ttl_seconds":300,"max_active_shares":1}}},
     {"operation_id":"buffered.valid","method":"GET","path":"/buffered-valid","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":64}},
     {"operation_id":"buffered.invalid","method":"GET","path":"/buffered-invalid","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":64}},
     {"operation_id":"buffered.oversize","method":"GET","path":"/buffered-oversize","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":8}}
@@ -290,6 +344,7 @@ JSON
 cargo build -p xshield-gateway >/dev/null
 cat >"$test_dir/origin.py" <<'PY'
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 import sys
 import time
 
@@ -323,8 +378,36 @@ class Handler(BaseHTTPRequestHandler):
             "/buffered-valid": b'{"ok":true}',
             "/buffered-invalid": b'private-invalid-json',
             "/buffered-oversize": b'{"private":"must-not-release"}',
+            "/shared-record?record_id=record-123": b'{"record_id":"record-123","summary":"shared"}',
         }
         body = responses.get(self.path)
+        status = 200
+        truncated = False
+        share_mode = "valid"
+        if self.path == "/share-issue?record_id=record-123":
+            control = Path(sys.argv[3])
+            mode_path = control / "share.mode"
+            share_mode = mode_path.read_text().strip() if mode_path.exists() else "valid"
+            body = {
+                "collision": b'{"ok":true,"share_token":null}',
+                "duplicate": b'{"ok":true,"ok":false}',
+                "nonobject": b'[{"ok":true}]',
+                "truncated": b'{"ok":true',
+                "oversize": b'{"padding":"' + b'x' * 440 + b'"}',
+                "unsuccessful": b'{"error":"share_declined"}',
+            }.get(share_mode, b'{"ok":true}')
+            status = 422 if share_mode == "unsuccessful" else 200
+            truncated = share_mode == "truncated"
+            if share_mode in ("grant-revoked", "epoch-changed"):
+                (control / f"share-{share_mode}.started").touch()
+                for _ in range(250):
+                    if (control / f"share-{share_mode}.release").exists():
+                        (control / f"share-{share_mode}.released").touch()
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.send_error(504)
+                    return
         if body is None:
             self.send_response(404)
             self.end_headers()
@@ -332,9 +415,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/slow-account":
             open(sys.argv[2], "w", encoding="utf-8").close()
             time.sleep(1)
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(len(body) + (16 if truncated else 0)))
+        if self.path == "/share-issue?record_id=record-123":
+            self.send_header("Cache-Control", "public, max-age=600")
+            self.send_header("ETag", '"origin-share-response"')
+            if share_mode == "content-range":
+                self.send_header("Content-Range", "bytes 0-10/100")
+            if share_mode == "attachment":
+                self.send_header("Content-Disposition", 'attachment; filename="record.json"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -343,13 +433,14 @@ class Handler(BaseHTTPRequestHandler):
 
 ThreadingHTTPServer(("127.0.0.1", 8180), Handler).serve_forever()
 PY
-python3 "$test_dir/origin.py" "$test_dir/origin.log" "$test_dir/slow.started" &
+python3 "$test_dir/origin.py" "$test_dir/origin.log" "$test_dir/slow.started" "$test_dir" &
 origin_pid=$!
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
 XSHIELD_CONFIG="$test_dir/config.json" \
 XSHIELD_JOURNAL_KEY_HEX="8888888888888888888888888888888888888888888888888888888888888888" \
 XSHIELD_DATABASE_URL="$database_base_url/$test_database" \
 XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
+XSHIELD_SHARE_TOKEN_KEY_HEX="$share_token_key" \
     "$repo_root/target/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!
 
@@ -980,7 +1071,7 @@ expanded_share_status=$(curl -sS -o "$test_dir/expanded-share.json" -w '%{http_c
 valid_share_status=$(curl -sS -o "$test_dir/valid-share.body" -w '%{http_code}' \
     -H "X-Xshield-Share-Token: $share_token" \
     'http://127.0.0.1:6288/shared-record?record_id=record-123')
-[[ "$valid_share_status" == "404" ]]
+[[ "$valid_share_status" == "200" ]]
 
 psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
     "UPDATE xshield.share_grants SET status = 'revoked' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND share_id = 'share_018f2a3b-4c5d-7000-8000-000000000908'" >/dev/null
@@ -989,6 +1080,181 @@ revoked_share_status=$(curl -sS -o "$test_dir/revoked-share.json" -w '%{http_cod
     'http://127.0.0.1:6288/shared-record?record_id=record-123')
 [[ "$revoked_share_status" == "403" ]]
 grep -q '"reason_code":"SHARE_SCOPE_MISMATCH"' "$test_dir/revoked-share.json"
+
+share_issue_rows() {
+    psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT (SELECT count(*) FROM xshield.share_grants
+        WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+          AND issuance_rule_id = 'record-share-r1'),
+       (SELECT count(*) FROM xshield.audit_outbox
+        WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+          AND event_type = 'share.issued');
+SQL
+}
+
+assert_share_issue_blocked() {
+    local label=$1 before status result=0
+    before=$(share_issue_rows)
+    status=$(curl -sS --max-time 10 -o "$test_dir/share-$label.body" -w '%{http_code}' \
+        -H "Cookie: __Host-xshield_sid=$session_id" \
+        -H "Authorization: Bearer $bearer" \
+        -H 'X-Xshield-Action-Ref: action_share_issue_primary' \
+        'http://127.0.0.1:6288/share-issue?record_id=record-123' 2>/dev/null) || result=$?
+    [[ "$status" != "200" || "$result" != "0" ]]
+    ! grep -Eq '"(share_token|ok|padding)"' "$test_dir/share-$label.body" 2>/dev/null
+    [[ "$(share_issue_rows)" == "$before" ]]
+}
+
+missing_issue_action=$(curl -sS -o "$test_dir/share-missing-action.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    'http://127.0.0.1:6288/share-issue?record_id=record-123')
+[[ "$missing_issue_action" == "403" ]]
+grep -q '"reason_code":"UI_ACTION_NOT_AVAILABLE"' "$test_dir/share-missing-action.json"
+wrong_issue_resource=$(curl -sS -o "$test_dir/share-wrong-resource.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H 'X-Xshield-Action-Ref: action_share_issue_primary' \
+    'http://127.0.0.1:6288/share-issue?record_id=record-999')
+[[ "$wrong_issue_resource" == "403" ]]
+grep -q '"reason_code":"CAPABILITY_MISSING"' "$test_dir/share-wrong-resource.json"
+! grep -q '^GET /share-issue' "$test_dir/origin.log"
+[[ "$(share_issue_rows)" == "0|0" ]]
+
+for share_mode in collision duplicate nonobject truncated oversize content-range attachment; do
+    printf '%s' "$share_mode" >"$test_dir/share.mode"
+    assert_share_issue_blocked "$share_mode"
+done
+printf '%s' unsuccessful >"$test_dir/share.mode"
+unsuccessful_share_status=$(curl -sS -o "$test_dir/share-unsuccessful.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H 'X-Xshield-Action-Ref: action_share_issue_primary' \
+    'http://127.0.0.1:6288/share-issue?record_id=record-123')
+[[ "$unsuccessful_share_status" == "422" ]]
+[[ "$(<"$test_dir/share-unsuccessful.body")" == '{"error":"share_declined"}' ]]
+[[ "$(share_issue_rows)" == "0|0" ]]
+
+printf '%s' valid >"$test_dir/share.mode"
+issued_share_status=$(curl -sS -D "$test_dir/share-issued.headers" \
+    -o "$test_dir/share-issued.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$session_id" \
+    -H "Authorization: Bearer $bearer" \
+    -H 'X-Xshield-Action-Ref: action_share_issue_primary' \
+    'http://127.0.0.1:6288/share-issue?record_id=record-123')
+[[ "$issued_share_status" == "200" ]]
+grep -qi '^cache-control: private, no-store' "$test_dir/share-issued.headers"
+! grep -Eqi '^(content-length|etag):' "$test_dir/share-issued.headers"
+issued_share_token=$(python3 - "$test_dir/share-issued.body" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as response:
+    body = json.load(response)
+assert set(body) == {"ok", "share_token"} and body["ok"] is True
+assert re.fullmatch(r"[0-9a-f]{64}", body["share_token"])
+print(body["share_token"])
+PY
+)
+issued_share_fingerprint=$(printf '%s\0%s\0%s\0%s\0' \
+    'xshield-share-token-v1' 'tenant_gateway' 'site_gateway' "$issued_share_token" \
+    | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$fingerprint_key" -binary \
+    | od -An -tx1 | tr -d ' \n')
+issued_share_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v fingerprint="$issued_share_fingerprint" \
+    -v resource_fingerprint="$share_resource_fingerprint" \
+    -v request_id="$(awk 'tolower($1) == "x-xshield-request-id:" {gsub("\r", "", $2); print $2}' "$test_dir/share-issued.headers")" <<'SQL'
+SELECT count(*), count(*) FILTER (WHERE
+    share.status = 'active' AND share.issuer_auth_epoch = 1
+    AND share.resource_key_hmac = decode(:'resource_fingerprint', 'hex')
+    AND share.operation_id = 'records.share.read' AND share.view_id = 'shared_summary'
+    AND share.use_policy = 'reusable_read'
+    AND share.expires_at > clock_timestamp()
+    AND share.expires_at <= source.expires_at
+    AND share.expires_at <= share.issued_at + interval '300 seconds'
+    AND outbox.aggregate_ref = share.share_id
+    AND outbox.envelope @> '{"schema_version":3,"producer_id":"gateway-share-grant","producer_seq":1,"request_seq":1,"policy_revision":"policy-r1","example_only":false,"payload":{"stage":"share_grant","outcome":"PASS","reason_code":"SHARE_ISSUED","issuer_auth_epoch":1,"issuer_grant_id":"grant_018f2a3b-4c5d-7000-8000-000000000925","issuance_rule_id":"record-share-r1","issuer_operation_id":"records.share.issue","issuer_view_profile":"share_controls","resource_type":"record","operation_id":"records.share.read","view_profile":"shared_summary","method":"GET","use_policy":"reusable_read"}}'
+    AND outbox.envelope->>'request_id' = :'request_id'
+    AND outbox.envelope->>'event_id' = outbox.event_id
+    AND outbox.envelope->>'producer_boot_id' = outbox.event_id
+    AND outbox.envelope->'payload'->>'share_id' = share.share_id
+    AND outbox.envelope->'payload'->>'resource_key_hmac' = :'resource_fingerprint'
+    AND NOT (outbox.envelope->'payload' ?| ARRAY['token', 'share_token', 'token_fingerprint', 'issuance_key'])
+)
+FROM xshield.share_grants share
+JOIN xshield.resource_grants source
+  ON (source.tenant_id, source.site_id, source.grant_id) =
+     (share.tenant_id, share.site_id, share.issuer_grant_id)
+JOIN xshield.audit_outbox outbox
+  ON (outbox.tenant_id, outbox.site_id, outbox.event_id) =
+     (share.tenant_id, share.site_id, share.source_event_id)
+WHERE share.tenant_id = 'tenant_gateway' AND share.site_id = 'site_gateway'
+  AND share.token_fingerprint = decode(:'fingerprint', 'hex')
+  AND outbox.event_type = 'share.issued';
+SQL
+)
+[[ "$issued_share_state" == "1|1" ]]
+[[ "$(share_issue_rows)" == "1|1" ]]
+
+issued_share_read_status=$(curl -sS -o "$test_dir/share-issued-read.body" -w '%{http_code}' \
+    -H "X-Xshield-Share-Token: $issued_share_token" \
+    'http://127.0.0.1:6288/shared-record?record_id=record-123')
+[[ "$issued_share_read_status" == "200" ]]
+[[ "$(<"$test_dir/share-issued-read.body")" == '{"record_id":"record-123","summary":"shared"}' ]]
+issued_share_wrong_resource=$(curl -sS -o "$test_dir/share-issued-wrong-resource.json" -w '%{http_code}' \
+    -H "X-Xshield-Share-Token: $issued_share_token" \
+    'http://127.0.0.1:6288/shared-record?record_id=record-999')
+[[ "$issued_share_wrong_resource" == "403" ]]
+grep -q '"reason_code":"SHARE_SCOPE_MISMATCH"' "$test_dir/share-issued-wrong-resource.json"
+assert_share_issue_blocked capacity
+psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+    "UPDATE xshield.share_grants SET status = 'revoked' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND issuance_rule_id = 'record-share-r1'" >/dev/null
+psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+    "UPDATE xshield.share_issuance_rules SET status = 'retired' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND rule_id = 'record-share-r1'" >/dev/null
+assert_share_issue_blocked retired-rule
+psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+    "UPDATE xshield.share_issuance_rules SET status = 'active' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND rule_id = 'record-share-r1'" >/dev/null
+
+# The origin barrier ensures each authority change commits after request admission.
+for share_mode in grant-revoked epoch-changed; do
+    printf '%s' "$share_mode" >"$test_dir/share.mode"
+    assert_share_issue_blocked "$share_mode" &
+    share_request_pid=$!
+    for _ in {1..100}; do
+        [[ -f "$test_dir/share-$share_mode.started" ]] && break
+        sleep 0.02
+    done
+    [[ -f "$test_dir/share-$share_mode.started" ]]
+    if [[ "$share_mode" == "grant-revoked" ]]; then
+        psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+            "UPDATE xshield.resource_grants SET status = 'revoked' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND grant_id = 'grant_018f2a3b-4c5d-7000-8000-000000000925'" >/dev/null
+    else
+        psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+            "UPDATE xshield.auth_bindings SET auth_epoch = auth_epoch + 1 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND binding_id = 'auth_018f2a3b-4c5d-7000-8000-000000000901'" >/dev/null
+    fi
+    touch "$test_dir/share-$share_mode.release"
+    wait "$share_request_pid"
+    share_request_pid=""
+    [[ -f "$test_dir/share-$share_mode.released" ]]
+    if [[ "$share_mode" == "grant-revoked" ]]; then
+        psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
+            "UPDATE xshield.resource_grants SET status = 'active' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND grant_id = 'grant_018f2a3b-4c5d-7000-8000-000000000925'" >/dev/null
+    fi
+done
+[[ "$(share_issue_rows)" == "1|1" ]]
+share_secret_events=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v token="$issued_share_token" -v token_fingerprint="$issued_share_fingerprint" \
+    -v bearer="$bearer" -v session_id="$session_id" <<'SQL'
+SELECT count(*) FROM xshield.audit_outbox
+WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+  AND (position(:'token' IN envelope::text) > 0
+       OR position(:'token_fingerprint' IN envelope::text) > 0
+       OR position(:'bearer' IN envelope::text) > 0
+       OR position(:'session_id' IN envelope::text) > 0);
+SQL
+)
+[[ "$share_secret_events" == "0" ]]
 
 kill -KILL "$gateway_pid"
 wait "$gateway_pid" 2>/dev/null || true
@@ -1014,7 +1280,8 @@ grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 [[ $(grep -c 'GET /orders?order_id=order-refresh' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /path-orders/order%2D123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
-[[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "2" ]]
+[[ $(grep -c '^GET /share-issue?record_id=record-123$' "$test_dir/origin.log") == "13" ]]
 [[ $(grep -c 'GET /buffered-valid' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /buffered-invalid' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /buffered-oversize' "$test_dir/origin.log") == "1" ]]
@@ -1022,6 +1289,8 @@ grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 ! grep -q 'ActionRef=action_' "$test_dir/origin.log"
 ! grep -q 'ServiceCredential=verified-' "$test_dir/origin.log"
 ! grep -q 'ShareToken=verified-' "$test_dir/origin.log"
+! grep -q '^ShareToken=.' "$test_dir/origin.log"
+! grep -Fq "$issued_share_token" "$test_dir/origin.log" "$test_dir/gateway.log"
 grep -q 'Authorization=Bearer verified-business-token' "$test_dir/origin.log"
 [[ -n $(find "$test_dir/journal" -name 'segment-*.xaj' -type f -print -quit) ]]
 
