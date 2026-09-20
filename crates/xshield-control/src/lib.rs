@@ -1920,6 +1920,37 @@ impl ControlPlane {
         let audit_subject = subject.clone();
         let audit_artifact_id = artifact_id.clone();
         let audit_access_request_id = access_request_id.clone();
+        // Binary responses carry the same authenticated scope and exact targets
+        // as JSON envelopes, so browsers can reject stale or mismatched bytes
+        // before creating a downloadable object. All values originate from
+        // validated identifiers or the bounded plaintext length.
+        let byte_length = bytes_read.to_string();
+        let metadata = [
+            ("x-xshield-request-id", request_id.as_str()),
+            ("x-xshield-tenant-id", self.config.tenant_id.as_str()),
+            ("x-xshield-site-id", self.config.site_id.as_str()),
+            ("x-xshield-artifact-id", artifact_id.as_str()),
+            (EVIDENCE_ACCESS_REQUEST_HEADER, access_request_id.as_str()),
+            ("content-length", byte_length.as_str()),
+        ]
+        .into_iter()
+        .map(|(name, value)| HeaderValue::from_str(value).map(|value| (name, value)))
+        .collect::<Result<Vec<_>, _>>();
+        let Ok(metadata) = metadata else {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    Some(access_request_id),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_EVIDENCE_READ_CORRUPT",
+                    "evidence content is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )
+                .await;
+        };
         let audited = tokio::task::spawn_blocking(move || {
             audit_control.append_access_event_with_evidence_bytes(
                 &audit_request_id,
@@ -1947,6 +1978,9 @@ impl ControlPlane {
         let mut response = Response::new(Body::from(Bytes::from_owner(content)));
         *response.status_mut() = StatusCode::OK;
         let headers = response.headers_mut();
+        for (name, value) in metadata {
+            headers.insert(name, value);
+        }
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/octet-stream"),
@@ -4338,6 +4372,7 @@ impl From<serde_json::Error> for ControlError {
 
 #[cfg(test)]
 mod tests {
+    mod access_console_wire;
     mod audit_publish;
     mod case_close;
     mod case_collection;
@@ -5481,6 +5516,17 @@ mod tests {
         assert_eq!(content.headers()[CONTENT_TYPE], "application/octet-stream");
         assert_eq!(content.headers()["cache-control"], "private, no-store");
         assert_eq!(content.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(content.headers()["x-xshield-tenant-id"], "tenant_a");
+        assert_eq!(content.headers()["x-xshield-site-id"], "site_a");
+        assert_eq!(content.headers()["x-xshield-artifact-id"], artifact_id);
+        assert_eq!(
+            content.headers()[EVIDENCE_ACCESS_REQUEST_HEADER],
+            access_request_id
+        );
+        assert!(
+            RequestId::parse(content.headers()["x-xshield-request-id"].to_str().unwrap()).is_ok()
+        );
+        assert_eq!(content.headers()["content-length"], "17");
         assert_eq!(
             content.headers()[CONTENT_DISPOSITION],
             "attachment; filename=\"evidence.bin\""

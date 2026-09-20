@@ -23,7 +23,9 @@ if (
 const readPath =
   /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls\/mdl_[a-f0-9-]+|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|cases(?:\/case_[a-f0-9-]+\/items)?)$/;
 const writePath =
-  /^\/control\/v1\/(?:cases|cases\/case_[a-f0-9-]+\/(?:items|close))$/;
+  /^\/control\/v1\/(?:cases|cases\/case_[a-f0-9-]+\/(?:items|close)|artifacts\/artifact_[a-f0-9-]+\/access|evidence-access-requests\/access_[a-f0-9-]+\/(?:approve|deny))$/;
+const accessReadPath =
+  /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content)$/;
 
 export default defineConfig({
   server: {
@@ -51,7 +53,9 @@ export default defineConfig({
         bypass(request, response) {
           const path = (request.url ?? "").split("?")[0] ?? "";
           const allowed =
-            (request.method === "GET" && readPath.test(path)) ||
+            (request.method === "GET" &&
+              (readPath.test(path) ||
+                (request.url === path && accessReadPath.test(path)))) ||
             (request.method === "POST" &&
               (request.url === "/control/v1/search" ||
                 (request.url === path && writePath.test(path))));

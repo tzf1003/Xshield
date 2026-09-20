@@ -4,6 +4,8 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 案件工作台另外调用本人案件列表和集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。
 
+证据访问工作台调用申请、详情、批准/拒绝及内容端点，分别校验 Investigator、申请主体或 Approver、独立 Approver、获批主体 Reader。详情显示原始理由、审批历史与目标状态，原文通过显式附件下载交付。
+
 ## 本地运行
 
 使用 Node.js 22.12+（22 系列）或 24+，在此目录执行：
@@ -15,7 +17,7 @@ npm run dev
 
 页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发固定只读 GET、案件列表/集合 GET、精确 `POST /control/v1/search` 及案件创建/关联/关闭路径；写路径拒绝附加查询串。剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次成功响应后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发固定调查 GET、案件列表/集合 GET、证据申请详情/内容 GET、精确 `POST /control/v1/search` 及案件和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次成功响应后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
@@ -41,6 +43,16 @@ npm run dev
 
 写入后表单冻结原键、目标及参数。首次明确拒绝可重新准备操作，未知结果只能原样重试；后续拒绝不能消除早先未知结果。冻结请求在调查类型切换时保留，401、闲置、页面离开、刷新或断连后清空。未确认操作触发原生离页提醒；操作者须先安全保管界面显示的原路径、键和正文，重新鉴权后填写这些值恢复，禁止用新键推断重试不会产生重复创建。默认键来自浏览器随机 UUID，键不作为授权凭证。
 
+## 证据访问工作台
+
+选择“证据访问”，填写本人案件 ID、证据 ID、申请理由和幂等键，提交后保存返回的申请 ID。申请人可以读取自己的详情，同站点独立审批人可用该 ID 读取并复核申请人、理由、目标、历史决策和数据库观察时间。批准须填写理由和明确秒数，受服务端上限及证据期限限制；拒绝可终结目标已失效的 pending 申请。每次操作仍由服务端重新检查角色、主体和当前状态。
+
+变更冻结原路径、原键和正文，未知结果只允许原样重试；切换调查类型保留恢复参数，401、闲置、页面离开、刷新和断连清空会话。刷新后可显式勾选恢复原访问申请，或读取详情并恢复原审批请求，由服务端确认精确幂等结果；恢复后遭拒绝仍保持未知，直至有效成功响应确认原操作。申请/批准/拒绝的结果与附件读取分别记录管理请求 ID。
+
+获批申请人以 SensitiveEvidenceReader 凭证读取详情后点击“下载原文（.bin）”。客户端校验二进制响应的服务端范围、申请/证据目标、媒体类型、附件属性和完整字节长度，15 秒总期限内有界读取至多 64 MiB，保留字节形成 Blob，并交给浏览器保存 `.bin` 文件。原文不进入页面内容或持久浏览器存储，临时对象 URL 在使用后释放；清态或切换目标抑制晚到下载。浏览器内存与系统下载管理器不提供可靠清零保证；已交给浏览器的附件由操作者管理，界面提示不证明磁盘保存完成。
+
+控制服务须先升级以提供 29.13 的六个二进制身份/长度响应头，代理必须透传并禁止缓存与正文日志。详情和当前 approved 状态仅供复核，不代替内容端点的重新授权。企业身份、MFA、再认证及服务端浏览器会话仍为生产启用前置要求。
+
 ## 构建与部署边界
 
 ```sh
@@ -55,7 +67,7 @@ npm run build
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据内容审批、模型调用列表与导出界面属于后续独立闭环。
+API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。模型调用列表与批量导出界面属于后续独立闭环。
 
 ## 验证
 
@@ -69,6 +81,7 @@ cargo test -p xshield-control --lib console_client_ -- --ignored
 # 需要已应用迁移的隔离测试 PostgreSQL；设置 XSHIELD_TEST_DATABASE_URL：
 cargo test -p xshield-control --lib console_ledger_client_reads_postgres_http_contract -- --ignored
 cargo test -p xshield-control --lib console_case_client_mutates_postgres_http_contract -- --ignored
+cargo test -p xshield-control --lib console_access_client_mutates_postgres_and_reads_vault_http_contract -- --ignored
 # 或使用仓库的自动隔离建库、迁移和清理流程（包含上述账本 wire）：
 scripts/test_postgres.sh
 ```
@@ -82,6 +95,8 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
 账本 Node 回归覆盖目标/版本/空值、状态与代际一致性、微秒到期边界、未知字段投影和固定错误诊断。浏览器验证资格→绑定/来源请求、显式历史检索、生命周期状态、权限失败与会话隔离。独立账本 wire 使用真实 PostgreSQL 测试数据、Axum 路由、Node 客户端和加密管理 journal；范围为隔离合成记录，不代表生产数据或企业身份入口验收。
 
 案件 Node 回归验证固定路径与键、UTF-8/控制字符边界、目标/状态/分页一致性及显式重试；本人列表额外验证严格降序、游标位置和白名单投影。浏览器覆盖列表分页/打开、创建→浏览→关联→关闭、断网/超时与原键恢复、未知后再次拒绝、切换调查类型和目标后的冻结参数、401/闲置/刷新清态、独立 Observer 权限、文本注入及桌面/移动布局。案件 wire 使用真实 PostgreSQL、Axum 和 Node 客户端，覆盖本人 open/closed 列表、范围隔离、连接池整体超时、SQL 锁超时、断连创建恢复、幂等重试/冲突、关联及分页、关闭后约束、外部所有者不可用、401/403，并复核案件、outbox 和管理 journal。独立列表故障测试验证断连后完成审计、预读坏行整页拒绝和审计失败扣留结果。测试仅使用隔离合成记录。
+
+证据访问 Node 测试覆盖请求与决策的规范参数、精确重放、微秒期限和历史状态、未知字段投影、二进制目标/范围/安全响应头、实际长度、64 MiB 上限、单字节分块、取消与读体超时。浏览器使用合成响应验证申请→复核→批准/拒绝→精确字节下载、恢复未知操作、历史状态限制、会话清理、错绑/跨范围响应、晚到下载抑制、文本注入和桌面/移动布局。独立 wire 使用真实 PostgreSQL、Axum、Node 客户端和加密 vault，验证独立审批、幂等冲突、17 字节原文、过期/关闭约束及 outbox/管理审计；不访问生产证据或企业身份服务。
 
 ## 依赖与维护
 

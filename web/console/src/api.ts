@@ -58,6 +58,13 @@ import type {
   CaseItemAdded,
   CaseClosed,
 } from "./cases.ts";
+import {
+  validateAccessId, decodeAccessRequested, decodeAccessInspection,
+  decodeAccessDecision, accessPattern,
+} from "./evidence-access.ts";
+import type {
+  AccessRequested, AccessInspection, AccessDecision, EvidenceDownload,
+} from "./evidence-access.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -583,10 +590,13 @@ async function readJson(
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let size = 0;
   let body = "";
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
     while (true) {
       signal.throwIfAborted();
       const chunk = await reader.read();
+      signal.throwIfAborted();
       if (chunk.done) break;
       size += chunk.value.byteLength;
       if (size > maxBytes)
@@ -603,9 +613,77 @@ async function readJson(
     if (signal.aborted || error instanceof ApiError) throw error;
     throw new ApiError("INVALID_RESPONSE", response.status);
   } finally {
+    signal.removeEventListener("abort", cancel);
     // Cancellation need not wait for a remote stream to acknowledge it.
     void reader.cancel().catch(() => {});
     reader.releaseLock();
+  }
+}
+
+const maxEvidenceBytes = 64 * 1024 * 1024;
+async function readEvidence(
+  response: Response, signal: AbortSignal, artifactId: string, accessId: string,
+): Promise<EvidenceDownload> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    // Validate every header before taking a body reader. Filenames are fixed
+    // locally; server-controlled disposition values never become browser URLs.
+    ensure(response.status === 200);
+    const headers = response.headers;
+    const base = envelope({
+      request_id: headers.get("X-Xshield-Request-Id"),
+      tenant_id: headers.get("X-Xshield-Tenant-Id"),
+      site_id: headers.get("X-Xshield-Site-Id"),
+    });
+    ensure(id(headers.get("X-Xshield-Artifact-Id"), artifactPattern) === artifactId);
+    ensure(id(headers.get("X-Xshield-Evidence-Access-Request"), accessPattern) === accessId);
+    ensure(headers.get("content-type") === "application/octet-stream");
+    ensure(headers.get("content-disposition") === 'attachment; filename="evidence.bin"');
+    ensure(headers.get("x-content-type-options") === "nosniff");
+    const cache = headers.get("cache-control")?.split(",").map((v) => v.trim().toLowerCase());
+    ensure(cache?.includes("private") && cache.includes("no-store") && !cache.includes("public"));
+    ensure(headers.get("content-encoding") === null);
+    const length = headers.get("content-length");
+    ensure(length !== null && /^(0|[1-9][0-9]*)(?![\s\S])/.test(length));
+    const expected = Number(length);
+    ensure(Number.isSafeInteger(expected));
+    if (expected > maxEvidenceBytes) throw new ApiError("RESPONSE_TOO_LARGE");
+    ensure(response.body !== null);
+    reader = response.body.getReader();
+    const buffer = new Uint8Array(expected);
+    let bytes = 0;
+    // Native fetch aborts its body, but an explicit cancellation bridge also
+    // covers an already-delivered or application-provided stalled stream.
+    const cancel = () => { void reader?.cancel().catch(() => {}); };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      while (true) {
+        signal.throwIfAborted();
+        const chunk = await reader.read();
+        signal.throwIfAborted();
+        if (chunk.done) break;
+        const next = bytes + chunk.value.byteLength;
+        if (next > maxEvidenceBytes) throw new ApiError("RESPONSE_TOO_LARGE");
+        ensure(next <= expected);
+        buffer.set(chunk.value, bytes);
+        bytes = next;
+      }
+      ensure(bytes === expected);
+      return { ...base, artifact_id: artifactId, access_request_id: accessId,
+        bytes, blob: new Blob([buffer], { type: "application/octet-stream" }) };
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      // One bounded buffer avoids per-chunk allocation amplification. Blob
+      // construction copies it; clear this owned intermediate on every path.
+      buffer.fill(0);
+    }
+  } finally {
+    if (reader) {
+      void reader.cancel().catch(() => {});
+      reader.releaseLock();
+    } else {
+      void response.body?.cancel().catch(() => {});
+    }
   }
 }
 
@@ -642,6 +720,19 @@ export class ControlClient {
     body?: string,
     idempotencyKey?: string,
   ): Promise<T> {
+    return this.#transport(path, async (response, combined) =>
+      decode(await readJson(response, combined), response.status),
+    signal, body, idempotencyKey);
+  }
+
+  async #transport<T>(
+    path: string,
+    consume: (response: Response, signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+    body?: string,
+    idempotencyKey?: string,
+    accessId?: string,
+  ): Promise<T> {
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), 15_000);
     const combined = signal
@@ -654,7 +745,8 @@ export class ControlClient {
         method: body === undefined ? "GET" : "POST",
         headers: {
           Authorization: this.#authorization,
-          Accept: "application/json",
+          Accept: accessId === undefined ? "application/json" : "application/octet-stream",
+          ...(accessId === undefined ? {} : { "X-Xshield-Evidence-Access-Request": accessId }),
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           ...(idempotencyKey === undefined
             ? {}
@@ -668,8 +760,8 @@ export class ControlClient {
         signal: combined,
       });
       status = response.status;
-      const value = await readJson(response, combined);
       if (!response.ok) {
+        const value = await readJson(response, combined);
         const row = object(value);
         const requestId =
           typeof row.request_id === "string" &&
@@ -685,7 +777,7 @@ export class ControlClient {
             : "HTTP_ERROR";
         throw new ApiError(code, status, requestId);
       }
-      return decode(value, status);
+      return await consume(response, combined);
     } catch (error) {
       if (signal?.aborted) throw new ApiError("REQUEST_ABORTED", status);
       if (deadline.signal.aborted)
@@ -1037,6 +1129,62 @@ export class ControlClient {
       JSON.stringify({ reason }),
       key,
     );
+  }
+
+  /** Submit one access application. Preserve its key and exact parameters for
+   * uncertain results; only an explicit replay can establish durable status. */
+  async requestEvidenceAccess(
+    artifactId: string, caseId: string, justification: string, key: string,
+    signal?: AbortSignal,
+  ): Promise<AccessRequested> {
+    if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
+      throw new ApiError("CONTROL_ARTIFACT_ID_INVALID");
+    validateCaseId(caseId);
+    if (!validCaseText(justification))
+      throw new ApiError("CONTROL_EVIDENCE_ACCESS_REQUEST_INVALID");
+    this.#idempotencyKey(key);
+    return this.#request(`artifacts/${artifactId}/access`,
+      (value, status) => decodeAccessRequested(value, artifactId, caseId, status),
+      signal, JSON.stringify({ case_id: caseId, access_kind: "sensitive_raw", justification }), key);
+  }
+
+  /** Inspect one scoped historical record, with server-side access auditing. */
+  async evidenceAccess(accessId: string, signal?: AbortSignal): Promise<AccessInspection> {
+    validateAccessId(accessId);
+    return this.#request(`evidence-access-requests/${accessId}`, (value, status) => {
+      ensure(status === 200);
+      return decodeAccessInspection(value, accessId);
+    }, signal);
+  }
+
+  /** Record an independent decision once. Server role, ownership and expiry
+   * checks are authoritative; failures retain the exact caller-owned retry input. */
+  async decideEvidenceAccess(
+    accessId: string, decision: "approve" | "deny", reason: string,
+    ttlSeconds: number | null, key: string, signal?: AbortSignal,
+  ): Promise<AccessDecision> {
+    validateAccessId(accessId);
+    if (!validCaseText(reason) || !["approve", "deny"].includes(decision) ||
+        (decision === "deny" ? ttlSeconds !== null :
+          typeof ttlSeconds !== "number" || !Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 86400))
+      throw new ApiError("CONTROL_EVIDENCE_ACCESS_DECISION_INVALID");
+    this.#idempotencyKey(key);
+    return this.#request(`evidence-access-requests/${accessId}/${decision}`,
+      (value, status) => decodeAccessDecision(value, accessId, decision, ttlSeconds, status),
+      signal, JSON.stringify(decision === "approve" ? { reason, ttl_seconds: ttlSeconds } : { reason }), key);
+  }
+
+  /** Fetch a bounded binary attachment under fresh server authorization. The
+   * entire request and body share one deadline; the caller owns Blob disposal. */
+  async downloadEvidence(
+    artifactId: string, accessId: string, signal?: AbortSignal,
+  ): Promise<EvidenceDownload> {
+    if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
+      throw new ApiError("CONTROL_ARTIFACT_ID_INVALID");
+    validateAccessId(accessId);
+    return this.#transport(`artifacts/${artifactId}/content`,
+      (response, combined) => readEvidence(response, combined, artifactId, accessId),
+      signal, undefined, undefined, accessId);
   }
 
   #idempotencyKey(key: string): void {

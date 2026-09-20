@@ -127,6 +127,8 @@ Authorization 与访问申请头必须各自单值，不接受查询串；重复
 
 成功响应为 `application/octet-stream` 的 `attachment`，设置 `Cache-Control: private, no-store` 与 `X-Content-Type-Options: nosniff`，不返回下载 URL。内容释放前写入独立加密管理审计 `evidence.read`，绑定 access request、artifact 和 evidence ref，并记录实际字节数；审计、数据库、vault 或完整性依赖失败返回 503，响应正文不泄露资源归属或内部错误。
 
+二进制成功响应通过 `X-Xshield-Request-Id`、`X-Xshield-Tenant-Id`、`X-Xshield-Site-Id`、`X-Xshield-Artifact-Id`、`X-Xshield-Evidence-Access-Request` 提供管理请求、已认证范围和精确目标，并用 `Content-Length` 声明完整字节数。控制台须核对这些头、媒体类型、附件属性、实际长度及当前会话范围后才生成临时下载对象；代理需透传这些头。旧客户端可忽略新增头，新下载界面须在控制服务升级后启用。服务端读取审计证明内容已准备释放，不证明浏览器收到或用户保存成功。
+
 本地整对象 MVP 每个 EvidenceReadPort 同时保留一个读取/响应对象：许可在调度解密前获取，并随清零明文缓冲交给 HTTP 响应，直到最后一个响应字节引用释放；取消请求不会提前归还仍在执行的解密许可。容量占满返回带独立审计的 `CONTROL_EVIDENCE_READ_CAPACITY_EXHAUSTED`/503。缓冲直接移交给响应，避免额外完整明文复制；需要并发大对象下载时再引入按字节计费的共享预算和分块读取。
 
 内容请求另持有 29.11 的共享操作许可，覆盖数据库授权、vault 解密及耐久读取审计；它在响应构造完成后释放，整对象许可继续随响应缓冲保留。已准入任务断连后仍完成终态审计并丢弃无人接收的清零缓冲，不记录为客户端已收到内容。15 秒预算仅覆盖数据库操作，本地有界文件读取、解密与审计 fsync 完成后才释放各自资源；审计失败始终扣留明文。

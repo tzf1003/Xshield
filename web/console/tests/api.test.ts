@@ -1552,7 +1552,7 @@ test("ledger failures retain safe diagnostics and cancelled requests do not star
   }
 });
 
-test("development proxy permits fixed reads and exact search/case POST routes", async () => {
+test("development proxy permits fixed investigation and evidence access routes", async () => {
   const { default: config } = await import("../vite.config.ts");
   const proxy = config.server?.proxy?.["/control/"];
   assert.ok(proxy && typeof proxy !== "string" && proxy.bypass);
@@ -1586,7 +1586,17 @@ test("development proxy permits fixed reads and exact search/case POST routes", 
     ["POST", "/control/v1/cases?tenant=other", false],
     ["POST", "/control/v1/cases/", false],
     ["POST", `/control/v1/requests/${REQUEST_ID}`, false],
-    ["GET", `/control/v1/artifacts/${ARTIFACT_ID}/content`, false],
+    ["GET", `/control/v1/artifacts/${ARTIFACT_ID}/content`, true],
+    ["GET", `/control/v1/artifacts/${ARTIFACT_ID}/content?`, false],
+    ["POST", `/control/v1/artifacts/${ARTIFACT_ID}/content`, false],
+    ["POST", `/control/v1/artifacts/${ARTIFACT_ID}/access`, true],
+    ["POST", `/control/v1/artifacts/${ARTIFACT_ID}/access?scope=other`, false],
+    ["GET", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041", true],
+    ["GET", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041?", false],
+    ["POST", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve", true],
+    ["POST", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/deny", true],
+    ["POST", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve?", false],
+    ["GET", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve", false],
     ["POST", `/control/v1/grants/${GRANT_ID}`, false],
     ["DELETE", `/control/v1/auth-bindings/${BINDING_ID}`, false],
     ["GET", `/control/v1/grants/${GRANT_ID}/revoke`, false],

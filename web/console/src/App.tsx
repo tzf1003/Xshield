@@ -7,6 +7,7 @@ import { SearchPanel } from "./SearchPanel";
 import type { SearchPreset } from "./SearchPanel";
 import { LedgerPanel } from "./LedgerPanel";
 import { CasePanel } from "./CasePanel";
+import { EvidenceAccessPanel } from "./EvidenceAccessPanel";
 import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
@@ -26,8 +27,15 @@ import {
 } from "./panels";
 
 type Problem = { message: string; code: string; requestId?: string | null };
-type Channel = "query" | "events" | "evidence" | "artifact" | "case";
-type QueryKind = "request" | "model" | "grant" | "binding" | "search" | "case";
+type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access";
+type QueryKind =
+  | "request"
+  | "model"
+  | "grant"
+  | "binding"
+  | "search"
+  | "case"
+  | "access";
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
@@ -68,6 +76,7 @@ export function App() {
     evidence: 0,
     artifact: 0,
     case: 0,
+    access: 0,
   });
   const scope = useRef<{ tenant_id: string; site_id: string } | null>(null);
   const [connected, setConnected] = useState(false);
@@ -245,7 +254,12 @@ export function App() {
   }
   function query(event: FormEvent) {
     event.preventDefault();
-    if (queryKind === "search" || queryKind === "case") return;
+    if (
+      queryKind === "search" ||
+      queryKind === "case" ||
+      queryKind === "access"
+    )
+      return;
     clearResults();
     const target = requestId.trim();
     setRequestId(target);
@@ -358,6 +372,7 @@ export function App() {
     binding: "身份绑定调查",
     search: "结构化事件检索",
     case: "案件工作台",
+    access: "证据访问",
   }[queryKind];
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
@@ -427,7 +442,9 @@ export function App() {
                 ? "按时间与事件字段检索，核对直接引用的历史事实。"
                 : queryKind === "case"
                   ? "建立本人调查案件，核对证据引用与案件状态。"
-                  : "核对当前账本的状态、代际与期限。"}
+                  : queryKind === "access"
+                    ? "复核访问申请，通过独立审批后按需下载证据原文。"
+                    : "核对当前账本的状态、代际与期限。"}
         </p>
         {sessionNotice && (
           <div className="notice" role="status">
@@ -480,13 +497,15 @@ export function App() {
                       ? "search"
                       : event.target.value === "case"
                         ? "case"
-                        : event.target.value === "grant"
-                          ? "grant"
-                          : event.target.value === "binding"
-                            ? "binding"
-                            : event.target.value === "model"
-                              ? "model"
-                              : "request",
+                        : event.target.value === "access"
+                          ? "access"
+                          : event.target.value === "grant"
+                            ? "grant"
+                            : event.target.value === "binding"
+                              ? "binding"
+                              : event.target.value === "model"
+                                ? "model"
+                                : "request",
                   );
                 }}
               >
@@ -496,31 +515,34 @@ export function App() {
                 <option value="binding">身份绑定</option>
                 <option value="search">结构化事件检索</option>
                 <option value="case">案件工作台</option>
+                <option value="access">证据访问</option>
               </select>
-              {queryKind !== "search" && queryKind !== "case" && (
-                <>
-                  <label htmlFor="request-id">{queryLabels[queryKind]}</label>
-                  <input
-                    id="request-id"
-                    className="mono"
-                    placeholder={`${queryPrefixes[queryKind]}_…`}
-                    value={requestId}
-                    onChange={(e) => {
-                      clearResults();
-                      setRequestId(e.target.value);
-                    }}
-                    autoComplete="off"
-                    spellCheck={false}
-                    maxLength={queryPrefixes[queryKind].length + 37}
-                    required
-                    pattern={`${queryPrefixes[queryKind]}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
-                    title={`请输入规范的 ${queryPrefixes[queryKind]}_ 前缀 UUIDv7`}
-                  />
-                  <button type="submit" disabled={busy.query}>
-                    {busy.query ? "查询中…" : "查询"}
-                  </button>
-                </>
-              )}
+              {queryKind !== "search" &&
+                queryKind !== "case" &&
+                queryKind !== "access" && (
+                  <>
+                    <label htmlFor="request-id">{queryLabels[queryKind]}</label>
+                    <input
+                      id="request-id"
+                      className="mono"
+                      placeholder={`${queryPrefixes[queryKind]}_…`}
+                      value={requestId}
+                      onChange={(e) => {
+                        clearResults();
+                        setRequestId(e.target.value);
+                      }}
+                      autoComplete="off"
+                      spellCheck={false}
+                      maxLength={queryPrefixes[queryKind].length + 37}
+                      required
+                      pattern={`${queryPrefixes[queryKind]}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
+                      title={`请输入规范的 ${queryPrefixes[queryKind]}_ 前缀 UUIDv7`}
+                    />
+                    <button type="submit" disabled={busy.query}>
+                      {busy.query ? "查询中…" : "查询"}
+                    </button>
+                  </>
+                )}
             </form>
             <Failure problem={problems.query ?? null} />
             <div hidden={queryKind !== "case"}>
@@ -539,7 +561,18 @@ export function App() {
                 }
               />
             </div>
-            {queryKind === "case" ? null : queryKind === "search" ? (
+            <div hidden={queryKind !== "access"}>
+              <EvidenceAccessPanel
+                active={queryKind === "access"}
+                busy={Boolean(busy.access)}
+                onInvalidate={clearResults}
+                onRun={(fetcher, apply, fail) =>
+                  run("access", fetcher, apply, fail)
+                }
+              />
+            </div>
+            {queryKind === "case" ||
+            queryKind === "access" ? null : queryKind === "search" ? (
               <SearchPanel
                 response={search}
                 initialFilter={searchPreset}
