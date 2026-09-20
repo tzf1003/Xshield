@@ -53,6 +53,8 @@ PostgreSQL 首版在同一短事务中锁定当前 binding，重验主体、授�
 
 分享发行使用独立的 `share_issuance_rules` 映射发行 operation/view 到有限读取 operation/view。事务重新锁定当前认证 binding，并精确核对发行者持有的活动 ResourceGrant、资源 HMAC、auth epoch、活动策略、规则和 TTL；分享期限不得超过认证、来源资格或规则上限。幂等 key 的全部授权语义一致时返回原 share ID，任何字段变化均冲突；每个发行者的活动分享容量在同一行锁下检查。ShareGrant 与 `share.issued` outbox 事件同事务提交，任一写入失败都不产生凭证记录。
 
+`ShareIssueApi` 库入口现在从已验证的发行事实构造完整 v3 事件，再执行上述事务；调用方不再传入任意 JSON envelope。share ID 使用稳定 event ID 的 UUID 部分，重试必须冻结 event ID、issuance key、request/trace、发行时间和全部授权字段；数据库同时核对原 share、发行时间及原 outbox 正文，检查当前撤销状态与数据库实时时钟。来源资格的策略版本必须等于发行版本，关联界面动作须活动且完整覆盖资格的身份、操作、view 与期限；这些授权行在事务内保持锁定，精确重试也等待分享撤销事务完成。取得授权锁后与插入后提交前重新检查期限，跨期等待会回滚发行。分享凭证明文仅在提交或精确重试成功后释放，事件不包含凭证、凭证指纹或 issuance key。历史随机 share ID 或稀疏事件不自动改写，也不据此重发凭证。库入口已提供，实际 HTTP 响应发行适配器仍待接入；现有分享读取入口保持独立。
+
 兑换后为接收者建立 LIMITED_SHARE 上下文，与分享者 Cookie 不必相同；不会扩大为完整用户身份。只读不等于可转分享，病例摘要不等于患者全量信息。附件、视频分片、Range 访问需单独或可证明收缩的子资格。重复读取与单次写请求 nonce 分离。
 
 ## 6.6 服务身份

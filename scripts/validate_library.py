@@ -506,6 +506,134 @@ def check_response_grant_contracts(schema: dict) -> None:
                   event_id=first['event_id'], request_id=first['request_id'])
     check('outbox:response_grant:reject_legacy_sparse', not valid(schema, sparse))
 
+def check_share_grant_contracts(schema: dict) -> None:
+    """Validate share issuance shape; Rust owns row and cross-field checks."""
+    issued = 1_789_776_000
+    event_id = 'ev_018f2a3b-4c5d-7000-8000-000000000021'
+    base = {
+        'schema_version': 3, 'event_type': 'share.issued', 'event_id': event_id,
+        'tenant_id': 'tenant_demo', 'site_id': 'site_demo',
+        'request_id': 'req_018f2a3b-4c5d-7000-8000-000000000023',
+        'trace_id': '018f2a3b4c5d70008000000000000023', 'span_id': '018f2a3b4c5d7023',
+        'producer_id': 'gateway-share-grant', 'producer_boot_id': event_id,
+        'producer_seq': 1, 'request_seq': 1,
+        'occurred_at': '2026-09-19T00:00:00Z', 'observed_at': '2026-09-19T00:00:00Z',
+        'policy_revision': 'policy-r1', 'example_only': False,
+        'evidence_refs': [], 'cause_event_ids': [], 'sensitivity': 'SENSITIVE',
+        'integrity': {'state': 'pending', 'previous_hash': None, 'event_hash': None},
+        'payload': {
+            'stage': 'share_grant', 'outcome': 'PASS', 'reason_code': 'SHARE_ISSUED',
+            'share_id': event_id.replace('ev_', 'share_'),
+            'issuer_binding_id': 'auth_018f2a3b-4c5d-7000-8000-000000000032',
+            'issuer_auth_epoch': 1,
+            'issuer_grant_id': 'grant_018f2a3b-4c5d-7000-8000-000000000033',
+            'issuance_rule_id': 'profile-share-r1',
+            'issuer_operation_id': 'profile.read', 'issuer_view_profile': 'private',
+            'resource_type': 'profile', 'resource_key_hmac': 'b' * 64,
+            'operation_id': 'profile.share.read', 'view_profile': 'public',
+            'method': 'GET', 'use_policy': 'reusable_read',
+            'issued_at_unix': issued, 'expires_at_unix': issued + 60,
+        },
+    }
+    check('outbox:share_grant:valid', valid(schema, base))
+    for payload in [False, True]:
+        for field in base['payload'] if payload else base:
+            missing = copy.deepcopy(base)
+            del (missing['payload'] if payload else missing)[field]
+            check(f'outbox:share_grant:missing_{"payload" if payload else "envelope"}_{field}',
+                  not valid(schema, missing))
+    for field in ['previous_hash', 'event_hash']:
+        missing = copy.deepcopy(base)
+        del missing['integrity'][field]
+        check('outbox:share_grant:optional_integrity_' + field, valid(schema, missing))
+    for label, field, value in [
+        ('event_prefix', 'event_id', base['payload']['share_id']),
+        ('boot_prefix', 'producer_boot_id', base['request_id']),
+        ('request_prefix', 'request_id', event_id),
+        ('request_null', 'request_id', None),
+        ('share_prefix', 'share_id', event_id),
+        ('share_v4', 'share_id', base['payload']['share_id'].replace('-7000-', '-4000-')),
+        ('binding_prefix', 'issuer_binding_id', base['payload']['issuer_grant_id']),
+        ('grant_prefix', 'issuer_grant_id', base['payload']['issuer_binding_id']),
+        ('hmac_uppercase', 'resource_key_hmac', 'B' * 64),
+        ('hmac_short', 'resource_key_hmac', 'b' * 63),
+        ('hmac_newline', 'resource_key_hmac', 'b' * 64 + '\n'),
+        ('producer', 'producer_id', 'gateway-response-grant'),
+        ('sensitivity', 'sensitivity', 'INTERNAL'),
+        ('example', 'example_only', True),
+        ('stage', 'stage', 'response_grant'), ('outcome', 'outcome', 'DENY'),
+        ('reason', 'reason_code', 'GRANT_ISSUED'), ('method', 'method', 'POST'),
+        ('use_policy', 'use_policy', 'single_use'),
+        ('evidence_refs', 'evidence_refs', ['artifact_018f2a3b-4c5d-7000-8000-000000000001']),
+        ('causes', 'cause_event_ids', [event_id]),
+    ]:
+        invalid = copy.deepcopy(base)
+        (invalid['payload'] if field in invalid['payload'] else invalid)[field] = value
+        check('outbox:share_grant:reject_' + label, not valid(schema, invalid))
+    for field in ['tenant_id', 'site_id', 'policy_revision', 'issuance_rule_id',
+                  'issuer_operation_id', 'issuer_view_profile', 'resource_type',
+                  'operation_id', 'view_profile']:
+        for label, value in [('empty', ''), ('oversized', 'a' * 129), ('unicode', 'é'),
+                             ('control', 'bad\x00'), ('newline', 'bad\n')]:
+            invalid = copy.deepcopy(base)
+            (invalid['payload'] if field in invalid['payload'] else invalid)[field] = value
+            check(f'outbox:share_grant:{field}_{label}', not valid(schema, invalid))
+        boundary = copy.deepcopy(base)
+        (boundary['payload'] if field in boundary['payload'] else boundary)[field] = 'a' * 128
+        check(f'outbox:share_grant:{field}_ascii_boundary', valid(schema, boundary))
+    for field in ['producer_seq', 'request_seq']:
+        for value in [0, 2, 1.5]:
+            invalid = copy.deepcopy(base)
+            invalid[field] = value
+            check(f'outbox:share_grant:{field}_{value}', not valid(schema, invalid))
+    for field in ['issuer_auth_epoch', 'issued_at_unix', 'expires_at_unix']:
+        for label, value in [('negative', -1), ('fractional', 1.5), ('overflow', 2 ** 63)]:
+            invalid = copy.deepcopy(base)
+            invalid['payload'][field] = value
+            check(f'outbox:share_grant:{field}_{label}', not valid(schema, invalid))
+        for value in [0, 2 ** 63 - 1]:
+            boundary = copy.deepcopy(base)
+            boundary['payload'][field] = value
+            expected = value != 0 or field == 'issued_at_unix'
+            check(f'outbox:share_grant:{field}_boundary_{value}', valid(schema, boundary) == expected)
+    for field in ['unknown', 'credential', 'token', 'fingerprint', 'issuance_key',
+                  'proof_kind', 'confidence', 'confidence_status']:
+        invalid = copy.deepcopy(base)
+        invalid['payload'][field] = None
+        check('outbox:share_grant:unknown_payload_' + field, not valid(schema, invalid))
+    for field in ['extra', 'connection_id', 'agent_run_id']:
+        invalid = copy.deepcopy(base)
+        invalid[field] = None
+        check('outbox:share_grant:unknown_envelope_' + field, not valid(schema, invalid))
+    for field, value in [('state', 'sealed'), ('state', 'fixture_unsealed'),
+                         ('event_hash', 'a' * 64), ('previous_hash', 'a' * 64)]:
+        invalid = copy.deepcopy(base)
+        invalid['integrity'][field] = value
+        check(f'outbox:share_grant:integrity_{field}_{value}', not valid(schema, invalid))
+    for field in ['occurred_at', 'observed_at']:
+        for label, value in [('fractional', '2026-09-19T00:00:00.0Z'),
+                             ('offset', '2026-09-19T00:00:00+00:00'), ('invalid', 'invalid')]:
+            invalid = copy.deepcopy(base)
+            invalid[field] = value
+            check(f'outbox:share_grant:{field}_{label}', not valid(schema, invalid))
+
+    # Each field is valid alone. Rust, not JSON Schema, compares these values
+    # with the event identity and original issue time during publication.
+    for label, field, value in [
+        ('boot_mismatch', 'producer_boot_id', event_id[:-1] + '9'),
+        ('share_mismatch', 'share_id', base['payload']['share_id'][:-1] + '9'),
+        ('occurred_mismatch', 'occurred_at', '2026-09-19T01:00:00Z'),
+        ('observed_mismatch', 'observed_at', '2026-09-19T01:00:00Z'),
+        ('zero_ttl', 'expires_at_unix', issued),
+        ('negative_ttl', 'expires_at_unix', issued - 1),
+        ('overlong_ttl', 'expires_at_unix', issued + 86_401),
+    ]:
+        mismatch = copy.deepcopy(base)
+        (mismatch['payload'] if field in mismatch['payload'] else mismatch)[field] = value
+        check('outbox:share_grant:rust_only_' + label, valid(schema, mismatch))
+    sparse = dict(base['payload'], schema_version=3, event_type='share.issued', event_id=event_id)
+    check('outbox:share_grant:reject_legacy_sparse', not valid(schema, sparse))
+
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
         if 'validation' in p.parts or 'target' in p.parts: continue
@@ -587,6 +715,7 @@ def main() -> int:
     check_model_evaluation_contracts(schemas, model_stage, choice)
     check_outbox_contracts(schemas)
     check_response_grant_contracts(schemas['audit-event'])
+    check_share_grant_contracts(schemas['audit-event'])
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))
     check('fixture:all_synthetic',all(e['example_only'] for e in events) and all(c['example_only'] for c in calls))

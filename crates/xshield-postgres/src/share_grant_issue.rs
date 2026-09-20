@@ -82,9 +82,10 @@ impl PostgresIdentityStore {
     /// Issues one exact limited share after revalidating identity, resource
     /// authority, policy mapping, expiry, idempotency, and capacity.
     ///
-    /// The issuer binding row lock serializes capacity checks. The source grant,
-    /// policy, and issuance rule stay read-locked until the share and outbox event
-    /// commit atomically. Existing issuance keys never extend their lease.
+    /// The issuer binding row lock serializes capacity checks. The source action,
+    /// grant, policy, and issuance rule stay read-locked until the share and outbox event
+    /// commit atomically. Exact replays preserve the share ID, issuance time and
+    /// original outbox envelope; live database time and revocation still apply.
     ///
     /// # Errors
     /// Returns [`StoreError`] for numeric overflow, corrupt stored identifiers,
@@ -107,9 +108,15 @@ impl PostgresIdentityStore {
             transaction.rollback().await?;
             return Ok(ShareGrantWriteOutcome::Ineligible);
         }
-        if let Some(outcome) =
-            existing_outcome(&mut transaction, &command, epoch, expires_at).await?
-        {
+        let existing = existing_outcome(&mut transaction, &command, epoch, now, expires_at).await?;
+        // Row-lock predicates may have run before waiting for another writer.
+        // All locked authority leases contain this share lease, so its live
+        // deadline bounds them too. Frozen audit time must not extend it.
+        if !lease_is_live(&mut transaction, expires_at).await? {
+            transaction.rollback().await?;
+            return Ok(ShareGrantWriteOutcome::Ineligible);
+        }
+        if let Some(outcome) = existing {
             transaction.rollback().await?;
             return Ok(outcome);
         }
@@ -121,11 +128,26 @@ impl PostgresIdentityStore {
         }
 
         insert_share_and_event(&mut transaction, &command, epoch, now, expires_at).await?;
+        // Inserts can wait on constraints as well; discard both rows if that
+        // wait exhausted the lease before the transaction's commit boundary.
+        if !lease_is_live(&mut transaction, expires_at).await? {
+            transaction.rollback().await?;
+            return Ok(ShareGrantWriteOutcome::Ineligible);
+        }
         transaction.commit().await?;
         Ok(ShareGrantWriteOutcome::Created(
             command.draft.share_id.clone(),
         ))
     }
+}
+
+async fn lease_is_live(connection: &mut PgConnection, expires_at: i64) -> Result<bool, StoreError> {
+    Ok(
+        sqlx::query_scalar("SELECT to_timestamp($1) > clock_timestamp()")
+            .bind(expires_at)
+            .fetch_one(connection)
+            .await?,
+    )
 }
 
 async fn lock_eligible_binding(
@@ -140,8 +162,9 @@ async fn lock_eligible_binding(
          WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
            AND principal_ref = $4 AND authorization_context_ref = $5
            AND auth_epoch = $6 AND status = 'active'
-           AND absolute_expires_at > to_timestamp($7)
+           AND absolute_expires_at > GREATEST(to_timestamp($7), clock_timestamp())
            AND absolute_expires_at >= to_timestamp($8)
+           AND to_timestamp($8) > clock_timestamp()
          FOR UPDATE",
     )
     .bind(command.snapshot.tenant_id().as_str())
@@ -168,6 +191,17 @@ async fn source_is_eligible(
     let eligible: Option<i32> = sqlx::query_scalar(
         "SELECT 1
          FROM xshield.resource_grants resource_grant
+         JOIN xshield.ui_actions action
+           ON action.tenant_id = resource_grant.tenant_id
+          AND action.site_id = resource_grant.site_id
+          AND action.action_ref = resource_grant.action_ref
+          AND action.binding_id = resource_grant.binding_id
+          AND action.auth_epoch = resource_grant.auth_epoch
+          AND action.operation_id = resource_grant.operation_id
+          AND action.field_profile = resource_grant.view_id
+          AND action.policy_revision = resource_grant.policy_revision
+          AND resource_grant.issued_at >= action.issued_at
+          AND resource_grant.expires_at <= action.expires_at
          JOIN xshield.policy_revisions policy
            ON policy.tenant_id = resource_grant.tenant_id
           AND policy.site_id = resource_grant.site_id
@@ -182,13 +216,16 @@ async fn source_is_eligible(
            AND resource_grant.resource_type = $6 AND resource_grant.resource_key_hmac = $7
            AND resource_grant.operation_id = $8 AND resource_grant.view_id = $9
            AND resource_grant.status = 'active'
-           AND resource_grant.expires_at > to_timestamp($10)
+           AND action.status = 'active'
+           AND action.expires_at > GREATEST(to_timestamp($10), clock_timestamp())
+           AND resource_grant.expires_at > GREATEST(to_timestamp($10), clock_timestamp())
            AND resource_grant.expires_at >= to_timestamp($11)
            AND rule.rule_id = $12 AND rule.issuer_operation_id = $8
            AND rule.issuer_view_id = $9 AND rule.share_operation_id = $13
            AND rule.share_view_id = $14 AND rule.max_ttl_seconds >= $15
            AND rule.status = 'active' AND policy.status = 'active'
-         FOR SHARE OF resource_grant, policy, rule",
+           AND resource_grant.policy_revision = $16
+         FOR SHARE OF resource_grant, action, policy, rule",
     )
     .bind(command.snapshot.tenant_id().as_str())
     .bind(command.snapshot.site_id().as_str())
@@ -205,6 +242,7 @@ async fn source_is_eligible(
     .bind(command.draft.operation_id.as_str())
     .bind(command.draft.view_profile.as_str())
     .bind(ttl)
+    .bind(command.draft.policy_revision.as_str())
     .fetch_optional(connection)
     .await?;
     Ok(eligible.is_some())
@@ -214,15 +252,24 @@ async fn existing_outcome(
     connection: &mut PgConnection,
     command: &ShareGrantPersistence<'_>,
     epoch: i64,
+    issued_at: i64,
     expires_at: i64,
 ) -> Result<Option<ShareGrantWriteOutcome>, StoreError> {
     let existing = sqlx::query(
-        "SELECT share_id, issuer_binding_id, issuer_auth_epoch, issuer_grant_id,
-                issuance_rule_id, token_fingerprint, resource_type, resource_key_hmac,
-                operation_id, view_id, source_event_id, policy_revision,
-                extract(epoch FROM expires_at)::bigint AS expires_at
-         FROM xshield.share_grants
-         WHERE tenant_id = $1 AND site_id = $2 AND issuance_key = $3",
+        "SELECT share.share_id, share.issuer_binding_id, share.issuer_auth_epoch,
+                share.issuer_grant_id, share.issuance_rule_id, share.token_fingerprint,
+                share.resource_type, share.resource_key_hmac, share.operation_id, share.view_id,
+                share.source_event_id, share.policy_revision, share.status,
+                extract(epoch FROM share.issued_at)::bigint AS issued_at,
+                extract(epoch FROM share.expires_at)::bigint AS expires_at,
+                outbox.envelope AS stored_envelope, outbox.aggregate_ref AS stored_aggregate_ref,
+                outbox.event_type AS stored_event_type
+         FROM xshield.share_grants share
+         LEFT JOIN xshield.audit_outbox outbox
+           ON outbox.tenant_id = share.tenant_id AND outbox.site_id = share.site_id
+          AND outbox.event_id = share.source_event_id
+         WHERE share.tenant_id = $1 AND share.site_id = $2 AND share.issuance_key = $3
+         FOR SHARE OF share",
     )
     .bind(command.snapshot.tenant_id().as_str())
     .bind(command.snapshot.site_id().as_str())
@@ -234,8 +281,19 @@ async fn existing_outcome(
     };
     let share_id = ShareGrantId::parse(row.try_get::<&str, _>("share_id")?)
         .map_err(|_| StoreError::CorruptData("share_id"))?;
-    let same = row.try_get::<&str, _>("issuer_binding_id")?
-        == command.snapshot.binding_id().as_str()
+    if row.try_get::<&str, _>("status")? != "active" {
+        return Ok(Some(ShareGrantWriteOutcome::Ineligible));
+    }
+    let stored_envelope = row
+        .try_get::<Option<Value>, _>("stored_envelope")?
+        .ok_or(StoreError::CorruptData("share_outbox"))?;
+    if row.try_get::<Option<&str>, _>("stored_aggregate_ref")? != Some(share_id.as_str())
+        || row.try_get::<Option<&str>, _>("stored_event_type")? != Some("share.issued")
+    {
+        return Err(StoreError::CorruptData("share_outbox"));
+    }
+    let same = share_id == command.draft.share_id
+        && row.try_get::<&str, _>("issuer_binding_id")? == command.snapshot.binding_id().as_str()
         && row.try_get::<Option<i64>, _>("issuer_auth_epoch")? == Some(epoch)
         && row.try_get::<Option<&str>, _>("issuer_grant_id")?
             == Some(command.authority.resource_grant_id.as_str())
@@ -250,7 +308,9 @@ async fn existing_outcome(
         && row.try_get::<&str, _>("view_id")? == command.draft.view_profile.as_str()
         && row.try_get::<&str, _>("source_event_id")? == command.event_id.as_str()
         && row.try_get::<&str, _>("policy_revision")? == command.draft.policy_revision.as_str()
-        && row.try_get::<i64, _>("expires_at")? == expires_at;
+        && row.try_get::<i64, _>("expires_at")? == expires_at
+        && row.try_get::<i64, _>("issued_at")? == issued_at
+        && &stored_envelope == command.event_envelope;
     Ok(Some(if same {
         ShareGrantWriteOutcome::Existing(share_id)
     } else {
@@ -268,7 +328,7 @@ async fn active_share_count(
         "SELECT count(*) FROM xshield.share_grants
          WHERE tenant_id = $1 AND site_id = $2 AND issuer_binding_id = $3
            AND issuer_auth_epoch = $4 AND status = 'active'
-           AND expires_at > to_timestamp($5)",
+           AND expires_at > GREATEST(to_timestamp($5), clock_timestamp())",
     )
     .bind(command.snapshot.tenant_id().as_str())
     .bind(command.snapshot.site_id().as_str())

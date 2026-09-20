@@ -7,11 +7,11 @@ use xshield_postgres::{OutboxLeaseConfig, OutboxScope, PostgresIdentityStore};
 use xshield_worker::{
     OutboxPublisherConfig, publish_case_outbox_batch, publish_evidence_access_outbox_batch,
     publish_evidence_catalog_outbox_batch, publish_identity_outbox_batch,
-    publish_response_grant_outbox_batch,
+    publish_response_grant_outbox_batch, publish_share_grant_outbox_batch,
 };
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|identity|response_grant)";
+const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|identity|response_grant|share_grant)";
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
@@ -39,7 +39,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     };
     if !matches!(
         family.as_str(),
-        "case" | "evidence_catalog" | "evidence_access" | "identity" | "response_grant"
+        "case"
+            | "evidence_catalog"
+            | "evidence_access"
+            | "identity"
+            | "response_grant"
+            | "share_grant"
     ) {
         return Err(USAGE.into());
     }
@@ -93,6 +98,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "response_grant" => {
             publish_response_grant_outbox_batch(&store, &client, &scope, &config).await?
         }
+        "share_grant" => publish_share_grant_outbox_batch(&store, &client, &scope, &config).await?,
         _ => return Err(USAGE.into()),
     };
     println!(

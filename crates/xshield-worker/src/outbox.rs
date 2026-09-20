@@ -2,8 +2,8 @@
 //!
 //! Outbox envelopes are a different producer contract from sealed journal
 //! records. This module only accepts complete case, catalog, access, identity,
-//! and response-grant envelopes emitted by their typed producers; other families remain
-//! explicitly unsupported until their producers expose validated fields.
+//! response-grant, and share-grant envelopes emitted by their typed producers.
+//! Other families remain unsupported until their producers expose validated fields.
 
 use super::{
     IndexRow, PayloadSummary, PublishError, WireEvent, hex, insert_rows, reject_remote_conflicts,
@@ -25,6 +25,7 @@ mod clickhouse_tests;
 mod delivery_tests;
 mod identity;
 mod response_grant;
+mod share_grant;
 
 const MAX_OUTBOX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_RETRY_SECONDS: u64 = 3_600;
@@ -46,6 +47,7 @@ enum OutboxFamily {
     EvidenceAccess,
     Identity,
     ResponseGrant,
+    ShareGrant,
 }
 
 impl OutboxFamily {
@@ -56,6 +58,7 @@ impl OutboxFamily {
             Self::EvidenceAccess => EVIDENCE_ACCESS_EVENT_TYPES,
             Self::Identity => identity::EVENT_TYPES,
             Self::ResponseGrant => response_grant::EVENT_TYPES,
+            Self::ShareGrant => share_grant::EVENT_TYPES,
         }
     }
 
@@ -66,6 +69,7 @@ impl OutboxFamily {
             Self::EvidenceAccess => "access_request_id",
             Self::Identity => "binding_id",
             Self::ResponseGrant => "grant_id",
+            Self::ShareGrant => "share_id",
         }
     }
 }
@@ -73,6 +77,7 @@ impl OutboxFamily {
 pub(super) fn supports(event_type: &str) -> bool {
     identity::EVENT_TYPES.contains(&event_type)
         || response_grant::EVENT_TYPES.contains(&event_type)
+        || share_grant::EVENT_TYPES.contains(&event_type)
         || matches!(
             event_type,
             "case.created"
@@ -243,6 +248,25 @@ pub async fn publish_response_grant_outbox_batch(
     publish_outbox_batch(store, client, scope, config, OutboxFamily::ResponseGrant).await
 }
 
+/// Publishes one bounded batch of gateway share-grant issuance transactions.
+///
+/// Complete v3 envelopes bind event identity, issuer, target, and frozen issuance
+/// time. Historical sparse records remain unacknowledged with
+/// `OUTBOX_INVALID_EVENT`. This records issuance history; current authorization
+/// still requires the transactional share store. Credentials are never indexed.
+///
+/// # Errors
+/// Returns the same lease, event, and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_share_grant_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::ShareGrant).await
+}
+
 async fn publish_outbox_batch(
     store: &PostgresIdentityStore,
     client: &Client,
@@ -385,6 +409,9 @@ struct CasePayload {
 }
 
 pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    if share_grant::EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return share_grant::parse(event);
+    }
     if response_grant::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return response_grant::parse(event);
     }

@@ -23,7 +23,9 @@ xshield-postgres = { path = "../xshield-postgres" }
 zeroize.workspace = true
 
 [dev-dependencies]
+clickhouse.workspace = true
 sqlx.workspace = true
+xshield-worker = { path = "../xshield-worker" }
 
 [lints]
 workspace = true

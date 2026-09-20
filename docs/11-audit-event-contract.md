@@ -87,7 +87,7 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 `xshield-outbox-worker` 是一次有界发布 pass，按固定 tenant/site 作用域从 `xshield.audit_outbox` 领取最多 256 行及 64 MiB JSON 字节，并以 PostgreSQL `clock_timestamp()` 设置最长一小时租约。候选行使用 `FOR UPDATE SKIP LOCKED`；ClickHouse 网络操作不持有 PostgreSQL 事务锁。确认必须携带同一 event_id、作用域和未过期 lease token，旧 token 或跨作用域确认统一拒绝。发布成功后才写 `published_at`；失败释放租约、保存 `OUTBOX_INVALID_EVENT`、`OUTBOX_INDEX_UNAVAILABLE` 或 `OUTBOX_INTEGRITY_CONFLICT` 并按有界延迟重试。
 
-部署先应用 `0019_m3_outbox_delivery.sql`，然后运行 `xshield-outbox-worker TENANT_ID SITE_ID`。`XSHIELD_OUTBOX_FAMILY` 可设为 `case`（默认）、`evidence_catalog`、`evidence_access`、`identity` 或 `response_grant`，每次只领取该族。数据库配置为 `XSHIELD_DATABASE_URL`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`；索引配置为 `XSHIELD_CLICKHOUSE_URL/DATABASE/USER/PASSWORD` 和可选 `XSHIELD_CLICKHOUSE_TABLE`（默认 `audit_events`）。秘密只通过部署环境注入。
+部署先应用 `0019_m3_outbox_delivery.sql`，然后运行 `xshield-outbox-worker TENANT_ID SITE_ID`。`XSHIELD_OUTBOX_FAMILY` 可设为 `case`（默认）、`evidence_catalog`、`evidence_access`、`identity`、`response_grant` 或 `share_grant`，每次只领取该族。数据库配置为 `XSHIELD_DATABASE_URL`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`；索引配置为 `XSHIELD_CLICKHOUSE_URL/DATABASE/USER/PASSWORD` 和可选 `XSHIELD_CLICKHOUSE_TABLE`（默认 `audit_events`）。秘密只通过部署环境注入。
 
 必须配置 `XSHIELD_AUDIT_METADATA_RETENTION_DAYS`（1–3650）、`XSHIELD_OUTBOX_MAX_EVENTS`（1–256）、`XSHIELD_OUTBOX_MAX_BYTES`（1–67108864）、`XSHIELD_OUTBOX_LEASE_SECONDS` 和 `XSHIELD_OUTBOX_RETRY_SECONDS`（均为 1–3600）。一条 envelope 另受 64 KiB 解析上限约束。该命令执行一次后退出；调度器按固定作用域和族再次运行，遇错误保留退出失败供告警。当前 pass 在首个错误处停止，已领取的后续行等待租约到期再处理。
 
@@ -95,7 +95,9 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 `response_grant` 精确领取 `response_grant.issued`，只接受 `gateway-response-grant` 的完整 v3 envelope，且 `aggregate_ref` 必须等于 payload 的 `grant_id`。封闭 payload 包含 `response_grant/PASS/GRANT_ISSUED`、资格/binding/epoch/响应证据/动作引用、来源与目标 operation、GET 方法与路由、资源类型与 HMAC、view、单个 field、mapping revision、2xx 且非 204 的响应状态、正文 SHA-256、candidate_count 和发行/到期秒数。解析器重新校验强类型 ID、lowercase hex、正 epoch、1–1000 个候选及 1–86400 秒 TTL；引用或形状偏差均拒绝。
 
-五族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。其他 grant、`share.issued`、`binding.revoked` 及其他事务事件仍待交付，不得据此声称全量 outbox 已索引。
+`share_grant` 精确领取 `share.issued`，只接受 `gateway-share-grant` 的完整 v3 envelope，`aggregate_ref` 必须等于 payload 的 `share_id`，share ID 的 UUID 部分必须等于 event ID。封闭 payload 包含 `share_grant/PASS/SHARE_ISSUED`、分享 ID、发行者 binding/epoch/来源 grant/规则、来源与目标 operation/view、资源类型及 HMAC、`GET/reusable_read` 和发行/到期秒数；强类型 ID、scoped name、lowercase hex、正 bigint epoch、1–86400 秒 TTL 均重新校验。凭证、凭证指纹、issuance key 和原始资源值不进入事件。
+
+六族的 producer、policy、请求/序号、确定性 proof、重复键、未知字段和列/envelope 一致性均重新校验，不会回退到通用解析。ClickHouse 插入前后均按 event_id 比对 SHA-256 content_digest；相同 ID 的不同正文保持完整性冲突，绝不确认 PostgreSQL 行。其他 grant、`binding.revoked` 及其他事务事件仍待交付，不得据此声称全量 outbox 已索引。
 
 身份事务使用 request_id 作为独立 producer_boot_id，producer_seq/request_seq 均为 1，保留原网关请求 trace 与配置修订；两种序列不推进 journal 的序列，也不表示跨来源全序。当前时间线按 `(request_seq,event_id)` 排序，调查时应结合生产者与发生时间理解身份事件，不能以该位置推断源站先后。`identity_lifecycle` 的 PASS 是事务结果，`is_terminal=0`，不推断业务执行状态；确定性结果保持 `confidence=null/not_applicable`。主体/上下文引用与新旧凭证 HMAC 保留在 `SENSITIVE` payload_json，脱敏查询摘要不返回该载荷，普通检索不授予认证权力。
 
@@ -103,4 +105,6 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 请求摘要的 method 仅来自 `request.accepted` 或 `control_access`，operation 仅来自 `request.accepted` 或请求阶段事实。资格事件中的目标方法与操作保留为事件字段；只有资格历史时，请求摘要中的来源方法与操作保持空值，等待请求上下文事件。
 
-身份与响应资格生产者升级把原顶层业务字段移至完整 envelope 的 `payload`，运行中的生产者与发布器应配套升级。历史稀疏行保留原文、保持未确认并记录 `OUTBOX_INVALID_EVENT`、延迟重试；不会以当前状态补造历史时间或来源。上线前应盘点历史积压并保留原始证据，监控错误码及积压；当前首错停批会使已领取的后续行等待租约到期。发布器不重放身份转换、不重新发行资格，也不回滚已提交的状态。
+分享发行库 API 用完整 event ID 作为独立 producer_boot_id，producer_seq/request_seq 均为 1；同一请求可产生多个独立分享，request_id 保留原请求。occurred_at/observed_at 同时等于冻结 issued_at_unix 的规范 UTC 整秒编码，重试沿用原值。`share_grant` 摘要保留 `PASS/SHARE_ISSUED`、GET 和目标 operation，`confidence=null/not_applicable`、`is_terminal=0`，不推导跨生产者全序或客户端收到凭证；`SENSITIVE` payload 的 evidence_refs/cause_event_ids 为空。HTTP 响应发行适配器仍待交付。
+
+身份、响应资格与分享发行生产者升级把原顶层业务字段移至完整 envelope 的 `payload`，运行中的生产者与发布器应配套升级。历史稀疏行保留原文、保持未确认并记录 `OUTBOX_INVALID_EVENT`、延迟重试；不会以当前状态补造历史时间或来源。分享库 API 同时要求稳定 event/share ID 和完整精确重试正文，旧随机 share ID 或稀疏正文不匹配时拒绝重试，不重新发行凭证。上线前应盘点历史积压并保留原始证据，监控错误码及积压；当前首错停批会使已领取的后续行等待租约到期。发布器不重放身份转换、不重新发行资格，也不回滚已提交的状态。

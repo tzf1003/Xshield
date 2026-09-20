@@ -3237,6 +3237,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "clickhouse",
  "http",
  "openssl",
  "pingora",
@@ -3249,6 +3250,7 @@ dependencies = [
  "xshield-core",
  "xshield-evidence",
  "xshield-postgres",
+ "xshield-worker",
  "zeroize",
 ]
 

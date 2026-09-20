@@ -80,6 +80,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
             OutboxFamily::ResponseGrant,
             vec![response_grant::tests::event()],
         ),
+        (OutboxFamily::ShareGrant, vec![share_grant::tests::event()]),
     ] {
         for envelope in envelopes {
             let stored = insert_event(pool, scope, family, envelope).await;
@@ -100,6 +101,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
         (OutboxFamily::EvidenceAccess, 3),
         (OutboxFamily::Identity, 4),
         (OutboxFamily::ResponseGrant, 1),
+        (OutboxFamily::ShareGrant, 1),
     ] {
         let mock = test::Mock::new();
         let mut insertions = Vec::new();
@@ -140,7 +142,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
     }
     let published: i64 = sqlx::query_scalar("SELECT count(*) FROM xshield.audit_outbox WHERE tenant_id = $1 AND published_at IS NOT NULL AND lease_token IS NULL")
         .bind(scope.tenant_id().as_str()).fetch_one(pool).await.unwrap();
-    assert_eq!(published, 13);
+    assert_eq!(published, 14);
     let attempts: i32 = sqlx::query_scalar(
         "SELECT delivery_attempts FROM xshield.audit_outbox WHERE event_id = $1",
     )
@@ -321,47 +323,54 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope) {
             .unwrap();
     assert_eq!(preserved, legacy);
 
-    for sparse in [false, true] {
-        let stored = insert_event(
-            pool,
-            scope,
-            OutboxFamily::ResponseGrant,
-            response_grant::tests::event(),
-        )
-        .await;
-        let id = stored["event_id"].as_str().unwrap();
-        let mut invalid = stored.clone();
-        if sparse {
-            invalid = json!({"schema_version": 3, "event_type": "response_grant.issued",
-                "event_id": id, "grant_id": stored["payload"]["grant_id"]});
-        } else {
-            invalid["payload"]["grant_id"] = json!(format!("grant_{}", Uuid::now_v7()));
-        }
-        sqlx::query("UPDATE xshield.audit_outbox SET envelope = $2 WHERE event_id = $1")
-            .bind(id)
-            .bind(&invalid)
-            .execute(pool)
-            .await
-            .unwrap();
-        let mock = test::Mock::new();
-        assert!(
-            publish_response_grant_outbox_batch(
-                &store,
-                &Client::default().with_mock(&mock),
-                scope,
-                &config
-            )
-            .await
-            .is_err()
-        );
-        assert_failure(pool, id, INVALID_EVENT_CODE).await;
-        let preserved: Value =
-            sqlx::query_scalar("SELECT envelope FROM xshield.audit_outbox WHERE event_id = $1")
+    for (family, envelope) in [
+        (OutboxFamily::ResponseGrant, response_grant::tests::event()),
+        (OutboxFamily::ShareGrant, share_grant::tests::event()),
+    ] {
+        for sparse in [false, true] {
+            let stored = insert_event(pool, scope, family, envelope.clone()).await;
+            let id = stored["event_id"].as_str().unwrap();
+            let mut invalid = stored.clone();
+            if sparse {
+                invalid = json!({"schema_version": 3, "event_type": stored["event_type"],
+                "event_id": id, family.aggregate_field(): stored["payload"][family.aggregate_field()]});
+            } else {
+                sqlx::query(
+                    "UPDATE xshield.audit_outbox SET aggregate_ref = $2 WHERE event_id = $1",
+                )
                 .bind(id)
-                .fetch_one(pool)
+                .bind(format!("mismatched_{}", Uuid::now_v7()))
+                .execute(pool)
                 .await
                 .unwrap();
-        assert_eq!(preserved, invalid);
+            }
+            sqlx::query("UPDATE xshield.audit_outbox SET envelope = $2 WHERE event_id = $1")
+                .bind(id)
+                .bind(&invalid)
+                .execute(pool)
+                .await
+                .unwrap();
+            let mock = test::Mock::new();
+            assert!(
+                publish_outbox_batch(
+                    &store,
+                    &Client::default().with_mock(&mock),
+                    scope,
+                    &config,
+                    family
+                )
+                .await
+                .is_err()
+            );
+            assert_failure(pool, id, INVALID_EVENT_CODE).await;
+            let preserved: Value =
+                sqlx::query_scalar("SELECT envelope FROM xshield.audit_outbox WHERE event_id = $1")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            assert_eq!(preserved, invalid);
+        }
     }
 }
 
@@ -455,6 +464,17 @@ pub(super) async fn insert_event(
     event["event_id"] = json!(format!("ev_{}", Uuid::now_v7()));
     event["tenant_id"] = json!(scope.tenant_id().as_str());
     event["site_id"] = json!(scope.site_id().as_str());
+    if matches!(family, OutboxFamily::ShareGrant) {
+        event["producer_boot_id"] = event["event_id"].clone();
+        event["payload"]["share_id"] = json!(format!(
+            "share_{}",
+            event["event_id"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("ev_")
+                .unwrap()
+        ));
+    }
     sqlx::query("INSERT INTO xshield.audit_outbox (event_id,tenant_id,site_id,aggregate_ref,event_type,envelope) VALUES ($1,$2,$3,$4,$5,$6)")
         .bind(event["event_id"].as_str().unwrap()).bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str())
         .bind(event["payload"][family.aggregate_field()].as_str().unwrap()).bind(event["event_type"].as_str().unwrap())

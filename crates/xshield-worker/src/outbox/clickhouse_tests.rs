@@ -253,6 +253,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
             OutboxFamily::ResponseGrant,
             vec![response_grant::tests::event()],
         ),
+        (OutboxFamily::ShareGrant, vec![share_grant::tests::event()]),
     ] {
         for envelope in envelopes {
             let stored = insert_event(pool, scope, family, current_event(envelope)).await;
@@ -265,6 +266,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
         (OutboxFamily::EvidenceAccess, 3),
         (OutboxFamily::Identity, 4),
         (OutboxFamily::ResponseGrant, 1),
+        (OutboxFamily::ShareGrant, 1),
     ] {
         assert_eq!(
             publish_family(&store, client, scope, &config, family).await,
@@ -407,7 +409,10 @@ async fn assert_index_rows(
                 DateTime::parse_from_rfc3339(envelope["occurred_at"].as_str().unwrap()).unwrap()
             );
             assert_eq!(row.observed_at, row.occurred_at);
-            let expected_micros = if envelope["event_type"] == "response_grant.issued" {
+            let expected_micros = if matches!(
+                envelope["event_type"].as_str(),
+                Some("response_grant.issued" | "share.issued")
+            ) {
                 0
             } else {
                 123_456
@@ -447,6 +452,9 @@ async fn publish_family(
         OutboxFamily::Identity => publish_identity_outbox_batch(store, client, scope, config).await,
         OutboxFamily::ResponseGrant => {
             publish_response_grant_outbox_batch(store, client, scope, config).await
+        }
+        OutboxFamily::ShareGrant => {
+            publish_share_grant_outbox_batch(store, client, scope, config).await
         }
     }
     .unwrap()
@@ -582,7 +590,10 @@ async fn exercise_retry_and_conflict(
 }
 
 fn current_event(mut envelope: Value) -> Value {
-    if envelope["event_type"] == "response_grant.issued" {
+    if matches!(
+        envelope["event_type"].as_str(),
+        Some("response_grant.issued" | "share.issued")
+    ) {
         let now = Utc::now();
         envelope["occurred_at"] = json!(now.to_rfc3339_opts(SecondsFormat::Secs, true));
         envelope["observed_at"] = envelope["occurred_at"].clone();

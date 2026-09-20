@@ -17,11 +17,8 @@ use xshield_postgres::{
     PostgresIdentityStore, ShareGrantPersistence, ShareGrantWriteOutcome, StoreError,
 };
 
-const NOW: u64 = 1_800_000_000;
-const SESSION_EXPIRES: u64 = NOW + 2_000;
-const SOURCE_EXPIRES: u64 = NOW + 1_000;
-
 struct Fixture {
+    now: u64,
     tenant: TenantId,
     site: SiteId,
     binding_id: AuthBindingId,
@@ -29,7 +26,7 @@ struct Fixture {
     authority: ShareIssueAuthority,
 }
 
-fn fixture() -> Fixture {
+fn fixture(now: u64) -> Fixture {
     let tenant = TenantId::parse("tenant_share_issue").unwrap();
     let site = SiteId::parse("site_share_issue").unwrap();
     let binding_id = AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000a01").unwrap();
@@ -48,7 +45,7 @@ fn fixture() -> Fixture {
         AuthEpoch::new(4),
         CredentialGeneration::new(1),
         credentials.clone(),
-        UnixSeconds::new(SESSION_EXPIRES),
+        UnixSeconds::new(now + 2_000),
     )
     .unwrap();
     let snapshot = binding
@@ -57,10 +54,11 @@ fn fixture() -> Fixture {
             &site,
             &session_id,
             &credentials,
-            UnixSeconds::new(NOW),
+            UnixSeconds::new(now),
         )
         .unwrap();
     Fixture {
+        now,
         tenant,
         site,
         binding_id,
@@ -75,7 +73,7 @@ fn fixture() -> Fixture {
     }
 }
 
-fn draft(value: u64, issuance_key: &str, token: u8, resource: u8) -> ShareGrantDraft {
+fn draft(now: u64, value: u64, issuance_key: &str, token: u8, resource: u8) -> ShareGrantDraft {
     ShareGrantDraft {
         share_id: ShareGrantId::parse(format!("share_018f2a3b-4c5d-7000-8000-{value:012x}"))
             .unwrap(),
@@ -86,7 +84,7 @@ fn draft(value: u64, issuance_key: &str, token: u8, resource: u8) -> ShareGrantD
         operation_id: OperationId::parse("records.share.read").unwrap(),
         view_profile: ViewProfile::parse("shared_summary").unwrap(),
         policy_revision: PolicyRevision::parse("policy-share-r1").unwrap(),
-        expires_at: UnixSeconds::new(NOW + 300),
+        expires_at: UnixSeconds::new(now + 300),
     }
 }
 
@@ -109,7 +107,7 @@ async fn issue(
             &fixture.authority,
             event_id,
             &envelope,
-            UnixSeconds::new(NOW),
+            UnixSeconds::new(fixture.now),
             capacity,
         )?)
         .await
@@ -127,7 +125,8 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
     let pool = PgPool::connect(&database_url)
         .await
         .expect("assertion pool connects");
-    let fixture = fixture();
+    let now = database_now(&pool).await;
+    let fixture = fixture(now);
     seed(&pool, &fixture).await;
 
     let rollback_event = event_id(0xa10);
@@ -146,7 +145,7 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
         issue(
             &store,
             &fixture,
-            &draft(0xa11, "share-rollback", 62, 63),
+            &draft(now, 0xa11, "share-rollback", 62, 63),
             &rollback_event,
             1,
         )
@@ -159,7 +158,7 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
         issue(
             &store,
             &fixture,
-            &draft(0xa12, "share-unknown-resource", 64, 99),
+            &draft(now, 0xa12, "share-unknown-resource", 64, 99),
             &event_id(0xa13),
             1,
         )
@@ -168,8 +167,8 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
         ShareGrantWriteOutcome::Ineligible
     );
 
-    let mut excessive_lease = draft(0xa21, "share-excessive-lease", 71, 63);
-    excessive_lease.expires_at = UnixSeconds::new(NOW + 601);
+    let mut excessive_lease = draft(now, 0xa21, "share-excessive-lease", 71, 63);
+    excessive_lease.expires_at = UnixSeconds::new(now + 601);
     assert_eq!(
         issue(&store, &fixture, &excessive_lease, &event_id(0xa22), 1,)
             .await
@@ -177,7 +176,7 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
         ShareGrantWriteOutcome::Ineligible
     );
 
-    let first = draft(0xa14, "share-first", 65, 63);
+    let first = draft(now, 0xa14, "share-first", 65, 63);
     let first_event = event_id(0xa15);
     assert_eq!(
         issue(&store, &fixture, &first, &first_event, 1)
@@ -192,12 +191,100 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
         ShareGrantWriteOutcome::Existing(first.share_id.clone())
     );
     assert_eq!(outbox_count(&pool, first_event.as_str()).await, 1);
+    revoked_action_blocks_issuance(&store, &pool, &fixture, &first, &first_event).await;
+    source_lock_wait_preserves_expiry(&store, &pool, &fixture).await;
+    outbox_lock_wait_preserves_expiry(&store, &pool, &fixture).await;
+    replay_waits_for_share_revocation(&store, &pool, &fixture, &first, &first_event).await;
+
+    // An exact replay includes its immutable identity, time, and audit record.
+    let mut different_id = first.clone();
+    different_id.share_id = draft(now, 0xa30, "ignored", 65, 63).share_id;
+    assert_eq!(
+        issue(&store, &fixture, &different_id, &first_event, 1)
+            .await
+            .unwrap(),
+        ShareGrantWriteOutcome::Conflict
+    );
+    let envelope = json!({"schema_version": 3, "event_type": "share.issued"});
+    assert_eq!(
+        store
+            .issue_share_grant(
+                ShareGrantPersistence::new(
+                    &fixture.snapshot,
+                    &first,
+                    &fixture.authority,
+                    &first_event,
+                    &envelope,
+                    UnixSeconds::new(now + 1),
+                    1,
+                )
+                .unwrap()
+            )
+            .await
+            .unwrap(),
+        ShareGrantWriteOutcome::Conflict
+    );
+    sqlx::query(
+        "UPDATE xshield.audit_outbox SET envelope = '{\"changed\":true}' WHERE event_id = $1",
+    )
+    .bind(first_event.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        issue(&store, &fixture, &first, &first_event, 1)
+            .await
+            .unwrap(),
+        ShareGrantWriteOutcome::Conflict
+    );
+    sqlx::query("DELETE FROM xshield.audit_outbox WHERE event_id = $1")
+        .bind(first_event.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        issue(&store, &fixture, &first, &first_event, 1).await,
+        Err(StoreError::CorruptData("share_outbox"))
+    ));
+    sqlx::query("INSERT INTO xshield.audit_outbox (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope) VALUES ($1,$2,$3,$4,'share.issued',$5)")
+        .bind(first_event.as_str()).bind(fixture.tenant.as_str()).bind(fixture.site.as_str())
+        .bind(first.share_id.as_str()).bind(&envelope).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE xshield.share_grants SET status = 'revoked' WHERE share_id = $1")
+        .bind(first.share_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        issue(&store, &fixture, &first, &first_event, 1)
+            .await
+            .unwrap(),
+        ShareGrantWriteOutcome::Ineligible
+    );
+    sqlx::query("UPDATE xshield.share_grants SET status = 'active' WHERE share_id = $1")
+        .bind(first.share_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // A same-named rule in another revision cannot relabel the source authority.
+    sqlx::query("INSERT INTO xshield.policy_revisions (tenant_id,site_id,revision,status,content_digest,artifact_ref) SELECT tenant_id,site_id,'policy-other','active',content_digest,artifact_ref FROM xshield.policy_revisions WHERE tenant_id=$1 AND site_id=$2")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str()).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO xshield.share_issuance_rules (tenant_id,site_id,policy_revision,rule_id,issuer_operation_id,issuer_view_id,share_operation_id,share_view_id,max_ttl_seconds,status) SELECT tenant_id,site_id,'policy-other',rule_id,issuer_operation_id,issuer_view_id,share_operation_id,share_view_id,max_ttl_seconds,status FROM xshield.share_issuance_rules WHERE tenant_id=$1 AND site_id=$2")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str()).execute(&pool).await.unwrap();
+    let mut wrong_policy = draft(now, 0xa31, "share-wrong-policy", 74, 63);
+    wrong_policy.policy_revision = PolicyRevision::parse("policy-other").unwrap();
+    assert_eq!(
+        issue(&store, &fixture, &wrong_policy, &event_id(0xa32), 10)
+            .await
+            .unwrap(),
+        ShareGrantWriteOutcome::Ineligible
+    );
 
     assert_eq!(
         issue(
             &store,
             &fixture,
-            &draft(0xa16, "share-first", 66, 63),
+            &draft(now, 0xa16, "share-first", 66, 63),
             &first_event,
             1,
         )
@@ -209,8 +296,8 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
         .execute(&pool)
         .await
         .unwrap();
-    let left = draft(0xa17, "share-capacity-left", 67, 63);
-    let right = draft(0xa18, "share-capacity-right", 68, 63);
+    let left = draft(now, 0xa17, "share-capacity-left", 67, 63);
+    let right = draft(now, 0xa18, "share-capacity-right", 68, 63);
     let left_event = event_id(0xa19);
     let right_event = event_id(0xa20);
     let (left_outcome, right_outcome) = tokio::join!(
@@ -247,7 +334,7 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
         issue(
             &store,
             &fixture,
-            &draft(0xa23, "share-revoked-source", 72, 63),
+            &draft(now, 0xa23, "share-revoked-source", 72, 63),
             &event_id(0xa24),
             2,
         )
@@ -255,6 +342,202 @@ async fn share_issue_is_qualified_atomic_idempotent_and_bounded() {
         .unwrap(),
         ShareGrantWriteOutcome::Ineligible
     );
+
+    // Frozen audit time never authorizes an issuance after the live lease ended.
+    let old_now: i64 =
+        sqlx::query_scalar("SELECT extract(epoch FROM clock_timestamp())::bigint - 7200")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE xshield.auth_bindings SET absolute_expires_at=to_timestamp($3) WHERE tenant_id=$1 AND site_id=$2")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str()).bind(old_now + 1_000)
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE xshield.resource_grants SET status='active',issued_at=to_timestamp($3),expires_at=to_timestamp($4) WHERE tenant_id=$1 AND site_id=$2")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str()).bind(old_now - 1).bind(old_now + 1_000)
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE xshield.ui_actions SET issued_at=to_timestamp($3),expires_at=to_timestamp($4) WHERE tenant_id=$1 AND site_id=$2")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str()).bind(old_now - 1).bind(old_now + 1_000)
+        .execute(&pool).await.unwrap();
+    let mut elapsed = draft(now, 0xa33, "share-elapsed", 75, 63);
+    elapsed.expires_at = UnixSeconds::new(u64::try_from(old_now + 300).unwrap());
+    assert_eq!(
+        store
+            .issue_share_grant(
+                ShareGrantPersistence::new(
+                    &fixture.snapshot,
+                    &elapsed,
+                    &fixture.authority,
+                    &event_id(0xa34),
+                    &envelope,
+                    UnixSeconds::new(u64::try_from(old_now).unwrap()),
+                    10,
+                )
+                .unwrap()
+            )
+            .await
+            .unwrap(),
+        ShareGrantWriteOutcome::Ineligible
+    );
+}
+
+async fn database_now(pool: &PgPool) -> u64 {
+    let now: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    u64::try_from(now).unwrap()
+}
+
+async fn wait_for_blocked_issuer(pool: &PgPool, blocker_pid: i32) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker_pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("issuance must actually wait for the held row lock");
+}
+
+async fn revoked_action_blocks_issuance(
+    store: &PostgresIdentityStore,
+    pool: &PgPool,
+    fixture: &Fixture,
+    existing: &ShareGrantDraft,
+    existing_event: &EventId,
+) {
+    let pending = draft(fixture.now, 0xa35, "share-revoked-action", 76, 63);
+    let pending_event = event_id(0xa36);
+    let before = share_count(pool).await;
+    sqlx::query("UPDATE xshield.ui_actions SET status = 'revoked' WHERE tenant_id = $1 AND site_id = $2 AND action_ref = 'action_record_share'")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str()).execute(pool).await.unwrap();
+    for (candidate, event) in [(existing, existing_event), (&pending, &pending_event)] {
+        assert_eq!(
+            issue(store, fixture, candidate, event, 10).await.unwrap(),
+            ShareGrantWriteOutcome::Ineligible
+        );
+    }
+    assert_eq!(share_count(pool).await, before);
+    assert_eq!(outbox_count(pool, existing_event.as_str()).await, 1);
+    assert_eq!(outbox_count(pool, pending_event.as_str()).await, 0);
+    sqlx::query("UPDATE xshield.ui_actions SET status = 'active' WHERE tenant_id = $1 AND site_id = $2 AND action_ref = 'action_record_share'")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str()).execute(pool).await.unwrap();
+}
+
+async fn source_lock_wait_preserves_expiry(
+    store: &PostgresIdentityStore,
+    pool: &PgPool,
+    fixture: &Fixture,
+) {
+    let before = share_count(pool).await;
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM xshield.resource_grants WHERE tenant_id = $1 AND site_id = $2 AND grant_id = $3 FOR UPDATE")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str())
+        .bind(fixture.authority.resource_grant_id.as_str())
+        .fetch_one(&mut *blocker).await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let mut pending = draft(fixture.now, 0xa37, "share-expired-while-blocked", 77, 63);
+    pending.expires_at = UnixSeconds::new(database_now(pool).await + 2);
+    let pending_event = event_id(0xa38);
+    // Confirm the issuance reached the source lock before allowing its lease
+    // to expire, so rejection must account for time spent waiting inside SQL.
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::join!(issue(store, fixture, &pending, &pending_event, 10), async {
+            wait_for_blocked_issuer(pool, blocker_pid).await;
+            while database_now(pool).await < pending.expires_at.value() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            blocker.rollback().await.unwrap();
+        })
+    })
+    .await
+    .expect("source-lock expiry regression must finish within eight seconds");
+    assert_eq!(outcome.unwrap(), ShareGrantWriteOutcome::Ineligible);
+    assert_eq!(share_count(pool).await, before);
+    assert_eq!(outbox_count(pool, pending_event.as_str()).await, 0);
+}
+
+async fn outbox_lock_wait_preserves_expiry(
+    store: &PostgresIdentityStore,
+    pool: &PgPool,
+    fixture: &Fixture,
+) {
+    let before = share_count(pool).await;
+    let pending_event = event_id(0xa3a);
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO xshield.audit_outbox (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope) VALUES ($1, $2, $3, 'expiry-blocker', 'fixture', '{}')")
+        .bind(pending_event.as_str()).bind(fixture.tenant.as_str())
+        .bind(fixture.site.as_str()).execute(&mut *blocker).await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let mut pending = draft(fixture.now, 0xa39, "share-expired-before-commit", 78, 63);
+    pending.expires_at = UnixSeconds::new(database_now(pool).await + 2);
+    // Releasing the uncommitted duplicate lets both inserts complete. The
+    // final live-clock check must roll them back when that wait spent the TTL.
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::join!(issue(store, fixture, &pending, &pending_event, 10), async {
+            wait_for_blocked_issuer(pool, blocker_pid).await;
+            while database_now(pool).await < pending.expires_at.value() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            blocker.rollback().await.unwrap();
+        })
+    })
+    .await
+    .expect("outbox-lock expiry regression must finish within eight seconds");
+    assert_eq!(outcome.unwrap(), ShareGrantWriteOutcome::Ineligible);
+    assert_eq!(share_count(pool).await, before);
+    assert_eq!(outbox_count(pool, pending_event.as_str()).await, 0);
+}
+
+async fn replay_waits_for_share_revocation(
+    store: &PostgresIdentityStore,
+    pool: &PgPool,
+    fixture: &Fixture,
+    existing: &ShareGrantDraft,
+    existing_event: &EventId,
+) {
+    let before = share_count(pool).await;
+    let mut revocation = pool.begin().await.unwrap();
+    sqlx::query("UPDATE xshield.share_grants SET status = 'revoked' WHERE tenant_id = $1 AND site_id = $2 AND share_id = $3")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str())
+        .bind(existing.share_id.as_str()).execute(&mut *revocation).await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *revocation)
+        .await
+        .unwrap();
+    // A plain snapshot read would return Existing before this revocation
+    // commits. Reaching the row lock proves the replay serializes behind it.
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::join!(issue(store, fixture, existing, existing_event, 10), async {
+            wait_for_blocked_issuer(pool, blocker_pid).await;
+            revocation.commit().await.unwrap();
+        })
+    })
+    .await
+    .expect("share-revocation regression must finish within eight seconds");
+    assert_eq!(outcome.unwrap(), ShareGrantWriteOutcome::Ineligible);
+    assert_eq!(share_count(pool).await, before);
+    assert_eq!(outbox_count(pool, existing_event.as_str()).await, 1);
+    sqlx::query("UPDATE xshield.share_grants SET status = 'active' WHERE tenant_id = $1 AND site_id = $2 AND share_id = $3")
+        .bind(fixture.tenant.as_str()).bind(fixture.site.as_str())
+        .bind(existing.share_id.as_str()).execute(pool).await.unwrap();
 }
 
 async fn share_count(pool: &PgPool) -> i64 {
@@ -297,7 +580,7 @@ async fn seed(pool: &PgPool, fixture: &Fixture) {
     .bind(fixture.site.as_str())
     .bind(fixture.binding_id.as_str())
     .bind([69_u8; 32].as_slice())
-    .bind(i64::try_from(SESSION_EXPIRES).unwrap())
+    .bind(i64::try_from(fixture.now + 2_000).unwrap())
     .execute(pool)
     .await
     .unwrap();
@@ -315,8 +598,8 @@ async fn seed(pool: &PgPool, fixture: &Fixture) {
     .bind(fixture.binding_id.as_str())
     .bind("req_018f2a3b-4c5d-7000-8000-000000000a04")
     .bind([70_u8; 32].as_slice())
-    .bind(i64::try_from(NOW - 1).unwrap())
-    .bind(i64::try_from(SOURCE_EXPIRES).unwrap())
+    .bind(i64::try_from(fixture.now - 1).unwrap())
+    .bind(i64::try_from(fixture.now + 1_000).unwrap())
     .execute(pool)
     .await
     .unwrap();
@@ -351,8 +634,8 @@ async fn seed(pool: &PgPool, fixture: &Fixture) {
     .bind(fixture.binding_id.as_str())
     .bind("req_018f2a3b-4c5d-7000-8000-000000000a04")
     .bind("page_018f2a3b-4c5d-7000-8000-000000000a03")
-    .bind(i64::try_from(NOW - 1).unwrap())
-    .bind(i64::try_from(SOURCE_EXPIRES).unwrap())
+    .bind(i64::try_from(fixture.now - 1).unwrap())
+    .bind(i64::try_from(fixture.now + 1_000).unwrap())
     .execute(pool)
     .await
     .unwrap();
@@ -371,8 +654,8 @@ async fn seed(pool: &PgPool, fixture: &Fixture) {
     .bind(fixture.binding_id.as_str())
     .bind([63_u8; 32].as_slice())
     .bind("ev_018f2a3b-4c5d-7000-8000-000000000a06")
-    .bind(i64::try_from(NOW - 1).unwrap())
-    .bind(i64::try_from(SOURCE_EXPIRES).unwrap())
+    .bind(i64::try_from(fixture.now - 1).unwrap())
+    .bind(i64::try_from(fixture.now + 1_000).unwrap())
     .execute(pool)
     .await
     .unwrap();
