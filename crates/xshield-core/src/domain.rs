@@ -119,6 +119,11 @@ v7_id!(RequestId, "req_", "request_id");
 v7_id!(ModelCallId, "mdl_", "model_call_id");
 v7_id!(CalibrationReportId, "calr_", "calibration_report_id");
 v7_id!(
+    CalibrationLineageReviewId,
+    "calrev_",
+    "calibration_lineage_review_id"
+);
+v7_id!(
     CalibrationReadCapabilityId,
     "calcap_",
     "calibration_read_capability_id"

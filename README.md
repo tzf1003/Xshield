@@ -12,6 +12,8 @@
 
 `xshield_core::calibration::dataset` 已为离线阈值评估提供无 I/O 的数据集领域契约：每个样本分别引用模型调用记录和标签证据，冻结批准、数据集/标签/任务/映射/阈值、provider、wire model、模型/提示修订及可未知的 resolved revision；训练、校准、评估和标签 manifest 必须是四个不同 artifact，且不能复用为样本来源。它拒绝样本证据别名、跨角色复用、重复引用以及模型或映射修订漂移，并在结果保留按输入顺序的调用 ID、模型记录、标签证据三元关联和统计指标。worker content decoder 进一步严格消费现有 schema-v3 model_call 与 reviewed-label DTO，只接受经 role/slot 授权的 `risk_projection` 并对映射缺失、状态失败和 provenance 漂移 fail-closed；该契约只能比较提交的引用集合，不能证明外部内容互不重叠。详情与测试边界见 [10.14](docs/10-jev-and-agents.md#1014-已实现校准数据集领域契约) 和 [20.3](docs/20-testing-and-acceptance.md#203-误拒与安全收益)。
 
+`xshield_core::calibration::lineage_review` 已为下一阶段校准分区审查提供纯领域 MVP：提交者必须用四个冻结 manifest、分区绑定的 corpus/reviewed-label 来源节点及有界 parent 图构造声明。审查将 provenance artifact 精确绑定、拒绝角色或 kind 漂移、未知/重复/不可达来源、跨分区 parent 和环，并生成独立 `calrev_` review ID 与 review artifact 引用。它只说明已审核声明关系，不替代受控读取、内容去重或外部语料独立性验证；专用 vault、持久化和 outbox 终态正在继续实现。契约与反例边界见 [10.19](docs/10-jev-and-agents.md#1019-已实现声明式分区与血缘审查领域-mvp)。
+
 Jev 离线评估已支持 Score：操作员提交 2–10 档有序描述，适配器验证完整档位、概率分布和加权评分，并将评分、档位及独立供应商置信度写入加密调用证据。模型审计、查询及控制台接受 Score 生命周期；Gateway 官方费用元数据经过有界校验。部署顺序、数值容差与运行方式见 [10.11](docs/10-jev-and-agents.md#1011-已实现-score-离线评估)。
 
 控制台已接入 AuditAdministrator 的证据保留工作台：为案件成员创建有期限和理由的保留锁、分页复核保留历史并显式释放。创建与释放使用冻结幂等请求恢复未知结果，列表按数据库观察时间区分期限与释放事实；保留延缓物理删除，原文读取继续使用独立审批和原期限。使用及部署边界见 [15.10](docs/15-console-and-api.md#1510-已实现证据保留工作台)。

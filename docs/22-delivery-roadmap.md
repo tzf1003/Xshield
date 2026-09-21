@@ -42,6 +42,8 @@
 
 校准数据集契约增量：`calibration::dataset` 已将每个离线样本分别绑定到模型调用记录和标签 artifact，冻结批准、数据集/标签/任务/映射/阈值、模型/提示/供应商修订及训练、校准、评估、标签四份不同 manifest。它拒绝 manifest 与样本来源、样本记录与标签角色之间的别名、重复调用/引用和模型或映射漂移，保留有序调用 ID—模型记录—标签证据三元关联、阈值和指标；实现保持无 I/O。引用集合不同不证明外部内容独立，受控 evidence 读取、内容去重/分区审查、独立报告 evidence、journal/outbox 终态和真实阈值选择仍需按 [10.14](10-jev-and-agents.md#1014-已实现校准数据集领域契约) 继续交付，不能借用 `model.*` 生命周期表示校准报告。
 
+分区/血缘审查增量：`calibration::lineage_review` 已交付纯领域 MVP。它将四个 provenance-bound manifest 与分区绑定的 corpus/reviewed-label source graph 逐项核对，拒绝角色或 kind 漂移、未知/重复/不可达来源、跨分区 parent、环以及 review artifact 别名，并生成独立 `calrev_` 声明审核结果。该结果仅说明提交的关系通过审核，不能证明外部 corpus 内容独立或替代受控 evidence 读取；专用 review artifact、PostgreSQL 原子记录、受限 outbox 和真实数据质量验收继续交付。
+
 校准读取边界增量：`CalibrationEvidenceReadCapability` 和 `CalibrationEvidenceReadPort` 已规定离线批量读取的最小纯契约。每个 `calcap_` capability 强绑定 tenant/site、可信时间有效期、完整且不可扩展的四份 manifest 与 model-record/label artifact 集合、读取 role、样本数和 512 MiB 聚合字节上限；artifact 别名及 scope、期限、role/reference 偏差均须拒绝，局部读取拒绝统一为 `CALIBRATION_EVIDENCE_NOT_AUTHORIZED`。`CalibrationEvidenceBatchLease` 与不可复制的 `CalibrationEvidenceReadSession` 将权威发行器开始的一个 batch lease 绑定到精确内存 capability，局部请求必须同时匹配 session、capability、scope、期限和成员引用；私有 lease handle 不可格式化或复制。
 
 耐久发行与 batch lease 增量：迁移 0023 与 PostgreSQL adapter 已在一个事务中锁定活跃 catalog、写入完整 capability/member snapshot 和受限 `calibration.read_capability.issued` outbox 事实；规范 scope digest 固定 provenance、manifest、成员角色/序号、catalog 摘要/字节及预算。精确幂等恢复只接受同一耐久输入；catalog 变化、范围/期限不匹配或超预算不发行。开始 batch 时再次锁定并比较 header/member/live catalog，数据库仅保存私有 lease handle 的 digest，并保证一个 active lease；到期会形成有界 recovery generation，旧 lease 不复活，超过恢复上限终结 capability。发行事实 `request_id=null` 且不含 artifact、内容或私有 handle；calibration worker family 已严格消费其封闭小型 payload 和 capability aggregate，并沿用既有发布流程，真实 ClickHouse 投递仍待专有集成验收。

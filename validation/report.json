@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3580,
-  "passed_count": 3580,
+  "checks_total": 3581,
+  "passed_count": 3581,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -17402,6 +17402,11 @@
     },
     {
       "name": "link:README.md:docs/20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/10-jev-and-agents.md",
       "passed": true,
       "detail": ""
     },

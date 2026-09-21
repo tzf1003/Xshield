@@ -17,6 +17,7 @@ use crate::domain::ModelCallId;
 use std::{collections::BTreeSet, fmt};
 
 pub mod dataset;
+pub mod lineage_review;
 pub mod mapping;
 pub mod publication;
 pub mod read_capability;

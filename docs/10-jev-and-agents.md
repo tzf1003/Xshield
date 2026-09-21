@@ -169,3 +169,9 @@ Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 
 `xshield_worker::calibration_audit::CalibrationEvidenceReadAuditEvent` 是 `LocalCalibrationEvidenceReader` 的 reader 本地加密 journal writer。它按当前 journal 的 boot/next sequence 冻结 `calibration.evidence_read`，成功只记录 capability ID 与已通过预释放屏障的有界字节数；它不是 evaluator 已收到明文的断言。reader 先取得 0025 reservation，helper 的 `append` 返回被绑定的 journal receipt，随后由 release-boundary 事务决定是否交付；reservation 最终提交失败时清零并扣留内容，且不会写入矛盾的第二个终态。拒绝或依赖错误只记录 capability ID、结果和稳定原因。该 helper 不替代每次读取前的 `authorize_calibration_evidence_read`，也不替代 evaluator completion。
 
 事件 payload、schema 与 sealed-segment publisher 都拒绝 artifact、role、sample index、lease/handle、evidence refs 和内容，以免分析索引成为批量源证据目录。journal event 不使用 outbox：outbox 的 at-least-once 投递只记录数据库事务事实，不能证明 reader 已在明文释放前获得本地耐久确认。reader/vault、受限报告 artifact 及报告提交闭环已交付；内容独立性审查和真实校准仍由后续闭环交付。
+
+## 10.19 已实现声明式分区与血缘审查领域 MVP
+
+`xshield_core::calibration::lineage_review` 以 `PartitionLineageSubmission` 表达对四份冻结 manifest 的有界声明：训练、校准、评估分区只能声明 `corpus` 来源，标签分区只能声明 `reviewed_label` 来源；每个来源以及每个 root/parent 边都使用受限的 `source_id + source_revision` 强类型引用。`review_partition_lineage` 逐项把四个 manifest artifact 对回 `EvaluationProvenance`，要求恰好一个声明角色和每个来源都能从本分区的 manifest root 到达。它拒绝 manifest/review artifact 别名、角色/kind 漂移、重复或未知来源、重复/self parent、跨分区 parent、环、不可达节点和所有容量越界，并规范化 source、root 和 parent 顺序；成功输出独立 `calrev_` review ID、review artifact 引用、冻结 provenance、schema `1`、policy revision `calibration-lineage-v1` 和规范顺序的声明图，原因固定为 `CALIBRATION_PARTITION_LINEAGE_REVIEWED`。
+
+这是一条对提交声明的纯领域审核事实：artifact ID、source ID、revision 与无环图只能说明本次提交的关系满足该契约，不能证明未提交的 ancestry、外部 corpus 内容不重叠、语义去重、样本独立、标签质量或真实模型质量。该层不读取/解密证据、不使用 batch capability、case、`ApprovalRef` 或控制台角色作为读取权，不调用模型，也不发布阈值、策略或业务资格。后续专用 review artifact vault、PostgreSQL 原子记录和受限 outbox 将把此纯结果持久化；它们也不能把声明审核升级为内容独立性证明。
