@@ -50,11 +50,103 @@ async fn calibration_read_capability_is_atomic_exact_and_recovery_safe() {
         .expect("assertion pool connects");
     let fixture = Fixture::new();
     seed_catalog(&pool, &fixture).await;
+    assert_unreserved_catalog_delete_is_not_suppressed(&pool, &fixture).await;
+    assert_role_metadata_is_required_on_issue(&pool, &store, &fixture).await;
 
     assert_exact_issuance_and_drift_rejection(&pool, &store, &fixture).await;
     assert_single_lease_and_recovery(&pool, &store, &fixture).await;
 
     cleanup(&pool, &fixture).await;
+}
+
+async fn assert_unreserved_catalog_delete_is_not_suppressed(pool: &PgPool, fixture: &Fixture) {
+    // The final fixture artifact is deliberately absent from every frozen
+    // capability. A catalog DELETE is allowed when it has no live release
+    // reservation; a BEFORE DELETE trigger must return OLD, not NEW, or
+    // PostgreSQL silently reports zero affected rows.
+    let deleted = sqlx::query(
+        "DELETE FROM xshield.artifact_catalog
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.artifacts[7].as_str())
+    .execute(pool)
+    .await
+    .expect("an unreserved catalog object is deletable")
+    .rows_affected();
+    assert_eq!(
+        deleted, 1,
+        "an unreserved catalog delete is never suppressed"
+    );
+}
+
+async fn assert_role_metadata_is_required_on_issue(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+) {
+    // Every role is backed by a purpose-specific catalog kind and the shared
+    // restricted JSON shape. A syntactically valid but mismatched source must
+    // be rejected before a capability header or issuance event is persisted.
+    for (field, value) in [
+        ("kind", "calibration_evidence"),
+        ("content_type", "text/plain"),
+        ("fidelity", "entity_exact"),
+        ("classification", "INTERNAL"),
+    ] {
+        update_catalog_metadata(
+            pool,
+            fixture,
+            4,
+            if field == "kind" { value } else { "model_call" },
+            if field == "content_type" {
+                value
+            } else {
+                "application/json"
+            },
+            if field == "fidelity" {
+                value
+            } else {
+                "semantic"
+            },
+            if field == "classification" {
+                value
+            } else {
+                "RESTRICTED"
+            },
+        )
+        .await;
+        let capability = fixture.capability(1_024);
+        assert!(matches!(
+            issue_capability(store, &capability, &event_id(), 1, 2).await,
+            CalibrationReadCapabilityIssueOutcome::SourceUnavailable
+        ));
+        let persisted: (i64, i64) = sqlx::query_as(
+            "SELECT
+                 (SELECT count(*) FROM xshield.calibration_read_capabilities
+                  WHERE tenant_id=$1 AND site_id=$2),
+                 (SELECT count(*) FROM xshield.audit_outbox
+                  WHERE tenant_id=$1 AND site_id=$2
+                    AND event_type='calibration.read_capability.issued')",
+        )
+        .bind(fixture.tenant.as_str())
+        .bind(fixture.site.as_str())
+        .fetch_one(pool)
+        .await
+        .expect("failed issuance leaves no durable capability or event");
+        assert_eq!(persisted, (0, 0));
+        update_catalog_metadata(
+            pool,
+            fixture,
+            4,
+            "model_call",
+            "application/json",
+            "semantic",
+            "RESTRICTED",
+        )
+        .await;
+    }
 }
 
 struct Fixture {
@@ -288,6 +380,7 @@ async fn assert_exact_read_authorization_rechecks_lease_and_catalog(
                 && value.role() == reference.role()
                 && value.sample_index() == reference.sample_index()
     ));
+    assert_role_metadata_drift_denies_active_use(pool, store, fixture, &request).await;
 
     assert_fake_lease_is_denied(store, &capability, fixture, &reference, &session, now).await;
     assert_catalog_drift_denies_read(pool, store, fixture, &reference, &request).await;
@@ -303,6 +396,73 @@ async fn assert_exact_read_authorization_rechecks_lease_and_catalog(
         session,
     )
     .await;
+}
+
+async fn assert_role_metadata_drift_denies_active_use(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    request: &CalibrationEvidenceReadRequest<'_>,
+) {
+    // A lease does not freeze permission to a changed source. Both ordinary
+    // authorization and the release reservation must recheck the role shape.
+    for (field, value) in [
+        ("kind", "calibration_evidence"),
+        ("content_type", "text/plain"),
+        ("fidelity", "entity_exact"),
+        ("classification", "INTERNAL"),
+    ] {
+        update_catalog_metadata(
+            pool,
+            fixture,
+            4,
+            if field == "kind" { value } else { "model_call" },
+            if field == "content_type" {
+                value
+            } else {
+                "application/json"
+            },
+            if field == "fidelity" {
+                value
+            } else {
+                "semantic"
+            },
+            if field == "classification" {
+                value
+            } else {
+                "RESTRICTED"
+            },
+        )
+        .await;
+        assert!(matches!(
+            store
+                .authorize_calibration_evidence_read(request)
+                .await
+                .expect("role drift read authorization resolves"),
+            CalibrationEvidenceReadAuthorizationOutcome::Denied(
+                CalibrationEvidenceReadDenied::EvidenceNotAuthorized
+            )
+        ));
+        assert!(matches!(
+            store
+                .reserve_calibration_evidence_release(request)
+                .await
+                .expect("role drift release reservation resolves"),
+            CalibrationEvidenceReleaseReservationOutcome::Denied(
+                CalibrationEvidenceReadDenied::EvidenceNotAuthorized
+            )
+        ));
+        update_catalog_metadata(
+            pool,
+            fixture,
+            4,
+            "model_call",
+            "application/json",
+            "semantic",
+            "RESTRICTED",
+        )
+        .await;
+    }
 }
 
 async fn assert_release_reservation_denies_expired_lease(
@@ -875,7 +1035,7 @@ async fn issue_capability_as(
 }
 
 async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
-    for artifact in &fixture.artifacts {
+    for (index, artifact) in fixture.artifacts.iter().enumerate() {
         sqlx::query(
             "INSERT INTO xshield.artifact_catalog (
                  tenant_id, site_id, artifact_id, request_id, schema_version, kind, content_type,
@@ -884,16 +1044,17 @@ async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
                  integrity_digest, parent_refs, recorded_at, expires_at, catalog_event_id, status,
                  deleted_at
              ) VALUES (
-                 $1,$2,$3,$4,3,'calibration_evidence','application/json','complete',
-                 'entity_exact',64,64,'RESTRICTED',false,'aead_envelope_v1',$5,
-                 'key-r1','sha256_ciphertext',$6,'{}',clock_timestamp(),
-                 clock_timestamp() + interval '10 minutes',$7,'active',NULL
+                 $1,$2,$3,$4,3,$5,'application/json','complete',
+                 'semantic',64,64,'RESTRICTED',false,'aead_envelope_v1',$6,
+                 'key-r1','sha256_ciphertext',$7,'{}',clock_timestamp(),
+                 clock_timestamp() + interval '10 minutes',$8,'active',NULL
              )",
         )
         .bind(fixture.tenant.as_str())
         .bind(fixture.site.as_str())
         .bind(artifact.as_str())
         .bind(request_id().as_str())
+        .bind(calibration_catalog_kind(index))
         .bind(format!("{}.xev", artifact.as_str()))
         .bind("a".repeat(64))
         .bind(event_id().as_str())
@@ -901,6 +1062,44 @@ async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
         .await
         .expect("catalog fixture inserts");
     }
+}
+
+fn calibration_catalog_kind(index: usize) -> &'static str {
+    match index {
+        0 => "evaluation_manifest",
+        1 => "training_manifest",
+        2 => "calibration_manifest",
+        3 => "label_manifest",
+        4 => "model_call",
+        5 => "reviewed_label",
+        _ => "unrelated_calibration_evidence",
+    }
+}
+
+async fn update_catalog_metadata(
+    pool: &PgPool,
+    fixture: &Fixture,
+    index: usize,
+    kind: &str,
+    content_type: &str,
+    fidelity: &str,
+    classification: &str,
+) {
+    sqlx::query(
+        "UPDATE xshield.artifact_catalog
+         SET kind=$1, content_type=$2, fidelity=$3, classification=$4
+         WHERE tenant_id=$5 AND site_id=$6 AND artifact_id=$7",
+    )
+    .bind(kind)
+    .bind(content_type)
+    .bind(fidelity)
+    .bind(classification)
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.artifacts[index].as_str())
+    .execute(pool)
+    .await
+    .expect("catalog metadata update succeeds");
 }
 
 async fn cleanup(pool: &PgPool, fixture: &Fixture) {

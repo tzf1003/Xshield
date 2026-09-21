@@ -198,20 +198,24 @@ async fn seed_expired_report(
     artifact_id: &str,
 ) {
     sqlx::query(
-        "INSERT INTO xshield.calibration_report_artifacts (
+        "WITH fixture_clock AS (
+             SELECT date_trunc('milliseconds', clock_timestamp() - interval '2 seconds') AS recorded_at
+         )
+         INSERT INTO xshield.calibration_report_artifacts (
              tenant_id, site_id, report_id, artifact_id, schema_version, kind,
              content_type, canonical_body_encoding, capture_status, fidelity,
              bytes_observed, bytes_saved, classification, storage_profile,
              storage_locator, key_ref, integrity_algorithm, integrity_digest,
              recorded_at, published_at, expires_at
-         ) VALUES ($1,$2,$3,$4,1,'calibration_evaluation_report',
+         ) SELECT $1,$2,$3,$4,1,'calibration_evaluation_report',
                    'application/vnd.xshield.calibration-report+json',
                    'xshield_calibration_report_canonical_json_v1','complete','entity_exact',
                    1,1,'RESTRICTED','aead_envelope_v1',$5,'report-retention-r1',
                    'sha256_ciphertext',$6,
-                   date_trunc('milliseconds', clock_timestamp()),
-                   date_trunc('milliseconds', clock_timestamp()),
-                   clock_timestamp() - interval '1 second')",
+                   fixture_clock.recorded_at,
+                   fixture_clock.recorded_at,
+                   fixture_clock.recorded_at + interval '1 second'
+           FROM fixture_clock",
     )
     .bind(tenant.as_str())
     .bind(site.as_str())

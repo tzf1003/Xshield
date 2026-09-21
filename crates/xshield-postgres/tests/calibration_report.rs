@@ -538,7 +538,7 @@ fn completed_report(fixture: &Fixture) -> EvaluationReport {
 }
 
 async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
-    for artifact in &fixture.artifacts {
+    for (index, artifact) in fixture.artifacts.iter().enumerate() {
         sqlx::query(
             "INSERT INTO xshield.artifact_catalog (
                  tenant_id, site_id, artifact_id, request_id, schema_version, kind, content_type,
@@ -547,22 +547,35 @@ async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
                  integrity_digest, parent_refs, recorded_at, expires_at, catalog_event_id, status,
                  deleted_at
              ) VALUES (
-                 $1,$2,$3,$4,3,'calibration_evidence','application/json','complete',
-                 'entity_exact',64,64,'RESTRICTED',false,'aead_envelope_v1',$5,
-                 'key-r1','sha256_ciphertext',$6,'{}',clock_timestamp(),
-                 clock_timestamp() + interval '10 minutes',$7,'active',NULL
+                 $1,$2,$3,$4,3,$5,'application/json','complete',
+                 'semantic',64,64,'RESTRICTED',false,'aead_envelope_v1',$6,
+                 'key-r1','sha256_ciphertext',$7,'{}',clock_timestamp(),
+                 clock_timestamp() + interval '10 minutes',$8,'active',NULL
              )",
         )
         .bind(fixture.tenant.as_str())
         .bind(fixture.site.as_str())
         .bind(artifact.as_str())
         .bind(request_id().as_str())
+        .bind(calibration_catalog_kind(index))
         .bind(format!("{}.xev", artifact.as_str()))
         .bind("a".repeat(64))
         .bind(event_id().as_str())
         .execute(pool)
         .await
         .expect("catalog fixture inserts");
+    }
+}
+
+fn calibration_catalog_kind(index: usize) -> &'static str {
+    match index {
+        0 => "evaluation_manifest",
+        1 => "training_manifest",
+        2 => "calibration_manifest",
+        3 => "label_manifest",
+        4 => "model_call",
+        5 => "reviewed_label",
+        _ => "unrelated_calibration_evidence",
     }
 }
 

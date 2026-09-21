@@ -398,6 +398,10 @@ impl PostgresIdentityStore {
             transaction.rollback().await?;
             return Ok(CalibrationReadCapabilityIssueOutcome::SourceUnavailable);
         }
+        if !catalog_snapshots_match_roles(command.capability, &snapshots) {
+            transaction.rollback().await?;
+            return Ok(CalibrationReadCapabilityIssueOutcome::SourceUnavailable);
+        }
         let members = freeze_members(command.capability, &snapshots)?;
         let scope_digest = scope_digest(command.capability, &members);
         let record = insert_capability_header(
@@ -1246,6 +1250,57 @@ fn freeze_members(
         .collect()
 }
 
+/// Returns whether every frozen catalog row has the only metadata shape that
+/// may serve its declared calibration role. This is checked before persistence
+/// and again against both frozen and live rows before every durable use, so a
+/// caller cannot relabel a generic evidence object as a calibration source.
+fn catalog_snapshots_match_roles(
+    capability: &CalibrationEvidenceReadCapability,
+    snapshots: &BTreeMap<String, CatalogSnapshot>,
+) -> bool {
+    capability.evidence_refs().into_iter().all(|reference| {
+        snapshots
+            .get(reference.artifact_id().as_str())
+            .is_some_and(|snapshot| {
+                catalog_shape_matches(
+                    reference.role(),
+                    &snapshot.kind,
+                    &snapshot.content_type,
+                    &snapshot.fidelity,
+                    &snapshot.classification,
+                )
+            })
+    })
+}
+
+/// Binds each purpose-limited role to a dedicated catalog representation.
+///
+/// The model-evaluation worker already emits `model_call` as restricted,
+/// semantic JSON. The remaining names are reserved producer contracts for the
+/// future manifest and reviewed-label writers; accepting a generic artifact
+/// here would let the issuer create a misleading role binding before the
+/// evaluator's content parser has a chance to reject it.
+fn catalog_shape_matches(
+    role: CalibrationEvidenceRole,
+    kind: &str,
+    content_type: &str,
+    fidelity: &str,
+    classification: &str,
+) -> bool {
+    let expected_kind = match role {
+        CalibrationEvidenceRole::TrainingManifest => "training_manifest",
+        CalibrationEvidenceRole::CalibrationManifest => "calibration_manifest",
+        CalibrationEvidenceRole::EvaluationManifest => "evaluation_manifest",
+        CalibrationEvidenceRole::LabelManifest => "label_manifest",
+        CalibrationEvidenceRole::ModelCallRecord => "model_call",
+        CalibrationEvidenceRole::ReviewedLabel => "reviewed_label",
+    };
+    kind == expected_kind
+        && content_type == "application/json"
+        && fidelity == "semantic"
+        && classification == "RESTRICTED"
+}
+
 fn scope_digest(
     capability: &CalibrationEvidenceReadCapability,
     members: &[FrozenMember],
@@ -1649,6 +1704,17 @@ async fn durable_capability_matches(
     let Some(members) = frozen_members_for_capability(connection, header, capability).await? else {
         return Ok(false);
     };
+    if members.iter().any(|member| {
+        !catalog_shape_matches(
+            member.role,
+            &member.snapshot.kind,
+            &member.snapshot.content_type,
+            &member.snapshot.fidelity,
+            &member.snapshot.classification,
+        )
+    }) {
+        return Ok(false);
+    }
     frozen_scope_matches(header, capability, &members)
 }
 
@@ -1727,6 +1793,22 @@ async fn members_match_live_catalog(
     let end = unix_timestamp(capability.expires_at())?;
     let mut total = 0_u64;
     for row in rows {
+        let role = role_from_storage(row.try_get("role")?)?;
+        if !catalog_shape_matches(
+            role,
+            row.try_get("catalog_kind")?,
+            row.try_get("catalog_content_type")?,
+            row.try_get("catalog_fidelity")?,
+            row.try_get("catalog_classification")?,
+        ) || !catalog_shape_matches(
+            role,
+            row.try_get("live_kind")?,
+            row.try_get("live_content_type")?,
+            row.try_get("live_fidelity")?,
+            row.try_get("live_classification")?,
+        ) {
+            return Ok(false);
+        }
         if row.try_get::<&str, _>("live_status")? != "active"
             || row
                 .try_get::<Option<DateTime<Utc>>, _>("live_deleted_at")?
