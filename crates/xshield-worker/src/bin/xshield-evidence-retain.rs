@@ -4,6 +4,7 @@ use std::{collections::HashSet, env, fs::File, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
 use xshield_evidence::{EvidenceError, EvidenceKey, EvidenceVaultConfig, LocalEvidenceVault};
 use xshield_postgres::{
+    CalibrationLineageReviewOrphanPurgeResult, CalibrationLineageReviewPurgeResult,
     CalibrationReportOrphanPurgeResult, CalibrationReportPurgeResult, EvidenceOrphanPurgeResult,
     EvidencePurgeResult, PostgresIdentityStore,
 };
@@ -120,6 +121,120 @@ async fn run() -> Result<(), &'static str> {
             report_deleted += 1;
         } else {
             report_failed += 1;
+        }
+    }
+    let lineage_review_jobs = tokio::time::timeout(
+        DEADLINE,
+        store.prepare_calibration_lineage_review_purge(&tenant, &site, &key_id, limit),
+    )
+    .await
+    .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_PURGE_TIMEOUT")?
+    .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_PURGE_UNAVAILABLE")?;
+    let mut lineage_review_deleted = 0;
+    let mut lineage_review_failed = 0;
+    for job in &lineage_review_jobs {
+        let result = lineage_review_result(&vault, &tenant, &site, job.manifest());
+        tokio::time::timeout(
+            DEADLINE,
+            store.finish_calibration_lineage_review_purge(job, result),
+        )
+        .await
+        .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_PURGE_TIMEOUT")?
+        .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_PURGE_COMPLETION_UNAVAILABLE")?;
+        if matches!(result, CalibrationLineageReviewPurgeResult::Deleted(_)) {
+            lineage_review_deleted += 1;
+        } else {
+            lineage_review_failed += 1;
+        }
+    }
+    let pending_lineage_review_orphans = tokio::time::timeout(
+        DEADLINE,
+        store.pending_calibration_lineage_review_orphan_purges(&tenant, &site, limit),
+    )
+    .await
+    .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_TIMEOUT")?
+    .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_UNAVAILABLE")?;
+    let mut lineage_review_orphan_selected = pending_lineage_review_orphans.len();
+    let mut lineage_review_orphan_deleted = 0;
+    let mut lineage_review_orphan_failed = 0;
+    let mut seen_lineage_review_orphans = HashSet::new();
+    for job in &pending_lineage_review_orphans {
+        seen_lineage_review_orphans.insert(job.candidate().artifact_id().to_owned());
+        let result =
+            lineage_review_orphan_result(&vault, job.tenant_id(), job.site_id(), job.candidate());
+        tokio::time::timeout(
+            DEADLINE,
+            store.finish_calibration_lineage_review_orphan_purge(job, result),
+        )
+        .await
+        .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_TIMEOUT")?
+        .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_COMPLETION_UNAVAILABLE")?;
+        if matches!(
+            result,
+            CalibrationLineageReviewOrphanPurgeResult::Deleted(_)
+        ) {
+            lineage_review_orphan_deleted += 1;
+        } else {
+            lineage_review_orphan_failed += 1;
+        }
+    }
+    let mut lineage_review_orphan_remaining =
+        usize::from(limit).saturating_sub(pending_lineage_review_orphans.len());
+    let mut lineage_review_orphan_cursor = None;
+    while lineage_review_orphan_remaining > 0 {
+        let page_limit = u16::try_from(lineage_review_orphan_remaining)
+            .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_SCAN_UNAVAILABLE")?;
+        let page = vault
+            .list_calibration_lineage_review_orphan_candidates_after(
+                &tenant,
+                &site,
+                orphan_grace,
+                page_limit,
+                lineage_review_orphan_cursor.as_deref(),
+            )
+            .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_SCAN_UNAVAILABLE")?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        lineage_review_orphan_cursor = Some(last.artifact_id().to_owned());
+        consume_lineage_review_orphan_scan_budget(&mut lineage_review_orphan_remaining, page.len());
+        let candidates = page
+            .into_iter()
+            .filter(|candidate| !seen_lineage_review_orphans.contains(candidate.artifact_id()))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            continue;
+        }
+        let jobs = tokio::time::timeout(
+            DEADLINE,
+            store.prepare_calibration_lineage_review_orphan_purge(&tenant, &site, &candidates),
+        )
+        .await
+        .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_TIMEOUT")?
+        .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_UNAVAILABLE")?;
+        lineage_review_orphan_selected += jobs.len();
+        for job in &jobs {
+            let result = lineage_review_orphan_result(
+                &vault,
+                job.tenant_id(),
+                job.site_id(),
+                job.candidate(),
+            );
+            tokio::time::timeout(
+                DEADLINE,
+                store.finish_calibration_lineage_review_orphan_purge(job, result),
+            )
+            .await
+            .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_TIMEOUT")?
+            .map_err(|_| "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_COMPLETION_UNAVAILABLE")?;
+            if matches!(
+                result,
+                CalibrationLineageReviewOrphanPurgeResult::Deleted(_)
+            ) {
+                lineage_review_orphan_deleted += 1;
+            } else {
+                lineage_review_orphan_failed += 1;
+            }
         }
     }
     let pending_report_orphans = tokio::time::timeout(
@@ -274,10 +389,12 @@ async fn run() -> Result<(), &'static str> {
         }
     }
     println!(
-        "selected={} deleted={deleted} failed={failed} report_selected={} report_deleted={report_deleted} report_failed={report_failed} report_orphan_selected={} report_orphan_deleted={report_orphan_deleted} report_orphan_failed={report_orphan_failed} orphan_selected={} orphan_deleted={orphan_deleted} orphan_failed={orphan_failed}",
+        "selected={} deleted={deleted} failed={failed} report_selected={} report_deleted={report_deleted} report_failed={report_failed} report_orphan_selected={} report_orphan_deleted={report_orphan_deleted} report_orphan_failed={report_orphan_failed} lineage_review_selected={} lineage_review_deleted={lineage_review_deleted} lineage_review_failed={lineage_review_failed} lineage_review_orphan_selected={} lineage_review_orphan_deleted={lineage_review_orphan_deleted} lineage_review_orphan_failed={lineage_review_orphan_failed} orphan_selected={} orphan_deleted={orphan_deleted} orphan_failed={orphan_failed}",
         jobs.len(),
         report_jobs.len(),
         report_orphan_selected,
+        lineage_review_jobs.len(),
+        lineage_review_orphan_selected,
         orphan_selected
     );
     if failed > 0 {
@@ -291,6 +408,12 @@ async fn run() -> Result<(), &'static str> {
     }
     if report_orphan_failed > 0 {
         return Err("CALIBRATION_REPORT_ORPHAN_PURGE_FAILED");
+    }
+    if lineage_review_failed > 0 {
+        return Err("CALIBRATION_LINEAGE_REVIEW_PURGE_FAILED");
+    }
+    if lineage_review_orphan_failed > 0 {
+        return Err("CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_FAILED");
     }
     Ok(())
 }
@@ -335,6 +458,52 @@ fn report_orphan_result(
     }
 }
 
+fn lineage_review_result(
+    vault: &LocalEvidenceVault,
+    tenant: &TenantId,
+    site: &SiteId,
+    manifest: &xshield_evidence::CalibrationLineageReviewEvidenceManifest,
+) -> CalibrationLineageReviewPurgeResult {
+    match vault.purge_expired_calibration_lineage_review(tenant, site, manifest) {
+        Ok(outcome) => CalibrationLineageReviewPurgeResult::Deleted(outcome),
+        Err(
+            EvidenceError::NotAvailable
+            | EvidenceError::CorruptEvidence
+            | EvidenceError::UnsafePath
+            | EvidenceError::UnsafePermissions
+            | EvidenceError::InvalidConfig
+            | EvidenceError::InvalidWrite,
+        ) => CalibrationLineageReviewPurgeResult::Rejected,
+        Err(_) => CalibrationLineageReviewPurgeResult::Unavailable,
+    }
+}
+
+fn lineage_review_orphan_result(
+    vault: &LocalEvidenceVault,
+    tenant: &TenantId,
+    site: &SiteId,
+    candidate: &xshield_evidence::CalibrationLineageReviewOrphanCandidate,
+) -> CalibrationLineageReviewOrphanPurgeResult {
+    match vault.purge_calibration_lineage_review_orphan(tenant, site, candidate) {
+        Ok(outcome) => CalibrationLineageReviewOrphanPurgeResult::Deleted(outcome),
+        Err(
+            EvidenceError::NotAvailable
+            | EvidenceError::CorruptEvidence
+            | EvidenceError::UnsafePath
+            | EvidenceError::UnsafePermissions
+            | EvidenceError::InvalidConfig
+            | EvidenceError::InvalidWrite,
+        ) => CalibrationLineageReviewOrphanPurgeResult::Rejected,
+        Err(_) => CalibrationLineageReviewOrphanPurgeResult::Unavailable,
+    }
+}
+
+// The per-pass maintenance budget bounds observations, not only database jobs:
+// a committed review must not make this synchronous vault scan walk unboundedly.
+fn consume_lineage_review_orphan_scan_budget(remaining: &mut usize, observed_candidates: usize) {
+    *remaining = remaining.saturating_sub(observed_candidates);
+}
+
 fn orphan_result(
     vault: &LocalEvidenceVault,
     tenant: &TenantId,
@@ -360,5 +529,21 @@ async fn main() {
     if let Err(reason) = run().await {
         eprintln!("{reason}; usage: xshield-evidence-retain TENANT_ID SITE_ID BATCH_LIMIT_1_TO_32");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consume_lineage_review_orphan_scan_budget;
+
+    #[test]
+    fn committed_review_page_consumes_scan_budget_when_prepare_returns_no_jobs() {
+        let mut remaining = 2;
+        let prepared_jobs = 0;
+
+        consume_lineage_review_orphan_scan_budget(&mut remaining, 2);
+
+        assert_eq!(prepared_jobs, 0);
+        assert_eq!(remaining, 0);
     }
 }

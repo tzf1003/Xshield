@@ -676,7 +676,7 @@ async fn seed_committed_lineage_review(
              'xshield_calibration_lineage_review_canonical_json_v1','complete','entity_exact',
              1,1,'RESTRICTED','aead_envelope_v1',$5,'key-r1','sha256_ciphertext',$6,
              date_trunc('milliseconds', now()),date_trunc('milliseconds', now()),
-             now() + interval '10 minutes'
+             date_trunc('milliseconds', now() + interval '10 minutes')
          )",
     )
     .bind(fixture.tenant.as_str())

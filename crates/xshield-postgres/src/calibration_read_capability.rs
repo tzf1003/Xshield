@@ -1245,7 +1245,8 @@ async fn locked_lineage_review_matches(
              artifact.storage_profile, artifact.storage_locator, artifact.key_ref,
              artifact.integrity_algorithm, artifact.integrity_digest,
              artifact.recorded_at, artifact.reviewed_at AS artifact_reviewed_at,
-             artifact.expires_at AS artifact_expires_at
+             artifact.expires_at AS artifact_expires_at,
+             artifact.retention_status, artifact.purge_requested_event_id
          FROM xshield.calibration_lineage_reviews review
          JOIN xshield.calibration_lineage_review_artifacts artifact
            ON artifact.tenant_id=review.tenant_id AND artifact.site_id=review.site_id
@@ -1265,6 +1266,13 @@ async fn locked_lineage_review_matches(
     let provenance = capability.provenance();
     let model = provenance.model();
     let review_artifact_id: &str = row.try_get("review_artifact_id")?;
+    if row.try_get::<&str, _>("retention_status")? != "active"
+        || row
+            .try_get::<Option<&str>, _>("purge_requested_event_id")?
+            .is_some()
+    {
+        return Ok(false);
+    }
     let integrity_digest: &str = row.try_get("integrity_digest")?;
     let key_ref: &str = row.try_get("key_ref")?;
     let artifact_expires_at: DateTime<Utc> = row.try_get("artifact_expires_at")?;

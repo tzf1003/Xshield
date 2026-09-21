@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3584,
-  "passed_count": 3584,
+  "checks_total": 3832,
+  "passed_count": 3832,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -16456,6 +16456,1236 @@
       "detail": ""
     },
     {
+      "name": "outbox:lineage_review_retention:valid_purge_requested",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_proof_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_confidence_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_review_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_review_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_expires_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_requested_retained_metadata",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_requested_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_requested_request",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_requested_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_requested_evidence_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_requested_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_requested_review_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_requested_review_artifact_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_requested_expiry_seconds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:intent_has_no_cause_purge_requested",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:valid_deleted",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_proof_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_confidence_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_review_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_review_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_expires_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_deleted_retained_metadata",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_deleted_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_deleted_request",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_deleted_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_deleted_evidence_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_deleted_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_deleted_review_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_deleted_review_artifact_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_deleted_expiry_seconds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:terminal_requires_cause_deleted",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:valid_purge_failed",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_proof_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_confidence_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_review_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_review_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_expires_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_purge_failed_retained_metadata",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_failed_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_failed_request",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_failed_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_failed_evidence_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_failed_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_failed_review_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_failed_review_artifact_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_purge_failed_expiry_seconds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:terminal_requires_cause_purge_failed",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:valid_orphan_purge_requested",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_proof_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_confidence_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_review_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_review_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_expires_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_requested_retained_metadata",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_requested_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_requested_request",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_requested_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_requested_evidence_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_requested_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_requested_review_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_requested_review_artifact_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_requested_expiry_seconds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:intent_has_no_cause_orphan_purge_requested",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:valid_orphan_deleted",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_proof_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_confidence_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_review_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_review_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_expires_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_deleted_retained_metadata",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_deleted_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_deleted_request",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_deleted_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_deleted_evidence_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_deleted_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_deleted_review_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_deleted_review_artifact_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_deleted_expiry_seconds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:terminal_requires_cause_orphan_deleted",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:valid_orphan_purge_failed",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_proof_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_confidence_status",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_review_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_review_artifact_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_expires_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:missing_orphan_purge_failed_retained_metadata",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_failed_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_failed_request",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_failed_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_failed_evidence_many",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_failed_confidence",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_failed_review_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_failed_review_artifact_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:reject_orphan_purge_failed_expiry_seconds",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:lineage_review_retention:terminal_requires_cause_orphan_purge_failed",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "outbox:calibration_read_capability:valid",
       "passed": true,
       "detail": ""
@@ -17781,6 +19011,11 @@
       "detail": ""
     },
     {
+      "name": "link:docs/10-jev-and-agents.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/11-audit-event-contract.md:10-jev-and-agents.md",
       "passed": true,
       "detail": ""
@@ -17797,6 +19032,11 @@
     },
     {
       "name": "link:docs/12-evidence-capture-and-vault.md:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/12-evidence-capture-and-vault.md:11-audit-event-contract.md",
       "passed": true,
       "detail": ""
     },

@@ -344,6 +344,77 @@ fn report_orphan_retention_facts_are_closed_and_bound_to_the_recovery_intent() {
 }
 
 #[test]
+fn lineage_review_retention_facts_are_closed_and_review_bound() {
+    const REVIEW: &str = "calrev_018f2a3b-4c5d-7000-8000-000000000097";
+    const REVIEW_ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000096";
+    for (event_type, outcome, reason_code, cause) in [
+        (
+            "calibration.lineage_review_retention.purge_requested",
+            "PASS",
+            "CALIBRATION_LINEAGE_REVIEW_PURGE_REQUESTED",
+            json!([]),
+        ),
+        (
+            "calibration.lineage_review_retention.deleted",
+            "PASS",
+            "CALIBRATION_LINEAGE_REVIEW_DELETE_ALREADY_ABSENT",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.lineage_review_retention.purge_failed",
+            "ERROR",
+            "CALIBRATION_LINEAGE_REVIEW_PURGE_REJECTED",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.lineage_review_retention.orphan_purge_requested",
+            "PASS",
+            "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_REQUESTED",
+            json!([]),
+        ),
+        (
+            "calibration.lineage_review_retention.orphan_deleted",
+            "PASS",
+            "CALIBRATION_LINEAGE_REVIEW_ORPHAN_DELETED",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.lineage_review_retention.orphan_purge_failed",
+            "ERROR",
+            "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_UNAVAILABLE",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+    ] {
+        let mut value = event();
+        value["event_type"] = json!(event_type);
+        value["producer_id"] = json!("calibration-lineage-review-retention");
+        value["producer_boot_id"] = json!("018f2a3b-4c5d-7000-8000-000000000098");
+        value["policy_revision"] = json!("calibration-retention-v1");
+        value["trace_id"] = json!("018f2a3b4c5d70008000000000000097");
+        value["span_id"] = json!("018f2a3b4c5d7000");
+        value["cause_event_ids"] = cause;
+        value["evidence_refs"] = json!([REVIEW_ARTIFACT]);
+        value["payload"] = json!({
+            "stage":"calibration_lineage_review_retention", "outcome":outcome,
+            "reason_code":reason_code, "proof_kind":"deterministic",
+            "confidence":null, "confidence_status":"not_applicable",
+            "review_id":REVIEW, "review_artifact_id":REVIEW_ARTIFACT,
+            "expires_at":"2026-09-21T00:00:00.123Z", "retained_metadata":true
+        });
+        assert!(
+            row(&value).is_ok(),
+            "valid lineage-review retention {event_type}"
+        );
+
+        value["payload"]["review_artifact_id"] = json!(REPORT_ARTIFACT);
+        assert!(
+            row(&value).is_err(),
+            "evidence reference must bind the review artifact"
+        );
+    }
+}
+
+#[test]
 fn canonical_capability_issuance_is_a_non_terminal_deterministic_summary() {
     let value = capability_issuance_event();
     let index_row = row(&value).unwrap();
@@ -588,6 +659,19 @@ fn calibration_aggregate_field_follows_the_event_contract() {
         assert_eq!(
             super::super::OutboxFamily::Calibration.aggregate_field(event_type),
             "report_id"
+        );
+    }
+    for event_type in [
+        "calibration.lineage_review_retention.purge_requested",
+        "calibration.lineage_review_retention.deleted",
+        "calibration.lineage_review_retention.purge_failed",
+        "calibration.lineage_review_retention.orphan_purge_requested",
+        "calibration.lineage_review_retention.orphan_deleted",
+        "calibration.lineage_review_retention.orphan_purge_failed",
+    ] {
+        assert_eq!(
+            super::super::OutboxFamily::Calibration.aggregate_field(event_type),
+            "review_id"
         );
     }
     assert!(

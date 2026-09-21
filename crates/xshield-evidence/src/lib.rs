@@ -29,6 +29,7 @@ use zeroize::Zeroizing;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 mod calibration_lineage_review;
+mod calibration_lineage_review_retention;
 mod calibration_report;
 mod calibration_report_retention;
 
@@ -38,6 +39,7 @@ pub use calibration_lineage_review::{
     CalibrationLineageReviewEvidenceManifest, CalibrationLineageReviewEvidenceWrite,
     VerifiedCalibrationLineageReviewManifest,
 };
+pub use calibration_lineage_review_retention::CalibrationLineageReviewOrphanCandidate;
 pub use calibration_report::{
     AttestedCalibrationReportManifest, CALIBRATION_REPORT_CANONICAL_BODY_ENCODING,
     CALIBRATION_REPORT_EVIDENCE_MANIFEST_SCHEMA_VERSION, CalibrationReportEvidenceManifest,
@@ -618,12 +620,9 @@ impl LocalEvidenceVault {
                     .root
                     .join(format!("{artifact_id}.manifest.hmac")),
             )?;
-            let has_report_sidecar =
-                calibration_report::sidecars_present(&self.config.root, artifact_id)?;
-            // A calibration report has its own authenticated sidecar contract.
-            // The generic retention scanner cannot safely validate or purge it,
-            // so it must leave the object to the report-specific lifecycle.
-            if has_report_sidecar {
+            // Dedicated objects have their own authenticated retention
+            // contracts. Generic reconciliation cannot validate either family.
+            if dedicated_sidecars_present(&self.config.root, artifact_id)? {
                 continue;
             }
             let authenticated_manifest = match (has_manifest, has_hmac) {
@@ -722,6 +721,8 @@ impl LocalEvidenceVault {
                 "manifest.hmac",
                 calibration_report::MANIFEST_FILENAME_SUFFIX,
                 calibration_report::MANIFEST_AUTH_FILENAME_SUFFIX,
+                calibration_lineage_review::MANIFEST_FILENAME_SUFFIX,
+                calibration_lineage_review::MANIFEST_AUTH_FILENAME_SUFFIX,
             ] {
                 if sidecar_present(
                     &self
@@ -1144,6 +1145,11 @@ fn sidecar_present(path: &Path) -> Result<bool, EvidenceError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(EvidenceError::Io(error)),
     }
+}
+
+fn dedicated_sidecars_present(root: &Path, artifact_id: &str) -> Result<bool, EvidenceError> {
+    Ok(calibration_report::sidecars_present(root, artifact_id)?
+        || calibration_lineage_review::sidecars_present(root, artifact_id)?)
 }
 
 fn validate_private_directory(path: &Path) -> Result<(), EvidenceError> {

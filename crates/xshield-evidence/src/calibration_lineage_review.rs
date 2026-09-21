@@ -33,8 +33,10 @@ pub const CALIBRATION_LINEAGE_REVIEW_CANONICAL_BODY_ENCODING: &str =
 const CAPTURE_STATUS: &str = "complete";
 const ENVELOPE_PROFILE: &str = "aead_envelope_v1";
 const INTEGRITY_ALGORITHM: &str = "sha256_ciphertext";
-const MANIFEST_SUFFIX: &str = "calibration-lineage-review.manifest.json";
-const MANIFEST_AUTH_SUFFIX: &str = "calibration-lineage-review.manifest.hmac";
+/// File suffix for the authenticated lineage-review metadata sidecar.
+pub(crate) const MANIFEST_FILENAME_SUFFIX: &str = "calibration-lineage-review.manifest.json";
+/// File suffix for the authentication tag of the lineage-review metadata sidecar.
+pub(crate) const MANIFEST_AUTH_FILENAME_SUFFIX: &str = "calibration-lineage-review.manifest.hmac";
 
 /// Validated write command for one completed declaration-review artifact.
 ///
@@ -528,11 +530,33 @@ fn calibration_lineage_review_aad(
 }
 
 fn manifest_filename(artifact_id: &str) -> String {
-    format!("{artifact_id}.{MANIFEST_SUFFIX}")
+    format!("{artifact_id}.{MANIFEST_FILENAME_SUFFIX}")
 }
 
 fn manifest_auth_filename(artifact_id: &str) -> String {
-    format!("{artifact_id}.{MANIFEST_AUTH_SUFFIX}")
+    format!("{artifact_id}.{MANIFEST_AUTH_FILENAME_SUFFIX}")
+}
+
+/// Reports whether any dedicated lineage-review sidecar exists for an artifact.
+///
+/// The generic orphan scanner uses this before considering a ciphertext. It
+/// cannot authenticate this object family and must leave it for the dedicated
+/// lineage-review retention flow.
+pub(crate) fn sidecars_present(
+    root: &std::path::Path,
+    artifact_id: &str,
+) -> Result<bool, EvidenceError> {
+    for filename in [
+        manifest_filename(artifact_id),
+        manifest_auth_filename(artifact_id),
+    ] {
+        match std::fs::symlink_metadata(root.join(filename)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(EvidenceError::Io(error)),
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

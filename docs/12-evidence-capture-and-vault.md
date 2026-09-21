@@ -106,6 +106,12 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 
 真实 PostgreSQL 与 CLI 测试覆盖批量边界、租户/站点/key 隔离、目录锁、意图和完成 outbox 故障回滚、删除后重启、幂等完成、损坏密文保留与重试、孤儿宽限/审计/删除、篡改 catalog 提前期限拒绝；库单测覆盖未到期、错误密钥、错误作用域、符号链接、HMAC、摘要和 partial-sidecar 保留。配置 ClickHouse 后，同一脚本继续把实际清理生产者的六类事件投递至真实生产 DDL 并验证脱敏查询、精确确认、重投去重、故障恢复及内容冲突，执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。
 
+### 12.8.1 已实现：校准 lineage-review 专用 body retention
+
+迁移 `0033_m4_calibration_lineage_review_retention.sql` 将 committed lineage-review 的加密 body 与 request catalog retention 分离：review projection、冻结 provenance 和认证 sidecar 继续保留，只有到期 `.xev` 可由 `xshield-evidence-retain` 删除。命令复用 12.8 的 tenant/site/key、目录锁、批量和 orphan 宽限配置；每个 lineage-review phase 每次最多处理 32 项。数据库先锁定 active、到期的 review metadata 并写入 purge intent，vault 随后精确重验 sidecar、scope、key、expiry、文件安全属性和密文摘要，完成目录同步后才写 `deleted` tombstone。已有 intent 在进程中断或数据库完成不确定时可重试，已不存在的密文以稳定的 already-absent 完成事实收敛；reject/unavailable 不删除文件并留下可恢复 intent。
+
+专用 orphan 路径只接收超过宽限期、完整认证且与 committed review metadata 无对应关系的 sidecar。它将文件长度、mtime、sidecar digest、scope、expiry 和精确 artifact/review identity 绑定到独立 intent，再次认证观察后才删除密文；partial、替换、跨域或未认证 sidecar 留作调查。通用 orphan 扫描显式跳过带 lineage-review sidecar 的对象，因此不会将其误当作 catalog 孤儿。新 capability 不能绑定有 intent 或 tombstone 的 review；维护 outbox 不授予读取或恢复资格。六类 maintenance event 的受限 envelope 见 [11.9.2](11-audit-event-contract.md#1192-已实现-calibrationlineage_review_retention-维护契约)。
+
 ## 12.9 案件证据保留锁存储与发布
 
 迁移 `0020_m3_case_evidence_holds.sql` 和 `PostgresIdentityStore` 已实现案件级保留锁；管理 HTTP 创建、释放及分页历史入口见 [29.21](29-api-endpoint-catalog.md#2921-已实现的案件保留锁管理契约)。调用方须认证精确 tenant/site 的 AuditAdministrator 并审计操作尝试，该角色可处理同作用域内其他所有者的案件。锁只暂停指定 artifact 的物理删除，catalog/vault 原始 expires_at、读取审批和到期拒读规则保持有效。创建要求 open 案件、已有案件成员、active catalog 且尚未提交删除意图；已过期但尚未进入删除意图的对象可保留供后续合规处置。

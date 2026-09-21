@@ -157,6 +157,12 @@ schema 与消费端拒绝未知/重复字段、错误 producer/aggregate/evidenc
 
 schema 与 calibration parser 同时拒绝未知或重复字段、错误 producer/policy/aggregate/time/trace/evidence binding、非规范 ID、artifact 别名和任何 source graph、source ID/revision、source-graph digest、样本、标签、指标、提示词、凭证或正文。索引摘要固定为 deterministic、`confidence=null/not_applicable` 和非业务终态。它记录提交声明已通过审核，不证明外部 corpus 独立、模型质量或阈值有效性，也不授予 evidence 读取、发布阈值/策略或业务资格。
 
+### 11.9.2 已实现 calibration.lineage_review_retention 维护契约
+
+`calibration.lineage_review_retention.*` 由 `calibration-lineage-review-retention` 生成，policy revision 固定为 `calibration-retention-v1`，aggregate、trace 和 span 均从 `calrev_` review ID 确定；request_id 为 null，唯一 evidence_ref 为 review artifact，发生/观察时间使用相同的数据库 UTC 毫秒。封闭 payload 固定为 `calibration_lineage_review_retention`、deterministic、`confidence=null/not_applicable` 与 `retained_metadata=true`，仅含 review/artifact ID 和到期时间。它不携带 source graph、source ID/revision、样本、标签、指标、提示词、凭证、sidecar、locator、摘要或正文。
+
+六类事件分为 committed review 与 request-free orphan 两组：`purge_requested`/`deleted`/`purge_failed` 和 `orphan_purge_requested`/`orphan_deleted`/`orphan_purge_failed`。两种 intent 没有 cause；完成或失败事实必须引用已经提交的同一清理 intent。完成原因只允许 `...DELETED` 或 `...DELETE_ALREADY_ABSENT`，失败原因只允许 `...PURGE_REJECTED` 或 `...PURGE_UNAVAILABLE`，两者都不表示 review 重新可读、数据独立、阈值有效或任何业务终态。schema 与 calibration parser 拒绝未知/重复字段、错误 producer/policy/aggregate/trace/evidence binding、非规范 ID/时间、多个 evidence/cause 引用及内容字段。索引只记录受限维护历史，projection、sidecar、tombstone 和 capability eligibility 仍由 PostgreSQL/vault 决定。
+
 ## 11.10 已实现校准读取能力发行事实
 
 `calibration.read_capability.issued` 是耐久 batch capability 发行的受限 outbox 事实，独立于 `calibration.reported`。producer 固定为 `calibration-capability-issuer`、policy revision 为 `calibration-v1`，aggregate 为 `calcap_` UUIDv7 capability ID；request_id、evidence_refs 和 cause_event_ids 均为空。其确定性 payload 固定为 `calibration_read_capability/PASS/CALIBRATION_READ_CAPABILITY_ISSUED`，只含 capability ID、规范 scope digest、成员数、冻结总字节数以及 Unix 秒的起止期限。trace/span 从 capability UUID 导出；event ID 与 producer boot 相同，两个序号均为 1，发生/观察时间由数据库以 UTC 毫秒冻结。

@@ -1562,6 +1562,75 @@ def check_calibration_report_contract(schema: dict) -> None:
                   event_id=event_id)
     check('outbox:calibration:reject_legacy_sparse', not valid(schema, sparse))
 
+def check_calibration_lineage_review_retention_contract(schema: dict) -> None:
+    """Validate six restricted lineage-review retention event shapes."""
+    event_id = 'ev_018f2a3b-4c5d-7000-8000-000000000081'
+    review_id = 'calrev_018f2a3b-4c5d-7000-8000-000000000082'
+    artifact = 'artifact_018f2a3b-4c5d-7000-8000-000000000083'
+    trace_id = review_id[7:].replace('-', '')
+    cases = [
+        ('purge_requested', 'PASS', 'CALIBRATION_LINEAGE_REVIEW_PURGE_REQUESTED', []),
+        ('deleted', 'PASS', 'CALIBRATION_LINEAGE_REVIEW_DELETE_ALREADY_ABSENT', [event_id]),
+        ('purge_failed', 'ERROR', 'CALIBRATION_LINEAGE_REVIEW_PURGE_REJECTED', [event_id]),
+        ('orphan_purge_requested', 'PASS', 'CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_REQUESTED', []),
+        ('orphan_deleted', 'PASS', 'CALIBRATION_LINEAGE_REVIEW_ORPHAN_DELETED', [event_id]),
+        ('orphan_purge_failed', 'ERROR', 'CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_UNAVAILABLE', [event_id]),
+    ]
+    for suffix, outcome, reason_code, causes in cases:
+        base = {
+            'schema_version': 3,
+            'event_type': 'calibration.lineage_review_retention.' + suffix,
+            'event_id': event_id, 'tenant_id': 'tenant_demo', 'site_id': 'site_demo',
+            'request_id': None, 'trace_id': trace_id, 'span_id': trace_id[:16],
+            'producer_id': 'calibration-lineage-review-retention',
+            'producer_boot_id': '018f2a3b-4c5d-7000-8000-000000000084',
+            'producer_seq': 1, 'request_seq': 1,
+            'occurred_at': '2026-09-20T00:00:00.123Z',
+            'observed_at': '2026-09-20T00:00:00.123Z',
+            'policy_revision': 'calibration-retention-v1', 'example_only': False,
+            'evidence_refs': [artifact], 'cause_event_ids': causes,
+            'sensitivity': 'RESTRICTED',
+            'integrity': {'state': 'pending', 'previous_hash': None, 'event_hash': None},
+            'payload': {
+                'stage': 'calibration_lineage_review_retention', 'outcome': outcome,
+                'reason_code': reason_code, 'proof_kind': 'deterministic',
+                'confidence': None, 'confidence_status': 'not_applicable',
+                'review_id': review_id, 'review_artifact_id': artifact,
+                'expires_at': '2026-09-20T00:00:00.122Z', 'retained_metadata': True,
+            },
+        }
+        check('outbox:lineage_review_retention:valid_' + suffix, valid(schema, base))
+        for payload in [False, True]:
+            for field in base['payload'] if payload else base:
+                missing = copy.deepcopy(base)
+                del (missing['payload'] if payload else missing)[field]
+                check(f'outbox:lineage_review_retention:missing_{suffix}_{field}',
+                      not valid(schema, missing))
+        for label, field, value in [
+            ('producer', 'producer_id', 'calibration-report-retention'),
+            ('request', 'request_id', event_id),
+            ('sensitivity', 'sensitivity', 'INTERNAL'),
+            ('evidence_many', 'evidence_refs', [artifact, artifact]),
+            ('confidence', 'confidence', 0.1),
+            ('review_prefix', 'review_id', event_id),
+            ('review_artifact_prefix', 'review_artifact_id', review_id),
+            ('expiry_seconds', 'expires_at', '2026-09-20T00:00:00Z'),
+        ]:
+            invalid = copy.deepcopy(base)
+            (invalid['payload'] if field in invalid['payload'] else invalid)[field] = value
+            check(f'outbox:lineage_review_retention:reject_{suffix}_{label}',
+                  not valid(schema, invalid))
+        if causes:
+            invalid = copy.deepcopy(base)
+            invalid['cause_event_ids'] = []
+            check('outbox:lineage_review_retention:terminal_requires_cause_' + suffix,
+                  not valid(schema, invalid))
+        else:
+            invalid = copy.deepcopy(base)
+            invalid['cause_event_ids'] = [event_id]
+            check('outbox:lineage_review_retention:intent_has_no_cause_' + suffix,
+                  not valid(schema, invalid))
+
 def check_calibration_read_capability_issued_contract(schema: dict) -> None:
     """Validate restricted capability issuance fields; Rust owns cross-field binding."""
     event_id = 'ev_018f2a3b-4c5d-7000-8000-000000000071'
@@ -1751,6 +1820,7 @@ def main() -> int:
     check_grant_contracts(schemas['audit-event'])
     check_share_grant_contracts(schemas['audit-event'])
     check_calibration_report_contract(schemas['audit-event'])
+    check_calibration_lineage_review_retention_contract(schemas['audit-event'])
     check_calibration_read_capability_issued_contract(schemas['audit-event'])
     idx=load('examples/request-index.json');check('request_index:events',set(idx['event_ids'])==ev_ids)
     check('request_index:artifacts',set(idx['artifact_ids'])==set(manifests))

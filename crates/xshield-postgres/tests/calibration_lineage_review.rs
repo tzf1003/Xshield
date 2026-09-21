@@ -31,7 +31,7 @@ use xshield_postgres::{
 };
 
 #[tokio::test]
-#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0029"]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0033"]
 async fn lineage_review_commit_is_atomic_exact_and_closed() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -55,6 +55,7 @@ async fn lineage_review_commit_is_atomic_exact_and_closed() {
     assert_commit_and_retention_safe_exact_retry(&pool, &store, &fixture, &vault).await;
     assert_catalog_drift_is_unavailable(&pool, &store, &fixture, &vault).await;
     assert_cross_family_artifact_collision_is_closed(&pool, &store, &fixture, &vault).await;
+    assert_orphan_tombstone_fences_later_review_commit(&pool, &store, &fixture, &vault).await;
 
     fs::remove_dir_all(vault_root).expect("private vault root is removable");
 }
@@ -271,6 +272,51 @@ async fn assert_cross_family_artifact_collision_is_closed(
     .await
     .expect("conflict state is queryable");
     assert_eq!(counts, (0, 0, 0));
+}
+
+async fn assert_orphan_tombstone_fences_later_review_commit(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    vault: &LocalEvidenceVault,
+) {
+    let review = review(fixture, artifact_id());
+    let manifest = write_and_attest(vault, fixture, &review);
+    let requested_event_id = event_id();
+    let completed_event_id = event_id();
+    sqlx::query(
+        "INSERT INTO xshield.calibration_lineage_review_orphan_purges (
+             tenant_id, site_id, review_id, artifact_id, storage_locator,
+             sidecar_digest, observed_bytes, observed_modified_seconds,
+             observed_modified_nanos, expires_at, requested_event_id,
+             completed_event_id, status, requested_at, completed_at
+         ) VALUES (
+             $1,$2,$3,$4,$5,$6,1,1,0,
+             date_trunc('milliseconds', clock_timestamp() - interval '1 second'),
+             $7,$8,'deleted',clock_timestamp(),clock_timestamp()
+         )",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(review.review_id().as_str())
+    .bind(review.review_artifact_id().as_str())
+    .bind(format!("{}.xev", review.review_artifact_id().as_str()))
+    .bind("c".repeat(64))
+    .bind(requested_event_id.as_str())
+    .bind(completed_event_id.as_str())
+    .execute(pool)
+    .await
+    .expect("orphan tombstone fixture inserts");
+    let commit_event_id = event_id();
+    let command = CalibrationLineageReviewCommit::new(&review, &manifest, &commit_event_id)
+        .expect("fenced commit command is valid");
+    assert!(matches!(
+        store
+            .commit_calibration_lineage_review(command)
+            .await
+            .expect("fenced commit resolves"),
+        CalibrationLineageReviewCommitOutcome::Conflict
+    ));
 }
 
 fn review(fixture: &Fixture, review_artifact_id: ArtifactId) -> CalibrationLineageReviewArtifact {

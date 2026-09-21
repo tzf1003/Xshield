@@ -8,6 +8,7 @@
 mod action_read;
 mod binding_inspection;
 mod calibration_lineage_review;
+mod calibration_lineage_review_retention;
 mod calibration_read_capability;
 mod calibration_report;
 mod calibration_report_retention;
@@ -41,6 +42,10 @@ pub use binding_inspection::BindingInspection;
 pub use calibration_lineage_review::{
     CalibrationLineageReviewCommit, CalibrationLineageReviewCommitOutcome,
     CalibrationLineageReviewCommitRecord,
+};
+pub use calibration_lineage_review_retention::{
+    CalibrationLineageReviewOrphanPurgeJob, CalibrationLineageReviewOrphanPurgeResult,
+    CalibrationLineageReviewPurgeJob, CalibrationLineageReviewPurgeResult,
 };
 pub use calibration_read_capability::{
     AuthorizedCalibrationEvidence, CalibrationEvidenceBatchBegin,

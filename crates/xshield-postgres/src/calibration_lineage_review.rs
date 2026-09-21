@@ -177,11 +177,28 @@ impl PostgresIdentityStore {
         }
         let mut transaction = self.pool.begin().await?;
         set_timeouts(&mut transaction).await?;
-        lock_review(&mut transaction, review).await?;
+        lock_review_identities(
+            &mut transaction,
+            review.review_id(),
+            review.review_artifact_id(),
+        )
+        .await?;
         if let Some(existing) = find_review(&mut transaction, &tenant_id, &site_id, review).await? {
             let result = existing_outcome(&mut transaction, &existing, &command).await?;
             transaction.rollback().await?;
             return Ok(result);
+        }
+        if orphan_identity_is_fenced(
+            &mut transaction,
+            &tenant_id,
+            &site_id,
+            review.review_id(),
+            review.review_artifact_id(),
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(CalibrationLineageReviewCommitOutcome::Conflict);
         }
         if event_is_used(&mut transaction, command.event_id).await? {
             transaction.rollback().await?;
@@ -254,19 +271,50 @@ async fn set_timeouts(
     Ok(())
 }
 
-async fn lock_review(
+async fn lock_review_identities(
     connection: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    review: &CalibrationLineageReviewArtifact,
+    review_id: &CalibrationLineageReviewId,
+    artifact_id: &ArtifactId,
 ) -> Result<(), StoreError> {
-    sqlx::query(
-        "SELECT pg_advisory_xact_lock(hashtextextended(
-             'xshield-calibration-lineage-review-v1:' || $1, 0
-         ))",
-    )
-    .bind(review.review_id().as_str())
-    .execute(&mut **connection)
-    .await?;
+    let mut identities = [
+        format!("xshield-calibration-lineage-review-v1:artifact:{artifact_id}"),
+        format!("xshield-calibration-lineage-review-v1:review:{review_id}"),
+    ];
+    identities.sort_unstable();
+    for identity in identities {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(identity)
+            .execute(&mut **connection)
+            .await?;
+    }
     Ok(())
+}
+
+/// Detects an orphan-purge identity that has durably fenced new publication.
+///
+/// The orphan row outlives a physical removal. Once deletion intent exists,
+/// even a fresh review writer with the same identities cannot safely commit:
+/// its just-attested ciphertext may be removed by the maintenance owner.
+async fn orphan_identity_is_fenced(
+    connection: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    review_id: &CalibrationLineageReviewId,
+    artifact_id: &ArtifactId,
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM xshield.calibration_lineage_review_orphan_purges
+             WHERE tenant_id=$1 AND site_id=$2
+               AND (review_id=$3 OR artifact_id=$4)
+         )",
+    )
+    .bind(tenant_id.as_str())
+    .bind(site_id.as_str())
+    .bind(review_id.as_str())
+    .bind(artifact_id.as_str())
+    .fetch_one(&mut **connection)
+    .await?)
 }
 
 async fn find_review(

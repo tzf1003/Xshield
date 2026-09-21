@@ -26,6 +26,12 @@ pub(super) const EVENT_TYPES: &[&str] = &[
     "calibration.report_retention.orphan_purge_requested",
     "calibration.report_retention.orphan_deleted",
     "calibration.report_retention.orphan_purge_failed",
+    "calibration.lineage_review_retention.purge_requested",
+    "calibration.lineage_review_retention.deleted",
+    "calibration.lineage_review_retention.purge_failed",
+    "calibration.lineage_review_retention.orphan_purge_requested",
+    "calibration.lineage_review_retention.orphan_deleted",
+    "calibration.lineage_review_retention.orphan_purge_failed",
 ];
 
 #[derive(Deserialize)]
@@ -129,6 +135,22 @@ struct CalibrationReportRetention {
     retained_metadata: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationLineageReviewRetention {
+    stage: String,
+    outcome: String,
+    reason_code: String,
+    proof_kind: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    confidence: Option<f64>,
+    confidence_status: String,
+    review_id: String,
+    review_artifact_id: String,
+    expires_at: String,
+    retained_metadata: bool,
+}
+
 /// Validates one complete offline calibration-report event without side effects.
 ///
 /// Common v3 envelope, leased event identity, duplicate JSON key, and scope
@@ -153,6 +175,12 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         .starts_with("calibration.report_retention.")
     {
         return parse_report_retention(event);
+    }
+    if event
+        .event_type
+        .starts_with("calibration.lineage_review_retention.")
+    {
+        return parse_lineage_review_retention(event);
     }
     let value: CalibrationReport = serde_json::from_str(event.payload.get())?;
     let report_id = CalibrationReportId::parse(value.report_id.clone())
@@ -193,6 +221,100 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         confidence_status: "not_applicable".to_owned(),
         ..PayloadSummary::default()
     })
+}
+
+/// Validates an expiry-maintenance fact for one lineage-review body.
+///
+/// It only records a restricted lifecycle phase. The durable review projection
+/// and authenticated vault sidecar decide availability; an indexed event never
+/// restores the body or makes it a source-evidence authorization.
+fn parse_lineage_review_retention(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    let value: CalibrationLineageReviewRetention = serde_json::from_str(event.payload.get())?;
+    let review_id = CalibrationLineageReviewId::parse(value.review_id.clone())
+        .map_err(|_| PublishError::InvalidEvent)?;
+    let review_uuid = review_id
+        .as_str()
+        .strip_prefix("calrev_")
+        .ok_or(PublishError::InvalidEvent)?;
+    if event.producer_id != "calibration-lineage-review-retention"
+        || event.policy_revision != "calibration-retention-v1"
+        || valid_uuid_v7(&event.producer_boot_id).is_err()
+        || event.producer_seq != 1
+        || event.request_seq != 1
+        || event.request_id.is_some()
+        || event.sensitivity != "RESTRICTED"
+        || event.observed_at != event.occurred_at
+        || event.trace_id != review_uuid.replace('-', "")
+        || event.trace_id.get(..16) != Some(event.span_id.as_str())
+        || value.stage != "calibration_lineage_review_retention"
+        || value.proof_kind != "deterministic"
+        || value.confidence.is_some()
+        || value.confidence_status != "not_applicable"
+        || ArtifactId::parse(&value.review_artifact_id).is_err()
+        || event.evidence_refs.as_slice() != [value.review_artifact_id.as_str()]
+        || !value.retained_metadata
+        || utc_millis(&value.expires_at).is_err()
+        || !valid_lineage_review_retention_result(event, &value)
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    let intent = event.event_type.ends_with("purge_requested");
+    match event.cause_event_ids.as_slice() {
+        [] if intent => {}
+        [cause] if !intent && cause != &event.event_id && EventId::parse(cause).is_ok() => {}
+        _ => return Err(PublishError::InvalidEvent),
+    }
+    utc_millis(&event.occurred_at)?;
+    Ok(PayloadSummary {
+        stage: value.stage,
+        outcome: value.outcome,
+        reason_code: value.reason_code,
+        proof_kind: value.proof_kind,
+        confidence_status: value.confidence_status,
+        ..PayloadSummary::default()
+    })
+}
+
+fn valid_lineage_review_retention_result(
+    event: &WireEvent,
+    value: &CalibrationLineageReviewRetention,
+) -> bool {
+    matches!(
+        (
+            event.event_type.as_str(),
+            value.outcome.as_str(),
+            value.reason_code.as_str()
+        ),
+        (
+            "calibration.lineage_review_retention.purge_requested",
+            "PASS",
+            "CALIBRATION_LINEAGE_REVIEW_PURGE_REQUESTED"
+        ) | (
+            "calibration.lineage_review_retention.deleted",
+            "PASS",
+            "CALIBRATION_LINEAGE_REVIEW_DELETED"
+                | "CALIBRATION_LINEAGE_REVIEW_DELETE_ALREADY_ABSENT"
+        ) | (
+            "calibration.lineage_review_retention.purge_failed",
+            "ERROR",
+            "CALIBRATION_LINEAGE_REVIEW_PURGE_REJECTED"
+                | "CALIBRATION_LINEAGE_REVIEW_PURGE_UNAVAILABLE"
+        ) | (
+            "calibration.lineage_review_retention.orphan_purge_requested",
+            "PASS",
+            "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_REQUESTED"
+        ) | (
+            "calibration.lineage_review_retention.orphan_deleted",
+            "PASS",
+            "CALIBRATION_LINEAGE_REVIEW_ORPHAN_DELETED"
+                | "CALIBRATION_LINEAGE_REVIEW_ORPHAN_DELETE_ALREADY_ABSENT"
+        ) | (
+            "calibration.lineage_review_retention.orphan_purge_failed",
+            "ERROR",
+            "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_REJECTED"
+                | "CALIBRATION_LINEAGE_REVIEW_ORPHAN_PURGE_UNAVAILABLE"
+        )
+    )
 }
 
 /// Validates the restricted durable declaration-review history fact.
