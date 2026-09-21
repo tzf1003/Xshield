@@ -15,6 +15,14 @@ use crate::domain::{
 };
 use std::{collections::BTreeSet, fmt};
 
+/// Strict content DTOs for turning controlled model-record and label bytes into a sample.
+///
+/// The decoder has no reader, vault, authorization, audit, or persistence dependency.
+/// Its caller must obtain the two byte slices through the purpose-specific
+/// calibration read capability and preserve the capability's role and slot
+/// checks before calling it.
+pub mod content;
+
 /// One model route and template family frozen for a dataset evaluation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelIdentity {
@@ -531,3 +539,7 @@ fn valid_component(value: &str) -> bool {
 #[cfg(test)]
 #[path = "dataset/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "dataset/content_tests.rs"]
+mod content_tests;

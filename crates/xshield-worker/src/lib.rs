@@ -24,6 +24,7 @@ use xshield_audit::{
 use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 
 pub mod calibration_audit;
+pub mod calibration_evaluator;
 mod calibration_vault_reader;
 mod control_audit;
 pub mod model_eval;

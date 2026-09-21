@@ -45,7 +45,7 @@ const EVIDENCE_KEY: &str = "1111111111111111111111111111111111111111111111111111
 const JOURNAL_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
 #[tokio::test]
-#[ignore = "requires script-owned XSHIELD_TEST_DATABASE_URL with migrations through 0025"]
+#[ignore = "requires script-owned XSHIELD_TEST_DATABASE_URL with migrations through 0028"]
 async fn calibration_reader_requires_durable_journal_before_plaintext_and_completion() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -240,9 +240,9 @@ impl Fixture {
                     tenant_id: &self.tenant,
                     site_id: &self.site,
                     request_id: &self.request,
-                    kind: "calibration_evidence",
-                    content_type: "application/octet-stream",
-                    fidelity: EvidenceFidelity::EntityExact,
+                    kind: calibration_fixture_kind(index),
+                    content_type: "application/json",
+                    fidelity: EvidenceFidelity::Semantic,
                     classification: EvidenceClassification::Restricted,
                     parent_refs: &[],
                     expires_at: Utc::now() + TimeDelta::minutes(5),
@@ -532,6 +532,18 @@ fn assert_release_event(event: &Value, capability_id: &str) {
             event["payload"].get(field).is_none(),
             "payload exposes {field}"
         );
+    }
+}
+
+fn calibration_fixture_kind(index: u8) -> &'static str {
+    match index {
+        0 => "evaluation_manifest",
+        1 => "training_manifest",
+        2 => "calibration_manifest",
+        3 => "label_manifest",
+        4 => "model_call",
+        5 => "reviewed_label",
+        _ => unreachable!("fixture creates exactly six calibration artifacts"),
     }
 }
 

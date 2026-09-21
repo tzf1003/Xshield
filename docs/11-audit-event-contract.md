@@ -154,7 +154,7 @@ schema 与消费端拒绝未知/重复字段、错误 producer/aggregate/evidenc
 
 此事实与 capability header、完整成员 snapshot 同一 PostgreSQL 事务提交；成员行及其 catalog snapshot 留在受限关系表，不展开至 envelope。lease ID、私有 lease handle、artifact ID、批准/数据集/模型修订、标签、概率、内容、控制台主体和业务请求均不进入事实。它记录发行，不构成内容授权、消费完成、报告、模型质量、阈值/策略发布或业务终态。现有 calibration consumer 已严格解析该 event type，绑定 capability aggregate、producer、时钟、trace、空 evidence/cause 引用、64 位 scope digest 以及成员/字节/期限边界，并沿用族隔离的 at-least-once 发布；真实 ClickHouse 端到端投递仍需专有数据库验收。outbox 留存不能替代 durable header/members/lease 状态作为授权真值。
 
-受限报告持久化适配器能够生成 `calibration-evaluator` 的 `calibration.reported`：未来应用服务必须先认证专用 report vault sidecar、密文摘要、AEAD 和 canonical report DTO，再将该 attestation 与冻结投影、lease completion 和 outbox 行一并交给同一 PostgreSQL 事务。当前没有生产 evaluator/application 调用该 API。部署者不得人工伪造事件或用 outbox 代替 vault、lease、catalog 或 retention 状态；跨文件系统与数据库之间的崩溃恢复仍须由专用 reconciliation 路径闭合，不能据此推断 report 内容独立或真实校准结论。
+受限报告持久化适配器能够生成 `calibration-evaluator` 的 `calibration.reported`：worker evaluator 先认证专用 report vault sidecar、密文摘要、AEAD 和 canonical report DTO，再将该 attestation 与冻结投影、lease completion 和 outbox 行一并交给同一 PostgreSQL 事务。部署者不得人工伪造事件或用 outbox 代替 vault、lease、catalog 或 retention 状态；跨文件系统与数据库之间的崩溃恢复仍须由专用 reconciliation 路径闭合，不能据此推断 report 内容独立或真实校准结论。
 
 ## 11.11 已实现校准明文释放 journal 审计契约
 
