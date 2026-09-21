@@ -40,7 +40,7 @@ use xshield_postgres::{
 };
 
 #[tokio::test]
-#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0032"]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0033"]
 async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -68,7 +68,7 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
     )
     .await;
 
-    assert_artifact_first_conflict_keeps_lease_active(&pool, &store, &fixture, &vault).await;
+    assert_cross_family_artifact_conflict_keeps_lease_active(&pool, &store, &fixture, &vault).await;
     assert_successful_commit_is_atomic_and_exact(&pool, &store, &fixture, &vault).await;
     assert_wrong_runner_catalog_drift_and_expiry_are_closed(&pool, &store, &fixture, &vault).await;
 
@@ -145,7 +145,7 @@ impl Fixture {
     }
 }
 
-async fn assert_artifact_first_conflict_keeps_lease_active(
+async fn assert_cross_family_artifact_conflict_keeps_lease_active(
     pool: &PgPool,
     store: &PostgresIdentityStore,
     fixture: &Fixture,
@@ -158,9 +158,9 @@ async fn assert_artifact_first_conflict_keeps_lease_active(
         .bind_issued_batch_lease(lease, now())
         .expect("issued lease binds capability");
     let evaluation = completed_report(fixture);
-    let (publication, report) = report_artifact(&evaluation);
+    let (publication, report) =
+        report_artifact_with_id(&evaluation, fixture.lineage_review_artifact_id.clone());
     let manifest = write_report(vault, fixture, &report);
-    seed_report_artifact_collision(pool, manifest.manifest()).await;
     let completion =
         CalibrationEvidenceBatchCompletion::from_successful_evaluation(session, evaluation)
             .expect("completion matches capability");
@@ -186,17 +186,22 @@ async fn assert_artifact_first_conflict_keeps_lease_active(
         outcome.reason_code()
     );
     assert_state(pool, &capability, "leased", "active").await;
-    let report_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM xshield.calibration_reports
-         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3",
+    let state: (i64, i64, String) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM xshield.calibration_report_artifacts
+              WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3),
+             (SELECT count(*) FROM xshield.calibration_reports
+              WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$4),
+             (SELECT family FROM xshield.artifact_identity_registry WHERE artifact_id=$3)",
     )
     .bind(fixture.tenant.as_str())
     .bind(fixture.site.as_str())
+    .bind(fixture.lineage_review_artifact_id.as_str())
     .bind(capability.capability_id().as_str())
     .fetch_one(pool)
     .await
-    .expect("report count is queryable");
-    assert_eq!(report_count, 0);
+    .expect("cross-family conflict state is queryable");
+    assert_eq!(state, (0, 0, "calibration_lineage_review".to_owned()));
 }
 
 #[allow(clippy::too_many_lines)]
@@ -489,9 +494,16 @@ async fn assert_wrong_runner_catalog_drift_and_expiry_are_closed(
 fn report_artifact(
     evaluation: &EvaluationReport,
 ) -> (CalibrationReportPublication, CalibrationReportArtifact) {
+    report_artifact_with_id(evaluation, artifact_id())
+}
+
+fn report_artifact_with_id(
+    evaluation: &EvaluationReport,
+    report_artifact_id: ArtifactId,
+) -> (CalibrationReportPublication, CalibrationReportArtifact) {
     let publication = CalibrationReportPublication::new(
         CalibrationReportId::parse(format!("calr_{}", Uuid::now_v7())).expect("report id is valid"),
-        artifact_id(),
+        report_artifact_id,
         evaluation,
     )
     .expect("report artifact does not alias source evidence");
@@ -743,44 +755,6 @@ fn calibration_catalog_kind(index: usize) -> &'static str {
         5 => "reviewed_label",
         _ => "unrelated_calibration_evidence",
     }
-}
-
-async fn seed_report_artifact_collision(
-    pool: &PgPool,
-    manifest: &xshield_evidence::CalibrationReportEvidenceManifest,
-) {
-    let expires_at = chrono::DateTime::parse_from_rfc3339(&manifest.expires_at)
-        .expect("fixture report expiry parses")
-        .with_timezone(&Utc);
-    sqlx::query(
-        "INSERT INTO xshield.calibration_report_artifacts (
-             tenant_id, site_id, report_id, artifact_id, schema_version, kind,
-             content_type, canonical_body_encoding, capture_status, fidelity,
-             bytes_observed, bytes_saved, classification, storage_profile,
-             storage_locator, key_ref, integrity_algorithm, integrity_digest,
-             recorded_at, published_at, expires_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'entity_exact',$10,$10,'RESTRICTED',$11,$12,$13,$14,$15,
-                   date_trunc('milliseconds', clock_timestamp()), date_trunc('milliseconds', clock_timestamp()), $16)",
-    )
-    .bind(&manifest.tenant_id)
-    .bind(&manifest.site_id)
-    .bind(&manifest.report_id)
-    .bind(&manifest.artifact_id)
-    .bind(i16::from(manifest.schema_version))
-    .bind(&manifest.kind)
-    .bind(&manifest.content_type)
-    .bind(&manifest.canonical_body_encoding)
-    .bind(&manifest.capture_status)
-    .bind(i64::try_from(manifest.bytes_saved).expect("bytes fit postgres"))
-    .bind(&manifest.storage.profile)
-    .bind(&manifest.storage.locator)
-    .bind(manifest.storage.key_ref.as_deref().expect("key reference is present"))
-    .bind(&manifest.integrity.algorithm)
-    .bind(&manifest.integrity.digest)
-    .bind(expires_at)
-    .execute(pool)
-    .await
-    .expect("report artifact collision fixture inserts");
 }
 
 fn cleanup(_pool: &PgPool, _fixture: &Fixture) {

@@ -309,7 +309,11 @@ impl LocalEvidenceVault {
             .join(format!("{}.xev", artifact_id.as_str()));
         let metadata = match path.symlink_metadata() {
             Ok(value) => value,
+            // A previous owner may have removed the ciphertext before its
+            // directory sync or database completion. Sync before reporting a
+            // successful retry so the tombstone never outruns durable removal.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                sync_directory(&self.config.root)?;
                 return Ok(EvidencePurgeOutcome::AlreadyAbsent);
             }
             Err(error) => return Err(EvidenceError::Io(error)),
@@ -451,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn lineage_review_orphan_scanner_is_separate_from_generic_orphans_and_retries_absence() {
+    fn lineage_review_orphan_scanner_is_separate_from_generic_orphans_and_syncs_absence_retries() {
         let root = private_temp_directory();
         let vault = LocalEvidenceVault::open(
             EvidenceVaultConfig::new(&root, "lineage-review-retention-r1", 1024, 30).unwrap(),
@@ -489,6 +493,9 @@ mod tests {
             EvidencePurgeOutcome::Removed
         );
         assert!(!ciphertext.exists());
+        // This follows the recovery path after a prior owner removed the file.
+        // The successful retry must still directory-sync before its caller may
+        // persist an `AlreadyAbsent` terminal tombstone.
         assert_eq!(
             vault
                 .purge_calibration_lineage_review_orphan(&tenant, &site, &candidates[0])

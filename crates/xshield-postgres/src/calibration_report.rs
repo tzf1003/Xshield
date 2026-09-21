@@ -279,6 +279,18 @@ impl PostgresIdentityStore {
         }
 
         let timestamp = date_millis(now);
+        if !claim_report_artifact_identity(
+            &mut transaction,
+            capability.tenant_id(),
+            capability.site_id(),
+            command.publication.report_artifact_id(),
+            timestamp,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(CalibrationReportCommitOutcome::Conflict);
+        }
         let artifact_inserted =
             insert_report_artifact(&mut transaction, command.manifest.manifest(), timestamp)
                 .await?;
@@ -660,6 +672,35 @@ async fn insert_report_artifact(
     .bind(timestamp)
     .bind(timestamp)
     .bind(expires_at)
+    .execute(&mut **connection)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Claims the global artifact identity before inserting the report owner row.
+///
+/// The registry claim converts a concurrent cross-family collision into the
+/// closed `Conflict` outcome. The owner-row trigger then verifies that this
+/// transaction owns the matching report-family claim; a later failure rolls
+/// the claim back with the surrounding report transaction.
+async fn claim_report_artifact_identity(
+    connection: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &xshield_core::domain::TenantId,
+    site_id: &xshield_core::domain::SiteId,
+    artifact_id: &ArtifactId,
+    registered_at: DateTime<Utc>,
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query(
+        "INSERT INTO xshield.artifact_identity_registry
+             (artifact_id, tenant_id, site_id, family, registered_at)
+         VALUES ($1,$2,$3,'calibration_report',$4)
+         ON CONFLICT (artifact_id) DO NOTHING",
+    )
+    .bind(artifact_id.as_str())
+    .bind(tenant_id.as_str())
+    .bind(site_id.as_str())
+    .bind(registered_at)
     .execute(&mut **connection)
     .await?
     .rows_affected()
