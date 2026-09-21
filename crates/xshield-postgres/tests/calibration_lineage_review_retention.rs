@@ -78,20 +78,43 @@ async fn calibration_lineage_review_retention_is_intent_first_tombstoned_and_rec
     .expect("tombstone is queryable");
     assert_eq!(terminal, ("deleted".to_owned(), true, 2));
 
-    sqlx::query(
-        "DELETE FROM xshield.calibration_lineage_review_artifacts WHERE tenant_id=$1 AND site_id=$2",
+    let failed_review_id = format!("calrev_{}", Uuid::now_v7());
+    let failed_artifact_id = format!("artifact_{}", Uuid::now_v7());
+    seed_expired_lineage_review(
+        &pool,
+        &tenant,
+        &site,
+        &failed_review_id,
+        &failed_artifact_id,
+    )
+    .await;
+    let failed_jobs = store
+        .prepare_calibration_lineage_review_purge(&tenant, &site, "lineage-review-retention-r1", 1)
+        .await
+        .expect("failure intent commits");
+    assert_eq!(failed_jobs.len(), 1);
+    store
+        .finish_calibration_lineage_review_purge(
+            &failed_jobs[0],
+            CalibrationLineageReviewPurgeResult::Unavailable,
+        )
+        .await
+        .expect("failure fact commits");
+    let failed: (String, bool, i64) = sqlx::query_as(
+        "SELECT retention_status, purge_completed_event_id IS NULL,
+                (SELECT count(*) FROM xshield.audit_outbox
+                 WHERE tenant_id=$1 AND site_id=$2
+                   AND event_type = 'calibration.lineage_review_retention.purge_failed')
+         FROM xshield.calibration_lineage_review_artifacts
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
     )
     .bind(tenant.as_str())
     .bind(site.as_str())
-    .execute(&pool)
+    .bind(&failed_artifact_id)
+    .fetch_one(&pool)
     .await
-    .expect("lineage-review fixture cleans up");
-    sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id=$1 AND site_id=$2")
-        .bind(tenant.as_str())
-        .bind(site.as_str())
-        .execute(&pool)
-        .await
-        .expect("outbox fixture cleans up");
+    .expect("retryable lineage-review fact is queryable");
+    assert_eq!(failed, ("active".to_owned(), true, 1));
 }
 
 #[tokio::test]
@@ -183,20 +206,58 @@ async fn calibration_lineage_review_orphan_retention_is_intent_first_without_rev
     .expect("orphan tombstone is queryable");
     assert_eq!(terminal, ("deleted".to_owned(), true, 2, true));
 
-    sqlx::query(
-        "DELETE FROM xshield.calibration_lineage_review_orphan_purges WHERE tenant_id=$1 AND site_id=$2",
+    assert_retryable_orphan_failure(&store, &pool, &tenant, &site).await;
+}
+
+async fn assert_retryable_orphan_failure(
+    store: &PostgresIdentityStore,
+    pool: &PgPool,
+    tenant: &TenantId,
+    site: &SiteId,
+) {
+    let failed_review_id = format!("calrev_{}", Uuid::now_v7());
+    let failed_artifact_id = format!("artifact_{}", Uuid::now_v7());
+    let failed_candidate = CalibrationLineageReviewOrphanCandidate::from_observation(
+        &failed_review_id,
+        &failed_artifact_id,
+        "c".repeat(64),
+        (Utc::now() - TimeDelta::seconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true),
+        1,
+        1_789_689_601,
+        456,
+    )
+    .expect("failure candidate is valid");
+    let failed_jobs = store
+        .prepare_calibration_lineage_review_orphan_purge(
+            tenant,
+            site,
+            std::slice::from_ref(&failed_candidate),
+        )
+        .await
+        .expect("orphan failure intent commits");
+    assert_eq!(failed_jobs.len(), 1);
+    store
+        .finish_calibration_lineage_review_orphan_purge(
+            &failed_jobs[0],
+            CalibrationLineageReviewOrphanPurgeResult::Unavailable,
+        )
+        .await
+        .expect("orphan failure fact commits");
+    let failed: (String, bool, i64) = sqlx::query_as(
+        "SELECT status, completed_event_id IS NULL,
+                (SELECT count(*) FROM xshield.audit_outbox
+                 WHERE tenant_id=$1 AND site_id=$2
+                   AND event_type = 'calibration.lineage_review_retention.orphan_purge_failed')
+         FROM xshield.calibration_lineage_review_orphan_purges
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
     )
     .bind(tenant.as_str())
     .bind(site.as_str())
-    .execute(&pool)
+    .bind(&failed_artifact_id)
+    .fetch_one(pool)
     .await
-    .expect("orphan fixture cleans up");
-    sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id=$1 AND site_id=$2")
-        .bind(tenant.as_str())
-        .bind(site.as_str())
-        .execute(&pool)
-        .await
-        .expect("outbox fixture cleans up");
+    .expect("retryable orphan fact is queryable");
+    assert_eq!(failed, ("pending".to_owned(), true, 1));
 }
 
 async fn seed_expired_lineage_review(

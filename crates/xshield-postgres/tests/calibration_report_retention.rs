@@ -77,20 +77,43 @@ async fn calibration_report_retention_is_intent_first_tombstoned_and_recoverable
     .expect("tombstone is queryable");
     assert_eq!(terminal, ("deleted".to_owned(), true, 2));
 
-    sqlx::query(
-        "DELETE FROM xshield.calibration_report_artifacts WHERE tenant_id=$1 AND site_id=$2",
+    // Keep a retryable terminal fact alongside the deleted tombstone. The
+    // temporary database is owned by the script and is later consumed by the
+    // real ClickHouse maintenance-delivery regression.
+    let failed_report_id = format!("calr_{}", Uuid::now_v7());
+    let failed_artifact_id = format!("artifact_{}", Uuid::now_v7());
+    seed_expired_report(
+        &pool,
+        &tenant,
+        &site,
+        &failed_report_id,
+        &failed_artifact_id,
+    )
+    .await;
+    let failed_jobs = store
+        .prepare_calibration_report_purge(&tenant, &site, "report-retention-r1", 1)
+        .await
+        .expect("failure intent commits");
+    assert_eq!(failed_jobs.len(), 1);
+    store
+        .finish_calibration_report_purge(&failed_jobs[0], CalibrationReportPurgeResult::Unavailable)
+        .await
+        .expect("failure fact commits");
+    let failed: (String, bool, i64) = sqlx::query_as(
+        "SELECT retention_status, purge_completed_event_id IS NULL,
+                (SELECT count(*) FROM xshield.audit_outbox
+                 WHERE tenant_id=$1 AND site_id=$2
+                   AND event_type = 'calibration.report_retention.purge_failed')
+         FROM xshield.calibration_report_artifacts
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
     )
     .bind(tenant.as_str())
     .bind(site.as_str())
-    .execute(&pool)
+    .bind(&failed_artifact_id)
+    .fetch_one(&pool)
     .await
-    .expect("report fixture cleans up");
-    sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id=$1 AND site_id=$2")
-        .bind(tenant.as_str())
-        .bind(site.as_str())
-        .execute(&pool)
-        .await
-        .expect("outbox fixture cleans up");
+    .expect("retryable report fact is queryable");
+    assert_eq!(failed, ("active".to_owned(), true, 1));
 }
 
 #[tokio::test]
@@ -174,20 +197,58 @@ async fn calibration_report_orphan_retention_is_intent_first_without_report_meta
     .expect("orphan tombstone is queryable");
     assert_eq!(terminal, ("deleted".to_owned(), true, 2, true));
 
-    sqlx::query(
-        "DELETE FROM xshield.calibration_report_orphan_purges WHERE tenant_id=$1 AND site_id=$2",
+    assert_retryable_orphan_failure(&store, &pool, &tenant, &site).await;
+}
+
+async fn assert_retryable_orphan_failure(
+    store: &PostgresIdentityStore,
+    pool: &PgPool,
+    tenant: &TenantId,
+    site: &SiteId,
+) {
+    let failed_report_id = format!("calr_{}", Uuid::now_v7());
+    let failed_artifact_id = format!("artifact_{}", Uuid::now_v7());
+    let failed_candidate = CalibrationReportOrphanCandidate::from_observation(
+        &failed_report_id,
+        &failed_artifact_id,
+        "c".repeat(64),
+        (Utc::now() - TimeDelta::seconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true),
+        1,
+        1_789_689_601,
+        456,
+    )
+    .expect("failure candidate is valid");
+    let failed_jobs = store
+        .prepare_calibration_report_orphan_purge(
+            tenant,
+            site,
+            std::slice::from_ref(&failed_candidate),
+        )
+        .await
+        .expect("orphan failure intent commits");
+    assert_eq!(failed_jobs.len(), 1);
+    store
+        .finish_calibration_report_orphan_purge(
+            &failed_jobs[0],
+            CalibrationReportOrphanPurgeResult::Unavailable,
+        )
+        .await
+        .expect("orphan failure fact commits");
+    let failed: (String, bool, i64) = sqlx::query_as(
+        "SELECT status, completed_event_id IS NULL,
+                (SELECT count(*) FROM xshield.audit_outbox
+                 WHERE tenant_id=$1 AND site_id=$2
+                   AND event_type = 'calibration.report_retention.orphan_purge_failed')
+         FROM xshield.calibration_report_orphan_purges
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
     )
     .bind(tenant.as_str())
     .bind(site.as_str())
-    .execute(&pool)
+    .bind(&failed_artifact_id)
+    .fetch_one(pool)
     .await
-    .expect("orphan fixture cleans up");
-    sqlx::query("DELETE FROM xshield.audit_outbox WHERE tenant_id=$1 AND site_id=$2")
-        .bind(tenant.as_str())
-        .bind(site.as_str())
-        .execute(&pool)
-        .await
-        .expect("outbox fixture cleans up");
+    .expect("retryable orphan fact is queryable");
+    assert_eq!(failed, ("pending".to_owned(), true, 1));
 }
 
 async fn seed_expired_report(

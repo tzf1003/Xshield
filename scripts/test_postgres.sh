@@ -87,6 +87,8 @@ if [[ -n "${XSHIELD_TEST_CLICKHOUSE_URL:-}" ]]; then
         cargo test -p xshield-worker --lib real_outbox_clickhouse_delivery -- --ignored
     XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
         cargo test -p xshield-worker --lib real_calibration_outbox_clickhouse_delivery -- --ignored
+    XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+        cargo test -p xshield-worker --lib real_calibration_maintenance_outbox_clickhouse_delivery -- --ignored
 else
     printf '%s\n' 'ClickHouse outbox integration skipped: XSHIELD_TEST_CLICKHOUSE_URL is not configured.'
 fi

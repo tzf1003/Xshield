@@ -24,6 +24,8 @@ mod calibration;
 #[cfg(test)]
 mod calibration_delivery_tests;
 #[cfg(test)]
+mod calibration_maintenance_delivery_tests;
+#[cfg(test)]
 mod clickhouse_tests;
 #[cfg(test)]
 mod delivery_tests;
