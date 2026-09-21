@@ -1,5 +1,5 @@
 use crate::{PostgresIdentityStore, StoreError};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Timelike, Utc};
 use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use xshield_core::domain::{ArtifactId, EventId, RequestId, SiteId, TenantId};
@@ -193,6 +193,15 @@ impl PostgresIdentityStore {
             .manifest()
             .validate_catalog_shape(recorded_at)
             .map_err(|_| StoreError::InvalidCommand)?;
+        if !claim_catalog_artifact_identity(&mut transaction, &command, recorded_at).await? {
+            if !catalog_artifact_identity_matches(&mut transaction, &command).await? {
+                transaction.rollback().await?;
+                return Ok(EvidenceCatalogWriteOutcome::Conflict);
+            }
+            let outcome = existing_catalog_outcome(&mut transaction, &command).await?;
+            transaction.commit().await?;
+            return Ok(outcome);
+        }
         if insert_catalog_row(&mut transaction, &command, recorded_at).await? {
             insert_catalog_event(&mut transaction, &command).await?;
             transaction.commit().await?;
@@ -276,6 +285,126 @@ impl PostgresIdentityStore {
         .map(catalog_artifact)
         .transpose()
     }
+}
+
+/// Preclaims the global identity before inserting the request-catalog owner.
+///
+/// The owner-row trigger remains the last-line guard for legacy writers. This
+/// early claim lets a concurrent calibration owner resolve through the closed
+/// catalog outcome instead of exposing the trigger's unique-violation error.
+async fn claim_catalog_artifact_identity(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &EvidenceCatalogPublish<'_>,
+    recorded_at: DateTime<Utc>,
+) -> Result<bool, StoreError> {
+    let manifest = command.manifest.manifest();
+    let registered_at = date_millis(recorded_at);
+    Ok(sqlx::query(
+        "INSERT INTO xshield.artifact_identity_registry
+             (artifact_id, tenant_id, site_id, family, registered_at)
+         VALUES ($1,$2,$3,'evidence_catalog',$4)
+         ON CONFLICT (artifact_id) DO NOTHING",
+    )
+    .bind(&manifest.artifact_id)
+    .bind(&manifest.tenant_id)
+    .bind(&manifest.site_id)
+    .bind(registered_at)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Confirms that an already-claimed identity belongs to this catalog scope.
+///
+/// A false preclaim is expected for an exact retry. The registry is append-only,
+/// so a matching catalog-family entry must have its immutable catalog owner;
+/// [`existing_catalog_outcome`] treats any missing owner as corrupt state.
+async fn catalog_artifact_identity_matches(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &EvidenceCatalogPublish<'_>,
+) -> Result<bool, StoreError> {
+    let manifest = command.manifest.manifest();
+    let owner = sqlx::query(
+        "SELECT tenant_id, site_id, family
+         FROM xshield.artifact_identity_registry
+         WHERE artifact_id=$1
+         FOR KEY SHARE",
+    )
+    .bind(&manifest.artifact_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StoreError::CorruptData(
+        "artifact_identity_registry_conflict",
+    ))?;
+    let tenant_id = owner.try_get::<String, _>("tenant_id")?;
+    let site_id = owner.try_get::<String, _>("site_id")?;
+    let family = owner.try_get::<String, _>("family")?;
+    if tenant_id == manifest.tenant_id
+        && site_id == manifest.site_id
+        && family == "evidence_catalog"
+    {
+        return Ok(true);
+    }
+    if !foreign_artifact_identity_has_owner(
+        transaction,
+        &manifest.artifact_id,
+        &tenant_id,
+        &site_id,
+        &family,
+    )
+    .await?
+    {
+        return Err(StoreError::CorruptData("artifact_identity_registry_owner"));
+    }
+    Ok(false)
+}
+
+/// Verifies a foreign registry claim remains backed by its immutable owner.
+///
+/// A valid owner from another scope or family is an expected conflict. A
+/// registry entry without that owner cannot be classified as a normal
+/// collision because the append-only identity fence has lost its provenance.
+async fn foreign_artifact_identity_has_owner(
+    transaction: &mut Transaction<'_, Postgres>,
+    artifact_id: &str,
+    tenant_id: &str,
+    site_id: &str,
+    family: &str,
+) -> Result<bool, StoreError> {
+    let statement = match family {
+        "evidence_catalog" => {
+            "SELECT EXISTS(
+                 SELECT 1 FROM xshield.artifact_catalog
+                 WHERE artifact_id=$1 AND tenant_id=$2 AND site_id=$3
+             )"
+        }
+        "calibration_report" => {
+            "SELECT EXISTS(
+                 SELECT 1 FROM xshield.calibration_report_artifacts
+                 WHERE artifact_id=$1 AND tenant_id=$2 AND site_id=$3
+             )"
+        }
+        "calibration_lineage_review" => {
+            "SELECT EXISTS(
+                 SELECT 1 FROM xshield.calibration_lineage_review_artifacts
+                 WHERE artifact_id=$1 AND tenant_id=$2 AND site_id=$3
+             )"
+        }
+        _ => return Err(StoreError::CorruptData("artifact_identity_registry_family")),
+    };
+    Ok(sqlx::query_scalar(statement)
+        .bind(artifact_id)
+        .bind(tenant_id)
+        .bind(site_id)
+        .fetch_one(&mut **transaction)
+        .await?)
+}
+
+fn date_millis(value: DateTime<Utc>) -> DateTime<Utc> {
+    value
+        .with_nanosecond(value.timestamp_subsec_millis() * 1_000_000)
+        .unwrap_or(value)
 }
 
 async fn insert_catalog_row(

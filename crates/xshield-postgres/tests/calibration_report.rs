@@ -6,6 +6,7 @@
 //! workflow owns any later treatment of that unreachable object.
 
 use chrono::{TimeDelta, Utc};
+use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{env, fs, path::PathBuf, time::Duration};
 use tokio::time::sleep;
@@ -36,14 +37,16 @@ use xshield_core::{
     identity::UnixSeconds,
 };
 use xshield_evidence::{
-    CalibrationLineageReviewEvidenceWrite, CalibrationReportEvidenceWrite, EvidenceKey,
-    EvidenceVaultConfig, LocalEvidenceVault,
+    CalibrationLineageReviewEvidenceWrite, CalibrationReportEvidenceWrite, EvidenceClassification,
+    EvidenceFidelity, EvidenceKey, EvidenceVaultConfig, EvidenceWrite, LocalEvidenceVault,
+    VerifiedEvidenceManifest,
 };
 use xshield_postgres::{
     CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
     CalibrationLineageReviewCommit, CalibrationLineageReviewCommitOutcome,
     CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome, CalibrationReportCommit,
-    CalibrationReportCommitOutcome, PostgresIdentityStore,
+    CalibrationReportCommitOutcome, EvidenceCatalogPublish, EvidenceCatalogWriteOutcome,
+    PostgresIdentityStore,
 };
 
 #[tokio::test]
@@ -79,6 +82,19 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
             .expect("lineage test key is valid"),
     )
     .expect("lineage vault opens");
+    let catalog_vault_root = private_temp_directory();
+    let catalog_vault = LocalEvidenceVault::open(
+        EvidenceVaultConfig::new(
+            &catalog_vault_root,
+            "catalog-race-evidence-key-r1",
+            1024 * 1024,
+            1,
+        )
+        .expect("catalog race vault configuration is valid"),
+        EvidenceKey::from_hex("3333333333333333333333333333333333333333333333333333333333333333")
+            .expect("catalog race key is valid"),
+    )
+    .expect("catalog race vault opens");
     seed_catalog(&pool, &fixture).await;
     seed_committed_lineage_review(&store, &fixture, &lineage_vault).await;
 
@@ -90,6 +106,15 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
         &fixture,
         &vault,
         &lineage_vault,
+    )
+    .await;
+    assert_concurrent_report_wins_catalog_artifact_identity(
+        &database_url,
+        &pool,
+        &store,
+        &fixture,
+        &vault,
+        &catalog_vault,
     )
     .await;
     assert_concurrent_report_wins_lineage_review_artifact_identity(
@@ -107,6 +132,7 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
     cleanup(&pool, &fixture);
     fs::remove_dir_all(vault_root).expect("private vault root is removable");
     fs::remove_dir_all(lineage_vault_root).expect("private lineage vault root is removable");
+    fs::remove_dir_all(catalog_vault_root).expect("private catalog vault root is removable");
 }
 
 struct Fixture {
@@ -554,6 +580,159 @@ async fn assert_concurrent_report_wins_lineage_review_artifact_identity(
     assert_eq!(lineage_state, (0, 0, 0));
 }
 
+/// Forces the generic catalog writer to contend with a report's uncommitted
+/// registry claim. The relation gate is deliberately after report preclaim;
+/// this proves a cross-family collision reaches the closed catalog `Conflict`
+/// outcome rather than leaking the owner trigger's database uniqueness error.
+#[allow(clippy::too_many_lines)]
+async fn assert_concurrent_report_wins_catalog_artifact_identity(
+    database_url: &str,
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    report_vault: &LocalEvidenceVault,
+    catalog_vault: &LocalEvidenceVault,
+) {
+    let capability = fixture.capability(120);
+    issue(store, &capability).await;
+    let lease = begin(store, &capability, "runner-registry-catalog-wins").await;
+    let session = capability
+        .bind_issued_batch_lease(lease, now())
+        .expect("issued lease binds capability");
+
+    let catalog_request_id =
+        RequestId::parse(format!("req_{}", Uuid::now_v7())).expect("catalog request id is valid");
+    let catalog_manifest = catalog_vault
+        .write(&EvidenceWrite {
+            tenant_id: &fixture.tenant,
+            site_id: &fixture.site,
+            request_id: &catalog_request_id,
+            kind: "request_decoded",
+            content_type: "application/json",
+            fidelity: EvidenceFidelity::EntityExact,
+            classification: EvidenceClassification::Restricted,
+            parent_refs: &[],
+            expires_at: Utc::now() + TimeDelta::minutes(5),
+            plaintext: br#"{\"catalog_race\":true}"#,
+        })
+        .expect("catalog ciphertext is durable before the race");
+    let shared_artifact_id = ArtifactId::parse(&catalog_manifest.manifest().artifact_id)
+        .expect("catalog artifact id is valid");
+    let evaluation = completed_report(fixture);
+    let (publication, report) = report_artifact_with_id(&evaluation, shared_artifact_id.clone());
+    let report_manifest = write_report(report_vault, fixture, &report);
+    let completion =
+        CalibrationEvidenceBatchCompletion::from_successful_evaluation(session, evaluation)
+            .expect("completion matches capability");
+    let completion_event_id = event_id();
+    let report_event_id = event_id();
+    let report_command = CalibrationReportCommit::new(
+        &completion,
+        &report,
+        &publication,
+        &report_manifest,
+        "runner-registry-catalog-wins",
+        &completion_event_id,
+        &report_event_id,
+    )
+    .expect("report race command is valid");
+    let catalog_event_id = event_id();
+    let catalog_envelope = catalog_envelope(&catalog_manifest, &catalog_event_id);
+    let catalog_command =
+        EvidenceCatalogPublish::new(&catalog_manifest, &catalog_event_id, &catalog_envelope)
+            .expect("catalog race command is valid");
+
+    let report_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("report race actor pool connects");
+    let report_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&report_pool)
+        .await
+        .expect("report race actor pid is queryable");
+    let report_store = PostgresIdentityStore::from_pool(report_pool.clone());
+    let catalog_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("catalog race actor pool connects");
+    let catalog_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&catalog_pool)
+        .await
+        .expect("catalog race actor pid is queryable");
+    let catalog_store = PostgresIdentityStore::from_pool(catalog_pool.clone());
+
+    let mut gate = pool
+        .begin()
+        .await
+        .expect("report artifact gate transaction starts");
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .expect("report artifact gate pid is queryable");
+    sqlx::query("LOCK TABLE xshield.calibration_report_artifacts IN SHARE MODE")
+        .execute(&mut *gate)
+        .await
+        .expect("report artifact relation is gated after registry preclaim");
+
+    let (report_outcome, catalog_outcome) = tokio::join!(
+        report_store.complete_and_publish_calibration_report(report_command),
+        async {
+            wait_for_database_block(pool, report_pid, gate_pid).await;
+            let (catalog_outcome, ()) = tokio::join!(
+                catalog_store.publish_evidence_manifest(catalog_command),
+                async {
+                    wait_for_database_block(pool, catalog_pid, report_pid).await;
+                    gate.commit()
+                        .await
+                        .expect("report artifact gate releases after both waits");
+                },
+            );
+            catalog_outcome
+        },
+    );
+    report_pool.close().await;
+    catalog_pool.close().await;
+
+    assert!(
+        matches!(
+            report_outcome.expect("report race transaction resolves"),
+            CalibrationReportCommitOutcome::Committed(_)
+        ),
+        "report must retain the deliberate registry ordering"
+    );
+    assert_eq!(
+        catalog_outcome.expect("catalog race transaction resolves"),
+        EvidenceCatalogWriteOutcome::Conflict,
+        "catalog must close a report-owned registry collision without a database error"
+    );
+    assert_state(pool, &capability, "consumed", "completed").await;
+
+    let state: (i64, i64, i64, i64, i64, String) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM xshield.calibration_report_artifacts
+              WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3),
+             (SELECT count(*) FROM xshield.calibration_reports
+              WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$4),
+             (SELECT count(*) FROM xshield.audit_outbox WHERE event_id=ANY($5)),
+             (SELECT count(*) FROM xshield.artifact_catalog
+              WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3)
+             ,(SELECT count(*) FROM xshield.audit_outbox WHERE event_id=$6),
+             (SELECT family FROM xshield.artifact_identity_registry WHERE artifact_id=$3)",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(publication.report_artifact_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(vec![completion_event_id.as_str(), report_event_id.as_str()])
+    .bind(catalog_event_id.as_str())
+    .fetch_one(pool)
+    .await
+    .expect("report-winning catalog-race state is queryable");
+    assert_eq!(state, (1, 1, 2, 0, 0, "calibration_report".to_owned()));
+}
+
 #[allow(clippy::too_many_lines)]
 async fn assert_successful_commit_is_atomic_and_exact(
     pool: &PgPool,
@@ -981,6 +1160,42 @@ fn write_and_attest_lineage_review(
     vault
         .attest_calibration_lineage_review(&fixture.tenant, &fixture.site, review)
         .expect("lineage review is freshly authenticated before race commit")
+}
+
+fn catalog_envelope(verified: &VerifiedEvidenceManifest, event_id: &EventId) -> Value {
+    let manifest = verified.manifest();
+    json!({
+        "schema_version": 3,
+        "event_id": event_id.as_str(),
+        "event_type": "evidence.cataloged",
+        "tenant_id": manifest.tenant_id,
+        "site_id": manifest.site_id,
+        "request_id": manifest.request_id,
+        "trace_id": "018f2a3b4c5d70008000000000000902",
+        "span_id": "018f2a3b4c5d7000",
+        "producer_id": "calibration-report-catalog-race",
+        "producer_boot_id": "boot-test",
+        "producer_seq": 1,
+        "request_seq": 1,
+        "occurred_at": "2026-09-22T00:00:00.000Z",
+        "observed_at": "2026-09-22T00:00:00.000Z",
+        "policy_revision": "policy-test-r1",
+        "example_only": false,
+        "evidence_refs": [manifest.artifact_id],
+        "cause_event_ids": [],
+        "payload": {
+            "stage": "evidence_catalog",
+            "outcome": "PASS",
+            "reason_code": "EVIDENCE_CATALOG_PUBLISHED",
+            "artifact_id": manifest.artifact_id,
+        },
+        "sensitivity": "RESTRICTED",
+        "integrity": {
+            "state": "pending",
+            "previous_hash": null,
+            "event_hash": null,
+        },
+    })
 }
 
 async fn issue(store: &PostgresIdentityStore, capability: &CalibrationEvidenceReadCapability) {

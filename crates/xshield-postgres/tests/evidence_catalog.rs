@@ -10,7 +10,7 @@ use xshield_evidence::{
 };
 use xshield_postgres::{
     EvidenceCatalogArtifactQuery, EvidenceCatalogPublish, EvidenceCatalogQuery,
-    EvidenceCatalogWriteOutcome, PostgresIdentityStore,
+    EvidenceCatalogWriteOutcome, PostgresIdentityStore, StoreError,
 };
 
 const KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -105,6 +105,10 @@ async fn catalog_publish_is_atomic_idempotent_scoped_and_bounded() {
     );
 
     assert_expired_publication_is_rejected(&store, &vault, &tenant, &site, &request).await;
+    assert_foreign_registry_without_owner_is_corrupt(
+        &pool, &store, &vault, &tenant, &site, &request,
+    )
+    .await;
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -257,6 +261,63 @@ async fn assert_expired_publication_is_rejected(
             .await
             .is_err()
     );
+}
+
+async fn assert_foreign_registry_without_owner_is_corrupt(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    vault: &LocalEvidenceVault,
+    tenant: &TenantId,
+    site: &SiteId,
+    request: &RequestId,
+) {
+    let verified = vault
+        .write(&EvidenceWrite {
+            tenant_id: tenant,
+            site_id: site,
+            request_id: request,
+            kind: "request_decoded",
+            content_type: "application/json",
+            fidelity: EvidenceFidelity::EntityExact,
+            classification: EvidenceClassification::Restricted,
+            parent_refs: &[],
+            expires_at: Utc::now() + TimeDelta::minutes(10),
+            plaintext: br#"{\"foreign_registry_owner\":false}"#,
+        })
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO xshield.artifact_identity_registry
+             (artifact_id, tenant_id, site_id, family, registered_at)
+         VALUES ($1, 'tenant_foreign_registry', 'site_foreign_registry',
+                 'calibration_report', date_trunc('milliseconds', clock_timestamp()))",
+    )
+    .bind(&verified.manifest().artifact_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let event = EventId::parse(format!("ev_{}", Uuid::now_v7())).unwrap();
+    let envelope = catalog_envelope(&verified, &event);
+    assert!(matches!(
+        store
+            .publish_evidence_manifest(
+                EvidenceCatalogPublish::new(&verified, &event, &envelope).unwrap()
+            )
+            .await,
+        Err(StoreError::CorruptData("artifact_identity_registry_owner"))
+    ));
+    let artifacts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM xshield.artifact_catalog WHERE artifact_id=$1")
+            .bind(&verified.manifest().artifact_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let events: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM xshield.audit_outbox WHERE event_id=$1")
+            .bind(event.as_str())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!((artifacts, events), (0, 0));
 }
 
 async fn assert_audit_failure_rolls_back(
