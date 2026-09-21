@@ -146,11 +146,11 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 同一脚本的 `grant_issue` 集成测试用数据库时钟和 `pg_blocking_pids` 确认真实锁等待，覆盖 binding、已有 grant 和 outbox 唯一键三个位置的跨期拒绝，失败不新增账本或 outbox。它还覆盖并发撤销后的重放拒绝、动作/策略失效、独立 grant ID/trace/冻结时间冲突（含存储子秒偏差），以及 outbox aggregate/type 错绑；批准约束含嵌套指数数字、小数、负零、Unicode 与大整数，并覆盖 JSONB 展开超限时原子拒绝。普通单测验证 trace、约束对象/16 KiB 上限、容量和 TTL/整秒时间范围。
 
-`postgres_outbox_publishing_generic_grant_producer` 读取以上 `GrantPersistence` 实际提交的行，逐字段核对授权事实与完整 envelope、批准约束摘要及冻结时间，再经通用资格发布 API 验证索引、精确确认和空重跑。未配置 ClickHouse 时使用受控 HTTP；配置后使用独占 ClickHouse 库和生产 DDL，读回两个底表及两个 active 视图。它只接受脚本拥有的 `xshield_test_*` 数据库，验证范围是库生产者至双库投递，HTTP 发行适配器仍待交付。
+`postgres_outbox_publishing_generic_grant_producer` 读取以上 `GrantPersistence` 实际提交的行，逐字段核对授权事实与完整 envelope、批准约束摘要及冻结时间，再经通用资格发布 API 验证索引、精确确认和空重跑。未配置 ClickHouse 时使用受控 HTTP；配置后使用独占 ClickHouse 库和生产 DDL，读回两个底表及两个 active 视图。它只接受脚本拥有的 `xshield_test_*` 数据库，验证范围是库生产者至双库投递。`GrantPersistence` 不设独立 HTTP 面；真实站点来源发行的 HTTP 闭环由下述网关响应资格回归验证。
 
 `scripts/test_gateway_identity.sh` 通过真实网关、合成源站和专有 PostgreSQL 库执行匿名创建、登录、刷新与同主体上下文切换，保留原有认证、CAS、旧资格隔离及错误响应断言，同时检查生产 v3 envelope 与请求 ID。脚本结束前运行 `postgres_gateway_identity_outbox_publishing`，将实际生产的四种身份事务通过 worker 投递给受控 ClickHouse HTTP 服务，核对 RowBinary 索引、摘要、确认和重复运行空批次；该测试只接受脚本拥有的 `xshield_gateway_*` 数据库。
 
-配置 20.6 的 `XSHIELD_TEST_CLICKHOUSE_URL` 及测试账户后，同一网关脚本还会运行 `real_gateway_response_grant_outbox_delivery`。脚本产生两个响应、三个实际响应资格事件，其中一个响应含两个资源；测试把 envelope 与 PostgreSQL 响应证据、动作及资源资格行逐项比对，检查批内连续序号，再通过生产发布器写入真实 ClickHouse，读回两个底表与两个 active 视图，验证精确确认和重复运行空批次。该链路已在真实 PostgreSQL 与 ClickHouse 联调通过；入口仅接受脚本拥有的数据库，未配置 ClickHouse URL 时明确报告跳过。
+配置 20.6 的 `XSHIELD_TEST_CLICKHOUSE_URL` 及测试账户后，同一网关脚本还会运行 `real_gateway_response_grant_outbox_delivery`。脚本产生两个响应、三个实际响应资格事件，其中一个响应含两个资源；测试把 envelope 与 PostgreSQL 响应证据、动作及资源资格行逐项比对，检查批内连续序号，再通过生产发布器写入真实 ClickHouse，读回两个底表与两个 active 视图，验证精确确认和重复运行空批次。源路径只接受已认证会话的严格成功响应，字段碰撞、重复键、资源偏差、来源撤销、epoch/policy/action 变化、容量耗尽和锁等待跨期均不会释放正文或留下部分资格。该链路已在真实 PostgreSQL 与 ClickHouse 联调通过；入口仅接受脚本拥有的数据库，未配置 ClickHouse URL 时明确报告跳过。
 
 配置同一 ClickHouse 环境后，`scripts/test_postgres.sh` 还会运行 `real_outbox_clickhouse_delivery`：在专有 PostgreSQL 临时库和独占 ClickHouse 数据库内重复应用生产 DDL，通过八族发布 API 投递十七组按生产契约构造的合成 envelope，读回两个底表及两个 active 视图，核对作用域、事件引用、SHA-256 digest、事件时间（通用资源资格、响应资格和分享为整秒，其他样本含微秒）、保留期限、确定性空置信度和非业务终态，并逐行检查 PostgreSQL 精确确认与重复运行空批次。该回归已在真实 PostgreSQL 与 ClickHouse 执行通过；真实数据库回归入口均纳入 CI。普通 workspace 测试将其标为 ignored，必须实际运行相应脚本才能形成验证结果。
 

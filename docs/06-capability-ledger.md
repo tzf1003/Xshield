@@ -43,7 +43,7 @@ PostgreSQL 首版在同一短事务中锁定当前 binding，重验主体、授�
 
 通用 ResourceGrant 写入同样以数据库 `clock_timestamp()` 重新约束 binding、动作和候选 grant 的绝对期限；锁等待或唯一键等待跨过期限时整笔事务回滚。发行幂等键不仅逐字段比较账本语义，还要求活动状态、冻结签发时间以及同一 `grant.issued` outbox envelope 完整一致；缺失或错绑的 outbox 视为存储损坏，不回退为已发行。
 
-`GrantPersistence::new` 校验并冻结类型化发行字段，持久化入口构建 `gateway-grant` 的完整 v3 事件，以 source_request_id 关联来源请求，event ID 作为独立 producer boot，保留冻结 trace、策略与发行时间。调用方提供批准的 constraints 对象，输入 JSON 及 PostgreSQL `jsonb::text` 表示均限制为 16 KiB；摘要使用后者 UTF-8 字节的原生 SHA-256，约束对象留在 PostgreSQL 账本。数字按 JSONB 表示参与摘要和重试，避免指数展开及负零转换影响持久化一致性；PostgreSQL 升级须复跑数字往返与精确重试测试。TTL 限制为 1–86400 秒，并在事务中受当前身份和来源动作期限进一步约束。`XSHIELD_OUTBOX_FAMILY=grant` 发布发行历史；此入口是持久化库 API，HTTP 来源发行适配器仍待交付。
+`GrantPersistence::new` 校验并冻结类型化发行字段，持久化入口构建 `gateway-grant` 的完整 v3 事件，以 source_request_id 关联来源请求，event ID 作为独立 producer boot，保留冻结 trace、策略与发行时间。调用方提供批准的 constraints 对象，输入 JSON 及 PostgreSQL `jsonb::text` 表示均限制为 16 KiB；摘要使用后者 UTF-8 字节的原生 SHA-256，约束对象留在 PostgreSQL 账本。数字按 JSONB 表示参与摘要和重试，避免指数展开及负零转换影响持久化一致性；PostgreSQL 升级须复跑数字往返与精确重试测试。TTL 限制为 1–86400 秒，并在事务中受当前身份和来源动作期限进一步约束。`XSHIELD_OUTBOX_FAMILY=grant` 发布发行历史。该命令只接受网关已验证、已类型化的内部事实；管理 Bearer、控制台 JSON、浏览器 sensor 或保留命名空间均不能组装其 `AuthSnapshot`、动作、资源 HMAC、约束、事件或时间。站点 HTTP 来源发行由下段 `response.resource_grant` 的原子批量适配器完成，不设置独立通用资格发行端点。
 
 网关逐资源提交 `gateway-response-grant` 生产者的完整 v3 `response_grant.issued` envelope，绑定原请求、身份代际、响应证据、动作与资源资格、目标和策略修订。批内序号从 1 开始，发行时间随事务输入冻结；`XSHIELD_OUTBOX_FAMILY=response_grant` 可独立发布这些事实，精确契约及历史稀疏行处理见 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布)。索引发布不改变资格状态、期限或响应释放屏障；后续授权继续查询当前 PostgreSQL 账本。
 
