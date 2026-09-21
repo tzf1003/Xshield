@@ -6,7 +6,7 @@
 //! workflow owns any later treatment of that unreachable object.
 
 use chrono::{TimeDelta, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{env, fs, path::PathBuf, time::Duration};
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -15,6 +15,11 @@ use xshield_core::{
         GroundTruth, Probability, Signal, Thresholds,
         dataset::{
             DatasetSample, EvaluationProvenance, EvaluationReport, ModelIdentity, evaluate_dataset,
+        },
+        lineage_review::{
+            CalibrationLineageReviewArtifact, LineageSourceDeclaration, LineageSourceKind,
+            LineageSourceRef, PartitionLineageSubmission, PartitionManifestDeclaration,
+            PartitionRole, review_partition_lineage,
         },
         publication::{CalibrationReportArtifact, CalibrationReportPublication},
         read_capability::{
@@ -31,10 +36,12 @@ use xshield_core::{
     identity::UnixSeconds,
 };
 use xshield_evidence::{
-    CalibrationReportEvidenceWrite, EvidenceKey, EvidenceVaultConfig, LocalEvidenceVault,
+    CalibrationLineageReviewEvidenceWrite, CalibrationReportEvidenceWrite, EvidenceKey,
+    EvidenceVaultConfig, LocalEvidenceVault,
 };
 use xshield_postgres::{
     CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
+    CalibrationLineageReviewCommit, CalibrationLineageReviewCommitOutcome,
     CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome, CalibrationReportCommit,
     CalibrationReportCommitOutcome, PostgresIdentityStore,
 };
@@ -59,6 +66,19 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
             .expect("test key is valid"),
     )
     .expect("vault opens");
+    let lineage_vault_root = private_temp_directory();
+    let lineage_vault = LocalEvidenceVault::open(
+        EvidenceVaultConfig::new(
+            &lineage_vault_root,
+            "lineage-race-evidence-key-r1",
+            1024 * 1024,
+            1,
+        )
+        .expect("lineage vault configuration is valid"),
+        EvidenceKey::from_hex("2222222222222222222222222222222222222222222222222222222222222222")
+            .expect("lineage test key is valid"),
+    )
+    .expect("lineage vault opens");
     seed_catalog(&pool, &fixture).await;
     seed_committed_lineage_review(
         &pool,
@@ -69,11 +89,21 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
     .await;
 
     assert_cross_family_artifact_conflict_keeps_lease_active(&pool, &store, &fixture, &vault).await;
+    assert_concurrent_lineage_review_wins_report_artifact_identity(
+        &database_url,
+        &pool,
+        &store,
+        &fixture,
+        &vault,
+        &lineage_vault,
+    )
+    .await;
     assert_successful_commit_is_atomic_and_exact(&pool, &store, &fixture, &vault).await;
     assert_wrong_runner_catalog_drift_and_expiry_are_closed(&pool, &store, &fixture, &vault).await;
 
     cleanup(&pool, &fixture);
     fs::remove_dir_all(vault_root).expect("private vault root is removable");
+    fs::remove_dir_all(lineage_vault_root).expect("private lineage vault root is removable");
 }
 
 struct Fixture {
@@ -202,6 +232,144 @@ async fn assert_cross_family_artifact_conflict_keeps_lease_active(
     .await
     .expect("cross-family conflict state is queryable");
     assert_eq!(state, (0, 0, "calibration_lineage_review".to_owned()));
+}
+
+/// Holds the report capability header before the report can claim its artifact
+/// identity. This makes the lineage-review commit win the shared registry ID
+/// without depending on scheduler timing, then proves the unblocked report
+/// returns the closed conflict instead of leaking a database uniqueness error.
+#[allow(clippy::too_many_lines)]
+async fn assert_concurrent_lineage_review_wins_report_artifact_identity(
+    database_url: &str,
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    report_vault: &LocalEvidenceVault,
+    lineage_vault: &LocalEvidenceVault,
+) {
+    let capability = fixture.capability(120);
+    issue(store, &capability).await;
+    let lease = begin(store, &capability, "runner-registry-race").await;
+    let session = capability
+        .bind_issued_batch_lease(lease, now())
+        .expect("issued lease binds capability");
+    let evaluation = completed_report(fixture);
+    let shared_artifact_id = artifact_id();
+    let (publication, report) = report_artifact_with_id(&evaluation, shared_artifact_id.clone());
+    let report_manifest = write_report(report_vault, fixture, &report);
+    let completion =
+        CalibrationEvidenceBatchCompletion::from_successful_evaluation(session, evaluation)
+            .expect("completion matches capability");
+    let completion_event_id = event_id();
+    let report_event_id = event_id();
+    let report_command = CalibrationReportCommit::new(
+        &completion,
+        &report,
+        &publication,
+        &report_manifest,
+        "runner-registry-race",
+        &completion_event_id,
+        &report_event_id,
+    )
+    .expect("report race command is valid");
+
+    let lineage_review = lineage_review(fixture, shared_artifact_id);
+    let lineage_manifest = write_and_attest_lineage_review(lineage_vault, fixture, &lineage_review);
+    let lineage_event_id = event_id();
+    let lineage_command =
+        CalibrationLineageReviewCommit::new(&lineage_review, &lineage_manifest, &lineage_event_id)
+            .expect("lineage race command is valid");
+
+    let report_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("report race actor pool connects");
+    let report_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&report_pool)
+        .await
+        .expect("report race actor pid is queryable");
+    let report_store = PostgresIdentityStore::from_pool(report_pool.clone());
+
+    let mut blocker = pool
+        .begin()
+        .await
+        .expect("capability lock transaction starts");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("capability lock pid is queryable");
+    sqlx::query(
+        "SELECT 1 FROM xshield.calibration_read_capabilities
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 FOR UPDATE",
+    )
+    .bind(capability.tenant_id().as_str())
+    .bind(capability.site_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .execute(&mut *blocker)
+    .await
+    .expect("capability header is locked before report race");
+
+    let (report_outcome, lineage_outcome) = tokio::join!(
+        report_store.complete_and_publish_calibration_report(report_command),
+        async {
+            wait_for_database_block(pool, report_pid, blocker_pid).await;
+            let outcome = store
+                .commit_calibration_lineage_review(lineage_command)
+                .await;
+            blocker
+                .commit()
+                .await
+                .expect("capability header lock releases after lineage commit");
+            outcome
+        },
+    );
+    report_pool.close().await;
+
+    assert!(
+        matches!(
+            lineage_outcome.expect("lineage race transaction resolves"),
+            CalibrationLineageReviewCommitOutcome::Committed(_)
+        ),
+        "lineage review must win the deliberate registry ordering"
+    );
+    assert!(
+        matches!(
+            report_outcome.expect("report race transaction resolves"),
+            CalibrationReportCommitOutcome::Conflict
+        ),
+        "report must map the committed lineage registry owner to Conflict"
+    );
+    assert_state(pool, &capability, "leased", "active").await;
+
+    let state: (i64, i64, i64, i64, i64, i64, String) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM xshield.calibration_report_artifacts
+              WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3),
+             (SELECT count(*) FROM xshield.calibration_reports
+              WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$4),
+             (SELECT count(*) FROM xshield.calibration_lineage_review_artifacts
+              WHERE tenant_id=$1 AND site_id=$2 AND review_id=$5 AND artifact_id=$3),
+             (SELECT count(*) FROM xshield.calibration_lineage_reviews
+              WHERE tenant_id=$1 AND site_id=$2 AND review_id=$5),
+             (SELECT count(*) FROM xshield.audit_outbox WHERE event_id=ANY($6)),
+             (SELECT count(*) FROM xshield.audit_outbox WHERE event_id=$7),
+             (SELECT family FROM xshield.artifact_identity_registry WHERE artifact_id=$3)",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(publication.report_artifact_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(lineage_review.review_id().as_str())
+    .bind(vec![completion_event_id.as_str(), report_event_id.as_str()])
+    .bind(lineage_event_id.as_str())
+    .fetch_one(pool)
+    .await
+    .expect("registry race terminal state is queryable");
+    assert_eq!(
+        state,
+        (0, 0, 1, 1, 0, 1, "calibration_lineage_review".to_owned())
+    );
 }
 
 #[allow(clippy::too_many_lines)]
@@ -512,6 +680,91 @@ fn report_artifact_with_id(
     (publication, report)
 }
 
+fn lineage_review(
+    fixture: &Fixture,
+    review_artifact_id: ArtifactId,
+) -> CalibrationLineageReviewArtifact {
+    let training = lineage_source_ref("report-race-training-root");
+    let calibration = lineage_source_ref("report-race-calibration-root");
+    let evaluation = lineage_source_ref("report-race-evaluation-root");
+    let labels = lineage_source_ref("report-race-label-root");
+    let submission = PartitionLineageSubmission::new(
+        vec![
+            lineage_declaration(
+                PartitionRole::Training,
+                fixture.artifacts[1].clone(),
+                training.clone(),
+            ),
+            lineage_declaration(
+                PartitionRole::Calibration,
+                fixture.artifacts[2].clone(),
+                calibration.clone(),
+            ),
+            lineage_declaration(
+                PartitionRole::Evaluation,
+                fixture.artifacts[0].clone(),
+                evaluation.clone(),
+            ),
+            lineage_declaration(
+                PartitionRole::Label,
+                fixture.artifacts[3].clone(),
+                labels.clone(),
+            ),
+        ],
+        vec![
+            lineage_source(training, PartitionRole::Training, LineageSourceKind::Corpus),
+            lineage_source(
+                calibration,
+                PartitionRole::Calibration,
+                LineageSourceKind::Corpus,
+            ),
+            lineage_source(
+                evaluation,
+                PartitionRole::Evaluation,
+                LineageSourceKind::Corpus,
+            ),
+            lineage_source(
+                labels,
+                PartitionRole::Label,
+                LineageSourceKind::ReviewedLabel,
+            ),
+        ],
+    )
+    .expect("race lineage submission is valid");
+    let review = review_partition_lineage(
+        CalibrationLineageReviewId::parse(format!("calrev_{}", Uuid::now_v7()))
+            .expect("race lineage review id is valid"),
+        review_artifact_id,
+        fixture.provenance(),
+        &submission,
+    )
+    .expect("race lineage review is valid");
+    CalibrationLineageReviewArtifact::from_review(&review)
+        .expect("race lineage artifact is canonical")
+}
+
+fn lineage_source_ref(value: &str) -> LineageSourceRef {
+    LineageSourceRef::new(value, "revision-r1").expect("race lineage source reference is valid")
+}
+
+fn lineage_declaration(
+    role: PartitionRole,
+    artifact_id: ArtifactId,
+    root: LineageSourceRef,
+) -> PartitionManifestDeclaration {
+    PartitionManifestDeclaration::new(role, artifact_id, vec![root])
+        .expect("race lineage partition declaration is valid")
+}
+
+fn lineage_source(
+    reference: LineageSourceRef,
+    partition: PartitionRole,
+    kind: LineageSourceKind,
+) -> LineageSourceDeclaration {
+    LineageSourceDeclaration::new(reference, partition, kind, Vec::new())
+        .expect("race lineage source declaration is valid")
+}
+
 fn write_report(
     vault: &LocalEvidenceVault,
     fixture: &Fixture,
@@ -528,6 +781,24 @@ fn write_report(
     vault
         .attest_calibration_report(&fixture.tenant, &fixture.site, report)
         .expect("report is freshly authenticated before database commit")
+}
+
+fn write_and_attest_lineage_review(
+    vault: &LocalEvidenceVault,
+    fixture: &Fixture,
+    review: &CalibrationLineageReviewArtifact,
+) -> xshield_evidence::AttestedCalibrationLineageReviewManifest {
+    vault
+        .write_calibration_lineage_review(&CalibrationLineageReviewEvidenceWrite {
+            tenant_id: &fixture.tenant,
+            site_id: &fixture.site,
+            review,
+            expires_at: Utc::now() + TimeDelta::minutes(5),
+        })
+        .expect("lineage review persists before race commit");
+    vault
+        .attest_calibration_lineage_review(&fixture.tenant, &fixture.site, review)
+        .expect("lineage review is freshly authenticated before race commit")
 }
 
 async fn issue(store: &PostgresIdentityStore, capability: &CalibrationEvidenceReadCapability) {
@@ -594,6 +865,25 @@ async fn assert_state(
         state,
         (expected_capability.to_owned(), expected_lease.to_owned())
     );
+}
+
+async fn wait_for_database_block(pool: &PgPool, waiter: i32, blocker: i32) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let queued: bool = sqlx::query_scalar("SELECT $2=ANY(pg_blocking_pids($1))")
+                .bind(waiter)
+                .bind(blocker)
+                .fetch_one(pool)
+                .await
+                .expect("database lock graph is queryable");
+            if queued {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("report transaction reached the locked capability header");
 }
 
 fn completed_report(fixture: &Fixture) -> EvaluationReport {
