@@ -92,7 +92,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-worker --lib model_eval` 运行严格 DTO、重复键、版本、候选/概率/置信度、文本/字节上限及真实 loopback HTTP 传输测试；覆盖固定目标、单次 429/529/重定向、超时、取消、响应前缀和 API key 排除。另验证私有输入、目录排他/容量与中断终态恢复。
 
-`scripts/test_postgres.sh` 在独立临时库迁移后运行 `model_eval::tests::postgres_evaluation`：实际 HTTP 字节与解密输入证据一致，供应商输出捕获、规范化记录和目录均可读取，所有 `model.*` journal 事件通过生产索引解析；验证成功、429、非法响应和秘密排除，并注入 catalog/outbox 写入失败确认 HTTP 未调用。该测试单独运行需要 `XSHIELD_TEST_DATABASE_URL`，默认常规测试会跳过。全部样本和 API key 均为合成数据；真实供应商推理、计费、检测率与校准另行批准和测量。
+`scripts/test_postgres.sh` 在独立临时库迁移后运行 `model_eval::tests::postgres_evaluation` 及 `model_evaluation_admission`：实际 HTTP 字节与解密输入证据一致，供应商输出捕获、规范化记录和目录均可读取，所有 `model.*` journal 事件通过生产索引解析；验证成功、429、非法响应和秘密排除，并注入 catalog/outbox 写入失败确认 HTTP 未调用。admission 回归使用独立 PostgreSQL actor 连接与 `pg_blocking_pids` 证明同 tenant/site 的 advisory-lock 临界区：过期 lease 先被数据库时钟终结，再计数并创建唯一新 lease；满额调用只写 `started → failed(MODEL_EVALUATION_CAPACITY_EXHAUSTED)`，HTTP 计数、catalog、证据和 `evidence.cataloged` outbox 都为零；不同 site 独立，精确 release 可重试，迟到 release 不能释放后继 lease。正常与失败模型终态均检查 active lease 归零。该测试单独运行需要 `XSHIELD_TEST_DATABASE_URL`，默认常规测试会跳过。全部样本和 API key 均为合成数据；真实供应商推理、计费、检测率与校准另行批准和测量。
 
 ## 20.8 案件证据关联回归
 

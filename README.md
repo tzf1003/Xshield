@@ -28,7 +28,7 @@ Jev 离线评估已支持 Score：操作员提交 2–10 档有序描述，适�
 
 `web/console` 已提供只读请求、模型调用、资格/身份绑定调查与结构化事件检索：Observer 可查看请求摘要、事件分页、模型生命周期/供应商标识、证据元数据及资格/绑定账本快照，并打开来源请求和绑定详情；Investigator 可提交有界 UTC 时间窗、同事件 AND 条件和稳定排序，按冻结计划继续分页。账本持久状态、时间到期和代际分别展示，数据库观察与日志水位独立，历史入口须显式选择时间窗并重新鉴权。客户端校验查询摘要和精确微秒位置，显示实际扫描量、空值与配置日志水位/缺口；历史查询权限不替代 Observer 或原文权限。凭证只存页面内存，401、闲置及刷新清态，跨范围和晚到响应受到隔离。模型生命周期完整性与日志水位独立显示，历史未知供应商和 Noul 空置信度按实际记录呈现。运行方式、验证范围及企业身份入口待补边界见 [控制台说明](web/console/README.md) 和 [15.7](docs/15-console-and-api.md#157-已实现只读请求调查控制台)。
 
-`xshield-model-eval` 已实现操作员批准的一次性 Jev 离线评估：严格 Choice/Noul 契约、固定 Vercel AI Gateway HTTPS 端点（显式 `direct` 可兼容 TypeSafe 直连）、实际请求/响应加密证据、PostgreSQL catalog/outbox 和 `model.*` 耐久终态。429/529、超时、取消、超限和中断恢复均有明确结果；使用方法与运行边界见 [10.9](docs/10-jev-and-agents.md#109-已实现一次性离线评估) 和 [RB-11](docs/26-runbooks.md#rb-11-一次性模型离线评估)。当前验证使用合成 loopback 供应商，不代表真实模型质量、计费或外部服务可用性；校准及调查 Agent 继续迭代。
+`xshield-model-eval` 已实现操作员批准的一次性 Jev 离线评估：严格 Choice/Noul 契约、固定 Vercel AI Gateway HTTPS 端点（显式 `direct` 可兼容 TypeSafe 直连）、实际请求/响应加密证据、PostgreSQL catalog/outbox 和 `model.*` 耐久终态。迁移 0034 进一步将 tenant/site 跨实例调用容量绑定到 PostgreSQL scope 和私有短租约：容量拒绝只形成模型终态，不创建证据或 HTTP 调用；发送前以数据库时钟重验，终态 journal 耐久后释放，进程中断只可由 TTL 回收而不重放。429/529、超时、取消、超限和中断恢复均有明确结果；使用方法与运行边界见 [10.9](docs/10-jev-and-agents.md#109-已实现一次性离线评估) 和 [RB-11](docs/26-runbooks.md#rb-11-一次性模型离线评估)。当前验证使用合成 loopback 供应商，不代表真实模型质量、计费或外部服务可用性；校准及调查 Agent 继续迭代。
 
 模型阶段及调用审计支持 `mdl_` 强类型引用、provider/provider_model_id 与内部模型版本索引；阶段汇总保留最新 null 置信度，Gateway alias 不伪造精确 resolved revision。发布与查询边界见 [11.4](docs/11-audit-event-contract.md#114-阶段结果契约) 和 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归)。
 

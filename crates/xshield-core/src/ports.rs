@@ -18,9 +18,44 @@ use crate::{
         AuthBinding, AuthSnapshot, CredentialFingerprint, CredentialSlot, IdentityDenied,
         UnixSeconds,
     },
+    model_evaluation_admission::{
+        ModelEvaluationAdmissionAttempt, ModelEvaluationAdmissionReleaseState,
+        ModelEvaluationAdmissionState,
+    },
     provenance::{ActionGrant, ProvenanceError},
 };
 use std::{cell::RefCell, collections::BTreeMap, fmt, future::Future};
+
+/// Authoritative cross-instance capacity boundary for model provider calls.
+///
+/// Implementations reserve capacity only. They must not grant a business
+/// operation, issue a UI action, open evidence, approve disclosure, or publish
+/// a policy. A worker acquires before evidence output, confirms immediately
+/// before network send, and closes only after its terminal audit barrier.
+pub trait ModelEvaluationAdmissionPort {
+    /// Opaque, non-serializable adapter lease type.
+    type Lease;
+    /// Adapter dependency or persistence error.
+    type Error;
+
+    /// Acquires one tenant/site scoped capacity lease.
+    fn acquire_model_evaluation_admission<'a>(
+        &'a self,
+        attempt: &'a ModelEvaluationAdmissionAttempt,
+    ) -> impl Future<Output = Result<ModelEvaluationAdmissionState<Self::Lease>, Self::Error>> + Send + 'a;
+
+    /// Rechecks an already acquired lease immediately before provider send.
+    fn confirm_model_evaluation_admission<'a>(
+        &'a self,
+        lease: &'a Self::Lease,
+    ) -> impl Future<Output = Result<ModelEvaluationAdmissionState<()>, Self::Error>> + Send + 'a;
+
+    /// Closes one private lease after the caller's durable terminal boundary.
+    fn release_model_evaluation_admission<'a>(
+        &'a self,
+        lease: &'a Self::Lease,
+    ) -> impl Future<Output = Result<ModelEvaluationAdmissionReleaseState, Self::Error>> + Send + 'a;
+}
 
 /// A validated request to read exactly one artifact in a calibration batch.
 ///

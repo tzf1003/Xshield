@@ -18,9 +18,16 @@ use std::{
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
-use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
+use xshield_core::{
+    domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId},
+    model_evaluation_admission::{
+        ModelEvaluationAdmissionAttempt, ModelEvaluationAdmissionReleaseState,
+        ModelEvaluationAdmissionState,
+    },
+    ports::ModelEvaluationAdmissionPort,
+};
 use xshield_evidence::EvidenceFidelity;
-use xshield_postgres::PostgresIdentityStore;
+use xshield_postgres::{ModelEvaluationAdmissionLease, PostgresIdentityStore};
 use zeroize::Zeroizing;
 
 mod storage;
@@ -35,6 +42,9 @@ use wire::{Input, Response};
 
 const CONFIG: &str = "MODEL_CONFIG_INVALID";
 const CATALOG_DEADLINE: Duration = Duration::from_secs(5);
+const DEFAULT_EVALUATION_RUNNER: &str = "xshield-model-eval";
+const ADMISSION_UNAVAILABLE: &str = "MODEL_EVALUATION_ADMISSION_UNAVAILABLE";
+const ADMISSION_RELEASE_UNAVAILABLE: &str = "MODEL_EVALUATION_ADMISSION_RELEASE_UNAVAILABLE";
 
 /// Redacted terminal receipt. Detailed model content requires evidence authorization.
 #[derive(Serialize)]
@@ -92,6 +102,8 @@ pub async fn evaluate_file(
         TenantId::parse(env::var("XSHIELD_TENANT_ID").map_err(|_| CONFIG)?).map_err(|_| CONFIG)?;
     let site =
         SiteId::parse(env::var("XSHIELD_SITE_ID").map_err(|_| CONFIG)?).map_err(|_| CONFIG)?;
+    let runner_id = env::var("XSHIELD_MODEL_EVALUATION_RUNNER_ID")
+        .unwrap_or_else(|_| DEFAULT_EVALUATION_RUNNER.to_owned());
     let mut storage = tokio::task::block_in_place(Storage::from_env)?;
     tokio::task::block_in_place(|| storage.recover())?;
     let database = secret("XSHIELD_DATABASE_URL")?;
@@ -102,7 +114,17 @@ pub async fn evaluate_file(
     .await
     .map_err(|_| "MODEL_CATALOG_UNAVAILABLE")?
     .map_err(|_| "MODEL_CATALOG_UNAVAILABLE")?;
-    evaluate(&input, &client, &mut storage, &store, tenant, site, cancel).await
+    evaluate(
+        &input,
+        &client,
+        &mut storage,
+        &store,
+        tenant,
+        site,
+        &runner_id,
+        cancel,
+    )
+    .await
 }
 
 fn secret(name: &str) -> Result<Zeroizing<String>, &'static str> {
@@ -208,6 +230,7 @@ impl Attempt {
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn evaluate(
     input: &Input,
     client: &impl ModelPort,
@@ -215,6 +238,7 @@ async fn evaluate(
     store: &PostgresIdentityStore,
     tenant: TenantId,
     site: SiteId,
+    runner_id: &str,
     cancel: &mut oneshot::Receiver<()>,
 ) -> Result<EvaluationReport, &'static str> {
     let internal = Zeroizing::new(input.internal_bytes()?);
@@ -226,16 +250,53 @@ async fn evaluate(
         ModelEvent::new_for_provider(&attempt, input, client.provider(), client.provider_model());
     storage.event(&mut attempt, "model.started", &event)?;
     let started = Instant::now();
-    let result = execute(
-        input,
-        client,
-        storage,
-        store,
-        &mut attempt,
-        &internal,
-        cancel,
-    )
-    .await;
+    let admission_attempt = PolicyRevision::parse(input.policy_revision())
+        .ok()
+        .and_then(|policy_revision| {
+            ModelEvaluationAdmissionAttempt::new(
+                attempt.tenant.clone(),
+                attempt.site.clone(),
+                attempt.request.clone(),
+                attempt.call.clone(),
+                policy_revision,
+                runner_id,
+            )
+            .ok()
+        });
+    // Admission happens after `model.started`, so local configuration and
+    // authoritative-store failures must still pass through the common terminal
+    // event barrier. Returning here would leave a started-only lifecycle.
+    let (lease, result) = match admission_attempt {
+        None => (None, Err(CONFIG)),
+        Some(admission_attempt) => match tokio::time::timeout(
+            CATALOG_DEADLINE,
+            ModelEvaluationAdmissionPort::acquire_model_evaluation_admission(
+                store,
+                &admission_attempt,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(ModelEvaluationAdmissionState::Admitted(lease))) => {
+                let result = execute(
+                    input,
+                    client,
+                    storage,
+                    store,
+                    &mut attempt,
+                    &internal,
+                    &lease,
+                    cancel,
+                )
+                .await;
+                (Some(lease), result)
+            }
+            Ok(Ok(ModelEvaluationAdmissionState::Denied(denied))) => {
+                (None, Err(denied.reason_code()))
+            }
+            Ok(Err(_)) | Err(_) => (None, Err(ADMISSION_UNAVAILABLE)),
+        },
+    };
     let (status, reason, response) = match result {
         Ok(result) => result,
         Err(reason) => ("error", reason, None),
@@ -259,7 +320,7 @@ async fn evaluate(
         _ => "model.failed",
     };
     storage.event(&mut attempt, event_type, &event)?;
-    Ok(EvaluationReport {
+    let report = EvaluationReport {
         request_id: attempt.request.as_str().to_owned(),
         model_call_id: attempt.call.as_str().to_owned(),
         status: status.to_owned(),
@@ -267,7 +328,24 @@ async fn evaluate(
         input_artifact_id: attempt.input,
         output_artifact_id: attempt.output,
         call_artifact_id: attempt.record,
-    })
+    };
+    if let Some(lease) = lease {
+        let released = tokio::time::timeout(
+            CATALOG_DEADLINE,
+            ModelEvaluationAdmissionPort::release_model_evaluation_admission(store, &lease),
+        )
+        .await
+        .map_err(|_| ADMISSION_RELEASE_UNAVAILABLE)?
+        .map_err(|_| ADMISSION_RELEASE_UNAVAILABLE)?;
+        if !matches!(
+            released,
+            ModelEvaluationAdmissionReleaseState::Released
+                | ModelEvaluationAdmissionReleaseState::AlreadyReleased
+        ) {
+            return Err(ADMISSION_RELEASE_UNAVAILABLE);
+        }
+    }
+    Ok(report)
 }
 
 // Keep the ordered input/send/output barriers together for durability review.
@@ -279,6 +357,7 @@ async fn execute(
     store: &PostgresIdentityStore,
     attempt: &mut Attempt,
     internal: &[u8],
+    admission: &ModelEvaluationAdmissionLease,
     cancel: &mut oneshot::Receiver<()>,
 ) -> Result<(&'static str, &'static str, Option<Response>), &'static str> {
     attempt.internal = Some(
@@ -325,6 +404,21 @@ async fn execute(
     "MODEL_REQUESTED".clone_into(&mut requested.reason_code);
     requested.input_artifact_id.clone_from(&attempt.input);
     storage.event(attempt, "model.requested", &requested)?;
+    // The synchronous journal barrier comes before the final database-time
+    // confirmation. Once confirmed, the client starts its bounded request
+    // immediately, so journal latency cannot consume the active lease while a
+    // provider call is in flight.
+    match tokio::time::timeout(
+        CATALOG_DEADLINE,
+        ModelEvaluationAdmissionPort::confirm_model_evaluation_admission(store, admission),
+    )
+    .await
+    .map_err(|_| ADMISSION_UNAVAILABLE)?
+    .map_err(|_| ADMISSION_UNAVAILABLE)?
+    {
+        ModelEvaluationAdmissionState::Admitted(()) => {}
+        ModelEvaluationAdmissionState::Denied(denied) => return Err(denied.reason_code()),
+    }
     let started = Instant::now();
     let exchange = client.send(&api, cancel).await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);

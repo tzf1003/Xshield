@@ -19,6 +19,7 @@ const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333
 const JOURNAL_KEY: &str = "4444444444444444444444444444444444444444444444444444444444444444";
 const API_KEY: &str = "synthetic-evaluation-api-key";
 const RESPONSE: &str = r#"{"model":"jev-1.13.0","answers":{"evaluation":{"type":"choice","choice":"UNKNOWN","probabilities":{"NONE":0.2,"UNKNOWN":0.8},"confidence":0.75}},"usage":{"input_tokens":100,"output_tokens":20}}"#;
+const MODEL_EVALUATION_POLICY_REVISION: &str = "policy-r1";
 
 fn input() -> Input {
     Input::parse(br#"{"schema_version":1,"approval_ref":"synthetic-test-r1","model_revision":"jev-1.13.0","policy_revision":"policy-r1","prompt_revision":"prompt-r1","untrusted_content":"untrusted synthetic content","question":{"type":"choice","instructions":"Choose one candidate.","criteria":{"NONE":"No matching candidate.","UNKNOWN":"Insufficient evidence."}}}"#).unwrap()
@@ -149,6 +150,40 @@ fn scope() -> (TenantId, SiteId) {
         TenantId::parse("tenant_model_eval").unwrap(),
         SiteId::parse("site_model_eval").unwrap(),
     )
+}
+
+fn postgres_scope(label: &str) -> (TenantId, SiteId) {
+    let suffix = Uuid::now_v7().simple();
+    (
+        TenantId::parse(format!("tenant_model_eval_{label}_{suffix}")).unwrap(),
+        SiteId::parse(format!("site_model_eval_{label}_{suffix}")).unwrap(),
+    )
+}
+
+async fn provision_admission_scope(
+    pool: &sqlx::PgPool,
+    tenant: &TenantId,
+    site: &SiteId,
+    max_active_calls: i32,
+) {
+    sqlx::query(
+        "INSERT INTO xshield.model_evaluation_admission_scopes
+             (tenant_id, site_id, policy_revision, max_active_calls, lease_seconds, configured_at)
+         VALUES ($1,$2,$4,$3,45,
+                 date_trunc('milliseconds', clock_timestamp()))
+         ON CONFLICT (tenant_id, site_id) DO UPDATE
+         SET policy_revision=EXCLUDED.policy_revision,
+             max_active_calls=EXCLUDED.max_active_calls,
+             lease_seconds=EXCLUDED.lease_seconds,
+             configured_at=EXCLUDED.configured_at",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .bind(max_active_calls)
+    .bind(MODEL_EVALUATION_POLICY_REVISION)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -354,6 +389,8 @@ async fn postgres_evaluation_captures_actual_io_and_dependency_failures() {
     let store = PostgresIdentityStore::connect(&database, 2, Duration::from_secs(5))
         .await
         .unwrap();
+    let (configured_tenant, configured_site) = postgres_scope("io");
+    provision_admission_scope(&pool, &configured_tenant, &configured_site, 8).await;
     for (status, body, expected, confidence, objects) in [
         (200, RESPONSE, "MODEL_EVALUATED", Some(0.75), 4),
         (429, r#"{"error":"quota"}"#, "MODEL_RATE_LIMITED", None, 4),
@@ -368,7 +405,8 @@ async fn postgres_evaluation_captures_actual_io_and_dependency_failures() {
     ] {
         let fixture = Fixture::new();
         let mut storage = fixture.storage();
-        let (tenant, site) = scope();
+        let tenant = configured_tenant.clone();
+        let site = configured_site.clone();
         let (endpoint, server) = server(status, body).await;
         let client = JevClient::for_test(
             Zeroizing::new(API_KEY.to_owned()),
@@ -384,12 +422,26 @@ async fn postgres_evaluation_captures_actual_io_and_dependency_failures() {
             &store,
             tenant.clone(),
             site.clone(),
+            "model-eval-postgres-test-r1",
             &mut cancel,
         )
         .await
         .unwrap();
         let actual_sent = server.await.unwrap();
         assert_eq!(report.reason_code, expected);
+        let active_leases: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM xshield.model_evaluation_admission_leases
+             WHERE tenant_id=$1 AND site_id=$2 AND status='active'",
+        )
+        .bind(tenant.as_str())
+        .bind(site.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            active_leases, 0,
+            "terminal evaluation must release capacity"
+        );
         let vault = fixture.vault();
         let request = RequestId::parse(&report.request_id).unwrap();
         let catalog = store
@@ -434,6 +486,9 @@ async fn postgres_evaluation_captures_actual_io_and_dependency_failures() {
         assert_eq!(fixture.events().len(), 3);
     }
     // A catalog insert failure keeps the provider untouched and records a terminal.
+    let failure_tenant = TenantId::parse("tenant_model_eval_failure").unwrap();
+    let failure_site = scope().1;
+    provision_admission_scope(&pool, &failure_tenant, &failure_site, 8).await;
     sqlx::query("ALTER TABLE xshield.audit_outbox ADD CONSTRAINT test_model_catalog_failure CHECK (tenant_id <> 'tenant_model_eval_failure')").execute(&pool).await.unwrap();
     let fixture = Fixture::new();
     let mut storage = fixture.storage();
@@ -448,8 +503,9 @@ async fn postgres_evaluation_captures_actual_io_and_dependency_failures() {
         &client,
         &mut storage,
         &store,
-        TenantId::parse("tenant_model_eval_failure").unwrap(),
-        scope().1,
+        failure_tenant,
+        failure_site,
+        "model-eval-postgres-test-r1",
         &mut cancel,
     )
     .await
@@ -465,6 +521,9 @@ async fn postgres_evaluation_captures_actual_io_and_dependency_failures() {
     assert_eq!(fixture.events().len(), 2);
 
     // Dependency failure after an actual send must still close the attempt.
+    let capture_failure_tenant = TenantId::parse("tenant_model_eval_capture_failure").unwrap();
+    let capture_failure_site = scope().1;
+    provision_admission_scope(&pool, &capture_failure_tenant, &capture_failure_site, 8).await;
     let fixture = Fixture::new();
     let mut storage = fixture.storage();
     let client = CountingPort {
@@ -477,8 +536,9 @@ async fn postgres_evaluation_captures_actual_io_and_dependency_failures() {
         &client,
         &mut storage,
         &store,
-        TenantId::parse("tenant_model_eval_capture_failure").unwrap(),
-        scope().1,
+        capture_failure_tenant,
+        capture_failure_site,
+        "model-eval-postgres-test-r1",
         &mut cancel,
     )
     .await
@@ -496,6 +556,189 @@ async fn postgres_evaluation_captures_actual_io_and_dependency_failures() {
     assert_eq!(events.len(), 3);
     assert_eq!(events[2]["event_type"], "model.failed");
     assert_eq!(events[2]["payload"]["confidence"], serde_json::Value::Null);
+
+    // A runner configuration rejection happens after `model.started`; it must
+    // still be recorded as a terminal and never reach evidence or HTTP.
+    let fixture = Fixture::new();
+    let mut storage = fixture.storage();
+    let client = CountingPort {
+        calls: AtomicUsize::new(0),
+        payload: Arc::default(),
+        fail_after_send: None,
+    };
+    let (_sender, mut cancel) = oneshot::channel();
+    let report = evaluate(
+        &input(),
+        &client,
+        &mut storage,
+        &store,
+        TenantId::parse("tenant_model_eval_invalid_runner").unwrap(),
+        SiteId::parse("site_model_eval_invalid_runner").unwrap(),
+        " invalid-runner",
+        &mut cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.reason_code, "MODEL_CONFIG_INVALID");
+    assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    assert!(report.input_artifact_id.is_none());
+    assert!(report.output_artifact_id.is_none());
+    assert!(report.call_artifact_id.is_none());
+    drop(storage);
+    let events = fixture.events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["event_type"], "model.started");
+    assert_eq!(events[1]["event_type"], "model.failed");
+    assert_eq!(events[1]["payload"]["reason_code"], "MODEL_CONFIG_INVALID");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn postgres_evaluation_admission_refuses_capacity_before_evidence_or_http() {
+    let database = env::var("XSHIELD_TEST_DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&database).await.unwrap();
+    let store = PostgresIdentityStore::connect(&database, 2, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let tenant = TenantId::parse("tenant_model_eval_admission_capacity").unwrap();
+    let site = SiteId::parse("site_model_eval_admission_capacity").unwrap();
+    provision_admission_scope(&pool, &tenant, &site, 1).await;
+    let blocker = ModelEvaluationAdmissionAttempt::new(
+        tenant.clone(),
+        site.clone(),
+        RequestId::parse(format!("req_{}", Uuid::now_v7())).unwrap(),
+        ModelCallId::parse(format!("mdl_{}", Uuid::now_v7())).unwrap(),
+        PolicyRevision::parse(MODEL_EVALUATION_POLICY_REVISION).unwrap(),
+        "model-eval-capacity-test-r1",
+    )
+    .unwrap();
+    let lease = match store
+        .acquire_model_evaluation_admission(&blocker)
+        .await
+        .unwrap()
+    {
+        ModelEvaluationAdmissionState::Admitted(lease) => lease,
+        ModelEvaluationAdmissionState::Denied(denied) => {
+            panic!(
+                "fixture capacity admission denied: {}",
+                denied.reason_code()
+            )
+        }
+    };
+    let fixture = Fixture::new();
+    let mut storage = fixture.storage();
+    let client = CountingPort {
+        calls: AtomicUsize::new(0),
+        payload: Arc::default(),
+        fail_after_send: None,
+    };
+    let (_sender, mut cancel) = oneshot::channel();
+    let report = evaluate(
+        &input(),
+        &client,
+        &mut storage,
+        &store,
+        tenant.clone(),
+        site.clone(),
+        "model-eval-capacity-test-r1",
+        &mut cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.reason_code, "MODEL_EVALUATION_CAPACITY_EXHAUSTED");
+    assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    assert!(report.input_artifact_id.is_none());
+    assert!(report.output_artifact_id.is_none());
+    assert!(report.call_artifact_id.is_none());
+    let catalog = store
+        .list_request_artifacts(
+            EvidenceCatalogQuery::new(
+                &tenant,
+                &site,
+                &RequestId::parse(&report.request_id).unwrap(),
+                None,
+                16,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(catalog.artifacts().is_empty());
+    let outbox: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM xshield.audit_outbox
+         WHERE tenant_id=$1 AND site_id=$2
+           AND event_type='evidence.cataloged' AND envelope->>'request_id'=$3",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .bind(&report.request_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outbox, 0);
+    drop(storage);
+    let events = fixture.events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["event_type"], "model.started");
+    assert_eq!(events[1]["event_type"], "model.failed");
+    assert_eq!(
+        events[1]["payload"]["reason_code"],
+        "MODEL_EVALUATION_CAPACITY_EXHAUSTED"
+    );
+    assert_eq!(
+        store
+            .release_model_evaluation_admission(&lease)
+            .await
+            .unwrap(),
+        ModelEvaluationAdmissionReleaseState::Released
+    );
+
+    sqlx::query(
+        "UPDATE xshield.model_evaluation_admission_scopes
+         SET policy_revision='policy-r2'
+         WHERE tenant_id=$1 AND site_id=$2",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let fixture = Fixture::new();
+    let mut storage = fixture.storage();
+    let client = CountingPort {
+        calls: AtomicUsize::new(0),
+        payload: Arc::default(),
+        fail_after_send: None,
+    };
+    let (_sender, mut cancel) = oneshot::channel();
+    let report = evaluate(
+        &input(),
+        &client,
+        &mut storage,
+        &store,
+        tenant.clone(),
+        site.clone(),
+        "model-eval-capacity-test-r1",
+        &mut cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        report.reason_code,
+        "MODEL_EVALUATION_ADMISSION_POLICY_MISMATCH"
+    );
+    assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    assert!(report.input_artifact_id.is_none());
+    assert!(report.call_artifact_id.is_none());
+    drop(storage);
+    let events = fixture.events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["event_type"], "model.failed");
+    assert_eq!(
+        events[1]["payload"]["reason_code"],
+        "MODEL_EVALUATION_ADMISSION_POLICY_MISMATCH"
+    );
 }
 
 struct CountedGateway {
@@ -561,11 +804,14 @@ async fn postgres_evaluation_score_preserves_gateway_evidence_and_failure_termin
     let store = PostgresIdentityStore::connect(&database, 2, Duration::from_secs(5))
         .await
         .unwrap();
+    let (configured_tenant, configured_site) = postgres_scope("score");
+    provision_admission_scope(&pool, &configured_tenant, &configured_site, 8).await;
     let input = score_input();
     for (status, response, expected) in score_exchange_cases() {
         let fixture = Fixture::new();
         let mut storage = fixture.storage();
-        let (tenant, site) = scope();
+        let tenant = configured_tenant.clone();
+        let site = configured_site.clone();
         let body = serde_json::to_string(&response).unwrap();
         let (endpoint, server) = server(status, &body).await;
         let client = CountedGateway {
@@ -586,6 +832,7 @@ async fn postgres_evaluation_score_preserves_gateway_evidence_and_failure_termin
             &store,
             tenant.clone(),
             site.clone(),
+            "model-eval-postgres-test-r1",
             &mut cancel,
         )
         .await

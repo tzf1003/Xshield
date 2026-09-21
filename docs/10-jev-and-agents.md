@@ -54,7 +54,7 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 ## 10.6 失败、缓存与重试
 
-固定 deadline、每站预算、并发 semaphore、熔断和取消。缓存键包括模型具体版本、模板、全部决策相关输入摘要和安全域；不缓存“用户一直安全”。缓存命中要引用原 model_call_id 与新调用采用原因。
+固定 deadline、每站预算、并发 semaphore、熔断和取消。跨实例 Jev 调用使用 PostgreSQL 的 tenant/site 容量 scope 与私有短租约：受控部署预置上限、45 秒以内的租约期限和配置 revision；scope 的 revision 必须精确匹配本次已批准模型输入的 policy revision，worker 只能申请、发送前复核并在本地终态 journal 耐久后释放。数据库时钟与 advisory lock 串行回收过期租约、计数和新 lease；token 仅留在当前进程，持久化只保存摘要。`model.requested` 的本地耐久屏障在最终数据库时钟复核之前，随后立即开始固定 10 秒 HTTP deadline，避免 journal 延迟耗尽正在发送的租约。容量或 revision 未获准时只形成 `model.started → model.failed`，不产生证据/catalog/outbox 或 HTTP 调用；租约不构成业务资格、approval、evidence-read 权限或策略发布。进程中断后的私有 token 不恢复，旧 lease 仅等待 TTL 到期，恢复仍只补记 `MODEL_OUTCOME_UNKNOWN`，不重放供应商请求。缓存键包括模型具体版本、模板、全部决策相关输入摘要和安全域；不缓存“用户一直安全”。缓存命中要引用原 model_call_id 与新调用采用原因。
 
 重试独立 attempt_id，记录每次输入是否相同、供应商 request id、耗时与用量。只有最终成功请求不能代表之前失败未计费；拿不到 token/cost 时标 unknown。外部模型动态升级后，记录 `resolved_model_revision=null`（未知），禁止声称可逐位复现。
 
@@ -82,7 +82,7 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 资源上限：输入与实际 API JSON 各 8 KiB，文本合计最多 6144 字符，响应最多 64 KiB，每个证据文档最多 512 KiB、保留 24 小时；发送至读体总期限 10 秒，catalog 操作每步 5 秒。证据根目录排他锁限制一次一个任务，预留四对象最坏空间，目录最多 100000 文件。429 记 `MODEL_RATE_LIMITED`、529 记 `MODEL_OVERLOADED`，保留合法 Retry-After 秒数供操作员决策；每次 CLI 调用至多一次 HTTP。重启认证扫描最多 10000 条专用 journal 记录，补记中断终态并保留因果引用；接近上限时按 RB-11 轮换目录。
 
-后续增量包括缓存、多实例站点预算、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。Score 增量见 10.11；当前未执行真实供应商推理或准确率/校准测试。
+后续增量包括缓存、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。Score 增量见 10.11；当前未执行真实供应商推理或准确率/校准测试。
 
 ## 10.10 Jev 供应商接入决定
 
