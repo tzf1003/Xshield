@@ -92,6 +92,15 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
         &lineage_vault,
     )
     .await;
+    assert_concurrent_report_wins_lineage_review_artifact_identity(
+        &database_url,
+        &pool,
+        &store,
+        &fixture,
+        &vault,
+        &lineage_vault,
+    )
+    .await;
     assert_successful_commit_is_atomic_and_exact(&pool, &store, &fixture, &vault).await;
     assert_wrong_runner_catalog_drift_and_expiry_are_closed(&pool, &store, &fixture, &vault).await;
 
@@ -369,6 +378,180 @@ async fn assert_concurrent_lineage_review_wins_report_artifact_identity(
         state,
         (0, 0, 1, 1, 0, 1, "calibration_lineage_review".to_owned())
     );
+}
+
+/// Lets the report retain its registry preclaim while a relation lock stops
+/// its owner-row insert. A separate lineage fixture prevents catalog row locks
+/// from masking the global registry wait: the second actor must queue on the
+/// report's uncommitted identity claim and then close as `Conflict`.
+#[allow(clippy::too_many_lines)]
+async fn assert_concurrent_report_wins_lineage_review_artifact_identity(
+    database_url: &str,
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    report_vault: &LocalEvidenceVault,
+    lineage_vault: &LocalEvidenceVault,
+) {
+    let capability = fixture.capability(120);
+    issue(store, &capability).await;
+    let lease = begin(store, &capability, "runner-registry-report-wins").await;
+    let session = capability
+        .bind_issued_batch_lease(lease, now())
+        .expect("issued lease binds capability");
+    let evaluation = completed_report(fixture);
+    let shared_artifact_id = artifact_id();
+    let (publication, report) = report_artifact_with_id(&evaluation, shared_artifact_id.clone());
+    let report_manifest = write_report(report_vault, fixture, &report);
+    let completion =
+        CalibrationEvidenceBatchCompletion::from_successful_evaluation(session, evaluation)
+            .expect("completion matches capability");
+    let completion_event_id = event_id();
+    let report_event_id = event_id();
+    let report_command = CalibrationReportCommit::new(
+        &completion,
+        &report,
+        &publication,
+        &report_manifest,
+        "runner-registry-report-wins",
+        &completion_event_id,
+        &report_event_id,
+    )
+    .expect("report race command is valid");
+
+    // Use a different scope and independent live manifests so the second actor
+    // can only wait on the global artifact registry, not on report catalog rows.
+    let contender = Fixture::new();
+    seed_catalog(pool, &contender).await;
+    let lineage_review = lineage_review(
+        &contender,
+        CalibrationLineageReviewId::parse(format!("calrev_{}", Uuid::now_v7()))
+            .expect("race lineage review id is valid"),
+        shared_artifact_id,
+    );
+    let lineage_manifest =
+        write_and_attest_lineage_review(lineage_vault, &contender, &lineage_review);
+    let lineage_event_id = event_id();
+    let lineage_command =
+        CalibrationLineageReviewCommit::new(&lineage_review, &lineage_manifest, &lineage_event_id)
+            .expect("lineage race command is valid");
+
+    let report_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("report race actor pool connects");
+    let report_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&report_pool)
+        .await
+        .expect("report race actor pid is queryable");
+    let report_store = PostgresIdentityStore::from_pool(report_pool.clone());
+    let lineage_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("lineage race actor pool connects");
+    let lineage_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&lineage_pool)
+        .await
+        .expect("lineage race actor pid is queryable");
+    let lineage_store = PostgresIdentityStore::from_pool(lineage_pool.clone());
+
+    let mut gate = pool
+        .begin()
+        .await
+        .expect("report artifact gate transaction starts");
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .expect("report artifact gate pid is queryable");
+    sqlx::query("LOCK TABLE xshield.calibration_report_artifacts IN SHARE MODE")
+        .execute(&mut *gate)
+        .await
+        .expect("report artifact relation is gated after registry preclaim");
+
+    let (report_outcome, lineage_outcome) = tokio::join!(
+        report_store.complete_and_publish_calibration_report(report_command),
+        async {
+            wait_for_database_block(pool, report_pid, gate_pid).await;
+            let (lineage_outcome, ()) = tokio::join!(
+                lineage_store.commit_calibration_lineage_review(lineage_command),
+                async {
+                    wait_for_database_block(pool, lineage_pid, report_pid).await;
+                    gate.commit()
+                        .await
+                        .expect("report artifact gate releases after both waits");
+                },
+            );
+            lineage_outcome
+        },
+    );
+    report_pool.close().await;
+    lineage_pool.close().await;
+
+    assert!(
+        matches!(
+            report_outcome.expect("report race transaction resolves"),
+            CalibrationReportCommitOutcome::Committed(_)
+        ),
+        "report must retain the deliberate registry ordering"
+    );
+    assert!(
+        matches!(
+            lineage_outcome.expect("lineage race transaction resolves"),
+            CalibrationLineageReviewCommitOutcome::Conflict
+        ),
+        "lineage review must map the report-owned registry identity to Conflict"
+    );
+    assert_state(pool, &capability, "consumed", "completed").await;
+
+    let report_state: (i64, i64, i64, String, String, String) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM xshield.calibration_report_artifacts
+              WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3),
+             (SELECT count(*) FROM xshield.calibration_reports
+              WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$4),
+             (SELECT count(*) FROM xshield.audit_outbox WHERE event_id=ANY($5)),
+             (SELECT tenant_id FROM xshield.artifact_identity_registry WHERE artifact_id=$3),
+             (SELECT site_id FROM xshield.artifact_identity_registry WHERE artifact_id=$3),
+             (SELECT family FROM xshield.artifact_identity_registry WHERE artifact_id=$3)",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(publication.report_artifact_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(vec![completion_event_id.as_str(), report_event_id.as_str()])
+    .fetch_one(pool)
+    .await
+    .expect("report-winning registry state is queryable");
+    assert_eq!(
+        report_state,
+        (
+            1,
+            1,
+            2,
+            fixture.tenant.as_str().to_owned(),
+            fixture.site.as_str().to_owned(),
+            "calibration_report".to_owned(),
+        )
+    );
+
+    let lineage_state: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM xshield.calibration_lineage_review_artifacts
+              WHERE tenant_id=$1 AND site_id=$2 AND review_id=$3),
+             (SELECT count(*) FROM xshield.calibration_lineage_reviews
+              WHERE tenant_id=$1 AND site_id=$2 AND review_id=$3),
+             (SELECT count(*) FROM xshield.audit_outbox WHERE event_id=$4)",
+    )
+    .bind(contender.tenant.as_str())
+    .bind(contender.site.as_str())
+    .bind(lineage_review.review_id().as_str())
+    .bind(lineage_event_id.as_str())
+    .fetch_one(pool)
+    .await
+    .expect("lineage conflict state is queryable");
+    assert_eq!(lineage_state, (0, 0, 0));
 }
 
 #[allow(clippy::too_many_lines)]
@@ -882,7 +1065,7 @@ async fn wait_for_database_block(pool: &PgPool, waiter: i32, blocker: i32) {
         }
     })
     .await
-    .expect("report transaction reached the locked capability header");
+    .expect("expected database waiter to reach blocker");
 }
 
 fn completed_report(fixture: &Fixture) -> EvaluationReport {
