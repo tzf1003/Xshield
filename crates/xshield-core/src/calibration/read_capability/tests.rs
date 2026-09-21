@@ -1,10 +1,13 @@
 use super::*;
 use crate::{
-    calibration::dataset::{EvaluationProvenance, ModelIdentity},
+    calibration::{
+        GroundTruth, Probability, Signal, Thresholds,
+        dataset::{DatasetSample, EvaluationProvenance, ModelIdentity, evaluate_dataset},
+    },
     domain::{
         ApprovalRef, ArtifactId, CalibrationReadCapabilityId, CalibrationReadLeaseId,
-        DatasetRevision, LabelRevision, MappingRevision, ModelRevision, PromptRevision, ProviderId,
-        TaskRevision, ThresholdPolicyRevision,
+        DatasetRevision, LabelRevision, MappingRevision, ModelCallId, ModelRevision,
+        PromptRevision, ProviderId, TaskRevision, ThresholdPolicyRevision,
     },
     ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
 };
@@ -266,6 +269,102 @@ fn batch_session_rejects_invalid_mismatched_or_out_of_scope_issued_leases() {
 
 fn source(model: usize, label: usize) -> CalibrationSampleReadScope {
     CalibrationSampleReadScope::new(artifact(model), artifact(label))
+}
+
+fn completed_report(
+    provenance: EvaluationProvenance,
+    sources: &[CalibrationSampleReadScope],
+) -> EvaluationReport {
+    let samples = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            DatasetSample::new(
+                ModelCallId::parse(format!("mdl_018f2a3b-4c5d-7000-8000-{index:012x}")).unwrap(),
+                source.model_call_artifact_id().clone(),
+                source.label_artifact_id().clone(),
+                provenance.model().clone(),
+                provenance.mapping_revision().clone(),
+                GroundTruth::Benign,
+                Signal::Risk(Probability::new(0.1).unwrap()),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    evaluate_dataset(
+        provenance,
+        &samples,
+        Thresholds::new(
+            Probability::new(0.2).unwrap(),
+            Probability::new(0.8).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn completion_consumes_only_a_full_evaluator_result_for_the_exact_session() {
+    let sources = vec![source(10, 11), source(12, 13)];
+    let capability = capability(sources.clone()).unwrap();
+    let issued_session = session(&capability, 110, 190, [7; 32], 150).unwrap();
+    let completion = CalibrationEvidenceBatchCompletion::from_successful_evaluation(
+        issued_session,
+        completed_report(capability.provenance().clone(), &sources),
+    )
+    .unwrap();
+    assert_eq!(
+        completion.session().lease().capability_id(),
+        capability.capability_id()
+    );
+    assert_eq!(completion.report().sources().len(), 2);
+
+    let source_mismatch = CalibrationEvidenceBatchCompletion::from_successful_evaluation(
+        session(&capability, 110, 190, [8; 32], 150).unwrap(),
+        completed_report(
+            capability.provenance().clone(),
+            &[source(10, 11), source(14, 15)],
+        ),
+    )
+    .err()
+    .expect("partial or substituted result is rejected");
+    assert_eq!(
+        source_mismatch,
+        CalibrationEvidenceBatchCompletionError::SourceSetMismatch
+    );
+
+    let mismatched_provenance = EvaluationProvenance::new(
+        ApprovalRef::parse("approval-r2").unwrap(),
+        DatasetRevision::parse("dataset-r1").unwrap(),
+        LabelRevision::parse("labels-r1").unwrap(),
+        TaskRevision::parse("task-r1").unwrap(),
+        ThresholdPolicyRevision::parse("threshold-r1").unwrap(),
+        MappingRevision::parse("risk-map-r1").unwrap(),
+        artifact(1),
+        artifact(2),
+        artifact(3),
+        artifact(4),
+        capability.provenance().model().clone(),
+    )
+    .unwrap();
+    let provenance_mismatch = CalibrationEvidenceBatchCompletion::from_successful_evaluation(
+        session(&capability, 110, 190, [9; 32], 150).unwrap(),
+        completed_report(mismatched_provenance, &sources),
+    )
+    .err()
+    .expect("different evaluator provenance is rejected");
+    assert_eq!(
+        provenance_mismatch,
+        CalibrationEvidenceBatchCompletionError::ProvenanceMismatch
+    );
+    assert_eq!(
+        source_mismatch.reason_code(),
+        "CALIBRATION_READ_BATCH_COMPLETION_SOURCE_SET_MISMATCH"
+    );
+    assert_eq!(
+        provenance_mismatch.reason_code(),
+        "CALIBRATION_READ_BATCH_COMPLETION_PROVENANCE_MISMATCH"
+    );
 }
 
 #[test]

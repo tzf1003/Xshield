@@ -23,10 +23,15 @@ use xshield_audit::{
 };
 use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 
+pub mod calibration_audit;
+mod calibration_vault_reader;
 mod control_audit;
 pub mod model_eval;
 mod outbox;
 mod search;
+pub use calibration_vault_reader::{
+    CalibrationEvidenceContent, CalibrationEvidenceReadError, LocalCalibrationEvidenceReader,
+};
 pub use outbox::{
     OutboxPublishReport, OutboxPublisherConfig, publish_calibration_outbox_batch,
     publish_case_outbox_batch, publish_evidence_access_outbox_batch,
@@ -813,6 +818,52 @@ enum ParseSource {
     Outbox,
 }
 
+/// Parses common v3 envelope fields that the authenticated journal/outbox
+/// metadata must bind before a source-specific payload parser is selected.
+fn parse_authenticated_wire_event(
+    bytes: &[u8],
+    authenticated_event_id: &EventId,
+    authenticated_sequence: u64,
+    authenticated_boot_id: &str,
+) -> Result<WireEvent, PublishError> {
+    reject_duplicate_json(bytes)?;
+    let event: WireEvent = serde_json::from_slice(bytes)?;
+    let event_id =
+        EventId::parse(event.event_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
+    if event.schema_version != 3
+        || &event_id != authenticated_event_id
+        || event.producer_seq != authenticated_sequence
+        || event.producer_boot_id != authenticated_boot_id
+        || event.request_seq == 0
+        || event.example_only
+        || !valid_event_type(&event.event_type)
+        || !valid_name(&event.producer_id)
+        || !valid_lower_hex(&event.trace_id, 32)
+        || !valid_lower_hex(&event.span_id, 16)
+        || !matches!(
+            event.sensitivity.as_str(),
+            "PUBLIC" | "INTERNAL" | "SENSITIVE" | "RESTRICTED"
+        )
+        || event.integrity.state != "pending"
+        || event.integrity.previous_hash.is_some()
+        || event.integrity.event_hash.is_some()
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    TenantId::parse(event.tenant_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
+    SiteId::parse(event.site_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
+    PolicyRevision::parse(event.policy_revision.clone()).map_err(|_| PublishError::InvalidEvent)?;
+    if let Some(request_id) = &event.request_id {
+        RequestId::parse(request_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
+    }
+    validate_id_list(&event.evidence_refs, None)?;
+    validate_id_list(&event.cause_event_ids, Some("ev_"))?;
+    if event.event_type.starts_with("model.") {
+        model_eval::ModelEvent::validate_envelope(&event)?;
+    }
+    Ok(event)
+}
+
 impl IndexRow {
     fn parse(
         bytes: &[u8],
@@ -861,42 +912,12 @@ impl IndexRow {
         metadata_retention: TimeDelta,
         source: ParseSource,
     ) -> Result<Self, PublishError> {
-        reject_duplicate_json(bytes)?;
-        let event: WireEvent = serde_json::from_slice(bytes)?;
-        let event_id =
-            EventId::parse(event.event_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
-        if event.schema_version != 3
-            || &event_id != authenticated_event_id
-            || event.producer_seq != authenticated_sequence
-            || event.producer_boot_id != authenticated_boot_id
-            || event.request_seq == 0
-            || event.example_only
-            || !valid_event_type(&event.event_type)
-            || !valid_name(&event.producer_id)
-            || !valid_lower_hex(&event.trace_id, 32)
-            || !valid_lower_hex(&event.span_id, 16)
-            || !matches!(
-                event.sensitivity.as_str(),
-                "PUBLIC" | "INTERNAL" | "SENSITIVE" | "RESTRICTED"
-            )
-            || event.integrity.state != "pending"
-            || event.integrity.previous_hash.is_some()
-            || event.integrity.event_hash.is_some()
-        {
-            return Err(PublishError::InvalidEvent);
-        }
-        TenantId::parse(event.tenant_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
-        SiteId::parse(event.site_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
-        PolicyRevision::parse(event.policy_revision.clone())
-            .map_err(|_| PublishError::InvalidEvent)?;
-        if let Some(request_id) = &event.request_id {
-            RequestId::parse(request_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
-        }
-        validate_id_list(&event.evidence_refs, None)?;
-        validate_id_list(&event.cause_event_ids, Some("ev_"))?;
-        if event.event_type.starts_with("model.") {
-            model_eval::ModelEvent::validate_envelope(&event)?;
-        }
+        let event = parse_authenticated_wire_event(
+            bytes,
+            authenticated_event_id,
+            authenticated_sequence,
+            authenticated_boot_id,
+        )?;
         let occurred_at = DateTime::parse_from_rfc3339(&event.occurred_at)
             .map_err(|_| PublishError::InvalidEvent)?
             .with_timezone(&Utc);
@@ -907,8 +928,17 @@ impl IndexRow {
             .checked_add_signed(metadata_retention)
             .ok_or(PublishError::InvalidEvent)?;
         let summary = match source {
+            ParseSource::Journal if calibration_audit::supports(&event.event_type) => {
+                calibration_audit::parse(&event)?
+            }
             ParseSource::Journal if control_audit::supports(&event.event_type) => {
                 control_audit::parse(&event)?
+            }
+            // Transactional outbox facts are never valid in a local journal.
+            // Without this source gate, an attacker-controlled journal payload
+            // could bypass a dedicated journal parser by naming an outbox type.
+            ParseSource::Journal if outbox::supports(&event.event_type) => {
+                return Err(PublishError::UnsupportedEventType);
             }
             ParseSource::Journal => PayloadSummary::parse(&event.event_type, event.payload.get())?,
             ParseSource::Outbox if outbox::supports(&event.event_type) => outbox::parse(&event)?,

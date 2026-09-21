@@ -780,7 +780,51 @@ impl LocalEvidenceVault {
         now: DateTime<Utc>,
     ) -> Result<Zeroizing<Vec<u8>>, EvidenceError> {
         let verified = self.read_manifest_at(tenant_id, site_id, artifact_id, now)?;
-        let manifest = verified.manifest();
+        self.decrypt_verified_manifest(tenant_id, site_id, artifact_id, verified.manifest())
+    }
+
+    /// Authenticates, decrypts, and binds content to an already authorized manifest.
+    ///
+    /// The vault reloads the authenticated sidecars before and after decryption
+    /// and compares both observations to `expected`. This keeps a caller's
+    /// catalog comparison coupled to the decrypted object even if a privileged
+    /// retention or reconciliation process races this read. It does not grant
+    /// content access; callers must establish their own authorization first.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::CorruptEvidence`] when either authenticated
+    /// sidecar observation differs from `expected`, or when digest, AEAD, or
+    /// plaintext-length validation fails. Other error semantics match
+    /// [`Self::read_content`].
+    pub fn read_content_matching_manifest(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        expected: &VerifiedEvidenceManifest,
+    ) -> Result<Zeroizing<Vec<u8>>, EvidenceError> {
+        let manifest = expected.manifest();
+        let artifact_id = manifest.artifact_id.as_str();
+        let now = Utc::now();
+        let observed = self.read_manifest_at(tenant_id, site_id, artifact_id, now)?;
+        if observed.manifest() != manifest {
+            return Err(EvidenceError::CorruptEvidence);
+        }
+        let plaintext =
+            self.decrypt_verified_manifest(tenant_id, site_id, artifact_id, manifest)?;
+        let current = self.read_manifest_at(tenant_id, site_id, artifact_id, Utc::now())?;
+        if current.manifest() != manifest {
+            return Err(EvidenceError::CorruptEvidence);
+        }
+        Ok(plaintext)
+    }
+
+    fn decrypt_verified_manifest(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        artifact_id: &str,
+        manifest: &EvidenceManifest,
+    ) -> Result<Zeroizing<Vec<u8>>, EvidenceError> {
         let max_envelope = u64::try_from(self.config.max_artifact_bytes)
             .map_err(|_| EvidenceError::InvalidConfig)?
             .checked_add(
@@ -1300,6 +1344,59 @@ mod tests {
         fs::write(root.join(&manifest.storage.locator), tampered).unwrap();
         assert!(matches!(
             vault.read_content(&tenant, &site, &manifest.artifact_id),
+            Err(EvidenceError::CorruptEvidence)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn content_matching_manifest_rejects_a_different_authenticated_object() {
+        let root = private_temp_directory();
+        let vault = LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(&root, "evidence-key-r1", 1024, 30).unwrap(),
+            EvidenceKey::from_hex(KEY).unwrap(),
+        )
+        .unwrap();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
+        let first = vault
+            .write(&EvidenceWrite {
+                tenant_id: &tenant,
+                site_id: &site,
+                request_id: &request,
+                kind: "request_decoded",
+                content_type: "application/json",
+                fidelity: EvidenceFidelity::EntityExact,
+                classification: EvidenceClassification::Restricted,
+                parent_refs: &[],
+                expires_at: Utc::now() + TimeDelta::minutes(5),
+                plaintext: b"first",
+            })
+            .unwrap();
+        let second = vault
+            .write(&EvidenceWrite {
+                tenant_id: &tenant,
+                site_id: &site,
+                request_id: &request,
+                kind: "request_decoded",
+                content_type: "application/json",
+                fidelity: EvidenceFidelity::EntityExact,
+                classification: EvidenceClassification::Restricted,
+                parent_refs: &[],
+                expires_at: Utc::now() + TimeDelta::minutes(5),
+                plaintext: b"second",
+            })
+            .unwrap();
+        assert!(matches!(
+            vault.read_content_matching_manifest(&tenant, &site, &first),
+            Ok(content) if content.as_slice() == b"first"
+        ));
+        let first_manifest = root.join(format!("{}.manifest.json", first.manifest().artifact_id));
+        let second_manifest = root.join(format!("{}.manifest.json", second.manifest().artifact_id));
+        fs::rename(&second_manifest, &first_manifest).unwrap();
+        assert!(matches!(
+            vault.read_content_matching_manifest(&tenant, &site, &first),
             Err(EvidenceError::CorruptEvidence)
         ));
         fs::remove_dir_all(root).unwrap();

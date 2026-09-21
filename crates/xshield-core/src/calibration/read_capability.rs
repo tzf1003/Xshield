@@ -6,7 +6,10 @@
 //! adapter must still verify its issuance, current catalog state, object
 //! integrity, lease use, and each vault read.
 
-use super::{MAX_SAMPLES, dataset::EvaluationProvenance};
+use super::{
+    MAX_SAMPLES,
+    dataset::{EvaluationProvenance, EvaluationReport},
+};
 use crate::{
     domain::{ArtifactId, CalibrationReadCapabilityId, CalibrationReadLeaseId, SiteId, TenantId},
     identity::UnixSeconds,
@@ -259,6 +262,101 @@ impl<'a> CalibrationEvidenceReadSession<'a> {
             && capability.permits_evidence_ref(evidence_ref)
     }
 }
+
+/// An evaluator-owned proof that one complete frozen batch produced a report.
+///
+/// This type consumes the non-duplicable read session, so a successful
+/// evaluator cannot subsequently hand the same lease to another completion
+/// attempt. It is deliberately distinct from an individual read request:
+/// one opened artifact, a console approval, or a partial source list cannot
+/// construct this proof. The persistence adapter still authenticates the
+/// durable active lease and uses its database clock before consuming it.
+pub struct CalibrationEvidenceBatchCompletion<'a> {
+    session: CalibrationEvidenceReadSession<'a>,
+    report: EvaluationReport,
+}
+
+impl<'a> CalibrationEvidenceBatchCompletion<'a> {
+    /// Binds a successful full evaluation to the exact batch session it used.
+    ///
+    /// A valid [`EvaluationReport`] is only a full-batch proof when its
+    /// frozen provenance and ordered model-record/label source pairs exactly
+    /// match the capability. This constructor has no persistence, audit,
+    /// publication, or policy side effect. The evaluator owns the obligation
+    /// to obtain every source via the controlled reader before it builds the
+    /// report; a storage adapter consumes the durable lease only after this
+    /// type has been constructed.
+    ///
+    /// # Errors
+    /// Returns [`CalibrationEvidenceBatchCompletionError`] when the report was
+    /// formed from another provenance or omits, reorders, or substitutes a
+    /// frozen source pair. It never exposes evidence content.
+    pub fn from_successful_evaluation(
+        session: CalibrationEvidenceReadSession<'a>,
+        report: EvaluationReport,
+    ) -> Result<Self, CalibrationEvidenceBatchCompletionError> {
+        let capability = session.capability();
+        if report.provenance() != capability.provenance() {
+            return Err(CalibrationEvidenceBatchCompletionError::ProvenanceMismatch);
+        }
+        if report.sources().len() != capability.sources().len()
+            || !report.sources().iter().zip(capability.sources()).all(
+                |(report_source, capability_source)| {
+                    report_source.model_call_artifact_id()
+                        == capability_source.model_call_artifact_id()
+                        && report_source.label_artifact_id()
+                            == capability_source.label_artifact_id()
+                },
+            )
+        {
+            return Err(CalibrationEvidenceBatchCompletionError::SourceSetMismatch);
+        }
+        Ok(Self { session, report })
+    }
+
+    /// Returns the consumed-in-memory session for durable lease comparison.
+    ///
+    /// This borrows the opaque token only for a purpose-specific persistence
+    /// adapter. Callers must not serialize, log, or turn it into a public ID.
+    #[must_use]
+    pub const fn session(&self) -> &CalibrationEvidenceReadSession<'a> {
+        &self.session
+    }
+
+    /// Returns the complete evaluation result whose source tuples were bound.
+    #[must_use]
+    pub const fn report(&self) -> &EvaluationReport {
+        &self.report
+    }
+}
+
+/// Closed failures for binding an evaluator result to a batch completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalibrationEvidenceBatchCompletionError {
+    /// The result preserved a different approval/revision/model provenance.
+    ProvenanceMismatch,
+    /// The result did not cover the frozen source pairs in their exact order.
+    SourceSetMismatch,
+}
+
+impl CalibrationEvidenceBatchCompletionError {
+    /// Returns the stable, payload-free reason code for caller-owned audit.
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::ProvenanceMismatch => "CALIBRATION_READ_BATCH_COMPLETION_PROVENANCE_MISMATCH",
+            Self::SourceSetMismatch => "CALIBRATION_READ_BATCH_COMPLETION_SOURCE_SET_MISMATCH",
+        }
+    }
+}
+
+impl fmt::Display for CalibrationEvidenceBatchCompletionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.reason_code())
+    }
+}
+
+impl std::error::Error for CalibrationEvidenceBatchCompletionError {}
 
 /// A server-issued, exact-scope capability for one offline calibration batch.
 ///

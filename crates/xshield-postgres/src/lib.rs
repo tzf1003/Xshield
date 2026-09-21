@@ -37,7 +37,8 @@ pub use action_read::ResponseActionDescriptorQuery;
 pub use binding_inspection::BindingInspection;
 pub use calibration_read_capability::{
     AuthorizedCalibrationEvidence, CalibrationEvidenceBatchBegin,
-    CalibrationEvidenceBatchBeginOutcome, CalibrationEvidenceReadAuthorizationOutcome,
+    CalibrationEvidenceBatchBeginOutcome, CalibrationEvidenceBatchComplete,
+    CalibrationEvidenceBatchCompleteOutcome, CalibrationEvidenceReadAuthorizationOutcome,
     CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome,
     CalibrationReadCapabilityRecord,
 };

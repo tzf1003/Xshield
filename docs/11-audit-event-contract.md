@@ -153,3 +153,17 @@ schema 与消费端拒绝未知/重复字段、错误 producer/aggregate/evidenc
 此事实与 capability header、完整成员 snapshot 同一 PostgreSQL 事务提交；成员行及其 catalog snapshot 留在受限关系表，不展开至 envelope。lease ID、私有 lease handle、artifact ID、批准/数据集/模型修订、标签、概率、内容、控制台主体和业务请求均不进入事实。它记录发行，不构成内容授权、消费完成、报告、模型质量、阈值/策略发布或业务终态。现有 calibration consumer 已严格解析该 event type，绑定 capability aggregate、producer、时钟、trace、空 evidence/cause 引用、64 位 scope digest 以及成员/字节/期限边界，并沿用族隔离的 at-least-once 发布；真实 ClickHouse 端到端投递仍需专有数据库验收。outbox 留存不能替代 durable header/members/lease 状态作为授权真值。
 
 当前增量只提供领域投影、schema 和该族的有界 outbox 消费契约；没有 `calibration-evaluator` producer、受控 evidence 读取、report artifact 写入或报告事务持久化实现。部署者不得人工伪造事件来替代这些前置步骤；待 producer 交付后，必须在同一事务中证明 report artifact、冻结投影与 outbox 行的身份一致，再启用实际事件生成。
+
+## 11.11 已实现校准明文释放 journal 审计契约
+
+`calibration.evidence_read` 是校准 reader 专用加密 journal 的单对象终态事实，不是 PostgreSQL outbox 事件。`LocalCalibrationEvidenceReader` 只在每次 PostgreSQL 授权、vault 认证 manifest、密文摘要和 AEAD 检查完成之后构造它；若结果为成功，必须在明文交给 evaluator 之前取得 `LocalJournal::append_batch` 的耐久 receipt。索引发布可按封存段至少一次延后进行，不能作为释放屏障或授权真值。journal 追加失败、receipt 错绑或序列耗尽时，调用方返回自己的 audit-unavailable 错误并阻断明文；不会伪造一条 `ERROR` 事件来表示一个没有耐久写入的结果。
+
+producer 固定为 `calibration-evidence-reader`，policy revision 为 `calibration-v1`，request_id 为 null、request_seq 为 1、sensitivity 为 `RESTRICTED`、evidence_refs 与 cause_event_ids 为空。event ID 在单次物理释放前冻结；调用方持有的 helper 可仅以同一冻结字节和 ID 做精确 append 重试，新的物理明文释放必须生成新的 event ID。当前 reader 在 append 边界不确定时不交付 plaintext，关闭已 poisoned journal 并要求其 owner 先走 journal recovery；它不将未确认 event 当作可重新释放的依据。producer boot 和 producer sequence 从持有 journal 的 writer 取得；trace 从 `calcap_` capability UUID 导出，span 从 `ev_` event UUID 导出。`JournalReceipt.receipt_id`、artifact、role、sample index、lease ID、lease handle、控制台主体和任何内容均不序列化到 envelope 或 payload。
+
+封闭 payload 仅为 `stage=calibration_evidence_read`、outcome、reason_code、capability_id 以及成功时的 `bytes_released`。`PASS/CALIBRATION_EVIDENCE_READ_RELEASED` 要求 1–512 MiB 的准确字节数；`DENY/CALIBRATION_EVIDENCE_READ_NOT_AUTHORIZED` 不带字节数；`ERROR` 只允许 `CALIBRATION_EVIDENCE_READ_AUTHORIZATION_UNAVAILABLE`、`...CAPACITY_UNAVAILABLE`、`...INTEGRITY_FAILED`、`...VAULT_UNAVAILABLE` 或 `...CANCELLED`，同样不带字节数。所有结果是 deterministic、`confidence=null/not_applicable`、非业务终态，不表示 batch consumed、完整评估、报告质量、阈值/策略发布或源站动作。`xshield_worker::calibration_audit::CalibrationEvidenceReadAuditEvent` 是 reader 调用的冻结/追加 helper；`LocalCalibrationEvidenceReader` 已将它接入 pre-plaintext barrier。
+
+## 11.12 已实现校准 batch completion 终态
+
+`calibration.read_batch.completed` 是迁移 0024 将完整 evaluator completion 持久化为 `lease active → completed`、capability `leased → consumed` 的同一 PostgreSQL 事务中的受限 outbox 终态。producer 固定为 `calibration-evidence-batch-completer`，aggregate/trace/span 都绑定 `calcap_` UUIDv7 capability；event ID 与 producer boot 相同，两个序号为 1，发生/观察时间为同一数据库 UTC 毫秒。capability header 以外键保存精确 completion event ID，未知提交重试先核对该引用和 event，不能因后续 retention 或 drift 复活读权。
+
+封闭 payload 仅含 `calibration_read_batch/PASS/CALIBRATION_READ_BATCH_COMPLETED` 与 capability ID；request、evidence_refs、cause、lease ID/handle、runner、artifact、样本、label、概率、指标、evaluator 输出和 report 均禁止进入该事实。它是可检索的安全终态，不是 evidence 已完整读取的证明、report 生成、模型质量、阈值/策略发布或业务授权真值；每次 reader 的 release journal 与后续 report producer 各自独立。

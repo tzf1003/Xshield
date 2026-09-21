@@ -160,13 +160,15 @@ pub enum CalibrationEvidenceReadState<Content> {
 /// or policy, or itself produce a durable audit.
 ///
 /// Before returning [`CalibrationEvidenceReadState::Read`], an adapter MUST
-/// independently revalidate the capability issuance and current tenant/site
-/// scope; atomically consume it for exactly one batch or apply a documented
-/// recovery state; verify active catalog entries and the aggregate catalog-byte
-/// budget; authenticate each typed manifest and requested role; and verify the
-/// persisted object digest and AEAD before exposing content. The adapter MUST
-/// treat any failed recheck as a non-content result, and the application MUST
-/// write its required terminal audit without logging source payloads.
+/// independently revalidate the capability issuance, current tenant/site
+/// scope, and active batch lease; verify active catalog entries and the
+/// aggregate catalog-byte budget; authenticate each typed manifest and
+/// requested role; and verify the persisted object digest and AEAD before
+/// exposing content. The adapter MUST treat any failed recheck as a
+/// non-content result and durably record its reader-owned terminal audit
+/// before returning plaintext. A separate evaluator-owned completion command
+/// may consume the batch only after it constructs the exact complete report;
+/// an individual artifact read never consumes the lease.
 pub trait CalibrationEvidenceReadPort {
     /// Adapter-specific content representation. Implementations should retain
     /// secret-buffer ownership and zeroization until the evaluator consumes it.

@@ -17,7 +17,8 @@ use std::{collections::BTreeMap, time::Duration};
 use uuid::Uuid;
 use xshield_core::{
     calibration::read_capability::{
-        CalibrationEvidenceBatchLease, CalibrationEvidenceReadCapability, CalibrationEvidenceRole,
+        CalibrationEvidenceBatchCompletion, CalibrationEvidenceBatchLease,
+        CalibrationEvidenceReadCapability, CalibrationEvidenceReadSession, CalibrationEvidenceRole,
     },
     domain::{CalibrationReadCapabilityId, CalibrationReadLeaseId, EventId, ModelRevision},
     identity::UnixSeconds,
@@ -27,6 +28,8 @@ use zeroize::Zeroizing;
 
 const ISSUED_EVENT_TYPE: &str = "calibration.read_capability.issued";
 const ISSUED_EVENT_REASON: &str = "CALIBRATION_READ_CAPABILITY_ISSUED";
+const COMPLETED_EVENT_TYPE: &str = "calibration.read_batch.completed";
+const COMPLETED_EVENT_REASON: &str = "CALIBRATION_READ_BATCH_COMPLETED";
 const MAX_BATCH_LEASE_SECONDS: u64 = 3_600;
 const MAX_RECOVERIES: i32 = 16;
 
@@ -74,6 +77,42 @@ pub struct CalibrationEvidenceBatchBegin<'a> {
     capability: &'a CalibrationEvidenceReadCapability,
     runner_id: &'a str,
     lease_for: Duration,
+}
+
+/// A bounded command to consume a lease after one complete evaluator succeeds.
+///
+/// The command deliberately accepts the core's
+/// [`CalibrationEvidenceBatchCompletion`] rather than an artifact reference or
+/// read request. That proof consumes the in-memory session and has already
+/// checked the complete ordered evaluator source set; one successful object
+/// open can therefore never consume a capability.
+pub struct CalibrationEvidenceBatchComplete<'completion, 'capability> {
+    completion: &'completion CalibrationEvidenceBatchCompletion<'capability>,
+    runner_id: &'completion str,
+}
+
+impl<'completion, 'capability> CalibrationEvidenceBatchComplete<'completion, 'capability> {
+    /// Binds the configured evaluator runner to its successful full-batch result.
+    ///
+    /// The runner must be the same configured evaluator identity that acquired
+    /// the lease. Completion has no audit, report-publication, or vault I/O
+    /// side effect; the adapter performs only the atomic lease-state change.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidCommand`] when `runner_id` is not bounded
+    /// configured-runner text.
+    pub fn new(
+        completion: &'completion CalibrationEvidenceBatchCompletion<'capability>,
+        runner_id: &'completion str,
+    ) -> Result<Self, StoreError> {
+        if !valid_text(runner_id, 128) {
+            return Err(StoreError::InvalidCommand);
+        }
+        Ok(Self {
+            completion,
+            runner_id,
+        })
+    }
 }
 
 impl<'a> CalibrationEvidenceBatchBegin<'a> {
@@ -198,6 +237,29 @@ pub enum CalibrationEvidenceBatchBeginOutcome {
     Unavailable,
     /// Recovery has reached its fixed durable retry bound.
     RecoveryExhausted,
+}
+
+/// Result of atomically consuming a capability-wide evaluator lease.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalibrationEvidenceBatchCompleteOutcome {
+    /// The active lease and its capability moved to their terminal states.
+    Completed,
+    /// This exact private lease had already completed in an earlier attempt.
+    AlreadyCompleted,
+    /// The exact capability, lease, catalog, or time window cannot complete.
+    Unavailable,
+}
+
+impl CalibrationEvidenceBatchCompleteOutcome {
+    /// Returns the stable non-content terminal reason for caller-owned audit.
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::Completed => "CALIBRATION_READ_BATCH_COMPLETED",
+            Self::AlreadyCompleted => "CALIBRATION_READ_BATCH_ALREADY_COMPLETED",
+            Self::Unavailable => "CALIBRATION_READ_BATCH_COMPLETION_UNAVAILABLE",
+        }
+    }
 }
 
 impl CalibrationEvidenceBatchBeginOutcome {
@@ -467,6 +529,112 @@ impl PostgresIdentityStore {
         Ok(CalibrationEvidenceBatchBeginOutcome::Started(lease))
     }
 
+    /// Atomically consumes an active lease after a complete evaluator succeeds.
+    ///
+    /// The core completion proof binds the in-memory lease to an
+    /// [`EvaluationReport`](xshield_core::calibration::dataset::EvaluationReport)
+    /// whose provenance and ordered source pairs exactly match the frozen
+    /// capability. This transaction rechecks that immutable durable snapshot,
+    /// the live catalog, configured runner, active lease ID, and private token
+    /// digest before it updates `active -> completed` and `leased -> consumed`.
+    /// A single artifact authorization or vault read has no path to this state
+    /// transition. Repeating the same completed private lease is safe after an
+    /// unknown commit result; it does not reopen or reconsume the capability.
+    ///
+    /// This operation writes a restricted, content-free completion outbox fact
+    /// in the same transaction as the two state transitions. It does not write
+    /// a generic `evidence.read` record: the reader owns the separate
+    /// pre-plaintext audit, and a later report producer owns its distinct
+    /// report/audit transaction. Neither journal/index state is authorization
+    /// truth for this transition.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for a database or corrupt durable-state failure.
+    /// Expected mismatches, expiration, revocation, catalog drift, or a lease
+    /// held by another runner return [`CalibrationEvidenceBatchCompleteOutcome::Unavailable`]
+    /// without exposing content.
+    pub async fn complete_calibration_evidence_batch(
+        &self,
+        command: CalibrationEvidenceBatchComplete<'_, '_>,
+    ) -> Result<CalibrationEvidenceBatchCompleteOutcome, StoreError> {
+        let completion = command.completion;
+        let session = completion.session();
+        let capability = session.capability();
+        let mut transaction = self.pool.begin().await?;
+        set_short_timeouts(&mut transaction).await?;
+        let Some(header) = find_capability(&mut transaction, capability).await? else {
+            transaction.rollback().await?;
+            return Ok(CalibrationEvidenceBatchCompleteOutcome::Unavailable);
+        };
+        let header_status: &str = header.try_get("status")?;
+        if header_status == "consumed" {
+            let completed =
+                completed_lease_matches(&mut transaction, capability, session, command.runner_id)
+                    .await?;
+            let audited =
+                completed && completion_event_exists(&mut transaction, &header, capability).await?;
+            transaction.rollback().await?;
+            if completed && !audited {
+                return Err(StoreError::CorruptData("calibration_completion_outbox"));
+            }
+            return Ok(if completed {
+                CalibrationEvidenceBatchCompleteOutcome::AlreadyCompleted
+            } else {
+                CalibrationEvidenceBatchCompleteOutcome::Unavailable
+            });
+        }
+        if !durable_capability_matches(&mut transaction, &header, capability).await? {
+            transaction.rollback().await?;
+            return Ok(CalibrationEvidenceBatchCompleteOutcome::Unavailable);
+        }
+        if header_status != "leased" {
+            transaction.rollback().await?;
+            return Ok(CalibrationEvidenceBatchCompleteOutcome::Unavailable);
+        }
+
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let not_before = unix_timestamp(capability.not_before())?;
+        let capability_expires_at = unix_timestamp(capability.expires_at())?;
+        if now < not_before {
+            transaction.rollback().await?;
+            return Ok(CalibrationEvidenceBatchCompleteOutcome::Unavailable);
+        }
+        if now >= capability_expires_at {
+            expire_capability_if_needed(&mut transaction, &header, now).await?;
+            transaction.commit().await?;
+            return Ok(CalibrationEvidenceBatchCompleteOutcome::Unavailable);
+        }
+        if !members_match_live_catalog(&mut transaction, capability, &header).await? {
+            transaction.rollback().await?;
+            return Ok(CalibrationEvidenceBatchCompleteOutcome::Unavailable);
+        }
+        if !active_lease_matches_completion(
+            &mut transaction,
+            &header,
+            capability,
+            session,
+            command.runner_id,
+            now,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(CalibrationEvidenceBatchCompleteOutcome::Unavailable);
+        }
+        complete_active_calibration_batch(
+            &mut transaction,
+            capability,
+            session,
+            command.runner_id,
+            now,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CalibrationEvidenceBatchCompleteOutcome::Completed)
+    }
+
     /// Revalidates one exact capability member immediately before vault access.
     ///
     /// This authorization is deliberately purpose-specific: it verifies the
@@ -552,6 +720,60 @@ enum LeasePreparation {
     Recover { generation: i32 },
     RecoveryExhausted,
     Unavailable,
+}
+
+/// Performs the two durable state changes and their inseparable terminal fact.
+/// The caller has already locked and revalidated the capability, member set,
+/// and active lease, so a mismatch here is durable corruption rather than a
+/// caller-visible authorization denial.
+async fn complete_active_calibration_batch(
+    connection: &mut PgConnection,
+    capability: &CalibrationEvidenceReadCapability,
+    session: &CalibrationEvidenceReadSession<'_>,
+    runner_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    let completed_at = date_millis(now);
+    let token_digest = sha256(session.lease().token());
+    let lease_changed = sqlx::query(
+        "UPDATE xshield.calibration_read_capability_leases
+         SET status='completed', completed_at=$6
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 AND lease_id=$4
+           AND runner_id=$5 AND status='active' AND lease_token_digest=$7",
+    )
+    .bind(capability.tenant_id().as_str())
+    .bind(capability.site_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(session.lease().lease_id().as_str())
+    .bind(runner_id)
+    .bind(completed_at)
+    .bind(token_digest.as_slice())
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if lease_changed != 1 {
+        return Err(StoreError::CorruptData("calibration_completing_lease"));
+    }
+    let event_id = EventId::parse(format!("ev_{}", Uuid::now_v7()))
+        .map_err(|_| StoreError::CorruptData("calibration_completion_event_id"))?;
+    let header_changed = sqlx::query(
+        "UPDATE xshield.calibration_read_capabilities
+         SET status='consumed', consumed_at=$4, recovery_required_at=NULL,
+             completion_event_id=$5
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 AND status='leased'",
+    )
+    .bind(capability.tenant_id().as_str())
+    .bind(capability.site_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(completed_at)
+    .bind(event_id.as_str())
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if header_changed != 1 {
+        return Err(StoreError::CorruptData("calibration_consuming_header"));
+    }
+    insert_completion_event(connection, &event_id, capability, completed_at).await
 }
 
 async fn set_short_timeouts(connection: &mut PgConnection) -> Result<(), StoreError> {
@@ -1015,6 +1237,31 @@ async fn insert_issuance_event(
     Ok(())
 }
 
+/// Inserts the durable batch-consumption terminal without source references,
+/// lease material, evaluator output, or a report claim.
+async fn insert_completion_event(
+    connection: &mut PgConnection,
+    event_id: &EventId,
+    capability: &CalibrationEvidenceReadCapability,
+    completed_at: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    let envelope = completion_event(event_id, capability, completed_at)?;
+    sqlx::query(
+        "INSERT INTO xshield.audit_outbox (
+             event_id, tenant_id, site_id, aggregate_ref, event_type, envelope
+         ) VALUES ($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(event_id.as_str())
+    .bind(capability.tenant_id().as_str())
+    .bind(capability.site_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(COMPLETED_EVENT_TYPE)
+    .bind(envelope)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 fn issuance_event(
     event_id: &EventId,
     capability: &CalibrationEvidenceReadCapability,
@@ -1050,6 +1297,38 @@ fn issuance_event(
             "frozen_total_bytes": record.frozen_total_bytes(),
             "not_before_unix": record.not_before().value(),
             "expires_at_unix": record.expires_at().value()
+        }
+    }))
+}
+
+fn completion_event(
+    event_id: &EventId,
+    capability: &CalibrationEvidenceReadCapability,
+    completed_at: DateTime<Utc>,
+) -> Result<Value, StoreError> {
+    let trace_id = capability
+        .capability_id()
+        .as_str()
+        .strip_prefix("calcap_")
+        .ok_or(StoreError::CorruptData("capability_id"))?
+        .replace('-', "");
+    let timestamp = completed_at.to_rfc3339_opts(SecondsFormat::Millis, true);
+    if trace_id.len() != 32 || timestamp.len() != 24 {
+        return Err(StoreError::CorruptData("calibration_completion_event"));
+    }
+    Ok(json!({
+        "schema_version": 3, "event_id": event_id.as_str(), "event_type": COMPLETED_EVENT_TYPE,
+        "tenant_id": capability.tenant_id().as_str(), "site_id": capability.site_id().as_str(),
+        "request_id": null, "trace_id": trace_id, "span_id": &trace_id[..16],
+        "producer_id": "calibration-evidence-batch-completer", "producer_boot_id": event_id.as_str(),
+        "producer_seq": 1, "request_seq": 1, "occurred_at": timestamp, "observed_at": timestamp,
+        "policy_revision": "calibration-v1", "example_only": false,
+        "evidence_refs": [], "cause_event_ids": [], "sensitivity": "RESTRICTED",
+        "integrity": {"state":"pending", "previous_hash":null, "event_hash":null},
+        "payload": {
+            "stage":"calibration_read_batch", "outcome":"PASS",
+            "reason_code":COMPLETED_EVENT_REASON,
+            "capability_id": capability.capability_id().as_str()
         }
     }))
 }
@@ -1315,6 +1594,110 @@ async fn active_lease_matches_request(
         return Ok(None);
     }
     Ok(Some(lease))
+}
+
+/// Checks the private lease material for a state-changing full-batch completion.
+///
+/// Unlike a read authorization, this additionally binds the configured runner
+/// that acquired the lease. The caller already locks the header and complete
+/// catalog scope; this function only answers whether that exact active lease
+/// can be moved to `completed` in the same transaction.
+async fn active_lease_matches_completion(
+    connection: &mut PgConnection,
+    header: &PgRow,
+    capability: &CalibrationEvidenceReadCapability,
+    session: &CalibrationEvidenceReadSession<'_>,
+    runner_id: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, StoreError> {
+    if header.try_get::<&str, _>("status")? != "leased" {
+        return Ok(false);
+    }
+    let lease = sqlx::query(
+        "SELECT status, runner_id, lease_token_digest, acquired_at, lease_until
+         FROM xshield.calibration_read_capability_leases
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 AND lease_id=$4
+         FOR UPDATE",
+    )
+    .bind(capability.tenant_id().as_str())
+    .bind(capability.site_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(session.lease().lease_id().as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(lease) = lease else {
+        return Ok(false);
+    };
+    let token_digest = sha256(session.lease().token());
+    Ok(lease.try_get::<&str, _>("status")? == "active"
+        && lease.try_get::<&str, _>("runner_id")? == runner_id
+        && lease
+            .try_get::<Vec<u8>, _>("lease_token_digest")?
+            .as_slice()
+            == token_digest
+        && lease.try_get::<DateTime<Utc>, _>("acquired_at")? <= now
+        && lease.try_get::<DateTime<Utc>, _>("lease_until")? > now)
+}
+
+/// Recognizes the exact completed lease after an unknown completion commit.
+///
+/// This intentionally does not inspect live catalog state or wall-clock
+/// expiry: a committed terminal state remains retry-identifiable even when
+/// source retention later changes. It cannot authorize a new read or lease.
+async fn completed_lease_matches(
+    connection: &mut PgConnection,
+    capability: &CalibrationEvidenceReadCapability,
+    session: &CalibrationEvidenceReadSession<'_>,
+    runner_id: &str,
+) -> Result<bool, StoreError> {
+    let lease = sqlx::query(
+        "SELECT status, runner_id, lease_token_digest
+         FROM xshield.calibration_read_capability_leases
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 AND lease_id=$4
+         FOR UPDATE",
+    )
+    .bind(capability.tenant_id().as_str())
+    .bind(capability.site_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(session.lease().lease_id().as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(lease) = lease else {
+        return Ok(false);
+    };
+    let token_digest = sha256(session.lease().token());
+    Ok(lease.try_get::<&str, _>("status")? == "completed"
+        && lease.try_get::<&str, _>("runner_id")? == runner_id
+        && lease
+            .try_get::<Vec<u8>, _>("lease_token_digest")?
+            .as_slice()
+            == token_digest)
+}
+
+/// Ensures an unknown-commit retry cannot call a consumed capability complete
+/// when its atomic security terminal was manually removed or never committed.
+async fn completion_event_exists(
+    connection: &mut PgConnection,
+    header: &PgRow,
+    capability: &CalibrationEvidenceReadCapability,
+) -> Result<bool, StoreError> {
+    let Some(event_id) = header.try_get::<Option<String>, _>("completion_event_id")? else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM xshield.audit_outbox
+             WHERE event_id=$1 AND tenant_id=$2 AND site_id=$3
+               AND aggregate_ref=$4 AND event_type=$5
+         )",
+    )
+    .bind(event_id)
+    .bind(capability.tenant_id().as_str())
+    .bind(capability.site_id().as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(COMPLETED_EVENT_TYPE)
+    .fetch_one(&mut *connection)
+    .await?)
 }
 
 async fn authorized_member_for_request(

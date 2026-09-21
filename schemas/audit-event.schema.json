@@ -1012,6 +1012,87 @@
           "maximum": 9223372036854775807
         }
       }
+    },
+    "calibration_read_batch_completed": {
+      "$comment": "Restricted durable terminal for a fully evaluated calibration batch. It identifies the capability only; it never contains a lease, source artifact, report, evaluator content, or policy publication.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "outcome", "reason_code", "capability_id"],
+      "properties": {
+        "stage": {"const": "calibration_read_batch"},
+        "outcome": {"const": "PASS"},
+        "reason_code": {"const": "CALIBRATION_READ_BATCH_COMPLETED"},
+        "capability_id": {
+          "type": "string",
+          "maxLength": 43,
+          "pattern": "^calcap_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      }
+    },
+    "calibration_evidence_read": {
+      "$comment": "Restricted terminal fact from the encrypted calibration-reader journal. It is the local-durable plaintext-release barrier, not an outbox authorization fact. The selected artifact, semantic role, sample slot, lease identity or handle, evidence references, and content remain outside the envelope.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "outcome",
+        "reason_code",
+        "capability_id"
+      ],
+      "properties": {
+        "stage": {"const": "calibration_evidence_read"},
+        "outcome": {"enum": ["PASS", "DENY", "ERROR"]},
+        "reason_code": {
+          "enum": [
+            "CALIBRATION_EVIDENCE_READ_RELEASED",
+            "CALIBRATION_EVIDENCE_READ_NOT_AUTHORIZED",
+            "CALIBRATION_EVIDENCE_READ_AUTHORIZATION_UNAVAILABLE",
+            "CALIBRATION_EVIDENCE_READ_CAPACITY_UNAVAILABLE",
+            "CALIBRATION_EVIDENCE_READ_INTEGRITY_FAILED",
+            "CALIBRATION_EVIDENCE_READ_VAULT_UNAVAILABLE",
+            "CALIBRATION_EVIDENCE_READ_CANCELLED"
+          ]
+        },
+        "capability_id": {
+          "type": "string",
+          "maxLength": 43,
+          "pattern": "^calcap_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "bytes_released": {"type": "integer", "minimum": 1, "maximum": 536870912}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"const": "PASS"}}, "required": ["outcome"]},
+          "then": {
+            "properties": {"reason_code": {"const": "CALIBRATION_EVIDENCE_READ_RELEASED"}},
+            "required": ["bytes_released"]
+          }
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "DENY"}}, "required": ["outcome"]},
+          "then": {
+            "properties": {"reason_code": {"const": "CALIBRATION_EVIDENCE_READ_NOT_AUTHORIZED"}},
+            "not": {"required": ["bytes_released"]}
+          }
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "ERROR"}}, "required": ["outcome"]},
+          "then": {
+            "properties": {
+              "reason_code": {
+                "enum": [
+                  "CALIBRATION_EVIDENCE_READ_AUTHORIZATION_UNAVAILABLE",
+                  "CALIBRATION_EVIDENCE_READ_CAPACITY_UNAVAILABLE",
+                  "CALIBRATION_EVIDENCE_READ_INTEGRITY_FAILED",
+                  "CALIBRATION_EVIDENCE_READ_VAULT_UNAVAILABLE",
+                  "CALIBRATION_EVIDENCE_READ_CANCELLED"
+                ]
+              }
+            },
+            "not": {"required": ["bytes_released"]}
+          }
+        }
+      ]
     }
   },
   "allOf": [
@@ -1838,6 +1919,107 @@
           "evidence_refs": {"maxItems": 0},
           "cause_event_ids": {"maxItems": 0},
           "payload": {"$ref": "#/$defs/calibration_read_capability_issued"},
+          "sensitivity": {"const": "RESTRICTED"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"event_type": {"const": "calibration.read_batch.completed"}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Atomic, content-free calibration batch-consumption terminal. Rust additionally binds the completed capability aggregate, event/boot equality, trace/span derivation, canonical UTC-millisecond time, and duplicate JSON key rejection. It is neither a report nor an authorization source.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"type": "null"},
+          "trace_id": {"type": "string", "minLength": 32, "maxLength": 32, "pattern": "^[0-9a-f]{32}$"},
+          "span_id": {"type": "string", "minLength": 16, "maxLength": 16, "pattern": "^[0-9a-f]{16}$"},
+          "producer_id": {"const": "calibration-evidence-batch-completer"},
+          "producer_boot_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "producer_seq": {"const": 1},
+          "request_seq": {"const": 1},
+          "occurred_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "observed_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "policy_revision": {"const": "calibration-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {"maxItems": 0},
+          "cause_event_ids": {"maxItems": 0},
+          "payload": {"$ref": "#/$defs/calibration_read_batch_completed"},
+          "sensitivity": {"const": "RESTRICTED"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"event_type": {"const": "calibration.evidence_read"}},
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Reader-local encrypted-journal fact. Rust additionally binds the authenticated journal producer boot and sequence, derives trace from capability_id and span from event_id, requires identical UTC-millisecond occurred/observed times, and rejects duplicate JSON keys. A successful append is required before plaintext leaves the reader; an append failure is not represented by this event.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"type": "null"},
+          "trace_id": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32,
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "span_id": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 16,
+            "pattern": "^[0-9a-f]{16}$"
+          },
+          "producer_id": {"const": "calibration-evidence-reader"},
+          "producer_boot_id": {
+            "type": "string",
+            "maxLength": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "request_seq": {"const": 1},
+          "occurred_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "observed_at": {"$ref": "#/$defs/hold_utc_millisecond"},
+          "policy_revision": {"const": "calibration-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {"maxItems": 0},
+          "cause_event_ids": {"maxItems": 0},
+          "payload": {"$ref": "#/$defs/calibration_evidence_read"},
           "sensitivity": {"const": "RESTRICTED"},
           "integrity": {
             "properties": {

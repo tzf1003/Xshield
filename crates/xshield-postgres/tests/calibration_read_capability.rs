@@ -12,25 +12,32 @@ use tokio::time::sleep;
 use uuid::Uuid;
 use xshield_core::{
     calibration::{
-        dataset::{EvaluationProvenance, ModelIdentity},
-        read_capability::{CalibrationEvidenceReadCapability, CalibrationSampleReadScope},
+        GroundTruth, Probability, Signal, Thresholds,
+        dataset::{
+            DatasetSample, EvaluationProvenance, EvaluationReport, ModelIdentity, evaluate_dataset,
+        },
+        read_capability::{
+            CalibrationEvidenceBatchCompletion, CalibrationEvidenceReadCapability,
+            CalibrationSampleReadScope,
+        },
     },
     domain::{
         ApprovalRef, ArtifactId, CalibrationReadCapabilityId, DatasetRevision, EventId,
-        LabelRevision, MappingRevision, ModelRevision, PromptRevision, ProviderId, RequestId,
-        SiteId, TaskRevision, TenantId, ThresholdPolicyRevision,
+        LabelRevision, MappingRevision, ModelCallId, ModelRevision, PromptRevision, ProviderId,
+        RequestId, SiteId, TaskRevision, TenantId, ThresholdPolicyRevision,
     },
     identity::UnixSeconds,
     ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
 };
 use xshield_postgres::{
     CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
+    CalibrationEvidenceBatchComplete, CalibrationEvidenceBatchCompleteOutcome,
     CalibrationEvidenceReadAuthorizationOutcome, CalibrationReadCapabilityIssue,
     CalibrationReadCapabilityIssueOutcome, PostgresIdentityStore,
 };
 
 #[tokio::test]
-#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0023"]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0024"]
 async fn calibration_read_capability_is_atomic_exact_and_recovery_safe() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -283,6 +290,184 @@ async fn assert_exact_read_authorization_rechecks_lease_and_catalog(
 
     assert_fake_lease_is_denied(store, &capability, fixture, &reference, &session, now).await;
     assert_catalog_drift_denies_read(pool, store, fixture, &reference, &request).await;
+    drop(request);
+
+    assert_ordinary_read_does_not_consume_and_full_evaluation_completes(
+        pool,
+        store,
+        fixture,
+        &capability,
+        session,
+    )
+    .await;
+}
+
+async fn assert_ordinary_read_does_not_consume_and_full_evaluation_completes(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    capability: &CalibrationEvidenceReadCapability,
+    session: xshield_core::calibration::read_capability::CalibrationEvidenceReadSession<'_>,
+) {
+    let states: (String, String) = sqlx::query_as(
+        "SELECT capability.status, lease.status
+         FROM xshield.calibration_read_capabilities capability
+         JOIN xshield.calibration_read_capability_leases lease
+           ON lease.tenant_id=capability.tenant_id AND lease.site_id=capability.site_id
+          AND lease.capability_id=capability.capability_id
+         WHERE capability.tenant_id=$1 AND capability.site_id=$2 AND capability.capability_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(capability.capability_id().as_str())
+    .fetch_one(pool)
+    .await
+    .expect("ordinary read leaves the lease active");
+    assert_eq!(states, ("leased".to_owned(), "active".to_owned()));
+
+    let completion = CalibrationEvidenceBatchCompletion::from_successful_evaluation(
+        session,
+        completed_report(fixture),
+    )
+    .expect("the full evaluator result matches the frozen capability");
+    assert!(matches!(
+        store
+            .complete_calibration_evidence_batch(
+                CalibrationEvidenceBatchComplete::new(&completion, "other-runner")
+                    .expect("bounded runner is valid"),
+            )
+            .await
+            .expect("wrong runner completion resolves"),
+        CalibrationEvidenceBatchCompleteOutcome::Unavailable
+    ));
+    assert!(matches!(
+        store
+            .complete_calibration_evidence_batch(
+                CalibrationEvidenceBatchComplete::new(&completion, "runner-read")
+                    .expect("bound runner is valid"),
+            )
+            .await
+            .expect("full completion commits"),
+        CalibrationEvidenceBatchCompleteOutcome::Completed
+    ));
+    assert!(matches!(
+        store
+            .complete_calibration_evidence_batch(
+                CalibrationEvidenceBatchComplete::new(&completion, "runner-read")
+                    .expect("retry command is valid"),
+            )
+            .await
+            .expect("unknown-commit retry resolves"),
+        CalibrationEvidenceBatchCompleteOutcome::AlreadyCompleted
+    ));
+
+    assert_completion_outbox_is_atomic(pool, fixture, capability).await;
+    assert_completed_batch_denies_new_reads(store, fixture, capability, completion.session()).await;
+}
+
+async fn assert_completion_outbox_is_atomic(
+    pool: &PgPool,
+    fixture: &Fixture,
+    capability: &CalibrationEvidenceReadCapability,
+) {
+    let states: (String, String, String, i64) = sqlx::query_as(
+        "SELECT capability.status, lease.status, capability.completion_event_id,
+                (SELECT count(*) FROM xshield.audit_outbox outbox
+                 WHERE outbox.aggregate_ref=capability.capability_id)::bigint
+         FROM xshield.calibration_read_capabilities capability
+         JOIN xshield.calibration_read_capability_leases lease
+           ON lease.tenant_id=capability.tenant_id AND lease.site_id=capability.site_id
+          AND lease.capability_id=capability.capability_id
+         WHERE capability.tenant_id=$1 AND capability.site_id=$2 AND capability.capability_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(capability.capability_id().as_str())
+    .fetch_one(pool)
+    .await
+    .expect("completion state is queryable");
+    assert_eq!(states.0, "consumed");
+    assert_eq!(states.1, "completed");
+    assert_eq!(states.3, 2);
+    let completion_event: Value = sqlx::query_scalar(
+        "SELECT envelope FROM xshield.audit_outbox
+         WHERE event_id=$1 AND tenant_id=$2 AND site_id=$3
+           AND aggregate_ref=$4 AND event_type='calibration.read_batch.completed'",
+    )
+    .bind(&states.2)
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(capability.capability_id().as_str())
+    .fetch_one(pool)
+    .await
+    .expect("completion outbox is atomically retained");
+    assert_eq!(
+        completion_event["payload"],
+        serde_json::json!({
+            "stage": "calibration_read_batch",
+            "outcome": "PASS",
+            "reason_code": "CALIBRATION_READ_BATCH_COMPLETED",
+            "capability_id": capability.capability_id().as_str()
+        })
+    );
+    assert_eq!(completion_event["evidence_refs"], serde_json::json!([]));
+    assert_eq!(completion_event["cause_event_ids"], serde_json::json!([]));
+}
+
+async fn assert_completed_batch_denies_new_reads(
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    capability: &CalibrationEvidenceReadCapability,
+    session: &xshield_core::calibration::read_capability::CalibrationEvidenceReadSession<'_>,
+) {
+    let now = UnixSeconds::new(u64::try_from(Utc::now().timestamp()).expect("current time"));
+    let reference = capability
+        .evidence_refs()
+        .into_iter()
+        .next()
+        .expect("frozen manifest is present");
+    let request = CalibrationEvidenceReadRequest::new(
+        session,
+        capability,
+        &reference,
+        &fixture.tenant,
+        &fixture.site,
+        now,
+    )
+    .expect("completed session remains locally shaped");
+    assert!(matches!(
+        store
+            .authorize_calibration_evidence_read(&request)
+            .await
+            .expect("completed lease resolves to denial"),
+        CalibrationEvidenceReadAuthorizationOutcome::Denied(
+            CalibrationEvidenceReadDenied::EvidenceNotAuthorized
+        )
+    ));
+}
+
+fn completed_report(fixture: &Fixture) -> EvaluationReport {
+    let provenance = fixture.provenance();
+    let sample = DatasetSample::new(
+        ModelCallId::parse(format!("mdl_{}", Uuid::now_v7())).expect("model call is valid"),
+        fixture.artifacts[4].clone(),
+        fixture.artifacts[5].clone(),
+        provenance.model().clone(),
+        provenance.mapping_revision().clone(),
+        GroundTruth::Benign,
+        Signal::Risk(Probability::new(0.1).expect("probability is valid")),
+    )
+    .expect("dataset sample is valid");
+    evaluate_dataset(
+        provenance,
+        &[sample],
+        Thresholds::new(
+            Probability::new(0.2).expect("probability is valid"),
+            Probability::new(0.8).expect("probability is valid"),
+        )
+        .expect("thresholds are valid"),
+    )
+    .expect("dataset evaluation succeeds")
 }
 
 async fn assert_fake_lease_is_denied(

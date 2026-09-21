@@ -12,8 +12,11 @@ use xshield_core::domain::{ArtifactId, CalibrationReadCapabilityId, CalibrationR
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub(super) const EVENT_TYPES: &[&str] =
-    &["calibration.reported", "calibration.read_capability.issued"];
+pub(super) const EVENT_TYPES: &[&str] = &[
+    "calibration.reported",
+    "calibration.read_capability.issued",
+    "calibration.read_batch.completed",
+];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +66,15 @@ struct CalibrationReadCapabilityIssued {
     expires_at_unix: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationReadBatchCompleted {
+    stage: String,
+    outcome: String,
+    reason_code: String,
+    capability_id: String,
+}
+
 /// Validates one complete offline calibration-report event without side effects.
 ///
 /// Common v3 envelope, leased event identity, duplicate JSON key, and scope
@@ -75,6 +87,9 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
     }
     if event.event_type == "calibration.read_capability.issued" {
         return parse_capability_issued(event);
+    }
+    if event.event_type == "calibration.read_batch.completed" {
+        return parse_batch_completed(event);
     }
     let value: CalibrationReport = serde_json::from_str(event.payload.get())?;
     let report_id = CalibrationReportId::parse(value.report_id.clone())
@@ -103,6 +118,46 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         || !valid_resolved_revision(&value.resolved_model_revision)
         || !all_artifacts(&value)
         || event.evidence_refs.as_slice() != [value.report_artifact_id]
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    utc_millis(&event.occurred_at)?;
+    Ok(PayloadSummary {
+        stage: value.stage,
+        outcome: value.outcome,
+        reason_code: value.reason_code,
+        proof_kind: "deterministic".to_owned(),
+        confidence_status: "not_applicable".to_owned(),
+        ..PayloadSummary::default()
+    })
+}
+
+/// Validates the content-free atomic terminal for one complete batch lease.
+/// The durable header/lease rows remain the authority; this fact only makes
+/// the terminal transition searchable and never authorizes a later read.
+fn parse_batch_completed(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    let value: CalibrationReadBatchCompleted = serde_json::from_str(event.payload.get())?;
+    let capability_id = CalibrationReadCapabilityId::parse(value.capability_id.clone())
+        .map_err(|_| PublishError::InvalidEvent)?;
+    let capability_uuid = capability_id
+        .as_str()
+        .strip_prefix("calcap_")
+        .ok_or(PublishError::InvalidEvent)?;
+    if event.producer_id != "calibration-evidence-batch-completer"
+        || event.policy_revision != "calibration-v1"
+        || event.producer_boot_id != event.event_id
+        || event.producer_seq != 1
+        || event.request_seq != 1
+        || event.request_id.is_some()
+        || event.sensitivity != "RESTRICTED"
+        || event.observed_at != event.occurred_at
+        || event.trace_id != capability_uuid.replace('-', "")
+        || event.trace_id.get(..16) != Some(event.span_id.as_str())
+        || !event.evidence_refs.is_empty()
+        || !event.cause_event_ids.is_empty()
+        || value.stage != "calibration_read_batch"
+        || value.outcome != "PASS"
+        || value.reason_code != "CALIBRATION_READ_BATCH_COMPLETED"
     {
         return Err(PublishError::InvalidEvent);
     }

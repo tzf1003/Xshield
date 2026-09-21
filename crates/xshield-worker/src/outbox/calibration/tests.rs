@@ -76,6 +76,29 @@ fn capability_issuance_event() -> Value {
     event
 }
 
+fn batch_completion_event() -> Value {
+    let mut event = crate::outbox::tests::event("case.created");
+    let trace_id = CAPABILITY.strip_prefix("calcap_").unwrap().replace('-', "");
+    event["event_type"] = json!(EVENT_TYPES[2]);
+    event["producer_id"] = json!("calibration-evidence-batch-completer");
+    event["producer_boot_id"] = json!(EVENT);
+    event["request_id"] = Value::Null;
+    event["trace_id"] = json!(trace_id);
+    event["span_id"] = json!(&trace_id[..16]);
+    event["occurred_at"] = json!("2026-09-20T00:00:00.123Z");
+    event["observed_at"] = event["occurred_at"].clone();
+    event["policy_revision"] = json!("calibration-v1");
+    event["sensitivity"] = json!("RESTRICTED");
+    event["evidence_refs"] = json!([]);
+    event["cause_event_ids"] = json!([]);
+    event["payload"] = json!({
+        "stage": "calibration_read_batch", "outcome": "PASS",
+        "reason_code": "CALIBRATION_READ_BATCH_COMPLETED",
+        "capability_id": CAPABILITY
+    });
+    event
+}
+
 fn row(value: &Value) -> Result<IndexRow, PublishError> {
     let bytes = serde_json::to_vec(value).map_err(|_| PublishError::InvalidEvent)?;
     IndexRow::parse_outbox(
@@ -173,6 +196,40 @@ fn canonical_capability_issuance_is_a_non_terminal_deterministic_summary() {
     let mut zero_digest = value;
     zero_digest["payload"]["scope_digest"] = json!("0".repeat(64));
     assert!(row(&zero_digest).is_ok());
+}
+
+#[test]
+fn completion_is_a_restricted_non_terminal_without_sources_or_lease_material() {
+    let original = batch_completion_event();
+    let index_row = row(&original).unwrap();
+    assert_eq!(index_row.event_type, "calibration.read_batch.completed");
+    assert_eq!(index_row.stage, "calibration_read_batch");
+    assert_eq!(index_row.outcome, "PASS");
+    assert_eq!(index_row.reason_code, "CALIBRATION_READ_BATCH_COMPLETED");
+    assert_eq!(index_row.proof_kind, "deterministic");
+    assert_eq!(index_row.confidence, None);
+    assert_eq!(index_row.confidence_status, "not_applicable");
+    assert_eq!(index_row.sensitivity, "RESTRICTED");
+    assert!(index_row.request_id.is_empty());
+    assert!(index_row.evidence_refs.is_empty());
+    assert!(index_row.cause_event_ids.is_empty());
+    assert_eq!(index_row.is_terminal, 0);
+    for (pointer, replacement) in [
+        ("/producer_id", json!("calibration-evaluator")),
+        ("/payload/stage", json!("calibration_report")),
+        ("/payload/outcome", json!("DENY")),
+        ("/payload/reason_code", json!("CALIBRATION_REPORTED")),
+        ("/payload/capability_id", json!(REPORT)),
+        ("/evidence_refs", json!([REPORT_ARTIFACT])),
+        ("/cause_event_ids", json!([EVENT])),
+    ] {
+        let mut invalid = original.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(row(&invalid).is_err(), "accepted {pointer}");
+    }
+    let mut unknown = original;
+    unknown["payload"]["lease_id"] = json!("callease_018f2a3b-4c5d-7000-8000-000000000009");
+    assert!(row(&unknown).is_err(), "accepted lease identity");
 }
 
 #[test]
@@ -333,6 +390,10 @@ fn calibration_aggregate_field_follows_the_event_contract() {
     assert_eq!(
         super::super::OutboxFamily::Calibration
             .aggregate_field("calibration.read_capability.issued"),
+        "capability_id"
+    );
+    assert_eq!(
+        super::super::OutboxFamily::Calibration.aggregate_field("calibration.read_batch.completed"),
         "capability_id"
     );
     assert!(

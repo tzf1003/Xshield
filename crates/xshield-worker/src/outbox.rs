@@ -94,7 +94,9 @@ impl OutboxFamily {
             Self::EvidenceAccess => "access_request_id",
             Self::Calibration => match event_type {
                 "calibration.reported" => "report_id",
-                "calibration.read_capability.issued" => "capability_id",
+                "calibration.read_capability.issued" | "calibration.read_batch.completed" => {
+                    "capability_id"
+                }
                 _ => "",
             },
             Self::Identity => "binding_id",
