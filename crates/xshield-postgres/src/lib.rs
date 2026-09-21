@@ -8,6 +8,8 @@
 mod action_read;
 mod binding_inspection;
 mod calibration_read_capability;
+mod calibration_report;
+mod calibration_report_retention;
 mod case_close;
 mod case_evidence;
 mod case_evidence_holds;
@@ -39,9 +41,17 @@ pub use calibration_read_capability::{
     AuthorizedCalibrationEvidence, CalibrationEvidenceBatchBegin,
     CalibrationEvidenceBatchBeginOutcome, CalibrationEvidenceBatchComplete,
     CalibrationEvidenceBatchCompleteOutcome, CalibrationEvidenceReadAuthorizationOutcome,
+    CalibrationEvidenceReleaseCommitOutcome, CalibrationEvidenceReleaseReservationOutcome,
     CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome,
     CalibrationReadCapabilityRecord,
 };
+pub use calibration_report::{
+    CalibrationReportCommit, CalibrationReportCommitOutcome, CalibrationReportCommitRecord,
+};
+pub use calibration_report_retention::{
+    CalibrationReportOrphanPurgeJob, CalibrationReportOrphanPurgeResult,
+};
+pub use calibration_report_retention::{CalibrationReportPurgeJob, CalibrationReportPurgeResult};
 pub use case_close::{
     InvestigationCaseClose, InvestigationCaseCloseRecord, InvestigationCaseCloseWriteOutcome,
 };

@@ -45,7 +45,7 @@ const EVIDENCE_KEY: &str = "1111111111111111111111111111111111111111111111111111
 const JOURNAL_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
 #[tokio::test]
-#[ignore = "requires script-owned XSHIELD_TEST_DATABASE_URL with migrations through 0024"]
+#[ignore = "requires script-owned XSHIELD_TEST_DATABASE_URL with migrations through 0025"]
 async fn calibration_reader_requires_durable_journal_before_plaintext_and_completion() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");

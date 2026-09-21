@@ -32,6 +32,7 @@ const COMPLETED_EVENT_TYPE: &str = "calibration.read_batch.completed";
 const COMPLETED_EVENT_REASON: &str = "CALIBRATION_READ_BATCH_COMPLETED";
 const MAX_BATCH_LEASE_SECONDS: u64 = 3_600;
 const MAX_RECOVERIES: i32 = 16;
+const RELEASE_RESERVATION_SECONDS: i64 = 5;
 
 /// Validated input for atomically issuing one frozen calibration-read capability.
 pub struct CalibrationReadCapabilityIssue<'a> {
@@ -315,6 +316,31 @@ pub enum CalibrationEvidenceReadAuthorizationOutcome {
     /// The exact current catalog artifact may proceed to vault authentication.
     Authorized(Box<AuthorizedCalibrationEvidence>),
     /// The capability, lease, member, or live catalog cannot authorize content.
+    Denied(CalibrationEvidenceReadDenied),
+}
+
+/// Private durable reservation for one authenticated plaintext release.
+///
+/// This is intentionally neither cloneable nor serializable. It binds one
+/// exact request to its database row until the reader commits the release
+/// boundary after its local journal acknowledges the release fact.
+pub struct CalibrationEvidenceReleaseReservation {
+    reservation_id: String,
+}
+
+/// Result of reserving the final plaintext-release boundary.
+pub enum CalibrationEvidenceReleaseReservationOutcome {
+    /// The exact request owns a short durable reservation until it is committed.
+    Reserved(CalibrationEvidenceReleaseReservation),
+    /// The capability cannot reserve another plaintext release.
+    Denied(CalibrationEvidenceReadDenied),
+}
+
+/// Result of committing a journal-backed plaintext release boundary.
+pub enum CalibrationEvidenceReleaseCommitOutcome {
+    /// The journal-backed release linearized while the reservation was valid.
+    Released,
+    /// The reservation expired or the capability no longer authorizes release.
     Denied(CalibrationEvidenceReadDenied),
 }
 
@@ -672,6 +698,62 @@ impl PostgresIdentityStore {
         let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
+        let Some(_lease) =
+            active_lease_matches_request(&mut transaction, &header, request, now).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(denied());
+        };
+        if !members_match_live_catalog(&mut transaction, request.capability(), &header).await? {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        let Some(authorized) = authorized_member_for_request(&mut transaction, request).await?
+        else {
+            transaction.rollback().await?;
+            return Ok(denied());
+        };
+        transaction.commit().await?;
+        Ok(CalibrationEvidenceReadAuthorizationOutcome::Authorized(
+            Box::new(authorized),
+        ))
+    }
+
+    /// Reserves the final boundary for one vault-authenticated plaintext release.
+    ///
+    /// The reader calls this only after it has authenticated the vault object
+    /// against a pre-vault catalog expectation. This short transaction repeats
+    /// the full live capability, lease, and catalog checks and creates a
+    /// durable exact-request reservation. The reservation is protected from
+    /// catalog mutation until the reader either commits the journal-backed
+    /// release boundary or its short deadline passes; no database lock spans
+    /// vault or journal I/O.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for a database or corrupt durable-state failure.
+    /// Expected mismatches or expiry return the closed `Denied` outcome.
+    pub async fn reserve_calibration_evidence_release(
+        &self,
+        request: &CalibrationEvidenceReadRequest<'_>,
+    ) -> Result<CalibrationEvidenceReleaseReservationOutcome, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        set_short_timeouts(&mut transaction).await?;
+        let denied = || {
+            CalibrationEvidenceReleaseReservationOutcome::Denied(
+                CalibrationEvidenceReadDenied::EvidenceNotAuthorized,
+            )
+        };
+        let Some(header) = find_capability(&mut transaction, request.capability()).await? else {
+            transaction.rollback().await?;
+            return Ok(denied());
+        };
+        if !durable_capability_matches(&mut transaction, &header, request.capability()).await? {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
         let Some(lease) =
             active_lease_matches_request(&mut transaction, &header, request, now).await?
         else {
@@ -682,16 +764,141 @@ impl PostgresIdentityStore {
             transaction.rollback().await?;
             return Ok(denied());
         }
-        let Some(authorized) =
-            authorized_member_for_request(&mut transaction, request, lease).await?
-        else {
+        if authorized_member_for_request(&mut transaction, request)
+            .await?
+            .is_none()
+        {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        let lease_until: DateTime<Utc> = lease.try_get("lease_until")?;
+        let capability_until = unix_timestamp(request.capability().expires_at())?;
+        let reservation_until = std::cmp::min(
+            std::cmp::min(lease_until, capability_until),
+            now.checked_add_signed(chrono::TimeDelta::seconds(RELEASE_RESERVATION_SECONDS))
+                .ok_or(StoreError::InvalidCommand)?,
+        );
+        if reservation_until <= now {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        let reservation_id = Uuid::now_v7().to_string();
+        let token_digest = sha256(request.session().lease().token());
+        sqlx::query(
+            "DELETE FROM xshield.calibration_evidence_release_reservations
+             WHERE reserved_until <= clock_timestamp()",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO xshield.calibration_evidence_release_reservations (
+                 reservation_id, tenant_id, site_id, capability_id, lease_id,
+                 artifact_id, lease_token_digest, reserved_at, reserved_until
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(&reservation_id)
+        .bind(request.tenant_id().as_str())
+        .bind(request.site_id().as_str())
+        .bind(request.capability().capability_id().as_str())
+        .bind(request.session().lease().lease_id().as_str())
+        .bind(request.evidence_ref().artifact_id().as_str())
+        .bind(token_digest.as_slice())
+        .bind(date_millis(now))
+        .bind(date_millis(reservation_until))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(CalibrationEvidenceReleaseReservationOutcome::Reserved(
+            CalibrationEvidenceReleaseReservation { reservation_id },
+        ))
+    }
+
+    /// Commits the database side of a journal-backed plaintext release.
+    ///
+    /// The reader calls this only after a dedicated local journal has durably
+    /// recorded the release fact and before it returns the zeroizing buffer.
+    /// The transaction requires the exact active reservation to still be live,
+    /// repeats full authorization under locks, then consumes only the
+    /// reservation. Its commit is the release linearization point: later
+    /// catalog changes cannot retroactively authorize or disclose another
+    /// object.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for a database or corrupt durable-state failure.
+    /// A missing, expired, or mismatched reservation is a closed denial.
+    pub async fn commit_calibration_evidence_release(
+        &self,
+        request: &CalibrationEvidenceReadRequest<'_>,
+        reservation: CalibrationEvidenceReleaseReservation,
+    ) -> Result<CalibrationEvidenceReleaseCommitOutcome, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        set_short_timeouts(&mut transaction).await?;
+        let denied = || {
+            CalibrationEvidenceReleaseCommitOutcome::Denied(
+                CalibrationEvidenceReadDenied::EvidenceNotAuthorized,
+            )
+        };
+        let token_digest = sha256(request.session().lease().token());
+        let reservation_row = sqlx::query(
+            "SELECT reserved_until FROM xshield.calibration_evidence_release_reservations
+             WHERE reservation_id=$1 AND tenant_id=$2 AND site_id=$3
+               AND capability_id=$4 AND lease_id=$5 AND artifact_id=$6
+               AND lease_token_digest=$7
+             FOR UPDATE",
+        )
+        .bind(&reservation.reservation_id)
+        .bind(request.tenant_id().as_str())
+        .bind(request.site_id().as_str())
+        .bind(request.capability().capability_id().as_str())
+        .bind(request.session().lease().lease_id().as_str())
+        .bind(request.evidence_ref().artifact_id().as_str())
+        .bind(token_digest.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(reservation_row) = reservation_row else {
             transaction.rollback().await?;
             return Ok(denied());
         };
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        if reservation_row.try_get::<DateTime<Utc>, _>("reserved_until")? <= now {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        let Some(header) = find_capability(&mut transaction, request.capability()).await? else {
+            transaction.rollback().await?;
+            return Ok(denied());
+        };
+        if !durable_capability_matches(&mut transaction, &header, request.capability()).await?
+            || !members_match_live_catalog(&mut transaction, request.capability(), &header).await?
+            || active_lease_matches_request(&mut transaction, &header, request, now)
+                .await?
+                .is_none()
+        {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        if authorized_member_for_request(&mut transaction, request)
+            .await?
+            .is_none()
+        {
+            transaction.rollback().await?;
+            return Ok(denied());
+        }
+        let changed = sqlx::query(
+            "DELETE FROM xshield.calibration_evidence_release_reservations
+             WHERE reservation_id=$1",
+        )
+        .bind(&reservation.reservation_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(StoreError::CorruptData("calibration_release_reservation"));
+        }
         transaction.commit().await?;
-        Ok(CalibrationEvidenceReadAuthorizationOutcome::Authorized(
-            Box::new(authorized),
-        ))
+        Ok(CalibrationEvidenceReleaseCommitOutcome::Released)
     }
 }
 
@@ -1496,7 +1703,8 @@ async fn members_match_live_catalog(
                 catalog.kind AS live_kind, catalog.content_type AS live_content_type,
                 catalog.fidelity AS live_fidelity, catalog.classification AS live_classification,
                 catalog.expires_at AS live_expires_at, catalog.catalog_event_id AS live_event_id,
-                catalog.status AS live_status, catalog.deleted_at AS live_deleted_at
+                catalog.status AS live_status, catalog.deleted_at AS live_deleted_at,
+                catalog.purge_requested_event_id AS live_purge_requested_event_id
          FROM xshield.calibration_read_capability_members member
          JOIN xshield.artifact_catalog catalog
            ON catalog.tenant_id=member.tenant_id AND catalog.site_id=member.site_id
@@ -1522,6 +1730,9 @@ async fn members_match_live_catalog(
         if row.try_get::<&str, _>("live_status")? != "active"
             || row
                 .try_get::<Option<DateTime<Utc>>, _>("live_deleted_at")?
+                .is_some()
+            || row
+                .try_get::<Option<&str>, _>("live_purge_requested_event_id")?
                 .is_some()
             || row.try_get::<DateTime<Utc>, _>("live_expires_at")? <= now
             || row.try_get::<DateTime<Utc>, _>("live_expires_at")? < end
@@ -1703,7 +1914,6 @@ async fn completion_event_exists(
 async fn authorized_member_for_request(
     connection: &mut PgConnection,
     request: &CalibrationEvidenceReadRequest<'_>,
-    _lease: PgRow,
 ) -> Result<Option<AuthorizedCalibrationEvidence>, StoreError> {
     let row = sqlx::query(
         "SELECT member.role AS calibration_role,

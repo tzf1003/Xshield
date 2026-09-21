@@ -28,6 +28,16 @@ use zeroize::Zeroizing;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+mod calibration_report;
+mod calibration_report_retention;
+
+pub use calibration_report::{
+    AttestedCalibrationReportManifest, CALIBRATION_REPORT_CANONICAL_BODY_ENCODING,
+    CALIBRATION_REPORT_EVIDENCE_MANIFEST_SCHEMA_VERSION, CalibrationReportEvidenceManifest,
+    CalibrationReportEvidenceWrite, VerifiedCalibrationReportManifest,
+};
+pub use calibration_report_retention::CalibrationReportOrphanCandidate;
+
 const SCHEMA_VERSION: u8 = 3;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
@@ -601,6 +611,14 @@ impl LocalEvidenceVault {
                     .root
                     .join(format!("{artifact_id}.manifest.hmac")),
             )?;
+            let has_report_sidecar =
+                calibration_report::sidecars_present(&self.config.root, artifact_id)?;
+            // A calibration report has its own authenticated sidecar contract.
+            // The generic retention scanner cannot safely validate or purge it,
+            // so it must leave the object to the report-specific lifecycle.
+            if has_report_sidecar {
+                continue;
+            }
             let authenticated_manifest = match (has_manifest, has_hmac) {
                 (false, false) => false,
                 (true, true) => {
@@ -692,7 +710,12 @@ impl LocalEvidenceVault {
                 return Err(EvidenceError::CorruptEvidence);
             }
         } else {
-            for suffix in ["manifest.json", "manifest.hmac"] {
+            for suffix in [
+                "manifest.json",
+                "manifest.hmac",
+                calibration_report::MANIFEST_FILENAME_SUFFIX,
+                calibration_report::MANIFEST_AUTH_FILENAME_SUFFIX,
+            ] {
                 if sidecar_present(
                     &self
                         .config
@@ -973,7 +996,10 @@ fn aad(
     Ok(output)
 }
 
-fn derive_key(root_key: &[u8; 32], aad: &[u8]) -> Result<Zeroizing<[u8; 32]>, EvidenceError> {
+pub(crate) fn derive_key(
+    root_key: &[u8; 32],
+    aad: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, EvidenceError> {
     let key = PKey::hmac(root_key)?;
     let mut signer = Signer::new(MessageDigest::sha256(), &key)?;
     signer.update(b"xshield-evidence-data-key-v1")?;
@@ -985,7 +1011,10 @@ fn derive_key(root_key: &[u8; 32], aad: &[u8]) -> Result<Zeroizing<[u8; 32]>, Ev
     Ok(Zeroizing::new(derived))
 }
 
-fn authenticate_manifest(root_key: &[u8; 32], manifest: &[u8]) -> Result<[u8; 32], EvidenceError> {
+pub(crate) fn authenticate_manifest(
+    root_key: &[u8; 32],
+    manifest: &[u8],
+) -> Result<[u8; 32], EvidenceError> {
     let key = PKey::hmac(root_key)?;
     let mut signer = Signer::new(MessageDigest::sha256(), &key)?;
     signer.update(b"xshield-evidence-manifest-v1")?;
@@ -996,7 +1025,7 @@ fn authenticate_manifest(root_key: &[u8; 32], manifest: &[u8]) -> Result<[u8; 32
         .map_err(|_| EvidenceError::Crypto)
 }
 
-fn encrypt(
+pub(crate) fn encrypt(
     key: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     aad: &[u8],
@@ -1014,7 +1043,7 @@ fn encrypt(
     Ok((ciphertext, tag))
 }
 
-fn decrypt(
+pub(crate) fn decrypt(
     key: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     aad: &[u8],
@@ -1034,7 +1063,7 @@ fn decrypt(
     Ok(plaintext)
 }
 
-fn envelope(
+pub(crate) fn envelope(
     nonce: &[u8; NONCE_BYTES],
     tag: &[u8; TAG_BYTES],
     ciphertext: &[u8],
@@ -1052,7 +1081,7 @@ fn envelope(
     Ok(output)
 }
 
-fn parse_envelope(envelope: &[u8]) -> Result<EnvelopeParts<'_>, EvidenceError> {
+pub(crate) fn parse_envelope(envelope: &[u8]) -> Result<EnvelopeParts<'_>, EvidenceError> {
     let minimum = 1 + NONCE_BYTES + TAG_BYTES;
     if envelope.len() < minimum || envelope[0] != 1 {
         return Err(EvidenceError::CorruptEvidence);
@@ -1066,7 +1095,11 @@ fn parse_envelope(envelope: &[u8]) -> Result<EnvelopeParts<'_>, EvidenceError> {
     Ok((nonce, tag, &envelope[minimum..]))
 }
 
-fn write_new_synced(root: &Path, filename: &str, bytes: &[u8]) -> Result<(), EvidenceError> {
+pub(crate) fn write_new_synced(
+    root: &Path,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<(), EvidenceError> {
     let path = root.join(filename);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -1078,7 +1111,7 @@ fn write_new_synced(root: &Path, filename: &str, bytes: &[u8]) -> Result<(), Evi
     Ok(())
 }
 
-fn read_private_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, EvidenceError> {
+pub(crate) fn read_private_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, EvidenceError> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || metadata.len() > max_bytes {
         return Err(EvidenceError::UnsafePath);
@@ -1118,12 +1151,12 @@ fn validate_private_directory(path: &Path) -> Result<(), EvidenceError> {
     Ok(())
 }
 
-fn sync_directory(path: &Path) -> Result<(), EvidenceError> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), EvidenceError> {
     File::open(path)?.sync_all()?;
     Ok(())
 }
 
-fn hide_absence(error: EvidenceError) -> EvidenceError {
+pub(crate) fn hide_absence(error: EvidenceError) -> EvidenceError {
     match error {
         EvidenceError::Io(ref inner) if inner.kind() == io::ErrorKind::NotFound => {
             EvidenceError::NotAvailable
@@ -1132,13 +1165,13 @@ fn hide_absence(error: EvidenceError) -> EvidenceError {
     }
 }
 
-fn validate_artifact_id(value: &str) -> Result<(), EvidenceError> {
+pub(crate) fn validate_artifact_id(value: &str) -> Result<(), EvidenceError> {
     ArtifactId::parse(value)
         .map(|_| ())
         .map_err(|_| EvidenceError::NotAvailable)
 }
 
-fn valid_name(value: &str) -> bool {
+pub(crate) fn valid_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= NAME_BYTES_MAX
         && value
@@ -1146,7 +1179,7 @@ fn valid_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
-fn valid_lower_hex(value: &str, bytes: usize) -> bool {
+pub(crate) fn valid_lower_hex(value: &str, bytes: usize) -> bool {
     value.len() == bytes
         && value
             .bytes()
@@ -1172,7 +1205,7 @@ const fn hex_nibble(value: u8) -> u8 {
     }
 }
 
-fn lower_hex(value: &[u8; 32]) -> String {
+pub(crate) fn lower_hex(value: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(value.len() * 2);
     for byte in value {

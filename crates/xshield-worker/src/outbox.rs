@@ -93,7 +93,13 @@ impl OutboxFamily {
             Self::EvidenceCatalog | Self::EvidenceRetention => "artifact_id",
             Self::EvidenceAccess => "access_request_id",
             Self::Calibration => match event_type {
-                "calibration.reported" => "report_id",
+                "calibration.reported"
+                | "calibration.report_retention.purge_requested"
+                | "calibration.report_retention.deleted"
+                | "calibration.report_retention.purge_failed"
+                | "calibration.report_retention.orphan_purge_requested"
+                | "calibration.report_retention.orphan_deleted"
+                | "calibration.report_retention.orphan_purge_failed" => "report_id",
                 "calibration.read_capability.issued" | "calibration.read_batch.completed" => {
                     "capability_id"
                 }

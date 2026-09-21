@@ -4,10 +4,10 @@
 //! report artifact. This adapter only accepts the bounded metadata needed to
 //! identify its frozen provenance in the analytical index.
 
-use super::{PayloadSummary, PublishError, WireEvent, valid_lower_hex, valid_name};
+use super::{PayloadSummary, PublishError, WireEvent, valid_lower_hex, valid_name, valid_uuid_v7};
 use chrono::{DateTime, SecondsFormat};
 use serde::Deserialize;
-use xshield_core::domain::{ArtifactId, CalibrationReadCapabilityId, CalibrationReportId};
+use xshield_core::domain::{ArtifactId, CalibrationReadCapabilityId, CalibrationReportId, EventId};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -16,6 +16,12 @@ pub(super) const EVENT_TYPES: &[&str] = &[
     "calibration.reported",
     "calibration.read_capability.issued",
     "calibration.read_batch.completed",
+    "calibration.report_retention.purge_requested",
+    "calibration.report_retention.deleted",
+    "calibration.report_retention.purge_failed",
+    "calibration.report_retention.orphan_purge_requested",
+    "calibration.report_retention.orphan_deleted",
+    "calibration.report_retention.orphan_purge_failed",
 ];
 
 #[derive(Deserialize)]
@@ -75,6 +81,22 @@ struct CalibrationReadBatchCompleted {
     capability_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationReportRetention {
+    stage: String,
+    outcome: String,
+    reason_code: String,
+    proof_kind: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    confidence: Option<f64>,
+    confidence_status: String,
+    report_id: String,
+    report_artifact_id: String,
+    expires_at: String,
+    retained_metadata: bool,
+}
+
 /// Validates one complete offline calibration-report event without side effects.
 ///
 /// Common v3 envelope, leased event identity, duplicate JSON key, and scope
@@ -90,6 +112,12 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
     }
     if event.event_type == "calibration.read_batch.completed" {
         return parse_batch_completed(event);
+    }
+    if event
+        .event_type
+        .starts_with("calibration.report_retention.")
+    {
+        return parse_report_retention(event);
     }
     let value: CalibrationReport = serde_json::from_str(event.payload.get())?;
     let report_id = CalibrationReportId::parse(value.report_id.clone())
@@ -117,7 +145,7 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         || !valid_provider_model_id(&value.provider_model_id)
         || !valid_resolved_revision(&value.resolved_model_revision)
         || !all_artifacts(&value)
-        || event.evidence_refs.as_slice() != [value.report_artifact_id]
+        || event.evidence_refs.as_slice() != [value.report_artifact_id.as_str()]
     {
         return Err(PublishError::InvalidEvent);
     }
@@ -130,6 +158,94 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         confidence_status: "not_applicable".to_owned(),
         ..PayloadSummary::default()
     })
+}
+
+/// Validates an expiry-maintenance fact for one report body.
+///
+/// The report artifact sidecar and `PostgreSQL` tombstone remain authoritative;
+/// this restricted outbox record only makes a deterministic maintenance phase
+/// searchable and never restores content or changes the report's provenance.
+fn parse_report_retention(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    let value: CalibrationReportRetention = serde_json::from_str(event.payload.get())?;
+    let report_id = CalibrationReportId::parse(value.report_id.clone())
+        .map_err(|_| PublishError::InvalidEvent)?;
+    let report_uuid = report_id
+        .as_str()
+        .strip_prefix("calr_")
+        .ok_or(PublishError::InvalidEvent)?;
+    if event.producer_id != "calibration-report-retention"
+        || event.policy_revision != "calibration-retention-v1"
+        || valid_uuid_v7(&event.producer_boot_id).is_err()
+        || event.producer_seq != 1
+        || event.request_seq != 1
+        || event.request_id.is_some()
+        || event.sensitivity != "RESTRICTED"
+        || event.observed_at != event.occurred_at
+        || event.trace_id != report_uuid.replace('-', "")
+        || event.trace_id.get(..16) != Some(event.span_id.as_str())
+        || value.stage != "calibration_report_retention"
+        || value.proof_kind != "deterministic"
+        || value.confidence.is_some()
+        || value.confidence_status != "not_applicable"
+        || ArtifactId::parse(&value.report_artifact_id).is_err()
+        || event.evidence_refs.as_slice() != [value.report_artifact_id.as_str()]
+        || !value.retained_metadata
+        || utc_millis(&value.expires_at).is_err()
+        || !valid_report_retention_result(event, &value)
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    let intent = event.event_type.ends_with("purge_requested");
+    match event.cause_event_ids.as_slice() {
+        [] if intent => {}
+        [cause] if !intent && cause != &event.event_id && EventId::parse(cause).is_ok() => {}
+        _ => return Err(PublishError::InvalidEvent),
+    }
+    utc_millis(&event.occurred_at)?;
+    Ok(PayloadSummary {
+        stage: value.stage,
+        outcome: value.outcome,
+        reason_code: value.reason_code,
+        proof_kind: value.proof_kind,
+        confidence_status: value.confidence_status,
+        ..PayloadSummary::default()
+    })
+}
+
+fn valid_report_retention_result(event: &WireEvent, value: &CalibrationReportRetention) -> bool {
+    matches!(
+        (
+            event.event_type.as_str(),
+            value.outcome.as_str(),
+            value.reason_code.as_str()
+        ),
+        (
+            "calibration.report_retention.purge_requested",
+            "PASS",
+            "CALIBRATION_REPORT_PURGE_REQUESTED"
+        ) | (
+            "calibration.report_retention.deleted",
+            "PASS",
+            "CALIBRATION_REPORT_DELETED" | "CALIBRATION_REPORT_DELETE_ALREADY_ABSENT"
+        ) | (
+            "calibration.report_retention.purge_failed",
+            "ERROR",
+            "CALIBRATION_REPORT_PURGE_REJECTED" | "CALIBRATION_REPORT_PURGE_UNAVAILABLE"
+        ) | (
+            "calibration.report_retention.orphan_purge_requested",
+            "PASS",
+            "CALIBRATION_REPORT_ORPHAN_PURGE_REQUESTED"
+        ) | (
+            "calibration.report_retention.orphan_deleted",
+            "PASS",
+            "CALIBRATION_REPORT_ORPHAN_DELETED" | "CALIBRATION_REPORT_ORPHAN_DELETE_ALREADY_ABSENT"
+        ) | (
+            "calibration.report_retention.orphan_purge_failed",
+            "ERROR",
+            "CALIBRATION_REPORT_ORPHAN_PURGE_REJECTED"
+                | "CALIBRATION_REPORT_ORPHAN_PURGE_UNAVAILABLE"
+        )
+    )
 }
 
 /// Validates the content-free atomic terminal for one complete batch lease.

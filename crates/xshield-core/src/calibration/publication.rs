@@ -12,6 +12,14 @@ use crate::domain::{
 };
 use std::fmt;
 
+mod artifact;
+
+pub use artifact::{
+    CALIBRATION_REPORT_ARTIFACT_CONTENT_TYPE, CALIBRATION_REPORT_ARTIFACT_KIND,
+    CALIBRATION_REPORT_ARTIFACT_SCHEMA_VERSION, CalibrationReportArtifact,
+    CalibrationReportArtifactError, CalibrationReportArtifactSource,
+};
+
 /// Immutable, non-content metadata for one independently durable report.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CalibrationReportPublication {
@@ -192,3 +200,7 @@ impl std::error::Error for PublicationError {}
 #[cfg(test)]
 #[path = "publication/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "publication/artifact_tests.rs"]
+mod artifact_tests;

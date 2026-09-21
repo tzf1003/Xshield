@@ -26,6 +26,7 @@ use xshield_core::{
 use xshield_evidence::{EvidenceError, LocalEvidenceVault};
 use xshield_postgres::{
     AuthorizedCalibrationEvidence, CalibrationEvidenceReadAuthorizationOutcome,
+    CalibrationEvidenceReleaseCommitOutcome, CalibrationEvidenceReleaseReservationOutcome,
     PostgresIdentityStore, StoreError,
 };
 use zeroize::Zeroizing;
@@ -166,7 +167,8 @@ impl Error for CalibrationEvidenceAuditError {
 /// The reader authorizes every attempt with `PostgreSQL` before opening the
 /// vault. It then compares the vault-authenticated manifest with the catalog
 /// expectation, validates envelope digest and AEAD through the vault, and
-/// appends the dedicated terminal fact before returning a plaintext buffer.
+/// reserves and commits a durable release boundary around the dedicated
+/// terminal fact before returning a plaintext buffer.
 /// It does not consume a batch, publish a report, or write a control-plane
 /// `evidence.read` event.
 pub struct LocalCalibrationEvidenceReader {
@@ -224,12 +226,25 @@ impl LocalCalibrationEvidenceReader {
         .await
         .map_err(CalibrationEvidenceAuditError::Cancelled)?
     }
+
+    async fn append_pre_release(
+        &self,
+        context: &CalibrationEvidenceReadAuditContext,
+        bytes_released: u64,
+    ) -> Result<(), CalibrationEvidenceAuditError> {
+        self.append_terminal(
+            context,
+            CalibrationEvidenceReadOutcome::ReleasePrepared { bytes_released },
+        )
+        .await
+    }
 }
 
 impl CalibrationEvidenceReadPort for LocalCalibrationEvidenceReader {
     type Content = CalibrationEvidenceContent;
     type Error = CalibrationEvidenceReadError;
 
+    #[allow(clippy::too_many_lines)]
     async fn read_calibration_evidence<'a>(
         &'a self,
         request: CalibrationEvidenceReadRequest<'a>,
@@ -281,7 +296,42 @@ impl CalibrationEvidenceReadPort for LocalCalibrationEvidenceReader {
         .await
         {
             Ok(Ok(content)) => {
+                // Vault authentication covers the immutable object, but the
+                // database authorization transaction ended before that I/O.
+                // Reserve the database release boundary before the journal
+                // barrier; the reservation blocks catalog mutation without
+                // holding a database lock across the local journal fsync.
+                let reservation = match self
+                    .store
+                    .reserve_calibration_evidence_release(&request)
+                    .await
+                {
+                    Ok(CalibrationEvidenceReleaseReservationOutcome::Reserved(reservation)) => {
+                        reservation
+                    }
+                    Ok(CalibrationEvidenceReleaseReservationOutcome::Denied(denied)) => {
+                        drop(content);
+                        self.append_terminal(
+                            &audit_context,
+                            CalibrationEvidenceReadOutcome::NotAuthorized,
+                        )
+                        .await
+                        .map_err(CalibrationEvidenceReadError::Audit)?;
+                        return Ok(CalibrationEvidenceReadState::Denied(denied));
+                    }
+                    Err(error) => {
+                        drop(content);
+                        self.append_terminal(
+                            &audit_context,
+                            CalibrationEvidenceReadOutcome::AuthorizationUnavailable,
+                        )
+                        .await
+                        .map_err(CalibrationEvidenceReadError::Audit)?;
+                        return Err(CalibrationEvidenceReadError::Authorization(error));
+                    }
+                };
                 let Ok(bytes_released) = u64::try_from(content.bytes.len()) else {
+                    drop(content);
                     self.append_terminal(
                         &audit_context,
                         CalibrationEvidenceReadOutcome::IntegrityFailed,
@@ -292,13 +342,30 @@ impl CalibrationEvidenceReadPort for LocalCalibrationEvidenceReader {
                         EvidenceError::CorruptEvidence,
                     ));
                 };
-                self.append_terminal(
-                    &audit_context,
-                    CalibrationEvidenceReadOutcome::Released { bytes_released },
-                )
-                .await
-                .map_err(CalibrationEvidenceReadError::Audit)?;
-                Ok(CalibrationEvidenceReadState::Read(content))
+                if let Err(error) = self
+                    .append_pre_release(&audit_context, bytes_released)
+                    .await
+                {
+                    drop(content);
+                    return Err(CalibrationEvidenceReadError::Audit(error));
+                }
+                match self
+                    .store
+                    .commit_calibration_evidence_release(&request, reservation)
+                    .await
+                {
+                    Ok(CalibrationEvidenceReleaseCommitOutcome::Released) => {
+                        Ok(CalibrationEvidenceReadState::Read(content))
+                    }
+                    Ok(CalibrationEvidenceReleaseCommitOutcome::Denied(denied)) => {
+                        drop(content);
+                        Ok(CalibrationEvidenceReadState::Denied(denied))
+                    }
+                    Err(error) => {
+                        drop(content);
+                        Err(CalibrationEvidenceReadError::Authorization(error))
+                    }
+                }
             }
             Ok(Err(error)) => {
                 self.append_terminal(&audit_context, vault_outcome(&error))

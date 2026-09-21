@@ -32,12 +32,13 @@ use xshield_core::{
 use xshield_postgres::{
     CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
     CalibrationEvidenceBatchComplete, CalibrationEvidenceBatchCompleteOutcome,
-    CalibrationEvidenceReadAuthorizationOutcome, CalibrationReadCapabilityIssue,
+    CalibrationEvidenceReadAuthorizationOutcome, CalibrationEvidenceReleaseCommitOutcome,
+    CalibrationEvidenceReleaseReservationOutcome, CalibrationReadCapabilityIssue,
     CalibrationReadCapabilityIssueOutcome, PostgresIdentityStore,
 };
 
 #[tokio::test]
-#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0024"]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0025"]
 async fn calibration_read_capability_is_atomic_exact_and_recovery_safe() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -290,6 +291,8 @@ async fn assert_exact_read_authorization_rechecks_lease_and_catalog(
 
     assert_fake_lease_is_denied(store, &capability, fixture, &reference, &session, now).await;
     assert_catalog_drift_denies_read(pool, store, fixture, &reference, &request).await;
+    assert_release_reservation_blocks_catalog_drift(pool, store, &request).await;
+    assert_release_reservation_denies_expired_lease(pool, store, &request).await;
     drop(request);
 
     assert_ordinary_read_does_not_consume_and_full_evaluation_completes(
@@ -300,6 +303,117 @@ async fn assert_exact_read_authorization_rechecks_lease_and_catalog(
         session,
     )
     .await;
+}
+
+async fn assert_release_reservation_denies_expired_lease(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    request: &CalibrationEvidenceReadRequest<'_>,
+) {
+    let reservation = match store
+        .reserve_calibration_evidence_release(request)
+        .await
+        .expect("release reservation resolves")
+    {
+        CalibrationEvidenceReleaseReservationOutcome::Reserved(reservation) => reservation,
+        CalibrationEvidenceReleaseReservationOutcome::Denied(_) => {
+            panic!("fresh authorization must reserve the release boundary")
+        }
+    };
+    sqlx::query(
+        "UPDATE xshield.calibration_read_capability_leases
+         SET lease_until=date_trunc('milliseconds', clock_timestamp()) + interval '10 milliseconds'
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 AND lease_id=$4",
+    )
+    .bind(request.tenant_id().as_str())
+    .bind(request.site_id().as_str())
+    .bind(request.capability().capability_id().as_str())
+    .bind(request.session().lease().lease_id().as_str())
+    .execute(pool)
+    .await
+    .expect("test lease is shortened after reservation");
+    sleep(Duration::from_millis(25)).await;
+    assert!(matches!(
+        store
+            .commit_calibration_evidence_release(request, reservation)
+            .await
+            .expect("expired release boundary resolves"),
+        CalibrationEvidenceReleaseCommitOutcome::Denied(
+            CalibrationEvidenceReadDenied::EvidenceNotAuthorized
+        )
+    ));
+    sqlx::query(
+        "UPDATE xshield.calibration_read_capability_leases
+         SET lease_until=date_trunc('milliseconds', clock_timestamp()) + interval '30 seconds'
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 AND lease_id=$4",
+    )
+    .bind(request.tenant_id().as_str())
+    .bind(request.site_id().as_str())
+    .bind(request.capability().capability_id().as_str())
+    .bind(request.session().lease().lease_id().as_str())
+    .execute(pool)
+    .await
+    .expect("test lease is restored after the denied release boundary");
+    sqlx::query(
+        "DELETE FROM xshield.calibration_evidence_release_reservations
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3 AND lease_id=$4
+           AND artifact_id=$5",
+    )
+    .bind(request.tenant_id().as_str())
+    .bind(request.site_id().as_str())
+    .bind(request.capability().capability_id().as_str())
+    .bind(request.session().lease().lease_id().as_str())
+    .bind(request.evidence_ref().artifact_id().as_str())
+    .execute(pool)
+    .await
+    .expect("denied test reservation is removed");
+}
+
+async fn assert_release_reservation_blocks_catalog_drift(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    request: &CalibrationEvidenceReadRequest<'_>,
+) {
+    let reservation = match store
+        .reserve_calibration_evidence_release(request)
+        .await
+        .expect("release reservation resolves")
+    {
+        CalibrationEvidenceReleaseReservationOutcome::Reserved(reservation) => reservation,
+        CalibrationEvidenceReleaseReservationOutcome::Denied(_) => {
+            panic!("fresh authorization must reserve the release boundary")
+        }
+    };
+    let drift = sqlx::query(
+        "UPDATE xshield.artifact_catalog SET integrity_digest=integrity_digest
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(request.tenant_id().as_str())
+    .bind(request.site_id().as_str())
+    .bind(request.evidence_ref().artifact_id().as_str())
+    .execute(pool)
+    .await;
+    assert!(
+        drift.is_err(),
+        "an active release reservation must reject a concurrent catalog mutation"
+    );
+    assert!(matches!(
+        store
+            .commit_calibration_evidence_release(request, reservation)
+            .await
+            .expect("reserved release commits"),
+        CalibrationEvidenceReleaseCommitOutcome::Released
+    ));
+    sqlx::query(
+        "UPDATE xshield.artifact_catalog SET integrity_digest=integrity_digest
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(request.tenant_id().as_str())
+    .bind(request.site_id().as_str())
+    .bind(request.evidence_ref().artifact_id().as_str())
+    .execute(pool)
+    .await
+    .expect("catalog mutation resumes after the release boundary commits");
 }
 
 async fn assert_ordinary_read_does_not_consume_and_full_evaluation_completes(

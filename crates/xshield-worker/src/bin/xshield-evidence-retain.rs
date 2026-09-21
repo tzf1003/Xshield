@@ -3,7 +3,10 @@
 use std::{collections::HashSet, env, fs::File, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
 use xshield_evidence::{EvidenceError, EvidenceKey, EvidenceVaultConfig, LocalEvidenceVault};
-use xshield_postgres::{EvidenceOrphanPurgeResult, EvidencePurgeResult, PostgresIdentityStore};
+use xshield_postgres::{
+    CalibrationReportOrphanPurgeResult, CalibrationReportPurgeResult, EvidenceOrphanPurgeResult,
+    EvidencePurgeResult, PostgresIdentityStore,
+};
 use zeroize::Zeroizing;
 
 const DEADLINE: Duration = Duration::from_secs(15);
@@ -98,6 +101,106 @@ async fn run() -> Result<(), &'static str> {
             failed += 1;
         }
     }
+    let report_jobs = tokio::time::timeout(
+        DEADLINE,
+        store.prepare_calibration_report_purge(&tenant, &site, &key_id, limit),
+    )
+    .await
+    .map_err(|_| "CALIBRATION_REPORT_PURGE_TIMEOUT")?
+    .map_err(|_| "CALIBRATION_REPORT_PURGE_UNAVAILABLE")?;
+    let mut report_deleted = 0;
+    let mut report_failed = 0;
+    for job in &report_jobs {
+        let result = report_result(&vault, &tenant, &site, job.manifest());
+        tokio::time::timeout(DEADLINE, store.finish_calibration_report_purge(job, result))
+            .await
+            .map_err(|_| "CALIBRATION_REPORT_PURGE_TIMEOUT")?
+            .map_err(|_| "CALIBRATION_REPORT_PURGE_COMPLETION_UNAVAILABLE")?;
+        if matches!(result, CalibrationReportPurgeResult::Deleted(_)) {
+            report_deleted += 1;
+        } else {
+            report_failed += 1;
+        }
+    }
+    let pending_report_orphans = tokio::time::timeout(
+        DEADLINE,
+        store.pending_calibration_report_orphan_purges(&tenant, &site, limit),
+    )
+    .await
+    .map_err(|_| "CALIBRATION_REPORT_ORPHAN_PURGE_TIMEOUT")?
+    .map_err(|_| "CALIBRATION_REPORT_ORPHAN_PURGE_UNAVAILABLE")?;
+    let mut report_orphan_selected = pending_report_orphans.len();
+    let mut report_orphan_deleted = 0;
+    let mut report_orphan_failed = 0;
+    let mut seen_report_orphans = HashSet::new();
+    for job in &pending_report_orphans {
+        seen_report_orphans.insert(job.candidate().artifact_id().to_owned());
+        let result = report_orphan_result(&vault, job.tenant_id(), job.site_id(), job.candidate());
+        tokio::time::timeout(
+            DEADLINE,
+            store.finish_calibration_report_orphan_purge(job, result),
+        )
+        .await
+        .map_err(|_| "CALIBRATION_REPORT_ORPHAN_PURGE_TIMEOUT")?
+        .map_err(|_| "CALIBRATION_REPORT_ORPHAN_PURGE_COMPLETION_UNAVAILABLE")?;
+        if matches!(result, CalibrationReportOrphanPurgeResult::Deleted(_)) {
+            report_orphan_deleted += 1;
+        } else {
+            report_orphan_failed += 1;
+        }
+    }
+    let report_orphan_remaining = usize::from(limit).saturating_sub(pending_report_orphans.len());
+    let mut report_orphan_scanned = 0usize;
+    let mut report_orphan_cursor = None;
+    while report_orphan_scanned < report_orphan_remaining {
+        let page_limit = u16::try_from(report_orphan_remaining - report_orphan_scanned)
+            .map_err(|_| "CALIBRATION_REPORT_ORPHAN_SCAN_UNAVAILABLE")?;
+        let page = vault
+            .list_calibration_report_orphan_candidates_after(
+                &tenant,
+                &site,
+                orphan_grace,
+                page_limit,
+                report_orphan_cursor.as_deref(),
+            )
+            .map_err(|_| "CALIBRATION_REPORT_ORPHAN_SCAN_UNAVAILABLE")?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        report_orphan_cursor = Some(last.artifact_id().to_owned());
+        let candidates = page
+            .into_iter()
+            .filter(|candidate| !seen_report_orphans.contains(candidate.artifact_id()))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            continue;
+        }
+        let jobs = tokio::time::timeout(
+            DEADLINE,
+            store.prepare_calibration_report_orphan_purge(&tenant, &site, &candidates),
+        )
+        .await
+        .map_err(|_| "CALIBRATION_REPORT_ORPHAN_PURGE_TIMEOUT")?
+        .map_err(|_| "CALIBRATION_REPORT_ORPHAN_PURGE_UNAVAILABLE")?;
+        report_orphan_selected += jobs.len();
+        report_orphan_scanned += jobs.len();
+        for job in &jobs {
+            let result =
+                report_orphan_result(&vault, job.tenant_id(), job.site_id(), job.candidate());
+            tokio::time::timeout(
+                DEADLINE,
+                store.finish_calibration_report_orphan_purge(job, result),
+            )
+            .await
+            .map_err(|_| "CALIBRATION_REPORT_ORPHAN_PURGE_TIMEOUT")?
+            .map_err(|_| "CALIBRATION_REPORT_ORPHAN_PURGE_COMPLETION_UNAVAILABLE")?;
+            if matches!(result, CalibrationReportOrphanPurgeResult::Deleted(_)) {
+                report_orphan_deleted += 1;
+            } else {
+                report_orphan_failed += 1;
+            }
+        }
+    }
     let pending_orphans = tokio::time::timeout(
         DEADLINE,
         store.pending_evidence_orphan_purges(&tenant, &site, limit),
@@ -171,8 +274,10 @@ async fn run() -> Result<(), &'static str> {
         }
     }
     println!(
-        "selected={} deleted={deleted} failed={failed} orphan_selected={} orphan_deleted={orphan_deleted} orphan_failed={orphan_failed}",
+        "selected={} deleted={deleted} failed={failed} report_selected={} report_deleted={report_deleted} report_failed={report_failed} report_orphan_selected={} report_orphan_deleted={report_orphan_deleted} report_orphan_failed={report_orphan_failed} orphan_selected={} orphan_deleted={orphan_deleted} orphan_failed={orphan_failed}",
         jobs.len(),
+        report_jobs.len(),
+        report_orphan_selected,
         orphan_selected
     );
     if failed > 0 {
@@ -181,7 +286,53 @@ async fn run() -> Result<(), &'static str> {
     if orphan_failed > 0 {
         return Err("EVIDENCE_ORPHAN_PURGE_FAILED");
     }
+    if report_failed > 0 {
+        return Err("CALIBRATION_REPORT_PURGE_FAILED");
+    }
+    if report_orphan_failed > 0 {
+        return Err("CALIBRATION_REPORT_ORPHAN_PURGE_FAILED");
+    }
     Ok(())
+}
+
+fn report_result(
+    vault: &LocalEvidenceVault,
+    tenant: &TenantId,
+    site: &SiteId,
+    manifest: &xshield_evidence::CalibrationReportEvidenceManifest,
+) -> CalibrationReportPurgeResult {
+    match vault.purge_expired_calibration_report(tenant, site, manifest) {
+        Ok(outcome) => CalibrationReportPurgeResult::Deleted(outcome),
+        Err(
+            EvidenceError::NotAvailable
+            | EvidenceError::CorruptEvidence
+            | EvidenceError::UnsafePath
+            | EvidenceError::UnsafePermissions
+            | EvidenceError::InvalidConfig
+            | EvidenceError::InvalidWrite,
+        ) => CalibrationReportPurgeResult::Rejected,
+        Err(_) => CalibrationReportPurgeResult::Unavailable,
+    }
+}
+
+fn report_orphan_result(
+    vault: &LocalEvidenceVault,
+    tenant: &TenantId,
+    site: &SiteId,
+    candidate: &xshield_evidence::CalibrationReportOrphanCandidate,
+) -> CalibrationReportOrphanPurgeResult {
+    match vault.purge_calibration_report_orphan(tenant, site, candidate) {
+        Ok(outcome) => CalibrationReportOrphanPurgeResult::Deleted(outcome),
+        Err(
+            EvidenceError::NotAvailable
+            | EvidenceError::CorruptEvidence
+            | EvidenceError::UnsafePath
+            | EvidenceError::UnsafePermissions
+            | EvidenceError::InvalidConfig
+            | EvidenceError::InvalidWrite,
+        ) => CalibrationReportOrphanPurgeResult::Rejected,
+        Err(_) => CalibrationReportOrphanPurgeResult::Unavailable,
+    }
 }
 
 fn orphan_result(

@@ -80,6 +80,14 @@ impl PostgresIdentityStore {
             "SELECT * FROM xshield.artifact_catalog
              WHERE tenant_id = $1 AND site_id = $2 AND key_ref = $3
                AND status = 'active' AND expires_at <= clock_timestamp()
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM xshield.calibration_evidence_release_reservations reservation
+                   WHERE reservation.tenant_id = artifact_catalog.tenant_id
+                     AND reservation.site_id = artifact_catalog.site_id
+                     AND reservation.artifact_id = artifact_catalog.artifact_id
+                     AND reservation.reserved_until > clock_timestamp()
+               )
                AND (purge_requested_event_id IS NOT NULL OR NOT EXISTS (
                    SELECT 1 FROM xshield.case_evidence_holds hold
                    WHERE hold.tenant_id = artifact_catalog.tenant_id

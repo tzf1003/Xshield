@@ -160,6 +160,148 @@ fn canonical_report_is_a_non_terminal_deterministic_summary() {
 }
 
 #[test]
+fn report_retention_facts_are_closed_and_report_bound() {
+    for (event_type, outcome, reason_code, cause) in [
+        (
+            "calibration.report_retention.purge_requested",
+            "PASS",
+            "CALIBRATION_REPORT_PURGE_REQUESTED",
+            json!([]),
+        ),
+        (
+            "calibration.report_retention.deleted",
+            "PASS",
+            "CALIBRATION_REPORT_DELETED",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.report_retention.deleted",
+            "PASS",
+            "CALIBRATION_REPORT_DELETE_ALREADY_ABSENT",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.report_retention.purge_failed",
+            "ERROR",
+            "CALIBRATION_REPORT_PURGE_REJECTED",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.report_retention.purge_failed",
+            "ERROR",
+            "CALIBRATION_REPORT_PURGE_UNAVAILABLE",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+    ] {
+        let mut value = event();
+        value["event_type"] = json!(event_type);
+        value["producer_id"] = json!("calibration-report-retention");
+        value["producer_boot_id"] = json!("018f2a3b-4c5d-7000-8000-000000000098");
+        value["policy_revision"] = json!("calibration-retention-v1");
+        value["cause_event_ids"] = cause;
+        value["payload"] = json!({
+            "stage":"calibration_report_retention", "outcome":outcome,
+            "reason_code":reason_code, "proof_kind":"deterministic",
+            "confidence":null, "confidence_status":"not_applicable",
+            "report_id":REPORT, "report_artifact_id":REPORT_ARTIFACT,
+            "expires_at":"2026-09-21T00:00:00.123Z", "retained_metadata":true
+        });
+        let parsed = row(&value).expect("retention fact is valid");
+        assert_eq!(parsed.event_type, event_type);
+        assert_eq!(parsed.stage, "calibration_report_retention");
+        assert_eq!(parsed.outcome, outcome);
+        assert_eq!(parsed.reason_code, reason_code);
+        assert_eq!(parsed.evidence_refs, [REPORT_ARTIFACT]);
+
+        value["payload"]["retained_metadata"] = json!(false);
+        assert!(
+            row(&value).is_err(),
+            "retention metadata must remain explicit"
+        );
+    }
+}
+
+#[test]
+fn report_orphan_retention_facts_are_closed_and_bound_to_the_recovery_intent() {
+    for (event_type, outcome, reason_code, cause) in [
+        (
+            "calibration.report_retention.orphan_purge_requested",
+            "PASS",
+            "CALIBRATION_REPORT_ORPHAN_PURGE_REQUESTED",
+            json!([]),
+        ),
+        (
+            "calibration.report_retention.orphan_deleted",
+            "PASS",
+            "CALIBRATION_REPORT_ORPHAN_DELETED",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.report_retention.orphan_deleted",
+            "PASS",
+            "CALIBRATION_REPORT_ORPHAN_DELETE_ALREADY_ABSENT",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.report_retention.orphan_purge_failed",
+            "ERROR",
+            "CALIBRATION_REPORT_ORPHAN_PURGE_REJECTED",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+        (
+            "calibration.report_retention.orphan_purge_failed",
+            "ERROR",
+            "CALIBRATION_REPORT_ORPHAN_PURGE_UNAVAILABLE",
+            json!(["ev_018f2a3b-4c5d-7000-8000-000000000099"]),
+        ),
+    ] {
+        let mut value = event();
+        value["event_type"] = json!(event_type);
+        value["producer_id"] = json!("calibration-report-retention");
+        value["producer_boot_id"] = json!("018f2a3b-4c5d-7000-8000-000000000098");
+        value["policy_revision"] = json!("calibration-retention-v1");
+        value["cause_event_ids"] = cause;
+        value["payload"] = json!({
+            "stage":"calibration_report_retention", "outcome":outcome,
+            "reason_code":reason_code, "proof_kind":"deterministic",
+            "confidence":null, "confidence_status":"not_applicable",
+            "report_id":REPORT, "report_artifact_id":REPORT_ARTIFACT,
+            "expires_at":"2026-09-21T00:00:00.123Z", "retained_metadata":true
+        });
+        assert!(row(&value).is_ok(), "valid orphan retention {event_type}");
+
+        let mut missing = value.clone();
+        missing["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("retained_metadata");
+        assert!(row(&missing).is_err(), "accepted incomplete orphan payload");
+
+        let mut unknown = value.clone();
+        unknown["payload"]["source_request_id"] = json!(EVENT);
+        assert!(
+            row(&unknown).is_err(),
+            "accepted catalog field in orphan payload"
+        );
+    }
+
+    let mut terminal_without_intent = event();
+    terminal_without_intent["event_type"] = json!("calibration.report_retention.orphan_deleted");
+    terminal_without_intent["producer_id"] = json!("calibration-report-retention");
+    terminal_without_intent["producer_boot_id"] = json!("018f2a3b-4c5d-7000-8000-000000000098");
+    terminal_without_intent["policy_revision"] = json!("calibration-retention-v1");
+    terminal_without_intent["cause_event_ids"] = json!([]);
+    terminal_without_intent["payload"] = json!({
+        "stage":"calibration_report_retention", "outcome":"PASS",
+        "reason_code":"CALIBRATION_REPORT_ORPHAN_DELETED", "proof_kind":"deterministic",
+        "confidence":null, "confidence_status":"not_applicable",
+        "report_id":REPORT, "report_artifact_id":REPORT_ARTIFACT,
+        "expires_at":"2026-09-21T00:00:00.123Z", "retained_metadata":true
+    });
+    assert!(row(&terminal_without_intent).is_err());
+}
+
+#[test]
 fn canonical_capability_issuance_is_a_non_terminal_deterministic_summary() {
     let value = capability_issuance_event();
     let index_row = row(&value).unwrap();
@@ -396,6 +538,16 @@ fn calibration_aggregate_field_follows_the_event_contract() {
         super::super::OutboxFamily::Calibration.aggregate_field("calibration.read_batch.completed"),
         "capability_id"
     );
+    for event_type in [
+        "calibration.report_retention.orphan_purge_requested",
+        "calibration.report_retention.orphan_deleted",
+        "calibration.report_retention.orphan_purge_failed",
+    ] {
+        assert_eq!(
+            super::super::OutboxFamily::Calibration.aggregate_field(event_type),
+            "report_id"
+        );
+    }
     assert!(
         super::super::OutboxFamily::Calibration
             .aggregate_field("calibration.unknown")

@@ -969,6 +969,52 @@
         }
       }
     },
+    "calibration_report_retention": {
+      "$comment": "Restricted report-body retention fact. The dedicated report metadata/provenance and authenticated sidecar remain outside artifact_catalog and outlive body deletion; this payload never restores content or proves remote-copy deletion.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "outcome",
+        "reason_code",
+        "proof_kind",
+        "confidence",
+        "confidence_status",
+        "report_id",
+        "report_artifact_id",
+        "expires_at",
+        "retained_metadata"
+      ],
+      "properties": {
+        "stage": {"const": "calibration_report_retention"},
+        "outcome": {"enum": ["PASS", "ERROR"]},
+        "reason_code": {
+          "enum": [
+            "CALIBRATION_REPORT_PURGE_REQUESTED",
+            "CALIBRATION_REPORT_DELETED",
+            "CALIBRATION_REPORT_DELETE_ALREADY_ABSENT",
+            "CALIBRATION_REPORT_PURGE_REJECTED",
+            "CALIBRATION_REPORT_PURGE_UNAVAILABLE",
+            "CALIBRATION_REPORT_ORPHAN_PURGE_REQUESTED",
+            "CALIBRATION_REPORT_ORPHAN_DELETED",
+            "CALIBRATION_REPORT_ORPHAN_DELETE_ALREADY_ABSENT",
+            "CALIBRATION_REPORT_ORPHAN_PURGE_REJECTED",
+            "CALIBRATION_REPORT_ORPHAN_PURGE_UNAVAILABLE"
+          ]
+        },
+        "proof_kind": {"const": "deterministic"},
+        "confidence": {"type": "null"},
+        "confidence_status": {"const": "not_applicable"},
+        "report_id": {
+          "type": "string",
+          "maxLength": 41,
+          "pattern": "^calr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "report_artifact_id": {"$ref": "#/$defs/model_artifact_ref", "type": "string"},
+        "expires_at": {"$ref": "#/$defs/utc_millisecond"},
+        "retained_metadata": {"const": true}
+      }
+    },
     "calibration_read_capability_issued": {
       "$comment": "Restricted metadata for a committed calibration batch-read capability. The frozen member set, manifest references, lease handle, and evidence content remain outside this envelope and must not become indexable payload fields.",
       "type": "object",
@@ -1030,7 +1076,7 @@
       }
     },
     "calibration_evidence_read": {
-      "$comment": "Restricted terminal fact from the encrypted calibration-reader journal. It is the local-durable plaintext-release barrier, not an outbox authorization fact. The selected artifact, semantic role, sample slot, lease identity or handle, evidence references, and content remain outside the envelope.",
+      "$comment": "Restricted pre-release barrier from the encrypted calibration-reader journal. It is not an outbox authorization fact or proof that an evaluator received plaintext. The selected artifact, semantic role, sample slot, lease identity or handle, evidence references, and content remain outside the envelope.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1044,7 +1090,7 @@
         "outcome": {"enum": ["PASS", "DENY", "ERROR"]},
         "reason_code": {
           "enum": [
-            "CALIBRATION_EVIDENCE_READ_RELEASED",
+            "CALIBRATION_EVIDENCE_READ_RELEASE_PREPARED",
             "CALIBRATION_EVIDENCE_READ_NOT_AUTHORIZED",
             "CALIBRATION_EVIDENCE_READ_AUTHORIZATION_UNAVAILABLE",
             "CALIBRATION_EVIDENCE_READ_CAPACITY_UNAVAILABLE",
@@ -1064,7 +1110,7 @@
         {
           "if": {"properties": {"outcome": {"const": "PASS"}}, "required": ["outcome"]},
           "then": {
-            "properties": {"reason_code": {"const": "CALIBRATION_EVIDENCE_READ_RELEASED"}},
+            "properties": {"reason_code": {"const": "CALIBRATION_EVIDENCE_READ_RELEASE_PREPARED"}},
             "required": ["bytes_released"]
           }
         },
@@ -1874,6 +1920,193 @@
           "connection_id": false,
           "agent_run_id": false
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "calibration.report_retention.purge_requested",
+              "calibration.report_retention.deleted",
+              "calibration.report_retention.purge_failed",
+              "calibration.report_retention.orphan_purge_requested",
+              "calibration.report_retention.orphan_deleted",
+              "calibration.report_retention.orphan_purge_failed"
+            ]
+          }
+        },
+        "required": ["event_type"]
+      },
+      "then": {
+        "$comment": "Committed calibration-report retention metadata only. The report sidecar and PostgreSQL retention rows are authoritative; the intent is a recoverable file-system/database boundary rather than a cross-storage transaction. Rust additionally checks report aggregate/evidence binding, trace/span derivation, non-self intent causes, duplicate keys, and the leased row/source relation.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {"$ref": "#/$defs/scoped_name"},
+          "site_id": {"$ref": "#/$defs/scoped_name"},
+          "request_id": {"type": "null"},
+          "trace_id": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32,
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "span_id": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 16,
+            "pattern": "^[0-9a-f]{16}$"
+          },
+          "producer_id": {"const": "calibration-report-retention"},
+          "producer_boot_id": {
+            "type": "string",
+            "maxLength": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "producer_seq": {"const": 1},
+          "request_seq": {"const": 1},
+          "occurred_at": {"$ref": "#/$defs/utc_millisecond"},
+          "observed_at": {"$ref": "#/$defs/utc_millisecond"},
+          "policy_revision": {"const": "calibration-retention-v1"},
+          "example_only": {"const": false},
+          "evidence_refs": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"$ref": "#/$defs/model_artifact_ref", "type": "string"}
+          },
+          "cause_event_ids": {
+            "maxItems": 1,
+            "items": {
+              "type": "string",
+              "maxLength": 39,
+              "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "sensitivity": {"const": "RESTRICTED"},
+          "integrity": {
+            "properties": {
+              "state": {"const": "pending"},
+              "previous_hash": {"type": "null"},
+              "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "event_type": {
+                  "enum": [
+                    "calibration.report_retention.purge_requested",
+                    "calibration.report_retention.orphan_purge_requested"
+                  ]
+                }
+              }
+            },
+            "then": {"properties": {"cause_event_ids": {"maxItems": 0}}},
+            "else": {"properties": {"cause_event_ids": {"minItems": 1}}}
+          }
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "event_type": {"const": "calibration.report_retention.purge_requested"},
+              "payload": {
+                "$ref": "#/$defs/calibration_report_retention",
+                "properties": {
+                  "outcome": {"const": "PASS"},
+                  "reason_code": {"const": "CALIBRATION_REPORT_PURGE_REQUESTED"}
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "calibration.report_retention.deleted"},
+              "payload": {
+                "$ref": "#/$defs/calibration_report_retention",
+                "properties": {
+                  "outcome": {"const": "PASS"},
+                  "reason_code": {
+                    "enum": [
+                      "CALIBRATION_REPORT_DELETED",
+                      "CALIBRATION_REPORT_DELETE_ALREADY_ABSENT"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "calibration.report_retention.purge_failed"},
+              "payload": {
+                "$ref": "#/$defs/calibration_report_retention",
+                "properties": {
+                  "outcome": {"const": "ERROR"},
+                  "reason_code": {
+                    "enum": [
+                      "CALIBRATION_REPORT_PURGE_REJECTED",
+                      "CALIBRATION_REPORT_PURGE_UNAVAILABLE"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "calibration.report_retention.orphan_purge_requested"},
+              "payload": {
+                "$ref": "#/$defs/calibration_report_retention",
+                "properties": {
+                  "outcome": {"const": "PASS"},
+                  "reason_code": {"const": "CALIBRATION_REPORT_ORPHAN_PURGE_REQUESTED"}
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "calibration.report_retention.orphan_deleted"},
+              "payload": {
+                "$ref": "#/$defs/calibration_report_retention",
+                "properties": {
+                  "outcome": {"const": "PASS"},
+                  "reason_code": {
+                    "enum": [
+                      "CALIBRATION_REPORT_ORPHAN_DELETED",
+                      "CALIBRATION_REPORT_ORPHAN_DELETE_ALREADY_ABSENT"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "event_type": {"const": "calibration.report_retention.orphan_purge_failed"},
+              "payload": {
+                "$ref": "#/$defs/calibration_report_retention",
+                "properties": {
+                  "outcome": {"const": "ERROR"},
+                  "reason_code": {
+                    "enum": [
+                      "CALIBRATION_REPORT_ORPHAN_PURGE_REJECTED",
+                      "CALIBRATION_REPORT_ORPHAN_PURGE_UNAVAILABLE"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {

@@ -1,4 +1,4 @@
-//! Calibration plaintext-release journal fixtures and negative contract coverage.
+//! Calibration plaintext pre-release journal fixtures and negative contract coverage.
 
 use super::{CalibrationEvidenceReadAuditEvent, CalibrationEvidenceReadOutcome};
 use crate::{IndexRow, PublishError};
@@ -27,7 +27,7 @@ fn event() -> Value {
         "evidence_refs": [], "cause_event_ids": [],
         "payload": {
             "stage": "calibration_evidence_read", "outcome": "PASS",
-            "reason_code": "CALIBRATION_EVIDENCE_READ_RELEASED",
+            "reason_code": "CALIBRATION_EVIDENCE_READ_RELEASE_PREPARED",
             "capability_id": CAPABILITY, "bytes_released": 17
         },
         "sensitivity": "RESTRICTED",
@@ -74,13 +74,16 @@ fn rejected(value: &Value, scenario: &str) {
 }
 
 #[test]
-fn successful_plaintext_release_is_a_restricted_nonbusiness_fact() {
+fn successful_pre_release_barrier_is_a_restricted_nonbusiness_fact() {
     let value = event();
     let row = index(&value).unwrap();
     assert_eq!(row.event_type, "calibration.evidence_read");
     assert_eq!(row.stage, "calibration_evidence_read");
     assert_eq!(row.outcome, "PASS");
-    assert_eq!(row.reason_code, "CALIBRATION_EVIDENCE_READ_RELEASED");
+    assert_eq!(
+        row.reason_code,
+        "CALIBRATION_EVIDENCE_READ_RELEASE_PREPARED"
+    );
     assert_eq!(row.proof_kind, "deterministic");
     assert_eq!(row.confidence, None);
     assert_eq!(row.confidence_status, "not_applicable");
@@ -208,13 +211,21 @@ fn identity_timing_and_outcome_bindings_are_exact() {
         rejected(&invalid, field);
     }
     for (outcome, reason, bytes) in [
-        ("PASS", "CALIBRATION_EVIDENCE_READ_RELEASED", Value::Null),
+        (
+            "PASS",
+            "CALIBRATION_EVIDENCE_READ_RELEASE_PREPARED",
+            Value::Null,
+        ),
         (
             "PASS",
             "CALIBRATION_EVIDENCE_READ_NOT_AUTHORIZED",
             json!(17),
         ),
-        ("DENY", "CALIBRATION_EVIDENCE_READ_RELEASED", Value::Null),
+        (
+            "DENY",
+            "CALIBRATION_EVIDENCE_READ_RELEASE_PREPARED",
+            Value::Null,
+        ),
         (
             "DENY",
             "CALIBRATION_EVIDENCE_READ_NOT_AUTHORIZED",
@@ -305,7 +316,7 @@ fn helper_freezes_and_durably_acknowledges_the_pre_release_event() {
         &TenantId::parse("tenant_demo").unwrap(),
         &SiteId::parse("site_demo").unwrap(),
         &CalibrationReadCapabilityId::parse(CAPABILITY).unwrap(),
-        CalibrationEvidenceReadOutcome::Released { bytes_released: 17 },
+        CalibrationEvidenceReadOutcome::ReleasePrepared { bytes_released: 17 },
     )
     .unwrap();
     let row = IndexRow::parse(
@@ -328,7 +339,7 @@ fn helper_freezes_and_durably_acknowledges_the_pre_release_event() {
             &TenantId::parse("tenant_demo").unwrap(),
             &SiteId::parse("site_demo").unwrap(),
             &CalibrationReadCapabilityId::parse(CAPABILITY).unwrap(),
-            CalibrationEvidenceReadOutcome::Released { bytes_released: 0 },
+            CalibrationEvidenceReadOutcome::ReleasePrepared { bytes_released: 0 },
         ),
         Err(super::CalibrationAuditBuildError::ReleasedBytesOutOfRange)
     ));
@@ -359,7 +370,7 @@ fn helper_rejects_an_event_when_its_frozen_sequence_is_stale() {
         &tenant_id,
         &site_id,
         &capability_id,
-        CalibrationEvidenceReadOutcome::Released { bytes_released: 17 },
+        CalibrationEvidenceReadOutcome::ReleasePrepared { bytes_released: 17 },
     )
     .unwrap();
     let current = CalibrationEvidenceReadAuditEvent::prepare(
@@ -367,7 +378,7 @@ fn helper_rejects_an_event_when_its_frozen_sequence_is_stale() {
         &tenant_id,
         &site_id,
         &capability_id,
-        CalibrationEvidenceReadOutcome::Released { bytes_released: 18 },
+        CalibrationEvidenceReadOutcome::ReleasePrepared { bytes_released: 18 },
     )
     .unwrap();
     current.append(&mut journal).unwrap();

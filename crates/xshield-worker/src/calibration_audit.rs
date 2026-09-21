@@ -24,13 +24,17 @@ const PRODUCER_ID: &str = "calibration-evidence-reader";
 const POLICY_REVISION: &str = "calibration-v1";
 const MAX_RELEASED_BYTES: u64 = 512 * 1024 * 1024;
 
-/// The final outcome recorded immediately before an evaluator can receive
-/// calibration plaintext.
+/// The reader-local result recorded before a calibration plaintext handoff.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalibrationEvidenceReadOutcome {
-    /// Vault-authenticated plaintext is about to cross the reader boundary.
-    Released {
-        /// Exact bounded plaintext bytes about to be released.
+    /// Vault-authenticated plaintext passed the durable pre-release barrier.
+    ///
+    /// This records only that the reader has a bounded buffer ready for the
+    /// final database release boundary; it does not assert that any evaluator
+    /// received the buffer. The reservation commit remains the linearization
+    /// point for delivery.
+    ReleasePrepared {
+        /// Exact bounded plaintext bytes retained for the pending boundary.
         bytes_released: u64,
     },
     /// Capability, lease, member, or current catalog checks denied the read.
@@ -50,13 +54,13 @@ pub enum CalibrationEvidenceReadOutcome {
 impl CalibrationEvidenceReadOutcome {
     fn wire(self) -> Result<(&'static str, &'static str, Option<u64>), CalibrationAuditBuildError> {
         match self {
-            Self::Released { bytes_released } => {
+            Self::ReleasePrepared { bytes_released } => {
                 if !(1..=MAX_RELEASED_BYTES).contains(&bytes_released) {
                     return Err(CalibrationAuditBuildError::ReleasedBytesOutOfRange);
                 }
                 Ok((
                     "PASS",
-                    "CALIBRATION_EVIDENCE_READ_RELEASED",
+                    "CALIBRATION_EVIDENCE_READ_RELEASE_PREPARED",
                     Some(bytes_released),
                 ))
             }
@@ -120,13 +124,14 @@ impl std::error::Error for CalibrationAuditBuildError {
     }
 }
 
-/// One immutable calibration plaintext-release event frozen for journal append.
+/// One immutable calibration pre-release barrier event frozen for journal append.
 ///
 /// Build this event after a terminal authorization or vault result is known and,
-/// for [`CalibrationEvidenceReadOutcome::Released`], after decryption but
-/// before the bytes leave the reader. Call [`Self::append`] successfully before
-/// returning plaintext. A failed append produces no durable terminal event and
-/// must block the release rather than being represented as a successful audit.
+/// for [`CalibrationEvidenceReadOutcome::ReleasePrepared`], after decryption
+/// and durable release reservation but before the final release boundary. Call
+/// [`Self::append`] successfully before committing that boundary. A failed
+/// append must block the release rather than being represented as a successful
+/// delivery audit.
 pub struct CalibrationEvidenceReadAuditEvent {
     event_id: EventId,
     producer_sequence: u64,
@@ -271,7 +276,7 @@ struct CalibrationEvidenceRead {
     bytes_released: Option<u64>,
 }
 
-/// Validates one terminal calibration plaintext-release event.
+/// Validates one calibration plaintext pre-release barrier event.
 ///
 /// The authenticated journal sequence and producer boot identity are validated
 /// by the common journal reader before this parser runs. This parser binds the
@@ -294,7 +299,7 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         .ok_or(PublishError::InvalidEvent)?
         .replace('-', "");
     let valid_terminal = match (value.outcome.as_str(), value.reason_code.as_str()) {
-        ("PASS", "CALIBRATION_EVIDENCE_READ_RELEASED") => value
+        ("PASS", "CALIBRATION_EVIDENCE_READ_RELEASE_PREPARED") => value
             .bytes_released
             .is_some_and(|bytes| (1..=MAX_RELEASED_BYTES).contains(&bytes)),
         ("DENY", "CALIBRATION_EVIDENCE_READ_NOT_AUTHORIZED")
@@ -333,8 +338,8 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         reason_code: value.reason_code,
         proof_kind: "deterministic".to_owned(),
         confidence_status: "not_applicable".to_owned(),
-        // This is an audit result for an offline data release. It does not
-        // express a protected-origin decision or a completed calibration job.
+        // This is a pre-release audit barrier, not a proof of evaluator
+        // delivery, protected-origin decision, or completed calibration job.
         ..PayloadSummary::default()
     })
 }
