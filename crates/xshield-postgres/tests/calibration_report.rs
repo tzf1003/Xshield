@@ -80,13 +80,7 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
     )
     .expect("lineage vault opens");
     seed_catalog(&pool, &fixture).await;
-    seed_committed_lineage_review(
-        &pool,
-        &fixture,
-        &fixture.lineage_review_id,
-        &fixture.lineage_review_artifact_id,
-    )
-    .await;
+    seed_committed_lineage_review(&store, &fixture, &lineage_vault).await;
 
     assert_cross_family_artifact_conflict_keeps_lease_active(&pool, &store, &fixture, &vault).await;
     assert_concurrent_lineage_review_wins_report_artifact_identity(
@@ -273,7 +267,12 @@ async fn assert_concurrent_lineage_review_wins_report_artifact_identity(
     )
     .expect("report race command is valid");
 
-    let lineage_review = lineage_review(fixture, shared_artifact_id);
+    let lineage_review = lineage_review(
+        fixture,
+        CalibrationLineageReviewId::parse(format!("calrev_{}", Uuid::now_v7()))
+            .expect("race lineage review id is valid"),
+        shared_artifact_id,
+    );
     let lineage_manifest = write_and_attest_lineage_review(lineage_vault, fixture, &lineage_review);
     let lineage_event_id = event_id();
     let lineage_command =
@@ -682,6 +681,7 @@ fn report_artifact_with_id(
 
 fn lineage_review(
     fixture: &Fixture,
+    review_id: CalibrationLineageReviewId,
     review_artifact_id: ArtifactId,
 ) -> CalibrationLineageReviewArtifact {
     let training = lineage_source_ref("report-race-training-root");
@@ -732,8 +732,7 @@ fn lineage_review(
     )
     .expect("race lineage submission is valid");
     let review = review_partition_lineage(
-        CalibrationLineageReviewId::parse(format!("calrev_{}", Uuid::now_v7()))
-            .expect("race lineage review id is valid"),
+        review_id,
         review_artifact_id,
         fixture.provenance(),
         &submission,
@@ -940,99 +939,37 @@ async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
     }
 }
 
-/// Seeds only the immutable review projection already produced by the dedicated
-/// vault-attested review path. This report fixture exercises capability/report
-/// state transitions, while `calibration_lineage_review` owns the vault-first
-/// review commit regression.
+/// Establishes the report fixture's reviewed partition through its production
+/// vault-attested command. The report transaction may only bind a lineage
+/// review whose metadata and restricted outbox fact were committed together.
 async fn seed_committed_lineage_review(
-    pool: &PgPool,
+    store: &PostgresIdentityStore,
     fixture: &Fixture,
-    review_id: &CalibrationLineageReviewId,
-    review_artifact_id: &ArtifactId,
+    vault: &LocalEvidenceVault,
 ) {
-    let provenance = fixture.provenance();
+    let review = lineage_review(
+        fixture,
+        fixture.lineage_review_id.clone(),
+        fixture.lineage_review_artifact_id.clone(),
+    );
+    assert_eq!(review.review_id(), &fixture.lineage_review_id);
+    let manifest = write_and_attest_lineage_review(vault, fixture, &review);
     let event = event_id();
-    let mut transaction = pool.begin().await.expect("review seed transaction starts");
-    sqlx::query(
-        "INSERT INTO xshield.audit_outbox
-             (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope)
-         VALUES ($1,$2,$3,$4,'calibration.partition_lineage.reviewed','{}')",
-    )
-    .bind(event.as_str())
-    .bind(fixture.tenant.as_str())
-    .bind(fixture.site.as_str())
-    .bind(review_id.as_str())
-    .execute(&mut *transaction)
-    .await
-    .expect("review event seed inserts");
-    sqlx::query(
-        "INSERT INTO xshield.calibration_lineage_review_artifacts (
-             tenant_id, site_id, review_id, artifact_id, schema_version, kind,
-             content_type, canonical_body_encoding, capture_status, fidelity,
-             bytes_observed, bytes_saved, classification, storage_profile,
-             storage_locator, key_ref, integrity_algorithm, integrity_digest,
-             recorded_at, reviewed_at, expires_at
-         ) VALUES (
-             $1,$2,$3,$4,1,'calibration_partition_lineage_review',
-             'application/vnd.xshield.calibration-lineage-review+json',
-             'xshield_calibration_lineage_review_canonical_json_v1','complete','entity_exact',
-             1,1,'RESTRICTED','aead_envelope_v1',$5,'key-r1','sha256_ciphertext',$6,
-             date_trunc('milliseconds', now()),date_trunc('milliseconds', now()),
-             date_trunc('milliseconds', now() + interval '10 minutes')
-         )",
-    )
-    .bind(fixture.tenant.as_str())
-    .bind(fixture.site.as_str())
-    .bind(review_id.as_str())
-    .bind(review_artifact_id.as_str())
-    .bind(format!("{}.xev", review_artifact_id.as_str()))
-    .bind("a".repeat(64))
-    .execute(&mut *transaction)
-    .await
-    .expect("attested review artifact projection inserts");
-    sqlx::query(
-        "INSERT INTO xshield.calibration_lineage_reviews (
-             tenant_id, site_id, review_id, review_artifact_id, schema_version, policy_revision,
-             approval_ref, dataset_revision, label_revision, task_revision,
-             threshold_policy_revision, mapping_revision, evaluation_manifest_artifact_id,
-             training_manifest_artifact_id, calibration_manifest_artifact_id,
-             label_manifest_artifact_id, provider, provider_model_id, model_revision,
-             prompt_revision, resolved_model_revision, source_graph_digest, reviewed_event_id,
-             reviewed_at
-         ) VALUES (
-             $1,$2,$3,$4,1,'calibration-lineage-v1',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-             $15,$16,$17,$18,$19,decode(repeat('a',64),'hex'),$20,date_trunc('milliseconds', now())
-         )",
-    )
-    .bind(fixture.tenant.as_str())
-    .bind(fixture.site.as_str())
-    .bind(review_id.as_str())
-    .bind(review_artifact_id.as_str())
-    .bind(provenance.approval_ref().as_str())
-    .bind(provenance.dataset_revision().as_str())
-    .bind(provenance.label_revision().as_str())
-    .bind(provenance.task_revision().as_str())
-    .bind(provenance.threshold_policy_revision().as_str())
-    .bind(provenance.mapping_revision().as_str())
-    .bind(provenance.evaluation_manifest_artifact_id().as_str())
-    .bind(provenance.training_manifest_artifact_id().as_str())
-    .bind(provenance.calibration_manifest_artifact_id().as_str())
-    .bind(provenance.label_manifest_artifact_id().as_str())
-    .bind(provenance.model().provider().as_str())
-    .bind(provenance.model().provider_model_id())
-    .bind(provenance.model().model_revision().as_str())
-    .bind(provenance.model().prompt_revision().as_str())
-    .bind(
-        provenance
-            .model()
-            .resolved_model_revision()
-            .map(ModelRevision::as_str),
-    )
-    .bind(event.as_str())
-    .execute(&mut *transaction)
-    .await
-    .expect("committed lineage review projection inserts");
-    transaction.commit().await.expect("review seed commits");
+    let command = CalibrationLineageReviewCommit::new(&review, &manifest, &event)
+        .expect("review seed command is valid");
+    let record = match store
+        .commit_calibration_lineage_review(command)
+        .await
+        .expect("review seed transaction resolves")
+    {
+        CalibrationLineageReviewCommitOutcome::Committed(record) => record,
+        outcome => panic!(
+            "expected committed review seed, got {}",
+            outcome.reason_code()
+        ),
+    };
+    assert_eq!(record.review_id(), review.review_id());
+    assert_eq!(record.review_artifact_id(), review.review_artifact_id());
 }
 
 fn calibration_catalog_kind(index: usize) -> &'static str {
