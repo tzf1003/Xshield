@@ -22,9 +22,10 @@ use xshield_core::{
         },
     },
     domain::{
-        ApprovalRef, ArtifactId, CalibrationReadCapabilityId, DatasetRevision, EventId,
-        LabelRevision, MappingRevision, ModelCallId, ModelRevision, PromptRevision, ProviderId,
-        RequestId, SiteId, TaskRevision, TenantId, ThresholdPolicyRevision,
+        ApprovalRef, ArtifactId, CalibrationLineageReviewId, CalibrationReadCapabilityId,
+        DatasetRevision, EventId, LabelRevision, MappingRevision, ModelCallId, ModelRevision,
+        PromptRevision, ProviderId, RequestId, SiteId, TaskRevision, TenantId,
+        ThresholdPolicyRevision,
     },
     identity::UnixSeconds,
     ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
@@ -38,7 +39,7 @@ use xshield_postgres::{
 };
 
 #[tokio::test]
-#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0025"]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0032"]
 async fn calibration_read_capability_is_atomic_exact_and_recovery_safe() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -50,13 +51,14 @@ async fn calibration_read_capability_is_atomic_exact_and_recovery_safe() {
         .expect("assertion pool connects");
     let fixture = Fixture::new();
     seed_catalog(&pool, &fixture).await;
+    seed_committed_lineage_review(&pool, &fixture).await;
     assert_unreserved_catalog_delete_is_not_suppressed(&pool, &fixture).await;
     assert_role_metadata_is_required_on_issue(&pool, &store, &fixture).await;
 
     assert_exact_issuance_and_drift_rejection(&pool, &store, &fixture).await;
     assert_single_lease_and_recovery(&pool, &store, &fixture).await;
 
-    cleanup(&pool, &fixture).await;
+    cleanup(&pool, &fixture);
 }
 
 async fn assert_unreserved_catalog_delete_is_not_suppressed(pool: &PgPool, fixture: &Fixture) {
@@ -152,6 +154,8 @@ async fn assert_role_metadata_is_required_on_issue(
 struct Fixture {
     tenant: TenantId,
     site: SiteId,
+    lineage_review_id: CalibrationLineageReviewId,
+    lineage_review_artifact_id: ArtifactId,
     artifacts: Vec<ArtifactId>,
 }
 
@@ -161,6 +165,12 @@ impl Fixture {
             tenant: TenantId::parse(format!("tenant_calcap_{}", Uuid::now_v7().simple()))
                 .expect("tenant is bounded"),
             site: SiteId::parse("site_calcap").expect("site is bounded"),
+            lineage_review_id: CalibrationLineageReviewId::parse(format!(
+                "calrev_{}",
+                Uuid::now_v7()
+            ))
+            .expect("lineage review id is valid"),
+            lineage_review_artifact_id: artifact_id(),
             artifacts: (0..8).map(|_| artifact_id()).collect(),
         }
     }
@@ -172,6 +182,7 @@ impl Fixture {
         CalibrationEvidenceReadCapability::new(
             CalibrationReadCapabilityId::parse(format!("calcap_{}", Uuid::now_v7()))
                 .expect("capability id is valid"),
+            self.lineage_review_id.clone(),
             self.tenant.clone(),
             self.site.clone(),
             self.provenance(),
@@ -225,11 +236,38 @@ async fn assert_exact_issuance_and_drift_rejection(
     assert_eq!(record.member_count(), 6);
     assert_eq!(record.frozen_total_bytes(), 384);
     assert_issued_envelope(pool, fixture, &capability, &record).await;
+    assert_issued_capability_review_is_immutable(pool, fixture, &capability).await;
     assert_exact_retries(store, &capability, &event, &record).await;
     assert_concurrent_conflicting_issuers_return_conflict(store, fixture).await;
     assert_exact_read_authorization_rechecks_lease_and_catalog(pool, store, fixture).await;
     assert_altered_capability_is_unavailable(store, fixture, &capability).await;
     assert_catalog_drift_is_unavailable(pool, store, fixture, &capability).await;
+}
+
+async fn assert_issued_capability_review_is_immutable(
+    pool: &PgPool,
+    fixture: &Fixture,
+    capability: &CalibrationEvidenceReadCapability,
+) {
+    let other_review_id = CalibrationLineageReviewId::parse(format!("calrev_{}", Uuid::now_v7()))
+        .expect("alternate lineage review id is valid");
+    let attempted_rebind = sqlx::query(
+        "UPDATE xshield.calibration_read_capabilities SET lineage_review_id=$4
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(other_review_id.as_str())
+    .execute(pool)
+    .await
+    .expect_err("issued capability lineage review must not be rebound");
+    assert_eq!(
+        attempted_rebind
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code),
+        Some(std::borrow::Cow::Borrowed("23514"))
+    );
 }
 
 async fn assert_issued_envelope(
@@ -833,6 +871,7 @@ async fn assert_altered_capability_is_unavailable(
 ) {
     let altered = CalibrationEvidenceReadCapability::new(
         capability.capability_id().clone(),
+        capability.lineage_review_id().clone(),
         fixture.tenant.clone(),
         fixture.site.clone(),
         fixture.provenance(),
@@ -1034,6 +1073,98 @@ async fn issue_capability_as(
         .expect("issue resolves")
 }
 
+/// Seeds only the immutable database projection produced after vault attestation.
+/// The dedicated review-commit regression owns end-to-end vault publication;
+/// this batch fixture needs the projection so it can exercise the issuer gate.
+async fn seed_committed_lineage_review(pool: &PgPool, fixture: &Fixture) {
+    let provenance = fixture.provenance();
+    let event = event_id();
+    let mut transaction = pool.begin().await.expect("review seed transaction starts");
+    sqlx::query(
+        "INSERT INTO xshield.audit_outbox
+             (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope)
+         VALUES ($1,$2,$3,$4,'calibration.partition_lineage.reviewed','{}')",
+    )
+    .bind(event.as_str())
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.lineage_review_id.as_str())
+    .execute(&mut *transaction)
+    .await
+    .expect("review event seed inserts");
+    sqlx::query(
+        "INSERT INTO xshield.calibration_lineage_review_artifacts (
+             tenant_id, site_id, review_id, artifact_id, schema_version, kind,
+             content_type, canonical_body_encoding, capture_status, fidelity,
+             bytes_observed, bytes_saved, classification, storage_profile,
+             storage_locator, key_ref, integrity_algorithm, integrity_digest,
+             recorded_at, reviewed_at, expires_at
+         ) VALUES (
+             $1,$2,$3,$4,1,'calibration_partition_lineage_review',
+             'application/vnd.xshield.calibration-lineage-review+json',
+             'xshield_calibration_lineage_review_canonical_json_v1','complete','entity_exact',
+             1,1,'RESTRICTED','aead_envelope_v1',$5,'key-r1','sha256_ciphertext',$6,
+             date_trunc('milliseconds', now()),date_trunc('milliseconds', now()),
+             now() + interval '10 minutes'
+         )",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.lineage_review_id.as_str())
+    .bind(fixture.lineage_review_artifact_id.as_str())
+    .bind(format!(
+        "{}.xev",
+        fixture.lineage_review_artifact_id.as_str()
+    ))
+    .bind("a".repeat(64))
+    .execute(&mut *transaction)
+    .await
+    .expect("attested review artifact projection inserts");
+    sqlx::query(
+        "INSERT INTO xshield.calibration_lineage_reviews (
+             tenant_id, site_id, review_id, review_artifact_id, schema_version, policy_revision,
+             approval_ref, dataset_revision, label_revision, task_revision,
+             threshold_policy_revision, mapping_revision, evaluation_manifest_artifact_id,
+             training_manifest_artifact_id, calibration_manifest_artifact_id,
+             label_manifest_artifact_id, provider, provider_model_id, model_revision,
+             prompt_revision, resolved_model_revision, source_graph_digest, reviewed_event_id,
+             reviewed_at
+         ) VALUES (
+             $1,$2,$3,$4,1,'calibration-lineage-v1',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+             $15,$16,$17,$18,$19,decode(repeat('a',64),'hex'),$20,date_trunc('milliseconds', now())
+         )",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(fixture.lineage_review_id.as_str())
+    .bind(fixture.lineage_review_artifact_id.as_str())
+    .bind(provenance.approval_ref().as_str())
+    .bind(provenance.dataset_revision().as_str())
+    .bind(provenance.label_revision().as_str())
+    .bind(provenance.task_revision().as_str())
+    .bind(provenance.threshold_policy_revision().as_str())
+    .bind(provenance.mapping_revision().as_str())
+    .bind(provenance.evaluation_manifest_artifact_id().as_str())
+    .bind(provenance.training_manifest_artifact_id().as_str())
+    .bind(provenance.calibration_manifest_artifact_id().as_str())
+    .bind(provenance.label_manifest_artifact_id().as_str())
+    .bind(provenance.model().provider().as_str())
+    .bind(provenance.model().provider_model_id())
+    .bind(provenance.model().model_revision().as_str())
+    .bind(provenance.model().prompt_revision().as_str())
+    .bind(
+        provenance
+            .model()
+            .resolved_model_revision()
+            .map(ModelRevision::as_str),
+    )
+    .bind(event.as_str())
+    .execute(&mut *transaction)
+    .await
+    .expect("committed lineage review projection inserts");
+    transaction.commit().await.expect("review seed commits");
+}
+
 async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
     for (index, artifact) in fixture.artifacts.iter().enumerate() {
         sqlx::query(
@@ -1102,53 +1233,10 @@ async fn update_catalog_metadata(
     .expect("catalog metadata update succeeds");
 }
 
-async fn cleanup(pool: &PgPool, fixture: &Fixture) {
-    let mut transaction = pool.begin().await.expect("cleanup transaction starts");
-    sqlx::query(
-        "UPDATE xshield.calibration_read_capability_leases
-         SET status='abandoned', recovery_required_at=NULL, completed_at=NULL,
-             abandoned_at=date_trunc('milliseconds', clock_timestamp())
-         WHERE tenant_id=$1 AND status IN ('active', 'recovery_required')",
-    )
-    .bind(fixture.tenant.as_str())
-    .execute(&mut *transaction)
-    .await
-    .expect("cleanup retires leases");
-    sqlx::query(
-        "UPDATE xshield.calibration_read_capabilities
-         SET status='expired', recovery_required_at=NULL, consumed_at=NULL,
-             expired_at=date_trunc('milliseconds', clock_timestamp()), revoked_at=NULL
-         WHERE tenant_id=$1 AND status NOT IN ('consumed', 'expired', 'revoked')",
-    )
-    .bind(fixture.tenant.as_str())
-    .execute(&mut *transaction)
-    .await
-    .expect("cleanup retires capabilities");
-    for statement in [
-        "DELETE FROM xshield.calibration_read_capability_leases WHERE tenant_id=$1",
-        "DELETE FROM xshield.calibration_read_capability_members WHERE tenant_id=$1",
-        "DELETE FROM xshield.calibration_read_capabilities WHERE tenant_id=$1",
-    ] {
-        sqlx::query(statement)
-            .bind(fixture.tenant.as_str())
-            .execute(&mut *transaction)
-            .await
-            .expect("fixture cleanup succeeds");
-    }
-    transaction
-        .commit()
-        .await
-        .expect("capability cleanup commits");
-    for statement in [
-        "DELETE FROM xshield.artifact_catalog WHERE tenant_id=$1",
-        "DELETE FROM xshield.audit_outbox WHERE tenant_id=$1",
-    ] {
-        sqlx::query(statement)
-            .bind(fixture.tenant.as_str())
-            .execute(pool)
-            .await
-            .expect("fixture cleanup succeeds");
-    }
+fn cleanup(_pool: &PgPool, _fixture: &Fixture) {
+    // Migration 0030 freezes committed review projections. Every integration
+    // fixture uses a unique tenant and the harness drops its temporary database,
+    // so deleting retained audit state here would test an invalid lifecycle.
 }
 
 fn artifact_id() -> ArtifactId {

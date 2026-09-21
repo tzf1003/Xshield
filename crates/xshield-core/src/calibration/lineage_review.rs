@@ -16,6 +16,14 @@ use std::{
     fmt,
 };
 
+mod artifact;
+
+pub use artifact::{
+    CALIBRATION_LINEAGE_REVIEW_ARTIFACT_CONTENT_TYPE, CALIBRATION_LINEAGE_REVIEW_ARTIFACT_KIND,
+    CALIBRATION_LINEAGE_REVIEW_ARTIFACT_SCHEMA_VERSION, CalibrationLineageReviewArtifact,
+    CalibrationLineageReviewArtifactError,
+};
+
 /// Maximum declared source nodes admitted to one review before allocation.
 pub const MAX_LINEAGE_SOURCES: usize = 256;
 /// Maximum direct declared sources for one partition manifest.

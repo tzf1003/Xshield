@@ -287,10 +287,17 @@ async fn assert_audit_failure_rolls_back(
             .await
             .is_err()
     );
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM xshield.artifact_catalog")
-        .fetch_one(pool)
-        .await
-        .unwrap();
+    // Other integration fixtures retain immutable audit/provenance history in
+    // this shared temporary database. This assertion is about the failed
+    // publication's own scope, not unrelated catalog families.
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM xshield.artifact_catalog WHERE tenant_id=$1 AND site_id=$2",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .fetch_one(pool)
+    .await
+    .unwrap();
     assert_eq!(count, 0);
     sqlx::query("DELETE FROM xshield.audit_outbox WHERE event_id = $1")
         .bind(event.as_str())

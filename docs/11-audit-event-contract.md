@@ -21,6 +21,7 @@
 | calibration_read_capability_id | 一份目的限定的离线校准批量读取能力 | calcap_ + UUIDv7；冻结 scope，不是内容或业务授权凭证 |
 | calibration_read_lease_id | 一次校准批次会话的公开关联 ID | callease_ + UUIDv7；私有 lease handle 仅在运行中会话存在 |
 | calibration_report_id | 一份独立的离线校准报告元数据投影 | calr_ + UUIDv7；不是 evidence 内容读取或阈值/策略发布凭证 |
+| calibration_lineage_review_id | 一份独立的校准分区声明审核投影 | calrev_ + UUIDv7；不是 corpus 内容独立性、evidence 读取或业务授权凭证 |
 | agent_run_id/tool_call_id | Agent 运行及工具调用 | agt_/tool_，父子运行明确关联 |
 | grant_id/page_evidence_id | 资格与界面来源 | 用于完整追溯发行链 |
 | case_id/export_id/replay_id | 调查案、导出与回放 | 各自审批、权限和审计 |
@@ -128,6 +129,8 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 校准报告保留另使用 `calibration.report_retention.*` 六种受限事件，涵盖已提交报告的到期删除及 request-free 侧车孤儿的 intent、完成和失败。producer、scope、report/artifact 引用、UTC 毫秒、`retained_metadata=true`、原因/outcome 与 cause 绑定由 worker 和 schema 双重校验；孤儿路径不进入通用 evidence orphan 表。事件只记录维护阶段，不能恢复报告正文、延长期限或证明跨存储操作具备事务原子性。
 
+`calibration` 族还接收 `calibration.partition_lineage.reviewed`。该事件只将一个独立 `calrev_` 审核、其 protected artifact、冻结 provenance 和四份 manifest 关联到受限历史索引；它不携带 source graph、source ID/revision、图摘要、样本、标签、指标或正文，也不把 ClickHouse/outbox 变成 catalog、vault、retention 或授权真值。
+
 升级后可为既有完整清理事件启用 `evidence_retention` 调度；案件保留锁及升级后的清理任务须先应用迁移 `0020_m3_case_evidence_holds.sql`（见 12.9）。索引保留期仍从原始 occurred_at 起算，积压中已超期事件在 active 视图不可见。所有 v3 来源均要求 envelope 显式包含 request_id（可为 null，具体族另有限制），缺失字段的历史畸形记录按既有错误/水位规则保留待处理，不补造请求身份。
 
 身份事务使用 request_id 作为独立 producer_boot_id，producer_seq/request_seq 均为 1，保留原网关请求 trace 与配置修订；两种序列不推进 journal 的序列，也不表示跨来源全序。当前时间线按 `(request_seq,event_id)` 排序，调查时应结合生产者与发生时间理解身份事件，不能以该位置推断源站先后。`identity_lifecycle` 的 PASS 是事务结果，`is_terminal=0`，不推断业务执行状态；确定性结果保持 `confidence=null/not_applicable`。主体/上下文引用与新旧凭证 HMAC 保留在 `SENSITIVE` payload_json，脱敏查询摘要不返回该载荷，普通检索不授予认证权力。
@@ -147,6 +150,12 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 `calibration` 族只接受 `calibration.reported` 的完整、受限元数据 envelope：producer 固定为 `calibration-evaluator`、policy revision 固定为 `calibration-v1`，聚合字段为 `calr_` UUIDv7 report ID；request_id 为 null，producer boot、两个序号、UTC 毫秒发生/观察时间、trace/span 与 report ID 的绑定均严格校验。封闭 payload 固定为 `calibration_report/PASS/CALIBRATION_REPORTED`，只含 report artifact、approval、dataset/label/task/threshold-policy/mapping revision、四份 manifest 和 ModelIdentity。report artifact 既是唯一 evidence_ref，也不得与四份 manifest 重复；resolved provider revision 只能是有效修订或显式 null，不能由当前路由推断。
 
 schema 与消费端拒绝未知/重复字段、错误 producer/aggregate/evidence 绑定、非规范 ID 或时间、别名 artifact、额外 cause，以及任何标签、概率、样本、ground truth、指标、提示词、凭证或 evidence 内容。索引摘要固定为 deterministic、`confidence=null/not_applicable`、非业务终态且不带 HTTP 方法、操作或源站状态；它记录一个离线报告元数据事实，不授予授权、读取 evidence、改变/发布阈值或策略，也不代表报告或模型质量。
+
+### 11.9.1 已实现 calibration.partition_lineage.reviewed 发布契约
+
+`calibration.partition_lineage.reviewed` 的 producer 固定为 `calibration-lineage-reviewer`，policy revision 固定为 `calibration-lineage-v1`，aggregate 为 `calrev_` UUIDv7 review ID。request_id 和 cause_event_ids 必须为空，producer boot 等于 event ID，两个序号均为 1，trace/span 从 review UUID 导出，发生/观察时间为相同的数据库 UTC 毫秒。其封闭 payload 固定为 `calibration_partition_lineage/PASS/CALIBRATION_PARTITION_LINEAGE_REVIEWED`，只含 review/artifact ID、approval/dataset/label/task/threshold-policy/mapping revision、四份不同 manifest 及 ModelIdentity；review artifact 是唯一 evidence_ref，不能别名四份 manifest。
+
+schema 与 calibration parser 同时拒绝未知或重复字段、错误 producer/policy/aggregate/time/trace/evidence binding、非规范 ID、artifact 别名和任何 source graph、source ID/revision、source-graph digest、样本、标签、指标、提示词、凭证或正文。索引摘要固定为 deterministic、`confidence=null/not_applicable` 和非业务终态。它记录提交声明已通过审核，不证明外部 corpus 独立、模型质量或阈值有效性，也不授予 evidence 读取、发布阈值/策略或业务资格。
 
 ## 11.10 已实现校准读取能力发行事实
 

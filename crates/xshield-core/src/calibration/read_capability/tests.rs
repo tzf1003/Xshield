@@ -5,9 +5,9 @@ use crate::{
         dataset::{DatasetSample, EvaluationProvenance, ModelIdentity, evaluate_dataset},
     },
     domain::{
-        ApprovalRef, ArtifactId, CalibrationReadCapabilityId, CalibrationReadLeaseId,
-        DatasetRevision, LabelRevision, MappingRevision, ModelCallId, ModelRevision,
-        PromptRevision, ProviderId, TaskRevision, ThresholdPolicyRevision,
+        ApprovalRef, ArtifactId, CalibrationLineageReviewId, CalibrationReadCapabilityId,
+        CalibrationReadLeaseId, DatasetRevision, LabelRevision, MappingRevision, ModelCallId,
+        ModelRevision, PromptRevision, ProviderId, TaskRevision, ThresholdPolicyRevision,
     },
     ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
 };
@@ -55,6 +55,7 @@ fn capability_with_id(
 ) -> Result<CalibrationEvidenceReadCapability, CalibrationReadCapabilityError> {
     CalibrationEvidenceReadCapability::new(
         capability_id,
+        lineage_review_id(),
         TenantId::parse("tenant_demo").unwrap(),
         SiteId::parse("site_demo").unwrap(),
         provenance(),
@@ -63,6 +64,10 @@ fn capability_with_id(
         UnixSeconds::new(200),
         1024,
     )
+}
+
+fn lineage_review_id() -> CalibrationLineageReviewId {
+    CalibrationLineageReviewId::parse("calrev_018f2a3b-4c5d-7000-8000-000000000001").unwrap()
 }
 
 #[test]
@@ -468,6 +473,7 @@ fn capability_rejects_unbounded_or_aliased_source_sets() {
         assert_eq!(
             CalibrationEvidenceReadCapability::new(
                 capability_id.clone(),
+                lineage_review_id(),
                 tenant.clone(),
                 site.clone(),
                 provenance(),

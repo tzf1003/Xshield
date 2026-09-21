@@ -1,6 +1,5 @@
 //! Calibration report parser fixtures and negative contract coverage.
 
-use super::EVENT_TYPES;
 use crate::{IndexRow, PublishError};
 use chrono::TimeDelta;
 use serde_json::{Value, json};
@@ -10,15 +9,21 @@ const EVENT: &str = "ev_018f2a3b-4c5d-7000-8000-000000000001";
 const CAPABILITY: &str = "calcap_018f2a3b-4c5d-7000-8000-000000000008";
 const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-000000000002";
 const REPORT_ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000003";
+const REVIEW: &str = "calrev_018f2a3b-4c5d-7000-8000-000000000009";
+const REVIEW_ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000009";
 const EVALUATION_MANIFEST: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000004";
 const TRAINING_MANIFEST: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000005";
 const CALIBRATION_MANIFEST: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000006";
 const LABEL_MANIFEST: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000007";
+const REPORT_EVENT_TYPE: &str = "calibration.reported";
+const LINEAGE_REVIEW_EVENT_TYPE: &str = "calibration.partition_lineage.reviewed";
+const CAPABILITY_ISSUED_EVENT_TYPE: &str = "calibration.read_capability.issued";
+const BATCH_COMPLETED_EVENT_TYPE: &str = "calibration.read_batch.completed";
 
 /// Canonical complete calibration report fixture for parser and lease tests.
 pub(crate) fn event() -> Value {
     let mut event = crate::outbox::tests::event("case.created");
-    event["event_type"] = json!(EVENT_TYPES[0]);
+    event["event_type"] = json!(REPORT_EVENT_TYPE);
     event["producer_id"] = json!("calibration-evaluator");
     event["producer_boot_id"] = json!(EVENT);
     event["request_id"] = Value::Null;
@@ -48,12 +53,48 @@ pub(crate) fn event() -> Value {
     event
 }
 
+/// Canonical restricted declaration-review fixture. It intentionally projects
+/// only immutable review metadata; source graph nodes and corpus details do
+/// not leave the encrypted review artifact.
+fn lineage_review_event() -> Value {
+    let mut event = crate::outbox::tests::event("case.created");
+    let trace_id = REVIEW.strip_prefix("calrev_").unwrap().replace('-', "");
+    event["event_type"] = json!(LINEAGE_REVIEW_EVENT_TYPE);
+    event["producer_id"] = json!("calibration-lineage-reviewer");
+    event["producer_boot_id"] = json!(EVENT);
+    event["request_id"] = Value::Null;
+    event["trace_id"] = json!(trace_id);
+    event["span_id"] = json!(&trace_id[..16]);
+    event["occurred_at"] = json!("2026-09-20T00:00:00.123Z");
+    event["observed_at"] = event["occurred_at"].clone();
+    event["policy_revision"] = json!("calibration-lineage-v1");
+    event["sensitivity"] = json!("RESTRICTED");
+    event["evidence_refs"] = json!([REVIEW_ARTIFACT]);
+    event["cause_event_ids"] = json!([]);
+    event["payload"] = json!({
+        "stage": "calibration_partition_lineage", "outcome": "PASS",
+        "reason_code": "CALIBRATION_PARTITION_LINEAGE_REVIEWED", "review_id": REVIEW,
+        "review_artifact_id": REVIEW_ARTIFACT, "approval_ref": "approval-r1",
+        "dataset_revision": "dataset-r1", "label_revision": "labels-r1",
+        "task_revision": "task-r1", "threshold_policy_revision": "threshold-r1",
+        "mapping_revision": "mapping-r1",
+        "evaluation_manifest_artifact_id": EVALUATION_MANIFEST,
+        "training_manifest_artifact_id": TRAINING_MANIFEST,
+        "calibration_manifest_artifact_id": CALIBRATION_MANIFEST,
+        "label_manifest_artifact_id": LABEL_MANIFEST,
+        "provider": "vercel_ai_gateway", "provider_model_id": "typesafe-ai/jev",
+        "model_revision": "jev-1.13.0", "prompt_revision": "prompt-r1",
+        "resolved_model_revision": null
+    });
+    event
+}
+
 /// Canonical restricted issuance fixture. It contains a digest and aggregate
 /// bounds only: frozen member references and lease handles are never indexed.
 fn capability_issuance_event() -> Value {
     let mut event = crate::outbox::tests::event("case.created");
     let trace_id = CAPABILITY.strip_prefix("calcap_").unwrap().replace('-', "");
-    event["event_type"] = json!(EVENT_TYPES[1]);
+    event["event_type"] = json!(CAPABILITY_ISSUED_EVENT_TYPE);
     event["producer_id"] = json!("calibration-capability-issuer");
     event["producer_boot_id"] = json!(EVENT);
     event["request_id"] = Value::Null;
@@ -68,7 +109,8 @@ fn capability_issuance_event() -> Value {
     event["payload"] = json!({
         "stage": "calibration_read_capability", "outcome": "PASS",
         "reason_code": "CALIBRATION_READ_CAPABILITY_ISSUED",
-        "capability_id": CAPABILITY, "scope_digest": "a".repeat(64),
+        "capability_id": CAPABILITY, "lineage_review_id": REVIEW,
+        "scope_digest": "a".repeat(64),
         "member_count": 6, "frozen_total_bytes": 1,
         "not_before_unix": 1_789_689_600_u64,
         "expires_at_unix": 1_789_693_200_u64
@@ -79,7 +121,7 @@ fn capability_issuance_event() -> Value {
 fn batch_completion_event() -> Value {
     let mut event = crate::outbox::tests::event("case.created");
     let trace_id = CAPABILITY.strip_prefix("calcap_").unwrap().replace('-', "");
-    event["event_type"] = json!(EVENT_TYPES[2]);
+    event["event_type"] = json!(BATCH_COMPLETED_EVENT_TYPE);
     event["producer_id"] = json!("calibration-evidence-batch-completer");
     event["producer_boot_id"] = json!(EVENT);
     event["request_id"] = Value::Null;
@@ -686,4 +728,189 @@ fn provenance_and_model_metadata_are_bounded_and_explicit() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn lineage_review_is_a_restricted_non_terminal_summary_without_graph_content() {
+    let value = lineage_review_event();
+    let index_row = row(&value).unwrap();
+    assert_eq!(index_row.event_type, LINEAGE_REVIEW_EVENT_TYPE);
+    assert_eq!(index_row.stage, "calibration_partition_lineage");
+    assert_eq!(index_row.outcome, "PASS");
+    assert_eq!(
+        index_row.reason_code,
+        "CALIBRATION_PARTITION_LINEAGE_REVIEWED"
+    );
+    assert_eq!(index_row.proof_kind, "deterministic");
+    assert_eq!(index_row.confidence, None);
+    assert_eq!(index_row.confidence_status, "not_applicable");
+    assert_eq!(index_row.sensitivity, "RESTRICTED");
+    assert!(index_row.request_id.is_empty());
+    assert_eq!(index_row.evidence_refs, vec![REVIEW_ARTIFACT]);
+    assert!(index_row.cause_event_ids.is_empty());
+    assert_eq!(index_row.is_terminal, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&index_row.payload_json).unwrap(),
+        value["payload"]
+    );
+    for forbidden in [
+        "sources",
+        "source_graph",
+        "source_graph_digest",
+        "source_id",
+        "source_revision",
+        "sample_index",
+        "label",
+        "metrics",
+    ] {
+        assert!(
+            value["payload"].get(forbidden).is_none(),
+            "review payload exposed {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn lineage_review_identity_scope_and_artifact_bindings_are_exact() {
+    let original = lineage_review_event();
+    for (pointer, replacement) in [
+        ("/event_type", json!(REPORT_EVENT_TYPE)),
+        ("/producer_id", json!("calibration-evaluator")),
+        (
+            "/producer_boot_id",
+            json!("ev_018f2a3b-4c5d-7000-8000-000000000099"),
+        ),
+        (
+            "/request_id",
+            json!("req_018f2a3b-4c5d-7000-8000-000000000008"),
+        ),
+        ("/producer_seq", json!(2)),
+        ("/request_seq", json!(2)),
+        ("/policy_revision", json!("calibration-v1")),
+        ("/sensitivity", json!("SENSITIVE")),
+        ("/example_only", json!(true)),
+        ("/trace_id", json!("018f2a3b4c5d70008000000000000001")),
+        ("/span_id", json!("018f2a3b4c5d7001")),
+        ("/observed_at", json!("2026-09-20T00:00:00.124Z")),
+        ("/integrity/state", json!("sealed")),
+        ("/cause_event_ids", json!([EVENT])),
+        ("/evidence_refs", json!([])),
+        ("/evidence_refs", json!([EVALUATION_MANIFEST])),
+        ("/evidence_refs", json!([REVIEW_ARTIFACT, REVIEW_ARTIFACT])),
+        (
+            "/payload/review_id",
+            json!("calrev_018f2a3b-4c5d-4000-8000-000000000009"),
+        ),
+        ("/payload/review_artifact_id", json!(EVALUATION_MANIFEST)),
+        ("/payload/stage", json!("calibration_report")),
+        ("/payload/outcome", json!("DENY")),
+        ("/payload/reason_code", json!("CALIBRATION_REPORTED")),
+    ] {
+        let mut invalid = original.clone();
+        *invalid.pointer_mut(pointer).unwrap() = replacement;
+        assert!(row(&invalid).is_err(), "accepted {pointer}");
+    }
+    for field in [
+        "source_graph",
+        "source_graph_digest",
+        "source_id",
+        "source_revision",
+    ] {
+        let mut invalid = original.clone();
+        invalid["payload"][field] = json!("excluded");
+        assert!(row(&invalid).is_err(), "accepted graph field {field}");
+    }
+}
+
+#[test]
+fn lineage_review_payload_is_closed_and_metadata_is_bounded() {
+    let original = lineage_review_event();
+    for path in ["", "/payload", "/integrity"] {
+        for field in original.pointer(path).unwrap().as_object().unwrap().keys() {
+            let mut missing = original.clone();
+            missing
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            let optional_hash =
+                path == "/integrity" && matches!(field.as_str(), "previous_hash" | "event_hash");
+            assert_eq!(
+                row(&missing).is_ok(),
+                optional_hash,
+                "missing {path}/{field}"
+            );
+        }
+        let mut unknown = original.clone();
+        unknown.pointer_mut(path).unwrap()["extra"] = Value::Null;
+        assert!(row(&unknown).is_err(), "accepted unknown {path}");
+    }
+    let serialized = serde_json::to_string(&original).unwrap();
+    for (needle, duplicate) in [
+        (
+            r#""review_id":"calrev_018f2a3b-4c5d-7000-8000-000000000009""#,
+            r#""review_id":"calrev_018f2a3b-4c5d-7000-8000-000000000099","review_id":"calrev_018f2a3b-4c5d-7000-8000-000000000009""#,
+        ),
+        (
+            r#""producer_seq":1"#,
+            r#""producer_seq":2,"producer_seq":1"#,
+        ),
+    ] {
+        assert!(row_bytes(serialized.replace(needle, duplicate).as_bytes()).is_err());
+    }
+    for field in [
+        "approval_ref",
+        "dataset_revision",
+        "label_revision",
+        "task_revision",
+        "threshold_policy_revision",
+        "mapping_revision",
+        "provider",
+        "model_revision",
+        "prompt_revision",
+    ] {
+        for replacement in [json!(""), json!("bad value"), json!("x".repeat(129))] {
+            let mut invalid = original.clone();
+            invalid["payload"][field] = replacement;
+            assert!(row(&invalid).is_err(), "accepted {field}");
+        }
+    }
+    for field in [
+        "evaluation_manifest_artifact_id",
+        "training_manifest_artifact_id",
+        "calibration_manifest_artifact_id",
+        "label_manifest_artifact_id",
+    ] {
+        let mut invalid = original.clone();
+        invalid["payload"][field] = json!(REVIEW);
+        assert!(row(&invalid).is_err(), "accepted invalid {field}");
+    }
+    for (field, duplicate) in [
+        ("evaluation_manifest_artifact_id", REVIEW_ARTIFACT),
+        ("training_manifest_artifact_id", EVALUATION_MANIFEST),
+        ("calibration_manifest_artifact_id", EVALUATION_MANIFEST),
+        ("label_manifest_artifact_id", EVALUATION_MANIFEST),
+    ] {
+        let mut invalid = original.clone();
+        invalid["payload"][field] = json!(duplicate);
+        assert!(row(&invalid).is_err(), "accepted overlapping {field}");
+    }
+    for replacement in [
+        json!("typesafe-ai/jev/extra"),
+        json!("typesafe ai/jev"),
+        json!("x".repeat(129)),
+    ] {
+        let mut invalid = original.clone();
+        invalid["payload"]["provider_model_id"] = replacement;
+        assert!(row(&invalid).is_err());
+    }
+    let mut known = original.clone();
+    known["payload"]["resolved_model_revision"] = json!("jev-1.13.0");
+    assert!(row(&known).is_ok());
+    for replacement in [json!(""), json!("bad revision"), json!(true)] {
+        let mut invalid = original.clone();
+        invalid["payload"]["resolved_model_revision"] = replacement;
+        assert!(row(&invalid).is_err());
+    }
 }

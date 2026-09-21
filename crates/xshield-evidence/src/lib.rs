@@ -28,9 +28,16 @@ use zeroize::Zeroizing;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+mod calibration_lineage_review;
 mod calibration_report;
 mod calibration_report_retention;
 
+pub use calibration_lineage_review::{
+    AttestedCalibrationLineageReviewManifest, CALIBRATION_LINEAGE_REVIEW_CANONICAL_BODY_ENCODING,
+    CALIBRATION_LINEAGE_REVIEW_EVIDENCE_MANIFEST_SCHEMA_VERSION,
+    CalibrationLineageReviewEvidenceManifest, CalibrationLineageReviewEvidenceWrite,
+    VerifiedCalibrationLineageReviewManifest,
+};
 pub use calibration_report::{
     AttestedCalibrationReportManifest, CALIBRATION_REPORT_CANONICAL_BODY_ENCODING,
     CALIBRATION_REPORT_EVIDENCE_MANIFEST_SCHEMA_VERSION, CalibrationReportEvidenceManifest,

@@ -16,11 +16,23 @@ use sqlx::{PgConnection, Row, postgres::PgRow};
 use std::{collections::BTreeMap, time::Duration};
 use uuid::Uuid;
 use xshield_core::{
-    calibration::read_capability::{
-        CalibrationEvidenceBatchCompletion, CalibrationEvidenceBatchLease,
-        CalibrationEvidenceReadCapability, CalibrationEvidenceReadSession, CalibrationEvidenceRole,
+    calibration::{
+        lineage_review::{
+            CALIBRATION_LINEAGE_REVIEW_ARTIFACT_CONTENT_TYPE,
+            CALIBRATION_LINEAGE_REVIEW_ARTIFACT_KIND,
+            CALIBRATION_LINEAGE_REVIEW_ARTIFACT_SCHEMA_VERSION,
+            CALIBRATION_LINEAGE_REVIEW_POLICY_REVISION,
+        },
+        read_capability::{
+            CalibrationEvidenceBatchCompletion, CalibrationEvidenceBatchLease,
+            CalibrationEvidenceReadCapability, CalibrationEvidenceReadSession,
+            CalibrationEvidenceRole,
+        },
     },
-    domain::{CalibrationReadCapabilityId, CalibrationReadLeaseId, EventId, ModelRevision},
+    domain::{
+        CalibrationLineageReviewId, CalibrationReadCapabilityId, CalibrationReadLeaseId, EventId,
+        ModelRevision,
+    },
     identity::UnixSeconds,
     ports::{CalibrationEvidenceReadDenied, CalibrationEvidenceReadRequest},
 };
@@ -44,7 +56,7 @@ pub struct CalibrationReadCapabilityIssue<'a> {
 }
 
 impl<'a> CalibrationReadCapabilityIssue<'a> {
-    /// Binds issuer retry material to a fully formed, purpose-limited capability.
+    /// Binds retry material to a capability that already carries one review.
     ///
     /// The constructor has no database, audit, vault, or model side effect. The
     /// caller must retain every argument unchanged when recovering an unknown
@@ -52,7 +64,9 @@ impl<'a> CalibrationReadCapabilityIssue<'a> {
     ///
     /// # Errors
     /// Returns [`StoreError::InvalidCommand`] when `issued_by` is not bounded
-    /// text. Catalog availability and exact retry checks occur transactionally.
+    /// text. The review's committed, vault-attested metadata and frozen
+    /// provenance are checked under transaction locks; an outbox event never
+    /// serves as that authorization truth.
     pub fn new(
         capability: &'a CalibrationEvidenceReadCapability,
         issued_by: &'a str,
@@ -150,6 +164,7 @@ impl<'a> CalibrationEvidenceBatchBegin<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CalibrationReadCapabilityRecord {
     capability_id: CalibrationReadCapabilityId,
+    lineage_review_id: CalibrationLineageReviewId,
     scope_digest: [u8; 32],
     member_count: u32,
     frozen_total_bytes: u64,
@@ -163,6 +178,15 @@ impl CalibrationReadCapabilityRecord {
     #[must_use]
     pub const fn capability_id(&self) -> &CalibrationReadCapabilityId {
         &self.capability_id
+    }
+
+    /// Returns the committed declaration-review identity that bound issuance.
+    ///
+    /// This is provenance for the capability issuer only. It does not grant
+    /// content access, permit policy publication, or expose the review graph.
+    #[must_use]
+    pub const fn lineage_review_id(&self) -> &CalibrationLineageReviewId {
+        &self.lineage_review_id
     }
 
     /// Returns the SHA-256 of the canonical frozen scope representation.
@@ -347,11 +371,12 @@ pub enum CalibrationEvidenceReleaseCommitOutcome {
 impl PostgresIdentityStore {
     /// Issues one exact frozen calibration capability with its restricted audit fact.
     ///
-    /// New issuance takes deterministic catalog row locks, freezes the exact
-    /// catalog snapshots and aggregate byte count, inserts every member, and
-    /// inserts one small outbox fact in the same transaction. A retry compares
-    /// only durable frozen state, so later catalog changes cannot alter or
-    /// silently replace an already issued batch.
+    /// New issuance locks the committed lineage review and its vault-attested
+    /// metadata projection before it freezes catalog snapshots and aggregate
+    /// bytes. It inserts the review binding, every member, and one small outbox
+    /// fact in the same transaction. A retry compares only durable frozen
+    /// state, so later catalog changes cannot alter or silently replace an
+    /// already issued batch.
     ///
     /// # Errors
     /// Returns [`StoreError`] for malformed durable state, entropy failure, or
@@ -377,6 +402,21 @@ impl PostgresIdentityStore {
         }
 
         let capability_expires_at = unix_timestamp(command.capability.expires_at())?;
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        if now >= capability_expires_at
+            || !locked_lineage_review_matches(
+                &mut transaction,
+                command.capability,
+                command.capability.lineage_review_id(),
+                now,
+            )
+            .await?
+        {
+            transaction.rollback().await?;
+            return Ok(CalibrationReadCapabilityIssueOutcome::SourceUnavailable);
+        }
         let snapshots = lock_current_catalog(&mut transaction, command.capability).await?;
         if snapshots.len() != command.capability.evidence_refs().len() {
             transaction.rollback().await?;
@@ -391,19 +431,16 @@ impl PostgresIdentityStore {
             transaction.rollback().await?;
             return Ok(CalibrationReadCapabilityIssueOutcome::SourceUnavailable);
         }
-        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *transaction)
-            .await?;
-        if now >= capability_expires_at {
-            transaction.rollback().await?;
-            return Ok(CalibrationReadCapabilityIssueOutcome::SourceUnavailable);
-        }
         if !catalog_snapshots_match_roles(command.capability, &snapshots) {
             transaction.rollback().await?;
             return Ok(CalibrationReadCapabilityIssueOutcome::SourceUnavailable);
         }
         let members = freeze_members(command.capability, &snapshots)?;
-        let scope_digest = scope_digest(command.capability, &members);
+        let scope_digest = scope_digest(
+            command.capability,
+            command.capability.lineage_review_id(),
+            &members,
+        );
         let record = insert_capability_header(
             &mut transaction,
             &command,
@@ -1113,7 +1150,9 @@ fn header_matches_command(
     if !header_matches_capability(row, command.capability)? {
         return Ok(false);
     }
-    let equal = row.try_get::<&str, _>("issued_by")? == command.issued_by
+    let equal = row.try_get::<Option<&str>, _>("lineage_review_id")?
+        == Some(command.capability.lineage_review_id().as_str())
+        && row.try_get::<&str, _>("issued_by")? == command.issued_by
         && row
             .try_get::<Vec<u8>, _>("issuance_idempotency_digest")?
             .as_slice()
@@ -1134,6 +1173,11 @@ fn header_matches_capability(
     let equal = row.try_get::<&str, _>("tenant_id")? == capability.tenant_id().as_str()
         && row.try_get::<&str, _>("site_id")? == capability.site_id().as_str()
         && row.try_get::<&str, _>("capability_id")? == capability.capability_id().as_str()
+        // The scope digest also commits this value, but the header needs its
+        // own exact comparison. Otherwise a changed header plus a matching
+        // replacement digest could make a different review appear durable.
+        && row.try_get::<Option<&str>, _>("lineage_review_id")?
+            == Some(capability.lineage_review_id().as_str())
         && row.try_get::<&str, _>("approval_ref")?
             == capability.provenance().approval_ref().as_str()
         && row.try_get::<&str, _>("dataset_revision")?
@@ -1166,6 +1210,113 @@ fn header_matches_capability(
             == i32::try_from(capability.evidence_refs().len())
                 .map_err(|_| StoreError::NumericRange("member_count"))?;
     Ok(equal)
+}
+
+/// Locks the committed lineage review that provides this issuance's independent
+/// provenance proof.
+///
+/// The review body remains in the dedicated encrypted vault. Its artifact row
+/// is the fixed projection inserted only by `commit_calibration_lineage_review`
+/// after a fresh vault attestation. Locking both rows here keeps a concurrent
+/// retention or administrative mutation from exchanging a review's metadata
+/// between validation and capability-header insertion. The restricted outbox
+/// row is deliberately not queried: publication is history, never authority.
+async fn locked_lineage_review_matches(
+    connection: &mut PgConnection,
+    capability: &CalibrationEvidenceReadCapability,
+    lineage_review_id: &CalibrationLineageReviewId,
+    now: DateTime<Utc>,
+) -> Result<bool, StoreError> {
+    let row = sqlx::query(
+        "SELECT
+             review.schema_version AS review_schema_version,
+             review.policy_revision AS review_policy_revision,
+             review.approval_ref, review.dataset_revision, review.label_revision,
+             review.task_revision, review.threshold_policy_revision, review.mapping_revision,
+             review.evaluation_manifest_artifact_id, review.training_manifest_artifact_id,
+             review.calibration_manifest_artifact_id, review.label_manifest_artifact_id,
+             review.provider, review.provider_model_id, review.model_revision,
+             review.prompt_revision, review.resolved_model_revision, review.source_graph_digest,
+             review.review_artifact_id, review.reviewed_at AS review_reviewed_at,
+             artifact.schema_version AS artifact_schema_version,
+             artifact.kind AS artifact_kind, artifact.content_type AS artifact_content_type,
+             artifact.canonical_body_encoding, artifact.capture_status, artifact.fidelity,
+             artifact.bytes_observed, artifact.bytes_saved, artifact.classification,
+             artifact.storage_profile, artifact.storage_locator, artifact.key_ref,
+             artifact.integrity_algorithm, artifact.integrity_digest,
+             artifact.recorded_at, artifact.reviewed_at AS artifact_reviewed_at,
+             artifact.expires_at AS artifact_expires_at
+         FROM xshield.calibration_lineage_reviews review
+         JOIN xshield.calibration_lineage_review_artifacts artifact
+           ON artifact.tenant_id=review.tenant_id AND artifact.site_id=review.site_id
+          AND artifact.review_id=review.review_id
+          AND artifact.artifact_id=review.review_artifact_id
+         WHERE review.tenant_id=$1 AND review.site_id=$2 AND review.review_id=$3
+         FOR UPDATE OF review, artifact",
+    )
+    .bind(capability.tenant_id().as_str())
+    .bind(capability.site_id().as_str())
+    .bind(lineage_review_id.as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let provenance = capability.provenance();
+    let model = provenance.model();
+    let review_artifact_id: &str = row.try_get("review_artifact_id")?;
+    let integrity_digest: &str = row.try_get("integrity_digest")?;
+    let key_ref: &str = row.try_get("key_ref")?;
+    let artifact_expires_at: DateTime<Utc> = row.try_get("artifact_expires_at")?;
+    Ok(row.try_get::<i16, _>("review_schema_version")?
+        == i16::from(CALIBRATION_LINEAGE_REVIEW_ARTIFACT_SCHEMA_VERSION)
+        && row.try_get::<&str, _>("review_policy_revision")?
+            == CALIBRATION_LINEAGE_REVIEW_POLICY_REVISION
+        && row.try_get::<&str, _>("approval_ref")? == provenance.approval_ref().as_str()
+        && row.try_get::<&str, _>("dataset_revision")? == provenance.dataset_revision().as_str()
+        && row.try_get::<&str, _>("label_revision")? == provenance.label_revision().as_str()
+        && row.try_get::<&str, _>("task_revision")? == provenance.task_revision().as_str()
+        && row.try_get::<&str, _>("threshold_policy_revision")?
+            == provenance.threshold_policy_revision().as_str()
+        && row.try_get::<&str, _>("mapping_revision")? == provenance.mapping_revision().as_str()
+        && row.try_get::<&str, _>("evaluation_manifest_artifact_id")?
+            == provenance.evaluation_manifest_artifact_id().as_str()
+        && row.try_get::<&str, _>("training_manifest_artifact_id")?
+            == provenance.training_manifest_artifact_id().as_str()
+        && row.try_get::<&str, _>("calibration_manifest_artifact_id")?
+            == provenance.calibration_manifest_artifact_id().as_str()
+        && row.try_get::<&str, _>("label_manifest_artifact_id")?
+            == provenance.label_manifest_artifact_id().as_str()
+        && row.try_get::<&str, _>("provider")? == model.provider().as_str()
+        && row.try_get::<&str, _>("provider_model_id")? == model.provider_model_id()
+        && row.try_get::<&str, _>("model_revision")? == model.model_revision().as_str()
+        && row.try_get::<&str, _>("prompt_revision")? == model.prompt_revision().as_str()
+        && row.try_get::<Option<&str>, _>("resolved_model_revision")?
+            == model.resolved_model_revision().map(ModelRevision::as_str)
+        && row.try_get::<Vec<u8>, _>("source_graph_digest")?.len() == 32
+        && row.try_get::<i16, _>("artifact_schema_version")?
+            == i16::from(CALIBRATION_LINEAGE_REVIEW_ARTIFACT_SCHEMA_VERSION)
+        && row.try_get::<&str, _>("artifact_kind")? == CALIBRATION_LINEAGE_REVIEW_ARTIFACT_KIND
+        && row.try_get::<&str, _>("artifact_content_type")?
+            == CALIBRATION_LINEAGE_REVIEW_ARTIFACT_CONTENT_TYPE
+        && row.try_get::<&str, _>("canonical_body_encoding")?
+            == "xshield_calibration_lineage_review_canonical_json_v1"
+        && row.try_get::<&str, _>("capture_status")? == "complete"
+        && row.try_get::<&str, _>("fidelity")? == "entity_exact"
+        && row.try_get::<i64, _>("bytes_observed")? > 0
+        && row.try_get::<i64, _>("bytes_observed")? == row.try_get::<i64, _>("bytes_saved")?
+        && row.try_get::<&str, _>("classification")? == "RESTRICTED"
+        && row.try_get::<&str, _>("storage_profile")? == "aead_envelope_v1"
+        && row.try_get::<&str, _>("storage_locator")? == format!("{review_artifact_id}.xev")
+        && valid_text(key_ref, 128)
+        && row.try_get::<&str, _>("integrity_algorithm")? == "sha256_ciphertext"
+        && valid_lower_hex(integrity_digest, 64)
+        && row.try_get::<DateTime<Utc>, _>("review_reviewed_at")?
+            == row.try_get::<DateTime<Utc>, _>("recorded_at")?
+        && row.try_get::<DateTime<Utc>, _>("recorded_at")?
+            == row.try_get::<DateTime<Utc>, _>("artifact_reviewed_at")?
+        && artifact_expires_at > now
+        && artifact_expires_at >= unix_timestamp(capability.expires_at())?)
 }
 
 async fn lock_current_catalog(
@@ -1303,6 +1454,7 @@ fn catalog_shape_matches(
 
 fn scope_digest(
     capability: &CalibrationEvidenceReadCapability,
+    lineage_review_id: &CalibrationLineageReviewId,
     members: &[FrozenMember],
 ) -> [u8; 32] {
     let mut canonical = Vec::with_capacity(4096);
@@ -1312,6 +1464,7 @@ fn scope_digest(
     );
     append_field(&mut canonical, capability.tenant_id().as_str());
     append_field(&mut canonical, capability.site_id().as_str());
+    append_field(&mut canonical, lineage_review_id.as_str());
     append_field(&mut canonical, &capability.not_before().value().to_string());
     append_field(&mut canonical, &capability.expires_at().value().to_string());
     append_field(&mut canonical, &capability.max_total_bytes().to_string());
@@ -1379,7 +1532,7 @@ async fn insert_capability_header(
     let model = provenance.model();
     let row = sqlx::query(
         "INSERT INTO xshield.calibration_read_capabilities (
-             tenant_id, site_id, capability_id, approval_ref, dataset_revision,
+             tenant_id, site_id, capability_id, lineage_review_id, approval_ref, dataset_revision,
              label_revision, task_revision, threshold_policy_revision, mapping_revision,
              provider, provider_model_id, model_revision, prompt_revision,
              resolved_model_revision, scope_digest, sample_count, member_count,
@@ -1387,14 +1540,15 @@ async fn insert_capability_header(
              issuance_idempotency_digest, issuance_request_digest, issued_event_id,
              issued_at, status
          ) VALUES (
-             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-             to_timestamp($20),to_timestamp($21),$22,$23,$24,$25,
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+             to_timestamp($21),to_timestamp($22),$23,$24,$25,$26,
              date_trunc('milliseconds', clock_timestamp()),'issued'
          ) RETURNING *",
     )
     .bind(capability.tenant_id().as_str())
     .bind(capability.site_id().as_str())
     .bind(capability.capability_id().as_str())
+    .bind(capability.lineage_review_id().as_str())
     .bind(provenance.approval_ref().as_str())
     .bind(provenance.dataset_revision().as_str())
     .bind(provenance.label_revision().as_str())
@@ -1554,6 +1708,7 @@ fn issuance_event(
             "stage":"calibration_read_capability", "outcome":"PASS",
             "reason_code":ISSUED_EVENT_REASON,
             "capability_id": capability.capability_id().as_str(),
+            "lineage_review_id": record.lineage_review_id().as_str(),
             "scope_digest": lower_hex(record.scope_digest()),
             "member_count": record.member_count(),
             "frozen_total_bytes": record.frozen_total_bytes(),
@@ -1605,6 +1760,11 @@ fn record_from_header(row: &PgRow) -> Result<CalibrationReadCapabilityRecord, St
     Ok(CalibrationReadCapabilityRecord {
         capability_id: CalibrationReadCapabilityId::parse(row.try_get::<&str, _>("capability_id")?)
             .map_err(|_| StoreError::CorruptData("calibration_capability_id"))?,
+        lineage_review_id: CalibrationLineageReviewId::parse(
+            row.try_get::<Option<&str>, _>("lineage_review_id")?
+                .ok_or(StoreError::CorruptData("calibration_lineage_review_id"))?,
+        )
+        .map_err(|_| StoreError::CorruptData("calibration_lineage_review_id"))?,
         scope_digest,
         member_count: u32::try_from(row.try_get::<i32, _>("member_count")?)
             .map_err(|_| StoreError::CorruptData("calibration_member_count"))?,
@@ -1739,7 +1899,15 @@ fn frozen_scope_matches(
     Ok(header.try_get::<i32, _>("member_count")? == member_count
         && persisted_total == frozen_total_bytes
         && frozen_total_bytes <= capability.max_total_bytes()
-        && scope_digest(capability, members) == persisted_digest)
+        && header
+            .try_get::<Option<&str>, _>("lineage_review_id")?
+            .is_some_and(|review_id| {
+                CalibrationLineageReviewId::parse(review_id)
+                    .ok()
+                    .is_some_and(|review_id| {
+                        scope_digest(capability, &review_id, members) == persisted_digest
+                    })
+            }))
 }
 
 fn role_from_storage(value: &str) -> Result<CalibrationEvidenceRole, StoreError> {
@@ -2282,6 +2450,13 @@ fn lower_hex(bytes: &[u8]) -> String {
             ]
         })
         .collect()
+}
+
+fn valid_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn valid_text(value: &str, max: usize) -> bool {

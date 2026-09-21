@@ -7,13 +7,17 @@
 use super::{PayloadSummary, PublishError, WireEvent, valid_lower_hex, valid_name, valid_uuid_v7};
 use chrono::{DateTime, SecondsFormat};
 use serde::Deserialize;
-use xshield_core::domain::{ArtifactId, CalibrationReadCapabilityId, CalibrationReportId, EventId};
+use xshield_core::domain::{
+    ArtifactId, CalibrationLineageReviewId, CalibrationReadCapabilityId, CalibrationReportId,
+    EventId,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;
 
 pub(super) const EVENT_TYPES: &[&str] = &[
     "calibration.reported",
+    "calibration.partition_lineage.reviewed",
     "calibration.read_capability.issued",
     "calibration.read_batch.completed",
     "calibration.report_retention.purge_requested",
@@ -49,6 +53,33 @@ struct CalibrationReport {
     resolved_model_revision: ResolvedModelRevision,
 }
 
+/// Bounded projection of a declaration-review fact. The source graph remains
+/// only in the encrypted review artifact and is never indexed through outbox.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CalibrationLineageReview {
+    stage: String,
+    outcome: String,
+    reason_code: String,
+    review_id: String,
+    review_artifact_id: String,
+    approval_ref: String,
+    dataset_revision: String,
+    label_revision: String,
+    task_revision: String,
+    threshold_policy_revision: String,
+    mapping_revision: String,
+    evaluation_manifest_artifact_id: String,
+    training_manifest_artifact_id: String,
+    calibration_manifest_artifact_id: String,
+    label_manifest_artifact_id: String,
+    provider: String,
+    provider_model_id: String,
+    model_revision: String,
+    prompt_revision: String,
+    resolved_model_revision: ResolvedModelRevision,
+}
+
 /// Preserves the explicit unknown revision rather than treating an omitted field
 /// as a known or current provider revision.
 #[derive(Deserialize)]
@@ -65,6 +96,7 @@ struct CalibrationReadCapabilityIssued {
     outcome: String,
     reason_code: String,
     capability_id: String,
+    lineage_review_id: String,
     scope_digest: String,
     member_count: u32,
     frozen_total_bytes: u64,
@@ -113,6 +145,9 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
     if event.event_type == "calibration.read_batch.completed" {
         return parse_batch_completed(event);
     }
+    if event.event_type == "calibration.partition_lineage.reviewed" {
+        return parse_lineage_review(event);
+    }
     if event
         .event_type
         .starts_with("calibration.report_retention.")
@@ -146,6 +181,53 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         || !valid_resolved_revision(&value.resolved_model_revision)
         || !all_artifacts(&value)
         || event.evidence_refs.as_slice() != [value.report_artifact_id.as_str()]
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    utc_millis(&event.occurred_at)?;
+    Ok(PayloadSummary {
+        stage: value.stage,
+        outcome: value.outcome,
+        reason_code: value.reason_code,
+        proof_kind: "deterministic".to_owned(),
+        confidence_status: "not_applicable".to_owned(),
+        ..PayloadSummary::default()
+    })
+}
+
+/// Validates the restricted durable declaration-review history fact.
+///
+/// A successful parse only makes the independent review identifiable in the
+/// analytical index. It never treats submitted graph metadata as proof of
+/// corpus independence and never grants source evidence access.
+fn parse_lineage_review(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
+    let value: CalibrationLineageReview = serde_json::from_str(event.payload.get())?;
+    let review_id = CalibrationLineageReviewId::parse(value.review_id.clone())
+        .map_err(|_| PublishError::InvalidEvent)?;
+    let review_uuid = review_id
+        .as_str()
+        .strip_prefix("calrev_")
+        .ok_or(PublishError::InvalidEvent)?;
+    if event.producer_id != "calibration-lineage-reviewer"
+        || event.policy_revision != "calibration-lineage-v1"
+        || event.producer_boot_id != event.event_id
+        || event.producer_seq != 1
+        || event.request_seq != 1
+        || event.request_id.is_some()
+        || event.sensitivity != "RESTRICTED"
+        || event.observed_at != event.occurred_at
+        || event.trace_id != review_uuid.replace('-', "")
+        || event.trace_id.get(..16) != Some(event.span_id.as_str())
+        || !event.cause_event_ids.is_empty()
+        || value.stage != "calibration_partition_lineage"
+        || value.outcome != "PASS"
+        || value.reason_code != "CALIBRATION_PARTITION_LINEAGE_REVIEWED"
+        || ArtifactId::parse(&value.review_artifact_id).is_err()
+        || !valid_lineage_scalars(&value)
+        || !valid_provider_model_id(&value.provider_model_id)
+        || !valid_resolved_revision(&value.resolved_model_revision)
+        || !lineage_artifacts_are_distinct(&value)
+        || event.evidence_refs.as_slice() != [value.review_artifact_id.as_str()]
     {
         return Err(PublishError::InvalidEvent);
     }
@@ -295,6 +377,8 @@ fn parse_capability_issued(event: &WireEvent) -> Result<PayloadSummary, PublishE
     let value: CalibrationReadCapabilityIssued = serde_json::from_str(event.payload.get())?;
     let capability_id = CalibrationReadCapabilityId::parse(value.capability_id.clone())
         .map_err(|_| PublishError::InvalidEvent)?;
+    CalibrationLineageReviewId::parse(value.lineage_review_id.clone())
+        .map_err(|_| PublishError::InvalidEvent)?;
     let capability_uuid = capability_id
         .as_str()
         .strip_prefix("calcap_")
@@ -353,6 +437,22 @@ fn valid_scalars(value: &CalibrationReport) -> bool {
     .all(|field| valid_name(field))
 }
 
+fn valid_lineage_scalars(value: &CalibrationLineageReview) -> bool {
+    [
+        &value.approval_ref,
+        &value.dataset_revision,
+        &value.label_revision,
+        &value.task_revision,
+        &value.threshold_policy_revision,
+        &value.mapping_revision,
+        &value.provider,
+        &value.model_revision,
+        &value.prompt_revision,
+    ]
+    .into_iter()
+    .all(|field| valid_name(field))
+}
+
 fn valid_resolved_revision(value: &ResolvedModelRevision) -> bool {
     match value {
         ResolvedModelRevision::Known(revision) => valid_name(revision),
@@ -363,6 +463,24 @@ fn valid_resolved_revision(value: &ResolvedModelRevision) -> bool {
 fn all_artifacts(value: &CalibrationReport) -> bool {
     let artifacts = [
         &value.report_artifact_id,
+        &value.evaluation_manifest_artifact_id,
+        &value.training_manifest_artifact_id,
+        &value.calibration_manifest_artifact_id,
+        &value.label_manifest_artifact_id,
+    ];
+    artifacts
+        .iter()
+        .all(|artifact| ArtifactId::parse(*artifact).is_ok())
+        && artifacts
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == artifacts.len()
+}
+
+fn lineage_artifacts_are_distinct(value: &CalibrationLineageReview) -> bool {
+    let artifacts = [
+        &value.review_artifact_id,
         &value.evaluation_manifest_artifact_id,
         &value.training_manifest_artifact_id,
         &value.calibration_manifest_artifact_id,

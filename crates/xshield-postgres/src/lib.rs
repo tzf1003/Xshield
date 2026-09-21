@@ -7,6 +7,7 @@
 
 mod action_read;
 mod binding_inspection;
+mod calibration_lineage_review;
 mod calibration_read_capability;
 mod calibration_report;
 mod calibration_report_retention;
@@ -37,6 +38,10 @@ mod share_grant_read;
 
 pub use action_read::ResponseActionDescriptorQuery;
 pub use binding_inspection::BindingInspection;
+pub use calibration_lineage_review::{
+    CalibrationLineageReviewCommit, CalibrationLineageReviewCommitOutcome,
+    CalibrationLineageReviewCommitRecord,
+};
 pub use calibration_read_capability::{
     AuthorizedCalibrationEvidence, CalibrationEvidenceBatchBegin,
     CalibrationEvidenceBatchBeginOutcome, CalibrationEvidenceBatchComplete,

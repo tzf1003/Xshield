@@ -951,8 +951,9 @@ mod tests {
             read_capability::{CalibrationEvidenceBatchLease, CalibrationSampleReadScope},
         },
         domain::{
-            DatasetRevision, LabelRevision, MappingRevision, ModelCallId, ModelRevision,
-            PromptRevision, ProviderId, TaskRevision, ThresholdPolicyRevision,
+            CalibrationLineageReviewId, DatasetRevision, LabelRevision, MappingRevision,
+            ModelCallId, ModelRevision, PromptRevision, ProviderId, TaskRevision,
+            ThresholdPolicyRevision,
         },
     };
 
@@ -1387,6 +1388,7 @@ mod tests {
         Fixture {
             capability: CalibrationEvidenceReadCapability::new(
                 capability_id(),
+                lineage_review_id(),
                 tenant(),
                 site(),
                 provenance,
@@ -1414,6 +1416,11 @@ mod tests {
     fn capability_id() -> CalibrationReadCapabilityId {
         CalibrationReadCapabilityId::parse("calcap_018f2a3b-4c5d-7000-8000-000000000001")
             .expect("capability id")
+    }
+
+    fn lineage_review_id() -> CalibrationLineageReviewId {
+        CalibrationLineageReviewId::parse("calrev_018f2a3b-4c5d-7000-8000-000000000001")
+            .expect("lineage review id")
     }
 
     fn lease_id() -> xshield_core::domain::CalibrationReadLeaseId {

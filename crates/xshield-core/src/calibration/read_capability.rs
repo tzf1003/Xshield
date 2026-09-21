@@ -11,7 +11,10 @@ use super::{
     dataset::{EvaluationProvenance, EvaluationReport},
 };
 use crate::{
-    domain::{ArtifactId, CalibrationReadCapabilityId, CalibrationReadLeaseId, SiteId, TenantId},
+    domain::{
+        ArtifactId, CalibrationLineageReviewId, CalibrationReadCapabilityId,
+        CalibrationReadLeaseId, SiteId, TenantId,
+    },
     identity::UnixSeconds,
 };
 use std::{collections::BTreeSet, fmt};
@@ -368,6 +371,7 @@ impl std::error::Error for CalibrationEvidenceBatchCompletionError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CalibrationEvidenceReadCapability {
     capability_id: CalibrationReadCapabilityId,
+    lineage_review_id: CalibrationLineageReviewId,
     tenant_id: TenantId,
     site_id: SiteId,
     provenance: EvaluationProvenance,
@@ -391,6 +395,7 @@ impl CalibrationEvidenceReadCapability {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         capability_id: CalibrationReadCapabilityId,
+        lineage_review_id: CalibrationLineageReviewId,
         tenant_id: TenantId,
         site_id: SiteId,
         provenance: EvaluationProvenance,
@@ -429,6 +434,7 @@ impl CalibrationEvidenceReadCapability {
         }
         Ok(Self {
             capability_id,
+            lineage_review_id,
             tenant_id,
             site_id,
             provenance,
@@ -509,6 +515,17 @@ impl CalibrationEvidenceReadCapability {
     #[must_use]
     pub const fn capability_id(&self) -> &CalibrationReadCapabilityId {
         &self.capability_id
+    }
+
+    /// Returns the committed declaration-review identity bound to this batch.
+    ///
+    /// This identifies the review that the durable issuer must lock and compare
+    /// with the exact provenance and four manifests before any evidence lease
+    /// may exist. It is not a content-read authorization and does not expose
+    /// the source graph represented by the review artifact.
+    #[must_use]
+    pub const fn lineage_review_id(&self) -> &CalibrationLineageReviewId {
+        &self.lineage_review_id
     }
 
     /// Returns the frozen tenant scope.

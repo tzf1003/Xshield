@@ -7,6 +7,7 @@
 
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use std::{env, fs, path::PathBuf, time::Duration};
 use uuid::Uuid;
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, sha256_digest};
@@ -20,9 +21,10 @@ use xshield_core::{
         },
     },
     domain::{
-        ApprovalRef, ArtifactId, CalibrationReadCapabilityId, DatasetRevision, EventId,
-        LabelRevision, MappingRevision, ModelCallId, ModelRevision, PromptRevision, ProviderId,
-        RequestId, SiteId, TaskRevision, TenantId, ThresholdPolicyRevision,
+        ApprovalRef, ArtifactId, CalibrationLineageReviewId, CalibrationReadCapabilityId,
+        DatasetRevision, EventId, LabelRevision, MappingRevision, ModelCallId, ModelRevision,
+        PromptRevision, ProviderId, RequestId, SiteId, TaskRevision, TenantId,
+        ThresholdPolicyRevision,
     },
     identity::UnixSeconds,
     ports::{
@@ -45,7 +47,7 @@ const EVIDENCE_KEY: &str = "1111111111111111111111111111111111111111111111111111
 const JOURNAL_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
 #[tokio::test]
-#[ignore = "requires script-owned XSHIELD_TEST_DATABASE_URL with migrations through 0028"]
+#[ignore = "requires script-owned XSHIELD_TEST_DATABASE_URL with migrations through 0032"]
 async fn calibration_reader_requires_durable_journal_before_plaintext_and_completion() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -199,6 +201,8 @@ struct Fixture {
     store: PostgresIdentityStore,
     tenant: TenantId,
     site: SiteId,
+    lineage_review_id: CalibrationLineageReviewId,
+    lineage_review_artifact_id: ArtifactId,
     request: RequestId,
     root: PathBuf,
     evidence_root: PathBuf,
@@ -220,6 +224,13 @@ impl Fixture {
             tenant: TenantId::parse(format!("tenant_reader_{}", Uuid::now_v7().simple()))
                 .expect("tenant is bounded"),
             site: SiteId::parse("site_reader").expect("site is bounded"),
+            lineage_review_id: CalibrationLineageReviewId::parse(format!(
+                "calrev_{}",
+                Uuid::now_v7()
+            ))
+            .expect("lineage review id is valid"),
+            lineage_review_artifact_id: ArtifactId::parse(format!("artifact_{}", Uuid::now_v7()))
+                .expect("lineage review artifact id is valid"),
             request: RequestId::parse(format!("req_{}", Uuid::now_v7()))
                 .expect("request id is valid"),
             journal_root: root.join("journal"),
@@ -228,7 +239,9 @@ impl Fixture {
             artifacts: Vec::new(),
             plaintexts: Vec::new(),
         };
-        fixture.write_catalog().await
+        let fixture = fixture.write_catalog().await;
+        fixture.seed_committed_lineage_review(database_url).await;
+        fixture
     }
 
     async fn write_catalog(mut self) -> Self {
@@ -273,6 +286,94 @@ impl Fixture {
         self
     }
 
+    /// Seeds only the immutable review projection already produced by the
+    /// dedicated vault-attested review commit path. This reader fixture tests
+    /// post-issuance evidence release and therefore must not weaken the issuer
+    /// gate by substituting an outbox event for its locked review projection.
+    async fn seed_committed_lineage_review(&self, database_url: &str) {
+        let pool = PgPool::connect(database_url)
+            .await
+            .expect("review seed pool connects");
+        let provenance = self.provenance();
+        let event = event_id();
+        let mut transaction = pool.begin().await.expect("review seed transaction starts");
+        sqlx::query(
+            "INSERT INTO xshield.audit_outbox
+                 (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope)
+             VALUES ($1,$2,$3,$4,'calibration.partition_lineage.reviewed','{}')",
+        )
+        .bind(event.as_str())
+        .bind(self.tenant.as_str())
+        .bind(self.site.as_str())
+        .bind(self.lineage_review_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .expect("review event seed inserts");
+        sqlx::query(
+            "INSERT INTO xshield.calibration_lineage_review_artifacts (
+                 tenant_id, site_id, review_id, artifact_id, schema_version, kind,
+                 content_type, canonical_body_encoding, capture_status, fidelity,
+                 bytes_observed, bytes_saved, classification, storage_profile,
+                 storage_locator, key_ref, integrity_algorithm, integrity_digest,
+                 recorded_at, reviewed_at, expires_at
+             ) VALUES (
+                 $1,$2,$3,$4,1,'calibration_partition_lineage_review',
+                 'application/vnd.xshield.calibration-lineage-review+json',
+                 'xshield_calibration_lineage_review_canonical_json_v1','complete','entity_exact',
+                 1,1,'RESTRICTED','aead_envelope_v1',$5,'key-r1','sha256_ciphertext',$6,
+                 date_trunc('milliseconds', now()),date_trunc('milliseconds', now()),
+                 now() + interval '10 minutes'
+             )",
+        )
+        .bind(self.tenant.as_str())
+        .bind(self.site.as_str())
+        .bind(self.lineage_review_id.as_str())
+        .bind(self.lineage_review_artifact_id.as_str())
+        .bind(format!("{}.xev", self.lineage_review_artifact_id.as_str()))
+        .bind("a".repeat(64))
+        .execute(&mut *transaction)
+        .await
+        .expect("attested review artifact projection inserts");
+        sqlx::query(
+            "INSERT INTO xshield.calibration_lineage_reviews (
+                 tenant_id, site_id, review_id, review_artifact_id, schema_version, policy_revision,
+                 approval_ref, dataset_revision, label_revision, task_revision,
+                 threshold_policy_revision, mapping_revision, evaluation_manifest_artifact_id,
+                 training_manifest_artifact_id, calibration_manifest_artifact_id,
+                 label_manifest_artifact_id, provider, provider_model_id, model_revision,
+                 prompt_revision, resolved_model_revision, source_graph_digest, reviewed_event_id,
+                 reviewed_at
+             ) VALUES (
+                 $1,$2,$3,$4,1,'calibration-lineage-v1',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                 $15,$16,$17,$18,$19,decode(repeat('a',64),'hex'),$20,date_trunc('milliseconds', now())
+             )",
+        )
+        .bind(self.tenant.as_str())
+        .bind(self.site.as_str())
+        .bind(self.lineage_review_id.as_str())
+        .bind(self.lineage_review_artifact_id.as_str())
+        .bind(provenance.approval_ref().as_str())
+        .bind(provenance.dataset_revision().as_str())
+        .bind(provenance.label_revision().as_str())
+        .bind(provenance.task_revision().as_str())
+        .bind(provenance.threshold_policy_revision().as_str())
+        .bind(provenance.mapping_revision().as_str())
+        .bind(provenance.evaluation_manifest_artifact_id().as_str())
+        .bind(provenance.training_manifest_artifact_id().as_str())
+        .bind(provenance.calibration_manifest_artifact_id().as_str())
+        .bind(provenance.label_manifest_artifact_id().as_str())
+        .bind(provenance.model().provider().as_str())
+        .bind(provenance.model().provider_model_id())
+        .bind(provenance.model().model_revision().as_str())
+        .bind(provenance.model().prompt_revision().as_str())
+        .bind(provenance.model().resolved_model_revision().map(ModelRevision::as_str))
+        .bind(event.as_str())
+        .execute(&mut *transaction)
+        .await
+        .expect("committed lineage review projection inserts");
+        transaction.commit().await.expect("review seed commits");
+    }
+
     fn vault(&self) -> LocalEvidenceVault {
         LocalEvidenceVault::open(
             EvidenceVaultConfig::new(&self.evidence_root, "reader-evidence-r1", 1024, 1)
@@ -315,6 +416,7 @@ impl Fixture {
         CalibrationEvidenceReadCapability::new(
             CalibrationReadCapabilityId::parse(format!("calcap_{}", Uuid::now_v7()))
                 .expect("capability id is valid"),
+            self.lineage_review_id.clone(),
             self.tenant.clone(),
             self.site.clone(),
             self.provenance(),

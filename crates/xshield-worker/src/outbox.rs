@@ -100,6 +100,7 @@ impl OutboxFamily {
                 | "calibration.report_retention.orphan_purge_requested"
                 | "calibration.report_retention.orphan_deleted"
                 | "calibration.report_retention.orphan_purge_failed" => "report_id",
+                "calibration.partition_lineage.reviewed" => "review_id",
                 "calibration.read_capability.issued" | "calibration.read_batch.completed" => {
                     "capability_id"
                 }

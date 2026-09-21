@@ -236,6 +236,15 @@ impl PostgresIdentityStore {
         };
         let status: &str = header.try_get("status")?;
         if status == "consumed" {
+            // Recovery intentionally does not require live catalog rows: a
+            // committed report must remain exactly recoverable after normal
+            // retention. It still rechecks the immutable capability header
+            // and the report's copied review identity before returning an
+            // existing result.
+            if !report_header_matches(&header, capability)? {
+                transaction.rollback().await?;
+                return Ok(CalibrationReportCommitOutcome::Unavailable);
+            }
             let result = existing_report_commit(&mut transaction, &header, &command).await?;
             transaction.rollback().await?;
             return Ok(result);
@@ -367,6 +376,8 @@ fn report_header_matches(
         row.try_get::<&str, _>("tenant_id")? == capability.tenant_id().as_str()
             && row.try_get::<&str, _>("site_id")? == capability.site_id().as_str()
             && row.try_get::<&str, _>("capability_id")? == capability.capability_id().as_str()
+            && row.try_get::<Option<&str>, _>("lineage_review_id")?
+                == Some(capability.lineage_review_id().as_str())
             && row.try_get::<&str, _>("approval_ref")? == provenance.approval_ref().as_str()
             && row.try_get::<&str, _>("dataset_revision")?
                 == provenance.dataset_revision().as_str()
@@ -667,6 +678,7 @@ async fn insert_report_row(
     Ok(sqlx::query(
         "INSERT INTO xshield.calibration_reports (
              tenant_id, site_id, report_id, report_artifact_id, capability_id,
+             lineage_review_id,
              approval_ref, dataset_revision, label_revision, task_revision,
              threshold_policy_revision, mapping_revision,
              evaluation_manifest_artifact_id, training_manifest_artifact_id,
@@ -674,7 +686,7 @@ async fn insert_report_row(
              provider, provider_model_id, model_revision, prompt_revision,
              resolved_model_revision, completion_event_id, reported_event_id,
              completed_at, reported_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
          ON CONFLICT DO NOTHING",
     )
     .bind(capability.tenant_id().as_str())
@@ -682,6 +694,7 @@ async fn insert_report_row(
     .bind(publication.report_id().as_str())
     .bind(publication.report_artifact_id().as_str())
     .bind(capability.capability_id().as_str())
+    .bind(capability.lineage_review_id().as_str())
     .bind(provenance.approval_ref().as_str())
     .bind(provenance.dataset_revision().as_str())
     .bind(provenance.label_revision().as_str())
@@ -858,6 +871,8 @@ fn report_row_matches(
             && row.try_get::<&str, _>("report_artifact_id")?
                 == publication.report_artifact_id().as_str()
             && row.try_get::<&str, _>("capability_id")? == capability.capability_id().as_str()
+            && row.try_get::<Option<&str>, _>("lineage_review_id")?
+                == Some(capability.lineage_review_id().as_str())
             && row.try_get::<&str, _>("approval_ref")? == publication.approval_ref().as_str()
             && row.try_get::<&str, _>("dataset_revision")?
                 == publication.dataset_revision().as_str()
@@ -1027,6 +1042,7 @@ fn report_scope_digest(
     );
     append_scope_field(&mut canonical, capability.tenant_id().as_str());
     append_scope_field(&mut canonical, capability.site_id().as_str());
+    append_scope_field(&mut canonical, capability.lineage_review_id().as_str());
     append_scope_field(&mut canonical, &capability.not_before().value().to_string());
     append_scope_field(&mut canonical, &capability.expires_at().value().to_string());
     append_scope_field(&mut canonical, &capability.max_total_bytes().to_string());

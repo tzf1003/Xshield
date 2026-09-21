@@ -23,9 +23,10 @@ use xshield_core::{
         },
     },
     domain::{
-        ApprovalRef, ArtifactId, CalibrationReadCapabilityId, CalibrationReportId, DatasetRevision,
-        EventId, LabelRevision, MappingRevision, ModelCallId, ModelRevision, PromptRevision,
-        ProviderId, RequestId, SiteId, TaskRevision, TenantId, ThresholdPolicyRevision,
+        ApprovalRef, ArtifactId, CalibrationLineageReviewId, CalibrationReadCapabilityId,
+        CalibrationReportId, DatasetRevision, EventId, LabelRevision, MappingRevision, ModelCallId,
+        ModelRevision, PromptRevision, ProviderId, RequestId, SiteId, TaskRevision, TenantId,
+        ThresholdPolicyRevision,
     },
     identity::UnixSeconds,
 };
@@ -39,7 +40,7 @@ use xshield_postgres::{
 };
 
 #[tokio::test]
-#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0026"]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL with migrations through 0032"]
 async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state() {
     let database_url =
         env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required");
@@ -59,18 +60,27 @@ async fn calibration_report_commit_is_atomic_exact_and_closed_on_invalid_state()
     )
     .expect("vault opens");
     seed_catalog(&pool, &fixture).await;
+    seed_committed_lineage_review(
+        &pool,
+        &fixture,
+        &fixture.lineage_review_id,
+        &fixture.lineage_review_artifact_id,
+    )
+    .await;
 
     assert_artifact_first_conflict_keeps_lease_active(&pool, &store, &fixture, &vault).await;
     assert_successful_commit_is_atomic_and_exact(&pool, &store, &fixture, &vault).await;
     assert_wrong_runner_catalog_drift_and_expiry_are_closed(&pool, &store, &fixture, &vault).await;
 
-    cleanup(&pool, &fixture).await;
+    cleanup(&pool, &fixture);
     fs::remove_dir_all(vault_root).expect("private vault root is removable");
 }
 
 struct Fixture {
     tenant: TenantId,
     site: SiteId,
+    lineage_review_id: CalibrationLineageReviewId,
+    lineage_review_artifact_id: ArtifactId,
     artifacts: Vec<ArtifactId>,
 }
 
@@ -80,6 +90,12 @@ impl Fixture {
             tenant: TenantId::parse(format!("tenant_calreport_{}", Uuid::now_v7().simple()))
                 .expect("tenant is bounded"),
             site: SiteId::parse("site_calreport").expect("site is bounded"),
+            lineage_review_id: CalibrationLineageReviewId::parse(format!(
+                "calrev_{}",
+                Uuid::now_v7()
+            ))
+            .expect("lineage review id is valid"),
+            lineage_review_artifact_id: artifact_id(),
             artifacts: (0..6).map(|_| artifact_id()).collect(),
         }
     }
@@ -89,6 +105,7 @@ impl Fixture {
         CalibrationEvidenceReadCapability::new(
             CalibrationReadCapabilityId::parse(format!("calcap_{}", Uuid::now_v7()))
                 .expect("capability id is valid"),
+            self.lineage_review_id.clone(),
             self.tenant.clone(),
             self.site.clone(),
             self.provenance(),
@@ -159,13 +176,15 @@ async fn assert_artifact_first_conflict_keeps_lease_active(
         &report_event_id,
     )
     .expect("commit command is valid");
-    assert!(matches!(
-        store
-            .complete_and_publish_calibration_report(command)
-            .await
-            .expect("collision resolves"),
-        CalibrationReportCommitOutcome::Conflict
-    ));
+    let outcome = store
+        .complete_and_publish_calibration_report(command)
+        .await
+        .expect("collision resolves");
+    assert!(
+        matches!(outcome, CalibrationReportCommitOutcome::Conflict),
+        "expected report artifact collision, got {}",
+        outcome.reason_code()
+    );
     assert_state(pool, &capability, "leased", "active").await;
     let report_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM xshield.calibration_reports
@@ -180,6 +199,7 @@ async fn assert_artifact_first_conflict_keeps_lease_active(
     assert_eq!(report_count, 0);
 }
 
+#[allow(clippy::too_many_lines)]
 async fn assert_successful_commit_is_atomic_and_exact(
     pool: &PgPool,
     store: &PostgresIdentityStore,
@@ -246,6 +266,20 @@ async fn assert_successful_commit_is_atomic_and_exact(
     assert_eq!(persisted.3, completion_event_id.as_str());
     assert_eq!(persisted.4, report_event_id.as_str());
     assert_eq!(record.report_id(), publication.report_id());
+    let persisted_lineage_review_id: String = sqlx::query_scalar(
+        "SELECT lineage_review_id FROM xshield.calibration_reports
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(capability.capability_id().as_str())
+    .fetch_one(pool)
+    .await
+    .expect("report persists its authorization review identity");
+    assert_eq!(
+        persisted_lineage_review_id,
+        fixture.lineage_review_id.as_str()
+    );
 
     let retry = CalibrationReportCommit::new(
         &completion,
@@ -282,6 +316,43 @@ async fn assert_successful_commit_is_atomic_and_exact(
             .await
             .expect("conflicting retry resolves"),
         CalibrationReportCommitOutcome::Conflict
+    ));
+
+    let other_review_id = CalibrationLineageReviewId::parse(format!("calrev_{}", Uuid::now_v7()))
+        .expect("alternate lineage review id is valid");
+    let attempted_rebind = sqlx::query(
+        "UPDATE xshield.calibration_reports SET lineage_review_id=$4
+         WHERE tenant_id=$1 AND site_id=$2 AND capability_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(capability.capability_id().as_str())
+    .bind(other_review_id.as_str())
+    .execute(pool)
+    .await
+    .expect_err("committed report lineage review must not be rebound");
+    assert_eq!(
+        attempted_rebind
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code),
+        Some(std::borrow::Cow::Borrowed("23514"))
+    );
+    let post_rebind_retry = CalibrationReportCommit::new(
+        &completion,
+        &report,
+        &publication,
+        &manifest,
+        "runner-success",
+        &completion_event_id,
+        &report_event_id,
+    )
+    .expect("post-rebind retry is shaped");
+    assert!(matches!(
+        store
+            .complete_and_publish_calibration_report(post_rebind_retry)
+            .await
+            .expect("post-rebind retry resolves"),
+        CalibrationReportCommitOutcome::Existing(existing) if existing == record
     ));
 }
 
@@ -567,6 +638,101 @@ async fn seed_catalog(pool: &PgPool, fixture: &Fixture) {
     }
 }
 
+/// Seeds only the immutable review projection already produced by the dedicated
+/// vault-attested review path. This report fixture exercises capability/report
+/// state transitions, while `calibration_lineage_review` owns the vault-first
+/// review commit regression.
+async fn seed_committed_lineage_review(
+    pool: &PgPool,
+    fixture: &Fixture,
+    review_id: &CalibrationLineageReviewId,
+    review_artifact_id: &ArtifactId,
+) {
+    let provenance = fixture.provenance();
+    let event = event_id();
+    let mut transaction = pool.begin().await.expect("review seed transaction starts");
+    sqlx::query(
+        "INSERT INTO xshield.audit_outbox
+             (event_id, tenant_id, site_id, aggregate_ref, event_type, envelope)
+         VALUES ($1,$2,$3,$4,'calibration.partition_lineage.reviewed','{}')",
+    )
+    .bind(event.as_str())
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(review_id.as_str())
+    .execute(&mut *transaction)
+    .await
+    .expect("review event seed inserts");
+    sqlx::query(
+        "INSERT INTO xshield.calibration_lineage_review_artifacts (
+             tenant_id, site_id, review_id, artifact_id, schema_version, kind,
+             content_type, canonical_body_encoding, capture_status, fidelity,
+             bytes_observed, bytes_saved, classification, storage_profile,
+             storage_locator, key_ref, integrity_algorithm, integrity_digest,
+             recorded_at, reviewed_at, expires_at
+         ) VALUES (
+             $1,$2,$3,$4,1,'calibration_partition_lineage_review',
+             'application/vnd.xshield.calibration-lineage-review+json',
+             'xshield_calibration_lineage_review_canonical_json_v1','complete','entity_exact',
+             1,1,'RESTRICTED','aead_envelope_v1',$5,'key-r1','sha256_ciphertext',$6,
+             date_trunc('milliseconds', now()),date_trunc('milliseconds', now()),
+             now() + interval '10 minutes'
+         )",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(review_id.as_str())
+    .bind(review_artifact_id.as_str())
+    .bind(format!("{}.xev", review_artifact_id.as_str()))
+    .bind("a".repeat(64))
+    .execute(&mut *transaction)
+    .await
+    .expect("attested review artifact projection inserts");
+    sqlx::query(
+        "INSERT INTO xshield.calibration_lineage_reviews (
+             tenant_id, site_id, review_id, review_artifact_id, schema_version, policy_revision,
+             approval_ref, dataset_revision, label_revision, task_revision,
+             threshold_policy_revision, mapping_revision, evaluation_manifest_artifact_id,
+             training_manifest_artifact_id, calibration_manifest_artifact_id,
+             label_manifest_artifact_id, provider, provider_model_id, model_revision,
+             prompt_revision, resolved_model_revision, source_graph_digest, reviewed_event_id,
+             reviewed_at
+         ) VALUES (
+             $1,$2,$3,$4,1,'calibration-lineage-v1',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+             $15,$16,$17,$18,$19,decode(repeat('a',64),'hex'),$20,date_trunc('milliseconds', now())
+         )",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(review_id.as_str())
+    .bind(review_artifact_id.as_str())
+    .bind(provenance.approval_ref().as_str())
+    .bind(provenance.dataset_revision().as_str())
+    .bind(provenance.label_revision().as_str())
+    .bind(provenance.task_revision().as_str())
+    .bind(provenance.threshold_policy_revision().as_str())
+    .bind(provenance.mapping_revision().as_str())
+    .bind(provenance.evaluation_manifest_artifact_id().as_str())
+    .bind(provenance.training_manifest_artifact_id().as_str())
+    .bind(provenance.calibration_manifest_artifact_id().as_str())
+    .bind(provenance.label_manifest_artifact_id().as_str())
+    .bind(provenance.model().provider().as_str())
+    .bind(provenance.model().provider_model_id())
+    .bind(provenance.model().model_revision().as_str())
+    .bind(provenance.model().prompt_revision().as_str())
+    .bind(
+        provenance
+            .model()
+            .resolved_model_revision()
+            .map(ModelRevision::as_str),
+    )
+    .bind(event.as_str())
+    .execute(&mut *transaction)
+    .await
+    .expect("committed lineage review projection inserts");
+    transaction.commit().await.expect("review seed commits");
+}
+
 fn calibration_catalog_kind(index: usize) -> &'static str {
     match index {
         0 => "evaluation_manifest",
@@ -617,32 +783,10 @@ async fn seed_report_artifact_collision(
     .expect("report artifact collision fixture inserts");
 }
 
-async fn cleanup(pool: &PgPool, fixture: &Fixture) {
-    let mut transaction = pool.begin().await.expect("cleanup transaction starts");
-    for statement in [
-        "DELETE FROM xshield.calibration_reports WHERE tenant_id=$1",
-        "DELETE FROM xshield.calibration_report_artifacts WHERE tenant_id=$1",
-        "DELETE FROM xshield.calibration_read_capability_leases WHERE tenant_id=$1",
-        "DELETE FROM xshield.calibration_read_capability_members WHERE tenant_id=$1",
-        "DELETE FROM xshield.calibration_read_capabilities WHERE tenant_id=$1",
-    ] {
-        sqlx::query(statement)
-            .bind(fixture.tenant.as_str())
-            .execute(&mut *transaction)
-            .await
-            .expect("fixture state cleans up");
-    }
-    transaction.commit().await.expect("cleanup commits");
-    for statement in [
-        "DELETE FROM xshield.artifact_catalog WHERE tenant_id=$1",
-        "DELETE FROM xshield.audit_outbox WHERE tenant_id=$1",
-    ] {
-        sqlx::query(statement)
-            .bind(fixture.tenant.as_str())
-            .execute(pool)
-            .await
-            .expect("fixture state cleans up");
-    }
+fn cleanup(_pool: &PgPool, _fixture: &Fixture) {
+    // Migration 0030 freezes committed review projections. Every integration
+    // fixture uses a unique tenant and the harness drops its temporary database,
+    // so deleting retained audit state here would test an invalid lifecycle.
 }
 
 fn now() -> UnixSeconds {
