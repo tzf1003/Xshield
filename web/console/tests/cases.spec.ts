@@ -155,7 +155,7 @@ test("case list renders purpose as text with healthy desktop and mobile layouts"
     await route.fulfill({ json: body });
   });
   await connectCases(page);
-  await expect(page).toHaveURL("http://127.0.0.1:5173/");
+  await expect(page).toHaveURL(new URL("/", page.url()).toString());
   await expect(page).toHaveTitle("调查控制台 · Xshield");
   await page.getByRole("button", { name: "读取我的案件 / 刷新列表" }).click();
   const list = page.getByRole("region", { name: "我的案件", exact: true });
@@ -332,7 +332,7 @@ test("case create → browse → add → refresh → close → browse uses expli
     }
   });
   await connectCases(page);
-  await expect(page).toHaveURL("http://127.0.0.1:5173/");
+  await expect(page).toHaveURL(new URL("/", page.url()).toString());
   await expect(page).toHaveTitle("调查控制台 · Xshield");
   await expect(
     page.getByRole("heading", { name: "案件工作台", exact: true }),
