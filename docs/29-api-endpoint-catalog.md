@@ -316,3 +316,15 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 游标使用独立用途域 `xshield-control-model-call-list-cursor-v1`，以 HMAC 常量时间比较绑定管理凭证摘要、主体、服务端 tenant/site、窗口、页大小、固定排序及最后的微秒时间和 model call ID。它不能跨凭证、主体、范围、窗口、页大小、位置、接口或游标密钥轮换复用；签名依赖失败为 `CONTROL_CURSOR_UNAVAILABLE`/503。列表与 search/单项模型查询共用每实例一个在途许可；已准入查询在客户端断连后仍执行至索引和终态审计。容量为 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429；确定性预算溢出为 `CONTROL_QUERY_BUDGET_EXCEEDED`/429，`retryable=false`、`next_action=narrow_query`；超时、索引依赖或水位检查故障分别为 `CONTROL_QUERY_TIMEOUT`、`CONTROL_MODEL_CALLS_INDEX_UNAVAILABLE`、`CONTROL_MODEL_CALLS_HEALTH_UNAVAILABLE`/503。
 
 所有已认证且可审计的尝试都追加独立 `console.model.list` 管理 journal：成功为 `PASS/CONTROL_MODEL_CALLS_READ`，失败按相应稳定原因码区分 DENY/ERROR。事件没有 target、query digest、evidence refs、游标、窗口、返回模型 ID 或页面数据；因此它不把列表观察伪装成单项读取、模型执行或证据授权。必需审计写入失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留任何结果；所有响应 `Cache-Control: private, no-store`。发布器必须先升级到支持 `console.model.list` 后开放路由；无 PostgreSQL migration 或新依赖。回滚时先停用路由和界面，保持可识别该管理事件的发布器直至已封存段发布完毕。
+
+## 29.26 已实现的校准报告调查契约
+
+`GET /control/v1/calibration-reports/{report_id}` 仅允许独立管理 Bearer、`AuditAdministrator` 与服务端固定 tenant/site。`report_id` 必须是规范 `calr_` UUIDv7；任何查询串（包括空 `?`）、非空 body、重复认证头或无效路径均在投影读取前拒绝。该接口不接受页面传入 scope、报告正文或读取资格；角色也不替代专用 report body 的访问授权。
+
+成功响应为 `schema_version=3`、管理 `request_id`、`tenant_id`、`site_id`、`source_report_id`、`found`、可空 `as_of` 与可空 `report`。未找到及跨 tenant/site 均返回 200、`found=false`、`as_of=null`、`report=null`，不形成对象枚举 oracle。找到时 `report` 仅包含 report/artifact ID、completed/reported 时间及事件 ID、body expiry、approval、dataset/label/task/threshold-policy/mapping revision、四份 manifest artifact ID、provider/wire model/model/prompt/resolved revision、可空 lineage review ID 与 `body_status=active|deleted`。`body_status` 只说明专用密文 body 的保留 tombstone，绝不代表正文读取权。
+
+查询只使用专用 `calibration_reports`、`calibration_report_artifacts`、capability/review 绑定与完成、报告、retention outbox；不访问 `artifact_catalog`、vault、`EvidenceReadPort`、capability session 或 lease。投影会重验 tenant/site、事件 aggregate/type、完整不可变 report envelope、冻结时间、body retention 事件以及 report 与四份 manifest 的互异性。任一缺失、损坏或超时返回 `CONTROL_CALIBRATION_REPORT_STORE_UNAVAILABLE`/503，且不返回部分 metadata。响应从不包含 capability、lease、token、storage locator、key ref、完整性摘要、正文、样本、标签、概率、指标、提示词、evidence refs 或 URL。
+
+有效读取与现有 search/model 查询共用单实例在途许可，繁忙为 `CONTROL_CALIBRATION_REPORT_BUSY`/429；连接池等待计入 15 秒总时限，SQL/锁等待上限 5 秒。已准入读取在客户端断连后仍完成投影与终态审计，许可持有至审计完成。每个可审计尝试追加 `console.calibration.report.read`：成功为 `PASS/CONTROL_CALIBRATION_REPORT_READ`，路径/请求拒绝和依赖故障使用 11.13 的稳定原因码。审计中仅可写经验证的 report target；不记录 report metadata 或访问结果正文。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，所有响应设置 `Cache-Control: private, no-store`。
+
+部署先升级管理 journal 发布器以识别 `console.calibration.report.read`，再启用控制 API；无新增 migration、依赖或 secret。回滚先停用路由，保留新发布器直到已封存的管理事件完成发布；数据库 projection、report retention 与 outbox 历史继续按既有策略保留。

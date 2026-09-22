@@ -22,6 +22,8 @@ if (
 }
 const readPath =
   /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls(?:\/mdl_[a-f0-9-]+)?|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|evidence-access-requests|cases(?:\/case_[a-f0-9-]+\/(?:items|holds))?)$/;
+const calibrationReportPath =
+  /^\/control\/v1\/calibration-reports\/calr_[a-f0-9-]+$/;
 const writePath =
   /^\/control\/v1\/(?:cases|cases\/case_[a-f0-9-]+\/(?:items|close|holds)|evidence-holds\/ev_[a-f0-9-]+\/release|artifacts\/artifact_[a-f0-9-]+\/access|evidence-access-requests\/access_[a-f0-9-]+\/(?:approve|deny))$/;
 const accessReadPath =
@@ -83,6 +85,7 @@ export default defineConfig({
                 : path === auditHealthPath
                   ? request.url === auditHealthPath
                   : readPath.test(path)) ||
+                (request.url === path && calibrationReportPath.test(path)) ||
                 (request.url === path && accessReadPath.test(path)))) ||
             (request.method === "POST" &&
               (request.url === "/control/v1/search" ||

@@ -9,6 +9,7 @@ import {
   MODEL_CALL_ID,
   OTHER_MODEL_CALL_ID,
   THIRD_MODEL_CALL_ID,
+  CALIBRATION_REPORT_ID,
   REQUEST_ID,
   TOKEN,
   artifactFixture,
@@ -17,6 +18,7 @@ import {
   evidenceFixture,
   summaryFixture,
   auditHealthFixture,
+  calibrationReportFixture,
   modelCallFixture,
   modelCallListFixture,
   searchFixture,
@@ -72,6 +74,8 @@ async function mockControl(page: Page, override?: Override) {
       reply = { body: modelCallListFixture(url.searchParams.has("cursor")) };
     } else if (url.pathname === "/control/v1/audit/health") {
       reply = { body: auditHealthFixture() };
+    } else if (url.pathname.startsWith("/control/v1/calibration-reports/")) {
+      reply = { body: calibrationReportFixture(url.pathname.split("/").at(-1)) };
     } else if (url.pathname.startsWith("/control/v1/model-calls/")) {
       reply = { body: modelCallFixture(url.pathname.split("/").at(-1)) };
     } else if (url.pathname.startsWith("/control/v1/artifacts/")) {
@@ -114,6 +118,81 @@ async function queryAuditHealth(page: Page) {
   await page.getByLabel("查询类型", { exact: true }).selectOption("audit-health");
   await page.getByRole("button", { name: "读取发布状态", exact: true }).click();
 }
+
+async function queryCalibrationReport(page: Page, reportId = CALIBRATION_REPORT_ID) {
+  await page.getByLabel("查询类型", { exact: true }).selectOption("calibration-report");
+  await page.getByLabel("校准报告 ID", { exact: true }).fill(reportId);
+  await page.getByRole("button", { name: "查询", exact: true }).click();
+}
+
+test("reads restricted calibration report metadata without creating a content path", async ({
+  page,
+}) => {
+  const calls = await mockControl(page);
+  await connect(page);
+  await queryCalibrationReport(page);
+  const details = page.getByRole("region", { name: "校准报告详情", exact: true });
+  await expect(details).toContainText(CALIBRATION_REPORT_ID);
+  await expect(details).toContainText("报告正文 tombstone");
+  await expect(details).toContainText("active（未记录终态删除）");
+  await expect(
+    page.getByText(/不显示或读取报告正文、样本、标签、概率、指标、提示词/),
+  ).toBeVisible();
+  expect(calls.map((call) => call.path)).toEqual([
+    `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`,
+  ]);
+  expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
+  expect(calls.some((call) => call.path.includes("/content"))).toBe(false);
+  await page.getByRole("button", { name: "手动刷新报告", exact: true }).click();
+  await expect.poll(() => calls.length).toBe(2);
+});
+
+test("calibration report reads discard expired, scope-drifting, and late state", async ({
+  page,
+}) => {
+  let mode: "expired" | "drift" | "delayed" = "expired";
+  let release = () => {};
+  const delayed = new Promise<void>((resolve) => { release = resolve; });
+  let arrived = () => {};
+  const arrivedReport = new Promise<void>((resolve) => { arrived = resolve; });
+  await mockControl(page, async (url) => {
+    if (!url.pathname.startsWith("/control/v1/calibration-reports/")) return undefined;
+    if (mode === "expired") return { status: 401, body: errorFixture("CONTROL_AUTH_REQUIRED") };
+    if (mode === "drift") return { body: { ...calibrationReportFixture(), site_id: "site_other" } };
+    arrived();
+    await delayed;
+    return { body: calibrationReportFixture() };
+  });
+  await connect(page);
+  await queryCalibrationReport(page);
+  await expect(page.getByRole("status")).toContainText("管理凭证已失效");
+  await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
+
+  mode = "drift";
+  await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
+  await page.getByRole("button", { name: "连接", exact: true }).click();
+  await query(page);
+  await expect(page.getByText("AUTH_BINDING_VALID", { exact: true })).toBeVisible();
+  await queryCalibrationReport(page);
+  await expect(page.getByRole("status")).toContainText("响应范围校验失败");
+  await expect(page.getByRole("region", { name: "校准报告详情" })).toHaveCount(0);
+
+  mode = "delayed";
+  await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
+  await page.getByRole("button", { name: "连接", exact: true }).click();
+  const settled = requestSettled(
+    page,
+    `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`,
+  );
+  await queryCalibrationReport(page);
+  await arrivedReport;
+  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  await query(page);
+  release();
+  await settled;
+  await paint(page);
+  await expect(page.getByRole("region", { name: "校准报告详情" })).toHaveCount(0);
+});
 
 test("reads audit publication state only after an explicit manual action", async ({
   page,

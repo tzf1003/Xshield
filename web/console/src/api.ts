@@ -6,6 +6,7 @@ import {
   requestPattern,
   artifactPattern,
   modelCallPattern,
+  calibrationReportPattern,
   eventPattern,
   grantPattern,
   bindingPattern,
@@ -264,6 +265,44 @@ export type ModelCallListResponse = Envelope & {
   items: ModelCallListItem[];
   truncated: boolean;
   next_cursor: string | null;
+};
+
+/** Frozen restricted calibration-report metadata. This projection deliberately
+ * contains no report body, source sample, label, probability, metric, prompt,
+ * storage locator, integrity material, or content-read capability. */
+export type CalibrationReport = {
+  report_id: string;
+  report_artifact_id: string;
+  completed_at: string;
+  reported_at: string;
+  reported_event_id: string;
+  body_expires_at: string;
+  approval_ref: string;
+  dataset_revision: string;
+  label_revision: string;
+  task_revision: string;
+  threshold_policy_revision: string;
+  mapping_revision: string;
+  evaluation_manifest_artifact_id: string;
+  training_manifest_artifact_id: string;
+  calibration_manifest_artifact_id: string;
+  label_manifest_artifact_id: string;
+  provider: string;
+  provider_model_id: string;
+  model_revision: string;
+  prompt_revision: string;
+  resolved_model_revision: string | null;
+  lineage_review_id: string | null;
+  /** Dedicated encrypted report-body retention tombstone, never a read grant. */
+  body_status: "active" | "deleted";
+};
+
+export type CalibrationReportResponse = Envelope & {
+  schema_version: 3;
+  source_report_id: string;
+  found: boolean;
+  as_of: string | null;
+  report: CalibrationReport | null;
 };
 
 /** Authenticated snapshot of one configured audit journal's publication into
@@ -1148,6 +1187,100 @@ export class ControlClient {
                 ? "pending"
                 : "partial";
         ensure(result.completeness === expected);
+        return result;
+      },
+      signal,
+    );
+  }
+
+  /** Read one AuditAdministrator-scoped calibration-report projection. The
+   * encrypted body is never requested by this route, and active retention is
+   * not a content-read authorization or a policy/publication decision. */
+  async calibrationReport(
+    reportId: string,
+    signal?: AbortSignal,
+  ): Promise<CalibrationReportResponse> {
+    if (
+      typeof reportId !== "string" ||
+      !calibrationReportPattern.test(reportId)
+    )
+      throw new ApiError("CONTROL_CALIBRATION_REPORT_ID_INVALID");
+    return this.#request(
+      `calibration-reports/${reportId}`,
+      (value) => {
+        const row = object(value);
+        ensure(
+          row.schema_version === 3 &&
+            Object.keys(row).length === 8 &&
+            [
+              "schema_version",
+              "request_id",
+              "tenant_id",
+              "site_id",
+              "source_report_id",
+              "found",
+              "as_of",
+              "report",
+            ].every((key) => Object.hasOwn(row, key)),
+        );
+        const result: CalibrationReportResponse = {
+          ...envelope(row),
+          schema_version: 3,
+          source_report_id: id(row.source_report_id, calibrationReportPattern),
+          found: bool(row.found),
+          as_of: nullable(row.as_of, timestamp),
+          report: nullable(row.report, (value) => {
+            const details = object(value);
+            ensure(
+              Object.keys(details).length === 23 &&
+                [
+                  "report_id", "report_artifact_id", "completed_at", "reported_at",
+                  "reported_event_id", "body_expires_at", "approval_ref", "dataset_revision",
+                  "label_revision", "task_revision", "threshold_policy_revision", "mapping_revision",
+                  "evaluation_manifest_artifact_id", "training_manifest_artifact_id",
+                  "calibration_manifest_artifact_id", "label_manifest_artifact_id", "provider",
+                  "provider_model_id", "model_revision", "prompt_revision",
+                  "resolved_model_revision", "lineage_review_id", "body_status",
+                ].every((key) => Object.hasOwn(details, key)),
+            );
+            const report: CalibrationReport = {
+              report_id: id(details.report_id, calibrationReportPattern),
+              report_artifact_id: id(details.report_artifact_id, artifactPattern),
+              completed_at: timestamp(details.completed_at),
+              reported_at: timestamp(details.reported_at),
+              reported_event_id: id(details.reported_event_id, eventPattern),
+              body_expires_at: timestamp(details.body_expires_at),
+              approval_ref: name(details.approval_ref),
+              dataset_revision: name(details.dataset_revision),
+              label_revision: name(details.label_revision),
+              task_revision: name(details.task_revision),
+              threshold_policy_revision: name(details.threshold_policy_revision),
+              mapping_revision: name(details.mapping_revision),
+              evaluation_manifest_artifact_id: id(details.evaluation_manifest_artifact_id, artifactPattern),
+              training_manifest_artifact_id: id(details.training_manifest_artifact_id, artifactPattern),
+              calibration_manifest_artifact_id: id(details.calibration_manifest_artifact_id, artifactPattern),
+              label_manifest_artifact_id: id(details.label_manifest_artifact_id, artifactPattern),
+              provider: name(details.provider),
+              provider_model_id: text(details.provider_model_id),
+              model_revision: name(details.model_revision),
+              prompt_revision: name(details.prompt_revision),
+              resolved_model_revision: nullable(details.resolved_model_revision, name),
+              lineage_review_id: nullable(details.lineage_review_id, (item) =>
+                id(item, new RegExp(`^calrev_${uuid}$`)),
+              ),
+              body_status: choice(details.body_status, ["active", "deleted"]),
+            };
+            ensure(
+              Date.parse(report.completed_at) <= Date.parse(report.reported_at) &&
+                Date.parse(report.reported_at) < Date.parse(report.body_expires_at),
+            );
+            return report;
+          }),
+        };
+        ensure(result.source_report_id === reportId);
+        ensure(result.found === (result.report !== null));
+        ensure((result.as_of !== null) === result.found);
+        ensure(!result.report || result.report.report_id === reportId);
         return result;
       },
       signal,

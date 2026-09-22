@@ -11,6 +11,7 @@ mod calibration_lineage_review;
 mod calibration_lineage_review_retention;
 mod calibration_read_capability;
 mod calibration_report;
+mod calibration_report_inspection;
 mod calibration_report_retention;
 mod case_close;
 mod case_evidence;
@@ -59,6 +60,7 @@ pub use calibration_read_capability::{
 pub use calibration_report::{
     CalibrationReportCommit, CalibrationReportCommitOutcome, CalibrationReportCommitRecord,
 };
+pub use calibration_report_inspection::{CalibrationReportBodyStatus, CalibrationReportInspection};
 pub use calibration_report_retention::{
     CalibrationReportOrphanPurgeJob, CalibrationReportOrphanPurgeResult,
 };

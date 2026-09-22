@@ -483,6 +483,7 @@ impl ControlPlane {
                 None,
                 None,
                 targets.hold.as_ref(),
+                None,
             )
         })
         .await;

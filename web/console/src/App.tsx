@@ -13,6 +13,7 @@ import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
   AuditHealthResponse,
+  CalibrationReportResponse,
   EventsResponse,
   EvidenceResponse,
   ModelCallListPlan,
@@ -23,6 +24,7 @@ import type {
 import {
   ArtifactDetail,
   AuditHealthPanel,
+  CalibrationReportPanel,
   EventDetail,
   EventTable,
   EvidenceTable,
@@ -39,6 +41,7 @@ type QueryKind =
   | "model"
   | "model-list"
   | "audit-health"
+  | "calibration-report"
   | "grant"
   | "binding"
   | "search"
@@ -48,12 +51,14 @@ type QueryKind =
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
+  "calibration-report": "校准报告 ID",
   grant: "资格 ID",
   binding: "身份绑定 ID",
 };
 const queryPrefixes = {
   request: "req",
   model: "mdl",
+  "calibration-report": "calr",
   grant: "grant",
   binding: "auth",
 };
@@ -106,6 +111,8 @@ export function App() {
     null,
   );
   const [health, setHealth] = useState<AuditHealthResponse | null>(null);
+  const [calibrationReport, setCalibrationReport] =
+    useState<CalibrationReportResponse | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [events, setEvents] = useState<EventsResponse | null>(null);
   const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
@@ -127,6 +134,7 @@ export function App() {
     setModelListPlan(null);
     setModelList(null);
     setHealth(null);
+    setCalibrationReport(null);
     setLedger(null);
     setSearchPlan(null);
     setSearch(null);
@@ -291,6 +299,14 @@ export function App() {
       );
       return;
     }
+    if (queryKind === "calibration-report") {
+      void run(
+        "query",
+        (api, signal) => api.calibrationReport(target, signal),
+        (response) => setCalibrationReport(response),
+      );
+      return;
+    }
     if (queryKind === "grant") {
       void run(
         "query",
@@ -341,6 +357,15 @@ export function App() {
       "query",
       (api, signal) => api.health(signal),
       (response) => setHealth(response),
+    );
+  }
+  function loadCalibrationReport(target = requestId.trim()) {
+    clearResults();
+    setRequestId(target);
+    void run(
+      "query",
+      (api, signal) => api.calibrationReport(target, signal),
+      (response) => setCalibrationReport(response),
     );
   }
   function openTarget(kind: "request" | "binding" | "model", id: string) {
@@ -430,6 +455,7 @@ export function App() {
     model: "模型调用调查",
     "model-list": "模型调用列表",
     "audit-health": "审计发布状态",
+    "calibration-report": "校准报告调查",
     grant: "资格调查",
     binding: "身份绑定调查",
     search: "结构化事件检索",
@@ -504,6 +530,8 @@ export function App() {
               ? "核对模型调用生命周期、版本与证据引用。"
               : queryKind === "audit-health"
                 ? "按需读取配置审计日志到索引的发布快照。"
+                : queryKind === "calibration-report"
+                  ? "读取受限校准报告的冻结元数据与正文保留观察。"
                 : queryKind === "search"
                 ? "按时间与事件字段检索，核对直接引用的历史事实。"
                 : queryKind === "case"
@@ -567,6 +595,8 @@ export function App() {
                         ? "model-list"
                         : event.target.value === "audit-health"
                         ? "audit-health"
+                        : event.target.value === "calibration-report"
+                          ? "calibration-report"
                         : event.target.value === "case"
                         ? "case"
                         : event.target.value === "access"
@@ -587,6 +617,7 @@ export function App() {
                 <option value="model">模型调用</option>
                 <option value="model-list">模型调用列表</option>
                 <option value="audit-health">审计发布状态</option>
+                <option value="calibration-report">校准报告</option>
                 <option value="grant">资格</option>
                 <option value="binding">身份绑定</option>
                 <option value="search">结构化事件检索</option>
@@ -693,6 +724,12 @@ export function App() {
                 response={health}
                 busy={Boolean(busy.query)}
                 onRefresh={loadHealth}
+              />
+            ) : queryKind === "calibration-report" ? (
+              <CalibrationReportPanel
+                response={calibrationReport}
+                busy={Boolean(busy.query)}
+                onRefresh={() => loadCalibrationReport()}
               />
             ) : ledger ? (
               <LedgerPanel

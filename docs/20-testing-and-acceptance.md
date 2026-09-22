@@ -175,3 +175,5 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 故障回归以数据库时间强制租约过期，验证索引写入成功后旧 token 确认被拒绝，重新领取可确认且底表重复行在 active 视图合并为一条。真实缺失目标表返回 `OUTBOX_INDEX_UNAVAILABLE`，延迟期间不领取，到期并恢复目标后重试成功；同一 event_id 修改合成正文返回 `OUTBOX_INTEGRITY_CONFLICT` 并保持未确认。断言失败后仍等待清理本测试所属的双库数据。该回归验证数据库集成与故障注入，不覆盖进程崩溃、网络分区或生产负载。
 
 真实 Outbox 回归还覆盖请求摘要的混合来源：较早 ID、序号为 1 的 GET 目标资格先到，摘要保持来源方法/操作为空；同一 request_id 的 POST 来源请求随后到达，两个查询视图均返回来源方法与操作，资格事件继续保留其目标语义。
+
+受限校准报告调查的真实 PostgreSQL 回归覆盖成功 projection 的冻结 metadata、跨 tenant 同构未命中、通过实际 retention intent/tombstone 后仍可观察的 `body_status=deleted`，以及篡改报告 outbox 链接后的 fail-closed。控制层 HTTP 回归覆盖 `AuditAdministrator`、严格路径/空 query/空 body、容量与存储故障、稳定审计 target、审计失败扣留响应和许可在终态审计后释放。它们不构成密文正文读取、外部内容独立性、模型质量或策略发布验收。

@@ -5,6 +5,7 @@
 
 #![warn(missing_docs)]
 
+mod calibration_report_inspection;
 mod case_close;
 mod case_collection;
 mod case_holds;
@@ -45,8 +46,8 @@ use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealV
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{
-        ArtifactId, AuthBindingId, CaseId, EventId, EvidenceAccessRequestId, GrantId, ModelCallId,
-        RequestId, SiteId, TenantId,
+        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
+        GrantId, ModelCallId, RequestId, SiteId, TenantId,
     },
     investigation::{
         EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
@@ -1971,6 +1972,7 @@ impl ControlPlane {
                 None,
                 None,
                 None,
+                None,
             )
         })
         .await;
@@ -3093,8 +3095,11 @@ impl ControlPlane {
                 .lock()
                 .is_ok_and(|mut rate| rate.take(Instant::now()));
             if !within_budget {
-                return Err(Box::new(api_error(
+                return Err(Box::new(self.audited_error(
                     request_id,
+                    None,
+                    action,
+                    None,
                     StatusCode::TOO_MANY_REQUESTS,
                     "CONTROL_RATE_LIMITED",
                     "management request rate exceeded",
@@ -3230,6 +3235,7 @@ impl ControlPlane {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3264,6 +3270,7 @@ impl ControlPlane {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -3293,6 +3300,36 @@ impl ControlPlane {
             None,
             None,
             None,
+            None,
+        )
+    }
+
+    fn append_calibration_report_access_event(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        target_report_id: Option<&CalibrationReportId>,
+        outcome: &'static str,
+        reason_code: &'static str,
+    ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence_bytes(
+            request_id,
+            subject_ref,
+            calibration_report_inspection::ACCESS,
+            None,
+            None,
+            None,
+            None,
+            None,
+            outcome,
+            reason_code,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            target_report_id,
         )
     }
 
@@ -3315,6 +3352,7 @@ impl ControlPlane {
         target_grant_id: Option<&GrantId>,
         target_binding_id: Option<&AuthBindingId>,
         target_hold_id: Option<&EventId>,
+        target_calibration_report_id: Option<&CalibrationReportId>,
     ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
@@ -3361,6 +3399,8 @@ impl ControlPlane {
                 target_grant_id: target_grant_id.map(GrantId::as_str),
                 target_binding_id: target_binding_id.map(AuthBindingId::as_str),
                 target_hold_id: target_hold_id.map(EventId::as_str),
+                target_calibration_report_id: target_calibration_report_id
+                    .map(CalibrationReportId::as_str),
                 query_digest,
                 outcome,
                 reason_code,
@@ -3399,6 +3439,10 @@ pub fn router(control: ControlPlane) -> Router {
             get(model_call_list::handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(MODEL_CALL_PATH, get(model_call_handler))
+        .route(
+            calibration_report_inspection::PATH,
+            get(calibration_report_inspection::handler).layer(DefaultBodyLimit::max(0)),
+        )
         .route(
             ledger_inspection::GRANT_PATH,
             get(ledger_inspection::grant_handler),
@@ -4307,6 +4351,8 @@ struct AccessPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_hold_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_calibration_report_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
@@ -4384,6 +4430,7 @@ impl From<serde_json::Error> for ControlError {
 mod tests {
     mod access_console_wire;
     mod audit_publish;
+    mod calibration_report_inspection;
     mod case_close;
     mod case_collection;
     mod case_console_wire;

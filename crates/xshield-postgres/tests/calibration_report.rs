@@ -44,9 +44,9 @@ use xshield_evidence::{
 use xshield_postgres::{
     CalibrationEvidenceBatchBegin, CalibrationEvidenceBatchBeginOutcome,
     CalibrationLineageReviewCommit, CalibrationLineageReviewCommitOutcome,
-    CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome, CalibrationReportCommit,
-    CalibrationReportCommitOutcome, EvidenceCatalogPublish, EvidenceCatalogWriteOutcome,
-    PostgresIdentityStore,
+    CalibrationReadCapabilityIssue, CalibrationReadCapabilityIssueOutcome,
+    CalibrationReportBodyStatus, CalibrationReportCommit, CalibrationReportCommitOutcome,
+    EvidenceCatalogPublish, EvidenceCatalogWriteOutcome, PostgresIdentityStore, StoreError,
 };
 
 #[tokio::test]
@@ -888,6 +888,141 @@ async fn assert_successful_commit_is_atomic_and_exact(
             .expect("post-rebind retry resolves"),
         CalibrationReportCommitOutcome::Existing(existing) if existing == record
     ));
+
+    assert_report_projection_inspection(pool, store, fixture, &record).await;
+}
+
+async fn assert_report_projection_inspection(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    record: &xshield_postgres::CalibrationReportCommitRecord,
+) {
+    let active = store
+        .read_calibration_report(&fixture.tenant, &fixture.site, record.report_id())
+        .await
+        .expect("active report projection is readable")
+        .expect("committed report projection is found");
+    assert_eq!(active.report_id, *record.report_id());
+    assert_eq!(active.report_artifact_id, *record.report_artifact_id());
+    assert_eq!(active.reported_event_id, *record.report_event_id());
+    assert_eq!(active.completed_at, record.completed_at());
+    assert_eq!(active.reported_at, record.reported_at());
+    assert_eq!(
+        active.lineage_review_id,
+        Some(fixture.lineage_review_id.clone())
+    );
+    assert_eq!(active.body_status, CalibrationReportBodyStatus::Active);
+
+    let foreign_tenant = TenantId::parse(format!("tenant_foreign_{}", Uuid::now_v7().simple()))
+        .expect("foreign tenant is valid");
+    assert!(
+        store
+            .read_calibration_report(&foreign_tenant, &fixture.site, record.report_id())
+            .await
+            .expect("foreign-scope report query resolves")
+            .is_none()
+    );
+
+    // Expire this dedicated body through the actual retention workflow. The
+    // report projection remains observable, but the response must reduce its
+    // physical state to a tombstone rather than attempting a body read.
+    sqlx::query(
+        "UPDATE xshield.calibration_report_artifacts
+         SET expires_at = recorded_at + interval '1 millisecond'
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(record.report_artifact_id().as_str())
+    .execute(pool)
+    .await
+    .expect("report body becomes retention eligible");
+    let jobs = store
+        .prepare_calibration_report_purge(
+            &fixture.tenant,
+            &fixture.site,
+            "report-evidence-key-r1",
+            1,
+        )
+        .await
+        .expect("report-body tombstone intent commits");
+    assert_eq!(jobs.len(), 1);
+    store
+        .finish_calibration_report_purge(
+            &jobs[0],
+            xshield_postgres::CalibrationReportPurgeResult::Deleted(
+                xshield_evidence::EvidencePurgeOutcome::AlreadyAbsent,
+            ),
+        )
+        .await
+        .expect("report-body tombstone commits");
+    let deleted = store
+        .read_calibration_report(&fixture.tenant, &fixture.site, record.report_id())
+        .await
+        .expect("deleted report projection is readable")
+        .expect("deleted report projection remains found");
+    assert_eq!(deleted.body_status, CalibrationReportBodyStatus::Deleted);
+
+    assert_tampered_tombstone_is_rejected(pool, store, fixture, record).await;
+
+    // Outbox references are part of the frozen projection proof. A damaged
+    // event cannot be downgraded to a not-found result or a partial response.
+    sqlx::query(
+        "UPDATE xshield.audit_outbox SET event_type='calibration.corrupt' WHERE event_id=$1",
+    )
+    .bind(record.report_event_id().as_str())
+    .execute(pool)
+    .await
+    .expect("test corrupts report outbox linkage");
+    assert!(matches!(
+        store
+            .read_calibration_report(&fixture.tenant, &fixture.site, record.report_id())
+            .await,
+        Err(StoreError::CorruptData(_))
+    ));
+}
+
+async fn assert_tampered_tombstone_is_rejected(
+    pool: &PgPool,
+    store: &PostgresIdentityStore,
+    fixture: &Fixture,
+    record: &xshield_postgres::CalibrationReportCommitRecord,
+) {
+    // Tombstones bind the whole restricted maintenance envelope, including its
+    // expiry and cause. A syntactically valid extra field is still corrupt: the
+    // inspection surface must not silently accept a widened event contract.
+    let completed_purge_event: String = sqlx::query_scalar(
+        "SELECT purge_completed_event_id FROM xshield.calibration_report_artifacts
+         WHERE tenant_id=$1 AND site_id=$2 AND artifact_id=$3",
+    )
+    .bind(fixture.tenant.as_str())
+    .bind(fixture.site.as_str())
+    .bind(record.report_artifact_id().as_str())
+    .fetch_one(pool)
+    .await
+    .expect("completed purge event is retained");
+    sqlx::query(
+        "UPDATE xshield.audit_outbox
+         SET envelope = envelope || '{\"unexpected\":true}'::jsonb WHERE event_id=$1",
+    )
+    .bind(&completed_purge_event)
+    .execute(pool)
+    .await
+    .expect("test widens retention envelope");
+    assert!(matches!(
+        store
+            .read_calibration_report(&fixture.tenant, &fixture.site, record.report_id())
+            .await,
+        Err(StoreError::CorruptData(_))
+    ));
+    sqlx::query(
+        "UPDATE xshield.audit_outbox SET envelope = envelope - 'unexpected' WHERE event_id=$1",
+    )
+    .bind(&completed_purge_event)
+    .execute(pool)
+    .await
+    .expect("test restores retention envelope");
 }
 
 #[allow(clippy::too_many_lines)]

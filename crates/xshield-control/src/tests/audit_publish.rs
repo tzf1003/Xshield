@@ -281,6 +281,7 @@ fn append_access_contracts(control: &ControlPlane) {
             Some(&GrantId::parse("grant_018f2a3b-4c5d-7000-8000-000000000953").unwrap()),
             None,
             None,
+            None,
         )
         .unwrap();
     control
@@ -302,6 +303,7 @@ fn append_access_contracts(control: &ControlPlane) {
             Some(
                 &crate::AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000954").unwrap(),
             ),
+            None,
             None,
         )
         .unwrap();
@@ -486,6 +488,7 @@ fn append_access_contracts(control: &ControlPlane) {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
     }
@@ -545,6 +548,7 @@ fn append_hold_access_contracts(control: &ControlPlane) {
                 None,
                 None,
                 mutation.then_some(&hold),
+                None,
             )
             .unwrap();
     }
@@ -566,6 +570,7 @@ fn append_hold_access_contracts(control: &ControlPlane) {
                     outcome,
                     reason,
                     &[],
+                    None,
                     None,
                     None,
                     None,

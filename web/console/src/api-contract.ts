@@ -12,6 +12,14 @@ export const messages = {
   CONTROL_REQUEST_ID_INVALID: "请输入规范的请求 ID。",
   CONTROL_ARTIFACT_ID_INVALID: "证据 ID 格式无效。",
   CONTROL_MODEL_CALL_ID_INVALID: "请输入规范的模型调用 ID。",
+  CONTROL_CALIBRATION_REPORT_ID_INVALID: "请输入规范的校准报告 ID。",
+  CONTROL_CALIBRATION_REPORT_READ_REQUEST_INVALID:
+    "校准报告查询请求无效，请核对报告 ID。",
+  CONTROL_CALIBRATION_REPORT_BUSY: "校准报告查询服务繁忙，请稍后重试。",
+  CONTROL_CALIBRATION_REPORT_NOT_AVAILABLE:
+    "当前身份和范围内校准报告不可用。",
+  CONTROL_CALIBRATION_REPORT_STORE_UNAVAILABLE:
+    "校准报告存储暂时不可用，请稍后重试。",
   CONTROL_MODEL_CALLS_REQUEST_INVALID:
     "模型调用列表条件无效，请检查 UTC 时间窗、页大小和分页凭证。",
   CONTROL_MODEL_CALLS_INDEX_UNAVAILABLE:
@@ -127,6 +135,7 @@ const endOfInput = "(?![\\s\\S])";
 export const requestPattern = new RegExp(`^req_${uuid}${endOfInput}`);
 export const artifactPattern = new RegExp(`^artifact_${uuid}${endOfInput}`);
 export const modelCallPattern = new RegExp(`^mdl_${uuid}${endOfInput}`);
+export const calibrationReportPattern = new RegExp(`^calr_${uuid}${endOfInput}`);
 export const eventPattern = new RegExp(`^ev_${uuid}${endOfInput}`);
 export const grantPattern = new RegExp(`^grant_${uuid}${endOfInput}`);
 export const bindingPattern = new RegExp(`^auth_${uuid}${endOfInput}`);

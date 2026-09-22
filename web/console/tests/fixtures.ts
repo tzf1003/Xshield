@@ -8,6 +8,8 @@ export const OTHER_REQUEST_ID = "req_018f2a3b-4c5d-7000-8000-000000000002";
 export const MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
 export const OTHER_MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000002";
 export const THIRD_MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000003";
+export const CALIBRATION_REPORT_ID =
+  "calr_018f2a3b-4c5d-7000-8000-000000000021";
 export const ARTIFACT_ID = "artifact_018f2a3b-4c5d-7000-8000-000000000011";
 export const OTHER_ARTIFACT_ID =
   "artifact_018f2a3b-4c5d-7000-8000-000000000012";
@@ -86,6 +88,52 @@ export function auditHealthFixture() {
       producer_boot_id: "018f2a3b-4c5d-7000-8000-000000000088",
       producer_sequence: 42,
     },
+  };
+}
+
+/** Synthetic restricted projection; this fixture intentionally contains no
+ * report body, source tuple, label content, probability, metric, or prompt. */
+export function calibrationReportFixture(
+  reportId = CALIBRATION_REPORT_ID,
+  found = true,
+) {
+  return {
+    ...envelope(),
+    schema_version: 3,
+    source_report_id: reportId,
+    found,
+    as_of: found ? AS_OF : null,
+    report: found
+      ? {
+          report_id: reportId,
+          report_artifact_id: "artifact_018f2a3b-4c5d-7000-8000-000000000021",
+          completed_at: "2026-09-20T08:10:00.000000Z",
+          reported_at: AS_OF,
+          reported_event_id: "ev_018f2a3b-4c5d-7000-8000-000000000021",
+          body_expires_at: "2026-09-21T08:10:30.000000Z",
+          approval_ref: "approval_demo_r1",
+          dataset_revision: "dataset_demo_r1",
+          label_revision: "labels_demo_r1",
+          task_revision: "task_demo_r1",
+          threshold_policy_revision: "threshold_demo_r1",
+          mapping_revision: "mapping_demo_r1",
+          evaluation_manifest_artifact_id:
+            "artifact_018f2a3b-4c5d-7000-8000-000000000022",
+          training_manifest_artifact_id:
+            "artifact_018f2a3b-4c5d-7000-8000-000000000023",
+          calibration_manifest_artifact_id:
+            "artifact_018f2a3b-4c5d-7000-8000-000000000024",
+          label_manifest_artifact_id:
+            "artifact_018f2a3b-4c5d-7000-8000-000000000025",
+          provider: "vercel_ai_gateway",
+          provider_model_id: "typesafe-ai/jev",
+          model_revision: "jev_1.13.0",
+          prompt_revision: "evaluation_r1",
+          resolved_model_revision: null,
+          lineage_review_id: null,
+          body_status: "active",
+        }
+      : null,
   };
 }
 

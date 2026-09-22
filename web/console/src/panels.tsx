@@ -5,6 +5,7 @@ import type {
   ArtifactResponse,
   AuditHealthResponse,
   AuditEvent,
+  CalibrationReportResponse,
   EventsResponse,
   Manifest,
   ModelCallListPlan,
@@ -62,6 +63,98 @@ function Badge({ value }: { value: string | null }) {
     >
       {value || "未记录"}
     </span>
+  );
+}
+
+/** Displays only one frozen restricted report projection. The body retention
+ * marker is an investigation observation, never a content-read affordance. */
+export function CalibrationReportPanel({
+  response,
+  busy,
+  onRefresh,
+}: {
+  response: CalibrationReportResponse | null;
+  busy: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <>
+      <section className="panel" aria-label="校准报告调查说明">
+        <h2>受限校准报告元数据</h2>
+        <p className="footnote">
+          这里仅显示已冻结的报告元数据与正文 tombstone 状态。它不显示或读取报告正文、样本、标签、概率、指标、提示词或任何内容读取能力。
+        </p>
+        <button onClick={onRefresh} disabled={busy}>
+          {busy ? "读取中…" : response ? "手动刷新报告" : "读取报告"}
+        </button>
+        <p className="footnote">
+          每次读取均由服务端独立重新鉴权并写管理审计；控制台不会自动轮询。
+        </p>
+      </section>
+      {response?.report ? (
+        <section className="panel" aria-label="校准报告详情" aria-busy={busy}>
+          <div className="panel-heading model-heading">
+            <h2>校准报告</h2>
+            <span className="mono">{response.report.report_id}</span>
+          </div>
+          <div className="detail-body">
+            <Rows
+              entries={[
+                ["管理请求 ID", <span className="mono">{response.request_id}</span>],
+                ["数据库观察时间", <span className="mono">{time(response.as_of ?? "")}</span>],
+                ["批次完成时间", <span className="mono">{time(response.report.completed_at)}</span>],
+                ["报告冻结时间", <span className="mono">{time(response.report.reported_at)}</span>],
+                ["报告 artifact", <span className="mono">{response.report.report_artifact_id}</span>],
+                ["报告事件", <span className="mono">{response.report.reported_event_id}</span>],
+                ["正文保留至", <span className="mono">{time(response.report.body_expires_at)}</span>],
+                ["批准引用", <span className="mono">{response.report.approval_ref}</span>],
+                ["数据集修订", <span className="mono">{response.report.dataset_revision}</span>],
+                ["标签集修订", <span className="mono">{response.report.label_revision}</span>],
+                ["任务语义修订", <span className="mono">{response.report.task_revision}</span>],
+                ["阈值策略修订", <span className="mono">{response.report.threshold_policy_revision}</span>],
+                ["风险映射修订", <span className="mono">{response.report.mapping_revision}</span>],
+                ["评估 manifest", <span className="mono">{response.report.evaluation_manifest_artifact_id}</span>],
+                ["训练 manifest", <span className="mono">{response.report.training_manifest_artifact_id}</span>],
+                ["校准 manifest", <span className="mono">{response.report.calibration_manifest_artifact_id}</span>],
+                ["标签 manifest", <span className="mono">{response.report.label_manifest_artifact_id}</span>],
+                ["供应商", <span className="mono">{response.report.provider}</span>],
+                ["供应商模型 ID", <span className="mono">{response.report.provider_model_id}</span>],
+                ["内部模型修订", <span className="mono">{response.report.model_revision}</span>],
+                ["提示修订", <span className="mono">{response.report.prompt_revision}</span>],
+                [
+                  "已解析模型修订",
+                  response.report.resolved_model_revision ? (
+                    <span className="mono">{response.report.resolved_model_revision}</span>
+                  ) : "历史记录未提供",
+                ],
+                [
+                  "血缘审查",
+                  response.report.lineage_review_id ? (
+                    <span className="mono">{response.report.lineage_review_id}</span>
+                  ) : "历史记录未提供",
+                ],
+                [
+                  "报告正文 tombstone",
+                  response.report.body_status === "active"
+                    ? "active（未记录终态删除）"
+                    : "deleted（已记录终态删除）",
+                ],
+              ]}
+            />
+          </div>
+          <p className="footnote">
+            正文 tombstone 状态只说明专用加密正文的保留观察；它不表示正文可读、质量已验证、阈值或策略已发布，亦不表示业务资格。
+          </p>
+        </section>
+      ) : response ? (
+        <section className="panel" aria-label="校准报告详情" aria-busy={busy}>
+          <h2>当前范围内未找到报告</h2>
+          <p className="footnote">
+            该结果不推断报告不存在于其他范围，也不提供任何内容或读取能力。
+          </p>
+        </section>
+      ) : null}
+    </>
   );
 }
 

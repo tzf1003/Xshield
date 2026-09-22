@@ -20,10 +20,12 @@ import {
   MODEL_CALL_ID,
   OTHER_MODEL_CALL_ID,
   THIRD_MODEL_CALL_ID,
+  CALIBRATION_REPORT_ID,
   EVENT_CURSOR,
   EVIDENCE_CURSOR,
   summaryFixture,
   auditHealthFixture,
+  calibrationReportFixture,
   eventsFixture,
   evidenceFixture,
   artifactFixture,
@@ -54,6 +56,7 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
     artifactFixture(),
     modelCallFixture(),
     auditHealthFixture(),
+    calibrationReportFixture(),
   ];
   const paths = [
     `/control/v1/requests/${REQUEST_ID}`,
@@ -62,6 +65,7 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
     `/control/v1/artifacts/${ARTIFACT_ID}`,
     `/control/v1/model-calls/${MODEL_CALL_ID}`,
     "/control/v1/audit/health",
+    `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`,
   ];
   let index = 0;
   t.mock.method(
@@ -109,7 +113,71 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
   assert.deepEqual(model, modelCallFixture());
   const health = await client.health();
   assert.deepEqual(health, auditHealthFixture());
-  assert.equal(index, 6);
+  const calibrationReport = await client.calibrationReport(CALIBRATION_REPORT_ID);
+  assert.deepEqual(calibrationReport, calibrationReportFixture());
+  assert.equal(index, 7);
+});
+
+test("calibration report metadata has an exact restricted decoder", async (t) => {
+  const client = new ControlClient(TOKEN);
+  let body: unknown = calibrationReportFixture();
+  let status = 200;
+  t.mock.method(globalThis, "fetch", async () => response(body, status));
+  assert.deepEqual(
+    await client.calibrationReport(CALIBRATION_REPORT_ID),
+    calibrationReportFixture(),
+  );
+  const deleted = calibrationReportFixture();
+  assert.ok(deleted.report);
+  Object.assign(deleted.report, {
+    body_status: "deleted",
+    lineage_review_id: "calrev_018f2a3b-4c5d-7000-8000-000000000021",
+  });
+  body = deleted;
+  assert.deepEqual(await client.calibrationReport(CALIBRATION_REPORT_ID), deleted);
+  body = calibrationReportFixture(CALIBRATION_REPORT_ID, false);
+  assert.deepEqual(await client.calibrationReport(CALIBRATION_REPORT_ID), body);
+  for (const mutate of [
+    (value: { report: Record<string, unknown> | null; as_of: string | null }) => {
+      assert.ok(value.report);
+      value.report.report_id = MODEL_CALL_ID;
+    },
+    (value: { report: Record<string, unknown> | null; as_of: string | null }) => {
+      assert.ok(value.report);
+      value.report.body_status = "unknown";
+    },
+    (value: { report: Record<string, unknown> | null; as_of: string | null }) => {
+      assert.ok(value.report);
+      Object.assign(value.report, { body: "must-not-appear" });
+    },
+    (value: { report: Record<string, unknown> | null; as_of: string | null }) => {
+      value.as_of = null;
+    },
+  ]) {
+    const value = calibrationReportFixture();
+    mutate(value);
+    body = value;
+    await assert.rejects(
+      client.calibrationReport(CALIBRATION_REPORT_ID),
+      errorIs("INVALID_RESPONSE", 200),
+    );
+  }
+  for (const value of [
+    "invalid-report-id",
+    CALIBRATION_REPORT_ID.toUpperCase(),
+    CALIBRATION_REPORT_ID.replace("-7000-", "-4000-"),
+    `${CALIBRATION_REPORT_ID}?query=1`,
+  ])
+    await assert.rejects(
+      client.calibrationReport(value),
+      errorIs("CONTROL_CALIBRATION_REPORT_ID_INVALID"),
+    );
+  body = errorFixture("CONTROL_SCOPE_DENIED");
+  status = 403;
+  await assert.rejects(
+    client.calibrationReport(CALIBRATION_REPORT_ID),
+    errorIs("CONTROL_SCOPE_DENIED", 403),
+  );
 });
 
 test("audit publication health validates a complete fixed-scope snapshot", async (t) => {
@@ -1744,6 +1812,10 @@ test("development proxy permits fixed investigation and evidence access routes",
     ["GET", "/control/v1/audit/health", true],
     ["GET", "/control/v1/audit/health?scope=other", false],
     ["POST", "/control/v1/audit/health", false],
+    ["GET", `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`, true],
+    ["GET", `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}?cursor=opaque`, false],
+    ["POST", `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`, false],
+    ["GET", "/control/v1/calibration-reports/calr_not-a-v7", false],
     ["GET", `/control/v1/grants/${GRANT_ID}`, true],
     ["GET", `/control/v1/auth-bindings/${BINDING_ID}`, true],
     [

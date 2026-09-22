@@ -17,6 +17,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.manifest.read"
             | "console.model.read"
             | "console.model.list"
+            | "console.calibration.report.read"
             | "console.grant.read"
             | "console.binding.read"
             | "console.query.executed"
@@ -51,6 +52,7 @@ struct AccessPayload {
     target_grant_id: Option<String>,
     target_binding_id: Option<String>,
     target_hold_id: Option<String>,
+    target_calibration_report_id: Option<String>,
     query_digest: Option<String>,
     outcome: String,
     reason_code: String,
@@ -92,6 +94,9 @@ impl AccessPayload {
         }
         if event.event_type == "console.model.list" {
             self.validate_model_list_reason()?;
+        }
+        if event.event_type == "console.calibration.report.read" {
+            self.validate_calibration_report_read_reason()?;
         }
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
@@ -173,6 +178,52 @@ impl AccessPayload {
         }
     }
 
+    fn validate_calibration_report_read_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_CALIBRATION_REPORT_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_CALIBRATION_REPORT_ID_INVALID"
+                    | "CONTROL_CALIBRATION_REPORT_READ_REQUEST_INVALID"
+                    | "CONTROL_CALIBRATION_REPORT_BUSY"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CALIBRATION_REPORT_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        let before_target = self.subject_ref.is_none()
+            || matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_CALIBRATION_REPORT_ID_INVALID"
+            );
+        let requires_target = matches!(
+            self.reason_code.as_str(),
+            "CONTROL_CALIBRATION_REPORT_READ"
+                | "CONTROL_CALIBRATION_REPORT_READ_REQUEST_INVALID"
+                | "CONTROL_CALIBRATION_REPORT_BUSY"
+                | "CONTROL_CALIBRATION_REPORT_STORE_UNAVAILABLE"
+        );
+        if !valid
+            || before_target && self.target_calibration_report_id.is_some()
+            || requires_target && self.target_calibration_report_id.is_none()
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        Ok(())
+    }
+
     fn validate_access_list_reason(&self) -> Result<(), PublishError> {
         let valid = match self.outcome.as_str() {
             "PASS" => self.reason_code == "CONTROL_EVIDENCE_ACCESS_LIST_READ",
@@ -240,7 +291,8 @@ impl AccessPayload {
 
     fn validate_targets(&self, event_type: &str, success: bool) -> Result<(), PublishError> {
         // Keep the field order explicit: request, artifact, case, access request,
-        // model call, grant, binding, hold. Denials retain validated targets.
+        // model call, grant, binding, hold, calibration report. Denials retain
+        // only their already validated direct target.
         let targets = [
             (&self.target_request_id, "req_"),
             (&self.target_artifact_id, "artifact_"),
@@ -250,47 +302,53 @@ impl AccessPayload {
             (&self.target_grant_id, "grant_"),
             (&self.target_binding_id, "auth_"),
             (&self.target_hold_id, "ev_"),
+            (&self.target_calibration_report_id, "calr_"),
         ];
         let allowed = match (event_type, self.method.as_str(), self.path.as_str()) {
             ("console.health.read", "GET", "/control/v1/audit/health")
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests") => {
-                [false; 8]
+                [false; 9]
             }
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")
             | ("console.events.read", "GET", "/control/v1/requests/{request_id}/events")
             | ("console.manifest.read", "GET", "/control/v1/requests/{request_id}/evidence") => {
-                [true, false, false, false, false, false, false, false]
+                [true, false, false, false, false, false, false, false, false]
             }
             ("console.manifest.read", "GET", "/control/v1/artifacts/{artifact_id}") => {
-                [false, true, false, false, false, false, false, false]
+                [false, true, false, false, false, false, false, false, false]
             }
             ("console.model.read", "GET", "/control/v1/model-calls/{model_call_id}") => {
-                [false, false, false, false, true, false, false, false]
+                [false, false, false, false, true, false, false, false, false]
             }
             ("console.grant.read", "GET", "/control/v1/grants/{grant_id}") => {
-                [false, false, false, false, false, true, false, false]
+                [false, false, false, false, false, true, false, false, false]
             }
             ("console.binding.read", "GET", "/control/v1/auth-bindings/{binding_id}") => {
-                [false, false, false, false, false, false, true, false]
+                [false, false, false, false, false, false, true, false, false]
             }
+            (
+                "console.calibration.report.read",
+                "GET",
+                "/control/v1/calibration-reports/{report_id}",
+            ) => [false, false, false, false, false, false, false, false, true],
             ("case.created", "POST", "/control/v1/cases")
             | ("case.closed", "POST", "/control/v1/cases/{case_id}/close")
             | ("console.case.read", "GET", "/control/v1/cases/{case_id}/items")
             | ("console.evidence.hold.read", "GET", "/control/v1/cases/{case_id}/holds") => {
-                [false, false, true, false, false, false, false, false]
+                [false, false, true, false, false, false, false, false, false]
             }
             ("case.evidence.added", "POST", "/control/v1/cases/{case_id}/items") => {
-                [false, true, true, false, false, false, false, false]
+                [false, true, true, false, false, false, false, false, false]
             }
             ("console.evidence.hold.created", "POST", "/control/v1/cases/{case_id}/holds")
             | (
                 "console.evidence.hold.released",
                 "POST",
                 "/control/v1/evidence-holds/{hold_id}/release",
-            ) => [false, true, true, false, false, false, false, true],
+            ) => [false, true, true, false, false, false, false, true, false],
             ("evidence.access.requested", "POST", "/control/v1/artifacts/{artifact_id}/access")
             | (
                 "evidence.access.approved",
@@ -301,15 +359,17 @@ impl AccessPayload {
                 "evidence.access.denied",
                 "POST",
                 "/control/v1/evidence-access-requests/{access_request_id}/deny",
-            ) => [false, true, true, true, false, false, false, false],
+            ) => [false, true, true, true, false, false, false, false, false],
             ("evidence.read", "GET", "/control/v1/artifacts/{artifact_id}/content") => {
-                [false, true, false, true, false, false, false, false]
+                [false, true, false, true, false, false, false, false, false]
             }
             (
                 "console.evidence.access.read",
                 "GET",
                 "/control/v1/evidence-access-requests/{access_request_id}",
-            ) => [false, success, success, true, false, false, false, false],
+            ) => [
+                false, success, success, true, false, false, false, false, false,
+            ],
             _ => return Err(PublishError::InvalidEvent),
         };
         for ((target, prefix), allowed) in targets.into_iter().zip(allowed) {

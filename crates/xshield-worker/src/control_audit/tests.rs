@@ -14,6 +14,7 @@ const MODEL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000008";
 const GRANT: &str = "grant_018f2a3b-4c5d-7000-8000-000000000009";
 const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-00000000000a";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-00000000000b";
+const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-00000000000c";
 const HOLD_ACTIONS: &[(&str, &str, &str, &str)] = &[
     (
         "console.evidence.hold.created",
@@ -201,6 +202,72 @@ fn model_listing_publishes_only_scoped_access_facts() {
         terminal["payload"]["outcome"] = outcome.into();
         terminal["payload"]["reason_code"] = reason.into();
         assert_eq!(index(&terminal).unwrap().outcome, outcome);
+    }
+}
+
+#[test]
+fn calibration_report_read_requires_a_validated_target_after_path_parsing() {
+    let mut value = event();
+    value["event_type"] = "console.calibration.report.read".into();
+    value["payload"]["path"] = "/control/v1/calibration-reports/{report_id}".into();
+    value["payload"]["target_case_id"] = Value::Null;
+    value["payload"]["target_calibration_report_id"] = REPORT.into();
+    value["payload"]["reason_code"] = "CONTROL_CALIBRATION_REPORT_READ".into();
+    value["evidence_refs"] = json!([]);
+    assert_eq!(
+        index(&value).unwrap().reason_code,
+        "CONTROL_CALIBRATION_REPORT_READ"
+    );
+
+    for (outcome, reason) in [
+        ("DENY", "CONTROL_CALIBRATION_REPORT_READ_REQUEST_INVALID"),
+        ("DENY", "CONTROL_CALIBRATION_REPORT_BUSY"),
+        ("ERROR", "CONTROL_CALIBRATION_REPORT_STORE_UNAVAILABLE"),
+    ] {
+        let mut terminal = value.clone();
+        terminal["payload"]["outcome"] = outcome.into();
+        terminal["payload"]["reason_code"] = reason.into();
+        assert!(index(&terminal).is_ok(), "{reason}");
+        terminal["payload"]["target_calibration_report_id"] = Value::Null;
+        rejected(&terminal, "parsed report failure without target");
+    }
+
+    for (outcome, reason) in [
+        ("DENY", "CONTROL_AUTH_REQUIRED"),
+        ("DENY", "CONTROL_SCOPE_DENIED"),
+        ("DENY", "CONTROL_RATE_LIMITED"),
+        ("DENY", "CONTROL_CALIBRATION_REPORT_ID_INVALID"),
+        ("ERROR", "CONTROL_RATE_UNAVAILABLE"),
+        ("ERROR", "CONTROL_CLOCK_UNAVAILABLE"),
+    ] {
+        let mut terminal = value.clone();
+        terminal["payload"]["outcome"] = outcome.into();
+        terminal["payload"]["reason_code"] = reason.into();
+        terminal["payload"]["target_calibration_report_id"] = Value::Null;
+        if matches!(
+            reason,
+            "CONTROL_AUTH_REQUIRED" | "CONTROL_CLOCK_UNAVAILABLE"
+        ) {
+            terminal["payload"]["subject_ref"] = Value::Null;
+        }
+        assert!(index(&terminal).is_ok(), "{reason}");
+        terminal["payload"]["target_calibration_report_id"] = REPORT.into();
+        rejected(&terminal, "unparsed report failure with target");
+    }
+
+    for (field, content) in [
+        ("method", json!("POST")),
+        ("path", json!("/control/v1/calibration-reports/report")),
+        ("target_request_id", json!(REQUEST)),
+        ("target_artifact_id", json!(ARTIFACT)),
+        ("target_case_id", json!(CASE)),
+        ("target_model_call_id", json!(MODEL)),
+        ("query_digest", json!("a".repeat(64))),
+        ("bytes_read", json!(0)),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
     }
 }
 

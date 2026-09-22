@@ -184,3 +184,9 @@ producer 固定为 `calibration-evidence-reader`，policy revision 为 `calibrat
 `calibration.read_batch.completed` 是迁移 0024 将完整 evaluator completion 持久化为 `lease active → completed`、capability `leased → consumed` 的同一 PostgreSQL 事务中的受限 outbox 终态。producer 固定为 `calibration-evidence-batch-completer`，aggregate/trace/span 都绑定 `calcap_` UUIDv7 capability；event ID 与 producer boot 相同，两个序号为 1，发生/观察时间为同一数据库 UTC 毫秒。capability header 以外键保存精确 completion event ID，未知提交重试先核对该引用和 event，不能因后续 retention 或 drift 复活读权。
 
 封闭 payload 仅含 `calibration_read_batch/PASS/CALIBRATION_READ_BATCH_COMPLETED` 与 capability ID；request、evidence_refs、cause、lease ID/handle、runner、artifact、样本、label、概率、指标、evaluator 输出和 report 均禁止进入该事实。它是可检索的安全终态，不是 evidence 已完整读取的证明、模型质量、阈值/策略发布或业务授权真值；报告提交时该 completion 与 `calibration.reported` 在同一事务中产生，但两份受限 payload 仍不相互展开内容。
+
+## 11.13 已实现校准报告调查访问审计
+
+`console.calibration.report.read` 是控制面读取单个受限 `calr_` 报告 projection 的管理访问事件。它固定 `GET /control/v1/calibration-reports/{report_id}`、`AuditAdministrator` 与 `control_access` 发布路径；成功为 `PASS/CONTROL_CALIBRATION_REPORT_READ`。已认证的路径、请求或容量拒绝使用 `CONTROL_CALIBRATION_REPORT_ID_INVALID`、`CONTROL_CALIBRATION_REPORT_READ_REQUEST_INVALID` 或 `CONTROL_CALIBRATION_REPORT_BUSY`，身份/范围/速率沿用通用管理原因；存储、限流和时钟依赖故障分别保留 `CONTROL_CALIBRATION_REPORT_STORE_UNAVAILABLE`、`CONTROL_RATE_UNAVAILABLE` 与 `CONTROL_CLOCK_UNAVAILABLE`。
+
+只有经路径校验的目标可写 `target_calibration_report_id=calr_…`；认证或范围未建立、限流/时钟失败和无效 ID 不写目标。成功以及已解析目标后的 request、busy 和 store 终态必须保留该目标。所有其他 target、query digest、bytes_read 和 evidence_refs 均为空；payload 不记录报告内容、body 状态、revision、manifest、provider、审批、游标、存储信息或读取资格。worker 对事件类型、方法、路径、目标前缀和上述 outcome/reason 集合严格解析；无法耐久追加该事件时控制面返回 `AUDIT_DURABILITY_FAILED` 并扣留原响应。
