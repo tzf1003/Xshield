@@ -1,6 +1,6 @@
 # Xshield 调查控制台
 
-React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用，按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件。UI 调用现有的七类 GET 端点及只读 `POST /control/v1/search`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。GET 详情需要显式 `Observer`，事件检索需要 `Investigator`，两种角色分别校验。
+React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件。UI 调用固定 GET 端点及只读 `POST /control/v1/search`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情与模型调用列表均需要显式 `Observer`，事件检索需要 `Investigator`，两种角色分别校验。
 
 案件工作台另外调用本人案件列表和集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。
 
@@ -31,6 +31,7 @@ npm run dev
 - 查询摘要使用浏览器原生 WebCrypto 验证，需要 HTTPS 或 localhost 安全上下文；能力不可用时本地拒绝查询。
 - 搜索只读已发布历史事实；请求与证据引用可打开现有详情，但仍需 Observer，Investigator 不隐含该权限。当前资格/绑定有效性、案件归属与原文读取由对应服务分别校验。完整关联图、跨事件遍历与自然语言计划继续迭代。
 - 查询类型可切换为模型调用，接受 `mdl_` UUIDv7。结果显示 provider、请求所用 provider_model_id、内部模型/提示版本、置信度语义、因果生命周期及输入/输出/调用记录引用；点击引用沿用单项证据元数据查询。旧记录两项供应商字段均为空时显示“历史记录未提供”，Noul 置信度显示“不适用”。
+- “模型调用列表”要求 UTC 整秒半开时间窗（最长 31 天）及 1–100 条页大小，固定按 `(occurred_at DESC, model_call_id DESC)` 返回窗口内可见的最新脱敏记录。页面只显示 `latest_confidence_status`，不显示数值置信度、证据引用、生命周期、概率或供应商正文；游标由服务端绑定身份、范围和窗口，客户端只原样继续分页。点击模型调用 ID 会重新调用单项详情并重新鉴权，列表行不代替详情、当前状态、生命周期完整性或证据访问权。
 - 模型的 `complete/pending/partial/not_indexed` 分别表示可见生命周期完整、等待终态、终态前驱不全和当前索引未命中。索引水位只覆盖配置日志源，不表示模型已全部追平；供应商模型标识不代替精确解析版本，评估完成不授予业务操作资格。
 - 资格与身份绑定查询接受规范 `grant_` / `auth_` UUIDv7，展示数据库 `as_of`、持久状态和独立时间到期标志。资格记录包含发行代际、操作/视图、策略与来源引用，以及同一快照的当前绑定状态和代际是否一致；绑定详情还包含凭证代际与更新时间。UTC 微秒原样保留，客户端精确核对到期关系，超出 JavaScript 安全整数范围的代际值拒绝展示。匿名、撤销和过期记录可调查，`active` 标签不等于在线准入通过。
 - 资格可打开绑定详情和来源请求时间线；“准备历史检索”只预填对应 ID，须填写 UTC 时间窗并主动提交 Investigator 查询。账本观察不附带 ClickHouse 水位，后续查询不构成跨存储冻结快照。`found=false` 显示“当前账本未找到”，不推断历史不存在；主体、凭证、资源指纹、动作引用和约束正文均不进入展示对象。
@@ -81,7 +82,7 @@ npm run build
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 [29.24](../../docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。模型调用列表与批量导出界面属于后续独立闭环。
+API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 [29.24](../../docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。模型调用列表依赖支持其固定窗口、签名游标和 `console.model.list` 审计的控制 API；批量导出继续独立交付。
 
 ## 验证
 

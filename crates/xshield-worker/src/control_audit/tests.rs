@@ -155,6 +155,55 @@ fn case_listing_publishes_only_scoped_access_facts() {
     }
 }
 
+#[test]
+fn model_listing_publishes_only_scoped_access_facts() {
+    let mut value = event();
+    value["event_type"] = "console.model.list".into();
+    value["payload"]["path"] = "/control/v1/model-calls".into();
+    value["payload"]["target_case_id"] = Value::Null;
+    value["payload"]["reason_code"] = "CONTROL_MODEL_CALLS_READ".into();
+    value["evidence_refs"] = json!([]);
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    assert_eq!(row.confidence, None);
+    assert_eq!(row.is_terminal, 0);
+    for (field, content) in [
+        ("method", json!("POST")),
+        ("path", json!("/control/v1/model-calls?cursor=opaque")),
+        ("subject_ref", Value::Null),
+        ("target_case_id", json!(CASE)),
+        ("target_model_call_id", json!(MODEL)),
+        ("target_artifact_id", json!(ARTIFACT)),
+        ("query_digest", json!("a".repeat(64))),
+        ("bytes_read", json!(0)),
+        ("reason_code", json!("CONTROL_MODEL_CALL_READ")),
+        ("start", json!("2026-09-19T00:00:00Z")),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
+    }
+    let mut referenced = value.clone();
+    referenced["evidence_refs"] = json!([ARTIFACT]);
+    rejected(&referenced, "model listing has no evidence targets");
+    for (outcome, reason) in [
+        ("DENY", "CONTROL_MODEL_CALLS_REQUEST_INVALID"),
+        ("DENY", "CONTROL_CURSOR_INVALID"),
+        ("DENY", "CONTROL_QUERY_CAPACITY_EXHAUSTED"),
+        ("DENY", "CONTROL_QUERY_BUDGET_EXCEEDED"),
+        ("ERROR", "CONTROL_CURSOR_UNAVAILABLE"),
+        ("ERROR", "CONTROL_QUERY_TIMEOUT"),
+        ("ERROR", "CONTROL_MODEL_CALLS_INDEX_UNAVAILABLE"),
+        ("ERROR", "CONTROL_MODEL_CALLS_HEALTH_UNAVAILABLE"),
+    ] {
+        let mut terminal = value.clone();
+        terminal["payload"]["subject_ref"] = Value::Null;
+        terminal["payload"]["outcome"] = outcome.into();
+        terminal["payload"]["reason_code"] = reason.into();
+        assert_eq!(index(&terminal).unwrap().outcome, outcome);
+    }
+}
+
 fn access_list_event() -> Value {
     let mut value = event();
     value["event_type"] = "console.evidence.access.list".into();

@@ -7,6 +7,7 @@ export const REQUEST_ID = "req_018f2a3b-4c5d-7000-8000-000000000001";
 export const OTHER_REQUEST_ID = "req_018f2a3b-4c5d-7000-8000-000000000002";
 export const MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
 export const OTHER_MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000002";
+export const THIRD_MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000003";
 export const ARTIFACT_ID = "artifact_018f2a3b-4c5d-7000-8000-000000000011";
 export const OTHER_ARTIFACT_ID =
   "artifact_018f2a3b-4c5d-7000-8000-000000000012";
@@ -241,6 +242,74 @@ export function modelCallFixture(modelCallId = MODEL_CALL_ID) {
       events,
       lifecycle_complete: true,
     },
+  };
+}
+
+/** Synthetic latest-in-window model-call metadata. No lifecycle, evidence,
+ * provider body, probability or numerical confidence crosses this list wire. */
+export function modelCallListFixture(nextPage = false) {
+  const item = (
+    modelCallId: string,
+    occurredAt: string,
+    latestStatus: string,
+    latestReasonCode: string,
+    latestConfidenceStatus: string,
+  ) => ({
+    model_call_id: modelCallId,
+    request_id: REQUEST_ID,
+    occurred_at: occurredAt,
+    provider: "vercel_ai_gateway",
+    provider_model_id: "typesafe-ai/jev",
+    model_revision: "jev-1.13.0",
+    prompt_revision: "evaluation-r1",
+    question_type: "choice",
+    latest_status: latestStatus,
+    latest_reason_code: latestReasonCode,
+    latest_confidence_status: latestConfidenceStatus,
+  });
+  const items = nextPage
+    ? [
+        item(
+          THIRD_MODEL_CALL_ID,
+          "2026-09-20T08:10:30.123454Z",
+          "error",
+          "MODEL_PROVIDER_UNAVAILABLE",
+          "unavailable",
+        ),
+      ]
+    : [
+        item(
+          MODEL_CALL_ID,
+          "2026-09-20T08:10:30.123456Z",
+          "success",
+          "MODEL_EVALUATED",
+          "provided",
+        ),
+        item(
+          OTHER_MODEL_CALL_ID,
+          "2026-09-20T08:10:30.123455Z",
+          "requested",
+          "MODEL_REQUESTED",
+          "not_provided",
+        ),
+      ];
+  return {
+    ...envelope(),
+    schema_version: 3,
+    start: "2026-09-20T00:00:00Z",
+    end: "2026-09-21T00:00:00Z",
+    watermark_scope: "configured_journal",
+    as_of: AS_OF,
+    index_watermark: summaryFixture().index_watermark,
+    has_gaps: true,
+    pending_segments: 2,
+    scanned_rows: 24,
+    scanned_bytes: 2048,
+    items,
+    truncated: !nextPage,
+    next_cursor: nextPage
+      ? null
+      : `v1.1789891830123455.${OTHER_MODEL_CALL_ID}.${"0".repeat(64)}`,
   };
 }
 

@@ -11,8 +11,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use xshield_core::{
     domain::{EventId, ModelCallId, RequestId, SiteId, TenantId},
-    query::{QueryFilter, QueryPlan, QuerySort},
+    query::{MAX_LIMIT, QueryFilter, QueryPlan, QuerySort, QueryWindow},
 };
+
+/// Maximum number of redacted model-call summaries in one page.
+///
+/// The list validates each selected lifecycle payload before projecting it, so
+/// its page budget is intentionally lower than the generic event-search
+/// budget. This keeps a corrupt retained payload from turning a metadata list
+/// into an unbounded decoder workload.
+pub const MODEL_CALL_LIST_LIMIT_MAX: u16 = 100;
 
 /// One redacted event returned by a bounded cross-request query.
 #[derive(Clone, Debug, Deserialize, Serialize, Row)]
@@ -150,6 +158,148 @@ pub struct ModelCallSummary {
     pub lifecycle_complete: bool,
 }
 
+/// A validated, bounded request for redacted model-call discovery.
+///
+/// This type deliberately has no tenant or site field: the authenticated
+/// control-plane composition root supplies those values to the query adapter.
+/// The window describes what was visible to this page, not a frozen lifecycle
+/// snapshot or a grant to read model evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModelCallListPlan {
+    window: QueryWindow,
+    limit: u16,
+}
+
+impl ModelCallListPlan {
+    /// Validates a model-call discovery page after its UTC window was checked.
+    ///
+    /// # Errors
+    /// Returns [`ModelCallListPlanError::InvalidLimit`] when the page is empty,
+    /// exceeds this list's decoder budget, or exceeds the workspace query
+    /// maximum. Authorization, scope injection, cursor authentication, and
+    /// terminal access audit remain caller responsibilities.
+    pub const fn new(window: QueryWindow, limit: u16) -> Result<Self, ModelCallListPlanError> {
+        if limit == 0 || limit > MODEL_CALL_LIST_LIMIT_MAX || limit > MAX_LIMIT {
+            return Err(ModelCallListPlanError::InvalidLimit);
+        }
+        Ok(Self { window, limit })
+    }
+
+    /// Returns the required half-open UTC investigation window.
+    #[must_use]
+    pub const fn window(self) -> QueryWindow {
+        self.window
+    }
+
+    /// Returns the maximum number of redacted summaries to expose.
+    #[must_use]
+    pub const fn limit(self) -> u16 {
+        self.limit
+    }
+}
+
+/// Static validation failures for [`ModelCallListPlan`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelCallListPlanError {
+    /// The requested page size is outside the list's fixed resource budget.
+    InvalidLimit,
+}
+
+/// Stable keyset position for descending model-call discovery.
+///
+/// The position is the latest retained lifecycle event for one `mdl_` within
+/// the caller's window. It is intentionally not an event cursor: one model
+/// call appears at most once on a page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCallListPosition {
+    occurred_at: DateTime<Utc>,
+    model_call_id: ModelCallId,
+}
+
+impl ModelCallListPosition {
+    /// Builds a position from a validated list row.
+    ///
+    /// # Errors
+    /// Returns [`PublishError::InvalidEvent`] if the timestamp cannot be
+    /// represented without loss in `ClickHouse`'s microsecond cursor boundary.
+    pub fn new(
+        occurred_at: DateTime<Utc>,
+        model_call_id: ModelCallId,
+    ) -> Result<Self, PublishError> {
+        if occurred_at.timestamp_subsec_nanos() >= 1_000_000_000
+            || !occurred_at.timestamp_subsec_nanos().is_multiple_of(1_000)
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        Ok(Self {
+            occurred_at,
+            model_call_id,
+        })
+    }
+
+    /// Returns the latest visible lifecycle occurrence time.
+    #[must_use]
+    pub const fn occurred_at(&self) -> DateTime<Utc> {
+        self.occurred_at
+    }
+
+    /// Returns the model-call component of the keyset position.
+    #[must_use]
+    pub fn model_call_id(&self) -> &ModelCallId {
+        &self.model_call_id
+    }
+}
+
+/// One redacted model-call discovery row.
+///
+/// Every field is derived from the latest lifecycle event visible inside the
+/// requested window. The row does not assert that this is the call's current
+/// state or that its entire lifecycle is retained. It intentionally excludes
+/// evidence references, provider bodies, probabilities, and confidence values.
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelCallListSummary {
+    /// Stable model attempt identity. Opening it requires a separately audited
+    /// and re-authorized model-call detail request.
+    pub model_call_id: String,
+    /// Request that emitted the latest visible model lifecycle event.
+    pub request_id: String,
+    /// Authenticated occurrence time of the latest visible lifecycle event.
+    #[serde(serialize_with = "serialize_event_time")]
+    pub occurred_at: DateTime<Utc>,
+    /// Stable provider route name, when historical lifecycle data recorded it.
+    pub provider: Option<String>,
+    /// Exact historical wire model identifier, not an inferred resolved revision.
+    pub provider_model_id: Option<String>,
+    /// Versioned internal model identifier.
+    pub model_revision: String,
+    /// Versioned prompt identifier.
+    pub prompt_revision: String,
+    /// Typed Jev question family.
+    pub question_type: String,
+    /// Latest lifecycle status visible inside the requested window.
+    pub latest_status: String,
+    /// Stable reason attached to that latest visible status.
+    pub latest_reason_code: String,
+    /// Availability semantics for the latest confidence value, without that value.
+    pub latest_confidence_status: String,
+}
+
+/// One bounded page of redacted model-call discovery results.
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelCallListResult {
+    /// One latest-in-window row for each returned model call.
+    pub model_calls: Vec<ModelCallListSummary>,
+    /// True when a further descending keyset page exists.
+    pub truncated: bool,
+    /// Last returned row used to continue discovery. This is never serialized.
+    #[serde(skip)]
+    pub next_position: Option<ModelCallListPosition>,
+    /// Actual index scan rows when `ClickHouse` reports them.
+    pub scanned_rows: Option<u64>,
+    /// Actual index scan bytes when `ClickHouse` reports them.
+    pub scanned_bytes: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Row)]
 struct ModelCallRow {
     event_id: String,
@@ -164,6 +314,23 @@ struct ModelCallRow {
     evidence_refs: Vec<String>,
     cause_event_ids: Vec<String>,
     sensitivity: String,
+    payload_json: String,
+}
+
+/// One aggregate row used only while constructing a redacted discovery page.
+/// Evidence references are fetched to authenticate payload-to-envelope binding,
+/// then intentionally discarded before the public list projection is built.
+#[derive(Debug, Deserialize, Serialize, Row)]
+struct ModelCallListRow {
+    model_call_id: String,
+    request_id: String,
+    event_type: String,
+    #[serde(
+        deserialize_with = "deserialize_event_time",
+        serialize_with = "serialize_event_time"
+    )]
+    occurred_at: DateTime<Utc>,
+    evidence_refs: Vec<String>,
     payload_json: String,
 }
 
@@ -303,6 +470,221 @@ pub async fn query_model_call(
     )
     .await
     .map_err(|_| PublishError::QueryTimeout)?
+}
+
+/// Lists model calls by their latest lifecycle event visible in one UTC window.
+///
+/// The tenant and site are injected by the authenticated control-plane root.
+/// The query groups only fixed model lifecycle event types, parses each selected
+/// payload with the same strict decoder as the detail endpoint, and returns a
+/// redacted summary. It neither reconstructs a full lifecycle nor grants
+/// evidence access. Results are ordered by `(occurred_at DESC, model_call_id
+/// DESC)` and a supplied position is valid only for this plan's window.
+///
+/// # Errors
+/// Returns [`PublishError::InvalidConfig`] when the continuation position lies
+/// outside the supplied window, [`PublishError::InvalidEvent`] for a malformed
+/// selected aggregate row, [`PublishError::QueryBudgetExceeded`] when a query
+/// or decoder budget is exhausted, [`PublishError::QueryTimeout`] for the
+/// client deadline, and [`PublishError::ClickHouse`] for index failures.
+/// Admission, cursor authentication, and terminal access audit are caller
+/// responsibilities.
+pub async fn query_model_calls(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    plan: &ModelCallListPlan,
+    after: Option<&ModelCallListPosition>,
+) -> Result<ModelCallListResult, PublishError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        execute_model_call_list(config, client, tenant_id, site_id, plan, after),
+    )
+    .await
+    .map_err(|_| PublishError::QueryTimeout)?
+}
+
+#[allow(clippy::too_many_lines)]
+async fn execute_model_call_list(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    plan: &ModelCallListPlan,
+    after: Option<&ModelCallListPosition>,
+) -> Result<ModelCallListResult, PublishError> {
+    let start = i64::try_from(plan.window().start().value())
+        .ok()
+        .and_then(|value| value.checked_mul(1_000_000))
+        .ok_or(PublishError::InvalidConfig)?;
+    let end = i64::try_from(plan.window().end().value())
+        .ok()
+        .and_then(|value| value.checked_mul(1_000_000))
+        .ok_or(PublishError::InvalidConfig)?;
+    if after
+        .is_some_and(|position| !(start..end).contains(&position.occurred_at().timestamp_micros()))
+    {
+        return Err(PublishError::InvalidConfig);
+    }
+
+    // `argMax` uses event_id only to break equal clock readings within one
+    // model call. The outer keyset purposefully uses model_call_id instead:
+    // one group yields at most one row, making page boundaries stable even
+    // when different calls share the same microsecond timestamp.
+    let mut sql = format!(
+        "SELECT model_call_id,request_id,event_type,occurred_at,evidence_refs,payload_json \
+         FROM ( \
+           SELECT model_call_id, \
+             argMax(request_id,tuple(occurred_at,event_id)) AS request_id, \
+             argMax(event_type,tuple(occurred_at,event_id)) AS event_type, \
+             argMax(occurred_at,tuple(occurred_at,event_id)) AS occurred_at, \
+             argMax(evidence_refs,tuple(occurred_at,event_id)) AS evidence_refs, \
+             argMax(payload_json,tuple(occurred_at,event_id)) AS payload_json \
+           FROM ( \
+             SELECT {MODEL_CALL_ID_PROJECTION},request_id,event_id,event_type,occurred_at, \
+                    evidence_refs,payload_json \
+             FROM ? \
+             WHERE tenant_id = ? AND site_id = ? \
+               AND occurred_at >= fromUnixTimestamp64Micro(?) \
+               AND occurred_at < fromUnixTimestamp64Micro(?) \
+               AND proof_kind = 'model' \
+               AND event_type IN ('model.started','model.requested','model.responded', \
+                                  'model.failed','model.timeout','model.cancelled') \
+           ) \
+           WHERE model_call_id IS NOT NULL \
+           GROUP BY model_call_id \
+         )",
+    );
+    if after.is_some() {
+        sql.push_str(
+            " WHERE tuple(occurred_at,model_call_id) < \
+             tuple(fromUnixTimestamp64Micro(?),?)",
+        );
+    }
+    sql.push_str(" ORDER BY occurred_at DESC,model_call_id DESC LIMIT ?");
+
+    let mut query = client
+        .query(&sql)
+        .bind(Identifier(&config.active_view))
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(start)
+        .bind(end);
+    if let Some(position) = after {
+        query = query
+            .bind(position.occurred_at().timestamp_micros())
+            .bind(position.model_call_id().as_str());
+    }
+    let fetch_limit = u64::from(plan.limit()) + 1;
+    let mut cursor = query
+        .bind(fetch_limit)
+        .with_setting("max_execution_time", "2")
+        .with_setting("timeout_before_checking_execution_speed", "0")
+        .with_setting("max_rows_to_read", "1000000")
+        .with_setting("max_bytes_to_read", "67108864")
+        .with_setting("read_overflow_mode", "throw")
+        .with_setting("timeout_overflow_mode", "throw")
+        // Returned payloads are re-validated and discarded. Four MiB bounds
+        // that internal decoder work while permitting 101 retained envelopes
+        // at the fixed page maximum.
+        .with_setting("max_result_bytes", "4194304")
+        .with_setting("result_overflow_mode", "throw")
+        .with_setting("max_memory_usage", "268435456")
+        .with_setting("max_threads", "2")
+        .with_setting("prefer_column_name_to_alias", "1")
+        .with_setting("wait_end_of_query", "1")
+        .fetch::<ModelCallListRow>()
+        .map_err(query_error)?;
+    let mut model_calls = Vec::with_capacity(usize::from(plan.limit()) + 1);
+    let mut seen_model_call_ids = BTreeSet::new();
+    while let Some(row) = cursor.next().await.map_err(query_error)? {
+        if model_calls.len() > usize::from(plan.limit()) {
+            return Err(PublishError::InvalidEvent);
+        }
+        if cursor.decoded_bytes() > 4 * 1024 * 1024 || row.payload_json.len() > 8192 {
+            return Err(PublishError::QueryBudgetExceeded);
+        }
+        let model_call_id =
+            ModelCallId::parse(row.model_call_id).map_err(|_| PublishError::InvalidEvent)?;
+        let request_id =
+            RequestId::parse(row.request_id).map_err(|_| PublishError::InvalidEvent)?;
+        validate_id_list(&row.evidence_refs, None)?;
+        let payload =
+            super::model_eval::ModelEvent::parse_query_event(&row.payload_json, &row.event_type)
+                // Indexed payload corruption is an authenticated event-contract
+                // violation, not a caller JSON failure. Keep it distinct from a
+                // transport dependency failure before the control adapter maps it.
+                .map_err(|_| PublishError::InvalidEvent)?;
+        if payload.model_call_id != model_call_id.as_str()
+            || [
+                payload.input_artifact_id.as_deref(),
+                payload.output_artifact_id.as_deref(),
+                payload.call_artifact_id.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|artifact_id| {
+                !row.evidence_refs
+                    .iter()
+                    .any(|reference| reference == artifact_id)
+            })
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        let key = (row.occurred_at, model_call_id.as_str());
+        let previous = model_calls
+            .last()
+            .map(|previous: &ModelCallListSummary| {
+                (previous.occurred_at, previous.model_call_id.as_str())
+            })
+            .or_else(|| {
+                after.map(|position| (position.occurred_at(), position.model_call_id().as_str()))
+            });
+        if !seen_model_call_ids.insert(model_call_id.as_str().to_owned())
+            || !(start..end).contains(&row.occurred_at.timestamp_micros())
+            || previous.is_some_and(|previous| key >= previous)
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        model_calls.push(ModelCallListSummary {
+            model_call_id: model_call_id.as_str().to_owned(),
+            request_id: request_id.as_str().to_owned(),
+            occurred_at: row.occurred_at,
+            provider: payload.provider,
+            provider_model_id: payload.provider_model_id,
+            model_revision: payload.model_revision,
+            prompt_revision: payload.prompt_revision,
+            question_type: payload.question_type,
+            latest_status: payload.status,
+            latest_reason_code: payload.reason_code,
+            latest_confidence_status: payload.confidence_status,
+        });
+    }
+    let scanned_rows = cursor
+        .summary()
+        .and_then(clickhouse::QuerySummary::read_rows);
+    let scanned_bytes = cursor
+        .summary()
+        .and_then(clickhouse::QuerySummary::read_bytes);
+    let truncated = model_calls.len() > usize::from(plan.limit());
+    model_calls.truncate(usize::from(plan.limit()));
+    let next_position = if truncated {
+        let last = model_calls.last().ok_or(PublishError::InvalidEvent)?;
+        Some(ModelCallListPosition::new(
+            last.occurred_at,
+            ModelCallId::parse(&last.model_call_id).map_err(|_| PublishError::InvalidEvent)?,
+        )?)
+    } else {
+        None
+    };
+    Ok(ModelCallListResult {
+        model_calls,
+        truncated,
+        next_position,
+        scanned_rows,
+        scanned_bytes,
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -825,19 +1207,27 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelCallRow, ModelCallSummary, PublishError, SearchEventSummary, query_error,
-        query_model_call, validate_search_event,
+        MODEL_CALL_ID_PROJECTION, MODEL_CALL_LIST_LIMIT_MAX, ModelCallListPlan,
+        ModelCallListPosition, ModelCallListResult, ModelCallListRow, ModelCallRow,
+        ModelCallSummary, PublishError, SearchEventSummary, query_error, query_model_call,
+        query_model_calls, validate_search_event,
     };
     use crate::PublisherConfig;
     use chrono::{DateTime, Utc};
     use clickhouse::{Client, error::Error, test};
-    use xshield_core::domain::{ModelCallId, SiteId, TenantId};
+    use xshield_core::{
+        domain::{ModelCallId, SiteId, TenantId},
+        identity::UnixSeconds,
+        query::QueryWindow,
+    };
 
     const MODEL_CALL_ID: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
     const REQUEST_ID: &str = "req_018f2a3b-4c5d-7000-8000-000000000001";
     const INPUT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000001";
     const OUTPUT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000002";
     const CALL_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000003";
+    const MODEL_CALL_ID_TWO: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000002";
+    const MODEL_CALL_ID_THREE: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000003";
 
     fn model_row(
         event_id: &str,
@@ -1042,6 +1432,253 @@ mod tests {
             &ModelCallId::parse(MODEL_CALL_ID).unwrap(),
         )
         .await
+    }
+
+    fn model_list_plan(limit: u16) -> ModelCallListPlan {
+        ModelCallListPlan::new(
+            QueryWindow::new(
+                UnixSeconds::new(1_789_776_000),
+                UnixSeconds::new(1_789_776_100),
+            )
+            .unwrap(),
+            limit,
+        )
+        .unwrap()
+    }
+
+    fn model_list_row(model_call_id: &str, second: u8) -> ModelCallListRow {
+        let mut row = model_rows().remove(2);
+        let mut payload: serde_json::Value = serde_json::from_str(&row.payload_json).unwrap();
+        payload["model_call_id"] = model_call_id.into();
+        payload["provider"] = "vercel_ai_gateway".into();
+        payload["provider_model_id"] = "typesafe-ai/jev".into();
+        row.payload_json = payload.to_string();
+        ModelCallListRow {
+            model_call_id: model_call_id.to_owned(),
+            request_id: row.request_id,
+            event_type: row.event_type,
+            occurred_at: DateTime::parse_from_rfc3339(&format!(
+                "2026-09-19T00:00:{second:02}.000Z"
+            ))
+            .unwrap()
+            .with_timezone(&Utc),
+            evidence_refs: row.evidence_refs,
+            payload_json: row.payload_json,
+        }
+    }
+
+    async fn query_model_list_rows(
+        rows: Vec<ModelCallListRow>,
+        limit: u16,
+        after: Option<&ModelCallListPosition>,
+    ) -> Result<ModelCallListResult, PublishError> {
+        let mut mock = test::Mock::new();
+        if !rows.is_empty() {
+            mock.add(test::handlers::provide(rows));
+        }
+        // Several negative-path cases deliberately reject before consuming the
+        // mock response. Their assertion is the typed local rejection, not a
+        // transport exchange.
+        mock.non_exhaustive();
+        let config = PublisherConfig::new(
+            "/tmp/xshield-model-list-query-journal",
+            "/tmp/xshield-model-list-query-manifest",
+            "/tmp/xshield-model-list-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        query_model_calls(
+            &config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_demo").unwrap(),
+            &SiteId::parse("site_demo").unwrap(),
+            &model_list_plan(limit),
+            after,
+        )
+        .await
+    }
+
+    #[test]
+    fn model_call_list_plan_enforces_its_decoder_page_budget() {
+        let window = QueryWindow::new(
+            UnixSeconds::new(1_789_776_000),
+            UnixSeconds::new(1_789_776_100),
+        )
+        .unwrap();
+        assert!(ModelCallListPlan::new(window, 1).is_ok());
+        assert!(ModelCallListPlan::new(window, MODEL_CALL_LIST_LIMIT_MAX).is_ok());
+        for invalid in [0, MODEL_CALL_LIST_LIMIT_MAX + 1] {
+            assert!(ModelCallListPlan::new(window, invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn model_call_list_returns_one_latest_redacted_window_row_per_call() {
+        let rows = vec![
+            model_list_row(MODEL_CALL_ID_TWO, 3),
+            model_list_row(MODEL_CALL_ID, 3),
+            model_list_row(MODEL_CALL_ID_THREE, 2),
+        ];
+        let page = query_model_list_rows(rows, 2, None).await.unwrap();
+        assert!(page.truncated);
+        assert_eq!(page.model_calls.len(), 2);
+        assert_eq!(page.model_calls[0].model_call_id, MODEL_CALL_ID_TWO);
+        assert_eq!(page.model_calls[1].model_call_id, MODEL_CALL_ID);
+        assert_eq!(page.model_calls[0].request_id, REQUEST_ID);
+        assert_eq!(
+            page.model_calls[0].provider_model_id.as_deref(),
+            Some("typesafe-ai/jev")
+        );
+        assert_eq!(page.model_calls[0].latest_status, "success");
+        assert_eq!(page.model_calls[0].latest_confidence_status, "provided");
+        let position = page.next_position.as_ref().unwrap();
+        assert_eq!(position.model_call_id().as_str(), MODEL_CALL_ID);
+        assert_eq!(position.occurred_at(), page.model_calls[1].occurred_at);
+
+        let encoded = serde_json::to_value(&page).unwrap();
+        let item = &encoded["model_calls"][0];
+        assert!(item.get("evidence_refs").is_none());
+        assert!(item.get("confidence").is_none());
+        assert!(item.get("input_artifact_id").is_none());
+        assert_eq!(item["latest_confidence_status"], "provided");
+
+        let after = ModelCallListPosition::new(
+            page.model_calls[1].occurred_at,
+            ModelCallId::parse(MODEL_CALL_ID).unwrap(),
+        )
+        .unwrap();
+        let next = query_model_list_rows(
+            vec![model_list_row(MODEL_CALL_ID_THREE, 2)],
+            2,
+            Some(&after),
+        )
+        .await
+        .unwrap();
+        assert!(!next.truncated);
+        assert_eq!(next.model_calls[0].model_call_id, MODEL_CALL_ID_THREE);
+    }
+
+    #[tokio::test]
+    async fn model_call_list_rejects_bad_window_position_order_and_envelope_binding() {
+        let outside = ModelCallListPosition::new(
+            DateTime::parse_from_rfc3339("2026-09-20T00:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ModelCallId::parse(MODEL_CALL_ID).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            query_model_list_rows(Vec::new(), 2, Some(&outside)).await,
+            Err(PublishError::InvalidConfig)
+        ));
+
+        let mut out_of_window = model_list_row(MODEL_CALL_ID, 3);
+        out_of_window.occurred_at = DateTime::parse_from_rfc3339("2026-09-20T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(matches!(
+            query_model_list_rows(vec![out_of_window], 2, None).await,
+            Err(PublishError::InvalidEvent)
+        ));
+
+        let mut missing_artifact_binding = model_list_row(MODEL_CALL_ID, 3);
+        missing_artifact_binding.evidence_refs.remove(2);
+        assert!(matches!(
+            query_model_list_rows(vec![missing_artifact_binding], 2, None).await,
+            Err(PublishError::InvalidEvent)
+        ));
+
+        let mut payload_drift = model_list_row(MODEL_CALL_ID, 3);
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&payload_drift.payload_json).unwrap();
+        payload["model_call_id"] = MODEL_CALL_ID_TWO.into();
+        payload_drift.payload_json = payload.to_string();
+        assert!(matches!(
+            query_model_list_rows(vec![payload_drift], 2, None).await,
+            Err(PublishError::InvalidEvent)
+        ));
+
+        let mut malformed_payload = model_list_row(MODEL_CALL_ID, 3);
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&malformed_payload.payload_json).unwrap();
+        payload["unexpected"] = true.into();
+        malformed_payload.payload_json = payload.to_string();
+        let result = query_model_list_rows(vec![malformed_payload], 2, None).await;
+        assert!(
+            matches!(result, Err(PublishError::InvalidEvent)),
+            "{result:?}"
+        );
+
+        let duplicate = vec![
+            model_list_row(MODEL_CALL_ID, 3),
+            model_list_row(MODEL_CALL_ID, 2),
+        ];
+        assert!(matches!(
+            query_model_list_rows(duplicate, 2, None).await,
+            Err(PublishError::InvalidEvent)
+        ));
+
+        let mut oversized_payload = model_list_row(MODEL_CALL_ID, 3);
+        oversized_payload.payload_json.push_str(&" ".repeat(8192));
+        assert!(matches!(
+            query_model_list_rows(vec![oversized_payload], 2, None).await,
+            Err(PublishError::QueryBudgetExceeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_call_list_compiles_scoped_latest_keyset_query() {
+        let fixture = PublisherConfig::new(
+            "/tmp/xshield-model-list-query-journal",
+            "/tmp/xshield-model-list-query-manifest",
+            "/tmp/xshield-model-list-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        let mock = test::Mock::new();
+        let recorded = mock.add(test::handlers::record_ddl());
+        let position = ModelCallListPosition::new(
+            DateTime::parse_from_rfc3339("2026-09-19T00:00:03.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ModelCallId::parse(MODEL_CALL_ID).unwrap(),
+        )
+        .unwrap();
+        let result = query_model_calls(
+            &fixture,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_demo").unwrap(),
+            &SiteId::parse("site_demo").unwrap(),
+            &model_list_plan(2),
+            Some(&position),
+        )
+        .await
+        .unwrap();
+        assert!(result.model_calls.is_empty());
+        let sql = recorded.query().await;
+        assert!(
+            sql.contains("WHERE tenant_id = 'tenant_demo' AND site_id = 'site_demo'"),
+            "{sql}"
+        );
+        assert!(sql.contains(MODEL_CALL_ID_PROJECTION), "{sql}");
+        assert!(sql.contains("AND proof_kind = 'model'"), "{sql}");
+        assert!(sql.contains("WHERE model_call_id IS NOT NULL"), "{sql}");
+        assert!(sql.contains("GROUP BY model_call_id"), "{sql}");
+        assert!(
+            sql.contains("argMax(payload_json,tuple(occurred_at,event_id))"),
+            "{sql}"
+        );
+        assert!(sql.contains("tuple(occurred_at,model_call_id) <"), "{sql}");
+        assert!(
+            sql.contains("ORDER BY occurred_at DESC,model_call_id DESC"),
+            "{sql}"
+        );
     }
 
     #[tokio::test]

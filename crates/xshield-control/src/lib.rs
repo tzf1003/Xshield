@@ -13,6 +13,7 @@ mod case_list;
 mod evidence_access_inspection;
 mod evidence_access_list;
 mod ledger_inspection;
+mod model_call_list;
 mod search;
 
 use axum::{
@@ -3393,6 +3394,10 @@ pub fn router(control: ControlPlane) -> Router {
         .route(HEALTH_PATH, get(health_handler))
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
+        .route(
+            model_call_list::PATH,
+            get(model_call_list::handler).layer(DefaultBodyLimit::max(0)),
+        )
         .route(MODEL_CALL_PATH, get(model_call_handler))
         .route(
             ledger_inspection::GRANT_PATH,
@@ -4391,6 +4396,7 @@ mod tests {
     mod evidence_lifecycle;
     mod hold_console_wire;
     mod ledger_inspection;
+    mod model_call_list;
     mod search_references;
 
     use super::search::SearchRequest;

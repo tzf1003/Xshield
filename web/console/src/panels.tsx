@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
 import type { SearchEvent } from "./search";
 import type {
@@ -5,6 +6,8 @@ import type {
   AuditEvent,
   EventsResponse,
   Manifest,
+  ModelCallListPlan,
+  ModelCallListResponse,
   ModelCallResponse,
   SummaryResponse,
 } from "./api";
@@ -58,6 +61,261 @@ function Badge({ value }: { value: string | null }) {
     >
       {value || "未记录"}
     </span>
+  );
+}
+
+const confidenceStatusLabel = {
+  provided: "已提供（详见详情）",
+  not_applicable: "不适用",
+  not_provided: "未提供",
+  unavailable: "不可用",
+} as const;
+
+/** Bounded Observer discovery. A row is only a latest-in-window observation;
+ * opening it always performs the separately audited model-call detail read. */
+export function ModelCallListPanel({
+  response,
+  plan,
+  busy,
+  onEdit,
+  onSubmit,
+  onNext,
+  onOpen,
+}: {
+  response: ModelCallListResponse | null;
+  plan: ModelCallListPlan | null;
+  busy: boolean;
+  onEdit: () => void;
+  onSubmit: (value: unknown) => void;
+  onNext: () => void;
+  onOpen: (id: string) => void;
+}) {
+  const [window, setWindow] = useState(() => {
+    const end = Math.floor(Date.now() / 1000) * 1000;
+    return {
+      start: new Date(end - 86_400_000).toISOString().slice(0, 19),
+      end: new Date(end).toISOString().slice(0, 19),
+    };
+  });
+  const [limit, setLimit] = useState("25");
+  const utc = (value: string) =>
+    `${value.length === 16 ? `${value}:00` : value}Z`;
+  return (
+    <>
+      <form
+        className="panel model-list-form"
+        aria-label="模型调用列表条件"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit({
+            start: utc(window.start),
+            end: utc(window.end),
+            limit: Number(limit),
+          });
+        }}
+      >
+        <div className="search-window">
+          <label>
+            开始时间（UTC，含）
+            <input
+              type="datetime-local"
+              value={window.start}
+              min="1970-01-01T00:00:00"
+              max="2300-01-01T00:00:00"
+              step="1"
+              required
+              onChange={(event) => {
+                onEdit();
+                setWindow({ ...window, start: event.target.value });
+              }}
+            />
+          </label>
+          <label>
+            结束时间（UTC，不含）
+            <input
+              type="datetime-local"
+              value={window.end}
+              min="1970-01-01T00:00:00"
+              max="2300-01-01T00:00:00"
+              step="1"
+              required
+              onChange={(event) => {
+                onEdit();
+                setWindow({ ...window, end: event.target.value });
+              }}
+            />
+          </label>
+          <label>
+            每页条数
+            <input
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              required
+              value={limit}
+              onChange={(event) => {
+                onEdit();
+                setLimit(event.target.value);
+              }}
+            />
+          </label>
+        </div>
+        <div className="search-actions">
+          <p className="footnote">
+            UTC 整秒半开时间窗，最多 31 天。结果固定按发生时间、模型调用 ID
+            从新到旧排列。
+          </p>
+          <button type="submit" disabled={busy}>
+            {busy ? "读取中…" : "读取模型调用"}
+          </button>
+        </div>
+        <p className="footnote">
+          此列表要求 Observer，只显示窗口内可见的最新脱敏记录；模型详情和证据元数据仍分别重新鉴权。
+        </p>
+      </form>
+      {plan && (
+        <section className="panel model-list-plan" aria-label="已提交模型调用列表条件">
+          <details>
+            <summary>已提交列表条件</summary>
+            <Rows
+              entries={[
+                ["开始时间", <span className="mono">{plan.start}</span>],
+                ["结束时间", <span className="mono">{plan.end}</span>],
+                ["每页条数", plan.limit],
+              ]}
+            />
+          </details>
+          {response && (
+            <Rows
+              entries={[
+                ["管理请求 ID", <span className="mono">{response.request_id}</span>],
+                [
+                  "实际扫描行",
+                  response.scanned_rows === null
+                    ? "未知（索引未报告）"
+                    : response.scanned_rows.toLocaleString(),
+                ],
+                [
+                  "实际扫描字节",
+                  response.scanned_bytes === null
+                    ? "未知（索引未报告）"
+                    : response.scanned_bytes.toLocaleString(),
+                ],
+              ]}
+            />
+          )}
+        </section>
+      )}
+      {response && (
+        <>
+          <div
+            className={`notice ${response.has_gaps || response.pending_segments > 0 ? "warning" : ""}`}
+            role="status"
+            aria-label="模型调用列表索引状态"
+          >
+            <div>
+              <strong>
+                {response.has_gaps ? "索引存在缺口" : "未观察到索引缺口"} · {" "}
+                {response.pending_segments} 个待发布段
+              </strong>
+              <p>
+                水位仅覆盖配置的日志源；列表为空、生命周期是否完整和其他生产者是否追平都须分别判断。
+              </p>
+              <details>
+                <summary>查看列表水位</summary>
+                <Rows
+                  entries={[
+                    ["观察时间", <span className="mono">{response.as_of}</span>],
+                    ["水位范围", response.watermark_scope],
+                    [
+                      "水位",
+                      response.index_watermark
+                        ? `${response.index_watermark.producer_boot_id} / ${response.index_watermark.producer_sequence}`
+                        : "尚不可用",
+                    ],
+                  ]}
+                />
+              </details>
+            </div>
+          </div>
+          <section className="panel" aria-label="模型调用列表结果" aria-busy={busy}>
+            <div className="panel-heading">
+              <h2>模型调用列表</h2>
+              <span className="muted">本页 {response.items.length} 条</span>
+            </div>
+            <div className="table-wrap">
+              <table className="model-list-table">
+                <thead>
+                  <tr>
+                    <th scope="col">发生时间</th>
+                    <th scope="col">模型调用</th>
+                    <th scope="col">供应商 / 模型</th>
+                    <th scope="col">内部版本</th>
+                    <th scope="col">窗口内最新状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {response.items.map((item) => (
+                    <tr key={item.model_call_id}>
+                      <td className="mono">{time(item.occurred_at)}</td>
+                      <td>
+                        <button
+                          className="artifact-link mono"
+                          onClick={() => onOpen(item.model_call_id)}
+                        >
+                          {item.model_call_id}
+                        </button>
+                        <small className="mono">{item.request_id}</small>
+                      </td>
+                      <td>
+                        <span>{item.provider ?? "历史记录未提供"}</span>
+                        <small className="mono">
+                          {item.provider_model_id ?? "历史记录未提供"}
+                        </small>
+                      </td>
+                      <td>
+                        <span className="mono">{item.model_revision}</span>
+                        <small className="mono">{item.prompt_revision}</small>
+                        <small>{item.question_type}</small>
+                      </td>
+                      <td>
+                        <span
+                          className={`badge ${item.latest_status === "success" ? "passed" : ["error", "timeout", "cancelled"].includes(item.latest_status) ? "denied" : ""}`}
+                        >
+                          {item.latest_status}
+                        </span>
+                        <small className="mono">{item.latest_reason_code}</small>
+                        <small>
+                          置信度：{confidenceStatusLabel[item.latest_confidence_status]}
+                        </small>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {response.items.length === 0 && (
+              <p className="footnote search-empty">
+                当前窗口和作用域内没有可见调用；这不推断调用不存在、未发布记录不存在或索引完整。
+              </p>
+            )}
+            <div className="pagination">
+              <button
+                className="outline"
+                disabled={busy || !response.next_cursor}
+                onClick={onNext}
+              >
+                下一页
+              </button>
+              <span className="muted">
+                {response.truncated ? "本页已截断，可继续翻页" : "当前可见结果已读完"}
+              </span>
+            </div>
+          </section>
+        </>
+      )}
+    </>
   );
 }
 

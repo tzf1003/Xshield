@@ -41,8 +41,10 @@ pub use outbox::{
     publish_share_grant_outbox_batch,
 };
 pub use search::{
-    AuditSearchResult, ModelCallEventSummary, ModelCallSummary, SearchEventSummary, SearchPosition,
-    query_audit_events, query_model_call,
+    AuditSearchResult, MODEL_CALL_LIST_LIMIT_MAX, ModelCallEventSummary, ModelCallListPlan,
+    ModelCallListPlanError, ModelCallListPosition, ModelCallListResult, ModelCallListSummary,
+    ModelCallSummary, SearchEventSummary, SearchPosition, query_audit_events, query_model_call,
+    query_model_calls,
 };
 
 #[cfg(unix)]

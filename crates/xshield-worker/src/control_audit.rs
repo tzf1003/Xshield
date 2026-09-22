@@ -16,6 +16,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.events.read"
             | "console.manifest.read"
             | "console.model.read"
+            | "console.model.list"
             | "console.grant.read"
             | "console.binding.read"
             | "console.query.executed"
@@ -89,6 +90,9 @@ impl AccessPayload {
         if event.event_type == "console.evidence.access.list" {
             self.validate_access_list_reason()?;
         }
+        if event.event_type == "console.model.list" {
+            self.validate_model_list_reason()?;
+        }
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
             "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
@@ -141,6 +145,32 @@ impl AccessPayload {
             self.validate_evidence(event)?;
         }
         Ok(())
+    }
+
+    fn validate_model_list_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_MODEL_CALLS_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_MODEL_CALLS_REQUEST_INVALID"
+                    | "CONTROL_CURSOR_INVALID"
+                    | "CONTROL_QUERY_CAPACITY_EXHAUSTED"
+                    | "CONTROL_QUERY_BUDGET_EXCEEDED"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CURSOR_UNAVAILABLE"
+                    | "CONTROL_QUERY_TIMEOUT"
+                    | "CONTROL_MODEL_CALLS_INDEX_UNAVAILABLE"
+                    | "CONTROL_MODEL_CALLS_HEALTH_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
     }
 
     fn validate_access_list_reason(&self) -> Result<(), PublishError> {
@@ -224,6 +254,7 @@ impl AccessPayload {
         let allowed = match (event_type, self.method.as_str(), self.path.as_str()) {
             ("console.health.read", "GET", "/control/v1/audit/health")
             | ("console.case.list", "GET", "/control/v1/cases")
+            | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests") => {
                 [false; 8]
             }

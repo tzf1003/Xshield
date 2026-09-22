@@ -19,6 +19,7 @@ import {
   ARTIFACT_ID,
   MODEL_CALL_ID,
   OTHER_MODEL_CALL_ID,
+  THIRD_MODEL_CALL_ID,
   EVENT_CURSOR,
   EVIDENCE_CURSOR,
   summaryFixture,
@@ -27,6 +28,7 @@ import {
   artifactFixture,
   errorFixture,
   modelCallFixture,
+  modelCallListFixture,
 } from "./fixtures.ts";
 
 const response = (value: unknown, status = 200) =>
@@ -209,6 +211,89 @@ test("model call projection preserves lifecycle, missing history and Noul confid
   };
   t.mock.method(globalThis, "fetch", async () => response(missing));
   assert.deepEqual(await client.modelCall(MODEL_CALL_ID), missing);
+});
+
+test("model-call list binds its UTC window, ordering and opaque cursor", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const plan = {
+    start: "2026-09-20T00:00:00Z",
+    end: "2026-09-21T00:00:00Z",
+    limit: 2,
+  };
+  let request = 0;
+  t.mock.method(globalThis, "fetch", async (path: string) => {
+    request += 1;
+    assert.equal(
+      path,
+      request === 1
+        ? "/control/v1/model-calls?start=2026-09-20T00%3A00%3A00Z&end=2026-09-21T00%3A00%3A00Z&limit=2"
+        : `/control/v1/model-calls?start=2026-09-20T00%3A00%3A00Z&end=2026-09-21T00%3A00%3A00Z&limit=2&cursor=${encodeURIComponent(modelCallListFixture().next_cursor!)}`,
+    );
+    return response(modelCallListFixture(request === 2));
+  });
+  const first = await client.modelCalls(plan);
+  assert.equal(first.items[0]?.model_call_id, MODEL_CALL_ID);
+  assert.ok(!JSON.stringify(first).includes("confidence\":0.8"));
+  const second = await client.modelCalls(plan, first.next_cursor!);
+  assert.equal(second.items[0]?.model_call_id, THIRD_MODEL_CALL_ID);
+  for (const invalid of [
+    { ...plan, limit: 0 },
+    { ...plan, limit: 101 },
+    { ...plan, start: "2026-09-20T00:00:00.000Z" },
+    { ...plan, end: plan.start },
+    { ...plan, extra: true },
+  ])
+    await assert.rejects(
+      client.modelCalls(invalid),
+      errorIs("CONTROL_MODEL_CALLS_REQUEST_INVALID"),
+    );
+  await assert.rejects(
+    client.modelCalls(plan, "cursor&injection"),
+    errorIs("CONTROL_CURSOR_INVALID"),
+  );
+});
+
+test("model-call list rejects malformed rows, ordering and response plan drift", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const plan = {
+    start: "2026-09-20T00:00:00Z",
+    end: "2026-09-21T00:00:00Z",
+    limit: 2,
+  };
+  const mutate = [
+    (value: ReturnType<typeof modelCallListFixture>) => {
+      value.end = "2026-09-22T00:00:00Z";
+    },
+    (value: ReturnType<typeof modelCallListFixture>) => {
+      value.items.reverse();
+    },
+    (value: ReturnType<typeof modelCallListFixture>) => {
+      value.items[0]!.occurred_at = "2026-09-20T08:10:30Z";
+    },
+    (value: ReturnType<typeof modelCallListFixture>) => {
+      value.items[0]!.occurred_at = "2026-09-21T00:00:00.000000Z";
+    },
+    (value: ReturnType<typeof modelCallListFixture>) => {
+      value.items[0]!.latest_confidence_status = "provided";
+      Object.assign(value.items[0]!, { confidence: 0.8 });
+    },
+    (value: ReturnType<typeof modelCallListFixture>) => {
+      value.items[1]!.latest_confidence_status = "provided";
+    },
+    (value: ReturnType<typeof modelCallListFixture>) => {
+      value.truncated = true;
+      value.next_cursor = null;
+    },
+  ];
+  for (const change of mutate) {
+    const value = modelCallListFixture();
+    change(value);
+    t.mock.method(globalThis, "fetch", async () => response(value));
+    await assert.rejects(
+      client.modelCalls(plan),
+      errorIs("INVALID_RESPONSE", 200),
+    );
+  }
 });
 
 test("Score lifecycle keeps confidence separate from score evidence", async (t) => {

@@ -218,6 +218,154 @@ export type ModelCallResponse = Envelope & {
   completeness: "complete" | "pending" | "partial" | "not_indexed";
   model_call: ModelCall | null;
 };
+/** A bounded, descending discovery window. The server binds the opaque cursor
+ * to this exact plan and the authenticated scope; it is never decoded here. */
+export type ModelCallListPlan = {
+  start: string;
+  end: string;
+  limit: number;
+};
+/** One redacted latest-in-window model-call observation. It has no evidence,
+ * provider body, probability or numerical confidence field. */
+export type ModelCallListItem = {
+  model_call_id: string;
+  request_id: string;
+  occurred_at: string;
+  provider: "typesafe" | "vercel_ai_gateway" | null;
+  provider_model_id: string | null;
+  model_revision: string;
+  prompt_revision: string;
+  question_type: "choice" | "score" | "noul";
+  latest_status:
+    | "started"
+    | "requested"
+    | "success"
+    | "error"
+    | "timeout"
+    | "cancelled";
+  latest_reason_code: string;
+  latest_confidence_status:
+    | "provided"
+    | "not_applicable"
+    | "not_provided"
+    | "unavailable";
+};
+export type ModelCallListResponse = Envelope & {
+  schema_version: 3;
+  start: string;
+  end: string;
+  watermark_scope: "configured_journal";
+  as_of: string;
+  index_watermark: Watermark | null;
+  has_gaps: boolean;
+  pending_segments: number;
+  scanned_rows: number | null;
+  scanned_bytes: number | null;
+  items: ModelCallListItem[];
+  truncated: boolean;
+  next_cursor: string | null;
+};
+
+function modelCallListTime(value: unknown): string {
+  const result = timestamp(value);
+  // The route's signed query vocabulary has exactly-second UTC boundaries.
+  ensure(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(result));
+  return result;
+}
+
+/** Validate a local list plan before it can become an audited GET request. */
+export function validateModelCallListPlan(value: unknown): ModelCallListPlan {
+  try {
+    const row = object(value);
+    ensure(
+      Object.keys(row).length === 3 &&
+        ["start", "end", "limit"].every((key) => Object.hasOwn(row, key)),
+    );
+    const start = modelCallListTime(row.start);
+    const end = modelCallListTime(row.end);
+    const duration = Date.parse(end) - Date.parse(start);
+    ensure(
+      duration > 0 &&
+        duration <= 31 * 24 * 60 * 60 * 1000 &&
+        Date.parse(start) >= 0 &&
+        Date.parse(end) <= 10_413_792_000_000,
+    );
+    return { start, end, limit: integer(row.limit, 1, 100) };
+  } catch {
+    throw new ApiError("CONTROL_MODEL_CALLS_REQUEST_INVALID");
+  }
+}
+
+function modelCallListItem(value: unknown): ModelCallListItem {
+  const row = object(value);
+  ensure(
+    Object.keys(row).length === 11 &&
+      [
+        "model_call_id",
+        "request_id",
+        "occurred_at",
+        "provider",
+        "provider_model_id",
+        "model_revision",
+        "prompt_revision",
+        "question_type",
+        "latest_status",
+        "latest_reason_code",
+        "latest_confidence_status",
+      ].every((key) => Object.hasOwn(row, key)),
+  );
+  const result: ModelCallListItem = {
+    model_call_id: id(row.model_call_id, modelCallPattern),
+    request_id: id(row.request_id, requestPattern),
+    occurred_at: timestamp(row.occurred_at),
+    provider: nullable(row.provider, (item) =>
+      choice(item, ["typesafe", "vercel_ai_gateway"]),
+    ),
+    provider_model_id: nullable(row.provider_model_id, (item) => text(item)),
+    model_revision: name(row.model_revision),
+    prompt_revision: name(row.prompt_revision),
+    question_type: choice(row.question_type, ["choice", "score", "noul"]),
+    latest_status: choice(row.latest_status, [
+      "started",
+      "requested",
+      "success",
+      "error",
+      "timeout",
+      "cancelled",
+    ]),
+    latest_reason_code: name(row.latest_reason_code),
+    latest_confidence_status: choice(row.latest_confidence_status, [
+      "provided",
+      "not_applicable",
+      "not_provided",
+      "unavailable",
+    ]),
+  };
+  ensure(
+    result.question_type !== "noul" ||
+      result.latest_confidence_status === "not_applicable",
+  );
+  ensure(
+    result.latest_status === "success" ||
+      result.latest_confidence_status !== "provided",
+  );
+  return result;
+}
+
+type ModelCallListPosition = { time: bigint; modelCallId: string };
+function modelCallListPosition(item: ModelCallListItem): ModelCallListPosition {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z$/.exec(
+    item.occurred_at,
+  );
+  // The model-call index and its keyset cursor operate at exact microseconds.
+  ensure(match !== null);
+  const millis = Date.parse(`${match[1]!}Z`);
+  ensure(Number.isSafeInteger(millis));
+  return {
+    time: BigInt(millis) * 1000n + BigInt(match[2]!),
+    modelCallId: item.model_call_id,
+  };
+}
 
 const maxBytes = 16 * 1024 * 1024;
 function stage(value: unknown): Stage {
@@ -983,6 +1131,94 @@ export class ControlClient {
                 ? "pending"
                 : "partial";
         ensure(result.completeness === expected);
+        return result;
+      },
+      signal,
+    );
+  }
+
+  /** Discover redacted model-call metadata inside a fixed UTC window. The
+   * cursor remains opaque: every continued page is still scope- and
+   * server-authorized, while opening a row uses the separate detail endpoint.
+   */
+  async modelCalls(
+    value: unknown,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<ModelCallListResponse> {
+    const plan = validateModelCallListPlan(value);
+    if (
+      cursor !== undefined &&
+      (typeof cursor !== "string" || !cursorPattern.test(cursor))
+    )
+      throw new ApiError("CONTROL_CURSOR_INVALID");
+    const parameters = new URLSearchParams({
+      start: plan.start,
+      end: plan.end,
+      limit: String(plan.limit),
+    });
+    if (cursor !== undefined) parameters.set("cursor", cursor);
+    return this.#request(
+      `model-calls?${parameters.toString()}`,
+      (value) => {
+        const row = object(value);
+        ensure(
+          row.schema_version === 3 &&
+            Object.keys(row).length === 16 &&
+            [
+              "schema_version",
+              "request_id",
+              "tenant_id",
+              "site_id",
+              "start",
+              "end",
+              "watermark_scope",
+              "as_of",
+              "index_watermark",
+              "has_gaps",
+              "pending_segments",
+              "scanned_rows",
+              "scanned_bytes",
+              "items",
+              "truncated",
+              "next_cursor",
+            ].every((key) => Object.hasOwn(row, key)),
+        );
+        const result: ModelCallListResponse = {
+          ...envelope(row),
+          ...watermarked(row),
+          ...pagination(row),
+          schema_version: 3,
+          start: modelCallListTime(row.start),
+          end: modelCallListTime(row.end),
+          watermark_scope: choice(row.watermark_scope, [
+            "configured_journal",
+          ]),
+          pending_segments: integer(row.pending_segments),
+          scanned_rows: nullable(row.scanned_rows, integer),
+          scanned_bytes: nullable(row.scanned_bytes, integer),
+          items: list(row.items, plan.limit, modelCallListItem),
+        };
+        ensure(result.start === plan.start && result.end === plan.end);
+        ensure(!result.truncated || result.items.length === plan.limit);
+        const start = BigInt(Date.parse(plan.start)) * 1000n;
+        const end = BigInt(Date.parse(plan.end)) * 1000n;
+        const seen = new Set<string>();
+        let previous: ModelCallListPosition | null = null;
+        for (const item of result.items) {
+          const current = modelCallListPosition(item);
+          ensure(current.time >= start && current.time < end);
+          ensure(!seen.has(current.modelCallId));
+          if (previous)
+            ensure(
+              current.time < previous.time ||
+                (current.time === previous.time &&
+                  current.modelCallId < previous.modelCallId),
+            );
+          seen.add(current.modelCallId);
+          previous = current;
+        }
+        ensure(result.next_cursor === null || result.next_cursor !== cursor);
         return result;
       },
       signal,

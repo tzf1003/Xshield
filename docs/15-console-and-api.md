@@ -42,6 +42,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | GET /control/v1/requests/{request_id} | 聚合摘要、阶段、覆盖和关联 |
 | GET /control/v1/requests/{request_id}/events | 不可变事件分页 |
 | GET /control/v1/requests/{request_id}/evidence | 作用域内证据 manifest 分页，不读取内容 |
+| GET /control/v1/model-calls | 在固定窗口内分页发现模型调用的最新脱敏状态 |
 | GET /control/v1/model-calls/{model_call_id} | 逻辑调用与实际尝试、输入输出引用 |
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定的脱敏账本快照、来源请求引用 |
 | GET /control/v1/auth-bindings/{binding_id} | 身份绑定的代际、状态与期限快照 |
@@ -96,7 +97,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 
 ## 15.7 已实现只读请求调查控制台
 
-`web/console` 以 React + TypeScript 实现请求 ID → 摘要 → 事件时间线 → 证据目录/单项元数据、模型调用 ID → 脱敏生命周期 → 证据元数据、资格 ID → 账本快照 → 身份绑定/来源请求，以及结构化事件检索的可交互闭环。详情调用 29.7–29.10、29.15、29.19–29.20 的七类 GET，要求 Observer；结构化检索调用 29.14 的 `POST /control/v1/search`，要求 Investigator。两种角色分别校验，Investigator 不隐含 Observer。范围由首次成功响应确认并在同一会话后续响应中逐一校验。事件和证据分页显式触发，证据目录按需查询，每页替换当前页。
+`web/console` 以 React + TypeScript 实现请求 ID → 摘要 → 事件时间线 → 证据目录/单项元数据、模型调用 ID → 脱敏生命周期 → 证据元数据、固定 UTC 窗口 → 模型调用分页发现、资格 ID → 账本快照 → 身份绑定/来源请求，以及结构化事件检索的可交互闭环。模型列表和详情均调用独立的 Observer API；列表行仅为窗口内最新可见状态，点击 `mdl_` 后仍重新鉴权并写独立详情审计。结构化检索调用 29.14 的 `POST /control/v1/search`，要求 Investigator。两种角色分别校验，Investigator 不隐含 Observer。范围由首次成功响应确认并在同一会话后续响应中逐一校验。事件、证据和模型列表分页显式触发，每页替换当前页。
 
 检索使用原生表单输入 UTC 整秒半开时间窗（1970 至 2300，最长 31 天）、1–1000 条页大小及事件时间升/降序。最多 8 个 allowlist 条件按同事件 AND 组合，包含 request/event/grant/auth binding/case/artifact ID、五类精确文本、outcome 和整数基点置信度上限；数值阈值不匹配空置信度。界面展示已提交计划、服务端查询摘要、管理请求 ID、实际扫描行/字节和索引水位/pending/gap，区分统计未知与 0。分页冻结已提交计划；编辑任何查询条件使旧结果、详情、摘要和游标失效，后续新发布或到期记录仍可能改变分页可见集合。
 
@@ -104,13 +105,15 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 
 摘要保留缺失、未知和未确认语义；`complete` 与索引 gap/pending 独立呈现，分别披露摘要/事件观察时间与配置日志源水位。事件展示证明类型、置信度可用性、修订和证据引用；确定性规则不填造置信度。目录只展示采集状态、保真度、字节数、分级及期限，`found=false` 统一为“当前不可用”；存储地址、密钥引用和密文摘要不进入展示 DTO。
 
-模型查询展示 provider/provider_model_id、内部模型与提示版本、问题类型、置信度可用性和按 request_seq 排序的有界生命周期；Noul 保持空置信度，历史供应商双空字段保持未知。界面区分 complete、pending、partial 和 not_indexed，强调配置日志源水位不证明模型追平，模型评估完成不表示业务操作获准。输入、输出与调用记录仅以 artifact 引用打开元数据；概率正文和供应商原文须经独立证据内容授权。
+模型列表使用 1970–2300、最长 31 天的 UTC 整秒半开时间窗和 1–100 条页大小，固定以 `(occurred_at DESC, model_call_id DESC)` 键集分页。每行只显示模型/提示版本、provider/provider_model_id、问题类型、窗口内最新状态/原因及置信度可用性，不显示数值置信度、概率、证据引用、生命周期或供应商正文。列表游标绑定凭证、主体、服务端 tenant/site、窗口、页大小、排序和最后位置；编辑条件清空旧页，后续发布或保留可能改变后页可见集合。它不主张当前状态、完整生命周期、模型索引已追平或证据读取资格。点击行会调用单项模型查询，继续由 Observer 重鉴权并记录 `console.model.read`。
+
+单项模型查询展示 provider/provider_model_id、内部模型与提示版本、问题类型、置信度可用性和按 request_seq 排序的有界生命周期；Noul 保持空置信度，历史供应商双空字段保持未知。界面区分 complete、pending、partial 和 not_indexed，强调配置日志源水位不证明模型追平，模型评估完成不表示业务操作获准。输入、输出与调用记录仅以 artifact 引用打开元数据；概率正文和供应商原文须经独立证据内容授权。
 
 资格及身份绑定查询展示单次 PostgreSQL 观察的 `as_of`、持久状态、时间到期与代际事实，保留 UTC 微秒并校验精确到期关系。资格内嵌当前绑定与资格共享快照；打开独立绑定详情或来源请求会产生新的观察。匿名、撤销和过期不被折叠成未找到，active 行仍可能到期；未找到时明确当前范围未返回记录。主体、凭证、资源指纹、动作引用及 constraints 不进入展示对象。历史检索入口仅预填目标条件，要求填写 UTC 时间窗并主动提交，独立校验 Investigator；账本与历史查询不构成跨存储冻结快照。界面不从这些事实派生在线准入结论，完整来源图继续迭代。
 
 凭证保存在当前页面内存，刷新、页面离开、闲置 15 分钟、401 或主动断连后清态；异步响应绑定查询代际和操作序号，旧响应不能恢复已清除数据，跨范围响应断连。原生 Fetch 固定同源路径、禁止重定向和 Cookie，实施 15 秒读体总期限及 16 MiB 上限，错误只呈现固定安全文案、稳定代码和管理请求 ID。管理审计继续由服务端控制端点完成。
 
-当前通过机器 Bearer 接入；OIDC/MFA 登录、服务端浏览器会话、模型列表/导出界面继续迭代。生产启用须先满足 15.3 的身份边界及 TLS、专用管理 origin、缓存/CSP 配置。开发和部署步骤、测试数据语义见 [控制台说明](../web/console/README.md)。
+当前通过机器 Bearer 接入；OIDC/MFA 登录、服务端浏览器会话和批量导出界面继续迭代。生产启用须先满足 15.3 的身份边界及 TLS、专用管理 origin、缓存/CSP 配置。开发和部署步骤、测试数据语义见 [控制台说明](../web/console/README.md)。
 
 ## 15.8 已实现案件工作台
 

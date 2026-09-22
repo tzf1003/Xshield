@@ -1,12 +1,13 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
 | GET /control/v1/requests/{request_id} | 请求概要和完整性状态 | console.request.read |
 | GET /control/v1/requests/{request_id}/events | 事件游标分页和阶段树 | console.events.read |
 | GET /control/v1/requests/{request_id}/evidence | 证据manifest清单 | console.manifest.read |
+| GET /control/v1/model-calls | 窗口内模型调用最新脱敏状态分页 | console.model.list |
 | GET /control/v1/model-calls/{model_call_id} | 模型调用、实际输入输出引用 | console.model.read |
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定账本快照、来源请求引用 | console.grant.read |
 | GET /control/v1/auth-bindings/{binding_id} | 当前身份与凭证代际、状态、期限 | console.binding.read |
@@ -303,3 +304,15 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 列表与案件及证据访问共用单实例在途许可，繁忙为 `CONTROL_EVIDENCE_ACCESS_BUSY`/429。数据库操作含连接池等待限 15 秒，事务内 SQL/锁等待限 5 秒；故障、超时或损坏为 `CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE`/503。只读事务结束后追加独立 `console.evidence.access.list` 管理审计，已准入任务断连后继续到结果和审计终态，许可覆盖审计；进程退出和本地 fsync 仍是故障边界。成功含空页为 `PASS/CONTROL_EVIDENCE_ACCESS_LIST_READ`；失败按 4xx/DENY、5xx/ERROR 使用 11.7 的精确原因集合。全部 target、query_digest 和 bytes_read 只允许缺省/null，evidence_refs 为空；事件只保存调用者与访问结果，列表视图、游标、记录及他人主体不进入载荷。必需审计失败为 `AUDIT_DURABILITY_FAILED`/503 并扣留响应数据，所有响应设置 `private, no-store`。
 
 部署先应用 `0022_m4_evidence_access_listing.sql`，为 tenant/site/requested_by/access ID 建立降序索引，并为 tenant/site/access ID 建立 pending 部分索引；再升级管理 journal 发布器、控制 API 和控制台。索引在事务内非并发构建，期间阻塞该表写入，大表需维护窗口。数据库角色沿用详情所需的 evidence_access_requests、investigation_cases、artifact_catalog 和 audit_outbox 查询权限；无需新增密钥或依赖。回滚时先停用新界面/路由，继续使用可识别新事件的发布器直到相关积压已处理；应用可回退并保留两个加法索引，或仅移除本迁移的索引，保留所有申请和 outbox 历史。旧发布器遇到新事件会停止推进并保留待发布段。
+
+## 29.25 已实现的模型调用列表契约
+
+`GET /control/v1/model-calls?start=<UTC>&end=<UTC>&limit=<1..100>[&cursor=<signed>]` 仅允许固定 tenant/site 内的 `Observer` 与单值管理 Bearer。服务端拒绝页面传入 tenant/site；每页均重新验证凭证、时效、角色、范围与速率。`start`、`end` 必须是规范 `YYYY-MM-DDTHH:MM:SSZ` UTC 整秒，表示 `[start,end)`，范围在 1970–2300 且最长 31 天。`limit` 为无前导零的 1–100 十进制整数；参数各出现一次，未知参数、空值、非空请求体、非规范时间、重复 Bearer 或非法 UTF-8 均在索引访问前拒绝为 `CONTROL_MODEL_CALLS_REQUEST_INVALID`/400。无效或错绑游标为 `CONTROL_CURSOR_INVALID`/400。
+
+查询仅从 retention-aware active view 读取固定 `model.*` 生命周期类型与 `proof_kind=model` 行。对每个 `mdl_`，它在请求窗口内以 `(occurred_at,event_id)` 选取最新可见事件，再整体按 `(occurred_at DESC, model_call_id DESC)` 取 `limit + 1` 行并做排他 keyset 分页。历史空索引列仅从同一已认证 model payload 回填强类型 `mdl_`；最新 payload、request、artifact envelope 绑定、范围、时间精度及返回顺序均重新校验，任一损坏或预算溢出均不返回部分页面。列表不是冻结快照：发布、保留或去重可改变后续页面；窗口内最新事件不表示当前状态、完整生命周期、调用存在性、模型已追平或证据读取权。
+
+成功响应固定为 `schema_version=3`、管理 `request_id`、tenant/site、回显的 start/end、`watermark_scope=configured_journal`、独立 `as_of`、`index_watermark`、`has_gaps`、`pending_segments`、可空实际扫描统计、`items`、`truncated` 和可空 `next_cursor`。item 只含 `model_call_id`、来源 `request_id`、观察时间、provider/provider_model_id、模型/提示版本、question type、窗口内 `latest_status/latest_reason_code/latest_confidence_status`。不含数值 confidence、概率、payload、供应商正文、证据引用、artifact ID 或完整生命周期。Noul 只以 `latest_confidence_status=not_applicable` 表示；provider model ID 不是精确 resolved revision。打开 item 继续调用 29.15，并重新鉴权和审计。
+
+游标使用独立用途域 `xshield-control-model-call-list-cursor-v1`，以 HMAC 常量时间比较绑定管理凭证摘要、主体、服务端 tenant/site、窗口、页大小、固定排序及最后的微秒时间和 model call ID。它不能跨凭证、主体、范围、窗口、页大小、位置、接口或游标密钥轮换复用；签名依赖失败为 `CONTROL_CURSOR_UNAVAILABLE`/503。列表与 search/单项模型查询共用每实例一个在途许可；已准入查询在客户端断连后仍执行至索引和终态审计。容量为 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429；确定性预算溢出为 `CONTROL_QUERY_BUDGET_EXCEEDED`/429，`retryable=false`、`next_action=narrow_query`；超时、索引依赖或水位检查故障分别为 `CONTROL_QUERY_TIMEOUT`、`CONTROL_MODEL_CALLS_INDEX_UNAVAILABLE`、`CONTROL_MODEL_CALLS_HEALTH_UNAVAILABLE`/503。
+
+所有已认证且可审计的尝试都追加独立 `console.model.list` 管理 journal：成功为 `PASS/CONTROL_MODEL_CALLS_READ`，失败按相应稳定原因码区分 DENY/ERROR。事件没有 target、query digest、evidence refs、游标、窗口、返回模型 ID 或页面数据；因此它不把列表观察伪装成单项读取、模型执行或证据授权。必需审计写入失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留任何结果；所有响应 `Cache-Control: private, no-store`。发布器必须先升级到支持 `console.model.list` 后开放路由；无 PostgreSQL migration 或新依赖。回滚时先停用路由和界面，保持可识别该管理事件的发布器直至已封存段发布完毕。

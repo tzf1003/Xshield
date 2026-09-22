@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
-import { ApiError, ControlClient } from "./api";
+import { ApiError, ControlClient, validateModelCallListPlan } from "./api";
 import { validateSearchPlan } from "./search";
 import type { SearchPlan, SearchResponse } from "./search";
 import { SearchPanel } from "./SearchPanel";
@@ -14,6 +14,8 @@ import type {
   ArtifactResponse,
   EventsResponse,
   EvidenceResponse,
+  ModelCallListPlan,
+  ModelCallListResponse,
   ModelCallResponse,
   SummaryResponse,
 } from "./api";
@@ -22,6 +24,7 @@ import {
   EventDetail,
   EventTable,
   EvidenceTable,
+  ModelCallListPanel,
   ModelCallOverview,
   RequestOverview,
   WatermarkNotice,
@@ -32,6 +35,7 @@ type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access" 
 type QueryKind =
   | "request"
   | "model"
+  | "model-list"
   | "grant"
   | "binding"
   | "search"
@@ -93,6 +97,11 @@ export function App() {
   const [searchPlan, setSearchPlan] = useState<SearchPlan | null>(null);
   const [search, setSearch] = useState<SearchResponse | null>(null);
   const [model, setModel] = useState<ModelCallResponse | null>(null);
+  const [modelListPlan, setModelListPlan] =
+    useState<ModelCallListPlan | null>(null);
+  const [modelList, setModelList] = useState<ModelCallListResponse | null>(
+    null,
+  );
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [events, setEvents] = useState<EventsResponse | null>(null);
   const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
@@ -111,6 +120,8 @@ export function App() {
     epoch.current += 1;
     setSummary(null);
     setModel(null);
+    setModelListPlan(null);
+    setModelList(null);
     setLedger(null);
     setSearchPlan(null);
     setSearch(null);
@@ -260,7 +271,7 @@ export function App() {
     if (
       queryKind === "search" ||
       queryKind === "case" ||
-      queryKind === "access" || queryKind === "hold"
+      queryKind === "access" || queryKind === "hold" || queryKind === "model-list"
     )
       return;
     clearResults();
@@ -293,6 +304,29 @@ export function App() {
       "query",
       (api, signal) => api.binding(target, signal),
       (response) => setLedger(response),
+    );
+  }
+  function loadModelCalls(value: unknown, cursor?: string) {
+    let plan: ModelCallListPlan;
+    try {
+      plan = validateModelCallListPlan(value);
+    } catch {
+      clearResults();
+      void run(
+        "query",
+        (api, signal) => api.modelCalls(value, cursor, signal),
+        () => {},
+      );
+      return;
+    }
+    clearResults();
+    void run(
+      "query",
+      (api, signal) => api.modelCalls(plan, cursor, signal),
+      (response) => {
+        setModelListPlan(plan);
+        setModelList(response);
+      },
     );
   }
   function openTarget(kind: "request" | "binding" | "model", id: string) {
@@ -380,6 +414,7 @@ export function App() {
   const title = {
     request: "请求调查",
     model: "模型调用调查",
+    "model-list": "模型调用列表",
     grant: "资格调查",
     binding: "身份绑定调查",
     search: "结构化事件检索",
@@ -511,6 +546,8 @@ export function App() {
                   setQueryKind(
                     event.target.value === "search"
                       ? "search"
+                      : event.target.value === "model-list"
+                        ? "model-list"
                       : event.target.value === "case"
                         ? "case"
                         : event.target.value === "access"
@@ -529,6 +566,7 @@ export function App() {
               >
                 <option value="request">请求</option>
                 <option value="model">模型调用</option>
+                <option value="model-list">模型调用列表</option>
                 <option value="grant">资格</option>
                 <option value="binding">身份绑定</option>
                 <option value="search">结构化事件检索</option>
@@ -538,7 +576,9 @@ export function App() {
               </select>
               {queryKind !== "search" &&
                 queryKind !== "case" &&
-                queryKind !== "access" && queryKind !== "hold" && (
+                queryKind !== "access" &&
+                queryKind !== "hold" &&
+                queryKind !== "model-list" && (
                   <>
                     <label htmlFor="request-id">{queryLabels[queryKind]}</label>
                     <input
@@ -613,6 +653,19 @@ export function App() {
                   clearArtifact();
                   setSelected(id);
                 }}
+              />
+            ) : queryKind === "model-list" ? (
+              <ModelCallListPanel
+                response={modelList}
+                plan={modelListPlan}
+                busy={Boolean(busy.query)}
+                onEdit={clearResults}
+                onSubmit={(value) => loadModelCalls(value)}
+                onNext={() => {
+                  if (modelListPlan && modelList?.next_cursor)
+                    loadModelCalls(modelListPlan, modelList.next_cursor);
+                }}
+                onOpen={(id) => openTarget("model", id)}
               />
             ) : ledger ? (
               <LedgerPanel

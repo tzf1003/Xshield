@@ -21,11 +21,34 @@ if (
   );
 }
 const readPath =
-  /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls\/mdl_[a-f0-9-]+|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|evidence-access-requests|cases(?:\/case_[a-f0-9-]+\/(?:items|holds))?)$/;
+  /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls(?:\/mdl_[a-f0-9-]+)?|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|evidence-access-requests|cases(?:\/case_[a-f0-9-]+\/(?:items|holds))?)$/;
 const writePath =
   /^\/control\/v1\/(?:cases|cases\/case_[a-f0-9-]+\/(?:items|close|holds)|evidence-holds\/ev_[a-f0-9-]+\/release|artifacts\/artifact_[a-f0-9-]+\/access|evidence-access-requests\/access_[a-f0-9-]+\/(?:approve|deny))$/;
 const accessReadPath =
   /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content)$/;
+const modelCallListPath = "/control/v1/model-calls";
+
+function validModelCallListQuery(url: string): boolean {
+  const [path, query] = url.split("?", 2);
+  if (path !== modelCallListPath || query === undefined) return false;
+  const parameters = new URLSearchParams(query);
+  const start = parameters.get("start");
+  const end = parameters.get("end");
+  const limit = parameters.get("limit");
+  const cursor = parameters.get("cursor");
+  return (
+    (parameters.size === 3 || parameters.size === 4) &&
+    start !== null &&
+    end !== null &&
+    limit !== null &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(start) &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(end) &&
+    /^(?:[1-9]|[1-9][0-9]|100)$/.test(limit) &&
+    (parameters.size === 3
+      ? cursor === null
+      : cursor !== null && /^[A-Za-z0-9_.-]{1,160}$/.test(cursor))
+  );
+}
 
 export default defineConfig({
   server: {
@@ -54,7 +77,9 @@ export default defineConfig({
           const path = (request.url ?? "").split("?")[0] ?? "";
           const allowed =
             (request.method === "GET" &&
-              (readPath.test(path) ||
+              ((path === modelCallListPath
+                ? validModelCallListQuery(request.url ?? "")
+                : readPath.test(path)) ||
                 (request.url === path && accessReadPath.test(path)))) ||
             (request.method === "POST" &&
               (request.url === "/control/v1/search" ||

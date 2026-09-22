@@ -8,6 +8,7 @@ import {
   OTHER_REQUEST_ID,
   MODEL_CALL_ID,
   OTHER_MODEL_CALL_ID,
+  THIRD_MODEL_CALL_ID,
   REQUEST_ID,
   TOKEN,
   artifactFixture,
@@ -16,6 +17,7 @@ import {
   evidenceFixture,
   summaryFixture,
   modelCallFixture,
+  modelCallListFixture,
   searchFixture,
   SEARCH_PLAN,
 } from "./fixtures";
@@ -65,6 +67,8 @@ async function mockControl(page: Page, override?: Override) {
       reply = { body: grantFixture(url.pathname.split("/").at(-1)) };
     } else if (url.pathname.startsWith("/control/v1/auth-bindings/")) {
       reply = { body: bindingFixture(url.pathname.split("/").at(-1)) };
+    } else if (url.pathname === "/control/v1/model-calls") {
+      reply = { body: modelCallListFixture(url.searchParams.has("cursor")) };
     } else if (url.pathname.startsWith("/control/v1/model-calls/")) {
       reply = { body: modelCallFixture(url.pathname.split("/").at(-1)) };
     } else if (url.pathname.startsWith("/control/v1/artifacts/")) {
@@ -183,6 +187,65 @@ test("queries model lifecycle and opens only reference metadata", async ({
       });
   }
   expect(runtimeErrors).toEqual([]);
+});
+
+test("lists redacted model calls and reauthorizes the clicked detail", async ({
+  page,
+}) => {
+  const calls = await mockControl(page);
+  await connect(page);
+  await page.getByLabel("查询类型", { exact: true }).selectOption("model-list");
+  const form = page.getByRole("form", { name: "模型调用列表条件" });
+  await form
+    .getByLabel("开始时间（UTC，含）", { exact: true })
+    .fill("2026-09-20T00:00");
+  await form
+    .getByLabel("结束时间（UTC，不含）", { exact: true })
+    .fill("2026-09-21T00:00");
+  await form.getByLabel("每页条数", { exact: true }).fill("2");
+  await form.getByRole("button", { name: "读取模型调用", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "模型调用列表", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("MODEL_EVALUATED", { exact: true })).toBeVisible();
+  await expect(page.getByText("0.8", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "下一页", exact: true }).click();
+  await expect(
+    page.getByText(THIRD_MODEL_CALL_ID, { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: THIRD_MODEL_CALL_ID, exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "模型调用调查", exact: true }),
+  ).toBeVisible();
+  const listCalls = calls.filter(
+    (call) =>
+      new URL(`http://console.test${call.path}`).pathname ===
+      "/control/v1/model-calls",
+  );
+  expect(listCalls).toHaveLength(2);
+  for (const call of listCalls) {
+    const url = new URL(`http://console.test${call.path}`);
+    expect(url.searchParams.get("start")).toBe("2026-09-20T00:00:00Z");
+    expect(url.searchParams.get("end")).toBe("2026-09-21T00:00:00Z");
+    expect(url.searchParams.get("limit")).toBe("2");
+    expect(call.authorized).toBe(true);
+    expect(call.cookie).toBeNull();
+  }
+  expect(
+    listCalls[0] &&
+      new URL(`http://console.test${listCalls[0].path}`).searchParams.has(
+        "cursor",
+      ),
+  ).toBe(false);
+  expect(
+    listCalls[1] &&
+      new URL(`http://console.test${listCalls[1].path}`).searchParams.has(
+        "cursor",
+      ),
+  ).toBe(true);
+  expect(calls.at(-1)?.path).toBe(
+    `/control/v1/model-calls/${THIRD_MODEL_CALL_ID}`,
+  );
 });
 
 test("opens a model event link through the separately authorized lifecycle route", async ({
