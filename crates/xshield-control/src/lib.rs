@@ -3095,11 +3095,8 @@ impl ControlPlane {
                 .lock()
                 .is_ok_and(|mut rate| rate.take(Instant::now()));
             if !within_budget {
-                return Err(Box::new(self.audited_error(
+                return Err(Box::new(api_error(
                     request_id,
-                    None,
-                    action,
-                    None,
                     StatusCode::TOO_MANY_REQUESTS,
                     "CONTROL_RATE_LIMITED",
                     "management request rate exceeded",
