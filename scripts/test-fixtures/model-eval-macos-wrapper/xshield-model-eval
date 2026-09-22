@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${AI_GATEWAY_API_KEY:-}" != 'synthetic-gateway-key-for-wrapper-tests' ]]; then
+    exit 71
+fi
+if [[ "${XSHIELD_JEV_ROUTE:-}" != 'gateway' ]]; then
+    exit 72
+fi
+if [[ ${XSHIELD_JEV_API_KEY+x} == x ]]; then
+    exit 73
+fi
+if [[ "$#" -ne 2 || "$1" != '--approved-input' ]]; then
+    exit 74
+fi
+printf '%s\n' '{"fixture":"model-eval-wrapper"}'

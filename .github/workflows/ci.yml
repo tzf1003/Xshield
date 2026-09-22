@@ -62,6 +62,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
+      - name: macOS model evaluation wrapper contract
+        run: scripts/test_model_eval_macos_wrapper.sh
       - name: Rust to console HTTP wire contract
         run: cargo test -p xshield-control --lib console_client_ -- --ignored
       - run: node --test sensor/test/sensor.test.mjs

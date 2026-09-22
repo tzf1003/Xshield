@@ -88,7 +88,7 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 2026-09-20 确定：Jev 后续通过 [Vercel AI Gateway 的 Jev 入口](https://vercel.com/ai-gateway/models/jev) 接入，模型标识为 `typesafe-ai/jev`。[官方 TypeSafe 兼容 API 文档](https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe) 列出的请求地址为 `https://ai-gateway.vercel.sh/typesafe/v1/systemone`，模型目录为 `GET https://ai-gateway.vercel.sh/typesafe/v1/models`，使用 Gateway Bearer 凭证。
 
-秘密由运行环境管理，约定引用 `AI_GATEWAY_API_KEY`；仓库、前端构建、样例和审计只保留引用，禁止保存密钥值。macOS 本地开发可使用钥匙串服务 `Xshield.Jev.VercelAIGateway`、账号 `Xshield` 保存该秘密，并由启动包装器注入进程环境；当前 CLI 只从环境变量读取，不直接访问钥匙串。
+秘密由运行环境管理，约定引用 `AI_GATEWAY_API_KEY`；仓库、前端构建、样例和审计只保留引用，禁止保存密钥值。macOS 本地开发可使用钥匙串服务 `Xshield.Jev.VercelAIGateway`、账号 `Xshield` 保存该秘密，并通过 `scripts/run-model-eval-macos.sh --approved-input PRIVATE_JSON_FILE` 启动。包装器先在仓库自身 target 目录完成固定 evaluator binary 的构建，再只向该 `exec` 子进程注入 Gateway 环境变量；拒绝直连路由、预置 Gateway/直连凭据、外部 target 覆盖、空或不合法的钥匙串项。当前 CLI 只从环境变量读取，不直接访问钥匙串。
 
 已完成固定 Gateway 适配并将其作为默认路由；当前 CLI 仍不执行自动重试、fallback 或资格写入。`XSHIELD_JEV_API_KEY` 仅可在显式 `direct` 路由发往 TypeSafe 直连目标，不得注入 Gateway；Gateway 响应的 `provider_metadata.gateway.routing` 仅做有界契约校验，不把 alias 当作精确版本。外发输入审批、固定 HTTPS 目标、硬拒绝优先及 Noul 空置信度要求继续生效。
 
