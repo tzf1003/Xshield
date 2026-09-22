@@ -23,6 +23,7 @@ import {
   EVENT_CURSOR,
   EVIDENCE_CURSOR,
   summaryFixture,
+  auditHealthFixture,
   eventsFixture,
   evidenceFixture,
   artifactFixture,
@@ -52,6 +53,7 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
     evidenceFixture(),
     artifactFixture(),
     modelCallFixture(),
+    auditHealthFixture(),
   ];
   const paths = [
     `/control/v1/requests/${REQUEST_ID}`,
@@ -59,6 +61,7 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
     `/control/v1/requests/${REQUEST_ID}/evidence?cursor=${EVIDENCE_CURSOR}`,
     `/control/v1/artifacts/${ARTIFACT_ID}`,
     `/control/v1/model-calls/${MODEL_CALL_ID}`,
+    "/control/v1/audit/health",
   ];
   let index = 0;
   t.mock.method(
@@ -104,7 +107,57 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
   }
   const model = await client.modelCall(MODEL_CALL_ID);
   assert.deepEqual(model, modelCallFixture());
-  assert.equal(index, 5);
+  const health = await client.health();
+  assert.deepEqual(health, auditHealthFixture());
+  assert.equal(index, 6);
+});
+
+test("audit publication health validates a complete fixed-scope snapshot", async (t) => {
+  const client = new ControlClient(TOKEN);
+  let body: unknown = auditHealthFixture();
+  let status = 200;
+  t.mock.method(globalThis, "fetch", async () => response(body, status));
+  assert.deepEqual(await client.health(), auditHealthFixture());
+  const mutations: Array<(value: ReturnType<typeof auditHealthFixture>) => void> = [
+    (value) => {
+      value.target_id = "target/other";
+    },
+    (value) => {
+      value.metadata_retention_days = 0;
+    },
+    (value) => {
+      value.published_segments = value.closed_segments + 1;
+    },
+    (value) => {
+      value.published_segments -= 1;
+    },
+    (value) => {
+      value.pending_segments = value.closed_segments + 1;
+    },
+    (value) => {
+      value.unsealed_segments = value.pending_segments + 1;
+    },
+    (value) => {
+      Object.assign(value, { unexpected: true });
+    },
+  ];
+  for (const mutate of mutations) {
+    const value = auditHealthFixture();
+    mutate(value);
+    body = value;
+    status = 200;
+    await assert.rejects(client.health(), errorIs("INVALID_RESPONSE", 200));
+  }
+  body = { ...auditHealthFixture(), index_watermark: null };
+  assert.deepEqual(await client.health(), body);
+  for (const [nextStatus, code] of [
+    [403, "CONTROL_SCOPE_DENIED"],
+    [503, "CONTROL_HEALTH_UNAVAILABLE"],
+  ] as const) {
+    body = errorFixture(code);
+    status = nextStatus;
+    await assert.rejects(client.health(), errorIs(code, nextStatus));
+  }
 });
 
 test("invalid IDs, opaque cursor transport and credentials fail before network use", async (t) => {
@@ -1688,6 +1741,9 @@ test("development proxy permits fixed investigation and evidence access routes",
   type Response = Parameters<typeof proxy.bypass>[1];
   for (const [method, url, allowed] of [
     ["POST", "/control/v1/search", true],
+    ["GET", "/control/v1/audit/health", true],
+    ["GET", "/control/v1/audit/health?scope=other", false],
+    ["POST", "/control/v1/audit/health", false],
     ["GET", `/control/v1/grants/${GRANT_ID}`, true],
     ["GET", `/control/v1/auth-bindings/${BINDING_ID}`, true],
     [

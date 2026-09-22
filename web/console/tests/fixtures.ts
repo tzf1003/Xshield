@@ -68,6 +68,27 @@ export function summaryFixture(requestId = REQUEST_ID) {
   };
 }
 
+/** Synthetic configured-journal publication snapshot, not a service health claim. */
+export function auditHealthFixture() {
+  return {
+    ...envelope(),
+    target_id: "clickhouse_primary",
+    table: "audit_events",
+    as_of: AS_OF,
+    metadata_retention_days: 30,
+    closed_segments: 7,
+    closed_segment_bytes: 32768,
+    published_segments: 5,
+    pending_segments: 2,
+    unsealed_segments: 1,
+    has_gaps: true,
+    index_watermark: {
+      producer_boot_id: "018f2a3b-4c5d-7000-8000-000000000088",
+      producer_sequence: 42,
+    },
+  };
+}
+
 export function eventsFixture(requestId = REQUEST_ID, nextPage = false) {
   const event = (
     sequence: number,

@@ -27,6 +27,7 @@ const writePath =
 const accessReadPath =
   /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content)$/;
 const modelCallListPath = "/control/v1/model-calls";
+const auditHealthPath = "/control/v1/audit/health";
 
 function validModelCallListQuery(url: string): boolean {
   const [path, query] = url.split("?", 2);
@@ -79,7 +80,9 @@ export default defineConfig({
             (request.method === "GET" &&
               ((path === modelCallListPath
                 ? validModelCallListQuery(request.url ?? "")
-                : readPath.test(path)) ||
+                : path === auditHealthPath
+                  ? request.url === auditHealthPath
+                  : readPath.test(path)) ||
                 (request.url === path && accessReadPath.test(path)))) ||
             (request.method === "POST" &&
               (request.url === "/control/v1/search" ||

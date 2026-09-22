@@ -266,6 +266,23 @@ export type ModelCallListResponse = Envelope & {
   next_cursor: string | null;
 };
 
+/** Authenticated snapshot of one configured audit journal's publication into
+ * its analytical index. It is deliberately separate from request eligibility,
+ * Outbox delivery, and service-wide health. */
+export type AuditHealthResponse = Envelope & {
+  target_id: string;
+  table: string;
+  as_of: string;
+  metadata_retention_days: number;
+  closed_segments: number;
+  closed_segment_bytes: number;
+  published_segments: number;
+  pending_segments: number;
+  unsealed_segments: number;
+  has_gaps: boolean;
+  index_watermark: Watermark | null;
+};
+
 function modelCallListTime(value: unknown): string {
   const result = timestamp(value);
   // The route's signed query vocabulary has exactly-second UTC boundaries.
@@ -1219,6 +1236,55 @@ export class ControlClient {
           previous = current;
         }
         ensure(result.next_cursor === null || result.next_cursor !== cursor);
+        return result;
+      },
+      signal,
+    );
+  }
+
+  /** Read the configured journal-to-index publication snapshot. Every call is
+   * separately authorized and audited by the server; this client never polls. */
+  async health(signal?: AbortSignal): Promise<AuditHealthResponse> {
+    return this.#request(
+      "audit/health",
+      (value) => {
+        const row = object(value);
+        ensure(
+          Object.keys(row).length === 14 &&
+            [
+              "request_id",
+              "tenant_id",
+              "site_id",
+              "target_id",
+              "table",
+              "as_of",
+              "metadata_retention_days",
+              "closed_segments",
+              "closed_segment_bytes",
+              "published_segments",
+              "pending_segments",
+              "unsealed_segments",
+              "has_gaps",
+              "index_watermark",
+            ].every((key) => Object.hasOwn(row, key)),
+        );
+        const result: AuditHealthResponse = {
+          ...envelope(row),
+          ...watermarked(row),
+          target_id: name(row.target_id),
+          table: name(row.table),
+          metadata_retention_days: integer(row.metadata_retention_days, 1, 3_650),
+          closed_segments: integer(row.closed_segments),
+          closed_segment_bytes: integer(row.closed_segment_bytes),
+          published_segments: integer(row.published_segments),
+          pending_segments: integer(row.pending_segments),
+          unsealed_segments: integer(row.unsealed_segments),
+        };
+        ensure(
+          BigInt(result.published_segments) + BigInt(result.pending_segments) ===
+            BigInt(result.closed_segments),
+        );
+        ensure(result.unsealed_segments <= result.pending_segments);
         return result;
       },
       signal,

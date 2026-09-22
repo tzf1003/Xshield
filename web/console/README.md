@@ -2,6 +2,8 @@
 
 React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件。UI 调用固定 GET 端点及只读 `POST /control/v1/search`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情与模型调用列表均需要显式 `Observer`，事件检索需要 `Investigator`，两种角色分别校验。
 
+“审计发布状态”由 `AuditAdministrator` 手动读取 `GET /control/v1/audit/health`。它展示一个配置 audit journal 到索引目标的封存段发布快照：观察时间、目标、保留期、关闭/已发布/待发布/未封存段、缺口和连续水位；界面不自动轮询。该观察不判断业务准入、全部 Outbox 状态或系统整体健康。
+
 案件工作台另外调用本人案件列表和集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。
 
 证据访问工作台调用申请、详情、批准/拒绝及内容端点，分别校验 Investigator、申请主体或 Approver、独立 Approver、获批主体 Reader。详情显示原始理由、审批历史与目标状态，原文通过显式附件下载交付。
@@ -26,6 +28,7 @@ npm run dev
 ## 查询与安全语义
 
 - 摘要后再读事件；证据目录和单项元数据按点击惰性读取。分页显式触发，每页替换前页，换请求重置游标。
+- 审计发布状态由操作者显式读取和刷新；每次读取均由服务端重新鉴权并写 `console.health.read`。连续水位只覆盖该配置 journal 的已确认封存段；缺口、待发布段和未封存段是发布观察，不能替代对其他路径或服务的独立检查。
 - 结构化事件检索输入 UTC 整秒半开时间窗（1970 至 2300，最长 31 天）、1–1000 条页大小及事件时间升/降序。服务端配置可进一步收紧单页上限。最多 8 个条件要求同一事件全部匹配，字段选择限定为 request/event/grant/auth binding/case/artifact ID、event_type/stage/reason_code/operation_id/model_revision 精确文本、outcome 和 0–10000 整数基点置信度上限。原生日期框中的值按 UTC 解释。
 - 已提交计划、服务端查询摘要和管理 request_id 可见；下一页沿用冻结计划，编辑即清除旧结果、详情和游标。结果保留 nullable 字段与 RFC3339 微秒时间，扫描统计未知与 0 分开显示，空结果与索引 gap/pending 分别判断。水位只覆盖配置日志源，独立 Outbox 可能仍待发布；分页期间发布或到期可能改变后续可见集合。
 - 查询摘要使用浏览器原生 WebCrypto 验证，需要 HTTPS 或 localhost 安全上下文；能力不可用时本地拒绝查询。
@@ -102,7 +105,7 @@ cargo test -p xshield-control --lib console_hold_client_mutates_postgres_http_co
 scripts/test_postgres.sh
 ```
 
-Node 单测覆盖请求/响应边界、模型生命周期一致性、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖分页、模型查询与引用详情、Noul/历史空字段，以及搜索 POST 正文、冻结计划分页、编辑失效、输入边界、空结果与 gap、可空事实和独立 Observer 权限。共享回归覆盖 403/429/503、401/闲置/页面离开/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
+Node 单测覆盖请求/响应边界、模型生命周期一致性、发布快照的白名单字段与计数关系、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖审计发布状态的显式读取/刷新及会话隔离、分页、模型查询与引用详情、Noul/历史空字段，以及搜索 POST 正文、冻结计划分页、编辑失效、输入边界、空结果与 gap、可空事实和独立 Observer 权限。共享回归覆盖 403/429/503、401/闲置/页面离开/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
 
 Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管理 journal，验证摘要、事件分页与微秒时间、目录依赖故障和 401，以及完整 Gateway Choice、旧记录 Noul 部分生命周期、模型未命中、预算 429 和模型访问审计。浏览器回归的 manifest 成功数据是合成契约，不代表已在生产数据源或企业 SSO 上验收。
 

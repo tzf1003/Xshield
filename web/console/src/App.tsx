@@ -12,6 +12,7 @@ import { EvidenceHoldPanel } from "./EvidenceHoldPanel";
 import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
+  AuditHealthResponse,
   EventsResponse,
   EvidenceResponse,
   ModelCallListPlan,
@@ -21,6 +22,7 @@ import type {
 } from "./api";
 import {
   ArtifactDetail,
+  AuditHealthPanel,
   EventDetail,
   EventTable,
   EvidenceTable,
@@ -36,6 +38,7 @@ type QueryKind =
   | "request"
   | "model"
   | "model-list"
+  | "audit-health"
   | "grant"
   | "binding"
   | "search"
@@ -102,6 +105,7 @@ export function App() {
   const [modelList, setModelList] = useState<ModelCallListResponse | null>(
     null,
   );
+  const [health, setHealth] = useState<AuditHealthResponse | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [events, setEvents] = useState<EventsResponse | null>(null);
   const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
@@ -122,6 +126,7 @@ export function App() {
     setModel(null);
     setModelListPlan(null);
     setModelList(null);
+    setHealth(null);
     setLedger(null);
     setSearchPlan(null);
     setSearch(null);
@@ -271,7 +276,8 @@ export function App() {
     if (
       queryKind === "search" ||
       queryKind === "case" ||
-      queryKind === "access" || queryKind === "hold" || queryKind === "model-list"
+      queryKind === "access" || queryKind === "hold" || queryKind === "model-list" ||
+      queryKind === "audit-health"
     )
       return;
     clearResults();
@@ -327,6 +333,14 @@ export function App() {
         setModelListPlan(plan);
         setModelList(response);
       },
+    );
+  }
+  function loadHealth() {
+    clearResults();
+    void run(
+      "query",
+      (api, signal) => api.health(signal),
+      (response) => setHealth(response),
     );
   }
   function openTarget(kind: "request" | "binding" | "model", id: string) {
@@ -415,6 +429,7 @@ export function App() {
     request: "请求调查",
     model: "模型调用调查",
     "model-list": "模型调用列表",
+    "audit-health": "审计发布状态",
     grant: "资格调查",
     binding: "身份绑定调查",
     search: "结构化事件检索",
@@ -487,7 +502,9 @@ export function App() {
             ? "沿着请求时间线，核对每一次判定与证据。"
             : queryKind === "model"
               ? "核对模型调用生命周期、版本与证据引用。"
-              : queryKind === "search"
+              : queryKind === "audit-health"
+                ? "按需读取配置审计日志到索引的发布快照。"
+                : queryKind === "search"
                 ? "按时间与事件字段检索，核对直接引用的历史事实。"
                 : queryKind === "case"
                   ? "建立本人调查案件，核对证据引用与案件状态。"
@@ -548,7 +565,9 @@ export function App() {
                       ? "search"
                       : event.target.value === "model-list"
                         ? "model-list"
-                      : event.target.value === "case"
+                        : event.target.value === "audit-health"
+                        ? "audit-health"
+                        : event.target.value === "case"
                         ? "case"
                         : event.target.value === "access"
                           ? "access"
@@ -567,6 +586,7 @@ export function App() {
                 <option value="request">请求</option>
                 <option value="model">模型调用</option>
                 <option value="model-list">模型调用列表</option>
+                <option value="audit-health">审计发布状态</option>
                 <option value="grant">资格</option>
                 <option value="binding">身份绑定</option>
                 <option value="search">结构化事件检索</option>
@@ -578,7 +598,8 @@ export function App() {
                 queryKind !== "case" &&
                 queryKind !== "access" &&
                 queryKind !== "hold" &&
-                queryKind !== "model-list" && (
+                queryKind !== "model-list" &&
+                queryKind !== "audit-health" && (
                   <>
                     <label htmlFor="request-id">{queryLabels[queryKind]}</label>
                     <input
@@ -666,6 +687,12 @@ export function App() {
                     loadModelCalls(modelListPlan, modelList.next_cursor);
                 }}
                 onOpen={(id) => openTarget("model", id)}
+              />
+            ) : queryKind === "audit-health" ? (
+              <AuditHealthPanel
+                response={health}
+                busy={Boolean(busy.query)}
+                onRefresh={loadHealth}
               />
             ) : ledger ? (
               <LedgerPanel

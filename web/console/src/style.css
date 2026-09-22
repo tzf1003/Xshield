@@ -248,6 +248,16 @@ main {
   margin-bottom: 13px;
 }
 
+.audit-health-intro,
+.audit-health-result {
+  padding: 20px;
+  margin-bottom: 13px;
+}
+
+.audit-health-intro .footnote {
+  margin: 9px 0;
+}
+
 .model-list-form label {
   display: grid;
   gap: 7px;

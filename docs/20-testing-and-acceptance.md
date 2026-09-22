@@ -118,6 +118,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-worker --lib control_audit` 覆盖严格 DTO、事件/方法/路由绑定、主体和目标 ID、成功/拒绝/依赖失败、查询摘要、读取字节数、证据引用及确定性空置信度；损坏或事务 outbox 形状不会被当作管理访问日志接受。
 
+审计发布状态控制台回归使用严格白名单 DTO，覆盖目标/表、观察时间、保留期、五类计数、缺口及可空连续水位，并拒绝未知字段、异常计数关系、跨范围响应和 403/503。浏览器使用显式合成 HTTP 响应验证首次不会自动读取、手动刷新会重新请求、401 清态以及切换查询后抑制晚到响应；这些回归只验证客户端和 HTTP 契约，不声明索引、Outbox 或系统整体状态已验证。
+
 `cargo test -p xshield-control --lib management_audit` 由实际管理事件生产者及 HTTP 路由写入 journal，经封存和现有发布器验证报文兼容与 checkpoint 重用。配置 20.6 的专用 ClickHouse 后，执行 `cargo test -p xshield-control --lib management_audit -- --ignored`，在独占数据库运行同一路径并读回索引、时间线、有界搜索及跨租户/站点隔离。该真实数据库测试纳入 CI；普通 workspace 测试只编译并跳过其服务调用。
 
 保留锁管理的三类 `console.evidence.hold.*` 也走同一生产 journal、封存和投递回归，覆盖创建/释放及精确重试原因、空列表、拒绝和依赖故障；worker 与 Schema 同时拒绝目标/方法/路由错绑、越权携带 hold 目标及未知字段。
