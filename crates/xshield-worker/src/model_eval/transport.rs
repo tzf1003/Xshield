@@ -76,6 +76,14 @@ pub(super) trait ModelPort {
     /// Detect literal or JSON-escaped keys before any evidence capture.
     fn contains_secret(&self, bytes: &[u8]) -> bool;
 
+    /// Checks whether cache key material repeats this transport's credential.
+    ///
+    /// The default is suitable for non-network test ports. Real transports must
+    /// compare without formatting either secret.
+    fn cache_key_reuses_transport_secret(&self, _cache_key: &[u8]) -> bool {
+        false
+    }
+
     /// Fixed audit/provider identity selected by the validated route.
     fn provider(&self) -> &'static str {
         "typesafe"
@@ -364,6 +372,10 @@ impl ModelPort for JevClient {
 
     fn contains_secret(&self, bytes: &[u8]) -> bool {
         secret_in_bytes(bytes, self.api_key.as_bytes(), unclosed_json_string(bytes))
+    }
+
+    fn cache_key_reuses_transport_secret(&self, cache_key: &[u8]) -> bool {
+        openssl::memcmp::eq(self.api_key.as_bytes(), cache_key)
     }
 
     fn provider(&self) -> &'static str {

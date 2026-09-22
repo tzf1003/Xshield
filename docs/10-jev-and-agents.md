@@ -82,7 +82,7 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 资源上限：输入与实际 API JSON 各 8 KiB，文本合计最多 6144 字符，响应最多 64 KiB，每个证据文档最多 512 KiB、保留 24 小时；发送至读体总期限 10 秒，catalog 操作每步 5 秒。证据根目录排他锁限制一次一个任务，预留四对象最坏空间，目录最多 100000 文件。429 记 `MODEL_RATE_LIMITED`、529 记 `MODEL_OVERLOADED`，保留合法 Retry-After 秒数供操作员决策；每次 CLI 调用至多一次 HTTP。重启认证扫描最多 10000 条专用 journal 记录，补记中断终态并保留因果引用；接近上限时按 RB-11 轮换目录。
 
-`XSHIELD_MODEL_CACHE_DOMAIN` 与独立的 `XSHIELD_MODEL_CACHE_KEY_HEX` 目前只交付了缓存安全前置契约：启动时严格验证 domain、64 位小写 hex HMAC 密钥、与 evidence/journal 密钥的角色隔离，并覆盖 tenant/site、provider、wire model、精确 resolved revision 和完整 canonical internal input 导出 HMAC-SHA-256。Gateway 路由因别名缺少精确版本证明而以 `MODEL_CACHE_EXACT_REVISION_REQUIRED` 拒绝该配置。当前尚未交付 durable lookup/store，设置这些变量不会复用、读取或写入模型结果；不得据此声明缓存已启用。后续增量包括耐久缓存、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。Score 增量见 10.11；当前未执行真实供应商推理或准确率/校准测试。
+`XSHIELD_MODEL_CACHE_DOMAIN` 与独立的 `XSHIELD_MODEL_CACHE_KEY_HEX` 目前只交付了缓存安全前置契约：启动时严格验证 domain、64 位小写 hex HMAC 密钥、与 provider/evidence/journal 密钥的角色隔离，并覆盖 tenant/site、provider、wire model、精确 resolved revision 和完整 canonical internal input 导出 HMAC-SHA-256。Gateway 路由因别名缺少精确版本证明而以 `MODEL_CACHE_EXACT_REVISION_REQUIRED` 拒绝该配置。当前尚未交付 durable lookup/store，设置这些变量不会复用、读取或写入模型结果；不得据此声明缓存已启用。后续增量包括耐久缓存、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。Score 增量见 10.11；当前未执行真实供应商推理或准确率/校准测试。
 
 ## 10.10 Jev 供应商接入决定
 

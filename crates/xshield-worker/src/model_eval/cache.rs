@@ -174,6 +174,15 @@ impl ModelCacheConfiguration {
         parse_key(value)
             .is_ok_and(|candidate| openssl::memcmp::eq(self.key.as_ref(), candidate.as_ref()))
     }
+
+    /// Returns whether a transport credential repeats this cache key.
+    ///
+    /// The evaluator treats this as a configuration error before any evidence
+    /// setup or provider request, so one secret cannot cross credential roles.
+    #[must_use]
+    pub(super) fn reuses_transport_secret(&self, model: &impl ModelPort) -> bool {
+        model.cache_key_reuses_transport_secret(self.key.as_ref())
+    }
 }
 
 fn parse_key(value: &str) -> Result<[u8; CACHE_KEY_BYTES], &'static str> {
@@ -227,6 +236,7 @@ mod tests {
     struct Direct;
     struct Gateway;
     struct Alternate;
+    struct ReusedCredential;
 
     impl ModelPort for Direct {
         async fn send_with_deadline(
@@ -297,6 +307,29 @@ mod tests {
         }
     }
 
+    impl ModelPort for ReusedCredential {
+        async fn send_with_deadline(
+            &self,
+            _payload: &[u8],
+            _cancel: &mut oneshot::Receiver<()>,
+            _deadline: Duration,
+        ) -> super::super::transport::Exchange {
+            unreachable!("cache configuration tests do not send")
+        }
+
+        fn contains_secret(&self, _bytes: &[u8]) -> bool {
+            false
+        }
+
+        fn cache_key_reuses_transport_secret(&self, _cache_key: &[u8]) -> bool {
+            true
+        }
+
+        fn exact_cache_revision(&self) -> Option<&str> {
+            Some("jev-1.13.0")
+        }
+    }
+
     #[test]
     fn cache_configuration_is_explicit_exact_and_scope_bound() {
         assert!(
@@ -345,6 +378,8 @@ mod tests {
         assert_ne!(first.as_bytes(), other_model.as_bytes());
         assert!(config.matches_hex_secret(CACHE_KEY));
         assert!(!config.matches_hex_secret(&"f".repeat(64)));
+        assert!(config.reuses_transport_secret(&ReusedCredential));
+        assert!(!config.reuses_transport_secret(&Direct));
     }
 
     #[test]

@@ -111,7 +111,10 @@ pub async fn evaluate_file(
         // Durable lookup is deliberately not enabled until its source-record and
         // catalog revalidation adapter is present.
         cache.validate_input_binding(&tenant, &site, &input)?;
-        if cache.matches_hex_secret(&evidence_key) || cache.matches_hex_secret(&journal_key) {
+        if cache.reuses_transport_secret(&client)
+            || cache.matches_hex_secret(&evidence_key)
+            || cache.matches_hex_secret(&journal_key)
+        {
             return Err(CONFIG);
         }
     }
