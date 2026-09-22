@@ -152,7 +152,7 @@ impl JevRoute {
     }
 }
 
-/// Fixed HTTPS destination with verified native TLS roots. Secrets and response
+/// Fixed HTTPS destination with verified, dependency-pinned WebPKI roots. Secrets and response
 /// bodies intentionally have no `Debug`/`Display` or tracing representation.
 pub(super) struct JevClient {
     client: HttpClient,
@@ -164,13 +164,12 @@ pub(super) struct JevClient {
 }
 
 impl JevClient {
-    /// Validate the injected key and native trust store without network I/O.
+    /// Validate the injected key and pinned trust store without network I/O.
     /// Failures are stable configuration codes; credentials are never returned.
     pub(super) fn new(route: JevRoute, api_key: Zeroizing<String>) -> Result<Self, &'static str> {
         validate_key(&api_key)?;
         let connector = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .map_err(|_| "MODEL_TLS_ROOTS_UNAVAILABLE")?
+            .with_webpki_roots()
             .https_only()
             .enable_http1()
             .build();
@@ -210,8 +209,7 @@ impl JevClient {
             return Err("MODEL_ENDPOINT_INVALID");
         }
         let connector = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .map_err(|_| "MODEL_TLS_ROOTS_UNAVAILABLE")?
+            .with_webpki_roots()
             .https_or_http()
             .enable_http1()
             .build();
