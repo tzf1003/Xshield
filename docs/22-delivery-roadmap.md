@@ -70,7 +70,7 @@ Score 增量：一次性离线评估已接入 2–10 档有序量表、完整档
 
 当前增量：已落地有界 QueryPlan AST、固定作用域的参数化 ClickHouse 事件查询、稳定 HMAC 游标和 `console.query.executed` 审计。查询返回脱敏事件摘要、实际扫描量及索引水位/gap，实施单实例并发上限和客户端 deadline；超预算计划须缩小范围。`case_id` 与 `artifact_id` 已覆盖直接引用的案件事实、审批管理尝试、保留锁及证据历史，复用既有索引与预算，固定映射见 29.14。检索权限沿用 Investigator 的 tenant/site 范围，当前案件、保留和内容权限仍各自校验。当前为同一事件的 AND 过滤，模型接入、调查 Agent、跨事件关联和只读回放继续按垂直闭环推进。
 
-模型增量：一次性 Jev 离线评估已接通严格 Choice/Noul DTO、固定 Vercel AI Gateway HTTPS 传输（显式 direct 兼容路由）、实际请求/响应证据、catalog/outbox、`model.*` journal 与发布解析；429/529、超时、取消、容量和中断恢复具有明确终态。阶段索引统一 `mdl_`、模型版本与置信度状态，Gateway alias 未解析时保持 `resolved_model_revision=null`。迁移 0034 的 PostgreSQL admission scope/私有短租约已使 tenant/site 跨实例调用预算成为权威：数据库 advisory lock 与时钟回收过期 lease、限制在途调用，容量拒绝不写证据或发送 HTTP，发送前重新确认，终态 journal 耐久后精确释放；恢复不重放调用。回归使用合成 loopback 供应商；OpenJev/SemIf、缓存/自动重试、校准与真实供应商验收继续按 [10.9](10-jev-and-agents.md#109-已实现一次性离线评估) 推进。
+模型增量：一次性 Jev 离线评估已接通严格 Choice/Noul DTO、固定 Vercel AI Gateway HTTPS 传输（显式 direct 兼容路由）、实际请求/响应证据、catalog/outbox、`model.*` journal 与发布解析；429/529、超时、取消、容量和中断恢复具有明确终态。阶段索引统一 `mdl_`、模型版本与置信度状态，Gateway alias 未解析时保持 `resolved_model_revision=null`。迁移 0034 的 PostgreSQL admission scope/私有短租约已使 tenant/site 跨实例调用预算成为权威：数据库 advisory lock 与时钟回收过期 lease、限制在途调用，容量拒绝不写证据或发送 HTTP，发送前重新确认，终态 journal 耐久后精确释放；恢复不重放调用。缓存安全前置契约已强制独立于 evidence/journal 密钥的 HMAC key、scope/domain、完整 canonical 输入与精确模型修订；Gateway alias 没有精确修订即拒绝配置。耐久 cache lookup/store 及其来源证据重验尚未交付，故没有缓存命中或复用行为。回归使用合成 loopback 供应商；OpenJev/SemIf、耐久缓存/自动重试、校准与真实供应商验收继续按 [10.9](10-jev-and-agents.md#109-已实现一次性离线评估) 推进。
 
 交付：Jev/OpenJev Provider adapter、有限候选匹配、校准、概率日志、调查 Agent、QueryPlan、只读回放；固定模型和模板版本。
 

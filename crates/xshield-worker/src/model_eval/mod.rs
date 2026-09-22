@@ -30,6 +30,7 @@ use xshield_evidence::EvidenceFidelity;
 use xshield_postgres::{ModelEvaluationAdmissionLease, PostgresIdentityStore};
 use zeroize::Zeroizing;
 
+mod cache;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -104,6 +105,16 @@ pub async fn evaluate_file(
         TenantId::parse(env::var("XSHIELD_TENANT_ID").map_err(|_| CONFIG)?).map_err(|_| CONFIG)?;
     let site =
         SiteId::parse(env::var("XSHIELD_SITE_ID").map_err(|_| CONFIG)?).map_err(|_| CONFIG)?;
+    if let Some(cache) = cache::ModelCacheConfiguration::from_environment(&client)? {
+        // Derive once before setup proceeds, so a malformed cache configuration
+        // cannot surface after local evidence/journal resources have been opened.
+        // Durable lookup is deliberately not enabled until its source-record and
+        // catalog revalidation adapter is present.
+        cache.validate_input_binding(&tenant, &site, &input)?;
+        if cache.matches_hex_secret(&evidence_key) || cache.matches_hex_secret(&journal_key) {
+            return Err(CONFIG);
+        }
+    }
     let runner_id = env::var("XSHIELD_MODEL_EVALUATION_RUNNER_ID")
         .unwrap_or_else(|_| DEFAULT_EVALUATION_RUNNER.to_owned());
     let mut storage = tokio::task::block_in_place(Storage::from_env)?;

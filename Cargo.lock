@@ -3286,6 +3286,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "openssl",
  "serde",
  "serde_json",
  "sqlx",

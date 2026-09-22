@@ -85,6 +85,13 @@ pub(super) trait ModelPort {
     fn provider_model(&self) -> &'static str {
         DIRECT_MODEL
     }
+
+    /// Returns an exact resolved revision only when the transport can prove it
+    /// before the call. Gateway aliases return `None` so a cache cannot treat a
+    /// route label as immutable provider implementation evidence.
+    fn exact_cache_revision(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,6 +372,10 @@ impl ModelPort for JevClient {
 
     fn provider_model(&self) -> &'static str {
         self.route.provider_model()
+    }
+
+    fn exact_cache_revision(&self) -> Option<&str> {
+        (self.route == JevRoute::Direct).then_some(DIRECT_MODEL)
     }
 }
 
