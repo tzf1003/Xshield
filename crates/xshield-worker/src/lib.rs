@@ -53,6 +53,10 @@ const LIST_ITEMS_MAX: usize = 256;
 const NAME_BYTES_MAX: usize = 128;
 const MAX_METADATA_RETENTION_DAYS: u16 = 3_650;
 const MAX_REQUEST_STAGES: usize = 128;
+// Historical rows predate the indexed column. Only model-derived events may
+// recover their redacted link from the already-indexed payload; result rows
+// still pass through `ModelCallId::parse` before reaching a caller.
+const MODEL_CALL_ID_PROJECTION: &str = "nullIf(if(proof_kind = 'model',if(model_call_id = '',JSONExtractString(payload_json,'model_call_id'),model_call_id),''),'') AS model_call_id";
 
 /// Immutable publication settings for one analytical destination.
 #[derive(Clone, Debug)]
@@ -190,6 +194,11 @@ pub struct AuditEventSummary {
     pub policy_revision: String,
     /// Model revision when the event was model-derived.
     pub model_revision: String,
+    /// Exact model-call reference when the event was model-derived.
+    ///
+    /// This is an investigation link only. It neither grants evidence access
+    /// nor substitutes for the independently authorized model-call lookup.
+    pub model_call_id: Option<String>,
     /// Opaque evidence references; content requires separate authorization.
     pub evidence_refs: Vec<String>,
     /// Earlier event identities that directly caused this event.
@@ -522,16 +531,28 @@ pub async fn query_request_events(
         return Err(PublishError::InvalidConfig);
     }
     let fetch_limit = u64::from(limit) + 1;
+    let query_sql = match after {
+        Some(_) => format!(
+            "SELECT event_id,event_type,stage,outcome,reason_code,proof_kind,confidence,\
+             confidence_status,occurred_at,request_seq,duration_us,policy_revision,\
+             model_revision,{MODEL_CALL_ID_PROJECTION},\
+             evidence_refs,cause_event_ids,sensitivity FROM ? \
+             WHERE tenant_id = ? AND site_id = ? AND request_id = ? \
+             AND (request_seq > ? OR (request_seq = ? AND event_id > ?)) \
+             ORDER BY request_seq,event_id LIMIT ?"
+        ),
+        None => format!(
+            "SELECT event_id,event_type,stage,outcome,reason_code,proof_kind,confidence,\
+             confidence_status,occurred_at,request_seq,duration_us,policy_revision,\
+             model_revision,{MODEL_CALL_ID_PROJECTION},\
+             evidence_refs,cause_event_ids,sensitivity FROM ? \
+             WHERE tenant_id = ? AND site_id = ? AND request_id = ? \
+             ORDER BY request_seq,event_id LIMIT ?"
+        ),
+    };
     let query = match after {
         Some(position) => client
-            .query(
-                "SELECT event_id,event_type,stage,outcome,reason_code,proof_kind,confidence,\
-                 confidence_status,occurred_at,request_seq,duration_us,policy_revision,\
-                 model_revision,evidence_refs,cause_event_ids,sensitivity FROM ? \
-                 WHERE tenant_id = ? AND site_id = ? AND request_id = ? \
-                 AND (request_seq > ? OR (request_seq = ? AND event_id > ?)) \
-                 ORDER BY request_seq,event_id LIMIT ?",
-            )
+            .query(&query_sql)
             .bind(Identifier(&config.active_view))
             .bind(tenant_id.as_str())
             .bind(site_id.as_str())
@@ -541,13 +562,7 @@ pub async fn query_request_events(
             .bind(position.event_id().as_str())
             .bind(fetch_limit),
         None => client
-            .query(
-                "SELECT event_id,event_type,stage,outcome,reason_code,proof_kind,confidence,\
-             confidence_status,occurred_at,request_seq,duration_us,policy_revision,\
-             model_revision,evidence_refs,cause_event_ids,sensitivity FROM ? \
-             WHERE tenant_id = ? AND site_id = ? AND request_id = ? \
-             ORDER BY request_seq,event_id LIMIT ?",
-            )
+            .query(&query_sql)
             .bind(Identifier(&config.active_view))
             .bind(tenant_id.as_str())
             .bind(site_id.as_str())
@@ -560,16 +575,21 @@ pub async fn query_request_events(
         .fetch_all::<AuditEventSummary>()
         .await?;
     for event in &events {
-        if matches!(
-            event.event_type.as_str(),
-            "stage.completed" | "stage.skipped"
-        ) && (!valid_confidence(
-            &event.proof_kind,
-            &event.outcome,
-            event.confidence,
-            &event.confidence_status,
-        ) || (!event.model_revision.is_empty()
-            && (event.proof_kind != "model" || !valid_name(&event.model_revision))))
+        if event
+            .model_call_id
+            .as_deref()
+            .is_some_and(|value| ModelCallId::parse(value).is_err())
+            || (event.proof_kind == "model") != event.model_call_id.is_some()
+            || (matches!(
+                event.event_type.as_str(),
+                "stage.completed" | "stage.skipped"
+            ) && (!valid_confidence(
+                &event.proof_kind,
+                &event.outcome,
+                event.confidence,
+                &event.confidence_status,
+            ) || (!event.model_revision.is_empty()
+                && (event.proof_kind != "model" || !valid_name(&event.model_revision)))))
         {
             return Err(PublishError::InvalidEvent);
         }
@@ -803,6 +823,10 @@ struct IndexRow {
     duration_us: u64,
     policy_revision: String,
     model_revision: String,
+    // `clickhouse::Row` encodes this struct in field order for `INSERT INTO`
+    // without an explicit column list. Keep this next to `model_revision`,
+    // matching both the CREATE schema and expand-contract ALTER placement.
+    model_call_id: String,
     evidence_refs: Vec<String>,
     cause_event_ids: Vec<String>,
     sensitivity: String,
@@ -976,6 +1000,7 @@ impl IndexRow {
             http_status: summary.http_status,
             is_terminal: u8::from(summary.is_terminal),
             duration_us: summary.duration_us,
+            model_call_id: summary.model_call_id,
             policy_revision: event.policy_revision,
             model_revision: summary.model_revision,
             evidence_refs: event.evidence_refs,
@@ -1164,6 +1189,7 @@ struct PayloadSummary {
     confidence: Option<f64>,
     confidence_status: String,
     model_revision: String,
+    model_call_id: String,
     method: String,
     operation_id: String,
     origin_state: String,
@@ -1299,6 +1325,7 @@ impl StagePayload {
             confidence: self.confidence,
             confidence_status: self.confidence_status,
             model_revision: self.model_revision.unwrap_or_default(),
+            model_call_id: self.model_call_id.unwrap_or_default(),
             operation_id: self.facts.operation_id.unwrap_or_default(),
             duration_us: self.duration_us,
             ..PayloadSummary::default()
@@ -1893,11 +1920,12 @@ impl From<xshield_postgres::StoreError> for PublishError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditEventSummary, Checkpoint, ExistingDigest, IndexRow, PayloadSummary, PublishError,
-        PublisherConfig, RequestStageSummary, RequestSummaryRow, SearchEventSummary,
-        SearchPosition, TimeDelta, closed_segment_paths, inspect_publication_health,
-        prepare_private_directory, publish_sealed_segments, query_audit_events, query_model_call,
-        query_request_events, query_request_summary, read_private_bounded, write_checkpoint,
+        AuditEventSummary, Checkpoint, ExistingDigest, IndexRow, MODEL_CALL_ID_PROJECTION,
+        PayloadSummary, PublishError, PublisherConfig, RequestStageSummary, RequestSummaryRow,
+        SearchEventSummary, SearchPosition, TimeDelta, closed_segment_paths,
+        inspect_publication_health, prepare_private_directory, publish_sealed_segments,
+        query_audit_events, query_model_call, query_request_events, query_request_summary,
+        read_private_bounded, write_checkpoint,
     };
     use chrono::{DateTime, Utc};
     use clickhouse::{Client, sql::Identifier, test};
@@ -2579,6 +2607,10 @@ mod tests {
             assert_eq!(rows[0].confidence, Some(0.75));
             assert_eq!(rows[0].confidence_status, "provided");
             assert_eq!(rows[0].model_revision, revision.unwrap_or_default());
+            assert_eq!(
+                rows[0].model_call_id,
+                model_stage_payload()["model_call_id"].as_str().unwrap()
+            );
             assert_eq!(fixture.checkpoint_count(), 1);
         }
     }
@@ -2731,6 +2763,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_timeline_backfills_only_empty_model_call_indexes() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let recorded = mock.add(test::handlers::record_ddl());
+        let result = query_request_events(
+            &fixture.config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_a").unwrap(),
+            &RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(result.events.is_empty());
+        let sql = recorded.query().await;
+        assert!(sql.contains(MODEL_CALL_ID_PROJECTION), "{sql}");
+        assert_eq!(
+            sql.matches("JSONExtractString(payload_json,'model_call_id')")
+                .count(),
+            1,
+            "{sql}"
+        );
+    }
+
+    #[tokio::test]
     async fn request_event_query_validates_model_stage_metadata_before_pagination() {
         let fixture = Fixture::new();
         let mock = test::Mock::new();
@@ -2743,6 +2802,7 @@ mod tests {
         valid.confidence = Some(0.75);
         valid.confidence_status = "provided".to_owned();
         valid.model_revision = "jev-1.13.0".to_owned();
+        valid.model_call_id = Some("mdl_018f2a3b-4c5d-7000-8000-000000000001".to_owned());
         mock.add(test::handlers::provide([valid.clone()]));
         let result =
             query_request_events(&fixture.config, &client, &tenant, &site, &request, None, 1)
@@ -2750,7 +2810,7 @@ mod tests {
                 .unwrap();
         assert_eq!(result.events[0].model_revision, "jev-1.13.0");
 
-        let mutations: [fn(&mut AuditEventSummary); 8] = [
+        let mutations: [fn(&mut AuditEventSummary); 10] = [
             |row| row.confidence = None,
             |row| row.confidence = Some(f64::NAN),
             |row| row.confidence_status = "unavailable".to_owned(),
@@ -2760,6 +2820,8 @@ mod tests {
                 row.outcome = "SKIPPED".to_owned();
             },
             |row| row.model_revision = "model/revision".to_owned(),
+            |row| row.model_call_id = Some("model_018f2a3b-4c5d-7000-8000-000000000001".to_owned()),
+            |row| row.model_call_id = None,
             |row| row.proof_kind = "observation".to_owned(),
             |row| {
                 row.proof_kind = "deterministic".to_owned();
@@ -2920,7 +2982,13 @@ mod tests {
             assert!(sql.contains(&format!(
                 "ORDER BY occurred_at {order},event_id {order} LIMIT 8"
             )));
-            assert!(!sql.contains("payload_json"));
+            assert!(sql.contains(MODEL_CALL_ID_PROJECTION), "{sql}");
+            assert_eq!(
+                sql.matches("JSONExtractString(payload_json,'model_call_id')")
+                    .count(),
+                1,
+                "{sql}"
+            );
         }
     }
 
@@ -2963,7 +3031,9 @@ mod tests {
         ] {
             assert!(sql.contains(fragment), "missing query fragment: {fragment}");
         }
-        assert!(!sql.split_once(" FROM ").unwrap().0.contains("payload_json"));
+        let projection = sql.split_once(" FROM ").unwrap().0;
+        assert!(projection.contains(MODEL_CALL_ID_PROJECTION), "{sql}");
+        assert_eq!(projection.matches("payload_json").count(), 1, "{sql}");
     }
 
     #[tokio::test]
@@ -3009,7 +3079,9 @@ mod tests {
         ] {
             assert!(sql.contains(fragment), "missing query fragment: {fragment}");
         }
-        assert!(!sql.split_once(" FROM ").unwrap().0.contains("payload_json"));
+        let projection = sql.split_once(" FROM ").unwrap().0;
+        assert!(projection.contains(MODEL_CALL_ID_PROJECTION), "{sql}");
+        assert_eq!(projection.matches("payload_json").count(), 1, "{sql}");
     }
 
     #[tokio::test]
@@ -3404,6 +3476,7 @@ mod tests {
             duration_us: 10,
             policy_revision: "policy-r1".to_owned(),
             model_revision: String::new(),
+            model_call_id: None,
             evidence_refs: Vec::new(),
             cause_event_ids: Vec::new(),
             sensitivity: "INTERNAL".to_owned(),
@@ -3426,6 +3499,7 @@ mod tests {
             duration_us: 10,
             policy_revision: "policy-r1".to_owned(),
             model_revision: None,
+            model_call_id: None,
             evidence_refs: Vec::new(),
             cause_event_ids: Vec::new(),
             sensitivity: "INTERNAL".to_owned(),

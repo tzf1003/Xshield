@@ -295,13 +295,22 @@ export function App() {
       (response) => setLedger(response),
     );
   }
-  function openTarget(kind: "request" | "binding", id: string) {
+  function openTarget(kind: "request" | "binding" | "model", id: string) {
     clearResults();
     setSearchPreset(null);
     setQueryKind(kind);
     setRequestId(id);
-    if (kind === "request") loadRequest(id);
-    else loadBinding(id);
+    if (kind === "request") {
+      loadRequest(id);
+    } else if (kind === "model") {
+      void run(
+        "query",
+        (api, signal) => api.modelCall(id, signal),
+        (response) => setModel(response),
+      );
+    } else {
+      loadBinding(id);
+    }
   }
   function loadRequest(target: string) {
     void run(
@@ -406,6 +415,7 @@ export function App() {
             event={event}
             onOpen={openArtifact}
             onRequest={(id) => openTarget("request", id)}
+            onModelCall={(id) => openTarget("model", id)}
           />
         ) : (
           <p className="empty">选择一条事件或证据查看详情。</p>

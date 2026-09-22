@@ -87,6 +87,7 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
   const events = await client.events(REQUEST_ID, EVENT_CURSOR);
   assert.equal(events.events[0]?.occurred_at, Date.parse(summary.as_of) * 1000);
   assert.equal(events.events[0]?.model_revision, "");
+  assert.equal(events.events[0]?.model_call_id, null);
   assert.equal(events.next_cursor, EVENT_CURSOR);
   const evidence = await client.evidence(REQUEST_ID, EVIDENCE_CURSOR);
   const artifact = await client.artifact(ARTIFACT_ID);
@@ -574,6 +575,7 @@ test("timeline validates sequence, numeric precision, references and pagination"
   Object.assign(model.events[0]!, {
     proof_kind: "model",
     model_revision: "model-r1",
+    model_call_id: MODEL_CALL_ID,
     confidence: 0.83,
     confidence_status: "provided",
   });
@@ -900,6 +902,7 @@ async function searchResponse(plan = searchPlan()): Promise<SearchResponse> {
     duration_us: 0,
     policy_revision: "policy-r1",
     model_revision: null,
+    model_call_id: null,
     evidence_refs: [ARTIFACT_ID],
     cause_event_ids: [],
     sensitivity: "INTERNAL",
@@ -1074,6 +1077,7 @@ test("search pagination preserves nullable facts, microsecond ordering and both 
             : "2026-09-20T08:10:30.123455Z",
         proof_kind: "model",
         model_revision: "model-r1",
+        model_call_id: MODEL_CALL_ID,
         confidence: 0.1,
         confidence_status: "provided",
       },

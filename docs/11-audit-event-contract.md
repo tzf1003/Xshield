@@ -59,7 +59,7 @@ occurred_at 是服务器 UTC，浏览器时间另存 client_reported_at；时区
 
 模型结果另存全概率、Noul 值或评分、供应商置信度、校准版本、阈值和采取的动作。可解释文本是独立 explanation，不等同于决策事实；如果来自另一个模型，必须有另一条 model_call_id。
 
-当前阶段发布契约：`proof_kind=model` 必须带 `mdl_` UUIDv7 调用引用；其他 proof 不携带模型调用或版本。可选 `model_revision` 为 1–128 字节的 ASCII 字母、数字、`_`、`-`、`.` 标识，写入独立索引列，供时间线与有界查询使用。旧事件的 `model_revision` 缺失或显式 null 时保持未知（索引空值），不从当前配置补填历史版本。provider 与 provider_model_id 必须成对出现，旧事件两者均缺失时保持兼容，查询字段序列化为 null。`confidence_status=provided` 与非空置信度一一对应，其他状态必须为 null；确定性结果继续为 `null/not_applicable`，SKIPPED/CANCELLED 不得携带数值。
+当前阶段发布契约：`proof_kind=model` 必须带 `mdl_` UUIDv7 调用引用；其他 proof 不携带模型调用或版本。可选 `model_revision` 为 1–128 字节的 ASCII 字母、数字、`_`、`-`、`.` 标识，`model_call_id` 与其一同写入独立索引列，供请求时间线与有界查询展示直接调查链接。该链接只投影强类型 ID；模型详情继续由独立 `Observer` 端点重新鉴权和审计。为兼容新增列前的历史行，查询仅在 `proof_kind=model` 且索引为空时，从同一受限 payload 的 `model_call_id` 回填，并再次验证 `mdl_` UUIDv7；空或非法值拒绝该结果，绝不从当前配置推断历史值。旧非模型事件的缺失调用/模型版本继续以 null 表示未知。provider 与 provider_model_id 必须成对出现，旧事件两者均缺失时保持兼容，查询字段序列化为 null。`confidence_status=provided` 与非空置信度一一对应，其他状态必须为 null；确定性结果继续为 `null/not_applicable`，SKIPPED/CANCELLED 不得携带数值。
 
 升级兼容：已有网关确定性事件无需改写。违反文档约定的 `model_` 前缀、非模型事件附带模型引用或置信度状态矛盾会被发布器以 InvalidEvent 拒绝并保持当前段水位；应检查生产者及受影响段，保留原始审计证据。阶段汇总使用同一最新事件的置信度，包括 null，避免沿用较早尝试的数值。
 

@@ -2,7 +2,8 @@
 //! values are bound parameters, and callers must audit attempts and results.
 
 use super::{
-    PublishError, PublisherConfig, valid_confidence, valid_event_type, valid_name, validate_id_list,
+    MODEL_CALL_ID_PROJECTION, PublishError, PublisherConfig, valid_confidence, valid_event_type,
+    valid_name, validate_id_list,
 };
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row, sql::Identifier};
@@ -48,6 +49,11 @@ pub struct SearchEventSummary {
     pub policy_revision: String,
     /// Model revision when the event was model-derived.
     pub model_revision: Option<String>,
+    /// Exact model-call reference when the event was model-derived.
+    ///
+    /// This link is redacted metadata. Consumers must use the separately
+    /// authorized model-call endpoint before viewing lifecycle details.
+    pub model_call_id: Option<String>,
     /// Opaque evidence references; content requires separate authorization.
     pub evidence_refs: Vec<String>,
     /// Earlier event identities that directly caused this event.
@@ -551,12 +557,13 @@ async fn execute_query(
         return Err(PublishError::InvalidConfig);
     }
     let descending = matches!(plan.sort(), QuerySort::OccurredAtDesc);
-    let mut sql = String::from(
+    let mut sql = format!(
         "SELECT nullIf(request_id,'') AS request_id,event_id,event_type,\
          nullIf(stage,'') AS stage,nullIf(outcome,'') AS outcome,\
          nullIf(reason_code,'') AS reason_code,nullIf(proof_kind,'') AS proof_kind,confidence,\
          nullIf(confidence_status,'') AS confidence_status,occurred_at,request_seq,duration_us,\
          policy_revision,nullIf(model_revision,'') AS model_revision,\
+         {MODEL_CALL_ID_PROJECTION},\
          evidence_refs,cause_event_ids,sensitivity FROM ? WHERE tenant_id = ? AND site_id = ? \
          AND occurred_at >= fromUnixTimestamp64Micro(?) AND occurred_at < fromUnixTimestamp64Micro(?)",
     );
@@ -800,6 +807,11 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
             .model_revision
             .as_deref()
             .is_some_and(|value| !valid_name(value) || event.proof_kind.as_deref() != Some("model"))
+        || event
+            .model_call_id
+            .as_deref()
+            .is_some_and(|value| ModelCallId::parse(value).is_err())
+        || (event.proof_kind.as_deref() == Some("model")) != event.model_call_id.is_some()
         || !matches!(
             event.sensitivity.as_str(),
             "PUBLIC" | "INTERNAL" | "SENSITIVE" | "RESTRICTED"
@@ -869,6 +881,7 @@ mod tests {
             "proof_kind":"model","confidence":0.86,"confidence_status":"provided",
             "occurred_at":"2026-09-19T00:00:00Z","request_seq":1,"duration_us":120,
             "policy_revision":"policy-r1","model_revision":"jev-1.13.0",
+            "model_call_id":"mdl_018f2a3b-4c5d-7000-8000-000000000001",
             "evidence_refs":[],"cause_event_ids":[],"sensitivity":"RESTRICTED"
         }"#,
         )
@@ -890,6 +903,12 @@ mod tests {
         }
         event.model_revision = None;
         assert!(validate_search_event(&event).is_ok());
+        event.model_call_id = Some("model_018f2a3b-4c5d-7000-8000-000000000001".to_owned());
+        assert!(validate_search_event(&event).is_err());
+        event.model_call_id = Some(MODEL_CALL_ID.to_owned());
+        assert!(validate_search_event(&event).is_ok());
+        event.model_call_id = None;
+        assert!(validate_search_event(&event).is_err());
         event.proof_kind = Some("deterministic".to_owned());
         event.confidence_status = None;
         assert!(validate_search_event(&event).is_err());

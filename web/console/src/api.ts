@@ -125,6 +125,8 @@ export type AuditEvent = {
   duration_us: number;
   policy_revision: string;
   model_revision: string;
+  /** Redacted model lifecycle link; the target endpoint reauthorizes access. */
+  model_call_id: string | null;
   evidence_refs: string[];
   cause_event_ids: string[];
   sensitivity: string;
@@ -291,7 +293,7 @@ function summary(value: unknown): Summary {
 }
 function auditEvent(value: unknown): AuditEvent {
   const row = object(value);
-  return {
+  const result = {
     event_id: id(row.event_id, eventPattern),
     event_type: name(row.event_type),
     stage: name(row.stage, true),
@@ -315,6 +317,9 @@ function auditEvent(value: unknown): AuditEvent {
     duration_us: integer(row.duration_us),
     policy_revision: name(row.policy_revision),
     model_revision: name(row.model_revision, true),
+    model_call_id: nullable(row.model_call_id, (item) =>
+      id(item, modelCallPattern),
+    ),
     evidence_refs: references(
       row.evidence_refs,
       new RegExp(`^[a-z]+_${uuid}$`),
@@ -327,6 +332,8 @@ function auditEvent(value: unknown): AuditEvent {
       "RESTRICTED",
     ]),
   };
+  ensure((result.proof_kind === "model") === (result.model_call_id !== null));
+  return result;
 }
 function manifest(
   value: unknown,

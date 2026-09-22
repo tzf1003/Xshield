@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS xshield.audit_events (
  request_seq UInt32, method String, operation_id String,
  origin_state LowCardinality(String), http_status Nullable(UInt16),
  is_terminal UInt8, duration_us UInt64,
- policy_revision String, model_revision String,
+ policy_revision String, model_revision String, model_call_id String,
  evidence_refs Array(String), cause_event_ids Array(String),
  sensitivity LowCardinality(String), payload_json String,
  event_hash String, content_digest FixedString(64), ingest_revision UInt64
@@ -45,11 +45,13 @@ ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS operation_id String 
 ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS origin_state LowCardinality(String) DEFAULT '' AFTER operation_id;
 ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS http_status Nullable(UInt16) DEFAULT NULL AFTER origin_state;
 ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS is_terminal UInt8 DEFAULT 0 AFTER http_status;
+ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS model_call_id String DEFAULT '' AFTER model_revision;
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS method String DEFAULT '' AFTER request_seq;
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS operation_id String DEFAULT '' AFTER method;
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS origin_state LowCardinality(String) DEFAULT '' AFTER operation_id;
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS http_status Nullable(UInt16) DEFAULT NULL AFTER origin_state;
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS is_terminal UInt8 DEFAULT 0 AFTER http_status;
+ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS model_call_id String DEFAULT '' AFTER model_revision;
 CREATE MATERIALIZED VIEW IF NOT EXISTS xshield.mv_events_by_time
 TO xshield.events_by_time AS SELECT * FROM xshield.audit_events;
 ALTER TABLE xshield.mv_events_by_time MODIFY QUERY

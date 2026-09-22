@@ -243,6 +243,7 @@ fn assert_index_rows(rows: &[IndexRow], expected: &BTreeMap<String, Value>) {
             http_status: None,
             is_terminal: 0,
             duration_us: 0,
+            model_call_id: String::new(),
             policy_revision: envelope["policy_revision"].as_str().unwrap().to_owned(),
             model_revision: String::new(),
             evidence_refs: Vec::new(),

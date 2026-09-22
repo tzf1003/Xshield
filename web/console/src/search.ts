@@ -6,6 +6,7 @@ import {
   ApiError,
   uuid,
   requestPattern,
+  modelCallPattern,
   eventPattern,
   artifactPattern,
   grantPattern,
@@ -80,6 +81,8 @@ export type SearchEvent = {
   duration_us: number;
   policy_revision: string;
   model_revision: string | null;
+  /** Redacted model lifecycle link; the target endpoint reauthorizes access. */
+  model_call_id: string | null;
   evidence_refs: string[];
   cause_event_ids: string[];
   sensitivity: string;
@@ -263,7 +266,11 @@ function searchEvent(value: unknown): SearchEvent {
   const event_type = name(row.event_type);
   ensure(/^[a-z0-9_.]{3,128}$/.test(event_type));
   const model_revision = nullable(row.model_revision, name);
+  const model_call_id = nullable(row.model_call_id, (value) =>
+    id(value, modelCallPattern),
+  );
   ensure(model_revision === null || proof_kind === "model");
+  ensure((proof_kind === "model") === (model_call_id !== null));
   return {
     request_id: nullable(row.request_id, (value) => id(value, requestPattern)),
     event_id: id(row.event_id, eventPattern),
@@ -281,6 +288,7 @@ function searchEvent(value: unknown): SearchEvent {
     duration_us: integer(row.duration_us),
     policy_revision: name(row.policy_revision),
     model_revision,
+    model_call_id,
     evidence_refs: references(
       row.evidence_refs,
       new RegExp(`^[a-z]+_${uuid}$`),

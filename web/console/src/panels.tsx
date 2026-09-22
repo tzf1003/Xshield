@@ -443,10 +443,12 @@ export function EventDetail({
   event,
   onOpen,
   onRequest,
+  onModelCall,
 }: {
   event: AuditEvent | SearchEvent;
   onOpen: (id: string) => void;
   onRequest?: (id: string) => void;
+  onModelCall?: (id: string) => void;
 }) {
   return (
     <div className="detail-body">
@@ -486,6 +488,19 @@ export function EventDetail({
           [
             "策略版本",
             <span className="mono">{event.policy_revision || "未记录"}</span>,
+          ],
+          [
+            "模型调用",
+            event.model_call_id ? (
+              <button
+                className="artifact-link mono"
+                onClick={() => onModelCall?.(event.model_call_id!)}
+              >
+                {event.model_call_id}
+              </button>
+            ) : (
+              "未记录"
+            ),
           ],
           [
             "证据引用",

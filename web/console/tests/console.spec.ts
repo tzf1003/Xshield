@@ -185,6 +185,36 @@ test("queries model lifecycle and opens only reference metadata", async ({
   expect(runtimeErrors).toEqual([]);
 });
 
+test("opens a model event link through the separately authorized lifecycle route", async ({
+  page,
+}) => {
+  const calls = await mockControl(page, (url) => {
+    if (!url.pathname.endsWith("/events")) return undefined;
+    const events = eventsFixture();
+    Object.assign(events.events.at(-1)!, {
+      proof_kind: "model",
+      model_revision: "jev-1.13.0",
+      model_call_id: MODEL_CALL_ID,
+      confidence: 0.8,
+      confidence_status: "provided",
+    });
+    return { body: events };
+  });
+  await connect(page);
+  await query(page);
+  await expect(page.locator("aside").getByRole("button", { name: MODEL_CALL_ID })).toBeVisible();
+  await page.locator("aside").getByRole("button", { name: MODEL_CALL_ID }).click();
+  await expect(
+    page.getByRole("heading", { name: "模型调用调查", exact: true }),
+  ).toBeVisible();
+  expect(calls.map((call) => call.path)).toEqual([
+    `/control/v1/requests/${REQUEST_ID}`,
+    `/control/v1/requests/${REQUEST_ID}/events`,
+    `/control/v1/model-calls/${MODEL_CALL_ID}`,
+  ]);
+  expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
+});
+
 test("Score query displays lifecycle and independent provider confidence", async ({
   page,
 }) => {
