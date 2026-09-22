@@ -8,7 +8,7 @@
 
 ## 21.2 队列和隔离
 
-每站点请求并发、模型 token、Agent 总预算、WSS 连接、证据写带宽、最大解压字节、查询扫描量分开限额。一次性 Jev 评估的跨实例 provider 并发以 PostgreSQL `model_evaluation_admission_scopes` 的 tenant/site 上限为真值；scope 配置由受控部署预置，默认不因环境变量自动创建，且 scope revision 必须精确匹配已批准评估输入的 policy revision。每个调用的私有 admission lease 为 30–60 秒，生产建议 45 秒，必须覆盖 10 秒 provider deadline 和发送前数据库复核；`model.requested` 的耐久屏障在最终复核前完成，随后立即发送，避免日志延迟消耗在途调用预算。每次 acquire 以 advisory lock、scope 行锁与数据库时钟回收过期 lease 后计数。容量拒绝不写证据或发出 HTTP，终态 journal 失败时 lease 交给 TTL 回收，不能提前放开可能已发出的调用。日志的关键事件和普通调试队列分离。严格级别依赖失败时背压/拒绝，不能为了吞吐悄悄采样掉全请求安全事件。
+每站点请求并发、模型 token、Agent 总预算、WSS 连接、证据写带宽、最大解压字节、查询扫描量分开限额。一次性 Jev 评估的跨实例 provider 并发以 PostgreSQL `model_evaluation_admission_scopes` 的 tenant/site 上限为真值；scope 配置由受控部署预置，默认不因环境变量自动创建，且 scope revision 必须精确匹配已批准评估输入的 policy revision。每个调用的私有 admission lease 为 30–60 秒，生产建议 45 秒；发送前数据库复核须保留完整 10 秒 provider window，而复核与实际 HTTP 共享该 10 秒单调预算，故任一复核、日志或调度延迟只会缩短实际请求期限。`model.requested` 的耐久屏障在最终复核前完成。每次 acquire 以 advisory lock、scope `FOR UPDATE` 行锁与数据库时钟回收过期 lease 后计数；同一锁也使容量观察和配置更新串行。容量拒绝不写证据或发出 HTTP，终态 journal 失败时 lease 交给 TTL 回收，不能提前放开可能已发出的调用。日志的关键事件和普通调试队列分离。严格级别依赖失败时背压/拒绝，不能为了吞吐悄悄采样掉全请求安全事件。
 
 模型调用比例应由端点策略与已缓存有效动作映射决定，不每个心跳调用一次。保留随机影子样本评价普通请求，避免只测试规则已发现的攻击。
 

@@ -352,10 +352,11 @@ struct CountingPort {
     fail_after_send: Option<sqlx::PgPool>,
 }
 impl ModelPort for CountingPort {
-    async fn send<'a>(
+    async fn send_with_deadline<'a>(
         &'a self,
         payload: &'a [u8],
         _: &'a mut oneshot::Receiver<()>,
+        _: Duration,
     ) -> transport::Exchange {
         self.calls.fetch_add(1, Ordering::SeqCst);
         *self.payload.lock().unwrap() = payload.to_vec();
@@ -747,13 +748,16 @@ struct CountedGateway {
 }
 
 impl ModelPort for CountedGateway {
-    async fn send<'a>(
+    async fn send_with_deadline<'a>(
         &'a self,
         payload: &'a [u8],
         cancel: &'a mut oneshot::Receiver<()>,
+        deadline: Duration,
     ) -> transport::Exchange {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.client.send(payload, cancel).await
+        self.client
+            .send_with_deadline(payload, cancel, deadline)
+            .await
     }
 
     fn contains_secret(&self, bytes: &[u8]) -> bool {

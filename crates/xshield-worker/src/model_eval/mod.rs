@@ -37,7 +37,9 @@ mod transport;
 mod wire;
 
 use storage::Storage;
-use transport::{DIRECT_MODEL, GATEWAY_MODEL, JevClient, JevRoute, ModelPort};
+use transport::{
+    DIRECT_MODEL, GATEWAY_MODEL, JevClient, JevRoute, ModelPort, PROVIDER_SEND_DEADLINE,
+};
 use wire::{Input, Response};
 
 const CONFIG: &str = "MODEL_CONFIG_INVALID";
@@ -250,19 +252,15 @@ async fn evaluate(
         ModelEvent::new_for_provider(&attempt, input, client.provider(), client.provider_model());
     storage.event(&mut attempt, "model.started", &event)?;
     let started = Instant::now();
-    let admission_attempt = PolicyRevision::parse(input.policy_revision())
-        .ok()
-        .and_then(|policy_revision| {
-            ModelEvaluationAdmissionAttempt::new(
-                attempt.tenant.clone(),
-                attempt.site.clone(),
-                attempt.request.clone(),
-                attempt.call.clone(),
-                policy_revision,
-                runner_id,
-            )
-            .ok()
-        });
+    let admission_attempt = ModelEvaluationAdmissionAttempt::new(
+        attempt.tenant.clone(),
+        attempt.site.clone(),
+        attempt.request.clone(),
+        attempt.call.clone(),
+        attempt.policy.clone(),
+        runner_id,
+    )
+    .ok();
     // Admission happens after `model.started`, so local configuration and
     // authoritative-store failures must still pass through the common terminal
     // event barrier. Returning here would leave a started-only lifecycle.
@@ -405,9 +403,12 @@ async fn execute(
     requested.input_artifact_id.clone_from(&attempt.input);
     storage.event(attempt, "model.requested", &requested)?;
     // The synchronous journal barrier comes before the final database-time
-    // confirmation. Once confirmed, the client starts its bounded request
-    // immediately, so journal latency cannot consume the active lease while a
-    // provider call is in flight.
+    // confirmation. The confirmation plus HTTP exchange share this one
+    // monotonic budget: confirmation verifies a full provider window against
+    // database time, and the client receives only the remainder. This makes a
+    // scheduler or catalog delay shorten the call instead of letting it run
+    // beyond its private lease.
+    let send_budget_started = Instant::now();
     match tokio::time::timeout(
         CATALOG_DEADLINE,
         ModelEvaluationAdmissionPort::confirm_model_evaluation_admission(store, admission),
@@ -419,8 +420,14 @@ async fn execute(
         ModelEvaluationAdmissionState::Admitted(()) => {}
         ModelEvaluationAdmissionState::Denied(denied) => return Err(denied.reason_code()),
     }
+    let Some(send_timeout) = PROVIDER_SEND_DEADLINE
+        .checked_sub(send_budget_started.elapsed())
+        .filter(|deadline| !deadline.is_zero())
+    else {
+        return Err("MODEL_EVALUATION_ADMISSION_LEASE_EXPIRED");
+    };
     let started = Instant::now();
-    let exchange = client.send(&api, cancel).await;
+    let exchange = client.send_with_deadline(&api, cancel, send_timeout).await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let response = if let Some(failure) = exchange.failure {
         Err(failure)
@@ -738,6 +745,7 @@ impl ModelEvent {
             confidence: self.confidence,
             confidence_status: self.confidence_status,
             model_revision: self.model_revision,
+            model_call_id: self.model_call_id,
             duration_us: self.duration_us,
             ..crate::PayloadSummary::default()
         })

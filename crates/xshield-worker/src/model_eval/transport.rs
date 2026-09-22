@@ -16,7 +16,9 @@ pub(super) const DIRECT_MODEL: &str = "jev-1.13.0";
 pub(super) const GATEWAY_MODEL: &str = "typesafe-ai/jev";
 const DIRECT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const GATEWAY_ENDPOINT: &str = "https://ai-gateway.vercel.sh/typesafe/v1/systemone";
-const DEADLINE: Duration = Duration::from_secs(10);
+/// The fixed maximum provider exchange window. Admission confirmation may
+/// shorten this window so an exchange cannot outlive its private lease.
+pub(super) const PROVIDER_SEND_DEADLINE: Duration = Duration::from_secs(10);
 const RESPONSE_LIMIT: usize = 65_536;
 type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -59,10 +61,16 @@ impl Exchange {
 /// A single, cancellable attempt without retries. The caller owns durable input,
 /// output and terminal audit records; dropping a sender alone does not cancel.
 pub(super) trait ModelPort {
-    fn send<'a>(
+    /// Sends within the caller-owned, non-zero remaining admission budget.
+    ///
+    /// An implementation must keep any response capture inside `deadline`; it
+    /// must not start a request whose configured provider timeout can outlive
+    /// that budget.
+    fn send_with_deadline<'a>(
         &'a self,
         payload: &'a [u8],
         cancel: &'a mut oneshot::Receiver<()>,
+        deadline: Duration,
     ) -> impl Future<Output = Exchange> + Send + 'a;
 
     /// Detect literal or JSON-escaped keys before any evidence capture.
@@ -155,7 +163,7 @@ impl JevClient {
             client: build_client(connector),
             api_key,
             endpoint: Uri::from_static(route.endpoint()),
-            timeout: DEADLINE,
+            timeout: PROVIDER_SEND_DEADLINE,
             route,
         })
     }
@@ -294,13 +302,26 @@ impl JevClient {
         exchange.capture_status = "excluded_policy";
         exchange.failure = Some("MODEL_SECRET_EXCLUDED");
     }
-}
 
-impl ModelPort for JevClient {
-    async fn send<'a>(
-        &'a self,
-        payload: &'a [u8],
-        cancel: &'a mut oneshot::Receiver<()>,
+    /// Sends using the client's normal fixed exchange budget.
+    ///
+    /// Test transport callers use this convenience boundary; production
+    /// admission uses [`ModelPort::send_with_deadline`] to pass the remaining
+    /// private-lease budget instead.
+    #[cfg(test)]
+    pub(super) async fn send(
+        &self,
+        payload: &[u8],
+        cancel: &mut oneshot::Receiver<()>,
+    ) -> Exchange {
+        self.send_with_timeout(payload, cancel, self.timeout).await
+    }
+
+    async fn send_with_timeout(
+        &self,
+        payload: &[u8],
+        cancel: &mut oneshot::Receiver<()>,
+        timeout: Duration,
     ) -> Exchange {
         let mut exchange = Exchange::unavailable();
         // Pattern mismatch disables the cancellation branch when its sender
@@ -308,7 +329,7 @@ impl ModelPort for JevClient {
         let result = tokio::select! {
             biased;
             Ok(()) = cancel => Err("MODEL_CANCELLED"),
-            result = tokio::time::timeout(self.timeout, self.receive(payload, &mut exchange)) => {
+            result = tokio::time::timeout(timeout, self.receive(payload, &mut exchange)) => {
                 match result {
                     Ok(result) => result,
                     Err(_) => Err("MODEL_TIMEOUT"),
@@ -320,6 +341,18 @@ impl ModelPort for JevClient {
         }
         self.exclude_secret(&mut exchange);
         exchange
+    }
+}
+
+impl ModelPort for JevClient {
+    async fn send_with_deadline<'a>(
+        &'a self,
+        payload: &'a [u8],
+        cancel: &'a mut oneshot::Receiver<()>,
+        deadline: Duration,
+    ) -> Exchange {
+        self.send_with_timeout(payload, cancel, self.timeout.min(deadline))
+            .await
     }
 
     fn contains_secret(&self, bytes: &[u8]) -> bool {
@@ -549,8 +582,12 @@ mod tests {
 
     async fn exchange_with_key(response: Vec<u8>, closed_cancel: bool, key: &str) -> Exchange {
         let (endpoint, server) = server(response, false).await;
-        let client =
-            JevClient::for_test(Zeroizing::new(key.to_owned()), &endpoint, DEADLINE).unwrap();
+        let client = JevClient::for_test(
+            Zeroizing::new(key.to_owned()),
+            &endpoint,
+            PROVIDER_SEND_DEADLINE,
+        )
+        .unwrap();
         let (sender, mut cancel) = oneshot::channel();
         if closed_cancel {
             drop(sender);
@@ -584,7 +621,7 @@ mod tests {
             JevRoute::Gateway,
             Zeroizing::new(KEY.to_owned()),
             &endpoint,
-            DEADLINE,
+            PROVIDER_SEND_DEADLINE,
         )
         .unwrap();
         let (sender, mut cancel) = oneshot::channel();
@@ -651,7 +688,7 @@ mod tests {
         for cancel_request in [false, true] {
             let (endpoint, server) = server(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nx-request-id: partial_1\r\n\r\n{\"prefix\":".to_vec(), true).await;
             let timeout = if cancel_request {
-                DEADLINE
+                PROVIDER_SEND_DEADLINE
             } else {
                 Duration::from_millis(100)
             };
@@ -687,6 +724,30 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn admission_budget_shortens_provider_timeout_and_preserves_prefix() {
+        let (endpoint, server) = server(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nx-request-id: partial_1\r\n\r\n{\"prefix\":".to_vec(),
+            true,
+        )
+        .await;
+        let client = JevClient::for_test(
+            Zeroizing::new(KEY.to_owned()),
+            &endpoint,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let (_sender, mut cancel) = oneshot::channel();
+        let result =
+            ModelPort::send_with_deadline(&client, b"{}", &mut cancel, Duration::from_millis(50))
+                .await;
+        server.await.unwrap();
+        assert_eq!(result.status, Some(200));
+        assert_eq!(result.body.as_slice(), b"{\"prefix\":");
+        assert_eq!(result.failure, Some("MODEL_TIMEOUT"));
+        assert_eq!(result.capture_status, "partial_timeout");
     }
 
     #[tokio::test]
@@ -864,7 +925,7 @@ mod tests {
     async fn configuration_keeps_https_and_rejects_input_destination_or_invalid_key() {
         let mut client = JevClient::new(JevRoute::Direct, Zeroizing::new(KEY.to_owned())).unwrap();
         assert_eq!(client.endpoint, DIRECT_ENDPOINT);
-        assert_eq!(client.timeout, DEADLINE);
+        assert_eq!(client.timeout, PROVIDER_SEND_DEADLINE);
         assert!(client.contains_secret(format!("before{KEY}after").as_bytes()));
         assert!(!client.contains_secret(b"a different value"));
         let gateway = JevClient::new(JevRoute::Gateway, Zeroizing::new(KEY.to_owned())).unwrap();
@@ -895,7 +956,12 @@ mod tests {
             "http://127.0.0.2:8080/v1/systemone",
         ] {
             assert!(
-                JevClient::for_test(Zeroizing::new(KEY.to_owned()), endpoint, DEADLINE).is_err()
+                JevClient::for_test(
+                    Zeroizing::new(KEY.to_owned()),
+                    endpoint,
+                    PROVIDER_SEND_DEADLINE,
+                )
+                .is_err()
             );
         }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -914,7 +980,7 @@ mod tests {
         let client = JevClient::for_test(
             Zeroizing::new(KEY.to_owned()),
             &client.endpoint.to_string(),
-            DEADLINE,
+            PROVIDER_SEND_DEADLINE,
         )
         .unwrap();
         let (sender, mut cancel) = oneshot::channel();
