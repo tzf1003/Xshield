@@ -27,6 +27,7 @@ import {
   confidence,
 } from "./api-contract.ts";
 import type { Envelope, Watermark } from "./api-contract.ts";
+import { accessPattern } from "./evidence-access.ts";
 
 const textFields = [
   "event_type",
@@ -52,6 +53,7 @@ const idPatterns = {
   case_id: new RegExp(`^case_${uuid}$`),
   artifact_id: artifactPattern,
   calibration_report_id: new RegExp(`^calr_${uuid}$`),
+  evidence_access_request_id: accessPattern,
   model_call_id: modelCallPattern,
 };
 export type SearchFilter =

@@ -11,6 +11,7 @@ const fields = [
   ["case_id", "案件 ID"],
   ["artifact_id", "证据 ID"],
   ["calibration_report_id", "校准报告 ID"],
+  ["evidence_access_request_id", "访问申请 ID"],
   ["model_call_id", "模型调用 ID"],
   ["event_type", "事件类型"],
   ["stage", "阶段"],
@@ -27,6 +28,7 @@ export type SearchPreset = {
     | "grant_id"
     | "auth_binding_id"
     | "calibration_report_id"
+    | "evidence_access_request_id"
     | "model_call_id";
   value: string;
 };

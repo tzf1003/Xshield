@@ -1002,6 +1002,14 @@ async fn execute_query(
                 "AND event_type = 'console.calibration.report.read' ",
                 "AND JSONExtractString(payload_json,'target_calibration_report_id') = ?))",
             )),
+            QueryFilter::EvidenceAccessRequestId(_) => sql.push_str(concat!(
+                "((event_type IN ('evidence.access.requested','evidence.access.approved',",
+                "'evidence.access.denied') ",
+                "AND JSONExtractString(payload_json,'access_request_id') = ?) ",
+                "OR (stage = 'control_access' ",
+                "AND event_type = 'console.evidence.access.read' ",
+                "AND JSONExtractString(payload_json,'target_access_request_id') = ?))",
+            )),
             QueryFilter::ModelCallId(_) => sql.push_str(concat!(
                 "((event_type IN ('model.started','model.requested','model.responded',",
                 "'model.failed','model.timeout','model.cancelled') ",
@@ -1048,6 +1056,9 @@ async fn execute_query(
             QueryFilter::CaseId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::ArtifactId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::CalibrationReportId(value) => {
+                query.bind(value.as_str()).bind(value.as_str())
+            }
+            QueryFilter::EvidenceAccessRequestId(value) => {
                 query.bind(value.as_str()).bind(value.as_str())
             }
             QueryFilter::ModelCallId(value) => query.bind(value.as_str()).bind(value.as_str()),

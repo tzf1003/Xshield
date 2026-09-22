@@ -677,6 +677,15 @@ export function App() {
                 active={queryKind === "access"}
                 busy={Boolean(busy.access)}
                 onInvalidate={clearResults}
+                onHistory={(accessRequestId) => {
+                  clearResults();
+                  setSearchPreset({
+                    kind: "evidence_access_request_id",
+                    value: accessRequestId,
+                  });
+                  setRequestId("");
+                  setQueryKind("search");
+                }}
                 onRun={(fetcher, apply, fail) =>
                   run("access", fetcher, apply, fail)
                 }

@@ -1182,10 +1182,10 @@ test("search canonical digest covers every predicate and retained filter order",
     { kind: "case_id", value: `case_${suffix}` },
     { kind: "artifact_id", value: ARTIFACT_ID },
     { kind: "calibration_report_id", value: `calr_${suffix}` },
-    { kind: "model_call_id", value: `mdl_${suffix}` },
+    { kind: "evidence_access_request_id", value: `access_${suffix}` },
     { kind: "confidence_at_most", basis_points: 1234 },
   ];
-  const canonical = `1789862400|1789948800|asc|2|request_id=${REQUEST_ID}|grant_id=grant_${suffix}|auth_binding_id=auth_${suffix}|case_id=case_${suffix}|artifact_id=${ARTIFACT_ID}|calibration_report_id=calr_${suffix}|model_call_id=mdl_${suffix}|confidence<=1234`;
+  const canonical = `1789862400|1789948800|asc|2|request_id=${REQUEST_ID}|grant_id=grant_${suffix}|auth_binding_id=auth_${suffix}|case_id=case_${suffix}|artifact_id=${ARTIFACT_ID}|calibration_report_id=calr_${suffix}|evidence_access_request_id=access_${suffix}|confidence<=1234`;
   const expected = createHash("sha256").update(canonical).digest("hex");
   assert.equal(await searchPlanDigest(validateSearchPlan(plan)), expected);
   plan.filters.reverse();
@@ -1234,6 +1234,7 @@ test("invalid search inputs fail before network and preserve strict query budget
     { filters: [{ kind: "outcome", value: "allow" }] },
     { filters: [{ kind: "request_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "calibration_report_id", value: ARTIFACT_ID }] },
+    { filters: [{ kind: "evidence_access_request_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "model_call_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "text", field: "payload_json", value: "anything" }] },
     { filters: [{ kind: "text", field: "stage", value: "a|b" }] },

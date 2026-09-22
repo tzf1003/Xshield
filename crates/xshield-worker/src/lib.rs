@@ -1942,8 +1942,8 @@ mod tests {
     };
     use xshield_core::{
         domain::{
-            ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, ModelCallId,
-            RequestId, SiteId, TenantId,
+            ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
+            EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, SiteId, TenantId,
         },
         identity::UnixSeconds,
         query::{
@@ -3154,6 +3154,43 @@ mod tests {
             "JSONExtractString(payload_json,'model_call_id') = 'mdl_018f2a3b-4c5d-7000-8000-000000000004'",
             "stage = 'control_access' AND event_type = 'console.model.read'",
             "JSONExtractString(payload_json,'target_model_call_id') = 'mdl_018f2a3b-4c5d-7000-8000-000000000004'",
+            "ORDER BY occurred_at DESC,event_id DESC LIMIT 3",
+        ] {
+            assert!(sql.contains(fragment), "missing query fragment: {fragment}");
+        }
+        assert_eq!(sql.matches("payload_json").count(), 3, "{sql}");
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_binds_restricted_evidence_access_history() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let captured = mock.add(test::handlers::record_ddl());
+        let access =
+            EvidenceAccessRequestId::parse("access_018f2a3b-4c5d-7000-8000-000000000005").unwrap();
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            vec![QueryFilter::EvidenceAccessRequestId(access)],
+            QuerySort::OccurredAtDesc,
+            2,
+        )
+        .unwrap();
+        query_audit_events(
+            &fixture.config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_b").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+        let sql = captured.query().await;
+        for fragment in [
+            "event_type IN ('evidence.access.requested','evidence.access.approved','evidence.access.denied')",
+            "JSONExtractString(payload_json,'access_request_id') = 'access_018f2a3b-4c5d-7000-8000-000000000005'",
+            "stage = 'control_access' AND event_type = 'console.evidence.access.read'",
+            "JSONExtractString(payload_json,'target_access_request_id') = 'access_018f2a3b-4c5d-7000-8000-000000000005'",
             "ORDER BY occurred_at DESC,event_id DESC LIMIT 3",
         ] {
             assert!(sql.contains(fragment), "missing query fragment: {fragment}");

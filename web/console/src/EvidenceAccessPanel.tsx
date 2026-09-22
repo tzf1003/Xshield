@@ -67,11 +67,13 @@ export function EvidenceAccessPanel({
   active,
   busy,
   onInvalidate,
+  onHistory,
   onRun,
 }: {
   active: boolean;
   busy: boolean;
   onInvalidate: () => void;
+  onHistory: (accessRequestId: string) => void;
   onRun: Run;
 }) {
   const [action, setAction] = useState<Action>("request");
@@ -580,7 +582,7 @@ export function EvidenceAccessPanel({
           </form>
           <AccessFailure error={readError} />
           {inspection ? (
-            <AccessDetails response={inspection} />
+            <AccessDetails response={inspection} onHistory={onHistory} />
           ) : (
             <p className="empty">
               读取申请详情，复核申请人、理由、目标及历史决策。

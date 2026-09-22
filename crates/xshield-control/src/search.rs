@@ -20,8 +20,8 @@ use uuid::Uuid;
 use xshield_core::{
     admin::ManagementRole,
     domain::{
-        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, ModelCallId,
-        RequestId, SiteId, TenantId,
+        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
+        GrantId, ModelCallId, RequestId, SiteId, TenantId,
     },
     identity::UnixSeconds,
     query::{
@@ -388,6 +388,10 @@ fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
                 canonical.push_str("calibration_report_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::EvidenceAccessRequestId(value) => {
+                canonical.push_str("evidence_access_request_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::ModelCallId(value) => {
                 canonical.push_str("model_call_id=");
                 canonical.push_str(value.as_str());
@@ -501,6 +505,9 @@ enum SearchFilterRequest {
     CalibrationReportId {
         value: String,
     },
+    EvidenceAccessRequestId {
+        value: String,
+    },
     ModelCallId {
         value: String,
     },
@@ -539,6 +546,9 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::CalibrationReportId { value } => CalibrationReportId::parse(value)
                 .map(QueryFilter::CalibrationReportId)
+                .map_err(|_| ()),
+            Self::EvidenceAccessRequestId { value } => EvidenceAccessRequestId::parse(value)
+                .map(QueryFilter::EvidenceAccessRequestId)
                 .map_err(|_| ()),
             Self::ModelCallId { value } => ModelCallId::parse(value)
                 .map(QueryFilter::ModelCallId)

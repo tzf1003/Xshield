@@ -40,6 +40,22 @@ async function requestAccess(page: Page) {
   await page.getByLabel("访问幂等键", { exact: true }).fill(ACCESS_KEY);
   await page.getByRole("button", { name: "提交访问申请", exact: true }).click();
 }
+test("prepares scoped access-request history without submitting a search", async ({ page }) => {
+  const calls = await intercept(page, async (route) => route.fulfill({ json: accessInspectionFixture() }));
+  await connect(page);
+  await inspect(page);
+  await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
+    "evidence_access_request_id",
+  );
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(ACCESS_ID);
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  expect(calls.map((call) => call.path)).toEqual([
+    `/control/v1/evidence-access-requests/${ACCESS_ID}`,
+  ]);
+});
 test("explicit request, independent review, approval and exact binary download", async ({ page }) => {
   let approved = false;
   const payload = Buffer.from([0, 255, 60, 115, 99, 114, 105, 112, 116, 62]);
