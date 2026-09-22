@@ -152,7 +152,7 @@ impl JevRoute {
     }
 }
 
-/// Fixed HTTPS destination with verified, dependency-pinned WebPKI roots. Secrets and response
+/// Fixed HTTPS destination with verified, dependency-pinned `WebPKI` roots. Secrets and response
 /// bodies intentionally have no `Debug`/`Display` or tracing representation.
 pub(super) struct JevClient {
     client: HttpClient,
