@@ -2,7 +2,7 @@ use super::*;
 use crate::lower_hex;
 use openssl::sha::sha256;
 use xshield_core::{
-    domain::{ArtifactId, AuthBindingId, CaseId, GrantId},
+    domain::{ArtifactId, AuthBindingId, CalibrationReportId, CaseId, GrantId},
     query::QueryFilter,
 };
 
@@ -10,6 +10,7 @@ const GRANT: &str = "grant_018f2a3b-4c5d-7000-8000-000000000101";
 const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-000000000102";
 const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000103";
 const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000104";
+const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-000000000105";
 
 pub(super) fn reference_payload() -> Value {
     let mut payload = search_payload();
@@ -26,6 +27,12 @@ fn case_reference_payload() -> Value {
         {"kind": "case_id", "value": CASE},
         {"kind": "artifact_id", "value": ARTIFACT}
     ]);
+    payload
+}
+
+fn calibration_report_reference_payload() -> Value {
+    let mut payload = search_payload();
+    payload["filters"] = json!([{"kind": "calibration_report_id", "value": REPORT}]);
     payload
 }
 
@@ -161,6 +168,85 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
 }
 
 #[tokio::test]
+async fn calibration_report_search_requires_audit_administrator_and_audits_the_plan() {
+    let fixture = Fixture::new(10, ManagementRole::Investigator);
+    let response = response_json(
+        router(fixture.control)
+            .oneshot(search_http_request(&calibration_report_reference_payload()))
+            .await
+            .unwrap(),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert_eq!(
+        response["error_code"],
+        "CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED"
+    );
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "console.query.executed");
+    assert_eq!(events[0]["payload"]["outcome"], "DENY");
+    assert_eq!(
+        events[0]["payload"]["reason_code"],
+        "CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED"
+    );
+    assert_eq!(
+        events[0]["payload"]["query_digest"],
+        lower_hex(&sha256(
+            format!("10|70|asc|1|calibration_report_id={REPORT}").as_bytes()
+        ))
+    );
+    assert!(!events[0].to_string().contains(REPORT));
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn calibration_report_search_binds_only_restricted_history() {
+    let mock = test::Mock::new();
+    let event = search_event("ev_018f2a3b-4c5d-7000-8000-000000000115", 20);
+    mock.add(test::handlers::provide([event]));
+    let mut fixture = Fixture::with_index(
+        10,
+        ManagementRole::Investigator,
+        Client::default().with_mock(&mock),
+    );
+    fixture.control.config.principal = ManagementPrincipal::new(
+        "operator-1",
+        [
+            ManagementRole::Investigator,
+            ManagementRole::AuditAdministrator,
+        ],
+        [(
+            fixture.control.config.tenant_id.clone(),
+            fixture.control.config.site_id.clone(),
+        )],
+    )
+    .unwrap();
+    let app = router(fixture.control);
+    let response = response_json(
+        app.clone()
+            .oneshot(search_http_request(&calibration_report_reference_payload()))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let canonical = format!("10|70|asc|1|calibration_report_id={REPORT}");
+    assert_eq!(
+        response["query_digest"],
+        lower_hex(&sha256(canonical.as_bytes()))
+    );
+    assert_eq!(response["events"].as_array().map(Vec::len), Some(1));
+    drop(app);
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "console.query.executed");
+    assert!(!events[0].to_string().contains(REPORT));
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
     let fixture = Fixture::new(100, ManagementRole::Investigator);
     let app = router(fixture.control);
@@ -170,6 +256,7 @@ async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
         ("auth_binding_id", BINDING, GRANT),
         ("case_id", CASE, ARTIFACT),
         ("artifact_id", ARTIFACT, CASE),
+        ("calibration_report_id", REPORT, ARTIFACT),
     ] {
         for invalid in [
             json!(other),
@@ -343,6 +430,56 @@ async fn reference_search_cursor_binds_each_typed_reference() {
         );
         fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
     }
+}
+
+#[tokio::test]
+async fn calibration_report_search_cursor_binds_the_exact_report_reference() {
+    let mut fixture = Fixture::new(10, ManagementRole::Investigator);
+    fixture.control.config.principal = ManagementPrincipal::new(
+        "operator-1",
+        [
+            ManagementRole::Investigator,
+            ManagementRole::AuditAdministrator,
+        ],
+        [(
+            fixture.control.config.tenant_id.clone(),
+            fixture.control.config.site_id.clone(),
+        )],
+    )
+    .unwrap();
+    let payload = calibration_report_reference_payload();
+    let plan = serde_json::from_value::<SearchRequest>(payload.clone())
+        .unwrap()
+        .into_plan(1000)
+        .unwrap();
+    assert_eq!(
+        plan.filters(),
+        [QueryFilter::CalibrationReportId(
+            CalibrationReportId::parse(REPORT).unwrap(),
+        )]
+    );
+    let position = xshield_worker::SearchPosition::new(
+        DateTime::from_timestamp_micros(20_123_456).unwrap(),
+        EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+    )
+    .unwrap();
+    let cursor = fixture
+        .control
+        .encode_search_cursor("operator-1", &plan, &position)
+        .unwrap();
+    let mut altered = payload;
+    altered["filters"][0]["value"] = json!(REPORT.replace("105", "106"));
+    altered["cursor"] = json!(cursor);
+    let body = response_json(
+        router(fixture.control)
+            .oneshot(search_http_request(&altered))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
 }
 
 #[test]

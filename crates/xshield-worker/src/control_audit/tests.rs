@@ -1005,12 +1005,20 @@ fn query_digest_and_optional_request_target_are_bound_to_search() {
     event["payload"]["path"] = "/control/v1/search".into();
     event["payload"]["target_case_id"] = Value::Null;
     event["evidence_refs"] = json!([]);
+    event["payload"]["reason_code"] = "CONTROL_QUERY_EXECUTED".into();
     rejected(&event, "successful search without query digest");
     event["payload"]["query_digest"] = json!("a".repeat(64));
     assert!(index(&event).is_ok());
     event["payload"]["target_request_id"] = REQUEST.into();
     assert!(index(&event).is_ok(), "search with an exact request filter");
     event["payload"]["target_request_id"] = Value::Null;
+    event["payload"]["outcome"] = "DENY".into();
+    event["payload"]["reason_code"] = "CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED".into();
+    assert!(index(&event).is_ok(), "restricted report-history denial");
+    event["payload"]["reason_code"] = "CONTROL_QUERY_UNRECOGNIZED".into();
+    rejected(&event, "unknown search reason");
+    event["payload"]["outcome"] = "PASS".into();
+    event["payload"]["reason_code"] = "CONTROL_QUERY_EXECUTED".into();
     for digest in [
         Value::Null,
         json!("a".repeat(63)),
@@ -1025,8 +1033,12 @@ fn query_digest_and_optional_request_target_are_bound_to_search() {
         .as_object_mut()
         .unwrap()
         .remove("query_digest");
-    for outcome in ["DENY", "ERROR"] {
+    for (outcome, reason) in [
+        ("DENY", "CONTROL_QUERY_BUDGET_EXCEEDED"),
+        ("ERROR", "CONTROL_QUERY_TIMEOUT"),
+    ] {
         event["payload"]["outcome"] = outcome.into();
+        event["payload"]["reason_code"] = reason.into();
         assert!(index(&event).is_ok());
     }
     let mut non_query = self::event();
@@ -1345,6 +1357,9 @@ fn existing_management_actions_accept_absent_or_null_hold_targets() {
         value["payload"]["outcome"] = "DENY".into();
         value["payload"]["target_case_id"] = Value::Null;
         value["evidence_refs"] = json!([]);
+        if kind == "console.query.executed" {
+            value["payload"]["reason_code"] = "CONTROL_QUERY_BUDGET_EXCEEDED".into();
+        }
         assert!(index(&value).is_ok(), "{kind} absent hold target");
         value["payload"]["target_hold_id"] = Value::Null;
         assert!(index(&value).is_ok(), "{kind} null hold target");

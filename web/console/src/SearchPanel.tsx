@@ -10,6 +10,7 @@ const fields = [
   ["auth_binding_id", "身份绑定 ID"],
   ["case_id", "案件 ID"],
   ["artifact_id", "证据 ID"],
+  ["calibration_report_id", "校准报告 ID"],
   ["event_type", "事件类型"],
   ["stage", "阶段"],
   ["reason_code", "原因码"],
@@ -21,7 +22,7 @@ const fields = [
 type Field = (typeof fields)[number][0];
 type DraftFilter = { id: number; field: Field; value: string };
 export type SearchPreset = {
-  kind: "grant_id" | "auth_binding_id";
+  kind: "grant_id" | "auth_binding_id" | "calibration_report_id";
   value: string;
 };
 const outcomes = [

@@ -137,7 +137,7 @@ Authorization 与访问申请头必须各自单值，不接受查询串；重复
 
 ## 29.14 已实现的受限调查查询契约
 
-`POST /control/v1/search` 要求固定 tenant/site 作用域内的 `Investigator` 和管理 Bearer。请求体上限 8 KiB，严格接受 `schema_version=3`、UTC RFC3339 的 `start`/`end`、`sort`、`limit`、可选 `cursor` 及有界 `filters`。时间边界采用整秒，半开区间 `[start,end)` 最长 31 天且位于 1970-01-01 至 2300-01-01；单页受 `XSHIELD_CONTROL_MAX_QUERY_EVENTS` 限制，硬上限 1000 行，最多 8 个过滤器。过滤器只对同一事件做 AND 匹配：规范 request/event/grant/auth binding/case/artifact ID、`event_type`/`stage`/`reason_code`/`operation_id`/`model_revision` 精确文本、`PASS/ALLOW/DENY/UNKNOWN/ERROR/SKIPPED/CANCELLED` outcome 枚举和 0–10000 整数 basis-points 置信度上限。规则事件的空置信度不会匹配数值阈值；当前接口不做跨事件关联、聚合或自然语言编译。未知字段、版本、控制字符和自由表达式均拒绝。
+`POST /control/v1/search` 要求固定 tenant/site 作用域内的 `Investigator` 和管理 Bearer。请求体上限 8 KiB，严格接受 `schema_version=3`、UTC RFC3339 的 `start`/`end`、`sort`、`limit`、可选 `cursor` 及有界 `filters`。时间边界采用整秒，半开区间 `[start,end)` 最长 31 天且位于 1970-01-01 至 2300-01-01；单页受 `XSHIELD_CONTROL_MAX_QUERY_EVENTS` 限制，硬上限 1000 行，最多 8 个过滤器。过滤器只对同一事件做 AND 匹配：规范 request/event/grant/auth binding/case/artifact/calibration-report ID、`event_type`/`stage`/`reason_code`/`operation_id`/`model_revision` 精确文本、`PASS/ALLOW/DENY/UNKNOWN/ERROR/SKIPPED/CANCELLED` outcome 枚举和 0–10000 整数 basis-points 置信度上限。规则事件的空置信度不会匹配数值阈值；当前接口不做跨事件关联、聚合或自然语言编译。未知字段、版本、控制字符和自由表达式均拒绝。
 
 ```json
 {
@@ -167,7 +167,11 @@ Authorization 与访问申请头必须各自单值，不接受查询串；重复
 
 case/artifact 同样采用规范小写强类型校验、8 项总预算及完整计划摘要/游标绑定。组合要求同一事件直接引用两者，不展开案件成员的全部历史。检索沿用 Investigator 对固定 tenant/site 的脱敏审计权限，可观察该范围内其他主体的历史；当前案件集合仍单独检查所有者，保留管理与原文读取仍各自鉴权。关闭、到期、删除后保留的索引引用也可命中，不证明当前对象存在、可读或保留锁有效。新过滤器复用既有视图和事件，无需数据库迁移；新计划的管理日志仍只保存 query_digest。
 
-无效计划返回 `CONTROL_QUERY_INVALID`/422，无效游标返回 `CONTROL_CURSOR_INVALID`/400，均在索引访问前拒绝。确定的查询预算耗尽返回 `CONTROL_QUERY_BUDGET_EXCEEDED`/429、`retryable=false`、`next_action=narrow_query`；单实例容量占满返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，客户端超时返回 `CONTROL_QUERY_TIMEOUT`/503，依赖故障返回对应 503。可审计尝试均写 `console.query.executed`；通过计划校验后的成功或失败审计携带 `query_digest`，不保存原始查询文本或游标。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果；响应统一 `Cache-Control: private, no-store`。
+校准报告使用 `{"kind":"calibration_report_id","value":"calr_UUIDv7"}`，值必须为规范小写强类型 ID。该计划仍先要求 Investigator；由于报告的保留和管理读取历史具有与 29.26 元数据调查相同的可见性边界，同一主体还必须在相同固定 tenant/site 持有 `AuditAdministrator`。缺少第二角色时，服务端在索引访问前返回 `CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED`/403，并以 `DENY` 终态写既有 `console.query.executed`；审计只包含计划摘要，绝不包含原始报告 ID。
+
+通过双角色检查后，过滤器只匹配 `calibration.reported`、六种 `calibration.report_retention.*` 维护事实的 payload `report_id`，以及 `control_access` 阶段的 `console.calibration.report.read` 的 `target_calibration_report_id`。事件族、JSON 键、tenant/site、stage 与 `calr_` 值均由服务端固定并参数化；同名字段、其他事件和嵌套对象不构成关联。结果只为已发布的脱敏历史摘要，不能读取报告正文或样本、标签、概率、指标、提示词、能力、lease、存储定位、密钥、阈值/策略，也不产生任何校准、证据或业务资格。该过滤器与其他条件同样占用 8 项预算，并将完整 ID 纳入响应 query_digest 和游标签名；响应和审计摘要均不替代 29.26 的单报告重新鉴权。
+
+无效计划返回 `CONTROL_QUERY_INVALID`/422，无效游标返回 `CONTROL_CURSOR_INVALID`/400，均在索引访问前拒绝。含校准报告条件但缺少同作用域 AuditAdministrator 返回上述 `CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED`/403。确定的查询预算耗尽返回 `CONTROL_QUERY_BUDGET_EXCEEDED`/429、`retryable=false`、`next_action=narrow_query`；单实例容量占满返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，客户端超时返回 `CONTROL_QUERY_TIMEOUT`/503，依赖故障返回对应 503。可审计尝试均写 `console.query.executed`；通过计划校验后的成功或失败审计携带 `query_digest`，不保存原始查询文本、报告 ID 或游标。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果；响应统一 `Cache-Control: private, no-store`。
 
 ## 29.15 已实现的模型调用查询契约
 

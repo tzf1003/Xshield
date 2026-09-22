@@ -72,10 +72,12 @@ export function CalibrationReportPanel({
   response,
   busy,
   onRefresh,
+  onHistory,
 }: {
   response: CalibrationReportResponse | null;
   busy: boolean;
   onRefresh: () => void;
+  onHistory: (reportId: string) => void;
 }) {
   return (
     <>
@@ -144,6 +146,16 @@ export function CalibrationReportPanel({
           </div>
           <p className="footnote">
             正文 tombstone 状态只说明专用加密正文的保留观察；它不表示正文可读、质量已验证、阈值或策略已发布，亦不表示业务资格。
+          </p>
+          <button
+            type="button"
+            className="outline"
+            onClick={() => onHistory(response.report!.report_id)}
+          >
+            准备历史检索
+          </button>
+          <p className="footnote">
+            历史检索仅预填报告引用，仍需输入时间窗并由 Investigator 独立鉴权。
           </p>
         </section>
       ) : response ? (

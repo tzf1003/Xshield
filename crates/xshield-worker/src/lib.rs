@@ -1942,8 +1942,8 @@ mod tests {
     };
     use xshield_core::{
         domain::{
-            ArtifactId, AuthBindingId, CaseId, EventId, GrantId, ModelCallId, RequestId, SiteId,
-            TenantId,
+            ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, ModelCallId,
+            RequestId, SiteId, TenantId,
         },
         identity::UnixSeconds,
         query::{
@@ -3084,6 +3084,45 @@ mod tests {
         let projection = sql.split_once(" FROM ").unwrap().0;
         assert!(projection.contains(MODEL_CALL_ID_PROJECTION), "{sql}");
         assert_eq!(projection.matches("payload_json").count(), 1, "{sql}");
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_binds_restricted_calibration_report_history() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let captured = mock.add(test::handlers::record_ddl());
+        let report =
+            CalibrationReportId::parse("calr_018f2a3b-4c5d-7000-8000-000000000003").unwrap();
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            vec![QueryFilter::CalibrationReportId(report)],
+            QuerySort::OccurredAtDesc,
+            2,
+        )
+        .unwrap();
+        query_audit_events(
+            &fixture.config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_b").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+        let sql = captured.query().await;
+        for fragment in [
+            "event_type = 'calibration.reported'",
+            "'calibration.report_retention.purge_requested'",
+            "'calibration.report_retention.orphan_purge_failed'",
+            "JSONExtractString(payload_json,'report_id') = 'calr_018f2a3b-4c5d-7000-8000-000000000003'",
+            "stage = 'control_access' AND event_type = 'console.calibration.report.read'",
+            "JSONExtractString(payload_json,'target_calibration_report_id') = 'calr_018f2a3b-4c5d-7000-8000-000000000003'",
+            "ORDER BY occurred_at DESC,event_id DESC LIMIT 3",
+        ] {
+            assert!(sql.contains(fragment), "missing query fragment: {fragment}");
+        }
+        assert_eq!(sql.matches("payload_json").count(), 3, "{sql}");
     }
 
     #[tokio::test]

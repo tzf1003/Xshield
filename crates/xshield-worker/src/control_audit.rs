@@ -98,6 +98,9 @@ impl AccessPayload {
         if event.event_type == "console.calibration.report.read" {
             self.validate_calibration_report_read_reason()?;
         }
+        if event.event_type == "console.query.executed" {
+            self.validate_search_reason()?;
+        }
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
             "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
@@ -168,6 +171,38 @@ impl AccessPayload {
                     | "CONTROL_QUERY_TIMEOUT"
                     | "CONTROL_MODEL_CALLS_INDEX_UNAVAILABLE"
                     | "CONTROL_MODEL_CALLS_HEALTH_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
+    }
+
+    fn validate_search_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_QUERY_EXECUTED",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_QUERY_INVALID"
+                    | "CONTROL_CURSOR_INVALID"
+                    | "CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED"
+                    | "CONTROL_QUERY_CAPACITY_EXHAUSTED"
+                    | "CONTROL_QUERY_BUDGET_EXCEEDED"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CURSOR_UNAVAILABLE"
+                    | "CONTROL_QUERY_TIMEOUT"
+                    | "CONTROL_INDEX_UNAVAILABLE"
+                    | "CONTROL_HEALTH_UNAVAILABLE"
             ),
             _ => false,
         };

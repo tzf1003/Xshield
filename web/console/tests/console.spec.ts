@@ -145,6 +145,19 @@ test("reads restricted calibration report metadata without creating a content pa
   expect(calls.some((call) => call.path.includes("/content"))).toBe(false);
   await page.getByRole("button", { name: "手动刷新报告", exact: true }).click();
   await expect.poll(() => calls.length).toBe(2);
+  await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "结构化事件检索", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
+    "calibration_report_id",
+  );
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(
+    CALIBRATION_REPORT_ID,
+  );
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  expect(calls).toHaveLength(2);
 });
 
 test("calibration report reads discard expired, scope-drifting, and late state", async ({
@@ -1184,7 +1197,10 @@ test("search submits an allowlisted plan, freezes pagination and clears edited r
     },
     { kind: "case_id", value: "case_018f2a3b-4c5d-7000-8000-000000000001" },
     { kind: "artifact_id", value: ARTIFACT_ID },
-    { kind: "text", field: "stage", value: "admission" },
+    {
+      kind: "calibration_report_id",
+      value: "calr_018f2a3b-4c5d-7000-8000-000000000001",
+    },
     { kind: "outcome", value: "DENY" },
   ];
   for (const [index, filter] of filters.entries()) {
@@ -1592,7 +1608,7 @@ test("search rejects malicious metadata, drops raw fields and fits desktop and m
   await expect(page.getByText(injected, { exact: true })).toHaveCount(0);
   malicious = false;
   await search(page);
-  await expect(page).toHaveURL("http://127.0.0.1:5173/");
+  await expect(page).toHaveURL(new URL("/", page.url()).toString());
   await expect(page).toHaveTitle(/Xshield/);
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   await expect(
@@ -2089,7 +2105,7 @@ test("ledger rejects malicious fields and drops undisclosed data before desktop 
     await expect(
       page.getByRole("button", { name: "准备历史检索", exact: true }),
     ).toBeVisible();
-    await expect(page).toHaveURL("http://127.0.0.1:5173/");
+    await expect(page).toHaveURL(new URL("/", page.url()).toString());
     await expect(page).toHaveTitle(/Xshield/);
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
     await expect(page.locator("main img")).toHaveCount(0);

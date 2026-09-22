@@ -124,7 +124,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 保留锁管理的三类 `console.evidence.hold.*` 也走同一生产 journal、封存和投递回归，覆盖创建/释放及精确重试原因、空列表、拒绝和依赖故障；worker 与 Schema 同时拒绝目标/方法/路由错绑、越权携带 hold 目标及未知字段。
 
-同一真实数据库回归通过 `/control/v1/search` 按 case_id、artifact_id 及两者组合双向逐页读取上述已发布管理事件，逐项与生产 journal 对照；检查已发布水位、脱敏字段、每页终态审计及查询日志再次发布。查询日志只保留计划摘要，目标 ID 不进入该访问日志。
+同一真实数据库回归通过 `/control/v1/search` 按 case_id、artifact_id 及两者组合双向逐页读取上述已发布管理事件，逐项与生产 journal 对照；检查已发布水位、脱敏字段、每页终态审计及查询日志再次发布。校准报告历史回归额外覆盖 `calr_` 强类型、固定七类 report/retention 及管理读取事件、参数绑定、游标绑定、普通 Investigator 的索引前 403、同主体 Investigator + AuditAdministrator 的受限成功路径，以及 `console.query.executed` 只保留计划摘要而不出现原始报告 ID。查询日志只保留计划摘要，目标 ID 不进入该访问日志。
 
 `cargo test -p xshield-control case_holds` 覆盖严格路径/JSON/UTC 毫秒（含闰秒反例）、重复认证和幂等头、4 KiB/UTF-8 长度、权限/作用域/凭证期限/速率、在途上限、存储故障及审计扣留。`scripts/test_postgres.sh` 另执行 `case_holds_are_scoped_idempotent_paginated_and_audited`：真实 vault/catalog/案件关联后由独立管理员创建、释放和分页，检查幂等冲突、过期/超长新期限、目标隔离、游标全部绑定、同对象多条历史去重引用、关闭后释放与查询、原期限和审批保持、提交后审计故障恢复及断连后的提交/审计。核心主体测试检查启动身份规范且保持原值。
 

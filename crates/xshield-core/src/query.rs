@@ -6,7 +6,7 @@
 //! queries after injecting the authenticated tenant/site scope.
 
 use crate::{
-    domain::{ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId},
+    domain::{ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, RequestId},
     identity::UnixSeconds,
 };
 use std::fmt;
@@ -173,6 +173,12 @@ pub enum QueryFilter {
     /// Exact evidence reference or validated management target.
     /// Matching metadata does not grant access to the evidence content.
     ArtifactId(ArtifactId),
+    /// Exact calibration-report reference in restricted lifecycle history or a
+    /// validated management read attempt.
+    ///
+    /// This selects retained metadata only. It does not authorize report-body
+    /// access, evidence access, threshold publication, or business operations.
+    CalibrationReportId(CalibrationReportId),
     /// Exact equality on an allow-listed text column.
     Text {
         /// Column selected from [`QueryTextField`].
@@ -195,6 +201,7 @@ impl QueryFilter {
             | Self::AuthBindingId(_)
             | Self::CaseId(_)
             | Self::ArtifactId(_)
+            | Self::CalibrationReportId(_)
             | Self::Outcome(_)
             | Self::ConfidenceAtMost(_) => Ok(()),
             Self::Text { value, .. } => {
@@ -327,7 +334,7 @@ mod tests {
         QueryPlan, QueryPlanError, QuerySort, QueryTextField, QueryWindow,
     };
     use crate::{
-        domain::{ArtifactId, AuthBindingId, CaseId, GrantId, RequestId},
+        domain::{ArtifactId, AuthBindingId, CalibrationReportId, CaseId, GrantId, RequestId},
         identity::UnixSeconds,
     };
 
@@ -373,6 +380,18 @@ mod tests {
                 field: QueryTextField::ReasonCode,
                 value: "UI_SOURCE_MISSING".to_owned(),
             }
+        );
+        assert!(
+            QueryPlan::new(
+                window(60),
+                vec![QueryFilter::CalibrationReportId(
+                    CalibrationReportId::parse("calr_018f2a3b-4c5d-7000-8000-000000000005")
+                        .unwrap(),
+                )],
+                QuerySort::OccurredAtAsc,
+                1,
+            )
+            .is_ok()
         );
         let mut excess = plan.filters().to_vec();
         excess.push(plan.filters()[MAX_FILTERS - 1].clone());

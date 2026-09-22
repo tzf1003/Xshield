@@ -989,6 +989,19 @@ async fn execute_query(
                   'evidence.read','console.evidence.hold.created','console.evidence.hold.released') \
                   AND JSONExtractString(payload_json,'target_artifact_id') = ?))",
             ),
+            QueryFilter::CalibrationReportId(_) => sql.push_str(concat!(
+                "((event_type = 'calibration.reported' OR event_type IN (",
+                "'calibration.report_retention.purge_requested',",
+                "'calibration.report_retention.deleted',",
+                "'calibration.report_retention.purge_failed',",
+                "'calibration.report_retention.orphan_purge_requested',",
+                "'calibration.report_retention.orphan_deleted',",
+                "'calibration.report_retention.orphan_purge_failed')) ",
+                "AND JSONExtractString(payload_json,'report_id') = ?) ",
+                "OR (stage = 'control_access' ",
+                "AND event_type = 'console.calibration.report.read' ",
+                "AND JSONExtractString(payload_json,'target_calibration_report_id') = ?))",
+            )),
             QueryFilter::Text { field, .. } => {
                 sql.push_str(field.as_str());
                 sql.push_str(" = ?");
@@ -1026,6 +1039,9 @@ async fn execute_query(
             QueryFilter::AuthBindingId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::CaseId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::ArtifactId(value) => query.bind(value.as_str()).bind(value.as_str()),
+            QueryFilter::CalibrationReportId(value) => {
+                query.bind(value.as_str()).bind(value.as_str())
+            }
             QueryFilter::Text { value, .. } => query.bind(value),
             QueryFilter::Outcome(value) => query.bind(value.as_str()),
             QueryFilter::ConfidenceAtMost(value) => query.bind(value.as_f64()),

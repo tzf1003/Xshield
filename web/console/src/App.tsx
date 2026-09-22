@@ -730,6 +730,15 @@ export function App() {
                 response={calibrationReport}
                 busy={Boolean(busy.query)}
                 onRefresh={() => loadCalibrationReport()}
+                onHistory={(reportId) => {
+                  clearResults();
+                  setSearchPreset({
+                    kind: "calibration_report_id",
+                    value: reportId,
+                  });
+                  setRequestId("");
+                  setQueryKind("search");
+                }}
               />
             ) : ledger ? (
               <LedgerPanel

@@ -1177,15 +1177,15 @@ test("search canonical digest covers every predicate and retained filter order",
   const suffix = "018f2a3b-4c5d-7000-8000-000000000001";
   plan.filters = [
     { kind: "request_id", value: REQUEST_ID },
-    { kind: "event_id", value: `ev_${suffix}` },
     { kind: "grant_id", value: `grant_${suffix}` },
     { kind: "auth_binding_id", value: `auth_${suffix}` },
     { kind: "case_id", value: `case_${suffix}` },
     { kind: "artifact_id", value: ARTIFACT_ID },
+    { kind: "calibration_report_id", value: `calr_${suffix}` },
     { kind: "text", field: "operation_id", value: "orders:read" },
     { kind: "confidence_at_most", basis_points: 1234 },
   ];
-  const canonical = `1789862400|1789948800|asc|2|request_id=${REQUEST_ID}|event_id=ev_${suffix}|grant_id=grant_${suffix}|auth_binding_id=auth_${suffix}|case_id=case_${suffix}|artifact_id=${ARTIFACT_ID}|operation_id=orders:read|confidence<=1234`;
+  const canonical = `1789862400|1789948800|asc|2|request_id=${REQUEST_ID}|grant_id=grant_${suffix}|auth_binding_id=auth_${suffix}|case_id=case_${suffix}|artifact_id=${ARTIFACT_ID}|calibration_report_id=calr_${suffix}|operation_id=orders:read|confidence<=1234`;
   const expected = createHash("sha256").update(canonical).digest("hex");
   assert.equal(await searchPlanDigest(validateSearchPlan(plan)), expected);
   plan.filters.reverse();
@@ -1233,6 +1233,7 @@ test("invalid search inputs fail before network and preserve strict query budget
     { filters: [{ kind: "outcome", value: "DENY", extra: true }] },
     { filters: [{ kind: "outcome", value: "allow" }] },
     { filters: [{ kind: "request_id", value: ARTIFACT_ID }] },
+    { filters: [{ kind: "calibration_report_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "text", field: "payload_json", value: "anything" }] },
     { filters: [{ kind: "text", field: "stage", value: "a|b" }] },
     { filters: [{ kind: "text", field: "stage", value: "a".repeat(129) }] },

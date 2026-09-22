@@ -51,6 +51,7 @@ const idPatterns = {
   auth_binding_id: bindingPattern,
   case_id: new RegExp(`^case_${uuid}$`),
   artifact_id: artifactPattern,
+  calibration_report_id: new RegExp(`^calr_${uuid}$`),
 };
 export type SearchFilter =
   | { kind: keyof typeof idPatterns; value: string }

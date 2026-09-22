@@ -19,7 +19,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 use xshield_core::{
     admin::ManagementRole,
-    domain::{ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId, SiteId, TenantId},
+    domain::{
+        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, RequestId,
+        SiteId, TenantId,
+    },
     identity::UnixSeconds,
     query::{
         ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
@@ -80,6 +83,27 @@ impl ControlPlane {
                 )
                 .await;
         };
+        if plan
+            .filters()
+            .iter()
+            .any(|filter| matches!(filter, QueryFilter::CalibrationReportId(_)))
+            && !self.config.principal.authorizes(
+                ManagementRole::AuditAdministrator,
+                &self.config.tenant_id,
+                &self.config.site_id,
+            )
+        {
+            // Retention and access facts have the same visibility boundary as
+            // report metadata, so an Investigator needs this additional role.
+            return self
+                .finish_search(
+                    request_id,
+                    subject,
+                    &plan,
+                    Err(SearchFailure::CalibrationReportHistoryScopeDenied),
+                )
+                .await;
+        }
         let after = match cursor
             .as_deref()
             .map(|cursor| self.decode_search_cursor(&subject, &plan, cursor))
@@ -202,9 +226,12 @@ impl ControlPlane {
             .map_or_else(SearchFailure::reason, |_| "CONTROL_QUERY_EXECUTED");
         let outcome = match &result {
             Ok(_) => "PASS",
-            Err(SearchFailure::InvalidCursor | SearchFailure::Budget | SearchFailure::Capacity) => {
-                "DENY"
-            }
+            Err(
+                SearchFailure::InvalidCursor
+                | SearchFailure::CalibrationReportHistoryScopeDenied
+                | SearchFailure::Budget
+                | SearchFailure::Capacity,
+            ) => "DENY",
             Err(_) => "ERROR",
         };
         let audited = tokio::task::spawn_blocking(move || {
@@ -357,6 +384,10 @@ fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
                 canonical.push_str("artifact_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::CalibrationReportId(value) => {
+                canonical.push_str("calibration_report_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::Text { field, value } => {
                 canonical.push_str(field.as_str());
                 canonical.push('=');
@@ -463,6 +494,9 @@ enum SearchFilterRequest {
     ArtifactId {
         value: String,
     },
+    CalibrationReportId {
+        value: String,
+    },
     Text {
         field: SearchTextFieldRequest,
         value: String,
@@ -495,6 +529,9 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::ArtifactId { value } => ArtifactId::parse(value)
                 .map(QueryFilter::ArtifactId)
+                .map_err(|_| ()),
+            Self::CalibrationReportId { value } => CalibrationReportId::parse(value)
+                .map(QueryFilter::CalibrationReportId)
                 .map_err(|_| ()),
             Self::Text { field, value } => Ok(QueryFilter::Text {
                 field: field.into_domain(),
@@ -592,6 +629,7 @@ pub(super) struct SearchResponse {
 
 pub(super) enum SearchFailure {
     InvalidCursor,
+    CalibrationReportHistoryScopeDenied,
     CursorUnavailable,
     Capacity,
     Budget,
@@ -604,6 +642,9 @@ impl SearchFailure {
     pub(super) const fn reason(&self) -> &'static str {
         match self {
             Self::InvalidCursor => "CONTROL_CURSOR_INVALID",
+            Self::CalibrationReportHistoryScopeDenied => {
+                "CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED"
+            }
             Self::CursorUnavailable => "CONTROL_CURSOR_UNAVAILABLE",
             Self::Capacity => "CONTROL_QUERY_CAPACITY_EXHAUSTED",
             Self::Budget => "CONTROL_QUERY_BUDGET_EXCEEDED",
@@ -620,6 +661,12 @@ impl SearchFailure {
                 "invalid pagination cursor",
                 false,
                 "restart_query",
+            ),
+            Self::CalibrationReportHistoryScopeDenied => (
+                StatusCode::FORBIDDEN,
+                "management operation forbidden",
+                false,
+                "request_scope",
             ),
             Self::CursorUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
