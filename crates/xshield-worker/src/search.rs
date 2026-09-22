@@ -1002,6 +1002,14 @@ async fn execute_query(
                 "AND event_type = 'console.calibration.report.read' ",
                 "AND JSONExtractString(payload_json,'target_calibration_report_id') = ?))",
             )),
+            QueryFilter::ModelCallId(_) => sql.push_str(concat!(
+                "((event_type IN ('model.started','model.requested','model.responded',",
+                "'model.failed','model.timeout','model.cancelled') ",
+                "AND JSONExtractString(payload_json,'model_call_id') = ?) ",
+                "OR (stage = 'control_access' ",
+                "AND event_type = 'console.model.read' ",
+                "AND JSONExtractString(payload_json,'target_model_call_id') = ?))",
+            )),
             QueryFilter::Text { field, .. } => {
                 sql.push_str(field.as_str());
                 sql.push_str(" = ?");
@@ -1042,6 +1050,7 @@ async fn execute_query(
             QueryFilter::CalibrationReportId(value) => {
                 query.bind(value.as_str()).bind(value.as_str())
             }
+            QueryFilter::ModelCallId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::Text { value, .. } => query.bind(value),
             QueryFilter::Outcome(value) => query.bind(value.as_str()),
             QueryFilter::ConfidenceAtMost(value) => query.bind(value.as_f64()),

@@ -3126,6 +3126,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_request_query_binds_restricted_model_call_history() {
+        let fixture = Fixture::new();
+        let mock = test::Mock::new();
+        let captured = mock.add(test::handlers::record_ddl());
+        let model_call = ModelCallId::parse("mdl_018f2a3b-4c5d-7000-8000-000000000004").unwrap();
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            vec![QueryFilter::ModelCallId(model_call)],
+            QuerySort::OccurredAtDesc,
+            2,
+        )
+        .unwrap();
+        query_audit_events(
+            &fixture.config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_b").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+        let sql = captured.query().await;
+        for fragment in [
+            "event_type IN ('model.started','model.requested','model.responded','model.failed','model.timeout','model.cancelled')",
+            "JSONExtractString(payload_json,'model_call_id') = 'mdl_018f2a3b-4c5d-7000-8000-000000000004'",
+            "stage = 'control_access' AND event_type = 'console.model.read'",
+            "JSONExtractString(payload_json,'target_model_call_id') = 'mdl_018f2a3b-4c5d-7000-8000-000000000004'",
+            "ORDER BY occurred_at DESC,event_id DESC LIMIT 3",
+        ] {
+            assert!(sql.contains(fragment), "missing query fragment: {fragment}");
+        }
+        assert_eq!(sql.matches("payload_json").count(), 3, "{sql}");
+    }
+
+    #[tokio::test]
     async fn cross_request_query_descends_and_preserves_optional_fields() {
         let fixture = Fixture::new();
         let mock = test::Mock::new();

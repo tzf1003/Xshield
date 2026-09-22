@@ -20,8 +20,8 @@ use uuid::Uuid;
 use xshield_core::{
     admin::ManagementRole,
     domain::{
-        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, RequestId,
-        SiteId, TenantId,
+        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, ModelCallId,
+        RequestId, SiteId, TenantId,
     },
     identity::UnixSeconds,
     query::{
@@ -388,6 +388,10 @@ fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
                 canonical.push_str("calibration_report_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::ModelCallId(value) => {
+                canonical.push_str("model_call_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::Text { field, value } => {
                 canonical.push_str(field.as_str());
                 canonical.push('=');
@@ -497,6 +501,9 @@ enum SearchFilterRequest {
     CalibrationReportId {
         value: String,
     },
+    ModelCallId {
+        value: String,
+    },
     Text {
         field: SearchTextFieldRequest,
         value: String,
@@ -532,6 +539,9 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::CalibrationReportId { value } => CalibrationReportId::parse(value)
                 .map(QueryFilter::CalibrationReportId)
+                .map_err(|_| ()),
+            Self::ModelCallId { value } => ModelCallId::parse(value)
+                .map(QueryFilter::ModelCallId)
                 .map_err(|_| ()),
             Self::Text { field, value } => Ok(QueryFilter::Text {
                 field: field.into_domain(),

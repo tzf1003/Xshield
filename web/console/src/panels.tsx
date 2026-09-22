@@ -507,9 +507,11 @@ export function ModelCallListPanel({
 export function ModelCallOverview({
   response,
   onOpen,
+  onHistory,
 }: {
   response: ModelCallResponse;
   onOpen: (id: string) => void;
+  onHistory: (modelCallId: string) => void;
 }) {
   const model = response.model_call;
   const completeness = {
@@ -610,6 +612,12 @@ export function ModelCallOverview({
             <p className="footnote">
               供应商模型 ID
               是请求所用标识，不代表已解析的精确模型版本。生命周期完整不等于索引无缺口。评估完成不表示业务操作获准。
+            </p>
+            <button onClick={() => onHistory(model.model_call_id)}>
+              准备历史检索
+            </button>
+            <p className="footnote">
+              历史检索仅预填模型调用引用，仍需输入时间窗并由 Investigator 独立鉴权。
             </p>
             <h3 className="model-lifecycle-title">模型生命周期</h3>
             {model.events.map((event) => (

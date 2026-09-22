@@ -367,6 +367,29 @@ test("queries model lifecycle and opens only reference metadata", async ({
   expect(runtimeErrors).toEqual([]);
 });
 
+test("prepares scoped model call history without submitting a search", async ({
+  page,
+}) => {
+  const calls = await mockControl(page);
+  await connect(page);
+  await queryModel(page);
+  await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "结构化事件检索", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
+    "model_call_id",
+  );
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(
+    MODEL_CALL_ID,
+  );
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  expect(calls.map((call) => call.path)).toEqual([
+    `/control/v1/model-calls/${MODEL_CALL_ID}`,
+  ]);
+});
+
 test("lists redacted model calls and reauthorizes the clicked detail", async ({
   page,
 }) => {
@@ -1201,7 +1224,10 @@ test("search submits an allowlisted plan, freezes pagination and clears edited r
       kind: "calibration_report_id",
       value: "calr_018f2a3b-4c5d-7000-8000-000000000001",
     },
-    { kind: "outcome", value: "DENY" },
+    {
+      kind: "model_call_id",
+      value: "mdl_018f2a3b-4c5d-7000-8000-000000000001",
+    },
   ];
   for (const [index, filter] of filters.entries()) {
     if (filter.kind === "confidence_at_most") continue;

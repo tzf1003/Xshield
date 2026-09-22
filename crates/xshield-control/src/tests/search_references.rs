@@ -2,7 +2,7 @@ use super::*;
 use crate::lower_hex;
 use openssl::sha::sha256;
 use xshield_core::{
-    domain::{ArtifactId, AuthBindingId, CalibrationReportId, CaseId, GrantId},
+    domain::{ArtifactId, AuthBindingId, CalibrationReportId, CaseId, GrantId, ModelCallId},
     query::QueryFilter,
 };
 
@@ -11,6 +11,7 @@ const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-000000000102";
 const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000103";
 const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000104";
 const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-000000000105";
+const MODEL_CALL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000106";
 
 pub(super) fn reference_payload() -> Value {
     let mut payload = search_payload();
@@ -33,6 +34,12 @@ fn case_reference_payload() -> Value {
 fn calibration_report_reference_payload() -> Value {
     let mut payload = search_payload();
     payload["filters"] = json!([{"kind": "calibration_report_id", "value": REPORT}]);
+    payload
+}
+
+fn model_call_reference_payload() -> Value {
+    let mut payload = search_payload();
+    payload["filters"] = json!([{"kind": "model_call_id", "value": MODEL_CALL}]);
     payload
 }
 
@@ -246,6 +253,44 @@ async fn calibration_report_search_binds_only_restricted_history() {
 }
 
 #[tokio::test]
+async fn model_call_search_binds_only_restricted_history() {
+    let mock = test::Mock::new();
+    let event = search_event("ev_018f2a3b-4c5d-7000-8000-000000000116", 20);
+    mock.add(test::handlers::provide([event]));
+    let fixture = Fixture::with_index(
+        10,
+        ManagementRole::Investigator,
+        Client::default().with_mock(&mock),
+    );
+    let app = router(fixture.control);
+    let response = response_json(
+        app.clone()
+            .oneshot(search_http_request(&model_call_reference_payload()))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let canonical = format!("10|70|asc|1|model_call_id={MODEL_CALL}");
+    assert_eq!(
+        response["query_digest"],
+        lower_hex(&sha256(canonical.as_bytes()))
+    );
+    assert_eq!(response["events"].as_array().map(Vec::len), Some(1));
+    drop(app);
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "console.query.executed");
+    assert_eq!(events[0]["payload"]["outcome"], "PASS");
+    assert_eq!(
+        events[0]["payload"]["query_digest"],
+        lower_hex(&sha256(canonical.as_bytes()))
+    );
+    assert!(!events[0].to_string().contains(MODEL_CALL));
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
     let fixture = Fixture::new(100, ManagementRole::Investigator);
@@ -257,6 +302,7 @@ async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
         ("case_id", CASE, ARTIFACT),
         ("artifact_id", ARTIFACT, CASE),
         ("calibration_report_id", REPORT, ARTIFACT),
+        ("model_call_id", MODEL_CALL, ARTIFACT),
     ] {
         for invalid in [
             json!(other),
@@ -469,6 +515,44 @@ async fn calibration_report_search_cursor_binds_the_exact_report_reference() {
         .unwrap();
     let mut altered = payload;
     altered["filters"][0]["value"] = json!(REPORT.replace("105", "106"));
+    altered["cursor"] = json!(cursor);
+    let body = response_json(
+        router(fixture.control)
+            .oneshot(search_http_request(&altered))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn model_call_search_cursor_binds_the_exact_model_call_reference() {
+    let fixture = Fixture::new(10, ManagementRole::Investigator);
+    let payload = model_call_reference_payload();
+    let plan = serde_json::from_value::<SearchRequest>(payload.clone())
+        .unwrap()
+        .into_plan(1000)
+        .unwrap();
+    assert_eq!(
+        plan.filters(),
+        [QueryFilter::ModelCallId(
+            ModelCallId::parse(MODEL_CALL).unwrap()
+        )]
+    );
+    let position = xshield_worker::SearchPosition::new(
+        DateTime::from_timestamp_micros(20_123_456).unwrap(),
+        EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+    )
+    .unwrap();
+    let cursor = fixture
+        .control
+        .encode_search_cursor("operator-1", &plan, &position)
+        .unwrap();
+    let mut altered = payload;
+    altered["filters"][0]["value"] = json!(MODEL_CALL.replace("106", "107"));
     altered["cursor"] = json!(cursor);
     let body = response_json(
         router(fixture.control)

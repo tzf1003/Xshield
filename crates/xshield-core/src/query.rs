@@ -6,7 +6,10 @@
 //! queries after injecting the authenticated tenant/site scope.
 
 use crate::{
-    domain::{ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, RequestId},
+    domain::{
+        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, GrantId, ModelCallId,
+        RequestId,
+    },
     identity::UnixSeconds,
 };
 use std::fmt;
@@ -179,6 +182,13 @@ pub enum QueryFilter {
     /// This selects retained metadata only. It does not authorize report-body
     /// access, evidence access, threshold publication, or business operations.
     CalibrationReportId(CalibrationReportId),
+    /// Exact model-call reference in fixed model lifecycle history or a
+    /// validated management detail read.
+    ///
+    /// This selects retained, redacted event metadata only. It does not
+    /// authorize model-detail access, evidence access, replay, or business
+    /// operations.
+    ModelCallId(ModelCallId),
     /// Exact equality on an allow-listed text column.
     Text {
         /// Column selected from [`QueryTextField`].
@@ -202,6 +212,7 @@ impl QueryFilter {
             | Self::CaseId(_)
             | Self::ArtifactId(_)
             | Self::CalibrationReportId(_)
+            | Self::ModelCallId(_)
             | Self::Outcome(_)
             | Self::ConfidenceAtMost(_) => Ok(()),
             Self::Text { value, .. } => {
@@ -334,7 +345,9 @@ mod tests {
         QueryPlan, QueryPlanError, QuerySort, QueryTextField, QueryWindow,
     };
     use crate::{
-        domain::{ArtifactId, AuthBindingId, CalibrationReportId, CaseId, GrantId, RequestId},
+        domain::{
+            ArtifactId, AuthBindingId, CalibrationReportId, CaseId, GrantId, ModelCallId, RequestId,
+        },
         identity::UnixSeconds,
     };
 
@@ -387,6 +400,17 @@ mod tests {
                 vec![QueryFilter::CalibrationReportId(
                     CalibrationReportId::parse("calr_018f2a3b-4c5d-7000-8000-000000000005")
                         .unwrap(),
+                )],
+                QuerySort::OccurredAtAsc,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(
+            QueryPlan::new(
+                window(60),
+                vec![QueryFilter::ModelCallId(
+                    ModelCallId::parse("mdl_018f2a3b-4c5d-7000-8000-000000000006").unwrap(),
                 )],
                 QuerySort::OccurredAtAsc,
                 1,

@@ -754,7 +754,19 @@ export function App() {
               />
             ) : model ? (
               <>
-                <ModelCallOverview response={model} onOpen={openArtifact} />
+                <ModelCallOverview
+                  response={model}
+                  onOpen={openArtifact}
+                  onHistory={(modelCallId) => {
+                    clearResults();
+                    setSearchPreset({
+                      kind: "model_call_id",
+                      value: modelCallId,
+                    });
+                    setRequestId("");
+                    setQueryKind("search");
+                  }}
+                />
                 {(artifact || busy.artifact || problems.artifact) && (
                   <section
                     className="panel detail-panel"
