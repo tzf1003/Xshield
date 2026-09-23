@@ -13,6 +13,8 @@ pub(super) fn supports(event_type: &str) -> bool {
         event_type,
         "console.auth.login"
             | "console.auth.callback"
+            | "console.auth.reauth.start"
+            | "console.auth.reauth.callback"
             | "console.auth.session.read"
             | "console.auth.session.logout"
             | "console.health.read"
@@ -109,6 +111,8 @@ impl AccessPayload {
         let valid_reason = match event.event_type.as_str() {
             "console.auth.login" => self.reason_code == "CONTROL_OIDC_LOGIN_STARTED",
             "console.auth.callback" => self.reason_code == "CONTROL_OIDC_LOGIN_COMPLETED",
+            "console.auth.reauth.start" => self.reason_code == "CONTROL_OIDC_REAUTH_STARTED",
+            "console.auth.reauth.callback" => self.reason_code == "CONTROL_OIDC_REAUTH_VERIFIED",
             "console.auth.session.read" => self.reason_code == "CONTROL_BROWSER_SESSION_READ",
             "console.auth.session.logout" => self.reason_code == "CONTROL_BROWSER_SESSION_REVOKED",
             "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
@@ -349,7 +353,12 @@ impl AccessPayload {
         ];
         let allowed = match (event_type, self.method.as_str(), self.path.as_str()) {
             ("console.auth.login", "GET", "/control/v1/auth/oidc/start")
-            | ("console.auth.callback", "GET", "/control/v1/auth/oidc/callback")
+            | (
+                "console.auth.callback" | "console.auth.reauth.callback",
+                "GET",
+                "/control/v1/auth/oidc/callback",
+            )
+            | ("console.auth.reauth.start", "POST", "/control/v1/auth/oidc/reauth/start")
             | ("console.auth.session.read", "GET", "/control/v1/session")
             | ("console.auth.session.logout", "POST", "/control/v1/session/logout")
             | ("console.health.read", "GET", "/control/v1/audit/health")

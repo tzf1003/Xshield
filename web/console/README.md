@@ -67,7 +67,7 @@ npm run dev
 
 获批申请人以 SensitiveEvidenceReader 凭证读取详情后点击“下载原文（.bin）”。客户端校验二进制响应的服务端范围、申请/证据目标、媒体类型、附件属性和完整字节长度，15 秒总期限内有界读取至多 64 MiB，保留字节形成 Blob，并交给浏览器保存 `.bin` 文件。原文不进入页面内容或持久浏览器存储，临时对象 URL 在使用后释放；清态或切换目标抑制晚到下载。浏览器内存与系统下载管理器不提供可靠清零保证；已交给浏览器的附件由操作者管理，界面提示不证明磁盘保存完成。
 
-控制服务须先升级以提供 29.13 的六个二进制身份/长度响应头，代理必须透传并禁止缓存与正文日志。详情和当前 approved 状态仅供复核，不代替内容端点的重新授权。管理身份由 29.27 的 OIDC/MFA 与服务端会话提供；强操作再认证仍未覆盖。
+控制服务须先升级以提供 29.13 的六个二进制身份/长度响应头，代理必须透传并禁止缓存与正文日志。详情和当前 approved 状态仅供复核，不代替内容端点的重新授权。原文下载还要求用户通过全局“重新验证高危操作”按钮完成同一 OIDC session 的 MFA step-up；两分钟后失效且不替代独立审批。机器 Bearer 暂不能读取原文，导出和其他强操作再认证仍未覆盖。
 
 ## 证据保留工作台
 
@@ -85,7 +85,7 @@ npm run dev
 npm run build
 ```
 
-`dist/` 是静态产物。部署到专用管理 origin，由同源受控反向代理将 `/control/v1` 指向控制服务；生产环境必须使用 TLS、网络隔离和企业 OIDC 身份入口。控制服务需配置 `XSHIELD_CONTROL_OIDC_ISSUER`、`XSHIELD_CONTROL_OIDC_CLIENT_ID`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CONTROL_OIDC_REQUIRED_ACR`、`XSHIELD_CONTROL_CONSOLE_ORIGIN` 和 `XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON`，并在启用前应用迁移 0035、升级可发布 `console.auth.*` 的管理 journal。角色仅来自部署侧精确 subject allowlist，当前每个实例固定到启动时配置的 tenant/site。会话 Cookie 为 Secure/HttpOnly/SameSite=Lax，服务端执行 15 分钟闲置和 8 小时绝对超时，写请求强制精确 Origin + CSRF token。机器 Bearer API 仅保留给受控自动化，生产 UI 不采集 token。真实企业 IdP 联调与强操作再认证仍须独立验收。Vite dev/preview 只供本地开发，不是生产管理边界。
+`dist/` 是静态产物。部署到专用管理 origin，由同源受控反向代理将 `/control/v1` 指向控制服务；生产环境必须使用 TLS、网络隔离和企业 OIDC 身份入口。控制服务需配置 `XSHIELD_CONTROL_OIDC_ISSUER`、`XSHIELD_CONTROL_OIDC_CLIENT_ID`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CONTROL_OIDC_REQUIRED_ACR`、`XSHIELD_CONTROL_CONSOLE_ORIGIN` 和 `XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON`，并在启用前应用迁移 0035/0036、升级可发布 `console.auth.*` 的管理 journal。代理需允许 `POST /control/v1/auth/oidc/reauth/start` 并透传 `Set-Cookie`，禁止缓存或记录请求/响应正文。角色仅来自部署侧精确 subject allowlist，当前每个实例固定到启动时配置的 tenant/site。会话 Cookie 为 Secure/HttpOnly/SameSite=Lax，服务端执行 15 分钟闲置和 8 小时绝对超时，写请求强制精确 Origin + CSRF token。机器 Bearer API 仅保留给受控自动化，生产 UI 不采集 token，且当前不能读取原文。真实企业 IdP 联调仍须独立验收。Vite dev/preview 只供本地开发，不是生产管理边界。
 
 静态服务器应返回 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`，并以响应头设置：
 
@@ -113,7 +113,7 @@ cargo test -p xshield-control --lib console_hold_client_mutates_postgres_http_co
 scripts/test_postgres.sh
 ```
 
-Node 单测覆盖请求/响应边界、模型生命周期一致性、校准报告严格白名单 projection、发布快照的白名单字段与计数关系、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖校准报告和审计发布状态的显式读取/刷新及会话隔离、分页、模型查询与引用详情、Noul/历史空字段，以及搜索 POST 正文、冻结计划分页、编辑失效、事件详情预填同 Trace 条件且不自动提交、输入边界、空结果与 gap、可空事实和独立角色权限。共享回归覆盖 403/429/503、401/闲置/页面离开/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
+Node 单测覆盖请求/响应边界、OIDC step-up 的空正文/CSRF/安全授权 URL、模型生命周期一致性、校准报告严格白名单 projection、发布快照的白名单字段与计数关系、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖校准报告和审计发布状态的显式读取/刷新及会话隔离、分页、模型查询与引用详情、Noul/历史空字段，以及搜索 POST 正文、冻结计划分页、编辑失效、事件详情预填同 Trace 条件且不自动提交、输入边界、空结果与 gap、可空事实和独立角色权限。共享回归覆盖 403/429/503、401/闲置/页面离开/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
 
 Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管理 journal，验证摘要、事件分页与微秒时间、目录依赖故障和 401，以及完整 Gateway Choice、旧记录 Noul 部分生命周期、模型未命中、预算 429 和模型访问审计。浏览器回归的 manifest 成功数据是合成契约，不代表已在生产数据源或企业 SSO 上验收。
 

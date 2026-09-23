@@ -7,6 +7,7 @@ pub struct ManagementBrowserSession {
     issuer: String,
     subject: String,
     csrf_token: String,
+    step_up_valid: bool,
 }
 
 impl ManagementBrowserSession {
@@ -27,6 +28,39 @@ impl ManagementBrowserSession {
     pub fn csrf_token(&self) -> &str {
         &self.csrf_token
     }
+
+    /// Reports whether the session has an MFA-backed step-up within two minutes.
+    #[must_use]
+    pub const fn step_up_valid(&self) -> bool {
+        self.step_up_valid
+    }
+}
+
+/// One consumed OIDC transaction, optionally bound to an existing browser session.
+pub struct ManagementOidcTransaction {
+    pkce_verifier: String,
+    nonce: String,
+    session_digest: Option<Vec<u8>>,
+}
+
+impl ManagementOidcTransaction {
+    /// Returns the verifier paired with this single-use authorization state.
+    #[must_use]
+    pub fn pkce_verifier(&self) -> &str {
+        &self.pkce_verifier
+    }
+
+    /// Returns the nonce paired with this single-use authorization state.
+    #[must_use]
+    pub fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
+    /// Returns the existing session digest for step-up, or `None` for login.
+    #[must_use]
+    pub fn session_digest(&self) -> Option<&[u8]> {
+        self.session_digest.as_deref()
+    }
 }
 
 impl PostgresIdentityStore {
@@ -43,6 +77,7 @@ impl PostgresIdentityStore {
         state_digest: &[u8; 32],
         pkce_verifier: &str,
         nonce: &str,
+        session_digest: Option<&[u8; 32]>,
     ) -> Result<(), StoreError> {
         if !(43..=128).contains(&pkce_verifier.len())
             || !pkce_verifier.bytes().all(|byte| {
@@ -64,12 +99,13 @@ impl PostgresIdentityStore {
         .await?;
         sqlx::query(
             "INSERT INTO xshield.management_oidc_transactions
-                (state_digest, pkce_verifier, nonce, expires_at)
-             VALUES ($1, $2, $3, clock_timestamp() + interval '5 minutes')",
+                (state_digest, pkce_verifier, nonce, session_digest, expires_at)
+             VALUES ($1, $2, $3, $4, clock_timestamp() + interval '5 minutes')",
         )
         .bind(state_digest.as_slice())
         .bind(pkce_verifier)
         .bind(nonce)
+        .bind(session_digest.map(<[u8; 32]>::as_slice))
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -84,17 +120,23 @@ impl PostgresIdentityStore {
     pub async fn consume_management_oidc_transaction(
         &self,
         state_digest: &[u8; 32],
-    ) -> Result<Option<(String, String)>, StoreError> {
+    ) -> Result<Option<ManagementOidcTransaction>, StoreError> {
         let row = sqlx::query(
             "DELETE FROM xshield.management_oidc_transactions
              WHERE state_digest = $1 AND expires_at > clock_timestamp()
-             RETURNING pkce_verifier, nonce",
+             RETURNING pkce_verifier, nonce, session_digest",
         )
         .bind(state_digest.as_slice())
         .fetch_optional(&self.pool)
         .await?;
-        row.map(|row| Ok((row.try_get("pkce_verifier")?, row.try_get("nonce")?)))
-            .transpose()
+        row.map(|row| {
+            Ok(ManagementOidcTransaction {
+                pkce_verifier: row.try_get("pkce_verifier")?,
+                nonce: row.try_get("nonce")?,
+                session_digest: row.try_get("session_digest")?,
+            })
+        })
+        .transpose()
     }
 
     /// Creates an opaque, revocable browser session with an eight-hour absolute
@@ -167,7 +209,11 @@ impl PostgresIdentityStore {
              WHERE session_digest = $1 AND revoked_at IS NULL
                AND expires_at > clock_timestamp()
                AND last_seen_at > clock_timestamp() - interval '15 minutes'
-             RETURNING issuer, subject, csrf_token",
+             RETURNING issuer, subject, csrf_token,
+                       COALESCE(
+                           last_reauthenticated_at > clock_timestamp() - interval '2 minutes',
+                           false
+                       ) AS step_up_valid",
         )
         .bind(session_digest.as_slice())
         .fetch_optional(&self.pool)
@@ -177,9 +223,41 @@ impl PostgresIdentityStore {
                 issuer: row.try_get("issuer")?,
                 subject: row.try_get("subject")?,
                 csrf_token: row.try_get("csrf_token")?,
+                step_up_valid: row.try_get("step_up_valid")?,
             })
         })
         .transpose()
+    }
+
+    /// Marks an active matching browser session as freshly reauthenticated.
+    ///
+    /// The database clock defines the two-minute validity window. This update
+    /// only succeeds for the exact issuer/subject and a still-live idle session.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Database`] when the state transition cannot be
+    /// durably recorded.
+    pub async fn reauthenticate_management_browser_session(
+        &self,
+        session_digest: &[u8; 32],
+        issuer: &str,
+        subject: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE xshield.management_browser_sessions
+             SET last_seen_at = GREATEST(last_seen_at, statement_timestamp()),
+                 last_reauthenticated_at = GREATEST(last_seen_at, statement_timestamp())
+             WHERE session_digest = $1 AND issuer = $2 AND subject = $3
+               AND revoked_at IS NULL AND expires_at > clock_timestamp()
+               AND last_seen_at > clock_timestamp() - interval '15 minutes'",
+        )
+        .bind(session_digest.as_slice())
+        .bind(issuer)
+        .bind(subject)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
     }
 
     /// Revokes a session by its opaque-token digest.

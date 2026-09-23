@@ -1,6 +1,7 @@
 use super::{AccessAction, ControlPlane, audit_unavailable, internal_error};
 use axum::{
     Extension, Json,
+    body::Bytes,
     extract::{RawQuery, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::Next,
@@ -10,7 +11,7 @@ use openidconnect::{
     AccessTokenHash, AuthenticationContextClass, AuthorizationCode, ClientId, ClientSecret,
     CsrfToken, EndpointMaybeSet, EndpointNotSet, EndpointSet, IssuerUrl, Nonce,
     OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
-    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
+    core::{CoreAuthPrompt, CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
 };
 use openssl::{memcmp, rand::rand_bytes, sha::sha256};
 use serde::{Deserialize, Serialize};
@@ -28,12 +29,14 @@ pub(super) const LOGIN_PATH: &str = "/control/v1/auth/oidc/start";
 pub(super) const CALLBACK_PATH: &str = "/control/v1/auth/oidc/callback";
 pub(super) const SESSION_PATH: &str = "/control/v1/session";
 pub(super) const LOGOUT_PATH: &str = "/control/v1/session/logout";
+pub(super) const REAUTH_START_PATH: &str = "/control/v1/auth/oidc/reauth/start";
 const SESSION_COOKIE: &str = "__Host-xshield-session";
 const STATE_COOKIE: &str = "__Host-xshield-oidc-state";
 const CSRF_HEADER: &str = "x-xshield-csrf";
 const STATE_BYTES_MAX: usize = 128;
 const CALLBACK_QUERY_BYTES_MAX: usize = 8_192;
 const BROWSER_SESSION_LIFETIME_SECONDS: u64 = 8 * 60 * 60;
+const STEP_UP_AUTH_TIME_MAX_AGE_SECONDS: u64 = 60;
 
 pub(super) const LOGIN_ACCESS: AccessAction = AccessAction {
     event_type: "console.auth.login",
@@ -58,6 +61,18 @@ pub(super) const SESSION_LOGOUT_ACCESS: AccessAction = AccessAction {
     method: "POST",
     path: LOGOUT_PATH,
     role: ManagementRole::Observer,
+};
+pub(super) const REAUTH_START_ACCESS: AccessAction = AccessAction {
+    event_type: "console.auth.reauth.start",
+    method: "POST",
+    path: REAUTH_START_PATH,
+    role: ManagementRole::SensitiveEvidenceReader,
+};
+const REAUTH_CALLBACK_ACCESS: AccessAction = AccessAction {
+    event_type: "console.auth.reauth.callback",
+    method: "GET",
+    path: CALLBACK_PATH,
+    role: ManagementRole::SensitiveEvidenceReader,
 };
 
 type OidcClient = CoreClient<
@@ -227,6 +242,7 @@ pub(super) struct AuthContext {
     pub(super) principal: Option<ManagementPrincipal>,
     pub(super) csrf_token: Option<String>,
     pub(super) session_digest: Option<[u8; 32]>,
+    pub(super) step_up_valid: bool,
     assertion: Option<BrowserRequestAssertion>,
     state: AuthState,
 }
@@ -242,6 +258,10 @@ impl AuthContext {
 
     fn csrf_valid(&self) -> bool {
         matches!(self.state, AuthState::Browser { csrf_valid: true })
+    }
+
+    pub(super) const fn step_up_valid(&self) -> bool {
+        self.step_up_valid
     }
 }
 
@@ -370,7 +390,7 @@ pub(super) async fn auth_middleware(
 ) -> Response {
     let is_auth_endpoint = matches!(
         request.uri().path(),
-        LOGIN_PATH | CALLBACK_PATH | SESSION_PATH | LOGOUT_PATH
+        LOGIN_PATH | CALLBACK_PATH | SESSION_PATH | LOGOUT_PATH | REAUTH_START_PATH
     );
     let ambiguous = cookie_name_present(request.headers(), SESSION_COOKIE)
         && request.headers().contains_key(header::AUTHORIZATION);
@@ -388,6 +408,10 @@ pub(super) async fn auth_middleware(
         )
         .await
     };
+    #[cfg(test)]
+    {
+        context.step_up_valid |= control.test_step_up_valid;
+    }
     // Some handlers still read Authorization directly. Strip duplicate or
     // non-UTF-8 values here so a rejected header cannot be reinterpreted by
     // an individual handler as a valid first value.
@@ -555,6 +579,7 @@ async fn resolve_browser_auth(
         state: AuthState::Browser { csrf_valid },
         csrf_token: Some(session.csrf_token().to_owned()),
         session_digest: Some(digest),
+        step_up_valid: session.step_up_valid(),
         assertion: Some(assertion),
     }
 }
@@ -600,6 +625,7 @@ pub(super) async fn login_handler(State(control): State<std::sync::Arc<ControlPl
             &sha256(state_value.as_bytes()),
             verifier.secret(),
             nonce.secret(),
+            None,
         )
         .await
         .is_err()
@@ -641,6 +667,214 @@ pub(super) async fn login_handler(State(control): State<std::sync::Arc<ControlPl
     };
     let mut response = StatusCode::SEE_OTHER.into_response();
     response.headers_mut().insert(header::LOCATION, location);
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, state_cookie);
+    response
+}
+
+#[derive(Serialize)]
+struct ReauthenticationStartResponse<'a> {
+    schema_version: u8,
+    request_id: &'a str,
+    tenant_id: &'a str,
+    site_id: &'a str,
+    authorization_url: &'a str,
+}
+
+/// Starts a fresh MFA challenge bound to the current browser session.
+pub(super) async fn reauthentication_start_handler(
+    State(control): State<std::sync::Arc<ControlPlane>>,
+    Extension(auth): Extension<AuthContext>,
+    RawQuery(query): RawQuery,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    let request_id = request_id();
+    if let Some(response) = unauthenticated_rate_limit(&control, &request_id, REAUTH_START_ACCESS) {
+        return response;
+    }
+    let Some(principal) = auth.principal.as_ref().filter(|_| auth.is_browser()) else {
+        return auth_required_response(&control, &request_id, REAUTH_START_ACCESS, &auth);
+    };
+    if !principal.authorizes(
+        REAUTH_START_ACCESS.role,
+        &control.config.tenant_id,
+        &control.config.site_id,
+    ) {
+        return reauthentication_start_error(
+            &control,
+            &request_id,
+            principal.subject(),
+            StatusCode::FORBIDDEN,
+            "CONTROL_SCOPE_DENIED",
+            false,
+            "verify_role",
+        );
+    }
+    if !auth.csrf_valid() {
+        return reauthentication_start_error(
+            &control,
+            &request_id,
+            principal.subject(),
+            StatusCode::FORBIDDEN,
+            "CONTROL_CSRF_REQUIRED",
+            false,
+            "refresh_session",
+        );
+    }
+    if query.is_some() || !body.as_ref().is_ok_and(Bytes::is_empty) {
+        return reauthentication_start_error(
+            &control,
+            &request_id,
+            principal.subject(),
+            StatusCode::BAD_REQUEST,
+            "CONTROL_OIDC_REAUTH_REQUEST_INVALID",
+            false,
+            "correct_request",
+        );
+    }
+    let Some(session_digest) = auth.session_digest.as_ref() else {
+        return internal_error(&request_id).into_response();
+    };
+    let Some(provider) = control.oidc.as_deref() else {
+        return reauthentication_start_error(
+            &control,
+            &request_id,
+            principal.subject(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "CONTROL_OIDC_UNAVAILABLE",
+            true,
+            "retry_later",
+        );
+    };
+    match control
+        .catalog
+        .active_management_browser_session(session_digest)
+        .await
+    {
+        Ok(Some(session))
+            if session.issuer() == provider.issuer && session.subject() == principal.subject() => {}
+        Ok(Some(_) | None) => {
+            return reauthentication_start_error(
+                &control,
+                &request_id,
+                principal.subject(),
+                StatusCode::UNAUTHORIZED,
+                "CONTROL_SESSION_REVOKED",
+                false,
+                "authenticate",
+            );
+        }
+        Err(_) => {
+            return reauthentication_start_error(
+                &control,
+                &request_id,
+                principal.subject(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONTROL_SESSION_UNAVAILABLE",
+                true,
+                "retry_later",
+            );
+        }
+    }
+    begin_reauthentication(&control, &request_id, principal, session_digest, provider).await
+}
+
+fn reauthentication_start_error(
+    control: &ControlPlane,
+    request_id: &str,
+    subject: &str,
+    status: StatusCode,
+    reason: &'static str,
+    retryable: bool,
+    next_action: &'static str,
+) -> Response {
+    control
+        .audited_error(
+            request_id,
+            Some(subject),
+            REAUTH_START_ACCESS,
+            None,
+            status,
+            reason,
+            "sensitive operation reauthentication could not be started",
+            retryable,
+            next_action,
+        )
+        .into_response()
+}
+
+async fn begin_reauthentication(
+    control: &ControlPlane,
+    request_id: &str,
+    principal: &ManagementPrincipal,
+    session_digest: &[u8; 32],
+    provider: &OidcProvider,
+) -> Response {
+    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    let state = CsrfToken::new_random();
+    let nonce = Nonce::new_random();
+    let (authorization_url, state, nonce) = provider
+        .client
+        .authorize_url(
+            CoreAuthenticationFlow::AuthorizationCode,
+            || state,
+            || nonce,
+        )
+        .add_scope(Scope::new("openid".to_owned()))
+        .add_auth_context_value(provider.required_acr.clone())
+        .set_max_age(std::time::Duration::ZERO)
+        .add_prompt(CoreAuthPrompt::Login)
+        .set_pkce_challenge(challenge)
+        .url();
+    let state_value = state.secret();
+    if control
+        .catalog
+        .begin_management_oidc_transaction(
+            &sha256(state_value.as_bytes()),
+            verifier.secret(),
+            nonce.secret(),
+            Some(session_digest),
+        )
+        .await
+        .is_err()
+    {
+        return reauthentication_start_error(
+            control,
+            request_id,
+            principal.subject(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "CONTROL_OIDC_TRANSACTION_UNAVAILABLE",
+            true,
+            "retry_later",
+        );
+    }
+    if control
+        .append_access_event(
+            request_id,
+            Some(principal.subject()),
+            REAUTH_START_ACCESS,
+            None,
+            "PASS",
+            "CONTROL_OIDC_REAUTH_STARTED",
+        )
+        .is_err()
+    {
+        return audit_unavailable(request_id).into_response();
+    }
+    let Ok(state_cookie) = HeaderValue::from_str(&format!(
+        "{STATE_COOKIE}={state_value}; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Lax"
+    )) else {
+        return internal_error(request_id).into_response();
+    };
+    let mut response = Json(ReauthenticationStartResponse {
+        schema_version: 3,
+        request_id,
+        tenant_id: control.config.tenant_id.as_str(),
+        site_id: control.config.site_id.as_str(),
+        authorization_url: authorization_url.as_str(),
+    })
+    .into_response();
     response
         .headers_mut()
         .append(header::SET_COOKIE, state_cookie);
@@ -699,7 +933,7 @@ async fn verify_oidc_subject(
     code: String,
     verifier: String,
     nonce: String,
-) -> Result<String, (StatusCode, &'static str)> {
+) -> Result<VerifiedOidcIdentity, (StatusCode, &'static str)> {
     let exchange = provider
         .client
         .exchange_code(AuthorizationCode::new(code))
@@ -744,7 +978,118 @@ async fn verify_oidc_subject(
             "CONTROL_OIDC_SUBJECT_NOT_PROVISIONED",
         ));
     }
-    Ok(subject.to_owned())
+    Ok(VerifiedOidcIdentity {
+        subject: subject.to_owned(),
+        auth_time_unix: claims.auth_time().as_ref().map(chrono::DateTime::timestamp),
+    })
+}
+
+struct VerifiedOidcIdentity {
+    subject: String,
+    auth_time_unix: Option<i64>,
+}
+
+fn auth_time_is_recent(auth_time_unix: Option<i64>, now_unix: u64) -> bool {
+    auth_time_unix
+        .and_then(|value| u64::try_from(value).ok())
+        .is_some_and(|auth_time| {
+            auth_time <= now_unix.saturating_add(30)
+                && now_unix.saturating_sub(auth_time) <= STEP_UP_AUTH_TIME_MAX_AGE_SECONDS
+        })
+}
+
+fn finish_step_up_callback(provider: &OidcProvider, request_id: &str) -> Response {
+    let Some(location) = HeaderValue::from_str(&format!("{}/", provider.console_origin)).ok()
+    else {
+        return internal_error(request_id).into_response();
+    };
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    response.headers_mut().insert(header::LOCATION, location);
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "__Host-xshield-oidc-state=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax",
+        ),
+    );
+    response
+}
+
+async fn complete_step_up_callback(
+    control: &ControlPlane,
+    provider: &OidcProvider,
+    request_id: &str,
+    identity: VerifiedOidcIdentity,
+    session_digest: &[u8; 32],
+) -> Response {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs());
+    if !now.is_some_and(|now| auth_time_is_recent(identity.auth_time_unix, now)) {
+        return control
+            .audited_error(
+                request_id,
+                None,
+                CALLBACK_ACCESS,
+                None,
+                StatusCode::UNAUTHORIZED,
+                "CONTROL_OIDC_AUTH_TIME_STALE",
+                "management sign-in could not be completed",
+                false,
+                "sign_in_again",
+            )
+            .into_response();
+    }
+    if control
+        .append_access_event(
+            request_id,
+            Some(&identity.subject),
+            REAUTH_CALLBACK_ACCESS,
+            None,
+            "PASS",
+            "CONTROL_OIDC_REAUTH_VERIFIED",
+        )
+        .is_err()
+    {
+        return audit_unavailable(request_id).into_response();
+    }
+    match control
+        .catalog
+        .reauthenticate_management_browser_session(
+            session_digest,
+            &provider.issuer,
+            &identity.subject,
+        )
+        .await
+    {
+        Ok(true) => finish_step_up_callback(provider, request_id),
+        Ok(false) => control
+            .audited_error(
+                request_id,
+                None,
+                CALLBACK_ACCESS,
+                None,
+                StatusCode::UNAUTHORIZED,
+                "CONTROL_OIDC_REAUTH_SESSION_INVALID",
+                "management sign-in could not be completed",
+                false,
+                "sign_in_again",
+            )
+            .into_response(),
+        Err(_) => control
+            .audited_error(
+                request_id,
+                Some(&identity.subject),
+                REAUTH_CALLBACK_ACCESS,
+                None,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONTROL_SESSION_UNAVAILABLE",
+                "management session is temporarily unavailable",
+                true,
+                "retry_later",
+            )
+            .into_response(),
+    }
 }
 
 fn access_token_hash_error() -> (StatusCode, &'static str) {
@@ -900,7 +1245,7 @@ pub(super) async fn callback_handler(
     if !memcmp::eq(state.as_bytes(), state_cookie.as_bytes()) {
         return fail(StatusCode::UNAUTHORIZED, "CONTROL_OIDC_STATE_INVALID");
     }
-    let (verifier, nonce) = match control
+    let transaction = match control
         .catalog
         .consume_management_oidc_transaction(&sha256(state.as_bytes()))
         .await
@@ -920,11 +1265,27 @@ pub(super) async fn callback_handler(
     if code.is_empty() || code.len() > 2_048 {
         return fail(StatusCode::BAD_REQUEST, "CONTROL_OIDC_CALLBACK_INVALID");
     }
-    let subject = match verify_oidc_subject(provider, code, verifier, nonce).await {
+    let identity = match verify_oidc_subject(
+        provider,
+        code,
+        transaction.pkce_verifier().to_owned(),
+        transaction.nonce().to_owned(),
+    )
+    .await
+    {
         Ok(subject) => subject,
         Err((status, reason)) => return fail(status, reason),
     };
-    finish_oidc_login(&control, provider, &request_id, &subject).await
+    let Some(session_digest) = transaction.session_digest() else {
+        return finish_oidc_login(&control, provider, &request_id, &identity.subject).await;
+    };
+    let Ok(session_digest) = <[u8; 32]>::try_from(session_digest) else {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "CONTROL_OIDC_TRANSACTION_UNAVAILABLE",
+        );
+    };
+    complete_step_up_callback(&control, provider, &request_id, identity, &session_digest).await
 }
 
 #[derive(Serialize)]
@@ -1243,9 +1604,9 @@ fn no_store(response: &mut Response) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserRequestAssertion, ManagementRole, cookie_value, csrf_request_valid,
-        endpoint_is_secure, lower_hex, parse_callback_query, secure_url, sign_request_assertion,
-        verify_request_assertion,
+        BrowserRequestAssertion, ManagementRole, STEP_UP_AUTH_TIME_MAX_AGE_SECONDS,
+        auth_time_is_recent, cookie_value, csrf_request_valid, endpoint_is_secure, lower_hex,
+        parse_callback_query, secure_url, sign_request_assertion, verify_request_assertion,
     };
     use axum::http::{HeaderMap, Method, header};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1263,6 +1624,30 @@ mod tests {
             parse_callback_query(Some("error=denied&error_description=policy&state=s")).is_ok()
         );
         assert!(parse_callback_query(Some("code=one&error_description=ignored&state=s")).is_err());
+    }
+
+    #[test]
+    fn step_up_requires_a_recent_non_future_oidc_auth_time() {
+        let now = 1_800_000_000_u64;
+        assert!(auth_time_is_recent(Some(i64::try_from(now).unwrap()), now));
+        assert!(auth_time_is_recent(
+            Some(i64::try_from(now - STEP_UP_AUTH_TIME_MAX_AGE_SECONDS).unwrap()),
+            now,
+        ));
+        assert!(!auth_time_is_recent(
+            Some(i64::try_from(now - STEP_UP_AUTH_TIME_MAX_AGE_SECONDS - 1).unwrap()),
+            now,
+        ));
+        assert!(auth_time_is_recent(
+            Some(i64::try_from(now + 30).unwrap()),
+            now,
+        ));
+        assert!(!auth_time_is_recent(
+            Some(i64::try_from(now + 31).unwrap()),
+            now,
+        ));
+        assert!(!auth_time_is_recent(None, now));
+        assert!(!auth_time_is_recent(Some(-1), now));
     }
 
     #[test]

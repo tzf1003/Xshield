@@ -90,6 +90,50 @@ test("browser session bootstrap and logout use same-origin cookie and CSRF", asy
   assert.equal(call, 2);
 });
 
+test("step-up start is a CSRF-protected browser POST with a safe OIDC URL", async (t) => {
+  const csrfToken = "b".repeat(64);
+  const authorizeUrl = "https://identity.example/authorize?client_id=console";
+  t.mock.method(globalThis, "fetch", async (path: string, options: RequestInit) => {
+    assert.equal(path, "/control/v1/auth/oidc/reauth/start");
+    assert.equal(options.method, "POST");
+    assert.equal(options.credentials, "same-origin");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.body, "");
+    assert.deepEqual(options.headers, {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-Xshield-CSRF": csrfToken,
+    });
+    return response({
+      schema_version: 3,
+      request_id: REQUEST_ID,
+      tenant_id: "tenant_a",
+      site_id: "site_a",
+      authorization_url: authorizeUrl,
+    });
+  });
+
+  const url = await new ControlClient(undefined, csrfToken).startReauthentication();
+  assert.equal(url, authorizeUrl);
+});
+
+test("step-up start rejects insecure or malformed OIDC destinations", async (t) => {
+  t.mock.method(globalThis, "fetch", async () =>
+    response({
+      schema_version: 3,
+      request_id: REQUEST_ID,
+      tenant_id: "tenant_a",
+      site_id: "site_a",
+      authorization_url: "javascript:alert(1)",
+    }),
+  );
+
+  await assert.rejects(
+    new ControlClient(undefined, "c".repeat(64)).startReauthentication(),
+    errorIs("INVALID_RESPONSE"),
+  );
+});
+
 test("fixed GET routes preserve wire semantics and safe display metadata", async (t) => {
   const fixtures = [
     summaryFixture(),

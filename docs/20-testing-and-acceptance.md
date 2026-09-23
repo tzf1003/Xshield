@@ -24,7 +24,7 @@
 
 机器化验收目录见 examples/acceptance-cases.json，包含独立 case_id、步骤、期望和关联不变量；这里只提供设计用例，不声称已经对运行产品执行。
 
-管理身份的本地回归覆盖 callback query 闭合解析、HTTPS/loopback URL 边界、短时 HMAC 断言防伪造和篡改、重复 Cookie、严格 Origin/CSRF 头、认证响应 no-store，以及重复 `Authorization` 不能被 handler 重新解释。Rust 控制 API、Node 与 Playwright 的普通控制台回归不模拟真实 IdP。`xshield-postgres` 的 `oidc_transactions_are_one_use_and_browser_sessions_are_revocable` 需独立 PostgreSQL、迁移 0035 与显式解除 ignored 才验证一次性 state、数据库到期/撤销路径；因此本地测试通过不能替代该集成用例、真实企业 IdP/MFA 联调或部署代理/Cookie/TLS 验收。
+管理身份的本地回归覆盖 callback query 闭合解析、HTTPS/loopback URL 边界、短时 HMAC 断言防伪造和篡改、重复 Cookie、严格 Origin/CSRF 头、认证响应 no-store，以及重复 `Authorization` 不能被 handler 重新解释。step-up 单测覆盖 `auth_time` 新鲜度与时钟偏差、API client 的 CSRF/安全授权 URL，以及未 step-up 的原文读取拒绝。Rust 控制 API、Node 与 Playwright 的普通控制台回归不模拟真实 IdP。`xshield-postgres` 的 `oidc_transactions_are_one_use_and_browser_sessions_are_revocable` 需独立 PostgreSQL、迁移 0035–0036 与显式解除 ignored 才验证一次性 state、session digest 绑定、数据库 step-up 窗口和撤销路径；因此本地测试通过不能替代该集成用例、真实企业 IdP/MFA 联调或部署代理/Cookie/TLS 验收。
 
 ## 20.3 误拒与安全收益
 

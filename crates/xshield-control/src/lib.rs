@@ -21,7 +21,7 @@ mod search;
 pub use identity::{IdentityConfigError, OidcProvider};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::{Body, Bytes},
     extract::{
         DefaultBodyLimit, Path, RawQuery, State,
@@ -413,6 +413,8 @@ pub struct ControlPlane {
     case_evidence_capacity: Arc<Semaphore>,
     catalog: PostgresIdentityStore,
     oidc: Option<Arc<identity::OidcProvider>>,
+    #[cfg(test)]
+    test_step_up_valid: bool,
     auth_context_key: Option<Zeroizing<[u8; 32]>>,
     evidence_read: Option<Arc<EvidenceReadPort>>,
     access_journal: Mutex<LocalJournal>,
@@ -449,6 +451,8 @@ impl ControlPlane {
             case_evidence_capacity: Arc::new(Semaphore::new(1)),
             catalog,
             oidc: None,
+            #[cfg(test)]
+            test_step_up_valid: false,
             auth_context_key,
             evidence_read: None,
             access_journal: Mutex::new(access_journal),
@@ -1710,6 +1714,7 @@ impl ControlPlane {
         target_artifact_id: String,
         access_request_id: Option<String>,
         query_present: bool,
+        step_up_valid: bool,
     ) -> EndpointResult {
         let request_id = format!("req_{}", Uuid::now_v7());
         let auth_control = Arc::clone(&self);
@@ -1787,6 +1792,21 @@ impl ControlPlane {
                 )
                 .await;
         };
+        if !step_up_valid {
+            return self
+                .audited_evidence_read_error_async(
+                    request_id,
+                    subject,
+                    Some(artifact_id),
+                    Some(access_request_id),
+                    StatusCode::FORBIDDEN,
+                    "CONTROL_STEP_UP_REQUIRED",
+                    "fresh MFA reauthentication is required before reading evidence",
+                    false,
+                    "reauthenticate",
+                )
+                .await;
+        }
         let Ok(permit) = Arc::clone(&self.case_evidence_capacity).try_acquire_owned() else {
             return self
                 .audited_evidence_read_error_async(
@@ -3503,6 +3523,10 @@ pub fn router(control: ControlPlane) -> Router {
     Router::new()
         .route(identity::LOGIN_PATH, get(identity::login_handler))
         .route(identity::CALLBACK_PATH, get(identity::callback_handler))
+        .route(
+            identity::REAUTH_START_PATH,
+            post(identity::reauthentication_start_handler).layer(DefaultBodyLimit::max(0)),
+        )
         .route(identity::SESSION_PATH, get(identity::session_handler))
         .route(identity::LOGOUT_PATH, post(identity::logout_handler))
         .route(HEALTH_PATH, get(health_handler))
@@ -3775,6 +3799,7 @@ async fn evidence_content_handler(
     Path(artifact_id): Path<String>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
+    Extension(auth): Extension<identity::AuthContext>,
 ) -> Response {
     let authorization = single_header(&headers, AUTHORIZATION.as_str());
     let access_request_id = single_header(&headers, EVIDENCE_ACCESS_REQUEST_HEADER);
@@ -3784,6 +3809,7 @@ async fn evidence_content_handler(
             artifact_id,
             access_request_id,
             query.is_some(),
+            auth.step_up_valid(),
         )
         .await
         .into_response()
@@ -4529,7 +4555,7 @@ mod tests {
     use axum::{
         body::{Body, to_bytes},
         http::{
-            Request, StatusCode,
+            Method, Request, StatusCode,
             header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE},
         },
     };
@@ -4719,18 +4745,25 @@ mod tests {
 
     #[tokio::test]
     async fn authentication_endpoint_responses_are_never_cached() {
-        let fixture = Fixture::new(10, ManagementRole::Observer);
-        let response = router(fixture.control)
-            .oneshot(
-                Request::get("/control/v1/session")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers()["cache-control"], "no-store");
-        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        for (method, path) in [
+            (Method::GET, "/control/v1/session"),
+            (Method::POST, super::identity::REAUTH_START_PATH),
+        ] {
+            let fixture = Fixture::new(10, ManagementRole::Observer);
+            let response = router(fixture.control)
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        }
     }
 
     #[tokio::test]
@@ -5385,6 +5418,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let mut unverified = Fixture::new(10, ManagementRole::SensitiveEvidenceReader);
+        unverified.control.test_step_up_valid = false;
+        let response = router(unverified.control)
+            .oneshot(evidence_content_request(MISSING_ARTIFACT_ID, access_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(error["error_code"], "CONTROL_STEP_UP_REQUIRED");
 
         let invalid = Fixture::new(10, ManagementRole::SensitiveEvidenceReader);
         let app = router(invalid.control);
@@ -6571,6 +6616,7 @@ mod tests {
             .unwrap();
             let credential =
                 ManagementCredential::new(TOKEN, token_issued_at, token_expires_at).unwrap();
+            let test_step_up_valid = role == ManagementRole::SensitiveEvidenceReader;
             let config = ControlConfig::new(
                 credential,
                 CursorKey::from_hex(CURSOR_KEY).unwrap(),
@@ -6586,14 +6632,17 @@ mod tests {
             .unwrap();
             let seal_key = test_seal_key();
             Self {
-                control: ControlPlane::new(
-                    config,
-                    JournalKey::from_hex(JOURNAL_KEY).unwrap(),
-                    seal_key,
-                    index,
-                    catalog,
-                    access_journal,
-                ),
+                control: ControlPlane {
+                    test_step_up_valid,
+                    ..ControlPlane::new(
+                        config,
+                        JournalKey::from_hex(JOURNAL_KEY).unwrap(),
+                        seal_key,
+                        index,
+                        catalog,
+                        access_journal,
+                    )
+                },
                 access_directory: access,
             }
         }

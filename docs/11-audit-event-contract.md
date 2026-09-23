@@ -67,7 +67,9 @@ occurred_at 是服务器 UTC，浏览器时间另存 client_reported_at；时区
 
 ## 11.5 必须记录的事件族
 
-request.accepted/completed/aborted；stage.started/completed/skipped；identity.bound/refreshed/revoked/mismatch；page.accepted/rejected；grant.issued/denied/expired/revoked；crypto.decode/encode/failed/fallback；model.requested/responded/timeout/cache_hit；agent.started/tool_called/tool_result/artifact_created/finished；origin.forward_intent/response/unknown；evidence.captured/sealed/cataloged/expired/deleted/read；policy.proposed/tested/approved/published/rolled_back；audit.gap/backpressure/durability_failed；console.query/export/decrypt/replay。
+request.accepted/completed/aborted；stage.started/completed/skipped；identity.bound/refreshed/revoked/mismatch；page.accepted/rejected；grant.issued/denied/expired/revoked；crypto.decode/encode/failed/fallback；model.requested/responded/timeout/cache_hit；agent.started/tool_called/tool_result/artifact_created/finished；origin.forward_intent/response/unknown；evidence.captured/sealed/cataloged/expired/deleted/read；policy.proposed/tested/approved/published/rolled_back；audit.gap/backpressure/durability_failed；console.query/export/decrypt/replay；console.auth.login/callback/session.read/session.logout/reauth.start/reauth.callback。
+
+再认证事件仅描述 OIDC step-up 的启动与验证，不携带 state、授权码、token 或原始认证上下文值；完整的路径、角色与失败审计映射见 [29.28](29-api-endpoint-catalog.md#2928-已实现的-mfa-再认证契约)。
 
 恢复补偿产生的 request.aborted 允许 `status=null`，并以 cause_event_ids 指向已知的 decision、request.accepted、origin.response 或新追加的 origin.unknown；准入批次只留下 accepted 前缀时使用 `decision=UNKNOWN` 与 `reason_code=REQUEST_INCOMPLETE`。它表达审计终态，不虚构客户端实际收到的状态码。
 

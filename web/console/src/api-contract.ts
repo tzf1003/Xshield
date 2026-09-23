@@ -8,6 +8,8 @@ export type Envelope = {
 export const messages = {
   CONTROL_AUTH_REQUIRED: "管理会话无效或已过期，请重新登录。",
   CONTROL_CSRF_REQUIRED: "管理会话校验已过期，请重新登录。",
+  CONTROL_STEP_UP_REQUIRED: "读取原文前须完成两分钟内的 MFA 再认证。",
+  CONTROL_OIDC_REAUTH_REQUEST_INVALID: "再认证请求无效，请重新开始操作。",
   CONTROL_SESSION_UNAVAILABLE: "管理会话服务暂时不可用，请稍后重试。",
   CONTROL_SCOPE_DENIED: "当前身份没有此作用域的操作权限。",
   CONTROL_RATE_LIMITED: "管理请求已达频率上限，请稍后重试。",

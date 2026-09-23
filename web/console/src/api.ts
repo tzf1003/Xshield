@@ -1117,6 +1117,35 @@ export class ControlClient {
     );
   }
 
+  async startReauthentication(signal?: AbortSignal): Promise<string> {
+    ensure(this.#authorization === null && this.#csrfToken !== null);
+    return this.#request(
+      "auth/oidc/reauth/start",
+      (value) => {
+        const row = object(value);
+        ensure(
+          Object.keys(row).sort().join(",") ===
+            "authorization_url,request_id,schema_version,site_id,tenant_id",
+        );
+        ensure(row.schema_version === 3);
+        ensure(typeof row.request_id === "string" && requestPattern.test(row.request_id));
+        name(row.tenant_id);
+        name(row.site_id);
+        const target = new URL(text(row.authorization_url, 4_096));
+        ensure(
+          (target.protocol === "https:" ||
+            (target.protocol === "http:" &&
+              ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname))) &&
+            target.username === "" &&
+            target.password === "",
+        );
+        return target.href;
+      },
+      signal,
+      "",
+    );
+  }
+
   async summary(
     requestId: string,
     signal?: AbortSignal,

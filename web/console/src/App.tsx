@@ -315,6 +315,22 @@ export function App() {
       disconnect(notice);
     }
   }
+  async function reauthenticate() {
+    const activeClient = client.current;
+    if (!activeClient) return;
+    try {
+      const authorizationUrl = await activeClient.startReauthentication(
+        lifetime.current.signal,
+      );
+      window.location.assign(authorizationUrl);
+    } catch (error) {
+      setSessionNotice(
+        error instanceof ApiError
+          ? `${error.message} 页面状态保持不变。`
+          : "无法启动身份再认证，请稍后重试。",
+      );
+    }
+  }
   function clearArtifact() {
     operations.current.artifact += 1;
     setArtifact(null);
@@ -602,9 +618,17 @@ export function App() {
                 断开连接
               </button>
             ) : (
-              <button className="outline" onClick={() => void logout()}>
-                安全退出
-              </button>
+              <>
+                <span className="muted" role="status">
+                  原文查看要求两分钟内的 MFA 再认证
+                </span>
+                <button className="outline" onClick={() => void reauthenticate()}>
+                  重新验证高危操作
+                </button>
+                <button className="outline" onClick={() => void logout()}>
+                  安全退出
+                </button>
+              </>
             )
           )}
         </div>

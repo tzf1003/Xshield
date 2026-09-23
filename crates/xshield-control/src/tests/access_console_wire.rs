@@ -62,7 +62,7 @@ async fn console_access_client_mutates_postgres_and_reads_vault_http_contract() 
         &[ManagementRole::Observer],
         TENANT,
     );
-    let foreign = fixture(
+    let mut foreign = fixture(
         &pool,
         "console-foreign-reviewer",
         &[
@@ -89,6 +89,8 @@ async fn console_access_client_mutates_postgres_and_reads_vault_http_contract() 
     )
     .await;
     requester.control.evidence_read = Some(Arc::new(EvidenceReadPort::new(vault)));
+    requester.control.test_step_up_valid = true;
+    foreign.control.test_step_up_valid = true;
     let mut servers = Vec::new();
     let mut addresses = Vec::new();
     let mut directories = Vec::new();

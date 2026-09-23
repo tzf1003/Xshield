@@ -68,7 +68,7 @@ Score 增量：一次性离线评估已接入 2–10 档有序量表、完整档
 
 审批详情增量：`GET /control/v1/evidence-access-requests/{access_request_id}` 已形成主体可见性、单数据库快照、历史申请/决策与目标状态、独立管理审计及发布契约闭环。申请人和同站点审批人可在决策前复核明确理由与范围。
 
-控制台身份增量：已接入 OIDC authorization-code + S256 PKCE、单次 state/nonce、签名/issuer/audience/MFA ACR 校验、显式 subject-role allowlist、服务端撤销会话、Origin + CSRF、闲置与绝对超时及 `console.auth.*` 审计。迁移 0035 必须先于启用；机器 Bearer 路径保留供受控自动化，生产 UI 不保存 token。真实企业 IdP 联调、组织级 MFA 策略、强操作再认证和批量导出继续单独验收。
+控制台身份增量：已接入 OIDC authorization-code + S256 PKCE、单次 state/nonce、签名/issuer/audience/MFA ACR 校验、显式 subject-role allowlist、服务端撤销会话、Origin + CSRF、闲置与绝对超时及 `console.auth.*` 审计。迁移 0035 必须先于登录启用；原文读取的 session-bound MFA step-up 已落地，要求迁移 0036、近 60 秒 auth_time，并由数据库时钟提供两分钟窗口，且不替代独立审批。机器 Bearer 暂不能读取原文；导出和其他高危操作再认证继续单独交付。真实企业 IdP 联调、组织级 MFA 策略仍待验收。
 
 控制台证据访问增量：申请、详情复核、独立批准/拒绝与申请人附件下载已接入固定 API。写入保持冻结原键恢复，二进制响应提供精确范围、目标和长度；客户端校验后才交付浏览器，目标与会话变更抑制晚到下载。控制台通过 15.7 的 OIDC 管理会话认证，证据读取仍独立授权。
 

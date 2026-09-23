@@ -409,6 +409,7 @@ async fn block_audit(
 fn barrier_router(control: Arc<ControlPlane>) -> axum::Router {
     use axum::{
         extract::DefaultBodyLimit,
+        middleware::from_fn_with_state,
         routing::{get, post},
     };
     axum::Router::new()
@@ -429,7 +430,11 @@ fn barrier_router(control: Arc<ControlPlane>) -> axum::Router {
             get(crate::evidence_content_handler),
         )
         .layer(DefaultBodyLimit::max(crate::CASE_BODY_BYTES_MAX))
-        .with_state(control)
+        .with_state(Arc::clone(&control))
+        .layer(from_fn_with_state(
+            control,
+            crate::identity::auth_middleware,
+        ))
 }
 
 async fn single_connection_pool() -> sqlx::PgPool {

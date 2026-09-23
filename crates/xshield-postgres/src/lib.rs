@@ -105,7 +105,7 @@ pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
 pub use investigation_case::{
     InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
 };
-pub use management_session::ManagementBrowserSession;
+pub use management_session::{ManagementBrowserSession, ManagementOidcTransaction};
 pub use model_evaluation_admission::ModelEvaluationAdmissionLease;
 pub use outbox::{
     OutboxAckOutcome, OutboxEvent, OutboxFailureOutcome, OutboxLease, OutboxLeaseConfig,

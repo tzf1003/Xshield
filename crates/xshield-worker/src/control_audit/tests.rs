@@ -174,6 +174,20 @@ fn oidc_session_audit_contract_is_fixed_and_does_not_index_credentials() {
             Some("oidc-subject-1"),
         ),
         (
+            "console.auth.reauth.start",
+            "POST",
+            "/control/v1/auth/oidc/reauth/start",
+            "CONTROL_OIDC_REAUTH_STARTED",
+            Some("oidc-subject-1"),
+        ),
+        (
+            "console.auth.reauth.callback",
+            "GET",
+            "/control/v1/auth/oidc/callback",
+            "CONTROL_OIDC_REAUTH_VERIFIED",
+            Some("oidc-subject-1"),
+        ),
+        (
             "console.auth.session.read",
             "GET",
             "/control/v1/session",

@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 管理会话及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -40,6 +40,7 @@
 | GET /control/v1/audit/health | 各层watermark、gap与存储状态 | console.health.read |
 | GET /control/v1/auth/oidc/start | 启动授权码 + PKCE 管理员登录 | console.auth.login |
 | GET /control/v1/auth/oidc/callback | 消费 OIDC callback 并建立服务端会话 | console.auth.callback |
+| POST /control/v1/auth/oidc/reauth/start | 为当前 OIDC 浏览器会话发起 MFA step-up | console.auth.reauth.start |
 | GET /control/v1/session | 读取当前浏览器主体、作用域与 CSRF bootstrap | console.auth.session.read |
 | POST /control/v1/session/logout | 撤销当前浏览器会话 | console.auth.session.logout |
 
@@ -127,7 +128,7 @@ PostgreSQL 按 tenant/site/decider 串行化幂等键并锁定申请行；申请
 
 ## 29.13 已实现的证据内容读取契约
 
-`GET /control/v1/artifacts/{artifact_id}/content` 要求固定 tenant/site 内的 `SensitiveEvidenceReader`、管理 Bearer，以及 `X-Xshield-Evidence-Access-Request` 头中的强类型 access request ID。服务端要求该申请的 `requested_by` 等于当前管理主体，状态为 `approved`，资格、案件和 catalog 均仍有效，且 artifact 仍 active、未删除并未过期；缺少、跨主体、跨作用域、拒绝、撤销、过期和删除统一返回 `CONTROL_EVIDENCE_READ_NOT_AVAILABLE`/404。数据库检查通过后，EvidenceReadPort 重新认证 vault manifest HMAC、scope、期限、key-id、ciphertext digest 与 AEAD；目录与 vault manifest 不一致或认证失败不会返回内容。
+`GET /control/v1/artifacts/{artifact_id}/content` 要求固定 tenant/site 内的 `SensitiveEvidenceReader`、当前同源 OIDC 浏览器会话的两分钟 MFA step-up，以及 `X-Xshield-Evidence-Access-Request` 头中的强类型 access request ID。该会话须由部署方配置的 ACR 与最近 60 秒 OIDC `auth_time` 再认证；step-up 不替代逐申请独立审批。当前机器 Bearer 没有 step-up 凭据路径，不能读取原文。服务端要求申请的 `requested_by` 等于当前管理主体，状态为 `approved`，资格、案件和 catalog 均仍有效，且 artifact 仍 active、未删除并未过期；缺少、跨主体、跨作用域、拒绝、撤销、过期和删除统一返回 `CONTROL_EVIDENCE_READ_NOT_AVAILABLE`/404。未完成 step-up 时返回 `CONTROL_STEP_UP_REQUIRED`/403；管理 session 已在 middleware 校验，内容 handler 在获取证据读取许可、查询访问申请/catalog 或调用 vault 前拒绝。数据库检查通过后，EvidenceReadPort 重新认证 vault manifest HMAC、scope、期限、key-id、ciphertext digest 与 AEAD；目录与 vault manifest 不一致或认证失败不会返回内容。
 
 Authorization 与访问申请头必须各自单值，不接受查询串；重复访问申请头按缺少申请引用拒绝，查询串返回 `CONTROL_EVIDENCE_READ_REQUEST_INVALID`/400。数据库授权读取的整体预算为 15 秒，短事务中语句/锁等待最多 5 秒，持有申请、案件与 catalog 共享锁后用新的数据库时间检查资格和对象两项期限。事务在访问 vault 前结束；获准在途读取沿用其授权观察，后续状态改变不撤回已经释放的字节。
 
@@ -360,3 +361,13 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 登录成功后创建独立 256-bit 随机 session/CSRF token。浏览器只收到 `__Host-xshield-session` 不透明 Cookie；PostgreSQL 以随机 session token 的 SHA-256 摘要查找会话，并以 DB clock 执行 8 小时绝对期限、15 分钟闲置期限及显式撤销。CSRF token 独立绑定服务端 session，仅由同源 `GET /control/v1/session` 返回；每个非安全方法还必须提交唯一且精确匹配的 `Origin` 与 `X-Xshield-CSRF`。未认证 principal 不信任任何浏览器输入。当前进程的 subject-role mapping 在每个请求重新读取，完成部署配置变更后，相关实例的新请求即按新映射授权；principal 范围固定为该实例配置 tenant/site。
 
 内部 middleware 将有效 Cookie 映射为最多 30 秒的进程内 HMAC 身份断言以复用既有授权函数；断言不能由外部 caller 签发或持久化。静态 Bearer 仍按已有机器认证契约处理；同一请求并带 Cookie 与 Authorization 会拒绝。login、callback、session bootstrap 与 logout 均写独立管理 journal `console.auth.login/callback/session.read/session.logout`；audit 失败扣留成功结果。session 创建在 audit 失败时撤销。所有认证响应均为 `no-store`，logout 只接受带有效 CSRF 的浏览器 session。数据库 schema 由迁移 0035 提供；OIDC 代码、Rustls HTTP 与 URL 依赖版本/许可证/升级策略见 README。
+
+## 29.28 已实现的 MFA 再认证契约
+
+`POST /control/v1/auth/oidc/reauth/start` 仅接受当前活动的 OIDC 浏览器 session，要求 `SensitiveEvidenceReader`、精确 Origin 与 CSRF token；拒绝查询串和非空正文。请求使用固定部署 issuer/client/redirect，发起授权码 + S256 PKCE，并附加部署要求的 ACR、`max_age=0` 与 `prompt=login`。五分钟一次性 state/nonce/PKCE 事务同时绑定当前 session token digest；响应只包含固定字段与 `authorization_url`，设置 host-only HttpOnly state Cookie 并使用 `no-store` / `no-referrer`。
+
+复用 29.27 callback 完成签名、issuer、audience、nonce、`at_hash`（存在时）、ACR 和精确 subject allowlist 校验；step-up 额外要求 OIDC `auth_time` 存在、年龄不超过 60 秒、未来偏差不超过 30 秒，并要求 issuer/subject 与事务绑定的当前活动 session 精确相同。PostgreSQL 只更新该未撤销且未超时 session 的 `last_reauthenticated_at`；有效期以数据库时钟计算为两分钟。被撤销、绝对到期或超过 15 分钟闲置的 session 不能续期。当前登录 `GET /control/v1/session` 不回传 step-up 标志，服务端每个原文请求独立检查。
+
+再认证开始写 `console.auth.reauth.start`；OIDC 身份、ACR、auth_time 验证通过后，服务端先耐久写 `console.auth.reauth.callback` 的 `CONTROL_OIDC_REAUTH_VERIFIED`，再更新 session 时间戳。该 PASS 只证明声明已验证，不是原文读取或审批事实；session 存储故障会另记 reauth callback ERROR。state、签名、身份或新鲜度拒绝沿用通用 `console.auth.callback` 拒绝，不记录授权码、state、token 或原始 ACR。证据原文的独立审批始终不变。原文内容端点经管理 session 与强类型参数校验后，在获取证据读取许可、查询访问申请/catalog 或调用 vault 前要求 step-up；未满足返回 `CONTROL_STEP_UP_REQUIRED`/403。当前机器 Bearer 尚无用途绑定的再认证凭据，因此不能通过该端点读取原文，自动化读取需待后续安全凭据设计。
+
+部署需先应用迁移 0036，再升级控制服务、能识别新增 `console.auth.reauth.*` 事件的管理 journal 发布器、同源代理与控制台；代理须透传 reauth-start 的 `Set-Cookie`，禁止缓存与记录其请求/响应正文。迁移回退前须禁用原文内容路由或确保活动版本仍强制 step-up；不得先移除该字段再回退应用。

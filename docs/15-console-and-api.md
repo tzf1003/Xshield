@@ -121,7 +121,7 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 
 生产控制台使用 OIDC 建立的 HttpOnly 同源会话 Cookie；页面不读取或保存会话秘密。受控自动化仍可在客户端内存使用短期管理 Bearer，退出、闲置 15 分钟、401 或主动断连后清态；异步响应绑定查询代际和操作序号，旧响应不能恢复已清除数据，跨范围响应断连。原生 Fetch 固定同源路径、拒绝重定向，浏览器会话请求只发送同源 Cookie，Bearer 自动化请求省略 Cookie；实施 15 秒读体总期限及 16 MiB 上限，错误只呈现固定安全文案、稳定代码和管理请求 ID。管理审计继续由服务端控制端点完成。
 
-生产控制台已实现 OIDC authorization-code + S256 PKCE 登录、单次 state/nonce、签名验证、精确 issuer/audience 与部署要求的 MFA `acr`，以及 PostgreSQL 撤销型 HttpOnly 浏览器会话、15 分钟闲置/8 小时绝对超时和 Origin + CSRF 防护。subject 必须由部署配置显式映射到管理角色；每次请求按当前映射重建固定 tenant/site principal，IdP 自声明角色不授信。原机器 Bearer API 保留用于受控自动化；生产界面不收集或持久化机器 token。批量导出与高危操作再认证仍单独交付。启用须先应用迁移 0035，配置 TLS、专用同源管理 origin、CSP/缓存策略及本文 19.3 的 OIDC 环境变量。开发和部署步骤、测试数据语义见 [控制台说明](../web/console/README.md)。
+生产控制台已实现 OIDC authorization-code + S256 PKCE 登录、单次 state/nonce、签名验证、精确 issuer/audience 与部署要求的 MFA `acr`，以及 PostgreSQL 撤销型 HttpOnly 浏览器会话、15 分钟闲置/8 小时绝对超时和 Origin + CSRF 防护。subject 必须由部署配置显式映射到管理角色；每次请求按当前映射重建固定 tenant/site principal，IdP 自声明角色不授信。原文读取另要求同一浏览器 session 在两分钟内完成 MFA step-up，并仍须通过独立审批；step-up 使用迁移 0036 和最近 60 秒 `auth_time`。机器 Bearer 暂无 step-up 路径，不能读取原文。批量导出及其他高危操作再认证仍单独交付。启用须先应用迁移 0035/0036，配置 TLS、专用同源管理 origin、CSP/缓存策略及本文 19.3 的 OIDC 环境变量。开发和部署步骤、测试数据语义见 [控制台说明](../web/console/README.md)。
 
 ## 15.8 已实现案件工作台
 
@@ -143,7 +143,7 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 
 获批申请人使用 Reader 角色，读取详情后显式点击下载。客户端校验规范响应头、已确认的 tenant/site、申请和 artifact、附件媒体类型及实际字节数；二进制读取上限 64 MiB，发送到读体总期限 15 秒。内容保持 Blob 并以 `.bin` 附件交给浏览器，页面不解释原文；临时对象 URL 及时释放。下载切换目标、查询或会话后，旧响应不能触发保存。界面显示管理请求 ID、字节数和交付浏览器状态，不能由此推断磁盘落盘成功。审批过期、案件关闭和证据删除由后端在每次读取时重验。
 
-二进制响应身份头须先升级控制服务并配置代理透传后启用界面。工作台沿用 15.7 的 OIDC 管理会话；内容批准和原文读取仍独立授权。高危写操作再认证继续独立交付。
+二进制响应身份头须先升级控制服务并配置代理透传后启用界面。工作台沿用 15.7 的 OIDC 管理会话；读取前须点按全局“重新验证高危操作”完成两分钟有效 MFA step-up，内容批准仍是独立授权。机器 Bearer 当前不能读取原文；导出和其他高危操作再认证继续独立交付。
 
 ## 15.10 已实现证据保留工作台
 
