@@ -560,6 +560,13 @@ async fn postgres_model_evaluation_cache_reuses_revalidated_source() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(
+        store
+            .purge_expired_model_evaluation_cache(&tenant, &site, 32,)
+            .await
+            .unwrap(),
+        1
+    );
     let expired_client = CountingPort {
         calls: AtomicUsize::new(0),
         payload: Arc::default(),

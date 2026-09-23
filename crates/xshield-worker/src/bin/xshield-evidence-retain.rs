@@ -70,6 +70,13 @@ async fn run() -> Result<(), &'static str> {
     .await
     .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
     .map_err(|_| "EVIDENCE_PURGE_UNAVAILABLE")?;
+    let cache_deleted = tokio::time::timeout(
+        DEADLINE,
+        store.purge_expired_model_evaluation_cache(&tenant, &site, limit),
+    )
+    .await
+    .map_err(|_| "MODEL_CACHE_PURGE_TIMEOUT")?
+    .map_err(|_| "MODEL_CACHE_PURGE_UNAVAILABLE")?;
     let jobs = tokio::time::timeout(
         DEADLINE,
         store.prepare_evidence_purge(&tenant, &site, &key_id, limit),
@@ -389,7 +396,7 @@ async fn run() -> Result<(), &'static str> {
         }
     }
     println!(
-        "selected={} deleted={deleted} failed={failed} report_selected={} report_deleted={report_deleted} report_failed={report_failed} report_orphan_selected={} report_orphan_deleted={report_orphan_deleted} report_orphan_failed={report_orphan_failed} lineage_review_selected={} lineage_review_deleted={lineage_review_deleted} lineage_review_failed={lineage_review_failed} lineage_review_orphan_selected={} lineage_review_orphan_deleted={lineage_review_orphan_deleted} lineage_review_orphan_failed={lineage_review_orphan_failed} orphan_selected={} orphan_deleted={orphan_deleted} orphan_failed={orphan_failed}",
+        "cache_deleted={cache_deleted} selected={} deleted={deleted} failed={failed} report_selected={} report_deleted={report_deleted} report_failed={report_failed} report_orphan_selected={} report_orphan_deleted={report_orphan_deleted} report_orphan_failed={report_orphan_failed} lineage_review_selected={} lineage_review_deleted={lineage_review_deleted} lineage_review_failed={lineage_review_failed} lineage_review_orphan_selected={} lineage_review_orphan_deleted={lineage_review_orphan_deleted} lineage_review_orphan_failed={lineage_review_orphan_failed} orphan_selected={} orphan_deleted={orphan_deleted} orphan_failed={orphan_failed}",
         jobs.len(),
         report_jobs.len(),
         report_orphan_selected,

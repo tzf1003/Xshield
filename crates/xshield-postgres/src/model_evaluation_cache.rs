@@ -11,6 +11,7 @@ use sqlx::{Row, Transaction};
 use xshield_core::domain::{ArtifactId, ModelCallId, RequestId, SiteId, TenantId};
 
 const MODEL_CACHE_KEY_BYTES: usize = 32;
+const MODEL_CACHE_PURGE_MAX: u16 = 128;
 
 /// One exact cache record ready for a durable insert.
 pub struct ModelEvaluationCacheWrite<'a> {
@@ -297,6 +298,54 @@ impl PostgresIdentityStore {
         } else {
             ModelEvaluationCacheWriteOutcome::Conflict
         })
+    }
+
+    /// Removes a bounded batch of expired cache rows in one tenant/site scope.
+    ///
+    /// Cache rows are optimization metadata rather than authorization or
+    /// evidence state, so expiry cleanup is safe to skip when another
+    /// maintenance worker already holds a row lock. The caller owns the
+    /// maintenance schedule and must treat a database error as an incomplete
+    /// pass.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidCommand`] for an unbounded batch or
+    /// [`StoreError`] when the bounded transaction cannot complete.
+    pub async fn purge_expired_model_evaluation_cache(
+        &self,
+        tenant: &TenantId,
+        site: &SiteId,
+        limit: u16,
+    ) -> Result<u64, StoreError> {
+        if !(1..=MODEL_CACHE_PURGE_MAX).contains(&limit) {
+            return Err(StoreError::InvalidCommand);
+        }
+        let mut transaction = self.pool.begin().await?;
+        set_cache_timeouts(&mut transaction).await?;
+        let deleted = sqlx::query(
+            "WITH expired AS (
+                SELECT tenant_id, site_id, cache_key
+                FROM xshield.model_evaluation_cache
+                WHERE tenant_id=$1 AND site_id=$2
+                  AND expires_at <= clock_timestamp()
+                ORDER BY expires_at ASC, cache_key ASC
+                LIMIT $3
+                FOR UPDATE SKIP LOCKED
+             )
+             DELETE FROM xshield.model_evaluation_cache cache
+             USING expired
+             WHERE cache.tenant_id=expired.tenant_id
+               AND cache.site_id=expired.site_id
+               AND cache.cache_key=expired.cache_key
+             RETURNING cache.cache_key",
+        )
+        .bind(tenant.as_str())
+        .bind(site.as_str())
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        u64::try_from(deleted.len()).map_err(|_| StoreError::CorruptData("model_cache_purge_count"))
     }
 }
 
