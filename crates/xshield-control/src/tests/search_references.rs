@@ -408,6 +408,46 @@ async fn evidence_hold_search_uses_browser_roles_for_the_second_scope_check() {
 }
 
 #[tokio::test]
+async fn calibration_report_search_uses_browser_roles_for_the_second_scope_check() {
+    let mut fixture = Fixture::new(10, ManagementRole::Investigator);
+    fixture.control.config.principal = ManagementPrincipal::new(
+        "machine-operator",
+        [
+            ManagementRole::Investigator,
+            ManagementRole::AuditAdministrator,
+        ],
+        [(
+            fixture.control.config.tenant_id.clone(),
+            fixture.control.config.site_id.clone(),
+        )],
+    )
+    .unwrap();
+    let authorization =
+        browser_authorization(&fixture.control, "browser-investigator", &["investigator"]);
+    let response = response_json(
+        router(fixture.control)
+            .oneshot(
+                Request::post(super::super::search::SEARCH_PATH)
+                    .header(AUTHORIZATION, authorization)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        calibration_report_reference_payload().to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert_eq!(
+        response["error_code"],
+        "CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED"
+    );
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn evidence_hold_search_binds_only_restricted_history() {
     let mock = test::Mock::new();
     let event = search_event("ev_018f2a3b-4c5d-7000-8000-000000000118", 20);
