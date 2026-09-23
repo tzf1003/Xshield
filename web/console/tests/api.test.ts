@@ -1123,7 +1123,7 @@ async function searchResponse(plan = searchPlan()): Promise<SearchResponse> {
     index_watermark: source.index_watermark,
     has_gaps: true,
     pending_segments: 2,
-    query_digest: await searchPlanDigest(plan),
+    query_digest: (await searchPlanDigest(plan)) ?? "0".repeat(64),
     scanned_rows: null,
     scanned_bytes: 0,
     truncated: true,
@@ -1206,6 +1206,18 @@ test("search canonical digest covers every predicate and retained filter order",
   assert.equal(plan.filters.length, 1);
 });
 
+test("subject search keeps its response digest opaque to the browser", async (t) => {
+  const plan = {
+    ...searchPlan(),
+    filters: [{ kind: "subject_ref" as const, value: "operator-1" }],
+  };
+  const fixture = await searchResponse(plan);
+  fixture.query_digest = "a".repeat(64);
+  t.mock.method(globalThis, "fetch", async () => response(fixture));
+  assert.equal(await searchPlanDigest(validateSearchPlan(plan)), null);
+  assert.deepEqual(await new ControlClient(TOKEN).search(plan), fixture);
+});
+
 test("search accepts only a canonical evidence hold reference", async () => {
   const holdId = "ev_018f2a3b-4c5d-7000-8000-000000000061";
   const plan = validateSearchPlan({
@@ -1252,6 +1264,8 @@ test("invalid search inputs fail before network and preserve strict query budget
     { filters: [{ kind: "evidence_access_request_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "evidence_hold_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "model_call_id", value: ARTIFACT_ID }] },
+    { filters: [{ kind: "subject_ref", value: "operator\n1" }] },
+    { filters: [{ kind: "subject_ref", value: "é".repeat(129) }] },
     { filters: [{ kind: "text", field: "payload_json", value: "anything" }] },
     { filters: [{ kind: "text", field: "stage", value: "a|b" }] },
     { filters: [{ kind: "text", field: "stage", value: "a".repeat(129) }] },

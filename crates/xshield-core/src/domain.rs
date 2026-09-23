@@ -22,6 +22,39 @@ impl fmt::Display for InvalidValue {
 
 impl std::error::Error for InvalidValue {}
 
+/// A validated identity reference used only to locate scoped audit history.
+///
+/// Its debug representation is redacted because subject references may contain
+/// operator or account identifiers.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SubjectRef(String);
+
+impl SubjectRef {
+    /// Validates and owns a non-empty UTF-8 subject reference of at most 256 bytes.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] for an empty, oversized, or control-containing value.
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidValue> {
+        let value = value.into();
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(InvalidValue::new("subject_ref"));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated reference for a parameterized, scoped query.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SubjectRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SubjectRef([REDACTED])")
+    }
+}
+
 fn valid_scoped_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -196,7 +229,7 @@ const fn hex_nibble(byte: u8) -> u8 {
 mod tests {
     use super::{
         ArtifactId, CalibrationReadLeaseId, CaseId, EvidenceAccessRequestId, ModelCallId,
-        ModelEvaluationLeaseId, RequestId, TenantId,
+        ModelEvaluationLeaseId, RequestId, SubjectRef, TenantId,
     };
 
     #[test]
@@ -226,5 +259,15 @@ mod tests {
         );
         assert!(TenantId::parse("tenant_demo").is_ok());
         assert!(TenantId::parse("tenant/demo").is_err());
+    }
+
+    #[test]
+    fn subject_reference_is_bounded_and_redacted_in_debug() {
+        let subject = SubjectRef::parse("operator-1").unwrap();
+        assert_eq!(subject.as_str(), "operator-1");
+        assert_eq!(format!("{subject:?}"), "SubjectRef([REDACTED])");
+        assert!(SubjectRef::parse("").is_err());
+        assert!(SubjectRef::parse("operator\n1").is_err());
+        assert!(SubjectRef::parse("é".repeat(129)).is_err());
     }
 }

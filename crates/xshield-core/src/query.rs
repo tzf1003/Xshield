@@ -8,7 +8,7 @@
 use crate::{
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, RequestId,
+        GrantId, ModelCallId, RequestId, SubjectRef,
     },
     identity::UnixSeconds,
 };
@@ -164,6 +164,8 @@ pub enum QueryFilter {
     RequestId(RequestId),
     /// Exact immutable event identity.
     EventId(EventId),
+    /// Exact direct identity reference in fixed identity and management payload fields.
+    SubjectRef(SubjectRef),
     /// Exact resource-grant reference in an issuance event or share source.
     /// This selects historical facts, not the current grant's eligibility.
     GrantId(GrantId),
@@ -219,6 +221,7 @@ impl QueryFilter {
         match self {
             Self::RequestId(_)
             | Self::EventId(_)
+            | Self::SubjectRef(_)
             | Self::GrantId(_)
             | Self::AuthBindingId(_)
             | Self::CaseId(_)
@@ -361,7 +364,7 @@ mod tests {
     use crate::{
         domain::{
             ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-            EvidenceAccessRequestId, GrantId, ModelCallId, RequestId,
+            EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, SubjectRef,
         },
         identity::UnixSeconds,
     };
@@ -415,6 +418,17 @@ mod tests {
                 vec![QueryFilter::CalibrationReportId(
                     CalibrationReportId::parse("calr_018f2a3b-4c5d-7000-8000-000000000005")
                         .unwrap(),
+                )],
+                QuerySort::OccurredAtAsc,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(
+            QueryPlan::new(
+                window(60),
+                vec![QueryFilter::SubjectRef(
+                    SubjectRef::parse("operator-1").unwrap(),
                 )],
                 QuerySort::OccurredAtAsc,
                 1,

@@ -426,7 +426,7 @@ export async function searchFixture(
   return {
     ...envelope(),
     schema_version: 3,
-    query_digest: await searchPlanDigest(plan),
+    query_digest: (await searchPlanDigest(plan)) ?? "0".repeat(64),
     as_of: AS_OF,
     index_watermark: summaryFixture().index_watermark,
     has_gaps: true,

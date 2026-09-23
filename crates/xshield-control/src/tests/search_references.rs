@@ -1,10 +1,10 @@
 use super::*;
-use crate::lower_hex;
+use crate::{component_signature, lower_hex};
 use openssl::sha::sha256;
 use xshield_core::{
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EvidenceAccessRequestId, GrantId,
-        ModelCallId,
+        ModelCallId, SubjectRef,
     },
     query::QueryFilter,
 };
@@ -17,6 +17,7 @@ const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-000000000105";
 const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000106";
 const MODEL_CALL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000106";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-000000000107";
+const SUBJECT: &str = "principal-target-1";
 
 pub(super) fn reference_payload() -> Value {
     let mut payload = search_payload();
@@ -63,6 +64,12 @@ fn evidence_access_reference_payload() -> Value {
     payload
 }
 
+fn subject_reference_payload() -> Value {
+    let mut payload = search_payload();
+    payload["filters"] = json!([{"kind": "subject_ref", "value": SUBJECT}]);
+    payload
+}
+
 async fn response_json(response: axum::response::Response, status: StatusCode) -> Value {
     assert_eq!(response.status(), status);
     assert_eq!(response.headers()["cache-control"], "private, no-store");
@@ -72,8 +79,13 @@ async fn response_json(response: axum::response::Response, status: StatusCode) -
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
-    for mut payload in [reference_payload(), case_reference_payload()] {
+    for mut payload in [
+        reference_payload(),
+        case_reference_payload(),
+        subject_reference_payload(),
+    ] {
         let by_case = payload["filters"][0]["kind"] == "case_id";
+        let by_subject = payload["filters"][0]["kind"] == "subject_ref";
         let mock = test::Mock::new();
         let first = "ev_018f2a3b-4c5d-7000-8000-000000000111";
         let second = "ev_018f2a3b-4c5d-7000-8000-000000000112";
@@ -95,6 +107,14 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
             shared.reason_code = Some("CONTROL_EVIDENCE_HOLD_RELEASED".to_owned());
             shared.evidence_refs = vec![ARTIFACT.to_owned()];
         }
+        if by_subject {
+            issued.event_type = "binding.created".to_owned();
+            issued.stage = Some("identity_lifecycle".to_owned());
+            issued.reason_code = Some("BINDING_CREATED".to_owned());
+            shared.event_type = "identity.refreshed".to_owned();
+            shared.stage = Some("identity_lifecycle".to_owned());
+            shared.reason_code = Some("IDENTITY_REFRESHED".to_owned());
+        }
         mock.add(test::handlers::provide([issued, shared.clone()]));
         mock.add(test::handlers::provide([shared]));
         mock.add(test::handlers::provide(Vec::<
@@ -105,6 +125,7 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
             ManagementRole::Investigator,
             Client::default().with_mock(&mock),
         );
+        let cursor_key = *fixture.control.config.cursor_key.0;
         let app = router(fixture.control);
         let first_page = response_json(
             app.clone()
@@ -125,8 +146,18 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
         assert!(first_page["events"][0].get("payload_json").is_none());
         assert!(first_page["events"][0].get("grant_status").is_none());
         assert!(first_page["events"][0].get("target_case_id").is_none());
+        if by_subject {
+            assert!(!first_page.to_string().contains(SUBJECT));
+        }
         let canonical = if by_case {
             format!("10|70|asc|1|case_id={CASE}|artifact_id={ARTIFACT}")
+        } else if by_subject {
+            let digest = component_signature(
+                &cursor_key,
+                &[b"xshield/search/subject-ref/v1", SUBJECT.as_bytes()],
+            )
+            .unwrap();
+            format!("10|70|asc|1|subject_ref_hmac={}", lower_hex(&digest))
         } else {
             format!("10|70|asc|1|grant_id={GRANT}|auth_binding_id={BINDING}")
         };
@@ -149,6 +180,8 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
         payload.as_object_mut().unwrap().remove("cursor");
         payload["filters"][0]["value"] = json!(if by_case {
             CASE.replace("103", "109")
+        } else if by_subject {
+            "operator-2".to_owned()
         } else {
             GRANT.replace("101", "109")
         });
@@ -171,8 +204,11 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
             assert_eq!(event["payload"]["reason_code"], "CONTROL_QUERY_EXECUTED");
             assert!(event["payload"]["target_request_id"].is_null());
             assert!(event["payload"].get("filters").is_none());
-            for reference in [GRANT, BINDING, CASE, ARTIFACT] {
-                assert!(!event.to_string().contains(reference));
+            for reference in [GRANT, BINDING, CASE, ARTIFACT, SUBJECT] {
+                assert!(
+                    !event.to_string().contains(reference),
+                    "audit event echoed {reference}: {event}"
+                );
             }
             assert!(event["payload"]["target_case_id"].is_null());
             assert!(event["payload"]["target_artifact_id"].is_null());
@@ -509,6 +545,37 @@ async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
         );
         attempts += 1;
     }
+    for value in [String::new(), "operator\n1".to_owned(), "é".repeat(129)] {
+        let mut payload = search_payload();
+        payload["filters"] = json!([{"kind": "subject_ref", "value": value}]);
+        let body = response_json(
+            app.clone()
+                .oneshot(search_http_request(&payload))
+                .await
+                .unwrap(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        assert_eq!(body["error_code"], "CONTROL_QUERY_INVALID");
+        attempts += 1;
+    }
+    for filter in [
+        json!({"kind":"subject_ref"}),
+        json!({"kind":"subject_ref","value":SUBJECT,"tenant_id":"tenant_b"}),
+    ] {
+        let mut payload = search_payload();
+        payload["filters"] = json!([filter]);
+        let body = response_json(
+            app.clone()
+                .oneshot(search_http_request(&payload))
+                .await
+                .unwrap(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        assert_eq!(body["error_code"], "CONTROL_QUERY_INVALID");
+        attempts += 1;
+    }
     drop(app);
     assert_access_events(
         &fixture.access_directory,
@@ -619,6 +686,50 @@ async fn reference_search_cursor_binds_each_typed_reference() {
         );
         fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
     }
+}
+
+#[tokio::test]
+async fn subject_reference_search_cursor_binds_value_without_audit_echo() {
+    let fixture = Fixture::new(10, ManagementRole::Investigator);
+    let payload = subject_reference_payload();
+    let plan = serde_json::from_value::<SearchRequest>(payload.clone())
+        .unwrap()
+        .into_plan(1000)
+        .unwrap();
+    assert_eq!(
+        plan.filters(),
+        [QueryFilter::SubjectRef(SubjectRef::parse(SUBJECT).unwrap())]
+    );
+    let position = xshield_worker::SearchPosition::new(
+        DateTime::from_timestamp_micros(20_123_456).unwrap(),
+        EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+    )
+    .unwrap();
+    let cursor = fixture
+        .control
+        .encode_search_cursor("operator-1", &plan, &position)
+        .unwrap();
+    let mut altered = payload;
+    altered["filters"][0]["value"] = json!("operator-2");
+    altered["cursor"] = json!(cursor);
+    let body = response_json(
+        router(fixture.control)
+            .oneshot(search_http_request(&altered))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "console.query.executed");
+    assert!(!events[0].to_string().contains(SUBJECT));
+    assert_eq!(
+        events[0]["payload"]["query_digest"].as_str().unwrap().len(),
+        64
+    );
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
 }
 
 #[tokio::test]

@@ -1390,6 +1390,37 @@ test("search validates whole UTC windows, field allowlists and numeric bounds be
   });
 });
 
+test("subject history search is prepared but submitted only on explicit action", async ({
+  page,
+}) => {
+  const calls = await mockControl(page);
+  await connect(page);
+  await prepareSearch(page);
+  await addSearchFilter(page, 1, "subject_ref", "operator-1");
+  await expect(
+    page.getByText("主体引用仅用于精确筛选，结果不会回显主体值", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  expect(calls.filter(({ path }) => path === "/control/v1/search")).toHaveLength(
+    0,
+  );
+  await search(page);
+  await expect(
+    page.getByRole("region", { name: "搜索事件结果" }),
+  ).toContainText("本页 2 条");
+  const request = calls.find(({ path }) => path === "/control/v1/search");
+  expect(request?.body).toMatchObject({
+    filters: [{ kind: "subject_ref", value: "operator-1" }],
+  });
+  const screenshotDirectory = process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR;
+  if (screenshotDirectory)
+    await page.screenshot({
+      path: resolve(screenshotDirectory, "subject-search.png"),
+      fullPage: true,
+    });
+});
+
 test("search errors use safe messages, manual retries and clear the session on 401", async ({
   page,
 }) => {

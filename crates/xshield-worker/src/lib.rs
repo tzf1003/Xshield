@@ -1943,7 +1943,7 @@ mod tests {
     use xshield_core::{
         domain::{
             ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-            EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, SiteId, TenantId,
+            EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, SiteId, SubjectRef, TenantId,
         },
         identity::UnixSeconds,
         query::{
@@ -3008,6 +3008,7 @@ mod tests {
                 QueryFilter::AuthBindingId(
                     AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000002").unwrap(),
                 ),
+                QueryFilter::SubjectRef(SubjectRef::parse("operator-1").unwrap()),
             ],
             QuerySort::OccurredAtDesc,
             2,
@@ -3033,6 +3034,7 @@ mod tests {
             "AND ((event_type IN ('session.created','binding.created','identity.refreshed','epoch.changed','binding.revoked','grant.issued','response_grant.issued') AND JSONExtractString(payload_json,'binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002')",
             "OR (event_type = 'share.issued' AND JSONExtractString(payload_json,'issuer_binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002')",
             "OR (stage = 'control_access' AND event_type = 'console.binding.read' AND JSONExtractString(payload_json,'target_binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002')",
+            "AND (JSONExtractString(payload_json,'subject_ref') = 'operator-1' OR JSONExtractString(payload_json,'principal_ref') = 'operator-1' OR JSONExtractString(payload_json,'authorization_context_ref') = 'operator-1' OR JSONExtractString(payload_json,'previous_principal_ref') = 'operator-1' OR JSONExtractString(payload_json,'previous_authorization_context_ref') = 'operator-1')",
             "ORDER BY occurred_at DESC,event_id DESC LIMIT 3",
         ] {
             assert!(sql.contains(fragment), "missing query fragment: {fragment}");

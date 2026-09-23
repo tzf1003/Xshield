@@ -6,7 +6,10 @@ use serde::{Serialize, Serializer, ser::SerializeTuple};
 use std::{env, panic::resume_unwind};
 use uuid::Uuid;
 use xshield_core::{
-    domain::{ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId, SiteId, TenantId},
+    domain::{
+        ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId, SiteId, SubjectRef,
+        TenantId,
+    },
     identity::UnixSeconds,
     query::{
         ConfidenceThreshold, QueryFilter, QueryOutcome, QueryPlan, QuerySort, QueryTextField,
@@ -525,6 +528,65 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
         row.payload_json = payload;
         rows.push(row);
     }
+    for (sequence, kind, payload) in [
+        (
+            228,
+            "console.case.read",
+            serde_json::json!({"subject_ref": "operator-1"}).to_string(),
+        ),
+        (
+            229,
+            "binding.created",
+            serde_json::json!({"principal_ref": "operator-1"}).to_string(),
+        ),
+        (
+            230,
+            "identity.refreshed",
+            serde_json::json!({"authorization_context_ref": "operator-1"}).to_string(),
+        ),
+        (
+            231,
+            "epoch.changed",
+            serde_json::json!({"previous_principal_ref": "operator-1"}).to_string(),
+        ),
+        (
+            232,
+            "epoch.changed",
+            serde_json::json!({"previous_authorization_context_ref": "operator-1"}).to_string(),
+        ),
+        (
+            233,
+            "binding.created",
+            serde_json::json!({"nested": {"principal_ref": "operator-1"}}).to_string(),
+        ),
+        (
+            234,
+            "binding.created",
+            serde_json::json!({"unrelated_subject": "operator-1"}).to_string(),
+        ),
+        (
+            235,
+            "binding.created",
+            serde_json::json!({"principal_ref": "Operator-1"}).to_string(),
+        ),
+    ] {
+        let mut row = rows[0].clone();
+        row.event_id = event_id(sequence);
+        row.event_type = kind;
+        row.payload_json = payload;
+        rows.push(row);
+    }
+    let mut other_subject_tenant = rows[0].clone();
+    other_subject_tenant.event_id = event_id(236);
+    other_subject_tenant.tenant_id = "tenant_other";
+    other_subject_tenant.payload_json =
+        serde_json::json!({"subject_ref": "operator-1"}).to_string();
+    rows.push(other_subject_tenant);
+    let mut other_subject_site = rows[0].clone();
+    other_subject_site.event_id = event_id(237);
+    other_subject_site.site_id = "site_other";
+    other_subject_site.payload_json = serde_json::json!({"subject_ref": "operator-1"}).to_string();
+    rows.push(other_subject_site);
     let mut outside = rows[0].clone();
     outside.event_id = event_id(220);
     outside.occurred_at = start + TimeDelta::seconds(2);
@@ -544,6 +606,7 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
     .unwrap();
     let grant = QueryFilter::GrantId(GrantId::parse(GRANT).unwrap());
     let binding = QueryFilter::AuthBindingId(AuthBindingId::parse(BINDING).unwrap());
+    let subject = QueryFilter::SubjectRef(SubjectRef::parse("operator-1").unwrap());
     let tenant = TenantId::parse("tenant_linkage").unwrap();
     let site = SiteId::parse("site_linkage").unwrap();
     for table in ["audit_events", "events_by_time"] {
@@ -551,6 +614,14 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
         for (filters, ids) in [
             (vec![grant.clone()], vec![201, 202, 203, 222]),
             (vec![binding.clone()], (201..=208).chain([223]).collect()),
+            (vec![subject.clone()], vec![228, 229, 230, 231, 232]),
+            (
+                vec![
+                    subject.clone(),
+                    text(QueryTextField::EventType, "epoch.changed"),
+                ],
+                vec![231, 232],
+            ),
             (vec![grant.clone(), binding.clone()], vec![201, 202, 203]),
             (
                 vec![
@@ -619,9 +690,50 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
             );
             assert_ids(&result, &expected);
         }
+        let subject_plan =
+            QueryPlan::new(window, vec![subject.clone()], QuerySort::OccurredAtAsc, 100).unwrap();
+        for (tenant, site, expected) in [
+            (
+                "tenant_linkage",
+                "site_linkage",
+                vec![228, 229, 230, 231, 232],
+            ),
+            ("tenant_other", "site_linkage", vec![236]),
+            ("tenant_linkage", "site_other", vec![237]),
+        ] {
+            let result = queried(
+                query_audit_events(
+                    &config,
+                    reader,
+                    &TenantId::parse(tenant).unwrap(),
+                    &SiteId::parse(site).unwrap(),
+                    &subject_plan,
+                    None,
+                )
+                .await,
+            );
+            assert_ids(&result, &expected);
+        }
         for sort in [QuerySort::OccurredAtAsc, QuerySort::OccurredAtDesc] {
             let plan = QueryPlan::new(window, vec![binding.clone()], sort, 1).unwrap();
             let mut expected: Vec<_> = (201..=208).chain([223]).collect();
+            if sort == QuerySort::OccurredAtDesc {
+                expected.reverse();
+            }
+            let mut after = None;
+            for (index, id) in expected.iter().enumerate() {
+                let page = queried(
+                    query_audit_events(&config, reader, &tenant, &site, &plan, after.as_ref())
+                        .await,
+                );
+                assert_ids(&page, &[*id]);
+                assert_eq!(page.truncated, index + 1 < expected.len());
+                after = page.next_position;
+            }
+        }
+        for sort in [QuerySort::OccurredAtAsc, QuerySort::OccurredAtDesc] {
+            let plan = QueryPlan::new(window, vec![subject.clone()], sort, 1).unwrap();
+            let mut expected = [228, 229, 230, 231, 232];
             if sort == QuerySort::OccurredAtDesc {
                 expected.reverse();
             }

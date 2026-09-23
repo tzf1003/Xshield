@@ -21,7 +21,7 @@ use xshield_core::{
     admin::ManagementRole,
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, RequestId, SiteId, TenantId,
+        GrantId, ModelCallId, RequestId, SiteId, SubjectRef, TenantId,
     },
     identity::UnixSeconds,
     query::{
@@ -204,7 +204,10 @@ impl ControlPlane {
             request_id: request_id.to_owned(),
             tenant_id: self.config.tenant_id.as_str().to_owned(),
             site_id: self.config.site_id.as_str().to_owned(),
-            query_digest: lower_hex(&query_plan_digest(plan)),
+            query_digest: lower_hex(
+                &query_plan_digest(plan, &self.config.cursor_key.0)
+                    .map_err(|()| SearchFailure::CursorUnavailable)?,
+            ),
             as_of: health.as_of,
             index_watermark: health.index_watermark,
             has_gaps: health.has_gaps,
@@ -230,7 +233,9 @@ impl ControlPlane {
         });
         let audit_control = Arc::clone(&self);
         let audit_request_id = request_id.clone();
-        let audit_plan_digest = query_plan_digest(plan);
+        let Ok(audit_plan_digest) = query_plan_digest(plan, &self.config.cursor_key.0) else {
+            return audit_unavailable(&request_id);
+        };
         let reason = result
             .as_ref()
             .map_or_else(SearchFailure::reason, |_| "CONTROL_QUERY_EXECUTED");
@@ -272,7 +277,7 @@ impl ControlPlane {
         plan: &QueryPlan,
         position: &SearchPosition,
     ) -> Result<String, ()> {
-        let plan_digest = query_plan_digest(plan);
+        let plan_digest = query_plan_digest(plan, &self.config.cursor_key.0)?;
         let timestamp = position.occurred_at().timestamp_micros();
         let signature = search_cursor_signature(
             &self.config.cursor_key.0,
@@ -323,7 +328,8 @@ impl ControlPlane {
         }
         let event_id = EventId::parse(event_id).map_err(|_| CursorError::Invalid)?;
         let supplied_signature = parse_lower_hex_32(signature).ok_or(CursorError::Invalid)?;
-        let plan_digest = query_plan_digest(plan);
+        let plan_digest = query_plan_digest(plan, &self.config.cursor_key.0)
+            .map_err(|()| CursorError::Unavailable)?;
         let expected_signature = search_cursor_signature(
             &self.config.cursor_key.0,
             &self.config.credential.token_digest,
@@ -357,7 +363,7 @@ pub(super) async fn handler(
         .into_response()
 }
 
-fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
+fn query_plan_digest(plan: &QueryPlan, key: &[u8; 32]) -> Result<[u8; 32], ()> {
     let mut canonical = format!(
         "{}|{}|{}|{}",
         plan.window().start().value(),
@@ -378,6 +384,14 @@ fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
             QueryFilter::EventId(value) => {
                 canonical.push_str("event_id=");
                 canonical.push_str(value.as_str());
+            }
+            QueryFilter::SubjectRef(value) => {
+                let digest = component_signature(
+                    key,
+                    &[b"xshield/search/subject-ref/v1", value.as_str().as_bytes()],
+                )?;
+                canonical.push_str("subject_ref_hmac=");
+                canonical.push_str(&lower_hex(&digest));
             }
             QueryFilter::GrantId(value) => {
                 canonical.push_str("grant_id=");
@@ -426,7 +440,7 @@ fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
             }
         }
     }
-    sha256(canonical.as_bytes())
+    Ok(sha256(canonical.as_bytes()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -505,6 +519,9 @@ enum SearchFilterRequest {
     EventId {
         value: String,
     },
+    SubjectRef {
+        value: String,
+    },
     GrantId {
         value: String,
     },
@@ -549,6 +566,9 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::EventId { value } => EventId::parse(value)
                 .map(QueryFilter::EventId)
+                .map_err(|_| ()),
+            Self::SubjectRef { value } => SubjectRef::parse(value)
+                .map(QueryFilter::SubjectRef)
                 .map_err(|_| ()),
             Self::GrantId { value } => GrantId::parse(value)
                 .map(QueryFilter::GrantId)

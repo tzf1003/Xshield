@@ -78,7 +78,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 查询回归覆盖 `audit_events_active` 和通过物化视图填充的 `events_by_time_active`：租户/站点隔离、可空 LowCardinality 字段、`ALLOW`、微秒及同时间戳 keyset 双向分页、闭开时间窗口、全部类型过滤器与同事件 AND 语义、重复事件合并、最早期限优先及物理 TTL 清理前隐藏过期行。查询使用只获两个 active 视图 `SELECT` 的独占测试账号，同时断言直接读取两张底表返回权限拒绝。
 
-案件/证据过滤回归包含实际契约的事件/阶段与目标字段、evidence_refs 成员、失败管理目标、空/缺失/嵌套字段、无关类型/错配阶段、作用域和同事件 AND，以及双向 keyset 分页。资格/身份过滤回归固定 `grant.issued`、`response_grant.issued`、`share.issued` 与 `console.grant.read`、`console.binding.read` 的目标键，并隔离错配阶段和伪造事件类型；模型调用过滤回归固定六类 `model.*` 生命周期与 `console.model.read` 的两个 JSON 目标键；访问申请过滤回归固定三类 `evidence.access.*` 申请/决策事件与 `console.evidence.access.read` 的两个 JSON 目标键；保留锁的真实 ClickHouse 用例固定创建/释放事务事件与管理写入事件的 `hold_id`/`target_hold_id` 键、事件族/阶段边界、作用域和双向 keyset 分页。控制层 `reference_search` 测试验证规范 ID、严格/重复字段、8 项预算、原有摘要兼容、每个 ID 与过滤顺序的游标绑定、返回脱敏和计划摘要审计。
+案件/证据过滤回归包含实际契约的事件/阶段与目标字段、evidence_refs 成员、失败管理目标、空/缺失/嵌套字段、无关类型/错配阶段、作用域和同事件 AND，以及双向 keyset 分页。资格/身份过滤回归固定 `grant.issued`、`response_grant.issued`、`share.issued` 与 `console.grant.read`、`console.binding.read` 的目标键，并隔离错配阶段和伪造事件类型；模型调用过滤回归固定六类 `model.*` 生命周期与 `console.model.read` 的两个 JSON 目标键；访问申请过滤回归固定三类 `evidence.access.*` 申请/决策事件与 `console.evidence.access.read` 的两个 JSON 目标键；保留锁的真实 ClickHouse 用例固定创建/释放事务事件与管理写入事件的 `hold_id`/`target_hold_id` 键、事件族/阶段边界、作用域和双向 keyset 分页。主体过滤回归固定五个顶层引用键，并排除嵌套/无关字段、大小写差异，验证 tenant/site、同事件 AND 和双向分页；控制层检查 UTF-8 长度/控制字符、HMAC 摘要、游标绑定和审计无原始值，控制台验证输入仅在显式提交后发送且响应摘要保持不透明。`reference_search` 其余测试继续覆盖规范 ID、严格/重复字段、8 项预算、原有摘要兼容、每个引用与过滤顺序的游标绑定和返回脱敏。
 
 发布回归从加密 journal 与签名清单开始，验证真实 `FixedString` 编码、两张物理表的精确摘要和微秒时间读回、同步确认后的水位提交与 checkpoint 重用；继续追加同 event_id 的不同内容时，发布器必须返回完整性冲突，保留原水位并显示待投递段。
 
@@ -124,7 +124,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 保留锁管理的三类 `console.evidence.hold.*` 也走同一生产 journal、封存和投递回归，覆盖创建/释放及精确重试原因、空列表、拒绝和依赖故障；worker 与 Schema 同时拒绝目标/方法/路由错绑、越权携带 hold 目标及未知字段。
 
-同一真实数据库回归通过 `/control/v1/search` 按 case_id、artifact_id 及两者组合双向逐页读取已发布管理事件，逐项与生产 journal 对照，并按 `evidence_hold_id` 双向分页读取同一保留锁的创建/释放管理事件；检查已发布水位、脱敏字段、每页终态审计及查询日志再次发布。控制层 `search_references` 单元回归另覆盖校准报告与保留锁的强类型 ID、作用域拒绝、同主体 Investigator + AuditAdministrator 成功、参数摘要脱敏和引用绑定游标；worker 查询回归固定允许的生命周期/管理事件与 payload 键。原始 ID 不进入 `console.query.executed`。
+同一真实数据库回归通过 `/control/v1/search` 按 case_id、artifact_id 及两者组合双向逐页读取已发布管理事件，逐项与生产 journal 对照，并按 `evidence_hold_id` 双向分页读取同一保留锁的创建/释放管理事件；检查已发布水位、脱敏字段、每页终态审计及查询日志再次发布。控制层 `search_references` 单元回归另覆盖校准报告、保留锁和主体引用的强类型/边界校验、作用域拒绝、角色要求、参数摘要脱敏和引用绑定游标；worker 查询回归固定允许的事件/字段映射。主体过滤条件值不作为审计字段或响应字段回显；审计仍按现有契约记录调用者主体引用及密钥化计划摘要。
 
 `cargo test -p xshield-control case_holds` 覆盖严格路径/JSON/UTC 毫秒（含闰秒反例）、重复认证和幂等头、4 KiB/UTF-8 长度、权限/作用域/凭证期限/速率、在途上限、存储故障及审计扣留。`scripts/test_postgres.sh` 另执行 `case_holds_are_scoped_idempotent_paginated_and_audited`：真实 vault/catalog/案件关联后由独立管理员创建、释放和分页，检查幂等冲突、过期/超长新期限、目标隔离、游标全部绑定、同对象多条历史去重引用、关闭后释放与查询、原期限和审批保持、提交后审计故障恢复及断连后的提交/审计。核心主体测试检查启动身份规范且保持原值。
 

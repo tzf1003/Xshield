@@ -137,7 +137,7 @@ Authorization 与访问申请头必须各自单值，不接受查询串；重复
 
 ## 29.14 已实现的受限调查查询契约
 
-`POST /control/v1/search` 要求固定 tenant/site 作用域内的 `Investigator` 和管理 Bearer。请求体上限 8 KiB，严格接受 `schema_version=3`、UTC RFC3339 的 `start`/`end`、`sort`、`limit`、可选 `cursor` 及有界 `filters`。时间边界采用整秒，半开区间 `[start,end)` 最长 31 天且位于 1970-01-01 至 2300-01-01；单页受 `XSHIELD_CONTROL_MAX_QUERY_EVENTS` 限制，硬上限 1000 行，最多 8 个过滤器。过滤器只对同一事件做 AND 匹配：规范 request/event/grant/auth binding/case/artifact/calibration-report/model-call/evidence-access-request/evidence-hold ID、`event_type`/`stage`/`reason_code`/`operation_id`/`model_revision` 精确文本、`PASS/ALLOW/DENY/UNKNOWN/ERROR/SKIPPED/CANCELLED` outcome 枚举和 0–10000 整数 basis-points 置信度上限。规则事件的空置信度不会匹配数值阈值；当前接口不做跨事件关联、聚合或自然语言编译。未知字段、版本、控制字符和自由表达式均拒绝。
+`POST /control/v1/search` 要求固定 tenant/site 作用域内的 `Investigator` 和管理 Bearer。请求体上限 8 KiB，严格接受 `schema_version=3`、UTC RFC3339 的 `start`/`end`、`sort`、`limit`、可选 `cursor` 及有界 `filters`。时间边界采用整秒，半开区间 `[start,end)` 最长 31 天且位于 1970-01-01 至 2300-01-01；单页受 `XSHIELD_CONTROL_MAX_QUERY_EVENTS` 限制，硬上限 1000 行，最多 8 个过滤器。过滤器只对同一事件做 AND 匹配：规范 request/event/grant/auth binding/case/artifact/calibration-report/model-call/evidence-access-request/evidence-hold ID、受限 `subject_ref`、`event_type`/`stage`/`reason_code`/`operation_id`/`model_revision` 精确文本、`PASS/ALLOW/DENY/UNKNOWN/ERROR/SKIPPED/CANCELLED` outcome 枚举和 0–10000 整数 basis-points 置信度上限。规则事件的空置信度不会匹配数值阈值；当前接口不做跨事件关联、聚合或自然语言编译。未知字段、版本、控制字符和自由表达式均拒绝。
 
 ```json
 {
@@ -177,7 +177,9 @@ case/artifact 同样采用规范小写强类型校验、8 项总预算及完整�
 
 保留锁使用 `{"kind":"evidence_hold_id","value":"ev_UUIDv7"}`，按 `EventId` 强类型验证其规范小写 UUIDv7。该计划除 Investigator 外，还要求同一主体在相同 tenant/site 持有 `AuditAdministrator`；缺少该角色时在索引访问前返回 `CONTROL_EVIDENCE_HOLD_HISTORY_SCOPE_DENIED`/403，并审计 `DENY` 与 query_digest。过滤器只匹配 `evidence.hold.created/released` 的 payload `hold_id`，以及 `control_access` 阶段 `console.evidence.hold.created/released` 的 `target_hold_id`。固定事件族、JSON 键和 tenant/site 条件服务端定义，ID 作为查询参数绑定；其他事件及嵌套字段不匹配。结果只包含脱敏已发布事件摘要，不返回保留理由、期限、正文或对象状态，也不替代 29.21 保留锁管理端点重新鉴权，不改变任何保留、审批、读取、重放或业务权限。该过滤器占用原有 8 项预算，完整 ID 纳入 query_digest 与游标签名，访问日志只保留 query_digest。
 
-无效计划返回 `CONTROL_QUERY_INVALID`/422，无效游标返回 `CONTROL_CURSOR_INVALID`/400，均在索引访问前拒绝。含校准报告或保留锁条件但缺少同作用域 AuditAdministrator 分别返回 `CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED`/403 或 `CONTROL_EVIDENCE_HOLD_HISTORY_SCOPE_DENIED`/403。确定的查询预算耗尽返回 `CONTROL_QUERY_BUDGET_EXCEEDED`/429、`retryable=false`、`next_action=narrow_query`；单实例容量占满返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，客户端超时返回 `CONTROL_QUERY_TIMEOUT`/503，依赖故障返回对应 503。可审计尝试均写 `console.query.executed`；通过计划校验后的成功或失败审计携带 `query_digest`，不保存原始查询文本、报告 ID、保留锁 ID、模型调用 ID、访问申请 ID 或游标。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果；响应统一 `Cache-Control: private, no-store`。
+主体引用使用 `{"kind":"subject_ref","value":"…"}`，接受 1–256 UTF-8 字节并拒绝控制字符；只在固定 tenant/site 范围内对 payload 顶层 `subject_ref`、`principal_ref`、`authorization_context_ref`、`previous_principal_ref`、`previous_authorization_context_ref` 做参数化精确匹配。其他事件/载荷未包含这些固定字段时不匹配，嵌套和相似字段不参与搜索。该过滤器沿用 Investigator 权限和原有 8 项预算；脱敏结果不回显查询值。由于主体标识可能低熵，canonical plan 在纳入摘要前先以 cursor key 和独立用途域 `xshield/search/subject-ref/v1` 对值计算 HMAC，再生成 query_digest 与游标签名；审计不写过滤器值，仍保留标准调用者主体引用与 query_digest。浏览器无法重算该服务端密钥化摘要，只校验其 64 位小写十六进制响应形状；其他计划仍执行客户端与服务端摘要相等校验。
+
+无效计划返回 `CONTROL_QUERY_INVALID`/422，无效游标返回 `CONTROL_CURSOR_INVALID`/400，均在索引访问前拒绝。含校准报告或保留锁条件但缺少同作用域 AuditAdministrator 分别返回 `CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED`/403 或 `CONTROL_EVIDENCE_HOLD_HISTORY_SCOPE_DENIED`/403。确定的查询预算耗尽返回 `CONTROL_QUERY_BUDGET_EXCEEDED`/429、`retryable=false`、`next_action=narrow_query`；单实例容量占满返回 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/429，客户端超时返回 `CONTROL_QUERY_TIMEOUT`/503，依赖故障返回对应 503。可审计尝试均写 `console.query.executed`；通过计划校验后的成功或失败审计携带 `query_digest`，不保存原始过滤条件或游标，但仍保留标准调用者主体引用。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果；响应统一 `Cache-Control: private, no-store`。
 
 ## 29.15 已实现的模型调用查询契约
 

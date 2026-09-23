@@ -954,6 +954,13 @@ async fn execute_query(
         match filter {
             QueryFilter::RequestId(_) => sql.push_str("request_id = ?"),
             QueryFilter::EventId(_) => sql.push_str("event_id = ?"),
+            QueryFilter::SubjectRef(_) => sql.push_str(
+                "(JSONExtractString(payload_json,'subject_ref') = ? \
+                 OR JSONExtractString(payload_json,'principal_ref') = ? \
+                 OR JSONExtractString(payload_json,'authorization_context_ref') = ? \
+                 OR JSONExtractString(payload_json,'previous_principal_ref') = ? \
+                 OR JSONExtractString(payload_json,'previous_authorization_context_ref') = ?)",
+            ),
             // ponytail: bounded payload scan; add indexed columns only when
             // measured retention volumes exceed the existing scan budget.
             QueryFilter::GrantId(_) => sql.push_str(
@@ -1063,6 +1070,12 @@ async fn execute_query(
         query = match filter {
             QueryFilter::RequestId(value) => query.bind(value.as_str()),
             QueryFilter::EventId(value) => query.bind(value.as_str()),
+            QueryFilter::SubjectRef(value) => query
+                .bind(value.as_str())
+                .bind(value.as_str())
+                .bind(value.as_str())
+                .bind(value.as_str())
+                .bind(value.as_str()),
             QueryFilter::GrantId(value) => query
                 .bind(value.as_str())
                 .bind(value.as_str())

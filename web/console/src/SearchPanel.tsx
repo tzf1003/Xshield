@@ -8,6 +8,7 @@ const fields = [
   ["event_id", "事件 ID"],
   ["grant_id", "资格 ID"],
   ["auth_binding_id", "身份绑定 ID"],
+  ["subject_ref", "主体引用"],
   ["case_id", "案件 ID"],
   ["artifact_id", "证据 ID"],
   ["calibration_report_id", "校准报告 ID"],
@@ -198,7 +199,7 @@ export function SearchPanel({
         </div>
         <p className="footnote">
           UTC 整秒半开时间窗，最多 31 天；最多 8
-          个条件，全部匹配同一事件。置信度空值不会匹配数值阈值。
+          个条件，全部匹配同一事件。主体引用仅用于精确筛选，结果不会回显主体值；置信度空值不会匹配数值阈值。
         </p>
         {filters.map((filter, index) => (
           <div className="search-filter" key={filter.id}>
@@ -251,7 +252,7 @@ export function SearchPanel({
                     filter.field === "confidence_at_most" ? 10000 : undefined
                   }
                   step={1}
-                  maxLength={128}
+                  maxLength={filter.field === "subject_ref" ? 256 : 128}
                   value={filter.value}
                   autoComplete="off"
                   spellCheck={false}

@@ -59,6 +59,7 @@ const idPatterns = {
 };
 export type SearchFilter =
   | { kind: keyof typeof idPatterns; value: string }
+  | { kind: "subject_ref"; value: string }
   | { kind: "text"; field: (typeof textFields)[number]; value: string }
   | { kind: "outcome"; value: (typeof outcomes)[number] }
   | { kind: "confidence_at_most"; basis_points: number };
@@ -130,6 +131,7 @@ function filter(value: unknown): SearchFilter {
   const row = object(value);
   const kind = choice(row.kind, [
     ...Object.keys(idPatterns),
+    "subject_ref",
     "text",
     "outcome",
     "confidence_at_most",
@@ -146,6 +148,15 @@ function filter(value: unknown): SearchFilter {
   }
   exactKeys(row, ["kind", "value"]);
   if (kind === "outcome") return { kind, value: choice(row.value, outcomes) };
+  if (kind === "subject_ref") {
+    const value = text(row.value, 256);
+    ensure(
+      value.length > 0 &&
+        new TextEncoder().encode(value).length <= 256 &&
+        !/[\u0000-\u001f\u007f-\u009f]/u.test(value),
+    );
+    return { kind, value };
+  }
   const idKind = kind as keyof typeof idPatterns;
   return { kind: idKind, value: id(row.value, idPatterns[idKind]) };
 }
@@ -183,11 +194,14 @@ export function validateSearchPlan(value: unknown): SearchPlan {
   }
 }
 
-/** Mirror control::search::query_plan_digest to bind every page to its plan.
- * This checks response identity, not authorization; the server authenticates
- * the opaque signature with the credential and scope on every request.
+/** Mirror control::search::query_plan_digest when its inputs are public.
+ * Subject references use a server-keyed digest, so the client must not hash a
+ * low-entropy value locally; null means validate only the opaque digest shape.
  */
-export async function searchPlanDigest(plan: SearchPlan): Promise<string> {
+export async function searchPlanDigest(
+  plan: SearchPlan,
+): Promise<string | null> {
+  if (plan.filters.some((item) => item.kind === "subject_ref")) return null;
   let canonical = `${Date.parse(plan.start) / 1000}|${Date.parse(plan.end) / 1000}|${plan.sort === "occurred_at_asc" ? "asc" : "desc"}|${plan.limit}`;
   for (const item of plan.filters) {
     canonical +=
@@ -314,17 +328,22 @@ function searchEvent(value: unknown): SearchEvent {
 export function decodeSearchResponse(
   value: unknown,
   plan: SearchPlan,
-  digest: string,
+  digest: string | null,
   cursor?: string,
 ): SearchResponse {
   const row = object(value);
-  ensure(row.schema_version === 3 && row.query_digest === digest);
+  const query_digest = text(row.query_digest, 64);
+  ensure(
+    row.schema_version === 3 &&
+      /^[a-f0-9]{64}$/.test(query_digest) &&
+      (digest === null || query_digest === digest),
+  );
   const result: SearchResponse = {
     ...envelope(row),
     ...watermarked(row),
     ...pagination(row),
     schema_version: 3,
-    query_digest: digest,
+    query_digest,
     pending_segments: integer(row.pending_segments),
     scanned_rows: nullable(row.scanned_rows, integer),
     scanned_bytes: nullable(row.scanned_bytes, integer),
