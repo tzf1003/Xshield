@@ -1389,6 +1389,57 @@ test("submits bounded server causality only after an explicit UTC window", async
   expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
 });
 
+test("discards a late causality response after the query bounds change", async ({
+  page,
+}) => {
+  const root = "ev_018f2a3b-4c5d-7000-8000-000000000001";
+  let release = () => {};
+  const delayed = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let arrive = () => {};
+  const arrived = new Promise<void>((resolve) => {
+    arrive = resolve;
+  });
+  const calls = await mockControl(page, async (url, request) => {
+    if (url.pathname !== "/control/v1/causality") return undefined;
+    arrive();
+    await delayed;
+    return {
+      body: await causalityFixture(request.postDataJSON() as CausalityPlan),
+    };
+  });
+  await connect(page);
+  await prepareSearch(page);
+  await search(page);
+  await page.getByRole("radio", { name: root, exact: true }).check();
+  const panel = page.getByRole("region", { name: "服务端因果查询", exact: true });
+  await panel
+    .getByLabel("因果开始时间（UTC，含）", { exact: true })
+    .fill("2026-09-20T00:00");
+  await panel
+    .getByLabel("因果结束时间（UTC，不含）", { exact: true })
+    .fill("2026-09-21T00:00");
+  const settled = requestSettled(page, "/control/v1/causality");
+  await panel.getByRole("button", { name: "查询服务端因果", exact: true }).click();
+  await arrived;
+  await expect(panel.getByRole("button", { name: "查询中…", exact: true })).toBeDisabled();
+
+  await panel.getByLabel("最大节点数", { exact: true }).fill("8");
+  await expect(
+    page.getByRole("region", { name: "服务端因果查询结果", exact: true }),
+  ).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "查询服务端因果", exact: true })).toBeEnabled();
+
+  release();
+  await settled;
+  await paint(page);
+  await expect(
+    page.getByRole("region", { name: "服务端因果查询结果", exact: true }),
+  ).toHaveCount(0);
+  expect(calls.filter(({ path }) => path === "/control/v1/causality")).toHaveLength(1);
+});
+
 test("structured event search supports a strict trace identifier", async ({ page }) => {
   const trace = "018f2a3b4c5d70008000000000000003";
   const calls = await mockControl(page);
