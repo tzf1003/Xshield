@@ -13,6 +13,7 @@
 | 组 | 用例范围 | 必须满足 |
 |---|---|---|
 | IDENTITY | 新 Cookie、A/B 拼接、冲突认证、刷新、换租户、旧响应 | 认证链不能混搭或继承错误账本 |
+| MANAGEMENT_AUTH | OIDC callback 重复/未知参数、issuer/MFA/nonce/PKCE 校验、一次性 state、session 撤销与超时、Cookie/Bearer 冲突、CSRF/Origin、审计失败 | 主体角色只来自精确部署映射；会话不可伪造、重放或绕过审计 |
 | FLOW | 列表/创建、无来源直达、TTL 内复用、共享、隐藏组件 | 只认可有效动作与目标 |
 | CRYPTO | 三种接管、响应不可见、版本变更、AAD/签名失败 | 实际检查/重建内容一致，失败不被洗成兼容 |
 | POLICY | 读写、字段、批量、父子对象、GraphQL、角色功能 | 不把见过 ID 扩展为操作权 |
@@ -22,6 +23,8 @@
 | RECOVERY | 重放、取消、未知源站结果、撤权、备份恢复 | 不重发非幂等写，不复活旧资格 |
 
 机器化验收目录见 examples/acceptance-cases.json，包含独立 case_id、步骤、期望和关联不变量；这里只提供设计用例，不声称已经对运行产品执行。
+
+管理身份的本地回归覆盖 callback query 闭合解析、HTTPS/loopback URL 边界、短时 HMAC 断言防伪造和篡改、重复 Cookie、严格 Origin/CSRF 头、认证响应 no-store，以及重复 `Authorization` 不能被 handler 重新解释。Rust 控制 API、Node 与 Playwright 的普通控制台回归不模拟真实 IdP。`xshield-postgres` 的 `oidc_transactions_are_one_use_and_browser_sessions_are_revocable` 需独立 PostgreSQL、迁移 0035 与显式解除 ignored 才验证一次性 state、数据库到期/撤销路径；因此本地测试通过不能替代该集成用例、真实企业 IdP/MFA 联调或部署代理/Cookie/TLS 验收。
 
 ## 20.3 误拒与安全收益
 

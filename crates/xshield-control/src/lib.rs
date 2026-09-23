@@ -13,9 +13,12 @@ mod case_items;
 mod case_list;
 mod evidence_access_inspection;
 mod evidence_access_list;
+mod identity;
 mod ledger_inspection;
 mod model_call_list;
 mod search;
+
+pub use identity::{IdentityConfigError, OidcProvider};
 
 use axum::{
     Json, Router,
@@ -28,12 +31,15 @@ use axum::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE},
     },
+    middleware::from_fn_with_state,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::{SecondsFormat, Utc};
 use clickhouse::Client;
-use openssl::{hash::MessageDigest, memcmp, pkey::PKey, sha::sha256, sign::Signer};
+use openssl::{
+    hash::MessageDigest, memcmp, pkey::PKey, rand::rand_bytes, sha::sha256, sign::Signer,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -406,6 +412,8 @@ pub struct ControlPlane {
     search_capacity: Arc<Semaphore>,
     case_evidence_capacity: Arc<Semaphore>,
     catalog: PostgresIdentityStore,
+    oidc: Option<Arc<identity::OidcProvider>>,
+    auth_context_key: Option<Zeroizing<[u8; 32]>>,
     evidence_read: Option<Arc<EvidenceReadPort>>,
     access_journal: Mutex<LocalJournal>,
     unauthenticated_rate: Mutex<RateWindow>,
@@ -424,6 +432,10 @@ impl ControlPlane {
         access_journal: LocalJournal,
     ) -> Self {
         let rate_limit = config.limits.requests_per_minute;
+        let mut auth_context_key = [0_u8; 32];
+        let auth_context_key = rand_bytes(&mut auth_context_key)
+            .ok()
+            .map(|()| Zeroizing::new(auth_context_key));
         Self {
             unauthenticated_rate: Mutex::new(RateWindow::new(rate_limit)),
             rate: Mutex::new(RateWindow::new(rate_limit)),
@@ -436,6 +448,8 @@ impl ControlPlane {
             search_capacity: Arc::new(Semaphore::new(1)),
             case_evidence_capacity: Arc::new(Semaphore::new(1)),
             catalog,
+            oidc: None,
+            auth_context_key,
             evidence_read: None,
             access_journal: Mutex::new(access_journal),
         }
@@ -446,6 +460,31 @@ impl ControlPlane {
     pub fn with_evidence_read_port(mut self, port: EvidenceReadPort) -> Self {
         self.evidence_read = Some(Arc::new(port));
         self
+    }
+
+    /// Installs the human-console OIDC provider at the trusted composition root.
+    ///
+    /// # Errors
+    /// Returns [`IdentityConfigError::Unavailable`] if the process cannot
+    /// create the private HMAC key used for browser identity assertions.
+    pub fn with_oidc_provider(
+        mut self,
+        provider: identity::OidcProvider,
+    ) -> Result<Self, identity::IdentityConfigError> {
+        if self.auth_context_key.is_none() {
+            return Err(identity::IdentityConfigError::Unavailable);
+        }
+        self.oidc = Some(Arc::new(provider));
+        Ok(self)
+    }
+
+    pub(crate) fn take_unauthenticated_rate_budget(&self) -> Option<bool> {
+        // ponytail: one process-wide window bounds unauthenticated endpoints;
+        // key by a trusted client identity if proxy metadata is added later.
+        self.unauthenticated_rate
+            .lock()
+            .ok()
+            .map(|mut rate| rate.take(Instant::now()))
     }
 
     fn health(&self, authorization: Option<&str>) -> EndpointResult {
@@ -3026,7 +3065,22 @@ impl ControlPlane {
         request_id: &str,
         action: AccessAction,
     ) -> Result<String, Box<EndpointResult>> {
-        let subject = self.authenticated_subject(authorization, request_id, action)?;
+        let identity = self.authenticated_subject(authorization, request_id, action)?;
+        let principal = &identity.principal;
+        let subject = principal.subject();
+        if identity.browser && action.method != "GET" && !identity.csrf_valid {
+            return Err(Box::new(self.audited_error(
+                request_id,
+                Some(subject),
+                action,
+                None,
+                StatusCode::FORBIDDEN,
+                "CONTROL_CSRF_REQUIRED",
+                "management operation forbidden",
+                false,
+                "refresh_session",
+            )));
+        }
         let Ok(mut rate) = self.rate.lock() else {
             return Err(Box::new(self.audited_error(
                 request_id,
@@ -3055,74 +3109,7 @@ impl ControlPlane {
                 "retry_later",
             )));
         }
-        Ok(subject.to_owned())
-    }
-
-    fn authenticated_subject<'a>(
-        &'a self,
-        authorization: Option<&str>,
-        request_id: &str,
-        action: AccessAction,
-    ) -> Result<&'a str, Box<EndpointResult>> {
-        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-            return Err(Box::new(self.audited_error(
-                request_id,
-                None,
-                action,
-                None,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CONTROL_CLOCK_UNAVAILABLE",
-                "management service unavailable",
-                true,
-                "retry_later",
-            )));
-        };
-        let token_active = now.as_secs() >= self.config.credential.issued_at
-            && now.as_secs() < self.config.credential.expires_at;
-        let authenticated = token_active
-            && authorization
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .filter(|value| value.len() <= TOKEN_BYTES_MAX)
-                .is_some_and(|value| {
-                    memcmp::eq(
-                        &sha256(value.as_bytes()),
-                        &self.config.credential.token_digest,
-                    )
-                });
-        if !authenticated {
-            let within_budget = self
-                .unauthenticated_rate
-                .lock()
-                .is_ok_and(|mut rate| rate.take(Instant::now()));
-            if !within_budget {
-                return Err(Box::new(api_error(
-                    request_id,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "CONTROL_RATE_LIMITED",
-                    "management request rate exceeded",
-                    true,
-                    "retry_later",
-                )));
-            }
-            return Err(Box::new(self.audited_error(
-                request_id,
-                None,
-                action,
-                None,
-                StatusCode::UNAUTHORIZED,
-                "CONTROL_AUTH_REQUIRED",
-                "management authentication required",
-                false,
-                "authenticate",
-            )));
-        }
-
-        let subject = self.config.principal.subject();
-        if !self.config.principal.authorizes(
-            action.role,
-            &self.config.tenant_id,
-            &self.config.site_id,
-        ) {
+        if !principal.authorizes(action.role, &self.config.tenant_id, &self.config.site_id) {
             return Err(Box::new(self.audited_error(
                 request_id,
                 Some(subject),
@@ -3135,7 +3122,92 @@ impl ControlPlane {
                 "request_scope",
             )));
         }
-        Ok(subject)
+        Ok(subject.to_owned())
+    }
+
+    fn authenticated_subject(
+        &self,
+        authorization: Option<&str>,
+        request_id: &str,
+        action: AccessAction,
+    ) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
+        let unauthorized = || {
+            let within_budget = self.take_unauthenticated_rate_budget() == Some(true);
+            if !within_budget {
+                return api_error(
+                    request_id,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "CONTROL_RATE_LIMITED",
+                    "management request rate exceeded",
+                    true,
+                    "retry_later",
+                );
+            }
+            self.audited_error(
+                request_id,
+                None,
+                action,
+                None,
+                StatusCode::UNAUTHORIZED,
+                "CONTROL_AUTH_REQUIRED",
+                "management authentication required",
+                false,
+                "authenticate",
+            )
+        };
+        if authorization.is_some_and(|value| value.starts_with("Xshield-Session ")) {
+            let Some(key) = self.auth_context_key.as_deref() else {
+                return Err(Box::new(self.audited_error(
+                    request_id,
+                    None,
+                    action,
+                    None,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_SESSION_UNAVAILABLE",
+                    "management service unavailable",
+                    true,
+                    "retry_later",
+                )));
+            };
+            if let Some(identity) =
+                authorization.and_then(|value| identity::verify_request_assertion(value, key))
+            {
+                return Ok(identity);
+            }
+        } else {
+            let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+                return Err(Box::new(self.audited_error(
+                    request_id,
+                    None,
+                    action,
+                    None,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_CLOCK_UNAVAILABLE",
+                    "management service unavailable",
+                    true,
+                    "retry_later",
+                )));
+            };
+            let authenticated = now.as_secs() >= self.config.credential.issued_at
+                && now.as_secs() < self.config.credential.expires_at
+                && authorization
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .filter(|value| value.len() <= TOKEN_BYTES_MAX)
+                    .is_some_and(|value| {
+                        memcmp::eq(
+                            &sha256(value.as_bytes()),
+                            &self.config.credential.token_digest,
+                        )
+                    });
+            if authenticated {
+                return Ok(identity::VerifiedRequestIdentity {
+                    principal: self.config.principal.clone(),
+                    browser: false,
+                    csrf_valid: true,
+                });
+            }
+        }
+        Err(Box::new(unauthorized()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3427,7 +3499,12 @@ impl ControlPlane {
 /// Read routes have no production side effects. Mutations use their documented
 /// transactional outbox and every route writes the required management audit.
 pub fn router(control: ControlPlane) -> Router {
+    let state = Arc::new(control);
     Router::new()
+        .route(identity::LOGIN_PATH, get(identity::login_handler))
+        .route(identity::CALLBACK_PATH, get(identity::callback_handler))
+        .route(identity::SESSION_PATH, get(identity::session_handler))
+        .route(identity::LOGOUT_PATH, post(identity::logout_handler))
         .route(HEALTH_PATH, get(health_handler))
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
@@ -3501,7 +3578,8 @@ pub fn router(control: ControlPlane) -> Router {
             case_holds::RELEASE_PATH,
             post(case_holds::release_handler).layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
         )
-        .with_state(Arc::new(control))
+        .with_state(Arc::clone(&state))
+        .layer(from_fn_with_state(state, identity::auth_middleware))
 }
 
 async fn evidence_access_approve_handler(
@@ -4625,6 +4703,34 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn duplicate_authorization_values_cannot_be_reinterpreted_by_handlers() {
+        let fixture = Fixture::new(10, ManagementRole::AuditAdministrator);
+        let mut request = authenticated_request();
+        request
+            .headers_mut()
+            .append(AUTHORIZATION, format!("Bearer {TOKEN}x").parse().unwrap());
+
+        let response = router(fixture.control).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn authentication_endpoint_responses_are_never_cached() {
+        let fixture = Fixture::new(10, ManagementRole::Observer);
+        let response = router(fixture.control)
+            .oneshot(
+                Request::get("/control/v1/session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
     }
 
     #[tokio::test]

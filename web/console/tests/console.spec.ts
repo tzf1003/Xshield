@@ -178,7 +178,7 @@ test("calibration report reads discard expired, scope-drifting, and late state",
   });
   await connect(page);
   await queryCalibrationReport(page);
-  await expect(page.getByRole("status")).toContainText("管理凭证已失效");
+  await expect(page.getByRole("status")).toContainText("管理会话已失效");
   await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
 
   mode = "drift";
@@ -258,7 +258,7 @@ test("audit publication reads discard expired, scope-drifting, and late state", 
   });
   await connect(page);
   await queryAuditHealth(page);
-  await expect(page.getByRole("status")).toContainText("管理凭证已失效");
+  await expect(page.getByRole("status")).toContainText("管理会话已失效");
   await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
 
   mode = "drift";
@@ -587,7 +587,7 @@ test("model 401 and scope drift dispose the authenticated session", async ({
   );
   await connect(page);
   await queryModel(page);
-  await expect(page.getByRole("status")).toContainText("管理凭证已失效");
+  await expect(page.getByRole("status")).toContainText("管理会话已失效");
   await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
   drift = true;
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
@@ -1261,6 +1261,7 @@ test("event details traverse direct causes and children through explicit history
 
   await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
   await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
+  await page.getByLabel("每页条数", { exact: true }).fill("2");
   await search(page);
   expect(calls[1]?.body).toMatchObject({
     filters: [{ kind: "event_id", value: predecessor }],
@@ -1325,6 +1326,7 @@ test("event details prepare same-trace search without auto-submitting", async ({
 
   await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
   await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
+  await page.getByLabel("每页条数", { exact: true }).fill("2");
   await search(page);
   expect(calls).toHaveLength(2);
   expect(calls[1]?.body).toMatchObject({
@@ -1420,6 +1422,7 @@ test("search submits an allowlisted plan, freezes pagination and clears edited r
   await expect(
     page.getByText("2026-09-20T08:10:30.123455Z", { exact: true }),
   ).toBeVisible();
+  await page.getByLabel("条件 1 字段", { exact: true }).selectOption("request_id");
   await page.getByLabel("条件 1 值", { exact: true }).fill(OTHER_REQUEST_ID);
   await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(
     0,
@@ -1585,7 +1588,7 @@ test("search errors use safe messages, manual retries and clear the session on 4
   ).toHaveCount(0);
   reply = { status: 401, body: errorFixture("CONTROL_AUTH_REQUIRED") };
   await search(page);
-  await expect(page.getByRole("status")).toContainText("管理凭证已失效");
+  await expect(page.getByRole("status")).toContainText("管理会话已失效");
   await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
   await expect(
     page.getByRole("region", { name: "已提交查询计划" }),

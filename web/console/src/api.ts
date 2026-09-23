@@ -905,10 +905,86 @@ async function readEvidence(
   }
 }
 
-/** Fixed scoped endpoints. Callers own session disposal, scope checks and mutation retry input. */
+export type BrowserSession = {
+  subject: string;
+  tenant_id: string;
+  site_id: string;
+  csrf_token: string;
+};
+
+/** Authenticates the HttpOnly browser cookie and returns only its CSRF companion. */
+export async function bootstrapBrowserSession(
+  signal?: AbortSignal,
+): Promise<BrowserSession> {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), 15_000);
+  const combined = signal
+    ? AbortSignal.any([signal, deadline.signal])
+    : deadline.signal;
+  let status = 0;
+  try {
+    const response = await fetch("/control/v1/session", {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal: combined,
+    });
+    status = response.status;
+    const value = await readJson(response, combined);
+    if (!response.ok) {
+      const row = object(value);
+      const requestId =
+        typeof row.request_id === "string" && requestPattern.test(row.request_id)
+          ? row.request_id
+          : null;
+      const code =
+        typeof row.error_code === "string" &&
+        Object.hasOwn(messages, row.error_code) &&
+        row.error_code.startsWith("CONTROL_")
+          ? (row.error_code as ErrorCode)
+          : "HTTP_ERROR";
+      throw new ApiError(code, status, requestId);
+    }
+    const row = object(value);
+    ensure(
+      Object.keys(row).sort().join(",") ===
+        "csrf_token,site_id,subject,tenant_id",
+    );
+    const csrfToken = text(row.csrf_token, 64);
+    ensure(/^[0-9a-f]{64}$/.test(csrfToken));
+    return {
+      subject: text(row.subject, 256),
+      tenant_id: name(row.tenant_id),
+      site_id: name(row.site_id),
+      csrf_token: csrfToken,
+    };
+  } catch (error) {
+    if (signal?.aborted) throw new ApiError("REQUEST_ABORTED", status);
+    if (deadline.signal.aborted) throw new ApiError("REQUEST_TIMEOUT", status);
+    if (error instanceof ApiError)
+      throw new ApiError(error.code, status || error.status, error.requestId);
+    throw new ApiError("NETWORK_UNAVAILABLE", status);
+  } finally {
+    clearTimeout(timer);
+    deadline.abort();
+  }
+}
+
+/** Fixed scoped endpoints. Bearers are machine/test-only; browsers use OIDC cookies. */
 export class ControlClient {
-  #authorization: string;
-  constructor(token: string) {
+  #authorization: string | null;
+  #csrfToken: string | null;
+  constructor(token?: string, csrfToken?: string) {
+    if (token === undefined) {
+      if (csrfToken !== undefined && !/^[0-9a-f]{64}$/.test(csrfToken))
+        throw new ApiError("INVALID_CREDENTIAL");
+      this.#authorization = null;
+      this.#csrfToken = csrfToken ?? null;
+      return;
+    }
     if (
       typeof token !== "string" ||
       token.length > 512 ||
@@ -918,6 +994,7 @@ export class ControlClient {
     const bytes = new TextEncoder().encode(token).byteLength;
     if (bytes < 32 || bytes > 512) throw new ApiError("INVALID_CREDENTIAL");
     this.#authorization = `Bearer ${token}`;
+    this.#csrfToken = null;
     try {
       // Browser header serialization must preserve the exact server credential.
       if (
@@ -962,16 +1039,21 @@ export class ControlClient {
       const response = await fetch(`/control/v1/${path}`, {
         method: body === undefined ? "GET" : "POST",
         headers: {
-          Authorization: this.#authorization,
+          ...(this.#authorization === null
+            ? {}
+            : { Authorization: this.#authorization }),
           Accept: accessId === undefined ? "application/json" : "application/octet-stream",
           ...(accessId === undefined ? {} : { "X-Xshield-Evidence-Access-Request": accessId }),
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(body === undefined || this.#csrfToken === null
+            ? {}
+            : { "X-Xshield-CSRF": this.#csrfToken }),
           ...(idempotencyKey === undefined
             ? {}
             : { "Idempotency-Key": idempotencyKey }),
         },
         ...(body === undefined ? {} : { body }),
-        credentials: "omit",
+        credentials: this.#authorization === null ? "same-origin" : "omit",
         cache: "no-store",
         redirect: "error",
         referrerPolicy: "no-referrer",
@@ -1007,6 +1089,32 @@ export class ControlClient {
       clearTimeout(timer);
       deadline.abort();
     }
+  }
+
+  async logoutBrowserSession(signal?: AbortSignal): Promise<void> {
+    ensure(this.#authorization === null && this.#csrfToken !== null);
+    await this.#transport(
+      "session/logout",
+      async (response, combined) => {
+        if (!response.ok) {
+          const row = object(await readJson(response, combined));
+          const requestId =
+            typeof row.request_id === "string" && requestPattern.test(row.request_id)
+              ? row.request_id
+              : null;
+          const code =
+            typeof row.error_code === "string" &&
+            Object.hasOwn(messages, row.error_code) &&
+            row.error_code.startsWith("CONTROL_")
+              ? (row.error_code as ErrorCode)
+              : "HTTP_ERROR";
+          throw new ApiError(code, response.status, requestId);
+        }
+        ensure(response.status === 204);
+      },
+      signal,
+      "",
+    );
   }
 
   async summary(

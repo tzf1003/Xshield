@@ -6,7 +6,9 @@ export type Envelope = {
   site_id: string;
 };
 export const messages = {
-  CONTROL_AUTH_REQUIRED: "管理凭证无效或已过期，请重新连接。",
+  CONTROL_AUTH_REQUIRED: "管理会话无效或已过期，请重新登录。",
+  CONTROL_CSRF_REQUIRED: "管理会话校验已过期，请重新登录。",
+  CONTROL_SESSION_UNAVAILABLE: "管理会话服务暂时不可用，请稍后重试。",
   CONTROL_SCOPE_DENIED: "当前身份没有此作用域的操作权限。",
   CONTROL_RATE_LIMITED: "管理请求已达频率上限，请稍后重试。",
   CONTROL_REQUEST_ID_INVALID: "请输入规范的请求 ID。",

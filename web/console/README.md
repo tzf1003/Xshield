@@ -25,7 +25,7 @@ npm run dev
 
 页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、精确 `POST /control/v1/search` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。服务端要求证据申请列表使用规范 `view=mine` 或 `view=review` 及其后可选的单个 `cursor`，保留历史只接受可选游标。代理剥离 Cookie/Set-Cookie，不注入管理身份、不跟随重定向。连接表单只在页面内存中保存 Bearer；首次成功响应后显示经服务端确认的范围。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、精确 `POST /control/v1/search` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。OIDC callback 保留经服务端校验的授权响应 query；其他身份路径拒绝 query。代理只转发 Xshield session/state Cookie，剥离所有其他 Cookie；`Set-Cookie` 仅允许来自登录开始、callback 与 logout。代理不注入管理身份且不跟随重定向。正常开发启动使用 OIDC 会话；只有 Playwright 配置会设置 `VITE_XSHIELD_E2E_MACHINE_LOGIN=1` 启用合成 Bearer 表单，生产构建不会提供该入口。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
@@ -67,7 +67,7 @@ npm run dev
 
 获批申请人以 SensitiveEvidenceReader 凭证读取详情后点击“下载原文（.bin）”。客户端校验二进制响应的服务端范围、申请/证据目标、媒体类型、附件属性和完整字节长度，15 秒总期限内有界读取至多 64 MiB，保留字节形成 Blob，并交给浏览器保存 `.bin` 文件。原文不进入页面内容或持久浏览器存储，临时对象 URL 在使用后释放；清态或切换目标抑制晚到下载。浏览器内存与系统下载管理器不提供可靠清零保证；已交给浏览器的附件由操作者管理，界面提示不证明磁盘保存完成。
 
-控制服务须先升级以提供 29.13 的六个二进制身份/长度响应头，代理必须透传并禁止缓存与正文日志。详情和当前 approved 状态仅供复核，不代替内容端点的重新授权。企业身份、MFA、再认证及服务端浏览器会话仍为生产启用前置要求。
+控制服务须先升级以提供 29.13 的六个二进制身份/长度响应头，代理必须透传并禁止缓存与正文日志。详情和当前 approved 状态仅供复核，不代替内容端点的重新授权。管理身份由 29.27 的 OIDC/MFA 与服务端会话提供；强操作再认证仍未覆盖。
 
 ## 证据保留工作台
 
@@ -85,7 +85,7 @@ npm run dev
 npm run build
 ```
 
-`dist/` 是静态产物。部署到专用管理 origin，由同源受控反向代理将 `/control/v1` 指向控制服务；生产环境必须使用 TLS、网络隔离和企业身份入口，配置 MFA、凭证发放/撤销及会话策略。当前版本的浏览器连接使用机器 Bearer，尚未实现 OIDC/MFA 登录或服务端浏览器会话，因此不能宣称达到 15.3 的完整生产身份要求。Vite dev/preview 只供本地开发，不是生产管理边界。
+`dist/` 是静态产物。部署到专用管理 origin，由同源受控反向代理将 `/control/v1` 指向控制服务；生产环境必须使用 TLS、网络隔离和企业 OIDC 身份入口。控制服务需配置 `XSHIELD_CONTROL_OIDC_ISSUER`、`XSHIELD_CONTROL_OIDC_CLIENT_ID`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CONTROL_OIDC_REQUIRED_ACR`、`XSHIELD_CONTROL_CONSOLE_ORIGIN` 和 `XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON`，并在启用前应用迁移 0035、升级可发布 `console.auth.*` 的管理 journal。角色仅来自部署侧精确 subject allowlist，当前每个实例固定到启动时配置的 tenant/site。会话 Cookie 为 Secure/HttpOnly/SameSite=Lax，服务端执行 15 分钟闲置和 8 小时绝对超时，写请求强制精确 Origin + CSRF token。机器 Bearer API 仅保留给受控自动化，生产 UI 不采集 token。真实企业 IdP 联调与强操作再认证仍须独立验收。Vite dev/preview 只供本地开发，不是生产管理边界。
 
 静态服务器应返回 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`，并以响应头设置：
 

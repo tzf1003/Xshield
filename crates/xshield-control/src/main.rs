@@ -1,11 +1,17 @@
 use clickhouse::Client;
+use serde::Deserialize;
 use std::{
-    collections::BTreeSet, env, error::Error, net::SocketAddr, path::PathBuf, time::Duration,
+    collections::{BTreeMap, BTreeSet},
+    env,
+    error::Error,
+    net::SocketAddr,
+    path::PathBuf,
+    time::Duration,
 };
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
 use xshield_control::{
     ControlConfig, ControlLimits, ControlPlane, CursorKey, EvidenceReadPort, IdempotencyKey,
-    ManagementCredential, router,
+    ManagementCredential, OidcProvider, router,
 };
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
@@ -33,6 +39,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let site_id = SiteId::parse(env::var("XSHIELD_SITE_ID")?)?;
     let subject = env::var("XSHIELD_CONTROL_SUBJECT")?;
     let roles = parse_roles(&env::var("XSHIELD_CONTROL_ROLES")?)?;
+    let oidc_issuer = env::var("XSHIELD_CONTROL_OIDC_ISSUER")?;
+    let oidc_client_id = env::var("XSHIELD_CONTROL_OIDC_CLIENT_ID")?;
+    let oidc_client_secret = Zeroizing::new(env::var("XSHIELD_CONTROL_OIDC_CLIENT_SECRET")?);
+    let console_origin = env::var("XSHIELD_CONTROL_CONSOLE_ORIGIN")?;
+    let required_acr = env::var("XSHIELD_CONTROL_OIDC_REQUIRED_ACR")?;
+    let oidc_subject_roles =
+        parse_oidc_subject_roles(&env::var("XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON")?)?;
     let token = Zeroizing::new(env::var("XSHIELD_CONTROL_TOKEN")?);
     let cursor_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_CURSOR_KEY_HEX")?);
     let idempotency_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX")?);
@@ -147,12 +160,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
         database_acquire_timeout,
     )
     .await?;
+    let oidc_provider = OidcProvider::discover(
+        &oidc_issuer,
+        &oidc_client_id,
+        &oidc_client_secret,
+        &console_origin,
+        &required_acr,
+        oidc_subject_roles,
+    )
+    .await?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
     axum::serve(
         listener,
         router(
             ControlPlane::new(config, source_key, seal_key, index, catalog, access_journal)
-                .with_evidence_read_port(EvidenceReadPort::new(evidence_vault)),
+                .with_evidence_read_port(EvidenceReadPort::new(evidence_vault))
+                .with_oidc_provider(oidc_provider)?,
         ),
     )
     .await?;
@@ -162,25 +185,64 @@ async fn run() -> Result<(), Box<dyn Error>> {
 fn parse_roles(value: &str) -> Result<BTreeSet<ManagementRole>, &'static str> {
     let mut roles = BTreeSet::new();
     for role in value.split(',') {
-        let role = match role {
-            "observer" => ManagementRole::Observer,
-            "investigator" => ManagementRole::Investigator,
-            "sensitive_evidence_reader" => ManagementRole::SensitiveEvidenceReader,
-            "sensitive_evidence_approver" => ManagementRole::SensitiveEvidenceApprover,
-            "policy_author" => ManagementRole::PolicyAuthor,
-            "policy_approver" => ManagementRole::PolicyApprover,
-            "release_operator" => ManagementRole::ReleaseOperator,
-            "audit_administrator" => ManagementRole::AuditAdministrator,
-            "key_administrator" => ManagementRole::KeyAdministrator,
-            "system_admin" => ManagementRole::SystemAdmin,
-            _ => return Err("invalid XSHIELD_CONTROL_ROLES"),
-        };
+        let role = parse_role(role).ok_or("invalid XSHIELD_CONTROL_ROLES")?;
         roles.insert(role);
     }
     if roles.is_empty() {
         return Err("invalid XSHIELD_CONTROL_ROLES");
     }
     Ok(roles)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OidcSubjectRoleEntry {
+    subject: String,
+    roles: Vec<String>,
+}
+
+fn parse_oidc_subject_roles(
+    value: &str,
+) -> Result<BTreeMap<String, BTreeSet<ManagementRole>>, &'static str> {
+    let entries: Vec<OidcSubjectRoleEntry> = serde_json::from_str(value)
+        .map_err(|_| "invalid XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON")?;
+    if entries.is_empty() {
+        return Err("invalid XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON");
+    }
+    let mut mappings = BTreeMap::new();
+    for entry in entries {
+        if entry.roles.is_empty() {
+            return Err("invalid XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON");
+        }
+        let mut roles = BTreeSet::new();
+        for name in entry.roles {
+            let role =
+                parse_role(&name).ok_or("invalid XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON")?;
+            if !roles.insert(role) {
+                return Err("invalid XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON");
+            }
+        }
+        if mappings.insert(entry.subject, roles).is_some() {
+            return Err("invalid XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON");
+        }
+    }
+    Ok(mappings)
+}
+
+fn parse_role(value: &str) -> Option<ManagementRole> {
+    Some(match value {
+        "observer" => ManagementRole::Observer,
+        "investigator" => ManagementRole::Investigator,
+        "sensitive_evidence_reader" => ManagementRole::SensitiveEvidenceReader,
+        "sensitive_evidence_approver" => ManagementRole::SensitiveEvidenceApprover,
+        "policy_author" => ManagementRole::PolicyAuthor,
+        "policy_approver" => ManagementRole::PolicyApprover,
+        "release_operator" => ManagementRole::ReleaseOperator,
+        "audit_administrator" => ManagementRole::AuditAdministrator,
+        "key_administrator" => ManagementRole::KeyAdministrator,
+        "system_admin" => ManagementRole::SystemAdmin,
+        _ => return None,
+    })
 }
 
 #[tokio::main]
@@ -193,7 +255,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_roles;
+    use super::{parse_oidc_subject_roles, parse_roles};
     use xshield_core::admin::ManagementRole;
 
     #[test]
@@ -205,5 +267,29 @@ mod tests {
         assert!(roles.contains(&ManagementRole::SensitiveEvidenceApprover));
         assert!(parse_roles("observer,unknown").is_err());
         assert!(parse_roles("").is_err());
+    }
+
+    #[test]
+    fn oidc_roles_are_exact_subject_mappings_without_duplicates() {
+        let mappings = parse_oidc_subject_roles(
+            r#"[{"subject":"oidc-sub-1","roles":["observer","investigator"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert!(mappings["oidc-sub-1"].contains(&ManagementRole::Observer));
+        assert!(
+            parse_oidc_subject_roles(
+                r#"[{"subject":"a","roles":["observer"]},{"subject":"a","roles":["investigator"]}]"#
+            )
+            .is_err()
+        );
+        assert!(
+            parse_oidc_subject_roles(r#"[{"subject":"a","roles":["observer","observer"]}]"#)
+                .is_err()
+        );
+        assert!(
+            parse_oidc_subject_roles(r#"[{"subject":"a","roles":["system_admin","admin"]}]"#)
+                .is_err()
+        );
     }
 }

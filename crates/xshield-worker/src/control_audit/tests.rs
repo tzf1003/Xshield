@@ -157,6 +157,56 @@ fn case_listing_publishes_only_scoped_access_facts() {
 }
 
 #[test]
+fn oidc_session_audit_contract_is_fixed_and_does_not_index_credentials() {
+    for (kind, method, path, reason, subject) in [
+        (
+            "console.auth.login",
+            "GET",
+            "/control/v1/auth/oidc/start",
+            "CONTROL_OIDC_LOGIN_STARTED",
+            None,
+        ),
+        (
+            "console.auth.callback",
+            "GET",
+            "/control/v1/auth/oidc/callback",
+            "CONTROL_OIDC_LOGIN_COMPLETED",
+            Some("oidc-subject-1"),
+        ),
+        (
+            "console.auth.session.read",
+            "GET",
+            "/control/v1/session",
+            "CONTROL_BROWSER_SESSION_READ",
+            Some("oidc-subject-1"),
+        ),
+        (
+            "console.auth.session.logout",
+            "POST",
+            "/control/v1/session/logout",
+            "CONTROL_BROWSER_SESSION_REVOKED",
+            Some("oidc-subject-1"),
+        ),
+    ] {
+        let mut value = event();
+        value["event_type"] = kind.into();
+        value["payload"]["method"] = method.into();
+        value["payload"]["path"] = path.into();
+        value["payload"]["reason_code"] = reason.into();
+        value["payload"]["subject_ref"] = subject.map_or(Value::Null, Value::from);
+        value["payload"]["target_case_id"] = Value::Null;
+        value["evidence_refs"] = json!([]);
+        assert!(index(&value).is_ok(), "{kind}");
+
+        value["payload"]["reason_code"] = "CONTROL_INVALID_INPUT".into();
+        value["payload"]["outcome"] = "DENY".into();
+        assert!(index(&value).is_ok(), "{kind} denial");
+        value["payload"]["path"] = "/control/v1/other".into();
+        rejected(&value, "OIDC audit with an unregistered path");
+    }
+}
+
+#[test]
 fn model_listing_publishes_only_scoped_access_facts() {
     let mut value = event();
     value["event_type"] = "console.model.list".into();

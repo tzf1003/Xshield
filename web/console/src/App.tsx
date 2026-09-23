@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
-import { ApiError, ControlClient, validateModelCallListPlan } from "./api";
+import {
+  ApiError,
+  ControlClient,
+  bootstrapBrowserSession,
+  validateModelCallListPlan,
+} from "./api";
 import { validateSearchPlan } from "./search";
 import type { SearchPlan, SearchResponse } from "./search";
 import { SearchPanel } from "./SearchPanel";
@@ -63,6 +68,8 @@ const queryPrefixes = {
   binding: "auth",
 };
 const idleMs = 15 * 60 * 1000;
+const machineLoginEnabled =
+  import.meta.env.DEV && import.meta.env.VITE_XSHIELD_E2E_MACHINE_LOGIN === "1";
 
 function Failure({ problem }: { problem: Problem | null }) {
   return (
@@ -96,6 +103,7 @@ export function App() {
   const scope = useRef<{ tenant_id: string; site_id: string } | null>(null);
   const [connected, setConnected] = useState(false);
   const [token, setToken] = useState("");
+  const [authReady, setAuthReady] = useState(machineLoginEnabled);
   const [requestId, setRequestId] = useState("");
   const [queryKind, setQueryKind] = useState<QueryKind>("request");
   const [ledger, setLedger] = useState<GrantResponse | BindingResponse | null>(
@@ -155,6 +163,7 @@ export function App() {
       scope.current = null;
       setConnected(false);
       setToken("");
+      setAuthReady(true);
       setRequestId("");
       setQueryKind("request");
       setSearchPreset(null);
@@ -162,6 +171,35 @@ export function App() {
     },
     [clearResults],
   );
+
+  useEffect(() => {
+    if (machineLoginEnabled) return;
+    const controller = new AbortController();
+    void bootstrapBrowserSession(controller.signal)
+      .then((session) => {
+        client.current = new ControlClient(undefined, session.csrf_token);
+        scope.current = {
+          tenant_id: session.tenant_id,
+          site_id: session.site_id,
+        };
+        setSessionNotice(null);
+        setConnected(true);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (!(error instanceof ApiError && error.status === 401)) {
+          setSessionNotice(
+            error instanceof ApiError
+              ? error.message
+              : "无法恢复管理会话，请检查服务后重试。",
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setAuthReady(true);
+      });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     if (!connected) return;
@@ -226,7 +264,7 @@ export function App() {
     } catch (error) {
       if (!current()) return false;
       if (error instanceof ApiError && error.status === 401) {
-        disconnect("管理凭证已失效，请重新连接。");
+        disconnect("管理会话已失效，请重新登录。");
       } else {
         fail?.(error);
         const problem =
@@ -260,6 +298,22 @@ export function App() {
     setToken("");
     setSessionNotice(null);
     setConnected(true);
+  }
+  async function logout() {
+    const activeClient = client.current;
+    if (!activeClient) return;
+    try {
+      await activeClient.logoutBrowserSession();
+      disconnect("已安全退出管理会话。");
+    } catch (error) {
+      const notice =
+        error instanceof ApiError
+          ? `${error.message} 页面状态已清理，请重新登录确认会话状态。`
+          : "退出状态未确认；页面状态已清理，请重新登录确认会话状态。";
+      // The server may have revoked the session before an audit or network
+      // failure prevented a success response. Never keep sensitive UI state.
+      disconnect(notice);
+    }
   }
   function clearArtifact() {
     operations.current.artifact += 1;
@@ -532,9 +586,15 @@ export function App() {
                 : "尚未连接"}
           </span>
           {connected && (
-            <button className="outline" onClick={() => disconnect()}>
-              断开连接
-            </button>
+            machineLoginEnabled ? (
+              <button className="outline" onClick={() => disconnect()}>
+                断开连接
+              </button>
+            ) : (
+              <button className="outline" onClick={() => void logout()}>
+                安全退出
+              </button>
+            )
           )}
         </div>
       </header>
@@ -569,30 +629,59 @@ export function App() {
             className="panel connect-panel"
             aria-labelledby="connect-title"
           >
-            <h2 id="connect-title">连接管理服务</h2>
-            <p className="muted">
-              使用当前站点的管理凭证。详情查询需
-              Observer，结构化检索与案件操作需
-              Investigator；访问范围由服务端校验。
-            </p>
-            <form onSubmit={connect}>
-              <label htmlFor="token">管理凭证</label>
-              <input
-                id="token"
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                autoComplete="off"
-                spellCheck={false}
-                maxLength={4096}
-                required
-              />
-              <button type="submit">连接</button>
-            </form>
-            <p className="footnote">
-              凭证仅保存在当前页面内存中。刷新、断开连接或闲置 15
-              分钟后需重新连接。
-            </p>
+            <h2 id="connect-title">
+              {machineLoginEnabled ? "连接管理服务" : "企业身份登录"}
+            </h2>
+            {machineLoginEnabled ? (
+              <>
+                <p className="muted">
+                  自动化测试专用的机器凭证入口。生产控制台仅使用企业 OIDC 身份。
+                </p>
+                <form onSubmit={connect}>
+                  <label htmlFor="token">管理凭证</label>
+                  <input
+                    id="token"
+                    type="password"
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    maxLength={4096}
+                    required
+                  />
+                  <button type="submit">连接</button>
+                </form>
+                <p className="footnote">
+                  此入口仅在显式开启的本地 Playwright 测试环境可用。
+                </p>
+              </>
+            ) : !authReady ? (
+              <p className="empty" role="status">正在恢复管理会话…</p>
+            ) : (
+              <>
+                <p className="muted">
+                  使用企业身份提供方完成 MFA。访问角色与站点范围由服务端部署映射决定。
+                </p>
+                <button
+                  type="button"
+                  onClick={() => window.location.assign("/control/v1/auth/oidc/start")}
+                >
+                  使用企业身份登录
+                </button>
+                {sessionNotice && (
+                  <button
+                    className="outline"
+                    type="button"
+                    onClick={() => window.location.reload()}
+                  >
+                    重试会话检查
+                  </button>
+                )}
+                <p className="footnote">
+                  浏览器只持有 HttpOnly 服务端会话 Cookie；闲置 15 分钟或达到 8 小时绝对时限后须重新登录。
+                </p>
+              </>
+            )}
           </section>
         ) : (
           <>

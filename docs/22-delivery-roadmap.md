@@ -22,9 +22,9 @@
 
 ## M3 完整日志后台
 
-案件界面增量：已接入本人案件创建、本人 open/closed 列表及打开、证据集合分页、关联与关闭流程，展示数据库观察、catalog 状态、管理请求 ID 与精确幂等结果。列表固定 owner/tenant/site，以案件 ID 降序键集分页、独立签名游标和 `console.case.list` 审计完成发现闭环；创建或关闭后显式刷新。内存表单保留冻结键与参数，未知结果仅原样重试，会话终止清态；案件后端具备有界许可、数据库 deadline 和断连后终态审计。真实 PostgreSQL/HTTP/前端客户端闭环验证事务事实及独立管理审计，浏览器覆盖重试、权限、异步隔离与响应式布局；生产身份入口和批量导出界面继续交付。
+案件界面增量：已接入本人案件创建、本人 open/closed 列表及打开、证据集合分页、关联与关闭流程，展示数据库观察、catalog 状态、管理请求 ID 与精确幂等结果。列表固定 owner/tenant/site，以案件 ID 降序键集分页、独立签名游标和 `console.case.list` 审计完成发现闭环；创建或关闭后显式刷新。内存表单保留冻结键与参数，未知结果仅原样重试，会话终止清态；案件后端具备有界许可、数据库 deadline 和断连后终态审计。真实 PostgreSQL/HTTP/前端客户端闭环验证事务事实及独立管理审计，浏览器覆盖重试、权限、异步隔离与响应式布局；批量导出界面和强操作再认证继续交付。
 
-界面增量：`web/console` 已交付 Observer 只读请求、单条模型调用和模型调用列表调查闭环。列表要求有界 UTC 窗口，以 `(occurred_at DESC, model_call_id DESC)` 发现每个 `mdl_` 的最新可见脱敏状态，签名游标、独立 `console.model.list` 审计、索引水位和详情重授权均已接通；它不把窗口内状态描述为完整生命周期或证据资格。AuditAdministrator 可显式读取一个配置 audit journal 到索引目标的发布快照，展示封存段、连续水位、待发布/未封存段与缺口；该观察不推导业务准入、全部 Outbox 或系统整体状态。Investigator 结构化事件检索已接入现有 search API，以有界 UTC 时间窗及最多 8 项同事件 AND 条件查询，展示提交计划/摘要、扫描量、可空事件事实和独立索引状态；事件详情可显式准备同 Trace 查询，保持既有 Investigator 授权、UTC 时间窗和审计。分页复用冻结计划，编辑即失效；请求和证据元数据链接继续要求独立 Observer 权限。内存凭证、闲置/401 清态、跨范围/晚到响应隔离均有回归；真实 Rust HTTP 与前端客户端的 wire 测试校验摘要/事件、Gateway Choice、历史 Noul 部分生命周期、模型未命中及预算失败路径。生产身份入口、完整关联图和导出界面按 [15.7](15-console-and-api.md#157-已实现只读请求调查控制台) 继续交付。
+界面增量：`web/console` 已交付 Observer 只读请求、单条模型调用和模型调用列表调查闭环。列表要求有界 UTC 窗口，以 `(occurred_at DESC, model_call_id DESC)` 发现每个 `mdl_` 的最新可见脱敏状态，签名游标、独立 `console.model.list` 审计、索引水位和详情重授权均已接通；它不把窗口内状态描述为完整生命周期或证据资格。AuditAdministrator 可显式读取一个配置 audit journal 到索引目标的发布快照，展示封存段、连续水位、待发布/未封存段与缺口；该观察不推导业务准入、全部 Outbox 或系统整体状态。Investigator 结构化事件检索已接入现有 search API，以有界 UTC 时间窗及最多 8 项同事件 AND 条件查询，展示提交计划/摘要、扫描量、可空事件事实和独立索引状态；事件详情可显式准备同 Trace 查询，保持既有 Investigator 授权、UTC 时间窗和审计。分页复用冻结计划，编辑即失效；请求和证据元数据链接继续要求独立 Observer 权限。内存会话、闲置/401 清态、跨范围/晚到响应隔离均有回归；真实 Rust HTTP 与前端客户端的 wire 测试校验摘要/事件、Gateway Choice、历史 Noul 部分生命周期、模型未命中及预算失败路径。OIDC 管理身份已交付；强操作再认证、完整关联图和导出界面继续迭代，见 [15.7](15-console-and-api.md#157-已实现只读请求调查控制台)。
 
 当前增量：控制服务已提供单 request_id 的脱敏聚合摘要、受限阶段聚合、事件时间线、证据 manifest 列表及单 artifact 元数据查询，强制 Observer 角色与服务端 tenant/site 作用域。摘要和事件只查询 retention-aware 去重视图；manifest 只查询 PostgreSQL active、未删除、按数据库时钟未过期的 catalog 行，单项查询对缺失、到期、删除和作用域偏差返回统一不存在语义。事件、manifest 和案件证据集合列表均采用稳定游标分页，游标以独立 HMAC 密钥和不同用途域绑定主体、凭证摘要、作用域、目标、查询版本/页大小和最后位置。案件集合在单 PostgreSQL 只读快照内返回案件摘要、成员引用和 active/expired/deleted/unavailable 状态（正常 retention 使用 deleted tombstone，unavailable 保留为防御性一致性状态），不暴露内容元数据或授权能力。各类查询均写独立耐久管理审计，ClickHouse 查询还携带索引完整性状态。本地证据库已形成单对象 AES-256-GCM、artifact 作用域派生密钥、typed manifest HMAC、私有耐久写、到期/跨域统一拒读和篡改检测闭环；PostgreSQL catalog 支持认证 manifest 与 outbox 原子幂等发布，并提供有界到期密文与孤儿对象维护的删除意图、排他本地锁、tombstone、mtime/sidecar 复验与故障重试。调查案件创建、证据关联、集合查询、敏感原文申请和独立决策已形成固定作用域、主体级容量、精确幂等、禁止自批和 outbox 原子提交闭环；批准时重验目标并建立不超过 artifact 期限的短时服务端资格。EvidenceReadPort 内容读取已接入 `/control/v1/artifacts/{artifact_id}/content`：Reader 只能消费与自身主体绑定的批准行，读取前重验 PostgreSQL 案件/catalog 与 vault 侧 manifest、摘要、AEAD，释放前写入实际字节数审计。网关采集与远端对象 adapter 继续迭代。
 
@@ -68,7 +68,9 @@ Score 增量：一次性离线评估已接入 2–10 档有序量表、完整档
 
 审批详情增量：`GET /control/v1/evidence-access-requests/{access_request_id}` 已形成主体可见性、单数据库快照、历史申请/决策与目标状态、独立管理审计及发布契约闭环。申请人和同站点审批人可在决策前复核明确理由与范围。
 
-控制台证据访问增量：申请、详情复核、独立批准/拒绝与申请人附件下载已接入固定 API。写入保持冻结原键恢复，二进制响应提供精确范围、目标和长度；客户端校验后才交付浏览器，目标与会话变更抑制晚到下载。生产企业身份、MFA、再认证和服务端浏览器会话仍是后续交付及生产启用门槛。
+控制台身份增量：已接入 OIDC authorization-code + S256 PKCE、单次 state/nonce、签名/issuer/audience/MFA ACR 校验、显式 subject-role allowlist、服务端撤销会话、Origin + CSRF、闲置与绝对超时及 `console.auth.*` 审计。迁移 0035 必须先于启用；机器 Bearer 路径保留供受控自动化，生产 UI 不保存 token。真实企业 IdP 联调、组织级 MFA 策略、强操作再认证和批量导出继续单独验收。
+
+控制台证据访问增量：申请、详情复核、独立批准/拒绝与申请人附件下载已接入固定 API。写入保持冻结原键恢复，二进制响应提供精确范围、目标和长度；客户端校验后才交付浏览器，目标与会话变更抑制晚到下载。控制台通过 15.7 的 OIDC 管理会话认证，证据读取仍独立授权。
 
 案件增量：`POST /control/v1/cases/{case_id}/items` 与 `GET /control/v1/cases/{case_id}/items` 已形成关联、单快照集合浏览、catalog 状态和审计闭环。`POST /control/v1/cases/{case_id}/close` 已提供所有者终结、容量释放、精确重试及事务 outbox，历史集合与审批保留，后续原文资格校验受 closed 状态约束；新增关联和关闭已覆盖断连终态审计回归。案件保留锁已完成有界存储、清理屏障、事件发布及 AuditAdministrator 创建/释放/历史查询 HTTP 闭环（见 12.9、29.21）；调查 Agent 与导出继续交付。保留锁延缓物理删除，案件生命周期与保留操作均不扩大原文权限或读取期限。
 

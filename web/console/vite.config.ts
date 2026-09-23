@@ -30,6 +30,10 @@ const accessReadPath =
   /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content)$/;
 const modelCallListPath = "/control/v1/model-calls";
 const auditHealthPath = "/control/v1/audit/health";
+const oidcLoginPath = "/control/v1/auth/oidc/start";
+const oidcCallbackPath = "/control/v1/auth/oidc/callback";
+const sessionPath = "/control/v1/session";
+const sessionLogoutPath = "/control/v1/session/logout";
 
 function validModelCallListQuery(url: string): boolean {
   const [path, query] = url.split("?", 2);
@@ -68,19 +72,14 @@ export default defineConfig({
         target: target.origin,
         changeOrigin: true,
         followRedirects: false,
-        configure(proxy) {
-          proxy.on("proxyReq", (request) => {
-            request.removeHeader("cookie");
-          });
-          proxy.on("proxyRes", (response) => {
-            delete response.headers["set-cookie"];
-          });
-        },
         bypass(request, response) {
           const path = (request.url ?? "").split("?")[0] ?? "";
           const allowed =
             (request.method === "GET" &&
-              ((path === modelCallListPath
+              ((path === oidcLoginPath && request.url === path) ||
+                path === oidcCallbackPath ||
+                (path === sessionPath && request.url === path) ||
+                (path === modelCallListPath
                 ? validModelCallListQuery(request.url ?? "")
                 : path === auditHealthPath
                   ? request.url === auditHealthPath
@@ -88,7 +87,8 @@ export default defineConfig({
                 (request.url === path && calibrationReportPath.test(path)) ||
                 (request.url === path && accessReadPath.test(path)))) ||
             (request.method === "POST" &&
-              (request.url === "/control/v1/search" ||
+              ((path === sessionLogoutPath && request.url === path) ||
+                request.url === "/control/v1/search" ||
                 (request.url === path && writePath.test(path))));
           if (!allowed) {
             if (response) {
@@ -97,6 +97,37 @@ export default defineConfig({
             }
             return false;
           }
+        },
+        configure(proxy) {
+          proxy.on("proxyReq", (proxyRequest, request) => {
+            const path = (request.url ?? "").split("?", 2)[0] ?? "";
+            const allowedCookieNames =
+              path === oidcCallbackPath
+                ? ["__Host-xshield-oidc-state"]
+                : path === oidcLoginPath
+                  ? []
+                  : ["__Host-xshield-session"];
+            const rawCookie = request.headers.cookie;
+            const cookies = (Array.isArray(rawCookie) ? rawCookie : [rawCookie])
+              .filter((value): value is string => typeof value === "string")
+              .flatMap((value) => value.split(";"))
+              .map((value) => value.trim())
+              .filter((value) =>
+                allowedCookieNames.some((name) => value.startsWith(`${name}=`)),
+              );
+            if (cookies.length === 0) proxyRequest.removeHeader("cookie");
+            else proxyRequest.setHeader("cookie", cookies.join("; "));
+          });
+          proxy.on("proxyRes", (proxyResponse, request) => {
+            const path = (request.url ?? "").split("?", 2)[0] ?? "";
+            if (
+              path !== oidcLoginPath &&
+              path !== oidcCallbackPath &&
+              path !== sessionLogoutPath
+            ) {
+              delete proxyResponse.headers["set-cookie"];
+            }
+          });
         },
       },
     },

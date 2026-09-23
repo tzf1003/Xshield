@@ -30,6 +30,7 @@ mod grant_inspection;
 mod grant_read;
 mod identity_read;
 mod investigation_case;
+mod management_session;
 mod model_evaluation_admission;
 mod outbox;
 mod provenance;
@@ -104,6 +105,7 @@ pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
 pub use investigation_case::{
     InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
 };
+pub use management_session::ManagementBrowserSession;
 pub use model_evaluation_admission::ModelEvaluationAdmissionLease;
 pub use outbox::{
     OutboxAckOutcome, OutboxEvent, OutboxFailureOutcome, OutboxLease, OutboxLeaseConfig,

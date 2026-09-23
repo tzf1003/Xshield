@@ -11,7 +11,11 @@ mod tests;
 pub(super) fn supports(event_type: &str) -> bool {
     matches!(
         event_type,
-        "console.health.read"
+        "console.auth.login"
+            | "console.auth.callback"
+            | "console.auth.session.read"
+            | "console.auth.session.logout"
+            | "console.health.read"
             | "console.request.read"
             | "console.events.read"
             | "console.manifest.read"
@@ -103,6 +107,10 @@ impl AccessPayload {
         }
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
+            "console.auth.login" => self.reason_code == "CONTROL_OIDC_LOGIN_STARTED",
+            "console.auth.callback" => self.reason_code == "CONTROL_OIDC_LOGIN_COMPLETED",
+            "console.auth.session.read" => self.reason_code == "CONTROL_BROWSER_SESSION_READ",
+            "console.auth.session.logout" => self.reason_code == "CONTROL_BROWSER_SESSION_REVOKED",
             "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
             "console.evidence.hold.created" => matches!(
                 self.reason_code.as_str(),
@@ -126,7 +134,7 @@ impl AccessPayload {
             || self.subject_ref.as_ref().is_some_and(|subject| {
                 subject.is_empty() || subject.len() > 256 || subject.chars().any(char::is_control)
             })
-            || (success && self.subject_ref.is_none())
+            || (success && self.subject_ref.is_none() && event.event_type != "console.auth.login")
         {
             return Err(PublishError::InvalidEvent);
         }
@@ -340,7 +348,11 @@ impl AccessPayload {
             (&self.target_calibration_report_id, "calr_"),
         ];
         let allowed = match (event_type, self.method.as_str(), self.path.as_str()) {
-            ("console.health.read", "GET", "/control/v1/audit/health")
+            ("console.auth.login", "GET", "/control/v1/auth/oidc/start")
+            | ("console.auth.callback", "GET", "/control/v1/auth/oidc/callback")
+            | ("console.auth.session.read", "GET", "/control/v1/session")
+            | ("console.auth.session.logout", "POST", "/control/v1/session/logout")
+            | ("console.health.read", "GET", "/control/v1/audit/health")
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests") => {

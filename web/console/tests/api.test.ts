@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
-import { ApiError, ControlClient } from "../src/api.ts";
+import { ApiError, ControlClient, bootstrapBrowserSession } from "../src/api.ts";
 import { validateSearchPlan, searchPlanDigest } from "../src/search.ts";
 import type { SearchPlan, SearchResponse } from "../src/search.ts";
 import {
@@ -47,6 +47,48 @@ const errorIs = (code: string, status?: number) => (error: unknown) => {
   assert.ok(!error.message.includes(TOKEN));
   return true;
 };
+
+test("browser session bootstrap and logout use same-origin cookie and CSRF", async (t) => {
+  const csrfToken = "a".repeat(64);
+  let call = 0;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (path: string, options: RequestInit) => {
+      call += 1;
+      if (call === 1) {
+        assert.equal(path, "/control/v1/session");
+        assert.equal(options.method, "GET");
+        assert.equal(options.credentials, "same-origin");
+        assert.equal(options.cache, "no-store");
+        assert.equal(options.redirect, "error");
+        assert.equal(options.referrerPolicy, "no-referrer");
+        return response({
+          subject: "operator-1",
+          tenant_id: "tenant_a",
+          site_id: "site_a",
+          csrf_token: csrfToken,
+        });
+      }
+      assert.equal(path, "/control/v1/session/logout");
+      assert.equal(options.method, "POST");
+      assert.equal(options.credentials, "same-origin");
+      assert.deepEqual(options.headers, {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-Xshield-CSRF": csrfToken,
+      });
+      assert.equal(options.body, "");
+      return new Response(null, { status: 204 });
+    },
+  );
+
+  const session = await bootstrapBrowserSession();
+  assert.equal(session.subject, "operator-1");
+  assert.equal(session.csrf_token, csrfToken);
+  await new ControlClient(undefined, session.csrf_token).logoutBrowserSession();
+  assert.equal(call, 2);
+});
 
 test("fixed GET routes preserve wire semantics and safe display metadata", async (t) => {
   const fixtures = [
@@ -1892,6 +1934,13 @@ test("development proxy permits fixed investigation and evidence access routes",
   type Response = Parameters<typeof proxy.bypass>[1];
   for (const [method, url, allowed] of [
     ["POST", "/control/v1/search", true],
+    ["GET", "/control/v1/auth/oidc/start", true],
+    ["GET", "/control/v1/auth/oidc/start?next=/", false],
+    ["GET", "/control/v1/auth/oidc/callback?code=sample&state=sample", true],
+    ["GET", "/control/v1/session", true],
+    ["GET", "/control/v1/session?scope=other", false],
+    ["POST", "/control/v1/session/logout", true],
+    ["POST", "/control/v1/session/logout?scope=other", false],
     ["GET", "/control/v1/audit/health", true],
     ["GET", "/control/v1/audit/health?scope=other", false],
     ["POST", "/control/v1/audit/health", false],
@@ -1969,6 +2018,50 @@ test("development proxy permits fixed investigation and evidence access routes",
     assert.equal(state.statusCode, allowed ? 200 : 404);
     assert.equal(state.ended, !allowed);
   }
+
+  const listeners = new Map<string, (...args: unknown[]) => void>();
+  proxy.configure?.({
+    on(event: string, listener: (...args: unknown[]) => void) {
+      listeners.set(event, listener);
+    },
+  } as never, proxy as never);
+  const proxyHeaders: Record<string, string> = {};
+  listeners.get("proxyReq")?.(
+    {
+      removeHeader(name: string) {
+        delete proxyHeaders[name];
+      },
+      setHeader(name: string, value: string) {
+        proxyHeaders[name] = value;
+      },
+    },
+    {
+      url: "/control/v1/search",
+      headers: {
+        cookie:
+          "unrelated=secret; __Host-xshield-session=session; __Host-xshield-oidc-state=state",
+      },
+    },
+  );
+  assert.equal(proxyHeaders.cookie, "__Host-xshield-session=session");
+  listeners.get("proxyReq")?.(
+    {
+      removeHeader(name: string) {
+        delete proxyHeaders[name];
+      },
+      setHeader(name: string, value: string) {
+        proxyHeaders[name] = value;
+      },
+    },
+    {
+      url: "/control/v1/auth/oidc/callback?code=sample&state=sample",
+      headers: { cookie: "__Host-xshield-session=session; __Host-xshield-oidc-state=state" },
+    },
+  );
+  assert.equal(proxyHeaders.cookie, "__Host-xshield-oidc-state=state");
+  const proxyResponse = { headers: { "set-cookie": ["x=secret"] } };
+  listeners.get("proxyRes")?.(proxyResponse, { url: "/control/v1/search" });
+  assert.equal(proxyResponse.headers["set-cookie"], undefined);
 });
 
 const CASE_ID = "case_018f2a3b-4c5d-7000-8000-000000000951";

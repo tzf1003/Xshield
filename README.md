@@ -192,6 +192,8 @@ cargo run -p xshield-control -- \
 | UUID 1.x | 生成服务器侧 UUIDv7 请求 ID | MIT OR Apache-2.0；锁文件固定，补丁升级执行 ID 契约测试 |
 | async-trait / bytes / http 1.x | 实现 Pingora 异步过滤器、有界拒绝响应体及 trailer 边界类型 | MIT OR Apache-2.0；锁文件固定，随 Pingora 兼容线评估更新 |
 | Axum 0.8.x / Tower 0.5.x | 独立管理 HTTP 路由与可测试 Service 边界 | MIT；锁文件固定，升级先执行管理认证、作用域、限流、错误契约及审计回归 |
+| openidconnect 4.0.1 | OIDC discovery、授权码 + S256 PKCE、ID token/JWKS/nonce/audience 校验 | MIT；精确版本并锁文件，升级复跑 callback/parser、issuer/audience、MFA ACR、密钥轮换与故障回归 |
+| reqwest 0.12.x / url 2.x | 有界、禁重定向的 Rustls IdP discovery 与 token endpoint HTTPS | MIT OR Apache-2.0；锁文件固定，升级复跑 TLS、endpoint allowlist、超时、重定向拒绝与秘密排除回归 |
 | crc32fast / zeroize 1.x | journal 快速损坏检测与秘密缓冲清零 | MIT OR Apache-2.0；锁文件固定，升级执行篡改、恢复和秘密生命周期测试 |
 | chrono 0.4.x | 生成审计契约要求的 UTC RFC 3339 时间戳 | MIT OR Apache-2.0；锁文件固定，补丁升级执行审计契约与时钟异常测试 |
 | Python cryptography 49.0.0（仅测试） | 生成 Gateway→Origin 加密请求测试向量，不进入产品运行时 | Apache-2.0 OR BSD-3-Clause；精确版本，升级先执行认证失败、不回退与源站不可见反例 |

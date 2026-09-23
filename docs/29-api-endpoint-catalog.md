@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 管理会话及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -38,6 +38,10 @@
 | POST /control/v1/candidates/{id}/publish | 灰度签名发布 | policy.published |
 | POST /control/v1/sites/{id}/rollback | 回退已验证版本 | policy.rolled_back |
 | GET /control/v1/audit/health | 各层watermark、gap与存储状态 | console.health.read |
+| GET /control/v1/auth/oidc/start | 启动授权码 + PKCE 管理员登录 | console.auth.login |
+| GET /control/v1/auth/oidc/callback | 消费 OIDC callback 并建立服务端会话 | console.auth.callback |
+| GET /control/v1/session | 读取当前浏览器主体、作用域与 CSRF bootstrap | console.auth.session.read |
+| POST /control/v1/session/logout | 撤销当前浏览器会话 | console.auth.session.logout |
 
 ## 29.1 查询契约
 
@@ -346,3 +350,13 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 有效读取与现有 search/model 查询共用单实例在途许可，繁忙为 `CONTROL_CALIBRATION_REPORT_BUSY`/429；连接池等待计入 15 秒总时限，SQL/锁等待上限 5 秒。已准入读取在客户端断连后仍完成投影与终态审计，许可持有至审计完成。每个可审计尝试追加 `console.calibration.report.read`：成功为 `PASS/CONTROL_CALIBRATION_REPORT_READ`，路径/请求拒绝和依赖故障使用 11.13 的稳定原因码。审计中仅可写经验证的 report target；不记录 report metadata 或访问结果正文。必需审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，所有响应设置 `Cache-Control: private, no-store`。
 
 部署先升级管理 journal 发布器以识别 `console.calibration.report.read`，再启用控制 API；无新增 migration、依赖或 secret。回滚先停用路由，保留新发布器直到已封存的管理事件完成发布；数据库 projection、report retention 与 outbox 历史继续按既有策略保留。
+
+## 29.27 已实现的 OIDC 管理会话契约
+
+`GET /control/v1/auth/oidc/start` 使用启动配置的唯一 issuer/client/redirect，发起 authorization-code flow，包含随机一次性 state、nonce 与 S256 PKCE；state Cookie 为 `Secure; HttpOnly; SameSite=Lax; Path=/` 且有效 5 分钟。未认证 OIDC/session 端点共用进程级未认证速率预算。浏览器禁止提交回跳地址、角色、tenant/site 或 redirect target。
+
+`GET /control/v1/auth/oidc/callback` 仅接受单值、有限长度的 `code/state/error/iss` 与 OIDC 标准的可选 `error_description/error_uri`；拒绝重复和未知参数。callback 必须同时匹配 state query 与 host-only state Cookie，并以单条 `DELETE ... RETURNING` 原子消费尚未过期的 PKCE verifier/nonce。code 通过 HTTPS token endpoint 兑换，重定向禁用；OIDC 库以 discovery JWKS 验证 ID token 签名、issuer、audience 与 nonce。控制服务再要求精确的部署方 MFA `acr`、校验存在的 `at_hash`，并拒绝未在 subject-role allowlist 精确登记的主体。IdP claim 不提供授权角色。
+
+登录成功后创建独立 256-bit 随机 session/CSRF token。浏览器只收到 `__Host-xshield-session` 不透明 Cookie；PostgreSQL 以随机 session token 的 SHA-256 摘要查找会话，并以 DB clock 执行 8 小时绝对期限、15 分钟闲置期限及显式撤销。CSRF token 独立绑定服务端 session，仅由同源 `GET /control/v1/session` 返回；每个非安全方法还必须提交唯一且精确匹配的 `Origin` 与 `X-Xshield-CSRF`。未认证 principal 不信任任何浏览器输入。当前进程的 subject-role mapping 在每个请求重新读取，完成部署配置变更后，相关实例的新请求即按新映射授权；principal 范围固定为该实例配置 tenant/site。
+
+内部 middleware 将有效 Cookie 映射为最多 30 秒的进程内 HMAC 身份断言以复用既有授权函数；断言不能由外部 caller 签发或持久化。静态 Bearer 仍按已有机器认证契约处理；同一请求并带 Cookie 与 Authorization 会拒绝。login、callback、session bootstrap 与 logout 均写独立管理 journal `console.auth.login/callback/session.read/session.logout`；audit 失败扣留成功结果。session 创建在 audit 失败时撤销。所有认证响应均为 `no-store`，logout 只接受带有效 CSRF 的浏览器 session。数据库 schema 由迁移 0035 提供；OIDC 代码、Rustls HTTP 与 URL 依赖版本/许可证/升级策略见 README。
