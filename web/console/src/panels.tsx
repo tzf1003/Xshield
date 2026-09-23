@@ -1,8 +1,10 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 import type { SearchEvent } from "./search";
+import type { CausalityResponse } from "./search";
 import { buildCausalNeighborhood } from "./event-causality";
 import type { CausalNode } from "./event-causality";
+import { CausalityPanel } from "./CausalityPanel";
 import type {
   ArtifactResponse,
   AuditHealthResponse,
@@ -915,6 +917,11 @@ export function EventDetail({
   onPreviousEvent,
   onFollowEvent,
   onCausalEvent,
+  causality,
+  causalityBusy,
+  causalityProblem,
+  onCausalityEdit,
+  onCausalitySubmit,
 }: {
   event: AuditEvent | SearchEvent;
   relatedEvents: (AuditEvent | SearchEvent)[];
@@ -925,6 +932,15 @@ export function EventDetail({
   onPreviousEvent: (eventId: string) => void;
   onFollowEvent: (eventId: string) => void;
   onCausalEvent: (eventId: string) => void;
+  causality: CausalityResponse | null;
+  causalityBusy: boolean;
+  causalityProblem: {
+    message: string;
+    code: string;
+    requestId?: string | null;
+  } | null;
+  onCausalityEdit: () => void;
+  onCausalitySubmit: (value: unknown) => void;
 }) {
   const traceId = "trace_id" in event ? event.trace_id : null;
   const causal = buildCausalNeighborhood(event, relatedEvents);
@@ -1057,6 +1073,15 @@ export function EventDetail({
       {(causal.predecessors.length > 0 || causal.successors.length > 0) && (
         <CausalityGraph neighborhood={causal} onOpen={onCausalEvent} />
       )}
+      <CausalityPanel
+        key={event.event_id}
+        eventId={event.event_id}
+        response={causality}
+        busy={causalityBusy}
+        problem={causalityProblem}
+        onEdit={onCausalityEdit}
+        onSubmit={onCausalitySubmit}
+      />
     </div>
   );
 }

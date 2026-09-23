@@ -36,8 +36,16 @@ import {
   validateSearchCursor,
   searchPlanDigest,
   decodeSearchResponse,
+  validateCausalityPlan,
+  decodeCausalityResponse,
 } from "./search.ts";
-import type { SearchPlan, SearchResponse } from "./search.ts";
+import type {
+  SearchPlan,
+  SearchResponse,
+  CausalityPlan,
+  CausalityResponse,
+} from "./search.ts";
+export type { CausalityPlan, CausalityResponse } from "./search.ts";
 import { decodeGrantResponse, decodeBindingResponse } from "./ledger.ts";
 import type { GrantResponse, BindingResponse } from "./ledger.ts";
 import {
@@ -1615,6 +1623,27 @@ export class ControlClient {
     return this.#request(
       "search",
       (value) => decodeSearchResponse(value, frozen, digest, cursor),
+      signal,
+      body,
+    );
+  }
+
+  /** Execute an Investigator-only bounded causality traversal.
+   * The root, UTC window and graph limits are validated before transport; the
+   * response remains a redacted event projection with no payload access.
+   */
+  async causality(
+    plan: CausalityPlan,
+    signal?: AbortSignal,
+  ): Promise<CausalityResponse> {
+    const frozen = validateCausalityPlan(plan);
+    if (signal?.aborted) throw new ApiError("REQUEST_ABORTED");
+    const body = JSON.stringify(frozen);
+    if (new TextEncoder().encode(body).byteLength > 4 * 1024)
+      throw new ApiError("CONTROL_CAUSALITY_REQUEST_INVALID");
+    return this.#request(
+      "causality",
+      (value) => decodeCausalityResponse(value, frozen),
       signal,
       body,
     );

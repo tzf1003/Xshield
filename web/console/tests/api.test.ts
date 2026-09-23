@@ -1978,6 +1978,9 @@ test("development proxy permits fixed investigation and evidence access routes",
   type Response = Parameters<typeof proxy.bypass>[1];
   for (const [method, url, allowed] of [
     ["POST", "/control/v1/search", true],
+    ["POST", "/control/v1/causality", true],
+    ["POST", "/control/v1/causality?scope=other", false],
+    ["POST", "/control/v1/causality/", false],
     ["GET", "/control/v1/auth/oidc/start", true],
     ["GET", "/control/v1/auth/oidc/start?next=/", false],
     ["GET", "/control/v1/auth/oidc/callback?code=sample&state=sample", true],

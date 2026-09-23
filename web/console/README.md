@@ -1,6 +1,6 @@
 # Xshield 调查控制台
 
-React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用并预填历史检索，按访问申请 ID 读取历史申请/决策元数据并预填历史检索，按校准报告 ID 读取受限冻结元数据，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件。UI 调用固定 GET 端点及只读 `POST /control/v1/search`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情与模型调用列表均需要显式 `Observer`，校准报告详情需要 `AuditAdministrator`，事件检索需要 `Investigator`；带 `calibration_report_id` 或 `evidence_hold_id` 的检索还要求同一主体同时具备 `AuditAdministrator`，三种角色分别校验。
+React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用并预填历史检索，按访问申请 ID 读取历史申请/决策元数据并预填历史检索，按校准报告 ID 读取受限冻结元数据，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件，并从事件详情显式提交有界服务端因果查询。UI 调用固定 GET 端点及只读 `POST /control/v1/search`、`POST /control/v1/causality`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情与模型调用列表均需要显式 `Observer`，校准报告详情需要 `AuditAdministrator`，事件检索与因果查询需要 `Investigator`；带 `calibration_report_id` 或 `evidence_hold_id` 的检索还要求同一主体同时具备 `AuditAdministrator`，三种角色分别校验。
 
 “审计发布状态”由 `AuditAdministrator` 手动读取 `GET /control/v1/audit/health`。它展示一个配置 audit journal 到索引目标的封存段发布快照：观察时间、目标、保留期、关闭/已发布/待发布/未封存段、缺口和连续水位；界面不自动轮询。该观察不判断业务准入、全部 Outbox 状态或系统整体健康。
 
@@ -25,7 +25,7 @@ npm run dev
 
 页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、精确 `POST /control/v1/search` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。OIDC callback 保留经服务端校验的授权响应 query；其他身份路径拒绝 query。代理只转发 Xshield session/state Cookie，剥离所有其他 Cookie；`Set-Cookie` 仅允许来自登录开始、callback、reauth-start 与 logout。代理不注入管理身份且不跟随重定向。正常开发启动使用 OIDC 会话；只有 Playwright 配置会设置 `VITE_XSHIELD_E2E_MACHINE_LOGIN=1` 启用合成 Bearer 表单，生产构建不会提供该入口。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、精确 `POST /control/v1/search`、`POST /control/v1/causality` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。OIDC callback 保留经服务端校验的授权响应 query；其他身份路径拒绝 query。代理只转发 Xshield session/state Cookie，剥离所有其他 Cookie；`Set-Cookie` 仅允许来自登录开始、callback、reauth-start 与 logout。代理不注入管理身份且不跟随重定向。正常开发启动使用 OIDC 会话；只有 Playwright 配置会设置 `VITE_XSHIELD_E2E_MACHINE_LOGIN=1` 启用合成 Bearer 表单，生产构建不会提供该入口。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
@@ -37,7 +37,7 @@ npm run dev
 - `share_grant_id` 按强类型 ID 过滤固定 `share.issued` 顶层 `share_id`；仅返回脱敏事件摘要，沿用 Investigator 查询范围、时间/扫描预算和审计，不返回分享 bearer 凭证。
 - 已提交计划、服务端查询摘要和管理 request_id 可见；下一页沿用冻结计划，编辑即清除旧结果、详情和游标。结果保留 nullable 字段与 RFC3339 微秒时间，扫描统计未知与 0 分开显示，空结果与索引 gap/pending 分别判断。水位只覆盖配置日志源，独立 Outbox 可能仍待发布；分页期间发布或到期可能改变后续可见集合。
 - 查询摘要使用浏览器原生 WebCrypto 验证，需要 HTTPS 或 localhost 安全上下文；能力不可用时本地拒绝查询。
-- 搜索只读已发布历史事实；请求与证据引用可打开现有详情，但仍需 Observer，Investigator 不隐含该权限。当前资格/绑定有效性、案件归属与原文读取由对应服务分别校验。事件详情可逐跳查看直接前驱或查找一个事件的直接后继；服务端另提供固定 UTC 窗口的 `POST /control/v1/causality`，最多 4 跳/16 个非根节点，沿已发布引用返回脱敏摘要并独立审计。当前 UI 卡片仍按已加载事件集合即时计算，不自动调用该端点或自动提交；无上限完整图、自然语言计划与回放继续迭代。
+- 搜索只读已发布历史事实；请求与证据引用可打开现有详情，但仍需 Observer，Investigator 不隐含该权限。当前资格/绑定有效性、案件归属与原文读取由对应服务分别校验。事件详情可逐跳查看直接前驱或查找一个事件的直接后继；服务端另提供固定 UTC 窗口的 `POST /control/v1/causality`，最多 4 跳/16 个非根节点，沿已发布引用返回脱敏摘要并独立审计。详情中的服务端因果表单要求操作者填写 UTC 窗口、方向和上限后主动提交，编辑或切换事件会清除旧结果；当前页卡片仍按已加载事件集合即时计算。无上限完整图、自然语言计划与回放继续迭代。
 - `subject_ref` 可精确定位固定顶层主体/身份引用；值限制为 256 UTF-8 字节且不允许控制字符。结果不会回显该值，服务端使用用途隔离 HMAC 生成计划摘要，浏览器不对主体值自行计算摘要。
 - 查询类型可切换为模型调用，接受 `mdl_` UUIDv7。结果显示 provider、请求所用 provider_model_id、内部模型/提示版本、置信度语义、因果生命周期及输入/输出/调用记录引用；点击引用沿用单项证据元数据查询。旧记录两项供应商字段均为空时显示“历史记录未提供”，Noul 置信度显示“不适用”。
 - “模型调用列表”要求 UTC 整秒半开时间窗（最长 31 天）及 1–100 条页大小，固定按 `(occurred_at DESC, model_call_id DESC)` 返回窗口内可见的最新脱敏记录。页面只显示 `latest_confidence_status`，不显示数值置信度、证据引用、生命周期、概率或供应商正文；游标由服务端绑定身份、范围和窗口，客户端只原样继续分页。点击模型调用 ID 会重新调用单项详情并重新鉴权，列表行不代替详情、当前状态、生命周期完整性或证据访问权。

@@ -18,6 +18,7 @@ import {
   name,
   id,
   integer,
+  bool,
   choice,
   nullable,
   list,
@@ -114,6 +115,37 @@ export type SearchResponse = Envelope & {
   events: SearchEvent[];
 };
 
+export type CausalityPlan = {
+  schema_version: 3;
+  start: string;
+  end: string;
+  event_id: string;
+  direction: "both" | "predecessors" | "successors";
+  max_depth: number;
+  max_nodes: number;
+};
+export type CausalityNode = {
+  event: SearchEvent;
+  depth: number;
+  direction: "predecessor" | "successor";
+};
+export type CausalityResponse = Envelope & {
+  schema_version: 3;
+  root_event_id: string;
+  found: boolean;
+  direction: CausalityPlan["direction"];
+  max_depth: number;
+  max_nodes: number;
+  truncated: boolean;
+  as_of: string;
+  index_watermark: Watermark | null;
+  has_gaps: boolean;
+  pending_segments: number;
+  scanned_rows: number | null;
+  scanned_bytes: number | null;
+  nodes: CausalityNode[];
+};
+
 function exactKeys(row: Record<string, unknown>, keys: string[]): void {
   ensure(
     Object.keys(row).length === keys.length &&
@@ -198,6 +230,42 @@ export function validateSearchPlan(value: unknown): SearchPlan {
     };
   } catch {
     throw new ApiError("CONTROL_QUERY_INVALID");
+  }
+}
+
+/** Validate a bounded server-side causality plan before transport. */
+export function validateCausalityPlan(value: unknown): CausalityPlan {
+  try {
+    const row = object(value);
+    exactKeys(row, [
+      "schema_version",
+      "start",
+      "end",
+      "event_id",
+      "direction",
+      "max_depth",
+      "max_nodes",
+    ]);
+    ensure(row.schema_version === 3);
+    const start = wholeSecond(row.start);
+    const end = wholeSecond(row.end);
+    const duration = Date.parse(end) - Date.parse(start);
+    ensure(duration > 0 && duration <= 31 * 24 * 60 * 60 * 1000);
+    return {
+      schema_version: 3,
+      start,
+      end,
+      event_id: id(row.event_id, eventPattern),
+      direction: choice(row.direction, [
+        "both",
+        "predecessors",
+        "successors",
+      ]),
+      max_depth: integer(row.max_depth, 1, 4),
+      max_nodes: integer(row.max_nodes, 1, 16),
+    };
+  } catch {
+    throw new ApiError("CONTROL_CAUSALITY_REQUEST_INVALID");
   }
 }
 
@@ -389,5 +457,68 @@ export function decodeSearchResponse(
     );
     ensure(result.next_cursor !== cursor);
   }
+  return result;
+}
+
+function causalityNode(value: unknown, plan: CausalityPlan): CausalityNode {
+  const row = object(value);
+  exactKeys(row, ["event", "depth", "direction"]);
+  const event = searchEvent(row.event);
+  eventPosition(event);
+  const direction = choice(row.direction, ["predecessor", "successor"]);
+  ensure(
+    (direction === "predecessor" &&
+      (plan.direction === "both" || plan.direction === "predecessors")) ||
+      (direction === "successor" &&
+        (plan.direction === "both" || plan.direction === "successors")),
+  );
+  return {
+    event,
+    depth: integer(row.depth, 1, plan.max_depth),
+    direction,
+  };
+}
+
+/** Decode the redacted, bounded graph response without accepting payloads. */
+export function decodeCausalityResponse(
+  value: unknown,
+  plan: CausalityPlan,
+): CausalityResponse {
+  const row = object(value);
+  ensure(row.schema_version === 3);
+  const result: CausalityResponse = {
+    ...envelope(row),
+    ...watermarked(row),
+    schema_version: 3,
+    root_event_id: id(row.root_event_id, eventPattern),
+    found: bool(row.found),
+    direction: choice(row.direction, ["both", "predecessors", "successors"]),
+    max_depth: integer(row.max_depth, 1, 4),
+    max_nodes: integer(row.max_nodes, 1, 16),
+    truncated: bool(row.truncated),
+    pending_segments: integer(row.pending_segments),
+    scanned_rows: nullable(row.scanned_rows, integer),
+    scanned_bytes: nullable(row.scanned_bytes, integer),
+    nodes: list(row.nodes, plan.max_nodes, (item) => causalityNode(item, plan)),
+  };
+  ensure(
+    result.root_event_id === plan.event_id &&
+      result.direction === plan.direction &&
+      result.max_depth === plan.max_depth &&
+      result.max_nodes === plan.max_nodes,
+  );
+  const rootTime = Date.parse(plan.start);
+  const endTime = Date.parse(plan.end);
+  const seen = new Set<string>([result.root_event_id]);
+  for (const node of result.nodes) {
+    const occurred = eventPosition(node.event);
+    ensure(
+      occurred.time >= BigInt(rootTime) * 1000n &&
+        occurred.time < BigInt(endTime) * 1000n &&
+        !seen.has(node.event.event_id),
+    );
+    seen.add(node.event.event_id);
+  }
+  ensure(result.found || result.nodes.length === 0);
   return result;
 }

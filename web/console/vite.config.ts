@@ -30,6 +30,7 @@ const accessReadPath =
   /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content)$/;
 const modelCallListPath = "/control/v1/model-calls";
 const auditHealthPath = "/control/v1/audit/health";
+const causalityPath = "/control/v1/causality";
 const oidcLoginPath = "/control/v1/auth/oidc/start";
 const oidcCallbackPath = "/control/v1/auth/oidc/callback";
 const oidcReauthStartPath = "/control/v1/auth/oidc/reauth/start";
@@ -91,6 +92,7 @@ export default defineConfig({
               (((path === sessionLogoutPath || path === oidcReauthStartPath) &&
                 request.url === path) ||
                 request.url === "/control/v1/search" ||
+                request.url === causalityPath ||
                 (request.url === path && writePath.test(path))));
           if (!allowed) {
             if (response) {

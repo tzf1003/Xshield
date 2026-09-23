@@ -383,7 +383,13 @@ export function modelCallListFixture(nextPage = false) {
 }
 
 import { searchPlanDigest } from "../src/search.ts";
-import type { SearchEvent, SearchPlan, SearchResponse } from "../src/search.ts";
+import type {
+  CausalityPlan,
+  CausalityResponse,
+  SearchEvent,
+  SearchPlan,
+  SearchResponse,
+} from "../src/search.ts";
 
 export const SEARCH_PLAN: SearchPlan = {
   schema_version: 3,
@@ -439,5 +445,46 @@ export async function searchFixture(
       ? null
       : `v1.${position}.${last.event_id}.${"0".repeat(64)}`,
     events,
+  };
+}
+
+export async function causalityFixture(
+  plan: CausalityPlan,
+): Promise<CausalityResponse> {
+  const base = await searchFixture();
+  const predecessor = {
+    ...base.events[0]!,
+    event_id: "ev_018f2a3b-4c5d-7000-8000-000000000003",
+    cause_event_ids: [],
+  };
+  const successor = {
+    ...base.events[1]!,
+    event_id: "ev_018f2a3b-4c5d-7000-8000-000000000004",
+    cause_event_ids: [plan.event_id],
+  };
+  return {
+    ...envelope(),
+    schema_version: 3,
+    root_event_id: plan.event_id,
+    found: true,
+    direction: plan.direction,
+    max_depth: plan.max_depth,
+    max_nodes: plan.max_nodes,
+    truncated: false,
+    as_of: AS_OF,
+    index_watermark: summaryFixture().index_watermark,
+    has_gaps: true,
+    pending_segments: 2,
+    scanned_rows: 4,
+    scanned_bytes: 1024,
+    nodes:
+      plan.direction === "predecessors"
+        ? [{ event: predecessor, depth: 1, direction: "predecessor" }]
+        : plan.direction === "successors"
+          ? [{ event: successor, depth: 1, direction: "successor" }]
+          : [
+              { event: predecessor, depth: 1, direction: "predecessor" },
+              { event: successor, depth: 1, direction: "successor" },
+            ],
   };
 }

@@ -22,9 +22,10 @@ import {
   modelCallFixture,
   modelCallListFixture,
   searchFixture,
+  causalityFixture,
   SEARCH_PLAN,
 } from "./fixtures";
-import type { SearchPlan } from "../src/search";
+import type { CausalityPlan, SearchPlan } from "../src/search";
 import {
   BINDING_ID,
   GRANT_ID,
@@ -66,6 +67,8 @@ async function mockControl(page: Page, override?: Override) {
     else if (url.pathname === "/control/v1/search") {
       const { cursor, ...plan } = request.postDataJSON();
       reply = { body: await searchFixture(plan, Boolean(cursor)) };
+    } else if (url.pathname === "/control/v1/causality") {
+      reply = { body: await causalityFixture(request.postDataJSON() as CausalityPlan) };
     } else if (url.pathname.startsWith("/control/v1/grants/")) {
       reply = { body: grantFixture(url.pathname.split("/").at(-1)) };
     } else if (url.pathname.startsWith("/control/v1/auth-bindings/")) {
@@ -1343,6 +1346,47 @@ test("shows a bounded multi-hop neighborhood and prepares unloaded references", 
     "",
   );
   expect(calls).toHaveLength(1);
+});
+
+test("submits bounded server causality only after an explicit UTC window", async ({
+  page,
+}) => {
+  const root = "ev_018f2a3b-4c5d-7000-8000-000000000001";
+  const calls = await mockControl(page);
+  await connect(page);
+  await prepareSearch(page);
+  await search(page);
+  await page.getByRole("radio", { name: root, exact: true }).check();
+  const panel = page.getByRole("region", { name: "服务端因果查询", exact: true });
+  await expect(panel).toBeVisible();
+  expect(calls.filter(({ path }) => path === "/control/v1/causality")).toHaveLength(0);
+  await panel
+    .getByLabel("因果开始时间（UTC，含）", { exact: true })
+    .fill("2026-09-20T00:00");
+  await panel
+    .getByLabel("因果结束时间（UTC，不含）", { exact: true })
+    .fill("2026-09-21T00:00");
+  await panel.getByRole("combobox", { name: "遍历方向", exact: true }).selectOption("successors");
+  await panel.getByLabel("最大跳数", { exact: true }).fill("3");
+  await panel.getByLabel("最大节点数", { exact: true }).fill("4");
+  await panel.getByRole("button", { name: "查询服务端因果", exact: true }).click();
+  await expect(
+    page.getByRole("region", { name: "服务端因果查询结果", exact: true }),
+  ).toContainText("已找到");
+  const request = calls.find(({ path }) => path === "/control/v1/causality");
+  expect(request?.body).toEqual({
+    schema_version: 3,
+    start: "2026-09-20T00:00:00Z",
+    end: "2026-09-21T00:00:00Z",
+    event_id: root,
+    direction: "successors",
+    max_depth: 3,
+    max_nodes: 4,
+  });
+  await expect(
+    page.getByRole("region", { name: "服务端因果查询结果", exact: true }),
+  ).toContainText("ev_018f2a3b-4c5d-7000-8000-000000000004");
+  expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
 });
 
 test("structured event search supports a strict trace identifier", async ({ page }) => {

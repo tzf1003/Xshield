@@ -6,8 +6,12 @@ import {
   bootstrapBrowserSession,
   validateModelCallListPlan,
 } from "./api";
-import { validateSearchPlan } from "./search";
-import type { SearchPlan, SearchResponse } from "./search";
+import { validateCausalityPlan, validateSearchPlan } from "./search";
+import type {
+  CausalityResponse,
+  SearchPlan,
+  SearchResponse,
+} from "./search";
 import { SearchPanel } from "./SearchPanel";
 import type { SearchPreset } from "./SearchPanel";
 import { LedgerPanel } from "./LedgerPanel";
@@ -113,6 +117,7 @@ export function App() {
   const [searchPresetVersion, setSearchPresetVersion] = useState(0);
   const [searchPlan, setSearchPlan] = useState<SearchPlan | null>(null);
   const [search, setSearch] = useState<SearchResponse | null>(null);
+  const [causality, setCausality] = useState<CausalityResponse | null>(null);
   const [model, setModel] = useState<ModelCallResponse | null>(null);
   const [modelListPlan, setModelListPlan] =
     useState<ModelCallListPlan | null>(null);
@@ -147,6 +152,7 @@ export function App() {
     setLedger(null);
     setSearchPlan(null);
     setSearch(null);
+    setCausality(null);
     setEvents(null);
     setEvidence(null);
     setArtifact(null);
@@ -488,6 +494,23 @@ export function App() {
       },
     );
   }
+  function loadCausality(value: unknown) {
+    setCausality(null);
+    void run(
+      "query",
+      (api, signal) => {
+        const plan = validateCausalityPlan(value);
+        return api.causality(plan, signal);
+      },
+      (response) => setCausality(response),
+    );
+  }
+  function invalidateCausality() {
+    operations.current.query += 1;
+    setCausality(null);
+    setBusy((value) => ({ ...value, query: false }));
+    setProblems((value) => ({ ...value, query: undefined }));
+  }
   function loadEvidence(cursor?: string) {
     if (!summary) return;
     setEvidence(null);
@@ -581,6 +604,7 @@ export function App() {
             }
             onCausalEvent={(id) => {
               clearArtifact();
+              invalidateCausality();
               if (relatedEvents.some((item) => item.event_id === id)) {
                 setSelected(id);
               } else {
@@ -590,6 +614,13 @@ export function App() {
             onTraceId={(traceId) =>
               prepareSearchHistory({ kind: "trace_id", value: traceId })
             }
+            causality={causality}
+            causalityBusy={Boolean(busy.query)}
+            causalityProblem={problems.query ?? null}
+            onCausalityEdit={() => {
+              invalidateCausality();
+            }}
+            onCausalitySubmit={loadCausality}
           />
         ) : (
           <p className="empty">选择一条事件或证据查看详情。</p>
@@ -853,6 +884,7 @@ export function App() {
                 }}
                 onSelect={(id) => {
                   clearArtifact();
+                  invalidateCausality();
                   setSelected(id);
                 }}
               />
@@ -997,6 +1029,7 @@ export function App() {
                         selected={selected}
                         onSelect={(id) => {
                           clearArtifact();
+                          invalidateCausality();
                           setSelected(id);
                         }}
                       />

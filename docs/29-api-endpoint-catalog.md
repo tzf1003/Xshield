@@ -383,4 +383,4 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 
 每次认证尝试追加 `console.causality.read` 管理事件：成功为 `PASS/CONTROL_CAUSALITY_READ`，无效计划、容量或确定性预算拒绝为 `DENY`，超时/索引/健康故障为 `ERROR`。通过计划后的审计携带独立用途域 HMAC `query_digest`，原始根 ID、窗口、方向和节点限制不写入 journal；计划解析失败可省略摘要。审计写入失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，响应统一 `Cache-Control: private, no-store`。该端点只提供有界调查摘要，不提供自然语言编译、无上限完整图、回放、导出、证据读取或业务权限。
 
-部署先升级能够识别 `console.causality.read` 的管理 journal 发布器，再启用路由；无新增迁移或依赖。控制台当前仍使用已加载事件集合的即时邻域，后续可在保持显式提交和角色边界的前提下接入该端点。
+部署先升级能够识别 `console.causality.read` 的管理 journal 发布器，再启用路由；无新增迁移或依赖。控制台事件详情已提供显式查询表单，只有在操作者填写 UTC 窗口并提交后才调用该端点；已加载事件集合的即时邻域仍独立展示。

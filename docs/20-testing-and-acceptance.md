@@ -26,7 +26,7 @@
 
 管理身份的本地回归覆盖 callback query 闭合解析、HTTPS/loopback URL 边界、短时 HMAC 断言防伪造和篡改、重复 Cookie、严格 Origin/CSRF 头、认证响应 no-store，以及重复 `Authorization` 不能被 handler 重新解释。step-up 单测覆盖 `auth_time` 新鲜度与时钟偏差、API client 的 CSRF/安全授权 URL，以及未 step-up 的原文读取拒绝。Rust 控制 API、Node 与 Playwright 的普通控制台回归不模拟真实 IdP。`xshield-postgres` 的 `oidc_transactions_are_one_use_and_browser_sessions_are_revocable` 需独立 PostgreSQL、迁移 0035–0036 与显式解除 ignored 才验证一次性 state、session digest 绑定、数据库 step-up 窗口和撤销路径；因此本地测试通过不能替代该集成用例、真实企业 IdP/MFA 联调或部署代理/Cookie/TLS 验收。
 
-服务端因果回归由 `cargo test -p xshield-control --lib causality` 覆盖严格 DTO、非 Investigator 拒绝、根/前驱/后继的有界 BFS、深度/方向投影、脱敏摘要、健康字段和单次 `console.causality.read` 审计；`cargo test -p xshield-worker --lib control_audit` 额外验证成功事件必须带 64 位小写十六进制查询摘要、失败请求可省略摘要且路径/目标/原因白名单固定。ClickHouse 集成仍需在专用实例复核扫描预算、截断和索引缺口，本地 mock 不代表生产容量或发布延迟。
+服务端因果回归由 `cargo test -p xshield-control --lib causality` 覆盖严格 DTO、非 Investigator 拒绝、根/前驱/后继的有界 BFS、深度/方向投影、脱敏摘要、健康字段和单次 `console.causality.read` 审计；`cargo test -p xshield-worker --lib control_audit` 额外验证成功事件必须带 64 位小写十六进制查询摘要、失败请求可省略摘要且路径/目标/原因白名单固定。控制台 Playwright 回归还验证事件详情的服务端因果表单不会自动提交，提交后只发送冻结的 UTC 窗口/方向/上限并显示脱敏节点。ClickHouse 集成仍需在专用实例复核扫描预算、截断和索引缺口，本地 mock 不代表生产容量或发布延迟。
 
 ## 20.3 误拒与安全收益
 

@@ -96,6 +96,13 @@ export const messages = {
     "查询超出服务预算，请缩小时间范围或细化条件；精确 ID 查询请联系管理员。",
   CONTROL_QUERY_CAPACITY_EXHAUSTED: "调查查询服务繁忙，请稍后重试。",
   CONTROL_QUERY_TIMEOUT: "调查查询超时，请稍后重试。",
+  CONTROL_CAUSALITY_REQUEST_INVALID:
+    "因果查询条件无效，请检查 UTC 时间窗、方向和遍历上限。",
+  CONTROL_CAUSALITY_TIMEOUT: "因果查询超时，请缩小范围或稍后重试。",
+  CONTROL_CAUSALITY_INDEX_UNAVAILABLE:
+    "因果事件索引暂时不可用，请稍后重试。",
+  CONTROL_CAUSALITY_HEALTH_UNAVAILABLE:
+    "因果索引水位暂时不可用，请稍后重试。",
   CONTROL_CURSOR_INVALID: "分页凭证已失效，请重新查询。",
   CONTROL_CURSOR_UNAVAILABLE: "分页服务暂时不可用，请稍后重试。",
   CONTROL_INDEX_UNAVAILABLE: "审计索引暂时不可用，请稍后重试。",

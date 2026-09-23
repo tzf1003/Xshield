@@ -585,6 +585,49 @@ main {
   font-size: 10px;
 }
 
+.causality-query {
+  border-top: 1px solid #dce2e9;
+  padding-top: 14px;
+}
+
+.causality-query h4 {
+  margin: 0 0 8px;
+  color: #273447;
+  font-size: 13px;
+}
+
+.causality-query-form {
+  display: grid;
+  gap: 9px;
+}
+
+.causality-query-form .search-window {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.causality-query-result {
+  margin-top: 14px;
+}
+
+.causality-query-nodes {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.causality-query-nodes li {
+  display: grid;
+  gap: 2px;
+  border-left: 1px solid #d6dde5;
+  padding-left: 9px;
+}
+
+.causality-query-nodes strong {
+  color: #273447;
+}
+
 .notice summary {
   cursor: pointer;
   font-size: 12px;
