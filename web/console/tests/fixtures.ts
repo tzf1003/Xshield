@@ -402,6 +402,7 @@ export async function searchFixture(
   const events: SearchEvent[] = (nextPage ? [3] : [1, 2]).map((sequence) => ({
     event_id: `ev_018f2a3b-4c5d-7000-8000-${String(sequence).padStart(12, "0")}`,
     event_type: sequence === 1 ? "evidence.deleted" : "stage.completed",
+    trace_id: "018f2a3b4c5d70008000000000000003",
     request_id: sequence === 1 ? null : REQUEST_ID,
     stage: sequence === 1 ? null : "admission",
     outcome: sequence === 1 ? null : "DENY",

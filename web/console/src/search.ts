@@ -77,6 +77,8 @@ export type SearchPlan = {
 export type SearchEvent = {
   request_id: string | null;
   event_id: string;
+  /** Exact indexed W3C trace; nullable only for older API deployments. */
+  trace_id: string | null;
   event_type: string;
   stage: string | null;
   outcome: string | null;
@@ -296,6 +298,9 @@ function searchEvent(value: unknown): SearchEvent {
   return {
     request_id: nullable(row.request_id, (value) => id(value, requestPattern)),
     event_id: id(row.event_id, eventPattern),
+    trace_id: Object.hasOwn(row, "trace_id")
+      ? nullable(row.trace_id, (value) => id(value, traceIdPattern))
+      : null,
     event_type,
     stage: nullable(row.stage, name),
     outcome: nullable(row.outcome, (value) =>

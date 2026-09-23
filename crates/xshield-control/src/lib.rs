@@ -6765,6 +6765,7 @@ mod tests {
         xshield_worker::SearchEventSummary {
             request_id: Some("req_018f2a3b-4c5d-7000-8000-000000000001".to_owned()),
             event_id: event_id.to_owned(),
+            trace_id: "018f2a3b4c5d70008000000000000003".to_owned(),
             event_type: "stage.completed".to_owned(),
             stage: Some("admission".to_owned()),
             outcome: Some("PASS".to_owned()),
@@ -7510,7 +7511,7 @@ mod tests {
         );
         let digest = |sort| {
             let canonical = format!(
-                "{}|{}|{sort}|2|event_type=grant.issued|grant_id=grant_018f2a3b-4c5d-7000-8000-000000000101|auth_binding_id=auth_018f2a3b-4c5d-7000-8000-000000000102",
+                "{}|{}|{sort}|2|trace_id=018f2a3b4c5d70008000000000000003|event_type=grant.issued|grant_id=grant_018f2a3b-4c5d-7000-8000-000000000101|auth_binding_id=auth_018f2a3b-4c5d-7000-8000-000000000102",
                 occurred_at.timestamp() - 30,
                 occurred_at.timestamp() + 30,
             );

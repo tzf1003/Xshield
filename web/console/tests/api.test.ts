@@ -1096,6 +1096,7 @@ async function searchResponse(plan = searchPlan()): Promise<SearchResponse> {
   const events = [2, 1].map((id, index) => ({
     request_id: null,
     event_id: `ev_018f2a3b-4c5d-7000-8000-${String(id).padStart(12, "0")}`,
+    trace_id: "018f2a3b4c5d70008000000000000003",
     event_type: "origin.response",
     stage: null,
     outcome: null,
@@ -1435,6 +1436,9 @@ test("search rejects contradictory digest, position, confidence and wire shapes"
       value.events[1]!.event_id = value.events[0]!.event_id;
     },
     (value) => {
+      value.events[0]!.trace_id = "018F2A3B4C5D70008000000000000003";
+    },
+    (value) => {
       value.events.push(value.events[0]!);
     },
     (value) => {
@@ -1465,6 +1469,14 @@ test("search rejects contradictory digest, position, confidence and wire shapes"
     client.search(searchPlan(), first.next_cursor!),
     errorIs("INVALID_RESPONSE", 200),
   );
+});
+
+test("search accepts older responses without the additive trace projection", async (t) => {
+  const value = await searchResponse();
+  delete (value.events[0] as { trace_id?: string | null }).trace_id;
+  t.mock.method(globalThis, "fetch", async () => response(value));
+  const actual = await new ControlClient(TOKEN).search(searchPlan());
+  assert.equal(actual.events[0]?.trace_id, null);
 });
 
 test("search shares bounded errors and cancellation while distinguishing plan budget denial", async (t) => {

@@ -1318,6 +1318,7 @@ fn query_config(table: &str) -> PublisherConfig {
 fn assert_summary(actual: &SearchEventSummary, expected: &TestEvent) {
     let optional = |value: &'static str| (!value.is_empty()).then_some(value);
     assert_eq!(actual.event_id, expected.event_id);
+    assert_eq!(actual.trace_id, "0".repeat(32));
     assert_eq!(actual.event_type, expected.event_type);
     assert_eq!(actual.request_id.as_deref(), optional(expected.request_id));
     assert_eq!(actual.stage.as_deref(), optional(expected.stage));

@@ -908,6 +908,7 @@ export function EventDetail({
   onOpen,
   onRequest,
   onModelCall,
+  onTraceId,
   onPreviousEvent,
   onFollowEvent,
 }: {
@@ -915,9 +916,11 @@ export function EventDetail({
   onOpen: (id: string) => void;
   onRequest?: (id: string) => void;
   onModelCall?: (id: string) => void;
+  onTraceId?: (traceId: string) => void;
   onPreviousEvent: (eventId: string) => void;
   onFollowEvent: (eventId: string) => void;
 }) {
+  const traceId = "trace_id" in event ? event.trace_id : null;
   return (
     <div className="detail-body">
       <h3>{stageName(event.stage)}</h3>
@@ -995,11 +998,22 @@ export function EventDetail({
       <button onClick={() => onFollowEvent(event.event_id)}>
         查找以此为前驱的事件
       </button>
+      {traceId && (
+        <button onClick={() => onTraceId?.(traceId)}>
+          准备同 Trace 检索
+        </button>
+      )}
       <details className="event-metadata">
         <summary>更多事件字段</summary>
         <Rows
           entries={[
             ["事件类型", <span className="mono">{event.event_type}</span>],
+            ...(traceId
+              ? ([["Trace ID", <span className="mono">{traceId}</span>]] as [
+                  string,
+                  ReactNode,
+                ][])
+              : []),
             ...(typeof event.occurred_at === "number"
               ? ([["事件时间", time(event.occurred_at)]] as [
                   string,

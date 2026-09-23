@@ -506,6 +506,9 @@ export function App() {
             onFollowEvent={(id) =>
               prepareSearchHistory({ kind: "caused_by_event_id", value: id })
             }
+            onTraceId={(traceId) =>
+              prepareSearchHistory({ kind: "trace_id", value: traceId })
+            }
           />
         ) : (
           <p className="empty">选择一条事件或证据查看详情。</p>

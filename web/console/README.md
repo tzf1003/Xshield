@@ -32,7 +32,7 @@ npm run dev
 - 摘要后再读事件；证据目录和单项元数据按点击惰性读取。分页显式触发，每页替换前页，换请求重置游标。
 - 审计发布状态由操作者显式读取和刷新；每次读取均由服务端重新鉴权并写 `console.health.read`。连续水位只覆盖该配置 journal 的已确认封存段；缺口、待发布段和未封存段是发布观察，不能替代对其他路径或服务的独立检查。
 - 校准报告详情由操作者显式读取和刷新；每次读取均由服务端重新鉴权并写 `console.calibration.report.read`。控制台只接受严格白名单响应；401、范围偏差和晚到响应清空状态。报告正文 tombstone 仅是专用加密正文的保留观察，不会启用内容读取或改变现有校准、策略和业务边界。
-- 结构化事件检索输入 UTC 整秒半开时间窗（1970 至 2300，最长 31 天）、1–1000 条页大小及事件时间升/降序。服务端配置可进一步收紧单页上限。最多 8 个条件要求同一事件全部匹配，字段选择限定为 request/event/前驱事件/32 个小写十六进制字符 trace ID/grant/auth binding/case/artifact/calibration-report/model-call/evidence-access-request/evidence-hold ID、event_type/stage/reason_code/operation_id/model_revision 精确文本、outcome 和 0–10000 整数基点置信度上限。Trace ID 精确匹配现有 `FixedString(32)` 索引列，仍须提供有界 UTC 时间窗；前驱事件 ID 只检索固定 `cause_event_ids` 中的直接关联，不递归遍历。校准报告和保留锁 ID 只定位固定生命周期、保留维护和管理操作历史，不读取正文或授予任何能力；两类过滤均要求同作用域 `AuditAdministrator`，服务端在索引访问前拒绝权限不足的 Investigator。模型调用 ID 只定位固定模型生命周期和 `console.model.read` 历史，详情和证据继续各自重新鉴权。访问申请 ID 只定位固定申请/决策和 `console.evidence.access.read` 历史，详情、审批和原文读取继续各自重新鉴权。详情页的历史入口只预填 ID，操作者仍须填写 UTC 时间窗并主动提交。原生日期框中的值按 UTC 解释。
+- 结构化事件检索输入 UTC 整秒半开时间窗（1970 至 2300，最长 31 天）、1–1000 条页大小及事件时间升/降序。服务端配置可进一步收紧单页上限。最多 8 个条件要求同一事件全部匹配，字段选择限定为 request/event/前驱事件/32 个小写十六进制字符 trace ID/grant/auth binding/case/artifact/calibration-report/model-call/evidence-access-request/evidence-hold ID、event_type/stage/reason_code/operation_id/model_revision 精确文本、outcome 和 0–10000 整数基点置信度上限。Trace ID 精确匹配现有 `FixedString(32)` 索引列，搜索摘要回传经过校验的 trace 引用；详情页可预填同 Trace 检索，仍须提供有界 UTC 时间窗并主动提交。前驱事件 ID 只检索固定 `cause_event_ids` 中的直接关联，不递归遍历。校准报告和保留锁 ID 只定位固定生命周期、保留维护和管理操作历史，不读取正文或授予任何能力；两类过滤均要求同作用域 `AuditAdministrator`，服务端在索引访问前拒绝权限不足的 Investigator。模型调用 ID 只定位固定模型生命周期和 `console.model.read` 历史，详情和证据继续各自重新鉴权。访问申请 ID 只定位固定申请/决策和 `console.evidence.access.read` 历史，详情、审批和原文读取继续各自重新鉴权。原生日期框中的值按 UTC 解释。
 - 已提交计划、服务端查询摘要和管理 request_id 可见；下一页沿用冻结计划，编辑即清除旧结果、详情和游标。结果保留 nullable 字段与 RFC3339 微秒时间，扫描统计未知与 0 分开显示，空结果与索引 gap/pending 分别判断。水位只覆盖配置日志源，独立 Outbox 可能仍待发布；分页期间发布或到期可能改变后续可见集合。
 - 查询摘要使用浏览器原生 WebCrypto 验证，需要 HTTPS 或 localhost 安全上下文；能力不可用时本地拒绝查询。
 - 搜索只读已发布历史事实；请求与证据引用可打开现有详情，但仍需 Observer，Investigator 不隐含该权限。当前资格/绑定有效性、案件归属与原文读取由对应服务分别校验。事件详情可逐跳查看直接前驱或查找一个事件的直接后继；每次重新鉴权、计费并审计，不自动提交或递归展开。完整关联图、多跳遍历与自然语言计划继续迭代。
@@ -111,7 +111,7 @@ cargo test -p xshield-control --lib console_hold_client_mutates_postgres_http_co
 scripts/test_postgres.sh
 ```
 
-Node 单测覆盖请求/响应边界、模型生命周期一致性、校准报告严格白名单 projection、发布快照的白名单字段与计数关系、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖校准报告和审计发布状态的显式读取/刷新及会话隔离、分页、模型查询与引用详情、Noul/历史空字段，以及搜索 POST 正文、冻结计划分页、编辑失效、输入边界、空结果与 gap、可空事实和独立角色权限。共享回归覆盖 403/429/503、401/闲置/页面离开/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
+Node 单测覆盖请求/响应边界、模型生命周期一致性、校准报告严格白名单 projection、发布快照的白名单字段与计数关系、精度、空值、取消、超时和流式上限。Playwright 使用真实客户端加显式合成 HTTP 响应，覆盖校准报告和审计发布状态的显式读取/刷新及会话隔离、分页、模型查询与引用详情、Noul/历史空字段，以及搜索 POST 正文、冻结计划分页、编辑失效、事件详情预填同 Trace 条件且不自动提交、输入边界、空结果与 gap、可空事实和独立角色权限。共享回归覆盖 403/429/503、401/闲置/页面离开/刷新清态、异步响应隔离、跨范围拒绝、文本注入及 1536/390 像素布局；默认不记录截图或 trace。需要本地截图时显式将 `XSHIELD_CONSOLE_SCREENSHOT_DIR` 设为仓库外临时目录，验收后清理。
 
 Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管理 journal，验证摘要、事件分页与微秒时间、目录依赖故障和 401，以及完整 Gateway Choice、旧记录 Noul 部分生命周期、模型未命中、预算 429 和模型访问审计。浏览器回归的 manifest 成功数据是合成契约，不代表已在生产数据源或企业 SSO 上验收。
 

@@ -111,6 +111,7 @@ try {
     first.events.map((row) => row.occurred_at),
     ["2026-09-20T08:10:30.123456Z", "2026-09-20T08:10:30.123789Z"],
   );
+  assert.ok(first.events.every((row) => row.trace_id === trace));
   const nullableEvent = first.events[0];
   assert.ok(nullableEvent);
   for (const field of [

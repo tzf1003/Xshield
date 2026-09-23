@@ -1304,6 +1304,36 @@ test("structured event search supports a strict trace identifier", async ({ page
   await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("本页 2 条");
 });
 
+test("event details prepare same-trace search without auto-submitting", async ({ page }) => {
+  const trace = "018f2a3b4c5d70008000000000000003";
+  const calls = await mockControl(page);
+  await connect(page);
+  await prepareSearch(page);
+  await search(page);
+  expect(calls).toHaveLength(1);
+
+  await page.locator("aside").getByRole("button", {
+    name: "准备同 Trace 检索",
+    exact: true,
+  }).click();
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("trace_id");
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(trace);
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
+  expect(calls).toHaveLength(1);
+
+  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
+  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
+  await search(page);
+  expect(calls).toHaveLength(2);
+  expect(calls[1]?.body).toMatchObject({
+    filters: [{ kind: "trace_id", value: trace }],
+  });
+  await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("本页 2 条");
+  expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
+});
+
 test("search submits an allowlisted plan, freezes pagination and clears edited results", async ({
   page,
 }) => {

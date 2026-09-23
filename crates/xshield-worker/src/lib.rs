@@ -3678,6 +3678,7 @@ mod tests {
         SearchEventSummary {
             request_id: Some(request_id.to_owned()),
             event_id: format!("ev_018f2a3b-4c5d-7000-8000-{request_seq:012x}"),
+            trace_id: "018f2a3b4c5d70008000000000000003".to_owned(),
             event_type: "stage.completed".to_owned(),
             stage: Some("admission".to_owned()),
             outcome: Some("PASS".to_owned()),

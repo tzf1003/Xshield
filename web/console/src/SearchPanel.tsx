@@ -30,6 +30,7 @@ type DraftFilter = { id: number; field: Field; value: string };
 export type SearchPreset = {
   kind:
     | "event_id"
+    | "trace_id"
     | "caused_by_event_id"
     | "grant_id"
     | "auth_binding_id"

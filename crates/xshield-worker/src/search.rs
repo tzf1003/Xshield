@@ -10,7 +10,7 @@ use clickhouse::{Client, Row, sql::Identifier};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use xshield_core::{
-    domain::{EventId, ModelCallId, RequestId, SiteId, TenantId},
+    domain::{EventId, ModelCallId, RequestId, SiteId, TenantId, TraceId},
     query::{MAX_LIMIT, QueryFilter, QueryPlan, QuerySort, QueryWindow},
 };
 
@@ -29,6 +29,8 @@ pub struct SearchEventSummary {
     pub request_id: Option<String>,
     /// Stable immutable event identity.
     pub event_id: String,
+    /// Exact W3C trace identifier from the indexed event envelope.
+    pub trace_id: String,
     /// Versioned event kind.
     pub event_type: String,
     /// Pipeline stage extracted by the publisher adapter.
@@ -940,7 +942,7 @@ async fn execute_query(
     }
     let descending = matches!(plan.sort(), QuerySort::OccurredAtDesc);
     let mut sql = format!(
-        "SELECT nullIf(request_id,'') AS request_id,event_id,event_type,\
+        "SELECT nullIf(request_id,'') AS request_id,event_id,trace_id,event_type,\
          nullIf(stage,'') AS stage,nullIf(outcome,'') AS outcome,\
          nullIf(reason_code,'') AS reason_code,nullIf(proof_kind,'') AS proof_kind,confidence,\
          nullIf(confidence_status,'') AS confidence_status,occurred_at,request_seq,duration_us,\
@@ -1217,6 +1219,7 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
         RequestId::parse(request).map_err(|_| PublishError::InvalidEvent)?;
     }
     EventId::parse(&event.event_id).map_err(|_| PublishError::InvalidEvent)?;
+    TraceId::parse(event.trace_id.clone()).map_err(|_| PublishError::InvalidEvent)?;
     validate_id_list(&event.evidence_refs, None)?;
     validate_id_list(&event.cause_event_ids, Some("ev_"))?;
     let confidence_valid = event.confidence_status.as_deref().map_or(
@@ -1284,16 +1287,16 @@ mod tests {
     use super::{
         MODEL_CALL_ID_PROJECTION, MODEL_CALL_LIST_LIMIT_MAX, ModelCallListPlan,
         ModelCallListPosition, ModelCallListResult, ModelCallListRow, ModelCallRow,
-        ModelCallSummary, PublishError, SearchEventSummary, query_error, query_model_call,
-        query_model_calls, validate_search_event,
+        ModelCallSummary, PublishError, SearchEventSummary, query_audit_events, query_error,
+        query_model_call, query_model_calls, validate_search_event,
     };
     use crate::PublisherConfig;
     use chrono::{DateTime, Utc};
     use clickhouse::{Client, error::Error, test};
     use xshield_core::{
-        domain::{ModelCallId, SiteId, TenantId},
+        domain::{ModelCallId, SiteId, TenantId, TraceId},
         identity::UnixSeconds,
-        query::QueryWindow,
+        query::{QueryFilter, QueryPlan, QuerySort, QueryWindow},
     };
 
     const MODEL_CALL_ID: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
@@ -1341,6 +1344,7 @@ mod tests {
             r#"{
             "request_id":"req_018f2a3b-4c5d-7000-8000-000000000001",
             "event_id":"ev_018f2a3b-4c5d-7000-8000-000000000001",
+            "trace_id":"018f2a3b4c5d70008000000000000003",
             "event_type":"stage.completed","stage":"ui_semantic_match",
             "outcome":"PASS","reason_code":"CANDIDATE_CLASSIFICATION_COMPLETE",
             "proof_kind":"model","confidence":0.86,"confidence_status":"provided",
@@ -1752,6 +1756,49 @@ mod tests {
         assert!(sql.contains("tuple(occurred_at,model_call_id) <"), "{sql}");
         assert!(
             sql.contains("ORDER BY occurred_at DESC,model_call_id DESC"),
+            "{sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_projects_and_filters_exact_trace_id() {
+        let config = PublisherConfig::new(
+            "/tmp/xshield-trace-query-journal",
+            "/tmp/xshield-trace-query-manifest",
+            "/tmp/xshield-trace-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        let mock = test::Mock::new();
+        let recorded = mock.add(test::handlers::record_ddl());
+        let trace = TraceId::parse("018f2a3b4c5d70008000000000000003").unwrap();
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            vec![QueryFilter::TraceId(trace)],
+            QuerySort::OccurredAtDesc,
+            2,
+        )
+        .unwrap();
+
+        let result = query_audit_events(
+            &config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_b").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.events.is_empty());
+        let sql = recorded.query().await;
+        assert!(sql.contains("event_id,trace_id,event_type"), "{sql}");
+        assert!(
+            sql.contains("trace_id = '018f2a3b4c5d70008000000000000003'"),
             "{sql}"
         );
     }
