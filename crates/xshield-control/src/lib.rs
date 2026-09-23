@@ -3259,6 +3259,16 @@ impl ControlPlane {
         request_id: &str,
         action: AccessAction,
     ) -> Result<String, Box<EndpointResult>> {
+        self.authorize_identity(authorization, request_id, action)
+            .map(|identity| identity.principal.subject().to_owned())
+    }
+
+    fn authorize_identity(
+        &self,
+        authorization: Option<&str>,
+        request_id: &str,
+        action: AccessAction,
+    ) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
         let identity = self.authenticated_subject(authorization, request_id, action)?;
         let principal = &identity.principal;
         let subject = principal.subject();
@@ -3316,7 +3326,7 @@ impl ControlPlane {
                 "request_scope",
             )));
         }
-        Ok(subject.to_owned())
+        Ok(identity)
     }
 
     fn authenticated_subject(

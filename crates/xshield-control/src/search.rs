@@ -54,15 +54,25 @@ impl ControlPlane {
         let request_id = format!("req_{}", Uuid::now_v7());
         let auth_control = Arc::clone(&self);
         let auth_request_id = request_id.clone();
-        let subject = match tokio::task::spawn_blocking(move || {
-            auth_control.authorize(authorization.as_deref(), &auth_request_id, SEARCH_ACCESS)
+        let identity = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize_identity(
+                authorization.as_deref(),
+                &auth_request_id,
+                SEARCH_ACCESS,
+            )
         })
         .await
         {
-            Ok(Ok(subject)) => subject,
+            Ok(Ok(identity)) => identity,
             Ok(Err(response)) => return *response,
             Err(_) => return internal_error(&request_id),
         };
+        let has_audit_administrator = identity.principal.authorizes(
+            ManagementRole::AuditAdministrator,
+            &self.config.tenant_id,
+            &self.config.site_id,
+        );
+        let subject = identity.principal.subject().to_owned();
         let Some((plan, cursor)) = payload.and_then(|mut payload| {
             let cursor = payload.cursor.take();
             payload
@@ -89,11 +99,8 @@ impl ControlPlane {
                 filter,
                 QueryFilter::CalibrationReportId(_) | QueryFilter::EvidenceHoldId(_)
             )
-        }) && !self.config.principal.authorizes(
-            ManagementRole::AuditAdministrator,
-            &self.config.tenant_id,
-            &self.config.site_id,
-        ) {
+        }) && !has_audit_administrator
+        {
             // Both retained report and hold facts share their respective
             // administrator visibility boundaries with the source workbenches.
             return self
