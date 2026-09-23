@@ -33,10 +33,8 @@ pub(super) struct ModelCacheConfiguration {
 ///
 /// It is intentionally not displayable: a cache lookup receives raw bytes and
 /// must retain the scope and domain supplied by [`ModelCacheConfiguration`].
-#[cfg(test)]
 pub(super) struct ModelCacheKey(Zeroizing<[u8; CACHE_KEY_BYTES]>);
 
-#[cfg(test)]
 impl ModelCacheKey {
     /// Borrows the fixed-length database lookup key without formatting it.
     #[must_use]
@@ -69,7 +67,7 @@ impl ModelCacheConfiguration {
         Self::from_values(model, Some(&domain), Some(source.as_str()))
     }
 
-    fn from_values(
+    pub(super) fn from_values(
         model: &impl ModelPort,
         domain: Option<&str>,
         source: Option<&str>,
@@ -100,27 +98,7 @@ impl ModelCacheConfiguration {
         }))
     }
 
-    /// Checks that an opaque key can be derived for one complete validated input.
-    ///
-    /// Length-prefixing prevents ambiguous component concatenation. The input
-    /// serialization contains every current decision-relevant field; tenant/site
-    /// and configured domain prevent reuse across trust scopes. The key is
-    /// dropped immediately because durable cache lookup is not enabled yet.
-    ///
-    /// # Errors
-    /// Returns a stable configuration reason if the local crypto provider fails.
-    pub(super) fn validate_input_binding(
-        &self,
-        tenant_id: &TenantId,
-        site_id: &SiteId,
-        input: &Input,
-    ) -> Result<(), &'static str> {
-        let _derived = self.derive_key(tenant_id, site_id, input)?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn key_for(
+    pub(super) fn key_for(
         &self,
         tenant_id: &TenantId,
         site_id: &SiteId,
@@ -182,6 +160,21 @@ impl ModelCacheConfiguration {
     #[must_use]
     pub(super) fn reuses_transport_secret(&self, model: &impl ModelPort) -> bool {
         model.cache_key_reuses_transport_secret(self.key.as_ref())
+    }
+
+    /// Returns the fixed provider identity used by this cache scope.
+    pub(super) fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// Returns the fixed wire model identity used by this cache scope.
+    pub(super) fn provider_model_id(&self) -> &str {
+        &self.provider_model_id
+    }
+
+    /// Returns the exact model revision proven by the transport.
+    pub(super) fn resolved_model_revision(&self) -> &str {
+        &self.resolved_model_revision
     }
 }
 

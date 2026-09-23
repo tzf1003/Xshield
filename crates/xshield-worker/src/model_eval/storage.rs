@@ -1,6 +1,7 @@
 use super::{Attempt, CATALOG_DEADLINE, CONFIG, ModelEvent, secret};
 use chrono::{TimeDelta, Utc};
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -8,13 +9,14 @@ use std::{
     path::Path,
 };
 use xshield_audit::{JournalError, JournalKey, JournalLimits, JournalRecord, LocalJournal};
-use xshield_core::domain::{ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
+use xshield_core::domain::{ArtifactId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 use xshield_evidence::{
     EvidenceClassification, EvidenceFidelity, EvidenceKey, EvidenceVaultConfig, EvidenceWrite,
     LocalEvidenceVault,
 };
 use xshield_postgres::{
-    EvidenceCatalogPublish, EvidenceCatalogWriteOutcome, PostgresIdentityStore,
+    EvidenceCatalogArtifactQuery, EvidenceCatalogPublish, EvidenceCatalogWriteOutcome,
+    ModelEvaluationCacheEntry, PostgresIdentityStore,
 };
 
 const DOCUMENT_MAX: usize = 512 * 1024;
@@ -22,6 +24,54 @@ const WRITE_OVERHEAD: u64 = 64 * 1024 + 61;
 const RESERVATION: u64 = 4 * (DOCUMENT_MAX as u64 + WRITE_OVERHEAD);
 const MAX_FILES: u64 = 100_000;
 const AUDIT: &str = "MODEL_AUDIT_UNAVAILABLE";
+
+/// Strict, owned representation of one successful source model-call record.
+///
+/// Cache reuse reserializes this record with a new call/request identity and a
+/// `MODEL_CACHE_HIT` reason. The source record is never returned to callers.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CachedModelRecord {
+    schema_version: u8,
+    model_call_id: String,
+    request_id: String,
+    example_only: bool,
+    provider: String,
+    provider_model_id: String,
+    model_revision: String,
+    resolved_model_revision: Option<String>,
+    prompt_revision: String,
+    input_artifact_id: String,
+    output_artifact_id: Option<String>,
+    question_type: String,
+    result: Option<Value>,
+    probabilities: BTreeMap<String, f64>,
+    legend: Option<BTreeMap<String, String>>,
+    risk_projection: Option<Value>,
+    pub(super) provider_confidence: Option<f64>,
+    pub(super) confidence_status: String,
+    probability_semantics: String,
+    usage: CachedUsageRecord,
+    duration_ms: u64,
+    status: String,
+    reason_code: String,
+    http_status: Option<u16>,
+    capture_status: String,
+    retry_after_seconds: Option<u32>,
+    provider_request_id: Option<String>,
+    schema_validation: String,
+    provider_internal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache_source_model_call_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CachedUsageRecord {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    source: String,
+}
 
 pub(super) struct Storage {
     vault: LocalEvidenceVault,
@@ -167,6 +217,170 @@ impl Storage {
         Ok(artifact)
     }
 
+    /// Revalidates and materializes one durable cache hit.
+    ///
+    /// Every source artifact is looked up in the exact `PostgreSQL` scope, its
+    /// authenticated vault manifest is compared byte-for-byte with catalog
+    /// metadata, and its content is parsed before any new model-call record is
+    /// written. A hit reuses source evidence references but receives a fresh
+    /// model-call artifact and lifecycle IDs.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) async fn execute_cached(
+        &mut self,
+        store: &PostgresIdentityStore,
+        input: &super::Input,
+        client: &impl super::ModelPort,
+        attempt: &mut Attempt,
+        internal: &[u8],
+        source: &ModelEvaluationCacheEntry,
+    ) -> Result<CachedModelRecord, &'static str> {
+        let internal_bytes = self
+            .read_cached_artifact(
+                store,
+                &attempt.tenant,
+                &attempt.site,
+                &source.internal_artifact,
+                &source.source_request,
+                "model_internal_input",
+            )
+            .await?;
+        if internal_bytes.as_slice() != internal {
+            return Err("MODEL_CACHE_SOURCE_INVALID");
+        }
+        let input_bytes = self
+            .read_cached_artifact(
+                store,
+                &attempt.tenant,
+                &attempt.site,
+                &source.input_artifact,
+                &source.source_request,
+                "model_input",
+            )
+            .await?;
+        let expected_input = input
+            .api_bytes_for_model(
+                source.source_request.as_str(),
+                source.source_model_call.as_str(),
+                source.internal_artifact.as_str(),
+                client.provider_model(),
+            )
+            .map_err(|_| "MODEL_CACHE_SOURCE_INVALID")?;
+        if input_bytes.as_slice() != expected_input.as_slice()
+            || client.contains_secret(&expected_input)
+        {
+            return Err("MODEL_CACHE_SOURCE_INVALID");
+        }
+        validate_cached_input_document(&input_bytes, source)?;
+        let output_bytes = self
+            .read_cached_artifact(
+                store,
+                &attempt.tenant,
+                &attempt.site,
+                &source.output_artifact,
+                &source.source_request,
+                "model_output",
+            )
+            .await?;
+        validate_cached_output_document(&output_bytes)?;
+        let call_bytes = self
+            .read_cached_artifact(
+                store,
+                &attempt.tenant,
+                &attempt.site,
+                &source.call_artifact,
+                &source.source_request,
+                "model_call",
+            )
+            .await?;
+        let mut record: CachedModelRecord =
+            serde_json::from_slice(&call_bytes).map_err(|_| "MODEL_CACHE_SOURCE_INVALID")?;
+        validate_cached_record(&record, input, source)?;
+
+        attempt.internal = Some(source.internal_artifact.as_str().to_owned());
+        attempt.input = Some(source.input_artifact.as_str().to_owned());
+        // The cache transition is the durable equivalent of model.requested;
+        // it intentionally contains no provider request and no output ref yet.
+        let mut cached_event = ModelEvent::new_for_provider(
+            attempt,
+            input,
+            client.provider(),
+            client.provider_model(),
+        );
+        "requested".clone_into(&mut cached_event.status);
+        "MODEL_CACHE_HIT".clone_into(&mut cached_event.reason_code);
+        cached_event.input_artifact_id = attempt.input.clone();
+        cached_event.cache_source_model_call_id =
+            Some(source.source_model_call.as_str().to_owned());
+        self.event(attempt, "model.cache_hit", &cached_event)?;
+
+        attempt.output = Some(source.output_artifact.as_str().to_owned());
+        record.model_call_id = attempt.call.as_str().to_owned();
+        record.request_id = attempt.request.as_str().to_owned();
+        record.input_artifact_id = source.input_artifact.as_str().to_owned();
+        record.output_artifact_id = Some(source.output_artifact.as_str().to_owned());
+        "success".clone_into(&mut record.status);
+        "MODEL_CACHE_HIT".clone_into(&mut record.reason_code);
+        record.duration_ms = 0;
+        record.http_status = None;
+        "cached".clone_into(&mut record.capture_status);
+        record.retry_after_seconds = None;
+        record.provider_request_id = None;
+        "cached".clone_into(&mut record.schema_validation);
+        record.cache_source_model_call_id = Some(source.source_model_call.as_str().to_owned());
+        let bytes = serde_json::to_vec(&record).map_err(|_| "MODEL_EVIDENCE_UNAVAILABLE")?;
+        record.input_artifact_id = source.input_artifact.as_str().to_owned();
+        attempt.record = Some(
+            self.capture(
+                store,
+                attempt,
+                "model_call",
+                &bytes,
+                EvidenceFidelity::Semantic,
+                &attempt.refs(),
+            )
+            .await?,
+        );
+        Ok(record)
+    }
+
+    async fn read_cached_artifact(
+        &self,
+        store: &PostgresIdentityStore,
+        tenant: &TenantId,
+        site: &SiteId,
+        artifact: &ArtifactId,
+        source_request: &RequestId,
+        expected_kind: &str,
+    ) -> Result<Vec<u8>, &'static str> {
+        let catalog = store
+            .find_artifact(EvidenceCatalogArtifactQuery::new(tenant, site, artifact))
+            .await
+            .map_err(|_| "MODEL_CACHE_SOURCE_UNAVAILABLE")?
+            .ok_or("MODEL_CACHE_SOURCE_INVALID")?;
+        let manifest = catalog.manifest();
+        if manifest.request_id != source_request.as_str()
+            || manifest.kind != expected_kind
+            || manifest.content_type != "application/json"
+            || manifest.classification != EvidenceClassification::Restricted
+        {
+            return Err("MODEL_CACHE_SOURCE_INVALID");
+        }
+        let verified = tokio::task::block_in_place(|| {
+            self.vault
+                .read_manifest(tenant, site, artifact.as_str())
+                .map_err(|_| "MODEL_CACHE_SOURCE_INVALID")
+        })?;
+        if verified.manifest() != manifest {
+            return Err("MODEL_CACHE_SOURCE_INVALID");
+        }
+        let content = tokio::task::block_in_place(|| {
+            self.vault
+                .read_content_matching_manifest(tenant, site, &verified)
+                .map_err(|_| "MODEL_CACHE_SOURCE_INVALID")
+        })?;
+        Ok(content.to_vec())
+    }
+
     pub(super) fn event(
         &mut self,
         attempt: &mut Attempt,
@@ -229,8 +443,8 @@ impl Storage {
                     {
                         pending.insert(payload.model_call_id.clone(), (event, payload));
                     }
-                    "model.requested" | "model.responded" | "model.failed" | "model.timeout"
-                    | "model.cancelled" => {
+                    "model.requested" | "model.cache_hit" | "model.responded" | "model.failed"
+                    | "model.timeout" | "model.cancelled" => {
                         let (previous, previous_payload) =
                             old.ok_or(JournalError::Corrupt("model lifecycle"))?;
                         if event.request_id != previous.request_id
@@ -246,16 +460,21 @@ impl Storage {
                             || (previous.event_type == "model.started"
                                 && !matches!(
                                     event.event_type.as_str(),
-                                    "model.requested" | "model.failed"
+                                    "model.requested" | "model.cache_hit" | "model.failed"
                                 ))
-                            || (previous.event_type == "model.requested"
-                                && (event.event_type == "model.requested"
-                                    || payload.input_artifact_id
-                                        != previous_payload.input_artifact_id))
+                            || (matches!(
+                                previous.event_type.as_str(),
+                                "model.requested" | "model.cache_hit"
+                            ) && (event.event_type == "model.requested"
+                                || event.event_type == "model.cache_hit"
+                                || payload.input_artifact_id != previous_payload.input_artifact_id))
                         {
                             return Err(JournalError::Corrupt("model lifecycle"));
                         }
-                        if event.event_type == "model.requested" {
+                        if matches!(
+                            event.event_type.as_str(),
+                            "model.requested" | "model.cache_hit"
+                        ) {
                             pending.insert(payload.model_call_id.clone(), (event, payload));
                         }
                     }
@@ -294,4 +513,93 @@ impl Storage {
         }
         Ok(())
     }
+}
+
+fn validate_cached_input_document(
+    bytes: &[u8],
+    source: &ModelEvaluationCacheEntry,
+) -> Result<(), &'static str> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| "MODEL_CACHE_SOURCE_INVALID")?;
+    let trace = value
+        .get("state")
+        .and_then(Value::as_object)
+        .and_then(|state| state.get("trace_context"))
+        .and_then(Value::as_object)
+        .ok_or("MODEL_CACHE_SOURCE_INVALID")?;
+    if value.get("model").and_then(Value::as_str) != Some(source.provider_model_id.as_str())
+        || trace.get("request_id").and_then(Value::as_str) != Some(source.source_request.as_str())
+        || trace.get("model_call_id").and_then(Value::as_str)
+            != Some(source.source_model_call.as_str())
+        || trace.get("input_artifact_id").and_then(Value::as_str)
+            != Some(source.internal_artifact.as_str())
+    {
+        return Err("MODEL_CACHE_SOURCE_INVALID");
+    }
+    Ok(())
+}
+
+fn validate_cached_output_document(bytes: &[u8]) -> Result<(), &'static str> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| "MODEL_CACHE_SOURCE_INVALID")?;
+    let body = value
+        .get("body")
+        .and_then(Value::as_array)
+        .ok_or("MODEL_CACHE_SOURCE_INVALID")?;
+    let bytes_saved = value
+        .get("bytes_saved")
+        .and_then(Value::as_u64)
+        .ok_or("MODEL_CACHE_SOURCE_INVALID")?;
+    if value.get("representation").and_then(Value::as_str) != Some("entity_bytes_array")
+        || value.get("capture_status").and_then(Value::as_str) != Some("complete")
+        || bytes_saved != u64::try_from(body.len()).unwrap_or(u64::MAX)
+    {
+        return Err("MODEL_CACHE_SOURCE_INVALID");
+    }
+    Ok(())
+}
+
+fn validate_cached_record(
+    record: &CachedModelRecord,
+    input: &super::Input,
+    source: &ModelEvaluationCacheEntry,
+) -> Result<(), &'static str> {
+    if record.schema_version != 3
+        || record.model_call_id != source.source_model_call.as_str()
+        || record.request_id != source.source_request.as_str()
+        || record.example_only
+        || record.provider != source.provider
+        || record.provider_model_id != source.provider_model_id
+        || record.model_revision != input.model_revision()
+        || record.prompt_revision != input.prompt_revision()
+        || record.resolved_model_revision != source.resolved_model_revision
+        || record.input_artifact_id != source.input_artifact.as_str()
+        || record.output_artifact_id.as_deref() != Some(source.output_artifact.as_str())
+        || record.question_type != input.question_type()
+        || record.status != "success"
+        || record.reason_code != "MODEL_EVALUATED"
+        || record.probability_semantics != "provider_reported_uncalibrated"
+        || record.capture_status != "complete"
+        || record.schema_validation != "valid"
+        || record.cache_source_model_call_id.is_some()
+        || !matches!(record.usage.source.as_str(), "provider" | "unavailable")
+        || record
+            .probabilities
+            .values()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        || !crate::valid_confidence(
+            "model",
+            "PASS",
+            record.provider_confidence,
+            &record.confidence_status,
+        )
+    {
+        return Err("MODEL_CACHE_SOURCE_INVALID");
+    }
+    if input.question_type() == "noul" {
+        if record.confidence_status != "not_applicable" || !record.probabilities.is_empty() {
+            return Err("MODEL_CACHE_SOURCE_INVALID");
+        }
+    } else if record.result.is_none() || record.probabilities.is_empty() {
+        return Err("MODEL_CACHE_SOURCE_INVALID");
+    }
+    Ok(())
 }

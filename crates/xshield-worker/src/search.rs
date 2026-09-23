@@ -551,7 +551,7 @@ async fn execute_model_call_list(
                AND occurred_at >= fromUnixTimestamp64Micro(?) \
                AND occurred_at < fromUnixTimestamp64Micro(?) \
                AND proof_kind = 'model' \
-               AND event_type IN ('model.started','model.requested','model.responded', \
+               AND event_type IN ('model.started','model.requested','model.cache_hit','model.responded', \
                                   'model.failed','model.timeout','model.cancelled') \
            ) \
            WHERE model_call_id IS NOT NULL \
@@ -704,7 +704,7 @@ async fn execute_model_call(
             "SELECT event_id,event_type,request_id,occurred_at,request_seq,
              evidence_refs,cause_event_ids,sensitivity,payload_json FROM ?
              WHERE tenant_id = ? AND site_id = ?
-               AND event_type IN ('model.started','model.requested','model.responded',
+               AND event_type IN ('model.started','model.requested','model.cache_hit','model.responded',
                                   'model.failed','model.timeout','model.cancelled')
                AND JSONExtractString(payload_json,'model_call_id') = ?
              ORDER BY request_seq,event_id LIMIT 4",
@@ -743,6 +743,7 @@ async fn execute_model_call(
                 row.event_type.as_str(),
                 "model.started"
                     | "model.requested"
+                    | "model.cache_hit"
                     | "model.responded"
                     | "model.failed"
                     | "model.timeout"
@@ -1036,7 +1037,7 @@ async fn execute_query(
                 "AND JSONExtractString(payload_json,'target_access_request_id') = ?))",
             )),
             QueryFilter::ModelCallId(_) => sql.push_str(concat!(
-                "((event_type IN ('model.started','model.requested','model.responded',",
+                "((event_type IN ('model.started','model.requested','model.cache_hit','model.responded',",
                 "'model.failed','model.timeout','model.cancelled') ",
                 "AND JSONExtractString(payload_json,'model_call_id') = ?) ",
                 "OR (stage = 'control_access' ",
@@ -1516,6 +1517,20 @@ mod tests {
             &ModelCallId::parse(MODEL_CALL_ID).unwrap(),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn model_call_query_accepts_cache_hit_lifecycle() {
+        let mut rows = model_rows();
+        let mut cache_hit: serde_json::Value = serde_json::from_str(&rows[1].payload_json).unwrap();
+        cache_hit["reason_code"] = "MODEL_CACHE_HIT".into();
+        cache_hit["cache_source_model_call_id"] = "mdl_018f2a3b-4c5d-7000-8000-000000000002".into();
+        rows[1].event_type = "model.cache_hit".to_owned();
+        rows[1].payload_json = cache_hit.to_string();
+        let summary = query_model_rows(rows).await.unwrap().unwrap();
+        assert!(summary.lifecycle_complete);
+        assert_eq!(summary.events[1].event_type, "model.cache_hit");
+        assert_eq!(summary.reason_code, "MODEL_EVALUATED");
     }
 
     fn model_list_plan(limit: u16) -> ModelCallListPlan {

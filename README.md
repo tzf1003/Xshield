@@ -36,7 +36,7 @@ Jev 离线评估已支持 Score：操作员提交 2–10 档有序描述，适�
 
 证据原文下载还要求当前 OIDC 浏览器会话完成两分钟有效的 MFA 再认证，并继续通过逐次独立审批；该 step-up 使用迁移 0036 和部署方精确 ACR/auth_time 校验。当前机器 Bearer 自动化没有 step-up 凭据，原文端点会 fail-closed 拒绝，详见 [29.28](docs/29-api-endpoint-catalog.md#2928-已实现的-mfa-再认证契约)。
 
-`xshield-model-eval` 已实现操作员批准的一次性 Jev 离线评估：严格 Choice/Noul 契约、固定 Vercel AI Gateway HTTPS 端点（显式 `direct` 可兼容 TypeSafe 直连）、实际请求/响应加密证据、PostgreSQL catalog/outbox 和 `model.*` 耐久终态。迁移 0034 进一步将 tenant/site 跨实例调用容量绑定到 PostgreSQL scope 和私有短租约：容量拒绝只形成模型终态，不创建证据或 HTTP 调用；发送前以数据库时钟重验，终态 journal 耐久后释放，进程中断只可由 TTL 回收而不重放。429/529、超时、取消、超限和中断恢复均有明确结果；使用方法与运行边界见 [10.9](docs/10-jev-and-agents.md#109-已实现一次性离线评估) 和 [RB-11](docs/26-runbooks.md#rb-11-一次性模型离线评估)。当前验证使用合成 loopback 供应商，不代表真实模型质量、计费或外部服务可用性；校准及调查 Agent 继续迭代。
+`xshield-model-eval` 已实现操作员批准的一次性 Jev 离线评估：严格 Choice/Noul 契约、固定 Vercel AI Gateway HTTPS 端点（显式 `direct` 可兼容 TypeSafe 直连）、实际请求/响应加密证据、PostgreSQL catalog/outbox 和 `model.*` 耐久终态。迁移 0034 进一步将 tenant/site 跨实例调用容量绑定到 PostgreSQL scope 和私有短租约；迁移 0037 为 direct 精确模型修订增加了耐久结果缓存，命中前重新验证来源 catalog/vault 和完整模型证据，写入新的 `model_call_id`/`request_id` 与 `model.cache_hit`，不申请 admission 或发送 HTTP；缓存不提供证据读取或业务资格，缓存写入失败也不改写已完成的模型结果。容量拒绝只形成模型终态，不创建证据或 HTTP 调用；发送前以数据库时钟重验，终态 journal 耐久后释放，进程中断只可由 TTL 回收而不重放。429/529、超时、取消、超限和中断恢复均有明确结果；使用方法与运行边界见 [10.9](docs/10-jev-and-agents.md#109-已实现一次性离线评估) 和 [RB-11](docs/26-runbooks.md#rb-11-一次性模型离线评估)。当前验证使用合成 loopback 供应商，不代表真实模型质量、计费或外部服务可用性；校准及调查 Agent 继续迭代。
 
 模型阶段及调用审计支持 `mdl_` 强类型引用、provider/provider_model_id 与内部模型版本索引；阶段汇总保留最新 null 置信度，Gateway alias 不伪造精确 resolved revision。发布与查询边界见 [11.4](docs/11-audit-event-contract.md#114-阶段结果契约) 和 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归)。
 

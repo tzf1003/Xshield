@@ -76,13 +76,15 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 默认请求固定发送到 `https://ai-gateway.vercel.sh/typesafe/v1/systemone`，wire model 为 `typesafe-ai/jev`，Bearer 由 `AI_GATEWAY_API_KEY` 独立注入；使用原生 TLS 信任根，拒绝重定向和动态目标。`XSHIELD_JEV_ROUTE=direct` 才启用兼容的 TypeSafe 直连（`XSHIELD_JEV_API_KEY`、`https://api.typesafe.ai/v1/systemone`、`jev-1.13.0`）。模型生命周期和调用记录分别保留 `provider` 与独立的 `provider_model_id`；内部审计仍记录固定 `jev-1.13.0`，Gateway 别名没有精确版本证明时 `resolved_model_revision=null`。支持单题 Choice、Score 与 Noul（Score 详见 10.11）；Choice 要求 2–32 个候选，包含 NONE/UNKNOWN，返回完整候选概率且最高概率选项匹配。Noul 的 confidence 始终为 `null/not_applicable`。缺少用量保持 unknown，不估造 token 或成本。
 
-闭环顺序：`model.started` → 内部输入证据 → 冻结实际 API JSON 证据 → `model.requested` → 单次 HTTP → 响应捕获及规范化调用记录 → `model.responded/failed/timeout/cancelled`。每个证据对象先在 vault 耐久落盘，再与 `evidence.cataloged` outbox 原子提交目录。输入目录或审计屏障失败会阻止 HTTP；调用后的取证失败产生依赖失败终态。终态自身持久失败时退出非零，下次启动将未完成调用补记为 `MODEL_OUTCOME_UNKNOWN`，供应商是否已计费保持未知。
+正常 provider 闭环顺序为：`model.started` → 内部输入证据 → 冻结实际 API JSON 证据 → `model.requested` → 单次 HTTP → 响应捕获及规范化调用记录 → `model.responded/failed/timeout/cancelled`；缓存命中则为 `model.started` → `model.cache_hit` → 新的调用记录 → `model.responded`。每个证据对象先在 vault 耐久落盘，再与 `evidence.cataloged` outbox 原子提交目录。输入目录或审计屏障失败会阻止 HTTP；调用后的取证失败产生依赖失败终态。终态自身持久失败时退出非零，下次启动将未完成调用补记为 `MODEL_OUTCOME_UNKNOWN`，供应商是否已计费保持未知。
 
 四类对象分别为 `model_internal_input`、`model_input`、`model_output`、`model_call`，通过 parent_refs 和事件 evidence_refs 关联。输入保存内部 typed DTO 与实际发送的 JSON。输出对象为 `representation=entity_bytes_array` 的完整 JSON 捕获文档，body 保存实际收到的字节数组，`capture_status/bytes_observed/bytes_saved/http_status` 描述供应商实体的覆盖；对象 manifest 的 complete 只代表捕获文档完整。超限/断流/超时保留有界前缀；响应不可用或命中 API key 排除策略时 output_artifact_id 为 null，调用记录仍明确说明原因。普通审计仅保存版本、状态、置信度与证据引用。正文沿用独立申请、批准与 SensitiveEvidenceReader 读取流程。
 
 资源上限：输入与实际 API JSON 各 8 KiB，文本合计最多 6144 字符，响应最多 64 KiB，每个证据文档最多 512 KiB、保留 24 小时；发送至读体总期限 10 秒，catalog 操作每步 5 秒。证据根目录排他锁限制一次一个任务，预留四对象最坏空间，目录最多 100000 文件。429 记 `MODEL_RATE_LIMITED`、529 记 `MODEL_OVERLOADED`，保留合法 Retry-After 秒数供操作员决策；每次 CLI 调用至多一次 HTTP。重启认证扫描最多 10000 条专用 journal 记录，补记中断终态并保留因果引用；接近上限时按 RB-11 轮换目录。
 
-`XSHIELD_MODEL_CACHE_DOMAIN` 与独立的 `XSHIELD_MODEL_CACHE_KEY_HEX` 目前只交付了缓存安全前置契约：启动时严格验证 domain、64 位小写 hex HMAC 密钥、与 provider/evidence/journal 密钥的角色隔离，并覆盖 tenant/site、provider、wire model、精确 resolved revision 和完整 canonical internal input 导出 HMAC-SHA-256。Gateway 路由因别名缺少精确版本证明而以 `MODEL_CACHE_EXACT_REVISION_REQUIRED` 拒绝该配置。当前尚未交付 durable lookup/store，设置这些变量不会复用、读取或写入模型结果；不得据此声明缓存已启用。后续增量包括耐久缓存、自动重试、OpenJev/SemIf 伴随进程和调查 Agent，分别完成安全域、能力与恢复契约后接入。Score 增量见 10.11；当前未执行真实供应商推理或准确率/校准测试。
+`XSHIELD_MODEL_CACHE_DOMAIN` 与独立的 `XSHIELD_MODEL_CACHE_KEY_HEX` 现在可在迁移 0037 后启用耐久结果缓存，但仅限能在调用前证明精确 `resolved_model_revision` 的 direct Jev 路由；Gateway alias 仍以 `MODEL_CACHE_EXACT_REVISION_REQUIRED` 拒绝。HMAC-SHA-256 键继续绑定 tenant/site、provider、wire model、精确修订、安全域和完整 canonical internal input，并与 provider/evidence/journal 密钥隔离。PostgreSQL 只保存不透明键、版本字段和四个来源 artifact 引用；缓存行的期限不晚于来源 evidence，过期来源不能插入或命中。
+
+命中前 worker 重新检查四个 catalog 行的作用域、活动状态、期限和删除标记，比较认证 vault manifest/内容，并严格重建、比较实际 API JSON、内部输入、完整输出捕获和成功 `model_call` 记录。任何缺失、过期、删除、篡改、版本漂移或依赖故障均拒绝复用（`MODEL_CACHE_SOURCE_INVALID`/`MODEL_CACHE_SOURCE_UNAVAILABLE`）；不会降级为未经核验的结果。成功命中形成 `model.started → model.cache_hit → model.responded`，`model.cache_hit` 绑定来源 `mdl_`；它不申请模型 admission、不发送 HTTP，而是为本次请求写入新的 `request_id`、`model_call_id` 和调用记录。缓存写入位于成功取证之后，是可重试的优化：插入失败不会改写已经完成的 `MODEL_EVALUATED` 结果。缓存不提供证据读取、审批、资格或重放权限；真实供应商推理、准确率和校准仍需单独测量。
 
 ## 10.10 Jev 供应商接入决定
 

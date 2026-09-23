@@ -63,7 +63,7 @@ occurred_at 是服务器 UTC，浏览器时间另存 client_reported_at；时区
 
 升级兼容：已有网关确定性事件无需改写。违反文档约定的 `model_` 前缀、非模型事件附带模型引用或置信度状态矛盾会被发布器以 InvalidEvent 拒绝并保持当前段水位；应检查生产者及受影响段，保留原始审计证据。阶段汇总使用同一最新事件的置信度，包括 null，避免沿用较早尝试的数值。
 
-一次性离线评估已接入 `model.started/requested/responded/failed/timeout/cancelled` 的 typed payload 与发布解析：model_call_id、provider、独立的 provider_model_id（例如 `typesafe-ai/jev`）、内部模型/模板版本、问题类型、状态、原因、置信度、耗时及可空的输入/输出/调用证据引用。provider_model_id 只描述实际冻结 wire 标识，不替代内部 model_revision；Gateway alias 没有精确版本证明时 resolved_model_revision 保持 null。模型调用终态不设置业务请求 `is_terminal`，不表示源站已执行；完整边界见 [10.9](10-jev-and-agents.md#109-已实现一次性离线评估)。
+一次性离线评估已接入 `model.started/requested/cache_hit/responded/failed/timeout/cancelled` 的 typed payload 与发布解析：model_call_id、provider、独立的 provider_model_id（例如 `typesafe-ai/jev`）、内部模型/模板版本、问题类型、状态、原因、置信度、耗时及可空的输入/输出/调用证据引用。`model.cache_hit` 仍是 requested 状态，但必须带 `reason_code=MODEL_CACHE_HIT` 和已校验的来源 `cache_source_model_call_id`；随后写入本次新的调用记录。provider_model_id 只描述实际冻结 wire 标识，不替代内部 model_revision；Gateway alias 没有精确版本证明时 resolved_model_revision 保持 null。模型调用终态不设置业务请求 `is_terminal`，不表示源站已执行；完整边界见 [10.9](10-jev-and-agents.md#109-已实现一次性离线评估)。
 
 ## 11.5 必须记录的事件族
 

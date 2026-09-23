@@ -1203,8 +1203,8 @@ struct PayloadSummary {
 impl PayloadSummary {
     fn parse(event_type: &str, json: &str) -> Result<Self, PublishError> {
         match event_type {
-            "model.started" | "model.requested" | "model.responded" | "model.failed"
-            | "model.timeout" | "model.cancelled" => {
+            "model.started" | "model.requested" | "model.cache_hit" | "model.responded"
+            | "model.failed" | "model.timeout" | "model.cancelled" => {
                 serde_json::from_str::<model_eval::ModelEvent>(json)?.validate(event_type)
             }
             "stage.completed" | "stage.skipped" => {
@@ -3192,7 +3192,7 @@ mod tests {
         .unwrap();
         let sql = captured.query().await;
         for fragment in [
-            "event_type IN ('model.started','model.requested','model.responded','model.failed','model.timeout','model.cancelled')",
+            "event_type IN ('model.started','model.requested','model.cache_hit','model.responded','model.failed','model.timeout','model.cancelled')",
             "JSONExtractString(payload_json,'model_call_id') = 'mdl_018f2a3b-4c5d-7000-8000-000000000004'",
             "stage = 'control_access' AND event_type = 'console.model.read'",
             "JSONExtractString(payload_json,'target_model_call_id') = 'mdl_018f2a3b-4c5d-7000-8000-000000000004'",

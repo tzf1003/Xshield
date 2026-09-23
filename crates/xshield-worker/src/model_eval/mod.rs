@@ -5,7 +5,7 @@
 //! have independent deadlines. A dedicated journal and exclusive evidence root bound
 //! concurrency to one evaluation. Recovery closes interrupted attempts as unknown.
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{SecondsFormat, Timelike, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::{
@@ -19,7 +19,7 @@ use std::{
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use xshield_core::{
-    domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId},
+    domain::{ArtifactId, EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId},
     model_evaluation_admission::{
         ModelEvaluationAdmissionAttempt, ModelEvaluationAdmissionReleaseState,
         ModelEvaluationAdmissionState,
@@ -27,7 +27,9 @@ use xshield_core::{
     ports::ModelEvaluationAdmissionPort,
 };
 use xshield_evidence::EvidenceFidelity;
-use xshield_postgres::{ModelEvaluationAdmissionLease, PostgresIdentityStore};
+use xshield_postgres::{
+    ModelEvaluationAdmissionLease, ModelEvaluationCacheWrite, PostgresIdentityStore,
+};
 use zeroize::Zeroizing;
 
 mod cache;
@@ -37,7 +39,7 @@ mod tests;
 mod transport;
 mod wire;
 
-use storage::Storage;
+use storage::{CachedModelRecord, Storage};
 use transport::{
     DIRECT_MODEL, GATEWAY_MODEL, JevClient, JevRoute, ModelPort, PROVIDER_SEND_DEADLINE,
 };
@@ -105,19 +107,21 @@ pub async fn evaluate_file(
         TenantId::parse(env::var("XSHIELD_TENANT_ID").map_err(|_| CONFIG)?).map_err(|_| CONFIG)?;
     let site =
         SiteId::parse(env::var("XSHIELD_SITE_ID").map_err(|_| CONFIG)?).map_err(|_| CONFIG)?;
-    if let Some(cache) = cache::ModelCacheConfiguration::from_environment(&client)? {
+    let cache = cache::ModelCacheConfiguration::from_environment(&client)?;
+    let cache_key = if let Some(cache) = &cache {
         // Derive once before setup proceeds, so a malformed cache configuration
         // cannot surface after local evidence/journal resources have been opened.
-        // Durable lookup is deliberately not enabled until its source-record and
-        // catalog revalidation adapter is present.
-        cache.validate_input_binding(&tenant, &site, &input)?;
+        let key = cache.key_for(&tenant, &site, &input)?;
         if cache.reuses_transport_secret(&client)
             || cache.matches_hex_secret(&evidence_key)
             || cache.matches_hex_secret(&journal_key)
         {
             return Err(CONFIG);
         }
-    }
+        Some(key)
+    } else {
+        None
+    };
     let runner_id = env::var("XSHIELD_MODEL_EVALUATION_RUNNER_ID")
         .unwrap_or_else(|_| DEFAULT_EVALUATION_RUNNER.to_owned());
     let mut storage = tokio::task::block_in_place(Storage::from_env)?;
@@ -130,7 +134,7 @@ pub async fn evaluate_file(
     .await
     .map_err(|_| "MODEL_CATALOG_UNAVAILABLE")?
     .map_err(|_| "MODEL_CATALOG_UNAVAILABLE")?;
-    evaluate(
+    evaluate_with_cache(
         &input,
         &client,
         &mut storage,
@@ -138,6 +142,8 @@ pub async fn evaluate_file(
         tenant,
         site,
         &runner_id,
+        cache.as_ref(),
+        cache_key.as_ref(),
         cancel,
     )
     .await
@@ -190,6 +196,11 @@ struct Attempt {
     input: Option<String>,
     output: Option<String>,
     record: Option<String>,
+}
+
+enum ExecutionResult {
+    Provider(Option<Box<Response>>),
+    Cache(Box<CachedModelRecord>),
 }
 
 impl Attempt {
@@ -246,6 +257,7 @@ impl Attempt {
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn evaluate(
     input: &Input,
@@ -257,6 +269,29 @@ async fn evaluate(
     runner_id: &str,
     cancel: &mut oneshot::Receiver<()>,
 ) -> Result<EvaluationReport, &'static str> {
+    evaluate_with_cache(
+        input, client, storage, store, tenant, site, runner_id, None, None, cancel,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::type_complexity
+)]
+async fn evaluate_with_cache(
+    input: &Input,
+    client: &impl ModelPort,
+    storage: &mut Storage,
+    store: &PostgresIdentityStore,
+    tenant: TenantId,
+    site: SiteId,
+    runner_id: &str,
+    cache: Option<&cache::ModelCacheConfiguration>,
+    cache_key: Option<&cache::ModelCacheKey>,
+    cancel: &mut oneshot::Receiver<()>,
+) -> Result<EvaluationReport, &'static str> {
     let internal = Zeroizing::new(input.internal_bytes()?);
     if client.contains_secret(&internal) {
         return Err("MODEL_SECRET_EXCLUDED");
@@ -266,64 +301,173 @@ async fn evaluate(
         ModelEvent::new_for_provider(&attempt, input, client.provider(), client.provider_model());
     storage.event(&mut attempt, "model.started", &event)?;
     let started = Instant::now();
-    let admission_attempt = ModelEvaluationAdmissionAttempt::new(
-        attempt.tenant.clone(),
-        attempt.site.clone(),
-        attempt.request.clone(),
-        attempt.call.clone(),
-        attempt.policy.clone(),
-        runner_id,
-    )
-    .ok();
-    // Admission happens after `model.started`, so local configuration and
-    // authoritative-store failures must still pass through the common terminal
-    // event barrier. Returning here would leave a started-only lifecycle.
-    let (lease, result) = match admission_attempt {
-        None => (None, Err(CONFIG)),
-        Some(admission_attempt) => match tokio::time::timeout(
+    let mut cache_hit = false;
+    let (lease, result): (
+        Option<ModelEvaluationAdmissionLease>,
+        Result<(&'static str, &'static str, ExecutionResult), &'static str>,
+    ) = if let (Some(cache), Some(cache_key)) = (cache, cache_key) {
+        match tokio::time::timeout(
             CATALOG_DEADLINE,
-            ModelEvaluationAdmissionPort::acquire_model_evaluation_admission(
-                store,
-                &admission_attempt,
-            ),
+            store.find_model_evaluation_cache(&attempt.tenant, &attempt.site, cache_key.as_bytes()),
         )
         .await
         {
-            Ok(Ok(ModelEvaluationAdmissionState::Admitted(lease))) => {
-                let result = execute(
+            Ok(Ok(Some(source))) => {
+                if source.provider != cache.provider()
+                    || source.provider_model_id != cache.provider_model_id()
+                    || source.model_revision != input.model_revision()
+                    || source.prompt_revision != input.prompt_revision()
+                    || source.resolved_model_revision.as_deref()
+                        != Some(cache.resolved_model_revision())
+                {
+                    (None, Err("MODEL_CACHE_SOURCE_INVALID"))
+                } else {
+                    let result = tokio::time::timeout(
+                        CATALOG_DEADLINE,
+                        storage.execute_cached(
+                            store,
+                            input,
+                            client,
+                            &mut attempt,
+                            &internal,
+                            &source,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| "MODEL_CACHE_SOURCE_UNAVAILABLE")
+                    .and_then(|result| {
+                        result.map(|cached| {
+                            cache_hit = true;
+                            (
+                                "success",
+                                "MODEL_CACHE_HIT",
+                                ExecutionResult::Cache(Box::new(cached)),
+                            )
+                        })
+                    });
+                    (None, result)
+                }
+            }
+            Ok(Ok(None)) => {
+                run_provider_evaluation(
                     input,
                     client,
                     storage,
                     store,
                     &mut attempt,
                     &internal,
-                    &lease,
+                    runner_id,
                     cancel,
                 )
-                .await;
-                (Some(lease), result)
+                .await
             }
-            Ok(Ok(ModelEvaluationAdmissionState::Denied(denied))) => {
-                (None, Err(denied.reason_code()))
-            }
-            Ok(Err(_)) | Err(_) => (None, Err(ADMISSION_UNAVAILABLE)),
-        },
+            Ok(Err(_)) | Err(_) => (None, Err("MODEL_CACHE_UNAVAILABLE")),
+        }
+    } else {
+        run_provider_evaluation(
+            input,
+            client,
+            storage,
+            store,
+            &mut attempt,
+            &internal,
+            runner_id,
+            cancel,
+        )
+        .await
     };
-    let (status, reason, response) = match result {
+    let (status, reason, execution) = match result {
         Ok(result) => result,
-        Err(reason) => ("error", reason, None),
+        Err(reason) => ("error", reason, ExecutionResult::Provider(None)),
     };
+    if !cache_hit
+        && status == "success"
+        && let (
+            Some(cache),
+            Some(cache_key),
+            Some(internal_id),
+            Some(input_id),
+            Some(output_id),
+            Some(call_id),
+        ) = (
+            cache,
+            cache_key,
+            attempt.internal.as_deref(),
+            attempt.input.as_deref(),
+            attempt.output.as_deref(),
+            attempt.record.as_deref(),
+        )
+    {
+        let source_request = attempt.request.clone();
+        let source_model_call = attempt.call.clone();
+        if let (Ok(internal_id), Ok(input_id), Ok(output_id), Ok(call_id)) = (
+            ArtifactId::parse(internal_id),
+            ArtifactId::parse(input_id),
+            ArtifactId::parse(output_id),
+            ArtifactId::parse(call_id),
+        ) && let Ok(command) = ModelEvaluationCacheWrite::new(
+            &attempt.tenant,
+            &attempt.site,
+            cache_key.as_bytes(),
+            &source_request,
+            &source_model_call,
+            &internal_id,
+            &input_id,
+            &output_id,
+            &call_id,
+            cache.provider(),
+            cache.provider_model_id(),
+            input.model_revision(),
+            input.prompt_revision(),
+            Some(cache.resolved_model_revision()),
+            {
+                let expires_at = Utc::now() + chrono::TimeDelta::hours(24);
+                expires_at
+                    .with_nanosecond(expires_at.timestamp_subsec_millis() * 1_000_000)
+                    .unwrap_or(expires_at)
+            },
+        ) {
+            // Cache persistence is an optimization after the provider response
+            // and complete source evidence are already durable. A failed or
+            // racing insert must not rewrite a successful model outcome into a
+            // dependency failure; the next exact evaluation can populate the
+            // key again.
+            let _ = tokio::time::timeout(
+                CATALOG_DEADLINE,
+                store.store_model_evaluation_cache(command),
+            )
+            .await;
+        }
+    }
     event.status = status.to_owned();
     event.reason_code = reason.to_owned();
     event.duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     event.input_artifact_id.clone_from(&attempt.input);
     event.output_artifact_id.clone_from(&attempt.output);
     event.call_artifact_id.clone_from(&attempt.record);
-    if let Some(response) = response {
-        event.confidence = response.provider_confidence;
-        response
-            .confidence_status
-            .clone_into(&mut event.confidence_status);
+    match &execution {
+        ExecutionResult::Provider(Some(response)) if status == "success" => {
+            event.confidence = response.provider_confidence;
+            response
+                .confidence_status
+                .clone_into(&mut event.confidence_status);
+        }
+        ExecutionResult::Cache(cached) if status == "success" => {
+            event.confidence = cached.provider_confidence;
+            cached
+                .confidence_status
+                .clone_into(&mut event.confidence_status);
+        }
+        ExecutionResult::Provider(None) => {}
+        ExecutionResult::Provider(Some(_)) | ExecutionResult::Cache(_) => {
+            event.confidence = None;
+            let confidence_status = if input.question_type() == "noul" {
+                "not_applicable"
+            } else {
+                "unavailable"
+            };
+            confidence_status.clone_into(&mut event.confidence_status);
+        }
     }
     let event_type = match status {
         "success" => "model.responded",
@@ -360,6 +504,58 @@ async fn evaluate(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_provider_evaluation(
+    input: &Input,
+    client: &impl ModelPort,
+    storage: &mut Storage,
+    store: &PostgresIdentityStore,
+    attempt: &mut Attempt,
+    internal: &[u8],
+    runner_id: &str,
+    cancel: &mut oneshot::Receiver<()>,
+) -> (
+    Option<ModelEvaluationAdmissionLease>,
+    Result<(&'static str, &'static str, ExecutionResult), &'static str>,
+) {
+    let admission_attempt = ModelEvaluationAdmissionAttempt::new(
+        attempt.tenant.clone(),
+        attempt.site.clone(),
+        attempt.request.clone(),
+        attempt.call.clone(),
+        attempt.policy.clone(),
+        runner_id,
+    )
+    .ok();
+    // Admission happens after `model.started`, so local configuration and
+    // authoritative-store failures still pass through the common terminal
+    // event barrier instead of leaving a started-only lifecycle.
+    match admission_attempt {
+        None => (None, Err(CONFIG)),
+        Some(admission_attempt) => match tokio::time::timeout(
+            CATALOG_DEADLINE,
+            ModelEvaluationAdmissionPort::acquire_model_evaluation_admission(
+                store,
+                &admission_attempt,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(ModelEvaluationAdmissionState::Admitted(lease))) => {
+                let result = execute(
+                    input, client, storage, store, attempt, internal, &lease, cancel,
+                )
+                .await;
+                (Some(lease), result)
+            }
+            Ok(Ok(ModelEvaluationAdmissionState::Denied(denied))) => {
+                (None, Err(denied.reason_code()))
+            }
+            Ok(Err(_)) | Err(_) => (None, Err(ADMISSION_UNAVAILABLE)),
+        },
+    }
+}
+
 // Keep the ordered input/send/output barriers together for durability review.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn execute(
@@ -371,7 +567,7 @@ async fn execute(
     internal: &[u8],
     admission: &ModelEvaluationAdmissionLease,
     cancel: &mut oneshot::Receiver<()>,
-) -> Result<(&'static str, &'static str, Option<Response>), &'static str> {
+) -> Result<(&'static str, &'static str, ExecutionResult), &'static str> {
     attempt.internal = Some(
         storage
             .capture(
@@ -552,7 +748,11 @@ async fn execute(
             )
             .await?,
     );
-    Ok((status, reason, response.ok()))
+    Ok((
+        status,
+        reason,
+        ExecutionResult::Provider(response.ok().map(Box::new)),
+    ))
 }
 
 #[derive(Serialize)]
@@ -613,6 +813,8 @@ struct UsageRecord {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ModelEvent {
     pub(crate) model_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_source_model_call_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
     pub(crate) provider: Option<String>,
     #[serde(default, deserialize_with = "deserialize_non_null_option")]
@@ -684,6 +886,7 @@ impl ModelEvent {
     ) -> Self {
         Self {
             model_call_id: attempt.call.as_str().to_owned(),
+            cache_source_model_call_id: None,
             provider: Some(provider.to_owned()),
             provider_model_id: Some(provider_model_id.to_owned()),
             model_revision: input.model_revision().to_owned(),
@@ -721,7 +924,9 @@ impl ModelEvent {
             _ => return Err(InvalidEvent),
         }
         let outcome = match (event_type, self.status.as_str()) {
-            ("model.started", "started") | ("model.requested", "requested") => "UNKNOWN",
+            ("model.started", "started") | ("model.requested" | "model.cache_hit", "requested") => {
+                "UNKNOWN"
+            }
             ("model.responded", "success") => "PASS",
             ("model.timeout", "timeout") | ("model.failed", "error") => "ERROR",
             ("model.cancelled", "cancelled") => "CANCELLED",
@@ -731,6 +936,10 @@ impl ModelEvent {
             || !crate::valid_name(&self.prompt_revision)
             || !crate::valid_name(&self.reason_code)
             || !matches!(self.question_type.as_str(), "choice" | "score" | "noul")
+            || (event_type == "model.cache_hit"
+                && (self.reason_code != "MODEL_CACHE_HIT"
+                    || self.cache_source_model_call_id.is_none()))
+            || (event_type != "model.cache_hit" && self.cache_source_model_call_id.is_some())
             || !crate::valid_confidence("model", outcome, self.confidence, &self.confidence_status)
             || (self.question_type == "noul" && self.confidence_status != "not_applicable")
             || (self.status != "success" && self.confidence.is_some())
@@ -750,6 +959,9 @@ impl ModelEvent {
         .flatten()
         {
             xshield_core::domain::ArtifactId::parse(id).map_err(|_| InvalidEvent)?;
+        }
+        if let Some(source) = &self.cache_source_model_call_id {
+            ModelCallId::parse(source).map_err(|_| InvalidEvent)?;
         }
         Ok(crate::PayloadSummary {
             stage: "model_eval".to_owned(),

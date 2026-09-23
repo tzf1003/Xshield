@@ -77,6 +77,8 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-worker --lib model_eval::tests::postgres_evaluation -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+    cargo test -p xshield-worker --lib postgres_model_evaluation_cache_reuses_revalidated_source -- --ignored
+XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-worker --lib postgres_outbox_publishing -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-worker --test calibration_vault_reader -- --ignored

@@ -18,6 +18,7 @@ use xshield_postgres::EvidenceCatalogQuery;
 const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 const JOURNAL_KEY: &str = "4444444444444444444444444444444444444444444444444444444444444444";
 const API_KEY: &str = "synthetic-evaluation-api-key";
+const CACHE_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const RESPONSE: &str = r#"{"model":"jev-1.13.0","answers":{"evaluation":{"type":"choice","choice":"UNKNOWN","probabilities":{"NONE":0.2,"UNKNOWN":0.8},"confidence":0.75}},"usage":{"input_tokens":100,"output_tokens":20}}"#;
 const MODEL_EVALUATION_POLICY_REVISION: &str = "policy-r1";
 
@@ -308,6 +309,22 @@ fn model_event_contract_rejects_confidence_and_lifecycle_contradictions() {
     assert!(serde_json::from_value::<ModelEvent>(null_fields).is_err());
 }
 
+#[test]
+fn model_cache_hit_event_binds_the_source_call_without_changing_lifecycle_shape() {
+    let (tenant, site) = scope();
+    let input = input();
+    let attempt = Attempt::new(&input, tenant, site).unwrap();
+    let mut event = ModelEvent::new(&attempt, &input);
+    event.status = "requested".to_owned();
+    event.reason_code = "MODEL_CACHE_HIT".to_owned();
+    event.input_artifact_id = Some(format!("artifact_{}", Uuid::now_v7()));
+    event.cache_source_model_call_id = Some(format!("mdl_{}", Uuid::now_v7()));
+    assert!(event.clone().validate("model.cache_hit").is_ok());
+
+    event.cache_source_model_call_id = None;
+    assert!(event.validate("model.cache_hit").is_err());
+}
+
 async fn server(status: u16, body: &str) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
@@ -379,6 +396,195 @@ impl ModelPort for CountingPort {
             .windows(API_KEY.len())
             .any(|part| part == API_KEY.as_bytes())
     }
+
+    fn exact_cache_revision(&self) -> Option<&str> {
+        Some(DIRECT_MODEL)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL and migration 0037"]
+#[allow(clippy::too_many_lines)]
+async fn postgres_model_evaluation_cache_reuses_revalidated_source() {
+    let database = env::var("XSHIELD_TEST_DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&database).await.unwrap();
+    let store = PostgresIdentityStore::connect(&database, 2, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let (tenant, site) = postgres_scope("cache");
+    provision_admission_scope(&pool, &tenant, &site, 8).await;
+    let fixture = Fixture::new();
+    let approved = input();
+    let first_client = CountingPort {
+        calls: AtomicUsize::new(0),
+        payload: Arc::default(),
+        fail_after_send: None,
+    };
+    let cache = cache::ModelCacheConfiguration::from_values(
+        &first_client,
+        Some("model-cache-test-r1"),
+        Some(CACHE_KEY),
+    )
+    .unwrap()
+    .unwrap();
+    let cache_key = cache.key_for(&tenant, &site, &approved).unwrap();
+    let (_sender, mut cancel) = oneshot::channel();
+    let first = {
+        let mut storage = fixture.storage();
+        evaluate_with_cache(
+            &approved,
+            &first_client,
+            &mut storage,
+            &store,
+            tenant.clone(),
+            site.clone(),
+            "model-eval-cache-test-r1",
+            Some(&cache),
+            Some(&cache_key),
+            &mut cancel,
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(first.reason_code, "MODEL_EVALUATED");
+    assert_eq!(first_client.calls.load(Ordering::SeqCst), 1);
+    let source_call = ModelCallId::parse(&first.model_call_id).unwrap();
+    let cache_entry = store
+        .find_model_evaluation_cache(&tenant, &site, cache_key.as_bytes())
+        .await
+        .unwrap()
+        .expect("successful evaluation should publish a cache row");
+    assert_eq!(cache_entry.source_model_call, source_call);
+    assert_eq!(cache_entry.model_revision, approved.model_revision());
+    assert_eq!(cache_entry.prompt_revision, approved.prompt_revision());
+
+    let second_client = CountingPort {
+        calls: AtomicUsize::new(0),
+        payload: Arc::default(),
+        fail_after_send: None,
+    };
+    let (_sender, mut cancel) = oneshot::channel();
+    let second = {
+        let mut storage = fixture.storage();
+        evaluate_with_cache(
+            &approved,
+            &second_client,
+            &mut storage,
+            &store,
+            tenant.clone(),
+            site.clone(),
+            "model-eval-cache-test-r1",
+            Some(&cache),
+            Some(&cache_key),
+            &mut cancel,
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(second.reason_code, "MODEL_CACHE_HIT");
+    assert_ne!(second.model_call_id, first.model_call_id);
+    assert_eq!(second_client.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(second.input_artifact_id, first.input_artifact_id);
+    assert_eq!(second.output_artifact_id, first.output_artifact_id);
+    assert_ne!(second.call_artifact_id, first.call_artifact_id);
+
+    let events = fixture.events();
+    assert_eq!(events.len(), 6);
+    assert_eq!(events[3]["event_type"], "model.started");
+    assert_eq!(events[4]["event_type"], "model.cache_hit");
+    assert_eq!(
+        events[4]["payload"]["cache_source_model_call_id"],
+        first.model_call_id
+    );
+    assert_eq!(events[5]["event_type"], "model.responded");
+    assert_eq!(events[5]["payload"]["reason_code"], "MODEL_CACHE_HIT");
+
+    let vault = fixture.vault();
+    let cached_call: serde_json::Value = serde_json::from_slice(
+        &vault
+            .read_content(&tenant, &site, second.call_artifact_id.as_deref().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cached_call["model_call_id"], second.model_call_id);
+    assert_eq!(cached_call["request_id"], second.request_id);
+    assert_eq!(cached_call["reason_code"], "MODEL_CACHE_HIT");
+    assert_eq!(
+        cached_call["cache_source_model_call_id"],
+        first.model_call_id
+    );
+    assert_eq!(cached_call["capture_status"], "cached");
+
+    let output_path = fixture.root.join("evidence").join(format!(
+        "{}.xev",
+        second.output_artifact_id.as_deref().unwrap()
+    ));
+    let original_output = fs::read(&output_path).unwrap();
+    fs::write(&output_path, b"tampered").unwrap();
+    let tampered_client = CountingPort {
+        calls: AtomicUsize::new(0),
+        payload: Arc::default(),
+        fail_after_send: None,
+    };
+    let (_sender, mut cancel) = oneshot::channel();
+    let tampered = {
+        let mut storage = fixture.storage();
+        evaluate_with_cache(
+            &approved,
+            &tampered_client,
+            &mut storage,
+            &store,
+            tenant.clone(),
+            site.clone(),
+            "model-eval-cache-test-r1",
+            Some(&cache),
+            Some(&cache_key),
+            &mut cancel,
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(tampered.reason_code, "MODEL_CACHE_SOURCE_INVALID");
+    assert_eq!(tampered_client.calls.load(Ordering::SeqCst), 0);
+    fs::write(&output_path, original_output).unwrap();
+
+    sqlx::query(
+        "UPDATE xshield.model_evaluation_cache
+         SET expires_at = created_at + interval '1 millisecond'
+         WHERE tenant_id=$1 AND site_id=$2 AND cache_key=$3",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .bind(cache_key.as_bytes())
+    .execute(&pool)
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let expired_client = CountingPort {
+        calls: AtomicUsize::new(0),
+        payload: Arc::default(),
+        fail_after_send: None,
+    };
+    let (_sender, mut cancel) = oneshot::channel();
+    let expired = {
+        let mut storage = fixture.storage();
+        evaluate_with_cache(
+            &approved,
+            &expired_client,
+            &mut storage,
+            &store,
+            tenant,
+            site,
+            "model-eval-cache-test-r1",
+            Some(&cache),
+            Some(&cache_key),
+            &mut cancel,
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(expired.reason_code, "MODEL_EVALUATED");
+    assert_eq!(expired_client.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

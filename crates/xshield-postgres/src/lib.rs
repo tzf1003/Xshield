@@ -32,6 +32,7 @@ mod identity_read;
 mod investigation_case;
 mod management_session;
 mod model_evaluation_admission;
+mod model_evaluation_cache;
 mod outbox;
 mod provenance;
 mod request_replay;
@@ -107,6 +108,9 @@ pub use investigation_case::{
 };
 pub use management_session::{ManagementBrowserSession, ManagementOidcTransaction};
 pub use model_evaluation_admission::ModelEvaluationAdmissionLease;
+pub use model_evaluation_cache::{
+    ModelEvaluationCacheEntry, ModelEvaluationCacheWrite, ModelEvaluationCacheWriteOutcome,
+};
 pub use outbox::{
     OutboxAckOutcome, OutboxEvent, OutboxFailureOutcome, OutboxLease, OutboxLeaseConfig,
     OutboxScope, ack_outbox_event, claim_outbox_batch, claim_outbox_batch_for_types,
