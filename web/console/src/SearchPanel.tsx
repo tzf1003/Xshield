@@ -205,7 +205,7 @@ export function SearchPanel({
         </div>
         <p className="footnote">
           UTC 整秒半开时间窗，最多 31 天；最多 8
-          个条件，全部匹配同一事件。Trace ID 为 32 个小写十六进制字符且仍受时间窗限制；前驱事件条件只查找直接关联，不递归展开；主体引用仅用于精确筛选，结果不会回显主体值；置信度空值不会匹配数值阈值。
+          个条件，全部匹配同一事件。Trace ID 为 32 个小写十六进制字符且仍受时间窗限制；前驱事件条件只查找直接关联，事件详情可在当前页显示有界因果邻域；主体引用仅用于精确筛选，结果不会回显主体值；置信度空值不会匹配数值阈值。
         </p>
         {filters.map((filter, index) => (
           <div className="search-filter" key={filter.id}>

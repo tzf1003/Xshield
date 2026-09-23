@@ -1289,6 +1289,62 @@ test("event details traverse direct causes and children through explicit history
   expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
 });
 
+test("shows a bounded multi-hop neighborhood and prepares unloaded references", async ({
+  page,
+}) => {
+  const root = "ev_018f2a3b-4c5d-7000-8000-000000000001";
+  const loaded = "ev_018f2a3b-4c5d-7000-8000-000000000002";
+  const missing = "ev_018f2a3b-4c5d-7000-8000-000000000099";
+  const calls = await mockControl(page, async (url, request) => {
+    if (url.pathname !== "/control/v1/search") return undefined;
+    const result = await searchFixture(request.postDataJSON() as SearchPlan);
+    const first = result.events[0];
+    const second = result.events[1];
+    if (first && second) {
+      first.cause_event_ids = [second.event_id];
+      second.cause_event_ids = [missing];
+    }
+    result.truncated = false;
+    result.next_cursor = null;
+    return { body: result };
+  });
+  await connect(page);
+  await prepareSearch(page);
+  await search(page);
+
+  const graph = page.locator("aside details.causal-graph");
+  await graph.locator("summary").click();
+  await expect(graph).toContainText("第 2 跳");
+  await expect(graph).toContainText(missing);
+  expect(calls).toHaveLength(1);
+
+  await graph
+    .getByRole("button", { name: `查看因果事件 ${loaded}`, exact: true })
+    .click();
+  await expect(
+    page.locator("aside dl").getByText(loaded, { exact: true }),
+  ).toBeVisible();
+  expect(calls).toHaveLength(1);
+  await page.getByRole("radio", { name: root, exact: true }).check();
+
+  await graph
+    .getByRole("button", { name: `查看因果事件 ${missing}`, exact: true })
+    .click();
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
+    "event_id",
+  );
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(
+    missing,
+  );
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue(
+    "",
+  );
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue(
+    "",
+  );
+  expect(calls).toHaveLength(1);
+});
+
 test("structured event search supports a strict trace identifier", async ({ page }) => {
   const trace = "018f2a3b4c5d70008000000000000003";
   const calls = await mockControl(page);

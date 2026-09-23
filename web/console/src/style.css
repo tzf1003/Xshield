@@ -535,6 +535,56 @@ main {
   cursor: pointer;
 }
 
+.event-actions {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.event-actions button {
+  text-align: left;
+}
+
+.causality-branches {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+.causality-branch {
+  min-width: 0;
+}
+
+.causality-branch h4 {
+  margin: 12px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.causal-level {
+  margin: 8px 0 8px 3px;
+  padding-left: 10px;
+  border-left: 1px solid #d6dde5;
+}
+
+.causal-level ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.causal-node {
+  display: grid;
+  gap: 3px;
+  max-width: 100%;
+}
+
+.causal-node .mono {
+  font-size: 10px;
+}
+
 .notice summary {
   cursor: pointer;
   font-size: 12px;

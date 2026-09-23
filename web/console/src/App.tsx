@@ -512,6 +512,8 @@ export function App() {
   const event = (search?.events ?? events?.events)?.find(
     (value) => value.event_id === selected,
   );
+  const relatedEvents =
+    search?.events ?? events?.events ?? (event ? [event] : []);
   const title = {
     request: "请求调查",
     model: "模型调用调查",
@@ -551,6 +553,7 @@ export function App() {
         (event ? (
           <EventDetail
             event={event}
+            relatedEvents={relatedEvents}
             onOpen={openArtifact}
             onRequest={(id) => openTarget("request", id)}
             onModelCall={(id) => openTarget("model", id)}
@@ -560,6 +563,14 @@ export function App() {
             onFollowEvent={(id) =>
               prepareSearchHistory({ kind: "caused_by_event_id", value: id })
             }
+            onCausalEvent={(id) => {
+              clearArtifact();
+              if (relatedEvents.some((item) => item.event_id === id)) {
+                setSelected(id);
+              } else {
+                prepareSearchHistory({ kind: "event_id", value: id });
+              }
+            }}
             onTraceId={(traceId) =>
               prepareSearchHistory({ kind: "trace_id", value: traceId })
             }

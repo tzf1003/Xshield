@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 import type { SearchEvent } from "./search";
+import { buildCausalNeighborhood } from "./event-causality";
+import type { CausalNode } from "./event-causality";
 import type {
   ArtifactResponse,
   AuditHealthResponse,
@@ -905,22 +907,27 @@ export function EventTable({
 
 export function EventDetail({
   event,
+  relatedEvents,
   onOpen,
   onRequest,
   onModelCall,
   onTraceId,
   onPreviousEvent,
   onFollowEvent,
+  onCausalEvent,
 }: {
   event: AuditEvent | SearchEvent;
+  relatedEvents: (AuditEvent | SearchEvent)[];
   onOpen: (id: string) => void;
   onRequest?: (id: string) => void;
   onModelCall?: (id: string) => void;
   onTraceId?: (traceId: string) => void;
   onPreviousEvent: (eventId: string) => void;
   onFollowEvent: (eventId: string) => void;
+  onCausalEvent: (eventId: string) => void;
 }) {
   const traceId = "trace_id" in event ? event.trace_id : null;
+  const causal = buildCausalNeighborhood(event, relatedEvents);
   return (
     <div className="detail-body">
       <h3>{stageName(event.stage)}</h3>
@@ -995,14 +1002,16 @@ export function EventDetail({
           ],
         ]}
       />
-      <button onClick={() => onFollowEvent(event.event_id)}>
-        查找以此为前驱的事件
-      </button>
-      {traceId && (
-        <button onClick={() => onTraceId?.(traceId)}>
-          准备同 Trace 检索
+      <div className="event-actions">
+        <button onClick={() => onFollowEvent(event.event_id)}>
+          查找以此为前驱的事件
         </button>
-      )}
+        {traceId && (
+          <button onClick={() => onTraceId?.(traceId)}>
+            准备同 Trace 检索
+          </button>
+        )}
+      </div>
       <details className="event-metadata">
         <summary>更多事件字段</summary>
         <Rows
@@ -1045,7 +1054,89 @@ export function EventDetail({
           ]}
         />
       </details>
+      {(causal.predecessors.length > 0 || causal.successors.length > 0) && (
+        <CausalityGraph neighborhood={causal} onOpen={onCausalEvent} />
+      )}
     </div>
+  );
+}
+
+function CausalityGraph({
+  neighborhood,
+  onOpen,
+}: {
+  neighborhood: ReturnType<typeof buildCausalNeighborhood>;
+  onOpen: (eventId: string) => void;
+}) {
+  const count = [...neighborhood.predecessors, ...neighborhood.successors]
+    .flat()
+    .length;
+  return (
+    <details className="event-metadata causal-graph">
+      <summary>查看当前页因果关联（{count} 个节点）</summary>
+      <p className="footnote">
+        关联只依据已发布事件的前驱引用。未载入引用可准备事件 ID 检索；每次检索仍由操作者提供时间窗并提交。
+      </p>
+      <div className="causality-branches">
+        <CausalityBranch
+          label="前驱方向"
+          levels={neighborhood.predecessors}
+          onOpen={onOpen}
+        />
+        <CausalityBranch
+          label="后继方向"
+          levels={neighborhood.successors}
+          onOpen={onOpen}
+        />
+      </div>
+      {neighborhood.truncated && (
+        <p className="footnote" role="status">
+          视图已达到每方向 4 跳或 16 个节点上限。
+        </p>
+      )}
+    </details>
+  );
+}
+
+function CausalityBranch({
+  label,
+  levels,
+  onOpen,
+}: {
+  label: string;
+  levels: CausalNode[][];
+  onOpen: (eventId: string) => void;
+}) {
+  return (
+    <section aria-label={label} className="causality-branch">
+      <h4>{label}</h4>
+      {levels.length === 0 ? (
+        <p className="empty">当前已加载事件中没有关联节点。</p>
+      ) : (
+        levels.map((nodes, index) => (
+          <div
+            className="causal-level"
+            key={nodes.map((node) => node.eventId).join("|")}
+          >
+            <span className="footnote">第 {index + 1} 跳</span>
+            <ul>
+              {nodes.map((node) => (
+                <li key={node.eventId}>
+                  <button
+                    className="artifact-link causal-node"
+                    aria-label={`查看因果事件 ${node.eventId}`}
+                    onClick={() => onOpen(node.eventId)}
+                  >
+                    <span>{node.event?.event_type ?? "引用事件未载入"}</span>
+                    <span className="mono">{node.eventId}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      )}
+    </section>
   );
 }
 
