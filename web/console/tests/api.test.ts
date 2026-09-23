@@ -1338,6 +1338,21 @@ test("search accepts only a canonical share grant reference", async () => {
   );
 });
 
+test("search accepts only a canonical agent run reference", async () => {
+  const agentRunId = "agt_018f2a3b-4c5d-7000-8000-000000000007";
+  const plan = validateSearchPlan({
+    ...searchPlan(),
+    filters: [{ kind: "agent_run_id", value: agentRunId }],
+  });
+  assert.deepEqual(plan.filters, [{ kind: "agent_run_id", value: agentRunId }]);
+  assert.equal(
+    await searchPlanDigest(plan),
+    createHash("sha256")
+      .update(`1789862400|1789948800|asc|2|agent_run_id=${agentRunId}`)
+      .digest("hex"),
+  );
+});
+
 test("search accepts only lowercase fixed-width trace IDs and digests them", async () => {
   const trace = "018f2a3b4c5d70008000000000000003";
   const plan = validateSearchPlan({

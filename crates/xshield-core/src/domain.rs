@@ -185,6 +185,7 @@ scoped_name!(SiteId, "site_id");
 scoped_name!(PolicyRevision, "policy_revision");
 v7_id!(RequestId, "req_", "request_id");
 v7_id!(ModelCallId, "mdl_", "model_call_id");
+v7_id!(AgentRunId, "agt_", "agent_run_id");
 v7_id!(ModelEvaluationLeaseId, "mle_", "model_evaluation_lease_id");
 v7_id!(CalibrationReportId, "calr_", "calibration_report_id");
 v7_id!(
@@ -263,8 +264,8 @@ const fn hex_nibble(byte: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactId, CalibrationReadLeaseId, CaseId, EvidenceAccessRequestId, ModelCallId,
-        ModelEvaluationLeaseId, RequestId, SubjectRef, TenantId, TraceId,
+        AgentRunId, ArtifactId, CalibrationReadLeaseId, CaseId, EvidenceAccessRequestId,
+        ModelCallId, ModelEvaluationLeaseId, RequestId, SubjectRef, TenantId, TraceId,
     };
 
     #[test]
@@ -274,6 +275,7 @@ mod tests {
         assert!(RequestId::parse("req_01A0AFA6-3320-758a-9554-d0d3b561b8c6").is_err());
         assert!(RequestId::parse("ev_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_err());
         assert!(ModelCallId::parse("mdl_01a0afa6-3320-7791-8f45-b4d5a34ffb57").is_ok());
+        assert!(AgentRunId::parse("agt_01a0afa6-3320-7791-8f45-b4d5a34ffb57").is_ok());
         assert!(ModelEvaluationLeaseId::parse("mle_01a0afa6-3320-7791-8f45-b4d5a34ffb57").is_ok());
         assert!(
             CalibrationReadLeaseId::parse("callease_01a0afa6-3320-7791-8f45-b4d5a34ffb57").is_ok()
@@ -283,9 +285,11 @@ mod tests {
             "req_01a0afa6-3320-7791-8f45-b4d5a34ffb57",
             "mdl_01a0afa6-3320-4791-8f45-b4d5a34ffb57",
             "mdl_01A0afa6-3320-7791-8f45-b4d5a34ffb57",
+            "agent_01a0afa6-3320-7791-8f45-b4d5a34ffb57",
         ] {
             assert!(ModelCallId::parse(id).is_err());
         }
+        assert!(AgentRunId::parse("agt_01a0afa6-3320-4791-8f45-b4d5a34ffb57").is_err());
         assert!(ArtifactId::parse("artifact_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_ok());
         assert!(ArtifactId::parse("art_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_err());
         assert!(CaseId::parse("case_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_ok());

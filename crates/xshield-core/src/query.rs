@@ -7,8 +7,9 @@
 
 use crate::{
     domain::{
-        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, RequestId, ShareGrantId, SubjectRef, TraceId,
+        AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
+        EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, ShareGrantId, SubjectRef,
+        TraceId,
     },
     identity::UnixSeconds,
 };
@@ -213,6 +214,13 @@ pub enum QueryFilter {
     /// authorize model-detail access, evidence access, replay, or business
     /// operations.
     ModelCallId(ModelCallId),
+    /// Exact agent-run reference in fixed agent lifecycle history or a
+    /// validated management detail read.
+    ///
+    /// This selects retained, redacted event metadata only. It does not
+    /// authorize agent input/output access, evidence access, replay, or
+    /// business operations.
+    AgentRunId(AgentRunId),
     /// Exact equality on an allow-listed text column.
     Text {
         /// Column selected from [`QueryTextField`].
@@ -242,6 +250,7 @@ impl QueryFilter {
             | Self::EvidenceHoldId(_)
             | Self::EvidenceAccessRequestId(_)
             | Self::ModelCallId(_)
+            | Self::AgentRunId(_)
             | Self::ShareGrantId(_)
             | Self::Outcome(_)
             | Self::ConfidenceAtMost(_) => Ok(()),
@@ -376,7 +385,7 @@ mod tests {
     };
     use crate::{
         domain::{
-            ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
+            AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
             EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, ShareGrantId, SubjectRef,
         },
         identity::UnixSeconds,
@@ -476,6 +485,17 @@ mod tests {
                 window(60),
                 vec![QueryFilter::ModelCallId(
                     ModelCallId::parse("mdl_018f2a3b-4c5d-7000-8000-000000000006").unwrap(),
+                )],
+                QuerySort::OccurredAtAsc,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(
+            QueryPlan::new(
+                window(60),
+                vec![QueryFilter::AgentRunId(
+                    AgentRunId::parse("agt_018f2a3b-4c5d-7000-8000-000000000007").unwrap(),
                 )],
                 QuerySort::OccurredAtAsc,
                 1,

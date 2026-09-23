@@ -44,6 +44,8 @@ Jev 离线评估已支持 Score：操作员提交 2–10 档有序描述，适�
 
 `POST /control/v1/search` 已支持强类型 `model_call_id=mdl_…` 检索固定模型生命周期及对应 `console.model.read` 历史。该计划保持 Investigator 的受限历史权限，模型详情仍需独立 Observer 重新鉴权；服务端固定事件族、JSON 键和参数绑定，审计仅保留查询摘要。控制台模型详情仅预填该条件，操作者必须填写独立时间窗后主动提交。完整边界见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。
 
+`POST /control/v1/search` 现支持强类型 `agent_run_id=agt_…` 检索固定 Agent 生命周期（启动、工具调用/结果、产物和终态）及对应 `console.agent.read` 历史。该过滤器沿用 Investigator 的脱敏历史范围；它不实现或触发 Agent 执行，不返回输入/输出正文、工具参数、证据内容或权限快照，也不授予回放、详情或业务权限。服务端固定事件族、JSON 键和参数绑定，审计仅保留查询摘要；控制台提供该字段供操作者主动提交有界检索。完整边界见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。
+
 `POST /control/v1/search` 已支持强类型 `evidence_access_request_id=access_…` 检索固定访问申请/决策事件及对应 `console.evidence.access.read` 历史。该计划保持 Investigator 的受限历史权限，申请详情、审批与原文读取仍各自重新鉴权；服务端固定事件族、JSON 键和参数绑定，审计仅保留查询摘要。控制台访问申请详情仅预填该条件，操作者必须填写独立时间窗后主动提交。完整边界见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。
 
 `POST /control/v1/search` 已支持 `evidence_hold_id=ev_…` 检索固定保留锁创建、释放及相应管理尝试历史。该条件要求同一主体同时持有 Investigator 与 AuditAdministrator；控制台保留历史只预填 ID，不自动提交，时间窗仍由操作者填写。查询只返回脱敏历史摘要，访问审计仅保存计划摘要，不改变保留、详情或原文权限。完整边界见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。

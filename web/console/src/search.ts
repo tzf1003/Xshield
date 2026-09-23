@@ -61,6 +61,7 @@ const idPatterns = {
   evidence_access_request_id: accessPattern,
   evidence_hold_id: eventPattern,
   model_call_id: modelCallPattern,
+  agent_run_id: new RegExp(`^agt_${uuid}$`),
   share_grant_id: sharePattern,
 };
 export type SearchFilter =

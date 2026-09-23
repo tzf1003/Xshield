@@ -1044,6 +1044,14 @@ async fn execute_query(
                 "AND event_type = 'console.model.read' ",
                 "AND JSONExtractString(payload_json,'target_model_call_id') = ?))",
             )),
+            QueryFilter::AgentRunId(_) => sql.push_str(concat!(
+                "((event_type IN ('agent.started','agent.tool_called','agent.tool_result',",
+                "'agent.artifact_created','agent.finished') ",
+                "AND JSONExtractString(payload_json,'agent_run_id') = ?) ",
+                "OR (stage = 'control_access' ",
+                "AND event_type = 'console.agent.read' ",
+                "AND JSONExtractString(payload_json,'target_agent_run_id') = ?))",
+            )),
             QueryFilter::ShareGrantId(_) => sql.push_str(
                 "event_type = 'share.issued' \
                   AND JSONExtractString(payload_json,'share_id') = ?",
@@ -1108,6 +1116,7 @@ async fn execute_query(
                 query.bind(value.as_str()).bind(value.as_str())
             }
             QueryFilter::ModelCallId(value) => query.bind(value.as_str()).bind(value.as_str()),
+            QueryFilter::AgentRunId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::ShareGrantId(value) => query.bind(value.as_str()),
             QueryFilter::Text { value, .. } => query.bind(value),
             QueryFilter::Outcome(value) => query.bind(value.as_str()),
