@@ -395,6 +395,10 @@ mod tests {
         QueryWindow::new(UnixSeconds::new(10), UnixSeconds::new(10 + seconds)).unwrap()
     }
 
+    fn assert_accepts(filter: QueryFilter) {
+        assert!(QueryPlan::new(window(60), vec![filter], QuerySort::OccurredAtAsc, 1).is_ok());
+    }
+
     #[test]
     fn plan_is_bounded_and_keeps_scope_out_of_client_input() {
         let request_id = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000001").unwrap();
@@ -434,74 +438,24 @@ mod tests {
                 value: "UI_SOURCE_MISSING".to_owned(),
             }
         );
-        assert!(
-            QueryPlan::new(
-                window(60),
-                vec![QueryFilter::CalibrationReportId(
-                    CalibrationReportId::parse("calr_018f2a3b-4c5d-7000-8000-000000000005")
-                        .unwrap(),
-                )],
-                QuerySort::OccurredAtAsc,
-                1,
-            )
-            .is_ok()
-        );
-        assert!(
-            QueryPlan::new(
-                window(60),
-                vec![QueryFilter::SubjectRef(
-                    SubjectRef::parse("operator-1").unwrap(),
-                )],
-                QuerySort::OccurredAtAsc,
-                1,
-            )
-            .is_ok()
-        );
-        assert!(
-            QueryPlan::new(
-                window(60),
-                vec![QueryFilter::EvidenceHoldId(
-                    EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000006").unwrap(),
-                )],
-                QuerySort::OccurredAtAsc,
-                1,
-            )
-            .is_ok()
-        );
-        assert!(
-            QueryPlan::new(
-                window(60),
-                vec![QueryFilter::EvidenceAccessRequestId(
-                    EvidenceAccessRequestId::parse("access_018f2a3b-4c5d-7000-8000-000000000006")
-                        .unwrap(),
-                )],
-                QuerySort::OccurredAtAsc,
-                1,
-            )
-            .is_ok()
-        );
-        assert!(
-            QueryPlan::new(
-                window(60),
-                vec![QueryFilter::ModelCallId(
-                    ModelCallId::parse("mdl_018f2a3b-4c5d-7000-8000-000000000006").unwrap(),
-                )],
-                QuerySort::OccurredAtAsc,
-                1,
-            )
-            .is_ok()
-        );
-        assert!(
-            QueryPlan::new(
-                window(60),
-                vec![QueryFilter::AgentRunId(
-                    AgentRunId::parse("agt_018f2a3b-4c5d-7000-8000-000000000007").unwrap(),
-                )],
-                QuerySort::OccurredAtAsc,
-                1,
-            )
-            .is_ok()
-        );
+        assert_accepts(QueryFilter::CalibrationReportId(
+            CalibrationReportId::parse("calr_018f2a3b-4c5d-7000-8000-000000000005").unwrap(),
+        ));
+        assert_accepts(QueryFilter::SubjectRef(
+            SubjectRef::parse("operator-1").unwrap(),
+        ));
+        assert_accepts(QueryFilter::EvidenceHoldId(
+            EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000006").unwrap(),
+        ));
+        assert_accepts(QueryFilter::EvidenceAccessRequestId(
+            EvidenceAccessRequestId::parse("access_018f2a3b-4c5d-7000-8000-000000000006").unwrap(),
+        ));
+        assert_accepts(QueryFilter::ModelCallId(
+            ModelCallId::parse("mdl_018f2a3b-4c5d-7000-8000-000000000006").unwrap(),
+        ));
+        assert_accepts(QueryFilter::AgentRunId(
+            AgentRunId::parse("agt_018f2a3b-4c5d-7000-8000-000000000007").unwrap(),
+        ));
         let mut excess = plan.filters().to_vec();
         excess.push(plan.filters()[MAX_FILTERS - 1].clone());
         assert_eq!(
