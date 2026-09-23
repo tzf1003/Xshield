@@ -48,6 +48,7 @@ const outcomes = [
 const idPatterns = {
   request_id: requestPattern,
   event_id: eventPattern,
+  caused_by_event_id: eventPattern,
   grant_id: grantPattern,
   auth_binding_id: bindingPattern,
   case_id: new RegExp(`^case_${uuid}$`),

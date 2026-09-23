@@ -164,6 +164,11 @@ pub enum QueryFilter {
     RequestId(RequestId),
     /// Exact immutable event identity.
     EventId(EventId),
+    /// Exact direct predecessor event reference.
+    ///
+    /// This returns events whose recorded cause list contains the reference;
+    /// it does not recursively traverse an event graph.
+    CausedByEventId(EventId),
     /// Exact direct identity reference in fixed identity and management payload fields.
     SubjectRef(SubjectRef),
     /// Exact resource-grant reference in an issuance event or share source.
@@ -221,6 +226,7 @@ impl QueryFilter {
         match self {
             Self::RequestId(_)
             | Self::EventId(_)
+            | Self::CausedByEventId(_)
             | Self::SubjectRef(_)
             | Self::GrantId(_)
             | Self::AuthBindingId(_)
@@ -475,6 +481,19 @@ mod tests {
             QueryPlan::new(plan.window(), excess, plan.sort(), plan.limit()),
             Err(QueryPlanError::TooManyFilters)
         );
+    }
+
+    #[test]
+    fn direct_cause_filter_uses_a_typed_event_reference() {
+        let event = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000008").unwrap();
+        let plan = QueryPlan::new(
+            window(60),
+            vec![QueryFilter::CausedByEventId(event.clone())],
+            QuerySort::OccurredAtAsc,
+            1,
+        )
+        .unwrap();
+        assert_eq!(plan.filters(), [QueryFilter::CausedByEventId(event)]);
     }
 
     #[test]

@@ -508,10 +508,14 @@ export function ModelCallOverview({
   response,
   onOpen,
   onHistory,
+  onPreviousEvent,
+  onFollowEvent,
 }: {
   response: ModelCallResponse;
   onOpen: (id: string) => void;
   onHistory: (modelCallId: string) => void;
+  onPreviousEvent: (eventId: string) => void;
+  onFollowEvent: (eventId: string) => void;
 }) {
   const model = response.model_call;
   const completeness = {
@@ -647,11 +651,21 @@ export function ModelCallOverview({
                       "前驱事件",
                       event.cause_event_ids.length
                         ? event.cause_event_ids.map((id) => (
-                            <p className="mono" key={id}>
+                            <button
+                              className="artifact-link mono"
+                              key={id}
+                              onClick={() => onPreviousEvent(id)}
+                            >
                               {id}
-                            </p>
+                            </button>
                           ))
                         : "起始事件",
+                    ],
+                    [
+                      "直接后继",
+                      <button onClick={() => onFollowEvent(event.event_id)}>
+                        准备关联检索
+                      </button>,
                     ],
                     [
                       "证据引用",
@@ -894,11 +908,15 @@ export function EventDetail({
   onOpen,
   onRequest,
   onModelCall,
+  onPreviousEvent,
+  onFollowEvent,
 }: {
   event: AuditEvent | SearchEvent;
   onOpen: (id: string) => void;
   onRequest?: (id: string) => void;
   onModelCall?: (id: string) => void;
+  onPreviousEvent: (eventId: string) => void;
+  onFollowEvent: (eventId: string) => void;
 }) {
   return (
     <div className="detail-body">
@@ -974,6 +992,9 @@ export function EventDetail({
           ],
         ]}
       />
+      <button onClick={() => onFollowEvent(event.event_id)}>
+        查找以此为前驱的事件
+      </button>
       <details className="event-metadata">
         <summary>更多事件字段</summary>
         <Rows
@@ -997,9 +1018,13 @@ export function EventDetail({
               "前驱事件",
               event.cause_event_ids.length
                 ? event.cause_event_ids.map((id) => (
-                    <p className="mono" key={id}>
+                    <button
+                      className="artifact-link mono"
+                      key={id}
+                      onClick={() => onPreviousEvent(id)}
+                    >
                       {id}
-                    </p>
+                    </button>
                   ))
                 : "未记录",
             ],

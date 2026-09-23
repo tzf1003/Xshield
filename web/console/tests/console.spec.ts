@@ -555,6 +555,25 @@ test("model query preserves partial Noul history and unknown absence", async ({
   );
 });
 
+test("model lifecycle predecessor links prepare exact event history", async ({
+  page,
+}) => {
+  const calls = await mockControl(page);
+  await connect(page);
+  await queryModel(page);
+  await page.locator(".model-event").nth(1).locator("summary").click();
+  const predecessor = "ev_018f2a3b-4c5d-7000-8000-000000000001";
+  await page.getByRole("button", { name: predecessor, exact: true }).click();
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
+    "event_id",
+  );
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(predecessor);
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  expect(calls.map((call) => call.path)).toEqual([
+    `/control/v1/model-calls/${MODEL_CALL_ID}`,
+  ]);
+});
+
 test("model 401 and scope drift dispose the authenticated session", async ({
   page,
 }) => {
@@ -1203,6 +1222,71 @@ async function addSearchFilter(
   if (field === "outcome") await input.selectOption(value);
   else await input.fill(value);
 }
+
+test("event details traverse direct causes and children through explicit history search", async ({
+  page,
+}) => {
+  const predecessor = "ev_018f2a3b-4c5d-7000-8000-000000000001";
+  const successor = "ev_018f2a3b-4c5d-7000-8000-000000000002";
+  const calls = await mockControl(page, async (url, request) => {
+    if (url.pathname !== "/control/v1/search") return undefined;
+    const plan = request.postDataJSON() as SearchPlan;
+    const result = await searchFixture(plan);
+    result.events[1]!.cause_event_ids = [predecessor];
+    const exactEvent = plan.filters.find((item) => item.kind === "event_id");
+    const cause = plan.filters.find((item) => item.kind === "caused_by_event_id");
+    if (exactEvent?.kind === "event_id")
+      result.events = result.events.filter((item) => item.event_id === exactEvent.value);
+    if (cause?.kind === "caused_by_event_id")
+      result.events = result.events.filter((item) => item.cause_event_ids.includes(cause.value));
+    if (exactEvent || cause) {
+      result.truncated = false;
+      result.next_cursor = null;
+    }
+    return { body: result };
+  });
+  await connect(page);
+  await prepareSearch(page);
+  await search(page);
+  await page.getByRole("radio", { name: successor, exact: true }).check();
+  await page.locator("aside").getByText("更多事件字段", { exact: true }).click();
+  await page.locator("aside").getByRole("button", { name: predecessor, exact: true }).click();
+
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("event_id");
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(predecessor);
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
+  expect(calls).toHaveLength(1);
+
+  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
+  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
+  await search(page);
+  expect(calls[1]?.body).toMatchObject({
+    filters: [{ kind: "event_id", value: predecessor }],
+  });
+  await page.locator("aside").getByRole("button", {
+    name: "查找以此为前驱的事件",
+    exact: true,
+  }).click();
+
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
+    "caused_by_event_id",
+  );
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(predecessor);
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  expect(calls).toHaveLength(2);
+
+  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
+  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
+  await search(page);
+  expect(calls[2]?.body).toMatchObject({
+    filters: [{ kind: "caused_by_event_id", value: predecessor }],
+  });
+  await expect(page.getByRole("radio", { name: successor, exact: true })).toBeVisible();
+  expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
+});
 
 test("search submits an allowlisted plan, freezes pagination and clears edited results", async ({
   page,

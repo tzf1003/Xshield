@@ -1176,7 +1176,10 @@ test("search canonical digest covers every predicate and retained filter order",
   const plan = searchPlan();
   const suffix = "018f2a3b-4c5d-7000-8000-000000000001";
   plan.filters = [
-    { kind: "request_id", value: REQUEST_ID },
+    {
+      kind: "caused_by_event_id",
+      value: "ev_018f2a3b-4c5d-7000-8000-000000000001",
+    },
     { kind: "grant_id", value: `grant_${suffix}` },
     { kind: "auth_binding_id", value: `auth_${suffix}` },
     { kind: "case_id", value: `case_${suffix}` },
@@ -1185,7 +1188,7 @@ test("search canonical digest covers every predicate and retained filter order",
     { kind: "evidence_access_request_id", value: `access_${suffix}` },
     { kind: "confidence_at_most", basis_points: 1234 },
   ];
-  const canonical = `1789862400|1789948800|asc|2|request_id=${REQUEST_ID}|grant_id=grant_${suffix}|auth_binding_id=auth_${suffix}|case_id=case_${suffix}|artifact_id=${ARTIFACT_ID}|calibration_report_id=calr_${suffix}|evidence_access_request_id=access_${suffix}|confidence<=1234`;
+  const canonical = `1789862400|1789948800|asc|2|caused_by_event_id=ev_${suffix}|grant_id=grant_${suffix}|auth_binding_id=auth_${suffix}|case_id=case_${suffix}|artifact_id=${ARTIFACT_ID}|calibration_report_id=calr_${suffix}|evidence_access_request_id=access_${suffix}|confidence<=1234`;
   const expected = createHash("sha256").update(canonical).digest("hex");
   assert.equal(await searchPlanDigest(validateSearchPlan(plan)), expected);
   plan.filters.reverse();
@@ -1264,6 +1267,7 @@ test("invalid search inputs fail before network and preserve strict query budget
     { filters: [{ kind: "evidence_access_request_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "evidence_hold_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "model_call_id", value: ARTIFACT_ID }] },
+    { filters: [{ kind: "caused_by_event_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "subject_ref", value: "operator\n1" }] },
     { filters: [{ kind: "subject_ref", value: "é".repeat(129) }] },
     { filters: [{ kind: "text", field: "payload_json", value: "anything" }] },

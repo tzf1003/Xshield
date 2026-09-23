@@ -954,6 +954,9 @@ async fn execute_query(
         match filter {
             QueryFilter::RequestId(_) => sql.push_str("request_id = ?"),
             QueryFilter::EventId(_) => sql.push_str("event_id = ?"),
+            // ponytail: inspect the existing cause array under the fixed time/scope
+            // scan budgets; add an edge projection only if measured queries exceed them.
+            QueryFilter::CausedByEventId(_) => sql.push_str("has(cause_event_ids,?)"),
             QueryFilter::SubjectRef(_) => sql.push_str(
                 "(JSONExtractString(payload_json,'subject_ref') = ? \
                  OR JSONExtractString(payload_json,'principal_ref') = ? \
@@ -1069,7 +1072,9 @@ async fn execute_query(
     for filter in plan.filters() {
         query = match filter {
             QueryFilter::RequestId(value) => query.bind(value.as_str()),
-            QueryFilter::EventId(value) => query.bind(value.as_str()),
+            QueryFilter::EventId(value) | QueryFilter::CausedByEventId(value) => {
+                query.bind(value.as_str())
+            }
             QueryFilter::SubjectRef(value) => query
                 .bind(value.as_str())
                 .bind(value.as_str())

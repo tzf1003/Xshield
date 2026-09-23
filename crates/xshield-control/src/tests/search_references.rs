@@ -3,8 +3,8 @@ use crate::{component_signature, lower_hex};
 use openssl::sha::sha256;
 use xshield_core::{
     domain::{
-        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EvidenceAccessRequestId, GrantId,
-        ModelCallId, SubjectRef,
+        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
+        GrantId, ModelCallId, SubjectRef,
     },
     query::QueryFilter,
 };
@@ -17,6 +17,7 @@ const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-000000000105";
 const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000106";
 const MODEL_CALL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000106";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-000000000107";
+const PREDECESSOR: &str = "ev_018f2a3b-4c5d-7000-8000-000000000108";
 const SUBJECT: &str = "principal-target-1";
 
 pub(super) fn reference_payload() -> Value {
@@ -52,6 +53,12 @@ fn evidence_hold_reference_payload() -> Value {
 fn model_call_reference_payload() -> Value {
     let mut payload = search_payload();
     payload["filters"] = json!([{"kind": "model_call_id", "value": MODEL_CALL}]);
+    payload
+}
+
+fn caused_by_event_reference_payload() -> Value {
+    let mut payload = search_payload();
+    payload["filters"] = json!([{"kind": "caused_by_event_id", "value": PREDECESSOR}]);
     payload
 }
 
@@ -430,6 +437,45 @@ async fn model_call_search_binds_only_restricted_history() {
 }
 
 #[tokio::test]
+async fn caused_by_event_search_audits_only_the_plan_digest() {
+    let mock = test::Mock::new();
+    mock.add(test::handlers::provide([search_event(
+        "ev_018f2a3b-4c5d-7000-8000-000000000118",
+        20,
+    )]));
+    let fixture = Fixture::with_index(
+        10,
+        ManagementRole::Investigator,
+        Client::default().with_mock(&mock),
+    );
+    let app = router(fixture.control);
+    let response = response_json(
+        app.clone()
+            .oneshot(search_http_request(&caused_by_event_reference_payload()))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let canonical = format!("10|70|asc|1|caused_by_event_id={PREDECESSOR}");
+    assert_eq!(
+        response["query_digest"],
+        lower_hex(&sha256(canonical.as_bytes()))
+    );
+    assert_eq!(response["events"].as_array().map(Vec::len), Some(1));
+    drop(app);
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "console.query.executed");
+    assert_eq!(
+        events[0]["payload"]["query_digest"],
+        lower_hex(&sha256(canonical.as_bytes()))
+    );
+    assert!(!events[0].to_string().contains(PREDECESSOR));
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn evidence_access_search_binds_only_restricted_history() {
     let mock = test::Mock::new();
     let event = search_event("ev_018f2a3b-4c5d-7000-8000-000000000117", 20);
@@ -482,6 +528,7 @@ async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
         ("evidence_hold_id", HOLD, ARTIFACT),
         ("evidence_access_request_id", ACCESS, ARTIFACT),
         ("model_call_id", MODEL_CALL, ARTIFACT),
+        ("caused_by_event_id", PREDECESSOR, ARTIFACT),
     ] {
         for invalid in [
             json!(other),
@@ -855,6 +902,44 @@ async fn model_call_search_cursor_binds_the_exact_model_call_reference() {
         .unwrap();
     let mut altered = payload;
     altered["filters"][0]["value"] = json!(MODEL_CALL.replace("106", "107"));
+    altered["cursor"] = json!(cursor);
+    let body = response_json(
+        router(fixture.control)
+            .oneshot(search_http_request(&altered))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn caused_by_event_search_cursor_binds_the_exact_predecessor_reference() {
+    let fixture = Fixture::new(10, ManagementRole::Investigator);
+    let payload = caused_by_event_reference_payload();
+    let plan = serde_json::from_value::<SearchRequest>(payload.clone())
+        .unwrap()
+        .into_plan(1000)
+        .unwrap();
+    assert_eq!(
+        plan.filters(),
+        [QueryFilter::CausedByEventId(
+            EventId::parse(PREDECESSOR).unwrap()
+        )]
+    );
+    let position = xshield_worker::SearchPosition::new(
+        DateTime::from_timestamp_micros(20_123_456).unwrap(),
+        EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+    )
+    .unwrap();
+    let cursor = fixture
+        .control
+        .encode_search_cursor("operator-1", &plan, &position)
+        .unwrap();
+    let mut altered = payload;
+    altered["filters"][0]["value"] = json!(PREDECESSOR.replace("108", "109"));
     altered["cursor"] = json!(cursor);
     let body = response_json(
         router(fixture.control)

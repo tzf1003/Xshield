@@ -102,6 +102,7 @@ export function App() {
     null,
   );
   const [searchPreset, setSearchPreset] = useState<SearchPreset | null>(null);
+  const [searchPresetVersion, setSearchPresetVersion] = useState(0);
   const [searchPlan, setSearchPlan] = useState<SearchPlan | null>(null);
   const [search, setSearch] = useState<SearchResponse | null>(null);
   const [model, setModel] = useState<ModelCallResponse | null>(null);
@@ -385,6 +386,13 @@ export function App() {
       loadBinding(id);
     }
   }
+  function prepareSearchHistory(preset: SearchPreset) {
+    clearResults();
+    setSearchPreset(preset);
+    setSearchPresetVersion((version) => version + 1);
+    setRequestId("");
+    setQueryKind("search");
+  }
   function loadRequest(target: string) {
     void run(
       "query",
@@ -492,6 +500,12 @@ export function App() {
             onOpen={openArtifact}
             onRequest={(id) => openTarget("request", id)}
             onModelCall={(id) => openTarget("model", id)}
+            onPreviousEvent={(id) =>
+              prepareSearchHistory({ kind: "event_id", value: id })
+            }
+            onFollowEvent={(id) =>
+              prepareSearchHistory({ kind: "caused_by_event_id", value: id })
+            }
           />
         ) : (
           <p className="empty">选择一条事件或证据查看详情。</p>
@@ -678,13 +692,10 @@ export function App() {
                 busy={Boolean(busy.access)}
                 onInvalidate={clearResults}
                 onHistory={(accessRequestId) => {
-                  clearResults();
-                  setSearchPreset({
+                  prepareSearchHistory({
                     kind: "evidence_access_request_id",
                     value: accessRequestId,
                   });
-                  setRequestId("");
-                  setQueryKind("search");
                 }}
                 onRun={(fetcher, apply, fail) =>
                   run("access", fetcher, apply, fail)
@@ -694,15 +705,13 @@ export function App() {
             <div hidden={queryKind !== "hold"}>
               <EvidenceHoldPanel active={queryKind === "hold"} busy={Boolean(busy.hold)}
                 onInvalidate={clearResults} onHistory={(holdId) => {
-                  clearResults();
-                  setSearchPreset({ kind: "evidence_hold_id", value: holdId });
-                  setRequestId("");
-                  setQueryKind("search");
+                  prepareSearchHistory({ kind: "evidence_hold_id", value: holdId });
                 }} onRun={(fetcher, apply, fail) => run("hold", fetcher, apply, fail)} />
             </div>
             {queryKind === "case" || queryKind === "hold" ||
             queryKind === "access" ? null : queryKind === "search" ? (
               <SearchPanel
+                key={searchPresetVersion}
                 response={search}
                 initialFilter={searchPreset}
                 plan={searchPlan}
@@ -745,13 +754,10 @@ export function App() {
                 busy={Boolean(busy.query)}
                 onRefresh={() => loadCalibrationReport()}
                 onHistory={(reportId) => {
-                  clearResults();
-                  setSearchPreset({
+                  prepareSearchHistory({
                     kind: "calibration_report_id",
                     value: reportId,
                   });
-                  setRequestId("");
-                  setQueryKind("search");
                 }}
               />
             ) : ledger ? (
@@ -760,10 +766,7 @@ export function App() {
                 onBinding={(id) => openTarget("binding", id)}
                 onRequest={(id) => openTarget("request", id)}
                 onHistory={(preset) => {
-                  clearResults();
-                  setSearchPreset(preset);
-                  setRequestId("");
-                  setQueryKind("search");
+                  prepareSearchHistory(preset);
                 }}
               />
             ) : model ? (
@@ -772,14 +775,17 @@ export function App() {
                   response={model}
                   onOpen={openArtifact}
                   onHistory={(modelCallId) => {
-                    clearResults();
-                    setSearchPreset({
+                    prepareSearchHistory({
                       kind: "model_call_id",
                       value: modelCallId,
                     });
-                    setRequestId("");
-                    setQueryKind("search");
                   }}
+                  onPreviousEvent={(id) =>
+                    prepareSearchHistory({ kind: "event_id", value: id })
+                  }
+                  onFollowEvent={(id) =>
+                    prepareSearchHistory({ kind: "caused_by_event_id", value: id })
+                  }
                 />
                 {(artifact || busy.artifact || problems.artifact) && (
                   <section
