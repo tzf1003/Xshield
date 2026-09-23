@@ -609,22 +609,31 @@ main {
   margin-top: 14px;
 }
 
-.causality-query-nodes {
+.causality-query-root {
   display: grid;
-  gap: 7px;
-  margin: 10px 0 0;
-  padding: 0;
-  list-style: none;
+  gap: 3px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-left: 2px solid #8798ad;
+  background: #f6f8fb;
 }
 
-.causality-query-nodes li {
+.causality-query .causality-branch h5 {
+  margin: 12px 0 8px;
+  color: #273447;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.causality-query .causal-level li {
   display: grid;
   gap: 2px;
-  border-left: 1px solid #d6dde5;
-  padding-left: 9px;
+  list-style: none;
+  margin-bottom: 6px;
+  padding-left: 2px;
 }
 
-.causality-query-nodes strong {
+.causality-query .causal-level strong {
   color: #273447;
 }
 

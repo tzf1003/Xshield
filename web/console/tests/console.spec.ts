@@ -1370,9 +1370,15 @@ test("submits bounded server causality only after an explicit UTC window", async
   await panel.getByLabel("最大跳数", { exact: true }).fill("3");
   await panel.getByLabel("最大节点数", { exact: true }).fill("4");
   await panel.getByRole("button", { name: "查询服务端因果", exact: true }).click();
-  await expect(
-    page.getByRole("region", { name: "服务端因果查询结果", exact: true }),
-  ).toContainText("已找到");
+  const result = page.getByRole("region", {
+    name: "服务端因果查询结果",
+    exact: true,
+  });
+  await expect(result).toContainText("已找到");
+  await expect(result).toContainText("根事件");
+  await expect(result).toContainText(root);
+  await expect(result).toContainText("后继方向");
+  await expect(result).toContainText("第 1 跳");
   const request = calls.find(({ path }) => path === "/control/v1/causality");
   expect(request?.body).toEqual({
     schema_version: 3,
@@ -1383,9 +1389,7 @@ test("submits bounded server causality only after an explicit UTC window", async
     max_depth: 3,
     max_nodes: 4,
   });
-  await expect(
-    page.getByRole("region", { name: "服务端因果查询结果", exact: true }),
-  ).toContainText("ev_018f2a3b-4c5d-7000-8000-000000000004");
+  await expect(result).toContainText("ev_018f2a3b-4c5d-7000-8000-000000000004");
   expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
 });
 

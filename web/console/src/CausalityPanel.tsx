@@ -1,7 +1,59 @@
 import { useState } from "react";
-import type { CausalityResponse } from "./search";
+import type { CausalityNode, CausalityResponse } from "./search";
 
 type Problem = { message: string; code: string; requestId?: string | null };
+type CausalityLevel = { depth: number; nodes: CausalityNode[] };
+
+function levels(
+  nodes: CausalityNode[],
+  direction: CausalityNode["direction"],
+): CausalityLevel[] {
+  const byDepth = new Map<number, CausalityNode[]>();
+  for (const node of nodes) {
+    if (node.direction !== direction) continue;
+    const level = byDepth.get(node.depth) ?? [];
+    level.push(node);
+    byDepth.set(node.depth, level);
+  }
+  return [...byDepth.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([depth, level]) => ({ depth, nodes: level }));
+}
+
+function CausalityQueryBranch({
+  label,
+  nodes,
+}: {
+  label: string;
+  nodes: CausalityLevel[];
+}) {
+  return (
+    <section className="causality-branch" aria-label={label}>
+      <h5>{label}</h5>
+      {nodes.length === 0 ? (
+        <p className="empty">当前窗口没有该方向的关联节点。</p>
+      ) : (
+        nodes.map((level) => (
+          <div
+            className="causal-level"
+            key={level.nodes.map((node) => node.event.event_id).join("|")}
+          >
+            <span className="footnote">第 {level.depth} 跳</span>
+            <ul>
+              {level.nodes.map((node) => (
+                <li key={node.event.event_id}>
+                  <strong>{node.event.event_type}</strong>
+                  <span className="mono">{node.event.event_id}</span>
+                  <span className="mono">{node.event.occurred_at}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      )}
+    </section>
+  );
+}
 
 /** Explicit server traversal for the currently selected redacted event. */
 export function CausalityPanel({
@@ -187,23 +239,31 @@ export function CausalityPanel({
               </dd>
             </div>
           </dl>
+          <div className="causality-query-root">
+            <span>根事件</span>
+            <span className="mono">{eventId}</span>
+          </div>
           {visibleResponse.truncated && (
             <p className="footnote" role="status">
               结果已达到服务端有界遍历上限，不能据此推断完整因果图。
             </p>
           )}
-          {visibleResponse.nodes.length > 0 && (
-            <ul className="causality-query-nodes">
-              {visibleResponse.nodes.map((node) => (
-                <li key={node.event.event_id}>
-                  <span>{node.direction === "predecessor" ? "前驱" : "后继"} · 第 {node.depth} 跳</span>
-                  <strong>{node.event.event_type}</strong>
-                  <span className="mono">{node.event.event_id}</span>
-                  <span className="mono">{node.event.occurred_at}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+          <div className="causality-branches">
+            {(visibleResponse.direction === "both" ||
+              visibleResponse.direction === "predecessors") && (
+              <CausalityQueryBranch
+                label="前驱方向"
+                nodes={levels(visibleResponse.nodes, "predecessor")}
+              />
+            )}
+            {(visibleResponse.direction === "both" ||
+              visibleResponse.direction === "successors") && (
+              <CausalityQueryBranch
+                label="后继方向"
+                nodes={levels(visibleResponse.nodes, "successor")}
+              />
+            )}
+          </div>
         </section>
       )}
     </section>
