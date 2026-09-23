@@ -5,7 +5,7 @@
 
 use super::{
     AccessAction, ControlPlane, EndpointResult, api_error, audit_unavailable, component_signature,
-    internal_error, valid_idempotency_key,
+    internal_error, single_header, valid_idempotency_key,
 };
 use axum::{
     Json,
@@ -199,16 +199,6 @@ fn valid_reason(reason: &str) -> bool {
         && reason.len() <= 512
         && reason.trim() == reason
         && !reason.chars().any(char::is_control)
-}
-
-fn single_header(headers: &HeaderMap, name: &str) -> Option<String> {
-    let mut values = headers.get_all(name).iter();
-    let value = values.next()?.to_str().ok()?;
-    if values.next().is_some() {
-        None
-    } else {
-        Some(value.to_owned())
-    }
 }
 
 pub(super) async fn create_handler(
