@@ -1151,9 +1151,15 @@ async fn execute_agent_run(
     }) {
         return Err(PublishError::InvalidEvent);
     }
+    // A retained suffix may contain a later start and finish after an omitted
+    // prefix; only a visible start at the beginning proves a complete run.
     Ok(Some(AgentRunSummary {
         agent_run_id: agent_run_id.as_str().to_owned(),
-        lifecycle_complete: started_seen && finished_seen,
+        lifecycle_complete: events
+            .first()
+            .is_some_and(|event| event.event_type == "agent.started")
+            && started_seen
+            && finished_seen,
         events,
     }))
 }
@@ -1714,6 +1720,12 @@ mod tests {
             query_agent_rows(duplicate_sequence).await,
             Err(PublishError::InvalidEvent)
         ));
+
+        let mut late_start = agent_rows();
+        late_start[0].event_type = "agent.tool_called".to_owned();
+        late_start[1].event_type = "agent.started".to_owned();
+        let result = query_agent_rows(late_start).await.unwrap().unwrap();
+        assert!(!result.lifecycle_complete);
 
         let mut oversized_payload = agent_rows();
         oversized_payload[1]

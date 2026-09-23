@@ -454,6 +454,17 @@ test("agent run projection keeps lifecycle facts redacted and bounded", async (t
   retainedSuffix.completeness = "partial";
   body = retainedSuffix;
   assert.deepEqual(await client.agentRun(AGENT_RUN_ID), retainedSuffix);
+  const lateStart = agentRunFixture();
+  const [startedEvent, toolEvent, finishedEvent] = lateStart.agent_run!.events;
+  lateStart.agent_run!.events = [
+    { ...toolEvent!, request_seq: 1, cause_event_ids: [] },
+    { ...startedEvent!, request_seq: 2 },
+    { ...finishedEvent!, request_seq: 3, cause_event_ids: [toolEvent!.event_id] },
+  ];
+  lateStart.agent_run!.lifecycle_complete = false;
+  lateStart.completeness = "partial";
+  body = lateStart;
+  assert.deepEqual(await client.agentRun(AGENT_RUN_ID), lateStart);
   for (const mutate of [
     (value: ReturnType<typeof agentRunFixture>) => {
       value.agent_run!.events[1]!.request_seq = 1;

@@ -391,7 +391,7 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 
 `GET /control/v1/agent-runs/{agent_run_id}` 要求固定 tenant/site 内的 `Observer` 和单值管理 Bearer。路径 ID 先按 `agt_` UUIDv7 强类型校验；查询只访问 retention-aware `audit_events_active` 中固定的 `agent.started`、`agent.tool_called`、`agent.tool_result`、`agent.artifact_created`、`agent.finished` 事件，并以参数绑定注入服务端 tenant/site 与目标 ID。事件 payload 先拒绝重复 JSON 键，再只解码并比较 `agent_run_id`；未知的工具参数、结果、提示、权限快照和正文不会进入返回 DTO。
 
-成功响应返回独立管理 `request_id`、固定作用域、`source_agent_run_id`、`found`、`completeness`、配置 journal 的 `as_of`/`index_watermark`/`has_gaps`/`pending_segments`，以及按 `request_seq,event_id` 排序且 `request_seq` 严格递增的脱敏生命周期事件。每个事件仅含 event/request/trace ID、时间、序号、类型、结果/原因、证据引用、直接因果引用和 sensitivity；`lifecycle_complete` 只有在同一查询可见且顺序正确的启动与终态同时存在时为 true。证据引用仍需独立 manifest、审批和 EvidenceReadPort；详情不会触发执行、回放、导出、证据读取或业务资格。
+成功响应返回独立管理 `request_id`、固定作用域、`source_agent_run_id`、`found`、`completeness`、配置 journal 的 `as_of`/`index_watermark`/`has_gaps`/`pending_segments`，以及按 `request_seq,event_id` 排序且 `request_seq` 严格递增的脱敏生命周期事件。每个事件仅含 event/request/trace ID、时间、序号、类型、结果/原因、证据引用、直接因果引用和 sensitivity；`lifecycle_complete` 只有在可见片段首事件为启动、随后按序出现终态且二者均在同一查询内时为 true，保留后缀保持 `partial`。证据引用仍需独立 manifest、审批和 EvidenceReadPort；详情不会触发执行、回放、导出、证据读取或业务资格。
 
 查询固定最多解码 64 个事件、单 payload 16 KiB、结果 1 MiB、2 秒索引预算及 5 秒客户端 deadline，并与其他分析读取共享单实例许可。已认证且路径有效的成功、未命中、容量/预算拒绝和依赖故障均追加独立 `console.agent.read`；通过路径校验的目标写入 `target_agent_run_id`，成功的去重 evidence refs 才进入审计引用。无效 ID 为 `CONTROL_AGENT_RUN_ID_INVALID`/400，容量/预算、超时、索引或健康故障沿用受限查询错误族；审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，响应统一 `Cache-Control: private, no-store`。
 

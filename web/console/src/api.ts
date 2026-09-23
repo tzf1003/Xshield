@@ -926,7 +926,10 @@ function agentRun(value: unknown, target: string): AgentRun {
       ),
     );
   }
-  ensure(result.lifecycle_complete === (started && finished));
+  ensure(
+    result.lifecycle_complete ===
+      (started && finished && result.events[0]?.event_type === "agent.started"),
+  );
   return result;
 }
 
