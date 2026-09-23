@@ -99,39 +99,32 @@ impl ControlPlane {
     ) -> EndpointResult {
         let request_id = format!("req_{}", Uuid::now_v7());
         let parsed = query(raw.as_deref());
-        let role = if matches!(&parsed, Ok((EvidenceAccessListView::Review, _))) {
-            ManagementRole::SensitiveEvidenceApprover
+        let roles = if matches!(&parsed, Ok((EvidenceAccessListView::Review, _))) {
+            vec![ManagementRole::SensitiveEvidenceApprover]
         } else {
-            [
+            vec![
                 ManagementRole::SensitiveEvidenceApprover,
                 ManagementRole::SensitiveEvidenceReader,
                 ManagementRole::Investigator,
             ]
-            .into_iter()
-            .find(|role| {
-                self.config.principal.authorizes(
-                    *role,
-                    &self.config.tenant_id,
-                    &self.config.site_id,
-                )
-            })
-            .unwrap_or(ManagementRole::Investigator)
         };
         let auth_control = Arc::clone(&self);
         let auth_request = request_id.clone();
-        let subject = match tokio::task::spawn_blocking(move || {
-            auth_control.authorize(
+        let identity = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize_any_identity(
                 authorization.as_deref(),
                 &auth_request,
-                AccessAction { role, ..ACCESS },
+                ACCESS,
+                &roles,
             )
         })
         .await
         {
-            Ok(Ok(subject)) => subject,
+            Ok(Ok(identity)) => identity,
             Ok(Err(result)) => return *result,
             Err(_) => return internal_error(&request_id),
         };
+        let subject = identity.principal.subject().to_owned();
         let (view, cursor) = match parsed {
             Ok(value) if empty => value,
             _ => {

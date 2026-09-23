@@ -261,6 +261,50 @@ async fn evidence_access_list_auth_roles_scope_rate_and_capacity() {
 }
 
 #[tokio::test]
+async fn evidence_access_list_uses_browser_roles_for_mine_scope() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://xshield:xshield@127.0.0.1:1/xshield")
+        .unwrap();
+    pool.close().await;
+    let mut fixture = Fixture::with_catalog(
+        10,
+        ManagementRole::Investigator,
+        PostgresIdentityStore::from_pool(pool),
+        1,
+    );
+    fixture.control.config.principal = ManagementPrincipal::new(
+        "machine-investigator",
+        [ManagementRole::Investigator],
+        [(
+            fixture.control.config.tenant_id.clone(),
+            fixture.control.config.site_id.clone(),
+        )],
+    )
+    .unwrap();
+    let mut input = request("?view=mine");
+    input.headers_mut().insert(
+        AUTHORIZATION,
+        browser_authorization(
+            &fixture.control,
+            "browser-reader",
+            &["sensitive_evidence_reader"],
+        )
+        .parse()
+        .unwrap(),
+    );
+    let response = json_response(
+        router(fixture.control).oneshot(input).await.unwrap(),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_eq!(response["error_code"], STORE);
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    audit(&events[0], "ERROR", STORE);
+    cleanup(&fixture.access_directory);
+}
+
+#[tokio::test]
 async fn evidence_access_list_cursor_binds_scope_subject_credential_limit_view_and_position() {
     for binding in [
         "subject",

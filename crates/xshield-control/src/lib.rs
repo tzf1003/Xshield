@@ -3269,9 +3269,61 @@ impl ControlPlane {
         request_id: &str,
         action: AccessAction,
     ) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
-        let identity = self.authenticated_subject(authorization, request_id, action)?;
+        let identity = self.authenticate_request(authorization, request_id, action)?;
         let principal = &identity.principal;
         let subject = principal.subject();
+        if !principal.authorizes(action.role, &self.config.tenant_id, &self.config.site_id) {
+            return Err(Box::new(self.audited_error(
+                request_id,
+                Some(subject),
+                action,
+                None,
+                StatusCode::FORBIDDEN,
+                "CONTROL_SCOPE_DENIED",
+                "management operation forbidden",
+                false,
+                "request_scope",
+            )));
+        }
+        Ok(identity)
+    }
+
+    fn authorize_any_identity(
+        &self,
+        authorization: Option<&str>,
+        request_id: &str,
+        action: AccessAction,
+        roles: &[ManagementRole],
+    ) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
+        let identity = self.authenticate_request(authorization, request_id, action)?;
+        if !roles.iter().any(|role| {
+            identity
+                .principal
+                .authorizes(*role, &self.config.tenant_id, &self.config.site_id)
+        }) {
+            return Err(Box::new(self.audited_error(
+                request_id,
+                Some(identity.principal.subject()),
+                action,
+                None,
+                StatusCode::FORBIDDEN,
+                "CONTROL_SCOPE_DENIED",
+                "management operation forbidden",
+                false,
+                "request_scope",
+            )));
+        }
+        Ok(identity)
+    }
+
+    fn authenticate_request(
+        &self,
+        authorization: Option<&str>,
+        request_id: &str,
+        action: AccessAction,
+    ) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
+        let identity = self.authenticated_subject(authorization, request_id, action)?;
+        let subject = identity.principal.subject();
         if identity.browser && action.method != "GET" && !identity.csrf_valid {
             return Err(Box::new(self.audited_error(
                 request_id,
@@ -3311,19 +3363,6 @@ impl ControlPlane {
                 "management request rate exceeded",
                 true,
                 "retry_later",
-            )));
-        }
-        if !principal.authorizes(action.role, &self.config.tenant_id, &self.config.site_id) {
-            return Err(Box::new(self.audited_error(
-                request_id,
-                Some(subject),
-                action,
-                None,
-                StatusCode::FORBIDDEN,
-                "CONTROL_SCOPE_DENIED",
-                "management operation forbidden",
-                false,
-                "request_scope",
             )));
         }
         Ok(identity)
@@ -7346,6 +7385,38 @@ mod tests {
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(payload.to_string()))
             .unwrap()
+    }
+
+    fn browser_authorization(control: &ControlPlane, subject: &str, roles: &[&str]) -> String {
+        let expires_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 30;
+        let payload = serde_json::to_vec(&json!({
+            "version": 1,
+            "subject": subject,
+            "tenant_id": control.config.tenant_id.as_str(),
+            "site_id": control.config.site_id.as_str(),
+            "roles": roles,
+            "csrf_valid": true,
+            "expires_at": expires_at,
+        }))
+        .unwrap();
+        let key = control.auth_context_key.as_deref().unwrap();
+        let signature =
+            super::component_signature(key, &[b"xshield-control-browser-request-v1", &payload])
+                .unwrap();
+        let mut payload_hex = String::with_capacity(payload.len() * 2);
+        for byte in payload {
+            payload_hex.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+            payload_hex.push(char::from(b"0123456789abcdef"[(byte & 0x0f) as usize]));
+        }
+        format!(
+            "Xshield-Session {}.{}",
+            payload_hex,
+            super::lower_hex(&signature)
+        )
     }
 
     fn analytical_http_request(model_lookup: bool) -> Request<Body> {

@@ -384,32 +384,8 @@ async fn evidence_hold_search_uses_browser_roles_for_the_second_scope_check() {
         )],
     )
     .unwrap();
-    let expires_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 30;
-    let payload = serde_json::to_vec(&json!({
-        "version": 1,
-        "subject": "browser-investigator",
-        "tenant_id": fixture.control.config.tenant_id.as_str(),
-        "site_id": fixture.control.config.site_id.as_str(),
-        "roles": ["investigator"],
-        "csrf_valid": true,
-        "expires_at": expires_at,
-    }))
-    .unwrap();
-    let key = fixture.control.auth_context_key.as_deref().unwrap();
-    let signature =
-        component_signature(key, &[b"xshield-control-browser-request-v1", &payload]).unwrap();
-    let authorization = format!(
-        "Xshield-Session {}.{}",
-        payload
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-        lower_hex(&signature)
-    );
+    let authorization =
+        browser_authorization(&fixture.control, "browser-investigator", &["investigator"]);
     let response = response_json(
         router(fixture.control)
             .oneshot(
