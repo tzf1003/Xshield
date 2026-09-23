@@ -4,6 +4,7 @@
 
 use super::{
     AccessAction, ControlPlane, EndpointResult, api_error, audit_unavailable, internal_error,
+    single_header,
 };
 use axum::{
     Json,
@@ -257,10 +258,7 @@ async fn handler(
     headers: HeaderMap,
     kind: Kind,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .read_ledger(kind, authorization, target.ok().map(|Path(id)| id), query)
         .await

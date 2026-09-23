@@ -4,7 +4,7 @@
 use super::{
     AccessAction, CURSOR_VERSION, ControlPlane, CursorError, EndpointResult, api_error,
     audit_unavailable, case_items, component_signature, internal_error, lower_hex,
-    parse_cursor_query, parse_lower_hex_32,
+    parse_cursor_query, parse_lower_hex_32, single_header,
 };
 use axum::{
     Json,
@@ -65,10 +65,7 @@ pub(super) async fn handler(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .read_case_collection(authorization, case_id.ok().map(|Path(id)| id), query)
         .await

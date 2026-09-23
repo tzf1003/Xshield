@@ -7,6 +7,7 @@
 
 use super::{
     AccessAction, ControlPlane, EndpointResult, ErrorResponse, audit_unavailable, internal_error,
+    single_header,
 };
 use axum::{
     Json,
@@ -168,10 +169,7 @@ pub(super) async fn handler(
     headers: HeaderMap,
     payload: Result<Json<CausalityRequest>, JsonRejection>,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .causality(authorization, payload.ok().map(|Json(value)| value))
         .await

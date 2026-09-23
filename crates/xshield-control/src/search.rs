@@ -4,7 +4,7 @@
 use super::{
     AccessAction, CURSOR_BYTES_MAX, CURSOR_VERSION, ControlPlane, CursorError, EndpointResult,
     ErrorResponse, audit_unavailable, component_signature, internal_error, lower_hex,
-    parse_lower_hex_32,
+    parse_lower_hex_32, single_header,
 };
 use axum::{
     Json,
@@ -361,10 +361,7 @@ pub(super) async fn handler(
     headers: HeaderMap,
     payload: Result<Json<SearchRequest>, JsonRejection>,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .search(authorization, payload.ok().map(|Json(payload)| payload))
         .await

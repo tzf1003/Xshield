@@ -3986,20 +3986,8 @@ async fn create_case_handler(
     headers: HeaderMap,
     payload: Result<Json<CreateCaseRequest>, JsonRejection>,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let mut keys = headers.get_all("idempotency-key").iter();
-    let idempotency_key = keys
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let idempotency_key = if keys.next().is_none() {
-        idempotency_key
-    } else {
-        None
-    };
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
+    let idempotency_key = single_header(&headers, "idempotency-key");
     control
         .create_case(
             authorization,
@@ -4015,10 +4003,7 @@ async fn request_summary_handler(
     Path(request_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .request_summary(authorization, request_id)
         .await
@@ -4026,10 +4011,7 @@ async fn request_summary_handler(
 }
 
 async fn health_handler(State(control): State<Arc<ControlPlane>>, headers: HeaderMap) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     match tokio::task::spawn_blocking(move || control.health(authorization.as_deref())).await {
         Ok(result) => result.into_response(),
         Err(_) => internal_error(&format!("req_{}", Uuid::now_v7())).into_response(),
@@ -4042,10 +4024,7 @@ async fn request_events_handler(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .request_events(authorization, request_id, raw_query)
         .await
@@ -4057,10 +4036,7 @@ async fn model_call_handler(
     path: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .model_call(authorization, path.ok().map(|Path(id)| id))
         .await
@@ -4072,10 +4048,7 @@ async fn agent_run_handler(
     path: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .agent_run(authorization, path.ok().map(|Path(id)| id))
         .await
@@ -4088,10 +4061,7 @@ async fn request_evidence_handler(
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .request_evidence(authorization, request_id, raw_query)
         .await
@@ -4103,10 +4073,7 @@ async fn artifact_handler(
     Path(artifact_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
     control
         .artifact(authorization, artifact_id)
         .await

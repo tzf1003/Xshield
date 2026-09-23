@@ -2,7 +2,7 @@
 
 use super::{
     AccessAction, ControlPlane, EndpointResult, api_error, audit_unavailable, component_signature,
-    internal_error, lower_hex, valid_idempotency_key,
+    internal_error, lower_hex, single_header, valid_idempotency_key,
 };
 use axum::{
     Json,
@@ -58,16 +58,8 @@ pub(super) async fn handler(
     headers: HeaderMap,
     payload: Result<Json<AddRequest>, JsonRejection>,
 ) -> Response {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let mut keys = headers.get_all("idempotency-key").iter();
-    let key = keys
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let key = if keys.next().is_none() { key } else { None };
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
+    let key = single_header(&headers, "idempotency-key");
     control
         .add_case_item(
             authorization,
