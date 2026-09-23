@@ -1059,6 +1059,7 @@ async fn execute_agent_run(
     let mut evidence_ids = BTreeSet::new();
     let mut started_seen = false;
     let mut finished_seen = false;
+    let mut previous_request_seq = 0;
     while let Some(row) = cursor.next().await.map_err(query_error)? {
         if cursor.decoded_bytes() > 1024 * 1024 || row.payload_json.len() > 16 * 1024 {
             return Err(PublishError::QueryBudgetExceeded);
@@ -1074,9 +1075,11 @@ async fn execute_agent_run(
                     | "agent.finished"
             )
             || row.request_seq == 0
+            || row.request_seq <= previous_request_seq
         {
             return Err(PublishError::InvalidEvent);
         }
+        previous_request_seq = row.request_seq;
         reject_duplicate_json(row.payload_json.as_bytes())?;
         let payload: AgentRunPayload = serde_json::from_str(&row.payload_json)?;
         let payload_id =
@@ -1702,6 +1705,13 @@ mod tests {
             r#"{"agent_run_id":"agt_018f2a3b-4c5d-7000-8000-000000000002"}"#.to_owned();
         assert!(matches!(
             query_agent_rows(mismatched).await,
+            Err(PublishError::InvalidEvent)
+        ));
+
+        let mut duplicate_sequence = agent_rows();
+        duplicate_sequence[1].request_seq = duplicate_sequence[0].request_seq;
+        assert!(matches!(
+            query_agent_rows(duplicate_sequence).await,
             Err(PublishError::InvalidEvent)
         ));
 
