@@ -8,6 +8,7 @@ import { CausalityPanel } from "./CausalityPanel";
 import type {
   ArtifactResponse,
   AuditHealthResponse,
+  AgentRunResponse,
   AuditEvent,
   CalibrationReportResponse,
   EventsResponse,
@@ -760,6 +761,144 @@ export function WatermarkNotice({
         </details>
       </div>
     </div>
+  );
+}
+
+/** Displays only the independently authorized, redacted Agent lifecycle. */
+export function AgentRunOverview({
+  response,
+  onOpen,
+  onRequest,
+  onHistory,
+}: {
+  response: AgentRunResponse;
+  onOpen: (id: string) => void;
+  onRequest: (id: string) => void;
+  onHistory: (id: string) => void;
+}) {
+  const run = response.agent_run;
+  const completeness = {
+    complete: "生命周期完整",
+    partial: "生命周期部分可见",
+    not_indexed: "当前索引未找到运行",
+  }[response.completeness];
+  return (
+    <>
+      <div
+        className={"notice " + (response.has_gaps || response.pending_segments > 0 ? "warning" : "")}
+        role="status"
+      >
+        <div>
+          <strong>{completeness}</strong>
+          <p>
+            这里只展示固定事件的脱敏元数据；索引水位和保留窗口可能使生命周期暂时不完整。
+          </p>
+          <details>
+            <summary>查看 Agent 查询水位</summary>
+            <Rows
+              entries={[
+                ["观察时间", time(response.as_of)],
+                ["水位范围", response.watermark_scope],
+                [
+                  "水位",
+                  response.index_watermark
+                    ? response.index_watermark.producer_boot_id +
+                      " / " +
+                      response.index_watermark.producer_sequence
+                    : "尚不可用",
+                ],
+                ["待发布段", response.pending_segments],
+                ["索引缺口", response.has_gaps ? "存在" : "未观察到"],
+              ]}
+            />
+          </details>
+        </div>
+      </div>
+      <section className="panel" aria-label="Agent 运行详情">
+        <div className="panel-heading model-heading">
+          <h2>Agent 运行</h2>
+          <span className="mono">{response.source_agent_run_id}</span>
+        </div>
+        {run ? (
+          <div className="detail-body">
+            <Rows
+              entries={[
+                ["管理请求 ID", <span className="mono">{response.request_id}</span>],
+                ["来源请求", run.events[0]?.request_id ? (
+                  <button
+                    className="artifact-link mono"
+                    onClick={() => onRequest(run.events[0]!.request_id!)}
+                  >
+                    {run.events[0]!.request_id}
+                  </button>
+                ) : "未记录"],
+                ["生命周期", run.lifecycle_complete ? "已观察到启动与终态" : "仍有缺口"],
+                ["事件数量", run.events.length],
+              ]}
+            />
+            <p className="footnote">
+              事件正文、工具参数/结果、提示和权限快照不进入此视图；证据引用仍需单独授权读取。
+            </p>
+            <button onClick={() => onHistory(run.agent_run_id)}>
+              准备历史检索
+            </button>
+            <p className="footnote">
+              历史检索仅预填 Agent 运行引用，仍需输入时间窗并由 Investigator 独立鉴权。
+            </p>
+            <h3 className="model-lifecycle-title">Agent 生命周期</h3>
+            {run.events.map((event) => (
+              <details className="model-event" key={event.event_id}>
+                <summary>
+                  <span className="mono">
+                    #{event.request_seq} · {event.event_type}
+                  </span>
+                  <Badge value={event.outcome} />
+                </summary>
+                <Rows
+                  entries={[
+                    ["事件 ID", <span className="mono">{event.event_id}</span>],
+                    ["事件时间", time(event.occurred_at)],
+                    ["Trace ID", <span className="mono">{event.trace_id}</span>],
+                    ["原因", <span className="mono">{event.reason_code ?? "未记录"}</span>],
+                    ["数据分级", label(event.sensitivity)],
+                    [
+                      "前驱事件",
+                      event.cause_event_ids.length
+                        ? event.cause_event_ids.map((id) => (
+                            <p className="mono" key={id}>{id}</p>
+                          ))
+                        : "起始事件",
+                    ],
+                    [
+                      "证据引用",
+                      event.evidence_refs.length
+                        ? event.evidence_refs.map((id) =>
+                            id.startsWith("artifact_") ? (
+                              <button
+                                className="artifact-link mono"
+                                key={id}
+                                onClick={() => onOpen(id)}
+                              >
+                                {id}
+                              </button>
+                            ) : (
+                              <p className="mono" key={id}>{id}</p>
+                            ),
+                          )
+                        : "当前未记录",
+                    ],
+                  ]}
+                />
+              </details>
+            ))}
+          </div>
+        ) : (
+          <p className="empty">
+            当前作用域和索引水位内未找到该 Agent 运行；这不推断其他范围或保留窗口中的历史。
+          </p>
+        )}
+      </section>
+    </>
   );
 }
 

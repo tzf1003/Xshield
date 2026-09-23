@@ -8,6 +8,7 @@ export const OTHER_REQUEST_ID = "req_018f2a3b-4c5d-7000-8000-000000000002";
 export const MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
 export const OTHER_MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000002";
 export const THIRD_MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000003";
+export const AGENT_RUN_ID = "agt_018f2a3b-4c5d-7000-8000-000000000001";
 export const CALIBRATION_REPORT_ID =
   "calr_018f2a3b-4c5d-7000-8000-000000000021";
 export const ARTIFACT_ID = "artifact_018f2a3b-4c5d-7000-8000-000000000011";
@@ -311,6 +312,68 @@ export function modelCallFixture(modelCallId = MODEL_CALL_ID) {
       events,
       lifecycle_complete: true,
     },
+  };
+}
+
+export function agentRunFixture(agentRunId = AGENT_RUN_ID, found = true) {
+  const events = [
+    {
+      event_id: "ev_018f2a3b-4c5d-7000-8000-000000000031",
+      event_type: "agent.started",
+      request_id: REQUEST_ID,
+      trace_id: "018f2a3b4c5d70008000000000000031",
+      occurred_at: AS_OF,
+      request_seq: 1,
+      outcome: "PASS",
+      reason_code: "AGENT_STARTED",
+      evidence_refs: [],
+      cause_event_ids: [],
+      sensitivity: "INTERNAL",
+    },
+    {
+      event_id: "ev_018f2a3b-4c5d-7000-8000-000000000032",
+      event_type: "agent.tool_called",
+      request_id: REQUEST_ID,
+      trace_id: "018f2a3b4c5d70008000000000000031",
+      occurred_at: AS_OF,
+      request_seq: 2,
+      outcome: "PASS",
+      reason_code: "AGENT_TOOL_CALLED",
+      evidence_refs: [],
+      cause_event_ids: ["ev_018f2a3b-4c5d-7000-8000-000000000031"],
+      sensitivity: "INTERNAL",
+    },
+    {
+      event_id: "ev_018f2a3b-4c5d-7000-8000-000000000033",
+      event_type: "agent.finished",
+      request_id: REQUEST_ID,
+      trace_id: "018f2a3b4c5d70008000000000000031",
+      occurred_at: AS_OF,
+      request_seq: 3,
+      outcome: "PASS",
+      reason_code: "AGENT_FINISHED",
+      evidence_refs: [ARTIFACT_ID],
+      cause_event_ids: ["ev_018f2a3b-4c5d-7000-8000-000000000032"],
+      sensitivity: "INTERNAL",
+    },
+  ];
+  return {
+    ...envelope(),
+    source_agent_run_id: agentRunId,
+    watermark_scope: "configured_journal",
+    as_of: AS_OF,
+    index_watermark: summaryFixture().index_watermark,
+    has_gaps: true,
+    pending_segments: 2,
+    found,
+    completeness: found ? "complete" : "not_indexed",
+    agent_run: found
+      ? {
+          agent_run_id: agentRunId,
+          lifecycle_complete: true,
+          events,
+        }
+      : null,
   };
 }
 

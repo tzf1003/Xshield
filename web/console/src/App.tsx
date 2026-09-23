@@ -23,6 +23,7 @@ import type {
   ArtifactResponse,
   AuditHealthResponse,
   CalibrationReportResponse,
+  AgentRunResponse,
   EventsResponse,
   EvidenceResponse,
   ModelCallListPlan,
@@ -33,6 +34,7 @@ import type {
 import {
   ArtifactDetail,
   AuditHealthPanel,
+  AgentRunOverview,
   CalibrationReportPanel,
   EventDetail,
   EventTable,
@@ -48,6 +50,7 @@ type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access" 
 type QueryKind =
   | "request"
   | "model"
+  | "agent"
   | "model-list"
   | "audit-health"
   | "calibration-report"
@@ -60,6 +63,7 @@ type QueryKind =
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
+  agent: "Agent 运行 ID",
   "calibration-report": "校准报告 ID",
   grant: "资格 ID",
   binding: "身份绑定 ID",
@@ -67,6 +71,7 @@ const queryLabels = {
 const queryPrefixes = {
   request: "req",
   model: "mdl",
+  agent: "agt",
   "calibration-report": "calr",
   grant: "grant",
   binding: "auth",
@@ -119,6 +124,7 @@ export function App() {
   const [search, setSearch] = useState<SearchResponse | null>(null);
   const [causality, setCausality] = useState<CausalityResponse | null>(null);
   const [model, setModel] = useState<ModelCallResponse | null>(null);
+  const [agentRun, setAgentRun] = useState<AgentRunResponse | null>(null);
   const [modelListPlan, setModelListPlan] =
     useState<ModelCallListPlan | null>(null);
   const [modelList, setModelList] = useState<ModelCallListResponse | null>(
@@ -145,6 +151,7 @@ export function App() {
     epoch.current += 1;
     setSummary(null);
     setModel(null);
+    setAgentRun(null);
     setModelListPlan(null);
     setModelList(null);
     setHealth(null);
@@ -376,6 +383,14 @@ export function App() {
       );
       return;
     }
+    if (queryKind === "agent") {
+      void run(
+        "query",
+        (api, signal) => api.agentRun(target, signal),
+        (response) => setAgentRun(response),
+      );
+      return;
+    }
     if (queryKind === "calibration-report") {
       void run(
         "query",
@@ -445,7 +460,10 @@ export function App() {
       (response) => setCalibrationReport(response),
     );
   }
-  function openTarget(kind: "request" | "binding" | "model", id: string) {
+  function openTarget(
+    kind: "request" | "binding" | "model" | "agent",
+    id: string,
+  ) {
     clearResults();
     setSearchPreset(null);
     setQueryKind(kind);
@@ -457,6 +475,12 @@ export function App() {
         "query",
         (api, signal) => api.modelCall(id, signal),
         (response) => setModel(response),
+      );
+    } else if (kind === "agent") {
+      void run(
+        "query",
+        (api, signal) => api.agentRun(id, signal),
+        (response) => setAgentRun(response),
       );
     } else {
       loadBinding(id);
@@ -556,6 +580,7 @@ export function App() {
   const title = {
     request: "请求调查",
     model: "模型调用调查",
+    agent: "Agent 运行调查",
     "model-list": "模型调用列表",
     "audit-health": "审计发布状态",
     "calibration-report": "校准报告调查",
@@ -671,6 +696,8 @@ export function App() {
             ? "沿着请求时间线，核对每一次判定与证据。"
             : queryKind === "model"
               ? "核对模型调用生命周期、版本与证据引用。"
+              : queryKind === "agent"
+                ? "核对 Agent 脱敏生命周期与固定事件引用。"
               : queryKind === "audit-health"
                 ? "按需读取配置审计日志到索引的发布快照。"
                 : queryKind === "calibration-report"
@@ -781,12 +808,15 @@ export function App() {
                               ? "binding"
                               : event.target.value === "model"
                                 ? "model"
+                                : event.target.value === "agent"
+                                  ? "agent"
                                 : "request",
                   );
                 }}
               >
                 <option value="request">请求</option>
                 <option value="model">模型调用</option>
+                <option value="agent">Agent 运行</option>
                 <option value="model-list">模型调用列表</option>
                 <option value="audit-health">审计发布状态</option>
                 <option value="calibration-report">校准报告</option>
@@ -969,6 +999,42 @@ export function App() {
                   </section>
                 )}
               </>
+            ) : agentRun ? (
+              <>
+                <AgentRunOverview
+                  response={agentRun}
+                  onOpen={openArtifact}
+                  onRequest={(id) => openTarget("request", id)}
+                  onHistory={(agentRunId) => {
+                    prepareSearchHistory({
+                      kind: "agent_run_id",
+                      value: agentRunId,
+                    });
+                  }}
+                />
+                {(artifact || busy.artifact || problems.artifact) && (
+                  <section
+                    className="panel detail-panel"
+                    aria-label="Agent 证据详情"
+                    aria-live="polite"
+                  >
+                    <div className="panel-heading">
+                      <h2>证据详情</h2>
+                      <button className="text-button" onClick={clearArtifact}>
+                        关闭详情
+                      </button>
+                    </div>
+                    <Failure problem={problems.artifact ?? null} />
+                    {busy.artifact ? (
+                      <p className="empty" role="status">
+                        正在读取证据元数据…
+                      </p>
+                    ) : (
+                      artifact && <ArtifactDetail response={artifact} />
+                    )}
+                  </section>
+                )}
+              </>
             ) : summary ? (
               <>
                 <WatermarkNotice summary={summary} events={events} />
@@ -1089,6 +1155,8 @@ export function App() {
                       ? "从一个请求开始"
                       : queryKind === "model"
                         ? "查询模型调用"
+                        : queryKind === "agent"
+                          ? "查询 Agent 运行"
                         : "查询账本记录"}
                   </h2>
                   <p className="muted">
@@ -1096,6 +1164,8 @@ export function App() {
                       ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
                       : queryKind === "model"
                         ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
+                        : queryKind === "agent"
+                          ? "输入 Agent 运行 ID，读取脱敏生命周期与固定事件引用。"
                         : `输入${queryLabels[queryKind]}，读取当前状态、代际与期限。`}
                   </p>
                 </section>

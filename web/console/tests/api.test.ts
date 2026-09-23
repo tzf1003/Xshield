@@ -20,6 +20,7 @@ import {
   MODEL_CALL_ID,
   OTHER_MODEL_CALL_ID,
   THIRD_MODEL_CALL_ID,
+  AGENT_RUN_ID,
   CALIBRATION_REPORT_ID,
   EVENT_CURSOR,
   EVIDENCE_CURSOR,
@@ -31,6 +32,7 @@ import {
   artifactFixture,
   errorFixture,
   modelCallFixture,
+  agentRunFixture,
   modelCallListFixture,
 } from "./fixtures.ts";
 
@@ -141,6 +143,7 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
     evidenceFixture(),
     artifactFixture(),
     modelCallFixture(),
+    agentRunFixture(),
     auditHealthFixture(),
     calibrationReportFixture(),
   ];
@@ -150,6 +153,7 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
     `/control/v1/requests/${REQUEST_ID}/evidence?cursor=${EVIDENCE_CURSOR}`,
     `/control/v1/artifacts/${ARTIFACT_ID}`,
     `/control/v1/model-calls/${MODEL_CALL_ID}`,
+    `/control/v1/agent-runs/${AGENT_RUN_ID}`,
     "/control/v1/audit/health",
     `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`,
   ];
@@ -197,11 +201,13 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
   }
   const model = await client.modelCall(MODEL_CALL_ID);
   assert.deepEqual(model, modelCallFixture());
+  const agent = await client.agentRun(AGENT_RUN_ID);
+  assert.deepEqual(agent, agentRunFixture());
   const health = await client.health();
   assert.deepEqual(health, auditHealthFixture());
   const calibrationReport = await client.calibrationReport(CALIBRATION_REPORT_ID);
   assert.deepEqual(calibrationReport, calibrationReportFixture());
-  assert.equal(index, 7);
+  assert.equal(index, 8);
 });
 
 test("calibration report metadata has an exact restricted decoder", async (t) => {
@@ -372,6 +378,17 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
       client.modelCall(value),
       errorIs("CONTROL_MODEL_CALL_ID_INVALID"),
     );
+  for (const value of [
+    REQUEST_ID,
+    AGENT_RUN_ID.toUpperCase(),
+    `${AGENT_RUN_ID}?extra=1`,
+    AGENT_RUN_ID.replace("-7000-", "-4000-"),
+    `${AGENT_RUN_ID}\n`,
+  ])
+    await assert.rejects(
+      client.agentRun(value),
+      errorIs("CONTROL_AGENT_RUN_ID_INVALID"),
+    );
   for (const cursor of [
     "",
     "a".repeat(161),
@@ -418,6 +435,43 @@ test("model call projection preserves lifecycle, missing history and Noul confid
   };
   t.mock.method(globalThis, "fetch", async () => response(missing));
   assert.deepEqual(await client.modelCall(MODEL_CALL_ID), missing);
+});
+
+test("agent run projection keeps lifecycle facts redacted and bounded", async (t) => {
+  const client = new ControlClient(TOKEN);
+  let body: ReturnType<typeof agentRunFixture> = agentRunFixture();
+  t.mock.method(globalThis, "fetch", async () => response(body));
+  assert.deepEqual(await client.agentRun(AGENT_RUN_ID), body);
+  const partial = agentRunFixture();
+  partial.agent_run!.events = partial.agent_run!.events.slice(0, 2);
+  partial.agent_run!.lifecycle_complete = false;
+  partial.completeness = "partial";
+  body = partial;
+  assert.deepEqual(await client.agentRun(AGENT_RUN_ID), partial);
+  const retainedSuffix = agentRunFixture();
+  retainedSuffix.agent_run!.events = retainedSuffix.agent_run!.events.slice(1, 2);
+  retainedSuffix.agent_run!.lifecycle_complete = false;
+  retainedSuffix.completeness = "partial";
+  body = retainedSuffix;
+  assert.deepEqual(await client.agentRun(AGENT_RUN_ID), retainedSuffix);
+  for (const mutate of [
+    (value: ReturnType<typeof agentRunFixture>) => {
+      value.agent_run!.events[1]!.request_seq = 1;
+    },
+    (value: ReturnType<typeof agentRunFixture>) => {
+      Object.assign(value.agent_run!.events[1]!, { tool_args: "opaque" });
+    },
+  ]) {
+    const invalid = agentRunFixture();
+    mutate(invalid);
+    body = invalid;
+    await assert.rejects(
+      client.agentRun(AGENT_RUN_ID),
+      errorIs("INVALID_RESPONSE", 200),
+    );
+  }
+  body = agentRunFixture(AGENT_RUN_ID, false);
+  assert.deepEqual(await client.agentRun(AGENT_RUN_ID), body);
 });
 
 test("model-call list binds its UTC window, ordering and opaque cursor", async (t) => {

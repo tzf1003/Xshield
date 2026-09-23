@@ -1,6 +1,6 @@
 # Xshield 调查控制台
 
-React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用并预填历史检索，按访问申请 ID 读取历史申请/决策元数据并预填历史检索，按校准报告 ID 读取受限冻结元数据，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件，并从事件详情显式提交有界服务端因果查询。UI 调用固定 GET 端点及只读 `POST /control/v1/search`、`POST /control/v1/causality`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情与模型调用列表均需要显式 `Observer`，校准报告详情需要 `AuditAdministrator`，事件检索与因果查询需要 `Investigator`；带 `calibration_report_id` 或 `evidence_hold_id` 的检索还要求同一主体同时具备 `AuditAdministrator`，三种角色分别校验。
+React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用并预填历史检索，按 Agent 运行 ID 读取脱敏生命周期与固定事件引用并预填历史检索，按访问申请 ID 读取历史申请/决策元数据并预填历史检索，按校准报告 ID 读取受限冻结元数据，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件，并从事件详情显式提交有界服务端因果查询。UI 调用固定 GET 端点及只读 `POST /control/v1/search`、`POST /control/v1/causality`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情、Agent 详情与模型调用列表均需要显式 `Observer`，校准报告详情需要 `AuditAdministrator`，事件检索与因果查询需要 `Investigator`；带 `calibration_report_id` 或 `evidence_hold_id` 的检索还要求同一主体同时具备 `AuditAdministrator`，三种角色分别校验。
 
 “审计发布状态”由 `AuditAdministrator` 手动读取 `GET /control/v1/audit/health`。它展示一个配置 audit journal 到索引目标的封存段发布快照：观察时间、目标、保留期、关闭/已发布/待发布/未封存段、缺口和连续水位；界面不自动轮询。该观察不判断业务准入、全部 Outbox 状态或系统整体健康。
 
@@ -45,6 +45,7 @@ npm run dev
 - 资格与身份绑定查询接受规范 `grant_` / `auth_` UUIDv7，展示数据库 `as_of`、持久状态和独立时间到期标志。资格记录包含发行代际、操作/视图、策略与来源引用，以及同一快照的当前绑定状态和代际是否一致；绑定详情还包含凭证代际与更新时间。UTC 微秒原样保留，客户端精确核对到期关系，超出 JavaScript 安全整数范围的代际值拒绝展示。匿名、撤销和过期记录可调查，`active` 标签不等于在线准入通过。
 - 资格可打开绑定详情和来源请求时间线；“准备历史检索”只预填对应 ID，须填写 UTC 时间窗并主动提交 Investigator 查询。账本观察不附带 ClickHouse 水位，后续查询不构成跨存储冻结快照。`found=false` 显示“当前账本未找到”，不推断历史不存在；主体、凭证、资源指纹、动作引用和约束正文均不进入展示对象。
 - `complete` 表示观察到保留的请求终态，不表示索引无缺口。页面分别显示摘要/事件水位和观察时间；水位只覆盖配置 journal，不覆盖所有 Outbox。
+- Agent 详情只展示固定生命周期事件的类型、时间、结果/原因、因果和证据引用；工具参数、结果、提示、权限快照及正文不进入客户端。生命周期完整性与索引 gap/pending 分开显示，证据引用仍由独立 Observer/Reader 端点重新鉴权。
 - 转发意图不是源站已执行证明，确认源站响应不等于业务成功。缺失判定与 `UNKNOWN`、等待终态分开显示；确定性证明保持空置信度。
 - 证据 `found=false` 显示“当前不可用”，不推断对象存在性；manifest 不证明内容读取权或对象侧完整性。locator、密钥引用和密文摘要在客户端投影时丢弃。
 - Bearer 不写 URL、日志或浏览器持久存储；所有请求 `credentials: omit`、`cache: no-store`、禁止重定向，读取上限 16 MiB、全程期限 15 秒。凭证须可被浏览器原样编码为 Authorization 头。

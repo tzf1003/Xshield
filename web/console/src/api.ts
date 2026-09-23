@@ -6,6 +6,7 @@ import {
   requestPattern,
   artifactPattern,
   modelCallPattern,
+  agentRunPattern,
   calibrationReportPattern,
   eventPattern,
   grantPattern,
@@ -226,6 +227,41 @@ export type ModelCallResponse = Envelope & {
   found: boolean;
   completeness: "complete" | "pending" | "partial" | "not_indexed";
   model_call: ModelCall | null;
+};
+
+export type AgentRunEvent = {
+  event_id: string;
+  event_type:
+    | "agent.started"
+    | "agent.tool_called"
+    | "agent.tool_result"
+    | "agent.artifact_created"
+    | "agent.finished";
+  request_id: string | null;
+  trace_id: string;
+  occurred_at: string;
+  request_seq: number;
+  outcome: string | null;
+  reason_code: string | null;
+  evidence_refs: string[];
+  cause_event_ids: string[];
+  sensitivity: "PUBLIC" | "INTERNAL" | "SENSITIVE" | "RESTRICTED";
+};
+export type AgentRun = {
+  agent_run_id: string;
+  lifecycle_complete: boolean;
+  events: AgentRunEvent[];
+};
+export type AgentRunResponse = Envelope & {
+  source_agent_run_id: string;
+  watermark_scope: "configured_journal";
+  as_of: string;
+  index_watermark: Watermark | null;
+  has_gaps: boolean;
+  pending_segments: number;
+  found: boolean;
+  completeness: "complete" | "partial" | "not_indexed";
+  agent_run: AgentRun | null;
 };
 /** A bounded, descending discovery window. The server binds the opaque cursor
  * to this exact plan and the authenticated scope; it is never decoded here. */
@@ -791,6 +827,106 @@ function modelCall(value: unknown, target: string): ModelCall {
         !["started", "requested"].includes(latest.status) &&
         continuous),
   );
+  return result;
+}
+
+const agentEventTypes = [
+  "agent.started",
+  "agent.tool_called",
+  "agent.tool_result",
+  "agent.artifact_created",
+  "agent.finished",
+] as const;
+const agentTracePattern = /^[0-9a-f]{32}$/;
+const agentOutcomes = [
+  "PASS",
+  "ALLOW",
+  "DENY",
+  "UNKNOWN",
+  "ERROR",
+  "SKIPPED",
+  "CANCELLED",
+  "not_sent",
+  "unknown",
+  "response_received",
+] as const;
+
+function agentRunEvent(value: unknown): AgentRunEvent {
+  const row = object(value);
+  ensure(
+    Object.keys(row).length === 11 &&
+      [
+        "event_id",
+        "event_type",
+        "request_id",
+        "trace_id",
+        "occurred_at",
+        "request_seq",
+        "outcome",
+        "reason_code",
+        "evidence_refs",
+        "cause_event_ids",
+        "sensitivity",
+      ].every((key) => Object.hasOwn(row, key)),
+  );
+  return {
+    event_id: id(row.event_id, eventPattern),
+    event_type: choice(row.event_type, agentEventTypes),
+    request_id: nullable(row.request_id, (item) => id(item, requestPattern)),
+    trace_id: id(row.trace_id, agentTracePattern),
+    occurred_at: timestamp(row.occurred_at),
+    request_seq: integer(row.request_seq, 1, 0xffff_ffff),
+    outcome: nullable(row.outcome, (item) => choice(item, agentOutcomes)),
+    reason_code: nullable(row.reason_code, name),
+    evidence_refs: references(row.evidence_refs, new RegExp(`^[a-z]+_${uuid}$`)),
+    cause_event_ids: references(row.cause_event_ids, eventPattern),
+    sensitivity: choice(row.sensitivity, [
+      "PUBLIC",
+      "INTERNAL",
+      "SENSITIVE",
+      "RESTRICTED",
+    ]),
+  };
+}
+
+function agentRun(value: unknown, target: string): AgentRun {
+  const row = object(value);
+  ensure(
+    Object.keys(row).length === 3 &&
+      ["agent_run_id", "lifecycle_complete", "events"].every((key) =>
+        Object.hasOwn(row, key),
+      ),
+  );
+  const result: AgentRun = {
+    agent_run_id: id(row.agent_run_id, agentRunPattern),
+    lifecycle_complete: bool(row.lifecycle_complete),
+    events: list(row.events, 64, agentRunEvent),
+  };
+  ensure(result.agent_run_id === target && result.events.length > 0);
+  const seen = new Set<string>();
+  let started = false;
+  let finished = false;
+  let previousSeq = 0;
+  for (const [index, event] of result.events.entries()) {
+    ensure(!seen.has(event.event_id) && event.request_seq > previousSeq);
+    seen.add(event.event_id);
+    previousSeq = event.request_seq;
+    if (event.event_type === "agent.started") {
+      ensure(!started && !finished);
+      started = true;
+    } else if (event.event_type === "agent.finished") {
+      ensure(started && !finished);
+      finished = true;
+    } else {
+      ensure(!finished);
+    }
+    ensure(
+      !event.cause_event_ids.some((cause) =>
+        result.events.slice(index).some((later) => later.event_id === cause),
+      ),
+    );
+  }
+  ensure(result.lifecycle_complete === (started && finished));
   return result;
 }
 
@@ -1426,6 +1562,65 @@ export class ControlClient {
         ensure(result.found === (result.report !== null));
         ensure((result.as_of !== null) === result.found);
         ensure(!result.report || result.report.report_id === reportId);
+        return result;
+      },
+      signal,
+    );
+  }
+
+  /** Read the separately audited, redacted lifecycle for one Agent run. */
+  async agentRun(
+    agentRunId: string,
+    signal?: AbortSignal,
+  ): Promise<AgentRunResponse> {
+    if (typeof agentRunId !== "string" || !agentRunPattern.test(agentRunId))
+      throw new ApiError("CONTROL_AGENT_RUN_ID_INVALID");
+    return this.#request(
+      `agent-runs/${agentRunId}`,
+      (value) => {
+        const row = object(value);
+        ensure(
+          Object.keys(row).length === 12 &&
+            [
+              "request_id",
+              "tenant_id",
+              "site_id",
+              "source_agent_run_id",
+              "watermark_scope",
+              "as_of",
+              "index_watermark",
+              "has_gaps",
+              "pending_segments",
+              "found",
+              "completeness",
+              "agent_run",
+            ].every((key) => Object.hasOwn(row, key)),
+        );
+        const result: AgentRunResponse = {
+          ...envelope(row),
+          ...watermarked(row),
+          source_agent_run_id: id(row.source_agent_run_id, agentRunPattern),
+          watermark_scope: choice(row.watermark_scope, ["configured_journal"]),
+          pending_segments: integer(row.pending_segments),
+          found: bool(row.found),
+          completeness: choice(row.completeness, [
+            "complete",
+            "partial",
+            "not_indexed",
+          ]),
+          agent_run: nullable(row.agent_run, (item) =>
+            agentRun(item, agentRunId),
+          ),
+        };
+        ensure(result.source_agent_run_id === agentRunId);
+        ensure(result.found === (result.agent_run !== null));
+        const expected =
+          result.agent_run === null
+            ? "not_indexed"
+            : result.agent_run.lifecycle_complete
+              ? "complete"
+              : "partial";
+        ensure(result.completeness === expected);
         return result;
       },
       signal,

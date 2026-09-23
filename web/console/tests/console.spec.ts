@@ -7,6 +7,7 @@ import {
   OTHER_ARTIFACT_ID,
   OTHER_REQUEST_ID,
   MODEL_CALL_ID,
+  AGENT_RUN_ID,
   OTHER_MODEL_CALL_ID,
   THIRD_MODEL_CALL_ID,
   CALIBRATION_REPORT_ID,
@@ -20,6 +21,7 @@ import {
   auditHealthFixture,
   calibrationReportFixture,
   modelCallFixture,
+  agentRunFixture,
   modelCallListFixture,
   searchFixture,
   causalityFixture,
@@ -79,6 +81,8 @@ async function mockControl(page: Page, override?: Override) {
       reply = { body: auditHealthFixture() };
     } else if (url.pathname.startsWith("/control/v1/calibration-reports/")) {
       reply = { body: calibrationReportFixture(url.pathname.split("/").at(-1)) };
+    } else if (url.pathname.startsWith("/control/v1/agent-runs/")) {
+      reply = { body: agentRunFixture(url.pathname.split("/").at(-1)) };
     } else if (url.pathname.startsWith("/control/v1/model-calls/")) {
       reply = { body: modelCallFixture(url.pathname.split("/").at(-1)) };
     } else if (url.pathname.startsWith("/control/v1/artifacts/")) {
@@ -114,6 +118,12 @@ async function query(page: Page, requestId = REQUEST_ID) {
 async function queryModel(page: Page, modelCallId = MODEL_CALL_ID) {
   await page.getByLabel("查询类型", { exact: true }).selectOption("model");
   await page.getByLabel("模型调用 ID", { exact: true }).fill(modelCallId);
+  await page.getByRole("button", { name: "查询", exact: true }).click();
+}
+
+async function queryAgent(page: Page, agentRunId = AGENT_RUN_ID) {
+  await page.getByLabel("查询类型", { exact: true }).selectOption("agent");
+  await page.getByLabel("Agent 运行 ID", { exact: true }).fill(agentRunId);
   await page.getByRole("button", { name: "查询", exact: true }).click();
 }
 
@@ -390,6 +400,37 @@ test("prepares scoped model call history without submitting a search", async ({
   await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
   expect(calls.map((call) => call.path)).toEqual([
     `/control/v1/model-calls/${MODEL_CALL_ID}`,
+  ]);
+});
+
+test("reads the redacted Agent lifecycle and prepares scoped history", async ({
+  page,
+}) => {
+  const calls = await mockControl(page);
+  await connect(page);
+  await queryAgent(page);
+  await expect(
+    page.getByRole("heading", { name: "Agent 运行调查", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Agent 运行详情", exact: true }),
+  ).toContainText(AGENT_RUN_ID);
+  await expect(page.getByText(/agent\.tool_called/)).toBeVisible();
+  await expect(page.getByText("tool_args", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "结构化事件检索", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
+    "agent_run_id",
+  );
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(
+    AGENT_RUN_ID,
+  );
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  expect(calls.map((call) => call.path)).toEqual([
+    "/control/v1/agent-runs/" + AGENT_RUN_ID,
   ]);
 });
 

@@ -16,6 +16,7 @@ export const messages = {
   CONTROL_REQUEST_ID_INVALID: "请输入规范的请求 ID。",
   CONTROL_ARTIFACT_ID_INVALID: "证据 ID 格式无效。",
   CONTROL_MODEL_CALL_ID_INVALID: "请输入规范的模型调用 ID。",
+  CONTROL_AGENT_RUN_ID_INVALID: "请输入规范的 Agent 运行 ID。",
   CONTROL_CALIBRATION_REPORT_ID_INVALID: "请输入规范的校准报告 ID。",
   CONTROL_CALIBRATION_REPORT_READ_REQUEST_INVALID:
     "校准报告查询请求无效，请核对报告 ID。",
@@ -146,6 +147,7 @@ const endOfInput = "(?![\\s\\S])";
 export const requestPattern = new RegExp(`^req_${uuid}${endOfInput}`);
 export const artifactPattern = new RegExp(`^artifact_${uuid}${endOfInput}`);
 export const modelCallPattern = new RegExp(`^mdl_${uuid}${endOfInput}`);
+export const agentRunPattern = new RegExp(`^agt_${uuid}${endOfInput}`);
 export const calibrationReportPattern = new RegExp(`^calr_${uuid}${endOfInput}`);
 export const eventPattern = new RegExp(`^ev_${uuid}${endOfInput}`);
 export const grantPattern = new RegExp(`^grant_${uuid}${endOfInput}`);
