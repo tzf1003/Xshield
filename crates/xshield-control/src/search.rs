@@ -83,24 +83,34 @@ impl ControlPlane {
                 )
                 .await;
         };
-        if plan
-            .filters()
-            .iter()
-            .any(|filter| matches!(filter, QueryFilter::CalibrationReportId(_)))
-            && !self.config.principal.authorizes(
-                ManagementRole::AuditAdministrator,
-                &self.config.tenant_id,
-                &self.config.site_id,
+        if plan.filters().iter().any(|filter| {
+            matches!(
+                filter,
+                QueryFilter::CalibrationReportId(_) | QueryFilter::EvidenceHoldId(_)
             )
-        {
-            // Retention and access facts have the same visibility boundary as
-            // report metadata, so an Investigator needs this additional role.
+        }) && !self.config.principal.authorizes(
+            ManagementRole::AuditAdministrator,
+            &self.config.tenant_id,
+            &self.config.site_id,
+        ) {
+            // Both retained report and hold facts share their respective
+            // administrator visibility boundaries with the source workbenches.
             return self
                 .finish_search(
                     request_id,
                     subject,
                     &plan,
-                    Err(SearchFailure::CalibrationReportHistoryScopeDenied),
+                    Err(
+                        if plan
+                            .filters()
+                            .iter()
+                            .any(|filter| matches!(filter, QueryFilter::CalibrationReportId(_)))
+                        {
+                            SearchFailure::CalibrationReportHistoryScopeDenied
+                        } else {
+                            SearchFailure::EvidenceHoldHistoryScopeDenied
+                        },
+                    ),
                 )
                 .await;
         }
@@ -229,6 +239,7 @@ impl ControlPlane {
             Err(
                 SearchFailure::InvalidCursor
                 | SearchFailure::CalibrationReportHistoryScopeDenied
+                | SearchFailure::EvidenceHoldHistoryScopeDenied
                 | SearchFailure::Budget
                 | SearchFailure::Capacity,
             ) => "DENY",
@@ -388,6 +399,10 @@ fn query_plan_digest(plan: &QueryPlan) -> [u8; 32] {
                 canonical.push_str("calibration_report_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::EvidenceHoldId(value) => {
+                canonical.push_str("evidence_hold_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::EvidenceAccessRequestId(value) => {
                 canonical.push_str("evidence_access_request_id=");
                 canonical.push_str(value.as_str());
@@ -505,6 +520,9 @@ enum SearchFilterRequest {
     CalibrationReportId {
         value: String,
     },
+    EvidenceHoldId {
+        value: String,
+    },
     EvidenceAccessRequestId {
         value: String,
     },
@@ -546,6 +564,9 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::CalibrationReportId { value } => CalibrationReportId::parse(value)
                 .map(QueryFilter::CalibrationReportId)
+                .map_err(|_| ()),
+            Self::EvidenceHoldId { value } => EventId::parse(value)
+                .map(QueryFilter::EvidenceHoldId)
                 .map_err(|_| ()),
             Self::EvidenceAccessRequestId { value } => EvidenceAccessRequestId::parse(value)
                 .map(QueryFilter::EvidenceAccessRequestId)
@@ -650,6 +671,7 @@ pub(super) struct SearchResponse {
 pub(super) enum SearchFailure {
     InvalidCursor,
     CalibrationReportHistoryScopeDenied,
+    EvidenceHoldHistoryScopeDenied,
     CursorUnavailable,
     Capacity,
     Budget,
@@ -665,6 +687,7 @@ impl SearchFailure {
             Self::CalibrationReportHistoryScopeDenied => {
                 "CONTROL_CALIBRATION_REPORT_HISTORY_SCOPE_DENIED"
             }
+            Self::EvidenceHoldHistoryScopeDenied => "CONTROL_EVIDENCE_HOLD_HISTORY_SCOPE_DENIED",
             Self::CursorUnavailable => "CONTROL_CURSOR_UNAVAILABLE",
             Self::Capacity => "CONTROL_QUERY_CAPACITY_EXHAUSTED",
             Self::Budget => "CONTROL_QUERY_BUDGET_EXCEEDED",
@@ -682,7 +705,7 @@ impl SearchFailure {
                 false,
                 "restart_query",
             ),
-            Self::CalibrationReportHistoryScopeDenied => (
+            Self::CalibrationReportHistoryScopeDenied | Self::EvidenceHoldHistoryScopeDenied => (
                 StatusCode::FORBIDDEN,
                 "management operation forbidden",
                 false,

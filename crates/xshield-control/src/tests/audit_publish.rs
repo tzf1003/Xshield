@@ -701,6 +701,18 @@ async fn assert_real_control_publication(client: &Client) {
 async fn assert_reference_search_http(journal: &AccessJournal, client: &Client) {
     let mut fixture = Fixture::with_index(200, ManagementRole::Investigator, client.clone());
     let mut searches = AccessJournal::for_fixture(&fixture);
+    fixture.control.config.principal = ManagementPrincipal::new(
+        "operator-1",
+        [
+            ManagementRole::Investigator,
+            ManagementRole::AuditAdministrator,
+        ],
+        [(
+            fixture.control.config.tenant_id.clone(),
+            fixture.control.config.site_id.clone(),
+        )],
+    )
+    .unwrap();
     fixture.control.config.publisher = journal.config.clone();
     fixture.control.config.source_journal_key_id = "control-key-r1".to_owned();
     let app = router(fixture.control);
@@ -781,6 +793,61 @@ async fn assert_reference_search_http(journal: &AccessJournal, client: &Client) 
             }
         }
     }
+    let mut expected_hold = journal
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event["event_type"].as_str(),
+                Some("console.evidence.hold.created" | "console.evidence.hold.released")
+            ) && event["payload"]["target_hold_id"] == HOLD
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expected_hold.len(), 4);
+    expected_hold.sort_by_key(|event| {
+        (
+            DateTime::parse_from_rfc3339(event["occurred_at"].as_str().unwrap()).unwrap(),
+            event["event_id"].as_str().unwrap(),
+        )
+    });
+    for descending in [false, true] {
+        let mut expected_ids = expected_hold
+            .iter()
+            .map(|event| event["event_id"].clone())
+            .collect::<Vec<_>>();
+        if descending {
+            expected_ids.reverse();
+        }
+        let mut payload = json!({
+            "schema_version": 3,
+            "start": start,
+            "end": end,
+            "sort": if descending { "occurred_at_desc" } else { "occurred_at_asc" },
+            "limit": 1,
+            "filters": [{"kind": "evidence_hold_id", "value": HOLD}],
+        });
+        for (index, event_id) in expected_ids.iter().enumerate() {
+            let response = app
+                .clone()
+                .oneshot(search_http_request(&payload))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                    .unwrap();
+            query_count += 1;
+            assert_eq!(body["events"].as_array().unwrap().len(), 1);
+            assert_eq!(body["events"][0]["event_id"], *event_id);
+            assert!(body["events"][0].get("payload_json").is_none());
+            assert!(body["events"][0].get("target_hold_id").is_none());
+            assert!(!body["events"][0].to_string().contains(HOLD));
+            let more = index + 1 < expected_ids.len();
+            assert_eq!(body["truncated"], more);
+            assert_eq!(body["next_cursor"].is_string(), more);
+            payload["cursor"] = body["next_cursor"].clone();
+        }
+    }
     drop(app);
     searches.events = read_access_events(&fixture.access_directory);
     assert_eq!(searches.events.len(), query_count);
@@ -792,6 +859,7 @@ async fn assert_reference_search_http(journal: &AccessJournal, client: &Client) 
         let encoded = event.to_string();
         assert!(!encoded.contains(CASE));
         assert!(!encoded.contains(MISSING_ARTIFACT_ID));
+        assert!(!encoded.contains(HOLD));
     }
     assert_eq!(
         searches.publish(client).await.published_events,

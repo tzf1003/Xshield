@@ -41,6 +41,21 @@ async function history(page: Page) {
   await page.getByRole("button", { name: "读取保留历史 / 刷新", exact: true }).click();
 }
 
+test("prepares scoped evidence hold history without submitting a search", async ({ page }) => {
+  const calls = await intercept(page, (route) => route.fulfill({ json: holdCollectionFixture() }));
+  await connect(page);
+  await history(page);
+  await page.getByRole("button", { name: `准备历史检索 ${HOLD_ID}`, exact: true }).click();
+  await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
+  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("evidence_hold_id");
+  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(HOLD_ID);
+  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  expect(calls.map((call) => call.path)).toEqual([
+    `/control/v1/cases/${HOLD_CASE_ID}/holds`,
+  ]);
+});
+
 test("explicit hold creation, history selection, release and refresh", async ({ page }) => {
   let released = false;
   const errors: string[] = [];

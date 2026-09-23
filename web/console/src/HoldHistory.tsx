@@ -7,11 +7,12 @@ function atOrBefore(left: string, right: string) {
     right.replace(/\.(\d+)Z$/, (_, part: string) => `.${part.padEnd(6, "0")}Z`);
 }
 
-export function HoldHistory({ page, busy, canSelect, onSelect, onNext }: {
+export function HoldHistory({ page, busy, canSelect, onSelect, onHistory, onNext }: {
   page: HoldCollection;
   busy: boolean;
   canSelect: boolean;
   onSelect: (hold: HoldRecord) => void;
+  onHistory: (holdId: string) => void;
   onNext: (cursor: string) => void;
 }) {
   return <>
@@ -34,8 +35,16 @@ export function HoldHistory({ page, busy, canSelect, onSelect, onNext }: {
           ["释放人", hold.released_by ?? "—"], ["释放理由", hold.released_reason ?? "—"],
           ["释放时间", hold.released_at ?? "—"], ["释放事件", hold.released_event_id ?? "—"],
         ]} />
-        <button className="text-button" disabled={busy || !canSelect || hold.released_at !== null}
-          onClick={() => onSelect(hold)}>选择释放 {hold.hold_id}</button>
+        <div className="case-actions">
+          <button className="text-button" disabled={busy || !canSelect || hold.released_at !== null}
+            onClick={() => onSelect(hold)}>选择释放 {hold.hold_id}</button>
+          <button type="button" className="text-button" disabled={busy}
+            aria-label={`准备历史检索 ${hold.hold_id}`}
+            onClick={() => onHistory(hold.hold_id)}>准备历史检索</button>
+        </div>
+        <p className="footnote">
+          历史检索仅预填保留锁引用；仍需填写 UTC 时间窗并由服务端独立校验权限。
+        </p>
       </article>;
     })}
     <div className="pagination">

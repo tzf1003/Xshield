@@ -97,7 +97,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 
 ## 15.7 已实现只读请求调查控制台
 
-`web/console` 以 React + TypeScript 实现请求 ID → 摘要 → 事件时间线 → 证据目录/单项元数据、模型调用 ID → 脱敏生命周期 → 证据元数据 → 仅预填模型调用 ID 的历史检索、访问申请 ID → 历史申请/决策元数据 → 仅预填申请 ID 的历史检索、固定 UTC 窗口 → 模型调用分页发现、校准报告 ID → 受限冻结元数据、资格 ID → 账本快照 → 身份绑定/来源请求，以及结构化事件检索的可交互闭环。模型列表和详情均调用独立的 Observer API；校准报告详情独立要求 `AuditAdministrator`；列表行仅为窗口内最新可见状态，点击 `mdl_` 后仍重新鉴权并写独立详情审计。结构化检索调用 29.14 的 `POST /control/v1/search`，通常要求 Investigator；当计划含 `calibration_report_id` 时，同一主体还必须在固定 tenant/site 持有 `AuditAdministrator`。模型或访问申请历史预填不会提交检索，操作者仍须填写时间窗并以 Investigator 身份独立提交；三个角色分别校验，Investigator 不隐含 Observer 或 AuditAdministrator。范围由首次成功响应确认并在同一会话后续响应中逐一校验。事件、证据和模型列表分页显式触发，每页替换当前页。
+`web/console` 以 React + TypeScript 实现请求 ID → 摘要 → 事件时间线 → 证据目录/单项元数据、模型调用 ID → 脱敏生命周期 → 证据元数据 → 仅预填模型调用 ID 的历史检索、访问申请 ID → 历史申请/决策元数据 → 仅预填申请 ID 的历史检索、固定 UTC 窗口 → 模型调用分页发现、校准报告 ID → 受限冻结元数据、资格 ID → 账本快照 → 身份绑定/来源请求，以及结构化事件检索的可交互闭环。模型列表和详情均调用独立的 Observer API；校准报告详情独立要求 `AuditAdministrator`；列表行仅为窗口内最新可见状态，点击 `mdl_` 后仍重新鉴权并写独立详情审计。结构化检索调用 29.14 的 `POST /control/v1/search`，通常要求 Investigator；当计划含 `calibration_report_id` 或 `evidence_hold_id` 时，同一主体还必须在固定 tenant/site 持有 `AuditAdministrator`。模型、访问申请或保留锁历史预填不会提交检索，操作者仍须填写时间窗并以 Investigator 身份独立提交；三个角色分别校验，Investigator 不隐含 Observer 或 AuditAdministrator。范围由首次成功响应确认并在同一会话后续响应中逐一校验。事件、证据和模型列表分页显式触发，每页替换当前页。
 
 控制台还提供 AuditAdministrator 专用的“审计发布状态”：操作者手动调用 29.5 的 `GET /control/v1/audit/health`，读取当前配置 audit journal 到索引目标的单次发布快照。界面展示 `as_of`、目标/表、元数据保留期、关闭段和字节、已发布/待发布/未封存段、缺口及连续水位；不自动轮询。每次读取由服务端重新鉴权并记录 `console.health.read`，客户端重新校验 tenant/site，401、范围偏差和晚到响应都清空页面状态。此处仅用于发布观察，不表达业务准入、全部 Outbox 状态或系统整体健康。
 

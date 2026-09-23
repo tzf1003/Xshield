@@ -12,6 +12,7 @@ const fields = [
   ["artifact_id", "证据 ID"],
   ["calibration_report_id", "校准报告 ID"],
   ["evidence_access_request_id", "访问申请 ID"],
+  ["evidence_hold_id", "保留锁 ID"],
   ["model_call_id", "模型调用 ID"],
   ["event_type", "事件类型"],
   ["stage", "阶段"],
@@ -29,6 +30,7 @@ export type SearchPreset = {
     | "auth_binding_id"
     | "calibration_report_id"
     | "evidence_access_request_id"
+    | "evidence_hold_id"
     | "model_call_id";
   value: string;
 };

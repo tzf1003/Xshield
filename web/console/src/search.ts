@@ -54,6 +54,7 @@ const idPatterns = {
   artifact_id: artifactPattern,
   calibration_report_id: new RegExp(`^calr_${uuid}$`),
   evidence_access_request_id: accessPattern,
+  evidence_hold_id: eventPattern,
   model_call_id: modelCallPattern,
 };
 export type SearchFilter =

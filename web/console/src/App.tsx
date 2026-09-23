@@ -693,7 +693,12 @@ export function App() {
             </div>
             <div hidden={queryKind !== "hold"}>
               <EvidenceHoldPanel active={queryKind === "hold"} busy={Boolean(busy.hold)}
-                onInvalidate={clearResults} onRun={(fetcher, apply, fail) => run("hold", fetcher, apply, fail)} />
+                onInvalidate={clearResults} onHistory={(holdId) => {
+                  clearResults();
+                  setSearchPreset({ kind: "evidence_hold_id", value: holdId });
+                  setRequestId("");
+                  setQueryKind("search");
+                }} onRun={(fetcher, apply, fail) => run("hold", fetcher, apply, fail)} />
             </div>
             {queryKind === "case" || queryKind === "hold" ||
             queryKind === "access" ? null : queryKind === "search" ? (

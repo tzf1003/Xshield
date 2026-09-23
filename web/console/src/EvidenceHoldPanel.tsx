@@ -28,8 +28,9 @@ function HoldFailure({ error }: { error: unknown }) {
   </div></div> : null;
 }
 
-export function EvidenceHoldPanel({ active, busy, onInvalidate, onRun }: {
-  active: boolean; busy: boolean; onInvalidate: () => void; onRun: Run;
+export function EvidenceHoldPanel({ active, busy, onInvalidate, onHistory, onRun }: {
+  active: boolean; busy: boolean; onInvalidate: () => void;
+  onHistory: (holdId: string) => void; onRun: Run;
 }) {
   const [action, setAction] = useState<Action>("create");
   const [caseId, setCaseId] = useState("");
@@ -172,7 +173,8 @@ export function EvidenceHoldPanel({ active, busy, onInvalidate, onRun }: {
           <p className="muted">按保留锁 ID 升序分页，每页使用独立数据库时间。到期与持久释放分别展示；操作后请刷新。</p>
         </form>
         <HoldFailure error={readError} />
-        {page ? <HoldHistory page={page} busy={busy} canSelect={!attempt} onNext={load} onSelect={(hold) => {
+        {page ? <HoldHistory page={page} busy={busy} canSelect={!attempt} onHistory={onHistory}
+          onNext={load} onSelect={(hold) => {
           setAction("release"); setHoldId(hold.hold_id); setReason(""); setRecover(false);
         }} /> : !readError && <p className="empty">填写案件 ID，查看保留锁与释放事实。</p>}
       </section>

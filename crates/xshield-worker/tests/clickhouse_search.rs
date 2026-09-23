@@ -599,6 +599,7 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
 async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
     const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000301";
     const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000301";
+    const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-000000000131";
     let now_micros: i64 = checked(
         writer
             .query("SELECT toUnixTimestamp64Micro(now64(6))")
@@ -609,8 +610,8 @@ async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
     let now = DateTime::from_timestamp_micros(now_micros).unwrap();
     let start = DateTime::from_timestamp(now.timestamp() - 60, 0).unwrap();
     let expires = now + TimeDelta::hours(1);
-    let direct = serde_json::json!({"case_id": CASE, "artifact_id": ARTIFACT});
-    let targets = serde_json::json!({"target_case_id": CASE, "target_artifact_id": ARTIFACT});
+    let direct = serde_json::json!({"case_id": CASE, "artifact_id": ARTIFACT, "hold_id": HOLD});
+    let targets = serde_json::json!({"target_case_id": CASE, "target_artifact_id": ARTIFACT, "target_hold_id": HOLD});
     let new_row = |sequence, kind, stage, payload: &serde_json::Value| {
         // The two timestamp groups exercise both halves of the keyset tuple.
         let mut row = TestEvent::new(
@@ -748,9 +749,37 @@ async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
             "control_access",
             targets.clone(),
         ),
+        (
+            356,
+            "evidence.hold.created",
+            "control_access",
+            direct.clone(),
+        ),
+        (
+            357,
+            "console.evidence.hold.created",
+            "evidence_hold",
+            targets.clone(),
+        ),
     ] {
         rows.push(new_row(sequence, kind, stage, &payload));
     }
+    let mut other_tenant_hold = rows
+        .iter()
+        .find(|row| row.event_type == "evidence.hold.created")
+        .unwrap()
+        .clone();
+    other_tenant_hold.event_id = event_id(371);
+    other_tenant_hold.tenant_id = "tenant_other";
+    rows.push(other_tenant_hold);
+    let mut other_site_hold = rows
+        .iter()
+        .find(|row| row.event_type == "console.evidence.hold.created")
+        .unwrap()
+        .clone();
+    other_site_hold.event_id = event_id(372);
+    other_site_hold.site_id = "site_other";
+    rows.push(other_site_hold);
     let mut other_tenant = rows[2].clone();
     other_tenant.event_id = event_id(361);
     other_tenant.tenant_id = "tenant_other";
@@ -785,9 +814,11 @@ async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
     .unwrap();
     let case = QueryFilter::CaseId(CaseId::parse(CASE).unwrap());
     let artifact = QueryFilter::ArtifactId(ArtifactId::parse(ARTIFACT).unwrap());
+    let hold = QueryFilter::EvidenceHoldId(EventId::parse(HOLD).unwrap());
     let case_ids: Vec<_> = (301..=306).chain(311..=320).collect();
     let artifact_ids: Vec<_> = (303..=306).chain(313..=329).collect();
     let combined_ids: Vec<_> = (303..=306).chain(313..=320).collect();
+    let hold_ids = vec![305, 306, 318, 319];
     let tenant = TenantId::parse("tenant_case_search").unwrap();
     let site = SiteId::parse("site_case_search").unwrap();
     for table in ["audit_events", "events_by_time"] {
@@ -796,6 +827,7 @@ async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
             (vec![case.clone()], case_ids.clone()),
             (vec![artifact.clone()], artifact_ids.clone()),
             (vec![case.clone(), artifact.clone()], combined_ids.clone()),
+            (vec![hold.clone()], hold_ids.clone()),
             (
                 vec![
                     case.clone(),
@@ -840,6 +872,8 @@ async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
                     "case_id",
                     "target_case_id",
                     "target_artifact_id",
+                    "hold_id",
+                    "target_hold_id",
                 ] {
                     assert!(json.get(field).is_none());
                 }
@@ -870,14 +904,44 @@ async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
             );
             assert_ids(&result, &ids);
         }
+        let hold_plan =
+            QueryPlan::new(window, vec![hold.clone()], QuerySort::OccurredAtAsc, 100).unwrap();
+        for (tenant, site, ids) in [
+            ("tenant_other", "site_case_search", vec![371]),
+            ("tenant_case_search", "site_other", vec![372]),
+            ("tenant_other", "site_other", vec![]),
+        ] {
+            let result = queried(
+                query_audit_events(
+                    &config,
+                    reader,
+                    &TenantId::parse(tenant).unwrap(),
+                    &SiteId::parse(site).unwrap(),
+                    &hold_plan,
+                    None,
+                )
+                .await,
+            );
+            assert_ids(&result, &ids);
+        }
+        let missing_hold = QueryFilter::EvidenceHoldId(
+            EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000399").unwrap(),
+        );
+        let plan =
+            QueryPlan::new(window, vec![missing_hold], QuerySort::OccurredAtAsc, 100).unwrap();
+        let result =
+            queried(query_audit_events(&config, reader, &tenant, &site, &plan, None).await);
+        assert_ids(&result, &[]);
         for filters in [
             vec![case.clone()],
             vec![artifact.clone()],
             vec![case.clone(), artifact.clone()],
+            vec![hold.clone()],
         ] {
             let ids = match filters.as_slice() {
                 [QueryFilter::CaseId(_)] => &case_ids,
                 [QueryFilter::ArtifactId(_)] => &artifact_ids,
+                [QueryFilter::EvidenceHoldId(_)] => &hold_ids,
                 _ => &combined_ids,
             };
             for sort in [QuerySort::OccurredAtAsc, QuerySort::OccurredAtDesc] {

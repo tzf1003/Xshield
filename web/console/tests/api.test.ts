@@ -1206,6 +1206,21 @@ test("search canonical digest covers every predicate and retained filter order",
   assert.equal(plan.filters.length, 1);
 });
 
+test("search accepts only a canonical evidence hold reference", async () => {
+  const holdId = "ev_018f2a3b-4c5d-7000-8000-000000000061";
+  const plan = validateSearchPlan({
+    ...searchPlan(),
+    filters: [{ kind: "evidence_hold_id", value: holdId }],
+  });
+  assert.deepEqual(plan.filters, [{ kind: "evidence_hold_id", value: holdId }]);
+  assert.equal(
+    await searchPlanDigest(plan),
+    createHash("sha256")
+      .update(`1789862400|1789948800|asc|2|evidence_hold_id=${holdId}`)
+      .digest("hex"),
+  );
+});
+
 test("invalid search inputs fail before network and preserve strict query budgets", async (t) => {
   const network = t.mock.method(globalThis, "fetch", async () => {
     throw new Error("unexpected network");
@@ -1235,6 +1250,7 @@ test("invalid search inputs fail before network and preserve strict query budget
     { filters: [{ kind: "request_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "calibration_report_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "evidence_access_request_id", value: ARTIFACT_ID }] },
+    { filters: [{ kind: "evidence_hold_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "model_call_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "text", field: "payload_json", value: "anything" }] },
     { filters: [{ kind: "text", field: "stage", value: "a|b" }] },

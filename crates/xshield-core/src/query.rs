@@ -182,6 +182,12 @@ pub enum QueryFilter {
     /// This selects retained metadata only. It does not authorize report-body
     /// access, evidence access, threshold publication, or business operations.
     CalibrationReportId(CalibrationReportId),
+    /// Exact evidence-hold reference in fixed hold lifecycle history or a
+    /// validated management mutation attempt.
+    ///
+    /// This selects retained, redacted metadata only. It does not authorize
+    /// retention changes, evidence access, replay, or business operations.
+    EvidenceHoldId(EventId),
     /// Exact evidence-access request reference in fixed access lifecycle
     /// history or a validated management detail read.
     ///
@@ -218,6 +224,7 @@ impl QueryFilter {
             | Self::CaseId(_)
             | Self::ArtifactId(_)
             | Self::CalibrationReportId(_)
+            | Self::EvidenceHoldId(_)
             | Self::EvidenceAccessRequestId(_)
             | Self::ModelCallId(_)
             | Self::Outcome(_)
@@ -353,8 +360,8 @@ mod tests {
     };
     use crate::{
         domain::{
-            ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EvidenceAccessRequestId,
-            GrantId, ModelCallId, RequestId,
+            ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
+            EvidenceAccessRequestId, GrantId, ModelCallId, RequestId,
         },
         identity::UnixSeconds,
     };
@@ -408,6 +415,17 @@ mod tests {
                 vec![QueryFilter::CalibrationReportId(
                     CalibrationReportId::parse("calr_018f2a3b-4c5d-7000-8000-000000000005")
                         .unwrap(),
+                )],
+                QuerySort::OccurredAtAsc,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(
+            QueryPlan::new(
+                window(60),
+                vec![QueryFilter::EvidenceHoldId(
+                    EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000006").unwrap(),
                 )],
                 QuerySort::OccurredAtAsc,
                 1,

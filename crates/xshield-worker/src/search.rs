@@ -1002,6 +1002,14 @@ async fn execute_query(
                 "AND event_type = 'console.calibration.report.read' ",
                 "AND JSONExtractString(payload_json,'target_calibration_report_id') = ?))",
             )),
+            QueryFilter::EvidenceHoldId(_) => sql.push_str(concat!(
+                "((event_type IN ('evidence.hold.created','evidence.hold.released') ",
+                "AND JSONExtractString(payload_json,'hold_id') = ?) ",
+                "OR (stage = 'control_access' ",
+                "AND event_type IN ('console.evidence.hold.created',",
+                "'console.evidence.hold.released') ",
+                "AND JSONExtractString(payload_json,'target_hold_id') = ?))",
+            )),
             QueryFilter::EvidenceAccessRequestId(_) => sql.push_str(concat!(
                 "((event_type IN ('evidence.access.requested','evidence.access.approved',",
                 "'evidence.access.denied') ",
@@ -1058,6 +1066,7 @@ async fn execute_query(
             QueryFilter::CalibrationReportId(value) => {
                 query.bind(value.as_str()).bind(value.as_str())
             }
+            QueryFilter::EvidenceHoldId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::EvidenceAccessRequestId(value) => {
                 query.bind(value.as_str()).bind(value.as_str())
             }
