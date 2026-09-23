@@ -45,9 +45,11 @@ const outcomes = [
   "SKIPPED",
   "CANCELLED",
 ] as const;
+const traceIdPattern = /^[0-9a-f]{32}$/;
 const idPatterns = {
   request_id: requestPattern,
   event_id: eventPattern,
+  trace_id: traceIdPattern,
   caused_by_event_id: eventPattern,
   grant_id: grantPattern,
   auth_binding_id: bindingPattern,

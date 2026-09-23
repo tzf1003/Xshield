@@ -6,7 +6,7 @@
 
 ## 实现状态
 
-结构化事件调查已增加直接因果边逐跳检索：详情页可准备前驱事件或按已知事件查找直接后继；每步沿用 Investigator 作用域、既有扫描预算与审计，需手动填写时间窗并提交，不进行递归遍历。关联图、多跳汇总和自然语言计划仍按垂直闭环继续交付。
+结构化事件调查已支持精确 Trace ID 过滤，并增加直接因果边逐跳检索：每步沿用 Investigator 作用域、既有扫描预算与审计，需手动填写时间窗并提交；因果入口不进行递归遍历。完整关联图、多跳汇总和自然语言计划仍按垂直闭环继续交付。
 
 `xshield_core::calibration::read_capability` 与 `ports::CalibrationEvidenceReadPort` 已为离线校准批量读取定义纯领域/端口边界：独立的 `calcap_` capability 冻结 tenant/site、可信有效期、四份分区 manifest、每个样本的 model-record/label artifact 对、语义 role、样本上限及 512 MiB 聚合字节上限。请求只接受 capability 导出的精确引用及与该 capability 绑定的、不可复制的 batch lease/session handle，重验 scope、租约、capability ID 和成员关系；控制台单对象 `EvidenceReadPort`、案件、审批、`ApprovalRef` 或管理角色不能作为此批次授权。迁移 0023–0025 与 PostgreSQL 适配器已将完整 catalog 快照、规范 scope digest、受限 issuance/completion outbox 事实及明文释放 reservation 持久化；开始批次时再次锁定并核对完整集合，私有 lease handle 仅留在运行中会话。读取授权器在每次打开 vault 前再次锁定并核对完整 capability/member/live catalog、活动 lease 与私有 handle digest，只返回内部 catalog 预期；`LocalCalibrationEvidenceReader` 将该预期与本地 vault 的认证 manifest、密文摘要和 AEAD 校验结合，取得短时、精确绑定的 release reservation 后写入独立加密 `calibration.evidence_read` journal receipt，并在返回明文前原子提交 release boundary。完整 `EvaluationReport` 才能驱动原子 lease completion；受限报告 artifact、持久化适配器及内容无关事件提交 API 与 worker evaluator 编排已交付。evaluator 逐引用读取并校验 v3 model-call/label DTO、调用纯阈值内核、写入并 fresh-attest report，再以固定身份精确重试 PostgreSQL 提交；内容独立性仍需声明式分区/血缘审查，不能由 artifact 引用本身证明。适配器逐次重验及完整闭环见 [10.16](docs/10-jev-and-agents.md#1016-已实现校准批量读取能力与端口契约)、[10.17](docs/10-jev-and-agents.md#1017-已实现耐久发行与批次会话)、[16.4](docs/16-rust-code-architecture.md#164-port-契约) 与 [20.3](docs/20-testing-and-acceptance.md#203-误拒与安全收益)。
 

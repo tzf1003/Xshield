@@ -8,7 +8,7 @@ use uuid::Uuid;
 use xshield_core::{
     domain::{
         ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId, SiteId, SubjectRef,
-        TenantId,
+        TenantId, TraceId,
     },
     identity::UnixSeconds,
     query::{
@@ -1157,6 +1157,42 @@ async fn assert_search(
         );
         assert_ids(&result, &ids);
     }
+    let trace_plan = QueryPlan::new(
+        window,
+        vec![QueryFilter::TraceId(
+            TraceId::parse("0".repeat(32)).unwrap(),
+        )],
+        QuerySort::OccurredAtAsc,
+        100,
+    )
+    .unwrap();
+    let result =
+        queried(query_audit_events(config, client, &tenant, &site, &trace_plan, None).await);
+    assert_ids(&result, &[1, 3, 4, 2, 5]);
+    let other_scope = queried(
+        query_audit_events(
+            config,
+            client,
+            &TenantId::parse("tenant_other").unwrap(),
+            &site,
+            &trace_plan,
+            None,
+        )
+        .await,
+    );
+    assert_ids(&other_scope, &[10]);
+    let missing_trace = QueryPlan::new(
+        window,
+        vec![QueryFilter::TraceId(
+            TraceId::parse("f".repeat(32)).unwrap(),
+        )],
+        QuerySort::OccurredAtAsc,
+        100,
+    )
+    .unwrap();
+    let result =
+        queried(query_audit_events(config, client, &tenant, &site, &missing_trace, None).await);
+    assert_ids(&result, &[]);
     for sort in [QuerySort::OccurredAtAsc, QuerySort::OccurredAtDesc] {
         let plan = QueryPlan::new(window, Vec::new(), sort, 1).unwrap();
         let mut ordered: Vec<_> = expected.iter().collect();

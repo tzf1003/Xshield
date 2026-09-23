@@ -8,7 +8,7 @@
 use crate::{
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, RequestId, SubjectRef,
+        GrantId, ModelCallId, RequestId, SubjectRef, TraceId,
     },
     identity::UnixSeconds,
 };
@@ -164,6 +164,8 @@ pub enum QueryFilter {
     RequestId(RequestId),
     /// Exact immutable event identity.
     EventId(EventId),
+    /// Exact W3C trace identifier in the event index.
+    TraceId(TraceId),
     /// Exact direct predecessor event reference.
     ///
     /// This returns events whose recorded cause list contains the reference;
@@ -226,6 +228,7 @@ impl QueryFilter {
         match self {
             Self::RequestId(_)
             | Self::EventId(_)
+            | Self::TraceId(_)
             | Self::CausedByEventId(_)
             | Self::SubjectRef(_)
             | Self::GrantId(_)

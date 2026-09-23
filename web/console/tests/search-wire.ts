@@ -22,11 +22,13 @@ try {
   );
   const grant = "grant_018f2a3b-4c5d-7000-8000-000000000101";
   const binding = "auth_018f2a3b-4c5d-7000-8000-000000000102";
+  const trace = "018f2a3b4c5d70008000000000000003";
   const plan: SearchPlan = {
     schema_version: 3,
     start: "2026-09-20T08:10:00Z",
     end: "2026-09-20T08:11:00Z",
     filters: [
+      { kind: "trace_id", value: trace },
       { kind: "text", field: "event_type", value: "grant.issued" },
       { kind: "grant_id", value: grant },
       { kind: "auth_binding_id", value: binding },
@@ -82,7 +84,7 @@ try {
     createHash("sha256")
       .update(
         `${Date.parse(plan.start) / 1000}|${Date.parse(plan.end) / 1000}|${order}|2` +
-          `|event_type=grant.issued|grant_id=${grant}|auth_binding_id=${binding}`,
+          `|trace_id=${trace}|event_type=grant.issued|grant_id=${grant}|auth_binding_id=${binding}`,
       )
       .digest("hex");
   phase = 2;

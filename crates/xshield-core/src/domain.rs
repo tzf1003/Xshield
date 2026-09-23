@@ -55,6 +55,41 @@ impl fmt::Debug for SubjectRef {
     }
 }
 
+/// A validated 32-character lowercase hexadecimal trace identifier.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct TraceId(String);
+
+impl TraceId {
+    /// Parses a trace identifier in the event schema's fixed-width encoding.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] when the value is not exactly 32 lowercase
+    /// hexadecimal characters.
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidValue> {
+        let value = value.into();
+        if value.len() != 32
+            || !value
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(InvalidValue::new("trace_id"));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated value used by parameterized index queries.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TraceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 fn valid_scoped_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -229,7 +264,7 @@ const fn hex_nibble(byte: u8) -> u8 {
 mod tests {
     use super::{
         ArtifactId, CalibrationReadLeaseId, CaseId, EvidenceAccessRequestId, ModelCallId,
-        ModelEvaluationLeaseId, RequestId, SubjectRef, TenantId,
+        ModelEvaluationLeaseId, RequestId, SubjectRef, TenantId, TraceId,
     };
 
     #[test]
@@ -258,6 +293,14 @@ mod tests {
             EvidenceAccessRequestId::parse("access_01a0afa6-3320-758a-9554-d0d3b561b8c6").is_ok()
         );
         assert!(TenantId::parse("tenant_demo").is_ok());
+        assert!(TraceId::parse("018f2a3b4c5d70008000000000000003").is_ok());
+        for trace in [
+            "018f2a3b4c5d7000800000000000000",
+            "018F2A3B4C5D70008000000000000003",
+            "018f2a3b4c5d7000800000000000000g",
+        ] {
+            assert!(TraceId::parse(trace).is_err());
+        }
         assert!(TenantId::parse("tenant/demo").is_err());
     }
 

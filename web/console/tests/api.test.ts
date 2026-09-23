@@ -1236,6 +1236,21 @@ test("search accepts only a canonical evidence hold reference", async () => {
   );
 });
 
+test("search accepts only lowercase fixed-width trace IDs and digests them", async () => {
+  const trace = "018f2a3b4c5d70008000000000000003";
+  const plan = validateSearchPlan({
+    ...searchPlan(),
+    filters: [{ kind: "trace_id", value: trace }],
+  });
+  assert.deepEqual(plan.filters, [{ kind: "trace_id", value: trace }]);
+  assert.equal(
+    await searchPlanDigest(plan),
+    createHash("sha256")
+      .update(`1789862400|1789948800|asc|2|trace_id=${trace}`)
+      .digest("hex"),
+  );
+});
+
 test("invalid search inputs fail before network and preserve strict query budgets", async (t) => {
   const network = t.mock.method(globalThis, "fetch", async () => {
     throw new Error("unexpected network");
@@ -1268,6 +1283,9 @@ test("invalid search inputs fail before network and preserve strict query budget
     { filters: [{ kind: "evidence_hold_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "model_call_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "caused_by_event_id", value: ARTIFACT_ID }] },
+    { filters: [{ kind: "trace_id", value: "018F2A3B4C5D70008000000000000003" }] },
+    { filters: [{ kind: "trace_id", value: "018f2a3b4c5d7000800000000000000" }] },
+    { filters: [{ kind: "trace_id", value: "018f2a3b4c5d7000800000000000000g" }] },
     { filters: [{ kind: "subject_ref", value: "operator\n1" }] },
     { filters: [{ kind: "subject_ref", value: "é".repeat(129) }] },
     { filters: [{ kind: "text", field: "payload_json", value: "anything" }] },

@@ -21,7 +21,7 @@ use xshield_core::{
     admin::ManagementRole,
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, RequestId, SiteId, SubjectRef, TenantId,
+        GrantId, ModelCallId, RequestId, SiteId, SubjectRef, TenantId, TraceId,
     },
     identity::UnixSeconds,
     query::{
@@ -385,6 +385,10 @@ fn query_plan_digest(plan: &QueryPlan, key: &[u8; 32]) -> Result<[u8; 32], ()> {
                 canonical.push_str("event_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::TraceId(value) => {
+                canonical.push_str("trace_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::CausedByEventId(value) => {
                 canonical.push_str("caused_by_event_id=");
                 canonical.push_str(value.as_str());
@@ -523,6 +527,9 @@ enum SearchFilterRequest {
     EventId {
         value: String,
     },
+    TraceId {
+        value: String,
+    },
     CausedByEventId {
         value: String,
     },
@@ -573,6 +580,9 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::EventId { value } => EventId::parse(value)
                 .map(QueryFilter::EventId)
+                .map_err(|_| ()),
+            Self::TraceId { value } => TraceId::parse(value)
+                .map(QueryFilter::TraceId)
                 .map_err(|_| ()),
             Self::CausedByEventId { value } => EventId::parse(value)
                 .map(QueryFilter::CausedByEventId)

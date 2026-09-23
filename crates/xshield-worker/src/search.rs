@@ -954,6 +954,7 @@ async fn execute_query(
         match filter {
             QueryFilter::RequestId(_) => sql.push_str("request_id = ?"),
             QueryFilter::EventId(_) => sql.push_str("event_id = ?"),
+            QueryFilter::TraceId(_) => sql.push_str("trace_id = ?"),
             // ponytail: inspect the existing cause array under the fixed time/scope
             // scan budgets; add an edge projection only if measured queries exceed them.
             QueryFilter::CausedByEventId(_) => sql.push_str("has(cause_event_ids,?)"),
@@ -1075,6 +1076,7 @@ async fn execute_query(
             QueryFilter::EventId(value) | QueryFilter::CausedByEventId(value) => {
                 query.bind(value.as_str())
             }
+            QueryFilter::TraceId(value) => query.bind(value.as_str()),
             QueryFilter::SubjectRef(value) => query
                 .bind(value.as_str())
                 .bind(value.as_str())

@@ -4,7 +4,7 @@ use openssl::sha::sha256;
 use xshield_core::{
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, SubjectRef,
+        GrantId, ModelCallId, SubjectRef, TraceId,
     },
     query::QueryFilter,
 };
@@ -18,6 +18,7 @@ const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000106";
 const MODEL_CALL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000106";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-000000000107";
 const PREDECESSOR: &str = "ev_018f2a3b-4c5d-7000-8000-000000000108";
+const TRACE: &str = "018f2a3b4c5d70008000000000000003";
 const SUBJECT: &str = "principal-target-1";
 
 pub(super) fn reference_payload() -> Value {
@@ -59,6 +60,12 @@ fn model_call_reference_payload() -> Value {
 fn caused_by_event_reference_payload() -> Value {
     let mut payload = search_payload();
     payload["filters"] = json!([{"kind": "caused_by_event_id", "value": PREDECESSOR}]);
+    payload
+}
+
+fn trace_reference_payload() -> Value {
+    let mut payload = search_payload();
+    payload["filters"] = json!([{"kind": "trace_id", "value": TRACE}]);
     payload
 }
 
@@ -476,6 +483,46 @@ async fn caused_by_event_search_audits_only_the_plan_digest() {
 }
 
 #[tokio::test]
+async fn trace_search_audits_only_the_exact_plan_digest() {
+    let mock = test::Mock::new();
+    mock.add(test::handlers::provide([search_event(
+        "ev_018f2a3b-4c5d-7000-8000-000000000119",
+        20,
+    )]));
+    let fixture = Fixture::with_index(
+        10,
+        ManagementRole::Investigator,
+        Client::default().with_mock(&mock),
+    );
+    let app = router(fixture.control);
+    let response = response_json(
+        app.clone()
+            .oneshot(search_http_request(&trace_reference_payload()))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let canonical = format!("10|70|asc|1|trace_id={TRACE}");
+    assert_eq!(
+        response["query_digest"],
+        lower_hex(&sha256(canonical.as_bytes()))
+    );
+    assert_eq!(response["events"].as_array().map(Vec::len), Some(1));
+    drop(app);
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "console.query.executed");
+    assert_eq!(events[0]["payload"]["outcome"], "PASS");
+    assert_eq!(
+        events[0]["payload"]["query_digest"],
+        lower_hex(&sha256(canonical.as_bytes()))
+    );
+    assert!(!events[0].to_string().contains(TRACE));
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn evidence_access_search_binds_only_restricted_history() {
     let mock = test::Mock::new();
     let event = search_event("ev_018f2a3b-4c5d-7000-8000-000000000117", 20);
@@ -516,7 +563,7 @@ async fn evidence_access_search_binds_only_restricted_history() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
-    let fixture = Fixture::new(100, ManagementRole::Investigator);
+    let fixture = Fixture::new(200, ManagementRole::Investigator);
     let app = router(fixture.control);
     let mut attempts = 0;
     for (kind, valid, other) in [
@@ -590,6 +637,28 @@ async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
             response_json(response, StatusCode::UNPROCESSABLE_ENTITY).await["error_code"],
             "CONTROL_QUERY_INVALID"
         );
+        attempts += 1;
+    }
+    for invalid in [
+        json!("018F2A3B4C5D70008000000000000003"),
+        json!("018f2a3b4c5d7000800000000000000"),
+        json!("018f2a3b4c5d7000800000000000000g"),
+        json!(ARTIFACT),
+        json!(""),
+        json!(null),
+        json!(123),
+    ] {
+        let mut payload = search_payload();
+        payload["filters"] = json!([{"kind": "trace_id", "value": invalid}]);
+        let body = response_json(
+            app.clone()
+                .oneshot(search_http_request(&payload))
+                .await
+                .unwrap(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        assert_eq!(body["error_code"], "CONTROL_QUERY_INVALID");
         attempts += 1;
     }
     for value in [String::new(), "operator\n1".to_owned(), "é".repeat(129)] {
@@ -950,6 +1019,46 @@ async fn caused_by_event_search_cursor_binds_the_exact_predecessor_reference() {
     )
     .await;
     assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn trace_search_cursor_binds_the_exact_trace_identifier() {
+    let fixture = Fixture::new(10, ManagementRole::Investigator);
+    let payload = trace_reference_payload();
+    let plan = serde_json::from_value::<SearchRequest>(payload.clone())
+        .unwrap()
+        .into_plan(1000)
+        .unwrap();
+    assert_eq!(
+        plan.filters(),
+        [QueryFilter::TraceId(TraceId::parse(TRACE).unwrap())]
+    );
+    let position = xshield_worker::SearchPosition::new(
+        DateTime::from_timestamp_micros(20_123_456).unwrap(),
+        EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+    )
+    .unwrap();
+    let cursor = fixture
+        .control
+        .encode_search_cursor("operator-1", &plan, &position)
+        .unwrap();
+    let mut altered = payload;
+    altered["filters"][0]["value"] = json!("018f2a3b4c5d70008000000000000004");
+    altered["cursor"] = json!(cursor);
+    let body = response_json(
+        router(fixture.control)
+            .oneshot(search_http_request(&altered))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "console.query.executed");
+    assert!(!events[0].to_string().contains(TRACE));
     fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
 }
 

@@ -36,6 +36,8 @@
 
 资格调查增量：受限查询已增加 `grant_id` 与 `auth_binding_id`，按固定事件字段定位身份生命周期、通用/响应资格发行、分享来源及 `console.grant.read` / `console.binding.read` 管理历史。强类型校验、同事件 AND、作用域与游标绑定、查询预算和审计沿用既有闭环；返回直接引用事件及 request_id。`GET /control/v1/grants/{grant_id}` 已补齐资格、当前绑定状态及来源请求引用的 PostgreSQL 单快照调查，独立显示持久状态、数据库时间过期标志和代际是否一致；`GET /control/v1/auth-bindings/{binding_id}` 提供当前身份/凭证代际、持久状态、期限与更新时间，复用调查许可及断连终态审计。控制台已接通两类快照、资格到绑定/来源请求导航及需显式时间窗和独立权限的历史查询入口，保留微秒观察与缺失语义。历史命中不授予 Observer 详情权限；在线准入仍校验完整证明，完整关联图继续交付。
 
+Trace ID 检索增量：结构化事件检索现在可按事件契约的 32 个小写十六进制字符 trace 精确查找 ClickHouse 中同 trace 的脱敏事件，复用现有 `FixedString(32)` 列、scope/time/budget、HMAC 游标及查询审计；未新增 Schema 或授权边界。
+
 ## M4 模型与调查
 
 阈值评估基础增量：纯 core 已提供二元恶意概率的固定双阈值计算、九格计数、缺失原因、正确分母、可靠性桶和 Brier。该层无 I/O；获准证据组装、数据分区隔离、耐久报告、阈值选择及真实校准按 [10.12](10-jev-and-agents.md#1012-离线阈值评估内核) 继续交付。

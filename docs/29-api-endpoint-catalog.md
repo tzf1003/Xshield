@@ -137,6 +137,8 @@ Authorization 与访问申请头必须各自单值，不接受查询串；重复
 
 ## 29.14 已实现的受限调查查询契约
 
+此契约另支持 `{"kind":"trace_id","value":"018f2a3b4c5d70008000000000000003"}`：值严格为 32 个小写十六进制字符并精确匹配现有 ClickHouse `FixedString(32)` 列，无需 Schema 迁移。trace 不编码可信时间或授权作用域，因此请求仍需有界 UTC 时间窗，服务端注入 tenant/site 并应用原有扫描预算、query_digest、签名游标和 `console.query.executed` 审计。结果只定位同 trace 的脱敏事件，不构成身份、资格或跨作用域关联证明。
+
 `POST /control/v1/search` 要求固定 tenant/site 作用域内的 `Investigator` 和管理 Bearer。请求体上限 8 KiB，严格接受 `schema_version=3`、UTC RFC3339 的 `start`/`end`、`sort`、`limit`、可选 `cursor` 及有界 `filters`。时间边界采用整秒，半开区间 `[start,end)` 最长 31 天且位于 1970-01-01 至 2300-01-01；单页受 `XSHIELD_CONTROL_MAX_QUERY_EVENTS` 限制，硬上限 1000 行，最多 8 个过滤器。过滤器只对同一结果事件做 AND 匹配：规范 request/event/grant/auth binding/case/artifact/calibration-report/model-call/evidence-access-request/evidence-hold ID、直接因果边、受限 `subject_ref`、`event_type`/`stage`/`reason_code`/`operation_id`/`model_revision` 精确文本、`PASS/ALLOW/DENY/UNKNOWN/ERROR/SKIPPED/CANCELLED` outcome 枚举和 0–10000 整数 basis-points 置信度上限。规则事件的空置信度不会匹配数值阈值；除下述直接因果边外，不做跨事件聚合、多跳遍历或自然语言编译。未知字段、版本、控制字符和自由表达式均拒绝。
 
 ```json

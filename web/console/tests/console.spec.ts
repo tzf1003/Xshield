@@ -1288,6 +1288,22 @@ test("event details traverse direct causes and children through explicit history
   expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
 });
 
+test("structured event search supports a strict trace identifier", async ({ page }) => {
+  const trace = "018f2a3b4c5d70008000000000000003";
+  const calls = await mockControl(page);
+  await connect(page);
+  await prepareSearch(page);
+  await addSearchFilter(page, 1, "trace_id", trace);
+  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
+  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
+  await search(page);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.body).toMatchObject({
+    filters: [{ kind: "trace_id", value: trace }],
+  });
+  await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("本页 2 条");
+});
+
 test("search submits an allowlisted plan, freezes pagination and clears edited results", async ({
   page,
 }) => {

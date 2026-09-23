@@ -6,6 +6,7 @@ import { EventTable, Rows } from "./panels";
 const fields = [
   ["request_id", "请求 ID"],
   ["event_id", "事件 ID"],
+  ["trace_id", "Trace ID"],
   ["caused_by_event_id", "前驱事件 ID"],
   ["grant_id", "资格 ID"],
   ["auth_binding_id", "身份绑定 ID"],
@@ -202,7 +203,7 @@ export function SearchPanel({
         </div>
         <p className="footnote">
           UTC 整秒半开时间窗，最多 31 天；最多 8
-          个条件，全部匹配同一事件。前驱事件条件只查找直接关联，不递归展开；主体引用仅用于精确筛选，结果不会回显主体值；置信度空值不会匹配数值阈值。
+          个条件，全部匹配同一事件。Trace ID 为 32 个小写十六进制字符且仍受时间窗限制；前驱事件条件只查找直接关联，不递归展开；主体引用仅用于精确筛选，结果不会回显主体值；置信度空值不会匹配数值阈值。
         </p>
         {filters.map((filter, index) => (
           <div className="search-filter" key={filter.id}>
@@ -255,7 +256,13 @@ export function SearchPanel({
                     filter.field === "confidence_at_most" ? 10000 : undefined
                   }
                   step={1}
-                  maxLength={filter.field === "subject_ref" ? 256 : 128}
+                  maxLength={
+                    filter.field === "subject_ref"
+                      ? 256
+                      : filter.field === "trace_id"
+                        ? 32
+                        : 128
+                  }
                   value={filter.value}
                   autoComplete="off"
                   spellCheck={false}
