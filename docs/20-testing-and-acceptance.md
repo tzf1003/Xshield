@@ -19,12 +19,14 @@
 | POLICY | 读写、字段、批量、父子对象、GraphQL、角色功能 | 不把见过 ID 扩展为操作权 |
 | MODEL | NONE、低信心、Score 档位/加权评分、Noul、提示注入、超时、缓存、版本变动 | 不伪造 confidence，不覆盖硬拒绝 |
 | AUDIT | 每层、跳过、证据链、断网、磁盘满、重启、去重 | 必需事件可追溯，缺失可见 |
-| CONSOLE | ID 横向访问、原文审批、导出、自然语言查询、有界因果邻域 | 不绕过租户/敏感权限；关联只沿已发布引用，历史检索仍显式授权与提交 |
+| CONSOLE | ID 横向访问、原文审批、导出、自然语言查询、有界因果查询/邻域 | 不绕过租户/敏感权限；关联只沿已发布引用，历史检索仍显式授权与提交 |
 | RECOVERY | 重放、取消、未知源站结果、撤权、备份恢复 | 不重发非幂等写，不复活旧资格 |
 
 机器化验收目录见 examples/acceptance-cases.json，包含独立 case_id、步骤、期望和关联不变量；这里只提供设计用例，不声称已经对运行产品执行。
 
 管理身份的本地回归覆盖 callback query 闭合解析、HTTPS/loopback URL 边界、短时 HMAC 断言防伪造和篡改、重复 Cookie、严格 Origin/CSRF 头、认证响应 no-store，以及重复 `Authorization` 不能被 handler 重新解释。step-up 单测覆盖 `auth_time` 新鲜度与时钟偏差、API client 的 CSRF/安全授权 URL，以及未 step-up 的原文读取拒绝。Rust 控制 API、Node 与 Playwright 的普通控制台回归不模拟真实 IdP。`xshield-postgres` 的 `oidc_transactions_are_one_use_and_browser_sessions_are_revocable` 需独立 PostgreSQL、迁移 0035–0036 与显式解除 ignored 才验证一次性 state、session digest 绑定、数据库 step-up 窗口和撤销路径；因此本地测试通过不能替代该集成用例、真实企业 IdP/MFA 联调或部署代理/Cookie/TLS 验收。
+
+服务端因果回归由 `cargo test -p xshield-control --lib causality` 覆盖严格 DTO、非 Investigator 拒绝、根/前驱/后继的有界 BFS、深度/方向投影、脱敏摘要、健康字段和单次 `console.causality.read` 审计；`cargo test -p xshield-worker --lib control_audit` 额外验证成功事件必须带 64 位小写十六进制查询摘要、失败请求可省略摘要且路径/目标/原因白名单固定。ClickHouse 集成仍需在专用实例复核扫描预算、截断和索引缺口，本地 mock 不代表生产容量或发布延迟。
 
 ## 20.3 误拒与安全收益
 

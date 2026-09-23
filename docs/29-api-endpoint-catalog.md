@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -14,6 +14,7 @@
 | GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树 | console.agent.read |
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
+| POST /control/v1/causality | 固定窗口内有界多跳因果摘要 | console.causality.read |
 | POST /control/v1/artifacts/{id}/access | 申请解密/原文查看能力 | evidence.access.requested |
 | GET /control/v1/evidence-access-requests | 本人申请历史与独立审批待办（已实现，29.24） | console.evidence.access.list |
 | GET /control/v1/evidence-access-requests/{access_request_id} | 申请理由、目标与历史决策详情（已实现，29.23） | console.evidence.access.read |
@@ -371,3 +372,15 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 再认证开始写 `console.auth.reauth.start`；OIDC 身份、ACR、auth_time 验证通过后，服务端先耐久写 `console.auth.reauth.callback` 的 `CONTROL_OIDC_REAUTH_VERIFIED`，再更新 session 时间戳。该 PASS 只证明声明已验证，不是原文读取或审批事实；session 存储故障会另记 reauth callback ERROR。state、签名、身份或新鲜度拒绝沿用通用 `console.auth.callback` 拒绝，不记录授权码、state、token 或原始 ACR。证据原文的独立审批始终不变。原文内容端点经管理 session 与强类型参数校验后，在获取证据读取许可、查询访问申请/catalog 或调用 vault 前要求 step-up；未满足返回 `CONTROL_STEP_UP_REQUIRED`/403。当前机器 Bearer 尚无用途绑定的再认证凭据，因此不能通过该端点读取原文，自动化读取需待后续安全凭据设计。
 
 部署需先应用迁移 0036，再升级控制服务、能识别新增 `console.auth.reauth.*` 事件的管理 journal 发布器、同源代理与控制台；代理须透传 reauth-start 的 `Set-Cookie`，禁止缓存与记录其请求/响应正文。迁移回退前须禁用原文内容路由或确保活动版本仍强制 step-up；不得先移除该字段再回退应用。
+
+## 29.29 已实现的有界因果查询契约
+
+`POST /control/v1/causality` 要求固定 tenant/site 内的 `Investigator` 和单值管理 Bearer。请求体上限 4 KiB，严格接受 `schema_version=3`、UTC RFC3339 整秒 `start`/`end`、规范 `ev_` `event_id`、`direction`（`both`、`predecessors` 或 `successors`）、`max_depth`（1–4）和 `max_nodes`（1–16）；未知字段、非 UTC、带小数秒、非法 ID、逆序/越界窗口均在索引访问前返回 `CONTROL_CAUSALITY_REQUEST_INVALID`/400。服务端不接受页面传入 tenant/site 或任意表达式。
+
+服务端先以根 ID 精确查询固定时间窗，再沿已发布投影中的 `cause_event_ids` 做有界 BFS：前驱按记录引用逐个定位，后继使用固定的 `caused_by_event_id` 成员条件。查询最多返回 `max_nodes` 个非根节点；达到上限、后继页被截断或触达深度上限时标记 `truncated=true`，深度超过 `max_depth` 不再扩展。根不存在、过期、跨作用域或尚未发布统一返回 `found=false`，不泄露对象存在性；缺失引用不会由时间或 payload 猜测。每个索引请求复用结构化查询的 tenant/site、参数绑定、扫描预算和单实例共享许可，总期限 15 秒。
+
+200 响应包含 `schema_version=3`、管理 `request_id`、固定作用域、`root_event_id`、请求方向/上限、`found`、`truncated`、`as_of`、`index_watermark`、`has_gaps`、`pending_segments`、可空 `scanned_rows`/`scanned_bytes` 及 `nodes`。节点只含结构化搜索的脱敏 `SearchEventSummary`、相对 `depth` 和 `direction`；不含 `payload_json`、证据正文、存储地址、密钥或授权上下文。响应不表示跨页冻结快照，也不替代请求、模型、案件、保留或证据端点的重新鉴权。
+
+每次认证尝试追加 `console.causality.read` 管理事件：成功为 `PASS/CONTROL_CAUSALITY_READ`，无效计划、容量或确定性预算拒绝为 `DENY`，超时/索引/健康故障为 `ERROR`。通过计划后的审计携带独立用途域 HMAC `query_digest`，原始根 ID、窗口、方向和节点限制不写入 journal；计划解析失败可省略摘要。审计写入失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，响应统一 `Cache-Control: private, no-store`。该端点只提供有界调查摘要，不提供自然语言编译、无上限完整图、回放、导出、证据读取或业务权限。
+
+部署先升级能够识别 `console.causality.read` 的管理 journal 发布器，再启用路由；无新增迁移或依赖。控制台当前仍使用已加载事件集合的即时邻域，后续可在保持显式提交和角色边界的前提下接入该端点。

@@ -27,6 +27,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.grant.read"
             | "console.binding.read"
             | "console.query.executed"
+            | "console.causality.read"
             | "console.case.read"
             | "console.case.list"
             | "console.evidence.access.read"
@@ -107,6 +108,9 @@ impl AccessPayload {
         if event.event_type == "console.query.executed" {
             self.validate_search_reason()?;
         }
+        if event.event_type == "console.causality.read" {
+            self.validate_causality_reason()?;
+        }
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
             "console.auth.login" => self.reason_code == "CONTROL_OIDC_LOGIN_STARTED",
@@ -146,7 +150,10 @@ impl AccessPayload {
         for reference in &event.evidence_refs {
             valid_prefixed_v7(reference, "artifact_")?;
         }
-        let is_query = event.event_type == "console.query.executed";
+        let is_query = matches!(
+            event.event_type.as_str(),
+            "console.query.executed" | "console.causality.read"
+        );
         let is_read = event.event_type == "evidence.read";
         if self
             .query_digest
@@ -215,6 +222,35 @@ impl AccessPayload {
                     | "CONTROL_QUERY_TIMEOUT"
                     | "CONTROL_INDEX_UNAVAILABLE"
                     | "CONTROL_HEALTH_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
+    }
+
+    fn validate_causality_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_CAUSALITY_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_CAUSALITY_REQUEST_INVALID"
+                    | "CONTROL_QUERY_CAPACITY_EXHAUSTED"
+                    | "CONTROL_QUERY_BUDGET_EXCEEDED"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_CAUSALITY_TIMEOUT"
+                    | "CONTROL_CAUSALITY_INDEX_UNAVAILABLE"
+                    | "CONTROL_CAUSALITY_HEALTH_UNAVAILABLE"
             ),
             _ => false,
         };
@@ -364,9 +400,8 @@ impl AccessPayload {
             | ("console.health.read", "GET", "/control/v1/audit/health")
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
-            | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests") => {
-                [false; 9]
-            }
+            | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests")
+            | ("console.causality.read", "POST", "/control/v1/causality") => [false; 9],
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")
             | ("console.events.read", "GET", "/control/v1/requests/{request_id}/events")
@@ -463,7 +498,8 @@ impl AccessPayload {
             | "console.model.read"
             | "console.case.read"
             | "console.evidence.hold.read"
-            | "console.query.executed" => true,
+            | "console.query.executed"
+            | "console.causality.read" => true,
             _ => event.evidence_refs.is_empty(),
         };
         if valid {

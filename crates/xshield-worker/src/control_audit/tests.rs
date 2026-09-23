@@ -157,6 +157,25 @@ fn case_listing_publishes_only_scoped_access_facts() {
 }
 
 #[test]
+fn causality_audit_contract_requires_a_redacted_query_digest() {
+    let mut value = event();
+    value["event_type"] = "console.causality.read".into();
+    value["payload"]["method"] = "POST".into();
+    value["payload"]["path"] = "/control/v1/causality".into();
+    value["payload"]["target_case_id"] = Value::Null;
+    value["payload"]["reason_code"] = "CONTROL_CAUSALITY_READ".into();
+    value["payload"]["query_digest"] = "a".repeat(64).into();
+    value["evidence_refs"] = json!([]);
+    assert!(index(&value).is_ok());
+
+    value["payload"]["query_digest"] = Value::Null;
+    rejected(&value, "causality success without digest");
+    value["payload"]["outcome"] = "DENY".into();
+    value["payload"]["reason_code"] = "CONTROL_CAUSALITY_REQUEST_INVALID".into();
+    assert!(index(&value).is_ok());
+}
+
+#[test]
 fn oidc_session_audit_contract_is_fixed_and_does_not_index_credentials() {
     for (kind, method, path, reason, subject) in [
         (

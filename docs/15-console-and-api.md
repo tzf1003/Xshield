@@ -39,6 +39,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | 方法与路径 | 用途 |
 |---|---|
 | POST /control/v1/search | 结构化 QueryPlan，返回游标和水位 |
+| POST /control/v1/causality | 固定窗口内有界多跳因果摘要 |
 | GET /control/v1/requests/{request_id} | 聚合摘要、阶段、覆盖和关联 |
 | GET /control/v1/requests/{request_id}/events | 不可变事件分页 |
 | GET /control/v1/requests/{request_id}/evidence | 作用域内证据 manifest 分页，不读取内容 |
@@ -101,6 +102,8 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 
 结构化检索支持 `share_grant_id` 精确定位已发布的 `share.issued` 脱敏事件；ID 按 `ShareGrantId` 校验，使用 Investigator 既有固定范围与查询审计，不读取或返回分享 bearer 凭证。
 
+服务端因果查询 `POST /control/v1/causality` 要求 Investigator 和管理 Bearer，固定接受 UTC 整秒窗口、根 `ev_`、方向及 1–4 跳/1–16 节点的上限。结果只投影已发布的脱敏事件摘要，按记录的 `cause_event_ids` 有界遍历前驱/后继，附带水位、缺口与扫描统计；根未命中与索引缺口保持同构的 `found=false`/健康字段语义。请求不读取 payload 或证据正文，审计事件为 `console.causality.read`，成功或计划后的失败只保存 HMAC 查询摘要。当前控制台 UI 的即时因果卡片仍基于已加载事件；接入该端点不改变详情、原文、回放或业务资格权限。
+
 `web/console` 以 React + TypeScript 实现请求 ID → 摘要 → 事件时间线 → 证据目录/单项元数据、模型调用 ID → 脱敏生命周期 → 证据元数据 → 仅预填模型调用 ID 的历史检索、访问申请 ID → 历史申请/决策元数据 → 仅预填申请 ID 的历史检索、固定 UTC 窗口 → 模型调用分页发现、校准报告 ID → 受限冻结元数据、资格 ID → 账本快照 → 身份绑定/来源请求，以及结构化事件检索的可交互闭环。模型列表和详情均调用独立的 Observer API；校准报告详情独立要求 `AuditAdministrator`；列表行仅为窗口内最新可见状态，点击 `mdl_` 后仍重新鉴权并写独立详情审计。结构化检索调用 29.14 的 `POST /control/v1/search`，通常要求 Investigator；当计划含 `calibration_report_id` 或 `evidence_hold_id` 时，同一主体还必须在固定 tenant/site 持有 `AuditAdministrator`。主体引用可精确筛选已发布历史，但结果不回显该值；其密钥化 query_digest 由服务端生成，浏览器只校验不透明摘要格式。模型、访问申请或保留锁历史预填不会提交检索，操作者仍须填写时间窗并以 Investigator 身份独立提交；三个角色分别校验，Investigator 不隐含 Observer 或 AuditAdministrator。范围由首次成功响应确认并在同一会话后续响应中逐一校验。事件、证据和模型列表分页显式触发，每页替换当前页。
 
 控制台还提供 AuditAdministrator 专用的“审计发布状态”：操作者手动调用 29.5 的 `GET /control/v1/audit/health`，读取当前配置 audit journal 到索引目标的单次发布快照。界面展示 `as_of`、目标/表、元数据保留期、关闭段和字节、已发布/待发布/未封存段、缺口及连续水位；不自动轮询。每次读取由服务端重新鉴权并记录 `console.health.read`，客户端重新校验 tenant/site，401、范围偏差和晚到响应都清空页面状态。此处仅用于发布观察，不表达业务准入、全部 Outbox 状态或系统整体健康。
@@ -109,7 +112,7 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 
 检索使用原生表单输入 UTC 整秒半开时间窗（1970 至 2300，最长 31 天）、1–1000 条页大小及事件时间升/降序。最多 8 个 allowlist 条件按同事件 AND 组合，包含 request/event/trace/直接因果/grant/auth binding/case/artifact/calibration-report/model-call/evidence-access-request/evidence-hold/share-grant ID、`subject_ref`、五类精确文本、outcome 和整数基点置信度上限；数值阈值不匹配空置信度。校准报告 ID 只定位固定的报告发布、报告正文保留维护及 `console.calibration.report.read` 历史，不提供报告正文、样本、阈值或读取授权；它要求同一主体同时具备 Investigator 和 AuditAdministrator。模型调用 ID 只定位固定的模型生命周期与 `console.model.read` 历史；它不返回模型详情或证据，也不把 Investigator 提升为 Observer。访问申请 ID 只定位固定的申请、决策与 `console.evidence.access.read` 历史；它不返回原文或授予审批/读取资格。界面展示已提交计划、服务端查询摘要、管理请求 ID、实际扫描行/字节和索引水位/pending/gap，区分统计未知与 0。分页冻结已提交计划；编辑任何查询条件使旧结果、详情、摘要和游标失效，后续新发布或到期记录仍可能改变分页可见集合。
 
-搜索事件和请求时间线保留 nullable 请求、阶段、结果、证明、置信度、模型版本与强类型模型调用引用，并原样显示 RFC3339 微秒时间。结构化搜索事件额外投影并校验 32 位 `trace_id`；详情可准备同 Trace 检索，旧服务端尚未回传该字段时不显示入口。模型引用可打开既有模型详情；该跳转继续由 `Observer` 端点重新鉴权并写独立 `console.model.read` 审计，检索权限不扩大详情或证据访问。空结果与索引完整性独立呈现；水位只覆盖配置日志源，不能推断独立 Outbox 已追平。已知请求和 artifact 引用也可显式打开对应详情，仍由各端点重新鉴权。事件与模型生命周期中已记录的直接前驱 ID 可点选以准备精确事件检索；已选事件也可准备按其前驱 ID 查找直接后继的检索；trace 入口只预填同 Trace 条件。控制台还可在当前已加载事件集合内，沿已记录的 `cause_event_ids` 展示最多 4 跳、每方向最多 16 个节点；未载入引用只准备精确 `event_id` 检索。所有入口均不自动提交，仍须填写 UTC 时间窗；该局部视图不扩大 Investigator 搜索、Observer 详情或证据读取权限，也不推断缺失边或跨作用域关系。客户端只展示脱敏事件投影，payload、存储地址、密钥和原文保持在展示边界之外。跨页完整关联图、资格/身份全链路、自然语言查询和回放继续迭代。
+搜索事件和请求时间线保留 nullable 请求、阶段、结果、证明、置信度、模型版本与强类型模型调用引用，并原样显示 RFC3339 微秒时间。结构化搜索事件额外投影并校验 32 位 `trace_id`；详情可准备同 Trace 检索，旧服务端尚未回传该字段时不显示入口。模型引用可打开既有模型详情；该跳转继续由 `Observer` 端点重新鉴权并写独立 `console.model.read` 审计，检索权限不扩大详情或证据访问。空结果与索引完整性独立呈现；水位只覆盖配置日志源，不能推断独立 Outbox 已追平。已知请求和 artifact 引用也可显式打开对应详情，仍由各端点重新鉴权。事件与模型生命周期中已记录的直接前驱 ID 可点选以准备精确事件检索；已选事件也可准备按其前驱 ID 查找直接后继的检索；trace 入口只预填同 Trace 条件。控制台还可在当前已加载事件集合内，沿已记录的 `cause_event_ids` 展示最多 4 跳、每方向最多 16 个节点；未载入引用只准备精确 `event_id` 检索。服务端 `POST /control/v1/causality` 另提供固定窗口内最多 4 跳/16 个非根节点的有界摘要遍历，沿已发布引用返回脱敏事件并独立审计；当前 UI 局部视图仍不自动提交或递归展开。所有入口均不扩大 Investigator 搜索、Observer 详情或证据读取权限，也不推断缺失边或跨作用域关系。客户端只展示脱敏事件投影，payload、存储地址、密钥和原文保持在展示边界之外。跨页完整关联图、资格/身份全链路、自然语言查询和回放继续迭代。
 
 摘要保留缺失、未知和未确认语义；`complete` 与索引 gap/pending 独立呈现，分别披露摘要/事件观察时间与配置日志源水位。事件展示证明类型、置信度可用性、修订和证据引用；确定性规则不填造置信度。目录只展示采集状态、保真度、字节数、分级及期限，`found=false` 统一为“当前不可用”；存储地址、密钥引用和密文摘要不进入展示 DTO。
 

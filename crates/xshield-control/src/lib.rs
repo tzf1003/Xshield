@@ -11,6 +11,7 @@ mod case_collection;
 mod case_holds;
 mod case_items;
 mod case_list;
+mod causality;
 mod evidence_access_inspection;
 mod evidence_access_list;
 mod identity;
@@ -3553,6 +3554,10 @@ pub fn router(control: ControlPlane) -> Router {
             search::SEARCH_PATH,
             post(search::handler).layer(DefaultBodyLimit::max(search::SEARCH_BODY_BYTES_MAX)),
         )
+        .route(
+            causality::PATH,
+            post(causality::handler).layer(DefaultBodyLimit::max(causality::BODY_BYTES_MAX)),
+        )
         .route(REQUEST_EVIDENCE_PATH, get(request_evidence_handler))
         .route(ARTIFACT_PATH, get(artifact_handler))
         .route(EVIDENCE_CONTENT_PATH, get(evidence_content_handler))
@@ -3821,6 +3826,7 @@ enum EndpointResult {
     RequestEvents(RequestEventsResponse),
     ModelCall(ModelCallResponse),
     Search(search::SearchResponse),
+    Causality(causality::CausalityResponse),
     RequestEvidence(RequestEvidenceResponse),
     Artifact(ArtifactResponse),
     Case(StatusCode, CreateCaseResponse),
@@ -3838,6 +3844,7 @@ impl IntoResponse for EndpointResult {
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::ModelCall(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Search(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::Causality(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Artifact(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Case(status, response) => (status, Json(response)).into_response(),
@@ -4539,6 +4546,7 @@ mod tests {
     mod case_holds_postgres;
     mod case_items;
     mod case_list;
+    mod causality;
     mod evidence_access_inspection;
     mod evidence_access_list;
     mod evidence_lifecycle;
