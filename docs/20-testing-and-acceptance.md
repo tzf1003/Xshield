@@ -78,7 +78,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 查询回归覆盖 `audit_events_active` 和通过物化视图填充的 `events_by_time_active`：租户/站点隔离、可空 LowCardinality 字段、`ALLOW`、微秒及同时间戳 keyset 双向分页、闭开时间窗口、全部类型过滤器与同事件 AND 语义、重复事件合并、最早期限优先及物理 TTL 清理前隐藏过期行。查询使用只获两个 active 视图 `SELECT` 的独占测试账号，同时断言直接读取两张底表返回权限拒绝。
 
-案件/证据过滤回归包含实际契约的事件/阶段与目标字段、evidence_refs 成员、失败管理目标、空/缺失/嵌套字段、无关类型/错配阶段、作用域和同事件 AND，以及双向 keyset 分页。模型调用过滤回归固定六类 `model.*` 生命周期与 `console.model.read` 的两个 JSON 目标键；访问申请过滤回归固定三类 `evidence.access.*` 申请/决策事件与 `console.evidence.access.read` 的两个 JSON 目标键；保留锁的真实 ClickHouse 用例固定创建/释放事务事件与管理写入事件的 `hold_id`/`target_hold_id` 键、事件族/阶段边界、作用域和双向 keyset 分页。控制层 `reference_search` 测试验证规范 ID、严格/重复字段、8 项预算、原有摘要兼容、每个 ID 与过滤顺序的游标绑定、返回脱敏和计划摘要审计。
+案件/证据过滤回归包含实际契约的事件/阶段与目标字段、evidence_refs 成员、失败管理目标、空/缺失/嵌套字段、无关类型/错配阶段、作用域和同事件 AND，以及双向 keyset 分页。资格/身份过滤回归固定 `grant.issued`、`response_grant.issued`、`share.issued` 与 `console.grant.read`、`console.binding.read` 的目标键，并隔离错配阶段和伪造事件类型；模型调用过滤回归固定六类 `model.*` 生命周期与 `console.model.read` 的两个 JSON 目标键；访问申请过滤回归固定三类 `evidence.access.*` 申请/决策事件与 `console.evidence.access.read` 的两个 JSON 目标键；保留锁的真实 ClickHouse 用例固定创建/释放事务事件与管理写入事件的 `hold_id`/`target_hold_id` 键、事件族/阶段边界、作用域和双向 keyset 分页。控制层 `reference_search` 测试验证规范 ID、严格/重复字段、8 项预算、原有摘要兼容、每个 ID 与过滤顺序的游标绑定、返回脱敏和计划摘要审计。
 
 发布回归从加密 journal 与签名清单开始，验证真实 `FixedString` 编码、两张物理表的精确摘要和微秒时间读回、同步确认后的水位提交与 checkpoint 重用；继续追加同 event_id 的不同内容时，发布器必须返回完整性冲突，保留原水位并显示待投递段。
 

@@ -16,6 +16,8 @@ use xshield_worker::{
 
 const CASE: &str = "case_018f2a3b-4c5d-7000-8000-000000000951";
 const ACCESS_REQUEST: &str = "access_018f2a3b-4c5d-7000-8000-000000000952";
+const TARGET_GRANT_ID: &str = "grant_018f2a3b-4c5d-7000-8000-000000000953";
+const TARGET_BINDING_ID: &str = "auth_018f2a3b-4c5d-7000-8000-000000000954";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-000000000955";
 
 struct AccessJournal {
@@ -278,7 +280,7 @@ fn append_access_contracts(control: &ControlPlane) {
             &[],
             None,
             None,
-            Some(&GrantId::parse("grant_018f2a3b-4c5d-7000-8000-000000000953").unwrap()),
+            Some(&GrantId::parse(TARGET_GRANT_ID).unwrap()),
             None,
             None,
             None,
@@ -300,9 +302,7 @@ fn append_access_contracts(control: &ControlPlane) {
             None,
             None,
             None,
-            Some(
-                &crate::AuthBindingId::parse("auth_018f2a3b-4c5d-7000-8000-000000000954").unwrap(),
-            ),
+            Some(&crate::AuthBindingId::parse(TARGET_BINDING_ID).unwrap()),
             None,
             None,
         )
@@ -793,6 +793,43 @@ async fn assert_reference_search_http(journal: &AccessJournal, client: &Client) 
             }
         }
     }
+    for (kind, target, target_field) in [
+        ("grant_id", TARGET_GRANT_ID, "target_grant_id"),
+        ("auth_binding_id", TARGET_BINDING_ID, "target_binding_id"),
+    ] {
+        let expected = journal
+            .events
+            .iter()
+            .filter(|event| event["payload"][target_field] == target)
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), 1);
+        let payload = json!({
+            "schema_version": 3,
+            "start": start,
+            "end": end,
+            "sort": "occurred_at_asc",
+            "limit": 1,
+            "filters": [{"kind": kind, "value": target}],
+        });
+        let response = app
+            .clone()
+            .oneshot(search_http_request(&payload))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        query_count += 1;
+        assert_eq!(body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(body["events"][0]["event_id"], expected[0]["event_id"]);
+        assert!(body["events"][0].get(target_field).is_none());
+        assert!(!body["events"][0].to_string().contains(target));
+        assert_eq!(body["truncated"], false);
+        assert!(body["next_cursor"].is_null());
+        assert!(!body["index_watermark"].is_null());
+    }
     let mut expected_hold = journal
         .events
         .iter()
@@ -859,7 +896,11 @@ async fn assert_reference_search_http(journal: &AccessJournal, client: &Client) 
         let encoded = event.to_string();
         assert!(!encoded.contains(CASE));
         assert!(!encoded.contains(MISSING_ARTIFACT_ID));
+        assert!(!encoded.contains(TARGET_GRANT_ID));
+        assert!(!encoded.contains(TARGET_BINDING_ID));
         assert!(!encoded.contains(HOLD));
+        assert!(event["payload"]["target_grant_id"].is_null());
+        assert!(event["payload"]["target_binding_id"].is_null());
     }
     assert_eq!(
         searches.publish(client).await.published_events,

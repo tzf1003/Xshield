@@ -3027,8 +3027,12 @@ mod tests {
         for fragment in [
             "WHERE tenant_id = 'tenant_a' AND site_id = 'site_b'",
             "occurred_at >= fromUnixTimestamp64Micro(1000000) AND occurred_at < fromUnixTimestamp64Micro(61000000)",
-            "AND ((event_type IN ('grant.issued','response_grant.issued') AND JSONExtractString(payload_json,'grant_id') = 'grant_018f2a3b-4c5d-7000-8000-000000000001') OR (event_type = 'share.issued' AND JSONExtractString(payload_json,'issuer_grant_id') = 'grant_018f2a3b-4c5d-7000-8000-000000000001'))",
-            "AND ((event_type IN ('session.created','binding.created','identity.refreshed','epoch.changed','binding.revoked','grant.issued','response_grant.issued') AND JSONExtractString(payload_json,'binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002') OR (event_type = 'share.issued' AND JSONExtractString(payload_json,'issuer_binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002'))",
+            "AND ((event_type IN ('grant.issued','response_grant.issued') AND JSONExtractString(payload_json,'grant_id') = 'grant_018f2a3b-4c5d-7000-8000-000000000001')",
+            "OR (event_type = 'share.issued' AND JSONExtractString(payload_json,'issuer_grant_id') = 'grant_018f2a3b-4c5d-7000-8000-000000000001')",
+            "OR (stage = 'control_access' AND event_type = 'console.grant.read' AND JSONExtractString(payload_json,'target_grant_id') = 'grant_018f2a3b-4c5d-7000-8000-000000000001')",
+            "AND ((event_type IN ('session.created','binding.created','identity.refreshed','epoch.changed','binding.revoked','grant.issued','response_grant.issued') AND JSONExtractString(payload_json,'binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002')",
+            "OR (event_type = 'share.issued' AND JSONExtractString(payload_json,'issuer_binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002')",
+            "OR (stage = 'control_access' AND event_type = 'console.binding.read' AND JSONExtractString(payload_json,'target_binding_id') = 'auth_018f2a3b-4c5d-7000-8000-000000000002')",
             "ORDER BY occurred_at DESC,event_id DESC LIMIT 3",
         ] {
             assert!(sql.contains(fragment), "missing query fragment: {fragment}");

@@ -44,7 +44,7 @@ Jev 离线评估已支持 Score：操作员提交 2–10 档有序描述，适�
 
 `POST /control/v1/search` 已支持 `evidence_hold_id=ev_…` 检索固定保留锁创建、释放及相应管理尝试历史。该条件要求同一主体同时持有 Investigator 与 AuditAdministrator；控制台保留历史只预填 ID，不自动提交，时间窗仍由操作者填写。查询只返回脱敏历史摘要，访问审计仅保存计划摘要，不改变保留、详情或原文权限。完整边界见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。
 
-`POST /control/v1/search` 已支持按 `grant_id`、`auth_binding_id` 强类型过滤身份与资格发行事件，并定位分享的来源资格和绑定。复用 Investigator 权限、固定作用域、有界时间窗、签名游标与独立访问审计；结果为已发布历史事实，具体字段映射和可见性边界见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。
+`POST /control/v1/search` 已支持按 `grant_id`、`auth_binding_id` 强类型过滤身份与资格发行事件、分享来源及对应的管理详情读取历史。复用 Investigator 权限、固定作用域、有界时间窗、签名游标与独立访问审计；结果为已发布历史事实，具体字段映射和可见性边界见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。管理详情本身仍须单独具备 Observer 权限。
 
 `GET /control/v1/grants/{grant_id}` 提供 Observer 可读的资格及当前绑定账本快照、数据库时间过期标志和来源请求/事件引用。过期、撤销和代际变化仍可调查；所有返回经过 `console.grant.read` 耐久审计，字段与部署权限见 [29.19](docs/29-api-endpoint-catalog.md#2919-已实现的资格账本调查契约)。
 

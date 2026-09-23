@@ -480,6 +480,51 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
     let mut duplicate = rows[0].clone();
     duplicate.retention_expires_at += TimeDelta::hours(1);
     rows.push(duplicate);
+    for (sequence, kind, stage, payload) in [
+        (
+            222,
+            "console.grant.read",
+            "control_access",
+            serde_json::json!({"target_grant_id": GRANT}).to_string(),
+        ),
+        (
+            223,
+            "console.binding.read",
+            "control_access",
+            serde_json::json!({"target_binding_id": BINDING}).to_string(),
+        ),
+        (
+            224,
+            "console.grant.read",
+            "case_management",
+            serde_json::json!({"target_grant_id": GRANT}).to_string(),
+        ),
+        (
+            225,
+            "console.binding.read",
+            "case_management",
+            serde_json::json!({"target_binding_id": BINDING}).to_string(),
+        ),
+        (
+            226,
+            "console.grant.read.spoofed",
+            "control_access",
+            serde_json::json!({"target_grant_id": GRANT}).to_string(),
+        ),
+        (
+            227,
+            "console.binding.read.spoofed",
+            "control_access",
+            serde_json::json!({"target_binding_id": BINDING}).to_string(),
+        ),
+    ] {
+        let mut row = rows[0].clone();
+        row.event_id = event_id(sequence);
+        row.event_type = kind;
+        row.stage = stage;
+        row.payload_json = payload;
+        rows.push(row);
+    }
     let mut outside = rows[0].clone();
     outside.event_id = event_id(220);
     outside.occurred_at = start + TimeDelta::seconds(2);
@@ -504,8 +549,8 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
     for table in ["audit_events", "events_by_time"] {
         let config = query_config(table);
         for (filters, ids) in [
-            (vec![grant.clone()], vec![201, 202, 203]),
-            (vec![binding.clone()], (201..=208).collect()),
+            (vec![grant.clone()], vec![201, 202, 203, 222]),
+            (vec![binding.clone()], (201..=208).chain([223]).collect()),
             (vec![grant.clone(), binding.clone()], vec![201, 202, 203]),
             (
                 vec![
@@ -576,7 +621,7 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
         }
         for sort in [QuerySort::OccurredAtAsc, QuerySort::OccurredAtDesc] {
             let plan = QueryPlan::new(window, vec![binding.clone()], sort, 1).unwrap();
-            let mut expected: Vec<_> = (201..=208).collect();
+            let mut expected: Vec<_> = (201..=208).chain([223]).collect();
             if sort == QuerySort::OccurredAtDesc {
                 expected.reverse();
             }

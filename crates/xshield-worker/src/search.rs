@@ -960,14 +960,18 @@ async fn execute_query(
                 "((event_type IN ('grant.issued','response_grant.issued') \
                   AND JSONExtractString(payload_json,'grant_id') = ?) \
                   OR (event_type = 'share.issued' \
-                  AND JSONExtractString(payload_json,'issuer_grant_id') = ?))",
+                  AND JSONExtractString(payload_json,'issuer_grant_id') = ?) \
+                  OR (stage = 'control_access' AND event_type = 'console.grant.read' \
+                  AND JSONExtractString(payload_json,'target_grant_id') = ?))",
             ),
             QueryFilter::AuthBindingId(_) => sql.push_str(
                 "((event_type IN ('session.created','binding.created','identity.refreshed',\
                   'epoch.changed','binding.revoked','grant.issued','response_grant.issued') \
                   AND JSONExtractString(payload_json,'binding_id') = ?) \
                   OR (event_type = 'share.issued' \
-                  AND JSONExtractString(payload_json,'issuer_binding_id') = ?))",
+                  AND JSONExtractString(payload_json,'issuer_binding_id') = ?) \
+                  OR (stage = 'control_access' AND event_type = 'console.binding.read' \
+                  AND JSONExtractString(payload_json,'target_binding_id') = ?))",
             ),
             QueryFilter::CaseId(_) => sql.push_str(
                 "((tuple(stage,event_type) IN (('case_management','case.created'),\
@@ -1059,8 +1063,14 @@ async fn execute_query(
         query = match filter {
             QueryFilter::RequestId(value) => query.bind(value.as_str()),
             QueryFilter::EventId(value) => query.bind(value.as_str()),
-            QueryFilter::GrantId(value) => query.bind(value.as_str()).bind(value.as_str()),
-            QueryFilter::AuthBindingId(value) => query.bind(value.as_str()).bind(value.as_str()),
+            QueryFilter::GrantId(value) => query
+                .bind(value.as_str())
+                .bind(value.as_str())
+                .bind(value.as_str()),
+            QueryFilter::AuthBindingId(value) => query
+                .bind(value.as_str())
+                .bind(value.as_str())
+                .bind(value.as_str()),
             QueryFilter::CaseId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::ArtifactId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::CalibrationReportId(value) => {
