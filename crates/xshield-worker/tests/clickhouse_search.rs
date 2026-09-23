@@ -7,8 +7,8 @@ use std::{env, panic::resume_unwind};
 use uuid::Uuid;
 use xshield_core::{
     domain::{
-        ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId, SiteId, SubjectRef,
-        TenantId, TraceId,
+        ArtifactId, AuthBindingId, CaseId, EventId, GrantId, RequestId, ShareGrantId, SiteId,
+        SubjectRef, TenantId, TraceId,
     },
     identity::UnixSeconds,
     query::{
@@ -410,6 +410,7 @@ async fn insert_events(client: &Client) -> (QueryWindow, Vec<TestEvent>) {
 async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
     const GRANT: &str = "grant_018f2a3b-4c5d-7000-8000-000000000201";
     const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-000000000201";
+    const SHARE: &str = "share_018f2a3b-4c5d-7000-8000-000000000201";
     let now_micros: i64 = checked(
         writer
             .query("SELECT toUnixTimestamp64Micro(now64(6))")
@@ -421,8 +422,12 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
     let start = DateTime::from_timestamp(now.timestamp() - 60, 0).unwrap();
     let expires = now + TimeDelta::hours(1);
     let direct = serde_json::json!({"grant_id": GRANT, "binding_id": BINDING}).to_string();
-    let issuer =
-        serde_json::json!({"issuer_grant_id": GRANT, "issuer_binding_id": BINDING}).to_string();
+    let issuer = serde_json::json!({
+        "issuer_grant_id": GRANT,
+        "issuer_binding_id": BINDING,
+        "share_id": SHARE,
+    })
+    .to_string();
     let mut rows = Vec::new();
     for (sequence, kind) in [
         (201, "grant.issued"),
@@ -447,13 +452,21 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
     }
     // Equal JSON field names are meaningful only in the declared event family.
     for (sequence, kind, payload) in [
-        (209, "stage.completed", direct.clone()),
+        (
+            209,
+            "stage.completed",
+            serde_json::json!({"share_id": SHARE}).to_string(),
+        ),
         (210, "case.closed", issuer.clone()),
         (211, "grant.issued", issuer.clone()),
         (212, "share.issued", direct.clone()),
         (213, "grant.issued", "{}".to_owned()),
         (214, "share.issued", "{}".to_owned()),
-        (215, "grant.issued.spoofed", direct.clone()),
+        (
+            215,
+            "share.issued.spoofed",
+            serde_json::json!({"share_id": SHARE}).to_string(),
+        ),
         (
             221,
             "grant.issued",
@@ -466,7 +479,7 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
         row.payload_json = payload;
         rows.push(row);
     }
-    let mut other_tenant = rows[0].clone();
+    let mut other_tenant = rows[2].clone();
     other_tenant.event_id = event_id(216);
     other_tenant.tenant_id = "tenant_other";
     rows.push(other_tenant);
@@ -606,6 +619,7 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
     .unwrap();
     let grant = QueryFilter::GrantId(GrantId::parse(GRANT).unwrap());
     let binding = QueryFilter::AuthBindingId(AuthBindingId::parse(BINDING).unwrap());
+    let share = QueryFilter::ShareGrantId(ShareGrantId::parse(SHARE).unwrap());
     let subject = QueryFilter::SubjectRef(SubjectRef::parse("operator-1").unwrap());
     let tenant = TenantId::parse("tenant_linkage").unwrap();
     let site = SiteId::parse("site_linkage").unwrap();
@@ -614,6 +628,7 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
         for (filters, ids) in [
             (vec![grant.clone()], vec![201, 202, 203, 222]),
             (vec![binding.clone()], (201..=208).chain([223]).collect()),
+            (vec![share.clone()], vec![203]),
             (vec![subject.clone()], vec![228, 229, 230, 231, 232]),
             (
                 vec![
@@ -684,6 +699,26 @@ async fn assert_grant_binding_search(writer: &Client, reader: &Client) {
                     &TenantId::parse(tenant).unwrap(),
                     &SiteId::parse(site).unwrap(),
                     &plan,
+                    None,
+                )
+                .await,
+            );
+            assert_ids(&result, &expected);
+        }
+        let share_plan =
+            QueryPlan::new(window, vec![share.clone()], QuerySort::OccurredAtAsc, 100).unwrap();
+        for (tenant, site, expected) in [
+            ("tenant_other", "site_linkage", vec![216]),
+            ("tenant_linkage", "site_other", vec![217]),
+            ("tenant_other", "site_other", vec![]),
+        ] {
+            let result = queried(
+                query_audit_events(
+                    &config,
+                    reader,
+                    &TenantId::parse(tenant).unwrap(),
+                    &SiteId::parse(site).unwrap(),
+                    &share_plan,
                     None,
                 )
                 .await,

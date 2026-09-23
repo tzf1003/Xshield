@@ -139,6 +139,7 @@ export const calibrationReportPattern = new RegExp(`^calr_${uuid}${endOfInput}`)
 export const eventPattern = new RegExp(`^ev_${uuid}${endOfInput}`);
 export const grantPattern = new RegExp(`^grant_${uuid}${endOfInput}`);
 export const bindingPattern = new RegExp(`^auth_${uuid}${endOfInput}`);
+export const sharePattern = new RegExp(`^share_${uuid}${endOfInput}`);
 export const cursorPattern = /^[A-Za-z0-9_.-]{1,160}$/;
 
 export function ensure(condition: unknown): asserts condition {

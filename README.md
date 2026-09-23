@@ -48,6 +48,8 @@ Jev 离线评估已支持 Score：操作员提交 2–10 档有序描述，适�
 
 `POST /control/v1/search` 已支持按 `grant_id`、`auth_binding_id` 强类型过滤身份与资格发行事件、分享来源及对应的管理详情读取历史。复用 Investigator 权限、固定作用域、有界时间窗、签名游标与独立访问审计；结果为已发布历史事实，具体字段映射和可见性边界见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。管理详情本身仍须单独具备 Observer 权限。
 
+`POST /control/v1/search` 另支持强类型 `share_grant_id=share_…` 精确定位固定 `share.issued` 事件中的分享签发记录。该过滤器沿用 Investigator 的固定作用域、有界时间窗、签名游标和访问审计，只返回脱敏事件摘要；不会返回分享 bearer 凭证或扩大权限。
+
 受限检索现支持 `subject_ref` 精确筛选身份与管理历史中的直接主体引用；输入有 256 UTF-8 字节上限且拒绝控制字符，服务端只匹配固定顶层引用字段。结果不回显查询值，计划摘要使用用途隔离的 HMAC 处理该低熵值；审计不保存过滤条件，仍保留标准调用者主体引用与计划摘要。检索沿用 Investigator 的固定 tenant/site 范围，不授予详情或证据读取权限。完整字段映射见 [29.14](docs/29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。
 
 `GET /control/v1/grants/{grant_id}` 提供 Observer 可读的资格及当前绑定账本快照、数据库时间过期标志和来源请求/事件引用。过期、撤销和代际变化仍可调查；所有返回经过 `console.grant.read` 耐久审计，字段与部署权限见 [29.19](docs/29-api-endpoint-catalog.md#2919-已实现的资格账本调查契约)。

@@ -4,7 +4,7 @@ use openssl::sha::sha256;
 use xshield_core::{
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, SubjectRef, TraceId,
+        GrantId, ModelCallId, ShareGrantId, SubjectRef, TraceId,
     },
     query::QueryFilter,
 };
@@ -16,6 +16,7 @@ const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000104";
 const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-000000000105";
 const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000106";
 const MODEL_CALL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000106";
+const SHARE: &str = "share_018f2a3b-4c5d-7000-8000-000000000109";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-000000000107";
 const PREDECESSOR: &str = "ev_018f2a3b-4c5d-7000-8000-000000000108";
 const TRACE: &str = "018f2a3b4c5d70008000000000000003";
@@ -54,6 +55,12 @@ fn evidence_hold_reference_payload() -> Value {
 fn model_call_reference_payload() -> Value {
     let mut payload = search_payload();
     payload["filters"] = json!([{"kind": "model_call_id", "value": MODEL_CALL}]);
+    payload
+}
+
+fn share_reference_payload() -> Value {
+    let mut payload = search_payload();
+    payload["filters"] = json!([{"kind": "share_grant_id", "value": SHARE}]);
     payload
 }
 
@@ -575,6 +582,7 @@ async fn reference_search_rejects_invalid_ids_and_roles_before_index_access() {
         ("evidence_hold_id", HOLD, ARTIFACT),
         ("evidence_access_request_id", ACCESS, ARTIFACT),
         ("model_call_id", MODEL_CALL, ARTIFACT),
+        ("share_grant_id", SHARE, ARTIFACT),
         ("caused_by_event_id", PREDECESSOR, ARTIFACT),
     ] {
         for invalid in [
@@ -1097,6 +1105,48 @@ async fn evidence_access_search_cursor_binds_the_exact_access_reference() {
     )
     .await;
     assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
+    fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn share_search_cursor_binds_the_exact_share_reference() {
+    let fixture = Fixture::new(10, ManagementRole::Investigator);
+    let payload = share_reference_payload();
+    let plan = serde_json::from_value::<SearchRequest>(payload.clone())
+        .unwrap()
+        .into_plan(1000)
+        .unwrap();
+    assert_eq!(
+        plan.filters(),
+        [QueryFilter::ShareGrantId(
+            ShareGrantId::parse(SHARE).unwrap()
+        )]
+    );
+    let position = xshield_worker::SearchPosition::new(
+        DateTime::from_timestamp_micros(20_123_456).unwrap(),
+        EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000001").unwrap(),
+    )
+    .unwrap();
+    let cursor = fixture
+        .control
+        .encode_search_cursor("operator-1", &plan, &position)
+        .unwrap();
+    let mut altered = payload;
+    altered["filters"][0]["value"] = json!(SHARE.replace("109", "110"));
+    altered["cursor"] = json!(cursor);
+    let body = response_json(
+        router(fixture.control)
+            .oneshot(search_http_request(&altered))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["error_code"], "CONTROL_CURSOR_INVALID");
+    let events = read_access_events(&fixture.access_directory);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "console.query.executed");
+    assert!(!events[0].to_string().contains(SHARE));
     fs::remove_dir_all(fixture.access_directory.parent().unwrap()).unwrap();
 }
 

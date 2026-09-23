@@ -11,6 +11,7 @@ import {
   artifactPattern,
   grantPattern,
   bindingPattern,
+  sharePattern,
   ensure,
   object,
   text,
@@ -59,6 +60,7 @@ const idPatterns = {
   evidence_access_request_id: accessPattern,
   evidence_hold_id: eventPattern,
   model_call_id: modelCallPattern,
+  share_grant_id: sharePattern,
 };
 export type SearchFilter =
   | { kind: keyof typeof idPatterns; value: string }

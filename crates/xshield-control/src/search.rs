@@ -21,7 +21,7 @@ use xshield_core::{
     admin::ManagementRole,
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, RequestId, SiteId, SubjectRef, TenantId, TraceId,
+        GrantId, ModelCallId, RequestId, ShareGrantId, SiteId, SubjectRef, TenantId, TraceId,
     },
     identity::UnixSeconds,
     query::{
@@ -433,6 +433,10 @@ fn query_plan_digest(plan: &QueryPlan, key: &[u8; 32]) -> Result<[u8; 32], ()> {
                 canonical.push_str("model_call_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::ShareGrantId(value) => {
+                canonical.push_str("share_grant_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::Text { field, value } => {
                 canonical.push_str(field.as_str());
                 canonical.push('=');
@@ -560,6 +564,9 @@ enum SearchFilterRequest {
     ModelCallId {
         value: String,
     },
+    ShareGrantId {
+        value: String,
+    },
     Text {
         field: SearchTextFieldRequest,
         value: String,
@@ -613,6 +620,9 @@ impl SearchFilterRequest {
                 .map_err(|_| ()),
             Self::ModelCallId { value } => ModelCallId::parse(value)
                 .map(QueryFilter::ModelCallId)
+                .map_err(|_| ()),
+            Self::ShareGrantId { value } => ShareGrantId::parse(value)
+                .map(QueryFilter::ShareGrantId)
                 .map_err(|_| ()),
             Self::Text { field, value } => Ok(QueryFilter::Text {
                 field: field.into_domain(),

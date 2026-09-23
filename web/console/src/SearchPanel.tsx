@@ -17,6 +17,7 @@ const fields = [
   ["evidence_access_request_id", "访问申请 ID"],
   ["evidence_hold_id", "保留锁 ID"],
   ["model_call_id", "模型调用 ID"],
+  ["share_grant_id", "分享资格 ID"],
   ["event_type", "事件类型"],
   ["stage", "阶段"],
   ["reason_code", "原因码"],

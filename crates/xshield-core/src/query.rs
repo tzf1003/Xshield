@@ -8,7 +8,7 @@
 use crate::{
     domain::{
         ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, RequestId, SubjectRef, TraceId,
+        GrantId, ModelCallId, RequestId, ShareGrantId, SubjectRef, TraceId,
     },
     identity::UnixSeconds,
 };
@@ -179,6 +179,9 @@ pub enum QueryFilter {
     /// Exact binding reference in identity or qualification issuance events.
     /// The caller's management scope is applied independently by the adapter.
     AuthBindingId(AuthBindingId),
+    /// Exact issued share reference in fixed share issuance events.
+    /// This locates redacted history and does not return the bearer credential.
+    ShareGrantId(ShareGrantId),
     /// Direct case reference in case facts or validated management attempts.
     /// This selects history independently of current case access permissions.
     CaseId(CaseId),
@@ -239,6 +242,7 @@ impl QueryFilter {
             | Self::EvidenceHoldId(_)
             | Self::EvidenceAccessRequestId(_)
             | Self::ModelCallId(_)
+            | Self::ShareGrantId(_)
             | Self::Outcome(_)
             | Self::ConfidenceAtMost(_) => Ok(()),
             Self::Text { value, .. } => {
@@ -373,7 +377,7 @@ mod tests {
     use crate::{
         domain::{
             ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-            EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, SubjectRef,
+            EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, ShareGrantId, SubjectRef,
         },
         identity::UnixSeconds,
     };
@@ -497,6 +501,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.filters(), [QueryFilter::CausedByEventId(event)]);
+    }
+
+    #[test]
+    fn share_grant_filter_uses_a_typed_issued_reference() {
+        let share = ShareGrantId::parse("share_018f2a3b-4c5d-7000-8000-000000000007").unwrap();
+        let plan = QueryPlan::new(
+            window(60),
+            vec![QueryFilter::ShareGrantId(share.clone())],
+            QuerySort::OccurredAtAsc,
+            1,
+        )
+        .unwrap();
+        assert_eq!(plan.filters(), [QueryFilter::ShareGrantId(share)]);
     }
 
     #[test]

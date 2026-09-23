@@ -1043,6 +1043,10 @@ async fn execute_query(
                 "AND event_type = 'console.model.read' ",
                 "AND JSONExtractString(payload_json,'target_model_call_id') = ?))",
             )),
+            QueryFilter::ShareGrantId(_) => sql.push_str(
+                "event_type = 'share.issued' \
+                  AND JSONExtractString(payload_json,'share_id') = ?",
+            ),
             QueryFilter::Text { field, .. } => {
                 sql.push_str(field.as_str());
                 sql.push_str(" = ?");
@@ -1103,6 +1107,7 @@ async fn execute_query(
                 query.bind(value.as_str()).bind(value.as_str())
             }
             QueryFilter::ModelCallId(value) => query.bind(value.as_str()).bind(value.as_str()),
+            QueryFilter::ShareGrantId(value) => query.bind(value.as_str()),
             QueryFilter::Text { value, .. } => query.bind(value),
             QueryFilter::Outcome(value) => query.bind(value.as_str()),
             QueryFilter::ConfidenceAtMost(value) => query.bind(value.as_f64()),
@@ -1294,7 +1299,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use clickhouse::{Client, error::Error, test};
     use xshield_core::{
-        domain::{ModelCallId, SiteId, TenantId, TraceId},
+        domain::{ModelCallId, ShareGrantId, SiteId, TenantId, TraceId},
         identity::UnixSeconds,
         query::{QueryFilter, QueryPlan, QuerySort, QueryWindow},
     };
@@ -1799,6 +1804,53 @@ mod tests {
         assert!(sql.contains("event_id,trace_id,event_type"), "{sql}");
         assert!(
             sql.contains("trace_id = '018f2a3b4c5d70008000000000000003'"),
+            "{sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_filters_share_id_in_fixed_event_family() {
+        let config = PublisherConfig::new(
+            "/tmp/xshield-share-query-journal",
+            "/tmp/xshield-share-query-manifest",
+            "/tmp/xshield-share-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        let mock = test::Mock::new();
+        let recorded = mock.add(test::handlers::record_ddl());
+        let share = ShareGrantId::parse("share_018f2a3b-4c5d-7000-8000-000000000007").unwrap();
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            vec![QueryFilter::ShareGrantId(share)],
+            QuerySort::OccurredAtDesc,
+            2,
+        )
+        .unwrap();
+
+        let result = query_audit_events(
+            &config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_b").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.events.is_empty());
+        let sql = recorded.query().await;
+        assert!(sql.contains("event_type = 'share.issued'"), "{sql}");
+        assert!(
+            sql.contains("JSONExtractString(payload_json,'share_id')"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("share_018f2a3b-4c5d-7000-8000-000000000007"),
             "{sql}"
         );
     }

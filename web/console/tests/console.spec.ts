@@ -1341,7 +1341,6 @@ test("search submits an allowlisted plan, freezes pagination and clears edited r
   await connect(page);
   await prepareSearch(page);
   const filters: SearchPlan["filters"] = [
-    { kind: "request_id", value: REQUEST_ID },
     { kind: "event_id", value: "ev_018f2a3b-4c5d-7000-8000-000000000001" },
     { kind: "grant_id", value: "grant_018f2a3b-4c5d-7000-8000-000000000001" },
     {
@@ -1357,6 +1356,10 @@ test("search submits an allowlisted plan, freezes pagination and clears edited r
     {
       kind: "model_call_id",
       value: "mdl_018f2a3b-4c5d-7000-8000-000000000001",
+    },
+    {
+      kind: "share_grant_id",
+      value: "share_018f2a3b-4c5d-7000-8000-000000000007",
     },
   ];
   for (const [index, filter] of filters.entries()) {
