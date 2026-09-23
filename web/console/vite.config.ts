@@ -32,6 +32,7 @@ const modelCallListPath = "/control/v1/model-calls";
 const auditHealthPath = "/control/v1/audit/health";
 const oidcLoginPath = "/control/v1/auth/oidc/start";
 const oidcCallbackPath = "/control/v1/auth/oidc/callback";
+const oidcReauthStartPath = "/control/v1/auth/oidc/reauth/start";
 const sessionPath = "/control/v1/session";
 const sessionLogoutPath = "/control/v1/session/logout";
 
@@ -87,7 +88,8 @@ export default defineConfig({
                 (request.url === path && calibrationReportPath.test(path)) ||
                 (request.url === path && accessReadPath.test(path)))) ||
             (request.method === "POST" &&
-              ((path === sessionLogoutPath && request.url === path) ||
+              (((path === sessionLogoutPath || path === oidcReauthStartPath) &&
+                request.url === path) ||
                 request.url === "/control/v1/search" ||
                 (request.url === path && writePath.test(path))));
           if (!allowed) {
@@ -123,7 +125,8 @@ export default defineConfig({
             if (
               path !== oidcLoginPath &&
               path !== oidcCallbackPath &&
-              path !== sessionLogoutPath
+              path !== sessionLogoutPath &&
+              path !== oidcReauthStartPath
             ) {
               delete proxyResponse.headers["set-cookie"];
             }

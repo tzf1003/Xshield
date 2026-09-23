@@ -1981,6 +1981,8 @@ test("development proxy permits fixed investigation and evidence access routes",
     ["GET", "/control/v1/auth/oidc/start", true],
     ["GET", "/control/v1/auth/oidc/start?next=/", false],
     ["GET", "/control/v1/auth/oidc/callback?code=sample&state=sample", true],
+    ["POST", "/control/v1/auth/oidc/reauth/start", true],
+    ["POST", "/control/v1/auth/oidc/reauth/start?next=/", false],
     ["GET", "/control/v1/session", true],
     ["GET", "/control/v1/session?scope=other", false],
     ["POST", "/control/v1/session/logout", true],
@@ -2103,9 +2105,29 @@ test("development proxy permits fixed investigation and evidence access routes",
     },
   );
   assert.equal(proxyHeaders.cookie, "__Host-xshield-oidc-state=state");
+  listeners.get("proxyReq")?.(
+    {
+      removeHeader(name: string) {
+        delete proxyHeaders[name];
+      },
+      setHeader(name: string, value: string) {
+        proxyHeaders[name] = value;
+      },
+    },
+    {
+      url: "/control/v1/auth/oidc/reauth/start",
+      headers: { cookie: "__Host-xshield-session=session; __Host-xshield-oidc-state=state" },
+    },
+  );
+  assert.equal(proxyHeaders.cookie, "__Host-xshield-session=session");
   const proxyResponse = { headers: { "set-cookie": ["x=secret"] } };
   listeners.get("proxyRes")?.(proxyResponse, { url: "/control/v1/search" });
   assert.equal(proxyResponse.headers["set-cookie"], undefined);
+  proxyResponse.headers["set-cookie"] = ["__Host-xshield-oidc-state=next"];
+  listeners.get("proxyRes")?.(proxyResponse, {
+    url: "/control/v1/auth/oidc/reauth/start",
+  });
+  assert.deepEqual(proxyResponse.headers["set-cookie"], ["__Host-xshield-oidc-state=next"]);
 });
 
 const CASE_ID = "case_018f2a3b-4c5d-7000-8000-000000000951";
