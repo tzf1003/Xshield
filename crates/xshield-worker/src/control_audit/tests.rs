@@ -11,6 +11,7 @@ const ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000005";
 const OTHER_ARTIFACT: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000006";
 const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000007";
 const MODEL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000008";
+const AGENT_RUN: &str = "agt_018f2a3b-4c5d-7000-8000-00000000000d";
 const GRANT: &str = "grant_018f2a3b-4c5d-7000-8000-000000000009";
 const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-00000000000a";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-00000000000b";
@@ -173,6 +174,45 @@ fn causality_audit_contract_requires_a_redacted_query_digest() {
     value["payload"]["outcome"] = "DENY".into();
     value["payload"]["reason_code"] = "CONTROL_CAUSALITY_REQUEST_INVALID".into();
     assert!(index(&value).is_ok());
+}
+
+#[test]
+fn agent_run_access_contract_keeps_tool_payloads_out_of_management_audit() {
+    let mut value = event();
+    value["event_type"] = "console.agent.read".into();
+    value["payload"] = json!({
+        "method": "GET",
+        "path": "/control/v1/agent-runs/{agent_run_id}",
+        "subject_ref": "audit-operator",
+        "target_request_id": null,
+        "target_artifact_id": null,
+        "target_case_id": null,
+        "target_access_request_id": null,
+        "target_model_call_id": null,
+        "target_agent_run_id": AGENT_RUN,
+        "target_grant_id": null,
+        "target_binding_id": null,
+        "target_hold_id": null,
+        "target_calibration_report_id": null,
+        "query_digest": null,
+        "outcome": "PASS",
+        "reason_code": "CONTROL_AGENT_RUN_READ"
+    });
+    value["evidence_refs"] = json!([]);
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    assert_eq!(row.method, "GET");
+    assert_eq!(row.reason_code, "CONTROL_AGENT_RUN_READ");
+    assert!(row.evidence_refs.is_empty());
+    let mut invalid = value.clone();
+    invalid["payload"]["target_agent_run_id"] = "agent_018f2a3b-4c5d-7000-8000-00000000000d".into();
+    rejected(&invalid, "wrong agent run prefix");
+    let mut denied = value;
+    denied["payload"]["outcome"] = "DENY".into();
+    denied["payload"]["reason_code"] = "CONTROL_AGENT_RUN_ID_INVALID".into();
+    denied["payload"]["subject_ref"] = Value::Null;
+    denied["payload"]["target_agent_run_id"] = Value::Null;
+    assert!(index(&denied).is_ok());
 }
 
 #[test]

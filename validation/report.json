@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3844,
-  "passed_count": 3844,
+  "checks_total": 3846,
+  "passed_count": 3846,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -18796,6 +18796,11 @@
       "detail": ""
     },
     {
+      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:docs/11-audit-event-contract.md",
       "passed": true,
       "detail": ""
@@ -19067,6 +19072,11 @@
     },
     {
       "name": "link:docs/11-audit-event-contract.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/11-audit-event-contract.md:29-api-endpoint-catalog.md",
       "passed": true,
       "detail": ""
     },

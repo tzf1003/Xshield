@@ -1374,6 +1374,59 @@
       }
     },
     {
+      "if": {"properties": {"event_type": {"const": "console.agent.read"}}, "required": ["event_type"]},
+      "then": {
+        "$comment": "Redacted Agent lifecycle metadata access. The control journal records only the validated run target and bounded evidence references; Agent payloads, tool arguments/results, prompts and permission snapshots remain outside this projection.",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["method", "path", "outcome", "reason_code"],
+            "properties": {
+              "method": {"const": "GET"},
+              "path": {"const": "/control/v1/agent-runs/{agent_run_id}"},
+              "subject_ref": {"anyOf": [{"$ref": "#/$defs/identity_subject"}, {"type": "null"}]},
+              "target_request_id": {"type": "null"},
+              "target_artifact_id": {"type": "null"},
+              "target_case_id": {"type": "null"},
+              "target_access_request_id": {"type": "null"},
+              "target_model_call_id": {"type": "null"},
+              "target_agent_run_id": {"anyOf": [{"type": "string", "pattern": "^agt_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}, {"type": "null"}]},
+              "target_grant_id": {"type": "null"},
+              "target_binding_id": {"type": "null"},
+              "target_hold_id": {"type": "null"},
+              "target_calibration_report_id": {"type": "null"},
+              "query_digest": {"type": "null"},
+              "bytes_read": {"type": "null"},
+              "outcome": {"enum": ["PASS", "DENY", "ERROR"]},
+              "reason_code": {"type": "string", "minLength": 1, "maxLength": 128, "not": {"pattern": "[^A-Z0-9_]"}}
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"outcome": {"const": "PASS"}}},
+                "then": {"required": ["subject_ref", "target_agent_run_id"], "properties": {"subject_ref": {"type": "string"}, "target_agent_run_id": {"type": "string"}, "reason_code": {"const": "CONTROL_AGENT_RUN_READ"}}}
+              },
+              {
+                "if": {"properties": {"outcome": {"const": "DENY"}}},
+                "then": {"properties": {"reason_code": {"enum": ["CONTROL_AUTH_REQUIRED", "CONTROL_SCOPE_DENIED", "CONTROL_RATE_LIMITED", "CONTROL_AGENT_RUN_ID_INVALID", "CONTROL_QUERY_CAPACITY_EXHAUSTED", "CONTROL_QUERY_BUDGET_EXCEEDED"]}}}
+              },
+              {
+                "if": {"properties": {"outcome": {"const": "ERROR"}}},
+                "then": {"properties": {"reason_code": {"enum": ["CONTROL_RATE_UNAVAILABLE", "CONTROL_CLOCK_UNAVAILABLE", "CONTROL_QUERY_TIMEOUT", "CONTROL_INDEX_UNAVAILABLE", "CONTROL_HEALTH_UNAVAILABLE"]}}}
+              },
+              {
+                "if": {"anyOf": [{"properties": {"subject_ref": {"type": "null"}}}, {"properties": {"reason_code": {"enum": ["CONTROL_AUTH_REQUIRED", "CONTROL_SCOPE_DENIED", "CONTROL_RATE_LIMITED", "CONTROL_RATE_UNAVAILABLE", "CONTROL_CLOCK_UNAVAILABLE", "CONTROL_AGENT_RUN_ID_INVALID"]}}}]},
+                "then": {"properties": {"target_agent_run_id": {"type": "null"}}}
+              }
+            ]
+          }
+        },
+        "if": {"properties": {"payload": {"properties": {"outcome": {"const": "PASS"}}}}},
+        "then": {"properties": {"evidence_refs": {"maxItems": 256, "items": {"$ref": "#/$defs/model_artifact_ref", "type": "string"}}}},
+        "else": {"properties": {"evidence_refs": {"maxItems": 0}}}
+      }
+    },
+    {
       "if": {
         "properties": {"event_type": {"enum": ["console.health.read", "console.request.read", "console.events.read", "console.manifest.read", "console.model.read", "console.grant.read", "console.binding.read", "console.query.executed", "console.case.read", "case.created", "case.closed", "case.evidence.added", "evidence.access.requested", "evidence.access.approved", "evidence.access.denied", "evidence.read"]}},
         "required": ["event_type"]

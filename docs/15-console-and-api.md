@@ -47,7 +47,7 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | GET /control/v1/model-calls/{model_call_id} | 逻辑调用与实际尝试、输入输出引用 |
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定的脱敏账本快照、来源请求引用 |
 | GET /control/v1/auth-bindings/{binding_id} | 身份绑定的代际、状态与期限快照 |
-| GET /control/v1/agent-runs/{agent_run_id} | 子调用、工具、产物和权限快照 |
+| GET /control/v1/agent-runs/{agent_run_id} | Agent 脱敏生命周期与工具事件摘要（正文/权限快照隔离） |
 | GET /control/v1/artifacts/{artifact_id} | 作用域内单个证据状态、长度、保密和完整性，不读取内容 |
 | POST /control/v1/artifacts/{id}/access | 申请受限原文访问 |
 | GET /control/v1/evidence-access-requests | 分页发现本人申请历史或独立审批待办 |

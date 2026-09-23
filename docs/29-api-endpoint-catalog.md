@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -11,7 +11,7 @@
 | GET /control/v1/model-calls/{model_call_id} | 模型调用、实际输入输出引用 | console.model.read |
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定账本快照、来源请求引用 | console.grant.read |
 | GET /control/v1/auth-bindings/{binding_id} | 当前身份与凭证代际、状态、期限 | console.binding.read |
-| GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树 | console.agent.read |
+| GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树（脱敏生命周期，已实现，29.30） | console.agent.read |
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
 | POST /control/v1/causality | 固定窗口内有界多跳因果摘要 | console.causality.read |
@@ -169,7 +169,7 @@ Authorization 与访问申请头必须各自单值，不接受查询串；重复
 
 资格与身份定位分别使用 `{"kind":"grant_id","value":"grant_UUIDv7"}` 和 `{"kind":"auth_binding_id","value":"auth_UUIDv7"}`，value 必须为规范小写强类型 ID。资格过滤匹配 `grant.issued`、`response_grant.issued` 的 `grant_id`、`share.issued` 的 `issuer_grant_id`，以及 `control_access` 阶段 `console.grant.read` 的 `target_grant_id`。身份过滤匹配 `session.created`、`binding.created`、`identity.refreshed`、`epoch.changed`、`binding.revoked`、`grant.issued`、`response_grant.issued` 的 `binding_id`，`share.issued` 的 `issuer_binding_id`，以及 `control_access` 阶段 `console.binding.read` 的 `target_binding_id`。事件族、阶段和 JSON 键由服务端固定，索引内有界读取这些 payload 字段参与过滤；其他事件或阶段中的同名键不构成关联。两类过滤可组合并继续占用原有 8 项预算，完整类型和值纳入 query_digest 和游标签名，访问审计仍仅记录计划摘要。管理详情读取仍单独要求 `Observer`；历史命中不授予详情读取。
 
-Agent 运行使用 `{"kind":"agent_run_id","value":"agt_UUIDv7"}`，值必须为规范小写强类型 ID。过滤器只匹配 `agent.started`、`agent.tool_called`、`agent.tool_result`、`agent.artifact_created`、`agent.finished` 的 payload `agent_run_id`，以及 `control_access` 阶段 `console.agent.read` 的 `target_agent_run_id`；事件族、JSON 键、tenant/site、stage 与 `agt_` 值由服务端固定并参数化。结果仅为脱敏历史摘要，不能读取 Agent 输入/输出、工具参数、产物正文或权限快照，不触发执行、回放或业务资格；Agent 详情端点仍需独立实现、授权与审计。
+Agent 运行使用 `{"kind":"agent_run_id","value":"agt_UUIDv7"}`，值必须为规范小写强类型 ID。过滤器只匹配 `agent.started`、`agent.tool_called`、`agent.tool_result`、`agent.artifact_created`、`agent.finished` 的 payload `agent_run_id`，以及 `control_access` 阶段 `console.agent.read` 的 `target_agent_run_id`；事件族、JSON 键、tenant/site、stage 与 `agt_` 值由服务端固定并参数化。结果仅为脱敏历史摘要，不能读取 Agent 输入/输出、工具参数、产物正文或权限快照，不触发执行、回放或业务资格；详情端点另行要求 Observer 并写独立管理审计。
 
 定位结果是保留窗口内已发布的直接引用事件，可通过返回的 request_id 继续查看请求时间线；不会自动遍历关联请求或报告当前 binding/grant 的有效状态。空结果可能来自未发布、到期或作用域不匹配，不能证明发行从未发生。响应中的水位只覆盖当前配置的 journal 源，不代表独立 outbox 生产者已追平。当前复用有界 payload 扫描，超出预算要求缩小时间窗；大规模索引列物化需另行容量测量。
 
@@ -386,3 +386,13 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 每次认证尝试追加 `console.causality.read` 管理事件：成功为 `PASS/CONTROL_CAUSALITY_READ`，无效计划、容量或确定性预算拒绝为 `DENY`，超时/索引/健康故障为 `ERROR`。通过计划后的审计携带独立用途域 HMAC `query_digest`，原始根 ID、窗口、方向和节点限制不写入 journal；计划解析失败可省略摘要。审计写入失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，响应统一 `Cache-Control: private, no-store`。该端点只提供有界调查摘要，不提供自然语言编译、无上限完整图、回放、导出、证据读取或业务权限。
 
 部署先升级能够识别 `console.causality.read` 的管理 journal 发布器，再启用路由；无新增迁移或依赖。控制台事件详情已提供显式查询表单，只有在操作者填写 UTC 窗口并提交后才调用该端点；已加载事件集合的即时邻域仍独立展示。
+
+## 29.30 已实现的 Agent 运行脱敏详情契约
+
+`GET /control/v1/agent-runs/{agent_run_id}` 要求固定 tenant/site 内的 `Observer` 和单值管理 Bearer。路径 ID 先按 `agt_` UUIDv7 强类型校验；查询只访问 retention-aware `audit_events_active` 中固定的 `agent.started`、`agent.tool_called`、`agent.tool_result`、`agent.artifact_created`、`agent.finished` 事件，并以参数绑定注入服务端 tenant/site 与目标 ID。事件 payload 先拒绝重复 JSON 键，再只解码并比较 `agent_run_id`；未知的工具参数、结果、提示、权限快照和正文不会进入返回 DTO。
+
+成功响应返回独立管理 `request_id`、固定作用域、`source_agent_run_id`、`found`、`completeness`、配置 journal 的 `as_of`/`index_watermark`/`has_gaps`/`pending_segments`，以及按 `request_seq,event_id` 排序的脱敏生命周期事件。每个事件仅含 event/request/trace ID、时间、序号、类型、结果/原因、证据引用、直接因果引用和 sensitivity；`lifecycle_complete` 只有在同一查询可见且顺序正确的启动与终态同时存在时为 true。证据引用仍需独立 manifest、审批和 EvidenceReadPort；详情不会触发执行、回放、导出、证据读取或业务资格。
+
+查询固定最多解码 64 个事件、单 payload 16 KiB、结果 1 MiB、2 秒索引预算及 5 秒客户端 deadline，并与其他分析读取共享单实例许可。已认证且路径有效的成功、未命中、容量/预算拒绝和依赖故障均追加独立 `console.agent.read`；通过路径校验的目标写入 `target_agent_run_id`，成功的去重 evidence refs 才进入审计引用。无效 ID 为 `CONTROL_AGENT_RUN_ID_INVALID`/400，容量/预算、超时、索引或健康故障沿用受限查询错误族；审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，响应统一 `Cache-Control: private, no-store`。
+
+该接口只交付历史脱敏观察，不等同于调查 Agent 执行器；`POST /control/v1/cases/{case_id}/analyze`、自然语言计划、完整工具树、只读回放与导出仍保持未实现的设计契约。部署先升级能够识别 `console.agent.read`、`target_agent_run_id` 和新原因码的管理 journal 发布器，再开放路由；无新增 migration 或运行时秘密存储。

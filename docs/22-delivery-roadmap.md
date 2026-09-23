@@ -82,6 +82,8 @@ Score 增量：一次性离线评估已接入 2–10 档有序量表、完整档
 
 验收：模型输出不覆盖硬拒绝，Noul 不伪造 confidence；实际模型输入输出可查看；模型停机行为按端点策略执行；没有实测不宣称检测率。
 
+Agent 详情增量：`GET /control/v1/agent-runs/{agent_run_id}` 已交付 Observer 脱敏生命周期读取闭环，固定 Agent 事件族与 `agent_run_id` DTO、重复键/因果顺序校验、64 事件和 16 KiB payload 预算、`console.agent.read` 审计及 not-indexed/partial/complete 语义均已接通。工具参数、结果、提示、权限快照、产物正文、执行器、回放与导出不进入该投影。
+
 ## M5 持续适配与产品化
 
 交付：构建监测、隔离 Agent、候选协议/UI 映射、双身份测试、签名发布、灰度回滚；容量调优与部署指南。

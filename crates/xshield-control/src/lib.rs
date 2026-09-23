@@ -53,8 +53,8 @@ use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealV
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{
-        ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId, EvidenceAccessRequestId,
-        GrantId, ModelCallId, RequestId, SiteId, TenantId,
+        AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
+        EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, SiteId, TenantId,
     },
     investigation::{
         EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
@@ -70,9 +70,10 @@ use xshield_postgres::{
     InvestigationCaseWriteOutcome, PostgresIdentityStore,
 };
 use xshield_worker::{
-    IndexWatermark, ModelCallSummary, PublicationHealth, PublishError, PublisherConfig,
-    RequestEventPosition, RequestEvents, RequestSummary, inspect_publication_health,
-    query_model_call, query_request_events, query_request_summary,
+    AgentRunSummary, IndexWatermark, ModelCallSummary, PublicationHealth, PublishError,
+    PublisherConfig, RequestEventPosition, RequestEvents, RequestSummary,
+    inspect_publication_health, query_agent_run, query_model_call, query_request_events,
+    query_request_summary,
 };
 use zeroize::Zeroizing;
 
@@ -81,6 +82,7 @@ const REQUEST_SUMMARY_PATH: &str = "/control/v1/requests/{request_id}";
 const REQUEST_EVENTS_PATH: &str = "/control/v1/requests/{request_id}/events";
 const REQUEST_EVIDENCE_PATH: &str = "/control/v1/requests/{request_id}/evidence";
 const MODEL_CALL_PATH: &str = "/control/v1/model-calls/{model_call_id}";
+const AGENT_RUN_PATH: &str = "/control/v1/agent-runs/{agent_run_id}";
 const ARTIFACT_PATH: &str = "/control/v1/artifacts/{artifact_id}";
 const EVIDENCE_ACCESS_PATH: &str = "/control/v1/artifacts/{artifact_id}/access";
 const EVIDENCE_ACCESS_APPROVE_PATH: &str =
@@ -138,6 +140,12 @@ const MODEL_CALL_ACCESS: AccessAction = AccessAction {
     event_type: "console.model.read",
     method: "GET",
     path: MODEL_CALL_PATH,
+    role: ManagementRole::Observer,
+};
+const AGENT_RUN_ACCESS: AccessAction = AccessAction {
+    event_type: "console.agent.read",
+    method: "GET",
+    path: AGENT_RUN_PATH,
     role: ManagementRole::Observer,
 };
 const ARTIFACT_ACCESS: AccessAction = AccessAction {
@@ -917,6 +925,171 @@ impl ControlPlane {
             found: model_call.is_some(),
             completeness,
             model_call,
+        })
+    }
+
+    async fn agent_run(
+        self: Arc<Self>,
+        authorization: Option<String>,
+        target_agent_run_id: Option<String>,
+    ) -> EndpointResult {
+        let request_id = format!("req_{}", Uuid::now_v7());
+        let auth_control = Arc::clone(&self);
+        let auth_request_id = request_id.clone();
+        let subject = match tokio::task::spawn_blocking(move || {
+            auth_control.authorize(authorization.as_deref(), &auth_request_id, AGENT_RUN_ACCESS)
+        })
+        .await
+        {
+            Ok(Ok(subject)) => subject,
+            Ok(Err(response)) => return *response,
+            Err(_) => return internal_error(&request_id),
+        };
+        let Some(target_agent_run_id) =
+            target_agent_run_id.and_then(|id| AgentRunId::parse(id).ok())
+        else {
+            return self
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    AGENT_RUN_ACCESS,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_AGENT_RUN_ID_INVALID",
+                    "invalid agent run identifier",
+                    false,
+                    "correct_request",
+                )
+                .await;
+        };
+        let Ok(permit) = Arc::clone(&self.search_capacity).try_acquire_owned() else {
+            return self
+                .finish_agent_run(
+                    request_id,
+                    subject,
+                    target_agent_run_id,
+                    Err(search::SearchFailure::Capacity),
+                )
+                .await;
+        };
+        let task_request_id = request_id.clone();
+        match tokio::spawn(async move {
+            let _permit = permit;
+            let result = self.run_agent_run(&target_agent_run_id).await;
+            self.finish_agent_run(task_request_id, subject, target_agent_run_id, result)
+                .await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => internal_error(&request_id),
+        }
+    }
+
+    async fn run_agent_run(
+        self: &Arc<Self>,
+        target: &AgentRunId,
+    ) -> Result<(Option<AgentRunSummary>, PublicationHealth), search::SearchFailure> {
+        let control = Arc::clone(self);
+        let health = tokio::task::spawn_blocking(move || {
+            inspect_publication_health(
+                &control.config.publisher,
+                &control.config.source_journal_key_id,
+                &control.source_journal_key,
+                &control.seal_key,
+            )
+        })
+        .await
+        .map_err(|_| search::SearchFailure::HealthUnavailable)?
+        .map_err(|_| search::SearchFailure::HealthUnavailable)?;
+        let agent_run = query_agent_run(
+            &self.config.publisher,
+            &self.index,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            target,
+        )
+        .await
+        .map_err(|error| match error {
+            PublishError::QueryBudgetExceeded => search::SearchFailure::Budget,
+            PublishError::QueryTimeout => search::SearchFailure::Timeout,
+            _ => search::SearchFailure::IndexUnavailable,
+        })?;
+        Ok((agent_run, health))
+    }
+
+    async fn finish_agent_run(
+        self: Arc<Self>,
+        request_id: String,
+        subject: String,
+        target_agent_run_id: AgentRunId,
+        result: Result<(Option<AgentRunSummary>, PublicationHealth), search::SearchFailure>,
+    ) -> EndpointResult {
+        let evidence_refs = result
+            .as_ref()
+            .ok()
+            .and_then(|(summary, _)| summary.as_ref())
+            .map(agent_run_evidence_refs)
+            .unwrap_or_default();
+        let reason = result
+            .as_ref()
+            .map_or_else(search::SearchFailure::reason, |_| "CONTROL_AGENT_RUN_READ");
+        let outcome = match &result {
+            Ok(_) => "PASS",
+            Err(search::SearchFailure::Capacity | search::SearchFailure::Budget) => "DENY",
+            Err(_) => "ERROR",
+        };
+        let audit_control = Arc::clone(&self);
+        let audit_request_id = request_id.clone();
+        let audit_subject = subject.clone();
+        let audit_agent_run_id = target_agent_run_id.clone();
+        let audited = tokio::task::spawn_blocking(move || {
+            let refs = evidence_refs.iter().map(String::as_str).collect::<Vec<_>>();
+            audit_control.append_agent_access_event(
+                &audit_request_id,
+                Some(&audit_subject),
+                &audit_agent_run_id,
+                outcome,
+                reason,
+                &refs,
+            )
+        })
+        .await;
+        if !matches!(audited, Ok(Ok(()))) {
+            return audit_unavailable(&request_id);
+        }
+        let (agent_run, health) = match result {
+            Ok(result) => result,
+            Err(search::SearchFailure::Budget) => {
+                return api_error(
+                    &request_id,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "CONTROL_QUERY_BUDGET_EXCEEDED",
+                    "agent run lookup exceeded its query budget",
+                    false,
+                    "narrow_query",
+                );
+            }
+            Err(error) => return error.response(request_id),
+        };
+        let completeness = match agent_run.as_ref() {
+            Some(summary) if summary.lifecycle_complete => "complete",
+            Some(_) => "partial",
+            None => "not_indexed",
+        };
+        EndpointResult::AgentRun(AgentRunResponse {
+            request_id,
+            tenant_id: self.config.tenant_id.as_str().to_owned(),
+            site_id: self.config.site_id.as_str().to_owned(),
+            source_agent_run_id: target_agent_run_id.as_str().to_owned(),
+            watermark_scope: "configured_journal",
+            as_of: health.as_of,
+            index_watermark: health.index_watermark,
+            has_gaps: health.has_gaps,
+            pending_segments: health.pending_segments,
+            found: agent_run.is_some(),
+            completeness,
+            agent_run,
         })
     }
 
@@ -3394,6 +3567,37 @@ impl ControlPlane {
         )
     }
 
+    fn append_agent_access_event(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        target_agent_run_id: &AgentRunId,
+        outcome: &'static str,
+        reason_code: &'static str,
+        evidence_refs: &[&str],
+    ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence_bytes_with_agent(
+            request_id,
+            subject_ref,
+            AGENT_RUN_ACCESS,
+            None,
+            None,
+            None,
+            None,
+            None,
+            outcome,
+            reason_code,
+            evidence_refs,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(target_agent_run_id),
+        )
+    }
+
     fn append_calibration_report_access_event(
         &self,
         request_id: &str,
@@ -3444,6 +3648,50 @@ impl ControlPlane {
         target_hold_id: Option<&EventId>,
         target_calibration_report_id: Option<&CalibrationReportId>,
     ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence_bytes_with_agent(
+            request_id,
+            subject_ref,
+            action,
+            target_request_id,
+            target_artifact_id,
+            target_case_id,
+            target_access_request_id,
+            target_model_call_id,
+            outcome,
+            reason_code,
+            evidence_refs,
+            bytes_read,
+            query_digest,
+            target_grant_id,
+            target_binding_id,
+            target_hold_id,
+            target_calibration_report_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_access_event_with_evidence_bytes_with_agent(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        action: AccessAction,
+        target_request_id: Option<&RequestId>,
+        target_artifact_id: Option<&ArtifactId>,
+        target_case_id: Option<&CaseId>,
+        target_access_request_id: Option<&EvidenceAccessRequestId>,
+        target_model_call_id: Option<&ModelCallId>,
+        outcome: &'static str,
+        reason_code: &'static str,
+        evidence_refs: &[&str],
+        bytes_read: Option<u64>,
+        query_digest: Option<&str>,
+        target_grant_id: Option<&GrantId>,
+        target_binding_id: Option<&AuthBindingId>,
+        target_hold_id: Option<&EventId>,
+        target_calibration_report_id: Option<&CalibrationReportId>,
+        target_agent_run_id: Option<&AgentRunId>,
+    ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
             .lock()
@@ -3491,6 +3739,7 @@ impl ControlPlane {
                 target_hold_id: target_hold_id.map(EventId::as_str),
                 target_calibration_report_id: target_calibration_report_id
                     .map(CalibrationReportId::as_str),
+                target_agent_run_id: target_agent_run_id.map(AgentRunId::as_str),
                 query_digest,
                 outcome,
                 reason_code,
@@ -3538,6 +3787,7 @@ pub fn router(control: ControlPlane) -> Router {
             get(model_call_list::handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(MODEL_CALL_PATH, get(model_call_handler))
+        .route(AGENT_RUN_PATH, get(agent_run_handler))
         .route(
             calibration_report_inspection::PATH,
             get(calibration_report_inspection::handler).layer(DefaultBodyLimit::max(0)),
@@ -3768,6 +4018,21 @@ async fn model_call_handler(
         .into_response()
 }
 
+async fn agent_run_handler(
+    State(control): State<Arc<ControlPlane>>,
+    path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    control
+        .agent_run(authorization, path.ok().map(|Path(id)| id))
+        .await
+        .into_response()
+}
+
 async fn request_evidence_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(request_id): Path<String>,
@@ -3825,6 +4090,7 @@ enum EndpointResult {
     RequestSummary(RequestSummaryResponse),
     RequestEvents(RequestEventsResponse),
     ModelCall(ModelCallResponse),
+    AgentRun(AgentRunResponse),
     Search(search::SearchResponse),
     Causality(causality::CausalityResponse),
     RequestEvidence(RequestEvidenceResponse),
@@ -3843,6 +4109,7 @@ impl IntoResponse for EndpointResult {
             Self::RequestSummary(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::ModelCall(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::AgentRun(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Search(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Causality(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
@@ -4225,8 +4492,35 @@ struct ModelCallResponse {
     model_call: Option<ModelCallSummary>,
 }
 
+#[derive(Serialize)]
+struct AgentRunResponse {
+    request_id: String,
+    tenant_id: String,
+    site_id: String,
+    source_agent_run_id: String,
+    watermark_scope: &'static str,
+    as_of: String,
+    index_watermark: Option<IndexWatermark>,
+    has_gaps: bool,
+    pending_segments: usize,
+    found: bool,
+    completeness: &'static str,
+    agent_run: Option<AgentRunSummary>,
+}
+
 fn model_call_evidence_refs(summary: &ModelCallSummary) -> Vec<String> {
     // The query validates that all top-level artifacts occur in these envelopes.
+    let mut refs: Vec<_> = summary
+        .events
+        .iter()
+        .flat_map(|event| event.evidence_refs.iter().cloned())
+        .collect();
+    refs.sort_unstable();
+    refs.dedup();
+    refs
+}
+
+fn agent_run_evidence_refs(summary: &AgentRunSummary) -> Vec<String> {
     let mut refs: Vec<_> = summary
         .events
         .iter()
@@ -4461,6 +4755,8 @@ struct AccessPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_calibration_report_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_agent_run_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
@@ -4604,6 +4900,7 @@ mod tests {
         "4444444444444444444444444444444444444444444444444444444444444444";
     const TOKEN: &str = "test-control-token-32-bytes-long-value";
     const MODEL_CALL_ID: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
+    const AGENT_RUN_ID: &str = "agt_018f2a3b-4c5d-7000-8000-000000000001";
     const MISSING_ARTIFACT_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000999";
 
     #[test]
@@ -4922,6 +5219,109 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["payload"]["target_model_call_id"], MODEL_CALL_ID);
         assert_eq!(events[0]["evidence_refs"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn agent_run_endpoint_returns_redacted_lifecycle_and_audits_scope() {
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide([
+            agent_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000001",
+                "agent.started",
+                1,
+            ),
+            agent_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000002",
+                "agent.tool_called",
+                2,
+            ),
+            agent_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000003",
+                "agent.finished",
+                3,
+            ),
+        ]));
+        let fixture = Fixture::with_index(
+            10,
+            ManagementRole::Observer,
+            Client::default().with_mock(&mock),
+        );
+        let response = router(fixture.control)
+            .oneshot(
+                Request::get(format!("/control/v1/agent-runs/{AGENT_RUN_ID}"))
+                    .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(body["found"], true);
+        assert_eq!(body["completeness"], "complete");
+        assert_eq!(body["agent_run"]["agent_run_id"], AGENT_RUN_ID);
+        assert_eq!(
+            body["agent_run"]["events"][1]["event_type"],
+            "agent.tool_called"
+        );
+        assert!(body["agent_run"]["events"][1].get("payload").is_none());
+        let events = read_access_events(&fixture.access_directory);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], "console.agent.read");
+        assert_eq!(events[0]["payload"]["target_agent_run_id"], AGENT_RUN_ID);
+        assert_eq!(events[0]["evidence_refs"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn agent_run_rejects_unauthorized_and_invalid_ids_before_index_access() {
+        for (role, authenticated, id, expected) in [
+            (
+                ManagementRole::Observer,
+                false,
+                "%FF",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                ManagementRole::AuditAdministrator,
+                true,
+                AGENT_RUN_ID,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                ManagementRole::Observer,
+                true,
+                "invalid",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ManagementRole::Observer,
+                true,
+                "%FF",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mock = test::Mock::new();
+            let fixture = Fixture::with_index(10, role, Client::default().with_mock(&mock));
+            let mut request = Request::get(format!("/control/v1/agent-runs/{id}"))
+                .body(Body::empty())
+                .unwrap();
+            if authenticated {
+                request
+                    .headers_mut()
+                    .insert(AUTHORIZATION, format!("Bearer {TOKEN}").parse().unwrap());
+            }
+            let response = router(fixture.control).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            if expected == StatusCode::BAD_REQUEST {
+                assert_eq!(body["error_code"], "CONTROL_AGENT_RUN_ID_INVALID");
+            }
+            assert_access_events(&fixture.access_directory, 1, "console.agent.read", None);
+        }
     }
 
     #[tokio::test]
@@ -6428,6 +6828,31 @@ mod tests {
         payload_json: String,
     }
 
+    #[derive(Clone, Debug, Row, Serialize)]
+    struct AgentRow {
+        request_id: Option<String>,
+        event_id: String,
+        trace_id: String,
+        event_type: String,
+        stage: Option<String>,
+        outcome: Option<String>,
+        reason_code: Option<String>,
+        proof_kind: Option<String>,
+        confidence: Option<f64>,
+        confidence_status: Option<String>,
+        #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
+        occurred_at: DateTime<Utc>,
+        request_seq: u32,
+        duration_us: u64,
+        policy_revision: String,
+        model_revision: Option<String>,
+        model_call_id: Option<String>,
+        evidence_refs: Vec<String>,
+        cause_event_ids: Vec<String>,
+        sensitivity: String,
+        payload_json: String,
+    }
+
     struct Fixture {
         control: ControlPlane,
         access_directory: std::path::PathBuf,
@@ -6921,6 +7346,38 @@ mod tests {
                 .unwrap()
         } else {
             search_http_request(&search_references::reference_payload())
+        }
+    }
+
+    fn agent_row(event_id: &str, event_type: &str, request_seq: u32) -> AgentRow {
+        AgentRow {
+            request_id: Some("req_018f2a3b-4c5d-7000-8000-000000000001".to_owned()),
+            event_id: event_id.to_owned(),
+            trace_id: "018f2a3b4c5d70008000000000000003".to_owned(),
+            event_type: event_type.to_owned(),
+            stage: Some("agent".to_owned()),
+            outcome: Some("PASS".to_owned()),
+            reason_code: Some("AGENT_EVENT".to_owned()),
+            proof_kind: Some("deterministic".to_owned()),
+            confidence: None,
+            confidence_status: Some("not_applicable".to_owned()),
+            occurred_at: DateTime::from_timestamp(1_000 + i64::from(request_seq), 0).unwrap(),
+            request_seq,
+            duration_us: 10,
+            policy_revision: "policy-r1".to_owned(),
+            model_revision: None,
+            model_call_id: None,
+            evidence_refs: Vec::new(),
+            cause_event_ids: if event_type == "agent.started" {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "ev_018f2a3b-4c5d-7000-8000-000000000{:03}",
+                    request_seq - 1
+                )]
+            },
+            sensitivity: "INTERNAL".to_owned(),
+            payload_json: format!(r#"{{"agent_run_id":"{AGENT_RUN_ID}"}}"#),
         }
     }
 

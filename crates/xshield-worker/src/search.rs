@@ -2,15 +2,15 @@
 //! values are bound parameters, and callers must audit attempts and results.
 
 use super::{
-    MODEL_CALL_ID_PROJECTION, PublishError, PublisherConfig, valid_confidence, valid_event_type,
-    valid_name, validate_id_list,
+    MODEL_CALL_ID_PROJECTION, PublishError, PublisherConfig, reject_duplicate_json,
+    valid_confidence, valid_event_type, valid_name, validate_id_list,
 };
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row, sql::Identifier};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use xshield_core::{
-    domain::{EventId, ModelCallId, RequestId, SiteId, TenantId, TraceId},
+    domain::{AgentRunId, EventId, ModelCallId, RequestId, SiteId, TenantId, TraceId},
     query::{MAX_LIMIT, QueryFilter, QueryPlan, QuerySort, QueryWindow},
 };
 
@@ -158,6 +158,49 @@ pub struct ModelCallSummary {
     /// True only when the visible prefix contains start, send, and terminal
     /// (or start and a pre-send failure). Retention may hide an earlier prefix.
     pub lifecycle_complete: bool,
+}
+
+/// One redacted event in an Agent run's retained lifecycle.
+///
+/// Agent payloads may contain tool arguments, results, prompts, or permission
+/// snapshots. None of those fields cross this projection; callers must use a
+/// separately authorized evidence path for any protected material.
+#[derive(Clone, Debug, Serialize)]
+pub struct AgentRunEventSummary {
+    /// Immutable audit event identity.
+    pub event_id: String,
+    /// Fixed Agent lifecycle event kind.
+    pub event_type: String,
+    /// Request that initiated the Agent run, when retained.
+    pub request_id: Option<String>,
+    /// Exact trace identifier from the indexed envelope.
+    pub trace_id: String,
+    /// Authenticated occurrence time.
+    #[serde(serialize_with = "serialize_event_time")]
+    pub occurred_at: DateTime<Utc>,
+    /// Request-local event order.
+    pub request_seq: u32,
+    /// Redacted stage outcome and reason.
+    pub outcome: Option<String>,
+    /// Stable decision or failure reason.
+    pub reason_code: Option<String>,
+    /// Opaque evidence references; content remains separately authorized.
+    pub evidence_refs: Vec<String>,
+    /// Direct causal predecessors visible on the event.
+    pub cause_event_ids: Vec<String>,
+    /// Event sensitivity classification.
+    pub sensitivity: String,
+}
+
+/// A bounded, redacted Agent lifecycle assembled from fixed event families.
+#[derive(Clone, Debug, Serialize)]
+pub struct AgentRunSummary {
+    /// Stable Agent run identity.
+    pub agent_run_id: String,
+    /// True only when both lifecycle endpoints are retained in order.
+    pub lifecycle_complete: bool,
+    /// Ordered redacted lifecycle entries.
+    pub events: Vec<AgentRunEventSummary>,
 }
 
 /// A validated, bounded request for redacted model-call discovery.
@@ -336,6 +379,39 @@ struct ModelCallListRow {
     payload_json: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Row)]
+struct AgentRunRow {
+    request_id: Option<String>,
+    event_id: String,
+    trace_id: String,
+    event_type: String,
+    stage: Option<String>,
+    outcome: Option<String>,
+    reason_code: Option<String>,
+    proof_kind: Option<String>,
+    confidence: Option<f64>,
+    confidence_status: Option<String>,
+    #[serde(
+        deserialize_with = "deserialize_event_time",
+        serialize_with = "serialize_event_time"
+    )]
+    occurred_at: DateTime<Utc>,
+    request_seq: u32,
+    duration_us: u64,
+    policy_revision: String,
+    model_revision: Option<String>,
+    model_call_id: Option<String>,
+    evidence_refs: Vec<String>,
+    cause_event_ids: Vec<String>,
+    sensitivity: String,
+    payload_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentRunPayload {
+    agent_run_id: String,
+}
+
 fn serialize_event_time<S: Serializer>(
     value: &DateTime<Utc>,
     serializer: S,
@@ -469,6 +545,32 @@ pub async fn query_model_call(
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         execute_model_call(config, client, tenant_id, site_id, model_call_id),
+    )
+    .await
+    .map_err(|_| PublishError::QueryTimeout)?
+}
+
+/// Reads one Agent run's retained lifecycle from fixed event families.
+///
+/// The result is intentionally a redacted timeline rather than a tool
+/// execution record. Payloads are duplicate-key checked and only the typed
+/// `agent_run_id` discriminator is consumed; arguments, results, prompts,
+/// artifacts, and permission snapshots never enter the response.
+///
+/// # Errors
+///
+/// Returns the publisher's bounded query, timeout, or event-validation error
+/// when the index cannot provide a trustworthy lifecycle.
+pub async fn query_agent_run(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    agent_run_id: &AgentRunId,
+) -> Result<Option<AgentRunSummary>, PublishError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        execute_agent_run(config, client, tenant_id, site_id, agent_run_id),
     )
     .await
     .map_err(|_| PublishError::QueryTimeout)?
@@ -910,6 +1012,149 @@ async fn execute_model_call(
     }))
 }
 
+#[allow(clippy::too_many_lines)]
+async fn execute_agent_run(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    agent_run_id: &AgentRunId,
+) -> Result<Option<AgentRunSummary>, PublishError> {
+    // ponytail: bounded payload scan; add a materialized agent_run_id column
+    // only when retained Agent history exceeds this fixed decoder budget.
+    let mut cursor = client
+        .query(
+            "SELECT nullIf(request_id,'') AS request_id,event_id,trace_id,event_type,
+             nullIf(stage,'') AS stage,nullIf(outcome,'') AS outcome,
+             nullIf(reason_code,'') AS reason_code,nullIf(proof_kind,'') AS proof_kind,confidence,
+             nullIf(confidence_status,'') AS confidence_status,occurred_at,request_seq,duration_us,
+             policy_revision,nullIf(model_revision,'') AS model_revision,
+             nullIf(model_call_id,'') AS model_call_id,
+             evidence_refs,cause_event_ids,sensitivity,payload_json FROM ?
+             WHERE tenant_id = ? AND site_id = ?
+               AND event_type IN ('agent.started','agent.tool_called','agent.tool_result',
+                                  'agent.artifact_created','agent.finished')
+               AND JSONExtractString(payload_json,'agent_run_id') = ?
+             ORDER BY request_seq,event_id LIMIT 65",
+        )
+        .bind(Identifier(&config.active_view))
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(agent_run_id.as_str())
+        .with_setting("max_execution_time", "2")
+        .with_setting("timeout_before_checking_execution_speed", "0")
+        .with_setting("max_rows_to_read", "1000000")
+        .with_setting("max_bytes_to_read", "67108864")
+        .with_setting("read_overflow_mode", "throw")
+        .with_setting("timeout_overflow_mode", "throw")
+        .with_setting("max_result_bytes", "1048576")
+        .with_setting("result_overflow_mode", "throw")
+        .with_setting("max_memory_usage", "268435456")
+        .with_setting("max_threads", "2")
+        .with_setting("wait_end_of_query", "1")
+        .fetch::<AgentRunRow>()
+        .map_err(query_error)?;
+    let mut events = Vec::with_capacity(64);
+    let mut seen_event_ids = BTreeSet::new();
+    let mut evidence_ids = BTreeSet::new();
+    let mut started_seen = false;
+    let mut finished_seen = false;
+    while let Some(row) = cursor.next().await.map_err(query_error)? {
+        if cursor.decoded_bytes() > 1024 * 1024 || row.payload_json.len() > 16 * 1024 {
+            return Err(PublishError::QueryBudgetExceeded);
+        }
+        if events.len() == 64
+            || !seen_event_ids.insert(row.event_id.clone())
+            || !matches!(
+                row.event_type.as_str(),
+                "agent.started"
+                    | "agent.tool_called"
+                    | "agent.tool_result"
+                    | "agent.artifact_created"
+                    | "agent.finished"
+            )
+            || row.request_seq == 0
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        reject_duplicate_json(row.payload_json.as_bytes())?;
+        let payload: AgentRunPayload = serde_json::from_str(&row.payload_json)?;
+        let payload_id =
+            AgentRunId::parse(payload.agent_run_id).map_err(|_| PublishError::InvalidEvent)?;
+        if payload_id != *agent_run_id {
+            return Err(PublishError::InvalidEvent);
+        }
+        let event = SearchEventSummary {
+            request_id: row.request_id.clone(),
+            event_id: row.event_id.clone(),
+            trace_id: row.trace_id.clone(),
+            event_type: row.event_type.clone(),
+            stage: row.stage,
+            outcome: row.outcome,
+            reason_code: row.reason_code,
+            proof_kind: row.proof_kind,
+            confidence: row.confidence,
+            confidence_status: row.confidence_status,
+            occurred_at: row.occurred_at,
+            request_seq: row.request_seq,
+            duration_us: row.duration_us,
+            policy_revision: row.policy_revision,
+            model_revision: row.model_revision,
+            model_call_id: row.model_call_id,
+            evidence_refs: row.evidence_refs,
+            cause_event_ids: row.cause_event_ids,
+            sensitivity: row.sensitivity,
+        };
+        validate_search_event(&event)?;
+        evidence_ids.extend(event.evidence_refs.iter().cloned());
+        if evidence_ids.len() > super::LIST_ITEMS_MAX {
+            return Err(PublishError::InvalidEvent);
+        }
+        if row.event_type == "agent.started" {
+            if started_seen || finished_seen {
+                return Err(PublishError::InvalidEvent);
+            }
+            started_seen = true;
+        } else if row.event_type == "agent.finished" {
+            if finished_seen || !started_seen {
+                return Err(PublishError::InvalidEvent);
+            }
+            finished_seen = true;
+        } else if finished_seen {
+            return Err(PublishError::InvalidEvent);
+        }
+        events.push(AgentRunEventSummary {
+            event_id: event.event_id,
+            event_type: event.event_type,
+            request_id: event.request_id,
+            trace_id: event.trace_id,
+            occurred_at: event.occurred_at,
+            request_seq: event.request_seq,
+            outcome: event.outcome,
+            reason_code: event.reason_code,
+            evidence_refs: event.evidence_refs,
+            cause_event_ids: event.cause_event_ids,
+            sensitivity: event.sensitivity,
+        });
+    }
+    if events.is_empty() {
+        return Ok(None);
+    }
+    if events.iter().enumerate().any(|(index, event)| {
+        event
+            .cause_event_ids
+            .iter()
+            .any(|cause| events[index..].iter().any(|later| &later.event_id == cause))
+    }) {
+        return Err(PublishError::InvalidEvent);
+    }
+    Ok(Some(AgentRunSummary {
+        agent_run_id: agent_run_id.as_str().to_owned(),
+        lifecycle_complete: started_seen && finished_seen,
+        events,
+    }))
+}
+
 fn merge_model_ref(
     current: Option<String>,
     next: Option<String>,
@@ -1300,16 +1545,17 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
 #[cfg(test)]
 mod tests {
     use super::{
-        MODEL_CALL_ID_PROJECTION, MODEL_CALL_LIST_LIMIT_MAX, ModelCallListPlan,
-        ModelCallListPosition, ModelCallListResult, ModelCallListRow, ModelCallRow,
-        ModelCallSummary, PublishError, SearchEventSummary, query_audit_events, query_error,
-        query_model_call, query_model_calls, validate_search_event,
+        AgentRunRow, AgentRunSummary, MODEL_CALL_ID_PROJECTION, MODEL_CALL_LIST_LIMIT_MAX,
+        ModelCallListPlan, ModelCallListPosition, ModelCallListResult, ModelCallListRow,
+        ModelCallRow, ModelCallSummary, PublishError, SearchEventSummary, query_agent_run,
+        query_audit_events, query_error, query_model_call, query_model_calls,
+        validate_search_event,
     };
     use crate::PublisherConfig;
     use chrono::{DateTime, Utc};
     use clickhouse::{Client, error::Error, test};
     use xshield_core::{
-        domain::{ModelCallId, ShareGrantId, SiteId, TenantId, TraceId},
+        domain::{AgentRunId, ModelCallId, ShareGrantId, SiteId, TenantId, TraceId},
         identity::UnixSeconds,
         query::{QueryFilter, QueryPlan, QuerySort, QueryWindow},
     };
@@ -1321,6 +1567,7 @@ mod tests {
     const CALL_ID: &str = "artifact_018f2a3b-4c5d-7000-8000-000000000003";
     const MODEL_CALL_ID_TWO: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000002";
     const MODEL_CALL_ID_THREE: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000003";
+    const AGENT_RUN_ID: &str = "agt_018f2a3b-4c5d-7000-8000-000000000001";
 
     fn model_row(
         event_id: &str,
@@ -1351,6 +1598,135 @@ mod tests {
             sensitivity: "RESTRICTED".to_owned(),
             payload_json: payload.to_owned(),
         }
+    }
+
+    fn agent_row(event_id: &str, event_type: &str, request_seq: u32) -> AgentRunRow {
+        AgentRunRow {
+            request_id: Some(REQUEST_ID.to_owned()),
+            event_id: event_id.to_owned(),
+            trace_id: "018f2a3b4c5d70008000000000000003".to_owned(),
+            event_type: event_type.to_owned(),
+            stage: Some("agent".to_owned()),
+            outcome: Some("PASS".to_owned()),
+            reason_code: Some("AGENT_EVENT".to_owned()),
+            proof_kind: Some("deterministic".to_owned()),
+            confidence: None,
+            confidence_status: Some("not_applicable".to_owned()),
+            occurred_at: DateTime::parse_from_rfc3339(&format!(
+                "2026-09-19T00:00:0{request_seq}.000Z"
+            ))
+            .unwrap()
+            .with_timezone(&Utc),
+            request_seq,
+            duration_us: 10,
+            policy_revision: "policy-r1".to_owned(),
+            model_revision: None,
+            model_call_id: None,
+            evidence_refs: Vec::new(),
+            cause_event_ids: if event_type == "agent.started" {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "ev_018f2a3b-4c5d-7000-8000-000000000{:03}",
+                    request_seq - 1
+                )]
+            },
+            sensitivity: "INTERNAL".to_owned(),
+            payload_json: format!(r#"{{"agent_run_id":"{AGENT_RUN_ID}"}}"#),
+        }
+    }
+
+    fn agent_rows() -> Vec<AgentRunRow> {
+        vec![
+            agent_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000001",
+                "agent.started",
+                1,
+            ),
+            agent_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000002",
+                "agent.tool_called",
+                2,
+            ),
+            agent_row(
+                "ev_018f2a3b-4c5d-7000-8000-000000000003",
+                "agent.finished",
+                3,
+            ),
+        ]
+    }
+
+    async fn query_agent_rows(
+        rows: Vec<AgentRunRow>,
+    ) -> Result<Option<AgentRunSummary>, PublishError> {
+        let mock = test::Mock::new();
+        mock.add(test::handlers::provide(rows));
+        let config = PublisherConfig::new(
+            "/tmp/xshield-agent-query-journal",
+            "/tmp/xshield-agent-query-manifest",
+            "/tmp/xshield-agent-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        query_agent_run(
+            &config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_demo").unwrap(),
+            &SiteId::parse("site_demo").unwrap(),
+            &AgentRunId::parse(AGENT_RUN_ID).unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn agent_run_query_returns_only_redacted_lifecycle_metadata() {
+        let result = query_agent_rows(agent_rows()).await.unwrap().unwrap();
+        assert!(result.lifecycle_complete);
+        assert_eq!(result.agent_run_id, AGENT_RUN_ID);
+        assert_eq!(result.events.len(), 3);
+        assert_eq!(result.events[1].event_type, "agent.tool_called");
+    }
+
+    #[tokio::test]
+    async fn agent_run_query_rejects_corrupt_payloads_and_evidence_budget() {
+        let mut duplicate = agent_rows();
+        duplicate[0].payload_json =
+            format!(r#"{{"agent_run_id":"{AGENT_RUN_ID}","agent_run_id":"{AGENT_RUN_ID}"}}"#);
+        assert!(query_agent_rows(duplicate).await.is_err());
+
+        let mut mismatched = agent_rows();
+        mismatched[1].payload_json =
+            r#"{"agent_run_id":"agt_018f2a3b-4c5d-7000-8000-000000000002"}"#.to_owned();
+        assert!(matches!(
+            query_agent_rows(mismatched).await,
+            Err(PublishError::InvalidEvent)
+        ));
+
+        let mut oversized_payload = agent_rows();
+        oversized_payload[1]
+            .payload_json
+            .push_str(&"x".repeat(16 * 1024));
+        assert!(matches!(
+            query_agent_rows(oversized_payload).await,
+            Err(PublishError::QueryBudgetExceeded)
+        ));
+
+        let mut oversized_evidence = agent_rows();
+        for (index, row) in oversized_evidence.iter_mut().enumerate() {
+            row.evidence_refs.extend((0..129).map(|offset| {
+                format!(
+                    "artifact_018f2a3b-4c5d-7000-8000-{:012}",
+                    100 + index * 129 + offset
+                )
+            }));
+        }
+        assert!(matches!(
+            query_agent_rows(oversized_evidence).await,
+            Err(PublishError::InvalidEvent)
+        ));
     }
 
     #[test]

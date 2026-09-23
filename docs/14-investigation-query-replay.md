@@ -26,7 +26,7 @@ request_id 查询返回请求摘要、身份快照、阶段树、来源页面与
 
 精确 ID 查询通过 typed ID 的时间局部性和索引桶缩小范围；trace_id 精确匹配 ClickHouse 现有 `FixedString(32)` 列，并继续受有界时间窗与扫描预算约束。首版不为每个事件在 PostgreSQL 建百万级重复 locator；按规模使用 ClickHouse 的次序、查询表/物化视图以及有界热目录。标明 ORDER BY 主要服务的查询路径并实测，而不是依赖一个 Bloom 索引解决所有检索。[S24]
 
-当前 QueryPlan 还支持强类型 `agent_run_id=agt_…` 历史过滤：只定位固定 Agent 启动、工具调用/结果、产物、终态及 `console.agent.read` 管理访问事件。结果仍是脱敏事件摘要，查询沿用 Investigator 的 tenant/site、时间、预算、游标和审计边界；不会读取 Agent 输入/输出或工具正文，不触发 Agent 执行、回放或权限提升。Agent 详情端点、自然语言编译和回放仍按后续垂直闭环交付。
+当前 QueryPlan 还支持强类型 `agent_run_id=agt_…` 历史过滤：只定位固定 Agent 启动、工具调用/结果、产物、终态及 `console.agent.read` 管理访问事件。结果仍是脱敏事件摘要，查询沿用 Investigator 的 tenant/site、时间、预算、游标和审计边界；不会读取 Agent 输入/输出或工具正文，不触发 Agent 执行、回放或权限提升。`GET /control/v1/agent-runs/{agent_run_id}` 已提供 Observer 重新鉴权的脱敏生命周期详情；自然语言编译、执行器和回放仍按后续垂直闭环交付。
 
 ## 14.3 自然语言检索
 
