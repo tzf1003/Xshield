@@ -1,4 +1,4 @@
-use super::{AccessAction, ControlPlane, audit_unavailable, internal_error};
+use super::{AccessAction, ControlPlane, audit_unavailable, internal_error, single_header};
 use axum::{
     Extension, Json,
     body::Bytes,
@@ -412,9 +412,9 @@ pub(super) async fn auth_middleware(
     {
         context.step_up_valid |= control.test_step_up_valid;
     }
-    // Some handlers still read Authorization directly. Strip duplicate or
-    // non-UTF-8 values here so a rejected header cannot be reinterpreted by
-    // an individual handler as a valid first value.
+    // Normalize malformed or ambiguous Authorization before downstream
+    // handlers inspect the request, so a rejected value cannot be
+    // reinterpreted as a valid first value.
     if request.headers().contains_key(header::AUTHORIZATION)
         && single_header(request.headers(), header::AUTHORIZATION.as_str()).is_none()
     {
@@ -1496,15 +1496,6 @@ fn auth_required_response(
             },
         )
         .into_response()
-}
-
-fn single_header(headers: &HeaderMap, name: &str) -> Option<String> {
-    let mut values = headers.get_all(name).iter();
-    values
-        .next()
-        .filter(|_| values.next().is_none())
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }
 
 fn csrf_request_valid(
