@@ -195,7 +195,7 @@ write_dev_env() {
     export XSHIELD_CONTROL_LISTEN="127.0.0.1:9443"
     now=$(date +%s)
     export XSHIELD_CONTROL_TOKEN_ISSUED_AT=$((now - 60))
-    export XSHIELD_CONTROL_TOKEN_EXPIRES_AT=$((now + 86400))
+    export XSHIELD_CONTROL_TOKEN_EXPIRES_AT=$((now + 86340))
     export XSHIELD_EVIDENCE_ROOT
     install -d -m 0700 "$XSHIELD_EVIDENCE_ROOT" "$dev_root/journal" "$dev_root/manifests" \
         "$dev_root/checkpoints" "$dev_root/control-audit"

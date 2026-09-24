@@ -2,6 +2,9 @@
 -- 查询仍须按event_id去重，并监控audit_event_conflicts应始终为空。
 -- ClickHouse不是资格账本/认证真值。TTL后台执行，不承诺即时删除。
 CREATE DATABASE IF NOT EXISTS xshield;
+-- ClickHouse 24.x accepts DateTime/Date TTL expressions. Keep the stored
+-- deadline at microsecond precision for active views and cast only for the
+-- asynchronous physical cleanup pass.
 CREATE TABLE IF NOT EXISTS xshield.audit_events (
  tenant_id String, site_id String,
  request_id String, trace_id FixedString(32),
@@ -22,22 +25,22 @@ CREATE TABLE IF NOT EXISTS xshield.audit_events (
 ) ENGINE=MergeTree
 PARTITION BY toYYYYMM(occurred_at)
 ORDER BY (tenant_id,site_id,request_id,request_seq,event_id)
-TTL retention_expires_at DELETE;
+TTL toDateTime(retention_expires_at) DELETE;
 -- 热门按时间/原因分析的第二物理排序。生产大流量需评估存储放大，非强制双写。
 CREATE TABLE IF NOT EXISTS xshield.events_by_time AS xshield.audit_events
 ENGINE=MergeTree PARTITION BY toYYYYMM(occurred_at)
 ORDER BY (tenant_id,site_id,toDate(occurred_at),reason_code,occurred_at,event_id)
-TTL retention_expires_at DELETE;
+TTL toDateTime(retention_expires_at) DELETE;
 -- Expand-contract migration for an existing fixed-30-day index. Upgrade the
 -- materialized-view target before its source so inserts remain compatible.
 ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS
  retention_expires_at DateTime64(6,'UTC') DEFAULT occurred_at + INTERVAL 30 DAY
  AFTER observed_at;
-ALTER TABLE xshield.events_by_time MODIFY TTL retention_expires_at DELETE;
+ALTER TABLE xshield.events_by_time MODIFY TTL toDateTime(retention_expires_at) DELETE;
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS
  retention_expires_at DateTime64(6,'UTC') DEFAULT occurred_at + INTERVAL 30 DAY
  AFTER observed_at;
-ALTER TABLE xshield.audit_events MODIFY TTL retention_expires_at DELETE;
+ALTER TABLE xshield.audit_events MODIFY TTL toDateTime(retention_expires_at) DELETE;
 -- Expand redacted request facts before deploying a publisher that emits them.
 -- Upgrade the materialized-view target first so SELECT * remains insertable.
 ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS method String DEFAULT '' AFTER request_seq;

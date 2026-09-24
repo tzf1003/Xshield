@@ -889,6 +889,7 @@ struct CallbackQuery {
     error_description: Option<String>,
     error_uri: Option<String>,
     issuer: Option<String>,
+    session_state: Option<String>,
 }
 
 fn parse_callback_query(raw: Option<&str>) -> Result<CallbackQuery, ()> {
@@ -912,6 +913,9 @@ fn parse_callback_query(raw: Option<&str>) -> Result<CallbackQuery, ()> {
             "error_description" => result.error_description = Some(value.into_owned()),
             "error_uri" => result.error_uri = Some(value.into_owned()),
             "iss" => result.issuer = Some(value.into_owned()),
+            // Keycloak emits the optional OpenID Session Management value. It
+            // is not used for authorization, but is part of a valid callback.
+            "session_state" => result.session_state = Some(value.into_owned()),
             _ => return Err(()),
         }
     }
@@ -1611,6 +1615,12 @@ mod tests {
         assert!(parse_callback_query(Some("code=one&error=bad&state=s")).is_err());
         assert!(parse_callback_query(Some("code=one&state=s&next=https%3A%2F%2Fevil")).is_err());
         assert!(parse_callback_query(Some("code=one&state=s&iss=https%3A%2F%2Fissuer")).is_ok());
+        assert!(
+            parse_callback_query(Some(
+                "code=one&state=s&iss=https%3A%2F%2Fissuer&session_state=provider-session"
+            ))
+            .is_ok()
+        );
         assert!(
             parse_callback_query(Some("error=denied&error_description=policy&state=s")).is_ok()
         );
