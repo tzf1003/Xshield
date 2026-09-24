@@ -177,6 +177,10 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 分享 API 集成测试复用 workspace 固定版本的 `clickhouse`（MIT OR Apache-2.0）和内部 `xshield-worker`（Apache-2.0）作为开发依赖，用于检验实际生产事件和发布器；版本及许可证检查随 workspace 统一维护，网关运行时依赖不变。
 
+### 持久化案件分析任务（MVP）
+
+案件清单分析通过 `POST /control/v1/cases/{case_id}/analyze` 创建耐久任务，并由 `GET /control/v1/jobs/{job_id}` 读取本人范围内的状态。Node 契约回归固定检查空正文、路径、幂等头、`202` 响应、重复读取、未知任务同构返回、完成时间一致性和任务 ID 校验；Rust 回归覆盖 owner scope、重复键精确重放、参数冲突、案件不可用、角色审计及 `console.case.analyze`/`console.job.read` 的 typed target。任务当前只提交案件 catalog 的计数快照，写入迁移 0038 的 PostgreSQL 表并以 `succeeded` 终态返回；模型调用、正文读取、导出、回放和业务资格不在此闭环内。真实 PostgreSQL wire 回归随案件脚本补充，未配置隔离数据库时不宣称已执行。
+
 故障回归以数据库时间强制租约过期，验证索引写入成功后旧 token 确认被拒绝，重新领取可确认且底表重复行在 active 视图合并为一条。真实缺失目标表返回 `OUTBOX_INDEX_UNAVAILABLE`，延迟期间不领取，到期并恢复目标后重试成功；同一 event_id 修改合成正文返回 `OUTBOX_INTEGRITY_CONFLICT` 并保持未确认。断言失败后仍等待清理本测试所属的双库数据。该回归验证数据库集成与故障注入，不覆盖进程崩溃、网络分区或生产负载。
 
 真实 Outbox 回归还覆盖请求摘要的混合来源：较早 ID、序号为 1 的 GET 目标资格先到，摘要保持来源方法/操作为空；同一 request_id 的 POST 来源请求随后到达，两个查询视图均返回来源方法与操作，资格事件继续保留其目标语义。

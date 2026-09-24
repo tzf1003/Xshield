@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3846,
-  "passed_count": 3846,
+  "checks_total": 3847,
+  "passed_count": 3847,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -19117,6 +19117,11 @@
     },
     {
       "name": "link:docs/13-audit-storage-reliability.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
       "passed": true,
       "detail": ""
     },

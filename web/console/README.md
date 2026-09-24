@@ -8,6 +8,8 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 案件工作台另外调用本人案件列表和集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。
 
+案件工作台也可显式提交案件清单分析：`POST /control/v1/cases/{case_id}/analyze` 返回耐久 `job_` 任务，随后由 `GET /control/v1/jobs/{job_id}` 读取本人范围内的状态。客户端保留原幂等键，严格校验 `202` 任务投影、完成时间与计数关系；未知或他人任务只显示同构未找到。当前页面契约只覆盖 catalog 计数快照，不触发模型、正文读取、导出或回放。
+
 证据访问工作台调用申请、详情、批准/拒绝及内容端点，分别校验 Investigator、申请主体或 Approver、独立 Approver、获批主体 Reader。详情显示原始理由、审批历史与目标状态，原文通过显式附件下载交付。
 
 “我的申请”按本人主体发现历史记录，允许 Investigator、SensitiveEvidenceReader 或 SensitiveEvidenceApprover；“审批待办”要求 SensitiveEvidenceApprover，列出同作用域其他主体的 pending 申请。列表逐页替换，打开记录时重新读取详情；每页展示独立数据库观察时间和管理请求 ID。

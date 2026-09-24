@@ -15,6 +15,7 @@ mod causality;
 mod evidence_access_inspection;
 mod evidence_access_list;
 mod identity;
+mod jobs;
 mod ledger_inspection;
 mod model_call_list;
 mod search;
@@ -54,7 +55,7 @@ use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{
         AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-        EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, SiteId, TenantId,
+        EvidenceAccessRequestId, GrantId, JobId, ModelCallId, RequestId, SiteId, TenantId,
     },
     investigation::{
         EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
@@ -3647,6 +3648,37 @@ impl ControlPlane {
         )
     }
 
+    fn append_job_access_event(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        target_job_id: &JobId,
+        outcome: &'static str,
+        reason_code: &'static str,
+    ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence_bytes_with_job(
+            request_id,
+            subject_ref,
+            jobs::READ_ACCESS,
+            None,
+            None,
+            None,
+            None,
+            None,
+            outcome,
+            reason_code,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(target_job_id),
+        )
+    }
+
     fn append_calibration_report_access_event(
         &self,
         request_id: &str,
@@ -3741,6 +3773,52 @@ impl ControlPlane {
         target_calibration_report_id: Option<&CalibrationReportId>,
         target_agent_run_id: Option<&AgentRunId>,
     ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence_bytes_with_job(
+            request_id,
+            subject_ref,
+            action,
+            target_request_id,
+            target_artifact_id,
+            target_case_id,
+            target_access_request_id,
+            target_model_call_id,
+            outcome,
+            reason_code,
+            evidence_refs,
+            bytes_read,
+            query_digest,
+            target_grant_id,
+            target_binding_id,
+            target_hold_id,
+            target_calibration_report_id,
+            target_agent_run_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_access_event_with_evidence_bytes_with_job(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        action: AccessAction,
+        target_request_id: Option<&RequestId>,
+        target_artifact_id: Option<&ArtifactId>,
+        target_case_id: Option<&CaseId>,
+        target_access_request_id: Option<&EvidenceAccessRequestId>,
+        target_model_call_id: Option<&ModelCallId>,
+        outcome: &'static str,
+        reason_code: &'static str,
+        evidence_refs: &[&str],
+        bytes_read: Option<u64>,
+        query_digest: Option<&str>,
+        target_grant_id: Option<&GrantId>,
+        target_binding_id: Option<&AuthBindingId>,
+        target_hold_id: Option<&EventId>,
+        target_calibration_report_id: Option<&CalibrationReportId>,
+        target_agent_run_id: Option<&AgentRunId>,
+        target_job_id: Option<&JobId>,
+    ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
             .lock()
@@ -3789,6 +3867,7 @@ impl ControlPlane {
                 target_calibration_report_id: target_calibration_report_id
                     .map(CalibrationReportId::as_str),
                 target_agent_run_id: target_agent_run_id.map(AgentRunId::as_str),
+                target_job_id: target_job_id.map(JobId::as_str),
                 query_digest,
                 outcome,
                 reason_code,
@@ -3838,6 +3917,10 @@ pub fn router(control: ControlPlane) -> Router {
         .route(MODEL_CALL_PATH, get(model_call_handler))
         .route(AGENT_RUN_PATH, get(agent_run_handler))
         .route(
+            jobs::PATH,
+            get(jobs::read_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
             calibration_report_inspection::PATH,
             get(calibration_report_inspection::handler).layer(DefaultBodyLimit::max(0)),
         )
@@ -3885,6 +3968,10 @@ pub fn router(control: ControlPlane) -> Router {
             post(create_case_handler)
                 .get(case_list::handler)
                 .layer(DefaultBodyLimit::max(CASE_BODY_BYTES_MAX)),
+        )
+        .route(
+            jobs::ANALYZE_PATH,
+            post(jobs::analyze_handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(
             case_items::PATH,
@@ -4107,6 +4194,7 @@ enum EndpointResult {
     RequestEvents(RequestEventsResponse),
     ModelCall(ModelCallResponse),
     AgentRun(AgentRunResponse),
+    Job(StatusCode, jobs::JobResponse),
     Search(search::SearchResponse),
     Causality(causality::CausalityResponse),
     RequestEvidence(RequestEvidenceResponse),
@@ -4126,6 +4214,7 @@ impl IntoResponse for EndpointResult {
             Self::RequestEvents(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::ModelCall(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::AgentRun(response) => (StatusCode::OK, Json(response)).into_response(),
+            Self::Job(status, response) => (status, Json(response)).into_response(),
             Self::Search(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Causality(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
@@ -4772,6 +4861,8 @@ struct AccessPayload<'a> {
     target_calibration_report_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_agent_run_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_job_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,

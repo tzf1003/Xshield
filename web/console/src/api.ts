@@ -68,6 +68,9 @@ import type {
   CaseItemAdded,
   CaseClosed,
 } from "./cases.ts";
+import { decodeJobResponse, validateJobId } from "./jobs.ts";
+import type { JobResponse } from "./jobs.ts";
+export type { JobResponse } from "./jobs.ts";
 import {
   validateAccessId, decodeAccessRequested, decodeAccessInspection,
   decodeAccessDecision, accessPattern,
@@ -1941,6 +1944,34 @@ export class ControlClient {
       signal,
       JSON.stringify({ reason }),
       key,
+    );
+  }
+
+  /** Start the bounded, metadata-only case inventory analysis. Keep the exact
+   * key and case ID until the durable 202 response resolves any uncertainty. */
+  async analyzeCase(
+    caseId: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<JobResponse> {
+    validateCaseId(caseId);
+    this.#idempotencyKey(key);
+    return this.#request(
+      `cases/${caseId}/analyze`,
+      (value, status) => decodeJobResponse(value, status, caseId),
+      signal,
+      "",
+      key,
+    );
+  }
+
+  /** Read one owner-scoped durable job; a foreign or unknown job is opaque. */
+  async job(jobId: string, signal?: AbortSignal): Promise<JobResponse> {
+    validateJobId(jobId);
+    return this.#request(
+      `jobs/${jobId}`,
+      (value, status) => decodeJobResponse(value, status),
+      signal,
     );
   }
 

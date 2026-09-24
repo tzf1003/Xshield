@@ -59,6 +59,8 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | POST /control/v1/cases/{case_id}/items | 将同作用域有效证据引用加入本人开放案件 |
 | GET /control/v1/cases/{case_id}/items | 查询本人案件的有界证据引用集合及 catalog 状态 |
 | POST /control/v1/cases/{case_id}/close | 关闭本人案件并保留调查历史 |
+| POST /control/v1/cases/{case_id}/analyze | 生成只读案件清单分析任务（MVP） |
+| GET /control/v1/jobs/{job_id} | 查看本人任务状态与确定性分析结果 |
 | POST /control/v1/cases/{case_id}/holds | 管理员为案件成员证据创建保留锁 |
 | GET /control/v1/cases/{case_id}/holds | 管理员分页查看案件保留历史 |
 | POST /control/v1/evidence-holds/{hold_id}/release | 管理员显式释放保留锁 |
@@ -73,6 +75,8 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 当前案件创建接口要求 `Investigator`、管理机器凭证和 16–128 字节规范 `Idempotency-Key`；tenant/site 与 owner 均由服务端身份确定，请求只接受严格 JSON `purpose`。每个 owner/tenant/site 的 open 案件数受启动配置限制，案件与 `case.created` outbox 同事务提交；精确重试返回原案件，不同参数复用键返回 409。
 
 案件关闭要求相同角色与本人归属，严格接受 `reason` 与独立用途的幂等键。关闭状态、理由及 `case.closed` outbox 同事务提交，并释放 open 案件容量；精确重试返回原关闭时间。关闭后的历史集合仍可查询，后续新增关联、访问申请/批准及读取资格校验继续要求 open 状态；既已通过校验的在途读取可能完成。具体失败、审计和迁移边界见 [29.18](29-api-endpoint-catalog.md#2918-已实现的案件关闭契约)。
+
+案件清单分析 MVP 要求 Investigator、固定 tenant/site、空请求体和规范幂等键；事务内只统计本人案件的成员引用及当前 active catalog 数，不读取 vault、不调用模型、不授予证据资格。首次和精确重试返回 202 与耐久 `job_id`，任务记录为 `case_analysis/succeeded` 并保留检查点；不同案件复用同一键返回 409，跨主体目标统一 404。`GET /control/v1/jobs/{job_id}` 只读取本人任务，规范但不可见的任务返回 `found=false`，成功和失败均写独立 `console.job.read` 审计。完整边界见 [29.31](29-api-endpoint-catalog.md#2931-已实现的案件清单分析与任务状态契约-mvp)。
 
 案件证据关联要求同一角色、固定作用域与幂等键，只接受本人 open 案件及同作用域 active 未过期 artifact。每案最多 128 项，关联与 `case.evidence.added` outbox 原子提交；关联不授予内容读取权限，也不延长 artifact 保留期限。精确重试返回原关联时间，详情见 [29.16](29-api-endpoint-catalog.md#2916-已实现的案件证据关联契约)。
 

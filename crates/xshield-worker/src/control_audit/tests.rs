@@ -16,6 +16,7 @@ const GRANT: &str = "grant_018f2a3b-4c5d-7000-8000-000000000009";
 const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-00000000000a";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-00000000000b";
 const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-00000000000c";
+const JOB: &str = "job_018f2a3b-4c5d-7000-8000-00000000000e";
 const HOLD_ACTIONS: &[(&str, &str, &str, &str)] = &[
     (
         "console.evidence.hold.created",
@@ -213,6 +214,65 @@ fn agent_run_access_contract_keeps_tool_payloads_out_of_management_audit() {
     denied["payload"]["subject_ref"] = Value::Null;
     denied["payload"]["target_agent_run_id"] = Value::Null;
     assert!(index(&denied).is_ok());
+}
+
+#[test]
+fn case_analysis_and_job_read_bind_only_typed_targets() {
+    let mut analysis = event();
+    analysis["event_type"] = "console.case.analyze".into();
+    analysis["payload"] = json!({
+        "method": "POST",
+        "path": "/control/v1/cases/{case_id}/analyze",
+        "subject_ref": "audit-operator",
+        "target_request_id": null,
+        "target_artifact_id": null,
+        "target_case_id": CASE,
+        "target_access_request_id": null,
+        "target_model_call_id": null,
+        "target_agent_run_id": null,
+        "target_grant_id": null,
+        "target_binding_id": null,
+        "target_hold_id": null,
+        "target_calibration_report_id": null,
+        "target_job_id": null,
+        "query_digest": null,
+        "outcome": "PASS",
+        "reason_code": "CONTROL_CASE_ANALYSIS_CREATED"
+    });
+    analysis["evidence_refs"] = json!([]);
+    assert!(index(&analysis).is_ok());
+    analysis["payload"]["reason_code"] = "CONTROL_CASE_ANALYSIS_REPLAYED".into();
+    assert!(index(&analysis).is_ok());
+    analysis["payload"]["target_case_id"] = Value::Null;
+    rejected(&analysis, "case analysis success without case target");
+
+    let mut job = event();
+    job["event_type"] = "console.job.read".into();
+    job["payload"] = json!({
+        "method": "GET",
+        "path": "/control/v1/jobs/{job_id}",
+        "subject_ref": "audit-operator",
+        "target_request_id": null,
+        "target_artifact_id": null,
+        "target_case_id": null,
+        "target_access_request_id": null,
+        "target_model_call_id": null,
+        "target_agent_run_id": null,
+        "target_grant_id": null,
+        "target_binding_id": null,
+        "target_hold_id": null,
+        "target_calibration_report_id": null,
+        "target_job_id": JOB,
+        "query_digest": null,
+        "outcome": "PASS",
+        "reason_code": "CONTROL_JOB_READ"
+    });
+    job["evidence_refs"] = json!([]);
+    assert!(index(&job).is_ok());
+    job["payload"]["target_job_id"] = "case_018f2a3b-4c5d-7000-8000-00000000000e".into();
+    rejected(&job, "wrong job prefix");
+    job["payload"]["target_job_id"] = Value::Null;
+    rejected(&job, "job read success without target");
 }
 
 #[test]

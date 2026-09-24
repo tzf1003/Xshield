@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { ApiError } from "./api";
-import type { ControlClient, Envelope } from "./api";
+import type { ControlClient, Envelope, JobResponse } from "./api";
 import { artifactPattern } from "./api-contract";
 import { casePattern, validCaseText, validIdempotencyKey } from "./cases";
 import type {
@@ -27,6 +27,13 @@ type Attempt = {
   request: FrozenRequest;
   phase: "pending" | "unknown" | "rejected" | "confirmed";
   result?: MutationResult;
+  error?: unknown;
+};
+type AnalysisRequest = { caseId: string; key: string };
+type AnalysisAttempt = {
+  request: AnalysisRequest;
+  phase: "pending" | "unknown" | "rejected" | "confirmed";
+  result?: JobResponse;
   error?: unknown;
 };
 type Run = <T extends Envelope>(
@@ -84,6 +91,8 @@ export function CasePanel({
   const [value, setValue] = useState("");
   const [key, setKey] = useState<string>(newKey);
   const [attempt, setAttempt] = useState<Attempt | null>(null);
+  const [analysisKey, setAnalysisKey] = useState<string>(newKey);
+  const [analysis, setAnalysis] = useState<AnalysisAttempt | null>(null);
   const mounted = useRef(true);
   // A ref freezes synchronously, including rapid double clicks before React paints.
   const inFlight = useRef(false);
@@ -97,10 +106,16 @@ export function CasePanel({
     if (!active) {
       setCollection(null);
       setReadError(null);
+      setAnalysis(null);
     }
   }, [active]);
-  const unresolved =
-    attempt?.phase === "pending" || attempt?.phase === "unknown";
+  const mutationUnresolved =
+    attempt?.phase === "pending" ||
+    attempt?.phase === "unknown";
+  const analysisUnresolved =
+    analysis?.phase === "pending" ||
+    analysis?.phase === "unknown";
+  const unresolved = mutationUnresolved || analysisUnresolved;
   useEffect(() => {
     if (!unresolved) return;
     const warn = (event: BeforeUnloadEvent) => {
@@ -115,6 +130,8 @@ export function CasePanel({
     onInvalidate();
     setCollection(null);
     setReadError(null);
+    setAnalysis(null);
+    setAnalysisKey(newKey());
     void onRun<CaseCollection>(
       (api, signal) => api.caseItems(target, cursor, signal),
       setCollection,
@@ -166,6 +183,79 @@ export function CasePanel({
     );
     inFlight.current = false;
     if (mounted.current && !handled) setAttempt({ request, phase: "unknown" });
+  }
+
+  async function analyze(request: AnalysisRequest) {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    const wasUnknown = analysis?.phase === "unknown";
+    setAnalysis({ request, phase: "pending" });
+    onInvalidate();
+    let handled = false;
+    await onRun<JobResponse>(
+      (api, signal) => api.analyzeCase(request.caseId, request.key, signal),
+      (result) => {
+        handled = true;
+        setAnalysis({ request, phase: "confirmed", result });
+      },
+      (error) => {
+        handled = true;
+        const knownRejection =
+          !wasUnknown &&
+          error instanceof ApiError &&
+          error.code.startsWith("CONTROL_") &&
+          [400, 403, 404, 409, 422, 429].includes(error.status);
+        setAnalysis({
+          request,
+          phase: knownRejection ? "rejected" : "unknown",
+          error,
+        });
+      },
+    );
+    inFlight.current = false;
+    if (mounted.current && !handled)
+      setAnalysis({ request, phase: "unknown" });
+  }
+
+  async function readAnalysis(jobId: string) {
+    if (inFlight.current || !analysis) return;
+    inFlight.current = true;
+    const request = analysis.request;
+    const previous = analysis.result;
+    setAnalysis({ request, phase: "pending", result: previous });
+    onInvalidate();
+    let handled = false;
+    await onRun<JobResponse>(
+      (api, signal) => api.job(jobId, signal),
+      (result) => {
+        handled = true;
+        setAnalysis({ request, phase: "confirmed", result });
+      },
+      (error) => {
+        handled = true;
+        setAnalysis({ request, phase: "unknown", result: previous, error });
+      },
+    );
+    inFlight.current = false;
+    if (mounted.current && !handled)
+      setAnalysis({ request, phase: "unknown", result: previous });
+  }
+
+  function submitAnalysis(event: FormEvent) {
+    event.preventDefault();
+    const target = collection?.case.case_id ?? caseId;
+    if (
+      analysis ||
+      !casePattern.test(target) ||
+      !validIdempotencyKey(analysisKey)
+    )
+      return;
+    void analyze({ caseId: target, key: analysisKey });
+  }
+
+  function resetAnalysis() {
+    setAnalysis(null);
+    setAnalysisKey(newKey());
   }
 
   const openCase = collection?.case.status === "open";
@@ -325,7 +415,7 @@ export function CasePanel({
                       : `${actions[attempt.request.action]}已确认`}
               </h3>
               <CaseFailure error={attempt.error} />
-              {unresolved && (
+              {mutationUnresolved && (
                 <div className="notice warning">
                   服务端可能已经提交。保留原幂等键与参数，使用下方“原样重试”确认结果。离开或会话清空前，请手动保存这份请求。
                 </div>
@@ -396,7 +486,7 @@ export function CasePanel({
                 </button>
                 <button
                   className="text-button"
-                  disabled={busy || unresolved}
+                  disabled={busy || mutationUnresolved}
                   onClick={() => {
                     setAttempt(null);
                     setValue("");
@@ -433,6 +523,8 @@ export function CasePanel({
                 setCaseId(event.target.value);
                 setCollection(null);
                 setReadError(null);
+                setAnalysis(null);
+                setAnalysisKey(newKey());
               }}
               placeholder="case_…"
               autoComplete="off"
@@ -487,6 +579,96 @@ export function CasePanel({
                     案件已关闭，历史证据引用仍可浏览。
                   </p>
                 )}
+                <form className="case-analysis" onSubmit={submitAnalysis}>
+                  <h3>案件清单分析</h3>
+                  <p className="muted">
+                    只统计当前集合的引用与目录状态，结果写入耐久任务；不会读取正文。
+                  </p>
+                  <label htmlFor="case-analysis-key">分析幂等键</label>
+                  <input
+                    id="case-analysis-key"
+                    className="mono"
+                    value={analysis?.request.key ?? analysisKey}
+                    readOnly={Boolean(analysis)}
+                    onChange={(event) => setAnalysisKey(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    minLength={16}
+                    maxLength={128}
+                    required
+                  />
+                  {!analysis && (
+                    <button
+                      type="submit"
+                      disabled={
+                        busy ||
+                        !validIdempotencyKey(analysisKey) ||
+                        !casePattern.test(collection.case.case_id)
+                      }
+                    >
+                      提交清单分析
+                    </button>
+                  )}
+                  {analysis && (
+                    <div className="case-result" aria-live="polite">
+                      <strong>
+                        {analysis.phase === "pending"
+                          ? "分析提交中"
+                          : analysis.phase === "unknown"
+                            ? "分析结果未知"
+                            : analysis.phase === "rejected"
+                              ? "分析请求被拒绝"
+                              : "分析任务已确认"}
+                      </strong>
+                      <CaseFailure error={analysis.error} />
+                      {analysis.result?.job && (
+                        <Rows
+                          entries={[
+                            [
+                              "任务 ID",
+                              <span className="mono">
+                                {analysis.result.job.job_id}
+                              </span>,
+                            ],
+                            ["任务状态", analysis.result.job.status],
+                            ["引用总数", analysis.result.job.artifact_count],
+                            [
+                              "当前有效引用",
+                              analysis.result.job.active_artifact_count,
+                            ],
+                            [
+                              "管理请求 ID",
+                              <span className="mono">
+                                {analysis.result.request_id}
+                              </span>,
+                            ],
+                          ]}
+                        />
+                      )}
+                      <div className="case-actions">
+                        <button
+                          type="button"
+                          className="text-button"
+                          disabled={busy || analysis.phase === "pending"}
+                          onClick={() => {
+                            const jobId = analysis.result?.job?.job_id;
+                            if (jobId) void readAnalysis(jobId);
+                          }}
+                        >
+                          重新读取任务状态
+                        </button>
+                        <button
+                          type="button"
+                          className="text-button"
+                          disabled={busy || analysisUnresolved}
+                          onClick={resetAnalysis}
+                        >
+                          准备新分析
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </form>
               </div>
               <div className="case-items">
                 {collection.items.length === 0 ? (

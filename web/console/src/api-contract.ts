@@ -57,6 +57,13 @@ export const messages = {
   CONTROL_CASE_BUSY: "案件服务繁忙，请保留原键与参数后重试。",
   CONTROL_CASE_EVIDENCE_BUSY: "案件证据服务繁忙，请稍后重试。",
   CONTROL_CASE_CLOSE_BUSY: "案件关闭服务繁忙，请保留原键与参数后重试。",
+  CONTROL_CASE_ANALYSIS_BUSY: "案件分析服务繁忙，请保留原键与参数后重试。",
+  CONTROL_CASE_ANALYSIS_STORE_UNAVAILABLE:
+    "案件分析存储暂时不可用；写入结果可能未知，请保留原键与参数。",
+  CONTROL_CASE_ANALYSIS_TARGET_UNAVAILABLE:
+    "当前身份和范围内案件分析目标不可用。",
+  CONTROL_JOB_ID_INVALID: "请输入规范的任务 ID。",
+  CONTROL_JOB_STORE_UNAVAILABLE: "任务状态暂时不可用，请稍后重试。",
   CONTROL_CASE_STORE_UNAVAILABLE:
     "案件存储暂时不可用；写入结果可能未知，请保留原键与参数。",
   CONTROL_CASE_EVIDENCE_STORE_UNAVAILABLE:
@@ -148,6 +155,7 @@ export const requestPattern = new RegExp(`^req_${uuid}${endOfInput}`);
 export const artifactPattern = new RegExp(`^artifact_${uuid}${endOfInput}`);
 export const modelCallPattern = new RegExp(`^mdl_${uuid}${endOfInput}`);
 export const agentRunPattern = new RegExp(`^agt_${uuid}${endOfInput}`);
+export const jobPattern = new RegExp(`^job_${uuid}${endOfInput}`);
 export const calibrationReportPattern = new RegExp(`^calr_${uuid}${endOfInput}`);
 export const eventPattern = new RegExp(`^ev_${uuid}${endOfInput}`);
 export const grantPattern = new RegExp(`^grant_${uuid}${endOfInput}`);

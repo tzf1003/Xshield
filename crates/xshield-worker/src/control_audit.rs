@@ -24,6 +24,8 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.model.read"
             | "console.model.list"
             | "console.agent.read"
+            | "console.case.analyze"
+            | "console.job.read"
             | "console.calibration.report.read"
             | "console.grant.read"
             | "console.binding.read"
@@ -58,6 +60,7 @@ struct AccessPayload {
     target_access_request_id: Option<String>,
     target_model_call_id: Option<String>,
     target_agent_run_id: Option<String>,
+    target_job_id: Option<String>,
     target_grant_id: Option<String>,
     target_binding_id: Option<String>,
     target_hold_id: Option<String>,
@@ -116,6 +119,12 @@ impl AccessPayload {
         if event.event_type == "console.agent.read" {
             self.validate_agent_run_reason()?;
         }
+        if matches!(
+            event.event_type.as_str(),
+            "console.case.analyze" | "console.job.read"
+        ) {
+            self.validate_job_reason(&event.event_type)?;
+        }
         let success = self.outcome == "PASS";
         let valid_reason = match event.event_type.as_str() {
             "console.auth.login" => self.reason_code == "CONTROL_OIDC_LOGIN_STARTED",
@@ -152,6 +161,7 @@ impl AccessPayload {
             return Err(PublishError::InvalidEvent);
         }
         self.validate_targets(&event.event_type, success)?;
+        self.validate_job_target(&event.event_type, success)?;
         for reference in &event.evidence_refs {
             valid_prefixed_v7(reference, "artifact_")?;
         }
@@ -293,6 +303,63 @@ impl AccessPayload {
         } else {
             Err(PublishError::InvalidEvent)
         }
+    }
+
+    fn validate_job_reason(&self, event_type: &str) -> Result<(), PublishError> {
+        let valid = match (event_type, self.outcome.as_str()) {
+            ("console.case.analyze", "PASS") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CASE_ANALYSIS_CREATED" | "CONTROL_CASE_ANALYSIS_REPLAYED"
+            ),
+            ("console.case.analyze", "DENY") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_CASE_ID_INVALID"
+                    | "CONTROL_IDEMPOTENCY_KEY_INVALID"
+                    | "CONTROL_IDEMPOTENCY_UNAVAILABLE"
+                    | "CONTROL_CASE_ANALYSIS_BUSY"
+                    | "CONTROL_IDEMPOTENCY_CONFLICT"
+                    | "CONTROL_CASE_ANALYSIS_TARGET_UNAVAILABLE"
+            ),
+            ("console.case.analyze", "ERROR") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CASE_ANALYSIS_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+            ),
+            ("console.job.read", "PASS") => self.reason_code == "CONTROL_JOB_READ",
+            ("console.job.read", "DENY") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_JOB_ID_INVALID"
+            ),
+            ("console.job.read", "ERROR") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_JOB_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        valid.then_some(()).ok_or(PublishError::InvalidEvent)
+    }
+
+    fn validate_job_target(&self, event_type: &str, success: bool) -> Result<(), PublishError> {
+        if event_type == "console.job.read" {
+            if success && self.target_job_id.is_none() {
+                return Err(PublishError::InvalidEvent);
+            }
+        } else if self.target_job_id.is_some() {
+            return Err(PublishError::InvalidEvent);
+        }
+        if let Some(target) = &self.target_job_id {
+            valid_prefixed_v7(target, "job_")?;
+        }
+        Ok(())
     }
 
     fn validate_calibration_report_read_reason(&self) -> Result<(), PublishError> {
@@ -439,6 +506,7 @@ impl AccessPayload {
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests")
+            | ("console.job.read", "GET", "/control/v1/jobs/{job_id}")
             | ("console.causality.read", "POST", "/control/v1/causality") => [false; 10],
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")
@@ -471,7 +539,8 @@ impl AccessPayload {
             ("case.created", "POST", "/control/v1/cases")
             | ("case.closed", "POST", "/control/v1/cases/{case_id}/close")
             | ("console.case.read", "GET", "/control/v1/cases/{case_id}/items")
-            | ("console.evidence.hold.read", "GET", "/control/v1/cases/{case_id}/holds") => [
+            | ("console.evidence.hold.read", "GET", "/control/v1/cases/{case_id}/holds")
+            | ("console.case.analyze", "POST", "/control/v1/cases/{case_id}/analyze") => [
                 false, false, true, false, false, false, false, false, false, false,
             ],
             ("case.evidence.added", "POST", "/control/v1/cases/{case_id}/items") => [

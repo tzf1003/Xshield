@@ -58,6 +58,91 @@ async function browseCase(page: Page, caseId = CASE_ID) {
     .click();
 }
 
+test("case analysis waits for explicit submit and reads the durable job", async ({
+  page,
+}) => {
+  const jobId = "job_018f2a3b-4c5d-7000-8000-000000000041";
+  const analysisKey = "synthetic-case-analysis-key-0001";
+  let analysisCalls = 0;
+  let jobReads = 0;
+  const calls = await mockCases(page, async (route, url) => {
+    if (url.pathname.endsWith("/items")) {
+      await route.fulfill({ json: caseCollectionFixture() });
+    } else if (url.pathname.endsWith("/analyze")) {
+      analysisCalls += 1;
+      await route.fulfill({
+        status: 202,
+        json: {
+          request_id: "req_018f2a3b-4c5d-7000-8000-000000000042",
+          tenant_id: "tenant_demo",
+          site_id: "site_demo",
+          found: true,
+          job: {
+            job_id: jobId,
+            kind: "case_analysis",
+            status: "succeeded",
+            checkpoint: "inventory_committed",
+            reason_code: "CONTROL_CASE_ANALYSIS_COMPLETE",
+            retryable: false,
+            case_id: CASE_ID,
+            artifact_count: 3,
+            active_artifact_count: 2,
+            created_at: "2026-09-20T08:00:00.000Z",
+            updated_at: "2026-09-20T08:00:00.123Z",
+            completed_at: "2026-09-20T08:00:00.123Z",
+            replayed: false,
+          },
+        },
+      });
+    } else if (url.pathname.endsWith(`/jobs/${jobId}`)) {
+      jobReads += 1;
+      const response = {
+        request_id: "req_018f2a3b-4c5d-7000-8000-000000000043",
+        tenant_id: "tenant_demo",
+        site_id: "site_demo",
+        found: true,
+        job: {
+          job_id: jobId,
+          kind: "case_analysis",
+          status: "succeeded",
+          checkpoint: "inventory_committed",
+          reason_code: "CONTROL_CASE_ANALYSIS_COMPLETE",
+          retryable: false,
+          case_id: CASE_ID,
+          artifact_count: 3,
+          active_artifact_count: 2,
+          created_at: "2026-09-20T08:00:00.000Z",
+          updated_at: "2026-09-20T08:00:00.123Z",
+          completed_at: "2026-09-20T08:00:00.123Z",
+          replayed: false,
+        },
+      };
+      await route.fulfill({ json: response });
+    } else {
+      await route.fulfill({ json: caseListFixture() });
+    }
+  });
+  await connectCases(page);
+  await browseCase(page);
+  await expect(page.getByRole("heading", { name: "案件清单分析" })).toBeVisible();
+  expect(analysisCalls).toBe(0);
+  await page.getByLabel("分析幂等键", { exact: true }).fill(analysisKey);
+  await page.getByRole("button", { name: "提交清单分析", exact: true }).click();
+  await expect(page.getByText("分析任务已确认", { exact: true })).toBeVisible();
+  expect(analysisCalls).toBe(1);
+  await page.getByRole("button", { name: "重新读取任务状态", exact: true }).click();
+  await expect(page.getByText("任务状态", { exact: true })).toBeVisible();
+  expect(jobReads).toBe(1);
+  expect(calls.filter((call) => call.path.endsWith("/analyze"))).toEqual([
+    {
+      path: `/control/v1/cases/${CASE_ID}/analyze`,
+      method: "POST",
+      key: analysisKey,
+      body: null,
+    },
+  ]);
+});
+
 test("case list explicitly reads live pages and opens a freshly authorized collection", async ({
   page,
 }) => {

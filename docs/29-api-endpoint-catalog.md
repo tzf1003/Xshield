@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -29,10 +29,10 @@
 | POST /control/v1/cases/{case_id}/holds | 管理员保留案件成员证据 | console.evidence.hold.created |
 | POST /control/v1/evidence-holds/{hold_id}/release | 管理员释放保留锁 | console.evidence.hold.released |
 | GET /control/v1/cases/{case_id}/holds | 管理员分页查询保留历史 | console.evidence.hold.read |
-| POST /control/v1/cases/{id}/analyze | 启动只读调查Agent | agent.started，工具/模型独立事件 |
+| POST /control/v1/cases/{id}/analyze | 启动只读案件清单分析任务（MVP） | console.case.analyze |
 | POST /control/v1/replays | 离线规则评估，不送原站 | replay.requested/completed |
 | POST /control/v1/exports | 带用途/范围/审批的导出任务 | export.requested/approved/downloaded |
-| GET /control/v1/jobs/{id} | 查看任务进度与错误 | console.job.read |
+| GET /control/v1/jobs/{id} | 查看本人任务进度与错误 | console.job.read |
 | POST /control/v1/sites/{id}/candidates | 提交配置候选 | policy.proposed |
 | POST /control/v1/candidates/{id}/validate | 受控验证 | policy.tested |
 | POST /control/v1/candidates/{id}/approve | 审批不等于部署 | policy.approved |
@@ -395,4 +395,14 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 
 查询固定最多解码 64 个事件、单 payload 16 KiB、结果 1 MiB、2 秒索引预算及 5 秒客户端 deadline，并与其他分析读取共享单实例许可。已认证且路径有效的成功、未命中、容量/预算拒绝和依赖故障均追加独立 `console.agent.read`；通过路径校验的目标写入 `target_agent_run_id`，成功的去重 evidence refs 才进入审计引用。无效 ID 为 `CONTROL_AGENT_RUN_ID_INVALID`/400，容量/预算、超时、索引或健康故障沿用受限查询错误族；审计失败返回 `AUDIT_DURABILITY_FAILED`/503 并扣留结果，响应统一 `Cache-Control: private, no-store`。
 
-该接口只交付历史脱敏观察，不等同于调查 Agent 执行器；`POST /control/v1/cases/{case_id}/analyze`、自然语言计划、完整工具树、只读回放与导出仍保持未实现的设计契约。部署先升级能够识别 `console.agent.read`、`target_agent_run_id` 和新原因码的管理 journal 发布器，再开放路由；无新增 migration 或运行时秘密存储。
+该接口只交付历史脱敏观察，不等同于调查 Agent 执行器；自然语言计划、完整工具树、只读回放与导出仍保持未实现的设计契约。
+
+## 29.31 已实现的案件清单分析与任务状态契约（MVP）
+
+`POST /control/v1/cases/{case_id}/analyze` 要求固定 tenant/site 内的 `Investigator`、单值管理 Bearer、规范 `Idempotency-Key` 和空请求体。服务端先校验案件 UUIDv7、主体/案件归属和幂等摘要，再在 PostgreSQL 同一事务中读取案件状态、案件成员总数与当前 active catalog 引用数，写入迁移 0038 的 `control_jobs`。该 MVP 是确定性的只读清单分析：不调用模型、不读取 vault 内容、不创建证据资格，也不声称完成 Agent 工具树或回放。
+
+事务以主体/作用域锁串行化同一幂等域；相同主体、作用域、键和案件返回原 `job_id` 与原完成时间，改案件或参数返回 `CONTROL_IDEMPOTENCY_CONFLICT`/409。目标不属于本人或当前作用域统一为 `CONTROL_CASE_ANALYSIS_TARGET_UNAVAILABLE`/404，不泄露案件存在性；连接池、SQL/锁等待和审计均有有界预算。首次与精确重试返回 202，响应包含 `job_id`、`kind=case_analysis`、`status=succeeded`、`checkpoint=inventory_committed`、案件 ID、两个计数、稳定完成原因和时间戳。
+
+`GET /control/v1/jobs/{job_id}` 仅允许同一固定作用域内的 `Investigator` 读取本人任务；未知、跨主体或跨作用域的规范 ID 统一返回 200 `found=false`。成功、未命中、路径/认证拒绝和存储故障均写独立 `console.job.read`，成功目标写 `target_job_id`，审计不保存原幂等键、计数以外的案件内容、凭证或正文。结果和管理 journal 均设置 `private, no-store`；后续长任务可复用此状态机，但必须新增明确的 producer、checkpoint、终态原因和资源预算，不得把该 MVP 伪装成通用执行器。
+
+部署先应用 `0038_m4_control_jobs.sql`，再升级能识别 `console.case.analyze`、`console.job.read` 和 `target_job_id` 的管理 journal 发布器，最后开放控制路由与界面。回滚先停用分析入口，保留新发布器直至已封存管理事件发布完成；任务历史与案件事实继续按各自保留策略保存。

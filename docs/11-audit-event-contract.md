@@ -83,7 +83,7 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 ## 11.7 已实现的管理访问审计发布
 
-封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.grant.read`、`console.binding.read`、`console.query.executed`、`console.case.read`、`console.case.list`、`console.evidence.access.read`、`console.evidence.access.list`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
+封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.grant.read`、`console.binding.read`、`console.query.executed`、`console.case.read`、`console.case.list`、`console.case.analyze`、`console.job.read`、`console.evidence.access.read`、`console.evidence.access.list`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；任务读取的 `job_` 目标使用独立字段校验。重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
 
 `console.case.list` 固定对应 `GET /control/v1/cases`，成功（含空页）要求主体和 `CONTROL_CASES_READ`。全部 target 字段、query_digest、bytes_read 仅允许缺省/null，evidence_refs 为空；事件不保存案件用途、列表正文或游标。权限/输入/预算拒绝为 DENY，依赖失败为 ERROR；启用端点前先升级管理 journal 发布器。
 
@@ -108,6 +108,8 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 目标 case/hold/access/model/request、主体、query_digest 与 bytes_read 保留在受限的原始事件载荷；脱敏查询返回通用摘要和证据引用，不直接返回该载荷。`case_id` 过滤按固定事件/阶段读取案件目标，`artifact_id` 按 evidence_refs 及固定管理事件的证据目标定位；`calibration_report_id` 与 `evidence_hold_id` 均要求同一主体同时具备 Investigator 与 AuditAdministrator，分别读取固定报告/保留历史及对应管理操作目标；权限拒绝使用稳定原因码并仅以 query_digest 形成既有 `console.query.executed` 的 DENY 终态。`model_call_id` 过滤以 Investigator 身份读取固定 `model.*` 生命周期事件及 `console.model.read` 目标；它不替代该详情路由的独立 Observer 重鉴权。`evidence_access_request_id` 过滤以 Investigator 身份读取固定 `evidence.access.*` 申请/决策事件及 `console.evidence.access.read` 目标；它不替代申请详情、审批或原文读取各自的重鉴权。`subject_ref` 过滤以 Investigator 身份在固定 tenant/site 范围内精确匹配 `subject_ref`、`principal_ref`、`authorization_context_ref`、`previous_principal_ref`、`previous_authorization_context_ref` 顶层字段；查询摘要对该值使用用途隔离 HMAC，结果不回显主体。完整映射见 [29.14](29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约)。完整跨事件展开仍继续交付；引用可检索不扩大证据读取权限。管理 journal 描述接口访问尝试和重试；未认证请求超出限流预算时直接返回 `CONTROL_RATE_LIMITED`，不追加逐请求访问日志。PostgreSQL 同名 outbox 记录事务状态转换，两者 event_id 与载荷契约不同；journal 发布器与下述 outbox 发布器分别绑定各自来源和契约。
 
 `agent_run_id` 历史检索以 Investigator 身份读取固定 `agent.started`、`agent.tool_called`、`agent.tool_result`、`agent.artifact_created`、`agent.finished` 事件及 `console.agent.read` 目标；只投影脱敏历史摘要，不读取 Agent 输入/输出或工具正文，不触发执行、回放或权限提升。`GET /control/v1/agent-runs/{agent_run_id}` 另以 Observer 重新鉴权读取固定事件族的脱敏生命周期，并独立审计 `console.agent.read`；工具参数、结果和权限快照仍隔离。完整映射见 [29.14](29-api-endpoint-catalog.md#2914-已实现的受限调查查询契约) 与 [29.30](29-api-endpoint-catalog.md#2930-已实现的-agent-运行脱敏详情契约)。
+
+案件清单分析 MVP 由 `console.case.analyze` 记录案件目标，`console.job.read` 记录任务状态查询；两者仅保存确定性管理事实，不把任务状态当作 Agent 生命周期、证据读取资格或回放结果。`target_job_id` 只允许出现在任务状态查询成功或已校验的终态错误中，并按 `job_` UUIDv7 强类型解析；审计不记录幂等原文、案件正文或模型输入输出。
 
 ## 11.8 已实现的按事件族 outbox 发布
 
