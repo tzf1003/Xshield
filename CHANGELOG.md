@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 修复调查导出包在批准提交结果未知后的重试边界：包请求 ID 固定由 `export_id` 派生，重试会按固定 scope、类型、父引用与期限复用已发布 catalog 对象，避免重复活动包；增加稳定 ID 回归和 PostgreSQL 包完成精确重放覆盖。
+
 - 增加离线校准批量读取 capability/port 契约：`calcap_` 精确冻结 tenant/site、有效期、四份分区 manifest、model-record/label artifact 对及 role、样本和聚合字节上限；请求只接受 capability 导出的成员引用，拒绝跨 scope、过期、集合外、角色偏差及不同 capability 的引用。该边界与控制台单对象证据读取隔离，当前仍未实现 capability 发行/持久化、消费状态、catalog/vault 内容读取、读取审计或真实校准。
 
 - 增加离线校准报告发布元数据契约：`calr_` 报告 ID 和独立 report artifact 只投影冻结的批准、数据集/标签/任务/映射/阈值策略修订、四份 manifest 与模型身份；拒绝 report artifact 与 manifest 或样本来源 artifact 别名，保留显式未知的 resolved revision。`calibration.reported` 仅定义受限元数据 schema/消费契约，不包含样本、标签、概率、指标或供应商正文，也不实现 evidence 读取、报告持久化 producer、阈值/策略发布或真实校准。

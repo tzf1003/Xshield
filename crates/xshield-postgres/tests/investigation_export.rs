@@ -153,6 +153,26 @@ async fn investigation_export_is_scoped_idempotent_independent_and_download_boun
     assert_eq!(ready.status(), "ready");
     assert_eq!(ready.package_bytes(), Some(128));
 
+    let package_replay = store
+        .complete_investigation_export(
+            InvestigationExportPackage::new(
+                &export_id,
+                &package_artifact,
+                &package_request,
+                &"a".repeat(64),
+                128,
+            )
+            .expect("package replay command is valid"),
+            &tenant,
+            &site,
+        )
+        .await
+        .expect("package replay succeeds");
+    assert!(matches!(
+        package_replay,
+        InvestigationExportPackageOutcome::Existing(_)
+    ));
+
     let first = store
         .claim_investigation_export_download(&tenant, &site, &export_id)
         .await

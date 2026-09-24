@@ -29,10 +29,11 @@ use xshield_core::{
 };
 use xshield_evidence::EvidenceError;
 use xshield_postgres::{
-    EvidenceCatalogArtifactQuery, EvidenceCatalogPublish, EvidenceCatalogWriteOutcome,
-    InvestigationExportCreate, InvestigationExportDecision, InvestigationExportDecisionOutcome,
-    InvestigationExportPackage, InvestigationExportPackageOutcome, InvestigationExportRecord,
-    InvestigationExportSnapshot, InvestigationExportWriteOutcome,
+    EvidenceCatalogArtifactQuery, EvidenceCatalogPublish, EvidenceCatalogQuery,
+    EvidenceCatalogWriteOutcome, InvestigationExportCreate, InvestigationExportDecision,
+    InvestigationExportDecisionOutcome, InvestigationExportPackage,
+    InvestigationExportPackageOutcome, InvestigationExportRecord, InvestigationExportSnapshot,
+    InvestigationExportWriteOutcome,
 };
 
 /// Export request endpoint.
@@ -832,22 +833,7 @@ impl ControlPlane {
         snapshot: InvestigationExportSnapshot,
         replayed: bool,
     ) -> EndpointResult {
-        let Some(port) = self.evidence_read.clone() else {
-            return self
-                .audited_export_error_async(
-                    request_id,
-                    Some(subject),
-                    Some(record.export_id().clone()),
-                    APPROVE_ACCESS,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "CONTROL_EXPORT_STORAGE_UNAVAILABLE",
-                    "export storage is temporarily unavailable",
-                    true,
-                    "retry_later",
-                )
-                .await;
-        };
-        let Ok(package_request_id) = RequestId::parse(request_id.clone()) else {
+        let Ok(package_request_id) = stable_package_request_id(record.export_id()) else {
             return internal_error(&request_id);
         };
         let Some(package_expiry) = record.expires_at().filter(|value| *value > Utc::now()) else {
@@ -884,85 +870,200 @@ impl ControlPlane {
             .iter()
             .map(|item| item.artifact_id().as_str().to_owned())
             .collect::<Vec<_>>();
-        let tenant = self.config.tenant_id.clone();
-        let site = self.config.site_id.clone();
-        let package_request_for_write = package_request_id.clone();
-        let write_result = tokio::task::spawn_blocking(move || {
-            port.write_export_package(
-                &tenant,
-                &site,
-                &package_request_for_write,
-                &parent_refs,
-                package_expiry,
-                &package,
-            )
-        })
-        .await;
-        let Ok(Ok(manifest)) = write_result else {
-            return self
-                .audited_export_error_async(
-                    request_id,
-                    Some(subject),
-                    Some(record.export_id().clone()),
-                    APPROVE_ACCESS,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "CONTROL_EXPORT_STORAGE_UNAVAILABLE",
-                    "export storage is temporarily unavailable",
-                    true,
-                    "retry_later",
-                )
-                .await;
-        };
-        let Ok(event_id) = xshield_core::domain::EventId::parse(format!("ev_{}", Uuid::now_v7()))
-        else {
-            return internal_error(&request_id);
-        };
-        let envelope = package_catalog_envelope(
-            &event_id,
-            self.config.tenant_id.as_str(),
-            self.config.site_id.as_str(),
-            &manifest.manifest().request_id,
-            &manifest.manifest().artifact_id,
-        );
-        let Ok(catalog_command) = EvidenceCatalogPublish::new(&manifest, &event_id, &envelope)
-        else {
-            return internal_error(&request_id);
-        };
-        let published = tokio::time::timeout(
-            Duration::from_secs(15),
-            self.catalog.publish_evidence_manifest(catalog_command),
-        )
-        .await;
-        if !matches!(
-            published,
-            Ok(Ok(
-                EvidenceCatalogWriteOutcome::Published | EvidenceCatalogWriteOutcome::Existing
-            ))
+        // The approval transaction may commit before package completion. A
+        // retry must reuse an already-published package instead of creating a
+        // second active export object.
+        let expected_expiry = package_expiry.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let existing = match EvidenceCatalogQuery::new(
+            &self.config.tenant_id,
+            &self.config.site_id,
+            &package_request_id,
+            None,
+            128,
         ) {
-            return self
-                .audited_export_error_async(
-                    request_id,
-                    Some(subject),
-                    Some(record.export_id().clone()),
-                    APPROVE_ACCESS,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "CONTROL_EXPORT_STORE_UNAVAILABLE",
-                    "export service is temporarily unavailable",
-                    true,
-                    "retry_later",
+            Ok(query) => {
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    self.catalog.list_request_artifacts(query),
                 )
-                .await;
-        }
-        let package_bytes = manifest.manifest().bytes_saved;
-        let Ok(package_artifact_id) = ArtifactId::parse(manifest.manifest().artifact_id.clone())
-        else {
-            return internal_error(&request_id);
+                .await
+            }
+            Err(_) => return internal_error(&request_id),
         };
+        let existing = match existing {
+            Ok(Ok(page)) => {
+                let mut package = None;
+                for artifact in page.artifacts() {
+                    let manifest = artifact.manifest();
+                    if manifest.kind != "investigation_export_metadata" {
+                        continue;
+                    }
+                    if manifest.content_type != "application/json"
+                        || manifest.fidelity != xshield_evidence::EvidenceFidelity::Redacted
+                        || manifest.classification
+                            != xshield_evidence::EvidenceClassification::Restricted
+                        || manifest.parent_refs != parent_refs
+                        || manifest.expires_at != expected_expiry
+                    {
+                        return self
+                            .audited_export_error_async(
+                                request_id,
+                                Some(subject),
+                                Some(record.export_id().clone()),
+                                APPROVE_ACCESS,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "CONTROL_EXPORT_STORAGE_CORRUPT",
+                                "export package is temporarily unavailable",
+                                true,
+                                "retry_later",
+                            )
+                            .await;
+                    }
+                    let Ok(artifact_id) = ArtifactId::parse(manifest.artifact_id.clone()) else {
+                        return internal_error(&request_id);
+                    };
+                    let package_ref = (
+                        artifact_id,
+                        manifest.integrity.digest.clone(),
+                        manifest.bytes_saved,
+                    );
+                    if package.replace(package_ref).is_some() {
+                        return self
+                            .audited_export_error_async(
+                                request_id,
+                                Some(subject),
+                                Some(record.export_id().clone()),
+                                APPROVE_ACCESS,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "CONTROL_EXPORT_STORAGE_CORRUPT",
+                                "export package is temporarily unavailable",
+                                true,
+                                "retry_later",
+                            )
+                            .await;
+                    }
+                }
+                package
+            }
+            _ => {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_STORE_UNAVAILABLE",
+                        "export storage is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+        };
+        let package_ref = if let Some(existing) = existing {
+            existing
+        } else {
+            let Some(port) = self.evidence_read.clone() else {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_STORAGE_UNAVAILABLE",
+                        "export storage is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            };
+            let tenant = self.config.tenant_id.clone();
+            let site = self.config.site_id.clone();
+            let package_request_for_write = package_request_id.clone();
+            let write_result = tokio::task::spawn_blocking(move || {
+                port.write_export_package(
+                    &tenant,
+                    &site,
+                    &package_request_for_write,
+                    &parent_refs,
+                    package_expiry,
+                    &package,
+                )
+            })
+            .await;
+            let Ok(Ok(manifest)) = write_result else {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_STORAGE_UNAVAILABLE",
+                        "export storage is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            };
+            let Ok(event_id) =
+                xshield_core::domain::EventId::parse(format!("ev_{}", Uuid::now_v7()))
+            else {
+                return internal_error(&request_id);
+            };
+            let envelope = package_catalog_envelope(
+                &event_id,
+                self.config.tenant_id.as_str(),
+                self.config.site_id.as_str(),
+                &manifest.manifest().request_id,
+                &manifest.manifest().artifact_id,
+            );
+            let Ok(catalog_command) = EvidenceCatalogPublish::new(&manifest, &event_id, &envelope)
+            else {
+                return internal_error(&request_id);
+            };
+            let published = tokio::time::timeout(
+                Duration::from_secs(15),
+                self.catalog.publish_evidence_manifest(catalog_command),
+            )
+            .await;
+            if !matches!(
+                published,
+                Ok(Ok(
+                    EvidenceCatalogWriteOutcome::Published | EvidenceCatalogWriteOutcome::Existing
+                ))
+            ) {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_STORE_UNAVAILABLE",
+                        "export service is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+            let Ok(artifact_id) = ArtifactId::parse(manifest.manifest().artifact_id.clone()) else {
+                return internal_error(&request_id);
+            };
+            (
+                artifact_id,
+                manifest.manifest().integrity.digest.clone(),
+                manifest.manifest().bytes_saved,
+            )
+        };
+        let (package_artifact_id, package_digest, package_bytes) = package_ref;
         let Ok(package_command) = InvestigationExportPackage::new(
             record.export_id(),
             &package_artifact_id,
             &package_request_id,
-            &manifest.manifest().integrity.digest,
+            &package_digest,
             package_bytes,
         ) else {
             return internal_error(&request_id);
@@ -1530,6 +1631,11 @@ fn export_response(
     }
 }
 
+fn stable_package_request_id(export_id: &ExportId) -> Result<RequestId, ()> {
+    let suffix = export_id.as_str().strip_prefix("export_").ok_or(())?;
+    RequestId::parse(format!("req_{suffix}")).map_err(|_| ())
+}
+
 fn package_json(
     record: &InvestigationExportRecord,
     snapshot: &InvestigationExportSnapshot,
@@ -1634,4 +1740,19 @@ fn package_catalog_envelope(
         "sensitivity": "RESTRICTED",
         "integrity": {"state": "pending", "previous_hash": null, "event_hash": null}
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stable_package_request_id;
+    use xshield_core::domain::ExportId;
+
+    #[test]
+    fn package_request_id_is_stable_for_export_retries() {
+        let export_id = ExportId::parse("export_018f2a3b-4c5d-7000-8000-000000000901").unwrap();
+        let first = stable_package_request_id(&export_id).unwrap();
+        let second = stable_package_request_id(&export_id).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.as_str(), "req_018f2a3b-4c5d-7000-8000-000000000901");
+    }
 }
