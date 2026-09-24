@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${XSHIELD_DEV_POSTGRES_DB:-xshield}
+      POSTGRES_USER: ${XSHIELD_DEV_POSTGRES_USER:-xshield_dev}
+      POSTGRES_PASSWORD: ${XSHIELD_DEV_POSTGRES_PASSWORD:-xshield_dev}
+    ports:
+      - "127.0.0.1:${XSHIELD_DEV_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - xshield-dev-postgres:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:${XSHIELD_DEV_CLICKHOUSE_HTTP_PORT:-58123}:8123"
+      - "127.0.0.1:${XSHIELD_DEV_CLICKHOUSE_NATIVE_PORT:-59000}:9000"
+    volumes:
+      - xshield-dev-clickhouse:/var/lib/clickhouse
+      - ./sql/clickhouse.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      - ./dev/clickhouse/002-dev-user.sql:/docker-entrypoint-initdb.d/002-dev-user.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  oidc:
+    image: quay.io/keycloak/keycloak:26.7.4
+    command: ["start-dev", "--http-port=8080", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: dev-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: dev-admin-password
+      KC_HOSTNAME: http://127.0.0.1:58080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:58080:8080"
+    volumes:
+      - xshield-dev-oidc:/opt/keycloak/data
+      - ./dev/keycloak/xshield-dev-realm.json:/opt/keycloak/data/import/xshield-dev-realm.json:ro
+
+volumes:
+  xshield-dev-postgres:
+  xshield-dev-clickhouse:
+  xshield-dev-oidc:

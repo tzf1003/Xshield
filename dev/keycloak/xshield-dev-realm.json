@@ -1,0 +1,60 @@
+{
+  "realm": "xshield-dev",
+  "enabled": true,
+  "displayName": "Xshield local development",
+  "sslRequired": "NONE",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "eventsEnabled": true,
+  "eventsListeners": ["jboss-logging"],
+  "clients": [
+    {
+      "clientId": "xshield-console-dev",
+      "name": "Xshield local console",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "xshield-dev-client-secret",
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:5173/control/v1/auth/oidc/callback"
+      ],
+      "webOrigins": ["http://127.0.0.1:5173"],
+      "protocolMappers": [
+        {
+          "name": "xshield-dev-acr",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": {
+            "claim.name": "acr",
+            "claim.value": "1",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "00000000-0000-7000-8000-000000000001",
+      "username": "developer",
+      "enabled": true,
+      "email": "developer@xshield.local",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "xshield-dev-password",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

@@ -20,14 +20,21 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 ## 本地运行
 
-使用 Node.js 22.12+（22 系列）或 24+，在此目录执行：
+使用 Node.js 22.12+（22 系列）或 24+，推荐从仓库根目录执行：
 
 ```sh
-npm ci
-npm run dev
+./dev.sh
 ```
 
-也可以在仓库根目录执行 `./dev.sh` 启动同一 Vite 控制台；需要同时启动控制服务时使用 `./dev.sh --with-control`，但 PostgreSQL、ClickHouse、OIDC 及控制服务环境变量必须由调用者预先配置。脚本不生成或持久化凭据；`--with-control` 只复用调用者已导出的环境变量。
+它会编排本地 PostgreSQL、ClickHouse、Keycloak OIDC、`xshield-control` 和 Vite 控制台；首次运行需要 Docker Desktop，数据库迁移会从空数据卷自动执行。打开 `http://127.0.0.1:5173` 后，点击“使用企业身份登录”，使用本地开发身份 `developer` / `xshield-dev-password` 完成登录。该身份只存在于本地 Keycloak 开发 realm；本地 realm 的认证等级声明是开发测试值，不代表企业 MFA 验收。
+
+只启动前端（连接已存在的控制服务）时执行：
+
+```sh
+(cd web/console && npm ci && npm run dev)
+```
+
+等价的仓库根目录参数是 `./dev.sh --console-only`。`./dev.sh --reset` 只清理本地开发 Docker 数据卷并重新应用迁移。
 
 页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
