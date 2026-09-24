@@ -7,6 +7,7 @@ import {
   EXPORT_CASE_ID,
   EXPORT_ID,
   EXPORT_KEY,
+  EXPORT_PACKAGE_REQUEST_ID,
   exportDownloadHeaders,
   exportFixture,
 } from "./export-fixtures.ts";
@@ -26,6 +27,7 @@ test("export methods bind fixed routes, exact bodies and replay status", async (
   const pending = exportFixture();
   const replay = exportFixture("pending_approval", true);
   const ready = exportFixture("ready");
+  assert.equal(ready.package_request_id, EXPORT_PACKAGE_REQUEST_ID);
   const rejected = exportFixture("rejected");
   const replies = [pending, replay, ready, ready, rejected];
   const paths = [

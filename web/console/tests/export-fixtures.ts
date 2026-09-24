@@ -4,6 +4,7 @@ export const EXPORT_ID = "export_018f2a3b-4c5d-7000-8000-000000000071";
 export const EXPORT_CASE_ID = "case_018f2a3b-4c5d-7000-8000-000000000031";
 export const EXPORT_KEY = "synthetic-export-operation-key-0001";
 export const EXPORT_ARTIFACT_ID = "artifact_018f2a3b-4c5d-7000-8000-000000000072";
+export const EXPORT_PACKAGE_REQUEST_ID = "req_018f2a3b-4c5d-7000-8000-000000000071";
 const envelope = {
   request_id: "req_018f2a3b-4c5d-7000-8000-000000000099",
   tenant_id: "tenant_demo",
@@ -31,7 +32,7 @@ export function exportFixture(
       ? "2026-09-20T08:25:00.000Z"
       : null,
     package_artifact_id: ready ? EXPORT_ARTIFACT_ID : null,
-    package_request_id: ready ? envelope.request_id : null,
+    package_request_id: ready ? EXPORT_PACKAGE_REQUEST_ID : null,
     package_digest: ready ? "a".repeat(64) : null,
     package_bytes: ready ? 17 : null,
     download_count: 0,

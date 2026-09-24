@@ -417,6 +417,8 @@ pub enum InvestigationExportPackageOutcome {
     Completed(InvestigationExportRecord),
     /// The package was already attached.
     Existing(InvestigationExportRecord),
+    /// A ready export was submitted with different package metadata.
+    Conflict,
     /// The export is not currently attachable.
     Unavailable,
 }
@@ -699,7 +701,15 @@ impl PostgresIdentityStore {
                 .await?
             {
                 Some(record) if record.status() == "ready" => {
-                    InvestigationExportPackageOutcome::Existing(record)
+                    let matches = record.package_artifact_id() == Some(command.artifact_id)
+                        && record.package_request_id() == Some(command.request_id)
+                        && record.package_digest() == Some(command.digest)
+                        && record.package_bytes() == Some(command.bytes);
+                    if matches {
+                        InvestigationExportPackageOutcome::Existing(record)
+                    } else {
+                        InvestigationExportPackageOutcome::Conflict
+                    }
                 }
                 _ => InvestigationExportPackageOutcome::Unavailable,
             },

@@ -173,6 +173,26 @@ async fn investigation_export_is_scoped_idempotent_independent_and_download_boun
         InvestigationExportPackageOutcome::Existing(_)
     ));
 
+    let package_conflict = store
+        .complete_investigation_export(
+            InvestigationExportPackage::new(
+                &export_id,
+                &package_artifact,
+                &package_request,
+                &"b".repeat(64),
+                128,
+            )
+            .expect("conflicting package command is valid"),
+            &tenant,
+            &site,
+        )
+        .await
+        .expect("package conflict is observable");
+    assert!(matches!(
+        package_conflict,
+        InvestigationExportPackageOutcome::Conflict
+    ));
+
     let first = store
         .claim_investigation_export_download(&tenant, &site, &export_id)
         .await

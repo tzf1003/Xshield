@@ -1076,24 +1076,41 @@ impl ControlPlane {
                 &self.config.site_id,
             )
             .await;
-        let Ok(
-            InvestigationExportPackageOutcome::Completed(record)
-            | InvestigationExportPackageOutcome::Existing(record),
-        ) = completed
-        else {
-            return self
-                .audited_export_error_async(
-                    request_id,
-                    Some(subject),
-                    Some(record.export_id().clone()),
-                    APPROVE_ACCESS,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "CONTROL_EXPORT_STORE_UNAVAILABLE",
-                    "export storage is temporarily unavailable",
-                    true,
-                    "retry_later",
-                )
-                .await;
+        let record = match completed {
+            Ok(
+                InvestigationExportPackageOutcome::Completed(record)
+                | InvestigationExportPackageOutcome::Existing(record),
+            ) => record,
+            Ok(InvestigationExportPackageOutcome::Conflict) => {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_STORAGE_CORRUPT",
+                        "export package is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+            Ok(InvestigationExportPackageOutcome::Unavailable) | Err(_) => {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_STORE_UNAVAILABLE",
+                        "export storage is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
         };
         EndpointResult::Export(
             StatusCode::OK,
