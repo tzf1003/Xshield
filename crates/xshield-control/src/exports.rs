@@ -1281,6 +1281,10 @@ impl ControlPlane {
             CONTENT_DISPOSITION,
             HeaderValue::from_static("attachment; filename=\"investigation-export.json\""),
         );
+        response.headers_mut().insert(
+            "x-content-type-options",
+            HeaderValue::from_static("nosniff"),
+        );
         EndpointResult::Raw(super::no_store(response))
     }
 

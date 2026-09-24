@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3847,
-  "passed_count": 3847,
+  "checks_total": 3848,
+  "passed_count": 3848,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -19167,6 +19167,11 @@
     },
     {
       "name": "link:docs/18-api-and-data-models.md:12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/22-delivery-roadmap.md:15-console-and-api.md",
       "passed": true,
       "detail": ""
     },

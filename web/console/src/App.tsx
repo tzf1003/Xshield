@@ -18,6 +18,7 @@ import { LedgerPanel } from "./LedgerPanel";
 import { CasePanel } from "./CasePanel";
 import { EvidenceAccessPanel } from "./EvidenceAccessPanel";
 import { EvidenceHoldPanel } from "./EvidenceHoldPanel";
+import { ExportPanel } from "./ExportPanel";
 import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
@@ -46,7 +47,7 @@ import {
 } from "./panels";
 
 type Problem = { message: string; code: string; requestId?: string | null };
-type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access" | "hold";
+type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access" | "hold" | "export";
 type QueryKind =
   | "request"
   | "model"
@@ -59,7 +60,8 @@ type QueryKind =
   | "search"
   | "case"
   | "access"
-  | "hold";
+  | "hold"
+  | "export";
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
@@ -67,6 +69,7 @@ const queryLabels = {
   "calibration-report": "校准报告 ID",
   grant: "资格 ID",
   binding: "身份绑定 ID",
+  export: "导出 ID",
 };
 const queryPrefixes = {
   request: "req",
@@ -75,6 +78,7 @@ const queryPrefixes = {
   "calibration-report": "calr",
   grant: "grant",
   binding: "auth",
+  export: "export",
 };
 const idleMs = 15 * 60 * 1000;
 const machineLoginEnabled =
@@ -108,6 +112,7 @@ export function App() {
     case: 0,
     access: 0,
     hold: 0,
+    export: 0,
   });
   const scope = useRef<{ tenant_id: string; site_id: string } | null>(null);
   const [connected, setConnected] = useState(false);
@@ -368,7 +373,7 @@ export function App() {
     if (
       queryKind === "search" ||
       queryKind === "case" ||
-      queryKind === "access" || queryKind === "hold" || queryKind === "model-list" ||
+      queryKind === "access" || queryKind === "hold" || queryKind === "export" || queryKind === "model-list" ||
       queryKind === "audit-health"
     )
       return;
@@ -590,6 +595,7 @@ export function App() {
     case: "案件工作台",
     access: "证据访问",
     hold: "证据保留",
+    export: "调查导出",
   }[queryKind];
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
@@ -710,6 +716,8 @@ export function App() {
                     ? "复核访问申请，通过独立审批后按需下载证据原文。"
                     : queryKind === "hold"
                       ? "管理案件证据保留期限，核对创建与释放历史。"
+                    : queryKind === "export"
+                      ? "申请经独立审批的案件与目录元数据包；下载需重新验证。"
                     : "核对当前账本的状态、代际与期限。"}
         </p>
         {sessionNotice && (
@@ -800,8 +808,10 @@ export function App() {
                         ? "case"
                         : event.target.value === "access"
                           ? "access"
-                          : event.target.value === "hold"
+                        : event.target.value === "hold"
                             ? "hold"
+                          : event.target.value === "export"
+                            ? "export"
                           : event.target.value === "grant"
                             ? "grant"
                             : event.target.value === "binding"
@@ -826,11 +836,13 @@ export function App() {
                 <option value="case">案件工作台</option>
                 <option value="access">证据访问</option>
                 <option value="hold">证据保留</option>
+                <option value="export">调查导出</option>
               </select>
               {queryKind !== "search" &&
                 queryKind !== "case" &&
                 queryKind !== "access" &&
                 queryKind !== "hold" &&
+                queryKind !== "export" &&
                 queryKind !== "model-list" &&
                 queryKind !== "audit-health" && (
                   <>
@@ -899,8 +911,18 @@ export function App() {
                   prepareSearchHistory({ kind: "evidence_hold_id", value: holdId });
                 }} onRun={(fetcher, apply, fail) => run("hold", fetcher, apply, fail)} />
             </div>
+            <div hidden={queryKind !== "export"}>
+              <ExportPanel
+                active={queryKind === "export"}
+                busy={Boolean(busy.export)}
+                onInvalidate={clearResults}
+                onRun={(fetcher, apply, fail) =>
+                  run("export", fetcher, apply, fail)
+                }
+              />
+            </div>
             {queryKind === "case" || queryKind === "hold" ||
-            queryKind === "access" ? null : queryKind === "search" ? (
+            queryKind === "access" || queryKind === "export" ? null : queryKind === "search" ? (
               <SearchPanel
                 key={searchPresetVersion}
                 response={search}

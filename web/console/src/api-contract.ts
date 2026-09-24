@@ -62,6 +62,23 @@ export const messages = {
     "案件分析存储暂时不可用；写入结果可能未知，请保留原键与参数。",
   CONTROL_CASE_ANALYSIS_TARGET_UNAVAILABLE:
     "当前身份和范围内案件分析目标不可用。",
+  CONTROL_EXPORT_ID_INVALID: "请输入规范的导出 ID。",
+  CONTROL_EXPORT_BODY_INVALID: "导出请求无效，请重新填写后重试。",
+  CONTROL_EXPORT_INPUT_INVALID: "导出参数无效，请核对用途与决策理由。",
+  CONTROL_EXPORT_TARGET_UNAVAILABLE: "当前案件或导出目标不可用。",
+  CONTROL_EXPORT_STORE_UNAVAILABLE:
+    "导出状态存储暂时不可用；写入结果可能未知，请保留原键与参数。",
+  CONTROL_EXPORT_STORAGE_UNAVAILABLE:
+    "导出包存储暂时不可用，请稍后重试。",
+  CONTROL_EXPORT_STORAGE_CORRUPT:
+    "导出包完整性验证未通过，内容尚未释放。",
+  CONTROL_EXPORT_PACKAGE_TOO_LARGE: "导出范围超过包大小上限，请缩小案件范围。",
+  CONTROL_EXPORT_STEP_UP_REQUIRED: "导出审批或下载需要两分钟内的 MFA 再认证。",
+  CONTROL_EXPORT_NOT_FOUND: "当前身份和范围内导出记录不可用。",
+  CONTROL_EXPORT_NOT_AVAILABLE: "导出包当前不可用，请重新读取状态。",
+  CONTROL_EXPORT_CAPACITY_EXHAUSTED: "导出读取容量已占满，请稍后重试。",
+  CONTROL_EXPORT_SELF_APPROVAL: "导出申请须由另一位具备审批权限的主体处理。",
+  CONTROL_EXPORT_ALREADY_DECIDED: "导出已完成决策，请读取当前状态。",
   CONTROL_JOB_ID_INVALID: "请输入规范的任务 ID。",
   CONTROL_JOB_STORE_UNAVAILABLE: "任务状态暂时不可用，请稍后重试。",
   CONTROL_CASE_STORE_UNAVAILABLE:

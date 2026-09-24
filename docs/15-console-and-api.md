@@ -166,8 +166,8 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 
 ## 15.11 已实现调查导出 API（MVP）
 
-调查导出先交付服务端闭环，控制台只在后续增量接入。Investigator 以 `POST /control/v1/exports` 提交本人 open/closed 案件的用途和幂等键；`GET /control/v1/exports/{export_id}` 允许请求人读取状态，或由同作用域的 Approver、Reader、AuditAdministrator 复核。请求人不能批准自己的导出；批准和拒绝均要求独立 `SensitiveEvidenceApprover`、近期浏览器 step-up、明确理由及原键，批准成功后由数据库快照生成短时加密 `metadata_only` 包。
+调查导出先交付服务端闭环，控制台已接入最小工作台。Investigator 以 `POST /control/v1/exports` 提交本人 open/closed 案件的用途和幂等键；`GET /control/v1/exports/{export_id}` 允许请求人读取状态，或由同作用域的 Approver、Reader、AuditAdministrator 复核。请求人不能批准自己的导出；批准和拒绝均要求独立 `SensitiveEvidenceApprover`、近期浏览器 step-up、明确理由及原键，批准成功后由数据库快照生成短时加密 `metadata_only` 包。
 
-包只包含案件与最多 128 个成员的证据 catalog 元数据、active/expired/deleted/unavailable 缺失清单和 omitted 字段说明，不包含证据正文、事件载荷、模型输入输出、存储定位或连接凭据。包的 `artifact_id`、包请求 ID、catalog digest、字节数和 tenant/site 在下载前同时与 PostgreSQL 记录、catalog manifest 和 vault manifest 比较；任一不一致都扣留响应。Reader 需再次完成 step-up，`GET /download` 的 claim 在数据库中原子限制为两次并受 15 分钟过期时间约束；下载响应为 JSON 附件，审计失败或存储不确定时不返回包。
+包只包含案件与最多 128 个成员的证据 catalog 元数据、active/expired/deleted/unavailable 缺失清单和 omitted 字段说明，不包含证据正文、事件载荷、模型输入输出、存储定位或连接凭据。包的 `artifact_id`、包请求 ID、catalog digest、字节数和 tenant/site 在下载前同时与 PostgreSQL 记录、catalog manifest 和 vault manifest 比较；任一不一致都扣留响应。Reader 需再次完成 step-up，`GET /download` 的 claim 在数据库中原子限制为两次并受 15 分钟过期时间约束；下载响应为带 `nosniff` 的有界 JSON 附件，控制台还会将实际附件 artifact/长度与最近一次 `ready` 状态逐项绑定，审计失败或存储不确定时不返回包。
 
-部署先应用迁移 0039，再升级可识别 `export.requested`、`export.approved`、`export.denied`、`export.downloaded` 和 `console.export.read` 的管理 journal 发布器，最后开放 API。当前不提供完整事件/正文导出、自动轮询或 Bearer 强操作；控制台接入、真实 PostgreSQL/vault wire 和浏览器契约继续按垂直里程碑交付。
+部署先应用迁移 0039，再升级可识别 `export.requested`、`export.approved`、`export.denied`、`export.downloaded` 和 `console.export.read` 的管理 journal 发布器，开放固定代理路由后再启用工作台。当前不提供完整事件/正文导出、自动轮询或 Bearer 强操作；工作台只在显式提交后读取状态，未知写入结果保留原键与参数，下载仅接收有界 JSON Blob。

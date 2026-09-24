@@ -21,14 +21,14 @@ if (
   );
 }
 const readPath =
-  /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls(?:\/mdl_[a-f0-9-]+)?|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|evidence-access-requests|cases(?:\/case_[a-f0-9-]+\/(?:items|holds))?)$/;
+  /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls(?:\/mdl_[a-f0-9-]+)?|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|evidence-access-requests|cases(?:\/case_[a-f0-9-]+\/(?:items|holds))?|exports\/export_[a-f0-9-]+)$/;
 const jobPath = /^\/control\/v1\/jobs\/job_[a-f0-9-]+$/;
 const calibrationReportPath =
   /^\/control\/v1\/calibration-reports\/calr_[a-f0-9-]+$/;
 const writePath =
-  /^\/control\/v1\/(?:cases|cases\/case_[a-f0-9-]+\/(?:items|close|holds|analyze)|evidence-holds\/ev_[a-f0-9-]+\/release|artifacts\/artifact_[a-f0-9-]+\/access|evidence-access-requests\/access_[a-f0-9-]+\/(?:approve|deny))$/;
+  /^\/control\/v1\/(?:cases|cases\/case_[a-f0-9-]+\/(?:items|close|holds|analyze)|evidence-holds\/ev_[a-f0-9-]+\/release|artifacts\/artifact_[a-f0-9-]+\/access|evidence-access-requests\/access_[a-f0-9-]+\/(?:approve|deny)|exports|exports\/export_[a-f0-9-]+\/(?:approve|deny))$/;
 const accessReadPath =
-  /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content)$/;
+  /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content|exports\/export_[a-f0-9-]+\/download)$/;
 const modelCallListPath = "/control/v1/model-calls";
 const auditHealthPath = "/control/v1/audit/health";
 const causalityPath = "/control/v1/causality";

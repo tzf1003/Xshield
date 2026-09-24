@@ -35,6 +35,7 @@ import {
   agentRunFixture,
   modelCallListFixture,
 } from "./fixtures.ts";
+import { EXPORT_ID } from "./export-fixtures.ts";
 
 const response = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
@@ -2147,6 +2148,14 @@ test("development proxy permits fixed investigation and evidence access routes",
     ["POST", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/deny", true],
     ["POST", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve?", false],
     ["GET", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve", false],
+    ["POST", "/control/v1/exports", true],
+    ["POST", "/control/v1/exports?scope=other", false],
+    ["GET", `/control/v1/exports/${EXPORT_ID}`, true],
+    ["GET", `/control/v1/exports/${EXPORT_ID}/download`, true],
+    ["POST", `/control/v1/exports/${EXPORT_ID}/approve`, true],
+    ["POST", `/control/v1/exports/${EXPORT_ID}/deny`, true],
+    ["GET", `/control/v1/exports/${EXPORT_ID}/approve`, false],
+    ["GET", "/control/v1/exports/export_invalid", false],
     ["POST", `/control/v1/grants/${GRANT_ID}`, false],
     ["DELETE", `/control/v1/auth-bindings/${BINDING_ID}`, false],
     ["GET", `/control/v1/grants/${GRANT_ID}/revoke`, false],

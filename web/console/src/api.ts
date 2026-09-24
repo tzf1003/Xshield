@@ -85,6 +85,10 @@ import {
   validHoldReason, validateHoldUntil, validateHoldId, validateHoldCursor,
 } from "./evidence-holds.ts";
 import type { HoldMutation, HoldCollection } from "./evidence-holds.ts";
+import {
+  decodeExportResponse, validateExportId, exportPattern,
+} from "./exports.ts";
+import type { ExportDownload, InvestigationExport } from "./exports.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -1055,6 +1059,84 @@ async function readEvidence(
   }
 }
 
+const maxExportBytes = 8 * 1024 * 1024;
+async function readExport(
+  response: Response,
+  signal: AbortSignal,
+  exportId: string,
+  expectedArtifactId: string,
+  expectedBytes: number,
+): Promise<ExportDownload> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    ensure(response.status === 200);
+    const headers = response.headers;
+    const base = envelope({
+      request_id: headers.get("X-Xshield-Request-Id"),
+      tenant_id: headers.get("X-Xshield-Tenant-Id"),
+      site_id: headers.get("X-Xshield-Site-Id"),
+    });
+    ensure(id(headers.get("X-Xshield-Export-Id"), exportPattern) === exportId);
+    const artifactId = id(headers.get("X-Xshield-Package-Artifact-Id"), artifactPattern);
+    ensure(artifactId === expectedArtifactId);
+    ensure(headers.get("content-type") === "application/json");
+    ensure(
+      headers.get("content-disposition") ===
+        'attachment; filename="investigation-export.json"',
+    );
+    ensure(headers.get("x-content-type-options") === "nosniff");
+    ensure(headers.get("content-encoding") === null);
+    const cache = headers
+      .get("cache-control")
+      ?.split(",")
+      .map((value) => value.trim().toLowerCase());
+    ensure(cache?.includes("private") && cache.includes("no-store") && !cache.includes("public"));
+    const length = headers.get("content-length");
+    ensure(length !== null && /^(0|[1-9][0-9]*)(?![\s\S])/.test(length));
+    const expected = Number(length);
+    ensure(Number.isSafeInteger(expected));
+    if (expected > maxExportBytes) throw new ApiError("RESPONSE_TOO_LARGE");
+    ensure(expected === expectedBytes);
+    ensure(response.body !== null);
+    reader = response.body.getReader();
+    const buffer = new Uint8Array(expected);
+    let bytes = 0;
+    const cancel = () => { void reader?.cancel().catch(() => {}); };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      while (true) {
+        signal.throwIfAborted();
+        const chunk = await reader.read();
+        signal.throwIfAborted();
+        if (chunk.done) break;
+        const next = bytes + chunk.value.byteLength;
+        if (next > maxExportBytes) throw new ApiError("RESPONSE_TOO_LARGE");
+        ensure(next <= expected);
+        buffer.set(chunk.value, bytes);
+        bytes = next;
+      }
+      ensure(bytes === expected);
+      return {
+        ...base,
+        export_id: exportId,
+        artifact_id: artifactId,
+        bytes,
+        blob: new Blob([buffer], { type: "application/json" }),
+      };
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      buffer.fill(0);
+    }
+  } finally {
+    if (reader) {
+      void reader.cancel().catch(() => {});
+      reader.releaseLock();
+    } else {
+      void response.body?.cancel().catch(() => {});
+    }
+  }
+}
+
 export type BrowserSession = {
   subject: string;
   tenant_id: string;
@@ -1971,6 +2053,98 @@ export class ControlClient {
     return this.#request(
       `jobs/${jobId}`,
       (value, status) => decodeJobResponse(value, status),
+      signal,
+    );
+  }
+
+  /** Request a metadata-only package for an owned case. The package is not
+   * created until an independent approver commits the decision. */
+  async requestExport(
+    caseId: string,
+    purpose: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<InvestigationExport> {
+    validateCaseId(caseId);
+    if (!validCaseText(purpose))
+      throw new ApiError("CONTROL_EXPORT_INPUT_INVALID");
+    this.#idempotencyKey(key);
+    return this.#request(
+      "exports",
+      (value, status) => {
+        const result = decodeExportResponse(value, undefined, caseId);
+        ensure(status === (result.replayed ? 200 : 202));
+        ensure(result.replayed || result.status === "pending_approval");
+        ensure(result.purpose === purpose);
+        return result;
+      },
+      signal,
+      JSON.stringify({ case_id: caseId, purpose }),
+      key,
+    );
+  }
+
+  /** Read one scope-bound export projection; no package bytes are requested. */
+  async exportStatus(
+    exportId: string,
+    signal?: AbortSignal,
+  ): Promise<InvestigationExport> {
+    validateExportId(exportId);
+    return this.#request(
+      `exports/${exportId}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeExportResponse(value, exportId);
+      },
+      signal,
+    );
+  }
+
+  /** Commit an independent approval or denial with the exact retry inputs. */
+  async decideExport(
+    exportId: string,
+    decision: "approve" | "deny",
+    reason: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<InvestigationExport> {
+    validateExportId(exportId);
+    if (!validCaseText(reason) || !["approve", "deny"].includes(decision))
+      throw new ApiError("CONTROL_EXPORT_INPUT_INVALID");
+    this.#idempotencyKey(key);
+    return this.#request(
+      `exports/${exportId}/${decision}`,
+      (value, status) => {
+        const result = decodeExportResponse(value, exportId);
+        ensure(status === 200);
+        ensure(
+          decision === "deny"
+            ? result.status === "rejected"
+            : result.status === "ready" || (result.replayed && result.status === "approved"),
+        );
+        ensure(result.decision_reason === reason);
+        return result;
+      },
+      signal,
+      JSON.stringify({ reason }),
+      key,
+    );
+  }
+
+  /** Download the bounded metadata package after fresh server authorization. */
+  async downloadExport(
+    exportId: string,
+    expectedArtifactId: string,
+    expectedBytes: number,
+    signal?: AbortSignal,
+  ): Promise<ExportDownload> {
+    validateExportId(exportId);
+    ensure(id(expectedArtifactId, artifactPattern) === expectedArtifactId);
+    ensure(Number.isSafeInteger(expectedBytes) && expectedBytes >= 0 && expectedBytes <= maxExportBytes);
+    return this.#transport(
+      `exports/${exportId}/download`,
+      (response, combined) =>
+        readExport(response, combined, exportId, expectedArtifactId, expectedBytes),
       signal,
     );
   }

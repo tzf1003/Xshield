@@ -399,7 +399,8 @@ main {
 }
 
 .access-workbench textarea,
-.hold-workbench textarea {
+.hold-workbench textarea,
+.export-workbench textarea {
   width: 100%;
   min-height: 90px;
   resize: vertical;

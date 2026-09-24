@@ -6,7 +6,7 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 “校准报告”由 `AuditAdministrator` 手动读取 `GET /control/v1/calibration-reports/{report_id}`。页面严格校验 `calr_` UUIDv7，并只展示受限 projection 的冻结元数据与正文 `active`/`deleted` tombstone；缺失或跨范围保留为当前范围未找到。正文 tombstone 不是读取授权、质量结论、阈值/策略发布或业务资格。该页面不请求或显示正文、样本、标签、概率、指标、提示词、存储信息或内容读取能力，也不自动轮询。
 
-案件工作台另外调用本人案件列表和集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。服务端已提供调查导出元数据包 MVP（迁移 0039 与 29.32），本页面尚未接入导出按钮；完整包正文和事件导出不在该 MVP 内。
+案件工作台另外调用本人案件列表和集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。调查导出工作台使用迁移 0039 的元数据包 API，完整包正文和事件导出不在该 MVP 内。
 
 案件工作台也可显式提交案件清单分析：`POST /control/v1/cases/{case_id}/analyze` 返回耐久 `job_` 任务，随后由 `GET /control/v1/jobs/{job_id}` 读取本人范围内的状态。客户端保留原幂等键，严格校验 `202` 任务投影、完成时间与计数关系；未知或他人任务只显示同构未找到。当前页面契约只覆盖 catalog 计数快照，不触发模型、正文读取、导出或回放。
 
@@ -15,6 +15,8 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 “我的申请”按本人主体发现历史记录，允许 Investigator、SensitiveEvidenceReader 或 SensitiveEvidenceApprover；“审批待办”要求 SensitiveEvidenceApprover，列出同作用域其他主体的 pending 申请。列表逐页替换，打开记录时重新读取详情；每页展示独立数据库观察时间和管理请求 ID。
 
 证据保留工作台使用独立 AuditAdministrator 角色，为案件成员创建保留锁、逐页核对历史及显式释放。保留管理控制物理删除资格，原文访问仍遵守原始期限及独立审批。
+
+调查导出工作台显式申请、读取状态并提交独立批准/拒绝；申请人不能自批，审批与下载均要求近期浏览器 MFA step-up。批准后的 `ready` 包仅含案件/证据目录元数据、缺失与 omitted 清单，客户端把 JSON 作为有界 Blob 下载，不将包正文渲染到页面；服务端在下载前原子限制为两次并重验 PostgreSQL、catalog 与 vault manifest。切换调查类型、401、闲置和页面离开会清理本地状态，未知写入结果只允许原幂等键和原参数重试。
 
 ## 本地运行
 
@@ -71,7 +73,7 @@ npm run dev
 
 获批申请人以 SensitiveEvidenceReader 凭证读取详情后点击“下载原文（.bin）”。客户端校验二进制响应的服务端范围、申请/证据目标、媒体类型、附件属性和完整字节长度，15 秒总期限内有界读取至多 64 MiB，保留字节形成 Blob，并交给浏览器保存 `.bin` 文件。原文不进入页面内容或持久浏览器存储，临时对象 URL 在使用后释放；清态或切换目标抑制晚到下载。浏览器内存与系统下载管理器不提供可靠清零保证；已交给浏览器的附件由操作者管理，界面提示不证明磁盘保存完成。
 
-控制服务须先升级以提供 29.13 的六个二进制身份/长度响应头，代理必须透传并禁止缓存与正文日志。详情和当前 approved 状态仅供复核，不代替内容端点的重新授权。原文下载还要求用户通过全局“重新验证高危操作”按钮完成同一 OIDC session 的 MFA step-up；两分钟后失效且不替代独立审批。机器 Bearer 暂不能读取原文，导出和其他强操作再认证仍未覆盖。
+控制服务须先升级以提供 29.13 的六个二进制身份/长度响应头，代理必须透传并禁止缓存与正文日志。详情和当前 approved 状态仅供复核，不代替内容端点的重新授权。原文下载还要求用户通过全局“重新验证高危操作”按钮完成同一 OIDC session 的 MFA step-up；两分钟后失效且不替代独立审批。导出工作台同样只在浏览器 session step-up 后允许审批和下载；机器 Bearer 暂不能执行这些高危操作。
 
 ## 证据保留工作台
 
@@ -97,7 +99,7 @@ npm run build
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 [29.24](../../docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。模型调用列表依赖支持其固定窗口、签名游标和 `console.model.list` 审计的控制 API。校准报告详情须先升级至能识别 `console.calibration.report.read` 的管理 journal 发布器，再启用控制 API 与界面；调查导出 API 启用前应用迁移 0039 并升级上述五类导出管理事件的发布器，控制台按钮仍需单独验收；无新增 secret。完整事件/正文导出继续独立交付。
+API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 [29.24](../../docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。模型调用列表依赖支持其固定窗口、签名游标和 `console.model.list` 审计的控制 API。校准报告详情须先升级至能识别 `console.calibration.report.read` 的管理 journal 发布器，再启用控制 API 与界面；调查导出 API 启用前应用迁移 0039、升级导出管理事件发布器并开放 Vite 的固定 `/exports` 代理路由；无新增 secret。完整事件/正文导出继续独立交付。
 
 ## 验证
 
