@@ -1306,6 +1306,10 @@ async fn execute_query(
                 "AND event_type = 'console.agent.read' ",
                 "AND JSONExtractString(payload_json,'target_agent_run_id') = ?))",
             )),
+            QueryFilter::JobId(_) => sql.push_str(
+                "stage = 'control_access' AND event_type = 'console.job.read' \
+                 AND JSONExtractString(payload_json,'target_job_id') = ?",
+            ),
             QueryFilter::ShareGrantId(_) => sql.push_str(
                 "event_type = 'share.issued' \
                   AND JSONExtractString(payload_json,'share_id') = ?",
@@ -1371,6 +1375,7 @@ async fn execute_query(
             }
             QueryFilter::ModelCallId(value) => query.bind(value.as_str()).bind(value.as_str()),
             QueryFilter::AgentRunId(value) => query.bind(value.as_str()).bind(value.as_str()),
+            QueryFilter::JobId(value) => query.bind(value.as_str()),
             QueryFilter::ShareGrantId(value) => query.bind(value.as_str()),
             QueryFilter::Text { value, .. } => query.bind(value),
             QueryFilter::Outcome(value) => query.bind(value.as_str()),
@@ -1564,7 +1569,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use clickhouse::{Client, error::Error, test};
     use xshield_core::{
-        domain::{AgentRunId, ModelCallId, ShareGrantId, SiteId, TenantId, TraceId},
+        domain::{AgentRunId, JobId, ModelCallId, ShareGrantId, SiteId, TenantId, TraceId},
         identity::UnixSeconds,
         query::{QueryFilter, QueryPlan, QuerySort, QueryWindow},
     };
@@ -2273,6 +2278,53 @@ mod tests {
         );
         assert!(
             sql.contains("share_018f2a3b-4c5d-7000-8000-000000000007"),
+            "{sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_request_query_filters_job_id_in_fixed_access_history() {
+        let config = PublisherConfig::new(
+            "/tmp/xshield-job-query-journal",
+            "/tmp/xshield-job-query-manifest",
+            "/tmp/xshield-job-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        let mock = test::Mock::new();
+        let recorded = mock.add(test::handlers::record_ddl());
+        let job = JobId::parse("job_018f2a3b-4c5d-7000-8000-000000000007").unwrap();
+        let plan = QueryPlan::new(
+            QueryWindow::new(UnixSeconds::new(1), UnixSeconds::new(61)).unwrap(),
+            vec![QueryFilter::JobId(job)],
+            QuerySort::OccurredAtDesc,
+            2,
+        )
+        .unwrap();
+
+        let result = query_audit_events(
+            &config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_a").unwrap(),
+            &SiteId::parse("site_b").unwrap(),
+            &plan,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.events.is_empty());
+        let sql = recorded.query().await;
+        assert!(sql.contains("event_type = 'console.job.read'"), "{sql}");
+        assert!(
+            sql.contains("JSONExtractString(payload_json,'target_job_id')"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("job_018f2a3b-4c5d-7000-8000-000000000007"),
             "{sql}"
         );
     }

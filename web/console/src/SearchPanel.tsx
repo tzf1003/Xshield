@@ -18,6 +18,7 @@ const fields = [
   ["evidence_hold_id", "保留锁 ID"],
   ["model_call_id", "模型调用 ID"],
   ["agent_run_id", "Agent 运行 ID"],
+  ["job_id", "任务 ID"],
   ["share_grant_id", "分享资格 ID"],
   ["event_type", "事件类型"],
   ["stage", "阶段"],
@@ -40,7 +41,8 @@ export type SearchPreset = {
     | "evidence_access_request_id"
     | "evidence_hold_id"
     | "model_call_id"
-    | "agent_run_id";
+    | "agent_run_id"
+    | "job_id";
   value: string;
 };
 const outcomes = [

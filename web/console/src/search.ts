@@ -11,6 +11,7 @@ import {
   artifactPattern,
   grantPattern,
   bindingPattern,
+  jobPattern,
   sharePattern,
   ensure,
   object,
@@ -62,6 +63,7 @@ const idPatterns = {
   evidence_hold_id: eventPattern,
   model_call_id: modelCallPattern,
   agent_run_id: new RegExp(`^agt_${uuid}$`),
+  job_id: jobPattern,
   share_grant_id: sharePattern,
 };
 export type SearchFilter =

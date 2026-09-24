@@ -1418,6 +1418,21 @@ test("search accepts only a canonical agent run reference", async () => {
   );
 });
 
+test("search accepts only a canonical durable job reference", async () => {
+  const jobId = "job_018f2a3b-4c5d-7000-8000-000000000007";
+  const plan = validateSearchPlan({
+    ...searchPlan(),
+    filters: [{ kind: "job_id", value: jobId }],
+  });
+  assert.deepEqual(plan.filters, [{ kind: "job_id", value: jobId }]);
+  assert.equal(
+    await searchPlanDigest(plan),
+    createHash("sha256")
+      .update(`1789862400|1789948800|asc|2|job_id=${jobId}`)
+      .digest("hex"),
+  );
+});
+
 test("search accepts only lowercase fixed-width trace IDs and digests them", async () => {
   const trace = "018f2a3b4c5d70008000000000000003";
   const plan = validateSearchPlan({
@@ -1464,6 +1479,7 @@ test("invalid search inputs fail before network and preserve strict query budget
     { filters: [{ kind: "evidence_access_request_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "evidence_hold_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "model_call_id", value: ARTIFACT_ID }] },
+    { filters: [{ kind: "job_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "share_grant_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "caused_by_event_id", value: ARTIFACT_ID }] },
     { filters: [{ kind: "trace_id", value: "018F2A3B4C5D70008000000000000003" }] },

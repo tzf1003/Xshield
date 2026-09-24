@@ -21,8 +21,8 @@ use xshield_core::{
     admin::ManagementRole,
     domain::{
         AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-        EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, ShareGrantId, SiteId, SubjectRef,
-        TenantId, TraceId,
+        EvidenceAccessRequestId, GrantId, JobId, ModelCallId, RequestId, ShareGrantId, SiteId,
+        SubjectRef, TenantId, TraceId,
     },
     identity::UnixSeconds,
     query::{
@@ -442,6 +442,10 @@ fn query_plan_digest(plan: &QueryPlan, key: &[u8; 32]) -> Result<[u8; 32], ()> {
                 canonical.push_str("agent_run_id=");
                 canonical.push_str(value.as_str());
             }
+            QueryFilter::JobId(value) => {
+                canonical.push_str("job_id=");
+                canonical.push_str(value.as_str());
+            }
             QueryFilter::ShareGrantId(value) => {
                 canonical.push_str("share_grant_id=");
                 canonical.push_str(value.as_str());
@@ -576,6 +580,9 @@ enum SearchFilterRequest {
     AgentRunId {
         value: String,
     },
+    JobId {
+        value: String,
+    },
     ShareGrantId {
         value: String,
     },
@@ -636,6 +643,7 @@ impl SearchFilterRequest {
             Self::AgentRunId { value } => AgentRunId::parse(value)
                 .map(QueryFilter::AgentRunId)
                 .map_err(|_| ()),
+            Self::JobId { value } => JobId::parse(value).map(QueryFilter::JobId).map_err(|_| ()),
             Self::ShareGrantId { value } => ShareGrantId::parse(value)
                 .map(QueryFilter::ShareGrantId)
                 .map_err(|_| ()),

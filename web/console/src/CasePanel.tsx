@@ -75,6 +75,7 @@ export function CasePanel({
   onInvalidate,
   onRun,
   onArtifact,
+  onHistory,
   artifactDetails,
 }: {
   active: boolean;
@@ -82,6 +83,7 @@ export function CasePanel({
   onInvalidate: () => void;
   onRun: Run;
   onArtifact: (id: string) => void;
+  onHistory: (jobId: string) => void;
   artifactDetails: ReactNode;
 }) {
   const [caseId, setCaseId] = useState("");
@@ -657,6 +659,18 @@ export function CasePanel({
                         >
                           重新读取任务状态
                         </button>
+                        {analysis.result?.job && (
+                          <button
+                            type="button"
+                            className="text-button"
+                            disabled={busy}
+                            onClick={() =>
+                              onHistory(analysis.result!.job!.job_id)
+                            }
+                          >
+                            准备任务历史检索
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="text-button"

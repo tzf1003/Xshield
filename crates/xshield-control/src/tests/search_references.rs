@@ -17,6 +17,7 @@ const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-000000000105";
 const ACCESS: &str = "access_018f2a3b-4c5d-7000-8000-000000000106";
 const MODEL_CALL: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000106";
 const AGENT_RUN: &str = "agt_018f2a3b-4c5d-7000-8000-000000000110";
+const JOB: &str = "job_018f2a3b-4c5d-7000-8000-000000000111";
 const SHARE: &str = "share_018f2a3b-4c5d-7000-8000-000000000109";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-000000000107";
 const PREDECESSOR: &str = "ev_018f2a3b-4c5d-7000-8000-000000000108";
@@ -62,6 +63,12 @@ fn model_call_reference_payload() -> Value {
 fn agent_run_reference_payload() -> Value {
     let mut payload = search_payload();
     payload["filters"] = json!([{"kind": "agent_run_id", "value": AGENT_RUN}]);
+    payload
+}
+
+fn job_reference_payload() -> Value {
+    let mut payload = search_payload();
+    payload["filters"] = json!([{"kind": "job_id", "value": JOB}]);
     payload
 }
 
@@ -111,9 +118,11 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
         reference_payload(),
         case_reference_payload(),
         subject_reference_payload(),
+        job_reference_payload(),
     ] {
         let by_case = payload["filters"][0]["kind"] == "case_id";
         let by_subject = payload["filters"][0]["kind"] == "subject_ref";
+        let by_job = payload["filters"][0]["kind"] == "job_id";
         let mock = test::Mock::new();
         let first = "ev_018f2a3b-4c5d-7000-8000-000000000111";
         let second = "ev_018f2a3b-4c5d-7000-8000-000000000112";
@@ -142,6 +151,14 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
             shared.event_type = "identity.refreshed".to_owned();
             shared.stage = Some("identity_lifecycle".to_owned());
             shared.reason_code = Some("IDENTITY_REFRESHED".to_owned());
+        }
+        if by_job {
+            issued.event_type = "console.job.read".to_owned();
+            issued.stage = Some("control_access".to_owned());
+            issued.reason_code = Some("CONTROL_JOB_READ".to_owned());
+            shared.event_type = "console.job.read".to_owned();
+            shared.stage = Some("control_access".to_owned());
+            shared.reason_code = Some("CONTROL_JOB_READ".to_owned());
         }
         mock.add(test::handlers::provide([issued, shared.clone()]));
         mock.add(test::handlers::provide([shared]));
@@ -186,6 +203,8 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
             )
             .unwrap();
             format!("10|70|asc|1|subject_ref_hmac={}", lower_hex(&digest))
+        } else if by_job {
+            format!("10|70|asc|1|job_id={JOB}")
         } else {
             format!("10|70|asc|1|grant_id={GRANT}|auth_binding_id={BINDING}")
         };
@@ -210,6 +229,8 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
             CASE.replace("103", "109")
         } else if by_subject {
             "operator-2".to_owned()
+        } else if by_job {
+            JOB.replace("111", "119")
         } else {
             GRANT.replace("101", "109")
         });
@@ -232,7 +253,7 @@ async fn reference_search_returns_redacted_pages_and_audits_the_plan() {
             assert_eq!(event["payload"]["reason_code"], "CONTROL_QUERY_EXECUTED");
             assert!(event["payload"]["target_request_id"].is_null());
             assert!(event["payload"].get("filters").is_none());
-            for reference in [GRANT, BINDING, CASE, ARTIFACT, SUBJECT] {
+            for reference in [GRANT, BINDING, CASE, ARTIFACT, SUBJECT, JOB] {
                 assert!(
                     !event.to_string().contains(reference),
                     "audit event echoed {reference}: {event}"

@@ -866,6 +866,9 @@ export function App() {
                 onRun={(fetcher, apply, fail) =>
                   run("case", fetcher, apply, fail)
                 }
+                onHistory={(jobId) => {
+                  prepareSearchHistory({ kind: "job_id", value: jobId });
+                }}
                 onArtifact={openArtifact}
                 artifactDetails={
                   queryKind === "case" &&

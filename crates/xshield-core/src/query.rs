@@ -8,7 +8,7 @@
 use crate::{
     domain::{
         AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-        EvidenceAccessRequestId, GrantId, ModelCallId, RequestId, ShareGrantId, SubjectRef,
+        EvidenceAccessRequestId, GrantId, JobId, ModelCallId, RequestId, ShareGrantId, SubjectRef,
         TraceId,
     },
     identity::UnixSeconds,
@@ -221,6 +221,12 @@ pub enum QueryFilter {
     /// authorize agent input/output access, evidence access, replay, or
     /// business operations.
     AgentRunId(AgentRunId),
+    /// Exact durable control-job reference in fixed job access history.
+    ///
+    /// This selects retained management metadata only. It does not authorize
+    /// the job projection, case details, evidence access, replay, or business
+    /// operations.
+    JobId(JobId),
     /// Exact equality on an allow-listed text column.
     Text {
         /// Column selected from [`QueryTextField`].
@@ -251,6 +257,7 @@ impl QueryFilter {
             | Self::EvidenceAccessRequestId(_)
             | Self::ModelCallId(_)
             | Self::AgentRunId(_)
+            | Self::JobId(_)
             | Self::ShareGrantId(_)
             | Self::Outcome(_)
             | Self::ConfidenceAtMost(_) => Ok(()),
