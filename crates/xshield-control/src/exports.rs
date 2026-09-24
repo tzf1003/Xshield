@@ -18,6 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{SecondsFormat, Utc};
+use openssl::sha::sha256;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,8 +33,9 @@ use xshield_postgres::{
     EvidenceCatalogArtifactQuery, EvidenceCatalogPublish, EvidenceCatalogQuery,
     EvidenceCatalogWriteOutcome, InvestigationExportCreate, InvestigationExportDecision,
     InvestigationExportDecisionOutcome, InvestigationExportPackage,
+    InvestigationExportPackageClaim, InvestigationExportPackageClaimOutcome,
     InvestigationExportPackageOutcome, InvestigationExportRecord, InvestigationExportSnapshot,
-    InvestigationExportWriteOutcome,
+    InvestigationExportWriteOutcome, StoreError,
 };
 
 /// Export request endpoint.
@@ -870,6 +872,7 @@ impl ControlPlane {
             .iter()
             .map(|item| item.artifact_id().as_str().to_owned())
             .collect::<Vec<_>>();
+        let parent_refs_digest = export_parent_refs_digest(&parent_refs);
         // The approval transaction may commit before package completion. A
         // retry must reuse an already-published package instead of creating a
         // second active export object.
@@ -961,8 +964,76 @@ impl ControlPlane {
                     .await;
             }
         };
-        let package_ref = if let Some(existing) = existing {
-            existing
+        let Ok(claim_command) = InvestigationExportPackageClaim::new(
+            record.export_id(),
+            &package_request_id,
+            &parent_refs_digest,
+            package_expiry,
+        ) else {
+            return internal_error(&request_id);
+        };
+        let claim_lease_until = match self
+            .catalog
+            .claim_investigation_export_package(
+                claim_command,
+                &self.config.tenant_id,
+                &self.config.site_id,
+            )
+            .await
+        {
+            Ok(InvestigationExportPackageClaimOutcome::Claimed { lease_until }) => lease_until,
+            Ok(
+                InvestigationExportPackageClaimOutcome::Existing(_)
+                | InvestigationExportPackageClaimOutcome::Conflict,
+            )
+            | Err(StoreError::CorruptData(_)) => {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_STORAGE_CORRUPT",
+                        "export package is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+            Ok(InvestigationExportPackageClaimOutcome::Busy) => {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_PACKAGE_BUSY",
+                        "export package generation is in progress",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+            Ok(InvestigationExportPackageClaimOutcome::Unavailable) | Err(_) => {
+                return self
+                    .audited_export_error_async(
+                        request_id,
+                        Some(subject),
+                        Some(record.export_id().clone()),
+                        APPROVE_ACCESS,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_EXPORT_STORE_UNAVAILABLE",
+                        "export storage is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await;
+            }
+        };
+        let (package_ref, claim_lease_until) = if let Some(existing) = existing {
+            (existing, Some(claim_lease_until))
         } else {
             let Some(port) = self.evidence_read.clone() else {
                 return self
@@ -1053,9 +1124,12 @@ impl ControlPlane {
                 return internal_error(&request_id);
             };
             (
-                artifact_id,
-                manifest.manifest().integrity.digest.clone(),
-                manifest.manifest().bytes_saved,
+                (
+                    artifact_id,
+                    manifest.manifest().integrity.digest.clone(),
+                    manifest.manifest().bytes_saved,
+                ),
+                Some(claim_lease_until),
             )
         };
         let (package_artifact_id, package_digest, package_bytes) = package_ref;
@@ -1068,14 +1142,27 @@ impl ControlPlane {
         ) else {
             return internal_error(&request_id);
         };
-        let completed = self
-            .catalog
-            .complete_investigation_export(
-                package_command,
-                &self.config.tenant_id,
-                &self.config.site_id,
-            )
-            .await;
+        let completed = match claim_lease_until {
+            Some(lease_until) => {
+                self.catalog
+                    .complete_investigation_export_claimed(
+                        package_command,
+                        &self.config.tenant_id,
+                        &self.config.site_id,
+                        lease_until,
+                    )
+                    .await
+            }
+            None => {
+                self.catalog
+                    .complete_investigation_export(
+                        package_command,
+                        &self.config.tenant_id,
+                        &self.config.site_id,
+                    )
+                    .await
+            }
+        };
         let record = match completed {
             Ok(
                 InvestigationExportPackageOutcome::Completed(record)
@@ -1653,6 +1740,22 @@ fn stable_package_request_id(export_id: &ExportId) -> Result<RequestId, ()> {
     RequestId::parse(format!("req_{suffix}")).map_err(|_| ())
 }
 
+fn export_parent_refs_digest(parent_refs: &[String]) -> [u8; 32] {
+    let mut canonical = Vec::with_capacity(
+        std::mem::size_of::<u64>()
+            + parent_refs
+                .iter()
+                .map(|value| std::mem::size_of::<u64>() + value.len())
+                .sum::<usize>(),
+    );
+    canonical.extend_from_slice(&(parent_refs.len() as u64).to_be_bytes());
+    for parent_ref in parent_refs {
+        canonical.extend_from_slice(&(parent_ref.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(parent_ref.as_bytes());
+    }
+    sha256(&canonical)
+}
+
 fn package_json(
     record: &InvestigationExportRecord,
     snapshot: &InvestigationExportSnapshot,
@@ -1761,7 +1864,7 @@ fn package_catalog_envelope(
 
 #[cfg(test)]
 mod tests {
-    use super::stable_package_request_id;
+    use super::{export_parent_refs_digest, stable_package_request_id};
     use xshield_core::domain::ExportId;
 
     #[test]
@@ -1771,5 +1874,14 @@ mod tests {
         let second = stable_package_request_id(&export_id).unwrap();
         assert_eq!(first, second);
         assert_eq!(first.as_str(), "req_018f2a3b-4c5d-7000-8000-000000000901");
+    }
+
+    #[test]
+    fn export_parent_refs_digest_is_length_prefixed() {
+        let first = export_parent_refs_digest(&["ab".to_owned(), "c".to_owned()]);
+        let second = export_parent_refs_digest(&["a".to_owned(), "bc".to_owned()]);
+        let replay = export_parent_refs_digest(&["ab".to_owned(), "c".to_owned()]);
+        assert_ne!(first, second);
+        assert_eq!(first, replay);
     }
 }

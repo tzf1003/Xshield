@@ -10,6 +10,7 @@ use xshield_core::{
 
 const EXPORT_KIND: &str = "metadata_only";
 const MAX_DOWNLOADS: i64 = 2;
+const PACKAGE_CLAIM_LEASE_SECONDS: i64 = 60;
 
 /// Validated input for one idempotent export request.
 pub struct InvestigationExportCreate<'a> {
@@ -129,6 +130,74 @@ impl<'a> InvestigationExportPackage<'a> {
             digest,
             bytes,
         })
+    }
+}
+
+/// Validated identity used to serialize one external export-package write.
+pub struct InvestigationExportPackageClaim<'a> {
+    export_id: &'a ExportId,
+    request_id: &'a RequestId,
+    parent_refs_digest: &'a [u8],
+    package_expires_at: DateTime<Utc>,
+}
+
+impl<'a> InvestigationExportPackageClaim<'a> {
+    /// Binds a package-generation attempt to its frozen parent references and
+    /// approval deadline.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidCommand`] when the parent digest is not
+    /// exactly 32 bytes.
+    pub fn new(
+        export_id: &'a ExportId,
+        request_id: &'a RequestId,
+        parent_refs_digest: &'a [u8],
+        package_expires_at: DateTime<Utc>,
+    ) -> Result<Self, StoreError> {
+        if parent_refs_digest.len() != 32 {
+            return Err(StoreError::InvalidCommand);
+        }
+        Ok(Self {
+            export_id,
+            request_id,
+            parent_refs_digest,
+            package_expires_at,
+        })
+    }
+}
+
+/// Durable metadata returned for an already-published package claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvestigationExportPackageRef {
+    artifact_id: ArtifactId,
+    request_id: RequestId,
+    digest: String,
+    bytes: u64,
+}
+
+impl InvestigationExportPackageRef {
+    /// Returns the package artifact identity.
+    #[must_use]
+    pub const fn artifact_id(&self) -> &ArtifactId {
+        &self.artifact_id
+    }
+
+    /// Returns the stable package request identity.
+    #[must_use]
+    pub const fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+
+    /// Returns the lowercase ciphertext digest.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Returns the plaintext byte count stored by the vault.
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
     }
 }
 
@@ -423,6 +492,24 @@ pub enum InvestigationExportPackageOutcome {
     Unavailable,
 }
 
+/// Result of claiming the external package-generation boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InvestigationExportPackageClaimOutcome {
+    /// This caller owns the current short-lived write lease.
+    Claimed {
+        /// The database timestamp at which this writer loses ownership.
+        lease_until: DateTime<Utc>,
+    },
+    /// A package claim was already durably published.
+    Existing(InvestigationExportPackageRef),
+    /// Another writer currently owns the lease.
+    Busy,
+    /// The stable claim identity was reused with different parameters.
+    Conflict,
+    /// The export is not currently package-claimable.
+    Unavailable,
+}
+
 impl PostgresIdentityStore {
     /// Creates one owner-scoped, idempotent pending export request.
     ///
@@ -660,6 +747,145 @@ impl PostgresIdentityStore {
         }
     }
 
+    /// Claims the external vault-write boundary for one approved export.
+    ///
+    /// The claim is intentionally separate from the evidence catalog. It
+    /// serializes concurrent control replicas before an irreversible vault
+    /// write, while the short lease lets a crashed writer be retried. The
+    /// ready transition must still present the lease returned here.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database failure or corrupt claim state.
+    #[allow(clippy::too_many_lines)]
+    pub async fn claim_investigation_export_package(
+        &self,
+        command: InvestigationExportPackageClaim<'_>,
+        tenant: &TenantId,
+        site: &SiteId,
+    ) -> Result<InvestigationExportPackageClaimOutcome, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        set_export_timeouts(&mut tx).await?;
+        let export = sqlx::query(
+            "SELECT status, expires_at, package_artifact_id,
+                    COALESCE(expires_at > clock_timestamp(), false) AS package_live
+             FROM xshield.investigation_exports
+             WHERE tenant_id = $1 AND site_id = $2 AND export_id = $3
+             FOR UPDATE",
+        )
+        .bind(tenant.as_str())
+        .bind(site.as_str())
+        .bind(command.export_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(export) = export else {
+            tx.rollback().await?;
+            return Ok(InvestigationExportPackageClaimOutcome::Unavailable);
+        };
+        let status: String = export.try_get("status")?;
+        let expires_at: Option<DateTime<Utc>> = export.try_get("expires_at")?;
+        let package_artifact_id: Option<String> = export.try_get("package_artifact_id")?;
+        let package_live: bool = export.try_get("package_live")?;
+        if status != "approved" || package_artifact_id.is_some() || !package_live {
+            tx.rollback().await?;
+            return Ok(InvestigationExportPackageClaimOutcome::Unavailable);
+        }
+        if expires_at != Some(command.package_expires_at) {
+            tx.rollback().await?;
+            return Ok(InvestigationExportPackageClaimOutcome::Conflict);
+        }
+
+        let row = sqlx::query(
+            "SELECT package_request_id, parent_refs_digest, package_expires_at,
+                    state, lease_until, package_artifact_id, package_digest,
+                    package_bytes, lease_until > clock_timestamp() AS lease_live
+             FROM xshield.investigation_export_package_claims
+             WHERE tenant_id = $1 AND site_id = $2 AND export_id = $3
+             FOR UPDATE",
+        )
+        .bind(tenant.as_str())
+        .bind(site.as_str())
+        .bind(command.export_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            let lease_until: DateTime<Utc> = sqlx::query_scalar(
+                "INSERT INTO xshield.investigation_export_package_claims (
+                     tenant_id, site_id, export_id, package_request_id,
+                     parent_refs_digest, package_expires_at, state, lease_until,
+                     created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, 'writing',
+                           LEAST($6, clock_timestamp() + ($7::bigint * interval '1 second')),
+                           clock_timestamp(), clock_timestamp())
+                 RETURNING lease_until",
+            )
+            .bind(tenant.as_str())
+            .bind(site.as_str())
+            .bind(command.export_id.as_str())
+            .bind(command.request_id.as_str())
+            .bind(command.parent_refs_digest)
+            .bind(command.package_expires_at)
+            .bind(PACKAGE_CLAIM_LEASE_SECONDS)
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(InvestigationExportPackageClaimOutcome::Claimed { lease_until });
+        };
+        let stored_request_id: String = row.try_get("package_request_id")?;
+        let stored_parent_refs_digest: Vec<u8> = row.try_get("parent_refs_digest")?;
+        let stored_expires_at: DateTime<Utc> = row.try_get("package_expires_at")?;
+        if stored_parent_refs_digest.len() != 32 {
+            tx.rollback().await?;
+            return Err(StoreError::CorruptData(
+                "investigation_export_claim_parent_refs_digest",
+            ));
+        }
+        if stored_request_id != command.request_id.as_str()
+            || stored_parent_refs_digest.as_slice() != command.parent_refs_digest
+            || stored_expires_at != command.package_expires_at
+        {
+            tx.rollback().await?;
+            return Ok(InvestigationExportPackageClaimOutcome::Conflict);
+        }
+        let state: String = row.try_get("state")?;
+        match state.as_str() {
+            "published" => {
+                let package = decode_package_ref(&row)?;
+                tx.commit().await?;
+                Ok(InvestigationExportPackageClaimOutcome::Existing(package))
+            }
+            "writing" => {
+                let lease_live: bool = row.try_get("lease_live")?;
+                if lease_live {
+                    tx.rollback().await?;
+                    return Ok(InvestigationExportPackageClaimOutcome::Busy);
+                }
+                let lease_until: Option<DateTime<Utc>> = sqlx::query_scalar(
+                    "UPDATE xshield.investigation_export_package_claims
+                     SET lease_until = LEAST(package_expires_at,
+                                             clock_timestamp() + ($4::bigint * interval '1 second')),
+                         updated_at = clock_timestamp()
+                     WHERE tenant_id = $1 AND site_id = $2 AND export_id = $3
+                       AND state = 'writing'
+                       AND package_expires_at > clock_timestamp()
+                     RETURNING lease_until",
+                )
+                .bind(tenant.as_str())
+                .bind(site.as_str())
+                .bind(command.export_id.as_str())
+                .bind(PACKAGE_CLAIM_LEASE_SECONDS)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(lease_until) = lease_until else {
+                    tx.rollback().await?;
+                    return Ok(InvestigationExportPackageClaimOutcome::Unavailable);
+                };
+                tx.commit().await?;
+                Ok(InvestigationExportPackageClaimOutcome::Claimed { lease_until })
+            }
+            _ => Err(StoreError::CorruptData("investigation_export_claim_state")),
+        }
+    }
+
     /// Attaches a vault-backed package after an approval commit.
     ///
     /// # Errors
@@ -670,8 +896,75 @@ impl PostgresIdentityStore {
         tenant: &TenantId,
         site: &SiteId,
     ) -> Result<InvestigationExportPackageOutcome, StoreError> {
+        self.complete_investigation_export_inner(command, tenant, site, None)
+            .await
+    }
+
+    /// Attaches a package while proving ownership of its generation lease.
+    ///
+    /// A stale writer cannot turn a successor's claim into a ready export: the
+    /// claim is promoted first in the same transaction as the export row.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database failure or corrupt durable state.
+    pub async fn complete_investigation_export_claimed(
+        &self,
+        command: InvestigationExportPackage<'_>,
+        tenant: &TenantId,
+        site: &SiteId,
+        lease_until: DateTime<Utc>,
+    ) -> Result<InvestigationExportPackageOutcome, StoreError> {
+        self.complete_investigation_export_inner(command, tenant, site, Some(lease_until))
+            .await
+    }
+
+    async fn complete_investigation_export_inner(
+        &self,
+        command: InvestigationExportPackage<'_>,
+        tenant: &TenantId,
+        site: &SiteId,
+        claim_lease_until: Option<DateTime<Utc>>,
+    ) -> Result<InvestigationExportPackageOutcome, StoreError> {
         let bytes =
             i64::try_from(command.bytes).map_err(|_| StoreError::NumericRange("package_bytes"))?;
+        let mut tx = self.pool.begin().await?;
+        set_export_timeouts(&mut tx).await?;
+        if let Some(lease_until) = claim_lease_until {
+            let claimed = sqlx::query(
+                "UPDATE xshield.investigation_export_package_claims
+                 SET state = 'published', package_artifact_id = $4,
+                     package_digest = $5, package_bytes = $6,
+                     updated_at = clock_timestamp()
+                 WHERE tenant_id = $1 AND site_id = $2 AND export_id = $3
+                   AND package_request_id = $7 AND state = 'writing'
+                   AND lease_until = $8
+                   AND package_expires_at = (
+                       SELECT expires_at FROM xshield.investigation_exports
+                       WHERE tenant_id = $1 AND site_id = $2 AND export_id = $3
+                   )
+                   AND package_expires_at > clock_timestamp()
+                 RETURNING export_id",
+            )
+            .bind(tenant.as_str())
+            .bind(site.as_str())
+            .bind(command.export_id.as_str())
+            .bind(command.artifact_id.as_str())
+            .bind(command.digest)
+            .bind(bytes)
+            .bind(command.request_id.as_str())
+            .bind(lease_until)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if claimed.is_none() {
+                tx.rollback().await?;
+                return Ok(self
+                    .read_investigation_export(tenant, site, command.export_id)
+                    .await?
+                    .map_or(InvestigationExportPackageOutcome::Unavailable, |record| {
+                        package_outcome_for_record(&record, &command)
+                    }));
+            }
+        }
         let row = sqlx::query(AssertSqlSafe(format!(
             "UPDATE xshield.investigation_exports
              SET status = 'ready', package_artifact_id = $4, package_request_id = $5,
@@ -688,30 +981,21 @@ impl PostgresIdentityStore {
         .bind(command.request_id.as_str())
         .bind(command.digest)
         .bind(bytes)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
         if let Some(row) = row {
-            return Ok(InvestigationExportPackageOutcome::Completed(decode_export(
-                &row,
-            )?));
+            let record = decode_export(&row)?;
+            tx.commit().await?;
+            return Ok(InvestigationExportPackageOutcome::Completed(record));
         }
+        tx.rollback().await?;
         Ok(
             match self
                 .read_investigation_export(tenant, site, command.export_id)
                 .await?
             {
-                Some(record) if record.status() == "ready" => {
-                    let matches = record.package_artifact_id() == Some(command.artifact_id)
-                        && record.package_request_id() == Some(command.request_id)
-                        && record.package_digest() == Some(command.digest)
-                        && record.package_bytes() == Some(command.bytes);
-                    if matches {
-                        InvestigationExportPackageOutcome::Existing(record)
-                    } else {
-                        InvestigationExportPackageOutcome::Conflict
-                    }
-                }
-                _ => InvestigationExportPackageOutcome::Unavailable,
+                Some(record) => package_outcome_for_record(&record, &command),
+                None => InvestigationExportPackageOutcome::Unavailable,
             },
         )
     }
@@ -753,6 +1037,68 @@ async fn set_export_timeouts(
         .execute(&mut **transaction)
         .await?;
     Ok(())
+}
+
+fn package_outcome_for_record(
+    record: &InvestigationExportRecord,
+    command: &InvestigationExportPackage<'_>,
+) -> InvestigationExportPackageOutcome {
+    if record.status() != "ready" {
+        return InvestigationExportPackageOutcome::Unavailable;
+    }
+    if record.package_artifact_id() == Some(command.artifact_id)
+        && record.package_request_id() == Some(command.request_id)
+        && record.package_digest() == Some(command.digest)
+        && record.package_bytes() == Some(command.bytes)
+    {
+        InvestigationExportPackageOutcome::Existing(record.clone())
+    } else {
+        InvestigationExportPackageOutcome::Conflict
+    }
+}
+
+fn decode_package_ref(row: &PgRow) -> Result<InvestigationExportPackageRef, StoreError> {
+    let artifact_id = row
+        .try_get::<Option<String>, _>("package_artifact_id")?
+        .ok_or(StoreError::CorruptData(
+            "investigation_export_claim_artifact",
+        ))?;
+    let request_id = row
+        .try_get::<Option<String>, _>("package_request_id")?
+        .ok_or(StoreError::CorruptData(
+            "investigation_export_claim_request",
+        ))?;
+    let digest = row
+        .try_get::<Option<String>, _>("package_digest")?
+        .ok_or(StoreError::CorruptData("investigation_export_claim_digest"))?;
+    let bytes = row
+        .try_get::<Option<i64>, _>("package_bytes")?
+        .ok_or(StoreError::CorruptData("investigation_export_claim_bytes"))?;
+    let artifact_id = ArtifactId::parse(artifact_id)
+        .map_err(|_| StoreError::CorruptData("investigation_export_claim_artifact"))?;
+    let request_id = RequestId::parse(request_id)
+        .map_err(|_| StoreError::CorruptData("investigation_export_claim_request"))?;
+    if !valid_package_digest(&digest) || !(0..=67_108_864).contains(&bytes) {
+        return Err(StoreError::CorruptData(
+            "investigation_export_claim_package",
+        ));
+    }
+    let bytes = u64::try_from(bytes)
+        .map_err(|_| StoreError::CorruptData("investigation_export_claim_bytes"))?;
+    Ok(InvestigationExportPackageRef {
+        artifact_id,
+        request_id,
+        digest,
+        bytes,
+    })
+}
+
+fn valid_package_digest(value: &str) -> bool {
+    value.len() == 64
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && value
+            .chars()
+            .all(|character| !character.is_ascii_uppercase())
 }
 
 async fn existing_export(
@@ -1004,6 +1350,7 @@ fn decode_export(row: &PgRow) -> Result<InvestigationExportRecord, StoreError> {
 mod tests {
     use super::{
         InvestigationExportCreate, InvestigationExportDecision, InvestigationExportPackage,
+        InvestigationExportPackageClaim,
     };
     use xshield_core::{
         domain::{ArtifactId, CaseId, ExportId, RequestId, SiteId, TenantId},
@@ -1059,6 +1406,24 @@ mod tests {
                 12,
             )
             .is_ok()
+        );
+        assert!(
+            InvestigationExportPackageClaim::new(
+                draft.export_id(),
+                &request,
+                &[5; 32],
+                chrono::Utc::now(),
+            )
+            .is_ok()
+        );
+        assert!(
+            InvestigationExportPackageClaim::new(
+                draft.export_id(),
+                &request,
+                &[5; 31],
+                chrono::Utc::now(),
+            )
+            .is_err()
         );
     }
 }

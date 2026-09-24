@@ -1,5 +1,6 @@
 //! `PostgreSQL` wire regression for metadata-only investigation exports.
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::{env, time::Duration};
 use uuid::Uuid;
@@ -9,8 +10,9 @@ use xshield_core::{
 };
 use xshield_postgres::{
     InvestigationExportCreate, InvestigationExportDecision, InvestigationExportDecisionOutcome,
-    InvestigationExportPackage, InvestigationExportPackageOutcome, InvestigationExportWriteOutcome,
-    PostgresIdentityStore,
+    InvestigationExportPackage, InvestigationExportPackageClaim,
+    InvestigationExportPackageClaimOutcome, InvestigationExportPackageOutcome,
+    InvestigationExportWriteOutcome, PostgresIdentityStore,
 };
 
 #[tokio::test]
@@ -127,12 +129,120 @@ async fn investigation_export_is_scoped_idempotent_independent_and_download_boun
         InvestigationExportDecisionOutcome::SelfApproval
     );
 
-    let package_artifact =
-        ArtifactId::parse(format!("artifact_{}", Uuid::now_v7())).expect("artifact is valid");
     let package_request =
         RequestId::parse(format!("req_{}", Uuid::now_v7())).expect("request is valid");
+    let package_expires_at = approved_record
+        .expires_at()
+        .expect("approved export has an expiry");
+    let parent_refs_digest = [31_u8; 32];
+    let first_lease = match store
+        .claim_investigation_export_package(
+            package_claim(
+                &export_id,
+                &package_request,
+                &parent_refs_digest,
+                package_expires_at,
+            ),
+            &tenant,
+            &site,
+        )
+        .await
+        .expect("first package claim succeeds")
+    {
+        InvestigationExportPackageClaimOutcome::Claimed { lease_until } => lease_until,
+        other => panic!("expected first package claim, got {other:?}"),
+    };
+    assert!(matches!(
+        store
+            .claim_investigation_export_package(
+                package_claim(
+                    &export_id,
+                    &package_request,
+                    &parent_refs_digest,
+                    package_expires_at,
+                ),
+                &tenant,
+                &site
+            )
+            .await
+            .expect("busy claim lookup succeeds"),
+        InvestigationExportPackageClaimOutcome::Busy
+    ));
+    let conflicting_parent_refs_digest = [32_u8; 32];
+    assert!(matches!(
+        store
+            .claim_investigation_export_package(
+                package_claim(
+                    &export_id,
+                    &package_request,
+                    &conflicting_parent_refs_digest,
+                    package_expires_at,
+                ),
+                &tenant,
+                &site
+            )
+            .await
+            .expect("claim conflict lookup succeeds"),
+        InvestigationExportPackageClaimOutcome::Conflict
+    ));
+
+    sqlx::query(
+        "UPDATE xshield.investigation_export_package_claims
+         SET lease_until = created_at
+         WHERE tenant_id = $1 AND site_id = $2 AND export_id = $3",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .bind(export_id.as_str())
+    .execute(&pool)
+    .await
+    .expect("claim expiry simulation succeeds");
+    let successor_lease = match store
+        .claim_investigation_export_package(
+            package_claim(
+                &export_id,
+                &package_request,
+                &parent_refs_digest,
+                package_expires_at,
+            ),
+            &tenant,
+            &site,
+        )
+        .await
+        .expect("expired claim reclaim succeeds")
+    {
+        InvestigationExportPackageClaimOutcome::Claimed { lease_until } => lease_until,
+        other => panic!("expected reclaimed package claim, got {other:?}"),
+    };
+    assert_ne!(first_lease, successor_lease);
+
+    let stale_artifact =
+        ArtifactId::parse(format!("artifact_{}", Uuid::now_v7())).expect("artifact is valid");
+    let stale_result = store
+        .complete_investigation_export_claimed(
+            InvestigationExportPackage::new(
+                &export_id,
+                &stale_artifact,
+                &package_request,
+                &"a".repeat(64),
+                128,
+            )
+            .expect("stale package command is valid"),
+            &tenant,
+            &site,
+            first_lease,
+        )
+        .await
+        .expect("stale writer outcome is observable");
+    assert!(matches!(
+        stale_result,
+        InvestigationExportPackageOutcome::Unavailable
+    ));
+
+    let package_artifact =
+        ArtifactId::parse(format!("artifact_{}", Uuid::now_v7())).expect("artifact is valid");
     let completed = store
-        .complete_investigation_export(
+        .complete_investigation_export_claimed(
             InvestigationExportPackage::new(
                 &export_id,
                 &package_artifact,
@@ -143,6 +253,7 @@ async fn investigation_export_is_scoped_idempotent_independent_and_download_boun
             .expect("package command is valid"),
             &tenant,
             &site,
+            successor_lease,
         )
         .await
         .expect("package completion succeeds");
@@ -228,6 +339,16 @@ async fn investigation_export_is_scoped_idempotent_independent_and_download_boun
         .execute(&pool)
         .await
         .expect("export cleanup succeeds");
+    let remaining_claims: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM xshield.investigation_export_package_claims
+         WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .fetch_one(&pool)
+    .await
+    .expect("claim cleanup is queryable");
+    assert_eq!(remaining_claims, 0);
     sqlx::query("DELETE FROM xshield.investigation_cases WHERE tenant_id = $1 AND site_id = $2")
         .bind(tenant.as_str())
         .bind(site.as_str())
@@ -254,4 +375,19 @@ async fn seed_case(pool: &PgPool, tenant: &TenantId, site: &SiteId, case_id: &Ca
     .execute(pool)
     .await
     .expect("case seed succeeds");
+}
+
+fn package_claim<'a>(
+    export_id: &'a ExportId,
+    request_id: &'a RequestId,
+    parent_refs_digest: &'a [u8; 32],
+    package_expires_at: DateTime<Utc>,
+) -> InvestigationExportPackageClaim<'a> {
+    InvestigationExportPackageClaim::new(
+        export_id,
+        request_id,
+        parent_refs_digest,
+        package_expires_at,
+    )
+    .expect("package claim command is valid")
 }

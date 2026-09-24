@@ -202,7 +202,9 @@ async fn seed_artifact_item(
              'application/json', 'complete', 'entity_exact', 2, 2,
              'RESTRICTED', false, 'aead_envelope_v1', $3 || '.xev',
              'evidence-key-r1', 'sha256_ciphertext', repeat('a', 64), '{}',
-             clock_timestamp(),
+             CASE WHEN $6 = 'expired'
+                  THEN clock_timestamp() - interval '2 hours'
+                  ELSE clock_timestamp() END,
              CASE WHEN $6 = 'expired'
                   THEN clock_timestamp() - interval '1 hour'
                   ELSE clock_timestamp() + interval '1 hour' END,

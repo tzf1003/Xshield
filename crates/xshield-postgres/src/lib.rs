@@ -112,8 +112,9 @@ pub use investigation_case::{
 pub use investigation_export::{
     InvestigationExportArtifact, InvestigationExportCreate, InvestigationExportDecision,
     InvestigationExportDecisionOutcome, InvestigationExportPackage,
-    InvestigationExportPackageOutcome, InvestigationExportRecord, InvestigationExportSnapshot,
-    InvestigationExportWriteOutcome,
+    InvestigationExportPackageClaim, InvestigationExportPackageClaimOutcome,
+    InvestigationExportPackageOutcome, InvestigationExportPackageRef, InvestigationExportRecord,
+    InvestigationExportSnapshot, InvestigationExportWriteOutcome,
 };
 pub use management_session::{ManagementBrowserSession, ManagementOidcTransaction};
 pub use model_evaluation_admission::ModelEvaluationAdmissionLease;

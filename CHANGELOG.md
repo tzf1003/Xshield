@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 收口调查导出包的并发生成：迁移 0040 以 tenant/site/export claim、长度前缀父引用摘要和短 lease 串行化 vault 写入；过期 lease 可回收，旧 writer 不能提交 ready，claim 与 ready 在同一 PostgreSQL 事务内完成，并补充 Busy、参数冲突、损坏、过期回收、精确重试和级联清理回归。
+
 - 收紧调查导出包完成的幂等边界：`ready` 记录只有在 artifact、包请求、摘要和字节数全部精确匹配时才接受重试；错绑元数据返回存储损坏并扣留结果，补充 PostgreSQL 回归。
 
 - 修复调查导出包在批准提交结果未知后的重试边界：包请求 ID 固定由 `export_id` 派生，重试会按固定 scope、类型、父引用与期限复用已发布 catalog 对象，避免重复活动包；增加稳定 ID 回归和 PostgreSQL 包完成精确重放覆盖。
