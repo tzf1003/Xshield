@@ -74,7 +74,7 @@ Score 增量：一次性离线评估已接入 2–10 档有序量表、完整档
 
 案件增量：`POST /control/v1/cases/{case_id}/items` 与 `GET /control/v1/cases/{case_id}/items` 已形成关联、单快照集合浏览、catalog 状态和审计闭环。`POST /control/v1/cases/{case_id}/close` 已提供所有者终结、容量释放、精确重试及事务 outbox，历史集合与审批保留，后续原文资格校验受 closed 状态约束；新增关联和关闭已覆盖断连终态审计回归。案件保留锁已完成有界存储、清理屏障、事件发布及 AuditAdministrator 创建/释放/历史查询 HTTP 闭环（见 12.9、29.21）；调查 Agent 与导出继续交付。保留锁延缓物理删除，案件生命周期与保留操作均不扩大原文权限或读取期限。
 
-案件分析 MVP 增量：`POST /control/v1/cases/{case_id}/analyze` 以严格幂等键生成 `job_` 任务，事务内提交迁移 0038 的案件 catalog 计数快照；`GET /control/v1/jobs/{job_id}` 只返回同一主体的任务投影，未知或他人任务保持同构不可见。两个端点分别写 `console.case.analyze` 与 `console.job.read`，审计 target 只接受强类型案件/任务 ID。当前闭环不触发模型、正文读取、导出、回放或业务资格；调查 Agent 与更丰富的异步步骤在后续垂直闭环中接入。
+案件分析 MVP 增量：`POST /control/v1/cases/{case_id}/analyze` 以严格幂等键生成 `job_` 任务，事务内提交迁移 0038 的案件 catalog 计数快照；`GET /control/v1/jobs/{job_id}` 只返回同一主体的任务投影，未知或他人任务保持同构不可见。两个端点分别写 `console.case.analyze` 与 `console.job.read`，审计 target 只接受强类型案件/任务 ID。案件脚本现通过 `control_job` PostgreSQL wire 回归验证 active/expired/deleted 计数、精确重放、参数冲突与作用域隔离。当前闭环不触发模型、正文读取、导出、回放或业务资格；调查 Agent 与更丰富的异步步骤在后续垂直闭环中接入。
 
 当前增量：已落地有界 QueryPlan AST、固定作用域的参数化 ClickHouse 事件查询、稳定 HMAC 游标和 `console.query.executed` 审计。查询返回脱敏事件摘要、实际扫描量及索引水位/gap，实施单实例并发上限和客户端 deadline；超预算计划须缩小范围。`case_id` 与 `artifact_id` 已覆盖直接引用的案件事实、审批管理尝试、保留锁及证据历史；`subject_ref` 精确检索固定的顶层主体/身份引用，使用用途隔离 HMAC 保护低熵摘要且不在结果中回显，均复用既有索引与预算，固定映射见 29.14。事件详情现在可逐跳查看记录的直接因果前驱，或按一个事件 ID 查找直接后继；入口仅预填、显式提交，不递归展开。`POST /control/v1/causality` 已补齐服务端有界多跳遍历，固定窗口内沿已发布引用最多 4 跳、16 个非根节点，返回脱敏摘要、健康/扫描字段并以独立 `console.causality.read` 审计；Investigator 范围、内容隔离与审计失败扣留结果保持不变。控制台事件详情提供填写 UTC 窗口后主动提交的服务端表单，当前已加载事件页的局部邻域继续作为即时视图。跨页完整关联图、调查 Agent、自然语言计划和只读回放继续按垂直闭环推进。
 
