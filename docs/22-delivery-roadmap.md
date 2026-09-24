@@ -22,7 +22,7 @@
 
 ## M3 完整日志后台
 
-案件界面增量：已接入本人案件创建、本人 open/closed 列表及打开、证据集合分页、关联与关闭流程，展示数据库观察、catalog 状态、管理请求 ID 与精确幂等结果。列表固定 owner/tenant/site，以案件 ID 降序键集分页、独立签名游标和 `console.case.list` 审计完成发现闭环；创建或关闭后显式刷新。内存表单保留冻结键与参数，未知结果仅原样重试，会话终止清态；案件后端具备有界许可、数据库 deadline 和断连后终态审计。真实 PostgreSQL/HTTP/前端客户端闭环验证事务事实及独立管理审计，浏览器覆盖重试、权限、异步隔离与响应式布局；批量导出界面和强操作再认证继续交付。
+案件界面增量：已接入本人案件创建、本人 open/closed 列表及打开、证据集合分页、关联与关闭流程，展示数据库观察、catalog 状态、管理请求 ID 与精确幂等结果。列表固定 owner/tenant/site，以案件 ID 降序键集分页、独立签名游标和 `console.case.list` 审计完成发现闭环；创建或关闭后显式刷新。内存表单保留冻结键与参数，未知结果仅原样重试，会话终止清态；案件后端具备有界许可、数据库 deadline 和断连后终态审计。真实 PostgreSQL/HTTP/前端客户端闭环验证事务事实及独立管理审计，浏览器覆盖重试、权限、异步隔离与响应式布局；调查导出 API 的元数据包 MVP 已进入 M4，界面和强操作再认证继续交付。
 
 界面增量：`web/console` 已交付 Observer 只读请求、单条模型调用和模型调用列表调查闭环。列表要求有界 UTC 窗口，以 `(occurred_at DESC, model_call_id DESC)` 发现每个 `mdl_` 的最新可见脱敏状态，签名游标、独立 `console.model.list` 审计、索引水位和详情重授权均已接通；它不把窗口内状态描述为完整生命周期或证据资格。AuditAdministrator 可显式读取一个配置 audit journal 到索引目标的发布快照，展示封存段、连续水位、待发布/未封存段与缺口；该观察不推导业务准入、全部 Outbox 或系统整体状态。Investigator 结构化事件检索已接入现有 search API，以有界 UTC 时间窗及最多 8 项同事件 AND 条件查询，展示提交计划/摘要、扫描量、可空事件事实和独立索引状态；现在也可按强类型 `agent_run_id` 定位固定 Agent 生命周期和管理访问历史，沿用同一 scope、时间、预算、游标与审计边界。事件详情可显式准备同 Trace 查询，保持既有 Investigator 授权、UTC 时间窗和审计。分页复用冻结计划，编辑即失效；请求和证据元数据链接继续要求独立 Observer 权限。内存会话、闲置/401 清态、跨范围/晚到响应隔离均有回归；真实 Rust HTTP 与前端客户端的 wire 测试校验摘要/事件、Gateway Choice、历史 Noul 部分生命周期、模型未命中及预算失败路径。OIDC 管理身份已交付；强操作再认证、完整关联图和导出界面继续迭代，见 [15.7](15-console-and-api.md#157-已实现只读请求调查控制台)。
 
@@ -30,7 +30,7 @@
 
 交付：journal、ClickHouse、对象证据库、签名 manifest、全请求检索、阶段树、原文审批、转换对照、导出、故障恢复和索引水位。
 
-管理审计增量：现有控制端点的独立 journal 已接通严格封存发布契约，可检索访问尝试、稳定原因和证据引用；管理结果与业务请求终态分离，使用独立源目录和水位。PostgreSQL outbox 已交付案件、证据目录、证据访问、证据清理、校准报告和分区血缘审查 metadata、身份生命周期、通用资源资格、响应资格和分享发行九族消费发布闭环，包含按族租约、精确确认、失败重试和 ClickHouse 内容冲突检查。校准族只消费已形成的受限 `calibration.reported` 与 `calibration.partition_lineage.reviewed` metadata，不生成报告或审核结果，也不授予读取权限。身份生产者已把会话创建、登录、刷新、上下文切换和显式撤销接入完整 v3 契约，并经真实网关/源站/PostgreSQL 回归；身份发布器已严格接收 `binding.revoked`。通用 `GrantPersistence` 库入口构造并原子提交完整 `grant.issued`，只消费网关已验证的类型化内部事实，不提供独立 HTTP 入口。站点 HTTP 资格发行由响应资格生产者在严格源站响应、响应证据、动作和资源资格的同一事务中提交完整 `response_grant.issued` envelope；分享库 API 原子提交完整 `share.issued`，绑定稳定 event/share ID、冻结时间和精确重试正文；HTTP `response.share_issue` 已接通独立获准分享操作、完整 JSON 校验、当前来源资格复验及提交后凭证注入。历史稀疏身份、通用资源资格、响应资格及分享记录保留未确认。清理族保留六类 catalog/孤儿删除意图、完成与失败事实，以独立维护阶段、artifact/cause 引用及空请求进入脱敏检索。各族合成契约与实际生产者的数据库覆盖及执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。案件与证据目标过滤已交付，更多管理目标过滤、调查包导出及控制台界面继续交付。
+管理审计增量：现有控制端点的独立 journal 已接通严格封存发布契约，可检索访问尝试、稳定原因和证据引用；管理结果与业务请求终态分离，使用独立源目录和水位。PostgreSQL outbox 已交付案件、证据目录、证据访问、证据清理、校准报告和分区血缘审查 metadata、身份生命周期、通用资源资格、响应资格和分享发行九族消费发布闭环，包含按族租约、精确确认、失败重试和 ClickHouse 内容冲突检查。校准族只消费已形成的受限 `calibration.reported` 与 `calibration.partition_lineage.reviewed` metadata，不生成报告或审核结果，也不授予读取权限。身份生产者已把会话创建、登录、刷新、上下文切换和显式撤销接入完整 v3 契约，并经真实网关/源站/PostgreSQL 回归；身份发布器已严格接收 `binding.revoked`。通用 `GrantPersistence` 库入口构造并原子提交完整 `grant.issued`，只消费网关已验证的类型化内部事实，不提供独立 HTTP 入口。站点 HTTP 资格发行由响应资格生产者在严格源站响应、响应证据、动作和资源资格的同一事务中提交完整 `response_grant.issued` envelope；分享库 API 原子提交完整 `share.issued`，绑定稳定 event/share ID、冻结时间和精确重试正文；HTTP `response.share_issue` 已接通独立获准分享操作、完整 JSON 校验、当前来源资格复验及提交后凭证注入。历史稀疏身份、通用资源资格、响应资格及分享记录保留未确认。清理族保留六类 catalog/孤儿删除意图、完成与失败事实，以独立维护阶段、artifact/cause 引用及空请求进入脱敏检索。各族合成契约与实际生产者的数据库覆盖及执行方式见 [20.12](20-testing-and-acceptance.md#2012-outbox-发布回归)。案件与证据目标过滤已交付；调查导出 API 的元数据包 MVP 已交付，控制台界面和完整正文导出继续交付。
 
 验收：按任一请求/模型/资格 ID 完整追链；每个缺失有状态；查看与导出也记录；高危审计失败不继续无证据执行。
 

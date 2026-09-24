@@ -46,9 +46,9 @@ SANDBOX_PROTOCOL_REPLAY：隔离测试源站验证协议转换；生产凭证被
 
 ## 14.5 调查包导出
 
-包内容：case manifest、事件 JSONL、请求/响应各版本、转换关系、模型输入输出、规则/适配/构建引用、证据摘要及签名验证说明、脱敏与缺失清单。包默认加密，下载授权短时，记录操作者、目的、范围、批准者和字节数。
+当前已实现的 MVP 是元数据导出，不是完整取证包：`POST /control/v1/exports` 创建带用途的 `metadata_only` 请求，`GET /control/v1/exports/{export_id}` 读取状态，`/approve` 与 `/deny` 由独立 `SensitiveEvidenceApprover` 决定，`/download` 由 `SensitiveEvidenceReader` 在近期 step-up 后获取。批准只在数据库中冻结案件状态、用途和最多 128 个成员的 catalog 元数据，生成的 JSON 包还包含 active/expired/deleted/unavailable 缺失清单与明确的 omitted 列表；包通过现有本地加密证据库写入，目录指针、请求绑定、digest 和字节数在下载前再次校验。审批有效期固定为 15 分钟，下载声明最多两次；存储或审计不确定时不释放结果。
 
-导出包不默认附带 live Cookie、API key 或生产连接串。导出有过期和次数限制，但已下载副本不能远程保证删除。证据对照可给安全文本视图或十六进制视图，绝不在后台同源执行被捕获 HTML/JS。
+MVP 不复制事件 JSONL、请求/响应版本、转换关系、模型输入输出或规则/构建引用，也不附带任何连接凭据；它不授予证据读取、模型重放、业务资格或策略发布权限。完整事件/正文取证包仍需独立的字段白名单、容量预算和再认证设计；已下载副本的本地生命周期也不能由服务端远程保证删除。
 
 ## 14.6 查询性能目标
 

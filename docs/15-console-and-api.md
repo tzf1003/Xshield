@@ -128,7 +128,7 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 
 生产控制台使用 OIDC 建立的 HttpOnly 同源会话 Cookie；页面不读取或保存会话秘密。受控自动化仍可在客户端内存使用短期管理 Bearer，退出、闲置 15 分钟、401 或主动断连后清态；异步响应绑定查询代际和操作序号，旧响应不能恢复已清除数据，跨范围响应断连。原生 Fetch 固定同源路径、拒绝重定向，浏览器会话请求只发送同源 Cookie，Bearer 自动化请求省略 Cookie；实施 15 秒读体总期限及 16 MiB 上限，错误只呈现固定安全文案、稳定代码和管理请求 ID。管理审计继续由服务端控制端点完成。
 
-生产控制台已实现 OIDC authorization-code + S256 PKCE 登录、单次 state/nonce、签名验证、精确 issuer/audience 与部署要求的 MFA `acr`，以及 PostgreSQL 撤销型 HttpOnly 浏览器会话、15 分钟闲置/8 小时绝对超时和 Origin + CSRF 防护。subject 必须由部署配置显式映射到管理角色；每次请求按当前映射重建固定 tenant/site principal，IdP 自声明角色不授信。原文读取另要求同一浏览器 session 在两分钟内完成 MFA step-up，并仍须通过独立审批；step-up 使用迁移 0036 和最近 60 秒 `auth_time`。机器 Bearer 暂无 step-up 路径，不能读取原文。批量导出及其他高危操作再认证仍单独交付。启用须先应用迁移 0035/0036，配置 TLS、专用同源管理 origin、CSP/缓存策略及本文 19.3 的 OIDC 环境变量。开发和部署步骤、测试数据语义见 [控制台说明](../web/console/README.md)。
+生产控制台已实现 OIDC authorization-code + S256 PKCE 登录、单次 state/nonce、签名验证、精确 issuer/audience 与部署要求的 MFA `acr`，以及 PostgreSQL 撤销型 HttpOnly 浏览器会话、15 分钟闲置/8 小时绝对超时和 Origin + CSRF 防护。subject 必须由部署配置显式映射到管理角色；每次请求按当前映射重建固定 tenant/site principal，IdP 自声明角色不授信。原文读取与调查导出另要求同一浏览器 session 在两分钟内完成 MFA step-up，并仍须通过独立审批；step-up 使用迁移 0036 和最近 60 秒 `auth_time`。机器 Bearer 暂无 step-up 路径，不能读取原文、批准导出或下载导出包。启用须先应用迁移 0035/0036，配置 TLS、专用同源管理 origin、CSP/缓存策略及本文 19.3 的 OIDC 环境变量。开发和部署步骤、测试数据语义见 [控制台说明](../web/console/README.md)。
 
 ## 15.8 已实现案件工作台
 
@@ -163,3 +163,11 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 创建/释放提交后冻结原路径、键和正文，未知结果仅原样重试；恢复原请求后遇到拒绝仍保持待确认。首次明确拒绝或有效成功结果允许准备新的操作。切换调查类型保留冻结请求；401、断连、闲置、刷新或页面离开清理内存，未确认操作触发离页提醒。操作者重新鉴权后可按保存的完整原请求恢复，客户端清态不撤销服务端已准入事务。
 
 启用前应用迁移 0020 并完成 12.9 的保留感知清理升级，部署可识别 `console.evidence.hold.*` 的管理 journal 发布器和 29.21 控制 API，再上线界面及代理路由。回退界面保留数据库锁和历史记录；保留锁仍存在时继续使用支持它们的清理服务。工作台沿用 15.7 的 OIDC 管理会话；强操作再认证仍独立交付。客户端、合成浏览器及真实 PostgreSQL/HTTP 回归各自的验证边界见控制台说明。
+
+## 15.11 已实现调查导出 API（MVP）
+
+调查导出先交付服务端闭环，控制台只在后续增量接入。Investigator 以 `POST /control/v1/exports` 提交本人 open/closed 案件的用途和幂等键；`GET /control/v1/exports/{export_id}` 允许请求人读取状态，或由同作用域的 Approver、Reader、AuditAdministrator 复核。请求人不能批准自己的导出；批准和拒绝均要求独立 `SensitiveEvidenceApprover`、近期浏览器 step-up、明确理由及原键，批准成功后由数据库快照生成短时加密 `metadata_only` 包。
+
+包只包含案件与最多 128 个成员的证据 catalog 元数据、active/expired/deleted/unavailable 缺失清单和 omitted 字段说明，不包含证据正文、事件载荷、模型输入输出、存储定位或连接凭据。包的 `artifact_id`、包请求 ID、catalog digest、字节数和 tenant/site 在下载前同时与 PostgreSQL 记录、catalog manifest 和 vault manifest 比较；任一不一致都扣留响应。Reader 需再次完成 step-up，`GET /download` 的 claim 在数据库中原子限制为两次并受 15 分钟过期时间约束；下载响应为 JSON 附件，审计失败或存储不确定时不返回包。
+
+部署先应用迁移 0039，再升级可识别 `export.requested`、`export.approved`、`export.denied`、`export.downloaded` 和 `console.export.read` 的管理 journal 发布器，最后开放 API。当前不提供完整事件/正文导出、自动轮询或 Bearer 强操作；控制台接入、真实 PostgreSQL/vault wire 和浏览器契约继续按垂直里程碑交付。

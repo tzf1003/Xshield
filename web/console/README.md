@@ -6,7 +6,7 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 “校准报告”由 `AuditAdministrator` 手动读取 `GET /control/v1/calibration-reports/{report_id}`。页面严格校验 `calr_` UUIDv7，并只展示受限 projection 的冻结元数据与正文 `active`/`deleted` tombstone；缺失或跨范围保留为当前范围未找到。正文 tombstone 不是读取授权、质量结论、阈值/策略发布或业务资格。该页面不请求或显示正文、样本、标签、概率、指标、提示词、存储信息或内容读取能力，也不自动轮询。
 
-案件工作台另外调用本人案件列表和集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。
+案件工作台另外调用本人案件列表和集合 GET 及创建、证据关联、关闭三个 POST，均要求 `Investigator`。它显示调查元数据和操作结果；证据内容、审批、保留管理和导出仍由独立权限与流程控制。服务端已提供调查导出元数据包 MVP（迁移 0039 与 29.32），本页面尚未接入导出按钮；完整包正文和事件导出不在该 MVP 内。
 
 案件工作台也可显式提交案件清单分析：`POST /control/v1/cases/{case_id}/analyze` 返回耐久 `job_` 任务，随后由 `GET /control/v1/jobs/{job_id}` 读取本人范围内的状态。客户端保留原幂等键，严格校验 `202` 任务投影、完成时间与计数关系；未知或他人任务只显示同构未找到。当前页面契约只覆盖 catalog 计数快照，不触发模型、正文读取、导出或回放。
 
@@ -97,7 +97,7 @@ npm run build
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 [29.24](../../docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。模型调用列表依赖支持其固定窗口、签名游标和 `console.model.list` 审计的控制 API。校准报告详情须先升级至能识别 `console.calibration.report.read` 的管理 journal 发布器，再启用控制 API 与界面；无新增 migration 或 secret。批量导出继续独立交付。
+API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 [29.24](../../docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。模型调用列表依赖支持其固定窗口、签名游标和 `console.model.list` 审计的控制 API。校准报告详情须先升级至能识别 `console.calibration.report.read` 的管理 journal 发布器，再启用控制 API 与界面；调查导出 API 启用前应用迁移 0039 并升级上述五类导出管理事件的发布器，控制台按钮仍需单独验收；无新增 secret。完整事件/正文导出继续独立交付。
 
 ## 验证
 

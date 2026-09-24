@@ -31,6 +31,7 @@ mod grant_inspection;
 mod grant_read;
 mod identity_read;
 mod investigation_case;
+mod investigation_export;
 mod management_session;
 mod model_evaluation_admission;
 mod model_evaluation_cache;
@@ -107,6 +108,12 @@ pub use grant_inspection::{BindingRecordStatus, GrantInspection, GrantRecordStat
 pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
 pub use investigation_case::{
     InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
+};
+pub use investigation_export::{
+    InvestigationExportArtifact, InvestigationExportCreate, InvestigationExportDecision,
+    InvestigationExportDecisionOutcome, InvestigationExportPackage,
+    InvestigationExportPackageOutcome, InvestigationExportRecord, InvestigationExportSnapshot,
+    InvestigationExportWriteOutcome,
 };
 pub use management_session::{ManagementBrowserSession, ManagementOidcTransaction};
 pub use model_evaluation_admission::ModelEvaluationAdmissionLease;

@@ -14,6 +14,7 @@ mod case_list;
 mod causality;
 mod evidence_access_inspection;
 mod evidence_access_list;
+mod exports;
 mod identity;
 mod jobs;
 mod ledger_inspection;
@@ -55,14 +56,18 @@ use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{
         AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-        EvidenceAccessRequestId, GrantId, JobId, ModelCallId, RequestId, SiteId, TenantId,
+        EvidenceAccessRequestId, ExportId, GrantId, JobId, ModelCallId, RequestId, SiteId,
+        TenantId,
     },
     investigation::{
         EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
         InvestigationCaseDraft,
     },
 };
-use xshield_evidence::{EvidenceError, EvidenceManifest, LocalEvidenceVault};
+use xshield_evidence::{
+    EvidenceClassification, EvidenceError, EvidenceFidelity, EvidenceManifest, EvidenceWrite,
+    LocalEvidenceVault, VerifiedEvidenceManifest,
+};
 use xshield_postgres::{
     EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,
     EvidenceAccessDecisionWriteOutcome, EvidenceAccessRequestCreate, EvidenceAccessRequestRecord,
@@ -266,6 +271,58 @@ impl EvidenceReadPort {
             site_id,
             capability.artifact().artifact_id().as_str(),
         )?;
+        Ok(EvidenceContent {
+            bytes,
+            _permit: permit,
+        })
+    }
+
+    fn write_export_package(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        request_id: &RequestId,
+        parent_refs: &[String],
+        expires_at: chrono::DateTime<Utc>,
+        plaintext: &[u8],
+    ) -> Result<VerifiedEvidenceManifest, EvidenceError> {
+        self.vault.write(&EvidenceWrite {
+            tenant_id,
+            site_id,
+            request_id,
+            kind: "investigation_export_metadata",
+            content_type: "application/json",
+            fidelity: EvidenceFidelity::Redacted,
+            classification: EvidenceClassification::Restricted,
+            parent_refs,
+            expires_at,
+            plaintext,
+        })
+    }
+
+    fn read_export_package(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        artifact_id: &ArtifactId,
+        package_request_id: &RequestId,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<EvidenceContent, EvidenceError> {
+        let manifest = self
+            .vault
+            .read_manifest(tenant_id, site_id, artifact_id.as_str())?;
+        let metadata = manifest.manifest();
+        if metadata.request_id != package_request_id.as_str()
+            || metadata.kind != "investigation_export_metadata"
+            || metadata.content_type != "application/json"
+            || metadata.fidelity != EvidenceFidelity::Redacted
+            || metadata.classification != EvidenceClassification::Restricted
+        {
+            return Err(EvidenceError::CorruptEvidence);
+        }
+        let bytes = self
+            .vault
+            .read_content_matching_manifest(tenant_id, site_id, &manifest)?;
         Ok(EvidenceContent {
             bytes,
             _permit: permit,
@@ -3676,6 +3733,7 @@ impl ControlPlane {
             None,
             None,
             Some(target_job_id),
+            None,
         )
     }
 
@@ -3705,6 +3763,44 @@ impl ControlPlane {
             None,
             None,
             target_report_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_export_access_event(
+        &self,
+        request_id: &str,
+        subject_ref: Option<&str>,
+        action: AccessAction,
+        target_export_id: &ExportId,
+        target_case_id: Option<&CaseId>,
+        target_artifact_id: Option<&ArtifactId>,
+        outcome: &'static str,
+        reason_code: &'static str,
+        evidence_refs: &[&str],
+        bytes_read: Option<u64>,
+    ) -> Result<(), ControlError> {
+        self.append_access_event_with_evidence_bytes_with_job(
+            request_id,
+            subject_ref,
+            action,
+            None,
+            target_artifact_id,
+            target_case_id,
+            None,
+            None,
+            outcome,
+            reason_code,
+            evidence_refs,
+            bytes_read,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(target_export_id),
         )
     }
 
@@ -3793,6 +3889,7 @@ impl ControlPlane {
             target_calibration_report_id,
             target_agent_run_id,
             None,
+            None,
         )
     }
 
@@ -3818,6 +3915,7 @@ impl ControlPlane {
         target_calibration_report_id: Option<&CalibrationReportId>,
         target_agent_run_id: Option<&AgentRunId>,
         target_job_id: Option<&JobId>,
+        target_export_id: Option<&ExportId>,
     ) -> Result<(), ControlError> {
         let mut journal = self
             .access_journal
@@ -3868,6 +3966,7 @@ impl ControlPlane {
                     .map(CalibrationReportId::as_str),
                 target_agent_run_id: target_agent_run_id.map(AgentRunId::as_str),
                 target_job_id: target_job_id.map(JobId::as_str),
+                target_export_id: target_export_id.map(ExportId::as_str),
                 query_digest,
                 outcome,
                 reason_code,
@@ -3896,6 +3995,7 @@ impl ControlPlane {
 ///
 /// Read routes have no production side effects. Mutations use their documented
 /// transactional outbox and every route writes the required management audit.
+#[allow(clippy::too_many_lines)]
 pub fn router(control: ControlPlane) -> Router {
     let state = Arc::new(control);
     Router::new()
@@ -3919,6 +4019,26 @@ pub fn router(control: ControlPlane) -> Router {
         .route(
             jobs::PATH,
             get(jobs::read_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
+            exports::PATH,
+            post(exports::request_handler).layer(DefaultBodyLimit::max(exports::MAX_BODY_BYTES)),
+        )
+        .route(
+            exports::READ_PATH,
+            get(exports::read_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
+            exports::APPROVE_PATH,
+            post(exports::approve_handler).layer(DefaultBodyLimit::max(exports::MAX_BODY_BYTES)),
+        )
+        .route(
+            exports::DENY_PATH,
+            post(exports::deny_handler).layer(DefaultBodyLimit::max(exports::MAX_BODY_BYTES)),
+        )
+        .route(
+            exports::DOWNLOAD_PATH,
+            get(exports::download_handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(
             calibration_report_inspection::PATH,
@@ -4195,6 +4315,7 @@ enum EndpointResult {
     ModelCall(ModelCallResponse),
     AgentRun(AgentRunResponse),
     Job(StatusCode, jobs::JobResponse),
+    Export(StatusCode, exports::ExportResponse),
     Search(search::SearchResponse),
     Causality(causality::CausalityResponse),
     RequestEvidence(RequestEvidenceResponse),
@@ -4215,6 +4336,7 @@ impl IntoResponse for EndpointResult {
             Self::ModelCall(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::AgentRun(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Job(status, response) => (status, Json(response)).into_response(),
+            Self::Export(status, response) => (status, Json(response)).into_response(),
             Self::Search(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::Causality(response) => (StatusCode::OK, Json(response)).into_response(),
             Self::RequestEvidence(response) => (StatusCode::OK, Json(response)).into_response(),
@@ -4863,6 +4985,8 @@ struct AccessPayload<'a> {
     target_agent_run_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_job_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_export_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,

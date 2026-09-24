@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`POST /control/v1/exports`、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -32,6 +32,10 @@
 | POST /control/v1/cases/{id}/analyze | 启动只读案件清单分析任务（MVP） | console.case.analyze |
 | POST /control/v1/replays | 离线规则评估，不送原站 | replay.requested/completed |
 | POST /control/v1/exports | 带用途/范围/审批的导出任务 | export.requested/approved/downloaded |
+| GET /control/v1/exports/{export_id} | 读取本人或管理范围内的导出状态 | console.export.read |
+| POST /control/v1/exports/{export_id}/approve | 独立批准并生成短时元数据包 | export.approved |
+| POST /control/v1/exports/{export_id}/deny | 独立拒绝导出请求 | export.denied |
+| GET /control/v1/exports/{export_id}/download | 领取加密元数据包（最多两次） | export.downloaded |
 | GET /control/v1/jobs/{id} | 查看本人任务进度与错误 | console.job.read |
 | POST /control/v1/sites/{id}/candidates | 提交配置候选 | policy.proposed |
 | POST /control/v1/candidates/{id}/validate | 受控验证 | policy.tested |
@@ -406,3 +410,15 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 `GET /control/v1/jobs/{job_id}` 仅允许同一固定作用域内的 `Investigator` 读取本人任务；未知、跨主体或跨作用域的规范 ID 统一返回 200 `found=false`。成功、未命中、路径/认证拒绝和存储故障均写独立 `console.job.read`，成功目标写 `target_job_id`，审计不保存原幂等键、计数以外的案件内容、凭证或正文。结果和管理 journal 均设置 `private, no-store`；后续长任务可复用此状态机，但必须新增明确的 producer、checkpoint、终态原因和资源预算，不得把该 MVP 伪装成通用执行器。
 
 部署先应用 `0038_m4_control_jobs.sql`，再升级能识别 `console.case.analyze`、`console.job.read` 和 `target_job_id` 的管理 journal 发布器，最后开放控制路由与界面。回滚先停用分析入口，保留新发布器直至已封存管理事件发布完成；任务历史与案件事实继续按各自保留策略保存。
+
+## 29.32 已实现的调查导出契约（MVP）
+
+`POST /control/v1/exports` 要求固定 tenant/site 内的 `Investigator`、单值管理凭证、规范幂等键和严格 JSON `{case_id,purpose}`；案件必须属于请求人且为 open/closed。服务端创建迁移 0039 的 `metadata_only` 行并返回 202；精确主体、作用域、键和参数重试返回同一 `export_id`，复用键改参数返回 `CONTROL_IDEMPOTENCY_CONFLICT`，其他案件统一为 `CONTROL_EXPORT_TARGET_UNAVAILABLE`。请求审计为 `export.requested`，不保存原始幂等键或用途正文。
+
+`GET /control/v1/exports/{export_id}` 允许请求人读取自己的状态，也允许同作用域的 SensitiveEvidenceApprover、SensitiveEvidenceReader 或 AuditAdministrator 复核；缺失、跨范围和权限不足使用同构安全错误。成功读取追加 `console.export.read`。读取不返回包正文、vault locator、密钥引用、事件载荷或证据读取资格。
+
+`POST /approve` 与 `/deny` 只接受独立 Approver；请求人不能自批，审批人必须具有对应 action 角色和 `SensitiveEvidenceApprover`，且同一浏览器 session 最近完成 step-up。请求体只含 1–512 字节、无控制字符且无首尾空白的 reason，原键绑定用途隔离的 HMAC 摘要；批准固定生成 15 分钟期限，拒绝无期限。批准事务返回案件与 catalog 的只读快照，随后控制层把最多 128 个成员的元数据、缺失清单和 omitted 列表序列化成 `investigation_export_metadata` JSON，用现有 vault 写入 `Restricted`/`Redacted` 加密 artifact，并原子发布 `evidence.cataloged` 后将导出置为 `ready`。任何 vault/catalog/数据库不确定均返回可重试 503，不把 approved 状态冒充 ready。
+
+`GET /download` 只接受独立 Reader 和近期 step-up。数据库先在 `ready`、期限有效且下载计数小于 2 时原子 claim；随后比较导出行、active catalog manifest 和 vault authenticated manifest 的 artifact/request/digest/bytes 四元关系，再读取并返回 JSON attachment。读取前不加载证据正文；返回的包只包含案件/证据目录元数据与 missing/omitted 清单，不含事件 JSONL、请求响应版本、模型输入输出、规则/构建引用、存储定位、密钥、连接凭据或任何业务资格。成功、失败和审计故障分别写固定管理事件，审计不保存原始包或用途。
+
+部署顺序为应用 `0039_m4_investigation_exports.sql`、升级可识别 `export.requested`、`export.approved`、`export.denied`、`export.downloaded` 和 `console.export.read` 的管理 journal，再开放路由。该 MVP 不提供完整事件/正文取证包、自动轮询、机器 step-up 或 UI 工作台；这些部分必须在独立字段/容量/回滚验收后追加。

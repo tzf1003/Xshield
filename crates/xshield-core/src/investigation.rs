@@ -1,6 +1,8 @@
 //! Pure investigation-case values for control-plane workflows.
 
-use crate::domain::{ArtifactId, CaseId, EvidenceAccessRequestId, InvalidValue, SiteId, TenantId};
+use crate::domain::{
+    ArtifactId, CaseId, EvidenceAccessRequestId, ExportId, InvalidValue, SiteId, TenantId,
+};
 
 const SUBJECT_MAX: usize = 256;
 const PURPOSE_MAX: usize = 512;
@@ -34,6 +36,87 @@ pub struct InvestigationCaseCloseDraft {
     case_id: CaseId,
     owner_ref: String,
     reason: String,
+}
+
+/// A metadata-only investigation export request before durable approval.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvestigationExportDraft {
+    export_id: ExportId,
+    tenant_id: TenantId,
+    site_id: SiteId,
+    case_id: CaseId,
+    requested_by: String,
+    purpose: String,
+}
+
+impl InvestigationExportDraft {
+    /// Binds a server-generated export identity to one owned case and purpose.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] when the requester or purpose is empty,
+    /// oversized, or contains control characters. Persistence rechecks case
+    /// ownership and status before accepting the request.
+    pub fn new(
+        export_id: ExportId,
+        tenant_id: TenantId,
+        site_id: SiteId,
+        case_id: CaseId,
+        requested_by: impl Into<String>,
+        purpose: impl Into<String>,
+    ) -> Result<Self, InvalidValue> {
+        let requested_by = requested_by.into();
+        let purpose = purpose.into();
+        if !valid_text(&requested_by, SUBJECT_MAX) {
+            return Err(InvalidValue::new("export_requester"));
+        }
+        if !valid_text(&purpose, PURPOSE_MAX) || purpose.trim() != purpose {
+            return Err(InvalidValue::new("export_purpose"));
+        }
+        Ok(Self {
+            export_id,
+            tenant_id,
+            site_id,
+            case_id,
+            requested_by,
+            purpose,
+        })
+    }
+
+    /// Returns the server-generated export identity.
+    #[must_use]
+    pub const fn export_id(&self) -> &ExportId {
+        &self.export_id
+    }
+
+    /// Returns the trusted tenant scope.
+    #[must_use]
+    pub const fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    /// Returns the trusted site scope.
+    #[must_use]
+    pub const fn site_id(&self) -> &SiteId {
+        &self.site_id
+    }
+
+    /// Returns the case being exported.
+    #[must_use]
+    pub const fn case_id(&self) -> &CaseId {
+        &self.case_id
+    }
+
+    /// Returns the authenticated requester.
+    #[must_use]
+    pub fn requested_by(&self) -> &str {
+        &self.requested_by
+    }
+
+    /// Returns the bounded export purpose.
+    #[must_use]
+    pub fn purpose(&self) -> &str {
+        &self.purpose
+    }
 }
 
 impl InvestigationCaseCloseDraft {
@@ -517,9 +600,9 @@ mod tests {
     use super::{
         CaseEvidenceDraft, EvidenceAccessDecisionDraft, EvidenceAccessDecisionKind,
         EvidenceAccessKind, EvidenceAccessRequestDraft, InvestigationCaseCloseDraft,
-        InvestigationCaseDraft,
+        InvestigationCaseDraft, InvestigationExportDraft,
     };
-    use crate::domain::{ArtifactId, CaseId, EvidenceAccessRequestId, SiteId, TenantId};
+    use crate::domain::{ArtifactId, CaseId, EvidenceAccessRequestId, ExportId, SiteId, TenantId};
 
     #[test]
     fn case_evidence_actor_is_bounded() {
@@ -577,6 +660,31 @@ mod tests {
         assert!(
             InvestigationCaseDraft::new(case_id, tenant, site, "investigator-1", "x".repeat(513))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn export_draft_is_scoped_and_bounded() {
+        let export = InvestigationExportDraft::new(
+            ExportId::parse("export_018f2a3b-4c5d-7000-8000-000000000901").unwrap(),
+            TenantId::parse("tenant_case").unwrap(),
+            SiteId::parse("site_case").unwrap(),
+            CaseId::parse("case_018f2a3b-4c5d-7000-8000-000000000902").unwrap(),
+            "investigator-1",
+            "Export metadata for incident review",
+        )
+        .unwrap();
+        assert_eq!(export.purpose(), "Export metadata for incident review");
+        assert!(
+            InvestigationExportDraft::new(
+                export.export_id().clone(),
+                export.tenant_id().clone(),
+                export.site_id().clone(),
+                export.case_id().clone(),
+                "investigator-1",
+                " padded ",
+            )
+            .is_err()
         );
     }
 
