@@ -1,13 +1,14 @@
 import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { Button, Skeleton } from "antd";
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { type SiteSection, siteSections } from "../../admin-routes.ts";
 import { safeError } from "../../security/errors.ts";
 import { PageActions } from "../../shell/page-actions";
 import { groupChanges } from "../../sites/model/diff.ts";
 import { configSections, sectionLabel, visibleSections } from "../../sites/sections.ts";
 import { ProblemAlert } from "../../ui/ProblemAlert";
+import { busy } from "./fields";
 import { NoticeBanner, PendingBanner } from "./workspace/Banners";
 import { ChangeBar } from "./workspace/ChangeBar";
 import { SectionNav } from "./workspace/SectionNav";
@@ -24,16 +25,15 @@ import "./workspace.css";
 
 const sectionNames = siteSections.map(([key]) => key) as readonly string[];
 
-/** `/sites/{siteId}/{section}`, and the transitional `/sites/new/...` create flow. */
+/** `/sites/{siteId}/{section}`. (New sites are created in the wizard at `/sites/new/{step}`.) */
 export function SiteDetailPage() {
   const params = useParams({ strict: false }) as { siteId?: string; section?: string };
   const siteId = params.siteId ?? "";
-  const creating = siteId === "new";
   const section = (
     sectionNames.includes(params.section ?? "") ? params.section : "overview"
   ) as SiteSection;
   // A different site is a different workspace: drafts and unsaved edits never cross sites.
-  return <SiteWorkspace key={siteId} siteId={creating ? null : siteId} section={section} />;
+  return <SiteWorkspace key={siteId} siteId={siteId} section={section} />;
 }
 
 function renderSection(section: SiteSection, ws: WorkspaceApi) {
@@ -61,40 +61,31 @@ function renderSection(section: SiteSection, ws: WorkspaceApi) {
   }
 }
 
-function SiteWorkspace({ siteId, section }: { siteId: string | null; section: SiteSection }) {
+function SiteWorkspace({ siteId, section }: { siteId: string; section: SiteSection }) {
   const ws = useSiteWorkspace(siteId);
   const router = useRouter();
-  const basePath = `/sites/${siteId ?? "new"}`;
+  const basePath = `/sites/${siteId}`;
   const sections = visibleSections(ws.access, ws.creating);
   const offered = sections.includes(section);
   const go = (key: string) => void router.navigate({ to: `${basePath}/${key}` } as never);
-
-  useEffect(() => {
-    // A site being created has only the editor sections; old links to others land on the first.
-    if (ws.creating && !offered)
-      void router.navigate({ to: "/sites/new/network", replace: true } as never);
-  }, [ws.creating, offered, router]);
 
   const unsaved = useMemo(() => {
     const counts = new Map(
       [...groupChanges(ws.changes)].map(([group, items]) => [group, items.length] as const),
     );
-    if (ws.creating && ws.newSiteId !== "") counts.set("network", (counts.get("network") ?? 0) + 1);
     return counts;
-  }, [ws.changes, ws.creating, ws.newSiteId]);
+  }, [ws.changes]);
 
   // Only an editor needs the draft; an observer opening 策略与健康 reads health, nothing else.
   const needsDraft = ws.access.canConfigure && configSections.includes(section as never);
   const configReady = ws.draft !== null;
-  const readError = ws.creating
-    ? null
-    : ws.access.canConfigure
-      ? ws.configQuery.error
-      : ws.access.canObserve
-        ? ws.statusQuery.error
-        : null;
-  const waiting = !ws.creating && ws.access.canConfigure && ws.configQuery.isPending;
-  const missing = !ws.creating && ws.found === false;
+  const readError = ws.access.canConfigure
+    ? ws.configQuery.error
+    : ws.access.canObserve
+      ? ws.statusQuery.error
+      : null;
+  const waiting = ws.access.canConfigure && ws.configQuery.isPending;
+  const missing = ws.found === false;
 
   let body: React.ReactNode;
   if (!offered) {
@@ -123,7 +114,7 @@ function SiteWorkspace({ siteId, section }: { siteId: string | null; section: Si
     body = renderSection(section, ws);
   }
 
-  const refreshable = ws.creating || ws.access.canConfigure || ws.access.canObserve;
+  const refreshable = ws.access.canConfigure || ws.access.canObserve;
   return (
     <section
       className="xs-site-page"
@@ -140,14 +131,14 @@ function SiteWorkspace({ siteId, section }: { siteId: string | null; section: Si
           <Button
             icon={<ReloadOutlined aria-hidden="true" />}
             disabled={ws.running}
-            loading={ws.configQuery.isFetching || ws.statusQuery.isFetching}
+            loading={busy(ws.configQuery.isFetching || ws.statusQuery.isFetching)}
             onClick={ws.refresh}
           >
-            {ws.creating || ws.access.canConfigure ? "刷新站点" : "刷新站点状态"}
+            {ws.access.canConfigure ? "刷新站点" : "刷新站点状态"}
           </Button>
         )}
       </PageActions>
-      {siteId !== null && <SiteHeader ws={ws} />}
+      <SiteHeader ws={ws} />
       <PendingBanner ws={ws} />
       <NoticeBanner ws={ws} />
       {sections.length > 0 && (

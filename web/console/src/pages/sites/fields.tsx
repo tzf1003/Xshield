@@ -1,4 +1,4 @@
-import { CloseCircleFilled, ExclamationCircleFilled } from "@ant-design/icons";
+import { CloseCircleFilled, ExclamationCircleFilled, LoadingOutlined } from "@ant-design/icons";
 import { Form, InputNumber, type InputNumberProps, Switch } from "antd";
 import { cloneElement, type ReactElement, type ReactNode } from "react";
 import type { Issue } from "../../sites/model/validation.ts";
@@ -62,6 +62,13 @@ export function Field({ id, label, hint, issue, required, group, children }: Fie
     </Form.Item>
   );
 }
+
+/**
+ * Button `loading` with an icon that is not announced: antd's default one reads "loading" and
+ * stays in the button's accessible name, so "保存草稿" would become "loading 保存草稿".
+ */
+export const busy = (on: boolean) =>
+  on ? { icon: <LoadingOutlined aria-hidden="true" /> } : false;
 
 type ToggleProps = {
   checked: boolean;

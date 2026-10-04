@@ -1,4 +1,11 @@
-import { type QueryKind, routeQueryKind, siteRoute, siteSections } from "../admin-routes.ts";
+import {
+  canonicalWizardStep,
+  type QueryKind,
+  routeQueryKind,
+  siteRoute,
+  siteSections,
+  wizardSteps,
+} from "../admin-routes.ts";
 
 /**
  * Navigation is a view aid only: hiding an entry is not authorization, the server authorizes
@@ -329,7 +336,10 @@ export function breadcrumbs(pathname: string, groups: readonly NavGroup[]): Crum
   const meta = pageMeta(pathname);
   const site = siteRoute(pathname);
   if (site) {
-    const section = siteSections.find(([part]) => part === site.section)?.[1] ?? site.section;
+    const section = site.creating
+      ? (wizardSteps.find(([part]) => part === canonicalWizardStep(site.section))?.[1] ??
+        site.section)
+      : (siteSections.find(([part]) => part === site.section)?.[1] ?? site.section);
     return [
       { label: "站点" },
       site.creating

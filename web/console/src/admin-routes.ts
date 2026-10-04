@@ -12,6 +12,36 @@ export const siteSections = [
   ["audit", "审计"],
 ] as const;
 export type SiteSection = (typeof siteSections)[number][0];
+
+/** The steps of /sites/new/{step}, in order. */
+export const wizardSteps = [
+  ["basics", "基本信息"],
+  ["upstream", "上游与监听"],
+  ["entry", "入口与模式"],
+  ["routes", "首批路由"],
+  ["review", "校验与保存"],
+] as const;
+export type WizardStep = (typeof wizardSteps)[number][0];
+
+/** Before the wizard, a new site was created inside the section pages; those addresses still resolve. */
+const wizardAliases: Readonly<Record<string, WizardStep>> = {
+  overview: "basics",
+  network: "basics",
+  "security-entry": "entry",
+  routes: "routes",
+  identity: "review",
+  crypto: "review",
+  "waf-limits": "review",
+  policies: "review",
+  releases: "basics",
+  audit: "basics",
+};
+
+/** The wizard step a slug names, or the step an older section address now lives in. */
+export function canonicalWizardStep(part: string): WizardStep | null {
+  if (wizardSteps.some(([key]) => key === part)) return part as WizardStep;
+  return Object.hasOwn(wizardAliases, part) ? (wizardAliases[part] ?? null) : null;
+}
 export type QueryKind =
   | "overview"
   | "session"
@@ -69,10 +99,17 @@ const targets: Partial<Record<QueryKind, RegExp>> = {
 };
 export function siteRoute(
   pathname: string,
-): { siteId: string; section: SiteSection; creating: boolean } | null {
+): { siteId: string; section: string; creating: boolean } | null {
   const match = /^\/sites\/([A-Za-z0-9_.-]{1,128})\/([a-z-]+)$/.exec(pathname);
-  if (!match?.[1] || !siteSections.some(([part]) => part === match[2])) return null;
-  return { siteId: match[1], section: match[2] as SiteSection, creating: match[1] === "new" };
+  if (!match?.[1] || !match[2]) return null;
+  // `new` is the wizard, whose steps (and the section names it replaced) are not site sections.
+  if (match[1] === "new") {
+    return canonicalWizardStep(match[2]) === null
+      ? null
+      : { siteId: "new", section: match[2], creating: true };
+  }
+  if (!siteSections.some(([part]) => part === match[2])) return null;
+  return { siteId: match[1], section: match[2], creating: false };
 }
 export function routeTarget(pathname: string, kind: QueryKind): string | null {
   return targets[kind]?.exec(pathname)?.[1] ?? null;

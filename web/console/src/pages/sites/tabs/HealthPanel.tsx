@@ -8,6 +8,7 @@ import { reasonText } from "../../../ui/reason-codes.ts";
 import { StatePill } from "../../../ui/StatePill";
 import { siteDisplayState } from "../../../ui/state-model.ts";
 import { TimeStamp } from "../../../ui/TimeStamp";
+import { busy } from "../fields";
 
 const rows = [
   ["edge_state", "Edge"],
@@ -35,7 +36,7 @@ export function HealthPanel({ siteId }: { siteId: string }) {
         <h3>运行健康</h3>
         <Button
           icon={<HeartOutlined aria-hidden="true" />}
-          loading={health.isFetching}
+          loading={busy(health.isFetching)}
           onClick={() => void health.read()}
         >
           读取健康状态

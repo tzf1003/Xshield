@@ -4,9 +4,10 @@ import {
   createRoute,
   lazyRouteComponent,
   notFound,
+  redirect,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { type QueryKind, siteSections } from "../admin-routes.ts";
+import { canonicalWizardStep, type QueryKind, siteSections } from "../admin-routes.ts";
 import {
   agentRunPattern,
   bindingPattern,
@@ -57,7 +58,7 @@ export function createAppRouteTree(components: RouteComponents) {
   function page(
     kind: QueryKind,
     path: string,
-    options: { component?: unknown; params?: unknown } = {},
+    options: { component?: unknown; params?: unknown; beforeLoad?: unknown } = {},
   ): AnyRoute {
     // A malformed ID or section throws notFound() while the route is matched. Each page route
     // renders its own "not found" so the failure stays inside the shell: with only an ancestor
@@ -90,6 +91,25 @@ export function createAppRouteTree(components: RouteComponents) {
     }),
     page("site-list", "sites", {
       component: lazyRouteComponent(() => import("../pages/sites/SitesListPage"), "SitesListPage"),
+    }),
+    // The new-site wizard. Its slugs are static (`new` outranks the `$siteId` pattern below); an
+    // address from before the wizard, such as /sites/new/network, redirects to the step it became.
+    page("site-config", "sites/new/$step", {
+      component: lazyRouteComponent(() => import("../pages/sites/NewSiteRoute"), "NewSiteRoute"),
+      params: {
+        parse: (raw: Record<string, string>) => {
+          const step = typeof raw.step === "string" ? canonicalWizardStep(raw.step) : null;
+          if (step === null) throw notFound();
+          return { step: raw.step as string };
+        },
+        stringify: (params: Record<string, string>) => ({ step: params.step }),
+      },
+      beforeLoad: ({ params }: { params: { step: string } }) => {
+        const step = canonicalWizardStep(params.step);
+        if (step !== null && step !== params.step) {
+          throw redirect({ to: `/sites/new/${step}`, replace: true } as never);
+        }
+      },
     }),
     page("site-config", "sites/$siteId/$section", {
       component: lazyRouteComponent(

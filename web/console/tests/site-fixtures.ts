@@ -224,6 +224,35 @@ export async function mockSite(page: Page, init: Partial<SiteMock> = {}): Promis
     if (await mock.intercept?.(route, url)) return;
     const parts = path.split("/");
     const tail = parts.at(-1) ?? "";
+    if (path === "/control/v1/sites" && request.method() === "POST") {
+      mock.writes.push({
+        method: "POST",
+        path,
+        body: request.postData(),
+        key: await request.headerValue("idempotency-key"),
+        digest: null,
+      });
+      const { site_id: createdId, ...created } = request.postDataJSON() as {
+        site_id: string;
+      } & Record<string, unknown>;
+      mock.id = createdId;
+      mock.config = {
+        ...created,
+        listen_port: created.listen_port === 0 ? 6102 : created.listen_port,
+      };
+      mock.state = {
+        desired_revision: 1,
+        active_revision: null,
+        apply_state: "pending",
+        requires_approval: created.status === "active",
+        reason_code:
+          created.status === "draft"
+            ? "CONTROL_SITE_DRAFT_NOT_APPLICABLE"
+            : "CONTROL_SITE_APPROVAL_REQUIRED",
+      };
+      await route.fulfill({ status: 201, json: configBody(createdId, mock.config, mock.state) });
+      return;
+    }
     if (path === "/control/v1/sites") {
       await route.fulfill({
         json: { ...envelope("site_demo"), sites: [], truncated: false, next_cursor: null },
@@ -241,7 +270,10 @@ export async function mockSite(page: Page, init: Partial<SiteMock> = {}): Promis
     }
     if (tail === "config" && request.method() === "PUT") {
       const posted = request.postDataJSON() as Record<string, unknown>;
-      mock.config = posted;
+      mock.config = {
+        ...posted,
+        listen_port: posted.listen_port === 0 ? 6102 : posted.listen_port,
+      };
       mock.state = { ...mock.state, desired_revision: mock.state.desired_revision + 1 };
       await route.fulfill({ json: configBody(mock.id, mock.config, mock.state) });
     } else if (tail === "config") {

@@ -2,6 +2,7 @@ import { Button, Popconfirm, Popover } from "antd";
 import { useState } from "react";
 import { groupChanges, groupLabel } from "../../../sites/model/diff.ts";
 import { DiffModal } from "../DiffView";
+import { busy } from "../fields";
 import type { WorkspaceApi } from "./use-workspace.ts";
 
 /**
@@ -71,7 +72,7 @@ export function ChangeBar({ ws, onGo }: { ws: WorkspaceApi; onGo: (section: stri
         <Button onClick={() => setDiffOpen(true)}>查看差异</Button>
         <Button
           type="primary"
-          loading={ws.running}
+          loading={busy(ws.running)}
           disabled={ws.locked || problems.length > 0}
           onClick={() => void ws.save()}
         >

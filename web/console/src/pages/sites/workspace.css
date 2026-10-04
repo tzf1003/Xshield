@@ -415,6 +415,90 @@ details.xs-card,
   border-radius: var(--xs-radius-control);
 }
 
+/* ---------- New-site wizard ---------- */
+
+.xs-wizard-steps {
+  padding: 16px 20px;
+  background: var(--xs-surface);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-panel);
+}
+
+.xs-wizard-routes {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.xs-wizard-routes > .xs-card:first-child {
+  padding: 4px 4px 12px;
+}
+
+.xs-wizard-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--xs-surface);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-panel);
+}
+
+.xs-wizard-hint {
+  flex: 1 1 auto;
+  color: var(--xs-deny);
+  text-align: center;
+  font-size: 13px;
+}
+
+.xs-wizard-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.xs-wizard-diff {
+  margin-top: 12px;
+}
+
+.xs-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-checklist li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.xs-check-icon {
+  margin-top: 3px;
+}
+
+.xs-check-icon--ok {
+  color: var(--xs-allow);
+}
+
+.xs-check-icon--warning {
+  color: var(--xs-observe);
+}
+
+.xs-check-icon--error {
+  color: var(--xs-deny);
+}
+
+.xs-check-message {
+  display: block;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
 @media (width <= 760px) {
   .xs-change-bar {
     bottom: 8px;

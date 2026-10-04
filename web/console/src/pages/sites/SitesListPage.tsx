@@ -18,6 +18,7 @@ import {
 } from "../../sites/list-model.ts";
 import { useSiteList } from "../../sites/state/queries.ts";
 import { PageActions } from "../../shell/page-actions";
+import { busy } from "./fields";
 import { IdChip } from "../../ui/IdChip";
 import { ProblemAlert } from "../../ui/ProblemAlert";
 import { StatePill, applyStateSpec } from "../../ui/StatePill";
@@ -25,7 +26,7 @@ import { TimeStamp } from "../../ui/TimeStamp";
 import "../../ui/ui.css";
 import "./sites.css";
 
-const NEW_SITE_PATH = "/sites/new/network";
+const NEW_SITE_PATH = "/sites/new/basics";
 
 /**
  * 受保护站点: the tenant's sites as a searchable table. Search and the status chips only
@@ -166,7 +167,7 @@ export function SitesListPage() {
         )}
         <Button
           icon={<ReloadOutlined aria-hidden="true" />}
-          loading={refreshing}
+          loading={busy(refreshing)}
           onClick={() => void query.refresh()}
         >
           刷新

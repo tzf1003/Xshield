@@ -108,15 +108,18 @@ test("new site works with populated list and refresh resets draft", async ({ pag
   await setup(page);
   await login(page);
   await page.getByRole("button", { name: "新建站点" }).click();
-  await expect(page).toHaveURL(/sites.new.network$/);
+  // The five-step wizard replaced the ten section pages; the addresses of the old ones redirect.
+  await expect(page).toHaveURL(/sites.new.basics$/);
   await page.getByLabel("站点 ID", { exact: true }).fill("fresh");
   await page.getByLabel("站点名称", { exact: true }).fill("新站点");
-  await category(page, "路由与操作").click();
+  await page.getByLabel("公网入口", { exact: true }).fill("https://fresh.example.test");
+  await page.getByRole("button", { name: "下一步", exact: true }).click();
+  await expect(page).toHaveURL(/sites.new.upstream$/);
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveCount(0);
-  await category(page, "网络").click();
+  await page.goBack();
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveValue("新站点");
   page.once("dialog", (d) => d.accept());
-  await page.getByRole("button", { name: "刷新站点" }).click();
+  await page.getByRole("button", { name: "清空并重新填写" }).click();
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveValue("");
 });
 
