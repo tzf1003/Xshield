@@ -39,7 +39,7 @@
 | POST /control/v1/sites/{site_id}/validate | 校验已持久化站点配置 | console.site.config.validate |
 | POST /control/v1/sites/{site_id}/apply | 请求受保护的 edge 应用；draft 站点稳定拒绝，持有 `site.config.apply_direct` 的 Agent 可直接应用并留下审批记录 | console.site.config.apply |
 | POST /control/v1/sites/{site_id}/approve | PolicyApprover 独立批准绑定到当前 desired revision 的高风险修订并触发应用；可选 `X-Xshield-Expected-Config-Digest` 固定所审阅的配置 | console.site.config.approve |
-| POST /control/v1/sites/{site_id}/rollback | 请求回滚已确认快照 | console.site.config.rollback |
+| POST /control/v1/sites/{site_id}/rollback | 以先前 active 修订的完整配置创建新修订（修订号不复用），按审批规则评估、幂等、写审计 | console.site.config.rollback |
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
 | POST /control/v1/causality | 固定窗口内有界多跳因果摘要 | console.causality.read |

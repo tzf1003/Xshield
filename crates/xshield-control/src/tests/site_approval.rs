@@ -44,6 +44,16 @@ impl MockEdge {
         })
     }
 
+    /// The gateway configuration the edge currently serves for `site`.
+    fn served_gateway_config(&self, site: &str) -> Option<Value> {
+        self.0
+            .lock()
+            .unwrap()
+            .serving
+            .get(site)
+            .map(|config| config["gateway_config"].clone())
+    }
+
     fn served_sites(&self) -> Vec<String> {
         self.0.lock().unwrap().serving.keys().cloned().collect()
     }
@@ -962,5 +972,174 @@ async fn an_uncompilable_site_is_reported_and_never_blocks_the_tenant() {
     assert!(events.iter().any(|event| {
         event["payload"]["reason_code"] == "CONTROL_SITE_POLICY_INVALID"
             && event["payload"]["outcome"] == "ERROR"
+    }));
+}
+
+async fn rollback(ctx: &Ctx, site: &str, key: &str) -> (StatusCode, Value) {
+    Ctx::call(
+        &ctx.author,
+        "POST",
+        &format!("/control/v1/sites/{site}/rollback"),
+        None,
+        Some(key),
+    )
+    .await
+}
+
+/// Rollback used to be unusable (the stored revision lacked `policy_revision`,
+/// so every call returned 400) and picked `active - 1`, which can be a revision
+/// that never served traffic. It now restores the previously *active*
+/// configuration as a NEW revision, risk-evaluated like any other change,
+/// audited and idempotent.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn rollback_restores_the_previously_active_configuration_as_a_new_revision() {
+    let ctx = Ctx::new().await;
+    let site = "site_rollback";
+    // r1: live on A.
+    ctx.create_live(site, "8.8.8.8:9000").await;
+    // r2: B, approved and applied.
+    let (_, second) = ctx
+        .put(site, &site_body(site, "8.8.4.4:9000"), &ctx.key("to-b"))
+        .await;
+    assert_eq!(second["requires_approval"], true);
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-b")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let config_at_two = ctx.edge.served_gateway_config(site).unwrap();
+    assert_eq!(config_at_two["origin"]["address"], "8.8.4.4:9000");
+    // r3: C is saved but never approved, so it never serves traffic.
+    let (_, third) = ctx
+        .put(site, &site_body(site, "9.9.9.9:9000"), &ctx.key("to-c"))
+        .await;
+    assert_eq!(third["desired_revision"], 3);
+    assert_eq!(third["requires_approval"], true);
+    // r4: D replaces the unapproved r3 and is approved and applied.
+    let (_, fourth) = ctx
+        .put(site, &site_body(site, "7.7.7.7:9000"), &ctx.key("to-d"))
+        .await;
+    assert_eq!(fourth["desired_revision"], 4);
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-d")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let state = ctx.status(site).await;
+    assert_eq!(state["active_revision"], 4);
+    assert_eq!(
+        ctx.edge.served_upstream(site).as_deref(),
+        Some("7.7.7.7:9000")
+    );
+
+    // Rolling back from r4 means r2 (B), the revision that served before it,
+    // not r3 (C), which merely has the previous number.
+    let rollback_key = ctx.key("rollback");
+    let (status, rolled) = rollback(&ctx, site, &rollback_key).await;
+    assert!(status.is_success(), "{status} {rolled}");
+    assert_eq!(
+        rolled["desired_revision"], 5,
+        "a new revision, never a reused number"
+    );
+    assert_eq!(rolled["config"]["upstream_address"], "8.8.4.4:9000");
+    // Going from D back to B is a change to what the edge serves: the
+    // rollback itself needs approval and is not applied yet.
+    assert_eq!(rolled["requires_approval"], true, "{rolled}");
+    assert_ne!(rolled["apply_state"], "active");
+    assert_eq!(
+        ctx.edge.served_upstream(site).as_deref(),
+        Some("7.7.7.7:9000")
+    );
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-rollback")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["apply_state"], "active", "{approved}");
+    let state = ctx.status(site).await;
+    assert_eq!(
+        (
+            state["desired_revision"].as_u64(),
+            state["active_revision"].as_u64()
+        ),
+        (Some(5), Some(5))
+    );
+    assert_eq!(
+        ctx.edge.served_gateway_config(site).unwrap(),
+        config_at_two,
+        "the edge receives exactly what it served at revision 2"
+    );
+    // Revision history is complete configurations and keeps every number.
+    let (_, history) = Ctx::call(
+        &ctx.author,
+        "GET",
+        &format!("/control/v1/sites/{site}/revisions"),
+        None,
+        None,
+    )
+    .await;
+    let revisions = history["revisions"].as_array().unwrap();
+    assert_eq!(revisions.len(), 5);
+    assert_eq!(revisions[0]["revision"], 5);
+    assert_eq!(revisions[0]["config"]["policy_revision"], "policy-v1");
+    assert_eq!(revisions[0]["config"]["upstream_address"], "8.8.4.4:9000");
+
+    // Idempotent: the same key replays the same outcome and creates nothing.
+    let applies = ctx.edge.apply_count();
+    let (status, replay) = rollback(&ctx, site, &rollback_key).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["desired_revision"], 5);
+    assert_eq!(ctx.status(site).await["desired_revision"], 5);
+    assert_eq!(
+        ctx.edge.apply_count(),
+        applies,
+        "a replay publishes nothing"
+    );
+
+    // Rolling back again toggles to the revision active before r5 (r4, D) ...
+    let (status, again) = rollback(&ctx, site, &ctx.key("rollback-again")).await;
+    assert!(status.is_success(), "{again}");
+    assert_eq!(again["desired_revision"], 6);
+    assert_eq!(again["config"]["upstream_address"], "7.7.7.7:9000");
+    assert_eq!(again["requires_approval"], true);
+    // ... and a rollback issued while a change is pending cancels that change:
+    // it restores what is *active* (r5, B), which equals the baseline, so it
+    // needs no approval and the pending r6 is superseded.
+    let (status, cancelled) = rollback(&ctx, site, &ctx.key("rollback-cancel")).await;
+    assert!(status.is_success(), "{cancelled}");
+    assert_eq!(cancelled["desired_revision"], 7);
+    assert_eq!(cancelled["config"]["upstream_address"], "8.8.4.4:9000");
+    assert_eq!(cancelled["requires_approval"], false, "{cancelled}");
+    assert_eq!(cancelled["apply_state"], "active", "{cancelled}");
+    assert_eq!(
+        ctx.edge.served_upstream(site).as_deref(),
+        Some("8.8.4.4:9000")
+    );
+
+    // The first rollback's key is superseded by now; replaying it neither
+    // creates a revision nor resurrects the old outcome.
+    let (status, superseded) = rollback(&ctx, site, &rollback_key).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{superseded}");
+    assert_eq!(
+        superseded["error_code"],
+        "CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED"
+    );
+    assert_eq!(ctx.status(site).await["desired_revision"], 7);
+
+    // Nothing to roll back to on a site with a single revision.
+    ctx.create_live("site_single", "1.1.1.1:9000").await;
+    let (status, unavailable) = rollback(&ctx, "site_single", &ctx.key("single")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{unavailable}");
+    assert_eq!(
+        unavailable["error_code"],
+        "CONTROL_SITE_ROLLBACK_UNAVAILABLE"
+    );
+
+    let events = ctx.finish().await;
+    let rollbacks = events
+        .iter()
+        .filter(|event| event["event_type"] == "console.site.config.rollback")
+        .collect::<Vec<_>>();
+    assert!(rollbacks.len() >= 5, "every attempt is audited");
+    assert!(rollbacks.iter().any(|event| {
+        event["payload"]["reason_code"] == "CONTROL_SITE_CONFIG_REPLAYED"
+            && event["payload"]["outcome"] == "PASS"
+    }));
+    assert!(rollbacks.iter().any(|event| {
+        event["payload"]["reason_code"] == "CONTROL_SITE_ROLLBACK_UNAVAILABLE"
+            && event["payload"]["outcome"] == "DENY"
     }));
 }

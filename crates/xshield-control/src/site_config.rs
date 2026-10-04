@@ -1441,10 +1441,9 @@ pub async fn rollback_handler(
         Ok(subject) => subject,
         Err(response) => return (*response).into_response(),
     };
-    if single_header(&headers, "idempotency-key")
+    let Some(idempotency_key) = single_header(&headers, "idempotency-key")
         .filter(|value| super::valid_idempotency_key(value))
-        .is_none()
-    {
+    else {
         return control
             .audited_error_async(
                 request_id,
@@ -1459,14 +1458,27 @@ pub async fn rollback_handler(
             )
             .await
             .into_response();
-    }
-    let apply = match control
+    };
+    // A replay of this very request is recognised *before* anything that
+    // depends on the site's current state is resolved: once the first call has
+    // created a revision the "previous" revision is a different one, and a
+    // replay must not chase it.
+    let Some(idempotency_digest) = write_idempotency_digest(
+        &control,
+        ROLLBACK_ACCESS,
+        &subject,
+        &site_id,
+        &idempotency_key,
+    ) else {
+        return super::internal_error(&request_id).into_response();
+    };
+    let replayed = match control
         .catalog
-        .read_protected_site_apply_state(&control.config.tenant_id, &site_id)
+        .find_protected_site_write(&control.config.tenant_id, &site_id, &idempotency_digest)
         .await
     {
-        Ok(Some(apply)) => apply,
-        Ok(None) | Err(_) => {
+        Ok(replayed) => replayed,
+        Err(_) => {
             return control
                 .audited_error_async(
                     request_id,
@@ -1474,8 +1486,8 @@ pub async fn rollback_handler(
                     ROLLBACK_ACCESS,
                     None,
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
-                    "site application state is temporarily unavailable",
+                    "CONTROL_SITE_CONFIG_UNAVAILABLE",
+                    "site revision history is temporarily unavailable",
                     true,
                     "retry_later",
                 )
@@ -1483,25 +1495,78 @@ pub async fn rollback_handler(
                 .into_response();
         }
     };
-    let Some(previous_revision) = rollback_target_revision(&apply) else {
-        return control
-            .audited_error_async(
-                request_id,
-                Some(subject),
-                ROLLBACK_ACCESS,
-                None,
-                StatusCode::CONFLICT,
-                "CONTROL_SITE_ROLLBACK_UNAVAILABLE",
-                "no previously active snapshot is available for rollback",
-                false,
-                "inspect_revisions",
-            )
+    let target_revision = if let Some(found) = replayed {
+        // The write path decides what the replay means (an exact replay of the
+        // latest write, or a superseded key); it only needs a valid body.
+        found.revision
+    } else {
+        let apply = match control
+            .catalog
+            .read_protected_site_apply_state(&control.config.tenant_id, &site_id)
             .await
-            .into_response();
+        {
+            Ok(Some(apply)) => apply,
+            Ok(None) | Err(_) => {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        ROLLBACK_ACCESS,
+                        None,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
+                        "site application state is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await
+                    .into_response();
+            }
+        };
+        let previous_active = match control
+            .catalog
+            .read_protected_site_previous_active_revision(&control.config.tenant_id, &site_id)
+            .await
+        {
+            Ok(previous) => previous,
+            Err(_) => {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        ROLLBACK_ACCESS,
+                        None,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_SITE_CONFIG_UNAVAILABLE",
+                        "site revision history is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await
+                    .into_response();
+            }
+        };
+        let Some(revision) = rollback_target_revision(&apply, previous_active) else {
+            return control
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    ROLLBACK_ACCESS,
+                    None,
+                    StatusCode::CONFLICT,
+                    "CONTROL_SITE_ROLLBACK_UNAVAILABLE",
+                    "no previously active snapshot is available for rollback",
+                    false,
+                    "inspect_revisions",
+                )
+                .await
+                .into_response();
+        };
+        revision
     };
     let Some(config) = (match control
         .catalog
-        .read_protected_site_revision_config(&control.config.tenant_id, &site_id, previous_revision)
+        .read_protected_site_revision_config(&control.config.tenant_id, &site_id, target_revision)
         .await
     {
         Ok(config) => config,
@@ -1559,13 +1624,25 @@ pub async fn rollback_handler(
     .await
 }
 
-fn rollback_target_revision(apply: &xshield_postgres::ProtectedSiteApplyState) -> Option<u64> {
-    match apply.active_revision {
-        Some(active) if apply.apply_state != "active" || apply.desired_revision != active => {
-            Some(active)
-        }
-        Some(active) => active.checked_sub(1),
-        None => None,
+/// The revision a rollback restores, as the content of a *new* revision.
+///
+/// With a change still pending (desired differs from active, or the last apply
+/// did not complete) it is the active revision: the rollback cancels the
+/// pending change. Otherwise it is the revision that was active before the
+/// current one, taken from the recorded activation order. `active - 1` is not
+/// that: revision numbers are never reused, so the number below the active one
+/// can be a revision that failed, was never approved or never served traffic.
+fn rollback_target_revision(
+    apply: &xshield_postgres::ProtectedSiteApplyState,
+    previous_active: Option<u64>,
+) -> Option<u64> {
+    let active = apply.active_revision?;
+    let change_pending = apply.desired_revision != active
+        || !matches!(apply.apply_state.as_str(), "active" | "paused");
+    if change_pending {
+        Some(active)
+    } else {
+        previous_active
     }
 }
 
@@ -2669,19 +2746,18 @@ async fn write_site_handler(
     let Ok(canonical) = serde_json::to_vec(&payload) else {
         return super::internal_error(&request_id).into_response();
     };
-    let Some(idempotency_digest) = signature(
-        &control,
-        b"site-config-idempotency-v2",
-        &[
-            action.event_type.as_bytes(),
-            action.method.as_bytes(),
-            action.path.as_bytes(),
-            subject.as_bytes(),
-            site_id.as_str().as_bytes(),
-            idempotency_key.as_bytes(),
-        ],
-    ) else {
+    let Some(idempotency_digest) =
+        write_idempotency_digest(&control, action, &subject, &site_id, &idempotency_key)
+    else {
         return super::internal_error(&request_id).into_response();
+    };
+    // A rollback's request is "roll this site back" under this key; which
+    // revision that resolved to is an outcome, not part of the request, so a
+    // replay after the site has moved on is still the same request.
+    let request_basis: &[u8] = if action.event_type == ROLLBACK_ACCESS.event_type {
+        b"site-rollback-request-v1"
+    } else {
+        &canonical
     };
     let Some(request_digest) = signature(
         &control,
@@ -2693,7 +2769,7 @@ async fn write_site_handler(
             subject.as_bytes(),
             site_id.as_str().as_bytes(),
             idempotency_key.as_bytes(),
-            &canonical,
+            request_basis,
         ],
     ) else {
         return super::internal_error(&request_id).into_response();
@@ -3334,6 +3410,29 @@ fn validate_request_with(
         &request.upstream_address,
         &request.upstream_server_name,
         allow_loopback,
+    )
+}
+
+/// The identity under which a write is remembered: the action, the caller, the
+/// site and the key. It excludes the content, which is compared separately.
+fn write_idempotency_digest(
+    control: &ControlPlane,
+    action: AccessAction,
+    subject: &str,
+    site_id: &SiteId,
+    idempotency_key: &str,
+) -> Option<[u8; 32]> {
+    signature(
+        control,
+        b"site-config-idempotency-v2",
+        &[
+            action.event_type.as_bytes(),
+            action.method.as_bytes(),
+            action.path.as_bytes(),
+            subject.as_bytes(),
+            site_id.as_str().as_bytes(),
+            idempotency_key.as_bytes(),
+        ],
     )
 }
 
@@ -4134,13 +4233,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rollback_restores_last_active_when_desired_apply_is_not_active() {
-        let base = xshield_postgres::ProtectedSiteApplyState {
-            desired_revision: 3,
-            active_revision: Some(2),
+    fn apply_with(
+        desired: u64,
+        active: Option<u64>,
+        state: &str,
+    ) -> xshield_postgres::ProtectedSiteApplyState {
+        xshield_postgres::ProtectedSiteApplyState {
+            desired_revision: desired,
+            active_revision: active,
             apply_id: "apply_demo".to_owned(),
-            apply_state: "failed".to_owned(),
+            apply_state: state.to_owned(),
             reason_code: "EDGE_UNAVAILABLE".to_owned(),
             retry_count: 1,
             requires_approval: false,
@@ -4148,14 +4250,50 @@ mod tests {
             approved_by: None,
             approval_id: None,
             updated_at: chrono::Utc::now(),
-        };
-        assert_eq!(rollback_target_revision(&base), Some(2));
+        }
+    }
 
-        let active = xshield_postgres::ProtectedSiteApplyState {
-            desired_revision: 2,
-            apply_state: "active".to_owned(),
-            ..base
-        };
-        assert_eq!(rollback_target_revision(&active), Some(1));
+    #[test]
+    fn rollback_cancels_a_pending_change_by_restoring_the_active_revision() {
+        // Desired revision 3 never became active: the active one is restored.
+        assert_eq!(
+            rollback_target_revision(&apply_with(3, Some(2), "failed"), Some(1)),
+            Some(2)
+        );
+        assert_eq!(
+            rollback_target_revision(&apply_with(3, Some(2), "pending"), None),
+            Some(2)
+        );
+        // The last apply of the active revision itself did not complete.
+        assert_eq!(
+            rollback_target_revision(&apply_with(2, Some(2), "failed"), Some(1)),
+            Some(2)
+        );
+    }
+
+    /// `active - 1` is wrong whenever a revision in between never served
+    /// traffic; the recorded activation order decides.
+    #[test]
+    fn rollback_with_nothing_pending_restores_the_previously_active_revision() {
+        // Revision 3 was never approved, so revision 4's predecessor in
+        // service is revision 2.
+        assert_eq!(
+            rollback_target_revision(&apply_with(4, Some(4), "active"), Some(2)),
+            Some(2)
+        );
+        // A paused site has nothing pending either; undo the pause.
+        assert_eq!(
+            rollback_target_revision(&apply_with(4, Some(4), "paused"), Some(3)),
+            Some(3)
+        );
+        // Only one revision has ever been active, or none has.
+        assert_eq!(
+            rollback_target_revision(&apply_with(1, Some(1), "active"), None),
+            None
+        );
+        assert_eq!(
+            rollback_target_revision(&apply_with(1, None, "pending"), None),
+            None
+        );
     }
 }
