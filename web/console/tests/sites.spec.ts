@@ -92,7 +92,7 @@ test("site list opens exact site; categories and history retain draft; deep link
   await page.goBack();
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveValue("Beta 草稿");
   await page.goForward();
-  await expect(page.getByRole("combobox", { name: "安全入口", exact: true })).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: "安全入口", exact: true })).toBeVisible();
   page.once("dialog", (d) => d.dismiss());
   await page.getByRole("button", { name: "返回站点列表" }).click();
   await expect(page).toHaveURL(/sites.site_beta.security-entry$/);
@@ -100,7 +100,7 @@ test("site list opens exact site; categories and history retain draft; deep link
   await page.reload();
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await expect(page.getByRole("combobox", { name: "安全入口", exact: true })).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: "安全入口", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -157,7 +157,7 @@ test("unknown save outcome requires explicit identical retry", async ({ page }) 
   });
   await login(page, "/sites/site_alpha/network");
   await page.getByLabel("站点名称", { exact: true }).fill("保存后");
-  await page.getByRole("button", { name: "保存配置", exact: true }).click();
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect(page.getByRole("button", { name: "确认后原样重试" })).toBeVisible();
   expect(writes).toHaveLength(1);
   await expect(page.getByLabel("站点名称", { exact: true })).toBeDisabled();
@@ -183,7 +183,10 @@ test("config and mutation responses cannot switch the selected site", async ({ p
   mutation = true;
   await page.getByRole("button", { name: "刷新站点" }).click();
   await expect(page.getByLabel("站点名称", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "保存配置", exact: true }).click();
+  // Nothing to save until something changed: the bar with 保存草稿 appears with the first edit.
+  await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toHaveCount(0);
+  await page.getByLabel("站点名称", { exact: true }).fill("改名");
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect(page.getByRole("button", { name: "确认后原样重试" })).toBeVisible();
   await expect(page).toHaveURL(/sites.site_alpha.network$/);
 });
@@ -226,7 +229,7 @@ test("WAF category saves explicit query fragments", async ({ page }) => {
   });
   await login(page, "/sites/site_alpha/waf-limits");
   await page.getByRole("textbox", { name: /查询阻断片段/ }).fill("' or 1=1--\n<script");
-  await page.getByRole("button", { name: "保存配置", exact: true }).click();
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect.poll(() => saved.policy).toBeDefined();
   const policy = saved.policy as { waf: { blocked_query_fragments: string[] } };
   expect(policy.waf.blocked_query_fragments).toEqual(["' or 1=1--", "<script"]);
@@ -306,8 +309,10 @@ test("manual health reads show bounded states and reject wrong site", async ({ p
   await login(page, "/sites/site_alpha/policies");
   const region = page.getByRole("region", { name: "站点运行健康" });
   await region.getByRole("button", { name: "读取健康状态" }).click();
+  await expect(region).toContainText("不可用");
   await expect(region).toContainText("unavailable");
   await region.getByRole("button", { name: "读取健康状态" }).click();
   await expect(page.getByRole("alert")).toContainText("INVALID_RESPONSE");
   await expect(region.getByText("unavailable", { exact: true })).toHaveCount(0);
+  await expect(region.getByText("不可用")).toHaveCount(0);
 });

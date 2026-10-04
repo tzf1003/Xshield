@@ -19,7 +19,11 @@ function OperationList({ operations }: { operations: readonly OperationSnapshot[
           <li key={operation.id}>
             <strong>{operation.label}</strong>
             <span className="xs-pending-phase">
-              {operation.phase === "inflight" ? "请求中" : "结果未知"}
+              {operation.phase === "inflight"
+                ? "请求中"
+                : operation.phase === "step_up"
+                  ? "需要再认证 · 未执行"
+                  : "结果未知"}
               {operation.attempts > 1 ? ` · 已尝试 ${operation.attempts} 次` : ""}
             </span>
             <code className="mono">

@@ -59,6 +59,11 @@ export type WriteResult<T> =
   | { kind: "rejected"; error: unknown }
   /** The outcome cannot be established; only an exact retry of the frozen request is allowed. */
   | { kind: "unknown"; error: unknown }
+  /**
+   * Refused before anything ran because the fresh MFA step-up is missing. The frozen request is
+   * kept: once the operator re-verified, the identical request (same key, same body) is retried.
+   */
+  | { kind: "step_up"; error: unknown }
   /** The session ended while the request was in flight. State was cleared, nothing to show. */
   | { kind: "stale" };
 

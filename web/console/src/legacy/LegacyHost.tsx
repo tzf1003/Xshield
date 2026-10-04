@@ -1,4 +1,3 @@
-import { useBlocker } from "@tanstack/react-router";
 import type { FormEvent, KeyboardEvent } from "react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiError, validateModelCallListPlan } from "../api";
@@ -14,13 +13,9 @@ import type {
   ModelCallListPlan,
   ModelCallListResponse,
   ModelCallResponse,
-  SiteApplyResponse,
-  SiteConfigResponse,
-  SiteListItem,
-  SiteRevision,
   SummaryResponse,
 } from "../api";
-import { routeQueryKind, routeTarget, siteRoute } from "../admin-routes";
+import { routeQueryKind, routeTarget } from "../admin-routes";
 import type { BindingResponse, GrantResponse } from "../ledger";
 import {
   AgentRunOverview,
@@ -61,12 +56,6 @@ const EvidenceHoldPanel = lazy(() =>
 const ExportPanel = lazy(() =>
   import("../ExportPanel").then((module) => ({ default: module.ExportPanel })),
 );
-const SiteOperationsPanel = lazy(() =>
-  import("../SiteOperationsPanel").then((module) => ({ default: module.SiteOperationsPanel })),
-);
-const SiteConfigPanel = lazy(() =>
-  import("../SiteConfigPanel").then((module) => ({ default: module.SiteConfigPanel })),
-);
 const ManagementApiKeyPanel = lazy(() =>
   import("../ManagementApiKeyPanel").then((module) => ({ default: module.ManagementApiKeyPanel })),
 );
@@ -97,7 +86,6 @@ type Channel =
   | "access"
   | "hold"
   | "export"
-  | "sites"
   | "health";
 const queryLabels = {
   request: "请求 ID",
@@ -185,12 +173,10 @@ export default function LegacyHost({
     access: 0,
     hold: 0,
     export: 0,
-    sites: 0,
     health: 0,
   });
   const [requestId, setRequestId] = useState("");
   const queryKind = routeQueryKind(pathname);
-  const currentSite = siteRoute(pathname);
   const [ledger, setLedger] = useState<GrantResponse | BindingResponse | null>(null);
   const [searchPreset, setSearchPreset] = useState<SearchPreset | null>(null);
   const [searchPresetVersion, setSearchPresetVersion] = useState(0);
@@ -206,13 +192,6 @@ export default function LegacyHost({
   const [calibrationReport, setCalibrationReport] = useState<CalibrationReportResponse | null>(
     null,
   );
-  const [siteConfig, setSiteConfig] = useState<SiteConfigResponse | null>(null);
-  const [siteStatus, setSiteStatus] = useState<SiteApplyResponse | null>(null);
-  const [siteHealth, setSiteHealth] = useState<SiteApplyResponse | null>(null);
-  const [siteRevisions, setSiteRevisions] = useState<SiteRevision[]>([]);
-  const [siteList, setSiteList] = useState<SiteListItem[]>([]);
-  const [siteListCursor, setSiteListCursor] = useState<string | null>(null);
-  const selectedSiteId = currentSite?.siteId ?? "";
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [events, setEvents] = useState<EventsResponse | null>(null);
   const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
@@ -235,10 +214,6 @@ export default function LegacyHost({
     setHealth(null);
     setJob(null);
     setCalibrationReport(null);
-    setSiteConfig(null);
-    setSiteHealth(null);
-    setSiteStatus(null);
-    setSiteRevisions([]);
     setLedger(null);
     setSearchPlan(null);
     setSearch(null);
@@ -260,8 +235,6 @@ export default function LegacyHost({
       store.onDisconnect(() => {
         clearResults();
         setRequestId("");
-        setSiteList([]);
-        setSiteListCursor(null);
         setSearchPreset(null);
         setSessionNotice(null);
       }),
@@ -269,26 +242,16 @@ export default function LegacyHost({
   );
   const disconnect = session.disconnect;
 
-  const siteUnsaved = useRef(false);
   const pendingPreset = useRef<SearchPreset | null>(null);
-  const setSiteUnsaved = useCallback((value: boolean) => {
-    siteUnsaved.current = value;
-  }, []);
   const navigate = useCallback((path: string, completed = false) => go(path, { completed }), [go]);
 
-  // Leaving the page invalidates every in-flight response before another view can render;
-  // the categories of one site editing session are the exception.
+  // Leaving the page invalidates every in-flight response before another view can render.
   const previousPath = useRef(pathname);
   useLayoutEffect(() => {
     const before = previousPath.current;
     if (before === pathname) return;
     previousPath.current = pathname;
-    const previous = siteRoute(before);
-    const next = siteRoute(pathname);
-    if (!previous || !next || previous.siteId !== next.siteId) {
-      clearResults();
-      siteUnsaved.current = false;
-    }
+    clearResults();
     setRequestId("");
     const preset = pendingPreset.current;
     pendingPreset.current = null;
@@ -299,21 +262,6 @@ export default function LegacyHost({
       setSearchPreset(null);
     }
   }, [pathname, clearResults]);
-
-  // An unsaved site draft or unconfirmed operation asks before the page is left. The router
-  // consults this for links, programmatic navigation and back/forward alike; the panels
-  // install their own beforeunload warning for reloads.
-  useBlocker({
-    shouldBlockFn: ({ current, next }) => {
-      const before = siteRoute(current.pathname);
-      const after = siteRoute(next.pathname);
-      if (!siteUnsaved.current || (before && after && before.siteId === after.siteId)) {
-        return false;
-      }
-      return !window.confirm("当前站点有未保存草稿或待确认操作。确定离开？");
-    },
-    enableBeforeUnload: false,
-  });
 
   // A search requested from outside (the command palette) is applied once the session is live.
   useEffect(() => {
@@ -352,10 +300,6 @@ export default function LegacyHost({
     else if (queryKind === "binding") loadBinding(target);
     else if (queryKind === "calibration-report") loadCalibrationReport(target);
   }, [connected, pathname, queryKind]);
-
-  useEffect(() => {
-    if (connected && queryKind === "site-config") loadSiteConfig();
-  }, [connected, queryKind, selectedSiteId]);
 
   // Every response belongs to a view generation, a session epoch and one authenticated scope.
   // Abort alone cannot stop already-resolved promises from repainting old data.
@@ -443,8 +387,7 @@ export default function LegacyHost({
       queryKind === "hold" ||
       queryKind === "export" ||
       queryKind === "model-list" ||
-      queryKind === "audit-health" ||
-      queryKind === "site-config"
+      queryKind === "audit-health"
     )
       return;
     clearResults();
@@ -532,71 +475,6 @@ export default function LegacyHost({
       (api, signal) => api.health(signal),
       (response) => setHealth(response),
     );
-  }
-  function loadSiteConfig(cursor?: string, append = false) {
-    if (currentSite) {
-      if (!currentSite.creating) loadSiteDetails(currentSite.siteId);
-      return;
-    }
-    void run(
-      "sites",
-      (api, signal) => api.siteList(signal, cursor),
-      (response) => {
-        setSiteList((current) => {
-          if (!append) return response.sites;
-          const seen = new Set(current.map((site) => site.site_id));
-          return [...current, ...response.sites.filter((site) => !seen.has(site.site_id))];
-        });
-        setSiteListCursor(response.next_cursor);
-      },
-    );
-  }
-  function loadSiteDetails(siteId: string) {
-    if (managementRoles !== null && !managementRoles.includes("system_admin")) {
-      if (managementRoles.includes("observer")) {
-        void run(
-          "query",
-          (api, signal) => api.siteStatus(siteId, signal),
-          (response) => setSiteStatus(response),
-          undefined,
-          siteId,
-        );
-        void run(
-          "sites",
-          (api, signal) => api.siteRevisions(siteId, signal),
-          (response) => setSiteRevisions(response.revisions),
-          undefined,
-          siteId,
-        );
-      }
-      return;
-    }
-    void run(
-      "query",
-      async (api, signal) => {
-        const config = await api.siteConfig(siteId, signal);
-        // Each response is checked before combining projections. A revision
-        // response from another tenant/site must never be silently merged.
-        if (config.site_id !== siteId) throw new ApiError("INVALID_RESPONSE");
-        return config;
-      },
-      (response) => setSiteConfig(response),
-      undefined,
-      siteId,
-    );
-    if (managementRoles === null || managementRoles.includes("observer")) {
-      void run(
-        "sites",
-        async (api, signal) => {
-          const response = await api.siteRevisions(siteId, signal);
-          if (response.site_id !== siteId) throw new ApiError("INVALID_RESPONSE");
-          return response;
-        },
-        (response) => setSiteRevisions(response.revisions),
-        undefined,
-        siteId,
-      );
-    }
   }
   function loadCalibrationReport(target = requestId.trim()) {
     clearResults();
@@ -836,7 +714,6 @@ export default function LegacyHost({
           </form>
         )}
         <Failure problem={problems.query ?? null} />
-        <Failure problem={problems.sites ?? null} />
         <Failure problem={problems.health ?? null} />
         {queryKind === "api-keys" &&
           client &&
@@ -901,176 +778,10 @@ export default function LegacyHost({
             onRun={(fetcher, apply, fail) => run("export", fetcher, apply, fail)}
           />
         </Workbench>
-        {queryKind === "site-config" &&
-        currentSite &&
-        managementRoles !== null &&
-        !managementRoles.includes("system_admin") ? (
-          <Deferred>
-            <SiteOperationsPanel
-              key={selectedSiteId}
-              siteId={selectedSiteId}
-              section={currentSite.section}
-              roles={managementRoles}
-              status={siteStatus}
-              health={siteHealth}
-              revisions={siteRevisions}
-              busy={Boolean(busy.query || busy.sites || busy.health)}
-              failed={Boolean(problems.query || problems.sites)}
-              onRefresh={() => loadSiteDetails(selectedSiteId)}
-              onNavigate={navigate}
-              onUnsavedChange={setSiteUnsaved}
-              onHealth={() => {
-                setSiteHealth(null);
-                void run(
-                  "health",
-                  (api, signal) => api.siteHealth(selectedSiteId, signal),
-                  (response) => setSiteHealth(response),
-                  undefined,
-                  selectedSiteId,
-                );
-              }}
-              onValidate={() =>
-                run(
-                  "query",
-                  (api, signal) => api.validateSite(selectedSiteId, signal),
-                  (response) =>
-                    setSessionNotice(
-                      response.valid ? "配置验证通过。" : "配置验证未通过：" + response.reason_code,
-                    ),
-                  undefined,
-                  selectedSiteId,
-                )
-              }
-              onApply={(key) =>
-                run(
-                  "query",
-                  (api, signal) => api.applySite(selectedSiteId, key, signal),
-                  () => loadSiteDetails(selectedSiteId),
-                  undefined,
-                  selectedSiteId,
-                )
-              }
-              onApprove={(key) =>
-                run(
-                  "query",
-                  (api, signal) => api.approveSite(selectedSiteId, key, signal),
-                  () => loadSiteDetails(selectedSiteId),
-                  undefined,
-                  selectedSiteId,
-                )
-              }
-              onRollback={(key) =>
-                run(
-                  "query",
-                  (api, signal) => api.rollbackSite(selectedSiteId, key, signal),
-                  () => loadSiteDetails(selectedSiteId),
-                  undefined,
-                  selectedSiteId,
-                )
-              }
-            />
-          </Deferred>
-        ) : queryKind === "site-config" ? (
-          <Deferred>
-            <SiteConfigPanel
-              roles={managementRoles}
-              onUnsavedChange={setSiteUnsaved}
-              health={siteHealth}
-              healthBusy={Boolean(busy.health)}
-              onHealth={() => {
-                setSiteHealth(null);
-                void run(
-                  "health",
-                  (api, signal) => api.siteHealth(selectedSiteId, signal),
-                  (response) => setSiteHealth(response),
-                  undefined,
-                  selectedSiteId,
-                );
-              }}
-              response={siteConfig}
-              sites={siteList}
-              nextCursor={siteListCursor}
-              key={selectedSiteId || "list"}
-              selectedSiteId={currentSite?.creating ? "" : selectedSiteId}
-              creating={currentSite?.creating ?? false}
-              onNavigate={navigate}
-              busy={Boolean(busy.query || busy.sites)}
-              failed={Boolean(problems.query || problems.sites)}
-              onRefresh={() => loadSiteConfig()}
-              onLoadMore={() => {
-                if (siteListCursor) void loadSiteConfig(siteListCursor, true);
-              }}
-              listView={pathname === "/sites"}
-              section={currentSite?.section ?? "overview"}
-              onSelectSite={(siteId) => {
-                navigate(`/sites/${siteId}/overview`);
-              }}
-              onSave={(siteId, draft, key) => {
-                const creating = currentSite?.creating === true;
-                return run(
-                  "query",
-                  (api, signal) =>
-                    creating
-                      ? api.createSite(siteId, draft, key, signal)
-                      : api.saveSiteConfig(siteId, draft, key, signal),
-                  (response) => {
-                    setSiteConfig(response);
-                    if (creating) navigate("/sites/" + siteId + "/overview", true);
-                  },
-                  undefined,
-                  siteId,
-                );
-              }}
-              onValidate={(siteId) => {
-                return run(
-                  "query",
-                  (api, signal) => api.validateSite(siteId, signal),
-                  (result) => {
-                    setSessionNotice(
-                      result.valid ? "配置验证通过。" : "配置验证未通过：" + result.reason_code,
-                    );
-                  },
-                  undefined,
-                  siteId,
-                );
-              }}
-              onApply={(siteId, key) =>
-                run(
-                  "query",
-                  (api, signal) => api.applySite(siteId, key, signal),
-                  () => loadSiteDetails(siteId),
-                  undefined,
-                  siteId,
-                )
-              }
-              onApprove={(siteId, key) =>
-                run(
-                  "query",
-                  (api, signal) => api.approveSite(siteId, key, signal),
-                  () => loadSiteDetails(siteId),
-                  undefined,
-                  siteId,
-                )
-              }
-              revisions={siteRevisions}
-              onRollback={(siteId, key) =>
-                run(
-                  "query",
-                  (api, signal) => api.rollbackSite(siteId, key, signal),
-                  () => loadSiteDetails(siteId),
-                  undefined,
-                  siteId,
-                )
-              }
-              onOpenInvestigation={() => {
-                navigate("/investigation/requests");
-              }}
-            />
-          </Deferred>
-        ) : queryKind === "case" ||
-          queryKind === "hold" ||
-          queryKind === "access" ||
-          queryKind === "export" ? null : queryKind === "search" ? (
+        {queryKind === "case" ||
+        queryKind === "hold" ||
+        queryKind === "access" ||
+        queryKind === "export" ? null : queryKind === "search" ? (
           <Deferred>
             <SearchPanel
               key={searchPresetVersion}

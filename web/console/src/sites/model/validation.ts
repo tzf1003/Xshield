@@ -124,7 +124,7 @@ type RouteIssue = Readonly<{ field: string; severity: "error" | "warning"; messa
 /** Per-route rules of `SitePolicyConfig::validate`; cross-route rules are in `validateRouteSet`. */
 export function validateRoute(
   route: SiteRouteConfig,
-  limits: { max_response_body_bytes: number },
+  limits: { max_response_body_bytes: number; max_request_body_bytes?: number },
 ): RouteIssue[] {
   const issues: RouteIssue[] = [];
   const add = (field: string, message: string, severity: RouteIssue["severity"] = "error") =>
@@ -207,7 +207,87 @@ export function validateRoute(
   if (route.request_crypto !== null && (!["POST", "PUT", "PATCH"].includes(route.method) || ui)) {
     add("request_crypto", "请求加密只用于 POST/PUT/PATCH，且不能用于界面来源的路由。");
   }
+  for (const message of cryptoProblems(route, limits.max_request_body_bytes ?? MIB)) {
+    add(message.field, message.text);
+  }
   return issues;
+}
+
+const scopedValue = /^[A-Za-z0-9_.-]{1,128}$/;
+const num = (value: unknown): number => (typeof value === "number" ? value : Number.NaN);
+const text = (value: unknown): string => (typeof value === "string" ? value : "");
+
+/** The edge's request/response crypto contracts (`route_*_crypto_contract_holds`). */
+function cryptoProblems(
+  route: SiteRouteConfig,
+  maxRequestBody: number,
+): { field: "request_crypto" | "response_crypto"; text: string }[] {
+  const found: { field: "request_crypto" | "response_crypto"; text: string }[] = [];
+  const request = route.request_crypto;
+  if (request !== null) {
+    if (request.mode === "OBSERVE") {
+      if (!scopedValue.test(text(request.adapter_revision))) {
+        found.push({
+          field: "request_crypto",
+          text: "请求加密的适配器版本只能含字母、数字和 _ . -。",
+        });
+      }
+      if (route.response_crypto !== null) {
+        found.push({ field: "request_crypto", text: "仅观察请求时不能同时改写响应（响应加密）。" });
+      }
+    } else if (request.mode === "DIRECT_DECRYPT") {
+      const envelope = num(request.max_envelope_bytes);
+      const plaintext = num(request.max_plaintext_bytes);
+      const ok =
+        scopedValue.test(text(request.adapter_revision)) &&
+        scopedValue.test(text(request.key_id)) &&
+        num(request.key_not_before) < num(request.key_expires_at) &&
+        envelope >= 1 &&
+        envelope <= 64 * 1024 &&
+        envelope <= maxRequestBody &&
+        plaintext >= 1 &&
+        plaintext <= Math.floor(envelope / 2) &&
+        plaintext <= maxRequestBody &&
+        num(request.max_message_age_seconds) >= 1 &&
+        num(request.max_message_age_seconds) <= 3600 &&
+        num(request.max_future_skew_seconds) >= 0 &&
+        num(request.max_future_skew_seconds) <= 300 &&
+        num(request.max_active_messages) >= 1 &&
+        num(request.max_active_messages) <= 1_000_000;
+      if (!ok) {
+        found.push({
+          field: "request_crypto",
+          text: "请求解密参数不合法：标识为字母数字和 _ . -，密钥生效时间早于失效时间，信封 1–64 KiB 且不超过请求体上限，明文不超过信封的一半，有效期 1–3600 秒，时钟偏差 ≤ 300 秒。",
+        });
+      }
+    } else {
+      found.push({
+        field: "request_crypto",
+        text: "请求加密模式只能是 OBSERVE 或 DIRECT_DECRYPT。",
+      });
+    }
+  }
+  const response = route.response_crypto;
+  if (response !== null) {
+    const envelope = num(response.max_envelope_bytes);
+    const minimum = route.max_response_bytes * 2 + 1024;
+    const ok =
+      (response.mode === undefined || response.mode === "DIRECT_ENCRYPT") &&
+      scopedValue.test(text(response.adapter_revision)) &&
+      scopedValue.test(text(response.key_id)) &&
+      num(response.key_not_before) < num(response.key_expires_at) &&
+      num(response.message_ttl_seconds) >= 1 &&
+      num(response.message_ttl_seconds) <= 3600 &&
+      envelope >= minimum &&
+      envelope <= 2 * 16 * MIB + 4096;
+    if (!ok) {
+      found.push({
+        field: "response_crypto",
+        text: "响应加密参数不合法：标识为字母数字和 _ . -，密钥生效时间早于失效时间，有效期 1–3600 秒，信封不小于两倍响应上限加 1024 字节。",
+      });
+    }
+  }
+  return found;
 }
 
 /** Cross-route rules of the edge compiler (`validate_route_set` and the uniqueness checks). */

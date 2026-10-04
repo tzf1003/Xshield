@@ -92,6 +92,10 @@ export function createAppRouteTree(components: RouteComponents) {
       component: lazyRouteComponent(() => import("../pages/sites/SitesListPage"), "SitesListPage"),
     }),
     page("site-config", "sites/$siteId/$section", {
+      component: lazyRouteComponent(
+        () => import("../pages/sites/SiteDetailPage"),
+        "SiteDetailPage",
+      ),
       params: {
         parse: (raw: Record<string, string>) => {
           const { siteId, section } = raw;

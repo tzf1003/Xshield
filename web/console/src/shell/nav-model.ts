@@ -318,7 +318,6 @@ export const legacyKinds: ReadonlySet<QueryKind> = new Set<QueryKind>([
   "access",
   "hold",
   "export",
-  "site-config",
   "api-keys",
   "jobs",
 ]);

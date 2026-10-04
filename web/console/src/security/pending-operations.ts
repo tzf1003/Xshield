@@ -1,16 +1,18 @@
 import type { ControlClient } from "../api.ts";
 import { validIdempotencyKey } from "../cases.ts";
-import { isKnownRejection, type SafeError, safeError } from "./errors.ts";
+import { isKnownRejection, isStepUpRequired, type SafeError, safeError } from "./errors.ts";
 import type { ScopedResponse } from "./scope.ts";
 
 export type HttpMethod = "POST" | "PUT" | "PATCH" | "DELETE";
 
 /**
  * `inflight`: sent, no verdict yet. `unknown`: the outcome cannot be established (network loss,
- * timeout, 5xx, contract failure, ...). Only these two phases are kept; a confirmed success or a
+ * timeout, 5xx, contract failure, ...). `step_up`: the server refused before running anything
+ * because the fresh MFA step-up is missing, so the outcome IS known (nothing happened) and the
+ * identical request may be repeated once the operator re-verified. A confirmed success or a
  * deterministic server refusal resolves the operation and removes it.
  */
-export type OperationPhase = "inflight" | "unknown";
+export type OperationPhase = "inflight" | "unknown" | "step_up";
 
 export type OperationSnapshot = Readonly<{
   id: string;
@@ -94,8 +96,17 @@ export class PendingOperationStore {
     return () => this.#listeners.delete(listener);
   };
 
+  /**
+   * Operations whose outcome is not established: in flight or unknown. A `step_up` entry is
+   * not counted (the server did nothing), so the page-leave warning does not fire for the
+   * very redirect that performs the re-verification.
+   */
   get unresolvedCount(): number {
-    return this.#entries.size;
+    let count = 0;
+    for (const entry of this.#entries.values()) {
+      if (entry.snapshot.phase !== "step_up") count += 1;
+    }
+    return count;
   }
 
   get(id: string): OperationSnapshot | null {
@@ -150,7 +161,8 @@ export class PendingOperationStore {
     const entry = this.#entries.get(id);
     if (!entry) throw new Error("unknown pending operation");
     const { snapshot } = entry;
-    const retryable = snapshot.phase === "unknown" || snapshot.attempts === 0;
+    const retryable =
+      snapshot.phase === "unknown" || snapshot.phase === "step_up" || snapshot.attempts === 0;
     if (!retryable) throw new Error("operation is already in flight");
     entry.snapshot = Object.freeze({
       ...snapshot,
@@ -171,12 +183,33 @@ export class PendingOperationStore {
   }
 
   /**
-   * Classifies a failed attempt. A deterministic refusal of a first attempt resolves the entry
-   * (`rejected`); everything else, and any refusal after an ambiguous attempt, keeps it `unknown`.
+   * The operator gives up an operation whose outcome they could not establish (typically after
+   * re-reading the state). The frozen request is dropped; it can never be sent again.
    */
-  fail(id: string, error: unknown): "rejected" | "unknown" {
+  abandon(id: string): boolean {
+    if (!this.#entries.delete(id)) return false;
+    this.#publish();
+    return true;
+  }
+
+  /**
+   * Classifies a failed attempt. A refusal because the MFA step-up is missing keeps the frozen
+   * request for an exact retry (`step_up`); any other deterministic refusal of a first attempt
+   * resolves the entry (`rejected`); everything else, and any refusal after an ambiguous
+   * attempt, keeps it `unknown`.
+   */
+  fail(id: string, error: unknown): "rejected" | "unknown" | "step_up" {
     const entry = this.#entries.get(id);
     if (!entry) return "rejected";
+    if (isStepUpRequired(error)) {
+      entry.snapshot = Object.freeze({
+        ...entry.snapshot,
+        phase: "step_up",
+        lastError: safeError(error),
+      });
+      this.#publish();
+      return "step_up";
+    }
     if (!entry.hadUnknown && isKnownRejection(error)) {
       this.#entries.delete(id);
       this.#publish();
