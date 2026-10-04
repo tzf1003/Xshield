@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
-import { ApiError, ControlClient, bootstrapBrowserSession, validateModelCallListPlan } from "./api";
+import { ApiError, validateModelCallListPlan } from "./api";
+import type { ControlClient } from "./api";
+import { useGuardedQuery } from "./security/hooks";
+import { MANUAL_REFRESH } from "./security/query-client.ts";
+import { machineLoginEnabled, useSession } from "./security/SessionProvider";
+import { unauthorizedNotice } from "./security/session-store.ts";
 import { validateCausalityPlan, validateSearchPlan } from "./search";
 import type { CausalityResponse, SearchPlan, SearchResponse } from "./search";
 import { SearchPanel } from "./SearchPanel";
@@ -20,7 +25,6 @@ import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
   AuditHealthResponse,
-  WorkbenchOverviewResponse,
   CalibrationReportResponse,
   AgentRunResponse,
   EventsResponse,
@@ -33,7 +37,6 @@ import type {
   SiteApplyResponse,
   SiteListItem,
   SiteRevision,
-  BrowserSession,
   JobResponse,
 } from "./api";
 import {
@@ -61,8 +64,7 @@ type Channel =
   | "hold"
   | "export"
   | "sites"
-  | "health"
-  | "workbench";
+  | "health";
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
@@ -83,10 +85,6 @@ const queryPrefixes = {
   export: "export",
   jobs: "job",
 };
-const idleMs = 15 * 60 * 1000;
-const machineLoginEnabled =
-  import.meta.env.DEV && import.meta.env.VITE_XSHIELD_E2E_MACHINE_LOGIN === "1";
-
 function Failure({ problem }: { problem: Problem | null }) {
   return (
     problem && (
@@ -105,9 +103,22 @@ function Failure({ problem }: { problem: Problem | null }) {
 }
 
 export function App() {
-  const client = useRef<ControlClient | null>(null);
+  // The session layer owns the ControlClient, the confirmed scope, roles, idle expiry and the
+  // epoch shared with every TanStack query. This host keeps only per-view state.
+  const session = useSession();
+  const { store } = session.runtime;
+  const connected = session.state.status === "connected";
+  const client = session.state.client;
+  const scope = session.state.scope;
+  const sessionInfo = session.state.session;
+  // `null` is the explicitly enabled local machine-login mode. Browser
+  // sessions always carry the server-provided role list.
+  const managementRoles = session.state.roles as string[] | null;
+  const authReady = session.authReady;
+  // View generation: bumped whenever the visible view changes, so a response of an earlier view
+  // cannot repaint. Distinct from the session epoch, which only moves on connect/disconnect.
   const lifetime = useRef(new AbortController());
-  const epoch = useRef(0);
+  const viewGeneration = useRef(0);
   const operations = useRef<Record<Channel, number>>({
     query: 0,
     events: 0,
@@ -119,17 +130,9 @@ export function App() {
     export: 0,
     sites: 0,
     health: 0,
-    workbench: 0,
   });
-  const scope = useRef<{ tenant_id: string; site_id: string } | null>(null);
-  const [connected, setConnected] = useState(false);
   const [pathname, setPathname] = useState(() => window.location.pathname || "/");
-  const [sessionInfo, setSessionInfo] = useState<BrowserSession | null>(null);
-  // `null` is the explicitly enabled local machine-login mode. Browser
-  // sessions always carry the server-provided role list.
-  const [managementRoles, setManagementRoles] = useState<string[] | null>(null);
   const [token, setToken] = useState("");
-  const [authReady, setAuthReady] = useState(machineLoginEnabled);
   const [requestId, setRequestId] = useState("");
   const queryKind = routeQueryKind(pathname);
   const currentSite = siteRoute(pathname);
@@ -145,7 +148,6 @@ export function App() {
   const [modelList, setModelList] = useState<ModelCallListResponse | null>(null);
   const [job, setJob] = useState<JobResponse | null>(null);
   const [health, setHealth] = useState<AuditHealthResponse | null>(null);
-  const [workbench, setWorkbench] = useState<WorkbenchOverviewResponse | null>(null);
   const [calibrationReport, setCalibrationReport] = useState<CalibrationReportResponse | null>(
     null,
   );
@@ -169,14 +171,13 @@ export function App() {
   const clearResults = useCallback(() => {
     lifetime.current.abort();
     lifetime.current = new AbortController();
-    epoch.current += 1;
+    viewGeneration.current += 1;
     setSummary(null);
     setModel(null);
     setAgentRun(null);
     setModelListPlan(null);
     setModelList(null);
     setHealth(null);
-    setWorkbench(null);
     setJob(null);
     setCalibrationReport(null);
     setSiteConfig(null);
@@ -196,53 +197,23 @@ export function App() {
     setBusy({});
   }, []);
 
-  const disconnect = useCallback(
-    (notice: string | null = null) => {
-      clearResults();
-      client.current = null;
-      scope.current = null;
-      setConnected(false);
-      setSessionInfo(null);
-      setManagementRoles(null);
-      setToken("");
-      setAuthReady(true);
-      setRequestId("");
-      setSiteList([]);
-      setSiteListCursor(null);
-      setSearchPreset(null);
-      setSessionNotice(notice);
-    },
-    [clearResults],
-  );
-
-  useEffect(() => {
-    if (machineLoginEnabled) return;
-    const controller = new AbortController();
-    void bootstrapBrowserSession(controller.signal)
-      .then((session) => {
-        client.current = new ControlClient(undefined, session.csrf_token);
-        scope.current = {
-          tenant_id: session.tenant_id,
-          site_id: session.site_id,
-        };
-        setManagementRoles(session.roles);
-        setSessionInfo(session);
+  // Whatever ends the session (idle, logout, 401, scope violation, pagehide, or a TanStack
+  // query noticing one of those) also clears this host's per-view state, and the other way
+  // round: `disconnect` below ends the shared session and with it the query cache.
+  useEffect(
+    () =>
+      store.onDisconnect(() => {
+        clearResults();
+        setToken("");
+        setRequestId("");
+        setSiteList([]);
+        setSiteListCursor(null);
+        setSearchPreset(null);
         setSessionNotice(null);
-        setConnected(true);
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        if (!(error instanceof ApiError && error.status === 401)) {
-          setSessionNotice(
-            error instanceof ApiError ? error.message : "无法恢复管理会话，请检查服务后重试。",
-          );
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setAuthReady(true);
-      });
-    return () => controller.abort();
-  }, []);
+      }),
+    [store, clearResults],
+  );
+  const disconnect = session.disconnect;
 
   useEffect(() => {
     document.getElementById("main-content")?.focus();
@@ -341,25 +312,6 @@ export function App() {
   }, [connected, pathname, queryKind]);
 
   useEffect(() => {
-    if (!connected) return;
-    let timer: ReturnType<typeof setTimeout>;
-    const reset = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => disconnect("会话已因闲置断开，请重新连接。"), idleMs);
-    };
-    const leave = () => disconnect();
-    reset();
-    window.addEventListener("pointerdown", reset);
-    window.addEventListener("keydown", reset);
-    window.addEventListener("pagehide", leave);
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener("pointerdown", reset);
-      window.removeEventListener("keydown", reset);
-      window.removeEventListener("pagehide", leave);
-    };
-  }, [connected, disconnect]);
-  useEffect(() => {
     // StrictMode replays setup/cleanup; a new mount needs a live request signal.
     if (lifetime.current.signal.aborted) lifetime.current = new AbortController();
     return () => lifetime.current.abort();
@@ -368,16 +320,16 @@ export function App() {
     if (connected && queryKind === "site-config") loadSiteConfig();
   }, [connected, queryKind, selectedSiteId]);
 
-  useEffect(() => {
-    if (!connected || queryKind !== "overview") return;
-    void run(
-      "workbench",
-      (api, signal) => api.workbenchOverview(signal),
-      (response) => setWorkbench(response),
-    );
-  }, [connected, queryKind, managementRoles]);
+  // Shell-level read on the new data layer: epoch-keyed, scope-verified, abort-aware, and never
+  // refetched on focus, reconnect or mount. The refresh button is the only trigger.
+  const overviewQuery = useGuardedQuery({
+    key: ["workbench", "overview"],
+    fetch: (api, signal) => api.workbenchOverview(signal),
+    staleTime: MANUAL_REFRESH,
+    enabled: queryKind === "overview",
+  });
 
-  // Every response belongs to a query generation and one authenticated scope.
+  // Every response belongs to a view generation, a session epoch and one authenticated scope.
   // Abort alone cannot stop already-resolved promises from repainting old data.
   async function run<T extends { tenant_id: string; site_id: string }>(
     channel: Channel,
@@ -386,41 +338,33 @@ export function App() {
     fail?: (error: unknown) => void,
     expectedSiteId?: string,
   ): Promise<boolean> {
-    const api = client.current;
-    if (!api) return false;
-    const generation = epoch.current;
+    const start = store.getState();
+    const api = start.client;
+    if (!api || start.status !== "connected") return false;
+    const generation = viewGeneration.current;
+    const sessionEpoch = start.epoch;
     const operation = ++operations.current[channel];
-    const signal = lifetime.current.signal;
+    const signal = AbortSignal.any([lifetime.current.signal, store.signal]);
     const current = () =>
-      epoch.current === generation && operations.current[channel] === operation && !signal.aborted;
+      viewGeneration.current === generation &&
+      store.isCurrent(sessionEpoch) &&
+      operations.current[channel] === operation &&
+      !signal.aborted;
     setBusy((value) => ({ ...value, [channel]: true }));
     setProblems((value) => ({ ...value, [channel]: undefined }));
     try {
       const response = await fetcher(api, signal);
       if (!current()) return false;
-      if (expectedSiteId && response.site_id !== expectedSiteId) {
-        throw new ApiError("INVALID_RESPONSE");
-      }
-      if (
-        scope.current &&
-        (scope.current.tenant_id !== response.tenant_id ||
-          (!expectedSiteId && scope.current.site_id !== response.site_id))
-      ) {
-        disconnect("响应范围校验失败，连接已断开。");
-        return false;
-      }
-      if (!expectedSiteId) {
-        scope.current = {
-          tenant_id: response.tenant_id,
-          site_id: response.site_id,
-        };
-      }
+      const verdict = store.verifyScope(response, expectedSiteId);
+      if (verdict === "wrong_site") throw new ApiError("INVALID_RESPONSE");
+      // A cross-tenant or cross-site reply has already ended the session (and cleared this host).
+      if (verdict === "mismatch") return false;
       apply(response);
       return true;
     } catch (error) {
       if (!current()) return false;
       if (error instanceof ApiError && error.status === 401) {
-        disconnect("管理会话已失效，请重新登录。");
+        disconnect(unauthorizedNotice);
       } else {
         fail?.(error);
         const problem =
@@ -445,48 +389,19 @@ export function App() {
 
   function connect(event: FormEvent) {
     event.preventDefault();
-    try {
-      client.current = new ControlClient(token);
-    } catch {
+    if (!session.connectWithToken(token)) {
       setSessionNotice("请输入有效的管理凭证。");
       return;
     }
-    lifetime.current = new AbortController();
     setToken("");
-    setManagementRoles(null);
-    setSessionInfo(null);
     setSessionNotice(null);
-    setConnected(true);
   }
   async function logout() {
-    const activeClient = client.current;
-    if (!activeClient) return;
-    try {
-      await activeClient.logoutBrowserSession();
-      disconnect("已安全退出管理会话。");
-    } catch (error) {
-      const notice =
-        error instanceof ApiError
-          ? `${error.message} 页面状态已清理，请重新登录确认会话状态。`
-          : "退出状态未确认；页面状态已清理，请重新登录确认会话状态。";
-      // The server may have revoked the session before an audit or network
-      // failure prevented a success response. Never keep sensitive UI state.
-      disconnect(notice);
-    }
+    await session.logout();
   }
   async function reauthenticate() {
-    const activeClient = client.current;
-    if (!activeClient) return;
-    try {
-      const authorizationUrl = await activeClient.startReauthentication(lifetime.current.signal);
-      window.location.assign(authorizationUrl);
-    } catch (error) {
-      setSessionNotice(
-        error instanceof ApiError
-          ? `${error.message} 页面状态保持不变。`
-          : "无法启动身份再认证，请稍后重试。",
-      );
-    }
+    const failure = await session.reauthenticate();
+    if (failure) setSessionNotice(failure);
   }
   function clearArtifact() {
     operations.current.artifact += 1;
@@ -625,12 +540,7 @@ export function App() {
     );
   }
   function refreshOverview() {
-    clearResults();
-    void run(
-      "workbench",
-      (api, signal) => api.workbenchOverview(signal),
-      (response) => setWorkbench(response),
-    );
+    void overviewQuery.refetch();
   }
   function loadSiteDetails(siteId: string) {
     if (managementRoles !== null && !managementRoles.includes("system_admin")) {
@@ -863,14 +773,15 @@ export function App() {
     </aside>
   );
 
+  // While connected, in-session notices are local; once the session ended, why it ended.
+  const notice = connected ? sessionNotice : (sessionNotice ?? session.state.notice);
+
   return (
     <AdminShell
       connected={connected}
       pathname={pathname}
       title={title}
-      scope={
-        scope.current ? `${scope.current.tenant_id} / ${scope.current.site_id}` : "等待查询验证范围"
-      }
+      scope={scope ? `${scope.tenant_id} / ${scope.site_id}` : "等待查询验证范围"}
       roles={managementRoles}
       session={sessionInfo}
       machineLoginEnabled={machineLoginEnabled}
@@ -878,8 +789,8 @@ export function App() {
       onLogout={() => void logout()}
       onReauthenticate={() => void reauthenticate()}
       onRefresh={queryKind === "overview" ? refreshOverview : undefined}
-      refreshing={queryKind === "overview" && Boolean(busy.sites || busy.health)}
-      observedAt={queryKind === "overview" ? (workbench?.as_of ?? null) : null}
+      refreshing={queryKind === "overview" && overviewQuery.isFetching}
+      observedAt={queryKind === "overview" ? (overviewQuery.data?.as_of ?? null) : null}
     >
       <h1>{title}</h1>
       <p className="lead">
@@ -913,9 +824,9 @@ export function App() {
                                     ? "申请经独立审批的案件与目录元数据包；下载需重新验证。"
                                     : "核对当前账本的状态、代际与期限。"}
       </p>
-      {sessionNotice && (
+      {notice && (
         <div className="notice" role="status">
-          {sessionNotice}
+          {notice}
         </div>
       )}
       {!connected ? (
@@ -957,7 +868,7 @@ export function App() {
               >
                 使用企业身份登录
               </button>
-              {sessionNotice && (
+              {notice && (
                 <button className="outline" type="button" onClick={() => window.location.reload()}>
                   重试会话检查
                 </button>
@@ -973,9 +884,9 @@ export function App() {
         <>
           {queryKind === "overview" && (
             <OverviewWorkbench
-              overview={workbench}
-              busy={Boolean(busy.workbench)}
-              failed={Boolean(problems.workbench)}
+              overview={overviewQuery.data ?? null}
+              busy={overviewQuery.isFetching}
+              failed={overviewQuery.isError}
               onRefresh={refreshOverview}
               onNavigate={navigate}
             />
@@ -1087,13 +998,13 @@ export function App() {
           <Failure problem={problems.sites ?? null} />
           <Failure problem={problems.health ?? null} />
           {queryKind === "api-keys" &&
-            client.current &&
-            scope.current &&
+            client &&
+            scope &&
             (managementRoles?.includes("system_admin") ||
               managementRoles?.includes("key_administrator")) && (
               <ManagementApiKeyPanel
-                client={client.current}
-                tenantId={scope.current.tenant_id}
+                client={client}
+                tenantId={scope.tenant_id}
                 onNotice={setSessionNotice}
               />
             )}

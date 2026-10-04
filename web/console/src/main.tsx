@@ -2,11 +2,15 @@ import { App as AntdApp } from "antd";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { createSessionRuntime } from "./security/runtime.ts";
+import { SessionProvider } from "./security/SessionProvider";
 import { applyStoredThemeAttributes, ThemeProvider } from "./theme/ThemeProvider";
 import "./theme/fonts";
 import "./theme/tokens.generated.css";
 import "./style.css";
 
+// One runtime for the page: the session, its query cache and its pending writes live and die together.
+const runtime = createSessionRuntime();
 const root = document.getElementById("root");
 const cspNonce =
   document.querySelector('meta[name="xshield-csp-nonce"]')?.getAttribute("content") || undefined;
@@ -16,9 +20,11 @@ if (root)
   createRoot(root).render(
     <StrictMode>
       <ThemeProvider cspNonce={cspNonce}>
-        <AntdApp>
-          <App />
-        </AntdApp>
+        <SessionProvider runtime={runtime}>
+          <AntdApp>
+            <App />
+          </AntdApp>
+        </SessionProvider>
       </ThemeProvider>
     </StrictMode>,
   );
