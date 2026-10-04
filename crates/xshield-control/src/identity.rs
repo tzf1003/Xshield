@@ -1,6 +1,8 @@
 #![allow(clippy::map_unwrap_or)]
 
-use super::{AccessAction, ControlPlane, audit_unavailable, internal_error, single_header};
+use super::{
+    AccessAction, ControlPlane, api_key_authz, audit_unavailable, internal_error, single_header,
+};
 use axum::{
     Extension, Json,
     body::Bytes,
@@ -20,11 +22,12 @@ use openssl::{memcmp, rand::rand_bytes, sha::sha256};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use url::Url;
 use xshield_core::{
-    admin::{ManagementPrincipal, ManagementRole},
+    admin::{ApiKeyCapability, ApiKeyGrant, ManagementPrincipal, ManagementRole},
     domain::{SiteId, TenantId},
 };
 
@@ -314,9 +317,23 @@ struct BrowserRequestAssertion {
     direct_apply: bool,
     #[serde(default)]
     scopes: Vec<(String, String)>,
+    /// Exact authorities of an API-key principal. A key assertion carries these
+    /// and no roles; every other assertion carries roles and no grants.
+    #[serde(default)]
+    api_key_grants: Vec<AssertedGrant>,
     roles: Vec<String>,
     csrf_valid: bool,
     expires_at: u64,
+}
+
+/// One key authority exactly as stored in a scope row (`site_id` holds the
+/// tenant-wide marker for `site.create`), so request-time reconstruction goes
+/// through the same constructor as authentication.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssertedGrant {
+    site_id: String,
+    capability: String,
 }
 
 pub(super) struct VerifiedRequestIdentity {
@@ -327,6 +344,12 @@ pub(super) struct VerifiedRequestIdentity {
 }
 
 const ASSERTION_PREFIX: &str = "Xshield-Session ";
+/// Upper bounds for the in-process assertion. A key may hold up to 32 scope
+/// rows of up to 7 capabilities each; the hex bound covers the worst case with
+/// 128-byte site ids while still bounding what a client-supplied header costs
+/// to decode before its signature is checked.
+const API_KEY_GRANTS_MAX: usize = 32 * 7;
+const ASSERTION_HEX_MAX: usize = 128 * 1024;
 const ASSERTION_DOMAIN: &[u8] = b"xshield-control-browser-request-v1";
 
 pub(super) fn verify_request_assertion(
@@ -335,7 +358,8 @@ pub(super) fn verify_request_assertion(
 ) -> Option<VerifiedRequestIdentity> {
     let encoded = token.strip_prefix(ASSERTION_PREFIX)?;
     let (payload_hex, signature_hex) = encoded.split_once('.')?;
-    if payload_hex.is_empty() || payload_hex.len() > 8_192 || signature_hex.len() != 64 {
+    if payload_hex.is_empty() || payload_hex.len() > ASSERTION_HEX_MAX || signature_hex.len() != 64
+    {
         return None;
     }
     let payload = decode_hex(payload_hex)?;
@@ -349,17 +373,43 @@ pub(super) fn verify_request_assertion(
     }
     let assertion: BrowserRequestAssertion = serde_json::from_slice(&payload).ok()?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    // A key principal has grants and no roles; everyone else has roles and no
+    // grants. An assertion mixing the two is never produced and never trusted.
+    let key_principal = !assertion.api_key_grants.is_empty();
     if assertion.version != 1
         || assertion.expires_at <= now
         || assertion.expires_at > now.saturating_add(60)
-        || assertion.roles.is_empty()
+        || key_principal != assertion.roles.is_empty()
         || assertion.roles.len() > 10
+        || assertion.api_key_grants.len() > API_KEY_GRANTS_MAX
+        || (key_principal
+            && (assertion.tenant_scope || !assertion.machine || !assertion.scopes.is_empty()))
     {
         return None;
     }
     let machine = assertion.machine;
     let tenant_id = TenantId::parse(assertion.tenant_id).ok()?;
     let site_id = SiteId::parse(assertion.site_id).ok()?;
+    if key_principal {
+        let grants = assertion
+            .api_key_grants
+            .iter()
+            .map(|grant| {
+                ApiKeyGrant::from_scope_row(
+                    tenant_id.clone(),
+                    &grant.site_id,
+                    ApiKeyCapability::parse(&grant.capability)?,
+                )
+                .ok()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        return Some(VerifiedRequestIdentity {
+            principal: ManagementPrincipal::new_api_key(assertion.subject, grants).ok()?,
+            browser: false,
+            csrf_valid: assertion.csrf_valid,
+            direct_apply: assertion.direct_apply,
+        });
+    }
     let mut roles = std::collections::BTreeSet::new();
     for role in assertion.roles {
         if !roles.insert(parse_role(&role)?) {
@@ -503,7 +553,7 @@ pub(super) async fn auth_middleware(
 }
 
 async fn resolve_auth(
-    control: &ControlPlane,
+    control: &Arc<ControlPlane>,
     method: &Method,
     path: &str,
     headers: &HeaderMap,
@@ -514,15 +564,13 @@ async fn resolve_auth(
     let authorization = single_header(headers, header::AUTHORIZATION.as_str());
     let api_key = single_header(headers, API_KEY_HEADER);
     let cookie = cookie_value(headers, SESSION_COOKIE);
-    if api_key.is_some() {
-        let agent_run = single_header(headers, AGENT_RUN_HEADER);
-        if agent_run
-            .as_deref()
-            .is_none_or(|value| value.is_empty() || value.len() > 128)
-        {
+    if let Some(api_key) = api_key {
+        let agent_run_valid = single_header(headers, AGENT_RUN_HEADER)
+            .is_some_and(|value| !value.is_empty() && value.len() <= 128);
+        if !agent_run_valid {
             return AuthContext::default();
         }
-        return resolve_api_key(control, api_key.unwrap_or_default()).await;
+        return resolve_api_key(control, &api_key, path).await;
     }
     if authorization.is_some() && cookie.is_some() {
         return AuthContext {
@@ -539,10 +587,12 @@ async fn resolve_auth(
     resolve_browser_auth(control, method, headers, &cookie).await
 }
 
-async fn resolve_api_key(control: &ControlPlane, value: String) -> AuthContext {
+/// Authenticates one `X-Xshield-API-Key` attempt and projects the key's exact
+/// grants into a short-lived signed assertion for the route handlers.
+async fn resolve_api_key(control: &Arc<ControlPlane>, value: &str, path: &str) -> AuthContext {
     let request_id = request_id();
-    let Ok(identity) = control
-        .authenticate_api_key(&value, &request_id, API_KEY_ACCESS)
+    let Ok(mut identity) = control
+        .authenticate_api_key(value, &request_id, API_KEY_ACCESS)
         .await
     else {
         return AuthContext::default();
@@ -557,41 +607,35 @@ async fn resolve_api_key(control: &ControlPlane, value: String) -> AuthContext {
             ..AuthContext::default()
         };
     };
-    let roles = identity
+    let tenant = &control.config.tenant_id;
+    // Direct apply is bound to the one site the apply route addresses and to
+    // the key's own authority on it; it is never inferred from another site.
+    identity.direct_apply = api_key_authz::apply_target_site(path).is_some_and(|site| {
+        identity.principal.authorizes_capability(
+            ApiKeyCapability::SiteConfigApplyDirect,
+            tenant,
+            &site,
+        )
+    });
+    let api_key_grants = identity
         .principal
-        .roles()
-        .iter()
-        .copied()
-        .map(role_name)
-        .map(str::to_owned)
-        .collect();
-    let (tenant_id, site_id) = identity
-        .principal
-        .first_exact_site_scope()
-        .map(|(tenant, site)| (tenant.as_str().to_owned(), site.as_str().to_owned()))
-        .unwrap_or_else(|| {
-            (
-                control.config.tenant_id.as_str().to_owned(),
-                control.config.site_id.as_str().to_owned(),
-            )
-        });
-    let scopes = identity
-        .principal
-        .exact_site_scopes()
-        .map(|(tenant, site)| (tenant.as_str().to_owned(), site.as_str().to_owned()))
+        .api_key_grants()
+        .map(|grant| AssertedGrant {
+            site_id: grant.scope_site_id().to_owned(),
+            capability: grant.capability().as_str().to_owned(),
+        })
         .collect();
     let assertion = BrowserRequestAssertion {
         version: 1,
         subject: identity.principal.subject().to_owned(),
-        tenant_id,
-        site_id,
-        tenant_scope: identity
-            .principal
-            .has_tenant_scope(&control.config.tenant_id),
+        tenant_id: tenant.as_str().to_owned(),
+        site_id: control.config.site_id.as_str().to_owned(),
+        tenant_scope: false,
         machine: true,
         direct_apply: identity.direct_apply,
-        scopes,
-        roles,
+        scopes: Vec::new(),
+        api_key_grants,
+        roles: Vec::new(),
         csrf_valid: true,
         expires_at: now.saturating_add(30),
     };
@@ -703,6 +747,7 @@ async fn resolve_browser_auth(
             control.config.tenant_id.as_str().to_owned(),
             control.config.site_id.as_str().to_owned(),
         )],
+        api_key_grants: Vec::new(),
         roles: roles
             .iter()
             .copied()
@@ -1777,10 +1822,10 @@ fn no_store(response: &mut Response) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserRequestAssertion, ManagementRole, STEP_UP_AUTH_TIME_MAX_AGE_SECONDS,
-        auth_time_is_recent, can_start_step_up, cookie_value, csrf_request_valid,
-        endpoint_is_secure, lower_hex, parse_callback_query, secure_url, sign_request_assertion,
-        verify_request_assertion,
+        ApiKeyCapability, AssertedGrant, BrowserRequestAssertion, ManagementRole,
+        STEP_UP_AUTH_TIME_MAX_AGE_SECONDS, auth_time_is_recent, can_start_step_up, cookie_value,
+        csrf_request_valid, endpoint_is_secure, lower_hex, parse_callback_query, secure_url,
+        sign_request_assertion, verify_request_assertion,
     };
     use axum::http::{HeaderMap, Method, header};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1879,6 +1924,7 @@ mod tests {
             machine: false,
             direct_apply: false,
             scopes: vec![("tenant_a".to_owned(), "site_a".to_owned())],
+            api_key_grants: Vec::new(),
             roles: vec!["observer".to_owned()],
             csrf_valid: false,
             expires_at: now + 30,
@@ -1906,6 +1952,115 @@ mod tests {
         let altered = String::from_utf8(altered).unwrap();
         assert!(verify_request_assertion(&altered, &key).is_none());
         assert_eq!(lower_hex(b"\x00\xff"), "00ff");
+    }
+
+    fn key_assertion(grants: &[(&str, &str)]) -> BrowserRequestAssertion {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        BrowserRequestAssertion {
+            version: 1,
+            subject: "apikey:key_0:agent".to_owned(),
+            tenant_id: "tenant_a".to_owned(),
+            site_id: "site_default".to_owned(),
+            tenant_scope: false,
+            machine: true,
+            direct_apply: false,
+            scopes: Vec::new(),
+            api_key_grants: grants
+                .iter()
+                .map(|(site_id, capability)| AssertedGrant {
+                    site_id: (*site_id).to_owned(),
+                    capability: (*capability).to_owned(),
+                })
+                .collect(),
+            roles: Vec::new(),
+            csrf_valid: true,
+            expires_at: now + 30,
+        }
+    }
+
+    #[test]
+    fn key_assertions_carry_exact_grants_and_never_roles() {
+        let key = [0x33; 32];
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = |value: &str| SiteId::parse(value).unwrap();
+        let signed = sign_request_assertion(
+            &key_assertion(&[
+                ("site_a", "site.config.write"),
+                ("site_b", "site.read"),
+                ("__tenant__", "site.create"),
+            ]),
+            &key,
+        )
+        .unwrap();
+        let identity = verify_request_assertion(&signed, &key).unwrap();
+        assert!(!identity.browser, "a key is never a browser session");
+        let principal = identity.principal;
+        assert!(principal.is_api_key());
+        assert!(principal.roles().is_empty());
+        assert!(principal.authorizes_capability(
+            ApiKeyCapability::SiteConfigWrite,
+            &tenant,
+            &site("site_a")
+        ));
+        assert!(!principal.authorizes_capability(
+            ApiKeyCapability::SiteConfigWrite,
+            &tenant,
+            &site("site_b")
+        ));
+        assert!(principal.authorizes_capability(
+            ApiKeyCapability::SiteRead,
+            &tenant,
+            &site("site_b")
+        ));
+        assert!(!principal.authorizes_capability(
+            ApiKeyCapability::SiteRead,
+            &tenant,
+            &site("site_a")
+        ));
+        assert!(principal.authorizes_capability(
+            ApiKeyCapability::SiteCreate,
+            &tenant,
+            &site("anything")
+        ));
+        assert!(!principal.authorizes(ManagementRole::SystemAdmin, &tenant, &site("site_a")));
+    }
+
+    #[test]
+    fn malformed_or_mixed_key_assertions_are_never_trusted() {
+        let key = [0x33; 32];
+        let accepted = |assertion: &BrowserRequestAssertion| {
+            verify_request_assertion(&sign_request_assertion(assertion, &key).unwrap(), &key)
+                .is_some()
+        };
+        assert!(accepted(&key_assertion(&[("site_a", "site.read")])));
+        // Unknown capability, marker misuse, and a concrete site for creation.
+        assert!(!accepted(&key_assertion(&[("site_a", "site.delete")])));
+        assert!(!accepted(&key_assertion(&[("__tenant__", "site.read")])));
+        assert!(!accepted(&key_assertion(&[("site_a", "site.create")])));
+        assert!(!accepted(&key_assertion(&[("bad site", "site.read")])));
+        // Grants plus roles, tenant scope, browser flavour or role-style scopes.
+        let mut mixed = key_assertion(&[("site_a", "site.read")]);
+        mixed.roles = vec!["system_admin".to_owned()];
+        assert!(!accepted(&mixed));
+        let mut tenant_wide = key_assertion(&[("site_a", "site.read")]);
+        tenant_wide.tenant_scope = true;
+        assert!(!accepted(&tenant_wide));
+        let mut browser = key_assertion(&[("site_a", "site.read")]);
+        browser.machine = false;
+        assert!(!accepted(&browser));
+        let mut scoped = key_assertion(&[("site_a", "site.read")]);
+        scoped.scopes = vec![("tenant_a".to_owned(), "site_a".to_owned())];
+        assert!(!accepted(&scoped));
+        // An assertion with neither roles nor grants is not a principal at all.
+        assert!(!accepted(&key_assertion(&[])));
+        // The grant list is bounded.
+        let too_many: Vec<(&str, &str)> = (0..=super::API_KEY_GRANTS_MAX)
+            .map(|_| ("site_a", "site.read"))
+            .collect();
+        assert!(!accepted(&key_assertion(&too_many)));
     }
 
     #[test]

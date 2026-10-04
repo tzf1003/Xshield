@@ -570,9 +570,12 @@ pub async fn list_handler(
 ) -> Response {
     let request_id = format!("req_{}", uuid::Uuid::now_v7());
     let authorization = single_header(&headers, AUTHORIZATION.as_str());
-    let subject = match control.authorize_tenant(authorization.as_deref(), &request_id, LIST_ACCESS)
-    {
-        Ok(subject) => subject,
+    let (subject, visibility) = match control.authorize_tenant_with_visibility(
+        authorization.as_deref(),
+        &request_id,
+        LIST_ACCESS,
+    ) {
+        Ok(authorized) => authorized,
         Err(response) => return (*response).into_response(),
     };
     let (cursor, limit) = match parse_site_list_query(query.as_deref()) {
@@ -616,14 +619,13 @@ pub async fn list_handler(
         },
         None => None,
     };
-    let records = match control
-        .catalog
-        .list_protected_site_configs(
-            &control.config.tenant_id,
-            after_site_id.as_ref().map(SiteId::as_str),
-            limit.saturating_add(1),
-        )
-        .await
+    let records = match super::api_key_authz::list_visible_site_configs(
+        &control,
+        &visibility,
+        after_site_id.as_ref().map(SiteId::as_str),
+        limit.saturating_add(1),
+    )
+    .await
     {
         Ok(records) => records,
         Err(_) => {
@@ -2264,6 +2266,20 @@ async fn write_site_handler(
             Ok(subject) => subject,
             Err(response) => return (*response).into_response(),
         };
+    // These handlers are idempotent upserts. A key's creation and write
+    // capabilities stay separate: POST must not overwrite, PUT must not create.
+    if let Some(response) = control
+        .guard_api_key_site_write(
+            authorization.as_deref(),
+            &request_id,
+            &subject,
+            action,
+            &site_id,
+        )
+        .await
+    {
+        return response;
+    }
     let Some(idempotency_key) = single_header(&headers, "idempotency-key")
         .filter(|value| super::valid_idempotency_key(value))
     else {

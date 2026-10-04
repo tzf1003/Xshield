@@ -192,3 +192,40 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 # 管理 API Key
 
 `POST/GET /control/v1/agent-api-keys`、`POST /{id}/revoke`、`POST /{id}/rotate` 仅允许 KeyAdministrator 或 SystemAdmin 的浏览器管理会话并要求 CSRF。创建响应只返回一次完整 `xsk_` 明文，数据库和审计只保存 HMAC 指纹、前缀、scope 与生命周期。
+
+## 管理 API Key 的授权模型
+
+**管理入口只认浏览器会话。** 上述四个端点要求 OIDC 浏览器会话（持有 KeyAdministrator 或 SystemAdmin 并通过 CSRF）。静态机器 Bearer 虽可配置 SystemAdmin，但不是浏览器会话，同样返回 403 `CONTROL_SCOPE_DENIED`；API Key 本身没有任何角色，永远不能创建、列出、撤销或轮换 Key。早期实现曾接受机器 Bearer，本节以文档为准并已修正代码。
+
+**Key 没有角色，只有精确授权。** 每个 scope 行是 `(tenant_id, site_id, capability)`，鉴权对每个 `(站点, 能力)` 单独判定：只看点名该站点的那一行，不合并多行的角色，也不把某个能力当作另一个能力的超集。Key 不具备 Observer、Investigator 等调查角色，所以 `/requests`、`/search`、`/evidence`、`/cases`、`/grants`、`/auth-bindings`、`/exports`、`/audit/health`、`/session`、Key 管理等一律返回 403 `CONTROL_SCOPE_DENIED`（`/control/v1/*` 中凡未在下表列出的路由对 Key 关闭）。
+
+| 能力 | 放行的路由 | 授权范围 |
+|---|---|---|
+| `site.read` | `GET /sites`（仅返回有该能力的站点）、`GET /sites/{id}`、`GET /sites/{id}/config`、`/status`、`/revisions`、`GET /control/v1/workbench/overview`、旧 `GET /site-config` | 该行点名的站点 |
+| `site.health.read` | `GET /sites/{id}/health` | 该行点名的站点 |
+| `site.config.write` | `PUT /sites/{id}/config`、`PATCH /sites/{id}`、旧 `PUT /site-config`（只更新已存在站点） | 该行点名的站点 |
+| `site.config.validate` | `POST /sites/{id}/validate` | 该行点名的站点 |
+| `site.config.apply_direct` | `POST /sites/{id}/apply`（唯一的 apply 能力，无需独立审批，见下） | 该行点名的站点 |
+| `site.rollback` | `POST /sites/{id}/rollback` | 该行点名的站点 |
+| `site.create` | `POST /sites`（只创建不存在的站点） | 租户级，必须使用标记 `site_id = "__tenant__"` |
+
+任何能力都不放行 `DELETE /sites/{id}` 和 `POST /sites/{id}/approve`：删除站点与独立审批只能由人员完成。`site.config.write` 不能创建站点，`site.create` 不能读取、改写或覆盖已存在的站点：`POST /sites` 命中已存在站点时，除非该 Key 同时持有该站点的 `site.config.write`，否则返回 409 `CONTROL_API_KEY_SITE_EXISTS`；`PUT` 命中不存在的站点时，除非持有租户级 `site.create`，否则返回 403 `CONTROL_SCOPE_DENIED`。创建响应后重试同一请求时，仅持有 `site.create` 的 Key 会得到 409（它无权读取站点，需由人员或带 `site.read` 的 Key 确认）。
+
+**租户级标记。** `site.create` 不依附于任何已存在站点，因此只能以保留的 `site_id = "__tenant__"` 授予；该标记不能与其他能力搭配，`site.create` 也不能出现在具体站点上，二者均返回 400 `CONTROL_API_KEY_SCOPE_INVALID`。以前把 `site.create` 绑定到具体站点会隐式变成租户级的 SystemAdmin，现已取消；库中残留的此类行不再授予任何权限。名为 `__tenant__` 的站点不能被授予任何能力。
+
+**签发者不能授予自己行使不了的权限。** 创建与轮换时，签发会话必须在对应站点（租户级能力则在整个租户）持有该能力所依赖的全部角色，否则整个请求返回 403 `CONTROL_API_KEY_SCOPE_FORBIDDEN`，不会裁剪后继续：
+
+| 能力 | 签发者必须持有的角色 |
+|---|---|
+| `site.read` | SystemAdmin 与 Observer（该能力同时放行 SystemAdmin 与 Observer 保护的读路由） |
+| `site.health.read` | Observer |
+| `site.config.write`、`site.create` | SystemAdmin（`site.create` 需租户范围） |
+| `site.config.validate` | PolicyAuthor |
+| `site.rollback` | ReleaseOperator |
+| `site.config.apply_direct` | ReleaseOperator 与 PolicyApprover（直接应用等价于“批准并发布”） |
+
+因此仅持有 KeyAdministrator 的会话可以撤销或轮换，但不能签发任何带权限的 Key。
+
+**站点投影。** 站点列表与工作台只返回主体实际被授权的站点：Key 为持有 `site.read` 的站点，租户范围的浏览器 SystemAdmin 保持整个租户，仅有精确站点作用域的管理员为其作用域站点。仅持有 `site.config.write` 等其他能力而无 `site.read` 的 Key 访问站点列表和工作台返回 403。游标只会指向调用者可见的站点。
+
+**主体与审计。** Key 的主体在控制面内以 `apikey:{api_key_id}:{subject}` 表示，所有审计事件的 `subject_ref`、站点配置的 `updated_by` 与幂等摘要都因此带有 Key ID，且不可能与人员主体相同；明文 Key 永不进入审计或日志。`site.config.apply_direct` 的直接应用标志只在该 Key 对路径中那个站点持有该能力时才成立，其审批绕过的耐久记录由站点审批闸门负责。

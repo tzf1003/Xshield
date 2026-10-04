@@ -7,7 +7,9 @@
     clippy::ignored_unit_patterns
 )]
 
-use super::{AccessAction, ControlPlane, no_store, single_header};
+use super::{
+    AccessAction, ControlPlane, EndpointResult, api_key_authz, identity, no_store, single_header,
+};
 use axum::{
     Json,
     body::Bytes,
@@ -18,7 +20,11 @@ use axum::{
 use chrono::{DateTime, Utc};
 use openssl::rand::rand_bytes;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
+use xshield_core::{
+    admin::{ApiKeyCapability, ApiKeyGrant, ManagementPrincipal, ManagementRole},
+    domain::TenantId,
+};
 use xshield_postgres::ManagementApiKeyScopeInput;
 
 pub const PATH: &str = "/control/v1/agent-api-keys";
@@ -81,33 +87,100 @@ struct ManagementApiKeyView {
     last_used_at: Option<String>,
 }
 
-const CAPABILITIES: &[&str] = &[
-    "site.read",
-    "site.create",
-    "site.config.write",
-    "site.config.validate",
-    "site.config.apply_direct",
-    "site.health.read",
-    "site.rollback",
-];
+/// Most scope rows one key may carry, and so the bound on its grants.
+const SCOPES_MAX: usize = 32;
+
+/// Why a requested scope set cannot be issued.
+#[derive(Debug, Eq, PartialEq)]
+enum ScopeRejection {
+    /// Malformed, foreign-tenant, unknown capability, or a tenant-wide marker
+    /// used with anything but `site.create` (and vice versa).
+    Invalid,
+    /// Well formed, but the issuer could not itself exercise it.
+    Forbidden,
+}
+
+/// Turns the requested scopes into the exact grants to store.
+///
+/// Duplicates collapse; every grant must be one the issuer could itself
+/// exercise, so a key is never more powerful than the person who issued it.
+fn validate_scopes(
+    scopes: &[ScopeRequest],
+    tenant: &TenantId,
+    issuer: &ManagementPrincipal,
+) -> Result<BTreeSet<ApiKeyGrant>, ScopeRejection> {
+    if scopes.is_empty() || scopes.len() > SCOPES_MAX {
+        return Err(ScopeRejection::Invalid);
+    }
+    let mut grants = BTreeSet::new();
+    for scope in scopes {
+        if scope.tenant_id != tenant.as_str()
+            || scope.capabilities.is_empty()
+            || scope.capabilities.len() > ApiKeyCapability::ALL.len()
+        {
+            return Err(ScopeRejection::Invalid);
+        }
+        for name in &scope.capabilities {
+            let capability = ApiKeyCapability::parse(name).ok_or(ScopeRejection::Invalid)?;
+            let grant = ApiKeyGrant::from_scope_row(tenant.clone(), &scope.site_id, capability)
+                .map_err(|_| ScopeRejection::Invalid)?;
+            grants.insert(grant);
+        }
+    }
+    if grants
+        .iter()
+        .any(|grant| !api_key_authz::issuer_may_grant(issuer, grant))
+    {
+        return Err(ScopeRejection::Forbidden);
+    }
+    Ok(grants)
+}
+
+/// Authorizes key administration: a browser management session (the
+/// authenticator already enforces CSRF for its writes) holding
+/// `KeyAdministrator` or `SystemAdmin`, as `docs/15` §15 requires. A key has no
+/// roles and the static machine credential is not a browser session, so
+/// neither can mint, list, revoke or rotate keys.
+fn authorize_key_admin(
+    control: &ControlPlane,
+    headers: &HeaderMap,
+    request_id: &str,
+    action: AccessAction,
+) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
+    let auth = single_header(headers, AUTHORIZATION.as_str());
+    let identity = control.authorize_any_identity(
+        auth.as_deref(),
+        request_id,
+        action,
+        &[
+            ManagementRole::KeyAdministrator,
+            ManagementRole::SystemAdmin,
+        ],
+    )?;
+    if !identity.browser {
+        return Err(Box::new(control.audited_error(
+            request_id,
+            Some(identity.principal.subject()),
+            action,
+            None,
+            StatusCode::FORBIDDEN,
+            "CONTROL_SCOPE_DENIED",
+            "management operation forbidden",
+            false,
+            "request_scope",
+        )));
+    }
+    Ok(identity)
+}
 
 pub async fn list_handler(
     State(control): State<Arc<ControlPlane>>,
     headers: HeaderMap,
 ) -> Response {
     let request_id = format!("req_{}", uuid::Uuid::now_v7());
-    let auth = single_header(&headers, AUTHORIZATION.as_str());
-    let subject = match control.authorize_any_identity(
-        auth.as_deref(),
-        &request_id,
-        LIST_ACCESS,
-        &[
-            xshield_core::admin::ManagementRole::KeyAdministrator,
-            xshield_core::admin::ManagementRole::SystemAdmin,
-        ],
-    ) {
+    let subject = match authorize_key_admin(&control, &headers, &request_id, LIST_ACCESS) {
         Ok(identity) => identity.principal.subject().to_owned(),
-        Err(e) => return (*e).into_response(),
+        Err(response) => return (*response).into_response(),
     };
     match control
         .catalog
@@ -153,7 +226,12 @@ pub async fn create_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    issue(control, headers, body, None).await
+    let request_id = format!("req_{}", uuid::Uuid::now_v7());
+    let identity = match authorize_key_admin(&control, &headers, &request_id, ADMIN_ACCESS) {
+        Ok(identity) => identity,
+        Err(response) => return (*response).into_response(),
+    };
+    issue(control, identity.principal, request_id, body).await
 }
 
 pub async fn rotate_handler(
@@ -164,19 +242,11 @@ pub async fn rotate_handler(
 ) -> Response {
     let tenant = control.config.tenant_id.as_str().to_owned();
     let request_id = format!("req_{}", uuid::Uuid::now_v7());
-    let auth = single_header(&headers, AUTHORIZATION.as_str());
-    let subject = match control.authorize_any_identity(
-        auth.as_deref(),
-        &request_id,
-        ADMIN_ACCESS,
-        &[
-            xshield_core::admin::ManagementRole::KeyAdministrator,
-            xshield_core::admin::ManagementRole::SystemAdmin,
-        ],
-    ) {
-        Ok(identity) => identity.principal.subject().to_owned(),
-        Err(e) => return (*e).into_response(),
+    let identity = match authorize_key_admin(&control, &headers, &request_id, ADMIN_ACCESS) {
+        Ok(identity) => identity,
+        Err(response) => return (*response).into_response(),
     };
+    let subject = identity.principal.subject().to_owned();
     if !control
         .catalog
         .revoke_management_api_key(&tenant, &api_key_id, &subject)
@@ -198,7 +268,7 @@ pub async fn rotate_handler(
             .await
             .into_response();
     }
-    issue_with_subject(control, headers, body, Some(subject), Some(request_id)).await
+    issue(control, identity.principal, request_id, body).await
 }
 
 pub async fn revoke_handler(
@@ -207,18 +277,9 @@ pub async fn revoke_handler(
     headers: HeaderMap,
 ) -> Response {
     let request_id = format!("req_{}", uuid::Uuid::now_v7());
-    let auth = single_header(&headers, AUTHORIZATION.as_str());
-    let subject = match control.authorize_any_identity(
-        auth.as_deref(),
-        &request_id,
-        ADMIN_ACCESS,
-        &[
-            xshield_core::admin::ManagementRole::KeyAdministrator,
-            xshield_core::admin::ManagementRole::SystemAdmin,
-        ],
-    ) {
+    let subject = match authorize_key_admin(&control, &headers, &request_id, ADMIN_ACCESS) {
         Ok(identity) => identity.principal.subject().to_owned(),
-        Err(e) => return (*e).into_response(),
+        Err(response) => return (*response).into_response(),
     };
     match control.catalog.revoke_management_api_key(control.config.tenant_id.as_str(), &api_key_id, &subject).await {
         Ok(true) => no_store((StatusCode::OK, Json(serde_json::json!({"request_id": request_id, "api_key_id": api_key_id, "status": "revoked"}))).into_response()),
@@ -227,60 +288,17 @@ pub async fn revoke_handler(
     }
 }
 
-async fn issue(
-    control: Arc<ControlPlane>,
-    headers: HeaderMap,
-    body: Bytes,
-    _unused: Option<String>,
-) -> Response {
-    issue_with_subject(control, headers, body, None, None).await
-}
-
 fn hex_bytes(value: &[u8]) -> String {
     value.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-async fn issue_with_subject(
+async fn issue(
     control: Arc<ControlPlane>,
-    headers: HeaderMap,
+    issuer: ManagementPrincipal,
+    request_id: String,
     body: Bytes,
-    forced_subject: Option<String>,
-    forced_request_id: Option<String>,
 ) -> Response {
-    let request_id = forced_request_id.unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
-    let auth = single_header(&headers, AUTHORIZATION.as_str());
-    let subject = match forced_subject.or_else(|| {
-        control
-            .authorize_any_identity(
-                auth.as_deref(),
-                &request_id,
-                ADMIN_ACCESS,
-                &[
-                    xshield_core::admin::ManagementRole::KeyAdministrator,
-                    xshield_core::admin::ManagementRole::SystemAdmin,
-                ],
-            )
-            .ok()
-            .map(|identity| identity.principal.subject().to_owned())
-    }) {
-        Some(s) => s,
-        None => {
-            return control
-                .audited_error_async(
-                    request_id,
-                    None,
-                    ADMIN_ACCESS,
-                    None,
-                    StatusCode::UNAUTHORIZED,
-                    "CONTROL_AUTH_REQUIRED",
-                    "management authentication required",
-                    false,
-                    "authenticate",
-                )
-                .await
-                .into_response();
-        }
-    };
+    let subject = issuer.subject().to_owned();
     let request: CreateRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => {
@@ -320,36 +338,46 @@ async fn issue_with_subject(
                     .into_response();
             }
         };
-    if request.subject.is_empty()
+    let identity_invalid = request.subject.is_empty()
         || request.subject.len() > 256
         || request.display_name.is_empty()
-        || request.display_name.len() > 128
-        || request.scopes.is_empty()
-        || request.scopes.len() > 32
-        || request.scopes.iter().any(|s| {
-            s.tenant_id != control.config.tenant_id.as_str()
-                || s.site_id.is_empty()
-                || s.capabilities.is_empty()
-                || s.capabilities
-                    .iter()
-                    .any(|c| !CAPABILITIES.contains(&c.as_str()))
-        })
-    {
-        return control
-            .audited_error_async(
-                request_id,
-                Some(subject),
-                ADMIN_ACCESS,
-                None,
-                StatusCode::BAD_REQUEST,
-                "CONTROL_API_KEY_SCOPE_INVALID",
-                "invalid API key scope",
-                false,
-                "correct_request",
-            )
-            .await
-            .into_response();
-    }
+        || request.display_name.len() > 128;
+    let grants = if identity_invalid {
+        Err(ScopeRejection::Invalid)
+    } else {
+        validate_scopes(&request.scopes, &control.config.tenant_id, &issuer)
+    };
+    let grants = match grants {
+        Ok(grants) => grants,
+        Err(rejection) => {
+            let (status, reason, message) = match rejection {
+                ScopeRejection::Invalid => (
+                    StatusCode::BAD_REQUEST,
+                    "CONTROL_API_KEY_SCOPE_INVALID",
+                    "invalid API key scope",
+                ),
+                ScopeRejection::Forbidden => (
+                    StatusCode::FORBIDDEN,
+                    "CONTROL_API_KEY_SCOPE_FORBIDDEN",
+                    "API key scope exceeds the issuer's authority",
+                ),
+            };
+            return control
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    ADMIN_ACCESS,
+                    None,
+                    status,
+                    reason,
+                    message,
+                    false,
+                    "correct_request",
+                )
+                .await
+                .into_response();
+        }
+    };
     let Some(hash_key) = control.config.api_key_hash_key.as_deref() else {
         return control
             .audited_error_async(
@@ -405,15 +433,12 @@ async fn issue_with_subject(
         }
     };
     let api_key_id = format!("key_{}", uuid::Uuid::now_v7());
-    let inputs: Vec<_> = request
-        .scopes
+    let inputs: Vec<_> = grants
         .iter()
-        .flat_map(|s| {
-            s.capabilities.iter().map(|cap| ManagementApiKeyScopeInput {
-                tenant_id: s.tenant_id.clone(),
-                site_id: s.site_id.clone(),
-                capability: cap.clone(),
-            })
+        .map(|grant| ManagementApiKeyScopeInput {
+            tenant_id: grant.tenant().as_str().to_owned(),
+            site_id: grant.scope_site_id().to_owned(),
+            capability: grant.capability().as_str().to_owned(),
         })
         .collect();
     if control
@@ -461,4 +486,121 @@ async fn issue_with_subject(
         )
             .into_response(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xshield_core::admin::API_KEY_TENANT_WIDE_MARKER;
+
+    fn tenant() -> TenantId {
+        TenantId::parse("tenant_a").unwrap()
+    }
+
+    fn scope(site: &str, capabilities: &[&str]) -> ScopeRequest {
+        ScopeRequest {
+            tenant_id: "tenant_a".to_owned(),
+            site_id: site.to_owned(),
+            capabilities: capabilities
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+        }
+    }
+
+    fn issuer(roles: &[ManagementRole]) -> ManagementPrincipal {
+        ManagementPrincipal::new_tenant_scoped("human", roles.iter().copied(), [tenant()]).unwrap()
+    }
+
+    fn full_issuer() -> ManagementPrincipal {
+        issuer(&[
+            ManagementRole::SystemAdmin,
+            ManagementRole::Observer,
+            ManagementRole::PolicyAuthor,
+            ManagementRole::PolicyApprover,
+            ManagementRole::ReleaseOperator,
+        ])
+    }
+
+    #[test]
+    fn scopes_are_validated_into_exact_deduplicated_grants() {
+        let grants = validate_scopes(
+            &[
+                scope("site_a", &["site.read", "site.read", "site.config.write"]),
+                scope("site_a", &["site.read"]),
+                scope(API_KEY_TENANT_WIDE_MARKER, &["site.create"]),
+            ],
+            &tenant(),
+            &full_issuer(),
+        )
+        .unwrap();
+        let described: Vec<_> = grants
+            .iter()
+            .map(|grant| format!("{}:{}", grant.scope_site_id(), grant.capability().as_str()))
+            .collect();
+        assert_eq!(described.len(), 3, "{described:?}");
+        assert!(described.contains(&"__tenant__:site.create".to_owned()));
+        assert!(described.contains(&"site_a:site.read".to_owned()));
+        assert!(described.contains(&"site_a:site.config.write".to_owned()));
+    }
+
+    #[test]
+    fn malformed_scope_sets_are_invalid_before_authority_is_considered() {
+        let invalid = |scopes: Vec<ScopeRequest>| {
+            assert_eq!(
+                validate_scopes(&scopes, &tenant(), &issuer(&[])),
+                Err(ScopeRejection::Invalid)
+            );
+        };
+        invalid(vec![]);
+        invalid(
+            (0..=SCOPES_MAX)
+                .map(|_| scope("site_a", &["site.read"]))
+                .collect(),
+        );
+        invalid(vec![scope("site_a", &[])]);
+        invalid(vec![scope("site_a", &["site.delete"])]);
+        invalid(vec![scope("site_a", &["site.create"])]);
+        invalid(vec![scope(API_KEY_TENANT_WIDE_MARKER, &["site.read"])]);
+        invalid(vec![scope("", &["site.read"])]);
+        invalid(vec![scope("bad site", &["site.read"])]);
+        invalid(vec![ScopeRequest {
+            tenant_id: "tenant_other".to_owned(),
+            site_id: "site_a".to_owned(),
+            capabilities: vec!["site.read".to_owned()],
+        }]);
+    }
+
+    #[test]
+    fn well_formed_scopes_beyond_the_issuer_are_forbidden_not_invalid() {
+        let admin_only = issuer(&[ManagementRole::SystemAdmin]);
+        assert!(
+            validate_scopes(
+                &[scope("site_a", &["site.config.write"])],
+                &tenant(),
+                &admin_only
+            )
+            .is_ok()
+        );
+        for capability in [
+            "site.config.apply_direct",
+            "site.rollback",
+            "site.config.validate",
+        ] {
+            assert_eq!(
+                validate_scopes(&[scope("site_a", &[capability])], &tenant(), &admin_only),
+                Err(ScopeRejection::Forbidden),
+                "{capability}"
+            );
+        }
+        // One out-of-authority grant refuses the whole request; nothing is trimmed.
+        assert_eq!(
+            validate_scopes(
+                &[scope("site_a", &["site.config.write", "site.rollback"])],
+                &tenant(),
+                &admin_only
+            ),
+            Err(ScopeRejection::Forbidden)
+        );
+    }
 }

@@ -196,6 +196,12 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 受限校准报告调查的真实 PostgreSQL 回归覆盖成功 projection 的冻结 metadata、跨 tenant 同构未命中、通过实际 retention intent/tombstone 后仍可观察的 `body_status=deleted`，以及篡改报告 outbox 链接后的 fail-closed。控制层 HTTP 回归覆盖 `AuditAdministrator`、严格路径/空 query/空 body、容量与存储故障、稳定审计 target、审计失败扣留响应和许可在终态审计后释放。它们不构成密文正文读取、外部内容独立性、模型质量或策略发布验收。
 
 
+## 20.13 管理 API Key 授权回归
+
+`cargo test -p xshield-core --lib admin::` 与 `cargo test -p xshield-control --lib -- api_key_authz identity::tests management_api_key` 覆盖：能力名称精确解析、租户级标记只属于 `site.create` 且反向不可用、Key 主体没有任何角色且无法通过角色检查、同一 Key 多个站点的能力不合并也不互相推出、路由到能力的映射表（含 DELETE、approve 和站点管理之外的路由为空）、签发者角色规则、直接应用标志只绑定 apply 路径中的站点、站点投影的边界，以及签名断言对 Key 授权的往返和混合/畸形断言的拒绝。
+
+`XSHIELD_TEST_DATABASE_URL` 指向脚本拥有的数据库时，`cargo test -p xshield-control --lib api_key_authz -- --ignored` 在真实 PostgreSQL、Axum 路由和独立管理 journal 上运行 HTTP 回归：每个能力在授权站点与另一站点上遍历全部站点路由，期望集合与矩阵完全一致；“站点 A 写 + 站点 B 读”的 Key 不能写 B、不能读 A、不能 DELETE；`site.create` 绑定具体站点被拒、租户标记创建站点但不能覆盖、读取或配置已存在站点；`PUT` 不能创建；持有全部能力的 Key 访问调查、证据、案件、导出、会话和 Key 管理共 38 个路由均不成功；机器 Bearer 与权限不足的浏览器会话不能管理 Key，签发者缺少依赖角色时返回 `CONTROL_API_KEY_SCOPE_FORBIDDEN`；站点列表和工作台只投影 Key 的 `site.read` 站点；直接应用被限制在单个站点，审计主体包含 Key ID 且不含明文。这些测试默认 ignored，未提供数据库时必须声明未执行。
+
 ## 管理后台与开发数据卷验收（2026-09-27）
 
 浏览器回归使用固定合成 API 契约，并分别覆盖明确机器 fixture 和服务端角色会话模式。站点场景包含列表选择精确 site、创建、按类别编辑、草稿前进后退/离页保护、深链接刷新、空站点 nullable 字段、读写跨 scope 拒绝、写入未知结果的原键/原正文人工重试、验证/审批/发布/回滚以及健康观察。角色矩阵覆盖九种服务端角色，包括独立 Observer 状态视图及策略/发布角色入口。

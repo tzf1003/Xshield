@@ -5,6 +5,7 @@
 
 #![warn(missing_docs)]
 
+mod api_key_authz;
 mod calibration_report_inspection;
 mod case_close;
 mod case_collection;
@@ -57,11 +58,11 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
 use xshield_core::{
-    admin::{ManagementPrincipal, ManagementRole},
+    admin::{ApiKeyCapability, ApiKeyGrant, ManagementPrincipal, ManagementRole},
     domain::{
         AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-        EvidenceAccessRequestId, ExportId, GrantId, JobId, ModelCallId, RequestId, SiteId,
-        TenantId,
+        EvidenceAccessRequestId, ExportId, GrantId, JobId, ManagementApiKeyId, ModelCallId,
+        RequestId, SiteId, TenantId,
     },
     investigation::{
         EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
@@ -3439,7 +3440,16 @@ impl ControlPlane {
     ) -> Result<String, Box<EndpointResult>> {
         let identity = self.authenticate_request(authorization, request_id, action)?;
         let principal = &identity.principal;
-        if !principal.authorizes_site(action.role, &self.config.tenant_id, site_id) {
+        // A key carries no roles; it is accepted only by the capability its
+        // scope row grants for exactly this site. Unlisted routes stay closed.
+        let allowed = if principal.is_api_key() {
+            api_key_authz::capability_for(&action).is_some_and(|capability| {
+                principal.authorizes_capability(capability, &self.config.tenant_id, site_id)
+            })
+        } else {
+            principal.authorizes_site(action.role, &self.config.tenant_id, site_id)
+        };
+        if !allowed {
             return Err(Box::new(self.audited_error(
                 request_id,
                 Some(principal.subject()),
@@ -3461,22 +3471,8 @@ impl ControlPlane {
         request_id: &str,
         action: AccessAction,
     ) -> Result<String, Box<EndpointResult>> {
-        let identity = self.authenticate_request(authorization, request_id, action)?;
-        let principal = &identity.principal;
-        if !principal.authorizes_tenant(action.role, &self.config.tenant_id) {
-            return Err(Box::new(self.audited_error(
-                request_id,
-                Some(principal.subject()),
-                action,
-                None,
-                StatusCode::FORBIDDEN,
-                "CONTROL_SCOPE_DENIED",
-                "management operation forbidden",
-                false,
-                "request_scope",
-            )));
-        }
-        Ok(principal.subject().to_owned())
+        self.authorize_tenant_with_visibility(authorization, request_id, action)
+            .map(|(subject, _)| subject)
     }
 
     fn authorize_identity(
@@ -3670,39 +3666,37 @@ impl ControlPlane {
         Err(Box::new(unauthorized()))
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Resolves an `X-Xshield-API-Key` value to a key principal and appends the
+    /// `console.agent_api_key.use` event for the attempt.
+    ///
+    /// The principal carries exact `(site, capability)` grants and no roles.
+    /// Its subject is `apikey:{key_id}:{subject}` so every audit event and
+    /// every `updated_by` recorded for the key's actions names the credential
+    /// as well as the free-text label, and can never equal a person's subject.
+    ///
+    /// # Errors
+    /// Returns the already-audited response for an unknown, expired, revoked or
+    /// malformed key, an unavailable store, or an unavailable audit journal.
     async fn authenticate_api_key(
-        &self,
+        self: &Arc<Self>,
         value: &str,
         request_id: &str,
         action: AccessAction,
     ) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
-        let unauthorized = || {
-            Box::new(self.audited_error(
-                request_id,
-                None,
-                action,
-                None,
-                StatusCode::UNAUTHORIZED,
-                "CONTROL_API_KEY_INVALID",
-                "management authentication required",
-                false,
-                "authenticate",
-            ))
-        };
         let Some(key) = self.config.api_key_hash_key.as_deref() else {
-            return Err(unauthorized());
+            return Err(self.api_key_invalid(request_id, action).await);
         };
         let Some(fingerprint) = component_signature(key, &[value.as_bytes()]).ok() else {
-            return Err(unauthorized());
+            return Err(self.api_key_invalid(request_id, action).await);
         };
-        let scopes = self
+        let Ok(scopes) = self
             .catalog
             .lookup_management_api_key_scopes(&fingerprint, self.config.tenant_id.as_str())
             .await
-            .map_err(|_| {
-                Box::new(self.audited_error(
-                    request_id,
+        else {
+            return Err(Box::new(
+                self.audited_error_async(
+                    request_id.to_owned(),
                     None,
                     action,
                     None,
@@ -3711,85 +3705,80 @@ impl ControlPlane {
                     "management service unavailable",
                     true,
                     "retry_later",
-                ))
-            })?;
+                )
+                .await,
+            ));
+        };
         let Some(first) = scopes.first() else {
-            return Err(unauthorized());
+            return Err(self.api_key_invalid(request_id, action).await);
         };
-        let mut roles = std::collections::BTreeSet::new();
-        let direct_apply = scopes
+        // Rows are trusted only for this tenant and only in a shape the grant
+        // type accepts; anything else simply grants nothing.
+        let tenant = &self.config.tenant_id;
+        let grants: Vec<ApiKeyGrant> = scopes
             .iter()
-            .any(|scope| scope.capability == "site.config.apply_direct");
-        let mut tenant_scope = false;
-        for scope in &scopes {
-            match scope.capability.as_str() {
-                "site.read" | "site.health.read" => {
-                    roles.insert(ManagementRole::Observer);
-                }
-                "site.create" => {
-                    roles.insert(ManagementRole::SystemAdmin);
-                    tenant_scope = true;
-                }
-                "site.config.write" => {
-                    roles.insert(ManagementRole::SystemAdmin);
-                }
-                "site.config.validate" => {
-                    roles.insert(ManagementRole::PolicyAuthor);
-                }
-                "site.config.apply_direct" | "site.rollback" => {
-                    roles.insert(ManagementRole::ReleaseOperator);
-                }
-                _ => {}
-            }
-        }
-        let tenant = TenantId::parse(&first.tenant_id).map_err(|_| unauthorized())?;
-        let site = SiteId::parse(&first.site_id).map_err(|_| unauthorized())?;
-        let principal = if tenant_scope {
-            ManagementPrincipal::new_tenant_scoped(first.subject.clone(), roles, [tenant.clone()])
-                .map_err(|_| unauthorized())?
-                .with_exact_site_scope(tenant.clone(), site.clone())
-        } else {
-            ManagementPrincipal::new(
-                first.subject.clone(),
-                roles,
-                scopes.iter().filter_map(|scope| {
-                    Some((
-                        TenantId::parse(&scope.tenant_id).ok()?,
-                        SiteId::parse(&scope.site_id).ok()?,
-                    ))
-                }),
-            )
-            .map_err(|_| unauthorized())?
+            .filter_map(|scope| {
+                let capability = ApiKeyCapability::parse(&scope.capability)?;
+                let row_tenant = TenantId::parse(&scope.tenant_id).ok()?;
+                (row_tenant == *tenant).then_some(())?;
+                ApiKeyGrant::from_scope_row(row_tenant, &scope.site_id, capability).ok()
+            })
+            .collect();
+        let principal = ManagementApiKeyId::parse(first.api_key_id.clone())
+            .ok()
+            .and_then(|key_id| {
+                ManagementPrincipal::new_api_key(
+                    format!("apikey:{key_id}:{}", first.subject),
+                    grants,
+                )
+                .ok()
+            });
+        let Some(principal) = principal else {
+            return Err(self.api_key_invalid(request_id, action).await);
         };
-        if self
-            .append_access_event(
-                request_id,
-                Some(principal.subject()),
+        let control = Arc::clone(self);
+        let (event_request_id, subject) = (request_id.to_owned(), principal.subject().to_owned());
+        let appended = tokio::task::spawn_blocking(move || {
+            control.append_access_event(
+                &event_request_id,
+                Some(&subject),
                 action,
                 None,
                 "PASS",
                 "CONTROL_API_KEY_AUTHENTICATED",
             )
-            .is_err()
-        {
-            return Err(Box::new(self.audited_error(
-                request_id,
-                Some(principal.subject()),
-                action,
-                None,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CONTROL_AUDIT_UNAVAILABLE",
-                "management service unavailable",
-                true,
-                "retry_later",
-            )));
+        })
+        .await;
+        if !matches!(appended, Ok(Ok(()))) {
+            return Err(Box::new(audit_unavailable(request_id)));
         }
         Ok(identity::VerifiedRequestIdentity {
             principal,
             browser: false,
             csrf_valid: true,
-            direct_apply,
+            direct_apply: false,
         })
+    }
+
+    async fn api_key_invalid(
+        self: &Arc<Self>,
+        request_id: &str,
+        action: AccessAction,
+    ) -> Box<EndpointResult> {
+        Box::new(
+            self.audited_error_async(
+                request_id.to_owned(),
+                None,
+                action,
+                None,
+                StatusCode::UNAUTHORIZED,
+                "CONTROL_API_KEY_INVALID",
+                "management authentication required",
+                false,
+                "authenticate",
+            )
+            .await,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5433,6 +5422,7 @@ impl From<serde_json::Error> for ControlError {
 #[cfg(test)]
 mod tests {
     mod access_console_wire;
+    mod api_key_authz;
     mod audit_publish;
     mod calibration_report_inspection;
     mod case_close;

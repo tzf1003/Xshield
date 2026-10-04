@@ -188,6 +188,7 @@ v7_id!(ModelCallId, "mdl_", "model_call_id");
 v7_id!(AgentRunId, "agt_", "agent_run_id");
 v7_id!(JobId, "job_", "job_id");
 v7_id!(ExportId, "export_", "export_id");
+v7_id!(ManagementApiKeyId, "key_", "management_api_key_id");
 v7_id!(ModelEvaluationLeaseId, "mle_", "model_evaluation_lease_id");
 v7_id!(CalibrationReportId, "calr_", "calibration_report_id");
 v7_id!(
