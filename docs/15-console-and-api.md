@@ -2,7 +2,11 @@
 
 ## 15.1 信息架构
 
-Overview：防护状态、未覆盖端点、拒绝趋势、证据完整率、journal/索引水位、模型成本。
+站点运营后台支持同一租户下的多个受保护站点。站点列表使用租户范围的 `SystemAdmin` 管理身份，单站点配置使用站点路径再次校验作用域；每个站点拥有独立的内部 edge 监听端口，并通过签名游标分页。现有 `/control/v1/site-config` 保留为单站点兼容入口，新增多站点路径见 29 章。保存会产生 desired revision 和 apply intent；控制面在配置校验后通过 loopback HMAC apply 通道发送完整租户快照，只有 edge 原子确认后才显示 `active`，否则显示 `pending` 或 `failed` 并保留上一份有效快照。健康页面会探测批准的上游 health path，同时显示 edge 与 upstream 状态。
+
+部署时可用 `XSHIELD_EDGE_LISTEN_PORTS` 提供逗号分隔的 bootstrap 监听集合；edge 监听器监督器会在 apply 前绑定快照所需的全部端口，成功后再原子替换路由。新站点端口默认绑定同一私网/loopback 地址，可在不中断已有请求的情况下动态加入；配置中的监听地址必须与 bootstrap 地址一致。设置持久卷上的 `XSHIELD_EDGE_SNAPSHOT_PATH` 后，已确认的完整快照会以 HMAC 签名文件恢复，启动时验签失败会保持拒绝启动。
+
+Overview：防护状态、未覆盖端点、拒绝趋势、配置应用失败、审计水位、模型成本。站点详情按 Network、Security Entry、Routes & Operations、Identity、Crypto、WAF & Limits、Policies、Apply & Operations 分区；secret 只展示 reference、key ID 和状态。
 
 Sites：域名与上游、认证 profile、根入口、UI 映射、资格来源、加密版本、模式与覆盖。
 
@@ -17,6 +21,12 @@ Evidence & Cases：敏感证据审批、调查案、保留、验证与导出。
 Rules & Releases：差异、测试、审批、签名、灰度、回滚。
 
 Operations：节点、队列、存储、密钥引用、告警与审计访问。
+
+控制台实现采用原生 History API 的后台壳：左侧导航按服务端会话角色隐藏无权模块，站点详情、调查、案件、证据、审计和权限中心使用独立 URL，查询表单只存在于对应业务页面。隐藏导航不替代服务端授权；每个响应仍须重新验证 tenant/site scope、身份代际、操作资格和审计终态。`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049，现有开发数据卷无需重置。
+
+站点策略可设置 `static_asset_max_path_depth`，默认值为 `5`。它只为 `GET` 静态资源扩展名（JavaScript、CSS、字体、图片、source map 和静态 JSON）提供有限深度兜底匹配；超过深度、非静态扩展和 API 路径仍按精确 operation 拒绝。该兜底不改变 WAF、限流或审计链路。
+
+对象级实验站点还可显式设置 `origin_object_access_enforced=true`。Gateway 会删除客户端同名请求头，并仅在签名快照要求时向源站加入受信标记；源站据此执行对象所有者校验。该字段默认关闭，不能由请求方自行开启或关闭。
 
 ## 15.2 请求详情布局
 
@@ -64,10 +74,10 @@ Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据
 | POST /control/v1/cases/{case_id}/holds | 管理员为案件成员证据创建保留锁 |
 | GET /control/v1/cases/{case_id}/holds | 管理员分页查看案件保留历史 |
 | POST /control/v1/evidence-holds/{hold_id}/release | 管理员显式释放保留锁 |
-| POST /control/v1/replays | 异步安全回放任务 |
+| POST /control/v1/replays | 异步安全回放任务（设计，尚未实现） |
 | POST /control/v1/exports | 加密调查包导出任务 |
-| POST /control/v1/candidates/{id}/validate | 类型、依赖、扩权和覆盖检查 |
-| POST /control/v1/candidates/{id}/publish | 发布已审批工件，不直接接受自由脚本 |
+| POST /control/v1/candidates/{id}/validate | 类型、依赖、扩权和覆盖检查（设计，尚未实现） |
+| POST /control/v1/candidates/{id}/publish | 发布已审批工件，不直接接受自由脚本（设计，尚未实现） |
 | GET /control/v1/audit/health | 已认证的连续索引水位、缺口与本地存储状态 |
 
 浏览器探针仅能访问 `/__xshield/v1/bootstrap` 和 `/__xshield/v1/events/prepare`，不能访问管理 API。API path 中的 ID 均需按 tenant/site 和资源权限再验，不使用“知道 ID 就可读取”。
@@ -171,3 +181,14 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 包只包含案件与最多 128 个成员的证据 catalog 元数据、active/expired/deleted/unavailable 缺失清单和 omitted 字段说明，不包含证据正文、事件载荷、模型输入输出、存储定位或连接凭据。包请求 ID 固定由 `export_id` 派生；批准提交与包生成分离时，重试先按固定请求 ID、包类型、父引用和期限复用已发布 catalog 对象，不重复生成活动包。包的 `artifact_id`、包请求 ID、catalog digest、字节数和 tenant/site 在下载前同时与 PostgreSQL 记录、catalog manifest 和 vault manifest 比较；任一不一致都扣留响应。Reader 需再次完成 step-up，`GET /download` 的 claim 在数据库中原子限制为两次并受 15 分钟过期时间约束；下载响应为带 `nosniff` 的有界 JSON 附件，控制台还会将实际附件 artifact/长度与最近一次 `ready` 状态逐项绑定，审计失败或存储不确定时不返回包。
 
 部署先应用迁移 0039、0040，再升级可识别 `export.requested`、`export.approved`、`export.denied`、`export.downloaded` 和 `console.export.read` 的管理 journal 发布器，开放固定代理路由后再启用工作台。迁移 0040 按 tenant/site/export 保存包 claim；短 lease 保护 vault 写入，过期 claim 可回收，ready 提交必须携带当前 lease，claim 与 ready 在同一 PostgreSQL 事务内提交。当前不提供完整事件/正文导出、自然语言查询、安全回放、自动轮询或 Bearer 强操作；工作台只在显式提交后读取状态，未知写入结果保留原键与参数，下载仅接收有界 JSON Blob。
+
+## 后台路由与角色独立性验收（2026-09-27）
+
+站点列表和编辑器分别位于 /sites 与 /sites/{siteId}/{section}；创建入口为 /sites/new/network。网络、安全入口、路由、身份、加密、WAF/限流、策略/健康、发布与审计按分类独立渲染。原生 History API 管理路径和前进后退，同站点分类共享草稿；跨站点、跨模块时清空响应并取消旧请求，所有站点响应核对独立 tenant/site 范围。草稿离页有显式确认，未知写入保留原幂等键与正文供人工重试。
+
+只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
+
+本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0049 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
+# 管理 API Key
+
+`POST/GET /control/v1/agent-api-keys`、`POST /{id}/revoke`、`POST /{id}/rotate` 仅允许 KeyAdministrator 或 SystemAdmin 的浏览器管理会话并要求 CSRF。创建响应只返回一次完整 `xsk_` 明文，数据库和审计只保存 HMAC 指纹、前缀、scope 与生命周期。

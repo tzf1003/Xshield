@@ -6,6 +6,10 @@
 
 ## 实现状态
 
+后台采用独立 URL 与角色导航，受保护站点以列表进入分类编辑。开发环境默认 http://127.0.0.1:55173；启动会验证基础 schema，并按 ledger 增量补齐 0041–0049。运行与验收方法见 [控制台 README](web/console/README.md#回归验证)。
+
+多站点运营后台已接入 `GET/POST /control/v1/sites`、站点配置、状态/健康、修订、校验、应用、审批、回滚接口。配置写入先落 PostgreSQL，再由控制面通过 loopback HMAC 通道发送完整租户快照；edge 原子确认后才返回 `active`，否则保留旧快照并返回 `pending`/`failed`。策略字段已覆盖路由、身份、加密、WAF、限流、健康检查和 secret reference；公开入口、敏感策略变化和暂停/恢复由 `PolicyApprover` 独立批准，审批人不能批准自己的修订，浏览器审批还要求近期 step-up 重新认证。edge 由监听器监督器在应用前绑定快照所需的全部内部端口，再原子切换路由；`XSHIELD_EDGE_LISTEN_PORTS` 仅用于启动时的 bootstrap 监听集合，新站点端口可在不中断现有请求的情况下动态绑定。设置 `XSHIELD_EDGE_SNAPSHOT_PATH` 后，已确认快照以 HMAC 签名的 pending/active 文件原子持久化，edge 重启前会先验签和校验完整快照；损坏或作用域不符时拒绝启动，避免回退到未确认配置。
+
 案件分析 MVP 已形成可重试的耐久任务闭环：案件所有者显式提交清单计数分析，服务端在迁移 0038 的任务表中保存 `job_` 状态与幂等摘要，再通过本人范围的任务查询读取结果；固定审计事件覆盖创建、重放、拒绝与读取。当前实现只处理 catalog 元数据计数，模型、原文、导出和回放保持独立交付。
 
 调查导出 MVP 已形成独立审批的元数据包闭环：`POST /control/v1/exports` 在迁移 0039 中创建带用途的 `export_` 请求，独立的 `SensitiveEvidenceApprover` 在浏览器会话完成近期 step-up 后批准或拒绝，批准时只将案件/证据目录元数据与缺失清单写入现有加密证据库，`SensitiveEvidenceReader` 再以第二次 step-up 下载短时、最多两次的包。`web/console` 已接入显式申请、状态复核、审批/拒绝和下载工作台；包不复制证据正文、模型输入输出或连接凭据，每次请求、决定、生成和下载均写管理审计，目录指针与 vault manifest 在下载前再次逐项核对。包请求 ID 固定由 `export_id` 派生，迁移 0040 以 tenant/site/export 复合键、父引用摘要和短 lease 串行化外部包写入；过期 lease 可回收，旧 writer 不能提交 `ready`，claim 与 ready 在同一数据库事务内完成。完整事件/正文导出、自然语言查询和安全回放仍是后续 backlog。
@@ -110,6 +114,7 @@ cargo test -p xshield-evidence
 scripts/test_postgres.sh
 scripts/test_gateway_identity.sh
 scripts/test_gateway_request_crypto.sh
+scripts/test_gateway_dynamic_listeners.sh
 XSHIELD_CONFIG=examples/gateway-config.json \
 XSHIELD_JOURNAL_KEY_HEX="$YOUR_64_CHAR_LOWERCASE_HEX_KEY" \
 XSHIELD_DATABASE_URL="$YOUR_POSTGRES_URL" \
@@ -287,3 +292,10 @@ python scripts/validate_library.py
 ## 版本与维护
 
 新增需求先更新 RQ/INV/ADR，再同步 Schema、配置与用例。参考资料中的供应商能力是核验时状态；模型与依赖版本必须在实现时锁定并重新验证，不能将文档中的性能目标当成已实测指标。变更说明见 [CHANGELOG.md](CHANGELOG.md)。
+# 后端统一站点配置与 Agent API Key
+
+受保护站点以 `xshield-control + PostgreSQL` 为唯一配置源。Gateway 只接受控制面通过 loopback HMAC `/internal/v1/apply` 发布的签名快照；没有已确认快照时数据面保持拒绝。Agent 使用一次性显示的 `X-Xshield-API-Key`，Key 绑定 tenant、site 和能力集合，不能访问 Gateway 内部接口。
+
+本地 `dev.sh` 会生成独立的 API Key 指纹密钥与 edge apply HMAC 密钥，并以 bootstrap-only 模式启动 Gateway。Juice Shop 应通过 `POST /control/v1/sites` 创建并应用，不能通过旧静态 Gateway 配置注册。
+
+开发环境的受保护站点 HTTPS 入口由 `dev.sh --all` 自动生成：`https://juice.local:5443` 使用 `target/xshield-dev/tls/juice.local.crt` 的本地自签证书，并转发到 Gateway 的 `56188` HTTP 监听器。macOS 可执行 `scripts/generate_dev_tls_cert.sh target/xshield-dev/tls --install` 安装本地信任；生产环境不使用该开发终止器。

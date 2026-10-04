@@ -67,7 +67,7 @@ occurred_at 是服务器 UTC，浏览器时间另存 client_reported_at；时区
 
 ## 11.5 必须记录的事件族
 
-request.accepted/completed/aborted；stage.started/completed/skipped；identity.bound/refreshed/revoked/mismatch；page.accepted/rejected；grant.issued/denied/expired/revoked；crypto.decode/encode/failed/fallback；model.requested/responded/timeout/cache_hit；agent.started/tool_called/tool_result/artifact_created/finished；origin.forward_intent/response/unknown；evidence.captured/sealed/cataloged/expired/deleted/read；policy.proposed/tested/approved/published/rolled_back；audit.gap/backpressure/durability_failed；console.query/export/decrypt/replay；console.auth.login/callback/session.read/session.logout/reauth.start/reauth.callback。
+request.accepted/completed/aborted；stage.started/completed/skipped；identity.bound/refreshed/revoked/mismatch；page.accepted/rejected；grant.issued/denied/expired/revoked；crypto.decode/encode/failed/fallback；model.requested/responded/timeout/cache_hit；agent.started/tool_called/tool_result/artifact_created/finished；origin.forward_intent/response/unknown；evidence.captured/sealed/cataloged/expired/deleted/read；policy.proposed/tested/approved/published/rolled_back；audit.gap/backpressure/durability_failed；console.query/export/decrypt/replay；console.auth.login/callback/session.read/session.logout/reauth.start/reauth.callback/site.config.read/site.config.write。
 
 再认证事件仅描述 OIDC step-up 的启动与验证，不携带 state、授权码、token 或原始认证上下文值；完整的路径、角色与失败审计映射见 [29.28](29-api-endpoint-catalog.md#2928-已实现的-mfa-再认证契约)。
 
@@ -83,7 +83,7 @@ final decision 保存 cause_event_ids、required_checks、completed_checks、ski
 
 ## 11.7 已实现的管理访问审计发布
 
-封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.grant.read`、`console.binding.read`、`console.query.executed`、`console.case.read`、`console.case.list`、`console.case.analyze`、`console.job.read`、`console.evidence.access.read`、`console.evidence.access.list`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；任务读取的 `job_` 目标使用独立字段校验。重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
+封存段发布器支持当前控制服务的全部管理访问事件：`console.health.read`、`console.request.read`、`console.events.read`、`console.manifest.read`、`console.model.read`、`console.grant.read`、`console.binding.read`、`console.query.executed`、`console.case.read`、`console.case.list`、`console.case.analyze`、`console.job.read`、`console.evidence.access.read`、`console.evidence.access.list`、`console.site.config.read`、`console.site.config.write`、`console.sites.list`、`console.site.create`、`console.site.delete`、`console.site.status.read`、`console.site.config.validate`、`console.site.config.apply`、`console.site.config.rollback`、`case.created`、`case.closed`、`case.evidence.added`、`evidence.access.requested/approved/denied` 和 `evidence.read`。站点管理事件分别固定到列表、创建、删除、配置读写、状态/健康/修订读取、校验、应用和回滚路由；事件只携带已校验的租户/站点引用和稳定原因码，不携带配置秘密或完整配置正文。按实际 `AccessPayload` 严格解析并校验生产者、事件类型/HTTP 方法/路由组合、管理主体、目标 ID、证据引用、读取字节数及查询摘要；任务读取的 `job_` 目标使用独立字段校验。重复字段、未知字段、目标错绑或超界会停止当前段，水位保持在上一已确认段。
 
 `console.case.list` 固定对应 `GET /control/v1/cases`，成功（含空页）要求主体和 `CONTROL_CASES_READ`。全部 target 字段、query_digest、bytes_read 仅允许缺省/null，evidence_refs 为空；事件不保存案件用途、列表正文或游标。权限/输入/预算拒绝为 DENY，依赖失败为 ERROR；启用端点前先升级管理 journal 发布器。
 

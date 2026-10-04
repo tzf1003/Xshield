@@ -28,3 +28,6 @@
 ## 23.4 决策更新
 
 待验证事项由 owner、实验记录、ADR、通过标准和结论管理。产品名、Rust 主语言、无业务 SDK、无来源拒绝是已确定约束，不反复提为待选。变更这些约束需明确新的产品决定。
+# 已确定决策
+
+Agent 允许直接应用，但必须拥有明确 tenant/site scope 与 `site.config.apply_direct`。API Key 使用独立 Header、一次性明文展示和专用 HMAC 指纹密钥；不能扩大权限、读取秘密或绕过确定性校验。

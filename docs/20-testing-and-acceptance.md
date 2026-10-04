@@ -1,5 +1,9 @@
 # 20 测试策略与验收矩阵
 
+本地真实 edge 靶场入口见 [tests/security-lab/README.md](../tests/security-lab/README.md)。固定 Juice Shop v20.2.0 与双用户越权源站分别验证站点查询规则和 PostgreSQL 历史资格；测试输出将确定性拒绝与 Jev 离线评估分开归因。
+靶场从订单与账单两个独立源站的 PostgreSQL `response_evidence` 来源链生成四个私有 Jev 输入；目标资格按网关资源 HMAC、身份绑定和来源动作在活动账本中逐项核验。`independent_labels.json` 在调用前固定资源归属真值，并与模型输入、edge 决策分离。`--validate-input` 只检查 DTO 与外发载荷预算，不生成 Jev 判断。`--scenario all --evaluate-jev` 在各条真实 edge 请求之后执行影子模型调用，按站点汇总源站/edge/模型三层观察。
+2026-09-27 的 TypeSafe 直连实测：两个正常请求由 edge 放行且 Jev 选 ALLOW，两个跨对象请求由 edge 拒绝且 Jev 选 DENY；四次调用各有四份受限证据、已释放租约和认证审计终态。该结果的影子误放 0/2、误拒 0/2、弃权 0/4；模型未改变 edge 决策，增量拦截数为 0。最终冻结运行的标签 SHA-256 与保存报告复核一致；认证调用记录耗时合计 5436 ms（单次 1107–1555 ms），供应商报告输入 3835、输出 186 token；费用字段保持未知。四例均为本地合成对象级越权，不能推断跨构建或其他攻击家族的检出率；外部标签审查、扩大独立样本和正式阈值按 20.3 继续验收。
+
 ## 20.1 分层测试
 
 单元：纯政策、ID/时间/字段校验、同主体续期与换账号隔离。性质测试：任意目标/动作扩张不应通过精确资格；不同租户同 ID 不串域；输入排序/重复键不会引入解析差异。Fuzz：HTTP/JSON/压缩/协议适配/插件/事件解码。
@@ -163,6 +167,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `scripts/test_gateway_identity.sh` 通过真实网关、合成源站和专有 PostgreSQL 库执行匿名创建、登录、刷新与同主体上下文切换，保留原有认证、CAS、旧资格隔离及错误响应断言，同时检查生产 v3 envelope 与请求 ID。脚本结束前运行 `postgres_gateway_identity_outbox_publishing`，将实际生产的四种身份事务通过 worker 投递给受控 ClickHouse HTTP 服务，核对 RowBinary 索引、摘要、确认和重复运行空批次；该测试只接受脚本拥有的 `xshield_gateway_*` 数据库。
 
+`scripts/test_gateway_dynamic_listeners.sh` 启动真实 edge 和合成源站，先验证 bootstrap 端口，再通过签名 apply 通道一次加载两个站点。回归确认新端口在不中断旧端口的情况下绑定、端口与 Host 三重路由一致、两个站点都能到达各自冻结的上游，且 apply 返回 `active_revision` 后才开放新路由；随后重启 edge，验证 active 签名快照恢复动态监听。
+
 配置 20.6 的 `XSHIELD_TEST_CLICKHOUSE_URL` 及测试账户后，同一网关脚本还会运行 `real_gateway_response_grant_outbox_delivery`。脚本产生两个响应、三个实际响应资格事件，其中一个响应含两个资源；测试把 envelope 与 PostgreSQL 响应证据、动作及资源资格行逐项比对，检查批内连续序号，再通过生产发布器写入真实 ClickHouse，读回两个底表与两个 active 视图，验证精确确认和重复运行空批次。源路径只接受已认证会话的严格成功响应，字段碰撞、重复键、资源偏差、来源撤销、epoch/policy/action 变化、容量耗尽和锁等待跨期均不会释放正文或留下部分资格。该链路已在真实 PostgreSQL 与 ClickHouse 联调通过；入口仅接受脚本拥有的数据库，未配置 ClickHouse URL 时明确报告跳过。
 
 配置同一 ClickHouse 环境后，`scripts/test_postgres.sh` 还会运行 `real_outbox_clickhouse_delivery`：在专有 PostgreSQL 临时库和独占 ClickHouse 数据库内重复应用生产 DDL，通过八族发布 API 投递十七组按生产契约构造的合成 envelope，读回两个底表及两个 active 视图，核对作用域、事件引用、SHA-256 digest、事件时间（通用资源资格、响应资格和分享为整秒，其他样本含微秒）、保留期限、确定性空置信度和非业务终态，并逐行检查 PostgreSQL 精确确认与重复运行空批次。该回归已在真实 PostgreSQL 与 ClickHouse 执行通过；真实数据库回归入口均纳入 CI。普通 workspace 测试将其标为 ignored，必须实际运行相应脚本才能形成验证结果。
@@ -188,3 +194,17 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 真实 Outbox 回归还覆盖请求摘要的混合来源：较早 ID、序号为 1 的 GET 目标资格先到，摘要保持来源方法/操作为空；同一 request_id 的 POST 来源请求随后到达，两个查询视图均返回来源方法与操作，资格事件继续保留其目标语义。
 
 受限校准报告调查的真实 PostgreSQL 回归覆盖成功 projection 的冻结 metadata、跨 tenant 同构未命中、通过实际 retention intent/tombstone 后仍可观察的 `body_status=deleted`，以及篡改报告 outbox 链接后的 fail-closed。控制层 HTTP 回归覆盖 `AuditAdministrator`、严格路径/空 query/空 body、容量与存储故障、稳定审计 target、审计失败扣留响应和许可在终态审计后释放。它们不构成密文正文读取、外部内容独立性、模型质量或策略发布验收。
+
+
+## 管理后台与开发数据卷验收（2026-09-27）
+
+浏览器回归使用固定合成 API 契约，并分别覆盖明确机器 fixture 和服务端角色会话模式。站点场景包含列表选择精确 site、创建、按类别编辑、草稿前进后退/离页保护、深链接刷新、空站点 nullable 字段、读写跨 scope 拒绝、写入未知结果的原键/原正文人工重试、验证/审批/发布/回滚以及健康观察。角色矩阵覆盖九种服务端角色，包括独立 Observer 状态视图及策略/发布角色入口。
+
+实际基础设施验收命令：
+
+- python3 scripts/test_dev_postgres_migrations.py：在脚本拥有的临时库上覆盖基础 schema 缺失、新库 ledger 登记、旧库增量补齐、半成品拒绝、重复/并发启动、checksum、已登记约束损坏及非空站点/版本保留，并执行真实站点存储与 HTTP 契约测试；退出时删除临时库。
+- scripts/test_postgres.sh：已有 PostgreSQL、gateway、worker、control 的真实持久化与 HTTP 契约集成套件，使用独立测试数据库。
+- bash scripts/test_gateway_dynamic_listeners.sh：实际 edge 动态监听器、签名快照确认和重启恢复。
+- node scripts/test_console_oidc.mjs：运行中的 55173 控制台，真实本地 OIDC 登录、session、站点列表/详情、分类表单、资格账本和只读权限中心；检查控制 API 200、运行时错误与桌面/窄屏布局。只读 smoke 不更改业务站点或保存身份凭证。
+
+后端站点 HTTP 测试验证空库列表 200、缺失站点状态、创建与幂等重放、确定性校验、自审拒绝、独立审批和未确认 edge 的 pending 语义；拒绝与存储失败均验证稳定原因码和终态审计。迁移测试保护既有数据，生产升级继续使用部署侧审批与备份流程。本地 OIDC 开发 ACR 与合成浏览器角色不是企业 MFA 或生产发布认证。

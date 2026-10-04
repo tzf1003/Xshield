@@ -12,6 +12,10 @@
 
 WAF 终止 TLS 并重新验证上游证书，固定 upstream allowlist，不接受客户端任意 Host 变成开放代理。浏览器→WAF 与 WAF→源站的信任变化必须在站点接入说明中体现。
 
+**当前实现状态（2026-10-04 核查）**：上面描述的是目标形态。edge 目前只在内网或 loopback 地址监听明文 HTTP/1.1，尚未内置 TLS、ALPN、HTTP/2 和 PROXY protocol 适配；开发环境用本地 stunnel 终止 TLS（见 `dev.sh`）。因此生产部署必须放在可信的 TLS 终止器或负载均衡之后，且 edge 端口不得对公网开放；放在负载均衡之后时，所有客户端对 edge 呈现为同一来源地址，按来源的限流不会区分真实客户端，直到 PROXY protocol 或可信转发头适配交付。上游 TLS 的证书校验和固定 allowlist 已按本节实现。
+
+站点策略的 waf.blocked_query_fragments 可配置最多 32 个 ASCII 片段；edge 对有查询串的请求先执行有界、单次严格百分号解码和加号空格转换，再做不区分 ASCII 大小写的匹配。命中返回 WAF_QUERY_BLOCKED/403，畸形编码返回 WAF_QUERY_INVALID/400，均发生在源站转发前并记录请求审计。该规则只适合经过站点验证的具体片段；上线前应使用正常业务查询样本检查误拒，并以新策略修订发布。撤回此规则只需发布移除片段的配置快照，不删除已经产生的审计。
+
 匿名会话来源限流只使用 Pingora 看到的传输层对端地址，不信任客户端转发头。当前版本应由客户端直接连接 Xshield；若前置代理未透传受信的对端身份，来源限流会把该代理后的客户端归为同一来源，站点总限流仍生效。启用多层代理前须增加并验证受信 PROXY protocol 适配器。
 
 ## 19.3 密钥与秘密
@@ -19,6 +23,12 @@ WAF 终止 TLS 并重新验证上游证书，固定 upstream allowlist，不接�
 独立管理 TLS、协议适配、WAF session HMAC、票据签名、证据 KEK、日志签名、模型 API key。按用途和站点隔离，轮换带 key_id、并行验证期、撤销与审计；不得把所有密钥装进一个共享配置 JSON。
 
 管理 OIDC 由控制服务读取 `XSHIELD_CONTROL_OIDC_ISSUER`、`XSHIELD_CONTROL_OIDC_CLIENT_ID`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CONTROL_OIDC_REQUIRED_ACR`、`XSHIELD_CONTROL_CONSOLE_ORIGIN` 与 `XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON`。只允许 HTTPS IdP 和 HTTPS 控制台 origin（开发例外仅 loopback）；discovery/token 请求限时且不跟随重定向，启动时 issuer metadata 不可用则控制服务不启动。subject→角色 JSON 是部署管理员维护的精确 allowlist，不能直接映射 IdP 自声明角色；当前每个控制服务实例将获准主体限定到其启动配置的单一 tenant/site。client secret 由秘密管理器按用途注入、轮换，不写入仓库或浏览器 bundle。
+
+### 本地受保护站点 HTTPS 入口
+
+`dev.sh --all` 会为 `juice.local` 生成带 SAN 的短期自签证书，并启动本地 TLS 终止器，将 `https://juice.local:5443` 转发到 Gateway 的 HTTP 数据面 `127.0.0.1:56188`。证书和私钥只写入 `target/xshield-dev/tls/`，私钥权限为 `0600`。macOS 可执行 `scripts/generate_dev_tls_cert.sh target/xshield-dev/tls --install` 将证书加入当前登录钥匙串；未安装信任时使用 `curl -k` 做本地测试。该终止器只属于开发启动链，生产入口必须由受控 HTTPS 负载均衡器或边缘 TLS 终止，并继续通过控制 API 发布站点配置。
+
+多站点保存即应用还需要在 control 与 edge 同时配置 `XSHIELD_EDGE_APPLY_URL=http://127.0.0.1:9553/internal/v1/apply`、相同的 `XSHIELD_EDGE_APPLY_KEY_HEX`；edge 可用 `XSHIELD_EDGE_APPLY_LISTEN` 修改 loopback apply 地址，并用 `XSHIELD_EDGE_LISTEN_PORTS` 提供启动时的 bootstrap 监听集合。生产部署应再设置持久卷上的 `XSHIELD_EDGE_SNAPSHOT_PATH`；edge 会先把已验签的 pending 快照落盘，绑定端口并切换内存快照后再原子提升为 active，重启时只恢复最后一份 active 签名快照，损坏或作用域不符则拒绝启动。启用策略字段和独立审批前应用迁移 0046–0048；审批幂等摘要与 desired revision 一起清除/更新，作者自批由控制面拒绝，浏览器审批要求近期 step-up 重新认证。apply 请求是完整租户快照，edge 先校验 HMAC、租户、单调版本和每站点配置，再绑定所需内部端口并一次性替换；并发请求中落后的版本会被拒绝，连接失败、端口冲突或校验失败时 PostgreSQL 保留上一份 active revision。
 
 浏览器仅持有 `Secure; HttpOnly; SameSite=Lax; Path=/` 的不透明随机会话 Cookie；PostgreSQL 仅以 SHA-256 摘要索引会话 token，保存单独的 CSRF token，并由数据库时钟执行 15 分钟闲置/8 小时绝对到期和撤销。`__Host-` Cookie 要求 TLS 且不得配置 Domain。身份会话数据进入数据库备份，故备份权限与恢复流程须按管理身份材料保护；恢复后先撤销不应复活的浏览器会话。控制台通过同源代理访问 API，代理只转发 Xshield 会话/短期 OIDC state Cookie，其他 Cookie 剥离。
 
@@ -45,3 +55,6 @@ liveness 仅说明进程存活；readiness 根据必要配置、状态存储和�
 PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与独立权限复制；签名验证材料和 KMS 恢复流程同样不可缺少。恢复演练包括身份 epoch、过期资格、保留 tombstone、未完成请求和重复投递。密钥丢失导致证据不可读应记录为不可恢复，而不是显示空白。
 
 首版不作跨区域强一致承诺。新增多区域时先给出故障域、RPO/RTO、网络分区策略和实际演练报告。
+# Edge 配置发布
+
+设置 `XSHIELD_EDGE_APPLY_URL`、`XSHIELD_EDGE_APPLY_KEY_HEX`、`XSHIELD_EDGE_SNAPSHOT_PATH` 后，control 通过 loopback HMAC 发布快照。Gateway 可用 `XSHIELD_EDGE_BOOTSTRAP_ONLY=1` 启动空快照；控制面不可用时继续使用最后一个签名快照，签名、租户、revision、摘要或监听端口不匹配时 fail-closed。

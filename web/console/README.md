@@ -30,7 +30,7 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 ./dev.sh
 ```
 
-它会编排本地 PostgreSQL、ClickHouse、Keycloak OIDC、`xshield-control` 和 Vite 控制台；启动前会在现有 PostgreSQL 数据卷上以 advisory lock 增量补齐站点迁移 `0041–0048`，不会删除数据。打开 `http://127.0.0.1:55173` 后，点击“使用企业身份登录”，使用本地开发身份 `developer` / `xshield-dev-password` 完成登录。该身份只存在于本地 Keycloak 开发 realm；本地 realm 的认证等级声明是开发测试值，不代表企业 MFA 验收。
+它会编排本地 PostgreSQL、ClickHouse、Keycloak OIDC、`xshield-control` 和 Vite 控制台；启动前会在现有 PostgreSQL 数据卷上以 advisory lock 增量补齐站点迁移 `0041–0049`，不会删除数据。打开 `http://127.0.0.1:55173` 后，点击“使用企业身份登录”，使用本地开发身份 `developer` / `xshield-dev-password` 完成登录。该身份只存在于本地 Keycloak 开发 realm；本地 realm 的认证等级声明是开发测试值，不代表企业 MFA 验收。
 
 只启动前端（连接已存在的控制服务）时执行：
 

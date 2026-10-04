@@ -1,12 +1,17 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3848,
-  "passed_count": 3848,
+  "checks_total": 3854,
+  "passed_count": 3854,
   "planned_security_test_cases": 78,
   "checks": [
     {
       "name": "json:MANIFEST.sha256.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:dev/keycloak/xshield-dev-realm.json",
       "passed": true,
       "detail": ""
     },
@@ -47,6 +52,11 @@
     },
     {
       "name": "json:examples/evidence/response_to_client.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:examples/gateway-bootstrap-config.json",
       "passed": true,
       "detail": ""
     },
@@ -132,6 +142,11 @@
     },
     {
       "name": "json:schemas/site-policy.schema.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:tests/security-lab/independent_labels.json",
       "passed": true,
       "detail": ""
     },
@@ -18591,6 +18606,11 @@
       "detail": ""
     },
     {
+      "name": "link:README.md:web/console/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:docs/10-jev-and-agents.md",
       "passed": true,
       "detail": ""
@@ -19046,6 +19066,11 @@
       "detail": ""
     },
     {
+      "name": "link:docs/10-jev-and-agents.md:../tests/security-lab/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/10-jev-and-agents.md:11-audit-event-contract.md",
       "passed": true,
       "detail": ""
@@ -19167,6 +19192,11 @@
     },
     {
       "name": "link:docs/18-api-and-data-models.md:12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/20-testing-and-acceptance.md:../tests/security-lab/README.md",
       "passed": true,
       "detail": ""
     },

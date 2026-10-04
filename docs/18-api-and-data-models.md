@@ -67,3 +67,7 @@ examples 仅合成数据；scripts/validate_library.py 检查语法、Schema、�
 ## 18.6 兼容演进
 
 增加字段优先可选并给清晰默认；改变授权语义升 major。每个版本带读写兼容矩阵、迁移脚本和回放测试。旧证据保持原版本，可用只读转换器展示新视图，但不能改写历史事实。策略和解析器的版本与数据库迁移版本独立记录。
+
+## 18.7 多站点配置与 edge 生效边界
+
+`protected_site_configs` 是旧接口的兼容投影；`site_port_leases` 使用租户事务锁和 active 唯一索引分配内部监听端口，释放的端口可以安全复用。`site_apply_intents` 保存 desired revision、active revision、apply ID、状态、失败原因和独立审批摘要，`site_snapshot_sequences` 为完整租户快照提供跨控制实例的单调 revision。写入配置先提交 desired revision，再等待 edge 的签名确认；没有确认时控制台只能显示 `pending`，不能把持久化成功当作流量已切换。edge 侧的 `GatewaySnapshot`、`SiteRouteTable`、`ConfigSnapshotStore` 和 `ApplyCoordinator` 使用端口与 Host/SNI 双重选择，并在同一锁内拒绝已落后的并发快照后原子替换不可变快照，现有请求继续使用开始时绑定的 revision。0046–0048 将 typed policy、路由附加约束和独立高风险批准以 expand-contract 方式加入旧投影；策略密钥只以 reference/key ID 进入快照。

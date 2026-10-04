@@ -2,6 +2,14 @@
 
 本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`POST /control/v1/exports`、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
+站点接入后台的配置写入要求 `SystemAdmin`，按固定 tenant/site 保存受保护站点、源站、安全入口、策略版本、状态和唯一监听端口；写入使用 `Idempotency-Key`，响应同时返回经过校验的 gateway 启动配置草稿。
+
+多站点运营接口使用同一租户的站点范围：`GET /control/v1/sites?limit=1..100[&cursor=<signed>]` 返回有界站点元数据，游标绑定管理凭证摘要、主体、租户、页大小和最后站点 ID；`GET/PATCH /control/v1/sites/{site_id}` 与 `GET/PUT /control/v1/sites/{site_id}/config` 由服务端重新校验站点作用域。端口分配记录在独立租户端口租约表中，配置写入和端口租约在同一短事务内串行化；公网 origin 与内部 edge 监听端口分别保存。完整租户快照使用独立的单调 revision，edge 会在原子替换前拒绝落后的并发快照。写入会创建持久化 apply intent，并在没有认证 edge 确认时返回 `pending`、desired/active revision、apply_id 和稳定原因码；状态、健康、校验、应用、回滚和修订端点都暴露这条边界。健康端点同时探测已批准的固定上游 socket 与 health path，禁用重定向并把结果作为 `upstream_state` 返回。
+
+端口请求为 `0` 时，新站点从租户端口池取得最小空闲端口；已有站点更新会复用原 active lease，只有显式指定新端口才迁移租约。迁移、释放和唯一性检查都在同一事务锁内完成。
+
+本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0049，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
+
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
 | GET /control/v1/requests/{request_id} | 请求概要和完整性状态 | console.request.read |
@@ -12,6 +20,22 @@
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定账本快照、来源请求引用 | console.grant.read |
 | GET /control/v1/auth-bindings/{binding_id} | 当前身份与凭证代际、状态、期限 | console.binding.read |
 | GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树（脱敏生命周期，已实现，29.30） | console.agent.read |
+| GET /control/v1/site-config | 受保护站点配置与 gateway 启动配置草稿 | console.site.config.read |
+| PUT /control/v1/site-config | 幂等写入受保护站点配置并分配监听端口 | console.site.config.write |
+| GET /control/v1/sites | 租户范围的受保护站点列表 | console.sites.list |
+| GET /control/v1/sites/{site_id} | 单站点配置兼容视图 | console.site.config.read |
+| PATCH /control/v1/sites/{site_id} | 单站点幂等配置写入 | console.site.config.write |
+| GET /control/v1/sites/{site_id}/config | 单站点配置与 gateway 草稿 | console.site.config.read |
+| PUT /control/v1/sites/{site_id}/config | 单站点幂等配置写入并分配内部端口 | console.site.config.write |
+| POST /control/v1/sites | 创建租户范围的受保护站点 | console.site.create |
+| DELETE /control/v1/sites/{site_id} | 删除站点并释放内部端口租约 | console.site.delete |
+| GET /control/v1/sites/{site_id}/status | 读取 desired/active revision 和应用状态 | console.site.status.read |
+| GET /control/v1/sites/{site_id}/health | 读取站点配置与 edge 应用健康边界 | console.site.status.read |
+| GET /control/v1/sites/{site_id}/revisions | 读取当前发布边界 | console.site.status.read |
+| POST /control/v1/sites/{site_id}/validate | 校验已持久化站点配置 | console.site.config.validate |
+| POST /control/v1/sites/{site_id}/apply | 请求受保护的 edge 应用 | console.site.config.apply |
+| POST /control/v1/sites/{site_id}/approve | PolicyApprover 独立批准高风险修订并触发应用 | console.site.config.approve |
+| POST /control/v1/sites/{site_id}/rollback | 请求回滚已确认快照 | console.site.config.rollback |
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
 | POST /control/v1/causality | 固定窗口内有界多跳因果摘要 | console.causality.read |
@@ -30,17 +54,17 @@
 | POST /control/v1/evidence-holds/{hold_id}/release | 管理员释放保留锁 | console.evidence.hold.released |
 | GET /control/v1/cases/{case_id}/holds | 管理员分页查询保留历史 | console.evidence.hold.read |
 | POST /control/v1/cases/{id}/analyze | 启动只读案件清单分析任务（MVP） | console.case.analyze |
-| POST /control/v1/replays | 离线规则评估，不送原站 | replay.requested/completed |
+| POST /control/v1/replays | 离线规则评估，不送原站（设计，尚未实现） | replay.requested/completed |
 | POST /control/v1/exports | 带用途/范围/审批的导出任务 | export.requested/approved/downloaded |
 | GET /control/v1/exports/{export_id} | 读取本人或管理范围内的导出状态 | console.export.read |
 | POST /control/v1/exports/{export_id}/approve | 独立批准并生成短时元数据包 | export.approved |
 | POST /control/v1/exports/{export_id}/deny | 独立拒绝导出请求 | export.denied |
 | GET /control/v1/exports/{export_id}/download | 领取加密元数据包（最多两次） | export.downloaded |
 | GET /control/v1/jobs/{id} | 查看本人任务进度与错误 | console.job.read |
-| POST /control/v1/sites/{id}/candidates | 提交配置候选 | policy.proposed |
-| POST /control/v1/candidates/{id}/validate | 受控验证 | policy.tested |
-| POST /control/v1/candidates/{id}/approve | 审批不等于部署 | policy.approved |
-| POST /control/v1/candidates/{id}/publish | 灰度签名发布 | policy.published |
+| POST /control/v1/sites/{id}/candidates | 提交配置候选（设计，尚未实现） | policy.proposed |
+| POST /control/v1/candidates/{id}/validate | 受控验证（设计，尚未实现） | policy.tested |
+| POST /control/v1/candidates/{id}/approve | 审批不等于部署（设计，尚未实现） | policy.approved |
+| POST /control/v1/candidates/{id}/publish | 灰度签名发布（设计，尚未实现） | policy.published |
 | POST /control/v1/sites/{id}/rollback | 回退已验证版本 | policy.rolled_back |
 | GET /control/v1/audit/health | 各层watermark、gap与存储状态 | console.health.read |
 | GET /control/v1/auth/oidc/start | 启动授权码 + PKCE 管理员登录 | console.auth.login |
@@ -365,7 +389,7 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 
 `GET /control/v1/auth/oidc/callback` 仅接受单值、有限长度的 `code/state/error/iss` 与 OIDC 标准的可选 `error_description/error_uri`；拒绝重复和未知参数。callback 必须同时匹配 state query 与 host-only state Cookie，并以单条 `DELETE ... RETURNING` 原子消费尚未过期的 PKCE verifier/nonce。code 通过 HTTPS token endpoint 兑换，重定向禁用；OIDC 库以 discovery JWKS 验证 ID token 签名、issuer、audience 与 nonce。控制服务再要求精确的部署方 MFA `acr`、校验存在的 `at_hash`，并拒绝未在 subject-role allowlist 精确登记的主体。IdP claim 不提供授权角色。
 
-登录成功后创建独立 256-bit 随机 session/CSRF token。浏览器只收到 `__Host-xshield-session` 不透明 Cookie；PostgreSQL 以随机 session token 的 SHA-256 摘要查找会话，并以 DB clock 执行 8 小时绝对期限、15 分钟闲置期限及显式撤销。CSRF token 独立绑定服务端 session，仅由同源 `GET /control/v1/session` 返回；每个非安全方法还必须提交唯一且精确匹配的 `Origin` 与 `X-Xshield-CSRF`。未认证 principal 不信任任何浏览器输入。当前进程的 subject-role mapping 在每个请求重新读取，完成部署配置变更后，相关实例的新请求即按新映射授权；principal 范围固定为该实例配置 tenant/site。
+登录成功后创建独立 256-bit 随机 session/CSRF token。浏览器只收到 `__Host-xshield-session` 不透明 Cookie；PostgreSQL 以随机 session token 的 SHA-256 摘要查找会话，并以 DB clock 执行 8 小时绝对期限、15 分钟闲置期限及显式撤销。CSRF token 独立绑定服务端 session，仅由同源 `GET /control/v1/session` 返回；响应同时返回服务端签名断言中的角色名，供统一后台隐藏无权页面和操作，但服务端仍对每个请求重新鉴权。每个非安全方法还必须提交唯一且精确匹配的 `Origin` 与 `X-Xshield-CSRF`。未认证 principal 不信任任何浏览器输入。当前进程的 subject-role mapping 在每个请求重新读取，完成部署配置变更后，相关实例的新请求即按新映射授权；principal 范围固定为该实例配置 tenant/site。
 
 内部 middleware 将有效 Cookie 映射为最多 30 秒的进程内 HMAC 身份断言以复用既有授权函数；断言不能由外部 caller 签发或持久化。静态 Bearer 仍按已有机器认证契约处理；同一请求并带 Cookie 与 Authorization 会拒绝。login、callback、session bootstrap 与 logout 均写独立管理 journal `console.auth.login/callback/session.read/session.logout`；audit 失败扣留成功结果。session 创建在 audit 失败时撤销。所有认证响应均为 `no-store`，logout 只接受带有效 CSRF 的浏览器 session。数据库 schema 由迁移 0035 提供；OIDC 代码、Rustls HTTP 与 URL 依赖版本/许可证/升级策略见 README。
 
@@ -422,3 +446,22 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 `GET /download` 只接受独立 Reader 和近期 step-up。数据库先在 `ready`、期限有效且下载计数小于 2 时原子 claim；随后比较导出行、active catalog manifest 和 vault authenticated manifest 的 artifact/request/digest/bytes 四元关系，再读取并返回带 `X-Content-Type-Options: nosniff` 的 JSON attachment。读取前不加载证据正文；返回的包只包含案件/证据目录元数据与 missing/omitted 清单，不含事件 JSONL、请求响应版本、模型输入输出、规则/构建引用、存储定位、密钥、连接凭据或任何业务资格。成功、失败和审计故障分别写固定管理事件，审计不保存原始包或用途；控制台只接收与最近一次 `ready` 状态一致的 artifact 和精确字节数。
 
 部署顺序为应用 `0039_m4_investigation_exports.sql`、`0040_m4_investigation_export_package_claims.sql`，升级可识别 `export.requested`、`export.approved`、`export.denied`、`export.downloaded` 和 `console.export.read` 的管理 journal，再开放 API 与控制台固定代理路由。迁移 0040 的 claim 使用 tenant/site/export 复合键、固定 package request ID、长度前缀 parent_refs 摘要和短 lease；并发 writer 返回 Busy，参数变化返回 Conflict，过期 lease 可回收，旧 lease 不能完成 ready，claim 与 ready 绑定在同一事务。该 MVP 仍是 metadata-only，不提供完整事件/正文取证包、自然语言查询、安全回放、自动轮询或机器 step-up；工作台仅显式读取状态、提交冻结的幂等操作并下载有界 JSON Blob，完整包能力保留为独立 backlog。
+
+## 站点诊断与控制台契约补充（2026-09-27）
+
+found=false 的站点配置响应可以包含 requires_approval=null；客户端不得将其解读为发布许可或格式错误。持久化 listen_port 范围为 6100–65535；请求值 0 是自动分配指令。
+
+依赖故障响应在现有 error_code、message_safe、request_id、retryable、next_action 外附加可选 stage：配置存储为 site_config_store，发布/回滚存储为 site_apply_store，健康观察存储为 site_health_store。字段描述边界而非具体数据库错误；权限拒绝不标为存储故障。稳定原因码和审计终态保持兼容。
+
+控制台错误字典的契约测试检查后端 CONTROL_SITE_* 失败原因码集合；成功终态单独登记。GET 失败可以人工刷新；写入结果未知时由操作者确认后按原正文和幂等键重试。站点 status/health/revisions 与配置读取使用各自角色规则，前端不会用配置读取代替 Observer 只读接口。
+
+本地 schema manifest 位于 scripts/dev_postgres_schema.sql，由 scripts/generate_dev_postgres_schema.py 在独立临时数据库中按原 SQL 生成。修改迁移文件后必须审查 SQL 及 manifest 的共同变化；不要通过改写 ledger 绕过 checksum。生产升级由部署流程执行加法迁移；界面/API 可回滚，数据库历史不做破坏性回滚。
+# Agent API Key 端点
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST/GET | `/control/v1/agent-api-keys` | 创建或查看非秘密 Key 元数据 |
+| POST | `/control/v1/agent-api-keys/{id}/revoke` | 立即撤销 |
+| POST | `/control/v1/agent-api-keys/{id}/rotate` | 撤销旧 Key 并签发新 Key |
+
+Agent 站点操作使用 `/control/v1/sites` 及其 config、validate、apply、health、rollback 子路径。

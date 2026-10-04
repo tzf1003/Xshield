@@ -74,6 +74,10 @@ confidence 不是正确率。使用跨站/跨构建/跨攻击家族独立测试�
 
 `xshield-model-eval --approved-input PRIVATE_JSON_FILE` 接受操作员已批准对外披露、预先脱敏的单个私有 JSON 文件。`approval_ref` 是关联批准记录的标识，不是权限证明；部署账号、文件权限和外发审批由操作者保证。tenant/site 来自可信环境，request/model-call ID 由服务端生成。CLI 只产出评估证据，不连接网关资格写入路径；`MODEL_EVALUATED/PASS` 表示调用与取证完成，不表示业务操作获准。
 
+可选 `auth_facts` 与 `page_evidence` 同时提供时，严格 DTO 限定当前主体/目标资源/资格状态、同一来源请求、来源证据类型与引用、动作 ID/主体/资源和映射修订；响应来源可声明 `source_kind=response_evidence`，来源 ID 使用领域类型解析。可选 `attempt_request_id` 只提供一个经过强类型验证的已观察请求引用，供影子结果关联，不赋予授权。覆盖标记为 `operator_supplied`，不是运行时认证。省略两者时仍保持原有 `unavailable` 覆盖。`--validate-input PRIVATE_JSON_FILE` 检查文件权限、严格 DTO 和最终 Jev 载荷的 8 KiB 预算，不需要供应商密钥，也不发送请求或生成模型结果。本地越权靶场从两个独立站点的 PostgreSQL 来源链生成四个待审核输入；归属真值在调用前固定于独立标签文件，运行方法见 [靶场说明](../tests/security-lab/README.md)。
+
+本地靶场的 `--scenario all --evaluate-jev` 为两个独立站点分别建立临时 PostgreSQL scope、调用容量、加密证据根和审计 journal。真实 edge 请求完成后，影子模型从冻结来源链评估相同目标；模型输出不参与 edge 放行。2026-09-27 的 TypeSafe 直连实测中，订单与账单各一条正常请求得到 ALLOW、各一条跨对象请求得到 DENY；测试核对每次四份受限 catalog、释放的模型租约、认证 model_call 和 `model.started → model.requested → model.responded`。这四条合成样本仅验证方法与链路，外部标签复核、跨构建/攻击家族样本、误放/误拒置信区间、成本/延迟和正式阈值仍需单独验收。
+
 默认请求固定发送到 `https://ai-gateway.vercel.sh/typesafe/v1/systemone`，wire model 为 `typesafe-ai/jev`，Bearer 由 `AI_GATEWAY_API_KEY` 独立注入；使用原生 TLS 信任根，拒绝重定向和动态目标。`XSHIELD_JEV_ROUTE=direct` 才启用兼容的 TypeSafe 直连（`XSHIELD_JEV_API_KEY`、`https://api.typesafe.ai/v1/systemone`、`jev-1.13.0`）。模型生命周期和调用记录分别保留 `provider` 与独立的 `provider_model_id`；内部审计仍记录固定 `jev-1.13.0`，Gateway 别名没有精确版本证明时 `resolved_model_revision=null`。支持单题 Choice、Score 与 Noul（Score 详见 10.11）；Choice 要求 2–32 个候选，包含 NONE/UNKNOWN，返回完整候选概率且最高概率选项匹配。Noul 的 confidence 始终为 `null/not_applicable`。缺少用量保持 unknown，不估造 token 或成本。
 
 正常 provider 闭环顺序为：`model.started` → 内部输入证据 → 冻结实际 API JSON 证据 → `model.requested` → 单次 HTTP → 响应捕获及规范化调用记录 → `model.responded/failed/timeout/cancelled`；缓存命中则为 `model.started` → `model.cache_hit` → 新的调用记录 → `model.responded`。每个证据对象先在 vault 耐久落盘，再与 `evidence.cataloged` outbox 原子提交目录。输入目录或审计屏障失败会阻止 HTTP；调用后的取证失败产生依赖失败终态。终态自身持久失败时退出非零，下次启动将未完成调用补记为 `MODEL_OUTCOME_UNKNOWN`，供应商是否已计费保持未知。
@@ -193,3 +197,6 @@ Gateway 元数据支持官方 `provider_metadata.gateway` 中的 `generationId` 
 报告不存在或不属于固定 scope 时返回同构成功观察；已删除的专用密文 body 仍保留 metadata，并只以 `body_status=deleted` 描述物理 tombstone。接口不打开 vault、不读取 `artifact_catalog`、不调用 `EvidenceReadPort`，也不返回正文、storage locator、key ref、完整性摘要、能力、lease、token、证据引用、样本、标签、概率、指标、提示词或 URL。读取观察不是 body-read 权限、校准质量结论、阈值/策略发布或业务资格。
 
 控制层在审计释放前持有有界许可；每个已认证尝试写入 `console.calibration.report.read`，审计写入失败则扣留结果。路由、稳定原因码、响应字段和部署顺序由 [29.26](29-api-endpoint-catalog.md#2926-已实现的校准报告调查契约) 定义，事件封闭 parser 见 [11.13](11-audit-event-contract.md#1113-已实现校准报告调查访问审计)。
+# Agent 管理 API
+
+Agent 只能通过 `xshield-worker` 的强类型管理客户端调用控制 API。请求必须携带 `X-Xshield-API-Key`、`X-Xshield-Agent-Run-Id` 和幂等键；参数、scope、revision、digest 与 SSRF/端口/路由约束由控制面确定性校验。`site.config.apply_direct` 是独立能力，默认 Agent 不具备。
