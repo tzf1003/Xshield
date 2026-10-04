@@ -1,6 +1,8 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
+import { mockControl } from "./control-mock";
 import { REQUEST_ID } from "./fixtures";
+import { openView } from "./navigation";
 import { mockShellApi, SCOPE, signIn } from "./shell-helpers";
 
 // axe-core scans of the redesigned screens in both themes. Only critical and serious findings
@@ -88,11 +90,23 @@ for (const scheme of ["light", "dark"] as const) {
 
     test("request investigation with data", async ({ page }) => {
       await mockShellApi(page);
-      await signIn(page, "/investigation/requests");
-      await page.getByLabel("请求 ID", { exact: true }).fill(REQUEST_ID);
-      await page.getByRole("button", { name: "查询", exact: true }).click();
+      await signIn(page, "/access/session");
+      await page.keyboard.press("Control+KeyK");
+      await page.getByRole("combobox", { name: "命令面板" }).fill(REQUEST_ID);
+      await page.keyboard.press("Enter");
       await expect(page.getByRole("tab", { name: "事件时间线" })).toBeVisible();
       await expect(page.getByText("REQUEST_ACCEPTED", { exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("request stream with data", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, "/access/session");
+      await openView(page, "request");
+      await expect(page.locator(".ant-table-row")).toHaveCount(25);
+      expect(await serious(page)).toEqual([]);
+      await page.getByRole("button", { name: /更多筛选/ }).click();
+      await expect(page.getByLabel("操作 ID", { exact: true })).toBeVisible();
       expect(await serious(page)).toEqual([]);
     });
 

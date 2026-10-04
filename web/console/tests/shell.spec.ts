@@ -364,7 +364,7 @@ test.describe("session end clears both layers", () => {
     expect(await storageSnapshot(page)).toEqual({ local: {}, session: {} });
   });
 
-  test("a 401 on a legacy read clears the guarded layer too", async ({ page }) => {
+  test("a 401 on a request read clears the guarded layer too", async ({ page }) => {
     let expired = false;
     await mockShellApi(page, (url) =>
       expired && url.pathname.startsWith("/control/v1/requests/")
@@ -386,8 +386,8 @@ test.describe("session end clears both layers", () => {
       .getByRole("link", { name: "请求调查", exact: true })
       .click();
     expired = true;
-    await page.getByLabel("请求 ID", { exact: true }).fill(REQUEST_ID);
-    await page.getByRole("button", { name: "查询", exact: true }).click();
+    await page.getByLabel("按请求 ID 打开", { exact: true }).fill(REQUEST_ID);
+    await page.getByRole("button", { name: "打开", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("管理会话已失效");
     expect(await seamState(page)).toMatchObject({ status: "disconnected", queries: 0, pending: 0 });
     await expect(page.getByText(REQUEST_ID)).toHaveCount(0);

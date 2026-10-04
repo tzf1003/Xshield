@@ -1,0 +1,201 @@
+/*
+ * Investigation pages (request stream and detail, structured search, identity, models, agents,
+ * calibration). Structure comes from antd; these rules only lay pages out. Colours are --xs-*
+ * variables only (tests/ui-css.test.ts), so light, dark and system themes all work.
+ */
+
+.xs-page {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.xs-card {
+  min-width: 0;
+  padding: 16px 20px;
+  background: var(--xs-surface);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-panel);
+  box-shadow: var(--xs-shadow);
+}
+
+.xs-card-flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.xs-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+
+.xs-card-head h2,
+.xs-card h2 {
+  margin: 0;
+  color: var(--xs-ink);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.xs-card h3 {
+  margin: 0 0 8px;
+  color: var(--xs-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.xs-count {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-foot {
+  margin: 0;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-field-error {
+  margin: 4px 0 0;
+  color: var(--xs-deny);
+  font-size: 12px;
+}
+
+/* ---------- Toolbars ---------- */
+.xs-toolbar {
+  display: grid;
+  gap: 14px;
+}
+
+.xs-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 24px;
+}
+
+.xs-toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.xs-toolbar-label {
+  color: var(--xs-ink-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.xs-toolbar-note {
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
+.xs-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.xs-toolbar-hint {
+  margin: 0;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-open {
+  width: min(100%, 380px);
+}
+
+.xs-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-tags .ant-tag {
+  margin: 0;
+}
+
+.xs-more {
+  display: grid;
+  gap: 12px;
+  width: min(86vw, 340px);
+}
+
+.xs-more-field {
+  display: grid;
+  gap: 4px;
+}
+
+.xs-more-field label {
+  color: var(--xs-ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.xs-more-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ---------- Tables ---------- */
+.xs-row-link {
+  cursor: pointer;
+}
+
+.xs-more-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px 20px 4px;
+}
+
+.xs-more-bar > .ant-alert {
+  flex-basis: 100%;
+}
+
+.xs-card > .xs-foot {
+  padding: 4px 20px 14px;
+}
+
+/* ---------- Query details ---------- */
+.xs-plan-note {
+  margin: 0 0 8px;
+  color: var(--xs-ink-2);
+  font-size: 12px;
+}
+
+.xs-plan {
+  max-height: 260px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  overflow: auto;
+  color: var(--xs-ink);
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+  font-size: 12px;
+}
+
+@media (width <= 760px) {
+  .xs-card {
+    padding: 14px;
+  }
+
+  .xs-open {
+    width: 100%;
+  }
+}

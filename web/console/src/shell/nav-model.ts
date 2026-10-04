@@ -277,7 +277,7 @@ const titles: Record<QueryKind, string> = {
 const leads: Record<QueryKind, string> = {
   overview: "查看当前管理范围内的站点、审计和调查服务状态。",
   session: "查看当前主体、角色、站点范围和再认证状态。",
-  request: "沿着请求时间线，核对每一次判定与证据。",
+  request: "浏览已索引的请求终态，或按请求 ID 核对判定、阶段与证据。",
   model: "核对模型调用生命周期、版本与证据引用。",
   agent: "核对 Agent 脱敏生命周期与固定事件引用。",
   "model-list": "在固定 UTC 时间窗内分页发现模型调用；点击条目会重新读取详情并重新鉴权。",

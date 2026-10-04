@@ -110,7 +110,12 @@ export function createAppRouteTree(components: RouteComponents) {
       },
     }),
     page("api-keys", "admin/api-keys"),
-    page("request", "investigation/requests"),
+    page("request", "investigation/requests", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/RequestStreamPage"),
+        "RequestStreamPage",
+      ),
+    }),
     page("request", "investigation/requests/$requestId", {
       params: idParams("requestId", requestPattern),
     }),

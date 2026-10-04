@@ -37,7 +37,7 @@ async function mockCases(page: Page, handler: Handler) {
   return calls;
 }
 async function connectCases(page: Page) {
-  await page.goto("/investigation/requests");
+  await page.goto("/access/session");
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
   await openView(page, "case");
@@ -280,7 +280,7 @@ test("case list late refresh cannot restore rows or cursor after leaving the vie
   await expect(page.getByRole("button", { name: `打开案件 ${OTHER_CASE_ID}` })).toBeVisible();
   await refresh.click();
   await expect.poll(() => calls.length).toBe(2);
-  await openView(page, "request");
+  await openView(page, "audit-health");
   release();
   await openView(page, "case");
   await expect(page.getByText("读取本人案件后，选择一项打开证据集合。")).toBeVisible();
@@ -702,7 +702,7 @@ test("case late mutation response cannot repaint after navigation and retains re
   await connectCases(page);
   await createCase(page);
   await expect.poll(() => calls.length).toBe(1);
-  await openView(page, "request");
+  await openView(page, "audit-health");
   release();
   await openView(page, "case");
   await expect(page.getByRole("heading", { name: "操作结果未知" })).toBeVisible();

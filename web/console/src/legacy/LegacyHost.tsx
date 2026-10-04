@@ -768,6 +768,9 @@ export default function LegacyHost({
   // While connected, in-session notices are local; once the session ended, why it ended.
   const notice = connected ? sessionNotice : (sessionNotice ?? session.state.notice);
 
+  // The request stream (the list at /investigation/requests) is a routed page now.
+  if (pathname === "/investigation/requests") return null;
+
   return (
     <div className="legacy">
       {notice && (

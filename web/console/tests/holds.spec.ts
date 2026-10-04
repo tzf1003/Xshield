@@ -32,7 +32,7 @@ async function intercept(page: Page, handler: (route: Route, call: Call) => Prom
   return calls;
 }
 async function connect(page: Page) {
-  await page.goto("/investigation/requests");
+  await page.goto("/access/session");
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
   await openView(page, "hold");
@@ -143,7 +143,7 @@ test("unknown write preserves its original key through navigation and later reje
     ),
   ).toBe(true);
   await expect(page.getByRole("button", { name: "准备新的保留操作" })).toBeDisabled();
-  await openView(page, "request");
+  await openView(page, "audit-health");
   await openView(page, "hold");
   await page.getByRole("button", { name: "原样重试保留操作" }).click();
   await expect(page.getByRole("heading", { name: "保留操作结果未知" })).toBeVisible();
@@ -263,7 +263,7 @@ test("navigation ignores a late write response while preserving recovery", async
   await connect(page);
   await create(page);
   await expect.poll(() => calls.length).toBe(1);
-  await openView(page, "request");
+  await openView(page, "audit-health");
   release();
   await responseDelivered;
   await openView(page, "hold");

@@ -33,7 +33,7 @@ async function intercept(page: Page, handler: (route: Route, call: Call) => Prom
   return calls;
 }
 async function connect(page: Page) {
-  await page.goto("/investigation/requests");
+  await page.goto("/access/session");
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
   await openView(page, "access");
@@ -147,7 +147,7 @@ test("uncertain request preserves exact retry after a later rejection and naviga
   await requestAccess(page);
   await expect(page.getByRole("heading", { name: "访问操作结果未知" })).toBeVisible();
   await expect(page.getByRole("button", { name: "准备新的访问操作" })).toBeDisabled();
-  await openView(page, "request");
+  await openView(page, "audit-health");
   await openView(page, "access");
   await page.getByRole("button", { name: "原样重试访问操作" }).click();
   await expect(page.getByRole("heading", { name: "访问操作结果未知" })).toBeVisible();

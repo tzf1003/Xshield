@@ -76,7 +76,12 @@ export function ErrorState({
       }
       action={
         onRetry ? (
-          <Button size="small" icon={<ReloadOutlined />} loading={retrying} onClick={onRetry}>
+          <Button
+            size="small"
+            icon={<ReloadOutlined aria-hidden="true" />}
+            disabled={retrying}
+            onClick={onRetry}
+          >
             {retryLabel}
           </Button>
         ) : undefined
