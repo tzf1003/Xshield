@@ -460,6 +460,38 @@ impl DurableAudit {
         }
     }
 
+    /// Durably records the refusals counted for one listener port: requests no
+    /// site snapshot routes. One bounded `edge.unrouted_denied` summary stands
+    /// for all of them (see `unrouted.rs`); the barrier applies like any write.
+    pub(crate) async fn record_unrouted(
+        &self,
+        summary: &crate::unrouted::UnroutedSummary,
+    ) -> Result<(), DurableAuditError> {
+        let event = PendingEvent::new(
+            new_event_id()?,
+            "edge.unrouted_denied",
+            1,
+            Vec::new(),
+            Payload::Unrouted {
+                listener_port: summary.listener_port,
+                denied_count: summary.denied_count,
+                first_seen_unix: summary.first_seen_unix,
+                last_seen_unix: summary.last_seen_unix,
+                sample_host: summary.sample_host.clone(),
+                reason_code: ReasonCode::HostNotRouted.as_str(),
+            },
+        );
+        self.append(
+            BatchContext {
+                request_id: None,
+                trace_id: new_trace_id(),
+            },
+            vec![event],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Tries once to bring a closed barrier back; admission stays refused until
     /// this succeeds.
     ///
@@ -1645,6 +1677,14 @@ enum Payload {
     Recovery {
         recovered_records: u64,
         truncated_bytes: u64,
+        reason_code: &'static str,
+    },
+    Unrouted {
+        listener_port: u16,
+        denied_count: u64,
+        first_seen_unix: u64,
+        last_seen_unix: u64,
+        sample_host: Option<String>,
         reason_code: &'static str,
     },
 }
@@ -3058,6 +3098,99 @@ mod tests {
         shutdown_tx.send(true).unwrap();
         supervisor.await.unwrap();
         drop(audit);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn journal_events(
+        directory: &std::path::Path,
+        config: &GatewayConfig,
+        event_type: &str,
+    ) -> Vec<serde_json::Value> {
+        let (journal, _) = LocalJournal::open(
+            directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut found = Vec::new();
+        journal
+            .visit_closed_records(100_000, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["event_type"] == event_type {
+                    found.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        found
+    }
+
+    // The exact payload the worker's publisher accepts; the worker has a test
+    // for the same literal, so the two sides cannot drift apart silently.
+    #[tokio::test]
+    async fn unrouted_denials_are_one_bounded_event_per_port_and_survive_a_closed_barrier() {
+        use crate::unrouted::{UnroutedDenials, flush_once};
+        let directory = directory();
+        let config = config_segmented(&directory, 64 * 1024, 4 * 1024);
+        let audit = DurableAudit::open_recoverable(&config, KEY).unwrap();
+        let denials = UnroutedDenials::default();
+        for _ in 0..5_000 {
+            denials.record(6188, Some("Unknown.Example"), 1_700_000_000);
+        }
+        denials.record(6189, None, 1_700_000_005);
+
+        // The journal fills and the barrier closes before the first flush.
+        // Nothing counted is lost while it is closed: a failed flush puts the
+        // counts back and later refusals merge into them.
+        fill_until_closed(&audit, &config).await;
+        flush_once(&audit, &denials).await;
+        denials.record(6188, None, 1_700_000_100);
+        let waiting = denials.take();
+        assert_eq!(waiting.len(), 2, "{waiting:?}");
+        denials.restore(waiting);
+        assert!(remove_closed_segments(&directory) > 0);
+        audit.try_reopen().await.unwrap();
+
+        // One flush writes one event per port, however many requests were refused.
+        flush_once(&audit, &denials).await;
+        assert!(
+            denials.take().is_empty(),
+            "a successful flush drains the counts"
+        );
+        drop(audit);
+
+        let mut events = journal_events(&directory, &config, "edge.unrouted_denied");
+        events.sort_by_key(|event| event["payload"]["listener_port"].as_u64());
+        assert_eq!(events.len(), 2, "{events:#?}");
+        assert_eq!(
+            events[0]["payload"],
+            serde_json::json!({
+                "listener_port": 6188,
+                "denied_count": 5_001,
+                "first_seen_unix": 1_700_000_000_u64,
+                "last_seen_unix": 1_700_000_100_u64,
+                "sample_host": "unknown.example",
+                "reason_code": "HOST_NOT_ROUTED"
+            })
+        );
+        assert_eq!(
+            events[1]["payload"],
+            serde_json::json!({
+                "listener_port": 6189,
+                "denied_count": 1,
+                "first_seen_unix": 1_700_000_005_u64,
+                "last_seen_unix": 1_700_000_005_u64,
+                "sample_host": null,
+                "reason_code": "HOST_NOT_ROUTED"
+            })
+        );
+        for event in &events {
+            assert_eq!(event["request_id"], serde_json::Value::Null);
+            assert_eq!(event["tenant_id"], "tenant_test");
+            assert_eq!(event["policy_revision"], "policy-r1");
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 }

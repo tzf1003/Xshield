@@ -5,9 +5,11 @@ mod evidence_writer;
 mod listener_supervisor;
 mod protected_identity;
 mod rate_limit;
+mod unrouted;
 
 use crate::listener_supervisor::ListenerSupervisor;
 use crate::rate_limit::SiteRateLimiter;
+use crate::unrouted::{FLUSH_INTERVAL, UnroutedDenials, flush_unrouted_denials};
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora::{
@@ -117,6 +119,7 @@ struct Gateway {
     buffered_body_budget: Arc<Semaphore>,
     evidence: Option<evidence_writer::EvidenceWriter>,
     rate_limiter: Arc<SiteRateLimiter>,
+    unrouted: Arc<UnroutedDenials>,
 }
 
 struct PostgresRuntime {
@@ -288,6 +291,16 @@ impl ProxyHttp for Gateway {
             .route(listener_port, host.as_deref().unwrap_or_default())
             .is_none()
         {
+            // No site owns this request, so it cannot be audited under one and
+            // a durable event per request would let a flood fill the journal.
+            // Count it; one bounded summary per port and interval is written.
+            self.unrouted.record(
+                listener_port,
+                host.as_deref(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(1, |elapsed| elapsed.as_secs().max(1)),
+            );
             respond_denial(
                 session,
                 503,
@@ -2057,6 +2070,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let audit_readiness = audit.readiness();
     let audit_recovery = audit.clone();
+    let audit_unrouted = audit.clone();
+    let unrouted = Arc::new(UnroutedDenials::default());
     let mut server = Server::new(None)?;
     server.bootstrap();
     let proxy = pingora::proxy::http_proxy(
@@ -2072,6 +2087,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             postgres,
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
             rate_limiter: Arc::new(SiteRateLimiter::new()),
+            unrouted: Arc::clone(&unrouted),
         },
     );
     let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
@@ -2084,6 +2100,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     runtime.spawn(supervise_recovery(
         audit_recovery,
         RecoveryBackoff::PRODUCTION,
+        shutdown.clone(),
+    ));
+    runtime.spawn(flush_unrouted_denials(
+        audit_unrouted,
+        unrouted,
+        FLUSH_INTERVAL,
         shutdown.clone(),
     ));
     let supervisor = runtime.block_on(ListenerSupervisor::new(

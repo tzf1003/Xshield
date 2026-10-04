@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 为 edge 的未知 Host/端口拒绝补上审计：监听端口与 Host 没有命中任何站点快照的请求此前直接返回 503 `SITE_CONFIG_UNAVAILABLE`，没有任何审计事件、原因码或终态。因为这类请求没有站点作用域、逐请求写持久事件又会让洪峰写满 journal，网关按监听端口在内存中计数，每 60 秒为每个有计数的端口追加一条聚合的 `edge.unrouted_denied` 事件（新稳定原因码 `HOST_NOT_ROUTED`，含总数、首末时间和首个有界可打印 ASCII 的 Host 样本）；内存只随监听端口数增长，屏障关闭时计数保留、重开后合并写出。worker 发布器新增该事件类型的严格解析（拒绝其他原因码、零端口/零计数、时间颠倒、超界或含控制字符的 Host、未知/重复字段），须先升级发布器。客户端响应不变，窗口内逐请求明细有意不持久化，进程在两次写出之间退出会丢失该间隔内尚未写出的计数。
+
 - 修复 edge 限流与审计屏障：WAF 拒绝的请求不经过限流器，却仍各写一条耐久审计记录，拒绝洪峰不受限地写满 journal；限流表在 65,536 个来源后拒绝每一个新来源（评审测得 200 个中 0 个放行），且每次拒绝都在全局 `std::sync::Mutex` 下 `retain` 遍历全表（约 1.3 ms）；审计屏障一旦因 journal 写满或写错误关闭就没有任何重开路径，网关停摆到重启。现在每个请求先于 WAF 取令牌（`pre_admission_denial`），限流表改为 16 分片、共 65,536 个桶的 CLOCK 淘汰表，插入摊销 O(1)、新来源永不因表满被拒，IPv6 按 /64 计量；屏障由后台监督在有界退避（1–30 秒）下重试：目录低于高水位时释放失败的写入器、经恢复流程重开 journal，并先耐久追加 `audit.recovered`（新稳定原因码 `AUDIT_BARRIER_REOPENED`，`truncated_bytes=0`）再恢复准入，期间继续以 503 `AUDIT_DURABILITY_FAILED` 拒绝。worker 发布器只接受 `AUDIT_TAIL_RECOVERED`（有截断字节）与 `AUDIT_BARRIER_REOPENED`（无截断字节）两种 `audit.recovered`，部署时先升级发布器。屏障关闭期间丢失终态的在途请求仍由下次启动对账补偿，不在重开时补偿。该屏障没有 Pingora 集成回归，只有单元级证明。
 
 - 修复 Gateway 静态资源兜底绕过默认拒绝：该兜底默认以深度 5 对所有站点开启，且扩展名取最后一段 `rsplit('.')` 的结果，导致任意位置的 `.json`/`.map`、与扩展名同名的无点路径（`/api/json`、`/css`、`/search/png`）以及 `/admin/users;.js` 这类分号后缀都在无身份、无精确 operation 的情况下被放行，与“API 路径保持拒绝”的文档不符。现在该兜底按站点显式开启（`static_asset_max_path_depth` 为 `0` 或缺省即关闭，字段名不变）；开启后只放行 GET，路径经一次严格百分号解码后以解码文本判定，最后一段必须有真实的点、非空主名且扩展名属于 `js css ico png jpg jpeg gif svg webp woff woff2 ttf`；`.json` 与 `.map` 移出列表，`;`、反斜杠、`%2F`、点段与空段、控制字符、`?`/`#`、双重编码、空格和非 ASCII 字节一律拒绝。已存在站点策略里保存的 `5` 仍然有效，直到重新保存；`scripts/register_juice_shop.py` 已显式设置 5。原测试把“默认深度 5、默认策略放行 `/chunk.js`”当作期望，现改为断言默认关闭并在测试中显式开启。
