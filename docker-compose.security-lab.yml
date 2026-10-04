@@ -1,0 +1,34 @@
+name: xshield-security-lab
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:v20.2.0@sha256:8739101ade29358abb5469ee66ae78e582c97ed0a5543a4ad102e5fa5193526b
+    ports:
+      - "127.0.0.1:53000:3000"
+    environment:
+      NODE_ENV: unsafe
+    restart: unless-stopped
+    networks: [lab]
+
+  idor-origin:
+    image: python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
+    command: ["python", "/app/idor_origin.py"]
+    ports:
+      - "127.0.0.1:53001:8080"
+    volumes:
+      - ./tests/security-lab/idor_origin.py:/app/idor_origin.py:ro
+    restart: unless-stopped
+    networks: [lab]
+
+  invoice-origin:
+    image: python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
+    command: ["python", "/app/invoice_origin.py"]
+    ports:
+      - "127.0.0.1:53002:8080"
+    volumes:
+      - ./tests/security-lab/invoice_origin.py:/app/invoice_origin.py:ro
+    restart: unless-stopped
+    networks: [lab]
+
+networks:
+  lab:

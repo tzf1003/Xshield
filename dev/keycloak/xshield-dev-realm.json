@@ -21,9 +21,9 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "redirectUris": [
-        "http://127.0.0.1:5173/control/v1/auth/oidc/callback"
+        "http://127.0.0.1:55173/control/v1/auth/oidc/callback"
       ],
-      "webOrigins": ["http://127.0.0.1:5173"],
+      "webOrigins": ["http://127.0.0.1:55173"],
       "protocolMappers": [
         {
           "name": "xshield-dev-acr",

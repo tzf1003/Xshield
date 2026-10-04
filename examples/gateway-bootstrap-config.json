@@ -1,0 +1,22 @@
+{
+  "listen": "127.0.0.1:6188",
+  "origin": {"address": "127.0.0.1:1", "server_name": "bootstrap.invalid", "tls": false},
+  "tenant_id": "tenant_dev",
+  "site_id": "site_dev",
+  "policy_revision": "bootstrap-r1",
+  "audit": {
+    "directory": "target/xshield-dev/gateway-audit",
+    "key_id": "dev-journal-key",
+    "producer_id": "edge-bootstrap",
+    "max_bytes": 16777216,
+    "high_watermark_bytes": 12582912,
+    "segment_max_bytes": 4194304,
+    "reconcile_max_records": 1000000
+  },
+  "operations": [{
+    "operation_id": "bootstrap.reject",
+    "method": "GET",
+    "path": "/__bootstrap__",
+    "admission": "PUBLIC"
+  }]
+}

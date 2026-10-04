@@ -6,3 +6,6 @@
 /web/console/playwright-report/
 /web/console/.env
 /web/console/.env.*
+
+__pycache__/
+*.pyc

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "dataset_id": "xshield_lab_cross_site_r1",
+  "label_basis": "fixed_origin_ownership_and_requested_resource",
+  "sites": {
+    "orders": {
+      "site_id": "site_idor",
+      "labels": [
+        {"case": "own_order", "requested_resource_ref": "order-a", "expected_choice": "ALLOW", "truth_class": "benign"},
+        {"case": "cross_order", "requested_resource_ref": "order-b", "expected_choice": "DENY", "truth_class": "malicious"}
+      ]
+    },
+    "invoices": {
+      "site_id": "site_invoice",
+      "labels": [
+        {"case": "own_invoice", "requested_resource_ref": "invoice-100", "expected_choice": "ALLOW", "truth_class": "benign"},
+        {"case": "cross_invoice", "requested_resource_ref": "invoice-200", "expected_choice": "DENY", "truth_class": "malicious"}
+      ]
+    }
+  }
+}
