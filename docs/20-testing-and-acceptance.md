@@ -210,3 +210,5 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 后端站点 HTTP 测试验证空库列表 200、缺失站点状态、创建与幂等重放、确定性校验、自审拒绝、独立审批和未确认 edge 的 pending 语义；拒绝与存储失败均验证稳定原因码和终态审计。迁移测试保护既有数据，生产升级继续使用部署侧审批与备份流程。本地 OIDC 开发 ACR 与合成浏览器角色不是企业 MFA 或生产发布认证。
 
 上游 SSRF 回归分三层：`xshield-core` 的 `site::upstream` 对每个 IPv4/IPv6 范围的边界两侧、云元数据地址、映射/NAT64/6to4/Teredo 形式和回环放行开关逐项断言；`xshield-control` 单测覆盖保存校验（含默认端口 80/443 必须通过、IP 字面量或会被读成 IP 的服务名必须拒绝）、探测规划，以及用真实回环监听器验证探测只连接已验证套接字、使用配置端口、不跟随重定向、对映射回环与 IP 字面量服务名零连接；HTTP 测试在不触碰存储的情况下断言七种内部地址均返回 `CONTROL_SITE_SSRF_BLOCKED` 并写 DENY 审计，PostgreSQL 回归把一行旧数据改为映射回环后读取健康，确认监听器未被连接。这些测试不验证 DNS 重绑定（控制面不解析名称）或 edge 数据面转发的出口过滤。
+
+控制面与 edge 的校验一致性由 `xshield-gateway` 的 `site_config_parity` 测试固定：每个样本经 `SiteConfig::gateway_config`（控制面实际使用的同一投影）封装成 apply 请求，送入真实的 `GatewaySnapshot::from_apply_request`，对“核心接受则 edge 必须接受”逐样本断言。手写表覆盖路径字符集与保留前缀、同前缀/被遮蔽/超过 64 条的 `{param}` 路由、请求与响应 crypto 的每个边界和跨路由密钥规则、身份存储容量、sensor origin 与站点 ID 长度；四组确定性网格（路由形态、crypto 参数边界、origin×入口×身份×TTL 组合）共数万次真实编译，使手写表没有覆盖的新 edge 规则也会在任一组合触发时让构建失败。每个“核心必须拒绝”的样本同时断言 edge 确实拒绝，避免表项过期；语料规模下限防止校验被过度收紧而空转。`mirrored_edge_limits_have_not_drifted` 固定核心镜像的 edge 常量。该测试只覆盖 edge 配置编译，不覆盖运行期转发、监听器绑定冲突或证书校验。

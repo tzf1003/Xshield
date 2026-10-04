@@ -20,14 +20,11 @@ use serde_json::json;
 use std::{fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
 use url::Url;
 use xshield_core::{
-    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteHealthCheckConfig,
+    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SiteConfig, SiteHealthCheckConfig,
     SitePolicyConfig,
     admin::ManagementRole,
     domain::SiteId,
-    site::{
-        PublicOrigin, RouteOperation, UpstreamEndpoint,
-        upstream::{parse_upstream_socket, refuse_upstream_socket},
-    },
+    site::upstream::{parse_upstream_socket, refuse_upstream_socket},
 };
 use xshield_postgres::{
     ProtectedSiteApprovalOutcome, ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
@@ -426,6 +423,25 @@ pub struct SiteConfigRequest {
     status: String,
     #[serde(default)]
     policy: SitePolicyConfig,
+}
+
+impl SiteConfigRequest {
+    fn to_config(&self) -> SiteConfig {
+        SiteConfig {
+            display_name: self.display_name.clone(),
+            public_origin: self.public_origin.clone(),
+            upstream_address: self.upstream_address.clone(),
+            upstream_server_name: self.upstream_server_name.clone(),
+            upstream_tls: self.upstream_tls,
+            listen_port: self.listen_port,
+            entry_path: self.entry_path.clone(),
+            security_entry: self.security_entry.clone(),
+            sensor_enabled: self.sensor_enabled,
+            policy_revision: self.policy_revision.clone(),
+            status: self.status.clone(),
+            policy: self.policy.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1014,7 +1030,7 @@ pub async fn validate_handler(
         status: record.status().to_owned(),
         policy: record.policy().clone(),
     };
-    let valid = validate_request(&payload).is_ok();
+    let valid = validate_request(&payload, &site_id).is_ok();
     let reason_code = if valid {
         "CONTROL_SITE_VALIDATED"
     } else {
@@ -2456,7 +2472,7 @@ async fn write_site_handler(
             .await
             .into_response();
     }
-    if let Err(reason) = validate_request(&payload) {
+    if let Err(reason) = validate_request(&payload, &site_id) {
         return control
             .audited_error_async(
                 request_id,
@@ -2919,84 +2935,43 @@ fn validate_upstream_destination(
     Ok(())
 }
 
-fn validate_request(request: &SiteConfigRequest) -> Result<(), &'static str> {
-    validate_request_with(request, loopback_upstream_allowed())
+/// Maps a core validation failure to the stable control reason code.
+fn validation_reason(field: &str) -> &'static str {
+    if field.starts_with("upstream") {
+        "CONTROL_SITE_UPSTREAM_INVALID"
+    } else if field.starts_with("site_policy") {
+        "CONTROL_SITE_POLICY_INVALID"
+    } else if field == "site_id" {
+        "CONTROL_SITE_ID_INVALID"
+    } else {
+        "CONTROL_SITE_CONFIG_REQUEST_INVALID"
+    }
+}
+
+/// Validates a request for `site_id` under the deployment's network policy.
+///
+/// Everything that does not depend on the deployment lives in
+/// [`SiteConfig::validate_for_site`], the single definition the edge compiler
+/// is held to by the gateway parity test; this adds only the destination
+/// rules, which depend on the loopback opt-in.
+fn validate_request(request: &SiteConfigRequest, site_id: &SiteId) -> Result<(), &'static str> {
+    validate_request_with(request, site_id, loopback_upstream_allowed())
 }
 
 fn validate_request_with(
     request: &SiteConfigRequest,
+    site_id: &SiteId,
     allow_loopback: bool,
 ) -> Result<(), &'static str> {
-    let public =
-        Url::parse(&request.public_origin).map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?;
-    let public_loopback = public.host().is_some_and(|host| match host {
-        url::Host::Domain(name) => name == "localhost",
-        url::Host::Ipv4(ip) => ip.is_loopback(),
-        url::Host::Ipv6(ip) => ip.is_loopback(),
-    });
-    if public.host().is_none()
-        || !public.username().is_empty()
-        || public.password().is_some()
-        || (public.scheme() != "https" && !public_loopback)
-        || !matches!(public.path(), "" | "/")
-        || public.query().is_some()
-        || public.fragment().is_some()
-    {
-        return Err("CONTROL_SITE_CONFIG_REQUEST_INVALID");
-    }
-    if public.scheme() == "https" && PublicOrigin::parse(request.public_origin.clone()).is_err() {
-        return Err("CONTROL_SITE_CONFIG_REQUEST_INVALID");
-    }
-    UpstreamEndpoint::parse(
-        request.upstream_address.clone(),
-        request.upstream_server_name.clone(),
-        request.upstream_tls,
-    )
-    .map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
+    request
+        .to_config()
+        .validate_for_site(site_id)
+        .map_err(|error| validation_reason(error.field()))?;
     validate_upstream_destination(
         &request.upstream_address,
         &request.upstream_server_name,
         allow_loopback,
-    )?;
-    if request.display_name.is_empty()
-        || request.display_name.len() > 128
-        || request.display_name.trim() != request.display_name
-        || request.display_name.chars().any(char::is_control)
-        || (request.listen_port != 0 && !(6100..=65535).contains(&request.listen_port))
-        || !request
-            .upstream_server_name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-        || !matches!(
-            request.security_entry.as_str(),
-            "public" | "authenticated_root" | "ui_action_required"
-        )
-        || !matches!(request.status.as_str(), "draft" | "active" | "paused")
-        || !request.entry_path.starts_with('/')
-        || request.entry_path.contains(['?', '#'])
-        || request.policy_revision.is_empty()
-        || request.policy_revision.len() > 128
-        || !request
-            .policy_revision
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return Err("CONTROL_SITE_CONFIG_REQUEST_INVALID");
-    }
-    let security_entry = SecurityEntry::parse(&request.security_entry)
-        .map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?;
-    RouteOperation::new(
-        "protected.entry",
-        "GET",
-        request.entry_path.clone(),
-        security_entry,
     )
-    .map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?;
-    request
-        .policy
-        .validate()
-        .map_err(|_| "CONTROL_SITE_POLICY_INVALID")?;
-    Ok(())
 }
 
 fn requires_policy_approval(
@@ -3135,51 +3110,9 @@ fn decode_hex_key(value: &str) -> Option<[u8; 32]> {
     Some(key)
 }
 
-fn view(
-    control: &ControlPlane,
-    site_id: &SiteId,
-    record: &xshield_postgres::ProtectedSiteConfigRecord,
-) -> SiteConfigView {
-    let policy = effective_policy(record);
-    let operations = policy
-        .routes
-        .iter()
-        .map(gateway_operation)
-        .collect::<Vec<_>>();
-    let mut gateway_config = json!({
-        "listen": format!("127.0.0.1:{}", record.listen_port()),
-        "origin": { "address": record.upstream_address(), "server_name": record.upstream_server_name(), "tls": record.upstream_tls() },
-        "tenant_id": control.config.tenant_id.as_str(),
-        "site_id": site_id.as_str(),
-        "policy_revision": record.policy_revision(),
-        "site_policy": policy.clone(),
-        "audit": { "directory": format!("target/xshield-audit-{}", site_id.as_str()), "key_id": "deployment-managed", "producer_id": format!("edge-{}", site_id.as_str()), "max_bytes": 16_777_216_u64, "high_watermark_bytes": 12_582_912_u64, "segment_max_bytes": 4_194_304_u64 },
-        "operations": operations
-    });
-    if let Some(object) = gateway_config.as_object_mut() {
-        if policy.identity.enabled || record.security_entry() != "public" || record.sensor_enabled()
-        {
-            object.insert(
-                "identity_store".to_owned(),
-                json!({
-                    "max_connections": 8,
-                    "acquire_timeout_ms": 2000,
-                    "anonymous_session_ttl_seconds": policy.identity.session_ttl_seconds,
-                    "max_active_anonymous_sessions": 100_000,
-                    "anonymous_session_rate_window_seconds": 60,
-                    "max_anonymous_session_creations_per_source": 10,
-                    "max_anonymous_session_creations_per_site": 1000
-                }),
-            );
-        }
-        if record.sensor_enabled() {
-            object.insert(
-            "sensor".to_owned(),
-            json!({ "origin": record.public_origin(), "build_ref": "0000000000000000000000000000000000000000000000000000000000000000", "heartbeat_seconds": 15 }),
-        );
-        }
-    }
-    SiteConfigView {
+/// The typed configuration stored in one persisted row.
+fn config_of(record: &xshield_postgres::ProtectedSiteConfigRecord) -> SiteConfig {
+    SiteConfig {
         display_name: record.display_name().to_owned(),
         public_origin: record.public_origin().to_owned(),
         upstream_address: record.upstream_address().to_owned(),
@@ -3191,74 +3124,36 @@ fn view(
         sensor_enabled: record.sensor_enabled(),
         policy_revision: record.policy_revision().to_owned(),
         status: record.status().to_owned(),
-        policy,
+        policy: record.policy().clone(),
+    }
+}
+
+fn view(
+    control: &ControlPlane,
+    site_id: &SiteId,
+    record: &xshield_postgres::ProtectedSiteConfigRecord,
+) -> SiteConfigView {
+    let config = config_of(record);
+    SiteConfigView {
+        display_name: config.display_name.clone(),
+        public_origin: config.public_origin.clone(),
+        upstream_address: config.upstream_address.clone(),
+        upstream_server_name: config.upstream_server_name.clone(),
+        upstream_tls: config.upstream_tls,
+        listen_port: config.listen_port,
+        entry_path: config.entry_path.clone(),
+        security_entry: config.security_entry.clone(),
+        sensor_enabled: config.sensor_enabled,
+        policy_revision: config.policy_revision.clone(),
+        status: config.status.clone(),
+        policy: config.effective_policy(),
         revision: record.revision(),
         config_digest: hex(record.config_digest()),
         updated_by: record.updated_by().to_owned(),
         created_at: record.created_at().to_rfc3339(),
         updated_at: record.updated_at().to_rfc3339(),
-        gateway_config,
+        gateway_config: config.gateway_config(control.config.tenant_id.as_str(), site_id),
     }
-}
-
-fn effective_policy(record: &xshield_postgres::ProtectedSiteConfigRecord) -> SitePolicyConfig {
-    let mut policy = record.policy().clone();
-    if policy.routes.is_empty() {
-        policy.routes.push(xshield_core::SiteRouteConfig {
-            operation_id: "protected.entry".to_owned(),
-            method: "GET".to_owned(),
-            path: record.entry_path().to_owned(),
-            security_entry: xshield_core::SecurityEntry::parse(record.security_entry())
-                .unwrap_or(xshield_core::SecurityEntry::UiActionRequired),
-            source_action: (record.security_entry() == "ui_action_required")
-                .then(|| "protected.entry".to_owned()),
-            resource_type: None,
-            view_profile: None,
-            resource_query_parameter: None,
-            resource_path_parameter: None,
-            request_crypto: None,
-            response_crypto: None,
-            response_mode: String::new(),
-            max_response_bytes: 1_048_576,
-        });
-    }
-    policy
-}
-
-fn gateway_operation(route: &xshield_core::SiteRouteConfig) -> serde_json::Value {
-    let admission = match route.security_entry {
-        xshield_core::SecurityEntry::Public => "PUBLIC",
-        xshield_core::SecurityEntry::AuthenticatedRoot => "AUTHENTICATED_ROOT",
-        xshield_core::SecurityEntry::UiActionRequired => "UI_ACTION_REQUIRED",
-    };
-    let mut operation = json!({
-        "operation_id": route.operation_id,
-        "method": route.method,
-        "path": route.path,
-        "admission": admission,
-        "source_action": route.source_action,
-        "resource_type": route.resource_type,
-        "view_profile": route.view_profile,
-        "resource_query_parameter": route.resource_query_parameter,
-        "resource_path_parameter": route.resource_path_parameter,
-    });
-    if let Some(request_crypto) = &route.request_crypto {
-        operation["request_crypto"] = serde_json::to_value(request_crypto)
-            .unwrap_or_else(|_| json!({ "mode": "OBSERVE", "adapter_revision": "invalid" }));
-    }
-    if route.response_crypto.is_some() || !route.response_mode.is_empty() {
-        let mode = if route.response_mode.is_empty() {
-            "BUFFERED_JSON"
-        } else {
-            route.response_mode.as_str()
-        };
-        let mut response = json!({ "mode": mode, "max_bytes": route.max_response_bytes });
-        if let Some(crypto) = &route.response_crypto {
-            response["crypto"] = serde_json::to_value(crypto).unwrap_or_else(|_| json!({}));
-        }
-        operation["response"] = response;
-    }
-    operation
 }
 
 #[allow(clippy::format_collect)]
@@ -3279,6 +3174,10 @@ mod tests {
         GatewayApplyAck, GatewayApplyRequest, SecurityEntry, SiteRequestCrypto, SiteRouteConfig,
         domain::SiteId,
     };
+
+    fn site() -> SiteId {
+        SiteId::parse("site_a").unwrap()
+    }
 
     fn request() -> SiteConfigRequest {
         SiteConfigRequest {
@@ -3301,30 +3200,30 @@ mod tests {
     #[test]
     fn site_config_rejects_non_tls_public_origins() {
         let mut value = request();
-        assert!(validate_request(&value).is_ok());
+        assert!(validate_request(&value, &site()).is_ok());
         value.public_origin = "http://public.example".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
     }
 
     #[test]
     fn site_config_rejects_ambiguous_public_host_and_revision_text() {
         let mut value = request();
         value.public_origin = "https://public_example.com".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value = request();
         value.policy_revision = "policy version 2".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
     }
 
     #[test]
     fn site_config_rejects_metadata_and_link_local_upstreams() {
         let mut value = request();
         value.upstream_address = "127.0.0.1:9000".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value.upstream_address = "169.254.169.254:80".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value.upstream_address = "metadata.google.internal:80".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
     }
 
     /// Every address below reaches an internal, special-purpose or
@@ -3374,7 +3273,7 @@ mod tests {
             let mut value = request();
             value.upstream_address = address.to_owned();
             assert_eq!(
-                validate_request_with(&value, false),
+                validate_request_with(&value, &site(), false),
                 Err("CONTROL_SITE_SSRF_BLOCKED"),
                 "{address} must be refused as an internal upstream"
             );
@@ -3406,7 +3305,7 @@ mod tests {
             value.upstream_address = address.to_owned();
             value.upstream_tls = tls;
             assert_eq!(
-                validate_request_with(&value, false),
+                validate_request_with(&value, &site(), false),
                 Ok(()),
                 "{address} tls={tls} is a public upstream"
             );
@@ -3417,9 +3316,9 @@ mod tests {
     fn site_config_loopback_opt_in_allows_only_loopback() {
         let mut value = request();
         value.upstream_address = "127.0.0.1:9000".to_owned();
-        assert_eq!(validate_request_with(&value, true), Ok(()));
+        assert_eq!(validate_request_with(&value, &site(), true), Ok(()));
         value.upstream_address = "[::1]:9000".to_owned();
-        assert_eq!(validate_request_with(&value, true), Ok(()));
+        assert_eq!(validate_request_with(&value, &site(), true), Ok(()));
         // The opt-in is for the local lab only; it never unlocks private,
         // metadata, mapped or translated destinations.
         for address in [
@@ -3431,7 +3330,7 @@ mod tests {
         ] {
             value.upstream_address = address.to_owned();
             assert_eq!(
-                validate_request_with(&value, true),
+                validate_request_with(&value, &site(), true),
                 Err("CONTROL_SITE_SSRF_BLOCKED"),
                 "{address} stays blocked even with the loopback opt-in"
             );
@@ -3458,7 +3357,7 @@ mod tests {
             let mut value = request();
             value.upstream_server_name = name.to_owned();
             assert_eq!(
-                validate_request_with(&value, false),
+                validate_request_with(&value, &site(), false),
                 Err("CONTROL_SITE_UPSTREAM_INVALID"),
                 "{name} is not a DNS name"
             );
@@ -3466,7 +3365,11 @@ mod tests {
         for name in ["origin.local", "juice.lab", "a-b.example.test", "localhost"] {
             let mut value = request();
             value.upstream_server_name = name.to_owned();
-            assert_eq!(validate_request_with(&value, false), Ok(()), "{name}");
+            assert_eq!(
+                validate_request_with(&value, &site(), false),
+                Ok(()),
+                "{name}"
+            );
         }
     }
 
@@ -3635,18 +3538,18 @@ mod tests {
     fn site_config_keeps_listeners_inside_the_private_edge_pool() {
         let mut value = request();
         value.listen_port = 6099;
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value.listen_port = 6100;
-        assert!(validate_request(&value).is_ok());
+        assert!(validate_request(&value, &site()).is_ok());
     }
 
     #[test]
     fn site_config_rejects_ambiguous_entry_paths() {
         let mut value = request();
         value.entry_path = "/../admin".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value.entry_path = "/admin\\panel".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
     }
 
     #[test]

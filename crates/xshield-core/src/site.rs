@@ -7,7 +7,10 @@ use crate::domain::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub mod config;
 pub mod upstream;
+
+pub use config::SiteConfig;
 
 /// An internal edge listener port.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -638,82 +641,14 @@ impl SitePolicyConfig {
                         .map_err(|_| InvalidValue::new("site_policy.route"))?;
                 }
             }
-            if route_config.source_action.is_some()
-                && route_config
-                    .source_action
-                    .as_ref()
-                    .is_some_and(|v| v.len() > 128)
-                || route_config
-                    .resource_type
-                    .as_ref()
-                    .is_some_and(|v| v.len() > 128)
-                || route_config
-                    .view_profile
-                    .as_ref()
-                    .is_some_and(|v| v.len() > 128)
-                || route_config
-                    .resource_query_parameter
-                    .as_ref()
-                    .is_some_and(|v| v.len() > 128)
-                || route_config
-                    .resource_path_parameter
-                    .as_ref()
-                    .is_some_and(|v| v.len() > 128)
-                || route_config.max_response_bytes == 0
-                || route_config.max_response_bytes > self.limits.max_response_body_bytes
-                || !matches!(
-                    route_config.response_mode.as_str(),
-                    "" | "BUFFERED_JSON" | "SENSOR_HTML"
-                )
-                || route_config.response_crypto.as_ref().is_some_and(|crypto| {
-                    crypto.mode != "DIRECT_ENCRYPT"
-                        || crypto.adapter_revision.is_empty()
-                        || crypto.adapter_revision.len() > 128
-                        || crypto.key_id.is_empty()
-                        || crypto.key_id.len() > 128
-                        || crypto.key_not_before >= crypto.key_expires_at
-                        || !(1..=3_600).contains(&crypto.message_ttl_seconds)
-                        || crypto.max_envelope_bytes < route_config.max_response_bytes
-                })
-                || route_config
-                    .request_crypto
-                    .as_ref()
-                    .is_some_and(|crypto| match crypto {
-                        SiteRequestCrypto::DirectDecrypt {
-                            adapter_revision,
-                            key_id,
-                            key_not_before,
-                            key_expires_at,
-                            max_envelope_bytes,
-                            max_plaintext_bytes,
-                            max_message_age_seconds,
-                            max_future_skew_seconds,
-                            max_active_messages,
-                        } => {
-                            adapter_revision.is_empty()
-                                || adapter_revision.len() > 128
-                                || key_id.is_empty()
-                                || key_id.len() > 128
-                                || key_not_before >= key_expires_at
-                                || *max_envelope_bytes == 0
-                                || *max_envelope_bytes > 65_536
-                                || *max_envelope_bytes > self.limits.max_request_body_bytes
-                                || *max_plaintext_bytes == 0
-                                || *max_plaintext_bytes > self.limits.max_request_body_bytes
-                                || *max_message_age_seconds == 0
-                                || *max_message_age_seconds > 86_400
-                                || *max_future_skew_seconds > 300
-                                || *max_active_messages == 0
-                                || *max_active_messages > 1_000_000
-                        }
-                        SiteRequestCrypto::Observe { adapter_revision } => {
-                            adapter_revision.is_empty() || adapter_revision.len() > 128
-                        }
-                    })
+            if !route_field_bounds_hold(route_config, &self.limits)
+                || !route_response_contract_holds(route_config)
+                || !route_request_crypto_contract_holds(route_config, &self.limits)
             {
                 return Err(InvalidValue::new("site_policy.route"));
             }
         }
+        validate_route_set(&self.routes)?;
         if self.waf.blocked_headers.len() > 64
             || self.waf.blocked_headers.iter().any(|header| {
                 header.is_empty()
@@ -824,12 +759,197 @@ impl SitePolicyConfig {
     }
 }
 
+/// Namespace the edge serves itself (sensor assets, bootstrap, preparation).
+const EDGE_INTERNAL_PATH_PREFIX: &str = "/__xshield/";
+/// The edge compiles at most this many `{parameter}` routes per site
+/// (`MAX_PATH_RESOURCE_OPERATIONS` in the gateway); pinned by the gateway
+/// parity test.
+pub const EDGE_MAX_PATH_RESOURCE_ROUTES: usize = 64;
+/// Gateway `MAX_BUFFERED_JSON_BYTES`.
+const EDGE_MAX_BUFFERED_JSON_BYTES: usize = 16 * 1024 * 1024;
+/// Gateway `MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES`.
+const EDGE_MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES: usize = EDGE_MAX_BUFFERED_JSON_BYTES * 2 + 4096;
+/// Gateway `MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES`.
+const EDGE_MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
+/// Gateway `MAX_BUFFERED_BODY_IN_FLIGHT_BYTES`.
+const EDGE_MAX_BUFFERED_BODY_IN_FLIGHT_BYTES: usize =
+    EDGE_MAX_BUFFERED_JSON_BYTES * 2 + EDGE_MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES + 4096 + 16;
+
+/// Whether the edge compiler accepts `path` as a route template: printable
+/// ASCII only (no space, control byte, DEL or non-ASCII), no query or fragment
+/// text, and outside the namespace the edge serves itself.
+pub(crate) fn route_path_is_edge_compilable(path: &str) -> bool {
+    path.starts_with('/')
+        && path.bytes().all(|byte| byte.is_ascii_graphic())
+        && !path.contains(['?', '#'])
+        && !path.starts_with(EDGE_INTERNAL_PATH_PREFIX)
+}
+
+/// Scoped identifiers (adapter revisions, key ids) as the edge reads them.
+fn edge_scoped_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn route_field_bounds_hold(route: &SiteRouteConfig, limits: &SiteLimitsConfig) -> bool {
+    [
+        &route.source_action,
+        &route.resource_type,
+        &route.view_profile,
+        &route.resource_query_parameter,
+        &route.resource_path_parameter,
+    ]
+    .iter()
+    .all(|value| value.as_ref().is_none_or(|value| value.len() <= 128))
+        && route.max_response_bytes != 0
+        && route.max_response_bytes <= limits.max_response_body_bytes
+}
+
+/// Response handling the edge can compile from what a route can express.
+fn route_response_contract_holds(route: &SiteRouteConfig) -> bool {
+    // The sensor-rewriting mode needs adapter revision, origin digest and
+    // injection offset, which a route cannot carry, so the edge always rejects
+    // it; buffered JSON is the only expressible mode.
+    if !matches!(route.response_mode.as_str(), "" | "BUFFERED_JSON")
+        || route.max_response_bytes > EDGE_MAX_BUFFERED_JSON_BYTES
+    {
+        return false;
+    }
+    route.response_crypto.as_ref().is_none_or(|crypto| {
+        // The envelope must hold twice the plaintext plus fixed overhead.
+        let minimum_envelope = route
+            .max_response_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(1_024));
+        let in_flight = route
+            .max_response_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(crypto.max_envelope_bytes))
+            .and_then(|bytes| bytes.checked_add(4_096 + 16));
+        crypto.mode == "DIRECT_ENCRYPT"
+            && edge_scoped_value(&crypto.adapter_revision)
+            && edge_scoped_value(&crypto.key_id)
+            && crypto.key_not_before < crypto.key_expires_at
+            && (1..=3_600).contains(&crypto.message_ttl_seconds)
+            && minimum_envelope.is_some_and(|minimum| crypto.max_envelope_bytes >= minimum)
+            && crypto.max_envelope_bytes <= EDGE_MAX_ENCRYPTED_RESPONSE_ENVELOPE_BYTES
+            && in_flight.is_some_and(|bytes| bytes <= EDGE_MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)
+    })
+}
+
+/// Request-body handling the edge can compile.
+fn route_request_crypto_contract_holds(route: &SiteRouteConfig, limits: &SiteLimitsConfig) -> bool {
+    let Some(crypto) = route.request_crypto.as_ref() else {
+        return true;
+    };
+    // Only bodies can be decrypted or observed, never for UI-sourced
+    // operations, whose authority comes from the page action instead.
+    if !matches!(route.method.as_str(), "POST" | "PUT" | "PATCH")
+        || route.security_entry == SecurityEntry::UiActionRequired
+    {
+        return false;
+    }
+    match crypto {
+        // Observing a request while rewriting its response is unsupported.
+        SiteRequestCrypto::Observe { adapter_revision } => {
+            route.response_crypto.is_none() && edge_scoped_value(adapter_revision)
+        }
+        SiteRequestCrypto::DirectDecrypt {
+            adapter_revision,
+            key_id,
+            key_not_before,
+            key_expires_at,
+            max_envelope_bytes,
+            max_plaintext_bytes,
+            max_message_age_seconds,
+            max_future_skew_seconds,
+            max_active_messages,
+        } => {
+            edge_scoped_value(adapter_revision)
+                && edge_scoped_value(key_id)
+                && key_not_before < key_expires_at
+                && (1..=EDGE_MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES).contains(max_envelope_bytes)
+                && *max_envelope_bytes <= limits.max_request_body_bytes
+                && *max_plaintext_bytes != 0
+                // Validated plaintext must fit in half the envelope.
+                && *max_plaintext_bytes <= *max_envelope_bytes / 2
+                && *max_plaintext_bytes <= limits.max_request_body_bytes
+                && (1..=3_600).contains(max_message_age_seconds)
+                && *max_future_skew_seconds <= 300
+                && (1..=1_000_000).contains(max_active_messages)
+        }
+    }
+}
+
+/// Cross-route rules of the edge compiler: unambiguous matching, a bounded
+/// number of `{parameter}` routes and one key per direction.
+fn validate_route_set(routes: &[SiteRouteConfig]) -> Result<(), InvalidValue> {
+    let invalid = || InvalidValue::new("site_policy.routes");
+    // `(method, fixed prefix)` of every `{parameter}` route. The prefix is what
+    // the edge matches: a final segment after it, non-empty, without a slash.
+    let path_resources = routes
+        .iter()
+        .filter_map(|route| {
+            let parameter = route.resource_path_parameter.as_ref()?;
+            let prefix = route.path.strip_suffix(&format!("{{{parameter}}}"))?;
+            Some((route.method.as_str(), prefix))
+        })
+        .collect::<Vec<_>>();
+    if path_resources.len() > EDGE_MAX_PATH_RESOURCE_ROUTES {
+        return Err(invalid());
+    }
+    for (index, (method, prefix)) in path_resources.iter().enumerate() {
+        // Two routes with one method and prefix are the same route matched
+        // twice, whatever the parameter is called.
+        if path_resources[index + 1..]
+            .iter()
+            .any(|(other_method, other_prefix)| other_method == method && other_prefix == prefix)
+        {
+            return Err(invalid());
+        }
+        // A fixed-path route (including query-resource routes) that a
+        // `{parameter}` route of the same method also matches is shadowed.
+        if routes.iter().any(|route| {
+            route.resource_path_parameter.is_none()
+                && route.method == *method
+                && route
+                    .path
+                    .strip_prefix(prefix)
+                    .is_some_and(|segment| !segment.is_empty() && !segment.contains('/'))
+        }) {
+            return Err(invalid());
+        }
+    }
+    // One decryption key and one encryption key per site, never shared.
+    let request_keys = routes
+        .iter()
+        .filter_map(|route| match &route.request_crypto {
+            Some(SiteRequestCrypto::DirectDecrypt { key_id, .. }) => Some(key_id.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let response_keys = routes
+        .iter()
+        .filter_map(|route| route.response_crypto.as_ref())
+        .map(|crypto| crypto.key_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if request_keys.len() > 1
+        || response_keys.len() > 1
+        || !request_keys.is_disjoint(&response_keys)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 fn validate_site_route_path(route: &SiteRouteConfig) -> Result<String, InvalidValue> {
     let path = route.path.as_str();
     if path.is_empty()
         || path.len() > 256
-        || !path.starts_with('/')
-        || path.contains(['?', '#'])
+        || !route_path_is_edge_compilable(path)
         || path
             .bytes()
             .any(|byte| byte.is_ascii_control() || byte == b'\\')
@@ -1173,5 +1293,194 @@ mod tests {
         assert!(!policy.allows_static_asset("GET", "/a/b/c/d/e/f/style.css"));
         assert!(!policy.allows_static_asset("POST", "/chunk.js"));
         assert!(!policy.allows_static_asset("GET", "/api/users"));
+    }
+
+    fn route(id: &str, method: &str, path: &str) -> SiteRouteConfig {
+        SiteRouteConfig {
+            operation_id: id.to_owned(),
+            method: method.to_owned(),
+            path: path.to_owned(),
+            security_entry: SecurityEntry::Public,
+            source_action: None,
+            resource_type: None,
+            view_profile: None,
+            resource_query_parameter: None,
+            resource_path_parameter: None,
+            request_crypto: None,
+            response_crypto: None,
+            response_mode: String::new(),
+            max_response_bytes: 1_048_576,
+        }
+    }
+
+    fn orders(id: &str, path: &str, parameter: &str) -> SiteRouteConfig {
+        let mut route = route(id, "GET", path);
+        route.security_entry = SecurityEntry::UiActionRequired;
+        route.source_action = Some(format!("{id}.open"));
+        route.resource_type = Some("orders".to_owned());
+        route.view_profile = Some("summary".to_owned());
+        route.resource_path_parameter = Some(parameter.to_owned());
+        route
+    }
+
+    fn policy_of(routes: Vec<SiteRouteConfig>) -> SitePolicyConfig {
+        SitePolicyConfig {
+            routes,
+            ..SitePolicyConfig::default()
+        }
+    }
+
+    /// The edge compiler refuses these paths, so one site holding such a route
+    /// used to make every apply for the tenant fail with 422.
+    #[test]
+    fn route_paths_must_be_printable_ascii_outside_the_edge_namespace() {
+        for path in [
+            "/search results",
+            "/caf\u{e9}",
+            "/__xshield/v1/bootstrap",
+            "/__xshield/",
+            "/a\u{7f}b",
+            "/a\tb",
+        ] {
+            assert!(
+                policy_of(vec![route("a", "GET", path)]).validate().is_err(),
+                "{path:?}"
+            );
+        }
+        for path in [
+            "/",
+            "/a%20b",
+            "/__xshield",
+            "/__xshield_x/y",
+            "/__XSHIELD/x",
+        ] {
+            assert!(
+                policy_of(vec![route("a", "GET", path)]).validate().is_ok(),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_resource_routes_may_not_collide_or_shadow() {
+        let ok = |routes| policy_of(routes).validate().is_ok();
+        let one = || orders("o1", "/orders/{order_id}", "order_id");
+        assert!(ok(vec![one()]));
+        // The parameter's name does not make a second route on the same prefix
+        // a different route.
+        assert!(!ok(vec![one(), orders("o2", "/orders/{id}", "id")]));
+        assert!(!ok(vec![route("n", "GET", "/orders/new"), one()]));
+        assert!(!ok(vec![one(), route("n", "GET", "/orders/new")]));
+        // Not matched by the resource route: other method, empty final
+        // segment, deeper path, other prefix.
+        assert!(ok(vec![route("n", "POST", "/orders/new"), one()]));
+        assert!(ok(vec![route("n", "GET", "/orders/"), one()]));
+        assert!(ok(vec![route("n", "GET", "/orders/new/x"), one()]));
+        assert!(ok(vec![route("n", "GET", "/order/new"), one()]));
+    }
+
+    #[test]
+    fn at_most_the_edge_limit_of_path_resource_routes_is_accepted() {
+        let routes = |count: usize| {
+            (0..count)
+                .map(|index| {
+                    orders(
+                        &format!("r{index}"),
+                        &format!("/r{index}/{{order_id}}"),
+                        "order_id",
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            policy_of(routes(EDGE_MAX_PATH_RESOURCE_ROUTES))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            policy_of(routes(EDGE_MAX_PATH_RESOURCE_ROUTES + 1))
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn crypto_must_fit_what_the_edge_can_compile() {
+        let post = |id: &str| route(id, "POST", &format!("/{id}"));
+        let observe = |revision: &str| SiteRequestCrypto::Observe {
+            adapter_revision: revision.to_owned(),
+        };
+        let valid = |route: SiteRouteConfig| policy_of(vec![route]).validate().is_ok();
+
+        let mut route = post("a");
+        route.request_crypto = Some(observe("observe-v1"));
+        assert!(valid(route.clone()));
+        route.method = "GET".to_owned();
+        assert!(!valid(route.clone()), "no body to observe");
+        route.method = "POST".to_owned();
+        route.request_crypto = Some(observe("bad revision"));
+        assert!(!valid(route.clone()), "scoped values have no spaces");
+        route.request_crypto = Some(observe("observe-v1"));
+        route.security_entry = SecurityEntry::UiActionRequired;
+        route.source_action = Some("a.open".to_owned());
+        assert!(!valid(route), "UI-sourced operations are not encrypted");
+
+        let response = |envelope: usize| {
+            let mut route = post("b");
+            route.response_crypto = Some(SiteResponseCrypto {
+                mode: "DIRECT_ENCRYPT".to_owned(),
+                adapter_revision: "rev-1".to_owned(),
+                key_id: "key-r".to_owned(),
+                key_not_before: 1,
+                key_expires_at: 2,
+                message_ttl_seconds: 60,
+                max_envelope_bytes: envelope,
+            });
+            route
+        };
+        assert!(!valid(response(1_048_576 * 2 + 1_023)));
+        assert!(valid(response(1_048_576 * 2 + 1_024)));
+
+        let mut sensor = post("c");
+        sensor.response_mode = "SENSOR_HTML".to_owned();
+        assert!(!valid(sensor), "adapter metadata cannot be expressed");
+    }
+
+    #[test]
+    fn one_key_per_direction_and_never_shared() {
+        let decrypting = |id: &str, key: &str| {
+            let mut route = route(id, "POST", &format!("/{id}"));
+            route.request_crypto = Some(SiteRequestCrypto::DirectDecrypt {
+                adapter_revision: "rev-1".to_owned(),
+                key_id: key.to_owned(),
+                key_not_before: 1,
+                key_expires_at: 2,
+                max_envelope_bytes: 8_192,
+                max_plaintext_bytes: 4_096,
+                max_message_age_seconds: 60,
+                max_future_skew_seconds: 5,
+                max_active_messages: 10,
+            });
+            route
+        };
+        let encrypting = |id: &str, key: &str| {
+            let mut route = route(id, "POST", &format!("/{id}"));
+            route.response_crypto = Some(SiteResponseCrypto {
+                mode: "DIRECT_ENCRYPT".to_owned(),
+                adapter_revision: "rev-1".to_owned(),
+                key_id: key.to_owned(),
+                key_not_before: 1,
+                key_expires_at: 2,
+                message_ttl_seconds: 60,
+                max_envelope_bytes: 4_194_304,
+            });
+            route
+        };
+        let ok = |routes| policy_of(routes).validate().is_ok();
+        assert!(ok(vec![decrypting("a", "k1"), decrypting("b", "k1")]));
+        assert!(!ok(vec![decrypting("a", "k1"), decrypting("b", "k2")]));
+        assert!(!ok(vec![encrypting("a", "k1"), encrypting("b", "k2")]));
+        assert!(!ok(vec![decrypting("a", "k1"), encrypting("b", "k1")]));
+        assert!(ok(vec![decrypting("a", "k1"), encrypting("b", "k2")]));
     }
 }

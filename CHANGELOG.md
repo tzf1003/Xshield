@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 修复控制面校验接受 edge 编译器会拒绝的站点配置：edge 快照整体替换，一个站点含有空格或非 ASCII 路由路径、保留的 `/__xshield/` 前缀、同前缀的两条 `{param}` 路由、被 `{param}` 路由遮蔽的固定路由、超过 64 条 `{param}` 路由，或越界的请求/响应 crypto 参数、`SENSOR_HTML` 响应模式、IPv6 公开 origin、过长站点 ID、超过 5940 秒的匿名会话 TTL，就会让整个租户所有站点的 apply 返回 422。`xshield-core` 新增 `SiteConfig`（含 `validate`、有效策略与 edge 配置投影，由 control 视图直接复用），`SitePolicyConfig::validate` 拒绝 edge 会拒绝的一切；`xshield-gateway` 新增 `site_config_parity` 测试，把每个样本和数万个确定性组合经同一投影送入真实 edge 编译器，核心接受而 edge 拒绝即构建失败。控制面生成的 edge 配置随之修正：身份存储按有效路由实际需要输出，匿名会话创建速率随 TTL 缩放，sensor origin 去除末尾斜杠。
+
 - 修复站点上游 SSRF 防护绕过：`Url::host_str()` 给 IPv6 加方括号，文本 IP 检查对 `[::1]`、`[fd00::1]`、`[fe80::1]`、`[::ffff:127.0.0.1]`、`[::ffff:169.254.169.254]` 从未命中，Observer 的 `GET /health` 曾借 `[::ffff:127.0.0.1]:PORT` 让控制面向回环监听器发送 `GET /secret-internal-path`；IP 字面量 `upstream_server_name`（如 `127.0.0.1`）加公网地址曾使探测连接 `127.0.0.1:80`，探测也忽略配置端口。现在上游地址按类型化套接字解析，保存与探测连接前由 `xshield_core::site::upstream` 按数值分类，拒绝回环、私网、共享地址、链路本地、唯一本地、组播、保留/文档段、云元数据以及 IPv4 映射、NAT64、6to4、Teredo；服务名必须被 URL 解析器读成域名；探测固定到已验证套接字和配置端口、不使用环境代理、不跟随重定向。`8.8.8.8:80`（http）与 `:443`（https）此前因 `Url::port()` 对默认端口返回空而被误拒，现在合法。`XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1` 仍只为本地靶场放行 `127.0.0.0/8` 与 `::1`。
 
 - 修复管理审计发布器拒收控制面已产生的事件：`console.workbench.overview.read`、`console.site.config.approve`、API Key 管理/使用和导出全族（`console.export.read`、`export.requested/approved/denied/downloaded`）此前不在发布矩阵中，任何一次调用都会使所在 journal segment 无法发布并阻断其后的管理历史。发布器现按固定路径、强类型 `target_export_id`、成功原因码和下载证据绑定校验这些事件；新增 `scripts/check_audit_event_coverage.py` 并接入 CI，让控制面新增端点缺少发布矩阵项时直接失败。工作台改为展示真实的 edge 探测、edge 审计屏障状态和最近一次持久化的上游健康观察（各带观察时间），不再把每个来源写死为不可用；edge 健康接口不再硬编码 `audit_state=healthy`。
