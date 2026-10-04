@@ -513,7 +513,7 @@ mod tests {
             ("sensor", |c| c.sensor_enabled = true, vec![SensorChanged]),
             (
                 "static asset depth",
-                |c| c.policy.static_asset_max_path_depth = 0,
+                |c| c.policy.static_asset_max_path_depth = 3,
                 vec![StaticAssetPolicyChanged],
             ),
             (

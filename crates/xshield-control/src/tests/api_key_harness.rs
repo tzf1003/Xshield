@@ -116,6 +116,49 @@ fn replace_access_journal(fixture: &mut Fixture, max_bytes: u64) {
     fixture.access_directory = directory;
 }
 
+/// Signed browser-session assertion for `subject` over the whole `tenant`,
+/// valid for 30 seconds, with CSRF already validated. `assertion_key` is the
+/// control instance's private `auth_context_key`.
+pub(super) fn browser_assertion(
+    assertion_key: &[u8; 32],
+    tenant: &TenantId,
+    subject: &str,
+    roles: &[&str],
+) -> String {
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 30;
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "subject": subject,
+        "tenant_id": tenant.as_str(),
+        "site_id": DEFAULT_SITE,
+        "tenant_scope": true,
+        "machine": false,
+        "scopes": [[tenant.as_str(), DEFAULT_SITE]],
+        "roles": roles,
+        "csrf_valid": true,
+        "expires_at": expires_at,
+    }))
+    .unwrap();
+    let signature = super::super::component_signature(
+        assertion_key,
+        &[b"xshield-control-browser-request-v1", &payload],
+    )
+    .unwrap();
+    let payload_hex: String = payload
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .map(|nibble| char::from(b"0123456789abcdef"[usize::from(nibble)]))
+        .collect();
+    format!(
+        "Xshield-Session {payload_hex}.{}",
+        super::super::lower_hex(&signature)
+    )
+}
+
 impl Harness {
     pub(super) async fn new() -> Self {
         Self::build(None, 256 * 1024 * 1024).await
@@ -179,38 +222,7 @@ impl Harness {
     /// Fresh signed browser-session assertion (30 second lifetime), tenant-wide
     /// like a real OIDC session, with CSRF already validated.
     pub(super) fn browser_header(&self, subject: &str, roles: &[&str]) -> String {
-        let expires_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 30;
-        let payload = serde_json::to_vec(&json!({
-            "version": 1,
-            "subject": subject,
-            "tenant_id": self.tenant.as_str(),
-            "site_id": DEFAULT_SITE,
-            "tenant_scope": true,
-            "machine": false,
-            "scopes": [[self.tenant.as_str(), DEFAULT_SITE]],
-            "roles": roles,
-            "csrf_valid": true,
-            "expires_at": expires_at,
-        }))
-        .unwrap();
-        let signature = super::super::component_signature(
-            &self.assertion_key,
-            &[b"xshield-control-browser-request-v1", &payload],
-        )
-        .unwrap();
-        let payload_hex: String = payload
-            .iter()
-            .flat_map(|byte| [byte >> 4, byte & 0x0f])
-            .map(|nibble| char::from(b"0123456789abcdef"[usize::from(nibble)]))
-            .collect();
-        format!(
-            "Xshield-Session {payload_hex}.{}",
-            super::super::lower_hex(&signature)
-        )
+        browser_assertion(&self.assertion_key, &self.tenant, subject, roles)
     }
 
     pub(super) async fn send(&self, request: Request<Body>) -> (StatusCode, Value) {
