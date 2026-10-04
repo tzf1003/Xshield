@@ -18,10 +18,14 @@ mod exports;
 mod identity;
 mod jobs;
 mod ledger_inspection;
+mod management_api_key;
 mod model_call_list;
 mod search;
+mod site_config;
+mod workbench;
 
 pub use identity::{IdentityConfigError, OidcProvider};
+pub use site_config::EdgeApplyClient;
 
 use axum::{
     Extension, Json, Router,
@@ -78,8 +82,8 @@ use xshield_postgres::{
 use xshield_worker::{
     AgentRunSummary, IndexWatermark, ModelCallSummary, PublicationHealth, PublishError,
     PublisherConfig, RequestEventPosition, RequestEvents, RequestSummary,
-    inspect_publication_health, query_agent_run, query_model_call, query_request_events,
-    query_request_summary,
+    inspect_publication_health, query_agent_run, query_local_request_events,
+    query_local_request_summary, query_model_call, query_request_events, query_request_summary,
 };
 use zeroize::Zeroizing;
 
@@ -228,6 +232,15 @@ impl IdempotencyKey {
             .map(Self)
             .ok_or(ControlError::InvalidConfig)
     }
+}
+
+/// Parses the deployment-only HMAC key used to fingerprint management API keys.
+///
+/// # Errors
+/// Returns [`ControlError::InvalidConfig`] when the value is not exactly 32
+/// lowercase hexadecimal bytes.
+pub fn parse_management_api_key_hash_key(value: &str) -> Result<[u8; 32], ControlError> {
+    parse_lower_hex_32(value).ok_or(ControlError::InvalidConfig)
 }
 
 /// Vault-backed port that consumes an already validated evidence capability.
@@ -422,6 +435,7 @@ pub struct ControlConfig {
     publisher: PublisherConfig,
     source_journal_key_id: String,
     limits: ControlLimits,
+    api_key_hash_key: Option<Zeroizing<[u8; 32]>>,
 }
 
 impl ControlConfig {
@@ -462,7 +476,15 @@ impl ControlConfig {
             publisher,
             source_journal_key_id,
             limits,
+            api_key_hash_key: None,
         })
+    }
+
+    /// Installs the dedicated deployment key used to fingerprint Agent API keys.
+    #[must_use]
+    pub fn with_api_key_hash_key(mut self, key: [u8; 32]) -> Self {
+        self.api_key_hash_key = Some(Zeroizing::new(key));
+        self
     }
 }
 
@@ -484,6 +506,7 @@ pub struct ControlPlane {
     test_step_up_valid: bool,
     auth_context_key: Option<Zeroizing<[u8; 32]>>,
     evidence_read: Option<Arc<EvidenceReadPort>>,
+    gateway_apply: Option<Arc<site_config::EdgeApplyClient>>,
     access_journal: Mutex<LocalJournal>,
     unauthenticated_rate: Mutex<RateWindow>,
     rate: Mutex<RateWindow>,
@@ -522,6 +545,7 @@ impl ControlPlane {
             test_step_up_valid: false,
             auth_context_key,
             evidence_read: None,
+            gateway_apply: None,
             access_journal: Mutex::new(access_journal),
         }
     }
@@ -530,6 +554,15 @@ impl ControlPlane {
     #[must_use]
     pub fn with_evidence_read_port(mut self, port: EvidenceReadPort) -> Self {
         self.evidence_read = Some(Arc::new(port));
+        self
+    }
+
+    /// Installs the authenticated internal edge apply port at the composition
+    /// root. Without this optional deployment binding writes remain durable and
+    /// explicitly `pending` until an edge is reachable.
+    #[must_use]
+    pub fn with_edge_apply_client(mut self, client: EdgeApplyClient) -> Self {
+        self.gateway_apply = Some(Arc::new(client));
         self
     }
 
@@ -678,16 +711,9 @@ impl ControlPlane {
                     .await;
             }
         };
-        let Ok(events) = query_request_events(
-            &self.config.publisher,
-            &self.index,
-            &self.config.tenant_id,
-            &self.config.site_id,
-            &target_request_id,
-            after.as_ref(),
-            self.config.limits.max_query_events,
-        )
-        .await
+        let Ok(events) = self
+            .indexed_or_local_events(&target_request_id, after)
+            .await
         else {
             return self
                 .audited_error_async(
@@ -705,6 +731,97 @@ impl ControlPlane {
         };
         self.complete_request_events(request_id, subject, target_request_id, events)
             .await
+    }
+
+    /// Resolves one event page from the analytical index, or from authenticated
+    /// records that are committed locally but not published yet.
+    ///
+    /// An index failure is never reported as an empty page: only a local hit may
+    /// stand in for it, otherwise the original error is returned.
+    async fn indexed_or_local_events(
+        self: &Arc<Self>,
+        target_request_id: &RequestId,
+        after: Option<RequestEventPosition>,
+    ) -> Result<RequestEvents, PublishError> {
+        let indexed = query_request_events(
+            &self.config.publisher,
+            &self.index,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            target_request_id,
+            after.as_ref(),
+            self.config.limits.max_query_events,
+        )
+        .await;
+        if matches!(&indexed, Ok(events) if !events.events.is_empty()) {
+            return indexed;
+        }
+        let lookup_target = target_request_id.clone();
+        let local = self
+            .local_journal_lookup(move |control| {
+                query_local_request_events(
+                    &control.config.publisher,
+                    &control.config.source_journal_key_id,
+                    &control.source_journal_key,
+                    &control.config.tenant_id,
+                    &control.config.site_id,
+                    &lookup_target,
+                    after.as_ref(),
+                    control.config.limits.max_query_events,
+                )
+            })
+            .await;
+        local.map_or(indexed, Ok)
+    }
+
+    /// Same contract as [`Self::indexed_or_local_events`] for the request summary.
+    async fn indexed_or_local_summary(
+        self: &Arc<Self>,
+        target_request_id: &RequestId,
+    ) -> Result<Option<RequestSummary>, PublishError> {
+        let indexed = query_request_summary(
+            &self.config.publisher,
+            &self.index,
+            &self.config.tenant_id,
+            &self.config.site_id,
+            target_request_id,
+        )
+        .await;
+        if matches!(indexed, Ok(Some(_))) {
+            return indexed;
+        }
+        let lookup_target = target_request_id.clone();
+        let local = self
+            .local_journal_lookup(move |control| {
+                query_local_request_summary(
+                    &control.config.publisher,
+                    &control.config.source_journal_key_id,
+                    &control.source_journal_key,
+                    &control.config.tenant_id,
+                    &control.config.site_id,
+                    &lookup_target,
+                )
+            })
+            .await;
+        local.map_or(indexed, |summary| Ok(Some(summary)))
+    }
+
+    /// Reads authenticated records that are committed locally but may not have
+    /// reached the analytical index yet.
+    ///
+    /// The bounded scan performs blocking file I/O and therefore never runs on
+    /// the async executor. `None` covers "no match" and "journal unreadable":
+    /// callers must not treat it as proof that a request does not exist.
+    async fn local_journal_lookup<T: Send + 'static>(
+        self: &Arc<Self>,
+        lookup: impl FnOnce(&Self) -> Result<Option<T>, PublishError> + Send + 'static,
+    ) -> Option<T> {
+        let control = Arc::clone(self);
+        tokio::task::spawn_blocking(move || lookup(&control))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
     }
 
     async fn request_evidence(
@@ -2765,15 +2882,7 @@ impl ControlPlane {
                 )
                 .await;
         };
-        let Ok(summary) = query_request_summary(
-            &self.config.publisher,
-            &self.index,
-            &self.config.tenant_id,
-            &self.config.site_id,
-            &target_request_id,
-        )
-        .await
-        else {
+        let Ok(summary) = self.indexed_or_local_summary(&target_request_id).await else {
             return self
                 .audited_error_async(
                     request_id,
@@ -3321,6 +3430,55 @@ impl ControlPlane {
             .map(|identity| identity.principal.subject().to_owned())
     }
 
+    pub(crate) fn authorize_site(
+        &self,
+        authorization: Option<&str>,
+        request_id: &str,
+        action: AccessAction,
+        site_id: &SiteId,
+    ) -> Result<String, Box<EndpointResult>> {
+        let identity = self.authenticate_request(authorization, request_id, action)?;
+        let principal = &identity.principal;
+        if !principal.authorizes_site(action.role, &self.config.tenant_id, site_id) {
+            return Err(Box::new(self.audited_error(
+                request_id,
+                Some(principal.subject()),
+                action,
+                None,
+                StatusCode::FORBIDDEN,
+                "CONTROL_SCOPE_DENIED",
+                "management operation forbidden",
+                false,
+                "request_scope",
+            )));
+        }
+        Ok(principal.subject().to_owned())
+    }
+
+    pub(crate) fn authorize_tenant(
+        &self,
+        authorization: Option<&str>,
+        request_id: &str,
+        action: AccessAction,
+    ) -> Result<String, Box<EndpointResult>> {
+        let identity = self.authenticate_request(authorization, request_id, action)?;
+        let principal = &identity.principal;
+        if !principal.authorizes_tenant(action.role, &self.config.tenant_id) {
+            return Err(Box::new(self.audited_error(
+                request_id,
+                Some(principal.subject()),
+                action,
+                None,
+                StatusCode::FORBIDDEN,
+                "CONTROL_SCOPE_DENIED",
+                "management operation forbidden",
+                false,
+                "request_scope",
+            )));
+        }
+        Ok(principal.subject().to_owned())
+    }
+
     fn authorize_identity(
         &self,
         authorization: Option<&str>,
@@ -3505,10 +3663,133 @@ impl ControlPlane {
                     principal: self.config.principal.clone(),
                     browser: false,
                     csrf_valid: true,
+                    direct_apply: false,
                 });
             }
         }
         Err(Box::new(unauthorized()))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn authenticate_api_key(
+        &self,
+        value: &str,
+        request_id: &str,
+        action: AccessAction,
+    ) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
+        let unauthorized = || {
+            Box::new(self.audited_error(
+                request_id,
+                None,
+                action,
+                None,
+                StatusCode::UNAUTHORIZED,
+                "CONTROL_API_KEY_INVALID",
+                "management authentication required",
+                false,
+                "authenticate",
+            ))
+        };
+        let Some(key) = self.config.api_key_hash_key.as_deref() else {
+            return Err(unauthorized());
+        };
+        let Some(fingerprint) = component_signature(key, &[value.as_bytes()]).ok() else {
+            return Err(unauthorized());
+        };
+        let scopes = self
+            .catalog
+            .lookup_management_api_key_scopes(&fingerprint, self.config.tenant_id.as_str())
+            .await
+            .map_err(|_| {
+                Box::new(self.audited_error(
+                    request_id,
+                    None,
+                    action,
+                    None,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_API_KEY_UNAVAILABLE",
+                    "management service unavailable",
+                    true,
+                    "retry_later",
+                ))
+            })?;
+        let Some(first) = scopes.first() else {
+            return Err(unauthorized());
+        };
+        let mut roles = std::collections::BTreeSet::new();
+        let direct_apply = scopes
+            .iter()
+            .any(|scope| scope.capability == "site.config.apply_direct");
+        let mut tenant_scope = false;
+        for scope in &scopes {
+            match scope.capability.as_str() {
+                "site.read" | "site.health.read" => {
+                    roles.insert(ManagementRole::Observer);
+                }
+                "site.create" => {
+                    roles.insert(ManagementRole::SystemAdmin);
+                    tenant_scope = true;
+                }
+                "site.config.write" => {
+                    roles.insert(ManagementRole::SystemAdmin);
+                }
+                "site.config.validate" => {
+                    roles.insert(ManagementRole::PolicyAuthor);
+                }
+                "site.config.apply_direct" | "site.rollback" => {
+                    roles.insert(ManagementRole::ReleaseOperator);
+                }
+                _ => {}
+            }
+        }
+        let tenant = TenantId::parse(&first.tenant_id).map_err(|_| unauthorized())?;
+        let site = SiteId::parse(&first.site_id).map_err(|_| unauthorized())?;
+        let principal = if tenant_scope {
+            ManagementPrincipal::new_tenant_scoped(first.subject.clone(), roles, [tenant.clone()])
+                .map_err(|_| unauthorized())?
+                .with_exact_site_scope(tenant.clone(), site.clone())
+        } else {
+            ManagementPrincipal::new(
+                first.subject.clone(),
+                roles,
+                scopes.iter().filter_map(|scope| {
+                    Some((
+                        TenantId::parse(&scope.tenant_id).ok()?,
+                        SiteId::parse(&scope.site_id).ok()?,
+                    ))
+                }),
+            )
+            .map_err(|_| unauthorized())?
+        };
+        if self
+            .append_access_event(
+                request_id,
+                Some(principal.subject()),
+                action,
+                None,
+                "PASS",
+                "CONTROL_API_KEY_AUTHENTICATED",
+            )
+            .is_err()
+        {
+            return Err(Box::new(self.audited_error(
+                request_id,
+                Some(principal.subject()),
+                action,
+                None,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "CONTROL_AUDIT_UNAVAILABLE",
+                "management service unavailable",
+                true,
+                "retry_later",
+            )));
+        }
+        Ok(identity::VerifiedRequestIdentity {
+            principal,
+            browser: false,
+            csrf_valid: true,
+            direct_apply,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3545,6 +3826,7 @@ impl ControlPlane {
             status,
             ErrorResponse {
                 error_code: reason_code,
+                stage: error_stage(reason_code, status),
                 message_safe,
                 request_id: request_id.to_owned(),
                 retryable,
@@ -4007,6 +4289,74 @@ pub fn router(control: ControlPlane) -> Router {
         )
         .route(identity::SESSION_PATH, get(identity::session_handler))
         .route(identity::LOGOUT_PATH, post(identity::logout_handler))
+        .route(
+            management_api_key::PATH,
+            get(management_api_key::list_handler)
+                .post(management_api_key::create_handler)
+                .layer(DefaultBodyLimit::max(32 * 1024)),
+        )
+        .route(
+            "/control/v1/agent-api-keys/{api_key_id}/revoke",
+            post(management_api_key::revoke_handler),
+        )
+        .route(
+            "/control/v1/agent-api-keys/{api_key_id}/rotate",
+            post(management_api_key::rotate_handler).layer(DefaultBodyLimit::max(32 * 1024)),
+        )
+        .route(workbench::PATH, get(workbench::handler))
+        .route(
+            site_config::PATH,
+            get(site_config::read_handler)
+                .put(site_config::write_handler)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            site_config::SITES_PATH,
+            get(site_config::list_handler)
+                .post(site_config::create_handler)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            site_config::SITE_CONFIG_PATH,
+            get(site_config::read_site_path_handler)
+                .put(site_config::write_site_path_handler)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            site_config::SITE_REVISIONS_PATH,
+            get(site_config::revisions_handler),
+        )
+        .route(
+            site_config::SITE_STATUS_PATH,
+            get(site_config::status_handler),
+        )
+        .route(
+            site_config::SITE_HEALTH_PATH,
+            get(site_config::health_handler),
+        )
+        .route(
+            site_config::SITE_VALIDATE_PATH,
+            post(site_config::validate_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
+            site_config::SITE_APPLY_PATH,
+            post(site_config::apply_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
+            site_config::SITE_APPROVE_PATH,
+            post(site_config::approve_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
+            site_config::SITE_ROLLBACK_PATH,
+            post(site_config::rollback_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
+            site_config::SITE_PATH,
+            get(site_config::read_site_detail_handler)
+                .patch(site_config::patch_site_path_handler)
+                .delete(site_config::delete_handler)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route(HEALTH_PATH, get(health_handler))
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))
         .route(REQUEST_EVENTS_PATH, get(request_events_handler))
@@ -4672,6 +5022,7 @@ fn api_error(
         status,
         ErrorResponse {
             error_code,
+            stage: error_stage(error_code, status),
             message_safe,
             request_id: request_id.to_owned(),
             retryable,
@@ -4900,9 +5251,27 @@ struct EvidenceAccessDecisionResponse {
     replayed: bool,
 }
 
+// Stable dependency stages identify the failing boundary, without exposing
+// SQL errors, schema internals, connection strings or request configuration.
+fn error_stage(code: &str, status: StatusCode) -> Option<&'static str> {
+    if !status.is_server_error() {
+        return None;
+    }
+    match code {
+        "CONTROL_SITE_CONFIG_UNAVAILABLE" => Some("site_config_store"),
+        "CONTROL_SITE_APPLY_STATE_UNAVAILABLE" | "CONTROL_SITE_ROLLBACK_UNAVAILABLE" => {
+            Some("site_apply_store")
+        }
+        "CONTROL_SITE_HEALTH_UNAVAILABLE" => Some("site_health_store"),
+        _ => None,
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error_code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<&'static str>,
     message_safe: &'static str,
     request_id: String,
     retryable: bool,
@@ -5081,6 +5450,7 @@ mod tests {
     mod ledger_inspection;
     mod model_call_list;
     mod search_references;
+    mod site_admin;
 
     use super::search::SearchRequest;
     use super::{
@@ -8496,5 +8866,51 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod site_error_stage_tests {
+    use super::{ErrorResponse, StatusCode, error_stage};
+
+    #[test]
+    fn dependency_errors_expose_only_stable_stage_metadata() {
+        let error = ErrorResponse {
+            error_code: "CONTROL_SITE_CONFIG_UNAVAILABLE",
+            stage: error_stage(
+                "CONTROL_SITE_CONFIG_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            message_safe: "site configuration is temporarily unavailable",
+            request_id: "req_test".to_owned(),
+            retryable: true,
+            next_action: "retry_later",
+        };
+        let value = serde_json::to_value(error).unwrap();
+        assert_eq!(value["stage"], "site_config_store");
+        assert_eq!(value["retryable"], true);
+        assert_eq!(value["request_id"], "req_test");
+        assert_eq!(
+            error_stage("CONTROL_SITE_ROLLBACK_UNAVAILABLE", StatusCode::CONFLICT),
+            None
+        );
+        assert_eq!(
+            error_stage("CONTROL_SCOPE_DENIED", StatusCode::FORBIDDEN),
+            None
+        );
+        assert_eq!(
+            error_stage(
+                "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE
+            ),
+            Some("site_apply_store")
+        );
+        assert_eq!(
+            error_stage(
+                "CONTROL_SITE_HEALTH_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE
+            ),
+            Some("site_health_store")
+        );
     }
 }

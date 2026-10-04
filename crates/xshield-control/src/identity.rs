@@ -1,3 +1,5 @@
+#![allow(clippy::map_unwrap_or)]
+
 use super::{AccessAction, ControlPlane, audit_unavailable, internal_error, single_header};
 use axum::{
     Extension, Json,
@@ -7,6 +9,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, SecondsFormat, Utc};
 use openidconnect::{
     AccessTokenHash, AuthenticationContextClass, AuthorizationCode, ClientId, ClientSecret,
     CsrfToken, EndpointMaybeSet, EndpointNotSet, EndpointSet, IssuerUrl, Nonce,
@@ -30,6 +33,8 @@ pub(super) const CALLBACK_PATH: &str = "/control/v1/auth/oidc/callback";
 pub(super) const SESSION_PATH: &str = "/control/v1/session";
 pub(super) const LOGOUT_PATH: &str = "/control/v1/session/logout";
 pub(super) const REAUTH_START_PATH: &str = "/control/v1/auth/oidc/reauth/start";
+pub(super) const API_KEY_HEADER: &str = "x-xshield-api-key";
+const AGENT_RUN_HEADER: &str = "x-xshield-agent-run-id";
 const SESSION_COOKIE: &str = "__Host-xshield-session";
 const STATE_COOKIE: &str = "__Host-xshield-oidc-state";
 const CSRF_HEADER: &str = "x-xshield-csrf";
@@ -73,6 +78,12 @@ const REAUTH_CALLBACK_ACCESS: AccessAction = AccessAction {
     method: "GET",
     path: CALLBACK_PATH,
     role: ManagementRole::SensitiveEvidenceReader,
+};
+pub(super) const API_KEY_ACCESS: AccessAction = AccessAction {
+    event_type: "console.agent_api_key.use",
+    method: "*",
+    path: "/control/v1/*",
+    role: ManagementRole::Observer,
 };
 
 type OidcClient = CoreClient<
@@ -243,6 +254,10 @@ pub(super) struct AuthContext {
     pub(super) csrf_token: Option<String>,
     pub(super) session_digest: Option<[u8; 32]>,
     pub(super) step_up_valid: bool,
+    pub(super) session_expires_at: Option<DateTime<Utc>>,
+    pub(super) idle_expires_at: Option<DateTime<Utc>>,
+    pub(super) last_reauthenticated_at: Option<DateTime<Utc>>,
+    pub(super) direct_apply: bool,
     assertion: Option<BrowserRequestAssertion>,
     state: AuthState,
 }
@@ -260,8 +275,12 @@ impl AuthContext {
         matches!(self.state, AuthState::Browser { csrf_valid: true })
     }
 
-    pub(super) const fn step_up_valid(&self) -> bool {
+    pub(crate) const fn step_up_valid(&self) -> bool {
         self.step_up_valid
+    }
+
+    pub(crate) const fn is_browser_session(&self) -> bool {
+        matches!(self.state, AuthState::Browser { .. })
     }
 }
 
@@ -277,6 +296,9 @@ enum AuthState {
     AmbiguousCredentials,
 }
 
+// The flags are independent fields of the signed assertion's wire format;
+// folding them into an enum would change the authenticated representation.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserRequestAssertion {
@@ -284,6 +306,14 @@ struct BrowserRequestAssertion {
     subject: String,
     tenant_id: String,
     site_id: String,
+    #[serde(default)]
+    tenant_scope: bool,
+    #[serde(default)]
+    machine: bool,
+    #[serde(default)]
+    direct_apply: bool,
+    #[serde(default)]
+    scopes: Vec<(String, String)>,
     roles: Vec<String>,
     csrf_valid: bool,
     expires_at: u64,
@@ -293,6 +323,7 @@ pub(super) struct VerifiedRequestIdentity {
     pub(super) principal: ManagementPrincipal,
     pub(super) browser: bool,
     pub(super) csrf_valid: bool,
+    pub(super) direct_apply: bool,
 }
 
 const ASSERTION_PREFIX: &str = "Xshield-Session ";
@@ -326,6 +357,7 @@ pub(super) fn verify_request_assertion(
     {
         return None;
     }
+    let machine = assertion.machine;
     let tenant_id = TenantId::parse(assertion.tenant_id).ok()?;
     let site_id = SiteId::parse(assertion.site_id).ok()?;
     let mut roles = std::collections::BTreeSet::new();
@@ -334,11 +366,29 @@ pub(super) fn verify_request_assertion(
             return None;
         }
     }
+    let mut exact_scopes = vec![(tenant_id.clone(), site_id.clone())];
+    for (tenant, site) in assertion.scopes {
+        let pair = (TenantId::parse(tenant).ok()?, SiteId::parse(site).ok()?);
+        if !exact_scopes.contains(&pair) {
+            exact_scopes.push(pair);
+        }
+    }
+    let principal = if assertion.tenant_scope {
+        let mut principal =
+            ManagementPrincipal::new_tenant_scoped(assertion.subject, roles, [tenant_id.clone()])
+                .ok()?;
+        for (tenant, site) in exact_scopes {
+            principal = principal.with_exact_site_scope(tenant, site);
+        }
+        principal
+    } else {
+        ManagementPrincipal::new(assertion.subject, roles, exact_scopes).ok()?
+    };
     Some(VerifiedRequestIdentity {
-        principal: ManagementPrincipal::new(assertion.subject, roles, [(tenant_id, site_id)])
-            .ok()?,
-        browser: true,
+        principal,
+        browser: !machine,
         csrf_valid: assertion.csrf_valid,
+        direct_apply: assertion.direct_apply,
     })
 }
 
@@ -392,8 +442,11 @@ pub(super) async fn auth_middleware(
         request.uri().path(),
         LOGIN_PATH | CALLBACK_PATH | SESSION_PATH | LOGOUT_PATH | REAUTH_START_PATH
     );
-    let ambiguous = cookie_name_present(request.headers(), SESSION_COOKIE)
-        && request.headers().contains_key(header::AUTHORIZATION);
+    let ambiguous = (cookie_name_present(request.headers(), SESSION_COOKIE)
+        && request.headers().contains_key(header::AUTHORIZATION))
+        || (request.headers().contains_key(API_KEY_HEADER)
+            && (cookie_name_present(request.headers(), SESSION_COOKIE)
+                || request.headers().contains_key(header::AUTHORIZATION)));
     let mut context = if ambiguous {
         AuthContext {
             state: AuthState::AmbiguousCredentials,
@@ -419,6 +472,11 @@ pub(super) async fn auth_middleware(
         && single_header(request.headers(), header::AUTHORIZATION.as_str()).is_none()
     {
         request.headers_mut().remove(header::AUTHORIZATION);
+    }
+    if request.headers().contains_key(API_KEY_HEADER)
+        && single_header(request.headers(), API_KEY_HEADER).is_none()
+    {
+        request.headers_mut().remove(API_KEY_HEADER);
     }
     if matches!(context.state, AuthState::AmbiguousCredentials) {
         request.headers_mut().remove(header::AUTHORIZATION);
@@ -454,7 +512,18 @@ async fn resolve_auth(
         return AuthContext::default();
     }
     let authorization = single_header(headers, header::AUTHORIZATION.as_str());
+    let api_key = single_header(headers, API_KEY_HEADER);
     let cookie = cookie_value(headers, SESSION_COOKIE);
+    if api_key.is_some() {
+        let agent_run = single_header(headers, AGENT_RUN_HEADER);
+        if agent_run
+            .as_deref()
+            .is_none_or(|value| value.is_empty() || value.len() > 128)
+        {
+            return AuthContext::default();
+        }
+        return resolve_api_key(control, api_key.unwrap_or_default()).await;
+    }
     if authorization.is_some() && cookie.is_some() {
         return AuthContext {
             state: AuthState::AmbiguousCredentials,
@@ -468,6 +537,71 @@ async fn resolve_auth(
         return AuthContext::default();
     };
     resolve_browser_auth(control, method, headers, &cookie).await
+}
+
+async fn resolve_api_key(control: &ControlPlane, value: String) -> AuthContext {
+    let request_id = request_id();
+    let Ok(identity) = control
+        .authenticate_api_key(&value, &request_id, API_KEY_ACCESS)
+        .await
+    else {
+        return AuthContext::default();
+    };
+    let Some(now) = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|value| value.as_secs())
+    else {
+        return AuthContext {
+            state: AuthState::Unavailable,
+            ..AuthContext::default()
+        };
+    };
+    let roles = identity
+        .principal
+        .roles()
+        .iter()
+        .copied()
+        .map(role_name)
+        .map(str::to_owned)
+        .collect();
+    let (tenant_id, site_id) = identity
+        .principal
+        .first_exact_site_scope()
+        .map(|(tenant, site)| (tenant.as_str().to_owned(), site.as_str().to_owned()))
+        .unwrap_or_else(|| {
+            (
+                control.config.tenant_id.as_str().to_owned(),
+                control.config.site_id.as_str().to_owned(),
+            )
+        });
+    let scopes = identity
+        .principal
+        .exact_site_scopes()
+        .map(|(tenant, site)| (tenant.as_str().to_owned(), site.as_str().to_owned()))
+        .collect();
+    let assertion = BrowserRequestAssertion {
+        version: 1,
+        subject: identity.principal.subject().to_owned(),
+        tenant_id,
+        site_id,
+        tenant_scope: identity
+            .principal
+            .has_tenant_scope(&control.config.tenant_id),
+        machine: true,
+        direct_apply: identity.direct_apply,
+        scopes,
+        roles,
+        csrf_valid: true,
+        expires_at: now.saturating_add(30),
+    };
+    AuthContext {
+        principal: Some(identity.principal),
+        state: AuthState::Machine,
+        assertion: Some(assertion),
+        direct_apply: identity.direct_apply,
+        ..AuthContext::default()
+    }
 }
 
 fn resolve_machine_auth(control: &ControlPlane, authorization: &str) -> AuthContext {
@@ -534,13 +668,10 @@ async fn resolve_browser_auth(
     if session.issuer() != provider.issuer {
         return AuthContext::default();
     }
-    let Ok(principal) = ManagementPrincipal::new(
+    let Ok(principal) = ManagementPrincipal::new_tenant_scoped(
         session.subject(),
         roles.iter().copied(),
-        [(
-            control.config.tenant_id.clone(),
-            control.config.site_id.clone(),
-        )],
+        [control.config.tenant_id.clone()],
     ) else {
         return AuthContext::default();
     };
@@ -565,6 +696,13 @@ async fn resolve_browser_auth(
         subject: principal.subject().to_owned(),
         tenant_id: control.config.tenant_id.as_str().to_owned(),
         site_id: control.config.site_id.as_str().to_owned(),
+        tenant_scope: true,
+        machine: false,
+        direct_apply: false,
+        scopes: vec![(
+            control.config.tenant_id.as_str().to_owned(),
+            control.config.site_id.as_str().to_owned(),
+        )],
         roles: roles
             .iter()
             .copied()
@@ -580,7 +718,11 @@ async fn resolve_browser_auth(
         csrf_token: Some(session.csrf_token().to_owned()),
         session_digest: Some(digest),
         step_up_valid: session.step_up_valid(),
+        session_expires_at: Some(session.expires_at()),
+        idle_expires_at: Some(session.idle_expires_at()),
+        last_reauthenticated_at: session.last_reauthenticated_at(),
         assertion: Some(assertion),
+        direct_apply: false,
     }
 }
 
@@ -696,8 +838,8 @@ pub(super) async fn reauthentication_start_handler(
     let Some(principal) = auth.principal.as_ref().filter(|_| auth.is_browser()) else {
         return auth_required_response(&control, &request_id, REAUTH_START_ACCESS, &auth);
     };
-    if !principal.authorizes(
-        REAUTH_START_ACCESS.role,
+    if !can_start_step_up(
+        principal,
         &control.config.tenant_id,
         &control.config.site_id,
     ) {
@@ -778,6 +920,19 @@ pub(super) async fn reauthentication_start_handler(
         }
     }
     begin_reauthentication(&control, &request_id, principal, session_digest, provider).await
+}
+
+fn can_start_step_up(
+    principal: &ManagementPrincipal,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+) -> bool {
+    [
+        ManagementRole::SensitiveEvidenceReader,
+        ManagementRole::PolicyApprover,
+    ]
+    .into_iter()
+    .any(|role| principal.authorizes_site(role, tenant_id, site_id))
 }
 
 fn reauthentication_start_error(
@@ -1298,6 +1453,11 @@ struct SessionResponse<'a> {
     tenant_id: &'a str,
     site_id: &'a str,
     csrf_token: &'a str,
+    roles: &'a [String],
+    session_expires_at: Option<String>,
+    idle_expires_at: Option<String>,
+    last_reauthenticated_at: Option<String>,
+    step_up_valid: bool,
 }
 
 pub(super) async fn session_handler(
@@ -1314,6 +1474,13 @@ pub(super) async fn session_handler(
         return auth_required_response(&control, &request_id, SESSION_READ_ACCESS, &auth);
     };
     let Some(csrf_token) = auth.csrf_token.as_deref() else {
+        return internal_error(&request_id).into_response();
+    };
+    let Some(roles) = auth
+        .assertion
+        .as_ref()
+        .map(|assertion| assertion.roles.as_slice())
+    else {
         return internal_error(&request_id).into_response();
     };
     if control
@@ -1334,6 +1501,17 @@ pub(super) async fn session_handler(
         tenant_id: control.config.tenant_id.as_str(),
         site_id: control.config.site_id.as_str(),
         csrf_token,
+        roles,
+        session_expires_at: auth
+            .session_expires_at
+            .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        idle_expires_at: auth
+            .idle_expires_at
+            .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        last_reauthenticated_at: auth
+            .last_reauthenticated_at
+            .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        step_up_valid: auth.step_up_valid,
     })
     .into_response()
 }
@@ -1600,12 +1778,33 @@ fn no_store(response: &mut Response) {
 mod tests {
     use super::{
         BrowserRequestAssertion, ManagementRole, STEP_UP_AUTH_TIME_MAX_AGE_SECONDS,
-        auth_time_is_recent, cookie_value, csrf_request_valid, endpoint_is_secure, lower_hex,
-        parse_callback_query, secure_url, sign_request_assertion, verify_request_assertion,
+        auth_time_is_recent, can_start_step_up, cookie_value, csrf_request_valid,
+        endpoint_is_secure, lower_hex, parse_callback_query, secure_url, sign_request_assertion,
+        verify_request_assertion,
     };
     use axum::http::{HeaderMap, Method, header};
     use std::time::{SystemTime, UNIX_EPOCH};
     use xshield_core::domain::{SiteId, TenantId};
+
+    #[test]
+    fn policy_approver_can_start_independent_step_up() {
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let approver = xshield_core::admin::ManagementPrincipal::new_tenant_scoped(
+            "approver",
+            [ManagementRole::PolicyApprover],
+            [tenant.clone()],
+        )
+        .unwrap();
+        assert!(can_start_step_up(&approver, &tenant, &site));
+        let observer = xshield_core::admin::ManagementPrincipal::new_tenant_scoped(
+            "observer",
+            [ManagementRole::Observer],
+            [tenant.clone()],
+        )
+        .unwrap();
+        assert!(!can_start_step_up(&observer, &tenant, &site));
+    }
 
     #[test]
     fn callback_parser_rejects_duplicates_unknown_fields_and_mixed_results() {
@@ -1676,6 +1875,10 @@ mod tests {
             subject: "human-1".to_owned(),
             tenant_id: "tenant_a".to_owned(),
             site_id: "site_a".to_owned(),
+            tenant_scope: false,
+            machine: false,
+            direct_apply: false,
+            scopes: vec![("tenant_a".to_owned(), "site_a".to_owned())],
             roles: vec!["observer".to_owned()],
             csrf_valid: false,
             expires_at: now + 30,

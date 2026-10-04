@@ -10,8 +10,8 @@ use std::{
 };
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
 use xshield_control::{
-    ControlConfig, ControlLimits, ControlPlane, CursorKey, EvidenceReadPort, IdempotencyKey,
-    ManagementCredential, OidcProvider, router,
+    ControlConfig, ControlLimits, ControlPlane, CursorKey, EdgeApplyClient, EvidenceReadPort,
+    IdempotencyKey, ManagementCredential, OidcProvider, parse_management_api_key_hash_key, router,
 };
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
@@ -49,6 +49,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let token = Zeroizing::new(env::var("XSHIELD_CONTROL_TOKEN")?);
     let cursor_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_CURSOR_KEY_HEX")?);
     let idempotency_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX")?);
+    let api_key_hash_key_hex = env::var("XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX").ok();
     let source_key_id = env::var("XSHIELD_JOURNAL_KEY_ID")?;
     let source_key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let seal_key_id = env::var("XSHIELD_SEAL_KEY_ID")?;
@@ -92,8 +93,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let principal =
-        ManagementPrincipal::new(subject, roles, [(tenant_id.clone(), site_id.clone())])?;
+    let principal = ManagementPrincipal::new_tenant_scoped(subject, roles, [tenant_id.clone()])?
+        .with_exact_site_scope(tenant_id.clone(), site_id.clone());
     let publisher = PublisherConfig::new(
         journal_directory,
         manifest_directory,
@@ -114,7 +115,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         max_pending_evidence_access_requests,
         max_evidence_access_ttl_seconds,
     )?;
-    let config = ControlConfig::new(
+    let mut config = ControlConfig::new(
         credential,
         cursor_key,
         idempotency_key,
@@ -125,6 +126,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         source_key_id.clone(),
         control_limits,
     )?;
+    if let Some(value) = api_key_hash_key_hex.as_deref() {
+        config = config.with_api_key_hash_key(parse_management_api_key_hash_key(value)?);
+    }
     let source_key = JournalKey::from_hex(&source_key_hex)?;
     let seal_key = SealVerifyingKey::from_hex(seal_key_id, &seal_key_hex)?;
     let control_key = JournalKey::from_hex(&control_key_hex)?;
@@ -170,15 +174,20 @@ async fn run() -> Result<(), Box<dyn Error>> {
     )
     .await?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    axum::serve(
-        listener,
-        router(
-            ControlPlane::new(config, source_key, seal_key, index, catalog, access_journal)
-                .with_evidence_read_port(EvidenceReadPort::new(evidence_vault))
-                .with_oidc_provider(oidc_provider)?,
-        ),
-    )
-    .await?;
+    let control = ControlPlane::new(config, source_key, seal_key, index, catalog, access_journal)
+        .with_evidence_read_port(EvidenceReadPort::new(evidence_vault))
+        .with_oidc_provider(oidc_provider)?;
+    let control = match (
+        env::var("XSHIELD_EDGE_APPLY_URL"),
+        env::var("XSHIELD_EDGE_APPLY_KEY_HEX"),
+    ) {
+        (Ok(endpoint), Ok(key_hex)) => {
+            control.with_edge_apply_client(EdgeApplyClient::new(endpoint, &key_hex)?)
+        }
+        (Err(_), Err(_)) => control,
+        _ => return Err("edge apply URL and key must be configured together".into()),
+    };
+    axum::serve(listener, router(control)).await?;
     Ok(())
 }
 

@@ -824,6 +824,7 @@ impl SearchFailure {
         EndpointResult::Error(
             status,
             ErrorResponse {
+                stage: None,
                 error_code: self.reason(),
                 message_safe,
                 request_id,
