@@ -92,6 +92,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/console/package-lock.json
       - run: npm ci
+      - run: npm run lint
       - run: npm test
       - run: npm run build
       - run: npx playwright install --with-deps chromium --only-shell
