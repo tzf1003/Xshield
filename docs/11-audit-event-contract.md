@@ -73,6 +73,8 @@ request.accepted/completed/aborted；stage.started/completed/skipped；identity.
 
 恢复补偿产生的 request.aborted 允许 `status=null`，并以 cause_event_ids 指向已知的 decision、request.accepted、origin.response 或新追加的 origin.unknown；准入批次只留下 accepted 前缀时使用 `decision=UNKNOWN` 与 `reason_code=REQUEST_INCOMPLETE`。它表达审计终态，不虚构客户端实际收到的状态码。
 
+网关的 `audit.recovered` 与请求无关，只有两种可发布形态：修复崩溃尾部（`reason_code=AUDIT_TAIL_RECOVERED`，`truncated_bytes>0`）和持久写入失败后重开屏障（`reason_code=AUDIT_BARRIER_REOPENED`，`truncated_bytes=0`，见 [13.3](13-audit-storage-reliability.md)）；其他原因码或字节数组合会被发布器以 InvalidEvent 拒绝。
+
 不可采样事件：每请求最小记录、每个实际安全判定、资格变更、模型调用、Agent 工具调用、管理动作、证据访问与完整性异常。调试 span 和性能采样可独立配置，但不能让 required 审计消失。
 
 ## 11.6 可解释拒绝图

@@ -135,6 +135,7 @@ struct AuditConfig {
     key_id: String,
     producer_id: String,
     limits: JournalLimits,
+    high_watermark_bytes: u64,
     reconcile_max_records: u64,
 }
 
@@ -614,6 +615,7 @@ impl GatewayConfig {
                 key_id: dto.audit.key_id,
                 producer_id: dto.audit.producer_id,
                 limits: audit_limits,
+                high_watermark_bytes: dto.audit.high_watermark_bytes,
                 reconcile_max_records: dto.audit.reconcile_max_records,
             },
             identity_store,
@@ -688,6 +690,14 @@ impl GatewayConfig {
     #[must_use]
     pub const fn audit_limits(&self) -> JournalLimits {
         self.audit.limits
+    }
+
+    /// Returns the journal size below which a failed durable-audit barrier may
+    /// reopen; staying under the warning threshold avoids reopening into a
+    /// journal that would immediately fail again.
+    #[must_use]
+    pub const fn audit_high_watermark_bytes(&self) -> u64 {
+        self.audit.high_watermark_bytes
     }
 
     /// Returns the startup ceiling for authenticated historical record scans.

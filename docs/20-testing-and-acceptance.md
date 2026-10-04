@@ -210,6 +210,12 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-core --lib static_asset` 以表驱动覆盖：默认和缺省为关闭、显式深度与上限校验；评审复现的 `/orders/123.json`、`/api/v1/users/42.json`、`/admin/export.json`、`/api/json`、`/api/v1/map`、`/css`、`/search/png`、`/admin/users;.js`、`/admin/dashboard;.css`、`/api/accounts/..;/x.js`、`/api/users`、`/orders/123.xml` 全部拒绝而 `/assets/app.js` 放行；扩展名规则（空主名、尾点、大小写、`.mjs`、`.js.php`、尾斜杠）；原始与编码形态的 `;`、斜杠、反斜杠、点段、控制字符、`?`、`#`、双重编码、非 ASCII、畸形转义和超长路径。`cargo test -p xshield-gateway --lib static_asset` 通过 `GatewayConfig::admit` 检查无策略、空策略、深度 0 均关闭，启用后上述路径仍返回 `OperationNotMatched` 且只放行 GET 资源，精确 operation 不受影响。
 
+## 20.15 Edge 限流与审计屏障回归
+
+`cargo test -p xshield-gateway --bin xshield-gateway rate_limit` 覆盖：评审复现的 65,536 个来源填满旧表后新来源全部被拒，现在 70,000 个来源之后的新来源仍被放行；小容量表在 50,000 次淘汰插入后保持在上限内；令牌桶按突发限流并按时间补充，站点和来源互相独立，未知来源被拒绝；CLOCK 保留被持续引用的来源而淘汰安静来源；IPv6 同一 /64 共享预算。`waf_denied_floods_are_metered_before_the_waf` 与 `clean_requests_share_the_same_budget_as_denied_ones` 通过 `pre_admission_denial` 检查 WAF 拒绝的请求也消耗令牌：超出突发后 WAF 拒绝洪峰得到 `SITE_RATE_LIMIT_EXCEEDED`（此前始终是 WAF 拒绝而不受限）。
+
+`cargo test -p xshield-gateway --bin xshield-gateway durable_audit` 的恢复用例使用 48 KiB 配额、2 KiB 分段的真实加密 journal：写满后屏障关闭且准入以 `Unavailable` 拒绝；目录仍满时探测失败且不创建新段；移除关闭段（模拟发布/保留释放）后探测成功、准入恢复，journal 中恰有一条 `AUDIT_BARRIER_REOPENED` 的 `audit.recovered`；没有可恢复密钥的写入器保持关闭；退避序列按 1 倍、2 倍直至上限；监督任务在无人干预时于释放空间后重开屏障。`cargo test -p xshield-worker --lib audit_recovered` 固定 `audit.recovered` 的两种可发布形态。重开期间的进程崩溃、真实磁盘故障和多副本行为未测试；该屏障没有 Pingora 集成回归，仅有这些单元级证明。
+
 ## 管理后台与开发数据卷验收（2026-09-27）
 
 浏览器回归使用固定合成 API 契约，并分别覆盖明确机器 fixture 和服务端角色会话模式。站点场景包含列表选择精确 site、创建、按类别编辑、草稿前进后退/离页保护、深链接刷新、空站点 nullable 字段、读写跨 scope 拒绝、写入未知结果的原键/原正文人工重试、验证/审批/发布/回滚以及健康观察。角色矩阵覆盖九种服务端角色，包括独立 Observer 状态视图及策略/发布角色入口。

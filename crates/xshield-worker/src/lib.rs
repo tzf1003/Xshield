@@ -1483,7 +1483,11 @@ struct RecoveryPayload {
 
 impl RecoveryPayload {
     fn validate(self) -> Result<PayloadSummary, PublishError> {
-        if !valid_name(&self.reason_code) || self.truncated_bytes == 0 {
+        // A repaired crash tail always removed bytes; a barrier reopen did not.
+        let repaired_tail = self.reason_code == "AUDIT_TAIL_RECOVERED" && self.truncated_bytes > 0;
+        let barrier_reopened =
+            self.reason_code == "AUDIT_BARRIER_REOPENED" && self.truncated_bytes == 0;
+        if !valid_name(&self.reason_code) || !(repaired_tail || barrier_reopened) {
             return Err(PublishError::InvalidEvent);
         }
         let _ = self.recovered_records;
@@ -3361,6 +3365,45 @@ mod tests {
             assert!(sql.contains(fragment), "missing query fragment: {fragment}");
         }
         assert_eq!(sql.matches("payload_json").count(), 3, "{sql}");
+    }
+
+    // `audit.recovered` is the one gateway event not tied to a request. It has
+    // exactly two publishable shapes: a repaired crash tail (bytes were removed)
+    // and a barrier reopen after a durability failure (nothing was removed).
+    #[test]
+    fn audit_recovered_accepts_only_a_repaired_tail_or_a_barrier_reopen() {
+        let parse = |reason: &str, truncated: u64| {
+            PayloadSummary::parse(
+                "audit.recovered",
+                &serde_json::json!({
+                    "recovered_records": 3,
+                    "truncated_bytes": truncated,
+                    "reason_code": reason,
+                })
+                .to_string(),
+            )
+        };
+        assert_eq!(
+            parse("AUDIT_TAIL_RECOVERED", 17).unwrap().reason_code,
+            "AUDIT_TAIL_RECOVERED"
+        );
+        assert_eq!(
+            parse("AUDIT_BARRIER_REOPENED", 0).unwrap().reason_code,
+            "AUDIT_BARRIER_REOPENED"
+        );
+        for (reason, truncated) in [
+            ("AUDIT_TAIL_RECOVERED", 0),
+            ("AUDIT_BARRIER_REOPENED", 5),
+            ("SOMETHING_ELSE", 5),
+            ("SOMETHING_ELSE", 0),
+            ("audit_tail_recovered", 3),
+            ("", 3),
+        ] {
+            assert!(
+                matches!(parse(reason, truncated), Err(PublishError::InvalidEvent)),
+                "{reason} with {truncated} truncated bytes"
+            );
+        }
     }
 
     #[tokio::test]
