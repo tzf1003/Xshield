@@ -273,15 +273,3 @@ export function paletteSearch(
     });
   return { results, notice };
 }
-
-type KeyEventLike = Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">;
-
-/** Command/Ctrl+K, without Alt or Shift. */
-export function isPaletteShortcut(event: KeyEventLike): boolean {
-  return (
-    (event.metaKey || event.ctrlKey) &&
-    !event.altKey &&
-    !event.shiftKey &&
-    event.key.toLowerCase() === "k"
-  );
-}

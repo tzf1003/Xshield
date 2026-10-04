@@ -1,13 +1,14 @@
-import { CloseOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from "@ant-design/icons";
+import { MenuFoldOutlined, MenuUnfoldOutlined } from "@ant-design/icons";
 import { Outlet, useRouter, useRouterState } from "@tanstack/react-router";
-import { App as AntdApp, Button, Drawer, Layout } from "antd";
+import { App as AntdApp, Button, Layout } from "antd";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { useSession } from "../security/SessionProvider";
 import type { SearchPreset } from "../SearchPanel";
-import { CommandPalette } from "./CommandPalette";
+import { Brand } from "./Brand";
 import { breadcrumbs, legacyKinds, pageMeta, visibleNav } from "./nav-model.ts";
-import { isPaletteShortcut, type PaletteResult } from "./palette-classifier.ts";
+import type { PaletteResult } from "./palette-classifier.ts";
+import { isPaletteShortcut } from "./shortcut.ts";
 import { PageActionsTarget } from "./page-actions";
 import { SidebarNav } from "./SidebarNav";
 import { Topbar } from "./Topbar";
@@ -15,19 +16,17 @@ import { MOBILE_QUERY, useMediaQuery } from "./use-media-query";
 
 // The legacy pages (and their heavy panels) load on first use, not with the shell.
 const LegacyHost = lazy(() => import("../legacy/LegacyHost"));
+// Overlays load on first use (the palette is also fetched when the browser is idle, so the first
+// Ctrl+K is instant); neither is needed to render the shell.
+const loadPalette = () => import("./CommandPalette");
+const CommandPalette = lazy(() =>
+  loadPalette().then((module) => ({ default: module.CommandPalette })),
+);
+const MobileDrawer = lazy(() =>
+  import("./MobileDrawer").then((module) => ({ default: module.MobileDrawer })),
+);
 
 export type SearchIntent = { preset: SearchPreset; nonce: number };
-
-function Brand({ collapsed }: { collapsed?: boolean }) {
-  return (
-    <div className="xs-brand">
-      <span className="xs-brand-mark" aria-hidden="true">
-        X
-      </span>
-      {!collapsed && <span className="xs-brand-name">Xshield</span>}
-    </div>
-  );
-}
 
 const isMac = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "");
 
@@ -47,6 +46,8 @@ export function ShellLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteMounted, setPaletteMounted] = useState(false);
+  const [drawerMounted, setDrawerMounted] = useState(false);
   const [actionsTarget, setActionsTarget] = useState<HTMLElement | null>(null);
   const [searchIntent, setSearchIntent] = useState<SearchIntent | null>(null);
   const showsLegacy = legacyKinds.has(meta.kind);
@@ -76,10 +77,21 @@ export function ShellLayout() {
     const onKey = (event: KeyboardEvent) => {
       if (!isPaletteShortcut(event)) return;
       event.preventDefault();
+      setPaletteMounted(true);
       setPaletteOpen((open) => !open);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    const idle =
+      window.requestIdleCallback ?? ((callback: () => void) => window.setTimeout(callback, 1500));
+    const handle = idle(() => void loadPalette());
+    return () => {
+      if (window.cancelIdleCallback) window.cancelIdleCallback(handle);
+      else window.clearTimeout(handle);
+    };
   }, []);
 
   useEffect(() => {
@@ -157,8 +169,14 @@ export function ShellLayout() {
               session={sessionInfo}
               machineLogin={session.machineLoginEnabled}
               shortcutLabel={isMac ? "⌘K" : "Ctrl K"}
-              onOpenNav={() => setDrawerOpen(true)}
-              onOpenPalette={() => setPaletteOpen(true)}
+              onOpenNav={() => {
+                setDrawerMounted(true);
+                setDrawerOpen(true);
+              }}
+              onOpenPalette={() => {
+                setPaletteMounted(true);
+                setPaletteOpen(true);
+              }}
               onNavigate={navigate}
               onReauthenticate={() => {
                 void session.reauthenticate().then((failure) => {
@@ -192,38 +210,27 @@ export function ShellLayout() {
             <footer className="xs-footer">历史记录用于调查，当前访问资格由服务端独立校验。</footer>
           </Layout.Content>
         </Layout>
-        <Drawer
-          open={drawerOpen}
-          onClose={() => setDrawerOpen(false)}
-          placement="left"
-          size={288}
-          closable={false}
-          className="xs-drawer"
-          styles={{ body: { padding: 0 }, header: { display: "none" } }}
-        >
-          <aside aria-label="后台导航" className="xs-drawer-nav">
-            <div className="xs-drawer-head">
-              <Brand />
-              <Button
-                type="text"
-                icon={<CloseOutlined />}
-                aria-label="关闭导航"
-                onClick={() => setDrawerOpen(false)}
-              />
-            </div>
-            {nav}
-            <p className="xs-drawer-scope">
-              当前范围 <span className="mono">{scope}</span>
-            </p>
-          </aside>
-        </Drawer>
-        <CommandPalette
-          open={paletteOpen}
-          onClose={() => setPaletteOpen(false)}
-          roles={roles}
-          siteId={siteId}
-          onRun={runPalette}
-        />
+        {drawerMounted && (
+          <Suspense fallback={null}>
+            <MobileDrawer
+              open={drawerOpen}
+              onClose={() => setDrawerOpen(false)}
+              nav={nav}
+              scope={scope}
+            />
+          </Suspense>
+        )}
+        {paletteMounted && (
+          <Suspense fallback={null}>
+            <CommandPalette
+              open={paletteOpen}
+              onClose={() => setPaletteOpen(false)}
+              roles={roles}
+              siteId={siteId}
+              onRun={runPalette}
+            />
+          </Suspense>
+        )}
       </Layout>
     </PageActionsTarget.Provider>
   );

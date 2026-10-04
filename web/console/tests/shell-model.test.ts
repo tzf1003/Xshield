@@ -14,11 +14,11 @@ import {
 } from "../src/shell/nav-model.ts";
 import {
   fuzzyScore,
-  isPaletteShortcut,
   normalizePaste,
   paletteSearch,
   recognise,
 } from "../src/shell/palette-classifier.ts";
+import { isPaletteShortcut } from "../src/shell/shortcut.ts";
 
 const uuid = (n: number) => `018f2a3b-4c5d-7000-8000-${String(n).padStart(12, "0")}`;
 const ids = {
