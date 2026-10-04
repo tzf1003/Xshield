@@ -1,0 +1,73 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "vcs": { "enabled": false },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "src/**",
+      "tests/**",
+      "vite.config.ts",
+      "playwright.config.ts",
+      "tsconfig.json",
+      "biome.json"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "assist": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noArrayIndexKey": "warn",
+        "useIterableCallbackReturn": "warn"
+      },
+      "correctness": {
+        "useExhaustiveDependencies": "warn",
+        "useJsxKeyInIterable": "warn",
+        "noUnsafeOptionalChaining": "warn"
+      },
+      "a11y": {
+        "useButtonType": "warn",
+        "useAriaPropsSupportedByRole": "warn"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["src/security/**", "src/theme/**", "src/shell/**", "src/router/**", "src/pages/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noArrayIndexKey": "error",
+            "useIterableCallbackReturn": "error"
+          },
+          "correctness": {
+            "useExhaustiveDependencies": "error",
+            "useJsxKeyInIterable": "error",
+            "noUnsafeOptionalChaining": "error"
+          },
+          "a11y": {
+            "useButtonType": "error",
+            "useAriaPropsSupportedByRole": "error"
+          },
+          "style": { "noNonNullAssertion": "error" }
+        }
+      }
+    },
+    {
+      "includes": ["src/api.ts", "src/api-contract.ts", "src/search.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": { "noControlCharactersInRegex": "off" }
+        }
+      }
+    }
+  ]
+}
