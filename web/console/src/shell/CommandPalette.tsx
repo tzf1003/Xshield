@@ -25,6 +25,11 @@ export function CommandPalette({ open, onClose, roles, siteId, onRun }: Props) {
   const clamped = Math.min(active, Math.max(results.length - 1, 0));
 
   useEffect(() => {
+    void clamped;
+    document.getElementById(`palette-option-${clamped}`)?.scrollIntoView?.({ block: "nearest" });
+  }, [clamped]);
+
+  useEffect(() => {
     if (open) {
       setQuery("");
       setActive(0);
@@ -90,7 +95,14 @@ export function CommandPalette({ open, onClose, roles, siteId, onRun }: Props) {
         aria-activedescendant={results.length > 0 ? `palette-option-${clamped}` : undefined}
       />
       {outcome.notice && <p className="xs-palette-notice">{outcome.notice}</p>}
-      <div id={listId} role="listbox" aria-label="命令面板结果" className="xs-palette-list">
+      <div
+        id={listId}
+        role="listbox"
+        aria-label="命令面板结果"
+        className="xs-palette-list"
+        // A scroll container would otherwise become a keyboard tab stop of its own.
+        tabIndex={-1}
+      >
         {results.map((result, index) => {
           const heading = result.group === lastGroup ? null : result.group;
           lastGroup = result.group;

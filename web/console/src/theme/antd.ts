@@ -21,6 +21,10 @@ export function antdThemeConfig(mode: ThemeMode, density: DensityPreference): Th
       colorWarning: palette.observe,
       colorError: palette.deny,
       colorLink: palette.primary,
+      // Text on a solid primary fill: white on the light brand blue, ink on the dark one.
+      colorTextLightSolid: palette.onPrimary,
+      colorPrimaryHover: palette.primaryHover,
+      colorPrimaryBg: palette.primarySoft,
       colorTextBase: palette.ink,
       colorBgBase: palette.surface,
       colorBgLayout: palette.canvas,
@@ -61,9 +65,23 @@ export function antdThemeConfig(mode: ThemeMode, density: DensityPreference): Th
         darkItemSelectedBg: palette.sidebarActive,
         darkItemSelectedColor: palette.sidebarActiveInk,
         darkGroupTitleColor: palette.sidebarInkMuted,
+        itemSelectedColor: palette.primary,
+        itemSelectedBg: palette.primarySoft,
         itemBorderRadius: 6,
         itemHeight: 38,
         iconSize: 16,
+      },
+      // antd's dark algorithm re-derives colorPrimary from the seed (#8098FF becomes #7084dc),
+      // so the brand colour is pinned where it is drawn as a solid fill.
+      Dropdown: {
+        colorPrimary: palette.primary,
+        controlItemBgActive: palette.primarySoft,
+      },
+      Button: {
+        colorPrimary: palette.primary,
+        colorPrimaryHover: palette.primaryHover,
+        colorPrimaryActive: palette.primaryHover,
+        primaryColor: palette.onPrimary,
       },
       Table: {
         headerBg: palette.surfaceSubtle,

@@ -21,6 +21,7 @@ export function MobileDrawer({
       onClose={onClose}
       placement="left"
       size={288}
+      aria-label="导航抽屉"
       closable={false}
       className="xs-drawer"
       styles={{ body: { padding: 0 }, header: { display: "none" } }}

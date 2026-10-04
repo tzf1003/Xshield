@@ -49,7 +49,6 @@ export function createAppRouteTree(components: RouteComponents) {
     getParentRoute: () => root,
     id: "shell",
     component: components.Shell,
-    notFoundComponent: components.NotFound,
   });
 
   const pages: PageRoute[] = [];
@@ -60,9 +59,13 @@ export function createAppRouteTree(components: RouteComponents) {
     path: string,
     options: { component?: unknown; params?: unknown } = {},
   ): AnyRoute {
+    // A malformed ID or section throws notFound() while the route is matched. Each page route
+    // renders its own "not found" so the failure stays inside the shell: with only an ancestor
+    // handler the router would replace the whole shell (navigation included) with it.
     const route = createRoute({
       getParentRoute: () => shell,
       path,
+      notFoundComponent: components.NotFound,
       ...options,
     } as never) as AnyRoute;
     pages.push({ kind, path, route });

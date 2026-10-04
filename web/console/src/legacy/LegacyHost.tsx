@@ -169,6 +169,13 @@ export default function LegacyHost({
   // cannot repaint. Distinct from the session epoch, which only moves on connect/disconnect.
   const lifetime = useRef(new AbortController());
   const viewGeneration = useRef(0);
+  // Declared before every effect that issues a request: React replays effects in order on a
+  // StrictMode remount, so the request signal must be renewed before a loader runs again.
+  useEffect(() => {
+    // StrictMode replays setup/cleanup; a new mount needs a live request signal.
+    if (lifetime.current.signal.aborted) lifetime.current = new AbortController();
+    return () => lifetime.current.abort();
+  }, []);
   const operations = useRef<Record<Channel, number>>({
     query: 0,
     events: 0,
@@ -346,11 +353,6 @@ export default function LegacyHost({
     else if (queryKind === "calibration-report") loadCalibrationReport(target);
   }, [connected, pathname, queryKind]);
 
-  useEffect(() => {
-    // StrictMode replays setup/cleanup; a new mount needs a live request signal.
-    if (lifetime.current.signal.aborted) lifetime.current = new AbortController();
-    return () => lifetime.current.abort();
-  }, []);
   useEffect(() => {
     if (connected && queryKind === "site-config") loadSiteConfig();
   }, [connected, queryKind, selectedSiteId]);

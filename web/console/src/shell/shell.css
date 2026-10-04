@@ -379,7 +379,7 @@
 }
 
 .xs-palette-hint {
-  color: var(--xs-ink-3);
+  color: var(--xs-ink-2);
   font-family: var(--xs-font-mono);
   font-size: 12px;
   text-align: right;
