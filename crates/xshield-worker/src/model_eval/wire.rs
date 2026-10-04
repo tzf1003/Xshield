@@ -12,6 +12,8 @@ use super::transport::{DIRECT_MODEL, GATEWAY_MODEL};
 
 mod gateway_metadata;
 use gateway_metadata::ProviderMetadata;
+mod history;
+use history::{AuthFacts, PageEvidence};
 mod risk_mapping;
 #[cfg(test)]
 mod score_tests;
@@ -45,6 +47,10 @@ struct InputDto {
     prompt_revision: String,
     untrusted_content: String,
     question: Question,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_facts: Option<AuthFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page_evidence: Option<PageEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     risk_mapping: Option<MappingDto>,
 }
@@ -146,6 +152,19 @@ impl Input {
         if let Some(mapping) = &dto.risk_mapping {
             mapping.validate(&dto.question)?;
         }
+        if dto.auth_facts.is_some() != dto.page_evidence.is_some() {
+            return Err(INPUT_INVALID);
+        }
+        if let (Some(auth), Some(page)) = (&dto.auth_facts, &dto.page_evidence) {
+            auth.validate()?;
+            page.validate()?;
+            if auth.source_request_id() != page.source_request_id() {
+                return Err(INPUT_INVALID);
+            }
+            if text_chars + auth.text_chars() + page.text_chars() > TEXT_CHARS_MAX {
+                return Err(INPUT_INVALID);
+            }
+        }
         Ok(Self(dto))
     }
 
@@ -204,13 +223,21 @@ impl Input {
                     policy_revision: self.policy_revision(),
                     prompt_revision: self.prompt_revision(),
                 },
-                auth_facts: Unavailable::OFFLINE,
-                page_evidence: Unavailable::OFFLINE,
+                auth_facts: self.0.auth_facts.as_ref().into(),
+                page_evidence: self.0.page_evidence.as_ref().into(),
                 untrusted_content: &self.0.untrusted_content,
                 coverage: Coverage {
                     untrusted_content: "complete",
-                    auth_facts: "unavailable",
-                    page_evidence: "unavailable",
+                    auth_facts: if self.0.auth_facts.is_some() {
+                        "operator_supplied"
+                    } else {
+                        "unavailable"
+                    },
+                    page_evidence: if self.0.page_evidence.is_some() {
+                        "operator_supplied"
+                    } else {
+                        "unavailable"
+                    },
                 },
                 trace_context: TraceContext {
                     request_id,
@@ -275,8 +302,8 @@ struct ApiRequest<'a> {
 #[derive(Serialize)]
 struct State<'a> {
     trusted_policy: TrustedPolicy<'a>,
-    auth_facts: Unavailable,
-    page_evidence: Unavailable,
+    auth_facts: OfflineEvidence<'a, AuthFacts>,
+    page_evidence: OfflineEvidence<'a, PageEvidence>,
     untrusted_content: &'a str,
     coverage: Coverage,
     trace_context: TraceContext<'a>,
@@ -289,6 +316,19 @@ struct TrustedPolicy<'a> {
     approval_ref: &'a str,
     policy_revision: &'a str,
     prompt_revision: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OfflineEvidence<'a, T: Serialize> {
+    Supplied(&'a T),
+    Unavailable(Unavailable),
+}
+
+impl<'a, T: Serialize> From<Option<&'a T>> for OfflineEvidence<'a, T> {
+    fn from(value: Option<&'a T>) -> Self {
+        value.map_or(Self::Unavailable(Unavailable::OFFLINE), Self::Supplied)
+    }
 }
 
 #[derive(Serialize)]
@@ -456,7 +496,11 @@ impl Response {
                         || probabilities
                             .values()
                             .any(|value| !unit_interval(*value) || value > selected)
-                        || (probabilities.values().sum::<f64>() - 1.0).abs() > 1e-6
+                        // Gateway serializes provider probabilities at bounded
+                        // decimal precision; accept only the resulting small
+                        // rounding envelope, while still rejecting materially
+                        // inconsistent distributions.
+                        || (probabilities.values().sum::<f64>() - 1.0).abs() > 1e-3
                         || confidence.is_some_and(|value| !unit_interval(value))
                     {
                         return Err(RESPONSE_INVALID);

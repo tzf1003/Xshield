@@ -23,16 +23,19 @@ use xshield_audit::{
 };
 use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 
+pub mod agent_site_client;
 pub mod calibration_audit;
 pub mod calibration_evaluator;
 mod calibration_vault_reader;
 mod control_audit;
+mod local_request;
 pub mod model_eval;
 mod outbox;
 mod search;
 pub use calibration_vault_reader::{
     CalibrationEvidenceContent, CalibrationEvidenceReadError, LocalCalibrationEvidenceReader,
 };
+pub use local_request::{query_local_request_events, query_local_request_summary};
 pub use outbox::{
     OutboxPublishReport, OutboxPublisherConfig, publish_calibration_outbox_batch,
     publish_case_outbox_batch, publish_evidence_access_outbox_batch,
@@ -696,6 +699,26 @@ pub fn inspect_publication_health(
             health.pending_segments += 1;
             continuous = false;
         }
+    }
+    // The gateway durably syncs records into the active segment before it
+    // returns the origin response. That segment is intentionally not sealed
+    // yet, so it cannot contribute an index watermark, but it is still a
+    // pending publication unit. Count a non-empty active segment here so an
+    // immediately successful request is reported as pending_index rather than
+    // being misclassified as not_found.
+    let active_segment_bytes = active_segment_bytes(&config.journal_directory)?;
+    // A fresh active file contains only its authenticated header. The first
+    // journal record is substantially larger, so this threshold avoids
+    // reporting an idle gateway as permanently pending.
+    if active_segment_bytes > 64 {
+        health.pending_segments = health
+            .pending_segments
+            .checked_add(1)
+            .ok_or(PublishError::InvalidEvent)?;
+        health.unsealed_segments = health
+            .unsealed_segments
+            .checked_add(1)
+            .ok_or(PublishError::InvalidEvent)?;
     }
     Ok(health)
 }
@@ -1626,6 +1649,35 @@ fn closed_segment_paths(directory: &Path) -> Result<Vec<PathBuf>, PublishError> 
     }
     paths.sort();
     Ok(paths)
+}
+
+/// Total bytes of the unsealed active segment files. Closed segments carry the
+/// `.closed.xja` suffix and are accounted for separately.
+fn active_segment_bytes(directory: &Path) -> Result<u64, PublishError> {
+    let mut total = 0_u64;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("segment-")
+            || name.ends_with(".closed.xja")
+            || Path::new(name)
+                .extension()
+                .is_none_or(|extension| extension != "xja")
+        {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(PublishError::UnsafePath);
+        }
+        total = total
+            .checked_add(metadata.len())
+            .ok_or(PublishError::InvalidEvent)?;
+    }
+    Ok(total)
 }
 
 fn segment_boot_id(path: &Path) -> Result<String, PublishError> {
@@ -3911,6 +3963,40 @@ mod tests {
         assert_eq!(health.unsealed_segments, 1);
         assert!(!health.has_gaps);
         assert_eq!(health.index_watermark, None);
+    }
+
+    #[test]
+    fn active_segment_is_pending_only_once_it_holds_a_record() {
+        let fixture = Fixture::new();
+        checkpoint_segment(&fixture, 0);
+        let verifier = fixture.seal_key.verifying_key().unwrap();
+        let health = || {
+            inspect_publication_health(
+                &fixture.config,
+                "journal-key-r1",
+                &fixture.journal_key,
+                &verifier,
+            )
+            .unwrap()
+        };
+        // The fixture's live journal holds a header-only active segment next to
+        // the published closed one: an idle writer is not pending work.
+        assert_eq!(health().pending_segments, 0);
+        let active = fs::read_dir(&fixture.config.journal_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension().is_some_and(|extension| extension == "xja")
+                    && !path.to_string_lossy().ends_with(".closed.xja")
+            })
+            .expect("fixture keeps an active segment");
+        // A record in the unsealed tail is a pending unit, but never a gap.
+        let mut file = fs::OpenOptions::new().append(true).open(&active).unwrap();
+        std::io::Write::write_all(&mut file, &[0_u8; 128]).unwrap();
+        let pending = health();
+        assert_eq!(pending.pending_segments, 1);
+        assert_eq!(pending.unsealed_segments, 1);
+        assert!(!pending.has_gaps);
     }
 
     #[test]

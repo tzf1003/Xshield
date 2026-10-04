@@ -18,6 +18,15 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.auth.session.read"
             | "console.auth.session.logout"
             | "console.health.read"
+            | "console.site.config.read"
+            | "console.site.config.write"
+            | "console.sites.list"
+            | "console.site.create"
+            | "console.site.delete"
+            | "console.site.status.read"
+            | "console.site.config.validate"
+            | "console.site.config.apply"
+            | "console.site.config.rollback"
             | "console.request.read"
             | "console.events.read"
             | "console.manifest.read"
@@ -475,7 +484,7 @@ impl AccessPayload {
 
     // The explicit matrix is the audit contract; keeping it in one place is
     // safer than spreading target rules across event-specific validators.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::unnested_or_patterns)]
     fn validate_targets(&self, event_type: &str, success: bool) -> Result<(), PublishError> {
         // Keep the field order explicit: request, artifact, case, access request,
         // model call, agent run, grant, binding, hold, calibration report. Denials retain
@@ -503,6 +512,21 @@ impl AccessPayload {
             | ("console.auth.session.read", "GET", "/control/v1/session")
             | ("console.auth.session.logout", "POST", "/control/v1/session/logout")
             | ("console.health.read", "GET", "/control/v1/audit/health")
+            | ("console.site.config.read", "GET", "/control/v1/site-config")
+            | ("console.site.config.write", "PUT", "/control/v1/site-config")
+            | ("console.site.config.read", "GET", "/control/v1/sites/{site_id}/config")
+            | ("console.site.config.read", "GET", "/control/v1/sites/{site_id}")
+            | ("console.site.config.write", "PUT", "/control/v1/sites/{site_id}/config")
+            | ("console.site.config.write", "PATCH", "/control/v1/sites/{site_id}")
+            | ("console.sites.list", "GET", "/control/v1/sites")
+            | ("console.site.create", "POST", "/control/v1/sites")
+            | ("console.site.delete", "DELETE", "/control/v1/sites/{site_id}")
+            | ("console.site.status.read", "GET", "/control/v1/sites/{site_id}/status")
+            | ("console.site.status.read", "GET", "/control/v1/sites/{site_id}/health")
+            | ("console.site.status.read", "GET", "/control/v1/sites/{site_id}/revisions")
+            | ("console.site.config.validate", "POST", "/control/v1/sites/{site_id}/validate")
+            | ("console.site.config.apply", "POST", "/control/v1/sites/{site_id}/apply")
+            | ("console.site.config.rollback", "POST", "/control/v1/sites/{site_id}/rollback")
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests")

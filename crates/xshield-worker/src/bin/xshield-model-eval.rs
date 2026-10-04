@@ -5,12 +5,18 @@ use tokio::sync::oneshot;
 
 async fn run() -> Result<bool, &'static str> {
     let mut args = env::args_os().skip(1);
-    if args.next().as_deref() != Some(std::ffi::OsStr::new("--approved-input")) {
+    let mode = args.next().ok_or("MODEL_CONFIG_INVALID")?;
+    if mode != "--approved-input" && mode != "--validate-input" {
         return Err("MODEL_CONFIG_INVALID");
     }
     let input = PathBuf::from(args.next().ok_or("MODEL_CONFIG_INVALID")?);
     if args.next().is_some() {
         return Err("MODEL_CONFIG_INVALID");
+    }
+    if mode == "--validate-input" {
+        xshield_worker::model_eval::validate_file(&input)?;
+        println!("MODEL_INPUT_VALID");
+        return Ok(true);
     }
     let (sender, mut cancel) = oneshot::channel();
     let evaluation = xshield_worker::model_eval::evaluate_file(&input, &mut cancel);
@@ -37,7 +43,9 @@ async fn main() {
         Ok(true) => {}
         Ok(false) => std::process::exit(1),
         Err(reason) => {
-            eprintln!("{reason}; usage: xshield-model-eval --approved-input PRIVATE_JSON_FILE");
+            eprintln!(
+                "{reason}; usage: xshield-model-eval --approved-input|--validate-input PRIVATE_JSON_FILE"
+            );
             std::process::exit(1);
         }
     }

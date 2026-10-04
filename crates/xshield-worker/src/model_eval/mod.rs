@@ -183,6 +183,27 @@ fn read_input(path: &Path) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     Ok(bytes)
 }
 
+/// Checks one private offline input and the bounded Jev wire body without
+/// opening network, evidence storage, or model admission resources.
+///
+/// This validates syntax and size only; it cannot attest operator claims,
+/// approve disclosure, perform inference, or grant a business operation.
+///
+/// # Errors
+/// Returns the same stable input reason as the evaluation path. It emits no
+/// model text, credentials, or evidence content.
+pub fn validate_file(path: &Path) -> Result<(), &'static str> {
+    let bytes = read_input(path)?;
+    let input = Input::parse(&bytes)?;
+    input.api_bytes_for_model(
+        "req_01a0afa6-3320-7791-8f45-b4d5a34ffb57",
+        "mdl_01a0afa6-3320-7791-8f45-b4d5a34ffb58",
+        "artifact_01a0afa6-3320-7791-8f45-b4d5a34ffb59",
+        GATEWAY_MODEL,
+    )?;
+    Ok(())
+}
+
 struct Attempt {
     tenant: TenantId,
     site: SiteId,

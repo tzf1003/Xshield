@@ -271,8 +271,10 @@ async fn storage_capacity_exclusivity_and_input_permissions_are_enforced() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(read_input(&path).is_err());
+        assert!(validate_file(&path).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(read_input(&path).is_ok());
+        assert!(validate_file(&path).is_ok());
         let link = fixture.root.join("link.json");
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(read_input(&link).is_err());

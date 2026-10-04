@@ -18,7 +18,10 @@ const DIRECT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const GATEWAY_ENDPOINT: &str = "https://ai-gateway.vercel.sh/typesafe/v1/systemone";
 /// The fixed maximum provider exchange window. Admission confirmation may
 /// shorten this window so an exchange cannot outlive its private lease.
-pub(super) const PROVIDER_SEND_DEADLINE: Duration = Duration::from_secs(10);
+// Gateway-backed JEV calls can include provider routing and fallback selection;
+// keep the bounded deadline long enough for a normal routed response while
+// still failing closed when the provider is unavailable.
+pub(super) const PROVIDER_SEND_DEADLINE: Duration = Duration::from_secs(20);
 const RESPONSE_LIMIT: usize = 65_536;
 type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 

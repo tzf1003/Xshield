@@ -5,6 +5,7 @@
 //! The caller owns response byte limits, evidence capture, and terminal audit.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 use super::RESPONSE_INVALID;
 
@@ -16,7 +17,14 @@ const DECIMAL_BYTES_MAX: usize = 64;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ProviderMetadata {
+    typesafe: Option<TypeSafeMetadata>,
     gateway: Option<GatewayMetadata>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TypeSafeMetadata {
+    confidence: Option<BTreeMap<String, f64>>,
 }
 
 #[derive(Deserialize)]
@@ -28,6 +36,9 @@ struct GatewayMetadata {
     market_cost: Option<String>,
     surcharge_cost: Option<String>,
     gateway_cost: Option<String>,
+    inference_cost: Option<String>,
+    input_inference_cost: Option<String>,
+    output_inference_cost: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -40,6 +51,33 @@ struct GatewayRouting {
     // Retain the routing-level fields accepted by earlier adapter fixtures.
     generation_id: Option<String>,
     cost: Option<f64>,
+    fallbacks_available: Option<Vec<String>>,
+    planning_reasoning: Option<String>,
+    model_attempt_count: Option<u32>,
+    model_attempts: Option<Vec<ModelAttempt>>,
+    total_provider_attempt_count: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ModelAttempt {
+    canonical_slug: String,
+    #[allow(dead_code)]
+    success: bool,
+    provider_attempt_count: u32,
+    provider_attempts: Vec<ProviderAttempt>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProviderAttempt {
+    provider: String,
+    credential_type: String,
+    #[allow(dead_code)]
+    success: bool,
+    start_time: u64,
+    end_time: u64,
+    status_code: u16,
 }
 
 impl ProviderMetadata {
@@ -50,6 +88,16 @@ impl ProviderMetadata {
     /// caller records the captured response and terminal validation failure.
     /// This consumes diagnostics without publishing or calculating any cost.
     pub(super) fn validate(self) -> Result<(), &'static str> {
+        if let Some(typesafe) = self.typesafe
+            && typesafe.confidence.is_some_and(|values| {
+                values.len() > 64
+                    || values.iter().any(|(key, value)| {
+                        !valid_identifier(key) || !value.is_finite() || !(0.0..=1.0).contains(value)
+                    })
+            })
+        {
+            return Err(RESPONSE_INVALID);
+        }
         let Some(gateway) = self.gateway else {
             return Ok(());
         };
@@ -62,6 +110,9 @@ impl ProviderMetadata {
                 gateway.market_cost,
                 gateway.surcharge_cost,
                 gateway.gateway_cost,
+                gateway.inference_cost,
+                gateway.input_inference_cost,
+                gateway.output_inference_cost,
             ]
             .into_iter()
             .flatten()
@@ -85,6 +136,45 @@ impl ProviderMetadata {
             || routing
                 .cost
                 .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+        {
+            return Err(RESPONSE_INVALID);
+        }
+        if routing.fallbacks_available.as_ref().is_some_and(|values| {
+            values.len() > 16 || values.iter().any(|value| !valid_identifier(value))
+        }) || routing
+            .planning_reasoning
+            .as_deref()
+            .is_some_and(|value| value.len() > 4096)
+            || routing.model_attempts.as_ref().is_some_and(|attempts| {
+                attempts.len() > 16
+                    || attempts.iter().any(|attempt| {
+                        !valid_identifier(&attempt.canonical_slug)
+                            || attempt.provider_attempt_count as usize
+                                != attempt.provider_attempts.len()
+                            || attempt.provider_attempts.len() > 16
+                            || attempt.provider_attempts.iter().any(|provider| {
+                                !valid_identifier(&provider.provider)
+                                    || !valid_identifier(&provider.credential_type)
+                                    || provider.end_time < provider.start_time
+                                    || !(100..=599).contains(&provider.status_code)
+                            })
+                    })
+            })
+            || routing.model_attempt_count.is_some_and(|count| {
+                routing
+                    .model_attempts
+                    .as_ref()
+                    .is_some_and(|attempts| usize::try_from(count).ok() != Some(attempts.len()))
+            })
+            || routing.total_provider_attempt_count.is_some_and(|count| {
+                routing.model_attempts.as_ref().is_some_and(|attempts| {
+                    let total = attempts
+                        .iter()
+                        .map(|attempt| attempt.provider_attempts.len())
+                        .sum::<usize>();
+                    usize::try_from(count).ok() != Some(total)
+                })
+            })
         {
             return Err(RESPONSE_INVALID);
         }
