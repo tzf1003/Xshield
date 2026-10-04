@@ -68,6 +68,13 @@ def main() -> int:
                 emitted[(event_type, method, resolved)] = where
 
     worker_text = WORKER.read_text(encoding="utf-8")
+    # The publisher first asks `supports(event_type)`; an event type missing there skips
+    # the management parser entirely, even when the matrix below lists it.
+    supports_body = worker_text.split("fn supports(", 1)[1].split("\n}\n", 1)[0]
+    supported = set(re.findall(r'"([a-z_.]+)"', supports_body))
+    unsupported = sorted({event_type for event_type, _, _ in emitted} - supported)
+    for event_type in unsupported:
+        print(f"NOT IN supports(): {event_type}", file=sys.stderr)
     matrix = {
         (event_type, method, route)
         for events, method, route in MATRIX.findall(worker_text)
@@ -79,7 +86,7 @@ def main() -> int:
         print(f"UNRESOLVED path constant: {line}", file=sys.stderr)
     for (event_type, method, path), where in missing:
         print(f"NOT PUBLISHABLE: {event_type} {method} {path}  (emitted in {where})", file=sys.stderr)
-    if unresolved or missing:
+    if unresolved or missing or unsupported:
         print("Extend crates/xshield-worker/src/control_audit.rs (supports + validate_targets) "
               "and its tests for each entry above.", file=sys.stderr)
         return 1

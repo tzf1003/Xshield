@@ -8,7 +8,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 ROOT = Path(__file__).resolve().parents[1]
 # Repository-owned contracts only. Local automation and package installations
 # may carry valid JSON/YAML with unrelated external links and schemas.
-DISCOVERY_EXCLUDED_PARTS = frozenset({'validation', 'target', '.codex', 'node_modules'})
+DISCOVERY_EXCLUDED_PARTS = frozenset({'validation', 'target', '.codex', '.claude', 'node_modules'})
 checks: list[dict[str, object]] = []
 def check(name: str, ok: bool, detail: str = '') -> None:
     checks.append({'name': name, 'passed': bool(ok), 'detail': detail})

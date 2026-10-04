@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3853,
-  "passed_count": 3853,
+  "checks_total": 3854,
+  "passed_count": 3854,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -157,6 +157,11 @@
     },
     {
       "name": "json:web/console/package.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/test-results/.last-run.json",
       "passed": true,
       "detail": ""
     },
