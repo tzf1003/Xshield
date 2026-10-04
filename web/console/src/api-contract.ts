@@ -126,6 +126,11 @@ export const messages = {
   CONTROL_SITE_POLICY_INVALID: "站点策略未通过校验，请修正后重试。",
   CONTROL_SITE_PORT_UNAVAILABLE: "站点监听端口不可用，请选择其他端口。",
   CONTROL_SITE_APPROVAL_REQUIRED: "该发布需要独立审批后才能继续。",
+  CONTROL_SITE_APPROVAL_REVISION_MISMATCH: "待审批的修订在审阅后已变化，请重新读取并审阅后再批准。",
+  CONTROL_SITE_DRAFT_NOT_APPLICABLE: "草稿站点不会被应用；先通过审批把状态改为启用。",
+  CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED:
+    "该保存已被更新的修订取代，请重新读取站点后再操作，不要原样重试。",
+  CONTROL_SITE_DELETE_STEP_UP_REQUIRED: "删除站点需要最近完成的 MFA 再认证，请先重新验证后重试。",
   CONTROL_SITE_APPROVAL_SELF_REJECTED: "发布者不能审批自己的变更。",
   CONTROL_SITE_APPROVAL_NOT_REQUIRED: "当前发布不需要审批。",
   CONTROL_SITE_ROLLBACK_UNAVAILABLE: "站点回滚状态暂时不可用，请稍后重试。",
