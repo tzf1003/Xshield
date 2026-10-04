@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -14,16 +14,24 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
 use tokio::{io::AsyncWriteExt, net::TcpListener};
-use xshield_core::{GatewayApplyAck, GatewayApplyRequest};
+use xshield_core::{
+    GatewayApplyAck, GatewayApplyRequest,
+    edge_channel::{APPLY_ACK_SIGNATURE_HEADER, APPLY_SIGNATURE_HEADER, apply_ack_message},
+};
 
 use crate::durable_audit::AuditReadiness;
+use crate::edge_health::HealthGate;
 use crate::listener_supervisor::{ApplyError, ListenerSupervisor};
 use xshield_gateway::{MAX_CONFIG_BYTES, multi_site::GatewaySnapshot};
 
-const SIGNATURE_HEADER: &str = "x-xshield-apply-signature";
+const SIGNATURE_HEADER: &str = APPLY_SIGNATURE_HEADER;
+// Built at compile time: `from_static` rejects an invalid name there, so no
+// request can ever reach a panic on it.
+const ACK_SIGNATURE_HEADER: HeaderName = HeaderName::from_static(APPLY_ACK_SIGNATURE_HEADER);
 const MAX_APPLY_BYTES: usize = MAX_CONFIG_BYTES * 8;
 
 /// Authenticated state shared by the loopback apply handler.
@@ -32,6 +40,7 @@ pub struct ApplyState {
     supervisor: Arc<ListenerSupervisor>,
     tenant_id: String,
     key: [u8; 32],
+    health: Arc<HealthGate>,
     snapshot_path: Option<Arc<PathBuf>>,
     apply_lock: Arc<Mutex<()>>,
     audit: AuditReadiness,
@@ -51,6 +60,7 @@ impl ApplyState {
             supervisor,
             tenant_id,
             key,
+            health: Arc::new(HealthGate::new(key)),
             snapshot_path: snapshot_path.map(Arc::new),
             apply_lock: Arc::new(Mutex::new(())),
             audit,
@@ -170,38 +180,63 @@ async fn apply_handler(
             "EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE",
         );
     }
-    (
-        StatusCode::OK,
-        axum::Json(GatewayApplyAck {
+    signed_ack_response(
+        &state.key,
+        &expected,
+        &GatewayApplyAck {
             apply_id,
             active_revision,
             apply_state: "active".to_owned(),
             reason_code: "EDGE_APPLY_CONFIRMED".to_owned(),
-        }),
+        },
     )
-        .into_response()
 }
 
-async fn health_handler(State(state): State<ApplyState>, headers: HeaderMap) -> Response {
-    // Health is intentionally on the same authenticated loopback channel;
-    // unauthenticated liveness probes must not disclose tenant topology.
-    let mut signatures = headers.get_all(SIGNATURE_HEADER).iter();
-    let Some(signature) = signatures
-        .next()
-        .filter(|_| signatures.next().is_none())
-        .and_then(|value| value.to_str().ok())
-        .and_then(decode_hex)
-    else {
-        return error(StatusCode::UNAUTHORIZED, "EDGE_APPLY_SIGNATURE_INVALID");
-    };
-    let Some(expected) = sign(&state.key, b"health-v1") else {
+/// The acknowledgement, signed with the shared key over a message that
+/// includes the signature of the request it answers. The control plane can
+/// then tell the edge's answer from anything else able to reach its socket,
+/// and cannot be handed the acknowledgement of a different apply.
+fn signed_ack_response(
+    key: &[u8; 32],
+    request_signature: &[u8],
+    ack: &GatewayApplyAck,
+) -> Response {
+    let Ok(body) = serde_json::to_vec(ack) else {
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "EDGE_APPLY_SIGNATURE_UNAVAILABLE",
         );
     };
-    if !memcmp::eq(&expected, &signature) {
-        return error(StatusCode::UNAUTHORIZED, "EDGE_APPLY_SIGNATURE_INVALID");
+    let message = apply_ack_message(&lower_hex(request_signature), &body);
+    let Some(signature) = sign(key, &message) else {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EDGE_APPLY_SIGNATURE_UNAVAILABLE",
+        );
+    };
+    let Ok(signature) = HeaderValue::from_str(&lower_hex(&signature)) else {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EDGE_APPLY_SIGNATURE_UNAVAILABLE",
+        );
+    };
+    let mut response = (
+        StatusCode::OK,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        body,
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(ACK_SIGNATURE_HEADER, signature);
+    response
+}
+
+async fn health_handler(State(state): State<ApplyState>, headers: HeaderMap) -> Response {
+    // Health is intentionally on the same authenticated loopback channel;
+    // unauthenticated liveness probes must not disclose tenant topology.
+    if let Err(refusal) = state.health.check(&headers, unix_now(), Instant::now()) {
+        return refusal.response();
     }
     let snapshot = state.supervisor.current();
     let listener_count = state.supervisor.listener_count().await;
@@ -216,6 +251,15 @@ async fn health_handler(State(state): State<ApplyState>, headers: HeaderMap) -> 
         )),
     )
         .into_response()
+}
+
+/// Seconds since the epoch. An unreadable clock reads as 0, which is outside
+/// every request's window, so a broken clock refuses health requests instead
+/// of accepting stale ones.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// Edge health as observed by this process. `audit_state` mirrors the durable
@@ -244,7 +288,7 @@ struct ErrorBody {
     reason_code: &'static str,
 }
 
-fn error(status: StatusCode, reason_code: &'static str) -> Response {
+pub(crate) fn error(status: StatusCode, reason_code: &'static str) -> Response {
     (
         status,
         axum::Json(ErrorBody {
@@ -255,7 +299,7 @@ fn error(status: StatusCode, reason_code: &'static str) -> Response {
         .into_response()
 }
 
-fn sign(key: &[u8; 32], body: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn sign(key: &[u8; 32], body: &[u8]) -> Option<Vec<u8>> {
     let key = PKey::hmac(key).ok()?;
     let mut signer = Signer::new(MessageDigest::sha256(), &key).ok()?;
     signer.update(body).ok()?;
@@ -324,6 +368,7 @@ pub(crate) fn load_persisted_snapshot(
             "persisted edge snapshot failed validation",
         )
     })?;
+    restrict_to_owner(path);
     Ok(Some((envelope.request, snapshot)))
 }
 
@@ -332,10 +377,7 @@ async fn write_pending_snapshot(
     request: &GatewayApplyRequest,
     signature: &[u8],
 ) -> Result<(), std::io::Error> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let parent = parent_directory(path);
     tokio::fs::create_dir_all(parent).await?;
     let pending = pending_path(path);
     let temporary = temporary_path(&pending);
@@ -349,15 +391,55 @@ async fn write_pending_snapshot(
             "persisted edge snapshot cannot be serialized",
         )
     })?;
-    let mut file = tokio::fs::File::create(&temporary).await?;
+    // The snapshot is the complete tenant routing and policy set, so it is
+    // created readable by the edge user only. The mode is set at creation
+    // (a later chmod would leave a window in which another local user could
+    // open the file) and `create_new` refuses to follow a pre-planted name.
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options.open(&temporary).await?;
     file.write_all(&bytes).await?;
     file.sync_all().await?;
     drop(file);
-    tokio::fs::rename(&temporary, &pending).await
+    tokio::fs::rename(&temporary, &pending).await?;
+    // A rename is durable only once the directory entry is: without this a
+    // power loss after the 200 could resurrect the previous snapshot.
+    sync_directory(parent).await
 }
 
 async fn promote_pending_snapshot(path: &Path) -> Result<(), std::io::Error> {
-    tokio::fs::rename(pending_path(path), path).await
+    tokio::fs::rename(pending_path(path), path).await?;
+    sync_directory(parent_directory(path)).await
+}
+
+fn parent_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Flushes a directory so a rename inside it survives a crash. A failure is
+/// reported, not ignored: the caller then refuses or fails closed instead of
+/// acknowledging a snapshot that a restart could lose.
+async fn sync_directory(directory: &Path) -> Result<(), std::io::Error> {
+    tokio::fs::File::open(directory).await?.sync_all().await
+}
+
+/// Tightens a snapshot written before files were created with mode 0600, so a
+/// deployment is not left exposed until its next apply rewrites the file.
+/// Failing to chmod (for example a read-only volume) must not stop the edge
+/// from serving the snapshot it was configured with, so it is only reported.
+fn restrict_to_owner(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    // Any group or other permission bit means someone else can read the file.
+    if metadata.permissions().mode() & 0o077 != 0
+        && let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    {
+        eprintln!("xshield edge could not restrict the snapshot file mode: {error}");
+    }
 }
 
 async fn remove_pending_snapshot(path: &Path) -> Result<(), std::io::Error> {
@@ -402,7 +484,7 @@ pub fn key_from_hex(value: &str) -> Option<[u8; 32]> {
     Some(key)
 }
 
-fn decode_hex(value: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_hex(value: &str) -> Option<Vec<u8>> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
@@ -439,6 +521,165 @@ mod tests {
         assert_eq!(
             health_body("tenant_a", 0, 0, 0, true)["edge_state"],
             "unavailable"
+        );
+    }
+
+    fn empty_request(revision: u64) -> GatewayApplyRequest {
+        GatewayApplyRequest {
+            protocol_version: 1,
+            tenant_id: "tenant_a".to_owned(),
+            apply_id: "apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01".to_owned(),
+            snapshot_revision: revision,
+            sites: Vec::new(),
+        }
+    }
+
+    fn scratch_directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xshield-apply-{name}-{}", uuid::Uuid::now_v7()))
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn leftovers(directory: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    // Reviewer finding: the pending and active snapshot files were created
+    // with `File::create`, i.e. 0666 minus the process umask (0644 under the
+    // usual 022), so any local user could read the complete tenant routing
+    // and policy snapshot the control plane had pushed.
+    #[tokio::test]
+    async fn persisted_snapshots_are_private_to_the_edge_user() {
+        let directory = scratch_directory("private");
+        let path = directory.join("edge").join("snapshot.json");
+        write_pending_snapshot(&path, &empty_request(1), b"signature")
+            .await
+            .unwrap();
+        assert_eq!(mode_of(&pending_path(&path)), 0o600);
+        promote_pending_snapshot(&path).await.unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(
+            leftovers(&directory.join("edge")),
+            ["snapshot.json"],
+            "no pending or temporary file may outlive a promotion"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // A restart must not leave an old deployment exposed until its next apply:
+    // a file written by an edge from before the fix is tightened when loaded.
+    #[test]
+    fn a_snapshot_written_by_an_older_edge_is_made_private_when_it_is_loaded() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = scratch_directory("legacy");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("snapshot.json");
+        let key = [7_u8; 32];
+        let request = empty_request(1);
+        let signature = sign(&key, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let envelope = PersistedSnapshot {
+            request,
+            signature: lower_hex(&signature),
+        };
+        std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let loaded = load_persisted_snapshot(&path, &key, "tenant_a").unwrap();
+        assert_eq!(loaded.unwrap().1.revision(), 1);
+        assert_eq!(mode_of(&path), 0o600);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // That the kernel really flushes the directory entry cannot be observed
+    // from a unit test; what can be pinned is that a failure to do so is an
+    // error the apply handler turns into a refusal, never a silent success.
+    #[tokio::test]
+    async fn a_directory_that_cannot_be_synced_is_an_error_not_a_success() {
+        let directory = scratch_directory("sync");
+        std::fs::create_dir_all(&directory).unwrap();
+        sync_directory(&directory).await.unwrap();
+        assert!(sync_directory(&directory.join("missing")).await.is_err());
+        let path = directory.join("snapshot.json");
+        // Nothing to promote: the rename fails before any sync is attempted.
+        assert!(promote_pending_snapshot(&path).await.is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_apply_replaces_the_pending_file_without_leaving_temporaries() {
+        let directory = scratch_directory("rewrite");
+        let path = directory.join("snapshot.json");
+        for revision in [1, 2] {
+            write_pending_snapshot(&path, &empty_request(revision), b"signature")
+                .await
+                .unwrap();
+            promote_pending_snapshot(&path).await.unwrap();
+        }
+        assert_eq!(leftovers(&directory), ["snapshot.json"]);
+        assert_eq!(mode_of(&path), 0o600);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn pinned_ack() -> GatewayApplyAck {
+        GatewayApplyAck {
+            apply_id: "apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01".to_owned(),
+            active_revision: 7,
+            apply_state: "active".to_owned(),
+            reason_code: "EDGE_APPLY_CONFIRMED".to_owned(),
+        }
+    }
+
+    // Reviewer finding: the answer to an apply was plain JSON, so anything able
+    // to answer on the edge's port could confirm a snapshot the edge never
+    // applied. The expected values were computed independently with Python's
+    // `hmac`; the control plane's tests pin the same literals from its side.
+    #[tokio::test]
+    async fn the_apply_acknowledgement_is_signed_over_the_request_it_answers() {
+        let key = key_from_hex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+            .unwrap();
+        let response = signed_ack_response(&key, &[0xab_u8; 32], &pinned_ack());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(
+            response
+                .headers()
+                .get_all(&ACK_SIGNATURE_HEADER)
+                .iter()
+                .count(),
+            1
+        );
+        let signature = response.headers()[&ACK_SIGNATURE_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            &body[..],
+            br#"{"apply_id":"apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01","active_revision":7,"apply_state":"active","reason_code":"EDGE_APPLY_CONFIRMED"}"#
+        );
+        assert_eq!(
+            signature,
+            "0611268a882723b00c849321661f8020d1c627074fd8031173a5420415e2e5f3"
+        );
+        // Another request, another key: another tag.
+        let other_request = signed_ack_response(&key, &[0xcd_u8; 32], &pinned_ack());
+        assert_ne!(
+            other_request.headers()[&ACK_SIGNATURE_HEADER],
+            signature.as_str()
+        );
+        let other_key = signed_ack_response(&[1_u8; 32], &[0xab_u8; 32], &pinned_ack());
+        assert_ne!(
+            other_key.headers()[&ACK_SIGNATURE_HEADER],
+            signature.as_str()
         );
     }
 

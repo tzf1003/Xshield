@@ -5,18 +5,22 @@ use reconcile::{IncompleteRequest, incomplete_requests};
 use serde::Serialize;
 use std::{
     fmt,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
+    time::Duration,
 };
 use tokio::task::JoinError;
 use uuid::Uuid;
 use xshield_audit::{
-    JournalError, JournalKey, JournalReceipt, JournalRecord, LocalJournal, RecoveryReport,
+    JournalError, JournalKey, JournalLimits, JournalReceipt, JournalRecord, LocalJournal,
+    RecoveryReport,
 };
 use xshield_core::audit::ReasonCode;
 use xshield_core::domain::{EventId, InvalidValue, PageEvidenceId};
+use zeroize::Zeroizing;
 
 use xshield_gateway::request_crypto::{
     RequestCryptoCompatibilityRule, RequestCryptoEvidence, RequestCryptoObserveRule,
@@ -50,13 +54,32 @@ fn barrier_open(ready: &AtomicBool, failure_code: &AtomicU8) -> bool {
 
 #[derive(Clone)]
 pub(crate) struct DurableAudit {
-    journal: Arc<Mutex<LocalJournal>>,
+    /// `None` only while a failed writer has been released and its replacement
+    /// is not yet open; appends then fail closed with `Unavailable`.
+    journal: Arc<Mutex<Option<LocalJournal>>>,
     ready: Arc<AtomicBool>,
     failure_code: Arc<AtomicU8>,
     tenant_id: String,
     site_id: String,
     policy_revision: String,
     producer_id: String,
+    /// What it takes to reopen the journal after a durability failure; absent
+    /// for writers built without a recoverable key.
+    reopen: Option<Arc<ReopenSource>>,
+}
+
+/// Material for reopening the journal in process. `LocalJournal::open` is the
+/// only supported way back from a poisoned or quota-stale writer: it
+/// re-authenticates every segment, repairs an incomplete tail and recomputes
+/// the bytes in use from disk.
+struct ReopenSource {
+    key_hex: Zeroizing<String>,
+    directory: PathBuf,
+    key_id: String,
+    limits: JournalLimits,
+    /// The journal only reopens while it is under this size, so a nearly full
+    /// directory cannot flap between open and closed.
+    high_watermark_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -375,18 +398,36 @@ impl DurableAudit {
         )?;
         let incomplete = incomplete_requests(&journal, config)?;
         let audit = Self {
-            journal: Arc::new(Mutex::new(journal)),
+            journal: Arc::new(Mutex::new(Some(journal))),
             ready: Arc::new(AtomicBool::new(true)),
             failure_code: Arc::new(AtomicU8::new(0)),
             tenant_id: config.tenant_id().as_str().to_owned(),
             site_id: config.site_id().as_str().to_owned(),
             policy_revision: config.policy_revision().as_str().to_owned(),
             producer_id: config.audit_producer_id().to_owned(),
+            reopen: None,
         };
         if recovery.truncated_bytes > 0 {
             audit.record_recovery(recovery)?;
         }
         audit.record_incomplete(incomplete)?;
+        Ok(audit)
+    }
+
+    /// Opens the journal like [`Self::open`] and keeps what [`Self::try_reopen`]
+    /// needs to bring the barrier back after a durability failure.
+    pub(crate) fn open_recoverable(
+        config: &GatewayConfig,
+        key_hex: &str,
+    ) -> Result<Self, DurableAuditError> {
+        let mut audit = Self::open(config, JournalKey::from_hex(key_hex)?)?;
+        audit.reopen = Some(Arc::new(ReopenSource {
+            key_hex: Zeroizing::new(key_hex.to_owned()),
+            directory: config.audit_directory().to_owned(),
+            key_id: config.audit_key_id().to_owned(),
+            limits: config.audit_limits(),
+            high_watermark_bytes: config.audit_high_watermark_bytes(),
+        }));
         Ok(audit)
     }
 
@@ -415,7 +456,81 @@ impl DurableAudit {
             site_id: config.site_id().as_str().to_owned(),
             policy_revision: config.policy_revision().as_str().to_owned(),
             producer_id: config.audit_producer_id().to_owned(),
+            reopen: self.reopen.clone(),
         }
+    }
+
+    /// Durably records the refusals counted for one listener port: requests no
+    /// site snapshot routes. One bounded `edge.unrouted_denied` summary stands
+    /// for all of them (see `unrouted.rs`); the barrier applies like any write.
+    pub(crate) async fn record_unrouted(
+        &self,
+        summary: &crate::unrouted::UnroutedSummary,
+    ) -> Result<(), DurableAuditError> {
+        let event = PendingEvent::new(
+            new_event_id()?,
+            "edge.unrouted_denied",
+            1,
+            Vec::new(),
+            Payload::Unrouted {
+                listener_port: summary.listener_port,
+                denied_count: summary.denied_count,
+                first_seen_unix: summary.first_seen_unix,
+                last_seen_unix: summary.last_seen_unix,
+                sample_host: summary.sample_host.clone(),
+                reason_code: ReasonCode::HostNotRouted.as_str(),
+            },
+        );
+        self.append(
+            BatchContext {
+                request_id: None,
+                trace_id: new_trace_id(),
+            },
+            vec![event],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Tries once to bring a closed barrier back; admission stays refused until
+    /// this succeeds.
+    ///
+    /// The journal is only touched when its directory is below the high
+    /// watermark, so probing a still-full journal costs one directory listing
+    /// and creates no segment. The old writer is released first (the single
+    /// writer lock forbids two), the journal is reopened through recovery, and
+    /// the reopen is recorded durably (`audit.recovered` /
+    /// `AUDIT_BARRIER_REOPENED`) before the flags flip, so the gap is evident
+    /// in the audit trail. Requests whose terminal event was lost during the
+    /// outage are repaired by the existing startup reconciliation, not here: a
+    /// request may still be in flight and must not receive a second terminal.
+    ///
+    /// # Errors
+    /// Returns the reason the barrier stays closed.
+    pub(crate) async fn try_reopen(&self) -> Result<(), DurableAuditError> {
+        if self.is_ready() {
+            return Ok(());
+        }
+        let source = self
+            .reopen
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(DurableAuditError::Unavailable)?;
+        let journal = Arc::clone(&self.journal);
+        let scope = (
+            self.tenant_id.clone(),
+            self.site_id.clone(),
+            self.policy_revision.clone(),
+            self.producer_id.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            reopen_blocking(&journal, &source, (&scope.0, &scope.1, &scope.2, &scope.3))
+        })
+        .await
+        .map_err(DurableAuditError::Join)??;
+        self.failure_code.store(0, Ordering::Release);
+        self.ready.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub(crate) fn observe_failure(&self, error: &DurableAuditError) {
@@ -1128,8 +1243,131 @@ fn edge_response_reason(facts: &FinalFacts<'_>) -> ReasonCode {
     }
 }
 
+/// Bytes held by journal segments in `directory`: the same quantity the
+/// journal counts against its quota, read from disk without opening it.
+fn segment_bytes_on_disk(directory: &Path) -> Result<u64, DurableAuditError> {
+    let mut total = 0_u64;
+    for entry in std::fs::read_dir(directory).map_err(JournalError::Io)? {
+        let entry = entry.map_err(JournalError::Io)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with("segment-")
+            && Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension == "xja")
+        {
+            total = total.saturating_add(entry.metadata().map_err(JournalError::Io)?.len());
+        }
+    }
+    Ok(total)
+}
+
+fn reopen_blocking(
+    journal: &Arc<Mutex<Option<LocalJournal>>>,
+    source: &ReopenSource,
+    scope: (&str, &str, &str, &str),
+) -> Result<(), DurableAuditError> {
+    if segment_bytes_on_disk(&source.directory)? >= source.high_watermark_bytes {
+        return Err(DurableAuditError::Unavailable);
+    }
+    // A poisoned mutex only means a writer panicked mid-append; the handle is
+    // discarded below, so its contents no longer matter.
+    let mut slot = journal
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Release the failed writer (and its single-writer lock) before reopening.
+    drop(slot.take());
+    let (mut opened, report) = LocalJournal::open(
+        &source.directory,
+        &source.key_id,
+        JournalKey::from_hex(&source.key_hex)?,
+        source.limits,
+    )?;
+    if opened.status().high_watermark_reached {
+        // Raced with new writes; keep the healthy handle but stay closed.
+        *slot = Some(opened);
+        return Err(DurableAuditError::Unavailable);
+    }
+    let event = PendingEvent::new(
+        new_event_id()?,
+        "audit.recovered",
+        1,
+        Vec::new(),
+        Payload::Recovery {
+            recovered_records: report.recovered_records,
+            truncated_bytes: report.truncated_bytes,
+            reason_code: ReasonCode::AuditBarrierReopened.as_str(),
+        },
+    );
+    let appended = append_events(
+        &mut opened,
+        scope.0,
+        scope.1,
+        scope.2,
+        scope.3,
+        &BatchContext {
+            request_id: None,
+            trace_id: new_trace_id(),
+        },
+        &[event],
+    );
+    *slot = Some(opened);
+    appended.map(|_| ())
+}
+
+/// Bounded exponential backoff between reopen attempts.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecoveryBackoff {
+    initial: Duration,
+    max: Duration,
+}
+
+impl RecoveryBackoff {
+    pub(crate) const PRODUCTION: Self = Self {
+        initial: Duration::from_secs(1),
+        max: Duration::from_secs(30),
+    };
+
+    fn next(self, current: Duration) -> Duration {
+        current.saturating_mul(2).min(self.max)
+    }
+}
+
+/// Keeps the admission barrier recoverable: while it is closed, retries
+/// [`DurableAudit::try_reopen`] with bounded backoff until it succeeds or the
+/// process shuts down. While it is open this only polls an atomic flag.
+pub(crate) async fn supervise_recovery(
+    audit: DurableAudit,
+    backoff: RecoveryBackoff,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut delay = backoff.initial;
+    loop {
+        let wait = if audit.is_ready() {
+            delay = backoff.initial;
+            backoff.initial
+        } else {
+            delay
+        };
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            _ = shutdown.changed() => return,
+        }
+        if audit.is_ready() {
+            continue;
+        }
+        delay = if audit.try_reopen().await.is_ok() {
+            backoff.initial
+        } else {
+            backoff.next(delay)
+        };
+    }
+}
+
 fn append_locked(
-    journal: &Arc<Mutex<LocalJournal>>,
+    journal: &Arc<Mutex<Option<LocalJournal>>>,
     tenant_id: &str,
     site_id: &str,
     policy_revision: &str,
@@ -1137,9 +1375,30 @@ fn append_locked(
     context: &BatchContext,
     events: &[PendingEvent],
 ) -> Result<Vec<JournalReceipt>, DurableAuditError> {
-    let mut journal = journal
+    let mut slot = journal
         .lock()
         .map_err(|_| DurableAuditError::LockPoisoned)?;
+    let journal = slot.as_mut().ok_or(DurableAuditError::Unavailable)?;
+    append_events(
+        journal,
+        tenant_id,
+        site_id,
+        policy_revision,
+        producer_id,
+        context,
+        events,
+    )
+}
+
+fn append_events(
+    journal: &mut LocalJournal,
+    tenant_id: &str,
+    site_id: &str,
+    policy_revision: &str,
+    producer_id: &str,
+    context: &BatchContext,
+    events: &[PendingEvent],
+) -> Result<Vec<JournalReceipt>, DurableAuditError> {
     let first_sequence = journal
         .next_sequence()
         .ok_or(DurableAuditError::SequenceExhausted)?;
@@ -1420,6 +1679,14 @@ enum Payload {
         truncated_bytes: u64,
         reason_code: &'static str,
     },
+    Unrouted {
+        listener_port: u16,
+        denied_count: u64,
+        first_seen_unix: u64,
+        last_seen_unix: u64,
+        sample_host: Option<String>,
+        reason_code: &'static str,
+    },
 }
 
 #[derive(Serialize)]
@@ -1582,8 +1849,18 @@ mod tests {
         std::env::temp_dir().join(format!("xshield-gateway-audit-{}", Uuid::now_v7()))
     }
 
-    #[allow(clippy::too_many_lines)]
     fn config(directory: &std::path::Path, max_bytes: u64) -> GatewayConfig {
+        config_segmented(directory, max_bytes, max_bytes)
+    }
+
+    // Small segments rotate often, leaving closed segments an operator or the
+    // publisher can later remove to free quota.
+    #[allow(clippy::too_many_lines)]
+    fn config_segmented(
+        directory: &std::path::Path,
+        max_bytes: u64,
+        segment_bytes: u64,
+    ) -> GatewayConfig {
         let json = serde_json::json!({
             "listen": "127.0.0.1:6188",
             "origin": {
@@ -1600,7 +1877,7 @@ mod tests {
                 "producer_id": "edge-test",
                 "max_bytes": max_bytes,
                 "high_watermark_bytes": max_bytes / 2,
-                "segment_max_bytes": max_bytes
+                "segment_max_bytes": segment_bytes
             },
             "identity_store": {
                 "max_connections": 2,
@@ -2621,6 +2898,299 @@ mod tests {
         ));
         assert!(!audit.is_ready());
         drop(audit);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn health_facts<'a>(decision: &'a GatewayDecision, request_id: &'a str) -> AdmissionFacts<'a> {
+        AdmissionFacts {
+            request_id,
+            trace_id: "22222222222222222222222222222222",
+            method: "GET",
+            decision,
+            duration_us: 10,
+            request_crypto: None,
+            sensor_observations: &[],
+            forward_origin: true,
+        }
+    }
+
+    // Fills the journal until the barrier closes and returns how many
+    // admissions were committed first.
+    async fn fill_until_closed(audit: &DurableAudit, config: &GatewayConfig) -> usize {
+        let decision = config.admit("GET", "/health", UnixSeconds::new(1));
+        for committed in 0..10_000_usize {
+            let request_id = format!("req_{}", Uuid::now_v7());
+            if audit
+                .commit_admission(health_facts(&decision, &request_id))
+                .await
+                .is_err()
+            {
+                return committed;
+            }
+        }
+        panic!("the journal never filled");
+    }
+
+    fn remove_closed_segments(directory: &std::path::Path) -> usize {
+        let mut removed = 0;
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let closed = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("segment-") && name.ends_with(".closed.xja"));
+            if closed {
+                // Closed segments are read-only; the publisher/retention role
+                // that frees them owns the directory.
+                let mut permissions = fs::metadata(&path).unwrap().permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                permissions.set_readonly(false);
+                fs::set_permissions(&path, permissions).unwrap();
+                fs::remove_file(path).unwrap();
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    #[tokio::test]
+    async fn a_closed_barrier_reopens_once_the_journal_has_room_and_records_it() {
+        let directory = directory();
+        let config = config_segmented(&directory, 48 * 1024, 2 * 1024);
+        let audit = DurableAudit::open_recoverable(&config, KEY).unwrap();
+        let committed = fill_until_closed(&audit, &config).await;
+        assert!(committed > 0);
+        assert!(!audit.is_ready(), "a durability failure closes the barrier");
+
+        // Still full: probing must neither reopen nor create a segment.
+        let segments_before = fs::read_dir(&directory).unwrap().count();
+        assert!(audit.try_reopen().await.is_err());
+        assert!(!audit.is_ready());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), segments_before);
+        // Fail closed in between: admission is refused, not silently dropped.
+        let decision = config.admit("GET", "/health", UnixSeconds::new(1));
+        assert!(matches!(
+            audit
+                .commit_admission(health_facts(
+                    &decision,
+                    "req_018f2a3b-4c5d-7000-8000-000000000010"
+                ))
+                .await,
+            Err(DurableAuditError::Unavailable)
+        ));
+
+        // The publisher or retention frees closed segments; the next probe
+        // succeeds and admission resumes.
+        assert!(remove_closed_segments(&directory) > 0);
+        audit.try_reopen().await.unwrap();
+        assert!(audit.is_ready());
+        audit
+            .commit_admission(health_facts(
+                &decision,
+                "req_018f2a3b-4c5d-7000-8000-000000000011",
+            ))
+            .await
+            .expect("admission works after the barrier reopened");
+        // Probing an open barrier is a no-op.
+        audit.try_reopen().await.unwrap();
+
+        // The reopen is part of the audit trail.
+        drop(audit);
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut reopened = Vec::new();
+        journal
+            .visit_closed_records(10_000, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["event_type"] == "audit.recovered" {
+                    reopened.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reopened.len(), 1, "{reopened:?}");
+        assert_eq!(
+            reopened[0]["payload"]["reason_code"],
+            ReasonCode::AuditBarrierReopened.as_str()
+        );
+        assert_eq!(reopened[0]["payload"]["truncated_bytes"], 0);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_writer_without_a_recoverable_key_stays_closed() {
+        let directory = directory();
+        let config = config_segmented(&directory, 48 * 1024, 2 * 1024);
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        fill_until_closed(&audit, &config).await;
+        assert!(remove_closed_segments(&directory) > 0);
+        assert!(matches!(
+            audit.try_reopen().await,
+            Err(DurableAuditError::Unavailable)
+        ));
+        assert!(!audit.is_ready());
+        drop(audit);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_backoff_doubles_up_to_its_bound() {
+        let backoff = RecoveryBackoff {
+            initial: Duration::from_millis(100),
+            max: Duration::from_millis(700),
+        };
+        let mut delay = backoff.initial;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            seen.push(delay.as_millis());
+            delay = backoff.next(delay);
+        }
+        assert_eq!(seen, [100, 200, 400, 700, 700, 700]);
+        let production = RecoveryBackoff::PRODUCTION;
+        assert_eq!(production.initial, Duration::from_secs(1));
+        assert_eq!(production.max, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_reopens_a_failed_barrier_without_a_restart() {
+        let directory = directory();
+        let config = config_segmented(&directory, 48 * 1024, 2 * 1024);
+        let audit = DurableAudit::open_recoverable(&config, KEY).unwrap();
+        let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let supervisor = tokio::spawn(supervise_recovery(
+            audit.clone(),
+            RecoveryBackoff {
+                initial: Duration::from_millis(10),
+                max: Duration::from_millis(40),
+            },
+            shutdown,
+        ));
+        fill_until_closed(&audit, &config).await;
+        // While nothing frees space the supervisor keeps probing and the
+        // barrier stays closed.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!audit.is_ready());
+        assert!(remove_closed_segments(&directory) > 0);
+        let mut reopened = false;
+        for _ in 0..200 {
+            if audit.is_ready() {
+                reopened = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(reopened, "the supervisor must reopen the barrier");
+        let decision = config.admit("GET", "/health", UnixSeconds::new(1));
+        audit
+            .commit_admission(health_facts(
+                &decision,
+                "req_018f2a3b-4c5d-7000-8000-000000000012",
+            ))
+            .await
+            .unwrap();
+        shutdown_tx.send(true).unwrap();
+        supervisor.await.unwrap();
+        drop(audit);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn journal_events(
+        directory: &std::path::Path,
+        config: &GatewayConfig,
+        event_type: &str,
+    ) -> Vec<serde_json::Value> {
+        let (journal, _) = LocalJournal::open(
+            directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut found = Vec::new();
+        journal
+            .visit_closed_records(100_000, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["event_type"] == event_type {
+                    found.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        found
+    }
+
+    // The exact payload the worker's publisher accepts; the worker has a test
+    // for the same literal, so the two sides cannot drift apart silently.
+    #[tokio::test]
+    async fn unrouted_denials_are_one_bounded_event_per_port_and_survive_a_closed_barrier() {
+        use crate::unrouted::{UnroutedDenials, flush_once};
+        let directory = directory();
+        let config = config_segmented(&directory, 64 * 1024, 4 * 1024);
+        let audit = DurableAudit::open_recoverable(&config, KEY).unwrap();
+        let denials = UnroutedDenials::default();
+        for _ in 0..5_000 {
+            denials.record(6188, Some("Unknown.Example"), 1_700_000_000);
+        }
+        denials.record(6189, None, 1_700_000_005);
+
+        // The journal fills and the barrier closes before the first flush.
+        // Nothing counted is lost while it is closed: a failed flush puts the
+        // counts back and later refusals merge into them.
+        fill_until_closed(&audit, &config).await;
+        flush_once(&audit, &denials).await;
+        denials.record(6188, None, 1_700_000_100);
+        let waiting = denials.take();
+        assert_eq!(waiting.len(), 2, "{waiting:?}");
+        denials.restore(waiting);
+        assert!(remove_closed_segments(&directory) > 0);
+        audit.try_reopen().await.unwrap();
+
+        // One flush writes one event per port, however many requests were refused.
+        flush_once(&audit, &denials).await;
+        assert!(
+            denials.take().is_empty(),
+            "a successful flush drains the counts"
+        );
+        drop(audit);
+
+        let mut events = journal_events(&directory, &config, "edge.unrouted_denied");
+        events.sort_by_key(|event| event["payload"]["listener_port"].as_u64());
+        assert_eq!(events.len(), 2, "{events:#?}");
+        assert_eq!(
+            events[0]["payload"],
+            serde_json::json!({
+                "listener_port": 6188,
+                "denied_count": 5_001,
+                "first_seen_unix": 1_700_000_000_u64,
+                "last_seen_unix": 1_700_000_100_u64,
+                "sample_host": "unknown.example",
+                "reason_code": "HOST_NOT_ROUTED"
+            })
+        );
+        assert_eq!(
+            events[1]["payload"],
+            serde_json::json!({
+                "listener_port": 6189,
+                "denied_count": 1,
+                "first_seen_unix": 1_700_000_005_u64,
+                "last_seen_unix": 1_700_000_005_u64,
+                "sample_host": null,
+                "reason_code": "HOST_NOT_ROUTED"
+            })
+        );
+        for event in &events {
+            assert_eq!(event["request_id"], serde_json::Value::Null);
+            assert_eq!(event["tenant_id"], "tenant_test");
+            assert_eq!(event["policy_revision"], "policy-r1");
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 }

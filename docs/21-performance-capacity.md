@@ -38,6 +38,8 @@ storage_capacity = Σ每日量 × 保留天数 × 副本系数 + 索引/恢复�
 
 ## 21.5 账本与连接
 
+站点策略的 `limits.requests_per_second`/`burst` 是 edge 的按站点、按来源令牌桶，在 WAF、身份和耐久审计之前执行：每个请求，包括随后会被 WAF 拒绝的请求，都先取一个令牌，超限返回 429 `SITE_RATE_LIMIT_EXCEEDED`，否则 WAF 拒绝洪峰会不受限制地为每个请求写一条耐久审计记录。令牌桶表有界（16 个分片、共 65,536 个桶，CLOCK 二次机会淘汰，插入摊销 O(1)，不遍历全表），新来源永远不会因为表被旧来源占满而被拒绝，代价是被淘汰的来源重新获得完整突发；IPv6 来源按 /64 前缀计量，无法识别来源的请求被拒绝。这是进程内限流，多个 edge 副本各自计量。
+
 匿名会话用 `identity_store.max_active_anonymous_sessions` 设置每 tenant/site 活动上限，用 `anonymous_session_ttl_seconds` 限制服务端绝对期限；`anonymous_session_rate_window_seconds` 与来源/站点创建上限先在 edge 限制数据库尝试，再由 PostgreSQL tenant/site advisory lock 串行化分布式计数、清理与插入。配置校验要求 `站点窗口上限 × (ceil(TTL/窗口)+1) ≤ 活动容量`，覆盖窗口边界突发。来源/站点速率达到上限时返回 429，活动容量达到上限时返回 503，不以无状态 Cookie 绕过服务端记录。
 
 10 万会话 × 每会话 1000 条资格 = 1 亿条；按每条裸数据 128 字节约 12.8 GB，尚未计索引/JSON/副本。需要限制活跃资格数，避免每次看列表生成无限重复记录。

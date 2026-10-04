@@ -154,6 +154,11 @@ pub enum ReasonCode {
     AuditDurabilityFailed,
     /// A truncated crash tail was repaired before accepting traffic.
     AuditTailRecovered,
+    /// The durable-audit writer was reopened after a durability failure and
+    /// admission resumed.
+    AuditBarrierReopened,
+    /// No site snapshot routes the requested listener port and `Host`.
+    HostNotRouted,
     /// The forward intent reached the required durability boundary.
     OriginForwardIntentRecorded,
     /// A response was received from the selected origin.
@@ -296,6 +301,8 @@ impl ReasonCode {
             Self::SkippedBySiteUnavailable => "SKIPPED_BY_SITE_UNAVAILABLE",
             Self::AuditDurabilityFailed => "AUDIT_DURABILITY_FAILED",
             Self::AuditTailRecovered => "AUDIT_TAIL_RECOVERED",
+            Self::AuditBarrierReopened => "AUDIT_BARRIER_REOPENED",
+            Self::HostNotRouted => "HOST_NOT_ROUTED",
             Self::OriginForwardIntentRecorded => "ORIGIN_FORWARD_INTENT_RECORDED",
             Self::OriginResponseReceived => "ORIGIN_RESPONSE_RECEIVED",
             Self::SensorAssetServed => "SENSOR_ASSET_SERVED",
