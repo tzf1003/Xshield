@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 增加发布打包脚本 `scripts/package_release.sh`：构建 7 个 release 二进制与控制台静态包，附迁移、ClickHouse 结构、示例配置和部署/运行手册，生成带文件清单与 SHA-256 的 tar.gz。输出目录必须显式给出且不得在仓库内，使大体积构建产物可放在外接大容量磁盘上（含 exFAT 外接盘上使用 APFS 稀疏包的做法，见 19.7）；不构建镜像、不签名、不部署。
+
 - 增加调查导出发现与审批待办 API：`GET /control/v1/exports?view=mine|review` 按导出 ID 降序有界分页，`mine` 含本人全部持久状态，`review` 仅 Approver 可见他人 `pending_approval` 导出；游标绑定凭证、主体、作用域、视图与页大小，条目只投影元数据，不含用途、决定理由与包标识。列表访问写独立 `console.export.list` 审计（成功 `CONTROL_EXPORTS_READ`），worker 发布矩阵、封闭原因集和覆盖检查同步扩展；迁移 0050 增加加法排序索引并纳入开发库 reconciliation。控制台接入和 Vite 代理放行属于后续前端增量，本次未改动 `web/`。
 
 - 修复站点删除既无独立审批也无 step-up：`DELETE /control/v1/sites/{site_id}` 会把受保护站点从 edge 移除，却只要求 SystemAdmin 角色（持有 `site.config.write` 的 Agent API Key 同样映射为 SystemAdmin，可以删除）。现在与原文读取、导出审批一样要求同一浏览器会话两分钟内的 MFA step-up，否则返回 403 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED` 并写 DENY 审计；机器 Bearer 和 Agent API Key 没有 step-up 路径，因此不能删除站点，且没有可授予的删除能力。通过 step-up 的删除沿用“暂停 → edge 确认 → 删除”流程，暂停修订的预授权由存储记录为绑定该修订的 `delete_step_up` 审批。控制台需要在删除前引导用户完成“重新验证高危操作”，并为 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED` 提供提示。
