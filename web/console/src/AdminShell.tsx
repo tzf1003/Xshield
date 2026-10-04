@@ -14,6 +14,7 @@ import {
   TeamOutlined,
 } from "@ant-design/icons";
 import { siteSections } from "./admin-routes";
+import { ThemeMenu } from "./theme/ThemeMenu";
 
 type SessionView = {
   subject: string;
@@ -192,7 +193,7 @@ export function AdminShell({
   const [mobileOpen, setMobileOpen] = useState(false);
   return (
     <div
-      className={`${connected ? "admin-layout" : "admin-layout disconnected"}${collapsed ? " sidebar-collapsed" : ""}${mobileOpen ? " mobile-nav-open" : ""}`}
+      className={`legacy ${connected ? "admin-layout" : "admin-layout disconnected"}${collapsed ? " sidebar-collapsed" : ""}${mobileOpen ? " mobile-nav-open" : ""}`}
     >
       <a className="skip-link" href="#main-content">
         跳到主要内容
@@ -319,6 +320,7 @@ export function AdminShell({
             <span className="mono scope">{connected ? scope : "尚未连接"}</span>
           </div>
           <div className="connection">
+            <ThemeMenu />
             {observedAt && <span className="observed-at">观察于 {observedAt}</span>}
             {connected && onRefresh && (
               <button

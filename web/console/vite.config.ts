@@ -171,5 +171,9 @@ export default defineConfig({
       },
     },
   },
-  build: { sourcemap: false },
+  build: {
+    sourcemap: false,
+    // The CSP is `font-src 'self'`: fonts must stay separate hashed files, never data: URIs.
+    assetsInlineLimit: 0,
+  },
 });

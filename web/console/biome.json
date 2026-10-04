@@ -1,10 +1,13 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
-  "vcs": { "enabled": false },
+  "vcs": {
+    "enabled": false
+  },
   "files": {
     "ignoreUnknown": true,
     "includes": [
       "src/**",
+      "!src/theme/tokens.generated.css",
       "tests/**",
       "vite.config.ts",
       "playwright.config.ts",
@@ -18,7 +21,9 @@
     "indentWidth": 2,
     "lineWidth": 100
   },
-  "assist": { "enabled": false },
+  "assist": {
+    "enabled": false
+  },
   "linter": {
     "enabled": true,
     "rules": {
@@ -63,7 +68,9 @@
             "useButtonType": "error",
             "useAriaPropsSupportedByRole": "error"
           },
-          "style": { "noNonNullAssertion": "error" }
+          "style": {
+            "noNonNullAssertion": "error"
+          }
         }
       }
     },
@@ -71,7 +78,9 @@
       "includes": ["src/api.ts", "src/api-contract.ts", "src/search.ts"],
       "linter": {
         "rules": {
-          "suspicious": { "noControlCharactersInRegex": "off" }
+          "suspicious": {
+            "noControlCharactersInRegex": "off"
+          }
         }
       }
     }
