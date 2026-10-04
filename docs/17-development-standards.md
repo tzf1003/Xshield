@@ -57,3 +57,15 @@ AI 生成的代码与人工代码同门槛。修改授权根、秘密处理、�
 ## 17.9 Definition of Done
 
 行为与失败路径实现；契约及文档一致；单元/集成/安全测试通过；必需日志和证据可检索；没有秘密泄露；超时/配额/取消有效；迁移和回滚已验证；PR 说明残余风险与尚未执行的测试。未完成项标清，不宣称部署就绪。
+
+## 17.10 本地验证清单
+
+合并前在仓库根目录按下列命令验证，并在说明里写明未能执行的项（例如缺少 Docker 或 ClickHouse）：
+
+- Rust：`cargo fmt --all --check`；`cargo clippy --workspace --all-targets --locked -- -D warnings`（工作区启用 pedantic 规则，首次构建需数分钟）；`cargo test --workspace --all-targets --locked` 与 `cargo test --workspace --doc --locked`。
+- 文档与契约：`python3 scripts/validate_library.py`（会重写 `validation/report.*`，随改动一起提交）；`python3 scripts/check_audit_event_coverage.py`（控制面每个审计事件必须出现在 worker 发布矩阵中，见 11.14）。
+- PostgreSQL 集成：`scripts/test_postgres.sh` 会创建并在退出时删除唯一命名的临时库；也可手动 `createdb`、按序应用 `migrations/*.sql`、设置 `XSHIELD_TEST_DATABASE_URL` 运行单个 `--ignored` 测试后 `dropdb`。不要对包含他人数据的库运行，测试库名必须是一次性的。
+- ClickHouse 与端到端：需要 Docker 的回归（CI 的 ClickHouse 步骤、`scripts/test_gateway_*.sh`、Keycloak OIDC）在无法运行的环境中必须标注“未执行”，不得以本地单测代替。
+- 控制台（`web/console`）：`npm ci`；`npm run lint`（若已配置）；`npm test`；`npm run build`；`XSHIELD_E2E_PORT=<端口> npm run test:e2e`（并行 worktree 使用不同端口对，默认 5175/5176）。
+- 提交前不要使用 `git add -A` 把本地 agent worktree 或生成目录加入索引；按层、按功能分提交，提交说明写明验证结果与残余风险。
+
