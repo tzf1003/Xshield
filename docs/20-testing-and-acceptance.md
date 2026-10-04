@@ -167,7 +167,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `scripts/test_gateway_identity.sh` 通过真实网关、合成源站和专有 PostgreSQL 库执行匿名创建、登录、刷新与同主体上下文切换，保留原有认证、CAS、旧资格隔离及错误响应断言，同时检查生产 v3 envelope 与请求 ID。脚本结束前运行 `postgres_gateway_identity_outbox_publishing`，将实际生产的四种身份事务通过 worker 投递给受控 ClickHouse HTTP 服务，核对 RowBinary 索引、摘要、确认和重复运行空批次；该测试只接受脚本拥有的 `xshield_gateway_*` 数据库。
 
-`scripts/test_gateway_dynamic_listeners.sh` 启动真实 edge 和合成源站，先验证 bootstrap 端口，再通过签名 apply 通道一次加载两个站点。回归确认新端口在不中断旧端口的情况下绑定、端口与 Host 三重路由一致、两个站点都能到达各自冻结的上游，且 apply 返回 `active_revision` 后才开放新路由；随后重启 edge，验证 active 签名快照恢复动态监听。
+`scripts/test_gateway_dynamic_listeners.sh` 启动真实 edge 和合成源站，先验证 bootstrap 端口，再通过签名 apply 通道一次加载两个站点。回归确认新端口在不中断旧端口的情况下绑定、端口与 Host 三重路由一致、两个站点都能到达各自冻结的上游，且 apply 返回 `active_revision` 后才开放新路由；随后重启 edge，验证 active 签名快照恢复动态监听。该脚本还以 revision 1 完成首个 apply（与 edge 启动时的静态 bootstrap 快照同号，修复前返回 409 `EDGE_APPLY_IDEMPOTENCY_CONFLICT`）、用 Python 独立重算并校验确认的 HMAC、检查更新 revision 被接受、相同请求幂等重试、旧 revision 返回 409 `EDGE_APPLY_STALE_REVISION`、快照文件模式为 0600，并通过真实 HTTP 验证健康请求：新鲜请求 200、重放 401 `EDGE_HEALTH_REQUEST_REPLAYED`、两分钟前的请求 401 `EDGE_HEALTH_REQUEST_EXPIRED`、旧的固定 `health-v1` 签名 401。
 
 配置 20.6 的 `XSHIELD_TEST_CLICKHOUSE_URL` 及测试账户后，同一网关脚本还会运行 `real_gateway_response_grant_outbox_delivery`。脚本产生两个响应、三个实际响应资格事件，其中一个响应含两个资源；测试把 envelope 与 PostgreSQL 响应证据、动作及资源资格行逐项比对，检查批内连续序号，再通过生产发布器写入真实 ClickHouse，读回两个底表与两个 active 视图，验证精确确认和重复运行空批次。源路径只接受已认证会话的严格成功响应，字段碰撞、重复键、资源偏差、来源撤销、epoch/policy/action 变化、容量耗尽和锁等待跨期均不会释放正文或留下部分资格。该链路已在真实 PostgreSQL 与 ClickHouse 联调通过；入口仅接受脚本拥有的数据库，未配置 ClickHouse URL 时明确报告跳过。
 
@@ -219,6 +219,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 ## 20.16 Edge 快照与控制面通道回归
 
 `cargo test -p xshield-gateway --lib multi_site` 覆盖首个 apply：`the_first_control_apply_at_revision_one_replaces_the_placeholder_snapshot` 分别以 bootstrap-only 空快照和静态配置快照为占位，确认 revision 1 的首个已应用快照可以替换它们（修复前返回 `None`，即 apply 端 409 `EDGE_APPLY_IDEMPOTENCY_CONFLICT`）；`same_revision_conflicts_only_between_two_applied_payloads` 固定幂等重试、同 revision 异 payload 冲突、占位快照不能顶替已应用快照、旧 revision 拒绝与新 revision 接受；`the_supervisor_and_the_store_share_one_replacement_verdict` 固定监听器监督与快照存储共用同一个 `check_replacement` 判定。`cargo test -p xshield-gateway --bin xshield-gateway apply_api` 覆盖快照文件：pending 与 active 文件模式均为 0600、一次提升后目录中没有 pending 或临时文件、旧版本写出的 0644 文件加载后变为 0600、重复 apply 不遗留临时文件。目录 fsync 是否真正落盘无法在单元测试中观察，只固定“目录不可同步时返回错误而不是静默成功”；掉电后的持久性未验证。
+
+控制面通道回归：`cargo test -p xshield-core --lib edge_channel` 固定健康与确认消息的字节、标签互不相同、时间戳只有一种文本形式（拒绝符号、前导零、空白、全角数字、溢出）和 nonce 必须是 32 位小写 hex。`cargo test -p xshield-control --lib edge_channel` 在真实 reqwest 客户端与回环 Axum 假 edge 上运行：无签名、他钥签名、别的请求的签名、签名后多一个空格的确认、非 hex、大写 hex、重复签名头都得到 `EDGE_APPLY_ACK_SIGNATURE_INVALID`（修复前未签名确认返回 `Ok`），合法签名被接受且 apply_id 不符仍返回 `EDGE_APPLY_ACK_INVALID`；连续两次健康请求带规范时间戳、互不相同的 nonce 与按消息重算相等的签名（修复前没有这些头）；确认校验绑定密钥、请求签名和正文的每一个字节（逐字节翻转），超长正文先于 HMAC 被拒。`cargo test -p xshield-gateway --bin xshield-gateway edge_health` 与 `apply_api` 覆盖 edge 一侧：重复 nonce、±30 秒边界（含 ±31 秒拒绝）、签名覆盖密钥/时间戳/nonce、apply 体签名不能充当健康签名、缺失/重复/非规范头、未验签或过期请求不占用缓存、缓存满时拒绝而不遗忘并在保留期后恢复、nonce 保留到其请求最后可能被接受的时刻（时间戳领先 30 秒的请求在 60 秒时仍被识别为重放）、旧 control 的固定签名请求被拒绝；确认响应的签名按请求签名与正文计算。两侧共用同一组由 Python `hmac` 独立计算的已知答案向量，任何一侧的实现漂移都会使对应测试失败。尚未覆盖：真实 control 进程与真实 edge 进程之间的联调（上述脚本用 Python 代替 control）、时钟偏差超过窗口的现场行为，以及健康响应与非 2xx 响应没有签名这一已记录的限制。
 
 ## 管理后台与开发数据卷验收（2026-09-27）
 

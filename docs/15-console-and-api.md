@@ -2,7 +2,7 @@
 
 ## 15.1 信息架构
 
-站点运营后台支持同一租户下的多个受保护站点。站点列表使用租户范围的 `SystemAdmin` 管理身份，单站点配置使用站点路径再次校验作用域；每个站点拥有独立的内部 edge 监听端口，并通过签名游标分页。现有 `/control/v1/site-config` 保留为单站点兼容入口，新增多站点路径见 29 章。保存会产生 desired revision 和 apply intent；控制面在配置校验后通过 loopback HMAC apply 通道发送完整租户快照，只有 edge 原子确认后才显示 `active`，否则显示 `pending` 或 `failed` 并保留上一份有效快照。健康页面会探测批准的上游 health path，同时显示 edge 与 upstream 状态。
+站点运营后台支持同一租户下的多个受保护站点。站点列表使用租户范围的 `SystemAdmin` 管理身份，单站点配置使用站点路径再次校验作用域；每个站点拥有独立的内部 edge 监听端口，并通过签名游标分页。现有 `/control/v1/site-config` 保留为单站点兼容入口，新增多站点路径见 29 章。保存会产生 desired revision 和 apply intent；控制面在配置校验后通过 loopback HMAC apply 通道发送完整租户快照，只有 edge 原子确认后才显示 `active`（确认带 edge 的 HMAC 签名并绑定到该次请求，控制面验签失败按 `failed`、原因 `EDGE_APPLY_ACK_SIGNATURE_INVALID` 处理），否则显示 `pending` 或 `failed` 并保留上一份有效快照。edge 健康探测带时间戳和 nonce，edge 在控制面升级完成前可能短暂显示 `unavailable`，详见 19 章。健康页面会探测批准的上游 health path，同时显示 edge 与 upstream 状态。
 
 部署时可用 `XSHIELD_EDGE_LISTEN_PORTS` 提供逗号分隔的 bootstrap 监听集合；edge 监听器监督器会在 apply 前绑定快照所需的全部端口，成功后再原子替换路由。新站点端口默认绑定同一私网/loopback 地址，可在不中断已有请求的情况下动态加入；配置中的监听地址必须与 bootstrap 地址一致。设置持久卷上的 `XSHIELD_EDGE_SNAPSHOT_PATH` 后，已确认的完整快照会以 HMAC 签名文件恢复，启动时验签失败会保持拒绝启动。
 

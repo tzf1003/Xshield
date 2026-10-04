@@ -88,11 +88,12 @@ for _ in {1..80}; do
 done
 [[ "$(<"$test_dir/bootstrap.body")" == "origin:/" ]]
 
-python3 - "$test_dir/apply.json" "$origin_port" "$bootstrap_port" "$dynamic_port" <<'PY'
+write_apply_request() {
+python3 - "$1" "$origin_port" "$bootstrap_port" "$dynamic_port" "$2" <<'PY'
 import json
 import sys
 
-path, origin_port, bootstrap_port, dynamic_port = sys.argv[1:]
+path, origin_port, bootstrap_port, dynamic_port, revision = sys.argv[1:]
 
 def config(site, port):
     return {
@@ -109,7 +110,7 @@ request = {
     "protocol_version": 1,
     "tenant_id": "tenant_dynamic",
     "apply_id": "apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01",
-    "snapshot_revision": 2,
+    "snapshot_revision": int(revision),
     "sites": [
         {"site_id": "site_a", "listen_port": int(bootstrap_port), "public_origin": "https://site-a.example", "gateway_config": config("site_a", bootstrap_port), "revision": 1},
         {"site_id": "site_b", "listen_port": int(dynamic_port), "public_origin": "https://site-b.example", "gateway_config": config("site_b", dynamic_port), "revision": 1},
@@ -118,21 +119,136 @@ request = {
 with open(path, "w", encoding="utf-8") as output:
     json.dump(request, output, separators=(",", ":"))
 PY
+}
+write_apply_request "$test_dir/apply.json" 1
+write_apply_request "$test_dir/apply2.json" 2
 
-signature=$(python3 - "$test_dir/apply.json" "$key_hex" <<'PY'
+request_signature() {
+    python3 - "$1" "$key_hex" <<'PY'
 import hashlib
 import hmac
 import sys
 with open(sys.argv[1], "rb") as body:
     print(hmac.new(bytes.fromhex(sys.argv[2]), body.read(), hashlib.sha256).hexdigest())
 PY
-)
-apply_status=$(curl -sS -o "$test_dir/apply.response" -w '%{http_code}' \
-    -H "x-xshield-apply-signature: $signature" \
-    --data-binary "@$test_dir/apply.json" \
-    "http://127.0.0.1:$apply_port/internal/v1/apply")
+}
+
+# Posts one apply request. Leaves the request signature in $signature, the
+# status in $apply_status, the response headers in apply.headers and the body
+# in apply.response.
+post_apply() {
+    signature=$(request_signature "$1")
+    apply_status=$(curl -sS -D "$test_dir/apply.headers" -o "$test_dir/apply.response" \
+        -w '%{http_code}' \
+        -H "x-xshield-apply-signature: $signature" \
+        --data-binary "@$1" \
+        "http://127.0.0.1:$apply_port/internal/v1/apply")
+}
+
+# The edge signs its acknowledgement over the signature of the request it
+# answers; recompute that independently of the Rust implementation.
+verify_ack_signature() {
+    python3 - "$test_dir/apply.headers" "$test_dir/apply.response" "$key_hex" "$signature" <<'PY'
+import hashlib
+import hmac
+import sys
+
+headers_path, body_path, key_hex, request_signature = sys.argv[1:]
+with open(headers_path, encoding="ascii") as handle:
+    values = [
+        line.split(":", 1)[1].strip()
+        for line in handle
+        if line.lower().startswith("x-xshield-apply-ack-signature:")
+    ]
+assert len(values) == 1, values
+with open(body_path, "rb") as handle:
+    body = handle.read()
+message = b"xshield-edge-apply-ack-v1\n" + request_signature.encode() + b"\n" + body
+expected = hmac.new(bytes.fromhex(key_hex), message, hashlib.sha256).hexdigest()
+assert hmac.compare_digest(values[0], expected), (values[0], expected)
+PY
+}
+
+# The control plane's first snapshot is revision 1, the same number as the
+# static bootstrap snapshot this edge started with. That used to answer 409
+# EDGE_APPLY_IDEMPOTENCY_CONFLICT, so the first apply could never succeed.
+post_apply "$test_dir/apply.json"
+[[ "$apply_status" == "200" ]]
+grep -q '"active_revision":1' "$test_dir/apply.response"
+verify_ack_signature
+
+# A newer revision replaces it, an identical retry is idempotent and an older
+# revision is refused.
+post_apply "$test_dir/apply2.json"
 [[ "$apply_status" == "200" ]]
 grep -q '"active_revision":2' "$test_dir/apply.response"
+verify_ack_signature
+post_apply "$test_dir/apply2.json"
+[[ "$apply_status" == "200" ]]
+post_apply "$test_dir/apply.json"
+[[ "$apply_status" == "409" ]]
+grep -q 'EDGE_APPLY_STALE_REVISION' "$test_dir/apply.response"
+
+# The persisted snapshot holds the whole tenant routing and policy set.
+python3 - "$snapshot_path" <<'PY'
+import os
+import stat
+import sys
+
+mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode)
+assert mode == 0o600, oct(mode)
+PY
+
+# Health requests are signed over a timestamp and a nonce: a captured request
+# cannot be replayed, a stale one expires, and the old constant signature no
+# longer authenticates.
+python3 - "$apply_port" "$key_hex" <<'PY'
+import hashlib
+import hmac
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+port, key_hex = sys.argv[1:]
+key = bytes.fromhex(key_hex)
+url = f"http://127.0.0.1:{port}/internal/v1/health"
+
+
+def sign(message):
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
+def call(headers):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=5) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        return error.code, json.load(error)
+
+
+def signed(timestamp):
+    nonce = os.urandom(16).hex()
+    return {
+        "x-xshield-apply-signature": sign(f"xshield-edge-health-v2\n{timestamp}\n{nonce}".encode()),
+        "x-xshield-health-timestamp": str(timestamp),
+        "x-xshield-health-nonce": nonce,
+    }
+
+
+now = int(time.time())
+request = signed(now)
+status, body = call(request)
+assert status == 200 and body["edge_state"] == "healthy", (status, body)
+status, body = call(request)
+assert (status, body["reason_code"]) == (401, "EDGE_HEALTH_REQUEST_REPLAYED"), (status, body)
+status, body = call(signed(now - 120))
+assert (status, body["reason_code"]) == (401, "EDGE_HEALTH_REQUEST_EXPIRED"), (status, body)
+status, body = call({"x-xshield-apply-signature": sign(b"health-v1")})
+assert (status, body["reason_code"]) == (401, "EDGE_APPLY_SIGNATURE_INVALID"), (status, body)
+PY
 
 status=$(curl -sS -o "$test_dir/dynamic.body" -w '%{http_code}' \
     -H 'Host: site-b.example' "http://127.0.0.1:$dynamic_port/" 2>/dev/null)

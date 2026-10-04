@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -14,16 +14,24 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
 use tokio::{io::AsyncWriteExt, net::TcpListener};
-use xshield_core::{GatewayApplyAck, GatewayApplyRequest};
+use xshield_core::{
+    GatewayApplyAck, GatewayApplyRequest,
+    edge_channel::{APPLY_ACK_SIGNATURE_HEADER, APPLY_SIGNATURE_HEADER, apply_ack_message},
+};
 
 use crate::durable_audit::AuditReadiness;
+use crate::edge_health::HealthGate;
 use crate::listener_supervisor::{ApplyError, ListenerSupervisor};
 use xshield_gateway::{MAX_CONFIG_BYTES, multi_site::GatewaySnapshot};
 
-const SIGNATURE_HEADER: &str = "x-xshield-apply-signature";
+const SIGNATURE_HEADER: &str = APPLY_SIGNATURE_HEADER;
+// Built at compile time: `from_static` rejects an invalid name there, so no
+// request can ever reach a panic on it.
+const ACK_SIGNATURE_HEADER: HeaderName = HeaderName::from_static(APPLY_ACK_SIGNATURE_HEADER);
 const MAX_APPLY_BYTES: usize = MAX_CONFIG_BYTES * 8;
 
 /// Authenticated state shared by the loopback apply handler.
@@ -32,6 +40,7 @@ pub struct ApplyState {
     supervisor: Arc<ListenerSupervisor>,
     tenant_id: String,
     key: [u8; 32],
+    health: Arc<HealthGate>,
     snapshot_path: Option<Arc<PathBuf>>,
     apply_lock: Arc<Mutex<()>>,
     audit: AuditReadiness,
@@ -51,6 +60,7 @@ impl ApplyState {
             supervisor,
             tenant_id,
             key,
+            health: Arc::new(HealthGate::new(key)),
             snapshot_path: snapshot_path.map(Arc::new),
             apply_lock: Arc::new(Mutex::new(())),
             audit,
@@ -170,38 +180,63 @@ async fn apply_handler(
             "EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE",
         );
     }
-    (
-        StatusCode::OK,
-        axum::Json(GatewayApplyAck {
+    signed_ack_response(
+        &state.key,
+        &expected,
+        &GatewayApplyAck {
             apply_id,
             active_revision,
             apply_state: "active".to_owned(),
             reason_code: "EDGE_APPLY_CONFIRMED".to_owned(),
-        }),
+        },
     )
-        .into_response()
 }
 
-async fn health_handler(State(state): State<ApplyState>, headers: HeaderMap) -> Response {
-    // Health is intentionally on the same authenticated loopback channel;
-    // unauthenticated liveness probes must not disclose tenant topology.
-    let mut signatures = headers.get_all(SIGNATURE_HEADER).iter();
-    let Some(signature) = signatures
-        .next()
-        .filter(|_| signatures.next().is_none())
-        .and_then(|value| value.to_str().ok())
-        .and_then(decode_hex)
-    else {
-        return error(StatusCode::UNAUTHORIZED, "EDGE_APPLY_SIGNATURE_INVALID");
-    };
-    let Some(expected) = sign(&state.key, b"health-v1") else {
+/// The acknowledgement, signed with the shared key over a message that
+/// includes the signature of the request it answers. The control plane can
+/// then tell the edge's answer from anything else able to reach its socket,
+/// and cannot be handed the acknowledgement of a different apply.
+fn signed_ack_response(
+    key: &[u8; 32],
+    request_signature: &[u8],
+    ack: &GatewayApplyAck,
+) -> Response {
+    let Ok(body) = serde_json::to_vec(ack) else {
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "EDGE_APPLY_SIGNATURE_UNAVAILABLE",
         );
     };
-    if !memcmp::eq(&expected, &signature) {
-        return error(StatusCode::UNAUTHORIZED, "EDGE_APPLY_SIGNATURE_INVALID");
+    let message = apply_ack_message(&lower_hex(request_signature), &body);
+    let Some(signature) = sign(key, &message) else {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EDGE_APPLY_SIGNATURE_UNAVAILABLE",
+        );
+    };
+    let Ok(signature) = HeaderValue::from_str(&lower_hex(&signature)) else {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EDGE_APPLY_SIGNATURE_UNAVAILABLE",
+        );
+    };
+    let mut response = (
+        StatusCode::OK,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        body,
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(ACK_SIGNATURE_HEADER, signature);
+    response
+}
+
+async fn health_handler(State(state): State<ApplyState>, headers: HeaderMap) -> Response {
+    // Health is intentionally on the same authenticated loopback channel;
+    // unauthenticated liveness probes must not disclose tenant topology.
+    if let Err(refusal) = state.health.check(&headers, unix_now(), Instant::now()) {
+        return refusal.response();
     }
     let snapshot = state.supervisor.current();
     let listener_count = state.supervisor.listener_count().await;
@@ -216,6 +251,15 @@ async fn health_handler(State(state): State<ApplyState>, headers: HeaderMap) -> 
         )),
     )
         .into_response()
+}
+
+/// Seconds since the epoch. An unreadable clock reads as 0, which is outside
+/// every request's window, so a broken clock refuses health requests instead
+/// of accepting stale ones.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// Edge health as observed by this process. `audit_state` mirrors the durable
@@ -244,7 +288,7 @@ struct ErrorBody {
     reason_code: &'static str,
 }
 
-fn error(status: StatusCode, reason_code: &'static str) -> Response {
+pub(crate) fn error(status: StatusCode, reason_code: &'static str) -> Response {
     (
         status,
         axum::Json(ErrorBody {
@@ -255,7 +299,7 @@ fn error(status: StatusCode, reason_code: &'static str) -> Response {
         .into_response()
 }
 
-fn sign(key: &[u8; 32], body: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn sign(key: &[u8; 32], body: &[u8]) -> Option<Vec<u8>> {
     let key = PKey::hmac(key).ok()?;
     let mut signer = Signer::new(MessageDigest::sha256(), &key).ok()?;
     signer.update(body).ok()?;
@@ -440,7 +484,7 @@ pub fn key_from_hex(value: &str) -> Option<[u8; 32]> {
     Some(key)
 }
 
-fn decode_hex(value: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_hex(value: &str) -> Option<Vec<u8>> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
@@ -581,6 +625,62 @@ mod tests {
         assert_eq!(leftovers(&directory), ["snapshot.json"]);
         assert_eq!(mode_of(&path), 0o600);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn pinned_ack() -> GatewayApplyAck {
+        GatewayApplyAck {
+            apply_id: "apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01".to_owned(),
+            active_revision: 7,
+            apply_state: "active".to_owned(),
+            reason_code: "EDGE_APPLY_CONFIRMED".to_owned(),
+        }
+    }
+
+    // Reviewer finding: the answer to an apply was plain JSON, so anything able
+    // to answer on the edge's port could confirm a snapshot the edge never
+    // applied. The expected values were computed independently with Python's
+    // `hmac`; the control plane's tests pin the same literals from its side.
+    #[tokio::test]
+    async fn the_apply_acknowledgement_is_signed_over_the_request_it_answers() {
+        let key = key_from_hex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+            .unwrap();
+        let response = signed_ack_response(&key, &[0xab_u8; 32], &pinned_ack());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(
+            response
+                .headers()
+                .get_all(&ACK_SIGNATURE_HEADER)
+                .iter()
+                .count(),
+            1
+        );
+        let signature = response.headers()[&ACK_SIGNATURE_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            &body[..],
+            br#"{"apply_id":"apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01","active_revision":7,"apply_state":"active","reason_code":"EDGE_APPLY_CONFIRMED"}"#
+        );
+        assert_eq!(
+            signature,
+            "0611268a882723b00c849321661f8020d1c627074fd8031173a5420415e2e5f3"
+        );
+        // Another request, another key: another tag.
+        let other_request = signed_ack_response(&key, &[0xcd_u8; 32], &pinned_ack());
+        assert_ne!(
+            other_request.headers()[&ACK_SIGNATURE_HEADER],
+            signature.as_str()
+        );
+        let other_key = signed_ack_response(&[1_u8; 32], &[0xab_u8; 32], &pinned_ack());
+        assert_ne!(
+            other_key.headers()[&ACK_SIGNATURE_HEADER],
+            signature.as_str()
+        );
     }
 
     #[test]

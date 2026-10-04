@@ -84,14 +84,17 @@ impl EdgeApplyClient {
         })
     }
 
-    async fn apply(&self, request: &GatewayApplyRequest) -> Result<GatewayApplyAck, &'static str> {
+    pub(crate) async fn apply(
+        &self,
+        request: &GatewayApplyRequest,
+    ) -> Result<GatewayApplyAck, &'static str> {
         let body = serde_json::to_vec(request).map_err(|_| "EDGE_APPLY_PAYLOAD_INVALID")?;
         let signature = hmac_hex(&self.key, &body).ok_or("EDGE_APPLY_SIGNATURE_UNAVAILABLE")?;
         let response = self
             .http
             .post(&self.endpoint)
             .header("content-type", "application/json")
-            .header("x-xshield-apply-signature", signature)
+            .header("x-xshield-apply-signature", &signature)
             .body(body)
             .send()
             .await
@@ -113,21 +116,34 @@ impl EdgeApplyClient {
                 _ => "EDGE_APPLY_REJECTED",
             });
         }
-        let ack = response
-            .json::<GatewayApplyAck>()
+        // The ack is trusted only if the edge signed these exact bytes as the
+        // answer to this request; content is checked after authenticity.
+        let ack_headers = response.headers().clone();
+        let ack_body = response
+            .bytes()
             .await
+            .map_err(|_| "EDGE_APPLY_ACK_INVALID")?;
+        crate::edge_channel::verify_apply_ack(&self.key, &signature, &ack_headers, &ack_body)?;
+        let ack = serde_json::from_slice::<GatewayApplyAck>(&ack_body)
             .map_err(|_| "EDGE_APPLY_ACK_INVALID")?;
         validate_apply_ack(request, &ack)?;
         Ok(ack)
     }
 
-    async fn health(&self) -> Result<serde_json::Value, &'static str> {
-        let body = b"health-v1";
-        let signature = hmac_hex(&self.key, body).ok_or("EDGE_APPLY_SIGNATURE_UNAVAILABLE")?;
+    pub(crate) async fn health(&self) -> Result<serde_json::Value, &'static str> {
+        // A constant signature would stay valid forever once captured, so each
+        // request is signed over a fresh timestamp and nonce the edge enforces.
+        let auth = crate::edge_channel::sign_health_request(&self.key)
+            .ok_or("EDGE_APPLY_SIGNATURE_UNAVAILABLE")?;
         let response = self
             .http
             .get(&self.health_endpoint)
-            .header("x-xshield-apply-signature", signature)
+            .header("x-xshield-apply-signature", auth.signature)
+            .header(
+                xshield_core::edge_channel::HEALTH_TIMESTAMP_HEADER,
+                auth.timestamp,
+            )
+            .header(xshield_core::edge_channel::HEALTH_NONCE_HEADER, auth.nonce)
             .send()
             .await
             .map_err(|_| "EDGE_UNAVAILABLE")?;

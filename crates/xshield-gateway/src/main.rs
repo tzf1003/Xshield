@@ -1,6 +1,7 @@
 mod apply_api;
 mod buffered_json;
 mod durable_audit;
+mod edge_health;
 mod evidence_writer;
 mod listener_supervisor;
 mod protected_identity;

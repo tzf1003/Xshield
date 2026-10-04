@@ -13,6 +13,7 @@ mod case_holds;
 mod case_items;
 mod case_list;
 mod causality;
+mod edge_channel;
 mod evidence_access_inspection;
 mod evidence_access_list;
 mod exports;
