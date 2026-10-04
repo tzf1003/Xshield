@@ -1,7 +1,8 @@
 #![allow(clippy::map_unwrap_or)]
 
 use super::{
-    AccessAction, ControlPlane, api_key_authz, audit_unavailable, internal_error, single_header,
+    AccessAction, ControlPlane, api_error, api_key_authz, audit_unavailable, internal_error,
+    single_header,
 };
 use axum::{
     Extension, Json,
@@ -503,13 +504,20 @@ pub(super) async fn auth_middleware(
             ..AuthContext::default()
         }
     } else {
-        resolve_auth(
+        match resolve_auth(
             &control,
             request.method(),
             request.uri().path(),
             request.headers(),
         )
         .await
+        {
+            Ok(context) => context,
+            // A rejected API key is answered here, once, with its own audited
+            // terminal state (or the unaudited 429 once the budget is spent);
+            // no route runs and no second event is written for the attempt.
+            Err(response) => return response,
+        }
     };
     #[cfg(test)]
     {
@@ -557,9 +565,9 @@ async fn resolve_auth(
     method: &Method,
     path: &str,
     headers: &HeaderMap,
-) -> AuthContext {
+) -> Result<AuthContext, Response> {
     if matches!(path, LOGIN_PATH | CALLBACK_PATH) {
-        return AuthContext::default();
+        return Ok(AuthContext::default());
     }
     let authorization = single_header(headers, header::AUTHORIZATION.as_str());
     let api_key = single_header(headers, API_KEY_HEADER);
@@ -567,45 +575,85 @@ async fn resolve_auth(
     if let Some(api_key) = api_key {
         let agent_run_valid = single_header(headers, AGENT_RUN_HEADER)
             .is_some_and(|value| !value.is_empty() && value.len() <= 128);
-        if !agent_run_valid {
-            return AuthContext::default();
-        }
-        return resolve_api_key(control, &api_key, path).await;
+        return resolve_api_key(control, &api_key, agent_run_valid, path).await;
     }
     if authorization.is_some() && cookie.is_some() {
-        return AuthContext {
+        return Ok(AuthContext {
             state: AuthState::AmbiguousCredentials,
             ..AuthContext::default()
-        };
+        });
     }
     if let Some(value) = authorization {
-        return resolve_machine_auth(control, &value);
+        return Ok(resolve_machine_auth(control, &value));
     }
     let Some(cookie) = cookie else {
-        return AuthContext::default();
+        return Ok(AuthContext::default());
     };
-    resolve_browser_auth(control, method, headers, &cookie).await
+    Ok(resolve_browser_auth(control, method, headers, &cookie).await)
 }
 
-/// Authenticates one `X-Xshield-API-Key` attempt and projects the key's exact
-/// grants into a short-lived signed assertion for the route handlers.
-async fn resolve_api_key(control: &Arc<ControlPlane>, value: &str, path: &str) -> AuthContext {
+/// Authenticates one `X-Xshield-API-Key` attempt.
+///
+/// Every attempt first takes a unit of the process-wide unauthenticated budget,
+/// before the key lookup and before any audit append: junk keys therefore cost
+/// neither database reads nor durable journal space beyond that budget, and an
+/// exhausted budget is a stable 429 that writes nothing. Each allowed attempt
+/// leaves exactly one audited event. A valid key gets its unit back, so honest
+/// agent traffic does not starve login endpoints that share the budget.
+///
+/// # Errors
+/// Returns the rejection response (401, 429 or 503) for the middleware to send.
+async fn resolve_api_key(
+    control: &Arc<ControlPlane>,
+    value: &str,
+    agent_run_valid: bool,
+    path: &str,
+) -> Result<AuthContext, Response> {
     let request_id = request_id();
-    let Ok(mut identity) = control
+    if control.take_unauthenticated_rate_budget() != Some(true) {
+        return Err(api_error(
+            &request_id,
+            StatusCode::TOO_MANY_REQUESTS,
+            "CONTROL_RATE_LIMITED",
+            "management request rate exceeded",
+            true,
+            "retry_later",
+        )
+        .into_response());
+    }
+    if !agent_run_valid {
+        return Err(control
+            .audited_error_async(
+                request_id,
+                None,
+                API_KEY_ACCESS,
+                None,
+                StatusCode::UNAUTHORIZED,
+                "CONTROL_AUTH_REQUIRED",
+                "management authentication required",
+                false,
+                "authenticate",
+            )
+            .await
+            .into_response());
+    }
+    let mut identity = match control
         .authenticate_api_key(value, &request_id, API_KEY_ACCESS)
         .await
-    else {
-        return AuthContext::default();
+    {
+        Ok(identity) => identity,
+        Err(rejection) => return Err((*rejection).into_response()),
     };
+    control.refund_unauthenticated_rate_budget();
     let Some(now) = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|value| value.as_secs())
     else {
-        return AuthContext {
+        return Ok(AuthContext {
             state: AuthState::Unavailable,
             ..AuthContext::default()
-        };
+        });
     };
     let tenant = &control.config.tenant_id;
     // Direct apply is bound to the one site the apply route addresses and to
@@ -639,13 +687,13 @@ async fn resolve_api_key(control: &Arc<ControlPlane>, value: &str, path: &str) -
         csrf_valid: true,
         expires_at: now.saturating_add(30),
     };
-    AuthContext {
+    Ok(AuthContext {
         principal: Some(identity.principal),
         state: AuthState::Machine,
         assertion: Some(assertion),
         direct_apply: identity.direct_apply,
         ..AuthContext::default()
-    }
+    })
 }
 
 fn resolve_machine_auth(control: &ControlPlane, authorization: &str) -> AuthContext {

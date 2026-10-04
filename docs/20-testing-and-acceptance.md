@@ -202,6 +202,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `XSHIELD_TEST_DATABASE_URL` 指向脚本拥有的数据库时，`cargo test -p xshield-control --lib api_key_authz -- --ignored` 在真实 PostgreSQL、Axum 路由和独立管理 journal 上运行 HTTP 回归：每个能力在授权站点与另一站点上遍历全部站点路由，期望集合与矩阵完全一致；“站点 A 写 + 站点 B 读”的 Key 不能写 B、不能读 A、不能 DELETE；`site.create` 绑定具体站点被拒、租户标记创建站点但不能覆盖、读取或配置已存在站点；`PUT` 不能创建；持有全部能力的 Key 访问调查、证据、案件、导出、会话和 Key 管理共 38 个路由均不成功；机器 Bearer 与权限不足的浏览器会话不能管理 Key，签发者缺少依赖角色时返回 `CONTROL_API_KEY_SCOPE_FORBIDDEN`；站点列表和工作台只投影 Key 的 `site.read` 站点；直接应用被限制在单个站点，审计主体包含 Key ID 且不含明文。这些测试默认 ignored，未提供数据库时必须声明未执行。
 
+垃圾 Key 洪泛回归 `junk_api_keys_cannot_exhaust_the_audit_journal_or_block_valid_credentials` 不依赖数据库：以 1 MiB 的测试 journal、不可达的 Key 存储和 40 个配额发送 3000 个垃圾 Key，检查超出配额的 2960 个均为 429 `CONTROL_RATE_LIMITED`、journal 中恰有 40 条 `console.agent_api_key.use`，且随后的合法 Bearer 调用仍返回 200（修复前同一流量使其返回 503 `AUDIT_DURABILITY_FAILED`）。数据库版 `junk_attempts_leave_exactly_one_event_and_valid_keys_get_their_unit_back` 检查每次被允许的垃圾尝试恰好一条 DENY 事件且路由不再追加第二条、20 次有效 Key 请求不消耗 5 个配额的预算、预算耗尽后合法 Key 得到可重试的 429，而静态 Bearer 不受影响。
+
 ## 管理后台与开发数据卷验收（2026-09-27）
 
 浏览器回归使用固定合成 API 契约，并分别覆盖明确机器 fixture 和服务端角色会话模式。站点场景包含列表选择精确 site、创建、按类别编辑、草稿前进后退/离页保护、深链接刷新、空站点 nullable 字段、读写跨 scope 拒绝、写入未知结果的原键/原正文人工重试、验证/审批/发布/回滚以及健康观察。角色矩阵覆盖九种服务端角色，包括独立 Observer 状态视图及策略/发布角色入口。

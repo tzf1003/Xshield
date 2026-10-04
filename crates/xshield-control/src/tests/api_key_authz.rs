@@ -1,8 +1,12 @@
 //! HTTP-level contract for management API-key authorization: every decision is
 //! made per (site, capability) pair from the scope row that names the site, and
 //! a key never inherits a role, an investigation route or key administration.
+//! It also covers the unauthenticated budget that keeps junk keys away from the
+//! key table and the audit journal.
 //!
-//! These tests need `PostgreSQL` because keys are looked up by fingerprint.
+//! Tests that look keys up need `PostgreSQL` (they are ignored without
+//! `XSHIELD_TEST_DATABASE_URL`); the flood test runs against an unreachable
+//! database on purpose, because it must not depend on lookups succeeding.
 
 use super::*;
 
@@ -98,6 +102,12 @@ fn idempotency() -> (&'static str, String) {
 
 impl Harness {
     async fn new() -> Self {
+        Self::with_unauthenticated_budget(None).await
+    }
+
+    /// `budget` replaces the process-wide unauthenticated rate window while the
+    /// authenticated window keeps its generous test limit.
+    async fn with_unauthenticated_budget(budget: Option<u64>) -> Self {
         let url = std::env::var("XSHIELD_TEST_DATABASE_URL").unwrap();
         let store = PostgresIdentityStore::connect(&url, 8, Duration::from_secs(5))
             .await
@@ -121,6 +131,10 @@ impl Harness {
         .unwrap()
         .with_exact_site_scope(tenant.clone(), default_site);
         fixture.control.config.api_key_hash_key = Some(zeroize::Zeroizing::new([7_u8; 32]));
+        if let Some(limit) = budget {
+            *fixture.control.unauthenticated_rate.lock().unwrap() =
+                super::super::RateWindow::new(limit);
+        }
         roomy_access_journal(&mut fixture);
         let assertion_key: [u8; 32] = **fixture.control.auth_context_key.as_ref().unwrap();
         Self {
@@ -932,4 +946,149 @@ async fn legacy_single_site_routes_follow_the_default_site_scope_only() {
         .with_key(&on_other, "PUT", path, Some(&site_body(DEFAULT_SITE)))
         .await;
     assert!(is_scope_denied(status, &body), "{status} {body}");
+}
+
+async fn junk_key_request(app: &axum::Router, index: u32) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/control/v1/sites")
+                .header("x-xshield-api-key", format!("xsk_{index:048x}"))
+                .header("x-xshield-agent-run-id", RUN_ID)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// Reviewer reproduction: 3000 junk keys wrote 450 durable audit events into
+/// the 1 MiB test journal, after which every request, including a legitimate
+/// bearer call, failed with 503 `AUDIT_DURABILITY_FAILED`. The database is
+/// unreachable on purpose: metering must not depend on lookups succeeding.
+#[tokio::test]
+async fn junk_api_keys_cannot_exhaust_the_audit_journal_or_block_valid_credentials() {
+    const BUDGET: u64 = 40;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(10))
+        .connect_lazy("postgresql://xshield:xshield@127.0.0.1:1/xshield")
+        .unwrap();
+    let mut fixture = Fixture::with_catalog(
+        BUDGET,
+        ManagementRole::AuditAdministrator,
+        PostgresIdentityStore::from_pool(pool),
+        1,
+    );
+    fixture.control.config.api_key_hash_key = Some(zeroize::Zeroizing::new([7_u8; 32]));
+    let access_directory = fixture.access_directory.clone();
+    let app = router(fixture.control);
+    let mut statuses = std::collections::BTreeMap::<u16, u32>::new();
+    for index in 0..3000 {
+        let (status, body) = junk_key_request(&app, index).await;
+        *statuses.entry(status.as_u16()).or_default() += 1;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(body["error_code"], "CONTROL_RATE_LIMITED");
+            assert_eq!(body["retryable"], true);
+        }
+    }
+    assert_eq!(
+        statuses.get(&429).copied(),
+        Some(3000 - u32::try_from(BUDGET).unwrap()),
+        "everything beyond the budget is a 429: {statuses:?}"
+    );
+    // A legitimate management credential still works: the journal is not full.
+    let response = app.clone().oneshot(authenticated_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(app);
+    let events = read_access_events(&access_directory);
+    let key_events = events
+        .iter()
+        .filter(|event| event["event_type"] == "console.agent_api_key.use")
+        .count();
+    assert_eq!(
+        key_events,
+        usize::try_from(BUDGET).unwrap(),
+        "one audited event per allowed attempt, none once the budget is spent"
+    );
+    assert_eq!(
+        events.len(),
+        key_events + 1,
+        "junk keys write nothing besides their own attempt events"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn junk_attempts_leave_exactly_one_event_and_valid_keys_get_their_unit_back() {
+    const BUDGET: u64 = 5;
+    let harness = Harness::with_unauthenticated_budget(Some(BUDGET)).await;
+    harness.create_site("site_a").await;
+    let secret = harness
+        .issue(&json!([harness.scope("site_a", &["site.read"])]))
+        .await;
+    // Far more valid requests than the budget: each takes a unit and, once the
+    // key proves valid, returns it, so honest traffic never drains the budget.
+    for _ in 0..20 {
+        let (status, body) = harness
+            .with_key(&secret, "GET", "/control/v1/sites/site_a/status", None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let before = read_access_events(&harness.access_directory).len();
+    let mut statuses = Vec::new();
+    for index in 0..12 {
+        let (status, body) = junk_key_request(&harness.app, index).await;
+        statuses.push((
+            status.as_u16(),
+            body["error_code"].as_str().unwrap_or("").to_owned(),
+        ));
+    }
+    let allowed = usize::try_from(BUDGET).unwrap();
+    for (index, (status, code)) in statuses.iter().enumerate() {
+        if index < allowed {
+            assert_eq!(
+                (*status, code.as_str()),
+                (401, "CONTROL_API_KEY_INVALID"),
+                "{index}"
+            );
+        } else {
+            assert_eq!(
+                (*status, code.as_str()),
+                (429, "CONTROL_RATE_LIMITED"),
+                "{index}"
+            );
+        }
+    }
+    let after = read_access_events(&harness.access_directory);
+    let added = &after[before..];
+    assert_eq!(
+        added.len(),
+        allowed,
+        "exactly one audited event per allowed junk attempt, none for throttled ones"
+    );
+    for event in added {
+        assert_eq!(event["event_type"], "console.agent_api_key.use");
+        assert_eq!(event["payload"]["reason_code"], "CONTROL_API_KEY_INVALID");
+        assert_eq!(event["payload"]["outcome"], "DENY");
+    }
+    // While the junk budget is spent even a valid key is throttled, with a
+    // retryable 429 rather than a failure of the audit journal.
+    let (status, body) = harness
+        .with_key(&secret, "GET", "/control/v1/sites/site_a/status", None)
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["retryable"], true);
+    // Other credentials are unaffected by the key flood.
+    let (status, body) = harness
+        .operator("GET", "/control/v1/sites/site_a/status", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

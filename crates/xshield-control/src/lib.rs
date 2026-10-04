@@ -592,6 +592,15 @@ impl ControlPlane {
             .map(|mut rate| rate.take(Instant::now()))
     }
 
+    /// Returns the unit taken for an attempt that turned out to be a valid
+    /// credential, so legitimate key traffic does not drain the budget that
+    /// protects the audit journal and the login endpoints from junk.
+    pub(crate) fn refund_unauthenticated_rate_budget(&self) {
+        if let Ok(mut rate) = self.unauthenticated_rate.lock() {
+            rate.refund();
+        }
+    }
+
     fn health(&self, authorization: Option<&str>) -> EndpointResult {
         let request_id = format!("req_{}", Uuid::now_v7());
         let subject = match self.authorize(authorization, &request_id, HEALTH_ACCESS) {
@@ -3666,8 +3675,11 @@ impl ControlPlane {
         Err(Box::new(unauthorized()))
     }
 
-    /// Resolves an `X-Xshield-API-Key` value to a key principal and appends the
-    /// `console.agent_api_key.use` event for the attempt.
+    /// Resolves an `X-Xshield-API-Key` value to a key principal.
+    ///
+    /// The caller must already have taken one unit of the unauthenticated rate
+    /// budget: this function appends exactly one durable event per attempt
+    /// (`console.agent_api_key.use`, PASS or DENY/ERROR) and nothing else.
     ///
     /// The principal carries exact `(site, capability)` grants and no roles.
     /// Its subject is `apikey:{key_id}:{subject}` so every audit event and
@@ -5292,6 +5304,12 @@ impl RateWindow {
         }
         self.used += 1;
         true
+    }
+
+    /// Gives one taken unit back. If the window rolled over in between, the
+    /// unit belonged to the previous window and the new one is left alone.
+    fn refund(&mut self) {
+        self.used = self.used.saturating_sub(1);
     }
 }
 

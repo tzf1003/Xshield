@@ -228,4 +228,6 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 
 **站点投影。** 站点列表与工作台只返回主体实际被授权的站点：Key 为持有 `site.read` 的站点，租户范围的浏览器 SystemAdmin 保持整个租户，仅有精确站点作用域的管理员为其作用域站点。仅持有 `site.config.write` 等其他能力而无 `site.read` 的 Key 访问站点列表和工作台返回 403。游标只会指向调用者可见的站点。
 
+**无效 Key 的预算与审计。** 每个携带 `X-Xshield-API-Key` 的请求，在查询 Key 表和追加任何审计事件之前，先从进程级未认证预算取一个配额（与登录端点共用，容量等于 `XSHIELD_CONTROL_REQUESTS_PER_MINUTE`，窗口 60 秒）。预算耗尽时直接返回 429 `CONTROL_RATE_LIMITED`（`retryable=true`），既不查询数据库，也不写 journal。允许的尝试恰好留下一条 `console.agent_api_key.use` 终态事件：有效 Key 为 PASS；未知、过期、已撤销的 Key 为 DENY `CONTROL_API_KEY_INVALID`（响应 401 同码）；缺少或超长的 `X-Xshield-Agent-Run-Id` 为 DENY `CONTROL_AUTH_REQUIRED`（401）；Key 存储不可用为 ERROR `CONTROL_API_KEY_UNAVAILABLE`（503）。被拒绝的 Key 请求在此终结，路由不再运行，也不会追加第二条事件。有效 Key 在验证通过后归还所取配额，所以正常的 Agent 流量不消耗该预算；但垃圾 Key 耗尽预算期间，合法 Key 也会收到可重试的 429，直到窗口滚动。Bearer 与浏览器会话不受 Key 洪泛影响。此前垃圾 Key 每次都无预算地写一条持久事件，3000 个垃圾 Key 即可写满 1 MiB 的 journal，之后包括合法 Bearer 在内的所有请求都返回 503 `AUDIT_DURABILITY_FAILED`。
+
 **主体与审计。** Key 的主体在控制面内以 `apikey:{api_key_id}:{subject}` 表示，所有审计事件的 `subject_ref`、站点配置的 `updated_by` 与幂等摘要都因此带有 Key ID，且不可能与人员主体相同；明文 Key 永不进入审计或日志。`site.config.apply_direct` 的直接应用标志只在该 Key 对路径中那个站点持有该能力时才成立，其审批绕过的耐久记录由站点审批闸门负责。
