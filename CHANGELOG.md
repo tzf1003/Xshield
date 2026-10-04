@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 修复站点删除既无独立审批也无 step-up：`DELETE /control/v1/sites/{site_id}` 会把受保护站点从 edge 移除，却只要求 SystemAdmin 角色（持有 `site.config.write` 的 Agent API Key 同样映射为 SystemAdmin，可以删除）。现在与原文读取、导出审批一样要求同一浏览器会话两分钟内的 MFA step-up，否则返回 403 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED` 并写 DENY 审计；机器 Bearer 和 Agent API Key 没有 step-up 路径，因此不能删除站点，且没有可授予的删除能力。通过 step-up 的删除沿用“暂停 → edge 确认 → 删除”流程，暂停修订的预授权由存储记录为绑定该修订的 `delete_step_up` 审批。控制台需要在删除前引导用户完成“重新验证高危操作”，并为 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED` 提供提示。
+
 - 修复站点回滚完全不可用且目标选择错误：存储的修订缺少 `policy_revision` 而回滚的请求反序列化要求它，所以每次 `POST /rollback` 都返回 400 `CONTROL_SITE_CONFIG_REQUEST_INVALID`；目标取 `active - 1`（上一个修订号），而不是先前 active 的修订，可能选中从未批准或从未服务的修订。现在修订保存完整配置（旧行由 `policy_revision` 列补全读回），目标按 edge 确认顺序取先前 active 的修订，存在未完成变更时取 active（即取消该变更）；回滚以该内容创建**新修订**（修订号不复用），与其他保存一样按基线评估审批、校验、写审计，并在目标解析之前识别同键重放（返回原结果，后续写入后重放返回 409 `CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED`）。端到端测试覆盖 mock edge 收到的配置与 r2 时完全一致、编号跳过未批准修订、取消待处理变更、重放和不可回滚。
 
 - 修复站点四眼审批可被绕过的一组缺陷（新增迁移 0051）：`requires_approval` 过去按上一份 *desired* 修订重算并在每次保存时覆盖，所以风险变更第一次返回 `requires_approval=true` 且不应用，用新幂等键重放同一内容却返回 `false` 并发布到 edge；谓词还漏掉降级路由准入、清空 WAF 片段、关闭对象级校验和调高限额。现在写入事务内以 edge 正在服务的 active revision 配置为基线，用 `xshield-core` 的纯函数 `assess_change_risk` 判定：首次上线/取消暂停/draft→active、下线以及任何安全相关字段变化都需要审批，只有 `display_name`、`policy_revision` 标签和顺序变化不需要，且无法通过重提交清除；仅绑定 `(desired revision, 配置摘要, apply_id)` 的审批记录（追加式 `site_apply_approvals`）可清除。审批在持有租户锁和 intent 行锁的单个事务内读取 revision、apply_id 与作者：旧幂等键对新修订重放返回 409 `CONTROL_SITE_APPROVAL_REVISION_MISMATCH`（此前对未审阅的修订返回 200），可选 `X-Xshield-Expected-Config-Digest` 固定所审阅的配置，作者自批由事务内比较和数据库 CHECK 双重拒绝。`site.config.apply_direct` 语义保留，但直接应用写入 `direct_apply` 审批记录和 `EDGE_DIRECT_APPLY_*` 终态审计，并清除要求，不再留下阻塞其他站点的过期标记。

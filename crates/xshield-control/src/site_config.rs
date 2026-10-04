@@ -2040,10 +2040,19 @@ async fn site_apply_state_handler(
 /// Removes a site only after a configured edge has acknowledged a snapshot
 /// without that site's route. If the edge is unavailable, the durable site is
 /// left paused and the old edge snapshot remains the serving truth.
+///
+/// Deleting takes a protected site off the edge, so it is a high-risk action:
+/// it requires the browser session's fresh MFA step-up, the same machinery the
+/// evidence reads and export decisions use. Machine credentials (the management
+/// bearer and Agent API keys) have no step-up path, so they cannot delete sites
+/// whatever capabilities they hold; there is no delete capability to grant.
+/// The step-up is the authorization of the takedown pause that precedes the
+/// removal, which the store records against that exact revision.
 pub async fn delete_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(site_id): Path<String>,
     headers: HeaderMap,
+    Extension(auth): Extension<super::identity::AuthContext>,
 ) -> Response {
     let request_id = format!("req_{}", uuid::Uuid::now_v7());
     let Ok(site_id) = SiteId::parse(site_id) else {
@@ -2067,6 +2076,22 @@ pub async fn delete_handler(
         Ok(subject) => subject,
         Err(response) => return (*response).into_response(),
     };
+    if !auth.step_up_valid() {
+        return control
+            .audited_error_async(
+                request_id,
+                Some(subject),
+                DELETE_ACCESS,
+                None,
+                StatusCode::FORBIDDEN,
+                "CONTROL_SITE_DELETE_STEP_UP_REQUIRED",
+                "deleting a site requires recent reauthentication",
+                false,
+                "reauthenticate",
+            )
+            .await
+            .into_response();
+    }
     let Some(idempotency_key) = single_header(&headers, "idempotency-key")
         .filter(|value| super::valid_idempotency_key(value))
     else {

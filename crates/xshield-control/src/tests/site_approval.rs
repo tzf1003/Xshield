@@ -188,10 +188,22 @@ impl Ctx {
     /// A further principal with the given roles over the same tenant, store
     /// and edge. Its audit journal is read by [`Ctx::finish`].
     async fn principal(&self, subject: &str, roles: &[ManagementRole]) -> axum::Router {
+        self.principal_with_step_up(subject, roles, false).await
+    }
+
+    /// Like [`Ctx::principal`], optionally with the fresh MFA step-up that a
+    /// browser session carries for two minutes after reauthentication.
+    async fn principal_with_step_up(
+        &self,
+        subject: &str,
+        roles: &[ManagementRole],
+        step_up: bool,
+    ) -> axum::Router {
         let store = PostgresIdentityStore::connect(&self.database_url, 8, Duration::from_secs(5))
             .await
             .unwrap();
         let mut fixture = Fixture::with_decision_catalog(store, subject, roles[0]);
+        fixture.control.test_step_up_valid = step_up;
         fixture.control.config.tenant_id = self.tenant.clone();
         fixture.control.config.site_id = SiteId::parse("site_default").unwrap();
         fixture.control.config.principal = ManagementPrincipal::new_tenant_scoped(
@@ -1142,4 +1154,168 @@ async fn rollback_restores_the_previously_active_configuration_as_a_new_revision
         event["payload"]["reason_code"] == "CONTROL_SITE_ROLLBACK_UNAVAILABLE"
             && event["payload"]["outcome"] == "DENY"
     }));
+}
+
+async fn delete(app: &axum::Router, site: &str, key: &str) -> (StatusCode, Value) {
+    Ctx::call(
+        app,
+        "DELETE",
+        &format!("/control/v1/sites/{site}"),
+        None,
+        Some(key),
+    )
+    .await
+}
+
+/// Deleting a site removes it from the edge. It used to need nothing beyond the
+/// `SystemAdmin` role (and an API key with `site.config.write` carries that
+/// role); it now needs the same fresh browser MFA step-up as the other
+/// high-risk actions.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn deleting_a_site_requires_a_recent_step_up() {
+    let ctx = Ctx::new().await;
+    let site = "site_delete";
+    ctx.create_live(site, "8.8.8.8:9000").await;
+    let roles = [
+        ManagementRole::SystemAdmin,
+        ManagementRole::Observer,
+        ManagementRole::ReleaseOperator,
+    ];
+    let stepped_up = ctx.principal_with_step_up("admin-mfa", &roles, true).await;
+
+    // The author's session has no step-up: refused, audited, nothing changed.
+    let (status, refused) = delete(&ctx.author, site, &ctx.key("no-step-up")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error_code"],
+        "CONTROL_SITE_DELETE_STEP_UP_REQUIRED"
+    );
+    assert_eq!(refused["next_action"], "reauthenticate");
+    assert_eq!(
+        ctx.edge.served_upstream(site).as_deref(),
+        Some("8.8.8.8:9000")
+    );
+    assert_eq!(ctx.status(site).await["apply_state"], "active");
+
+    // A machine credential has no step-up path either, whatever capabilities
+    // it holds: `site.config.write` maps to SystemAdmin, which is not enough.
+    let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let (status, issued) = Ctx::call(
+        &ctx.author,
+        "POST",
+        "/control/v1/agent-api-keys",
+        Some(&json!({
+            "subject": "agent-writer", "display_name": "writer", "expires_at": expires,
+            "scopes": [{
+                "tenant_id": ctx.tenant.as_str(), "site_id": site,
+                "capabilities": ["site.config.write", "site.config.apply_direct", "site.rollback"]
+            }]
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let api_key = issued["api_key"].as_str().unwrap().to_owned();
+    let response = ctx
+        .author
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/control/v1/sites/{site}"))
+                .header("x-xshield-api-key", api_key.as_str())
+                .header("x-xshield-agent-run-id", "run-1")
+                .header("idempotency-key", ctx.key("api-key-delete"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let denied: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(denied["error_code"], "CONTROL_SITE_DELETE_STEP_UP_REQUIRED");
+    assert_eq!(
+        ctx.edge.served_upstream(site).as_deref(),
+        Some("8.8.8.8:9000")
+    );
+
+    // After a fresh step-up the delete goes through: the route leaves the edge
+    // first, then the site is removed.
+    let (status, deleted) = delete(&stepped_up, site, &ctx.key("with-step-up")).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["reason_code"], "CONTROL_SITE_DELETED");
+    assert_eq!(ctx.edge.served_upstream(site), None);
+    let (status, gone) = Ctx::call(
+        &ctx.author,
+        "GET",
+        &format!("/control/v1/sites/{site}/status"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
+
+    drop(stepped_up);
+    let events = ctx.finish().await;
+    let deletions = events
+        .iter()
+        .filter(|event| event["event_type"] == "console.site.delete")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deletions
+            .iter()
+            .filter(|event| event["payload"]["reason_code"]
+                == "CONTROL_SITE_DELETE_STEP_UP_REQUIRED"
+                && event["payload"]["outcome"] == "DENY")
+            .count(),
+        2,
+        "both refused attempts are audited"
+    );
+    assert!(deletions.iter().any(|event| {
+        event["payload"]["reason_code"] == "CONTROL_SITE_DELETED"
+            && event["payload"]["subject_ref"] == "admin-mfa"
+            && event["payload"]["outcome"] == "PASS"
+    }));
+}
+
+/// The takedown pause that precedes a delete is the caller's own, freshly
+/// re-authenticated decision: it supersedes a revision still awaiting approval
+/// instead of being blocked by it, and the unapproved content never serves.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn a_stepped_up_delete_supersedes_a_pending_approval_and_leaves_the_edge() {
+    let ctx = Ctx::new().await;
+    let site = "site_delete_pending";
+    ctx.create_live(site, "8.8.8.8:9000").await;
+    ctx.create_live("site_bystander", "1.1.1.1:9000").await;
+    let (_, pending) = ctx
+        .put(site, &site_body(site, "8.8.4.4:9000"), &ctx.key("risky"))
+        .await;
+    assert_eq!(pending["requires_approval"], true);
+    let roles = [ManagementRole::SystemAdmin, ManagementRole::Observer];
+    let stepped_up = ctx.principal_with_step_up("admin-mfa", &roles, true).await;
+
+    let (status, deleted) = delete(&stepped_up, site, &ctx.key("delete")).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(ctx.edge.served_upstream(site), None);
+    assert_eq!(
+        ctx.edge.served_upstream("site_bystander").as_deref(),
+        Some("1.1.1.1:9000"),
+        "other sites are untouched"
+    );
+    // The pause is removed together with the site; nothing remains to approve.
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM xshield.protected_site_configs WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0);
+    drop(stepped_up);
+    let _ = ctx.finish().await;
 }

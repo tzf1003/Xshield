@@ -32,7 +32,7 @@
 | GET /control/v1/sites/{site_id}/config | 单站点配置与 gateway 草稿 | console.site.config.read |
 | PUT /control/v1/sites/{site_id}/config | 单站点幂等配置写入并分配内部端口 | console.site.config.write |
 | POST /control/v1/sites | 创建租户范围的受保护站点 | console.site.create |
-| DELETE /control/v1/sites/{site_id} | 删除站点并释放内部端口租约 | console.site.delete |
+| DELETE /control/v1/sites/{site_id} | 删除站点并释放内部端口租约；要求浏览器会话两分钟内完成 MFA step-up，机器凭证不可删除 | console.site.delete |
 | GET /control/v1/sites/{site_id}/status | 读取 desired/active revision 和应用状态 | console.site.status.read |
 | GET /control/v1/sites/{site_id}/health | 读取站点配置与 edge 应用健康边界 | console.site.status.read |
 | GET /control/v1/sites/{site_id}/revisions | 读取当前发布边界 | console.site.status.read |
