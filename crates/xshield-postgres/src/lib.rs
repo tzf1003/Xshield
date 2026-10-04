@@ -146,7 +146,8 @@ pub use share_grant_issue::{ShareGrantPersistence, ShareGrantWriteOutcome};
 pub use site_config::{
     ProtectedSiteApplyState, ProtectedSiteApprovalOutcome, ProtectedSiteConfigListItem,
     ProtectedSiteConfigRecord, ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
-    ProtectedSiteHealthSnapshot, ProtectedSitePolicyRevision,
+    ProtectedSiteDirectApplyOutcome, ProtectedSiteHealthSnapshot, ProtectedSitePolicyRevision,
+    ProtectedSiteSnapshot, ProtectedSiteSnapshotSite, ProtectedSiteWriteMatch,
 };
 
 use serde_json::Value;

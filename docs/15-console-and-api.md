@@ -26,7 +26,7 @@ Operations：节点、队列、存储、密钥引用、告警与审计访问。
 
 会话与数据层位于 `src/security`：ControlClient、服务端确认的 tenant/site、角色和会话代际（epoch）只存在于内存。401、15 分钟闲置、离开或卸载页面（`pagehide`）、退出或响应 scope 不一致时，会话、TanStack Query 缓存和待确认操作登记一并清空，晚到的旧响应不能回填状态。新数据层的读取把 epoch 放入 query key，透传 AbortSignal，逐响应核对 tenant/site scope，且不自动轮询、不重试，也不在窗口聚焦或网络恢复时刷新；写入在发送前冻结方法、路径、幂等键和正文，结果未知时只允许以原键原正文精确重试，并触发离页提醒和“待确认操作”提示。浏览器存储只保存主题与密度偏好。当前处于控制台重做的第 0 阶段（基础设施）：只有工作台概览和会话信息刷新走这套读取层，写入登记仅由单元测试和测试夹具使用；调查、案件、证据、站点配置和 API Key 页面仍由旧页面宿主渲染，沿用各自的请求取消、写入冻结和离页提醒，尚未接入新的待确认登记，因此不会出现在“待确认操作”提示中。
 
-`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049 及导出列表索引 0050，现有开发数据卷无需重置。
+`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049、导出列表索引 0050 与站点审批绑定 0051，现有开发数据卷无需重置。
 
 站点策略可设置 `static_asset_max_path_depth`，默认值为 `5`。它只为 `GET` 静态资源扩展名（JavaScript、CSS、字体、图片、source map 和静态 JSON）提供有限深度兜底匹配；超过深度、非静态扩展和 API 路径仍按精确 operation 拒绝。该兜底不改变 WAF、限流或审计链路。
 
@@ -46,7 +46,7 @@ Operations：节点、队列、存储、密钥引用、告警与审计访问。
 
 Observer：只读脱敏摘要；Investigator：创建案件、查询授权证据；SensitiveEvidenceApprover：为其他主体批准或拒绝原文访问；SensitiveEvidenceReader：在获批短时范围内读原文；PolicyAuthor：提交候选；PolicyApprover：审批策略；ReleaseOperator：发布已签名工件；AuditAdministrator：保留与完整性运维；SystemAdmin：基础配置但不自动获得全部原文读取权。
 
-高危原文导出、全站降级、权限扩大、关键签名操作要求再认证及独立审批。拒绝作者自批高危变更。控制台 MFA、CSRF、会话超时、每站访问范围、管理员操作审计为首版要求。
+高危原文导出、全站降级、权限扩大、关键签名操作要求再认证及独立审批；站点删除要求再认证（见 15 章末“站点发布审批与应用语义”，不经过独立审批流程）。拒绝作者自批高危变更。控制台 MFA、CSRF、会话超时、每站访问范围、管理员操作审计为首版要求。
 
 ## 15.4 API 最小集（自定义契约）
 
@@ -194,7 +194,28 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 
 只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
 
-本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0050 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
+本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0051 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
+
+## 站点发布审批与应用语义（2026-10-04）
+
+**审批要求只由“edge 正在服务什么”决定。** 站点写入事务内，以站点 active revision 的已存储完整配置为基线（从未应用过的站点没有基线），与新的 desired 配置一起交给 `xshield-core` 的纯函数 `assess_change_risk` 计算原因集合；调用方不能提供、也不能通过再次提交等价内容清除该结果，因为它从不参考“上一份 desired”。结果与原因词元（`ACTIVATION`、`TAKEDOWN`、`UPSTREAM_CHANGED` 等，存于 `site_apply_intents.risk_reasons`）随 apply intent 一起持久化。
+
+**触发规则按“可自由变化项”的白名单定义，而不是按危险项列举。** 站点开始被服务（新建即 `active`、`draft`→`active`、`paused`→`active`）总需要审批，无论其余字段如何；正在服务的站点被暂停或改回 draft 也需要审批（Takedown）；基线与 desired 之间任何安全相关字段的变化都需要审批，包括上游地址/服务名/TLS、公开 origin、监听端口、入口路径与入口准入、路由的增删改（准入从 `ui_action_required` 降为 `authenticated_root`、source action、资源绑定、请求/响应 crypto、响应模式与大小）、identity、站点 crypto、WAF 开关/拦截头/拦截片段/Cookie 上限、限额（任何方向的变化，包括调高）、健康检查、secret 引用、sensor、静态资源深度和 `origin_object_access_enforced`；新增字段默认也算变化（`OTHER_CHANGE`）。只有 `display_name`、`policy_revision` 标签和路由/secret 的顺序变化不需要审批。draft 与未服务的 paused 站点不暴露任何东西，编辑它们不需要审批。与此前版本相比：限额调优、`policy_revision` 标签变化的判定改变，降级路由、清空 WAF 片段/拦截头、关闭对象级校验、调高限额不再绕过审批。
+
+**审批绑定到所审阅的修订。** `POST /approve` 在持有租户锁和 apply intent 行锁的单个事务内读取 desired revision、配置摘要、apply_id 与该修订的作者，然后：幂等键只在其批准过的 `(revision, digest, apply_id)` 上重放，对其他修订返回 409 `CONTROL_SITE_APPROVAL_REVISION_MISMATCH`；请求带 `X-Xshield-Expected-Config-Digest`（64 位小写十六进制）时，摘要必须等于当前 desired 摘要，否则同样 409；审批人等于该修订作者时返回 403 `CONTROL_SITE_APPROVAL_SELF_REJECTED`（数据库 CHECK 约束再兜底一次）；清除要求的 UPDATE 同时限定 revision 与 apply_id。审批、拒绝、重放和不需要审批（409 `CONTROL_SITE_APPROVAL_NOT_REQUIRED`）都有独立审计终态；批准记录写入追加式 `site_apply_approvals`。未带摘要头的旧客户端仍可调用，但只能批准事务内读到的 desired，建议控制台随审阅页面的 `config_digest` 一并发送该头。
+
+**直接应用保留，但留痕。** 持有明确作用域 `site.config.apply_direct` 的 Agent API Key 仍可对需要审批的 desired revision 调用 `POST /apply`；控制面在同一事务内写入 `approval_kind=direct_apply` 的审批记录（调用主体、修订、配置摘要、apply_id）并清除要求，因此不会留下阻塞其他站点的过期 `requires_approval`。成功与失败的终态审计分别为 `EDGE_DIRECT_APPLY_CONFIRMED` 与 `EDGE_DIRECT_APPLY_NOT_CONFIRMED`。没有该能力的调用者仍得到 `requires_approval=true` 且不发布。
+
+**draft 不可路由。** 保存 draft 不会发布；对 draft 站点调用 `POST /apply` 返回 409 `CONTROL_SITE_DRAFT_NOT_APPLICABLE` 并写 DENY 审计；快照不包含 draft，也不会把 draft 标成已应用；draft→active 属于需要审批的上线。
+
+**一个站点不会冻结或污染整个租户。** 控制面读取租户状态与分配快照 revision 在同一事务内完成。每个站点在快照中的内容：已批准（或无需批准）、有效且 `active` 的 desired 配置按 desired 发布并确认；待审批的站点保持在其最后一次获批（active）配置，不会把未批准内容带到 edge，状态保持待审批；从未应用且待审批的站点不出现在快照中；paused 站点不出现但按 paused 确认；draft 不出现也不确认。desired 配置无法通过校验的同级站点同样保持在最后一次获批配置，并在自己的状态上标为 `failed`/`CONTROL_SITE_POLICY_INVALID`，不使其他站点的 apply 失败；被应用的目标站点本身不满足这些条件时，apply 以其稳定原因失败并写入该站点状态：`CONTROL_SITE_POLICY_INVALID`、`CONTROL_SITE_PORT_UNAVAILABLE`（保持旧配置的站点占用的端口与新站点冲突）。保持不变的配置不再重新校验，避免校验收紧把正在服务的站点变成故障。
+
+**幂等键覆盖每一次写入。** 每个修订都保存写入的幂等标识。重放最新写入返回原结果；重放更早写入的键返回 409 `CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED` 且不创建修订（同键不同内容仍是 `CONTROL_IDEMPOTENCY_CONFLICT`）。API 没有加入 expected-revision 前置条件：两个操作者并发保存仍以后写入者为准，写入后的审批要求照旧由基线决定。
+
+**回滚。** `POST /control/v1/sites/{site_id}/rollback` 需要 `ReleaseOperator` 和规范 `Idempotency-Key`，没有请求体。它读取一个修订的完整已存储配置，并把它作为**新修订**写入（修订号永不复用），然后走与其他保存完全相同的路径：风险按当前 active 基线评估（从 D 回滚到 B 同样是上游变化，需要独立审批，批准前 edge 不变）、校验、幂等、审计和应用。回滚目标取决于状态：存在未完成的变更（desired 不等于 active，或上一次应用未完成）时取 active 修订，等于取消该变更，由于与基线一致所以无需审批；否则取**先前 active 的修订**，即按 edge 确认顺序（迁移 0051 的 `activated_at`）排在当前 active 之前的那一个，而不是 `active - 1`（后者可能是从未批准或从未服务的修订）；没有可回滚的目标时返回 409 `CONTROL_SITE_ROLLBACK_UNAVAILABLE`。同一个键重放回滚请求先于目标解析被识别，返回原结果（`CONTROL_SITE_CONFIG_REPLAYED`）且不创建修订；站点已有后续写入后重放，返回 409 `CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED`。修订历史（`GET /revisions`）里的每一行现在都是包含 `policy_revision` 的完整配置，读取更早版本写入的行时由 `policy_revision` 列补全。此前存储的修订缺少 `policy_revision` 而回滚反序列化要求它，所以每次回滚都返回 400 `CONTROL_SITE_CONFIG_REQUEST_INVALID`。
+
+**删除站点要求 step-up。** `DELETE /control/v1/sites/{site_id}` 会把受保护站点从 edge 移除，因此与原文读取、导出审批使用同一套浏览器 MFA step-up：同一会话须在两分钟内完成 OIDC 再认证（迁移 0036 的 step-up 状态），否则返回 403 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED`（`next_action=reauthenticate`）并写 DENY 审计，站点和 edge 均不变。机器 Bearer 和 Agent API Key 没有 step-up 路径，所以无论持有 `site.config.write`（映射为 SystemAdmin）等何种能力都不能删除站点；也不存在可授予的删除能力。通过 step-up 后流程不变：先以调用者的名义写入暂停修订（该预授权由存储记录为绑定该修订的 `delete_step_up` 审批，因此可以取代尚未批准的待审批修订，未批准的内容不会被服务），edge 确认不含该站点路由的快照后才删除数据库记录；edge 无法确认时站点保持暂停并返回 `CONTROL_SITE_DELETE_EDGE_NOT_CONFIRMED`。删除不要求第二个人审批：授权依据是再认证加上 `console.site.delete` 终态审计，作者自己也可以删除自己创建的站点，这是有意保留的取舍。
+
 # 管理 API Key
 
 `POST/GET /control/v1/agent-api-keys`、`POST /{id}/revoke`、`POST /{id}/rotate` 仅允许 KeyAdministrator 或 SystemAdmin 的浏览器管理会话并要求 CSRF。创建响应只返回一次完整 `xsk_` 明文，数据库和审计只保存 HMAC 指纹、前缀、scope 与生命周期。

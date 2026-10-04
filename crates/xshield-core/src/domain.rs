@@ -12,6 +12,12 @@ impl InvalidValue {
     pub(crate) const fn new(field: &'static str) -> Self {
         Self { field }
     }
+
+    /// Returns the stable name of the rejected field or area.
+    #[must_use]
+    pub const fn field(&self) -> &'static str {
+        self.field
+    }
 }
 
 impl fmt::Display for InvalidValue {

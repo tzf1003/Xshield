@@ -6,7 +6,7 @@
 
 ## 实现状态
 
-后台采用独立 URL 与角色导航，受保护站点以列表进入分类编辑。开发环境默认 http://127.0.0.1:55173；启动会验证基础 schema，并按 ledger 增量补齐 0041–0050。运行与验收方法见 [控制台 README](web/console/README.md#回归验证)。
+后台采用独立 URL 与角色导航，受保护站点以列表进入分类编辑。开发环境默认 http://127.0.0.1:55173；启动会验证基础 schema，并按 ledger 增量补齐 0041–0051。运行与验收方法见 [控制台 README](web/console/README.md#回归验证)。
 
 多站点运营后台已接入 `GET/POST /control/v1/sites`、站点配置、状态/健康、修订、校验、应用、审批、回滚接口。配置写入先落 PostgreSQL，再由控制面通过 loopback HMAC 通道发送完整租户快照；edge 原子确认后才返回 `active`，否则保留旧快照并返回 `pending`/`failed`。策略字段已覆盖路由、身份、加密、WAF、限流、健康检查和 secret reference；公开入口、敏感策略变化和暂停/恢复由 `PolicyApprover` 独立批准，审批人不能批准自己的修订，浏览器审批还要求近期 step-up 重新认证。edge 由监听器监督器在应用前绑定快照所需的全部内部端口，再原子切换路由；`XSHIELD_EDGE_LISTEN_PORTS` 仅用于启动时的 bootstrap 监听集合，新站点端口可在不中断现有请求的情况下动态绑定。设置 `XSHIELD_EDGE_SNAPSHOT_PATH` 后，已确认快照以 HMAC 签名的 pending/active 文件原子持久化，edge 重启前会先验签和校验完整快照；损坏或作用域不符时拒绝启动，避免回退到未确认配置。
 

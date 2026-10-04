@@ -22,7 +22,8 @@ pub mod provenance;
 pub mod query;
 pub mod site;
 pub use site::{
-    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteCryptoConfig,
-    SiteHealthCheckConfig, SiteIdentityConfig, SiteLimitsConfig, SitePolicyConfig,
-    SiteRequestCrypto, SiteResponseCrypto, SiteRouteConfig, SiteSecretReference, SiteWafConfig,
+    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteConfig,
+    SiteCryptoConfig, SiteHealthCheckConfig, SiteIdentityConfig, SiteLimitsConfig,
+    SitePolicyConfig, SiteRequestCrypto, SiteResponseCrypto, SiteRouteConfig, SiteSecretReference,
+    SiteWafConfig,
 };

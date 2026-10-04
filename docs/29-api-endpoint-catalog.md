@@ -8,7 +8,11 @@
 
 端口请求为 `0` 时，新站点从租户端口池取得最小空闲端口；已有站点更新会复用原 active lease，只有显式指定新端口才迁移租约。迁移、释放和唯一性检查都在同一事务锁内完成。
 
-本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0050，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
+上游地址校验（SSRF 防护）：`upstream_address` 必须是 IP 字面量套接字（`203.0.113.9:80`、`[2001:4860:4860::8888]:443` 之类），控制面从不代操作者解析名称；端口经类型化地址校验，80/443 等默认端口合法，0 被拒绝。保存时与健康探测连接前使用同一个纯函数（`xshield_core::site::upstream`）按解析后的数值分类，而不是检查文本：回环、未指定、RFC 1918 私网、RFC 6598 共享地址、链路本地、唯一本地、组播、保留/基准/文档段，以及云元数据地址（`169.254.169.254`、`168.63.129.16`、`100.100.100.200`、`192.0.0.192`、`fd00:ec2::254`）一律拒绝；IPv4 映射 IPv6（`::ffff:a.b.c.d`）和 NAT64、6to4、Teredo 等内嵌 IPv4 的形式不展开而直接拒绝。拒绝统一返回 400 `CONTROL_SITE_SSRF_BLOCKED` 并写入 DENY 审计，非 IP 字面量返回 `CONTROL_SITE_UPSTREAM_INVALID`。`upstream_server_name` 必须被探测所用的 URL 解析器识别为域名：`127.0.0.1`、`2130706433`、`0x7f.1` 等会被读成 IP 主机的写法同样返回 `CONTROL_SITE_UPSTREAM_INVALID`，因为 HTTP 客户端不对 IP 主机套用解析覆盖，会直接连接该地址。唯一的显式放行是部署环境变量 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1`（`dev.sh` 为本地靶场设置），它只放行 `127.0.0.0/8` 与 `::1`，不放行私网、元数据、映射或转换形式。健康探测对已持久化的行再次校验，并且只连接已验证的套接字：固定到配置端口、不使用环境代理、禁用重定向，`Host` 携带配置的服务名和端口；升级前写入或被直接改库的行因此也不会让探测向内部地址转发请求。
+
+配置校验与 edge 编译一致性：edge 快照是整体替换，任何一个站点配置被 edge 编译器拒绝都会使该租户所有 apply 失败，所以控制面校验必须不比 edge 宽松。`xshield-core` 的 `SiteConfig::validate`（含 `SitePolicyConfig::validate`）是唯一定义，拒绝 edge 编译器会拒绝的一切：路由路径只允许可打印 ASCII（空格、非 ASCII、控制字符、DEL 均拒绝），不得落入 edge 自用的 `/__xshield/` 命名空间；同方法同固定前缀的 `{param}` 路由（不论参数名）、被 `{param}` 路由同方法匹配的固定路径路由（不论声明顺序）、超过 64 条 `{param}` 路由；请求 crypto 仅限 POST/PUT/PATCH 且不用于 UI 来源操作，明文不超过信封一半、消息有效期不超过 3600 秒、标识符只含字母数字和 `_-.`；响应信封须不小于两倍明文加 1024 字节；`SENSOR_HTML` 响应模式因路由无法表达适配器元数据而拒绝；每站点最多一把请求解密密钥和一把响应加密密钥且不得共用；公开 origin 不接受 IPv6 字面量（edge 按主机名路由），开启 sensor 时明文 HTTP 只允许 `localhost` 与 `127.0.0.1`；站点 ID 加 `edge-` 前缀不得超过 128 字节。失败映射为稳定原因码：上游相关 `CONTROL_SITE_UPSTREAM_INVALID`，策略/路由 `CONTROL_SITE_POLICY_INVALID`，站点 ID `CONTROL_SITE_ID_INVALID`，其余 `CONTROL_SITE_CONFIG_REQUEST_INVALID`。控制面生成的 edge 配置同步调整：身份存储按有效路由的实际需要输出（任一路由需要身份或请求 crypto 即输出，而不只看顶层入口模式），匿名会话创建速率随 TTL 缩放以保持在 edge 的容量模型内（TTL 不超过 5940 秒时与此前一致），sensor origin 去除末尾斜杠。
+
+本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0051，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -28,14 +32,14 @@
 | GET /control/v1/sites/{site_id}/config | 单站点配置与 gateway 草稿 | console.site.config.read |
 | PUT /control/v1/sites/{site_id}/config | 单站点幂等配置写入并分配内部端口 | console.site.config.write |
 | POST /control/v1/sites | 创建租户范围的受保护站点 | console.site.create |
-| DELETE /control/v1/sites/{site_id} | 删除站点并释放内部端口租约 | console.site.delete |
+| DELETE /control/v1/sites/{site_id} | 删除站点并释放内部端口租约；要求浏览器会话两分钟内完成 MFA step-up，机器凭证不可删除 | console.site.delete |
 | GET /control/v1/sites/{site_id}/status | 读取 desired/active revision 和应用状态 | console.site.status.read |
 | GET /control/v1/sites/{site_id}/health | 读取站点配置与 edge 应用健康边界 | console.site.status.read |
 | GET /control/v1/sites/{site_id}/revisions | 读取当前发布边界 | console.site.status.read |
 | POST /control/v1/sites/{site_id}/validate | 校验已持久化站点配置 | console.site.config.validate |
-| POST /control/v1/sites/{site_id}/apply | 请求受保护的 edge 应用 | console.site.config.apply |
-| POST /control/v1/sites/{site_id}/approve | PolicyApprover 独立批准高风险修订并触发应用 | console.site.config.approve |
-| POST /control/v1/sites/{site_id}/rollback | 请求回滚已确认快照 | console.site.config.rollback |
+| POST /control/v1/sites/{site_id}/apply | 请求受保护的 edge 应用；draft 站点稳定拒绝，持有 `site.config.apply_direct` 的 Agent 可直接应用并留下审批记录 | console.site.config.apply |
+| POST /control/v1/sites/{site_id}/approve | PolicyApprover 独立批准绑定到当前 desired revision 的高风险修订并触发应用；可选 `X-Xshield-Expected-Config-Digest` 固定所审阅的配置 | console.site.config.approve |
+| POST /control/v1/sites/{site_id}/rollback | 以先前 active 修订的完整配置创建新修订（修订号不复用），按审批规则评估、幂等、写审计 | console.site.config.rollback |
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
 | POST /control/v1/causality | 固定窗口内有界多跳因果摘要 | console.causality.read |

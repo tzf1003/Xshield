@@ -17,22 +17,18 @@ use axum::{
 use openssl::{hash::MessageDigest, memcmp, pkey::PKey, sign::Signer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    fmt::Write as _,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
 use url::Url;
 use xshield_core::{
-    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SitePolicyConfig,
+    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SiteConfig, SiteHealthCheckConfig,
+    SitePolicyConfig,
     admin::ManagementRole,
     domain::SiteId,
-    site::{PublicOrigin, RouteOperation, UpstreamEndpoint},
+    site::upstream::{parse_upstream_socket, refuse_upstream_socket},
 };
 use xshield_postgres::{
-    ProtectedSiteApprovalOutcome, ProtectedSiteConfigRecord, ProtectedSiteConfigUpsert,
-    ProtectedSiteConfigWriteOutcome,
+    ProtectedSiteApprovalOutcome, ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
+    ProtectedSiteDirectApplyOutcome,
 };
 use zeroize::Zeroizing;
 
@@ -155,40 +151,98 @@ fn validate_apply_ack(
     Ok(())
 }
 
+/// Whether the deployment opted in to loopback upstreams (the local lab only).
+///
+/// The opt-in is read at each use so a lab restart picks it up without a code
+/// path caching a stale answer; it unlocks `127.0.0.0/8` and `::1` and nothing
+/// else (see `xshield_core::site::upstream`).
+fn loopback_upstream_allowed() -> bool {
+    std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1")
+}
+
+/// A health probe whose destination has been re-validated for this request.
+#[derive(Debug, Eq, PartialEq)]
+struct UpstreamProbePlan {
+    /// Absolute URL: DNS-name host, the configured port and the health path.
+    url: String,
+    /// The URL's canonical host, which the client's resolver override pins.
+    host: String,
+    /// The only socket the probe may connect to.
+    address: SocketAddr,
+}
+
+/// Decides, without any network I/O, where a probe may connect.
+///
+/// The persisted address is parsed and classified again here rather than
+/// trusted because it was valid when written: rows from before a rule was
+/// tightened, or edited directly in the database, must not turn the health
+/// endpoint into a request forwarder. The server name only ever supplies the
+/// `Host`/SNI identity; it must be a DNS name under the same URL parser the
+/// HTTP client will use, because that client does not apply a resolver
+/// override to IP literals (or to names such as `2130706433` that parse as one)
+/// and would connect to them directly.
+fn plan_upstream_probe(
+    address: &str,
+    server_name: &str,
+    tls: bool,
+    health_path: &str,
+    allow_loopback: bool,
+) -> Result<UpstreamProbePlan, &'static str> {
+    let socket = parse_upstream_socket(address).map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
+    if refuse_upstream_socket(socket, allow_loopback).is_some() {
+        return Err("CONTROL_SITE_SSRF_BLOCKED");
+    }
+    if !server_name_is_dns_name(server_name) {
+        return Err("CONTROL_SITE_UPSTREAM_INVALID");
+    }
+    let scheme = if tls { "https" } else { "http" };
+    let url = Url::parse(&format!(
+        "{scheme}://{server_name}:{}{health_path}",
+        socket.port()
+    ))
+    .map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
+    let Some(url::Host::Domain(host)) = url.host() else {
+        return Err("CONTROL_SITE_UPSTREAM_INVALID");
+    };
+    if url.port_or_known_default() != Some(socket.port()) || !url.username().is_empty() {
+        return Err("CONTROL_SITE_UPSTREAM_INVALID");
+    }
+    Ok(UpstreamProbePlan {
+        host: host.to_owned(),
+        url: url.to_string(),
+        address: socket,
+    })
+}
+
 /// Probes only the persisted, validated upstream socket and health path.
-/// Redirects stay disabled so a health check cannot become an open proxy.
-async fn probe_upstream(record: &ProtectedSiteConfigRecord) -> serde_json::Value {
-    let address = match record.upstream_address().parse::<SocketAddr>() {
-        Ok(address) => address,
-        Err(_) => {
+///
+/// The client connects to the validated socket address and nothing else: no
+/// proxy, no DNS resolution of operator-supplied names, and redirects stay
+/// disabled so a health check cannot become an open proxy.
+async fn probe_upstream(
+    address: &str,
+    server_name: &str,
+    tls: bool,
+    health: &SiteHealthCheckConfig,
+    allow_loopback: bool,
+) -> serde_json::Value {
+    let plan = match plan_upstream_probe(address, server_name, tls, &health.path, allow_loopback) {
+        Ok(plan) => plan,
+        Err(reason) => {
             return json!({
                 "upstream_state": "unavailable",
-                "reason_code": "CONTROL_SITE_UPSTREAM_INVALID"
+                "reason_code": reason
             });
         }
     };
-    if upstream_ip_is_unsafe(address.ip()) {
-        return json!({
-            "upstream_state": "unavailable",
-            "reason_code": "CONTROL_SITE_SSRF_BLOCKED"
-        });
-    }
-    let health = &record.policy().health_check;
-    let scheme = if record.upstream_tls() {
-        "https"
-    } else {
-        "http"
-    };
-    let url = format!(
-        "{scheme}://{}{}",
-        record.upstream_server_name(),
-        health.path
-    );
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(u64::from(health.timeout_ms)))
         .timeout(Duration::from_millis(u64::from(health.timeout_ms)))
         .redirect(reqwest::redirect::Policy::none())
-        .resolve(record.upstream_server_name(), address)
+        // An environment proxy would receive the request and resolve the name
+        // itself, defeating the pinned address.
+        .no_proxy()
+        .resolve(&plan.host, plan.address)
         .build()
     {
         Ok(client) => client,
@@ -199,7 +253,7 @@ async fn probe_upstream(record: &ProtectedSiteConfigRecord) -> serde_json::Value
             });
         }
     };
-    let response = match client.get(url).send().await {
+    let response = match client.get(plan.url).send().await {
         Ok(response) => response,
         Err(_) => {
             return json!({
@@ -370,6 +424,25 @@ pub struct SiteConfigRequest {
     status: String,
     #[serde(default)]
     policy: SitePolicyConfig,
+}
+
+impl SiteConfigRequest {
+    fn to_config(&self) -> SiteConfig {
+        SiteConfig {
+            display_name: self.display_name.clone(),
+            public_origin: self.public_origin.clone(),
+            upstream_address: self.upstream_address.clone(),
+            upstream_server_name: self.upstream_server_name.clone(),
+            upstream_tls: self.upstream_tls,
+            listen_port: self.listen_port,
+            entry_path: self.entry_path.clone(),
+            security_entry: self.security_entry.clone(),
+            sensor_enabled: self.sensor_enabled,
+            policy_revision: self.policy_revision.clone(),
+            status: self.status.clone(),
+            policy: self.policy.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -958,7 +1031,7 @@ pub async fn validate_handler(
         status: record.status().to_owned(),
         policy: record.policy().clone(),
     };
-    let valid = validate_request(&payload).is_ok();
+    let valid = validate_request(&payload, &site_id).is_ok();
     let reason_code = if valid {
         "CONTROL_SITE_VALIDATED"
     } else {
@@ -1119,32 +1192,32 @@ pub async fn approve_handler(
             .await
             .into_response();
     }
-    let updated_by = match control
-        .catalog
-        .read_protected_site_config(&control.config.tenant_id, &site_id)
-        .await
-    {
-        Ok(Some(record)) => record.updated_by().to_owned(),
-        _ => {
-            return super::internal_error(&request_id).into_response();
+    // A reviewer can pin the approval to the exact configuration they read by
+    // sending its digest; without it the approval covers whatever revision is
+    // desired inside the approving transaction, never a revision it did not see
+    // there.
+    let expected_digest = match single_header(&headers, "x-xshield-expected-config-digest") {
+        None => None,
+        Some(value) => {
+            let Some(digest) = decode_hex_key(&value) else {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        APPROVE_ACCESS,
+                        None,
+                        StatusCode::BAD_REQUEST,
+                        "CONTROL_SITE_CONFIG_REQUEST_INVALID",
+                        "invalid expected configuration digest",
+                        false,
+                        "correct_request",
+                    )
+                    .await
+                    .into_response();
+            };
+            Some(digest)
         }
     };
-    if updated_by == subject {
-        return control
-            .audited_error_async(
-                request_id,
-                Some(subject),
-                APPROVE_ACCESS,
-                None,
-                StatusCode::FORBIDDEN,
-                "CONTROL_SITE_APPROVAL_SELF_REJECTED",
-                "the configuration author cannot approve the same revision",
-                false,
-                "independent_approver",
-            )
-            .await
-            .into_response();
-    }
     let Some(idempotency_digest) = signature(
         &control,
         b"site-config-approve-idempotency-v1",
@@ -1157,6 +1230,8 @@ pub async fn approve_handler(
         return super::internal_error(&request_id).into_response();
     };
     let approval_id = format!("approval_{}", uuid::Uuid::now_v7());
+    // Revision, apply identity, author check and idempotent replay are all
+    // decided by the store inside one locked transaction.
     let approval = match control
         .catalog
         .approve_protected_site_apply(
@@ -1165,6 +1240,7 @@ pub async fn approve_handler(
             &approval_id,
             &subject,
             &idempotency_digest,
+            expected_digest.as_ref(),
         )
         .await
     {
@@ -1186,34 +1262,46 @@ pub async fn approve_handler(
                 .into_response();
         }
     };
-    if matches!(&approval, ProtectedSiteApprovalOutcome::Conflict) {
+    let refusal = match &approval {
+        ProtectedSiteApprovalOutcome::Applied { .. }
+        | ProtectedSiteApprovalOutcome::Existing { .. } => None,
+        ProtectedSiteApprovalOutcome::NotFound => Some((
+            StatusCode::NOT_FOUND,
+            "CONTROL_SITE_NOT_FOUND",
+            "site configuration was not found",
+            "correct_request",
+        )),
+        ProtectedSiteApprovalOutcome::NotRequired => Some((
+            StatusCode::CONFLICT,
+            "CONTROL_SITE_APPROVAL_NOT_REQUIRED",
+            "the desired revision does not require approval",
+            "read_site_status",
+        )),
+        ProtectedSiteApprovalOutcome::RevisionMismatch => Some((
+            StatusCode::CONFLICT,
+            "CONTROL_SITE_APPROVAL_REVISION_MISMATCH",
+            "the approval is bound to a different revision than the one now desired",
+            "read_site_status",
+        )),
+        ProtectedSiteApprovalOutcome::SelfApproval => Some((
+            StatusCode::FORBIDDEN,
+            "CONTROL_SITE_APPROVAL_SELF_REJECTED",
+            "the configuration author cannot approve the same revision",
+            "independent_approver",
+        )),
+    };
+    if let Some((status, reason, message, next_action)) = refusal {
         return control
             .audited_error_async(
                 request_id,
                 Some(subject),
                 APPROVE_ACCESS,
                 None,
-                StatusCode::CONFLICT,
-                "CONTROL_IDEMPOTENCY_CONFLICT",
-                "idempotency key is bound to a different approval",
+                status,
+                reason,
+                message,
                 false,
-                "use_original_request",
-            )
-            .await
-            .into_response();
-    }
-    if matches!(&approval, ProtectedSiteApprovalOutcome::NotRequired) && apply.requires_approval {
-        return control
-            .audited_error_async(
-                request_id,
-                Some(subject),
-                APPROVE_ACCESS,
-                None,
-                StatusCode::CONFLICT,
-                "CONTROL_SITE_APPROVAL_NOT_REQUIRED",
-                "the desired revision does not require approval",
-                false,
-                "read_site_status",
+                next_action,
             )
             .await
             .into_response();
@@ -1244,7 +1332,15 @@ pub async fn approve_handler(
     if current.apply_state != "active"
         || matches!(&approval, ProtectedSiteApprovalOutcome::Applied { .. })
     {
-        let _ = apply_site_snapshot(&control, &site_id, &current, false).await;
+        let status = match control
+            .catalog
+            .read_protected_site_config(&control.config.tenant_id, &site_id)
+            .await
+        {
+            Ok(Some(record)) => record.status().to_owned(),
+            _ => return super::internal_error(&request_id).into_response(),
+        };
+        let _ = apply_site_snapshot(&control, &site_id, &current, &status).await;
     }
     let state = match control
         .catalog
@@ -1345,10 +1441,9 @@ pub async fn rollback_handler(
         Ok(subject) => subject,
         Err(response) => return (*response).into_response(),
     };
-    if single_header(&headers, "idempotency-key")
+    let Some(idempotency_key) = single_header(&headers, "idempotency-key")
         .filter(|value| super::valid_idempotency_key(value))
-        .is_none()
-    {
+    else {
         return control
             .audited_error_async(
                 request_id,
@@ -1363,14 +1458,27 @@ pub async fn rollback_handler(
             )
             .await
             .into_response();
-    }
-    let apply = match control
+    };
+    // A replay of this very request is recognised *before* anything that
+    // depends on the site's current state is resolved: once the first call has
+    // created a revision the "previous" revision is a different one, and a
+    // replay must not chase it.
+    let Some(idempotency_digest) = write_idempotency_digest(
+        &control,
+        ROLLBACK_ACCESS,
+        &subject,
+        &site_id,
+        &idempotency_key,
+    ) else {
+        return super::internal_error(&request_id).into_response();
+    };
+    let replayed = match control
         .catalog
-        .read_protected_site_apply_state(&control.config.tenant_id, &site_id)
+        .find_protected_site_write(&control.config.tenant_id, &site_id, &idempotency_digest)
         .await
     {
-        Ok(Some(apply)) => apply,
-        Ok(None) | Err(_) => {
+        Ok(replayed) => replayed,
+        Err(_) => {
             return control
                 .audited_error_async(
                     request_id,
@@ -1378,8 +1486,8 @@ pub async fn rollback_handler(
                     ROLLBACK_ACCESS,
                     None,
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
-                    "site application state is temporarily unavailable",
+                    "CONTROL_SITE_CONFIG_UNAVAILABLE",
+                    "site revision history is temporarily unavailable",
                     true,
                     "retry_later",
                 )
@@ -1387,28 +1495,81 @@ pub async fn rollback_handler(
                 .into_response();
         }
     };
-    let Some(previous_revision) = rollback_target_revision(&apply) else {
-        return control
-            .audited_error_async(
-                request_id,
-                Some(subject),
-                ROLLBACK_ACCESS,
-                None,
-                StatusCode::CONFLICT,
-                "CONTROL_SITE_ROLLBACK_UNAVAILABLE",
-                "no previously active snapshot is available for rollback",
-                false,
-                "inspect_revisions",
-            )
+    let target_revision = if let Some(found) = replayed {
+        // The write path decides what the replay means (an exact replay of the
+        // latest write, or a superseded key); it only needs a valid body.
+        found.revision
+    } else {
+        let apply = match control
+            .catalog
+            .read_protected_site_apply_state(&control.config.tenant_id, &site_id)
             .await
-            .into_response();
+        {
+            Ok(Some(apply)) => apply,
+            Ok(None) | Err(_) => {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        ROLLBACK_ACCESS,
+                        None,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
+                        "site application state is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await
+                    .into_response();
+            }
+        };
+        let previous_active = match control
+            .catalog
+            .read_protected_site_previous_active_revision(&control.config.tenant_id, &site_id)
+            .await
+        {
+            Ok(previous) => previous,
+            Err(_) => {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        ROLLBACK_ACCESS,
+                        None,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_SITE_CONFIG_UNAVAILABLE",
+                        "site revision history is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await
+                    .into_response();
+            }
+        };
+        let Some(revision) = rollback_target_revision(&apply, previous_active) else {
+            return control
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    ROLLBACK_ACCESS,
+                    None,
+                    StatusCode::CONFLICT,
+                    "CONTROL_SITE_ROLLBACK_UNAVAILABLE",
+                    "no previously active snapshot is available for rollback",
+                    false,
+                    "inspect_revisions",
+                )
+                .await
+                .into_response();
+        };
+        revision
     };
-    let Some(mut payload) = (match control
+    let Some(config) = (match control
         .catalog
-        .read_protected_site_revision_config(&control.config.tenant_id, &site_id, previous_revision)
+        .read_protected_site_revision_config(&control.config.tenant_id, &site_id, target_revision)
         .await
     {
-        Ok(payload) => payload,
+        Ok(config) => config,
         Err(_) => {
             return control
                 .audited_error_async(
@@ -1441,6 +1602,11 @@ pub async fn rollback_handler(
             .await
             .into_response();
     };
+    // The stored revision is a complete configuration (including
+    // `policy_revision`), so it deserializes as an ordinary write request.
+    let Ok(mut payload) = serde_json::to_value(&config) else {
+        return super::internal_error(&request_id).into_response();
+    };
     let Some(object) = payload.as_object_mut() else {
         return super::internal_error(&request_id).into_response();
     };
@@ -1458,13 +1624,25 @@ pub async fn rollback_handler(
     .await
 }
 
-fn rollback_target_revision(apply: &xshield_postgres::ProtectedSiteApplyState) -> Option<u64> {
-    match apply.active_revision {
-        Some(active) if apply.apply_state != "active" || apply.desired_revision != active => {
-            Some(active)
-        }
-        Some(active) => active.checked_sub(1),
-        None => None,
+/// The revision a rollback restores, as the content of a *new* revision.
+///
+/// With a change still pending (desired differs from active, or the last apply
+/// did not complete) it is the active revision: the rollback cancels the
+/// pending change. Otherwise it is the revision that was active before the
+/// current one, taken from the recorded activation order. `active - 1` is not
+/// that: revision numbers are never reused, so the number below the active one
+/// can be a revision that failed, was never approved or never served traffic.
+fn rollback_target_revision(
+    apply: &xshield_postgres::ProtectedSiteApplyState,
+    previous_active: Option<u64>,
+) -> Option<u64> {
+    let active = apply.active_revision?;
+    let change_pending = apply.desired_revision != active
+        || !matches!(apply.apply_state.as_str(), "active" | "paused");
+    if change_pending {
+        Some(active)
+    } else {
+        previous_active
     }
 }
 
@@ -1588,14 +1766,131 @@ async fn site_apply_state_handler(
         None
     };
     let upstream_health = if read_health {
-        Some(probe_upstream(&record).await)
+        Some(
+            probe_upstream(
+                record.upstream_address(),
+                record.upstream_server_name(),
+                record.upstream_tls(),
+                &record.policy().health_check,
+                loopback_upstream_allowed(),
+            )
+            .await,
+        )
     } else {
         None
     };
     let health_details =
         read_health.then(|| merged_health_details(edge_health.clone(), upstream_health));
+    let mut directly_authorized = false;
+    let mut apply_failure: Option<&'static str> = None;
     if require_idempotency {
-        let _ = apply_site_snapshot(&control, &site_id, &apply, direct_apply).await;
+        // A draft is a preparation state and is never routable: refuse with a
+        // stable, audited reason instead of publishing or silently ignoring it.
+        if record.status() == "draft" {
+            return control
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    action,
+                    None,
+                    StatusCode::CONFLICT,
+                    "CONTROL_SITE_DRAFT_NOT_APPLICABLE",
+                    "a draft site cannot be applied; change its status first",
+                    false,
+                    "change_status",
+                )
+                .await
+                .into_response();
+        }
+        let mut current = apply.clone();
+        if apply.requires_approval && direct_apply {
+            // The explicit `site.config.apply_direct` capability replaces the
+            // second pair of eyes but not the record of it: a durable approval
+            // naming this caller and bound to the exact revision, digest and
+            // apply id is written, and the requirement is cleared with it.
+            let approval_id = format!("approval_{}", uuid::Uuid::now_v7());
+            let refusal = match control
+                .catalog
+                .authorize_protected_site_direct_apply(
+                    &control.config.tenant_id,
+                    &site_id,
+                    &approval_id,
+                    &subject,
+                    apply.desired_revision,
+                    &apply.apply_id,
+                )
+                .await
+            {
+                Ok(ProtectedSiteDirectApplyOutcome::Authorized { .. }) => {
+                    directly_authorized = true;
+                    None
+                }
+                Ok(ProtectedSiteDirectApplyOutcome::NotRequired) => None,
+                Ok(ProtectedSiteDirectApplyOutcome::Stale) => Some((
+                    StatusCode::CONFLICT,
+                    "CONTROL_SITE_APPROVAL_REVISION_MISMATCH",
+                    "the desired revision changed after it was read",
+                    false,
+                    "read_site_status",
+                )),
+                Ok(ProtectedSiteDirectApplyOutcome::NotFound) => Some((
+                    StatusCode::NOT_FOUND,
+                    "CONTROL_SITE_NOT_FOUND",
+                    "site configuration was not found",
+                    false,
+                    "correct_request",
+                )),
+                Err(_) => Some((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
+                    "site application state is temporarily unavailable",
+                    true,
+                    "retry_later",
+                )),
+            };
+            if let Some((status, reason, message, retryable, next_action)) = refusal {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        action,
+                        None,
+                        status,
+                        reason,
+                        message,
+                        retryable,
+                        next_action,
+                    )
+                    .await
+                    .into_response();
+            }
+            current = match control
+                .catalog
+                .read_protected_site_apply_state(&control.config.tenant_id, &site_id)
+                .await
+            {
+                Ok(Some(current)) => current,
+                Ok(None) | Err(_) => {
+                    return control
+                        .audited_error_async(
+                            request_id,
+                            Some(subject),
+                            action,
+                            None,
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
+                            "site application state is temporarily unavailable",
+                            true,
+                            "retry_later",
+                        )
+                        .await
+                        .into_response();
+                }
+            };
+        }
+        apply_failure = apply_site_snapshot(&control, &site_id, &current, record.status())
+            .await
+            .err();
     }
     let apply = match control
         .catalog
@@ -1621,12 +1916,34 @@ async fn site_apply_state_handler(
         }
     };
     let (audit_outcome, audit_reason) = if require_idempotency {
+        // A direct apply is named in the terminal audit state so the event
+        // stream shows who exercised the capability and with what result.
         if apply.apply_state == "active" {
-            ("PASS", "EDGE_APPLY_CONFIRMED")
+            (
+                "PASS",
+                if directly_authorized {
+                    "EDGE_DIRECT_APPLY_CONFIRMED"
+                } else {
+                    "EDGE_APPLY_CONFIRMED"
+                },
+            )
         } else if apply.requires_approval {
             ("DENY", "CONTROL_SITE_APPROVAL_REQUIRED")
+        } else if let Some(
+            reason @ ("CONTROL_SITE_POLICY_INVALID" | "CONTROL_SITE_PORT_UNAVAILABLE"),
+        ) = apply_failure
+        {
+            // The configuration itself is why nothing was published.
+            ("ERROR", reason)
         } else {
-            ("ERROR", "EDGE_APPLY_NOT_CONFIRMED")
+            (
+                "ERROR",
+                if directly_authorized {
+                    "EDGE_DIRECT_APPLY_NOT_CONFIRMED"
+                } else {
+                    "EDGE_APPLY_NOT_CONFIRMED"
+                },
+            )
         }
     } else {
         ("PASS", "CONTROL_SITE_STATUS_READ")
@@ -1723,10 +2040,19 @@ async fn site_apply_state_handler(
 /// Removes a site only after a configured edge has acknowledged a snapshot
 /// without that site's route. If the edge is unavailable, the durable site is
 /// left paused and the old edge snapshot remains the serving truth.
+///
+/// Deleting takes a protected site off the edge, so it is a high-risk action:
+/// it requires the browser session's fresh MFA step-up, the same machinery the
+/// evidence reads and export decisions use. Machine credentials (the management
+/// bearer and Agent API keys) have no step-up path, so they cannot delete sites
+/// whatever capabilities they hold; there is no delete capability to grant.
+/// The step-up is the authorization of the takedown pause that precedes the
+/// removal, which the store records against that exact revision.
 pub async fn delete_handler(
     State(control): State<Arc<ControlPlane>>,
     Path(site_id): Path<String>,
     headers: HeaderMap,
+    Extension(auth): Extension<super::identity::AuthContext>,
 ) -> Response {
     let request_id = format!("req_{}", uuid::Uuid::now_v7());
     let Ok(site_id) = SiteId::parse(site_id) else {
@@ -1750,6 +2076,22 @@ pub async fn delete_handler(
         Ok(subject) => subject,
         Err(response) => return (*response).into_response(),
     };
+    if !auth.step_up_valid() {
+        return control
+            .audited_error_async(
+                request_id,
+                Some(subject),
+                DELETE_ACCESS,
+                None,
+                StatusCode::FORBIDDEN,
+                "CONTROL_SITE_DELETE_STEP_UP_REQUIRED",
+                "deleting a site requires recent reauthentication",
+                false,
+                "reauthenticate",
+            )
+            .await
+            .into_response();
+    }
     let Some(idempotency_key) = single_header(&headers, "idempotency-key")
         .filter(|value| super::valid_idempotency_key(value))
     else {
@@ -1867,7 +2209,10 @@ pub async fn delete_handler(
                 policy_revision: record.policy_revision(),
                 status: "paused",
                 policy: record.policy(),
-                requires_approval: false,
+                // The caller deleting the site authorizes the takedown pause
+                // that precedes the removal; the store records that as an
+                // approval bound to this exact revision.
+                pre_authorized_by: Some(&subject),
                 config_digest: &config_digest,
                 updated_by: &subject,
                 idempotency_digest: &idempotency_digest,
@@ -1892,6 +2237,22 @@ pub async fn delete_handler(
                         "idempotency key is bound to different configuration",
                         false,
                         "use_original_request",
+                    )
+                    .await
+                    .into_response();
+            }
+            Ok(ProtectedSiteConfigWriteOutcome::Superseded) => {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        DELETE_ACCESS,
+                        None,
+                        StatusCode::CONFLICT,
+                        "CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED",
+                        "idempotency key belongs to an earlier write that a later one superseded",
+                        false,
+                        "read_site_status",
                     )
                     .await
                     .into_response();
@@ -1936,7 +2297,7 @@ pub async fn delete_handler(
                     .into_response();
             }
         };
-        if apply_site_snapshot(&control, &site_id, &paused_apply, false)
+        if apply_site_snapshot(&control, &site_id, &paused_apply, "paused")
             .await
             .is_err()
         {
@@ -2391,7 +2752,7 @@ async fn write_site_handler(
             .await
             .into_response();
     }
-    if let Err(reason) = validate_request(&payload) {
+    if let Err(reason) = validate_request(&payload, &site_id) {
         return control
             .audited_error_async(
                 request_id,
@@ -2407,46 +2768,21 @@ async fn write_site_handler(
             .await
             .into_response();
     }
-    let previous = match control
-        .catalog
-        .read_protected_site_config(&control.config.tenant_id, &site_id)
-        .await
-    {
-        Ok(previous) => previous,
-        Err(_) => {
-            return control
-                .audited_error_async(
-                    request_id,
-                    Some(subject),
-                    action,
-                    None,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "CONTROL_SITE_CONFIG_UNAVAILABLE",
-                    "site configuration is temporarily unavailable",
-                    true,
-                    "retry_later",
-                )
-                .await
-                .into_response();
-        }
-    };
-    let requires_approval = requires_policy_approval(previous.as_ref(), &payload);
     let Ok(canonical) = serde_json::to_vec(&payload) else {
         return super::internal_error(&request_id).into_response();
     };
-    let Some(idempotency_digest) = signature(
-        &control,
-        b"site-config-idempotency-v2",
-        &[
-            action.event_type.as_bytes(),
-            action.method.as_bytes(),
-            action.path.as_bytes(),
-            subject.as_bytes(),
-            site_id.as_str().as_bytes(),
-            idempotency_key.as_bytes(),
-        ],
-    ) else {
+    let Some(idempotency_digest) =
+        write_idempotency_digest(&control, action, &subject, &site_id, &idempotency_key)
+    else {
         return super::internal_error(&request_id).into_response();
+    };
+    // A rollback's request is "roll this site back" under this key; which
+    // revision that resolved to is an outcome, not part of the request, so a
+    // replay after the site has moved on is still the same request.
+    let request_basis: &[u8] = if action.event_type == ROLLBACK_ACCESS.event_type {
+        b"site-rollback-request-v1"
+    } else {
+        &canonical
     };
     let Some(request_digest) = signature(
         &control,
@@ -2458,7 +2794,7 @@ async fn write_site_handler(
             subject.as_bytes(),
             site_id.as_str().as_bytes(),
             idempotency_key.as_bytes(),
-            &canonical,
+            request_basis,
         ],
     ) else {
         return super::internal_error(&request_id).into_response();
@@ -2481,7 +2817,9 @@ async fn write_site_handler(
             policy_revision: &payload.policy_revision,
             status: &payload.status,
             policy: &payload.policy,
-            requires_approval,
+            // Whether this revision needs approval is decided inside the write
+            // transaction from the active revision, not by the caller.
+            pre_authorized_by: None,
             config_digest: &config_digest,
             updated_by: &subject,
             idempotency_digest: &idempotency_digest,
@@ -2529,6 +2867,22 @@ async fn write_site_handler(
                     "idempotency key is bound to different configuration",
                     false,
                     "use_original_request",
+                )
+                .await
+                .into_response();
+        }
+        ProtectedSiteConfigWriteOutcome::Superseded => {
+            return control
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    action,
+                    None,
+                    StatusCode::CONFLICT,
+                    "CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED",
+                    "idempotency key belongs to an earlier write that a later one superseded",
+                    false,
+                    "read_site_status",
                 )
                 .await
                 .into_response();
@@ -2595,7 +2949,7 @@ async fn write_site_handler(
         }
     };
     if !(replayed && apply.apply_state == "active") {
-        let _ = apply_site_snapshot(&control, &site_id, &apply, false).await;
+        let _ = apply_site_snapshot(&control, &site_id, &apply, record.status()).await;
     }
     let apply = match control
         .catalog
@@ -2638,64 +2992,240 @@ async fn write_site_handler(
     no_store((status, Json(response)).into_response())
 }
 
+/// What the edge is asked to serve for one site in a snapshot.
+struct ServedSite {
+    site_id: SiteId,
+    config: SiteConfig,
+    /// The revision whose configuration is being served.
+    revision: u64,
+}
+
+/// What the snapshot builder needs to know about one site, read together under
+/// the tenant lock.
+struct PlanInput {
+    site_id: SiteId,
+    desired: SiteConfig,
+    desired_revision: u64,
+    apply_id: String,
+    requires_approval: bool,
+    active_revision: Option<u64>,
+    /// The stored configuration of `active_revision`: what the edge serves.
+    active_config: Option<SiteConfig>,
+}
+
+impl PlanInput {
+    fn from_store(site: &xshield_postgres::ProtectedSiteSnapshotSite) -> Self {
+        Self {
+            site_id: site.site_id.clone(),
+            desired: site.record.site_config(),
+            desired_revision: site.record.revision(),
+            apply_id: site.apply_id.clone(),
+            requires_approval: site.requires_approval,
+            active_revision: site.active_revision,
+            active_config: site.active_config.clone(),
+        }
+    }
+}
+
+/// The snapshot the edge receives and the intents it confirms.
+struct SnapshotPlan {
+    served: Vec<ServedSite>,
+    /// `(site, desired revision, apply id)` of every site whose *desired*
+    /// revision this snapshot carries (or deliberately omits, for a paused
+    /// site); only these are marked applied after the edge confirms.
+    confirmed: Vec<(SiteId, u64, String)>,
+    /// Sites other than the target whose desired revision does not compile
+    /// and is not waiting for approval. They are held back, and each is marked
+    /// failed so its own status says why instead of the tenant failing as a
+    /// whole.
+    invalid: Vec<(SiteId, u64, String)>,
+}
+
+/// Decides, per site, which configuration the snapshot carries.
+///
+/// The rule is what keeps one site from freezing or poisoning the tenant:
+///
+/// - a site whose desired revision is approved (or never needed approval),
+///   valid and `active` is served as desired and confirmed;
+/// - a site whose desired revision awaits approval, or whose desired revision
+///   cannot be compiled, is held at its **last approved (active)
+///   configuration**, so the edge keeps serving exactly what was approved and
+///   the unapproved change never reaches it; the site is not confirmed, so its
+///   intent stays pending. A site that was never applied is omitted;
+/// - a `paused` desired revision is omitted and confirmed (it applies as
+///   paused); a `draft` is omitted and never confirmed, because a draft is
+///   not routable and must not look applied.
+///
+/// The apply *target* is held to the strict form of that rule: it must be
+/// approved, not a draft and compilable, otherwise the call fails with a
+/// stable reason instead of quietly serving something else.
+fn plan_snapshot(
+    sites: &[PlanInput],
+    target_site: &SiteId,
+    target_apply: &xshield_postgres::ProtectedSiteApplyState,
+) -> Result<SnapshotPlan, &'static str> {
+    let mut served = Vec::new();
+    let mut confirmed = Vec::new();
+    let mut invalid = Vec::new();
+    for site in sites {
+        let desired = site.desired.clone();
+        let is_target = site.site_id == *target_site;
+        if is_target {
+            // The target's state was read again with the snapshot, under the
+            // tenant lock; refuse to act on a revision the caller never saw.
+            if site.apply_id != target_apply.apply_id
+                || site.desired_revision != target_apply.desired_revision
+            {
+                return Err("CONTROL_SITE_APPLY_STATE_UNAVAILABLE");
+            }
+            if site.requires_approval {
+                return Err("CONTROL_SITE_APPROVAL_REQUIRED");
+            }
+            if desired.status == "draft" {
+                return Err("CONTROL_SITE_DRAFT_NOT_APPLICABLE");
+            }
+            if desired.is_serving() && desired.validate_for_site(&site.site_id).is_err() {
+                return Err("CONTROL_SITE_POLICY_INVALID");
+            }
+        }
+        let desired_is_compilable =
+            !desired.is_serving() || desired.validate_for_site(&site.site_id).is_ok();
+        if !site.requires_approval && !desired_is_compilable {
+            invalid.push((
+                site.site_id.clone(),
+                site.desired_revision,
+                site.apply_id.clone(),
+            ));
+        }
+        if site.requires_approval || !desired_is_compilable {
+            // Hold at the last approved configuration if the edge serves one.
+            // It is deliberately not validated again: the edge accepted it when
+            // it was applied, and dropping a live site because a validator got
+            // stricter since would turn a tightening into an outage.
+            if let (Some(previous), Some(revision)) =
+                (site.active_config.as_ref(), site.active_revision)
+                && previous.is_serving()
+            {
+                served.push(ServedSite {
+                    site_id: site.site_id.clone(),
+                    config: previous.clone(),
+                    revision,
+                });
+            }
+            continue;
+        }
+        match desired.status.as_str() {
+            "active" => {
+                served.push(ServedSite {
+                    site_id: site.site_id.clone(),
+                    config: desired,
+                    revision: site.desired_revision,
+                });
+                confirmed.push((
+                    site.site_id.clone(),
+                    site.desired_revision,
+                    site.apply_id.clone(),
+                ));
+            }
+            "paused" => confirmed.push((
+                site.site_id.clone(),
+                site.desired_revision,
+                site.apply_id.clone(),
+            )),
+            _ => {}
+        }
+    }
+    // The edge refuses two sites on one listener. A held-back site keeps the
+    // port of its last approved revision, which a later site may since have
+    // been allocated; surface that instead of sending a snapshot the edge
+    // would reject as a whole.
+    let mut ports = std::collections::BTreeSet::new();
+    if !served
+        .iter()
+        .all(|site| ports.insert(site.config.listen_port))
+    {
+        return Err("CONTROL_SITE_PORT_UNAVAILABLE");
+    }
+    Ok(SnapshotPlan {
+        served,
+        confirmed,
+        invalid,
+    })
+}
+
 /// Sends the complete tenant snapshot and commits exact desired revisions only
 /// after the edge confirms an atomic replacement. A missing edge binding is a
 /// deliberate `pending` state for development and control-plane-only deploys.
+///
+/// `target_status` is the status of the revision being applied; applying a
+/// draft is refused before anything is allocated or sent.
 async fn apply_site_snapshot(
     control: &ControlPlane,
     target_site: &SiteId,
     target_apply: &xshield_postgres::ProtectedSiteApplyState,
-    direct_apply: bool,
+    target_status: &str,
 ) -> Result<bool, &'static str> {
-    if target_apply.requires_approval && !direct_apply {
+    if target_apply.requires_approval {
         return Err("CONTROL_SITE_APPROVAL_REQUIRED");
+    }
+    if target_status == "draft" {
+        return Err("CONTROL_SITE_DRAFT_NOT_APPLICABLE");
     }
     let Some(client) = control.gateway_apply.as_ref() else {
         return Ok(false);
     };
-    let records = control
+    let snapshot = control
         .catalog
-        .list_protected_site_config_records(&control.config.tenant_id)
-        .await
-        .map_err(|_| "CONTROL_SITE_CONFIG_UNAVAILABLE")?;
-    let snapshot_revision = control
-        .catalog
-        .next_protected_site_snapshot_revision(&control.config.tenant_id)
+        .begin_protected_site_snapshot(&control.config.tenant_id)
         .await
         .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
-    let mut sites = Vec::with_capacity(records.len());
-    let mut revisions = Vec::with_capacity(records.len());
-    for (site_id, record) in records {
-        let apply = control
-            .catalog
-            .read_protected_site_apply_state(&control.config.tenant_id, &site_id)
-            .await
-            .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?
-            .ok_or("CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
-        // A complete edge snapshot cannot mix an unapproved desired config
-        // with other sites. Stop before sending anything so a normal save can
-        // never smuggle a high-risk sibling revision past its approver.
-        if apply.requires_approval && !(direct_apply && site_id == *target_site) {
-            return Err("CONTROL_SITE_APPROVAL_REQUIRED");
+    let inputs = snapshot
+        .sites
+        .iter()
+        .map(PlanInput::from_store)
+        .collect::<Vec<_>>();
+    let plan = match plan_snapshot(&inputs, target_site, target_apply) {
+        Ok(plan) => plan,
+        Err(reason) => {
+            // Failures the target is itself responsible for are recorded on
+            // it so its status reports why; approval, draft and state races
+            // are already visible in the state they were decided from.
+            if matches!(
+                reason,
+                "CONTROL_SITE_POLICY_INVALID" | "CONTROL_SITE_PORT_UNAVAILABLE"
+            ) {
+                let _ = control
+                    .catalog
+                    .mark_protected_site_apply_failed(
+                        &control.config.tenant_id,
+                        target_site,
+                        target_apply.desired_revision,
+                        &target_apply.apply_id,
+                        reason,
+                    )
+                    .await;
+            }
+            return Err(reason);
         }
-        revisions.push((site_id.clone(), apply.desired_revision, apply.apply_id));
-        if record.status() == "paused" {
-            continue;
-        }
-        let gateway_config = view(control, &site_id, &record).gateway_config;
-        sites.push(GatewayApplySite {
-            site_id: site_id.as_str().to_owned(),
-            listen_port: record.listen_port(),
-            public_origin: record.public_origin().to_owned(),
-            gateway_config,
-            revision: record.revision(),
-        });
-    }
+    };
+    let sites = plan
+        .served
+        .iter()
+        .map(|site| GatewayApplySite {
+            site_id: site.site_id.as_str().to_owned(),
+            listen_port: site.config.listen_port,
+            public_origin: site.config.public_origin.clone(),
+            gateway_config: site
+                .config
+                .gateway_config(control.config.tenant_id.as_str(), &site.site_id),
+            revision: site.revision,
+        })
+        .collect();
     let request = GatewayApplyRequest {
         protocol_version: 1,
         tenant_id: control.config.tenant_id.as_str().to_owned(),
         apply_id: target_apply.apply_id.clone(),
-        snapshot_revision,
+        snapshot_revision: snapshot.revision,
         sites,
     };
     if let Err(reason) = client.apply(&request).await {
@@ -2714,11 +3244,26 @@ async fn apply_site_snapshot(
     }
     if !control
         .catalog
-        .mark_protected_site_applies_active_batch(&control.config.tenant_id, &revisions)
+        .mark_protected_site_applies_active_batch(&control.config.tenant_id, &plan.confirmed)
         .await
         .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?
     {
         return Err("CONTROL_SITE_APPLY_STATE_UNAVAILABLE");
+    }
+    // The snapshot is live. Sites that were held back because their desired
+    // configuration does not compile are reported on their own status; this is
+    // informational, so a failure to record it does not undo the apply.
+    for (site, revision, apply_id) in &plan.invalid {
+        let _ = control
+            .catalog
+            .mark_protected_site_apply_failed(
+                &control.config.tenant_id,
+                site,
+                *revision,
+                apply_id,
+                "CONTROL_SITE_POLICY_INVALID",
+            )
+            .await;
     }
     Ok(true)
 }
@@ -2803,249 +3348,117 @@ pub(super) async fn edge_health(control: &ControlPlane) -> serde_json::Value {
     }
 }
 
-fn validate_request(request: &SiteConfigRequest) -> Result<(), &'static str> {
-    let public =
-        Url::parse(&request.public_origin).map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?;
-    let upstream = Url::parse(&format!(
-        "{}://{}",
-        if request.upstream_tls {
-            "https"
+/// Hostnames that name internal or metadata services. An upstream *address* is
+/// always an IP literal, so these only classify a refusal as a policy block
+/// rather than a malformed value.
+fn upstream_name_is_internal(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    ["metadata.google.internal", "metadata.google", "localhost"].contains(&host.as_str())
+        || [".internal", ".localhost", ".local"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+}
+
+/// Whether `name` is a DNS name under the URL parser the health probe uses.
+///
+/// WHATWG parsing reads `2130706433`, `0x7f.1` and `127.1` as IPv4 hosts, so a
+/// character-class check is not enough; the name is parsed the way it will be
+/// used and must come out as a domain.
+fn server_name_is_dns_name(name: &str) -> bool {
+    Url::parse(&format!("http://{name}/")).is_ok_and(|url| {
+        matches!(url.host(), Some(url::Host::Domain(domain)) if domain.eq_ignore_ascii_case(name))
+    })
+}
+
+/// Validates the origin destination: a literal socket address outside every
+/// internal range, and a server name that is a DNS name.
+fn validate_upstream_destination(
+    address: &str,
+    server_name: &str,
+    allow_loopback: bool,
+) -> Result<(), &'static str> {
+    let Ok(socket) = parse_upstream_socket(address) else {
+        // Names are never resolved on an operator's behalf. Known internal
+        // names are reported as blocked so the audit trail shows intent.
+        let host = address
+            .rsplit_once(':')
+            .map_or(address, |(host, _)| host)
+            .trim_matches(['[', ']']);
+        return Err(if upstream_name_is_internal(host) {
+            "CONTROL_SITE_SSRF_BLOCKED"
         } else {
-            "http"
-        },
-        request.upstream_address
-    ))
-    .map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
-    let public_loopback = public.host().is_some_and(|host| match host {
-        url::Host::Domain(name) => name == "localhost",
-        url::Host::Ipv4(ip) => ip.is_loopback(),
-        url::Host::Ipv6(ip) => ip.is_loopback(),
-    });
-    if public.host().is_none()
-        || !public.username().is_empty()
-        || public.password().is_some()
-        || (public.scheme() != "https" && !public_loopback)
-        || !matches!(public.path(), "" | "/")
-        || public.query().is_some()
-        || public.fragment().is_some()
-    {
-        return Err("CONTROL_SITE_CONFIG_REQUEST_INVALID");
-    }
-    if public.scheme() == "https" && PublicOrigin::parse(request.public_origin.clone()).is_err() {
-        return Err("CONTROL_SITE_CONFIG_REQUEST_INVALID");
-    }
-    if upstream.host().is_none()
-        || upstream.port().is_none()
-        || !upstream.username().is_empty()
-        || upstream.password().is_some()
-        || !matches!(upstream.path(), "" | "/")
-        || upstream.query().is_some()
-        || upstream.fragment().is_some()
-    {
-        return Err("CONTROL_SITE_UPSTREAM_INVALID");
-    }
-    UpstreamEndpoint::parse(
-        request.upstream_address.clone(),
-        request.upstream_server_name.clone(),
-        request.upstream_tls,
-    )
-    .map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
-    if upstream_host_is_unsafe(&upstream) {
+            "CONTROL_SITE_UPSTREAM_INVALID"
+        });
+    };
+    if refuse_upstream_socket(socket, allow_loopback).is_some() {
         return Err("CONTROL_SITE_SSRF_BLOCKED");
     }
-    if request
-        .upstream_address
-        .parse::<std::net::SocketAddr>()
-        .is_err()
-    {
+    if !server_name_is_dns_name(server_name) {
         return Err("CONTROL_SITE_UPSTREAM_INVALID");
     }
-    if request.display_name.is_empty()
-        || request.display_name.len() > 128
-        || request.display_name.trim() != request.display_name
-        || request.display_name.chars().any(char::is_control)
-        || (request.listen_port != 0 && !(6100..=65535).contains(&request.listen_port))
-        || !request
-            .upstream_server_name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-        || !matches!(
-            request.security_entry.as_str(),
-            "public" | "authenticated_root" | "ui_action_required"
-        )
-        || !matches!(request.status.as_str(), "draft" | "active" | "paused")
-        || !request.entry_path.starts_with('/')
-        || request.entry_path.contains(['?', '#'])
-        || request.policy_revision.is_empty()
-        || request.policy_revision.len() > 128
-        || !request
-            .policy_revision
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return Err("CONTROL_SITE_CONFIG_REQUEST_INVALID");
-    }
-    let security_entry = SecurityEntry::parse(&request.security_entry)
-        .map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?;
-    RouteOperation::new(
-        "protected.entry",
-        "GET",
-        request.entry_path.clone(),
-        security_entry,
-    )
-    .map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?;
-    request
-        .policy
-        .validate()
-        .map_err(|_| "CONTROL_SITE_POLICY_INVALID")?;
     Ok(())
 }
 
-fn requires_policy_approval(
-    previous: Option<&xshield_postgres::ProtectedSiteConfigRecord>,
+/// Maps a core validation failure to the stable control reason code.
+fn validation_reason(field: &str) -> &'static str {
+    if field.starts_with("upstream") {
+        "CONTROL_SITE_UPSTREAM_INVALID"
+    } else if field.starts_with("site_policy") {
+        "CONTROL_SITE_POLICY_INVALID"
+    } else if field == "site_id" {
+        "CONTROL_SITE_ID_INVALID"
+    } else {
+        "CONTROL_SITE_CONFIG_REQUEST_INVALID"
+    }
+}
+
+/// Validates a request for `site_id` under the deployment's network policy.
+///
+/// Everything that does not depend on the deployment lives in
+/// [`SiteConfig::validate_for_site`], the single definition the edge compiler
+/// is held to by the gateway parity test; this adds only the destination
+/// rules, which depend on the loopback opt-in.
+fn validate_request(request: &SiteConfigRequest, site_id: &SiteId) -> Result<(), &'static str> {
+    validate_request_with(request, site_id, loopback_upstream_allowed())
+}
+
+fn validate_request_with(
     request: &SiteConfigRequest,
-) -> bool {
-    let public_route = request
-        .policy
-        .routes
-        .iter()
-        .any(|route| route.security_entry == xshield_core::SecurityEntry::Public)
-        || (request.policy.routes.is_empty() && request.security_entry == "public");
-    let Some(previous) = previous else {
-        return public_route
-            || request.status == "paused"
-            || !request.policy.secret_refs.is_empty()
-            || request.policy.crypto.failure_strategy != "fail_closed"
-            || request.policy.routes.iter().any(route_has_crypto);
-    };
-    request.status == "paused"
-        || (previous.security_entry() != request.security_entry
-            && request.security_entry == "public")
-        || (previous.sensor_enabled() && !request.sensor_enabled)
-        || previous.public_origin() != request.public_origin
-        || previous.upstream_address() != request.upstream_address
-        || previous.upstream_server_name() != request.upstream_server_name
-        || previous.upstream_tls() != request.upstream_tls
-        || previous.policy_revision() != request.policy_revision
-        || policy_requires_approval(previous.policy(), &request.policy)
-        || (previous.status() == "paused" && request.status == "active")
-        || route_publicity_widened(previous.policy(), &request.policy)
-        || (public_route && previous.security_entry() != "public")
+    site_id: &SiteId,
+    allow_loopback: bool,
+) -> Result<(), &'static str> {
+    request
+        .to_config()
+        .validate_for_site(site_id)
+        .map_err(|error| validation_reason(error.field()))?;
+    validate_upstream_destination(
+        &request.upstream_address,
+        &request.upstream_server_name,
+        allow_loopback,
+    )
 }
 
-fn policy_requires_approval(previous: &SitePolicyConfig, request: &SitePolicyConfig) -> bool {
-    (previous.identity.enabled && !request.identity.enabled)
-        || (previous.waf.enabled && !request.waf.enabled)
-        || (previous.crypto.failure_strategy != request.crypto.failure_strategy
-            && request.crypto.failure_strategy == "observe")
-        || previous.crypto.adapter_revision != request.crypto.adapter_revision
-        || previous.crypto.protocol_version != request.crypto.protocol_version
-        || previous.secret_refs != request.secret_refs
-        || route_crypto_changed(previous, request)
-}
-
-fn route_crypto_changed(previous: &SitePolicyConfig, request: &SitePolicyConfig) -> bool {
-    previous.routes.iter().any(|before| {
-        let after = request
-            .routes
-            .iter()
-            .find(|route| same_route(before, route));
-        after.map_or_else(
-            || route_has_crypto(before),
-            |after| {
-                before.request_crypto != after.request_crypto
-                    || before.response_crypto != after.response_crypto
-            },
-        )
-    }) || request.routes.iter().any(|after| {
-        previous
-            .routes
-            .iter()
-            .all(|before| !same_route(before, after))
-            && route_has_crypto(after)
-    })
-}
-
-fn same_route(
-    before: &xshield_core::SiteRouteConfig,
-    after: &xshield_core::SiteRouteConfig,
-) -> bool {
-    before.operation_id == after.operation_id
-        && before.method == after.method
-        && before.path == after.path
-}
-
-fn route_has_crypto(route: &xshield_core::SiteRouteConfig) -> bool {
-    route.request_crypto.is_some() || route.response_crypto.is_some()
-}
-
-fn route_publicity_widened(previous: &SitePolicyConfig, request: &SitePolicyConfig) -> bool {
-    request.routes.iter().any(|route| {
-        route.security_entry == xshield_core::SecurityEntry::Public
-            && previous
-                .routes
-                .iter()
-                .find(|before| {
-                    before.operation_id == route.operation_id
-                        && before.method == route.method
-                        && before.path == route.path
-                })
-                .is_none_or(|before| before.security_entry != xshield_core::SecurityEntry::Public)
-    })
-}
-
-fn upstream_host_is_unsafe(upstream: &Url) -> bool {
-    let Some(host) = upstream.host_str().map(str::to_ascii_lowercase) else {
-        return true;
-    };
-    if matches!(
-        host.as_str(),
-        "metadata.google.internal" | "metadata.google"
-    ) {
-        return true;
-    }
-    if host.ends_with(".internal")
-        || host.ends_with(".localhost")
-        || host.strip_suffix(".local").is_some()
-        || host == "localhost"
-    {
-        return true;
-    }
-    host.parse::<IpAddr>().is_ok_and(upstream_ip_is_unsafe)
-}
-
-fn upstream_ip_is_unsafe(address: IpAddr) -> bool {
-    let allow_loopback = std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1");
-    match address {
-        IpAddr::V4(address) => {
-            (address.is_loopback() && !allow_loopback)
-                || address.is_unspecified()
-                || address.is_multicast()
-                || (address.octets()[0] == 169 && address.octets()[1] == 254)
-                || address.octets()[0] == 10
-                || (address.octets()[0] == 192 && address.octets()[1] == 168)
-                || (address.octets()[0] == 172 && (16..=31).contains(&address.octets()[1]))
-                || (address.octets()[0] == 100 && (64..=127).contains(&address.octets()[1]))
-                || (address.octets()[0] == 192
-                    && address.octets()[1] == 0
-                    && address.octets()[2] == 0)
-                || (address.octets()[0] == 198 && (18..=19).contains(&address.octets()[1]))
-                || (address.octets()[0] == 198
-                    && address.octets()[1] == 51
-                    && address.octets()[2] == 100)
-                || (address.octets()[0] == 203
-                    && address.octets()[1] == 0
-                    && address.octets()[2] == 113)
-        }
-        IpAddr::V6(address) => {
-            (address.is_loopback() && !allow_loopback)
-                || address.is_unspecified()
-                || address.is_multicast()
-                || (address.segments()[0] & 0xfe00) == 0xfc00
-                || (address.segments()[0] & 0xffc0) == 0xfe80
-                || (address.segments()[0] == 0x2001 && address.segments()[1] == 0x0db8)
-        }
-    }
+/// The identity under which a write is remembered: the action, the caller, the
+/// site and the key. It excludes the content, which is compared separately.
+fn write_idempotency_digest(
+    control: &ControlPlane,
+    action: AccessAction,
+    subject: &str,
+    site_id: &SiteId,
+    idempotency_key: &str,
+) -> Option<[u8; 32]> {
+    signature(
+        control,
+        b"site-config-idempotency-v2",
+        &[
+            action.event_type.as_bytes(),
+            action.method.as_bytes(),
+            action.path.as_bytes(),
+            subject.as_bytes(),
+            site_id.as_str().as_bytes(),
+            idempotency_key.as_bytes(),
+        ],
+    )
 }
 
 fn signature(control: &ControlPlane, label: &[u8], parts: &[&[u8]]) -> Option<[u8; 32]> {
@@ -3096,125 +3509,27 @@ fn view(
     site_id: &SiteId,
     record: &xshield_postgres::ProtectedSiteConfigRecord,
 ) -> SiteConfigView {
-    let policy = effective_policy(record);
-    let operations = policy
-        .routes
-        .iter()
-        .map(gateway_operation)
-        .collect::<Vec<_>>();
-    let mut gateway_config = json!({
-        "listen": format!("127.0.0.1:{}", record.listen_port()),
-        "origin": { "address": record.upstream_address(), "server_name": record.upstream_server_name(), "tls": record.upstream_tls() },
-        "tenant_id": control.config.tenant_id.as_str(),
-        "site_id": site_id.as_str(),
-        "policy_revision": record.policy_revision(),
-        "site_policy": policy.clone(),
-        "audit": { "directory": format!("target/xshield-audit-{}", site_id.as_str()), "key_id": "deployment-managed", "producer_id": format!("edge-{}", site_id.as_str()), "max_bytes": 16_777_216_u64, "high_watermark_bytes": 12_582_912_u64, "segment_max_bytes": 4_194_304_u64 },
-        "operations": operations
-    });
-    if let Some(object) = gateway_config.as_object_mut() {
-        if policy.identity.enabled || record.security_entry() != "public" || record.sensor_enabled()
-        {
-            object.insert(
-                "identity_store".to_owned(),
-                json!({
-                    "max_connections": 8,
-                    "acquire_timeout_ms": 2000,
-                    "anonymous_session_ttl_seconds": policy.identity.session_ttl_seconds,
-                    "max_active_anonymous_sessions": 100_000,
-                    "anonymous_session_rate_window_seconds": 60,
-                    "max_anonymous_session_creations_per_source": 10,
-                    "max_anonymous_session_creations_per_site": 1000
-                }),
-            );
-        }
-        if record.sensor_enabled() {
-            object.insert(
-            "sensor".to_owned(),
-            json!({ "origin": record.public_origin(), "build_ref": "0000000000000000000000000000000000000000000000000000000000000000", "heartbeat_seconds": 15 }),
-        );
-        }
-    }
+    let config = record.site_config();
     SiteConfigView {
-        display_name: record.display_name().to_owned(),
-        public_origin: record.public_origin().to_owned(),
-        upstream_address: record.upstream_address().to_owned(),
-        upstream_server_name: record.upstream_server_name().to_owned(),
-        upstream_tls: record.upstream_tls(),
-        listen_port: record.listen_port(),
-        entry_path: record.entry_path().to_owned(),
-        security_entry: record.security_entry().to_owned(),
-        sensor_enabled: record.sensor_enabled(),
-        policy_revision: record.policy_revision().to_owned(),
-        status: record.status().to_owned(),
-        policy,
+        display_name: config.display_name.clone(),
+        public_origin: config.public_origin.clone(),
+        upstream_address: config.upstream_address.clone(),
+        upstream_server_name: config.upstream_server_name.clone(),
+        upstream_tls: config.upstream_tls,
+        listen_port: config.listen_port,
+        entry_path: config.entry_path.clone(),
+        security_entry: config.security_entry.clone(),
+        sensor_enabled: config.sensor_enabled,
+        policy_revision: config.policy_revision.clone(),
+        status: config.status.clone(),
+        policy: config.effective_policy(),
         revision: record.revision(),
         config_digest: hex(record.config_digest()),
         updated_by: record.updated_by().to_owned(),
         created_at: record.created_at().to_rfc3339(),
         updated_at: record.updated_at().to_rfc3339(),
-        gateway_config,
+        gateway_config: config.gateway_config(control.config.tenant_id.as_str(), site_id),
     }
-}
-
-fn effective_policy(record: &xshield_postgres::ProtectedSiteConfigRecord) -> SitePolicyConfig {
-    let mut policy = record.policy().clone();
-    if policy.routes.is_empty() {
-        policy.routes.push(xshield_core::SiteRouteConfig {
-            operation_id: "protected.entry".to_owned(),
-            method: "GET".to_owned(),
-            path: record.entry_path().to_owned(),
-            security_entry: xshield_core::SecurityEntry::parse(record.security_entry())
-                .unwrap_or(xshield_core::SecurityEntry::UiActionRequired),
-            source_action: (record.security_entry() == "ui_action_required")
-                .then(|| "protected.entry".to_owned()),
-            resource_type: None,
-            view_profile: None,
-            resource_query_parameter: None,
-            resource_path_parameter: None,
-            request_crypto: None,
-            response_crypto: None,
-            response_mode: String::new(),
-            max_response_bytes: 1_048_576,
-        });
-    }
-    policy
-}
-
-fn gateway_operation(route: &xshield_core::SiteRouteConfig) -> serde_json::Value {
-    let admission = match route.security_entry {
-        xshield_core::SecurityEntry::Public => "PUBLIC",
-        xshield_core::SecurityEntry::AuthenticatedRoot => "AUTHENTICATED_ROOT",
-        xshield_core::SecurityEntry::UiActionRequired => "UI_ACTION_REQUIRED",
-    };
-    let mut operation = json!({
-        "operation_id": route.operation_id,
-        "method": route.method,
-        "path": route.path,
-        "admission": admission,
-        "source_action": route.source_action,
-        "resource_type": route.resource_type,
-        "view_profile": route.view_profile,
-        "resource_query_parameter": route.resource_query_parameter,
-        "resource_path_parameter": route.resource_path_parameter,
-    });
-    if let Some(request_crypto) = &route.request_crypto {
-        operation["request_crypto"] = serde_json::to_value(request_crypto)
-            .unwrap_or_else(|_| json!({ "mode": "OBSERVE", "adapter_revision": "invalid" }));
-    }
-    if route.response_crypto.is_some() || !route.response_mode.is_empty() {
-        let mode = if route.response_mode.is_empty() {
-            "BUFFERED_JSON"
-        } else {
-            route.response_mode.as_str()
-        };
-        let mut response = json!({ "mode": mode, "max_bytes": route.max_response_bytes });
-        if let Some(crypto) = &route.response_crypto {
-            response["crypto"] = serde_json::to_value(crypto).unwrap_or_else(|_| json!({}));
-        }
-        operation["response"] = response;
-    }
-    operation
 }
 
 #[allow(clippy::format_collect)]
@@ -3225,15 +3540,17 @@ fn hex(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        SiteConfigRequest, SitePolicyConfig, merged_health_details, parse_site_list_query,
-        patch_is_compatible, policy_requires_approval, rollback_target_revision,
-        validate_apply_ack, validate_request,
+        PlanInput, SiteConfigRequest, SiteHealthCheckConfig, SitePolicyConfig,
+        merged_health_details, parse_site_list_query, patch_is_compatible, plan_upstream_probe,
+        probe_upstream, rollback_target_revision, validate_apply_ack, validate_request,
+        validate_request_with,
     };
     use serde_json::json;
-    use xshield_core::{
-        GatewayApplyAck, GatewayApplyRequest, SecurityEntry, SiteRequestCrypto, SiteRouteConfig,
-        domain::SiteId,
-    };
+    use xshield_core::{GatewayApplyAck, GatewayApplyRequest, domain::SiteId};
+
+    fn site() -> SiteId {
+        SiteId::parse("site_a").unwrap()
+    }
 
     fn request() -> SiteConfigRequest {
         SiteConfigRequest {
@@ -3256,48 +3573,356 @@ mod tests {
     #[test]
     fn site_config_rejects_non_tls_public_origins() {
         let mut value = request();
-        assert!(validate_request(&value).is_ok());
+        assert!(validate_request(&value, &site()).is_ok());
         value.public_origin = "http://public.example".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
     }
 
     #[test]
     fn site_config_rejects_ambiguous_public_host_and_revision_text() {
         let mut value = request();
         value.public_origin = "https://public_example.com".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value = request();
         value.policy_revision = "policy version 2".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
     }
 
     #[test]
     fn site_config_rejects_metadata_and_link_local_upstreams() {
         let mut value = request();
         value.upstream_address = "127.0.0.1:9000".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value.upstream_address = "169.254.169.254:80".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value.upstream_address = "metadata.google.internal:80".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
+    }
+
+    /// Every address below reaches an internal, special-purpose or
+    /// translation-capable network. The reviewer reproduced `[::1]`,
+    /// `[fd00::1]`, `[fe80::1]` and both IPv4-mapped forms being accepted
+    /// because `Url::host_str` brackets IPv6 literals and the textual IP
+    /// check never matched.
+    #[test]
+    fn site_config_blocks_internal_ipv4_ipv6_mapped_and_translated_upstreams() {
+        for address in [
+            "[::1]:9000",
+            "[fd00::1]:9000",
+            "[fe80::1]:9000",
+            "[fd00:ec2::254]:80",
+            "[fec0::1]:80",
+            "[ff02::1]:80",
+            "[::]:80",
+            "[2001:db8::1]:80",
+            "[::ffff:127.0.0.1]:8080",
+            "[::ffff:169.254.169.254]:8080",
+            "[::ffff:10.0.0.5]:8080",
+            "[::ffff:8.8.8.8]:8080",
+            "[64:ff9b::7f00:1]:80",
+            "[64:ff9b::a9fe:a9fe]:80",
+            "[2002:7f00:1::]:80",
+            "0.0.0.0:80",
+            "0.1.2.3:80",
+            "127.0.0.1:80",
+            "127.255.255.254:80",
+            "10.0.0.1:80",
+            "172.16.0.1:80",
+            "172.31.255.255:80",
+            "192.168.1.1:80",
+            "169.254.169.254:80",
+            "168.63.129.16:80",
+            "100.64.0.1:80",
+            "100.100.100.200:80",
+            "192.0.0.192:80",
+            "192.0.2.1:80",
+            "198.18.0.1:80",
+            "198.51.100.1:80",
+            "203.0.113.1:80",
+            "224.0.0.1:80",
+            "240.0.0.1:80",
+            "255.255.255.255:80",
+        ] {
+            let mut value = request();
+            value.upstream_address = address.to_owned();
+            assert_eq!(
+                validate_request_with(&value, &site(), false),
+                Err("CONTROL_SITE_SSRF_BLOCKED"),
+                "{address} must be refused as an internal upstream"
+            );
+        }
+    }
+
+    #[test]
+    fn site_config_accepts_public_upstreams_and_scheme_default_ports() {
+        // `Url::port()` is None for a scheme's default port, which used to make
+        // `8.8.8.8:80` over http and `:443` over https "invalid".
+        for (address, tls) in [
+            ("8.8.8.8:80", false),
+            ("8.8.8.8:443", true),
+            ("8.8.8.8:443", false),
+            ("8.8.8.8:80", true),
+            ("[2001:4860:4860::8888]:443", true),
+            ("172.15.255.255:80", false),
+            ("172.32.0.1:80", false),
+            ("100.63.255.255:80", false),
+            ("100.128.0.1:80", false),
+            ("169.253.255.255:80", false),
+            ("169.255.0.1:80", false),
+            ("192.169.0.1:80", false),
+            ("198.17.255.255:80", false),
+            ("198.20.0.1:80", false),
+            ("223.255.255.255:80", false),
+        ] {
+            let mut value = request();
+            value.upstream_address = address.to_owned();
+            value.upstream_tls = tls;
+            assert_eq!(
+                validate_request_with(&value, &site(), false),
+                Ok(()),
+                "{address} tls={tls} is a public upstream"
+            );
+        }
+    }
+
+    #[test]
+    fn site_config_loopback_opt_in_allows_only_loopback() {
+        let mut value = request();
+        value.upstream_address = "127.0.0.1:9000".to_owned();
+        assert_eq!(validate_request_with(&value, &site(), true), Ok(()));
+        value.upstream_address = "[::1]:9000".to_owned();
+        assert_eq!(validate_request_with(&value, &site(), true), Ok(()));
+        // The opt-in is for the local lab only; it never unlocks private,
+        // metadata, mapped or translated destinations.
+        for address in [
+            "10.0.0.1:80",
+            "169.254.169.254:80",
+            "[::ffff:127.0.0.1]:80",
+            "[64:ff9b::7f00:1]:80",
+            "[fd00::1]:80",
+        ] {
+            value.upstream_address = address.to_owned();
+            assert_eq!(
+                validate_request_with(&value, &site(), true),
+                Err("CONTROL_SITE_SSRF_BLOCKED"),
+                "{address} stays blocked even with the loopback opt-in"
+            );
+        }
+    }
+
+    /// The probe used to build `http://{server_name}/...` and rely on a
+    /// resolver override that reqwest ignores for IP literals, so a public
+    /// `address` with `upstream_server_name = "127.0.0.1"` made the control
+    /// plane dial 127.0.0.1:80. Names the URL parser reads as an IPv4 host
+    /// ("2130706433", "0x7f.1", "127.1") have the same effect.
+    #[test]
+    fn site_config_rejects_server_names_that_a_url_parser_reads_as_an_ip() {
+        for name in [
+            "127.0.0.1",
+            "169.254.169.254",
+            "8.8.8.8",
+            "2130706433",
+            "0x7f.1",
+            "0x7f.0.0.1",
+            "127.1",
+            "1.1.1",
+        ] {
+            let mut value = request();
+            value.upstream_server_name = name.to_owned();
+            assert_eq!(
+                validate_request_with(&value, &site(), false),
+                Err("CONTROL_SITE_UPSTREAM_INVALID"),
+                "{name} is not a DNS name"
+            );
+        }
+        for name in ["origin.local", "juice.lab", "a-b.example.test", "localhost"] {
+            let mut value = request();
+            value.upstream_server_name = name.to_owned();
+            assert_eq!(
+                validate_request_with(&value, &site(), false),
+                Ok(()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_plan_targets_only_the_validated_socket_and_configured_port() {
+        let plan = plan_upstream_probe(
+            "8.8.8.8:9000",
+            "Origin.Example.Test",
+            false,
+            "/health",
+            false,
+        )
+        .unwrap();
+        // The old probe built `http://{server_name}/health`, which dials the
+        // scheme's default port instead of the configured one.
+        assert_eq!(plan.url, "http://origin.example.test:9000/health");
+        assert_eq!(plan.host, "origin.example.test");
+        assert_eq!(plan.address, "8.8.8.8:9000".parse().unwrap());
+        let default_port =
+            plan_upstream_probe("8.8.8.8:443", "origin.test", true, "/h", false).unwrap();
+        assert_eq!(default_port.address.port(), 443);
+        assert_eq!(default_port.url, "https://origin.test/h");
+    }
+
+    #[test]
+    fn probe_plan_refuses_internal_addresses_and_ip_like_server_names_without_io() {
+        for address in [
+            "[::ffff:127.0.0.1]:8080",
+            "[::ffff:169.254.169.254]:80",
+            "[::1]:80",
+            "[fd00::1]:80",
+            "127.0.0.1:80",
+            "10.1.2.3:80",
+            "169.254.169.254:80",
+            "[64:ff9b::7f00:1]:80",
+        ] {
+            assert_eq!(
+                plan_upstream_probe(address, "origin.test", false, "/health", false),
+                Err("CONTROL_SITE_SSRF_BLOCKED"),
+                "{address}"
+            );
+        }
+        for name in ["127.0.0.1", "2130706433", "0x7f.1", "127.1", "[::1]", "a b"] {
+            assert_eq!(
+                plan_upstream_probe("8.8.8.8:9000", name, false, "/health", false),
+                Err("CONTROL_SITE_UPSTREAM_INVALID"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            plan_upstream_probe("origin.test:80", "origin.test", false, "/h", false),
+            Err("CONTROL_SITE_UPSTREAM_INVALID")
+        );
+    }
+
+    /// Accepts connections on 127.0.0.1, records each request head and answers
+    /// with `response`. Returns the port and the shared record.
+    async fn recording_origin(
+        response: &'static str,
+    ) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heads = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorded = std::sync::Arc::clone(&heads);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let recorded = std::sync::Arc::clone(&recorded);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; 4096];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (port, heads)
+    }
+
+    #[tokio::test]
+    async fn probe_connects_to_the_pinned_socket_and_never_follows_redirects() {
+        let (target_port, target_heads) = recording_origin(
+            "HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        let health = SiteHealthCheckConfig::default();
+        // Only the lab opt-in may reach loopback; the Host header carries the
+        // configured server name and port while the socket is the pinned one.
+        let result = probe_upstream(
+            &format!("127.0.0.1:{target_port}"),
+            "origin.example.test",
+            false,
+            &health,
+            true,
+        )
+        .await;
+        assert_eq!(result["upstream_state"], "degraded", "{result}");
+        assert_eq!(
+            result["status"], 302,
+            "redirects are reported, not followed"
+        );
+        let heads = target_heads.lock().unwrap();
+        assert_eq!(heads.len(), 1);
+        assert!(
+            heads[0].starts_with("GET /health HTTP/1.1\r\n"),
+            "{}",
+            heads[0]
+        );
+        assert!(
+            heads[0]
+                .to_ascii_lowercase()
+                .contains(&format!("host: origin.example.test:{target_port}\r\n")),
+            "{}",
+            heads[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_does_not_dial_mapped_loopback_or_ip_literal_server_names() {
+        let (port, heads) =
+            recording_origin("HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        let health = SiteHealthCheckConfig {
+            path: "/secret-internal-path".to_owned(),
+            ..SiteHealthCheckConfig::default()
+        };
+        // A legacy or hand-edited row: the mapped loopback form used to pass
+        // every textual check and the probe dialled 127.0.0.1:{port}.
+        let mapped = probe_upstream(
+            &format!("[::ffff:127.0.0.1]:{port}"),
+            "origin.example.test",
+            false,
+            &health,
+            false,
+        )
+        .await;
+        assert_eq!(mapped["reason_code"], "CONTROL_SITE_SSRF_BLOCKED");
+        assert_eq!(mapped["upstream_state"], "unavailable");
+        // A public address with a loopback IP literal as server name used to
+        // dial 127.0.0.1:80 because the resolver override skips IP hosts.
+        let literal = probe_upstream("8.8.8.8:9000", "127.0.0.1", false, &health, false).await;
+        assert_eq!(literal["reason_code"], "CONTROL_SITE_UPSTREAM_INVALID");
+        // Even with the lab opt-in the mapped form stays blocked.
+        let opted_in = probe_upstream(
+            &format!("[::ffff:127.0.0.1]:{port}"),
+            "origin.example.test",
+            false,
+            &health,
+            true,
+        )
+        .await;
+        assert_eq!(opted_in["reason_code"], "CONTROL_SITE_SSRF_BLOCKED");
+        tokio::task::yield_now().await;
+        assert!(
+            heads.lock().unwrap().is_empty(),
+            "no connection may reach the loopback origin: {:?}",
+            heads.lock().unwrap()
+        );
     }
 
     #[test]
     fn site_config_keeps_listeners_inside_the_private_edge_pool() {
         let mut value = request();
         value.listen_port = 6099;
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value.listen_port = 6100;
-        assert!(validate_request(&value).is_ok());
+        assert!(validate_request(&value, &site()).is_ok());
     }
 
     #[test]
     fn site_config_rejects_ambiguous_entry_paths() {
         let mut value = request();
         value.entry_path = "/../admin".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
         value.entry_path = "/admin\\panel".to_owned();
-        assert!(validate_request(&value).is_err());
+        assert!(validate_request(&value, &site()).is_err());
     }
 
     #[test]
@@ -3334,37 +3959,272 @@ mod tests {
         assert!(parse_site_list_query(Some("scope=other")).is_err());
     }
 
+    // ---- snapshot planning ------------------------------------------------
+
+    fn config(status: &str, upstream: &str, port: u16) -> xshield_core::SiteConfig {
+        xshield_core::SiteConfig {
+            display_name: "demo".to_owned(),
+            public_origin: "https://demo.example.test".to_owned(),
+            upstream_address: upstream.to_owned(),
+            upstream_server_name: "origin.example.test".to_owned(),
+            upstream_tls: false,
+            listen_port: port,
+            entry_path: "/".to_owned(),
+            security_entry: "public".to_owned(),
+            sensor_enabled: false,
+            policy_revision: "policy-v1".to_owned(),
+            status: status.to_owned(),
+            policy: SitePolicyConfig::default(),
+        }
+    }
+
+    /// A site whose desired revision is 2 and whose active revision (if any)
+    /// is 1, with distinct upstreams so the served one is identifiable.
+    fn input(id: &str, desired: xshield_core::SiteConfig) -> PlanInput {
+        PlanInput {
+            site_id: SiteId::parse(id).unwrap(),
+            desired,
+            desired_revision: 2,
+            apply_id: format!("apply_{id}"),
+            requires_approval: false,
+            active_revision: Some(1),
+            active_config: Some(config("active", "1.1.1.1:9000", 6100)),
+        }
+    }
+
+    fn apply_state(id: &str) -> xshield_postgres::ProtectedSiteApplyState {
+        xshield_postgres::ProtectedSiteApplyState {
+            desired_revision: 2,
+            active_revision: Some(1),
+            apply_id: format!("apply_{id}"),
+            apply_state: "pending".to_owned(),
+            reason_code: "EDGE_APPLY_NOT_CONFIRMED".to_owned(),
+            retry_count: 0,
+            requires_approval: false,
+            risk_reasons: Vec::new(),
+            approved_by: None,
+            approval_id: None,
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn served(plan: &super::SnapshotPlan) -> Vec<(String, String, u64)> {
+        plan.served
+            .iter()
+            .map(|site| {
+                (
+                    site.site_id.as_str().to_owned(),
+                    site.config.upstream_address.clone(),
+                    site.revision,
+                )
+            })
+            .collect()
+    }
+
+    fn confirmed(plan: &super::SnapshotPlan) -> Vec<String> {
+        plan.confirmed
+            .iter()
+            .map(|(site, _, _)| site.as_str().to_owned())
+            .collect()
+    }
+
     #[test]
-    fn policy_approval_allows_bounded_tuning_but_blocks_security_downgrades() {
-        let previous = SitePolicyConfig::default();
-        let mut tuned = previous.clone();
-        tuned.limits.requests_per_second = 2_000;
-        assert!(!policy_requires_approval(&previous, &tuned));
+    fn a_site_awaiting_approval_stays_on_its_last_approved_configuration() {
+        let target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        let mut pending = input("site_a", config("active", "8.8.4.4:9000", 6100));
+        pending.requires_approval = true;
+        let mut never_applied = input("site_c", config("active", "9.9.9.9:9000", 6102));
+        never_applied.requires_approval = true;
+        never_applied.active_revision = None;
+        never_applied.active_config = None;
+        let plan = super::plan_snapshot(
+            &[pending, target, never_applied],
+            &SiteId::parse("site_b").unwrap(),
+            &apply_state("site_b"),
+        )
+        .unwrap();
+        assert_eq!(
+            served(&plan),
+            [
+                // Held at the approved revision 1, not the desired 8.8.4.4.
+                ("site_a".to_owned(), "1.1.1.1:9000".to_owned(), 1),
+                ("site_b".to_owned(), "2.2.2.2:9000".to_owned(), 2),
+            ],
+            "the never-applied site is omitted"
+        );
+        assert_eq!(
+            confirmed(&plan),
+            ["site_b"],
+            "only the applied desired revision"
+        );
+        assert!(plan.invalid.is_empty());
+    }
 
-        let mut weakened = previous.clone();
-        weakened.crypto.failure_strategy = "observe".to_owned();
-        assert!(policy_requires_approval(&previous, &weakened));
+    #[test]
+    fn drafts_are_omitted_and_never_confirmed_while_paused_sites_are_confirmed() {
+        let target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        let draft = input("site_a", config("draft", "8.8.4.4:9000", 6100));
+        let paused = input("site_c", config("paused", "9.9.9.9:9000", 6102));
+        let plan = super::plan_snapshot(
+            &[draft, target, paused],
+            &SiteId::parse("site_b").unwrap(),
+            &apply_state("site_b"),
+        )
+        .unwrap();
+        assert_eq!(served(&plan).len(), 1);
+        assert_eq!(
+            confirmed(&plan),
+            ["site_b", "site_c"],
+            "a draft must never look applied; a paused site applies as paused"
+        );
+    }
 
-        let mut encrypted_route = previous.clone();
-        encrypted_route.routes.push(SiteRouteConfig {
-            operation_id: "protected.read".to_owned(),
+    #[test]
+    fn a_takedown_awaiting_approval_keeps_the_site_served() {
+        let target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        let mut pausing = input("site_a", config("paused", "1.1.1.1:9000", 6100));
+        pausing.requires_approval = true;
+        let plan = super::plan_snapshot(
+            &[pausing, target],
+            &SiteId::parse("site_b").unwrap(),
+            &apply_state("site_b"),
+        )
+        .unwrap();
+        assert_eq!(served(&plan).len(), 2, "unapproved pause is not applied");
+        assert_eq!(confirmed(&plan), ["site_b"]);
+    }
+
+    #[test]
+    fn an_uncompilable_sibling_is_held_back_and_reported_without_failing_the_tenant() {
+        let target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        let mut broken = config("active", "8.8.4.4:9000", 6100);
+        broken.policy.routes = vec![xshield_core::SiteRouteConfig {
+            operation_id: "bad".to_owned(),
             method: "GET".to_owned(),
-            path: "/read".to_owned(),
-            security_entry: SecurityEntry::AuthenticatedRoot,
+            path: "/a b".to_owned(),
+            security_entry: xshield_core::SecurityEntry::Public,
             source_action: None,
             resource_type: None,
             view_profile: None,
             resource_query_parameter: None,
             resource_path_parameter: None,
-            request_crypto: Some(SiteRequestCrypto::Observe {
-                adapter_revision: "observe-v1".to_owned(),
-            }),
+            request_crypto: None,
             response_crypto: None,
             response_mode: String::new(),
             max_response_bytes: 1_048_576,
+        }];
+        let sibling = input("site_a", broken);
+        let plan = super::plan_snapshot(
+            &[sibling, target],
+            &SiteId::parse("site_b").unwrap(),
+            &apply_state("site_b"),
+        )
+        .unwrap();
+        assert_eq!(
+            served(&plan),
+            [
+                ("site_a".to_owned(), "1.1.1.1:9000".to_owned(), 1),
+                ("site_b".to_owned(), "2.2.2.2:9000".to_owned(), 2),
+            ]
+        );
+        assert_eq!(
+            plan.invalid
+                .iter()
+                .map(|(site, _, _)| site.as_str())
+                .collect::<Vec<_>>(),
+            ["site_a"]
+        );
+        assert_eq!(confirmed(&plan), ["site_b"]);
+    }
+
+    /// A live site is never dropped because a validator got stricter after the
+    /// edge accepted it: the held-back configuration is re-sent as it was.
+    #[test]
+    fn the_held_back_configuration_is_not_revalidated() {
+        let target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        let mut pending = input("site_a", config("active", "8.8.4.4:9000", 6100));
+        pending.requires_approval = true;
+        // Valid for the edge that applied it, but not under today's rules.
+        pending.active_config = Some(xshield_core::SiteConfig {
+            public_origin: "https://[::1]".to_owned(),
+            ..config("active", "1.1.1.1:9000", 6100)
         });
-        assert!(policy_requires_approval(&previous, &encrypted_route));
-        assert!(policy_requires_approval(&encrypted_route, &previous));
+        assert!(
+            pending
+                .active_config
+                .as_ref()
+                .unwrap()
+                .validate_for_site(&pending.site_id)
+                .is_err()
+        );
+        let plan = super::plan_snapshot(
+            &[pending, target],
+            &SiteId::parse("site_b").unwrap(),
+            &apply_state("site_b"),
+        )
+        .unwrap();
+        assert_eq!(served(&plan).len(), 2);
+    }
+
+    #[test]
+    fn the_target_is_held_to_the_strict_rule_with_a_stable_reason() {
+        let strict = |target: PlanInput, state: xshield_postgres::ProtectedSiteApplyState| {
+            super::plan_snapshot(&[target], &SiteId::parse("site_a").unwrap(), &state).err()
+        };
+        let base = || input("site_a", config("active", "8.8.4.4:9000", 6100));
+
+        let mut awaiting = base();
+        awaiting.requires_approval = true;
+        assert_eq!(
+            strict(awaiting, apply_state("site_a")),
+            Some("CONTROL_SITE_APPROVAL_REQUIRED")
+        );
+        assert_eq!(
+            strict(
+                input("site_a", config("draft", "8.8.4.4:9000", 6100)),
+                apply_state("site_a")
+            ),
+            Some("CONTROL_SITE_DRAFT_NOT_APPLICABLE")
+        );
+        let mut bad_origin = config("active", "8.8.4.4:9000", 6100);
+        bad_origin.public_origin = "https://[::1]".to_owned();
+        assert_eq!(
+            strict(input("site_a", bad_origin), apply_state("site_a")),
+            Some("CONTROL_SITE_POLICY_INVALID")
+        );
+        // The caller read a different revision or apply identity than the one
+        // under the lock.
+        let mut stale = apply_state("site_a");
+        stale.desired_revision = 1;
+        assert_eq!(
+            strict(base(), stale),
+            Some("CONTROL_SITE_APPLY_STATE_UNAVAILABLE")
+        );
+        let mut other_apply = apply_state("site_a");
+        other_apply.apply_id = "apply_other".to_owned();
+        assert_eq!(
+            strict(base(), other_apply),
+            Some("CONTROL_SITE_APPLY_STATE_UNAVAILABLE")
+        );
+        assert!(strict(base(), apply_state("site_a")).is_none());
+    }
+
+    #[test]
+    fn two_sites_on_one_listener_are_refused_before_anything_is_sent() {
+        // A held-back site keeps its old port, which a later site may now own.
+        let mut pending = input("site_a", config("active", "8.8.4.4:9000", 6101));
+        pending.requires_approval = true;
+        pending.active_config = Some(config("active", "1.1.1.1:9000", 6100));
+        let target = input("site_b", config("active", "2.2.2.2:9000", 6100));
+        assert_eq!(
+            super::plan_snapshot(
+                &[pending, target],
+                &SiteId::parse("site_b").unwrap(),
+                &apply_state("site_b"),
+            )
+            .err(),
+            Some("CONTROL_SITE_PORT_UNAVAILABLE")
+        );
     }
 
     #[test]
@@ -3398,27 +4258,67 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rollback_restores_last_active_when_desired_apply_is_not_active() {
-        let base = xshield_postgres::ProtectedSiteApplyState {
-            desired_revision: 3,
-            active_revision: Some(2),
+    fn apply_with(
+        desired: u64,
+        active: Option<u64>,
+        state: &str,
+    ) -> xshield_postgres::ProtectedSiteApplyState {
+        xshield_postgres::ProtectedSiteApplyState {
+            desired_revision: desired,
+            active_revision: active,
             apply_id: "apply_demo".to_owned(),
-            apply_state: "failed".to_owned(),
+            apply_state: state.to_owned(),
             reason_code: "EDGE_UNAVAILABLE".to_owned(),
             retry_count: 1,
             requires_approval: false,
+            risk_reasons: Vec::new(),
             approved_by: None,
             approval_id: None,
             updated_at: chrono::Utc::now(),
-        };
-        assert_eq!(rollback_target_revision(&base), Some(2));
+        }
+    }
 
-        let active = xshield_postgres::ProtectedSiteApplyState {
-            desired_revision: 2,
-            apply_state: "active".to_owned(),
-            ..base
-        };
-        assert_eq!(rollback_target_revision(&active), Some(1));
+    #[test]
+    fn rollback_cancels_a_pending_change_by_restoring_the_active_revision() {
+        // Desired revision 3 never became active: the active one is restored.
+        assert_eq!(
+            rollback_target_revision(&apply_with(3, Some(2), "failed"), Some(1)),
+            Some(2)
+        );
+        assert_eq!(
+            rollback_target_revision(&apply_with(3, Some(2), "pending"), None),
+            Some(2)
+        );
+        // The last apply of the active revision itself did not complete.
+        assert_eq!(
+            rollback_target_revision(&apply_with(2, Some(2), "failed"), Some(1)),
+            Some(2)
+        );
+    }
+
+    /// `active - 1` is wrong whenever a revision in between never served
+    /// traffic; the recorded activation order decides.
+    #[test]
+    fn rollback_with_nothing_pending_restores_the_previously_active_revision() {
+        // Revision 3 was never approved, so revision 4's predecessor in
+        // service is revision 2.
+        assert_eq!(
+            rollback_target_revision(&apply_with(4, Some(4), "active"), Some(2)),
+            Some(2)
+        );
+        // A paused site has nothing pending either; undo the pause.
+        assert_eq!(
+            rollback_target_revision(&apply_with(4, Some(4), "paused"), Some(3)),
+            Some(3)
+        );
+        // Only one revision has ever been active, or none has.
+        assert_eq!(
+            rollback_target_revision(&apply_with(1, Some(1), "active"), None),
+            None
+        );
+        assert_eq!(
+            rollback_target_revision(&apply_with(1, None, "pending"), None),
+            None
+        );
     }
 }

@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3854,
-  "passed_count": 3854,
+  "checks_total": 3855,
+  "passed_count": 3855,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -147,6 +147,11 @@
     },
     {
       "name": "json:tests/security-lab/independent_labels.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/biome.json",
       "passed": true,
       "detail": ""
     },
