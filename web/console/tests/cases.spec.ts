@@ -1,3 +1,4 @@
+import { openView } from "./navigation";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { resolve } from "node:path";
 import {
@@ -41,10 +42,10 @@ async function mockCases(page: Page, handler: Handler) {
   return calls;
 }
 async function connectCases(page: Page) {
-  await page.goto("/");
+  await page.goto("/investigation/requests");
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("case");
+  await openView(page, "case");
 }
 async function createCase(page: Page, purpose = CASE_PURPOSE) {
   await page.getByLabel("调查目的", { exact: true }).fill(purpose);
@@ -248,8 +249,8 @@ test("case list renders purpose as text with healthy desktop and mobile layouts"
     await route.fulfill({ json: body });
   });
   await connectCases(page);
-  await expect(page).toHaveURL(new URL("/", page.url()).toString());
-  await expect(page).toHaveTitle("调查控制台 · Xshield");
+  await expect(page).toHaveURL(new URL("/cases", page.url()).toString());
+  await expect(page).toHaveTitle("管理后台 · Xshield");
   await page.getByRole("button", { name: "读取我的案件 / 刷新列表" }).click();
   const list = page.getByRole("region", { name: "我的案件", exact: true });
   await expect(list.getByText(injection, { exact: true })).toBeVisible();
@@ -338,9 +339,9 @@ test("case list late refresh cannot restore rows or cursor after leaving the vie
   ).toBeVisible();
   await refresh.click();
   await expect.poll(() => calls.length).toBe(2);
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  await openView(page, "request");
   release();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("case");
+  await openView(page, "case");
   await expect(
     page.getByText("读取本人案件后，选择一项打开证据集合。"),
   ).toBeVisible();
@@ -425,8 +426,8 @@ test("case create → browse → add → refresh → close → browse uses expli
     }
   });
   await connectCases(page);
-  await expect(page).toHaveURL(new URL("/", page.url()).toString());
-  await expect(page).toHaveTitle("调查控制台 · Xshield");
+  await expect(page).toHaveURL(new URL("/cases", page.url()).toString());
+  await expect(page).toHaveTitle("管理后台 · Xshield");
   await expect(
     page.getByRole("heading", { name: "案件工作台", exact: true }),
   ).toBeVisible();
@@ -589,8 +590,8 @@ for (const failure of ["network", "service", "decode"] as const) {
       "",
     );
     await expect(page.getByLabel("调查目的", { exact: true })).toBeDisabled();
-    await page.getByLabel("查询类型", { exact: true }).selectOption("search");
-    await page.getByLabel("查询类型", { exact: true }).selectOption("case");
+    await openView(page, "search");
+    await openView(page, "case");
     await expect(
       page.getByRole("heading", { name: "操作结果未知" }),
     ).toBeVisible();
@@ -866,9 +867,9 @@ test("case late mutation response cannot repaint after navigation and retains re
   await connectCases(page);
   await createCase(page);
   await expect.poll(() => calls.length).toBe(1);
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  await openView(page, "request");
   release();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("case");
+  await openView(page, "case");
   await expect(
     page.getByRole("heading", { name: "操作结果未知" }),
   ).toBeVisible();
@@ -931,7 +932,7 @@ for (const end of ["401", "disconnect", "pagehide", "idle"] as const) {
     await expect(page.getByText(CASE_KEY, { exact: true })).toHaveCount(0);
     await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
     await page.getByRole("button", { name: "连接", exact: true }).click();
-    await page.getByLabel("查询类型", { exact: true }).selectOption("case");
+    await openView(page, "case");
     await expect(page.getByLabel("调查目的", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("幂等键", { exact: true })).not.toHaveValue(
       CASE_KEY,

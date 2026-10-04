@@ -373,11 +373,88 @@ export type AuditHealthResponse = Envelope & {
   index_watermark: Watermark | null;
 };
 
+export type WorkbenchObservation<T> = {
+  observed_at: string;
+  source_state: "available" | "partial" | "unavailable" | "not_authorized";
+  reason_code: string;
+  value: T | null;
+};
+
+export type WorkbenchSite = {
+  site_id: string;
+  display_name: string;
+  public_origin: string;
+  edge: WorkbenchObservation<string>;
+  upstream: WorkbenchObservation<string>;
+  audit: WorkbenchObservation<string>;
+  current_revision: number | null;
+  apply_state: string;
+  reason_code: string;
+  updated_at: string;
+};
+
+export type WorkbenchAudit = Omit<AuditHealthResponse, "request_id" | "tenant_id" | "site_id">;
+
+export type WorkbenchOverviewResponse = Envelope & {
+  as_of: string;
+  completeness: "complete" | "partial" | "unavailable";
+  index_watermark: Watermark | null;
+  has_gaps: boolean;
+  posture: WorkbenchObservation<string>;
+  sites: WorkbenchSite[];
+  queues: unknown[];
+  recent_activity: unknown[];
+  audit: WorkbenchObservation<WorkbenchAudit>;
+};
+
 function modelCallListTime(value: unknown): string {
   const result = timestamp(value);
   // The route's signed query vocabulary has exactly-second UTC boundaries.
   ensure(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(result));
   return result;
+}
+
+function decodeWorkbenchObservation<T>(value: unknown, decode: (value: unknown) => T): WorkbenchObservation<T> {
+  const row = object(value);
+  ensure(Object.keys(row).length === 4 && ["observed_at", "source_state", "reason_code", "value"].every((key) => Object.hasOwn(row, key)));
+  const source_state = choice(row.source_state, ["available", "partial", "unavailable", "not_authorized"] as const);
+  return { observed_at: timestamp(row.observed_at), source_state, reason_code: name(row.reason_code), value: row.value === null ? null : decode(row.value) };
+}
+
+function decodeWorkbenchAudit(value: unknown): WorkbenchAudit {
+  const row = object(value);
+  ensure(Object.keys(row).length === 11 && ["target_id", "table", "as_of", "metadata_retention_days", "closed_segments", "closed_segment_bytes", "published_segments", "pending_segments", "unsealed_segments", "has_gaps", "index_watermark"].every((key) => Object.hasOwn(row, key)));
+  const result = {
+    ...watermarked(row), target_id: name(row.target_id), table: name(row.table),
+    as_of: timestamp(row.as_of), metadata_retention_days: integer(row.metadata_retention_days, 1, 3650),
+    closed_segments: integer(row.closed_segments), closed_segment_bytes: integer(row.closed_segment_bytes),
+    published_segments: integer(row.published_segments), pending_segments: integer(row.pending_segments),
+    unsealed_segments: integer(row.unsealed_segments), has_gaps: bool(row.has_gaps),
+  } satisfies WorkbenchAudit;
+  ensure(result.published_segments + result.pending_segments === result.closed_segments);
+  ensure(result.unsealed_segments <= result.pending_segments);
+  return result;
+}
+
+function decodeWorkbenchOverview(value: unknown, status: number): WorkbenchOverviewResponse {
+  ensure(status === 200);
+  const row = object(value);
+  ensure(Object.keys(row).length === 12 && ["request_id", "tenant_id", "site_id", "as_of", "completeness", "index_watermark", "has_gaps", "posture", "sites", "queues", "recent_activity", "audit"].every((key) => Object.hasOwn(row, key)));
+  const sites = list(row.sites, 128, (item) => {
+    const site = object(item);
+    ensure(Object.keys(site).length === 10);
+    return {
+      site_id: name(site.site_id), display_name: text(site.display_name), public_origin: text(site.public_origin),
+      edge: decodeWorkbenchObservation(site.edge, text), upstream: decodeWorkbenchObservation(site.upstream, text), audit: decodeWorkbenchObservation(site.audit, text),
+      current_revision: site.current_revision === null ? null : integer(site.current_revision), apply_state: text(site.apply_state), reason_code: name(site.reason_code), updated_at: timestamp(site.updated_at),
+    };
+  });
+  return {
+    ...envelope(row), as_of: timestamp(row.as_of), completeness: choice(row.completeness, ["complete", "partial", "unavailable"] as const),
+    index_watermark: row.index_watermark === null ? null : (() => { const watermark = object(row.index_watermark); return { producer_boot_id: id(watermark.producer_boot_id, new RegExp(`^${uuid}$`)), producer_sequence: integer(watermark.producer_sequence, 1) }; })(),
+    has_gaps: bool(row.has_gaps), posture: decodeWorkbenchObservation(row.posture, text), sites,
+    queues: list(row.queues, 256, (item) => item), recent_activity: list(row.recent_activity, 256, (item) => item), audit: decodeWorkbenchObservation(row.audit, decodeWorkbenchAudit),
+  };
 }
 
 /** Validate a local list plan before it can become an audited GET request. */
@@ -1142,7 +1219,432 @@ export type BrowserSession = {
   tenant_id: string;
   site_id: string;
   csrf_token: string;
+  roles: string[];
+  session_expires_at: string;
+  idle_expires_at: string;
+  last_reauthenticated_at: string | null;
+  step_up_valid: boolean;
 };
+
+export type SiteRouteConfig = {
+  operation_id: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  security_entry: "public" | "authenticated_root" | "ui_action_required";
+  source_action: string | null;
+  resource_type: string | null;
+  view_profile: string | null;
+  resource_query_parameter: string | null;
+  resource_path_parameter: string | null;
+  request_crypto: Record<string, unknown> | null;
+  response_crypto: Record<string, unknown> | null;
+  response_mode: "" | "BUFFERED_JSON" | "SENSOR_HTML";
+  max_response_bytes: number;
+};
+
+export type SitePolicyConfig = {
+  routes: SiteRouteConfig[];
+  identity: {
+    enabled: boolean;
+    cookie_name: string;
+    credential_header: string;
+    profile: string;
+    session_ttl_seconds: number;
+    generation: number;
+  };
+  crypto: {
+    adapter_revision: string;
+    failure_strategy: string;
+    protocol_version: string | null;
+  };
+  waf: {
+    enabled: boolean;
+    blocked_headers: string[];
+    blocked_query_fragments: string[];
+    max_cookie_bytes: number;
+  };
+  limits: {
+    max_request_body_bytes: number;
+    max_response_body_bytes: number;
+    requests_per_second: number;
+    burst: number;
+  };
+  health_check: {
+    path: string;
+    interval_seconds: number;
+    timeout_ms: number;
+    expected_status: number;
+  };
+  secret_refs: SiteSecretReference[];
+};
+
+export type SiteSecretReference = {
+  kind: "tls" | "session_hmac" | "request_crypto" | "response_crypto" | "model";
+  secret_ref: string;
+  key_id: string;
+  state: "active" | "pending_rotation" | "retired" | "unavailable";
+};
+
+export type SiteConfig = {
+  display_name: string;
+  public_origin: string;
+  upstream_address: string;
+  upstream_server_name: string;
+  upstream_tls: boolean;
+  listen_port: number;
+  entry_path: string;
+  security_entry: "public" | "authenticated_root" | "ui_action_required";
+  sensor_enabled: boolean;
+  policy_revision: string;
+  status: "draft" | "active" | "paused";
+  policy: SitePolicyConfig;
+  revision: number;
+  config_digest: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  gateway_config: Record<string, unknown>;
+};
+export type SiteConfigResponse = Envelope & {
+  found: boolean;
+  desired_revision: number | null;
+  active_revision: number | null;
+  apply_state: "active" | "pending" | "failed" | "paused" | null;
+  apply_id: string | null;
+  reason_code: string | null;
+  requires_approval: boolean | null;
+  config_digest: string | null;
+  config: SiteConfig | null;
+  edge_health?: Record<string, unknown>;
+};
+
+export type SiteListItem = {
+  site_id: string;
+  display_name: string;
+  public_origin: string;
+  listen_port: number;
+  security_entry: SiteConfig["security_entry"];
+  sensor_enabled: boolean;
+  policy_revision: string;
+  status: SiteConfig["status"];
+  revision: number;
+  config_digest: string;
+  updated_by: string;
+  updated_at: string;
+  desired_revision: number;
+  active_revision: number | null;
+  apply_id: string;
+  apply_state: "active" | "pending" | "failed" | "paused";
+  reason_code: string;
+  requires_approval: boolean;
+};
+
+export type ManagementApiKeyRecord = {
+  api_key_id: string;
+  tenant_id: string;
+  subject: string;
+  display_name: string;
+  key_prefix: string;
+  status: string;
+  expires_at: string;
+  created_at: string;
+  last_used_at: string | null;
+};
+export type ManagementApiKeyResponse = {
+  request_id: string;
+  api_key_id: string;
+  api_key: string;
+  key_prefix: string;
+  expires_at: string;
+  scopes: Array<{ tenant_id: string; site_id: string; capabilities: string[] }>;
+};
+
+function decodeManagementApiKeys(value: unknown, status: number): ManagementApiKeyRecord[] {
+  ensure(status === 200);
+  const row = object(value);
+  return list(row.keys, 128, (item) => {
+    const key = object(item);
+    return {
+      api_key_id: id(key.api_key_id, /^key_[0-9a-f-]{36}$/), tenant_id: name(key.tenant_id),
+      subject: text(key.subject), display_name: text(key.display_name),
+      key_prefix: text(key.key_prefix), status: text(key.status),
+      expires_at: timestamp(key.expires_at), created_at: timestamp(key.created_at),
+      last_used_at: key.last_used_at === null ? null : timestamp(key.last_used_at),
+    };
+  });
+}
+function decodeManagementApiKey(value: unknown, status: number): ManagementApiKeyResponse {
+  ensure(status === 201);
+  const row = object(value);
+  return {
+    request_id: text(row.request_id), api_key_id: id(row.api_key_id, /^key_[0-9a-f-]{36}$/),
+    api_key: text(row.api_key), key_prefix: text(row.key_prefix),
+    expires_at: timestamp(row.expires_at),
+    scopes: list(row.scopes, 32, (item) => {
+      const scope = object(item);
+      return { tenant_id: name(scope.tenant_id), site_id: name(scope.site_id), capabilities: list(scope.capabilities, 16, text) };
+    }),
+  };
+}
+export type SiteListResponse = Envelope & {
+  sites: SiteListItem[];
+  truncated: boolean;
+  next_cursor: string | null;
+};
+export type SiteDeleteResponse = Envelope & { reason_code: string };
+export type SiteApplyResponse = Envelope & {
+  listen_port: number;
+  desired_revision: number;
+  active_revision: number | null;
+  config_digest: string;
+  apply_state: "active" | "pending" | "failed" | "paused";
+  apply_id: string;
+  reason_code: string;
+  requires_approval: boolean;
+  edge_health?: Record<string, unknown>;
+};
+export type SiteValidationResponse = Envelope & {
+  revision: number;
+  config_digest: string;
+  valid: boolean;
+  reason_code: string;
+};
+export type SiteRevision = {
+  revision: number;
+  policy_revision: string;
+  config_digest: string;
+  config: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
+};
+export type SiteRevisionsResponse = Envelope & {
+  revisions: SiteRevision[];
+};
+
+function decodeSitePolicy(value: unknown): SitePolicyConfig {
+  const defaults: SitePolicyConfig = {
+    routes: [],
+    identity: {
+      enabled: false,
+      cookie_name: "__Host-xshield_sid",
+      credential_header: "Authorization",
+      profile: "default",
+      session_ttl_seconds: 3600,
+      generation: 1,
+    },
+    crypto: { adapter_revision: "observe-v1", failure_strategy: "fail_closed", protocol_version: null },
+    waf: { enabled: true, blocked_headers: [], blocked_query_fragments: [], max_cookie_bytes: 8192 },
+    limits: { max_request_body_bytes: 1_048_576, max_response_body_bytes: 16_777_216, requests_per_second: 1000, burst: 2000 },
+    health_check: { path: "/health", interval_seconds: 15, timeout_ms: 2000, expected_status: 200 },
+    secret_refs: [],
+  };
+  if (value === undefined) return defaults;
+  const row = object(value);
+  const optionalObject = (item: unknown): Record<string, unknown> | null =>
+    item === null || item === undefined ? null : object(item);
+  const identity = row.identity === undefined ? defaults.identity : object(row.identity);
+  const crypto = row.crypto === undefined ? defaults.crypto : object(row.crypto);
+  const waf = row.waf === undefined ? defaults.waf : object(row.waf);
+  const limits = row.limits === undefined ? defaults.limits : object(row.limits);
+  const health = row.health_check === undefined ? defaults.health_check : object(row.health_check);
+  return {
+    routes: list(row.routes ?? [], 256, (item) => {
+      const route = object(item);
+      return {
+        operation_id: name(route.operation_id),
+        method: choice(route.method, ["GET", "POST", "PUT", "PATCH", "DELETE"]) as SiteRouteConfig["method"],
+        path: text(route.path, 256),
+        security_entry: choice(route.security_entry, ["public", "authenticated_root", "ui_action_required"]),
+        source_action: route.source_action === null ? null : name(route.source_action),
+        resource_type: route.resource_type === null ? null : name(route.resource_type),
+        view_profile: route.view_profile === null ? null : name(route.view_profile),
+        resource_query_parameter: route.resource_query_parameter === null ? null : name(route.resource_query_parameter),
+        resource_path_parameter: route.resource_path_parameter === null ? null : name(route.resource_path_parameter),
+        request_crypto: optionalObject(route.request_crypto),
+        response_crypto: optionalObject(route.response_crypto),
+        response_mode: choice(route.response_mode ?? "", ["", "BUFFERED_JSON", "SENSOR_HTML"]) as SiteRouteConfig["response_mode"],
+        max_response_bytes: integer(route.max_response_bytes ?? 1_048_576, 1, 16_777_216),
+      };
+    }),
+    identity: {
+      enabled: bool(identity.enabled),
+      cookie_name: text(identity.cookie_name, 128),
+      credential_header: text(identity.credential_header, 128),
+      profile: text(identity.profile, 128),
+      session_ttl_seconds: integer(identity.session_ttl_seconds, 1, 86_400),
+      generation: integer(identity.generation, 1),
+    },
+    crypto: {
+      adapter_revision: text(crypto.adapter_revision, 128),
+      failure_strategy: text(crypto.failure_strategy, 64),
+      protocol_version: crypto.protocol_version === null ? null : name(crypto.protocol_version),
+    },
+    waf: {
+      enabled: bool(waf.enabled),
+      blocked_headers: list(waf.blocked_headers ?? [], 64, (item) => text(item, 128)),
+      blocked_query_fragments: list(waf.blocked_query_fragments ?? [], 32, (item) => {
+        const fragment = text(item, 128);
+        ensure(fragment.length >= 3 && /^[\x20-\x7e]+$/.test(fragment));
+        return fragment;
+      }),
+      max_cookie_bytes: integer(waf.max_cookie_bytes, 1, 1_048_576),
+    },
+    limits: {
+      max_request_body_bytes: integer(limits.max_request_body_bytes, 1, 16_777_216),
+      max_response_body_bytes: integer(limits.max_response_body_bytes, 1, 16_777_216),
+      requests_per_second: integer(limits.requests_per_second, 1, 1_000_000),
+      burst: integer(limits.burst, 1, 2_000_000),
+    },
+    health_check: {
+      path: text(health.path, 256),
+      interval_seconds: integer(health.interval_seconds, 1, 3600),
+      timeout_ms: integer(health.timeout_ms, 100, 30_000),
+      expected_status: integer(health.expected_status, 100, 599),
+    },
+    secret_refs: list(row.secret_refs ?? [], 32, (item) => {
+      const secret = object(item);
+      return {
+        kind: choice(secret.kind, ["tls", "session_hmac", "request_crypto", "response_crypto", "model"]),
+        secret_ref: text(secret.secret_ref, 512),
+        key_id: name(secret.key_id),
+        state: choice(secret.state, ["active", "pending_rotation", "retired", "unavailable"]),
+      };
+    }),
+  };
+}
+
+function decodeSiteConfig(value: unknown, status: number): SiteConfigResponse {
+  ensure(status === 200 || status === 201);
+  const row = object(value);
+  const found = bool(row.found);
+  if (!found) return {
+    ...envelope(row), found: false, desired_revision: null, active_revision: null,
+    apply_state: null, apply_id: null, reason_code: null, config_digest: null, config: null,
+    requires_approval: row.requires_approval === undefined || row.requires_approval === null ? null : bool(row.requires_approval),
+    edge_health: row.edge_health === undefined ? undefined : object(row.edge_health),
+  };
+  ensure(row.config !== null);
+  const config = object(row.config);
+  return {
+    ...envelope(row),
+    found,
+    desired_revision: integer(row.desired_revision, 1),
+    active_revision: row.active_revision === null ? null : integer(row.active_revision, 1),
+    apply_state: choice(row.apply_state, ["active", "pending", "failed", "paused"]) as SiteConfigResponse["apply_state"],
+    apply_id: name(row.apply_id),
+    reason_code: name(row.reason_code),
+    requires_approval: bool(row.requires_approval),
+    config_digest: text(row.config_digest, 64),
+    edge_health: row.edge_health === undefined ? undefined : object(row.edge_health),
+    config: {
+      display_name: text(config.display_name, 128),
+      public_origin: text(config.public_origin, 512),
+      upstream_address: text(config.upstream_address, 128),
+      upstream_server_name: text(config.upstream_server_name, 253),
+      upstream_tls: bool(config.upstream_tls),
+      listen_port: integer(config.listen_port, 6100, 65535),
+      entry_path: text(config.entry_path, 256),
+      security_entry: choice(config.security_entry, ["public", "authenticated_root", "ui_action_required"]),
+      sensor_enabled: bool(config.sensor_enabled),
+      policy_revision: name(config.policy_revision),
+      status: choice(config.status, ["draft", "active", "paused"]),
+      policy: decodeSitePolicy(config.policy),
+      revision: integer(config.revision, 1),
+      config_digest: text(config.config_digest, 64),
+      updated_by: text(config.updated_by, 256),
+      created_at: timestamp(config.created_at),
+      updated_at: timestamp(config.updated_at),
+      gateway_config: object(config.gateway_config),
+    },
+  };
+}
+
+function decodeSiteList(value: unknown, status: number): SiteListResponse {
+  ensure(status === 200);
+  const row = object(value);
+  return {
+    ...envelope(row),
+    truncated: row.truncated === undefined ? false : bool(row.truncated),
+    next_cursor: row.next_cursor === undefined || row.next_cursor === null ? null : name(row.next_cursor),
+    sites: list(row.sites, 128, (item) => {
+      const site = object(item);
+      return {
+        site_id: name(site.site_id),
+        display_name: text(site.display_name, 128),
+        public_origin: text(site.public_origin, 512),
+        listen_port: integer(site.listen_port, 6100, 65535),
+        security_entry: choice(site.security_entry, ["public", "authenticated_root", "ui_action_required"]),
+        sensor_enabled: bool(site.sensor_enabled),
+        policy_revision: name(site.policy_revision),
+        status: choice(site.status, ["draft", "active", "paused"]),
+        revision: integer(site.revision, 1),
+        config_digest: text(site.config_digest, 64),
+        updated_by: text(site.updated_by, 256),
+        updated_at: timestamp(site.updated_at),
+        desired_revision: integer(site.desired_revision, 1),
+        active_revision: site.active_revision === null ? null : integer(site.active_revision, 1),
+        apply_id: name(site.apply_id),
+        apply_state: choice(site.apply_state, ["active", "pending", "failed", "paused"]) as SiteListItem["apply_state"],
+        reason_code: name(site.reason_code),
+        requires_approval: bool(site.requires_approval),
+      };
+    }),
+  };
+}
+
+function decodeSiteDelete(value: unknown, status: number): SiteDeleteResponse {
+  ensure(status === 200 || status === 404);
+  const row = object(value);
+  return { ...envelope(row), reason_code: name(row.reason_code) };
+}
+
+function decodeSiteApply(value: unknown, status: number): SiteApplyResponse {
+  ensure(status === 200);
+  const row = object(value);
+  return {
+    ...envelope(row),
+    listen_port: integer(row.listen_port, 6100, 65535),
+    desired_revision: integer(row.desired_revision, 1),
+    active_revision: row.active_revision === null ? null : integer(row.active_revision, 1),
+    config_digest: text(row.config_digest, 64),
+    apply_state: choice(row.apply_state, ["active", "pending", "failed", "paused"]) as SiteApplyResponse["apply_state"],
+    apply_id: name(row.apply_id),
+    reason_code: name(row.reason_code),
+    requires_approval: bool(row.requires_approval),
+    edge_health: row.edge_health === undefined ? undefined : object(row.edge_health),
+  };
+}
+
+function decodeSiteValidation(value: unknown, status: number): SiteValidationResponse {
+  ensure(status === 200 || status === 422);
+  const row = object(value);
+  return {
+    ...envelope(row),
+    revision: integer(row.revision, 1),
+    config_digest: text(row.config_digest, 64),
+    valid: bool(row.valid),
+    reason_code: name(row.reason_code),
+  };
+}
+
+function decodeSiteRevisions(value: unknown, status: number): SiteRevisionsResponse {
+  ensure(status === 200);
+  const row = object(value);
+  return {
+    ...envelope(row),
+    revisions: list(row.revisions, 128, (item) => {
+      const revision = object(item);
+      return {
+        revision: integer(revision.revision, 1),
+        policy_revision: name(revision.policy_revision),
+        config_digest: text(revision.config_digest, 64),
+        config: object(revision.config),
+        created_by: text(revision.created_by, 256),
+        created_at: timestamp(revision.created_at),
+      };
+    }),
+  };
+}
 
 /** Authenticates the HttpOnly browser cookie and returns only its CSRF companion. */
 export async function bootstrapBrowserSession(
@@ -1183,7 +1685,7 @@ export async function bootstrapBrowserSession(
     const row = object(value);
     ensure(
       Object.keys(row).sort().join(",") ===
-        "csrf_token,site_id,subject,tenant_id",
+        "csrf_token,idle_expires_at,last_reauthenticated_at,roles,session_expires_at,site_id,step_up_valid,subject,tenant_id",
     );
     const csrfToken = text(row.csrf_token, 64);
     ensure(/^[0-9a-f]{64}$/.test(csrfToken));
@@ -1192,6 +1694,22 @@ export async function bootstrapBrowserSession(
       tenant_id: name(row.tenant_id),
       site_id: name(row.site_id),
       csrf_token: csrfToken,
+      session_expires_at: timestamp(row.session_expires_at),
+      idle_expires_at: timestamp(row.idle_expires_at),
+      last_reauthenticated_at: nullable(row.last_reauthenticated_at, timestamp),
+      step_up_valid: bool(row.step_up_valid),
+      roles: list(row.roles, 10, (item) => choice(item, [
+        "observer",
+        "investigator",
+        "sensitive_evidence_reader",
+        "sensitive_evidence_approver",
+        "policy_author",
+        "policy_approver",
+        "release_operator",
+        "audit_administrator",
+        "key_administrator",
+        "system_admin",
+      ])),
     };
   } catch (error) {
     if (signal?.aborted) throw new ApiError("REQUEST_ABORTED", status);
@@ -1259,6 +1777,7 @@ export class ControlClient {
     body?: string,
     idempotencyKey?: string,
     accessId?: string,
+    methodOverride?: string,
   ): Promise<T> {
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), 15_000);
@@ -1269,7 +1788,7 @@ export class ControlClient {
     try {
       combined.throwIfAborted();
       const response = await fetch(`/control/v1/${path}`, {
-        method: body === undefined ? "GET" : "POST",
+          method: methodOverride ?? (body === undefined ? "GET" : (path === "site-config" || path.endsWith("/config") ? "PUT" : "POST")),
         headers: {
           ...(this.#authorization === null
             ? {}
@@ -1852,6 +2371,11 @@ export class ControlClient {
     );
   }
 
+  /** Read the server-projected operating snapshot once; callers own refresh cadence. */
+  async workbenchOverview(signal?: AbortSignal): Promise<WorkbenchOverviewResponse> {
+    return this.#request("workbench/overview", decodeWorkbenchOverview, signal);
+  }
+
   /** Read an Observer grant snapshot; online eligibility is checked separately.
    * Rejects malformed IDs before transport, retains the server's audit boundary,
    * and applies the shared timeout, byte cap and safe error contract.
@@ -2251,6 +2775,139 @@ export class ControlClient {
     return this.#transport(`artifacts/${artifactId}/content`,
       (response, combined) => readEvidence(response, combined, artifactId, accessId),
       signal, undefined, undefined, accessId);
+  }
+
+  async siteList(signal?: AbortSignal, cursor?: string, limit = 100): Promise<SiteListResponse> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      throw new ApiError("CONTROL_CURSOR_INVALID");
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor !== undefined) {
+      this.#cursor(cursor);
+      query.set("cursor", cursor);
+    }
+    return this.#request(`sites?${query.toString()}`, decodeSiteList, signal);
+  }
+
+  async managementApiKeys(signal?: AbortSignal): Promise<ManagementApiKeyRecord[]> {
+    return this.#request("agent-api-keys", decodeManagementApiKeys, signal);
+  }
+
+  async createManagementApiKey(
+    value: { subject: string; display_name: string; expires_at: string; scopes: Array<{ tenant_id: string; site_id: string; capabilities: string[] }> },
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<ManagementApiKeyResponse> {
+    this.#idempotencyKey(key);
+    return this.#request("agent-api-keys", decodeManagementApiKey, signal, JSON.stringify(value), key);
+  }
+
+  async revokeManagementApiKey(apiKeyId: string, key: string, signal?: AbortSignal): Promise<void> {
+    this.#idempotencyKey(key);
+    await this.#transport(`agent-api-keys/${name(apiKeyId)}/revoke`, async (response) => {
+      ensure(response.status === 200);
+    }, signal, "", key, undefined, "POST");
+  }
+
+  async createSite(
+    siteId: string,
+    value: Omit<SiteConfig, "revision" | "config_digest" | "updated_by" | "created_at" | "updated_at" | "gateway_config">,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<SiteConfigResponse> {
+    const parsedSiteId = name(siteId);
+    this.#idempotencyKey(key);
+    return this.#request(
+      "sites",
+      decodeSiteConfig,
+      signal,
+      JSON.stringify({ site_id: parsedSiteId, ...value }),
+      key,
+    );
+  }
+
+  async siteConfig(siteId?: string, signal?: AbortSignal): Promise<SiteConfigResponse> {
+    const path = siteId === undefined ? "site-config" : `sites/${name(siteId)}/config`;
+    return this.#request(path, decodeSiteConfig, signal);
+  }
+
+  async deleteSite(siteId: string, key: string, signal?: AbortSignal): Promise<SiteDeleteResponse> {
+    this.#idempotencyKey(key);
+    const path = `sites/${name(siteId)}`;
+    return this.#transport(
+      path,
+      async (response, combined) => decodeSiteDelete(await readJson(response, combined), response.status),
+      signal,
+      undefined,
+      key,
+      undefined,
+      "DELETE",
+    );
+  }
+
+  /** Observe edge/upstream health for one site; the backend audits each read. */
+  async siteHealth(siteId: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
+    return this.#request('sites/' + name(siteId) + '/health', decodeSiteApply, signal);
+  }
+
+  async siteStatus(siteId: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
+    return this.#request(`sites/${name(siteId)}/status`, decodeSiteApply, signal);
+  }
+
+  async validateSite(siteId: string, signal?: AbortSignal): Promise<SiteValidationResponse> {
+    return this.#transport(
+      `sites/${name(siteId)}/validate`,
+      async (response, combined) => decodeSiteValidation(await readJson(response, combined), response.status),
+      signal,
+      "",
+    );
+  }
+
+  async siteRevisions(siteId: string, signal?: AbortSignal): Promise<SiteRevisionsResponse> {
+    return this.#request(`sites/${name(siteId)}/revisions`, decodeSiteRevisions, signal);
+  }
+
+  async applySite(siteId: string, key: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
+    this.#idempotencyKey(key);
+    return this.#transport(
+      `sites/${name(siteId)}/apply`,
+      async (response, combined) => decodeSiteApply(await readJson(response, combined), response.status),
+      signal,
+      "",
+      key,
+    );
+  }
+
+  async approveSite(siteId: string, key: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
+    this.#idempotencyKey(key);
+    return this.#transport(
+      `sites/${name(siteId)}/approve`,
+      async (response, combined) => decodeSiteApply(await readJson(response, combined), response.status),
+      signal,
+      "",
+      key,
+    );
+  }
+
+  async rollbackSite(siteId: string, key: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
+    this.#idempotencyKey(key);
+    return this.#transport(
+      `sites/${name(siteId)}/rollback`,
+      async (response, combined) => decodeSiteApply(await readJson(response, combined), response.status),
+      signal,
+      "",
+      key,
+    );
+  }
+
+  async saveSiteConfig(
+    siteId: string | undefined,
+    value: Omit<SiteConfig, "revision" | "config_digest" | "updated_by" | "created_at" | "updated_at" | "gateway_config">,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<SiteConfigResponse> {
+    this.#idempotencyKey(key);
+    const path = siteId === undefined ? "site-config" : `sites/${name(siteId)}/config`;
+    return this.#request(path, decodeSiteConfig, signal, JSON.stringify(value), key);
   }
 
   #idempotencyKey(key: string): void {

@@ -19,10 +19,17 @@ import { CasePanel } from "./CasePanel";
 import { EvidenceAccessPanel } from "./EvidenceAccessPanel";
 import { EvidenceHoldPanel } from "./EvidenceHoldPanel";
 import { ExportPanel } from "./ExportPanel";
+import { SiteOperationsPanel } from "./SiteOperationsPanel";
+import { SiteConfigPanel } from "./SiteConfigPanel";
+import { AdminShell } from "./AdminShell";
+import { OverviewWorkbench } from "./OverviewWorkbench";
+import { ManagementApiKeyPanel } from "./ManagementApiKeyPanel";
+import { routeQueryKind, routeTarget, siteRoute } from "./admin-routes";
 import type { BindingResponse, GrantResponse } from "./ledger";
 import type {
   ArtifactResponse,
   AuditHealthResponse,
+  WorkbenchOverviewResponse,
   CalibrationReportResponse,
   AgentRunResponse,
   EventsResponse,
@@ -31,6 +38,12 @@ import type {
   ModelCallListResponse,
   ModelCallResponse,
   SummaryResponse,
+  SiteConfigResponse,
+  SiteApplyResponse,
+  SiteListItem,
+  SiteRevision,
+  BrowserSession,
+  JobResponse,
 } from "./api";
 import {
   ArtifactDetail,
@@ -46,22 +59,8 @@ import {
   WatermarkNotice,
 } from "./panels";
 
-type Problem = { message: string; code: string; requestId?: string | null };
-type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access" | "hold" | "export";
-type QueryKind =
-  | "request"
-  | "model"
-  | "agent"
-  | "model-list"
-  | "audit-health"
-  | "calibration-report"
-  | "grant"
-  | "binding"
-  | "search"
-  | "case"
-  | "access"
-  | "hold"
-  | "export";
+type Problem = { message: string; code: string; requestId?: string | null; status?: number };
+type Channel = "query" | "events" | "evidence" | "artifact" | "case" | "access" | "hold" | "export" | "sites" | "health" | "workbench";
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
@@ -70,6 +69,7 @@ const queryLabels = {
   grant: "资格 ID",
   binding: "身份绑定 ID",
   export: "导出 ID",
+  jobs: "任务 ID",
 };
 const queryPrefixes = {
   request: "req",
@@ -79,6 +79,7 @@ const queryPrefixes = {
   grant: "grant",
   binding: "auth",
   export: "export",
+  jobs: "job",
 };
 const idleMs = 15 * 60 * 1000;
 const machineLoginEnabled =
@@ -91,7 +92,7 @@ function Failure({ problem }: { problem: Problem | null }) {
         <div>
           {problem.message}
           <small className="mono">
-            {problem.code}
+            {problem.code}{problem.status ? " · HTTP " + problem.status : ""}
             {problem.requestId ? ` · ${problem.requestId}` : ""}
           </small>
         </div>
@@ -113,13 +114,22 @@ export function App() {
     access: 0,
     hold: 0,
     export: 0,
+    sites: 0,
+    health: 0,
+    workbench: 0,
   });
   const scope = useRef<{ tenant_id: string; site_id: string } | null>(null);
   const [connected, setConnected] = useState(false);
+  const [pathname, setPathname] = useState(() => window.location.pathname || "/");
+  const [sessionInfo, setSessionInfo] = useState<BrowserSession | null>(null);
+  // `null` is the explicitly enabled local machine-login mode. Browser
+  // sessions always carry the server-provided role list.
+  const [managementRoles, setManagementRoles] = useState<string[] | null>(null);
   const [token, setToken] = useState("");
   const [authReady, setAuthReady] = useState(machineLoginEnabled);
   const [requestId, setRequestId] = useState("");
-  const [queryKind, setQueryKind] = useState<QueryKind>("request");
+  const queryKind = routeQueryKind(pathname);
+  const currentSite = siteRoute(pathname);
   const [ledger, setLedger] = useState<GrantResponse | BindingResponse | null>(
     null,
   );
@@ -135,9 +145,18 @@ export function App() {
   const [modelList, setModelList] = useState<ModelCallListResponse | null>(
     null,
   );
+  const [job, setJob] = useState<JobResponse | null>(null);
   const [health, setHealth] = useState<AuditHealthResponse | null>(null);
+  const [workbench, setWorkbench] = useState<WorkbenchOverviewResponse | null>(null);
   const [calibrationReport, setCalibrationReport] =
     useState<CalibrationReportResponse | null>(null);
+  const [siteConfig, setSiteConfig] = useState<SiteConfigResponse | null>(null);
+  const [siteStatus, setSiteStatus] = useState<SiteApplyResponse | null>(null);
+  const [siteHealth, setSiteHealth] = useState<SiteApplyResponse | null>(null);
+  const [siteRevisions, setSiteRevisions] = useState<SiteRevision[]>([]);
+  const [siteList, setSiteList] = useState<SiteListItem[]>([]);
+  const [siteListCursor, setSiteListCursor] = useState<string | null>(null);
+  const selectedSiteId = currentSite?.siteId ?? "";
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [events, setEvents] = useState<EventsResponse | null>(null);
   const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
@@ -160,7 +179,13 @@ export function App() {
     setModelListPlan(null);
     setModelList(null);
     setHealth(null);
+    setWorkbench(null);
+    setJob(null);
     setCalibrationReport(null);
+    setSiteConfig(null);
+    setSiteHealth(null);
+    setSiteStatus(null);
+    setSiteRevisions([]);
     setLedger(null);
     setSearchPlan(null);
     setSearch(null);
@@ -180,10 +205,13 @@ export function App() {
       client.current = null;
       scope.current = null;
       setConnected(false);
+      setSessionInfo(null);
+      setManagementRoles(null);
       setToken("");
       setAuthReady(true);
       setRequestId("");
-      setQueryKind("request");
+      setSiteList([]);
+      setSiteListCursor(null);
       setSearchPreset(null);
       setSessionNotice(notice);
     },
@@ -200,6 +228,8 @@ export function App() {
           tenant_id: session.tenant_id,
           site_id: session.site_id,
         };
+        setManagementRoles(session.roles);
+        setSessionInfo(session);
         setSessionNotice(null);
         setConnected(true);
       })
@@ -218,6 +248,74 @@ export function App() {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => { document.getElementById("main-content")?.focus(); }, [pathname]);
+  const siteUnsaved = useRef(false);
+  const historyIndex = useRef<number>(Number(window.history.state?.xshieldIndex ?? 0));
+  useEffect(() => {
+    window.history.replaceState({ ...window.history.state, xshieldIndex: historyIndex.current }, "");
+  }, []);
+  const setSiteUnsaved = useCallback((value: boolean) => { siteUnsaved.current = value; }, []);
+  const allowNavigation = useCallback((nextPath: string, previousPath: string) => {
+    const before = siteRoute(previousPath);
+    const after = siteRoute(nextPath);
+    if (!siteUnsaved.current || (before && after && before.siteId === after.siteId)) return true;
+    return window.confirm("当前站点有未保存草稿或待确认操作。确定离开？");
+  }, []);
+  const syncRoute = useCallback((nextPath: string, previousPath: string) => {
+    const previous = siteRoute(previousPath);
+    const next = siteRoute(nextPath);
+    // A category is part of the same editing session. Other route changes
+    // invalidate every in-flight response before another view can render.
+    if (!previous || !next || previous.siteId !== next.siteId) clearResults();
+    if (!previous || !next || previous.siteId !== next.siteId) siteUnsaved.current = false;
+    setPathname(nextPath);
+    setRequestId("");
+    setSearchPreset(null);
+  }, [clearResults]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const next = window.location.pathname || "/";
+      const index = Number(window.history.state?.xshieldIndex ?? historyIndex.current - 1);
+      if (!allowNavigation(next, pathname)) {
+        const delta = historyIndex.current - index;
+        if (delta) window.history.go(delta);
+        else window.history.replaceState({ xshieldIndex: historyIndex.current }, "", pathname);
+        return;
+      }
+      historyIndex.current = index;
+      syncRoute(next, pathname);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [pathname, syncRoute, allowNavigation]);
+
+  const navigate = useCallback((path: string, completed = false) => {
+    if (path === window.location.pathname + window.location.search) return;
+    const previous = window.location.pathname;
+    if (!completed && !allowNavigation(path.split("?")[0] ?? path, previous)) return;
+    historyIndex.current += 1;
+    window.history.pushState({ xshieldIndex: historyIndex.current }, "", path);
+    syncRoute(window.location.pathname || "/", previous);
+  }, [syncRoute, allowNavigation]);
+
+  useEffect(() => {
+    const target = routeTarget(pathname, queryKind);
+    if (target) setRequestId(target);
+  }, [pathname, queryKind]);
+
+  useEffect(() => {
+    if (!connected) return;
+    const target = routeTarget(pathname, queryKind);
+    if (!target) return;
+    if (queryKind === "request") loadRequest(target);
+    else if (queryKind === "model") void run("query", (api, signal) => api.modelCall(target, signal), (response) => setModel(response));
+    else if (queryKind === "agent") void run("query", (api, signal) => api.agentRun(target, signal), (response) => setAgentRun(response));
+    else if (queryKind === "grant") void run("query", (api, signal) => api.grant(target, signal), (response) => setLedger(response));
+    else if (queryKind === "binding") loadBinding(target);
+    else if (queryKind === "calibration-report") loadCalibrationReport(target);
+  }, [connected, pathname, queryKind]);
 
   useEffect(() => {
     if (!connected) return;
@@ -241,7 +339,19 @@ export function App() {
       window.removeEventListener("pagehide", leave);
     };
   }, [connected, disconnect]);
-  useEffect(() => () => lifetime.current.abort(), []);
+  useEffect(() => {
+    // StrictMode replays setup/cleanup; a new mount needs a live request signal.
+    if (lifetime.current.signal.aborted) lifetime.current = new AbortController();
+    return () => lifetime.current.abort();
+  }, []);
+  useEffect(() => {
+    if (connected && queryKind === "site-config") loadSiteConfig();
+  }, [connected, queryKind, selectedSiteId]);
+
+  useEffect(() => {
+    if (!connected || queryKind !== "overview") return;
+    void run("workbench", (api, signal) => api.workbenchOverview(signal), (response) => setWorkbench(response));
+  }, [connected, queryKind, managementRoles]);
 
   // Every response belongs to a query generation and one authenticated scope.
   // Abort alone cannot stop already-resolved promises from repainting old data.
@@ -250,6 +360,7 @@ export function App() {
     fetcher: (api: ControlClient, signal: AbortSignal) => Promise<T>,
     apply: (response: T) => void,
     fail?: (error: unknown) => void,
+    expectedSiteId?: string,
   ): Promise<boolean> {
     const api = client.current;
     if (!api) return false;
@@ -265,18 +376,23 @@ export function App() {
     try {
       const response = await fetcher(api, signal);
       if (!current()) return false;
+      if (expectedSiteId && response.site_id !== expectedSiteId) {
+        throw new ApiError("INVALID_RESPONSE");
+      }
       if (
         scope.current &&
         (scope.current.tenant_id !== response.tenant_id ||
-          scope.current.site_id !== response.site_id)
+          (!expectedSiteId && scope.current.site_id !== response.site_id))
       ) {
         disconnect("响应范围校验失败，连接已断开。");
         return false;
       }
-      scope.current = {
-        tenant_id: response.tenant_id,
-        site_id: response.site_id,
-      };
+      if (!expectedSiteId) {
+        scope.current = {
+          tenant_id: response.tenant_id,
+          site_id: response.site_id,
+        };
+      }
       apply(response);
       return true;
     } catch (error) {
@@ -291,6 +407,7 @@ export function App() {
                 message: error.message,
                 code: error.code,
                 requestId: error.requestId,
+                status: error.status,
               }
             : {
                 message: "查询未完成，请稍后重试。",
@@ -307,13 +424,15 @@ export function App() {
   function connect(event: FormEvent) {
     event.preventDefault();
     try {
-      client.current = new ControlClient(token);
+    client.current = new ControlClient(token);
     } catch {
       setSessionNotice("请输入有效的管理凭证。");
       return;
     }
     lifetime.current = new AbortController();
     setToken("");
+    setManagementRoles(null);
+    setSessionInfo(null);
     setSessionNotice(null);
     setConnected(true);
   }
@@ -374,7 +493,7 @@ export function App() {
       queryKind === "search" ||
       queryKind === "case" ||
       queryKind === "access" || queryKind === "hold" || queryKind === "export" || queryKind === "model-list" ||
-      queryKind === "audit-health"
+      queryKind === "audit-health" || queryKind === "site-config"
     )
       return;
     clearResults();
@@ -386,6 +505,10 @@ export function App() {
         (api, signal) => api.modelCall(target, signal),
         (response) => setModel(response),
       );
+      return;
+    }
+    if (queryKind === "jobs") {
+      void run("query", (api, signal) => api.job(target, signal), (response) => setJob(response));
       return;
     }
     if (queryKind === "agent") {
@@ -449,12 +572,52 @@ export function App() {
     );
   }
   function loadHealth() {
-    clearResults();
     void run(
-      "query",
+      "health",
       (api, signal) => api.health(signal),
       (response) => setHealth(response),
     );
+  }
+  function loadSiteConfig(cursor?: string, append = false) {
+    if (currentSite) {
+      if (!currentSite.creating) loadSiteDetails(currentSite.siteId);
+      return;
+    }
+    void run("sites", (api, signal) => api.siteList(signal, cursor), (response) => {
+      setSiteList((current) => {
+        if (!append) return response.sites;
+        const seen = new Set(current.map((site) => site.site_id));
+        return [...current, ...response.sites.filter((site) => !seen.has(site.site_id))];
+      });
+      setSiteListCursor(response.next_cursor);
+    });
+  }
+  function refreshOverview() {
+    clearResults();
+    void run("workbench", (api, signal) => api.workbenchOverview(signal), (response) => setWorkbench(response));
+  }
+  function loadSiteDetails(siteId: string) {
+    if (managementRoles !== null && !managementRoles.includes("system_admin")) {
+      if (managementRoles.includes("observer")) {
+        void run("query", (api, signal) => api.siteStatus(siteId, signal), (response) => setSiteStatus(response), undefined, siteId);
+        void run("sites", (api, signal) => api.siteRevisions(siteId, signal), (response) => setSiteRevisions(response.revisions), undefined, siteId);
+      }
+      return;
+    }
+    void run("query", async (api, signal) => {
+      const config = await api.siteConfig(siteId, signal);
+      // Each response is checked before combining projections. A revision
+      // response from another tenant/site must never be silently merged.
+      if (config.site_id !== siteId) throw new ApiError("INVALID_RESPONSE");
+      return config;
+    }, (response) => setSiteConfig(response), undefined, siteId);
+    if (managementRoles === null || managementRoles.includes("observer")) {
+      void run("sites", async (api, signal) => {
+        const response = await api.siteRevisions(siteId, signal);
+        if (response.site_id !== siteId) throw new ApiError("INVALID_RESPONSE");
+        return response;
+      }, (response) => setSiteRevisions(response.revisions), undefined, siteId);
+    }
   }
   function loadCalibrationReport(target = requestId.trim()) {
     clearResults();
@@ -471,32 +634,22 @@ export function App() {
   ) {
     clearResults();
     setSearchPreset(null);
-    setQueryKind(kind);
-    setRequestId(id);
-    if (kind === "request") {
-      loadRequest(id);
-    } else if (kind === "model") {
-      void run(
-        "query",
-        (api, signal) => api.modelCall(id, signal),
-        (response) => setModel(response),
-      );
-    } else if (kind === "agent") {
-      void run(
-        "query",
-        (api, signal) => api.agentRun(id, signal),
-        (response) => setAgentRun(response),
-      );
-    } else {
-      loadBinding(id);
-    }
+    const route =
+      kind === "request"
+        ? `/investigation/requests/${id}`
+        : kind === "model"
+          ? `/investigation/models/${id}`
+          : kind === "agent"
+            ? `/investigation/agents/${id}`
+            : `/investigation/bindings/${id}`;
+    navigate(route);
   }
   function prepareSearchHistory(preset: SearchPreset) {
     clearResults();
+    navigate("/investigation/search");
     setSearchPreset(preset);
     setSearchPresetVersion((version) => version + 1);
     setRequestId("");
-    setQueryKind("search");
   }
   function loadRequest(target: string) {
     void run(
@@ -583,6 +736,8 @@ export function App() {
   const relatedEvents =
     search?.events ?? events?.events ?? (event ? [event] : []);
   const title = {
+    overview: "运行概览",
+    session: "权限中心",
     request: "请求调查",
     model: "模型调用调查",
     agent: "Agent 运行调查",
@@ -596,6 +751,10 @@ export function App() {
     access: "证据访问",
     hold: "证据保留",
     export: "调查导出",
+    "site-config": "受保护站点",
+    "api-keys": "管理 API Key",
+    jobs: "后台任务",
+    "not-found": "页面不存在",
   }[queryKind];
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
@@ -661,49 +820,37 @@ export function App() {
   );
 
   return (
-    <>
-      <header className="topbar">
-        <span className="brand">Xshield</span>
-        <span className="nav-title">{title}</span>
-        <span className="muted console-label">调查控制台</span>
-        <div className="connection">
-          <span className="mono scope">
-            {scope.current
-              ? `${scope.current.tenant_id} / ${scope.current.site_id}`
-              : connected
-                ? "等待查询验证范围"
-                : "尚未连接"}
-          </span>
-          {connected && (
-            machineLoginEnabled ? (
-              <button className="outline" onClick={() => disconnect()}>
-                断开连接
-              </button>
-            ) : (
-              <>
-                <span className="muted" role="status">
-                  原文查看要求两分钟内的 MFA 再认证
-                </span>
-                <button className="outline" onClick={() => void reauthenticate()}>
-                  重新验证高危操作
-                </button>
-                <button className="outline" onClick={() => void logout()}>
-                  安全退出
-                </button>
-              </>
-            )
-          )}
-        </div>
-      </header>
-      <main>
+    <AdminShell
+      connected={connected}
+      pathname={pathname}
+      title={title}
+      scope={scope.current ? `${scope.current.tenant_id} / ${scope.current.site_id}` : "等待查询验证范围"}
+      roles={managementRoles}
+      session={sessionInfo}
+      machineLoginEnabled={machineLoginEnabled}
+      onNavigate={navigate}
+      onLogout={() => void logout()}
+      onReauthenticate={() => void reauthenticate()}
+      onRefresh={queryKind === "overview" ? refreshOverview : undefined}
+      refreshing={queryKind === "overview" && Boolean(busy.sites || busy.health)}
+      observedAt={queryKind === "overview" ? workbench?.as_of ?? null : null}
+    >
         <h1>{title}</h1>
         <p className="lead">
-          {queryKind === "request"
+          {queryKind === "overview"
+            ? "查看当前管理范围内的站点、审计和调查服务状态。"
+            : queryKind === "session"
+              ? "查看当前主体、角色、站点范围和再认证状态。"
+            : queryKind === "request"
             ? "沿着请求时间线，核对每一次判定与证据。"
             : queryKind === "model"
               ? "核对模型调用生命周期、版本与证据引用。"
               : queryKind === "agent"
                 ? "核对 Agent 脱敏生命周期与固定事件引用。"
+              : queryKind === "site-config"
+                ? "配置受保护网站、上游、安全入口与反向代理监听端口。"
+              : queryKind === "api-keys"
+                ? "创建和撤销绑定 tenant、site 与能力集合的 Agent API Key。"
               : queryKind === "audit-health"
                 ? "按需读取配置审计日志到索引的发布快照。"
                 : queryKind === "calibration-report"
@@ -786,90 +933,62 @@ export function App() {
           </section>
         ) : (
           <>
-            <form className="panel query-form" onSubmit={query}>
-              <label htmlFor="query-kind">查询类型</label>
-              <select
-                id="query-kind"
-                value={queryKind}
-                onChange={(event) => {
-                  clearResults();
-                  setRequestId("");
-                  setSearchPreset(null);
-                  setQueryKind(
-                    event.target.value === "search"
-                      ? "search"
-                      : event.target.value === "model-list"
-                        ? "model-list"
-                        : event.target.value === "audit-health"
-                        ? "audit-health"
-                        : event.target.value === "calibration-report"
-                          ? "calibration-report"
-                        : event.target.value === "case"
-                        ? "case"
-                        : event.target.value === "access"
-                          ? "access"
-                        : event.target.value === "hold"
-                            ? "hold"
-                          : event.target.value === "export"
-                            ? "export"
-                          : event.target.value === "grant"
-                            ? "grant"
-                            : event.target.value === "binding"
-                              ? "binding"
-                              : event.target.value === "model"
-                                ? "model"
-                                : event.target.value === "agent"
-                                  ? "agent"
-                                : "request",
-                  );
-                }}
-              >
-                <option value="request">请求</option>
-                <option value="model">模型调用</option>
-                <option value="agent">Agent 运行</option>
-                <option value="model-list">模型调用列表</option>
-                <option value="audit-health">审计发布状态</option>
-                <option value="calibration-report">校准报告</option>
-                <option value="grant">资格</option>
-                <option value="binding">身份绑定</option>
-                <option value="search">结构化事件检索</option>
-                <option value="case">案件工作台</option>
-                <option value="access">证据访问</option>
-                <option value="hold">证据保留</option>
-                <option value="export">调查导出</option>
-              </select>
-              {queryKind !== "search" &&
-                queryKind !== "case" &&
-                queryKind !== "access" &&
-                queryKind !== "hold" &&
-                queryKind !== "export" &&
-                queryKind !== "model-list" &&
-                queryKind !== "audit-health" && (
-                  <>
-                    <label htmlFor="request-id">{queryLabels[queryKind]}</label>
-                    <input
-                      id="request-id"
-                      className="mono"
-                      placeholder={`${queryPrefixes[queryKind]}_…`}
-                      value={requestId}
-                      onChange={(e) => {
-                        clearResults();
-                        setRequestId(e.target.value);
-                      }}
-                      autoComplete="off"
-                      spellCheck={false}
-                      maxLength={queryPrefixes[queryKind].length + 37}
-                      required
-                      pattern={`${queryPrefixes[queryKind]}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
-                      title={`请输入规范的 ${queryPrefixes[queryKind]}_ 前缀 UUIDv7`}
-                    />
-                    <button type="submit" disabled={busy.query}>
-                      {busy.query ? "查询中…" : "查询"}
-                    </button>
-                  </>
-                )}
-            </form>
+            {queryKind === "overview" && (
+              <OverviewWorkbench
+                overview={workbench}
+                busy={Boolean(busy.workbench)}
+                failed={Boolean(problems.workbench)}
+                onRefresh={refreshOverview}
+                onNavigate={navigate}
+              />
+            )}
+            {queryKind === "jobs" && job && <section className="panel" aria-label="后台任务详情"><h2>任务状态</h2>{job.job ? <dl className="session-grid"><div><dt>任务</dt><dd>{job.job.job_id}</dd></div><div><dt>案件</dt><dd>{job.job.case_id}</dd></div><div><dt>状态</dt><dd>{job.job.status}</dd></div><div><dt>原因</dt><dd>{job.job.reason_code}</dd></div><div><dt>证据数量</dt><dd>{job.job.artifact_count}</dd></div></dl> : <p>当前主体范围内未找到该任务。</p>}</section>}
+            {queryKind === "not-found" && <p className="empty">该地址没有对应页面，请从侧栏选择功能。</p>}
+            {queryKind === "session" && sessionInfo && (
+              <section className="panel session-panel" aria-labelledby="session-title">
+                <h2 id="session-title">当前管理会话</h2>
+                <dl className="session-grid">
+                  <div><dt>主体</dt><dd className="mono">{sessionInfo.subject}</dd></div>
+                  <div><dt>租户</dt><dd className="mono">{sessionInfo.tenant_id}</dd></div>
+                  <div><dt>站点范围</dt><dd className="mono">{sessionInfo.site_id}</dd></div>
+                  <div><dt>角色</dt><dd>{sessionInfo.roles.join("、") || "无"}</dd></div>
+                  <div><dt>绝对到期</dt><dd>{sessionInfo.session_expires_at}</dd></div>
+                  <div><dt>闲置到期</dt><dd>{sessionInfo.idle_expires_at}</dd></div>
+                  <div><dt>最近再认证</dt><dd>{sessionInfo.last_reauthenticated_at ?? "尚未再认证"}</dd></div>
+                  <div><dt>Step-up</dt><dd>{sessionInfo.step_up_valid ? "有效" : "未生效"}</dd></div>
+                </dl>
+              </section>
+            )}
+            {["request", "model", "agent", "calibration-report", "grant", "binding", "jobs"].includes(queryKind) && (
+              <form className="panel query-form" onSubmit={query}>
+                <label htmlFor="request-id">{queryLabels[queryKind as keyof typeof queryLabels]}</label>
+                <input
+                  id="request-id"
+                  className="mono"
+                  placeholder={`${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_…`}
+                  value={requestId}
+                  onChange={(e) => {
+                    clearResults();
+                    setRequestId(e.target.value);
+                  }}
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={(queryPrefixes[queryKind as keyof typeof queryPrefixes] ?? "req").length + 37}
+                  required
+                  pattern={`${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
+                  title={`请输入规范的 ${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_ 前缀 UUIDv7`}
+                />
+                <button type="submit" disabled={busy.query}>
+                  {busy.query ? "查询中…" : "查询"}
+                </button>
+              </form>
+            )}
             <Failure problem={problems.query ?? null} />
+            <Failure problem={problems.sites ?? null} />
+            <Failure problem={problems.health ?? null} />
+            {queryKind === "api-keys" && client.current && scope.current && (managementRoles?.includes("system_admin") || managementRoles?.includes("key_administrator")) && (
+              <ManagementApiKeyPanel client={client.current} tenantId={scope.current.tenant_id} onNotice={setSessionNotice} />
+            )}
             <div hidden={queryKind !== "case"}>
               <CasePanel
                 active={queryKind === "case"}
@@ -921,7 +1040,67 @@ export function App() {
                 }
               />
             </div>
-            {queryKind === "case" || queryKind === "hold" ||
+            {queryKind === "site-config" && currentSite && managementRoles !== null && !managementRoles.includes("system_admin") ? (
+              <SiteOperationsPanel
+                key={selectedSiteId} siteId={selectedSiteId} section={currentSite.section} roles={managementRoles}
+                status={siteStatus} health={siteHealth} revisions={siteRevisions}
+                busy={Boolean(busy.query || busy.sites || busy.health)} failed={Boolean(problems.query || problems.sites)}
+                onRefresh={() => loadSiteDetails(selectedSiteId)} onNavigate={navigate} onUnsavedChange={setSiteUnsaved}
+                onHealth={() => { setSiteHealth(null); void run("health", (api, signal) => api.siteHealth(selectedSiteId, signal), (response) => setSiteHealth(response), undefined, selectedSiteId); }}
+                onValidate={() => run("query", (api, signal) => api.validateSite(selectedSiteId, signal), (response) => setSessionNotice(response.valid ? "配置验证通过。" : "配置验证未通过：" + response.reason_code), undefined, selectedSiteId)}
+                onApply={(key) => run("query", (api, signal) => api.applySite(selectedSiteId, key, signal), () => loadSiteDetails(selectedSiteId), undefined, selectedSiteId)}
+                onApprove={(key) => run("query", (api, signal) => api.approveSite(selectedSiteId, key, signal), () => loadSiteDetails(selectedSiteId), undefined, selectedSiteId)}
+                onRollback={(key) => run("query", (api, signal) => api.rollbackSite(selectedSiteId, key, signal), () => loadSiteDetails(selectedSiteId), undefined, selectedSiteId)}
+              />
+            ) : queryKind === "site-config" ? (
+              <SiteConfigPanel
+                roles={managementRoles}
+                onUnsavedChange={setSiteUnsaved}
+                health={siteHealth}
+                healthBusy={Boolean(busy.health)}
+                onHealth={() => {
+                  setSiteHealth(null);
+                  void run("health", (api, signal) => api.siteHealth(selectedSiteId, signal), (response) => setSiteHealth(response), undefined, selectedSiteId);
+                }}
+                response={siteConfig}
+                sites={siteList}
+                nextCursor={siteListCursor}
+                key={selectedSiteId || "list"}
+                selectedSiteId={currentSite?.creating ? "" : selectedSiteId}
+                creating={currentSite?.creating ?? false}
+                onNavigate={navigate}
+                busy={Boolean(busy.query || busy.sites)}
+                failed={Boolean(problems.query || problems.sites)}
+                onRefresh={() => loadSiteConfig()}
+                onLoadMore={() => { if (siteListCursor) void loadSiteConfig(siteListCursor, true); }}
+                listView={pathname === "/sites"}
+                section={currentSite?.section ?? "overview"}
+                onSelectSite={(siteId) => {
+                  navigate(`/sites/${siteId}/overview`);
+                }}
+                onSave={(siteId, draft, key) => {
+                  const creating = currentSite?.creating === true;
+                  return run("query", (api, signal) => creating
+                    ? api.createSite(siteId, draft, key, signal)
+                    : api.saveSiteConfig(siteId, draft, key, signal), (response) => {
+                    setSiteConfig(response);
+                    if (creating) navigate("/sites/" + siteId + "/overview", true);
+                  }, undefined, siteId);
+                }}
+                onValidate={(siteId) => {
+                  return run("query", (api, signal) => api.validateSite(siteId, signal), (result) => {
+                    setSessionNotice(result.valid ? "配置验证通过。" : "配置验证未通过：" + result.reason_code);
+                  }, undefined, siteId);
+                }}
+                onApply={(siteId, key) => run("query", (api, signal) => api.applySite(siteId, key, signal), () => loadSiteDetails(siteId), undefined, siteId)}
+                onApprove={(siteId, key) => run("query", (api, signal) => api.approveSite(siteId, key, signal), () => loadSiteDetails(siteId), undefined, siteId)}
+                revisions={siteRevisions}
+                onRollback={(siteId, key) => run("query", (api, signal) => api.rollbackSite(siteId, key, signal), () => loadSiteDetails(siteId), undefined, siteId)}
+                onOpenInvestigation={() => {
+                  navigate("/investigation/requests");
+                }}
+              />
+            ) : queryKind === "case" || queryKind === "hold" ||
             queryKind === "access" || queryKind === "export" ? null : queryKind === "search" ? (
               <SearchPanel
                 key={searchPresetVersion}
@@ -1176,8 +1355,12 @@ export function App() {
               !problems.query && (
                 <section className="panel empty-state">
                   <h2>
-                    {queryKind === "request"
-                      ? "从一个请求开始"
+                    {queryKind === "overview"
+                      ? "后台运行概览"
+                      : queryKind === "session"
+                        ? "当前权限中心"
+                        : queryKind === "request"
+                          ? "从一个请求开始"
                       : queryKind === "model"
                         ? "查询模型调用"
                         : queryKind === "agent"
@@ -1185,13 +1368,17 @@ export function App() {
                         : "查询账本记录"}
                   </h2>
                   <p className="muted">
-                    {queryKind === "request"
-                      ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
+                    {queryKind === "overview"
+                      ? "进入左侧模块开始管理。"
+                      : queryKind === "session"
+                        ? "此页面只读展示当前会话和服务端角色。"
+                        : queryKind === "request"
+                          ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
                       : queryKind === "model"
                         ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
                         : queryKind === "agent"
                           ? "输入 Agent 运行 ID，读取脱敏生命周期与固定事件引用。"
-                        : `输入${queryLabels[queryKind]}，读取当前状态、代际与期限。`}
+                        : `输入${queryLabels[queryKind as keyof typeof queryLabels] ?? "目标 ID"}，读取当前状态、代际与期限。`}
                   </p>
                 </section>
               )
@@ -1199,7 +1386,6 @@ export function App() {
           </>
         )}
         <footer>历史记录用于调查，当前访问资格由服务端独立校验。</footer>
-      </main>
-    </>
+    </AdminShell>
   );
 }

@@ -1,3 +1,4 @@
+import { openView } from "./navigation";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { resolve } from "node:path";
 import { ARTIFACT_ID, TOKEN, errorFixture } from "./fixtures";
@@ -9,10 +10,10 @@ const earlier = ACCESS_ID.slice(0, -2) + "40";
 const inbox = (page: Page) => page.getByRole("region", { name: "访问申请列表", exact: true });
 const detail = (page: Page) => page.getByRole("region", { name: "访问申请详情", exact: true });
 async function connect(page: Page) {
-  await page.goto("/");
+  await page.goto("/investigation/requests");
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("access");
+  await openView(page, "access");
 }
 async function routes(page: Page, handler: (route: Route, url: URL) => Promise<void>) {
   const calls: string[] = [];
@@ -79,8 +80,8 @@ test("explicit history pages and refreshed detail keep review authority separate
   expect(calls).toHaveLength(3);
   await read(page);
   await expect(inbox(page).getByText("当前范围内暂无审批待办。", { exact: true })).toBeVisible();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
-  await page.getByLabel("查询类型", { exact: true }).selectOption("access");
+  await openView(page, "request");
+  await openView(page, "access");
   await expect(inbox(page).getByText("当前范围内暂无审批待办。", { exact: true })).toHaveCount(0);
 });
 
@@ -127,10 +128,10 @@ for (const transition of ["view", "query", "disconnect"] as const) {
     await read(page);
     await expect.poll(() => started).toBe(true);
     if (transition === "view") await page.getByLabel("申请列表范围", { exact: true }).selectOption("review");
-    else if (transition === "query") await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+    else if (transition === "query") await openView(page, "request");
     else await page.getByRole("button", { name: "断开连接", exact: true }).click();
     release?.();
-    if (transition === "query") await page.getByLabel("查询类型", { exact: true }).selectOption("access");
+    if (transition === "query") await openView(page, "access");
     await expect(page.getByText("stale-list-owner", { exact: true })).toHaveCount(0);
     if (transition !== "disconnect") await expect(page.getByRole("button", { name: "读取申请列表 / 刷新", exact: true })).toBeEnabled();
   });

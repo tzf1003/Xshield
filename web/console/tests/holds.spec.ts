@@ -1,3 +1,4 @@
+import { openView } from "./navigation";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { resolve } from "node:path";
 import { ARTIFACT_ID, TOKEN, errorFixture } from "./fixtures";
@@ -20,10 +21,10 @@ async function intercept(page: Page, handler: (route: Route, call: Call) => Prom
   return calls;
 }
 async function connect(page: Page) {
-  await page.goto("/");
+  await page.goto("/investigation/requests");
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("hold");
+  await openView(page, "hold");
 }
 async function fillCreate(page: Page, until = HOLD_UNTIL) {
   await page.getByLabel("保留案件 ID", { exact: true }).fill(HOLD_CASE_ID);
@@ -111,8 +112,8 @@ test("unknown write preserves its original key through navigation and later reje
   await expect(page.getByRole("heading", { name: "保留操作结果未知" })).toBeVisible();
   expect(await page.evaluate(() => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
   await expect(page.getByRole("button", { name: "准备新的保留操作" })).toBeDisabled();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
-  await page.getByLabel("查询类型", { exact: true }).selectOption("hold");
+  await openView(page, "request");
+  await openView(page, "hold");
   await page.getByRole("button", { name: "原样重试保留操作" }).click();
   await expect(page.getByRole("heading", { name: "保留操作结果未知" })).toBeVisible();
   await expect(page.getByText("CONTROL_SCOPE_DENIED", { exact: false }).first()).toBeVisible();
@@ -209,10 +210,10 @@ test("navigation ignores a late write response while preserving recovery", async
   await connect(page);
   await create(page);
   await expect.poll(() => calls.length).toBe(1);
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  await openView(page, "request");
   release();
   await responseDelivered;
-  await page.getByLabel("查询类型", { exact: true }).selectOption("hold");
+  await openView(page, "hold");
   await expect(page.getByRole("heading", { name: "保留操作结果未知" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "创建保留锁已确认" })).toHaveCount(0);
   await expect(page.getByLabel("保留幂等键", { exact: true })).toHaveValue(HOLD_KEY);
@@ -276,7 +277,7 @@ for (const end of ["disconnect", "pagehide", "idle", "refresh", "unauthorized", 
     expect(await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }))).toEqual({ local: {}, session: {} });
     await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
     await page.getByRole("button", { name: "连接", exact: true }).click();
-    await page.getByLabel("查询类型", { exact: true }).selectOption("hold");
+    await openView(page, "hold");
     await expect(page.getByLabel("保留理由", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("保留历史案件 ID", { exact: true })).toHaveValue("");
   });

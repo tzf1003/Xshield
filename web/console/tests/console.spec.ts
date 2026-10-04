@@ -1,3 +1,4 @@
+import { openView } from "./navigation";
 import { expect, test, type Page, type Request } from "@playwright/test";
 import { resolve } from "node:path";
 import {
@@ -106,35 +107,36 @@ async function mockControl(page: Page, override?: Override) {
 }
 
 async function connect(page: Page) {
-  await page.goto("/");
+  await page.goto("/investigation/requests");
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
 }
 
 async function query(page: Page, requestId = REQUEST_ID) {
+  await openView(page, "request");
   await page.getByLabel("请求 ID", { exact: true }).fill(requestId);
   await page.getByRole("button", { name: "查询", exact: true }).click();
 }
 
 async function queryModel(page: Page, modelCallId = MODEL_CALL_ID) {
-  await page.getByLabel("查询类型", { exact: true }).selectOption("model");
+  await openView(page, "model");
   await page.getByLabel("模型调用 ID", { exact: true }).fill(modelCallId);
   await page.getByRole("button", { name: "查询", exact: true }).click();
 }
 
 async function queryAgent(page: Page, agentRunId = AGENT_RUN_ID) {
-  await page.getByLabel("查询类型", { exact: true }).selectOption("agent");
+  await openView(page, "agent");
   await page.getByLabel("Agent 运行 ID", { exact: true }).fill(agentRunId);
   await page.getByRole("button", { name: "查询", exact: true }).click();
 }
 
 async function queryAuditHealth(page: Page) {
-  await page.getByLabel("查询类型", { exact: true }).selectOption("audit-health");
+  await openView(page, "audit-health");
   await page.getByRole("button", { name: "读取发布状态", exact: true }).click();
 }
 
 async function queryCalibrationReport(page: Page, reportId = CALIBRATION_REPORT_ID) {
-  await page.getByLabel("查询类型", { exact: true }).selectOption("calibration-report");
+  await openView(page, "calibration-report");
   await page.getByLabel("校准报告 ID", { exact: true }).fill(reportId);
   await page.getByRole("button", { name: "查询", exact: true }).click();
 }
@@ -185,7 +187,7 @@ test("export workbench waits for explicit submission before exposing package dow
     return undefined;
   });
   await connect(page);
-  await page.getByLabel("查询类型", { exact: true }).selectOption("export");
+  await openView(page, "export");
   await expect(page.getByRole("heading", { name: "调查导出", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "申请元数据导出", exact: true })).toBeDisabled();
   expect(calls).toHaveLength(0);
@@ -245,7 +247,7 @@ test("calibration report reads discard expired, scope-drifting, and late state",
   );
   await queryCalibrationReport(page);
   await arrivedReport;
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  await openView(page, "request");
   await query(page);
   release();
   await settled;
@@ -258,7 +260,7 @@ test("reads audit publication state only after an explicit manual action", async
 }) => {
   const calls = await mockControl(page);
   await connect(page);
-  await page.getByLabel("查询类型", { exact: true }).selectOption("audit-health");
+  await openView(page, "audit-health");
   await expect(
     page.getByRole("heading", { name: "审计发布状态", exact: true }),
   ).toBeVisible();
@@ -322,7 +324,7 @@ test("audit publication reads discard expired, scope-drifting, and late state", 
   const settled = requestSettled(page, "/control/v1/audit/health");
   await queryAuditHealth(page);
   await arrivedHealth;
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  await openView(page, "request");
   await query(page);
   await expect(page.getByText("AUTH_BINDING_VALID", { exact: true })).toBeVisible();
   release();
@@ -472,7 +474,7 @@ test("lists redacted model calls and reauthorizes the clicked detail", async ({
 }) => {
   const calls = await mockControl(page);
   await connect(page);
-  await page.getByLabel("查询类型", { exact: true }).selectOption("model-list");
+  await openView(page, "model-list");
   const form = page.getByRole("form", { name: "模型调用列表条件" });
   await form
     .getByLabel("开始时间（UTC，含）", { exact: true })
@@ -705,7 +707,7 @@ test("switching to a request discards a late model response", async ({
   );
   await queryModel(page);
   await arrived;
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
+  await openView(page, "request");
   await query(page);
   await expect(
     page.getByText("AUTH_BINDING_VALID", { exact: true }),
@@ -1271,7 +1273,7 @@ test("treats metadata text as data and keeps desktop and mobile layouts bounded"
 });
 
 async function prepareSearch(page: Page) {
-  await page.getByLabel("查询类型", { exact: true }).selectOption("search");
+  await openView(page, "search");
   await page
     .getByLabel("开始时间（UTC，含）", { exact: true })
     .fill("2026-09-20T00:00");
@@ -1946,9 +1948,7 @@ test("editing, switching and disconnecting discard late search responses", async
     if (action === "edit")
       await page.getByLabel("每页条数", { exact: true }).fill("3");
     else if (action === "switch")
-      await page
-        .getByLabel("查询类型", { exact: true })
-        .selectOption("request");
+      await openView(page, "request");
     else
       await page.getByRole("button", { name: "断开连接", exact: true }).click();
     release();
@@ -2030,7 +2030,7 @@ test("search rejects malicious metadata, drops raw fields and fits desktop and m
   await expect(page.getByText(injected, { exact: true })).toHaveCount(0);
   malicious = false;
   await search(page);
-  await expect(page).toHaveURL(new URL("/", page.url()).toString());
+  await expect(page).toHaveURL(new URL("/investigation/search", page.url()).toString());
   await expect(page).toHaveTitle(/Xshield/);
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   await expect(
@@ -2089,7 +2089,7 @@ async function queryLedger(
   kind: "grant" | "binding",
   id = kind === "grant" ? GRANT_ID : BINDING_ID,
 ) {
-  await page.getByLabel("查询类型", { exact: true }).selectOption(kind);
+  await openView(page, kind);
   await page
     .getByLabel(kind === "grant" ? "资格 ID" : "身份绑定 ID", { exact: true })
     .fill(id);
@@ -2527,7 +2527,7 @@ test("ledger rejects malicious fields and drops undisclosed data before desktop 
     await expect(
       page.getByRole("button", { name: "准备历史检索", exact: true }),
     ).toBeVisible();
-    await expect(page).toHaveURL(new URL("/", page.url()).toString());
+    await expect(page).toHaveURL(new URL("/investigation/" + (kind === "grant" ? "grants" : "bindings"), page.url()).toString());
     await expect(page).toHaveTitle(/Xshield/);
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
     await expect(page.locator("main img")).toHaveCount(0);

@@ -51,6 +51,47 @@ const errorIs = (code: string, status?: number) => (error: unknown) => {
   return true;
 };
 
+test("empty site config accepts null approval and rejects malformed approval", async (t) => {
+  const wire = {
+    request_id: REQUEST_ID, tenant_id: "tenant_a", site_id: "site_demo",
+    found: false, desired_revision: null, active_revision: null,
+    apply_state: null, apply_id: null, requires_approval: null as unknown,
+    reason_code: null, config_digest: null, config: null,
+  };
+  t.mock.method(globalThis, "fetch", async () => response(wire));
+  const client = new ControlClient(TOKEN);
+  const result = await client.siteConfig("site_demo");
+  assert.equal(result.found, false);
+  assert.equal(result.requires_approval, null);
+  wire.requires_approval = "false";
+  await assert.rejects(client.siteConfig("site_demo"), errorIs("INVALID_RESPONSE"));
+});
+
+test("site list sends a bounded signed-cursor query and decodes pagination", async (t) => {
+  t.mock.method(globalThis, "fetch", async (path: string) => {
+    assert.equal(
+      path,
+      "/control/v1/sites?limit=25&cursor=v1.site_demo.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    return response({
+      request_id: REQUEST_ID,
+      tenant_id: "tenant_a",
+      site_id: "site_demo",
+      truncated: true,
+      next_cursor: "v1.site_next.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      sites: [],
+    });
+  });
+  const page = await new ControlClient(TOKEN).siteList(
+    undefined,
+    "v1.site_demo.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    25,
+  );
+  assert.equal(page.truncated, true);
+  assert.equal(page.sites.length, 0);
+  assert.match(page.next_cursor ?? "", /^v1\.site_next\./);
+});
+
 test("browser session bootstrap and logout use same-origin cookie and CSRF", async (t) => {
   const csrfToken = "a".repeat(64);
   let call = 0;
@@ -71,6 +112,11 @@ test("browser session bootstrap and logout use same-origin cookie and CSRF", asy
           tenant_id: "tenant_a",
           site_id: "site_a",
           csrf_token: csrfToken,
+          roles: ["system_admin"],
+          session_expires_at: "2026-09-26T12:00:00.000Z",
+          idle_expires_at: "2026-09-26T04:15:00.000Z",
+          last_reauthenticated_at: null,
+          step_up_valid: false,
         });
       }
       assert.equal(path, "/control/v1/session/logout");
@@ -89,6 +135,7 @@ test("browser session bootstrap and logout use same-origin cookie and CSRF", asy
   const session = await bootstrapBrowserSession();
   assert.equal(session.subject, "operator-1");
   assert.equal(session.csrf_token, csrfToken);
+  assert.deepEqual(session.roles, ["system_admin"]);
   await new ControlClient(undefined, session.csrf_token).logoutBrowserSession();
   assert.equal(call, 2);
 });
@@ -319,6 +366,25 @@ test("audit publication health validates a complete fixed-scope snapshot", async
     status = nextStatus;
     await assert.rejects(client.health(), errorIs(code, nextStatus));
   }
+});
+
+test("workbench overview keeps source completeness and scope fields strict", async (t) => {
+  const health = auditHealthFixture();
+  const { request_id: _requestId, tenant_id: _tenantId, site_id: _siteId, ...audit } = health;
+  const body = {
+    request_id: REQUEST_ID, tenant_id: "tenant_a", site_id: "site_demo", as_of: health.as_of,
+    completeness: "partial", index_watermark: health.index_watermark, has_gaps: true,
+    posture: { observed_at: health.as_of, source_state: "available", reason_code: "WORKBENCH_POSTURE_SCOPED", value: "degraded" },
+    sites: [{ site_id: "site_demo", display_name: "Demo", public_origin: "https://demo.example", edge: { observed_at: health.as_of, source_state: "unavailable", reason_code: "EDGE_UNKNOWN", value: null }, upstream: { observed_at: health.as_of, source_state: "available", reason_code: "UPSTREAM_OK", value: "healthy" }, audit: { observed_at: health.as_of, source_state: "available", reason_code: "AUDIT_OK", value: "continuous" }, current_revision: 3, apply_state: "active", reason_code: "SITE_ACTIVE", updated_at: health.as_of }],
+    queues: [], recent_activity: [], audit: { observed_at: health.as_of, source_state: "available", reason_code: "WORKBENCH_AUDIT_READ", value: audit },
+  };
+  t.mock.method(globalThis, "fetch", async (path: string) => { assert.equal(path, "/control/v1/workbench/overview"); return response(body); });
+  const result = await new ControlClient(TOKEN).workbenchOverview();
+  assert.equal(result.completeness, "partial");
+  assert.equal(result.sites[0]?.edge.value, null);
+  assert.equal(result.audit.value?.has_gaps, true);
+  (body as Record<string, unknown>).unexpected = true;
+  await assert.rejects(new ControlClient(TOKEN).workbenchOverview(), errorIs("INVALID_RESPONSE", 200));
 });
 
 test("invalid IDs, opaque cursor transport and credentials fail before network use", async (t) => {
@@ -1026,6 +1092,7 @@ test("HTTP diagnostics preserve status and safe request ID while discarding serv
     [429, "CONTROL_QUERY_BUDGET_EXCEEDED"],
     [429, "CONTROL_QUERY_CAPACITY_EXHAUSTED"],
     [503, "CONTROL_QUERY_TIMEOUT"],
+    [503, "CONTROL_SITE_CONFIG_UNAVAILABLE"],
     [503, "AUDIT_DURABILITY_FAILED"],
   ] as const) {
     t.mock.method(globalThis, "fetch", async () =>
@@ -2088,6 +2155,27 @@ test("development proxy permits fixed investigation and evidence access routes",
     ["POST", "/control/v1/session/logout", true],
     ["POST", "/control/v1/session/logout?scope=other", false],
     ["GET", "/control/v1/audit/health", true],
+    ["GET", "/control/v1/sites", true],
+    ["GET", "/control/v1/sites?limit=100", true],
+    ["GET", "/control/v1/sites?cursor=v1.site_demo.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&limit=50", true],
+    ["POST", "/control/v1/sites", true],
+    ["POST", "/control/v1/sites?scope=other", false],
+    ["GET", "/control/v1/sites?scope=other", false],
+    ["GET", "/control/v1/sites?limit=101", false],
+    ["GET", "/control/v1/sites/site_dev/config", true],
+    ["GET", "/control/v1/sites/site_dev/status", true],
+    ["GET", "/control/v1/sites/site_dev/health", true],
+    ["GET", "/control/v1/sites/site_dev/revisions", true],
+    ["PUT", "/control/v1/sites/site_dev/config", true],
+    ["PUT", "/control/v1/sites/site_dev/config?scope=other", false],
+    ["PATCH", "/control/v1/sites/site_dev", true],
+    ["DELETE", "/control/v1/sites/site_dev", true],
+    ["DELETE", "/control/v1/sites/site_dev?scope=other", false],
+    ["POST", "/control/v1/sites/site_dev/validate", true],
+    ["POST", "/control/v1/sites/site_dev/apply", true],
+    ["POST", "/control/v1/sites/site_dev/approve", true],
+    ["POST", "/control/v1/sites/site_dev/rollback", true],
+    ["GET", "/control/v1/sites/site_dev/config?scope=other", false],
     ["GET", "/control/v1/audit/health?scope=other", false],
     ["POST", "/control/v1/audit/health", false],
     ["GET", `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`, true],
@@ -2814,4 +2902,26 @@ test("case write failures do not retry; explicit retry retains original key and 
     errorIs("REQUEST_ABORTED"),
   );
   assert.equal(network.mock.callCount(), 0);
+});
+
+test("every backend site failure retains stable safe diagnostics", async (t) => {
+  const { readFile } = await import("node:fs/promises");
+  const { messages } = await import("../src/api-contract.ts");
+  const backend = await readFile(new URL("../../../crates/xshield-control/src/site_config.rs", import.meta.url), "utf8");
+  const terminalFacts = new Set([
+    "CONTROL_SITE_APPROVED_AND_APPLIED", "CONTROL_SITE_APPROVED_PENDING", "CONTROL_SITE_CONFIG_CREATED",
+    "CONTROL_SITE_CONFIG_READ", "CONTROL_SITE_CONFIG_REPLAYED", "CONTROL_SITE_CONFIG_UPDATED", "CONTROL_SITE_DELETED",
+    "CONTROL_SITE_DELETE_REPLAYED", "CONTROL_SITE_REVISIONS_READ", "CONTROL_SITE_STATUS_READ", "CONTROL_SITE_UPSTREAM_HEALTHY", "CONTROL_SITE_VALIDATED",
+  ]);
+  const codes = [...new Set([...backend.matchAll(/"(CONTROL_SITE_[A-Z_]+)"/g)].map(match => match[1] ?? ""))].filter(code => !terminalFacts.has(code));
+  let code = "CONTROL_SITE_CONFIG_UNAVAILABLE";
+  let status = 503;
+  t.mock.method(globalThis, "fetch", async () => response({ error_code: code, request_id: REQUEST_ID, message_safe: "Synthetic server detail", retryable: true, next_action: "retry_later" }, status));
+  const client = new ControlClient(TOKEN);
+  for (code of codes) {
+    assert.ok(Object.hasOwn(messages, code), "Unmapped site failure: " + code);
+    await assert.rejects(client.siteConfig("site_demo"), errorIs(code, status));
+  }
+  code = "CONTROL_SCOPE_DENIED"; status = 403;
+  await assert.rejects(client.siteConfig("site_demo"), errorIs(code, status));
 });

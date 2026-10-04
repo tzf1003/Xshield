@@ -1,6 +1,10 @@
-# Xshield 调查控制台
+# Xshield 管理后台
 
 React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用并预填历史检索，按 Agent 运行 ID 读取脱敏生命周期与固定事件引用并预填历史检索，按访问申请 ID 读取历史申请/决策元数据并预填历史检索，按校准报告 ID 读取受限冻结元数据，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件，并从事件详情显式提交有界服务端因果查询。UI 调用固定 GET 端点及只读 `POST /control/v1/search`、`POST /control/v1/causality`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情、Agent 详情与模型调用列表均需要显式 `Observer`，校准报告详情需要 `AuditAdministrator`，事件检索与因果查询需要 `Investigator`；带 `calibration_report_id` 或 `evidence_hold_id` 的检索还要求同一主体同时具备 `AuditAdministrator`，三种角色分别校验。
+
+控制台使用原生 History API 的后台路由和左侧导航，不再用“查询类型”选择菜单。站点、调查、案件、证据、审计和权限中心各自拥有独立 URL；页面刷新会恢复深链接，导航隐藏只改善操作体验，服务端仍对每个请求独立授权。
+
+“站点接入后台”由 `SystemAdmin` 读取租户范围的 `GET /control/v1/sites`，再通过 `GET/PUT /control/v1/sites/{site_id}/config` 管理每个受保护站点；旧 `GET/PUT /control/v1/site-config` 保留兼容。表单保存经过服务端校验的公网入口、源站地址、入口安全模式、探针标志、策略版本和状态，并按租户端口租约分配唯一 edge 内部监听端口。写入使用 `Idempotency-Key`，失败或断连时按原键重试；列表和单站点响应的 tenant/site 范围由客户端再次校验。浏览器会话返回服务端会话角色，界面只展示当前角色可用的站点页面和验证、批准、应用、回滚操作；服务端仍是最终授权边界。敏感配置只显示 secret reference、key ID 和状态。
 
 “审计发布状态”由 `AuditAdministrator` 手动读取 `GET /control/v1/audit/health`。它展示一个配置 audit journal 到索引目标的封存段发布快照：观察时间、目标、保留期、关闭/已发布/待发布/未封存段、缺口和连续水位；界面不自动轮询。该观察不判断业务准入、全部 Outbox 状态或系统整体健康。
 
@@ -26,7 +30,7 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 ./dev.sh
 ```
 
-它会编排本地 PostgreSQL、ClickHouse、Keycloak OIDC、`xshield-control` 和 Vite 控制台；首次运行需要 Docker Desktop，数据库迁移会从空数据卷自动执行。打开 `http://127.0.0.1:5173` 后，点击“使用企业身份登录”，使用本地开发身份 `developer` / `xshield-dev-password` 完成登录。该身份只存在于本地 Keycloak 开发 realm；本地 realm 的认证等级声明是开发测试值，不代表企业 MFA 验收。
+它会编排本地 PostgreSQL、ClickHouse、Keycloak OIDC、`xshield-control` 和 Vite 控制台；启动前会在现有 PostgreSQL 数据卷上以 advisory lock 增量补齐站点迁移 `0041–0048`，不会删除数据。打开 `http://127.0.0.1:55173` 后，点击“使用企业身份登录”，使用本地开发身份 `developer` / `xshield-dev-password` 完成登录。该身份只存在于本地 Keycloak 开发 realm；本地 realm 的认证等级声明是开发测试值，不代表企业 MFA 验收。
 
 只启动前端（连接已存在的控制服务）时执行：
 
@@ -36,9 +40,9 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 等价的仓库根目录参数是 `./dev.sh --console-only`。`./dev.sh --reset` 只清理本地开发 Docker 数据卷并重新应用迁移。
 
-页面为 `http://127.0.0.1:5173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
+页面为 `http://127.0.0.1:55173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、精确 `POST /control/v1/search`、`POST /control/v1/causality` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。OIDC callback 保留经服务端校验的授权响应 query；其他身份路径拒绝 query。代理只转发 Xshield session/state Cookie，剥离所有其他 Cookie；`Set-Cookie` 仅允许来自登录开始、callback、reauth-start 与 logout。代理不注入管理身份且不跟随重定向。正常开发启动使用 OIDC 会话；只有 Playwright 配置会设置 `VITE_XSHIELD_E2E_MACHINE_LOGIN=1` 启用合成 Bearer 表单，生产构建不会提供该入口。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、站点配置 `GET/PUT /control/v1/site-config`、精确 `POST /control/v1/search`、`POST /control/v1/causality` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。OIDC callback 保留经服务端校验的授权响应 query；其他身份路径拒绝 query。代理只转发 Xshield session/state Cookie，剥离所有其他 Cookie；`Set-Cookie` 仅允许来自登录开始、callback、reauth-start 与 logout。代理不注入管理身份且不跟随重定向。正常开发启动使用 OIDC 会话；只有 Playwright 配置会设置 `VITE_XSHIELD_E2E_MACHINE_LOGIN=1` 启用合成 Bearer 表单，生产构建不会提供该入口。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
@@ -147,3 +151,35 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
 运行依赖仅 `react` / `react-dom`（MIT），负责界面与 DOM 更新。构建依赖 `vite`（MIT）和 `typescript`（Apache-2.0），类型依赖 `@types/react`、`@types/react-dom`、`@types/node`（MIT）；`@playwright/test`（Apache-2.0）仅用于真实浏览器回归。全部直接依赖固定版本并提交 npm lockfile；依赖升级通过审查，重新执行类型、构建、API、浏览器及 Rust wire 测试。安全修复优先处理，主版本升级需核对 Node 兼容性。复用全局 npm 和 Playwright 浏览器缓存，不为临时分支重复安装。
 
 工具依据：[Vite 指南](https://vite.dev/guide/)、[React 构建指南](https://react.dev/learn/build-a-react-app-from-scratch)、[Playwright 测试服务器](https://playwright.dev/docs/test-webserver)。
+
+## 后台页面与恢复行为
+
+/sites 展示站点列表，/sites/new/network 创建站点，选择记录后进入 /sites/{siteId}/overview。详情按 network、security-entry、routes、identity、crypto、waf-limits、policies、releases、audit 分类；只渲染当前分类。分类切换和浏览器前进/后退保留当前草稿，刷新从服务端恢复深链接。离开有未保存草稿或待确认写入的站点前会提示确认。
+
+- system_admin：站点列表、网络和策略配置编辑；发布权限单独校验。
+- observer：当前会话站点的只读状态、健康观察和修订；独立的“站点状态”入口。
+- policy_author、policy_approver、release_operator：独立“站点发布”入口，分别校验、批准、应用/回滚。没有 observer 时显示操作入口和服务端结果，状态及修订读取仍需该角色。
+- 调查、案件、证据、导出和审计模块按各自服务端角色显示。/access/session 对所有已认证主体只读开放。
+
+资格账本使用 /investigation/grants，身份绑定使用 /investigation/bindings，后台任务使用 /operations/jobs。详情 URL 使用对应稳定对象 ID。路由变化取消旧请求并使旧响应失效；每个站点读取和写入响应都单独匹配 tenant 和目标 site。
+
+站点不存在时，服务端的 requires_approval: null 按缺失状态处理。已保存端口必须在 6100–65535；创建请求的 0 仅表示自动分配。HTTP 错误显示本地安全提示、稳定错误码、状态码和 request ID。结果未知的写入冻结原正文和幂等键，只有操作者点击“确认后原样重试”才重发。
+
+## 回归验证
+
+在 web/console 运行：
+
+    npm test
+    npm run build
+    npm run test:e2e
+
+从仓库根目录执行，需要 ./dev.sh 的本地服务：
+
+    node scripts/test_console_oidc.mjs
+    python3 scripts/test_dev_postgres_migrations.py
+    bash scripts/test_gateway_dynamic_listeners.sh
+
+Playwright 使用 5175 的明确机器 fixture 和 5176 的浏览器会话 fixture 两套入口；业务 API 响应为合成契约。test_console_oidc.mjs 另行访问 55173，执行真实本地 OIDC 登录、站点列表、详情刷新、资格账本、只读权限中心及 1440×1000 / 390×844 布局检查，截图写入 /tmp/xshield-console-smoke。它只执行管理读取，不创建业务站点、不保存 Cookie。
+# 管理 API Key 页面
+
+控制台通过后端管理 API 管理 Agent Key。页面只向具备 KeyAdministrator/SystemAdmin 的浏览器会话展示创建、scope、过期、撤销和轮换操作；明文只在创建响应中展示一次。

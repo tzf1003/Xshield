@@ -31,12 +31,22 @@ const accessReadPath =
   /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content|exports\/export_[a-f0-9-]+\/download)$/;
 const modelCallListPath = "/control/v1/model-calls";
 const auditHealthPath = "/control/v1/audit/health";
+const workbenchOverviewPath = "/control/v1/workbench/overview";
 const causalityPath = "/control/v1/causality";
 const oidcLoginPath = "/control/v1/auth/oidc/start";
 const oidcCallbackPath = "/control/v1/auth/oidc/callback";
 const oidcReauthStartPath = "/control/v1/auth/oidc/reauth/start";
 const sessionPath = "/control/v1/session";
 const sessionLogoutPath = "/control/v1/session/logout";
+const siteConfigPath = "/control/v1/site-config";
+const sitesPath = "/control/v1/sites";
+const sitePath = /^\/control\/v1\/sites\/[A-Za-z0-9_.-]{1,128}$/;
+const siteConfigCollectionPath =
+  /^\/control\/v1\/sites\/[A-Za-z0-9_.-]{1,128}\/config$/;
+const siteOperationPath =
+  /^\/control\/v1\/sites\/[A-Za-z0-9_.-]{1,128}\/(?:revisions|status|health)$/;
+const siteMutationPath =
+  /^\/control\/v1\/sites\/[A-Za-z0-9_.-]{1,128}\/(?:validate|apply|approve|rollback)$/;
 
 function validModelCallListQuery(url: string): boolean {
   const [path, query] = url.split("?", 2);
@@ -60,9 +70,25 @@ function validModelCallListQuery(url: string): boolean {
   );
 }
 
+function validSiteListQuery(url: string): boolean {
+  const [path, query] = url.split("?", 2);
+  if (path !== sitesPath || query === undefined) return false;
+  const parameters = new URLSearchParams(query);
+  const limit = parameters.get("limit");
+  const cursor = parameters.get("cursor");
+  return (
+    (parameters.size === 1 || parameters.size === 2) &&
+    limit !== null &&
+    /^(?:[1-9]|[1-9][0-9]|100)$/.test(limit) &&
+    (parameters.size === 1
+      ? cursor === null
+      : cursor !== null && /^[A-Za-z0-9_.-]{1,160}$/.test(cursor))
+  );
+}
+
 export default defineConfig({
   server: {
-    port: 5173,
+    port: 55173,
     strictPort: true,
     headers: {
       "Cache-Control": "no-store",
@@ -86,10 +112,30 @@ export default defineConfig({
                 ? validModelCallListQuery(request.url ?? "")
                 : path === auditHealthPath
                   ? request.url === auditHealthPath
+                  : path === workbenchOverviewPath
+                    ? request.url === workbenchOverviewPath
                   : readPath.test(path)) ||
                 (request.url === path && calibrationReportPath.test(path)) ||
                 (request.url === path && accessReadPath.test(path)) ||
-                (request.url === path && jobPath.test(path)))) ||
+                (request.url === path && jobPath.test(path))) ||
+                (request.url === siteConfigPath) ||
+                (request.url === sitesPath || validSiteListQuery(request.url ?? "")) ||
+                (request.url === path && sitePath.test(path)) ||
+                (request.url === path && siteConfigCollectionPath.test(path)) ||
+                (request.url === path && siteOperationPath.test(path))) ||
+            (request.method === "PATCH" &&
+              request.url === path &&
+              sitePath.test(path)) ||
+            (request.method === "DELETE" &&
+              request.url === path &&
+              sitePath.test(path)) ||
+            (request.method === "POST" &&
+              request.url === path &&
+              siteMutationPath.test(path)) ||
+            (request.method === "PUT" &&
+              (request.url === siteConfigPath ||
+                (request.url === path && siteConfigCollectionPath.test(path)))) ||
+            (request.method === "POST" && request.url === sitesPath) ||
             (request.method === "POST" &&
               (((path === sessionLogoutPath || path === oidcReauthStartPath) &&
                 request.url === path) ||

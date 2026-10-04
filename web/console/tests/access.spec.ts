@@ -1,3 +1,4 @@
+import { openView } from "./navigation";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -23,10 +24,10 @@ async function intercept(page: Page, handler: (route: Route, call: Call) => Prom
   return calls;
 }
 async function connect(page: Page) {
-  await page.goto("/");
+  await page.goto("/investigation/requests");
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("access");
+  await openView(page, "access");
 }
 async function inspect(page: Page) {
   await page.getByLabel("访问申请 ID", { exact: true }).fill(ACCESS_ID);
@@ -120,8 +121,8 @@ test("uncertain request preserves exact retry after a later rejection and naviga
   await requestAccess(page);
   await expect(page.getByRole("heading", { name: "访问操作结果未知" })).toBeVisible();
   await expect(page.getByRole("button", { name: "准备新的访问操作" })).toBeDisabled();
-  await page.getByLabel("查询类型", { exact: true }).selectOption("request");
-  await page.getByLabel("查询类型", { exact: true }).selectOption("access");
+  await openView(page, "request");
+  await openView(page, "access");
   await page.getByRole("button", { name: "原样重试访问操作" }).click();
   await expect(page.getByRole("heading", { name: "访问操作结果未知" })).toBeVisible();
   await expect(page.getByText("CONTROL_IDEMPOTENCY_CONFLICT", { exact: false }).first()).toBeVisible();
@@ -244,7 +245,7 @@ for (const end of ["disconnect", "pagehide", "idle", "refresh"] as const) {
     expect(await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }))).toEqual({ local: {}, session: {} });
     await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
     await page.getByRole("button", { name: "连接", exact: true }).click();
-    await page.getByLabel("查询类型", { exact: true }).selectOption("access");
+    await openView(page, "access");
     await expect(page.getByLabel("申请理由", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("访问申请 ID", { exact: true })).toHaveValue("");
   });
