@@ -111,6 +111,7 @@ test("every page kind the shell knows is reachable through exactly the declared 
   for (const kind of [
     "overview",
     "session",
+    "site-list",
     "site-config",
     "api-keys",
     "request",

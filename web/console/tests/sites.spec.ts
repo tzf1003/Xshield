@@ -81,11 +81,8 @@ test("site list opens exact site; categories and history retain draft; deep link
   await login(page);
   await expect(page.getByRole("region", { name: "受保护站点列表" })).toBeVisible();
   await expect(page.getByLabel("源站地址", { exact: true })).toHaveCount(0);
-  await page
-    .getByRole("article")
-    .filter({ hasText: "Beta 站点" })
-    .getByRole("button", { name: "打开站点" })
-    .click();
+  // The site cards became table rows; the site name is the link that opens the site.
+  await page.getByRole("link", { name: "Beta 站点", exact: true }).click();
   await expect(page).toHaveURL(/sites.site_beta.overview$/);
   await category(page, "网络").click();
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveValue("Beta 站点");

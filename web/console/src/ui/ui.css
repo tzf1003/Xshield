@@ -98,6 +98,16 @@
   outline-offset: 1px;
 }
 
+.xs-problem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.xs-problem small {
+  color: var(--xs-ink-3);
+}
+
 .xs-time-rel,
 .xs-time-empty {
   color: var(--xs-ink-3);

@@ -88,7 +88,9 @@ export function createAppRouteTree(components: RouteComponents) {
     page("session", "access/session", {
       component: lazyRouteComponent(() => import("../pages/SessionPage"), "SessionPage"),
     }),
-    page("site-config", "sites"),
+    page("site-list", "sites", {
+      component: lazyRouteComponent(() => import("../pages/sites/SitesListPage"), "SitesListPage"),
+    }),
     page("site-config", "sites/$siteId/$section", {
       params: {
         parse: (raw: Record<string, string>) => {
