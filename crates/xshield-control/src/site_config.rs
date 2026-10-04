@@ -2793,7 +2793,7 @@ fn patch_is_compatible(
             .is_none_or(|value| value.as_str() == Some(site_id.as_str()))
 }
 
-async fn edge_health(control: &ControlPlane) -> serde_json::Value {
+pub(super) async fn edge_health(control: &ControlPlane) -> serde_json::Value {
     match control.gateway_apply.as_ref() {
         Some(client) => client
             .health()

@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 use tokio::{io::AsyncWriteExt, net::TcpListener};
 use xshield_core::{GatewayApplyAck, GatewayApplyRequest};
 
+use crate::durable_audit::AuditReadiness;
 use crate::listener_supervisor::{ApplyError, ListenerSupervisor};
 use xshield_gateway::{MAX_CONFIG_BYTES, multi_site::GatewaySnapshot};
 
@@ -33,6 +34,7 @@ pub struct ApplyState {
     key: [u8; 32],
     snapshot_path: Option<Arc<PathBuf>>,
     apply_lock: Arc<Mutex<()>>,
+    audit: AuditReadiness,
 }
 
 impl ApplyState {
@@ -43,6 +45,7 @@ impl ApplyState {
         tenant_id: String,
         key: [u8; 32],
         snapshot_path: Option<PathBuf>,
+        audit: AuditReadiness,
     ) -> Self {
         Self {
             supervisor,
@@ -50,6 +53,7 @@ impl ApplyState {
             key,
             snapshot_path: snapshot_path.map(Arc::new),
             apply_lock: Arc::new(Mutex::new(())),
+            audit,
         }
     }
 }
@@ -203,16 +207,35 @@ async fn health_handler(State(state): State<ApplyState>, headers: HeaderMap) -> 
     let listener_count = state.supervisor.listener_count().await;
     (
         StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "tenant_id": snapshot.tenant_id().as_str(),
-            "active_revision": snapshot.revision(),
-            "site_count": snapshot.site_count(),
-            "listener_count": listener_count,
-            "edge_state": if listener_count == 0 { "unavailable" } else { "healthy" },
-            "audit_state": "healthy"
-        })),
+        axum::Json(health_body(
+            snapshot.tenant_id().as_str(),
+            snapshot.revision(),
+            snapshot.site_count(),
+            listener_count,
+            state.audit.is_ready(),
+        )),
     )
         .into_response()
+}
+
+/// Edge health as observed by this process. `audit_state` mirrors the durable
+/// audit barrier that fails admission closed, so it is `unavailable` exactly
+/// when requests are being refused for lack of durable evidence.
+fn health_body(
+    tenant_id: &str,
+    active_revision: u64,
+    site_count: usize,
+    listener_count: usize,
+    audit_ready: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tenant_id": tenant_id,
+        "active_revision": active_revision,
+        "site_count": site_count,
+        "listener_count": listener_count,
+        "edge_state": if listener_count == 0 { "unavailable" } else { "healthy" },
+        "audit_state": if audit_ready { "healthy" } else { "unavailable" }
+    })
 }
 
 #[derive(Serialize)]
@@ -403,6 +426,21 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_reports_audit_barrier_and_listener_state() {
+        let healthy = health_body("tenant_a", 7, 2, 3, true);
+        assert_eq!(healthy["edge_state"], "healthy");
+        assert_eq!(healthy["audit_state"], "healthy");
+        assert_eq!(healthy["active_revision"], 7);
+        let failed_audit = health_body("tenant_a", 7, 2, 3, false);
+        assert_eq!(failed_audit["edge_state"], "healthy");
+        assert_eq!(failed_audit["audit_state"], "unavailable");
+        assert_eq!(
+            health_body("tenant_a", 0, 0, 0, true)["edge_state"],
+            "unavailable"
+        );
+    }
 
     #[test]
     fn parses_only_fixed_lowercase_keys() {

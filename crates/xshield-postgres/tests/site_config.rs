@@ -207,6 +207,57 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
     .unwrap();
     assert_eq!(health_count, 1);
 
+    // The newest observation of each site wins; unobserved sites and other
+    // tenants contribute nothing.
+    store
+        .insert_protected_site_health_snapshot(
+            &tenant,
+            &site_a,
+            "degraded",
+            "unavailable",
+            "active",
+            "healthy",
+            "CONTROL_SITE_UPSTREAM_UNAVAILABLE",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    store
+        .insert_protected_site_health_snapshot(
+            &tenant,
+            &site_b,
+            "healthy",
+            "unknown",
+            "pending",
+            "unknown",
+            "CONTROL_SITE_HEALTH_OBSERVED",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    let latest = store
+        .latest_protected_site_health_snapshots(&tenant, 128)
+        .await
+        .unwrap();
+    assert_eq!(
+        latest
+            .iter()
+            .map(|snapshot| snapshot.site_id.as_str())
+            .collect::<Vec<_>>(),
+        [site_a.as_str(), site_b.as_str()]
+    );
+    assert_eq!(latest[0].edge_state, "degraded");
+    assert_eq!(latest[0].upstream_state, "unavailable");
+    assert_eq!(latest[1].audit_state, "unknown");
+    let other_tenant = TenantId::parse("tenant_site_contract_other").unwrap();
+    assert!(
+        store
+            .latest_protected_site_health_snapshots(&other_tenant, 128)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     assert!(
         store
             .delete_protected_site_config(&tenant, &site_a)

@@ -2097,6 +2097,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     {
         return Err("request and response encryption keys must differ".into());
     }
+    let audit_readiness = audit.readiness();
     let mut server = Server::new(None)?;
     server.bootstrap();
     let proxy = pingora::proxy::http_proxy(
@@ -2139,6 +2140,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             config.tenant_id().as_str().to_owned(),
             key,
             snapshot_path,
+            audit_readiness,
         );
         runtime.spawn(async move {
             if let Err(error) = apply_api::serve(apply_listener, state).await {

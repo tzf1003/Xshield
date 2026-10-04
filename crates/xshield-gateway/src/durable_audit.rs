@@ -27,6 +27,27 @@ use xshield_gateway::sensor::SensorObservation;
 use xshield_gateway::{GatewayConfig, GatewayDecision, GatewayOutcome};
 use xshield_postgres::SensorSession;
 
+/// Shared, read-only view of the durable-audit barrier state.
+///
+/// It carries no journal access: it only reports whether admission would
+/// currently fail closed because a durability error was observed.
+#[derive(Clone)]
+pub(crate) struct AuditReadiness {
+    ready: Arc<AtomicBool>,
+    failure_code: Arc<AtomicU8>,
+}
+
+impl AuditReadiness {
+    pub(crate) fn is_ready(&self) -> bool {
+        barrier_open(&self.ready, &self.failure_code)
+    }
+}
+
+// One definition for the admission barrier and its health view, so they cannot drift.
+fn barrier_open(ready: &AtomicBool, failure_code: &AtomicU8) -> bool {
+    ready.load(Ordering::Acquire) && failure_code.load(Ordering::Acquire) == 0
+}
+
 #[derive(Clone)]
 pub(crate) struct DurableAudit {
     journal: Arc<Mutex<LocalJournal>>,
@@ -370,7 +391,16 @@ impl DurableAudit {
     }
 
     pub(crate) fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire) && self.failure_code.load(Ordering::Acquire) == 0
+        barrier_open(&self.ready, &self.failure_code)
+    }
+
+    /// Returns a cheap shared view of the durable-audit barrier. Health probes
+    /// observe the same flags that make admission fail closed.
+    pub(crate) fn readiness(&self) -> AuditReadiness {
+        AuditReadiness {
+            ready: Arc::clone(&self.ready),
+            failure_code: Arc::clone(&self.failure_code),
+        }
     }
 
     /// Reuses the durable writer while binding emitted event scope to the

@@ -132,6 +132,21 @@ pub struct ProtectedSiteApplyState {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Most recent persisted health observation of one site.
+///
+/// It records what a health read saw at `captured_at`; it is not a live probe
+/// and carries no probe details.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtectedSiteHealthSnapshot {
+    pub site_id: String,
+    pub captured_at: DateTime<Utc>,
+    pub edge_state: String,
+    pub upstream_state: String,
+    pub config_state: String,
+    pub audit_state: String,
+    pub reason_code: String,
+}
+
 /// Outcome of an idempotent high-risk approval attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtectedSiteApprovalOutcome {
@@ -317,6 +332,44 @@ impl PostgresIdentityStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Reads the newest persisted health observation of each site in a tenant,
+    /// ordered by site ID. Sites that were never observed are simply absent.
+    ///
+    /// # Errors
+    /// Returns a storage or corruption error when the rows cannot be read.
+    pub async fn latest_protected_site_health_snapshots(
+        &self,
+        tenant_id: &TenantId,
+        limit: u16,
+    ) -> Result<Vec<ProtectedSiteHealthSnapshot>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT ON (site_id)
+                    site_id, captured_at, edge_state, upstream_state, config_state,
+                    audit_state, reason_code
+             FROM xshield.site_health_snapshots
+             WHERE tenant_id = $1
+             ORDER BY site_id ASC, captured_at DESC
+             LIMIT $2",
+        )
+        .bind(tenant_id.as_str())
+        .bind(i64::from(limit.clamp(1, 128)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProtectedSiteHealthSnapshot {
+                    site_id: row.try_get("site_id")?,
+                    captured_at: row.try_get("captured_at")?,
+                    edge_state: row.try_get("edge_state")?,
+                    upstream_state: row.try_get("upstream_state")?,
+                    config_state: row.try_get("config_state")?,
+                    audit_state: row.try_get("audit_state")?,
+                    reason_code: row.try_get("reason_code")?,
+                })
+            })
+            .collect()
     }
 
     /// Reads one immutable normalized policy payload for rollback preparation.
