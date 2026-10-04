@@ -1,4 +1,5 @@
 use crate::{PostgresIdentityStore, StoreError};
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 
 /// Active browser-management session data read after server-side validation.
@@ -7,6 +8,10 @@ pub struct ManagementBrowserSession {
     issuer: String,
     subject: String,
     csrf_token: String,
+    created_at: DateTime<Utc>,
+    last_seen_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    last_reauthenticated_at: Option<DateTime<Utc>>,
     step_up_valid: bool,
 }
 
@@ -33,6 +38,30 @@ impl ManagementBrowserSession {
     #[must_use]
     pub const fn step_up_valid(&self) -> bool {
         self.step_up_valid
+    }
+
+    /// Returns the database-clock absolute expiry of this session.
+    #[must_use]
+    pub const fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
+
+    /// Returns the database-clock time at which the current idle window ends.
+    #[must_use]
+    pub fn idle_expires_at(&self) -> DateTime<Utc> {
+        self.last_seen_at + chrono::Duration::minutes(15)
+    }
+
+    /// Returns the creation time used to derive the session policy window.
+    #[must_use]
+    pub const fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
+    /// Returns the last successful session-bound step-up time, if any.
+    #[must_use]
+    pub const fn last_reauthenticated_at(&self) -> Option<DateTime<Utc>> {
+        self.last_reauthenticated_at
     }
 }
 
@@ -209,7 +238,8 @@ impl PostgresIdentityStore {
              WHERE session_digest = $1 AND revoked_at IS NULL
                AND expires_at > clock_timestamp()
                AND last_seen_at > clock_timestamp() - interval '15 minutes'
-             RETURNING issuer, subject, csrf_token,
+             RETURNING issuer, subject, csrf_token, created_at, last_seen_at,
+                       expires_at, last_reauthenticated_at,
                        COALESCE(
                            last_reauthenticated_at > clock_timestamp() - interval '2 minutes',
                            false
@@ -223,6 +253,10 @@ impl PostgresIdentityStore {
                 issuer: row.try_get("issuer")?,
                 subject: row.try_get("subject")?,
                 csrf_token: row.try_get("csrf_token")?,
+                created_at: row.try_get("created_at")?,
+                last_seen_at: row.try_get("last_seen_at")?,
+                expires_at: row.try_get("expires_at")?,
+                last_reauthenticated_at: row.try_get("last_reauthenticated_at")?,
                 step_up_valid: row.try_get("step_up_valid")?,
             })
         })

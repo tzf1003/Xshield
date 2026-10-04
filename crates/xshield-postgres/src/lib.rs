@@ -32,6 +32,7 @@ mod grant_read;
 mod identity_read;
 mod investigation_case;
 mod investigation_export;
+mod management_api_key;
 mod management_session;
 mod model_evaluation_admission;
 mod model_evaluation_cache;
@@ -42,6 +43,7 @@ mod response_grant;
 mod service_identity_read;
 mod share_grant_issue;
 mod share_grant_read;
+mod site_config;
 
 pub use action_read::ResponseActionDescriptorQuery;
 pub use binding_inspection::BindingInspection;
@@ -116,6 +118,10 @@ pub use investigation_export::{
     InvestigationExportPackageOutcome, InvestigationExportPackageRef, InvestigationExportRecord,
     InvestigationExportSnapshot, InvestigationExportWriteOutcome,
 };
+pub use management_api_key::{
+    ManagementApiKeyPrincipal, ManagementApiKeyRecord, ManagementApiKeyScope,
+    ManagementApiKeyScopeInput,
+};
 pub use management_session::{ManagementBrowserSession, ManagementOidcTransaction};
 pub use model_evaluation_admission::ModelEvaluationAdmissionLease;
 pub use model_evaluation_cache::{
@@ -132,6 +138,11 @@ pub use response_grant::{
     CommittedResponseGrant, ResponseGrantItem, ResponseGrantPersistence, ResponseGrantWriteOutcome,
 };
 pub use share_grant_issue::{ShareGrantPersistence, ShareGrantWriteOutcome};
+pub use site_config::{
+    ProtectedSiteApplyState, ProtectedSiteApprovalOutcome, ProtectedSiteConfigListItem,
+    ProtectedSiteConfigRecord, ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
+    ProtectedSitePolicyRevision,
+};
 
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
