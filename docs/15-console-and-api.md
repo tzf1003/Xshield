@@ -2,7 +2,7 @@
 
 ## 15.1 信息架构
 
-站点运营后台支持同一租户下的多个受保护站点。站点列表使用租户范围的 `SystemAdmin` 管理身份，单站点配置使用站点路径再次校验作用域；每个站点拥有独立的内部 edge 监听端口，并通过签名游标分页。现有 `/control/v1/site-config` 保留为单站点兼容入口，新增多站点路径见 29 章。保存会产生 desired revision 和 apply intent；控制面在配置校验后通过 loopback HMAC apply 通道发送完整租户快照，只有 edge 原子确认后才显示 `active`，否则显示 `pending` 或 `failed` 并保留上一份有效快照。健康页面会探测批准的上游 health path，同时显示 edge 与 upstream 状态。
+站点运营后台支持同一租户下的多个受保护站点。站点列表使用租户范围的 `SystemAdmin` 管理身份，单站点配置使用站点路径再次校验作用域；每个站点拥有独立的内部 edge 监听端口，并通过签名游标分页。现有 `/control/v1/site-config` 保留为单站点兼容入口，新增多站点路径见 29 章。保存会产生 desired revision 和 apply intent；控制面在配置校验后通过 loopback HMAC apply 通道发送完整租户快照，只有 edge 原子确认后才显示 `active`（确认带 edge 的 HMAC 签名并绑定到该次请求，控制面验签失败按 `failed`、原因 `EDGE_APPLY_ACK_SIGNATURE_INVALID` 处理），否则显示 `pending` 或 `failed` 并保留上一份有效快照。edge 健康探测带时间戳和 nonce，edge 在控制面升级完成前可能短暂显示 `unavailable`，详见 19 章。健康页面会探测批准的上游 health path，同时显示 edge 与 upstream 状态。
 
 部署时可用 `XSHIELD_EDGE_LISTEN_PORTS` 提供逗号分隔的 bootstrap 监听集合；edge 监听器监督器会在 apply 前绑定快照所需的全部端口，成功后再原子替换路由。新站点端口默认绑定同一私网/loopback 地址，可在不中断已有请求的情况下动态加入；配置中的监听地址必须与 bootstrap 地址一致。设置持久卷上的 `XSHIELD_EDGE_SNAPSHOT_PATH` 后，已确认的完整快照会以 HMAC 签名文件恢复，启动时验签失败会保持拒绝启动。
 
@@ -28,7 +28,7 @@ Operations：节点、队列、存储、密钥引用、告警与审计访问。
 
 `./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049、导出列表索引 0050 与站点审批绑定 0051，现有开发数据卷无需重置。
 
-站点策略可设置 `static_asset_max_path_depth`，默认值为 `5`。它只为 `GET` 静态资源扩展名（JavaScript、CSS、字体、图片、source map 和静态 JSON）提供有限深度兜底匹配；超过深度、非静态扩展和 API 路径仍按精确 operation 拒绝。该兜底不改变 WAF、限流或审计链路。
+站点策略的 `static_asset_max_path_depth` 默认关闭（`0` 或缺省），站点显式设为 1–16 才启用静态资源兜底。兜底会在没有身份和精确 operation 的情况下放行请求，因此匹配很窄：只放行 `GET`；路径深度不超过该值；路径先做一次严格百分号解码，以解码后的文本判定（源站实际路由的就是这个文本）；最后一段必须有真实的点、非空主名，且扩展名属于 `js`、`css`、`ico`、`png`、`jpg`、`jpeg`、`gif`、`svg`、`webp`、`woff`、`woff2`、`ttf`（大小写不敏感），所以 `/api/json`、`/css` 这类无点名称不会被当成文件。`.json` 与 `.map` 不在列表中：API 响应和 source map 常以这些后缀命名，放行等于让任何人把 API 伪装成资源，需要时请配置显式路由。`;`（路径参数，如 `/admin/users;.js`）、反斜杠、`%2F`、`.`/`..`/空路径段、控制字符、`?`、`#`、解码后仍含 `%`（双重编码）、空格和非 ASCII 字节一律拒绝，其余字符限于字母、数字和 `. _ ~ @ + -`；畸形转义不会被猜测。超过深度、不符合上述规则和 API 路径仍按精确 operation 拒绝。兜底只在没有精确 operation 命中时生效，不改变 WAF、限流或审计链路。已存在站点策略中保存的 `5` 是此前默认值的序列化结果，升级后继续生效，直到重新保存策略；开发靶场脚本 `scripts/register_juice_shop.py` 显式设置 `5`，安全靶场和示例配置不依赖该兜底。
 
 对象级实验站点还可显式设置 `origin_object_access_enforced=true`。Gateway 会删除客户端同名请求头，并仅在签名快照要求时向源站加入受信标记；源站据此执行对象所有者校验。该字段默认关闭，不能由请求方自行开启或关闭。
 
@@ -219,3 +219,64 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 # 管理 API Key
 
 `POST/GET /control/v1/agent-api-keys`、`POST /{id}/revoke`、`POST /{id}/rotate` 仅允许 KeyAdministrator 或 SystemAdmin 的浏览器管理会话并要求 CSRF。创建响应只返回一次完整 `xsk_` 明文，数据库和审计只保存 HMAC 指纹、前缀、scope 与生命周期。
+
+## 管理 API Key 的授权模型
+
+**管理入口只认浏览器会话。** 上述四个端点要求 OIDC 浏览器会话（持有 KeyAdministrator 或 SystemAdmin 并通过 CSRF）。静态机器 Bearer 虽可配置 SystemAdmin，但不是浏览器会话，同样返回 403 `CONTROL_SCOPE_DENIED`；API Key 本身没有任何角色，永远不能创建、列出、撤销或轮换 Key。早期实现曾接受机器 Bearer，本节以文档为准并已修正代码。
+
+**Key 没有角色，只有精确授权。** 每个 scope 行是 `(tenant_id, site_id, capability)`，鉴权对每个 `(站点, 能力)` 单独判定：只看点名该站点的那一行，不合并多行的角色，也不把某个能力当作另一个能力的超集。Key 不具备 Observer、Investigator 等调查角色，所以 `/requests`、`/search`、`/evidence`、`/cases`、`/grants`、`/auth-bindings`、`/exports`、`/audit/health`、`/session`、Key 管理等一律返回 403 `CONTROL_SCOPE_DENIED`（`/control/v1/*` 中凡未在下表列出的路由对 Key 关闭）。
+
+| 能力 | 放行的路由 | 授权范围 |
+|---|---|---|
+| `site.read` | `GET /sites`（仅返回有该能力的站点）、`GET /sites/{id}`、`GET /sites/{id}/config`、`/status`、`/revisions`、`GET /control/v1/workbench/overview`、旧 `GET /site-config` | 该行点名的站点 |
+| `site.health.read` | `GET /sites/{id}/health` | 该行点名的站点 |
+| `site.config.write` | `PUT /sites/{id}/config`、`PATCH /sites/{id}`、旧 `PUT /site-config`（只更新已存在站点） | 该行点名的站点 |
+| `site.config.validate` | `POST /sites/{id}/validate` | 该行点名的站点 |
+| `site.config.apply_direct` | `POST /sites/{id}/apply`（唯一的 apply 能力，无需独立审批，见下） | 该行点名的站点 |
+| `site.rollback` | `POST /sites/{id}/rollback` | 该行点名的站点 |
+| `site.create` | `POST /sites`（只创建不存在的站点） | 租户级，必须使用标记 `site_id = "__tenant__"` |
+
+任何能力都不放行 `DELETE /sites/{id}` 和 `POST /sites/{id}/approve`：删除站点与独立审批只能由人员完成。`site.config.write` 不能创建站点，`site.create` 不能读取、改写或覆盖已存在的站点：`POST /sites` 命中已存在站点时，除非该 Key 同时持有该站点的 `site.config.write`，否则返回 409 `CONTROL_API_KEY_SITE_EXISTS`；`PUT` 命中不存在的站点时，除非持有租户级 `site.create`，否则返回 403 `CONTROL_SCOPE_DENIED`。创建响应后重试同一请求时，仅持有 `site.create` 的 Key 会得到 409（它无权读取站点，需由人员或带 `site.read` 的 Key 确认）。
+
+**租户级标记。** `site.create` 不依附于任何已存在站点，因此只能以保留的 `site_id = "__tenant__"` 授予；该标记不能与其他能力搭配，`site.create` 也不能出现在具体站点上，二者均返回 400 `CONTROL_API_KEY_SCOPE_INVALID`。以前把 `site.create` 绑定到具体站点会隐式变成租户级的 SystemAdmin，现已取消；库中残留的此类行不再授予任何权限。名为 `__tenant__` 的站点不能被授予任何能力。
+
+**签发者不能授予自己行使不了的权限。** 创建与轮换时，签发会话必须在对应站点（租户级能力则在整个租户）持有该能力所依赖的全部角色，否则整个请求返回 403 `CONTROL_API_KEY_SCOPE_FORBIDDEN`，不会裁剪后继续：
+
+| 能力 | 签发者必须持有的角色 |
+|---|---|
+| `site.read` | SystemAdmin 与 Observer（该能力同时放行 SystemAdmin 与 Observer 保护的读路由） |
+| `site.health.read` | Observer |
+| `site.config.write`、`site.create` | SystemAdmin（`site.create` 需租户范围） |
+| `site.config.validate` | PolicyAuthor |
+| `site.rollback` | ReleaseOperator |
+| `site.config.apply_direct` | ReleaseOperator 与 PolicyApprover（直接应用等价于“批准并发布”） |
+
+因此仅持有 KeyAdministrator 的会话可以撤销或轮换，但不能签发任何带权限的 Key。
+
+**站点投影。** 站点列表与工作台只返回主体实际被授权的站点：Key 为持有 `site.read` 的站点，租户范围的浏览器 SystemAdmin 保持整个租户，仅有精确站点作用域的管理员为其作用域站点。仅持有 `site.config.write` 等其他能力而无 `site.read` 的 Key 访问站点列表和工作台返回 403。游标只会指向调用者可见的站点。
+
+**无效 Key 的预算与审计。** 每个携带 `X-Xshield-API-Key` 的请求，在查询 Key 表和追加任何审计事件之前，先从进程级未认证预算取一个配额（与登录端点共用，容量等于 `XSHIELD_CONTROL_REQUESTS_PER_MINUTE`，窗口 60 秒）。预算耗尽时直接返回 429 `CONTROL_RATE_LIMITED`（`retryable=true`），既不查询数据库，也不写 journal。允许的尝试恰好留下一条 `console.agent_api_key.use` 终态事件：有效 Key 为 PASS；未知、过期、已撤销的 Key 为 DENY `CONTROL_API_KEY_INVALID`（响应 401 同码）；缺少或超长的 `X-Xshield-Agent-Run-Id` 为 DENY `CONTROL_AUTH_REQUIRED`（401）；Key 存储不可用为 ERROR `CONTROL_API_KEY_UNAVAILABLE`（503）。被拒绝的 Key 请求在此终结，路由不再运行，也不会追加第二条事件。有效 Key 在验证通过后归还所取配额，所以正常的 Agent 流量不消耗该预算；但垃圾 Key 耗尽预算期间，合法 Key 也会收到可重试的 429，直到窗口滚动。Bearer 与浏览器会话不受 Key 洪泛影响。此前垃圾 Key 每次都无预算地写一条持久事件，3000 个垃圾 Key 即可写满 1 MiB 的 journal，之后包括合法 Bearer 在内的所有请求都返回 503 `AUDIT_DURABILITY_FAILED`。
+
+**主体与审计。** Key 的主体在控制面内以 `apikey:{api_key_id}:{subject}` 表示，所有审计事件的 `subject_ref`、站点配置的 `updated_by` 与幂等摘要都因此带有 Key ID，且不可能与人员主体相同；明文 Key 永不进入审计或日志。`site.config.apply_direct` 的直接应用标志只在该 Key 对路径中那个站点持有该能力时才成立，其审批绕过的耐久记录由站点审批闸门负责。
+
+## 管理 API Key 的生命周期与审计
+
+**先审计后生效。** 创建、撤销和轮换都按同一顺序执行：校验请求，在数据库事务中暂存变更，追加持久审计事件，最后提交。审计追加失败时事务回滚并返回 503 `AUDIT_DURABILITY_FAILED`：不会出现没有创建记录的 Key，不会返回明文，撤销保持原状，轮换不会杀死旧 Key。列表也只在其访问事件已持久记录后才返回。提交本身在审计之后失败时返回 503 `CONTROL_API_KEY_UNAVAILABLE` 并追加一条 ERROR 事件，操作者以审计轨迹和列表核对结果。
+
+**事件。** 全部使用既有事件类型，管理者的 `subject_ref` 为浏览器会话主体，所作用的 Key 记录在强类型字段 `target_api_key_id`（`key_` + UUIDv7，见 [11.14](11-audit-event-contract.md)），指纹、前缀和明文不进入事件：
+
+| 操作 | 事件类型 | outcome / reason_code | target_api_key_id |
+|---|---|---|---|
+| 创建 | `console.agent_api_key.admin` | PASS `CONTROL_API_KEY_CREATED` | 新 Key |
+| 撤销 | `console.agent_api_key.admin` | PASS `CONTROL_API_KEY_REVOKED` | 被撤销的 Key |
+| 轮换 | `console.agent_api_key.admin`（同一请求、同一 journal 批次两条） | PASS `CONTROL_API_KEY_ROTATED_OUT`、PASS `CONTROL_API_KEY_ROTATED_IN` | 旧 Key、新 Key |
+| 列表 | `console.agent_api_key.list` | PASS `CONTROL_API_KEYS_LISTED` | 无 |
+| 拒绝或故障 | 同上 | DENY/ERROR，`CONTROL_API_KEY_REQUEST_INVALID`、`..._EXPIRY_INVALID`、`..._SCOPE_INVALID`、`..._SCOPE_FORBIDDEN`、`..._NOT_FOUND`、`..._UNAVAILABLE` 等 | 路径中已校验的 Key，未知时为空 |
+
+Key 的使用另有 `console.agent_api_key.use`（PASS 的主体为 `apikey:{api_key_id}:{subject}`，见上）。
+
+**轮换是一个事务。** `rotate` 先校验整个请求（JSON、过期、主体、scope、签发者权限），任何一项失败都返回 400/403 且旧 Key 不受影响；校验通过后在同一事务中撤销旧 Key 并写入新 Key，旧 Key 不存在或已撤销时返回 404 且不创建新 Key，并发的相同轮换恰有一个成功。此前代码先撤销旧 Key 再解析请求体，坏请求会留下已失效的旧 Key 而没有替换。
+
+**主体与显示名。** `subject` 是用于审计和列表的标签：1–128 个 ASCII 字符，取自字母、数字和 `. _ : @ / -`，且以字母或数字开头；`display_name` 为 1–128 个字符，可使用任何语言，但不得含控制、双向覆盖和零宽字符，也不得有首尾空白。不合规的输入直接返回 400 `CONTROL_API_KEY_SCOPE_INVALID`，不做静默规范化（空白、非 ASCII 字符会被用来冒充他人的名字）。`subject` 在租户内不要求唯一：凭证以 Key ID 区分，同一 `subject` 可以同时有多把有效 Key（轮换重叠、按能力拆分），审计主体因带有 Key ID 而始终可追溯到具体凭证。
+
+**最近使用。** 认证成功后写入 `last_used_at`，但同一 Key 每分钟最多写一次：节流在 UPDATE 语句内完成，被节流时语句不命中任何行也不产生新版本；失败认证和已撤销的 Key 不会更新。该写入只是记账，失败不会拒绝刚通过认证的 Key。

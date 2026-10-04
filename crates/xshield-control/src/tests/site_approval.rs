@@ -59,10 +59,35 @@ impl MockEdge {
     }
 }
 
+/// Signs an acknowledgement the way the edge does: HMAC-SHA256 over the label,
+/// the signature of the request it answers and the exact response body.
+fn sign_ack(request_signature: &str, ack_body: &[u8]) -> String {
+    let key = openssl::pkey::PKey::hmac(&[0x11_u8; 32]).unwrap();
+    let mut signer =
+        openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &key).unwrap();
+    signer
+        .update(&xshield_core::edge_channel::apply_ack_message(
+            request_signature,
+            ack_body,
+        ))
+        .unwrap();
+    signer
+        .sign_to_vec()
+        .unwrap()
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            use std::fmt::Write as _;
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        })
+}
+
 async fn edge_apply(
     State(edge): State<MockEdge>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
-) -> (StatusCode, Json<Value>) {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let request: Value = serde_json::from_slice(&body).unwrap();
     let revision = request["snapshot_revision"].as_u64().unwrap();
     let mut state = edge.0.lock().unwrap();
@@ -70,7 +95,8 @@ async fn edge_apply(
         return (
             StatusCode::CONFLICT,
             Json(json!({"error": "edge_apply_failed", "reason_code": "EDGE_APPLY_STALE_REVISION"})),
-        );
+        )
+            .into_response();
     }
     state.snapshot_revision = revision;
     state.serving = request["sites"]
@@ -80,15 +106,35 @@ async fn edge_apply(
         .map(|site| (site["site_id"].as_str().unwrap().to_owned(), site.clone()))
         .collect();
     state.applies.push(request.clone());
+    let ack_body = serde_json::to_vec(&json!({
+        "apply_id": request["apply_id"],
+        "active_revision": revision,
+        "apply_state": "active",
+        "reason_code": "EDGE_APPLY_CONFIRMED"
+    }))
+    .unwrap();
+    let request_signature = headers
+        .get(xshield_core::edge_channel::APPLY_SIGNATURE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let signature = sign_ack(request_signature, &ack_body);
     (
         StatusCode::OK,
-        Json(json!({
-            "apply_id": request["apply_id"],
-            "active_revision": revision,
-            "apply_state": "active",
-            "reason_code": "EDGE_APPLY_CONFIRMED"
-        })),
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_owned(),
+            ),
+            (
+                axum::http::HeaderName::from_static(
+                    xshield_core::edge_channel::APPLY_ACK_SIGNATURE_HEADER,
+                ),
+                signature,
+            ),
+        ],
+        ack_body,
     )
+        .into_response()
 }
 
 async fn start_edge() -> (MockEdge, String) {
@@ -111,6 +157,7 @@ const APPROVER: &str = "independent-reviewer";
 
 struct Ctx {
     tenant: TenantId,
+    assertion_key: [u8; 32],
     edge: MockEdge,
     edge_url: String,
     database_url: String,
@@ -150,6 +197,7 @@ impl Ctx {
         // site, so the principal needs that exact scope as well.
         .with_exact_site_scope(tenant.clone(), default_site.clone());
         let author_access = author.access_directory.clone();
+        let assertion_key: [u8; 32] = **author.control.auth_context_key.as_ref().unwrap();
         let client =
             super::super::EdgeApplyClient::new(edge_url.clone(), &"11".repeat(32)).unwrap();
         let author_app = router(author.control.with_edge_apply_client(client));
@@ -174,6 +222,7 @@ impl Ctx {
 
         Self {
             tenant,
+            assertion_key,
             edge,
             edge_url,
             pool: sqlx::PgPool::connect(&url).await.unwrap(),
@@ -251,6 +300,32 @@ impl Ctx {
             None => builder.body(Body::empty()).unwrap(),
         };
         let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Issues an API key the way production does: through a browser session
+    /// holding the key-administration role (the machine credential may not).
+    async fn issue_api_key(&self, body: &Value) -> (StatusCode, Value) {
+        let header = super::api_key_harness::browser_assertion(
+            &self.assertion_key,
+            &self.tenant,
+            "human-key-admin",
+            &super::api_key_harness::ISSUER_ROLES,
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/control/v1/agent-api-keys")
+            .header(AUTHORIZATION, header)
+            .header("idempotency-key", self.key("issue-api-key"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap();
+        let response = self.author.clone().oneshot(request).await.unwrap();
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1_048_576).await.unwrap();
         (
@@ -829,20 +904,15 @@ async fn direct_apply_is_recorded_and_does_not_leave_a_stale_flag() {
     let digest = created["config_digest"].as_str().unwrap().to_owned();
 
     let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
-    let (status, issued) = Ctx::call(
-        &ctx.author,
-        "POST",
-        "/control/v1/agent-api-keys",
-        Some(&json!({
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
             "subject": "agent-direct", "display_name": "direct", "expires_at": expires,
             "scopes": [{
                 "tenant_id": ctx.tenant.as_str(), "site_id": site,
                 "capabilities": ["site.config.apply_direct", "site.read"]
             }]
-        })),
-        None,
-    )
-    .await;
+        }))
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{issued}");
     let api_key = issued["api_key"].as_str().unwrap().to_owned();
 
@@ -894,7 +964,14 @@ async fn direct_apply_is_recorded_and_does_not_leave_a_stale_flag() {
     .await
     .unwrap();
     assert_eq!(record.get::<String, _>("approval_kind"), "direct_apply");
-    assert_eq!(record.get::<String, _>("approved_by"), "agent-direct");
+    // The key's principal subject names the key id as well as the agent.
+    assert_eq!(
+        record.get::<String, _>("approved_by"),
+        format!(
+            "apikey:{}:agent-direct",
+            issued["api_key_id"].as_str().unwrap()
+        )
+    );
     assert_eq!(record.get::<String, _>("authored_by"), AUTHOR);
     assert_eq!(record.get::<String, _>("digest"), digest);
     assert_eq!(record.get::<i64, _>("desired_revision"), 1);
@@ -1173,6 +1250,7 @@ async fn delete(app: &axum::Router, site: &str, key: &str) -> (StatusCode, Value
 /// high-risk actions.
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
 async fn deleting_a_site_requires_a_recent_step_up() {
     let ctx = Ctx::new().await;
     let site = "site_delete";
@@ -1201,20 +1279,15 @@ async fn deleting_a_site_requires_a_recent_step_up() {
     // A machine credential has no step-up path either, whatever capabilities
     // it holds: `site.config.write` maps to SystemAdmin, which is not enough.
     let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
-    let (status, issued) = Ctx::call(
-        &ctx.author,
-        "POST",
-        "/control/v1/agent-api-keys",
-        Some(&json!({
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
             "subject": "agent-writer", "display_name": "writer", "expires_at": expires,
             "scopes": [{
                 "tenant_id": ctx.tenant.as_str(), "site_id": site,
                 "capabilities": ["site.config.write", "site.config.apply_direct", "site.rollback"]
             }]
-        })),
-        None,
-    )
-    .await;
+        }))
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{issued}");
     let api_key = issued["api_key"].as_str().unwrap().to_owned();
     let response = ctx
@@ -1236,7 +1309,9 @@ async fn deleting_a_site_requires_a_recent_step_up() {
     let denied: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
-    assert_eq!(denied["error_code"], "CONTROL_SITE_DELETE_STEP_UP_REQUIRED");
+    // API keys never delete: the capability matrix has no delete capability, so
+    // the request is refused on scope before the step-up requirement is reached.
+    assert_eq!(denied["error_code"], "CONTROL_SCOPE_DENIED");
     assert_eq!(
         ctx.edge.served_upstream(site).as_deref(),
         Some("8.8.8.8:9000")
@@ -1271,8 +1346,19 @@ async fn deleting_a_site_requires_a_recent_step_up() {
                 == "CONTROL_SITE_DELETE_STEP_UP_REQUIRED"
                 && event["payload"]["outcome"] == "DENY")
             .count(),
-        2,
-        "both refused attempts are audited"
+        1,
+        "the session attempt without a step-up is audited"
+    );
+    assert_eq!(
+        deletions
+            .iter()
+            .filter(
+                |event| event["payload"]["reason_code"] == "CONTROL_SCOPE_DENIED"
+                    && event["payload"]["outcome"] == "DENY"
+            )
+            .count(),
+        1,
+        "the API-key attempt is refused on scope and audited"
     );
     assert!(deletions.iter().any(|event| {
         event["payload"]["reason_code"] == "CONTROL_SITE_DELETED"

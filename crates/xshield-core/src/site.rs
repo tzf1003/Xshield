@@ -434,8 +434,11 @@ pub struct SitePolicyConfig {
     pub health_check: SiteHealthCheckConfig,
     #[serde(default)]
     pub secret_refs: Vec<SiteSecretReference>,
-    /// Maximum path depth for public static assets such as JavaScript and CSS.
-    /// A zero value disables the static-asset fallback; the default is five.
+    /// Maximum path depth for the opt-in public static-asset fallback
+    /// (JavaScript, CSS, fonts and images). The fallback admits requests with
+    /// no identity and no exact operation, so it is off unless a site asks for
+    /// it: zero, and an omitted field, disable it. See
+    /// [`SitePolicyConfig::allows_static_asset`] for what it can match.
     #[serde(default = "default_static_asset_max_path_depth")]
     pub static_asset_max_path_depth: u8,
     /// Requests forwarded through the edge may ask a compatible origin to
@@ -461,7 +464,7 @@ impl Default for SitePolicyConfig {
 }
 
 const fn default_static_asset_max_path_depth() -> u8 {
-    5
+    0
 }
 
 impl Default for SiteIdentityConfig {
@@ -720,44 +723,54 @@ impl SitePolicyConfig {
         Ok(())
     }
 
-    /// Returns whether a public GET may use the bounded static-asset fallback.
-    /// This is intentionally limited to browser asset extensions and a finite
-    /// path depth so it cannot turn the site policy into a catch-all route.
+    /// Returns whether a public GET may use the opt-in static-asset fallback.
+    ///
+    /// The fallback exists for hashed bundle and font names that cannot be
+    /// listed route by route, and it is deliberately narrow because it admits a
+    /// request without identity or an exact operation:
+    ///
+    /// * the site must opt in with a non-zero `static_asset_max_path_depth`,
+    ///   which also bounds how many path segments may be matched;
+    /// * the path is percent-decoded once, strictly, and the decoded text is
+    ///   what is judged, since that is what an origin will route; anything an
+    ///   origin could read as structure rather than a file name is refused:
+    ///   `;` (path parameters such as `/admin/users;.js`), `\`, encoded
+    ///   slashes, dot and empty segments, controls, `?`, `#`, a decoded `%`
+    ///   (double encoding), spaces and non-ASCII bytes;
+    /// * the last segment needs a real dot, a non-empty stem and an extension
+    ///   from [`STATIC_ASSET_EXTENSIONS`], so `/api/json` or `/css` can never
+    ///   pass for a `.json` or `.css` file.
+    ///
+    /// `.json` and `.map` are not in the list: they are how APIs and source
+    /// maps are routinely spelled, so admitting them would let anyone name an
+    /// API response as an asset. Such files need an explicit route.
     #[must_use]
     pub fn allows_static_asset(&self, method: &str, path: &str) -> bool {
-        if method != "GET" || self.static_asset_max_path_depth == 0 || !path.starts_with('/') {
+        if method != "GET" || self.static_asset_max_path_depth == 0 {
             return false;
         }
-        let depth = path
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .count();
-        if depth == 0 || depth > usize::from(self.static_asset_max_path_depth) {
-            return false;
-        }
-        let Some(extension) = path
-            .rsplit('/')
-            .next()
-            .and_then(|name| name.rsplit('.').next())
-        else {
+        let Some(decoded) = decode_static_asset_path(path) else {
             return false;
         };
-        matches!(
-            extension.to_ascii_lowercase().as_str(),
-            "js" | "css"
-                | "map"
-                | "ico"
-                | "png"
-                | "jpg"
-                | "jpeg"
-                | "gif"
-                | "svg"
-                | "webp"
-                | "woff"
-                | "woff2"
-                | "ttf"
-                | "json"
-        )
+        let mut depth = 0_usize;
+        let mut name = "";
+        for segment in decoded[1..].split('/') {
+            if matches!(segment, "" | "." | "..") {
+                return false;
+            }
+            depth += 1;
+            name = segment;
+        }
+        if depth > usize::from(self.static_asset_max_path_depth) {
+            return false;
+        }
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            return false;
+        };
+        !stem.is_empty()
+            && STATIC_ASSET_EXTENSIONS
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
     }
 }
 
@@ -945,6 +958,57 @@ fn validate_route_set(routes: &[SiteRouteConfig]) -> Result<(), InvalidValue> {
         return Err(invalid());
     }
     Ok(())
+}
+
+/// Extensions the static-asset fallback may admit. `json` and `map` are absent
+/// on purpose; see [`SitePolicyConfig::allows_static_asset`].
+const STATIC_ASSET_EXTENSIONS: &[&str] = &[
+    "js", "css", "ico", "png", "jpg", "jpeg", "gif", "svg", "webp", "woff", "woff2", "ttf",
+];
+
+/// Longest request path the static-asset fallback will consider.
+const STATIC_ASSET_PATH_MAX: usize = 512;
+
+/// Percent-decodes `raw` once and keeps only paths made of file-name
+/// characters; `None` for anything else.
+///
+/// Allowed after decoding: ASCII letters and digits, `. _ ~ @ + -` and `/`.
+/// A `/` is accepted only as a literal separator, never from `%2F`, and a
+/// decoded `%` (a double-encoded escape) is refused, so one decoding step by
+/// the origin cannot produce a different path than the one judged here.
+fn decode_static_asset_path(raw: &str) -> Option<String> {
+    fn hex_digit(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    if raw.len() > STATIC_ASSET_PATH_MAX || !raw.starts_with('/') {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    let mut decoded = String::with_capacity(raw.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let (byte, escaped) = if bytes[index] == b'%' {
+            let pair = bytes.get(index + 1..index + 3)?;
+            index += 3;
+            ((hex_digit(pair[0])? << 4) | hex_digit(pair[1])?, true)
+        } else {
+            index += 1;
+            (bytes[index - 1], false)
+        };
+        let allowed = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'.' | b'_' | b'~' | b'@' | b'+' | b'-')
+            || (byte == b'/' && !escaped);
+        if !allowed {
+            return None;
+        }
+        decoded.push(char::from(byte));
+    }
+    Some(decoded)
 }
 
 fn validate_site_route_path(route: &SiteRouteConfig) -> Result<String, InvalidValue> {
@@ -1285,16 +1349,153 @@ mod tests {
         assert!(policy.validate().is_err());
     }
 
+    fn opted_in(depth: u8) -> SitePolicyConfig {
+        SitePolicyConfig {
+            static_asset_max_path_depth: depth,
+            ..SitePolicyConfig::default()
+        }
+    }
+
+    // The fallback admits requests without identity or an exact operation, so
+    // a site must ask for it. This test used to assert the opposite default
+    // (depth 5 for every site), which is the hole it now guards against.
+    #[test]
+    fn static_asset_fallback_is_off_unless_a_site_opts_in() {
+        let default = SitePolicyConfig::default();
+        assert_eq!(default.static_asset_max_path_depth, 0);
+        assert!(!default.allows_static_asset("GET", "/assets/app.js"));
+        // An omitted field in a stored or submitted policy means off, not five.
+        let parsed: SitePolicyConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.static_asset_max_path_depth, 0);
+        assert!(!parsed.allows_static_asset("GET", "/assets/app.js"));
+        let explicit: SitePolicyConfig =
+            serde_json::from_str(r#"{"static_asset_max_path_depth":3}"#).unwrap();
+        assert!(explicit.validate().is_ok());
+        assert!(explicit.allows_static_asset("GET", "/assets/app.js"));
+        let too_deep: SitePolicyConfig =
+            serde_json::from_str(r#"{"static_asset_max_path_depth":17}"#).unwrap();
+        assert!(too_deep.validate().is_err());
+    }
+
     #[test]
     fn static_assets_use_a_bounded_depth_and_extension_allowlist() {
-        let policy = SitePolicyConfig::default();
-        assert_eq!(policy.static_asset_max_path_depth, 5);
+        let policy = opted_in(5);
         assert!(policy.allows_static_asset("GET", "/chunk.js"));
         assert!(policy.allows_static_asset("GET", "/assets/js/chunk.js"));
         assert!(policy.allows_static_asset("GET", "/a/b/c/d/style.css"));
+        assert!(!policy.allows_static_asset("GET", "/a/b/c/d/e/style.css"));
         assert!(!policy.allows_static_asset("GET", "/a/b/c/d/e/f/style.css"));
         assert!(!policy.allows_static_asset("POST", "/chunk.js"));
+        assert!(!policy.allows_static_asset("HEAD", "/chunk.js"));
         assert!(!policy.allows_static_asset("GET", "/api/users"));
+        assert!(!opted_in(0).allows_static_asset("GET", "/chunk.js"));
+        assert!(!opted_in(1).allows_static_asset("GET", "/assets/chunk.js"));
+        assert!(opted_in(1).allows_static_asset("GET", "/chunk.js"));
+    }
+
+    // Reviewer reproductions: with the fallback on at depth 5 each of these
+    // was admitted without identity because the extension check looked at the
+    // whole last segment (`rsplit('.')` returns the entire name when there is
+    // no dot) or ignored characters that origins read as structure.
+    #[test]
+    fn static_asset_fallback_never_admits_apis_or_origin_path_tricks() {
+        let policy = opted_in(5);
+        for (path, expected) in [
+            ("/assets/app.js", true),
+            ("/orders/123.json", false),
+            ("/api/v1/users/42.json", false),
+            ("/admin/export.json", false),
+            ("/assets/app.js.map", false),
+            ("/api/json", false),
+            ("/api/v1/map", false),
+            ("/css", false),
+            ("/js", false),
+            ("/search/png", false),
+            ("/admin/users;.js", false),
+            ("/admin/dashboard;.css", false),
+            ("/api/accounts/..;/x.js", false),
+            ("/api/users", false),
+            ("/orders/123.xml", false),
+            // Extension rules: a real dot with a non-empty stem, case-insensitive.
+            ("/assets/.js", false),
+            ("/assets/app.", false),
+            ("/assets/app.JS", true),
+            ("/assets/logo.SVG", true),
+            ("/assets/app.mjs", false),
+            ("/assets/app.js.php", false),
+            ("/assets/app.js/", false),
+            ("/assets/@scope/pkg/font.woff2", true),
+            ("/assets/chunk-DBPdFzgj.js", true),
+            ("/assets/vendor~main.css", true),
+            ("/", false),
+            ("", false),
+            ("assets/app.js", false),
+            // Structure an origin may interpret differently from this check.
+            ("/a//b.js", false),
+            ("/a/./b.js", false),
+            ("/a/../b.js", false),
+            ("/a\\b.js", false),
+            ("/a/b.js;v=1", false),
+            ("/a/b.js::$DATA", false),
+            ("/a/b.js?x", false),
+            ("/a/b.js#x", false),
+            ("/a b/c.js", false),
+            ("/caf\u{e9}.js", false),
+        ] {
+            assert_eq!(
+                policy.allows_static_asset("GET", path),
+                expected,
+                "GET {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_asset_fallback_decodes_strictly_and_refuses_encoded_tricks() {
+        let policy = opted_in(5);
+        for (path, expected) in [
+            // Decoding is applied once; the decoded name is what the origin sees.
+            ("/assets/app%2ejs", true),
+            ("/assets/app%2Ejs", true),
+            ("/assets/%61pp.js", true),
+            ("/assets/app%2e", false),
+            // Encoded `;`, slash, backslash, dot segments, controls, query and
+            // percent signs are refused outright.
+            ("/admin/users%3b.js", false),
+            ("/admin/users%3B.js", false),
+            ("/a%2fb.js", false),
+            ("/a%2Fb.js", false),
+            ("/a%5cb.js", false),
+            ("/a/%2e%2e/b.js", false),
+            ("/a/%2E%2E/b.js", false),
+            ("/a/%2e/b.js", false),
+            ("/a/..%2fb.js", false),
+            ("/a/b%00.js", false),
+            ("/a/b%0a.js", false),
+            ("/a/b%0d%0a.js", false),
+            ("/a/b%7f.js", false),
+            ("/a/b%3f.js", false),
+            ("/a/b%23.js", false),
+            ("/a/b%20.js", false),
+            ("/a/b%252ejs", false),
+            ("/a/b%25.js", false),
+            ("/a/b%c3%a9.js", false),
+            ("/a/b%ff.js", false),
+            // Malformed escapes are never guessed.
+            ("/a/b%.js", false),
+            ("/a/b%2.js", false),
+            ("/a/b%zz.js", false),
+            ("/a/b.js%", false),
+        ] {
+            assert_eq!(
+                policy.allows_static_asset("GET", path),
+                expected,
+                "GET {path}"
+            );
+        }
+        // Unreasonably long paths are not asset requests.
+        let long = format!("/{}.js", "a".repeat(600));
+        assert!(!policy.allows_static_asset("GET", &long));
     }
 
     fn route(id: &str, method: &str, path: &str) -> SiteRouteConfig {

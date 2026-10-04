@@ -1,6 +1,6 @@
 //! Role-projected, read-only operating snapshot for the management console.
 
-use super::{AccessAction, ControlPlane, no_store, site_config};
+use super::{AccessAction, ControlPlane, api_key_authz, no_store, site_config};
 use axum::{
     Json,
     extract::State,
@@ -11,7 +11,7 @@ use chrono::Utc;
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use uuid::Uuid;
-use xshield_core::admin::ManagementRole;
+use xshield_core::admin::{ApiKeyCapability, ManagementRole};
 use xshield_postgres::{ProtectedSiteConfigListItem, ProtectedSiteHealthSnapshot};
 use xshield_worker::{PublicationHealth, inspect_publication_health};
 
@@ -80,7 +80,9 @@ pub async fn handler(
     let authorization = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    let auth = match control.authorize_any_identity(
+    // A key sees the workbench only through `site.read`, and only the sites
+    // that capability names; people are decided by role as before.
+    let auth = match control.authorize_any_identity_or_capability(
         authorization,
         &request_id,
         ACCESS,
@@ -90,6 +92,7 @@ pub async fn handler(
             ManagementRole::AuditAdministrator,
             ManagementRole::SystemAdmin,
         ],
+        ApiKeyCapability::SiteRead,
     ) {
         Ok(identity) => identity,
         Err(response) => return response.into_response(),
@@ -98,11 +101,15 @@ pub async fn handler(
     let roles = auth.principal.roles();
     let mut completeness = "complete";
     let mut sites = Vec::new();
-    if roles.contains(&ManagementRole::SystemAdmin) {
-        match control
-            .catalog
-            .list_protected_site_configs(&control.config.tenant_id, None, MAX_SITES)
-            .await
+    // Which sites are projected comes from the principal's own scope, never
+    // from its mere role: a tenant-scoped SystemAdmin sees the tenant, a key sees
+    // its `site.read` sites, an exact-scope administrator sees its scoped sites.
+    if let Some(visibility) = api_key_authz::projected_sites(
+        &auth.principal,
+        &control.config.tenant_id,
+        ManagementRole::SystemAdmin,
+    ) {
+        match api_key_authz::list_visible_site_configs(&control, &visibility, None, MAX_SITES).await
         {
             Ok(records) => {
                 // The store clamps one page to `MAX_SITES`; a full page may

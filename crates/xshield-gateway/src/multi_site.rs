@@ -49,6 +49,15 @@ impl GatewaySite {
     }
 }
 
+/// Why an incoming snapshot may not replace the one serving requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotRefusal {
+    /// The incoming revision is older than the serving one.
+    Stale,
+    /// The incoming snapshot claims the serving revision with another payload.
+    Conflict,
+}
+
 /// Immutable all-sites snapshot used for one request generation.
 pub struct GatewaySnapshot {
     revision: u64,
@@ -156,6 +165,34 @@ impl GatewaySnapshot {
         self.routes
             .resolve(listen_port, host)
             .and_then(|site| self.sites.get(site))
+    }
+
+    /// Decides whether `incoming` may replace this snapshot, which is the one
+    /// serving requests. The store (under its write lock) and the listener
+    /// supervisor (before it binds any socket) both ask this one question, so
+    /// they cannot disagree about what a conflict is.
+    ///
+    /// # Errors
+    /// [`SnapshotRefusal::Stale`] when `incoming` is older, and
+    /// [`SnapshotRefusal::Conflict`] when it claims the same revision as a
+    /// different applied payload.
+    pub fn check_replacement(&self, incoming: &Self) -> Result<(), SnapshotRefusal> {
+        if incoming.revision < self.revision {
+            return Err(SnapshotRefusal::Stale);
+        }
+        // Only a payload that arrived through the authenticated apply channel
+        // has a digest. The bootstrap-only or static snapshot the edge starts
+        // with is numbered 1 like the control plane's first snapshot but was
+        // never applied, so the first apply must be able to replace it. Two
+        // applied payloads at one revision are a retry only when identical,
+        // and a placeholder never displaces an applied snapshot of its revision.
+        if incoming.revision == self.revision
+            && self.payload_digest.is_some()
+            && self.payload_digest != incoming.payload_digest
+        {
+            return Err(SnapshotRefusal::Conflict);
+        }
+        Ok(())
     }
 
     /// Returns whether every configured site has a socket that the edge
@@ -362,10 +399,7 @@ impl ConfigSnapshotStore {
             .current
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if snapshot.revision() < current.revision()
-            || (snapshot.revision() == current.revision()
-                && current.payload_digest() != snapshot.payload_digest())
-        {
+        if current.check_replacement(&snapshot).is_err() {
             return None;
         }
         *current = Arc::new(snapshot);
@@ -552,6 +586,128 @@ mod tests {
         let conflicting = GatewaySnapshot::from_apply_request(conflicting).unwrap();
         let store = ConfigSnapshotStore::new(snapshot);
         assert_eq!(store.replace_if_current_or_newer(conflicting), None);
+    }
+
+    fn apply_request(revision: u64, public_origin: &str) -> GatewayApplyRequest {
+        let gateway_config = serde_json::json!({
+            "listen": "127.0.0.1:6100",
+            "origin": { "address": "127.0.0.1:8080", "server_name": "origin.local", "tls": false },
+            "tenant_id": "tenant_a", "site_id": "site_a", "policy_revision": "policy-r1",
+            "audit": { "directory": "target/audit-site-a", "key_id": "key-r1", "producer_id": "edge-r1", "max_bytes": 16_777_216, "high_watermark_bytes": 12_582_912, "segment_max_bytes": 4_194_304 },
+            "operations": [{ "operation_id": "entry", "method": "GET", "path": "/", "admission": "PUBLIC" }]
+        });
+        GatewayApplyRequest {
+            protocol_version: 1,
+            tenant_id: "tenant_a".to_owned(),
+            apply_id: "apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01".to_owned(),
+            snapshot_revision: revision,
+            sites: vec![xshield_core::GatewayApplySite {
+                site_id: "site_a".to_owned(),
+                listen_port: 6100,
+                public_origin: public_origin.to_owned(),
+                gateway_config,
+                revision,
+            }],
+        }
+    }
+
+    fn applied(revision: u64, public_origin: &str) -> GatewaySnapshot {
+        GatewaySnapshot::from_apply_request(apply_request(revision, public_origin)).unwrap()
+    }
+
+    // The control plane numbers its first snapshot 1, and so does the
+    // placeholder the edge starts with: an empty bootstrap-only snapshot or
+    // the static configuration. Neither is an applied payload, so it has no
+    // digest, and "same revision, different digest" used to be reported as an
+    // idempotency conflict. The very first apply could therefore never succeed.
+    #[test]
+    fn the_first_control_apply_at_revision_one_replaces_the_placeholder_snapshot() {
+        let tenant = xshield_core::domain::TenantId::parse("tenant_a").unwrap();
+        let bootstrap_only = GatewaySnapshot::compile_for_tenant(1, tenant, Vec::new()).unwrap();
+        let static_config = GatewaySnapshot::compile(
+            1,
+            vec![GatewaySite::new(config("site_a", 6100), ["a.example.com".to_owned()]).unwrap()],
+        )
+        .unwrap();
+        for (name, placeholder) in [
+            ("bootstrap-only", bootstrap_only),
+            ("static configuration", static_config),
+        ] {
+            assert_eq!(placeholder.payload_digest(), None, "{name}");
+            let store = ConfigSnapshotStore::new(placeholder);
+            let first = applied(1, "https://a.example.com");
+            assert!(first.payload_digest().is_some());
+            assert_eq!(
+                store.replace_if_current_or_newer(first),
+                Some(1),
+                "{name} must give way to the first applied snapshot"
+            );
+            assert!(store.load().payload_digest().is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn same_revision_conflicts_only_between_two_applied_payloads() {
+        let placeholder = GatewaySnapshot::compile(
+            2,
+            vec![GatewaySite::new(config("site_a", 6100), ["a.example.com".to_owned()]).unwrap()],
+        )
+        .unwrap();
+        let store = ConfigSnapshotStore::new(applied(2, "https://a.example.com"));
+        // A retry of the exact payload is idempotent.
+        assert_eq!(
+            store.replace_if_current_or_newer(applied(2, "https://a.example.com")),
+            Some(2)
+        );
+        // Another payload claiming the same revision is a conflict.
+        assert_eq!(
+            store.replace_if_current_or_newer(applied(2, "https://other.example.com")),
+            None
+        );
+        // A placeholder can never displace an applied snapshot of its revision.
+        assert_eq!(store.replace_if_current_or_newer(placeholder), None);
+        // Older revisions stay refused and newer ones are accepted.
+        assert_eq!(
+            store.replace_if_current_or_newer(applied(1, "https://a.example.com")),
+            None
+        );
+        assert_eq!(
+            store.replace_if_current_or_newer(applied(3, "https://a.example.com")),
+            Some(3)
+        );
+    }
+
+    // The listener supervisor decides the same question before it binds any
+    // socket, so both must come from one function instead of two copies.
+    #[test]
+    fn the_supervisor_and_the_store_share_one_replacement_verdict() {
+        let placeholder = GatewaySnapshot::compile_for_tenant(
+            1,
+            xshield_core::domain::TenantId::parse("tenant_a").unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            placeholder.check_replacement(&applied(1, "https://a.example.com")),
+            Ok(())
+        );
+        let serving = applied(4, "https://a.example.com");
+        assert_eq!(
+            serving.check_replacement(&applied(3, "https://a.example.com")),
+            Err(SnapshotRefusal::Stale)
+        );
+        assert_eq!(
+            serving.check_replacement(&applied(4, "https://other.example.com")),
+            Err(SnapshotRefusal::Conflict)
+        );
+        assert_eq!(
+            serving.check_replacement(&applied(4, "https://a.example.com")),
+            Ok(())
+        );
+        assert_eq!(
+            serving.check_replacement(&applied(5, "https://other.example.com")),
+            Ok(())
+        );
     }
 
     #[test]

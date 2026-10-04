@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
-use xshield_gateway::multi_site::{ApplyCoordinator, GatewaySnapshot};
+use xshield_gateway::multi_site::{ApplyCoordinator, GatewaySnapshot, SnapshotRefusal};
 
 pub(crate) enum ApplyError {
     StaleRevision,
@@ -62,14 +62,12 @@ impl ListenerSupervisor {
 
     pub(crate) async fn apply(&self, snapshot: GatewaySnapshot) -> Result<u64, ApplyError> {
         let mut listeners = self.listeners.lock().await;
-        let current = self.coordinator.current();
-        if snapshot.revision() < current.revision() {
-            return Err(ApplyError::StaleRevision);
-        }
-        if snapshot.revision() == current.revision()
-            && current.payload_digest() != snapshot.payload_digest()
-        {
-            return Err(ApplyError::RevisionConflict);
+        // Same question the store asks under its write lock; asking it here
+        // first keeps a refused snapshot from binding any socket.
+        match self.coordinator.current().check_replacement(&snapshot) {
+            Ok(()) => {}
+            Err(SnapshotRefusal::Stale) => return Err(ApplyError::StaleRevision),
+            Err(SnapshotRefusal::Conflict) => return Err(ApplyError::RevisionConflict),
         }
         let required = snapshot.listener_ports();
         let mut newly_bound = Vec::new();

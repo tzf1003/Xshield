@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3855,
-  "passed_count": 3855,
+  "checks_total": 3859,
+  "passed_count": 3859,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -19111,7 +19111,7 @@
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/11-audit-event-contract.md:13-audit-storage-reliability.md",
       "passed": true,
       "detail": ""
     },
@@ -19122,6 +19122,16 @@
     },
     {
       "name": "link:docs/11-audit-event-contract.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/11-audit-event-contract.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/11-audit-event-contract.md:15-console-and-api.md",
       "passed": true,
       "detail": ""
     },
@@ -19196,6 +19206,11 @@
       "detail": ""
     },
     {
+      "name": "link:docs/15-console-and-api.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/18-api-and-data-models.md:12-evidence-capture-and-vault.md",
       "passed": true,
       "detail": ""
@@ -19262,6 +19277,11 @@
     },
     {
       "name": "link:docs/29-api-endpoint-catalog.md:12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/29-api-endpoint-catalog.md:15-console-and-api.md",
       "passed": true,
       "detail": ""
     },
