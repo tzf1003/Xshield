@@ -1,11 +1,16 @@
 mod apply_api;
 mod buffered_json;
 mod durable_audit;
+mod edge_health;
 mod evidence_writer;
 mod listener_supervisor;
 mod protected_identity;
+mod rate_limit;
+mod unrouted;
 
 use crate::listener_supervisor::ListenerSupervisor;
+use crate::rate_limit::SiteRateLimiter;
+use crate::unrouted::{FLUSH_INTERVAL, UnroutedDenials, flush_unrouted_denials};
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora::{
@@ -16,18 +21,17 @@ use pingora::{
     upstreams::peer::HttpPeer,
 };
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     env,
     error::Error,
     fs,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Semaphore;
 use uuid::Uuid;
-use xshield_audit::JournalKey;
 use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
 use xshield_gateway::multi_site::{
     ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot,
@@ -52,8 +56,9 @@ use zeroize::Zeroizing;
 
 use crate::buffered_json::BufferedResponse;
 use crate::durable_audit::{
-    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RequestCryptoAudit,
+    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RecoveryBackoff, RequestCryptoAudit,
     ResponseCryptoAudit, ResponseSource, SensorHtmlAudit, SensorObservationAudit, new_trace_id,
+    supervise_recovery,
 };
 use crate::protected_identity::{
     CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE,
@@ -115,63 +120,7 @@ struct Gateway {
     buffered_body_budget: Arc<Semaphore>,
     evidence: Option<evidence_writer::EvidenceWriter>,
     rate_limiter: Arc<SiteRateLimiter>,
-}
-
-struct RateBucket {
-    tokens: f64,
-    updated: Instant,
-}
-
-struct SiteRateLimiter {
-    // ponytail: process-local source buckets; use a shared limiter when edge replicas need one quota.
-    buckets: Mutex<HashMap<(String, IpAddr), RateBucket>>,
-}
-
-impl SiteRateLimiter {
-    const MAX_BUCKETS: usize = 65_536;
-
-    fn new() -> Self {
-        Self {
-            buckets: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn allow(
-        &self,
-        site_id: &str,
-        source: Option<IpAddr>,
-        policy: &xshield_core::SitePolicyConfig,
-    ) -> bool {
-        let Some(source) = source else {
-            return false;
-        };
-        let now = Instant::now();
-        let mut buckets = self
-            .buckets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = (site_id.to_owned(), source);
-        if !buckets.contains_key(&key) && buckets.len() >= Self::MAX_BUCKETS {
-            buckets.retain(|_, bucket| now.duration_since(bucket.updated) < Duration::from_mins(5));
-            if buckets.len() >= Self::MAX_BUCKETS {
-                return false;
-            }
-        }
-        let rate = f64::from(policy.limits.requests_per_second);
-        let burst = f64::from(policy.limits.burst);
-        let bucket = buckets.entry(key).or_insert(RateBucket {
-            tokens: burst,
-            updated: now,
-        });
-        let elapsed = now.duration_since(bucket.updated).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
-        bucket.updated = now;
-        if bucket.tokens < 1.0 {
-            return false;
-        }
-        bucket.tokens -= 1.0;
-        true
-    }
+    unrouted: Arc<UnroutedDenials>,
 }
 
 struct PostgresRuntime {
@@ -343,6 +292,16 @@ impl ProxyHttp for Gateway {
             .route(listener_port, host.as_deref().unwrap_or_default())
             .is_none()
         {
+            // No site owns this request, so it cannot be audited under one and
+            // a durable event per request would let a flood fill the journal.
+            // Count it; one bounded summary per port and interval is written.
+            self.unrouted.record(
+                listener_port,
+                host.as_deref(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(1, |elapsed| elapsed.as_secs().max(1)),
+            );
             respond_denial(
                 session,
                 503,
@@ -388,24 +347,19 @@ impl ProxyHttp for Gateway {
             .await?;
             return Ok(true);
         };
-        let policy_denial = selected_config
-            .site_policy()
-            .and_then(|policy| site_waf_denial(request, policy));
-        let rate_limited = policy_denial.is_none()
-            && selected_config.site_policy().is_some_and(|policy| {
-                !self
-                    .rate_limiter
-                    .allow(selected_config.site_id().as_str(), client_ip, policy)
-            });
-        let mut decision = if let Some(reason) = policy_denial {
+        let pre_admission_denial = selected_config.site_policy().and_then(|policy| {
+            pre_admission_denial(
+                &self.rate_limiter,
+                selected_config.site_id().as_str(),
+                client_ip,
+                policy,
+                request,
+            )
+        });
+        let mut decision = if let Some(reason) = pre_admission_denial {
             let mut decision = selected_config.admit(&method, &path, now);
             decision.outcome = GatewayOutcome::Denied;
             decision.reason_code = reason;
-            decision
-        } else if rate_limited {
-            let mut decision = selected_config.admit(&method, &path, now);
-            decision.outcome = GatewayOutcome::Denied;
-            decision.reason_code = ReasonCode::SiteRateLimitExceeded;
             decision
         } else {
             match self.identity.as_ref() {
@@ -1664,6 +1618,24 @@ const fn denial_status(reason: ReasonCode) -> u16 {
     }
 }
 
+/// Cheap, identity-free checks that decide a request before any identity,
+/// crypto or durable-audit work. Returns the stable denial reason, if any.
+fn pre_admission_denial(
+    limiter: &SiteRateLimiter,
+    site_id: &str,
+    source: Option<std::net::IpAddr>,
+    policy: &xshield_core::SitePolicyConfig,
+    request: &pingora::http::RequestHeader,
+) -> Option<ReasonCode> {
+    // Metering comes first so every request, WAF-denied ones included, costs
+    // a token: each denial still commits a durable audit record, and an
+    // unmetered flood of them would fill the journal.
+    if !limiter.allow(site_id, source, policy) {
+        return Some(ReasonCode::SiteRateLimitExceeded);
+    }
+    site_waf_denial(request, policy)
+}
+
 fn site_waf_denial(
     request: &pingora::http::RequestHeader,
     policy: &xshield_core::SitePolicyConfig,
@@ -2069,7 +2041,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         initial_snapshot,
     ))));
     let key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
-    let audit = DurableAudit::open(&config, JournalKey::from_hex(&key_hex)?)?;
+    let audit = DurableAudit::open_recoverable(&config, &key_hex)?;
     let postgres = config
         .identity_store()
         .map(PostgresRuntime::from_env)
@@ -2098,6 +2070,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("request and response encryption keys must differ".into());
     }
     let audit_readiness = audit.readiness();
+    let audit_recovery = audit.clone();
+    let audit_unrouted = audit.clone();
+    let unrouted = Arc::new(UnroutedDenials::default());
     let mut server = Server::new(None)?;
     server.bootstrap();
     let proxy = pingora::proxy::http_proxy(
@@ -2113,6 +2088,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             postgres,
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
             rate_limiter: Arc::new(SiteRateLimiter::new()),
+            unrouted: Arc::clone(&unrouted),
         },
     );
     let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
@@ -2120,6 +2096,19 @@ fn run() -> Result<(), Box<dyn Error>> {
         .enable_all()
         .worker_threads(4)
         .build()?;
+    // A durability failure closes the admission barrier; this keeps it
+    // recoverable (bounded backoff, fail-closed in between) without a restart.
+    runtime.spawn(supervise_recovery(
+        audit_recovery,
+        RecoveryBackoff::PRODUCTION,
+        shutdown.clone(),
+    ));
+    runtime.spawn(flush_unrouted_denials(
+        audit_unrouted,
+        unrouted,
+        FLUSH_INTERVAL,
+        shutdown.clone(),
+    ));
     let supervisor = runtime.block_on(ListenerSupervisor::new(
         Arc::clone(&coordinator),
         Arc::new(proxy),
@@ -2203,6 +2192,75 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn limited_policy(burst: u32) -> xshield_core::SitePolicyConfig {
+        let mut policy = xshield_core::SitePolicyConfig::default();
+        policy.limits.requests_per_second = 1;
+        policy.limits.burst = burst;
+        policy.waf.enabled = true;
+        policy.waf.blocked_headers = vec!["x-attack".to_owned()];
+        policy
+    }
+
+    fn request_with(attack: bool) -> pingora::http::RequestHeader {
+        let mut request = pingora::http::RequestHeader::build("GET", b"/search", Some(1)).unwrap();
+        if attack {
+            request.insert_header("x-attack", "1").unwrap();
+        }
+        request
+    }
+
+    // Reviewer finding: WAF denials skipped the limiter, yet each one still
+    // committed a durable audit record, so a flood of WAF-denied requests was
+    // never metered. Every request now takes a token before the WAF runs.
+    #[test]
+    fn waf_denied_floods_are_metered_before_the_waf() {
+        let limiter = SiteRateLimiter::new();
+        let policy = limited_policy(3);
+        let source = Some("203.0.113.9".parse().unwrap());
+        let reasons: Vec<_> = (0..8)
+            .map(|_| pre_admission_denial(&limiter, "site_a", source, &policy, &request_with(true)))
+            .collect();
+        let allowed = usize::try_from(policy.limits.burst).unwrap();
+        for (index, reason) in reasons.iter().enumerate() {
+            let expected = if index < allowed {
+                ReasonCode::WafHeaderBlocked
+            } else {
+                ReasonCode::SiteRateLimitExceeded
+            };
+            assert_eq!(*reason, Some(expected), "request {index}");
+        }
+    }
+
+    #[test]
+    fn clean_requests_share_the_same_budget_as_denied_ones() {
+        let limiter = SiteRateLimiter::new();
+        let policy = limited_policy(2);
+        let source = Some("203.0.113.9".parse().unwrap());
+        let check = |attack| {
+            pre_admission_denial(&limiter, "site_a", source, &policy, &request_with(attack))
+        };
+        assert_eq!(check(true), Some(ReasonCode::WafHeaderBlocked));
+        assert_eq!(check(false), None);
+        // The third request exceeds the burst whatever it looks like.
+        assert_eq!(check(false), Some(ReasonCode::SiteRateLimitExceeded));
+        assert_eq!(check(true), Some(ReasonCode::SiteRateLimitExceeded));
+        // Another source and another site are unaffected.
+        let other = Some("203.0.113.10".parse().unwrap());
+        assert_eq!(
+            pre_admission_denial(&limiter, "site_a", other, &policy, &request_with(false)),
+            None
+        );
+        assert_eq!(
+            pre_admission_denial(&limiter, "site_b", source, &policy, &request_with(false)),
+            None
+        );
+        // An unknown source cannot be metered and is refused.
+        assert_eq!(
+            pre_admission_denial(&limiter, "site_a", None, &policy, &request_with(false)),
+            Some(ReasonCode::SiteRateLimitExceeded)
+        );
+    }
 
     #[test]
     fn listener_addresses_are_private_and_unique() {

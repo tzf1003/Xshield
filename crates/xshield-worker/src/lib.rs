@@ -1249,6 +1249,7 @@ impl PayloadSummary {
                 let payload: RecoveryPayload = serde_json::from_str(json)?;
                 payload.validate()
             }
+            "edge.unrouted_denied" => serde_json::from_str::<UnroutedPayload>(json)?.validate(),
             _ => Err(PublishError::UnsupportedEventType),
         }
     }
@@ -1483,12 +1484,62 @@ struct RecoveryPayload {
 
 impl RecoveryPayload {
     fn validate(self) -> Result<PayloadSummary, PublishError> {
-        if !valid_name(&self.reason_code) || self.truncated_bytes == 0 {
+        // A repaired crash tail always removed bytes; a barrier reopen did not.
+        let repaired_tail = self.reason_code == "AUDIT_TAIL_RECOVERED" && self.truncated_bytes > 0;
+        let barrier_reopened =
+            self.reason_code == "AUDIT_BARRIER_REOPENED" && self.truncated_bytes == 0;
+        if !valid_name(&self.reason_code) || !(repaired_tail || barrier_reopened) {
             return Err(PublishError::InvalidEvent);
         }
         let _ = self.recovered_records;
         Ok(PayloadSummary {
             reason_code: self.reason_code,
+            ..PayloadSummary::default()
+        })
+    }
+}
+
+/// Aggregated denials for requests no site snapshot routes. The edge cannot
+/// attribute them to a site, so it records one bounded summary per listener
+/// port and interval instead of one event per request.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnroutedPayload {
+    listener_port: u16,
+    denied_count: u64,
+    first_seen_unix: u64,
+    last_seen_unix: u64,
+    sample_host: Option<String>,
+    reason_code: String,
+}
+
+impl UnroutedPayload {
+    fn validate(self) -> Result<PayloadSummary, PublishError> {
+        // 2100-01-01: the same ceiling the other edge timestamps use.
+        const UNIX_MAX: u64 = 4_102_444_800;
+        if self.reason_code != "HOST_NOT_ROUTED"
+            || self.listener_port == 0
+            || self.denied_count == 0
+            || self.first_seen_unix == 0
+            || self.first_seen_unix > self.last_seen_unix
+            || self.last_seen_unix > UNIX_MAX
+            || self.sample_host.as_deref().is_some_and(|host| {
+                host.is_empty()
+                    || host.len() > 253
+                    || !host.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+            })
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        // A summary describes a refusal that happened before any site or
+        // request existed: it is deterministic, carries no confidence and is
+        // not the terminal state of a request.
+        Ok(PayloadSummary {
+            stage: "edge_routing".to_owned(),
+            outcome: "DENY".to_owned(),
+            reason_code: self.reason_code,
+            proof_kind: "deterministic".to_owned(),
+            confidence_status: "not_applicable".to_owned(),
             ..PayloadSummary::default()
         })
     }
@@ -3361,6 +3412,119 @@ mod tests {
             assert!(sql.contains(fragment), "missing query fragment: {fragment}");
         }
         assert_eq!(sql.matches("payload_json").count(), 3, "{sql}");
+    }
+
+    // Same payload the gateway writes for `edge.unrouted_denied`; the gateway has
+    // a test pinning this literal from its side.
+    const UNROUTED: &str = r#"{"listener_port":6188,"denied_count":5000,"first_seen_unix":1700000000,"last_seen_unix":1700000000,"sample_host":"unknown.example","reason_code":"HOST_NOT_ROUTED"}"#;
+
+    #[test]
+    fn unrouted_denial_summaries_are_publishable_and_strictly_validated() {
+        let summary = PayloadSummary::parse("edge.unrouted_denied", UNROUTED).unwrap();
+        assert_eq!(summary.stage, "edge_routing");
+        assert_eq!(summary.outcome, "DENY");
+        assert_eq!(summary.reason_code, "HOST_NOT_ROUTED");
+        assert_eq!(summary.proof_kind, "deterministic");
+        assert_eq!(summary.confidence_status, "not_applicable");
+        assert!(
+            !summary.is_terminal,
+            "a summary is not a request's terminal state"
+        );
+        let without_sample = UNROUTED.replace(
+            r#""sample_host":"unknown.example""#,
+            r#""sample_host":null"#,
+        );
+        assert!(PayloadSummary::parse("edge.unrouted_denied", &without_sample).is_ok());
+        let tamper = |from: &str, to: &str| UNROUTED.replace(from, to);
+        for (name, bad) in [
+            (
+                "another reason",
+                tamper("HOST_NOT_ROUTED", "SITE_NOT_CONFIGURED"),
+            ),
+            (
+                "port zero",
+                tamper(r#""listener_port":6188"#, r#""listener_port":0"#),
+            ),
+            (
+                "no refusals",
+                tamper(r#""denied_count":5000"#, r#""denied_count":0"#),
+            ),
+            (
+                "time travel",
+                tamper(
+                    r#""first_seen_unix":1700000000"#,
+                    r#""first_seen_unix":1700000001"#,
+                ),
+            ),
+            (
+                "zero first seen",
+                tamper(r#""first_seen_unix":1700000000"#, r#""first_seen_unix":0"#),
+            ),
+            (
+                "far future",
+                tamper(
+                    r#""last_seen_unix":1700000000"#,
+                    r#""last_seen_unix":9999999999"#,
+                ),
+            ),
+            ("empty host", tamper("unknown.example", "")),
+            ("control in host", tamper("unknown.example", "bad\\nhost")),
+            ("space in host", tamper("unknown.example", "bad host")),
+            ("long host", tamper("unknown.example", &"a".repeat(254))),
+            (
+                "unknown field",
+                tamper(r#""reason_code""#, r#""extra":1,"reason_code""#),
+            ),
+        ] {
+            assert!(
+                PayloadSummary::parse("edge.unrouted_denied", &bad).is_err(),
+                "accepted {name}"
+            );
+        }
+        let duplicate = UNROUTED.replace(
+            r#""denied_count":5000,"#,
+            r#""denied_count":5000,"denied_count":1,"#,
+        );
+        assert!(crate::reject_duplicate_json(duplicate.as_bytes()).is_err());
+    }
+
+    // `audit.recovered` is the one gateway event not tied to a request. It has
+    // exactly two publishable shapes: a repaired crash tail (bytes were removed)
+    // and a barrier reopen after a durability failure (nothing was removed).
+    #[test]
+    fn audit_recovered_accepts_only_a_repaired_tail_or_a_barrier_reopen() {
+        let parse = |reason: &str, truncated: u64| {
+            PayloadSummary::parse(
+                "audit.recovered",
+                &serde_json::json!({
+                    "recovered_records": 3,
+                    "truncated_bytes": truncated,
+                    "reason_code": reason,
+                })
+                .to_string(),
+            )
+        };
+        assert_eq!(
+            parse("AUDIT_TAIL_RECOVERED", 17).unwrap().reason_code,
+            "AUDIT_TAIL_RECOVERED"
+        );
+        assert_eq!(
+            parse("AUDIT_BARRIER_REOPENED", 0).unwrap().reason_code,
+            "AUDIT_BARRIER_REOPENED"
+        );
+        for (reason, truncated) in [
+            ("AUDIT_TAIL_RECOVERED", 0),
+            ("AUDIT_BARRIER_REOPENED", 5),
+            ("SOMETHING_ELSE", 5),
+            ("SOMETHING_ELSE", 0),
+            ("audit_tail_recovered", 3),
+            ("", 3),
+        ] {
+            assert!(
+                matches!(parse(reason, truncated), Err(PublishError::InvalidEvent)),
+                "{reason} with {truncated} truncated bytes"
+            );
+        }
     }
 
     #[tokio::test]

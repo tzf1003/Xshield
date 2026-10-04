@@ -135,6 +135,7 @@ struct AuditConfig {
     key_id: String,
     producer_id: String,
     limits: JournalLimits,
+    high_watermark_bytes: u64,
     reconcile_max_records: u64,
 }
 
@@ -614,6 +615,7 @@ impl GatewayConfig {
                 key_id: dto.audit.key_id,
                 producer_id: dto.audit.producer_id,
                 limits: audit_limits,
+                high_watermark_bytes: dto.audit.high_watermark_bytes,
                 reconcile_max_records: dto.audit.reconcile_max_records,
             },
             identity_store,
@@ -688,6 +690,14 @@ impl GatewayConfig {
     #[must_use]
     pub const fn audit_limits(&self) -> JournalLimits {
         self.audit.limits
+    }
+
+    /// Returns the journal size below which a failed durable-audit barrier may
+    /// reopen; staying under the warning threshold avoids reopening into a
+    /// journal that would immediately fail again.
+    #[must_use]
+    pub const fn audit_high_watermark_bytes(&self) -> u64 {
+        self.audit.high_watermark_bytes
     }
 
     /// Returns the startup ceiling for authenticated historical record scans.
@@ -2314,6 +2324,73 @@ mod tests {
         let prepare = config.admit_sensor_session("POST", SENSOR_PREPARE_PATH);
         assert_eq!(prepare.outcome, GatewayOutcome::Allowed);
         assert_eq!(prepare.reason_code, ReasonCode::SensorObservationAccepted);
+    }
+
+    #[test]
+    fn static_asset_fallback_is_opt_in_and_never_admits_api_paths() {
+        let denied = |config: &GatewayConfig, path: &str| {
+            let decision = config.admit("GET", path, UnixSeconds::new(1));
+            assert_eq!(decision.outcome, GatewayOutcome::Denied, "{path}");
+            assert_eq!(
+                decision.reason_code,
+                ReasonCode::OperationNotMatched,
+                "{path}"
+            );
+            assert!(decision.operation_id.is_none(), "{path}");
+        };
+        // No site policy, an empty one, and an explicit zero all leave it off.
+        for policy in [
+            None,
+            Some(r#""site_policy":{},"#),
+            Some(r#""site_policy":{"static_asset_max_path_depth":0},"#),
+        ] {
+            let configured = match policy {
+                Some(policy) => {
+                    CONFIG.replace("\"operations\":[", &format!("{policy}\"operations\":["))
+                }
+                None => CONFIG.to_owned(),
+            };
+            let config = GatewayConfig::from_json(configured.as_bytes()).unwrap();
+            denied(&config, "/assets/app.js");
+            denied(&config, "/styles.css");
+        }
+        let opted_in = CONFIG.replace(
+            "\"operations\":[",
+            "\"site_policy\":{\"static_asset_max_path_depth\":5},\"operations\":[",
+        );
+        let config = GatewayConfig::from_json(opted_in.as_bytes()).unwrap();
+        let asset = config.admit("GET", "/assets/app.js", UnixSeconds::new(1));
+        assert_eq!(asset.outcome, GatewayOutcome::Allowed);
+        assert_eq!(asset.reason_code, ReasonCode::PublicEntryAllowed);
+        assert_eq!(
+            asset.operation_id.unwrap().as_str(),
+            STATIC_ASSET_OPERATION_ID
+        );
+        // The reviewer's paths: APIs spelled as assets and origin path tricks.
+        for path in [
+            "/orders/123.json",
+            "/api/v1/users/42.json",
+            "/admin/export.json",
+            "/assets/app.js.map",
+            "/api/json",
+            "/api/v1/map",
+            "/css",
+            "/search/png",
+            "/admin/users;.js",
+            "/admin/dashboard;.css",
+            "/api/accounts/..;/x.js",
+            "/admin/users%3b.js",
+            "/a/%2e%2e/admin.js",
+            "/a%2fb.js",
+            "/api/users",
+        ] {
+            denied(&config, path);
+        }
+        // Only GET is a static asset, and exact operations are unaffected.
+        let post = config.admit("POST", "/assets/app.js", UnixSeconds::new(1));
+        assert_eq!(post.outcome, GatewayOutcome::Denied);
+        let exact = config.admit("GET", "/catalog", UnixSeconds::new(1));
+        assert_eq!(exact.operation_id.unwrap().as_str(), "catalog.read");
     }
 
     #[test]
