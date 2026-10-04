@@ -26,6 +26,79 @@ use crate::{
 };
 use std::{cell::RefCell, collections::BTreeMap, fmt, future::Future};
 
+use crate::site::{ApplyAck, ApplyIntent, PortLease, ProtectedSite};
+
+/// Durable multi-site control-plane storage boundary.
+pub trait SiteRegistryStore {
+    /// Adapter error.
+    type Error;
+    /// Reads one site in an authenticated tenant scope.
+    fn read_site<'a>(
+        &'a self,
+        tenant_id: &'a TenantId,
+        site_id: &'a SiteId,
+    ) -> impl Future<Output = Result<Option<ProtectedSite>, Self::Error>> + Send + 'a;
+}
+
+/// Transactional internal listener lease boundary.
+pub trait PortLeaseStore {
+    /// Adapter error.
+    type Error;
+    /// Reserves one unique internal port.
+    fn reserve_port<'a>(
+        &'a self,
+        tenant_id: &'a TenantId,
+        site_id: &'a SiteId,
+    ) -> impl Future<Output = Result<PortLease, Self::Error>> + Send + 'a;
+}
+
+/// Deterministic policy compilation boundary.
+pub trait PolicyCompiler {
+    /// Compiler error.
+    type Error;
+    /// Compiles a validated site revision into a signed-edge payload.
+    fn compile<'a>(
+        &'a self,
+        site: &'a ProtectedSite,
+        revision: u64,
+    ) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send + 'a;
+}
+
+/// Authenticated internal edge apply boundary.
+pub trait GatewayConfigApplyPort {
+    /// Adapter error.
+    type Error;
+    /// Sends a signed immutable snapshot and waits for an atomic acknowledgment.
+    fn apply<'a>(
+        &'a self,
+        intent: &'a ApplyIntent,
+        snapshot: &'a [u8],
+        signature: &'a [u8; 64],
+    ) -> impl Future<Output = Result<ApplyAck, Self::Error>> + Send + 'a;
+}
+
+/// Edge health read boundary.
+pub trait GatewayHealthPort {
+    /// Adapter error.
+    type Error;
+    /// Reads edge health without changing authorization state.
+    fn health<'a>(
+        &'a self,
+        tenant_id: &'a TenantId,
+    ) -> impl Future<Output = Result<String, Self::Error>> + Send + 'a;
+}
+
+/// Secret-manager reference boundary; implementations never return secret material.
+pub trait SecretReferencePort {
+    /// Adapter error.
+    type Error;
+    /// Checks the state of a deployment-owned secret reference.
+    fn status<'a>(
+        &'a self,
+        reference: &'a str,
+    ) -> impl Future<Output = Result<String, Self::Error>> + Send + 'a;
+}
+
 /// Authoritative cross-instance capacity boundary for model provider calls.
 ///
 /// Implementations reserve capacity only. They must not grant a business

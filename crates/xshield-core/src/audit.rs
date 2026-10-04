@@ -188,6 +188,16 @@ pub enum ReasonCode {
     EvidenceCaptureUnavailable,
     /// A configured encrypted request exceeded its complete-buffer bound.
     RequestBodyTooLarge,
+    /// A site WAF rule rejected a configured request header.
+    WafHeaderBlocked,
+    /// A configured query fragment matched after strict percent decoding.
+    WafQueryBlocked,
+    /// The bounded query could not be decoded unambiguously.
+    WafQueryInvalid,
+    /// A site WAF rule rejected an oversized Cookie header.
+    WafCookieTooLarge,
+    /// The site-wide source rate limit was exhausted.
+    SiteRateLimitExceeded,
     /// Aggregate encrypted-request buffering capacity was unavailable.
     RequestBufferCapacityExhausted,
     /// The encrypted request framing, media type, envelope, version, or plaintext was invalid.
@@ -303,6 +313,11 @@ impl ReasonCode {
             Self::EvidenceCaptureCapacityExhausted => "EVIDENCE_CAPTURE_CAPACITY_EXHAUSTED",
             Self::EvidenceCaptureUnavailable => "EVIDENCE_CAPTURE_UNAVAILABLE",
             Self::RequestBodyTooLarge => "REQUEST_BODY_TOO_LARGE",
+            Self::WafHeaderBlocked => "WAF_HEADER_BLOCKED",
+            Self::WafQueryBlocked => "WAF_QUERY_BLOCKED",
+            Self::WafQueryInvalid => "WAF_QUERY_INVALID",
+            Self::WafCookieTooLarge => "WAF_COOKIE_TOO_LARGE",
+            Self::SiteRateLimitExceeded => "SITE_RATE_LIMIT_EXCEEDED",
             Self::RequestBufferCapacityExhausted => "REQUEST_BUFFER_CAPACITY_EXHAUSTED",
             Self::RequestEnvelopeInvalid => "REQUEST_ENVELOPE_INVALID",
             Self::RequestCryptoAuthenticationFailed => "REQUEST_CRYPTO_AUTHENTICATION_FAILED",

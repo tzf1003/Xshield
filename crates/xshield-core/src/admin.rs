@@ -37,6 +37,7 @@ pub struct ManagementPrincipal {
     subject: String,
     roles: BTreeSet<ManagementRole>,
     scopes: BTreeSet<(TenantId, SiteId)>,
+    tenant_scopes: BTreeSet<TenantId>,
 }
 
 impl ManagementPrincipal {
@@ -62,7 +63,36 @@ impl ManagementPrincipal {
             subject,
             roles: roles.into_iter().collect(),
             scopes: scopes.into_iter().collect(),
+            tenant_scopes: BTreeSet::new(),
         })
+    }
+
+    /// Builds a management principal that is scoped to every site in the
+    /// supplied tenant set. Existing exact site scopes remain available for
+    /// endpoints that intentionally require a single site.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] when the subject or tenant scope is invalid.
+    pub fn new_tenant_scoped(
+        subject: impl Into<String>,
+        roles: impl IntoIterator<Item = ManagementRole>,
+        tenants: impl IntoIterator<Item = TenantId>,
+    ) -> Result<Self, InvalidValue> {
+        let mut principal = Self::new(subject, roles, [])?;
+        principal.tenant_scopes = tenants.into_iter().collect();
+        if principal.tenant_scopes.is_empty() {
+            return Err(InvalidValue::new("management_tenant_scope"));
+        }
+        Ok(principal)
+    }
+
+    /// Retains an exact site scope alongside a tenant-wide management scope.
+    /// This keeps legacy single-site handlers available while new tenant-wide
+    /// site-management endpoints enumerate the same tenant.
+    #[must_use]
+    pub fn with_exact_site_scope(mut self, tenant: TenantId, site: SiteId) -> Self {
+        self.scopes.insert((tenant, site));
+        self
     }
 
     /// Checks both role and tenant/site scope. It has no external effects.
@@ -71,10 +101,50 @@ impl ManagementPrincipal {
         self.roles.contains(&role) && self.scopes.contains(&(tenant.clone(), site.clone()))
     }
 
+    /// Checks a role against either an exact site scope or a tenant-wide scope.
+    #[must_use]
+    pub fn authorizes_site(&self, role: ManagementRole, tenant: &TenantId, site: &SiteId) -> bool {
+        self.roles.contains(&role)
+            && (self.scopes.contains(&(tenant.clone(), site.clone()))
+                || self.tenant_scopes.contains(tenant))
+    }
+
+    /// Checks whether the principal can enumerate the whole tenant.
+    #[must_use]
+    pub fn authorizes_tenant(&self, role: ManagementRole, tenant: &TenantId) -> bool {
+        self.roles.contains(&role) && self.tenant_scopes.contains(tenant)
+    }
+
     #[must_use]
     /// Returns the independently authenticated management subject.
     pub fn subject(&self) -> &str {
         &self.subject
+    }
+
+    /// Returns the server-derived role set for internal authentication adapters.
+    #[must_use]
+    pub fn roles(&self) -> &BTreeSet<ManagementRole> {
+        &self.roles
+    }
+
+    /// Returns whether this principal has a tenant-wide scope.
+    #[must_use]
+    pub fn has_tenant_scope(&self, tenant: &TenantId) -> bool {
+        self.tenant_scopes.contains(tenant)
+    }
+
+    /// Returns one exact site scope for request assertion projection.
+    #[must_use]
+    pub fn first_exact_site_scope(&self) -> Option<(&TenantId, &SiteId)> {
+        self.scopes
+            .iter()
+            .next()
+            .map(|(tenant, site)| (tenant, site))
+    }
+
+    /// Returns all exact site scopes for signed request projection.
+    pub fn exact_site_scopes(&self) -> impl Iterator<Item = (&TenantId, &SiteId)> {
+        self.scopes.iter().map(|(tenant, site)| (tenant, site))
     }
 }
 

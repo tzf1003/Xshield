@@ -20,3 +20,9 @@ pub mod model_evaluation_admission;
 pub mod ports;
 pub mod provenance;
 pub mod query;
+pub mod site;
+pub use site::{
+    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteCryptoConfig,
+    SiteHealthCheckConfig, SiteIdentityConfig, SiteLimitsConfig, SitePolicyConfig,
+    SiteRequestCrypto, SiteResponseCrypto, SiteRouteConfig, SiteSecretReference, SiteWafConfig,
+};
