@@ -17,6 +17,7 @@ const BINDING: &str = "auth_018f2a3b-4c5d-7000-8000-00000000000a";
 const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-00000000000b";
 const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-00000000000c";
 const JOB: &str = "job_018f2a3b-4c5d-7000-8000-00000000000e";
+const EXPORT: &str = "export_018f2a3b-4c5d-7000-8000-00000000000f";
 const HOLD_ACTIONS: &[(&str, &str, &str, &str)] = &[
     (
         "console.evidence.hold.created",
@@ -1577,4 +1578,200 @@ fn hold_management_rejects_duplicate_fields_and_transactional_payloads() {
         crossed["evidence_refs"] = json!([]);
         assert!(index(&crossed).is_err());
     }
+}
+
+fn surface_event(kind: &str, method: &str, path: &str, reason: &str) -> Value {
+    let mut value = event();
+    value["event_type"] = kind.into();
+    value["payload"]["method"] = method.into();
+    value["payload"]["path"] = path.into();
+    value["payload"]["reason_code"] = reason.into();
+    value["payload"]["target_case_id"] = Value::Null;
+    value["evidence_refs"] = json!([]);
+    value
+}
+
+// Each of these endpoints appends a journal event. An event the publisher
+// rejects stops publication of its whole segment, so every kind the control
+// plane can emit must stay accepted here.
+#[test]
+fn site_approval_workbench_and_api_key_events_are_publishable() {
+    for (kind, method, path, reason) in [
+        (
+            "console.workbench.overview.read",
+            "GET",
+            "/control/v1/workbench/overview",
+            "WORKBENCH_OVERVIEW_READ",
+        ),
+        (
+            "console.site.config.approve",
+            "POST",
+            "/control/v1/sites/{site_id}/approve",
+            "CONTROL_SITE_APPROVED_AND_APPLIED",
+        ),
+        (
+            "console.agent_api_key.admin",
+            "POST",
+            "/control/v1/agent-api-keys",
+            "CONTROL_API_KEY_CREATED",
+        ),
+        (
+            "console.agent_api_key.list",
+            "GET",
+            "/control/v1/agent-api-keys",
+            "CONTROL_API_KEYS_LISTED",
+        ),
+        (
+            "console.agent_api_key.use",
+            "*",
+            "/control/v1/*",
+            "CONTROL_API_KEY_AUTHENTICATED",
+        ),
+    ] {
+        let value = surface_event(kind, method, path, reason);
+        let row = index(&value).unwrap_or_else(|error| panic!("{kind}: {error:?}"));
+        assert_eq!(row.event_type, kind);
+        assert_eq!(row.stage, "control_access");
+        assert_eq!(row.is_terminal, 0);
+
+        for outcome in ["DENY", "ERROR"] {
+            let mut failed = value.clone();
+            failed["payload"]["outcome"] = outcome.into();
+            failed["payload"]["reason_code"] = "CONTROL_SCOPE_DENIED".into();
+            assert!(index(&failed).is_ok(), "{kind} {outcome}");
+        }
+        let mut wrong_path = value.clone();
+        wrong_path["payload"]["path"] = "/control/v1/other".into();
+        rejected(&wrong_path, &format!("{kind} with another path"));
+        let mut with_target = value.clone();
+        with_target["payload"]["target_case_id"] = CASE.into();
+        rejected(&with_target, &format!("{kind} with a case target"));
+        let mut with_export = value;
+        with_export["payload"]["target_export_id"] = EXPORT.into();
+        rejected(&with_export, &format!("{kind} with an export target"));
+    }
+    let mut wrong_reason = surface_event(
+        "console.workbench.overview.read",
+        "GET",
+        "/control/v1/workbench/overview",
+        "SOMETHING_ELSE",
+    );
+    rejected(&wrong_reason, "workbench read with another success reason");
+    wrong_reason["payload"]["outcome"] = "DENY".into();
+    assert!(index(&wrong_reason).is_ok());
+}
+
+#[test]
+fn export_workflow_events_carry_validated_export_case_and_package_targets() {
+    let export_event = |kind: &str, method: &str, path: &str, reason: &str| {
+        let mut value = surface_event(kind, method, path, reason);
+        value["payload"]["target_export_id"] = EXPORT.into();
+        value["payload"]["target_case_id"] = CASE.into();
+        value
+    };
+    for (kind, method, path, reasons) in [
+        (
+            "export.requested",
+            "POST",
+            "/control/v1/exports",
+            ["EXPORT_REQUESTED", "EXPORT_REQUEST_REPLAYED"],
+        ),
+        (
+            "export.approved",
+            "POST",
+            "/control/v1/exports/{export_id}/approve",
+            ["EXPORT_APPROVED", "EXPORT_APPROVAL_REPLAYED"],
+        ),
+        (
+            "export.denied",
+            "POST",
+            "/control/v1/exports/{export_id}/deny",
+            ["EXPORT_DENIED", "EXPORT_DENIAL_REPLAYED"],
+        ),
+    ] {
+        for reason in reasons {
+            assert!(
+                index(&export_event(kind, method, path, reason)).is_ok(),
+                "{kind} {reason}"
+            );
+        }
+        let value = export_event(kind, method, path, reasons[0]);
+        let mut no_export = value.clone();
+        no_export["payload"]["target_export_id"] = Value::Null;
+        rejected(&no_export, &format!("{kind} success without an export"));
+        let mut no_case = value.clone();
+        no_case["payload"]["target_case_id"] = Value::Null;
+        rejected(&no_case, &format!("{kind} success without a case"));
+        let mut bad_prefix = value.clone();
+        bad_prefix["payload"]["target_export_id"] = CASE.into();
+        rejected(&bad_prefix, &format!("{kind} with a case ID as export"));
+        let mut wrong_reason = value.clone();
+        wrong_reason["payload"]["reason_code"] = "EXPORT_DOWNLOADED".into();
+        rejected(
+            &wrong_reason,
+            &format!("{kind} with another success reason"),
+        );
+        let mut with_bytes = value.clone();
+        with_bytes["payload"]["bytes_read"] = 12.into();
+        rejected(&with_bytes, &format!("{kind} reporting bytes read"));
+        let mut failed = value;
+        failed["payload"]["outcome"] = "DENY".into();
+        failed["payload"]["reason_code"] = "CONTROL_EXPORT_SELF_APPROVAL".into();
+        failed["payload"]["target_case_id"] = Value::Null;
+        failed["payload"]["target_export_id"] = Value::Null;
+        assert!(
+            index(&failed).is_ok(),
+            "{kind} early denial without targets"
+        );
+    }
+
+    let mut read = surface_event(
+        "console.export.read",
+        "GET",
+        "/control/v1/exports/{export_id}",
+        "CONTROL_EXPORT_READ",
+    );
+    read["payload"]["target_export_id"] = EXPORT.into();
+    assert!(index(&read).is_ok());
+    let mut read_without_export = read.clone();
+    read_without_export["payload"]["target_export_id"] = Value::Null;
+    rejected(&read_without_export, "export read without an export");
+    let mut read_with_case = read;
+    read_with_case["payload"]["target_case_id"] = CASE.into();
+    rejected(&read_with_case, "export read with a case target");
+}
+
+#[test]
+fn export_download_event_binds_package_evidence_and_byte_count() {
+    let mut download = surface_event(
+        "export.downloaded",
+        "GET",
+        "/control/v1/exports/{export_id}/download",
+        "EXPORT_DOWNLOADED",
+    );
+    download["payload"]["target_export_id"] = EXPORT.into();
+    download["payload"]["target_case_id"] = CASE.into();
+    download["payload"]["target_artifact_id"] = ARTIFACT.into();
+    download["payload"]["bytes_read"] = 512.into();
+    download["evidence_refs"] = json!([ARTIFACT]);
+    assert!(index(&download).is_ok());
+    let mut other_package = download.clone();
+    other_package["evidence_refs"] = json!([OTHER_ARTIFACT]);
+    rejected(&other_package, "download evidence not matching the package");
+    let mut no_bytes = download.clone();
+    no_bytes["payload"]["bytes_read"] = Value::Null;
+    rejected(&no_bytes, "download without a byte count");
+    let mut failed = download;
+    failed["payload"]["outcome"] = "ERROR".into();
+    failed["payload"]["reason_code"] = "CONTROL_EXPORT_STORAGE_UNAVAILABLE".into();
+    failed["payload"]["bytes_read"] = Value::Null;
+    rejected(&failed, "failed download keeping package evidence");
+    failed["evidence_refs"] = json!([]);
+    failed["payload"]["target_artifact_id"] = Value::Null;
+    assert!(index(&failed).is_ok());
+
+    // An export target belongs only to export events.
+    let mut crossed = event();
+    crossed["payload"]["target_export_id"] = EXPORT.into();
+    rejected(&crossed, "export target on a case event");
 }

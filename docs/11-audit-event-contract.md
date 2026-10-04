@@ -196,3 +196,11 @@ producer 固定为 `calibration-evidence-reader`，policy revision 为 `calibrat
 `console.calibration.report.read` 是控制面读取单个受限 `calr_` 报告 projection 的管理访问事件。它固定 `GET /control/v1/calibration-reports/{report_id}`、`AuditAdministrator` 与 `control_access` 发布路径；成功为 `PASS/CONTROL_CALIBRATION_REPORT_READ`。已认证的路径、请求或容量拒绝使用 `CONTROL_CALIBRATION_REPORT_ID_INVALID`、`CONTROL_CALIBRATION_REPORT_READ_REQUEST_INVALID` 或 `CONTROL_CALIBRATION_REPORT_BUSY`，身份/范围/速率沿用通用管理原因；存储、限流和时钟依赖故障分别保留 `CONTROL_CALIBRATION_REPORT_STORE_UNAVAILABLE`、`CONTROL_RATE_UNAVAILABLE` 与 `CONTROL_CLOCK_UNAVAILABLE`。
 
 只有经路径校验的目标可写 `target_calibration_report_id=calr_…`；认证或范围未建立、限流/时钟失败和无效 ID 不写目标。成功以及已解析目标后的 request、busy 和 store 终态必须保留该目标。所有其他 target、query digest、bytes_read 和 evidence_refs 均为空；payload 不记录报告内容、body 状态、revision、manifest、provider、审批、游标、存储信息或读取资格。worker 对事件类型、方法、路径、目标前缀和上述 outcome/reason 集合严格解析；无法耐久追加该事件时控制面返回 `AUDIT_DURABILITY_FAILED` 并扣留原响应。
+
+## 11.14 管理 journal 事件的发布覆盖规则
+
+控制面每个端点在访问尝试结束时向管理 journal 追加一个 `control_access` 事件。worker 的管理发布器只接受 `crates/xshield-worker/src/control_audit.rs` 中显式列出的 (事件类型, 方法, 路径) 组合；任何不在表中的事件会使包含它的整个 segment 无法发布，其后的 segment 随之停在待发布状态，管理历史不可检索。因此新增端点的同一改动必须扩展该矩阵、目标与成功原因码校验及其测试。
+
+下列事件在 2026-10-04 补入发布器：`console.workbench.overview.read`（`GET /control/v1/workbench/overview`，无目标）、`console.site.config.approve`（`POST /control/v1/sites/{site_id}/approve`）、`console.agent_api_key.admin`/`list`（`/control/v1/agent-api-keys`）、`console.agent_api_key.use`（API Key 认证成功，方法 `*`、路径 `/control/v1/*`）和导出族 `console.export.read`、`export.requested`、`export.approved`、`export.denied`、`export.downloaded`。导出事件新增强类型 `target_export_id=export_…`：成功必须携带，非导出事件必须为空；请求、批准、拒绝成功还须携带 `target_case_id`；下载成功须同时携带 `target_artifact_id`、与其相同的单个 `evidence_refs` 和 `bytes_read`。站点批准与 API Key 管理的成功原因码只受通用格式约束，未知成功原因码不得阻断发布。
+
+`scripts/check_audit_event_coverage.py` 在 CI 中比较控制面全部 `AccessAction` 与该矩阵，缺任何一项即失败；它是文本级守卫，不替代发布器的真实 ClickHouse 回归（见 20.6、20.11）。

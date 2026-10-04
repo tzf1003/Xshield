@@ -26,7 +26,17 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.site.status.read"
             | "console.site.config.validate"
             | "console.site.config.apply"
+            | "console.site.config.approve"
             | "console.site.config.rollback"
+            | "console.workbench.overview.read"
+            | "console.agent_api_key.admin"
+            | "console.agent_api_key.list"
+            | "console.agent_api_key.use"
+            | "console.export.read"
+            | "export.requested"
+            | "export.approved"
+            | "export.denied"
+            | "export.downloaded"
             | "console.request.read"
             | "console.events.read"
             | "console.manifest.read"
@@ -70,6 +80,7 @@ struct AccessPayload {
     target_model_call_id: Option<String>,
     target_agent_run_id: Option<String>,
     target_job_id: Option<String>,
+    target_export_id: Option<String>,
     target_grant_id: Option<String>,
     target_binding_id: Option<String>,
     target_hold_id: Option<String>,
@@ -135,25 +146,7 @@ impl AccessPayload {
             self.validate_job_reason(&event.event_type)?;
         }
         let success = self.outcome == "PASS";
-        let valid_reason = match event.event_type.as_str() {
-            "console.auth.login" => self.reason_code == "CONTROL_OIDC_LOGIN_STARTED",
-            "console.auth.callback" => self.reason_code == "CONTROL_OIDC_LOGIN_COMPLETED",
-            "console.auth.reauth.start" => self.reason_code == "CONTROL_OIDC_REAUTH_STARTED",
-            "console.auth.reauth.callback" => self.reason_code == "CONTROL_OIDC_REAUTH_VERIFIED",
-            "console.auth.session.read" => self.reason_code == "CONTROL_BROWSER_SESSION_READ",
-            "console.auth.session.logout" => self.reason_code == "CONTROL_BROWSER_SESSION_REVOKED",
-            "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
-            "console.evidence.hold.created" => matches!(
-                self.reason_code.as_str(),
-                "CONTROL_EVIDENCE_HOLD_CREATED" | "CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED"
-            ),
-            "console.evidence.hold.released" => matches!(
-                self.reason_code.as_str(),
-                "CONTROL_EVIDENCE_HOLD_RELEASED" | "CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED"
-            ),
-            "console.evidence.hold.read" => self.reason_code == "CONTROL_EVIDENCE_HOLD_READ",
-            _ => true,
-        };
+        let valid_reason = self.success_reason_is_valid(&event.event_type);
         if !matches!(self.outcome.as_str(), "PASS" | "DENY" | "ERROR")
             || success && !valid_reason
             || self.reason_code.is_empty()
@@ -171,6 +164,7 @@ impl AccessPayload {
         }
         self.validate_targets(&event.event_type, success)?;
         self.validate_job_target(&event.event_type, success)?;
+        self.validate_export_target(&event.event_type, success)?;
         for reference in &event.evidence_refs {
             valid_prefixed_v7(reference, "artifact_")?;
         }
@@ -178,7 +172,10 @@ impl AccessPayload {
             event.event_type.as_str(),
             "console.query.executed" | "console.causality.read"
         );
-        let is_read = event.event_type == "evidence.read";
+        let is_read = matches!(
+            event.event_type.as_str(),
+            "evidence.read" | "export.downloaded"
+        );
         if self
             .query_digest
             .as_ref()
@@ -371,6 +368,28 @@ impl AccessPayload {
         Ok(())
     }
 
+    fn validate_export_target(&self, event_type: &str, success: bool) -> Result<(), PublishError> {
+        let is_export = matches!(
+            event_type,
+            "console.export.read"
+                | "export.requested"
+                | "export.approved"
+                | "export.denied"
+                | "export.downloaded"
+        );
+        if is_export {
+            if success && self.target_export_id.is_none() {
+                return Err(PublishError::InvalidEvent);
+            }
+        } else if self.target_export_id.is_some() {
+            return Err(PublishError::InvalidEvent);
+        }
+        if let Some(target) = &self.target_export_id {
+            valid_prefixed_v7(target, "export_")?;
+        }
+        Ok(())
+    }
+
     fn validate_calibration_report_read_reason(&self) -> Result<(), PublishError> {
         let valid = match self.outcome.as_str() {
             "PASS" => self.reason_code == "CONTROL_CALIBRATION_REPORT_READ",
@@ -482,6 +501,48 @@ impl AccessPayload {
         Ok(())
     }
 
+    /// Success reason codes are fixed per event type where the producer's set is
+    /// closed; the generic code format is enforced separately for every outcome.
+    fn success_reason_is_valid(&self, event_type: &str) -> bool {
+        match event_type {
+            "console.auth.login" => self.reason_code == "CONTROL_OIDC_LOGIN_STARTED",
+            "console.auth.callback" => self.reason_code == "CONTROL_OIDC_LOGIN_COMPLETED",
+            "console.auth.reauth.start" => self.reason_code == "CONTROL_OIDC_REAUTH_STARTED",
+            "console.auth.reauth.callback" => self.reason_code == "CONTROL_OIDC_REAUTH_VERIFIED",
+            "console.auth.session.read" => self.reason_code == "CONTROL_BROWSER_SESSION_READ",
+            "console.auth.session.logout" => self.reason_code == "CONTROL_BROWSER_SESSION_REVOKED",
+            "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
+            "console.evidence.hold.created" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_EVIDENCE_HOLD_CREATED" | "CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED"
+            ),
+            "console.evidence.hold.released" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_EVIDENCE_HOLD_RELEASED" | "CONTROL_EVIDENCE_HOLD_RELEASE_REPLAYED"
+            ),
+            "console.evidence.hold.read" => self.reason_code == "CONTROL_EVIDENCE_HOLD_READ",
+            "console.workbench.overview.read" => self.reason_code == "WORKBENCH_OVERVIEW_READ",
+            "console.export.read" => self.reason_code == "CONTROL_EXPORT_READ",
+            "export.requested" => matches!(
+                self.reason_code.as_str(),
+                "EXPORT_REQUESTED" | "EXPORT_REQUEST_REPLAYED"
+            ),
+            "export.approved" => matches!(
+                self.reason_code.as_str(),
+                "EXPORT_APPROVED" | "EXPORT_APPROVAL_REPLAYED"
+            ),
+            "export.denied" => matches!(
+                self.reason_code.as_str(),
+                "EXPORT_DENIED" | "EXPORT_DENIAL_REPLAYED"
+            ),
+            "export.downloaded" => self.reason_code == "EXPORT_DOWNLOADED",
+            // Site approval and API-key administration success reasons are not
+            // enumerated: the closed code format above still applies, and an
+            // unknown success code must never stop publication of the segment.
+            _ => true,
+        }
+    }
+
     // The explicit matrix is the audit contract; keeping it in one place is
     // safer than spreading target rules across event-specific validators.
     #[allow(clippy::too_many_lines, clippy::unnested_or_patterns)]
@@ -526,7 +587,13 @@ impl AccessPayload {
             | ("console.site.status.read", "GET", "/control/v1/sites/{site_id}/revisions")
             | ("console.site.config.validate", "POST", "/control/v1/sites/{site_id}/validate")
             | ("console.site.config.apply", "POST", "/control/v1/sites/{site_id}/apply")
+            | ("console.site.config.approve", "POST", "/control/v1/sites/{site_id}/approve")
             | ("console.site.config.rollback", "POST", "/control/v1/sites/{site_id}/rollback")
+            | ("console.workbench.overview.read", "GET", "/control/v1/workbench/overview")
+            | ("console.agent_api_key.admin", "POST", "/control/v1/agent-api-keys")
+            | ("console.agent_api_key.list", "GET", "/control/v1/agent-api-keys")
+            | ("console.agent_api_key.use", "*", "/control/v1/*")
+            | ("console.export.read", "GET", "/control/v1/exports/{export_id}")
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests")
@@ -561,13 +628,17 @@ impl AccessPayload {
                 false, false, false, false, false, false, false, false, false, true,
             ],
             ("case.created", "POST", "/control/v1/cases")
+            | ("export.requested", "POST", "/control/v1/exports")
+            | ("export.approved", "POST", "/control/v1/exports/{export_id}/approve")
+            | ("export.denied", "POST", "/control/v1/exports/{export_id}/deny")
             | ("case.closed", "POST", "/control/v1/cases/{case_id}/close")
             | ("console.case.read", "GET", "/control/v1/cases/{case_id}/items")
             | ("console.evidence.hold.read", "GET", "/control/v1/cases/{case_id}/holds")
             | ("console.case.analyze", "POST", "/control/v1/cases/{case_id}/analyze") => [
                 false, false, true, false, false, false, false, false, false, false,
             ],
-            ("case.evidence.added", "POST", "/control/v1/cases/{case_id}/items") => [
+            ("case.evidence.added", "POST", "/control/v1/cases/{case_id}/items")
+            | ("export.downloaded", "GET", "/control/v1/exports/{export_id}/download") => [
                 false, true, true, false, false, false, false, false, false, false,
             ],
             ("console.evidence.hold.created", "POST", "/control/v1/cases/{case_id}/holds")
@@ -624,6 +695,7 @@ impl AccessPayload {
             | "console.evidence.access.read"
             | "console.evidence.hold.created"
             | "console.evidence.hold.released"
+            | "export.downloaded"
             | "evidence.read" => {
                 event.evidence_refs.len() == 1
                     && self.target_artifact_id.as_ref() == event.evidence_refs.first()
