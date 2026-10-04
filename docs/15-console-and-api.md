@@ -6,7 +6,7 @@
 
 部署时可用 `XSHIELD_EDGE_LISTEN_PORTS` 提供逗号分隔的 bootstrap 监听集合；edge 监听器监督器会在 apply 前绑定快照所需的全部端口，成功后再原子替换路由。新站点端口默认绑定同一私网/loopback 地址，可在不中断已有请求的情况下动态加入；配置中的监听地址必须与 bootstrap 地址一致。设置持久卷上的 `XSHIELD_EDGE_SNAPSHOT_PATH` 后，已确认的完整快照会以 HMAC 签名文件恢复，启动时验签失败会保持拒绝启动。
 
-Overview：防护状态、未覆盖端点、拒绝趋势、配置应用失败、审计水位、模型成本。站点详情按 Network、Security Entry、Routes & Operations、Identity、Crypto、WAF & Limits、Policies、Apply & Operations 分区；secret 只展示 reference、key ID 和状态。
+Overview：防护状态、未覆盖端点、拒绝趋势、配置应用失败、审计水位、模型成本。站点详情按 Overview、Network、Security Entry、Routes & Operations、Identity、Crypto、WAF & Limits、Policies、Release（发布）、Audit 分区，页首固定显示站点状态、desired/active 修订和“草稿 → 已校验 → 待审批 → 应用中 → 已生效”生命周期；新建站点是五步向导（基本信息、上游与监听、入口与模式、首批路由、校验与保存）；secret 只展示 reference、key ID 和状态。
 
 Sites：域名与上游、认证 profile、根入口、UI 映射、资格来源、加密版本、模式与覆盖。
 
@@ -24,7 +24,7 @@ Operations：节点、队列、存储、密钥引用、告警与审计访问。
 
 控制台是 React 19 + antd 6 的单页应用，路由使用 TanStack Router 的代码式路由树，管理路径与此前保持一致。左侧导航按服务端会话角色隐藏无权模块，分为工作台、站点、流量与调查、案件与证据、运维与治理五组；非 SystemAdmin 的 Observer 与 PolicyAuthor、PolicyApprover、ReleaseOperator 额外得到当前会话站点的“站点状态”“站点发布”入口；视口宽度不超过 760 px 时导航收为抽屉。站点详情、调查、案件、证据、审计和权限中心使用独立 URL，查询表单只存在于对应业务页面。顶栏显示面包屑、服务端确认的 tenant/site 范围、MFA 再认证剩余时间（仅为提示，高危请求仍由服务端校验）、存在未决写入时的“待确认操作”提示，以及主题（跟随系统/浅色/深色）、密度和用户菜单。Ctrl/⌘+K 命令面板搜索当前角色可见的页面，也可粘贴规范（小写 UUIDv7）的对象 ID：`req_`、`mdl_`、`agt_`、`grant_`、`auth_`、`calr_` 直接打开既有详情路由，`case_`、`export_`、`artifact_` 进入所属页面，`access_`、`job_`、`ev_` 与 32 位十六进制 trace ID 可把单个条件预填到结构化检索（只预填，不自动提交；`ev_` 同时有事件和保留锁两种解释）。隐藏导航与命令面板都不替代服务端授权；每个响应仍须重新验证 tenant/site scope、身份代际、操作资格和审计终态。
 
-会话与数据层位于 `src/security`：ControlClient、服务端确认的 tenant/site、角色和会话代际（epoch）只存在于内存。401、15 分钟闲置、离开或卸载页面（`pagehide`）、退出或响应 scope 不一致时，会话、TanStack Query 缓存和待确认操作登记一并清空，晚到的旧响应不能回填状态。新数据层的读取把 epoch 放入 query key，透传 AbortSignal，逐响应核对 tenant/site scope，且不自动轮询、不重试，也不在窗口聚焦或网络恢复时刷新；写入在发送前冻结方法、路径、幂等键和正文，结果未知时只允许以原键原正文精确重试，并触发离页提醒和“待确认操作”提示。浏览器存储只保存主题与密度偏好。当前处于控制台重做的第 0 阶段（基础设施）：只有工作台概览和会话信息刷新走这套读取层，写入登记仅由单元测试和测试夹具使用；调查、案件、证据、站点配置和 API Key 页面仍由旧页面宿主渲染，沿用各自的请求取消、写入冻结和离页提醒，尚未接入新的待确认登记，因此不会出现在“待确认操作”提示中。
+会话与数据层位于 `src/security`：ControlClient、服务端确认的 tenant/site、角色和会话代际（epoch）只存在于内存。401、15 分钟闲置、离开或卸载页面（`pagehide`）、退出或响应 scope 不一致时，会话、TanStack Query 缓存和待确认操作登记一并清空，晚到的旧响应不能回填状态。新数据层的读取把 epoch 放入 query key，透传 AbortSignal，逐响应核对 tenant/site scope，且不自动轮询、不重试，也不在窗口聚焦或网络恢复时刷新；写入在发送前冻结方法、路径、幂等键和正文，结果未知时只允许以原键原正文精确重试，并触发离页提醒和“待确认操作”提示。浏览器存储只保存主题与密度偏好。控制台重做已完成第 0 阶段（基础设施）和第 1 阶段（站点接入与发布）：工作台概览、会话信息刷新和全部站点页面（列表、详情、新建向导、发布、路由抽屉）走这套读取层和写入登记，站点的未决写入会出现在“待确认操作”提示中；调查、案件、证据和 API Key 页面仍由旧页面宿主渲染，沿用各自的请求取消、写入冻结和离页提醒，尚未接入新的待确认登记，因此不会出现在该提示中。站点草稿只存在于页面内存：同一站点内切换分类和前进/后退保留，离开站点前须确认，刷新清空，不使用任何浏览器存储。
 
 `./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049、导出列表索引 0050 与站点审批绑定 0051，现有开发数据卷无需重置。
 
@@ -190,7 +190,7 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 
 ## 后台路由与角色独立性验收（2026-09-27）
 
-站点列表和编辑器分别位于 /sites 与 /sites/{siteId}/{section}；创建入口为 /sites/new/network。网络、安全入口、路由、身份、加密、WAF/限流、策略/健康、发布与审计按分类独立渲染。TanStack Router 管理路径和前进后退，同站点分类共享草稿；跨站点、跨模块时清空响应并取消旧请求，所有站点响应核对独立 tenant/site 范围。草稿离页有显式确认，未知写入保留原幂等键与正文供人工重试。
+站点列表和编辑器分别位于 /sites 与 /sites/{siteId}/{section}；创建入口是五步向导 /sites/new/{basics,upstream,entry,routes,review}（旧的 /sites/new/network 等地址重定向到对应步骤）。概览、网络、安全入口、路由、身份、加密、WAF/限流、策略/健康、发布与审计按分类独立渲染。TanStack Router 管理路径和前进后退，同站点分类共享草稿，向导的草稿也在步骤之间保留；跨站点、跨模块时清空响应并取消旧请求，所有站点响应既核对服务端确认的 tenant/site，也核对所请求的站点 ID。草稿离页有显式确认，未知写入保留原幂等键与正文供人工重试，且在站点内导航时保持可见。
 
 只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
 
@@ -215,6 +215,8 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 **回滚。** `POST /control/v1/sites/{site_id}/rollback` 需要 `ReleaseOperator` 和规范 `Idempotency-Key`，没有请求体。它读取一个修订的完整已存储配置，并把它作为**新修订**写入（修订号永不复用），然后走与其他保存完全相同的路径：风险按当前 active 基线评估（从 D 回滚到 B 同样是上游变化，需要独立审批，批准前 edge 不变）、校验、幂等、审计和应用。回滚目标取决于状态：存在未完成的变更（desired 不等于 active，或上一次应用未完成）时取 active 修订，等于取消该变更，由于与基线一致所以无需审批；否则取**先前 active 的修订**，即按 edge 确认顺序（迁移 0051 的 `activated_at`）排在当前 active 之前的那一个，而不是 `active - 1`（后者可能是从未批准或从未服务的修订）；没有可回滚的目标时返回 409 `CONTROL_SITE_ROLLBACK_UNAVAILABLE`。同一个键重放回滚请求先于目标解析被识别，返回原结果（`CONTROL_SITE_CONFIG_REPLAYED`）且不创建修订；站点已有后续写入后重放，返回 409 `CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED`。修订历史（`GET /revisions`）里的每一行现在都是包含 `policy_revision` 的完整配置，读取更早版本写入的行时由 `policy_revision` 列补全。此前存储的修订缺少 `policy_revision` 而回滚反序列化要求它，所以每次回滚都返回 400 `CONTROL_SITE_CONFIG_REQUEST_INVALID`。
 
 **删除站点要求 step-up。** `DELETE /control/v1/sites/{site_id}` 会把受保护站点从 edge 移除，因此与原文读取、导出审批使用同一套浏览器 MFA step-up：同一会话须在两分钟内完成 OIDC 再认证（迁移 0036 的 step-up 状态），否则返回 403 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED`（`next_action=reauthenticate`）并写 DENY 审计，站点和 edge 均不变。机器 Bearer 和 Agent API Key 没有 step-up 路径，所以无论持有 `site.config.write`（映射为 SystemAdmin）等何种能力都不能删除站点；也不存在可授予的删除能力。通过 step-up 后流程不变：先以调用者的名义写入暂停修订（该预授权由存储记录为绑定该修订的 `delete_step_up` 审批，因此可以取代尚未批准的待审批修订，未批准的内容不会被服务），edge 确认不含该站点路由的快照后才删除数据库记录；edge 无法确认时站点保持暂停并返回 `CONTROL_SITE_DELETE_EDGE_NOT_CONFIRMED`。删除不要求第二个人审批：授权依据是再认证加上 `console.site.delete` 终态审计，作者自己也可以删除自己创建的站点，这是有意保留的取舍。
+
+**控制台如何呈现这些语义（第 1 阶段）。** 发布页并排显示 edge 正在服务的修订与已暂存的修订。服务端只返回 `requires_approval`，不返回原因，所以“为什么需要审批”由控制台用 `assess_change_risk` 的同一套规则（TypeScript 移植，有单测）从两个修订的已存储配置复算，逐项列出涉及的字段和无需审批的修改；复算与服务端结论不一致时（例如服务端对控制台尚未识别的字段一律按 `OTHER_CHANGE` 要求审批）以服务端为准并如实说明，没有 Observer 角色、读不到修订时只显示服务端的结论。批准、应用、回滚先弹出确认框，展示将发布的字段差异和随后会发生什么，再走与以前相同的冻结写入（方法、路径、幂等键和正文在发送前冻结，结果未知只能原样重试）；验证配置不改变任何东西，直接执行。批准带 `X-Xshield-Expected-Config-Digest`，值取自已审阅修订的 `config_digest`（修订历史中暂存修订的摘要；与状态里的摘要不一致时拒绝提交；读不到修订的角色不带该头，批准的是服务端事务内的 desired）。回滚 API 没有请求体：有待生效变更时服务端恢复 active 修订，确认框点名它并列出被放弃的变更；否则服务端恢复先前 active 的修订，该顺序（`activated_at`）不在任何读取 API 中，控制台不能点名，只说明规则并提供较早修订的对比预览（预览不决定目标）；两种情况都说明会创建新修订。修订历史把内容与更早修订完全相同的修订标为“内容与 rN 相同”，用于回滚之后核对。批准与删除的 MFA step-up 对控制台只是提示：确认框显示再认证是否有效，服务端始终是授权方；批准返回 401 `CONTROL_STEP_UP_REQUIRED`（不会触发会话断开）或删除返回 403 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED` 都表示请求没有执行，控制台保留冻结的原请求，完成再认证后原样重试。删除站点需要逐字输入站点 ID，成功后回到列表并说明结果。批准、应用、回滚针对已保存的修订，不包含未保存草稿；动作之后的重新读取不会替换草稿。
 
 # 管理 API Key
 

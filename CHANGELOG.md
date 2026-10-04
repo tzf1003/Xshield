@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 控制台重做第 1 阶段（站点接入与发布，只改 `web/console/`，不改后端）：站点列表改为可搜索表格；新建站点改为五步向导（`/sites/new/{basics,upstream,entry,routes,review}`，旧的 `/sites/new/network` 等地址重定向到对应步骤）；站点详情加入生命周期步骤条、跨分类的未保存变更栏与字段差异、路由表格加抽屉（最多 256 条）；发布页并排显示 edge 在用与已暂存的修订，按两个修订的已存储配置复算“为什么需要审批”，批准/应用/回滚先经确认框，批准带 `X-Xshield-Expected-Config-Digest`，回滚按服务端规则说明目标并提示会创建新修订，删除站点需逐字输入站点 ID 并完成 MFA step-up（被拒绝的请求原样保留、可原样重试）。新增站点原因码词典（单测扫描 Rust 源码，缺码即失败）；全部站点页面迁到 guarded 读取层和“待确认操作”登记，旧 `SiteConfigPanel`/`SiteOperationsPanel` 删除。批准、应用或回滚针对已保存的修订，动作之后的重新读取不会替换未保存的草稿。已知限制：回滚目标的生效顺序没有读取 API，控制台只能说明规则、不能点名；列表 API 不返回上游地址；`scripts/test_console_oidc.mjs` 的站点步骤仍是旧页面的选择器，本阶段没有更新（需要 `./dev.sh` 的真实 OIDC 环境）。
+
 - 增加调查导出发现与审批待办 API：`GET /control/v1/exports?view=mine|review` 按导出 ID 降序有界分页，`mine` 含本人全部持久状态，`review` 仅 Approver 可见他人 `pending_approval` 导出；游标绑定凭证、主体、作用域、视图与页大小，条目只投影元数据，不含用途、决定理由与包标识。列表访问写独立 `console.export.list` 审计（成功 `CONTROL_EXPORTS_READ`），worker 发布矩阵、封闭原因集和覆盖检查同步扩展；迁移 0050 增加加法排序索引并纳入开发库 reconciliation。控制台接入和 Vite 代理放行属于后续前端增量，本次未改动 `web/`。
 
 - 修复站点删除既无独立审批也无 step-up：`DELETE /control/v1/sites/{site_id}` 会把受保护站点从 edge 移除，却只要求 SystemAdmin 角色（持有 `site.config.write` 的 Agent API Key 同样映射为 SystemAdmin，可以删除）。现在与原文读取、导出审批一样要求同一浏览器会话两分钟内的 MFA step-up，否则返回 403 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED` 并写 DENY 审计；机器 Bearer 和 Agent API Key 没有 step-up 路径，因此不能删除站点，且没有可授予的删除能力。通过 step-up 的删除沿用“暂停 → edge 确认 → 删除”流程，暂停修订的预授权由存储记录为绑定该修订的 `delete_step_up` 审批。控制台需要在删除前引导用户完成“重新验证高危操作”，并为 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED` 提供提示。
