@@ -1058,6 +1058,122 @@ impl LocalJournal {
         Ok(visited)
     }
 
+    /// Authenticates a bounded snapshot of closed and active journal records
+    /// for a read-only investigation. The active file may receive a new batch
+    /// during the read; only complete records in the opened snapshot are read.
+    /// Closed files must be complete. The caller validates application scope
+    /// and schema before releasing any result.
+    ///
+    /// # Errors
+    /// Returns an error for unsafe paths, invalid records, key mismatch, or
+    /// exhausted record and byte budgets.
+    pub fn visit_committed_records(
+        directory: impl AsRef<Path>,
+        expected_key_id: &str,
+        key: &JournalKey,
+        max_records: u64,
+        max_bytes: u64,
+        mut visit: impl FnMut(&AuthenticatedJournalRecord) -> Result<(), JournalError>,
+    ) -> Result<u64, JournalError> {
+        if max_records == 0 || max_bytes == 0 {
+            return Err(JournalError::InvalidLimits);
+        }
+        let directory = directory.as_ref();
+        prepare_existing_private_directory(directory)?;
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // The extension is compared exactly, so unfinished `.xja.tmp` files
+            // are never treated as committed segments.
+            if name.starts_with("segment-")
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension == "xja")
+            {
+                let metadata = fs::symlink_metadata(entry.path())?;
+                if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                    return Err(JournalError::UnsafePath);
+                }
+                #[cfg(unix)]
+                if metadata.permissions().mode() & 0o277 != 0 {
+                    return Err(JournalError::UnsafePermissions);
+                }
+                paths.push(entry.path());
+            }
+        }
+        paths.sort();
+        let mut visited = 0_u64;
+        let mut scanned_bytes = 0_u64;
+        for path in paths {
+            let mut file = File::open(&path)?;
+            let snapshot_len = file.metadata()?.len();
+            scanned_bytes = scanned_bytes
+                .checked_add(snapshot_len)
+                .ok_or(JournalError::ReadLimitExceeded)?;
+            if scanned_bytes > max_bytes {
+                return Err(JournalError::ReadLimitExceeded);
+            }
+            let identity = read_header(&mut file)?;
+            if identity.key_id != expected_key_id {
+                return Err(JournalError::KeyMismatch);
+            }
+            let closed = segment_path_state(&path, &identity)?;
+            let mut expected_sequence = 1_u64;
+            let mut previous_hash = ZERO_HASH;
+            loop {
+                let position = file.stream_position()?;
+                if position >= snapshot_len {
+                    break;
+                }
+                let mut length = [0; 4];
+                let read = read_until_full_or_eof(&mut file, &mut length)?;
+                if read != length.len() {
+                    if closed {
+                        return Err(JournalError::Corrupt("closed record length"));
+                    }
+                    break;
+                }
+                let body_len = usize::try_from(u32::from_le_bytes(length))
+                    .map_err(|_| JournalError::Corrupt("record length"))?;
+                if body_len == 0 || body_len > MAX_RECORD_BYTES {
+                    return Err(JournalError::Corrupt("record length"));
+                }
+                let end = file
+                    .stream_position()?
+                    .checked_add(
+                        u64::try_from(body_len).map_err(|_| JournalError::ReadLimitExceeded)?,
+                    )
+                    .ok_or(JournalError::ReadLimitExceeded)?;
+                if end > snapshot_len {
+                    if closed {
+                        return Err(JournalError::Corrupt("closed record body"));
+                    }
+                    break;
+                }
+                let mut body = vec![0; body_len];
+                if read_until_full_or_eof(&mut file, &mut body)? != body_len {
+                    return Err(JournalError::Corrupt("record body"));
+                }
+                visited = visited
+                    .checked_add(1)
+                    .ok_or(JournalError::RecordLimitExceeded)?;
+                if visited > max_records {
+                    return Err(JournalError::RecordLimitExceeded);
+                }
+                let record =
+                    decode_record(&identity, key, &body, expected_sequence, previous_hash)?;
+                visit(&record)?;
+                previous_hash = sha256(&body);
+                expected_sequence = expected_sequence
+                    .checked_add(1)
+                    .ok_or(JournalError::Corrupt("record sequence"))?;
+            }
+        }
+        Ok(visited)
+    }
+
     /// Returns the next sequence available to a caller holding exclusive access.
     #[must_use]
     pub const fn next_sequence(&self) -> Option<u64> {
