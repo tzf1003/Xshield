@@ -82,6 +82,7 @@ struct AccessPayload {
     target_agent_run_id: Option<String>,
     target_job_id: Option<String>,
     target_export_id: Option<String>,
+    target_api_key_id: Option<String>,
     target_grant_id: Option<String>,
     target_binding_id: Option<String>,
     target_hold_id: Option<String>,
@@ -169,6 +170,7 @@ impl AccessPayload {
         self.validate_targets(&event.event_type, success)?;
         self.validate_job_target(&event.event_type, success)?;
         self.validate_export_target(&event.event_type, success)?;
+        self.validate_api_key_target(&event.event_type, success)?;
         for reference in &event.evidence_refs {
             valid_prefixed_v7(reference, "artifact_")?;
         }
@@ -390,6 +392,24 @@ impl AccessPayload {
         }
         if let Some(target) = &self.target_export_id {
             valid_prefixed_v7(target, "export_")?;
+        }
+        Ok(())
+    }
+
+    /// Key administration names the key it acted on. Success always carries
+    /// it; a refusal keeps it only when the path id had already been validated.
+    /// Listing, key use and every other event type never carry one: a key id in
+    /// the wrong place would let an event claim an action it did not perform.
+    fn validate_api_key_target(&self, event_type: &str, success: bool) -> Result<(), PublishError> {
+        if event_type == "console.agent_api_key.admin" {
+            if success && self.target_api_key_id.is_none() {
+                return Err(PublishError::InvalidEvent);
+            }
+        } else if self.target_api_key_id.is_some() {
+            return Err(PublishError::InvalidEvent);
+        }
+        if let Some(target) = &self.target_api_key_id {
+            valid_prefixed_v7(target, "key_")?;
         }
         Ok(())
     }

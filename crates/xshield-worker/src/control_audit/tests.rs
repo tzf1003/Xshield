@@ -18,6 +18,7 @@ const HOLD: &str = "ev_018f2a3b-4c5d-7000-8000-00000000000b";
 const REPORT: &str = "calr_018f2a3b-4c5d-7000-8000-00000000000c";
 const JOB: &str = "job_018f2a3b-4c5d-7000-8000-00000000000e";
 const EXPORT: &str = "export_018f2a3b-4c5d-7000-8000-00000000000f";
+const API_KEY: &str = "key_018f2a3b-4c5d-7000-8000-000000000010";
 const HOLD_ACTIONS: &[(&str, &str, &str, &str)] = &[
     (
         "console.evidence.hold.created",
@@ -1628,7 +1629,10 @@ fn site_approval_workbench_and_api_key_events_are_publishable() {
             "CONTROL_API_KEY_AUTHENTICATED",
         ),
     ] {
-        let value = surface_event(kind, method, path, reason);
+        let mut value = surface_event(kind, method, path, reason);
+        if kind == "console.agent_api_key.admin" {
+            value["payload"]["target_api_key_id"] = API_KEY.into();
+        }
         let row = index(&value).unwrap_or_else(|error| panic!("{kind}: {error:?}"));
         assert_eq!(row.event_type, kind);
         assert_eq!(row.stage, "control_access");
@@ -1659,6 +1663,90 @@ fn site_approval_workbench_and_api_key_events_are_publishable() {
     rejected(&wrong_reason, "workbench read with another success reason");
     wrong_reason["payload"]["outcome"] = "DENY".into();
     assert!(index(&wrong_reason).is_ok());
+}
+
+#[test]
+fn api_key_admin_events_name_a_validated_key_and_no_other_event_may() {
+    let admin = |reason: &str| {
+        let mut value = surface_event(
+            "console.agent_api_key.admin",
+            "POST",
+            "/control/v1/agent-api-keys",
+            reason,
+        );
+        value["payload"]["target_api_key_id"] = API_KEY.into();
+        value
+    };
+    for reason in [
+        "CONTROL_API_KEY_CREATED",
+        "CONTROL_API_KEY_REVOKED",
+        "CONTROL_API_KEY_ROTATED_OUT",
+        "CONTROL_API_KEY_ROTATED_IN",
+    ] {
+        assert!(index(&admin(reason)).is_ok(), "{reason}");
+    }
+    let value = admin("CONTROL_API_KEY_CREATED");
+    let mut without_key = value.clone();
+    without_key["payload"]["target_api_key_id"] = Value::Null;
+    rejected(&without_key, "administration success without a key id");
+    // Only a well-formed `key_` + UUIDv7 reference is a key id.
+    for bad in [
+        CASE,
+        EXPORT,
+        REQUEST,
+        "key_",
+        "key_not-a-uuid",
+        "key_018f2a3b-4c5d-4000-8000-000000000010",
+        "KEY_018f2a3b-4c5d-7000-8000-000000000010",
+    ] {
+        let mut crossed = value.clone();
+        crossed["payload"]["target_api_key_id"] = bad.into();
+        rejected(&crossed, &format!("administration target {bad}"));
+    }
+    // A refusal may keep the target it had already validated, or carry none.
+    for target in [Value::from(API_KEY), Value::Null] {
+        let mut refused = value.clone();
+        refused["payload"]["outcome"] = "DENY".into();
+        refused["payload"]["reason_code"] = "CONTROL_API_KEY_NOT_FOUND".into();
+        refused["payload"]["target_api_key_id"] = target;
+        assert!(index(&refused).is_ok());
+    }
+    // The key id belongs to administration only: listing and use events never
+    // carry it, nor does any other event type.
+    for (kind, method, path, reason) in [
+        (
+            "console.agent_api_key.list",
+            "GET",
+            "/control/v1/agent-api-keys",
+            "CONTROL_API_KEYS_LISTED",
+        ),
+        (
+            "console.agent_api_key.use",
+            "*",
+            "/control/v1/*",
+            "CONTROL_API_KEY_AUTHENTICATED",
+        ),
+        (
+            "console.export.read",
+            "GET",
+            "/control/v1/exports/{export_id}",
+            "CONTROL_EXPORT_READ",
+        ),
+    ] {
+        let mut with_key = surface_event(kind, method, path, reason);
+        with_key["payload"]["target_api_key_id"] = API_KEY.into();
+        if kind == "console.export.read" {
+            with_key["payload"]["target_export_id"] = EXPORT.into();
+        }
+        rejected(&with_key, &format!("{kind} carrying a key id"));
+    }
+    let mut case_event = event();
+    case_event["payload"]["target_api_key_id"] = API_KEY.into();
+    rejected(&case_event, "a case event carrying a key id");
+    // Unknown fields stay refused: the target field is exact, not a wildcard.
+    let mut misspelled = value;
+    misspelled["payload"]["target_apikey_id"] = API_KEY.into();
+    rejected(&misspelled, "a misspelled key target field");
 }
 
 #[test]

@@ -80,14 +80,17 @@ impl EdgeApplyClient {
         })
     }
 
-    async fn apply(&self, request: &GatewayApplyRequest) -> Result<GatewayApplyAck, &'static str> {
+    pub(crate) async fn apply(
+        &self,
+        request: &GatewayApplyRequest,
+    ) -> Result<GatewayApplyAck, &'static str> {
         let body = serde_json::to_vec(request).map_err(|_| "EDGE_APPLY_PAYLOAD_INVALID")?;
         let signature = hmac_hex(&self.key, &body).ok_or("EDGE_APPLY_SIGNATURE_UNAVAILABLE")?;
         let response = self
             .http
             .post(&self.endpoint)
             .header("content-type", "application/json")
-            .header("x-xshield-apply-signature", signature)
+            .header("x-xshield-apply-signature", &signature)
             .body(body)
             .send()
             .await
@@ -109,21 +112,34 @@ impl EdgeApplyClient {
                 _ => "EDGE_APPLY_REJECTED",
             });
         }
-        let ack = response
-            .json::<GatewayApplyAck>()
+        // The ack is trusted only if the edge signed these exact bytes as the
+        // answer to this request; content is checked after authenticity.
+        let ack_headers = response.headers().clone();
+        let ack_body = response
+            .bytes()
             .await
+            .map_err(|_| "EDGE_APPLY_ACK_INVALID")?;
+        crate::edge_channel::verify_apply_ack(&self.key, &signature, &ack_headers, &ack_body)?;
+        let ack = serde_json::from_slice::<GatewayApplyAck>(&ack_body)
             .map_err(|_| "EDGE_APPLY_ACK_INVALID")?;
         validate_apply_ack(request, &ack)?;
         Ok(ack)
     }
 
-    async fn health(&self) -> Result<serde_json::Value, &'static str> {
-        let body = b"health-v1";
-        let signature = hmac_hex(&self.key, body).ok_or("EDGE_APPLY_SIGNATURE_UNAVAILABLE")?;
+    pub(crate) async fn health(&self) -> Result<serde_json::Value, &'static str> {
+        // A constant signature would stay valid forever once captured, so each
+        // request is signed over a fresh timestamp and nonce the edge enforces.
+        let auth = crate::edge_channel::sign_health_request(&self.key)
+            .ok_or("EDGE_APPLY_SIGNATURE_UNAVAILABLE")?;
         let response = self
             .http
             .get(&self.health_endpoint)
-            .header("x-xshield-apply-signature", signature)
+            .header("x-xshield-apply-signature", auth.signature)
+            .header(
+                xshield_core::edge_channel::HEALTH_TIMESTAMP_HEADER,
+                auth.timestamp,
+            )
+            .header(xshield_core::edge_channel::HEALTH_NONCE_HEADER, auth.nonce)
             .send()
             .await
             .map_err(|_| "EDGE_UNAVAILABLE")?;
@@ -643,9 +659,12 @@ pub async fn list_handler(
 ) -> Response {
     let request_id = format!("req_{}", uuid::Uuid::now_v7());
     let authorization = single_header(&headers, AUTHORIZATION.as_str());
-    let subject = match control.authorize_tenant(authorization.as_deref(), &request_id, LIST_ACCESS)
-    {
-        Ok(subject) => subject,
+    let (subject, visibility) = match control.authorize_tenant_with_visibility(
+        authorization.as_deref(),
+        &request_id,
+        LIST_ACCESS,
+    ) {
+        Ok(authorized) => authorized,
         Err(response) => return (*response).into_response(),
     };
     let (cursor, limit) = match parse_site_list_query(query.as_deref()) {
@@ -689,14 +708,13 @@ pub async fn list_handler(
         },
         None => None,
     };
-    let records = match control
-        .catalog
-        .list_protected_site_configs(
-            &control.config.tenant_id,
-            after_site_id.as_ref().map(SiteId::as_str),
-            limit.saturating_add(1),
-        )
-        .await
+    let records = match super::api_key_authz::list_visible_site_configs(
+        &control,
+        &visibility,
+        after_site_id.as_ref().map(SiteId::as_str),
+        limit.saturating_add(1),
+    )
+    .await
     {
         Ok(records) => records,
         Err(_) => {
@@ -2625,6 +2643,20 @@ async fn write_site_handler(
             Ok(subject) => subject,
             Err(response) => return (*response).into_response(),
         };
+    // These handlers are idempotent upserts. A key's creation and write
+    // capabilities stay separate: POST must not overwrite, PUT must not create.
+    if let Some(response) = control
+        .guard_api_key_site_write(
+            authorization.as_deref(),
+            &request_id,
+            &subject,
+            action,
+            &site_id,
+        )
+        .await
+    {
+        return response;
+    }
     let Some(idempotency_key) = single_header(&headers, "idempotency-key")
         .filter(|value| super::valid_idempotency_key(value))
     else {

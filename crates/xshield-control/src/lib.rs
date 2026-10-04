@@ -5,6 +5,7 @@
 
 #![warn(missing_docs)]
 
+mod api_key_authz;
 mod calibration_report_inspection;
 mod case_close;
 mod case_collection;
@@ -12,6 +13,7 @@ mod case_holds;
 mod case_items;
 mod case_list;
 mod causality;
+mod edge_channel;
 mod evidence_access_inspection;
 mod evidence_access_list;
 mod export_list;
@@ -58,11 +60,11 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
 use xshield_core::{
-    admin::{ManagementPrincipal, ManagementRole},
+    admin::{ApiKeyCapability, ApiKeyGrant, ManagementPrincipal, ManagementRole},
     domain::{
         AgentRunId, ArtifactId, AuthBindingId, CalibrationReportId, CaseId, EventId,
-        EvidenceAccessRequestId, ExportId, GrantId, JobId, ModelCallId, RequestId, SiteId,
-        TenantId,
+        EvidenceAccessRequestId, ExportId, GrantId, JobId, ManagementApiKeyId, ModelCallId,
+        RequestId, SiteId, TenantId,
     },
     investigation::{
         EvidenceAccessDecisionDraft, EvidenceAccessKind, EvidenceAccessRequestDraft,
@@ -590,6 +592,15 @@ impl ControlPlane {
             .lock()
             .ok()
             .map(|mut rate| rate.take(Instant::now()))
+    }
+
+    /// Returns the unit taken for an attempt that turned out to be a valid
+    /// credential, so legitimate key traffic does not drain the budget that
+    /// protects the audit journal and the login endpoints from junk.
+    pub(crate) fn refund_unauthenticated_rate_budget(&self) {
+        if let Ok(mut rate) = self.unauthenticated_rate.lock() {
+            rate.refund();
+        }
     }
 
     fn health(&self, authorization: Option<&str>) -> EndpointResult {
@@ -3440,7 +3451,16 @@ impl ControlPlane {
     ) -> Result<String, Box<EndpointResult>> {
         let identity = self.authenticate_request(authorization, request_id, action)?;
         let principal = &identity.principal;
-        if !principal.authorizes_site(action.role, &self.config.tenant_id, site_id) {
+        // A key carries no roles; it is accepted only by the capability its
+        // scope row grants for exactly this site. Unlisted routes stay closed.
+        let allowed = if principal.is_api_key() {
+            api_key_authz::capability_for(&action).is_some_and(|capability| {
+                principal.authorizes_capability(capability, &self.config.tenant_id, site_id)
+            })
+        } else {
+            principal.authorizes_site(action.role, &self.config.tenant_id, site_id)
+        };
+        if !allowed {
             return Err(Box::new(self.audited_error(
                 request_id,
                 Some(principal.subject()),
@@ -3462,22 +3482,8 @@ impl ControlPlane {
         request_id: &str,
         action: AccessAction,
     ) -> Result<String, Box<EndpointResult>> {
-        let identity = self.authenticate_request(authorization, request_id, action)?;
-        let principal = &identity.principal;
-        if !principal.authorizes_tenant(action.role, &self.config.tenant_id) {
-            return Err(Box::new(self.audited_error(
-                request_id,
-                Some(principal.subject()),
-                action,
-                None,
-                StatusCode::FORBIDDEN,
-                "CONTROL_SCOPE_DENIED",
-                "management operation forbidden",
-                false,
-                "request_scope",
-            )));
-        }
-        Ok(principal.subject().to_owned())
+        self.authorize_tenant_with_visibility(authorization, request_id, action)
+            .map(|(subject, _)| subject)
     }
 
     fn authorize_identity(
@@ -3671,39 +3677,40 @@ impl ControlPlane {
         Err(Box::new(unauthorized()))
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Resolves an `X-Xshield-API-Key` value to a key principal.
+    ///
+    /// The caller must already have taken one unit of the unauthenticated rate
+    /// budget: this function appends exactly one durable event per attempt
+    /// (`console.agent_api_key.use`, PASS or DENY/ERROR) and nothing else.
+    ///
+    /// The principal carries exact `(site, capability)` grants and no roles.
+    /// Its subject is `apikey:{key_id}:{subject}` so every audit event and
+    /// every `updated_by` recorded for the key's actions names the credential
+    /// as well as the free-text label, and can never equal a person's subject.
+    ///
+    /// # Errors
+    /// Returns the already-audited response for an unknown, expired, revoked or
+    /// malformed key, an unavailable store, or an unavailable audit journal.
     async fn authenticate_api_key(
-        &self,
+        self: &Arc<Self>,
         value: &str,
         request_id: &str,
         action: AccessAction,
     ) -> Result<identity::VerifiedRequestIdentity, Box<EndpointResult>> {
-        let unauthorized = || {
-            Box::new(self.audited_error(
-                request_id,
-                None,
-                action,
-                None,
-                StatusCode::UNAUTHORIZED,
-                "CONTROL_API_KEY_INVALID",
-                "management authentication required",
-                false,
-                "authenticate",
-            ))
-        };
         let Some(key) = self.config.api_key_hash_key.as_deref() else {
-            return Err(unauthorized());
+            return Err(self.api_key_invalid(request_id, action).await);
         };
         let Some(fingerprint) = component_signature(key, &[value.as_bytes()]).ok() else {
-            return Err(unauthorized());
+            return Err(self.api_key_invalid(request_id, action).await);
         };
-        let scopes = self
+        let Ok(scopes) = self
             .catalog
             .lookup_management_api_key_scopes(&fingerprint, self.config.tenant_id.as_str())
             .await
-            .map_err(|_| {
-                Box::new(self.audited_error(
-                    request_id,
+        else {
+            return Err(Box::new(
+                self.audited_error_async(
+                    request_id.to_owned(),
                     None,
                     action,
                     None,
@@ -3712,85 +3719,87 @@ impl ControlPlane {
                     "management service unavailable",
                     true,
                     "retry_later",
-                ))
-            })?;
+                )
+                .await,
+            ));
+        };
         let Some(first) = scopes.first() else {
-            return Err(unauthorized());
+            return Err(self.api_key_invalid(request_id, action).await);
         };
-        let mut roles = std::collections::BTreeSet::new();
-        let direct_apply = scopes
+        // Rows are trusted only for this tenant and only in a shape the grant
+        // type accepts; anything else simply grants nothing.
+        let tenant = &self.config.tenant_id;
+        let grants: Vec<ApiKeyGrant> = scopes
             .iter()
-            .any(|scope| scope.capability == "site.config.apply_direct");
-        let mut tenant_scope = false;
-        for scope in &scopes {
-            match scope.capability.as_str() {
-                "site.read" | "site.health.read" => {
-                    roles.insert(ManagementRole::Observer);
-                }
-                "site.create" => {
-                    roles.insert(ManagementRole::SystemAdmin);
-                    tenant_scope = true;
-                }
-                "site.config.write" => {
-                    roles.insert(ManagementRole::SystemAdmin);
-                }
-                "site.config.validate" => {
-                    roles.insert(ManagementRole::PolicyAuthor);
-                }
-                "site.config.apply_direct" | "site.rollback" => {
-                    roles.insert(ManagementRole::ReleaseOperator);
-                }
-                _ => {}
-            }
-        }
-        let tenant = TenantId::parse(&first.tenant_id).map_err(|_| unauthorized())?;
-        let site = SiteId::parse(&first.site_id).map_err(|_| unauthorized())?;
-        let principal = if tenant_scope {
-            ManagementPrincipal::new_tenant_scoped(first.subject.clone(), roles, [tenant.clone()])
-                .map_err(|_| unauthorized())?
-                .with_exact_site_scope(tenant.clone(), site.clone())
-        } else {
-            ManagementPrincipal::new(
-                first.subject.clone(),
-                roles,
-                scopes.iter().filter_map(|scope| {
-                    Some((
-                        TenantId::parse(&scope.tenant_id).ok()?,
-                        SiteId::parse(&scope.site_id).ok()?,
-                    ))
-                }),
-            )
-            .map_err(|_| unauthorized())?
+            .filter_map(|scope| {
+                let capability = ApiKeyCapability::parse(&scope.capability)?;
+                let row_tenant = TenantId::parse(&scope.tenant_id).ok()?;
+                (row_tenant == *tenant).then_some(())?;
+                ApiKeyGrant::from_scope_row(row_tenant, &scope.site_id, capability).ok()
+            })
+            .collect();
+        let principal = ManagementApiKeyId::parse(first.api_key_id.clone())
+            .ok()
+            .and_then(|key_id| {
+                ManagementPrincipal::new_api_key(
+                    format!("apikey:{key_id}:{}", first.subject),
+                    grants,
+                )
+                .ok()
+            });
+        let Some(principal) = principal else {
+            return Err(self.api_key_invalid(request_id, action).await);
         };
-        if self
-            .append_access_event(
-                request_id,
-                Some(principal.subject()),
+        let control = Arc::clone(self);
+        let (event_request_id, subject) = (request_id.to_owned(), principal.subject().to_owned());
+        let appended = tokio::task::spawn_blocking(move || {
+            control.append_access_event(
+                &event_request_id,
+                Some(&subject),
                 action,
                 None,
                 "PASS",
                 "CONTROL_API_KEY_AUTHENTICATED",
             )
-            .is_err()
-        {
-            return Err(Box::new(self.audited_error(
-                request_id,
-                Some(principal.subject()),
-                action,
-                None,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CONTROL_AUDIT_UNAVAILABLE",
-                "management service unavailable",
-                true,
-                "retry_later",
-            )));
+        })
+        .await;
+        if !matches!(appended, Ok(Ok(()))) {
+            return Err(Box::new(audit_unavailable(request_id)));
         }
+        // Last use is bookkeeping, not authority: the statement itself writes at
+        // most once a minute per key, and a failure here never denies a key that
+        // just authenticated.
+        let _ = self
+            .catalog
+            .touch_management_api_key(self.config.tenant_id.as_str(), &first.api_key_id)
+            .await;
         Ok(identity::VerifiedRequestIdentity {
             principal,
             browser: false,
             csrf_valid: true,
-            direct_apply,
+            direct_apply: false,
         })
+    }
+
+    async fn api_key_invalid(
+        self: &Arc<Self>,
+        request_id: &str,
+        action: AccessAction,
+    ) -> Box<EndpointResult> {
+        Box::new(
+            self.audited_error_async(
+                request_id.to_owned(),
+                None,
+                action,
+                None,
+                StatusCode::UNAUTHORIZED,
+                "CONTROL_API_KEY_INVALID",
+                "management authentication required",
+                false,
+                "authenticate",
+            )
+            .await,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4250,6 +4259,7 @@ impl ControlPlane {
                 target_agent_run_id: target_agent_run_id.map(AgentRunId::as_str),
                 target_job_id: target_job_id.map(JobId::as_str),
                 target_export_id: target_export_id.map(ExportId::as_str),
+                target_api_key_id: None,
                 query_digest,
                 outcome,
                 reason_code,
@@ -5311,6 +5321,12 @@ impl RateWindow {
         self.used += 1;
         true
     }
+
+    /// Gives one taken unit back. If the window rolled over in between, the
+    /// unit belonged to the previous window and the new one is left alone.
+    fn refund(&mut self) {
+        self.used = self.used.saturating_sub(1);
+    }
 }
 
 #[derive(Serialize)]
@@ -5363,6 +5379,8 @@ struct AccessPayload<'a> {
     target_job_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_export_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_api_key_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,
@@ -5440,6 +5458,9 @@ impl From<serde_json::Error> for ControlError {
 #[cfg(test)]
 mod tests {
     mod access_console_wire;
+    mod api_key_authz;
+    mod api_key_harness;
+    mod api_key_lifecycle;
     mod audit_publish;
     mod calibration_report_inspection;
     mod case_close;
@@ -7858,9 +7879,12 @@ mod tests {
         )
         .unwrap();
         let verifier = signing.verifying_key().unwrap();
+        // A segment normally holds one event (the fixtures rotate after every
+        // append) but an atomic batch, such as a key rotation's two events,
+        // closes as one segment; read every record in order.
         segments
             .into_iter()
-            .map(|segment| {
+            .flat_map(|segment| {
                 let path =
                     directory.join(format!("segment-{}.closed.xja", segment.producer_boot_id));
                 let manifest =
@@ -7876,10 +7900,15 @@ mod tests {
                     &verifier,
                 )
                 .unwrap();
-                let record = reader.next_record().unwrap().unwrap();
-                let event: Value = serde_json::from_slice(record.plaintext()).unwrap();
-                assert!(reader.next_record().unwrap().is_none());
-                event
+                let mut events = Vec::new();
+                while let Some(record) = reader.next_record().unwrap() {
+                    events.push(serde_json::from_slice::<Value>(record.plaintext()).unwrap());
+                }
+                assert!(
+                    !events.is_empty(),
+                    "a closed segment holds at least one event"
+                );
+                events
             })
             .collect()
     }
