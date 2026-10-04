@@ -231,3 +231,25 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 **无效 Key 的预算与审计。** 每个携带 `X-Xshield-API-Key` 的请求，在查询 Key 表和追加任何审计事件之前，先从进程级未认证预算取一个配额（与登录端点共用，容量等于 `XSHIELD_CONTROL_REQUESTS_PER_MINUTE`，窗口 60 秒）。预算耗尽时直接返回 429 `CONTROL_RATE_LIMITED`（`retryable=true`），既不查询数据库，也不写 journal。允许的尝试恰好留下一条 `console.agent_api_key.use` 终态事件：有效 Key 为 PASS；未知、过期、已撤销的 Key 为 DENY `CONTROL_API_KEY_INVALID`（响应 401 同码）；缺少或超长的 `X-Xshield-Agent-Run-Id` 为 DENY `CONTROL_AUTH_REQUIRED`（401）；Key 存储不可用为 ERROR `CONTROL_API_KEY_UNAVAILABLE`（503）。被拒绝的 Key 请求在此终结，路由不再运行，也不会追加第二条事件。有效 Key 在验证通过后归还所取配额，所以正常的 Agent 流量不消耗该预算；但垃圾 Key 耗尽预算期间，合法 Key 也会收到可重试的 429，直到窗口滚动。Bearer 与浏览器会话不受 Key 洪泛影响。此前垃圾 Key 每次都无预算地写一条持久事件，3000 个垃圾 Key 即可写满 1 MiB 的 journal，之后包括合法 Bearer 在内的所有请求都返回 503 `AUDIT_DURABILITY_FAILED`。
 
 **主体与审计。** Key 的主体在控制面内以 `apikey:{api_key_id}:{subject}` 表示，所有审计事件的 `subject_ref`、站点配置的 `updated_by` 与幂等摘要都因此带有 Key ID，且不可能与人员主体相同；明文 Key 永不进入审计或日志。`site.config.apply_direct` 的直接应用标志只在该 Key 对路径中那个站点持有该能力时才成立，其审批绕过的耐久记录由站点审批闸门负责。
+
+## 管理 API Key 的生命周期与审计
+
+**先审计后生效。** 创建、撤销和轮换都按同一顺序执行：校验请求，在数据库事务中暂存变更，追加持久审计事件，最后提交。审计追加失败时事务回滚并返回 503 `AUDIT_DURABILITY_FAILED`：不会出现没有创建记录的 Key，不会返回明文，撤销保持原状，轮换不会杀死旧 Key。列表也只在其访问事件已持久记录后才返回。提交本身在审计之后失败时返回 503 `CONTROL_API_KEY_UNAVAILABLE` 并追加一条 ERROR 事件，操作者以审计轨迹和列表核对结果。
+
+**事件。** 全部使用既有事件类型，管理者的 `subject_ref` 为浏览器会话主体，所作用的 Key 记录在强类型字段 `target_api_key_id`（`key_` + UUIDv7，见 [11.14](11-audit-event-contract.md)），指纹、前缀和明文不进入事件：
+
+| 操作 | 事件类型 | outcome / reason_code | target_api_key_id |
+|---|---|---|---|
+| 创建 | `console.agent_api_key.admin` | PASS `CONTROL_API_KEY_CREATED` | 新 Key |
+| 撤销 | `console.agent_api_key.admin` | PASS `CONTROL_API_KEY_REVOKED` | 被撤销的 Key |
+| 轮换 | `console.agent_api_key.admin`（同一请求、同一 journal 批次两条） | PASS `CONTROL_API_KEY_ROTATED_OUT`、PASS `CONTROL_API_KEY_ROTATED_IN` | 旧 Key、新 Key |
+| 列表 | `console.agent_api_key.list` | PASS `CONTROL_API_KEYS_LISTED` | 无 |
+| 拒绝或故障 | 同上 | DENY/ERROR，`CONTROL_API_KEY_REQUEST_INVALID`、`..._EXPIRY_INVALID`、`..._SCOPE_INVALID`、`..._SCOPE_FORBIDDEN`、`..._NOT_FOUND`、`..._UNAVAILABLE` 等 | 路径中已校验的 Key，未知时为空 |
+
+Key 的使用另有 `console.agent_api_key.use`（PASS 的主体为 `apikey:{api_key_id}:{subject}`，见上）。
+
+**轮换是一个事务。** `rotate` 先校验整个请求（JSON、过期、主体、scope、签发者权限），任何一项失败都返回 400/403 且旧 Key 不受影响；校验通过后在同一事务中撤销旧 Key 并写入新 Key，旧 Key 不存在或已撤销时返回 404 且不创建新 Key，并发的相同轮换恰有一个成功。此前代码先撤销旧 Key 再解析请求体，坏请求会留下已失效的旧 Key 而没有替换。
+
+**主体与显示名。** `subject` 是用于审计和列表的标签：1–128 个 ASCII 字符，取自字母、数字和 `. _ : @ / -`，且以字母或数字开头；`display_name` 为 1–128 个字符，可使用任何语言，但不得含控制、双向覆盖和零宽字符，也不得有首尾空白。不合规的输入直接返回 400 `CONTROL_API_KEY_SCOPE_INVALID`，不做静默规范化（空白、非 ASCII 字符会被用来冒充他人的名字）。`subject` 在租户内不要求唯一：凭证以 Key ID 区分，同一 `subject` 可以同时有多把有效 Key（轮换重叠、按能力拆分），审计主体因带有 Key ID 而始终可追溯到具体凭证。
+
+**最近使用。** 认证成功后写入 `last_used_at`，但同一 Key 每分钟最多写一次：节流在 UPDATE 语句内完成，被节流时语句不命中任何行也不产生新版本；失败认证和已撤销的 Key 不会更新。该写入只是记账，失败不会拒绝刚通过认证的 Key。

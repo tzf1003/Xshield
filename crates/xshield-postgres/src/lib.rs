@@ -119,8 +119,8 @@ pub use investigation_export::{
     InvestigationExportSnapshot, InvestigationExportWriteOutcome,
 };
 pub use management_api_key::{
-    ManagementApiKeyPrincipal, ManagementApiKeyRecord, ManagementApiKeyScope,
-    ManagementApiKeyScopeInput,
+    ManagementApiKeyRecord, ManagementApiKeyScope, ManagementApiKeyScopeInput, NewManagementApiKey,
+    PendingManagementApiKeyChange,
 };
 pub use management_session::{ManagementBrowserSession, ManagementOidcTransaction};
 pub use model_evaluation_admission::ModelEvaluationAdmissionLease;

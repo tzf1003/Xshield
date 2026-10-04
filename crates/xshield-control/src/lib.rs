@@ -3764,6 +3764,13 @@ impl ControlPlane {
         if !matches!(appended, Ok(Ok(()))) {
             return Err(Box::new(audit_unavailable(request_id)));
         }
+        // Last use is bookkeeping, not authority: the statement itself writes at
+        // most once a minute per key, and a failure here never denies a key that
+        // just authenticated.
+        let _ = self
+            .catalog
+            .touch_management_api_key(self.config.tenant_id.as_str(), &first.api_key_id)
+            .await;
         Ok(identity::VerifiedRequestIdentity {
             principal,
             browser: false,
@@ -4250,6 +4257,7 @@ impl ControlPlane {
                 target_agent_run_id: target_agent_run_id.map(AgentRunId::as_str),
                 target_job_id: target_job_id.map(JobId::as_str),
                 target_export_id: target_export_id.map(ExportId::as_str),
+                target_api_key_id: None,
                 query_digest,
                 outcome,
                 reason_code,
@@ -5364,6 +5372,8 @@ struct AccessPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_export_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_api_key_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     query_digest: Option<&'a str>,
     outcome: &'a str,
     reason_code: &'a str,
@@ -5441,6 +5451,8 @@ impl From<serde_json::Error> for ControlError {
 mod tests {
     mod access_console_wire;
     mod api_key_authz;
+    mod api_key_harness;
+    mod api_key_lifecycle;
     mod audit_publish;
     mod calibration_report_inspection;
     mod case_close;
@@ -7857,9 +7869,12 @@ mod tests {
         )
         .unwrap();
         let verifier = signing.verifying_key().unwrap();
+        // A segment normally holds one event (the fixtures rotate after every
+        // append) but an atomic batch, such as a key rotation's two events,
+        // closes as one segment; read every record in order.
         segments
             .into_iter()
-            .map(|segment| {
+            .flat_map(|segment| {
                 let path =
                     directory.join(format!("segment-{}.closed.xja", segment.producer_boot_id));
                 let manifest =
@@ -7875,10 +7890,15 @@ mod tests {
                     &verifier,
                 )
                 .unwrap();
-                let record = reader.next_record().unwrap().unwrap();
-                let event: Value = serde_json::from_slice(record.plaintext()).unwrap();
-                assert!(reader.next_record().unwrap().is_none());
-                event
+                let mut events = Vec::new();
+                while let Some(record) = reader.next_record().unwrap() {
+                    events.push(serde_json::from_slice::<Value>(record.plaintext()).unwrap());
+                }
+                assert!(
+                    !events.is_empty(),
+                    "a closed segment holds at least one event"
+                );
+                events
             })
             .collect()
     }

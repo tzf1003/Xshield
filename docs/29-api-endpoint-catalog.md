@@ -484,4 +484,6 @@ Key 以 `X-Xshield-API-Key` 与 `X-Xshield-Agent-Run-Id` 认证。Key 没有角�
 | `GET/PUT /control/v1/site-config` | 分别为 `site.read`、`site.config.write`，固定为控制面默认站点 |
 | `DELETE /sites/{id}`、`POST /sites/{id}/approve` | 无能力放行 |
 
+管理端点的生命周期契约：`POST /agent-api-keys` 返回 201 与一次性明文；`POST /agent-api-keys/{id}/revoke` 返回 200，未知、他租户或已撤销的 Key 返回 404 `CONTROL_API_KEY_NOT_FOUND`；`POST /agent-api-keys/{id}/rotate` 要求与创建相同的完整请求体，先校验后在单个事务中撤销旧 Key 并签发新 Key（响应形状与创建相同），校验失败返回 400/403 且旧 Key 保持有效，旧 Key 不存在或已撤销返回 404 且不产生新 Key。`GET /agent-api-keys` 返回租户内 Key 元数据（含节流后的 `last_used_at`，不含任何秘密）。四个端点都在持久审计事件追加成功后才提交变更或返回结果，审计失败返回 503 `AUDIT_DURABILITY_FAILED` 且无任何持久变更。成功事件为 `CONTROL_API_KEY_CREATED`、`CONTROL_API_KEY_REVOKED`、`CONTROL_API_KEY_ROTATED_OUT`/`CONTROL_API_KEY_ROTATED_IN`（同请求两条）和 `CONTROL_API_KEYS_LISTED`，作用的 Key 记录在 `target_api_key_id`。`subject` 为 1–128 个 ASCII 标签字符，`display_name` 为 1–128 个无控制/零宽/双向覆盖字符的文本，违规返回 400 `CONTROL_API_KEY_SCOPE_INVALID`，`subject` 不要求租户内唯一。无效 Key 的请求返回 401 `CONTROL_API_KEY_INVALID`，预算耗尽返回 429 `CONTROL_RATE_LIMITED`。
+
 签发（`POST /agent-api-keys`、`/rotate`）新增稳定拒绝码：400 `CONTROL_API_KEY_SCOPE_INVALID`（scope 形状、未知能力、`site.create` 绑定具体站点、`__tenant__` 搭配其他能力）与 403 `CONTROL_API_KEY_SCOPE_FORBIDDEN`（请求的能力超过签发会话自身可行使的权限）。四个管理端点只接受带 CSRF 的 OIDC 浏览器会话；静态机器 Bearer 与任何 Key 返回 403 `CONTROL_SCOPE_DENIED`。
