@@ -19,14 +19,9 @@ export function LedgerPanel({
   const identity = "binding" in response ? response.binding : null;
   const binding = grant?.binding ?? identity;
   const isGrant = "source_grant_id" in response;
-  const target = isGrant
-    ? response.source_grant_id
-    : response.source_binding_id;
+  const target = isGrant ? response.source_grant_id : response.source_binding_id;
   return (
-    <section
-      className="panel"
-      aria-label={isGrant ? "资格账本详情" : "身份绑定账本详情"}
-    >
+    <section className="panel" aria-label={isGrant ? "资格账本详情" : "身份绑定账本详情"}>
       <div className="panel-heading ledger-heading">
         <h2>{isGrant ? "资格账本快照" : "身份绑定账本快照"}</h2>
         <span className="mono">{target}</span>
@@ -34,16 +29,8 @@ export function LedgerPanel({
       <div className="detail-body">
         <Rows
           entries={[
-            [
-              "数据库时刻",
-              <span className="mono">
-                {response.as_of ?? "未返回观察时间"}
-              </span>,
-            ],
-            [
-              "管理请求 ID",
-              <span className="mono">{response.request_id}</span>,
-            ],
+            ["数据库时刻", <span className="mono">{response.as_of ?? "未返回观察时间"}</span>],
+            ["管理请求 ID", <span className="mono">{response.request_id}</span>],
           ]}
         />
         <p className="footnote">
@@ -52,9 +39,7 @@ export function LedgerPanel({
         {!response.found ? (
           <div className="ledger-missing" role="status">
             <h3>当前账本未找到</h3>
-            <p className="muted">
-              当前范围未返回账本记录；历史事件可通过独立检索继续核对。
-            </p>
+            <p className="muted">当前范围未返回账本记录；历史事件可通过独立检索继续核对。</p>
           </div>
         ) : (
           <div className={grant ? "ledger-grid" : "ledger-record"}>
@@ -66,28 +51,13 @@ export function LedgerPanel({
                     ["持久状态", grant.stored_status],
                     ["时间到期", grant.time_expired ? "已到期" : "未到期"],
                     ["发行身份代际", grant.auth_epoch],
-                    [
-                      "发行时间",
-                      <span className="mono">{grant.issued_at}</span>,
-                    ],
-                    [
-                      "到期时间",
-                      <span className="mono">{grant.expires_at}</span>,
-                    ],
+                    ["发行时间", <span className="mono">{grant.issued_at}</span>],
+                    ["到期时间", <span className="mono">{grant.expires_at}</span>],
                     ["资源类型", grant.resource_type],
-                    [
-                      "操作 ID",
-                      <span className="mono">{grant.operation_id}</span>,
-                    ],
+                    ["操作 ID", <span className="mono">{grant.operation_id}</span>],
                     ["视图 ID", <span className="mono">{grant.view_id}</span>],
-                    [
-                      "策略版本",
-                      <span className="mono">{grant.policy_revision}</span>,
-                    ],
-                    [
-                      "来源事件",
-                      <span className="mono">{grant.source_event_id}</span>,
-                    ],
+                    ["策略版本", <span className="mono">{grant.policy_revision}</span>],
+                    ["来源事件", <span className="mono">{grant.source_event_id}</span>],
                     [
                       "来源请求",
                       <button
@@ -124,31 +94,18 @@ export function LedgerPanel({
                     ["当前身份代际", binding.current_auth_epoch],
                     ...(grant
                       ? ([
-                          [
-                            "发行代际对比",
-                            grant.binding.epoch_matches_grant
-                              ? "一致"
-                              : "不一致",
-                          ],
+                          ["发行代际对比", grant.binding.epoch_matches_grant ? "一致" : "不一致"],
                         ] as [string, string][])
                       : []),
                     ...(identity
-                      ? ([["凭证代际", identity.credential_generation]] as [
-                          string,
-                          number,
-                        ][])
+                      ? ([["凭证代际", identity.credential_generation]] as [string, number][])
                       : []),
-                    [
-                      "到期时间",
-                      <span className="mono">{binding.expires_at}</span>,
-                    ],
+                    ["到期时间", <span className="mono">{binding.expires_at}</span>],
                     ...(identity
-                      ? ([
-                          [
-                            "更新时间",
-                            <span className="mono">{identity.updated_at}</span>,
-                          ],
-                        ] as [string, ReactNode][])
+                      ? ([["更新时间", <span className="mono">{identity.updated_at}</span>]] as [
+                          string,
+                          ReactNode,
+                        ][])
                       : []),
                   ]}
                 />
@@ -169,8 +126,7 @@ export function LedgerPanel({
             准备历史检索
           </button>
           <p className="footnote">
-            预填引用后需确认时间窗并提交。历史检索另需
-            Investigator；账本观察与历史索引各自查询。
+            预填引用后需确认时间窗并提交。历史检索另需 Investigator；账本观察与历史索引各自查询。
           </p>
         </div>
       </div>

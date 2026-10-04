@@ -31,8 +31,7 @@ test("causality plan validation keeps strict UTC and graph bounds", () => {
     assert.throws(
       () => validateCausalityPlan(mutation),
       (error: unknown) =>
-        error instanceof ApiError &&
-        error.code === "CONTROL_CAUSALITY_REQUEST_INVALID",
+        error instanceof ApiError && error.code === "CONTROL_CAUSALITY_REQUEST_INVALID",
     );
   }
 });

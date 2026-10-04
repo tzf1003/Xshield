@@ -34,14 +34,10 @@ function ExportFailure({ error }: { error: unknown }) {
   return error ? (
     <div className="notice danger" role="alert">
       <div>
-        {error instanceof ApiError
-          ? error.message
-          : "请求未完成，请核对结果后重试。"}
+        {error instanceof ApiError ? error.message : "请求未完成，请核对结果后重试。"}
         <small className="mono">
           {error instanceof ApiError ? error.code : "CONSOLE_REQUEST_FAILED"}
-          {error instanceof ApiError && error.requestId
-            ? ` · ${error.requestId}`
-            : ""}
+          {error instanceof ApiError && error.requestId ? ` · ${error.requestId}` : ""}
         </small>
       </div>
     </div>
@@ -58,7 +54,14 @@ function exportRows(result: InvestigationExport): [string, ReactNode][] {
     ["决策主体", result.decided_by ?? "尚未决策"],
     ["决策时间", result.decided_at ?? "尚未决策"],
     ["过期时间", result.expires_at ?? "不适用"],
-    ["包 artifact", result.package_artifact_id ? <span className="mono">{result.package_artifact_id}</span> : "尚未生成"],
+    [
+      "包 artifact",
+      result.package_artifact_id ? (
+        <span className="mono">{result.package_artifact_id}</span>
+      ) : (
+        "尚未生成"
+      ),
+    ],
     ["包大小", result.package_bytes === null ? "尚未生成" : `${result.package_bytes} bytes`],
     ["下载次数", `${result.download_count} / 2`],
     ["管理请求 ID", <span className="mono">{result.request_id}</span>],
@@ -110,9 +113,7 @@ export function ExportPanel({
       setDownloadError(null);
       setDownloadNotice(null);
       revokeDownload();
-      setAttempt((value) =>
-        value?.phase === "pending" ? { ...value, phase: "unknown" } : value,
-      );
+      setAttempt((value) => (value?.phase === "pending" ? { ...value, phase: "unknown" } : value));
     }
   }, [active]);
   const unresolved = attempt?.phase === "pending" || attempt?.phase === "unknown";
@@ -194,7 +195,8 @@ export function ExportPanel({
       ready.status !== "ready" ||
       ready.package_artifact_id === null ||
       ready.package_bytes === null
-    ) return;
+    )
+      return;
     const artifactId = ready.package_artifact_id;
     const packageBytes = ready.package_bytes;
     inFlight.current = true;
@@ -203,12 +205,7 @@ export function ExportPanel({
     revokeDownload();
     let handled = false;
     void onRun<ExportDownload>(
-      (api, signal) => api.downloadExport(
-        ready.export_id,
-        artifactId,
-        packageBytes,
-        signal,
-      ),
+      (api, signal) => api.downloadExport(ready.export_id, artifactId, packageBytes, signal),
       (result) => {
         handled = true;
         const url = URL.createObjectURL(result.blob);
@@ -231,14 +228,17 @@ export function ExportPanel({
   }
   const result = attempt?.result;
   const frozen = attempt?.request;
-  const validMutation = validIdempotencyKey(key) && validCaseText(reason) &&
+  const validMutation =
+    validIdempotencyKey(key) &&
+    validCaseText(reason) &&
     (action === "request" ? casePattern.test(caseId) : exportPattern.test(exportId));
 
   return (
     <div className="export-workbench">
       <div className="notice">
         <div>
-          导出只包含案件和证据目录的元数据，不包含证据正文、凭据或存储定位。申请人不能自批；审批和下载都需要最近两分钟内的 MFA 再认证。
+          导出只包含案件和证据目录的元数据，不包含证据正文、凭据或存储定位。申请人不能自批；审批和下载都需要最近两分钟内的
+          MFA 再认证。
           <p>写入操作会冻结原始参数与幂等键。结果未知时只使用“原样重试”确认，不能改键或改参数。</p>
         </div>
       </div>
@@ -250,11 +250,16 @@ export function ExportPanel({
           </div>
           <form className="case-form" onSubmit={submit}>
             <label htmlFor="export-action">导出操作</label>
-            <select id="export-action" value={action} disabled={Boolean(attempt)} onChange={(event) => {
-              setAction(event.target.value as Action);
-              setReason("");
-              setKey(newKey());
-            }}>
+            <select
+              id="export-action"
+              value={action}
+              disabled={Boolean(attempt)}
+              onChange={(event) => {
+                setAction(event.target.value as Action);
+                setReason("");
+                setKey(newKey());
+              }}
+            >
               <option value="request">申请元数据导出</option>
               <option value="approve">批准导出</option>
               <option value="deny">拒绝导出</option>
@@ -262,51 +267,178 @@ export function ExportPanel({
             {action === "request" ? (
               <>
                 <label htmlFor="export-case-id">导出案件 ID</label>
-                <input id="export-case-id" className="mono" value={caseId} disabled={Boolean(attempt)} onChange={(event) => setCaseId(event.target.value)} placeholder="case_…" autoComplete="off" spellCheck={false} maxLength={41} required />
+                <input
+                  id="export-case-id"
+                  className="mono"
+                  value={caseId}
+                  disabled={Boolean(attempt)}
+                  onChange={(event) => setCaseId(event.target.value)}
+                  placeholder="case_…"
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={41}
+                  required
+                />
                 <label htmlFor="export-purpose">导出调查用途</label>
               </>
             ) : (
               <>
                 <label htmlFor="export-id">导出 ID</label>
-                <input id="export-id" className="mono" value={exportId} disabled={Boolean(attempt)} onChange={(event) => setExportId(event.target.value)} placeholder="export_…" autoComplete="off" spellCheck={false} maxLength={44} required />
+                <input
+                  id="export-id"
+                  className="mono"
+                  value={exportId}
+                  disabled={Boolean(attempt)}
+                  onChange={(event) => setExportId(event.target.value)}
+                  placeholder="export_…"
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={44}
+                  required
+                />
                 <label htmlFor="export-reason">导出决策理由</label>
               </>
             )}
-            <textarea id={action === "request" ? "export-purpose" : "export-reason"} value={reason} disabled={Boolean(attempt)} onChange={(event) => setReason(event.target.value)} maxLength={512} required />
+            <textarea
+              id={action === "request" ? "export-purpose" : "export-reason"}
+              value={reason}
+              disabled={Boolean(attempt)}
+              onChange={(event) => setReason(event.target.value)}
+              maxLength={512}
+              required
+            />
             <p className="muted">1–512 UTF-8 字节，无首尾空白及控制字符。</p>
             <label htmlFor="export-key">导出幂等键</label>
-            <input id="export-key" className="mono" value={key} readOnly={Boolean(attempt)} onChange={(event) => setKey(event.target.value)} minLength={16} maxLength={128} autoComplete="off" spellCheck={false} required />
-            {!attempt && <button type="submit" disabled={busy || !validMutation}>{labels[action]}</button>}
+            <input
+              id="export-key"
+              className="mono"
+              value={key}
+              readOnly={Boolean(attempt)}
+              onChange={(event) => setKey(event.target.value)}
+              minLength={16}
+              maxLength={128}
+              autoComplete="off"
+              spellCheck={false}
+              required
+            />
+            {!attempt && (
+              <button type="submit" disabled={busy || !validMutation}>
+                {labels[action]}
+              </button>
+            )}
           </form>
           {attempt && (
             <div className="case-result" aria-live="polite">
-              <h3>{attempt.phase === "pending" ? "提交中，等待结果" : attempt.phase === "unknown" ? "操作结果未知" : attempt.phase === "rejected" ? "本次请求被拒绝" : `${labels[attempt.request.action]}已确认`}</h3>
+              <h3>
+                {attempt.phase === "pending"
+                  ? "提交中，等待结果"
+                  : attempt.phase === "unknown"
+                    ? "操作结果未知"
+                    : attempt.phase === "rejected"
+                      ? "本次请求被拒绝"
+                      : `${labels[attempt.request.action]}已确认`}
+              </h3>
               <ExportFailure error={attempt.error} />
-              {unresolved && <div className="notice warning">服务端可能已经提交。保留原幂等键与参数，使用下方“原样重试”确认结果。</div>}
-              <Rows entries={[["原幂等键", <span className="mono">{frozen?.key}</span>], ["冻结参数", <pre className="mono case-payload">{JSON.stringify(frozen?.action === "request" ? { case_id: frozen.caseId, purpose: frozen.reason } : { reason: frozen?.reason }, null, 2)}</pre>]]} />
+              {unresolved && (
+                <div className="notice warning">
+                  服务端可能已经提交。保留原幂等键与参数，使用下方“原样重试”确认结果。
+                </div>
+              )}
+              <Rows
+                entries={[
+                  ["原幂等键", <span className="mono">{frozen?.key}</span>],
+                  [
+                    "冻结参数",
+                    <pre className="mono case-payload">
+                      {JSON.stringify(
+                        frozen?.action === "request"
+                          ? { case_id: frozen.caseId, purpose: frozen.reason }
+                          : { reason: frozen?.reason },
+                        null,
+                        2,
+                      )}
+                    </pre>,
+                  ],
+                ]}
+              />
               {result && <Rows entries={exportRows(result)} />}
               <div className="case-actions">
-                <button className="outline" disabled={busy || attempt.phase === "pending"} onClick={() => void mutate(attempt.request)}>原样重试</button>
-                <button className="text-button" disabled={busy || unresolved} onClick={() => { setAttempt(null); setReason(""); setKey(newKey()); }}>准备新操作</button>
+                <button
+                  className="outline"
+                  disabled={busy || attempt.phase === "pending"}
+                  onClick={() => void mutate(attempt.request)}
+                >
+                  原样重试
+                </button>
+                <button
+                  className="text-button"
+                  disabled={busy || unresolved}
+                  onClick={() => {
+                    setAttempt(null);
+                    setReason("");
+                    setKey(newKey());
+                  }}
+                >
+                  准备新操作
+                </button>
               </div>
             </div>
           )}
         </section>
         <section className="panel" aria-label="导出状态" aria-busy={busy}>
-          <div className="panel-heading"><h2>导出状态</h2><span className="muted">不读取包正文</span></div>
-          <form className="case-form" onSubmit={(event) => { event.preventDefault(); readStatus(); }}>
+          <div className="panel-heading">
+            <h2>导出状态</h2>
+            <span className="muted">不读取包正文</span>
+          </div>
+          <form
+            className="case-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              readStatus();
+            }}
+          >
             <label htmlFor="export-status-id">导出状态 ID</label>
-            <input id="export-status-id" className="mono" value={exportId} onChange={(event) => { clearInspection(); setExportId(event.target.value); }} placeholder="export_…" autoComplete="off" spellCheck={false} maxLength={44} required />
-            <button type="submit" disabled={busy || !exportPattern.test(exportId)}>读取状态</button>
+            <input
+              id="export-status-id"
+              className="mono"
+              value={exportId}
+              onChange={(event) => {
+                clearInspection();
+                setExportId(event.target.value);
+              }}
+              placeholder="export_…"
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={44}
+              required
+            />
+            <button type="submit" disabled={busy || !exportPattern.test(exportId)}>
+              读取状态
+            </button>
           </form>
           <ExportFailure error={readError} />
-          {inspection && <div className="case-result"><Rows entries={exportRows(inspection)} />
-            {inspection.status === "ready" ? <>
-              <button type="button" onClick={download} disabled={busy}>下载元数据包</button>
-              <ExportFailure error={downloadError} />
-              {downloadNotice && <p className="notice" role="status">{downloadNotice}</p>}
-            </> : <p className="footnote">只有 ready 状态允许按需下载；状态读取本身不产生内容能力。</p>}
-          </div>}
+          {inspection && (
+            <div className="case-result">
+              <Rows entries={exportRows(inspection)} />
+              {inspection.status === "ready" ? (
+                <>
+                  <button type="button" onClick={download} disabled={busy}>
+                    下载元数据包
+                  </button>
+                  <ExportFailure error={downloadError} />
+                  {downloadNotice && (
+                    <p className="notice" role="status">
+                      {downloadNotice}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="footnote">
+                  只有 ready 状态允许按需下载；状态读取本身不产生内容能力。
+                </p>
+              )}
+            </div>
+          )}
         </section>
       </div>
     </div>

@@ -4,10 +4,7 @@ import type { CausalityNode, CausalityResponse } from "./search";
 type Problem = { message: string; code: string; requestId?: string | null };
 type CausalityLevel = { depth: number; nodes: CausalityNode[] };
 
-function levels(
-  nodes: CausalityNode[],
-  direction: CausalityNode["direction"],
-): CausalityLevel[] {
+function levels(nodes: CausalityNode[], direction: CausalityNode["direction"]): CausalityLevel[] {
   const byDepth = new Map<number, CausalityNode[]>();
   for (const node of nodes) {
     if (node.direction !== direction) continue;
@@ -20,13 +17,7 @@ function levels(
     .map(([depth, level]) => ({ depth, nodes: level }));
 }
 
-function CausalityQueryBranch({
-  label,
-  nodes,
-}: {
-  label: string;
-  nodes: CausalityLevel[];
-}) {
+function CausalityQueryBranch({ label, nodes }: { label: string; nodes: CausalityLevel[] }) {
   return (
     <section className="causality-branch" aria-label={label}>
       <h5>{label}</h5>
@@ -75,10 +66,8 @@ export function CausalityPanel({
   const [direction, setDirection] = useState<"both" | "predecessors" | "successors">("both");
   const [maxDepth, setMaxDepth] = useState("2");
   const [maxNodes, setMaxNodes] = useState("16");
-  const visibleResponse =
-    response?.root_event_id === eventId ? response : null;
-  const utc = (value: string) =>
-    `${value.length === 16 ? `${value}:00` : value}Z`;
+  const visibleResponse = response?.root_event_id === eventId ? response : null;
+  const utc = (value: string) => `${value.length === 16 ? `${value}:00` : value}Z`;
 
   return (
     <section

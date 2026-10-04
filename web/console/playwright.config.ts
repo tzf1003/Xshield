@@ -16,18 +16,29 @@ export default defineConfig({
   reporter: "list",
   use: { baseURL: machineOrigin, trace: "off", screenshot: "off" },
   projects: [
-    { name: "chromium", testIgnore: "**/browser-session.spec.ts", use: { ...devices["Desktop Chrome"] } },
-    { name: "browser-session", testMatch: "**/browser-session.spec.ts", use: { ...devices["Desktop Chrome"], baseURL: sessionOrigin } },
+    {
+      name: "chromium",
+      testIgnore: "**/browser-session.spec.ts",
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "browser-session",
+      testMatch: "**/browser-session.spec.ts",
+      use: { ...devices["Desktop Chrome"], baseURL: sessionOrigin },
+    },
   ],
-  webServer: [{
-    command: `VITE_XSHIELD_E2E_MACHINE_LOGIN=1 npx vite --host 127.0.0.1 --port ${machinePort} --strictPort`,
-    url: machineOrigin,
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-  }, {
-    command: `VITE_XSHIELD_E2E_MACHINE_LOGIN=0 npx vite --host 127.0.0.1 --port ${sessionPort} --strictPort`,
-    url: sessionOrigin,
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-  }],
+  webServer: [
+    {
+      command: `VITE_XSHIELD_E2E_MACHINE_LOGIN=1 npx vite --host 127.0.0.1 --port ${machinePort} --strictPort`,
+      url: machineOrigin,
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+    {
+      command: `VITE_XSHIELD_E2E_MACHINE_LOGIN=0 npx vite --host 127.0.0.1 --port ${sessionPort} --strictPort`,
+      url: sessionOrigin,
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+  ],
 });

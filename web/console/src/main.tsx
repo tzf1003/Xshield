@@ -6,7 +6,8 @@ import { App } from "./App";
 import "./style.css";
 
 const root = document.getElementById("root");
-const cspNonce = document.querySelector('meta[name="xshield-csp-nonce"]')?.getAttribute("content") ?? undefined;
+const cspNonce =
+  document.querySelector('meta[name="xshield-csp-nonce"]')?.getAttribute("content") ?? undefined;
 if (root)
   createRoot(root).render(
     <StrictMode>
@@ -28,7 +29,8 @@ if (root)
             colorBgLayout: "#f5f7fa",
             borderRadius: 8,
             controlHeight: 40,
-            fontFamily: "Inter, -apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif",
+            fontFamily:
+              "Inter, -apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif",
           },
         }}
       >

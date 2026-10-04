@@ -28,9 +28,7 @@ export function exportFixture(
     decided_by: decided ? "synthetic-approver" : null,
     decided_at: decided ? "2026-09-20T08:10:00.000Z" : null,
     decision_reason: decided ? "独立复核通过" : null,
-    expires_at: ["approved", "ready"].includes(status)
-      ? "2026-09-20T08:25:00.000Z"
-      : null,
+    expires_at: ["approved", "ready"].includes(status) ? "2026-09-20T08:25:00.000Z" : null,
     package_artifact_id: ready ? EXPORT_ARTIFACT_ID : null,
     package_request_id: ready ? EXPORT_PACKAGE_REQUEST_ID : null,
     package_digest: ready ? "a".repeat(64) : null,

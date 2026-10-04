@@ -41,7 +41,14 @@ try {
       assert.equal(raw.tenant_id, tenant);
       assert.equal(raw.site_id, "site_a");
     }
-    for (const excluded of ["locator", "key_ref", "content_base64", "idempotency_digest", "request_digest", "payload_json"])
+    for (const excluded of [
+      "locator",
+      "key_ref",
+      "content_base64",
+      "idempotency_digest",
+      "request_digest",
+      "payload_json",
+    ])
       assert.ok(!JSON.stringify(raw).includes(excluded));
     return response;
   };
@@ -56,27 +63,60 @@ try {
   const reason = "Wire sensitive retention reason";
   const releaseReason = "Wire sensitive release reason";
   phase = 2;
-  const caseId = (await client.createCase("Wire retention investigation", "hold-wire-case-key")).case_id;
-  const otherCase = (await client.createCase("Wire other investigation", "hold-wire-other-case-key")).case_id;
+  const caseId = (await client.createCase("Wire retention investigation", "hold-wire-case-key"))
+    .case_id;
+  const otherCase = (
+    await client.createCase("Wire other investigation", "hold-wire-other-case-key")
+  ).case_id;
   await client.addCaseItem(caseId, artifact, "hold-wire-item-key");
   origin = admin;
   assert.deepEqual((await client.evidenceHolds(caseId)).items, []);
-  const held = await client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-create-key");
+  const held = await client.createEvidenceHold(
+    caseId,
+    artifact,
+    reason,
+    until,
+    "hold-wire-create-key",
+  );
   assert.equal(held.created_by, "console-hold-admin");
   assert.equal(held.reason, reason);
   assert.equal(held.hold_until, until);
   assert.equal(held.replayed, false);
   assert.equal(held.released_event_id, null);
-  const replay = await client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-create-key");
+  const replay = await client.createEvidenceHold(
+    caseId,
+    artifact,
+    reason,
+    until,
+    "hold-wire-create-key",
+  );
   assert.equal(replay.replayed, true);
   assert.equal(replay.hold_id, held.hold_id);
   assert.equal(replay.created_at, held.created_at);
   phase = 3;
-  await assert.rejects(client.createEvidenceHold(caseId, artifact, "Changed hold reason", until, "hold-wire-create-key"), fails("CONTROL_EVIDENCE_HOLD_CONFLICT", 409));
+  await assert.rejects(
+    client.createEvidenceHold(
+      caseId,
+      artifact,
+      "Changed hold reason",
+      until,
+      "hold-wire-create-key",
+    ),
+    fails("CONTROL_EVIDENCE_HOLD_CONFLICT", 409),
+  );
   const later = new Date(Date.parse(until) + 3_600_000).toISOString();
-  await assert.rejects(client.createEvidenceHold(caseId, artifact, reason, later, "hold-wire-create-key"), fails("CONTROL_EVIDENCE_HOLD_CONFLICT", 409));
-  await assert.rejects(client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-natural-conflict"), fails("CONTROL_EVIDENCE_HOLD_CONFLICT", 409));
-  await assert.rejects(client.createEvidenceHold(otherCase, artifact, reason, until, "hold-wire-nonmember-key"), fails("CONTROL_EVIDENCE_HOLD_TARGET_UNAVAILABLE", 404));
+  await assert.rejects(
+    client.createEvidenceHold(caseId, artifact, reason, later, "hold-wire-create-key"),
+    fails("CONTROL_EVIDENCE_HOLD_CONFLICT", 409),
+  );
+  await assert.rejects(
+    client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-natural-conflict"),
+    fails("CONTROL_EVIDENCE_HOLD_CONFLICT", 409),
+  );
+  await assert.rejects(
+    client.createEvidenceHold(otherCase, artifact, reason, until, "hold-wire-nonmember-key"),
+    fails("CONTROL_EVIDENCE_HOLD_TARGET_UNAVAILABLE", 404),
+  );
   phase = 4;
   for (const deniedOrigin of [owner, observer]) {
     origin = deniedOrigin;
@@ -84,7 +124,8 @@ try {
       () => client.evidenceHolds(caseId),
       () => client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-denied-key"),
       () => client.releaseEvidenceHold(held.hold_id, releaseReason, "hold-wire-denied-key"),
-    ]) await assert.rejects(action(), fails("CONTROL_SCOPE_DENIED", 403));
+    ])
+      await assert.rejects(action(), fails("CONTROL_SCOPE_DENIED", 403));
   }
   for (const deniedOrigin of [foreignTenant, foreignSite]) {
     origin = deniedOrigin;
@@ -92,22 +133,40 @@ try {
       () => client.evidenceHolds(caseId),
       () => client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-foreign-key"),
       () => client.releaseEvidenceHold(held.hold_id, releaseReason, "hold-wire-foreign-key"),
-    ]) await assert.rejects(action(), fails("CONTROL_EVIDENCE_HOLD_TARGET_UNAVAILABLE", 404));
+    ])
+      await assert.rejects(action(), fails("CONTROL_EVIDENCE_HOLD_TARGET_UNAVAILABLE", 404));
   }
   phase = 5;
   origin = admin;
-  const released = await client.releaseEvidenceHold(held.hold_id, releaseReason, "hold-wire-release-key");
+  const released = await client.releaseEvidenceHold(
+    held.hold_id,
+    releaseReason,
+    "hold-wire-release-key",
+  );
   assert.equal(released.replayed, false);
   assert.equal(released.released_by, "console-hold-admin");
   assert.equal(released.released_reason, releaseReason);
   assert.ok(released.released_at);
   assert.ok(released.released_event_id);
-  const releaseReplay = await client.releaseEvidenceHold(held.hold_id, releaseReason, "hold-wire-release-key");
+  const releaseReplay = await client.releaseEvidenceHold(
+    held.hold_id,
+    releaseReason,
+    "hold-wire-release-key",
+  );
   assert.equal(releaseReplay.replayed, true);
   assert.equal(releaseReplay.released_event_id, released.released_event_id);
   assert.equal(releaseReplay.released_at, released.released_at);
-  await assert.rejects(client.releaseEvidenceHold(held.hold_id, "Changed release reason", "hold-wire-release-key"), fails("CONTROL_EVIDENCE_HOLD_CONFLICT", 409));
-  const renewed = await client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-renew-key");
+  await assert.rejects(
+    client.releaseEvidenceHold(held.hold_id, "Changed release reason", "hold-wire-release-key"),
+    fails("CONTROL_EVIDENCE_HOLD_CONFLICT", 409),
+  );
+  const renewed = await client.createEvidenceHold(
+    caseId,
+    artifact,
+    reason,
+    until,
+    "hold-wire-renew-key",
+  );
   assert.notEqual(renewed.hold_id, held.hold_id);
   phase = 6;
   const history = await client.evidenceHolds(caseId, undefined, new AbortController().signal);
@@ -123,16 +182,35 @@ try {
   assert.equal(next.items[0]?.released_event_id, null);
   assert.equal(next.truncated, false);
   assert.equal(next.next_cursor, null);
-  await assert.rejects(client.evidenceHolds(otherCase, history.next_cursor), fails("CONTROL_CURSOR_INVALID", 400));
+  await assert.rejects(
+    client.evidenceHolds(otherCase, history.next_cursor),
+    fails("CONTROL_CURSOR_INVALID", 400),
+  );
   phase = 7;
   origin = owner;
   await client.closeCase(caseId, "Wire retention case complete", "hold-wire-close-key");
   origin = admin;
   assert.equal((await client.evidenceHolds(caseId)).case_status, "closed");
-  await assert.rejects(client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-closed-key"), fails("CONTROL_EVIDENCE_HOLD_TARGET_UNAVAILABLE", 404));
-  const closedRelease = await client.releaseEvidenceHold(renewed.hold_id, releaseReason, "hold-wire-closed-release-key");
+  await assert.rejects(
+    client.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-closed-key"),
+    fails("CONTROL_EVIDENCE_HOLD_TARGET_UNAVAILABLE", 404),
+  );
+  const closedRelease = await client.releaseEvidenceHold(
+    renewed.hold_id,
+    releaseReason,
+    "hold-wire-closed-release-key",
+  );
   assert.equal(closedRelease.replayed, false);
-  assert.equal((await client.releaseEvidenceHold(renewed.hold_id, releaseReason, "hold-wire-closed-release-key")).replayed, true);
+  assert.equal(
+    (
+      await client.releaseEvidenceHold(
+        renewed.hold_id,
+        releaseReason,
+        "hold-wire-closed-release-key",
+      )
+    ).replayed,
+    true,
+  );
   const closedHistory = await client.evidenceHolds(caseId);
   const closedNext = await client.evidenceHolds(caseId, closedHistory.next_cursor!);
   assert.equal(closedNext.case_status, "closed");
@@ -143,7 +221,8 @@ try {
     () => invalid.evidenceHolds(caseId),
     () => invalid.createEvidenceHold(caseId, artifact, reason, until, "hold-wire-invalid-key"),
     () => invalid.releaseEvidenceHold(held.hold_id, releaseReason, "hold-wire-invalid-key"),
-  ]) await assert.rejects(action(), fails("CONTROL_AUTH_REQUIRED", 401));
+  ])
+    await assert.rejects(action(), fails("CONTROL_AUTH_REQUIRED", 401));
 } catch {
   // Node communicates the failed phase without exposing server bodies or credentials.
   process.exitCode = phase;

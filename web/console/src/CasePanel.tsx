@@ -6,12 +6,7 @@ import { ApiError } from "./api";
 import type { ControlClient, Envelope, JobResponse } from "./api";
 import { artifactPattern } from "./api-contract";
 import { casePattern, validCaseText, validIdempotencyKey } from "./cases";
-import type {
-  CaseCollection,
-  CaseCreated,
-  CaseItemAdded,
-  CaseClosed,
-} from "./cases";
+import type { CaseCollection, CaseCreated, CaseItemAdded, CaseClosed } from "./cases";
 import { Rows } from "./panels";
 import { CaseList } from "./CaseList";
 
@@ -55,14 +50,10 @@ function CaseFailure({ error }: { error: unknown }) {
   return error ? (
     <div className="notice danger" role="alert">
       <div>
-        {error instanceof ApiError
-          ? error.message
-          : "请求未完成，请核对结果后重试。"}
+        {error instanceof ApiError ? error.message : "请求未完成，请核对结果后重试。"}
         <small className="mono">
           {error instanceof ApiError ? error.code : "CONSOLE_REQUEST_FAILED"}
-          {error instanceof ApiError && error.requestId
-            ? ` · ${error.requestId}`
-            : ""}
+          {error instanceof ApiError && error.requestId ? ` · ${error.requestId}` : ""}
         </small>
       </div>
     </div>
@@ -111,12 +102,8 @@ export function CasePanel({
       setAnalysis(null);
     }
   }, [active]);
-  const mutationUnresolved =
-    attempt?.phase === "pending" ||
-    attempt?.phase === "unknown";
-  const analysisUnresolved =
-    analysis?.phase === "pending" ||
-    analysis?.phase === "unknown";
+  const mutationUnresolved = attempt?.phase === "pending" || attempt?.phase === "unknown";
+  const analysisUnresolved = analysis?.phase === "pending" || analysis?.phase === "unknown";
   const unresolved = mutationUnresolved || analysisUnresolved;
   useEffect(() => {
     if (!unresolved) return;
@@ -155,12 +142,7 @@ export function CasePanel({
         request.action === "create"
           ? api.createCase(request.value, request.key, signal)
           : request.action === "add"
-            ? api.addCaseItem(
-                request.caseId,
-                request.value,
-                request.key,
-                signal,
-              )
+            ? api.addCaseItem(request.caseId, request.value, request.key, signal)
             : api.closeCase(request.caseId, request.value, request.key, signal),
       (result) => {
         handled = true;
@@ -215,8 +197,7 @@ export function CasePanel({
       },
     );
     inFlight.current = false;
-    if (mounted.current && !handled)
-      setAnalysis({ request, phase: "unknown" });
+    if (mounted.current && !handled) setAnalysis({ request, phase: "unknown" });
   }
 
   async function readAnalysis(jobId: string) {
@@ -239,19 +220,13 @@ export function CasePanel({
       },
     );
     inFlight.current = false;
-    if (mounted.current && !handled)
-      setAnalysis({ request, phase: "unknown", result: previous });
+    if (mounted.current && !handled) setAnalysis({ request, phase: "unknown", result: previous });
   }
 
   function submitAnalysis(event: FormEvent) {
     event.preventDefault();
     const target = collection?.case.case_id ?? caseId;
-    if (
-      analysis ||
-      !casePattern.test(target) ||
-      !validIdempotencyKey(analysisKey)
-    )
-      return;
+    if (analysis || !casePattern.test(target) || !validIdempotencyKey(analysisKey)) return;
     void analyze({ caseId: target, key: analysisKey });
   }
 
@@ -261,14 +236,11 @@ export function CasePanel({
   }
 
   const openCase = collection?.case.status === "open";
-  const canTarget =
-    action === "create" || (action === "add" ? openCase : Boolean(collection));
-  const validValue =
-    action === "add" ? artifactPattern.test(value) : validCaseText(value);
+  const canTarget = action === "create" || (action === "add" ? openCase : Boolean(collection));
+  const validValue = action === "add" ? artifactPattern.test(value) : validCaseText(value);
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (attempt || !validValue || !validIdempotencyKey(key) || !canTarget)
-      return;
+    if (attempt || !validValue || !validIdempotencyKey(key) || !canTarget) return;
     void mutate({
       action,
       key,
@@ -345,9 +317,7 @@ export function CasePanel({
               <p className="muted">
                 目标案件：
                 <span className="mono">
-                  {frozen?.caseId ??
-                    collection?.case.case_id ??
-                    "请先读取本人开放案件"}
+                  {frozen?.caseId ?? collection?.case.case_id ?? "请先读取本人开放案件"}
                 </span>
               </p>
             )}
@@ -381,8 +351,7 @@ export function CasePanel({
               required
             />
             <p className="muted">
-              16–128 个 ASCII 字母、数字或
-              -_.:；恢复原请求时填写保存的原键及原参数。
+              16–128 个 ASCII 字母、数字或 -_.:；恢复原请求时填写保存的原键及原参数。
             </p>
             {action === "close" && (
               <div className="notice warning">
@@ -397,9 +366,7 @@ export function CasePanel({
             {!attempt && (
               <button
                 type="submit"
-                disabled={
-                  busy || !validValue || !validIdempotencyKey(key) || !canTarget
-                }
+                disabled={busy || !validValue || !validIdempotencyKey(key) || !canTarget}
               >
                 {actions[action]}
               </button>
@@ -443,16 +410,8 @@ export function CasePanel({
                 <Rows
                   entries={[
                     ["案件 ID", <span className="mono">{result.case_id}</span>],
-                    [
-                      "管理请求 ID",
-                      <span className="mono">{result.request_id}</span>,
-                    ],
-                    [
-                      "replayed",
-                      result.replayed
-                        ? "true（返回原操作结果）"
-                        : "false（首次提交）",
-                    ],
+                    ["管理请求 ID", <span className="mono">{result.request_id}</span>],
+                    ["replayed", result.replayed ? "true（返回原操作结果）" : "false（首次提交）"],
                     ...("status" in result
                       ? [["响应案件状态", result.status] as [string, ReactNode]]
                       : []),
@@ -468,10 +427,7 @@ export function CasePanel({
                     ],
                     ...("artifact_id" in result
                       ? ([
-                          [
-                            "证据 ID",
-                            <span className="mono">{result.artifact_id}</span>,
-                          ],
+                          ["证据 ID", <span className="mono">{result.artifact_id}</span>],
                           ["加入者", result.added_by],
                         ] as [string, ReactNode][])
                       : []),
@@ -536,11 +492,7 @@ export function CasePanel({
             />
             <button
               type="submit"
-              disabled={
-                busy ||
-                attempt?.phase === "pending" ||
-                !casePattern.test(caseId)
-              }
+              disabled={busy || attempt?.phase === "pending" || !casePattern.test(caseId)}
             >
               读取案件 / 刷新首页
             </button>
@@ -551,25 +503,11 @@ export function CasePanel({
               <div className="detail-body case-snapshot">
                 <Rows
                   entries={[
-                    [
-                      "案件状态",
-                      <span className="badge">{collection.case.status}</span>,
-                    ],
+                    ["案件状态", <span className="badge">{collection.case.status}</span>],
                     ["调查目的", collection.case.purpose],
-                    [
-                      "创建时间",
-                      <span className="mono">
-                        {collection.case.created_at}
-                      </span>,
-                    ],
-                    [
-                      "数据库 as_of",
-                      <span className="mono">{collection.as_of}</span>,
-                    ],
-                    [
-                      "管理请求 ID",
-                      <span className="mono">{collection.request_id}</span>,
-                    ],
+                    ["创建时间", <span className="mono">{collection.case.created_at}</span>],
+                    ["数据库 as_of", <span className="mono">{collection.as_of}</span>],
+                    ["管理请求 ID", <span className="mono">{collection.request_id}</span>],
                   ]}
                 />
                 <p className="footnote">
@@ -577,9 +515,7 @@ export function CasePanel({
                   状态仅描述目录，不证明原文读取权或对象完整性。
                 </p>
                 {collection.case.status === "closed" && (
-                  <p className="notice warning">
-                    案件已关闭，历史证据引用仍可浏览。
-                  </p>
+                  <p className="notice warning">案件已关闭，历史证据引用仍可浏览。</p>
                 )}
                 <form className="case-analysis" onSubmit={submitAnalysis}>
                   <h3>案件清单分析</h3>
@@ -626,23 +562,13 @@ export function CasePanel({
                       {analysis.result?.job && (
                         <Rows
                           entries={[
-                            [
-                              "任务 ID",
-                              <span className="mono">
-                                {analysis.result.job.job_id}
-                              </span>,
-                            ],
+                            ["任务 ID", <span className="mono">{analysis.result.job.job_id}</span>],
                             ["任务状态", analysis.result.job.status],
                             ["引用总数", analysis.result.job.artifact_count],
-                            [
-                              "当前有效引用",
-                              analysis.result.job.active_artifact_count,
-                            ],
+                            ["当前有效引用", analysis.result.job.active_artifact_count],
                             [
                               "管理请求 ID",
-                              <span className="mono">
-                                {analysis.result.request_id}
-                              </span>,
+                              <span className="mono">{analysis.result.request_id}</span>,
                             ],
                           ]}
                         />
@@ -664,9 +590,7 @@ export function CasePanel({
                             type="button"
                             className="text-button"
                             disabled={busy}
-                            onClick={() =>
-                              onHistory(analysis.result!.job!.job_id)
-                            }
+                            onClick={() => onHistory(analysis.result!.job!.job_id)}
                           >
                             准备任务历史检索
                           </button>
@@ -692,22 +616,15 @@ export function CasePanel({
                     <article className="case-item" key={item.artifact_id}>
                       <strong className="mono">{item.artifact_id}</strong>
                       <span className="badge">
-                        {item.catalog_status} ·{" "}
-                        {catalogLabels[item.catalog_status]}
+                        {item.catalog_status} · {catalogLabels[item.catalog_status]}
                       </span>
                       <Rows
                         entries={[
                           ["加入者", item.added_by],
-                          [
-                            "加入时间",
-                            <span className="mono">{item.added_at}</span>,
-                          ],
+                          ["加入时间", <span className="mono">{item.added_at}</span>],
                         ]}
                       />
-                      <button
-                        className="text-button"
-                        onClick={() => onArtifact(item.artifact_id)}
-                      >
+                      <button className="text-button" onClick={() => onArtifact(item.artifact_id)}>
                         查看元数据（需 Observer）
                       </button>
                     </article>

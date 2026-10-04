@@ -14,12 +14,8 @@ try {
     return url;
   };
   let origin = loopback(process.env.XSHIELD_CONSOLE_TEST_ORIGIN);
-  const observerOrigin = loopback(
-    process.env.XSHIELD_CONSOLE_TEST_OBSERVER_ORIGIN,
-  );
-  const artifacts = (process.env.XSHIELD_CONSOLE_TEST_ARTIFACTS ?? "")
-    .split(",")
-    .sort();
+  const observerOrigin = loopback(process.env.XSHIELD_CONSOLE_TEST_OBSERVER_ORIGIN);
+  const artifacts = (process.env.XSHIELD_CONSOLE_TEST_ARTIFACTS ?? "").split(",").sort();
   assert.equal(artifacts.length, 2);
   const first = artifacts[0]!;
   const second = artifacts[1]!;
@@ -68,10 +64,7 @@ try {
           Object.keys(item).sort(),
           ["case_id", "status", "purpose", "created_at"].sort(),
         );
-        assert.match(
-          item.created_at,
-          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
-        );
+        assert.match(item.created_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
         assert.notEqual(item.case_id, foreignCase);
       }
     }
@@ -86,9 +79,7 @@ try {
       assert.ok(!JSON.stringify(raw).includes(excluded));
     return response;
   };
-  const client = new ControlClient(
-    process.env.XSHIELD_CONSOLE_TEST_TOKEN ?? "",
-  );
+  const client = new ControlClient(process.env.XSHIELD_CONSOLE_TEST_TOKEN ?? "");
   const fails = (code: string, status: number) => (error: unknown) => {
     assert.ok(error instanceof ApiError);
     assert.equal(error.code, code);
@@ -110,17 +101,11 @@ try {
   assert.equal(initial.next_cursor, null);
   assert.equal(initial.truncated, false);
   phase = 3;
-  const created = await client.createCase(
-    "Wire investigation",
-    "case-wire-create-key",
-  );
+  const created = await client.createCase("Wire investigation", "case-wire-create-key");
   assert.equal(created.replayed, false);
   assert.equal(created.status, "open");
   const id = created.case_id;
-  const replay = await client.createCase(
-    "Wire investigation",
-    "case-wire-create-key",
-  );
+  const replay = await client.createCase("Wire investigation", "case-wire-create-key");
   assert.equal(replay.case_id, id);
   assert.equal(replay.created_at, created.created_at);
   assert.equal(replay.replayed, true);
@@ -149,10 +134,7 @@ try {
   assert.equal(older.truncated, false);
   assert.equal(older.next_cursor, null);
   await assert.rejects(
-    client.cases(
-      cases.next_cursor.slice(0, -1) +
-        (cases.next_cursor.endsWith("0") ? "1" : "0"),
-    ),
+    client.cases(cases.next_cursor.slice(0, -1) + (cases.next_cursor.endsWith("0") ? "1" : "0")),
     fails("CONTROL_CURSOR_INVALID", 400),
   );
   phase = 4;
@@ -160,11 +142,7 @@ try {
   const added = await client.addCaseItem(id, first, "case-wire-first-item");
   assert.equal(added.artifact_id, first);
   assert.equal(added.replayed, false);
-  const addedReplay = await client.addCaseItem(
-    id,
-    first,
-    "case-wire-first-item",
-  );
+  const addedReplay = await client.addCaseItem(id, first, "case-wire-first-item");
   assert.equal(addedReplay.added_at, added.added_at);
   assert.equal(addedReplay.replayed, true);
   await client.addCaseItem(id, second, "case-wire-second-item");
@@ -181,30 +159,14 @@ try {
   const last = await client.caseItems(id, page.next_cursor);
   assert.equal(last.items[0]?.artifact_id, second);
   assert.equal(last.next_cursor, null);
-  const tampered =
-    page.next_cursor.slice(0, -1) +
-    (page.next_cursor.endsWith("0") ? "1" : "0");
-  await assert.rejects(
-    client.caseItems(id, tampered),
-    fails("CONTROL_CURSOR_INVALID", 400),
-  );
-  await assert.rejects(
-    client.caseItems(foreignCase),
-    fails("CONTROL_CASE_NOT_AVAILABLE", 404),
-  );
+  const tampered = page.next_cursor.slice(0, -1) + (page.next_cursor.endsWith("0") ? "1" : "0");
+  await assert.rejects(client.caseItems(id, tampered), fails("CONTROL_CURSOR_INVALID", 400));
+  await assert.rejects(client.caseItems(foreignCase), fails("CONTROL_CASE_NOT_AVAILABLE", 404));
   phase = 6;
-  const closed = await client.closeCase(
-    id,
-    "Review complete",
-    "case-wire-close-key",
-  );
+  const closed = await client.closeCase(id, "Review complete", "case-wire-close-key");
   assert.equal(closed.replayed, false);
   assert.equal(closed.status, "closed");
-  const closedReplay = await client.closeCase(
-    id,
-    "Review complete",
-    "case-wire-close-key",
-  );
+  const closedReplay = await client.closeCase(id, "Review complete", "case-wire-close-key");
   assert.equal(closedReplay.closed_at, closed.closed_at);
   assert.equal(closedReplay.replayed, true);
   await assert.rejects(
@@ -220,18 +182,12 @@ try {
   assert.equal(closedCases.items[0]?.case_id, id);
   assert.equal(closedCases.items[0]?.status, "closed");
   assert.equal(
-    (await client.createCase("Wire investigation", "case-wire-create-key"))
-      .status,
+    (await client.createCase("Wire investigation", "case-wire-create-key")).status,
     "closed",
   );
   phase = 7;
-  const invalid = new ControlClient(
-    "synthetic-invalid-management-token-000000000000",
-  );
-  await assert.rejects(
-    invalid.caseItems(id),
-    fails("CONTROL_AUTH_REQUIRED", 401),
-  );
+  const invalid = new ControlClient("synthetic-invalid-management-token-000000000000");
+  await assert.rejects(invalid.caseItems(id), fails("CONTROL_AUTH_REQUIRED", 401));
   await assert.rejects(invalid.cases(), fails("CONTROL_AUTH_REQUIRED", 401));
   phase = 8;
   origin = observerOrigin;

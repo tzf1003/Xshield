@@ -40,12 +40,7 @@ import {
   validateCausalityPlan,
   decodeCausalityResponse,
 } from "./search.ts";
-import type {
-  SearchPlan,
-  SearchResponse,
-  CausalityPlan,
-  CausalityResponse,
-} from "./search.ts";
+import type { SearchPlan, SearchResponse, CausalityPlan, CausalityResponse } from "./search.ts";
 export type { CausalityPlan, CausalityResponse } from "./search.ts";
 import { decodeGrantResponse, decodeBindingResponse } from "./ledger.ts";
 import type { GrantResponse, BindingResponse } from "./ledger.ts";
@@ -61,33 +56,39 @@ import {
   decodeCaseItemAdded,
   decodeCaseClosed,
 } from "./cases.ts";
-import type {
-  CaseCreated,
-  CaseList,
-  CaseCollection,
-  CaseItemAdded,
-  CaseClosed,
-} from "./cases.ts";
+import type { CaseCreated, CaseList, CaseCollection, CaseItemAdded, CaseClosed } from "./cases.ts";
 import { decodeJobResponse, validateJobId } from "./jobs.ts";
 import type { JobResponse } from "./jobs.ts";
 export type { JobResponse } from "./jobs.ts";
 import {
-  validateAccessId, decodeAccessRequested, decodeAccessInspection,
-  decodeAccessDecision, accessPattern,
-  decodeAccessList, validateAccessListCursor, validateAccessListView,
+  validateAccessId,
+  decodeAccessRequested,
+  decodeAccessInspection,
+  decodeAccessDecision,
+  accessPattern,
+  decodeAccessList,
+  validateAccessListCursor,
+  validateAccessListView,
 } from "./evidence-access.ts";
 import type {
-  AccessRequested, AccessInspection, AccessDecision, EvidenceDownload,
-  AccessList, AccessListView,
+  AccessRequested,
+  AccessInspection,
+  AccessDecision,
+  EvidenceDownload,
+  AccessList,
+  AccessListView,
 } from "./evidence-access.ts";
 import {
-  decodeHoldCreated, decodeHoldReleased, decodeHoldCollection,
-  validHoldReason, validateHoldUntil, validateHoldId, validateHoldCursor,
+  decodeHoldCreated,
+  decodeHoldReleased,
+  decodeHoldCollection,
+  validHoldReason,
+  validateHoldUntil,
+  validateHoldId,
+  validateHoldCursor,
 } from "./evidence-holds.ts";
 import type { HoldMutation, HoldCollection } from "./evidence-holds.ts";
-import {
-  decodeExportResponse, validateExportId, exportPattern,
-} from "./exports.ts";
+import { decodeExportResponse, validateExportId, exportPattern } from "./exports.ts";
 import type { ExportDownload, InvestigationExport } from "./exports.ts";
 export type Stage = {
   stage: string;
@@ -193,13 +194,7 @@ export type ModelCallFacts = {
   model_revision: string;
   prompt_revision: string;
   question_type: "choice" | "score" | "noul";
-  status:
-    | "started"
-    | "requested"
-    | "success"
-    | "error"
-    | "timeout"
-    | "cancelled";
+  status: "started" | "requested" | "success" | "error" | "timeout" | "cancelled";
   reason_code: string;
   confidence: number | null;
   confidence_status: string;
@@ -288,19 +283,9 @@ export type ModelCallListItem = {
   model_revision: string;
   prompt_revision: string;
   question_type: "choice" | "score" | "noul";
-  latest_status:
-    | "started"
-    | "requested"
-    | "success"
-    | "error"
-    | "timeout"
-    | "cancelled";
+  latest_status: "started" | "requested" | "success" | "error" | "timeout" | "cancelled";
   latest_reason_code: string;
-  latest_confidence_status:
-    | "provided"
-    | "not_applicable"
-    | "not_provided"
-    | "unavailable";
+  latest_confidence_status: "provided" | "not_applicable" | "not_provided" | "unavailable";
 };
 export type ModelCallListResponse = Envelope & {
   schema_version: 3;
@@ -414,22 +399,61 @@ function modelCallListTime(value: unknown): string {
   return result;
 }
 
-function decodeWorkbenchObservation<T>(value: unknown, decode: (value: unknown) => T): WorkbenchObservation<T> {
+function decodeWorkbenchObservation<T>(
+  value: unknown,
+  decode: (value: unknown) => T,
+): WorkbenchObservation<T> {
   const row = object(value);
-  ensure(Object.keys(row).length === 4 && ["observed_at", "source_state", "reason_code", "value"].every((key) => Object.hasOwn(row, key)));
-  const source_state = choice(row.source_state, ["available", "partial", "unavailable", "not_authorized"] as const);
-  return { observed_at: timestamp(row.observed_at), source_state, reason_code: name(row.reason_code), value: row.value === null ? null : decode(row.value) };
+  ensure(
+    Object.keys(row).length === 4 &&
+      ["observed_at", "source_state", "reason_code", "value"].every((key) =>
+        Object.hasOwn(row, key),
+      ),
+  );
+  const source_state = choice(row.source_state, [
+    "available",
+    "partial",
+    "unavailable",
+    "not_authorized",
+  ] as const);
+  return {
+    observed_at: timestamp(row.observed_at),
+    source_state,
+    reason_code: name(row.reason_code),
+    value: row.value === null ? null : decode(row.value),
+  };
 }
 
 function decodeWorkbenchAudit(value: unknown): WorkbenchAudit {
   const row = object(value);
-  ensure(Object.keys(row).length === 11 && ["target_id", "table", "as_of", "metadata_retention_days", "closed_segments", "closed_segment_bytes", "published_segments", "pending_segments", "unsealed_segments", "has_gaps", "index_watermark"].every((key) => Object.hasOwn(row, key)));
+  ensure(
+    Object.keys(row).length === 11 &&
+      [
+        "target_id",
+        "table",
+        "as_of",
+        "metadata_retention_days",
+        "closed_segments",
+        "closed_segment_bytes",
+        "published_segments",
+        "pending_segments",
+        "unsealed_segments",
+        "has_gaps",
+        "index_watermark",
+      ].every((key) => Object.hasOwn(row, key)),
+  );
   const result = {
-    ...watermarked(row), target_id: name(row.target_id), table: name(row.table),
-    as_of: timestamp(row.as_of), metadata_retention_days: integer(row.metadata_retention_days, 1, 3650),
-    closed_segments: integer(row.closed_segments), closed_segment_bytes: integer(row.closed_segment_bytes),
-    published_segments: integer(row.published_segments), pending_segments: integer(row.pending_segments),
-    unsealed_segments: integer(row.unsealed_segments), has_gaps: bool(row.has_gaps),
+    ...watermarked(row),
+    target_id: name(row.target_id),
+    table: name(row.table),
+    as_of: timestamp(row.as_of),
+    metadata_retention_days: integer(row.metadata_retention_days, 1, 3650),
+    closed_segments: integer(row.closed_segments),
+    closed_segment_bytes: integer(row.closed_segment_bytes),
+    published_segments: integer(row.published_segments),
+    pending_segments: integer(row.pending_segments),
+    unsealed_segments: integer(row.unsealed_segments),
+    has_gaps: bool(row.has_gaps),
   } satisfies WorkbenchAudit;
   ensure(result.published_segments + result.pending_segments === result.closed_segments);
   ensure(result.unsealed_segments <= result.pending_segments);
@@ -439,21 +463,59 @@ function decodeWorkbenchAudit(value: unknown): WorkbenchAudit {
 function decodeWorkbenchOverview(value: unknown, status: number): WorkbenchOverviewResponse {
   ensure(status === 200);
   const row = object(value);
-  ensure(Object.keys(row).length === 12 && ["request_id", "tenant_id", "site_id", "as_of", "completeness", "index_watermark", "has_gaps", "posture", "sites", "queues", "recent_activity", "audit"].every((key) => Object.hasOwn(row, key)));
+  ensure(
+    Object.keys(row).length === 12 &&
+      [
+        "request_id",
+        "tenant_id",
+        "site_id",
+        "as_of",
+        "completeness",
+        "index_watermark",
+        "has_gaps",
+        "posture",
+        "sites",
+        "queues",
+        "recent_activity",
+        "audit",
+      ].every((key) => Object.hasOwn(row, key)),
+  );
   const sites = list(row.sites, 128, (item) => {
     const site = object(item);
     ensure(Object.keys(site).length === 10);
     return {
-      site_id: name(site.site_id), display_name: text(site.display_name), public_origin: text(site.public_origin),
-      edge: decodeWorkbenchObservation(site.edge, text), upstream: decodeWorkbenchObservation(site.upstream, text), audit: decodeWorkbenchObservation(site.audit, text),
-      current_revision: site.current_revision === null ? null : integer(site.current_revision), apply_state: text(site.apply_state), reason_code: name(site.reason_code), updated_at: timestamp(site.updated_at),
+      site_id: name(site.site_id),
+      display_name: text(site.display_name),
+      public_origin: text(site.public_origin),
+      edge: decodeWorkbenchObservation(site.edge, text),
+      upstream: decodeWorkbenchObservation(site.upstream, text),
+      audit: decodeWorkbenchObservation(site.audit, text),
+      current_revision: site.current_revision === null ? null : integer(site.current_revision),
+      apply_state: text(site.apply_state),
+      reason_code: name(site.reason_code),
+      updated_at: timestamp(site.updated_at),
     };
   });
   return {
-    ...envelope(row), as_of: timestamp(row.as_of), completeness: choice(row.completeness, ["complete", "partial", "unavailable"] as const),
-    index_watermark: row.index_watermark === null ? null : (() => { const watermark = object(row.index_watermark); return { producer_boot_id: id(watermark.producer_boot_id, new RegExp(`^${uuid}$`)), producer_sequence: integer(watermark.producer_sequence, 1) }; })(),
-    has_gaps: bool(row.has_gaps), posture: decodeWorkbenchObservation(row.posture, text), sites,
-    queues: list(row.queues, 256, (item) => item), recent_activity: list(row.recent_activity, 256, (item) => item), audit: decodeWorkbenchObservation(row.audit, decodeWorkbenchAudit),
+    ...envelope(row),
+    as_of: timestamp(row.as_of),
+    completeness: choice(row.completeness, ["complete", "partial", "unavailable"] as const),
+    index_watermark:
+      row.index_watermark === null
+        ? null
+        : (() => {
+            const watermark = object(row.index_watermark);
+            return {
+              producer_boot_id: id(watermark.producer_boot_id, new RegExp(`^${uuid}$`)),
+              producer_sequence: integer(watermark.producer_sequence, 1),
+            };
+          })(),
+    has_gaps: bool(row.has_gaps),
+    posture: decodeWorkbenchObservation(row.posture, text),
+    sites,
+    queues: list(row.queues, 256, (item) => item),
+    recent_activity: list(row.recent_activity, 256, (item) => item),
+    audit: decodeWorkbenchObservation(row.audit, decodeWorkbenchAudit),
   };
 }
 
@@ -502,9 +564,7 @@ function modelCallListItem(value: unknown): ModelCallListItem {
     model_call_id: id(row.model_call_id, modelCallPattern),
     request_id: id(row.request_id, requestPattern),
     occurred_at: timestamp(row.occurred_at),
-    provider: nullable(row.provider, (item) =>
-      choice(item, ["typesafe", "vercel_ai_gateway"]),
-    ),
+    provider: nullable(row.provider, (item) => choice(item, ["typesafe", "vercel_ai_gateway"])),
     provider_model_id: nullable(row.provider_model_id, (item) => text(item)),
     model_revision: name(row.model_revision),
     prompt_revision: name(row.prompt_revision),
@@ -525,22 +585,14 @@ function modelCallListItem(value: unknown): ModelCallListItem {
       "unavailable",
     ]),
   };
-  ensure(
-    result.question_type !== "noul" ||
-      result.latest_confidence_status === "not_applicable",
-  );
-  ensure(
-    result.latest_status === "success" ||
-      result.latest_confidence_status !== "provided",
-  );
+  ensure(result.question_type !== "noul" || result.latest_confidence_status === "not_applicable");
+  ensure(result.latest_status === "success" || result.latest_confidence_status !== "provided");
   return result;
 }
 
 type ModelCallListPosition = { time: bigint; modelCallId: string };
 function modelCallListPosition(item: ModelCallListItem): ModelCallListPosition {
-  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z$/.exec(
-    item.occurred_at,
-  );
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z$/.exec(item.occurred_at);
   // The model-call index and its keyset cursor operate at exact microseconds.
   ensure(match !== null);
   const millis = Date.parse(`${match[1]!}Z`);
@@ -557,22 +609,11 @@ function stage(value: unknown): Stage {
   const first_request_seq = integer(row.first_request_seq, 1, 0xffff_ffff);
   return {
     stage: name(row.stage),
-    outcome: choice(row.outcome, [
-      "PASS",
-      "DENY",
-      "UNKNOWN",
-      "ERROR",
-      "SKIPPED",
-      "CANCELLED",
-    ]),
+    outcome: choice(row.outcome, ["PASS", "DENY", "UNKNOWN", "ERROR", "SKIPPED", "CANCELLED"]),
     reason_code: name(row.reason_code),
     ...confidence(row),
     first_request_seq,
-    last_request_seq: integer(
-      row.last_request_seq,
-      first_request_seq,
-      0xffff_ffff,
-    ),
+    last_request_seq: integer(row.last_request_seq, first_request_seq, 0xffff_ffff),
     duration_us: integer(row.duration_us),
     event_count: integer(row.event_count, 1),
   };
@@ -589,9 +630,7 @@ function summary(value: unknown): Summary {
       return method;
     }),
     operation_id: nullable(row.operation_id, name),
-    decision: nullable(row.decision, (item) =>
-      choice(item, ["ALLOW", "DENY", "UNKNOWN"]),
-    ),
+    decision: nullable(row.decision, (item) => choice(item, ["ALLOW", "DENY", "UNKNOWN"])),
     reason_code: nullable(row.reason_code, name),
     status: nullable(row.status, (item) => integer(item, 100, 599)),
     origin_state: nullable(row.origin_state, (item) =>
@@ -617,10 +656,7 @@ function summary(value: unknown): Summary {
         result.duration_us,
       ].every((item) => item === null),
   );
-  ensure(
-    new Set(result.stages.map((item) => item.stage)).size ===
-      result.stages.length,
-  );
+  ensure(new Set(result.stages.map((item) => item.stage)).size === result.stages.length);
   return result;
 }
 function auditEvent(value: unknown): AuditEvent {
@@ -649,30 +685,15 @@ function auditEvent(value: unknown): AuditEvent {
     duration_us: integer(row.duration_us),
     policy_revision: name(row.policy_revision),
     model_revision: name(row.model_revision, true),
-    model_call_id: nullable(row.model_call_id, (item) =>
-      id(item, modelCallPattern),
-    ),
-    evidence_refs: references(
-      row.evidence_refs,
-      new RegExp(`^[a-z]+_${uuid}$`),
-    ),
+    model_call_id: nullable(row.model_call_id, (item) => id(item, modelCallPattern)),
+    evidence_refs: references(row.evidence_refs, new RegExp(`^[a-z]+_${uuid}$`)),
     cause_event_ids: references(row.cause_event_ids, eventPattern),
-    sensitivity: choice(row.sensitivity, [
-      "PUBLIC",
-      "INTERNAL",
-      "SENSITIVE",
-      "RESTRICTED",
-    ]),
+    sensitivity: choice(row.sensitivity, ["PUBLIC", "INTERNAL", "SENSITIVE", "RESTRICTED"]),
   };
   ensure((result.proof_kind === "model") === (result.model_call_id !== null));
   return result;
 }
-function manifest(
-  value: unknown,
-  scope: Envelope,
-  request?: string,
-  artifact?: string,
-): Manifest {
+function manifest(value: unknown, scope: Envelope, request?: string, artifact?: string): Manifest {
   const row = object(value);
   ensure(row.schema_version === 3 && row.example_only === false);
   const result: Manifest = {
@@ -688,18 +709,12 @@ function manifest(
     fidelity: choice(row.fidelity, ["entity_exact", "semantic", "redacted"]),
     bytes_observed: integer(row.bytes_observed, 0, 64 * 1024 * 1024),
     bytes_saved: integer(row.bytes_saved, 0, 64 * 1024 * 1024),
-    classification: choice(row.classification, [
-      "INTERNAL",
-      "SENSITIVE",
-      "RESTRICTED",
-    ]),
+    classification: choice(row.classification, ["INTERNAL", "SENSITIVE", "RESTRICTED"]),
     example_only: false,
     parent_refs: references(row.parent_refs, artifactPattern, 64),
     expires_at: timestamp(row.expires_at),
   };
-  ensure(
-    result.tenant_id === scope.tenant_id && result.site_id === scope.site_id,
-  );
+  ensure(result.tenant_id === scope.tenant_id && result.site_id === scope.site_id);
   ensure(
     (request === undefined || result.request_id === request) &&
       (artifact === undefined || result.artifact_id === artifact),
@@ -724,14 +739,11 @@ function modelFacts(row: Record<string, unknown>): ModelCallFacts {
   const provider = nullable(row.provider, (item) =>
     choice(item, ["typesafe", "vercel_ai_gateway"] as const),
   );
-  const provider_model_id = nullable(row.provider_model_id, (item) =>
-    text(item),
-  );
+  const provider_model_id = nullable(row.provider_model_id, (item) => text(item));
   ensure(
     provider === null
       ? provider_model_id === null
-      : provider_model_id ===
-          (provider === "typesafe" ? "jev-1.13.0" : "typesafe-ai/jev"),
+      : provider_model_id === (provider === "typesafe" ? "jev-1.13.0" : "typesafe-ai/jev"),
   );
   const result: ModelCallFacts = {
     provider,
@@ -751,25 +763,13 @@ function modelFacts(row: Record<string, unknown>): ModelCallFacts {
     confidence: value,
     confidence_status,
     duration_us: integer(row.duration_us),
-    input_artifact_id: nullable(row.input_artifact_id, (item) =>
-      id(item, artifactPattern),
-    ),
-    output_artifact_id: nullable(row.output_artifact_id, (item) =>
-      id(item, artifactPattern),
-    ),
-    call_artifact_id: nullable(row.call_artifact_id, (item) =>
-      id(item, artifactPattern),
-    ),
+    input_artifact_id: nullable(row.input_artifact_id, (item) => id(item, artifactPattern)),
+    output_artifact_id: nullable(row.output_artifact_id, (item) => id(item, artifactPattern)),
+    call_artifact_id: nullable(row.call_artifact_id, (item) => id(item, artifactPattern)),
   };
-  ensure(
-    result.question_type !== "noul" ||
-      result.confidence_status === "not_applicable",
-  );
+  ensure(result.question_type !== "noul" || result.confidence_status === "not_applicable");
   ensure(result.status === "success" || result.confidence === null);
-  ensure(
-    !["requested", "success"].includes(result.status) ||
-      result.input_artifact_id !== null,
-  );
+  ensure(!["requested", "success"].includes(result.status) || result.input_artifact_id !== null);
   ensure(
     result.status !== "success" ||
       (result.output_artifact_id !== null && result.call_artifact_id !== null),
@@ -792,22 +792,12 @@ function modelCall(value: unknown, target: string): ModelCall {
         request_id: id(event.request_id, requestPattern),
         occurred_at: timestamp(event.occurred_at),
         request_seq: integer(event.request_seq, 1, 0xffff_ffff),
-        evidence_refs: references(
-          event.evidence_refs,
-          new RegExp(`^[a-z]+_${uuid}$`),
-        ),
+        evidence_refs: references(event.evidence_refs, new RegExp(`^[a-z]+_${uuid}$`)),
         cause_event_ids: references(event.cause_event_ids, eventPattern, 1),
-        sensitivity: choice(event.sensitivity, [
-          "PUBLIC",
-          "INTERNAL",
-          "SENSITIVE",
-          "RESTRICTED",
-        ]),
+        sensitivity: choice(event.sensitivity, ["PUBLIC", "INTERNAL", "SENSITIVE", "RESTRICTED"]),
       };
       ensure(result.event_type === modelEventTypes[result.status]);
-      ensure(
-        result.cause_event_ids.length === (result.status === "started" ? 0 : 1),
-      );
+      ensure(result.cause_event_ids.length === (result.status === "started" ? 0 : 1));
       for (const reference of [
         result.input_artifact_id,
         result.output_artifact_id,
@@ -816,16 +806,13 @@ function modelCall(value: unknown, target: string): ModelCall {
         ensure(reference === null || result.evidence_refs.includes(reference));
       ensure(
         result.status !== "started" ||
-          [
-            result.input_artifact_id,
-            result.output_artifact_id,
-            result.call_artifact_id,
-          ].every((item) => item === null),
+          [result.input_artifact_id, result.output_artifact_id, result.call_artifact_id].every(
+            (item) => item === null,
+          ),
       );
       ensure(
         result.status !== "requested" ||
-          (result.output_artifact_id === null &&
-            result.call_artifact_id === null),
+          (result.output_artifact_id === null && result.call_artifact_id === null),
       );
       return result;
     }),
@@ -849,17 +836,9 @@ function modelCall(value: unknown, target: string): ModelCall {
     "duration_us",
   ] as const;
   ensure(latestFacts.every((field) => result[field] === latest[field]));
-  ensure(
-    new Set(result.events.map((event) => event.event_id)).size ===
-      result.events.length,
-  );
-  ensure(
-    new Set(result.events.map((event) => event.event_type)).size ===
-      result.events.length,
-  );
-  ensure(
-    new Set(result.events.flatMap((event) => event.evidence_refs)).size <= 256,
-  );
+  ensure(new Set(result.events.map((event) => event.event_id)).size === result.events.length);
+  ensure(new Set(result.events.map((event) => event.event_type)).size === result.events.length);
+  ensure(new Set(result.events.flatMap((event) => event.evidence_refs)).size <= 256);
   let continuous = true;
   // Retention may hide a predecessor. Visible send boundaries must still link
   // directly, and request sequence stays authoritative across clock rollback.
@@ -867,43 +846,25 @@ function modelCall(value: unknown, target: string): ModelCall {
     const event = result.events[index]!;
     ensure(identity.every((field) => event[field] === result[field]));
     ensure(
-      !result.events
-        .slice(index)
-        .some((later) => event.cause_event_ids.includes(later.event_id)),
+      !result.events.slice(index).some((later) => event.cause_event_ids.includes(later.event_id)),
     );
     if (index === 0) continue;
     const previous = result.events[index - 1]!;
     const direct = event.cause_event_ids[0] === previous.event_id;
-    ensure(
-      event.request_seq > previous.request_seq && event.status !== "started",
-    );
+    ensure(event.request_seq > previous.request_seq && event.status !== "started");
     ensure(["started", "requested"].includes(previous.status));
     ensure(
-      previous.status !== "requested" ||
-        event.input_artifact_id === previous.input_artifact_id,
+      previous.status !== "requested" || event.input_artifact_id === previous.input_artifact_id,
     );
+    ensure((previous.status !== "requested" && event.status !== "requested") || direct);
     ensure(
-      (previous.status !== "requested" && event.status !== "requested") ||
-        direct,
-    );
-    ensure(
-      previous.status !== "started" ||
-        !direct ||
-        ["requested", "error"].includes(event.status),
+      previous.status !== "started" || !direct || ["requested", "error"].includes(event.status),
     );
     continuous &&= direct;
   }
-  for (const field of [
-    "input_artifact_id",
-    "output_artifact_id",
-    "call_artifact_id",
-  ] as const) {
-    const refs = new Set(
-      result.events.map((event) => event[field]).filter((ref) => ref !== null),
-    );
-    ensure(
-      refs.size <= 1 && result[field] === (refs.values().next().value ?? null),
-    );
+  for (const field of ["input_artifact_id", "output_artifact_id", "call_artifact_id"] as const) {
+    const refs = new Set(result.events.map((event) => event[field]).filter((ref) => ref !== null));
+    ensure(refs.size <= 1 && result[field] === (refs.values().next().value ?? null));
   }
   ensure(
     result.lifecycle_complete ===
@@ -964,12 +925,7 @@ function agentRunEvent(value: unknown): AgentRunEvent {
     reason_code: nullable(row.reason_code, name),
     evidence_refs: references(row.evidence_refs, new RegExp(`^[a-z]+_${uuid}$`)),
     cause_event_ids: references(row.cause_event_ids, eventPattern),
-    sensitivity: choice(row.sensitivity, [
-      "PUBLIC",
-      "INTERNAL",
-      "SENSITIVE",
-      "RESTRICTED",
-    ]),
+    sensitivity: choice(row.sensitivity, ["PUBLIC", "INTERNAL", "SENSITIVE", "RESTRICTED"]),
   };
 }
 
@@ -977,9 +933,7 @@ function agentRun(value: unknown, target: string): AgentRun {
   const row = object(value);
   ensure(
     Object.keys(row).length === 3 &&
-      ["agent_run_id", "lifecycle_complete", "events"].every((key) =>
-        Object.hasOwn(row, key),
-      ),
+      ["agent_run_id", "lifecycle_complete", "events"].every((key) => Object.hasOwn(row, key)),
   );
   const result: AgentRun = {
     agent_run_id: id(row.agent_run_id, agentRunPattern),
@@ -1017,29 +971,24 @@ function agentRun(value: unknown, target: string): AgentRun {
   return result;
 }
 
-async function readJson(
-  response: Response,
-  signal: AbortSignal,
-): Promise<unknown> {
+async function readJson(response: Response, signal: AbortSignal): Promise<unknown> {
   ensure(
-    response.headers
-      .get("content-type")
-      ?.split(";")[0]
-      ?.trim()
-      .toLowerCase() === "application/json",
+    response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ===
+      "application/json",
   );
   const length = response.headers.get("content-length");
   if (length !== null) {
     ensure(/^\d+$/.test(length) && Number.isSafeInteger(Number(length)));
-    if (Number(length) > maxBytes)
-      throw new ApiError("RESPONSE_TOO_LARGE", response.status);
+    if (Number(length) > maxBytes) throw new ApiError("RESPONSE_TOO_LARGE", response.status);
   }
   ensure(response.body !== null);
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let size = 0;
   let body = "";
-  const cancel = () => { void reader.cancel().catch(() => {}); };
+  const cancel = () => {
+    void reader.cancel().catch(() => {});
+  };
   signal.addEventListener("abort", cancel, { once: true });
   try {
     while (true) {
@@ -1048,8 +997,7 @@ async function readJson(
       signal.throwIfAborted();
       if (chunk.done) break;
       size += chunk.value.byteLength;
-      if (size > maxBytes)
-        throw new ApiError("RESPONSE_TOO_LARGE", response.status);
+      if (size > maxBytes) throw new ApiError("RESPONSE_TOO_LARGE", response.status);
       body += decoder.decode(chunk.value, { stream: true });
     }
     body += decoder.decode();
@@ -1071,7 +1019,10 @@ async function readJson(
 
 const maxEvidenceBytes = 64 * 1024 * 1024;
 async function readEvidence(
-  response: Response, signal: AbortSignal, artifactId: string, accessId: string,
+  response: Response,
+  signal: AbortSignal,
+  artifactId: string,
+  accessId: string,
 ): Promise<EvidenceDownload> {
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
@@ -1089,7 +1040,10 @@ async function readEvidence(
     ensure(headers.get("content-type") === "application/octet-stream");
     ensure(headers.get("content-disposition") === 'attachment; filename="evidence.bin"');
     ensure(headers.get("x-content-type-options") === "nosniff");
-    const cache = headers.get("cache-control")?.split(",").map((v) => v.trim().toLowerCase());
+    const cache = headers
+      .get("cache-control")
+      ?.split(",")
+      .map((v) => v.trim().toLowerCase());
     ensure(cache?.includes("private") && cache.includes("no-store") && !cache.includes("public"));
     ensure(headers.get("content-encoding") === null);
     const length = headers.get("content-length");
@@ -1103,7 +1057,9 @@ async function readEvidence(
     let bytes = 0;
     // Native fetch aborts its body, but an explicit cancellation bridge also
     // covers an already-delivered or application-provided stalled stream.
-    const cancel = () => { void reader?.cancel().catch(() => {}); };
+    const cancel = () => {
+      void reader?.cancel().catch(() => {});
+    };
     signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
@@ -1118,8 +1074,13 @@ async function readEvidence(
         bytes = next;
       }
       ensure(bytes === expected);
-      return { ...base, artifact_id: artifactId, access_request_id: accessId,
-        bytes, blob: new Blob([buffer], { type: "application/octet-stream" }) };
+      return {
+        ...base,
+        artifact_id: artifactId,
+        access_request_id: accessId,
+        bytes,
+        blob: new Blob([buffer], { type: "application/octet-stream" }),
+      };
     } finally {
       signal.removeEventListener("abort", cancel);
       // One bounded buffer avoids per-chunk allocation amplification. Blob
@@ -1158,8 +1119,7 @@ async function readExport(
     ensure(artifactId === expectedArtifactId);
     ensure(headers.get("content-type") === "application/json");
     ensure(
-      headers.get("content-disposition") ===
-        'attachment; filename="investigation-export.json"',
+      headers.get("content-disposition") === 'attachment; filename="investigation-export.json"',
     );
     ensure(headers.get("x-content-type-options") === "nosniff");
     ensure(headers.get("content-encoding") === null);
@@ -1178,7 +1138,9 @@ async function readExport(
     reader = response.body.getReader();
     const buffer = new Uint8Array(expected);
     let bytes = 0;
-    const cancel = () => { void reader?.cancel().catch(() => {}); };
+    const cancel = () => {
+      void reader?.cancel().catch(() => {});
+    };
     signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
@@ -1365,10 +1327,14 @@ function decodeManagementApiKeys(value: unknown, status: number): ManagementApiK
   return list(row.keys, 128, (item) => {
     const key = object(item);
     return {
-      api_key_id: id(key.api_key_id, /^key_[0-9a-f-]{36}$/), tenant_id: name(key.tenant_id),
-      subject: text(key.subject), display_name: text(key.display_name),
-      key_prefix: text(key.key_prefix), status: text(key.status),
-      expires_at: timestamp(key.expires_at), created_at: timestamp(key.created_at),
+      api_key_id: id(key.api_key_id, /^key_[0-9a-f-]{36}$/),
+      tenant_id: name(key.tenant_id),
+      subject: text(key.subject),
+      display_name: text(key.display_name),
+      key_prefix: text(key.key_prefix),
+      status: text(key.status),
+      expires_at: timestamp(key.expires_at),
+      created_at: timestamp(key.created_at),
       last_used_at: key.last_used_at === null ? null : timestamp(key.last_used_at),
     };
   });
@@ -1377,12 +1343,18 @@ function decodeManagementApiKey(value: unknown, status: number): ManagementApiKe
   ensure(status === 201);
   const row = object(value);
   return {
-    request_id: text(row.request_id), api_key_id: id(row.api_key_id, /^key_[0-9a-f-]{36}$/),
-    api_key: text(row.api_key), key_prefix: text(row.key_prefix),
+    request_id: text(row.request_id),
+    api_key_id: id(row.api_key_id, /^key_[0-9a-f-]{36}$/),
+    api_key: text(row.api_key),
+    key_prefix: text(row.key_prefix),
     expires_at: timestamp(row.expires_at),
     scopes: list(row.scopes, 32, (item) => {
       const scope = object(item);
-      return { tenant_id: name(scope.tenant_id), site_id: name(scope.site_id), capabilities: list(scope.capabilities, 16, text) };
+      return {
+        tenant_id: name(scope.tenant_id),
+        site_id: name(scope.site_id),
+        capabilities: list(scope.capabilities, 16, text),
+      };
     }),
   };
 }
@@ -1432,9 +1404,23 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
       session_ttl_seconds: 3600,
       generation: 1,
     },
-    crypto: { adapter_revision: "observe-v1", failure_strategy: "fail_closed", protocol_version: null },
-    waf: { enabled: true, blocked_headers: [], blocked_query_fragments: [], max_cookie_bytes: 8192 },
-    limits: { max_request_body_bytes: 1_048_576, max_response_body_bytes: 16_777_216, requests_per_second: 1000, burst: 2000 },
+    crypto: {
+      adapter_revision: "observe-v1",
+      failure_strategy: "fail_closed",
+      protocol_version: null,
+    },
+    waf: {
+      enabled: true,
+      blocked_headers: [],
+      blocked_query_fragments: [],
+      max_cookie_bytes: 8192,
+    },
+    limits: {
+      max_request_body_bytes: 1_048_576,
+      max_response_body_bytes: 16_777_216,
+      requests_per_second: 1000,
+      burst: 2000,
+    },
     health_check: { path: "/health", interval_seconds: 15, timeout_ms: 2000, expected_status: 200 },
     secret_refs: [],
   };
@@ -1452,17 +1438,33 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
       const route = object(item);
       return {
         operation_id: name(route.operation_id),
-        method: choice(route.method, ["GET", "POST", "PUT", "PATCH", "DELETE"]) as SiteRouteConfig["method"],
+        method: choice(route.method, [
+          "GET",
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE",
+        ]) as SiteRouteConfig["method"],
         path: text(route.path, 256),
-        security_entry: choice(route.security_entry, ["public", "authenticated_root", "ui_action_required"]),
+        security_entry: choice(route.security_entry, [
+          "public",
+          "authenticated_root",
+          "ui_action_required",
+        ]),
         source_action: route.source_action === null ? null : name(route.source_action),
         resource_type: route.resource_type === null ? null : name(route.resource_type),
         view_profile: route.view_profile === null ? null : name(route.view_profile),
-        resource_query_parameter: route.resource_query_parameter === null ? null : name(route.resource_query_parameter),
-        resource_path_parameter: route.resource_path_parameter === null ? null : name(route.resource_path_parameter),
+        resource_query_parameter:
+          route.resource_query_parameter === null ? null : name(route.resource_query_parameter),
+        resource_path_parameter:
+          route.resource_path_parameter === null ? null : name(route.resource_path_parameter),
         request_crypto: optionalObject(route.request_crypto),
         response_crypto: optionalObject(route.response_crypto),
-        response_mode: choice(route.response_mode ?? "", ["", "BUFFERED_JSON", "SENSOR_HTML"]) as SiteRouteConfig["response_mode"],
+        response_mode: choice(route.response_mode ?? "", [
+          "",
+          "BUFFERED_JSON",
+          "SENSOR_HTML",
+        ]) as SiteRouteConfig["response_mode"],
         max_response_bytes: integer(route.max_response_bytes ?? 1_048_576, 1, 16_777_216),
       };
     }),
@@ -1504,7 +1506,13 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
     secret_refs: list(row.secret_refs ?? [], 32, (item) => {
       const secret = object(item);
       return {
-        kind: choice(secret.kind, ["tls", "session_hmac", "request_crypto", "response_crypto", "model"]),
+        kind: choice(secret.kind, [
+          "tls",
+          "session_hmac",
+          "request_crypto",
+          "response_crypto",
+          "model",
+        ]),
         secret_ref: text(secret.secret_ref, 512),
         key_id: name(secret.key_id),
         state: choice(secret.state, ["active", "pending_rotation", "retired", "unavailable"]),
@@ -1517,12 +1525,23 @@ function decodeSiteConfig(value: unknown, status: number): SiteConfigResponse {
   ensure(status === 200 || status === 201);
   const row = object(value);
   const found = bool(row.found);
-  if (!found) return {
-    ...envelope(row), found: false, desired_revision: null, active_revision: null,
-    apply_state: null, apply_id: null, reason_code: null, config_digest: null, config: null,
-    requires_approval: row.requires_approval === undefined || row.requires_approval === null ? null : bool(row.requires_approval),
-    edge_health: row.edge_health === undefined ? undefined : object(row.edge_health),
-  };
+  if (!found)
+    return {
+      ...envelope(row),
+      found: false,
+      desired_revision: null,
+      active_revision: null,
+      apply_state: null,
+      apply_id: null,
+      reason_code: null,
+      config_digest: null,
+      config: null,
+      requires_approval:
+        row.requires_approval === undefined || row.requires_approval === null
+          ? null
+          : bool(row.requires_approval),
+      edge_health: row.edge_health === undefined ? undefined : object(row.edge_health),
+    };
   ensure(row.config !== null);
   const config = object(row.config);
   return {
@@ -1530,7 +1549,12 @@ function decodeSiteConfig(value: unknown, status: number): SiteConfigResponse {
     found,
     desired_revision: integer(row.desired_revision, 1),
     active_revision: row.active_revision === null ? null : integer(row.active_revision, 1),
-    apply_state: choice(row.apply_state, ["active", "pending", "failed", "paused"]) as SiteConfigResponse["apply_state"],
+    apply_state: choice(row.apply_state, [
+      "active",
+      "pending",
+      "failed",
+      "paused",
+    ]) as SiteConfigResponse["apply_state"],
     apply_id: name(row.apply_id),
     reason_code: name(row.reason_code),
     requires_approval: bool(row.requires_approval),
@@ -1544,7 +1568,11 @@ function decodeSiteConfig(value: unknown, status: number): SiteConfigResponse {
       upstream_tls: bool(config.upstream_tls),
       listen_port: integer(config.listen_port, 6100, 65535),
       entry_path: text(config.entry_path, 256),
-      security_entry: choice(config.security_entry, ["public", "authenticated_root", "ui_action_required"]),
+      security_entry: choice(config.security_entry, [
+        "public",
+        "authenticated_root",
+        "ui_action_required",
+      ]),
       sensor_enabled: bool(config.sensor_enabled),
       policy_revision: name(config.policy_revision),
       status: choice(config.status, ["draft", "active", "paused"]),
@@ -1565,7 +1593,8 @@ function decodeSiteList(value: unknown, status: number): SiteListResponse {
   return {
     ...envelope(row),
     truncated: row.truncated === undefined ? false : bool(row.truncated),
-    next_cursor: row.next_cursor === undefined || row.next_cursor === null ? null : name(row.next_cursor),
+    next_cursor:
+      row.next_cursor === undefined || row.next_cursor === null ? null : name(row.next_cursor),
     sites: list(row.sites, 128, (item) => {
       const site = object(item);
       return {
@@ -1573,7 +1602,11 @@ function decodeSiteList(value: unknown, status: number): SiteListResponse {
         display_name: text(site.display_name, 128),
         public_origin: text(site.public_origin, 512),
         listen_port: integer(site.listen_port, 6100, 65535),
-        security_entry: choice(site.security_entry, ["public", "authenticated_root", "ui_action_required"]),
+        security_entry: choice(site.security_entry, [
+          "public",
+          "authenticated_root",
+          "ui_action_required",
+        ]),
         sensor_enabled: bool(site.sensor_enabled),
         policy_revision: name(site.policy_revision),
         status: choice(site.status, ["draft", "active", "paused"]),
@@ -1584,7 +1617,12 @@ function decodeSiteList(value: unknown, status: number): SiteListResponse {
         desired_revision: integer(site.desired_revision, 1),
         active_revision: site.active_revision === null ? null : integer(site.active_revision, 1),
         apply_id: name(site.apply_id),
-        apply_state: choice(site.apply_state, ["active", "pending", "failed", "paused"]) as SiteListItem["apply_state"],
+        apply_state: choice(site.apply_state, [
+          "active",
+          "pending",
+          "failed",
+          "paused",
+        ]) as SiteListItem["apply_state"],
         reason_code: name(site.reason_code),
         requires_approval: bool(site.requires_approval),
       };
@@ -1607,7 +1645,12 @@ function decodeSiteApply(value: unknown, status: number): SiteApplyResponse {
     desired_revision: integer(row.desired_revision, 1),
     active_revision: row.active_revision === null ? null : integer(row.active_revision, 1),
     config_digest: text(row.config_digest, 64),
-    apply_state: choice(row.apply_state, ["active", "pending", "failed", "paused"]) as SiteApplyResponse["apply_state"],
+    apply_state: choice(row.apply_state, [
+      "active",
+      "pending",
+      "failed",
+      "paused",
+    ]) as SiteApplyResponse["apply_state"],
     apply_id: name(row.apply_id),
     reason_code: name(row.reason_code),
     requires_approval: bool(row.requires_approval),
@@ -1647,14 +1690,10 @@ function decodeSiteRevisions(value: unknown, status: number): SiteRevisionsRespo
 }
 
 /** Authenticates the HttpOnly browser cookie and returns only its CSRF companion. */
-export async function bootstrapBrowserSession(
-  signal?: AbortSignal,
-): Promise<BrowserSession> {
+export async function bootstrapBrowserSession(signal?: AbortSignal): Promise<BrowserSession> {
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), 15_000);
-  const combined = signal
-    ? AbortSignal.any([signal, deadline.signal])
-    : deadline.signal;
+  const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
   let status = 0;
   try {
     const response = await fetch("/control/v1/session", {
@@ -1698,18 +1737,20 @@ export async function bootstrapBrowserSession(
       idle_expires_at: timestamp(row.idle_expires_at),
       last_reauthenticated_at: nullable(row.last_reauthenticated_at, timestamp),
       step_up_valid: bool(row.step_up_valid),
-      roles: list(row.roles, 10, (item) => choice(item, [
-        "observer",
-        "investigator",
-        "sensitive_evidence_reader",
-        "sensitive_evidence_approver",
-        "policy_author",
-        "policy_approver",
-        "release_operator",
-        "audit_administrator",
-        "key_administrator",
-        "system_admin",
-      ])),
+      roles: list(row.roles, 10, (item) =>
+        choice(item, [
+          "observer",
+          "investigator",
+          "sensitive_evidence_reader",
+          "sensitive_evidence_approver",
+          "policy_author",
+          "policy_approver",
+          "release_operator",
+          "audit_administrator",
+          "key_administrator",
+          "system_admin",
+        ]),
+      ),
     };
   } catch (error) {
     if (signal?.aborted) throw new ApiError("REQUEST_ABORTED", status);
@@ -1748,9 +1789,8 @@ export class ControlClient {
     try {
       // Browser header serialization must preserve the exact server credential.
       if (
-        new Headers({ Authorization: this.#authorization }).get(
-          "Authorization",
-        ) !== this.#authorization
+        new Headers({ Authorization: this.#authorization }).get("Authorization") !==
+        this.#authorization
       )
         throw new ApiError("INVALID_CREDENTIAL");
     } catch {
@@ -1765,9 +1805,13 @@ export class ControlClient {
     body?: string,
     idempotencyKey?: string,
   ): Promise<T> {
-    return this.#transport(path, async (response, combined) =>
-      decode(await readJson(response, combined), response.status),
-    signal, body, idempotencyKey);
+    return this.#transport(
+      path,
+      async (response, combined) => decode(await readJson(response, combined), response.status),
+      signal,
+      body,
+      idempotencyKey,
+    );
   }
 
   async #transport<T>(
@@ -1781,27 +1825,27 @@ export class ControlClient {
   ): Promise<T> {
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), 15_000);
-    const combined = signal
-      ? AbortSignal.any([signal, deadline.signal])
-      : deadline.signal;
+    const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
     let status = 0;
     try {
       combined.throwIfAborted();
       const response = await fetch(`/control/v1/${path}`, {
-          method: methodOverride ?? (body === undefined ? "GET" : (path === "site-config" || path.endsWith("/config") ? "PUT" : "POST")),
+        method:
+          methodOverride ??
+          (body === undefined
+            ? "GET"
+            : path === "site-config" || path.endsWith("/config")
+              ? "PUT"
+              : "POST"),
         headers: {
-          ...(this.#authorization === null
-            ? {}
-            : { Authorization: this.#authorization }),
+          ...(this.#authorization === null ? {} : { Authorization: this.#authorization }),
           Accept: accessId === undefined ? "application/json" : "application/octet-stream",
           ...(accessId === undefined ? {} : { "X-Xshield-Evidence-Access-Request": accessId }),
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           ...(body === undefined || this.#csrfToken === null
             ? {}
             : { "X-Xshield-CSRF": this.#csrfToken }),
-          ...(idempotencyKey === undefined
-            ? {}
-            : { "Idempotency-Key": idempotencyKey }),
+          ...(idempotencyKey === undefined ? {} : { "Idempotency-Key": idempotencyKey }),
         },
         ...(body === undefined ? {} : { body }),
         credentials: this.#authorization === null ? "same-origin" : "omit",
@@ -1815,15 +1859,13 @@ export class ControlClient {
         const value = await readJson(response, combined);
         const row = object(value);
         const requestId =
-          typeof row.request_id === "string" &&
-          requestPattern.test(row.request_id)
+          typeof row.request_id === "string" && requestPattern.test(row.request_id)
             ? row.request_id
             : null;
         const code =
           typeof row.error_code === "string" &&
           Object.hasOwn(messages, row.error_code) &&
-          (row.error_code.startsWith("CONTROL_") ||
-            row.error_code === "AUDIT_DURABILITY_FAILED")
+          (row.error_code.startsWith("CONTROL_") || row.error_code === "AUDIT_DURABILITY_FAILED")
             ? (row.error_code as ErrorCode)
             : "HTTP_ERROR";
         throw new ApiError(code, status, requestId);
@@ -1831,8 +1873,7 @@ export class ControlClient {
       return await consume(response, combined);
     } catch (error) {
       if (signal?.aborted) throw new ApiError("REQUEST_ABORTED", status);
-      if (deadline.signal.aborted)
-        throw new ApiError("REQUEST_TIMEOUT", status);
+      if (deadline.signal.aborted) throw new ApiError("REQUEST_TIMEOUT", status);
       if (error instanceof ApiError)
         throw new ApiError(error.code, status || error.status, error.requestId);
       throw new ApiError("NETWORK_UNAVAILABLE", status);
@@ -1897,10 +1938,7 @@ export class ControlClient {
     );
   }
 
-  async summary(
-    requestId: string,
-    signal?: AbortSignal,
-  ): Promise<SummaryResponse> {
+  async summary(requestId: string, signal?: AbortSignal): Promise<SummaryResponse> {
     this.#requestId(requestId);
     return this.#request(
       `requests/${requestId}`,
@@ -1937,11 +1975,7 @@ export class ControlClient {
     );
   }
 
-  async events(
-    requestId: string,
-    cursor?: string,
-    signal?: AbortSignal,
-  ): Promise<EventsResponse> {
+  async events(requestId: string, cursor?: string, signal?: AbortSignal): Promise<EventsResponse> {
     this.#requestId(requestId);
     return this.#request(
       `requests/${requestId}/events${this.#cursor(cursor)}`,
@@ -1956,10 +1990,7 @@ export class ControlClient {
           events: list(row.events, 1000, auditEvent),
         };
         ensure(!result.truncated || result.events.length > 0);
-        ensure(
-          new Set(result.events.map((item) => item.event_id)).size ===
-            result.events.length,
-        );
+        ensure(new Set(result.events.map((item) => item.event_id)).size === result.events.length);
         for (let index = 1; index < result.events.length; index++) {
           const previous = result.events[index - 1]!;
           const current = result.events[index]!;
@@ -1991,26 +2022,18 @@ export class ControlClient {
           ...base,
           ...pagination(row),
           source_request_id: requestId,
-          artifacts: list(row.artifacts, 128, (item) =>
-            manifest(item, base, requestId),
-          ),
+          artifacts: list(row.artifacts, 128, (item) => manifest(item, base, requestId)),
         };
         ensure(!result.truncated || result.artifacts.length > 0);
         for (let index = 1; index < result.artifacts.length; index++)
-          ensure(
-            result.artifacts[index]!.artifact_id >
-              result.artifacts[index - 1]!.artifact_id,
-          );
+          ensure(result.artifacts[index]!.artifact_id > result.artifacts[index - 1]!.artifact_id);
         return result;
       },
       signal,
     );
   }
 
-  async artifact(
-    artifactId: string,
-    signal?: AbortSignal,
-  ): Promise<ArtifactResponse> {
+  async artifact(artifactId: string, signal?: AbortSignal): Promise<ArtifactResponse> {
     if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
       throw new ApiError("CONTROL_ARTIFACT_ID_INVALID");
     return this.#request(
@@ -2023,9 +2046,7 @@ export class ControlClient {
           ...base,
           source_artifact_id: artifactId,
           found: bool(row.found),
-          artifact: nullable(row.artifact, (item) =>
-            manifest(item, base, undefined, artifactId),
-          ),
+          artifact: nullable(row.artifact, (item) => manifest(item, base, undefined, artifactId)),
         };
         ensure(result.found === (result.artifact !== null));
         return result;
@@ -2037,10 +2058,7 @@ export class ControlClient {
   /** Read scoped lifecycle metadata; the server audits the lookup. Invalid IDs,
    * contradictory history and bounded transport failures become safe ApiError values.
    * Evidence bodies remain behind their separately authorized content endpoint. */
-  async modelCall(
-    modelCallId: string,
-    signal?: AbortSignal,
-  ): Promise<ModelCallResponse> {
+  async modelCall(modelCallId: string, signal?: AbortSignal): Promise<ModelCallResponse> {
     if (typeof modelCallId !== "string" || !modelCallPattern.test(modelCallId))
       throw new ApiError("CONTROL_MODEL_CALL_ID_INVALID");
     return this.#request(
@@ -2055,15 +2073,8 @@ export class ControlClient {
           watermark_scope: choice(row.watermark_scope, ["configured_journal"]),
           pending_segments: integer(row.pending_segments),
           found: bool(row.found),
-          completeness: choice(row.completeness, [
-            "complete",
-            "pending",
-            "partial",
-            "not_indexed",
-          ]),
-          model_call: nullable(row.model_call, (item) =>
-            modelCall(item, modelCallId),
-          ),
+          completeness: choice(row.completeness, ["complete", "pending", "partial", "not_indexed"]),
+          model_call: nullable(row.model_call, (item) => modelCall(item, modelCallId)),
         };
         ensure(result.found === (result.model_call !== null));
         const expected =
@@ -2088,10 +2099,7 @@ export class ControlClient {
     reportId: string,
     signal?: AbortSignal,
   ): Promise<CalibrationReportResponse> {
-    if (
-      typeof reportId !== "string" ||
-      !calibrationReportPattern.test(reportId)
-    )
+    if (typeof reportId !== "string" || !calibrationReportPattern.test(reportId))
       throw new ApiError("CONTROL_CALIBRATION_REPORT_ID_INVALID");
     return this.#request(
       `calibration-reports/${reportId}`,
@@ -2122,13 +2130,29 @@ export class ControlClient {
             ensure(
               Object.keys(details).length === 23 &&
                 [
-                  "report_id", "report_artifact_id", "completed_at", "reported_at",
-                  "reported_event_id", "body_expires_at", "approval_ref", "dataset_revision",
-                  "label_revision", "task_revision", "threshold_policy_revision", "mapping_revision",
-                  "evaluation_manifest_artifact_id", "training_manifest_artifact_id",
-                  "calibration_manifest_artifact_id", "label_manifest_artifact_id", "provider",
-                  "provider_model_id", "model_revision", "prompt_revision",
-                  "resolved_model_revision", "lineage_review_id", "body_status",
+                  "report_id",
+                  "report_artifact_id",
+                  "completed_at",
+                  "reported_at",
+                  "reported_event_id",
+                  "body_expires_at",
+                  "approval_ref",
+                  "dataset_revision",
+                  "label_revision",
+                  "task_revision",
+                  "threshold_policy_revision",
+                  "mapping_revision",
+                  "evaluation_manifest_artifact_id",
+                  "training_manifest_artifact_id",
+                  "calibration_manifest_artifact_id",
+                  "label_manifest_artifact_id",
+                  "provider",
+                  "provider_model_id",
+                  "model_revision",
+                  "prompt_revision",
+                  "resolved_model_revision",
+                  "lineage_review_id",
+                  "body_status",
                 ].every((key) => Object.hasOwn(details, key)),
             );
             const report: CalibrationReport = {
@@ -2144,9 +2168,18 @@ export class ControlClient {
               task_revision: name(details.task_revision),
               threshold_policy_revision: name(details.threshold_policy_revision),
               mapping_revision: name(details.mapping_revision),
-              evaluation_manifest_artifact_id: id(details.evaluation_manifest_artifact_id, artifactPattern),
-              training_manifest_artifact_id: id(details.training_manifest_artifact_id, artifactPattern),
-              calibration_manifest_artifact_id: id(details.calibration_manifest_artifact_id, artifactPattern),
+              evaluation_manifest_artifact_id: id(
+                details.evaluation_manifest_artifact_id,
+                artifactPattern,
+              ),
+              training_manifest_artifact_id: id(
+                details.training_manifest_artifact_id,
+                artifactPattern,
+              ),
+              calibration_manifest_artifact_id: id(
+                details.calibration_manifest_artifact_id,
+                artifactPattern,
+              ),
               label_manifest_artifact_id: id(details.label_manifest_artifact_id, artifactPattern),
               provider: name(details.provider),
               provider_model_id: text(details.provider_model_id),
@@ -2176,10 +2209,7 @@ export class ControlClient {
   }
 
   /** Read the separately audited, redacted lifecycle for one Agent run. */
-  async agentRun(
-    agentRunId: string,
-    signal?: AbortSignal,
-  ): Promise<AgentRunResponse> {
+  async agentRun(agentRunId: string, signal?: AbortSignal): Promise<AgentRunResponse> {
     if (typeof agentRunId !== "string" || !agentRunPattern.test(agentRunId))
       throw new ApiError("CONTROL_AGENT_RUN_ID_INVALID");
     return this.#request(
@@ -2210,14 +2240,8 @@ export class ControlClient {
           watermark_scope: choice(row.watermark_scope, ["configured_journal"]),
           pending_segments: integer(row.pending_segments),
           found: bool(row.found),
-          completeness: choice(row.completeness, [
-            "complete",
-            "partial",
-            "not_indexed",
-          ]),
-          agent_run: nullable(row.agent_run, (item) =>
-            agentRun(item, agentRunId),
-          ),
+          completeness: choice(row.completeness, ["complete", "partial", "not_indexed"]),
+          agent_run: nullable(row.agent_run, (item) => agentRun(item, agentRunId)),
         };
         ensure(result.source_agent_run_id === agentRunId);
         ensure(result.found === (result.agent_run !== null));
@@ -2244,10 +2268,7 @@ export class ControlClient {
     signal?: AbortSignal,
   ): Promise<ModelCallListResponse> {
     const plan = validateModelCallListPlan(value);
-    if (
-      cursor !== undefined &&
-      (typeof cursor !== "string" || !cursorPattern.test(cursor))
-    )
+    if (cursor !== undefined && (typeof cursor !== "string" || !cursorPattern.test(cursor)))
       throw new ApiError("CONTROL_CURSOR_INVALID");
     const parameters = new URLSearchParams({
       start: plan.start,
@@ -2288,9 +2309,7 @@ export class ControlClient {
           schema_version: 3,
           start: modelCallListTime(row.start),
           end: modelCallListTime(row.end),
-          watermark_scope: choice(row.watermark_scope, [
-            "configured_journal",
-          ]),
+          watermark_scope: choice(row.watermark_scope, ["configured_journal"]),
           pending_segments: integer(row.pending_segments),
           scanned_rows: nullable(row.scanned_rows, integer),
           scanned_bytes: nullable(row.scanned_bytes, integer),
@@ -2309,8 +2328,7 @@ export class ControlClient {
           if (previous)
             ensure(
               current.time < previous.time ||
-                (current.time === previous.time &&
-                  current.modelCallId < previous.modelCallId),
+                (current.time === previous.time && current.modelCallId < previous.modelCallId),
             );
           seen.add(current.modelCallId);
           previous = current;
@@ -2394,10 +2412,7 @@ export class ControlClient {
    * Server authorization and audit remain mandatory; malformed observations
    * and bounded transport failures return safe ApiError values.
    */
-  async binding(
-    bindingId: string,
-    signal?: AbortSignal,
-  ): Promise<BindingResponse> {
+  async binding(bindingId: string, signal?: AbortSignal): Promise<BindingResponse> {
     if (typeof bindingId !== "string" || !bindingPattern.test(bindingId))
       throw new ApiError("CONTROL_BINDING_ID_INVALID");
     return this.#request(
@@ -2412,11 +2427,7 @@ export class ControlClient {
    * digest and cursor position, and shares the bounded credential-safe transport.
    * Search permission never grants content or Observer access.
    */
-  async search(
-    plan: SearchPlan,
-    cursor?: string,
-    signal?: AbortSignal,
-  ): Promise<SearchResponse> {
+  async search(plan: SearchPlan, cursor?: string, signal?: AbortSignal): Promise<SearchResponse> {
     const frozen = validateSearchPlan(plan);
     validateSearchCursor(cursor, frozen);
     if (signal?.aborted) throw new ApiError("REQUEST_ABORTED");
@@ -2439,10 +2450,7 @@ export class ControlClient {
    * The root, UTC window and graph limits are validated before transport; the
    * response remains a redacted event projection with no payload access.
    */
-  async causality(
-    plan: CausalityPlan,
-    signal?: AbortSignal,
-  ): Promise<CausalityResponse> {
+  async causality(plan: CausalityPlan, signal?: AbortSignal): Promise<CausalityResponse> {
     const frozen = validateCausalityPlan(plan);
     if (signal?.aborted) throw new ApiError("REQUEST_ABORTED");
     const body = JSON.stringify(frozen);
@@ -2474,13 +2482,8 @@ export class ControlClient {
   /** Create an owned investigation case; no automatic retries. Keep the original
    * key and purpose until a durable response resolves any uncertain outcome.
    */
-  async createCase(
-    purpose: string,
-    key: string,
-    signal?: AbortSignal,
-  ): Promise<CaseCreated> {
-    if (!validCaseText(purpose))
-      throw new ApiError("CONTROL_CASE_REQUEST_INVALID");
+  async createCase(purpose: string, key: string, signal?: AbortSignal): Promise<CaseCreated> {
+    if (!validCaseText(purpose)) throw new ApiError("CONTROL_CASE_REQUEST_INVALID");
     this.#idempotencyKey(key);
     return this.#request(
       "cases",
@@ -2492,11 +2495,7 @@ export class ControlClient {
   }
 
   /** Read one owned case page. This Investigator endpoint grants no Observer or content access. */
-  async caseItems(
-    caseId: string,
-    cursor?: string,
-    signal?: AbortSignal,
-  ): Promise<CaseCollection> {
+  async caseItems(caseId: string, cursor?: string, signal?: AbortSignal): Promise<CaseCollection> {
     validateCaseId(caseId);
     validateCaseCursor(cursor);
     return this.#request(
@@ -2541,8 +2540,7 @@ export class ControlClient {
     signal?: AbortSignal,
   ): Promise<CaseClosed> {
     validateCaseId(caseId);
-    if (!validCaseText(reason))
-      throw new ApiError("CONTROL_CASE_CLOSE_REQUEST_INVALID");
+    if (!validCaseText(reason)) throw new ApiError("CONTROL_CASE_CLOSE_REQUEST_INVALID");
     this.#idempotencyKey(key);
     return this.#request(
       `cases/${caseId}/close`,
@@ -2555,11 +2553,7 @@ export class ControlClient {
 
   /** Start the bounded, metadata-only case inventory analysis. Keep the exact
    * key and case ID until the durable 202 response resolves any uncertainty. */
-  async analyzeCase(
-    caseId: string,
-    key: string,
-    signal?: AbortSignal,
-  ): Promise<JobResponse> {
+  async analyzeCase(caseId: string, key: string, signal?: AbortSignal): Promise<JobResponse> {
     validateCaseId(caseId);
     this.#idempotencyKey(key);
     return this.#request(
@@ -2590,8 +2584,7 @@ export class ControlClient {
     signal?: AbortSignal,
   ): Promise<InvestigationExport> {
     validateCaseId(caseId);
-    if (!validCaseText(purpose))
-      throw new ApiError("CONTROL_EXPORT_INPUT_INVALID");
+    if (!validCaseText(purpose)) throw new ApiError("CONTROL_EXPORT_INPUT_INVALID");
     this.#idempotencyKey(key);
     return this.#request(
       "exports",
@@ -2609,10 +2602,7 @@ export class ControlClient {
   }
 
   /** Read one scope-bound export projection; no package bytes are requested. */
-  async exportStatus(
-    exportId: string,
-    signal?: AbortSignal,
-  ): Promise<InvestigationExport> {
+  async exportStatus(exportId: string, signal?: AbortSignal): Promise<InvestigationExport> {
     validateExportId(exportId);
     return this.#request(
       `exports/${exportId}`,
@@ -2664,7 +2654,9 @@ export class ControlClient {
   ): Promise<ExportDownload> {
     validateExportId(exportId);
     ensure(id(expectedArtifactId, artifactPattern) === expectedArtifactId);
-    ensure(Number.isSafeInteger(expectedBytes) && expectedBytes >= 0 && expectedBytes <= maxExportBytes);
+    ensure(
+      Number.isSafeInteger(expectedBytes) && expectedBytes >= 0 && expectedBytes <= maxExportBytes,
+    );
     return this.#transport(
       `exports/${exportId}/download`,
       (response, combined) =>
@@ -2675,44 +2667,73 @@ export class ControlClient {
 
   /** Create a scoped retention hold. Preserve exact inputs and the key for
    * uncertain outcomes; the server checks role, target state and new deadlines. */
-  async createEvidenceHold(caseId: string, artifactId: string, reason: string,
-    holdUntil: string, key: string, signal?: AbortSignal): Promise<HoldMutation> {
+  async createEvidenceHold(
+    caseId: string,
+    artifactId: string,
+    reason: string,
+    holdUntil: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<HoldMutation> {
     validateCaseId(caseId);
     if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
       throw new ApiError("CONTROL_ARTIFACT_ID_INVALID");
     if (!validHoldReason(reason)) throw new ApiError("CONTROL_EVIDENCE_HOLD_REQUEST_INVALID");
     validateHoldUntil(holdUntil);
     this.#idempotencyKey(key);
-    return this.#request(`cases/${caseId}/holds`,
+    return this.#request(
+      `cases/${caseId}/holds`,
       (value, status) => decodeHoldCreated(value, caseId, artifactId, reason, holdUntil, status),
-      signal, JSON.stringify({ artifact_id: artifactId, reason, hold_until: holdUntil }), key);
+      signal,
+      JSON.stringify({ artifact_id: artifactId, reason, hold_until: holdUntil }),
+      key,
+    );
   }
 
   /** Release a hold once; an exact retry confirms any uncertain transaction. */
-  async releaseEvidenceHold(holdId: string, reason: string, key: string,
-    signal?: AbortSignal): Promise<HoldMutation> {
+  async releaseEvidenceHold(
+    holdId: string,
+    reason: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<HoldMutation> {
     validateHoldId(holdId);
     if (!validHoldReason(reason)) throw new ApiError("CONTROL_EVIDENCE_HOLD_REQUEST_INVALID");
     this.#idempotencyKey(key);
-    return this.#request(`evidence-holds/${holdId}/release`,
+    return this.#request(
+      `evidence-holds/${holdId}/release`,
       (value, status) => decodeHoldReleased(value, holdId, reason, status),
-      signal, JSON.stringify({ reason }), key);
+      signal,
+      JSON.stringify({ reason }),
+      key,
+    );
   }
 
   /** Read a bounded, independently authorized and audited hold-history page. */
-  async evidenceHolds(caseId: string, cursor?: string, signal?: AbortSignal): Promise<HoldCollection> {
+  async evidenceHolds(
+    caseId: string,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<HoldCollection> {
     validateCaseId(caseId);
     validateHoldCursor(cursor);
-    return this.#request(`cases/${caseId}/holds${this.#cursor(cursor)}`, (value, status) => {
-      ensure(status === 200);
-      return decodeHoldCollection(value, caseId, cursor);
-    }, signal);
+    return this.#request(
+      `cases/${caseId}/holds${this.#cursor(cursor)}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeHoldCollection(value, caseId, cursor);
+      },
+      signal,
+    );
   }
 
   /** Submit one access application. Preserve its key and exact parameters for
    * uncertain results; only an explicit replay can establish durable status. */
   async requestEvidenceAccess(
-    artifactId: string, caseId: string, justification: string, key: string,
+    artifactId: string,
+    caseId: string,
+    justification: string,
+    key: string,
     signal?: AbortSignal,
   ): Promise<AccessRequested> {
     if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
@@ -2721,60 +2742,98 @@ export class ControlClient {
     if (!validCaseText(justification))
       throw new ApiError("CONTROL_EVIDENCE_ACCESS_REQUEST_INVALID");
     this.#idempotencyKey(key);
-    return this.#request(`artifacts/${artifactId}/access`,
+    return this.#request(
+      `artifacts/${artifactId}/access`,
       (value, status) => decodeAccessRequested(value, artifactId, caseId, status),
-      signal, JSON.stringify({ case_id: caseId, access_kind: "sensitive_raw", justification }), key);
+      signal,
+      JSON.stringify({ case_id: caseId, access_kind: "sensitive_raw", justification }),
+      key,
+    );
   }
 
   /** Read owned history or independent review work, bounded by a server-bound
    * cursor. Every page is freshly authorized and audited; no automatic reads. */
-  async evidenceAccessList(view: AccessListView, cursor?: string, signal?: AbortSignal): Promise<AccessList> {
+  async evidenceAccessList(
+    view: AccessListView,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<AccessList> {
     validateAccessListView(view);
     validateAccessListCursor(cursor);
     const query = `?view=${view}${cursor === undefined ? "" : `&cursor=${encodeURIComponent(cursor)}`}`;
-    return this.#request(`evidence-access-requests${query}`, (value, status) => {
-      ensure(status === 200);
-      return decodeAccessList(value, view, cursor);
-    }, signal);
+    return this.#request(
+      `evidence-access-requests${query}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeAccessList(value, view, cursor);
+      },
+      signal,
+    );
   }
 
   /** Inspect one scoped historical record, with server-side access auditing. */
   async evidenceAccess(accessId: string, signal?: AbortSignal): Promise<AccessInspection> {
     validateAccessId(accessId);
-    return this.#request(`evidence-access-requests/${accessId}`, (value, status) => {
-      ensure(status === 200);
-      return decodeAccessInspection(value, accessId);
-    }, signal);
+    return this.#request(
+      `evidence-access-requests/${accessId}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeAccessInspection(value, accessId);
+      },
+      signal,
+    );
   }
 
   /** Record an independent decision once. Server role, ownership and expiry
    * checks are authoritative; failures retain the exact caller-owned retry input. */
   async decideEvidenceAccess(
-    accessId: string, decision: "approve" | "deny", reason: string,
-    ttlSeconds: number | null, key: string, signal?: AbortSignal,
+    accessId: string,
+    decision: "approve" | "deny",
+    reason: string,
+    ttlSeconds: number | null,
+    key: string,
+    signal?: AbortSignal,
   ): Promise<AccessDecision> {
     validateAccessId(accessId);
-    if (!validCaseText(reason) || !["approve", "deny"].includes(decision) ||
-        (decision === "deny" ? ttlSeconds !== null :
-          typeof ttlSeconds !== "number" || !Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 86400))
+    if (
+      !validCaseText(reason) ||
+      !["approve", "deny"].includes(decision) ||
+      (decision === "deny"
+        ? ttlSeconds !== null
+        : typeof ttlSeconds !== "number" ||
+          !Number.isSafeInteger(ttlSeconds) ||
+          ttlSeconds < 1 ||
+          ttlSeconds > 86400)
+    )
       throw new ApiError("CONTROL_EVIDENCE_ACCESS_DECISION_INVALID");
     this.#idempotencyKey(key);
-    return this.#request(`evidence-access-requests/${accessId}/${decision}`,
+    return this.#request(
+      `evidence-access-requests/${accessId}/${decision}`,
       (value, status) => decodeAccessDecision(value, accessId, decision, ttlSeconds, status),
-      signal, JSON.stringify(decision === "approve" ? { reason, ttl_seconds: ttlSeconds } : { reason }), key);
+      signal,
+      JSON.stringify(decision === "approve" ? { reason, ttl_seconds: ttlSeconds } : { reason }),
+      key,
+    );
   }
 
   /** Fetch a bounded binary attachment under fresh server authorization. The
    * entire request and body share one deadline; the caller owns Blob disposal. */
   async downloadEvidence(
-    artifactId: string, accessId: string, signal?: AbortSignal,
+    artifactId: string,
+    accessId: string,
+    signal?: AbortSignal,
   ): Promise<EvidenceDownload> {
     if (typeof artifactId !== "string" || !artifactPattern.test(artifactId))
       throw new ApiError("CONTROL_ARTIFACT_ID_INVALID");
     validateAccessId(accessId);
-    return this.#transport(`artifacts/${artifactId}/content`,
+    return this.#transport(
+      `artifacts/${artifactId}/content`,
       (response, combined) => readEvidence(response, combined, artifactId, accessId),
-      signal, undefined, undefined, accessId);
+      signal,
+      undefined,
+      undefined,
+      accessId,
+    );
   }
 
   async siteList(signal?: AbortSignal, cursor?: string, limit = 100): Promise<SiteListResponse> {
@@ -2793,24 +2852,46 @@ export class ControlClient {
   }
 
   async createManagementApiKey(
-    value: { subject: string; display_name: string; expires_at: string; scopes: Array<{ tenant_id: string; site_id: string; capabilities: string[] }> },
+    value: {
+      subject: string;
+      display_name: string;
+      expires_at: string;
+      scopes: Array<{ tenant_id: string; site_id: string; capabilities: string[] }>;
+    },
     key: string,
     signal?: AbortSignal,
   ): Promise<ManagementApiKeyResponse> {
     this.#idempotencyKey(key);
-    return this.#request("agent-api-keys", decodeManagementApiKey, signal, JSON.stringify(value), key);
+    return this.#request(
+      "agent-api-keys",
+      decodeManagementApiKey,
+      signal,
+      JSON.stringify(value),
+      key,
+    );
   }
 
   async revokeManagementApiKey(apiKeyId: string, key: string, signal?: AbortSignal): Promise<void> {
     this.#idempotencyKey(key);
-    await this.#transport(`agent-api-keys/${name(apiKeyId)}/revoke`, async (response) => {
-      ensure(response.status === 200);
-    }, signal, "", key, undefined, "POST");
+    await this.#transport(
+      `agent-api-keys/${name(apiKeyId)}/revoke`,
+      async (response) => {
+        ensure(response.status === 200);
+      },
+      signal,
+      "",
+      key,
+      undefined,
+      "POST",
+    );
   }
 
   async createSite(
     siteId: string,
-    value: Omit<SiteConfig, "revision" | "config_digest" | "updated_by" | "created_at" | "updated_at" | "gateway_config">,
+    value: Omit<
+      SiteConfig,
+      "revision" | "config_digest" | "updated_by" | "created_at" | "updated_at" | "gateway_config"
+    >,
     key: string,
     signal?: AbortSignal,
   ): Promise<SiteConfigResponse> {
@@ -2835,7 +2916,8 @@ export class ControlClient {
     const path = `sites/${name(siteId)}`;
     return this.#transport(
       path,
-      async (response, combined) => decodeSiteDelete(await readJson(response, combined), response.status),
+      async (response, combined) =>
+        decodeSiteDelete(await readJson(response, combined), response.status),
       signal,
       undefined,
       key,
@@ -2846,7 +2928,7 @@ export class ControlClient {
 
   /** Observe edge/upstream health for one site; the backend audits each read. */
   async siteHealth(siteId: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
-    return this.#request('sites/' + name(siteId) + '/health', decodeSiteApply, signal);
+    return this.#request("sites/" + name(siteId) + "/health", decodeSiteApply, signal);
   }
 
   async siteStatus(siteId: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
@@ -2856,7 +2938,8 @@ export class ControlClient {
   async validateSite(siteId: string, signal?: AbortSignal): Promise<SiteValidationResponse> {
     return this.#transport(
       `sites/${name(siteId)}/validate`,
-      async (response, combined) => decodeSiteValidation(await readJson(response, combined), response.status),
+      async (response, combined) =>
+        decodeSiteValidation(await readJson(response, combined), response.status),
       signal,
       "",
     );
@@ -2870,7 +2953,8 @@ export class ControlClient {
     this.#idempotencyKey(key);
     return this.#transport(
       `sites/${name(siteId)}/apply`,
-      async (response, combined) => decodeSiteApply(await readJson(response, combined), response.status),
+      async (response, combined) =>
+        decodeSiteApply(await readJson(response, combined), response.status),
       signal,
       "",
       key,
@@ -2881,18 +2965,24 @@ export class ControlClient {
     this.#idempotencyKey(key);
     return this.#transport(
       `sites/${name(siteId)}/approve`,
-      async (response, combined) => decodeSiteApply(await readJson(response, combined), response.status),
+      async (response, combined) =>
+        decodeSiteApply(await readJson(response, combined), response.status),
       signal,
       "",
       key,
     );
   }
 
-  async rollbackSite(siteId: string, key: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
+  async rollbackSite(
+    siteId: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<SiteApplyResponse> {
     this.#idempotencyKey(key);
     return this.#transport(
       `sites/${name(siteId)}/rollback`,
-      async (response, combined) => decodeSiteApply(await readJson(response, combined), response.status),
+      async (response, combined) =>
+        decodeSiteApply(await readJson(response, combined), response.status),
       signal,
       "",
       key,
@@ -2901,7 +2991,10 @@ export class ControlClient {
 
   async saveSiteConfig(
     siteId: string | undefined,
-    value: Omit<SiteConfig, "revision" | "config_digest" | "updated_by" | "created_at" | "updated_at" | "gateway_config">,
+    value: Omit<
+      SiteConfig,
+      "revision" | "config_digest" | "updated_by" | "created_at" | "updated_at" | "gateway_config"
+    >,
     key: string,
     signal?: AbortSignal,
   ): Promise<SiteConfigResponse> {
@@ -2911,8 +3004,7 @@ export class ControlClient {
   }
 
   #idempotencyKey(key: string): void {
-    if (!validIdempotencyKey(key))
-      throw new ApiError("CONTROL_IDEMPOTENCY_KEY_INVALID");
+    if (!validIdempotencyKey(key)) throw new ApiError("CONTROL_IDEMPOTENCY_KEY_INVALID");
   }
   #requestId(requestId: string): void {
     if (typeof requestId !== "string" || !requestPattern.test(requestId))

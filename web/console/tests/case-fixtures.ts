@@ -19,10 +19,7 @@ const envelope = {
   tenant_id: "tenant_demo",
   site_id: "site_demo",
 };
-export function caseCreatedFixture(
-  purpose = CASE_PURPOSE,
-  replayed = false,
-): CaseCreated {
+export function caseCreatedFixture(purpose = CASE_PURPOSE, replayed = false): CaseCreated {
   return {
     ...envelope,
     case_id: CASE_ID,
@@ -59,10 +56,7 @@ export function caseListFixture(): CaseList {
     next_cursor: CASE_LIST_CURSOR,
   };
 }
-export function caseItemAddedFixture(
-  artifact = ARTIFACT_ID,
-  replayed = false,
-): CaseItemAdded {
+export function caseItemAddedFixture(artifact = ARTIFACT_ID, replayed = false): CaseItemAdded {
   return {
     ...envelope,
     schema_version: 3,

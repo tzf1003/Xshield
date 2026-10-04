@@ -81,12 +81,7 @@ function bindingFacts(row: Record<string, unknown>) {
   return {
     binding_id: id(row.binding_id, bindingPattern),
     current_auth_epoch: integer(row.current_auth_epoch),
-    stored_status: choice(row.stored_status, [
-      "anonymous",
-      "active",
-      "revoked",
-      "expired",
-    ]),
+    stored_status: choice(row.stored_status, ["anonymous", "active", "revoked", "expired"]),
     time_expired: bool(row.time_expired),
     expires_at: ledgerTime(row.expires_at),
   };
@@ -104,10 +99,7 @@ function observation(row: Record<string, unknown>) {
  * Missing/foreign records retain the server's unified null observation. Unknown
  * fields are discarded, malformed or unsafe integer facts throw INVALID_RESPONSE.
  */
-export function decodeGrantResponse(
-  value: unknown,
-  target: string,
-): GrantResponse {
+export function decodeGrantResponse(value: unknown, target: string): GrantResponse {
   const row = object(value);
   const base = observation(row);
   ensure(row.source_grant_id === target);
@@ -117,11 +109,7 @@ export function decodeGrantResponse(
     return {
       grant_id: id(data.grant_id, grantPattern),
       auth_epoch: integer(data.auth_epoch),
-      stored_status: choice(data.stored_status, [
-        "active",
-        "revoked",
-        "expired",
-      ]),
+      stored_status: choice(data.stored_status, ["active", "revoked", "expired"]),
       time_expired: bool(data.time_expired),
       issued_at: ledgerTime(data.issued_at),
       expires_at: ledgerTime(data.expires_at),
@@ -142,13 +130,10 @@ export function decodeGrantResponse(
     ensure(base.as_of !== null && grant.grant_id === target);
     ensure(grant.issued_at < grant.expires_at);
     ensure(grant.time_expired === grant.expires_at <= base.as_of);
-    ensure(
-      grant.binding.time_expired === grant.binding.expires_at <= base.as_of,
-    );
+    ensure(grant.binding.time_expired === grant.binding.expires_at <= base.as_of);
     ensure(grant.binding.current_auth_epoch >= grant.auth_epoch);
     ensure(
-      grant.binding.epoch_matches_grant ===
-        (grant.binding.current_auth_epoch === grant.auth_epoch),
+      grant.binding.epoch_matches_grant === (grant.binding.current_auth_epoch === grant.auth_epoch),
     );
   }
   return { ...base, source_grant_id: target, grant };
@@ -158,10 +143,7 @@ export function decodeGrantResponse(
  * Updated time may follow expiry; neither timestamp is an authorization result.
  * Invalid responses fail closed before reaching application state.
  */
-export function decodeBindingResponse(
-  value: unknown,
-  target: string,
-): BindingResponse {
+export function decodeBindingResponse(value: unknown, target: string): BindingResponse {
   const row = object(value);
   const base = observation(row);
   ensure(row.source_binding_id === target);
@@ -178,13 +160,9 @@ export function decodeBindingResponse(
     ensure(base.as_of !== null && binding.binding_id === target);
     ensure(binding.time_expired === binding.expires_at <= base.as_of);
     if (binding.stored_status === "anonymous")
-      ensure(
-        binding.current_auth_epoch === 0 && binding.credential_generation === 0,
-      );
+      ensure(binding.current_auth_epoch === 0 && binding.credential_generation === 0);
     if (binding.stored_status === "active")
-      ensure(
-        binding.current_auth_epoch > 0 && binding.credential_generation > 0,
-      );
+      ensure(binding.current_auth_epoch > 0 && binding.credential_generation > 0);
   }
   return { ...base, source_binding_id: target, binding };
 }

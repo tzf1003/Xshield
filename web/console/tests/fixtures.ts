@@ -1,19 +1,16 @@
 /** Synthetic HTTP fixtures mirroring control and worker response DTOs.
  * They model wire contracts for browser tests, not captured production records.
  */
-export const TOKEN =
-  "synthetic-observer-token-for-browser-tests-000000000000000000000000";
+export const TOKEN = "synthetic-observer-token-for-browser-tests-000000000000000000000000";
 export const REQUEST_ID = "req_018f2a3b-4c5d-7000-8000-000000000001";
 export const OTHER_REQUEST_ID = "req_018f2a3b-4c5d-7000-8000-000000000002";
 export const MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
 export const OTHER_MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000002";
 export const THIRD_MODEL_CALL_ID = "mdl_018f2a3b-4c5d-7000-8000-000000000003";
 export const AGENT_RUN_ID = "agt_018f2a3b-4c5d-7000-8000-000000000001";
-export const CALIBRATION_REPORT_ID =
-  "calr_018f2a3b-4c5d-7000-8000-000000000021";
+export const CALIBRATION_REPORT_ID = "calr_018f2a3b-4c5d-7000-8000-000000000021";
 export const ARTIFACT_ID = "artifact_018f2a3b-4c5d-7000-8000-000000000011";
-export const OTHER_ARTIFACT_ID =
-  "artifact_018f2a3b-4c5d-7000-8000-000000000012";
+export const OTHER_ARTIFACT_ID = "artifact_018f2a3b-4c5d-7000-8000-000000000012";
 export const EVENT_CURSOR = "synthetic.events.cursor-2";
 export const EVIDENCE_CURSOR = "synthetic.evidence.cursor-2";
 export const AS_OF = "2026-09-20T08:10:30.000Z";
@@ -94,10 +91,7 @@ export function auditHealthFixture() {
 
 /** Synthetic restricted projection; this fixture intentionally contains no
  * report body, source tuple, label content, probability, metric, or prompt. */
-export function calibrationReportFixture(
-  reportId = CALIBRATION_REPORT_ID,
-  found = true,
-) {
+export function calibrationReportFixture(reportId = CALIBRATION_REPORT_ID, found = true) {
   return {
     ...envelope(),
     schema_version: 3,
@@ -118,14 +112,10 @@ export function calibrationReportFixture(
           task_revision: "task_demo_r1",
           threshold_policy_revision: "threshold_demo_r1",
           mapping_revision: "mapping_demo_r1",
-          evaluation_manifest_artifact_id:
-            "artifact_018f2a3b-4c5d-7000-8000-000000000022",
-          training_manifest_artifact_id:
-            "artifact_018f2a3b-4c5d-7000-8000-000000000023",
-          calibration_manifest_artifact_id:
-            "artifact_018f2a3b-4c5d-7000-8000-000000000024",
-          label_manifest_artifact_id:
-            "artifact_018f2a3b-4c5d-7000-8000-000000000025",
+          evaluation_manifest_artifact_id: "artifact_018f2a3b-4c5d-7000-8000-000000000022",
+          training_manifest_artifact_id: "artifact_018f2a3b-4c5d-7000-8000-000000000023",
+          calibration_manifest_artifact_id: "artifact_018f2a3b-4c5d-7000-8000-000000000024",
+          label_manifest_artifact_id: "artifact_018f2a3b-4c5d-7000-8000-000000000025",
           provider: "vercel_ai_gateway",
           provider_model_id: "typesafe-ai/jev",
           model_revision: "jev_1.13.0",
@@ -139,12 +129,7 @@ export function calibrationReportFixture(
 }
 
 export function eventsFixture(requestId = REQUEST_ID, nextPage = false) {
-  const event = (
-    sequence: number,
-    stage: string,
-    outcome: string,
-    reason: string,
-  ) => ({
+  const event = (sequence: number, stage: string, outcome: string, reason: string) => ({
     event_id: `ev_018f2a3b-4c5d-7000-8000-${String(sequence).padStart(12, "0")}`,
     event_type: "stage.completed",
     stage,
@@ -184,10 +169,7 @@ export function eventsFixture(requestId = REQUEST_ID, nextPage = false) {
   };
 }
 
-export function manifestFixture(
-  artifactId = ARTIFACT_ID,
-  requestId = REQUEST_ID,
-) {
+export function manifestFixture(artifactId = ARTIFACT_ID, requestId = REQUEST_ID) {
   return {
     recorded_at: AS_OF,
     schema_version: 3,
@@ -222,16 +204,11 @@ export function evidenceFixture(requestId = REQUEST_ID, nextPage = false) {
     source_request_id: requestId,
     truncated: !nextPage,
     next_cursor: nextPage ? null : EVIDENCE_CURSOR,
-    artifacts: [
-      manifestFixture(nextPage ? OTHER_ARTIFACT_ID : ARTIFACT_ID, requestId),
-    ],
+    artifacts: [manifestFixture(nextPage ? OTHER_ARTIFACT_ID : ARTIFACT_ID, requestId)],
   };
 }
 
-export function artifactFixture(
-  artifactId = ARTIFACT_ID,
-  requestId = REQUEST_ID,
-) {
+export function artifactFixture(artifactId = ARTIFACT_ID, requestId = REQUEST_ID) {
   return {
     ...envelope(),
     source_artifact_id: artifactId,
@@ -264,17 +241,12 @@ export function modelCallFixture(modelCallId = MODEL_CALL_ID) {
     duration_us: 1200,
     input_artifact_id: ARTIFACT_ID as string | null,
     output_artifact_id: OTHER_ARTIFACT_ID as string | null,
-    call_artifact_id: "artifact_018f2a3b-4c5d-7000-8000-000000000013" as
-      string | null,
+    call_artifact_id: "artifact_018f2a3b-4c5d-7000-8000-000000000013" as string | null,
   };
   const events = ["started", "requested", "success"].map((status, index) => ({
     ...facts,
     status,
-    reason_code: [
-      "MODEL_EVALUATION_STARTED",
-      "MODEL_REQUESTED",
-      "MODEL_EVALUATED",
-    ][index]!,
+    reason_code: ["MODEL_EVALUATION_STARTED", "MODEL_REQUESTED", "MODEL_EVALUATED"][index]!,
     confidence: index === 2 ? 0.8 : null,
     confidence_status: index === 2 ? "provided" : "unavailable",
     input_artifact_id: index === 0 ? null : facts.input_artifact_id,
@@ -291,8 +263,7 @@ export function modelCallFixture(modelCallId = MODEL_CALL_ID) {
         : index === 1
           ? [ARTIFACT_ID]
           : [ARTIFACT_ID, OTHER_ARTIFACT_ID, facts.call_artifact_id!],
-    cause_event_ids:
-      index === 0 ? [] : [`ev_018f2a3b-4c5d-7000-8000-00000000000${index}`],
+    cause_event_ids: index === 0 ? [] : [`ev_018f2a3b-4c5d-7000-8000-00000000000${index}`],
     sensitivity: "RESTRICTED",
   }));
   return {
@@ -439,9 +410,7 @@ export function modelCallListFixture(nextPage = false) {
     scanned_bytes: 2048,
     items,
     truncated: !nextPage,
-    next_cursor: nextPage
-      ? null
-      : `v1.1789891830123455.${OTHER_MODEL_CALL_ID}.${"0".repeat(64)}`,
+    next_cursor: nextPage ? null : `v1.1789891830123455.${OTHER_MODEL_CALL_ID}.${"0".repeat(64)}`,
   };
 }
 
@@ -464,10 +433,7 @@ export const SEARCH_PLAN: SearchPlan = {
 };
 
 /** Synthetic HMAC bytes only model cursor shape; server signing is tested in Rust. */
-export async function searchFixture(
-  plan = SEARCH_PLAN,
-  nextPage = false,
-): Promise<SearchResponse> {
+export async function searchFixture(plan = SEARCH_PLAN, nextPage = false): Promise<SearchResponse> {
   const events: SearchEvent[] = (nextPage ? [3] : [1, 2]).map((sequence) => ({
     event_id: `ev_018f2a3b-4c5d-7000-8000-${String(sequence).padStart(12, "0")}`,
     event_type: sequence === 1 ? "evidence.deleted" : "stage.completed",
@@ -504,16 +470,12 @@ export async function searchFixture(
     scanned_rows: null,
     scanned_bytes: 0,
     truncated: !nextPage,
-    next_cursor: nextPage
-      ? null
-      : `v1.${position}.${last.event_id}.${"0".repeat(64)}`,
+    next_cursor: nextPage ? null : `v1.${position}.${last.event_id}.${"0".repeat(64)}`,
     events,
   };
 }
 
-export async function causalityFixture(
-  plan: CausalityPlan,
-): Promise<CausalityResponse> {
+export async function causalityFixture(plan: CausalityPlan): Promise<CausalityResponse> {
   const base = await searchFixture();
   const predecessor = {
     ...base.events[0]!,

@@ -47,10 +47,13 @@ test("case analysis and job reads keep strict paths and idempotency", async (t) 
     assert.equal(path, `/control/v1/jobs/${JOB_ID}`);
     assert.equal(options.method, "GET");
     assert.equal(options.body, undefined);
-    return new Response(JSON.stringify({ ...envelope, found: true, job: { ...job, replayed: true } }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ ...envelope, found: true, job: { ...job, replayed: true } }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   });
 
   const client = new ControlClient("t".repeat(32));

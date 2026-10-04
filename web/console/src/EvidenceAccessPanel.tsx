@@ -6,11 +6,7 @@ import type { ControlClient, Envelope } from "./api";
 import { artifactPattern } from "./api-contract";
 import { casePattern, validCaseText, validIdempotencyKey } from "./cases";
 import { accessPattern } from "./evidence-access";
-import type {
-  AccessDecision,
-  AccessInspection,
-  AccessRequested,
-} from "./evidence-access";
+import type { AccessDecision, AccessInspection, AccessRequested } from "./evidence-access";
 import { AccessDetails } from "./AccessDetails";
 import { AccessInbox } from "./AccessInbox";
 import { Rows } from "./panels";
@@ -49,14 +45,10 @@ function AccessFailure({ error }: { error: unknown }) {
   return error ? (
     <div className="notice danger" role="alert">
       <div>
-        {error instanceof ApiError
-          ? error.message
-          : "请求未完成，请核对结果后重试。"}
+        {error instanceof ApiError ? error.message : "请求未完成，请核对结果后重试。"}
         <small className="mono">
           {error instanceof ApiError ? error.code : "CONSOLE_REQUEST_FAILED"}
-          {error instanceof ApiError && error.requestId
-            ? ` · ${error.requestId}`
-            : ""}
+          {error instanceof ApiError && error.requestId ? ` · ${error.requestId}` : ""}
         </small>
       </div>
     </div>
@@ -92,9 +84,7 @@ export function EvidenceAccessPanel({
   const inFlight = useRef(false);
   const mounted = useRef(true);
   const downloadUrl = useRef<string | null>(null);
-  const downloadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
+  const downloadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   function revokeDownload() {
     clearTimeout(downloadTimer.current);
     if (downloadUrl.current) URL.revokeObjectURL(downloadUrl.current);
@@ -109,9 +99,7 @@ export function EvidenceAccessPanel({
   }, []);
   useEffect(() => {
     if (!active) {
-      setAttempt((value) =>
-        value?.phase === "pending" ? { ...value, phase: "unknown" } : value,
-      );
+      setAttempt((value) => (value?.phase === "pending" ? { ...value, phase: "unknown" } : value));
       setInspection(null);
       setReadError(null);
       setDownloadError(null);
@@ -119,8 +107,7 @@ export function EvidenceAccessPanel({
       revokeDownload();
     }
   }, [active]);
-  const unresolved =
-    attempt?.phase === "pending" || attempt?.phase === "unknown";
+  const unresolved = attempt?.phase === "pending" || attempt?.phase === "unknown";
   useEffect(() => {
     if (!unresolved) return;
     const warn = (event: BeforeUnloadEvent) => event.preventDefault();
@@ -172,10 +159,7 @@ export function EvidenceAccessPanel({
               signal,
             ),
       (result) => {
-        if (
-          result.case_id !== request.caseId ||
-          result.artifact_id !== request.artifactId
-        ) {
+        if (result.case_id !== request.caseId || result.artifact_id !== request.artifactId) {
           throw new ApiError("INVALID_RESPONSE");
         }
         handled = true;
@@ -216,19 +200,11 @@ export function EvidenceAccessPanel({
     action === "request"
       ? casePattern.test(caseId) && artifactPattern.test(artifactId)
       : reviewed &&
-        (recover ||
-          (item?.stored_status === "pending" &&
-            (action === "deny" || liveArtifact))) &&
+        (recover || (item?.stored_status === "pending" && (action === "deny" || liveArtifact))) &&
         (action === "deny" || validTtl);
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (
-      attempt ||
-      busy ||
-      !targetValid ||
-      !validCaseText(reason) ||
-      !validIdempotencyKey(key)
-    )
+    if (attempt || busy || !targetValid || !validCaseText(reason) || !validIdempotencyKey(key))
       return;
     if (action !== "request" && !item) return;
     void mutate({
@@ -256,12 +232,7 @@ export function EvidenceAccessPanel({
     setDownloadError(null);
     setDownloadNotice(null);
     void onRun(
-      (api, signal) =>
-        api.downloadEvidence(
-          target.artifact_id,
-          target.access_request_id,
-          signal,
-        ),
+      (api, signal) => api.downloadEvidence(target.artifact_id, target.access_request_id, signal),
       (response) => {
         // App calls apply only after epoch, abort and authenticated-scope checks.
         // Keep one bounded object URL; plaintext never enters React state or DOM.
@@ -309,8 +280,7 @@ export function EvidenceAccessPanel({
           仅可读取本人获批且仍有效的原文。角色与作用域由服务端校验。
           <p>
             申请详情对申请人（Investigator 或
-            SensitiveEvidenceReader）及同域审批人开放。原文仅在点击下载后保存为
-            .bin 附件。
+            SensitiveEvidenceReader）及同域审批人开放。原文仅在点击下载后保存为 .bin 附件。
           </p>
           <p>
             写入结果未知时保留原键与参数。刷新、断连、401、页面离开或闲置 15
@@ -318,8 +288,13 @@ export function EvidenceAccessPanel({
           </p>
         </div>
       </div>
-      <AccessInbox active={active} busy={busy} onInvalidate={invalidateInspection}
-        onRun={onRun} onOpen={browse} />
+      <AccessInbox
+        active={active}
+        busy={busy}
+        onInvalidate={invalidateInspection}
+        onRun={onRun}
+        onOpen={browse}
+      />
       <div className="case-grid">
         <section className="panel" aria-label="证据访问操作">
           <div className="panel-heading">
@@ -369,16 +344,13 @@ export function EvidenceAccessPanel({
                   spellCheck={false}
                   required
                 />
-                <p className="muted">
-                  填写本人开放案件及同作用域内的有效证据。
-                </p>
+                <p className="muted">填写本人开放案件及同作用域内的有效证据。</p>
               </>
             ) : (
               <p className="muted">
                 目标申请：
                 <span className="mono">
-                  {frozen?.accessId ||
-                    (reviewed ? accessId : "请先读取申请详情")}
+                  {frozen?.accessId || (reviewed ? accessId : "请先读取申请详情")}
                 </span>
                 。首次审批需复核详情；拒绝可终结已关闭案件或已到期证据的待决申请。
               </p>
@@ -400,9 +372,7 @@ export function EvidenceAccessPanel({
                   : "请填写保存的原幂等键、原理由和原批准期限。历史状态仍可确认原操作；服务端校验精确重试，参数不同会拒绝。请先读取目标详情。"}
               </p>
             )}
-            <label htmlFor="access-reason">
-              {action === "request" ? "申请理由" : "审批理由"}
-            </label>
+            <label htmlFor="access-reason">{action === "request" ? "申请理由" : "审批理由"}</label>
             <textarea
               id="access-reason"
               value={reason}
@@ -449,17 +419,13 @@ export function EvidenceAccessPanel({
               required
             />
             <p className="muted">
-              16–128 个 ASCII 字母、数字或
-              -_.:；恢复请求时填写原键及全部原参数。
+              16–128 个 ASCII 字母、数字或 -_.:；恢复请求时填写原键及全部原参数。
             </p>
             {!attempt && (
               <button
                 type="submit"
                 disabled={
-                  busy ||
-                  !targetValid ||
-                  !validCaseText(reason) ||
-                  !validIdempotencyKey(key)
+                  busy || !targetValid || !validCaseText(reason) || !validIdempotencyKey(key)
                 }
               >
                 {labels[action]}
@@ -510,9 +476,7 @@ export function EvidenceAccessPanel({
                     ["管理请求 ID", attempt.result.request_id],
                     [
                       "replayed",
-                      attempt.result.replayed
-                        ? "true（返回原操作结果）"
-                        : "false（首次提交）",
+                      attempt.result.replayed ? "true（返回原操作结果）" : "false（首次提交）",
                     ],
                   ]}
                 />
@@ -571,11 +535,7 @@ export function EvidenceAccessPanel({
             />
             <button
               type="submit"
-              disabled={
-                busy ||
-                attempt?.phase === "pending" ||
-                !accessPattern.test(accessId)
-              }
+              disabled={busy || attempt?.phase === "pending" || !accessPattern.test(accessId)}
             >
               读取申请 / 刷新
             </button>
@@ -584,9 +544,7 @@ export function EvidenceAccessPanel({
           {inspection ? (
             <AccessDetails response={inspection} onHistory={onHistory} />
           ) : (
-            <p className="empty">
-              读取申请详情，复核申请人、理由、目标及历史决策。
-            </p>
+            <p className="empty">读取申请详情，复核申请人、理由、目标及历史决策。</p>
           )}
           <div className="case-form">
             <button

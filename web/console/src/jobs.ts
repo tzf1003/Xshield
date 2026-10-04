@@ -43,13 +43,7 @@ function view(value: unknown): JobView {
   const result: JobView = {
     job_id: id(row.job_id, jobPattern),
     kind: choice(row.kind, ["case_analysis"]),
-    status: choice(row.status, [
-      "queued",
-      "running",
-      "succeeded",
-      "failed",
-      "cancelled",
-    ]),
+    status: choice(row.status, ["queued", "running", "succeeded", "failed", "cancelled"]),
     checkpoint: text(row.checkpoint, 128),
     reason_code: text(row.reason_code, 128),
     retryable: bool(row.retryable),
@@ -63,8 +57,7 @@ function view(value: unknown): JobView {
   };
   ensure(result.active_artifact_count <= result.artifact_count);
   ensure(
-    (result.status === "queued" || result.status === "running") ===
-      (result.completed_at === null),
+    (result.status === "queued" || result.status === "running") === (result.completed_at === null),
   );
   return result;
 }
@@ -79,8 +72,7 @@ export function decodeJobResponse(
   const result: JobResponse = {
     ...envelope(row),
     found: bool(row.found),
-    job:
-      row.job === undefined || row.job === null ? null : view(row.job),
+    job: row.job === undefined || row.job === null ? null : view(row.job),
   };
   ensure(result.found === (result.job !== null));
   if (expectedCaseId !== undefined) {

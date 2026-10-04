@@ -41,7 +41,13 @@
   },
   "overrides": [
     {
-      "includes": ["src/security/**", "src/theme/**", "src/shell/**", "src/router/**", "src/pages/**"],
+      "includes": [
+        "src/security/**",
+        "src/theme/**",
+        "src/shell/**",
+        "src/router/**",
+        "src/pages/**"
+      ],
       "linter": {
         "rules": {
           "suspicious": {

@@ -49,9 +49,7 @@ export function AccessDetails({
       <p className="footnote">
         以上为数据库观察时的历史事实。提交审批和下载时，服务端重新校验主体、角色、案件、目录、审批及期限。
       </p>
-      <button onClick={() => onHistory(item.access_request_id)}>
-        准备历史检索
-      </button>
+      <button onClick={() => onHistory(item.access_request_id)}>准备历史检索</button>
       <p className="footnote">
         历史检索仅预填访问申请引用，仍需输入时间窗并由 Investigator 独立鉴权。
       </p>

@@ -45,15 +45,7 @@ export type SearchPreset = {
     | "job_id";
   value: string;
 };
-const outcomes = [
-  "PASS",
-  "ALLOW",
-  "DENY",
-  "UNKNOWN",
-  "ERROR",
-  "SKIPPED",
-  "CANCELLED",
-];
+const outcomes = ["PASS", "ALLOW", "DENY", "UNKNOWN", "ERROR", "SKIPPED", "CANCELLED"];
 
 /** Builds an allowlisted plan; App owns submission, scope and cancellation. */
 export function SearchPanel({
@@ -90,17 +82,13 @@ export function SearchPanel({
   const [limit, setLimit] = useState("25");
   const [sort, setSort] = useState<SearchPlan["sort"]>("occurred_at_desc");
   const [filters, setFilters] = useState<DraftFilter[]>(() =>
-    initialFilter
-      ? [{ id: 0, field: initialFilter.kind, value: initialFilter.value }]
-      : [],
+    initialFilter ? [{ id: 0, field: initialFilter.kind, value: initialFilter.value }] : [],
   );
   const filterId = useRef(0);
 
   function updateFilter(id: number, change: Partial<DraftFilter>) {
     onEdit();
-    setFilters((items) =>
-      items.map((item) => (item.id === id ? { ...item, ...change } : item)),
-    );
+    setFilters((items) => items.map((item) => (item.id === id ? { ...item, ...change } : item)));
   }
 
   return (
@@ -111,8 +99,7 @@ export function SearchPanel({
         onSubmit={(event) => {
           event.preventDefault();
           // datetime-local intentionally represents UTC wall time, independent of browser timezone.
-          const utc = (value: string) =>
-            `${value.length === 16 ? `${value}:00` : value}Z`;
+          const utc = (value: string) => `${value.length === 16 ? `${value}:00` : value}Z`;
           onSubmit({
             schema_version: 3,
             start: utc(window.start),
@@ -123,13 +110,9 @@ export function SearchPanel({
               if (field === "confidence_at_most")
                 return { kind: field, basis_points: Number(value) };
               if (
-                [
-                  "event_type",
-                  "stage",
-                  "reason_code",
-                  "operation_id",
-                  "model_revision",
-                ].includes(field)
+                ["event_type", "stage", "reason_code", "operation_id", "model_revision"].includes(
+                  field,
+                )
               )
                 return { kind: "text", field, value };
               return { kind: field, value };
@@ -196,9 +179,7 @@ export function SearchPanel({
               onChange={(event) => {
                 onEdit();
                 setSort(
-                  event.target.value === "occurred_at_asc"
-                    ? "occurred_at_asc"
-                    : "occurred_at_desc",
+                  event.target.value === "occurred_at_asc" ? "occurred_at_asc" : "occurred_at_desc",
                 );
               }}
             >
@@ -208,15 +189,13 @@ export function SearchPanel({
           </div>
         </div>
         <p className="footnote">
-          UTC 整秒半开时间窗，最多 31 天；最多 8
-          个条件，全部匹配同一事件。Trace ID 为 32 个小写十六进制字符且仍受时间窗限制；前驱事件条件只查找直接关联，事件详情可在当前页显示有界因果邻域；主体引用仅用于精确筛选，结果不会回显主体值；置信度空值不会匹配数值阈值。
+          UTC 整秒半开时间窗，最多 31 天；最多 8 个条件，全部匹配同一事件。Trace ID 为 32
+          个小写十六进制字符且仍受时间窗限制；前驱事件条件只查找直接关联，事件详情可在当前页显示有界因果邻域；主体引用仅用于精确筛选，结果不会回显主体值；置信度空值不会匹配数值阈值。
         </p>
         {filters.map((filter, index) => (
           <div className="search-filter" key={filter.id}>
             <div className="search-field">
-              <label htmlFor={`search-field-${filter.id}`}>
-                条件 {index + 1} 字段
-              </label>
+              <label htmlFor={`search-field-${filter.id}`}>条件 {index + 1} 字段</label>
               <select
                 id={`search-field-${filter.id}`}
                 value={filter.field}
@@ -235,16 +214,12 @@ export function SearchPanel({
               </select>
             </div>
             <div className="search-field">
-              <label htmlFor={`search-value-${filter.id}`}>
-                条件 {index + 1} 值
-              </label>
+              <label htmlFor={`search-value-${filter.id}`}>条件 {index + 1} 值</label>
               {filter.field === "outcome" ? (
                 <select
                   id={`search-value-${filter.id}`}
                   value={filter.value}
-                  onChange={(event) =>
-                    updateFilter(filter.id, { value: event.target.value })
-                  }
+                  onChange={(event) => updateFilter(filter.id, { value: event.target.value })}
                 >
                   {outcomes.map((outcome) => (
                     <option key={outcome}>{outcome}</option>
@@ -254,28 +229,18 @@ export function SearchPanel({
                 <input
                   id={`search-value-${filter.id}`}
                   className="mono"
-                  type={
-                    filter.field === "confidence_at_most" ? "number" : "text"
-                  }
+                  type={filter.field === "confidence_at_most" ? "number" : "text"}
                   min={filter.field === "confidence_at_most" ? 0 : undefined}
-                  max={
-                    filter.field === "confidence_at_most" ? 10000 : undefined
-                  }
+                  max={filter.field === "confidence_at_most" ? 10000 : undefined}
                   step={1}
                   maxLength={
-                    filter.field === "subject_ref"
-                      ? 256
-                      : filter.field === "trace_id"
-                        ? 32
-                        : 128
+                    filter.field === "subject_ref" ? 256 : filter.field === "trace_id" ? 32 : 128
                   }
                   value={filter.value}
                   autoComplete="off"
                   spellCheck={false}
                   required
-                  onChange={(event) =>
-                    updateFilter(filter.id, { value: event.target.value })
-                  }
+                  onChange={(event) => updateFilter(filter.id, { value: event.target.value })}
                 />
               )}
             </div>
@@ -285,9 +250,7 @@ export function SearchPanel({
               aria-label={`删除条件 ${index + 1}`}
               onClick={() => {
                 onEdit();
-                setFilters((items) =>
-                  items.filter((item) => item.id !== filter.id),
-                );
+                setFilters((items) => items.filter((item) => item.id !== filter.id));
               }}
             >
               删除
@@ -302,10 +265,7 @@ export function SearchPanel({
             onClick={() => {
               onEdit();
               const id = ++filterId.current;
-              setFilters((items) => [
-                ...items,
-                { id, field: "request_id", value: "" },
-              ]);
+              setFilters((items) => [...items, { id, field: "request_id", value: "" }]);
             }}
           >
             添加条件
@@ -315,8 +275,7 @@ export function SearchPanel({
           </button>
         </div>
         <p className="footnote">
-          检索要求 Investigator；请求详情与证据元数据另需
-          Observer。权限由服务端分别校验。
+          检索要求 Investigator；请求详情与证据元数据另需 Observer。权限由服务端分别校验。
         </p>
       </form>
       {plan && (
@@ -328,14 +287,8 @@ export function SearchPanel({
           {response && (
             <Rows
               entries={[
-                [
-                  "查询摘要",
-                  <span className="mono">{response.query_digest}</span>,
-                ],
-                [
-                  "管理请求 ID",
-                  <span className="mono">{response.request_id}</span>,
-                ],
+                ["查询摘要", <span className="mono">{response.query_digest}</span>],
+                ["管理请求 ID", <span className="mono">{response.request_id}</span>],
                 [
                   "实际扫描行",
                   response.scanned_rows === null
@@ -366,17 +319,13 @@ export function SearchPanel({
                 {response.pending_segments} 个待发布段
               </strong>
               <p>
-                水位仅覆盖配置的日志源，独立 Outbox
-                可能仍待发布。结果为空与索引完整性分别判断。
+                水位仅覆盖配置的日志源，独立 Outbox 可能仍待发布。结果为空与索引完整性分别判断。
               </p>
               <details>
                 <summary>查看搜索水位</summary>
                 <Rows
                   entries={[
-                    [
-                      "观察时间",
-                      <span className="mono">{response.as_of}</span>,
-                    ],
+                    ["观察时间", <span className="mono">{response.as_of}</span>],
                     [
                       "水位",
                       response.index_watermark
@@ -394,11 +343,7 @@ export function SearchPanel({
                 <h2>搜索事件</h2>
                 <span className="muted">本页 {response.events.length} 条</span>
               </div>
-              <EventTable
-                events={response.events}
-                selected={selected}
-                onSelect={onSelect}
-              />
+              <EventTable events={response.events} selected={selected} onSelect={onSelect} />
               {response.events.length === 0 && (
                 <p className="footnote search-empty">
                   未发布、到期或作用域不匹配均可能返回空结果；请结合来源与保留策略核对。
@@ -413,9 +358,7 @@ export function SearchPanel({
                   下一页
                 </button>
                 <span className="muted">
-                  {response.truncated
-                    ? "本页已截断，可继续翻页"
-                    : "当前可见结果已读完"}
+                  {response.truncated ? "本页已截断，可继续翻页" : "当前可见结果已读完"}
                 </span>
               </div>
               <p className="footnote search-empty">

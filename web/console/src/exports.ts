@@ -85,11 +85,27 @@ export function decodeExportResponse(
   ensure(
     Object.keys(row).length === 21 &&
       [
-        "request_id", "tenant_id", "site_id", "export_id", "case_id",
-        "requested_by", "purpose", "kind", "status", "decided_by",
-        "decided_at", "decision_reason", "expires_at", "package_artifact_id",
-        "package_request_id", "package_digest", "package_bytes", "download_count",
-        "created_at", "updated_at", "replayed",
+        "request_id",
+        "tenant_id",
+        "site_id",
+        "export_id",
+        "case_id",
+        "requested_by",
+        "purpose",
+        "kind",
+        "status",
+        "decided_by",
+        "decided_at",
+        "decision_reason",
+        "expires_at",
+        "package_artifact_id",
+        "package_request_id",
+        "package_digest",
+        "package_bytes",
+        "download_count",
+        "created_at",
+        "updated_at",
+        "replayed",
       ].every((key) => Object.hasOwn(row, key)),
   );
   const result: InvestigationExport = {
@@ -104,12 +120,8 @@ export function decodeExportResponse(
     decided_at: nullable(row.decided_at, time),
     decision_reason: nullable(row.decision_reason, purpose),
     expires_at: nullable(row.expires_at, time),
-    package_artifact_id: nullable(row.package_artifact_id, (item) =>
-      id(item, artifactPattern),
-    ),
-    package_request_id: nullable(row.package_request_id, (item) =>
-      id(item, requestPattern),
-    ),
+    package_artifact_id: nullable(row.package_artifact_id, (item) => id(item, artifactPattern)),
+    package_request_id: nullable(row.package_request_id, (item) => id(item, requestPattern)),
     package_digest: nullable(row.package_digest, (item) => {
       const digest = text(item, 64);
       ensure(/^[a-f0-9]{64}(?![\s\S])/.test(digest));
@@ -125,18 +137,19 @@ export function decodeExportResponse(
   ensure(expectedCase === undefined || result.case_id === expectedCase);
   ensure(Date.parse(result.created_at) <= Date.parse(result.updated_at));
   const decided = result.status !== "pending_approval";
-  ensure(decided === (result.decided_by !== null && result.decided_at !== null && result.decision_reason !== null));
   ensure(
-    !["approved", "ready"].includes(result.status) ||
-      result.expires_at !== null,
+    decided ===
+      (result.decided_by !== null && result.decided_at !== null && result.decision_reason !== null),
   );
+  ensure(!["approved", "ready"].includes(result.status) || result.expires_at !== null);
   const packaged = result.status === "ready";
-  ensure(packaged === (
-    result.package_artifact_id !== null &&
-    result.package_request_id !== null &&
-    result.package_digest !== null &&
-    result.package_bytes !== null
-  ));
+  ensure(
+    packaged ===
+      (result.package_artifact_id !== null &&
+        result.package_request_id !== null &&
+        result.package_digest !== null &&
+        result.package_bytes !== null),
+  );
   ensure(
     result.status === "ready" ||
       (result.package_artifact_id === null &&

@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  buildCausalNeighborhood,
-  type CausalRecord,
-} from "../src/event-causality.ts";
+import { buildCausalNeighborhood, type CausalRecord } from "../src/event-causality.ts";
 
 const event = (id: string, causeIds: string[] = []): CausalRecord => ({
   event_id: id,
@@ -60,9 +57,7 @@ test("caps broad neighborhoods deterministically", () => {
   ];
 
   const result = buildCausalNeighborhood(root, records);
-  const ids = result.successors.flatMap((level) =>
-    level.map((node) => node.eventId),
-  );
+  const ids = result.successors.flatMap((level) => level.map((node) => node.eventId));
 
   assert.equal(ids.length, 16);
   assert.deepEqual(ids, [...ids].sort());

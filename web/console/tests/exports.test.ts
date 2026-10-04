@@ -110,10 +110,18 @@ test("export decoder rejects scope drift, malformed pointers and impossible stat
   t.mock.method(globalThis, "fetch", async () => json(fixture));
   const client = new ControlClient(TOKEN);
   for (const mutate of [
-    (row: ReturnType<typeof exportFixture>) => { row.kind = "wrong" as "metadata_only"; },
-    (row: ReturnType<typeof exportFixture>) => { row.package_digest = "B".repeat(64); },
-    (row: ReturnType<typeof exportFixture>) => { row.package_artifact_id = null; },
-    (row: ReturnType<typeof exportFixture>) => { row.download_count = 3; },
+    (row: ReturnType<typeof exportFixture>) => {
+      row.kind = "wrong" as "metadata_only";
+    },
+    (row: ReturnType<typeof exportFixture>) => {
+      row.package_digest = "B".repeat(64);
+    },
+    (row: ReturnType<typeof exportFixture>) => {
+      row.package_artifact_id = null;
+    },
+    (row: ReturnType<typeof exportFixture>) => {
+      row.download_count = 3;
+    },
   ]) {
     const invalid = exportFixture("ready");
     mutate(invalid);
@@ -148,12 +156,21 @@ test("export download binds headers, exact bytes and bounded Blob", async (t) =>
 
 test("export download rejects a package that differs from the inspected ready metadata", async (t) => {
   const bytes = new TextEncoder().encode('{"kind":"metadata_only"}');
-  t.mock.method(globalThis, "fetch", async () => new Response(bytes, {
-    headers: exportDownloadHeaders(bytes.byteLength),
-  }));
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () =>
+      new Response(bytes, {
+        headers: exportDownloadHeaders(bytes.byteLength),
+      }),
+  );
   const client = new ControlClient(TOKEN);
   await assert.rejects(
-    client.downloadExport(EXPORT_ID, "artifact_018f2a3b-4c5d-7000-8000-000000000073", bytes.byteLength),
+    client.downloadExport(
+      EXPORT_ID,
+      "artifact_018f2a3b-4c5d-7000-8000-000000000073",
+      bytes.byteLength,
+    ),
     errorIs("INVALID_RESPONSE"),
   );
   await assert.rejects(
@@ -163,9 +180,14 @@ test("export download rejects a package that differs from the inspected ready me
   const missingNosniff = exportDownloadHeaders(bytes.byteLength);
   delete missingNosniff["X-Content-Type-Options"];
   t.mock.restoreAll();
-  t.mock.method(globalThis, "fetch", async () => new Response(bytes, {
-    headers: missingNosniff,
-  }));
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () =>
+      new Response(bytes, {
+        headers: missingNosniff,
+      }),
+  );
   await assert.rejects(
     client.downloadExport(EXPORT_ID, EXPORT_ARTIFACT_ID, bytes.byteLength),
     errorIs("INVALID_RESPONSE"),

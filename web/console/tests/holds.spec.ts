@@ -2,8 +2,15 @@ import { openView } from "./navigation";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { resolve } from "node:path";
 import { ARTIFACT_ID, TOKEN, errorFixture } from "./fixtures";
-import { HOLD_ID, HOLD_CASE_ID, HOLD_KEY, HOLD_UNTIL, holdRecordFixture,
-  holdMutationFixture, holdCollectionFixture } from "./hold-fixtures";
+import {
+  HOLD_ID,
+  HOLD_CASE_ID,
+  HOLD_KEY,
+  HOLD_UNTIL,
+  holdRecordFixture,
+  holdMutationFixture,
+  holdCollectionFixture,
+} from "./hold-fixtures";
 
 type Call = { path: string; method: string; key: string | null; body: unknown };
 async function intercept(page: Page, handler: (route: Route, call: Call) => Promise<void>) {
@@ -13,8 +20,12 @@ async function intercept(page: Page, handler: (route: Route, call: Call) => Prom
     expect(await request.headerValue("authorization")).toBe(`Bearer ${TOKEN}`);
     expect(await request.headerValue("cookie")).toBeNull();
     const url = new URL(request.url());
-    const call = { path: url.pathname + url.search, method: request.method(),
-      key: await request.headerValue("idempotency-key"), body: request.postDataJSON() };
+    const call = {
+      path: url.pathname + url.search,
+      method: request.method(),
+      key: await request.headerValue("idempotency-key"),
+      body: request.postDataJSON(),
+    };
     calls.push(call);
     await handler(route, call);
   });
@@ -52,23 +63,25 @@ test("prepares scoped evidence hold history without submitting a search", async 
   await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(HOLD_ID);
   await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
   await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
-  expect(calls.map((call) => call.path)).toEqual([
-    `/control/v1/cases/${HOLD_CASE_ID}/holds`,
-  ]);
+  expect(calls.map((call) => call.path)).toEqual([`/control/v1/cases/${HOLD_CASE_ID}/holds`]);
 });
 
 test("explicit hold creation, history selection, release and refresh", async ({ page }) => {
   let released = false;
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
   const calls = await intercept(page, async (route, call) => {
     if (call.path.endsWith("/release")) {
       released = true;
       return route.fulfill({ json: holdMutationFixture(true) });
     }
     if (call.method === "POST") return route.fulfill({ status: 201, json: holdMutationFixture() });
-    return route.fulfill({ json: { ...holdCollectionFixture(), items: [holdRecordFixture(released)] } });
+    return route.fulfill({
+      json: { ...holdCollectionFixture(), items: [holdRecordFixture(released)] },
+    });
   });
   await connect(page);
   await expect(page).toHaveTitle(/Xshield/);
@@ -76,8 +89,12 @@ test("explicit hold creation, history selection, release and refresh", async ({ 
   expect(calls).toHaveLength(0);
   await create(page);
   await expect(page.getByRole("heading", { name: "创建保留锁已确认" })).toBeVisible();
-  expect(calls[0]).toEqual({ path: `/control/v1/cases/${HOLD_CASE_ID}/holds`, method: "POST", key: HOLD_KEY,
-    body: { artifact_id: ARTIFACT_ID, reason: holdRecordFixture().reason, hold_until: HOLD_UNTIL } });
+  expect(calls[0]).toEqual({
+    path: `/control/v1/cases/${HOLD_CASE_ID}/holds`,
+    method: "POST",
+    key: HOLD_KEY,
+    body: { artifact_id: ARTIFACT_ID, reason: holdRecordFixture().reason, hold_until: HOLD_UNTIL },
+  });
   expect(calls).toHaveLength(1);
   await page.getByRole("button", { name: "准备新的保留操作" }).click();
   await history(page);
@@ -89,28 +106,42 @@ test("explicit hold creation, history selection, release and refresh", async ({ 
   await page.getByRole("button", { name: "释放保留锁", exact: true }).click();
   await expect(page.getByRole("heading", { name: "释放保留锁已确认" })).toBeVisible();
   expect(calls).toHaveLength(3);
-  expect(calls[2]).toEqual({ path: `/control/v1/evidence-holds/${HOLD_ID}/release`, method: "POST", key: `${HOLD_KEY}-release`, body: { reason: holdRecordFixture(true).released_reason } });
+  expect(calls[2]).toEqual({
+    path: `/control/v1/evidence-holds/${HOLD_ID}/release`,
+    method: "POST",
+    key: `${HOLD_KEY}-release`,
+    body: { reason: holdRecordFixture(true).released_reason },
+  });
   await page.getByRole("button", { name: "读取保留历史 / 刷新", exact: true }).click();
   await expect(page.getByText("released · 已释放", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: `选择释放 ${HOLD_ID}`, exact: true })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: `选择释放 ${HOLD_ID}`, exact: true }),
+  ).toBeDisabled();
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
   const output = process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR;
   if (output) await page.screenshot({ path: resolve(output, "holds-desktop.png"), fullPage: true });
 });
 
-test("unknown write preserves its original key through navigation and later rejection", async ({ page }) => {
+test("unknown write preserves its original key through navigation and later rejection", async ({
+  page,
+}) => {
   let attempts = 0;
   const calls = await intercept(page, (route) => {
     attempts += 1;
     if (attempts === 1) return route.abort("failed");
-    if (attempts === 2) return route.fulfill({ status: 403, json: errorFixture("CONTROL_SCOPE_DENIED") });
+    if (attempts === 2)
+      return route.fulfill({ status: 403, json: errorFixture("CONTROL_SCOPE_DENIED") });
     return route.fulfill({ json: holdMutationFixture(false, true) });
   });
   await connect(page);
   await create(page);
   await expect(page.getByRole("heading", { name: "保留操作结果未知" })).toBeVisible();
-  expect(await page.evaluate(() => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
+  expect(
+    await page.evaluate(
+      () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })),
+    ),
+  ).toBe(true);
   await expect(page.getByRole("button", { name: "准备新的保留操作" })).toBeDisabled();
   await openView(page, "request");
   await openView(page, "hold");
@@ -120,12 +151,18 @@ test("unknown write preserves its original key through navigation and later reje
   await page.getByRole("button", { name: "原样重试保留操作" }).click();
   await expect(page.getByRole("heading", { name: "创建保留锁已确认" })).toBeVisible();
   expect(calls).toEqual([calls[0], calls[0], calls[0]]);
-  expect(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
+  expect(
+    await page.evaluate(() =>
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true })),
+    ),
+  ).toBe(true);
 });
 
 for (const action of ["create", "release"] as const) {
   test(`manual recovery of ${action} retains uncertainty after conflict`, async ({ page }) => {
-    await intercept(page, (route) => route.fulfill({ status: 409, json: errorFixture("CONTROL_EVIDENCE_HOLD_CONFLICT") }));
+    await intercept(page, (route) =>
+      route.fulfill({ status: 409, json: errorFixture("CONTROL_EVIDENCE_HOLD_CONFLICT") }),
+    );
     await connect(page);
     await page.getByLabel("保留操作类型", { exact: true }).selectOption(action);
     await page.getByLabel("恢复原保留操作", { exact: true }).check();
@@ -142,8 +179,12 @@ for (const action of ["create", "release"] as const) {
   });
 }
 
-test("invalid inputs remain local while restored past deadlines are sent unchanged", async ({ page }) => {
-  const calls = await intercept(page, (route) => route.fulfill({ status: 409, json: errorFixture("CONTROL_EVIDENCE_HOLD_CONFLICT") }));
+test("invalid inputs remain local while restored past deadlines are sent unchanged", async ({
+  page,
+}) => {
+  const calls = await intercept(page, (route) =>
+    route.fulfill({ status: 409, json: errorFixture("CONTROL_EVIDENCE_HOLD_CONFLICT") }),
+  );
   await connect(page);
   await fillCreate(page, "2026-02-30T00:00:00.000Z");
   await expect(page.getByRole("button", { name: "创建保留锁", exact: true })).toBeDisabled();
@@ -162,8 +203,12 @@ test("history paging is explicit and scoped to its case", async ({ page }) => {
   const cursor = `v1.${HOLD_ID}.${"a".repeat(64)}`;
   const calls = await intercept(page, (route, call) => {
     const body = holdCollectionFixture();
-    if (call.path.includes("cursor=")) body.items = [{ ...holdRecordFixture(), hold_id: HOLD_ID.replace(/.$/, "9") }];
-    else { body.truncated = true; body.next_cursor = cursor; }
+    if (call.path.includes("cursor="))
+      body.items = [{ ...holdRecordFixture(), hold_id: HOLD_ID.replace(/.$/, "9") }];
+    else {
+      body.truncated = true;
+      body.next_cursor = cursor;
+    }
     return route.fulfill({ json: body });
   });
   await connect(page);
@@ -175,7 +220,9 @@ test("history paging is explicit and scoped to its case", async ({ page }) => {
   await expect(page.getByText("保留生效中", { exact: true })).toHaveCount(0);
 });
 
-test("mobile history separates durable release from expiry and renders reasons inertly", async ({ page }) => {
+test("mobile history separates durable release from expiry and renders reasons inertly", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const injected = '<img src=x onerror="window.injected=1">';
   await intercept(page, (route) => {
@@ -190,7 +237,9 @@ test("mobile history separates durable release from expiry and renders reasons i
   await expect(page.getByText("保留期限已过", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("unreleased · 未释放", { exact: true })).toBeVisible();
   await expect(page.getByText(injected, { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: `选择释放 ${HOLD_ID}`, exact: true })).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: `选择释放 ${HOLD_ID}`, exact: true }),
+  ).toBeEnabled();
   expect(await page.evaluate(() => Reflect.get(window, "injected"))).toBeUndefined();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   const output = process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR;
@@ -200,8 +249,12 @@ test("mobile history separates durable release from expiry and renders reasons i
 test("navigation ignores a late write response while preserving recovery", async ({ page }) => {
   let release!: () => void;
   let delivered!: () => void;
-  const gate = new Promise<void>((done) => { release = done; });
-  const responseDelivered = new Promise<void>((done) => { delivered = done; });
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  const responseDelivered = new Promise<void>((done) => {
+    delivered = done;
+  });
   const calls = await intercept(page, async (route) => {
     await gate;
     await route.fulfill({ status: 201, json: holdMutationFixture() });
@@ -222,12 +275,21 @@ test("navigation ignores a late write response while preserving recovery", async
 test("changing history case discards a late page and its cursor", async ({ page }) => {
   let release!: () => void;
   let delivered!: () => void;
-  const gate = new Promise<void>((done) => { release = done; });
-  const responseDelivered = new Promise<void>((done) => { delivered = done; });
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  const responseDelivered = new Promise<void>((done) => {
+    delivered = done;
+  });
   const calls = await intercept(page, async (route) => {
     await gate;
-    await route.fulfill({ json: { ...holdCollectionFixture(), truncated: true,
-      next_cursor: `v1.${HOLD_ID}.${"a".repeat(64)}` } });
+    await route.fulfill({
+      json: {
+        ...holdCollectionFixture(),
+        truncated: true,
+        next_cursor: `v1.${HOLD_ID}.${"a".repeat(64)}`,
+      },
+    });
     delivered();
   });
   await connect(page);
@@ -236,15 +298,24 @@ test("changing history case discards a late page and its cursor", async ({ page 
   await page.getByLabel("保留历史案件 ID", { exact: true }).fill(HOLD_CASE_ID.replace(/.$/, "9"));
   release();
   await responseDelivered;
-  await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+  await page.evaluate(
+    () =>
+      new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))),
+  );
   await expect(page.getByText("保留生效中", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "下一页保留历史" })).toHaveCount(0);
-  await expect(page.getByLabel("保留历史案件 ID", { exact: true })).toHaveValue(HOLD_CASE_ID.replace(/.$/, "9"));
+  await expect(page.getByLabel("保留历史案件 ID", { exact: true })).toHaveValue(
+    HOLD_CASE_ID.replace(/.$/, "9"),
+  );
 });
 
 test("mismatched write response preserves the frozen request as unknown", async ({ page }) => {
-  await intercept(page, (route) => route.fulfill({ status: 201,
-    json: { ...holdMutationFixture(), artifact_id: ARTIFACT_ID.replace(/.$/, "9") } }));
+  await intercept(page, (route) =>
+    route.fulfill({
+      status: 201,
+      json: { ...holdMutationFixture(), artifact_id: ARTIFACT_ID.replace(/.$/, "9") },
+    }),
+  );
   await connect(page);
   await create(page);
   await expect(page.getByRole("heading", { name: "保留操作结果未知" })).toBeVisible();
@@ -259,7 +330,8 @@ for (const end of ["disconnect", "pagehide", "idle", "refresh", "unauthorized", 
     let count = 0;
     await intercept(page, (route) => {
       count += 1;
-      if (count > 1 && end === "unauthorized") return route.fulfill({ status: 401, json: errorFixture("CONTROL_AUTH_REQUIRED") });
+      if (count > 1 && end === "unauthorized")
+        return route.fulfill({ status: 401, json: errorFixture("CONTROL_AUTH_REQUIRED") });
       const body = holdCollectionFixture();
       if (count > 1 && end === "scope") body.tenant_id = "tenant_other";
       return route.fulfill({ json: body });
@@ -268,13 +340,17 @@ for (const end of ["disconnect", "pagehide", "idle", "refresh", "unauthorized", 
     await history(page);
     await expect(page.getByText("保留生效中", { exact: true })).toBeVisible();
     await page.getByLabel("保留理由", { exact: true }).fill("私有保留理由");
-    if (end === "disconnect") await page.getByRole("button", { name: "断开连接", exact: true }).click();
-    else if (end === "pagehide") await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+    if (end === "disconnect")
+      await page.getByRole("button", { name: "断开连接", exact: true }).click();
+    else if (end === "pagehide")
+      await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
     else if (end === "idle") await page.clock.runFor(15 * 60 * 1000 + 1);
     else if (end === "refresh") await page.reload();
     else await page.getByRole("button", { name: "读取保留历史 / 刷新", exact: true }).click();
     await expect(page.getByRole("heading", { name: "连接管理服务" })).toBeVisible();
-    expect(await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }))).toEqual({ local: {}, session: {} });
+    expect(
+      await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } })),
+    ).toEqual({ local: {}, session: {} });
     await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
     await page.getByRole("button", { name: "连接", exact: true }).click();
     await openView(page, "hold");

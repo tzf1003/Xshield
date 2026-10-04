@@ -2,8 +2,14 @@ import { openView } from "./navigation";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { resolve } from "node:path";
 import { ARTIFACT_ID, TOKEN, errorFixture } from "./fixtures";
-import { ACCESS_ID, ACCESS_CASE_ID, ACCESS_KEY, accessListFixture,
-  accessInspectionFixture, accessRequestedFixture } from "./access-fixtures";
+import {
+  ACCESS_ID,
+  ACCESS_CASE_ID,
+  ACCESS_KEY,
+  accessListFixture,
+  accessInspectionFixture,
+  accessRequestedFixture,
+} from "./access-fixtures";
 
 const cursor = `v1.${ACCESS_ID}.${"a".repeat(64)}`;
 const earlier = ACCESS_ID.slice(0, -2) + "40";
@@ -30,7 +36,9 @@ async function read(page: Page) {
   await page.getByRole("button", { name: "读取申请列表 / 刷新", exact: true }).click();
 }
 
-test("explicit history pages and refreshed detail keep review authority separate", async ({ page }) => {
+test("explicit history pages and refreshed detail keep review authority separate", async ({
+  page,
+}) => {
   const calls = await routes(page, async (route, url) => {
     if (url.pathname.endsWith(earlier)) {
       const fixture = accessInspectionFixture("revoked");
@@ -45,7 +53,8 @@ test("explicit history pages and refreshed detail keep review authority separate
       fixture.items[0]!.access_request_id = earlier;
       fixture.items[0]!.stored_status = "revoked";
     } else {
-      fixture.truncated = true; fixture.next_cursor = cursor;
+      fixture.truncated = true;
+      fixture.next_cursor = cursor;
     }
     return route.fulfill({ json: fixture });
   });
@@ -53,7 +62,9 @@ test("explicit history pages and refreshed detail keep review authority separate
   expect(calls).toHaveLength(0);
   await expect(inbox(page)).toBeVisible();
   await read(page);
-  await expect(inbox(page).getByRole("button", { name: `打开申请 ${ACCESS_ID}`, exact: true })).toBeVisible();
+  await expect(
+    inbox(page).getByRole("button", { name: `打开申请 ${ACCESS_ID}`, exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "下一页申请", exact: true }).click();
   await expect(inbox(page).getByText("revoked", { exact: true })).toBeVisible();
   await expect(inbox(page).getByText(ACCESS_ID, { exact: true })).toHaveCount(0);
@@ -71,7 +82,9 @@ test("explicit history pages and refreshed detail keep review authority separate
     await page.screenshot({ path: resolve(output, "access-inbox-desktop.png"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(inbox(page)).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      390,
+    );
     await page.screenshot({ path: resolve(output, "access-inbox-mobile.png"), fullPage: true });
   }
   await page.getByLabel("申请列表范围", { exact: true }).selectOption("review");
@@ -86,7 +99,9 @@ test("explicit history pages and refreshed detail keep review authority separate
 });
 
 test("review role refusal displays audited error and no record", async ({ page }) => {
-  await routes(page, async (route) => route.fulfill({ status: 403, json: errorFixture("CONTROL_SCOPE_DENIED") }));
+  await routes(page, async (route) =>
+    route.fulfill({ status: 403, json: errorFixture("CONTROL_SCOPE_DENIED") }),
+  );
   await connect(page);
   await page.getByLabel("申请列表范围", { exact: true }).selectOption("review");
   await read(page);
@@ -115,7 +130,9 @@ test("scope mismatch disconnects before revealing another tenant list", async ({
 for (const transition of ["view", "query", "disconnect"] as const) {
   test(`stale list response is discarded after ${transition}`, async ({ page }) => {
     let release: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let started = false;
     await routes(page, async (route) => {
       started = true;
@@ -127,29 +144,40 @@ for (const transition of ["view", "query", "disconnect"] as const) {
     await connect(page);
     await read(page);
     await expect.poll(() => started).toBe(true);
-    if (transition === "view") await page.getByLabel("申请列表范围", { exact: true }).selectOption("review");
+    if (transition === "view")
+      await page.getByLabel("申请列表范围", { exact: true }).selectOption("review");
     else if (transition === "query") await openView(page, "request");
     else await page.getByRole("button", { name: "断开连接", exact: true }).click();
     release?.();
     if (transition === "query") await openView(page, "access");
     await expect(page.getByText("stale-list-owner", { exact: true })).toHaveCount(0);
-    if (transition !== "disconnect") await expect(page.getByRole("button", { name: "读取申请列表 / 刷新", exact: true })).toBeEnabled();
+    if (transition !== "disconnect")
+      await expect(
+        page.getByRole("button", { name: "读取申请列表 / 刷新", exact: true }),
+      ).toBeEnabled();
   });
 }
 
-test("opening another list record preserves frozen unknown mutation and exact replay", async ({ page }) => {
+test("opening another list record preserves frozen unknown mutation and exact replay", async ({
+  page,
+}) => {
   const mutations: Array<{ body: unknown; key: string | null }> = [];
   await routes(page, async (route, url) => {
     if (route.request().method() === "POST") {
-      mutations.push({ body: route.request().postDataJSON(), key: await route.request().headerValue("idempotency-key") });
+      mutations.push({
+        body: route.request().postDataJSON(),
+        key: await route.request().headerValue("idempotency-key"),
+      });
       if (mutations.length === 1) return route.abort("failed");
       return route.fulfill({ json: { ...accessRequestedFixture(), replayed: true } });
     }
     if (url.searchParams.has("view")) {
-      const fixture = accessListFixture(); fixture.items[0]!.access_request_id = earlier;
+      const fixture = accessListFixture();
+      fixture.items[0]!.access_request_id = earlier;
       return route.fulfill({ json: fixture });
     }
-    const fixture = accessInspectionFixture(); fixture.access_request.access_request_id = earlier;
+    const fixture = accessInspectionFixture();
+    fixture.access_request.access_request_id = earlier;
     return route.fulfill({ json: fixture });
   });
   await connect(page);
@@ -166,7 +194,9 @@ test("opening another list record preserves frozen unknown mutation and exact re
   await expect(page.getByLabel("冻结访问请求参数", { exact: true })).toHaveText(frozen ?? "");
   await expect(page.getByRole("button", { name: "准备新的访问操作", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "原样重试访问操作", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "提交访问申请已确认", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "提交访问申请已确认", exact: true }),
+  ).toBeVisible();
   expect(mutations).toHaveLength(2);
   expect(mutations[1]).toEqual(mutations[0]);
 });

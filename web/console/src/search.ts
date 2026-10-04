@@ -39,15 +39,7 @@ const textFields = [
   "operation_id",
   "model_revision",
 ] as const;
-const outcomes = [
-  "PASS",
-  "ALLOW",
-  "DENY",
-  "UNKNOWN",
-  "ERROR",
-  "SKIPPED",
-  "CANCELLED",
-] as const;
+const outcomes = ["PASS", "ALLOW", "DENY", "UNKNOWN", "ERROR", "SKIPPED", "CANCELLED"] as const;
 const traceIdPattern = /^[0-9a-f]{32}$/;
 const idPatterns = {
   request_id: requestPattern,
@@ -150,18 +142,11 @@ export type CausalityResponse = Envelope & {
 };
 
 function exactKeys(row: Record<string, unknown>, keys: string[]): void {
-  ensure(
-    Object.keys(row).length === keys.length &&
-      keys.every((key) => Object.hasOwn(row, key)),
-  );
+  ensure(Object.keys(row).length === keys.length && keys.every((key) => Object.hasOwn(row, key)));
 }
 function wholeSecond(value: unknown): string {
   const input = text(value, 40);
-  ensure(
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.0{1,9})?(?:Z|\+00:00)$/.test(
-      input,
-    ),
-  );
+  ensure(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.0{1,9})?(?:Z|\+00:00)$/.test(input));
   const time = Date.parse(input);
   ensure(Number.isFinite(time) && time >= 0 && time <= 10_413_792_000_000);
   // Date.parse normalizes invalid calendar days. Require an exact round trip.
@@ -210,14 +195,7 @@ function filter(value: unknown): SearchFilter {
 export function validateSearchPlan(value: unknown): SearchPlan {
   try {
     const row = object(value);
-    exactKeys(row, [
-      "schema_version",
-      "start",
-      "end",
-      "filters",
-      "sort",
-      "limit",
-    ]);
+    exactKeys(row, ["schema_version", "start", "end", "filters", "sort", "limit"]);
     ensure(row.schema_version === 3);
     const start = wholeSecond(row.start);
     const end = wholeSecond(row.end);
@@ -259,11 +237,7 @@ export function validateCausalityPlan(value: unknown): CausalityPlan {
       start,
       end,
       event_id: id(row.event_id, eventPattern),
-      direction: choice(row.direction, [
-        "both",
-        "predecessors",
-        "successors",
-      ]),
+      direction: choice(row.direction, ["both", "predecessors", "successors"]),
       max_depth: integer(row.max_depth, 1, 4),
       max_nodes: integer(row.max_nodes, 1, 16),
     };
@@ -276,9 +250,7 @@ export function validateCausalityPlan(value: unknown): CausalityPlan {
  * Subject references use a server-keyed digest, so the client must not hash a
  * low-entropy value locally; null means validate only the opaque digest shape.
  */
-export async function searchPlanDigest(
-  plan: SearchPlan,
-): Promise<string | null> {
+export async function searchPlanDigest(plan: SearchPlan): Promise<string | null> {
   if (plan.filters.some((item) => item.kind === "subject_ref")) return null;
   let canonical = `${Date.parse(plan.start) / 1000}|${Date.parse(plan.end) / 1000}|${plan.sort === "occurred_at_asc" ? "asc" : "desc"}|${plan.limit}`;
   for (const item of plan.filters) {
@@ -288,13 +260,10 @@ export async function searchPlanDigest(
         : `|${item.kind === "text" ? item.field : item.kind}=${item.value}`;
   }
   try {
-    const digest = await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(canonical),
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(
+      "",
     );
-    return Array.from(new Uint8Array(digest), (byte) =>
-      byte.toString(16).padStart(2, "0"),
-    ).join("");
   } catch {
     throw new ApiError("QUERY_DIGEST_UNAVAILABLE");
   }
@@ -302,9 +271,7 @@ export async function searchPlanDigest(
 
 type Position = { time: bigint; eventId: string };
 function eventPosition(event: SearchEvent): Position {
-  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z$/.exec(
-    event.occurred_at,
-  );
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z$/.exec(event.occurred_at);
   ensure(match);
   const seconds = wholeSecond(`${match[1]}Z`);
   return {
@@ -313,9 +280,9 @@ function eventPosition(event: SearchEvent): Position {
   };
 }
 function cursorPosition(cursor: string, plan: SearchPlan): Position {
-  const match = new RegExp(
-    `^v1\\.(0|[1-9][0-9]{0,16})\\.(ev_${uuid})\\.([a-f0-9]{64})$`,
-  ).exec(cursor);
+  const match = new RegExp(`^v1\\.(0|[1-9][0-9]{0,16})\\.(ev_${uuid})\\.([a-f0-9]{64})$`).exec(
+    cursor,
+  );
   ensure(typeof cursor === "string" && cursor.length <= 160 && match);
   const position = { time: BigInt(match[1]!), eventId: match[2]! };
   ensure(inWindow(position, plan));
@@ -328,10 +295,7 @@ function inWindow(position: Position, plan: SearchPlan): boolean {
   );
 }
 /** Validate only the public cursor shape and position. No signature is trusted here. */
-export function validateSearchCursor(
-  cursor: string | undefined,
-  plan: SearchPlan,
-): void {
+export function validateSearchCursor(cursor: string | undefined, plan: SearchPlan): void {
   if (cursor === undefined) return;
   try {
     cursorPosition(cursor, plan);
@@ -345,12 +309,7 @@ function searchEvent(value: unknown): SearchEvent {
     choice(value, ["deterministic", "model", "observation", "none"]),
   );
   const confidence_status = nullable(row.confidence_status, (value) =>
-    choice(value, [
-      "provided",
-      "not_applicable",
-      "not_provided",
-      "unavailable",
-    ]),
+    choice(value, ["provided", "not_applicable", "not_provided", "unavailable"]),
   );
   const facts = confidence(
     {
@@ -363,9 +322,7 @@ function searchEvent(value: unknown): SearchEvent {
   const event_type = name(row.event_type);
   ensure(/^[a-z0-9_.]{3,128}$/.test(event_type));
   const model_revision = nullable(row.model_revision, name);
-  const model_call_id = nullable(row.model_call_id, (value) =>
-    id(value, modelCallPattern),
-  );
+  const model_call_id = nullable(row.model_call_id, (value) => id(value, modelCallPattern));
   ensure(model_revision === null || proof_kind === "model");
   ensure((proof_kind === "model") === (model_call_id !== null));
   return {
@@ -389,17 +346,9 @@ function searchEvent(value: unknown): SearchEvent {
     policy_revision: name(row.policy_revision),
     model_revision,
     model_call_id,
-    evidence_refs: references(
-      row.evidence_refs,
-      new RegExp(`^[a-z]+_${uuid}$`),
-    ),
+    evidence_refs: references(row.evidence_refs, new RegExp(`^[a-z]+_${uuid}$`)),
     cause_event_ids: references(row.cause_event_ids, eventPattern),
-    sensitivity: choice(row.sensitivity, [
-      "PUBLIC",
-      "INTERNAL",
-      "SENSITIVE",
-      "RESTRICTED",
-    ]),
+    sensitivity: choice(row.sensitivity, ["PUBLIC", "INTERNAL", "SENSITIVE", "RESTRICTED"]),
   };
 }
 
@@ -453,11 +402,7 @@ export function decodeSearchResponse(
   }
   if (result.next_cursor !== null) {
     const next = cursorPosition(result.next_cursor, plan);
-    ensure(
-      previous &&
-        next.time === previous.time &&
-        next.eventId === previous.eventId,
-    );
+    ensure(previous && next.time === previous.time && next.eventId === previous.eventId);
     ensure(result.next_cursor !== cursor);
   }
   return result;
@@ -472,8 +417,7 @@ function causalityNode(value: unknown, plan: CausalityPlan): CausalityNode {
   ensure(
     (direction === "predecessor" &&
       (plan.direction === "both" || plan.direction === "predecessors")) ||
-      (direction === "successor" &&
-        (plan.direction === "both" || plan.direction === "successors")),
+      (direction === "successor" && (plan.direction === "both" || plan.direction === "successors")),
   );
   return {
     event,
@@ -483,10 +427,7 @@ function causalityNode(value: unknown, plan: CausalityPlan): CausalityNode {
 }
 
 /** Decode the redacted, bounded graph response without accepting payloads. */
-export function decodeCausalityResponse(
-  value: unknown,
-  plan: CausalityPlan,
-): CausalityResponse {
+export function decodeCausalityResponse(value: unknown, plan: CausalityPlan): CausalityResponse {
   const row = object(value);
   ensure(row.schema_version === 3);
   const result: CausalityResponse = {

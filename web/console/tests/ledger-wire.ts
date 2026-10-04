@@ -41,14 +41,33 @@ try {
       assert.equal(raw.tenant_id, "tenant_console_ledger_wire");
       assert.equal(raw.site_id, "site_a");
       const kind = String(input).includes("/grants/") ? "grant" : "binding";
-      assert.deepEqual(Object.keys(raw).sort(), [
-        "schema_version", "request_id", "tenant_id", "site_id", `source_${kind}_id`,
-        "found", "as_of", kind,
-      ].sort());
+      assert.deepEqual(
+        Object.keys(raw).sort(),
+        [
+          "schema_version",
+          "request_id",
+          "tenant_id",
+          "site_id",
+          `source_${kind}_id`,
+          "found",
+          "as_of",
+          kind,
+        ].sort(),
+      );
       assert.equal(raw[`source_${kind}_id`], String(input).split("/").at(-1));
       const serialized = JSON.stringify(raw);
-      for (const excluded of ["principal_ref", "authorization_context", "fingerprint", "waf_sid",
-        "resource_key_hmac", "issuance_key", "action_ref", "constraints", "payload_json", "eligible"]) {
+      for (const excluded of [
+        "principal_ref",
+        "authorization_context",
+        "fingerprint",
+        "waf_sid",
+        "resource_key_hmac",
+        "issuance_key",
+        "action_ref",
+        "constraints",
+        "payload_json",
+        "eligible",
+      ]) {
         assert.equal(serialized.includes(excluded), false);
       }
     } else if (response.status === 503) {
@@ -82,14 +101,25 @@ try {
   timestamp(active.grant.expires_at);
   timestamp(active.grant.binding.expires_at);
   assert.deepEqual(active.grant, {
-    grant_id: grantId, auth_epoch: 4, stored_status: "active", time_expired: false,
-    issued_at: active.grant.issued_at, expires_at: active.grant.expires_at,
-    resource_type: "order", operation_id: "orders.read", view_id: "customer_detail",
-    policy_revision: "inspection-r1", source_event_id: id("ev", "e104"),
+    grant_id: grantId,
+    auth_epoch: 4,
+    stored_status: "active",
+    time_expired: false,
+    issued_at: active.grant.issued_at,
+    expires_at: active.grant.expires_at,
+    resource_type: "order",
+    operation_id: "orders.read",
+    view_id: "customer_detail",
+    policy_revision: "inspection-r1",
+    source_event_id: id("ev", "e104"),
     source_request_id: id("req", "e103"),
     binding: {
-      binding_id: bindingId, current_auth_epoch: 4, epoch_matches_grant: true,
-      stored_status: "active", time_expired: false, expires_at: active.grant.binding.expires_at,
+      binding_id: bindingId,
+      current_auth_epoch: 4,
+      epoch_matches_grant: true,
+      stored_status: "active",
+      time_expired: false,
+      expires_at: active.grant.binding.expires_at,
     },
   });
   phase = 3;
@@ -101,9 +131,13 @@ try {
   timestamp(binding.binding.expires_at);
   timestamp(binding.binding.updated_at);
   assert.deepEqual(binding.binding, {
-    binding_id: bindingId, current_auth_epoch: 4, credential_generation: 2,
-    stored_status: "active", time_expired: false,
-    expires_at: binding.binding.expires_at, updated_at: binding.binding.updated_at,
+    binding_id: bindingId,
+    current_auth_epoch: 4,
+    credential_generation: 2,
+    stored_status: "active",
+    time_expired: false,
+    expires_at: binding.binding.expires_at,
+    updated_at: binding.binding.updated_at,
   });
   phase = 4;
   const missingGrant = await client.grant(id("grant", "ffff"));
@@ -116,7 +150,9 @@ try {
   assert.equal(missingBinding.binding, null);
   assert.equal(missingBinding.as_of, null);
   for (const [suffix, status, expired] of [
-    ["e201", "expired", true], ["e202", "revoked", false], ["e203", "active", true],
+    ["e201", "expired", true],
+    ["e202", "revoked", false],
+    ["e203", "active", true],
   ] as const) {
     phase += 1;
     const historical = await client.grant(id("grant", suffix));
@@ -137,8 +173,10 @@ try {
   assert.equal(changed.grant?.binding.stored_status, "revoked");
   assert.equal(changed.grant?.binding.time_expired, true);
   for (const [suffix, status, epoch, generation, expired] of [
-    ["e201", "anonymous", 0, 0, false], ["e202", "active", 4, 2, true],
-    ["e203", "revoked", 5, 3, true], ["e204", "expired", 4, 2, true],
+    ["e201", "anonymous", 0, 0, false],
+    ["e202", "active", 4, 2, true],
+    ["e203", "revoked", 5, 3, true],
+    ["e204", "expired", 4, 2, true],
   ] as const) {
     phase += 1;
     const historical = await client.binding(id("auth", suffix));
@@ -149,12 +187,21 @@ try {
     assert.equal(historical.binding?.time_expired, expired);
     assert.ok(historical.binding);
     timestamp(historical.binding.updated_at);
-    if (expired) assert.ok(Date.parse(historical.binding.updated_at) > Date.parse(historical.binding.expires_at));
+    if (expired)
+      assert.ok(
+        Date.parse(historical.binding.updated_at) > Date.parse(historical.binding.expires_at),
+      );
   }
   phase = 14;
-  await assert.rejects(client.grant(id("grant", "e205")), failure("CONTROL_GRANT_STORE_UNAVAILABLE", 503));
+  await assert.rejects(
+    client.grant(id("grant", "e205")),
+    failure("CONTROL_GRANT_STORE_UNAVAILABLE", 503),
+  );
   phase = 15;
-  await assert.rejects(client.binding(id("auth", "e205")), failure("CONTROL_BINDING_STORE_UNAVAILABLE", 503));
+  await assert.rejects(
+    client.binding(id("auth", "e205")),
+    failure("CONTROL_BINDING_STORE_UNAVAILABLE", 503),
+  );
   phase = 16;
   const foreignGrant = await client.grant(id("grant", "e301"));
   assert.equal(foreignGrant.found, false);

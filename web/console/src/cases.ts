@@ -20,12 +20,8 @@ import {
 import type { Envelope } from "./api-contract.ts";
 
 export const casePattern = new RegExp(`^case_${uuid}(?![\\s\\S])`);
-const caseCursorPattern = new RegExp(
-  `^v1\\.(artifact_${uuid})\\.[a-f0-9]{64}(?![\\s\\S])`,
-);
-const caseListCursorPattern = new RegExp(
-  `^v1\\.(case_${uuid})\\.[a-f0-9]{64}(?![\\s\\S])`,
-);
+const caseCursorPattern = new RegExp(`^v1\\.(artifact_${uuid})\\.[a-f0-9]{64}(?![\\s\\S])`);
+const caseListCursorPattern = new RegExp(`^v1\\.(case_${uuid})\\.[a-f0-9]{64}(?![\\s\\S])`);
 export type CaseFacts = {
   case_id: string;
   status: "open" | "closed";
@@ -69,27 +65,17 @@ export type CaseClosed = Envelope & {
 };
 
 function validText(value: unknown, max: number): value is string {
-  if (
-    typeof value !== "string" ||
-    !value.length ||
-    value.length > max ||
-    /\p{Cc}/u.test(value)
-  )
+  if (typeof value !== "string" || !value.length || value.length > max || /\p{Cc}/u.test(value))
     return false;
   const bytes = new TextEncoder().encode(value);
   return bytes.byteLength <= max && new TextDecoder().decode(bytes) === value;
 }
 /** Match the Rust boundary's UTF-8 byte cap and Unicode whitespace semantics. */
 export function validCaseText(value: unknown): value is string {
-  return (
-    validText(value, 512) && !/^\p{White_Space}|\p{White_Space}$/u.test(value)
-  );
+  return validText(value, 512) && !/^\p{White_Space}|\p{White_Space}$/u.test(value);
 }
 export function validIdempotencyKey(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^[A-Za-z0-9_.:-]{16,128}(?![\s\S])/.test(value)
-  );
+  return typeof value === "string" && /^[A-Za-z0-9_.:-]{16,128}(?![\s\S])/.test(value);
 }
 export function validateCaseId(value: unknown): asserts value is string {
   if (typeof value !== "string" || !casePattern.test(value))
@@ -97,15 +83,13 @@ export function validateCaseId(value: unknown): asserts value is string {
 }
 export function validateCaseCursor(cursor?: string): string | undefined {
   if (cursor === undefined) return undefined;
-  const match =
-    typeof cursor === "string" ? caseCursorPattern.exec(cursor) : null;
+  const match = typeof cursor === "string" ? caseCursorPattern.exec(cursor) : null;
   if (!match) throw new ApiError("CONTROL_CURSOR_INVALID");
   return match[1];
 }
 export function validateCaseListCursor(cursor?: string): string | undefined {
   if (cursor === undefined) return undefined;
-  const match =
-    typeof cursor === "string" ? caseListCursorPattern.exec(cursor) : null;
+  const match = typeof cursor === "string" ? caseListCursorPattern.exec(cursor) : null;
   if (!match) throw new ApiError("CONTROL_CURSOR_INVALID");
   return match[1];
 }
@@ -159,11 +143,7 @@ export function decodeCaseList(value: unknown, cursor?: string): CaseList {
 }
 
 /** Correlate the immutable creation input; exact replay may report a closed case. */
-export function decodeCaseCreated(
-  value: unknown,
-  purpose: string,
-  status: number,
-): CaseCreated {
+export function decodeCaseCreated(value: unknown, purpose: string, status: number): CaseCreated {
   const row = object(value);
   const result = {
     ...envelope(row),
@@ -233,16 +213,10 @@ export function decodeCaseItemAdded(
     case_id: target,
     replayed: bool(row.replayed),
   };
-  ensure(
-    result.artifact_id === artifact && status === (result.replayed ? 200 : 201),
-  );
+  ensure(result.artifact_id === artifact && status === (result.replayed ? 200 : 201));
   return result;
 }
-export function decodeCaseClosed(
-  value: unknown,
-  target: string,
-  status: number,
-): CaseClosed {
+export function decodeCaseClosed(value: unknown, target: string, status: number): CaseClosed {
   const row = object(value);
   ensure(row.schema_version === 3 && row.case_id === target && status === 200);
   return {

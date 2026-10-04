@@ -1,8 +1,21 @@
 /** Evidence access observations and explicit mutations. These values describe
  * server records; every content read obtains fresh server authorization. */
 import {
-  ApiError, artifactPattern, uuid, bool, choice, ensure, envelope, eventPattern,
-  id, integer, list, nullable, object, pagination, timestamp,
+  ApiError,
+  artifactPattern,
+  uuid,
+  bool,
+  choice,
+  ensure,
+  envelope,
+  eventPattern,
+  id,
+  integer,
+  list,
+  nullable,
+  object,
+  pagination,
+  timestamp,
 } from "./api-contract.ts";
 import type { Envelope } from "./api-contract.ts";
 import { casePattern, validCaseText } from "./cases.ts";
@@ -45,16 +58,23 @@ export function validateAccessListView(view: unknown): asserts view is AccessLis
 
 /** Bounded, projected metadata from a live page. Sorting follows identity,
  * including across page boundaries; the next cursor must name the last row. */
-export function decodeAccessList(value: unknown, view: AccessListView, cursor?: string): AccessList {
+export function decodeAccessList(
+  value: unknown,
+  view: AccessListView,
+  cursor?: string,
+): AccessList {
   const row = object(value);
   ensure(row.schema_version === 3 && row.view === view);
   const result: AccessList = {
-    ...envelope(row), schema_version: 3, view,
+    ...envelope(row),
+    schema_version: 3,
+    view,
     as_of: time(row.as_of, true),
     items: list(row.items, 128, (value) => {
       const item = object(value);
       return {
-        ...targets(item), requested_by: subject(item.requested_by),
+        ...targets(item),
+        requested_by: subject(item.requested_by),
         access_kind: choice(item.access_kind, ["sensitive_raw"]),
         stored_status: choice(item.stored_status, statuses),
         requested_at: time(item.requested_at, true),
@@ -163,11 +183,15 @@ function targets(row: Record<string, unknown>) {
   };
 }
 export function decodeAccessRequested(
-  value: unknown, artifactId: string, caseId: string, status: number,
+  value: unknown,
+  artifactId: string,
+  caseId: string,
+  status: number,
 ): AccessRequested {
   const row = object(value);
   const result: AccessRequested = {
-    ...envelope(row), ...targets(row),
+    ...envelope(row),
+    ...targets(row),
     access_kind: choice(row.access_kind, ["sensitive_raw"]),
     status: choice(row.status, statuses),
     requested_at: time(row.requested_at),
@@ -179,12 +203,16 @@ export function decodeAccessRequested(
   return result;
 }
 export function decodeAccessDecision(
-  value: unknown, accessId: string, decision: "approve" | "deny",
-  ttlSeconds: number | null, status: number,
+  value: unknown,
+  accessId: string,
+  decision: "approve" | "deny",
+  ttlSeconds: number | null,
+  status: number,
 ): AccessDecision {
   const row = object(value);
   const result: AccessDecision = {
-    ...envelope(row), ...targets(row),
+    ...envelope(row),
+    ...targets(row),
     requested_by: subject(row.requested_by),
     decided_by: subject(row.decided_by),
     status: choice(row.status, ["approved", "denied", "expired", "revoked"]),
@@ -232,14 +260,34 @@ export function decodeAccessInspection(value: unknown, accessId: string): Access
     capability_time_expired: nullable(source.capability_time_expired, bool),
   };
   ensure(detail.access_request_id === accessId);
-  ensure(detail.artifact_time_expired === (microseconds(detail.artifact_expires_at) <= microseconds(as_of)));
-  ensure(detail.capability_time_expired === (detail.access_expires_at === null ? null : microseconds(detail.access_expires_at) <= microseconds(as_of)));
+  ensure(
+    detail.artifact_time_expired ===
+      microseconds(detail.artifact_expires_at) <= microseconds(as_of),
+  );
+  ensure(
+    detail.capability_time_expired ===
+      (detail.access_expires_at === null
+        ? null
+        : microseconds(detail.access_expires_at) <= microseconds(as_of)),
+  );
   if (detail.stored_status === "pending") {
-    ensure([detail.decided_by, detail.decision_reason, detail.decision_ttl_seconds,
-      detail.decision_event_id, detail.decided_at, detail.access_expires_at].every((v) => v === null));
+    ensure(
+      [
+        detail.decided_by,
+        detail.decision_reason,
+        detail.decision_ttl_seconds,
+        detail.decision_event_id,
+        detail.decided_at,
+        detail.access_expires_at,
+      ].every((v) => v === null),
+    );
   } else {
     ensure(detail.decided_by !== null && detail.decided_by !== detail.requested_by);
-    ensure(detail.decision_reason !== null && detail.decision_event_id !== null && detail.decided_at !== null);
+    ensure(
+      detail.decision_reason !== null &&
+        detail.decision_event_id !== null &&
+        detail.decided_at !== null,
+    );
     ensure(detail.decision_event_id !== detail.requested_event_id);
     if (detail.stored_status === "denied") {
       ensure(detail.decision_ttl_seconds === null && detail.access_expires_at === null);
@@ -251,7 +299,9 @@ export function decodeAccessInspection(value: unknown, accessId: string): Access
     }
   }
   return {
-    ...envelope(row), schema_version: 3, as_of,
+    ...envelope(row),
+    schema_version: 3,
+    as_of,
     max_approval_ttl_seconds: integer(row.max_approval_ttl_seconds, 1, 86400),
     access_request: detail,
   };

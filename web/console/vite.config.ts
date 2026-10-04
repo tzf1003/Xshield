@@ -1,9 +1,7 @@
 import { defineConfig } from "vite";
 
 // The operator's credential may only reach this deployment-owned destination.
-const target = new URL(
-  process.env.XSHIELD_CONTROL_PROXY ?? "http://127.0.0.1:9443",
-);
+const target = new URL(process.env.XSHIELD_CONTROL_PROXY ?? "http://127.0.0.1:9443");
 if (
   target.username ||
   target.password ||
@@ -12,19 +10,15 @@ if (
   target.hash ||
   !(
     target.protocol === "https:" ||
-    (target.protocol === "http:" &&
-      ["127.0.0.1", "[::1]", "localhost"].includes(target.hostname))
+    (target.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(target.hostname))
   )
 ) {
-  throw new Error(
-    "XSHIELD_CONTROL_PROXY requires an HTTPS origin or loopback HTTP origin",
-  );
+  throw new Error("XSHIELD_CONTROL_PROXY requires an HTTPS origin or loopback HTTP origin");
 }
 const readPath =
   /^\/control\/v1\/(?:requests\/req_[a-f0-9-]+(?:\/(?:events|evidence))?|artifacts\/artifact_[a-f0-9-]+|model-calls(?:\/mdl_[a-f0-9-]+)?|grants\/grant_[a-f0-9-]+|auth-bindings\/auth_[a-f0-9-]+|evidence-access-requests|cases(?:\/case_[a-f0-9-]+\/(?:items|holds))?|exports\/export_[a-f0-9-]+)$/;
 const jobPath = /^\/control\/v1\/jobs\/job_[a-f0-9-]+$/;
-const calibrationReportPath =
-  /^\/control\/v1\/calibration-reports\/calr_[a-f0-9-]+$/;
+const calibrationReportPath = /^\/control\/v1\/calibration-reports\/calr_[a-f0-9-]+$/;
 const writePath =
   /^\/control\/v1\/(?:cases|cases\/case_[a-f0-9-]+\/(?:items|close|holds|analyze)|evidence-holds\/ev_[a-f0-9-]+\/release|artifacts\/artifact_[a-f0-9-]+\/access|evidence-access-requests\/access_[a-f0-9-]+\/(?:approve|deny)|exports|exports\/export_[a-f0-9-]+\/(?:approve|deny))$/;
 const accessReadPath =
@@ -41,8 +35,7 @@ const sessionLogoutPath = "/control/v1/session/logout";
 const siteConfigPath = "/control/v1/site-config";
 const sitesPath = "/control/v1/sites";
 const sitePath = /^\/control\/v1\/sites\/[A-Za-z0-9_.-]{1,128}$/;
-const siteConfigCollectionPath =
-  /^\/control\/v1\/sites\/[A-Za-z0-9_.-]{1,128}\/config$/;
+const siteConfigCollectionPath = /^\/control\/v1\/sites\/[A-Za-z0-9_.-]{1,128}\/config$/;
 const siteOperationPath =
   /^\/control\/v1\/sites\/[A-Za-z0-9_.-]{1,128}\/(?:revisions|status|health)$/;
 const siteMutationPath =
@@ -109,29 +102,24 @@ export default defineConfig({
                 path === oidcCallbackPath ||
                 (path === sessionPath && request.url === path) ||
                 (path === modelCallListPath
-                ? validModelCallListQuery(request.url ?? "")
-                : path === auditHealthPath
-                  ? request.url === auditHealthPath
-                  : path === workbenchOverviewPath
-                    ? request.url === workbenchOverviewPath
-                  : readPath.test(path)) ||
+                  ? validModelCallListQuery(request.url ?? "")
+                  : path === auditHealthPath
+                    ? request.url === auditHealthPath
+                    : path === workbenchOverviewPath
+                      ? request.url === workbenchOverviewPath
+                      : readPath.test(path)) ||
                 (request.url === path && calibrationReportPath.test(path)) ||
                 (request.url === path && accessReadPath.test(path)) ||
-                (request.url === path && jobPath.test(path))) ||
-                (request.url === siteConfigPath) ||
-                (request.url === sitesPath || validSiteListQuery(request.url ?? "")) ||
-                (request.url === path && sitePath.test(path)) ||
-                (request.url === path && siteConfigCollectionPath.test(path)) ||
-                (request.url === path && siteOperationPath.test(path))) ||
-            (request.method === "PATCH" &&
-              request.url === path &&
-              sitePath.test(path)) ||
-            (request.method === "DELETE" &&
-              request.url === path &&
-              sitePath.test(path)) ||
-            (request.method === "POST" &&
-              request.url === path &&
-              siteMutationPath.test(path)) ||
+                (request.url === path && jobPath.test(path)))) ||
+            request.url === siteConfigPath ||
+            request.url === sitesPath ||
+            validSiteListQuery(request.url ?? "") ||
+            (request.url === path && sitePath.test(path)) ||
+            (request.url === path && siteConfigCollectionPath.test(path)) ||
+            (request.url === path && siteOperationPath.test(path)) ||
+            (request.method === "PATCH" && request.url === path && sitePath.test(path)) ||
+            (request.method === "DELETE" && request.url === path && sitePath.test(path)) ||
+            (request.method === "POST" && request.url === path && siteMutationPath.test(path)) ||
             (request.method === "PUT" &&
               (request.url === siteConfigPath ||
                 (request.url === path && siteConfigCollectionPath.test(path)))) ||
@@ -164,9 +152,7 @@ export default defineConfig({
               .filter((value): value is string => typeof value === "string")
               .flatMap((value) => value.split(";"))
               .map((value) => value.trim())
-              .filter((value) =>
-                allowedCookieNames.some((name) => value.startsWith(`${name}=`)),
-              );
+              .filter((value) => allowedCookieNames.some((name) => value.startsWith(`${name}=`)));
             if (cookies.length === 0) proxyRequest.removeHeader("cookie");
             else proxyRequest.setHeader("cookie", cookies.join("; "));
           });

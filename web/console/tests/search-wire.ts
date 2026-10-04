@@ -17,9 +17,7 @@ try {
     return url;
   };
   let origin = loopback(process.env.XSHIELD_CONSOLE_TEST_ORIGIN);
-  const observerOrigin = loopback(
-    process.env.XSHIELD_CONSOLE_TEST_OBSERVER_ORIGIN,
-  );
+  const observerOrigin = loopback(process.env.XSHIELD_CONSOLE_TEST_OBSERVER_ORIGIN);
   const grant = "grant_018f2a3b-4c5d-7000-8000-000000000101";
   const binding = "auth_018f2a3b-4c5d-7000-8000-000000000102";
   const trace = "018f2a3b4c5d70008000000000000003";
@@ -48,19 +46,13 @@ try {
     assert.equal(options?.cache, "no-store");
     assert.equal(options?.redirect, "error");
     assert.equal(options?.referrerPolicy, "no-referrer");
-    assert.equal(
-      new Headers(options?.headers).get("content-type"),
-      "application/json",
-    );
+    assert.equal(new Headers(options?.headers).get("content-type"), "application/json");
     assert.equal(typeof options?.body, "string");
     assert.deepEqual(JSON.parse(String(options?.body)), {
       ...expectedPlan,
       ...(expectedCursor === undefined ? {} : { cursor: expectedCursor }),
     });
-    const response = await networkFetch(
-      new URL(String(input), origin),
-      options,
-    );
+    const response = await networkFetch(new URL(String(input), origin), options);
     assert.equal(response.headers.get("cache-control"), "private, no-store");
     const raw = await response.clone().json();
     assert.match(raw.request_id, /^req_[0-9a-f-]+$/);
@@ -75,11 +67,8 @@ try {
     }
     return response;
   };
-  const client = new ControlClient(
-    process.env.XSHIELD_CONSOLE_TEST_TOKEN ?? "",
-  );
-  const event = (suffix: string) =>
-    `ev_018f2a3b-4c5d-7000-8000-00000000000${suffix}`;
+  const client = new ControlClient(process.env.XSHIELD_CONSOLE_TEST_TOKEN ?? "");
+  const event = (suffix: string) => `ev_018f2a3b-4c5d-7000-8000-00000000000${suffix}`;
   const digest = (order: "asc" | "desc") =>
     createHash("sha256")
       .update(
@@ -88,11 +77,7 @@ try {
       )
       .digest("hex");
   phase = 2;
-  const first = await client.search(
-    plan,
-    undefined,
-    new AbortController().signal,
-  );
+  const first = await client.search(plan, undefined, new AbortController().signal);
   assert.equal(first.schema_version, 3);
   assert.equal(first.tenant_id, "tenant_a");
   assert.equal(first.site_id, "site_a");
@@ -140,10 +125,7 @@ try {
     [event("2")],
   );
   assert.equal(next.events[0]?.occurred_at, "2026-09-20T08:10:30.123789Z");
-  assert.equal(
-    next.events[0]?.request_id,
-    "req_018f2a3b-4c5d-7000-8000-000000000001",
-  );
+  assert.equal(next.events[0]?.request_id, "req_018f2a3b-4c5d-7000-8000-000000000001");
   assert.equal(next.scanned_rows, null);
   assert.equal(next.scanned_bytes, null);
   assert.equal(next.truncated, false);
@@ -178,28 +160,15 @@ try {
   phase = 6;
   expectedPlan = plan;
   expectedCursor = undefined;
-  await assert.rejects(
-    client.search(plan),
-    failure("CONTROL_QUERY_BUDGET_EXCEEDED", 429),
-  );
+  await assert.rejects(client.search(plan), failure("CONTROL_QUERY_BUDGET_EXCEEDED", 429));
   phase = 7;
-  expectedCursor =
-    first.next_cursor.slice(0, -1) +
-    (first.next_cursor.endsWith("0") ? "1" : "0");
-  await assert.rejects(
-    client.search(plan, expectedCursor),
-    failure("CONTROL_CURSOR_INVALID", 400),
-  );
+  expectedCursor = first.next_cursor.slice(0, -1) + (first.next_cursor.endsWith("0") ? "1" : "0");
+  await assert.rejects(client.search(plan, expectedCursor), failure("CONTROL_CURSOR_INVALID", 400));
   phase = 8;
   origin = observerOrigin;
   expectedCursor = undefined;
-  const observer = new ControlClient(
-    process.env.XSHIELD_CONSOLE_TEST_TOKEN ?? "",
-  );
-  await assert.rejects(
-    observer.search(plan),
-    failure("CONTROL_SCOPE_DENIED", 403),
-  );
+  const observer = new ControlClient(process.env.XSHIELD_CONSOLE_TEST_TOKEN ?? "");
+  await assert.rejects(observer.search(plan), failure("CONTROL_SCOPE_DENIED", 403));
   assert.equal(requestIds.size, 7);
   assert.equal(JSON.stringify(plan), originalPlan);
 } catch {

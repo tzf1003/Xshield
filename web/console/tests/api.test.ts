@@ -53,10 +53,18 @@ const errorIs = (code: string, status?: number) => (error: unknown) => {
 
 test("empty site config accepts null approval and rejects malformed approval", async (t) => {
   const wire = {
-    request_id: REQUEST_ID, tenant_id: "tenant_a", site_id: "site_demo",
-    found: false, desired_revision: null, active_revision: null,
-    apply_state: null, apply_id: null, requires_approval: null as unknown,
-    reason_code: null, config_digest: null, config: null,
+    request_id: REQUEST_ID,
+    tenant_id: "tenant_a",
+    site_id: "site_demo",
+    found: false,
+    desired_revision: null,
+    active_revision: null,
+    apply_state: null,
+    apply_id: null,
+    requires_approval: null as unknown,
+    reason_code: null,
+    config_digest: null,
+    config: null,
   };
   t.mock.method(globalThis, "fetch", async () => response(wire));
   const client = new ControlClient(TOKEN);
@@ -95,42 +103,38 @@ test("site list sends a bounded signed-cursor query and decodes pagination", asy
 test("browser session bootstrap and logout use same-origin cookie and CSRF", async (t) => {
   const csrfToken = "a".repeat(64);
   let call = 0;
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async (path: string, options: RequestInit) => {
-      call += 1;
-      if (call === 1) {
-        assert.equal(path, "/control/v1/session");
-        assert.equal(options.method, "GET");
-        assert.equal(options.credentials, "same-origin");
-        assert.equal(options.cache, "no-store");
-        assert.equal(options.redirect, "error");
-        assert.equal(options.referrerPolicy, "no-referrer");
-        return response({
-          subject: "operator-1",
-          tenant_id: "tenant_a",
-          site_id: "site_a",
-          csrf_token: csrfToken,
-          roles: ["system_admin"],
-          session_expires_at: "2026-09-26T12:00:00.000Z",
-          idle_expires_at: "2026-09-26T04:15:00.000Z",
-          last_reauthenticated_at: null,
-          step_up_valid: false,
-        });
-      }
-      assert.equal(path, "/control/v1/session/logout");
-      assert.equal(options.method, "POST");
+  t.mock.method(globalThis, "fetch", async (path: string, options: RequestInit) => {
+    call += 1;
+    if (call === 1) {
+      assert.equal(path, "/control/v1/session");
+      assert.equal(options.method, "GET");
       assert.equal(options.credentials, "same-origin");
-      assert.deepEqual(options.headers, {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "X-Xshield-CSRF": csrfToken,
+      assert.equal(options.cache, "no-store");
+      assert.equal(options.redirect, "error");
+      assert.equal(options.referrerPolicy, "no-referrer");
+      return response({
+        subject: "operator-1",
+        tenant_id: "tenant_a",
+        site_id: "site_a",
+        csrf_token: csrfToken,
+        roles: ["system_admin"],
+        session_expires_at: "2026-09-26T12:00:00.000Z",
+        idle_expires_at: "2026-09-26T04:15:00.000Z",
+        last_reauthenticated_at: null,
+        step_up_valid: false,
       });
-      assert.equal(options.body, "");
-      return new Response(null, { status: 204 });
-    },
-  );
+    }
+    assert.equal(path, "/control/v1/session/logout");
+    assert.equal(options.method, "POST");
+    assert.equal(options.credentials, "same-origin");
+    assert.deepEqual(options.headers, {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-Xshield-CSRF": csrfToken,
+    });
+    assert.equal(options.body, "");
+    return new Response(null, { status: 204 });
+  });
 
   const session = await bootstrapBrowserSession();
   assert.equal(session.subject, "operator-1");
@@ -206,24 +210,20 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
     `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`,
   ];
   let index = 0;
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async (path: string, options: RequestInit) => {
-      assert.equal(path, paths[index]);
-      assert.equal(options.method, "GET");
-      assert.deepEqual(options.headers, {
-        Authorization: `Bearer ${TOKEN}`,
-        Accept: "application/json",
-      });
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.cache, "no-store");
-      assert.equal(options.redirect, "error");
-      assert.equal(options.referrerPolicy, "no-referrer");
-      assert.ok(options.signal instanceof AbortSignal);
-      return response(fixtures[index++]);
-    },
-  );
+  t.mock.method(globalThis, "fetch", async (path: string, options: RequestInit) => {
+    assert.equal(path, paths[index]);
+    assert.equal(options.method, "GET");
+    assert.deepEqual(options.headers, {
+      Authorization: `Bearer ${TOKEN}`,
+      Accept: "application/json",
+    });
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.referrerPolicy, "no-referrer");
+    assert.ok(options.signal instanceof AbortSignal);
+    return response(fixtures[index++]);
+  });
   const client = new ControlClient(TOKEN);
   assert.ok(!JSON.stringify(client).includes(TOKEN));
   const summary = await client.summary(REQUEST_ID);
@@ -238,10 +238,7 @@ test("fixed GET routes preserve wire semantics and safe display metadata", async
   assert.equal(events.next_cursor, EVENT_CURSOR);
   const evidence = await client.evidence(REQUEST_ID, EVIDENCE_CURSOR);
   const artifact = await client.artifact(ARTIFACT_ID);
-  assert.equal(
-    evidence.artifacts[0]?.artifact_id,
-    artifact.artifact?.artifact_id,
-  );
+  assert.equal(evidence.artifacts[0]?.artifact_id, artifact.artifact?.artifact_id);
   for (const item of [evidence.artifacts[0], artifact.artifact]) {
     assert.ok(item);
     assert.ok(!("storage" in item));
@@ -372,19 +369,70 @@ test("workbench overview keeps source completeness and scope fields strict", asy
   const health = auditHealthFixture();
   const { request_id: _requestId, tenant_id: _tenantId, site_id: _siteId, ...audit } = health;
   const body = {
-    request_id: REQUEST_ID, tenant_id: "tenant_a", site_id: "site_demo", as_of: health.as_of,
-    completeness: "partial", index_watermark: health.index_watermark, has_gaps: true,
-    posture: { observed_at: health.as_of, source_state: "available", reason_code: "WORKBENCH_POSTURE_SCOPED", value: "degraded" },
-    sites: [{ site_id: "site_demo", display_name: "Demo", public_origin: "https://demo.example", edge: { observed_at: health.as_of, source_state: "unavailable", reason_code: "EDGE_UNKNOWN", value: null }, upstream: { observed_at: health.as_of, source_state: "available", reason_code: "UPSTREAM_OK", value: "healthy" }, audit: { observed_at: health.as_of, source_state: "available", reason_code: "AUDIT_OK", value: "continuous" }, current_revision: 3, apply_state: "active", reason_code: "SITE_ACTIVE", updated_at: health.as_of }],
-    queues: [], recent_activity: [], audit: { observed_at: health.as_of, source_state: "available", reason_code: "WORKBENCH_AUDIT_READ", value: audit },
+    request_id: REQUEST_ID,
+    tenant_id: "tenant_a",
+    site_id: "site_demo",
+    as_of: health.as_of,
+    completeness: "partial",
+    index_watermark: health.index_watermark,
+    has_gaps: true,
+    posture: {
+      observed_at: health.as_of,
+      source_state: "available",
+      reason_code: "WORKBENCH_POSTURE_SCOPED",
+      value: "degraded",
+    },
+    sites: [
+      {
+        site_id: "site_demo",
+        display_name: "Demo",
+        public_origin: "https://demo.example",
+        edge: {
+          observed_at: health.as_of,
+          source_state: "unavailable",
+          reason_code: "EDGE_UNKNOWN",
+          value: null,
+        },
+        upstream: {
+          observed_at: health.as_of,
+          source_state: "available",
+          reason_code: "UPSTREAM_OK",
+          value: "healthy",
+        },
+        audit: {
+          observed_at: health.as_of,
+          source_state: "available",
+          reason_code: "AUDIT_OK",
+          value: "continuous",
+        },
+        current_revision: 3,
+        apply_state: "active",
+        reason_code: "SITE_ACTIVE",
+        updated_at: health.as_of,
+      },
+    ],
+    queues: [],
+    recent_activity: [],
+    audit: {
+      observed_at: health.as_of,
+      source_state: "available",
+      reason_code: "WORKBENCH_AUDIT_READ",
+      value: audit,
+    },
   };
-  t.mock.method(globalThis, "fetch", async (path: string) => { assert.equal(path, "/control/v1/workbench/overview"); return response(body); });
+  t.mock.method(globalThis, "fetch", async (path: string) => {
+    assert.equal(path, "/control/v1/workbench/overview");
+    return response(body);
+  });
   const result = await new ControlClient(TOKEN).workbenchOverview();
   assert.equal(result.completeness, "partial");
   assert.equal(result.sites[0]?.edge.value, null);
   assert.equal(result.audit.value?.has_gaps, true);
   (body as Record<string, unknown>).unexpected = true;
-  await assert.rejects(new ControlClient(TOKEN).workbenchOverview(), errorIs("INVALID_RESPONSE", 200));
+  await assert.rejects(
+    new ControlClient(TOKEN).workbenchOverview(),
+    errorIs("INVALID_RESPONSE", 200),
+  );
 });
 
 test("invalid IDs, opaque cursor transport and credentials fail before network use", async (t) => {
@@ -399,10 +447,7 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
     `${TOKEN} `,
     "界".repeat(32),
   ]) {
-    assert.throws(
-      () => new ControlClient(token),
-      errorIs("INVALID_CREDENTIAL"),
-    );
+    assert.throws(() => new ControlClient(token), errorIs("INVALID_CREDENTIAL"));
   }
   const client = new ControlClient(TOKEN);
   for (const request of [
@@ -416,23 +461,11 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
     `${REQUEST_ID}\u2028`,
     `${REQUEST_ID}\u2029`,
   ]) {
-    await assert.rejects(
-      client.summary(request),
-      errorIs("CONTROL_REQUEST_ID_INVALID"),
-    );
-    await assert.rejects(
-      client.events(request),
-      errorIs("CONTROL_REQUEST_ID_INVALID"),
-    );
-    await assert.rejects(
-      client.evidence(request),
-      errorIs("CONTROL_REQUEST_ID_INVALID"),
-    );
+    await assert.rejects(client.summary(request), errorIs("CONTROL_REQUEST_ID_INVALID"));
+    await assert.rejects(client.events(request), errorIs("CONTROL_REQUEST_ID_INVALID"));
+    await assert.rejects(client.evidence(request), errorIs("CONTROL_REQUEST_ID_INVALID"));
   }
-  await assert.rejects(
-    client.artifact(REQUEST_ID),
-    errorIs("CONTROL_ARTIFACT_ID_INVALID"),
-  );
+  await assert.rejects(client.artifact(REQUEST_ID), errorIs("CONTROL_ARTIFACT_ID_INVALID"));
   for (const value of [
     REQUEST_ID,
     MODEL_CALL_ID.toUpperCase(),
@@ -441,10 +474,7 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
     `${MODEL_CALL_ID}\n`,
     `${MODEL_CALL_ID}\u2028`,
   ])
-    await assert.rejects(
-      client.modelCall(value),
-      errorIs("CONTROL_MODEL_CALL_ID_INVALID"),
-    );
+    await assert.rejects(client.modelCall(value), errorIs("CONTROL_MODEL_CALL_ID_INVALID"));
   for (const value of [
     REQUEST_ID,
     AGENT_RUN_ID.toUpperCase(),
@@ -452,27 +482,10 @@ test("invalid IDs, opaque cursor transport and credentials fail before network u
     AGENT_RUN_ID.replace("-7000-", "-4000-"),
     `${AGENT_RUN_ID}\n`,
   ])
-    await assert.rejects(
-      client.agentRun(value),
-      errorIs("CONTROL_AGENT_RUN_ID_INVALID"),
-    );
-  for (const cursor of [
-    "",
-    "a".repeat(161),
-    "foo&limit=100",
-    "%76%31",
-    "a/b",
-    "a+b",
-    "a\nb",
-  ]) {
-    await assert.rejects(
-      client.events(REQUEST_ID, cursor),
-      errorIs("CONTROL_CURSOR_INVALID"),
-    );
-    await assert.rejects(
-      client.evidence(REQUEST_ID, cursor),
-      errorIs("CONTROL_CURSOR_INVALID"),
-    );
+    await assert.rejects(client.agentRun(value), errorIs("CONTROL_AGENT_RUN_ID_INVALID"));
+  for (const cursor of ["", "a".repeat(161), "foo&limit=100", "%76%31", "a/b", "a+b", "a\nb"]) {
+    await assert.rejects(client.events(REQUEST_ID, cursor), errorIs("CONTROL_CURSOR_INVALID"));
+    await assert.rejects(client.evidence(REQUEST_ID, cursor), errorIs("CONTROL_CURSOR_INVALID"));
   }
   assert.equal(network.mock.callCount(), 0);
 });
@@ -543,10 +556,7 @@ test("agent run projection keeps lifecycle facts redacted and bounded", async (t
     const invalid = agentRunFixture();
     mutate(invalid);
     body = invalid;
-    await assert.rejects(
-      client.agentRun(AGENT_RUN_ID),
-      errorIs("INVALID_RESPONSE", 200),
-    );
+    await assert.rejects(client.agentRun(AGENT_RUN_ID), errorIs("INVALID_RESPONSE", 200));
   }
   body = agentRunFixture(AGENT_RUN_ID, false);
   assert.deepEqual(await client.agentRun(AGENT_RUN_ID), body);
@@ -572,7 +582,7 @@ test("model-call list binds its UTC window, ordering and opaque cursor", async (
   });
   const first = await client.modelCalls(plan);
   assert.equal(first.items[0]?.model_call_id, MODEL_CALL_ID);
-  assert.ok(!JSON.stringify(first).includes("confidence\":0.8"));
+  assert.ok(!JSON.stringify(first).includes('confidence":0.8'));
   const second = await client.modelCalls(plan, first.next_cursor!);
   assert.equal(second.items[0]?.model_call_id, THIRD_MODEL_CALL_ID);
   for (const invalid of [
@@ -628,10 +638,7 @@ test("model-call list rejects malformed rows, ordering and response plan drift",
     const value = modelCallListFixture();
     change(value);
     t.mock.method(globalThis, "fetch", async () => response(value));
-    await assert.rejects(
-      client.modelCalls(plan),
-      errorIs("INVALID_RESPONSE", 200),
-    );
+    await assert.rejects(client.modelCalls(plan), errorIs("INVALID_RESPONSE", 200));
   }
 });
 
@@ -643,8 +650,7 @@ test("Score lifecycle keeps confidence separate from score evidence", async (t) 
       item.question_type = "score";
       if (item.status === "success") {
         item.confidence = reportedConfidence;
-        item.confidence_status =
-          reportedConfidence === null ? "not_provided" : "provided";
+        item.confidence_status = reportedConfidence === null ? "not_provided" : "provided";
       }
     }
     const expected = structuredClone(value);
@@ -660,10 +666,7 @@ test("Score lifecycle keeps confidence separate from score evidence", async (t) 
       if (item.status === "success") item.confidence = invalidConfidence;
     }
     t.mock.method(globalThis, "fetch", async () => response(value));
-    await assert.rejects(
-      client.modelCall(MODEL_CALL_ID),
-      errorIs("INVALID_RESPONSE", 200),
-    );
+    await assert.rejects(client.modelCall(MODEL_CALL_ID), errorIs("INVALID_RESPONSE", 200));
   }
 });
 
@@ -702,118 +705,110 @@ test("model call projection accepts pending prefixes and pre-send failure", asyn
 
 test("model call projection rejects contradictory lifecycle and malformed identity", async (t) => {
   const client = new ControlClient(TOKEN);
-  const mutations: Array<(value: ReturnType<typeof modelCallFixture>) => void> =
-    [
-      (value) => {
-        value.source_model_call_id = OTHER_MODEL_CALL_ID;
-      },
-      (value) => {
-        value.model_call.model_call_id = OTHER_MODEL_CALL_ID;
-      },
-      (value) => {
-        value.watermark_scope = "all_journals";
-      },
-      (value) => {
-        value.found = false;
-      },
-      (value) => {
-        value.completeness = "partial";
-      },
-      (value) => {
-        value.model_call.lifecycle_complete = false;
-      },
-      (value) => {
-        value.model_call.events = [];
-      },
-      (value) => {
-        value.model_call.events.reverse();
-      },
-      (value) => {
-        value.model_call.events[1]!.request_id = OTHER_REQUEST_ID;
-      },
-      (value) => {
-        value.model_call.events[1]!.provider_model_id = "jev-1.13.0";
-      },
-      (value) => {
-        Object.assign(value.model_call, { provider: null });
-      },
-      (value) => {
-        Reflect.deleteProperty(value.model_call, "provider");
-      },
-      (value) => {
-        value.model_call.confidence = 0.2;
-      },
-      (value) => {
-        value.model_call.events[0]!.confidence = 0.2;
-        value.model_call.events[0]!.confidence_status = "provided";
-      },
-      (value) => {
-        value.model_call.events[2]!.question_type = "noul";
-      },
-      (value) => {
-        for (const item of [value.model_call, ...value.model_call.events])
-          item.question_type = "unknown";
-      },
-      (value) => {
-        value.model_call.events[2]!.question_type = "score";
-      },
-      (value) => {
-        value.model_call.events[2]!.event_type = "model.cancelled";
-      },
-      (value) => {
-        value.model_call.events[2]!.evidence_refs = [];
-      },
-      (value) => {
-        value.model_call.events[1]!.cause_event_ids = [];
-      },
-      (value) => {
-        value.model_call.events[2]!.cause_event_ids = [
-          value.model_call.events[0]!.event_id,
-        ];
-      },
-      (value) => {
-        value.model_call.events[1]!.request_seq = 1;
-      },
-      (value) => {
-        value.model_call.events[2]!.occurred_at = "invalid";
-      },
-      (value) => {
-        value.model_call.events[2]!.duration_us = Number.MAX_SAFE_INTEGER + 1;
-      },
-      (value) => {
-        value.model_call.output_artifact_id = ARTIFACT_ID;
-      },
-      (value) => {
-        value.model_call.events[0]!.input_artifact_id = ARTIFACT_ID;
-        value.model_call.events[0]!.evidence_refs = [ARTIFACT_ID];
-      },
-      (value) => {
-        value.model_call.events[2]!.cause_event_ids = [
-          value.model_call.events[2]!.event_id,
-        ];
-      },
-      (value) => {
-        value.model_call.events.splice(0, 1);
-        Object.assign(value.model_call.events[1]!, {
-          ...value.model_call.events[0]!,
-          event_id: "ev_018f2a3b-4c5d-7000-8000-000000000003",
-          request_seq: 3,
-          cause_event_ids: [value.model_call.events[0]!.event_id],
-        });
-        Object.assign(value.model_call, value.model_call.events[1], {
-          lifecycle_complete: false,
-        });
-        value.completeness = "pending";
-      },
-    ];
+  const mutations: Array<(value: ReturnType<typeof modelCallFixture>) => void> = [
+    (value) => {
+      value.source_model_call_id = OTHER_MODEL_CALL_ID;
+    },
+    (value) => {
+      value.model_call.model_call_id = OTHER_MODEL_CALL_ID;
+    },
+    (value) => {
+      value.watermark_scope = "all_journals";
+    },
+    (value) => {
+      value.found = false;
+    },
+    (value) => {
+      value.completeness = "partial";
+    },
+    (value) => {
+      value.model_call.lifecycle_complete = false;
+    },
+    (value) => {
+      value.model_call.events = [];
+    },
+    (value) => {
+      value.model_call.events.reverse();
+    },
+    (value) => {
+      value.model_call.events[1]!.request_id = OTHER_REQUEST_ID;
+    },
+    (value) => {
+      value.model_call.events[1]!.provider_model_id = "jev-1.13.0";
+    },
+    (value) => {
+      Object.assign(value.model_call, { provider: null });
+    },
+    (value) => {
+      Reflect.deleteProperty(value.model_call, "provider");
+    },
+    (value) => {
+      value.model_call.confidence = 0.2;
+    },
+    (value) => {
+      value.model_call.events[0]!.confidence = 0.2;
+      value.model_call.events[0]!.confidence_status = "provided";
+    },
+    (value) => {
+      value.model_call.events[2]!.question_type = "noul";
+    },
+    (value) => {
+      for (const item of [value.model_call, ...value.model_call.events])
+        item.question_type = "unknown";
+    },
+    (value) => {
+      value.model_call.events[2]!.question_type = "score";
+    },
+    (value) => {
+      value.model_call.events[2]!.event_type = "model.cancelled";
+    },
+    (value) => {
+      value.model_call.events[2]!.evidence_refs = [];
+    },
+    (value) => {
+      value.model_call.events[1]!.cause_event_ids = [];
+    },
+    (value) => {
+      value.model_call.events[2]!.cause_event_ids = [value.model_call.events[0]!.event_id];
+    },
+    (value) => {
+      value.model_call.events[1]!.request_seq = 1;
+    },
+    (value) => {
+      value.model_call.events[2]!.occurred_at = "invalid";
+    },
+    (value) => {
+      value.model_call.events[2]!.duration_us = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (value) => {
+      value.model_call.output_artifact_id = ARTIFACT_ID;
+    },
+    (value) => {
+      value.model_call.events[0]!.input_artifact_id = ARTIFACT_ID;
+      value.model_call.events[0]!.evidence_refs = [ARTIFACT_ID];
+    },
+    (value) => {
+      value.model_call.events[2]!.cause_event_ids = [value.model_call.events[2]!.event_id];
+    },
+    (value) => {
+      value.model_call.events.splice(0, 1);
+      Object.assign(value.model_call.events[1]!, {
+        ...value.model_call.events[0]!,
+        event_id: "ev_018f2a3b-4c5d-7000-8000-000000000003",
+        request_seq: 3,
+        cause_event_ids: [value.model_call.events[0]!.event_id],
+      });
+      Object.assign(value.model_call, value.model_call.events[1], {
+        lifecycle_complete: false,
+      });
+      value.completeness = "pending";
+    },
+  ];
   for (const mutate of mutations) {
     const value = modelCallFixture();
     mutate(value);
     t.mock.method(globalThis, "fetch", async () => response(value));
-    await assert.rejects(
-      client.modelCall(MODEL_CALL_ID),
-      errorIs("INVALID_RESPONSE", 200),
-    );
+    await assert.rejects(client.modelCall(MODEL_CALL_ID), errorIs("INVALID_RESPONSE", 200));
   }
   const value = modelCallFixture();
   Object.assign(value.model_call, {
@@ -926,10 +921,7 @@ test("malformed summary facts are rejected instead of filling missing data", asy
     const value = summaryFixture();
     mutate(value);
     t.mock.method(globalThis, "fetch", async () => response(value));
-    await assert.rejects(
-      client.summary(REQUEST_ID),
-      errorIs("INVALID_RESPONSE", 200),
-    );
+    await assert.rejects(client.summary(REQUEST_ID), errorIs("INVALID_RESPONSE", 200));
   }
 });
 
@@ -980,10 +972,7 @@ test("timeline validates sequence, numeric precision, references and pagination"
     const value = eventsFixture();
     mutate(value);
     t.mock.method(globalThis, "fetch", async () => response(value));
-    await assert.rejects(
-      client.events(REQUEST_ID),
-      errorIs("INVALID_RESPONSE"),
-    );
+    await assert.rejects(client.events(REQUEST_ID), errorIs("INVALID_RESPONSE"));
   }
   const nullable = eventsFixture(REQUEST_ID, true);
   Object.assign(nullable.events[0]!, {
@@ -1007,62 +996,55 @@ test("timeline validates sequence, numeric precision, references and pagination"
   assert.equal((await client.events(REQUEST_ID)).events[0]?.confidence, 0.83);
   for (const confidence of [-0.1, 1.1, Infinity, NaN]) {
     Object.assign(model.events[0]!, { confidence });
-    await assert.rejects(
-      client.events(REQUEST_ID),
-      errorIs("INVALID_RESPONSE"),
-    );
+    await assert.rejects(client.events(REQUEST_ID), errorIs("INVALID_RESPONSE"));
   }
 });
 
 test("manifest projection validates exact scope, target, fidelity and page relationships", async (t) => {
   const client = new ControlClient(TOKEN);
-  const mutations: Array<(value: ReturnType<typeof evidenceFixture>) => void> =
-    [
-      (value) => {
-        value.source_request_id = OTHER_REQUEST_ID;
-      },
-      (value) => {
-        value.artifacts[0]!.tenant_id = "tenant_other";
-      },
-      (value) => {
-        value.artifacts[0]!.site_id = "site_other";
-      },
-      (value) => {
-        value.artifacts[0]!.request_id = OTHER_REQUEST_ID;
-      },
-      (value) => {
-        value.artifacts[0]!.schema_version = 4;
-      },
-      (value) => {
-        value.artifacts[0]!.example_only = true;
-      },
-      (value) => {
-        value.artifacts[0]!.bytes_saved = 257;
-      },
-      (value) => {
-        value.artifacts[0]!.fidelity = "perfect";
-      },
-      (value) => {
-        value.artifacts[0]!.classification = "PUBLIC";
-      },
-      (value) => {
-        value.artifacts[0]!.content_type = "text/html\nLocation: evil";
-      },
-      (value) => {
-        value.artifacts.push(value.artifacts[0]!);
-      },
-      (value) => {
-        value.artifacts = [];
-      },
-    ];
+  const mutations: Array<(value: ReturnType<typeof evidenceFixture>) => void> = [
+    (value) => {
+      value.source_request_id = OTHER_REQUEST_ID;
+    },
+    (value) => {
+      value.artifacts[0]!.tenant_id = "tenant_other";
+    },
+    (value) => {
+      value.artifacts[0]!.site_id = "site_other";
+    },
+    (value) => {
+      value.artifacts[0]!.request_id = OTHER_REQUEST_ID;
+    },
+    (value) => {
+      value.artifacts[0]!.schema_version = 4;
+    },
+    (value) => {
+      value.artifacts[0]!.example_only = true;
+    },
+    (value) => {
+      value.artifacts[0]!.bytes_saved = 257;
+    },
+    (value) => {
+      value.artifacts[0]!.fidelity = "perfect";
+    },
+    (value) => {
+      value.artifacts[0]!.classification = "PUBLIC";
+    },
+    (value) => {
+      value.artifacts[0]!.content_type = "text/html\nLocation: evil";
+    },
+    (value) => {
+      value.artifacts.push(value.artifacts[0]!);
+    },
+    (value) => {
+      value.artifacts = [];
+    },
+  ];
   for (const mutate of mutations) {
     const value = evidenceFixture();
     mutate(value);
     t.mock.method(globalThis, "fetch", async () => response(value));
-    await assert.rejects(
-      client.evidence(REQUEST_ID),
-      errorIs("INVALID_RESPONSE"),
-    );
+    await assert.rejects(client.evidence(REQUEST_ID), errorIs("INVALID_RESPONSE"));
   }
   for (const value of [
     { ...artifactFixture(), source_artifact_id: REQUEST_ID },
@@ -1076,10 +1058,7 @@ test("manifest projection validates exact scope, target, fidelity and page relat
     },
   ]) {
     t.mock.method(globalThis, "fetch", async () => response(value));
-    await assert.rejects(
-      client.artifact(ARTIFACT_ID),
-      errorIs("INVALID_RESPONSE"),
-    );
+    await assert.rejects(client.artifact(ARTIFACT_ID), errorIs("INVALID_RESPONSE"));
   }
 });
 
@@ -1095,15 +1074,10 @@ test("HTTP diagnostics preserve status and safe request ID while discarding serv
     [503, "CONTROL_SITE_CONFIG_UNAVAILABLE"],
     [503, "AUDIT_DURABILITY_FAILED"],
   ] as const) {
-    t.mock.method(globalThis, "fetch", async () =>
-      response(errorFixture(code), status),
-    );
+    t.mock.method(globalThis, "fetch", async () => response(errorFixture(code), status));
     await assert.rejects(client.summary(REQUEST_ID), (error) => {
       errorIs(code, status)(error);
-      assert.equal(
-        (error as ApiError).requestId,
-        errorFixture(code).request_id,
-      );
+      assert.equal((error as ApiError).requestId, errorFixture(code).request_id);
       return true;
     });
   }
@@ -1125,10 +1099,7 @@ test("HTTP diagnostics preserve status and safe request ID while discarding serv
   t.mock.method(globalThis, "fetch", async () => {
     throw new Error(TOKEN);
   });
-  await assert.rejects(
-    client.summary(REQUEST_ID),
-    errorIs("NETWORK_UNAVAILABLE"),
-  );
+  await assert.rejects(client.summary(REQUEST_ID), errorIs("NETWORK_UNAVAILABLE"));
   t.mock.method(
     globalThis,
     "fetch",
@@ -1138,20 +1109,13 @@ test("HTTP diagnostics preserve status and safe request ID while discarding serv
         headers: { "content-type": "text/html" },
       }),
   );
-  await assert.rejects(
-    client.summary(REQUEST_ID),
-    errorIs("INVALID_RESPONSE", 401),
-  );
+  await assert.rejects(client.summary(REQUEST_ID), errorIs("INVALID_RESPONSE", 401));
 });
 
 test("bounded stream decoding rejects oversized, invalid UTF-8, HTML and invalid JSON bodies", async (t) => {
   const client = new ControlClient(TOKEN);
   for (const [body, headers, code] of [
-    [
-      "<html>private</html>",
-      { "content-type": "text/html" },
-      "INVALID_RESPONSE",
-    ],
+    ["<html>private</html>", { "content-type": "text/html" }, "INVALID_RESPONSE"],
     ["{bad}", { "content-type": "application/json" }, "INVALID_RESPONSE"],
     [
       "{}",
@@ -1161,17 +1125,9 @@ test("bounded stream decoding rejects oversized, invalid UTF-8, HTML and invalid
       },
       "RESPONSE_TOO_LARGE",
     ],
-    [
-      "{}",
-      { "content-type": "application/json", "content-length": "-1" },
-      "INVALID_RESPONSE",
-    ],
+    ["{}", { "content-type": "application/json", "content-length": "-1" }, "INVALID_RESPONSE"],
   ] as const) {
-    t.mock.method(
-      globalThis,
-      "fetch",
-      async () => new Response(body, { headers }),
-    );
+    t.mock.method(globalThis, "fetch", async () => new Response(body, { headers }));
     await assert.rejects(client.summary(REQUEST_ID), errorIs(code));
   }
   t.mock.method(
@@ -1200,10 +1156,7 @@ test("bounded stream decoding rejects oversized, invalid UTF-8, HTML and invalid
         { headers: { "content-type": "application/json" } },
       ),
   );
-  await assert.rejects(
-    client.summary(REQUEST_ID),
-    errorIs("RESPONSE_TOO_LARGE"),
-  );
+  await assert.rejects(client.summary(REQUEST_ID), errorIs("RESPONSE_TOO_LARGE"));
   assert.equal(cancelled, true);
   const encoded = new TextEncoder().encode(
     JSON.stringify({ ...summaryFixture(), ignored: "证据" }),
@@ -1234,19 +1187,12 @@ test("external cancellation and 15-second deadline return sanitized terminal err
     "fetch",
     (_path: string, options: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
-        options.signal!.addEventListener(
-          "abort",
-          () => reject(new Error(TOKEN)),
-          { once: true },
-        );
+        options.signal!.addEventListener("abort", () => reject(new Error(TOKEN)), { once: true });
       }),
   );
   const preAborted = new AbortController();
   preAborted.abort(TOKEN);
-  await assert.rejects(
-    client.summary(REQUEST_ID, preAborted.signal),
-    errorIs("REQUEST_ABORTED"),
-  );
+  await assert.rejects(client.summary(REQUEST_ID, preAborted.signal), errorIs("REQUEST_ABORTED"));
   assert.equal(fetch.mock.callCount(), 0);
   const cancelled = new AbortController();
   const inFlight = client.summary(REQUEST_ID, cancelled.signal);
@@ -1255,10 +1201,7 @@ test("external cancellation and 15-second deadline return sanitized terminal err
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const timedOut = client.summary(REQUEST_ID);
   t.mock.timers.tick(14_999);
-  assert.equal(
-    (fetch.mock.calls.at(-1)!.arguments[1] as RequestInit).signal!.aborted,
-    false,
-  );
+  assert.equal((fetch.mock.calls.at(-1)!.arguments[1] as RequestInit).signal!.aborted, false);
   t.mock.timers.tick(1);
   await assert.rejects(timedOut, errorIs("REQUEST_TIMEOUT"));
 });
@@ -1273,11 +1216,9 @@ test("deadline also covers a stalled response body after headers arrive", async 
       new Response(
         new ReadableStream({
           start(controller) {
-            options.signal!.addEventListener(
-              "abort",
-              () => controller.error(new Error(TOKEN)),
-              { once: true },
-            );
+            options.signal!.addEventListener("abort", () => controller.error(new Error(TOKEN)), {
+              once: true,
+            });
           },
           pull() {
             reading = true;
@@ -1356,33 +1297,29 @@ test("search freezes a strict plan and posts only to its fixed audited read rout
   const plan = searchPlan();
   const original = structuredClone(plan);
   const fixture = await searchResponse();
-  const fetch = t.mock.method(
-    globalThis,
-    "fetch",
-    async (path: string, options: RequestInit) => {
-      assert.equal(path, "/control/v1/search");
-      assert.equal(options.method, "POST");
-      assert.deepEqual(options.headers, {
-        Authorization: `Bearer ${TOKEN}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      });
-      assert.deepEqual(JSON.parse(String(options.body)), original);
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.cache, "no-store");
-      assert.equal(options.redirect, "error");
-      assert.equal(options.referrerPolicy, "no-referrer");
-      assert.ok(options.signal instanceof AbortSignal);
-      return response({
-        ...fixture,
+  const fetch = t.mock.method(globalThis, "fetch", async (path: string, options: RequestInit) => {
+    assert.equal(path, "/control/v1/search");
+    assert.equal(options.method, "POST");
+    assert.deepEqual(options.headers, {
+      Authorization: `Bearer ${TOKEN}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    });
+    assert.deepEqual(JSON.parse(String(options.body)), original);
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.referrerPolicy, "no-referrer");
+    assert.ok(options.signal instanceof AbortSignal);
+    return response({
+      ...fixture,
+      payload_json: TOKEN,
+      events: fixture.events.map((event) => ({
+        ...event,
         payload_json: TOKEN,
-        events: fixture.events.map((event) => ({
-          ...event,
-          payload_json: TOKEN,
-        })),
-      });
-    },
-  );
+      })),
+    });
+  });
   const pending = new ControlClient(TOKEN).search(plan);
   plan.filters.push({ kind: "request_id", value: OTHER_REQUEST_ID });
   plan.limit = 100;
@@ -1416,9 +1353,7 @@ test("search canonical digest covers every predicate and retained filter order",
   plan.filters = [{ kind: "outcome", value: "DENY" }];
   assert.equal(
     await searchPlanDigest(plan),
-    createHash("sha256")
-      .update("1789862400|1789948800|asc|2|outcome=DENY")
-      .digest("hex"),
+    createHash("sha256").update("1789862400|1789948800|asc|2|outcome=DENY").digest("hex"),
   );
   const normalized = validateSearchPlan({
     ...plan,
@@ -1495,9 +1430,7 @@ test("search accepts only a canonical durable job reference", async () => {
   assert.deepEqual(plan.filters, [{ kind: "job_id", value: jobId }]);
   assert.equal(
     await searchPlanDigest(plan),
-    createHash("sha256")
-      .update(`1789862400|1789948800|asc|2|job_id=${jobId}`)
-      .digest("hex"),
+    createHash("sha256").update(`1789862400|1789948800|asc|2|job_id=${jobId}`).digest("hex"),
   );
 });
 
@@ -1510,9 +1443,7 @@ test("search accepts only lowercase fixed-width trace IDs and digests them", asy
   assert.deepEqual(plan.filters, [{ kind: "trace_id", value: trace }]);
   assert.equal(
     await searchPlanDigest(plan),
-    createHash("sha256")
-      .update(`1789862400|1789948800|asc|2|trace_id=${trace}`)
-      .digest("hex"),
+    createHash("sha256").update(`1789862400|1789948800|asc|2|trace_id=${trace}`).digest("hex"),
   );
 });
 
@@ -1567,16 +1498,8 @@ test("invalid search inputs fail before network and preserve strict query budget
       errorIs("CONTROL_QUERY_INVALID"),
     );
   }
-  for (const cursor of [
-    "",
-    "a".repeat(161),
-    "v1.0.ev_fake.signature",
-    "cursor&scope=other",
-  ]) {
-    await assert.rejects(
-      client.search(searchPlan(), cursor),
-      errorIs("CONTROL_CURSOR_INVALID"),
-    );
+  for (const cursor of ["", "a".repeat(161), "v1.0.ev_fake.signature", "cursor&scope=other"]) {
+    await assert.rejects(client.search(searchPlan(), cursor), errorIs("CONTROL_CURSOR_INVALID"));
   }
   const cancelled = new AbortController();
   cancelled.abort(TOKEN);
@@ -1614,17 +1537,10 @@ test("search pagination preserves nullable facts, microsecond ordering and both 
     next.next_cursor = null;
     next.scanned_rows = 0;
     next.scanned_bytes = null;
-    t.mock.method(
-      globalThis,
-      "fetch",
-      async (_path: string, options: RequestInit) => {
-        assert.equal(
-          JSON.parse(String(options.body)).cursor,
-          first.next_cursor,
-        );
-        return response(next);
-      },
-    );
+    t.mock.method(globalThis, "fetch", async (_path: string, options: RequestInit) => {
+      assert.equal(JSON.parse(String(options.body)).cursor, first.next_cursor);
+      return response(next);
+    });
     assert.deepEqual(await client.search(plan, first.next_cursor!), next);
     next.events = [];
     next.index_watermark = null;
@@ -1724,10 +1640,7 @@ test("search rejects contradictory digest, position, confidence and wire shapes"
     const value = await searchResponse();
     mutate(value);
     t.mock.method(globalThis, "fetch", async () => response(value));
-    await assert.rejects(
-      client.search(searchPlan()),
-      errorIs("INVALID_RESPONSE", 200),
-    );
+    await assert.rejects(client.search(searchPlan()), errorIs("INVALID_RESPONSE", 200));
   }
   const first = await searchResponse();
   t.mock.method(globalThis, "fetch", async () => response(first));
@@ -1756,9 +1669,7 @@ test("search shares bounded errors and cancellation while distinguishing plan bu
     [429, "CONTROL_QUERY_CAPACITY_EXHAUSTED"],
     [503, "AUDIT_DURABILITY_FAILED"],
   ] as const) {
-    t.mock.method(globalThis, "fetch", async () =>
-      response(errorFixture(code), status),
-    );
+    t.mock.method(globalThis, "fetch", async () => response(errorFixture(code), status));
     await assert.rejects(client.search(searchPlan()), errorIs(code, status));
   }
   t.mock.method(
@@ -1772,10 +1683,7 @@ test("search shares bounded errors and cancellation while distinguishing plan bu
         },
       }),
   );
-  await assert.rejects(
-    client.search(searchPlan()),
-    errorIs("RESPONSE_TOO_LARGE", 200),
-  );
+  await assert.rejects(client.search(searchPlan()), errorIs("RESPONSE_TOO_LARGE", 200));
   let started!: () => void;
   const reachedFetch = new Promise<void>((resolve) => {
     started = resolve;
@@ -1785,11 +1693,7 @@ test("search shares bounded errors and cancellation while distinguishing plan bu
     "fetch",
     (_path: string, options: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
-        options.signal!.addEventListener(
-          "abort",
-          () => reject(new Error(TOKEN)),
-          { once: true },
-        );
+        options.signal!.addEventListener("abort", () => reject(new Error(TOKEN)), { once: true });
         started();
       }),
   );
@@ -1804,10 +1708,7 @@ test("search shares bounded errors and cancellation while distinguishing plan bu
   t.mock.method(globalThis.crypto.subtle, "digest", async () => {
     throw new Error(TOKEN);
   });
-  await assert.rejects(
-    client.search(searchPlan()),
-    errorIs("QUERY_DIGEST_UNAVAILABLE"),
-  );
+  await assert.rejects(client.search(searchPlan()), errorIs("QUERY_DIGEST_UNAVAILABLE"));
   assert.equal(stopped.mock.callCount(), 0);
 });
 
@@ -1815,50 +1716,46 @@ test("ledger reads bind targets, preserve observations and project only display 
   const grant = grantFixture();
   const binding = bindingFixture();
   const sent: string[] = [];
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async (path: string, options: RequestInit) => {
-      sent.push(path);
-      assert.equal(options.method, "GET");
-      assert.equal(options.body, undefined);
-      assert.deepEqual(options.headers, {
-        Authorization: `Bearer ${TOKEN}`,
-        Accept: "application/json",
-      });
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.cache, "no-store");
-      assert.equal(options.redirect, "error");
-      assert.equal(options.referrerPolicy, "no-referrer");
-      assert.ok(options.signal instanceof AbortSignal);
-      return response(
-        path.includes("/grants/")
-          ? {
-              ...grant,
-              private_snapshot: "synthetic-private",
-              grant: {
-                ...grant.grant,
-                resource_key_hmac: "synthetic-private",
-                constraints: { secret: true },
-                binding: {
-                  ...grant.grant!.binding,
-                  principal_ref: "synthetic-private",
-                  credential: TOKEN,
-                },
-              },
-            }
-          : {
-              ...binding,
-              private_snapshot: "synthetic-private",
+  t.mock.method(globalThis, "fetch", async (path: string, options: RequestInit) => {
+    sent.push(path);
+    assert.equal(options.method, "GET");
+    assert.equal(options.body, undefined);
+    assert.deepEqual(options.headers, {
+      Authorization: `Bearer ${TOKEN}`,
+      Accept: "application/json",
+    });
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.referrerPolicy, "no-referrer");
+    assert.ok(options.signal instanceof AbortSignal);
+    return response(
+      path.includes("/grants/")
+        ? {
+            ...grant,
+            private_snapshot: "synthetic-private",
+            grant: {
+              ...grant.grant,
+              resource_key_hmac: "synthetic-private",
+              constraints: { secret: true },
               binding: {
-                ...binding.binding,
+                ...grant.grant!.binding,
                 principal_ref: "synthetic-private",
-                waf_sid_fingerprint: TOKEN,
+                credential: TOKEN,
               },
             },
-      );
-    },
-  );
+          }
+        : {
+            ...binding,
+            private_snapshot: "synthetic-private",
+            binding: {
+              ...binding.binding,
+              principal_ref: "synthetic-private",
+              waf_sid_fingerprint: TOKEN,
+            },
+          },
+    );
+  });
   const client = new ControlClient(TOKEN);
   assert.deepEqual(await client.grant(GRANT_ID), grant);
   assert.deepEqual(await client.binding(BINDING_ID), binding);
@@ -1900,9 +1797,7 @@ test("ledger target validation rejects ambiguous IDs before any transport", asyn
       target.replace("-7000-", "-4000-"),
       `${target}?tenant_id=other`,
       `../${target}`,
-      ...["\n", "\r", "\r\n", "\u2028", "\u2029", " ", "/", "%0a"].map(
-        (end) => target + end,
-      ),
+      ...["\n", "\r", "\r\n", "\u2028", "\u2029", " ", "/", "%0a"].map((end) => target + end),
     ])
       await assert.rejects(client[kind](value as string), errorIs(code));
   }
@@ -1911,10 +1806,7 @@ test("ledger target validation rejects ambiguous IDs before any transport", asyn
 
 test("ledger expiry compares exact microseconds and stored states remain independent", async (t) => {
   const client = new ControlClient(TOKEN);
-  for (const asOf of [
-    "2026-09-20T08:10:30.123456Z",
-    "2299-09-20T08:10:30.123456Z",
-  ]) {
+  for (const asOf of ["2026-09-20T08:10:30.123456Z", "2299-09-20T08:10:30.123456Z"]) {
     for (const [end, expired] of [
       ["123455", true],
       ["123456", true],
@@ -1945,9 +1837,7 @@ test("ledger expiry compares exact microseconds and stored states remain indepen
     for (const expired of [false, true]) {
       const binding = bindingFixture();
       binding.binding!.stored_status = state;
-      binding.binding!.expires_at = expired
-        ? binding.as_of!
-        : "2026-09-20T09:00:00.000000Z";
+      binding.binding!.expires_at = expired ? binding.as_of! : "2026-09-20T09:00:00.000000Z";
       binding.binding!.time_expired = expired;
       if (state !== "active") {
         binding.binding!.current_auth_epoch = 0;
@@ -1988,8 +1878,7 @@ test("ledger boundary rejects contradictory observations and malformed display f
       { ...fixture, [kind]: [] },
       {
         ...fixture,
-        [`source_${kind}_id`]:
-          kind === "grant" ? OTHER_GRANT_ID : OTHER_BINDING_ID,
+        [`source_${kind}_id`]: kind === "grant" ? OTHER_GRANT_ID : OTHER_BINDING_ID,
       },
       {
         ...fixture,
@@ -2012,11 +1901,7 @@ test("ledger boundary rejects contradictory observations and malformed display f
         ...fixture,
         [kind]: { ...record, time_expired: value },
       });
-    for (const field of [
-      "as_of",
-      "expires_at",
-      kind === "grant" ? "issued_at" : "updated_at",
-    ]) {
+    for (const field of ["as_of", "expires_at", kind === "grant" ? "issued_at" : "updated_at"]) {
       for (const value of [
         null,
         "1969-12-31T23:59:59.999999Z",
@@ -2036,10 +1921,7 @@ test("ledger boundary rejects contradictory observations and malformed display f
     }
     for (const bad of malformed) {
       t.mock.method(globalThis, "fetch", async () => response(bad));
-      await assert.rejects(
-        client[kind](target),
-        errorIs("INVALID_RESPONSE", 200),
-      );
+      await assert.rejects(client[kind](target), errorIs("INVALID_RESPONSE", 200));
     }
   }
   const grantBad = [
@@ -2071,13 +1953,8 @@ test("ledger boundary rejects contradictory observations and malformed display f
     },
   ];
   for (const data of grantBad) {
-    t.mock.method(globalThis, "fetch", async () =>
-      response({ ...grant, grant: data }),
-    );
-    await assert.rejects(
-      client.grant(GRANT_ID),
-      errorIs("INVALID_RESPONSE", 200),
-    );
+    t.mock.method(globalThis, "fetch", async () => response({ ...grant, grant: data }));
+    await assert.rejects(client.grant(GRANT_ID), errorIs("INVALID_RESPONSE", 200));
   }
   for (const field of ["current_auth_epoch", "credential_generation"]) {
     for (const value of [-1, 0, 1.5, "4", Number.MAX_SAFE_INTEGER + 1, null]) {
@@ -2087,10 +1964,7 @@ test("ledger boundary rejects contradictory observations and malformed display f
           binding: { ...binding.binding, [field]: value },
         }),
       );
-      await assert.rejects(
-        client.binding(BINDING_ID),
-        errorIs("INVALID_RESPONSE", 200),
-      );
+      await assert.rejects(client.binding(BINDING_ID), errorIs("INVALID_RESPONSE", 200));
     }
   }
   t.mock.method(globalThis, "fetch", async () =>
@@ -2099,10 +1973,7 @@ test("ledger boundary rejects contradictory observations and malformed display f
       binding: { ...binding.binding, stored_status: "anonymous" },
     }),
   );
-  await assert.rejects(
-    client.binding(BINDING_ID),
-    errorIs("INVALID_RESPONSE", 200),
-  );
+  await assert.rejects(client.binding(BINDING_ID), errorIs("INVALID_RESPONSE", 200));
 });
 
 test("ledger failures retain safe diagnostics and cancelled requests do not start", async (t) => {
@@ -2118,9 +1989,7 @@ test("ledger failures retain safe diagnostics and cancelled requests do not star
       [503, unavailable],
       [503, "AUDIT_DURABILITY_FAILED"],
     ] as const) {
-      t.mock.method(globalThis, "fetch", async () =>
-        response(errorFixture(code), status),
-      );
+      t.mock.method(globalThis, "fetch", async () => response(errorFixture(code), status));
       await assert.rejects(client[kind](target), errorIs(code, status));
     }
     const network = t.mock.method(globalThis, "fetch", async () => {
@@ -2157,7 +2026,11 @@ test("development proxy permits fixed investigation and evidence access routes",
     ["GET", "/control/v1/audit/health", true],
     ["GET", "/control/v1/sites", true],
     ["GET", "/control/v1/sites?limit=100", true],
-    ["GET", "/control/v1/sites?cursor=v1.site_demo.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&limit=50", true],
+    [
+      "GET",
+      "/control/v1/sites?cursor=v1.site_demo.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&limit=50",
+      true,
+    ],
     ["POST", "/control/v1/sites", true],
     ["POST", "/control/v1/sites?scope=other", false],
     ["GET", "/control/v1/sites?scope=other", false],
@@ -2184,11 +2057,7 @@ test("development proxy permits fixed investigation and evidence access routes",
     ["GET", "/control/v1/calibration-reports/calr_not-a-v7", false],
     ["GET", `/control/v1/grants/${GRANT_ID}`, true],
     ["GET", `/control/v1/auth-bindings/${BINDING_ID}`, true],
-    [
-      "GET",
-      `/control/v1/requests/${REQUEST_ID}/events?cursor=${EVENT_CURSOR}`,
-      true,
-    ],
+    ["GET", `/control/v1/requests/${REQUEST_ID}/events?cursor=${EVENT_CURSOR}`, true],
     ["POST", "/control/v1/search?scope=other", false],
     ["POST", "/control/v1/search/", false],
     ["GET", "/control/v1/search", false],
@@ -2210,7 +2079,11 @@ test("development proxy permits fixed investigation and evidence access routes",
     ["GET", `/control/v1/cases/${CASE_ID}/close`, false],
     ["POST", `/control/v1/cases/${CASE_ID}/holds`, true],
     ["GET", `/control/v1/cases/${CASE_ID}/holds`, true],
-    ["GET", `/control/v1/cases/${CASE_ID}/holds?cursor=v1.ev_018f2a3b-4c5d-7000-8000-000000000061.abc`, true],
+    [
+      "GET",
+      `/control/v1/cases/${CASE_ID}/holds?cursor=v1.ev_018f2a3b-4c5d-7000-8000-000000000061.abc`,
+      true,
+    ],
     ["POST", `/control/v1/cases/${CASE_ID}/holds?`, false],
     ["DELETE", `/control/v1/cases/${CASE_ID}/holds`, false],
     ["POST", "/control/v1/evidence-holds/ev_018f2a3b-4c5d-7000-8000-000000000061/release", true],
@@ -2226,16 +2099,44 @@ test("development proxy permits fixed investigation and evidence access routes",
     ["POST", `/control/v1/artifacts/${ARTIFACT_ID}/content`, false],
     ["POST", `/control/v1/artifacts/${ARTIFACT_ID}/access`, true],
     ["POST", `/control/v1/artifacts/${ARTIFACT_ID}/access?scope=other`, false],
-    ["GET", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041", true],
+    [
+      "GET",
+      "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041",
+      true,
+    ],
     ["GET", "/control/v1/evidence-access-requests?view=mine", true],
-    ["GET", "/control/v1/evidence-access-requests?view=review&cursor=v1.access_018f2a3b-4c5d-7000-8000-000000000041.abc", true],
+    [
+      "GET",
+      "/control/v1/evidence-access-requests?view=review&cursor=v1.access_018f2a3b-4c5d-7000-8000-000000000041.abc",
+      true,
+    ],
     ["POST", "/control/v1/evidence-access-requests?view=mine", false],
     ["GET", "/control/v1/evidence-access-requests/unknown?view=mine", false],
-    ["GET", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041?", false],
-    ["POST", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve", true],
-    ["POST", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/deny", true],
-    ["POST", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve?", false],
-    ["GET", "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve", false],
+    [
+      "GET",
+      "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041?",
+      false,
+    ],
+    [
+      "POST",
+      "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve",
+      true,
+    ],
+    [
+      "POST",
+      "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/deny",
+      true,
+    ],
+    [
+      "POST",
+      "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve?",
+      false,
+    ],
+    [
+      "GET",
+      "/control/v1/evidence-access-requests/access_018f2a3b-4c5d-7000-8000-000000000041/approve",
+      false,
+    ],
     ["POST", "/control/v1/exports", true],
     ["POST", "/control/v1/exports?scope=other", false],
     ["GET", `/control/v1/exports/${EXPORT_ID}`, true],
@@ -2267,11 +2168,14 @@ test("development proxy permits fixed investigation and evidence access routes",
   }
 
   const listeners = new Map<string, (...args: unknown[]) => void>();
-  proxy.configure?.({
-    on(event: string, listener: (...args: unknown[]) => void) {
-      listeners.set(event, listener);
-    },
-  } as never, proxy as never);
+  proxy.configure?.(
+    {
+      on(event: string, listener: (...args: unknown[]) => void) {
+        listeners.set(event, listener);
+      },
+    } as never,
+    proxy as never,
+  );
   const proxyHeaders: Record<string, string> = {};
   listeners.get("proxyReq")?.(
     {
@@ -2285,8 +2189,7 @@ test("development proxy permits fixed investigation and evidence access routes",
     {
       url: "/control/v1/search",
       headers: {
-        cookie:
-          "unrelated=secret; __Host-xshield-session=session; __Host-xshield-oidc-state=state",
+        cookie: "unrelated=secret; __Host-xshield-session=session; __Host-xshield-oidc-state=state",
       },
     },
   );
@@ -2399,39 +2302,32 @@ test("case list uses fixed GET pages and projects only owner case metadata", asy
   };
   const pages = [first, second, { ...second, items: [] }];
   let count = 0;
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async (path: string, options: RequestInit) => {
-      assert.equal(
-        path,
-        `/control/v1/cases${count === 1 ? `?cursor=${CASE_LIST_CURSOR}` : ""}`,
-      );
-      assert.equal(options.method, "GET");
-      assert.equal(options.body, undefined);
-      assert.deepEqual(options.headers, {
-        Authorization: `Bearer ${TOKEN}`,
-        Accept: "application/json",
-      });
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.cache, "no-store");
-      assert.equal(options.redirect, "error");
-      assert.equal(options.referrerPolicy, "no-referrer");
-      assert.ok(options.signal instanceof AbortSignal);
-      const page = pages[count++]!;
-      return response({
-        ...page,
-        owner_subject: "private-owner",
-        items: page.items.map((item) => ({
-          ...item,
-          content: "private-content",
-          storage: { locator: "private-locator" },
-          key_ref: "private-key",
-          evidence_access: "private-capability",
-        })),
-      });
-    },
-  );
+  t.mock.method(globalThis, "fetch", async (path: string, options: RequestInit) => {
+    assert.equal(path, `/control/v1/cases${count === 1 ? `?cursor=${CASE_LIST_CURSOR}` : ""}`);
+    assert.equal(options.method, "GET");
+    assert.equal(options.body, undefined);
+    assert.deepEqual(options.headers, {
+      Authorization: `Bearer ${TOKEN}`,
+      Accept: "application/json",
+    });
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.referrerPolicy, "no-referrer");
+    assert.ok(options.signal instanceof AbortSignal);
+    const page = pages[count++]!;
+    return response({
+      ...page,
+      owner_subject: "private-owner",
+      items: page.items.map((item) => ({
+        ...item,
+        content: "private-content",
+        storage: { locator: "private-locator" },
+        key_ref: "private-key",
+        evidence_access: "private-capability",
+      })),
+    });
+  });
   const client = new ControlClient(TOKEN);
   assert.deepEqual(await client.cases(), first);
   assert.deepEqual(await client.cases(CASE_LIST_CURSOR), second);
@@ -2486,9 +2382,7 @@ test("case list rejects malformed pages, oversized lists and unbound descending 
   ];
   const client = new ControlClient(TOKEN);
   for (const patch of malformed) {
-    t.mock.method(globalThis, "fetch", async () =>
-      response({ ...page, ...patch }),
-    );
+    t.mock.method(globalThis, "fetch", async () => response({ ...page, ...patch }));
     await assert.rejects(client.cases(), errorIs("INVALID_RESPONSE", 200));
   }
   // A later page must begin strictly below the incoming position.
@@ -2501,10 +2395,7 @@ test("case list rejects malformed pages, oversized lists and unbound descending 
         next_cursor: null,
       }),
     );
-    await assert.rejects(
-      client.cases(CASE_LIST_CURSOR),
-      errorIs("INVALID_RESPONSE", 200),
-    );
+    await assert.rejects(client.cases(CASE_LIST_CURSOR), errorIs("INVALID_RESPONSE", 200));
   }
   for (const status of [201, 202, 206]) {
     t.mock.method(globalThis, "fetch", async () => response(page, status));
@@ -2529,14 +2420,8 @@ test("case list validates cursor and cancellation before IO", async (t) => {
     `${CASE_LIST_CURSOR}&tenant_id=other`,
     `%76${CASE_LIST_CURSOR.slice(1)}`,
   ])
-    await assert.rejects(
-      client.cases(cursor),
-      errorIs("CONTROL_CURSOR_INVALID"),
-    );
-  await assert.rejects(
-    client.cases(undefined, AbortSignal.abort()),
-    errorIs("REQUEST_ABORTED"),
-  );
+    await assert.rejects(client.cases(cursor), errorIs("CONTROL_CURSOR_INVALID"));
+  await assert.rejects(client.cases(undefined, AbortSignal.abort()), errorIs("REQUEST_ABORTED"));
   assert.equal(network.mock.callCount(), 0);
 });
 
@@ -2584,41 +2469,32 @@ test("case transport freezes exact mutation inputs, keys and fixed response corr
       { ...caseAdded(), replayed: true },
       200,
     ],
-    [
-      `cases/${CASE_ID}/close`,
-      { reason: "Review complete" },
-      { ...closed, replayed: true },
-      200,
-    ],
+    [`cases/${CASE_ID}/close`, { reason: "Review complete" }, { ...closed, replayed: true }, 200],
   ];
   let count = 0;
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async (path: string, options: RequestInit) => {
-      const [expectedPath, body, result, status] = calls[count++]!;
-      assert.equal(path, `/control/v1/${expectedPath}`);
-      assert.equal(options.method, "POST");
-      assert.deepEqual(JSON.parse(String(options.body)), body);
-      assert.deepEqual(options.headers, {
-        Authorization: `Bearer ${TOKEN}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "Idempotency-Key": CASE_KEY,
-      });
-      assert.equal(options.credentials, "omit");
-      assert.equal(options.cache, "no-store");
-      assert.equal(options.redirect, "error");
-      return response(
-        {
-          ...(result as object),
-          content: "excluded",
-          storage: { secret: "excluded" },
-        },
-        status,
-      );
-    },
-  );
+  t.mock.method(globalThis, "fetch", async (path: string, options: RequestInit) => {
+    const [expectedPath, body, result, status] = calls[count++]!;
+    assert.equal(path, `/control/v1/${expectedPath}`);
+    assert.equal(options.method, "POST");
+    assert.deepEqual(JSON.parse(String(options.body)), body);
+    assert.deepEqual(options.headers, {
+      Authorization: `Bearer ${TOKEN}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "Idempotency-Key": CASE_KEY,
+    });
+    assert.equal(options.credentials, "omit");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.redirect, "error");
+    return response(
+      {
+        ...(result as object),
+        content: "excluded",
+        storage: { secret: "excluded" },
+      },
+      status,
+    );
+  });
   for (const replayed of [false, true]) {
     assert.deepEqual(await client.createCase(caseFacts().purpose, CASE_KEY), {
       ...created,
@@ -2629,10 +2505,10 @@ test("case transport freezes exact mutation inputs, keys and fixed response corr
       ...caseAdded(),
       replayed,
     });
-    assert.deepEqual(
-      await client.closeCase(CASE_ID, "Review complete", CASE_KEY),
-      { ...closed, replayed },
-    );
+    assert.deepEqual(await client.closeCase(CASE_ID, "Review complete", CASE_KEY), {
+      ...closed,
+      replayed,
+    });
   }
   assert.equal(count, 6);
 });
@@ -2691,10 +2567,7 @@ test("case input validates UTF-8, controls, exact identifiers and single canonic
     CASE_ID.toUpperCase(),
     "../cases",
   ]) {
-    await assert.rejects(
-      client.caseItems(target),
-      errorIs("CONTROL_CASE_ID_INVALID"),
-    );
+    await assert.rejects(client.caseItems(target), errorIs("CONTROL_CASE_ID_INVALID"));
     await assert.rejects(
       client.addCaseItem(target, ARTIFACT_ID, CASE_KEY),
       errorIs("CONTROL_CASE_ID_INVALID"),
@@ -2710,10 +2583,7 @@ test("case input validates UTF-8, controls, exact identifiers and single canonic
     `${CASE_CURSOR}&scope=other`,
     CASE_CURSOR.toUpperCase(),
   ])
-    await assert.rejects(
-      client.caseItems(CASE_ID, cursor),
-      errorIs("CONTROL_CURSOR_INVALID"),
-    );
+    await assert.rejects(client.caseItems(CASE_ID, cursor), errorIs("CONTROL_CURSOR_INVALID"));
   await assert.rejects(
     client.addCaseItem(CASE_ID, `${ARTIFACT_ID}\n`, CASE_KEY),
     errorIs("CONTROL_ARTIFACT_ID_INVALID"),
@@ -2723,12 +2593,7 @@ test("case input validates UTF-8, controls, exact identifiers and single canonic
 
 test("case collection keeps catalog status separate and binds ordered cursor pages", async (t) => {
   const client = new ControlClient(TOKEN);
-  for (const catalog_status of [
-    "active",
-    "expired",
-    "deleted",
-    "unavailable",
-  ]) {
+  for (const catalog_status of ["active", "expired", "deleted", "unavailable"]) {
     const page = casePage();
     page.items[0]!.catalog_status = catalog_status;
     Object.assign(page.items[0]!, {
@@ -2736,16 +2601,12 @@ test("case collection keeps catalog status separate and binds ordered cursor pag
       key_ref: "excluded",
       locator: "excluded",
     });
-    t.mock.method(
-      globalThis,
-      "fetch",
-      async (path: string, options: RequestInit) => {
-        assert.equal(path, `/control/v1/cases/${CASE_ID}/items`);
-        assert.equal(options.method, "GET");
-        assert.equal(new Headers(options.headers).get("idempotency-key"), null);
-        return response(page);
-      },
-    );
+    t.mock.method(globalThis, "fetch", async (path: string, options: RequestInit) => {
+      assert.equal(path, `/control/v1/cases/${CASE_ID}/items`);
+      assert.equal(options.method, "GET");
+      assert.equal(new Headers(options.headers).get("idempotency-key"), null);
+      return response(page);
+    });
     const result = await client.caseItems(CASE_ID);
     assert.equal(result.items[0]?.catalog_status, catalog_status);
     assert.equal(result.as_of, page.as_of);
@@ -2759,10 +2620,7 @@ test("case collection keeps catalog status separate and binds ordered cursor pag
     next_cursor: null,
   };
   t.mock.method(globalThis, "fetch", async (path: string) => {
-    assert.equal(
-      path,
-      `/control/v1/cases/${CASE_ID}/items?cursor=${CASE_CURSOR}`,
-    );
+    assert.equal(path, `/control/v1/cases/${CASE_ID}/items?cursor=${CASE_CURSOR}`);
     return response(last);
   });
   assert.deepEqual(await client.caseItems(CASE_ID, CASE_CURSOR), last);
@@ -2784,19 +2642,11 @@ test("case decoders reject contradictory scope targets, replay statuses and pagi
     { truncated: false },
     { next_cursor: CASE_CURSOR.replace(ARTIFACT_ID, REQUEST_ID) },
   ]) {
-    t.mock.method(globalThis, "fetch", async () =>
-      response({ ...casePage(), ...patch }),
-    );
-    await assert.rejects(
-      client.caseItems(CASE_ID),
-      errorIs("INVALID_RESPONSE"),
-    );
+    t.mock.method(globalThis, "fetch", async () => response({ ...casePage(), ...patch }));
+    await assert.rejects(client.caseItems(CASE_ID), errorIs("INVALID_RESPONSE"));
   }
   t.mock.method(globalThis, "fetch", async () => response(casePage()));
-  await assert.rejects(
-    client.caseItems(CASE_ID, CASE_CURSOR),
-    errorIs("INVALID_RESPONSE"),
-  );
+  await assert.rejects(client.caseItems(CASE_ID, CASE_CURSOR), errorIs("INVALID_RESPONSE"));
   for (const [status, patch] of [
     [200, {}],
     [201, { replayed: true }],
@@ -2805,10 +2655,7 @@ test("case decoders reject contradictory scope targets, replay statuses and pagi
     [201, { replayed: null }],
   ] as const) {
     t.mock.method(globalThis, "fetch", async () =>
-      response(
-        { ...caseEnvelope, ...caseFacts(), replayed: false, ...patch },
-        status,
-      ),
+      response({ ...caseEnvelope, ...caseFacts(), replayed: false, ...patch }, status),
     );
     await assert.rejects(
       client.createCase(caseFacts().purpose, CASE_KEY),
@@ -2821,9 +2668,7 @@ test("case decoders reject contradictory scope targets, replay statuses and pagi
     { replayed: true },
     { schema_version: 1 },
   ]) {
-    t.mock.method(globalThis, "fetch", async () =>
-      response({ ...caseAdded(), ...patch }, 201),
-    );
+    t.mock.method(globalThis, "fetch", async () => response({ ...caseAdded(), ...patch }, 201));
     await assert.rejects(
       client.addCaseItem(CASE_ID, ARTIFACT_ID, CASE_KEY),
       errorIs("INVALID_RESPONSE"),
@@ -2857,27 +2702,18 @@ test("case write failures do not retry; explicit retry retains original key and 
   const client = new ControlClient(TOKEN);
   const seen: string[] = [];
   let failed = true;
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async (_path: string, options: RequestInit) => {
-      seen.push(
-        `${new Headers(options.headers).get("Idempotency-Key")}:${String(options.body)}`,
-      );
-      if (failed) throw new Error(TOKEN);
-      return response({ ...caseEnvelope, ...caseFacts(), replayed: true });
-    },
-  );
+  t.mock.method(globalThis, "fetch", async (_path: string, options: RequestInit) => {
+    seen.push(`${new Headers(options.headers).get("Idempotency-Key")}:${String(options.body)}`);
+    if (failed) throw new Error(TOKEN);
+    return response({ ...caseEnvelope, ...caseFacts(), replayed: true });
+  });
   await assert.rejects(
     client.createCase(caseFacts().purpose, CASE_KEY),
     errorIs("NETWORK_UNAVAILABLE"),
   );
   assert.equal(seen.length, 1);
   failed = false;
-  assert.equal(
-    (await client.createCase(caseFacts().purpose, CASE_KEY)).replayed,
-    true,
-  );
+  assert.equal((await client.createCase(caseFacts().purpose, CASE_KEY)).replayed, true);
   assert.equal(seen[0], seen[1]);
   for (const [status, code] of [
     [401, "CONTROL_AUTH_REQUIRED"],
@@ -2890,10 +2726,7 @@ test("case write failures do not retry; explicit retry retains original key and 
     const network = t.mock.method(globalThis, "fetch", async () =>
       response(errorFixture(code), status),
     );
-    await assert.rejects(
-      client.createCase(caseFacts().purpose, CASE_KEY),
-      errorIs(code, status),
-    );
+    await assert.rejects(client.createCase(caseFacts().purpose, CASE_KEY), errorIs(code, status));
     assert.equal(network.mock.callCount(), 1);
   }
   const network = t.mock.method(globalThis, "fetch", async () => response({}));
@@ -2907,21 +2740,47 @@ test("case write failures do not retry; explicit retry retains original key and 
 test("every backend site failure retains stable safe diagnostics", async (t) => {
   const { readFile } = await import("node:fs/promises");
   const { messages } = await import("../src/api-contract.ts");
-  const backend = await readFile(new URL("../../../crates/xshield-control/src/site_config.rs", import.meta.url), "utf8");
+  const backend = await readFile(
+    new URL("../../../crates/xshield-control/src/site_config.rs", import.meta.url),
+    "utf8",
+  );
   const terminalFacts = new Set([
-    "CONTROL_SITE_APPROVED_AND_APPLIED", "CONTROL_SITE_APPROVED_PENDING", "CONTROL_SITE_CONFIG_CREATED",
-    "CONTROL_SITE_CONFIG_READ", "CONTROL_SITE_CONFIG_REPLAYED", "CONTROL_SITE_CONFIG_UPDATED", "CONTROL_SITE_DELETED",
-    "CONTROL_SITE_DELETE_REPLAYED", "CONTROL_SITE_REVISIONS_READ", "CONTROL_SITE_STATUS_READ", "CONTROL_SITE_UPSTREAM_HEALTHY", "CONTROL_SITE_VALIDATED",
+    "CONTROL_SITE_APPROVED_AND_APPLIED",
+    "CONTROL_SITE_APPROVED_PENDING",
+    "CONTROL_SITE_CONFIG_CREATED",
+    "CONTROL_SITE_CONFIG_READ",
+    "CONTROL_SITE_CONFIG_REPLAYED",
+    "CONTROL_SITE_CONFIG_UPDATED",
+    "CONTROL_SITE_DELETED",
+    "CONTROL_SITE_DELETE_REPLAYED",
+    "CONTROL_SITE_REVISIONS_READ",
+    "CONTROL_SITE_STATUS_READ",
+    "CONTROL_SITE_UPSTREAM_HEALTHY",
+    "CONTROL_SITE_VALIDATED",
   ]);
-  const codes = [...new Set([...backend.matchAll(/"(CONTROL_SITE_[A-Z_]+)"/g)].map(match => match[1] ?? ""))].filter(code => !terminalFacts.has(code));
+  const codes = [
+    ...new Set([...backend.matchAll(/"(CONTROL_SITE_[A-Z_]+)"/g)].map((match) => match[1] ?? "")),
+  ].filter((code) => !terminalFacts.has(code));
   let code = "CONTROL_SITE_CONFIG_UNAVAILABLE";
   let status = 503;
-  t.mock.method(globalThis, "fetch", async () => response({ error_code: code, request_id: REQUEST_ID, message_safe: "Synthetic server detail", retryable: true, next_action: "retry_later" }, status));
+  t.mock.method(globalThis, "fetch", async () =>
+    response(
+      {
+        error_code: code,
+        request_id: REQUEST_ID,
+        message_safe: "Synthetic server detail",
+        retryable: true,
+        next_action: "retry_later",
+      },
+      status,
+    ),
+  );
   const client = new ControlClient(TOKEN);
   for (code of codes) {
     assert.ok(Object.hasOwn(messages, code), "Unmapped site failure: " + code);
     await assert.rejects(client.siteConfig("site_demo"), errorIs(code, status));
   }
-  code = "CONTROL_SCOPE_DENIED"; status = 403;
+  code = "CONTROL_SCOPE_DENIED";
+  status = 403;
   await assert.rejects(client.siteConfig("site_demo"), errorIs(code, status));
 });
