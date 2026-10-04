@@ -98,13 +98,15 @@ test("every text pairing meets WCAG AA (4.5:1) in light and dark", () => {
   }
 });
 
-test("the legacy stylesheet uses tokens only and every variable it reads exists", () => {
-  const style = read("../src/style.css").replace(/\/\*[\s\S]*?\*\//g, "");
-  assert.deepEqual(style.match(/#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/g) ?? [], []);
+test("the legacy and the case/approval stylesheets use tokens only and every variable they read exists", () => {
   const defined = new Set(read("../src/theme/tokens.generated.css").match(/--xs-[a-z0-9-]+(?=:)/g));
-  const used = new Set(style.match(/var\((--xs-[a-z0-9-]+)\)/g)?.map((v) => v.slice(4, -1)));
-  const missing = [...used].filter((name) => !defined.has(name));
-  assert.deepEqual(missing, []);
+  for (const file of ["../src/style.css", "../src/work/work.css"]) {
+    const style = read(file).replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.deepEqual(style.match(/#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/g) ?? [], [], file);
+    const used = new Set(style.match(/var\((--xs-[a-z0-9-]+)\)/g)?.map((v) => v.slice(4, -1)));
+    const missing = [...used].filter((name) => !defined.has(name));
+    assert.deepEqual(missing, [], file);
+  }
 });
 
 test("generated CSS follows the system theme without a script and honours explicit overrides", () => {

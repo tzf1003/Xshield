@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createMemoryHistory } from "@tanstack/react-router";
-import { type QueryKind, routeQueryKind, siteSections } from "../src/admin-routes.ts";
+import { createMemoryHistory, isRedirect } from "@tanstack/react-router";
+import { caseTabs, type QueryKind, routeQueryKind, siteSections } from "../src/admin-routes.ts";
 import { createAppRouter } from "../src/router/create-router.ts";
 
 const blank = () => null;
@@ -26,6 +26,8 @@ const ids = {
   grant: `grant_${uuid(4)}`,
   auth: `auth_${uuid(5)}`,
   calr: `calr_${uuid(6)}`,
+  case: `case_${uuid(7)}`,
+  job: `job_${uuid(10)}`,
 };
 
 const valid = [
@@ -51,7 +53,11 @@ const valid = [
   `/investigation/bindings/${ids.auth}`,
   `/investigation/calibration/${ids.calr}`,
   "/cases",
+  `/cases/${ids.case}`,
+  ...caseTabs.map((tab) => `/cases/${ids.case}/${tab}`),
+  `/cases/jobs/${ids.job}`,
   "/evidence/access",
+  // Retired addresses still resolve (to a redirect into the case center).
   "/evidence/holds",
   "/evidence/exports",
   "/operations/audit",
@@ -79,6 +85,14 @@ const malformed = [
   "/Cases",
   "/INVESTIGATION/requests",
   "/cases/extra",
+  "/cases/jobs",
+  `/cases/${ids.case}/unknown`,
+  `/cases/${ids.case}/access/extra`,
+  `/cases/${ids.case.toUpperCase()}`,
+  `/cases/${ids.job}`,
+  `/cases/jobs/${ids.case}`,
+  `/cases/jobs/${ids.job}/extra`,
+  "/cases/case_123",
 ];
 
 test("every current path resolves to the same page kind as the hand-written router did", () => {
@@ -123,8 +137,6 @@ test("every page kind the shell knows is reachable through exactly the declared 
     "search",
     "case",
     "access",
-    "hold",
-    "export",
     "audit-health",
     "jobs",
   ] as QueryKind[]) {
@@ -137,4 +149,49 @@ test("the router stores nothing in the browser and restores no scroll state", ()
   assert.equal(router.options.scrollRestoration ?? false, false);
   assert.equal(router.options.caseSensitive, true);
   assert.equal(router.options.trailingSlash, "preserve");
+});
+
+type RouteOptions = {
+  beforeLoad?: () => void;
+  validateSearch?: (search: Record<string, unknown>) => Record<string, unknown>;
+};
+const optionsOf = (path: string): RouteOptions => {
+  const { pages } = createAppRouter(components);
+  const page = pages.find((entry) => entry.path === path);
+  assert.ok(page, path);
+  return (page.route as unknown as { options: RouteOptions }).options;
+};
+
+test("the retired evidence addresses redirect into the case center with a one-time hint", () => {
+  for (const [from, moved] of [
+    ["evidence/holds", "holds"],
+    ["evidence/exports", "exports"],
+  ] as const) {
+    const { beforeLoad } = optionsOf(from);
+    assert.ok(beforeLoad, from);
+    let thrown: unknown;
+    try {
+      beforeLoad();
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(isRedirect(thrown), `${from} redirects`);
+    // Replaced, not pushed: the retired address does not stay in the back button's way.
+    assert.deepEqual(
+      { to: thrown.options.to, search: thrown.options.search, replace: thrown.options.replace },
+      { to: "/cases", search: { moved }, replace: true },
+      from,
+    );
+  }
+});
+
+test("the case list accepts only the two known hints from the query", () => {
+  const { validateSearch } = optionsOf("cases");
+  assert.ok(validateSearch);
+  assert.deepEqual(validateSearch({ moved: "holds", x: 1 }), { moved: "holds" });
+  assert.deepEqual(validateSearch({ moved: "exports" }), { moved: "exports" });
+  for (const moved of ["__proto__", "constructor", "", "Holds", 1, null, ["holds"]]) {
+    assert.deepEqual(validateSearch({ moved }), { moved: undefined }, String(moved));
+  }
+  assert.deepEqual(validateSearch({}), { moved: undefined });
 });

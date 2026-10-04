@@ -1,0 +1,272 @@
+/*
+ * Case center and approval center. antd components carry the structure and their own states;
+ * these rules add the layout the pages share. Colours come from the --xs-* variables only
+ * (checked by tests/theme.test.ts), so every rule follows the light, dark and system themes.
+ */
+
+.xs-w {
+  min-width: 0;
+}
+
+.xs-w-stack {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.xs-w-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: var(--xs-panel-padding);
+  background: var(--xs-surface);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-panel);
+  box-shadow: var(--xs-shadow);
+}
+
+.xs-w-card h4 {
+  margin: 0;
+  color: var(--xs-ink);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.xs-w-card p {
+  margin: 0;
+}
+
+.xs-w-title {
+  min-width: 0;
+  margin: 0;
+  color: var(--xs-ink);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.xs-w-case-head {
+  gap: 10px;
+}
+
+.xs-w-between {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.xs-w-toolbar {
+  margin-bottom: 0;
+}
+
+.xs-w-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.xs-w-inline .xs-w-field {
+  flex: 1 1 320px;
+}
+
+.xs-w-muted {
+  color: var(--xs-ink-3);
+  font-size: 13px;
+}
+
+.xs-w-observed {
+  font-size: 12px;
+}
+
+.xs-w-error {
+  color: var(--xs-deny);
+  font-size: 13px;
+}
+
+.xs-w-code {
+  display: block;
+  margin-top: 4px;
+}
+
+.xs-w-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.xs-w-case {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xs-w-case a {
+  color: var(--xs-primary);
+  font-weight: 600;
+}
+
+/* ---------- Identifiers and state pills ---------- */
+.xs-w-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.xs-w-id code {
+  min-width: 0;
+  padding: 1px 6px;
+  color: var(--xs-ink-2);
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.xs-w-pill.ant-tag {
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* ---------- Detail facts ---------- */
+.xs-w-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.xs-w-facts > div {
+  display: grid;
+  grid-template-columns: minmax(84px, 128px) minmax(0, 1fr);
+  gap: 4px 16px;
+  align-items: baseline;
+}
+
+.xs-w-facts dt {
+  color: var(--xs-ink-3);
+  font-size: 13px;
+}
+
+.xs-w-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.xs-w-pre {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--xs-ink);
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Forms ---------- */
+.xs-w-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xs-w-field > label {
+  color: var(--xs-ink);
+  font-weight: 600;
+}
+
+.xs-w-field > small {
+  font-size: 12px;
+}
+
+.xs-w-pager {
+  margin-top: 12px;
+}
+
+/* ---------- Tables ---------- */
+.xs-w-clickable .ant-table-tbody > tr {
+  cursor: pointer;
+}
+
+.xs-w-table .ant-table {
+  background: var(--xs-surface);
+}
+
+.xs-w-table .ant-table-cell {
+  overflow-wrap: anywhere;
+}
+
+/* Split view of the approval center: the list on the left, the selected item on the right. */
+.xs-w-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(360px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.xs-w-pane {
+  position: sticky;
+  top: 72px;
+  max-height: calc(100vh - 88px);
+  overflow-y: auto;
+}
+
+.xs-w-selected > td {
+  background: var(--xs-primary-soft) !important;
+}
+
+@media (width <= 1100px) {
+  .xs-w-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Below the mobile breakpoint a table row becomes a card: header hidden (still announced),
+ * every cell shows its column name from the data-label attribute. */
+@media (width <= 760px) {
+  .xs-w-table .ant-table-thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .xs-w-table .ant-table-tbody > tr {
+    display: block;
+    border-bottom: 1px solid var(--xs-line);
+  }
+
+  .xs-w-table .ant-table-tbody > tr > td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border: 0;
+    text-align: right;
+  }
+
+  .xs-w-table .ant-table-tbody > tr > td::before {
+    flex: 0 0 5em;
+    color: var(--xs-ink-3);
+    font-size: 12px;
+    text-align: left;
+    content: attr(data-label);
+  }
+
+  .xs-w-table .ant-table-tbody > tr > td > * {
+    min-width: 0;
+  }
+
+  .xs-w-facts > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

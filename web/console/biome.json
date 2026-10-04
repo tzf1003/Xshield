@@ -51,7 +51,8 @@
         "src/theme/**",
         "src/shell/**",
         "src/router/**",
-        "src/pages/**"
+        "src/pages/**",
+        "src/work/**"
       ],
       "linter": {
         "rules": {

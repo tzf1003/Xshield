@@ -18,12 +18,20 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: ["**/browser-session.spec.ts", "**/shell-session.spec.ts"],
+      testIgnore: [
+        "**/browser-session.spec.ts",
+        "**/shell-session.spec.ts",
+        "**/work-session.spec.ts",
+      ],
       use: { ...devices["Desktop Chrome"] },
     },
     {
       name: "browser-session",
-      testMatch: ["**/browser-session.spec.ts", "**/shell-session.spec.ts"],
+      testMatch: [
+        "**/browser-session.spec.ts",
+        "**/shell-session.spec.ts",
+        "**/work-session.spec.ts",
+      ],
       use: { ...devices["Desktop Chrome"], baseURL: sessionOrigin },
     },
   ],

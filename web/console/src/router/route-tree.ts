@@ -4,17 +4,20 @@ import {
   createRoute,
   lazyRouteComponent,
   notFound,
+  redirect,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { type QueryKind, siteSections } from "../admin-routes.ts";
+import { caseTabs, type QueryKind, siteSections } from "../admin-routes.ts";
 import {
   agentRunPattern,
   bindingPattern,
   calibrationReportPattern,
   grantPattern,
+  jobPattern,
   modelCallPattern,
   requestPattern,
 } from "../api-contract.ts";
+import { casePattern } from "../cases.ts";
 import type { SessionRuntime } from "../security/runtime.ts";
 
 export type RouterContext = { runtime: SessionRuntime };
@@ -33,6 +36,11 @@ export type RouteComponents = {
 };
 
 export type PageRoute = Readonly<{ kind: QueryKind; path: string; route: AnyRoute }>;
+
+/** A retired address: leave at once for the page that took its place, with a one-time hint. */
+const movedTo = (to: string, moved: string) => () => {
+  throw redirect({ to, search: { moved }, replace: true } as never);
+};
 
 const siteIdPattern = /^[A-Za-z0-9_.-]{1,128}(?![\s\S])/;
 const sectionNames: readonly string[] = siteSections.map(([part]) => part);
@@ -57,7 +65,12 @@ export function createAppRouteTree(components: RouteComponents) {
   function page(
     kind: QueryKind,
     path: string,
-    options: { component?: unknown; params?: unknown } = {},
+    options: {
+      component?: unknown;
+      params?: unknown;
+      validateSearch?: unknown;
+      beforeLoad?: unknown;
+    } = {},
   ): AnyRoute {
     // A malformed ID or section throws notFound() while the route is matched. Each page route
     // renders its own "not found" so the failure stays inside the shell: with only an ancestor
@@ -136,10 +149,51 @@ export function createAppRouteTree(components: RouteComponents) {
       params: idParams("reportId", calibrationReportPattern),
     }),
     page("search", "investigation/search"),
-    page("case", "cases"),
+    page("case", "cases", {
+      component: lazyRouteComponent(() => import("../pages/cases/CasesPage"), "CasesPage"),
+      validateSearch: (search: Record<string, unknown>) => ({
+        moved: search.moved === "holds" || search.moved === "exports" ? search.moved : undefined,
+      }),
+    }),
+    page("case", "cases/jobs/$jobId", {
+      params: idParams("jobId", jobPattern),
+      component: lazyRouteComponent(() => import("../pages/cases/CasesPage"), "CasesPage"),
+    }),
+    page("case", "cases/$caseId", {
+      params: idParams("caseId", casePattern),
+      component: lazyRouteComponent(
+        () => import("../pages/cases/CaseDetailPage"),
+        "CaseDetailPage",
+      ),
+    }),
+    page("case", "cases/$caseId/$tab", {
+      params: {
+        parse: (raw: Record<string, string>) => {
+          const { caseId, tab } = raw;
+          if (
+            typeof caseId !== "string" ||
+            typeof tab !== "string" ||
+            !casePattern.test(caseId) ||
+            !(caseTabs as readonly string[]).includes(tab)
+          ) {
+            throw notFound();
+          }
+          return { caseId, tab };
+        },
+        stringify: (params: Record<string, string>) => ({
+          caseId: params.caseId,
+          tab: params.tab,
+        }),
+      },
+      component: lazyRouteComponent(
+        () => import("../pages/cases/CaseDetailPage"),
+        "CaseDetailPage",
+      ),
+    }),
     page("access", "evidence/access"),
-    page("hold", "evidence/holds"),
-    page("export", "evidence/exports"),
+    // Retired addresses: the pages moved into the case center, so the old bookmarks keep working.
+    page("case", "evidence/holds", { beforeLoad: movedTo("/cases", "holds") }),
+    page("case", "evidence/exports", { beforeLoad: movedTo("/cases", "exports") }),
     page("audit-health", "operations/audit"),
     page("jobs", "operations/jobs"),
     // Anything the table above does not describe.

@@ -16,7 +16,8 @@ import type { SearchPreset } from "../SearchPanel.tsx";
 import { flattenNav, type NavGroup, type NavItem, visibleNav } from "./nav-model.ts";
 
 export type PaletteAction =
-  | { type: "navigate"; to: string }
+  /** `search` is the URL query of the target, passed as an object (never spliced into `to`). */
+  | { type: "navigate"; to: string; search?: Readonly<Record<string, string>> }
   /** Opens the structured search with one prefilled, unsubmitted condition. */
   | { type: "search"; preset: SearchPreset };
 
