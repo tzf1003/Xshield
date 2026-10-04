@@ -4151,6 +4151,7 @@ name = "xshield-gateway"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "bytes",
  "chrono",
  "clickhouse",
@@ -4161,6 +4162,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "url",
  "uuid",
  "xshield-audit",
  "xshield-core",
@@ -4199,10 +4201,12 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "openssl",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",
  "tokio",
+ "url",
  "uuid",
  "xshield-audit",
  "xshield-core",
