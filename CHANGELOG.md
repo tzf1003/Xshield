@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 修复 edge 快照持久化与首个 apply：持久化的 pending/active 快照以默认权限创建（常见 umask 下为 0644），本机其他用户可读取完整的租户路由与策略；两次 rename 之后不 fsync 目录，掉电可能让已确认的快照回到旧版本；control 的第一份快照与 edge 启动占位快照同为 revision 1，占位快照没有摘要，“同 revision 摘要不同”被判为冲突，首个 apply 永远得到 409 `EDGE_APPLY_IDEMPOTENCY_CONFLICT`。现在快照文件创建时即为 0600（`create_new`，不跟随预置的同名文件），两次 rename 后都对目录 fsync，失败则拒绝 apply 或停止数据面监听；旧文件在加载时收紧为 0600；快照存储与监听器监督共用 `GatewaySnapshot::check_replacement`，只有两份已应用 payload 才会在同 revision 上冲突，占位快照可被首个 apply 替换且不能顶替已应用快照。目录 fsync 的真实落盘与掉电行为未在测试中验证。
+
 - 为 edge 的未知 Host/端口拒绝补上审计：监听端口与 Host 没有命中任何站点快照的请求此前直接返回 503 `SITE_CONFIG_UNAVAILABLE`，没有任何审计事件、原因码或终态。因为这类请求没有站点作用域、逐请求写持久事件又会让洪峰写满 journal，网关按监听端口在内存中计数，每 60 秒为每个有计数的端口追加一条聚合的 `edge.unrouted_denied` 事件（新稳定原因码 `HOST_NOT_ROUTED`，含总数、首末时间和首个有界可打印 ASCII 的 Host 样本）；内存只随监听端口数增长，屏障关闭时计数保留、重开后合并写出。worker 发布器新增该事件类型的严格解析（拒绝其他原因码、零端口/零计数、时间颠倒、超界或含控制字符的 Host、未知/重复字段），须先升级发布器。客户端响应不变，窗口内逐请求明细有意不持久化，进程在两次写出之间退出会丢失该间隔内尚未写出的计数。
 
 - 修复 edge 限流与审计屏障：WAF 拒绝的请求不经过限流器，却仍各写一条耐久审计记录，拒绝洪峰不受限地写满 journal；限流表在 65,536 个来源后拒绝每一个新来源（评审测得 200 个中 0 个放行），且每次拒绝都在全局 `std::sync::Mutex` 下 `retain` 遍历全表（约 1.3 ms）；审计屏障一旦因 journal 写满或写错误关闭就没有任何重开路径，网关停摆到重启。现在每个请求先于 WAF 取令牌（`pre_admission_denial`），限流表改为 16 分片、共 65,536 个桶的 CLOCK 淘汰表，插入摊销 O(1)、新来源永不因表满被拒，IPv6 按 /64 计量；屏障由后台监督在有界退避（1–30 秒）下重试：目录低于高水位时释放失败的写入器、经恢复流程重开 journal，并先耐久追加 `audit.recovered`（新稳定原因码 `AUDIT_BARRIER_REOPENED`，`truncated_bytes=0`）再恢复准入，期间继续以 503 `AUDIT_DURABILITY_FAILED` 拒绝。worker 发布器只接受 `AUDIT_TAIL_RECOVERED`（有截断字节）与 `AUDIT_BARRIER_REOPENED`（无截断字节）两种 `audit.recovered`，部署时先升级发布器。屏障关闭期间丢失终态的在途请求仍由下次启动对账补偿，不在重开时补偿。该屏障没有 Pingora 集成回归，只有单元级证明。

@@ -324,6 +324,7 @@ pub(crate) fn load_persisted_snapshot(
             "persisted edge snapshot failed validation",
         )
     })?;
+    restrict_to_owner(path);
     Ok(Some((envelope.request, snapshot)))
 }
 
@@ -332,10 +333,7 @@ async fn write_pending_snapshot(
     request: &GatewayApplyRequest,
     signature: &[u8],
 ) -> Result<(), std::io::Error> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let parent = parent_directory(path);
     tokio::fs::create_dir_all(parent).await?;
     let pending = pending_path(path);
     let temporary = temporary_path(&pending);
@@ -349,15 +347,55 @@ async fn write_pending_snapshot(
             "persisted edge snapshot cannot be serialized",
         )
     })?;
-    let mut file = tokio::fs::File::create(&temporary).await?;
+    // The snapshot is the complete tenant routing and policy set, so it is
+    // created readable by the edge user only. The mode is set at creation
+    // (a later chmod would leave a window in which another local user could
+    // open the file) and `create_new` refuses to follow a pre-planted name.
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options.open(&temporary).await?;
     file.write_all(&bytes).await?;
     file.sync_all().await?;
     drop(file);
-    tokio::fs::rename(&temporary, &pending).await
+    tokio::fs::rename(&temporary, &pending).await?;
+    // A rename is durable only once the directory entry is: without this a
+    // power loss after the 200 could resurrect the previous snapshot.
+    sync_directory(parent).await
 }
 
 async fn promote_pending_snapshot(path: &Path) -> Result<(), std::io::Error> {
-    tokio::fs::rename(pending_path(path), path).await
+    tokio::fs::rename(pending_path(path), path).await?;
+    sync_directory(parent_directory(path)).await
+}
+
+fn parent_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Flushes a directory so a rename inside it survives a crash. A failure is
+/// reported, not ignored: the caller then refuses or fails closed instead of
+/// acknowledging a snapshot that a restart could lose.
+async fn sync_directory(directory: &Path) -> Result<(), std::io::Error> {
+    tokio::fs::File::open(directory).await?.sync_all().await
+}
+
+/// Tightens a snapshot written before files were created with mode 0600, so a
+/// deployment is not left exposed until its next apply rewrites the file.
+/// Failing to chmod (for example a read-only volume) must not stop the edge
+/// from serving the snapshot it was configured with, so it is only reported.
+fn restrict_to_owner(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    // Any group or other permission bit means someone else can read the file.
+    if metadata.permissions().mode() & 0o077 != 0
+        && let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    {
+        eprintln!("xshield edge could not restrict the snapshot file mode: {error}");
+    }
 }
 
 async fn remove_pending_snapshot(path: &Path) -> Result<(), std::io::Error> {
@@ -440,6 +478,109 @@ mod tests {
             health_body("tenant_a", 0, 0, 0, true)["edge_state"],
             "unavailable"
         );
+    }
+
+    fn empty_request(revision: u64) -> GatewayApplyRequest {
+        GatewayApplyRequest {
+            protocol_version: 1,
+            tenant_id: "tenant_a".to_owned(),
+            apply_id: "apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01".to_owned(),
+            snapshot_revision: revision,
+            sites: Vec::new(),
+        }
+    }
+
+    fn scratch_directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xshield-apply-{name}-{}", uuid::Uuid::now_v7()))
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn leftovers(directory: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    // Reviewer finding: the pending and active snapshot files were created
+    // with `File::create`, i.e. 0666 minus the process umask (0644 under the
+    // usual 022), so any local user could read the complete tenant routing
+    // and policy snapshot the control plane had pushed.
+    #[tokio::test]
+    async fn persisted_snapshots_are_private_to_the_edge_user() {
+        let directory = scratch_directory("private");
+        let path = directory.join("edge").join("snapshot.json");
+        write_pending_snapshot(&path, &empty_request(1), b"signature")
+            .await
+            .unwrap();
+        assert_eq!(mode_of(&pending_path(&path)), 0o600);
+        promote_pending_snapshot(&path).await.unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(
+            leftovers(&directory.join("edge")),
+            ["snapshot.json"],
+            "no pending or temporary file may outlive a promotion"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // A restart must not leave an old deployment exposed until its next apply:
+    // a file written by an edge from before the fix is tightened when loaded.
+    #[test]
+    fn a_snapshot_written_by_an_older_edge_is_made_private_when_it_is_loaded() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = scratch_directory("legacy");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("snapshot.json");
+        let key = [7_u8; 32];
+        let request = empty_request(1);
+        let signature = sign(&key, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let envelope = PersistedSnapshot {
+            request,
+            signature: lower_hex(&signature),
+        };
+        std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let loaded = load_persisted_snapshot(&path, &key, "tenant_a").unwrap();
+        assert_eq!(loaded.unwrap().1.revision(), 1);
+        assert_eq!(mode_of(&path), 0o600);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // That the kernel really flushes the directory entry cannot be observed
+    // from a unit test; what can be pinned is that a failure to do so is an
+    // error the apply handler turns into a refusal, never a silent success.
+    #[tokio::test]
+    async fn a_directory_that_cannot_be_synced_is_an_error_not_a_success() {
+        let directory = scratch_directory("sync");
+        std::fs::create_dir_all(&directory).unwrap();
+        sync_directory(&directory).await.unwrap();
+        assert!(sync_directory(&directory.join("missing")).await.is_err());
+        let path = directory.join("snapshot.json");
+        // Nothing to promote: the rename fails before any sync is attempted.
+        assert!(promote_pending_snapshot(&path).await.is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_apply_replaces_the_pending_file_without_leaving_temporaries() {
+        let directory = scratch_directory("rewrite");
+        let path = directory.join("snapshot.json");
+        for revision in [1, 2] {
+            write_pending_snapshot(&path, &empty_request(revision), b"signature")
+                .await
+                .unwrap();
+            promote_pending_snapshot(&path).await.unwrap();
+        }
+        assert_eq!(leftovers(&directory), ["snapshot.json"]);
+        assert_eq!(mode_of(&path), 0o600);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

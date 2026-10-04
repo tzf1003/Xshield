@@ -216,6 +216,10 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-gateway --bin xshield-gateway durable_audit` 的恢复用例使用 48 KiB 配额、2 KiB 分段的真实加密 journal：写满后屏障关闭且准入以 `Unavailable` 拒绝；目录仍满时探测失败且不创建新段；移除关闭段（模拟发布/保留释放）后探测成功、准入恢复，journal 中恰有一条 `AUDIT_BARRIER_REOPENED` 的 `audit.recovered`；没有可恢复密钥的写入器保持关闭；退避序列按 1 倍、2 倍直至上限；监督任务在无人干预时于释放空间后重开屏障。`cargo test -p xshield-worker --lib audit_recovered` 固定 `audit.recovered` 的两种可发布形态。`cargo test -p xshield-gateway --bin xshield-gateway unrouted` 检查未路由请求计数：10 万次拒绝只产生每端口一条记录、Host 样本只保留有界可打印 ASCII 并转小写、失败回写后与新计数合并、端口数有上限；`unrouted_denials_are_one_bounded_event_per_port_and_survive_a_closed_barrier` 在真实加密 journal 上让屏障先关闭再写出，确认失败的写出不丢计数、重开后每端口恰有一条 `edge.unrouted_denied` 且 payload 与 worker 测试使用的字面量一致。`cargo test -p xshield-worker --lib unrouted` 固定该事件的发布形态并拒绝篡改。重开期间的进程崩溃、真实磁盘故障和多副本行为未测试；该屏障没有 Pingora 集成回归，仅有这些单元级证明。
 
+## 20.16 Edge 快照与控制面通道回归
+
+`cargo test -p xshield-gateway --lib multi_site` 覆盖首个 apply：`the_first_control_apply_at_revision_one_replaces_the_placeholder_snapshot` 分别以 bootstrap-only 空快照和静态配置快照为占位，确认 revision 1 的首个已应用快照可以替换它们（修复前返回 `None`，即 apply 端 409 `EDGE_APPLY_IDEMPOTENCY_CONFLICT`）；`same_revision_conflicts_only_between_two_applied_payloads` 固定幂等重试、同 revision 异 payload 冲突、占位快照不能顶替已应用快照、旧 revision 拒绝与新 revision 接受；`the_supervisor_and_the_store_share_one_replacement_verdict` 固定监听器监督与快照存储共用同一个 `check_replacement` 判定。`cargo test -p xshield-gateway --bin xshield-gateway apply_api` 覆盖快照文件：pending 与 active 文件模式均为 0600、一次提升后目录中没有 pending 或临时文件、旧版本写出的 0644 文件加载后变为 0600、重复 apply 不遗留临时文件。目录 fsync 是否真正落盘无法在单元测试中观察，只固定“目录不可同步时返回错误而不是静默成功”；掉电后的持久性未验证。
+
 ## 管理后台与开发数据卷验收（2026-09-27）
 
 浏览器回归使用固定合成 API 契约，并分别覆盖明确机器 fixture 和服务端角色会话模式。站点场景包含列表选择精确 site、创建、按类别编辑、草稿前进后退/离页保护、深链接刷新、空站点 nullable 字段、读写跨 scope 拒绝、写入未知结果的原键/原正文人工重试、验证/审批/发布/回滚以及健康观察。角色矩阵覆盖九种服务端角色，包括独立 Observer 状态视图及策略/发布角色入口。
