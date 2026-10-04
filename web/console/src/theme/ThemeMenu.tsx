@@ -13,25 +13,25 @@ const densityLabels: Record<DensityPreference, string> = {
   compact: "紧凑",
 };
 
-/** Shared by the stand-alone theme button and the user menu. */
+/** Choices shared by the stand-alone theme button and the user menu. */
+export function themeChoiceItems(): NonNullable<MenuProps["items"]> {
+  return (Object.keys(themeLabels) as ThemePreference[]).map((key) => ({
+    key: `theme:${key}`,
+    label: themeLabels[key],
+  }));
+}
+
+export function densityChoiceItems(): NonNullable<MenuProps["items"]> {
+  return (Object.keys(densityLabels) as DensityPreference[]).map((key) => ({
+    key: `density:${key}`,
+    label: densityLabels[key],
+  }));
+}
+
 export function themeMenuItems(): NonNullable<MenuProps["items"]> {
   return [
-    {
-      type: "group",
-      label: "主题",
-      children: (Object.keys(themeLabels) as ThemePreference[]).map((key) => ({
-        key: `theme:${key}`,
-        label: themeLabels[key],
-      })),
-    },
-    {
-      type: "group",
-      label: "密度",
-      children: (Object.keys(densityLabels) as DensityPreference[]).map((key) => ({
-        key: `density:${key}`,
-        label: densityLabels[key],
-      })),
-    },
+    { type: "group", label: "主题", children: themeChoiceItems() },
+    { type: "group", label: "密度", children: densityChoiceItems() },
   ];
 }
 

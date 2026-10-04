@@ -978,7 +978,9 @@ test("rejects a timeline from a different server scope", async ({ page }) => {
   );
   await connect(page);
   await query(page);
-  await expect(page.getByRole("status")).toContainText("响应范围校验失败");
+  // Between the summary and the (foreign) timeline reply two live regions briefly coexist (the
+  // index watermark notice and "正在读取事件…"), so wait for the one carrying the disconnect reason.
+  await expect(page.getByRole("status").filter({ hasText: "响应范围校验失败" })).toBeVisible();
   await expect(page.getByRole("button", { name: "连接", exact: true })).toBeVisible();
   await expect(page.getByText("AUTH_BINDING_VALID", { exact: true })).toHaveCount(0);
   await expect(page.getByText("tenant_other", { exact: true })).toHaveCount(0);

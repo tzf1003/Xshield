@@ -1,0 +1,548 @@
+/*
+ * Application shell: antd Layout/Menu/Drawer provide the structure and states, these rules add
+ * the brand, sizing and the responsive behaviour. Colours are --xs-* variables only.
+ */
+
+.xs-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---------- Frame ---------- */
+.xs-shell {
+  min-height: 100vh;
+  background: var(--xs-canvas);
+}
+
+.xs-body {
+  min-width: 0;
+  background: var(--xs-canvas);
+}
+
+.xs-sider {
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  overflow-y: auto;
+  border-right: 1px solid var(--xs-sidebar-line);
+}
+
+.xs-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.xs-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 20px 12px;
+  color: var(--xs-sidebar-active-ink);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+}
+
+.xs-brand-mark {
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: var(--xs-on-primary);
+  background: var(--xs-primary);
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.xs-nav {
+  flex: 1;
+  padding: 4px 8px;
+}
+
+.xs-nav .ant-menu {
+  background: transparent;
+  border-inline-end: 0;
+}
+
+.xs-nav .ant-menu-item-group-title {
+  color: var(--xs-sidebar-ink-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.xs-nav a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.xs-nav a:focus-visible {
+  outline: 2px solid var(--xs-sidebar-ink);
+  outline-offset: 2px;
+}
+
+.xs-collapse.ant-btn {
+  width: calc(100% - 16px);
+  margin: 8px;
+  color: var(--xs-sidebar-ink-muted);
+  justify-content: flex-start;
+}
+
+.xs-collapse.ant-btn:hover {
+  color: var(--xs-sidebar-active-ink);
+  background: var(--xs-sidebar-hover);
+}
+
+.xs-drawer .ant-drawer-body {
+  background: var(--xs-sidebar);
+}
+
+.xs-drawer-nav {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  color: var(--xs-sidebar-ink);
+}
+
+.xs-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 8px;
+}
+
+.xs-drawer-head .ant-btn {
+  color: var(--xs-sidebar-ink);
+}
+
+.xs-drawer-scope {
+  margin: auto 0 0;
+  padding: 14px 20px 20px;
+  color: var(--xs-sidebar-ink-muted);
+  border-top: 1px solid var(--xs-sidebar-line);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.skip-link:focus-visible {
+  outline: 2px solid var(--xs-primary);
+}
+
+/* ---------- Header ---------- */
+.xs-header {
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  height: 56px;
+  padding: 0 var(--xs-page-gutter);
+  line-height: normal;
+  border-bottom: 1px solid var(--xs-line);
+}
+
+.xs-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+}
+
+.xs-breadcrumb {
+  flex: 1;
+  min-width: 0;
+}
+
+.xs-breadcrumb a {
+  color: var(--xs-ink-2);
+}
+
+.xs-topbar-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.xs-scope.ant-tag {
+  margin: 0;
+  padding: 2px 8px;
+  color: var(--xs-ink);
+  background: var(--xs-surface-subtle);
+  border-color: var(--xs-line);
+  font-size: 12px;
+}
+
+.xs-scope-label {
+  color: var(--xs-ink-3);
+}
+
+.xs-chip.ant-tag {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.xs-short,
+.xs-nav-trigger {
+  display: none;
+}
+
+.xs-palette-trigger kbd {
+  padding: 0 5px;
+  color: var(--xs-ink-3);
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: 4px;
+  font-family: var(--xs-font-sans);
+  font-size: 11px;
+}
+
+.xs-user-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.xs-avatar.ant-avatar {
+  color: var(--xs-on-primary);
+  background: var(--xs-primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.xs-user-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xs-pending-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.xs-pending {
+  max-width: 420px;
+}
+
+.xs-pending-note {
+  margin: 0 0 8px;
+  color: var(--xs-ink-2);
+  font-size: 12px;
+}
+
+.xs-pending-list {
+  display: grid;
+  gap: 10px;
+  max-height: 50vh;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.xs-pending-list li {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.xs-pending-phase {
+  color: var(--xs-observe);
+  font-weight: 600;
+}
+
+/* ---------- Page ---------- */
+.xs-main {
+  scroll-margin-top: 56px;
+  width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 24px var(--xs-page-gutter) 32px;
+  outline: none;
+}
+
+.xs-page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 16px;
+  margin-bottom: 18px;
+}
+
+.xs-page-head h1 {
+  margin: 0;
+  color: var(--xs-ink);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.3px;
+}
+
+.xs-lead {
+  max-width: 760px;
+  margin: 6px 0 0;
+  color: var(--xs-ink-2);
+  font-size: 14px;
+}
+
+.xs-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.xs-observed {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.xs-footer {
+  margin-top: 28px;
+  padding: 18px 0 8px;
+  color: var(--xs-ink-3);
+  border-top: 1px solid var(--xs-line);
+  font-size: 12px;
+}
+
+/* ---------- Command palette ---------- */
+.xs-palette .ant-modal {
+  top: 12vh;
+}
+
+.xs-palette .ant-modal-content {
+  padding: 0;
+  overflow: hidden;
+}
+
+.xs-palette .ant-input-affix-wrapper {
+  padding: 14px 20px;
+}
+
+.xs-palette-list {
+  max-height: 50vh;
+  margin: 0;
+  padding: 4px 8px 8px;
+  overflow-y: auto;
+  list-style: none;
+  border-top: 1px solid var(--xs-line);
+}
+
+.xs-palette-list:empty {
+  display: none;
+}
+
+.xs-palette-group {
+  padding: 8px 12px 4px;
+  color: var(--xs-ink-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.xs-palette-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  color: var(--xs-ink);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.xs-palette-option.is-active {
+  background: var(--xs-primary-soft);
+}
+
+.xs-palette-hint {
+  color: var(--xs-ink-3);
+  font-family: var(--xs-font-mono);
+  font-size: 12px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.xs-palette-notice,
+.xs-palette-empty {
+  margin: 0;
+  padding: 12px 20px;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+  border-top: 1px solid var(--xs-line);
+}
+
+/* ---------- Sign-in ---------- */
+.xs-login {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px 16px;
+  background: var(--xs-canvas);
+}
+
+.xs-login-tools {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+
+.xs-login-inner {
+  display: grid;
+  gap: 16px;
+  width: 100%;
+  max-width: 440px;
+}
+
+.xs-login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.xs-login-brand strong {
+  display: block;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.xs-login-brand span:last-child {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-login-card {
+  display: grid;
+  gap: 12px;
+  padding: 28px;
+  background: var(--xs-surface);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-panel);
+  box-shadow: var(--xs-shadow);
+}
+
+.xs-login-card h1,
+.xs-login-card p {
+  margin: 0;
+}
+
+.xs-login-card h1 {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.xs-login-card label {
+  font-weight: 600;
+}
+
+.xs-login-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.xs-login-form .ant-btn {
+  justify-self: start;
+  min-width: 96px;
+}
+
+.xs-login-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.xs-login-card .footnote {
+  margin-top: 4px;
+}
+
+/* ---------- Responsive ----------
+ * Layout never depends on a JavaScript media-query flag: the first frame after a resize is
+ * already correct, and React then removes the elements that no longer apply. */
+@media (width <= 1100px) {
+  .xs-header {
+    padding-inline: 20px;
+  }
+
+  .xs-main {
+    padding-inline: 20px;
+  }
+
+  .xs-scope,
+  .xs-reauth,
+  .xs-chip .xs-long {
+    display: none;
+  }
+
+  .xs-chip .xs-short {
+    display: inline;
+  }
+}
+
+@media (width <= 760px) {
+  .xs-sider {
+    display: none;
+  }
+
+  .xs-nav-trigger {
+    display: inline-flex;
+  }
+
+  .xs-header {
+    padding-inline: 12px;
+  }
+
+  .xs-main {
+    padding: 16px 14px 28px;
+  }
+
+  .xs-page-head h1 {
+    font-size: 20px;
+  }
+
+  .xs-topbar {
+    gap: 6px;
+  }
+
+  .xs-topbar-end {
+    gap: 4px;
+  }
+
+  .xs-breadcrumb ol > li:not(:last-child),
+  .xs-palette-label,
+  .xs-user-name {
+    display: none;
+  }
+
+  .xs-palette .ant-modal {
+    top: 8vh;
+  }
+
+  .xs-login-card {
+    padding: 22px;
+  }
+}

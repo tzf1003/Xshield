@@ -1,13 +1,14 @@
 import { App as AntdApp } from "antd";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App";
+import { AppRouter } from "./router/AppRouter";
 import { createSessionRuntime } from "./security/runtime.ts";
 import { SessionProvider } from "./security/SessionProvider";
 import { applyStoredThemeAttributes, ThemeProvider } from "./theme/ThemeProvider";
 import "./theme/fonts";
 import "./theme/tokens.generated.css";
 import "./style.css";
+import "./shell/shell.css";
 
 // One runtime for the page: the session, its query cache and its pending writes live and die together.
 const runtime = createSessionRuntime();
@@ -22,7 +23,7 @@ if (root)
       <ThemeProvider cspNonce={cspNonce}>
         <SessionProvider runtime={runtime}>
           <AntdApp>
-            <App />
+            <AppRouter runtime={runtime} />
           </AntdApp>
         </SessionProvider>
       </ThemeProvider>

@@ -4,16 +4,13 @@ import {
   ClockCircleOutlined,
   CloseCircleOutlined,
   ExclamationCircleOutlined,
-  ReloadOutlined,
 } from "@ant-design/icons";
 import type { ReactNode } from "react";
 import type { WorkbenchOverviewResponse, WorkbenchSite } from "./api";
 
 type Props = {
   overview: WorkbenchOverviewResponse | null;
-  busy: boolean;
   failed: boolean;
-  onRefresh: () => void;
   onNavigate: (path: string) => void;
 };
 function time(value?: string | null) {
@@ -41,7 +38,8 @@ function state(site: WorkbenchSite) {
   return { label: "未知", tone: "muted", icon: <ExclamationCircleOutlined /> };
 }
 
-export function OverviewWorkbench({ overview, busy, failed, onRefresh, onNavigate }: Props) {
+/** Presentational: the page title and the refresh action belong to the shell page heading. */
+export function OverviewWorkbench({ overview, failed, onNavigate }: Props) {
   const sites = overview?.sites ?? [],
     pending = sites.filter(
       (site) => site.apply_state === "pending" || site.apply_state === "awaiting_approval",
@@ -60,27 +58,12 @@ export function OverviewWorkbench({ overview, busy, failed, onRefresh, onNavigat
           : "连续";
   return (
     <section className="workbench-overview" aria-label="运行概览">
-      <div className="workbench-heading-row">
-        <div>
-          <h2>运行概览</h2>
-          <p>
-            服务器按当前会话范围生成的运营快照 ·{" "}
-            {overview ? `请求 ${overview.request_id}` : "等待读取"}
-          </p>
-        </div>
-        <button
-          className="outline workbench-refresh"
-          type="button"
-          onClick={onRefresh}
-          disabled={busy}
-        >
-          <ReloadOutlined />
-          {busy ? "读取中…" : "刷新快照"}
-        </button>
-      </div>
-      {overview?.completeness !== "complete" && (
+      <p className="workbench-caption">
+        服务器按当前会话范围生成的运营快照 · {overview ? `请求 ${overview.request_id}` : "等待读取"}
+      </p>
+      {overview && overview.completeness !== "complete" && (
         <div className="notice notice-warning" role="status">
-          当前快照为{overview?.completeness === "partial" ? "部分结果" : "不可用"}
+          当前快照为{overview.completeness === "partial" ? "部分结果" : "不可用"}
           ，每个来源的状态和原因码已单独标明。
         </div>
       )}

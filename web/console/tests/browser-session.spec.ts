@@ -1,16 +1,22 @@
 import { test, expect } from "@playwright/test";
 import { REQUEST_ID } from "./fixtures";
-const roleViews: Record<string, string[]> = {
+// Phase 0 information architecture: 工作台 > 站点 > 流量与调查 > 案件与证据 > 运维与治理.
+// Labels and role rules are unchanged; only the grouping order differs from the previous shell,
+// which listed 防护/调查/案件与证据/治理 and appended the per-site entries after 权限中心.
+const roleLinks: Record<string, string[]> = {
   observer: [
+    "概览",
+    "站点状态",
     "请求调查",
+    "资格与身份账本",
+    "身份绑定",
     "模型调用列表",
     "模型调用详情",
     "Agent 运行",
-    "资格与身份账本",
-    "身份绑定",
+    "权限中心",
   ],
   investigator: [
-    "运行状态",
+    "概览",
     "请求调查",
     "结构化检索",
     "资格与身份账本",
@@ -18,16 +24,18 @@ const roleViews: Record<string, string[]> = {
     "案件工作台",
     "证据访问",
     "调查导出",
+    "运行状态",
+    "权限中心",
   ],
-  system_admin: ["受保护站点"],
-  policy_author: [],
-  policy_approver: [],
-  release_operator: [],
-  sensitive_evidence_approver: ["证据访问", "调查导出"],
-  sensitive_evidence_reader: ["证据访问", "调查导出"],
-  audit_administrator: ["证据保留", "校准报告", "审计发布状态"],
+  system_admin: ["概览", "受保护站点", "API Key", "权限中心"],
+  policy_author: ["概览", "站点发布", "权限中心"],
+  policy_approver: ["概览", "站点发布", "权限中心"],
+  release_operator: ["概览", "站点发布", "权限中心"],
+  sensitive_evidence_approver: ["概览", "证据访问", "调查导出", "权限中心"],
+  sensitive_evidence_reader: ["概览", "证据访问", "调查导出", "权限中心"],
+  audit_administrator: ["概览", "证据保留", "审计发布状态", "校准报告", "权限中心"],
 };
-for (const [role, views] of Object.entries(roleViews)) {
+for (const [role, links] of Object.entries(roleLinks)) {
   test("server role navigation: " + role, async ({ page }) => {
     const calls: string[] = [];
     await page.route("**/control/v1/**", async (route) => {
@@ -65,15 +73,7 @@ for (const [role, views] of Object.entries(roleViews)) {
       .getByRole("navigation")
       .first();
     await expect(nav).toBeVisible();
-    await expect(nav.getByRole("link")).toHaveText([
-      "概览",
-      ...views,
-      "权限中心",
-      ...(role === "observer" ? ["站点状态"] : []),
-      ...(["policy_author", "policy_approver", "release_operator"].includes(role)
-        ? ["站点发布"]
-        : []),
-    ]);
+    await expect(nav.getByRole("link")).toHaveText(links);
     await expect(page.getByRole("heading", { name: "当前管理会话" })).toBeVisible();
     await expect(page.locator("main")).toContainText(role);
     await expect(page.getByLabel("管理凭证", { exact: true })).toHaveCount(0);

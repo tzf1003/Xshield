@@ -103,6 +103,8 @@ export function ThemeProvider({ children, cspNonce }: { children: ReactNode; csp
       <ConfigProvider
         locale={zhCN}
         componentSize="middle"
+        // antd would insert a space between two CJK characters ("连 接"), breaking the accessible name.
+        button={{ autoInsertSpace: false }}
         csp={cspNonce ? { nonce: cspNonce } : undefined}
         theme={antd}
       >

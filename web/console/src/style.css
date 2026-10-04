@@ -5,10 +5,11 @@
  * theme/tokens.generated.css (generated from theme/tokens.ts), so every legacy page follows the
  * light, dark and system themes. Do not add hex or rgb colours here; add a token instead.
  * Sections: base, controls, primitives, tables, investigation, workbenches, sites, overview,
- * shell, responsive.
+ * responsive. The application shell (navigation, header, login) lives in shell/shell.css.
  */
 
 /* ---------- Base ---------- */
+
 :root {
   font-synthesis: none;
   text-rendering: optimizelegibility;
@@ -93,12 +94,6 @@ body {
   font-size: 14px;
 }
 
-main {
-  max-width: 1600px;
-  margin: 0 auto;
-  padding: 28px var(--xs-page-gutter) 36px;
-}
-
 #main-content:focus {
   outline: none;
 }
@@ -119,15 +114,8 @@ main {
   top: 1rem;
 }
 
-:where(.legacy) footer {
-  margin-top: 25px;
-  padding: 20px 0 28px;
-  color: var(--xs-ink-3);
-  border-top: 1px solid var(--xs-line);
-  font-size: 12px;
-}
-
 /* ---------- Controls ---------- */
+
 :where(.legacy) button,
 :where(.legacy) input,
 :where(.legacy) select,
@@ -231,6 +219,7 @@ main {
 }
 
 /* ---------- Primitives ---------- */
+
 .panel {
   min-width: 0;
   background: var(--xs-surface);
@@ -472,62 +461,8 @@ main {
   font-size: 13px;
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.dashboard-card {
-  display: grid;
-  gap: 10px;
-  min-height: 118px;
-  padding: 16px 18px;
-  border-radius: var(--xs-radius-panel);
-}
-
-.dashboard-card strong {
-  color: var(--xs-ink);
-  font-size: 26px;
-  line-height: 1.2;
-}
-
-.dashboard-card a {
-  color: var(--xs-primary);
-  font-weight: 650;
-}
-
-.connect-panel {
-  max-width: 760px;
-  margin-top: 26px;
-  padding: 30px;
-}
-
-.connect-panel h2 {
-  font-size: 18px;
-}
-
-.connect-panel > p {
-  margin-top: 10px;
-}
-
-.connect-panel form {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 10px 15px;
-  margin-top: 24px;
-}
-
-.connect-panel label {
-  grid-column: 1 / -1;
-}
-
-.connect-panel button {
-  margin-top: 14px;
-}
-
 /* ---------- Tables ---------- */
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -638,6 +573,7 @@ main {
 }
 
 /* ---------- Investigation ---------- */
+
 .overview {
   margin-top: 13px;
 }
@@ -851,6 +787,7 @@ main {
 }
 
 /* ---------- Search, model list, audit health, ledger ---------- */
+
 .search-form,
 .search-plan,
 .model-list-form,
@@ -965,6 +902,7 @@ main {
 }
 
 /* ---------- Case, access, hold and export workbenches ---------- */
+
 .case-list {
   margin-bottom: 22px;
 }
@@ -1083,6 +1021,7 @@ main {
 }
 
 /* ---------- Sites ---------- */
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1311,18 +1250,17 @@ main {
   margin: 16px 22px;
 }
 
-.subject {
-  max-width: 18rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-}
-
 /* ---------- Workbench overview ---------- */
+
 .workbench-overview {
   display: grid;
   gap: 16px;
+}
+
+.workbench-caption {
+  margin: 0;
+  color: var(--xs-ink-3);
+  font-size: 12px;
 }
 
 .workbench-heading-row {
@@ -1657,339 +1595,8 @@ main {
   font-size: 16px;
 }
 
-/* ---------- Shell (replaced by the antd shell in the router/shell step) ---------- */
-.admin-layout {
-  display: flex;
-  min-height: 100vh;
-  background: var(--xs-canvas);
-}
-
-.admin-content {
-  min-width: 0;
-  flex: 1;
-}
-
-.sidebar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  flex: 0 0 248px;
-  width: 248px;
-  height: 100vh;
-  overflow-y: auto;
-  padding: 18px 12px 12px;
-  color: var(--xs-sidebar-ink);
-  background: var(--xs-sidebar);
-  border-right: 1px solid var(--xs-sidebar-line);
-  transition:
-    width 160ms ease,
-    flex-basis 160ms ease;
-}
-
-.sidebar nav {
-  display: grid;
-  gap: 4px;
-}
-
-.sidebar nav a {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 38px;
-  padding: 8px 12px;
-  color: var(--xs-sidebar-ink);
-  text-decoration: none;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 560;
-  transition:
-    background 120ms ease,
-    color 120ms ease;
-}
-
-.sidebar nav a:hover,
-.sidebar nav a:focus-visible {
-  color: var(--xs-sidebar-active-ink);
-  background: var(--xs-sidebar-hover);
-}
-
-.sidebar nav a.active {
-  color: var(--xs-sidebar-active-ink);
-  background: var(--xs-sidebar-active);
-  border-color: var(--xs-sidebar-active);
-}
-
-.sidebar a:focus-visible {
-  outline: 2px solid var(--xs-sidebar-ink);
-  outline-offset: 2px;
-}
-
-.sidebar-brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 2px 12px 16px;
-  color: var(--xs-sidebar-active-ink);
-  font-size: 20px;
-  font-weight: 750;
-  letter-spacing: -0.5px;
-}
-
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  color: var(--xs-sidebar-active-ink);
-  background: var(--xs-primary);
-  border-radius: 8px;
-  font-size: 16px;
-  font-weight: 800;
-}
-
-.brand-wordmark {
-  font-weight: 760;
-}
-
-.sidebar-context {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 8px 18px;
-  padding: 9px 10px;
-  color: var(--xs-sidebar-ink-muted);
-  background: var(--xs-sidebar-hover);
-  border: 1px solid var(--xs-sidebar-line);
-  border-radius: 8px;
-  font-size: 11px;
-}
-
-.sidebar-context-dot {
-  width: 7px;
-  height: 7px;
-  background: var(--xs-allow);
-  border-radius: 50%;
-}
-
-.sidebar .nav-groups {
-  gap: 12px;
-}
-
-.nav-group {
-  display: grid;
-  gap: 3px;
-}
-
-.nav-group-label {
-  padding: 0 12px 6px;
-  color: var(--xs-sidebar-ink-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
-.nav-icon {
-  flex: 0 0 16px;
-  width: 16px;
-  font-size: 16px;
-}
-
-.sidebar-collapse {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  margin-top: 18px;
-  padding: 9px 12px;
-  color: var(--xs-sidebar-ink-muted);
-  background: transparent;
-  border: 1px solid var(--xs-sidebar-line);
-  font-size: 12px;
-  font-weight: 550;
-}
-
-.sidebar-collapse:hover {
-  color: var(--xs-sidebar-active-ink);
-  background: var(--xs-sidebar-hover);
-  filter: none;
-}
-
-.sidebar-subnav {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--xs-sidebar-line);
-}
-
-.sidebar .sidebar-subnav a {
-  min-height: 32px;
-  padding-block: 6px;
-  color: var(--xs-sidebar-ink-muted);
-  font-size: 12px;
-}
-
-.sidebar .sidebar-subnav a.active,
-.sidebar .sidebar-subnav a:hover,
-.sidebar .sidebar-subnav a:focus-visible {
-  color: var(--xs-sidebar-active-ink);
-}
-
-.admin-layout.sidebar-collapsed .sidebar {
-  flex-basis: 68px;
-  width: 68px;
-}
-
-.admin-layout.sidebar-collapsed .brand-wordmark,
-.admin-layout.sidebar-collapsed .sidebar-context span:last-child,
-.admin-layout.sidebar-collapsed .nav-group-label,
-.admin-layout.sidebar-collapsed .nav-groups a span,
-.admin-layout.sidebar-collapsed .sidebar-collapse span,
-.admin-layout.sidebar-collapsed .sidebar-subnav {
-  display: none;
-}
-
-.admin-layout.sidebar-collapsed .sidebar-brand,
-.admin-layout.sidebar-collapsed .nav-groups a,
-.admin-layout.sidebar-collapsed .sidebar-collapse {
-  justify-content: center;
-  padding-inline: 0;
-}
-
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 15;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  min-height: 56px;
-  padding: 0 28px;
-  color: var(--xs-ink);
-  background: var(--xs-surface);
-  border-bottom: 1px solid var(--xs-line);
-}
-
-.topbar button {
-  min-height: 32px;
-  padding: 5px 14px;
-  font-size: 12px;
-}
-
-.mobile-nav-trigger {
-  display: none;
-  min-height: 32px;
-  padding: 4px 8px;
-  color: var(--xs-ink);
-  background: transparent;
-  border: 0;
-}
-
-.mobile-nav-backdrop {
-  display: none;
-}
-
-.breadcrumbs {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 180px;
-  font-size: 14px;
-  white-space: nowrap;
-}
-
-.breadcrumb-root {
-  color: var(--xs-ink-3);
-  font-weight: 600;
-}
-
-.breadcrumb-separator {
-  color: var(--xs-ink-3);
-}
-
-.breadcrumbs strong {
-  font-weight: 700;
-}
-
-.topbar-scope {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-  padding-left: 18px;
-  border-left: 1px solid var(--xs-line);
-}
-
-.scope-label {
-  color: var(--xs-ink-3);
-  font-size: 11px;
-}
-
-.scope {
-  color: var(--xs-ink);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.connection {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-  margin-left: auto;
-}
-
-.connection button {
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.connection [role="status"] {
-  max-width: 15rem;
-}
-
-.observed-at {
-  color: var(--xs-ink-3);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.session-user {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding-left: 8px;
-  border-left: 1px solid var(--xs-line);
-}
-
-.session-avatar {
-  display: grid;
-  place-items: center;
-  width: 25px;
-  height: 25px;
-  color: var(--xs-on-primary);
-  background: var(--xs-primary);
-  border-radius: 50%;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.session-user-name {
-  max-width: 150px;
-  overflow: hidden;
-  color: var(--xs-ink);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.step-up-status {
-  font-size: 11px;
-  white-space: nowrap;
-}
-
 /* ---------- Responsive ---------- */
+
 @media (width >= 1500px) {
   .overview-grid {
     grid-template-columns: minmax(310px, 1.8fr) 1fr 1.5fr 1fr 1fr;
@@ -2002,19 +1609,6 @@ main {
 }
 
 @media (width <= 1100px) {
-  main {
-    padding-inline: 20px;
-  }
-
-  .topbar {
-    padding-inline: 20px;
-  }
-
-  .topbar-scope,
-  .connection .step-up-status {
-    display: none;
-  }
-
   .overview-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 20px 0;
@@ -2059,23 +1653,9 @@ main {
   :where(.legacy) th {
     padding: 13px 9px;
   }
-
-  .console-label {
-    display: none;
-  }
-}
-
-@media (width <= 900px) {
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (width <= 760px) {
-  main {
-    padding: 20px 14px 28px;
-  }
-
   :where(.legacy) h1 {
     font-size: 21px;
   }
@@ -2090,82 +1670,10 @@ main {
   }
 
   /* Off-canvas navigation. */
-  .admin-layout {
-    display: block;
-  }
 
-  .sidebar {
-    position: fixed;
-    inset: 0 auto 0 0;
-    box-shadow: 12px 0 30px var(--xs-overlay);
-    transform: translateX(-102%);
-    transition: transform 160ms ease;
-  }
-
-  .mobile-nav-open .sidebar {
-    transform: translateX(0);
-  }
-
-  .mobile-nav-backdrop {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 19;
-    width: 100%;
-    height: 100%;
-    padding: 0;
-    background: var(--xs-overlay);
-    border: 0;
-    border-radius: 0;
-  }
-
-  .mobile-nav-trigger {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .topbar {
-    gap: 10px;
-    padding-inline: 12px;
-  }
-
-  .breadcrumbs {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .breadcrumb-root,
-  .breadcrumb-separator,
-  .observed-at,
-  .session-user-name,
-  .topbar .outline {
-    display: none;
-  }
-
-  .session-user {
-    padding-left: 0;
-    border-left: 0;
-  }
-
-  .scope {
-    max-width: 160px;
-    font-size: 10px;
-  }
-
-  .dashboard-grid,
   .session-grid {
     grid-template-columns: 1fr 1fr;
     gap: 8px;
-  }
-
-  .dashboard-card {
-    min-height: 102px;
-    padding: 13px;
-  }
-
-  .dashboard-card strong {
-    font-size: 22px;
   }
 
   .site-card {
@@ -2331,23 +1839,6 @@ main {
     padding: 20px;
   }
 
-  .connect-panel {
-    margin-top: 18px;
-    padding: 22px;
-  }
-
-  .connect-panel form {
-    grid-template-columns: 1fr;
-  }
-
-  .connect-panel label {
-    grid-column: auto;
-  }
-
-  .connect-panel button {
-    margin-top: 4px;
-  }
-
   .evidence-table td:first-child {
     padding: 12px;
   }
@@ -2390,29 +1881,11 @@ main {
   .site-list-page > .empty-state {
     margin: 16px;
   }
-
-  .connection {
-    justify-content: flex-start;
-  }
-
-  .connection [role="status"] {
-    flex-basis: 100%;
-    max-width: none;
-  }
-
-  .connection button {
-    flex: 1 1 auto;
-  }
 }
 
 @media (width <= 480px) {
-  .dashboard-grid,
   .session-grid {
     grid-template-columns: 1fr;
-  }
-
-  .connection {
-    margin-left: 0;
   }
 
   .workbench-heading-row {
@@ -2422,25 +1895,5 @@ main {
 
   .workbench-kpis {
     grid-template-columns: 1fr 1fr;
-  }
-}
-
-@media (width <= 420px) {
-  .connection {
-    justify-content: space-between;
-    width: 100%;
-    margin: 0;
-  }
-
-  .scope {
-    max-width: 230px;
-  }
-
-  .topbar {
-    gap: 9px;
-  }
-
-  .connection button {
-    min-height: 31px;
   }
 }

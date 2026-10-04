@@ -1,48 +1,31 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useBlocker } from "@tanstack/react-router";
 import type { FormEvent, KeyboardEvent } from "react";
-import { ApiError, validateModelCallListPlan } from "./api";
-import type { ControlClient } from "./api";
-import { useGuardedQuery } from "./security/hooks";
-import { MANUAL_REFRESH } from "./security/query-client.ts";
-import { machineLoginEnabled, useSession } from "./security/SessionProvider";
-import { unauthorizedNotice } from "./security/session-store.ts";
-import { validateCausalityPlan, validateSearchPlan } from "./search";
-import type { CausalityResponse, SearchPlan, SearchResponse } from "./search";
-import { SearchPanel } from "./SearchPanel";
-import type { SearchPreset } from "./SearchPanel";
-import { LedgerPanel } from "./LedgerPanel";
-import { CasePanel } from "./CasePanel";
-import { EvidenceAccessPanel } from "./EvidenceAccessPanel";
-import { EvidenceHoldPanel } from "./EvidenceHoldPanel";
-import { ExportPanel } from "./ExportPanel";
-import { SiteOperationsPanel } from "./SiteOperationsPanel";
-import { SiteConfigPanel } from "./SiteConfigPanel";
-import { AdminShell } from "./AdminShell";
-import { OverviewWorkbench } from "./OverviewWorkbench";
-import { ManagementApiKeyPanel } from "./ManagementApiKeyPanel";
-import { routeQueryKind, routeTarget, siteRoute } from "./admin-routes";
-import type { BindingResponse, GrantResponse } from "./ledger";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ApiError, validateModelCallListPlan } from "../api";
 import type {
+  AgentRunResponse,
   ArtifactResponse,
   AuditHealthResponse,
   CalibrationReportResponse,
-  AgentRunResponse,
+  ControlClient,
   EventsResponse,
   EvidenceResponse,
+  JobResponse,
   ModelCallListPlan,
   ModelCallListResponse,
   ModelCallResponse,
-  SummaryResponse,
-  SiteConfigResponse,
   SiteApplyResponse,
+  SiteConfigResponse,
   SiteListItem,
   SiteRevision,
-  JobResponse,
-} from "./api";
+  SummaryResponse,
+} from "../api";
+import { routeQueryKind, routeTarget, siteRoute } from "../admin-routes";
+import type { BindingResponse, GrantResponse } from "../ledger";
 import {
+  AgentRunOverview,
   ArtifactDetail,
   AuditHealthPanel,
-  AgentRunOverview,
   CalibrationReportPanel,
   EventDetail,
   EventTable,
@@ -51,7 +34,58 @@ import {
   ModelCallOverview,
   RequestOverview,
   WatermarkNotice,
-} from "./panels";
+} from "../panels";
+import { validateCausalityPlan, validateSearchPlan } from "../search";
+import type { CausalityResponse, SearchPlan, SearchResponse } from "../search";
+import type { SearchPreset } from "../SearchPanel";
+import { useSession } from "../security/SessionProvider";
+import { unauthorizedNotice } from "../security/session-store.ts";
+
+// Heavy panels load the first time their page is opened. The four workbenches below keep their
+// unconfirmed-write state across navigation, so once mounted they stay mounted (hidden).
+const SearchPanel = lazy(() =>
+  import("../SearchPanel").then((module) => ({ default: module.SearchPanel })),
+);
+const LedgerPanel = lazy(() =>
+  import("../LedgerPanel").then((module) => ({ default: module.LedgerPanel })),
+);
+const CasePanel = lazy(() =>
+  import("../CasePanel").then((module) => ({ default: module.CasePanel })),
+);
+const EvidenceAccessPanel = lazy(() =>
+  import("../EvidenceAccessPanel").then((module) => ({ default: module.EvidenceAccessPanel })),
+);
+const EvidenceHoldPanel = lazy(() =>
+  import("../EvidenceHoldPanel").then((module) => ({ default: module.EvidenceHoldPanel })),
+);
+const ExportPanel = lazy(() =>
+  import("../ExportPanel").then((module) => ({ default: module.ExportPanel })),
+);
+const SiteOperationsPanel = lazy(() =>
+  import("../SiteOperationsPanel").then((module) => ({ default: module.SiteOperationsPanel })),
+);
+const SiteConfigPanel = lazy(() =>
+  import("../SiteConfigPanel").then((module) => ({ default: module.SiteConfigPanel })),
+);
+const ManagementApiKeyPanel = lazy(() =>
+  import("../ManagementApiKeyPanel").then((module) => ({ default: module.ManagementApiKeyPanel })),
+);
+
+/** Mounts its children the first time the page is opened and keeps them (hidden) afterwards. */
+function Workbench({ active, children }: { active: boolean; children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(active);
+  if (active && !mounted) setMounted(true);
+  if (!mounted) return null;
+  return (
+    <div hidden={!active}>
+      <Deferred>{children}</Deferred>
+    </div>
+  );
+}
+
+function Deferred({ children }: { children: React.ReactNode }) {
+  return <Suspense fallback={<p className="empty">正在加载页面…</p>}>{children}</Suspense>;
+}
 
 type Problem = { message: string; code: string; requestId?: string | null; status?: number };
 type Channel =
@@ -102,7 +136,25 @@ function Failure({ problem }: { problem: Problem | null }) {
   );
 }
 
-export function App() {
+export type LegacyHostProps = {
+  /** Current router pathname; the host keeps no routing state of its own. */
+  pathname: string;
+  navigate: (path: string, options?: { completed?: boolean }) => void;
+  /** Event search requested from outside the host (the command palette). */
+  searchIntent: { preset: SearchPreset; nonce: number } | null;
+  onSearchIntentConsumed: () => void;
+};
+
+/**
+ * The pre-redesign pages, kept working while they are rebuilt one by one on the routed data
+ * layer. The shell renders it once and keeps it mounted so unconfirmed writes survive navigation.
+ */
+export default function LegacyHost({
+  pathname,
+  navigate: go,
+  searchIntent,
+  onSearchIntentConsumed,
+}: LegacyHostProps) {
   // The session layer owns the ControlClient, the confirmed scope, roles, idle expiry and the
   // epoch shared with every TanStack query. This host keeps only per-view state.
   const session = useSession();
@@ -110,11 +162,9 @@ export function App() {
   const connected = session.state.status === "connected";
   const client = session.state.client;
   const scope = session.state.scope;
-  const sessionInfo = session.state.session;
   // `null` is the explicitly enabled local machine-login mode. Browser
   // sessions always carry the server-provided role list.
   const managementRoles = session.state.roles as string[] | null;
-  const authReady = session.authReady;
   // View generation: bumped whenever the visible view changes, so a response of an earlier view
   // cannot repaint. Distinct from the session epoch, which only moves on connect/disconnect.
   const lifetime = useRef(new AbortController());
@@ -131,8 +181,6 @@ export function App() {
     sites: 0,
     health: 0,
   });
-  const [pathname, setPathname] = useState(() => window.location.pathname || "/");
-  const [token, setToken] = useState("");
   const [requestId, setRequestId] = useState("");
   const queryKind = routeQueryKind(pathname);
   const currentSite = siteRoute(pathname);
@@ -204,7 +252,6 @@ export function App() {
     () =>
       store.onDisconnect(() => {
         clearResults();
-        setToken("");
         setRequestId("");
         setSiteList([]);
         setSiteListCursor(null);
@@ -215,70 +262,58 @@ export function App() {
   );
   const disconnect = session.disconnect;
 
-  useEffect(() => {
-    document.getElementById("main-content")?.focus();
-  }, [pathname]);
   const siteUnsaved = useRef(false);
-  const historyIndex = useRef<number>(Number(window.history.state?.xshieldIndex ?? 0));
-  useEffect(() => {
-    window.history.replaceState(
-      { ...window.history.state, xshieldIndex: historyIndex.current },
-      "",
-    );
-  }, []);
+  const pendingPreset = useRef<SearchPreset | null>(null);
   const setSiteUnsaved = useCallback((value: boolean) => {
     siteUnsaved.current = value;
   }, []);
-  const allowNavigation = useCallback((nextPath: string, previousPath: string) => {
-    const before = siteRoute(previousPath);
-    const after = siteRoute(nextPath);
-    if (!siteUnsaved.current || (before && after && before.siteId === after.siteId)) return true;
-    return window.confirm("当前站点有未保存草稿或待确认操作。确定离开？");
-  }, []);
-  const syncRoute = useCallback(
-    (nextPath: string, previousPath: string) => {
-      const previous = siteRoute(previousPath);
-      const next = siteRoute(nextPath);
-      // A category is part of the same editing session. Other route changes
-      // invalidate every in-flight response before another view can render.
-      if (!previous || !next || previous.siteId !== next.siteId) clearResults();
-      if (!previous || !next || previous.siteId !== next.siteId) siteUnsaved.current = false;
-      setPathname(nextPath);
-      setRequestId("");
+  const navigate = useCallback((path: string, completed = false) => go(path, { completed }), [go]);
+
+  // Leaving the page invalidates every in-flight response before another view can render;
+  // the categories of one site editing session are the exception.
+  const previousPath = useRef(pathname);
+  useLayoutEffect(() => {
+    const before = previousPath.current;
+    if (before === pathname) return;
+    previousPath.current = pathname;
+    const previous = siteRoute(before);
+    const next = siteRoute(pathname);
+    if (!previous || !next || previous.siteId !== next.siteId) {
+      clearResults();
+      siteUnsaved.current = false;
+    }
+    setRequestId("");
+    const preset = pendingPreset.current;
+    pendingPreset.current = null;
+    if (preset && routeQueryKind(pathname) === "search") {
+      setSearchPreset(preset);
+      setSearchPresetVersion((version) => version + 1);
+    } else {
       setSearchPreset(null);
-    },
-    [clearResults],
-  );
+    }
+  }, [pathname, clearResults]);
 
-  useEffect(() => {
-    const onPopState = () => {
-      const next = window.location.pathname || "/";
-      const index = Number(window.history.state?.xshieldIndex ?? historyIndex.current - 1);
-      if (!allowNavigation(next, pathname)) {
-        const delta = historyIndex.current - index;
-        if (delta) window.history.go(delta);
-        else window.history.replaceState({ xshieldIndex: historyIndex.current }, "", pathname);
-        return;
+  // An unsaved site draft or unconfirmed operation asks before the page is left. The router
+  // consults this for links, programmatic navigation and back/forward alike; the panels
+  // install their own beforeunload warning for reloads.
+  useBlocker({
+    shouldBlockFn: ({ current, next }) => {
+      const before = siteRoute(current.pathname);
+      const after = siteRoute(next.pathname);
+      if (!siteUnsaved.current || (before && after && before.siteId === after.siteId)) {
+        return false;
       }
-      historyIndex.current = index;
-      syncRoute(next, pathname);
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, [pathname, syncRoute, allowNavigation]);
-
-  const navigate = useCallback(
-    (path: string, completed = false) => {
-      if (path === window.location.pathname + window.location.search) return;
-      const previous = window.location.pathname;
-      if (!completed && !allowNavigation(path.split("?")[0] ?? path, previous)) return;
-      historyIndex.current += 1;
-      window.history.pushState({ xshieldIndex: historyIndex.current }, "", path);
-      syncRoute(window.location.pathname || "/", previous);
+      return !window.confirm("当前站点有未保存草稿或待确认操作。确定离开？");
     },
-    [syncRoute, allowNavigation],
-  );
+    enableBeforeUnload: false,
+  });
 
+  // A search requested from outside (the command palette) is applied once the session is live.
+  useEffect(() => {
+    if (!searchIntent || !connected) return;
+    prepareSearchHistory(searchIntent.preset);
+    onSearchIntentConsumed();
+  }, [searchIntent, connected]);
   useEffect(() => {
     const target = routeTarget(pathname, queryKind);
     if (target) setRequestId(target);
@@ -319,15 +354,6 @@ export function App() {
   useEffect(() => {
     if (connected && queryKind === "site-config") loadSiteConfig();
   }, [connected, queryKind, selectedSiteId]);
-
-  // Shell-level read on the new data layer: epoch-keyed, scope-verified, abort-aware, and never
-  // refetched on focus, reconnect or mount. The refresh button is the only trigger.
-  const overviewQuery = useGuardedQuery({
-    key: ["workbench", "overview"],
-    fetch: (api, signal) => api.workbenchOverview(signal),
-    staleTime: MANUAL_REFRESH,
-    enabled: queryKind === "overview",
-  });
 
   // Every response belongs to a view generation, a session epoch and one authenticated scope.
   // Abort alone cannot stop already-resolved promises from repainting old data.
@@ -387,22 +413,6 @@ export function App() {
     }
   }
 
-  function connect(event: FormEvent) {
-    event.preventDefault();
-    if (!session.connectWithToken(token)) {
-      setSessionNotice("请输入有效的管理凭证。");
-      return;
-    }
-    setToken("");
-    setSessionNotice(null);
-  }
-  async function logout() {
-    await session.logout();
-  }
-  async function reauthenticate() {
-    const failure = await session.reauthenticate();
-    if (failure) setSessionNotice(failure);
-  }
   function clearArtifact() {
     operations.current.artifact += 1;
     setArtifact(null);
@@ -539,9 +549,6 @@ export function App() {
       },
     );
   }
-  function refreshOverview() {
-    void overviewQuery.refetch();
-  }
   function loadSiteDetails(siteId: string) {
     if (managementRoles !== null && !managementRoles.includes("system_admin")) {
       if (managementRoles.includes("observer")) {
@@ -613,10 +620,14 @@ export function App() {
   }
   function prepareSearchHistory(preset: SearchPreset) {
     clearResults();
+    if (routeQueryKind(pathname) === "search") {
+      setSearchPreset(preset);
+      setSearchPresetVersion((version) => version + 1);
+      setRequestId("");
+      return;
+    }
+    pendingPreset.current = preset;
     navigate("/investigation/search");
-    setSearchPreset(preset);
-    setSearchPresetVersion((version) => version + 1);
-    setRequestId("");
   }
   function loadRequest(target: string) {
     void run(
@@ -699,27 +710,6 @@ export function App() {
   }
   const event = (search?.events ?? events?.events)?.find((value) => value.event_id === selected);
   const relatedEvents = search?.events ?? events?.events ?? (event ? [event] : []);
-  const title = {
-    overview: "运行概览",
-    session: "权限中心",
-    request: "请求调查",
-    model: "模型调用调查",
-    agent: "Agent 运行调查",
-    "model-list": "模型调用列表",
-    "audit-health": "审计发布状态",
-    "calibration-report": "校准报告调查",
-    grant: "资格调查",
-    binding: "身份绑定调查",
-    search: "结构化事件检索",
-    case: "案件工作台",
-    access: "证据访问",
-    hold: "证据保留",
-    export: "调查导出",
-    "site-config": "受保护站点",
-    "api-keys": "管理 API Key",
-    jobs: "后台任务",
-    "not-found": "页面不存在",
-  }[queryKind];
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
       <div className="panel-heading">
@@ -777,291 +767,143 @@ export function App() {
   const notice = connected ? sessionNotice : (sessionNotice ?? session.state.notice);
 
   return (
-    <AdminShell
-      connected={connected}
-      pathname={pathname}
-      title={title}
-      scope={scope ? `${scope.tenant_id} / ${scope.site_id}` : "等待查询验证范围"}
-      roles={managementRoles}
-      session={sessionInfo}
-      machineLoginEnabled={machineLoginEnabled}
-      onNavigate={navigate}
-      onLogout={() => void logout()}
-      onReauthenticate={() => void reauthenticate()}
-      onRefresh={queryKind === "overview" ? refreshOverview : undefined}
-      refreshing={queryKind === "overview" && overviewQuery.isFetching}
-      observedAt={queryKind === "overview" ? (overviewQuery.data?.as_of ?? null) : null}
-    >
-      <h1>{title}</h1>
-      <p className="lead">
-        {queryKind === "overview"
-          ? "查看当前管理范围内的站点、审计和调查服务状态。"
-          : queryKind === "session"
-            ? "查看当前主体、角色、站点范围和再认证状态。"
-            : queryKind === "request"
-              ? "沿着请求时间线，核对每一次判定与证据。"
-              : queryKind === "model"
-                ? "核对模型调用生命周期、版本与证据引用。"
-                : queryKind === "agent"
-                  ? "核对 Agent 脱敏生命周期与固定事件引用。"
-                  : queryKind === "site-config"
-                    ? "配置受保护网站、上游、安全入口与反向代理监听端口。"
-                    : queryKind === "api-keys"
-                      ? "创建和撤销绑定 tenant、site 与能力集合的 Agent API Key。"
-                      : queryKind === "audit-health"
-                        ? "按需读取配置审计日志到索引的发布快照。"
-                        : queryKind === "calibration-report"
-                          ? "读取受限校准报告的冻结元数据与正文保留观察。"
-                          : queryKind === "search"
-                            ? "按时间与事件字段检索，核对直接引用的历史事实。"
-                            : queryKind === "case"
-                              ? "建立本人调查案件，核对证据引用与案件状态。"
-                              : queryKind === "access"
-                                ? "复核访问申请，通过独立审批后按需下载证据原文。"
-                                : queryKind === "hold"
-                                  ? "管理案件证据保留期限，核对创建与释放历史。"
-                                  : queryKind === "export"
-                                    ? "申请经独立审批的案件与目录元数据包；下载需重新验证。"
-                                    : "核对当前账本的状态、代际与期限。"}
-      </p>
+    <div className="legacy">
       {notice && (
         <div className="notice" role="status">
           {notice}
         </div>
       )}
-      {!connected ? (
-        <section className="panel connect-panel" aria-labelledby="connect-title">
-          <h2 id="connect-title">{machineLoginEnabled ? "连接管理服务" : "企业身份登录"}</h2>
-          {machineLoginEnabled ? (
-            <>
-              <p className="muted">
-                自动化测试专用的机器凭证入口。生产控制台仅使用企业 OIDC 身份。
-              </p>
-              <form onSubmit={connect}>
-                <label htmlFor="token">管理凭证</label>
-                <input
-                  id="token"
-                  type="password"
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  maxLength={4096}
-                  required
-                />
-                <button type="submit">连接</button>
-              </form>
-              <p className="footnote">此入口仅在显式开启的本地 Playwright 测试环境可用。</p>
-            </>
-          ) : !authReady ? (
-            <p className="empty" role="status">
-              正在恢复管理会话…
-            </p>
-          ) : (
-            <>
-              <p className="muted">
-                使用企业身份提供方完成 MFA。访问角色与站点范围由服务端部署映射决定。
-              </p>
-              <button
-                type="button"
-                onClick={() => window.location.assign("/control/v1/auth/oidc/start")}
-              >
-                使用企业身份登录
-              </button>
-              {notice && (
-                <button className="outline" type="button" onClick={() => window.location.reload()}>
-                  重试会话检查
-                </button>
-              )}
-              <p className="footnote">
-                浏览器只持有 HttpOnly 服务端会话 Cookie；闲置 15 分钟或达到 8
-                小时绝对时限后须重新登录。
-              </p>
-            </>
-          )}
-        </section>
-      ) : (
-        <>
-          {queryKind === "overview" && (
-            <OverviewWorkbench
-              overview={overviewQuery.data ?? null}
-              busy={overviewQuery.isFetching}
-              failed={overviewQuery.isError}
-              onRefresh={refreshOverview}
-              onNavigate={navigate}
-            />
-          )}
-          {queryKind === "jobs" && job && (
-            <section className="panel" aria-label="后台任务详情">
-              <h2>任务状态</h2>
-              {job.job ? (
-                <dl className="session-grid">
-                  <div>
-                    <dt>任务</dt>
-                    <dd>{job.job.job_id}</dd>
-                  </div>
-                  <div>
-                    <dt>案件</dt>
-                    <dd>{job.job.case_id}</dd>
-                  </div>
-                  <div>
-                    <dt>状态</dt>
-                    <dd>{job.job.status}</dd>
-                  </div>
-                  <div>
-                    <dt>原因</dt>
-                    <dd>{job.job.reason_code}</dd>
-                  </div>
-                  <div>
-                    <dt>证据数量</dt>
-                    <dd>{job.job.artifact_count}</dd>
-                  </div>
-                </dl>
-              ) : (
-                <p>当前主体范围内未找到该任务。</p>
-              )}
-            </section>
-          )}
-          {queryKind === "not-found" && (
-            <p className="empty">该地址没有对应页面，请从侧栏选择功能。</p>
-          )}
-          {queryKind === "session" && sessionInfo && (
-            <section className="panel session-panel" aria-labelledby="session-title">
-              <h2 id="session-title">当前管理会话</h2>
+      <>
+        {queryKind === "jobs" && job && (
+          <section className="panel" aria-label="后台任务详情">
+            <h2>任务状态</h2>
+            {job.job ? (
               <dl className="session-grid">
                 <div>
-                  <dt>主体</dt>
-                  <dd className="mono">{sessionInfo.subject}</dd>
+                  <dt>任务</dt>
+                  <dd>{job.job.job_id}</dd>
                 </div>
                 <div>
-                  <dt>租户</dt>
-                  <dd className="mono">{sessionInfo.tenant_id}</dd>
+                  <dt>案件</dt>
+                  <dd>{job.job.case_id}</dd>
                 </div>
                 <div>
-                  <dt>站点范围</dt>
-                  <dd className="mono">{sessionInfo.site_id}</dd>
+                  <dt>状态</dt>
+                  <dd>{job.job.status}</dd>
                 </div>
                 <div>
-                  <dt>角色</dt>
-                  <dd>{sessionInfo.roles.join("、") || "无"}</dd>
+                  <dt>原因</dt>
+                  <dd>{job.job.reason_code}</dd>
                 </div>
                 <div>
-                  <dt>绝对到期</dt>
-                  <dd>{sessionInfo.session_expires_at}</dd>
-                </div>
-                <div>
-                  <dt>闲置到期</dt>
-                  <dd>{sessionInfo.idle_expires_at}</dd>
-                </div>
-                <div>
-                  <dt>最近再认证</dt>
-                  <dd>{sessionInfo.last_reauthenticated_at ?? "尚未再认证"}</dd>
-                </div>
-                <div>
-                  <dt>Step-up</dt>
-                  <dd>{sessionInfo.step_up_valid ? "有效" : "未生效"}</dd>
+                  <dt>证据数量</dt>
+                  <dd>{job.job.artifact_count}</dd>
                 </div>
               </dl>
-            </section>
-          )}
-          {["request", "model", "agent", "calibration-report", "grant", "binding", "jobs"].includes(
-            queryKind,
-          ) && (
-            <form className="panel query-form" onSubmit={query}>
-              <label htmlFor="request-id">
-                {queryLabels[queryKind as keyof typeof queryLabels]}
-              </label>
-              <input
-                id="request-id"
-                className="mono"
-                placeholder={`${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_…`}
-                value={requestId}
-                onChange={(e) => {
-                  clearResults();
-                  setRequestId(e.target.value);
-                }}
-                autoComplete="off"
-                spellCheck={false}
-                maxLength={
-                  (queryPrefixes[queryKind as keyof typeof queryPrefixes] ?? "req").length + 37
-                }
-                required
-                pattern={`${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
-                title={`请输入规范的 ${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_ 前缀 UUIDv7`}
-              />
-              <button type="submit" disabled={busy.query}>
-                {busy.query ? "查询中…" : "查询"}
-              </button>
-            </form>
-          )}
-          <Failure problem={problems.query ?? null} />
-          <Failure problem={problems.sites ?? null} />
-          <Failure problem={problems.health ?? null} />
-          {queryKind === "api-keys" &&
-            client &&
-            scope &&
-            (managementRoles?.includes("system_admin") ||
-              managementRoles?.includes("key_administrator")) && (
+            ) : (
+              <p>当前主体范围内未找到该任务。</p>
+            )}
+          </section>
+        )}
+        {["request", "model", "agent", "calibration-report", "grant", "binding", "jobs"].includes(
+          queryKind,
+        ) && (
+          <form className="panel query-form" onSubmit={query}>
+            <label htmlFor="request-id">{queryLabels[queryKind as keyof typeof queryLabels]}</label>
+            <input
+              id="request-id"
+              className="mono"
+              placeholder={`${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_…`}
+              value={requestId}
+              onChange={(e) => {
+                clearResults();
+                setRequestId(e.target.value);
+              }}
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={
+                (queryPrefixes[queryKind as keyof typeof queryPrefixes] ?? "req").length + 37
+              }
+              required
+              pattern={`${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
+              title={`请输入规范的 ${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_ 前缀 UUIDv7`}
+            />
+            <button type="submit" disabled={busy.query}>
+              {busy.query ? "查询中…" : "查询"}
+            </button>
+          </form>
+        )}
+        <Failure problem={problems.query ?? null} />
+        <Failure problem={problems.sites ?? null} />
+        <Failure problem={problems.health ?? null} />
+        {queryKind === "api-keys" &&
+          client &&
+          scope &&
+          (managementRoles?.includes("system_admin") ||
+            managementRoles?.includes("key_administrator")) && (
+            <Deferred>
               <ManagementApiKeyPanel
                 client={client}
                 tenantId={scope.tenant_id}
                 onNotice={setSessionNotice}
               />
-            )}
-          <div hidden={queryKind !== "case"}>
-            <CasePanel
-              active={queryKind === "case"}
-              busy={Boolean(busy.case)}
-              onInvalidate={clearResults}
-              onRun={(fetcher, apply, fail) => run("case", fetcher, apply, fail)}
-              onHistory={(jobId) => {
-                prepareSearchHistory({ kind: "job_id", value: jobId });
-              }}
-              onArtifact={openArtifact}
-              artifactDetails={
-                queryKind === "case" &&
-                (artifact || busy.artifact || problems.artifact) &&
-                eventDetails
-              }
-            />
-          </div>
-          <div hidden={queryKind !== "access"}>
-            <EvidenceAccessPanel
-              active={queryKind === "access"}
-              busy={Boolean(busy.access)}
-              onInvalidate={clearResults}
-              onHistory={(accessRequestId) => {
-                prepareSearchHistory({
-                  kind: "evidence_access_request_id",
-                  value: accessRequestId,
-                });
-              }}
-              onRun={(fetcher, apply, fail) => run("access", fetcher, apply, fail)}
-            />
-          </div>
-          <div hidden={queryKind !== "hold"}>
-            <EvidenceHoldPanel
-              active={queryKind === "hold"}
-              busy={Boolean(busy.hold)}
-              onInvalidate={clearResults}
-              onHistory={(holdId) => {
-                prepareSearchHistory({ kind: "evidence_hold_id", value: holdId });
-              }}
-              onRun={(fetcher, apply, fail) => run("hold", fetcher, apply, fail)}
-            />
-          </div>
-          <div hidden={queryKind !== "export"}>
-            <ExportPanel
-              active={queryKind === "export"}
-              busy={Boolean(busy.export)}
-              onInvalidate={clearResults}
-              onRun={(fetcher, apply, fail) => run("export", fetcher, apply, fail)}
-            />
-          </div>
-          {queryKind === "site-config" &&
-          currentSite &&
-          managementRoles !== null &&
-          !managementRoles.includes("system_admin") ? (
+            </Deferred>
+          )}
+        <Workbench active={queryKind === "case"}>
+          <CasePanel
+            active={queryKind === "case"}
+            busy={Boolean(busy.case)}
+            onInvalidate={clearResults}
+            onRun={(fetcher, apply, fail) => run("case", fetcher, apply, fail)}
+            onHistory={(jobId) => {
+              prepareSearchHistory({ kind: "job_id", value: jobId });
+            }}
+            onArtifact={openArtifact}
+            artifactDetails={
+              queryKind === "case" &&
+              (artifact || busy.artifact || problems.artifact) &&
+              eventDetails
+            }
+          />
+        </Workbench>
+        <Workbench active={queryKind === "access"}>
+          <EvidenceAccessPanel
+            active={queryKind === "access"}
+            busy={Boolean(busy.access)}
+            onInvalidate={clearResults}
+            onHistory={(accessRequestId) => {
+              prepareSearchHistory({
+                kind: "evidence_access_request_id",
+                value: accessRequestId,
+              });
+            }}
+            onRun={(fetcher, apply, fail) => run("access", fetcher, apply, fail)}
+          />
+        </Workbench>
+        <Workbench active={queryKind === "hold"}>
+          <EvidenceHoldPanel
+            active={queryKind === "hold"}
+            busy={Boolean(busy.hold)}
+            onInvalidate={clearResults}
+            onHistory={(holdId) => {
+              prepareSearchHistory({ kind: "evidence_hold_id", value: holdId });
+            }}
+            onRun={(fetcher, apply, fail) => run("hold", fetcher, apply, fail)}
+          />
+        </Workbench>
+        <Workbench active={queryKind === "export"}>
+          <ExportPanel
+            active={queryKind === "export"}
+            busy={Boolean(busy.export)}
+            onInvalidate={clearResults}
+            onRun={(fetcher, apply, fail) => run("export", fetcher, apply, fail)}
+          />
+        </Workbench>
+        {queryKind === "site-config" &&
+        currentSite &&
+        managementRoles !== null &&
+        !managementRoles.includes("system_admin") ? (
+          <Deferred>
             <SiteOperationsPanel
               key={selectedSiteId}
               siteId={selectedSiteId}
@@ -1125,7 +967,9 @@ export function App() {
                 )
               }
             />
-          ) : queryKind === "site-config" ? (
+          </Deferred>
+        ) : queryKind === "site-config" ? (
+          <Deferred>
             <SiteConfigPanel
               roles={managementRoles}
               onUnsavedChange={setSiteUnsaved}
@@ -1220,10 +1064,12 @@ export function App() {
                 navigate("/investigation/requests");
               }}
             />
-          ) : queryKind === "case" ||
-            queryKind === "hold" ||
-            queryKind === "access" ||
-            queryKind === "export" ? null : queryKind === "search" ? (
+          </Deferred>
+        ) : queryKind === "case" ||
+          queryKind === "hold" ||
+          queryKind === "access" ||
+          queryKind === "export" ? null : queryKind === "search" ? (
+          <Deferred>
             <SearchPanel
               key={searchPresetVersion}
               response={search}
@@ -1243,34 +1089,36 @@ export function App() {
                 setSelected(id);
               }}
             />
-          ) : queryKind === "model-list" ? (
-            <ModelCallListPanel
-              response={modelList}
-              plan={modelListPlan}
-              busy={Boolean(busy.query)}
-              onEdit={clearResults}
-              onSubmit={(value) => loadModelCalls(value)}
-              onNext={() => {
-                if (modelListPlan && modelList?.next_cursor)
-                  loadModelCalls(modelListPlan, modelList.next_cursor);
-              }}
-              onOpen={(id) => openTarget("model", id)}
-            />
-          ) : queryKind === "audit-health" ? (
-            <AuditHealthPanel response={health} busy={Boolean(busy.query)} onRefresh={loadHealth} />
-          ) : queryKind === "calibration-report" ? (
-            <CalibrationReportPanel
-              response={calibrationReport}
-              busy={Boolean(busy.query)}
-              onRefresh={() => loadCalibrationReport()}
-              onHistory={(reportId) => {
-                prepareSearchHistory({
-                  kind: "calibration_report_id",
-                  value: reportId,
-                });
-              }}
-            />
-          ) : ledger ? (
+          </Deferred>
+        ) : queryKind === "model-list" ? (
+          <ModelCallListPanel
+            response={modelList}
+            plan={modelListPlan}
+            busy={Boolean(busy.query)}
+            onEdit={clearResults}
+            onSubmit={(value) => loadModelCalls(value)}
+            onNext={() => {
+              if (modelListPlan && modelList?.next_cursor)
+                loadModelCalls(modelListPlan, modelList.next_cursor);
+            }}
+            onOpen={(id) => openTarget("model", id)}
+          />
+        ) : queryKind === "audit-health" ? (
+          <AuditHealthPanel response={health} busy={Boolean(busy.query)} onRefresh={loadHealth} />
+        ) : queryKind === "calibration-report" ? (
+          <CalibrationReportPanel
+            response={calibrationReport}
+            busy={Boolean(busy.query)}
+            onRefresh={() => loadCalibrationReport()}
+            onHistory={(reportId) => {
+              prepareSearchHistory({
+                kind: "calibration_report_id",
+                value: reportId,
+              });
+            }}
+          />
+        ) : ledger ? (
+          <Deferred>
             <LedgerPanel
               response={ledger}
               onBinding={(id) => openTarget("binding", id)}
@@ -1279,213 +1127,201 @@ export function App() {
                 prepareSearchHistory(preset);
               }}
             />
-          ) : model ? (
-            <>
-              <ModelCallOverview
-                response={model}
-                onOpen={openArtifact}
-                onHistory={(modelCallId) => {
-                  prepareSearchHistory({
-                    kind: "model_call_id",
-                    value: modelCallId,
-                  });
-                }}
-                onPreviousEvent={(id) => prepareSearchHistory({ kind: "event_id", value: id })}
-                onFollowEvent={(id) =>
-                  prepareSearchHistory({ kind: "caused_by_event_id", value: id })
-                }
-              />
-              {(artifact || busy.artifact || problems.artifact) && (
-                <section
-                  className="panel detail-panel"
-                  aria-label="模型证据详情"
-                  aria-live="polite"
-                >
-                  <div className="panel-heading">
-                    <h2>证据详情</h2>
-                    <button className="text-button" onClick={clearArtifact}>
-                      关闭详情
-                    </button>
-                  </div>
-                  <Failure problem={problems.artifact ?? null} />
-                  {busy.artifact ? (
-                    <p className="empty" role="status">
-                      正在读取证据元数据…
-                    </p>
-                  ) : (
-                    artifact && <ArtifactDetail response={artifact} />
-                  )}
-                </section>
-              )}
-            </>
-          ) : agentRun ? (
-            <>
-              <AgentRunOverview
-                response={agentRun}
-                onOpen={openArtifact}
-                onRequest={(id) => openTarget("request", id)}
-                onHistory={(agentRunId) => {
-                  prepareSearchHistory({
-                    kind: "agent_run_id",
-                    value: agentRunId,
-                  });
-                }}
-              />
-              {(artifact || busy.artifact || problems.artifact) && (
-                <section
-                  className="panel detail-panel"
-                  aria-label="Agent 证据详情"
-                  aria-live="polite"
-                >
-                  <div className="panel-heading">
-                    <h2>证据详情</h2>
-                    <button className="text-button" onClick={clearArtifact}>
-                      关闭详情
-                    </button>
-                  </div>
-                  <Failure problem={problems.artifact ?? null} />
-                  {busy.artifact ? (
-                    <p className="empty" role="status">
-                      正在读取证据元数据…
-                    </p>
-                  ) : (
-                    artifact && <ArtifactDetail response={artifact} />
-                  )}
-                </section>
-              )}
-            </>
-          ) : summary ? (
-            <>
-              <WatermarkNotice summary={summary} events={events} />
-              <RequestOverview response={summary} />
-              <div className="tabs" role="tablist" aria-label="调查内容" onKeyDown={tabKey}>
-                <button
-                  id="events-tab"
-                  role="tab"
-                  tabIndex={tab === "events" ? 0 : -1}
-                  aria-selected={tab === "events"}
-                  aria-controls="investigation-panel"
-                  onClick={() => switchTab("events")}
-                >
-                  事件时间线
-                </button>
-                <button
-                  id="evidence-tab"
-                  role="tab"
-                  tabIndex={tab === "evidence" ? 0 : -1}
-                  aria-selected={tab === "evidence"}
-                  aria-controls="investigation-panel"
-                  onClick={() => switchTab("evidence")}
-                >
-                  证据引用
-                </button>
-              </div>
-              <div className="investigation-grid">
-                <section
-                  className="panel"
-                  id="investigation-panel"
-                  role="tabpanel"
-                  aria-labelledby={`${tab}-tab`}
-                  aria-busy={Boolean(busy[tab])}
-                >
-                  <div className="panel-heading">
-                    <h2>{tab === "events" ? "事件时间线" : "证据引用"}</h2>
-                    <span className="muted">
-                      本页{" "}
-                      {tab === "events"
-                        ? (events?.events.length ?? 0)
-                        : (evidence?.artifacts.length ?? 0)}{" "}
-                      条
-                    </span>
-                  </div>
-                  <Failure problem={problems[tab] ?? null} />
-                  {problems[tab] ? null : busy[tab] ? (
-                    <p className="empty" role="status">
-                      正在读取{tab === "events" ? "事件" : "证据目录"}…
-                    </p>
-                  ) : tab === "events" ? (
-                    <EventTable
-                      events={events?.events ?? []}
-                      selected={selected}
-                      onSelect={(id) => {
-                        clearArtifact();
-                        invalidateCausality();
-                        setSelected(id);
-                      }}
-                    />
-                  ) : (
-                    <EvidenceTable artifacts={evidence?.artifacts ?? []} onOpen={openArtifact} />
-                  )}
-                  <div className="pagination">
-                    <button
-                      className="outline"
-                      disabled={
-                        Boolean(busy[tab]) ||
-                        !(tab === "events" ? events?.next_cursor : evidence?.next_cursor)
-                      }
-                      onClick={() => {
-                        if (tab === "events" && events?.next_cursor)
-                          loadEvents(summary.source_request_id, events.next_cursor);
-                        if (tab === "evidence" && evidence?.next_cursor)
-                          loadEvidence(evidence.next_cursor);
-                      }}
-                    >
-                      下一页
-                    </button>
-                    <span className="muted">
-                      {tab === "events" ? "按事件序号分页" : "按目录记录分页"}
-                    </span>
-                    {problems[tab] && (
-                      <button
-                        className="text-button"
-                        onClick={() =>
-                          tab === "events" ? loadEvents(summary.source_request_id) : loadEvidence()
-                        }
-                      >
-                        重新加载首页
-                      </button>
-                    )}
-                  </div>
-                </section>
-                {eventDetails}
-              </div>
-            </>
-          ) : (
-            !busy.query &&
-            !problems.query && (
-              <section className="panel empty-state">
-                <h2>
-                  {queryKind === "overview"
-                    ? "后台运行概览"
-                    : queryKind === "session"
-                      ? "当前权限中心"
-                      : queryKind === "request"
-                        ? "从一个请求开始"
-                        : queryKind === "model"
-                          ? "查询模型调用"
-                          : queryKind === "agent"
-                            ? "查询 Agent 运行"
-                            : "查询账本记录"}
-                </h2>
-                <p className="muted">
-                  {queryKind === "overview"
-                    ? "进入左侧模块开始管理。"
-                    : queryKind === "session"
-                      ? "此页面只读展示当前会话和服务端角色。"
-                      : queryKind === "request"
-                        ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
-                        : queryKind === "model"
-                          ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
-                          : queryKind === "agent"
-                            ? "输入 Agent 运行 ID，读取脱敏生命周期与固定事件引用。"
-                            : `输入${queryLabels[queryKind as keyof typeof queryLabels] ?? "目标 ID"}，读取当前状态、代际与期限。`}
-                </p>
+          </Deferred>
+        ) : model ? (
+          <>
+            <ModelCallOverview
+              response={model}
+              onOpen={openArtifact}
+              onHistory={(modelCallId) => {
+                prepareSearchHistory({
+                  kind: "model_call_id",
+                  value: modelCallId,
+                });
+              }}
+              onPreviousEvent={(id) => prepareSearchHistory({ kind: "event_id", value: id })}
+              onFollowEvent={(id) =>
+                prepareSearchHistory({ kind: "caused_by_event_id", value: id })
+              }
+            />
+            {(artifact || busy.artifact || problems.artifact) && (
+              <section className="panel detail-panel" aria-label="模型证据详情" aria-live="polite">
+                <div className="panel-heading">
+                  <h2>证据详情</h2>
+                  <button className="text-button" onClick={clearArtifact}>
+                    关闭详情
+                  </button>
+                </div>
+                <Failure problem={problems.artifact ?? null} />
+                {busy.artifact ? (
+                  <p className="empty" role="status">
+                    正在读取证据元数据…
+                  </p>
+                ) : (
+                  artifact && <ArtifactDetail response={artifact} />
+                )}
               </section>
-            )
-          )}
-        </>
-      )}
-      <footer>历史记录用于调查，当前访问资格由服务端独立校验。</footer>
-    </AdminShell>
+            )}
+          </>
+        ) : agentRun ? (
+          <>
+            <AgentRunOverview
+              response={agentRun}
+              onOpen={openArtifact}
+              onRequest={(id) => openTarget("request", id)}
+              onHistory={(agentRunId) => {
+                prepareSearchHistory({
+                  kind: "agent_run_id",
+                  value: agentRunId,
+                });
+              }}
+            />
+            {(artifact || busy.artifact || problems.artifact) && (
+              <section
+                className="panel detail-panel"
+                aria-label="Agent 证据详情"
+                aria-live="polite"
+              >
+                <div className="panel-heading">
+                  <h2>证据详情</h2>
+                  <button className="text-button" onClick={clearArtifact}>
+                    关闭详情
+                  </button>
+                </div>
+                <Failure problem={problems.artifact ?? null} />
+                {busy.artifact ? (
+                  <p className="empty" role="status">
+                    正在读取证据元数据…
+                  </p>
+                ) : (
+                  artifact && <ArtifactDetail response={artifact} />
+                )}
+              </section>
+            )}
+          </>
+        ) : summary ? (
+          <>
+            <WatermarkNotice summary={summary} events={events} />
+            <RequestOverview response={summary} />
+            <div className="tabs" role="tablist" aria-label="调查内容" onKeyDown={tabKey}>
+              <button
+                id="events-tab"
+                role="tab"
+                tabIndex={tab === "events" ? 0 : -1}
+                aria-selected={tab === "events"}
+                aria-controls="investigation-panel"
+                onClick={() => switchTab("events")}
+              >
+                事件时间线
+              </button>
+              <button
+                id="evidence-tab"
+                role="tab"
+                tabIndex={tab === "evidence" ? 0 : -1}
+                aria-selected={tab === "evidence"}
+                aria-controls="investigation-panel"
+                onClick={() => switchTab("evidence")}
+              >
+                证据引用
+              </button>
+            </div>
+            <div className="investigation-grid">
+              <section
+                className="panel"
+                id="investigation-panel"
+                role="tabpanel"
+                aria-labelledby={`${tab}-tab`}
+                aria-busy={Boolean(busy[tab])}
+              >
+                <div className="panel-heading">
+                  <h2>{tab === "events" ? "事件时间线" : "证据引用"}</h2>
+                  <span className="muted">
+                    本页{" "}
+                    {tab === "events"
+                      ? (events?.events.length ?? 0)
+                      : (evidence?.artifacts.length ?? 0)}{" "}
+                    条
+                  </span>
+                </div>
+                <Failure problem={problems[tab] ?? null} />
+                {problems[tab] ? null : busy[tab] ? (
+                  <p className="empty" role="status">
+                    正在读取{tab === "events" ? "事件" : "证据目录"}…
+                  </p>
+                ) : tab === "events" ? (
+                  <EventTable
+                    events={events?.events ?? []}
+                    selected={selected}
+                    onSelect={(id) => {
+                      clearArtifact();
+                      invalidateCausality();
+                      setSelected(id);
+                    }}
+                  />
+                ) : (
+                  <EvidenceTable artifacts={evidence?.artifacts ?? []} onOpen={openArtifact} />
+                )}
+                <div className="pagination">
+                  <button
+                    className="outline"
+                    disabled={
+                      Boolean(busy[tab]) ||
+                      !(tab === "events" ? events?.next_cursor : evidence?.next_cursor)
+                    }
+                    onClick={() => {
+                      if (tab === "events" && events?.next_cursor)
+                        loadEvents(summary.source_request_id, events.next_cursor);
+                      if (tab === "evidence" && evidence?.next_cursor)
+                        loadEvidence(evidence.next_cursor);
+                    }}
+                  >
+                    下一页
+                  </button>
+                  <span className="muted">
+                    {tab === "events" ? "按事件序号分页" : "按目录记录分页"}
+                  </span>
+                  {problems[tab] && (
+                    <button
+                      className="text-button"
+                      onClick={() =>
+                        tab === "events" ? loadEvents(summary.source_request_id) : loadEvidence()
+                      }
+                    >
+                      重新加载首页
+                    </button>
+                  )}
+                </div>
+              </section>
+              {eventDetails}
+            </div>
+          </>
+        ) : (
+          queryKind !== "api-keys" &&
+          !busy.query &&
+          !problems.query && (
+            <section className="panel empty-state">
+              <h2>
+                {queryKind === "request"
+                  ? "从一个请求开始"
+                  : queryKind === "model"
+                    ? "查询模型调用"
+                    : queryKind === "agent"
+                      ? "查询 Agent 运行"
+                      : "查询账本记录"}
+              </h2>
+              <p className="muted">
+                {queryKind === "request"
+                  ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
+                  : queryKind === "model"
+                    ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
+                    : queryKind === "agent"
+                      ? "输入 Agent 运行 ID，读取脱敏生命周期与固定事件引用。"
+                      : `输入${queryLabels[queryKind as keyof typeof queryLabels] ?? "目标 ID"}，读取当前状态、代际与期限。`}
+              </p>
+            </section>
+          )
+        )}
+      </>
+    </div>
   );
 }
