@@ -135,7 +135,10 @@ async fn site_admin_http_persists_replays_and_requires_independent_approval() {
     .await;
     assert_eq!(missing["found"], false);
     assert_eq!(missing["requires_approval"], Value::Null);
-    let payload = json!({"site_id": site.as_str(), "display_name": "HTTP contract site", "public_origin": "https://example.test", "upstream_address": "8.8.8.8:9000", "upstream_server_name": "example.test", "upstream_tls": false, "listen_port": 0, "entry_path": "/", "security_entry": "public", "sensor_enabled": false, "policy_revision": "policy-v1", "status": "draft"});
+    // The site is created `active`: a draft is never applied and exposes
+    // nothing, so it has no approval requirement to exercise here (drafts are
+    // covered by the `site_approval` tests).
+    let payload = json!({"site_id": site.as_str(), "display_name": "HTTP contract site", "public_origin": "https://example.test", "upstream_address": "8.8.8.8:9000", "upstream_server_name": "example.test", "upstream_tls": false, "listen_port": 0, "entry_path": "/", "security_entry": "public", "sensor_enabled": false, "policy_revision": "policy-v1", "status": "active"});
     let created = json_response(
         app.clone()
             .oneshot(request(

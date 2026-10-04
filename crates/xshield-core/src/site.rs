@@ -8,9 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub mod config;
+pub mod risk;
 pub mod upstream;
 
 pub use config::SiteConfig;
+pub use risk::{ChangeRisk, assess_change_risk};
 
 /// An internal edge listener port.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

@@ -54,6 +54,30 @@ pub struct SiteConfig {
 }
 
 impl SiteConfig {
+    /// Reads a configuration stored in `site_policy_revisions.config_json`.
+    ///
+    /// Revisions written by earlier versions lack `policy_revision` (it lives
+    /// in its own column) and, for the oldest backfilled rows, `policy`; both
+    /// are filled in. A `site_id` key left by the former rollback path is
+    /// ignored. Anything else unexpected is rejected rather than guessed at.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] when the value is not a complete site
+    /// configuration.
+    pub fn from_stored(
+        mut value: serde_json::Value,
+        policy_revision: &str,
+    ) -> Result<Self, InvalidValue> {
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| InvalidValue::new("stored_site_config"))?;
+        object.remove("site_id");
+        object
+            .entry("policy_revision")
+            .or_insert_with(|| serde_json::Value::String(policy_revision.to_owned()));
+        serde_json::from_value(value).map_err(|_| InvalidValue::new("stored_site_config"))
+    }
+
     /// Returns whether the edge serves this configuration.
     #[must_use]
     pub fn is_serving(&self) -> bool {
@@ -301,8 +325,9 @@ fn validate_public_origin(origin: &str, sensor_enabled: bool) -> Result<(), Inva
         return Err(invalid());
     }
     if !https {
-        let loopback =
-            host == "localhost" || host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback());
+        // The URL parser the previous check used lower-cased host names.
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback());
         let sensor_loopback = matches!(host, "localhost" | "127.0.0.1");
         if !loopback || (sensor_enabled && !sensor_loopback) {
             return Err(invalid());

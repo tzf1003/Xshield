@@ -22,7 +22,7 @@ Rules & Releases：差异、测试、审批、签名、灰度、回滚。
 
 Operations：节点、队列、存储、密钥引用、告警与审计访问。
 
-控制台实现采用原生 History API 的后台壳：左侧导航按服务端会话角色隐藏无权模块，站点详情、调查、案件、证据、审计和权限中心使用独立 URL，查询表单只存在于对应业务页面。隐藏导航不替代服务端授权；每个响应仍须重新验证 tenant/site scope、身份代际、操作资格和审计终态。`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049，现有开发数据卷无需重置。
+控制台实现采用原生 History API 的后台壳：左侧导航按服务端会话角色隐藏无权模块，站点详情、调查、案件、证据、审计和权限中心使用独立 URL，查询表单只存在于对应业务页面。隐藏导航不替代服务端授权；每个响应仍须重新验证 tenant/site scope、身份代际、操作资格和审计终态。`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049、0051，现有开发数据卷无需重置。
 
 站点策略可设置 `static_asset_max_path_depth`，默认值为 `5`。它只为 `GET` 静态资源扩展名（JavaScript、CSS、字体、图片、source map 和静态 JSON）提供有限深度兜底匹配；超过深度、非静态扩展和 API 路径仍按精确 operation 拒绝。该兜底不改变 WAF、限流或审计链路。
 
@@ -188,7 +188,23 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 
 只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
 
-本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0049 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
+本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0049、0051 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
 # 管理 API Key
 
 `POST/GET /control/v1/agent-api-keys`、`POST /{id}/revoke`、`POST /{id}/rotate` 仅允许 KeyAdministrator 或 SystemAdmin 的浏览器管理会话并要求 CSRF。创建响应只返回一次完整 `xsk_` 明文，数据库和审计只保存 HMAC 指纹、前缀、scope 与生命周期。
+
+## 站点发布审批与应用语义（2026-10-04）
+
+**审批要求只由“edge 正在服务什么”决定。** 站点写入事务内，以站点 active revision 的已存储完整配置为基线（从未应用过的站点没有基线），与新的 desired 配置一起交给 `xshield-core` 的纯函数 `assess_change_risk` 计算原因集合；调用方不能提供、也不能通过再次提交等价内容清除该结果，因为它从不参考“上一份 desired”。结果与原因词元（`ACTIVATION`、`TAKEDOWN`、`UPSTREAM_CHANGED` 等，存于 `site_apply_intents.risk_reasons`）随 apply intent 一起持久化。
+
+**触发规则按“可自由变化项”的白名单定义，而不是按危险项列举。** 站点开始被服务（新建即 `active`、`draft`→`active`、`paused`→`active`）总需要审批，无论其余字段如何；正在服务的站点被暂停或改回 draft 也需要审批（Takedown）；基线与 desired 之间任何安全相关字段的变化都需要审批，包括上游地址/服务名/TLS、公开 origin、监听端口、入口路径与入口准入、路由的增删改（准入从 `ui_action_required` 降为 `authenticated_root`、source action、资源绑定、请求/响应 crypto、响应模式与大小）、identity、站点 crypto、WAF 开关/拦截头/拦截片段/Cookie 上限、限额（任何方向的变化，包括调高）、健康检查、secret 引用、sensor、静态资源深度和 `origin_object_access_enforced`；新增字段默认也算变化（`OTHER_CHANGE`）。只有 `display_name`、`policy_revision` 标签和路由/secret 的顺序变化不需要审批。draft 与未服务的 paused 站点不暴露任何东西，编辑它们不需要审批。与此前版本相比：限额调优、`policy_revision` 标签变化的判定改变，降级路由、清空 WAF 片段/拦截头、关闭对象级校验、调高限额不再绕过审批。
+
+**审批绑定到所审阅的修订。** `POST /approve` 在持有租户锁和 apply intent 行锁的单个事务内读取 desired revision、配置摘要、apply_id 与该修订的作者，然后：幂等键只在其批准过的 `(revision, digest, apply_id)` 上重放，对其他修订返回 409 `CONTROL_SITE_APPROVAL_REVISION_MISMATCH`；请求带 `X-Xshield-Expected-Config-Digest`（64 位小写十六进制）时，摘要必须等于当前 desired 摘要，否则同样 409；审批人等于该修订作者时返回 403 `CONTROL_SITE_APPROVAL_SELF_REJECTED`（数据库 CHECK 约束再兜底一次）；清除要求的 UPDATE 同时限定 revision 与 apply_id。审批、拒绝、重放和不需要审批（409 `CONTROL_SITE_APPROVAL_NOT_REQUIRED`）都有独立审计终态；批准记录写入追加式 `site_apply_approvals`。未带摘要头的旧客户端仍可调用，但只能批准事务内读到的 desired，建议控制台随审阅页面的 `config_digest` 一并发送该头。
+
+**直接应用保留，但留痕。** 持有明确作用域 `site.config.apply_direct` 的 Agent API Key 仍可对需要审批的 desired revision 调用 `POST /apply`；控制面在同一事务内写入 `approval_kind=direct_apply` 的审批记录（调用主体、修订、配置摘要、apply_id）并清除要求，因此不会留下阻塞其他站点的过期 `requires_approval`。成功与失败的终态审计分别为 `EDGE_DIRECT_APPLY_CONFIRMED` 与 `EDGE_DIRECT_APPLY_NOT_CONFIRMED`。没有该能力的调用者仍得到 `requires_approval=true` 且不发布。
+
+**draft 不可路由。** 保存 draft 不会发布；对 draft 站点调用 `POST /apply` 返回 409 `CONTROL_SITE_DRAFT_NOT_APPLICABLE` 并写 DENY 审计；快照不包含 draft，也不会把 draft 标成已应用；draft→active 属于需要审批的上线。
+
+**一个站点不会冻结或污染整个租户。** 控制面读取租户状态与分配快照 revision 在同一事务内完成。每个站点在快照中的内容：已批准（或无需批准）、有效且 `active` 的 desired 配置按 desired 发布并确认；待审批的站点保持在其最后一次获批（active）配置，不会把未批准内容带到 edge，状态保持待审批；从未应用且待审批的站点不出现在快照中；paused 站点不出现但按 paused 确认；draft 不出现也不确认。desired 配置无法通过校验的同级站点同样保持在最后一次获批配置，并在自己的状态上标为 `failed`/`CONTROL_SITE_POLICY_INVALID`，不使其他站点的 apply 失败；被应用的目标站点本身不满足这些条件时，apply 以其稳定原因失败并写入该站点状态：`CONTROL_SITE_POLICY_INVALID`、`CONTROL_SITE_PORT_UNAVAILABLE`（保持旧配置的站点占用的端口与新站点冲突）。保持不变的配置不再重新校验，避免校验收紧把正在服务的站点变成故障。
+
+**幂等键覆盖每一次写入。** 每个修订都保存写入的幂等标识。重放最新写入返回原结果；重放更早写入的键返回 409 `CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED` 且不创建修订（同键不同内容仍是 `CONTROL_IDEMPOTENCY_CONFLICT`）。API 没有加入 expected-revision 前置条件：两个操作者并发保存仍以后写入者为准，写入后的审批要求照旧由基线决定。

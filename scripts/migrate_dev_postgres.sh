@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS xshield.dev_schema_migrations (
     applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 SQL
-    for file in "$repo_root"/migrations/004[1-9]_*.sql; do emit_migration "$file"; done
+    for file in "$repo_root"/migrations/00{4[1-9],[5-9][0-9]}_*.sql; do emit_migration "$file"; done
     printf "SELECT pg_advisory_unlock(hashtextextended('xshield-dev-migrations',0));\n"
 } | run_psql
 printf '%s\n' 'dev migration: baseline and site schema verified'

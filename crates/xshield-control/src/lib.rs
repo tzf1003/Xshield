@@ -5451,6 +5451,7 @@ mod tests {
     mod model_call_list;
     mod search_references;
     mod site_admin;
+    mod site_approval;
 
     use super::search::SearchRequest;
     use super::{
