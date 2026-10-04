@@ -373,6 +373,21 @@ impl DurableAudit {
         self.ready.load(Ordering::Acquire) && self.failure_code.load(Ordering::Acquire) == 0
     }
 
+    /// Reuses the durable writer while binding emitted event scope to the
+    /// selected site snapshot. The deployment key/journal remains shared;
+    /// per-site journal directories require a supervised writer registry.
+    pub(crate) fn scoped(&self, config: &GatewayConfig) -> Self {
+        Self {
+            journal: Arc::clone(&self.journal),
+            ready: Arc::clone(&self.ready),
+            failure_code: Arc::clone(&self.failure_code),
+            tenant_id: config.tenant_id().as_str().to_owned(),
+            site_id: config.site_id().as_str().to_owned(),
+            policy_revision: config.policy_revision().as_str().to_owned(),
+            producer_id: config.audit_producer_id().to_owned(),
+        }
+    }
+
     pub(crate) fn observe_failure(&self, error: &DurableAuditError) {
         let code = match error {
             DurableAuditError::Journal(_) => 1,

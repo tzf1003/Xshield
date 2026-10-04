@@ -1,28 +1,37 @@
+mod apply_api;
 mod buffered_json;
 mod durable_audit;
 mod evidence_writer;
+mod listener_supervisor;
 mod protected_identity;
 
+use crate::listener_supervisor::ListenerSupervisor;
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora::{
     Error as PingoraError, ErrorType, Result as PingoraResult,
     http::ResponseHeader,
-    proxy::{ProxyHttp, Session, http_proxy_service},
+    proxy::{ProxyHttp, Session},
     server::Server,
     upstreams::peer::HttpPeer,
 };
 use std::{
+    collections::{BTreeSet, HashMap},
     env,
     error::Error,
     fs,
-    sync::Arc,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use xshield_audit::JournalKey;
 use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
+use xshield_gateway::multi_site::{
+    ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot,
+};
 use xshield_gateway::request_crypto::{
     FrozenRequest, KeyAccessPort, KeyAccessQuery, RequestCryptoPolicy,
 };
@@ -32,8 +41,8 @@ use xshield_gateway::response_crypto::{
 use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
 use xshield_gateway::{
     BufferedResponsePolicy, GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
-    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_CONFIG_BYTES, SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES,
-    SENSOR_PREPARE_PATH,
+    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_BUFFERED_JSON_BYTES, MAX_CONFIG_BYTES,
+    SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES, SENSOR_PREPARE_PATH,
 };
 use xshield_postgres::{
     PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, SensorSession,
@@ -52,6 +61,13 @@ use crate::protected_identity::{
 };
 
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
+
+// Pingora normally fills socket metadata in its own listener service. The
+// dynamic listener supervisor uses the public ServerApp API, so carry the
+// accepted socket tuple through the task instead of guessing the route port.
+tokio::task_local! {
+    pub(crate) static DOWNSTREAM_SOCKET: (Option<SocketAddr>, Option<SocketAddr>);
+}
 fn validate_sensor_observation_headers(
     request: &pingora::http::RequestHeader,
     expected_origin: &str,
@@ -90,6 +106,7 @@ fn validate_sensor_observation_headers(
 
 struct Gateway {
     config: Arc<GatewayConfig>,
+    snapshot: Arc<ConfigSnapshotStore>,
     audit: DurableAudit,
     identity: Option<ProtectedIdentity>,
     request_key: Option<EnvRequestKey>,
@@ -97,6 +114,64 @@ struct Gateway {
     postgres: Option<Arc<PostgresRuntime>>,
     buffered_body_budget: Arc<Semaphore>,
     evidence: Option<evidence_writer::EvidenceWriter>,
+    rate_limiter: Arc<SiteRateLimiter>,
+}
+
+struct RateBucket {
+    tokens: f64,
+    updated: Instant,
+}
+
+struct SiteRateLimiter {
+    // ponytail: process-local source buckets; use a shared limiter when edge replicas need one quota.
+    buckets: Mutex<HashMap<(String, IpAddr), RateBucket>>,
+}
+
+impl SiteRateLimiter {
+    const MAX_BUCKETS: usize = 65_536;
+
+    fn new() -> Self {
+        Self {
+            buckets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn allow(
+        &self,
+        site_id: &str,
+        source: Option<IpAddr>,
+        policy: &xshield_core::SitePolicyConfig,
+    ) -> bool {
+        let Some(source) = source else {
+            return false;
+        };
+        let now = Instant::now();
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (site_id.to_owned(), source);
+        if !buckets.contains_key(&key) && buckets.len() >= Self::MAX_BUCKETS {
+            buckets.retain(|_, bucket| now.duration_since(bucket.updated) < Duration::from_mins(5));
+            if buckets.len() >= Self::MAX_BUCKETS {
+                return false;
+            }
+        }
+        let rate = f64::from(policy.limits.requests_per_second);
+        let burst = f64::from(policy.limits.burst);
+        let bucket = buckets.entry(key).or_insert(RateBucket {
+            tokens: burst,
+            updated: now,
+        });
+        let elapsed = now.duration_since(bucket.updated).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
+        bucket.updated = now;
+        if bucket.tokens < 1.0 {
+            return false;
+        }
+        bucket.tokens -= 1.0;
+        true
+    }
 }
 
 struct PostgresRuntime {
@@ -138,6 +213,8 @@ struct RequestContext {
     admission_audit: Option<AdmissionAudit>,
     rebuilt_request_body: Option<Bytes>,
     rebuilt_request_len: Option<usize>,
+    request_body_len: usize,
+    response_body_len: usize,
     request_crypto_audit: Option<RequestCryptoAudit>,
     response_crypto_audit: Option<ResponseCryptoAudit>,
     sensor_html_audit: Option<SensorHtmlAudit>,
@@ -152,9 +229,28 @@ struct RequestContext {
     origin_status: Option<u16>,
     origin_response_complete: bool,
     response_source: ResponseSource,
+    snapshot: Option<Arc<GatewaySnapshot>>,
+    listener_port: Option<u16>,
+    host: Option<String>,
+    audit: Option<DurableAudit>,
+}
+
+impl RequestContext {
+    fn config<'a>(&'a self, gateway: &'a Gateway) -> &'a GatewayConfig {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot.route(
+                    self.listener_port.unwrap_or(gateway.config.listen().port()),
+                    self.host.as_deref().unwrap_or_default(),
+                )
+            })
+            .unwrap_or(&gateway.config)
+    }
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl ProxyHttp for Gateway {
     type CTX = RequestContext;
 
@@ -167,6 +263,8 @@ impl ProxyHttp for Gateway {
             admission_audit: None,
             rebuilt_request_body: None,
             rebuilt_request_len: None,
+            request_body_len: 0,
+            response_body_len: 0,
             request_crypto_audit: None,
             response_crypto_audit: None,
             sensor_html_audit: None,
@@ -181,6 +279,13 @@ impl ProxyHttp for Gateway {
             origin_status: None,
             origin_response_complete: false,
             response_source: ResponseSource::Origin,
+            snapshot: None,
+            listener_port: DOWNSTREAM_SOCKET
+                .try_with(|(_, local)| local.map(|address| address.port()))
+                .ok()
+                .flatten(),
+            host: None,
+            audit: None,
         }
     }
 
@@ -207,11 +312,59 @@ impl ProxyHttp for Gateway {
             .as_downstream()
             .client_addr()
             .and_then(|address| address.as_inet())
-            .map(std::net::SocketAddr::ip);
+            .map(std::net::SocketAddr::ip)
+            .or_else(|| {
+                DOWNSTREAM_SOCKET
+                    .try_with(|(peer, _)| peer.map(|address| address.ip()))
+                    .ok()
+                    .flatten()
+            });
         let request = session.req_header();
         let method = request.method.as_str().to_owned();
         let path = request.uri.path().to_owned();
-        let internal_response = self.config.internal_response(&method, &path);
+        let host = request
+            .headers
+            .get("Host")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let listener_port = session
+            .as_downstream()
+            .server_addr()
+            .and_then(|address| address.as_inet().map(std::net::SocketAddr::port))
+            .or_else(|| {
+                DOWNSTREAM_SOCKET
+                    .try_with(|(_, local)| local.map(|address| address.port()))
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| context.config(self).listen().port());
+        let snapshot = self.snapshot.load();
+        if snapshot
+            .route(listener_port, host.as_deref().unwrap_or_default())
+            .is_none()
+        {
+            respond_denial(
+                session,
+                503,
+                &context.request_id,
+                ReasonCode::SiteConfigUnavailable,
+                None,
+            )
+            .await?;
+            return Ok(true);
+        }
+        context.snapshot = Some(snapshot);
+        context.listener_port = Some(listener_port);
+        context.host = host;
+        let snapshot_for_audit = context.snapshot.clone();
+        let selected_config = snapshot_for_audit
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot.route(listener_port, context.host.as_deref().unwrap_or_default())
+            })
+            .unwrap_or(&self.config);
+        context.audit = Some(self.audit.scoped(selected_config));
+        let internal_response = selected_config.internal_response(&method, &path);
         let Ok(wall_time) = SystemTime::now().duration_since(UNIX_EPOCH) else {
             respond_denial(
                 session,
@@ -235,39 +388,72 @@ impl ProxyHttp for Gateway {
             .await?;
             return Ok(true);
         };
-        let mut decision = match self.identity.as_ref() {
-            Some(identity) => {
-                if let Ok(admission) = identity
-                    .admit(
-                        &self.config,
-                        request,
-                        &request_id,
-                        &context.trace_id,
-                        client_ip,
-                        now,
-                    )
-                    .await
-                {
-                    context.response_identity = admission.response_identity;
-                    context.anonymous_session_cookie = admission.anonymous_session_cookie;
-                    context.compatibility_evidence = admission.compatibility_evidence;
-                    context.sensor_session = admission.sensor_session;
-                    admission.decision
-                } else {
-                    let mut decision = self.config.admit(&method, &path, now);
-                    decision.outcome = GatewayOutcome::Denied;
-                    decision.reason_code = store_failure_reason();
-                    decision
+        let policy_denial = selected_config
+            .site_policy()
+            .and_then(|policy| site_waf_denial(request, policy));
+        let rate_limited = policy_denial.is_none()
+            && selected_config.site_policy().is_some_and(|policy| {
+                !self
+                    .rate_limiter
+                    .allow(selected_config.site_id().as_str(), client_ip, policy)
+            });
+        let mut decision = if let Some(reason) = policy_denial {
+            let mut decision = selected_config.admit(&method, &path, now);
+            decision.outcome = GatewayOutcome::Denied;
+            decision.reason_code = reason;
+            decision
+        } else if rate_limited {
+            let mut decision = selected_config.admit(&method, &path, now);
+            decision.outcome = GatewayOutcome::Denied;
+            decision.reason_code = ReasonCode::SiteRateLimitExceeded;
+            decision
+        } else {
+            match self.identity.as_ref() {
+                Some(identity) => {
+                    if let Ok(admission) = identity
+                        .admit(
+                            selected_config,
+                            request,
+                            &request_id,
+                            &context.trace_id,
+                            client_ip,
+                            now,
+                        )
+                        .await
+                    {
+                        context.response_identity = admission.response_identity;
+                        context.anonymous_session_cookie = admission.anonymous_session_cookie;
+                        context.compatibility_evidence = admission.compatibility_evidence;
+                        context.sensor_session = admission.sensor_session;
+                        admission.decision
+                    } else {
+                        let mut decision = selected_config.admit(&method, &path, now);
+                        decision.outcome = GatewayOutcome::Denied;
+                        decision.reason_code = store_failure_reason();
+                        decision
+                    }
                 }
+                None => selected_config.admit(&method, &path, now),
             }
-            None => self.config.admit(&method, &path, now),
         };
+        if request
+            .headers
+            .get("Content-Length")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length > selected_config.request_body_limit())
+        {
+            decision.outcome = GatewayOutcome::Denied;
+            decision.reason_code = ReasonCode::RequestBodyTooLarge;
+        }
         self.apply_sensor_observation(session, context, internal_response, &mut decision)
             .await;
         self.apply_request_crypto(session, context, &method, &path, now, &mut decision)
             .await;
-        let audit_result = self
+        let audit_result = context
             .audit
+            .as_ref()
+            .unwrap_or(&self.audit)
             .commit_admission(AdmissionFacts {
                 request_id: &context.request_id,
                 trace_id: &context.trace_id,
@@ -282,7 +468,11 @@ impl ProxyHttp for Gateway {
         let admission_audit = match audit_result {
             Ok(receipt) => receipt,
             Err(error) => {
-                self.audit.observe_failure(&error);
+                context
+                    .audit
+                    .as_ref()
+                    .unwrap_or(&self.audit)
+                    .observe_failure(&error);
                 respond_denial(
                     session,
                     503,
@@ -317,7 +507,7 @@ impl ProxyHttp for Gateway {
                     respond_sensor_loader(session, &context.request_id).await?;
                 }
                 InternalResponse::SensorBootstrap => {
-                    let sensor = self.config.sensor().ok_or_else(|| {
+                    let sensor = context.config(self).sensor().ok_or_else(|| {
                         PingoraError::explain(
                             ErrorType::HTTPStatus(500),
                             "sensor bootstrap policy missing",
@@ -337,12 +527,12 @@ impl ProxyHttp for Gateway {
     async fn upstream_peer(
         &self,
         _session: &mut Session,
-        _context: &mut Self::CTX,
+        context: &mut Self::CTX,
     ) -> PingoraResult<Box<HttpPeer>> {
         Ok(Box::new(HttpPeer::new(
-            self.config.origin_address(),
-            self.config.origin_tls(),
-            self.config.origin_server_name().to_owned(),
+            context.config(self).origin_address(),
+            context.config(self).origin_tls(),
+            context.config(self).origin_server_name().to_owned(),
         )))
     }
 
@@ -353,6 +543,17 @@ impl ProxyHttp for Gateway {
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
         strip_edge_proofs(upstream_request)?;
+        // This header is edge-generated from the signed site policy.  Any
+        // client supplied copy is removed so callers cannot opt out of the
+        // origin's object ownership check.
+        upstream_request.remove_header("X-Xshield-Object-Access");
+        if context
+            .config(self)
+            .site_policy()
+            .is_some_and(|policy| policy.origin_object_access_enforced)
+        {
+            upstream_request.insert_header("X-Xshield-Object-Access", "enforce")?;
+        }
         if let Some(length) = context.rebuilt_request_len {
             for name in [
                 "Transfer-Encoding",
@@ -369,7 +570,7 @@ impl ProxyHttp for Gateway {
             upstream_request.insert_header("Content-Type", "application/json")?;
             upstream_request.insert_header("Content-Length", length.to_string())?;
         }
-        upstream_request.insert_header("Host", self.config.origin_server_name())?;
+        upstream_request.insert_header("Host", context.config(self).origin_server_name())?;
         upstream_request.insert_header("X-Xshield-Request-Id", &context.request_id)?;
         Ok(())
     }
@@ -382,6 +583,12 @@ impl ProxyHttp for Gateway {
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
         if context.rebuilt_request_len.is_none() {
+            if let Some(chunk) = body.as_ref() {
+                context.request_body_len = context.request_body_len.saturating_add(chunk.len());
+                if context.request_body_len > context.config(self).request_body_limit() {
+                    return request_error(ReasonCode::RequestBodyTooLarge);
+                }
+            }
             return Ok(());
         }
         if !end_of_stream {
@@ -401,16 +608,33 @@ impl ProxyHttp for Gateway {
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
         let request = session.req_header();
-        let buffered_policy = self
-            .config
-            .buffered_response_policy(request.method.as_str(), request.uri.path());
-        let response_crypto_rule = self
-            .config
-            .response_crypto_rule(request.method.as_str(), request.uri.path());
-        if upstream_response.status.as_u16() == 101 && buffered_policy.is_some() {
+        let response_limit = context
+            .config(self)
+            .site_policy()
+            .map_or(MAX_BUFFERED_JSON_BYTES, |policy| {
+                policy.limits.max_response_body_bytes
+            });
+        if upstream_response
+            .headers
+            .get("Content-Length")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length > response_limit)
+        {
+            context.response_failure = Some(ReasonCode::ResponseBodyTooLarge);
+            return response_error(ReasonCode::ResponseBodyTooLarge);
+        }
+        let has_buffered_policy = context
+            .config(self)
+            .buffered_response_policy(request.method.as_str(), request.uri.path())
+            .is_some();
+        if upstream_response.status.as_u16() == 101 && has_buffered_policy {
             context.origin_status = Some(101);
             context.response_failure = Some(ReasonCode::ResponseValidationFailed);
-            if let Some(rule) = response_crypto_rule {
+            if let Some(rule) = context
+                .config(self)
+                .response_crypto_rule(request.method.as_str(), request.uri.path())
+            {
                 context.response_crypto_audit = Some(ResponseCryptoAudit::failed(
                     rule,
                     ReasonCode::ResponseValidationFailed,
@@ -421,8 +645,8 @@ impl ProxyHttp for Gateway {
         }
         if !upstream_response.status.is_informational() {
             context.origin_status = Some(upstream_response.status.as_u16());
-            if self
-                .config
+            if context
+                .config(self)
                 .response_share_operation(request.method.as_str(), request.uri.path())
                 .is_some()
                 && (upstream_response.headers.contains_key("Content-Range")
@@ -433,7 +657,15 @@ impl ProxyHttp for Gateway {
                 context.response_failure = Some(ReasonCode::ResponseValidationFailed);
                 return response_error(ReasonCode::ResponseValidationFailed);
             }
-            if let Some(policy) = buffered_policy {
+            let buffered = {
+                let config = context.config(self);
+                let Some(policy) =
+                    config.buffered_response_policy(request.method.as_str(), request.uri.path())
+                else {
+                    return finish_response_header(upstream_response, &context.request_id);
+                };
+                let response_crypto_rule =
+                    config.response_crypto_rule(request.method.as_str(), request.uri.path());
                 let reservation_bytes = response_crypto_rule
                     .map(xshield_gateway::response_crypto::ResponseCryptoRule::max_in_flight_bytes)
                     .or_else(|| policy.max_in_flight_bytes())
@@ -443,38 +675,40 @@ impl ProxyHttp for Gateway {
                             ReasonCode::ResponseBufferCapacityExhausted.as_str(),
                         )
                     })?;
-                match BufferedResponse::begin(
+                let encrypted = response_crypto_rule.is_some();
+                let sensor_html = matches!(policy, BufferedResponsePolicy::SensorHtml(_));
+                let buffer = BufferedResponse::begin(
                     upstream_response,
                     policy,
                     reservation_bytes,
                     &self.buffered_body_budget,
-                ) {
-                    Ok(buffer) => {
-                        self.prepare_response_issuance_headers(
-                            request,
-                            upstream_response,
-                            context,
-                        )?;
-                        if response_crypto_rule.is_some() {
-                            prepare_encrypted_response_headers(upstream_response)?;
-                        } else if matches!(policy, BufferedResponsePolicy::SensorHtml(_)) {
-                            prepare_sensor_html_response_headers(upstream_response)?;
-                        }
-                        context.buffered_response = Some(buffer);
+                );
+                (buffer, encrypted, sensor_html)
+            };
+            match buffered.0 {
+                Ok(buffer) => {
+                    self.prepare_response_issuance_headers(request, upstream_response, context)?;
+                    if buffered.1 {
+                        prepare_encrypted_response_headers(upstream_response)?;
+                    } else if buffered.2 {
+                        prepare_sensor_html_response_headers(upstream_response)?;
                     }
-                    Err(reason) => {
-                        context.response_failure = Some(reason);
-                        if let Some(rule) = response_crypto_rule {
-                            context.response_crypto_audit =
-                                Some(ResponseCryptoAudit::failed(rule, reason, 0));
-                        }
-                        return response_error(reason);
+                    context.buffered_response = Some(buffer);
+                }
+                Err(reason) => {
+                    context.response_failure = Some(reason);
+                    if let Some(rule) = context
+                        .config(self)
+                        .response_crypto_rule(request.method.as_str(), request.uri.path())
+                    {
+                        context.response_crypto_audit =
+                            Some(ResponseCryptoAudit::failed(rule, reason, 0));
                     }
+                    return response_error(reason);
                 }
             }
         }
-        upstream_response.insert_header("X-Xshield-Request-Id", &context.request_id)?;
-        Ok(())
+        finish_response_header(upstream_response, &context.request_id)
     }
 
     fn response_body_filter(
@@ -484,6 +718,22 @@ impl ProxyHttp for Gateway {
         end_of_stream: bool,
         context: &mut Self::CTX,
     ) -> PingoraResult<Option<std::time::Duration>> {
+        if context.buffered_response.is_none() {
+            if let Some(chunk) = body.as_ref() {
+                context.response_body_len = context.response_body_len.saturating_add(chunk.len());
+                let limit = context
+                    .config(self)
+                    .site_policy()
+                    .map_or(MAX_BUFFERED_JSON_BYTES, |policy| {
+                        policy.limits.max_response_body_bytes
+                    });
+                if context.response_body_len > limit {
+                    context.response_failure = Some(ReasonCode::ResponseBodyTooLarge);
+                    return response_error(ReasonCode::ResponseBodyTooLarge);
+                }
+            }
+            return Ok(None);
+        }
         let Some(buffer) = context.buffered_response.as_mut() else {
             return Ok(None);
         };
@@ -518,8 +768,8 @@ impl ProxyHttp for Gateway {
             Err(reason) => {
                 context.response_failure = Some(reason);
                 let request = session.req_header();
-                if let Some(rule) = self
-                    .config
+                if let Some(rule) = context
+                    .config(self)
                     .response_crypto_rule(request.method.as_str(), request.uri.path())
                 {
                     context.response_crypto_audit =
@@ -561,8 +811,10 @@ impl ProxyHttp for Gateway {
         let Some(admission) = context.admission_audit.as_ref() else {
             return;
         };
-        let result = self
+        let result = context
             .audit
+            .as_ref()
+            .unwrap_or(&self.audit)
             .finalize(FinalFacts {
                 request_id: &context.request_id,
                 trace_id: &context.trace_id,
@@ -581,7 +833,11 @@ impl ProxyHttp for Gateway {
             })
             .await;
         if let Err(error) = result {
-            self.audit.observe_failure(&error);
+            context
+                .audit
+                .as_ref()
+                .unwrap_or(&self.audit)
+                .observe_failure(&error);
         }
     }
 }
@@ -595,8 +851,8 @@ impl Gateway {
         upstream_response: &mut ResponseHeader,
         context: &mut RequestContext,
     ) -> PingoraResult<()> {
-        if let Some(rule) = self
-            .config
+        if let Some(rule) = context
+            .config(self)
             .auth_binding_rule(request.method.as_str(), request.uri.path())
         {
             prepare_auth_response_headers(upstream_response)?;
@@ -612,26 +868,26 @@ impl Gateway {
                 append_waf_cookie(upstream_response, &pending.cookie_header_value())?;
                 context.pending_auth_binding = Some(pending);
             }
-        } else if self
-            .config
+        } else if context
+            .config(self)
             .auth_refresh_rule(request.method.as_str(), request.uri.path())
             .is_some()
-            || self
-                .config
+            || context
+                .config(self)
                 .auth_context_switch_rule(request.method.as_str(), request.uri.path())
                 .is_some()
-            || self
-                .config
+            || context
+                .config(self)
                 .auth_revoke_rule(request.method.as_str(), request.uri.path())
                 .is_some()
         {
             prepare_auth_response_headers(upstream_response)?;
-        } else if self
-            .config
+        } else if context
+            .config(self)
             .response_grant_operation(request.method.as_str(), request.uri.path())
             .is_some()
-            || self
-                .config
+            || context
+                .config(self)
                 .response_share_operation(request.method.as_str(), request.uri.path())
                 .is_some()
         {
@@ -647,12 +903,13 @@ impl Gateway {
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
-        let Some(rule) = self
-            .config
+        if context
+            .config(self)
             .evidence_capture_rule(request.method.as_str(), request.uri.path())
-        else {
+            .is_none()
+        {
             return Ok(body);
-        };
+        }
         let writer = self
             .evidence
             .as_ref()
@@ -661,20 +918,26 @@ impl Gateway {
             .postgres
             .as_ref()
             .ok_or(ReasonCode::EvidenceCaptureUnavailable)?;
-        let admission = context
+        let mut admission = context
             .admission_audit
-            .as_mut()
+            .take()
             .ok_or(ReasonCode::EvidenceCaptureUnavailable)?;
-        writer.capture(
-            &self.config,
+        let rule = context
+            .config(self)
+            .evidence_capture_rule(request.method.as_str(), request.uri.path())
+            .ok_or(ReasonCode::EvidenceCaptureUnavailable)?;
+        let result = writer.capture(
+            context.config(self),
             postgres,
-            &self.audit,
+            context.audit.as_ref().unwrap_or(&self.audit),
             &context.request_id,
             &context.trace_id,
-            admission,
+            &mut admission,
             rule,
             &body,
-        )?;
+        );
+        context.admission_audit = Some(admission);
+        result?;
         Ok(body)
     }
 
@@ -705,8 +968,8 @@ impl Gateway {
         session: &mut Session,
         context: &RequestContext,
     ) -> Result<Vec<SensorObservationAudit>, ReasonCode> {
-        let sensor = self
-            .config
+        let sensor = context
+            .config(self)
             .sensor()
             .ok_or(ReasonCode::SensorObservationInvalid)?;
         let expected_len =
@@ -761,7 +1024,7 @@ impl Gateway {
         if decision.outcome != GatewayOutcome::Allowed {
             return;
         }
-        let Some(policy) = self.config.request_crypto_policy(method, path) else {
+        let Some(policy) = context.config(self).request_crypto_policy(method, path) else {
             return;
         };
         let rule = match policy {
@@ -808,7 +1071,7 @@ impl Gateway {
         };
         let started_at = Instant::now();
         match self
-            .decrypt_request(session, rule, now, decision, &context.request_id)
+            .decrypt_request(session, context, rule, now, decision, &context.request_id)
             .await
         {
             Ok(frozen) => {
@@ -834,6 +1097,7 @@ impl Gateway {
     async fn decrypt_request(
         &self,
         session: &mut Session,
+        context: &RequestContext,
         rule: &xshield_gateway::request_crypto::RequestCryptoRule,
         now: UnixSeconds,
         decision: &GatewayDecision,
@@ -871,8 +1135,8 @@ impl Gateway {
             .as_ref()
             .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
         let frozen = rule.decode(
-            self.config.tenant_id().as_str(),
-            self.config.site_id().as_str(),
+            context.config(self).tenant_id().as_str(),
+            context.config(self).site_id().as_str(),
             operation_id.as_str(),
             &method,
             &path,
@@ -887,8 +1151,8 @@ impl Gateway {
             .as_ref()
             .ok_or(ReasonCode::RequestCryptoReplayStoreUnavailable)?;
         let message = RequestCryptoMessage::new(
-            self.config.tenant_id(),
-            self.config.site_id(),
+            context.config(self).tenant_id(),
+            context.config(self).site_id(),
             rule.key_id(),
             frozen.message_id(),
             frozen.nonce(),
@@ -923,8 +1187,8 @@ impl Gateway {
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
-        let Some(rule) = self
-            .config
+        let Some(rule) = context
+            .config(self)
             .response_crypto_rule(request.method.as_str(), request.uri.path())
         else {
             return Ok(body);
@@ -948,8 +1212,8 @@ impl Gateway {
                 .as_ref()
                 .ok_or(ReasonCode::ResponseCryptoKeyUnavailable)?;
             rule.encode(
-                self.config.tenant_id().as_str(),
-                self.config.site_id().as_str(),
+                context.config(self).tenant_id().as_str(),
+                context.config(self).site_id().as_str(),
                 operation_id.as_str(),
                 &context.request_id,
                 request.method.as_str(),
@@ -989,8 +1253,8 @@ impl Gateway {
             return Ok(body);
         };
         let request = session.req_header();
-        let rule = self
-            .config
+        let rule = context
+            .config(self)
             .auth_binding_rule(request.method.as_str(), request.uri.path())
             .ok_or(ReasonCode::ResponseValidationFailed)?;
         let identity = self
@@ -1003,7 +1267,7 @@ impl Gateway {
         // barrier to an async body hook when the proxy API provides one.
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(identity.commit_auth_binding(
-                &self.config,
+                context.config(self),
                 rule,
                 &pending,
                 &request_id,
@@ -1021,8 +1285,8 @@ impl Gateway {
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
-        let Some(operation) = self
-            .config
+        let Some(operation) = context
+            .config(self)
             .response_grant_operation(request.method.as_str(), request.uri.path())
         else {
             return Ok(body);
@@ -1053,7 +1317,7 @@ impl Gateway {
         // barrier to an async body hook when the proxy API provides one.
         let action_refs = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(identity.commit_response_grants(
-                &self.config,
+                context.config(self),
                 response_identity,
                 operation,
                 &request_id,
@@ -1081,8 +1345,8 @@ impl Gateway {
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
-        let Some(operation) = self
-            .config
+        let Some(operation) = context
+            .config(self)
             .response_share_operation(request.method.as_str(), request.uri.path())
         else {
             return Ok(body);
@@ -1090,8 +1354,8 @@ impl Gateway {
         let status = context
             .origin_status
             .ok_or(ReasonCode::ResponseValidationFailed)?;
-        let max_bytes = self
-            .config
+        let max_bytes = context
+            .config(self)
             .buffered_json_max_bytes(request.method.as_str(), request.uri.path())
             .ok_or(ReasonCode::ResponseValidationFailed)?;
         let Some(prepared) = operation.rule.prepare(status, &body, max_bytes)? else {
@@ -1118,7 +1382,7 @@ impl Gateway {
         // hook when available, preserving this pre-release transaction barrier.
         let token = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(identity.commit_response_share(
-                &self.config,
+                context.config(self),
                 response_identity,
                 operation,
                 &request_id,
@@ -1140,11 +1404,11 @@ impl Gateway {
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
-        let refresh = self
-            .config
+        let refresh = context
+            .config(self)
             .auth_refresh_rule(request.method.as_str(), request.uri.path());
-        let context_switch = self
-            .config
+        let context_switch = context
+            .config(self)
             .auth_context_switch_rule(request.method.as_str(), request.uri.path());
         let Some(rule) = refresh.or(context_switch) else {
             return Ok(body);
@@ -1176,7 +1440,7 @@ impl Gateway {
                 if context_switch.is_some() {
                     identity
                         .commit_auth_context_switch(
-                            &self.config,
+                            context.config(self),
                             rule,
                             response_identity,
                             &request_id,
@@ -1188,7 +1452,7 @@ impl Gateway {
                 } else {
                     identity
                         .commit_auth_refresh(
-                            &self.config,
+                            context.config(self),
                             rule,
                             response_identity,
                             &request_id,
@@ -1210,8 +1474,8 @@ impl Gateway {
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
-        let Some(rule) = self
-            .config
+        let Some(rule) = context
+            .config(self)
             .auth_revoke_rule(request.method.as_str(), request.uri.path())
         else {
             return Ok(body);
@@ -1238,7 +1502,7 @@ impl Gateway {
             .map_err(|_| ReasonCode::ClockUnavailable)?;
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(identity.commit_auth_revoke(
-                &self.config,
+                context.config(self),
                 rule,
                 response_identity,
                 &request_id,
@@ -1268,6 +1532,11 @@ fn prepare_grant_response_headers(response: &mut ResponseHeader) -> PingoraResul
     }
     response.insert_header("Transfer-Encoding", "chunked")?;
     response.insert_header("Cache-Control", "private, no-store")
+}
+
+fn finish_response_header(response: &mut ResponseHeader, request_id: &str) -> PingoraResult<()> {
+    response.insert_header("X-Xshield-Request-Id", request_id)?;
+    Ok(())
 }
 
 fn prepare_sensor_html_response_headers(response: &mut ResponseHeader) -> PingoraResult<()> {
@@ -1377,8 +1646,8 @@ fn elapsed_us(started_at: Instant) -> u64 {
 const fn denial_status(reason: ReasonCode) -> u16 {
     match reason {
         ReasonCode::AuthRequired => 401,
-        ReasonCode::AnonymousSessionRateExceeded => 429,
-        ReasonCode::RequestBodyTooLarge => 413,
+        ReasonCode::AnonymousSessionRateExceeded | ReasonCode::SiteRateLimitExceeded => 429,
+        ReasonCode::RequestBodyTooLarge | ReasonCode::WafCookieTooLarge => 413,
         ReasonCode::AnonymousSessionCapacityExceeded
         | ReasonCode::IdentityStoreUnavailable
         | ReasonCode::RequestBufferCapacityExhausted
@@ -1386,12 +1655,87 @@ const fn denial_status(reason: ReasonCode) -> u16 {
         | ReasonCode::RequestCryptoReplayStoreUnavailable
         | ReasonCode::RequestCryptoReplayCapacityExceeded => 503,
         ReasonCode::RequestEnvelopeInvalid
+        | ReasonCode::WafQueryInvalid
         | ReasonCode::RequestCryptoAuthenticationFailed
         | ReasonCode::RequestCryptoMessageExpired
         | ReasonCode::RequestCryptoMessageFromFuture => 400,
         ReasonCode::RequestCryptoReplayDetected => 409,
         _ => 403,
     }
+}
+
+fn site_waf_denial(
+    request: &pingora::http::RequestHeader,
+    policy: &xshield_core::SitePolicyConfig,
+) -> Option<ReasonCode> {
+    if !policy.waf.enabled {
+        return None;
+    }
+    if policy
+        .waf
+        .blocked_headers
+        .iter()
+        .any(|header| request.headers.contains_key(header))
+    {
+        return Some(ReasonCode::WafHeaderBlocked);
+    }
+    if !policy.waf.blocked_query_fragments.is_empty()
+        && let Some(query) = request.uri.query()
+    {
+        let Some(decoded) = decode_waf_query(query) else {
+            return Some(ReasonCode::WafQueryInvalid);
+        };
+        if policy
+            .waf
+            .blocked_query_fragments
+            .iter()
+            .any(|fragment| decoded.contains(&fragment.to_ascii_lowercase()))
+        {
+            return Some(ReasonCode::WafQueryBlocked);
+        }
+    }
+    let cookie_bytes = request
+        .headers
+        .get_all("Cookie")
+        .iter()
+        .map(|value| value.as_bytes().len())
+        .sum::<usize>();
+    (cookie_bytes > policy.waf.max_cookie_bytes as usize).then_some(ReasonCode::WafCookieTooLarge)
+}
+
+// Decode once, exactly as the upstream's query parser would, before matching.
+// Invalid escape sequences fail closed when this policy is enabled.
+fn decode_waf_query(query: &str) -> Option<String> {
+    if query.len() > 8_192 {
+        return None;
+    }
+    let mut output = Vec::with_capacity(query.len());
+    let bytes = query.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let pair = bytes.get(index + 1..index + 3)?;
+            let digit = |byte: u8| {
+                (byte as char)
+                    .to_digit(16)
+                    .and_then(|digit| u8::try_from(digit).ok())
+            };
+            output.push((digit(pair[0])? << 4) | digit(pair[1])?);
+            index += 3;
+        } else {
+            output.push(if bytes[index] == b'+' {
+                b' '
+            } else {
+                bytes[index]
+            });
+            index += 1;
+        }
+    }
+    let decoded = String::from_utf8(output).ok()?;
+    if decoded.bytes().any(|byte| byte.is_ascii_control()) {
+        return None;
+    }
+    Some(decoded.to_ascii_lowercase())
 }
 
 async fn respond_denial(
@@ -1660,8 +2004,70 @@ fn is_xshield_encrypted_content_type(request: &pingora::http::RequestHeader) -> 
         })
 }
 
+#[allow(clippy::too_many_lines)]
 fn run() -> Result<(), Box<dyn Error>> {
     let config = Arc::new(load_config()?);
+    let snapshot_config = load_config()?;
+    let apply_key = env::var("XSHIELD_EDGE_APPLY_KEY_HEX")
+        .ok()
+        .map(|value| apply_api::key_from_hex(&value).ok_or("invalid edge apply key"))
+        .transpose()?;
+    let snapshot_path = env::var_os("XSHIELD_EDGE_SNAPSHOT_PATH").map(PathBuf::from);
+    let mut persisted = match (snapshot_path.as_deref(), apply_key.as_ref()) {
+        (Some(path), Some(key)) => {
+            apply_api::load_persisted_snapshot(path, key, config.tenant_id().as_str())?
+        }
+        (Some(_), None) => {
+            return Err("XSHIELD_EDGE_SNAPSHOT_PATH requires XSHIELD_EDGE_APPLY_KEY_HEX".into());
+        }
+        (None, _) => None,
+    };
+    let mut listener_addresses = configured_listener_addresses(config.listen())?;
+    if let Some((_, snapshot)) = persisted.as_ref() {
+        for port in snapshot.listener_ports() {
+            let address = SocketAddr::new(config.listen().ip(), port);
+            if !listener_addresses.contains(&address) {
+                listener_addresses.push(address);
+            }
+        }
+        validate_listener_addresses(&listener_addresses)?;
+    }
+    if !listener_addresses
+        .iter()
+        .any(|address| address.port() == config.listen().port())
+    {
+        return Err("XSHIELD_EDGE_LISTEN_PORTS must include the bootstrap listener".into());
+    }
+    let mut public_hosts = env::var("XSHIELD_PUBLIC_HOSTS")
+        .unwrap_or_else(|_| config.origin_server_name().to_owned())
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    // The development listener is loopback-only, so accepting its exact IP
+    // Host keeps direct local probes compatible without widening public routes.
+    if config.listen().ip().is_loopback() {
+        let host = config.listen().ip().to_string();
+        if !public_hosts.iter().any(|current| current == &host) {
+            public_hosts.push(host);
+        }
+    }
+    let initial_snapshot = if let Some((_, snapshot)) = persisted.take() {
+        // The signed complete snapshot is the restart source of truth. The
+        // static file remains the bootstrap fallback only when no snapshot is
+        // configured yet.
+        snapshot
+    } else if env::var("XSHIELD_EDGE_BOOTSTRAP_ONLY").as_deref() == Ok("1") {
+        // Bootstrap-only mode deliberately exposes no business route until a
+        // signed control-plane snapshot arrives through /internal/v1/apply.
+        GatewaySnapshot::compile_for_tenant(1, config.tenant_id().clone(), Vec::new())?
+    } else {
+        GatewaySnapshot::compile(1, vec![GatewaySite::new(snapshot_config, public_hosts)?])?
+    };
+    let coordinator = Arc::new(ApplyCoordinator::new(Arc::new(ConfigSnapshotStore::new(
+        initial_snapshot,
+    ))));
     let key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let audit = DurableAudit::open(&config, JournalKey::from_hex(&key_hex)?)?;
     let postgres = config
@@ -1693,10 +2099,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let mut server = Server::new(None)?;
     server.bootstrap();
-    let mut proxy = http_proxy_service(
+    let proxy = pingora::proxy::http_proxy(
         &server.configuration,
         Gateway {
             config: Arc::clone(&config),
+            snapshot: coordinator.snapshot_store(),
             audit,
             identity,
             request_key,
@@ -1704,11 +2111,84 @@ fn run() -> Result<(), Box<dyn Error>> {
             evidence,
             postgres,
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
+            rate_limiter: Arc::new(SiteRateLimiter::new()),
         },
     );
-    proxy.add_tcp(&config.listen().to_string());
-    server.add_service(proxy);
+    let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(4)
+        .build()?;
+    let supervisor = runtime.block_on(ListenerSupervisor::new(
+        Arc::clone(&coordinator),
+        Arc::new(proxy),
+        config.listen().ip(),
+        &listener_addresses,
+        shutdown.clone(),
+    ))?;
+    if let Some(key) = apply_key {
+        let listen: SocketAddr = env::var("XSHIELD_EDGE_APPLY_LISTEN")
+            .unwrap_or_else(|_| "127.0.0.1:9553".to_owned())
+            .parse()?;
+        if !listen.ip().is_loopback() {
+            return Err("edge apply listener must use loopback".into());
+        }
+        let apply_listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
+        let state = apply_api::ApplyState::new(
+            Arc::new(supervisor),
+            config.tenant_id().as_str().to_owned(),
+            key,
+            snapshot_path,
+        );
+        runtime.spawn(async move {
+            if let Err(error) = apply_api::serve(apply_listener, state).await {
+                eprintln!("xshield edge apply listener stopped: {error}");
+            }
+        });
+    }
+    // The supervisor owns all data-plane sockets and apply coordination. Keep
+    // its runtime alive while the process waits for shutdown.
+    let _runtime = runtime;
+    let _shutdown_tx = shutdown_tx;
     server.run_forever();
+}
+
+fn configured_listener_addresses(default: SocketAddr) -> Result<Vec<SocketAddr>, Box<dyn Error>> {
+    let addresses = if let Ok(value) = env::var("XSHIELD_EDGE_LISTEN_PORTS") {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::parse::<SocketAddr>)
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        vec![default]
+    };
+    if addresses.is_empty() {
+        return Err("XSHIELD_EDGE_LISTEN_PORTS must contain one listener".into());
+    }
+    if addresses.iter().any(|address| address.ip() != default.ip()) {
+        return Err("XSHIELD_EDGE_LISTEN_PORTS must use the bootstrap bind address".into());
+    }
+    validate_listener_addresses(&addresses)?;
+    Ok(addresses)
+}
+
+fn validate_listener_addresses(addresses: &[SocketAddr]) -> Result<(), &'static str> {
+    let mut ports = BTreeSet::new();
+    for address in addresses {
+        if xshield_core::site::PortNumber::parse(address.port()).is_err() {
+            return Err("XSHIELD_EDGE_LISTEN_PORTS must use the internal listener pool");
+        }
+        let allowed = match address.ip() {
+            std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+            std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
+        };
+        if !allowed || !ports.insert(address.port()) {
+            return Err("XSHIELD_EDGE_LISTEN_PORTS must use unique loopback or private addresses");
+        }
+    }
+    Ok(())
 }
 
 fn main() {
@@ -1721,6 +2201,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_addresses_are_private_and_unique() {
+        assert!(
+            validate_listener_addresses(&[
+                "127.0.0.1:6100".parse().unwrap(),
+                "10.0.0.2:6101".parse().unwrap(),
+            ])
+            .is_ok()
+        );
+        assert!(validate_listener_addresses(&["127.0.0.1:1024".parse().unwrap()]).is_err());
+        assert!(validate_listener_addresses(&["0.0.0.0:6100".parse().unwrap()]).is_err());
+        assert!(
+            validate_listener_addresses(&[
+                "127.0.0.1:6100".parse().unwrap(),
+                "127.0.0.2:6100".parse().unwrap(),
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn rejects_and_clears_trailers_for_buffered_responses() {
@@ -1751,5 +2251,59 @@ mod tests {
             503
         );
         assert_eq!(denial_status(ReasonCode::AuthBindingMismatch), 403);
+    }
+
+    #[test]
+    fn site_waf_blocks_configured_headers_and_cookie_overflow() {
+        let mut request = pingora::http::RequestHeader::build("GET", b"/", Some(2)).unwrap();
+        request.insert_header("X-Debug", "1").unwrap();
+        request.insert_header("Cookie", "a=123456").unwrap();
+        let mut policy = xshield_core::SitePolicyConfig::default();
+        policy.waf.blocked_headers = vec!["x-debug".to_owned()];
+        policy.waf.max_cookie_bytes = 4;
+        assert_eq!(
+            site_waf_denial(&request, &policy),
+            Some(ReasonCode::WafHeaderBlocked)
+        );
+        policy.waf.blocked_headers.clear();
+        assert_eq!(
+            site_waf_denial(&request, &policy),
+            Some(ReasonCode::WafCookieTooLarge)
+        );
+    }
+
+    #[test]
+    fn site_waf_query_rules_decode_once_and_fail_closed() {
+        let mut policy = xshield_core::SitePolicyConfig::default();
+        policy.waf.blocked_query_fragments = vec!["' or 1=1--".to_owned()];
+        let request =
+            pingora::http::RequestHeader::build("GET", b"/search?q=%27+OR+1%3D1--", Some(1))
+                .unwrap();
+        assert_eq!(
+            site_waf_denial(&request, &policy),
+            Some(ReasonCode::WafQueryBlocked)
+        );
+        let malformed =
+            pingora::http::RequestHeader::build("GET", b"/search?q=%GG", Some(1)).unwrap();
+        assert_eq!(
+            site_waf_denial(&malformed, &policy),
+            Some(ReasonCode::WafQueryInvalid)
+        );
+        let safe =
+            pingora::http::RequestHeader::build("GET", b"/search?q=green+apple", Some(1)).unwrap();
+        assert_eq!(site_waf_denial(&safe, &policy), None);
+        assert_eq!(denial_status(ReasonCode::WafQueryInvalid), 400);
+    }
+
+    #[test]
+    fn site_rate_limiter_enforces_burst_per_source() {
+        let limiter = SiteRateLimiter::new();
+        let mut policy = xshield_core::SitePolicyConfig::default();
+        policy.limits.requests_per_second = 1;
+        policy.limits.burst = 1;
+        let source = Some("127.0.0.1".parse().unwrap());
+        assert!(limiter.allow("site_a", source, &policy));
+        assert!(!limiter.allow("site_a", source, &policy));
+        assert!(limiter.allow("site_a", Some("127.0.0.2".parse().unwrap()), &policy));
     }
 }

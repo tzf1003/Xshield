@@ -12,6 +12,7 @@ use std::{
 };
 use xshield_audit::JournalLimits;
 use xshield_core::{
+    SitePolicyConfig,
     admission::{
         AdmissionClass, AdmissionProof, AdmissionRequest, CapabilityPolicy, OperationPolicy,
         ResourceAccess,
@@ -24,10 +25,12 @@ use xshield_core::{
     grant::ResourceKeyHmac,
     identity::UnixSeconds,
     provenance::{ActionTarget, BuildFingerprint, HttpMethod, RouteTemplate},
+    site::PortNumber,
 };
 
 pub mod auth_binding;
 pub mod evidence_capture;
+pub mod multi_site;
 pub mod request_crypto;
 pub mod response_crypto;
 pub mod response_grant;
@@ -61,6 +64,7 @@ pub const MAX_BUFFERED_BODY_IN_FLIGHT_BYTES: usize = MAX_BUFFERED_JSON_BYTES * 2
 /// Pingora retry-buffer ceiling used to replace a pre-read encrypted entity.
 pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
+const STATIC_ASSET_OPERATION_ID: &str = "site.static_asset";
 /// Versioned same-origin browser sensor asset.
 pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
 /// Immutable browser sensor bootstrap loader.
@@ -105,6 +109,7 @@ pub struct GatewayConfig {
     audit: AuditConfig,
     identity_store: Option<IdentityStoreConfig>,
     sensor: Option<SensorConfig>,
+    site_policy: Option<SitePolicyConfig>,
     operations: BTreeMap<(String, String), CompiledOperation>,
     path_resource_operations: Vec<CompiledOperation>,
 }
@@ -217,6 +222,8 @@ struct ConfigDto {
     identity_store: Option<IdentityStoreDto>,
     #[serde(default)]
     sensor: Option<SensorDto>,
+    #[serde(default)]
+    site_policy: Option<SitePolicyConfig>,
     operations: Vec<OperationDto>,
 }
 
@@ -506,15 +513,22 @@ impl GatewayConfig {
     /// # Errors
     /// Returns [`ConfigError`] for malformed JSON, invalid identifiers, unsafe
     /// network values, unsafe paths, incoherent policies, or ambiguous routes.
+    #[allow(clippy::too_many_lines)]
     pub fn from_json(bytes: &[u8]) -> Result<Self, ConfigError> {
         if bytes.is_empty() || bytes.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError::Invalid("configuration size"));
         }
         let dto: ConfigDto = serde_json::from_slice(bytes).map_err(ConfigError::Json)?;
-        let listen = dto
+        if let Some(policy) = dto.site_policy.as_ref() {
+            policy
+                .validate()
+                .map_err(|_| ConfigError::Invalid("site_policy"))?;
+        }
+        let listen: SocketAddr = dto
             .listen
             .parse()
             .map_err(|_| ConfigError::Invalid("listen"))?;
+        PortNumber::parse(listen.port()).map_err(|_| ConfigError::Invalid("listen.port"))?;
         let origin_address = dto
             .origin
             .address
@@ -604,6 +618,7 @@ impl GatewayConfig {
             },
             identity_store,
             sensor,
+            site_policy: dto.site_policy,
             operations: compiled_operations.exact,
             path_resource_operations: compiled_operations.path_resources,
         })
@@ -685,6 +700,22 @@ impl GatewayConfig {
     #[must_use]
     pub const fn identity_store(&self) -> Option<IdentityStoreConfig> {
         self.identity_store
+    }
+
+    /// Returns the typed site policy carried by this immutable snapshot.
+    #[must_use]
+    pub fn site_policy(&self) -> Option<&SitePolicyConfig> {
+        self.site_policy.as_ref()
+    }
+
+    /// Returns the site-wide request entity limit used before forwarding.
+    #[must_use]
+    pub fn request_body_limit(&self) -> usize {
+        self.site_policy
+            .as_ref()
+            .map_or(16 * 1024 * 1024, |policy| {
+                policy.limits.max_request_body_bytes
+            })
     }
 
     /// Returns the optional browser sensor bootstrap policy.
@@ -1061,6 +1092,17 @@ impl GatewayConfig {
             };
         }
         let Some(operation) = self.operation(method, path) else {
+            if self
+                .site_policy
+                .as_ref()
+                .is_some_and(|policy| policy.allows_static_asset(method, path))
+            {
+                return GatewayDecision {
+                    outcome: GatewayOutcome::Allowed,
+                    operation_id: OperationId::parse(STATIC_ASSET_OPERATION_ID).ok(),
+                    reason_code: ReasonCode::PublicEntryAllowed,
+                };
+            }
             return GatewayDecision {
                 outcome: GatewayOutcome::Denied,
                 operation_id: None,
@@ -2536,6 +2578,16 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(oversized.as_bytes()),
             Err(ConfigError::Invalid("operations.response.max_bytes"))
+        ));
+    }
+
+    #[test]
+    fn listener_port_stays_inside_the_internal_pool() {
+        let mut config: serde_json::Value = serde_json::from_str(CONFIG).unwrap();
+        config["listen"] = "127.0.0.1:6099".into();
+        assert!(matches!(
+            GatewayConfig::from_json(&serde_json::to_vec(&config).unwrap()),
+            Err(ConfigError::Invalid("listen.port"))
         ));
     }
 
