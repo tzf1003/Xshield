@@ -107,6 +107,7 @@ INSERT INTO xshield.protected_site_configs (
     env = dict(os.environ, XSHIELD_TEST_DATABASE_URL='postgresql://' + USER + ':' + os.environ.get('XSHIELD_DEV_POSTGRES_PASSWORD', 'xshield_dev') + '@127.0.0.1:' + os.environ.get('XSHIELD_DEV_POSTGRES_PORT', '55432') + '/' + integration)
     subprocess.run(['cargo', 'test', '-p', 'xshield-postgres', '--test', 'site_config', '--offline', '--', '--ignored'], cwd=ROOT, env=env, check=True)
     subprocess.run(['cargo', 'test', '-p', 'xshield-control', '--offline', 'site_admin_http_', '--', '--ignored'], cwd=ROOT, env=env, check=True)
+    subprocess.run(['cargo', 'test', '-p', 'xshield-control', '--offline', '--lib', 'site_approval', '--', '--ignored'], cwd=ROOT, env=env, check=True)
     # Both integration suites use only this owned database, dropped in finally.
     print('PASS actual PostgreSQL site configuration contract', flush=True)
 

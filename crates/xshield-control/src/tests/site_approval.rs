@@ -1319,3 +1319,114 @@ async fn a_stepped_up_delete_supersedes_a_pending_approval_and_leaves_the_edge()
     drop(stepped_up);
     let _ = ctx.finish().await;
 }
+
+/// The simplest rollback: r1 applied, r2 changed, approved and applied, then a
+/// rollback puts r1's configuration back as the new revision 3.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn rolling_back_one_change_restores_the_first_revision_as_revision_three() {
+    let ctx = Ctx::new().await;
+    let site = "site_rollback_simple";
+    ctx.create_live(site, "8.8.8.8:9000").await;
+    let at_one = ctx.edge.served_gateway_config(site).unwrap();
+    let (_, changed) = ctx
+        .put(
+            site,
+            &with(
+                site_body(site, "8.8.4.4:9000"),
+                "display_name",
+                json!("second"),
+            ),
+            &ctx.key("change"),
+        )
+        .await;
+    assert_eq!(changed["requires_approval"], true);
+    let (status, approved) = ctx.approve(site, &ctx.key("approve")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(
+        ctx.edge.served_upstream(site).as_deref(),
+        Some("8.8.4.4:9000")
+    );
+
+    let (status, rolled) = rollback(&ctx, site, &ctx.key("rollback")).await;
+    assert!(status.is_success(), "{status} {rolled}");
+    assert_eq!(rolled["desired_revision"], 3);
+    assert_eq!(
+        rolled["config"]["display_name"], site,
+        "revision 1's label too"
+    );
+    // Restoring the old upstream is a change to what the edge serves.
+    assert_eq!(rolled["requires_approval"], true, "{rolled}");
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-rollback")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let state = ctx.status(site).await;
+    assert_eq!(state["apply_state"], "active");
+    assert_eq!(
+        state["active_revision"], 3,
+        "a new revision, not a reused one"
+    );
+    assert_eq!(
+        ctx.edge.served_gateway_config(site).unwrap(),
+        at_one,
+        "the edge receives revision 1's configuration"
+    );
+    let _ = ctx.finish().await;
+}
+
+/// A reviewer can pin an approval to the configuration they read; a digest
+/// that no longer matches is a stable 409 and approves nothing.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn an_approval_can_be_pinned_to_the_reviewed_configuration_digest() {
+    let ctx = Ctx::new().await;
+    let site = "site_pinned";
+    let (_, created) = ctx
+        .create(&site_body(site, "8.8.8.8:9000"), &ctx.key("create"))
+        .await;
+    assert_eq!(created["requires_approval"], true);
+    let reviewed = created["config_digest"].as_str().unwrap().to_owned();
+    // The author swaps in a different revision after the review.
+    let (_, swapped) = ctx
+        .put(site, &site_body(site, "8.8.4.4:9000"), &ctx.key("swap"))
+        .await;
+    let current = swapped["config_digest"].as_str().unwrap().to_owned();
+    assert_ne!(reviewed, current);
+
+    let approve_with = |digest: String, key: String| {
+        let app = ctx.approver.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/control/v1/sites/{site}/approve"))
+                        .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+                        .header("idempotency-key", key)
+                        .header("x-xshield-expected-config-digest", digest)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap())
+                    .unwrap();
+            (status, body)
+        }
+    };
+    let (status, stale) = approve_with(reviewed, ctx.key("stale-pin")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_eq!(
+        stale["error_code"],
+        "CONTROL_SITE_APPROVAL_REVISION_MISMATCH"
+    );
+    assert_eq!(ctx.status(site).await["requires_approval"], true);
+    let (status, malformed) = approve_with("not-a-digest".to_owned(), ctx.key("bad-pin")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{malformed}");
+    assert_eq!(ctx.status(site).await["requires_approval"], true);
+    let (status, approved) = approve_with(current, ctx.key("good-pin")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["requires_approval"], false);
+    let _ = ctx.finish().await;
+}

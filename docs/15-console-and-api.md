@@ -189,9 +189,6 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
 
 本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0049、0051 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
-# 管理 API Key
-
-`POST/GET /control/v1/agent-api-keys`、`POST /{id}/revoke`、`POST /{id}/rotate` 仅允许 KeyAdministrator 或 SystemAdmin 的浏览器管理会话并要求 CSRF。创建响应只返回一次完整 `xsk_` 明文，数据库和审计只保存 HMAC 指纹、前缀、scope 与生命周期。
 
 ## 站点发布审批与应用语义（2026-10-04）
 
@@ -212,3 +209,7 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 **回滚。** `POST /control/v1/sites/{site_id}/rollback` 需要 `ReleaseOperator` 和规范 `Idempotency-Key`，没有请求体。它读取一个修订的完整已存储配置，并把它作为**新修订**写入（修订号永不复用），然后走与其他保存完全相同的路径：风险按当前 active 基线评估（从 D 回滚到 B 同样是上游变化，需要独立审批，批准前 edge 不变）、校验、幂等、审计和应用。回滚目标取决于状态：存在未完成的变更（desired 不等于 active，或上一次应用未完成）时取 active 修订，等于取消该变更，由于与基线一致所以无需审批；否则取**先前 active 的修订**，即按 edge 确认顺序（迁移 0051 的 `activated_at`）排在当前 active 之前的那一个，而不是 `active - 1`（后者可能是从未批准或从未服务的修订）；没有可回滚的目标时返回 409 `CONTROL_SITE_ROLLBACK_UNAVAILABLE`。同一个键重放回滚请求先于目标解析被识别，返回原结果（`CONTROL_SITE_CONFIG_REPLAYED`）且不创建修订；站点已有后续写入后重放，返回 409 `CONTROL_SITE_IDEMPOTENCY_KEY_SUPERSEDED`。修订历史（`GET /revisions`）里的每一行现在都是包含 `policy_revision` 的完整配置，读取更早版本写入的行时由 `policy_revision` 列补全。此前存储的修订缺少 `policy_revision` 而回滚反序列化要求它，所以每次回滚都返回 400 `CONTROL_SITE_CONFIG_REQUEST_INVALID`。
 
 **删除站点要求 step-up。** `DELETE /control/v1/sites/{site_id}` 会把受保护站点从 edge 移除，因此与原文读取、导出审批使用同一套浏览器 MFA step-up：同一会话须在两分钟内完成 OIDC 再认证（迁移 0036 的 step-up 状态），否则返回 403 `CONTROL_SITE_DELETE_STEP_UP_REQUIRED`（`next_action=reauthenticate`）并写 DENY 审计，站点和 edge 均不变。机器 Bearer 和 Agent API Key 没有 step-up 路径，所以无论持有 `site.config.write`（映射为 SystemAdmin）等何种能力都不能删除站点；也不存在可授予的删除能力。通过 step-up 后流程不变：先以调用者的名义写入暂停修订（该预授权由存储记录为绑定该修订的 `delete_step_up` 审批，因此可以取代尚未批准的待审批修订，未批准的内容不会被服务），edge 确认不含该站点路由的快照后才删除数据库记录；edge 无法确认时站点保持暂停并返回 `CONTROL_SITE_DELETE_EDGE_NOT_CONFIRMED`。删除不要求第二个人审批：授权依据是再认证加上 `console.site.delete` 终态审计，作者自己也可以删除自己创建的站点，这是有意保留的取舍。
+
+# 管理 API Key
+
+`POST/GET /control/v1/agent-api-keys`、`POST /{id}/revoke`、`POST /{id}/rotate` 仅允许 KeyAdministrator 或 SystemAdmin 的浏览器管理会话并要求 CSRF。创建响应只返回一次完整 `xsk_` 明文，数据库和审计只保存 HMAC 指纹、前缀、scope 与生命周期。
