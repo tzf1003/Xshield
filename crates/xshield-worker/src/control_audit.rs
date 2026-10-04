@@ -33,6 +33,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.agent_api_key.list"
             | "console.agent_api_key.use"
             | "console.export.read"
+            | "console.export.list"
             | "export.requested"
             | "export.approved"
             | "export.denied"
@@ -123,6 +124,9 @@ impl AccessPayload {
         }
         if event.event_type == "console.evidence.access.list" {
             self.validate_access_list_reason()?;
+        }
+        if event.event_type == "console.export.list" {
+            self.validate_export_list_reason()?;
         }
         if event.event_type == "console.model.list" {
             self.validate_model_list_reason()?;
@@ -464,6 +468,39 @@ impl AccessPayload {
         }
     }
 
+    // Export discovery has no direct target, so the reason set alone is the
+    // contract. `CONTROL_SESSION_UNAVAILABLE` is the one reason beyond the
+    // access-list set: the shared authenticator can emit it for any endpoint,
+    // and an unpublishable event would stop its whole segment.
+    fn validate_export_list_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_EXPORTS_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_CURSOR_INVALID"
+                    | "CONTROL_EXPORT_LIST_REQUEST_INVALID"
+                    | "CONTROL_EXPORT_BUSY"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CURSOR_UNAVAILABLE"
+                    | "CONTROL_EXPORT_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_SESSION_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
+    }
+
     fn validate_access_read_reason(&self) -> Result<(), PublishError> {
         let valid = match self.outcome.as_str() {
             "PASS" => self.reason_code == "CONTROL_EVIDENCE_ACCESS_READ",
@@ -594,6 +631,7 @@ impl AccessPayload {
             | ("console.agent_api_key.list", "GET", "/control/v1/agent-api-keys")
             | ("console.agent_api_key.use", "*", "/control/v1/*")
             | ("console.export.read", "GET", "/control/v1/exports/{export_id}")
+            | ("console.export.list", "GET", "/control/v1/exports")
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests")

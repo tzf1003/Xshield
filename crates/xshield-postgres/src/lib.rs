@@ -32,6 +32,7 @@ mod grant_read;
 mod identity_read;
 mod investigation_case;
 mod investigation_export;
+mod investigation_export_list;
 mod management_api_key;
 mod management_session;
 mod model_evaluation_admission;
@@ -117,6 +118,10 @@ pub use investigation_export::{
     InvestigationExportPackageClaim, InvestigationExportPackageClaimOutcome,
     InvestigationExportPackageOutcome, InvestigationExportPackageRef, InvestigationExportRecord,
     InvestigationExportSnapshot, InvestigationExportWriteOutcome,
+};
+pub use investigation_export_list::{
+    InvestigationExportListItem, InvestigationExportListQuery, InvestigationExportListView,
+    InvestigationExportPage,
 };
 pub use management_api_key::{
     ManagementApiKeyPrincipal, ManagementApiKeyRecord, ManagementApiKeyScope,

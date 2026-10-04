@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECT = os.environ.get('XSHIELD_DEV_COMPOSE_PROJECT', 'xshield-dev')
 USER = os.environ.get('XSHIELD_DEV_POSTGRES_USER', 'xshield_dev')
 COMPOSE = ['docker', 'compose', '-p', PROJECT, '-f', str(ROOT / 'docker-compose.dev.yml'), 'exec', '-T', 'postgres']
+# Every migration after the 0040 baseline is tracked in the dev ledger. Deriving
+# the count keeps this check honest when a migration is added without also
+# extending migrate_dev_postgres.sh and generate_dev_postgres_schema.py.
+LATEST = max(int(path.name[:4]) for path in (ROOT / 'migrations').glob('*.sql'))
+LEDGER_ROWS = str(LATEST - 40)
 owned = []
 
 def command(args, data=None):
@@ -26,7 +31,7 @@ def sql(db, statement):
     if result.returncode: raise RuntimeError(result.stderr)
     return result.stdout.strip()
 
-def database(phase=48):
+def database(phase=LATEST):
     db = 'xshield_migration_test_' + uuid.uuid4().hex[:10]
     result = command(COMPOSE + ['createdb', '-U', USER, db])
     if result.returncode: raise RuntimeError(result.stderr)
@@ -46,15 +51,15 @@ def migrate(db, root=ROOT, error=None):
 def main():
     fresh = database()
     migrate(fresh)
-    assert sql(fresh, 'SELECT count(*) FROM xshield.dev_schema_migrations') == '8'
+    assert sql(fresh, 'SELECT count(*) FROM xshield.dev_schema_migrations') == LEDGER_ROWS
     migrate(fresh)
-    assert sql(fresh, 'SELECT count(*) FROM xshield.dev_schema_migrations') == '8'
+    assert sql(fresh, 'SELECT count(*) FROM xshield.dev_schema_migrations') == LEDGER_ROWS
     print('PASS initialized schema adoption and repeated startup', flush=True)
     old = database(40)
     sql(old, 'CREATE TABLE public.migration_sentinel (id int PRIMARY KEY, payload text); INSERT INTO public.migration_sentinel VALUES (1, \'preserve\');')
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(migrate, [old, old]))
-    assert sql(old, 'SELECT count(*) FROM xshield.dev_schema_migrations') == '8'
+    assert sql(old, 'SELECT count(*) FROM xshield.dev_schema_migrations') == LEDGER_ROWS
     assert sql(old, 'SELECT payload FROM public.migration_sentinel') == 'preserve'
     print('PASS old baseline upgrade, concurrent startup, preserved rows', flush=True)
     populated = database(41)

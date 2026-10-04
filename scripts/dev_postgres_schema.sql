@@ -1679,7 +1679,9 @@ INSERT INTO dev_expected_objects VALUES
 ('0049','index','management_api_keys','management_api_keys_pkey','CREATE UNIQUE INDEX management_api_keys_pkey ON xshield.management_api_keys USING btree (api_key_id)'),
 ('0049','index','management_api_keys','management_api_keys_tenant_id_fingerprint_key','CREATE UNIQUE INDEX management_api_keys_tenant_id_fingerprint_key ON xshield.management_api_keys USING btree (tenant_id, fingerprint)'),
 ('0049','table','management_api_key_scopes','management_api_key_scopes','r'),
-('0049','table','management_api_keys','management_api_keys','r');
+('0049','table','management_api_keys','management_api_keys','r'),
+('0050','index','investigation_exports','investigation_export_owner_page','CREATE INDEX investigation_export_owner_page ON xshield.investigation_exports USING btree (tenant_id, site_id, requested_by, export_id COLLATE "C" DESC)'),
+('0050','index','investigation_exports','investigation_export_pending_page','CREATE INDEX investigation_export_pending_page ON xshield.investigation_exports USING btree (tenant_id, site_id, export_id COLLATE "C" DESC) WHERE (status = ''pending_approval''::text)');
 CREATE TEMP TABLE dev_expected_checksums (phase text PRIMARY KEY, sha256 text);
 INSERT INTO dev_expected_checksums VALUES
 ('0041','e6a424c31dc3e78dfcaa6563dcd83f5098c629462dafa1746ea1f52d167ccc1b'),
@@ -1690,7 +1692,8 @@ INSERT INTO dev_expected_checksums VALUES
 ('0046','64617f04d1ebc15982c73fb73f15c15fe91d29297f1008b281053d6c939aafa7'),
 ('0047','6db03170afa0a9c73a4c3a601bc2a207281c5e84bfab6f6d8431cd49de9a3641'),
 ('0048','bbf966ff037c1fb7b4e916a3d1af4320ac3d036669e7154fd7333ad45b42ef0c'),
-('0049','38e67513d2b50b156c8cc286f21aabfe033a9a3e027bc168bc54c54f9c382dc2');
+('0049','38e67513d2b50b156c8cc286f21aabfe033a9a3e027bc168bc54c54f9c382dc2'),
+('0050','50a62be8bf11fe466aee3902a7e839a052bd319b2d7ccef23a822d32974f9079');
 
 CREATE FUNCTION pg_temp.dev_assert_schema(p_phase text) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE missing text;

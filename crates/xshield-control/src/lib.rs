@@ -14,6 +14,7 @@ mod case_list;
 mod causality;
 mod evidence_access_inspection;
 mod evidence_access_list;
+mod export_list;
 mod exports;
 mod identity;
 mod jobs;
@@ -4374,6 +4375,12 @@ pub fn router(control: ControlPlane) -> Router {
             exports::PATH,
             post(exports::request_handler).layer(DefaultBodyLimit::max(exports::MAX_BODY_BYTES)),
         )
+        // Same path, different method: axum merges the two method routers, and
+        // the zero body limit applies to the collection read only.
+        .route(
+            exports::PATH,
+            get(export_list::handler).layer(DefaultBodyLimit::max(0)),
+        )
         .route(
             exports::READ_PATH,
             get(exports::read_handler).layer(DefaultBodyLimit::max(0)),
@@ -5446,6 +5453,7 @@ mod tests {
     mod evidence_access_inspection;
     mod evidence_access_list;
     mod evidence_lifecycle;
+    mod export_list;
     mod hold_console_wire;
     mod ledger_inspection;
     mod model_call_list;
@@ -7940,6 +7948,17 @@ mod tests {
     }
 
     fn browser_authorization(control: &ControlPlane, subject: &str, roles: &[&str]) -> String {
+        browser_authorization_with_csrf(control, subject, roles, true)
+    }
+
+    // `csrf_valid = false` models a cookie session whose request carried no CSRF
+    // proof; only safe methods may proceed on such a session.
+    fn browser_authorization_with_csrf(
+        control: &ControlPlane,
+        subject: &str,
+        roles: &[&str],
+        csrf_valid: bool,
+    ) -> String {
         let expires_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -7951,7 +7970,7 @@ mod tests {
             "tenant_id": control.config.tenant_id.as_str(),
             "site_id": control.config.site_id.as_str(),
             "roles": roles,
-            "csrf_valid": true,
+            "csrf_valid": csrf_valid,
             "expires_at": expires_at,
         }))
         .unwrap();

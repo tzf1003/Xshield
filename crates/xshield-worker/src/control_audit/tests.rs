@@ -1775,3 +1775,243 @@ fn export_download_event_binds_package_evidence_and_byte_count() {
     crossed["payload"]["target_export_id"] = EXPORT.into();
     rejected(&crossed, "export target on a case event");
 }
+
+fn export_list_event() -> Value {
+    surface_event(
+        "console.export.list",
+        "GET",
+        "/control/v1/exports",
+        "CONTROL_EXPORTS_READ",
+    )
+}
+
+#[test]
+fn export_listing_publishes_scoped_facts_from_authenticated_journal() {
+    let value = export_list_event();
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    assert_eq!(row.method, "GET");
+    assert_eq!(row.outcome, "PASS");
+    assert_eq!(row.reason_code, "CONTROL_EXPORTS_READ");
+    assert_eq!(row.proof_kind, "deterministic");
+    assert_eq!(row.confidence, None);
+    assert_eq!(row.confidence_status, "not_applicable");
+    assert_eq!(row.request_id, REQUEST);
+    assert!(row.evidence_refs.is_empty());
+    assert_eq!(row.is_terminal, 0);
+    assert_eq!(row.http_status, None);
+    assert!(row.origin_state.is_empty());
+    // The management journal is the only source of this event; an outbox
+    // envelope with the same body must not be accepted as a transaction fact.
+    assert!(
+        IndexRow::parse_outbox(
+            &serde_json::to_vec(&value).unwrap(),
+            &EventId::parse(EVENT).unwrap(),
+            1,
+            BOOT,
+            "1".repeat(64),
+            TimeDelta::days(30),
+        )
+        .is_err()
+    );
+    for (field, content) in [
+        ("producer_id", json!("investigation-export")),
+        ("producer_boot_id", json!(REQUEST)),
+        ("producer_seq", json!(2)),
+        ("request_seq", json!(2)),
+        ("request_id", Value::Null),
+        ("policy_revision", json!("investigation-export-v1")),
+        ("sensitivity", json!("RESTRICTED")),
+        ("cause_event_ids", json!([EVENT])),
+        ("example_only", json!(true)),
+        ("connection_id", Value::Null),
+        ("agent_run_id", Value::Null),
+    ] {
+        let mut invalid = value.clone();
+        invalid[field] = content;
+        rejected(&invalid, field);
+    }
+}
+
+#[test]
+fn export_listing_rejects_page_data_targets_and_wrong_routes() {
+    let value = export_list_event();
+    for (field, content) in [
+        ("method", json!("POST")),
+        ("path", json!("/control/v1/exports?view=mine")),
+        ("path", json!("/control/v1/exports/{export_id}")),
+        ("path", json!("/control/v1/evidence-access-requests")),
+        ("subject_ref", Value::Null),
+        ("subject_ref", json!("")),
+        ("subject_ref", json!("actor\nname")),
+        ("subject_ref", json!("a".repeat(257))),
+        ("subject_ref", json!("界".repeat(86))),
+        ("outcome", json!("UNKNOWN")),
+        // Neither the access-list nor the single-export success reason fits.
+        ("reason_code", json!("CONTROL_EVIDENCE_ACCESS_LIST_READ")),
+        ("reason_code", json!("CONTROL_EXPORT_READ")),
+        ("reason_code", json!("CONTROL_EXPORTS_READ\n")),
+        ("view", json!("mine")),
+        ("cursor", json!("opaque")),
+        ("rows", json!([])),
+        ("items", json!([])),
+        ("purpose", json!("synthetic")),
+        ("decision_reason", json!("synthetic")),
+        ("requested_by", json!("other-actor")),
+        ("decided_by", json!("other-actor")),
+        ("package_artifact_id", json!(ARTIFACT)),
+        ("package_digest", json!("a".repeat(64))),
+        ("confidence", Value::Null),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
+    }
+    for (field, content) in [
+        ("target_request_id", json!(REQUEST)),
+        ("target_artifact_id", json!(ARTIFACT)),
+        ("target_case_id", json!(CASE)),
+        ("target_access_request_id", json!(ACCESS)),
+        ("target_model_call_id", json!(MODEL)),
+        ("target_agent_run_id", json!(AGENT_RUN)),
+        ("target_job_id", json!(JOB)),
+        ("target_export_id", json!(EXPORT)),
+        ("target_grant_id", json!(GRANT)),
+        ("target_binding_id", json!(BINDING)),
+        ("target_hold_id", json!(HOLD)),
+        ("target_calibration_report_id", json!(REPORT)),
+        ("query_digest", json!("a".repeat(64))),
+        ("bytes_read", json!(0)),
+    ] {
+        let mut nullable = value.clone();
+        nullable["payload"][field] = Value::Null;
+        assert!(index(&nullable).is_ok(), "{field}");
+        nullable["payload"][field] = content;
+        rejected(&nullable, field);
+    }
+    let mut invalid = value;
+    invalid["evidence_refs"] = json!([ARTIFACT]);
+    rejected(&invalid, "listing evidence reference");
+
+    // The list route owns neither the single-export reason nor its target, and
+    // the single-export event cannot borrow the collection route.
+    let mut read_on_list_route = surface_event(
+        "console.export.read",
+        "GET",
+        "/control/v1/exports",
+        "CONTROL_EXPORT_READ",
+    );
+    read_on_list_route["payload"]["target_export_id"] = EXPORT.into();
+    rejected(&read_on_list_route, "single export read on the list route");
+    let list_on_read_route = surface_event(
+        "console.export.list",
+        "GET",
+        "/control/v1/exports/{export_id}",
+        "CONTROL_EXPORTS_READ",
+    );
+    rejected(
+        &list_on_read_route,
+        "export list on the single export route",
+    );
+    let mut read_with_list_reason = surface_event(
+        "console.export.read",
+        "GET",
+        "/control/v1/exports/{export_id}",
+        "CONTROL_EXPORTS_READ",
+    );
+    read_with_list_reason["payload"]["target_export_id"] = EXPORT.into();
+    rejected(
+        &read_with_list_reason,
+        "single export read with the list reason",
+    );
+}
+
+#[test]
+fn export_listing_failure_reasons_require_exact_outcome_and_empty_targets() {
+    for (outcome, reason) in [
+        ("DENY", "CONTROL_AUTH_REQUIRED"),
+        ("DENY", "CONTROL_SCOPE_DENIED"),
+        ("DENY", "CONTROL_RATE_LIMITED"),
+        ("DENY", "CONTROL_CURSOR_INVALID"),
+        ("DENY", "CONTROL_EXPORT_LIST_REQUEST_INVALID"),
+        ("DENY", "CONTROL_EXPORT_BUSY"),
+        ("ERROR", "CONTROL_CURSOR_UNAVAILABLE"),
+        ("ERROR", "CONTROL_EXPORT_STORE_UNAVAILABLE"),
+        ("ERROR", "CONTROL_RATE_UNAVAILABLE"),
+        ("ERROR", "CONTROL_CLOCK_UNAVAILABLE"),
+        ("ERROR", "CONTROL_SESSION_UNAVAILABLE"),
+    ] {
+        let mut value = export_list_event();
+        value["payload"]["outcome"] = outcome.into();
+        value["payload"]["reason_code"] = reason.into();
+        for subject in [json!("audit-operator"), Value::Null] {
+            value["payload"]["subject_ref"] = subject;
+            assert_eq!(index(&value).unwrap().outcome, outcome, "{reason}");
+        }
+        value["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("subject_ref");
+        assert!(index(&value).is_ok(), "{reason}");
+        for other in ["PASS", if outcome == "DENY" { "ERROR" } else { "DENY" }] {
+            let mut invalid = value.clone();
+            invalid["payload"]["subject_ref"] = "audit-operator".into();
+            invalid["payload"]["outcome"] = other.into();
+            rejected(&invalid, "crossed outcome");
+        }
+        for invalid_reason in [
+            "CONTROL_EXPORTS_READ",
+            "CONTROL_EXPORT_READ",
+            "CONTROL_EVIDENCE_ACCESS_BUSY",
+            "CONTROL_EVIDENCE_ACCESS_LIST_REQUEST_INVALID",
+            "CONTROL_EVIDENCE_ACCESS_READ_STORE_UNAVAILABLE",
+            "CONTROL_UNKNOWN",
+            "CONTROL_AUDIT_UNAVAILABLE",
+        ] {
+            let mut invalid = value.clone();
+            invalid["payload"]["reason_code"] = invalid_reason.into();
+            rejected(&invalid, "crossed reason");
+        }
+        for field in [
+            "target_request_id",
+            "target_artifact_id",
+            "target_case_id",
+            "target_access_request_id",
+            "target_model_call_id",
+            "target_job_id",
+            "target_export_id",
+            "target_grant_id",
+            "target_binding_id",
+            "target_hold_id",
+            "query_digest",
+            "bytes_read",
+        ] {
+            let mut invalid = value.clone();
+            invalid["payload"][field] = if field == "bytes_read" {
+                json!(0)
+            } else {
+                json!(EXPORT)
+            };
+            rejected(&invalid, field);
+        }
+        value["evidence_refs"] = json!([ARTIFACT]);
+        rejected(&value, "failure evidence reference");
+    }
+}
+
+#[test]
+fn export_listing_duplicate_fields_fail_before_indexing() {
+    let bytes = serde_json::to_string(&export_list_event()).unwrap();
+    for addition in [
+        r#""outcome":"PASS","outcome":"PASS""#,
+        // `surface_event` already carries this null target, so this repeats it.
+        r#""outcome":"PASS","target_case_id":null"#,
+        r#""outcome":"PASS","unknown":null"#,
+    ] {
+        let invalid = bytes.replace(r#""outcome":"PASS""#, addition);
+        assert!(matches!(
+            index_bytes(invalid.as_bytes()),
+            Err(PublishError::Json(_))
+        ));
+    }
+}

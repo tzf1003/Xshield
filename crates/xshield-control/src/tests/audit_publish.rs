@@ -145,6 +145,11 @@ async fn access_journal() -> AccessJournal {
         ),
         (
             "GET",
+            "/control/v1/exports?view=invalid".to_owned(),
+            String::new(),
+        ),
+        (
+            "GET",
             "/control/v1/evidence-access-requests/bad".to_owned(),
             String::new(),
         ),
@@ -237,6 +242,7 @@ fn assert_access_families(events: &[Value]) {
             "console.evidence.hold.read",
             "console.evidence.access.read",
             "console.evidence.access.list",
+            "console.export.list",
             "case.created",
             "case.closed",
             "case.evidence.added",
@@ -312,6 +318,7 @@ fn append_access_contracts(control: &ControlPlane) {
         crate::case_list::ACCESS,
         crate::evidence_access_inspection::ACCESS,
         crate::evidence_access_list::ACCESS,
+        crate::export_list::ACCESS,
         REQUEST_EVENTS_ACCESS,
         REQUEST_SUMMARY_ACCESS,
         REQUEST_EVIDENCE_ACCESS,
@@ -342,6 +349,15 @@ fn append_access_contracts(control: &ControlPlane) {
             None,
             None,
             "CONTROL_EVIDENCE_ACCESS_LIST_READ",
+            vec![],
+        ),
+        (
+            crate::export_list::ACCESS,
+            None,
+            None,
+            None,
+            None,
+            "CONTROL_EXPORTS_READ",
             vec![],
         ),
         (
@@ -456,6 +472,22 @@ fn append_access_contracts(control: &ControlPlane) {
                 "PASS",
                 reason,
                 &refs,
+            )
+            .unwrap();
+    }
+    // An event the publisher rejects stops its whole segment, so every failure
+    // the export list records itself must be publishable. The shared
+    // authentication refusals are covered by the worker's exact-reason tests;
+    // the real-ClickHouse variant of this journal caps a query at 100 events.
+    for (outcome, reason) in crate::export_list::recorded_failures() {
+        control
+            .append_access_event(
+                &format!("req_{}", Uuid::now_v7()),
+                Some("operator-1"),
+                crate::export_list::ACCESS,
+                None,
+                outcome,
+                reason,
             )
             .unwrap();
     }
