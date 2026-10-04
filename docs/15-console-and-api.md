@@ -22,7 +22,11 @@ Rules & Releases：差异、测试、审批、签名、灰度、回滚。
 
 Operations：节点、队列、存储、密钥引用、告警与审计访问。
 
-控制台实现采用原生 History API 的后台壳：左侧导航按服务端会话角色隐藏无权模块，站点详情、调查、案件、证据、审计和权限中心使用独立 URL，查询表单只存在于对应业务页面。隐藏导航不替代服务端授权；每个响应仍须重新验证 tenant/site scope、身份代际、操作资格和审计终态。`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049 及导出列表索引 0050，现有开发数据卷无需重置。
+控制台是 React 19 + antd 6 的单页应用，路由使用 TanStack Router 的代码式路由树，管理路径与此前保持一致。左侧导航按服务端会话角色隐藏无权模块，分为工作台、站点、流量与调查、案件与证据、运维与治理五组；非 SystemAdmin 的 Observer 与 PolicyAuthor、PolicyApprover、ReleaseOperator 额外得到当前会话站点的“站点状态”“站点发布”入口；视口宽度不超过 760 px 时导航收为抽屉。站点详情、调查、案件、证据、审计和权限中心使用独立 URL，查询表单只存在于对应业务页面。顶栏显示面包屑、服务端确认的 tenant/site 范围、MFA 再认证剩余时间（仅为提示，高危请求仍由服务端校验）、存在未决写入时的“待确认操作”提示，以及主题（跟随系统/浅色/深色）、密度和用户菜单。Ctrl/⌘+K 命令面板搜索当前角色可见的页面，也可粘贴规范（小写 UUIDv7）的对象 ID：`req_`、`mdl_`、`agt_`、`grant_`、`auth_`、`calr_` 直接打开既有详情路由，`case_`、`export_`、`artifact_` 进入所属页面，`access_`、`job_`、`ev_` 与 32 位十六进制 trace ID 可把单个条件预填到结构化检索（只预填，不自动提交；`ev_` 同时有事件和保留锁两种解释）。隐藏导航与命令面板都不替代服务端授权；每个响应仍须重新验证 tenant/site scope、身份代际、操作资格和审计终态。
+
+会话与数据层位于 `src/security`：ControlClient、服务端确认的 tenant/site、角色和会话代际（epoch）只存在于内存。401、15 分钟闲置、离开或卸载页面（`pagehide`）、退出或响应 scope 不一致时，会话、TanStack Query 缓存和待确认操作登记一并清空，晚到的旧响应不能回填状态。新数据层的读取把 epoch 放入 query key，透传 AbortSignal，逐响应核对 tenant/site scope，且不自动轮询、不重试，也不在窗口聚焦或网络恢复时刷新；写入在发送前冻结方法、路径、幂等键和正文，结果未知时只允许以原键原正文精确重试，并触发离页提醒和“待确认操作”提示。浏览器存储只保存主题与密度偏好。当前处于控制台重做的第 0 阶段（基础设施）：只有工作台概览和会话信息刷新走这套读取层，写入登记仅由单元测试和测试夹具使用；调查、案件、证据、站点配置和 API Key 页面仍由旧页面宿主渲染，沿用各自的请求取消、写入冻结和离页提醒，尚未接入新的待确认登记，因此不会出现在“待确认操作”提示中。
+
+`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049 及导出列表索引 0050，现有开发数据卷无需重置。
 
 站点策略可设置 `static_asset_max_path_depth`，默认值为 `5`。它只为 `GET` 静态资源扩展名（JavaScript、CSS、字体、图片、source map 和静态 JSON）提供有限深度兜底匹配；超过深度、非静态扩展和 API 路径仍按精确 operation 拒绝。该兜底不改变 WAF、限流或审计链路。
 
@@ -186,7 +190,7 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 
 ## 后台路由与角色独立性验收（2026-09-27）
 
-站点列表和编辑器分别位于 /sites 与 /sites/{siteId}/{section}；创建入口为 /sites/new/network。网络、安全入口、路由、身份、加密、WAF/限流、策略/健康、发布与审计按分类独立渲染。原生 History API 管理路径和前进后退，同站点分类共享草稿；跨站点、跨模块时清空响应并取消旧请求，所有站点响应核对独立 tenant/site 范围。草稿离页有显式确认，未知写入保留原幂等键与正文供人工重试。
+站点列表和编辑器分别位于 /sites 与 /sites/{siteId}/{section}；创建入口为 /sites/new/network。网络、安全入口、路由、身份、加密、WAF/限流、策略/健康、发布与审计按分类独立渲染。TanStack Router 管理路径和前进后退，同站点分类共享草稿；跨站点、跨模块时清空响应并取消旧请求，所有站点响应核对独立 tenant/site 范围。草稿离页有显式确认，未知写入保留原幂等键与正文供人工重试。
 
 只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
 

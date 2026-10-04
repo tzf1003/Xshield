@@ -2,7 +2,7 @@
 
 React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用并预填历史检索，按 Agent 运行 ID 读取脱敏生命周期与固定事件引用并预填历史检索，按访问申请 ID 读取历史申请/决策元数据并预填历史检索，按校准报告 ID 读取受限冻结元数据，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件，并从事件详情显式提交有界服务端因果查询。UI 调用固定 GET 端点及只读 `POST /control/v1/search`、`POST /control/v1/causality`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情、Agent 详情与模型调用列表均需要显式 `Observer`，校准报告详情需要 `AuditAdministrator`，事件检索与因果查询需要 `Investigator`；带 `calibration_report_id` 或 `evidence_hold_id` 的检索还要求同一主体同时具备 `AuditAdministrator`，三种角色分别校验。
 
-控制台使用原生 History API 的后台路由和左侧导航，不再用“查询类型”选择菜单。站点、调查、案件、证据、审计和权限中心各自拥有独立 URL；页面刷新会恢复深链接，导航隐藏只改善操作体验，服务端仍对每个请求独立授权。
+控制台使用 TanStack Router 的后台路由和 antd 左侧导航（窄屏为抽屉），不再用“查询类型”选择菜单；Ctrl/⌘+K 命令面板按页面名搜索，或按 ID 前缀打开既有详情路由、预填结构化检索（不自动提交）。站点、调查、案件、证据、审计和权限中心各自拥有独立 URL；页面刷新会恢复深链接，导航隐藏只改善操作体验，服务端仍对每个请求独立授权。
 
 “站点接入后台”由 `SystemAdmin` 读取租户范围的 `GET /control/v1/sites`，再通过 `GET/PUT /control/v1/sites/{site_id}/config` 管理每个受保护站点；旧 `GET/PUT /control/v1/site-config` 保留兼容。表单保存经过服务端校验的公网入口、源站地址、入口安全模式、探针标志、策略版本和状态，并按租户端口租约分配唯一 edge 内部监听端口。写入使用 `Idempotency-Key`，失败或断连时按原键重试；列表和单站点响应的 tenant/site 范围由客户端再次校验。浏览器会话返回服务端会话角色，界面只展示当前角色可用的站点页面和验证、批准、应用、回滚操作；服务端仍是最终授权边界。敏感配置只显示 secret reference、key ID 和状态。
 
@@ -114,13 +114,43 @@ Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'
 
 API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 [29.24](../../docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。模型调用列表依赖支持其固定窗口、签名游标和 `console.model.list` 审计的控制 API。校准报告详情须先升级至能识别 `console.calibration.report.read` 的管理 journal 发布器，再启用控制 API 与界面；调查导出 API 启用前应用迁移 0039、升级导出管理事件发布器并开放 Vite 的固定 `/exports` 代理路由；无新增 secret。完整事件/正文导出继续独立交付。
 
+## 脚本、代码风格与目录
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm run dev` | Vite 开发服务器，`http://127.0.0.1:55173` |
+| `npm run lint` | `biome check`：格式与 lint，只有错误才失败；CI 的 `console` 作业在 `npm ci` 之后运行 |
+| `npm run lint:debt` | 汇总旧模块仍有的 lint 警告（不阻塞） |
+| `npm run format` | `biome format --write` |
+| `npm run theme:css` | 由 `src/theme/tokens.ts` 重新生成 `src/theme/tokens.generated.css`；单测校验两者一致 |
+| `npm test` | Node 单元测试（`node --experimental-strip-types --test tests/*.test.ts`） |
+| `npm run build` | `tsc --noEmit` 后 `vite build` |
+| `npm run test:e2e` | Playwright，见“验证” |
+
+`biome.json` 不支持注释，规则取舍写在这里：recommended 规则开启，`noExplicitAny` 为错误，import 排序（assist）未启用，`src/theme/tokens.generated.css` 不参与格式化。旧模块仍有违规的 `noArrayIndexKey`、`useIterableCallbackReturn`、`useExhaustiveDependencies`、`useJsxKeyInIterable`、`noUnsafeOptionalChaining`、`useButtonType`、`useAriaPropsSupportedByRole` 暂为警告；在 `src/security`、`src/theme`、`src/shell`、`src/router`、`src/pages` 中它们与 `noNonNullAssertion` 都是错误，所以欠账只会减少。`src/api.ts`、`src/api-contract.ts`、`src/search.ts` 里拒绝控制字符的正则是有意为之，只对这三个文件关闭 `noControlCharactersInRegex`。
+
+- `src/security`：会话（`SessionStore`、epoch、15 分钟闲置计时）、`guardedQuery` / `runFrozenWrite`、内存中的待确认操作登记和 `SessionProvider`。这里的数据只在内存，不写 Web Storage。
+- `src/theme`：设计 Token（`tokens.ts` 是品牌色与浅色/深色/紧凑密度的唯一来源）、antd 主题、生成的 `--xs-*` CSS 变量层、自托管字体（`@fontsource`，输出为同源静态文件），以及主题/密度偏好——这是控制台唯一写入 `localStorage` 的内容，读写都在 try/catch 内。`style.css` 里不允许出现十六进制或 rgb 颜色（单测校验）。
+- `src/router`：路由树；`src/admin-routes.ts` 保持原有的严格路径解析，路由测试以它为基准。
+- `src/shell`：侧栏、顶栏、移动抽屉、命令面板及其 ID 分类器、MFA 再认证提示和“待确认操作”提示。
+- `src/pages`：登录、概览、权限中心和“页面不存在”。
+- `src/legacy/LegacyHost.tsx`：尚未迁移的调查、案件、证据、站点和 API Key 页面；由外壳懒加载并保持挂载，导航不会丢失已冻结的写入。
+
+antd 的运行时样式使用 `index.html` 中 `xshield-csp-nonce` meta 的 nonce（仓库内为空，由部署模板写入同一个值，并须在响应 CSP 的 `style-src` 中允许它；上文的示例响应头没有展开该 nonce）。
+
+控制台重做第 0 阶段（基础设施）的边界：只有会话、工作台概览读取和会话信息刷新使用新的 guarded 数据层；调查、案件、证据、站点配置和 API Key 页面沿用各自的请求取消、写入冻结和离页提醒，尚未登记到“待确认操作”。命令面板只导航或预填，不提交查询。`window.__xshieldE2E` 是 Playwright 夹具，只在显式启用机器凭证登录的本地开发构建中存在，生产构建不包含。
+
 ## 验证
 
 ```sh
+npm run lint
 npm test
 npm run build
 npx playwright install chromium --only-shell
 npm run test:e2e
+# Playwright 同时启动两个 Vite 服务：XSHIELD_E2E_PORT（默认 5175，机器凭证构建）和它加 1（默认 5176，Cookie 会话构建）。
+# 并行 worktree 为各自的运行指定不冲突的端口对：
+XSHIELD_E2E_PORT=5311 npm run test:e2e
 # 从仓库根目录执行，Node.js 22 必须在 PATH：
 cargo test -p xshield-control --lib console_client_ -- --ignored
 # 需要已应用迁移的隔离测试 PostgreSQL；设置 XSHIELD_TEST_DATABASE_URL：
@@ -148,7 +178,7 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
 
 ## 依赖与维护
 
-运行依赖仅 `react` / `react-dom`（MIT），负责界面与 DOM 更新。构建依赖 `vite`（MIT）和 `typescript`（Apache-2.0），类型依赖 `@types/react`、`@types/react-dom`、`@types/node`（MIT）；`@playwright/test`（Apache-2.0）仅用于真实浏览器回归。全部直接依赖固定版本并提交 npm lockfile；依赖升级通过审查，重新执行类型、构建、API、浏览器及 Rust wire 测试。安全修复优先处理，主版本升级需核对 Node 兼容性。复用全局 npm 和 Playwright 浏览器缓存，不为临时分支重复安装。
+运行依赖：`react` / `react-dom`（界面与 DOM 更新）、`antd` 与 `@ant-design/icons`（组件与图标）、`@tanstack/react-router` 与 `@tanstack/react-query`（路由与服务端状态），均为 MIT；`@fontsource/ibm-plex-sans`、`@fontsource/jetbrains-mono` 提供自托管字体，字体文件为 OFL-1.1，由 Vite 输出为同源静态文件。构建与检查依赖 `vite`（MIT）、`typescript`（Apache-2.0）、`@biomejs/biome`（MIT OR Apache-2.0），类型依赖 `@types/react`、`@types/react-dom`、`@types/node`（MIT）；`@playwright/test`（Apache-2.0）和 `@axe-core/playwright`（MPL-2.0）仅用于真实浏览器回归与可访问性扫描。直接依赖除沿用 `^` 范围的 `antd` 与 `@ant-design/icons` 外固定版本，实际安装版本由提交的 npm lockfile 固定；依赖升级通过审查，重新执行类型、构建、API、浏览器及 Rust wire 测试。安全修复优先处理，主版本升级需核对 Node 兼容性。复用全局 npm 和 Playwright 浏览器缓存，不为临时分支重复安装。
 
 工具依据：[Vite 指南](https://vite.dev/guide/)、[React 构建指南](https://react.dev/learn/build-a-react-app-from-scratch)、[Playwright 测试服务器](https://playwright.dev/docs/test-webserver)。
 
@@ -169,6 +199,7 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
 
 在 web/console 运行：
 
+    npm run lint
     npm test
     npm run build
     npm run test:e2e
@@ -179,7 +210,7 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
     python3 scripts/test_dev_postgres_migrations.py
     bash scripts/test_gateway_dynamic_listeners.sh
 
-Playwright 使用 5175 的明确机器 fixture 和 5176 的浏览器会话 fixture 两套入口；业务 API 响应为合成契约。test_console_oidc.mjs 另行访问 55173，执行真实本地 OIDC 登录、站点列表、详情刷新、资格账本、只读权限中心及 1440×1000 / 390×844 布局检查，截图写入 /tmp/xshield-console-smoke。它只执行管理读取，不创建业务站点、不保存 Cookie。
+Playwright 默认使用 5175 的明确机器 fixture 和 5176 的浏览器会话 fixture 两套入口（可用 XSHIELD_E2E_PORT 改为 N 与 N+1）；业务 API 响应为合成契约。test_console_oidc.mjs 另行访问 55173，执行真实本地 OIDC 登录、站点列表、详情刷新、资格账本、只读权限中心及 1440×1000 / 390×844 布局检查，截图写入 /tmp/xshield-console-smoke。它只执行管理读取，不创建业务站点、不保存 Cookie。
 # 管理 API Key 页面
 
 控制台通过后端管理 API 管理 Agent Key。页面只向具备 KeyAdministrator/SystemAdmin 的浏览器会话展示创建、scope、过期、撤销和轮换操作；明文只在创建响应中展示一次。
