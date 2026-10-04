@@ -46,6 +46,8 @@ Tenant/Site：管理边界与上游域；PolicyRevision：不可变配置和签�
 
 证据访问申请列表复用详情的案件、catalog 和申请/决策 outbox 一致性校验，按固定 tenant/site 和 `mine`/`review` 主体谓词取得单 SQL 只读快照。`mine` 包含本人各历史状态，`review` 只含其他主体的 pending；申请 ID 使用 `C` 排序降序与排他游标，每页最多 128 条加一条预读，预读坏行同样使整页失败。空页仍返回数据库观察时间；分页间批准可移除待办，新增高位 ID 须刷新首页查看。迁移 `0022_m4_evidence_access_listing.sql` 添加 owner/scope 排序索引和 pending 部分索引，事务内构建期间阻塞该表写入；回滚应用可保留加法索引。查询保留案件关闭、对象过期或已删除时的历史记录，不改变申请或生成事务 outbox，响应经独立 `console.evidence.access.list` 审计后释放。
 
+调查导出列表（29.33）以同样的 `mine`/`review` 谓词和单 SQL 只读快照发现导出，`review` 固定为持久状态 `pending_approval`。导出行没有逐行 outbox，且由复合外键绑定案件，所以不做案件/catalog/outbox 关联；改为校验导出 ID、规范主体、状态与决定/期限/包的一致性、请求人与决定人分离及时间单调，预读坏行同样使整页失败。投影只选取元数据列，用途、决定理由和包标识不会被读出。导出 ID 使用 `C` 排序降序与排他游标；迁移 `0050_m4_investigation_export_listing.sql` 添加 requester 排序索引和 `pending_approval` 部分索引，事务内构建期间阻塞该表写入，回滚应用可保留加法索引。响应经独立 `console.export.list` 审计后释放。
+
 ## 18.4 协议规则
 
 外部 API 与 audit event 含 schema_version。未知 critical enum 或版本拒绝；可扩展 metadata 只能保存非授权数据。金额、资源 ID、期限等使用明确类型，不靠浮点或 JS 自动类型转换。

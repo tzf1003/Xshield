@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`POST /control/v1/exports`、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 站点接入后台的配置写入要求 `SystemAdmin`，按固定 tenant/site 保存受保护站点、源站、安全入口、策略版本、状态和唯一监听端口；写入使用 `Idempotency-Key`，响应同时返回经过校验的 gateway 启动配置草稿。
 
@@ -8,7 +8,7 @@
 
 端口请求为 `0` 时，新站点从租户端口池取得最小空闲端口；已有站点更新会复用原 active lease，只有显式指定新端口才迁移租约。迁移、释放和唯一性检查都在同一事务锁内完成。
 
-本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0049，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
+本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0050，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -56,6 +56,7 @@
 | POST /control/v1/cases/{id}/analyze | 启动只读案件清单分析任务（MVP） | console.case.analyze |
 | POST /control/v1/replays | 离线规则评估，不送原站（设计，尚未实现） | replay.requested/completed |
 | POST /control/v1/exports | 带用途/范围/审批的导出任务 | export.requested/approved/downloaded |
+| GET /control/v1/exports | 本人导出历史与独立审批待办（已实现，29.33） | console.export.list |
 | GET /control/v1/exports/{export_id} | 读取本人或管理范围内的导出状态 | console.export.read |
 | POST /control/v1/exports/{export_id}/approve | 独立批准并生成短时元数据包 | export.approved |
 | POST /control/v1/exports/{export_id}/deny | 独立拒绝导出请求 | export.denied |
@@ -446,6 +447,20 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 `GET /download` 只接受独立 Reader 和近期 step-up。数据库先在 `ready`、期限有效且下载计数小于 2 时原子 claim；随后比较导出行、active catalog manifest 和 vault authenticated manifest 的 artifact/request/digest/bytes 四元关系，再读取并返回带 `X-Content-Type-Options: nosniff` 的 JSON attachment。读取前不加载证据正文；返回的包只包含案件/证据目录元数据与 missing/omitted 清单，不含事件 JSONL、请求响应版本、模型输入输出、规则/构建引用、存储定位、密钥、连接凭据或任何业务资格。成功、失败和审计故障分别写固定管理事件，审计不保存原始包或用途；控制台只接收与最近一次 `ready` 状态一致的 artifact 和精确字节数。
 
 部署顺序为应用 `0039_m4_investigation_exports.sql`、`0040_m4_investigation_export_package_claims.sql`，升级可识别 `export.requested`、`export.approved`、`export.denied`、`export.downloaded` 和 `console.export.read` 的管理 journal，再开放 API 与控制台固定代理路由。迁移 0040 的 claim 使用 tenant/site/export 复合键、固定 package request ID、长度前缀 parent_refs 摘要和短 lease；并发 writer 返回 Busy，参数变化返回 Conflict，过期 lease 可回收，旧 lease 不能完成 ready，claim 与 ready 绑定在同一事务。该 MVP 仍是 metadata-only，不提供完整事件/正文取证包、自然语言查询、安全回放、自动轮询或机器 step-up；工作台仅显式读取状态、提交冻结的幂等操作并下载有界 JSON Blob，完整包能力保留为独立 backlog。
+
+## 29.33 已实现的调查导出列表契约
+
+`GET /control/v1/exports?view=mine` 用于发现当前主体的全部导出历史；同一固定 tenant/site 下具备 `Investigator`、`SensitiveEvidenceReader` 或 `SensitiveEvidenceApprover` 之一即可读取。`view=review` 仅允许 `SensitiveEvidenceApprover`，列出同作用域其他主体仍待决定（持久状态 `pending_approval`）的导出。Observer、SystemAdmin 与 AuditAdministrator 不隐含上述角色；Reader 与 AuditAdministrator 虽可按 ID 读取他人导出（29.32），列表不扩大枚举范围。每页重新校验单值管理 Bearer 或同源浏览器会话、凭证时效、作用域、角色和速率；GET 不要求 CSRF。列表只发现、不授权：批准/拒绝仍要求独立 Approver 与近期 step-up，下载仍要求 Reader 与近期 step-up，且各自重验当前状态。
+
+请求必须显式提供规范 `view=mine` 或 `view=review`，随后可附一个 `&cursor=...`；缺少/未知视图、逆序或重复参数、附加参数（含 tenant_id、site_id）、百分号编码的视图别名、空游标、超过 256 字节的游标及非空正文为 `CONTROL_EXPORT_LIST_REQUEST_INVALID`/400。形状或签名无效的游标为 `CONTROL_CURSOR_INVALID`/400；二者均提示重新开始查询。游标为 `v1.export_UUIDv7.64lowerhex`，采用独立用途域 `xshield-control-export-list-v1`，以 HMAC 绑定管理凭证摘要、主体、tenant/site、视图、服务端页大小和最后导出 ID，不能跨视图、主体、接口复用，也不能用证据访问申请或案件游标替代；轮换凭证/游标密钥或改变页大小后需重开查询。游标签名依赖失败为 `CONTROL_CURSOR_UNAVAILABLE`/503。
+
+200 响应字段为 `schema_version=3`、管理 `request_id`、`tenant_id`、`site_id`、`view`、数据库微秒 UTC `as_of`、`items`、`truncated` 和可空 `next_cursor`。每个 item 仅投影 export_id、case_id、requested_by、status、requested_at、decided_by、decided_at、expires_at。status 是 29.32 的持久状态（`pending_approval`、`approved`、`ready`、`rejected`、`expired`、`failed`），查询不改写它：`approved`/`ready` 行是否已过 `expires_at` 由客户端与 `as_of` 比较。`requested_at` 即详情的 `created_at`；与详情一致，item 时间为毫秒 UTC，仅 `as_of` 保留微秒。decided_by/decided_at 在未决定时为 null，expires_at 仅在批准后存在。`mine` 保留全部六种状态；`review` 固定为 `pending_approval`，已 `approved` 但尚未 `ready` 的导出已有决定，其包生成只能由原批准人按原键精确重试完成，不再属于待办。用途、决定理由、包 artifact/请求 ID、摘要、字节数、下载计数、幂等材料和 updated_at 不进入列表，仍由详情读取。空页仍包含数据库观察时间。
+
+页大小沿用 `XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS`（1–128），按规范导出 ID 的 `C` 字节序严格降序，以最后 ID 排他续查，最多多取一条预读判断下一页。单条 PostgreSQL 只读快照只投影元数据列（包列仅在 SQL 内折算为“是否已附包”的一致性标志，用途、理由和包标识不离开数据库），不 JOIN 案件、catalog 或 outbox：导出行以复合外键绑定案件，其状态转换不使用 outbox，管理访问另有 journal。所有可见记录含预读均校验 ID、规范主体、持久状态与决定/期限/包的一致性、请求人与决定人分离、时间单调，并再按视图复核可见性；任何坏行使整页失败。每页独立观察，后续批准/拒绝可使 review 项消失，新增高位 ID 需刷新首页发现；游标不是跨页数据库快照，列表刷新也不能确认未知写入。
+
+列表与案件及证据操作共用单实例在途许可，繁忙为 `CONTROL_EXPORT_BUSY`/429。数据库操作含连接池等待限 15 秒，事务内 SQL/锁等待限 5 秒；故障、超时或损坏为 `CONTROL_EXPORT_STORE_UNAVAILABLE`/503。只读事务结束后追加独立 `console.export.list` 管理审计，已准入任务断连后继续到结果和审计终态，许可覆盖审计；进程退出和本地 fsync 仍是故障边界。成功含空页为 `PASS/CONTROL_EXPORTS_READ`；拒绝仅限 `CONTROL_AUTH_REQUIRED`、`CONTROL_SCOPE_DENIED`、`CONTROL_RATE_LIMITED`、`CONTROL_CURSOR_INVALID`、`CONTROL_EXPORT_LIST_REQUEST_INVALID`、`CONTROL_EXPORT_BUSY`；故障仅限 `CONTROL_CURSOR_UNAVAILABLE`、`CONTROL_EXPORT_STORE_UNAVAILABLE`、`CONTROL_RATE_UNAVAILABLE`、`CONTROL_CLOCK_UNAVAILABLE`、`CONTROL_SESSION_UNAVAILABLE`（共享鉴权在会话验证密钥不可用时产生；29.24 的原因集合未登记它，本变更不修改）。全部 target（含 `target_export_id`）、query_digest 和 bytes_read 只允许缺省/null，evidence_refs 为空；事件只保存调用者与结果，视图、游标、导出记录及他人主体不进入载荷。必需审计失败为 `AUDIT_DURABILITY_FAILED`/503 并扣留响应数据，所有响应设置 `private, no-store`。
+
+部署先应用 `0050_m4_investigation_export_listing.sql`，为 tenant/site/requested_by/export ID 建立 `C` 序降序索引，并为 tenant/site/export ID 建立 `pending_approval` 部分索引；迁移 0039 的 requester 索引按 created_at 排序、主键使用库默认排序规则，均无法服务字节序键集分页。索引使用 `IF NOT EXISTS` 在事务内非并发构建，期间阻塞该表写入，大表需维护窗口。随后升级管理 journal 发布器、控制 API 和固定代理路由。数据库角色沿用详情所需的 investigation_exports 查询权限；无需新增密钥或依赖。回滚时先停用路由，继续使用可识别新事件的发布器直到相关积压已处理；应用可回退并保留两个加法索引，或仅移除本迁移的索引，保留所有导出、包 claim 和审计历史。旧发布器遇到新事件会停止推进并保留待发布段。
 
 ## 站点诊断与控制台契约补充（2026-09-27）
 

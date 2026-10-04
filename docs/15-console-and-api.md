@@ -22,7 +22,7 @@ Rules & Releases：差异、测试、审批、签名、灰度、回滚。
 
 Operations：节点、队列、存储、密钥引用、告警与审计访问。
 
-控制台实现采用原生 History API 的后台壳：左侧导航按服务端会话角色隐藏无权模块，站点详情、调查、案件、证据、审计和权限中心使用独立 URL，查询表单只存在于对应业务页面。隐藏导航不替代服务端授权；每个响应仍须重新验证 tenant/site scope、身份代际、操作资格和审计终态。`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049，现有开发数据卷无需重置。
+控制台实现采用原生 History API 的后台壳：左侧导航按服务端会话角色隐藏无权模块，站点详情、调查、案件、证据、审计和权限中心使用独立 URL，查询表单只存在于对应业务页面。隐藏导航不替代服务端授权；每个响应仍须重新验证 tenant/site scope、身份代际、操作资格和审计终态。`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049 及导出列表索引 0050，现有开发数据卷无需重置。
 
 站点策略可设置 `static_asset_max_path_depth`，默认值为 `5`。它只为 `GET` 静态资源扩展名（JavaScript、CSS、字体、图片、source map 和静态 JSON）提供有限深度兜底匹配；超过深度、非静态扩展和 API 路径仍按精确 operation 拒绝。该兜底不改变 WAF、限流或审计链路。
 
@@ -182,13 +182,15 @@ Investigator 可在同一控制台创建本人案件，读取“我的案件”�
 
 部署先应用迁移 0039、0040，再升级可识别 `export.requested`、`export.approved`、`export.denied`、`export.downloaded` 和 `console.export.read` 的管理 journal 发布器，开放固定代理路由后再启用工作台。迁移 0040 按 tenant/site/export 保存包 claim；短 lease 保护 vault 写入，过期 claim 可回收，ready 提交必须携带当前 lease，claim 与 ready 在同一 PostgreSQL 事务内提交。当前不提供完整事件/正文导出、自然语言查询、安全回放、自动轮询或 Bearer 强操作；工作台只在显式提交后读取状态，未知写入结果保留原键与参数，下载仅接收有界 JSON Blob。
 
+导出发现使用 `GET /control/v1/exports?view=mine|review`（29.33），为后续审批待办提供服务端能力；控制台尚未接入该列表，仍按规范 `export_` ID 读取详情。`mine` 允许 Investigator、Reader 或 Approver 分页查看本人全部持久状态，`review` 仅允许 Approver 查看同站点其他主体仍为 `pending_approval` 的导出。每页按导出 ID 降序，仅投影导出/案件 ID、申请人、持久状态、申请时间、决定人/时间和包期限；用途、决定理由与包标识仍在详情读取，列表不授予批准或下载资格。每次查询写独立 `console.export.list` 审计，游标绑定凭证、主体、作用域、视图及页大小。启用前先应用迁移 0050、升级管理 journal 发布器，再部署控制 API 与固定代理路由。
+
 ## 后台路由与角色独立性验收（2026-09-27）
 
 站点列表和编辑器分别位于 /sites 与 /sites/{siteId}/{section}；创建入口为 /sites/new/network。网络、安全入口、路由、身份、加密、WAF/限流、策略/健康、发布与审计按分类独立渲染。原生 History API 管理路径和前进后退，同站点分类共享草稿；跨站点、跨模块时清空响应并取消旧请求，所有站点响应核对独立 tenant/site 范围。草稿离页有显式确认，未知写入保留原幂等键与正文供人工重试。
 
 只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
 
-本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0049 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
+本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0050 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
 # 管理 API Key
 
 `POST/GET /control/v1/agent-api-keys`、`POST /{id}/revoke`、`POST /{id}/rotate` 仅允许 KeyAdministrator 或 SystemAdmin 的浏览器管理会话并要求 CSRF。创建响应只返回一次完整 `xsk_` 明文，数据库和审计只保存 HMAC 指纹、前缀、scope 与生命周期。

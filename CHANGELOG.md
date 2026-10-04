@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 增加调查导出发现与审批待办 API：`GET /control/v1/exports?view=mine|review` 按导出 ID 降序有界分页，`mine` 含本人全部持久状态，`review` 仅 Approver 可见他人 `pending_approval` 导出；游标绑定凭证、主体、作用域、视图与页大小，条目只投影元数据，不含用途、决定理由与包标识。列表访问写独立 `console.export.list` 审计（成功 `CONTROL_EXPORTS_READ`），worker 发布矩阵、封闭原因集和覆盖检查同步扩展；迁移 0050 增加加法排序索引并纳入开发库 reconciliation。控制台接入和 Vite 代理放行属于后续前端增量，本次未改动 `web/`。
+
 - 修复管理审计发布器拒收控制面已产生的事件：`console.workbench.overview.read`、`console.site.config.approve`、API Key 管理/使用和导出全族（`console.export.read`、`export.requested/approved/denied/downloaded`）此前不在发布矩阵中，任何一次调用都会使所在 journal segment 无法发布并阻断其后的管理历史。发布器现按固定路径、强类型 `target_export_id`、成功原因码和下载证据绑定校验这些事件；新增 `scripts/check_audit_event_coverage.py` 并接入 CI，让控制面新增端点缺少发布矩阵项时直接失败。工作台改为展示真实的 edge 探测、edge 审计屏障状态和最近一次持久化的上游健康观察（各带观察时间），不再把每个来源写死为不可用；edge 健康接口不再硬编码 `audit_state=healthy`。
 
 - 落地多站点运营增量并修复收口问题：迁移 0041–0049、站点配置与应用 API、工作台快照、Agent API Key、edge 动态监听与签名快照、控制台管理后台和安全靶场进入版本库。请求摘要与事件时间线在索引失败时不再返回空的 200：只有本地 journal 的认证命中可以代替索引结果，否则保持 `CONTROL_INDEX_UNAVAILABLE`/503；本地 journal 扫描在阻塞线程上执行。`inspect_publication_health` 只把未封存的活动 segment 计为待发布，不再把已关闭 segment 的字节误计为活动尾部（此前会让空闲系统永久显示一个待发布段，并掩盖在测试期望里），补充回归。工作台站点列表在满页时标记 partial。修复 clippy 和控制台 Playwright 的移动端抽屉与角色导航断言，库验证报告随新增 JSON 文件重生成。

@@ -189,6 +189,10 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 调查导出 MVP 的 Rust 单测覆盖强类型 `export_`/`case_`/`artifact_`/`req_` 绑定、reason/摘要/TTL/下载上限和元数据包边界；PostgreSQL wire 回归应在迁移 0039 的脚本拥有数据库中覆盖创建、精确重放/冲突、独立批准/拒绝、自批拒绝、案件/作用域隔离、审批后 catalog 快照、包完成的精确重放以及两次下载 claim。控制层回归还需注入 vault、catalog、审计不确定和 manifest/digest/bytes 错绑，确认目录已发布但提交结果未知时按固定包请求复用、结果扣留且不返回正文；浏览器回归只验证后续显式提交工作台，不把 202 或 approved 状态误当作可下载包。
 
+调查导出列表（29.33）的控制层回归 `cargo test -p xshield-control --lib export_list` 覆盖：缺失、未知、重复、逆序或百分号编码的视图，空/超长游标，额外参数和非空正文在取得在途许可前即被拒绝并审计；十种管理角色与两种视图的矩阵恰好只放行文档规定的角色，授权取决于浏览器会话角色而非机器主体；游标对凭证、主体、tenant/site、页大小、密钥、视图、位置以及证据访问申请/案件游标族的绑定，和跨视图、跨主体重放；认证、范围、速率、容量、依赖故障与会话密钥不可用都只产生一条 `console.export.list` 事件，journal 中没有视图、游标、导出 ID、用途或理由。`management_audit` 回归把 PASS 与端点自有的全部失败原因经真实封存 journal 和 worker 发布器验证；worker 的 `control_audit` 测试固定方法/路由、空目标、封闭原因集和重复/未知字段。`scripts/check_audit_event_coverage.py` 只比较发布矩阵，不检查 `supports`，后者由上述发布回归覆盖。
+
+`scripts/test_postgres.sh` 应用迁移 0050 后执行 `cargo test -p xshield-control --lib export_list -- --ignored` 和 `xshield-postgres` 的 `investigation_export_list`：真实 POST 创建与拒绝产生的行，加直接写入的 approved/ready/expired/failed 行，覆盖六种持久状态、降序键集分页、跨角色续页、review 队列排除本人与已决定项、跨租户/站点空页（仍带数据库观察时间）、列表与详情逐字段一致、读后各表 xmin 不变且不被业务行锁阻塞、预读坏行（待办带期限、自批、非规范主体）使整页失败、客户端断连后许可保持到审计终态、审计失败扣留页面，以及 15 秒连接池与 5 秒锁等待上限。这些集成测试默认 ignored，需脚本拥有的 PostgreSQL。
+
 故障回归以数据库时间强制租约过期，验证索引写入成功后旧 token 确认被拒绝，重新领取可确认且底表重复行在 active 视图合并为一条。真实缺失目标表返回 `OUTBOX_INDEX_UNAVAILABLE`，延迟期间不领取，到期并恢复目标后重试成功；同一 event_id 修改合成正文返回 `OUTBOX_INTEGRITY_CONFLICT` 并保持未确认。断言失败后仍等待清理本测试所属的双库数据。该回归验证数据库集成与故障注入，不覆盖进程崩溃、网络分区或生产负载。
 
 真实 Outbox 回归还覆盖请求摘要的混合来源：较早 ID、序号为 1 的 GET 目标资格先到，摘要保持来源方法/操作为空；同一 request_id 的 POST 来源请求随后到达，两个查询视图均返回来源方法与操作，资格事件继续保留其目标语义。
