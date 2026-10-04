@@ -38,6 +38,12 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "请求范围内不存在站点策略，请求未被转发到源站。",
     "核对租户、站点标识与域名路由；必要时先创建并发布站点。",
   ],
+  HOST_NOT_ROUTED: [
+    "deny",
+    "主机未路由",
+    "当前边缘快照中没有站点路由该监听端口与 Host，请求不属于任何站点，未被转发。",
+    "核对域名、监听端口与已发布的边缘快照；这类拒绝只按端口汇总，不逐条审计。",
+  ],
   SKIPPED_BY_SITE_UNAVAILABLE: [
     "unknown",
     "因站点结果而跳过",
@@ -56,6 +62,12 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "审计日志尾部已修复",
     "启动时发现审计日志尾部因崩溃被截断，已在接收流量前修复。",
     "复核崩溃时间点附近的请求是否缺少终态。",
+  ],
+  AUDIT_BARRIER_REOPENED: [
+    "observe",
+    "审计写入器已恢复",
+    "持久审计写入器在一次持久化失败后被重新打开，准入已恢复。",
+    "核对失败期间被拒绝或扣留的请求，并检查导致失败的审计存储问题。",
   ],
   CLOCK_UNAVAILABLE: [
     "error",
@@ -604,6 +616,24 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "无需处理；该字段原值在证据中不可恢复。",
   ],
   // ---- 边缘配置下发 ----
+  EDGE_HEALTH_REQUEST_EXPIRED: [
+    "deny",
+    "健康探测请求已过期",
+    "边缘健康探测请求的签名时间已超出允许范围，被拒绝。",
+    "核对控制面与边缘主机的时钟同步后重试。",
+  ],
+  EDGE_HEALTH_REQUEST_REPLAYED: [
+    "deny",
+    "健康探测请求被重放",
+    "边缘健康探测请求的随机数此前已使用过，被作为重放拒绝。",
+    "重新发起一次带新随机数的探测；反复出现请排查请求被截获重放。",
+  ],
+  EDGE_HEALTH_RATE_LIMITED: [
+    "deny",
+    "健康探测过于频繁",
+    "边缘健康探测请求超过了频率上限，被限流。",
+    "降低探测频率，稍后重试。",
+  ],
   EDGE_APPLY_CONFIRMED: [
     "allow",
     "下发已确认",
