@@ -7,6 +7,8 @@ use crate::domain::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub mod upstream;
+
 /// An internal edge listener port.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PortNumber(u16);

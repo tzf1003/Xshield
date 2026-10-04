@@ -17,22 +17,20 @@ use axum::{
 use openssl::{hash::MessageDigest, memcmp, pkey::PKey, sign::Signer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    fmt::Write as _,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
 use url::Url;
 use xshield_core::{
-    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SitePolicyConfig,
+    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteHealthCheckConfig,
+    SitePolicyConfig,
     admin::ManagementRole,
     domain::SiteId,
-    site::{PublicOrigin, RouteOperation, UpstreamEndpoint},
+    site::{
+        PublicOrigin, RouteOperation, UpstreamEndpoint,
+        upstream::{parse_upstream_socket, refuse_upstream_socket},
+    },
 };
 use xshield_postgres::{
-    ProtectedSiteApprovalOutcome, ProtectedSiteConfigRecord, ProtectedSiteConfigUpsert,
-    ProtectedSiteConfigWriteOutcome,
+    ProtectedSiteApprovalOutcome, ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
 };
 use zeroize::Zeroizing;
 
@@ -155,40 +153,98 @@ fn validate_apply_ack(
     Ok(())
 }
 
+/// Whether the deployment opted in to loopback upstreams (the local lab only).
+///
+/// The opt-in is read at each use so a lab restart picks it up without a code
+/// path caching a stale answer; it unlocks `127.0.0.0/8` and `::1` and nothing
+/// else (see `xshield_core::site::upstream`).
+fn loopback_upstream_allowed() -> bool {
+    std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1")
+}
+
+/// A health probe whose destination has been re-validated for this request.
+#[derive(Debug, Eq, PartialEq)]
+struct UpstreamProbePlan {
+    /// Absolute URL: DNS-name host, the configured port and the health path.
+    url: String,
+    /// The URL's canonical host, which the client's resolver override pins.
+    host: String,
+    /// The only socket the probe may connect to.
+    address: SocketAddr,
+}
+
+/// Decides, without any network I/O, where a probe may connect.
+///
+/// The persisted address is parsed and classified again here rather than
+/// trusted because it was valid when written: rows from before a rule was
+/// tightened, or edited directly in the database, must not turn the health
+/// endpoint into a request forwarder. The server name only ever supplies the
+/// `Host`/SNI identity; it must be a DNS name under the same URL parser the
+/// HTTP client will use, because that client does not apply a resolver
+/// override to IP literals (or to names such as `2130706433` that parse as one)
+/// and would connect to them directly.
+fn plan_upstream_probe(
+    address: &str,
+    server_name: &str,
+    tls: bool,
+    health_path: &str,
+    allow_loopback: bool,
+) -> Result<UpstreamProbePlan, &'static str> {
+    let socket = parse_upstream_socket(address).map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
+    if refuse_upstream_socket(socket, allow_loopback).is_some() {
+        return Err("CONTROL_SITE_SSRF_BLOCKED");
+    }
+    if !server_name_is_dns_name(server_name) {
+        return Err("CONTROL_SITE_UPSTREAM_INVALID");
+    }
+    let scheme = if tls { "https" } else { "http" };
+    let url = Url::parse(&format!(
+        "{scheme}://{server_name}:{}{health_path}",
+        socket.port()
+    ))
+    .map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
+    let Some(url::Host::Domain(host)) = url.host() else {
+        return Err("CONTROL_SITE_UPSTREAM_INVALID");
+    };
+    if url.port_or_known_default() != Some(socket.port()) || !url.username().is_empty() {
+        return Err("CONTROL_SITE_UPSTREAM_INVALID");
+    }
+    Ok(UpstreamProbePlan {
+        host: host.to_owned(),
+        url: url.to_string(),
+        address: socket,
+    })
+}
+
 /// Probes only the persisted, validated upstream socket and health path.
-/// Redirects stay disabled so a health check cannot become an open proxy.
-async fn probe_upstream(record: &ProtectedSiteConfigRecord) -> serde_json::Value {
-    let address = match record.upstream_address().parse::<SocketAddr>() {
-        Ok(address) => address,
-        Err(_) => {
+///
+/// The client connects to the validated socket address and nothing else: no
+/// proxy, no DNS resolution of operator-supplied names, and redirects stay
+/// disabled so a health check cannot become an open proxy.
+async fn probe_upstream(
+    address: &str,
+    server_name: &str,
+    tls: bool,
+    health: &SiteHealthCheckConfig,
+    allow_loopback: bool,
+) -> serde_json::Value {
+    let plan = match plan_upstream_probe(address, server_name, tls, &health.path, allow_loopback) {
+        Ok(plan) => plan,
+        Err(reason) => {
             return json!({
                 "upstream_state": "unavailable",
-                "reason_code": "CONTROL_SITE_UPSTREAM_INVALID"
+                "reason_code": reason
             });
         }
     };
-    if upstream_ip_is_unsafe(address.ip()) {
-        return json!({
-            "upstream_state": "unavailable",
-            "reason_code": "CONTROL_SITE_SSRF_BLOCKED"
-        });
-    }
-    let health = &record.policy().health_check;
-    let scheme = if record.upstream_tls() {
-        "https"
-    } else {
-        "http"
-    };
-    let url = format!(
-        "{scheme}://{}{}",
-        record.upstream_server_name(),
-        health.path
-    );
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(u64::from(health.timeout_ms)))
         .timeout(Duration::from_millis(u64::from(health.timeout_ms)))
         .redirect(reqwest::redirect::Policy::none())
-        .resolve(record.upstream_server_name(), address)
+        // An environment proxy would receive the request and resolve the name
+        // itself, defeating the pinned address.
+        .no_proxy()
+        .resolve(&plan.host, plan.address)
         .build()
     {
         Ok(client) => client,
@@ -199,7 +255,7 @@ async fn probe_upstream(record: &ProtectedSiteConfigRecord) -> serde_json::Value
             });
         }
     };
-    let response = match client.get(url).send().await {
+    let response = match client.get(plan.url).send().await {
         Ok(response) => response,
         Err(_) => {
             return json!({
@@ -1588,7 +1644,16 @@ async fn site_apply_state_handler(
         None
     };
     let upstream_health = if read_health {
-        Some(probe_upstream(&record).await)
+        Some(
+            probe_upstream(
+                record.upstream_address(),
+                record.upstream_server_name(),
+                record.upstream_tls(),
+                &record.policy().health_check,
+                loopback_upstream_allowed(),
+            )
+            .await,
+        )
     } else {
         None
     };
@@ -2803,19 +2868,67 @@ pub(super) async fn edge_health(control: &ControlPlane) -> serde_json::Value {
     }
 }
 
+/// Hostnames that name internal or metadata services. An upstream *address* is
+/// always an IP literal, so these only classify a refusal as a policy block
+/// rather than a malformed value.
+fn upstream_name_is_internal(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    ["metadata.google.internal", "metadata.google", "localhost"].contains(&host.as_str())
+        || [".internal", ".localhost", ".local"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+}
+
+/// Whether `name` is a DNS name under the URL parser the health probe uses.
+///
+/// WHATWG parsing reads `2130706433`, `0x7f.1` and `127.1` as IPv4 hosts, so a
+/// character-class check is not enough; the name is parsed the way it will be
+/// used and must come out as a domain.
+fn server_name_is_dns_name(name: &str) -> bool {
+    Url::parse(&format!("http://{name}/")).is_ok_and(|url| {
+        matches!(url.host(), Some(url::Host::Domain(domain)) if domain.eq_ignore_ascii_case(name))
+    })
+}
+
+/// Validates the origin destination: a literal socket address outside every
+/// internal range, and a server name that is a DNS name.
+fn validate_upstream_destination(
+    address: &str,
+    server_name: &str,
+    allow_loopback: bool,
+) -> Result<(), &'static str> {
+    let Ok(socket) = parse_upstream_socket(address) else {
+        // Names are never resolved on an operator's behalf. Known internal
+        // names are reported as blocked so the audit trail shows intent.
+        let host = address
+            .rsplit_once(':')
+            .map_or(address, |(host, _)| host)
+            .trim_matches(['[', ']']);
+        return Err(if upstream_name_is_internal(host) {
+            "CONTROL_SITE_SSRF_BLOCKED"
+        } else {
+            "CONTROL_SITE_UPSTREAM_INVALID"
+        });
+    };
+    if refuse_upstream_socket(socket, allow_loopback).is_some() {
+        return Err("CONTROL_SITE_SSRF_BLOCKED");
+    }
+    if !server_name_is_dns_name(server_name) {
+        return Err("CONTROL_SITE_UPSTREAM_INVALID");
+    }
+    Ok(())
+}
+
 fn validate_request(request: &SiteConfigRequest) -> Result<(), &'static str> {
+    validate_request_with(request, loopback_upstream_allowed())
+}
+
+fn validate_request_with(
+    request: &SiteConfigRequest,
+    allow_loopback: bool,
+) -> Result<(), &'static str> {
     let public =
         Url::parse(&request.public_origin).map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?;
-    let upstream = Url::parse(&format!(
-        "{}://{}",
-        if request.upstream_tls {
-            "https"
-        } else {
-            "http"
-        },
-        request.upstream_address
-    ))
-    .map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
     let public_loopback = public.host().is_some_and(|host| match host {
         url::Host::Domain(name) => name == "localhost",
         url::Host::Ipv4(ip) => ip.is_loopback(),
@@ -2834,32 +2947,17 @@ fn validate_request(request: &SiteConfigRequest) -> Result<(), &'static str> {
     if public.scheme() == "https" && PublicOrigin::parse(request.public_origin.clone()).is_err() {
         return Err("CONTROL_SITE_CONFIG_REQUEST_INVALID");
     }
-    if upstream.host().is_none()
-        || upstream.port().is_none()
-        || !upstream.username().is_empty()
-        || upstream.password().is_some()
-        || !matches!(upstream.path(), "" | "/")
-        || upstream.query().is_some()
-        || upstream.fragment().is_some()
-    {
-        return Err("CONTROL_SITE_UPSTREAM_INVALID");
-    }
     UpstreamEndpoint::parse(
         request.upstream_address.clone(),
         request.upstream_server_name.clone(),
         request.upstream_tls,
     )
     .map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
-    if upstream_host_is_unsafe(&upstream) {
-        return Err("CONTROL_SITE_SSRF_BLOCKED");
-    }
-    if request
-        .upstream_address
-        .parse::<std::net::SocketAddr>()
-        .is_err()
-    {
-        return Err("CONTROL_SITE_UPSTREAM_INVALID");
-    }
+    validate_upstream_destination(
+        &request.upstream_address,
+        &request.upstream_server_name,
+        allow_loopback,
+    )?;
     if request.display_name.is_empty()
         || request.display_name.len() > 128
         || request.display_name.trim() != request.display_name
@@ -2992,60 +3090,6 @@ fn route_publicity_widened(previous: &SitePolicyConfig, request: &SitePolicyConf
                 })
                 .is_none_or(|before| before.security_entry != xshield_core::SecurityEntry::Public)
     })
-}
-
-fn upstream_host_is_unsafe(upstream: &Url) -> bool {
-    let Some(host) = upstream.host_str().map(str::to_ascii_lowercase) else {
-        return true;
-    };
-    if matches!(
-        host.as_str(),
-        "metadata.google.internal" | "metadata.google"
-    ) {
-        return true;
-    }
-    if host.ends_with(".internal")
-        || host.ends_with(".localhost")
-        || host.strip_suffix(".local").is_some()
-        || host == "localhost"
-    {
-        return true;
-    }
-    host.parse::<IpAddr>().is_ok_and(upstream_ip_is_unsafe)
-}
-
-fn upstream_ip_is_unsafe(address: IpAddr) -> bool {
-    let allow_loopback = std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1");
-    match address {
-        IpAddr::V4(address) => {
-            (address.is_loopback() && !allow_loopback)
-                || address.is_unspecified()
-                || address.is_multicast()
-                || (address.octets()[0] == 169 && address.octets()[1] == 254)
-                || address.octets()[0] == 10
-                || (address.octets()[0] == 192 && address.octets()[1] == 168)
-                || (address.octets()[0] == 172 && (16..=31).contains(&address.octets()[1]))
-                || (address.octets()[0] == 100 && (64..=127).contains(&address.octets()[1]))
-                || (address.octets()[0] == 192
-                    && address.octets()[1] == 0
-                    && address.octets()[2] == 0)
-                || (address.octets()[0] == 198 && (18..=19).contains(&address.octets()[1]))
-                || (address.octets()[0] == 198
-                    && address.octets()[1] == 51
-                    && address.octets()[2] == 100)
-                || (address.octets()[0] == 203
-                    && address.octets()[1] == 0
-                    && address.octets()[2] == 113)
-        }
-        IpAddr::V6(address) => {
-            (address.is_loopback() && !allow_loopback)
-                || address.is_unspecified()
-                || address.is_multicast()
-                || (address.segments()[0] & 0xfe00) == 0xfc00
-                || (address.segments()[0] & 0xffc0) == 0xfe80
-                || (address.segments()[0] == 0x2001 && address.segments()[1] == 0x0db8)
-        }
-    }
 }
 
 fn signature(control: &ControlPlane, label: &[u8], parts: &[&[u8]]) -> Option<[u8; 32]> {
@@ -3225,9 +3269,10 @@ fn hex(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        SiteConfigRequest, SitePolicyConfig, merged_health_details, parse_site_list_query,
-        patch_is_compatible, policy_requires_approval, rollback_target_revision,
-        validate_apply_ack, validate_request,
+        SiteConfigRequest, SiteHealthCheckConfig, SitePolicyConfig, merged_health_details,
+        parse_site_list_query, patch_is_compatible, plan_upstream_probe, policy_requires_approval,
+        probe_upstream, rollback_target_revision, validate_apply_ack, validate_request,
+        validate_request_with,
     };
     use serde_json::json;
     use xshield_core::{
@@ -3280,6 +3325,310 @@ mod tests {
         assert!(validate_request(&value).is_err());
         value.upstream_address = "metadata.google.internal:80".to_owned();
         assert!(validate_request(&value).is_err());
+    }
+
+    /// Every address below reaches an internal, special-purpose or
+    /// translation-capable network. The reviewer reproduced `[::1]`,
+    /// `[fd00::1]`, `[fe80::1]` and both IPv4-mapped forms being accepted
+    /// because `Url::host_str` brackets IPv6 literals and the textual IP
+    /// check never matched.
+    #[test]
+    fn site_config_blocks_internal_ipv4_ipv6_mapped_and_translated_upstreams() {
+        for address in [
+            "[::1]:9000",
+            "[fd00::1]:9000",
+            "[fe80::1]:9000",
+            "[fd00:ec2::254]:80",
+            "[fec0::1]:80",
+            "[ff02::1]:80",
+            "[::]:80",
+            "[2001:db8::1]:80",
+            "[::ffff:127.0.0.1]:8080",
+            "[::ffff:169.254.169.254]:8080",
+            "[::ffff:10.0.0.5]:8080",
+            "[::ffff:8.8.8.8]:8080",
+            "[64:ff9b::7f00:1]:80",
+            "[64:ff9b::a9fe:a9fe]:80",
+            "[2002:7f00:1::]:80",
+            "0.0.0.0:80",
+            "0.1.2.3:80",
+            "127.0.0.1:80",
+            "127.255.255.254:80",
+            "10.0.0.1:80",
+            "172.16.0.1:80",
+            "172.31.255.255:80",
+            "192.168.1.1:80",
+            "169.254.169.254:80",
+            "168.63.129.16:80",
+            "100.64.0.1:80",
+            "100.100.100.200:80",
+            "192.0.0.192:80",
+            "192.0.2.1:80",
+            "198.18.0.1:80",
+            "198.51.100.1:80",
+            "203.0.113.1:80",
+            "224.0.0.1:80",
+            "240.0.0.1:80",
+            "255.255.255.255:80",
+        ] {
+            let mut value = request();
+            value.upstream_address = address.to_owned();
+            assert_eq!(
+                validate_request_with(&value, false),
+                Err("CONTROL_SITE_SSRF_BLOCKED"),
+                "{address} must be refused as an internal upstream"
+            );
+        }
+    }
+
+    #[test]
+    fn site_config_accepts_public_upstreams_and_scheme_default_ports() {
+        // `Url::port()` is None for a scheme's default port, which used to make
+        // `8.8.8.8:80` over http and `:443` over https "invalid".
+        for (address, tls) in [
+            ("8.8.8.8:80", false),
+            ("8.8.8.8:443", true),
+            ("8.8.8.8:443", false),
+            ("8.8.8.8:80", true),
+            ("[2001:4860:4860::8888]:443", true),
+            ("172.15.255.255:80", false),
+            ("172.32.0.1:80", false),
+            ("100.63.255.255:80", false),
+            ("100.128.0.1:80", false),
+            ("169.253.255.255:80", false),
+            ("169.255.0.1:80", false),
+            ("192.169.0.1:80", false),
+            ("198.17.255.255:80", false),
+            ("198.20.0.1:80", false),
+            ("223.255.255.255:80", false),
+        ] {
+            let mut value = request();
+            value.upstream_address = address.to_owned();
+            value.upstream_tls = tls;
+            assert_eq!(
+                validate_request_with(&value, false),
+                Ok(()),
+                "{address} tls={tls} is a public upstream"
+            );
+        }
+    }
+
+    #[test]
+    fn site_config_loopback_opt_in_allows_only_loopback() {
+        let mut value = request();
+        value.upstream_address = "127.0.0.1:9000".to_owned();
+        assert_eq!(validate_request_with(&value, true), Ok(()));
+        value.upstream_address = "[::1]:9000".to_owned();
+        assert_eq!(validate_request_with(&value, true), Ok(()));
+        // The opt-in is for the local lab only; it never unlocks private,
+        // metadata, mapped or translated destinations.
+        for address in [
+            "10.0.0.1:80",
+            "169.254.169.254:80",
+            "[::ffff:127.0.0.1]:80",
+            "[64:ff9b::7f00:1]:80",
+            "[fd00::1]:80",
+        ] {
+            value.upstream_address = address.to_owned();
+            assert_eq!(
+                validate_request_with(&value, true),
+                Err("CONTROL_SITE_SSRF_BLOCKED"),
+                "{address} stays blocked even with the loopback opt-in"
+            );
+        }
+    }
+
+    /// The probe used to build `http://{server_name}/...` and rely on a
+    /// resolver override that reqwest ignores for IP literals, so a public
+    /// `address` with `upstream_server_name = "127.0.0.1"` made the control
+    /// plane dial 127.0.0.1:80. Names the URL parser reads as an IPv4 host
+    /// ("2130706433", "0x7f.1", "127.1") have the same effect.
+    #[test]
+    fn site_config_rejects_server_names_that_a_url_parser_reads_as_an_ip() {
+        for name in [
+            "127.0.0.1",
+            "169.254.169.254",
+            "8.8.8.8",
+            "2130706433",
+            "0x7f.1",
+            "0x7f.0.0.1",
+            "127.1",
+            "1.1.1",
+        ] {
+            let mut value = request();
+            value.upstream_server_name = name.to_owned();
+            assert_eq!(
+                validate_request_with(&value, false),
+                Err("CONTROL_SITE_UPSTREAM_INVALID"),
+                "{name} is not a DNS name"
+            );
+        }
+        for name in ["origin.local", "juice.lab", "a-b.example.test", "localhost"] {
+            let mut value = request();
+            value.upstream_server_name = name.to_owned();
+            assert_eq!(validate_request_with(&value, false), Ok(()), "{name}");
+        }
+    }
+
+    #[test]
+    fn probe_plan_targets_only_the_validated_socket_and_configured_port() {
+        let plan = plan_upstream_probe(
+            "8.8.8.8:9000",
+            "Origin.Example.Test",
+            false,
+            "/health",
+            false,
+        )
+        .unwrap();
+        // The old probe built `http://{server_name}/health`, which dials the
+        // scheme's default port instead of the configured one.
+        assert_eq!(plan.url, "http://origin.example.test:9000/health");
+        assert_eq!(plan.host, "origin.example.test");
+        assert_eq!(plan.address, "8.8.8.8:9000".parse().unwrap());
+        let default_port =
+            plan_upstream_probe("8.8.8.8:443", "origin.test", true, "/h", false).unwrap();
+        assert_eq!(default_port.address.port(), 443);
+        assert_eq!(default_port.url, "https://origin.test/h");
+    }
+
+    #[test]
+    fn probe_plan_refuses_internal_addresses_and_ip_like_server_names_without_io() {
+        for address in [
+            "[::ffff:127.0.0.1]:8080",
+            "[::ffff:169.254.169.254]:80",
+            "[::1]:80",
+            "[fd00::1]:80",
+            "127.0.0.1:80",
+            "10.1.2.3:80",
+            "169.254.169.254:80",
+            "[64:ff9b::7f00:1]:80",
+        ] {
+            assert_eq!(
+                plan_upstream_probe(address, "origin.test", false, "/health", false),
+                Err("CONTROL_SITE_SSRF_BLOCKED"),
+                "{address}"
+            );
+        }
+        for name in ["127.0.0.1", "2130706433", "0x7f.1", "127.1", "[::1]", "a b"] {
+            assert_eq!(
+                plan_upstream_probe("8.8.8.8:9000", name, false, "/health", false),
+                Err("CONTROL_SITE_UPSTREAM_INVALID"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            plan_upstream_probe("origin.test:80", "origin.test", false, "/h", false),
+            Err("CONTROL_SITE_UPSTREAM_INVALID")
+        );
+    }
+
+    /// Accepts connections on 127.0.0.1, records each request head and answers
+    /// with `response`. Returns the port and the shared record.
+    async fn recording_origin(
+        response: &'static str,
+    ) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heads = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorded = std::sync::Arc::clone(&heads);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let recorded = std::sync::Arc::clone(&recorded);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0_u8; 4096];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (port, heads)
+    }
+
+    #[tokio::test]
+    async fn probe_connects_to_the_pinned_socket_and_never_follows_redirects() {
+        let (target_port, target_heads) = recording_origin(
+            "HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        let health = SiteHealthCheckConfig::default();
+        // Only the lab opt-in may reach loopback; the Host header carries the
+        // configured server name and port while the socket is the pinned one.
+        let result = probe_upstream(
+            &format!("127.0.0.1:{target_port}"),
+            "origin.example.test",
+            false,
+            &health,
+            true,
+        )
+        .await;
+        assert_eq!(result["upstream_state"], "degraded", "{result}");
+        assert_eq!(
+            result["status"], 302,
+            "redirects are reported, not followed"
+        );
+        let heads = target_heads.lock().unwrap();
+        assert_eq!(heads.len(), 1);
+        assert!(
+            heads[0].starts_with("GET /health HTTP/1.1\r\n"),
+            "{}",
+            heads[0]
+        );
+        assert!(
+            heads[0]
+                .to_ascii_lowercase()
+                .contains(&format!("host: origin.example.test:{target_port}\r\n")),
+            "{}",
+            heads[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_does_not_dial_mapped_loopback_or_ip_literal_server_names() {
+        let (port, heads) =
+            recording_origin("HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        let health = SiteHealthCheckConfig {
+            path: "/secret-internal-path".to_owned(),
+            ..SiteHealthCheckConfig::default()
+        };
+        // A legacy or hand-edited row: the mapped loopback form used to pass
+        // every textual check and the probe dialled 127.0.0.1:{port}.
+        let mapped = probe_upstream(
+            &format!("[::ffff:127.0.0.1]:{port}"),
+            "origin.example.test",
+            false,
+            &health,
+            false,
+        )
+        .await;
+        assert_eq!(mapped["reason_code"], "CONTROL_SITE_SSRF_BLOCKED");
+        assert_eq!(mapped["upstream_state"], "unavailable");
+        // A public address with a loopback IP literal as server name used to
+        // dial 127.0.0.1:80 because the resolver override skips IP hosts.
+        let literal = probe_upstream("8.8.8.8:9000", "127.0.0.1", false, &health, false).await;
+        assert_eq!(literal["reason_code"], "CONTROL_SITE_UPSTREAM_INVALID");
+        // Even with the lab opt-in the mapped form stays blocked.
+        let opted_in = probe_upstream(
+            &format!("[::ffff:127.0.0.1]:{port}"),
+            "origin.example.test",
+            false,
+            &health,
+            true,
+        )
+        .await;
+        assert_eq!(opted_in["reason_code"], "CONTROL_SITE_SSRF_BLOCKED");
+        tokio::task::yield_now().await;
+        assert!(
+            heads.lock().unwrap().is_empty(),
+            "no connection may reach the loopback origin: {:?}",
+            heads.lock().unwrap()
+        );
     }
 
     #[test]

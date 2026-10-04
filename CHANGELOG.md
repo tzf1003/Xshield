@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 修复站点上游 SSRF 防护绕过：`Url::host_str()` 给 IPv6 加方括号，文本 IP 检查对 `[::1]`、`[fd00::1]`、`[fe80::1]`、`[::ffff:127.0.0.1]`、`[::ffff:169.254.169.254]` 从未命中，Observer 的 `GET /health` 曾借 `[::ffff:127.0.0.1]:PORT` 让控制面向回环监听器发送 `GET /secret-internal-path`；IP 字面量 `upstream_server_name`（如 `127.0.0.1`）加公网地址曾使探测连接 `127.0.0.1:80`，探测也忽略配置端口。现在上游地址按类型化套接字解析，保存与探测连接前由 `xshield_core::site::upstream` 按数值分类，拒绝回环、私网、共享地址、链路本地、唯一本地、组播、保留/文档段、云元数据以及 IPv4 映射、NAT64、6to4、Teredo；服务名必须被 URL 解析器读成域名；探测固定到已验证套接字和配置端口、不使用环境代理、不跟随重定向。`8.8.8.8:80`（http）与 `:443`（https）此前因 `Url::port()` 对默认端口返回空而被误拒，现在合法。`XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1` 仍只为本地靶场放行 `127.0.0.0/8` 与 `::1`。
+
 - 修复管理审计发布器拒收控制面已产生的事件：`console.workbench.overview.read`、`console.site.config.approve`、API Key 管理/使用和导出全族（`console.export.read`、`export.requested/approved/denied/downloaded`）此前不在发布矩阵中，任何一次调用都会使所在 journal segment 无法发布并阻断其后的管理历史。发布器现按固定路径、强类型 `target_export_id`、成功原因码和下载证据绑定校验这些事件；新增 `scripts/check_audit_event_coverage.py` 并接入 CI，让控制面新增端点缺少发布矩阵项时直接失败。工作台改为展示真实的 edge 探测、edge 审计屏障状态和最近一次持久化的上游健康观察（各带观察时间），不再把每个来源写死为不可用；edge 健康接口不再硬编码 `audit_state=healthy`。
 
 - 落地多站点运营增量并修复收口问题：迁移 0041–0049、站点配置与应用 API、工作台快照、Agent API Key、edge 动态监听与签名快照、控制台管理后台和安全靶场进入版本库。请求摘要与事件时间线在索引失败时不再返回空的 200：只有本地 journal 的认证命中可以代替索引结果，否则保持 `CONTROL_INDEX_UNAVAILABLE`/503；本地 journal 扫描在阻塞线程上执行。`inspect_publication_health` 只把未封存的活动 segment 计为待发布，不再把已关闭 segment 的字节误计为活动尾部（此前会让空闲系统永久显示一个待发布段，并掩盖在测试期望里），补充回归。工作台站点列表在满页时标记 partial。修复 clippy 和控制台 Playwright 的移动端抽屉与角色导航断言，库验证报告随新增 JSON 文件重生成。

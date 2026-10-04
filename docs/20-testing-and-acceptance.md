@@ -208,3 +208,5 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 - node scripts/test_console_oidc.mjs：运行中的 55173 控制台，真实本地 OIDC 登录、session、站点列表/详情、分类表单、资格账本和只读权限中心；检查控制 API 200、运行时错误与桌面/窄屏布局。只读 smoke 不更改业务站点或保存身份凭证。
 
 后端站点 HTTP 测试验证空库列表 200、缺失站点状态、创建与幂等重放、确定性校验、自审拒绝、独立审批和未确认 edge 的 pending 语义；拒绝与存储失败均验证稳定原因码和终态审计。迁移测试保护既有数据，生产升级继续使用部署侧审批与备份流程。本地 OIDC 开发 ACR 与合成浏览器角色不是企业 MFA 或生产发布认证。
+
+上游 SSRF 回归分三层：`xshield-core` 的 `site::upstream` 对每个 IPv4/IPv6 范围的边界两侧、云元数据地址、映射/NAT64/6to4/Teredo 形式和回环放行开关逐项断言；`xshield-control` 单测覆盖保存校验（含默认端口 80/443 必须通过、IP 字面量或会被读成 IP 的服务名必须拒绝）、探测规划，以及用真实回环监听器验证探测只连接已验证套接字、使用配置端口、不跟随重定向、对映射回环与 IP 字面量服务名零连接；HTTP 测试在不触碰存储的情况下断言七种内部地址均返回 `CONTROL_SITE_SSRF_BLOCKED` 并写 DENY 审计，PostgreSQL 回归把一行旧数据改为映射回环后读取健康，确认监听器未被连接。这些测试不验证 DNS 重绑定（控制面不解析名称）或 edge 数据面转发的出口过滤。
