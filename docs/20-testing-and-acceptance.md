@@ -206,6 +206,10 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 生命周期回归 `cargo test -p xshield-control --lib api_key_lifecycle -- --ignored` 在真实 PostgreSQL 上覆盖：创建、轮换、撤销、列表和被拒绝的撤销各有一条带 `target_api_key_id` 的审计事件，轮换两条共享请求 ID，所有事件不含明文；主体和显示名的非法形态（空白、控制字符、西里尔字母同形字、emoji、超长、零宽/双向覆盖）全部返回 400 且不落库，同一 `subject` 可对应多把 Key；轮换遇到坏过期、空 scope、坏主体、未知字段、非对象或超出签发者权限的请求都返回 4xx 且旧 Key 仍可认证、库内不出现新 Key，有效轮换后旧 Key 返回 401、新 Key 可用，并发四个相同轮换恰有一个成功；容量只有几十条事件的 journal 写满后，创建、撤销、轮换均返回 `AUDIT_DURABILITY_FAILED`，不返回明文、不撤销、不创建；`last_used_at` 首次使用即写入，一分钟内重复使用保持不变，把时间拨回两分钟后下一次使用刷新，失败认证不更新任何 Key。数据库无关的 `key_administration_and_use_events_as_emitted_are_accepted_by_the_publisher` 把控制面实际写出的全部 Key 管理/使用事件形态（含两条一批的轮换）交给真实 `publish_sealed_segments`，确认全部可发布。`cargo test -p xshield-worker --lib control_audit` 另检查 `target_api_key_id` 的严格前缀、仅限管理事件且成功必带、错位或拼写错误的字段被拒绝。`cargo test -p xshield-postgres --test management_api_key -- --ignored` 覆盖暂存/提交/丢弃、轮换同时成功或同时不生效、撤销范围、`last_used_at` 节流和 scope 行的租户绑定。
 
+## 20.14 静态资源兜底回归
+
+`cargo test -p xshield-core --lib static_asset` 以表驱动覆盖：默认和缺省为关闭、显式深度与上限校验；评审复现的 `/orders/123.json`、`/api/v1/users/42.json`、`/admin/export.json`、`/api/json`、`/api/v1/map`、`/css`、`/search/png`、`/admin/users;.js`、`/admin/dashboard;.css`、`/api/accounts/..;/x.js`、`/api/users`、`/orders/123.xml` 全部拒绝而 `/assets/app.js` 放行；扩展名规则（空主名、尾点、大小写、`.mjs`、`.js.php`、尾斜杠）；原始与编码形态的 `;`、斜杠、反斜杠、点段、控制字符、`?`、`#`、双重编码、非 ASCII、畸形转义和超长路径。`cargo test -p xshield-gateway --lib static_asset` 通过 `GatewayConfig::admit` 检查无策略、空策略、深度 0 均关闭，启用后上述路径仍返回 `OperationNotMatched` 且只放行 GET 资源，精确 operation 不受影响。
+
 ## 管理后台与开发数据卷验收（2026-09-27）
 
 浏览器回归使用固定合成 API 契约，并分别覆盖明确机器 fixture 和服务端角色会话模式。站点场景包含列表选择精确 site、创建、按类别编辑、草稿前进后退/离页保护、深链接刷新、空站点 nullable 字段、读写跨 scope 拒绝、写入未知结果的原键/原正文人工重试、验证/审批/发布/回滚以及健康观察。角色矩阵覆盖九种服务端角色，包括独立 Observer 状态视图及策略/发布角色入口。
