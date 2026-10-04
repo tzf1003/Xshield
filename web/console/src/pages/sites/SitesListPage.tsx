@@ -1,6 +1,6 @@
 import { PlusOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { useRouter } from "@tanstack/react-router";
-import { Button, Empty, Input, Table, type TableColumnsType, Tag } from "antd";
+import { Alert, Button, Empty, Input, Table, type TableColumnsType, Tag } from "antd";
 import { type MouseEvent, useMemo, useState } from "react";
 import type { SiteListItem } from "../../api";
 import { safeError } from "../../security/errors.ts";
@@ -16,7 +16,9 @@ import {
   statusFilterOrder,
   summarize,
 } from "../../sites/list-model.ts";
+import { takeListNotice } from "../../sites/state/list-flash.ts";
 import { useSiteList } from "../../sites/state/queries.ts";
+import type { Outcome } from "../../sites/outcome.ts";
 import { PageActions } from "../../shell/page-actions";
 import { busy } from "./fields";
 import { IdChip } from "../../ui/IdChip";
@@ -39,6 +41,8 @@ export function SitesListPage() {
   const query = useSiteList();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<StatusFilter>("all");
+  // What happened on the page the operator just left (a deleted site), shown once.
+  const [notice, setNotice] = useState<Outcome | null>(takeListNotice);
 
   const sites = useMemo(
     () => dedupeSites(query.data?.pages.flatMap((page) => page.sites) ?? []),
@@ -182,6 +186,19 @@ export function SitesListPage() {
           </Button>
         )}
       </PageActions>
+
+      {notice && (
+        <div className="xs-sites-problem">
+          <Alert
+            type={notice.tone}
+            showIcon
+            role="status"
+            title={notice.title}
+            description={notice.detail ?? undefined}
+            closable={{ onClose: () => setNotice(null), "aria-label": "关闭提示" }}
+          />
+        </div>
+      )}
 
       {query.isError && (
         <div className="xs-sites-problem">

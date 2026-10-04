@@ -198,15 +198,17 @@ test("validation, apply, approve, rollback and delete are worded for what they d
     ).tone,
     "warning",
   );
-  assert.match(
+  const deleted = (reason_code: string) =>
     describeDelete({
       request_id: "req_018f2a3b-4c5d-7000-8000-000000000001",
       tenant_id: "t",
       site_id: "s",
-      reason_code: "CONTROL_SITE_DELETED",
-    }).title,
-    /站点已删除/,
-  );
+      reason_code,
+    });
+  assert.match(deleted("CONTROL_SITE_DELETED").title, /站点已删除/);
+  // The reason repeats the title, so it is not said twice; a replay is worth saying.
+  assert.equal(deleted("CONTROL_SITE_DELETED").detail, null);
+  assert.match(deleted("CONTROL_SITE_DELETE_REPLAYED").detail ?? "", /重放/);
   assert.equal(
     standing(
       {

@@ -40,6 +40,7 @@ import {
   useSiteRevisions,
   useSiteStatus,
 } from "../../../sites/state/detail-queries.ts";
+import { leaveListNotice } from "../../../sites/state/list-flash.ts";
 import {
   operationKind,
   operationsOfSite,
@@ -175,11 +176,18 @@ export function useSiteWorkspace(siteId: string | null) {
   const [draft, setDraft] = useState<SiteConfigDraft | null>(creating ? emptyDraft() : null);
   const [newSiteId, setNewSiteId] = useState("");
   const seededAt = useRef(0);
+  /** A release action re-reads the site; the unsaved edits of a draft are not its business. */
+  const keepDraft = useRef(false);
   useEffect(() => {
     // Every successful read of the configuration (including an explicit refresh that returns
-    // equal data) restarts the draft from the server; nothing else ever overwrites it.
+    // equal data) restarts the draft from the server; nothing else ever overwrites it. The one
+    // exception is the re-read after approve, apply or roll back, which must not eat edits.
     if (creating || saved === null || seededAt.current === configQuery.dataUpdatedAt) return;
     seededAt.current = configQuery.dataUpdatedAt;
+    if (keepDraft.current) {
+      keepDraft.current = false;
+      return;
+    }
     setDraft(structuredClone(saved));
   }, [creating, saved, configQuery.dataUpdatedAt]);
 
@@ -267,10 +275,14 @@ export function useSiteWorkspace(siteId: string | null) {
           break;
         case "delete":
           cache.dropSite();
-          setNotice({ kind: "outcome", ...describeDelete(response as SiteDeleteResponse) });
+          // This page goes away; the list it lands on tells the operator what happened.
+          leaveListNotice(describeDelete(response as SiteDeleteResponse));
           goTo("/sites");
           break;
         default:
+          // Approve, apply and roll back act on the saved revision, not on the draft: re-read
+          // the site's facts but keep whatever the operator has typed and not saved.
+          keepDraft.current = guard.current.dirty;
           cache.refreshDetail();
           setNotice({ kind: "outcome", ...describeApply(kind, response as SiteApplyResponse) });
       }
@@ -347,6 +359,7 @@ export function useSiteWorkspace(siteId: string | null) {
 
   const refresh = useCallback(() => {
     if (dirty && !window.confirm("放弃当前草稿并重新读取服务端状态？")) return;
+    keepDraft.current = false;
     setNotice(null);
     if (creating) {
       discard();

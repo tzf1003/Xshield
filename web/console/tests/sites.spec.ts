@@ -282,11 +282,25 @@ test("release page sequences validation approval apply and rollback with explici
   await expect(page.getByRole("button", { name: "应用期望版本" })).toBeDisabled();
   await page.getByRole("button", { name: "验证配置" }).click();
   await expect(page.getByRole("status")).toContainText("配置验证通过");
+  // Approving, applying and rolling back now confirm in a dialog that shows the change and what
+  // happens next; the requests, their order and their idempotency keys are unchanged.
   await page.getByRole("button", { name: "批准并应用" }).click();
+  await page
+    .getByRole("dialog", { name: "批准并应用 r1", exact: true })
+    .getByRole("button", { name: "确认批准" })
+    .click();
   await expect(page.getByRole("button", { name: "应用期望版本" })).toBeEnabled();
   await page.getByRole("button", { name: "应用期望版本" }).click();
+  await page
+    .getByRole("dialog", { name: "应用 r1", exact: true })
+    .getByRole("button", { name: "确认应用" })
+    .click();
   await expect(page.getByRole("button", { name: "回滚上一版本" })).toBeEnabled();
   await page.getByRole("button", { name: "回滚上一版本" }).click();
+  await page
+    .getByRole("dialog", { name: "回滚站点配置", exact: true })
+    .getByRole("button", { name: "确认回滚" })
+    .click();
   await expect(page.getByRole("button", { name: "回滚上一版本" })).toBeEnabled();
   expect(actions).toEqual(["validate", "approve", "apply", "rollback"]);
 });

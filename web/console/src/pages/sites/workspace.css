@@ -381,6 +381,8 @@ details.xs-card,
 }
 
 .xs-diff-value {
+  display: inline-block;
+  min-width: 120px;
   overflow-wrap: anywhere;
 }
 

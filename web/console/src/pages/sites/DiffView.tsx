@@ -1,4 +1,4 @@
-import { Button, Modal, Table, type TableColumnsType, Tag } from "antd";
+import { Button, Modal, Table, type TableColumnsType } from "antd";
 import { type FieldChange, groupLabel } from "../../sites/model/diff.ts";
 import { riskText } from "../../ui/reason-codes.ts";
 
@@ -48,11 +48,14 @@ export function DiffTable({ changes, showRisk = false, empty = "没有差异。"
       title: "审批",
       key: "risk",
       width: 190,
+      // The token pills of the rest of the console: legible in both themes, unlike a preset tag.
       render: (_, change) =>
         change.risk ? (
-          <Tag color="warning">{riskText(change.risk).label}</Tag>
+          <span className="xs-pill xs-pill--sm xs-pill--observe">
+            {riskText(change.risk).label}
+          </span>
         ) : (
-          <Tag>无需审批</Tag>
+          <span className="xs-pill xs-pill--sm">无需审批</span>
         ),
     });
   }

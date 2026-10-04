@@ -279,7 +279,13 @@ export async function mockSite(page: Page, init: Partial<SiteMock> = {}): Promis
     } else if (tail === "config") {
       await route.fulfill({ json: configBody(mock.id, mock.config, mock.state) });
     } else if (tail === "revisions") {
-      await route.fulfill({ json: revisionsBody(mock.id, mock.revisions) });
+      // As on the server, the staged revision's digest is the one the status reports.
+      const stored = mock.revisions.map((item) =>
+        item.revision === mock.state.desired_revision && item.digest === undefined
+          ? { ...item, digest: DIGEST }
+          : item,
+      );
+      await route.fulfill({ json: revisionsBody(mock.id, stored) });
     } else if (tail === "status") {
       await route.fulfill({ json: applyBody(mock.id, mock.state) });
     } else if (tail === "health") {

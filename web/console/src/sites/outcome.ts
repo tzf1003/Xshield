@@ -88,11 +88,9 @@ export function describeApply(
 }
 
 export function describeDelete(response: SiteDeleteResponse): Outcome {
-  return {
-    tone: "success",
-    title: "站点已删除，监听端口已释放。",
-    detail: reasonText(response.reason_code).text,
-  };
+  const title = "站点已删除，监听端口已释放。";
+  const detail = reasonText(response.reason_code).text;
+  return { tone: "success", title, detail: detail === title ? null : detail };
 }
 
 export const writeFailureTitle: Record<WriteKind, string> = {

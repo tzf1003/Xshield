@@ -122,10 +122,16 @@ test("an approver sees only the release page and reads nothing before acting", a
   await expect(page.getByRole("button", { name: "应用期望版本" })).toHaveCount(0);
   expect(reads(mock)).toEqual([]);
   await page.getByRole("button", { name: "批准并应用" }).click();
+  // The dialog says plainly that this role cannot see what it approves, then confirms.
+  const dialog = page.getByRole("dialog", { name: "批准并应用 当前修订", exact: true });
+  await expect(dialog.getByText("当前角色无法读取修订内容")).toBeVisible();
+  await dialog.getByRole("button", { name: "确认批准" }).click();
   await expect
     .poll(() => mock.writes.map((write) => write.path.split("/").at(-1)))
     .toEqual(["approve"]);
   expect(mock.writes[0]?.key).toBeTruthy();
+  // Nothing was read, so there is no digest to bind the approval to.
+  expect(mock.writes[0]?.digest).toBeNull();
 });
 
 test("a role without any site role gets the explanation and no request", async ({ page }) => {
@@ -153,7 +159,9 @@ test("revisions are read with the reviewer's role and shown newest first", async
     .first()
     .getByRole("button", { name: /展开|Expand/ })
     .click();
-  await expect(page.getByText("站点名称")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "修订历史" }).getByText("站点名称", { exact: true }),
+  ).toBeVisible();
   void revisionsBody;
   expect(mock.writes).toEqual([]);
 });
