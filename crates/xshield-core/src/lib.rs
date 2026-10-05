@@ -14,6 +14,7 @@ pub mod audit;
 pub mod calibration;
 pub mod domain;
 pub mod edge_channel;
+pub mod edge_descriptors;
 pub mod grant;
 pub mod identity;
 pub mod investigation;

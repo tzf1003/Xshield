@@ -136,7 +136,7 @@ pub struct GatewayConfig {
     site_policy: Option<SitePolicyConfig>,
     operations: BTreeMap<(String, String), CompiledOperation>,
     path_resource_operations: Vec<CompiledOperation>,
-    page_provenance: Option<page_actions::PageProvenance>,
+    page_provenance: Option<xshield_core::edge_descriptors::PageProvenance>,
     sensor_routes: page_actions::SensorRoutes,
 }
 
@@ -186,14 +186,14 @@ struct CompiledOperation {
     source_action: Option<ActionId>,
     resource: Option<CompiledResource>,
     request_crypto: Option<RequestCryptoPolicy>,
-    issued_by: Option<page_actions::IssuedByRule>,
+    issued_by: Option<xshield_core::edge_descriptors::IssuedBy>,
     response: Option<CompiledResponse>,
 }
 
 #[derive(Debug)]
 struct CompiledResponse {
     kind: ResponseKind,
-    page_actions: Option<page_actions::PageActionsRule>,
+    page_actions: Option<xshield_core::edge_descriptors::PageActions>,
     max_bytes: usize,
     crypto: Option<ResponseCryptoRule>,
     grant: Option<ResponseGrantRule>,
@@ -687,7 +687,7 @@ impl GatewayConfig {
     pub fn edge_descriptors(&self) -> Option<&page_actions::EdgeDescriptorSet> {
         self.page_provenance
             .as_ref()
-            .map(page_actions::PageProvenance::descriptors)
+            .map(xshield_core::edge_descriptors::PageProvenance::descriptors)
     }
 
     /// Returns non-secret routing hints the browser sensor receives at bootstrap.

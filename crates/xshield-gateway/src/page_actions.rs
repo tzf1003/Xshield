@@ -5,9 +5,16 @@
 //! response bodies: a page issues exactly the actions an operator declared with
 //! `issued_by`, and a response qualifies exactly the target its
 //! `resource_grant` names. The compiled descriptor set is what the edge writes
-//! to `xshield.action_descriptors` before a configuration serves traffic, so the
-//! issuance transactions and the per-request admission recheck compare against
-//! rows that the configuration itself produced.
+//! to `xshield.action_descriptors` before a configuration serves traffic (at
+//! startup, on a signed apply and when a persisted snapshot is restored), so
+//! the issuance transactions and the per-request admission recheck compare
+//! against rows that the configuration itself produced.
+//!
+//! The derivation of plans, descriptors and the canonical digest is the pure
+//! [`xshield_core::edge_descriptors::derive`], shared with any control plane
+//! that wants to precompute the digest; this module only maps the compiled
+//! operations onto its typed facts and keeps the gateway's configuration error
+//! paths.
 //!
 //! Main types:
 //! - [`PageActionPlan`]: the actions one approved page root issues on delivery.
@@ -21,27 +28,20 @@
 use crate::{
     CompiledOperation, CompiledResourceLocation, CompiledRouteMatch, ConfigError, ResponseKind,
 };
-use openssl::sha::Sha256;
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
 use xshield_core::{
-    admission::AdmissionClass,
-    domain::{
-        ActionId, FieldName, MappingRevision, OperationId, PageTemplate, PolicyRevision,
-        ViewProfile,
+    domain::{FieldName, PolicyRevision},
+    edge_descriptors::{
+        self, DescriptorError, GrantTargetFacts, IssuedBy, OperationFacts, PageActions,
+        PageProvenance, ResourceFacts, RouteMatch,
     },
-    provenance::{ActionDescriptor, ActionTargetRule, HttpMethod},
+    provenance::HttpMethod,
 };
 
-/// Maximum actions one page delivery may issue; bounds the issuance
-/// transaction, the bootstrap document and the sensor's reference table.
-pub const MAX_PAGE_ACTIONS: usize = 16;
-/// Maximum live page instances one binding may hold for one page template.
-pub const MAX_ACTIVE_PAGES: u32 = 1_000;
-/// Field profile recorded for page-issued actions, which expose no fields.
-const PAGE_ACTION_FIELD_PROFILE: &str = "none";
-/// Domain-separation tag of the descriptor-set digest; bump on any encoding change.
-const DESCRIPTOR_DIGEST_TAG: &[u8] = b"xshield-edge-descriptors-v1";
+pub use xshield_core::edge_descriptors::{
+    EdgeDescriptorSet, MAX_ACTIVE_PAGES, MAX_PAGE_ACTIONS, PageAction, PageActionPlan,
+};
+
 /// Upper bound on harvest rules exposed to the sensor.
 const MAX_HARVEST_RULES: usize = 64;
 
@@ -59,136 +59,71 @@ pub(crate) struct PageActionsDto {
     max_active_pages: u32,
 }
 
-/// Declares that one `UI_ACTION_REQUIRED` operation is issued by a page root.
-#[derive(Clone, Debug)]
-pub(crate) struct IssuedByRule {
-    page_operation_id: OperationId,
-    ttl_seconds: u64,
-}
-
-/// Page-level issuance settings on an approved `SENSOR_HTML` page root.
-#[derive(Clone, Debug)]
-pub(crate) struct PageActionsRule {
-    mapping_revision: MappingRevision,
-    max_active_pages: u32,
-}
-
-pub(crate) fn compile_issued_by(dto: IssuedByDto) -> Result<IssuedByRule, ConfigError> {
-    if !(1..=86_400).contains(&dto.ttl_seconds) {
-        return Err(ConfigError::Invalid("operations.issued_by.ttl_seconds"));
-    }
-    Ok(IssuedByRule {
-        page_operation_id: OperationId::parse(dto.page_operation_id)
-            .map_err(ConfigError::Domain)?,
-        ttl_seconds: dto.ttl_seconds,
-    })
-}
-
-pub(crate) fn compile_page_actions(dto: PageActionsDto) -> Result<PageActionsRule, ConfigError> {
-    if !(1..=MAX_ACTIVE_PAGES).contains(&dto.max_active_pages) {
-        return Err(ConfigError::Invalid(
-            "operations.response.page_actions.max_active_pages",
-        ));
-    }
-    Ok(PageActionsRule {
-        mapping_revision: MappingRevision::parse(dto.mapping_revision)
-            .map_err(ConfigError::Domain)?,
-        max_active_pages: dto.max_active_pages,
-    })
-}
-
-/// One action a page root issues on every verified delivery.
-#[derive(Clone, Debug)]
-pub struct PageAction {
-    descriptor: ActionDescriptor,
-    ttl_seconds: u64,
-}
-
-impl PageAction {
-    /// Returns the approved descriptor the issued action must match.
-    #[must_use]
-    pub const fn descriptor(&self) -> &ActionDescriptor {
-        &self.descriptor
-    }
-
-    /// Returns the configured action lease before session/evidence bounds.
-    #[must_use]
-    pub const fn ttl_seconds(&self) -> u64 {
-        self.ttl_seconds
+/// Keeps the configuration error the edge compiler always reported: the
+/// field path for a structural refusal, the domain error for an identifier.
+fn config_error(error: DescriptorError) -> ConfigError {
+    match error {
+        DescriptorError::Domain(value) => ConfigError::Domain(value),
+        other => ConfigError::Invalid(other.field()),
     }
 }
 
-/// The complete, ordered set of actions one approved page root issues.
-#[derive(Clone, Debug)]
-pub struct PageActionPlan {
-    page_operation_id: OperationId,
-    page_template: PageTemplate,
-    mapping_revision: MappingRevision,
-    max_active_pages: u32,
-    actions: Vec<PageAction>,
+pub(crate) fn compile_issued_by(dto: IssuedByDto) -> Result<IssuedBy, ConfigError> {
+    IssuedBy::parse(dto.page_operation_id, dto.ttl_seconds).map_err(config_error)
 }
 
-impl PageActionPlan {
-    /// Returns the page root operation whose delivery issues the actions.
-    #[must_use]
-    pub const fn page_operation_id(&self) -> &OperationId {
-        &self.page_operation_id
-    }
-
-    /// Returns the page template recorded on page evidence (the page operation ID).
-    #[must_use]
-    pub const fn page_template(&self) -> &PageTemplate {
-        &self.page_template
-    }
-
-    /// Returns the mapping revision shared by evidence and descriptors.
-    #[must_use]
-    pub const fn mapping_revision(&self) -> &MappingRevision {
-        &self.mapping_revision
-    }
-
-    /// Returns the live page-instance bound per binding.
-    #[must_use]
-    pub const fn max_active_pages(&self) -> u32 {
-        self.max_active_pages
-    }
-
-    /// Returns the issued actions ordered by action ID.
-    #[must_use]
-    pub fn actions(&self) -> &[PageAction] {
-        &self.actions
-    }
+pub(crate) fn compile_page_actions(dto: PageActionsDto) -> Result<PageActions, ConfigError> {
+    PageActions::parse(dto.mapping_revision, dto.max_active_pages).map_err(config_error)
 }
 
-/// Digest-bound descriptors derived from one configuration and policy revision.
+/// Validates every page/issued-action contract and derives the descriptor set.
 ///
-/// The digest covers every descriptor field in a canonical order and is stored
-/// as the policy revision's `content_digest`. A different set under the same
-/// revision therefore refuses to activate instead of silently changing what
-/// existing references mean.
-#[derive(Clone, Debug)]
-pub struct EdgeDescriptorSet {
-    descriptors: Vec<ActionDescriptor>,
-    content_digest: [u8; 32],
+/// Returns `None` when no page declares `page_actions`; such configurations
+/// keep externally provisioned descriptors. When any page declares them the
+/// edge owns the whole policy revision: page-issued and response-target
+/// descriptors are derived together and bound to one digest.
+pub(crate) fn compile(
+    operations: &[&CompiledOperation],
+    policy_revision: &PolicyRevision,
+) -> Result<Option<PageProvenance>, ConfigError> {
+    let facts = operations
+        .iter()
+        .map(|operation| operation_facts(operation))
+        .collect::<Vec<_>>();
+    edge_descriptors::derive(&facts, policy_revision).map_err(config_error)
 }
 
-impl EdgeDescriptorSet {
-    /// Returns descriptors ordered by action ID and mapping revision.
-    #[must_use]
-    pub fn descriptors(&self) -> &[ActionDescriptor] {
-        &self.descriptors
-    }
-
-    /// Returns the canonical SHA-256 of the descriptor set.
-    #[must_use]
-    pub const fn content_digest(&self) -> &[u8; 32] {
-        &self.content_digest
-    }
-
-    /// Returns the digest as lowercase hexadecimal.
-    #[must_use]
-    pub fn content_digest_hex(&self) -> String {
-        lower_hex(&self.content_digest)
+/// The facts of one compiled operation that page issuance depends on.
+fn operation_facts(operation: &CompiledOperation) -> OperationFacts<'_> {
+    let response = operation.response.as_ref();
+    OperationFacts {
+        operation_id: operation.policy.operation_id(),
+        method: operation.method,
+        route: &operation.route,
+        route_match: match operation.route_match {
+            CompiledRouteMatch::Exact(_) => RouteMatch::Exact,
+            CompiledRouteMatch::FinalResourceSegment { .. } => RouteMatch::FinalSegment,
+        },
+        admission: operation.policy.admission_class(),
+        source_action: operation.source_action.as_ref(),
+        resource: operation.resource.as_ref().map(|resource| ResourceFacts {
+            resource_type: &resource.resource_type,
+            view_profile: &resource.view_profile,
+            field: match &resource.location {
+                CompiledResourceLocation::Query(parameter)
+                | CompiledResourceLocation::FinalPathSegment { parameter, .. } => parameter,
+            },
+        }),
+        issued_by: operation.issued_by.as_ref(),
+        page_actions: response.and_then(|response| response.page_actions.as_ref()),
+        sensor_html: response
+            .is_some_and(|response| matches!(response.kind, ResponseKind::SensorHtml(_))),
+        resource_grant: response
+            .and_then(|response| response.grant.as_ref())
+            .map(|rule| GrantTargetFacts {
+                target_operation_id: rule.target_operation_id(),
+                target_mapping_revision: rule.target_mapping_revision(),
+            }),
     }
 }
 
@@ -262,213 +197,6 @@ impl SensorRoutes {
     }
 }
 
-/// Compiled page issuance and edge-managed descriptors for one configuration.
-#[derive(Clone, Debug)]
-pub(crate) struct PageProvenance {
-    plans: BTreeMap<OperationId, PageActionPlan>,
-    descriptors: EdgeDescriptorSet,
-}
-
-impl PageProvenance {
-    pub(crate) fn plan(&self, page_operation_id: &OperationId) -> Option<&PageActionPlan> {
-        self.plans.get(page_operation_id)
-    }
-
-    pub(crate) const fn descriptors(&self) -> &EdgeDescriptorSet {
-        &self.descriptors
-    }
-}
-
-/// Validates every page/issued-action contract and derives the descriptor set.
-///
-/// Returns `None` when no page declares `page_actions`; such configurations
-/// keep externally provisioned descriptors. When any page declares them the
-/// edge owns the whole policy revision: page-issued and response-target
-/// descriptors are derived together and bound to one digest.
-pub(crate) fn compile(
-    operations: &[&CompiledOperation],
-    policy_revision: &PolicyRevision,
-) -> Result<Option<PageProvenance>, ConfigError> {
-    let mut plans = page_plans(operations)?;
-    attach_issued_actions(operations, policy_revision, &mut plans)?;
-    if plans.is_empty() {
-        return Ok(None);
-    }
-    for plan in plans.values_mut() {
-        if plan.actions.is_empty() || plan.actions.len() > MAX_PAGE_ACTIONS {
-            return Err(ConfigError::Invalid("operations.response.page_actions"));
-        }
-        plan.actions.sort_by(|left, right| {
-            left.descriptor
-                .action_id()
-                .cmp(right.descriptor.action_id())
-        });
-    }
-    let page_descriptors = plans
-        .values()
-        .flat_map(|plan| plan.actions.iter().map(|action| action.descriptor.clone()));
-    let descriptors = unique_descriptors(
-        page_descriptors.chain(response_target_descriptors(operations, policy_revision)?),
-    )?;
-    let content_digest = descriptor_digest(&descriptors);
-    Ok(Some(PageProvenance {
-        plans,
-        descriptors: EdgeDescriptorSet {
-            descriptors,
-            content_digest,
-        },
-    }))
-}
-
-fn page_plans(
-    operations: &[&CompiledOperation],
-) -> Result<BTreeMap<OperationId, PageActionPlan>, ConfigError> {
-    let mut plans = BTreeMap::new();
-    for page in operations {
-        let Some(rule) = page.response.as_ref().and_then(|r| r.page_actions.as_ref()) else {
-            continue;
-        };
-        if page.method != HttpMethod::Get
-            || page.policy.admission_class() != AdmissionClass::AuthenticatedRoot
-            || !matches!(page.route_match, CompiledRouteMatch::Exact(_))
-            || !page
-                .response
-                .as_ref()
-                .is_some_and(|response| matches!(response.kind, ResponseKind::SensorHtml(_)))
-        {
-            return Err(ConfigError::Invalid("operations.response.page_actions"));
-        }
-        let page_operation_id = page.policy.operation_id().clone();
-        let page_template =
-            PageTemplate::parse(page_operation_id.as_str()).map_err(ConfigError::Domain)?;
-        plans.insert(
-            page_operation_id.clone(),
-            PageActionPlan {
-                page_operation_id,
-                page_template,
-                mapping_revision: rule.mapping_revision.clone(),
-                max_active_pages: rule.max_active_pages,
-                actions: Vec::new(),
-            },
-        );
-    }
-    Ok(plans)
-}
-
-fn attach_issued_actions(
-    operations: &[&CompiledOperation],
-    policy_revision: &PolicyRevision,
-    plans: &mut BTreeMap<OperationId, PageActionPlan>,
-) -> Result<(), ConfigError> {
-    for operation in operations {
-        let Some(issued_by) = operation.issued_by.as_ref() else {
-            continue;
-        };
-        let (Some(action_id), CompiledRouteMatch::Exact(_)) =
-            (operation.source_action.as_ref(), &operation.route_match)
-        else {
-            return Err(ConfigError::Invalid("operations.issued_by"));
-        };
-        if operation.policy.admission_class() != AdmissionClass::UiActionRequired
-            || operation.resource.is_some()
-        {
-            return Err(ConfigError::Invalid("operations.issued_by"));
-        }
-        let plan = plans
-            .get_mut(&issued_by.page_operation_id)
-            .ok_or(ConfigError::Invalid(
-                "operations.issued_by.page_operation_id",
-            ))?;
-        let descriptor = ActionDescriptor::approved(
-            action_id.clone(),
-            plan.page_template.clone(),
-            operation.policy.operation_id().clone(),
-            operation.method,
-            operation.route.clone(),
-            ActionTargetRule::None,
-            BTreeSet::new(),
-            ViewProfile::parse(PAGE_ACTION_FIELD_PROFILE).map_err(ConfigError::Domain)?,
-            policy_revision.clone(),
-            plan.mapping_revision.clone(),
-        );
-        plan.actions.push(PageAction {
-            descriptor,
-            ttl_seconds: issued_by.ttl_seconds,
-        });
-    }
-    Ok(())
-}
-
-/// Collapses identical derivations and rejects one `(action, mapping)` key
-/// with two meanings, ordered for the canonical digest.
-fn unique_descriptors(
-    candidates: impl Iterator<Item = ActionDescriptor>,
-) -> Result<Vec<ActionDescriptor>, ConfigError> {
-    let mut descriptors = BTreeMap::<(ActionId, MappingRevision), ActionDescriptor>::new();
-    for descriptor in candidates {
-        let key = (
-            descriptor.action_id().clone(),
-            descriptor.mapping_revision().clone(),
-        );
-        match descriptors.get(&key) {
-            Some(existing) if existing != &descriptor => {
-                return Err(ConfigError::Invalid("operations.source_action"));
-            }
-            Some(_) => {}
-            None => {
-                descriptors.insert(key, descriptor);
-            }
-        }
-    }
-    Ok(descriptors.into_values().collect())
-}
-
-fn response_target_descriptors(
-    operations: &[&CompiledOperation],
-    policy_revision: &PolicyRevision,
-) -> Result<Vec<ActionDescriptor>, ConfigError> {
-    let mut descriptors = Vec::new();
-    for source in operations {
-        let Some(rule) = source.response.as_ref().and_then(|r| r.grant.as_ref()) else {
-            continue;
-        };
-        let target = operations
-            .iter()
-            .find(|operation| operation.policy.operation_id() == rule.target_operation_id())
-            .ok_or(ConfigError::Invalid(
-                "operations.response.target_operation_id",
-            ))?;
-        let (Some(action_id), Some(resource)) =
-            (target.source_action.as_ref(), target.resource.as_ref())
-        else {
-            return Err(ConfigError::Invalid(
-                "operations.response.target_operation_id",
-            ));
-        };
-        let field = match &resource.location {
-            CompiledResourceLocation::Query(parameter)
-            | CompiledResourceLocation::FinalPathSegment { parameter, .. } => parameter.clone(),
-        };
-        descriptors.push(ActionDescriptor::approved(
-            action_id.clone(),
-            // Response evidence never compares page templates; the target
-            // operation keeps one descriptor per action and mapping revision
-            // even when several approved lists qualify the same target.
-            PageTemplate::parse(target.policy.operation_id().as_str())
-                .map_err(ConfigError::Domain)?,
-            target.policy.operation_id().clone(),
-            target.method,
-            target.route.clone(),
-            ActionTargetRule::Resource(resource.resource_type.clone()),
-            BTreeSet::from([field]),
-            resource.view_profile.clone(),
-            policy_revision.clone(),
-            rule.target_mapping_revision().clone(),
-        ));
-    }
-    Ok(descriptors)
-}
-
 /// Builds the non-secret routing hints the browser sensor receives.
 pub(crate) fn sensor_routes(
     operations: &[&CompiledOperation],
@@ -537,50 +265,6 @@ pub(crate) fn sensor_routes(
         return Err(ConfigError::Invalid("operations.response.resource_grant"));
     }
     Ok(routes)
-}
-
-fn descriptor_digest(descriptors: &[ActionDescriptor]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    let mut field = |value: &[u8]| {
-        // Every encoded value is a validated name, route or decimal count and
-        // can never contain NUL, so the separator keeps the encoding injective.
-        hasher.update(value);
-        hasher.update(&[0]);
-    };
-    field(DESCRIPTOR_DIGEST_TAG);
-    field(descriptors.len().to_string().as_bytes());
-    for descriptor in descriptors {
-        field(descriptor.action_id().as_str().as_bytes());
-        field(descriptor.mapping_revision().as_str().as_bytes());
-        field(descriptor.page_template().as_str().as_bytes());
-        field(descriptor.operation_id().as_str().as_bytes());
-        field(descriptor.method().as_str().as_bytes());
-        field(descriptor.route().as_str().as_bytes());
-        match descriptor.target_rule() {
-            ActionTargetRule::None => field(b"none"),
-            ActionTargetRule::VerifiedPrincipal => field(b"verified_principal"),
-            ActionTargetRule::Resource(resource_type) => {
-                field(b"resource");
-                field(resource_type.as_str().as_bytes());
-            }
-        }
-        field(descriptor.allowed_fields().len().to_string().as_bytes());
-        for allowed in descriptor.allowed_fields() {
-            field(allowed.as_str().as_bytes());
-        }
-        field(descriptor.field_profile().as_str().as_bytes());
-    }
-    hasher.finish()
-}
-
-fn lower_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
 }
 
 #[cfg(test)]
@@ -728,6 +412,21 @@ mod tests {
         let mut remapped = page();
         remapped["response"]["page_actions"]["mapping_revision"] = json!("mapping-r9");
         assert_ne!(base, digest(json!([remapped, list(), detail()])));
+    }
+
+    // The digest is stored as the policy revision's `content_digest`, so a
+    // change to the canonical encoding would make every deployed revision
+    // conflict on its next start. Pinned from the gateway's own derivation
+    // before the derivation moved to `xshield_core::edge_descriptors`, and
+    // recomputed independently with Python's hashlib over the documented
+    // encoding.
+    #[test]
+    fn descriptor_digest_is_pinned_byte_for_byte() {
+        let config = compile(json!([page(), login(), list(), detail()])).unwrap();
+        assert_eq!(
+            config.edge_descriptors().unwrap().content_digest_hex(),
+            "85129edcdc68fb7e82d233da50aaacfc954453b316f6591f0677092887270914"
+        );
     }
 
     #[test]

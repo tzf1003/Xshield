@@ -31,7 +31,7 @@ Xshield 是用 Rust 实现的上下文增强型 WAF，采用纯前置代理，�
 
 | 依赖 | 用途 | 许可证与更新策略 |
 |---|---|---|
-| Pingora 0.9.0 + OpenSSL backend | HTTP 代理生命周期、固定源站连接、请求过滤、journal AES-256-GCM、段清单 Ed25519 签名及模型缓存安全域的 HMAC-SHA-256 派生 | Apache-2.0；精确版本并锁文件，部署同步审查 OpenSSL 版本与许可证，升级先复跑协议歧义、加密恢复、签名验证、缓存键隔离、转发和故障测试 |
+| Pingora 0.9.0 + OpenSSL backend | HTTP 代理生命周期、固定源站连接、请求过滤、journal AES-256-GCM、段清单 Ed25519 签名及模型缓存安全域的 HMAC-SHA-256 派生；`xshield-core` 只用其 SHA-256 计算 edge 管理的动作描述集规范摘要（`edge_descriptors`，纯计算、无 I/O），使 edge 与控制面得到逐字节相同的摘要，未引入新 crate | Apache-2.0；精确版本并锁文件，部署同步审查 OpenSSL 版本与许可证，升级先复跑协议歧义、加密恢复、签名验证、缓存键隔离、转发和故障测试 |
 | SQLx 0.9.0 | PostgreSQL 异步事务和连接池 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 migration、回滚和并发测试 |
 | clickhouse 0.15.2 | 已封存审计段的类型化查询、同步批量投递与传输加密 | MIT OR Apache-2.0；精确版本并锁文件，升级先跑 RowBinary schema、重复投递、并发冲突和故障水位测试 |
 | hyper 1.x / hyper-util 0.1.x / http-body-util 0.1.x / hyper-rustls 0.27.x | 复用已锁定依赖提供单次 Jev HTTPS、原生信任根和有界响应读取 | hyper 系列为 MIT，hyper-rustls 为 Apache-2.0 OR ISC OR MIT；锁文件固定，升级复跑 TLS 配置、精确报文、取消、超时、限流与秘密排除回归 |
