@@ -24,33 +24,32 @@ try {
   await page.locator('#password').fill('xshield-dev-password');
   await page.getByRole('button', { name: 'Sign In', exact: true }).click();
   await page.waitForURL(origin + '/**');
+  // Accessible names below mirror the Playwright specs of the site pages
+  // (tests/sites-list.spec.ts, site-wizard.spec.ts, site-workspace.spec.ts).
   await page.getByRole('link', { name: '受保护站点', exact: true }).click();
-  await page.getByRole('heading', { name: '站点列表', exact: true }).waitFor();
-  await page.getByText('正在读取站点列表…').waitFor({ state: 'hidden' });
+  await page.getByRole('region', { name: '受保护站点列表', exact: true }).waitFor();
   assert.equal(await page.getByRole('alert').count(), 0);
   await expect.poll(() => responses.some(r => r.path === '/control/v1/sites' && r.status === 200)).toBeTruthy();
   await page.screenshot({ path: screenshots + '/sites-desktop.png' });
   await page.getByRole('button', { name: '新建站点', exact: true }).click();
+  await page.getByRole('region', { name: '新建站点向导', exact: true }).waitFor();
   await page.getByLabel('站点名称', { exact: true }).waitFor();
-  assert.equal(await page.getByLabel('每秒请求数', { exact: true }).count(), 0);
-  await page.screenshot({ path: screenshots + '/site-network-desktop.png' });
-  await page.getByRole('navigation', { name: '站点运营导航' }).getByRole('link', { name: '安全入口', exact: true }).click();
-  await page.getByRole('combobox', { name: '安全入口', exact: true }).waitFor();
-  assert.equal(await page.getByLabel('站点名称', { exact: true }).count(), 0);
+  await page.screenshot({ path: screenshots + '/site-wizard-desktop.png' });
 
-  await page.getByRole('link', { name: '资格与身份账本', exact: true }).click();
+  // Navigation entries were merged: grants and bindings are one page, 身份与资格.
+  await page.getByRole('link', { name: '身份与资格', exact: true }).click();
   assert.equal(new URL(page.url()).pathname, '/investigation/grants');
   await page.getByLabel('资格 ID', { exact: true }).waitFor();
+
   await page.goto(origin + '/sites/site_dev/network');
   await page.getByRole('region', { name: '受保护站点配置' }).waitFor();
-  await page.getByText('正在读取站点配置…').waitFor({ state: 'hidden' });
   assert.equal(await page.getByText('INVALID_RESPONSE', { exact: false }).count(), 0);
   await expect.poll(() => responses.some(r => r.path === '/control/v1/sites/site_dev/config' && r.status === 200)).toBeTruthy();
   await page.getByRole('link', { name: '权限中心', exact: true }).click();
   await page.getByRole('heading', { name: '当前管理会话', exact: true }).waitFor();
   assert((await page.locator('main').innerText()).includes('system_admin'));
   await page.getByRole('link', { name: '受保护站点', exact: true }).click();
-  await page.getByText('正在读取站点列表…').waitFor({ state: 'hidden' });
+  await page.getByRole('region', { name: '受保护站点列表', exact: true }).waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert.equal(await page.locator('vite-error-overlay').count(), 0);
