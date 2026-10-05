@@ -31,7 +31,7 @@ export type RoleView = Readonly<{
 
 const summaries: Readonly<Record<string, string>> = {
   observer:
-    "只读查看脱敏摘要：请求调查、资格与身份账本、模型调用与 Agent 运行，以及当前站点的状态、健康与修订。",
+    "只读查看脱敏摘要：请求调查、身份与资格、模型调用与 Agent 运行，以及当前站点的状态、健康与修订。",
   investigator: "执行受限的结构化检索，管理本人的案件，申请原文访问与导出，查看本人的任务。",
   sensitive_evidence_reader:
     "在独立批准的短时期限内下载本人申请的原文；每次下载都要两分钟内的 MFA 再认证。",
