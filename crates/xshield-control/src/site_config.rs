@@ -102,6 +102,11 @@ impl EdgeApplyClient {
                 .and_then(|value| value.get("reason_code"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("EDGE_APPLY_REJECTED");
+            // Refusals are unsigned, so only a closed set of known codes is
+            // kept; anything else is the generic refusal. A descriptor
+            // refusal also names the offending `site_id`, which is not used
+            // yet: holding just that site back needs that name re-checked
+            // against the snapshot this plane sent (it is unsigned too).
             return Err(match reason {
                 "EDGE_APPLY_STALE_REVISION" => "EDGE_APPLY_STALE_REVISION",
                 "EDGE_APPLY_VALIDATION_FAILED" => "EDGE_APPLY_VALIDATION_FAILED",
@@ -109,6 +114,8 @@ impl EdgeApplyClient {
                 "EDGE_APPLY_LISTENER_UNAVAILABLE" => "EDGE_APPLY_LISTENER_UNAVAILABLE",
                 "EDGE_APPLY_IDEMPOTENCY_CONFLICT" => "EDGE_APPLY_IDEMPOTENCY_CONFLICT",
                 "EDGE_APPLY_SIGNATURE_INVALID" => "EDGE_APPLY_SIGNATURE_INVALID",
+                "EDGE_APPLY_DESCRIPTOR_CONFLICT" => "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+                "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE" => "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE",
                 _ => "EDGE_APPLY_REJECTED",
             });
         }

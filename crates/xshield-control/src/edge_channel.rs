@@ -179,6 +179,8 @@ mod tests {
         TwoSignatures,
         /// Correctly signed, but acknowledging a different apply.
         SignedForAnotherApplyId,
+        /// An unsigned refusal with this status and body, as the edge sends.
+        Refused(u16, &'static str),
     }
 
     struct Edge {
@@ -191,6 +193,14 @@ mod tests {
         headers: HeaderMap,
         body: Bytes,
     ) -> Response {
+        if let Ack::Refused(status, body) = edge.ack {
+            return (
+                StatusCode::from_u16(status).unwrap(),
+                [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+                body,
+            )
+                .into_response();
+        }
         let request_signature = headers
             .get(APPLY_SIGNATURE_HEADER)
             .and_then(|value| value.to_str().ok())
@@ -239,6 +249,7 @@ mod tests {
                 put(sign(KEY_HEX, &request_signature));
                 put(sign(KEY_HEX, &request_signature));
             }
+            Ack::Refused(..) => unreachable!("answered before the acknowledgement is built"),
         }
         (StatusCode::OK, response_headers, sent).into_response()
     }
@@ -427,6 +438,52 @@ mod tests {
             client.apply(&request()).await.map(|_| ()),
             Err("EDGE_APPLY_ACK_INVALID")
         );
+    }
+
+    // The edge refuses a snapshot whose page-issuing site cannot have its
+    // action descriptors supplied, naming that site. The control plane keeps
+    // the two stable reasons (its apply state and the console explain them)
+    // and still turns any code it does not know into the generic refusal.
+    #[tokio::test]
+    async fn descriptor_supply_refusals_keep_their_stable_reasons() {
+        for (ack, expected) in [
+            (
+                Ack::Refused(
+                    409,
+                    r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_DESCRIPTOR_CONFLICT","site_id":"site_b"}"#,
+                ),
+                "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+            ),
+            (
+                Ack::Refused(
+                    503,
+                    r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_DESCRIPTOR_UNAVAILABLE","site_id":"site_a"}"#,
+                ),
+                "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE",
+            ),
+            (
+                Ack::Refused(
+                    409,
+                    r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_STALE_REVISION"}"#,
+                ),
+                "EDGE_APPLY_STALE_REVISION",
+            ),
+            (
+                Ack::Refused(
+                    409,
+                    r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_NOT_A_KNOWN_REASON"}"#,
+                ),
+                "EDGE_APPLY_REJECTED",
+            ),
+            (Ack::Refused(503, "not json"), "EDGE_APPLY_REJECTED"),
+        ] {
+            let (client, _edge) = edge(ack).await;
+            assert_eq!(
+                client.apply(&request()).await.map(|_| ()),
+                Err(expected),
+                "{ack:?}"
+            );
+        }
     }
 
     // Reviewer finding: the health request signed the constant `health-v1`, so
