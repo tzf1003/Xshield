@@ -203,10 +203,13 @@
     work.finally(() => state.pending.delete(work)).catch(() => undefined);
   };
 
+  // Reads the sensor's own clone. Cancelling one branch of a teed body only
+  // settles once the page's branch is done too, so cancellation is never
+  // awaited: the page keeps its response and the harvest ends now.
   const readBounded = async (response) => {
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_HARVEST_BYTES) {
-      await response.body?.cancel();
+      response.body?.cancel().catch(() => undefined);
       return null;
     }
     const reader = response.body?.getReader();
@@ -218,7 +221,7 @@
       if (done) break;
       size += value.byteLength;
       if (size > MAX_HARVEST_BYTES) {
-        await reader.cancel();
+        reader.cancel().catch(() => undefined);
         return null;
       }
       chunks.push(value);

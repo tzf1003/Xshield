@@ -6,8 +6,9 @@
 # Groups
 #   rust     fmt, audit-event coverage guard, library validation, clippy, tests,
 #            doc tests, PostgreSQL integration suite
-#   gateway  the real-binary gateway scripts (transport, dynamic listeners,
-#            request crypto, identity) and the Docker-free IDOR lab
+#   gateway  the browser sensor unit tests, the real-binary gateway scripts
+#            (transport, dynamic listeners, request crypto, identity), the
+#            Docker-free IDOR lab and the real-browser provenance loop
 #   console  npm ci, lint, unit tests, production build, Playwright e2e
 #
 # Environment
@@ -18,6 +19,8 @@
 #                           under $TMPDIR). Put it on persistent storage if the
 #                           logs must survive a reboot.
 #   XSHIELD_E2E_PORT        first of the two Playwright ports (default 5175).
+#   XSHIELD_PLAYWRIGHT_PACKAGE  package.json whose @playwright/test the browser
+#                           loop uses (default web/console after `npm ci`).
 #   PGHOST/PGPORT/PGUSER/PGPASSWORD   server for the PostgreSQL steps.
 #
 # A step whose tool is missing is reported as SKIP, never as success. The exit
@@ -95,10 +98,20 @@ group_rust() {
     fi
 }
 
+have_playwright() {
+    have node && node -e 'require("node:module").createRequire(process.argv[1]).resolve("@playwright/test")' \
+        "${XSHIELD_PLAYWRIGHT_PACKAGE:-$repo_root/web/console/package.json}" >/dev/null 2>&1
+}
+
 group_gateway() {
     if ! have cargo; then
         skip_step gateway-all "cargo not found"
         return
+    fi
+    if have node; then
+        run_step sensor-unit node --test sensor/test/sensor.test.mjs sensor/test/sensor-1.1.0.test.mjs
+    else
+        skip_step sensor-unit "node not found"
     fi
     run_step gw-transport scripts/test_gateway_transport.sh
     run_step gw-dynamic scripts/test_gateway_dynamic_listeners.sh
@@ -106,10 +119,16 @@ group_gateway() {
         run_step gw-request-crypto scripts/test_gateway_request_crypto.sh
         run_step gw-identity scripts/test_gateway_identity.sh
         run_step idor-lab scripts/test_idor_lab_local.sh
+        if have_playwright; then
+            run_step browser-loop scripts/test_browser_loop.sh
+        else
+            skip_step browser-loop "@playwright/test not installed (npm ci in web/console)"
+        fi
     else
         skip_step gw-request-crypto "psql/createdb not found"
         skip_step gw-identity "psql/createdb not found"
         skip_step idor-lab "psql/createdb not found"
+        skip_step browser-loop "psql/createdb not found"
     fi
 }
 
