@@ -6,6 +6,13 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 “站点接入后台”由 `SystemAdmin` 读取租户范围的 `GET /control/v1/sites`，再通过 `GET/PUT /control/v1/sites/{site_id}/config` 管理每个受保护站点；旧 `GET/PUT /control/v1/site-config` 保留兼容。表单保存经过服务端校验的公网入口、源站地址、入口安全模式、探针标志、策略版本和状态，并按租户端口租约分配唯一 edge 内部监听端口。写入使用 `Idempotency-Key`，失败或断连时按原键重试；列表和单站点响应的 tenant/site 范围由客户端再次校验。浏览器会话返回服务端会话角色，界面只展示当前角色可用的站点页面和验证、批准、应用、回滚操作；服务端仍是最终授权边界。敏感配置只显示 secret reference、key ID 和状态。
 
+站点页面按“接入、编辑、发布”三件事组织（第 1 阶段重做，取代旧的整页表单）：
+
+- **站点列表**（`/sites`）：可搜索的表格，行里是名称与 ID、公网入口、监听端口、配置状态、应用状态和最近更新（列表 API 不返回上游地址，所以不显示）；摘要和状态筛选只统计已读取的行，“加载更多”读取下一页签名游标，“刷新”从第一页重来。
+- **新建站点**（`/sites/new/{step}`）：五步向导——基本信息、上游与监听、入口与模式、首批路由、校验与保存。每一步是独立 URL，前进/后退可用，草稿在步骤之间保留；后面的步骤要等前面的校验通过才可进入。第 4 步可套用一个明确标注为“示例”的路由模板（入口页面加列表/详情/写入接口），也可留空，由 edge 使用入口路径生成的默认路由。最后一步汇总、预检并按“保存为草稿”创建一次；草稿不会发布，上线需要审批。旧的 `/sites/new/network` 等地址会重定向到对应步骤。
+- **站点详情**（`/sites/{siteId}/{section}`）：页首是站点 ID、一个词的状态、desired/active 修订、edge 正在服务与已暂存的修订，以及“草稿 → 已校验 → 待审批 → 应用中 → 已生效”的生命周期，失败停在失败的那一步并给出原因与建议；十个分类共享同一份草稿。任何分类里有未保存修改时，底部变更栏显示数量与所在分类，提供“放弃”“查看差异”（字段名加修改前/后）和“保存草稿”。路由用表格加抽屉编辑，可搜索、复制，最多 256 条。保存只创建新修订；是否需要审批、何时生效由“发布”页说明。
+- **发布**：左右并排显示 edge 正在服务的修订与已暂存的修订（提交人、时间、配置摘要）、“为什么需要审批”、发布操作、修订历史、手动健康读取，以及 SystemAdmin 的“危险操作”。服务端只告诉控制台“需要/不需要审批”，原因由控制台用服务端同一套规则（`assess_change_risk` 的 TypeScript 移植）从 edge 在用的修订与暂存修订的已存储配置复算，逐项列出涉及的字段；复算与服务端不一致时以服务端结论为准并如实说明。验证配置直接执行；批准并应用、应用期望版本、回滚上一版本都先弹出确认框，展示将发布的变更和随后会发生什么，再走与以前相同的冻结写入。批准请求带 `X-Xshield-Expected-Config-Digest`，值是已审阅修订的摘要（与状态里的摘要不一致时拒绝提交）。回滚 API 没有目标参数：有待生效变更时服务端恢复 edge 在用的修订，对话框点名并展示被放弃的变更；否则服务端恢复“先前生效过的修订”，控制台读不到生效顺序，只能说明规则，并提供较早修订的对比预览（预览不决定目标）。回滚总是创建**新修订**。批准和删除需要两分钟内的 MFA 再认证：对话框提示是否有效，被拒绝后请求保持冻结，再认证后可原样重试。删除站点还要求逐字输入站点 ID。
+
 “审计发布状态”由 `AuditAdministrator` 手动读取 `GET /control/v1/audit/health`。它展示一个配置 audit journal 到索引目标的封存段发布快照：观察时间、目标、保留期、关闭/已发布/待发布/未封存段、缺口和连续水位；界面不自动轮询。该观察不判断业务准入、全部 Outbox 状态或系统整体健康。
 
 “校准报告”由 `AuditAdministrator` 手动读取 `GET /control/v1/calibration-reports/{report_id}`。页面严格校验 `calr_` UUIDv7，并只展示受限 projection 的冻结元数据与正文 `active`/`deleted` tombstone；缺失或跨范围保留为当前范围未找到。正文 tombstone 不是读取授权、质量结论、阈值/策略发布或业务资格。该页面不请求或显示正文、样本、标签、概率、指标、提示词、存储信息或内容读取能力，也不自动轮询。
@@ -127,18 +134,20 @@ API 同样保持 `private, no-store`。生产代理仅向指定控制服务传�
 | `npm run build` | `tsc --noEmit` 后 `vite build` |
 | `npm run test:e2e` | Playwright，见“验证” |
 
-`biome.json` 不支持注释，规则取舍写在这里：recommended 规则开启，`noExplicitAny` 为错误，import 排序（assist）未启用，`src/theme/tokens.generated.css` 不参与格式化。旧模块仍有违规的 `noArrayIndexKey`、`useIterableCallbackReturn`、`useExhaustiveDependencies`、`useJsxKeyInIterable`、`noUnsafeOptionalChaining`、`useButtonType`、`useAriaPropsSupportedByRole` 暂为警告；在 `src/security`、`src/theme`、`src/shell`、`src/router`、`src/pages` 中它们与 `noNonNullAssertion` 都是错误，所以欠账只会减少。`src/api.ts`、`src/api-contract.ts`、`src/search.ts` 里拒绝控制字符的正则是有意为之，只对这三个文件关闭 `noControlCharactersInRegex`。
+`biome.json` 不支持注释，规则取舍写在这里：recommended 规则开启，`noExplicitAny` 为错误，import 排序（assist）未启用，`src/theme/tokens.generated.css` 不参与格式化。旧模块仍有违规的 `noArrayIndexKey`、`useIterableCallbackReturn`、`useExhaustiveDependencies`、`useJsxKeyInIterable`、`noUnsafeOptionalChaining`、`useButtonType`、`useAriaPropsSupportedByRole` 暂为警告；在 `src/security`、`src/theme`、`src/shell`、`src/router`、`src/pages`、`src/sites`、`src/ui` 中它们与 `noNonNullAssertion` 都是错误，所以欠账只会减少。`src/api.ts`、`src/api-contract.ts`、`src/search.ts` 里拒绝控制字符的正则是有意为之，只对这三个文件关闭 `noControlCharactersInRegex`。
 
 - `src/security`：会话（`SessionStore`、epoch、15 分钟闲置计时）、`guardedQuery` / `runFrozenWrite`、内存中的待确认操作登记和 `SessionProvider`。这里的数据只在内存，不写 Web Storage。
 - `src/theme`：设计 Token（`tokens.ts` 是品牌色与浅色/深色/紧凑密度的唯一来源）、antd 主题、生成的 `--xs-*` CSS 变量层、自托管字体（`@fontsource`，输出为同源静态文件），以及主题/密度偏好——这是控制台唯一写入 `localStorage` 的内容，读写都在 try/catch 内。`style.css` 里不允许出现十六进制或 rgb 颜色（单测校验）。
 - `src/router`：路由树；`src/admin-routes.ts` 保持原有的严格路径解析，路由测试以它为基准。
 - `src/shell`：侧栏、顶栏、移动抽屉、命令面板及其 ID 分类器、MFA 再认证提示和“待确认操作”提示。
-- `src/pages`：登录、概览、权限中心和“页面不存在”。
-- `src/legacy/LegacyHost.tsx`：尚未迁移的调查、案件、证据、站点和 API Key 页面；由外壳懒加载并保持挂载，导航不会丢失已冻结的写入。
+- `src/pages`：登录、概览、权限中心、“页面不存在”和站点页面（`pages/sites`：列表、详情与分类、新建向导、发布页、路由抽屉、变更栏）。站点页面按路由懒加载，不进入首屏脚本。
+- `src/sites`：站点的不含 React 的领域层——配置模型与草稿、字段差异引擎（`model/diff.ts`）、审批风险推算（`model/risk.ts`，`assess_change_risk` 的移植）、生命周期（`model/lifecycle.ts`）、发布规则（`model/release.ts`：回滚计划、审批摘要、操作可用性）、校验、角色可见性（`access.ts`）、写入的种类与结果文案，以及读取/写入 hook（`state/`，建立在 `src/security` 的 guarded 读取和冻结写入上）。
+- `src/ui`：跨页面共享的领域组件和词典——状态胶囊、可复制的 ID、时间戳、问题提示，以及原因码词典 `reason-codes.ts`（每个站点/应用/edge/健康原因码的人话说明与下一步；单测扫描 Rust 源码，缺任何一个码都会失败）。
+- `src/legacy/LegacyHost.tsx`：尚未迁移的调查、案件、证据和 API Key 页面；由外壳懒加载并保持挂载，导航不会丢失已冻结的写入。
 
 antd 的运行时样式使用 `index.html` 中 `xshield-csp-nonce` meta 的 nonce（仓库内为空，由部署模板写入同一个值，并须在响应 CSP 的 `style-src` 中允许它；上文的示例响应头没有展开该 nonce）。
 
-控制台重做第 0 阶段（基础设施）的边界：只有会话、工作台概览读取和会话信息刷新使用新的 guarded 数据层；调查、案件、证据、站点配置和 API Key 页面沿用各自的请求取消、写入冻结和离页提醒，尚未登记到“待确认操作”。命令面板只导航或预填，不提交查询。`window.__xshieldE2E` 是 Playwright 夹具，只在显式启用机器凭证登录的本地开发构建中存在，生产构建不包含。
+控制台重做的边界：第 0 阶段（基础设施）提供会话、guarded 数据层和待确认操作登记；第 1 阶段把全部站点页面（列表、详情、新建向导、发布、路由抽屉）迁到这套数据层——读取带 epoch、透传取消并逐响应核对 tenant/site 与所请求的站点 ID，不自动轮询（健康读取只在点击时发生，每次都会被服务端审计）；写入在发送前冻结方法、路径、幂等键和正文，结果未知只能原样重试，并出现在“待确认操作”里。站点草稿只在页面内存中：同一站点内切换分类、前进/后退都保留，离开站点或刷新会清空（离开前有确认），不写任何 Web Storage。调查、案件、证据和 API Key 页面仍沿用各自的请求取消、写入冻结和离页提醒，尚未登记到“待确认操作”。命令面板只导航或预填，不提交查询。`window.__xshieldE2E` 是 Playwright 夹具，只在显式启用机器凭证登录的本地开发构建中存在，生产构建不包含。
 
 ## 验证
 
@@ -184,11 +193,11 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
 
 ## 后台页面与恢复行为
 
-/sites 展示站点列表，/sites/new/network 创建站点，选择记录后进入 /sites/{siteId}/overview。详情按 network、security-entry、routes、identity、crypto、waf-limits、policies、releases、audit 分类；只渲染当前分类。分类切换和浏览器前进/后退保留当前草稿，刷新从服务端恢复深链接。离开有未保存草稿或待确认写入的站点前会提示确认。
+/sites 展示站点列表，选择记录后进入 /sites/{siteId}/overview；新建站点是 /sites/new/{basics,upstream,entry,routes,review} 五步向导（旧的 /sites/new/network、/sites/new/security-entry 等地址重定向到对应步骤，书签不会失效）。详情按 overview、network、security-entry、routes、identity、crypto、waf-limits、policies、releases、audit 分类；只渲染当前分类。分类切换和浏览器前进/后退保留当前草稿，刷新从服务端恢复深链接并清空草稿。离开有未保存草稿或待确认写入的站点前会提示确认；向导里有已填写内容时离开同样会提示。
 
-- system_admin：站点列表、网络和策略配置编辑；发布权限单独校验。
-- observer：当前会话站点的只读状态、健康观察和修订；独立的“站点状态”入口。
-- policy_author、policy_approver、release_operator：独立“站点发布”入口，分别校验、批准、应用/回滚。没有 observer 时显示操作入口和服务端结果，状态及修订读取仍需该角色。
+- system_admin：站点列表、新建向导、网络和策略配置编辑，以及发布页上的“危险操作”（删除站点：输入站点 ID，并需要两分钟内的 MFA 再认证；机器凭证不能删除）；发布权限单独校验。
+- observer：当前会话站点的只读状态、健康观察和修订；独立的“站点状态”入口；发布页显示状态、审批原因和修订历史，不提供任何写操作。
+- policy_author、policy_approver、release_operator：独立“站点发布”入口，分别验证配置（直接执行）、批准并应用、应用期望版本/回滚上一版本（后三者先弹出确认框）。没有 observer 时显示操作入口和服务端结果，状态及修订读取仍需该角色；此时确认框说明读不到修订内容，批准不带摘要。
 - 调查、案件、证据、导出和审计模块按各自服务端角色显示。/access/session 对所有已认证主体只读开放。
 
 资格账本使用 /investigation/grants，身份绑定使用 /investigation/bindings，后台任务使用 /operations/jobs。详情 URL 使用对应稳定对象 ID。路由变化取消旧请求并使旧响应失效；每个站点读取和写入响应都单独匹配 tenant 和目标 site。
@@ -210,7 +219,7 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
     python3 scripts/test_dev_postgres_migrations.py
     bash scripts/test_gateway_dynamic_listeners.sh
 
-Playwright 默认使用 5175 的明确机器 fixture 和 5176 的浏览器会话 fixture 两套入口（可用 XSHIELD_E2E_PORT 改为 N 与 N+1）；业务 API 响应为合成契约。test_console_oidc.mjs 另行访问 55173，执行真实本地 OIDC 登录、站点列表、详情刷新、资格账本、只读权限中心及 1440×1000 / 390×844 布局检查，截图写入 /tmp/xshield-console-smoke。它只执行管理读取，不创建业务站点、不保存 Cookie。
+Playwright 默认使用 5175 的明确机器 fixture 和 5176 的浏览器会话 fixture 两套入口（可用 XSHIELD_E2E_PORT 改为 N 与 N+1）；业务 API 响应为合成契约。站点页面的用例集中在 `tests/sites-list`、`site-workspace`（生命周期、变更栏、差异、200 条路由、移动端与可访问性）、`site-wizard`、`site-release`、`site-release-session`（Cookie 会话下的 MFA 与角色矩阵）和 `site-roles`；单测 `reason-codes.test.ts` 会扫描 Rust 源码里的站点/应用/edge 稳定码，词典缺任何一个就失败。test_console_oidc.mjs 另行访问 55173，执行真实本地 OIDC 登录、站点列表、详情刷新、资格账本、只读权限中心及 1440×1000 / 390×844 布局检查，截图写入 /tmp/xshield-console-smoke。它只执行管理读取，不创建业务站点、不保存 Cookie。
 # 管理 API Key 页面
 
 控制台通过后端管理 API 管理 Agent Key。页面只向具备 KeyAdministrator/SystemAdmin 的浏览器会话展示创建、scope、过期、撤销和轮换操作；明文只在创建响应中展示一次。

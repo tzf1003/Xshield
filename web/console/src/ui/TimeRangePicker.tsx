@@ -12,7 +12,7 @@ import {
   toLocalInput,
   type UtcWindow,
 } from "./time-range.ts";
-import "./ui.css";
+import "./kit.css";
 
 type Props = {
   value: RangeIntent;

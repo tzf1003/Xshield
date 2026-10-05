@@ -1,382 +1,117 @@
 /*
- * Shared investigation components: decision badges, reason codes, ID chips, timestamps, the time
- * range picker, the completeness banner and empty/error states. Colours come from the --xs-*
- * variables only (tests/ui-css.test.ts enforces it), so every state follows light, dark and system.
+ * Shared domain components (StatePill, IdChip, TimeStamp). Colours are --xs-* variables only,
+ * so light, dark and the system preference all follow src/theme/tokens.ts.
  */
 
-/* ---------- Decision badge ---------- */
-.xs-decision {
+.xs-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 100%;
-  padding: 1px 10px;
+  padding: 1px 10px 1px 8px;
   color: var(--xs-unknown);
+  white-space: nowrap;
   background: var(--xs-unknown-soft);
   border: 1px solid var(--xs-unknown-line);
-  border-radius: var(--xs-radius-control);
-  font-size: 13px;
+  border-radius: 999px;
+  font-size: 12px;
   font-weight: 600;
-  line-height: 22px;
-  white-space: nowrap;
+  line-height: 20px;
 }
 
-.xs-decision--allow {
+.xs-pill--sm {
+  padding: 0 8px 0 6px;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.xs-pill--allow {
   color: var(--xs-allow);
   background: var(--xs-allow-soft);
   border-color: var(--xs-allow-line);
 }
 
-.xs-decision--deny,
-.xs-decision--error {
+.xs-pill--deny {
   color: var(--xs-deny);
   background: var(--xs-deny-soft);
   border-color: var(--xs-deny-line);
 }
 
-.xs-decision--error {
-  border-style: dashed;
-}
-
-.xs-decision--observe {
+.xs-pill--observe {
   color: var(--xs-observe);
   background: var(--xs-observe-soft);
   border-color: var(--xs-observe-line);
 }
 
-.xs-decision--info {
+.xs-pill--info {
   color: var(--xs-info);
   background: var(--xs-info-soft);
   border-color: var(--xs-info-line);
 }
 
-.xs-decision--lg {
-  gap: 8px;
-  padding: 3px 16px;
-  font-size: 18px;
-  line-height: 30px;
-}
-
-.xs-decision-code {
-  /* Full colour: any transparency drops the code below 4.5:1 on the soft tone background. */
-  font-weight: 500;
-}
-
-/* ---------- Reason code ---------- */
-.xs-reason {
+.xs-pill-icon {
   display: inline-flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  max-width: 100%;
 }
 
-.xs-reason--inline {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 8px;
+.xs-pill-raw {
+  padding-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  border-left: 1px solid currentcolor;
 }
 
-.xs-reason-label {
-  color: var(--xs-ink);
-  font-weight: 500;
-}
-
-.xs-reason-code {
+.xs-idchip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   gap: 2px;
-  color: var(--xs-ink-3);
-  font-size: 12px;
 }
 
-.xs-reason--allow .xs-reason-label {
-  color: var(--xs-allow);
-}
-
-.xs-reason--deny .xs-reason-label,
-.xs-reason--error .xs-reason-label {
-  color: var(--xs-deny);
-}
-
-.xs-reason--observe .xs-reason-label {
-  color: var(--xs-observe);
-}
-
-.xs-reason-full {
-  display: grid;
-  gap: 4px;
-  margin: 6px 0 0;
+.xs-idchip code {
+  min-width: 0;
   color: var(--xs-ink-2);
-  font-size: 13px;
-}
-
-.xs-reason-full p {
-  margin: 0;
-}
-
-/* ---------- ID chip ---------- */
-.xs-id {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  max-width: 100%;
-  padding: 0 2px 0 8px;
-  color: var(--xs-ink);
-  background: var(--xs-surface-subtle);
-  border: 1px solid var(--xs-line);
-  border-radius: var(--xs-radius-control);
-  font-family: var(--xs-font-mono);
-  font-size: 12px;
-  line-height: 22px;
-}
-
-.xs-id > a,
-.xs-id > button.xs-id-open,
-.xs-id > .xs-id-text {
-  min-width: 0;
-  padding: 0;
-  overflow: hidden;
-  color: inherit;
-  font: inherit;
-  text-decoration: none;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  background: transparent;
-  border: 0;
-}
-
-.xs-id > a,
-.xs-id > button.xs-id-open {
-  color: var(--xs-primary);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-
-.xs-id--wrap > a,
-.xs-id--wrap > button.xs-id-open,
-.xs-id--wrap > .xs-id-text {
   overflow-wrap: anywhere;
-  white-space: normal;
 }
 
-.xs-copy {
-  display: inline-grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
+.xs-idchip-copy {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   padding: 0;
   color: var(--xs-ink-3);
-  background: transparent;
+  background: none;
   border: 0;
   border-radius: var(--xs-radius-control);
   cursor: pointer;
 }
 
-.xs-copy:hover {
+.xs-idchip-copy:hover {
   color: var(--xs-primary);
   background: var(--xs-primary-soft);
 }
 
-.xs-copy:focus-visible,
-.xs-id a:focus-visible,
-.xs-id button:focus-visible {
+.xs-idchip-copy:focus-visible {
   outline: 2px solid var(--xs-primary);
   outline-offset: 1px;
 }
 
-/* ---------- Time ---------- */
-.xs-time {
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.xs-tip {
-  display: grid;
-  gap: 2px;
-  font-size: 12px;
-}
-
-/* ---------- Time range picker ---------- */
-.xs-range {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.xs-range-presets {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.xs-range-custom {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 10px;
-}
-
-.xs-range-field {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.xs-range-field label {
-  color: var(--xs-ink-2);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.xs-range-hint {
-  margin: 0;
-  color: var(--xs-ink-3);
-  font-size: 12px;
-}
-
-.xs-range-hint.is-error {
-  color: var(--xs-deny);
-}
-
-/* ---------- Completeness banner ---------- */
-.xs-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 10px 16px;
-  color: var(--xs-ink-2);
-  background: var(--xs-surface-subtle);
-  border: 1px solid var(--xs-line);
-  border-radius: var(--xs-radius-control);
-  font-size: 13px;
-}
-
-.xs-banner-icon {
-  flex: none;
-  margin-top: 3px;
-  font-size: 16px;
-}
-
-.xs-banner-body {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.xs-banner-body strong {
-  color: var(--xs-ink);
-  font-weight: 600;
-}
-
-.xs-banner-body p {
-  margin: 0;
-}
-
-.xs-banner--complete .xs-banner-icon {
-  color: var(--xs-allow);
-}
-
-.xs-banner--pending,
-.xs-banner--gap {
-  background: var(--xs-observe-soft);
-  border-color: var(--xs-observe-line);
-}
-
-.xs-banner--pending .xs-banner-icon,
-.xs-banner--gap .xs-banner-icon {
-  color: var(--xs-observe);
-}
-
-.xs-banner--not_indexed {
-  background: var(--xs-info-soft);
-  border-color: var(--xs-info-line);
-}
-
-.xs-banner--not_indexed .xs-banner-icon {
-  color: var(--xs-info);
-}
-
-.xs-banner details {
-  margin-top: 2px;
-}
-
-.xs-banner summary {
-  width: fit-content;
-  color: var(--xs-primary);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.xs-banner dl {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 2px 14px;
-  margin: 6px 0 0;
-  font-size: 12px;
-}
-
-.xs-banner dt {
-  color: var(--xs-ink-3);
-}
-
-.xs-banner dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-/* ---------- Empty, error and loading states ---------- */
-.xs-state {
-  display: grid;
-  justify-items: center;
-  gap: 6px;
-  padding: 36px 20px;
-  color: var(--xs-ink-2);
-  text-align: center;
-}
-
-.xs-state h3 {
-  margin: 0;
-  color: var(--xs-ink);
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.xs-state p {
-  max-width: 560px;
-  margin: 0;
-  font-size: 13px;
-}
-
-.xs-state-icon {
-  color: var(--xs-ink-3);
-  font-size: 28px;
-}
-
 .xs-problem {
-  display: grid;
-  gap: 4px;
-}
-
-.xs-problem-meta {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 12px;
-  color: var(--xs-ink-2);
-  font-size: 12px;
+  flex-direction: column;
+  gap: 2px;
 }
 
-@media (width <= 760px) {
-  .xs-range-custom {
-    grid-template-columns: minmax(0, 1fr);
-  }
+.xs-problem small {
+  color: var(--xs-ink-3);
+}
 
-  .xs-banner {
-    padding: 10px 12px;
-  }
+.xs-time-rel,
+.xs-time-empty {
+  color: var(--xs-ink-3);
+}
+
+.xs-time-rel {
+  font-size: 0.92em;
 }

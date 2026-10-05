@@ -1,8 +1,13 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { useSyncExternalStore } from "react";
+import { type InfiniteData, useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
+import { useCallback, useSyncExternalStore } from "react";
 import type { ControlClient } from "../api";
 import { runFrozenWrite, type WriteResult } from "./guarded.ts";
-import { type GuardedQuerySpec, guardedQuery } from "./guarded-query.ts";
+import {
+  type GuardedInfiniteSpec,
+  type GuardedQuerySpec,
+  guardedInfiniteQuery,
+  guardedQuery,
+} from "./guarded-query.ts";
 import type { HttpMethod, OperationSnapshot } from "./pending-operations.ts";
 import type { ScopedResponse } from "./scope.ts";
 import { useSession } from "./SessionProvider";
@@ -14,6 +19,25 @@ import { useSession } from "./SessionProvider";
 export function useGuardedQuery<T extends ScopedResponse>(spec: GuardedQuerySpec<T>) {
   const { runtime } = useSession(); // `state` changes re-render this hook with the new epoch
   return useQuery(guardedQuery(runtime, spec));
+}
+
+/**
+ * A cursor-paginated read. `refresh` starts over from the first page (it never replays the
+ * cursors of the pages that were loaded), which is what a "刷新" button means for a list.
+ */
+export function useGuardedInfiniteQuery<T extends ScopedResponse>(spec: GuardedInfiniteSpec<T>) {
+  const { runtime } = useSession();
+  const options = guardedInfiniteQuery(runtime, spec);
+  const query = useInfiniteQuery(options);
+  const { refetch } = query;
+  const queryKey = options.queryKey;
+  const refresh = useCallback(async () => {
+    runtime.queryClient.setQueryData<InfiniteData<T, string | undefined>>(queryKey, (data) =>
+      data ? { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) } : data,
+    );
+    return refetch();
+  }, [runtime.queryClient, queryKey, refetch]);
+  return { ...query, refresh };
 }
 
 /** Unresolved writes, for the "待确认操作" indicator and the pages that own them. */

@@ -22,11 +22,11 @@ import { normalizePaste } from "../../shell/palette-classifier.ts";
 import { PageActions } from "../../shell/page-actions";
 import { CompletenessBanner } from "../../ui/CompletenessBanner";
 import { DecisionBadge } from "../../ui/DecisionBadge";
-import { IdChip } from "../../ui/IdChip";
+import { ObjectId } from "../../ui/ObjectId";
 import { ReasonCode } from "../../ui/ReasonCode";
 import { EmptyState, ErrorState, LoadingState } from "../../ui/states";
 import { TimeRangePicker, checkedResolution } from "../../ui/TimeRangePicker";
-import { TimeStamp } from "../../ui/TimeStamp";
+import { EventTime } from "../../ui/EventTime";
 import { isoToMs, formatDuration, formatSpan, type RangeIntent } from "../../ui/time-range.ts";
 import { QueryDetails } from "./QueryDetails";
 import "./investigation.css";
@@ -400,7 +400,7 @@ function StreamResults({ plan }: { plan: SearchPlan }) {
       title: "发生时间",
       dataIndex: "occurred_at",
       width: 168,
-      render: (value: string) => <TimeStamp value={value} />,
+      render: (value: string) => <EventTime value={value} />,
     },
     {
       title: "判定",
@@ -419,7 +419,7 @@ function StreamResults({ plan }: { plan: SearchPlan }) {
       width: 232,
       render: (value: string | null) =>
         value ? (
-          <IdChip
+          <ObjectId
             value={value}
             short
             quietCopy
@@ -471,7 +471,7 @@ function StreamResults({ plan }: { plan: SearchPlan }) {
           note={
             newest && lagMs !== null ? (
               <>
-                最新终态事件发生于 <TimeStamp value={newest.occurred_at} />
+                最新终态事件发生于 <EventTime value={newest.occurred_at} />
                 ，距索引观察时间 {formatSpan(lagMs)}；之后到达的请求可能尚未发布到索引。
               </>
             ) : null

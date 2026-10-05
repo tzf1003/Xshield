@@ -10,7 +10,7 @@ import {
 import { canSearch } from "../../investigation/roles.ts";
 import { useSession } from "../../security/SessionProvider";
 import { DecisionBadge } from "../../ui/DecisionBadge";
-import { IdChip } from "../../ui/IdChip";
+import { ObjectId } from "../../ui/ObjectId";
 import { ReasonCode } from "../../ui/ReasonCode";
 import {
   confidenceText,
@@ -20,7 +20,7 @@ import {
   stageName,
 } from "../../ui/request-vocab.ts";
 import { formatDuration } from "../../ui/time-range.ts";
-import { TimeStamp } from "../../ui/TimeStamp";
+import { EventTime } from "../../ui/EventTime";
 import { CausalitySection } from "./CausalitySection";
 import "./drawers.css";
 import "./investigation.css";
@@ -92,7 +92,7 @@ function EventBody({
   const { requestId, modelCallId, traceId } = event;
 
   const items = [
-    { key: "id", label: "事件 ID", children: <IdChip value={event.eventId} wrap /> },
+    { key: "id", label: "事件 ID", children: <ObjectId value={event.eventId} wrap /> },
     {
       key: "type",
       label: "事件类型",
@@ -108,9 +108,9 @@ function EventBody({
       label: "来源请求",
       children: requestId ? (
         requestId === currentRequestId ? (
-          <IdChip value={requestId} wrap />
+          <ObjectId value={requestId} wrap />
         ) : (
-          <IdChip
+          <ObjectId
             value={requestId}
             wrap
             href={requestPath(requestId)}
@@ -122,7 +122,7 @@ function EventBody({
       ),
     },
     ...(traceId
-      ? [{ key: "trace", label: "Trace ID", children: <IdChip value={traceId} wrap /> }]
+      ? [{ key: "trace", label: "Trace ID", children: <ObjectId value={traceId} wrap /> }]
       : []),
     {
       key: "stage",
@@ -165,7 +165,7 @@ function EventBody({
       key: "model",
       label: "模型调用",
       children: modelCallId ? (
-        <IdChip
+        <ObjectId
           value={modelCallId}
           wrap
           href={modelPath(modelCallId)}
@@ -180,7 +180,7 @@ function EventBody({
       label: "事件时间",
       children: (
         <span className="xs-times">
-          <TimeStamp value={event.occurredAt} precision="microsecond" />
+          <EventTime value={event.occurredAt} precision="microsecond" />
           <span className="mono xs-sub">{event.occurredAt}</span>
         </span>
       ),
@@ -194,10 +194,10 @@ function EventBody({
         ) : (
           <span className="xs-chips">
             {artifacts.map((ref) => (
-              <IdChip key={ref} value={ref} wrap onOpen={() => onOpenArtifact(ref)} />
+              <ObjectId key={ref} value={ref} wrap onOpen={() => onOpenArtifact(ref)} />
             ))}
             {otherRefs.map((ref) => (
-              <IdChip key={ref} value={ref} wrap />
+              <ObjectId key={ref} value={ref} wrap />
             ))}
           </span>
         ),
@@ -276,7 +276,7 @@ function EventBody({
                         <span className="xs-chips">
                           {event.causeEventIds.map((id) => (
                             <span className="xs-cause" key={id}>
-                              <IdChip value={id} wrap />
+                              <ObjectId value={id} wrap />
                               <Button
                                 size="small"
                                 type="link"

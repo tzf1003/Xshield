@@ -64,3 +64,12 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 # Edge 配置发布
 
 设置 `XSHIELD_EDGE_APPLY_URL`、`XSHIELD_EDGE_APPLY_KEY_HEX`、`XSHIELD_EDGE_SNAPSHOT_PATH` 后，control 通过 loopback HMAC 发布快照。Gateway 可用 `XSHIELD_EDGE_BOOTSTRAP_ONLY=1` 启动空快照；控制面不可用时继续使用最后一个签名快照，签名、租户、revision、摘要或监听端口不匹配时 fail-closed。
+
+## 19.7 发布打包
+
+`scripts/package_release.sh` 构建 release 二进制（gateway、control、worker、outbox-worker、evidence-retain、model-eval、audit-seal）和控制台静态包，并与迁移、`sql/clickhouse.sql`、示例配置、部署与运行手册一起装配成 `xshield-<版本>-<系统>-<架构>.tar.gz`，同时写出文件级 `MANIFEST.sha256` 和压缩包的 SHA-256。该脚本没有默认输出位置：必须显式设置 `XSHIELD_DIST_DIR`（暂存树与压缩包）和 `CARGO_TARGET_DIR`（cargo 构建产物），且二者不得位于仓库内，因为 release 构建产物很大，应落在专用的大容量磁盘上。
+
+在 macOS 上若使用外接 exFAT 磁盘，不要直接把 `CARGO_TARGET_DIR` 放在其上：exFAT 没有硬链接和 POSIX 权限，随附的 OpenSSL 源码构建会以 `Directory not empty` 失败。可以在该磁盘上创建 APFS 稀疏包（`hdiutil create -size 400g -type SPARSEBUNDLE -fs APFS -volname XshieldBuild -attach <磁盘>/xshield-build.sparsebundle`），把构建与打包目录放在其挂载点下；磁盘空间只在该外接盘上按需增长。
+
+打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像：当前没有 Dockerfile、Helm 清单或 systemd 单元，生产部署仍需在 TLS 终止器之后自行编排（见 19.2 的当前实现状态）。
+

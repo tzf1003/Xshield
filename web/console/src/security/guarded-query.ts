@@ -56,3 +56,47 @@ export function guardedQuery<T extends ScopedResponse>(
     networkMode: "always",
   } as const;
 }
+
+export type GuardedInfiniteSpec<T extends ScopedResponse> = {
+  key: readonly unknown[];
+  /** `cursor` is `undefined` for the first page, afterwards the server's signed cursor verbatim. */
+  fetchPage: (client: ControlClient, signal: AbortSignal, cursor: string | undefined) => Promise<T>;
+  nextCursor: (page: T) => string | null;
+  staleTime: number;
+  enabled?: boolean;
+  gcTime?: number;
+};
+
+/**
+ * Cursor pagination with the same guarantees as `guardedQuery`: every page is read through
+ * `runGuardedRead` (epoch, abort signal, scope check, 401 handling), the epoch is part of the
+ * key, and nothing refetches by itself.
+ */
+export function guardedInfiniteQuery<T extends ScopedResponse>(
+  runtime: SessionRuntime,
+  spec: GuardedInfiniteSpec<T>,
+) {
+  const { store } = runtime;
+  const state = store.getState();
+  const epoch = state.epoch;
+  return {
+    queryKey: guardedQueryKey(epoch, spec.key),
+    queryFn: ({ signal, pageParam }: { signal: AbortSignal; pageParam: string | undefined }) =>
+      runGuardedRead(store, {
+        fetch: (client, combined) => spec.fetchPage(client, combined, pageParam),
+        epoch,
+        signal,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last: T) => spec.nextCursor(last) ?? undefined,
+    enabled: state.status === "connected" && spec.enabled !== false,
+    staleTime: spec.staleTime,
+    gcTime: spec.gcTime ?? runtime.queryGcMs,
+    retry: 0,
+    retryOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: false,
+    networkMode: "always",
+  } as const;
+}

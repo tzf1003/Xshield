@@ -18,11 +18,11 @@ import { useSession } from "../../security/SessionProvider";
 import { PageActions } from "../../shell/page-actions";
 import { CompletenessBanner } from "../../ui/CompletenessBanner";
 import { DecisionBadge } from "../../ui/DecisionBadge";
-import { IdChip } from "../../ui/IdChip";
+import { ObjectId } from "../../ui/ObjectId";
 import { ReasonCode } from "../../ui/ReasonCode";
 import { originStateName } from "../../ui/request-vocab.ts";
 import { EmptyState, ErrorState, LoadingState } from "../../ui/states";
-import { TimeStamp } from "../../ui/TimeStamp";
+import { EventTime } from "../../ui/EventTime";
 import { formatDuration } from "../../ui/time-range.ts";
 import { AddToCaseModal } from "./AddToCaseModal";
 import { ArtifactDrawer } from "./ArtifactDrawer";
@@ -319,7 +319,7 @@ function NotFoundCard({ response }: { response: SummaryResponse }) {
           ? "待发布记录或索引缺口可能影响查询结果，请稍后点击页面右上角的「刷新」。"
           : "请核对请求 ID 与当前访问范围。未找到不推断请求不存在：它可能已过保留期、尚未发布，或不在当前作用域。"}
         <br />
-        <IdChip value={response.source_request_id} wrap />
+        <ObjectId value={response.source_request_id} wrap />
       </EmptyState>
     </section>
   );
@@ -382,7 +382,7 @@ function KeyFacts({ response }: { response: SummaryResponse }) {
           {
             key: "request",
             label: "请求 ID",
-            children: <IdChip value={response.source_request_id} wrap />,
+            children: <ObjectId value={response.source_request_id} wrap />,
           },
           {
             key: "site",
@@ -410,7 +410,7 @@ function KeyFacts({ response }: { response: SummaryResponse }) {
           {
             key: "time",
             label: "观察时间",
-            children: <TimeStamp value={summary.last_occurred_at} precision="millisecond" />,
+            children: <EventTime value={summary.last_occurred_at} precision="millisecond" />,
           },
           {
             key: "duration",

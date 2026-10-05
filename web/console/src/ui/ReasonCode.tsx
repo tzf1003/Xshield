@@ -1,7 +1,7 @@
 import { Tooltip } from "antd";
 import { CopyButton } from "./CopyButton";
 import { describeReason } from "./request-reasons.ts";
-import "./ui.css";
+import "./kit.css";
 
 type Props = {
   code: string | null | undefined;

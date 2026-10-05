@@ -11,6 +11,10 @@ use xshield_core::{
     site::assess_change_risk,
 };
 
+/// Newest health observations kept per site; see
+/// [`PostgresIdentityStore::insert_protected_site_health_snapshot`].
+pub const HEALTH_SNAPSHOT_HISTORY: i64 = 64;
+
 /// Validated site configuration ready for an atomic upsert.
 pub struct ProtectedSiteConfigUpsert<'a> {
     pub tenant_id: &'a TenantId,
@@ -373,7 +377,13 @@ impl PostgresIdentityStore {
         u64::try_from(revision).map_err(|_| StoreError::CorruptData("snapshot_revision"))
     }
 
-    /// Persists one bounded health observation for a tenant/site.
+    /// Persists one bounded health observation for a tenant/site and prunes
+    /// that site's history in the same transaction.
+    ///
+    /// A health read is an operator-triggered action, and any Observer can
+    /// repeat it, so the table must not grow with the number of reads: only
+    /// the newest [`HEALTH_SNAPSHOT_HISTORY`] observations per site are kept.
+    /// Consumers read the latest row; the rest is short debugging history.
     ///
     /// # Errors
     /// Returns [`StoreError::InvalidCommand`] for an invalid state or
@@ -411,6 +421,7 @@ impl PostgresIdentityStore {
         {
             return Err(StoreError::InvalidCommand);
         }
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO xshield.site_health_snapshots
                  (tenant_id, site_id, edge_state, upstream_state, config_state,
@@ -425,8 +436,27 @@ impl PostgresIdentityStore {
         .bind(audit_state)
         .bind(reason_code)
         .bind(details)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        // The row at OFFSET HISTORY is the oldest one past the limit; it and
+        // everything older goes. With fewer rows the sub-select is NULL and
+        // nothing is deleted. The (tenant, site, captured_at DESC) index
+        // serves both the sub-select and the range delete.
+        sqlx::query(
+            "DELETE FROM xshield.site_health_snapshots
+             WHERE tenant_id = $1 AND site_id = $2
+               AND captured_at <= (
+                   SELECT captured_at FROM xshield.site_health_snapshots
+                   WHERE tenant_id = $1 AND site_id = $2
+                   ORDER BY captured_at DESC
+                   OFFSET $3 LIMIT 1)",
+        )
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(HEALTH_SNAPSHOT_HISTORY)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 

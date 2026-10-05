@@ -3,9 +3,9 @@ import { useState } from "react";
 import type { CaseItemAdded, CaseList } from "../../cases.ts";
 import { useCursorPages } from "../../investigation/use-cursor-pages.ts";
 import { useGuardedMutation, usePendingOperations } from "../../security/hooks";
-import { IdChip } from "../../ui/IdChip";
+import { ObjectId } from "../../ui/ObjectId";
 import { EmptyState, ErrorState } from "../../ui/states";
-import { TimeStamp } from "../../ui/TimeStamp";
+import { EventTime } from "../../ui/EventTime";
 import "./drawers.css";
 import "./investigation.css";
 
@@ -80,7 +80,7 @@ function AddToCaseBody({ artifactId, onClose }: { artifactId: string; onClose: (
   return (
     <div className="xs-add-case">
       <p className="xs-foot">
-        证据 <IdChip value={artifactId} short quietCopy />{" "}
+        证据 <ObjectId value={artifactId} short quietCopy />{" "}
         将作为引用加入你名下的开放案件。加入不授予内容读取权限，也不延长证据的保留期限。
       </p>
       {cases.loading ? <Skeleton active paragraph={{ rows: 3 }} title={false} /> : null}
@@ -104,8 +104,8 @@ function AddToCaseBody({ artifactId, onClose }: { artifactId: string; onClose: (
             <Radio key={item.case_id} value={item.case_id} className="xs-case-option">
               <span className="xs-case-purpose">{item.purpose}</span>
               <span className="xs-case-meta">
-                <IdChip value={item.case_id} short quietCopy copyable={false} />
-                <TimeStamp value={item.created_at} />
+                <ObjectId value={item.case_id} short quietCopy copyable={false} />
+                <EventTime value={item.created_at} />
               </span>
             </Radio>
           ))}
@@ -125,7 +125,7 @@ function AddToCaseBody({ artifactId, onClose }: { artifactId: string; onClose: (
           title={result.response.replayed ? "原请求已确认，沿用既有关联" : "已加入案件"}
           description={
             <span>
-              案件 <IdChip value={result.response.case_id} short quietCopy />{" "}
+              案件 <ObjectId value={result.response.case_id} short quietCopy />{" "}
               的证据集合已包含该引用。
             </span>
           }
@@ -141,7 +141,7 @@ function AddToCaseBody({ artifactId, onClose }: { artifactId: string; onClose: (
           role="alert"
           title="结果未知：请求可能已经到达服务器"
           description={
-            <div className="xs-problem">
+            <div className="xs-fault">
               <span>
                 只能用原幂等键和原参数确认。刷新页面、闲置或退出后这些信息会被清除；顶栏「待确认操作」里保留了原路径与幂等键。
               </span>

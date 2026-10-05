@@ -16,7 +16,7 @@ import { DecisionBadge } from "../../ui/DecisionBadge";
 import { describeReason } from "../../ui/request-reasons.ts";
 import { eventTypeName, stageName } from "../../ui/request-vocab.ts";
 import { ErrorState } from "../../ui/states";
-import { TimeStamp } from "../../ui/TimeStamp";
+import { EventTime } from "../../ui/EventTime";
 import { windowAround } from "../../ui/time-range.ts";
 import { CompletenessBanner } from "../../ui/CompletenessBanner";
 import "./drawers.css";
@@ -217,7 +217,7 @@ function Branch({
                     ) : null}
                   </span>
                   <span className="xs-node-id mono">{node.event.event_id}</span>
-                  <TimeStamp value={node.event.occurred_at} precision="millisecond" />
+                  <EventTime value={node.event.occurred_at} precision="millisecond" />
                 </button>
               </li>
             ))}

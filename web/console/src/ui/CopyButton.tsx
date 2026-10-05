@@ -1,6 +1,6 @@
 import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
-import "./ui.css";
+import "./kit.css";
 
 type Props = {
   /** The text placed on the clipboard. */

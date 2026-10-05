@@ -3,10 +3,10 @@ import { Button, Descriptions, Drawer, Skeleton } from "antd";
 import { useInvestigationNavigate, requestPath } from "../../investigation/navigation.ts";
 import { useGuardedQuery } from "../../security/hooks";
 import { MANUAL_REFRESH } from "../../security/query-client.ts";
-import { IdChip } from "../../ui/IdChip";
+import { ObjectId } from "../../ui/ObjectId";
 import { captureName } from "../../ui/request-vocab.ts";
 import { EmptyState, ErrorState } from "../../ui/states";
-import { TimeStamp } from "../../ui/TimeStamp";
+import { EventTime } from "../../ui/EventTime";
 import "./drawers.css";
 import "./investigation.css";
 
@@ -89,13 +89,13 @@ function ArtifactBody({
           {
             key: "id",
             label: "证据 ID",
-            children: <IdChip value={artifact.artifact_id} wrap />,
+            children: <ObjectId value={artifact.artifact_id} wrap />,
           },
           {
             key: "request",
             label: "请求 ID",
             children: (
-              <IdChip
+              <ObjectId
                 value={artifact.request_id}
                 wrap
                 href={requestPath(artifact.request_id)}
@@ -125,12 +125,12 @@ function ArtifactBody({
           {
             key: "recorded",
             label: "记录时间",
-            children: <TimeStamp value={artifact.recorded_at} precision="millisecond" />,
+            children: <EventTime value={artifact.recorded_at} precision="millisecond" />,
           },
           {
             key: "expires",
             label: "到期时间",
-            children: <TimeStamp value={artifact.expires_at} precision="millisecond" />,
+            children: <EventTime value={artifact.expires_at} precision="millisecond" />,
           },
           {
             key: "parents",
@@ -141,7 +141,7 @@ function ArtifactBody({
               ) : (
                 <span className="xs-chips">
                   {artifact.parent_refs.map((ref) => (
-                    <IdChip key={ref} value={ref} short />
+                    <ObjectId key={ref} value={ref} short />
                   ))}
                 </span>
               ),

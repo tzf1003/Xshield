@@ -1,9 +1,9 @@
 import { InboxOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { Alert, Button, Skeleton } from "antd";
 import type { ReactNode } from "react";
-import { IdChip } from "./IdChip";
+import { ObjectId } from "./ObjectId";
 import { projectError } from "./error-projection.ts";
-import "./ui.css";
+import "./kit.css";
 
 type EmptyProps = {
   title: string;
@@ -60,15 +60,15 @@ export function ErrorState({
       role="alert"
       title={title ?? problem.message}
       description={
-        <div className="xs-problem">
+        <div className="xs-fault">
           {title ? <span>{problem.message}</span> : null}
-          <div className="xs-problem-meta">
+          <div className="xs-fault-meta">
             <span>
               错误码 <code className="mono">{problem.code}</code>
             </span>
             {problem.requestId ? (
               <span>
-                管理请求 ID <IdChip value={problem.requestId} quietCopy />
+                管理请求 ID <ObjectId value={problem.requestId} quietCopy />
               </span>
             ) : null}
           </div>

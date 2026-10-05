@@ -10,7 +10,7 @@ import {
   watermarkScopeLabel,
 } from "./completeness.ts";
 import { formatLocal } from "./time-range.ts";
-import "./ui.css";
+import "./kit.css";
 
 type Props = {
   input: CompletenessInput;

@@ -18,7 +18,7 @@ import {
 import type { CursorPages } from "../../investigation/use-cursor-pages.ts";
 import { CompletenessBanner } from "../../ui/CompletenessBanner";
 import { DecisionBadge } from "../../ui/DecisionBadge";
-import { IdChip } from "../../ui/IdChip";
+import { ObjectId } from "../../ui/ObjectId";
 import { ReasonCode } from "../../ui/ReasonCode";
 import {
   captureName,
@@ -29,7 +29,7 @@ import {
   stageName,
 } from "../../ui/request-vocab.ts";
 import { EmptyState, ErrorState } from "../../ui/states";
-import { TimeStamp } from "../../ui/TimeStamp";
+import { EventTime } from "../../ui/EventTime";
 import { formatDuration } from "../../ui/time-range.ts";
 import "./investigation.css";
 import "./request-detail.css";
@@ -64,7 +64,7 @@ export function EventsTab({
         <span className="xs-event-cell">
           <strong>{eventTypeName(view.eventType).label}</strong>
           {view.stage ? <span className="xs-sub">{stageName(view.stage).label}</span> : null}
-          <IdChip value={view.eventId} short quietCopy />
+          <ObjectId value={view.eventId} short quietCopy />
         </span>
       ),
     },
@@ -164,7 +164,7 @@ export function EvidenceTab({
       key: "artifact",
       render: (_value, row) => (
         <span className="xs-event-cell">
-          <IdChip value={row.artifact_id} onOpen={() => onOpen(row.artifact_id)} wrap quietCopy />
+          <ObjectId value={row.artifact_id} onOpen={() => onOpen(row.artifact_id)} wrap quietCopy />
           <span className="xs-sub mono">{row.kind}</span>
         </span>
       ),
@@ -193,7 +193,7 @@ export function EvidenceTab({
     {
       title: "到期",
       dataIndex: "expires_at",
-      render: (value: string) => <TimeStamp value={value} />,
+      render: (value: string) => <EventTime value={value} />,
     },
     {
       title: "操作",
@@ -430,7 +430,7 @@ export function ModelTab({
               if (!id) return null;
               return (
                 <li key={id}>
-                  <IdChip
+                  <ObjectId
                     value={id}
                     wrap
                     href={modelPath(id)}
@@ -545,13 +545,13 @@ export function AuditTab({
             <div>
               <dt>首个事件</dt>
               <dd>
-                <TimeStamp value={facts.first_occurred_at} precision="millisecond" />
+                <EventTime value={facts.first_occurred_at} precision="millisecond" />
               </dd>
             </div>
             <div>
               <dt>最后事件</dt>
               <dd>
-                <TimeStamp value={facts.last_occurred_at} precision="millisecond" />
+                <EventTime value={facts.last_occurred_at} precision="millisecond" />
               </dd>
             </div>
           </>

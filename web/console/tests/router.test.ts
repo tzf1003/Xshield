@@ -33,6 +33,8 @@ const valid = [
   "/access/session",
   "/sites",
   "/sites/new/network",
+  "/sites/new/basics",
+  "/sites/new/review",
   "/sites/site_alpha.v2-1/overview",
   ...siteSections.map(([section]) => `/sites/site_a/${section}`),
   "/admin/api-keys",
@@ -111,6 +113,7 @@ test("every page kind the shell knows is reachable through exactly the declared 
   for (const kind of [
     "overview",
     "session",
+    "site-list",
     "site-config",
     "api-keys",
     "request",

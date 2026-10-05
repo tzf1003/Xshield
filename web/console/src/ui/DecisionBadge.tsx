@@ -11,7 +11,7 @@ import {
 } from "@ant-design/icons";
 import type { ReactNode } from "react";
 import { type DecisionIcon, describeDecision } from "./decision.ts";
-import "./ui.css";
+import "./kit.css";
 
 const icons: Record<DecisionIcon, ReactNode> = {
   allow: <CheckCircleFilled aria-hidden="true" />,

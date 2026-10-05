@@ -1,8 +1,8 @@
 import { Collapse, Descriptions } from "antd";
 import { displayPlan } from "../../investigation/plans.ts";
 import type { SearchPlan, SearchResponse } from "../../search.ts";
-import { IdChip } from "../../ui/IdChip";
-import { TimeStamp } from "../../ui/TimeStamp";
+import { ObjectId } from "../../ui/ObjectId";
+import { EventTime } from "../../ui/EventTime";
 
 export function scanText(value: number | null): string {
   return value === null ? "未知（索引未报告）" : value.toLocaleString();
@@ -50,14 +50,14 @@ export function QueryDetails({
                     {
                       key: "request",
                       label: "管理请求 ID",
-                      children: <IdChip value={page.request_id} quietCopy />,
+                      children: <ObjectId value={page.request_id} quietCopy />,
                     },
                     { key: "rows", label: "实际扫描行", children: scanText(page.scanned_rows) },
                     { key: "bytes", label: "实际扫描字节", children: scanText(page.scanned_bytes) },
                     {
                       key: "as_of",
                       label: "索引观察时间",
-                      children: <TimeStamp value={page.as_of} precision="millisecond" />,
+                      children: <EventTime value={page.as_of} precision="millisecond" />,
                     },
                     {
                       key: "returned",
