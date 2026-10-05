@@ -39,6 +39,7 @@ mod retention;
 #[cfg(test)]
 mod retention_delivery_tests;
 mod share_grant;
+mod ui_action;
 
 const MAX_OUTBOX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_RETRY_SECONDS: u64 = 3_600;
@@ -73,6 +74,7 @@ enum OutboxFamily {
     Grant,
     ResponseGrant,
     ShareGrant,
+    UiAction,
     EvidenceRetention,
 }
 
@@ -87,6 +89,7 @@ impl OutboxFamily {
             Self::Grant => grant::EVENT_TYPES,
             Self::ResponseGrant => response_grant::EVENT_TYPES,
             Self::ShareGrant => share_grant::EVENT_TYPES,
+            Self::UiAction => ui_action::EVENT_TYPES,
             Self::EvidenceRetention => EVIDENCE_RETENTION_EVENT_TYPES,
         }
     }
@@ -119,6 +122,7 @@ impl OutboxFamily {
             Self::Identity => "binding_id",
             Self::Grant | Self::ResponseGrant => "grant_id",
             Self::ShareGrant => "share_id",
+            Self::UiAction => "action_ref",
         }
     }
 }
@@ -129,6 +133,7 @@ pub(super) fn supports(event_type: &str) -> bool {
         || grant::EVENT_TYPES.contains(&event_type)
         || response_grant::EVENT_TYPES.contains(&event_type)
         || share_grant::EVENT_TYPES.contains(&event_type)
+        || ui_action::EVENT_TYPES.contains(&event_type)
         || retention::EVENT_TYPES.contains(&event_type)
         || hold::EVENT_TYPES.contains(&event_type)
         || matches!(
@@ -338,6 +343,26 @@ pub async fn publish_response_grant_outbox_batch(
     publish_outbox_batch(store, client, scope, config, OutboxFamily::ResponseGrant).await
 }
 
+/// Publishes one bounded batch of gateway page-issued UI action facts.
+///
+/// Complete v3 envelopes bind each action reference to its page evidence,
+/// identity epoch, descriptor and frozen issuance time; the outbox aggregate
+/// must equal the payload `action_ref`. Publication records issuance history
+/// only: whether a reference is usable is decided per request by the UI
+/// action proof store, never by the index.
+///
+/// # Errors
+/// Returns the same lease, event, and index errors as
+/// [`publish_case_outbox_batch`].
+pub async fn publish_ui_action_outbox_batch(
+    store: &PostgresIdentityStore,
+    client: &Client,
+    scope: &OutboxScope,
+    config: &OutboxPublisherConfig,
+) -> Result<OutboxPublishReport, PublishError> {
+    publish_outbox_batch(store, client, scope, config, OutboxFamily::UiAction).await
+}
+
 /// Publishes one bounded batch of gateway share-grant issuance transactions.
 ///
 /// Complete v3 envelopes bind event identity, issuer, target, and frozen issuance
@@ -541,6 +566,9 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
     }
     if response_grant::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return response_grant::parse(event);
+    }
+    if ui_action::EVENT_TYPES.contains(&event.event_type.as_str()) {
+        return ui_action::parse(event);
     }
     if identity::EVENT_TYPES.contains(&event.event_type.as_str()) {
         return identity::parse(event);

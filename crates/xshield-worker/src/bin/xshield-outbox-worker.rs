@@ -9,11 +9,11 @@ use xshield_worker::{
     publish_evidence_access_outbox_batch, publish_evidence_catalog_outbox_batch,
     publish_evidence_retention_outbox_batch, publish_grant_outbox_batch,
     publish_identity_outbox_batch, publish_response_grant_outbox_batch,
-    publish_share_grant_outbox_batch,
+    publish_share_grant_outbox_batch, publish_ui_action_outbox_batch,
 };
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|evidence_retention|calibration|identity|grant|response_grant|share_grant)";
+const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|evidence_retention|calibration|identity|grant|response_grant|share_grant|ui_action)";
 
 #[allow(clippy::too_many_lines)] // Bounded fixed environment assembly keeps every operator input visible.
 async fn run() -> Result<(), Box<dyn Error>> {
@@ -51,6 +51,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             | "grant"
             | "response_grant"
             | "share_grant"
+            | "ui_action"
     ) {
         return Err(USAGE.into());
     }
@@ -108,6 +109,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             publish_response_grant_outbox_batch(&store, &client, &scope, &config).await?
         }
         "share_grant" => publish_share_grant_outbox_batch(&store, &client, &scope, &config).await?,
+        "ui_action" => publish_ui_action_outbox_batch(&store, &client, &scope, &config).await?,
         _ => return Err(USAGE.into()),
     };
     println!(

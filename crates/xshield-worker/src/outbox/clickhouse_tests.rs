@@ -536,6 +536,9 @@ async fn publish_family(
         OutboxFamily::ShareGrant => {
             publish_share_grant_outbox_batch(store, client, scope, config).await
         }
+        OutboxFamily::UiAction => {
+            publish_ui_action_outbox_batch(store, client, scope, config).await
+        }
         OutboxFamily::EvidenceRetention => {
             publish_evidence_retention_outbox_batch(store, client, scope, config).await
         }

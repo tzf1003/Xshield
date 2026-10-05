@@ -41,7 +41,7 @@ pub use outbox::{
     publish_case_outbox_batch, publish_evidence_access_outbox_batch,
     publish_evidence_catalog_outbox_batch, publish_evidence_retention_outbox_batch,
     publish_grant_outbox_batch, publish_identity_outbox_batch, publish_response_grant_outbox_batch,
-    publish_share_grant_outbox_batch,
+    publish_share_grant_outbox_batch, publish_ui_action_outbox_batch,
 };
 pub use search::{
     AgentRunEventSummary, AgentRunSummary, AuditSearchResult, MODEL_CALL_LIST_LIMIT_MAX,
