@@ -4,7 +4,8 @@
 #   scripts/verify_all.sh [rust] [gateway] [console]    (no argument: all three groups)
 #
 # Groups
-#   rust     fmt, audit-event coverage guard, library validation, clippy, tests,
+#   rust     fmt, audit-event coverage and environment-variable guards, library
+#            validation, clippy, tests,
 #            doc tests, PostgreSQL integration suite
 #   gateway  the browser sensor unit tests, the real-binary gateway scripts
 #            (transport, dynamic listeners, request crypto, identity), the
@@ -87,6 +88,7 @@ group_rust() {
     fi
     run_step fmt cargo fmt --all --check
     run_step audit-coverage python3 scripts/check_audit_event_coverage.py
+    run_step env-docs python3 scripts/check_env_docs.py
     run_step library python3 scripts/validate_library.py
     run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
     run_step test cargo test --workspace --all-targets --locked --no-fail-fast

@@ -93,6 +93,7 @@ jobs:
         timeout-minutes: 10
       - run: python scripts/validate_library.py
       - run: python scripts/check_audit_event_coverage.py
+      - run: python scripts/check_env_docs.py
 
   console:
     runs-on: ubuntu-latest

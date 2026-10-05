@@ -90,6 +90,8 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 
 设置 `XSHIELD_EDGE_APPLY_URL`、`XSHIELD_EDGE_APPLY_KEY_HEX`、`XSHIELD_EDGE_SNAPSHOT_PATH` 后，control 通过 loopback HMAC 发布快照。Gateway 可用 `XSHIELD_EDGE_BOOTSTRAP_ONLY=1` 启动空快照；控制面不可用时继续使用最后一个签名快照，签名、租户、revision、摘要或监听端口不匹配时 fail-closed。
 
+`XSHIELD_PUBLIC_HOSTS`（逗号分隔的主机名，可选）只作用于由 `XSHIELD_CONFIG` 启动的静态 bootstrap 站点：它列出该站点接受的 `Host`，缺省为配置里的 `origin.server_name`；监听地址是回环时，edge 还会接受该回环 IP 作为精确 Host，方便本地探测。已有签名快照时以快照为准，`XSHIELD_EDGE_BOOTSTRAP_ONLY=1` 的空快照也不使用它；控制面发布的站点，公开主机来自各自的 `public_origin`。Host 不匹配的请求按 `HOST_NOT_ROUTED` 拒绝并计入 `edge.unrouted_denied`，不会因为设置了本变量而放宽。
+
 ## 19.7 发布打包
 
 `scripts/package_release.sh` 构建 release 二进制（gateway、control、worker、outbox-worker、evidence-retain、model-eval、audit-seal）和控制台静态包，并与迁移、`sql/clickhouse.sql`、示例配置、部署与运行手册一起装配成 `xshield-<版本>-<系统>-<架构>.tar.gz`，同时写出文件级 `MANIFEST.sha256` 和压缩包的 SHA-256。该脚本没有默认输出位置：必须显式设置 `XSHIELD_DIST_DIR`（暂存树与压缩包）和 `CARGO_TARGET_DIR`（cargo 构建产物），且二者不得位于仓库内，因为 release 构建产物很大，应落在专用的大容量磁盘上。

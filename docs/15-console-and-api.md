@@ -250,6 +250,8 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 
 ## 管理 API Key 的授权模型
 
+**部署前提。** `XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX` 是控制面的部署专用 HMAC 密钥，必须恰好是 32 字节的小写十六进制（64 个字符），用于计算 Key 指纹；库里只保存指纹，不保存 Key。它是秘密，应与分页、幂等、审计等其他密钥互不相同，由 `dev.sh` 在本地生成。**未设置时 API Key 功能整体关闭**：携带 `X-Xshield-API-Key` 的请求不查询 Key 表，直接按无效 Key 处理并写审计（见下文预算与审计规则）。更换该密钥等于让所有已签发的 Key 失效，因为已保存的指纹不再匹配；需要更换时先通知使用方并重新签发。
+
 **管理入口只认浏览器会话。** 上述四个端点要求 OIDC 浏览器会话（持有 KeyAdministrator 或 SystemAdmin 并通过 CSRF）。静态机器 Bearer 虽可配置 SystemAdmin，但不是浏览器会话，同样返回 403 `CONTROL_SCOPE_DENIED`；API Key 本身没有任何角色，永远不能创建、列出、撤销或轮换 Key。早期实现曾接受机器 Bearer，本节以文档为准并已修正代码。
 
 **Key 没有角色，只有精确授权。** 每个 scope 行是 `(tenant_id, site_id, capability)`，鉴权对每个 `(站点, 能力)` 单独判定：只看点名该站点的那一行，不合并多行的角色，也不把某个能力当作另一个能力的超集。Key 不具备 Observer、Investigator 等调查角色，所以 `/requests`、`/search`、`/evidence`、`/cases`、`/grants`、`/auth-bindings`、`/exports`、`/audit/health`、`/session`、Key 管理等一律返回 403 `CONTROL_SCOPE_DENIED`（`/control/v1/*` 中凡未在下表列出的路由对 Key 关闭）。

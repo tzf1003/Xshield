@@ -64,7 +64,7 @@ AI 生成的代码与人工代码同门槛。修改授权根、秘密处理、�
 
 - 一次性运行下列全部门槛：`scripts/verify_all.sh [rust] [gateway] [console]`，每步一份日志（`XSHIELD_VERIFY_LOG_DIR`），缺少工具的步骤记为 SKIP 而不是成功，任一步失败则退出码非零；`CARGO_TARGET_DIR` 应指向大容量磁盘而不是系统盘。
 - Rust：`cargo fmt --all --check`；`cargo clippy --workspace --all-targets --locked -- -D warnings`（工作区启用 pedantic 规则，首次构建需数分钟）；`cargo test --workspace --all-targets --locked` 与 `cargo test --workspace --doc --locked`。
-- 文档与契约：`python3 scripts/validate_library.py`（会重写 `validation/report.*`，随改动一起提交）；`python3 scripts/check_audit_event_coverage.py`（控制面每个审计事件必须出现在 worker 发布矩阵中，见 11.14）。
+- 文档与契约：`python3 scripts/validate_library.py`（会重写 `validation/report.*`，随改动一起提交）；`python3 scripts/check_audit_event_coverage.py`（控制面每个审计事件必须出现在 worker 发布矩阵中，见 11.14）；`python3 scripts/check_env_docs.py`（产品代码读取的每个 `XSHIELD_*` 环境变量必须在文档中出现，测试专用变量除外）。
 - PostgreSQL 集成：`scripts/test_postgres.sh` 会创建并在退出时删除唯一命名的临时库；也可手动 `createdb`、按序应用 `migrations/*.sql`、设置 `XSHIELD_TEST_DATABASE_URL` 运行单个 `--ignored` 测试后 `dropdb`。不要对包含他人数据的库运行，测试库名必须是一次性的。
 - ClickHouse 与端到端：需要 Docker 的回归（CI 的 ClickHouse 步骤、`scripts/test_gateway_*.sh`、Keycloak OIDC）在无法运行的环境中必须标注“未执行”，不得以本地单测代替。
 - 控制台（`web/console`）：`npm ci`；`npm run lint`（若已配置）；`npm test`；`npm run build`；`XSHIELD_E2E_PORT=<端口> npm run test:e2e`（并行 worktree 使用不同端口对，默认 5175/5176）。
