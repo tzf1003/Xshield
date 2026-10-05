@@ -186,6 +186,12 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "精确的公开操作入口通过准入；仅表示入口匹配，不代表业务成功。",
     "无需处理。",
   ],
+  PAGE_ROOT_SESSION_ALLOWED: [
+    "allow",
+    "页面根按会话放行",
+    "不带 Authorization 的页面顶层导航，已按仍有效的 WAF 会话识别身份并放行；随后签发的一切仍绑定该身份与代际。",
+    "无需处理。",
+  ],
   UI_ACTION_ALLOWED: [
     "allow",
     "界面动作已准入",
@@ -260,6 +266,12 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "相同的动作资格此前已提交，本次沿用原记录。",
     "无需处理。",
   ],
+  UI_ACTION_CAPACITY_EXCEEDED: [
+    "deny",
+    "动作引用容量已满",
+    "页面签发时，该身份可持有的未过期动作引用已达容量上限，本次没有发行引用；页面照常交付，其受保护请求会因没有引用而被拒绝。",
+    "等待旧引用到期或撤销后重新打开页面；持续出现时核对页面声明的动作数量。",
+  ],
   UI_ACTION_EXPIRY_INVALID: [
     "deny",
     "动作期限无效",
@@ -283,6 +295,12 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "界面动作不可用",
     "没有为已验证的页面登记可用的动作映射，请求被拒绝。",
     "核对站点的界面动作映射与页面证据；确认该页面是否应开放此操作。",
+  ],
+  UI_DESCRIPTOR_CONFLICT: [
+    "error",
+    "动作描述冲突",
+    "边缘启动时发现，同一策略修订下的动作描述与已登记的不一致，已拒绝启动且不覆盖已有记录。",
+    "改变页面动作后发布新的策略修订；不要在原修订下改写动作描述。",
   ],
   UI_EVIDENCE_UNVERIFIED: [
     "deny",
@@ -511,11 +529,29 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "核对源站响应格式是否符合该操作的响应契约。",
   ],
   // ---- 浏览器传感器 ----
+  SENSOR_ACTIONS_DELIVERED: [
+    "info",
+    "动作引用已交付",
+    "传感器 1.1.0 的引导响应交付了当前页面的至少一个动作引用；审计只记录数量，引用本身不进入审计。",
+    "无需处理。",
+  ],
+  SENSOR_ACTIONS_UNAVAILABLE: [
+    "observe",
+    "没有可交付的动作引用",
+    "引导响应没有可交付的动作引用（页面未签发、已过期或已撤销），传感器无法为请求附带引用，页面的受保护请求会被拒绝。",
+    "核对页面是否在交付时签发了动作、引用是否已过期；重新打开页面后重试。",
+  ],
   SENSOR_ASSET_SERVED: [
     "info",
     "传感器资源已提供",
     "边缘提供了带版本的浏览器传感器资源文件。",
     "无需处理。",
+  ],
+  SENSOR_BOOTSTRAP_INVALID: [
+    "deny",
+    "传感器引导请求无效",
+    "引导请求的查询串不是受支持的形态（页面句柄缺失或畸形），已以 400 拒绝。",
+    "核对加载器版本与页面注入的 data-xshield-page 句柄；通常来自客户端异常或探测流量。",
   ],
   SENSOR_BOOTSTRAP_SERVED: [
     "info",
