@@ -19,6 +19,7 @@ pub struct SensorObservationBatch {
 /// Validated client-claimed sensor observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SensorObservation {
+    sensor_version: String,
     build_ref: String,
     page_handle: String,
     navigation_id: String,
@@ -101,10 +102,10 @@ pub struct InvalidSensorObservation;
 impl SensorObservation {
     fn from_dto(
         dto: SensorObservationDto,
-        expected_version: &str,
+        accepted_versions: &[&str],
         expected_build_ref: &str,
     ) -> Result<Self, InvalidSensorObservation> {
-        if dto.sensor_version != expected_version
+        if !accepted_versions.contains(&dto.sensor_version.as_str())
             || dto.build_ref != expected_build_ref
             || !prefixed_v7(&dto.page_handle, "pgh_")
             || !prefixed_v7(&dto.navigation_id, "nav_")
@@ -142,6 +143,7 @@ impl SensorObservation {
             return Err(InvalidSensorObservation);
         }
         Ok(Self {
+            sensor_version: dto.sensor_version,
             build_ref: dto.build_ref,
             page_handle: dto.page_handle,
             navigation_id: dto.navigation_id,
@@ -212,12 +214,16 @@ impl SensorObservation {
 impl SensorObservationBatch {
     /// Parses one complete bounded JSON batch against the configured build.
     ///
+    /// `accepted_versions` lists every sensor version whose assets the edge
+    /// still serves; one batch must use a single version.
+    ///
     /// # Errors
     /// Returns [`InvalidSensorObservation`] for invalid JSON, unknown fields,
-    /// unsupported versions, malformed identifiers, or incoherent sequencing.
+    /// unsupported or mixed versions, malformed identifiers, or incoherent
+    /// sequencing.
     pub fn from_json(
         bytes: &[u8],
-        expected_version: &str,
+        accepted_versions: &[&str],
         expected_build_ref: &str,
     ) -> Result<Self, InvalidSensorObservation> {
         if bytes.is_empty() || bytes.len() > MAX_SENSOR_OBSERVATION_BYTES {
@@ -231,11 +237,12 @@ impl SensorObservationBatch {
         let observations = dto
             .events
             .into_iter()
-            .map(|event| SensorObservation::from_dto(event, expected_version, expected_build_ref))
+            .map(|event| SensorObservation::from_dto(event, accepted_versions, expected_build_ref))
             .collect::<Result<Vec<_>, _>>()?;
         let first = observations.first().ok_or(InvalidSensorObservation)?;
         if observations.iter().enumerate().any(|(index, observation)| {
-            observation.build_ref != first.build_ref
+            observation.sensor_version != first.sensor_version
+                || observation.build_ref != first.build_ref
                 || observation.page_handle != first.page_handle
                 || observation.navigation_id != first.navigation_id
                 || usize::try_from(observation.client_event_seq)
@@ -295,17 +302,45 @@ mod tests {
 
     #[test]
     fn accepts_only_exact_bounded_observations() {
+        let accepted = &crate::ACCEPTED_SENSOR_VERSIONS[..];
         let ready =
-            SensorObservationBatch::from_json(&event("PAGE_READY", 1), "1.0.0", BUILD).unwrap();
+            SensorObservationBatch::from_json(&event("PAGE_READY", 1), accepted, BUILD).unwrap();
         assert_eq!(
             ready.observations()[0].event_type(),
             SensorEventType::PageReady
         );
         assert!(
-            SensorObservationBatch::from_json(&event("PAGE_READY", 2), "1.0.0", BUILD).is_err()
+            SensorObservationBatch::from_json(&event("PAGE_READY", 2), accepted, BUILD).is_err()
         );
-        assert!(SensorObservationBatch::from_json(&event("HEARTBEAT", 1), "1.0.0", BUILD).is_err());
-        assert!(SensorObservationBatch::from_json(&event("UNKNOWN", 2), "1.0.0", BUILD).is_err());
-        assert!(SensorObservationBatch::from_json(&event("HEARTBEAT", 2), "1.0.1", BUILD).is_err());
+        assert!(
+            SensorObservationBatch::from_json(&event("HEARTBEAT", 1), accepted, BUILD).is_err()
+        );
+        assert!(SensorObservationBatch::from_json(&event("UNKNOWN", 2), accepted, BUILD).is_err());
+        assert!(
+            SensorObservationBatch::from_json(&event("HEARTBEAT", 2), &["1.0.1"], BUILD).is_err()
+        );
+    }
+
+    #[test]
+    fn accepts_every_served_version_but_never_a_mixed_batch() {
+        let accepted = &crate::ACCEPTED_SENSOR_VERSIONS[..];
+        let mut batch: serde_json::Value = serde_json::from_slice(&event("PAGE_READY", 1)).unwrap();
+        for version in crate::ACCEPTED_SENSOR_VERSIONS {
+            batch["events"][0]["sensor_version"] = version.into();
+            assert!(
+                SensorObservationBatch::from_json(batch.to_string().as_bytes(), accepted, BUILD)
+                    .is_ok()
+            );
+        }
+        let mut second = batch["events"][0].clone();
+        second["event_type"] = "HEARTBEAT".into();
+        second["client_event_seq"] = 2.into();
+        second["sensor_version"] = crate::LEGACY_SENSOR_VERSION.into();
+        batch["events"][0]["sensor_version"] = crate::SENSOR_VERSION.into();
+        batch["events"].as_array_mut().unwrap().push(second);
+        assert!(
+            SensorObservationBatch::from_json(batch.to_string().as_bytes(), accepted, BUILD)
+                .is_err()
+        );
     }
 }

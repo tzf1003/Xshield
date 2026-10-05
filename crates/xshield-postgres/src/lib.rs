@@ -38,6 +38,7 @@ mod management_session;
 mod model_evaluation_admission;
 mod model_evaluation_cache;
 mod outbox;
+mod page_action_read;
 mod provenance;
 mod request_replay;
 mod response_grant;
@@ -108,7 +109,9 @@ pub use evidence_orphan::{EvidenceOrphanPurgeJob, EvidenceOrphanPurgeResult};
 pub use evidence_retention::{EvidencePurgeJob, EvidencePurgeResult};
 pub use grant::{GrantPersistence, GrantWriteOutcome};
 pub use grant_inspection::{BindingRecordStatus, GrantInspection, GrantRecordStatus};
-pub use identity_read::{SensorSession, SensorSessionQuery, SensorSessionState};
+pub use identity_read::{
+    DocumentSessionQuery, SensorSession, SensorSessionQuery, SensorSessionState,
+};
 pub use investigation_case::{
     InvestigationCaseCreate, InvestigationCaseRecord, InvestigationCaseWriteOutcome,
 };
@@ -137,7 +140,11 @@ pub use outbox::{
     OutboxScope, ack_outbox_event, claim_outbox_batch, claim_outbox_batch_for_types,
     fail_outbox_event,
 };
-pub use provenance::{ProvenancePersistence, ProvenanceWriteOutcome};
+pub use page_action_read::{PageActionQuery, PageActionView};
+pub use provenance::{
+    EdgeDescriptorSync, EdgeDescriptorSyncOutcome, MAX_PAGE_PROVENANCE_ACTIONS,
+    PageProvenanceBatch, PageProvenanceOutcome, ProvenancePersistence, ProvenanceWriteOutcome,
+};
 pub use request_replay::{RequestCryptoMessage, RequestCryptoMessageOutcome};
 pub use response_grant::{
     CommittedResponseGrant, ResponseGrantItem, ResponseGrantPersistence, ResponseGrantWriteOutcome,

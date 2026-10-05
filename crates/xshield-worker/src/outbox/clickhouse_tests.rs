@@ -260,6 +260,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
             vec![response_grant::tests::event()],
         ),
         (OutboxFamily::ShareGrant, vec![share_grant::tests::event()]),
+        (OutboxFamily::UiAction, vec![ui_action::tests::event()]),
     ] {
         for envelope in envelopes {
             let stored = insert_event(pool, scope, family, current_event(envelope)).await;
@@ -275,6 +276,7 @@ async fn exercise_delivery(pool: &PgPool, scope: &OutboxScope, client: &Client) 
         (OutboxFamily::Grant, 1),
         (OutboxFamily::ResponseGrant, 1),
         (OutboxFamily::ShareGrant, 1),
+        (OutboxFamily::UiAction, 1),
     ] {
         assert_eq!(
             publish_family(&store, client, scope, &config, family).await,
@@ -419,7 +421,9 @@ async fn assert_index_rows(
             assert_eq!(row.observed_at, row.occurred_at);
             let expected_micros = if matches!(
                 envelope["event_type"].as_str(),
-                Some("grant.issued" | "response_grant.issued" | "share.issued")
+                Some(
+                    "grant.issued" | "response_grant.issued" | "share.issued" | "ui_action.issued"
+                )
             ) {
                 0
             } else {
@@ -535,6 +539,9 @@ async fn publish_family(
         }
         OutboxFamily::ShareGrant => {
             publish_share_grant_outbox_batch(store, client, scope, config).await
+        }
+        OutboxFamily::UiAction => {
+            publish_ui_action_outbox_batch(store, client, scope, config).await
         }
         OutboxFamily::EvidenceRetention => {
             publish_evidence_retention_outbox_batch(store, client, scope, config).await
@@ -675,13 +682,16 @@ async fn exercise_retry_and_conflict(
 fn current_event(mut envelope: Value) -> Value {
     if matches!(
         envelope["event_type"].as_str(),
-        Some("grant.issued" | "response_grant.issued" | "share.issued")
+        Some("grant.issued" | "response_grant.issued" | "share.issued" | "ui_action.issued")
     ) {
         let now = Utc::now();
         envelope["occurred_at"] = json!(now.to_rfc3339_opts(SecondsFormat::Secs, true));
         envelope["observed_at"] = envelope["occurred_at"].clone();
         envelope["payload"]["issued_at_unix"] = json!(now.timestamp());
         envelope["payload"]["expires_at_unix"] = json!(now.timestamp() + 3_600);
+        if envelope["event_type"] == "ui_action.issued" {
+            envelope["payload"]["page_expires_at_unix"] = json!(now.timestamp() + 3_600);
+        }
         return envelope;
     }
     let now = Utc::now()

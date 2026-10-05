@@ -32,6 +32,7 @@ pub mod auth_binding;
 pub mod edge_transport;
 pub mod evidence_capture;
 pub mod multi_site;
+pub mod page_actions;
 pub mod proxy_protocol;
 pub mod request_crypto;
 pub mod response_crypto;
@@ -67,22 +68,39 @@ pub const MAX_BUFFERED_BODY_IN_FLIGHT_BYTES: usize = MAX_BUFFERED_JSON_BYTES * 2
 pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 const STATIC_ASSET_OPERATION_ID: &str = "site.static_asset";
-/// Versioned same-origin browser sensor asset.
-pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
-/// Immutable browser sensor bootstrap loader.
-pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.0.0-loader.js";
+/// Versioned same-origin browser sensor asset injected into new pages.
+pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.1.0.js";
+/// Immutable browser sensor bootstrap loader injected into new pages.
+pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.1.0-loader.js";
 /// Exact versioned sensor bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
+pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor-1.1.0.js");
 /// Exact versioned loader bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
+pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader-1.1.0.js");
+/// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
+pub const SENSOR_VERSION: &str = "1.1.0";
+/// Superseded sensor asset, still served byte-identical: pages delivered by
+/// an older edge (or another instance during a rolling upgrade) pin these
+/// exact bytes with SRI, so the URL may disappear but must never change.
+pub const LEGACY_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
+/// Superseded loader asset, still served byte-identical.
+pub const LEGACY_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.0.0-loader.js";
+/// Frozen 1.0.0 sensor bytes.
+pub const LEGACY_SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
+/// Frozen 1.0.0 loader bytes.
+pub const LEGACY_SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
+/// Version embedded in the legacy asset paths.
+pub const LEGACY_SENSOR_VERSION: &str = "1.0.0";
 /// Dynamic browser sensor bootstrap document.
 pub const SENSOR_BOOTSTRAP_PATH: &str = "/__xshield/v1/bootstrap";
 /// Same-origin observation preparation endpoint advertised by bootstrap.
 pub const SENSOR_PREPARE_PATH: &str = "/__xshield/v1/events/prepare";
-/// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
-pub const SENSOR_VERSION: &str = "1.0.0";
+/// Observation versions the prepare endpoint accepts: every version whose
+/// assets this edge still serves.
+pub const ACCEPTED_SENSOR_VERSIONS: [&str; 2] = [SENSOR_VERSION, LEGACY_SENSOR_VERSION];
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
 const SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.loader";
+const LEGACY_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.legacy_asset";
+const LEGACY_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.legacy_loader";
 const SENSOR_BOOTSTRAP_OPERATION_ID: &str = "xshield.sensor.bootstrap";
 const SENSOR_PREPARE_OPERATION_ID: &str = "xshield.sensor.prepare";
 const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
@@ -94,6 +112,10 @@ pub enum InternalResponse {
     SensorAsset,
     /// The immutable browser sensor bootstrap loader.
     SensorLoader,
+    /// The frozen 1.0.0 sensor asset kept for already-delivered pages.
+    LegacySensorAsset,
+    /// The frozen 1.0.0 loader asset kept for already-delivered pages.
+    LegacySensorLoader,
     /// A per-navigation browser sensor bootstrap document.
     SensorBootstrap,
     /// A session-bound browser observation preparation request.
@@ -114,6 +136,8 @@ pub struct GatewayConfig {
     site_policy: Option<SitePolicyConfig>,
     operations: BTreeMap<(String, String), CompiledOperation>,
     path_resource_operations: Vec<CompiledOperation>,
+    page_provenance: Option<page_actions::PageProvenance>,
+    sensor_routes: page_actions::SensorRoutes,
 }
 
 /// Validated server-owned browser sensor bootstrap policy.
@@ -162,12 +186,14 @@ struct CompiledOperation {
     source_action: Option<ActionId>,
     resource: Option<CompiledResource>,
     request_crypto: Option<RequestCryptoPolicy>,
+    issued_by: Option<page_actions::IssuedByRule>,
     response: Option<CompiledResponse>,
 }
 
 #[derive(Debug)]
 struct CompiledResponse {
     kind: ResponseKind,
+    page_actions: Option<page_actions::PageActionsRule>,
     max_bytes: usize,
     crypto: Option<ResponseCryptoRule>,
     grant: Option<ResponseGrantRule>,
@@ -354,6 +380,8 @@ struct OperationDto {
     resource_path_parameter: Option<String>,
     #[serde(default)]
     request_crypto: Option<RequestCryptoDto>,
+    #[serde(default)]
+    issued_by: Option<page_actions::IssuedByDto>,
     response: Option<ResponseDto>,
 }
 
@@ -395,6 +423,8 @@ struct ResponseDto {
     injection_offset: Option<usize>,
     #[serde(default)]
     additional_adapters: Vec<SensorHtmlAdapterDto>,
+    #[serde(default)]
+    page_actions: Option<page_actions::PageActionsDto>,
     #[serde(default)]
     crypto: Option<ResponseCryptoDto>,
     #[serde(default)]
@@ -602,6 +632,13 @@ impl GatewayConfig {
         {
             return Err(ConfigError::Invalid("identity_store"));
         }
+        let all_operations = compiled_operations
+            .exact
+            .values()
+            .chain(compiled_operations.path_resources.iter())
+            .collect::<Vec<_>>();
+        let page_provenance = page_actions::compile(&all_operations, &policy_revision)?;
+        let sensor_routes = page_actions::sensor_routes(&all_operations)?;
         Ok(Self {
             listen,
             origin: Origin {
@@ -625,7 +662,38 @@ impl GatewayConfig {
             site_policy: dto.site_policy,
             operations: compiled_operations.exact,
             path_resource_operations: compiled_operations.path_resources,
+            page_provenance,
+            sensor_routes,
         })
+    }
+
+    /// Returns the actions an approved `SENSOR_HTML` page root issues on
+    /// delivery, or `None` when the exact operation is not such a page root.
+    #[must_use]
+    pub fn page_action_plan(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<&page_actions::PageActionPlan> {
+        let operation = self.operation(method, path)?;
+        self.page_provenance
+            .as_ref()?
+            .plan(operation.policy.operation_id())
+    }
+
+    /// Returns the digest-bound descriptors the edge must provision before
+    /// this configuration serves traffic; `None` keeps external provisioning.
+    #[must_use]
+    pub fn edge_descriptors(&self) -> Option<&page_actions::EdgeDescriptorSet> {
+        self.page_provenance
+            .as_ref()
+            .map(page_actions::PageProvenance::descriptors)
+    }
+
+    /// Returns non-secret routing hints the browser sensor receives at bootstrap.
+    #[must_use]
+    pub const fn sensor_routes(&self) -> &page_actions::SensorRoutes {
+        &self.sensor_routes
     }
 
     /// Returns the validated listener socket.
@@ -802,6 +870,8 @@ impl GatewayConfig {
                 InternalResponse::SensorPrepare => AdmissionClass::AuthenticatedRoot,
                 InternalResponse::SensorAsset
                 | InternalResponse::SensorLoader
+                | InternalResponse::LegacySensorAsset
+                | InternalResponse::LegacySensorLoader
                 | InternalResponse::SensorBootstrap => AdmissionClass::Public,
             });
         }
@@ -815,6 +885,8 @@ impl GatewayConfig {
         match (method, path) {
             ("GET", SENSOR_ASSET_PATH) => Some(InternalResponse::SensorAsset),
             ("GET", SENSOR_LOADER_PATH) => Some(InternalResponse::SensorLoader),
+            ("GET", LEGACY_SENSOR_ASSET_PATH) => Some(InternalResponse::LegacySensorAsset),
+            ("GET", LEGACY_SENSOR_LOADER_PATH) => Some(InternalResponse::LegacySensorLoader),
             ("GET", SENSOR_BOOTSTRAP_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorBootstrap)
             }
@@ -1081,6 +1153,8 @@ impl GatewayConfig {
             let operation = match response {
                 InternalResponse::SensorAsset => SENSOR_ASSET_OPERATION_ID,
                 InternalResponse::SensorLoader => SENSOR_LOADER_OPERATION_ID,
+                InternalResponse::LegacySensorAsset => LEGACY_SENSOR_ASSET_OPERATION_ID,
+                InternalResponse::LegacySensorLoader => LEGACY_SENSOR_LOADER_OPERATION_ID,
                 InternalResponse::SensorBootstrap => SENSOR_BOOTSTRAP_OPERATION_ID,
                 InternalResponse::SensorPrepare => {
                     return GatewayDecision {
@@ -1622,15 +1696,9 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
     )
     .map_err(ConfigError::Policy)?;
     let response = compile_optional_response(dto.response, method)?;
-    let response_has_side_effects = response.as_ref().is_some_and(|response| {
-        response.crypto.is_some()
-            || response.grant.is_some()
-            || response.share_issue.is_some()
-            || response.auth_binding.is_some()
-            || response.auth_revoke.is_some()
-            || response.auth_refresh.is_some()
-            || response.auth_context_switch.is_some()
-    });
+    let response_has_side_effects = response
+        .as_ref()
+        .is_some_and(CompiledResponse::has_side_effects);
     let request_crypto = dto
         .request_crypto
         .map(|rule| compile_request_crypto(rule, method, dto.admission, response_has_side_effects))
@@ -1643,6 +1711,10 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         source_action,
         resource,
         request_crypto,
+        issued_by: dto
+            .issued_by
+            .map(page_actions::compile_issued_by)
+            .transpose()?,
         response,
     })
 }
@@ -1767,6 +1839,11 @@ fn compile_response(
         return Err(ConfigError::Invalid("operations.response.max_bytes"));
     }
     let kind = compile_response_kind(&mut dto, method)?;
+    let page_actions = dto
+        .page_actions
+        .take()
+        .map(page_actions::compile_page_actions)
+        .transpose()?;
     let crypto = dto
         .crypto
         .map(|crypto| compile_response_crypto(crypto, dto.max_bytes))
@@ -1908,6 +1985,7 @@ fn compile_response(
         .transpose()?;
     Ok(CompiledResponse {
         kind,
+        page_actions,
         max_bytes: dto.max_bytes,
         crypto,
         grant,
@@ -1930,6 +2008,7 @@ fn compile_response_kind(
                 || dto.origin_sha256.is_some()
                 || dto.injection_offset.is_some()
                 || !dto.additional_adapters.is_empty()
+                || dto.page_actions.is_some()
             {
                 return Err(ConfigError::Invalid("operations.response"));
             }
@@ -2086,6 +2165,19 @@ fn valid_json_pointer(value: &str) -> bool {
             .filter(|pair| pair[0] == b'~')
             .all(|pair| matches!(pair[1], b'0' | b'1'))
         && value.as_bytes().last().is_none_or(|byte| *byte != b'~')
+}
+
+impl CompiledResponse {
+    /// Whether releasing this response encrypts, issues, or changes identity.
+    const fn has_side_effects(&self) -> bool {
+        self.crypto.is_some()
+            || self.grant.is_some()
+            || self.share_issue.is_some()
+            || self.auth_binding.is_some()
+            || self.auth_revoke.is_some()
+            || self.auth_refresh.is_some()
+            || self.auth_context_switch.is_some()
+    }
 }
 
 impl CompiledOperation {

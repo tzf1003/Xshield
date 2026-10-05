@@ -97,7 +97,55 @@ pub(crate) struct AdmissionFacts<'a> {
     pub(crate) duration_us: u64,
     pub(crate) request_crypto: Option<&'a RequestCryptoAudit>,
     pub(crate) sensor_observations: &'a [SensorObservationAudit],
+    pub(crate) sensor_bootstrap: Option<&'a SensorBootstrapAudit>,
     pub(crate) forward_origin: bool,
+}
+
+/// What one versioned bootstrap delivered. Counts only: references never
+/// enter the journal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SensorBootstrapAudit {
+    delivered: usize,
+}
+
+impl SensorBootstrapAudit {
+    pub(crate) const fn new(delivered: usize) -> Self {
+        Self { delivered }
+    }
+}
+
+/// Result of issuing a page root's declared actions on delivery. A failure
+/// never withholds the page; it is recorded here and the page simply holds no
+/// references, so its gated requests stay denied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PageActionAudit {
+    outcome: &'static str,
+    reason_code: ReasonCode,
+    mapping_revision: String,
+}
+
+impl PageActionAudit {
+    pub(crate) fn issued(reason_code: ReasonCode, mapping_revision: &str) -> Self {
+        Self {
+            outcome: "PASS",
+            reason_code,
+            mapping_revision: mapping_revision.to_owned(),
+        }
+    }
+
+    /// Ineligibility, conflict or capacity is a deterministic denial; store
+    /// and clock failures are dependency errors.
+    pub(crate) fn failed(reason_code: ReasonCode, mapping_revision: &str) -> Self {
+        let outcome = match reason_code {
+            ReasonCode::IdentityStoreUnavailable | ReasonCode::ClockUnavailable => "ERROR",
+            _ => "DENY",
+        };
+        Self {
+            outcome,
+            reason_code,
+            mapping_revision: mapping_revision.to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -292,6 +340,7 @@ pub(crate) struct FinalFacts<'a> {
     pub(crate) origin_response_complete: bool,
     pub(crate) response_crypto: Option<&'a ResponseCryptoAudit>,
     pub(crate) sensor_html: Option<&'a SensorHtmlAudit>,
+    pub(crate) page_actions: Option<&'a PageActionAudit>,
     pub(crate) response_source: ResponseSource,
 }
 
@@ -674,6 +723,33 @@ impl DurableAudit {
             last_stage_id = String::from(observation_id.as_str());
             request_sequence += 1;
         }
+        if let Some(bootstrap) = facts.sensor_bootstrap {
+            let bootstrap_id = new_event_id()?;
+            let delivered = bootstrap.delivered > 0;
+            events.push(PendingEvent::new(
+                bootstrap_id.clone(),
+                if delivered {
+                    "stage.completed"
+                } else {
+                    "stage.skipped"
+                },
+                request_sequence,
+                vec![last_stage_id],
+                generic_stage(
+                    "sensor_bootstrap",
+                    if delivered { "PASS" } else { "SKIPPED" },
+                    if delivered {
+                        ReasonCode::SensorActionsDelivered
+                    } else {
+                        ReasonCode::SensorActionsUnavailable
+                    },
+                    Some(self.policy_revision.clone()),
+                    operation_id.clone(),
+                ),
+            ));
+            last_stage_id = String::from(bootstrap_id.as_str());
+            request_sequence += 1;
+        }
         events.push(PendingEvent::new(
             decision_id.clone(),
             "decision.composed",
@@ -743,39 +819,30 @@ impl DurableAudit {
                 .checked_add(1)
                 .ok_or(DurableAuditError::SequenceExhausted)?;
         }
+        let operation = facts
+            .decision
+            .operation_id
+            .as_ref()
+            .map(|operation| operation.as_str().to_owned());
+        let mut chain = StageChain {
+            events: &mut events,
+            causes: &mut completion_causes,
+            sequence: &mut request_sequence,
+        };
         if let Some(crypto) = facts.response_crypto {
-            let (crypto_id, event) = response_crypto_event(
-                crypto,
-                facts
-                    .decision
-                    .operation_id
-                    .as_ref()
-                    .map(|operation| operation.as_str().to_owned()),
-                request_sequence,
-                completion_causes.clone(),
-            )?;
-            events.push(event);
-            completion_causes.push(crypto_id.as_str().to_owned());
-            request_sequence = request_sequence
-                .checked_add(1)
-                .ok_or(DurableAuditError::SequenceExhausted)?;
+            chain.push(|sequence, causes| {
+                response_crypto_event(crypto, operation.clone(), sequence, causes)
+            })?;
         }
         if let Some(sensor_html) = facts.sensor_html {
-            let (event_id, event) = sensor_html_event(
-                sensor_html,
-                facts
-                    .decision
-                    .operation_id
-                    .as_ref()
-                    .map(|operation| operation.as_str().to_owned()),
-                request_sequence,
-                completion_causes.clone(),
-            )?;
-            events.push(event);
-            completion_causes.push(event_id.as_str().to_owned());
-            request_sequence = request_sequence
-                .checked_add(1)
-                .ok_or(DurableAuditError::SequenceExhausted)?;
+            chain.push(|sequence, causes| {
+                sensor_html_event(sensor_html, operation.clone(), sequence, causes)
+            })?;
+        }
+        if let Some(page) = facts.page_actions {
+            chain.push(|sequence, causes| {
+                page_action_event(page, operation.clone(), sequence, causes)
+            })?;
         }
         let completion_id = new_event_id()?;
         events.push(PendingEvent::new(
@@ -1112,6 +1179,80 @@ fn response_crypto_event(
     Ok((event_id, event))
 }
 
+/// Appends response-side stages so each is caused by every event before it
+/// and takes the next request sequence.
+struct StageChain<'a> {
+    events: &'a mut Vec<PendingEvent>,
+    causes: &'a mut Vec<String>,
+    sequence: &'a mut u32,
+}
+
+impl StageChain<'_> {
+    fn push(
+        &mut self,
+        build: impl FnOnce(u32, Vec<String>) -> Result<(EventId, PendingEvent), DurableAuditError>,
+    ) -> Result<(), DurableAuditError> {
+        let (event_id, event) = build(*self.sequence, self.causes.clone())?;
+        self.events.push(event);
+        self.causes.push(event_id.as_str().to_owned());
+        *self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(DurableAuditError::SequenceExhausted)?;
+        Ok(())
+    }
+}
+
+fn page_action_event(
+    page: &PageActionAudit,
+    operation_id: Option<String>,
+    request_sequence: u32,
+    cause_event_ids: Vec<String>,
+) -> Result<(EventId, PendingEvent), DurableAuditError> {
+    let event_id = new_event_id()?;
+    let event = PendingEvent::new(
+        event_id.clone(),
+        "stage.completed",
+        request_sequence,
+        cause_event_ids,
+        generic_stage(
+            "ui_action_issue",
+            page.outcome,
+            page.reason_code,
+            Some(page.mapping_revision.clone()),
+            operation_id,
+        ),
+    );
+    Ok((event_id, event))
+}
+
+/// A deterministic stage in the generic journal shape (operation-only facts),
+/// which the worker's journal publisher accepts without a dedicated parser.
+fn generic_stage(
+    stage: &'static str,
+    outcome: &'static str,
+    reason: ReasonCode,
+    rule_revision: Option<String>,
+    operation_id: Option<String>,
+) -> Payload {
+    Payload::StageCompleted {
+        stage,
+        stage_execution_id: format!("stg_{}", Uuid::now_v7()),
+        outcome,
+        reason_code: reason.as_str(),
+        proof_kind: "deterministic",
+        confidence: None,
+        confidence_status: "not_applicable",
+        duration_us: 0,
+        rule_revision,
+        model_call_id: None,
+        facts: StageFacts { operation_id },
+        coverage: StageCoverage {
+            admission_checked: true,
+        },
+    }
+}
+
 fn sensor_html_event(
     sensor_html: &SensorHtmlAudit,
     operation_id: Option<String>,
@@ -1237,7 +1378,9 @@ fn edge_response_reason(facts: &FinalFacts<'_>) -> ReasonCode {
         .map(xshield_core::domain::OperationId::as_str);
     match operation {
         Some("xshield.sensor.bootstrap") => ReasonCode::SensorBootstrapServed,
-        Some("xshield.sensor.loader") => ReasonCode::SensorLoaderServed,
+        Some("xshield.sensor.loader" | "xshield.sensor.legacy_loader") => {
+            ReasonCode::SensorLoaderServed
+        }
         Some("xshield.sensor.prepare") => ReasonCode::SensorObservationAccepted,
         _ => ReasonCode::SensorAssetServed,
     }
@@ -2000,6 +2143,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: None,
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2025,6 +2169,7 @@ mod tests {
                 origin_response_complete: true,
                 response_crypto: None,
                 sensor_html: Some(&transformation),
+                page_actions: None,
                 response_source: ResponseSource::Origin,
             })
             .await
@@ -2056,6 +2201,140 @@ mod tests {
         assert_eq!(stage["payload"]["rule_revision"], "home-r1");
         assert_eq!(stage["payload"]["facts"]["csp_nonce_applied"], false);
         assert_eq!(stage["payload"]["confidence"], serde_json::Value::Null);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One journal round trip per outcome keeps the matrix readable.
+    async fn records_bootstrap_delivery_and_page_issuance_in_the_generic_stage_shape() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", "/home", UnixSeconds::new(1));
+        let cases = [
+            ("req_018f2a3b-4c5d-7000-8000-000000000031", Some(2), None),
+            ("req_018f2a3b-4c5d-7000-8000-000000000032", Some(0), None),
+            (
+                "req_018f2a3b-4c5d-7000-8000-000000000033",
+                None,
+                Some(PageActionAudit::issued(
+                    ReasonCode::UiActionIssued,
+                    "mapping-r1",
+                )),
+            ),
+            (
+                "req_018f2a3b-4c5d-7000-8000-000000000034",
+                None,
+                Some(PageActionAudit::failed(
+                    ReasonCode::UiActionCapacityExceeded,
+                    "mapping-r1",
+                )),
+            ),
+            (
+                "req_018f2a3b-4c5d-7000-8000-000000000035",
+                None,
+                Some(PageActionAudit::failed(
+                    ReasonCode::IdentityStoreUnavailable,
+                    "mapping-r1",
+                )),
+            ),
+        ];
+        for (request_id, delivered, page) in &cases {
+            let bootstrap = delivered.map(SensorBootstrapAudit::new);
+            let admission = audit
+                .commit_admission(AdmissionFacts {
+                    request_id,
+                    trace_id: "31313131313131313131313131313131",
+                    method: "GET",
+                    decision: &decision,
+                    duration_us: 10,
+                    request_crypto: None,
+                    sensor_observations: &[],
+                    sensor_bootstrap: bootstrap.as_ref(),
+                    forward_origin: true,
+                })
+                .await
+                .unwrap();
+            audit
+                .finalize(FinalFacts {
+                    request_id,
+                    trace_id: "31313131313131313131313131313131",
+                    method: "GET",
+                    decision: &decision,
+                    admission: &admission,
+                    status: 200,
+                    duration_us: 20,
+                    proxy_error: false,
+                    response_failure: None,
+                    origin_status: Some(200),
+                    origin_response_complete: true,
+                    response_crypto: None,
+                    sensor_html: None,
+                    page_actions: page.as_ref(),
+                    response_source: ResponseSource::Origin,
+                })
+                .await
+                .unwrap();
+        }
+        drop(audit);
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut stages = Vec::new();
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if matches!(
+                    event["payload"]["stage"].as_str(),
+                    Some("sensor_bootstrap" | "ui_action_issue")
+                ) {
+                    stages.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let summary = stages
+            .iter()
+            .map(|event| {
+                // Only the generic facts/coverage shape: the worker journal
+                // publisher rejects unknown stage members.
+                assert_eq!(
+                    event["payload"]["facts"].as_object().unwrap().len(),
+                    1,
+                    "{event}"
+                );
+                assert_eq!(
+                    event["payload"]["coverage"],
+                    serde_json::json!({"admission_checked": true})
+                );
+                assert_eq!(event["payload"]["confidence"], serde_json::Value::Null);
+                (
+                    event["event_type"].as_str().unwrap().to_owned(),
+                    event["payload"]["outcome"].as_str().unwrap().to_owned(),
+                    event["payload"]["reason_code"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = [
+            ("stage.completed", "PASS", "SENSOR_ACTIONS_DELIVERED"),
+            ("stage.skipped", "SKIPPED", "SENSOR_ACTIONS_UNAVAILABLE"),
+            ("stage.completed", "PASS", "UI_ACTION_ISSUED"),
+            ("stage.completed", "DENY", "UI_ACTION_CAPACITY_EXCEEDED"),
+            ("stage.completed", "ERROR", "IDENTITY_STORE_UNAVAILABLE"),
+        ]
+        .map(|(event, outcome, reason)| (event.to_owned(), outcome.to_owned(), reason.to_owned()));
+        assert_eq!(summary, expected);
+        assert!(
+            stages[2..]
+                .iter()
+                .all(|event| event["payload"]["rule_revision"] == "mapping-r1")
+        );
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2122,6 +2401,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: None,
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2142,6 +2422,7 @@ mod tests {
                 origin_response_complete: true,
                 response_crypto: None,
                 sensor_html: None,
+                page_actions: None,
                 response_source: ResponseSource::Origin,
             })
             .await
@@ -2156,6 +2437,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: None,
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2176,6 +2458,7 @@ mod tests {
                 origin_response_complete: false,
                 response_crypto: None,
                 sensor_html: None,
+                page_actions: None,
                 response_source: ResponseSource::Origin,
             })
             .await
@@ -2265,6 +2548,7 @@ mod tests {
                     duration_us: 10,
                     request_crypto: None,
                     sensor_observations,
+                    sensor_bootstrap: None,
                     forward_origin: false,
                 })
                 .await
@@ -2285,6 +2569,7 @@ mod tests {
                     origin_response_complete: false,
                     response_crypto: None,
                     sensor_html: None,
+                    page_actions: None,
                     response_source: ResponseSource::Edge,
                 })
                 .await
@@ -2365,6 +2650,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: Some(&crypto),
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2428,6 +2714,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: Some(&crypto),
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2533,6 +2820,7 @@ mod tests {
                     duration_us: 10,
                     request_crypto: None,
                     sensor_observations: &[],
+                    sensor_bootstrap: None,
                     forward_origin: true,
                 })
                 .await
@@ -2552,6 +2840,7 @@ mod tests {
                     origin_response_complete: complete,
                     response_crypto: None,
                     sensor_html: None,
+                    page_actions: None,
                     response_source: ResponseSource::Origin,
                 })
                 .await
@@ -2617,6 +2906,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: None,
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2641,6 +2931,7 @@ mod tests {
                 origin_response_complete: false,
                 response_crypto: Some(&response_crypto),
                 sensor_html: None,
+                page_actions: None,
                 response_source: ResponseSource::Origin,
             })
             .await
@@ -2709,6 +3000,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: None,
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2773,6 +3065,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: None,
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2888,6 +3181,7 @@ mod tests {
                 duration_us: 10,
                 request_crypto: None,
                 sensor_observations: &[],
+                sensor_bootstrap: None,
                 forward_origin: true,
             })
             .await
@@ -2910,6 +3204,7 @@ mod tests {
             duration_us: 10,
             request_crypto: None,
             sensor_observations: &[],
+            sensor_bootstrap: None,
             forward_origin: true,
         }
     }

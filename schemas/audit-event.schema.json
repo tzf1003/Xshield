@@ -911,6 +911,129 @@
         }
       }
     },
+    "ui_action": {
+      "$comment": "Page-issued UI action from the gateway's page-delivery issuance. The Rust publisher additionally compares producer_boot_id with request_id, requires equal 1-based sequence values bounded by action_count, compares both UTC timestamps with issued_at_unix, requires action and page-evidence leases of 1-86400 seconds with the action lease not exceeding the evidence lease, a positive auth_epoch, rejects duplicate JSON keys, and binds the event to its outbox row (aggregate_ref equals action_ref). Page-issued actions carry no target and no fields; other producers must extend this contract first.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "outcome",
+        "reason_code",
+        "action_ref",
+        "action_id",
+        "binding_id",
+        "auth_epoch",
+        "page_evidence_id",
+        "page_template",
+        "build_fingerprint",
+        "operation_id",
+        "method",
+        "route_template",
+        "field_profile",
+        "fields",
+        "target_kind",
+        "mapping_revision",
+        "action_count",
+        "issued_at_unix",
+        "expires_at_unix",
+        "page_expires_at_unix"
+      ],
+      "properties": {
+        "stage": {
+          "const": "ui_action"
+        },
+        "outcome": {
+          "const": "PASS"
+        },
+        "reason_code": {
+          "const": "UI_ACTION_ISSUED"
+        },
+        "action_ref": {
+          "type": "string",
+          "maxLength": 71,
+          "pattern": "^action\\.[0-9a-f]{64}$"
+        },
+        "action_id": {
+          "$ref": "#/$defs/scoped_name"
+        },
+        "binding_id": {
+          "type": "string",
+          "maxLength": 41,
+          "pattern": "^auth_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "auth_epoch": {
+          "$ref": "#/$defs/identity_counter"
+        },
+        "page_evidence_id": {
+          "type": "string",
+          "maxLength": 41,
+          "pattern": "^page_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "page_template": {
+          "$ref": "#/$defs/scoped_name"
+        },
+        "build_fingerprint": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/scoped_name"
+        },
+        "method": {
+          "enum": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ]
+        },
+        "route_template": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^/[!-~]*$",
+          "not": {
+            "pattern": "[?#]|[^!-~]"
+          }
+        },
+        "field_profile": {
+          "$ref": "#/$defs/scoped_name"
+        },
+        "fields": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "target_kind": {
+          "const": "none"
+        },
+        "mapping_revision": {
+          "$ref": "#/$defs/scoped_name"
+        },
+        "action_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "issued_at_unix": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "expires_at_unix": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "page_expires_at_unix": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
+    },
     "calibration_report": {
       "$comment": "Offline calibration report metadata only. The report artifact contains protected detailed metrics and source evidence; this envelope never contains labels, probabilities, samples, prompts, credentials, or evidence contents.",
       "type": "object",
@@ -1918,6 +2041,92 @@
               "state": {"const": "pending"},
               "previous_hash": {"type": "null"},
               "event_hash": {"type": "null"}
+            }
+          },
+          "connection_id": false,
+          "agent_run_id": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "ui_action.issued"
+          }
+        },
+        "required": [
+          "event_type"
+        ]
+      },
+      "then": {
+        "$comment": "Gateway page-delivery issuance outbox shape. The schema checks field-local shape only; Rust owns equality, sequence bounds, time arithmetic, duplicate-key rejection, and source/row binding.",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 39,
+            "pattern": "^ev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/scoped_name"
+          },
+          "site_id": {
+            "$ref": "#/$defs/scoped_name"
+          },
+          "request_id": {
+            "$ref": "#/$defs/identity_request_id"
+          },
+          "producer_id": {
+            "const": "gateway-ui-action"
+          },
+          "producer_boot_id": {
+            "$ref": "#/$defs/identity_request_id"
+          },
+          "producer_seq": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16
+          },
+          "request_seq": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16
+          },
+          "occurred_at": {
+            "$ref": "#/$defs/utc_second"
+          },
+          "observed_at": {
+            "$ref": "#/$defs/utc_second"
+          },
+          "policy_revision": {
+            "$ref": "#/$defs/scoped_name"
+          },
+          "example_only": {
+            "const": false
+          },
+          "evidence_refs": {
+            "maxItems": 0
+          },
+          "cause_event_ids": {
+            "maxItems": 0
+          },
+          "sensitivity": {
+            "const": "SENSITIVE"
+          },
+          "payload": {
+            "$ref": "#/$defs/ui_action"
+          },
+          "integrity": {
+            "properties": {
+              "state": {
+                "const": "pending"
+              },
+              "previous_hash": {
+                "type": "null"
+              },
+              "event_hash": {
+                "type": "null"
+              }
             }
           },
           "connection_id": false,

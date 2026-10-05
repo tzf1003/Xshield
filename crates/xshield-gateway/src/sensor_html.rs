@@ -1,18 +1,28 @@
 //! Exact-build browser sensor HTML injection.
+//!
+//! Sensor 1.1.0 is injected as two classic synchronous scripts at the pinned
+//! `</head>` offset: the sensor first, so its fetch/XHR hooks exist before any
+//! later script of the document runs, then the loader, whose tag carries the
+//! per-delivery page handle. The handle is not a credential: the bootstrap
+//! returns references for it only to the session that owns the page, and the
+//! entity is released `private, no-store`.
 
 use openssl::{
     base64::encode_block,
     sha::{sha256, sha384},
 };
 use std::sync::LazyLock;
+use uuid::{Uuid, Version};
 
-const SENSOR_SCRIPT: &str = "<script defer src=\"/__xshield/v1/sensor/1.0.0.js\"";
-const LOADER_SCRIPT: &str = "<script defer src=\"/__xshield/v1/sensor/1.0.0-loader.js\"";
+const SENSOR_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.1.0.js\"";
+const LOADER_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.1.0-loader.js\"";
 const SCRIPT_END: &str = "></script>";
 const NONCE_ATTRIBUTE_OVERHEAD: usize = " nonce=\"\"".len();
 const NONCE_BYTES: usize = 32;
 const INTEGRITY_ATTRIBUTE_OVERHEAD: usize = " integrity=\"\"".len();
 const SHA384_INTEGRITY_BYTES: usize = "sha384-".len() + 64;
+const PAGE_ATTRIBUTE_OVERHEAD: usize = " data-xshield-page=\"\"".len();
+const PAGE_HANDLE_BYTES: usize = "pgh_".len() + 36;
 static SENSOR_INTEGRITY: LazyLock<String> = LazyLock::new(|| sri_sha384(crate::SENSOR_ASSET_BYTES));
 static LOADER_INTEGRITY: LazyLock<String> =
     LazyLock::new(|| sri_sha384(crate::SENSOR_LOADER_BYTES));
@@ -20,7 +30,9 @@ const MAX_INJECTION_BYTES: usize = SENSOR_SCRIPT.len()
     + LOADER_SCRIPT.len()
     + SCRIPT_END.len() * 2
     + (INTEGRITY_ATTRIBUTE_OVERHEAD + SHA384_INTEGRITY_BYTES) * 2
-    + (NONCE_ATTRIBUTE_OVERHEAD + NONCE_BYTES) * 2;
+    + (NONCE_ATTRIBUTE_OVERHEAD + NONCE_BYTES) * 2
+    + PAGE_ATTRIBUTE_OVERHEAD
+    + PAGE_HANDLE_BYTES;
 
 /// Exact static HTML adapter approved by trusted configuration.
 #[derive(Clone, Debug)]
@@ -71,13 +83,18 @@ impl SensorHtmlRule {
     ///
     /// # Errors
     /// Returns [`SensorHtmlError`] when the entity differs from the approved
-    /// digest or the configured insertion point is not a UTF-8 `</head>` tag.
+    /// digest, the configured insertion point is not a UTF-8 `</head>` tag, or
+    /// the page handle is not an edge-generated `pgh_` `UUIDv7`.
     pub fn inject(
         &self,
         source: &[u8],
         nonce: Option<&str>,
+        page_handle: &str,
     ) -> Result<InjectedSensorHtml, SensorHtmlError> {
-        if source.len() > self.max_bytes || std::str::from_utf8(source).is_err() {
+        if source.len() > self.max_bytes
+            || std::str::from_utf8(source).is_err()
+            || !valid_page_handle(page_handle)
+        {
             return Err(SensorHtmlError);
         }
         let origin_sha256 = encode_hex(sha256(source));
@@ -89,7 +106,7 @@ impl SensorHtmlRule {
         if source.get(adapter.injection_offset..adapter.injection_offset + 7) != Some(b"</head>") {
             return Err(SensorHtmlError);
         }
-        let injection = build_injection(nonce)?;
+        let injection = build_injection(nonce, page_handle)?;
         let capacity = source
             .len()
             .checked_add(injection.len())
@@ -111,13 +128,25 @@ impl SensorHtmlRule {
     }
 }
 
-fn build_injection(nonce: Option<&str>) -> Result<String, SensorHtmlError> {
+fn valid_page_handle(value: &str) -> bool {
+    value.len() == PAGE_HANDLE_BYTES
+        && value
+            .strip_prefix("pgh_")
+            .and_then(|uuid| Uuid::parse_str(uuid).ok())
+            .is_some_and(|uuid| {
+                uuid.get_version() == Some(Version::SortRand)
+                    && uuid.hyphenated().to_string() == value[4..]
+            })
+}
+
+fn build_injection(nonce: Option<&str>, page_handle: &str) -> Result<String, SensorHtmlError> {
     if nonce.is_some_and(|value| {
         value.len() != NONCE_BYTES
             || !value
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    }) {
+    }) || !valid_page_handle(page_handle)
+    {
         return Err(SensorHtmlError);
     }
     let nonce_bytes = nonce.map_or(0, str::len);
@@ -125,14 +154,16 @@ fn build_injection(nonce: Option<&str>) -> Result<String, SensorHtmlError> {
         + LOADER_SCRIPT.len()
         + SCRIPT_END.len() * 2
         + (INTEGRITY_ATTRIBUTE_OVERHEAD + SHA384_INTEGRITY_BYTES) * 2
-        + (nonce_bytes + NONCE_ATTRIBUTE_OVERHEAD) * usize::from(nonce.is_some()) * 2;
+        + (nonce_bytes + NONCE_ATTRIBUTE_OVERHEAD) * usize::from(nonce.is_some()) * 2
+        + PAGE_ATTRIBUTE_OVERHEAD
+        + page_handle.len();
     let mut output = String::new();
     output
         .try_reserve_exact(capacity)
         .map_err(|_| SensorHtmlError)?;
-    for (script, integrity) in [
-        (SENSOR_SCRIPT, SENSOR_INTEGRITY.as_str()),
-        (LOADER_SCRIPT, LOADER_INTEGRITY.as_str()),
+    for (script, integrity, page) in [
+        (SENSOR_SCRIPT, SENSOR_INTEGRITY.as_str(), None),
+        (LOADER_SCRIPT, LOADER_INTEGRITY.as_str(), Some(page_handle)),
     ] {
         output.push_str(script);
         output.push_str(" integrity=\"");
@@ -141,6 +172,11 @@ fn build_injection(nonce: Option<&str>) -> Result<String, SensorHtmlError> {
         if let Some(nonce) = nonce {
             output.push_str(" nonce=\"");
             output.push_str(nonce);
+            output.push('"');
+        }
+        if let Some(page) = page {
+            output.push_str(" data-xshield-page=\"");
+            output.push_str(page);
             output.push('"');
         }
         output.push_str(SCRIPT_END);
@@ -205,6 +241,8 @@ fn encode_hex(bytes: [u8; 32]) -> String {
 mod tests {
     use super::*;
 
+    const PAGE: &str = "pgh_018f2a3b-4c5d-7000-8000-000000000001";
+
     #[test]
     fn injects_only_the_exact_approved_html() {
         assert!(SENSOR_SCRIPT.contains(crate::SENSOR_ASSET_PATH));
@@ -212,13 +250,13 @@ mod tests {
         let source = b"<!doctype html><html><head></head><body>ok</body></html>";
         let alternate = b"<!doctype html><head></head>";
         let rule = SensorHtmlRule::new(
-            128,
+            256,
             vec![
                 ("home-r1".to_owned(), encode_hex(sha256(source)), 27),
                 ("home-r2".to_owned(), encode_hex(sha256(alternate)), 21),
             ],
         );
-        let result = rule.inject(source, None).unwrap();
+        let result = rule.inject(source, None, PAGE).unwrap();
         assert_eq!(result.adapter_revision(), "home-r1");
         let injected = result.into_body();
         assert!(
@@ -230,11 +268,44 @@ mod tests {
         assert!(injected.contains(&format!("integrity=\"{}\"", *SENSOR_INTEGRITY)));
         assert!(injected.contains(&format!("integrity=\"{}\"", *LOADER_INTEGRITY)));
         assert_eq!(
-            rule.inject(alternate, Some("0123456789abcdef0123456789abcdef"))
+            rule.inject(alternate, Some("0123456789abcdef0123456789abcdef"), PAGE)
                 .unwrap()
                 .adapter_revision(),
             "home-r2"
         );
-        assert!(rule.inject(b"<!doctype html><html></html>", None).is_err());
+        assert!(
+            rule.inject(b"<!doctype html><html></html>", None, PAGE)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn injects_synchronous_sensor_before_the_page_bound_loader() {
+        let source = b"<!doctype html><html><head></head><body>ok</body></html>";
+        let rule = SensorHtmlRule::new(
+            256,
+            vec![("home-r1".to_owned(), encode_hex(sha256(source)), 27)],
+        );
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let injected =
+            String::from_utf8(rule.inject(source, Some(nonce), PAGE).unwrap().into_body()).unwrap();
+        let sensor = injected.find(SENSOR_SCRIPT).unwrap();
+        let loader = injected.find(LOADER_SCRIPT).unwrap();
+        // Hooks must exist before any later script runs: no defer/async.
+        assert!(sensor < loader && !injected.contains("defer") && !injected.contains("async"));
+        assert_eq!(injected.matches("data-xshield-page").count(), 1);
+        assert!(injected[loader..].contains(&format!("data-xshield-page=\"{PAGE}\"")));
+        assert_eq!(injected.matches(&format!("nonce=\"{nonce}\"")).count(), 2);
+        assert!(injected.len() - source.len() <= MAX_INJECTION_BYTES);
+        // A forged, non-v7 or attribute-breaking handle never reaches the HTML.
+        for handle in [
+            "pgh_018f2a3b-4c5d-4000-8000-000000000001",
+            "pgh_018F2A3B-4C5D-7000-8000-000000000001",
+            "pgh_018f2a3b4c5d70008000000000000001",
+            "pgh_\"><script>alert(1)</script>",
+            "",
+        ] {
+            assert!(rule.inject(source, None, handle).is_err(), "{handle}");
+        }
     }
 }

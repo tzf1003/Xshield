@@ -114,6 +114,14 @@ pub enum ReasonCode {
     UiActionAlreadyIssued,
     /// An action reference was reused with different semantics.
     UiActionIssuanceConflict,
+    /// The binding already holds the configured number of live page instances.
+    UiActionCapacityExceeded,
+    /// Edge-derived action descriptors differ from the rows already bound to
+    /// the same policy revision, so the configuration is refused.
+    UiDescriptorConflict,
+    /// A digest-pinned page root was admitted from the WAF session alone
+    /// because a browser navigation cannot carry the application credential.
+    PageRootSessionAllowed,
     /// The exact public operation entry was approved.
     PublicEntryAllowed,
     /// The exact authentication operation entry was approved.
@@ -169,6 +177,12 @@ pub enum ReasonCode {
     SensorLoaderServed,
     /// A dynamic browser sensor bootstrap was served by the edge.
     SensorBootstrapServed,
+    /// A bootstrap request named a page handle in an unsupported shape.
+    SensorBootstrapInvalid,
+    /// The bootstrap returned live page actions bound to the requesting session.
+    SensorActionsDelivered,
+    /// The bootstrap returned no page actions for the requesting session.
+    SensorActionsUnavailable,
     /// A session-bound browser observation was durably accepted.
     SensorObservationAccepted,
     /// Browser observation framing or content failed strict validation.
@@ -281,6 +295,9 @@ impl ReasonCode {
             Self::UiActionIssued => "UI_ACTION_ISSUED",
             Self::UiActionAlreadyIssued => "UI_ACTION_ALREADY_ISSUED",
             Self::UiActionIssuanceConflict => "UI_ACTION_ISSUANCE_CONFLICT",
+            Self::UiActionCapacityExceeded => "UI_ACTION_CAPACITY_EXCEEDED",
+            Self::UiDescriptorConflict => "UI_DESCRIPTOR_CONFLICT",
+            Self::PageRootSessionAllowed => "PAGE_ROOT_SESSION_ALLOWED",
             Self::PublicEntryAllowed => "PUBLIC_ENTRY_ALLOWED",
             Self::AuthEntryAllowed => "AUTH_ENTRY_ALLOWED",
             Self::FlowRootAllowed => "FLOW_ROOT_ALLOWED",
@@ -308,6 +325,9 @@ impl ReasonCode {
             Self::SensorAssetServed => "SENSOR_ASSET_SERVED",
             Self::SensorLoaderServed => "SENSOR_LOADER_SERVED",
             Self::SensorBootstrapServed => "SENSOR_BOOTSTRAP_SERVED",
+            Self::SensorBootstrapInvalid => "SENSOR_BOOTSTRAP_INVALID",
+            Self::SensorActionsDelivered => "SENSOR_ACTIONS_DELIVERED",
+            Self::SensorActionsUnavailable => "SENSOR_ACTIONS_UNAVAILABLE",
             Self::SensorObservationAccepted => "SENSOR_OBSERVATION_ACCEPTED",
             Self::SensorObservationInvalid => "SENSOR_OBSERVATION_INVALID",
             Self::SensorHtmlInjected => "SENSOR_HTML_INJECTED",

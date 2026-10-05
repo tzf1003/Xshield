@@ -20,6 +20,15 @@ WAF 终止 TLS 并重新验证上游证书，固定 upstream allowlist，不接�
 
 按来源限流和匿名会话来源指纹使用 edge 归属的客户端地址：默认是 TCP 对端；对端属于 `XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED` 时是它在 PROXY 头中声明的源地址。客户端转发头一律不信任。放在未启用 PROXY protocol 的代理或负载均衡之后时，其后的所有客户端仍会被归为同一来源，站点总限流照常生效。
 
+### 页面签发、动作描述供给与探针 1.1.0
+
+新增网关配置字段（语义见 05 §5.3.1）：`SENSOR_HTML` 响应的 `page_actions: {"mapping_revision": "...", "max_active_pages": 1–1000}`，以及 `UI_ACTION_REQUIRED` 非资源 operation 的 `issued_by: {"page_operation_id": "...", "ttl_seconds": 1–86400}`。没有新增 edge 环境变量；页面签发沿用 `XSHIELD_DATABASE_URL` 与 `identity_store`。worker 新增 `XSHIELD_OUTBOX_FAMILY=ui_action`。
+
+- 启动顺序：只要配置声明了 `page_actions`，edge 在绑定任何监听端口之前把由配置推导的动作描述与策略修订写入 PostgreSQL；数据库不可达、修订已存在但摘要不同或非 `active`、或任一描述字段不同，都以 `xshield gateway startup failed: UI_DESCRIPTOR_CONFLICT: ...` 或身份存储不可用退出，绝不覆盖已有行。改变描述（路由、目标、页面、mapping revision 等）必须同时提升 `policy_revision`；只改 `ttl_seconds`、`max_active_pages` 不影响摘要。
+- 控制面下发的 apply 快照目前拒绝包含 `page_actions` 的站点配置（`apply page_actions`），页面签发只能来自 `XSHIELD_CONFIG` 的启动配置；控制台尚不能编写这些字段。
+- 升级顺序：先部署能解析 `ui_action.issued` 的 worker 并为每个站点调度 `XSHIELD_OUTBOX_FAMILY=ui_action`，再启用带 `page_actions` 的网关配置；否则这些行停留在 outbox 中未发布（不影响准入，但调查看不到签发历史）。
+- 探针版本：新页面注入 1.1.0（同步脚本 + 页面句柄）；1.0.0 资源仍按原字节提供，不带查询串的 bootstrap 仍返回 1.0.0 文档，prepare 同时接受两个版本，因此滚动升级期间旧实例交付的页面继续工作（仅观测，1.0.0 从不携带引用）。回滚到只提供 1.0.0 的旧网关后，新页面重新注入 1.0.0、不再获得页面引用（受控请求按默认拒绝处理）；回滚前已打开的 1.1.0 页面仍可出示已签发且未过期的引用，旧网关同样按服务端记录逐请求重验。页面 HTML 是 `no-store`，不会从缓存复活 1.1.0 标签。站点 CSP 若限制 `script-src`，仍由既有 nonce 改写覆盖两个同步标签。
+
 ### Edge 传输配置（原生 TLS 与 PROXY protocol）
 
 以下变量只由 edge 进程在启动时读取并完整校验，作用于全部数据面端口（不按站点配置）；任一校验失败都以 `xshield gateway startup failed: ...` 退出，错误只包含变量名与路径，不回显文件内容。
