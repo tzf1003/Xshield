@@ -11,7 +11,10 @@ export default defineConfig({
   testMatch: "**/*.spec.ts",
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
-  retries: 0,
+  // The mocked control API tells a StrictMode duplicate read from a real one by a short abort
+  // window (tests/control-mock.ts), which a slow shared runner can miss. One CI retry absorbs
+  // that; a deterministic failure still fails both attempts and a passed retry is reported flaky.
+  retries: process.env.CI ? 1 : 0,
   workers: 2,
   reporter: "list",
   use: { baseURL: machineOrigin, trace: "off", screenshot: "off" },
