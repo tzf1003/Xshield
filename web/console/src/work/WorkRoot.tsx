@@ -87,10 +87,11 @@ function StepUpDialog({ coordinator }: { coordinator: StepUpCoordinator }) {
           <strong>原请求（相同的幂等键与内容）会自动重新发送</strong>，无需重新填写。
         </p>
         {busy && (
-          <p>
+          // antd's Spin renders a <div>, which a <p> may not contain.
+          <div>
             <Spin size="small" />{" "}
             {state.phase === "opening" ? "正在打开验证窗口…" : "正在确认再认证状态…"}
-          </p>
+          </div>
         )}
         {state.phase === "waiting" && (
           <p>验证窗口已打开，完成 MFA 后会自动继续；也可手动重新检查。</p>

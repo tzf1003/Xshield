@@ -186,6 +186,17 @@ test.describe("in-place MFA step-up", () => {
     baseURL,
     context,
   }) => {
+    // A malformed dialog (for example a <div> inside a <p>) is a React console error.
+    const problems: string[] = [];
+    page.on("pageerror", (error) => problems.push(error.message));
+    page.on("console", (message) => {
+      // The browser reports the deliberate 403 of the first attempt itself; that is not a bug.
+      if (
+        ["error", "warning"].includes(message.type()) &&
+        !/^Failed to load resource/.test(message.text())
+      )
+        problems.push(message.text());
+    });
     const session: Record<string, unknown> = { step_up_valid: false };
     const base = readyExport();
     const calls = await open(
@@ -238,6 +249,7 @@ test.describe("in-place MFA step-up", () => {
     await expect(
       drawer.getByText("已发起附件保存：investigation-export.json（17 字节）"),
     ).toBeVisible();
+    expect(problems).toEqual([]);
   });
 
   test("cancelling ends the attempt with the server's own refusal; nothing is sent again", async ({
