@@ -520,6 +520,105 @@ test.describe("the approval center follows the roles the server reports", () => 
     await expect(pane.getByLabel("审批理由")).toHaveValue("");
   });
 
+  test("declining the step-up of a first attempt leaves nothing frozen; the form stays and a new submit is a new request", async ({
+    page,
+    baseURL,
+  }) => {
+    const calls = await open(page, baseURL, "/approvals", APPROVER, (url, request) =>
+      url.pathname === `/control/v1/exports/${EXPORT_ID}/approve` && request.method() === "POST"
+        ? refuse(403, "CONTROL_EXPORT_STEP_UP_REQUIRED")
+        : undefined,
+    );
+    await page.getByRole("button", { name: `处理 ${EXPORT_ID}` }).click();
+    const pane = page.getByRole("region", { name: "审批详情" });
+    await pane.getByLabel("审批理由").fill("独立复核通过");
+    const dialog = page.getByRole("dialog", { name: "需要 MFA 再认证" });
+    await pane.getByRole("button", { name: "批准", exact: true }).click();
+    await dialog.getByRole("button", { name: "取消，不再继续" }).click();
+    await expect(dialog).toHaveCount(0);
+    // The server did nothing, so nothing is frozen: the form is back with the reason intact and
+    // the refusal explained, and leaving the page does not warn.
+    const alert = pane.getByRole("alert").filter({ hasText: "CONTROL_EXPORT_STEP_UP_REQUIRED" });
+    await expect(alert).toContainText("需要两分钟内的 MFA 再认证");
+    await expect(pane.getByLabel("审批理由")).toHaveValue("独立复核通过");
+    await expect(pane.getByText("冻结的请求")).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })),
+      ),
+    ).toBe(false);
+    // Deciding again freezes a new request under a new key.
+    await pane.getByRole("button", { name: "批准", exact: true }).click();
+    await dialog.getByRole("button", { name: "取消，不再继续" }).click();
+    const posts = writes(calls).filter((call) => call.path.endsWith("/approve"));
+    expect(posts).toHaveLength(2);
+    expect(posts[0]?.key).not.toBe(posts[1]?.key);
+    expect(posts[0]?.body).toEqual(posts[1]?.body);
+  });
+
+  test("a retry after an unknown outcome whose step-up is declined stays frozen and later repeats the same request", async ({
+    page,
+    baseURL,
+  }) => {
+    const session: Record<string, unknown> = { step_up_valid: false };
+    let attempts = 0;
+    const calls = await open(
+      page,
+      baseURL,
+      "/approvals",
+      APPROVER,
+      (url, request) => {
+        if (
+          url.pathname !== `/control/v1/exports/${EXPORT_ID}/approve` ||
+          request.method() !== "POST"
+        )
+          return undefined;
+        attempts += 1;
+        if (attempts === 1) return { abort: "connectionreset" };
+        return session.step_up_valid ? undefined : refuse(403, "CONTROL_EXPORT_STEP_UP_REQUIRED");
+      },
+      session,
+    );
+    await page.getByRole("button", { name: `处理 ${EXPORT_ID}` }).click();
+    const pane = page.getByRole("region", { name: "审批详情" });
+    await pane.getByLabel("审批理由").fill("独立复核通过");
+    await pane.getByRole("button", { name: "批准", exact: true }).click();
+    await expect(pane.getByText("结果未知")).toBeVisible();
+
+    // The retry is refused: the MFA window lapsed meanwhile. The operator declines to verify.
+    const dialog = page.getByRole("dialog", { name: "需要 MFA 再认证" });
+    await pane.getByRole("button", { name: "原样重试" }).click();
+    await dialog.getByRole("button", { name: "取消，不再继续" }).click();
+    await expect(dialog).toHaveCount(0);
+    // The first attempt may have committed, so the refusal does not make it a clean failure:
+    // the request stays frozen as unknown (not "waiting for MFA"), and leaving the page warns.
+    await expect(pane.getByText("结果未知")).toBeVisible();
+    await expect(pane.getByText("尚未成功发送")).toHaveCount(0);
+    await expect(
+      pane.getByRole("alert").filter({ hasText: "CONTROL_EXPORT_STEP_UP_REQUIRED" }),
+    ).toBeVisible();
+    await expect(pane.getByLabel("审批理由")).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true })),
+      ),
+    ).toBe(true);
+
+    // Once the step-up is valid the identical request goes out and settles the question.
+    session.step_up_valid = true;
+    await pane.getByRole("button", { name: "原样重试" }).click();
+    await expect(page.getByText("已批准导出申请")).toBeVisible();
+    const posts = writes(calls).filter((call) => call.path.endsWith("/approve"));
+    expect(posts).toHaveLength(3);
+    for (const post of posts.slice(1)) {
+      expect({ path: post.path, key: post.key, body: post.body }).toEqual({
+        path: posts[0]?.path,
+        key: posts[0]?.key,
+        body: posts[0]?.body,
+      });
+    }
+  });
+
   test("the retired evidence-access address redirects with the same hint in cookie mode", async ({
     page,
     baseURL,

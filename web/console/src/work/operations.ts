@@ -4,7 +4,7 @@
  * is unmounted and mounted again finds its unknown write here, with its original key and body.
  */
 import type { OperationSnapshot } from "../security/pending-operations.ts";
-import { describeCode, type ErrorView, isStepUpCode } from "./errors.ts";
+import { describeCode, type ErrorView } from "./errors.ts";
 
 export type Owner = (operation: OperationSnapshot) => boolean;
 
@@ -87,8 +87,15 @@ function prettyBody(body: string | null): string {
 export function viewOperation(operation: OperationSnapshot): OperationView {
   const last = operation.lastError;
   const error = last ? describeCode(last.code, last.status, last.requestId) : null;
-  const stepUp = last !== null && isStepUpCode(last.code);
-  const phase = operation.phase === "inflight" ? "inflight" : stepUp ? "step-up" : "unknown";
+  // The store decides: `step_up` means the server refused before running anything. An operation
+  // that is `unknown` stays unknown even when its latest refusal asks for a step-up, because an
+  // earlier attempt may have been committed.
+  const phase =
+    operation.phase === "inflight"
+      ? "inflight"
+      : operation.phase === "step_up"
+        ? "step-up"
+        : "unknown";
   return {
     request: `${operation.method} ${operation.path}`,
     key: operation.idempotencyKey,

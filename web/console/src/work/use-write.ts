@@ -94,6 +94,16 @@ export function useWrite<TVars, T extends ScopedResponse>(
       callback.current?.(result.response);
     } else if (result.kind === "rejected") {
       setRejection(result.error);
+    } else if (result.kind === "step_up") {
+      // The server refused before it ran anything and the operator did not (or could not)
+      // re-verify, so this was a first attempt that never happened. The store keeps such a
+      // request frozen for a retry after re-verification; here the dialog already offered that,
+      // so it is dropped and the form stays editable, with the refusal shown (a new submit
+      // freezes a new request under a new key). An attempt that follows an unknown one is never
+      // filed as `step_up`: the store keeps it unknown, and it stays frozen below.
+      const stranded = runtime.pending.getSnapshot().find(spec.owner);
+      if (stranded?.phase === "step_up") runtime.pending.abandon(stranded.id);
+      setRejection(result.error);
     }
     return result;
   }
@@ -123,7 +133,9 @@ export function useWrite<TVars, T extends ScopedResponse>(
       return run(() => mutation.submit(vars));
     },
     retry: async () => {
-      if (!operation || operation.phase !== "unknown") return null;
+      if (!operation || (operation.phase !== "unknown" && operation.phase !== "step_up")) {
+        return null;
+      }
       setRejection(null);
       return run(() => mutation.retry(operation.id));
     },

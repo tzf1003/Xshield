@@ -362,13 +362,16 @@ test("a frozen operation is shown exactly as it will be resent", () => {
   assert.equal(view.phaseLabel, "结果未知");
   assert.equal(viewOperation(operation({ phase: "inflight" })).phaseLabel, "请求中");
   assert.equal(viewOperation(operation({ body: null })).body, "");
-  const stepUp = viewOperation(
-    operation({
-      lastError: { code: "CONTROL_EXPORT_STEP_UP_REQUIRED", status: 403, requestId: null },
-    }),
-  );
+  const refusal = { code: "CONTROL_EXPORT_STEP_UP_REQUIRED", status: 403, requestId: null };
+  // A first attempt the server refused before running anything: it waits for the MFA step-up.
+  const stepUp = viewOperation(operation({ phase: "step_up", lastError: refusal }));
   assert.equal(stepUp.phase, "step-up");
   assert.equal(stepUp.error?.code, "CONTROL_EXPORT_STEP_UP_REQUIRED");
+  // The same refusal of a retry says nothing about an earlier attempt that may have committed.
+  const afterUnknown = viewOperation(operation({ phase: "unknown", lastError: refusal }));
+  assert.equal(afterUnknown.phase, "unknown");
+  assert.equal(afterUnknown.phaseLabel, "结果未知");
+  assert.equal(afterUnknown.error?.code, "CONTROL_EXPORT_STEP_UP_REQUIRED");
   const failed = viewOperation(
     operation({ lastError: { code: "REQUEST_TIMEOUT", status: 0, requestId: null } }),
   );
