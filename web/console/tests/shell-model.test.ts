@@ -53,8 +53,7 @@ test("navigation is regrouped into the console sections; cases and approvals rep
       ["请求调查", "/investigation/requests"],
       ["结构化检索", "/investigation/search"],
       ["身份与资格", "/investigation/grants"],
-      ["模型调用列表", "/investigation/models"],
-      ["模型调用详情", "/investigation/models/lookup"],
+      ["模型调用", "/investigation/models"],
       ["Agent 运行", "/investigation/agents"],
       ["案件工作台", "/cases"],
       ["审批中心", "/approvals"],
@@ -77,8 +76,7 @@ test("role visibility matches the previous shell for every role", () => {
     "站点状态",
     "请求调查",
     "身份与资格",
-    "模型调用列表",
-    "模型调用详情",
+    "模型调用",
     "Agent 运行",
     "权限中心",
   ]);
@@ -142,7 +140,8 @@ test("the longest matching entry is current, including ID forms and sub-routes",
   const key = (path: string) => activeItem(path, items)?.href;
   assert.equal(key("/"), "/");
   assert.equal(key("/sites/site_a/network"), "/sites");
-  assert.equal(key("/investigation/models/lookup"), "/investigation/models/lookup");
+  // The lookup address redirects to the list, whose entry owns every model address.
+  assert.equal(key("/investigation/models/lookup"), "/investigation/models");
   assert.equal(key(`/investigation/models/${ids.mdl}`), "/investigation/models");
   assert.equal(key(`/investigation/requests/${ids.req}`), "/investigation/requests");
   // The identity page has a tab with its own address; both addresses highlight the one entry.
@@ -179,7 +178,8 @@ test("page titles, leads and breadcrumbs", () => {
   assert.equal(legacyKinds.has("request"), false);
   assert.equal(legacyKinds.has("search"), false);
   assert.equal(legacyKinds.has("case"), false);
-  assert.equal(legacyKinds.has("model"), true);
+  assert.equal(legacyKinds.has("model"), false);
+  assert.equal(legacyKinds.has("audit-health"), true);
 });
 
 test("IDs are recognised by prefix and exact canonical shape", () => {

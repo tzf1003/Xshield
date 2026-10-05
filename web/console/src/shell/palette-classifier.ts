@@ -100,9 +100,7 @@ export function recognise(value: string): Recognised | null {
   if (modelCallPattern.test(value)) {
     return {
       noun: "模型调用 ID",
-      candidates: [
-        open(`/investigation/models/${value}`, "模型调用详情", "/investigation/models/lookup"),
-      ],
+      candidates: [open(`/investigation/models/${value}`, "模型调用详情", "/investigation/models")],
     };
   }
   if (agentRunPattern.test(value)) {

@@ -106,6 +106,14 @@ export function createAppRouteTree(components: RouteComponents) {
     stringify: (params: Record<string, string>) => ({ [name]: params[name] }),
   });
 
+  const agentPage = lazyRouteComponent(
+    () => import("../pages/investigation/AgentPage"),
+    "AgentPage",
+  );
+  const calibrationPage = lazyRouteComponent(
+    () => import("../pages/investigation/CalibrationPage"),
+    "CalibrationPage",
+  );
   const identityPage = lazyRouteComponent(
     () => import("../pages/investigation/IdentityPage"),
     "IdentityPage",
@@ -178,13 +186,28 @@ export function createAppRouteTree(components: RouteComponents) {
       ),
       params: idParams("requestId", requestPattern),
     }),
-    page("model-list", "investigation/models"),
-    page("model", "investigation/models/lookup"),
+    page("model-list", "investigation/models", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/ModelListPage"),
+        "ModelListPage",
+      ),
+    }),
+    // The lookup form became the ID box of the list, so the old address redirects there.
+    page("model", "investigation/models/lookup", {
+      beforeLoad: () => {
+        throw redirect({ to: "/investigation/models", replace: true } as never);
+      },
+    }),
     page("model", "investigation/models/$modelCallId", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/ModelDetailPage"),
+        "ModelDetailPage",
+      ),
       params: idParams("modelCallId", modelCallPattern),
     }),
-    page("agent", "investigation/agents"),
+    page("agent", "investigation/agents", { component: agentPage }),
     page("agent", "investigation/agents/$agentRunId", {
+      component: agentPage,
       params: idParams("agentRunId", agentRunPattern),
     }),
     // One page with two tabs; every address that used to be a separate page keeps resolving.
@@ -198,8 +221,9 @@ export function createAppRouteTree(components: RouteComponents) {
       component: identityPage,
       params: idParams("bindingId", bindingPattern),
     }),
-    page("calibration-report", "investigation/calibration"),
+    page("calibration-report", "investigation/calibration", { component: calibrationPage }),
     page("calibration-report", "investigation/calibration/$reportId", {
+      component: calibrationPage,
       params: idParams("reportId", calibrationReportPattern),
     }),
     page("search", "investigation/search", {

@@ -183,6 +183,53 @@ export async function pagedSearchFixture(
   };
 }
 
+/**
+ * A model-call list response that obeys the page contract for the window and page size the
+ * request names: a first page holds exactly `limit` calls (the server only says "more" with a
+ * full page) and the page after it holds one. Times descend from just before the window's end;
+ * call 1..3 are the fixed MODEL_CALL_ID, OTHER_MODEL_CALL_ID and THIRD_MODEL_CALL_ID.
+ */
+export function pagedModelListFixture(params: URLSearchParams) {
+  const start = params.get("start") as string;
+  const end = params.get("end") as string;
+  const limit = Number(params.get("limit"));
+  const first = !params.has("cursor");
+  const numbers = first ? Array.from({ length: limit }, (_, index) => index + 1) : [limit + 1];
+  const items = numbers.map((n) => ({
+    model_call_id: `mdl_018f2a3b-4c5d-7000-8000-${String(n).padStart(12, "0")}`,
+    request_id: "req_018f2a3b-4c5d-7000-8000-000000000001",
+    occurred_at: `${new Date(Date.parse(end) - 1000 - n).toISOString().slice(0, -1)}456Z`,
+    provider: "vercel_ai_gateway",
+    provider_model_id: "typesafe-ai/jev",
+    model_revision: "jev-1.13.0",
+    prompt_revision: "evaluation-r1",
+    question_type: "choice",
+    latest_status: n === 1 ? "success" : n === 2 ? "requested" : "error",
+    latest_reason_code:
+      n === 1 ? "MODEL_EVALUATED" : n === 2 ? "MODEL_REQUESTED" : "MODEL_PROVIDER_UNAVAILABLE",
+    latest_confidence_status: n === 1 ? "provided" : n === 2 ? "not_provided" : "unavailable",
+  }));
+  const last = items.at(-1) as (typeof items)[number];
+  const [head, fraction] = last.occurred_at.split(".");
+  const position = BigInt(Date.parse(`${head}Z`)) * 1000n + BigInt((fraction ?? "").slice(0, 6));
+  return {
+    ...SCOPE,
+    schema_version: 3,
+    start,
+    end,
+    watermark_scope: "configured_journal",
+    as_of: new Date(Date.parse(end)).toISOString(),
+    index_watermark: summaryFixture().index_watermark,
+    has_gaps: true,
+    pending_segments: 2,
+    scanned_rows: 24,
+    scanned_bytes: 2048,
+    items,
+    truncated: first,
+    next_cursor: first ? `v1.${position}.${last.model_call_id}.${"0".repeat(64)}` : null,
+  };
+}
+
 /** Whether a plan is a request-stream plan (its `event_type` filter is a terminal request event). */
 export function isStreamPlan(plan: SearchPlan): boolean {
   return plan.filters.some(

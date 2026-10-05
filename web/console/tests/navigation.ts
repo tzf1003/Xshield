@@ -1,9 +1,9 @@
 import type { Page } from "@playwright/test";
 const links: Record<string, string> = {
   request: "请求调查",
-  model: "模型调用详情",
+  model: "模型调用",
   agent: "Agent 运行",
-  "model-list": "模型调用列表",
+  "model-list": "模型调用",
   "audit-health": "审计发布状态",
   "calibration-report": "校准报告",
   grant: "身份与资格",

@@ -10,11 +10,15 @@ import {
   eventsFixture,
   evidenceFixture,
   modelCallFixture,
-  modelCallListFixture,
   summaryFixture,
   TOKEN,
 } from "./fixtures";
-import { isStreamPlan, pagedSearchFixture, streamFixture } from "./investigation-fixtures";
+import {
+  isStreamPlan,
+  pagedModelListFixture,
+  pagedSearchFixture,
+  streamFixture,
+} from "./investigation-fixtures";
 import { bindingFixture, grantFixture } from "./ledger-fixtures";
 
 export type Reply = { status?: number; body: unknown };
@@ -100,7 +104,7 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
       } else if (url.pathname.startsWith("/control/v1/auth-bindings/")) {
         reply = { body: bindingFixture(url.pathname.split("/").at(-1)) };
       } else if (url.pathname === "/control/v1/model-calls") {
-        reply = { body: modelCallListFixture(url.searchParams.has("cursor")) };
+        reply = { body: pagedModelListFixture(url.searchParams) };
       } else if (url.pathname === "/control/v1/audit/health") {
         reply = { body: auditHealthFixture() };
       } else if (url.pathname.startsWith("/control/v1/calibration-reports/")) {

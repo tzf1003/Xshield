@@ -115,16 +115,13 @@ export const navCatalog: readonly NavGroup[] = [
         // The identity-binding tab has its own address but is the same page.
         alsoMatches: ["/investigation/bindings"],
       },
-      item("/investigation/models", "模型调用列表", ["observer"], "model", [
+      item("/investigation/models", "模型调用", ["observer"], "model", [
         "model",
         "models",
-        "list",
-        "模型",
-      ]),
-      item("/investigation/models/lookup", "模型调用详情", ["observer"], "model", [
-        "model",
         "mdl",
+        "list",
         "lookup",
+        "模型",
         "详情",
       ]),
       item("/investigation/agents", "Agent 运行", ["observer"], "agent", ["agent", "agt", "运行"]),
@@ -294,7 +291,7 @@ const titles: Record<QueryKind, string> = {
   request: "请求调查",
   model: "模型调用调查",
   agent: "Agent 运行调查",
-  "model-list": "模型调用列表",
+  "model-list": "模型调用",
   "audit-health": "审计发布状态",
   "calibration-report": "校准报告调查",
   grant: "身份与资格",
@@ -315,7 +312,8 @@ const leads: Record<QueryKind, string> = {
   request: "浏览已索引的请求终态，或按请求 ID 核对判定、阶段与证据。",
   model: "核对模型调用生命周期、版本与证据引用。",
   agent: "核对 Agent 脱敏生命周期与固定事件引用。",
-  "model-list": "在固定 UTC 时间窗内分页发现模型调用；点击条目会重新读取详情并重新鉴权。",
+  "model-list":
+    "在固定 UTC 时间窗内分页发现模型调用，或按模型调用 ID 直接打开；打开条目会重新读取详情并重新鉴权。",
   "audit-health": "按需读取配置审计日志到索引的发布快照。",
   "calibration-report": "读取受限校准报告的冻结元数据与正文保留观察。",
   grant: "核对账本中资格与身份绑定的状态、代际与期限；这是数据库时刻的观察，不是准入判定。",
@@ -337,11 +335,7 @@ export function pageMeta(pathname: string): PageMeta {
 
 /** Kinds whose content is still rendered by the legacy host rather than a routed page. */
 export const legacyKinds: ReadonlySet<QueryKind> = new Set<QueryKind>([
-  "model",
-  "agent",
-  "model-list",
   "audit-health",
-  "calibration-report",
   "api-keys",
   "jobs",
 ]);

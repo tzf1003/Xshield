@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 import { mockControl } from "./control-mock";
-import { REQUEST_ID } from "./fixtures";
+import { AGENT_RUN_ID, CALIBRATION_REPORT_ID, MODEL_CALL_ID, REQUEST_ID } from "./fixtures";
 import { pickRange } from "./investigation-helpers";
 import { BINDING_ID, GRANT_ID } from "./ledger-fixtures";
 import { openView } from "./navigation";
@@ -158,6 +158,33 @@ for (const scheme of ["light", "dark"] as const) {
       expect(await serious(page)).toEqual([]);
       await page.getByRole("link", { name: BINDING_ID, exact: true }).click();
       await expect(page.getByRole("region", { name: "身份绑定记录", exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("model call list and detail", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, "/access/session");
+      await openView(page, "model-list");
+      await page.getByRole("button", { name: "自定义", exact: true }).click();
+      await page.getByLabel("开始时间（本地，含）", { exact: true }).fill("2026-09-20T00:00");
+      await page.getByLabel("结束时间（本地，不含）", { exact: true }).fill("2026-09-21T00:00");
+      await page.getByRole("button", { name: "读取模型调用", exact: true }).click();
+      await expect(page.locator(".ant-table-row")).toHaveCount(25);
+      expect(await serious(page)).toEqual([]);
+      await page.getByRole("link", { name: MODEL_CALL_ID, exact: true }).click();
+      await expect(page.getByText("#3 · model.responded · success")).toBeVisible();
+      await page.getByText("#3 · model.responded · success", { exact: true }).click();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("agent run and calibration report", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, `/investigation/agents/${AGENT_RUN_ID}`);
+      await expect(page.getByText(/agent\.tool_called/)).toBeVisible();
+      await page.getByText(/#2 · agent\.tool_called/).click();
+      expect(await serious(page)).toEqual([]);
+      await signIn(page, `/investigation/calibration/${CALIBRATION_REPORT_ID}`);
+      await expect(page.getByRole("region", { name: "校准报告详情" })).toBeVisible();
       expect(await serious(page)).toEqual([]);
     });
 

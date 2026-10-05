@@ -69,7 +69,7 @@ test.describe("command palette respects role visibility", () => {
     const pages = await optionLabels(page);
     expect(pages.some((text) => text.includes("案件工作台"))).toBe(false);
     expect(pages.some((text) => text.includes("站点状态"))).toBe(true);
-    expect(pages.some((text) => text.includes("模型调用详情"))).toBe(true);
+    expect(pages.some((text) => text.includes("模型调用"))).toBe(true);
   });
 
   test("an investigator searches events; hold-ID search additionally needs the audit role", async ({

@@ -1,14 +1,7 @@
-import {
-  CheckCircleFilled,
-  ClockCircleOutlined,
-  CloseCircleFilled,
-  HistoryOutlined,
-  QuestionCircleFilled,
-  ReloadOutlined,
-} from "@ant-design/icons";
+import { HistoryOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useParams, useRouterState } from "@tanstack/react-router";
 import { Button, Descriptions, Input, Skeleton, Tabs } from "antd";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 import { bindingPattern, grantPattern } from "../../api-contract.ts";
 import {
   bindingListPath,
@@ -25,6 +18,7 @@ import { MANUAL_REFRESH } from "../../security/query-client.ts";
 import { normalizePaste } from "../../shell/palette-classifier.ts";
 import { EventTime } from "../../ui/EventTime";
 import { ObjectId } from "../../ui/ObjectId";
+import { type PillTone, TonePill } from "../../ui/TonePill";
 import { EmptyState, ErrorState } from "../../ui/states";
 import "./investigation.css";
 import "./identity.css";
@@ -176,44 +170,28 @@ function LookupForm({
   );
 }
 
-type Tone = "allow" | "deny" | "observe" | "unknown";
-
-const statusTone: Record<string, { label: string; tone: Tone }> = {
+const statusTone: Record<string, { label: string; tone: PillTone }> = {
   active: { label: "有效", tone: "allow" },
   revoked: { label: "已撤销", tone: "deny" },
   expired: { label: "已过期", tone: "observe" },
   anonymous: { label: "匿名", tone: "unknown" },
 };
 
-const pillIcon: Record<Tone, ReactNode> = {
-  allow: <CheckCircleFilled aria-hidden="true" />,
-  deny: <CloseCircleFilled aria-hidden="true" />,
-  observe: <ClockCircleOutlined aria-hidden="true" />,
-  unknown: <QuestionCircleFilled aria-hidden="true" />,
-};
-
-/** Colour, an icon and a word: a state is never carried by colour alone. */
-function Pill({ tone, children, code }: { tone: Tone; children: ReactNode; code?: string }) {
-  return (
-    <span className={`xs-decision xs-decision--${tone}`}>
-      {pillIcon[tone]}
-      <span>{children}</span>
-      {code ? <span className="xs-decision-code mono">{code}</span> : null}
-    </span>
-  );
-}
-
 function Stored({ status }: { status: string }) {
-  const entry = statusTone[status] ?? { label: "未识别", tone: "unknown" as const };
+  const entry = statusTone[status] ?? { label: "未识别", tone: "unknown" as PillTone };
   return (
-    <Pill tone={entry.tone} code={status}>
+    <TonePill tone={entry.tone} code={status}>
       {entry.label}
-    </Pill>
+    </TonePill>
   );
 }
 
 function Expiry({ expired }: { expired: boolean }) {
-  return expired ? <Pill tone="observe">已到期</Pill> : <Pill tone="allow">未到期</Pill>;
+  return expired ? (
+    <TonePill tone="observe">已到期</TonePill>
+  ) : (
+    <TonePill tone="allow">未到期</TonePill>
+  );
 }
 
 function Observation({
@@ -338,9 +316,9 @@ function GrantView({ response, onRefresh }: { response: GrantResponse; onRefresh
                   key: "match",
                   label: "发行代际对比",
                   children: grant.binding.epoch_matches_grant ? (
-                    <Pill tone="allow">一致</Pill>
+                    <TonePill tone="allow">一致</TonePill>
                   ) : (
-                    <Pill tone="deny">不一致</Pill>
+                    <TonePill tone="deny">不一致</TonePill>
                   ),
                 },
                 {

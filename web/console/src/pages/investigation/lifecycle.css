@@ -1,0 +1,45 @@
+/* Lifecycle timeline, the model / agent / calibration detail cards. Tokens only. */
+
+.xs-lifecycle .ant-timeline-item-content {
+  min-width: 0;
+}
+
+.xs-lifecycle .ant-collapse-header {
+  flex-wrap: wrap;
+  padding-block: 4px;
+  padding-inline: 0;
+}
+
+.xs-lifecycle .ant-collapse-content-box {
+  padding-inline: 0;
+}
+
+.xs-detail-facts {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.xs-verdicts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.xs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Inside a timeline the card is narrow on a phone: labels and times wrap instead of widening it. */
+.xs-lifecycle .ant-descriptions-item-label {
+  white-space: normal;
+}
+
+.xs-times .xs-when,
+.xs-times .mono {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
