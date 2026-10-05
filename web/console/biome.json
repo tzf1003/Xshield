@@ -52,6 +52,7 @@
         "src/shell/**",
         "src/router/**",
         "src/pages/**",
+        "src/work/**",
         "src/sites/**",
         "src/ui/**"
       ],

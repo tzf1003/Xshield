@@ -55,9 +55,7 @@ export type QueryKind =
   | "binding"
   | "search"
   | "case"
-  | "access"
-  | "hold"
-  | "export"
+  | "approvals"
   | "site-list"
   | "site-config"
   | "api-keys"
@@ -77,9 +75,12 @@ const paths: Record<string, QueryKind> = {
   "/investigation/calibration": "calibration-report",
   "/investigation/search": "search",
   "/cases": "case",
-  "/evidence/access": "access",
-  "/evidence/holds": "hold",
-  "/evidence/exports": "export",
+  "/approvals": "approvals",
+  "/approvals/mine": "approvals",
+  // Retired addresses: their routes redirect into the case and approval centers (route-tree.ts).
+  "/evidence/access": "approvals",
+  "/evidence/holds": "case",
+  "/evidence/exports": "case",
   "/operations/audit": "audit-health",
   "/operations/jobs": "jobs",
 };
@@ -111,12 +112,33 @@ export function siteRoute(
   if (!siteSections.some(([part]) => part === match[2])) return null;
   return { siteId: match[1], section: match[2], creating: false };
 }
+/** The tabs of a case detail page, in display order; `evidence` is the default. */
+export const caseTabs = ["evidence", "access", "holds", "exports", "analysis"] as const;
+export type CaseTab = (typeof caseTabs)[number];
+const caseIdPattern = "case_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const jobIdPattern = "job_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+
+/** `/cases/{case_id}` and `/cases/{case_id}/{tab}`. */
+export function caseRoute(pathname: string): { caseId: string; tab: CaseTab } | null {
+  const match = new RegExp(`^/cases/(${caseIdPattern})(?:/([a-z]+))?$`).exec(pathname);
+  if (!match?.[1]) return null;
+  const tab = match[2] ?? "evidence";
+  const known = caseTabs.find((name) => name === tab);
+  return known ? { caseId: match[1], tab: known } : null;
+}
+
+/** `/cases/jobs/{job_id}`: the case list with a small job-status dialog open. */
+export function caseJobRoute(pathname: string): string | null {
+  return new RegExp(`^/cases/jobs/(${jobIdPattern})$`).exec(pathname)?.[1] ?? null;
+}
+
 export function routeTarget(pathname: string, kind: QueryKind): string | null {
   return targets[kind]?.exec(pathname)?.[1] ?? null;
 }
 export function routeQueryKind(pathname: string): QueryKind {
   if (Object.hasOwn(paths, pathname)) return paths[pathname] ?? "not-found";
   if (siteRoute(pathname)) return "site-config";
+  if (caseRoute(pathname) || caseJobRoute(pathname)) return "case";
   for (const kind of Object.keys(targets) as QueryKind[])
     if (routeTarget(pathname, kind)) return kind;
   return "not-found";

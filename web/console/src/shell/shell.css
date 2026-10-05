@@ -89,6 +89,57 @@
   outline-offset: 2px;
 }
 
+.xs-nav-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.xs-nav-label > a {
+  flex: 1;
+  min-width: 0;
+}
+
+/*
+ * The count beside 审批中心: a quiet refresh affordance until something is pending. antd stretches
+ * every menu link over the whole row (a::before, absolutely positioned); the badge must sit
+ * above that overlay or a click on it would follow the link instead of re-reading the count.
+ */
+.xs-nav-badge {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 7px;
+  color: var(--xs-sidebar-ink);
+  background: transparent;
+  border: 1px solid var(--xs-sidebar-line);
+  border-radius: 11px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.xs-nav-badge.is-pending {
+  color: var(--xs-canvas);
+  background: var(--xs-observe);
+  border-color: var(--xs-observe);
+}
+
+.xs-nav-badge:hover:not(:disabled) {
+  border-color: var(--xs-sidebar-ink);
+}
+
+.xs-nav-badge:focus-visible {
+  outline: 2px solid var(--xs-sidebar-ink);
+  outline-offset: 2px;
+}
+
 .xs-collapse.ant-btn {
   width: calc(100% - 16px);
   margin: 8px;

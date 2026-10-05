@@ -44,49 +44,16 @@ const SearchPanel = lazy(() =>
 const LedgerPanel = lazy(() =>
   import("../LedgerPanel").then((module) => ({ default: module.LedgerPanel })),
 );
-const CasePanel = lazy(() =>
-  import("../CasePanel").then((module) => ({ default: module.CasePanel })),
-);
-const EvidenceAccessPanel = lazy(() =>
-  import("../EvidenceAccessPanel").then((module) => ({ default: module.EvidenceAccessPanel })),
-);
-const EvidenceHoldPanel = lazy(() =>
-  import("../EvidenceHoldPanel").then((module) => ({ default: module.EvidenceHoldPanel })),
-);
-const ExportPanel = lazy(() =>
-  import("../ExportPanel").then((module) => ({ default: module.ExportPanel })),
-);
 const ManagementApiKeyPanel = lazy(() =>
   import("../ManagementApiKeyPanel").then((module) => ({ default: module.ManagementApiKeyPanel })),
 );
-
-/** Mounts its children the first time the page is opened and keeps them (hidden) afterwards. */
-function Workbench({ active, children }: { active: boolean; children: React.ReactNode }) {
-  const [mounted, setMounted] = useState(active);
-  if (active && !mounted) setMounted(true);
-  if (!mounted) return null;
-  return (
-    <div hidden={!active}>
-      <Deferred>{children}</Deferred>
-    </div>
-  );
-}
 
 function Deferred({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<p className="empty">正在加载页面…</p>}>{children}</Suspense>;
 }
 
 type Problem = { message: string; code: string; requestId?: string | null; status?: number };
-type Channel =
-  | "query"
-  | "events"
-  | "evidence"
-  | "artifact"
-  | "case"
-  | "access"
-  | "hold"
-  | "export"
-  | "health";
+type Channel = "query" | "events" | "evidence" | "artifact" | "health";
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
@@ -94,7 +61,6 @@ const queryLabels = {
   "calibration-report": "校准报告 ID",
   grant: "资格 ID",
   binding: "身份绑定 ID",
-  export: "导出 ID",
   jobs: "任务 ID",
 };
 const queryPrefixes = {
@@ -104,7 +70,6 @@ const queryPrefixes = {
   "calibration-report": "calr",
   grant: "grant",
   binding: "auth",
-  export: "export",
   jobs: "job",
 };
 function Failure({ problem }: { problem: Problem | null }) {
@@ -169,10 +134,6 @@ export default function LegacyHost({
     events: 0,
     evidence: 0,
     artifact: 0,
-    case: 0,
-    access: 0,
-    hold: 0,
-    export: 0,
     health: 0,
   });
   const [requestId, setRequestId] = useState("");
@@ -380,15 +341,7 @@ export default function LegacyHost({
   }
   function query(event: FormEvent) {
     event.preventDefault();
-    if (
-      queryKind === "search" ||
-      queryKind === "case" ||
-      queryKind === "access" ||
-      queryKind === "hold" ||
-      queryKind === "export" ||
-      queryKind === "model-list" ||
-      queryKind === "audit-health"
-    )
+    if (queryKind === "search" || queryKind === "model-list" || queryKind === "audit-health")
       return;
     clearResults();
     const target = requestId.trim();
@@ -596,7 +549,7 @@ export default function LegacyHost({
         <h2>{artifact || busy.artifact || problems.artifact ? "证据详情" : "事件详情"}</h2>
         {(artifact || problems.artifact || busy.artifact) && (
           <button className="text-button" onClick={clearArtifact}>
-            {queryKind === "case" ? "关闭详情" : "返回事件"}
+            返回事件
           </button>
         )}
       </div>
@@ -728,60 +681,7 @@ export default function LegacyHost({
               />
             </Deferred>
           )}
-        <Workbench active={queryKind === "case"}>
-          <CasePanel
-            active={queryKind === "case"}
-            busy={Boolean(busy.case)}
-            onInvalidate={clearResults}
-            onRun={(fetcher, apply, fail) => run("case", fetcher, apply, fail)}
-            onHistory={(jobId) => {
-              prepareSearchHistory({ kind: "job_id", value: jobId });
-            }}
-            onArtifact={openArtifact}
-            artifactDetails={
-              queryKind === "case" &&
-              (artifact || busy.artifact || problems.artifact) &&
-              eventDetails
-            }
-          />
-        </Workbench>
-        <Workbench active={queryKind === "access"}>
-          <EvidenceAccessPanel
-            active={queryKind === "access"}
-            busy={Boolean(busy.access)}
-            onInvalidate={clearResults}
-            onHistory={(accessRequestId) => {
-              prepareSearchHistory({
-                kind: "evidence_access_request_id",
-                value: accessRequestId,
-              });
-            }}
-            onRun={(fetcher, apply, fail) => run("access", fetcher, apply, fail)}
-          />
-        </Workbench>
-        <Workbench active={queryKind === "hold"}>
-          <EvidenceHoldPanel
-            active={queryKind === "hold"}
-            busy={Boolean(busy.hold)}
-            onInvalidate={clearResults}
-            onHistory={(holdId) => {
-              prepareSearchHistory({ kind: "evidence_hold_id", value: holdId });
-            }}
-            onRun={(fetcher, apply, fail) => run("hold", fetcher, apply, fail)}
-          />
-        </Workbench>
-        <Workbench active={queryKind === "export"}>
-          <ExportPanel
-            active={queryKind === "export"}
-            busy={Boolean(busy.export)}
-            onInvalidate={clearResults}
-            onRun={(fetcher, apply, fail) => run("export", fetcher, apply, fail)}
-          />
-        </Workbench>
-        {queryKind === "case" ||
-        queryKind === "hold" ||
-        queryKind === "access" ||
-        queryKind === "export" ? null : queryKind === "search" ? (
+        {queryKind === "search" ? (
           <Deferred>
             <SearchPanel
               key={searchPresetVersion}

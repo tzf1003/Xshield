@@ -8,8 +8,10 @@ import {
   envelope,
   id,
   integer,
+  list,
   nullable,
   object,
+  pagination,
   requestPattern,
   text,
   timestamp,
@@ -158,5 +160,107 @@ export function decodeExportResponse(
         result.package_bytes === null),
   );
   ensure(result.status === "pending_approval" ? result.download_count === 0 : true);
+  return result;
+}
+
+export type ExportListView = "mine" | "review";
+/** The list projection of 29.33: no purpose, decision reason or package identifiers. */
+export type ExportListItem = {
+  export_id: string;
+  case_id: string;
+  requested_by: string;
+  status: ExportStatus;
+  requested_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  expires_at: string | null;
+};
+export type ExportList = Envelope & {
+  schema_version: 3;
+  view: ExportListView;
+  as_of: string;
+  items: ExportListItem[];
+  truncated: boolean;
+  next_cursor: string | null;
+};
+
+const exportListCursorPattern = new RegExp(`^v1\\.(export_${uuid})\\.[0-9a-f]{64}(?![\\s\\S])`);
+
+/** Validate the client-visible cursor shape; the server authenticates its scope, subject and
+ * view binding anew, so a cursor conveys no approval authority. */
+export function validateExportListCursor(cursor?: string): string | undefined {
+  if (cursor === undefined) return undefined;
+  const match = typeof cursor === "string" ? exportListCursorPattern.exec(cursor) : null;
+  if (!match) throw new ApiError("CONTROL_CURSOR_INVALID");
+  return match[1];
+}
+export function validateExportListView(view: unknown): asserts view is ExportListView {
+  if (view !== "mine" && view !== "review")
+    throw new ApiError("CONTROL_EXPORT_LIST_REQUEST_INVALID");
+}
+
+/** List items carry millisecond times; only the database observation keeps microseconds. */
+function micros(value: unknown): string {
+  const result = timestamp(value);
+  ensure(/\.\d{6}Z(?![\s\S])/.test(result));
+  return result;
+}
+
+function listItem(value: unknown): ExportListItem {
+  const row = object(value);
+  const item: ExportListItem = {
+    export_id: id(row.export_id, exportPattern),
+    case_id: id(row.case_id, casePattern),
+    requested_by: actor(row.requested_by),
+    status: choice(row.status, statuses),
+    requested_at: time(row.requested_at),
+    decided_by: nullable(row.decided_by, actor),
+    decided_at: nullable(row.decided_at, time),
+    expires_at: nullable(row.expires_at, time),
+  };
+  // A pending request has neither a decider nor a decision time; every other state has both.
+  ensure(
+    item.status === "pending_approval"
+      ? item.decided_by === null && item.decided_at === null
+      : item.decided_by !== null && item.decided_at !== null,
+  );
+  ensure(item.decided_by === null || item.decided_by !== item.requested_by);
+  // 29.33: the expiry exists only after approval; a rejection or a pending request has none.
+  ensure(!["approved", "ready"].includes(item.status) || item.expires_at !== null);
+  ensure(!["pending_approval", "rejected"].includes(item.status) || item.expires_at === null);
+  const requested = Date.parse(item.requested_at);
+  const decidedAt = item.decided_at === null ? requested : Date.parse(item.decided_at);
+  ensure(requested <= decidedAt);
+  ensure(item.expires_at === null || decidedAt <= Date.parse(item.expires_at));
+  return item;
+}
+
+/** Bounded, projected metadata from a live page. Order follows the export identity, also across
+ * page boundaries; the next cursor must name the last row; a review page holds pending rows only. */
+export function decodeExportList(
+  value: unknown,
+  view: ExportListView,
+  cursor?: string,
+): ExportList {
+  const row = object(value);
+  ensure(row.schema_version === 3 && row.view === view);
+  const result: ExportList = {
+    ...envelope(row),
+    schema_version: 3,
+    view,
+    as_of: micros(row.as_of),
+    items: list(row.items, 128, listItem),
+    ...pagination(row),
+  };
+  let previous = validateExportListCursor(cursor);
+  for (const item of result.items) {
+    ensure(previous === undefined || item.export_id < previous);
+    ensure(view !== "review" || item.status === "pending_approval");
+    previous = item.export_id;
+  }
+  if (result.next_cursor !== null) {
+    const match = exportListCursorPattern.exec(result.next_cursor);
+    ensure(match && result.items.length > 0 && match[1] === previous);
+  }
   return result;
 }

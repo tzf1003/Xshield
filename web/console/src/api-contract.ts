@@ -52,6 +52,8 @@ export const messages = {
     "案件分析存储暂时不可用；写入结果可能未知，请保留原键与参数。",
   CONTROL_CASE_ANALYSIS_TARGET_UNAVAILABLE: "当前身份和范围内案件分析目标不可用。",
   CONTROL_EXPORT_ID_INVALID: "请输入规范的导出 ID。",
+  CONTROL_EXPORT_LIST_REQUEST_INVALID: "请选择有效的导出列表范围并重新读取。",
+  CONTROL_EXPORT_BUSY: "导出服务繁忙，请稍后重试。",
   CONTROL_EXPORT_BODY_INVALID: "导出请求无效，请重新填写后重试。",
   CONTROL_EXPORT_INPUT_INVALID: "导出参数无效，请核对用途与决策理由。",
   CONTROL_EXPORT_TARGET_UNAVAILABLE: "当前案件或导出目标不可用。",
