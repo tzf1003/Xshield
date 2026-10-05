@@ -26,7 +26,9 @@ use xshield_core::{
 use crate::durable_audit::AuditReadiness;
 use crate::edge_health::HealthGate;
 use crate::listener_supervisor::{ApplyError, ListenerSupervisor};
-use xshield_gateway::{MAX_CONFIG_BYTES, multi_site::GatewaySnapshot};
+use xshield_gateway::{
+    MAX_CONFIG_BYTES, edge_transport::TransportStatus, multi_site::GatewaySnapshot,
+};
 
 const SIGNATURE_HEADER: &str = APPLY_SIGNATURE_HEADER;
 // Built at compile time: `from_static` rejects an invalid name there, so no
@@ -248,6 +250,7 @@ async fn health_handler(State(state): State<ApplyState>, headers: HeaderMap) -> 
             snapshot.site_count(),
             listener_count,
             state.audit.is_ready(),
+            state.supervisor.transport_status(),
         )),
     )
         .into_response()
@@ -265,12 +268,20 @@ fn unix_now() -> u64 {
 /// Edge health as observed by this process. `audit_state` mirrors the durable
 /// audit barrier that fails admission closed, so it is `unavailable` exactly
 /// when requests are being refused for lack of durable evidence.
+///
+/// The transport fields report configuration (`tls_enabled`,
+/// `proxy_protocol_enabled`) and process-lifetime counts of connections that
+/// never reached admission: TLS handshakes that failed or timed out, trusted
+/// balancer connections refused for their PROXY header, and connections shed
+/// because every setup slot was busy. Such connections have no request, so
+/// these counters, not audit events, are their record; they reset on restart.
 fn health_body(
     tenant_id: &str,
     active_revision: u64,
     site_count: usize,
     listener_count: usize,
     audit_ready: bool,
+    transport: TransportStatus,
 ) -> serde_json::Value {
     serde_json::json!({
         "tenant_id": tenant_id,
@@ -278,7 +289,12 @@ fn health_body(
         "site_count": site_count,
         "listener_count": listener_count,
         "edge_state": if listener_count == 0 { "unavailable" } else { "healthy" },
-        "audit_state": if audit_ready { "healthy" } else { "unavailable" }
+        "audit_state": if audit_ready { "healthy" } else { "unavailable" },
+        "tls_enabled": transport.tls_enabled,
+        "tls_handshake_failures": transport.tls_handshake_failures,
+        "proxy_protocol_enabled": transport.proxy_protocol_enabled,
+        "proxy_header_rejections": transport.proxy_header_rejections,
+        "connection_setup_shed": transport.setup_shed
     })
 }
 
@@ -509,19 +525,57 @@ pub(crate) fn decode_hex(value: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    const PLAINTEXT: TransportStatus = TransportStatus {
+        tls_enabled: false,
+        tls_handshake_failures: 0,
+        proxy_protocol_enabled: false,
+        proxy_header_rejections: 0,
+        setup_shed: 0,
+    };
+
     #[test]
     fn health_reports_audit_barrier_and_listener_state() {
-        let healthy = health_body("tenant_a", 7, 2, 3, true);
+        let healthy = health_body("tenant_a", 7, 2, 3, true, PLAINTEXT);
         assert_eq!(healthy["edge_state"], "healthy");
         assert_eq!(healthy["audit_state"], "healthy");
         assert_eq!(healthy["active_revision"], 7);
-        let failed_audit = health_body("tenant_a", 7, 2, 3, false);
+        let failed_audit = health_body("tenant_a", 7, 2, 3, false, PLAINTEXT);
         assert_eq!(failed_audit["edge_state"], "healthy");
         assert_eq!(failed_audit["audit_state"], "unavailable");
         assert_eq!(
-            health_body("tenant_a", 0, 0, 0, true)["edge_state"],
+            health_body("tenant_a", 0, 0, 0, true, PLAINTEXT)["edge_state"],
             "unavailable"
         );
+    }
+
+    // Connections that fail before admission have no request and no audit
+    // event; the health body is where an operator sees them.
+    #[test]
+    fn health_reports_transport_configuration_and_setup_failures() {
+        let body = health_body(
+            "tenant_a",
+            7,
+            2,
+            3,
+            true,
+            TransportStatus {
+                tls_enabled: true,
+                tls_handshake_failures: 4,
+                proxy_protocol_enabled: true,
+                proxy_header_rejections: 2,
+                setup_shed: 1,
+            },
+        );
+        assert_eq!(body["tls_enabled"], true);
+        assert_eq!(body["tls_handshake_failures"], 4);
+        assert_eq!(body["proxy_protocol_enabled"], true);
+        assert_eq!(body["proxy_header_rejections"], 2);
+        assert_eq!(body["connection_setup_shed"], 1);
+        // A handshake failure is not an edge outage.
+        assert_eq!(body["edge_state"], "healthy");
+        let plaintext = health_body("tenant_a", 7, 2, 3, true, PLAINTEXT);
+        assert_eq!(plaintext["tls_enabled"], false);
+        assert_eq!(plaintext["tls_handshake_failures"], 0);
     }
 
     fn empty_request(revision: u64) -> GatewayApplyRequest {

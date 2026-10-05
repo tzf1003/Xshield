@@ -5,6 +5,10 @@
 //! before the selected site snapshot is exposed to the request pipeline.
 
 use crate::{ConfigError, GatewayConfig};
+use pingora::{
+    http::RequestHeader,
+    protocols::http::authority::{RawTargetAuthority, raw_target_authority},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, RwLock},
@@ -331,6 +335,97 @@ fn normalize_host(value: &str) -> Option<String> {
     valid_host(&host).then_some(host)
 }
 
+/// Why a request carries no single authority the router may use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorityConflict {
+    /// More than one `Host` header.
+    DuplicateHost,
+    /// A `Host` value or a request-target authority is not visible ASCII, or
+    /// the target's authority is ambiguous.
+    Unreadable,
+    /// `Host` and the request-target authority name different hosts.
+    Mismatch,
+}
+
+/// The authority carried by the request target itself: HTTP/2 `:authority`
+/// (kept in the URI) or an HTTP/1 absolute-form target (kept verbatim by
+/// Pingora, whose parsed URI holds only the path).
+fn target_authority(request: &RequestHeader) -> Result<Option<&str>, AuthorityConflict> {
+    if let Some(authority) = request.uri.authority() {
+        return Ok(Some(authority.as_str()));
+    }
+    match raw_target_authority(request.raw_path()) {
+        RawTargetAuthority::None => Ok(None),
+        RawTargetAuthority::Absolute { authority, .. } => std::str::from_utf8(authority)
+            .map(Some)
+            .map_err(|_| AuthorityConflict::Unreadable),
+        RawTargetAuthority::AmbiguousAuthority => Err(AuthorityConflict::Unreadable),
+    }
+}
+
+/// Selects the authority the router matches for one request.
+///
+/// HTTP/2 carries it in `:authority` and may omit `Host`; an HTTP/1
+/// absolute-form target carries it in the target, and RFC 9112 section 3.2.2
+/// makes that win over `Host`. When both are present they must name the same
+/// host (compared as [`GatewaySnapshot::route`] normalizes it: case, trailing
+/// dot and port ignored, since routing is by listener port and the origin
+/// always receives its configured `Host`), so no component can be steered by
+/// a different host claim than the router used. Pingora 0.9 already refuses
+/// duplicate `Host`, userinfo and byte-unequal `Host`/authority pairs at
+/// HTTP/1 and HTTP/2 ingress; this check keeps the router's own decision
+/// fail-closed rather than relying on that. Returns `Ok(None)` when the
+/// request names no authority at all.
+///
+/// # Errors
+/// [`AuthorityConflict`] for duplicate or unreadable `Host` headers, an
+/// unreadable or ambiguous target authority, and a `Host` that disagrees with
+/// the target authority; the caller refuses the request as unroutable.
+pub fn routing_authority(request: &RequestHeader) -> Result<Option<&str>, AuthorityConflict> {
+    let mut hosts = request.headers.get_all(http::header::HOST).iter();
+    let host = hosts.next();
+    if hosts.next().is_some() {
+        return Err(AuthorityConflict::DuplicateHost);
+    }
+    let host = host
+        .map(|value| value.to_str().map_err(|_| AuthorityConflict::Unreadable))
+        .transpose()?;
+    match (target_authority(request)?, host) {
+        (None, host) => Ok(host),
+        (Some(authority), None) => Ok(Some(authority)),
+        (Some(authority), Some(host)) => match (normalize_host(authority), normalize_host(host)) {
+            (Some(left), Some(right)) if left == right => Ok(Some(authority)),
+            _ => Err(AuthorityConflict::Mismatch),
+        },
+    }
+}
+
+/// The origin-form equivalent of a request target that carries a scheme or
+/// authority (HTTP/2, or HTTP/1 absolute-form), or `None` when the target is
+/// already origin-form (or asterisk-form). The origin must only ever see the
+/// path and query: the authority it receives is its own configured `Host`.
+#[must_use]
+pub fn origin_form_target(request: &RequestHeader) -> Option<http::Uri> {
+    let absolute = request.uri.scheme().is_some()
+        || request.uri.authority().is_some()
+        || matches!(
+            raw_target_authority(request.raw_path()),
+            RawTargetAuthority::Absolute { .. }
+        );
+    if !absolute {
+        return None;
+    }
+    let mut parts = http::uri::Parts::default();
+    parts.path_and_query = Some(
+        request
+            .uri
+            .path_and_query()
+            .cloned()
+            .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/")),
+    );
+    http::Uri::from_parts(parts).ok()
+}
+
 /// In-memory internal port lease table for an edge supervisor.
 #[derive(Default)]
 pub struct ListenerManager {
@@ -507,6 +602,131 @@ mod tests {
             .expect("valid test configuration"),
         )
         .expect("compiled test configuration")
+    }
+
+    /// An HTTP/1 request as Pingora parses it: an absolute-form target is
+    /// kept verbatim and the parsed URI holds only its path.
+    fn h1(target: &[u8], hosts: &[&[u8]]) -> RequestHeader {
+        let mut request = RequestHeader::build("GET", target, None).unwrap();
+        for host in hosts {
+            request
+                .append_header(
+                    http::header::HOST,
+                    http::HeaderValue::from_bytes(host).unwrap(),
+                )
+                .unwrap();
+        }
+        request
+    }
+
+    /// An HTTP/2 request as Pingora builds it: `:scheme` and `:authority`
+    /// live in the URI, and `Host` is optional.
+    fn h2(target: &str, hosts: &[&[u8]]) -> RequestHeader {
+        let (mut parts, ()) = http::Request::builder()
+            .uri(target)
+            .version(http::Version::HTTP_2)
+            .body(())
+            .unwrap()
+            .into_parts();
+        for host in hosts {
+            parts.headers.append(
+                http::header::HOST,
+                http::HeaderValue::from_bytes(host).unwrap(),
+            );
+        }
+        RequestHeader::from(parts)
+    }
+
+    #[test]
+    fn host_and_authority_must_name_one_host() {
+        // HTTP/1 origin-form routes by Host.
+        assert_eq!(
+            routing_authority(&h1(b"/x", &[b"a.example.com"])),
+            Ok(Some("a.example.com"))
+        );
+        assert_eq!(routing_authority(&h1(b"/x", &[])), Ok(None));
+        // HTTP/2 without Host routes by :authority.
+        assert_eq!(
+            routing_authority(&h2("https://a.example.com:6188/x", &[])),
+            Ok(Some("a.example.com:6188"))
+        );
+        // HTTP/1 absolute-form names the authority in the target itself.
+        assert_eq!(
+            routing_authority(&h1(b"http://a.example.com/x", &[])),
+            Ok(Some("a.example.com"))
+        );
+        // Both present: the same host in any case, with or without a port.
+        assert_eq!(
+            routing_authority(&h2("https://A.example.com/x", &[b"a.example.com:443"])),
+            Ok(Some("A.example.com"))
+        );
+        assert_eq!(
+            routing_authority(&h1(b"http://a.example.com./x", &[b"a.example.com"])),
+            Ok(Some("a.example.com."))
+        );
+        // Different hosts, or an authority that is not a host, are refused.
+        for request in [
+            h2("https://b.example.com/x", &[b"a.example.com"]),
+            h1(b"http://a.example.com/x", &[b"b.example.com"]),
+            h1(b"http://user@a.example.com/x", &[b"a.example.com"]),
+            h2(
+                "https://a.example.com/x",
+                &[b"a.example.com, b.example.com"],
+            ),
+        ] {
+            assert_eq!(
+                routing_authority(&request),
+                Err(AuthorityConflict::Mismatch),
+                "{request:?}"
+            );
+        }
+        assert_eq!(
+            routing_authority(&h1(b"/x", &[b"a.example.com", b"b.example.com"])),
+            Err(AuthorityConflict::DuplicateHost)
+        );
+        assert_eq!(
+            routing_authority(&h1(b"/x", &[b"a.example.com\xff"])),
+            Err(AuthorityConflict::Unreadable)
+        );
+        // The selected authority routes like the equivalent Host header.
+        let snapshot = GatewaySnapshot::compile(
+            1,
+            vec![GatewaySite::new(config("site_a", 6100), ["a.example.com".to_owned()]).unwrap()],
+        )
+        .unwrap();
+        let request = h2("https://a.example.com:443/", &[]);
+        let authority = routing_authority(&request).unwrap().unwrap();
+        assert!(snapshot.route(6100, authority).is_some());
+    }
+
+    // HTTP/2 requests and HTTP/1 absolute-form targets carry the client's
+    // scheme and authority; the origin must only ever see origin-form.
+    #[test]
+    fn upstream_targets_are_origin_form() {
+        for (request, expected) in [
+            (
+                h2("https://site-a.example/orders?id=7", &[]),
+                Some("/orders?id=7"),
+            ),
+            (h2("https://site-a.example:6188", &[]), Some("/")),
+            (
+                h1(b"http://evil.example/a/b?c", &[b"evil.example"]),
+                Some("/a/b?c"),
+            ),
+            (h1(b"/orders?id=7", &[b"site-a.example"]), None),
+            (h1(b"*", &[b"site-a.example"]), None),
+        ] {
+            assert_eq!(
+                origin_form_target(&request).map(|uri| uri.to_string()),
+                expected.map(str::to_owned),
+                "{request:?}"
+            );
+        }
+        let mut request = h1(b"http://site-a.example/x?y=1", &[b"site-a.example"]);
+        let target = origin_form_target(&request).unwrap();
+        request.set_uri(target);
+        assert_eq!(request.raw_path(), b"/x?y=1");
+        assert!(request.uri.authority().is_none());
     }
 
     #[test]
