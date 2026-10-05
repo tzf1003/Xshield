@@ -1,4 +1,11 @@
-import { type QueryKind, routeQueryKind, siteRoute, siteSections } from "../admin-routes.ts";
+import {
+  canonicalWizardStep,
+  type QueryKind,
+  routeQueryKind,
+  siteRoute,
+  siteSections,
+  wizardSteps,
+} from "../admin-routes.ts";
 
 /**
  * Navigation is a view aid only: hiding an entry is not authorization, the server authorizes
@@ -289,6 +296,7 @@ const titles: Record<QueryKind, string> = {
   search: "结构化事件检索",
   case: "案件工作台",
   approvals: "审批中心",
+  "site-list": "受保护站点",
   "site-config": "受保护站点",
   "api-keys": "管理 API Key",
   jobs: "后台任务",
@@ -309,6 +317,7 @@ const leads: Record<QueryKind, string> = {
   search: "按时间与事件字段检索，核对直接引用的历史事实。",
   case: "案件是证据工作的枢纽：证据集合、访问申请、保留锁、导出与分析任务都在案件里完成。",
   approvals: "集中处理等待你审批的原文访问、导出和策略修订，并跟踪你自己的申请。",
+  "site-list": "查看受保护站点的发布状态，搜索、筛选并进入站点配置与发布。",
   "site-config": "配置受保护网站、上游、安全入口与反向代理监听端口。",
   "api-keys": "创建和撤销绑定 tenant、site 与能力集合的 Agent API Key。",
   jobs: "按任务 ID 读取后台任务的当前状态与原因码。",
@@ -331,7 +340,6 @@ export const legacyKinds: ReadonlySet<QueryKind> = new Set<QueryKind>([
   "grant",
   "binding",
   "search",
-  "site-config",
   "api-keys",
   "jobs",
 ]);
@@ -343,7 +351,10 @@ export function breadcrumbs(pathname: string, groups: readonly NavGroup[]): Crum
   const meta = pageMeta(pathname);
   const site = siteRoute(pathname);
   if (site) {
-    const section = siteSections.find(([part]) => part === site.section)?.[1] ?? site.section;
+    const section = site.creating
+      ? (wizardSteps.find(([part]) => part === canonicalWizardStep(site.section))?.[1] ??
+        site.section)
+      : (siteSections.find(([part]) => part === site.section)?.[1] ?? site.section);
     return [
       { label: "站点" },
       site.creating

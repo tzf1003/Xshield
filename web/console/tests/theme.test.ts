@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { cssVariableName, themeCss } from "../src/theme/css.ts";
 import {
@@ -98,14 +98,32 @@ test("every text pairing meets WCAG AA (4.5:1) in light and dark", () => {
   }
 });
 
-test("the legacy and the case/approval stylesheets use tokens only and every variable they read exists", () => {
+function stylesheets(directory: URL): URL[] {
+  const found: URL[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const child = new URL(entry.name + (entry.isDirectory() ? "/" : ""), directory);
+    if (entry.isDirectory()) found.push(...stylesheets(child));
+    else if (entry.name.endsWith(".css") && entry.name !== "tokens.generated.css")
+      found.push(child);
+  }
+  return found;
+}
+
+test("every stylesheet uses tokens only and every variable it reads exists", () => {
+  const files = stylesheets(new URL("../src/", import.meta.url));
+  // The legacy sheet, the shell, the shared components and the site pages at least.
+  assert.ok(files.length >= 4, `found only ${files.length} stylesheets`);
   const defined = new Set(read("../src/theme/tokens.generated.css").match(/--xs-[a-z0-9-]+(?=:)/g));
-  for (const file of ["../src/style.css", "../src/work/work.css"]) {
-    const style = read(file).replace(/\/\*[\s\S]*?\*\//g, "");
-    assert.deepEqual(style.match(/#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/g) ?? [], [], file);
+  for (const file of files) {
+    const style = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.deepEqual(
+      style.match(/#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/g) ?? [],
+      [],
+      file.pathname,
+    );
     const used = new Set(style.match(/var\((--xs-[a-z0-9-]+)\)/g)?.map((v) => v.slice(4, -1)));
     const missing = [...used].filter((name) => !defined.has(name));
-    assert.deepEqual(missing, [], file);
+    assert.deepEqual(missing, [], file.pathname);
   }
 });
 

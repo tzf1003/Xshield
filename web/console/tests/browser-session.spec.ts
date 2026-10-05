@@ -87,6 +87,14 @@ for (const [role, links] of Object.entries(roleLinks)) {
             ? "批准并应用"
             : "应用期望版本";
       await page.getByRole("button", { name: expected, exact: true }).click();
+      // Approving and applying confirm in a dialog first (validation changes nothing and runs
+      // at once); the request that follows is the same one the page always sent.
+      if (role !== "policy_author") {
+        await page
+          .getByRole("dialog")
+          .getByRole("button", { name: role === "policy_approver" ? "确认批准" : "确认应用" })
+          .click();
+      }
       await expect(
         page.getByRole("alert").filter({ hasText: "CONTROL_SCOPE_DENIED" }),
       ).toBeVisible();

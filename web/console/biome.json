@@ -52,7 +52,9 @@
         "src/shell/**",
         "src/router/**",
         "src/pages/**",
-        "src/work/**"
+        "src/work/**",
+        "src/sites/**",
+        "src/ui/**"
       ],
       "linter": {
         "rules": {

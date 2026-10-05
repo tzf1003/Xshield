@@ -7,7 +7,7 @@ import {
   redirect,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { caseTabs, type QueryKind, siteSections } from "../admin-routes.ts";
+import { canonicalWizardStep, caseTabs, type QueryKind, siteSections } from "../admin-routes.ts";
 import {
   agentRunPattern,
   bindingPattern,
@@ -113,8 +113,33 @@ export function createAppRouteTree(components: RouteComponents) {
     page("session", "access/session", {
       component: lazyRouteComponent(() => import("../pages/SessionPage"), "SessionPage"),
     }),
-    page("site-config", "sites"),
+    page("site-list", "sites", {
+      component: lazyRouteComponent(() => import("../pages/sites/SitesListPage"), "SitesListPage"),
+    }),
+    // The new-site wizard. Its slugs are static (`new` outranks the `$siteId` pattern below); an
+    // address from before the wizard, such as /sites/new/network, redirects to the step it became.
+    page("site-config", "sites/new/$step", {
+      component: lazyRouteComponent(() => import("../pages/sites/NewSiteRoute"), "NewSiteRoute"),
+      params: {
+        parse: (raw: Record<string, string>) => {
+          const step = typeof raw.step === "string" ? canonicalWizardStep(raw.step) : null;
+          if (step === null) throw notFound();
+          return { step: raw.step as string };
+        },
+        stringify: (params: Record<string, string>) => ({ step: params.step }),
+      },
+      beforeLoad: ({ params }: { params: { step: string } }) => {
+        const step = canonicalWizardStep(params.step);
+        if (step !== null && step !== params.step) {
+          throw redirect({ to: `/sites/new/${step}`, replace: true } as never);
+        }
+      },
+    }),
     page("site-config", "sites/$siteId/$section", {
+      component: lazyRouteComponent(
+        () => import("../pages/sites/SiteDetailPage"),
+        "SiteDetailPage",
+      ),
       params: {
         parse: (raw: Record<string, string>) => {
           const { siteId, section } = raw;

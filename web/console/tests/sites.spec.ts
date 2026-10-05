@@ -81,11 +81,8 @@ test("site list opens exact site; categories and history retain draft; deep link
   await login(page);
   await expect(page.getByRole("region", { name: "受保护站点列表" })).toBeVisible();
   await expect(page.getByLabel("源站地址", { exact: true })).toHaveCount(0);
-  await page
-    .getByRole("article")
-    .filter({ hasText: "Beta 站点" })
-    .getByRole("button", { name: "打开站点" })
-    .click();
+  // The site cards became table rows; the site name is the link that opens the site.
+  await page.getByRole("link", { name: "Beta 站点", exact: true }).click();
   await expect(page).toHaveURL(/sites.site_beta.overview$/);
   await category(page, "网络").click();
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveValue("Beta 站点");
@@ -95,7 +92,7 @@ test("site list opens exact site; categories and history retain draft; deep link
   await page.goBack();
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveValue("Beta 草稿");
   await page.goForward();
-  await expect(page.getByRole("combobox", { name: "安全入口", exact: true })).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: "安全入口", exact: true })).toBeVisible();
   page.once("dialog", (d) => d.dismiss());
   await page.getByRole("button", { name: "返回站点列表" }).click();
   await expect(page).toHaveURL(/sites.site_beta.security-entry$/);
@@ -103,7 +100,7 @@ test("site list opens exact site; categories and history retain draft; deep link
   await page.reload();
   await page.getByLabel("管理凭证", { exact: true }).fill(TOKEN);
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await expect(page.getByRole("combobox", { name: "安全入口", exact: true })).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: "安全入口", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -111,15 +108,18 @@ test("new site works with populated list and refresh resets draft", async ({ pag
   await setup(page);
   await login(page);
   await page.getByRole("button", { name: "新建站点" }).click();
-  await expect(page).toHaveURL(/sites.new.network$/);
+  // The five-step wizard replaced the ten section pages; the addresses of the old ones redirect.
+  await expect(page).toHaveURL(/sites.new.basics$/);
   await page.getByLabel("站点 ID", { exact: true }).fill("fresh");
   await page.getByLabel("站点名称", { exact: true }).fill("新站点");
-  await category(page, "路由与操作").click();
+  await page.getByLabel("公网入口", { exact: true }).fill("https://fresh.example.test");
+  await page.getByRole("button", { name: "下一步", exact: true }).click();
+  await expect(page).toHaveURL(/sites.new.upstream$/);
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveCount(0);
-  await category(page, "网络").click();
+  await page.goBack();
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveValue("新站点");
   page.once("dialog", (d) => d.accept());
-  await page.getByRole("button", { name: "刷新站点" }).click();
+  await page.getByRole("button", { name: "清空并重新填写" }).click();
   await expect(page.getByLabel("站点名称", { exact: true })).toHaveValue("");
 });
 
@@ -160,7 +160,7 @@ test("unknown save outcome requires explicit identical retry", async ({ page }) 
   });
   await login(page, "/sites/site_alpha/network");
   await page.getByLabel("站点名称", { exact: true }).fill("保存后");
-  await page.getByRole("button", { name: "保存配置", exact: true }).click();
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect(page.getByRole("button", { name: "确认后原样重试" })).toBeVisible();
   expect(writes).toHaveLength(1);
   await expect(page.getByLabel("站点名称", { exact: true })).toBeDisabled();
@@ -186,7 +186,10 @@ test("config and mutation responses cannot switch the selected site", async ({ p
   mutation = true;
   await page.getByRole("button", { name: "刷新站点" }).click();
   await expect(page.getByLabel("站点名称", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "保存配置", exact: true }).click();
+  // Nothing to save until something changed: the bar with 保存草稿 appears with the first edit.
+  await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toHaveCount(0);
+  await page.getByLabel("站点名称", { exact: true }).fill("改名");
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect(page.getByRole("button", { name: "确认后原样重试" })).toBeVisible();
   await expect(page).toHaveURL(/sites.site_alpha.network$/);
 });
@@ -229,7 +232,7 @@ test("WAF category saves explicit query fragments", async ({ page }) => {
   });
   await login(page, "/sites/site_alpha/waf-limits");
   await page.getByRole("textbox", { name: /查询阻断片段/ }).fill("' or 1=1--\n<script");
-  await page.getByRole("button", { name: "保存配置", exact: true }).click();
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect.poll(() => saved.policy).toBeDefined();
   const policy = saved.policy as { waf: { blocked_query_fragments: string[] } };
   expect(policy.waf.blocked_query_fragments).toEqual(["' or 1=1--", "<script"]);
@@ -279,11 +282,25 @@ test("release page sequences validation approval apply and rollback with explici
   await expect(page.getByRole("button", { name: "应用期望版本" })).toBeDisabled();
   await page.getByRole("button", { name: "验证配置" }).click();
   await expect(page.getByRole("status")).toContainText("配置验证通过");
+  // Approving, applying and rolling back now confirm in a dialog that shows the change and what
+  // happens next; the requests, their order and their idempotency keys are unchanged.
   await page.getByRole("button", { name: "批准并应用" }).click();
+  await page
+    .getByRole("dialog", { name: "批准并应用 r1", exact: true })
+    .getByRole("button", { name: "确认批准" })
+    .click();
   await expect(page.getByRole("button", { name: "应用期望版本" })).toBeEnabled();
   await page.getByRole("button", { name: "应用期望版本" }).click();
+  await page
+    .getByRole("dialog", { name: "应用 r1", exact: true })
+    .getByRole("button", { name: "确认应用" })
+    .click();
   await expect(page.getByRole("button", { name: "回滚上一版本" })).toBeEnabled();
   await page.getByRole("button", { name: "回滚上一版本" }).click();
+  await page
+    .getByRole("dialog", { name: "回滚站点配置", exact: true })
+    .getByRole("button", { name: "确认回滚" })
+    .click();
   await expect(page.getByRole("button", { name: "回滚上一版本" })).toBeEnabled();
   expect(actions).toEqual(["validate", "approve", "apply", "rollback"]);
 });
@@ -309,8 +326,10 @@ test("manual health reads show bounded states and reject wrong site", async ({ p
   await login(page, "/sites/site_alpha/policies");
   const region = page.getByRole("region", { name: "站点运行健康" });
   await region.getByRole("button", { name: "读取健康状态" }).click();
+  await expect(region).toContainText("不可用");
   await expect(region).toContainText("unavailable");
   await region.getByRole("button", { name: "读取健康状态" }).click();
   await expect(page.getByRole("alert")).toContainText("INVALID_RESPONSE");
   await expect(region.getByText("unavailable", { exact: true })).toHaveCount(0);
+  await expect(region.getByText("不可用")).toHaveCount(0);
 });

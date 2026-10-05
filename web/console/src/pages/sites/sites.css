@@ -1,0 +1,149 @@
+/*
+ * Site pages. Colours are --xs-* variables only (tests/theme.test.ts enforces it for this file
+ * as well); layout never relies on a JavaScript breakpoint.
+ */
+
+.xs-sites-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.xs-sites-problem {
+  min-width: 0;
+}
+
+.xs-sites-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 18px;
+  background: var(--xs-surface);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-panel);
+}
+
+.xs-sites-summary dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.xs-sites-summary dl > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.xs-sites-summary dd {
+  margin: 0;
+  color: var(--xs-ink);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.xs-sites-summary dt {
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
+.xs-sites-summary p {
+  margin: 0;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-sites-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.xs-sites-tools .ant-input-affix-wrapper {
+  flex: 1 1 280px;
+  max-width: 420px;
+}
+
+.xs-sites-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.xs-sites-table {
+  min-width: 0;
+}
+
+.xs-site-row {
+  cursor: pointer;
+}
+
+.xs-site-cell,
+.xs-apply-cell,
+.xs-updated-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xs-site-name {
+  color: var(--xs-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.xs-site-origin {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-revisions {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-wrap {
+  overflow-wrap: anywhere;
+}
+
+.xs-empty-note {
+  max-width: 420px;
+  margin: 4px auto 12px;
+}
+
+.xs-sites-more {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.xs-only-narrow {
+  display: none;
+}
+
+@media (width <= 991px) {
+  .xs-only-narrow {
+    display: inline;
+  }
+}
+
+@media (width <= 760px) {
+  .xs-sites-summary dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .xs-sites-tools .ant-input-affix-wrapper {
+    flex-basis: 100%;
+    max-width: none;
+  }
+}

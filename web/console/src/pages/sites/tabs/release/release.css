@@ -1,0 +1,202 @@
+/* The release page: serving next to staged, the reasons, the actions and their dialogs. */
+
+.xs-release-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 16px;
+}
+
+.xs-release-col {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--xs-surface-subtle);
+  border-radius: var(--xs-radius-control);
+}
+
+.xs-release-col h4 {
+  margin: 0;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.xs-release-col p {
+  margin: 0;
+}
+
+.xs-release-rev {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.xs-release-rev--none {
+  color: var(--xs-ink-3);
+}
+
+.xs-release-col .ant-btn {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+.xs-release-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 10px 16px;
+  margin: 4px 0 0;
+}
+
+.xs-release-meta dt {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-release-meta dd {
+  min-width: 0;
+  margin: 2px 0 0;
+  font-size: 13px;
+}
+
+.xs-modal-facts {
+  margin: 8px 0 4px;
+}
+
+.ant-modal-body > .xs-consequences:first-child {
+  margin-top: 8px;
+}
+
+.xs-modal-section {
+  margin-top: 16px;
+}
+
+.xs-modal-note {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.xs-modal-section h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.xs-consequences,
+.xs-reasons,
+.xs-reason-fields {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.xs-consequences li,
+.xs-reasons > li {
+  margin-bottom: 6px;
+}
+
+.xs-reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.xs-reasons > li {
+  margin-bottom: 0;
+}
+
+.xs-reason-fields {
+  margin-top: 4px;
+  font-size: 13px;
+  list-style: circle;
+}
+
+.xs-release-dirty {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  background: var(--xs-surface-subtle);
+  border-radius: var(--xs-radius-control);
+  font-size: 13px;
+}
+
+.xs-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+
+.xs-action-row .ant-btn {
+  min-width: 128px;
+}
+
+.xs-action-hint {
+  flex: 1 1 240px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.xs-preview-select {
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.xs-revision-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.xs-stepup-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 0 0;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
+.ant-modal-body > .ant-alert {
+  margin-bottom: 12px;
+}
+
+.ant-modal-body > .xs-modal-section ~ .ant-alert {
+  margin-top: 16px;
+}
+
+.xs-releases > .xs-card.xs-danger {
+  border-color: color-mix(in srgb, var(--xs-deny) 45%, var(--xs-line));
+}
+
+.xs-danger h3 {
+  color: var(--xs-deny);
+}
+
+.xs-danger p {
+  margin: 0 0 12px;
+}
+
+.xs-delete-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.xs-delete-mismatch {
+  color: var(--xs-deny);
+  font-weight: 600;
+}

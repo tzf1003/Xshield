@@ -1245,6 +1245,10 @@ export type SitePolicyConfig = {
     expected_status: number;
   };
   secret_refs: SiteSecretReference[];
+  /** Depth limit of the public static-asset fallback; 0 turns it off (server default 5, max 16). */
+  static_asset_max_path_depth: number;
+  /** Whether the edge asks the origin to enforce object ownership (server default false). */
+  origin_object_access_enforced: boolean;
 };
 
 export type SiteSecretReference = {
@@ -1430,6 +1434,8 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
     },
     health_check: { path: "/health", interval_seconds: 15, timeout_ms: 2000, expected_status: 200 },
     secret_refs: [],
+    static_asset_max_path_depth: 5,
+    origin_object_access_enforced: false,
   };
   if (value === undefined) return defaults;
   const row = object(value);
@@ -1525,6 +1531,16 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
         state: choice(secret.state, ["active", "pending_rotation", "retired", "unavailable"]),
       };
     }),
+    // The server always sends both; a missing field means the server's default. Dropping them
+    // here would silently reset them to the defaults on every save.
+    static_asset_max_path_depth:
+      row.static_asset_max_path_depth === undefined
+        ? defaults.static_asset_max_path_depth
+        : integer(row.static_asset_max_path_depth, 0, 16),
+    origin_object_access_enforced:
+      row.origin_object_access_enforced === undefined
+        ? defaults.origin_object_access_enforced
+        : bool(row.origin_object_access_enforced),
   };
 }
 
@@ -1829,6 +1845,7 @@ export class ControlClient {
     idempotencyKey?: string,
     accessId?: string,
     methodOverride?: string,
+    options?: { headers?: Record<string, string>; acceptStatuses?: readonly number[] },
   ): Promise<T> {
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), 15_000);
@@ -1853,6 +1870,7 @@ export class ControlClient {
             ? {}
             : { "X-Xshield-CSRF": this.#csrfToken }),
           ...(idempotencyKey === undefined ? {} : { "Idempotency-Key": idempotencyKey }),
+          ...(options?.headers ?? {}),
         },
         ...(body === undefined ? {} : { body }),
         credentials: this.#authorization === null ? "same-origin" : "omit",
@@ -1862,7 +1880,7 @@ export class ControlClient {
         signal: combined,
       });
       status = response.status;
-      if (!response.ok) {
+      if (!response.ok && !options?.acceptStatuses?.includes(response.status)) {
         const value = await readJson(response, combined);
         const row = object(value);
         const requestId =
@@ -2963,13 +2981,27 @@ export class ControlClient {
     return this.#request(`sites/${name(siteId)}/status`, decodeSiteApply, signal);
   }
 
-  async validateSite(siteId: string, signal?: AbortSignal): Promise<SiteValidationResponse> {
+  /**
+   * Validates the persisted configuration. A failed validation is a normal answer (422 with
+   * `valid: false`), not a transport error. The key is optional: the server ignores it, the
+   * console sends it so the frozen request it displays is the request that was sent.
+   */
+  async validateSite(
+    siteId: string,
+    signal?: AbortSignal,
+    key?: string,
+  ): Promise<SiteValidationResponse> {
+    if (key !== undefined) this.#idempotencyKey(key);
     return this.#transport(
       `sites/${name(siteId)}/validate`,
       async (response, combined) =>
         decodeSiteValidation(await readJson(response, combined), response.status),
       signal,
       "",
+      key,
+      undefined,
+      undefined,
+      { acceptStatuses: [422] },
     );
   }
 
@@ -2989,8 +3021,21 @@ export class ControlClient {
     );
   }
 
-  async approveSite(siteId: string, key: string, signal?: AbortSignal): Promise<SiteApplyResponse> {
+  /**
+   * `expectedConfigDigest` pins the approval to the configuration the reviewer looked at: the
+   * server answers 409 CONTROL_SITE_APPROVAL_REVISION_MISMATCH when the staged revision is no
+   * longer that one. 64 lowercase hex characters, exactly as `config_digest` is reported.
+   */
+  async approveSite(
+    siteId: string,
+    key: string,
+    signal?: AbortSignal,
+    expectedConfigDigest?: string,
+  ): Promise<SiteApplyResponse> {
     this.#idempotencyKey(key);
+    if (expectedConfigDigest !== undefined && !/^[0-9a-f]{64}$/.test(expectedConfigDigest)) {
+      throw new ApiError("CONTROL_SITE_CONFIG_REQUEST_INVALID");
+    }
     return this.#transport(
       `sites/${name(siteId)}/approve`,
       async (response, combined) =>
@@ -2998,6 +3043,11 @@ export class ControlClient {
       signal,
       "",
       key,
+      undefined,
+      undefined,
+      expectedConfigDigest === undefined
+        ? undefined
+        : { headers: { "X-Xshield-Expected-Config-Digest": expectedConfigDigest } },
     );
   }
 

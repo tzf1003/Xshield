@@ -11,6 +11,7 @@ import { ShellActionsContext } from "./actions";
 import type { PaletteAction, PaletteResult } from "./palette-classifier.ts";
 import { isPaletteShortcut } from "./shortcut.ts";
 import { PageActionsTarget } from "./page-actions";
+import { PageTitleSetter } from "./page-title";
 import { SidebarNav } from "./SidebarNav";
 import { Topbar } from "./Topbar";
 import { MOBILE_QUERY, useMediaQuery } from "./use-media-query";
@@ -50,6 +51,7 @@ export function ShellLayout() {
   const [paletteMounted, setPaletteMounted] = useState(false);
   const [drawerMounted, setDrawerMounted] = useState(false);
   const [actionsTarget, setActionsTarget] = useState<HTMLElement | null>(null);
+  const [titleOverride, setTitleOverride] = useState<string | null>(null);
   const [searchIntent, setSearchIntent] = useState<SearchIntent | null>(null);
   const showsLegacy = legacyKinds.has(meta.kind);
   // Once mounted the legacy host stays: it owns unconfirmed writes that must survive navigation.
@@ -136,114 +138,116 @@ export function ShellLayout() {
   return (
     <ShellActionsContext.Provider value={shellActions}>
       <PageActionsTarget.Provider value={actionsTarget}>
-        <Layout className="xs-shell" hasSider={!mobile}>
-          {/* biome-ignore lint/a11y/useValidAnchor: in-page skip link; focus moves without touching router history */}
-          <a
-            className="skip-link"
-            href="#main-content"
-            onClick={(event) => {
-              event.preventDefault();
-              document.getElementById("main-content")?.focus();
-            }}
-          >
-            跳到主要内容
-          </a>
-          {!mobile && (
-            <Layout.Sider
-              className="xs-sider"
-              width={248}
-              collapsedWidth={68}
-              collapsed={collapsed}
-              trigger={null}
-              theme="dark"
-              aria-label="后台导航"
+        <PageTitleSetter.Provider value={setTitleOverride}>
+          <Layout className="xs-shell" hasSider={!mobile}>
+            {/* biome-ignore lint/a11y/useValidAnchor: in-page skip link; focus moves without touching router history */}
+            <a
+              className="skip-link"
+              href="#main-content"
+              onClick={(event) => {
+                event.preventDefault();
+                document.getElementById("main-content")?.focus();
+              }}
             >
-              <Brand collapsed={collapsed} />
-              {nav}
-              <Button
-                type="text"
-                className="xs-collapse"
-                aria-label={collapsed ? "展开导航" : "收起导航"}
-                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-                onClick={() => setCollapsed((value) => !value)}
+              跳到主要内容
+            </a>
+            {!mobile && (
+              <Layout.Sider
+                className="xs-sider"
+                width={248}
+                collapsedWidth={68}
+                collapsed={collapsed}
+                trigger={null}
+                theme="dark"
+                aria-label="后台导航"
               >
-                {!collapsed && "收起菜单"}
-              </Button>
-            </Layout.Sider>
-          )}
-          <Layout className="xs-body">
-            <Layout.Header className="xs-header">
-              <Topbar
-                crumbs={crumbs}
-                scope={scope}
-                session={sessionInfo}
-                machineLogin={session.machineLoginEnabled}
-                shortcutLabel={isMac ? "⌘K" : "Ctrl K"}
-                onOpenNav={() => {
-                  setDrawerMounted(true);
-                  setDrawerOpen(true);
-                }}
-                onOpenPalette={() => {
-                  setPaletteMounted(true);
-                  setPaletteOpen(true);
-                }}
-                onNavigate={navigate}
-                onReauthenticate={() => {
-                  void session.reauthenticate().then((failure) => {
-                    if (failure) message.warning(failure);
-                  });
-                }}
-                onLogout={() => void session.logout()}
-              />
-            </Layout.Header>
-            <Layout.Content id="main-content" tabIndex={-1} className="xs-main">
-              <div className="xs-page-head">
-                <div>
-                  <h1>{meta.title}</h1>
-                  {meta.lead && <p className="xs-lead">{meta.lead}</p>}
-                </div>
-                <div className="xs-page-actions" ref={setActionsTarget} />
-              </div>
-              {meta.kind === "not-found" ? <NotFoundPage /> : <Outlet />}
-              {legacyMounted && (
-                <Suspense fallback={showsLegacy ? <p className="empty">正在加载页面…</p> : null}>
-                  <div hidden={!showsLegacy}>
-                    <LegacyHost
-                      pathname={pathname}
-                      navigate={navigate}
-                      searchIntent={searchIntent}
-                      onSearchIntentConsumed={() => setSearchIntent(null)}
-                    />
+                <Brand collapsed={collapsed} />
+                {nav}
+                <Button
+                  type="text"
+                  className="xs-collapse"
+                  aria-label={collapsed ? "展开导航" : "收起导航"}
+                  icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                  onClick={() => setCollapsed((value) => !value)}
+                >
+                  {!collapsed && "收起菜单"}
+                </Button>
+              </Layout.Sider>
+            )}
+            <Layout className="xs-body">
+              <Layout.Header className="xs-header">
+                <Topbar
+                  crumbs={crumbs}
+                  scope={scope}
+                  session={sessionInfo}
+                  machineLogin={session.machineLoginEnabled}
+                  shortcutLabel={isMac ? "⌘K" : "Ctrl K"}
+                  onOpenNav={() => {
+                    setDrawerMounted(true);
+                    setDrawerOpen(true);
+                  }}
+                  onOpenPalette={() => {
+                    setPaletteMounted(true);
+                    setPaletteOpen(true);
+                  }}
+                  onNavigate={navigate}
+                  onReauthenticate={() => {
+                    void session.reauthenticate().then((failure) => {
+                      if (failure) message.warning(failure);
+                    });
+                  }}
+                  onLogout={() => void session.logout()}
+                />
+              </Layout.Header>
+              <Layout.Content id="main-content" tabIndex={-1} className="xs-main">
+                <div className="xs-page-head">
+                  <div>
+                    <h1>{titleOverride ?? meta.title}</h1>
+                    {titleOverride === null && meta.lead && <p className="xs-lead">{meta.lead}</p>}
                   </div>
-                </Suspense>
-              )}
-              <footer className="xs-footer">
-                历史记录用于调查，当前访问资格由服务端独立校验。
-              </footer>
-            </Layout.Content>
+                  <div className="xs-page-actions" ref={setActionsTarget} />
+                </div>
+                {meta.kind === "not-found" ? <NotFoundPage /> : <Outlet />}
+                {legacyMounted && (
+                  <Suspense fallback={showsLegacy ? <p className="empty">正在加载页面…</p> : null}>
+                    <div hidden={!showsLegacy}>
+                      <LegacyHost
+                        pathname={pathname}
+                        navigate={navigate}
+                        searchIntent={searchIntent}
+                        onSearchIntentConsumed={() => setSearchIntent(null)}
+                      />
+                    </div>
+                  </Suspense>
+                )}
+                <footer className="xs-footer">
+                  历史记录用于调查，当前访问资格由服务端独立校验。
+                </footer>
+              </Layout.Content>
+            </Layout>
+            {drawerMounted && (
+              <Suspense fallback={null}>
+                <MobileDrawer
+                  open={drawerOpen}
+                  onClose={() => setDrawerOpen(false)}
+                  nav={nav}
+                  scope={scope}
+                />
+              </Suspense>
+            )}
+            {paletteMounted && (
+              <Suspense fallback={null}>
+                <CommandPalette
+                  open={paletteOpen}
+                  onClose={() => setPaletteOpen(false)}
+                  roles={roles}
+                  siteId={siteId}
+                  onRun={runPalette}
+                />
+              </Suspense>
+            )}
           </Layout>
-          {drawerMounted && (
-            <Suspense fallback={null}>
-              <MobileDrawer
-                open={drawerOpen}
-                onClose={() => setDrawerOpen(false)}
-                nav={nav}
-                scope={scope}
-              />
-            </Suspense>
-          )}
-          {paletteMounted && (
-            <Suspense fallback={null}>
-              <CommandPalette
-                open={paletteOpen}
-                onClose={() => setPaletteOpen(false)}
-                roles={roles}
-                siteId={siteId}
-                onRun={runPalette}
-              />
-            </Suspense>
-          )}
-        </Layout>
+        </PageTitleSetter.Provider>
       </PageActionsTarget.Provider>
     </ShellActionsContext.Provider>
   );
