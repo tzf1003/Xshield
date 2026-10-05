@@ -493,7 +493,14 @@
         "源站返回 B 列表"
       ],
       "expected": "范围约束先拒绝，不洗白发行",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "scripts/test_gateway_identity.sh",
+          "test": "new_account_query_status"
+        }
+      ],
+      "gap": "AUTHENTICATED_ROOT 且发放响应资格的列表带 customer 之类选择器查询串时，edge 以 FIELD_NOT_ALLOWED 拒绝且源站未收到，已有端到端断言；UI_ACTION_REQUIRED 非资源列表带查询串的同一拒绝只写在代码里，没有端到端断言，也没有验证源站返回他人列表时不发行资格的整条链路。"
     },
     {
       "id": "GRANT-03",

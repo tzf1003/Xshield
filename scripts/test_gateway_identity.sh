@@ -645,6 +645,16 @@ login_action_ref=$(python3 -c \
     "$test_dir/new-account.body")
 [[ "$login_action_ref" == action.* ]]
 
+# A grant-issuing root list admits no query string: the caller must not choose
+# whose objects it lists, because every item it returns becomes a grant.
+new_account_query_status=$(curl -sS -o "$test_dir/new-account-query.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    'http://127.0.0.1:6288/new-account?customer=other')
+[[ "$new_account_query_status" == "403" ]]
+grep -q '"reason_code":"FIELD_NOT_ALLOWED"' "$test_dir/new-account-query.json"
+refute grep -q 'customer=other' "$test_dir/origin.log"
+
 refresh_status=$(curl -sS -D "$test_dir/refresh.headers" -o "$test_dir/refresh.body" \
     -w '%{http_code}' -X POST \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \

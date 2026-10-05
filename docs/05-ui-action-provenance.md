@@ -43,6 +43,8 @@ ActionGrant：当前主体在特定 scope、期限和使用次数内可以使用
 
 **交付给浏览器。** 注入的 loader 标签携带本次交付的页面句柄 `pgh_<UUIDv7>`，其 UUID 即页面证据 ID；句柄本身不是凭证。`GET /__xshield/v1/bootstrap?page=<句柄>`（`private, no-store`）只在同源 fetch（`Sec-Fetch-Site` 缺省或为 `same-origin`）且 WAF 会话属于拥有该页面实例的 `active` binding、epoch 一致时，返回该页仍有效的 `actions: [{action_ref, method, path_template, expires_in_seconds}]`（至多 16 条）；另一会话拿到同一句柄只会得到空列表。引用从不进入 HTML、静态资源或日志，journal 只以 `sensor_bootstrap` 阶段记录是否交付了引用。
 
+**发放响应资格的列表不接受查询串。** 列表响应里的每个条目都会成为当前 binding 的资格，所以调用者不能借查询参数（例如 `?customer=B`）选择“列出谁的对象”，哪怕源站自己存在越权缺陷：配置了 `response.resource_grant` 的 `AUTHENTICATED_ROOT` 路由收到任何查询串即以 `FIELD_NOT_ALLOWED` 拒绝，请求不转发到源站；非资源的 `UI_ACTION_REQUIRED` 路由早已按同一规则拒绝。代价是这类列表目前不能带分页等参数，需要时应由站点另设无参数入口，或等待按路由声明查询参数白名单的能力（尚未实现）。
+
 **浏览器侧出示，网关侧重验。** 探针 1.1.0 只把这些服务端引用原样放进 `X-Xshield-Action-Ref`：页面动作匹配精确的同源方法与路径（带查询串不匹配），列表 → 详情的响应派生引用按 bootstrap 下发的 `resource_grant` 提取提示从已批准列表的 JSON 响应中读取（见 07 §7.4）。网关的 `admit_ui_action` 未作任何放宽：对每个请求重新加载服务端记录并校验 binding、epoch、策略、页面证据、方法、路由、目标、字段与期限，资源路由再精确匹配 ResourceGrant，转发前删除该请求头。真实浏览器回归见 20 §20.19。
 
 ## 5.4 页面中存在代码不等于存在入口

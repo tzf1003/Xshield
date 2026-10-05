@@ -850,15 +850,26 @@ impl ProtectedIdentity {
             IdentityProofState::Verified { binding, snapshot } => {
                 let (decision, compatibility_evidence, share_source) = match class {
                     Some(AdmissionClass::AuthenticatedRoot) => (
-                        config.admit_with_proof(
-                            method,
-                            path,
-                            now,
-                            AdmissionProof::Authenticated {
-                                binding: &binding,
-                                snapshot: &snapshot,
-                            },
-                        ),
+                        if request.uri.query().is_some()
+                            && config.response_grant_operation(method, path).is_some()
+                        {
+                            // Every item a grant-issuing list returns becomes a grant for
+                            // this binding, so the caller must not choose whose objects it
+                            // lists: any query string is a selector the origin may honor
+                            // (`?customerId=B`). The same rule already holds for a
+                            // UI-action route that is not a resource route.
+                            denied_reason(config, method, path, now, ReasonCode::FieldNotAllowed)
+                        } else {
+                            config.admit_with_proof(
+                                method,
+                                path,
+                                now,
+                                AdmissionProof::Authenticated {
+                                    binding: &binding,
+                                    snapshot: &snapshot,
+                                },
+                            )
+                        },
                         None,
                         None,
                     ),
