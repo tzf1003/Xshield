@@ -1707,6 +1707,7 @@ const fn denial_status(reason: ReasonCode) -> u16 {
         ReasonCode::RequestEnvelopeInvalid
         | ReasonCode::WafQueryInvalid
         | ReasonCode::SensorBootstrapInvalid
+        | ReasonCode::SensorObservationInvalid
         | ReasonCode::RequestCryptoAuthenticationFailed
         | ReasonCode::RequestCryptoMessageExpired
         | ReasonCode::RequestCryptoMessageFromFuture => 400,
@@ -2278,6 +2279,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A malformed request is the client's mistake (400), an unknown or
+    // unauthorized one is forbidden (403). Every sensor input the edge refuses
+    // because of its shape belongs with the other malformed-input reasons; the
+    // identity script once expected 400 here while the edge answered 403, and
+    // nothing noticed because its failed assertion was ignored by bash 3.2.
+    #[test]
+    fn denial_status_separates_malformed_input_from_forbidden_requests() {
+        for reason in [
+            ReasonCode::RequestEnvelopeInvalid,
+            ReasonCode::WafQueryInvalid,
+            ReasonCode::SensorBootstrapInvalid,
+            ReasonCode::SensorObservationInvalid,
+            ReasonCode::RequestCryptoAuthenticationFailed,
+            ReasonCode::RequestCryptoMessageExpired,
+            ReasonCode::RequestCryptoMessageFromFuture,
+        ] {
+            assert_eq!(denial_status(reason), 400, "{}", reason.as_str());
+        }
+        assert_eq!(denial_status(ReasonCode::AuthRequired), 401);
+        assert_eq!(denial_status(ReasonCode::RequestCryptoReplayDetected), 409);
+        assert_eq!(denial_status(ReasonCode::RequestBodyTooLarge), 413);
+        assert_eq!(denial_status(ReasonCode::SiteRateLimitExceeded), 429);
+        assert_eq!(denial_status(ReasonCode::IdentityStoreUnavailable), 503);
+        for reason in [
+            ReasonCode::UiActionNotAvailable,
+            ReasonCode::AuthBindingMismatch,
+            ReasonCode::HostNotRouted,
+        ] {
+            assert_eq!(denial_status(reason), 403, "{}", reason.as_str());
+        }
+    }
 
     fn limited_policy(burst: u32) -> xshield_core::SitePolicyConfig {
         let mut policy = xshield_core::SitePolicyConfig::default();
