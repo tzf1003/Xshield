@@ -35,6 +35,7 @@ import {
   siteNeedsApproval,
 } from "../src/work/inbox.ts";
 import { owners, viewOperation } from "../src/work/operations.ts";
+import { isOwnRequest, requestIsOwn } from "../src/work/ownership.ts";
 import { exportLapsed, exportPill } from "../src/work/status.ts";
 import { formatTtl, ttlPresets, ttlProblem } from "../src/work/ttl.ts";
 import { ACCESS_ID, accessListFixture } from "./access-fixtures.ts";
@@ -373,4 +374,19 @@ test("a frozen operation is shown exactly as it will be resent", () => {
   );
   assert.equal(failed.phase, "unknown");
   assert.match(failed.error?.message ?? "", /超时/);
+});
+
+test("any witness that says a request is yours withholds the decision form", () => {
+  // The list it came from and the signed-in subject are independent witnesses.
+  assert.equal(requestIsOwn("alice", "alice"), true);
+  assert.equal(requestIsOwn("alice", "bob"), false);
+  assert.equal(requestIsOwn("alice", null), null);
+  assert.equal(requestIsOwn("alice", null, "others"), false);
+  assert.equal(requestIsOwn("alice", null, "mine"), true);
+  // A review list that wrongly contained the subject's own request is overruled by the subject.
+  assert.equal(requestIsOwn("alice", "alice", "others"), true);
+  // And a "mine" list is never contradicted into a decision form by a differing subject.
+  assert.equal(requestIsOwn("alice", "bob", "mine"), true);
+  assert.equal(isOwnRequest("alice", "alice"), true);
+  assert.equal(isOwnRequest("alice", null), null);
 });

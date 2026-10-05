@@ -1,8 +1,8 @@
 import { test, expect } from "@playwright/test";
 import { REQUEST_ID } from "./fixtures";
-// Phase 0 information architecture: 工作台 > 站点 > 流量与调查 > 案件与证据 > 运维与治理.
-// Labels and role rules are unchanged; only the grouping order differs from the previous shell,
-// which listed 防护/调查/案件与证据/治理 and appended the per-site entries after 权限中心.
+// Information architecture: 工作台 > 站点 > 流量与调查 > 案件与审批 > 运维与治理. Cases and
+// approvals replace the four evidence pages (案件工作台, 证据访问, 证据保留, 调查导出): 案件工作台
+// also serves the hold role, 审批中心 serves the evidence roles and the policy approver.
 const roleLinks: Record<string, string[]> = {
   observer: [
     "概览",
@@ -22,18 +22,17 @@ const roleLinks: Record<string, string[]> = {
     "资格与身份账本",
     "身份绑定",
     "案件工作台",
-    "证据访问",
-    "调查导出",
+    "审批中心",
     "运行状态",
     "权限中心",
   ],
   system_admin: ["概览", "受保护站点", "API Key", "权限中心"],
   policy_author: ["概览", "站点发布", "权限中心"],
-  policy_approver: ["概览", "站点发布", "权限中心"],
+  policy_approver: ["概览", "站点发布", "审批中心", "权限中心"],
   release_operator: ["概览", "站点发布", "权限中心"],
-  sensitive_evidence_approver: ["概览", "证据访问", "调查导出", "权限中心"],
-  sensitive_evidence_reader: ["概览", "证据访问", "调查导出", "权限中心"],
-  audit_administrator: ["概览", "证据保留", "审计发布状态", "校准报告", "权限中心"],
+  sensitive_evidence_approver: ["概览", "审批中心", "权限中心"],
+  sensitive_evidence_reader: ["概览", "审批中心", "权限中心"],
+  audit_administrator: ["概览", "案件工作台", "审计发布状态", "校准报告", "权限中心"],
 };
 for (const [role, links] of Object.entries(roleLinks)) {
   test("server role navigation: " + role, async ({ page }) => {

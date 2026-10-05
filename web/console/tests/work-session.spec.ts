@@ -3,6 +3,7 @@
  * machine-login build cannot - role-specific pages, hidden controls and the server's own verdict.
  */
 import { expect, type Page, test } from "@playwright/test";
+import { ACCESS_ID, accessInspectionFixture, accessListFixture } from "./access-fixtures";
 import {
   exportDownloadHeaders,
   exportFixture,
@@ -13,6 +14,7 @@ import { holdRecordFixture } from "./hold-fixtures";
 import { ARTIFACT_ID } from "./fixtures";
 import {
   apiCalls,
+  type Call,
   CASE_ID,
   collection,
   EXPORT_ID,
@@ -302,5 +304,216 @@ test.describe("in-place MFA step-up", () => {
     await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
     await expect(page.getByRole("button", { name: "使用企业身份登录" })).toBeVisible();
     await expect(dialog).toHaveCount(0);
+  });
+});
+
+const APPROVER = ["sensitive_evidence_approver"];
+/** The subject the synthetic session signs in as. */
+const SUBJECT = "test-subject";
+
+/** The three list sources of the approval center, whatever their query. */
+const sourcesRead = (calls: Call[]) => [
+  ...new Set(
+    apiCalls(calls)
+      .filter((call) => call.method === "GET")
+      .map((call) => call.path.split("?")[0] ?? "")
+      .filter((path) =>
+        [
+          "/control/v1/evidence-access-requests",
+          "/control/v1/exports",
+          "/control/v1/sites",
+        ].includes(path),
+      ),
+  ),
+];
+
+/** Review queues and details whose requester is the signed-in subject itself. */
+const selfRequested: Override = (url, request) => {
+  if (request.method() !== "GET") return undefined;
+  if (url.pathname === "/control/v1/evidence-access-requests") {
+    const list = accessListFixture("review");
+    for (const item of list.items) item.requested_by = SUBJECT;
+    return { body: list };
+  }
+  if (url.pathname === `/control/v1/evidence-access-requests/${ACCESS_ID}`) {
+    const detail = accessInspectionFixture();
+    detail.access_request.requested_by = SUBJECT;
+    return { body: detail };
+  }
+  if (url.pathname === "/control/v1/exports") {
+    const list = exportListFixture("review");
+    for (const item of list.items) item.requested_by = SUBJECT;
+    return { body: list };
+  }
+  if (url.pathname === `/control/v1/exports/${EXPORT_ID}`)
+    return { body: { ...exportFixture("pending_approval"), requested_by: SUBJECT } };
+  return undefined;
+};
+
+test.describe("the approval center follows the roles the server reports", () => {
+  test("an evidence approver reads the two evidence queues and never asks for the site list", async ({
+    page,
+    baseURL,
+  }) => {
+    const calls = await open(page, baseURL, "/approvals", APPROVER);
+    await expect(page.getByRole("button", { name: `处理 ${ACCESS_ID}` })).toBeVisible();
+    await expect(page.getByRole("button", { name: `处理 ${EXPORT_ID}` })).toBeVisible();
+    expect(sourcesRead(calls).sort()).toEqual([
+      "/control/v1/evidence-access-requests",
+      "/control/v1/exports",
+    ]);
+    // The policy source is not offered either: no 策略 filter, no site banner.
+    const filter = page.getByRole("radiogroup", { name: "待办类型筛选" });
+    await expect(filter.getByText("策略", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("策略修订来自站点清单")).toHaveCount(0);
+    expect(apiCalls(calls).every((call) => call.authorized && call.csrf === null)).toBe(true);
+    expect(writes(calls)).toEqual([]);
+  });
+
+  test("a policy approver reads the site list only; the revisions are located, not decided", async ({
+    page,
+    baseURL,
+  }) => {
+    const calls = await open(page, baseURL, "/approvals", ["policy_approver"]);
+    await page.getByRole("button", { name: "查看 site_alpha" }).waitFor();
+    expect(sourcesRead(calls)).toEqual(["/control/v1/sites"]);
+    const filter = page.getByRole("radiogroup", { name: "待办类型筛选" });
+    await expect(filter.getByText("原文", { exact: true })).toHaveCount(0);
+    await expect(filter.getByText("导出", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "查看 site_alpha" }).click();
+    const pane = page.getByRole("region", { name: "审批详情" });
+    await expect(pane.getByRole("link", { name: "前往站点发布页审阅并决定" })).toBeVisible();
+    expect(writes(calls)).toEqual([]);
+  });
+
+  test("a policy approver without the right to list sites is told where the decision lives", async ({
+    page,
+    baseURL,
+  }) => {
+    await open(page, baseURL, "/approvals", ["policy_approver"], (url) =>
+      url.pathname === "/control/v1/sites" ? refuse(403, "CONTROL_SCOPE_DENIED") : undefined,
+    );
+    const banner = page.getByRole("alert").filter({ hasText: "策略修订读取失败" });
+    await expect(banner).toContainText("CONTROL_SCOPE_DENIED");
+    await expect(page.getByText("读取站点清单需要 SystemAdmin")).toBeVisible();
+    await expect(page.getByText("没有读取到待办；上方列出了读取失败的来源。")).toBeVisible();
+  });
+
+  test("an investigator has no queue of their own to review, only the history of their requests", async ({
+    page,
+    baseURL,
+  }) => {
+    const calls = await open(page, baseURL, "/approvals", ["investigator"]);
+    await expect(page.getByText("待我审批只对审批角色开放")).toBeVisible();
+    expect(apiCalls(calls)).toEqual([]);
+    await page.getByRole("tab", { name: "我的申请" }).click();
+    await expect(page).toHaveURL(/\/approvals\/mine$/);
+    await expect(page.getByRole("button", { name: /^(查看并下载|详情) / }).first()).toBeVisible();
+    expect(sourcesRead(calls).sort()).toEqual([
+      "/control/v1/evidence-access-requests",
+      "/control/v1/exports",
+    ]);
+    // Only the requester's own views were read; the review queues were not.
+    expect(
+      apiCalls(calls).every(
+        (call) => call.path.includes("view=mine") || call.path.includes("/exports/"),
+      ),
+    ).toBe(true);
+  });
+
+  test("an observer is offered no approval center at all", async ({ page, baseURL }) => {
+    const calls = await open(page, baseURL, "/", ["observer"]);
+    await expect(page.getByRole("complementary", { name: "后台导航" })).toBeVisible();
+    await expect(
+      page.getByRole("complementary", { name: "后台导航" }).getByRole("link", { name: "审批中心" }),
+    ).toHaveCount(0);
+    expect(sourcesRead(calls)).toEqual([]);
+  });
+
+  test("a request filed by the signed-in subject offers no decision, and says why", async ({
+    page,
+    baseURL,
+  }) => {
+    const calls = await open(page, baseURL, "/approvals", APPROVER, selfRequested);
+    await page.getByRole("button", { name: `处理 ${ACCESS_ID}` }).click();
+    const pane = page.getByRole("region", { name: "审批详情" });
+    await expect(pane.getByText("这是你自己提交的申请")).toBeVisible();
+    await expect(pane).toContainText("职责分离");
+    await expect(pane.getByLabel("审批理由")).toHaveCount(0);
+    await expect(pane.getByRole("button", { name: "批准", exact: true })).toHaveCount(0);
+    await expect(pane.getByRole("button", { name: "拒绝", exact: true })).toHaveCount(0);
+
+    await page.getByRole("button", { name: `处理 ${EXPORT_ID}` }).click();
+    await expect(pane.getByText("这是你自己提交的导出申请")).toBeVisible();
+    await expect(pane.getByLabel("审批理由")).toHaveCount(0);
+    await expect(pane.getByRole("button", { name: "批准", exact: true })).toHaveCount(0);
+    await expect(pane.getByRole("button", { name: "拒绝", exact: true })).toHaveCount(0);
+    expect(writes(calls)).toEqual([]);
+  });
+
+  test("approving an export waits for MFA, then repeats the same frozen request", async ({
+    page,
+    baseURL,
+    context,
+  }) => {
+    const session: Record<string, unknown> = { step_up_valid: false };
+    const calls = await open(
+      page,
+      baseURL,
+      "/approvals",
+      APPROVER,
+      (url, request) =>
+        url.pathname === `/control/v1/exports/${EXPORT_ID}/approve` && request.method() === "POST"
+          ? session.step_up_valid
+            ? undefined
+            : refuse(403, "CONTROL_EXPORT_STEP_UP_REQUIRED")
+          : undefined,
+      session,
+    );
+    await context.route("**/__reauth**", async (route) => {
+      session.step_up_valid = true;
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<!doctype html><title>idp</title><script>location.replace("/")</script>',
+      });
+    });
+    await page.getByRole("button", { name: `处理 ${EXPORT_ID}` }).click();
+    const pane = page.getByRole("region", { name: "审批详情" });
+    await pane.getByLabel("审批理由").fill("独立复核通过");
+    await pane.getByRole("button", { name: "批准", exact: true }).click();
+
+    const dialog = page.getByRole("dialog", { name: "需要 MFA 再认证" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("原请求（相同的幂等键与内容）会自动重新发送");
+    expect(writes(calls)).toHaveLength(1);
+
+    const popup = page.waitForEvent("popup");
+    await dialog.getByRole("button", { name: "在新窗口验证" }).click();
+    await (await popup).waitForEvent("close");
+    await expect(page.getByText("已批准导出申请")).toBeVisible();
+    await expect(dialog).toHaveCount(0);
+
+    // The session's own re-authentication start is also a POST; the decision is what repeats.
+    const posts = writes(calls).filter((call) => call.path.endsWith("/approve"));
+    expect(posts).toHaveLength(2);
+    const [first, second] = posts;
+    expect(second).toEqual(first);
+    expect(first).toMatchObject({
+      path: `/control/v1/exports/${EXPORT_ID}/approve`,
+      body: { reason: "独立复核通过" },
+      csrf: "a".repeat(64),
+    });
+    expect(first?.key).toMatch(/^[A-Za-z0-9_.:-]{16,128}$/);
+    // A decision that went through leaves no stale reason in the form.
+    await expect(pane.getByLabel("审批理由")).toHaveValue("");
+  });
+
+  test("the retired evidence-access address redirects with the same hint in cookie mode", async ({
+    page,
+    baseURL,
+  }) => {
+    await open(page, baseURL, "/evidence/access", APPROVER);
+    await expect(page).toHaveURL(/\/approvals\?moved=access$/);
+    await expect(page.getByText("“证据访问”已并入审批中心")).toBeVisible();
   });
 });

@@ -18,6 +18,8 @@ import {
   requestPattern,
 } from "../api-contract.ts";
 import { casePattern } from "../cases.ts";
+import { accessPattern } from "../evidence-access.ts";
+import { exportPattern } from "../exports.ts";
 import type { SessionRuntime } from "../security/runtime.ts";
 
 export type RouterContext = { runtime: SessionRuntime };
@@ -41,6 +43,16 @@ export type PageRoute = Readonly<{ kind: QueryKind; path: string; route: AnyRout
 const movedTo = (to: string, moved: string) => () => {
   throw redirect({ to, search: { moved }, replace: true } as never);
 };
+
+/** `?item=` selects one access request or export; `?moved=` carries a retired address's hint. */
+const approvalsSearch = (search: Record<string, unknown>) => ({
+  item:
+    typeof search.item === "string" &&
+    (accessPattern.test(search.item) || exportPattern.test(search.item))
+      ? search.item
+      : undefined,
+  moved: search.moved === "access" ? "access" : undefined,
+});
 
 const siteIdPattern = /^[A-Za-z0-9_.-]{1,128}(?![\s\S])/;
 const sectionNames: readonly string[] = siteSections.map(([part]) => part);
@@ -190,7 +202,21 @@ export function createAppRouteTree(components: RouteComponents) {
         "CaseDetailPage",
       ),
     }),
-    page("access", "evidence/access"),
+    page("approvals", "approvals", {
+      component: lazyRouteComponent(
+        () => import("../pages/approvals/ApprovalsPage"),
+        "ApprovalsPage",
+      ),
+      validateSearch: approvalsSearch,
+    }),
+    page("approvals", "approvals/mine", {
+      component: lazyRouteComponent(
+        () => import("../pages/approvals/ApprovalsPage"),
+        "ApprovalsPage",
+      ),
+      validateSearch: approvalsSearch,
+    }),
+    page("approvals", "evidence/access", { beforeLoad: movedTo("/approvals", "access") }),
     // Retired addresses: the pages moved into the case center, so the old bookmarks keep working.
     page("case", "evidence/holds", { beforeLoad: movedTo("/cases", "holds") }),
     page("case", "evidence/exports", { beforeLoad: movedTo("/cases", "exports") }),

@@ -56,8 +56,10 @@ const valid = [
   `/cases/${ids.case}`,
   ...caseTabs.map((tab) => `/cases/${ids.case}/${tab}`),
   `/cases/jobs/${ids.job}`,
+  "/approvals",
+  "/approvals/mine",
   "/evidence/access",
-  // Retired addresses still resolve (to a redirect into the case center).
+  // Retired addresses still resolve (to a redirect into the case and approval centers).
   "/evidence/holds",
   "/evidence/exports",
   "/operations/audit",
@@ -93,6 +95,9 @@ const malformed = [
   `/cases/jobs/${ids.case}`,
   `/cases/jobs/${ids.job}/extra`,
   "/cases/case_123",
+  "/approvals/other",
+  `/approvals/${ids.case}`,
+  "/approvals/mine/extra",
 ];
 
 test("every current path resolves to the same page kind as the hand-written router did", () => {
@@ -113,7 +118,7 @@ test("the router tolerates a trailing slash; the strict oracle the shell consult
   // TanStack matches `/cases/` to the cases route and, with `trailingSlash: "preserve"`, leaves
   // the URL alone. The shell asks routeQueryKind() before rendering and shows "page not found",
   // exactly as the hand-written router did (e2e: tests/shell.spec.ts).
-  for (const path of ["/cases/", "/sites/", "/investigation/requests/"]) {
+  for (const path of ["/cases/", "/sites/", "/investigation/requests/", "/approvals/"]) {
     assert.notEqual(routerKind(path), "not-found", `router is lenient for ${path}`);
     assert.equal(routeQueryKind(path), "not-found", `oracle is strict for ${path}`);
   }
@@ -136,7 +141,7 @@ test("every page kind the shell knows is reachable through exactly the declared 
     "calibration-report",
     "search",
     "case",
-    "access",
+    "approvals",
     "audit-health",
     "jobs",
   ] as QueryKind[]) {
@@ -182,6 +187,49 @@ test("the retired evidence addresses redirect into the case center with a one-ti
       { to: "/cases", search: { moved }, replace: true },
       from,
     );
+  }
+});
+
+test("the retired access address redirects to the approval center with its hint", () => {
+  const { beforeLoad } = optionsOf("evidence/access");
+  assert.ok(beforeLoad);
+  let thrown: unknown;
+  try {
+    beforeLoad();
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(isRedirect(thrown));
+  assert.deepEqual(
+    { to: thrown.options.to, search: thrown.options.search, replace: thrown.options.replace },
+    { to: "/approvals", search: { moved: "access" }, replace: true },
+  );
+});
+
+test("the approval center takes one selected item and one hint from the query, nothing else", () => {
+  const access = `access_${uuid(8)}`;
+  const exportId = `export_${uuid(9)}`;
+  for (const path of ["approvals", "approvals/mine"]) {
+    const { validateSearch } = optionsOf(path);
+    assert.ok(validateSearch, path);
+    assert.deepEqual(validateSearch({ item: access, x: 1 }), { item: access, moved: undefined });
+    assert.deepEqual(validateSearch({ item: exportId }), { item: exportId, moved: undefined });
+    assert.deepEqual(validateSearch({ moved: "access" }), { item: undefined, moved: "access" });
+    for (const item of [
+      "",
+      `${access}\n`,
+      access.toUpperCase(),
+      `case_${uuid(7)}`,
+      "__proto__",
+      1,
+      null,
+      [access],
+    ]) {
+      assert.equal(validateSearch({ item }).item, undefined, String(item));
+    }
+    for (const moved of ["holds", "__proto__", 1, null]) {
+      assert.equal(validateSearch({ moved }).moved, undefined, String(moved));
+    }
   }
 });
 

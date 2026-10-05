@@ -36,8 +36,3 @@ export function useRoles(): Roles {
     machine: state.session === null,
   };
 }
-
-/** Whether this request was filed by the signed-in subject; unknown without a browser session. */
-export function isOwnRequest(requester: string, subject: string | null): boolean | null {
-  return subject === null ? null : requester === subject;
-}

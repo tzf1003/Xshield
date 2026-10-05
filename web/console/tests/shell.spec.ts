@@ -57,9 +57,9 @@ test.describe("command palette", () => {
     await signIn(page, "/");
     await page.keyboard.press("Control+KeyK");
     await palette(page).fill(CASE_ID);
-    await expect(page.getByRole("option")).toHaveText([/打开案件工作台/]);
+    await expect(page.getByRole("option")).toHaveText([/打开案件详情/]);
     await page.keyboard.press("Enter");
-    await expect(page).toHaveURL(/\/cases$/);
+    await expect(page).toHaveURL(new RegExp(`/cases/${CASE_ID}$`));
     await expect(page.getByRole("heading", { name: "案件工作台", exact: true })).toBeVisible();
 
     await page.keyboard.press("Control+KeyK");

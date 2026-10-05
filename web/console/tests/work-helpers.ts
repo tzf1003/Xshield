@@ -123,6 +123,36 @@ export function collection(caseId = CASE_ID) {
   return body;
 }
 
+/** A site list with one revision awaiting a policy decision and one that is not. */
+export function sitesPage() {
+  const site = (id: string, name: string, requiresApproval: boolean) => ({
+    site_id: id,
+    display_name: name,
+    public_origin: "https://example.test",
+    listen_port: 6100,
+    security_entry: "public",
+    sensor_enabled: false,
+    policy_revision: "policy-v1",
+    status: "active",
+    revision: 3,
+    config_digest: "a".repeat(64),
+    updated_by: "synthetic-author",
+    updated_at: "2026-09-20T09:00:00.000Z",
+    desired_revision: 3,
+    active_revision: 2,
+    apply_id: "apply_fixture",
+    apply_state: requiresApproval ? "pending" : "active",
+    reason_code: requiresApproval ? "CONTROL_SITE_APPROVAL_REQUIRED" : "EDGE_APPLY_CONFIRMED",
+    requires_approval: requiresApproval,
+  });
+  return {
+    ...ENVELOPE,
+    truncated: false,
+    next_cursor: null,
+    sites: [site("site_alpha", "Alpha 站点", true), site("site_beta", "Beta 站点", false)],
+  };
+}
+
 /** A hold history for one case; every record belongs to that case, as the contract requires. */
 export function holds(caseId: string, items = holdCollectionFixture().items) {
   const base = holdCollectionFixture();
@@ -148,6 +178,7 @@ function defaults(url: URL, method: string, body: Record<string, unknown> | null
       return { body: exportListFixture(view) };
     }
     if (/^\/control\/v1\/exports\/export_[^/]+$/.test(path)) return { body: exportFixture() };
+    if (path === "/control/v1/sites") return { body: sitesPage() };
     match = /^\/control\/v1\/jobs\/(job_[^/]+)$/.exec(path);
     if (match?.[1]) return { body: jobBody(CASE_ID, match[1]) };
     match = /^\/control\/v1\/artifacts\/(artifact_[^/]+)$/.exec(path);

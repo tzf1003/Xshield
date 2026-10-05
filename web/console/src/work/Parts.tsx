@@ -1,10 +1,10 @@
 import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
-import { Alert, Button, Skeleton, Space, Tag } from "antd";
+import { Alert, Button, Skeleton, Space } from "antd";
 import { type HTMLAttributes, type ReactNode, useEffect, useState } from "react";
 import { StaleSessionError } from "../security/errors.ts";
 import { type ErrorView, errorView } from "./errors.ts";
 import { formatUtc, shortId } from "./format.ts";
-import type { Pill } from "./status.ts";
+import type { Pill, Tone } from "./status.ts";
 
 /** A stable code, status and request ID next to the safe message; never server-written text. */
 export function ErrorNotice({
@@ -81,10 +81,27 @@ export function IdChip({
 
 /** One state vocabulary everywhere: the same word, colour and explanation for the same state. */
 export function StatePill({ pill }: { pill: Pill }) {
+  return <TonePill tone={pill.tone} label={pill.label} hint={pill.hint} />;
+}
+
+/**
+ * A small coloured label drawn from the console's own palette tokens (see work.css), so that its
+ * contrast is the one the theme guarantees in both light and dark. antd's preset tag colours are
+ * not used: they fall below 4.5:1 on several states.
+ */
+export function TonePill({
+  tone,
+  label,
+  hint,
+}: {
+  tone: Tone | "brand";
+  label: string;
+  hint?: string;
+}) {
   return (
-    <Tag color={pill.tone} title={pill.hint} className="xs-w-pill">
-      {pill.label}
-    </Tag>
+    <span className={`xs-w-pill is-${tone}`} title={hint}>
+      {label}
+    </span>
   );
 }
 
@@ -95,13 +112,41 @@ export function StatePill({ pill }: { pill: Pill }) {
 export const labelled = (label: string) => () =>
   ({ "data-label": label }) as HTMLAttributes<HTMLElement>;
 
-/** A UTC time with the exact instant on hover. */
-export function Time({ value }: { value: string | null | undefined }) {
+/**
+ * A UTC time with the exact instant on hover. `stacked` breaks it into date and time on two lines
+ * for narrow table columns; the text content is unchanged.
+ */
+export function Time({
+  value,
+  stacked = false,
+}: {
+  value: string | null | undefined;
+  stacked?: boolean;
+}) {
   if (!value) return <span>—</span>;
+  const text = formatUtc(value);
+  if (!stacked) {
+    return (
+      <time dateTime={value} title={value}>
+        {text}
+      </time>
+    );
+  }
+  const split = text.indexOf(" ");
   return (
-    <time dateTime={value} title={value}>
-      {formatUtc(value)}
+    <time dateTime={value} title={value} className="xs-w-time-stack">
+      <span>{split < 0 ? text : text.slice(0, split)}</span>{" "}
+      <span>{split < 0 ? "" : text.slice(split + 1)}</span>
     </time>
+  );
+}
+
+/** A shortened ID for table cells: not interactive; the full value is the tooltip. */
+export function IdText({ id }: { id: string }) {
+  return (
+    <code className="mono xs-w-idtext" title={id}>
+      {shortId(id)}
+    </code>
   );
 }
 
@@ -216,7 +261,13 @@ export function usePager(scope: string): PagerState {
     scope,
     stack: [undefined],
   });
-  const stack = state.scope === scope ? state.stack : [undefined];
+  let stack = state.stack;
+  if (state.scope !== scope) {
+    // The scope changed: forget the old stack for good (not just for this render), so going
+    // back to an earlier scope starts on its first page instead of resurrecting a stale cursor.
+    stack = [undefined];
+    setState({ scope, stack });
+  }
   return {
     cursor: stack[stack.length - 1],
     index: stack.length - 1,

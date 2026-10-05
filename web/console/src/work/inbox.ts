@@ -84,7 +84,7 @@ export function siteApprovals(sites: readonly SiteListItem[]): InboxItem[] {
 }
 
 /** Newest first; rows without a usable time sink to the end; ties break on the key. */
-export function mergeInbox(...groups: readonly (readonly InboxItem[])[]): InboxItem[] {
+export function mergeInbox<T extends InboxItem>(...groups: readonly (readonly T[])[]): T[] {
   return groups.flat().sort((left, right) => {
     const a = Number.isFinite(left.atMs) ? left.atMs : Number.NEGATIVE_INFINITY;
     const b = Number.isFinite(right.atMs) ? right.atMs : Number.NEGATIVE_INFINITY;
@@ -93,7 +93,10 @@ export function mergeInbox(...groups: readonly (readonly InboxItem[])[]): InboxI
   });
 }
 
-export function filterInbox(items: readonly InboxItem[], kind: InboxKind | "all"): InboxItem[] {
+export function filterInbox<T extends InboxItem>(
+  items: readonly T[],
+  kind: InboxKind | "all",
+): T[] {
   return kind === "all" ? [...items] : items.filter((item) => item.kind === kind);
 }
 

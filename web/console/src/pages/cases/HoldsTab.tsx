@@ -86,7 +86,7 @@ export function HoldsTab({ caseId, members }: { caseId: string; members: readonl
       onCell: labelled("释放"),
       render: (_, hold) =>
         hold.released_at === null ? (
-          "未释放"
+          <span className="xs-w-nowrap">未释放</span>
         ) : (
           <div>
             <div className="xs-w-text">{hold.released_reason}</div>

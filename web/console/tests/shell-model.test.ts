@@ -40,10 +40,10 @@ const all = ["observer", "investigator", "audit_administrator", "system_admin"];
 const labels = (roles: string[] | null, siteId: string | null = "site_demo") =>
   flattenNav(visibleNav(roles, siteId)).map((entry) => entry.label);
 
-test("navigation keeps every existing label and URL, regrouped into the Phase 0 sections", () => {
+test("navigation is regrouped into the console sections; cases and approvals replace four pages", () => {
   assert.deepEqual(
     navCatalog.map((group) => group.label),
-    ["工作台", "站点", "流量与调查", "案件与证据", "运维与治理"],
+    ["工作台", "站点", "流量与调查", "案件与审批", "运维与治理"],
   );
   assert.deepEqual(
     flattenNav(navCatalog).map((entry) => [entry.label, entry.href]),
@@ -58,9 +58,7 @@ test("navigation keeps every existing label and URL, regrouped into the Phase 0 
       ["模型调用详情", "/investigation/models/lookup"],
       ["Agent 运行", "/investigation/agents"],
       ["案件工作台", "/cases"],
-      ["证据访问", "/evidence/access"],
-      ["证据保留", "/evidence/holds"],
-      ["调查导出", "/evidence/exports"],
+      ["审批中心", "/approvals"],
       ["运行状态", "/operations/jobs"],
       ["审计发布状态", "/operations/audit"],
       ["校准报告", "/investigation/calibration"],
@@ -93,21 +91,23 @@ test("role visibility matches the previous shell for every role", () => {
     "资格与身份账本",
     "身份绑定",
     "案件工作台",
-    "证据访问",
-    "调查导出",
+    "审批中心",
     "运行状态",
     "权限中心",
   ]);
   assert.deepEqual(labels(["system_admin"]), ["概览", "受保护站点", "API Key", "权限中心"]);
-  for (const role of ["policy_author", "policy_approver", "release_operator"]) {
+  for (const role of ["policy_author", "release_operator"]) {
     assert.deepEqual(labels([role]), ["概览", "站点发布", "权限中心"], role);
   }
+  // A policy approver also finds site revisions awaiting a decision in the approval center.
+  assert.deepEqual(labels(["policy_approver"]), ["概览", "站点发布", "审批中心", "权限中心"]);
   for (const role of ["sensitive_evidence_reader", "sensitive_evidence_approver"]) {
-    assert.deepEqual(labels([role]), ["概览", "证据访问", "调查导出", "权限中心"], role);
+    assert.deepEqual(labels([role]), ["概览", "审批中心", "权限中心"], role);
   }
+  // Holds moved into the case detail: the audit role reaches them through the case center.
   assert.deepEqual(labels(["audit_administrator"]), [
     "概览",
-    "证据保留",
+    "案件工作台",
     "审计发布状态",
     "校准报告",
     "权限中心",
@@ -162,7 +162,7 @@ test("page titles, leads and breadcrumbs", () => {
   const groups = visibleNav(all, "site_demo");
   assert.deepEqual(breadcrumbs("/", groups), [{ label: "运行概览" }]);
   assert.deepEqual(breadcrumbs("/cases", groups), [
-    { label: "案件与证据" },
+    { label: "案件与审批" },
     { label: "案件工作台" },
   ]);
   assert.deepEqual(breadcrumbs("/sites/site_a/network", groups), [
@@ -236,9 +236,18 @@ test("search-capable IDs are offered as event-search presets, others open their 
     paletteSearch(id, null, null)
       .results.filter((result) => result.action.type === "navigate")
       .map((result) => result.action);
-  assert.deepEqual(page(ids.case), [{ type: "navigate", to: "/cases" }]);
-  assert.deepEqual(page(ids.export), [{ type: "navigate", to: "/evidence/exports" }]);
-  assert.deepEqual(page(ids.artifact), [{ type: "navigate", to: "/evidence/access" }]);
+  // A case opens its detail page; an access request or export opens the approval center with
+  // that item selected (the item travels as the URL query, never spliced into the path).
+  assert.deepEqual(page(ids.case), [{ type: "navigate", to: `/cases/${ids.case}` }]);
+  assert.deepEqual(page(ids.access), [
+    { type: "navigate", to: "/approvals", search: { item: ids.access } },
+  ]);
+  assert.deepEqual(page(ids.export), [
+    { type: "navigate", to: "/approvals", search: { item: ids.export } },
+  ]);
+  // A job opens the small status dialog of the case center; evidence is reached through a case.
+  assert.deepEqual(page(ids.job), [{ type: "navigate", to: `/cases/jobs/${ids.job}` }]);
+  assert.deepEqual(page(ids.artifact), [{ type: "navigate", to: "/cases" }]);
   assert.ok(
     paletteSearch(ids.trace, null, null).results[0]?.label.startsWith("在事件检索中查找"),
     "the offered action is named as such",
@@ -269,7 +278,7 @@ test("the palette never offers what the roles hide", () => {
     both.results.map((result) =>
       result.action.type === "search" ? result.action.preset.kind : "page",
     ),
-    ["event_id", "evidence_hold_id", "page"],
+    ["event_id", "evidence_hold_id"],
   );
   // Pages are filtered the same way.
   const pages = paletteSearch("", ["system_admin"], null).results.map((result) => result.label);
@@ -292,7 +301,14 @@ test("fuzzy page search ranks exact, prefix, substring and subsequence matches",
   assert.equal(top("search"), "结构化检索");
   assert.equal(top("api"), "API Key");
   assert.equal(top("权限"), "权限中心");
-  assert.equal(top("导出"), "调查导出");
+  assert.equal(top("审批"), "审批中心");
+  // Exports are requested in a case and approved in the approval center: both are offered.
+  assert.deepEqual(
+    paletteSearch("导出", null, null)
+      .results.map((result) => result.label)
+      .sort(),
+    ["审批中心", "案件工作台"].sort(),
+  );
   assert.equal(paletteSearch("zzzz", null, null).results.length, 0);
 });
 

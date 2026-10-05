@@ -1,5 +1,6 @@
 import { Menu, type MenuProps } from "antd";
 import type { MouseEvent } from "react";
+import { ApprovalNavBadge } from "./ApprovalNavBadge";
 import { navIcon } from "./icons";
 import { activeItem, flattenNav, type NavGroup } from "./nav-model.ts";
 
@@ -31,15 +32,18 @@ export function SidebarNav({ groups, pathname, collapsed = false, onNavigate }: 
       icon: navIcon(entry.icon),
       title: entry.label,
       label: (
-        <a
-          href={entry.href}
-          aria-current={current?.key === entry.key ? "page" : undefined}
-          onClick={(event) => {
-            if (!isModified(event)) event.preventDefault();
-          }}
-        >
-          {entry.label}
-        </a>
+        <span className="xs-nav-label">
+          <a
+            href={entry.href}
+            aria-current={current?.key === entry.key ? "page" : undefined}
+            onClick={(event) => {
+              if (!isModified(event)) event.preventDefault();
+            }}
+          >
+            {entry.label}
+          </a>
+          {entry.badge === "approvals" && !collapsed && <ApprovalNavBadge />}
+        </span>
       ),
     })),
   }));

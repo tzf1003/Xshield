@@ -25,7 +25,7 @@ export type QueryKind =
   | "binding"
   | "search"
   | "case"
-  | "access"
+  | "approvals"
   | "site-config"
   | "api-keys"
   | "jobs"
@@ -44,8 +44,10 @@ const paths: Record<string, QueryKind> = {
   "/investigation/calibration": "calibration-report",
   "/investigation/search": "search",
   "/cases": "case",
-  "/evidence/access": "access",
-  // Retired addresses: their routes redirect into the case center (see route-tree.ts).
+  "/approvals": "approvals",
+  "/approvals/mine": "approvals",
+  // Retired addresses: their routes redirect into the case and approval centers (route-tree.ts).
+  "/evidence/access": "approvals",
   "/evidence/holds": "case",
   "/evidence/exports": "case",
   "/operations/audit": "audit-health",

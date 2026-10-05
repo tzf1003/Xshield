@@ -8,7 +8,8 @@ import { textProblem, utf8Length } from "./format.ts";
 import { owners } from "./operations.ts";
 import { ErrorNotice, Facts, Field, IdChip, LoadState, StatePill, Time } from "./Parts";
 import { domains, specs } from "./queries.ts";
-import { isOwnRequest, role, useRoles } from "./roles.ts";
+import { requestIsOwn } from "./ownership.ts";
+import { role, useRoles } from "./roles.ts";
 import { exportLapsed, exportPill } from "./status.ts";
 import { useWrite } from "./use-write.ts";
 import { FrozenOperation } from "./WriteDialog";
@@ -39,11 +40,7 @@ export function ExportDetail({
   const query = useGuardedQuery(specs.exportDetail(exportId));
   const { has, subject } = useRoles();
   const item = query.data;
-  const own = item
-    ? ownership
-      ? ownership === "mine"
-      : isOwnRequest(item.requested_by, subject)
-    : null;
+  const own = item ? requestIsOwn(item.requested_by, subject, ownership) : null;
   const download = useAttachmentDownload({
     target: exportId,
     fetch: (client, signal) => {
@@ -96,26 +93,6 @@ export function ExportDetail({
               ["案件", <IdChip key="c" id={item.case_id} label="案件 ID" />],
               ["类型", "仅元数据（案件与证据目录，不含证据正文）"],
               ["申请时间", <Time key="r" value={item.created_at} />],
-              ["决策人", item.decided_by ?? "—"],
-              ["决策时间", <Time key="dt" value={item.decided_at} />],
-              [
-                "决策理由",
-                item.decision_reason ? (
-                  <span key="d" className="xs-w-text">
-                    {item.decision_reason}
-                  </span>
-                ) : (
-                  "—"
-                ),
-              ],
-              ["到期", <Time key="e" value={item.expires_at} />],
-              [
-                "包",
-                item.package_bytes === null
-                  ? "尚未生成"
-                  : `${item.package_bytes.toLocaleString("en-US")} 字节`,
-              ],
-              ["已领取", `${item.download_count} / ${CLAIM_LIMIT} 次`],
             ]}
           />
           {item.status === "ready" && (
@@ -181,6 +158,35 @@ export function ExportDetail({
           )}
           {item.status === "pending_approval" && own !== true && has(role.approver) && (
             <ExportDecisionForm item={item} />
+          )}
+          {item.status !== "pending_approval" && (
+            <>
+              <h4 className="xs-w-subhead">决策与期限</h4>
+              <Facts
+                rows={[
+                  ["决策人", item.decided_by ?? "—"],
+                  ["决策时间", <Time key="dt" value={item.decided_at} />],
+                  [
+                    "决策理由",
+                    item.decision_reason ? (
+                      <span key="d" className="xs-w-text">
+                        {item.decision_reason}
+                      </span>
+                    ) : (
+                      "—"
+                    ),
+                  ],
+                  ["到期", <Time key="e" value={item.expires_at} />],
+                  [
+                    "包",
+                    item.package_bytes === null
+                      ? "尚未生成"
+                      : `${item.package_bytes.toLocaleString("en-US")} 字节`,
+                  ],
+                  ["已领取", `${item.download_count} / ${CLAIM_LIMIT} 次`],
+                ]}
+              />
+            </>
           )}
         </div>
       )}

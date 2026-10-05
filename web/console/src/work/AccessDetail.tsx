@@ -1,6 +1,6 @@
 import { DownloadOutlined, ReloadOutlined } from "@ant-design/icons";
 import { App as AntdApp, Alert, Button, Input, InputNumber, Segmented, Space } from "antd";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import type { AccessDecision, AccessInspection } from "../evidence-access.ts";
 import { useGuardedQuery } from "../security/hooks";
 import { useShellActions } from "../shell/actions";
@@ -9,7 +9,8 @@ import { textProblem, utf8Length } from "./format.ts";
 import { owners } from "./operations.ts";
 import { ErrorNotice, Facts, Field, IdChip, LoadState, Observed, StatePill, Time } from "./Parts";
 import { domains, specs } from "./queries.ts";
-import { isOwnRequest, role, useRoles } from "./roles.ts";
+import { requestIsOwn } from "./ownership.ts";
+import { role, useRoles } from "./roles.ts";
 import { accessPill } from "./status.ts";
 import { formatTtl, ttlPresets, ttlProblem } from "./ttl.ts";
 import { useWrite } from "./use-write.ts";
@@ -50,11 +51,7 @@ export function AccessDetail({
   const shell = useShellActions();
   const response = query.data;
   const item = response?.access_request;
-  const own = item
-    ? ownership
-      ? ownership === "mine"
-      : isOwnRequest(item.requested_by, subject)
-    : null;
+  const own = item ? requestIsOwn(item.requested_by, subject, ownership) : null;
   const download = useAttachmentDownload({
     target: accessId,
     fetch: (client, signal) => {
@@ -84,52 +81,7 @@ export function AccessDetail({
           </div>
           <Observed asOf={response.as_of} requestId={response.request_id} />
           <Notes item={item} own={own} />
-          <Facts
-            rows={[
-              ["申请人", item.requested_by],
-              [
-                "申请理由",
-                <span key="j" className="xs-w-text">
-                  {item.justification}
-                </span>,
-              ],
-              ["案件", <IdChip key="c" id={item.case_id} label="案件 ID" />],
-              ["证据", <IdChip key="a" id={item.artifact_id} label="证据 ID" />],
-              ["申请时间", <Time key="r" value={item.requested_at} />],
-              ["案件状态", item.case_status === "open" ? "开放" : "已关闭"],
-              ["证据目录", item.artifact_status === "active" ? "有效" : "已删除"],
-              [
-                "证据到期",
-                <span key="e">
-                  <Time value={item.artifact_expires_at} />
-                  {item.artifact_time_expired ? "（已到期）" : ""}
-                </span>,
-              ],
-              ["决策人", item.decided_by ?? "—"],
-              [
-                "决策理由",
-                item.decision_reason ? (
-                  <span key="d" className="xs-w-text">
-                    {item.decision_reason}
-                  </span>
-                ) : (
-                  "—"
-                ),
-              ],
-              ["决策时间", <Time key="dt" value={item.decided_at} />],
-              [
-                "批准期限",
-                item.decision_ttl_seconds === null ? "—" : formatTtl(item.decision_ttl_seconds),
-              ],
-              [
-                "访问到期",
-                <span key="ae">
-                  <Time value={item.access_expires_at} />
-                  {item.capability_time_expired ? "（已过期）" : ""}
-                </span>,
-              ],
-            ]}
-          />
+          <Facts rows={requestRows(item)} />
           {item.stored_status === "approved" && (
             <section className="xs-w-card" aria-label="下载原文">
               <h4>下载原文</h4>
@@ -186,6 +138,16 @@ export function AccessDetail({
           {item.stored_status === "pending" && own !== true && has(role.approver) && (
             <AccessDecisionForm item={item} maxTtl={response.max_approval_ttl_seconds} />
           )}
+          <h4 className="xs-w-subhead">
+            {item.stored_status === "pending" ? "目标与期限" : "状态、决策与期限"}
+          </h4>
+          <Facts
+            rows={
+              item.stored_status === "pending"
+                ? stateRows(item)
+                : [...stateRows(item), ...decisionRows(item)]
+            }
+          />
           {shell && has(role.investigator) && (
             <div>
               <Button
@@ -209,6 +171,65 @@ export function AccessDetail({
       )}
     </LoadState>
   );
+}
+
+type FactRow = readonly [string, ReactNode];
+
+/** What was asked, by whom and why: all a reviewer needs before the decision form. */
+function requestRows(item: Detail): FactRow[] {
+  return [
+    ["申请人", item.requested_by],
+    [
+      "申请理由",
+      <span key="j" className="xs-w-text">
+        {item.justification}
+      </span>,
+    ],
+    ["案件", <IdChip key="c" id={item.case_id} label="案件 ID" />],
+    ["证据", <IdChip key="a" id={item.artifact_id} label="证据 ID" />],
+    ["申请时间", <Time key="r" value={item.requested_at} />],
+  ];
+}
+
+/** The state of the target the request points at. */
+function stateRows(item: Detail): FactRow[] {
+  return [
+    ["案件状态", item.case_status === "open" ? "开放" : "已关闭"],
+    ["证据目录", item.artifact_status === "active" ? "有效" : "已删除"],
+    [
+      "证据到期",
+      <span key="e">
+        <Time value={item.artifact_expires_at} />
+        {item.artifact_time_expired ? "（已到期）" : ""}
+      </span>,
+    ],
+  ];
+}
+
+/** Empty on a pending request, so they are only shown once something was decided. */
+function decisionRows(item: Detail): FactRow[] {
+  return [
+    ["决策人", item.decided_by ?? "—"],
+    [
+      "决策理由",
+      item.decision_reason ? (
+        <span key="d" className="xs-w-text">
+          {item.decision_reason}
+        </span>
+      ) : (
+        "—"
+      ),
+    ],
+    ["决策时间", <Time key="dt" value={item.decided_at} />],
+    ["批准期限", item.decision_ttl_seconds === null ? "—" : formatTtl(item.decision_ttl_seconds)],
+    [
+      "访问到期",
+      <span key="ae">
+        <Time value={item.access_expires_at} />
+        {item.capability_time_expired ? "（已过期）" : ""}
+      </span>,
+    ],
+  ];
 }
 
 function Notes({ item, own }: { item: Detail; own: boolean | null }) {
@@ -330,10 +351,10 @@ function AccessDecisionForm({ item, maxTtl }: { item: Detail; maxTtl: number }) 
             ]}
           />
           {preset === "custom" && (
+            // No min/max here: the number input would silently clamp a typed value on blur. An
+            // out-of-range value must stay visible, with ttlProblem saying why it is refused.
             <InputNumber
               aria-label="自定义批准期限（秒）"
-              min={1}
-              max={maxTtl}
               step={60}
               precision={0}
               value={custom}

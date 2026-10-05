@@ -49,9 +49,6 @@ const SearchPanel = lazy(() =>
 const LedgerPanel = lazy(() =>
   import("../LedgerPanel").then((module) => ({ default: module.LedgerPanel })),
 );
-const EvidenceAccessPanel = lazy(() =>
-  import("../EvidenceAccessPanel").then((module) => ({ default: module.EvidenceAccessPanel })),
-);
 const SiteOperationsPanel = lazy(() =>
   import("../SiteOperationsPanel").then((module) => ({ default: module.SiteOperationsPanel })),
 );
@@ -62,24 +59,12 @@ const ManagementApiKeyPanel = lazy(() =>
   import("../ManagementApiKeyPanel").then((module) => ({ default: module.ManagementApiKeyPanel })),
 );
 
-/** Mounts its children the first time the page is opened and keeps them (hidden) afterwards. */
-function Workbench({ active, children }: { active: boolean; children: React.ReactNode }) {
-  const [mounted, setMounted] = useState(active);
-  if (active && !mounted) setMounted(true);
-  if (!mounted) return null;
-  return (
-    <div hidden={!active}>
-      <Deferred>{children}</Deferred>
-    </div>
-  );
-}
-
 function Deferred({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<p className="empty">正在加载页面…</p>}>{children}</Suspense>;
 }
 
 type Problem = { message: string; code: string; requestId?: string | null; status?: number };
-type Channel = "query" | "events" | "evidence" | "artifact" | "access" | "sites" | "health";
+type Channel = "query" | "events" | "evidence" | "artifact" | "sites" | "health";
 const queryLabels = {
   request: "请求 ID",
   model: "模型调用 ID",
@@ -160,7 +145,6 @@ export default function LegacyHost({
     events: 0,
     evidence: 0,
     artifact: 0,
-    access: 0,
     sites: 0,
     health: 0,
   });
@@ -414,7 +398,6 @@ export default function LegacyHost({
     event.preventDefault();
     if (
       queryKind === "search" ||
-      queryKind === "access" ||
       queryKind === "model-list" ||
       queryKind === "audit-health" ||
       queryKind === "site-config"
@@ -824,20 +807,6 @@ export default function LegacyHost({
               />
             </Deferred>
           )}
-        <Workbench active={queryKind === "access"}>
-          <EvidenceAccessPanel
-            active={queryKind === "access"}
-            busy={Boolean(busy.access)}
-            onInvalidate={clearResults}
-            onHistory={(accessRequestId) => {
-              prepareSearchHistory({
-                kind: "evidence_access_request_id",
-                value: accessRequestId,
-              });
-            }}
-            onRun={(fetcher, apply, fail) => run("access", fetcher, apply, fail)}
-          />
-        </Workbench>
         {queryKind === "site-config" &&
         currentSite &&
         managementRoles !== null &&
@@ -1004,7 +973,7 @@ export default function LegacyHost({
               }}
             />
           </Deferred>
-        ) : queryKind === "access" ? null : queryKind === "search" ? (
+        ) : queryKind === "search" ? (
           <Deferred>
             <SearchPanel
               key={searchPresetVersion}

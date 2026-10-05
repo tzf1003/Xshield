@@ -36,6 +36,14 @@
   margin: 0;
 }
 
+/* A quiet heading over a secondary group of facts inside a detail pane. */
+.xs-w-subhead {
+  margin: 0;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .xs-w-title {
   min-width: 0;
   margin: 0;
@@ -109,6 +117,18 @@
   font-weight: 600;
 }
 
+/* Table cells: a shortened ID, and a time broken into date and clock. */
+.xs-w-idtext {
+  color: var(--xs-ink-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.xs-w-time-stack span {
+  display: block;
+  white-space: nowrap;
+}
+
 /* ---------- Identifiers and state pills ---------- */
 .xs-w-id {
   display: inline-flex;
@@ -128,9 +148,50 @@
   overflow-wrap: anywhere;
 }
 
-.xs-w-pill.ant-tag {
-  margin: 0;
+/*
+ * State and kind labels. Each tone is a foreground, a soft background and a line from the same
+ * palette family; the theme keeps every pair above 4.5:1 in light and dark.
+ */
+.xs-w-pill {
+  display: inline-block;
+  padding: 0 8px;
+  color: var(--xs-unknown);
+  background: var(--xs-unknown-soft);
+  border: 1px solid var(--xs-unknown-line);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 20px;
   white-space: nowrap;
+}
+
+.xs-w-pill.is-success {
+  color: var(--xs-allow);
+  background: var(--xs-allow-soft);
+  border-color: var(--xs-allow-line);
+}
+
+.xs-w-pill.is-warning {
+  color: var(--xs-observe);
+  background: var(--xs-observe-soft);
+  border-color: var(--xs-observe-line);
+}
+
+.xs-w-pill.is-error {
+  color: var(--xs-deny);
+  background: var(--xs-deny-soft);
+  border-color: var(--xs-deny-line);
+}
+
+.xs-w-pill.is-processing {
+  color: var(--xs-info);
+  background: var(--xs-info-soft);
+  border-color: var(--xs-info-line);
+}
+
+.xs-w-pill.is-brand {
+  color: var(--xs-primary);
+  background: var(--xs-primary-soft);
+  border-color: var(--xs-line-strong);
 }
 
 /* ---------- Detail facts ---------- */
@@ -203,10 +264,20 @@
   overflow-wrap: anywhere;
 }
 
-/* Split view of the approval center: the list on the left, the selected item on the right. */
+/* Headers and short values (ages, times) never break inside a word or a number. */
+.xs-w-table .ant-table-thead > tr > th,
+.xs-w-nowrap {
+  white-space: nowrap;
+}
+
+/*
+ * Split view of the approval center: the list on the left, the selected item on the right. The
+ * page switches to a drawer below 1280px (see ApprovalsPage, which uses the same limit), where
+ * the list would otherwise be squeezed under 600px.
+ */
 .xs-w-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(360px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 400px);
   gap: 16px;
   align-items: start;
 }
@@ -222,7 +293,7 @@
   background: var(--xs-primary-soft) !important;
 }
 
-@media (width <= 1100px) {
+@media (width <= 1279px) {
   .xs-w-split {
     grid-template-columns: minmax(0, 1fr);
   }
