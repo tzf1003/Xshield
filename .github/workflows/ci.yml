@@ -75,6 +75,13 @@ jobs:
         timeout-minutes: 5
       - run: scripts/test_gateway_identity.sh
       - run: scripts/test_gateway_request_crypto.sh
+      - name: IDOR lab (real edge, PostgreSQL ledger, local origins)
+        env:
+          XSHIELD_LAB_PGHOST: localhost
+          XSHIELD_LAB_PGPORT: "5432"
+          XSHIELD_LAB_PGUSER: postgres
+          XSHIELD_LAB_PGPASSWORD: postgres
+        run: scripts/test_idor_lab_local.sh
       - run: scripts/test_gateway_transport.sh
       - run: python scripts/validate_library.py
       - run: python scripts/check_audit_event_coverage.py
