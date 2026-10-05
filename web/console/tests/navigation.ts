@@ -10,9 +10,7 @@ const links: Record<string, string> = {
   binding: "身份绑定",
   search: "结构化检索",
   case: "案件工作台",
-  access: "证据访问",
-  hold: "证据保留",
-  export: "调查导出",
+  approvals: "审批中心",
 };
 export async function openView(page: Page, kind: string) {
   const label = links[kind];

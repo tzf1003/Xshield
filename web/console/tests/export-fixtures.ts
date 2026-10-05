@@ -1,4 +1,9 @@
-import type { InvestigationExport } from "../src/exports.ts";
+import type {
+  ExportList,
+  ExportListItem,
+  ExportListView,
+  InvestigationExport,
+} from "../src/exports.ts";
 
 export const EXPORT_ID = "export_018f2a3b-4c5d-7000-8000-000000000071";
 export const EXPORT_CASE_ID = "case_018f2a3b-4c5d-7000-8000-000000000031";
@@ -52,5 +57,35 @@ export function exportDownloadHeaders(bytes = 17): Record<string, string> {
     "Content-Disposition": 'attachment; filename="investigation-export.json"',
     "X-Content-Type-Options": "nosniff",
     "Cache-Control": "private, no-store",
+  };
+}
+
+/** One list row, derived from the detail fixture so both projections stay in agreement. */
+export function exportListItemFixture(
+  status: InvestigationExport["status"] = "pending_approval",
+  exportId = EXPORT_ID,
+): ExportListItem {
+  const detail = exportFixture(status);
+  return {
+    export_id: exportId,
+    case_id: detail.case_id,
+    requested_by: detail.requested_by,
+    status: detail.status,
+    requested_at: detail.created_at,
+    decided_by: detail.decided_by,
+    decided_at: detail.decided_at,
+    expires_at: detail.expires_at,
+  };
+}
+
+export function exportListFixture(view: ExportListView = "mine"): ExportList {
+  return {
+    ...envelope,
+    schema_version: 3,
+    view,
+    as_of: "2026-09-20T08:01:00.000000Z",
+    items: [exportListItemFixture()],
+    truncated: false,
+    next_cursor: null,
   };
 }

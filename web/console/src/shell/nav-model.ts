@@ -41,6 +41,8 @@ export type NavItem = Readonly<{
   keywords: readonly string[];
   /** Pathname prefix that marks the entry as the current page. Defaults to `href`. */
   matchPrefix?: string;
+  /** A count the shell shows beside the label; it is only ever what the last read found. */
+  badge?: "approvals";
 }>;
 
 export type NavGroup = Readonly<{ key: string; label: string; items: readonly NavItem[] }>;
@@ -52,7 +54,8 @@ const item = (
   icon: IconKey,
   keywords: readonly string[] = [],
   matchPrefix?: string,
-): NavItem => ({ key: href, href, label, roles, icon, keywords, matchPrefix });
+  badge?: NavItem["badge"],
+): NavItem => ({ key: href, href, label, roles, icon, keywords, matchPrefix, badge });
 
 const evidenceReaders = [
   "investigator",
@@ -124,26 +127,46 @@ export const navCatalog: readonly NavGroup[] = [
   },
   {
     key: "cases",
-    label: "案件与证据",
+    label: "案件与审批",
     items: [
-      item("/cases", "案件工作台", ["investigator"], "case", ["case", "cases", "案件"]),
-      item("/evidence/access", "证据访问", evidenceReaders, "evidence", [
-        "evidence",
-        "access",
-        "artifact",
-        "证据",
-        "访问",
-      ]),
-      item("/evidence/holds", "证据保留", ["audit_administrator"], "hold", [
+      // Holds moved into the case detail, so the hold role reaches it too (by case ID).
+      item("/cases", "案件工作台", ["investigator", "audit_administrator"], "case", [
+        "case",
+        "cases",
+        "案件",
         "hold",
         "retention",
         "保留",
-      ]),
-      item("/evidence/exports", "调查导出", evidenceReaders, "export", [
         "export",
-        "download",
         "导出",
+        "analysis",
+        "分析",
       ]),
+      item(
+        "/approvals",
+        "审批中心",
+        [...evidenceReaders, "policy_approver"],
+        "evidence",
+        [
+          "approval",
+          "approvals",
+          "approve",
+          "review",
+          "审批",
+          "待办",
+          "evidence",
+          "access",
+          "artifact",
+          "证据",
+          "访问",
+          "export",
+          "download",
+          "导出",
+          "策略",
+        ],
+        undefined,
+        "approvals",
+      ),
     ],
   },
   {
@@ -272,9 +295,7 @@ const titles: Record<QueryKind, string> = {
   binding: "身份绑定调查",
   search: "结构化事件检索",
   case: "案件工作台",
-  access: "证据访问",
-  hold: "证据保留",
-  export: "调查导出",
+  approvals: "审批中心",
   "site-list": "受保护站点",
   "site-config": "受保护站点",
   "api-keys": "管理 API Key",
@@ -294,10 +315,8 @@ const leads: Record<QueryKind, string> = {
   grant: "核对当前账本的状态、代际与期限。",
   binding: "核对当前账本的状态、代际与期限。",
   search: "按时间与事件字段检索，核对直接引用的历史事实。",
-  case: "建立本人调查案件，核对证据引用与案件状态。",
-  access: "复核访问申请，通过独立审批后按需下载证据原文。",
-  hold: "管理案件证据保留期限，核对创建与释放历史。",
-  export: "申请经独立审批的案件与目录元数据包；下载需重新验证。",
+  case: "案件是证据工作的枢纽：证据集合、访问申请、保留锁、导出与分析任务都在案件里完成。",
+  approvals: "集中处理等待你审批的原文访问、导出和策略修订，并跟踪你自己的申请。",
   "site-list": "查看受保护站点的发布状态，搜索、筛选并进入站点配置与发布。",
   "site-config": "配置受保护网站、上游、安全入口与反向代理监听端口。",
   "api-keys": "创建和撤销绑定 tenant、site 与能力集合的 Agent API Key。",
@@ -319,10 +338,6 @@ export const legacyKinds: ReadonlySet<QueryKind> = new Set<QueryKind>([
   "calibration-report",
   "grant",
   "binding",
-  "case",
-  "access",
-  "hold",
-  "export",
   "api-keys",
   "jobs",
 ]);

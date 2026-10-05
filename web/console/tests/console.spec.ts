@@ -18,7 +18,6 @@ import {
   SEARCH_PLAN,
 } from "./fixtures";
 import { mockControl, paint, requestSettled } from "./control-mock";
-import { EXPORT_CASE_ID, EXPORT_ID, exportFixture } from "./export-fixtures";
 import {
   BINDING_ID,
   GRANT_ID,
@@ -92,38 +91,6 @@ test("reads restricted calibration report metadata without creating a content pa
   await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
   await expectPrefilled(page, "校准报告 ID", CALIBRATION_REPORT_ID);
   expect(calls).toHaveLength(2);
-});
-
-test("export workbench waits for explicit submission before exposing package download", async ({
-  page,
-}) => {
-  const calls = await mockControl(page, async (url, request) => {
-    if (url.pathname === "/control/v1/exports" && request.method() === "POST")
-      return { status: 202, body: exportFixture() };
-    if (url.pathname === `/control/v1/exports/${EXPORT_ID}` && request.method() === "GET")
-      return { body: exportFixture("ready") };
-    return undefined;
-  });
-  await connect(page);
-  await openView(page, "export");
-  await expect(page.getByRole("heading", { name: "调查导出", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "申请元数据导出", exact: true })).toBeDisabled();
-  expect(calls).toHaveLength(0);
-
-  await page.getByLabel("导出案件 ID", { exact: true }).fill(EXPORT_CASE_ID);
-  await page.getByLabel("导出调查用途", { exact: true }).fill("核对案件元数据");
-  await page.getByLabel("导出幂等键", { exact: true }).fill("browser-export-operation-key");
-  await page.getByRole("button", { name: "申请元数据导出", exact: true }).click();
-  await expect(page.getByText("申请元数据导出已确认", { exact: true })).toBeVisible();
-  expect(calls[0]?.path).toBe("/control/v1/exports");
-  expect(calls[0]?.method).toBe("POST");
-  expect(calls[0]?.body).toEqual({ case_id: EXPORT_CASE_ID, purpose: "核对案件元数据" });
-
-  await page.getByRole("button", { name: "准备新操作", exact: true }).click();
-  await page.getByLabel("导出状态 ID", { exact: true }).fill(EXPORT_ID);
-  await page.getByRole("button", { name: "读取状态", exact: true }).click();
-  await expect(page.getByText("ready", { exact: true })).toBeVisible();
-  expect(calls.some((call) => call.path.endsWith("/download"))).toBe(false);
 });
 
 test("calibration report reads discard expired, scope-drifting, and late state", async ({

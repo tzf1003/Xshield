@@ -24,6 +24,7 @@ const writePath =
 const accessReadPath =
   /^\/control\/v1\/(?:evidence-access-requests\/access_[a-f0-9-]+|artifacts\/artifact_[a-f0-9-]+\/content|exports\/export_[a-f0-9-]+\/download)$/;
 const modelCallListPath = "/control/v1/model-calls";
+const exportListPath = "/control/v1/exports";
 const auditHealthPath = "/control/v1/audit/health";
 const workbenchOverviewPath = "/control/v1/workbench/overview";
 const causalityPath = "/control/v1/causality";
@@ -63,6 +64,17 @@ function validModelCallListQuery(url: string): boolean {
   );
 }
 
+/**
+ * `GET /control/v1/exports?view=mine|review[&cursor=...]`, the one query shape the list takes.
+ * The whole URL is matched at once: splitting on `?` with a limit would silently drop a second
+ * `?` and everything after it.
+ */
+function validExportListQuery(url: string): boolean {
+  const index = url.indexOf("?");
+  if (index < 0 || url.slice(0, index) !== exportListPath) return false;
+  return /^view=(mine|review)(&cursor=[A-Za-z0-9_.-]{1,256})?$/.test(url.slice(index + 1));
+}
+
 function validSiteListQuery(url: string): boolean {
   const [path, query] = url.split("?", 2);
   if (path !== sitesPath || query === undefined) return false;
@@ -99,6 +111,7 @@ export default defineConfig({
           const allowed =
             (request.method === "GET" &&
               ((path === oidcLoginPath && request.url === path) ||
+                validExportListQuery(request.url ?? "") ||
                 path === oidcCallbackPath ||
                 (path === sessionPath && request.url === path) ||
                 (path === modelCallListPath

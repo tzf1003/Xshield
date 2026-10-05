@@ -196,12 +196,14 @@ export class PendingOperationStore {
    * Classifies a failed attempt. A refusal because the MFA step-up is missing keeps the frozen
    * request for an exact retry (`step_up`); any other deterministic refusal of a first attempt
    * resolves the entry (`rejected`); everything else, and any refusal after an ambiguous
-   * attempt, keeps it `unknown`.
+   * attempt, keeps it `unknown`. The step-up refusal is no exception to that last rule: once an
+   * earlier attempt was ambiguous it proves nothing about that attempt, so the entry stays
+   * `unknown` (and keeps arming the page-leave warning) instead of being filed as "nothing ran".
    */
   fail(id: string, error: unknown): "rejected" | "unknown" | "step_up" {
     const entry = this.#entries.get(id);
     if (!entry) return "rejected";
-    if (isStepUpRequired(error)) {
+    if (!entry.hadUnknown && isStepUpRequired(error)) {
       entry.snapshot = Object.freeze({
         ...entry.snapshot,
         phase: "step_up",

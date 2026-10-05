@@ -21,6 +21,7 @@ export default defineConfig({
       testIgnore: [
         "**/browser-session.spec.ts",
         "**/shell-session.spec.ts",
+        "**/work-session.spec.ts",
         "**/site-roles.spec.ts",
         "**/site-release-session.spec.ts",
       ],
@@ -31,6 +32,7 @@ export default defineConfig({
       testMatch: [
         "**/browser-session.spec.ts",
         "**/shell-session.spec.ts",
+        "**/work-session.spec.ts",
         "**/site-roles.spec.ts",
         "**/site-release-session.spec.ts",
       ],

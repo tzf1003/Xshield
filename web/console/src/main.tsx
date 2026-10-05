@@ -6,6 +6,7 @@ import { runFrozenWrite } from "./security/guarded.ts";
 import { createSessionRuntime } from "./security/runtime.ts";
 import { machineLoginEnabled, SessionProvider } from "./security/SessionProvider";
 import { applyStoredThemeAttributes, ThemeProvider } from "./theme/ThemeProvider";
+import { completeVerificationReturn, isVerificationReturn } from "./work/step-up-window.ts";
 import "./theme/fonts";
 import "./theme/tokens.generated.css";
 import "./style.css";
@@ -20,7 +21,11 @@ if (machineLoginEnabled) {
     value: Object.freeze({ runtime, runFrozenWrite }),
   });
 }
-const root = document.getElementById("root");
+// The window an in-place MFA step-up opened is sent back to this page by the identity provider.
+// It renders nothing: it tells the opener to re-read its session and closes (work/step-up-window).
+const returning = isVerificationReturn(window);
+if (returning) completeVerificationReturn(window);
+const root = returning ? null : document.getElementById("root");
 const cspNonce =
   document.querySelector('meta[name="xshield-csp-nonce"]')?.getAttribute("content") || undefined;
 // An explicit light/dark choice must be on <html> before the first React paint.

@@ -81,6 +81,7 @@ test("outcome chips and the aborted toggle narrow the search", async ({ page }) 
     { kind: "text", field: "event_type", value: "request.completed" },
     { kind: "outcome", value: "ALLOW" },
   ]);
+  await expect(rows(page).first()).toContainText("放行");
   await expect(rows(page).getByText("拒绝", { exact: true })).toHaveCount(0);
 
   // Search has no OR, so aborted requests are their own view. Only they can carry UNKNOWN.
@@ -91,6 +92,9 @@ test("outcome chips and the aborted toggle narrow the search", async ({ page }) 
     { kind: "text", field: "event_type", value: "request.aborted" },
     { kind: "outcome", value: "ALLOW" },
   ]);
+  // Aborted requests are never ALLOW: wait for that (empty) answer before changing the plan again,
+  // or the earlier read would be abandoned in flight and no longer counted as answered.
+  await expect(page.getByText("空结果不证明没有流量")).toBeVisible();
   await chip(page, "未知").click();
   await expect.poll(() => searches(calls).length).toBe(5);
   expect(body(searches(calls)[4]).filters).toEqual([

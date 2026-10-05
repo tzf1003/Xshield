@@ -13,10 +13,11 @@ import { casePattern } from "../cases.ts";
 import { accessPattern } from "../evidence-access.ts";
 import { exportPattern } from "../exports.ts";
 import type { SearchPreset } from "../investigation/search-preset.ts";
-import { flattenNav, type NavGroup, type NavItem, visibleNav } from "./nav-model.ts";
+import { flattenNav, isVisible, type NavGroup, type NavItem, visibleNav } from "./nav-model.ts";
 
 export type PaletteAction =
-  | { type: "navigate"; to: string }
+  /** `search` is the URL query of the target, passed as an object (never spliced into `to`). */
+  | { type: "navigate"; to: string; search?: Readonly<Record<string, string>> }
   /** Opens the structured search with one prefilled, unsubmitted condition. */
   | { type: "search"; preset: SearchPreset };
 
@@ -43,12 +44,20 @@ type Recognised = {
   candidates: readonly Candidate[];
 };
 type Candidate =
-  | { type: "open"; to: string; page: string; requires: readonly string[] }
+  | {
+      type: "open";
+      to: string;
+      page: string;
+      requires: readonly string[];
+      search?: Readonly<Record<string, string>>;
+    }
   | {
       type: "search";
       preset: SearchPreset["kind"];
       noun: string;
       requires: readonly string[];
+      /** Any one of these roles; empty means no extra role beyond the pages in `requires`. */
+      roles: readonly string[];
     };
 
 const SEARCH = "/investigation/search";
@@ -63,21 +72,24 @@ export function normalizePaste(raw: string): string {
 
 /** Recognises one ID by its prefix and exact canonical shape (version-7 UUID, lowercase). */
 export function recognise(value: string): Recognised | null {
-  const open = (to: string, page: string, requires: string): Candidate => ({
+  const open = (
+    to: string,
+    page: string,
+    requires: string,
+    search?: Readonly<Record<string, string>>,
+  ): Candidate => ({
     type: "open",
     to,
     page,
     requires: [requires],
+    ...(search ? { search } : {}),
   });
-  const search = (
-    preset: SearchPreset["kind"],
-    noun: string,
-    ...requires: string[]
-  ): Candidate => ({
+  const search = (preset: SearchPreset["kind"], noun: string, ...roles: string[]): Candidate => ({
     type: "search",
     preset,
     noun,
-    requires: [SEARCH, ...requires],
+    requires: [SEARCH],
+    roles,
   });
   if (requestPattern.test(value)) {
     return {
@@ -122,21 +134,21 @@ export function recognise(value: string): Recognised | null {
     };
   }
   if (casePattern.test(value)) {
-    return { noun: "案件 ID", candidates: [open("/cases", "案件工作台", "/cases")] };
+    return { noun: "案件 ID", candidates: [open(`/cases/${value}`, "案件详情", "/cases")] };
   }
   if (accessPattern.test(value)) {
     return {
       noun: "访问申请 ID",
       candidates: [
         search("evidence_access_request_id", "访问申请 ID"),
-        open("/evidence/access", "证据访问", "/evidence/access"),
+        open("/approvals", "审批中心的该申请", "/approvals", { item: value }),
       ],
     };
   }
   if (exportPattern.test(value)) {
     return {
       noun: "导出 ID",
-      candidates: [open("/evidence/exports", "调查导出", "/evidence/exports")],
+      candidates: [open("/approvals", "审批中心的该导出", "/approvals", { item: value })],
     };
   }
   if (jobPattern.test(value)) {
@@ -144,24 +156,25 @@ export function recognise(value: string): Recognised | null {
       noun: "任务 ID",
       candidates: [
         search("job_id", "任务 ID"),
-        open("/operations/jobs", "运行状态", "/operations/jobs"),
+        open(`/cases/jobs/${value}`, "案件分析任务", "/cases"),
       ],
     };
   }
   if (artifactPattern.test(value)) {
+    // Evidence has no page of its own: it is reached through a case.
     return {
       noun: "证据 ID",
-      candidates: [open("/evidence/access", "证据访问", "/evidence/access")],
+      candidates: [open("/cases", "案件工作台", "/cases")],
     };
   }
   if (eventPattern.test(value)) {
     // Event IDs and evidence-hold IDs share the `ev_` shape, so both interpretations are offered.
+    // Hold history needs the audit role in addition to the structured search itself.
     return {
       noun: "事件 / 保留锁 ID",
       candidates: [
         search("event_id", "事件 ID"),
-        search("evidence_hold_id", "保留锁 ID", "/evidence/holds"),
-        open("/evidence/holds", "证据保留", "/evidence/holds"),
+        search("evidence_hold_id", "保留锁 ID", "audit_administrator"),
       ],
     };
   }
@@ -220,7 +233,8 @@ export function paletteSearch(
   if (recognised) {
     let blocked = 0;
     recognised.candidates.forEach((candidate, index) => {
-      if (!candidate.requires.every((href) => visible.has(href))) {
+      const roleAllowed = candidate.type === "open" || isVisible(roles, candidate.roles);
+      if (!roleAllowed || !candidate.requires.every((href) => visible.has(href))) {
         blocked += 1;
         return;
       }
@@ -230,7 +244,9 @@ export function paletteSearch(
           group: "object",
           label: `打开${candidate.page}`,
           hint: `${recognised.noun} ${query}`,
-          action: { type: "navigate", to: candidate.to },
+          action: candidate.search
+            ? { type: "navigate", to: candidate.to, search: candidate.search }
+            : { type: "navigate", to: candidate.to },
         });
       } else {
         results.push({
