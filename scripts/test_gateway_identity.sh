@@ -443,7 +443,7 @@ XSHIELD_JOURNAL_KEY_HEX="8888888888888888888888888888888888888888888888888888888
 XSHIELD_DATABASE_URL="$database_base_url/$test_database" \
 XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
 XSHIELD_SHARE_TOKEN_KEY_HEX="$share_token_key" \
-    "$repo_root/target/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
+    "${CARGO_TARGET_DIR:-$repo_root/target}/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!
 
 for _ in {1..50}; do

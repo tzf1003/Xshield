@@ -5,6 +5,7 @@ Run only on loopback through the security-lab Compose project.
 """
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from urllib.parse import urlsplit
@@ -63,4 +64,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    # Containers keep the defaults; a local run (no Docker) sets both variables
+    # and should bind loopback only.
+    ThreadingHTTPServer(
+        (os.environ.get("LAB_ORIGIN_HOST", "0.0.0.0"), int(os.environ.get("LAB_ORIGIN_PORT", "8080"))),
+        Handler,
+    ).serve_forever()

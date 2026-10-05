@@ -161,7 +161,7 @@ XSHIELD_REQUEST_DECRYPTION_KEY_HEX="$request_key" \
 XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX="$response_key" \
 XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
 XSHIELD_DATABASE_URL="$database_url" \
-    "$repo_root/target/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
+    "${CARGO_TARGET_DIR:-$repo_root/target}/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!
 
 for _ in $(seq 1 100); do

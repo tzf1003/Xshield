@@ -1,12 +1,11 @@
 //! Owns live internal TCP sockets and serializes listener changes with edge apply.
+//!
+//! Each accepted connection is handed to [`EdgeTransport`] (PROXY header from
+//! a trusted balancer, socket metadata, TLS) in its own task before Pingora
+//! sees it, so a slow or hostile handshake never blocks the accept loop.
 
 use crate::Gateway;
-use pingora::{
-    apps::ServerApp,
-    protocols::{Stream, l4::stream::Stream as L4Stream},
-    proxy::HttpProxy,
-    server::ShutdownWatch,
-};
+use pingora::{apps::ServerApp, proxy::HttpProxy, server::ShutdownWatch};
 use std::{
     collections::BTreeMap,
     io,
@@ -15,6 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
+use xshield_gateway::edge_transport::{EdgeTransport, ListenerSetupSlots, TransportStatus};
 use xshield_gateway::multi_site::{ApplyCoordinator, GatewaySnapshot, SnapshotRefusal};
 
 pub(crate) enum ApplyError {
@@ -26,6 +26,7 @@ pub(crate) enum ApplyError {
 pub(crate) struct ListenerSupervisor {
     coordinator: Arc<ApplyCoordinator>,
     app: Arc<HttpProxy<Gateway, ()>>,
+    transport: Arc<EdgeTransport>,
     bind_ip: IpAddr,
     shutdown: ShutdownWatch,
     // The lock covers binding and the snapshot swap. An apply cannot expose
@@ -37,6 +38,7 @@ impl ListenerSupervisor {
     pub(crate) async fn new(
         coordinator: Arc<ApplyCoordinator>,
         app: Arc<HttpProxy<Gateway, ()>>,
+        transport: Arc<EdgeTransport>,
         bind_ip: IpAddr,
         initial_addresses: &[SocketAddr],
         shutdown: ShutdownWatch,
@@ -48,6 +50,7 @@ impl ListenerSupervisor {
         let supervisor = Self {
             coordinator,
             app,
+            transport,
             bind_ip,
             shutdown,
             listeners: Mutex::new(BTreeMap::new()),
@@ -113,6 +116,11 @@ impl ListenerSupervisor {
         self.listeners.lock().await.len()
     }
 
+    /// TLS/PROXY configuration and connection-setup failure counters.
+    pub(crate) fn transport_status(&self) -> TransportStatus {
+        self.transport.status()
+    }
+
     /// Stops all data-plane listeners after a durability failure. The apply
     /// channel remains available so an operator can repair storage and retry.
     pub(crate) async fn fail_closed(&self) {
@@ -125,8 +133,9 @@ impl ListenerSupervisor {
 
     fn spawn_listener(&self, listener: TcpListener) -> JoinHandle<()> {
         let app = Arc::clone(&self.app);
+        let transport = Arc::clone(&self.transport);
+        let slots = ListenerSetupSlots::new();
         let mut shutdown = self.shutdown.clone();
-        let local_addr = listener.local_addr().ok();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -136,20 +145,24 @@ impl ListenerSupervisor {
                         }
                     }
                     accepted = listener.accept() => match accepted {
-                        Ok((stream, _)) => {
-                            let app = Arc::clone(&app);
-                            let shutdown = shutdown.clone();
-                            let peer_addr = stream.peer_addr().ok();
-                            tokio::spawn(async move {
-                                crate::DOWNSTREAM_SOCKET
-                                    .scope((peer_addr, local_addr), async move {
-                                        let mut event = Some(Box::new(L4Stream::from(stream)) as Stream);
-                                        while let Some(stream) = event {
-                                            event = app.process_new(stream, &shutdown).await;
-                                        }
-                                    })
-                                    .await;
-                            });
+                        Ok((tcp, peer)) => {
+                            // Slots are reserved here, before a task exists,
+                            // so a flood is shed instead of queued; a refused
+                            // socket is closed when `tcp` drops.
+                            if let Some(setup) = transport.admit(peer, &slots) {
+                                let app = Arc::clone(&app);
+                                let transport = Arc::clone(&transport);
+                                let shutdown = shutdown.clone();
+                                tokio::spawn(async move {
+                                    let Some(stream) = transport.establish(tcp, setup).await else {
+                                        return;
+                                    };
+                                    let mut event = Some(stream);
+                                    while let Some(stream) = event {
+                                        event = app.process_new(stream, &shutdown).await;
+                                    }
+                                });
+                            }
                         }
                         Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
                     }
