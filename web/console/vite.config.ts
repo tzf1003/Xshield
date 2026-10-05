@@ -27,6 +27,9 @@ const modelCallListPath = "/control/v1/model-calls";
 const exportListPath = "/control/v1/exports";
 const auditHealthPath = "/control/v1/audit/health";
 const workbenchOverviewPath = "/control/v1/workbench/overview";
+// Agent API key administration: the list and create at one fixed path, revoke and rotate per key.
+const apiKeysPath = "/control/v1/agent-api-keys";
+const apiKeyMutationPath = /^\/control\/v1\/agent-api-keys\/key_[a-f0-9-]{36}\/(?:revoke|rotate)$/;
 const causalityPath = "/control/v1/causality";
 const oidcLoginPath = "/control/v1/auth/oidc/start";
 const oidcCallbackPath = "/control/v1/auth/oidc/callback";
@@ -137,6 +140,9 @@ export default defineConfig({
               (request.url === siteConfigPath ||
                 (request.url === path && siteConfigCollectionPath.test(path)))) ||
             (request.method === "POST" && request.url === sitesPath) ||
+            ((request.method === "GET" || request.method === "POST") &&
+              request.url === apiKeysPath) ||
+            (request.method === "POST" && request.url === path && apiKeyMutationPath.test(path)) ||
             (request.method === "POST" &&
               (((path === sessionLogoutPath || path === oidcReauthStartPath) &&
                 request.url === path) ||

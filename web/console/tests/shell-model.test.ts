@@ -6,7 +6,6 @@ import {
   breadcrumbs,
   flattenNav,
   isVisible,
-  legacyKinds,
   navCatalog,
   pageMeta,
   siteEntries,
@@ -172,14 +171,6 @@ test("page titles, leads and breadcrumbs", () => {
     { label: "网络" },
   ]);
   assert.deepEqual(breadcrumbs("/sites/new/network", groups)[1], { label: "新建站点" });
-  assert.equal(legacyKinds.has("overview"), false);
-  assert.equal(legacyKinds.has("session"), false);
-  // Routed pages render their own content; the legacy host still renders the rest.
-  assert.equal(legacyKinds.has("request"), false);
-  assert.equal(legacyKinds.has("search"), false);
-  assert.equal(legacyKinds.has("case"), false);
-  assert.equal(legacyKinds.has("model"), false);
-  assert.equal(legacyKinds.has("audit-health"), true);
 });
 
 test("IDs are recognised by prefix and exact canonical shape", () => {

@@ -1312,61 +1312,110 @@ export type SiteListItem = {
   requires_approval: boolean;
 };
 
+/** Canonical management API key ID (`key_` + UUID). */
+export const apiKeyIdPattern = /^key_[0-9a-f-]{36}(?![\s\S])/;
+
 export type ManagementApiKeyRecord = {
   api_key_id: string;
   tenant_id: string;
   subject: string;
   display_name: string;
   key_prefix: string;
-  status: string;
+  status: "active" | "revoked";
   expires_at: string;
   created_at: string;
   last_used_at: string | null;
 };
+/** `GET /agent-api-keys`: metadata only; the server returns no scope, fingerprint or secret. */
+export type ManagementApiKeyList = { request_id: string; keys: ManagementApiKeyRecord[] };
 export type ManagementApiKeyResponse = {
   request_id: string;
   api_key_id: string;
+  /** The plaintext, returned exactly once; callers must never store, log or display it twice. */
   api_key: string;
   key_prefix: string;
   expires_at: string;
   scopes: Array<{ tenant_id: string; site_id: string; capabilities: string[] }>;
 };
+export type ManagementApiKeyRevoked = {
+  request_id: string;
+  api_key_id: string;
+  status: "revoked";
+};
 
-function decodeManagementApiKeys(value: unknown, status: number): ManagementApiKeyRecord[] {
+const keyPrefixPattern = /^xsk_[A-Za-z0-9]{4,32}$/;
+
+function exactFields(row: Record<string, unknown>, keys: readonly string[]): void {
+  ensure(Object.keys(row).length === keys.length && keys.every((key) => Object.hasOwn(row, key)));
+}
+
+function decodeManagementApiKeys(value: unknown, status: number): ManagementApiKeyList {
   ensure(status === 200);
   const row = object(value);
-  return list(row.keys, 128, (item) => {
-    const key = object(item);
-    return {
-      api_key_id: id(key.api_key_id, /^key_[0-9a-f-]{36}$/),
-      tenant_id: name(key.tenant_id),
-      subject: text(key.subject),
-      display_name: text(key.display_name),
-      key_prefix: text(key.key_prefix),
-      status: text(key.status),
-      expires_at: timestamp(key.expires_at),
-      created_at: timestamp(key.created_at),
-      last_used_at: key.last_used_at === null ? null : timestamp(key.last_used_at),
-    };
-  });
+  exactFields(row, ["request_id", "keys"]);
+  return {
+    request_id: id(row.request_id, requestPattern),
+    keys: list(row.keys, 1024, (item) => {
+      const key = object(item);
+      exactFields(key, [
+        "api_key_id",
+        "tenant_id",
+        "subject",
+        "display_name",
+        "key_prefix",
+        "status",
+        "expires_at",
+        "created_at",
+        "last_used_at",
+      ]);
+      return {
+        api_key_id: id(key.api_key_id, apiKeyIdPattern),
+        tenant_id: name(key.tenant_id),
+        subject: text(key.subject, 256),
+        display_name: text(key.display_name),
+        key_prefix: id(key.key_prefix, keyPrefixPattern),
+        status: choice(key.status, ["active", "revoked"] as const),
+        expires_at: timestamp(key.expires_at),
+        created_at: timestamp(key.created_at),
+        last_used_at: key.last_used_at === null ? null : timestamp(key.last_used_at),
+      };
+    }),
+  };
 }
 function decodeManagementApiKey(value: unknown, status: number): ManagementApiKeyResponse {
   ensure(status === 201);
   const row = object(value);
-  return {
-    request_id: text(row.request_id),
-    api_key_id: id(row.api_key_id, /^key_[0-9a-f-]{36}$/),
-    api_key: text(row.api_key),
-    key_prefix: text(row.key_prefix),
+  exactFields(row, ["request_id", "api_key_id", "api_key", "key_prefix", "expires_at", "scopes"]);
+  const result = {
+    request_id: id(row.request_id, requestPattern),
+    api_key_id: id(row.api_key_id, apiKeyIdPattern),
+    api_key: id(row.api_key, /^xsk_[A-Za-z0-9]{16,128}$/),
+    key_prefix: id(row.key_prefix, keyPrefixPattern),
     expires_at: timestamp(row.expires_at),
     scopes: list(row.scopes, 32, (item) => {
       const scope = object(item);
+      exactFields(scope, ["tenant_id", "site_id", "capabilities"]);
       return {
         tenant_id: name(scope.tenant_id),
         site_id: name(scope.site_id),
-        capabilities: list(scope.capabilities, 16, text),
+        capabilities: list(scope.capabilities, 16, (capability) => name(capability)),
       };
     }),
+  };
+  ensure(result.scopes.length > 0 && result.api_key.startsWith(result.key_prefix));
+  return result;
+}
+function decodeManagementApiKeyRevoked(apiKeyId: string) {
+  return (value: unknown, status: number): ManagementApiKeyRevoked => {
+    ensure(status === 200);
+    const row = object(value);
+    exactFields(row, ["request_id", "api_key_id", "status"]);
+    ensure(row.api_key_id === apiKeyId && row.status === "revoked");
+    return {
+      request_id: id(row.request_id, requestPattern),
+      api_key_id: apiKeyId,
+      status: "revoked",
+    };
   };
 }
 export type SiteListResponse = Envelope & {
@@ -2893,16 +2942,25 @@ export class ControlClient {
     return this.#request(`sites?${query.toString()}`, decodeSiteList, signal);
   }
 
-  async managementApiKeys(signal?: AbortSignal): Promise<ManagementApiKeyRecord[]> {
+  /** Key metadata of the tenant. Browser session with KeyAdministrator or SystemAdmin only. */
+  async managementApiKeys(signal?: AbortSignal): Promise<ManagementApiKeyList> {
     return this.#request("agent-api-keys", decodeManagementApiKeys, signal);
   }
 
+  /**
+   * Issues a key. The reply carries its plaintext once. The server does not deduplicate by
+   * `Idempotency-Key` here: repeating a create whose first attempt committed issues a second key.
+   */
   async createManagementApiKey(
     value: {
       subject: string;
       display_name: string;
       expires_at: string;
-      scopes: Array<{ tenant_id: string; site_id: string; capabilities: string[] }>;
+      scopes: ReadonlyArray<{
+        tenant_id: string;
+        site_id: string;
+        capabilities: readonly string[];
+      }>;
     },
     key: string,
     signal?: AbortSignal,
@@ -2917,18 +2975,49 @@ export class ControlClient {
     );
   }
 
-  async revokeManagementApiKey(apiKeyId: string, key: string, signal?: AbortSignal): Promise<void> {
+  /**
+   * Revokes `apiKeyId` and issues its replacement in one transaction; a refused request leaves
+   * the old key alive, and a repeat after success finds the old key gone (404) and issues nothing.
+   */
+  async rotateManagementApiKey(
+    apiKeyId: string,
+    value: {
+      subject: string;
+      display_name: string;
+      expires_at: string;
+      scopes: ReadonlyArray<{
+        tenant_id: string;
+        site_id: string;
+        capabilities: readonly string[];
+      }>;
+    },
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<ManagementApiKeyResponse> {
+    if (!apiKeyIdPattern.test(apiKeyId)) throw new ApiError("CONTROL_API_KEY_NOT_FOUND");
     this.#idempotencyKey(key);
-    await this.#transport(
-      `agent-api-keys/${name(apiKeyId)}/revoke`,
-      async (response) => {
-        ensure(response.status === 200);
-      },
+    return this.#request(
+      `agent-api-keys/${apiKeyId}/rotate`,
+      decodeManagementApiKey,
+      signal,
+      JSON.stringify(value),
+      key,
+    );
+  }
+
+  async revokeManagementApiKey(
+    apiKeyId: string,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<ManagementApiKeyRevoked> {
+    if (!apiKeyIdPattern.test(apiKeyId)) throw new ApiError("CONTROL_API_KEY_NOT_FOUND");
+    this.#idempotencyKey(key);
+    return this.#request(
+      `agent-api-keys/${apiKeyId}/revoke`,
+      decodeManagementApiKeyRevoked(apiKeyId),
       signal,
       "",
       key,
-      undefined,
-      "POST",
     );
   }
 

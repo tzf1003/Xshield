@@ -1,0 +1,55 @@
+/* 权限中心. Layout only; colours are --xs-* variables (tests/theme.test.ts). */
+
+.xs-session-stepup {
+  display: inline-grid;
+  justify-items: start;
+  gap: 4px;
+}
+
+.xs-session-roles {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-session-roles > li {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+}
+
+.xs-session-roles p {
+  margin: 0;
+  color: var(--xs-ink);
+}
+
+.xs-session-role-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.xs-session-role.ant-tag {
+  margin: 0;
+  color: var(--xs-primary);
+  background: var(--xs-primary-soft);
+  border-color: var(--xs-line-strong);
+  font-weight: 600;
+}
+
+.xs-session-pages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.xs-session-pages a {
+  color: var(--xs-primary);
+  font-weight: 600;
+}

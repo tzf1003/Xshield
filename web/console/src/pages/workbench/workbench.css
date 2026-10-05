@@ -1,0 +1,331 @@
+/*
+ * The workbench (`/`). Cards reuse .xs-w-card from work.css; this adds the KPI strip, the two
+ * columns and the "待我处理" rows. Colours are --xs-* variables only (tests/theme.test.ts).
+ */
+
+.xs-wb {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* ---------- KPI strip ---------- */
+.xs-wb-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-wb-kpi {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  padding: 14px 16px;
+  background: var(--xs-surface);
+  border: 1px solid var(--xs-line);
+  border-top: 3px solid var(--xs-line-strong);
+  border-radius: var(--xs-radius-panel);
+  box-shadow: var(--xs-shadow);
+}
+
+.xs-wb-kpi.is-success {
+  border-top-color: var(--xs-allow);
+}
+
+.xs-wb-kpi.is-warning {
+  border-top-color: var(--xs-observe);
+}
+
+.xs-wb-kpi.is-error {
+  border-top-color: var(--xs-deny);
+}
+
+.xs-wb-kpi-label {
+  color: var(--xs-ink-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.xs-wb-kpi-value {
+  color: var(--xs-ink);
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+
+.xs-wb-kpi.is-error .xs-wb-kpi-value {
+  color: var(--xs-deny);
+}
+
+.xs-wb-kpi.is-warning .xs-wb-kpi-value {
+  color: var(--xs-observe);
+}
+
+.xs-wb-kpi-detail {
+  margin: 0;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.xs-wb-kpi-source {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Columns ---------- */
+.xs-wb-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+  gap: 16px;
+  align-items: start;
+}
+
+.xs-wb-column {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.xs-wb-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.xs-wb-head > div:first-child {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.xs-wb-head h2,
+.xs-wb-card-title {
+  margin: 0;
+  color: var(--xs-ink);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.xs-wb-sub {
+  margin: 2px 0 0;
+  color: var(--xs-ink-3);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.xs-wb-count {
+  display: inline-block;
+  min-width: 22px;
+  margin-left: 8px;
+  padding: 0 7px;
+  color: var(--xs-ink);
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: center;
+  vertical-align: 2px;
+}
+
+/* ---------- Sources of "待我处理" ---------- */
+.xs-wb-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+  list-style: none;
+}
+
+.xs-wb-sources strong {
+  color: var(--xs-ink-2);
+  font-weight: 600;
+}
+
+/* ---------- "待我处理" rows ---------- */
+.xs-wb-todos {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-wb-todo {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--xs-line);
+}
+
+.xs-wb-todo:first-child {
+  border-top: 0;
+}
+
+.xs-wb-todo-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xs-wb-todo-main strong {
+  color: var(--xs-ink);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.xs-wb-todo-main small {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.xs-wb-todo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.xs-wb-todo-actions a {
+  color: var(--xs-primary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ---------- Site table ---------- */
+.xs-wb-site {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xs-wb-site a {
+  color: var(--xs-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.xs-wb-site small {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-wb-upstream {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+}
+
+.xs-wb-live {
+  color: var(--xs-ink-2);
+  font-size: 12px;
+}
+
+/* ---------- Side cards ---------- */
+.xs-wb-links {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-wb-links a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  color: var(--xs-ink);
+  border-radius: var(--xs-radius-control);
+}
+
+.xs-wb-links a:hover,
+.xs-wb-links a:focus-visible {
+  color: var(--xs-primary);
+  background: var(--xs-primary-soft);
+}
+
+.xs-wb-denied {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-wb-denied li {
+  display: grid;
+  gap: 2px;
+  padding: 8px 0;
+  border-top: 1px solid var(--xs-line);
+}
+
+.xs-wb-denied li:first-child {
+  border-top: 0;
+}
+
+.xs-wb-denied a {
+  color: var(--xs-primary);
+  font-weight: 600;
+}
+
+.xs-wb-denied small {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.xs-wb-code {
+  overflow-wrap: anywhere;
+}
+
+.xs-wb-reasons {
+  margin: 0;
+  padding-left: 18px;
+}
+
+@media (width <= 1279px) {
+  .xs-wb-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (width <= 1100px) {
+  .xs-wb-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (width <= 760px) {
+  .xs-wb-todo {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .xs-wb-todo-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (width <= 560px) {
+  .xs-wb-kpis {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

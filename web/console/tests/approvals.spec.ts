@@ -566,7 +566,9 @@ test.describe("the navigation badge", () => {
     page,
   }) => {
     const calls = await mockWork(page);
-    await signIn(page, "/");
+    // The workbench at "/" reads the review queues itself when it opens, so the badge's
+    // "nothing read yet" state is checked from a page that reads nothing.
+    await signIn(page, "/access/session");
     const badge = sidebar(page).getByRole("button", { name: /审批待办数量/ });
     await expect(badge).toBeVisible();
     // Before anything was read there is no number, only the offer to read it.

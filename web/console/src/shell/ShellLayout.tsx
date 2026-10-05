@@ -6,7 +6,7 @@ import { searchLocation } from "../investigation/search-preset.ts";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { useSession } from "../security/SessionProvider";
 import { Brand } from "./Brand";
-import { breadcrumbs, legacyKinds, pageMeta, visibleNav } from "./nav-model.ts";
+import { breadcrumbs, pageMeta, visibleNav } from "./nav-model.ts";
 import { ShellActionsContext } from "./actions";
 import type { PaletteAction, PaletteResult } from "./palette-classifier.ts";
 import { isPaletteShortcut } from "./shortcut.ts";
@@ -16,8 +16,6 @@ import { SidebarNav } from "./SidebarNav";
 import { Topbar } from "./Topbar";
 import { MOBILE_QUERY, useMediaQuery } from "./use-media-query";
 
-// The legacy pages (and their heavy panels) load on first use, not with the shell.
-const LegacyHost = lazy(() => import("../legacy/LegacyHost"));
 // Overlays load on first use (the palette is also fetched when the browser is idle, so the first
 // Ctrl+K is instant); neither is needed to render the shell.
 const loadPalette = () => import("./CommandPalette");
@@ -50,12 +48,6 @@ export function ShellLayout() {
   const [drawerMounted, setDrawerMounted] = useState(false);
   const [actionsTarget, setActionsTarget] = useState<HTMLElement | null>(null);
   const [titleOverride, setTitleOverride] = useState<string | null>(null);
-  const showsLegacy = legacyKinds.has(meta.kind);
-  // Once mounted the legacy host stays: it owns unconfirmed writes that must survive navigation.
-  const [legacyMounted, setLegacyMounted] = useState(showsLegacy);
-  useEffect(() => {
-    if (showsLegacy) setLegacyMounted(true);
-  }, [showsLegacy]);
 
   const navigate = useCallback(
     (to: string, options?: { completed?: boolean; search?: Readonly<Record<string, string>> }) => {
@@ -203,13 +195,6 @@ export function ShellLayout() {
                   <div className="xs-page-actions" ref={setActionsTarget} />
                 </div>
                 {meta.kind === "not-found" ? <NotFoundPage /> : <Outlet />}
-                {legacyMounted && (
-                  <Suspense fallback={showsLegacy ? <p className="empty">正在加载页面…</p> : null}>
-                    <div hidden={!showsLegacy}>
-                      <LegacyHost pathname={pathname} navigate={navigate} />
-                    </div>
-                  </Suspense>
-                )}
                 <footer className="xs-footer">
                   历史记录用于调查，当前访问资格由服务端独立校验。
                 </footer>

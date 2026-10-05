@@ -1,0 +1,134 @@
+/*
+ * Agent API key administration. Layout only; colours are --xs-* variables (tests/theme.test.ts),
+ * so light, dark and the system preference follow src/theme/tokens.ts.
+ */
+
+.xs-key-name {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xs-key-name small {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.xs-key-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.xs-key-tags .xs-w-pill {
+  white-space: normal;
+}
+
+.xs-key-label {
+  color: var(--xs-ink);
+  font-weight: 600;
+}
+
+/* ---------- Scope editor ---------- */
+.xs-key-scope {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-panel);
+}
+
+.xs-key-scope > legend {
+  padding: 0 6px;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.xs-key-caps {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+}
+
+.xs-key-cap {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xs-key-cap.is-direct {
+  grid-column: 1 / -1;
+  padding: 8px 10px;
+  background: var(--xs-observe-soft);
+  border: 1px solid var(--xs-observe-line);
+  border-radius: var(--xs-radius-control);
+}
+
+.xs-key-cap-name {
+  color: var(--xs-ink);
+  font-weight: 600;
+}
+
+.xs-key-cap-code {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-key-cap-help {
+  padding-left: 24px;
+  color: var(--xs-ink-2);
+  font-size: 12px;
+}
+
+.xs-key-cap-warn {
+  padding-left: 24px;
+  color: var(--xs-ink);
+  font-size: 12px;
+}
+
+.xs-key-problems {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
+/* ---------- One-time secret ---------- */
+.xs-key-secret {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line-strong);
+  border-radius: var(--xs-radius-control);
+}
+
+.xs-key-secret-value {
+  flex: 1 1 260px;
+  min-width: 0;
+  color: var(--xs-ink);
+  font-size: 14px;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.xs-key-secret-footer {
+  justify-content: flex-end;
+}
+
+@media (width <= 760px) {
+  .xs-key-caps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

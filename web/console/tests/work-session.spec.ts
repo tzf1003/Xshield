@@ -434,12 +434,19 @@ test.describe("the approval center follows the roles the server reports", () => 
   });
 
   test("an observer is offered no approval center at all", async ({ page, baseURL }) => {
-    const calls = await open(page, baseURL, "/", ["observer"]);
+    // As the server does: the site list is SystemAdmin's.
+    const calls = await open(page, baseURL, "/", ["observer"], (url) =>
+      url.pathname === "/control/v1/sites" ? refuse(403, "CONTROL_SCOPE_DENIED") : undefined,
+    );
     await expect(page.getByRole("complementary", { name: "后台导航" })).toBeVisible();
     await expect(
       page.getByRole("complementary", { name: "后台导航" }).getByRole("link", { name: "审批中心" }),
     ).toHaveCount(0);
-    expect(sourcesRead(calls)).toEqual([]);
+    // The workbench at "/" asks for the site list (failed applies and approvals for its
+    // "待我处理"); the server refuses an observer and the page shows a role hint. The approval
+    // queues themselves are never read for an observer.
+    await expect(page.getByText("站点清单：服务端拒绝了当前身份")).toBeVisible();
+    expect(sourcesRead(calls)).toEqual(["/control/v1/sites"]);
   });
 
   test("a request filed by the signed-in subject offers no decision, and says why", async ({

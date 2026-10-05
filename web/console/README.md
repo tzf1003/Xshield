@@ -13,7 +13,7 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 - **站点详情**（`/sites/{siteId}/{section}`）：页首是站点 ID、一个词的状态、desired/active 修订、edge 正在服务与已暂存的修订，以及“草稿 → 已校验 → 待审批 → 应用中 → 已生效”的生命周期，失败停在失败的那一步并给出原因与建议；十个分类共享同一份草稿。任何分类里有未保存修改时，底部变更栏显示数量与所在分类，提供“放弃”“查看差异”（字段名加修改前/后）和“保存草稿”。路由用表格加抽屉编辑，可搜索、复制，最多 256 条。保存只创建新修订；是否需要审批、何时生效由“发布”页说明。
 - **发布**：左右并排显示 edge 正在服务的修订与已暂存的修订（提交人、时间、配置摘要）、“为什么需要审批”、发布操作、修订历史、手动健康读取，以及 SystemAdmin 的“危险操作”。服务端只告诉控制台“需要/不需要审批”，原因由控制台用服务端同一套规则（`assess_change_risk` 的 TypeScript 移植）从 edge 在用的修订与暂存修订的已存储配置复算，逐项列出涉及的字段；复算与服务端不一致时以服务端结论为准并如实说明。验证配置直接执行；批准并应用、应用期望版本、回滚上一版本都先弹出确认框，展示将发布的变更和随后会发生什么，再走与以前相同的冻结写入。批准请求带 `X-Xshield-Expected-Config-Digest`，值是已审阅修订的摘要（与状态里的摘要不一致时拒绝提交）。回滚 API 没有目标参数：有待生效变更时服务端恢复 edge 在用的修订，对话框点名并展示被放弃的变更；否则服务端恢复“先前生效过的修订”，控制台读不到生效顺序，只能说明规则，并提供较早修订的对比预览（预览不决定目标）。回滚总是创建**新修订**。批准和删除需要两分钟内的 MFA 再认证：对话框提示是否有效，被拒绝后请求保持冻结，再认证后可原样重试。删除站点还要求逐字输入站点 ID。
 
-“审计发布状态”由 `AuditAdministrator` 手动读取 `GET /control/v1/audit/health`。它展示一个配置 audit journal 到索引目标的封存段发布快照：观察时间、目标、保留期、关闭/已发布/待发布/未封存段、缺口和连续水位；界面不自动轮询。该观察不判断业务准入、全部 Outbox 状态或系统整体健康。
+“审计发布状态”（`/operations/audit`）由 `AuditAdministrator` 手动读取 `GET /control/v1/audit/health`：打开页面不读取，点击“读取发布状态”才读，之后只在“手动刷新发布状态”时再读。它展示一个配置 audit journal 到索引目标的封存段发布快照：观察时间、目标、保留期、关闭/已发布/待发布/未封存段（未封存段计入待发布段）、缺口和连续水位；没有该角色时显示角色提示，服务端拒绝（403）同样显示为提示而不是错误。该观察不判断业务准入、全部 Outbox 状态或系统整体健康。
 
 “校准报告”由 `AuditAdministrator` 手动读取 `GET /control/v1/calibration-reports/{report_id}`。页面严格校验 `calr_` UUIDv7，并只展示受限 projection 的冻结元数据与正文 `active`/`deleted` tombstone；缺失或跨范围保留为当前范围未找到。正文 tombstone 不是读取授权、质量结论、阈值/策略发布或业务资格。该页面不请求或显示正文、样本、标签、概率、指标、提示词、存储信息或内容读取能力，也不自动轮询。
 
@@ -24,6 +24,18 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 - **旧地址**：`/evidence/access` 重定向到 `/approvals?moved=access`，`/evidence/holds`、`/evidence/exports` 重定向到 `/cases?moved=holds|exports`，页面顶部显示一次可关闭的说明。
 - **命令面板**：`case_` 打开案件详情；`access_`、`export_` 打开审批中心并选中该项（`access_` 另可预填结构化检索）；`job_` 打开 `/cases/jobs/{job_id}` 的任务状态对话框（也可预填检索）；`artifact_` 进入案件工作台；`ev_` 的保留锁解释只对 `AuditAdministrator` 显示。
 - **审批数量徽标**：侧栏“审批中心”旁的数字是最近一次读取到的待办数量；有来源读取失败或还有后续页时显示 `N+`（下限）。点击数字只重新读取各来源第一页，不跳转；没有自动轮询，会话结束即清空。
+
+工作台与运维页面（第 4 阶段重做，取代旧的概览卡片、旧页面宿主中的审计发布状态、任务查询和 API Key 面板，以及旧的权限中心）：
+
+- **工作台**（`/`）：回答“什么需要我处理、有没有地方着火”。打开时读取一次 `GET /control/v1/workbench/overview`，再按角色读取“待我处理”的来源（站点清单首页 `GET /control/v1/sites`——服务端只允许 SystemAdmin；SensitiveEvidenceApprover 的原文访问与导出待办），每个来源独立失败：失败显示自己的横幅和重试，403 显示为角色提示，其余来源照常显示。之后不自动刷新，也不在窗口聚焦或网络恢复时重读。
+  - 顶部四个指标（正在服务的站点、待审批修订、应用失败、审计发布）各自写明来源与观察时间；读不到的来源显示“—”和原因，从不显示为 0。快照为部分结果或不可用时，页面说明已知原因（例如只为 SystemAdmin 投影站点列表、审计观察只给 AuditAdministrator）。快照里的 `queues`、`recent_activity` 目前总是空数组，页面不为它们渲染空面板。
+  - “待我处理”合并应用失败、待审批的站点修订、待你审批的原文访问与导出，以及本会话结果未知的写入（排在最前，可“原样重试”并前往原页面；创建或轮换 API Key 只在 API Key 页面重试，因为明文只在那里显示一次），每行链接到处理它的页面。合并顺序沿用审批中心的 `work/inbox.ts`。
+  - “站点健康”表格：edge 与其耐久审计屏障是读取快照时的实时探测（最长 2 秒）；源站是**最近一次持久化的健康读取**，显示“上次观察 …”与它自己的时间；从未读取过显示“从未观察”。每行的“刷新健康”就是站点健康读取（服务端会审计并写入一条观察记录，按钮上写明）。行点击进入站点概览；“刷新快照”只重读快照。
+  - 侧栏：审计发布卡片（AuditAdministrator，其余角色显示角色提示）、“最近被拒绝的请求”（Investigator，**只在点击后**执行一次结构化检索：`event_type=request.completed`、结果 DENY、最近 24 小时、最新 10 条，显示扫描统计，未知统计显示“未知”），以及按角色排序的快捷入口。
+- **审计发布状态**（`/operations/audit`）：见上文；结果卡片显示四个段计数、发布进度条、字节数、连续水位及其覆盖范围说明。
+- **后台任务**（`/operations/jobs`）：按任务 ID 查询，输入经命令面板同一套分类器检查——粘贴案件、请求等其他 ID 时说出它是什么并提供它自己的页面，格式不对时说明 `job_` 加小写 UUIDv7；有效 ID 写入地址 `?job=`，读取一次，之后只在“重新读取”时再读。结果卡片显示状态、案件链接、计数、检查点和原因码的人话说明；未知、他人或跨范围的任务统一显示“未找到”。案件页没有在内存中公开“本会话启动的任务”清单，所以本页不列出它们（从案件的“分析任务”页签查看）。
+- **API Key**（`/admin/api-keys`，侧栏“运维与治理”下，仅 KeyAdministrator/SystemAdmin 可见）：见下文“管理 API Key 页面”。
+- **权限中心**（`/access/session`）：主体、租户/站点范围、会话类型、绝对与闲置到期（带相对时间）、最近再认证、MFA 再认证状态与剩余时间（本地倒计时，仅作提示），以及每个角色一行“能做什么”和它解锁的页面（取自导航目录）。不显示 CSRF 令牌等任何秘密；“刷新会话信息”经 guarded 层重读 `GET /control/v1/session`。
 
 ## 本地运行
 
@@ -45,7 +57,7 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 页面为 `http://127.0.0.1:55173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
-代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、导出列表 `GET /control/v1/exports?view=mine|review`（只接受这两个视图和可选签名游标）、站点配置 `GET/PUT /control/v1/site-config`、精确 `POST /control/v1/search`、`POST /control/v1/causality` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。OIDC callback 保留经服务端校验的授权响应 query；其他身份路径拒绝 query。代理只转发 Xshield session/state Cookie，剥离所有其他 Cookie；`Set-Cookie` 仅允许来自登录开始、callback、reauth-start 与 logout。代理不注入管理身份且不跟随重定向。正常开发启动使用 OIDC 会话；只有 Playwright 配置会设置 `VITE_XSHIELD_E2E_MACHINE_LOGIN=1` 启用合成 Bearer 表单，生产构建不会提供该入口。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
+代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、导出列表 `GET /control/v1/exports?view=mine|review`（只接受这两个视图和可选签名游标）、Agent API Key 管理（`GET/POST /control/v1/agent-api-keys`，以及 `POST /control/v1/agent-api-keys/{key_id}/revoke|rotate`，均不带查询串）、站点配置 `GET/PUT /control/v1/site-config`、精确 `POST /control/v1/search`、`POST /control/v1/causality` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。OIDC callback 保留经服务端校验的授权响应 query；其他身份路径拒绝 query。代理只转发 Xshield session/state Cookie，剥离所有其他 Cookie；`Set-Cookie` 仅允许来自登录开始、callback、reauth-start 与 logout。代理不注入管理身份且不跟随重定向。正常开发启动使用 OIDC 会话；只有 Playwright 配置会设置 `VITE_XSHIELD_E2E_MACHINE_LOGIN=1` 启用合成 Bearer 表单，生产构建不会提供该入口。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
 ## 查询与安全语义
 
@@ -138,13 +150,13 @@ API 同样保持 `private, no-store`。生产代理仅向指定控制服务传�
 - `src/shell`：侧栏、顶栏、移动抽屉、命令面板及其 ID 分类器、MFA 再认证提示、“待确认操作”提示和审批待办数量徽标（`ApprovalNavBadge`）。
 - `src/pages`：登录、概览、权限中心、“页面不存在”和站点页面（`pages/sites`：列表、详情与分类、新建向导、发布页、路由抽屉、变更栏）。站点页面按路由懒加载，不进入首屏脚本。案件（`pages/cases`：列表、详情和五个页签、对话框）与审批中心（`pages/approvals`：待我审批、我的申请、详情区）同样按路由懒加载。
 - `src/sites`：站点的不含 React 的领域层——配置模型与草稿、字段差异引擎（`model/diff.ts`）、审批风险推算（`model/risk.ts`，`assess_change_risk` 的移植）、生命周期（`model/lifecycle.ts`）、发布规则（`model/release.ts`：回滚计划、审批摘要、操作可用性）、校验、角色可见性（`access.ts`）、写入的种类与结果文案，以及读取/写入 hook（`state/`，建立在 `src/security` 的 guarded 读取和冻结写入上）。
-- `src/ui`：跨页面共享的领域组件和词典——状态胶囊、可复制的 ID、时间戳、问题提示，以及原因码词典 `reason-codes.ts`（每个站点/应用/edge/健康原因码的人话说明与下一步；单测扫描 Rust 源码，缺任何一个码都会失败）。
+- `src/ui`：跨页面共享的领域组件和词典——状态胶囊、可复制的 ID、时间戳、问题提示，以及原因码词典 `reason-codes.ts`（每个站点/应用/edge/健康原因码的人话说明与下一步；单测扫描 Rust 源码，缺任何一个码都会失败）和 `operation-reasons.ts`（工作台 `WORKBENCH_*`、API Key、浏览器会话/OIDC、审计发布读取与案件分析任务的原因码，带简短标签；`tests/operation-reasons.test.ts` 扫描 `workbench.rs`、`management_api_key.rs`、`api_key_authz.rs`、`identity.rs` 及 `lib.rs`、`jobs.rs` 中的相关码，`WORKBENCH_*` 缺中文标签或说明即失败）。
 - `src/work`：案件与审批共用的不含路由的部分——读取规格与键（`queries.ts`）、写入 hook（`use-write.ts`，建立在 `useGuardedMutation` 与待确认操作登记之上）、冻结请求面板和对话框、原文/导出详情与决定表单（`AccessDetail`、`ExportDetail`）、下载（`downloads.ts`）、原地 MFA 再认证（`step-up.ts`、`step-up-window.ts`）、待办合并与排序（`inbox.ts`）、状态词典（`status.ts`）、保留期限（`holds.ts`）、审批数量徽标的存储（`approval-badge.ts`），以及 `work.css`。
-- `src/legacy/LegacyHost.tsx`：尚未迁移的调查页面和 API Key 页面；由外壳懒加载并保持挂载，导航不会丢失已冻结的写入。
+- `src/operations`：工作台与运维页面的不含路由部分——观察值的诚实呈现（`observation.ts`）、指标推导（`kpis.ts`）、“待我处理”的来源与排序（`todo.ts`，复用 `work/inbox.ts`）、冻结写入的归属页面（`operation-home.ts`）、被拒绝请求的检索计划（`denied.ts`）、角色说明与快捷入口（`roles.ts`）、API Key 的能力目录与表单校验（`api-keys.ts`）、读取与写入（`key-writes.ts`）以及一次性明文的内存存放（`key-secret.ts`）。页面在 `src/pages/workbench`、`pages/operations`、`pages/admin`、`pages/access`，均按路由懒加载。旧页面宿主 `src/legacy/LegacyHost.tsx`（以及 `panels.tsx`、`OverviewWorkbench.tsx`、`ManagementApiKeyPanel.tsx`）已删除：每个页面路由都渲染自己的组件，路由测试会检查这一点。
 
 antd 的运行时样式使用 `index.html` 中 `xshield-csp-nonce` meta 的 nonce（仓库内为空，由部署模板写入同一个值，并须在响应 CSP 的 `style-src` 中允许它；上文的示例响应头没有展开该 nonce）。
 
-控制台重做的边界：第 0 阶段（基础设施）提供会话、guarded 数据层和待确认操作登记；第 1 阶段把全部站点页面（列表、详情、新建向导、发布、路由抽屉）迁到这套数据层——读取带 epoch、透传取消并逐响应核对 tenant/site 与所请求的站点 ID，不自动轮询（健康读取只在点击时发生，每次都会被服务端审计）；写入在发送前冻结方法、路径、幂等键和正文，结果未知只能原样重试，并出现在“待确认操作”里。站点草稿只在页面内存中：同一站点内切换分类、前进/后退都保留，离开站点或刷新会清空（离开前有确认），不写任何 Web Storage。第 3 阶段把案件工作台和审批中心迁到同一数据层，写入同样登记到“待确认操作”。调查和 API Key 页面仍沿用各自的请求取消、写入冻结和离页提醒，尚未登记到“待确认操作”。命令面板只导航或预填，不提交查询。`window.__xshieldE2E` 是 Playwright 夹具，只在显式启用机器凭证登录的本地开发构建中存在，生产构建不包含。
+控制台重做的边界：第 0 阶段（基础设施）提供会话、guarded 数据层和待确认操作登记；第 1 阶段把全部站点页面（列表、详情、新建向导、发布、路由抽屉）迁到这套数据层——读取带 epoch、透传取消并逐响应核对 tenant/site 与所请求的站点 ID，不自动轮询（健康读取只在点击时发生，每次都会被服务端审计）；写入在发送前冻结方法、路径、幂等键和正文，结果未知只能原样重试，并出现在“待确认操作”里。站点草稿只在页面内存中：同一站点内切换分类、前进/后退都保留，离开站点或刷新会清空（离开前有确认），不写任何 Web Storage。第 3 阶段把案件工作台和审批中心迁到同一数据层，写入同样登记到“待确认操作”。第 2 阶段迁移了调查页面；第 4 阶段迁移了工作台、审计发布状态、后台任务、API Key 与权限中心，API Key 的创建、轮换和撤销同样登记到“待确认操作”，旧页面宿主已删除。命令面板只导航或预填，不提交查询。`window.__xshieldE2E` 是 Playwright 夹具，只在显式启用机器凭证登录的本地开发构建中存在，生产构建不包含。
 
 ## 验证
 
@@ -218,7 +230,25 @@ Rust 跨语言测试启动真实 Axum 路由、复用合成 ClickHouse 行和管
     python3 scripts/test_dev_postgres_migrations.py
     bash scripts/test_gateway_dynamic_listeners.sh
 
-Playwright 默认使用 5175 的明确机器 fixture 和 5176 的浏览器会话 fixture 两套入口（可用 XSHIELD_E2E_PORT 改为 N 与 N+1）；业务 API 响应为合成契约。站点页面的用例集中在 `tests/sites-list`、`site-workspace`（生命周期、变更栏、差异、200 条路由、移动端与可访问性）、`site-wizard`、`site-release`、`site-release-session`（Cookie 会话下的 MFA 与角色矩阵）和 `site-roles`；单测 `reason-codes.test.ts` 会扫描 Rust 源码里的站点/应用/edge 稳定码，词典缺任何一个就失败。test_console_oidc.mjs 另行访问 55173，执行真实本地 OIDC 登录、站点列表、详情刷新、资格账本、只读权限中心及 1440×1000 / 390×844 布局检查，截图写入 /tmp/xshield-console-smoke。它只执行管理读取，不创建业务站点、不保存 Cookie。
+Playwright 默认使用 5175 的明确机器 fixture 和 5176 的浏览器会话 fixture 两套入口（可用 XSHIELD_E2E_PORT 改为 N 与 N+1）；业务 API 响应为合成契约。站点页面的用例集中在 `tests/sites-list`、`site-workspace`（生命周期、变更栏、差异、200 条路由、移动端与可访问性）、`site-wizard`、`site-release`、`site-release-session`（Cookie 会话下的 MFA 与角色矩阵）和 `site-roles`；单测 `reason-codes.test.ts` 会扫描 Rust 源码里的站点/应用/edge 稳定码，词典缺任何一个就失败。工作台与运维页面的用例在 `tests/workbench`（不轮询、逐来源失败隔离、“—”不是 0、上次观察、点击才检索、从工作台原样重试、范围偏差断开）、`operations-session`（按角色的来源、权限中心、浅色/深色 axe 扫描）、`operations-pages`（审计发布、任务查询、390 像素布局）和 `api-keys-session`（一次性明文、本地校验、拒绝说明、创建/轮换/撤销的结果未知与原样重试、角色提示）；单测 `operation-reasons`、`operations-model`、`workbench-model` 与 `api-keys-model` 覆盖原因码扫描、观察值呈现、指标推导、范围编辑校验和 Key 客户端的严格解码。test_console_oidc.mjs 另行访问 55173，执行真实本地 OIDC 登录、站点列表、详情刷新、资格账本、只读权限中心及 1440×1000 / 390×844 布局检查，截图写入 /tmp/xshield-console-smoke。它只执行管理读取，不创建业务站点、不保存 Cookie。
 # 管理 API Key 页面
 
-控制台通过后端管理 API 管理 Agent Key。页面只向具备 KeyAdministrator/SystemAdmin 的浏览器会话展示创建、scope、过期、撤销和轮换操作；明文只在创建响应中展示一次。
+`/admin/api-keys` 只对带 CSRF 的 OIDC 浏览器会话、且持有 KeyAdministrator 或 SystemAdmin 时管理 Key；机器凭证测试模式显示说明且不发起读取（服务端对静态 Bearer 和任何 Key 都返回 403 `CONTROL_SCOPE_DENIED`），其他角色显示角色提示。服务端是最终授权方。
+
+- **列表**：打开时读取一次 `GET /control/v1/agent-api-keys`，之后只在“刷新”或自己确认的写入之后重读。列表只含元数据：名称、Agent 主体、前缀、状态（有效/已过期/已撤销；过期按浏览器时间判断并注明）、到期、最近使用（每分钟最多记录一次）。**服务端列表不返回范围**，所以只有本次会话中创建或轮换的 Key 显示签发时的范围，其余显示“列表不含范围”。列表中出现其他租户的 Key 时断开会话。
+- **创建**：名称、Agent 主体、到期（7/30/90 天预设，90 天预设在服务端上限内留 10 分钟余量，或自定义本地时间）和范围行；每行是一个站点（从站点清单首页选择，读不到时可直接输入站点 ID）或“整个租户（仅创建站点）”，再勾选能力。表单按服务端的 400 规则先在本地检查（主体 1–128 个 ASCII 字符、以字母或数字开头；名称不含控制/零宽/双向覆盖字符和首尾空白；`site.create` 只能在整个租户行、整个租户行不能搭配其他能力；同一站点只需要一行；最多 32 行），不合规时不发送。签发者只能授予自己能行使的能力：当前会话缺少某能力需要的角色时，表单提前警告服务端会以 403 `CONTROL_API_KEY_SCOPE_FORBIDDEN` 拒绝整个请求；只持有 KeyAdministrator 的会话不能签发（创建按钮禁用并说明），但可以撤销。
+- **一次性明文**：创建或轮换成功后，明文只在专用对话框里出现一次：可复制，必须勾选“我已把明文保存到安全位置”才能关闭，Esc、遮罩和关闭图标都不能关掉它；关闭时从内存中删除。明文从不进入 TanStack 缓存、待确认操作登记、地址、页面标题、元素属性、日志或浏览器存储；会话结束（闲置、退出、401、范围不符、离开页面）时一并清除。
+- **轮换与撤销**：轮换要求与创建相同的完整请求体（服务端在一个事务里撤销旧 Key 并签发新 Key，被拒绝时旧 Key 保持有效），由于列表不返回旧范围，需要重新选择；撤销先确认。三种写入都在发送前冻结方法、路径、幂等键和正文，结果未知时只能原样重试。注意服务端不按幂等键对“创建”去重：结果未知后重试可能再创建一把 Key，页面会说明这一点，并允许在核对列表后放弃这次请求；轮换和撤销的重试只会生效一次（之后得到 404 `CONTROL_API_KEY_NOT_FOUND`）。
+- **能力矩阵（控制台的说法）**：
+
+| 能力 | 控制台名称 | Key 能做什么 | 签发者须持有 |
+|---|---|---|---|
+| `site.read` | 读取站点 | 列出站点，读取配置、状态、修订和工作台快照（只含持有该能力的站点） | SystemAdmin 与 Observer |
+| `site.health.read` | 读取健康 | 读取站点健康观察（每次读取写入一条审计与观察记录） | Observer |
+| `site.config.write` | 修改配置 | 为已存在的站点保存新修订，不能创建站点 | SystemAdmin |
+| `site.config.validate` | 校验配置 | 对已保存配置执行服务端校验 | PolicyAuthor |
+| `site.config.apply_direct` | 直接应用 | 不经另一位审批人，把待审批的修订直接发布到 edge；以 Key ID 与主体写审批记录和审计（勾选框旁写明后果） | ReleaseOperator 与 PolicyApprover |
+| `site.rollback` | 回滚 | 以先前生效的修订创建新修订（仍按审批规则评估） | ReleaseOperator |
+| `site.create` | 创建站点 | 新建站点，不能读取或覆盖已存在的站点；只能授予整个租户（`__tenant__`） | SystemAdmin（租户范围） |
+
+Key 没有角色，永远不能访问调查、证据、案件、导出、会话或 Key 管理接口，也不能删除或批准站点。错误码按词典解释：400 `CONTROL_API_KEY_SCOPE_INVALID`（主体、名称或范围不合规）、400 `CONTROL_API_KEY_EXPIRY_INVALID`、403 `CONTROL_API_KEY_SCOPE_FORBIDDEN`、404 `CONTROL_API_KEY_NOT_FOUND`、503 `CONTROL_API_KEY_UNAVAILABLE`（写入结果未知）、429 `CONTROL_RATE_LIMITED`；401 `CONTROL_API_KEY_INVALID` 是 Agent 使用无效 Key 时得到的，不出现在管理页面。

@@ -240,6 +240,19 @@
   white-space: nowrap;
 }
 
+/* antd's status tag colours fall below 4.5:1 here (its own rule is .ant-tag.ant-tag-x:not(...).ant-tag-filled, so this one needs the ancestor to win); the console palette keeps 4.5:1 in both themes. */
+.xs-topbar .xs-chip.ant-tag.ant-tag-warning:not(.ant-tag-disabled) {
+  color: var(--xs-observe);
+  background: var(--xs-observe-soft);
+  border-color: var(--xs-observe-line);
+}
+
+.xs-topbar .xs-chip.ant-tag.ant-tag-success:not(.ant-tag-disabled) {
+  color: var(--xs-allow);
+  background: var(--xs-allow-soft);
+  border-color: var(--xs-allow-line);
+}
+
 .xs-short,
 .xs-nav-trigger {
   display: none;
@@ -587,6 +600,18 @@
   .xs-palette-label,
   .xs-user-name {
     display: none;
+  }
+
+  /* With the pending-operations chip in the header the crumb is squeezed: one line, ellipsis. */
+  .xs-breadcrumb ol {
+    flex-wrap: nowrap;
+  }
+
+  .xs-breadcrumb ol > li:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .xs-palette .ant-modal {

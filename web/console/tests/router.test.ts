@@ -152,6 +152,20 @@ test("every page kind the shell knows is reachable through exactly the declared 
   }
 });
 
+test("every page route renders its own component; only redirects and the catch-all do not", () => {
+  // The legacy host that used to render several pages beside the router is gone, so a page
+  // route without a component would render an empty page under its title.
+  const { pages } = createAppRouter(components);
+  for (const page of pages) {
+    const options = (
+      page.route as unknown as { options: { component?: unknown; beforeLoad?: unknown } }
+    ).options;
+    if (page.kind === "not-found") continue;
+    if (options.beforeLoad !== undefined && options.component === undefined) continue;
+    assert.ok(options.component !== undefined, `${page.path} renders nothing`);
+  }
+});
+
 test("the router stores nothing in the browser and restores no scroll state", () => {
   const { router } = createAppRouter(components);
   assert.equal(router.options.scrollRestoration ?? false, false);

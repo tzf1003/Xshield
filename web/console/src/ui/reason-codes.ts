@@ -1,4 +1,5 @@
 import { messages } from "../api-contract.ts";
+import { operationReason } from "./operation-reasons.ts";
 
 /**
  * Human text and a recommended next action for every site, apply, edge and health reason code
@@ -392,6 +393,9 @@ export function reasonText(code: string | null | undefined): ReasonView {
   if (Object.hasOwn(reasonDictionary, code)) {
     return { ...reasonDictionary[code as ReasonCode], code, known: true };
   }
+  // Workbench, API-key, session, audit-publication and job codes (src/ui/operation-reasons.ts).
+  const operation = operationReason(code);
+  if (operation) return { ...operation, code, known: true };
   if (Object.hasOwn(messages, code)) {
     return {
       code,
