@@ -2,6 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
 import { mockControl } from "./control-mock";
 import { REQUEST_ID } from "./fixtures";
+import { pickRange } from "./investigation-helpers";
 import { openView } from "./navigation";
 import { mockShellApi, SCOPE, signIn } from "./shell-helpers";
 
@@ -62,7 +63,7 @@ const sitesList = {
 
 for (const scheme of ["light", "dark"] as const) {
   test.describe(`accessibility (${scheme})`, () => {
-    test.use({ colorScheme: scheme });
+    test.use({ colorScheme: scheme, timezoneId: "UTC" });
 
     test("sign-in screen", async ({ page }) => {
       await mockShellApi(page);
@@ -121,6 +122,31 @@ for (const scheme of ["light", "dark"] as const) {
       expect(await serious(page)).toEqual([]);
       await page.getByRole("button", { name: /更多筛选/ }).click();
       await expect(page.getByLabel("操作 ID", { exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("structured search with conditions and results", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, "/access/session");
+      await openView(page, "search");
+      await expect(
+        page.getByRole("heading", { name: "结构化事件检索", exact: true }),
+      ).toBeVisible();
+      // The form with a condition, the open column picker and the unfilled range hint.
+      await page.getByLabel("条件值", { exact: true }).fill(REQUEST_ID);
+      await page.getByRole("button", { name: "添加条件", exact: true }).click();
+      await expect(page.getByRole("list", { name: "已添加的检索条件" })).toContainText(REQUEST_ID);
+      expect(await serious(page)).toEqual([]);
+      await pickRange(page, "2026-09-20T00:00", "2026-09-21T00:00");
+      await page.getByRole("button", { name: "检索事件", exact: true }).click();
+      await expect(page.locator(".ant-table-row")).toHaveCount(25);
+      expect(await serious(page)).toEqual([]);
+      await page.getByRole("button", { name: "选择列", exact: true }).click();
+      await expect(page.getByRole("checkbox", { name: "Trace", exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+      await page.keyboard.press("Escape");
+      await page.getByText("查看已提交计划", { exact: true }).click();
+      await expect(page.getByRole("region", { name: "已提交查询计划" })).toBeVisible();
       expect(await serious(page)).toEqual([]);
     });
 

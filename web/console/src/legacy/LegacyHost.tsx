@@ -13,27 +13,22 @@ import type {
   ModelCallResponse,
 } from "../api";
 import { routeQueryKind, routeTarget } from "../admin-routes";
+import type { SearchPreset } from "../investigation/search-preset.ts";
+import { useInvestigationNavigate } from "../investigation/navigation.ts";
 import type { BindingResponse, GrantResponse } from "../ledger";
 import {
   AgentRunOverview,
   ArtifactDetail,
   AuditHealthPanel,
   CalibrationReportPanel,
-  EventDetail,
   ModelCallListPanel,
   ModelCallOverview,
 } from "../panels";
-import { validateCausalityPlan, validateSearchPlan } from "../search";
-import type { CausalityResponse, SearchPlan, SearchResponse } from "../search";
-import type { SearchPreset } from "../SearchPanel";
 import { useSession } from "../security/SessionProvider";
 import { unauthorizedNotice } from "../security/session-store.ts";
 
 // Heavy panels load the first time their page is opened. The four workbenches below keep their
 // unconfirmed-write state across navigation, so once mounted they stay mounted (hidden).
-const SearchPanel = lazy(() =>
-  import("../SearchPanel").then((module) => ({ default: module.SearchPanel })),
-);
 const LedgerPanel = lazy(() =>
   import("../LedgerPanel").then((module) => ({ default: module.LedgerPanel })),
 );
@@ -121,24 +116,16 @@ export type LegacyHostProps = {
   /** Current router pathname; the host keeps no routing state of its own. */
   pathname: string;
   navigate: (path: string, options?: { completed?: boolean }) => void;
-  /** Event search requested from outside the host (the command palette). */
-  searchIntent: { preset: SearchPreset; nonce: number } | null;
-  onSearchIntentConsumed: () => void;
 };
 
 /** Kinds whose content is a routed page now; the host renders nothing of its own for them. */
-const routedKinds: ReadonlySet<string> = new Set(["request"]);
+const routedKinds: ReadonlySet<string> = new Set(["request", "search"]);
 
 /**
  * The pre-redesign pages, kept working while they are rebuilt one by one on the routed data
  * layer. The shell renders it once and keeps it mounted so unconfirmed writes survive navigation.
  */
-export default function LegacyHost({
-  pathname,
-  navigate: go,
-  searchIntent,
-  onSearchIntentConsumed,
-}: LegacyHostProps) {
+export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) {
   // The session layer owns the ControlClient, the confirmed scope, roles, idle expiry and the
   // epoch shared with every TanStack query. This host keeps only per-view state.
   const session = useSession();
@@ -174,11 +161,6 @@ export default function LegacyHost({
   const [requestId, setRequestId] = useState("");
   const queryKind = routeQueryKind(pathname);
   const [ledger, setLedger] = useState<GrantResponse | BindingResponse | null>(null);
-  const [searchPreset, setSearchPreset] = useState<SearchPreset | null>(null);
-  const [searchPresetVersion, setSearchPresetVersion] = useState(0);
-  const [searchPlan, setSearchPlan] = useState<SearchPlan | null>(null);
-  const [search, setSearch] = useState<SearchResponse | null>(null);
-  const [causality, setCausality] = useState<CausalityResponse | null>(null);
   const [model, setModel] = useState<ModelCallResponse | null>(null);
   const [agentRun, setAgentRun] = useState<AgentRunResponse | null>(null);
   const [modelListPlan, setModelListPlan] = useState<ModelCallListPlan | null>(null);
@@ -189,7 +171,6 @@ export default function LegacyHost({
     null,
   );
   const [artifact, setArtifact] = useState<ArtifactResponse | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<Partial<Record<Channel, boolean>>>({});
   const [problems, setProblems] = useState<Partial<Record<Channel, Problem>>>({});
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
@@ -206,11 +187,7 @@ export default function LegacyHost({
     setJob(null);
     setCalibrationReport(null);
     setLedger(null);
-    setSearchPlan(null);
-    setSearch(null);
-    setCausality(null);
     setArtifact(null);
-    setSelected(null);
     setProblems({});
     setBusy({});
   }, []);
@@ -223,15 +200,14 @@ export default function LegacyHost({
       store.onDisconnect(() => {
         clearResults();
         setRequestId("");
-        setSearchPreset(null);
         setSessionNotice(null);
       }),
     [store, clearResults],
   );
   const disconnect = session.disconnect;
 
-  const pendingPreset = useRef<SearchPreset | null>(null);
   const navigate = useCallback((path: string, completed = false) => go(path, { completed }), [go]);
+  const investigation = useInvestigationNavigate();
 
   // Leaving the page invalidates every in-flight response before another view can render.
   const previousPath = useRef(pathname);
@@ -241,22 +217,8 @@ export default function LegacyHost({
     previousPath.current = pathname;
     clearResults();
     setRequestId("");
-    const preset = pendingPreset.current;
-    pendingPreset.current = null;
-    if (preset && routeQueryKind(pathname) === "search") {
-      setSearchPreset(preset);
-      setSearchPresetVersion((version) => version + 1);
-    } else {
-      setSearchPreset(null);
-    }
   }, [pathname, clearResults]);
 
-  // A search requested from outside (the command palette) is applied once the session is live.
-  useEffect(() => {
-    if (!searchIntent || !connected) return;
-    prepareSearchHistory(searchIntent.preset);
-    onSearchIntentConsumed();
-  }, [searchIntent, connected]);
   useEffect(() => {
     const target = routeTarget(pathname, queryKind);
     if (target) setRequestId(target);
@@ -355,7 +317,6 @@ export default function LegacyHost({
   function query(event: FormEvent) {
     event.preventDefault();
     if (
-      queryKind === "search" ||
       queryKind === "case" ||
       queryKind === "access" ||
       queryKind === "hold" ||
@@ -460,7 +421,6 @@ export default function LegacyHost({
   }
   function openTarget(kind: "request" | "binding" | "model" | "agent", id: string) {
     clearResults();
-    setSearchPreset(null);
     const route =
       kind === "request"
         ? `/investigation/requests/${id}`
@@ -471,48 +431,10 @@ export default function LegacyHost({
             : `/investigation/bindings/${id}`;
     navigate(route);
   }
+  /** Opens the search page with one condition filled in; nothing is queried until you submit. */
   function prepareSearchHistory(preset: SearchPreset) {
     clearResults();
-    if (routeQueryKind(pathname) === "search") {
-      setSearchPreset(preset);
-      setSearchPresetVersion((version) => version + 1);
-      setRequestId("");
-      return;
-    }
-    pendingPreset.current = preset;
-    navigate("/investigation/search");
-  }
-  function searchEvents(value: unknown, cursor?: string) {
-    clearResults();
-    void run(
-      "query",
-      (api, signal) => {
-        const plan = validateSearchPlan(value);
-        setSearchPlan(plan);
-        return api.search(plan, cursor, signal);
-      },
-      (response) => {
-        setSearch(response);
-        setSelected(response.events[0]?.event_id ?? null);
-      },
-    );
-  }
-  function loadCausality(value: unknown) {
-    setCausality(null);
-    void run(
-      "query",
-      (api, signal) => {
-        const plan = validateCausalityPlan(value);
-        return api.causality(plan, signal);
-      },
-      (response) => setCausality(response),
-    );
-  }
-  function invalidateCausality() {
-    operations.current.query += 1;
-    setCausality(null);
-    setBusy((value) => ({ ...value, query: false }));
-    setProblems((value) => ({ ...value, query: undefined }));
+    investigation.openSearch(preset);
   }
   function openArtifact(id: string) {
     setArtifact(null);
@@ -522,57 +444,22 @@ export default function LegacyHost({
       (response) => setArtifact(response),
     );
   }
-  const event = search?.events?.find((value) => value.event_id === selected);
-  const relatedEvents = search?.events ?? (event ? [event] : []);
+  // Evidence metadata for the case workbench; events are shown by the routed investigation pages.
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
       <div className="panel-heading">
-        <h2>{artifact || busy.artifact || problems.artifact ? "证据详情" : "事件详情"}</h2>
-        {(artifact || problems.artifact || busy.artifact) && (
-          <button className="text-button" onClick={clearArtifact}>
-            {queryKind === "case" ? "关闭详情" : "返回事件"}
-          </button>
-        )}
+        <h2>证据详情</h2>
+        <button className="text-button" onClick={clearArtifact}>
+          关闭详情
+        </button>
       </div>
       <Failure problem={problems.artifact ?? null} />
       {busy.artifact ? (
         <p className="empty" role="status">
           正在读取证据元数据…
         </p>
-      ) : artifact ? (
-        <ArtifactDetail response={artifact} />
       ) : (
-        !problems.artifact &&
-        (event ? (
-          <EventDetail
-            event={event}
-            relatedEvents={relatedEvents}
-            onOpen={openArtifact}
-            onRequest={(id) => openTarget("request", id)}
-            onModelCall={(id) => openTarget("model", id)}
-            onPreviousEvent={(id) => prepareSearchHistory({ kind: "event_id", value: id })}
-            onFollowEvent={(id) => prepareSearchHistory({ kind: "caused_by_event_id", value: id })}
-            onCausalEvent={(id) => {
-              clearArtifact();
-              invalidateCausality();
-              if (relatedEvents.some((item) => item.event_id === id)) {
-                setSelected(id);
-              } else {
-                prepareSearchHistory({ kind: "event_id", value: id });
-              }
-            }}
-            onTraceId={(traceId) => prepareSearchHistory({ kind: "trace_id", value: traceId })}
-            causality={causality}
-            causalityBusy={Boolean(busy.query)}
-            causalityProblem={problems.query ?? null}
-            onCausalityEdit={() => {
-              invalidateCausality();
-            }}
-            onCausalitySubmit={loadCausality}
-          />
-        ) : (
-          <p className="empty">选择一条事件或证据查看详情。</p>
-        ))
+        artifact && <ArtifactDetail response={artifact} />
       )}
     </aside>
   );
@@ -719,29 +606,7 @@ export default function LegacyHost({
         {queryKind === "case" ||
         queryKind === "hold" ||
         queryKind === "access" ||
-        queryKind === "export" ? null : queryKind === "search" ? (
-          <Deferred>
-            <SearchPanel
-              key={searchPresetVersion}
-              response={search}
-              initialFilter={searchPreset}
-              plan={searchPlan}
-              busy={Boolean(busy.query)}
-              selected={selected}
-              details={eventDetails}
-              onEdit={clearResults}
-              onSubmit={searchEvents}
-              onNext={() => {
-                if (searchPlan && search?.next_cursor) searchEvents(searchPlan, search.next_cursor);
-              }}
-              onSelect={(id) => {
-                clearArtifact();
-                invalidateCausality();
-                setSelected(id);
-              }}
-            />
-          </Deferred>
-        ) : queryKind === "model-list" ? (
+        queryKind === "export" ? null : queryKind === "model-list" ? (
           <ModelCallListPanel
             response={modelList}
             plan={modelListPlan}

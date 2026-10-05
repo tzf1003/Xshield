@@ -11,11 +11,10 @@ import {
   evidenceFixture,
   modelCallFixture,
   modelCallListFixture,
-  searchFixture,
   summaryFixture,
   TOKEN,
 } from "./fixtures";
-import { isStreamPlan, streamFixture } from "./investigation-fixtures";
+import { isStreamPlan, pagedSearchFixture, streamFixture } from "./investigation-fixtures";
 import { bindingFixture, grantFixture } from "./ledger-fixtures";
 
 export type Reply = { status?: number; body: unknown };
@@ -92,7 +91,7 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
         reply = {
           body: isStreamPlan(plan as SearchPlan)
             ? await streamFixture(plan as SearchPlan, cursor)
-            : await searchFixture(plan, Boolean(cursor)),
+            : await pagedSearchFixture(plan as SearchPlan, cursor),
         };
       } else if (url.pathname === "/control/v1/causality") {
         reply = { body: await causalityFixture(request.postDataJSON() as CausalityPlan) };

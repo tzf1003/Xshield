@@ -1,9 +1,9 @@
 import { openView } from "./navigation";
+import { expectPrefilled, pickRange, submitSearch } from "./investigation-helpers";
 import { expect, test, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import {
   ARTIFACT_ID,
-  OTHER_REQUEST_ID,
   MODEL_CALL_ID,
   AGENT_RUN_ID,
   OTHER_MODEL_CALL_ID,
@@ -15,13 +15,10 @@ import {
   auditHealthFixture,
   calibrationReportFixture,
   modelCallFixture,
-  searchFixture,
-  causalityFixture,
   SEARCH_PLAN,
 } from "./fixtures";
-import { mockControl, paint, requestSettled, type Reply } from "./control-mock";
+import { mockControl, paint, requestSettled } from "./control-mock";
 import { EXPORT_CASE_ID, EXPORT_ID, exportFixture } from "./export-fixtures";
-import type { CausalityPlan, SearchPlan } from "../src/search";
 import {
   BINDING_ID,
   GRANT_ID,
@@ -93,13 +90,7 @@ test("reads restricted calibration report metadata without creating a content pa
   await page.getByRole("button", { name: "手动刷新报告", exact: true }).click();
   await expect.poll(() => calls.length).toBe(2);
   await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
-    "calibration_report_id",
-  );
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(CALIBRATION_REPORT_ID);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  await expectPrefilled(page, "校准报告 ID", CALIBRATION_REPORT_ID);
   expect(calls).toHaveLength(2);
 });
 
@@ -310,11 +301,7 @@ test("prepares scoped model call history without submitting a search", async ({ 
   await connect(page);
   await queryModel(page);
   await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("model_call_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(MODEL_CALL_ID);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  await expectPrefilled(page, "模型调用 ID", MODEL_CALL_ID);
   expect(calls.map((call) => call.path)).toEqual([`/control/v1/model-calls/${MODEL_CALL_ID}`]);
 });
 
@@ -329,11 +316,7 @@ test("reads the redacted Agent lifecycle and prepares scoped history", async ({ 
   await expect(page.getByText(/agent\.tool_called/)).toBeVisible();
   await expect(page.getByText("tool_args", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("agent_run_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(AGENT_RUN_ID);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  await expectPrefilled(page, "Agent 运行 ID", AGENT_RUN_ID);
   expect(calls.map((call) => call.path)).toEqual(["/control/v1/agent-runs/" + AGENT_RUN_ID]);
 });
 
@@ -438,9 +421,7 @@ test("model lifecycle predecessor links prepare exact event history", async ({ p
   await page.locator(".model-event").nth(1).locator("summary").click();
   const predecessor = "ev_018f2a3b-4c5d-7000-8000-000000000001";
   await page.getByRole("button", { name: predecessor, exact: true }).click();
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("event_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(predecessor);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+  await expectPrefilled(page, "事件 ID", predecessor);
   expect(calls.map((call) => call.path)).toEqual([`/control/v1/model-calls/${MODEL_CALL_ID}`]);
 });
 
@@ -512,672 +493,6 @@ test("model query budget failures remain explicit and require manual retry", asy
   await expect(page.getByText("Synthetic server detail must not be rendered")).toHaveCount(0);
 });
 
-async function prepareSearch(page: Page) {
-  await openView(page, "search");
-  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
-  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-  await page.getByLabel("每页条数", { exact: true }).fill("2");
-}
-
-async function search(page: Page) {
-  await page.getByRole("button", { name: "检索事件", exact: true }).click();
-}
-
-async function addSearchFilter(page: Page, index: number, field: string, value: string) {
-  await page.getByRole("button", { name: "添加条件", exact: true }).click();
-  await page.getByLabel(`条件 ${index} 字段`, { exact: true }).selectOption(field);
-  const input = page.getByLabel(`条件 ${index} 值`, { exact: true });
-  if (field === "outcome") await input.selectOption(value);
-  else await input.fill(value);
-}
-
-test("event details traverse direct causes and children through explicit history search", async ({
-  page,
-}) => {
-  const predecessor = "ev_018f2a3b-4c5d-7000-8000-000000000001";
-  const successor = "ev_018f2a3b-4c5d-7000-8000-000000000002";
-  const calls = await mockControl(page, async (url, request) => {
-    if (url.pathname !== "/control/v1/search") return undefined;
-    const plan = request.postDataJSON() as SearchPlan;
-    const result = await searchFixture(plan);
-    result.events[1]!.cause_event_ids = [predecessor];
-    const exactEvent = plan.filters.find((item) => item.kind === "event_id");
-    const cause = plan.filters.find((item) => item.kind === "caused_by_event_id");
-    if (exactEvent?.kind === "event_id")
-      result.events = result.events.filter((item) => item.event_id === exactEvent.value);
-    if (cause?.kind === "caused_by_event_id")
-      result.events = result.events.filter((item) => item.cause_event_ids.includes(cause.value));
-    if (exactEvent || cause) {
-      result.truncated = false;
-      result.next_cursor = null;
-    }
-    return { body: result };
-  });
-  await connect(page);
-  await prepareSearch(page);
-  await search(page);
-  await page.getByRole("radio", { name: successor, exact: true }).check();
-  await page.locator("aside").getByText("更多事件字段", { exact: true }).click();
-  await page.locator("aside").getByRole("button", { name: predecessor, exact: true }).click();
-
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("event_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(predecessor);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
-  expect(calls).toHaveLength(1);
-
-  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
-  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-  await page.getByLabel("每页条数", { exact: true }).fill("2");
-  await search(page);
-  expect(calls[1]?.body).toMatchObject({
-    filters: [{ kind: "event_id", value: predecessor }],
-  });
-  await page
-    .locator("aside")
-    .getByRole("button", {
-      name: "查找以此为前驱的事件",
-      exact: true,
-    })
-    .click();
-
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("caused_by_event_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(predecessor);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
-  expect(calls).toHaveLength(2);
-
-  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
-  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-  await search(page);
-  expect(calls[2]?.body).toMatchObject({
-    filters: [{ kind: "caused_by_event_id", value: predecessor }],
-  });
-  await expect(page.getByRole("radio", { name: successor, exact: true })).toBeVisible();
-  expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
-});
-
-test("shows a bounded multi-hop neighborhood and prepares unloaded references", async ({
-  page,
-}) => {
-  const root = "ev_018f2a3b-4c5d-7000-8000-000000000001";
-  const loaded = "ev_018f2a3b-4c5d-7000-8000-000000000002";
-  const missing = "ev_018f2a3b-4c5d-7000-8000-000000000099";
-  const calls = await mockControl(page, async (url, request) => {
-    if (url.pathname !== "/control/v1/search") return undefined;
-    const result = await searchFixture(request.postDataJSON() as SearchPlan);
-    const first = result.events[0];
-    const second = result.events[1];
-    if (first && second) {
-      first.cause_event_ids = [second.event_id];
-      second.cause_event_ids = [missing];
-    }
-    result.truncated = false;
-    result.next_cursor = null;
-    return { body: result };
-  });
-  await connect(page);
-  await prepareSearch(page);
-  await search(page);
-
-  const graph = page.locator("aside details.causal-graph");
-  await graph.locator("summary").click();
-  await expect(graph).toContainText("第 2 跳");
-  await expect(graph).toContainText(missing);
-  expect(calls).toHaveLength(1);
-
-  await graph.getByRole("button", { name: `查看因果事件 ${loaded}`, exact: true }).click();
-  await expect(page.locator("aside dl").getByText(loaded, { exact: true })).toBeVisible();
-  expect(calls).toHaveLength(1);
-  await page.getByRole("radio", { name: root, exact: true }).check();
-
-  await graph.getByRole("button", { name: `查看因果事件 ${missing}`, exact: true }).click();
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("event_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(missing);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
-  expect(calls).toHaveLength(1);
-});
-
-test("submits bounded server causality only after an explicit UTC window", async ({ page }) => {
-  const root = "ev_018f2a3b-4c5d-7000-8000-000000000001";
-  const calls = await mockControl(page);
-  await connect(page);
-  await prepareSearch(page);
-  await search(page);
-  await page.getByRole("radio", { name: root, exact: true }).check();
-  const panel = page.getByRole("region", { name: "服务端因果查询", exact: true });
-  await expect(panel).toBeVisible();
-  expect(calls.filter(({ path }) => path === "/control/v1/causality")).toHaveLength(0);
-  await panel.getByLabel("因果开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
-  await panel.getByLabel("因果结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-  await panel.getByRole("combobox", { name: "遍历方向", exact: true }).selectOption("successors");
-  await panel.getByLabel("最大跳数", { exact: true }).fill("3");
-  await panel.getByLabel("最大节点数", { exact: true }).fill("4");
-  await panel.getByRole("button", { name: "查询服务端因果", exact: true }).click();
-  const result = page.getByRole("region", {
-    name: "服务端因果查询结果",
-    exact: true,
-  });
-  await expect(result).toContainText("已找到");
-  await expect(result).toContainText("根事件");
-  await expect(result).toContainText(root);
-  await expect(result).toContainText("后继方向");
-  await expect(result).toContainText("第 1 跳");
-  const request = calls.find(({ path }) => path === "/control/v1/causality");
-  expect(request?.body).toEqual({
-    schema_version: 3,
-    start: "2026-09-20T00:00:00Z",
-    end: "2026-09-21T00:00:00Z",
-    event_id: root,
-    direction: "successors",
-    max_depth: 3,
-    max_nodes: 4,
-  });
-  await expect(result).toContainText("ev_018f2a3b-4c5d-7000-8000-000000000004");
-  expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
-});
-
-test("discards a late causality response after the query bounds change", async ({ page }) => {
-  const root = "ev_018f2a3b-4c5d-7000-8000-000000000001";
-  let release = () => {};
-  const delayed = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let arrive = () => {};
-  const arrived = new Promise<void>((resolve) => {
-    arrive = resolve;
-  });
-  const calls = await mockControl(page, async (url, request) => {
-    if (url.pathname !== "/control/v1/causality") return undefined;
-    arrive();
-    await delayed;
-    return {
-      body: await causalityFixture(request.postDataJSON() as CausalityPlan),
-    };
-  });
-  await connect(page);
-  await prepareSearch(page);
-  await search(page);
-  await page.getByRole("radio", { name: root, exact: true }).check();
-  const panel = page.getByRole("region", { name: "服务端因果查询", exact: true });
-  await panel.getByLabel("因果开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
-  await panel.getByLabel("因果结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-  const settled = requestSettled(page, "/control/v1/causality");
-  await panel.getByRole("button", { name: "查询服务端因果", exact: true }).click();
-  await arrived;
-  await expect(panel.getByRole("button", { name: "查询中…", exact: true })).toBeDisabled();
-
-  await panel.getByLabel("最大节点数", { exact: true }).fill("8");
-  await expect(page.getByRole("region", { name: "服务端因果查询结果", exact: true })).toHaveCount(
-    0,
-  );
-  await expect(panel.getByRole("button", { name: "查询服务端因果", exact: true })).toBeEnabled();
-
-  release();
-  await settled;
-  await paint(page);
-  await expect(page.getByRole("region", { name: "服务端因果查询结果", exact: true })).toHaveCount(
-    0,
-  );
-  expect(calls.filter(({ path }) => path === "/control/v1/causality")).toHaveLength(1);
-});
-
-test("structured event search supports a strict trace identifier", async ({ page }) => {
-  const trace = "018f2a3b4c5d70008000000000000003";
-  const calls = await mockControl(page);
-  await connect(page);
-  await prepareSearch(page);
-  await addSearchFilter(page, 1, "trace_id", trace);
-  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
-  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-  await search(page);
-  expect(calls).toHaveLength(1);
-  expect(calls[0]?.body).toMatchObject({
-    filters: [{ kind: "trace_id", value: trace }],
-  });
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("本页 2 条");
-});
-
-test("event details prepare same-trace search without auto-submitting", async ({ page }) => {
-  const trace = "018f2a3b4c5d70008000000000000003";
-  const calls = await mockControl(page);
-  await connect(page);
-  await prepareSearch(page);
-  await search(page);
-  expect(calls).toHaveLength(1);
-
-  await page
-    .locator("aside")
-    .getByRole("button", {
-      name: "准备同 Trace 检索",
-      exact: true,
-    })
-    .click();
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("trace_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(trace);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
-  expect(calls).toHaveLength(1);
-
-  await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
-  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-  await page.getByLabel("每页条数", { exact: true }).fill("2");
-  await search(page);
-  expect(calls).toHaveLength(2);
-  expect(calls[1]?.body).toMatchObject({
-    filters: [{ kind: "trace_id", value: trace }],
-  });
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("本页 2 条");
-  expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
-});
-
-test("search submits an allowlisted plan, freezes pagination and clears edited results", async ({
-  page,
-}) => {
-  const calls = await mockControl(page);
-  await connect(page);
-  await prepareSearch(page);
-  const filters: SearchPlan["filters"] = [
-    { kind: "event_id", value: "ev_018f2a3b-4c5d-7000-8000-000000000001" },
-    { kind: "grant_id", value: "grant_018f2a3b-4c5d-7000-8000-000000000001" },
-    {
-      kind: "auth_binding_id",
-      value: "auth_018f2a3b-4c5d-7000-8000-000000000001",
-    },
-    { kind: "case_id", value: "case_018f2a3b-4c5d-7000-8000-000000000001" },
-    { kind: "artifact_id", value: ARTIFACT_ID },
-    {
-      kind: "calibration_report_id",
-      value: "calr_018f2a3b-4c5d-7000-8000-000000000001",
-    },
-    {
-      kind: "model_call_id",
-      value: "mdl_018f2a3b-4c5d-7000-8000-000000000001",
-    },
-    {
-      kind: "share_grant_id",
-      value: "share_018f2a3b-4c5d-7000-8000-000000000007",
-    },
-  ];
-  for (const [index, filter] of filters.entries()) {
-    if (filter.kind === "confidence_at_most") continue;
-    await addSearchFilter(
-      page,
-      index + 1,
-      filter.kind === "text" ? filter.field : filter.kind,
-      filter.value,
-    );
-  }
-  await expect(page.getByRole("button", { name: "添加条件", exact: true })).toBeDisabled();
-  await search(page);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("本页 2 条");
-  const plan = { ...SEARCH_PLAN, filters };
-  expect(calls).toHaveLength(1);
-  expect(calls[0]).toMatchObject({
-    path: "/control/v1/search",
-    method: "POST",
-    authorized: true,
-    cookie: null,
-    body: plan,
-  });
-  await page.getByText("已提交查询计划", { exact: true }).click();
-  await expect(page.getByRole("region", { name: "已提交查询计划" }).locator("pre")).toHaveText(
-    JSON.stringify(plan, null, 2),
-  );
-  await expect(page.getByText("2026-09-20T08:10:30.123457Z", { exact: true })).toBeVisible();
-  await expect(page.locator("aside").getByText("未提供", { exact: true })).toBeVisible();
-  await expect(page.locator("aside dl > div").filter({ hasText: "来源请求" })).toContainText(
-    "未记录",
-  );
-  await expect(page.getByRole("region", { name: "已提交查询计划" })).toContainText(
-    "未知（索引未报告）",
-  );
-  await expect(
-    page.locator(".search-plan dl > div").filter({ hasText: "实际扫描字节" }),
-  ).toContainText("0");
-  await page.getByRole("button", { name: "下一页", exact: true }).click();
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("本页 1 条");
-  expect(calls[1]?.body).toEqual({
-    ...plan,
-    cursor: (await searchFixture(plan)).next_cursor,
-  });
-  await expect(page.getByRole("button", { name: "下一页", exact: true })).toBeDisabled();
-  await expect(page.getByText("2026-09-20T08:10:30.123455Z", { exact: true })).toBeVisible();
-  await page.getByLabel("条件 1 字段", { exact: true }).selectOption("request_id");
-  await page.getByLabel("条件 1 值", { exact: true }).fill(OTHER_REQUEST_ID);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "已提交查询计划" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "下一页", exact: true })).toHaveCount(0);
-  await search(page);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toBeVisible();
-  expect(calls[2]?.body).toEqual({
-    ...plan,
-    filters: [{ kind: "request_id", value: OTHER_REQUEST_ID }, ...filters.slice(1)],
-  });
-  expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
-});
-
-test("search validates whole UTC windows, field allowlists and numeric bounds before transport", async ({
-  page,
-}) => {
-  const calls = await mockControl(page);
-  await connect(page);
-  await prepareSearch(page);
-  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-10-22T00:00");
-  await search(page);
-  await expect(page.getByRole("alert")).toContainText("CONTROL_QUERY_INVALID");
-  expect(calls).toHaveLength(0);
-  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-20T00:00");
-  await search(page);
-  await expect(page.getByRole("alert")).toContainText("CONTROL_QUERY_INVALID");
-  await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-  for (const value of ["0", "1001", "1.5"]) {
-    await page.getByLabel("每页条数", { exact: true }).fill(value);
-    await search(page);
-    expect(calls).toHaveLength(0);
-  }
-  await page.getByLabel("每页条数", { exact: true }).fill("2");
-  for (const [index, field] of [
-    "event_type",
-    "stage",
-    "reason_code",
-    "operation_id",
-    "model_revision",
-  ].entries())
-    await addSearchFilter(page, index + 1, field, "audit.value");
-  await addSearchFilter(page, 6, "confidence_at_most", "10001");
-  await search(page);
-  expect(calls).toHaveLength(0);
-  await page.getByLabel("条件 6 值", { exact: true }).fill("0");
-  await page.getByLabel("条件 1 值", { exact: true }).fill("select * from events");
-  await search(page);
-  await expect(page.getByRole("alert")).toContainText("CONTROL_QUERY_INVALID");
-  expect(calls).toHaveLength(0);
-  await page.getByLabel("条件 1 值", { exact: true }).fill("audit.value");
-  await page.getByLabel("事件时间排序", { exact: true }).selectOption("occurred_at_asc");
-  await search(page);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toBeVisible();
-  expect(calls[0]?.body).toEqual({
-    ...SEARCH_PLAN,
-    sort: "occurred_at_asc",
-    filters: [
-      ...["event_type", "stage", "reason_code", "operation_id", "model_revision"].map((field) => ({
-        kind: "text",
-        field,
-        value: "audit.value",
-      })),
-      { kind: "confidence_at_most", basis_points: 0 },
-    ],
-  });
-  await page.getByLabel("条件 6 值", { exact: true }).fill("10000");
-  await search(page);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toBeVisible();
-  expect((calls.at(-1)?.body as SearchPlan).filters.at(-1)).toEqual({
-    kind: "confidence_at_most",
-    basis_points: 10000,
-  });
-});
-
-test("subject history search is prepared but submitted only on explicit action", async ({
-  page,
-}) => {
-  const calls = await mockControl(page);
-  await connect(page);
-  await prepareSearch(page);
-  await addSearchFilter(page, 1, "subject_ref", "operator-1");
-  await expect(
-    page.getByText("主体引用仅用于精确筛选，结果不会回显主体值", {
-      exact: false,
-    }),
-  ).toBeVisible();
-  expect(calls.filter(({ path }) => path === "/control/v1/search")).toHaveLength(0);
-  await search(page);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("本页 2 条");
-  const request = calls.find(({ path }) => path === "/control/v1/search");
-  expect(request?.body).toMatchObject({
-    filters: [{ kind: "subject_ref", value: "operator-1" }],
-  });
-  const screenshotDirectory = process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR;
-  if (screenshotDirectory)
-    await page.screenshot({
-      path: resolve(screenshotDirectory, "subject-search.png"),
-      fullPage: true,
-    });
-});
-
-test("search errors use safe messages, manual retries and clear the session on 401", async ({
-  page,
-}) => {
-  await page.clock.install();
-  let reply: Reply = {
-    status: 403,
-    body: errorFixture("CONTROL_SCOPE_DENIED"),
-  };
-  const calls = await mockControl(page, () => reply);
-  await connect(page);
-  await prepareSearch(page);
-  for (const [status, code] of [
-    [403, "CONTROL_SCOPE_DENIED"],
-    [429, "CONTROL_QUERY_BUDGET_EXCEEDED"],
-    [503, "CONTROL_QUERY_TIMEOUT"],
-    [400, "CONTROL_CURSOR_INVALID"],
-  ] as const) {
-    reply = { status, body: errorFixture(code) };
-    await search(page);
-    await expect(page.getByRole("alert")).toContainText(code);
-    await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
-  }
-  await page.clock.fastForward(60_000);
-  expect(calls).toHaveLength(4);
-  await expect(page.getByText("Synthetic server detail must not be rendered")).toHaveCount(0);
-  reply = { status: 401, body: errorFixture("CONTROL_AUTH_REQUIRED") };
-  await search(page);
-  await expect(page.getByRole("status")).toContainText("管理会话已失效");
-  await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
-  await expect(page.getByRole("region", { name: "已提交查询计划" })).toHaveCount(0);
-});
-
-test("search empty results retain independent gaps, pending and unknown scan facts", async ({
-  page,
-}) => {
-  await mockControl(page, async (url, request) =>
-    url.pathname === "/control/v1/search"
-      ? {
-          body: {
-            ...(await searchFixture(request.postDataJSON())),
-            events: [],
-            truncated: false,
-            next_cursor: null,
-            index_watermark: null,
-          },
-        }
-      : undefined,
-  );
-  await connect(page);
-  await prepareSearch(page);
-  await search(page);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toContainText("当前页暂无事件");
-  await expect(page.getByRole("status", { name: "搜索索引状态" })).toContainText(
-    "索引存在缺口 · 2 个待发布段",
-  );
-  await expect(page.getByRole("region", { name: "已提交查询计划" })).toContainText(
-    "未知（索引未报告）",
-  );
-  await page.getByText("查看搜索水位", { exact: true }).click();
-  await expect(page.getByRole("status", { name: "搜索索引状态" })).toContainText("尚不可用");
-  await expect(page.getByRole("button", { name: "下一页", exact: true })).toBeDisabled();
-});
-
-test("search and Observer detail permissions remain independent and scope drift disconnects", async ({
-  page,
-}) => {
-  let denyObserver = true;
-  let drift = false;
-  await mockControl(page, async (url, request) => {
-    if (url.pathname === "/control/v1/search")
-      return {
-        body: {
-          ...(await searchFixture(request.postDataJSON())),
-          site_id: drift ? "site_other" : "site_demo",
-        },
-      };
-    return denyObserver ? { status: 403, body: errorFixture("CONTROL_SCOPE_DENIED") } : undefined;
-  });
-  await connect(page);
-  await prepareSearch(page);
-  await search(page);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toBeVisible();
-  await page.getByRole("button", { name: ARTIFACT_ID, exact: true }).click();
-  await expect(page.locator("aside").getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toBeVisible();
-  await page.getByRole("button", { name: "返回事件", exact: true }).click();
-  await page
-    .getByRole("radio", {
-      name: "ev_018f2a3b-4c5d-7000-8000-000000000002",
-      exact: true,
-    })
-    .check();
-  await page.getByRole("button", { name: REQUEST_ID, exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
-  await expect(page.getByRole("heading", { name: "请求调查", exact: true })).toBeVisible();
-  denyObserver = false;
-  // The request page offers an explicit retry; nothing is read again by itself.
-  await page.getByRole("button", { name: "重新读取", exact: true }).click();
-  await expect(page.getByText("AUTH_BINDING_VALID", { exact: true })).toBeVisible();
-  drift = true;
-  await prepareSearch(page);
-  await search(page);
-  await expect(page.getByRole("status")).toContainText("响应范围校验失败");
-  await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
-});
-
-test("editing, switching and disconnecting discard late search responses", async ({ page }) => {
-  let release = () => {};
-  let arrive = () => {};
-  let delay = Promise.resolve();
-  await mockControl(page, async (url, request) => {
-    if (url.pathname !== "/control/v1/search") return undefined;
-    const plan = request.postDataJSON();
-    arrive();
-    await delay;
-    return { body: await searchFixture(plan) };
-  });
-  await connect(page);
-  for (const action of ["edit", "switch", "disconnect"] as const) {
-    await prepareSearch(page);
-    delay = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const arrived = new Promise<void>((resolve) => {
-      arrive = resolve;
-    });
-    const settled = requestSettled(page, "/control/v1/search");
-    await search(page);
-    await arrived;
-    if (action === "edit") await page.getByLabel("每页条数", { exact: true }).fill("3");
-    else if (action === "switch") await openView(page, "request");
-    else await page.getByRole("button", { name: "断开连接", exact: true }).click();
-    release();
-    await settled;
-    await paint(page);
-    await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
-    await expect(page.getByRole("region", { name: "已提交查询计划" })).toHaveCount(0);
-  }
-});
-
-test("search idle, pagehide and reload clear all in-memory search state", async ({ page }) => {
-  await page.clock.install();
-  await mockControl(page);
-  for (const action of ["idle", "pagehide", "reload"] as const) {
-    await connect(page);
-    await prepareSearch(page);
-    await search(page);
-    await expect(page.getByRole("region", { name: "搜索事件结果" })).toBeVisible();
-    if (action === "idle") await page.clock.fastForward(15 * 60_000 + 1);
-    else if (action === "pagehide")
-      await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
-    else await page.reload();
-    await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
-    await expect(page.getByRole("region", { name: "已提交查询计划" })).toHaveCount(0);
-    await expect(page.getByRole("region", { name: "搜索事件结果" })).toHaveCount(0);
-  }
-});
-
-test("search rejects malicious metadata, drops raw fields and fits desktop and mobile", async ({
-  page,
-}) => {
-  const injected = '<img src=x onerror="window.xshieldInjected=true">';
-  let malicious = true;
-  const runtimeErrors: string[] = [];
-  const consoleErrors: string[] = [];
-  page.on("pageerror", (error) => runtimeErrors.push(error.message));
-  page.on("console", (message) => {
-    if (["warning", "error"].includes(message.type())) consoleErrors.push(message.text());
-  });
-  await mockControl(page, async (url, request) => {
-    if (url.pathname !== "/control/v1/search") return undefined;
-    const value = await searchFixture(request.postDataJSON());
-    if (malicious) value.events[0]!.policy_revision = injected;
-    return {
-      body: {
-        ...value,
-        payload_json: "RAW_PAYLOAD_SENTINEL",
-        storage: { locator: "PRIVATE_STORAGE_SENTINEL" },
-        events: value.events.map((event) => ({
-          ...event,
-          payload_json: "RAW_PAYLOAD_SENTINEL",
-        })),
-      },
-    };
-  });
-  await connect(page);
-  await prepareSearch(page);
-  await addSearchFilter(page, 1, "grant_id", "grant_018f2a3b-4c5d-7000-8000-000000000001");
-  await search(page);
-  await expect(page.getByRole("alert")).toContainText("INVALID_RESPONSE");
-  await expect(page.getByText(injected, { exact: true })).toHaveCount(0);
-  malicious = false;
-  await search(page);
-  await expect(page).toHaveURL(new URL("/investigation/search", page.url()).toString());
-  await expect(page).toHaveTitle(/Xshield/);
-  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "搜索事件结果" })).toBeVisible();
-  expect(await page.evaluate(() => Reflect.get(window, "xshieldInjected"))).toBeUndefined();
-  await expect(page.locator("main img")).toHaveCount(0);
-  await expect(page.getByText("RAW_PAYLOAD_SENTINEL", { exact: false })).toHaveCount(0);
-  await expect(page.getByText("PRIVATE_STORAGE_SENTINEL", { exact: false })).toHaveCount(0);
-  for (const width of [1536, 390]) {
-    await page.setViewportSize({ width, height: 1024 });
-    await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
-    expect(
-      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
-    ).toBe(true);
-    for (const label of ["开始时间（UTC，含）", "结束时间（UTC，不含）", "条件 1 值"]) {
-      const field = await page.getByLabel(label, { exact: true }).boundingBox();
-      expect(field && field.x >= 0 && field.x + field.width <= width).toBeTruthy();
-    }
-    const screenshotDirectory = process.env.XSHIELD_CONSOLE_SCREENSHOT_DIR;
-    if (screenshotDirectory)
-      await page.screenshot({
-        path: resolve(screenshotDirectory, `search-${width}.png`),
-        fullPage: true,
-      });
-    if (screenshotDirectory) {
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await page.screenshot({
-        path: resolve(screenshotDirectory, `search-${width}-viewport.png`),
-        fullPage: false,
-      });
-    }
-  }
-  expect(runtimeErrors).toEqual([]);
-  expect(consoleErrors).toEqual([]);
-});
-
 async function queryLedger(
   page: Page,
   kind: "grant" | "binding",
@@ -1233,45 +548,47 @@ test("ledger grant and binding snapshots show independent facts and navigate kno
   ).toBe(true);
 });
 
-test("ledger history navigation presets only the reference and requires an explicit UTC window and Investigator", async ({
-  page,
-}) => {
-  const calls = await mockControl(page, (url) =>
-    url.pathname === "/control/v1/search"
-      ? { status: 403, body: errorFixture("CONTROL_SCOPE_DENIED") }
-      : undefined,
-  );
-  await connect(page);
-  for (const kind of ["grant", "binding"] as const) {
-    await queryLedger(page, kind);
-    await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
-    await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue(
-      kind === "grant" ? "grant_id" : "auth_binding_id",
+test.describe("ledger history", () => {
+  // The picker works in local time; a UTC browser clock makes the typed text the plan's text.
+  test.use({ timezoneId: "UTC" });
+
+  test("ledger history navigation presets only the reference and requires an explicit UTC window and Investigator", async ({
+    page,
+  }) => {
+    const calls = await mockControl(page, (url) =>
+      url.pathname === "/control/v1/search"
+        ? { status: 403, body: errorFixture("CONTROL_SCOPE_DENIED") }
+        : undefined,
     );
-    await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(
-      kind === "grant" ? GRANT_ID : BINDING_ID,
-    );
-    await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-    await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
-    const count = calls.length;
-    await search(page);
-    expect(calls).toHaveLength(count);
-    await page.getByLabel("开始时间（UTC，含）", { exact: true }).fill("2026-09-20T00:00");
-    await page.getByLabel("结束时间（UTC，不含）", { exact: true }).fill("2026-09-21T00:00");
-    await search(page);
-    await expect(page.getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
-    expect(calls.at(-1)?.body).toEqual({
-      ...SEARCH_PLAN,
-      limit: 25,
-      filters: [
-        {
-          kind: kind === "grant" ? "grant_id" : "auth_binding_id",
-          value: kind === "grant" ? GRANT_ID : BINDING_ID,
-        },
-      ],
-    });
-  }
+    await connect(page);
+    for (const kind of ["grant", "binding"] as const) {
+      await queryLedger(page, kind);
+      await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
+      await expectPrefilled(
+        page,
+        kind === "grant" ? "资格 ID" : "身份绑定 ID",
+        kind === "grant" ? GRANT_ID : BINDING_ID,
+      );
+      const count = calls.length;
+      // Without a range nothing is sent: the page asks for one.
+      await submitSearch(page);
+      await expect(page.getByRole("alert")).toContainText("请先选择时间范围");
+      expect(calls).toHaveLength(count);
+      await pickRange(page, "2026-09-20T00:00", "2026-09-21T00:00");
+      await submitSearch(page);
+      await expect(page.getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
+      expect(calls.at(-1)?.body).toEqual({
+        ...SEARCH_PLAN,
+        limit: 25,
+        filters: [
+          {
+            kind: kind === "grant" ? "grant_id" : "auth_binding_id",
+            value: kind === "grant" ? GRANT_ID : BINDING_ID,
+          },
+        ],
+      });
+    }
+  });
 });
 
 test("ledger separates stored lifecycle, database expiry and epoch mismatch", async ({ page }) => {

@@ -214,10 +214,12 @@ test("search presets round-trip through the route and reject anything non-canoni
   const preset = { kind: "trace_id", value: "018f2a3b4c5d70008000000000000003" } as const;
   assert.equal(encodePrefill(preset), "trace_id:018f2a3b4c5d70008000000000000003");
   assert.deepEqual(decodePrefill(encodePrefill(preset)), preset);
-  assert.deepEqual(searchLocation(preset), {
-    to: "/investigation/search",
-    search: { [PREFILL_PARAM]: "trace_id:018f2a3b4c5d70008000000000000003" },
-  });
+  const first = searchLocation(preset);
+  assert.equal(first.to, "/investigation/search");
+  assert.deepEqual(first.search, { [PREFILL_PARAM]: "trace_id:018f2a3b4c5d70008000000000000003" });
+  // The same condition handed over twice is two navigations: the router must not see the second
+  // as "already there", or the form would keep whatever the operator edited in between.
+  assert.notEqual(searchLocation(preset).state.handOver, first.state.handOver);
   // A prefill can only name an ID: never a free-text condition such as a subject reference.
   assert.equal((presetKinds as readonly string[]).includes("subject_ref"), false);
   for (const bad of [

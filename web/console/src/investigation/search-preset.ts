@@ -74,10 +74,22 @@ export function decodePrefill(raw: unknown): SearchPreset | null {
   return { kind: kind as SearchPresetKind, value };
 }
 
-/** Route location of the search page with a preset, for `router.navigate`. */
+let handOvers = 0;
+
+/**
+ * Route location of the search page with a preset, for `router.navigate`. Every hand-over carries
+ * its own history state, so handing the same condition over twice is still a navigation (the form
+ * is refilled) instead of the router treating the identical address as "already there".
+ */
 export function searchLocation(preset: SearchPreset): {
   to: typeof SEARCH_PATH;
   search: Record<string, string>;
+  state: { handOver: number };
 } {
-  return { to: SEARCH_PATH, search: { [PREFILL_PARAM]: encodePrefill(preset) } };
+  handOvers += 1;
+  return {
+    to: SEARCH_PATH,
+    search: { [PREFILL_PARAM]: encodePrefill(preset) },
+    state: { handOver: handOvers },
+  };
 }

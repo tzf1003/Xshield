@@ -1,6 +1,11 @@
 import { useRouter } from "@tanstack/react-router";
 import { useCallback } from "react";
-import { PREFILL_PARAM, type SearchPreset, encodePrefill } from "./search-preset.ts";
+import {
+  PREFILL_PARAM,
+  type SearchPreset,
+  encodePrefill,
+  searchLocation,
+} from "./search-preset.ts";
 
 /** Fixed detail and list addresses of the investigation pages. */
 export const requestListPath = "/investigation/requests";
@@ -33,10 +38,7 @@ export function useInvestigationNavigate() {
   );
   const openSearch = useCallback(
     (preset: SearchPreset) => {
-      void router.navigate({
-        to: searchPath,
-        search: { [PREFILL_PARAM]: encodePrefill(preset) },
-      } as never);
+      void router.navigate(searchLocation(preset) as never);
     },
     [router],
   );

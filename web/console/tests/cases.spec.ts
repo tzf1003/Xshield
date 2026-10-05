@@ -1,4 +1,5 @@
 import { openView } from "./navigation";
+import { expectPrefilled } from "./investigation-helpers";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { resolve } from "node:path";
 import { ARTIFACT_ID, OTHER_ARTIFACT_ID, TOKEN, errorFixture } from "./fixtures";
@@ -126,8 +127,7 @@ test("case analysis waits for explicit submit and reads the durable job", async 
   await expect(page.getByText("任务状态", { exact: true })).toBeVisible();
   expect(jobReads).toBe(1);
   await page.getByRole("button", { name: "准备任务历史检索", exact: true }).click();
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("job_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(jobId);
+  await expectPrefilled(page, "任务 ID", jobId);
   expect(calls.filter((call) => call.path.endsWith("/search"))).toHaveLength(0);
   expect(calls.filter((call) => call.path.endsWith("/analyze"))).toEqual([
     {

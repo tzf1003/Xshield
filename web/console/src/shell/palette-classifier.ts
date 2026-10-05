@@ -12,7 +12,7 @@ import {
 import { casePattern } from "../cases.ts";
 import { accessPattern } from "../evidence-access.ts";
 import { exportPattern } from "../exports.ts";
-import type { SearchPreset } from "../SearchPanel.tsx";
+import type { SearchPreset } from "../investigation/search-preset.ts";
 import { flattenNav, type NavGroup, type NavItem, visibleNav } from "./nav-model.ts";
 
 export type PaletteAction =

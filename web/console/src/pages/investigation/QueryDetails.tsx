@@ -15,9 +15,11 @@ export function scanText(value: number | null): string {
 export function QueryDetails({
   plan,
   pages,
+  label = "查询详情",
 }: {
   plan: SearchPlan;
   pages: readonly SearchResponse[];
+  label?: string;
 }) {
   return (
     <Collapse
@@ -26,7 +28,7 @@ export function QueryDetails({
       items={[
         {
           key: "details",
-          label: "查询详情",
+          label,
           children: (
             <section aria-label="已提交查询计划" className="xs-plan-region">
               <p className="xs-plan-note">

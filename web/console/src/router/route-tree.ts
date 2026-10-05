@@ -170,7 +170,12 @@ export function createAppRouteTree(components: RouteComponents) {
     page("calibration-report", "investigation/calibration/$reportId", {
       params: idParams("reportId", calibrationReportPattern),
     }),
-    page("search", "investigation/search"),
+    page("search", "investigation/search", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/SearchPage"),
+        "SearchPage",
+      ),
+    }),
     page("case", "cases"),
     page("access", "evidence/access"),
     page("hold", "evidence/holds"),

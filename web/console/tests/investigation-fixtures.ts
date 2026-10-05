@@ -124,6 +124,65 @@ export async function streamFixture(
   };
 }
 
+/** One event of the paged search fixture; event 1 is an `evidence.deleted` without a request. */
+export function pagedSearchEvent(
+  sequence: number,
+  sort: SearchPlan["sort"] = "occurred_at_desc",
+): SearchEvent {
+  const bare = sequence === 1;
+  return {
+    event_id: `ev_018f2a3b-4c5d-7000-8000-${String(sequence).padStart(12, "0")}`,
+    event_type: bare ? "evidence.deleted" : "stage.completed",
+    trace_id: STREAM_TRACE,
+    request_id: bare ? null : "req_018f2a3b-4c5d-7000-8000-000000000001",
+    stage: bare ? null : "admission",
+    outcome: bare ? null : "DENY",
+    reason_code: bare ? null : "SEARCH_SYNTHETIC_DENIAL",
+    proof_kind: bare ? null : "deterministic",
+    confidence: null,
+    confidence_status: bare ? null : "not_applicable",
+    occurred_at: `2026-09-20T08:10:30.${sort === "occurred_at_asc" ? 123453 + sequence : 123458 - sequence}Z`,
+    request_seq: sequence,
+    duration_us: 24,
+    policy_revision: "policy-demo-r3",
+    model_revision: null,
+    model_call_id: null,
+    evidence_refs: ["artifact_018f2a3b-4c5d-7000-8000-000000000011"],
+    cause_event_ids: [],
+    sensitivity: "INTERNAL",
+  };
+}
+
+/**
+ * A structured-search response that obeys the page contract: a first page holds exactly `limit`
+ * events and offers a cursor (the server only says "more" with a full page); the page after it
+ * holds one event and ends. Event numbers are 1..limit, then limit+1.
+ */
+export async function pagedSearchFixture(
+  plan: SearchPlan,
+  cursor?: string,
+): Promise<SearchResponse> {
+  const first = cursor === undefined;
+  const events = first
+    ? Array.from({ length: plan.limit }, (_, index) => pagedSearchEvent(index + 1, plan.sort))
+    : [pagedSearchEvent(plan.limit + 1, plan.sort)];
+  const last = events.at(-1) as SearchEvent;
+  return {
+    ...SCOPE,
+    schema_version: 3,
+    query_digest: (await searchPlanDigest(plan)) ?? "0".repeat(64),
+    as_of: "2026-09-20T08:10:30.000Z",
+    index_watermark: summaryFixture().index_watermark,
+    has_gaps: true,
+    pending_segments: 2,
+    scanned_rows: null,
+    scanned_bytes: 0,
+    truncated: first,
+    next_cursor: first ? `v1.${position(last)}.${last.event_id}.${"0".repeat(64)}` : null,
+    events,
+  };
+}
+
 /** Whether a plan is a request-stream plan (its `event_type` filter is a terminal request event). */
 export function isStreamPlan(plan: SearchPlan): boolean {
   return plan.filters.some(

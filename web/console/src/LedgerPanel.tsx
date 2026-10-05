@@ -1,7 +1,7 @@
 import type { GrantResponse, BindingResponse } from "./ledger";
 import type { ReactNode } from "react";
 import { Rows } from "./panels";
-import type { SearchPreset } from "./SearchPanel";
+import type { SearchPreset } from "./investigation/search-preset.ts";
 
 /** Ledger facts share one database observation time and carry no admission decision. */
 export function LedgerPanel({

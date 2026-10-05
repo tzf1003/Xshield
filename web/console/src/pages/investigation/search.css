@@ -1,0 +1,79 @@
+/* Structured search: condition builder, options and the column picker. Tokens only. */
+
+.xs-builder {
+  display: grid;
+  gap: 8px;
+}
+
+.xs-builder-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.xs-builder-field {
+  width: 230px;
+}
+
+.xs-builder-value {
+  flex: 1 1 300px;
+  min-width: 0;
+}
+
+.xs-builder-note {
+  margin: 0;
+  color: var(--xs-ink-2);
+  font-size: 12px;
+}
+
+.xs-conditions-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  color: var(--xs-ink-2);
+  font-size: 12px;
+}
+
+.xs-conditions .ant-tag {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.xs-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.xs-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
+.xs-option .ant-select {
+  min-width: 112px;
+}
+
+.xs-columns {
+  display: grid;
+  gap: 6px;
+  min-width: 160px;
+}
+
+.xs-event-cell .mono {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+@media (width <= 760px) {
+  .xs-builder-field {
+    width: 100%;
+  }
+}

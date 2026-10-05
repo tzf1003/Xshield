@@ -2,9 +2,9 @@ import { MenuFoldOutlined, MenuUnfoldOutlined } from "@ant-design/icons";
 import { Outlet, useRouter, useRouterState } from "@tanstack/react-router";
 import { App as AntdApp, Button, Layout } from "antd";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { searchLocation } from "../investigation/search-preset.ts";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { useSession } from "../security/SessionProvider";
-import type { SearchPreset } from "../SearchPanel";
 import { Brand } from "./Brand";
 import { breadcrumbs, legacyKinds, pageMeta, visibleNav } from "./nav-model.ts";
 import type { PaletteResult } from "./palette-classifier.ts";
@@ -26,8 +26,6 @@ const CommandPalette = lazy(() =>
 const MobileDrawer = lazy(() =>
   import("./MobileDrawer").then((module) => ({ default: module.MobileDrawer })),
 );
-
-export type SearchIntent = { preset: SearchPreset; nonce: number };
 
 const isMac = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "");
 
@@ -51,7 +49,6 @@ export function ShellLayout() {
   const [drawerMounted, setDrawerMounted] = useState(false);
   const [actionsTarget, setActionsTarget] = useState<HTMLElement | null>(null);
   const [titleOverride, setTitleOverride] = useState<string | null>(null);
-  const [searchIntent, setSearchIntent] = useState<SearchIntent | null>(null);
   const showsLegacy = legacyKinds.has(meta.kind);
   // Once mounted the legacy host stays: it owns unconfirmed writes that must survive navigation.
   const [legacyMounted, setLegacyMounted] = useState(showsLegacy);
@@ -103,12 +100,10 @@ export function ShellLayout() {
   const runPalette = useCallback(
     (result: PaletteResult) => {
       if (result.action.type === "navigate") navigate(result.action.to);
-      else {
-        setLegacyMounted(true);
-        setSearchIntent({ preset: result.action.preset, nonce: Date.now() });
-      }
+      // A search from the palette only fills the search form; the range and the submit are yours.
+      else void router.navigate(searchLocation(result.action.preset) as never);
     },
-    [navigate],
+    [navigate, router],
   );
 
   const scope = state.scope
@@ -201,12 +196,7 @@ export function ShellLayout() {
               {legacyMounted && (
                 <Suspense fallback={showsLegacy ? <p className="empty">正在加载页面…</p> : null}>
                   <div hidden={!showsLegacy}>
-                    <LegacyHost
-                      pathname={pathname}
-                      navigate={navigate}
-                      searchIntent={searchIntent}
-                      onSearchIntentConsumed={() => setSearchIntent(null)}
-                    />
+                    <LegacyHost pathname={pathname} navigate={navigate} />
                   </div>
                 </Suspense>
               )}

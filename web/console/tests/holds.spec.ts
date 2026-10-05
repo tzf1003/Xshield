@@ -1,4 +1,5 @@
 import { openView } from "./navigation";
+import { expectPrefilled } from "./investigation-helpers";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { resolve } from "node:path";
 import { ARTIFACT_ID, TOKEN, errorFixture } from "./fixtures";
@@ -58,11 +59,7 @@ test("prepares scoped evidence hold history without submitting a search", async 
   await connect(page);
   await history(page);
   await page.getByRole("button", { name: `准备历史检索 ${HOLD_ID}`, exact: true }).click();
-  await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
-  await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("evidence_hold_id");
-  await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(HOLD_ID);
-  await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("结束时间（UTC，不含）", { exact: true })).toHaveValue("");
+  await expectPrefilled(page, "保留锁 ID", HOLD_ID);
   expect(calls.map((call) => call.path)).toEqual([`/control/v1/cases/${HOLD_CASE_ID}/holds`]);
 });
 

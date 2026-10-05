@@ -319,7 +319,6 @@ export const legacyKinds: ReadonlySet<QueryKind> = new Set<QueryKind>([
   "calibration-report",
   "grant",
   "binding",
-  "search",
   "case",
   "access",
   "hold",
