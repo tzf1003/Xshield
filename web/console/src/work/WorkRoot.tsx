@@ -7,6 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import type { SessionRuntime } from "../security/runtime.ts";
 import { useSession } from "../security/SessionProvider";
 import { refreshSessionInfo } from "../security/session-queries.ts";
 import { StepUpCoordinator } from "./step-up.ts";
@@ -21,27 +22,42 @@ export function useStepUp(): StepUpCoordinator {
   return value;
 }
 
+const coordinators = new WeakMap<SessionRuntime, StepUpCoordinator>();
+
 /**
- * Every case and approval page renders inside this root. It owns the in-place step-up: while an
- * attempt waits for MFA, one dialog explains what is happening and what happens next. Leaving
- * the page cancels the wait, so a refused request never fires later in the background.
+ * One coordinator per session runtime. A frozen write keeps the coordinator it was submitted
+ * with; when its exact retry runs from another page (the workbench's "原样重试", or the same page
+ * mounted again) and the server asks for a step-up, the dialog of whichever root is mounted then
+ * must be the one that answers, instead of a coordinator whose page is gone.
+ */
+function sharedCoordinator(runtime: SessionRuntime): StepUpCoordinator {
+  let coordinator = coordinators.get(runtime);
+  if (!coordinator) {
+    coordinator = new StepUpCoordinator({
+      available: () => runtime.store.getState().session !== null,
+      openWindow: openVerificationWindow,
+      start: (signal) => {
+        const client = runtime.store.getState().client;
+        if (!client) return Promise.reject(new Error("管理会话已结束。"));
+        return client.startReauthentication(signal);
+      },
+      check: async () => (await refreshSessionInfo(runtime))?.step_up_valid === true,
+      listen: listenForVerificationReturn,
+    });
+    coordinators.set(runtime, coordinator);
+  }
+  return coordinator;
+}
+
+/**
+ * Every case and approval page, and the workbench, renders inside this root. It owns the
+ * in-place step-up: while an attempt waits for MFA, one dialog explains what is happening and
+ * what happens next. Leaving the page cancels the wait, so a refused request never fires later
+ * in the background.
  */
 export function WorkRoot({ children }: { children: ReactNode }) {
   const { runtime } = useSession();
-  const [coordinator] = useState(
-    () =>
-      new StepUpCoordinator({
-        available: () => runtime.store.getState().session !== null,
-        openWindow: openVerificationWindow,
-        start: (signal) => {
-          const client = runtime.store.getState().client;
-          if (!client) return Promise.reject(new Error("管理会话已结束。"));
-          return client.startReauthentication(signal);
-        },
-        check: async () => (await refreshSessionInfo(runtime))?.step_up_valid === true,
-        listen: listenForVerificationReturn,
-      }),
-  );
+  const [coordinator] = useState(() => sharedCoordinator(runtime));
   useEffect(() => coordinator.attach(), [coordinator]);
   return (
     <StepUpContext.Provider value={coordinator}>

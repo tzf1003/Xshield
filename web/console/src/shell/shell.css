@@ -589,6 +589,18 @@
     display: none;
   }
 
+  /* With the pending-operations chip in the header the crumb is squeezed: one line, ellipsis. */
+  .xs-breadcrumb ol {
+    flex-wrap: nowrap;
+  }
+
+  .xs-breadcrumb ol > li:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .xs-palette .ant-modal {
     top: 8vh;
   }

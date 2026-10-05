@@ -83,8 +83,14 @@ export function siteApprovals(sites: readonly SiteListItem[]): InboxItem[] {
   return sites.filter(siteNeedsApproval).map(siteInboxItem);
 }
 
-/** Newest first; rows without a usable time sink to the end; ties break on the key. */
-export function mergeInbox<T extends InboxItem>(...groups: readonly (readonly T[])[]): T[] {
+/**
+ * Newest first; rows without a usable time sink to the end; ties break on the key. Only the key
+ * and the time are read, so the workbench's "待我处理" rows (which add failed applies and unknown
+ * writes) use the same order.
+ */
+export function mergeInbox<T extends Pick<InboxItem, "key" | "atMs">>(
+  ...groups: readonly (readonly T[])[]
+): T[] {
   return groups.flat().sort((left, right) => {
     const a = Number.isFinite(left.atMs) ? left.atMs : Number.NEGATIVE_INFINITY;
     const b = Number.isFinite(right.atMs) ? right.atMs : Number.NEGATIVE_INFINITY;
