@@ -1715,7 +1715,10 @@ INSERT INTO dev_expected_objects VALUES
 ('0051','index','site_apply_approvals','site_apply_approvals_pkey','CREATE UNIQUE INDEX site_apply_approvals_pkey ON xshield.site_apply_approvals USING btree (tenant_id, site_id, approval_id)'),
 ('0051','index','site_apply_approvals','site_apply_approvals_tenant_id_site_id_apply_id_key','CREATE UNIQUE INDEX site_apply_approvals_tenant_id_site_id_apply_id_key ON xshield.site_apply_approvals USING btree (tenant_id, site_id, apply_id)'),
 ('0051','index','site_policy_revisions','site_policy_revisions_idempotency','CREATE UNIQUE INDEX site_policy_revisions_idempotency ON xshield.site_policy_revisions USING btree (tenant_id, site_id, idempotency_digest) WHERE (idempotency_digest IS NOT NULL)'),
-('0051','table','site_apply_approvals','site_apply_approvals','r');
+('0051','table','site_apply_approvals','site_apply_approvals','r'),
+('0052','column','site_routes','issued_by','jsonb|false|'),
+('0052','constraint','site_routes','site_routes_admission_check','CHECK ((admission = ANY (ARRAY[''PUBLIC''::text, ''AUTH_ENTRY''::text, ''AUTHENTICATED_ROOT''::text, ''UI_ACTION_REQUIRED''::text])))|true'),
+('0052','constraint','site_routes','site_routes_issued_by_object','CHECK (((issued_by IS NULL) OR (jsonb_typeof(issued_by) = ''object''::text)))|true');
 CREATE TEMP TABLE dev_expected_checksums (phase text PRIMARY KEY, sha256 text);
 INSERT INTO dev_expected_checksums VALUES
 ('0041','e6a424c31dc3e78dfcaa6563dcd83f5098c629462dafa1746ea1f52d167ccc1b'),
@@ -1728,7 +1731,20 @@ INSERT INTO dev_expected_checksums VALUES
 ('0048','bbf966ff037c1fb7b4e916a3d1af4320ac3d036669e7154fd7333ad45b42ef0c'),
 ('0049','38e67513d2b50b156c8cc286f21aabfe033a9a3e027bc168bc54c54f9c382dc2'),
 ('0050','50a62be8bf11fe466aee3902a7e839a052bd319b2d7ccef23a822d32974f9079'),
-('0051','0cd0768dd32b346769e5dd29c9341f9b4d5b43ea04e6dd28226eeda5a2334d87');
+('0051','0cd0768dd32b346769e5dd29c9341f9b4d5b43ea04e6dd28226eeda5a2334d87'),
+('0052','269779cbb6ac62f3c392e3f53abb6b5a5aec9a41f725c35679bc31b458a864aa');
+
+-- Whether an object reached the definition a phase recorded for it. A later
+-- migration may redefine an object (0052 widens a CHECK created by 0044), so a
+-- definition recorded by any later phase counts as reached too. A missing
+-- object (NULL definition) never has.
+CREATE FUNCTION pg_temp.dev_definition_reached(p_phase text, p_kind text, p_table text, p_name text, p_actual text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM dev_expected_objects later
+    WHERE later.kind = p_kind AND later.table_name = p_table AND later.name = p_name
+      AND later.phase >= p_phase AND later.definition = p_actual)
+$$;
 
 CREATE FUNCTION pg_temp.dev_assert_schema(p_phase text) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE missing text;
@@ -1736,7 +1752,8 @@ BEGIN
   SELECT e.kind || ':' || e.table_name || '.' || e.name INTO missing
   FROM dev_expected_objects e LEFT JOIN dev_schema_objects a
     USING(kind, table_name, name)
-  WHERE e.phase=p_phase AND e.definition IS DISTINCT FROM a.definition
+  WHERE e.phase=p_phase
+    AND NOT pg_temp.dev_definition_reached(e.phase, e.kind, e.table_name, e.name, a.definition)
   ORDER BY e.kind, e.table_name, e.name LIMIT 1;
   IF missing IS NOT NULL THEN
     RAISE EXCEPTION 'dev migration % schema mismatch: %', p_phase, missing;

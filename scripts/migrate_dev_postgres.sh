@@ -31,11 +31,18 @@ END \$\$;
 SELECT EXISTS (SELECT 1 FROM xshield.dev_schema_migrations WHERE migration_id='$migration_id') AS applied \gset
 SELECT NOT EXISTS (
   SELECT 1 FROM dev_expected_objects e LEFT JOIN dev_schema_objects a USING(kind,table_name,name)
-  WHERE e.phase='$migration_id' AND e.definition IS DISTINCT FROM a.definition
+  WHERE e.phase='$migration_id'
+    AND NOT pg_temp.dev_definition_reached(e.phase, e.kind, e.table_name, e.name, a.definition)
 ) AS complete \gset
+-- Partial: some object of this phase is already in place. An object that this
+-- phase only redefines exists before it runs, so it counts only once redefined.
 SELECT EXISTS (
   SELECT 1 FROM dev_expected_objects e JOIN dev_schema_objects a USING(kind,table_name,name)
   WHERE e.phase='$migration_id'
+    AND (pg_temp.dev_definition_reached(e.phase, e.kind, e.table_name, e.name, a.definition)
+         OR NOT EXISTS (SELECT 1 FROM dev_expected_objects earlier
+                        WHERE earlier.kind = e.kind AND earlier.table_name = e.table_name
+                          AND earlier.name = e.name AND earlier.phase < e.phase))
 ) AS partial \gset
 \if :applied
 SELECT pg_temp.dev_assert_schema('$migration_id');

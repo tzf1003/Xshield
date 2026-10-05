@@ -53,7 +53,7 @@ def main():
     try:
         for file in sorted((ROOT / 'migrations').glob('*.sql')):
             phase = file.name[:4]
-            if phase > '0051': break
+            if phase > '0052': break
             sql(file.read_text())
             if phase < '0040': continue
             payload = sql(SNAPSHOT + "SELECT coalesce(json_agg(o),'[]') FROM dev_schema_objects o;")
@@ -73,13 +73,26 @@ def main():
     out += 'CREATE TEMP TABLE dev_expected_checksums (phase text PRIMARY KEY, sha256 text);\n'
     out += 'INSERT INTO dev_expected_checksums VALUES\n' + ',\n'.join(hashes) + ';\n'
     out += """
+-- Whether an object reached the definition a phase recorded for it. A later
+-- migration may redefine an object (0052 widens a CHECK created by 0044), so a
+-- definition recorded by any later phase counts as reached too. A missing
+-- object (NULL definition) never has.
+CREATE FUNCTION pg_temp.dev_definition_reached(p_phase text, p_kind text, p_table text, p_name text, p_actual text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM dev_expected_objects later
+    WHERE later.kind = p_kind AND later.table_name = p_table AND later.name = p_name
+      AND later.phase >= p_phase AND later.definition = p_actual)
+$$;
+
 CREATE FUNCTION pg_temp.dev_assert_schema(p_phase text) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE missing text;
 BEGIN
   SELECT e.kind || ':' || e.table_name || '.' || e.name INTO missing
   FROM dev_expected_objects e LEFT JOIN dev_schema_objects a
     USING(kind, table_name, name)
-  WHERE e.phase=p_phase AND e.definition IS DISTINCT FROM a.definition
+  WHERE e.phase=p_phase
+    AND NOT pg_temp.dev_definition_reached(e.phase, e.kind, e.table_name, e.name, a.definition)
   ORDER BY e.kind, e.table_name, e.name LIMIT 1;
   IF missing IS NOT NULL THEN
     RAISE EXCEPTION 'dev migration % schema mismatch: %', p_phase, missing;
