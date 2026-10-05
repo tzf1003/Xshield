@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 限制站点健康观察的无界增长：任何 Observer 都可以反复执行站点健康读取，而每次读取都会向 `site_health_snapshots` 追加一行；该表现在于同一事务内只保留每个站点最新的 64 条观察（`HEALTH_SNAPSHOT_HISTORY`），工作台和健康接口只读取最新一行，不受影响。真实 PostgreSQL 回归覆盖保留数量、其他站点历史不受影响和最新观察保留。
+
 - 控制台重做第 1 阶段（站点接入与发布，只改 `web/console/`，不改后端）：站点列表改为可搜索表格；新建站点改为五步向导（`/sites/new/{basics,upstream,entry,routes,review}`，旧的 `/sites/new/network` 等地址重定向到对应步骤）；站点详情加入生命周期步骤条、跨分类的未保存变更栏与字段差异、路由表格加抽屉（最多 256 条）；发布页并排显示 edge 在用与已暂存的修订，按两个修订的已存储配置复算“为什么需要审批”，批准/应用/回滚先经确认框，批准带 `X-Xshield-Expected-Config-Digest`，回滚按服务端规则说明目标并提示会创建新修订，删除站点需逐字输入站点 ID 并完成 MFA step-up（被拒绝的请求原样保留、可原样重试）。新增站点原因码词典（单测扫描 Rust 源码，缺码即失败）；全部站点页面迁到 guarded 读取层和“待确认操作”登记，旧 `SiteConfigPanel`/`SiteOperationsPanel` 删除。批准、应用或回滚针对已保存的修订，动作之后的重新读取不会替换未保存的草稿。已知限制：回滚目标的生效顺序没有读取 API，控制台只能说明规则、不能点名；列表 API 不返回上游地址；`scripts/test_console_oidc.mjs` 的站点步骤仍是旧页面的选择器，本阶段没有更新（需要 `./dev.sh` 的真实 OIDC 环境）。
 
 - 增加发布打包脚本 `scripts/package_release.sh`：构建 7 个 release 二进制与控制台静态包，附迁移、ClickHouse 结构、示例配置和部署/运行手册，生成带文件清单与 SHA-256 的 tar.gz。输出目录必须显式给出且不得在仓库内，使大体积构建产物可放在外接大容量磁盘上（含 exFAT 外接盘上使用 APFS 稀疏包的做法，见 19.7）；不构建镜像、不签名、不部署。

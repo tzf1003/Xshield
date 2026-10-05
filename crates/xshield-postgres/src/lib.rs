@@ -144,10 +144,11 @@ pub use response_grant::{
 };
 pub use share_grant_issue::{ShareGrantPersistence, ShareGrantWriteOutcome};
 pub use site_config::{
-    ProtectedSiteApplyState, ProtectedSiteApprovalOutcome, ProtectedSiteConfigListItem,
-    ProtectedSiteConfigRecord, ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
-    ProtectedSiteDirectApplyOutcome, ProtectedSiteHealthSnapshot, ProtectedSitePolicyRevision,
-    ProtectedSiteSnapshot, ProtectedSiteSnapshotSite, ProtectedSiteWriteMatch,
+    HEALTH_SNAPSHOT_HISTORY, ProtectedSiteApplyState, ProtectedSiteApprovalOutcome,
+    ProtectedSiteConfigListItem, ProtectedSiteConfigRecord, ProtectedSiteConfigUpsert,
+    ProtectedSiteConfigWriteOutcome, ProtectedSiteDirectApplyOutcome, ProtectedSiteHealthSnapshot,
+    ProtectedSitePolicyRevision, ProtectedSiteSnapshot, ProtectedSiteSnapshotSite,
+    ProtectedSiteWriteMatch,
 };
 
 use serde_json::Value;

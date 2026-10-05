@@ -4,8 +4,8 @@ use std::{env, sync::OnceLock, time::Duration};
 use uuid::Uuid;
 use xshield_core::domain::{SiteId, TenantId};
 use xshield_postgres::{
-    PostgresIdentityStore, ProtectedSiteApprovalOutcome, ProtectedSiteConfigUpsert,
-    ProtectedSiteConfigWriteOutcome,
+    HEALTH_SNAPSHOT_HISTORY, PostgresIdentityStore, ProtectedSiteApprovalOutcome,
+    ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
 };
 
 #[tokio::test]
@@ -272,6 +272,64 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
     assert_eq!(latest[0].edge_state, "degraded");
     assert_eq!(latest[0].upstream_state, "unavailable");
     assert_eq!(latest[1].audit_state, "unknown");
+    // History is bounded per site: repeated reads keep only the newest
+    // observations, never touch another site's rows, and keep the latest one.
+    for round in 0..(HEALTH_SNAPSHOT_HISTORY + 6) {
+        let reason = if round % 2 == 0 {
+            "CONTROL_SITE_HEALTH_EVEN"
+        } else {
+            "CONTROL_SITE_HEALTH_ODD"
+        };
+        store
+            .insert_protected_site_health_snapshot(
+                &tenant,
+                &site_a,
+                "healthy",
+                "healthy",
+                "active",
+                "healthy",
+                reason,
+                &json!({}),
+            )
+            .await
+            .unwrap();
+    }
+    let kept_for = |site: &SiteId| {
+        let pool = pool.clone();
+        let tenant = tenant.clone();
+        let site = site.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM xshield.site_health_snapshots
+                 WHERE tenant_id = $1 AND site_id = $2",
+            )
+            .bind(tenant.as_str())
+            .bind(site.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(kept_for(&site_a).await, HEALTH_SNAPSHOT_HISTORY);
+    assert_eq!(
+        kept_for(&site_b).await,
+        1,
+        "another site's history is untouched"
+    );
+    let latest = store
+        .latest_protected_site_health_snapshots(&tenant, 128)
+        .await
+        .unwrap();
+    let newest_round = HEALTH_SNAPSHOT_HISTORY + 5;
+    assert_eq!(
+        latest[0].reason_code,
+        if newest_round % 2 == 0 {
+            "CONTROL_SITE_HEALTH_EVEN"
+        } else {
+            "CONTROL_SITE_HEALTH_ODD"
+        },
+        "the newest observation survives pruning"
+    );
     let other_tenant = TenantId::parse("tenant_site_contract_other").unwrap();
     assert!(
         store
