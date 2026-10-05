@@ -1,0 +1,19 @@
+/*
+ * Workbench and operations pages (audit publication, jobs, API keys, session). antd carries the
+ * structure; these rules add layout only. Colours are --xs-* variables (tests/theme.test.ts), so
+ * light, dark and the system preference all follow src/theme/tokens.ts.
+ */
+
+.xs-op-observation {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xs-op-age {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
