@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3858,
-  "passed_count": 3858,
+  "checks_total": 3864,
+  "passed_count": 3864,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -18606,6 +18606,21 @@
       "detail": ""
     },
     {
+      "name": "sources:30-console-redesign.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:30-console-redesign.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:30-console-redesign.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:web/console/README.md",
       "passed": true,
       "detail": ""
@@ -19041,6 +19056,11 @@
       "detail": ""
     },
     {
+      "name": "link:README.md:docs/30-console-redesign.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:docs/20-testing-and-acceptance.md",
       "passed": true,
       "detail": ""
@@ -19277,6 +19297,16 @@
     },
     {
       "name": "link:docs/29-api-endpoint-catalog.md:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/30-console-redesign.md:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/30-console-redesign.md:29-api-endpoint-catalog.md",
       "passed": true,
       "detail": ""
     },

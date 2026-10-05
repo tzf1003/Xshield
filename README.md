@@ -267,6 +267,7 @@ cargo run -p xshield-control -- \
 | 27 | [站点规则编写指南与评审清单](docs/27-rule-authoring-cookbook.md) |
 | 28 | [对话决策汇总与需求追踪](docs/28-conversation-decisions-and-traceability.md) |
 | 29 | [控制 API 与审计责任清单](docs/29-api-endpoint-catalog.md) |
+| 30 | [控制台重构方案与实施记录](docs/30-console-redesign.md) |
 
 ## 配套材料
 
