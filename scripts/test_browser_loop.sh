@@ -10,7 +10,9 @@
 # calls from unhooked contexts (Worker, iframe, a saved fetch reference) must
 # all be denied before the origin sees them. Afterwards the encrypted journal
 # is read back to prove every decision was audited with its reason code, and
-# the ui_action.issued outbox rows are run through the worker's parser.
+# the ui_action.issued outbox rows are run through the worker's parser. The
+# edge must also refuse to start without its database and when a changed
+# configuration would redefine descriptors under the same policy revision.
 #
 # Needs: cargo, python3, openssl, curl, psql/createdb/dropdb for a reachable
 # PostgreSQL (PG* variables; XSHIELD_TEST_DATABASE_BASE_URL overrides the
@@ -161,17 +163,53 @@ cat >"$test_dir/gateway.json" <<JSON
 }
 JSON
 
-env -u XSHIELD_EDGE_APPLY_KEY_HEX -u XSHIELD_EDGE_SNAPSHOT_PATH -u XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED \
-    XSHIELD_CONFIG="$test_dir/gateway.json" \
-    XSHIELD_PUBLIC_HOSTS=localhost \
-    XSHIELD_EDGE_LISTEN_PORTS="127.0.0.1:$edge_port" \
-    XSHIELD_EDGE_TLS_CERT_PATH="$test_dir/edge.pem" \
-    XSHIELD_EDGE_TLS_KEY_PATH="$test_dir/edge.key" \
-    XSHIELD_JOURNAL_KEY_HEX="$journal_key" \
-    XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
-    XSHIELD_DATABASE_URL="$database_url" \
-    "$gateway_bin" >"$test_dir/gateway.log" 2>&1 &
-gateway_pid=$!
+start_gateway() { # config database-url log
+    env -u XSHIELD_EDGE_APPLY_KEY_HEX -u XSHIELD_EDGE_SNAPSHOT_PATH \
+        -u XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED \
+        XSHIELD_CONFIG="$1" \
+        XSHIELD_PUBLIC_HOSTS=localhost \
+        XSHIELD_EDGE_LISTEN_PORTS="127.0.0.1:$edge_port" \
+        XSHIELD_EDGE_TLS_CERT_PATH="$test_dir/edge.pem" \
+        XSHIELD_EDGE_TLS_KEY_PATH="$test_dir/edge.key" \
+        XSHIELD_JOURNAL_KEY_HEX="$journal_key" \
+        XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
+        XSHIELD_DATABASE_URL="$2" \
+        "$gateway_bin" >"$3" 2>&1 &
+    gateway_pid=$!
+}
+
+# Expects a refused startup: the process exits non-zero before it listens and
+# names the stable reason. $1 = log, $2 = reason code.
+expect_refused_start() {
+    local exited=0
+    for _ in {1..100}; do
+        if ! kill -0 "$gateway_pid" 2>/dev/null; then
+            exited=1
+            break
+        fi
+        sleep 0.1
+    done
+    ((exited)) || { echo "edge started although it must refuse ($2)" >&2; exit 1; }
+    if wait "$gateway_pid"; then
+        echo "edge exited successfully although it must refuse ($2)" >&2
+        exit 1
+    fi
+    gateway_pid=""
+    grep -q "$2" "$1" || { cat "$1" >&2; exit 1; }
+    if curl -sk -o /dev/null "https://localhost:$edge_port/" 2>/dev/null; then
+        echo "a refused edge still accepted a connection ($2)" >&2
+        exit 1
+    fi
+}
+
+# Without its database the edge cannot provision descriptors and must not
+# start. Refused starts use their own journal directory.
+sed "s#\"$test_dir/audit\"#\"$test_dir/audit-refused\"#" "$test_dir/gateway.json" \
+    >"$test_dir/gateway-refused.json"
+start_gateway "$test_dir/gateway-refused.json" "${database_url}_missing" "$test_dir/gateway-no-db.log"
+expect_refused_start "$test_dir/gateway-no-db.log" IDENTITY_STORE_UNAVAILABLE
+
+start_gateway "$test_dir/gateway.json" "$database_url" "$test_dir/gateway.log"
 ready=0
 for _ in {1..150}; do
     kill -0 "$gateway_pid" 2>/dev/null || break
@@ -197,6 +235,20 @@ LOOP_EXPECTATIONS="$test_dir/expectations.json" \
 
 # Flush and close the journal, then prove every decision above was audited.
 stop_gateway
+
+# The same policy revision may never be redefined: a configuration that moves
+# the page-issued list action refuses to start and leaves the rows unchanged.
+sed 's#"path": "/orders",#"path": "/orders-v2",#' "$test_dir/gateway-refused.json" \
+    >"$test_dir/gateway-drift.json"
+if cmp -s "$test_dir/gateway-refused.json" "$test_dir/gateway-drift.json"; then
+    echo "the drift configuration did not change the list route" >&2
+    exit 1
+fi
+start_gateway "$test_dir/gateway-drift.json" "$database_url" "$test_dir/gateway-drift.log"
+expect_refused_start "$test_dir/gateway-drift.log" UI_DESCRIPTOR_CONFLICT
+[[ "$(psql -X -At -d "$test_database" -c \
+    "SELECT route_template FROM xshield.action_descriptors
+     WHERE tenant_id = 'tenant_loop' AND action_id = 'app.orders.list'")" == "/orders" ]]
 XSHIELD_BROWSER_LOOP_AUDIT="$test_dir/expectations.json" \
 XSHIELD_BROWSER_LOOP_JOURNAL="$test_dir/audit" \
 XSHIELD_BROWSER_LOOP_JOURNAL_KEY_HEX="$journal_key" \
