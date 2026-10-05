@@ -1,4 +1,14 @@
 //! Authenticated loopback control channel for atomic edge snapshot loading.
+//!
+//! An apply is all-or-nothing for the whole tenant snapshot. Under one lock,
+//! in this order: the snapshot compiles (no side effects), it must be allowed
+//! to replace the serving one, every site that declares page issuance has its
+//! edge-managed action descriptors supplied to `PostgreSQL`, the signed pending
+//! file is written, sockets are bound and the pointer is swapped, and the
+//! pending file is promoted. A refusal at any step before the swap leaves the
+//! serving snapshot and the persisted files as they were. Only the success
+//! acknowledgement is signed; refusals carry a stable reason code and, for a
+//! descriptor refusal, the site that caused it.
 
 use axum::{
     Router,
@@ -20,14 +30,20 @@ use tokio::sync::Mutex;
 use tokio::{io::AsyncWriteExt, net::TcpListener};
 use xshield_core::{
     GatewayApplyAck, GatewayApplyRequest,
+    domain::SiteId,
     edge_channel::{APPLY_ACK_SIGNATURE_HEADER, APPLY_SIGNATURE_HEADER, apply_ack_message},
 };
 
+use crate::descriptor_supply::{
+    APPLY_SUPPLY_DEADLINE, DescriptorStore, SupplyRefusal, supply_descriptors,
+};
 use crate::durable_audit::AuditReadiness;
 use crate::edge_health::HealthGate;
 use crate::listener_supervisor::{ApplyError, ListenerSupervisor};
 use xshield_gateway::{
-    MAX_CONFIG_BYTES, edge_transport::TransportStatus, multi_site::GatewaySnapshot,
+    MAX_CONFIG_BYTES,
+    edge_transport::TransportStatus,
+    multi_site::{GatewaySnapshot, SnapshotRefusal},
 };
 
 const SIGNATURE_HEADER: &str = APPLY_SIGNATURE_HEADER;
@@ -35,6 +51,14 @@ const SIGNATURE_HEADER: &str = APPLY_SIGNATURE_HEADER;
 // request can ever reach a panic on it.
 const ACK_SIGNATURE_HEADER: HeaderName = HeaderName::from_static(APPLY_ACK_SIGNATURE_HEADER);
 const MAX_APPLY_BYTES: usize = MAX_CONFIG_BYTES * 8;
+/// A site's edge-managed descriptors conflict with the rows its policy
+/// revision already binds (another digest, a revision that is not `active`,
+/// or a descriptor that means something else). A changed descriptor set
+/// needs a new policy revision label; retrying the same snapshot cannot help.
+const DESCRIPTOR_CONFLICT: &str = "EDGE_APPLY_DESCRIPTOR_CONFLICT";
+/// A site's edge-managed descriptors could not be supplied: the edge has no
+/// identity store, or `PostgreSQL` was unreachable or too slow. Retryable.
+const DESCRIPTOR_UNAVAILABLE: &str = "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE";
 
 /// Authenticated state shared by the loopback apply handler.
 #[derive(Clone)]
@@ -46,10 +70,15 @@ pub struct ApplyState {
     snapshot_path: Option<Arc<PathBuf>>,
     apply_lock: Arc<Mutex<()>>,
     audit: AuditReadiness,
+    descriptors: Option<Arc<dyn DescriptorStore>>,
 }
 
 impl ApplyState {
     /// Creates an apply endpoint bound to one deployment tenant.
+    ///
+    /// `descriptors` is the identity store the edge was started with, or
+    /// `None` when it has none; a snapshot with a page-issuing site is then
+    /// refused instead of being served without its descriptors.
     #[must_use]
     pub fn new(
         supervisor: Arc<ListenerSupervisor>,
@@ -57,6 +86,7 @@ impl ApplyState {
         key: [u8; 32],
         snapshot_path: Option<PathBuf>,
         audit: AuditReadiness,
+        descriptors: Option<Arc<dyn DescriptorStore>>,
     ) -> Self {
         Self {
             supervisor,
@@ -66,6 +96,7 @@ impl ApplyState {
             snapshot_path: snapshot_path.map(Arc::new),
             apply_lock: Arc::new(Mutex::new(())),
             audit,
+            descriptors,
         }
     }
 }
@@ -124,30 +155,26 @@ async fn apply_handler(
     // The supervisor serializes socket/snapshot replacement, while this lock
     // also serializes the durable pending->active promotion around it. Without
     // both, concurrent requests could persist B while serving A after restart.
+    // The descriptor supply runs under it too, so the snapshot it checked is
+    // still the serving one when the supply decides anything.
     let _apply_guard = state.apply_lock.lock().await;
-    if let Some(path) = state.snapshot_path.as_deref() {
-        let Ok(canonical_body) = serde_json::to_vec(&request) else {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE",
-            );
-        };
-        let Some(persistence_signature) = sign(&state.key, &canonical_body) else {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE",
-            );
-        };
-        if write_pending_snapshot(path, &request, &persistence_signature)
-            .await
-            .is_err()
-        {
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE",
-            );
-        }
+    let serving = state.supervisor.current();
+    if let Err(refusal) = prepare_switch(
+        &serving,
+        &snapshot,
+        &request,
+        state.descriptors.as_deref(),
+        state
+            .snapshot_path
+            .as_deref()
+            .map(|path| (path.as_path(), &state.key)),
+        APPLY_SUPPLY_DEADLINE,
+    )
+    .await
+    {
+        return refusal.response();
     }
+    drop(serving);
     let active_revision = match state.supervisor.apply(snapshot).await {
         Ok(revision) => revision,
         Err(ApplyError::ListenerUnavailable) => {
@@ -192,6 +219,109 @@ async fn apply_handler(
             reason_code: "EDGE_APPLY_CONFIRMED".to_owned(),
         },
     )
+}
+
+/// Why an apply was refused before the in-memory swap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ApplyRefusal {
+    status: StatusCode,
+    reason_code: &'static str,
+    /// The site a descriptor refusal is about. It lets a control plane hold
+    /// that one site back; it is not signed, so it can only ever explain a
+    /// refusal, never confirm anything.
+    site_id: Option<SiteId>,
+}
+
+impl ApplyRefusal {
+    const fn new(status: StatusCode, reason_code: &'static str) -> Self {
+        Self {
+            status,
+            reason_code,
+            site_id: None,
+        }
+    }
+
+    fn descriptors(refusal: SupplyRefusal) -> Self {
+        let (status, reason_code, site_id) = match refusal {
+            SupplyRefusal::Conflict { site_id, .. } => {
+                (StatusCode::CONFLICT, DESCRIPTOR_CONFLICT, site_id)
+            }
+            SupplyRefusal::Unavailable { site_id } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                DESCRIPTOR_UNAVAILABLE,
+                site_id,
+            ),
+        };
+        Self {
+            status,
+            reason_code,
+            site_id: Some(site_id),
+        }
+    }
+
+    fn response(&self) -> Response {
+        error_with_site(
+            self.status,
+            self.reason_code,
+            self.site_id.as_ref().map(SiteId::as_str),
+        )
+    }
+}
+
+/// Everything that must hold before sockets are bound and the pointer is
+/// swapped, in order; the first refusal stops the apply, so nothing after it
+/// has happened:
+/// 1. `incoming` may replace `serving` (the same verdict the supervisor
+///    reaches again under its own lock). Asked first so a stale or
+///    conflicting snapshot never touches `PostgreSQL`.
+/// 2. Every site that declares page issuance has its descriptors supplied,
+///    unless `incoming` is the exact payload already serving (an idempotent
+///    retry), whose descriptors were supplied before it ever served.
+/// 3. With persistence configured, the signed pending file is written.
+///
+/// The caller holds the apply lock, so `serving` cannot change underneath.
+async fn prepare_switch(
+    serving: &GatewaySnapshot,
+    incoming: &GatewaySnapshot,
+    request: &GatewayApplyRequest,
+    descriptors: Option<&dyn DescriptorStore>,
+    persistence: Option<(&Path, &[u8; 32])>,
+    supply_deadline: std::time::Duration,
+) -> Result<(), ApplyRefusal> {
+    match serving.check_replacement(incoming) {
+        Ok(()) => {}
+        Err(SnapshotRefusal::Stale) => {
+            return Err(ApplyRefusal::new(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_STALE_REVISION",
+            ));
+        }
+        Err(SnapshotRefusal::Conflict) => {
+            return Err(ApplyRefusal::new(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_IDEMPOTENCY_CONFLICT",
+            ));
+        }
+    }
+    let already_serving =
+        serving.payload_digest().is_some() && serving.payload_digest() == incoming.payload_digest();
+    if !already_serving {
+        supply_descriptors(descriptors, incoming.sites(), supply_deadline)
+            .await
+            .map_err(ApplyRefusal::descriptors)?;
+    }
+    if let Some((path, key)) = persistence {
+        let persistence_unavailable =
+            |status| ApplyRefusal::new(status, "EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE");
+        let canonical_body = serde_json::to_vec(request)
+            .map_err(|_| persistence_unavailable(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let signature = sign(key, &canonical_body)
+            .ok_or_else(|| persistence_unavailable(StatusCode::INTERNAL_SERVER_ERROR))?;
+        write_pending_snapshot(path, request, &signature)
+            .await
+            .map_err(|_| persistence_unavailable(StatusCode::SERVICE_UNAVAILABLE))?;
+    }
+    Ok(())
 }
 
 /// The acknowledgement, signed with the shared key over a message that
@@ -299,17 +429,29 @@ fn health_body(
 }
 
 #[derive(Serialize)]
-struct ErrorBody {
+struct ErrorBody<'a> {
     error: &'static str,
     reason_code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site_id: Option<&'a str>,
 }
 
 pub(crate) fn error(status: StatusCode, reason_code: &'static str) -> Response {
+    error_with_site(status, reason_code, None)
+}
+
+/// A refusal body; `site_id` is present only when one site caused it.
+fn error_with_site(
+    status: StatusCode,
+    reason_code: &'static str,
+    site_id: Option<&str>,
+) -> Response {
     (
         status,
         axum::Json(ErrorBody {
             error: "edge_apply_failed",
             reason_code,
+            site_id,
         }),
     )
         .into_response()
@@ -524,6 +666,8 @@ pub(crate) fn decode_hex(value: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::descriptor_supply::fake::{FakeStore, Mode, page_site};
+    use xshield_gateway::GatewayConfig;
 
     const PLAINTEXT: TransportStatus = TransportStatus {
         tls_enabled: false,
@@ -742,5 +886,668 @@ mod tests {
         assert!(key_from_hex(&"00".repeat(32)).is_some());
         assert!(key_from_hex(&"AA".repeat(32)).is_none());
         assert!(key_from_hex("00").is_none());
+    }
+
+    // ---- Descriptor supply before the swap -------------------------------
+
+    const KEY: [u8; 32] = [7_u8; 32];
+
+    /// A complete snapshot of page-issuing sites `(site, port, list path)`.
+    fn page_request(revision: u64, sites: &[(&str, u16, &str)]) -> GatewayApplyRequest {
+        GatewayApplyRequest {
+            protocol_version: 1,
+            tenant_id: "tenant_supply".to_owned(),
+            apply_id: "apply_0190c8f4-5b8a-7e8a-8e8a-1f6c0a5d1a01".to_owned(),
+            snapshot_revision: revision,
+            sites: sites
+                .iter()
+                .map(|(site, port, list_path)| xshield_core::GatewayApplySite {
+                    site_id: (*site).to_owned(),
+                    listen_port: *port,
+                    public_origin: format!("https://{}.example", site.replace('_', "-")),
+                    gateway_config: page_site(site, *port, list_path),
+                    revision,
+                })
+                .collect(),
+        }
+    }
+
+    /// The bootstrap-only snapshot an edge starts with.
+    fn placeholder() -> GatewaySnapshot {
+        GatewaySnapshot::compile_for_tenant(
+            1,
+            xshield_core::domain::TenantId::parse("tenant_supply").unwrap(),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn compiled(request: &GatewayApplyRequest) -> GatewaySnapshot {
+        GatewaySnapshot::from_apply_request(request.clone()).unwrap()
+    }
+
+    async fn prepare(
+        serving: &GatewaySnapshot,
+        request: &GatewayApplyRequest,
+        store: Option<&dyn DescriptorStore>,
+        path: &Path,
+    ) -> Result<(), ApplyRefusal> {
+        prepare_switch(
+            serving,
+            &compiled(request),
+            request,
+            store,
+            Some((path, &KEY)),
+            APPLY_SUPPLY_DEADLINE,
+        )
+        .await
+    }
+
+    fn digest_of(request: &GatewayApplyRequest, site: &str) -> String {
+        compiled(request)
+            .sites()
+            .find(|config| config.site_id().as_str() == site)
+            .and_then(GatewayConfig::edge_descriptors)
+            .unwrap()
+            .content_digest_hex()
+    }
+
+    fn refused(status: StatusCode, reason_code: &'static str, site: &str) -> ApplyRefusal {
+        ApplyRefusal {
+            status,
+            reason_code,
+            site_id: Some(SiteId::parse(site).unwrap()),
+        }
+    }
+
+    /// Nothing was persisted: no pending, active or temporary file.
+    fn nothing_persisted(directory: &Path) {
+        assert!(
+            !directory.exists() || leftovers(directory).is_empty(),
+            "{:?}",
+            leftovers(directory)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_issuing_site_is_supplied_before_its_pending_snapshot_is_written() {
+        let directory = scratch_directory("supply-created");
+        let path = directory.join("snapshot.json");
+        let store = FakeStore::new(Mode::Up);
+        let request = page_request(1, &[("site_a", 6100, "/orders")]);
+        prepare(&placeholder(), &request, Some(&store), &path)
+            .await
+            .unwrap();
+        // The rows exist, bound to this configuration's own digest, before
+        // the pending file that a restart could serve from exists.
+        assert_eq!(
+            store.revision("tenant_supply", "site_a", "policy-r1"),
+            Some(("active", digest_of(&request, "site_a")))
+        );
+        assert_eq!(leftovers(&directory), ["snapshot.json.pending"]);
+        // A snapshot with page-issuing sites is a valid restart source now.
+        promote_pending_snapshot(&path).await.unwrap();
+        let (restored, snapshot) = load_persisted_snapshot(&path, &KEY, "tenant_supply")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.snapshot_revision, 1);
+        assert!(
+            snapshot
+                .sites()
+                .all(|config| config.edge_descriptors().is_some())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_revision_that_is_already_supplied_is_accepted_as_existing() {
+        let directory = scratch_directory("supply-existing");
+        let path = directory.join("snapshot.json");
+        let store = FakeStore::new(Mode::Up);
+        let first = page_request(1, &[("site_a", 6100, "/orders")]);
+        prepare(&placeholder(), &first, Some(&store), &path)
+            .await
+            .unwrap();
+        promote_pending_snapshot(&path).await.unwrap();
+        // The next snapshot keeps the site's configuration (another site may
+        // have changed): the same digest under the same revision is fine.
+        let second = page_request(2, &[("site_a", 6100, "/orders")]);
+        prepare(&compiled(&first), &second, Some(&store), &path)
+            .await
+            .unwrap();
+        assert_eq!(store.calls().len(), 2);
+        assert_eq!(store.calls()[0], store.calls()[1]);
+        assert_eq!(
+            leftovers(&directory),
+            ["snapshot.json", "snapshot.json.pending"]
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // One conflicting site refuses the whole tenant snapshot, because an
+    // apply is atomic; the refusal names that site so a control plane could
+    // hold just it back.
+    #[tokio::test]
+    async fn a_digest_conflict_refuses_the_whole_snapshot_and_names_the_site() {
+        let directory = scratch_directory("supply-conflict");
+        let path = directory.join("snapshot.json");
+        let store = FakeStore::new(Mode::Up);
+        store.seed(
+            "tenant_supply",
+            "site_b",
+            "policy-r1",
+            "active",
+            &"e".repeat(64),
+        );
+        let request = page_request(
+            1,
+            &[("site_a", 6100, "/orders"), ("site_b", 6101, "/orders")],
+        );
+        assert_eq!(
+            prepare(&placeholder(), &request, Some(&store), &path).await,
+            Err(refused(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+                "site_b"
+            ))
+        );
+        nothing_persisted(&directory);
+        // Nothing was overwritten. The site checked before the conflict keeps
+        // its own idempotent binding; the next attempt reads it as existing.
+        assert_eq!(
+            store.revision("tenant_supply", "site_b", "policy-r1"),
+            Some(("active", "e".repeat(64)))
+        );
+        assert!(
+            store
+                .revision("tenant_supply", "site_a", "policy-r1")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_policy_revision_that_is_not_active_refuses_the_apply() {
+        let directory = scratch_directory("supply-retired");
+        let path = directory.join("snapshot.json");
+        let request = page_request(1, &[("site_a", 6100, "/orders")]);
+        let store = FakeStore::new(Mode::Up);
+        store.seed(
+            "tenant_supply",
+            "site_a",
+            "policy-r1",
+            "retired",
+            &digest_of(&request, "site_a"),
+        );
+        assert_eq!(
+            prepare(&placeholder(), &request, Some(&store), &path).await,
+            Err(refused(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+                "site_a"
+            ))
+        );
+        nothing_persisted(&directory);
+    }
+
+    #[tokio::test]
+    async fn a_stored_descriptor_with_another_meaning_refuses_the_apply() {
+        let directory = scratch_directory("supply-drift");
+        let path = directory.join("snapshot.json");
+        let store = FakeStore::new(Mode::Up);
+        store.drift_descriptor("tenant_supply", "site_a", "policy-r1");
+        let request = page_request(1, &[("site_a", 6100, "/orders")]);
+        assert_eq!(
+            prepare(&placeholder(), &request, Some(&store), &path).await,
+            Err(refused(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+                "site_a"
+            ))
+        );
+        nothing_persisted(&directory);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_or_hung_database_refuses_and_writes_no_pending_file() {
+        let directory = scratch_directory("supply-down");
+        let path = directory.join("snapshot.json");
+        let request = page_request(1, &[("site_a", 6100, "/orders")]);
+        let unavailable = refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE",
+            "site_a",
+        );
+        let down = FakeStore::new(Mode::Down);
+        assert_eq!(
+            prepare(&placeholder(), &request, Some(&down), &path).await,
+            Err(unavailable.clone())
+        );
+        nothing_persisted(&directory);
+        let hung = FakeStore::new(Mode::Hung);
+        assert_eq!(
+            prepare_switch(
+                &placeholder(),
+                &compiled(&request),
+                &request,
+                Some(&hung),
+                Some((&path, &KEY)),
+                std::time::Duration::from_millis(50),
+            )
+            .await,
+            Err(unavailable)
+        );
+        nothing_persisted(&directory);
+    }
+
+    // The edge's identity store comes from its bootstrap configuration. An
+    // edge started without one cannot make the descriptors exist, so it must
+    // refuse a page-issuing site rather than serve it without them; sites
+    // without page issuance do not need a database at all.
+    #[tokio::test]
+    async fn an_edge_without_an_identity_store_refuses_only_page_issuing_sites() {
+        let directory = scratch_directory("supply-no-store");
+        let path = directory.join("snapshot.json");
+        let request = page_request(1, &[("site_a", 6100, "/orders")]);
+        assert_eq!(
+            prepare(&placeholder(), &request, None, &path).await,
+            Err(refused(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE",
+                "site_a"
+            ))
+        );
+        nothing_persisted(&directory);
+        let mut plain = page_request(1, &[("site_a", 6100, "/orders")]);
+        let config = &mut plain.sites[0].gateway_config;
+        config["operations"] = serde_json::json!([
+            {"operation_id": "entry", "method": "GET", "path": "/", "admission": "PUBLIC"}
+        ]);
+        config.as_object_mut().unwrap().remove("sensor");
+        prepare(&placeholder(), &plain, None, &path).await.unwrap();
+        assert_eq!(leftovers(&directory), ["snapshot.json.pending"]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_and_conflicting_snapshots_never_reach_the_database() {
+        let directory = scratch_directory("supply-stale");
+        let path = directory.join("snapshot.json");
+        let store = FakeStore::new(Mode::Up);
+        let serving = compiled(&page_request(3, &[("site_a", 6100, "/orders")]));
+        assert_eq!(
+            prepare(
+                &serving,
+                &page_request(2, &[("site_a", 6100, "/orders")]),
+                Some(&store),
+                &path
+            )
+            .await,
+            Err(ApplyRefusal::new(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_STALE_REVISION"
+            ))
+        );
+        assert_eq!(
+            prepare(
+                &serving,
+                &page_request(3, &[("site_a", 6100, "/orders-v2")]),
+                Some(&store),
+                &path
+            )
+            .await,
+            Err(ApplyRefusal::new(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_IDEMPOTENCY_CONFLICT"
+            ))
+        );
+        assert!(store.calls().is_empty());
+        nothing_persisted(&directory);
+    }
+
+    // A retry of the exact payload already serving was supplied before it
+    // ever served; asking the database again would only turn a database
+    // outage into a failed no-op.
+    #[tokio::test]
+    async fn an_identical_retry_of_the_serving_snapshot_needs_no_database() {
+        let directory = scratch_directory("supply-retry");
+        let path = directory.join("snapshot.json");
+        let request = page_request(2, &[("site_a", 6100, "/orders")]);
+        let down = FakeStore::new(Mode::Down);
+        prepare(&compiled(&request), &request, Some(&down), &path)
+            .await
+            .unwrap();
+        assert!(down.calls().is_empty());
+        assert_eq!(leftovers(&directory), ["snapshot.json.pending"]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // The wire format of every existing refusal is unchanged; only a
+    // descriptor refusal names a site.
+    #[tokio::test]
+    async fn only_descriptor_refusals_name_a_site() {
+        let body = |response: Response| async move {
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap()
+        };
+        let conflict = ApplyRefusal::descriptors(SupplyRefusal::Conflict {
+            site_id: SiteId::parse("site_b").unwrap(),
+            policy_revision: xshield_core::domain::PolicyRevision::parse("policy-r1").unwrap(),
+        })
+        .response();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            &body(conflict).await[..],
+            br#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_DESCRIPTOR_CONFLICT","site_id":"site_b"}"#
+        );
+        let unavailable = ApplyRefusal::descriptors(SupplyRefusal::Unavailable {
+            site_id: SiteId::parse("site_a").unwrap(),
+        })
+        .response();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            &body(unavailable).await[..],
+            br#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_DESCRIPTOR_UNAVAILABLE","site_id":"site_a"}"#
+        );
+        assert_eq!(
+            &body(error(StatusCode::CONFLICT, "EDGE_APPLY_STALE_REVISION")).await[..],
+            br#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_STALE_REVISION"}"#
+        );
+    }
+
+    // ---- The same paths against a real PostgreSQL -------------------------
+    //
+    // Run by scripts/test_postgres.sh against a throwaway database with every
+    // migration applied. Each run uses its own tenant, so a database can be
+    // reused without cleaning it.
+
+    fn database_url() -> String {
+        std::env::var("XSHIELD_TEST_DATABASE_URL").expect("test database URL is required")
+    }
+
+    /// The test database's URL with a database name that does not exist.
+    fn missing_database_url() -> String {
+        let url = database_url();
+        match url.split_once('?') {
+            Some((base, query)) => format!("{base}_missing?{query}"),
+            None => format!("{url}_missing"),
+        }
+    }
+
+    fn runtime(url: String) -> crate::PostgresRuntime {
+        crate::PostgresRuntime::new(
+            zeroize::Zeroizing::new(url),
+            2,
+            std::time::Duration::from_secs(3),
+        )
+    }
+
+    fn fresh_tenant() -> String {
+        format!("tenant_supply_{}", uuid::Uuid::now_v7().simple())
+    }
+
+    /// `page_request` for one tenant of its own.
+    fn tenant_request(
+        tenant: &str,
+        revision: u64,
+        sites: &[(&str, u16, &str)],
+    ) -> GatewayApplyRequest {
+        let mut request = page_request(revision, sites);
+        request.tenant_id = tenant.to_owned();
+        for site in &mut request.sites {
+            site.gateway_config["tenant_id"] = serde_json::Value::from(tenant);
+        }
+        request
+    }
+
+    fn tenant_placeholder(tenant: &str) -> GatewaySnapshot {
+        GatewaySnapshot::compile_for_tenant(
+            1,
+            xshield_core::domain::TenantId::parse(tenant).unwrap(),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    /// `(status, content_digest, artifact_ref)` of one stored revision.
+    async fn stored_revision(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        site: &str,
+    ) -> Option<(String, String, String)> {
+        sqlx::query_as(
+            "SELECT status, content_digest, artifact_ref FROM xshield.policy_revisions
+             WHERE tenant_id = $1 AND site_id = $2 AND revision = 'policy-r1'",
+        )
+        .bind(tenant)
+        .bind(site)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    /// `action_id@route_template` of every stored descriptor of one site.
+    async fn stored_routes(pool: &sqlx::PgPool, tenant: &str, site: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT action_id || '@' || route_template FROM xshield.action_descriptors
+             WHERE tenant_id = $1 AND site_id = $2 ORDER BY action_id",
+        )
+        .bind(tenant)
+        .bind(site)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+    #[allow(clippy::too_many_lines)]
+    async fn descriptor_supply_postgres_backs_apply_and_restart() {
+        let pool = sqlx::PgPool::connect(&database_url()).await.unwrap();
+        let store = runtime(database_url());
+        let tenant = fresh_tenant();
+        let directory = scratch_directory("supply-postgres");
+        let path = directory.join("snapshot.json");
+        let sites = [("site_a", 6100, "/orders"), ("site_b", 6101, "/orders")];
+
+        // Apply: both sites are created before the pending file exists.
+        let first = tenant_request(&tenant, 1, &sites);
+        prepare_switch(
+            &tenant_placeholder(&tenant),
+            &compiled(&first),
+            &first,
+            Some(&store),
+            Some((&path, &KEY)),
+            APPLY_SUPPLY_DEADLINE,
+        )
+        .await
+        .unwrap();
+        for (site, _, _) in sites {
+            let digest = digest_of(&first, site);
+            assert_eq!(
+                stored_revision(&pool, &tenant, site).await,
+                Some((
+                    "active".to_owned(),
+                    digest.clone(),
+                    format!("edge.descriptors.sha256.{digest}")
+                ))
+            );
+            assert_eq!(
+                stored_routes(&pool, &tenant, site).await,
+                ["app.orders.list@/orders"]
+            );
+        }
+        assert_eq!(leftovers(&directory), ["snapshot.json.pending"]);
+        promote_pending_snapshot(&path).await.unwrap();
+
+        // Restart: the persisted snapshot is supplied again, idempotently.
+        let (_, restored) = load_persisted_snapshot(&path, &KEY, &tenant)
+            .unwrap()
+            .unwrap();
+        let supplied = crate::descriptor_supply::supply_before_serving(
+            Some(&store),
+            restored.sites(),
+            crate::descriptor_supply::StartupSource::PersistedSnapshot,
+        )
+        .await
+        .unwrap();
+        assert_eq!(supplied.len(), 2);
+        assert!(
+            supplied
+                .iter()
+                .all(|site| site.outcome == xshield_postgres::EdgeDescriptorSyncOutcome::Existing)
+        );
+
+        // A newer snapshot that moves site_b's page action under the same
+        // policy revision is refused as a whole and leaves every row and the
+        // active file as they were.
+        let serving = compiled(&first);
+        let drift = tenant_request(
+            &tenant,
+            2,
+            &[("site_a", 6100, "/orders"), ("site_b", 6101, "/orders-v2")],
+        );
+        assert_eq!(
+            prepare_switch(
+                &serving,
+                &compiled(&drift),
+                &drift,
+                Some(&store),
+                Some((&path, &KEY)),
+                APPLY_SUPPLY_DEADLINE,
+            )
+            .await,
+            Err(refused(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+                "site_b"
+            ))
+        );
+        assert_eq!(leftovers(&directory), ["snapshot.json"]);
+        assert_eq!(
+            stored_routes(&pool, &tenant, "site_b").await,
+            ["app.orders.list@/orders"]
+        );
+
+        // A revision retired by an operator is never reactivated by an edge,
+        // neither by an apply nor by a restart.
+        sqlx::query(
+            "UPDATE xshield.policy_revisions SET status = 'retired'
+             WHERE tenant_id = $1 AND site_id = 'site_a'",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let retry = tenant_request(&tenant, 3, &sites);
+        assert_eq!(
+            prepare_switch(
+                &serving,
+                &compiled(&retry),
+                &retry,
+                Some(&store),
+                Some((&path, &KEY)),
+                APPLY_SUPPLY_DEADLINE,
+            )
+            .await,
+            Err(refused(
+                StatusCode::CONFLICT,
+                "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+                "site_a"
+            ))
+        );
+        assert_eq!(
+            crate::descriptor_supply::supply_before_serving(
+                Some(&store),
+                restored.sites(),
+                crate::descriptor_supply::StartupSource::PersistedSnapshot,
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+            "UI_DESCRIPTOR_CONFLICT: persisted snapshot site site_a policy revision policy-r1 \
+             already binds other action descriptors"
+        );
+        assert_eq!(
+            stored_revision(&pool, &tenant, "site_a")
+                .await
+                .map(|row| row.0),
+            Some("retired".to_owned())
+        );
+
+        // No database: the apply is refused before anything is persisted and
+        // a restart refuses to serve the snapshot.
+        let down = runtime(missing_database_url());
+        let other = fresh_tenant();
+        let unreachable = tenant_request(&other, 1, &sites);
+        let elsewhere = directory.join("unreachable");
+        assert_eq!(
+            prepare_switch(
+                &tenant_placeholder(&other),
+                &compiled(&unreachable),
+                &unreachable,
+                Some(&down),
+                Some((&elsewhere.join("snapshot.json"), &KEY)),
+                APPLY_SUPPLY_DEADLINE,
+            )
+            .await,
+            Err(refused(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE",
+                "site_a"
+            ))
+        );
+        nothing_persisted(&elsewhere);
+        assert!(stored_revision(&pool, &other, "site_a").await.is_none());
+        assert_eq!(
+            crate::descriptor_supply::supply_before_serving(
+                Some(&down),
+                restored.sites(),
+                crate::descriptor_supply::StartupSource::PersistedSnapshot,
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+            "IDENTITY_STORE_UNAVAILABLE: persisted snapshot site site_a cannot supply its action \
+             descriptors"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // Two edges applying the same snapshot to one database converge: each
+    // revision is created once and found by the other, and both succeed.
+    #[tokio::test]
+    #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+    async fn descriptor_supply_postgres_concurrent_edges_converge() {
+        let first_edge = runtime(database_url());
+        let second_edge = runtime(database_url());
+        let tenant = fresh_tenant();
+        let request = tenant_request(
+            &tenant,
+            1,
+            &[("site_a", 6100, "/orders"), ("site_b", 6101, "/orders")],
+        );
+        let snapshot = compiled(&request);
+        let (left, right) = tokio::join!(
+            supply_descriptors(Some(&first_edge), snapshot.sites(), APPLY_SUPPLY_DEADLINE),
+            supply_descriptors(Some(&second_edge), snapshot.sites(), APPLY_SUPPLY_DEADLINE),
+        );
+        let outcomes = left
+            .unwrap()
+            .into_iter()
+            .chain(right.unwrap())
+            .map(|site| (site.site_id.as_str().to_owned(), site.outcome))
+            .collect::<Vec<_>>();
+        for site in ["site_a", "site_b"] {
+            let mut created = outcomes
+                .iter()
+                .filter(|(id, _)| id == site)
+                .map(|(_, outcome)| {
+                    *outcome == xshield_postgres::EdgeDescriptorSyncOutcome::Created
+                })
+                .collect::<Vec<_>>();
+            created.sort_unstable();
+            assert_eq!(created, [false, true], "{site}: one creation, one reuse");
+        }
     }
 }

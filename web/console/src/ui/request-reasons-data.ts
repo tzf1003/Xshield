@@ -676,6 +676,18 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "边缘已验证并启用该配置快照，对应修订已生效。",
     "无需处理。",
   ],
+  EDGE_APPLY_DESCRIPTOR_CONFLICT: [
+    "deny",
+    "下发动作描述冲突",
+    "快照中某站点由配置推导的界面动作描述与该策略修订已登记的描述不一致（摘要不同、修订不是 active 或描述含义改变），整份下发被拒绝。",
+    "改变页面动作、路由或映射须使用新的策略修订号；应答中的 site_id 指明出问题的站点。",
+  ],
+  EDGE_APPLY_DESCRIPTOR_UNAVAILABLE: [
+    "error",
+    "动作描述供给不可用",
+    "边缘无法把站点的界面动作描述写入 PostgreSQL（数据库不可达、超时或未配置身份存储），整份下发未生效。",
+    "恢复数据库连接，或为边缘配置身份存储后重新下发；应答中的 site_id 指明该站点。",
+  ],
   EDGE_APPLY_IDEMPOTENCY_CONFLICT: [
     "deny",
     "下发修订冲突",

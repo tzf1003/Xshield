@@ -1,5 +1,6 @@
 mod apply_api;
 mod buffered_json;
+mod descriptor_supply;
 mod durable_audit;
 mod edge_health;
 mod evidence_writer;
@@ -51,12 +52,13 @@ use xshield_gateway::{
     MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_BUFFERED_JSON_BYTES, MAX_CONFIG_BYTES,
 };
 use xshield_postgres::{
-    EdgeDescriptorSync, PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome,
-    SensorSession, StoreError,
+    PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, SensorSession,
+    StoreError,
 };
 use zeroize::Zeroizing;
 
 use crate::buffered_json::BufferedResponse;
+use crate::descriptor_supply::{DescriptorStore, StartupSource, supply_before_serving};
 use crate::durable_audit::{
     AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, PageActionAudit, RecoveryBackoff,
     RequestCryptoAudit, ResponseCryptoAudit, ResponseSource, SensorBootstrapAudit, SensorHtmlAudit,
@@ -131,12 +133,26 @@ struct PostgresRuntime {
 
 impl PostgresRuntime {
     fn from_env(config: xshield_gateway::IdentityStoreConfig) -> Result<Self, env::VarError> {
-        Ok(Self {
-            database_url: Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?),
-            max_connections: config.max_connections(),
-            acquire_timeout: Duration::from_millis(config.acquire_timeout_ms()),
+        Ok(Self::new(
+            Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?),
+            config.max_connections(),
+            Duration::from_millis(config.acquire_timeout_ms()),
+        ))
+    }
+
+    /// A runtime that connects lazily, on first use: an unreachable database
+    /// fails the request (or the apply) that needs it, not process startup.
+    fn new(
+        database_url: Zeroizing<String>,
+        max_connections: u32,
+        acquire_timeout: Duration,
+    ) -> Self {
+        Self {
+            database_url,
+            max_connections,
+            acquire_timeout,
             store: tokio::sync::OnceCell::new(),
-        })
+        }
     }
 
     async fn store(&self) -> Result<&PostgresIdentityStore, StoreError> {
@@ -2065,6 +2081,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             public_hosts.push(host);
         }
     }
+    // A restored snapshot serves before any control-plane apply, so its
+    // page-issuing sites need the same descriptor supply an apply performs.
+    let restored = persisted.is_some();
     let initial_snapshot = if let Some((_, snapshot)) = persisted.take() {
         // The signed complete snapshot is the restart source of truth. The
         // static file remains the bootstrap fallback only when no snapshot is
@@ -2151,12 +2170,25 @@ fn run() -> Result<(), Box<dyn Error>> {
         shutdown.clone(),
     ));
     // Descriptors must exist, unchanged, before any listener can admit a page
-    // root or a gated request against them; any refusal stops startup.
-    if let Some(descriptors) = config.edge_descriptors() {
-        let store = postgres
-            .as_ref()
-            .ok_or("identity store runtime unavailable")?;
-        runtime.block_on(provision_edge_descriptors(store, &config, descriptors))?;
+    // root or a gated request against them; any refusal stops startup. The
+    // bootstrap configuration and a restored snapshot get the same idempotent
+    // supply an apply performs, and an edge without an identity store refuses
+    // to serve a page-issuing configuration at all.
+    let descriptor_store = postgres
+        .clone()
+        .map(|runtime| runtime as Arc<dyn DescriptorStore>);
+    runtime.block_on(supply_before_serving(
+        descriptor_store.as_deref(),
+        [config.as_ref()],
+        StartupSource::Bootstrap,
+    ))?;
+    if restored {
+        let snapshot = coordinator.current();
+        runtime.block_on(supply_before_serving(
+            descriptor_store.as_deref(),
+            snapshot.sites(),
+            StartupSource::PersistedSnapshot,
+        ))?;
     }
     let supervisor = runtime.block_on(ListenerSupervisor::new(
         Arc::clone(&coordinator),
@@ -2180,6 +2212,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             key,
             snapshot_path,
             audit_readiness,
+            descriptor_store,
         );
         runtime.spawn(async move {
             if let Err(error) = apply_api::serve(apply_listener, state).await {
@@ -2192,43 +2225,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     let _runtime = runtime;
     let _shutdown_tx = shutdown_tx;
     server.run_forever();
-}
-
-/// Writes the configuration's digest-bound descriptor set, refusing to start
-/// on a database failure or when the policy revision already means something
-/// else. Errors name a stable reason code and never include connection data.
-async fn provision_edge_descriptors(
-    store: &PostgresRuntime,
-    config: &GatewayConfig,
-    descriptors: &xshield_gateway::page_actions::EdgeDescriptorSet,
-) -> Result<(), Box<dyn Error>> {
-    let digest = descriptors.content_digest_hex();
-    let unavailable = || ReasonCode::IdentityStoreUnavailable.as_str();
-    let outcome = store
-        .store()
-        .await
-        .map_err(|_| unavailable())?
-        .sync_edge_descriptors(
-            EdgeDescriptorSync::new(
-                config.tenant_id(),
-                config.site_id(),
-                config.policy_revision(),
-                &digest,
-                descriptors.descriptors(),
-            )
-            .map_err(|_| ReasonCode::UiDescriptorConflict.as_str())?,
-        )
-        .await
-        .map_err(|_| unavailable())?;
-    if !outcome.is_ready() {
-        return Err(format!(
-            "{}: policy revision {} already binds other action descriptors",
-            outcome.reason_code().as_str(),
-            config.policy_revision().as_str()
-        )
-        .into());
-    }
-    Ok(())
 }
 
 fn configured_listener_addresses(default: SocketAddr) -> Result<Vec<SocketAddr>, Box<dyn Error>> {

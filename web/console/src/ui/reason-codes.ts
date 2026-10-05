@@ -262,6 +262,16 @@ export const reasonDictionary = {
     "edge 收到同一应用标识但内容不同的快照。",
     "重新应用；仍失败请联系管理员。",
   ),
+  EDGE_APPLY_DESCRIPTOR_CONFLICT: entry(
+    "danger",
+    "edge 拒绝了整份快照：某个站点由配置推导的界面动作描述与该策略修订已登记的描述不一致（摘要不同、修订已停用或某条描述含义改变）。租户内其他站点的变更同样没有生效，edge 继续使用上一份快照。",
+    "改变页面动作、路由或映射后，用新的策略修订号重新保存并应用；同一修订号不能改变含义。edge 应答中的 site_id 指明出问题的站点。",
+  ),
+  EDGE_APPLY_DESCRIPTOR_UNAVAILABLE: entry(
+    "danger",
+    "edge 无法把站点的界面动作描述写入 PostgreSQL（数据库不可达、超时，或 edge 启动时没有配置身份存储），拒绝了整份快照；租户内其他站点的变更同样没有生效，edge 继续使用上一份快照。",
+    "恢复 edge 的数据库连接，或为 edge 配置身份存储后重新应用。",
+  ),
   EDGE_APPLY_SIGNATURE_INVALID: entry(
     "danger",
     "edge 验签失败：控制面与 edge 的应用密钥不一致。",

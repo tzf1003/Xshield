@@ -154,6 +154,14 @@ impl GatewaySnapshot {
         self.sites.len()
     }
 
+    /// Returns every compiled site configuration, ordered by site ID. The
+    /// edge walks this before a snapshot may serve traffic, for example to
+    /// supply edge-managed action descriptors, so a refusal always names the
+    /// same site for the same snapshot.
+    pub fn sites(&self) -> impl Iterator<Item = &GatewayConfig> {
+        self.sites.values()
+    }
+
     /// Returns every internal port required by this complete snapshot.
     #[must_use]
     pub fn listener_ports(&self) -> BTreeSet<u16> {
@@ -211,6 +219,12 @@ impl GatewaySnapshot {
     /// Compiles a complete signed-envelope payload before any pointer is
     /// replaced. The caller verifies transport authentication first.
     ///
+    /// Compilation has no side effects. A site that declares page issuance
+    /// compiles with its edge-managed descriptors
+    /// ([`GatewayConfig::edge_descriptors`]); the caller must supply them to
+    /// `PostgreSQL` before the snapshot serves traffic, both when it arrives
+    /// through the apply channel and when it is restored after a restart.
+    ///
     /// # Errors
     /// Returns [`ConfigError`] for malformed protocol fields or any invalid
     /// site configuration.
@@ -234,12 +248,6 @@ impl GatewaySnapshot {
             let config_bytes = serde_json::to_vec(&entry.gateway_config)
                 .map_err(|_| ConfigError::Invalid("apply config"))?;
             let config = GatewayConfig::from_json(&config_bytes)?;
-            // Edge-managed descriptors are provisioned before a startup
-            // configuration serves traffic. A live snapshot swap has no such
-            // barrier yet, so page actions are refused here, fail closed.
-            if config.edge_descriptors().is_some() {
-                return Err(ConfigError::Invalid("apply page_actions"));
-            }
             if config.site_id().as_str() != entry.site_id
                 || config.listen().port() != entry.listen_port
                 || config.tenant_id().as_str() != tenant_wire
@@ -841,8 +849,13 @@ mod tests {
         GatewaySnapshot::from_apply_request(apply_request(revision, public_origin)).unwrap()
     }
 
+    // Live snapshots used to refuse page actions outright, because nothing
+    // supplied their descriptors before a swap. The apply channel and the
+    // restart path now supply them (apply_api, descriptor_supply), so the
+    // compiler accepts such a site and exposes the same digest-bound set a
+    // startup configuration derives.
     #[test]
-    fn live_snapshots_refuse_page_actions_without_a_provisioning_barrier() {
+    fn live_snapshots_carry_page_action_sites_with_their_descriptors() {
         let mut request = apply_request(1, "https://site-a.example");
         let config = &mut request.sites[0].gateway_config;
         config["identity_store"] =
@@ -860,10 +873,46 @@ mod tests {
              "admission": "UI_ACTION_REQUIRED", "source_action": "app.orders.list",
              "issued_by": {"page_operation_id": "app.page", "ttl_seconds": 60}}
         ]);
-        assert!(matches!(
-            GatewaySnapshot::from_apply_request(request),
-            Err(ConfigError::Invalid("apply page_actions"))
-        ));
+        let startup = GatewayConfig::from_json(
+            &serde_json::to_vec(&request.sites[0].gateway_config).unwrap(),
+        )
+        .unwrap();
+        let snapshot = GatewaySnapshot::from_apply_request(request).unwrap();
+        let [site] = snapshot.sites().collect::<Vec<_>>()[..] else {
+            panic!("one site expected");
+        };
+        let applied = site.edge_descriptors().expect("edge-managed descriptors");
+        let expected = startup.edge_descriptors().unwrap();
+        assert_eq!(applied.content_digest(), expected.content_digest());
+        assert_eq!(applied.descriptors(), expected.descriptors());
+        assert_eq!(
+            applied
+                .descriptors()
+                .iter()
+                .map(|descriptor| descriptor.action_id().as_str())
+                .collect::<Vec<_>>(),
+            ["app.orders.list"]
+        );
+        assert!(site.page_action_plan("GET", "/app").is_some());
+    }
+
+    #[test]
+    fn snapshot_sites_are_listed_in_site_id_order() {
+        let snapshot = GatewaySnapshot::compile(
+            3,
+            vec![
+                GatewaySite::new(config("site_b", 6101), ["b.example.com".to_owned()]).unwrap(),
+                GatewaySite::new(config("site_a", 6100), ["a.example.com".to_owned()]).unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .sites()
+                .map(|site| site.site_id().as_str())
+                .collect::<Vec<_>>(),
+            ["site_a", "site_b"]
+        );
     }
 
     // The control plane numbers its first snapshot 1, and so does the
