@@ -5,6 +5,9 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+# None of these crates is published: they are one product, and the flag also lets
+# `cargo deny` accept their path dependencies.
+publish = false
 rust-version = "1.94"
 
 [workspace.dependencies]

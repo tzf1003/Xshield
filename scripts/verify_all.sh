@@ -4,7 +4,8 @@
 #   scripts/verify_all.sh [rust] [gateway] [console]    (no argument: all three groups)
 #
 # Groups
-#   rust     fmt, audit-event coverage and environment-variable guards, library
+#   rust     fmt, audit-event coverage, environment-variable and secret guards,
+#            dependency policy (cargo-deny), library
 #            validation, clippy, tests,
 #            doc tests, PostgreSQL integration suite
 #   gateway  the browser sensor unit tests, the real-binary gateway scripts
@@ -106,6 +107,12 @@ group_rust() {
     run_step fmt cargo fmt --all --check
     run_step audit-coverage python3 scripts/check_audit_event_coverage.py
     run_step env-docs python3 scripts/check_env_docs.py
+    run_step secrets python3 scripts/check_secrets.py
+    if have cargo-deny; then
+        run_step supply-chain cargo deny --locked check
+    else
+        skip_step supply-chain "cargo-deny not found (cargo install --locked cargo-deny)"
+    fi
     run_step library python3 scripts/validate_library.py
     run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
     run_step test cargo test --workspace --all-targets --locked --no-fail-fast

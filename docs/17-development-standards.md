@@ -46,6 +46,8 @@ MUST：保持入口薄、用例编排清晰、纯计算可独立测试；不为�
 
 CI：fmt、clippy、cargo test、doc test、schema/example validation、依赖图、依赖/许可证审查、secret scan、迁移验证、接口兼容检查。Clippy lint 按 workspace 管理；不能为了通过 CI 全局 allow 警告。[S27]
 
+其中依赖与密钥相关的几项当前这样落地（2026-10-06）：`deny.toml` 由 `cargo deny check` 执行，CI 的 `supply-chain` 作业与 `scripts/verify_all.sh rust`（已安装 cargo-deny 时）都会运行——第三方许可证只允许 MIT、Apache-2.0、BSD-2/3、ISC、Unicode-3.0、Zlib、CC0-1.0、Unlicense、BSL-1.0 与 CDLA-Permissive-2.0，RustSec 公告和被撤回（yanked）的版本失败，只允许 crates.io 来源，不允许 git 依赖；工作区各 crate 标记 `publish = false`。公告例外必须写在 `deny.toml` 里并说明为何不适用、何时结束（当前两项：经 `openidconnect` 引入的 `rsa` 只用于验证 ID Token 签名，Marvin 时序泄露针对私钥运算；`derivative` 是 `pingora-core` 内仅构建期使用的 proc-macro，无已知漏洞）。依赖图以 `cargo tree --duplicates` 作为 CI 工件保存。`scripts/check_secrets.py` 对已跟踪文件做高精度模式扫描（私钥块、云与 VCS 令牌、URL 内嵌凭据、疑似密钥的长十六进制字面量），不打印命中的值；它看不到已删除的历史，也不认识模板之外的供应商格式，因此不能代替历史范围的扫描器，合并前仍应对远端仓库启用平台的 secret scanning。接口兼容检查（对外 API 契约的破坏性变更检测）尚未实现，只有 29 章目录与契约测试。新增或升级依赖须按上面的规则说明原因、许可证和更新策略。
+
 覆盖率只辅助。新安全分支需要断言覆盖，关键不变量用性质测试；不以总体行覆盖率替代边界测试。压力/模糊/浏览器矩阵可夜间执行，但影响安全语义的最小回归必须阻止合并。
 
 ## 17.8 分支与 Agent 开发规范

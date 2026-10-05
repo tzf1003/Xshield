@@ -94,6 +94,25 @@ jobs:
       - run: python scripts/validate_library.py
       - run: python scripts/check_audit_event_coverage.py
       - run: python scripts/check_env_docs.py
+      - run: python scripts/check_secrets.py
+
+  # Licenses, RustSec advisories, yanked crates and registry sources (deny.toml).
+  # It reads Cargo.lock only, so it needs no database or build.
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --locked
+      # The graph a reviewer would otherwise rebuild by hand, kept with the run.
+      - run: cargo tree --workspace --locked --duplicates > cargo-tree-duplicates.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cargo-tree-duplicates
+          path: cargo-tree-duplicates.txt
 
   console:
     runs-on: ubuntu-latest

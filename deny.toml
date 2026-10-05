@@ -1,0 +1,54 @@
+# Supply-chain policy for `cargo deny check` (docs/17 §17.7, CI job "supply-chain").
+#
+# Third-party licenses are limited to permissive ones; a new dependency under any
+# other license fails the check until someone decides it is acceptable and adds
+# it here with the reason. Advisories and yanked crates fail the build. Only
+# crates.io is an allowed source: no git dependencies, no alternate registries.
+
+[graph]
+# Check the dependency graph for every target the workspace may build for.
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# Each ignored advisory needs the id, why it does not apply here, and what ends the
+# exception. Review them whenever the named dependency is upgraded.
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "Marvin timing leak in the rsa crate affects private-key operations. It enters only through openidconnect, which uses rsa to verify ID-token signatures (a public-key operation); this product never decrypts or signs with an RSA key. Ends when rsa ships a constant-time implementation or openidconnect drops it." },
+    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained but is only a build-time proc-macro inside pingora-core, with no known vulnerability. Ends with the next pingora upgrade that stops using it." },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# "OR" expressions pass when any alternative is allowed. The OpenSSL crates use the
+# system or vendored OpenSSL (Apache-2.0); no copyleft license is allowed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    # Mozilla root certificate data bundled by webpki-roots.
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+# Two versions of one crate are common in a large graph; they are reported, not failed.
+multiple-versions = "warn"
+# Workspace crates depend on each other by path; third-party wildcards stay denied.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
