@@ -409,10 +409,17 @@ impl EdgeTransport {
             .as_ref()
             .is_some_and(|trusted| trusted.contains(peer.ip()));
         let slots = if expects_proxy_header || self.config.tls_enabled() {
-            let reserved = Arc::clone(&listener.0)
-                .try_acquire_owned()
-                .ok()
-                .zip(Arc::clone(&self.setup_slots).try_acquire_owned().ok());
+            // The process slot is only tried once the listener has room, so a
+            // flood on one full listener never touches the shared budget.
+            let reserved =
+                Arc::clone(&listener.0)
+                    .try_acquire_owned()
+                    .ok()
+                    .and_then(|listener_slot| {
+                        let process_slot =
+                            Arc::clone(&self.setup_slots).try_acquire_owned().ok()?;
+                        Some((listener_slot, process_slot))
+                    });
             if reserved.is_none() {
                 self.setup_shed.fetch_add(1, Ordering::Relaxed);
                 return None;
