@@ -4129,9 +4129,9 @@ dependencies = [
 name = "xshield-core"
 version = "0.1.0"
 dependencies = [
- "openssl",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

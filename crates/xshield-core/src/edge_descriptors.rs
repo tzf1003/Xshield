@@ -63,7 +63,7 @@ use crate::{
     },
     provenance::{ActionDescriptor, ActionTargetRule, HttpMethod, RouteTemplate},
 };
-use openssl::sha::Sha256;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -583,7 +583,7 @@ fn descriptor_digest(descriptors: &[ActionDescriptor]) -> [u8; 32] {
         // Every encoded value is a validated name, route or decimal count and
         // can never contain NUL, so the separator keeps the encoding injective.
         hasher.update(value);
-        hasher.update(&[0]);
+        hasher.update([0]);
     };
     field(DESCRIPTOR_DIGEST_TAG);
     field(descriptors.len().to_string().as_bytes());
@@ -608,7 +608,7 @@ fn descriptor_digest(descriptors: &[ActionDescriptor]) -> [u8; 32] {
         }
         field(descriptor.field_profile().as_str().as_bytes());
     }
-    hasher.finish()
+    hasher.finalize().into()
 }
 
 fn lower_hex(bytes: &[u8]) -> String {
