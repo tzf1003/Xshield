@@ -6,6 +6,7 @@ mod evidence_writer;
 mod listener_supervisor;
 mod protected_identity;
 mod rate_limit;
+mod sensor_delivery;
 mod unrouted;
 
 use crate::listener_supervisor::ListenerSupervisor;
@@ -48,23 +49,25 @@ use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBat
 use xshield_gateway::{
     BufferedResponsePolicy, GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
     MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_BUFFERED_JSON_BYTES, MAX_CONFIG_BYTES,
-    SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES, SENSOR_PREPARE_PATH,
 };
 use xshield_postgres::{
-    PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, SensorSession,
-    StoreError,
+    EdgeDescriptorSync, PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome,
+    SensorSession, StoreError,
 };
 use zeroize::Zeroizing;
 
 use crate::buffered_json::BufferedResponse;
 use crate::durable_audit::{
-    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, RecoveryBackoff, RequestCryptoAudit,
-    ResponseCryptoAudit, ResponseSource, SensorHtmlAudit, SensorObservationAudit, new_trace_id,
-    supervise_recovery,
+    AdmissionAudit, AdmissionFacts, DurableAudit, FinalFacts, PageActionAudit, RecoveryBackoff,
+    RequestCryptoAudit, ResponseCryptoAudit, ResponseSource, SensorBootstrapAudit, SensorHtmlAudit,
+    SensorObservationAudit, new_trace_id, supervise_recovery,
 };
 use crate::protected_identity::{
-    CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity, WAF_COOKIE,
-    store_failure_reason, strip_edge_proofs,
+    CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity,
+    SensorBootstrapDelivery, WAF_COOKIE, store_failure_reason, strip_edge_proofs,
+};
+use crate::sensor_delivery::{
+    SensorScript, bootstrap_document, respond_sensor_bootstrap, respond_sensor_script,
 };
 
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
@@ -168,6 +171,9 @@ struct RequestContext {
     compatibility_evidence: Option<CompatibilityEvidence>,
     sensor_session: Option<SensorSession>,
     sensor_observation_audit: Vec<SensorObservationAudit>,
+    sensor_bootstrap: Option<SensorBootstrapDelivery>,
+    sensor_bootstrap_audit: Option<SensorBootstrapAudit>,
+    page_action_audit: Option<PageActionAudit>,
     anonymous_session_cookie: Option<String>,
     pending_auth_binding: Option<PendingAuthBinding>,
     response_failure: Option<ReasonCode>,
@@ -218,6 +224,9 @@ impl ProxyHttp for Gateway {
             compatibility_evidence: None,
             sensor_session: None,
             sensor_observation_audit: Vec::new(),
+            sensor_bootstrap: None,
+            sensor_bootstrap_audit: None,
+            page_action_audit: None,
             anonymous_session_cookie: None,
             pending_auth_binding: None,
             response_failure: None,
@@ -365,6 +374,13 @@ impl ProxyHttp for Gateway {
                         context.anonymous_session_cookie = admission.anonymous_session_cookie;
                         context.compatibility_evidence = admission.compatibility_evidence;
                         context.sensor_session = admission.sensor_session;
+                        context.sensor_bootstrap_audit = match &admission.sensor_bootstrap {
+                            Some(SensorBootstrapDelivery::Page { actions, .. }) => {
+                                Some(SensorBootstrapAudit::new(actions.len()))
+                            }
+                            Some(SensorBootstrapDelivery::Legacy) | None => None,
+                        };
+                        context.sensor_bootstrap = admission.sensor_bootstrap;
                         admission.decision
                     } else {
                         let mut decision = selected_config.admit(&method, &path, now);
@@ -402,6 +418,7 @@ impl ProxyHttp for Gateway {
                 duration_us: elapsed_us(context.started_at),
                 request_crypto: context.request_crypto_audit.as_ref(),
                 sensor_observations: &context.sensor_observation_audit,
+                sensor_bootstrap: context.sensor_bootstrap_audit.as_ref(),
                 forward_origin: internal_response.is_none(),
             })
             .await;
@@ -441,19 +458,41 @@ impl ProxyHttp for Gateway {
             context.response_source = ResponseSource::Edge;
             match internal_response {
                 InternalResponse::SensorAsset => {
-                    respond_sensor_asset(session, &context.request_id).await?;
+                    respond_sensor_script(session, &context.request_id, SensorScript::CURRENT)
+                        .await?;
                 }
                 InternalResponse::SensorLoader => {
-                    respond_sensor_loader(session, &context.request_id).await?;
+                    respond_sensor_script(session, &context.request_id, SensorScript::LOADER)
+                        .await?;
+                }
+                InternalResponse::LegacySensorAsset => {
+                    respond_sensor_script(session, &context.request_id, SensorScript::LEGACY)
+                        .await?;
+                }
+                InternalResponse::LegacySensorLoader => {
+                    respond_sensor_script(
+                        session,
+                        &context.request_id,
+                        SensorScript::LEGACY_LOADER,
+                    )
+                    .await?;
                 }
                 InternalResponse::SensorBootstrap => {
-                    let sensor = context.config(self).sensor().ok_or_else(|| {
+                    let config = context.config(self);
+                    let sensor = config.sensor().ok_or_else(|| {
                         PingoraError::explain(
                             ErrorType::HTTPStatus(500),
                             "sensor bootstrap policy missing",
                         )
                     })?;
-                    respond_sensor_bootstrap(session, &context.request_id, sensor).await?;
+                    let body = bootstrap_document(
+                        &context.request_id,
+                        sensor,
+                        config.sensor_routes(),
+                        context.sensor_bootstrap.as_ref(),
+                        now,
+                    );
+                    respond_sensor_bootstrap(session, &context.request_id, body).await?;
                 }
                 InternalResponse::SensorPrepare => {
                     respond_sensor_observation(session, &context.request_id).await?;
@@ -690,6 +729,15 @@ impl ProxyHttp for Gateway {
             Ok(Some(complete)) => {
                 context.origin_response_complete = true;
                 if let Some(transformation) = complete.sensor_html {
+                    // Issuance never withholds the verified page: a failure is
+                    // audited and the page simply holds no references.
+                    context.page_action_audit = self.issue_page_actions(
+                        session,
+                        context,
+                        &transformation.page_handle,
+                        &transformation.origin_sha256,
+                        &transformation.injected_sha256,
+                    );
                     context.sensor_html_audit = Some(SensorHtmlAudit::new(
                         transformation.adapter_revision,
                         transformation.origin_sha256,
@@ -778,6 +826,7 @@ impl ProxyHttp for Gateway {
                 origin_response_complete: context.origin_response_complete,
                 response_crypto: context.response_crypto_audit.as_ref(),
                 sensor_html: context.sensor_html_audit.as_ref(),
+                page_actions: context.page_action_audit.as_ref(),
                 response_source: context.response_source,
             })
             .await;
@@ -946,7 +995,7 @@ impl Gateway {
         }
         let batch = SensorObservationBatch::from_json(
             &body,
-            xshield_gateway::SENSOR_VERSION,
+            &xshield_gateway::ACCEPTED_SENSOR_VERSIONS,
             sensor.build_ref(),
         )
         .map_err(|_| ReasonCode::SensorObservationInvalid)?;
@@ -1225,6 +1274,58 @@ impl Gateway {
             ))
         })?;
         Ok(body)
+    }
+
+    /// Issues the actions a verified page root declares, after the exact
+    /// pinned document was injected and before its body is released. Returns
+    /// the audit record; `None` when the operation issues no page actions.
+    fn issue_page_actions(
+        &self,
+        session: &Session,
+        context: &RequestContext,
+        page_handle: &str,
+        origin_sha256: &str,
+        injected_sha256: &str,
+    ) -> Option<PageActionAudit> {
+        let request = session.req_header();
+        let config = context.config(self);
+        let plan = config.page_action_plan(request.method.as_str(), request.uri.path())?;
+        let mapping = plan.mapping_revision().as_str();
+        let result = (|| {
+            let identity = self
+                .identity
+                .as_ref()
+                .ok_or(ReasonCode::IdentityStoreUnavailable)?;
+            let response_identity = context
+                .response_identity
+                .as_ref()
+                .ok_or(ReasonCode::UiActionNotAvailable)?;
+            let request_id = RequestId::parse(&context.request_id)
+                .map_err(|_| ReasonCode::UiActionNotAvailable)?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| UnixSeconds::new(duration.as_secs()))
+                .map_err(|_| ReasonCode::ClockUnavailable)?;
+            // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
+            // barrier to an async body hook when the proxy API provides one.
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(identity.issue_page_actions(
+                    config,
+                    response_identity,
+                    plan,
+                    &request_id,
+                    &context.trace_id,
+                    page_handle,
+                    origin_sha256,
+                    injected_sha256,
+                    now,
+                ))
+            })
+        })();
+        Some(match result {
+            Ok(_) => PageActionAudit::issued(ReasonCode::UiActionIssued, mapping),
+            Err(reason) => PageActionAudit::failed(reason, mapping),
+        })
     }
 
     fn commit_response_grants(
@@ -1605,6 +1706,7 @@ const fn denial_status(reason: ReasonCode) -> u16 {
         | ReasonCode::RequestCryptoReplayCapacityExceeded => 503,
         ReasonCode::RequestEnvelopeInvalid
         | ReasonCode::WafQueryInvalid
+        | ReasonCode::SensorBootstrapInvalid
         | ReasonCode::RequestCryptoAuthenticationFailed
         | ReasonCode::RequestCryptoMessageExpired
         | ReasonCode::RequestCryptoMessageFromFuture => 400,
@@ -1720,69 +1822,6 @@ async fn respond_denial(
     if let Some(cookie) = session_cookie {
         response.append_header("Set-Cookie", cookie)?;
     }
-    response.set_content_length(body.len())?;
-    session
-        .write_response_header(Box::new(response), false)
-        .await?;
-    session.write_response_body(Some(body), true).await
-}
-
-async fn respond_sensor_asset(session: &mut Session, request_id: &str) -> PingoraResult<()> {
-    let body = Bytes::from_static(SENSOR_ASSET_BYTES);
-    let mut response = ResponseHeader::build(200, Some(7))?;
-    response.insert_header("Content-Type", "text/javascript; charset=utf-8")?;
-    response.insert_header("Cache-Control", "public, max-age=31536000, immutable")?;
-    response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
-    response.insert_header("X-Content-Type-Options", "nosniff")?;
-    response.insert_header("X-Xshield-Sensor-Version", xshield_gateway::SENSOR_VERSION)?;
-    response.insert_header("X-Xshield-Request-Id", request_id)?;
-    response.set_content_length(body.len())?;
-    session
-        .write_response_header(Box::new(response), false)
-        .await?;
-    session.write_response_body(Some(body), true).await
-}
-
-async fn respond_sensor_loader(session: &mut Session, request_id: &str) -> PingoraResult<()> {
-    let body = Bytes::from_static(SENSOR_LOADER_BYTES);
-    let mut response = ResponseHeader::build(200, Some(7))?;
-    response.insert_header("Content-Type", "text/javascript; charset=utf-8")?;
-    response.insert_header("Cache-Control", "public, max-age=31536000, immutable")?;
-    response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
-    response.insert_header("X-Content-Type-Options", "nosniff")?;
-    response.insert_header("X-Xshield-Sensor-Version", xshield_gateway::SENSOR_VERSION)?;
-    response.insert_header("X-Xshield-Request-Id", request_id)?;
-    response.set_content_length(body.len())?;
-    session
-        .write_response_header(Box::new(response), false)
-        .await?;
-    session.write_response_body(Some(body), true).await
-}
-
-async fn respond_sensor_bootstrap(
-    session: &mut Session,
-    request_id: &str,
-    sensor: &xshield_gateway::SensorConfig,
-) -> PingoraResult<()> {
-    let body = Bytes::from(
-        serde_json::json!({
-            "sensor_version": xshield_gateway::SENSOR_VERSION,
-            "build_ref": sensor.build_ref(),
-            "page_handle": format!("pgh_{}", Uuid::now_v7()),
-            "navigation_id": format!("nav_{}", Uuid::now_v7()),
-            "prepare_url": SENSOR_PREPARE_PATH,
-            "heartbeat_seconds": sensor.heartbeat_seconds(),
-            "request_id": request_id,
-        })
-        .to_string(),
-    );
-    let mut response = ResponseHeader::build(200, Some(7))?;
-    response.insert_header("Content-Type", "application/json")?;
-    response.insert_header("Cache-Control", "private, no-store")?;
-    response.insert_header("Pragma", "no-cache")?;
-    response.insert_header("Cross-Origin-Resource-Policy", "same-origin")?;
-    response.insert_header("X-Content-Type-Options", "nosniff")?;
-    response.insert_header("X-Xshield-Request-Id", request_id)?;
     response.set_content_length(body.len())?;
     session
         .write_response_header(Box::new(response), false)
@@ -2085,7 +2124,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             request_key,
             response_key,
             evidence,
-            postgres,
+            postgres: postgres.clone(),
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
             rate_limiter: Arc::new(SiteRateLimiter::new()),
             unrouted: Arc::clone(&unrouted),
@@ -2110,6 +2149,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         FLUSH_INTERVAL,
         shutdown.clone(),
     ));
+    // Descriptors must exist, unchanged, before any listener can admit a page
+    // root or a gated request against them; any refusal stops startup.
+    if let Some(descriptors) = config.edge_descriptors() {
+        let store = postgres
+            .as_ref()
+            .ok_or("identity store runtime unavailable")?;
+        runtime.block_on(provision_edge_descriptors(store, &config, descriptors))?;
+    }
     let supervisor = runtime.block_on(ListenerSupervisor::new(
         Arc::clone(&coordinator),
         Arc::new(proxy),
@@ -2144,6 +2191,43 @@ fn run() -> Result<(), Box<dyn Error>> {
     let _runtime = runtime;
     let _shutdown_tx = shutdown_tx;
     server.run_forever();
+}
+
+/// Writes the configuration's digest-bound descriptor set, refusing to start
+/// on a database failure or when the policy revision already means something
+/// else. Errors name a stable reason code and never include connection data.
+async fn provision_edge_descriptors(
+    store: &PostgresRuntime,
+    config: &GatewayConfig,
+    descriptors: &xshield_gateway::page_actions::EdgeDescriptorSet,
+) -> Result<(), Box<dyn Error>> {
+    let digest = descriptors.content_digest_hex();
+    let unavailable = || ReasonCode::IdentityStoreUnavailable.as_str();
+    let outcome = store
+        .store()
+        .await
+        .map_err(|_| unavailable())?
+        .sync_edge_descriptors(
+            EdgeDescriptorSync::new(
+                config.tenant_id(),
+                config.site_id(),
+                config.policy_revision(),
+                &digest,
+                descriptors.descriptors(),
+            )
+            .map_err(|_| ReasonCode::UiDescriptorConflict.as_str())?,
+        )
+        .await
+        .map_err(|_| unavailable())?;
+    if !outcome.is_ready() {
+        return Err(format!(
+            "{}: policy revision {} already binds other action descriptors",
+            outcome.reason_code().as_str(),
+            config.policy_revision().as_str()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn configured_listener_addresses(default: SocketAddr) -> Result<Vec<SocketAddr>, Box<dyn Error>> {

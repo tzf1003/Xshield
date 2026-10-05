@@ -189,6 +189,20 @@ curl --fail --silent --show-error -D "$test_dir/loader-headers" \
 cmp "$repo_root/sensor/src/loader.ts" "$test_dir/loader.js"
 grep -qi '^cache-control: public, max-age=31536000, immutable' "$test_dir/loader-headers"
 
+# Sensor 1.1.0 is what new pages reference; 1.0.0 above stays byte-identical
+# for pages delivered before the upgrade (its SRI pins those bytes).
+curl --fail --silent --show-error -D "$test_dir/sensor-current-headers" \
+    -o "$test_dir/sensor-current.js" \
+    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.1.0.js"
+cmp "$repo_root/sensor/src/sensor-1.1.0.js" "$test_dir/sensor-current.js"
+grep -qi '^x-xshield-sensor-version: 1.1.0' "$test_dir/sensor-current-headers"
+grep -qi '^cache-control: public, max-age=31536000, immutable' "$test_dir/sensor-current-headers"
+curl --fail --silent --show-error -D "$test_dir/loader-current-headers" \
+    -o "$test_dir/loader-current.js" \
+    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.1.0-loader.js"
+cmp "$repo_root/sensor/src/loader-1.1.0.js" "$test_dir/loader-current.js"
+grep -qi '^x-xshield-sensor-version: 1.1.0' "$test_dir/loader-current-headers"
+
 curl --fail --silent --show-error -D "$test_dir/home-headers" \
     -o "$test_dir/home.html" "http://127.0.0.1:$gateway_port/home"
 grep -qi '^cache-control: private, no-store' "$test_dir/home-headers"
@@ -197,7 +211,7 @@ curl --fail --silent --show-error -o "$test_dir/home-v2.html" \
     "http://127.0.0.1:$gateway_port/home?build=2"
 curl --fail --silent --show-error -D "$test_dir/home-csp.headers" \
     -o "$test_dir/home-csp.html" "http://127.0.0.1:$gateway_port/home-csp"
-python3 - "$test_dir/sensor.js" "$test_dir/loader.js" "$test_dir/home.html" \
+python3 - "$test_dir/sensor-current.js" "$test_dir/loader-current.js" "$test_dir/home.html" \
     "$test_dir/home-v2.html" "$test_dir/home-csp.headers" "$test_dir/home-csp.html" <<'PY'
 import base64
 import hashlib
@@ -213,8 +227,8 @@ loader_integrity = "sha384-" + base64.b64encode(
     hashlib.sha384(pathlib.Path(sys.argv[2]).read_bytes()).digest()
 ).decode()
 expected = {
-    "/__xshield/v1/sensor/1.0.0.js": sensor_integrity,
-    "/__xshield/v1/sensor/1.0.0-loader.js": loader_integrity,
+    "/__xshield/v1/sensor/1.1.0.js": sensor_integrity,
+    "/__xshield/v1/sensor/1.1.0-loader.js": loader_integrity,
 }
 
 class Scripts(HTMLParser):
@@ -226,11 +240,20 @@ class Scripts(HTMLParser):
         if tag == "script":
             self.scripts.append(dict(attrs))
 
+handles = set()
 for path in sys.argv[3:5]:
     parser = Scripts()
     parser.feed(pathlib.Path(path).read_text())
     assert {item["src"]: item["integrity"] for item in parser.scripts} == expected
     assert all("nonce" not in item for item in parser.scripts)
+    # Synchronous: the hooks exist before any later page script runs.
+    assert all("defer" not in item and "async" not in item for item in parser.scripts)
+    sensor, loader = parser.scripts
+    assert "data-xshield-page" not in sensor
+    assert re.fullmatch(r"pgh_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                        loader["data-xshield-page"])
+    handles.add(loader["data-xshield-page"])
+assert len(handles) == 2, "every delivery gets its own page handle"
 
 headers = pathlib.Path(sys.argv[5]).read_text()
 body = pathlib.Path(sys.argv[6]).read_text()
@@ -267,7 +290,29 @@ assert bootstrap["prepare_url"] == "/__xshield/v1/events/prepare"
 assert bootstrap["page_handle"].startswith("pgh_")
 assert bootstrap["navigation_id"].startswith("nav_")
 assert bootstrap["request_id"].startswith("req_")
+assert "actions" not in bootstrap, "the 1.0.0 shape never carries references"
 PY
+# The 1.1.0 bootstrap names one page instance; without an authenticated
+# session that owns it the document carries no reference at all.
+page_handle=pgh_018f2a3b-4c5d-7000-8000-000000000999
+curl --fail --silent --show-error -o "$test_dir/bootstrap-page.json" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    "http://127.0.0.1:$gateway_port/__xshield/v1/bootstrap?page=$page_handle"
+python3 - "$test_dir/bootstrap-page.json" "$page_handle" <<'PY'
+import json
+import pathlib
+import sys
+
+bootstrap = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert bootstrap["sensor_version"] == "1.1.0", bootstrap
+assert bootstrap["page_handle"] == sys.argv[2]
+assert bootstrap["actions"] == []
+assert isinstance(bootstrap["harvest"], list) and isinstance(bootstrap["invalidate"], list)
+PY
+invalid_bootstrap=$(curl --silent --show-error -o "$test_dir/bootstrap-invalid.json" \
+    -w '%{http_code}' "http://127.0.0.1:$gateway_port/__xshield/v1/bootstrap?page=$page_handle&page=$page_handle")
+[[ "$invalid_bootstrap" == "400" || "$invalid_bootstrap" == "403" ]]
+grep -q '"reason_code":"SENSOR_BOOTSTRAP_INVALID"' "$test_dir/bootstrap-invalid.json"
 
 plaintext='{"sku":"A-1","quantity":2}'
 now=$(date +%s)

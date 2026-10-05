@@ -245,7 +245,7 @@ impl ProtectedIdentity {
         }
     }
 
-    fn digest(&self, parts: &[&[u8]]) -> Result<[u8; 32], ReasonCode> {
+    pub(super) fn digest(&self, parts: &[&[u8]]) -> Result<[u8; 32], ReasonCode> {
         let mut canonical = Vec::new();
         for part in parts {
             canonical.extend_from_slice(part);
@@ -272,7 +272,7 @@ impl ProtectedIdentity {
     }
 }
 
-fn prefixed_uuid(
+pub(super) fn prefixed_uuid(
     prefix: &str,
     source_request_id: &RequestId,
     digest: [u8; 32],
@@ -290,7 +290,7 @@ fn prefixed_uuid(
     Ok(format!("{prefix}{}", Uuid::from_bytes(bytes)))
 }
 
-fn hex(bytes: [u8; 32]) -> String {
+pub(super) fn hex(bytes: [u8; 32]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut value = String::with_capacity(64);
     for byte in bytes {

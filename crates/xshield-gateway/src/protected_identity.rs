@@ -43,9 +43,12 @@ use xshield_postgres::{
 };
 use zeroize::Zeroizing;
 
+mod page_issue;
 mod response_issue;
 mod share_entry;
 mod share_issue;
+
+pub(crate) use page_issue::SensorBootstrapDelivery;
 
 pub(crate) const WAF_COOKIE: &str = "__Host-xshield_sid";
 const ACTION_HEADER: &str = "x-xshield-action-ref";
@@ -147,6 +150,7 @@ pub(crate) struct ProtectedAdmission {
     pub(crate) anonymous_session_cookie: Option<String>,
     pub(crate) compatibility_evidence: Option<CompatibilityEvidence>,
     pub(crate) sensor_session: Option<SensorSession>,
+    pub(crate) sensor_bootstrap: Option<SensorBootstrapDelivery>,
 }
 
 pub(crate) struct CompatibilityEvidence {
@@ -168,6 +172,7 @@ impl ProtectedAdmission {
             anonymous_session_cookie: None,
             compatibility_evidence: None,
             sensor_session: None,
+            sensor_bootstrap: None,
         }
     }
 }
@@ -352,11 +357,14 @@ impl ProtectedIdentity {
                 .await?
             {
                 AnonymousAdmission::Created(cookie) => ProtectedAdmission {
-                    decision: denied(config, method, path, now, IdentityDenied::AuthRequired),
-                    response_identity: None,
                     anonymous_session_cookie: Some(cookie),
-                    compatibility_evidence: None,
-                    sensor_session: None,
+                    ..ProtectedAdmission::without_identity(denied(
+                        config,
+                        method,
+                        path,
+                        now,
+                        IdentityDenied::AuthRequired,
+                    ))
                 },
                 AnonymousAdmission::RateExceeded => {
                     ProtectedAdmission::without_identity(denied_reason(
@@ -753,10 +761,18 @@ impl ProtectedIdentity {
     ) -> Result<ProtectedAdmission, IdentityRuntimeError> {
         let method = request.method.as_str();
         let path = request.uri.path();
-        if config.internal_response(method, path) == Some(InternalResponse::SensorPrepare) {
-            return self
-                .admit_sensor_prepare(config, request, method, path, now)
-                .await;
+        match config.internal_response(method, path) {
+            Some(InternalResponse::SensorPrepare) => {
+                return self
+                    .admit_sensor_prepare(config, request, method, path, now)
+                    .await;
+            }
+            Some(InternalResponse::SensorBootstrap) => {
+                return self
+                    .admit_sensor_bootstrap(config, request, method, path, now)
+                    .await;
+            }
+            _ => {}
         }
         let class = config.admission_class(method, path);
         if class == Some(AdmissionClass::ServiceIdentity) {
@@ -786,6 +802,16 @@ impl ProtectedIdentity {
             .await?
         {
             return Ok(admission);
+        }
+        // A navigation to a configured page root cannot carry the app's
+        // credential; any presented credential still takes the full path.
+        if class == Some(AdmissionClass::AuthenticatedRoot)
+            && config.page_action_plan(method, path).is_some()
+            && !request.headers.contains_key("authorization")
+        {
+            return self
+                .admit_page_session(config, request, method, path, now)
+                .await;
         }
         let presented = match PresentedIdentity::parse(request, &self.fingerprint_key) {
             Ok(presented) => presented,
@@ -851,15 +877,13 @@ impl ProtectedIdentity {
                     _ => (config.admit(method, path, now), None, None),
                 };
                 ProtectedAdmission {
-                    decision,
                     response_identity: Some(ResponseIdentity {
                         binding,
                         snapshot,
                         share_source,
                     }),
-                    anonymous_session_cookie: None,
                     compatibility_evidence,
-                    sensor_session: None,
+                    ..ProtectedAdmission::without_identity(decision)
                 }
             }
             IdentityProofState::Denied(error) => {
@@ -920,11 +944,8 @@ impl ProtectedIdentity {
             .await?;
         Ok(match state {
             SensorSessionState::Verified(sensor_session) => ProtectedAdmission {
-                decision: config.admit_sensor_session(method, path),
-                response_identity: None,
-                anonymous_session_cookie: None,
-                compatibility_evidence: None,
                 sensor_session: Some(sensor_session),
+                ..ProtectedAdmission::without_identity(config.admit_sensor_session(method, path))
             },
             SensorSessionState::Denied => ProtectedAdmission::without_identity(denied(
                 config,

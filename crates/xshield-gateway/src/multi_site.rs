@@ -234,6 +234,12 @@ impl GatewaySnapshot {
             let config_bytes = serde_json::to_vec(&entry.gateway_config)
                 .map_err(|_| ConfigError::Invalid("apply config"))?;
             let config = GatewayConfig::from_json(&config_bytes)?;
+            // Edge-managed descriptors are provisioned before a startup
+            // configuration serves traffic. A live snapshot swap has no such
+            // barrier yet, so page actions are refused here, fail closed.
+            if config.edge_descriptors().is_some() {
+                return Err(ConfigError::Invalid("apply page_actions"));
+            }
             if config.site_id().as_str() != entry.site_id
                 || config.listen().port() != entry.listen_port
                 || config.tenant_id().as_str() != tenant_wire
@@ -833,6 +839,31 @@ mod tests {
 
     fn applied(revision: u64, public_origin: &str) -> GatewaySnapshot {
         GatewaySnapshot::from_apply_request(apply_request(revision, public_origin)).unwrap()
+    }
+
+    #[test]
+    fn live_snapshots_refuse_page_actions_without_a_provisioning_barrier() {
+        let mut request = apply_request(1, "https://site-a.example");
+        let config = &mut request.sites[0].gateway_config;
+        config["identity_store"] =
+            serde_json::json!({"max_connections": 2, "acquire_timeout_ms": 1000});
+        config["sensor"] = serde_json::json!({"origin": "https://site-a.example",
+            "build_ref": "a".repeat(64), "heartbeat_seconds": 15});
+        config["operations"] = serde_json::json!([
+            {"operation_id": "app.page", "method": "GET", "path": "/app",
+             "admission": "AUTHENTICATED_ROOT",
+             "response": {"mode": "SENSOR_HTML", "max_bytes": 4096, "adapter_revision": "app-r1",
+                          "origin_sha256": "c".repeat(64), "injection_offset": 10,
+                          "page_actions": {"mapping_revision": "mapping-r1",
+                                           "max_active_pages": 4}}},
+            {"operation_id": "orders.list", "method": "GET", "path": "/orders",
+             "admission": "UI_ACTION_REQUIRED", "source_action": "app.orders.list",
+             "issued_by": {"page_operation_id": "app.page", "ttl_seconds": 60}}
+        ]);
+        assert!(matches!(
+            GatewaySnapshot::from_apply_request(request),
+            Err(ConfigError::Invalid("apply page_actions"))
+        ));
     }
 
     // The control plane numbers its first snapshot 1, and so does the

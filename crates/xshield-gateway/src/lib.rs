@@ -68,22 +68,39 @@ pub const MAX_BUFFERED_BODY_IN_FLIGHT_BYTES: usize = MAX_BUFFERED_JSON_BYTES * 2
 pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 const STATIC_ASSET_OPERATION_ID: &str = "site.static_asset";
-/// Versioned same-origin browser sensor asset.
-pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
-/// Immutable browser sensor bootstrap loader.
-pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.0.0-loader.js";
+/// Versioned same-origin browser sensor asset injected into new pages.
+pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.1.0.js";
+/// Immutable browser sensor bootstrap loader injected into new pages.
+pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.1.0-loader.js";
 /// Exact versioned sensor bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
+pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor-1.1.0.js");
 /// Exact versioned loader bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
+pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader-1.1.0.js");
+/// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
+pub const SENSOR_VERSION: &str = "1.1.0";
+/// Superseded sensor asset, still served byte-identical: pages delivered by
+/// an older edge (or another instance during a rolling upgrade) pin these
+/// exact bytes with SRI, so the URL may disappear but must never change.
+pub const LEGACY_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
+/// Superseded loader asset, still served byte-identical.
+pub const LEGACY_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.0.0-loader.js";
+/// Frozen 1.0.0 sensor bytes.
+pub const LEGACY_SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor.ts");
+/// Frozen 1.0.0 loader bytes.
+pub const LEGACY_SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
+/// Version embedded in the legacy asset paths.
+pub const LEGACY_SENSOR_VERSION: &str = "1.0.0";
 /// Dynamic browser sensor bootstrap document.
 pub const SENSOR_BOOTSTRAP_PATH: &str = "/__xshield/v1/bootstrap";
 /// Same-origin observation preparation endpoint advertised by bootstrap.
 pub const SENSOR_PREPARE_PATH: &str = "/__xshield/v1/events/prepare";
-/// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
-pub const SENSOR_VERSION: &str = "1.0.0";
+/// Observation versions the prepare endpoint accepts: every version whose
+/// assets this edge still serves.
+pub const ACCEPTED_SENSOR_VERSIONS: [&str; 2] = [SENSOR_VERSION, LEGACY_SENSOR_VERSION];
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
 const SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.loader";
+const LEGACY_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.legacy_asset";
+const LEGACY_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.legacy_loader";
 const SENSOR_BOOTSTRAP_OPERATION_ID: &str = "xshield.sensor.bootstrap";
 const SENSOR_PREPARE_OPERATION_ID: &str = "xshield.sensor.prepare";
 const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
@@ -95,6 +112,10 @@ pub enum InternalResponse {
     SensorAsset,
     /// The immutable browser sensor bootstrap loader.
     SensorLoader,
+    /// The frozen 1.0.0 sensor asset kept for already-delivered pages.
+    LegacySensorAsset,
+    /// The frozen 1.0.0 loader asset kept for already-delivered pages.
+    LegacySensorLoader,
     /// A per-navigation browser sensor bootstrap document.
     SensorBootstrap,
     /// A session-bound browser observation preparation request.
@@ -849,6 +870,8 @@ impl GatewayConfig {
                 InternalResponse::SensorPrepare => AdmissionClass::AuthenticatedRoot,
                 InternalResponse::SensorAsset
                 | InternalResponse::SensorLoader
+                | InternalResponse::LegacySensorAsset
+                | InternalResponse::LegacySensorLoader
                 | InternalResponse::SensorBootstrap => AdmissionClass::Public,
             });
         }
@@ -862,6 +885,8 @@ impl GatewayConfig {
         match (method, path) {
             ("GET", SENSOR_ASSET_PATH) => Some(InternalResponse::SensorAsset),
             ("GET", SENSOR_LOADER_PATH) => Some(InternalResponse::SensorLoader),
+            ("GET", LEGACY_SENSOR_ASSET_PATH) => Some(InternalResponse::LegacySensorAsset),
+            ("GET", LEGACY_SENSOR_LOADER_PATH) => Some(InternalResponse::LegacySensorLoader),
             ("GET", SENSOR_BOOTSTRAP_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorBootstrap)
             }
@@ -1128,6 +1153,8 @@ impl GatewayConfig {
             let operation = match response {
                 InternalResponse::SensorAsset => SENSOR_ASSET_OPERATION_ID,
                 InternalResponse::SensorLoader => SENSOR_LOADER_OPERATION_ID,
+                InternalResponse::LegacySensorAsset => LEGACY_SENSOR_ASSET_OPERATION_ID,
+                InternalResponse::LegacySensorLoader => LEGACY_SENSOR_LOADER_OPERATION_ID,
                 InternalResponse::SensorBootstrap => SENSOR_BOOTSTRAP_OPERATION_ID,
                 InternalResponse::SensorPrepare => {
                     return GatewayDecision {

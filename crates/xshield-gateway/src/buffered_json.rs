@@ -24,11 +24,18 @@ pub(crate) struct SensorHtmlTransformation {
     pub(crate) origin_sha256: String,
     pub(crate) injected_sha256: String,
     pub(crate) csp_nonce_applied: bool,
+    /// Per-delivery handle written into the loader tag. Its UUID doubles as
+    /// the page evidence ID, so the bootstrap can name exactly this instance.
+    pub(crate) page_handle: String,
 }
 
 enum BufferedResponseKind {
     Json,
-    SensorHtml(SensorHtmlRule, Option<String>),
+    SensorHtml {
+        rule: SensorHtmlRule,
+        nonce: Option<String>,
+        page_handle: String,
+    },
 }
 
 impl BufferedResponse {
@@ -50,7 +57,11 @@ impl BufferedResponse {
                 let nonce = prepare_csp_nonce(response)?;
                 (
                     rule.max_bytes(),
-                    BufferedResponseKind::SensorHtml(rule.clone(), nonce),
+                    BufferedResponseKind::SensorHtml {
+                        rule: rule.clone(),
+                        nonce,
+                        page_handle: format!("pgh_{}", uuid::Uuid::now_v7()),
+                    },
                 )
             }
             _ => return Err(validation_reason),
@@ -114,15 +125,20 @@ impl BufferedResponse {
                     sensor_html: None,
                 }))
             }
-            BufferedResponseKind::SensorHtml(rule, nonce) => {
+            BufferedResponseKind::SensorHtml {
+                rule,
+                nonce,
+                page_handle,
+            } => {
                 let injected = rule
-                    .inject(&self.bytes, nonce.as_deref())
+                    .inject(&self.bytes, nonce.as_deref(), page_handle)
                     .map_err(|_| ReasonCode::SensorHtmlValidationFailed)?;
                 let transformation = SensorHtmlTransformation {
                     adapter_revision: injected.adapter_revision().to_owned(),
                     origin_sha256: injected.origin_sha256().to_owned(),
                     injected_sha256: injected.injected_sha256().to_owned(),
                     csp_nonce_applied: nonce.is_some(),
+                    page_handle: page_handle.clone(),
                 };
                 Ok(Some(BufferedEntity {
                     body: Bytes::from(injected.into_body()),
