@@ -283,6 +283,19 @@ test("harvests list references without consuming the page's body", async () => {
   assert.equal(sensor.reference(numeric), null, "only string resources are matched");
   assert.equal(sensor.reference(encoded), OTHER_REF, "the path segment is decoded once");
   assert.equal(sensor.reference(nested), null);
+
+  // A list fetched with a query still carries edge-injected references; a
+  // target or page action with a query never matches.
+  const paged = harness({ route: (url) => (url.pathname === "/orders" ? json(list) : json({})) });
+  await paged.sandbox.XshieldSensor.boot(HANDLE);
+  await paged.app("/orders?page=2");
+  await settle();
+  await paged.app("/orders/ord-1");
+  await paged.app("/orders/ord-1?view=full");
+  const [pagedList, pagedDetail, pagedQuery] = paged.businessCalls();
+  assert.equal(paged.reference(pagedList), null);
+  assert.equal(paged.reference(pagedDetail), ORDER_REF);
+  assert.equal(paged.reference(pagedQuery), null);
 });
 
 test("ignores lists that are not same-origin JSON, oversized or over their bound", async () => {

@@ -119,13 +119,15 @@
     return value;
   };
 
-  const routeMatches = (route, url) =>
-    route.path !== undefined
-      ? url.pathname === route.path && url.search === ""
-      : url.search === "" &&
-        url.pathname.startsWith(route.prefix) &&
+  // Targets and page actions never carry a query (the edge rejects one);
+  // a list source may (the edge still injects its references).
+  const routeMatches = (route, url, queryAllowed = false) =>
+    (queryAllowed || url.search === "") &&
+    (route.path !== undefined
+      ? url.pathname === route.path
+      : url.pathname.startsWith(route.prefix) &&
         url.pathname.length > route.prefix.length &&
-        !url.pathname.slice(route.prefix.length).includes("/");
+        !url.pathname.slice(route.prefix.length).includes("/"));
 
   // The resource value a target request names, decoded once like the edge.
   const targetResource = (rule, url) => {
@@ -196,7 +198,9 @@
   };
 
   const harvestRule = (method, url) =>
-    state.rules.findIndex((rule) => rule.source.method === method && routeMatches(rule.source, url));
+    state.rules.findIndex(
+      (rule) => rule.source.method === method && routeMatches(rule.source, url, true),
+    );
 
   const track = (work) => {
     state.pending.add(work);
@@ -397,7 +401,7 @@
       }
       return Reflect.apply(nativeOpen, this, arguments);
     };
-    prototype.setRequestHeader = function setRequestHeader(name) {
+    prototype.setRequestHeader = function setRequestHeader(name, _value) {
       try {
         const call = calls.get(this);
         if (call !== undefined && String(name).toLowerCase() === ACTION_HEADER.toLowerCase()) {

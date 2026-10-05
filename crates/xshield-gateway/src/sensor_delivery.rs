@@ -300,8 +300,8 @@ mod tests {
 
     #[test]
     fn served_sensor_versions_are_pinned_and_frozen() {
-        // The 1.0.0 bytes are SRI-pinned by pages delivered before 1.1.0; any
-        // edit must ship as a new version path instead.
+        // Every served version path is immutable and SRI-pinned by pages that
+        // were delivered with it; any edit must ship as a new version path.
         assert_eq!(
             openssl::sha::sha256(SensorScript::LEGACY.bytes),
             hex32("60dac1e039186a9ae1519c7399d871b1446dd49748a30a9688f9a54ab2288df7")
@@ -309,6 +309,14 @@ mod tests {
         assert_eq!(
             openssl::sha::sha256(SensorScript::LEGACY_LOADER.bytes),
             hex32("7e4b2c44e3cff6c7f1c1b15e51f62c8066ae9ef5164fd69693488262e6ff2950")
+        );
+        assert_eq!(
+            openssl::sha::sha256(SensorScript::CURRENT.bytes),
+            hex32("31b0537aa333d79e77ed3237a813e78d13fc44dd0048b0acbe49af17fcdacd1f")
+        );
+        assert_eq!(
+            openssl::sha::sha256(SensorScript::LOADER.bytes),
+            hex32("bd869b6aab0a506c50a72427c4efc8c9f8fc75c4d6d59597963bd204432e26db")
         );
         assert_eq!(SensorScript::LEGACY.version, "1.0.0");
         assert_eq!(SensorScript::CURRENT.version, "1.1.0");

@@ -243,8 +243,13 @@ try {
   expectations.stages.push({ request_id: copied.requestId, stage: "sensor_bootstrap", outcome: "SKIPPED", reason_code: "SENSOR_ACTIONS_UNAVAILABLE" });
 
   // An expired lease: the sensor still holds the reference, the edge does not.
+  // Both times move into the past so the lease is over regardless of how
+  // close to a second boundary the list was issued.
   execFileSync("psql", ["-X", "-q", "-d", database, "-c",
-    `UPDATE xshield.ui_actions SET expires_at = issued_at + interval '1 second' WHERE action_ref = '${refs["ord-alice-2"]}'`]);
+    `UPDATE xshield.ui_actions
+     SET issued_at = clock_timestamp() - interval '2 minutes',
+         expires_at = clock_timestamp() - interval '1 minute'
+     WHERE action_ref = '${refs["ord-alice-2"]}'`]);
   expectDenied("alice: expired reference (app-style call)", await call(alice.page, "/orders/ord-alice-2"), "UI_ACTION_NOT_AVAILABLE");
   assert.equal(lastReference(alice, "/orders/ord-alice-2"), refs["ord-alice-2"], "the expired reference was presented");
 
