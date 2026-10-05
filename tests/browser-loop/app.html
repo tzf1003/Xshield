@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Orders</title>
+<script>
+  // Like some polyfills and frameworks, the app keeps its own reference to
+  // fetch before any later script runs; calls through it are not observed.
+  window.appRawFetch = window.fetch;
+</script>
+</head>
+<body>
+<main>
+  <h1>My orders</h1>
+  <p id="status">loading</p>
+  <ul id="orders"></ul>
+  <section id="detail" aria-live="polite"></section>
+  <button id="logout" type="button">Log out</button>
+</main>
+<script>
+  const token = sessionStorage.getItem("orders.token");
+  const api = (path, init = {}) =>
+    fetch(path, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } });
+
+  async function openOrder(id) {
+    const detail = document.getElementById("detail");
+    const response = await api(`/orders/${encodeURIComponent(id)}`);
+    detail.textContent = response.ok ? JSON.stringify(await response.json()) : "denied";
+    detail.dataset.status = String(response.status);
+  }
+
+  async function loadOrders() {
+    const status = document.getElementById("status");
+    const response = await api("/orders");
+    if (!response.ok) {
+      status.textContent = "denied";
+      status.dataset.status = String(response.status);
+      return;
+    }
+    const { orders } = await response.json();
+    const list = document.getElementById("orders");
+    for (const order of orders) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = order.title;
+      button.dataset.orderId = order.id;
+      button.addEventListener("click", () => openOrder(order.id));
+      const item = document.createElement("li");
+      item.append(button);
+      list.append(item);
+    }
+    status.textContent = "ready";
+    status.dataset.status = String(response.status);
+  }
+
+  document.getElementById("logout").addEventListener("click", async () => {
+    const response = await api("/api/logout", { method: "POST" });
+    document.getElementById("status").dataset.logout = String(response.status);
+  });
+
+  loadOrders();
+</script>
+</body>
+</html>
