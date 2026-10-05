@@ -2,13 +2,27 @@ use crate::{PostgresIdentityStore, StoreError};
 use sqlx::Row;
 use std::collections::BTreeMap;
 use xshield_core::{
-    domain::{AuthBindingId, SiteId, TenantId},
+    domain::{AuthBindingId, SiteId, TenantId, WafSessionId},
     identity::{
         AuthBinding, AuthEpoch, AuthorizationContextRef, CredentialFingerprint,
         CredentialGeneration, CredentialSlot, IdentityDenied, UnixSeconds,
     },
     ports::{IdentityProofQuery, IdentityProofState, IdentityProofStore},
 };
+
+/// Session-only lookup for a navigation to a digest-pinned page root.
+pub struct DocumentSessionQuery<'a> {
+    /// Tenant selected by trusted gateway configuration.
+    pub tenant_id: &'a TenantId,
+    /// Site selected by trusted gateway configuration.
+    pub site_id: &'a SiteId,
+    /// Exact WAF session presented by the navigation.
+    pub session_id: &'a WafSessionId,
+    /// Tenant-scoped fingerprint of that session cookie.
+    pub session_fingerprint: &'a [u8; 32],
+    /// Server time used for expiry checks.
+    pub now: UnixSeconds,
+}
 
 /// Session-only proof query for restricted sensor metadata ingestion.
 pub struct SensorSessionQuery<'a> {
@@ -99,38 +113,9 @@ impl IdentityProofStore for PostgresIdentityStore {
         )?;
         let absolute_expires_at =
             nonnegative(row.try_get("absolute_expires_at")?, "absolute_expires_at")?;
-        let credential_rows = sqlx::query(
-            "SELECT credential_kind, fingerprint
-             FROM xshield.credential_bindings
-             WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
-               AND generation = $4 AND status = 'active'
-               AND expires_at > GREATEST(to_timestamp($5), clock_timestamp())",
-        )
-        .bind(query.tenant_id.as_str())
-        .bind(query.site_id.as_str())
-        .bind(binding_id.as_str())
-        .bind(i64::try_from(generation).map_err(|_| StoreError::NumericRange("generation"))?)
-        .bind(now)
-        .fetch_all(&self.pool)
-        .await?;
-        let mut stored_credentials = BTreeMap::new();
-        for credential in credential_rows {
-            let slot = match credential.try_get::<&str, _>("credential_kind")? {
-                "cookie" => CredentialSlot::Cookie,
-                "bearer" => CredentialSlot::Bearer,
-                "body_token" => CredentialSlot::BodyToken,
-                _ => return Err(StoreError::CorruptData("credential_kind")),
-            };
-            let bytes = credential.try_get::<Vec<u8>, _>("fingerprint")?;
-            let fingerprint = CredentialFingerprint::from_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|_| StoreError::CorruptData("credential_fingerprint"))?,
-            );
-            if stored_credentials.insert(slot, fingerprint).is_some() {
-                return Err(StoreError::CorruptData("duplicate_credential_kind"));
-            }
-        }
+        let stored_credentials = self
+            .active_credentials(query.tenant_id, query.site_id, &binding_id, generation, now)
+            .await?;
         if stored_credentials.is_empty() {
             return Ok(IdentityProofState::Denied(IdentityDenied::BindingMismatch));
         }
@@ -165,6 +150,139 @@ impl IdentityProofStore for PostgresIdentityStore {
 }
 
 impl PostgresIdentityStore {
+    async fn active_credentials(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        binding_id: &AuthBindingId,
+        generation: u64,
+        now: i64,
+    ) -> Result<BTreeMap<CredentialSlot, CredentialFingerprint>, StoreError> {
+        let credential_rows = sqlx::query(
+            "SELECT credential_kind, fingerprint
+             FROM xshield.credential_bindings
+             WHERE tenant_id = $1 AND site_id = $2 AND binding_id = $3
+               AND generation = $4 AND status = 'active'
+               AND expires_at > GREATEST(to_timestamp($5), clock_timestamp())",
+        )
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(binding_id.as_str())
+        .bind(i64::try_from(generation).map_err(|_| StoreError::NumericRange("generation"))?)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut stored_credentials = BTreeMap::new();
+        for credential in credential_rows {
+            let slot = match credential.try_get::<&str, _>("credential_kind")? {
+                "cookie" => CredentialSlot::Cookie,
+                "bearer" => CredentialSlot::Bearer,
+                "body_token" => CredentialSlot::BodyToken,
+                _ => return Err(StoreError::CorruptData("credential_kind")),
+            };
+            let bytes = credential.try_get::<Vec<u8>, _>("fingerprint")?;
+            let fingerprint = CredentialFingerprint::from_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| StoreError::CorruptData("credential_fingerprint"))?,
+            );
+            if stored_credentials.insert(slot, fingerprint).is_some() {
+                return Err(StoreError::CorruptData("duplicate_credential_kind"));
+            }
+        }
+        Ok(stored_credentials)
+    }
+
+    /// Identifies the current authenticated binding from the WAF session alone
+    /// for a navigation to a digest-pinned page root.
+    ///
+    /// Requires an `active` unexpired binding that still holds live business
+    /// credentials, but does not match them: a top-level navigation cannot
+    /// carry the application's `Authorization` header. The result may only seed
+    /// page evidence for a pinned document (see
+    /// [`AuthBinding::verify_document_session`]); actions issued from it are
+    /// re-verified against the complete credential set when used. An anonymous
+    /// session is reported as `AuthRequired`; anything else unmatched as
+    /// `BindingMismatch`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database or stored-data failures.
+    pub async fn load_document_session(
+        &self,
+        query: DocumentSessionQuery<'_>,
+    ) -> Result<IdentityProofState, StoreError> {
+        let now = i64::try_from(query.now.value()).map_err(|_| StoreError::NumericRange("now"))?;
+        let row = sqlx::query(
+            "SELECT binding_id, status, principal_ref, authorization_context_ref,
+                    auth_epoch, credential_generation,
+                    extract(epoch FROM absolute_expires_at)::bigint AS absolute_expires_at
+             FROM xshield.auth_bindings
+             WHERE tenant_id = $1 AND site_id = $2 AND waf_sid_fingerprint = $3
+               AND status IN ('anonymous', 'active')
+               AND absolute_expires_at > GREATEST(to_timestamp($4), clock_timestamp())",
+        )
+        .bind(query.tenant_id.as_str())
+        .bind(query.site_id.as_str())
+        .bind(query.session_fingerprint.as_slice())
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(IdentityProofState::Denied(IdentityDenied::BindingMismatch));
+        };
+        if row.try_get::<&str, _>("status")? != "active" {
+            return Ok(IdentityProofState::Denied(IdentityDenied::AuthRequired));
+        }
+        let binding_id = AuthBindingId::parse(row.try_get::<&str, _>("binding_id")?)
+            .map_err(|_| StoreError::CorruptData("binding_id"))?;
+        let principal_ref = row
+            .try_get::<Option<&str>, _>("principal_ref")?
+            .ok_or(StoreError::CorruptData("principal_ref"))?;
+        let authorization_context_ref =
+            AuthorizationContextRef::parse(row.try_get::<&str, _>("authorization_context_ref")?)
+                .map_err(|_| StoreError::CorruptData("authorization_context_ref"))?;
+        let generation = nonnegative(
+            row.try_get("credential_generation")?,
+            "credential_generation",
+        )?;
+        let credentials = self
+            .active_credentials(query.tenant_id, query.site_id, &binding_id, generation, now)
+            .await?;
+        if credentials.is_empty() {
+            return Ok(IdentityProofState::Denied(IdentityDenied::BindingMismatch));
+        }
+        let binding = AuthBinding::new(
+            binding_id,
+            query.session_id.clone(),
+            query.tenant_id.clone(),
+            query.site_id.clone(),
+            principal_ref,
+            authorization_context_ref,
+            AuthEpoch::new(nonnegative(row.try_get("auth_epoch")?, "auth_epoch")?),
+            CredentialGeneration::new(generation),
+            credentials,
+            UnixSeconds::new(nonnegative(
+                row.try_get("absolute_expires_at")?,
+                "absolute_expires_at",
+            )?),
+        )
+        .map_err(|_| StoreError::CorruptData("auth_binding"))?;
+        Ok(
+            match binding.verify_document_session(
+                query.tenant_id,
+                query.site_id,
+                query.session_id,
+                query.now,
+            ) {
+                Ok(snapshot) => IdentityProofState::Verified {
+                    binding: Box::new(binding),
+                    snapshot,
+                },
+                Err(error) => IdentityProofState::Denied(error),
+            },
+        )
+    }
+
     /// Loads current session coordinates without accepting business operations.
     ///
     /// This lookup is reserved for sensor metadata. It never returns a full

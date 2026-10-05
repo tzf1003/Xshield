@@ -4,8 +4,14 @@ use sqlx::{PgConnection, Row};
 use xshield_core::{
     audit::ReasonCode,
     domain::PageEvidenceId,
-    provenance::{ActionGrant, ActionTarget, PageEvidence},
+    provenance::{ActionGrant, ActionTarget, ActionTargetRule, PageEvidence},
 };
+
+mod descriptor_sync;
+mod page_batch;
+
+pub use descriptor_sync::{EdgeDescriptorSync, EdgeDescriptorSyncOutcome};
+pub use page_batch::{MAX_PAGE_PROVENANCE_ACTIONS, PageProvenanceBatch, PageProvenanceOutcome};
 
 /// One verified page evidence and exact action grant persistence command.
 pub struct ProvenancePersistence<'a> {
@@ -491,6 +497,18 @@ fn field_values(action: &ActionGrant) -> Value {
             .map(|field| Value::String(field.as_str().to_owned()))
             .collect(),
     )
+}
+
+/// Encodes a descriptor target rule exactly as [`target_values`] encodes the
+/// rule half of a concrete target, so derived rows match issuance lookups.
+fn target_rule_value(rule: &ActionTargetRule) -> Value {
+    match rule {
+        ActionTargetRule::None => json!({"kind": "none"}),
+        ActionTargetRule::VerifiedPrincipal => json!({"kind": "verified_principal"}),
+        ActionTargetRule::Resource(resource_type) => {
+            json!({"kind": "resource", "resource_type": resource_type.as_str()})
+        }
+    }
 }
 
 fn target_values(target: &ActionTarget) -> (Value, Value) {
