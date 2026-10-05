@@ -14,7 +14,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-EDGE = ROOT / "target/debug/xshield-gateway"
+# Honour CARGO_TARGET_DIR so builds can live outside the repository (large disk).
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+EDGE = TARGET / "debug/xshield-gateway"
 JUICE = "http://127.0.0.1:53000"
 IDOR = "http://127.0.0.1:53001"
 

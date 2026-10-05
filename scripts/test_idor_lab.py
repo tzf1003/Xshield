@@ -20,8 +20,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-EDGE = ROOT / "target/debug/xshield-gateway"
-MODEL_EVAL = ROOT / "target/debug/xshield-model-eval"
+# Honour CARGO_TARGET_DIR so builds can live outside the repository (large disk).
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+EDGE = TARGET / "debug/xshield-gateway"
+MODEL_EVAL = TARGET / "debug/xshield-model-eval"
 FINGERPRINT_KEY = "7" * 64
 LABELS = ROOT / "tests/security-lab/independent_labels.json"
 SCENARIOS = {
