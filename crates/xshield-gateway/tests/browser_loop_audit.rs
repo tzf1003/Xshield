@@ -9,19 +9,19 @@ use xshield_audit::{JournalError, JournalKey, JournalLimits, LocalJournal};
 
 #[derive(Deserialize)]
 struct Expectations {
-    decisions: Vec<Decision>,
-    stages: Vec<Stage>,
+    decisions: Vec<ExpectedDecision>,
+    stages: Vec<ExpectedStage>,
 }
 
 #[derive(Deserialize)]
-struct Decision {
+struct ExpectedDecision {
     request_id: String,
     decision: String,
     reason_code: String,
 }
 
 #[derive(Deserialize)]
-struct Stage {
+struct ExpectedStage {
     request_id: String,
     stage: String,
     outcome: String,

@@ -41,7 +41,7 @@ ActionGrant：当前主体在特定 scope、期限和使用次数内可以使用
 
 **交付时签发。** 精确页面字节通过摘要与注入校验后、正文释放前，edge 在一个事务内写入一条 PageEvidence（模板 = 页面 operation，构建指纹 = 已验证的源站摘要，响应对象引用 = 注入后正文的 SHA-256）和该页声明的全部 ActionGrant 与逐项 `ui_action.issued` outbox。动作期限为配置 TTL 与 binding 绝对期限的较小值，证据期限为其中最长者；引用与事件 ID 由请求、页面实例和动作 HMAC 派生，精确重试得到相同结果。事务先锁 binding 行，再统计同一 binding、epoch 与页面模板下其他未过期页面实例，达到 `max_active_pages` 时返回 `UI_ACTION_CAPACITY_EXCEEDED`；任何一项不合格整体回滚。签发失败从不扣留已验证的页面：页面照常交付但不持有引用，其受控请求随之被拒绝，失败原因写入 `ui_action_issue` 阶段（DENY 或依赖故障 ERROR）。
 
-**交付给浏览器。** 注入的 loader 标签携带本次交付的页面句柄 `pgh_<UUIDv7>`，其 UUID 即页面证据 ID；句柄本身不是凭证。`GET /__xshield/v1/bootstrap?page=<句柄>`（`private, no-store`）只在同源 fetch（`Sec-Fetch-Site` 缺省或为 `same-origin`）且 WAF 会话属于拥有该页面实例的 `active` binding、epoch 一致时，返回该页仍有效的 `actions: [{action_ref, method, path_template, expires_in_seconds}]`（至多 16 条）；另一会话拿到同一句柄只会得到空列表。引用从不进入 HTML、静态资源或日志，journal 只记录交付数量（`sensor_bootstrap` 阶段）。
+**交付给浏览器。** 注入的 loader 标签携带本次交付的页面句柄 `pgh_<UUIDv7>`，其 UUID 即页面证据 ID；句柄本身不是凭证。`GET /__xshield/v1/bootstrap?page=<句柄>`（`private, no-store`）只在同源 fetch（`Sec-Fetch-Site` 缺省或为 `same-origin`）且 WAF 会话属于拥有该页面实例的 `active` binding、epoch 一致时，返回该页仍有效的 `actions: [{action_ref, method, path_template, expires_in_seconds}]`（至多 16 条）；另一会话拿到同一句柄只会得到空列表。引用从不进入 HTML、静态资源或日志，journal 只以 `sensor_bootstrap` 阶段记录是否交付了引用。
 
 **浏览器侧出示，网关侧重验。** 探针 1.1.0 只把这些服务端引用原样放进 `X-Xshield-Action-Ref`：页面动作匹配精确的同源方法与路径（带查询串不匹配），列表 → 详情的响应派生引用按 bootstrap 下发的 `resource_grant` 提取提示从已批准列表的 JSON 响应中读取（见 07 §7.4）。网关的 `admit_ui_action` 未作任何放宽：对每个请求重新加载服务端记录并校验 binding、epoch、策略、页面证据、方法、路由、目标、字段与期限，资源路由再精确匹配 ResourceGrant，转发前删除该请求头。真实浏览器回归见 20 §20.19。
 

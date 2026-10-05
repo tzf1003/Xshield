@@ -2206,6 +2206,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One journal round trip per outcome keeps the matrix readable.
     async fn records_bootstrap_delivery_and_page_issuance_in_the_generic_stage_shape() {
         let directory = directory();
         let config = config(&directory, 1024 * 1024);
