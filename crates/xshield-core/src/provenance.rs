@@ -493,6 +493,42 @@ impl ActionDescriptor {
     pub const fn field_profile(&self) -> &ViewProfile {
         &self.field_profile
     }
+
+    /// Returns the page template whose verified evidence may expose this action.
+    #[must_use]
+    pub const fn page_template(&self) -> &PageTemplate {
+        &self.page_template
+    }
+
+    /// Returns the target family the action may address.
+    #[must_use]
+    pub const fn target_rule(&self) -> &ActionTargetRule {
+        &self.target_rule
+    }
+
+    /// Returns the request fields the action may expose.
+    #[must_use]
+    pub const fn allowed_fields(&self) -> &BTreeSet<FieldName> {
+        &self.allowed_fields
+    }
+
+    /// Returns the signed policy revision that approved this mapping.
+    #[must_use]
+    pub const fn policy_revision(&self) -> &PolicyRevision {
+        &self.policy_revision
+    }
+
+    /// Returns the exact versioned UI mapping.
+    #[must_use]
+    pub const fn mapping_revision(&self) -> &MappingRevision {
+        &self.mapping_revision
+    }
+
+    /// Returns whether the mapping may still issue new actions.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        self.active
+    }
 }
 
 /// Requested action grant contents after route and response extraction.

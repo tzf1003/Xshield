@@ -335,6 +335,51 @@ impl AuthBinding {
         })
     }
 
+    /// Identifies this binding from the WAF session alone for a navigation to
+    /// an approved, digest-pinned static page.
+    ///
+    /// A top-level browser navigation carries the `HttpOnly` WAF cookie but
+    /// never the application's own `Authorization` header, so the business
+    /// credential cannot be matched for that one request shape. The snapshot
+    /// returned here therefore proves possession of the current WAF session,
+    /// not of the business credential. Callers may use it only to deliver a
+    /// document whose bytes are pinned by digest (so no per-user origin content
+    /// is released) and to seed page evidence for that document. Every action
+    /// issued from such evidence is re-verified against the complete credential
+    /// combination by [`AuthBinding::verify`] when it is used, so a stolen WAF
+    /// cookie alone yields no usable authority. Never use this snapshot to admit
+    /// an operation whose response carries business data.
+    ///
+    /// # Errors
+    /// Returns [`IdentityDenied`] for a revoked or expired binding or a tenant,
+    /// site, or session mismatch.
+    pub fn verify_document_session(
+        &self,
+        tenant: &TenantId,
+        site: &SiteId,
+        session: &WafSessionId,
+        now: UnixSeconds,
+    ) -> Result<AuthSnapshot, IdentityDenied> {
+        if self.status == BindingStatus::Revoked {
+            return Err(IdentityDenied::BindingRevoked);
+        }
+        if &self.tenant_id != tenant || &self.site_id != site || &self.session_id != session {
+            return Err(IdentityDenied::BindingMismatch);
+        }
+        if now >= self.absolute_expires_at {
+            return Err(IdentityDenied::SessionExpired);
+        }
+        Ok(AuthSnapshot {
+            binding_id: self.binding_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            site_id: self.site_id.clone(),
+            principal_ref: self.principal_ref.clone(),
+            authorization_context_ref: self.authorization_context_ref.clone(),
+            epoch: self.epoch,
+            generation: self.generation,
+        })
+    }
+
     /// Replaces verified credentials while preserving principal, scope, and epoch.
     ///
     /// The captured counters are the expected values for a persistence-layer
@@ -783,6 +828,54 @@ mod tests {
         assert_eq!(
             session.verify(&SiteId::parse("site_a").unwrap(), UnixSeconds::new(200)),
             Err(IdentityDenied::SessionExpired)
+        );
+    }
+
+    #[test]
+    fn document_session_identifies_only_the_exact_live_session() {
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let session = WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap();
+        let mut binding = binding();
+        let document = binding
+            .verify_document_session(&tenant, &site, &session, UnixSeconds::new(100))
+            .unwrap();
+        // The session-only snapshot names exactly the same identity context as
+        // a credential-verified one, so evidence seeded from it is rechecked
+        // against the full credential set at use.
+        assert_eq!(
+            Ok(document),
+            binding.verify(
+                &tenant,
+                &site,
+                &session,
+                &credentials(A),
+                UnixSeconds::new(100)
+            )
+        );
+        let other_session =
+            WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000009").unwrap();
+        assert_eq!(
+            binding.verify_document_session(&tenant, &site, &other_session, UnixSeconds::new(100)),
+            Err(IdentityDenied::BindingMismatch)
+        );
+        assert_eq!(
+            binding.verify_document_session(
+                &tenant,
+                &SiteId::parse("site_b").unwrap(),
+                &session,
+                UnixSeconds::new(100)
+            ),
+            Err(IdentityDenied::BindingMismatch)
+        );
+        assert_eq!(
+            binding.verify_document_session(&tenant, &site, &session, UnixSeconds::new(200)),
+            Err(IdentityDenied::SessionExpired)
+        );
+        binding.revoke();
+        assert_eq!(
+            binding.verify_document_session(&tenant, &site, &session, UnixSeconds::new(100)),
+            Err(IdentityDenied::BindingRevoked)
         );
     }
 
