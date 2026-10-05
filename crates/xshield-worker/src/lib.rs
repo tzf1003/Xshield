@@ -2788,6 +2788,70 @@ mod tests {
         assert!(summary.model_revision.is_empty());
     }
 
+    // The gateway records page issuance and bootstrap delivery in the generic
+    // stage shape so the journal publisher needs no dedicated parser; any
+    // extra fact or coverage member would stop the whole segment.
+    #[test]
+    fn gateway_page_provenance_stages_parse_in_the_generic_journal_shape() {
+        for (event_type, stage, outcome, reason) in [
+            (
+                "stage.completed",
+                "sensor_bootstrap",
+                "PASS",
+                "SENSOR_ACTIONS_DELIVERED",
+            ),
+            (
+                "stage.skipped",
+                "sensor_bootstrap",
+                "SKIPPED",
+                "SENSOR_ACTIONS_UNAVAILABLE",
+            ),
+            (
+                "stage.completed",
+                "ui_action_issue",
+                "PASS",
+                "UI_ACTION_ISSUED",
+            ),
+            (
+                "stage.completed",
+                "ui_action_issue",
+                "DENY",
+                "UI_ACTION_CAPACITY_EXCEEDED",
+            ),
+            (
+                "stage.completed",
+                "ui_action_issue",
+                "ERROR",
+                "IDENTITY_STORE_UNAVAILABLE",
+            ),
+        ] {
+            let payload = serde_json::json!({
+                "stage": stage,
+                "stage_execution_id": "stg_01a0afa6-3320-7637-b792-f997e8a40536",
+                "outcome": outcome,
+                "reason_code": reason,
+                "proof_kind": "deterministic",
+                "confidence": null,
+                "confidence_status": "not_applicable",
+                "duration_us": 0,
+                "rule_revision": "app-map-r1",
+                "model_call_id": null,
+                "facts": {"operation_id": "app.page"},
+                "coverage": {"admission_checked": true},
+            });
+            let summary = PayloadSummary::parse(event_type, &payload.to_string()).unwrap();
+            assert_eq!(
+                (
+                    summary.stage.as_str(),
+                    summary.outcome.as_str(),
+                    summary.reason_code.as_str(),
+                    summary.operation_id.as_str(),
+                ),
+                (stage, outcome, reason, "app.page")
+            );
+        }
+    }
+
     fn model_stage_payload() -> serde_json::Value {
         serde_json::json!({
             "stage": "ui_semantic_match",
