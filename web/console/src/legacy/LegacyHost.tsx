@@ -1,49 +1,13 @@
-import type { FormEvent, KeyboardEvent } from "react";
+import type { FormEvent } from "react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiError, validateModelCallListPlan } from "../api";
-import type {
-  AgentRunResponse,
-  ArtifactResponse,
-  AuditHealthResponse,
-  CalibrationReportResponse,
-  ControlClient,
-  EventsResponse,
-  EvidenceResponse,
-  JobResponse,
-  ModelCallListPlan,
-  ModelCallListResponse,
-  ModelCallResponse,
-  SummaryResponse,
-} from "../api";
 import { routeQueryKind, routeTarget } from "../admin-routes";
-import type { BindingResponse, GrantResponse } from "../ledger";
-import {
-  AgentRunOverview,
-  ArtifactDetail,
-  AuditHealthPanel,
-  CalibrationReportPanel,
-  EventDetail,
-  EventTable,
-  EvidenceTable,
-  ModelCallListPanel,
-  ModelCallOverview,
-  RequestOverview,
-  WatermarkNotice,
-} from "../panels";
-import { validateCausalityPlan, validateSearchPlan } from "../search";
-import type { CausalityResponse, SearchPlan, SearchResponse } from "../search";
-import type { SearchPreset } from "../SearchPanel";
+import { ApiError } from "../api";
+import type { AuditHealthResponse, ControlClient, JobResponse } from "../api";
+import { AuditHealthPanel } from "../panels";
 import { useSession } from "../security/SessionProvider";
 import { unauthorizedNotice } from "../security/session-store.ts";
 
-// Heavy panels load the first time their page is opened. The four workbenches below keep their
-// unconfirmed-write state across navigation, so once mounted they stay mounted (hidden).
-const SearchPanel = lazy(() =>
-  import("../SearchPanel").then((module) => ({ default: module.SearchPanel })),
-);
-const LedgerPanel = lazy(() =>
-  import("../LedgerPanel").then((module) => ({ default: module.LedgerPanel })),
-);
+// The panel loads the first time its page is opened.
 const ManagementApiKeyPanel = lazy(() =>
   import("../ManagementApiKeyPanel").then((module) => ({ default: module.ManagementApiKeyPanel })),
 );
@@ -53,25 +17,8 @@ function Deferred({ children }: { children: React.ReactNode }) {
 }
 
 type Problem = { message: string; code: string; requestId?: string | null; status?: number };
-type Channel = "query" | "events" | "evidence" | "artifact" | "health";
-const queryLabels = {
-  request: "请求 ID",
-  model: "模型调用 ID",
-  agent: "Agent 运行 ID",
-  "calibration-report": "校准报告 ID",
-  grant: "资格 ID",
-  binding: "身份绑定 ID",
-  jobs: "任务 ID",
-};
-const queryPrefixes = {
-  request: "req",
-  model: "mdl",
-  agent: "agt",
-  "calibration-report": "calr",
-  grant: "grant",
-  binding: "auth",
-  jobs: "job",
-};
+type Channel = "query" | "health";
+
 function Failure({ problem }: { problem: Problem | null }) {
   return (
     problem && (
@@ -93,21 +40,14 @@ export type LegacyHostProps = {
   /** Current router pathname; the host keeps no routing state of its own. */
   pathname: string;
   navigate: (path: string, options?: { completed?: boolean }) => void;
-  /** Event search requested from outside the host (the command palette). */
-  searchIntent: { preset: SearchPreset; nonce: number } | null;
-  onSearchIntentConsumed: () => void;
 };
 
 /**
- * The pre-redesign pages, kept working while they are rebuilt one by one on the routed data
- * layer. The shell renders it once and keeps it mounted so unconfirmed writes survive navigation.
+ * The pages that are not rebuilt yet: the job lookup, the audit publication snapshot and the
+ * management API-key panel. Every other page is a routed page with its own data layer. The shell
+ * renders this host once and keeps it mounted so an unconfirmed key operation survives navigation.
  */
-export default function LegacyHost({
-  pathname,
-  navigate: go,
-  searchIntent,
-  onSearchIntentConsumed,
-}: LegacyHostProps) {
+export default function LegacyHost({ pathname }: LegacyHostProps) {
   // The session layer owns the ControlClient, the confirmed scope, roles, idle expiry and the
   // epoch shared with every TanStack query. This host keeps only per-view state.
   const session = useSession();
@@ -129,36 +69,11 @@ export default function LegacyHost({
     if (lifetime.current.signal.aborted) lifetime.current = new AbortController();
     return () => lifetime.current.abort();
   }, []);
-  const operations = useRef<Record<Channel, number>>({
-    query: 0,
-    events: 0,
-    evidence: 0,
-    artifact: 0,
-    health: 0,
-  });
-  const [requestId, setRequestId] = useState("");
+  const operations = useRef<Record<Channel, number>>({ query: 0, health: 0 });
+  const [jobId, setJobId] = useState("");
   const queryKind = routeQueryKind(pathname);
-  const [ledger, setLedger] = useState<GrantResponse | BindingResponse | null>(null);
-  const [searchPreset, setSearchPreset] = useState<SearchPreset | null>(null);
-  const [searchPresetVersion, setSearchPresetVersion] = useState(0);
-  const [searchPlan, setSearchPlan] = useState<SearchPlan | null>(null);
-  const [search, setSearch] = useState<SearchResponse | null>(null);
-  const [causality, setCausality] = useState<CausalityResponse | null>(null);
-  const [model, setModel] = useState<ModelCallResponse | null>(null);
-  const [agentRun, setAgentRun] = useState<AgentRunResponse | null>(null);
-  const [modelListPlan, setModelListPlan] = useState<ModelCallListPlan | null>(null);
-  const [modelList, setModelList] = useState<ModelCallListResponse | null>(null);
   const [job, setJob] = useState<JobResponse | null>(null);
   const [health, setHealth] = useState<AuditHealthResponse | null>(null);
-  const [calibrationReport, setCalibrationReport] = useState<CalibrationReportResponse | null>(
-    null,
-  );
-  const [summary, setSummary] = useState<SummaryResponse | null>(null);
-  const [events, setEvents] = useState<EventsResponse | null>(null);
-  const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
-  const [artifact, setArtifact] = useState<ArtifactResponse | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [tab, setTab] = useState<"events" | "evidence">("events");
   const [busy, setBusy] = useState<Partial<Record<Channel, boolean>>>({});
   const [problems, setProblems] = useState<Partial<Record<Channel, Problem>>>({});
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
@@ -167,23 +82,8 @@ export default function LegacyHost({
     lifetime.current.abort();
     lifetime.current = new AbortController();
     viewGeneration.current += 1;
-    setSummary(null);
-    setModel(null);
-    setAgentRun(null);
-    setModelListPlan(null);
-    setModelList(null);
     setHealth(null);
     setJob(null);
-    setCalibrationReport(null);
-    setLedger(null);
-    setSearchPlan(null);
-    setSearch(null);
-    setCausality(null);
-    setEvents(null);
-    setEvidence(null);
-    setArtifact(null);
-    setSelected(null);
-    setTab("events");
     setProblems({});
     setBusy({});
   }, []);
@@ -195,16 +95,12 @@ export default function LegacyHost({
     () =>
       store.onDisconnect(() => {
         clearResults();
-        setRequestId("");
-        setSearchPreset(null);
+        setJobId("");
         setSessionNotice(null);
       }),
     [store, clearResults],
   );
   const disconnect = session.disconnect;
-
-  const pendingPreset = useRef<SearchPreset | null>(null);
-  const navigate = useCallback((path: string, completed = false) => go(path, { completed }), [go]);
 
   // Leaving the page invalidates every in-flight response before another view can render.
   const previousPath = useRef(pathname);
@@ -213,54 +109,13 @@ export default function LegacyHost({
     if (before === pathname) return;
     previousPath.current = pathname;
     clearResults();
-    setRequestId("");
-    const preset = pendingPreset.current;
-    pendingPreset.current = null;
-    if (preset && routeQueryKind(pathname) === "search") {
-      setSearchPreset(preset);
-      setSearchPresetVersion((version) => version + 1);
-    } else {
-      setSearchPreset(null);
-    }
+    setJobId("");
   }, [pathname, clearResults]);
 
-  // A search requested from outside (the command palette) is applied once the session is live.
-  useEffect(() => {
-    if (!searchIntent || !connected) return;
-    prepareSearchHistory(searchIntent.preset);
-    onSearchIntentConsumed();
-  }, [searchIntent, connected]);
   useEffect(() => {
     const target = routeTarget(pathname, queryKind);
-    if (target) setRequestId(target);
+    if (target) setJobId(target);
   }, [pathname, queryKind]);
-
-  useEffect(() => {
-    if (!connected) return;
-    const target = routeTarget(pathname, queryKind);
-    if (!target) return;
-    if (queryKind === "request") loadRequest(target);
-    else if (queryKind === "model")
-      void run(
-        "query",
-        (api, signal) => api.modelCall(target, signal),
-        (response) => setModel(response),
-      );
-    else if (queryKind === "agent")
-      void run(
-        "query",
-        (api, signal) => api.agentRun(target, signal),
-        (response) => setAgentRun(response),
-      );
-    else if (queryKind === "grant")
-      void run(
-        "query",
-        (api, signal) => api.grant(target, signal),
-        (response) => setLedger(response),
-      );
-    else if (queryKind === "binding") loadBinding(target);
-    else if (queryKind === "calibration-report") loadCalibrationReport(target);
-  }, [connected, pathname, queryKind]);
 
   // Every response belongs to a view generation, a session epoch and one authenticated scope.
   // Abort alone cannot stop already-resolved promises from repainting old data.
@@ -320,106 +175,15 @@ export default function LegacyHost({
     }
   }
 
-  function clearArtifact() {
-    operations.current.artifact += 1;
-    setArtifact(null);
-    setBusy((value) => ({ ...value, artifact: false }));
-    setProblems((value) => ({ ...value, artifact: undefined }));
-  }
-  function loadEvents(target: string, cursor?: string) {
-    setEvents(null);
-    setSelected(null);
-    clearArtifact();
-    void run(
-      "events",
-      (api, signal) => api.events(target, cursor, signal),
-      (response) => {
-        setEvents(response);
-        setSelected(response.events.at(-1)?.event_id ?? null);
-      },
-    );
-  }
-  function query(event: FormEvent) {
+  function queryJob(event: FormEvent) {
     event.preventDefault();
-    if (queryKind === "search" || queryKind === "model-list" || queryKind === "audit-health")
-      return;
     clearResults();
-    const target = requestId.trim();
-    setRequestId(target);
-    if (queryKind === "model") {
-      void run(
-        "query",
-        (api, signal) => api.modelCall(target, signal),
-        (response) => setModel(response),
-      );
-      return;
-    }
-    if (queryKind === "jobs") {
-      void run(
-        "query",
-        (api, signal) => api.job(target, signal),
-        (response) => setJob(response),
-      );
-      return;
-    }
-    if (queryKind === "agent") {
-      void run(
-        "query",
-        (api, signal) => api.agentRun(target, signal),
-        (response) => setAgentRun(response),
-      );
-      return;
-    }
-    if (queryKind === "calibration-report") {
-      void run(
-        "query",
-        (api, signal) => api.calibrationReport(target, signal),
-        (response) => setCalibrationReport(response),
-      );
-      return;
-    }
-    if (queryKind === "grant") {
-      void run(
-        "query",
-        (api, signal) => api.grant(target, signal),
-        (response) => setLedger(response),
-      );
-      return;
-    }
-    if (queryKind === "binding") {
-      loadBinding(target);
-      return;
-    }
-    loadRequest(target);
-  }
-  function loadBinding(target: string) {
+    const target = jobId.trim();
+    setJobId(target);
     void run(
       "query",
-      (api, signal) => api.binding(target, signal),
-      (response) => setLedger(response),
-    );
-  }
-  function loadModelCalls(value: unknown, cursor?: string) {
-    let plan: ModelCallListPlan;
-    try {
-      plan = validateModelCallListPlan(value);
-    } catch {
-      clearResults();
-      void run(
-        "query",
-        (api, signal) => api.modelCalls(value, cursor, signal),
-        () => {},
-      );
-      return;
-    }
-    clearResults();
-    void run(
-      "query",
-      (api, signal) => api.modelCalls(plan, cursor, signal),
-      (response) => {
-        setModelListPlan(plan);
-        setModelList(response);
-      },
+      (api, signal) => api.job(target, signal),
+      (response) => setJob(response),
     );
   }
   function loadHealth() {
@@ -429,173 +193,6 @@ export default function LegacyHost({
       (response) => setHealth(response),
     );
   }
-  function loadCalibrationReport(target = requestId.trim()) {
-    clearResults();
-    setRequestId(target);
-    void run(
-      "query",
-      (api, signal) => api.calibrationReport(target, signal),
-      (response) => setCalibrationReport(response),
-    );
-  }
-  function openTarget(kind: "request" | "binding" | "model" | "agent", id: string) {
-    clearResults();
-    setSearchPreset(null);
-    const route =
-      kind === "request"
-        ? `/investigation/requests/${id}`
-        : kind === "model"
-          ? `/investigation/models/${id}`
-          : kind === "agent"
-            ? `/investigation/agents/${id}`
-            : `/investigation/bindings/${id}`;
-    navigate(route);
-  }
-  function prepareSearchHistory(preset: SearchPreset) {
-    clearResults();
-    if (routeQueryKind(pathname) === "search") {
-      setSearchPreset(preset);
-      setSearchPresetVersion((version) => version + 1);
-      setRequestId("");
-      return;
-    }
-    pendingPreset.current = preset;
-    navigate("/investigation/search");
-  }
-  function loadRequest(target: string) {
-    void run(
-      "query",
-      (api, signal) => api.summary(target, signal),
-      (response) => {
-        setSummary(response);
-        loadEvents(target);
-      },
-    );
-  }
-  function searchEvents(value: unknown, cursor?: string) {
-    clearResults();
-    void run(
-      "query",
-      (api, signal) => {
-        const plan = validateSearchPlan(value);
-        setSearchPlan(plan);
-        return api.search(plan, cursor, signal);
-      },
-      (response) => {
-        setSearch(response);
-        setSelected(response.events[0]?.event_id ?? null);
-      },
-    );
-  }
-  function loadCausality(value: unknown) {
-    setCausality(null);
-    void run(
-      "query",
-      (api, signal) => {
-        const plan = validateCausalityPlan(value);
-        return api.causality(plan, signal);
-      },
-      (response) => setCausality(response),
-    );
-  }
-  function invalidateCausality() {
-    operations.current.query += 1;
-    setCausality(null);
-    setBusy((value) => ({ ...value, query: false }));
-    setProblems((value) => ({ ...value, query: undefined }));
-  }
-  function loadEvidence(cursor?: string) {
-    if (!summary) return;
-    setEvidence(null);
-    clearArtifact();
-    void run(
-      "evidence",
-      (api, signal) => api.evidence(summary.source_request_id, cursor, signal),
-      (response) => setEvidence(response),
-    );
-  }
-  function openArtifact(id: string) {
-    setArtifact(null);
-    void run(
-      "artifact",
-      (api, signal) => api.artifact(id, signal),
-      (response) => setArtifact(response),
-    );
-  }
-  function switchTab(next: "events" | "evidence") {
-    clearArtifact();
-    setTab(next);
-    if (next === "evidence" && !evidence && !busy.evidence) loadEvidence();
-  }
-  function tabKey(event: KeyboardEvent<HTMLDivElement>) {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const next =
-      event.key === "Home"
-        ? "events"
-        : event.key === "End"
-          ? "evidence"
-          : tab === "events"
-            ? "evidence"
-            : "events";
-    switchTab(next);
-    document.getElementById(`${next}-tab`)?.focus();
-  }
-  const event = (search?.events ?? events?.events)?.find((value) => value.event_id === selected);
-  const relatedEvents = search?.events ?? events?.events ?? (event ? [event] : []);
-  const eventDetails = (
-    <aside className="panel detail-panel" aria-live="polite">
-      <div className="panel-heading">
-        <h2>{artifact || busy.artifact || problems.artifact ? "证据详情" : "事件详情"}</h2>
-        {(artifact || problems.artifact || busy.artifact) && (
-          <button className="text-button" onClick={clearArtifact}>
-            返回事件
-          </button>
-        )}
-      </div>
-      <Failure problem={problems.artifact ?? null} />
-      {busy.artifact ? (
-        <p className="empty" role="status">
-          正在读取证据元数据…
-        </p>
-      ) : artifact ? (
-        <ArtifactDetail response={artifact} />
-      ) : (
-        !problems.artifact &&
-        (event ? (
-          <EventDetail
-            event={event}
-            relatedEvents={relatedEvents}
-            onOpen={openArtifact}
-            onRequest={(id) => openTarget("request", id)}
-            onModelCall={(id) => openTarget("model", id)}
-            onPreviousEvent={(id) => prepareSearchHistory({ kind: "event_id", value: id })}
-            onFollowEvent={(id) => prepareSearchHistory({ kind: "caused_by_event_id", value: id })}
-            onCausalEvent={(id) => {
-              clearArtifact();
-              invalidateCausality();
-              if (relatedEvents.some((item) => item.event_id === id)) {
-                setSelected(id);
-              } else {
-                prepareSearchHistory({ kind: "event_id", value: id });
-              }
-            }}
-            onTraceId={(traceId) => prepareSearchHistory({ kind: "trace_id", value: traceId })}
-            causality={causality}
-            causalityBusy={Boolean(busy.query)}
-            causalityProblem={problems.query ?? null}
-            onCausalityEdit={() => {
-              invalidateCausality();
-            }}
-            onCausalitySubmit={loadCausality}
-          />
-        ) : (
-          <p className="empty">选择一条事件或证据查看详情。</p>
-        ))
-      )}
-    </aside>
-  );
-
   // While connected, in-session notices are local; once the session ended, why it ended.
   const notice = connected ? sessionNotice : (sessionNotice ?? session.state.notice);
 
@@ -638,28 +235,24 @@ export default function LegacyHost({
             )}
           </section>
         )}
-        {["request", "model", "agent", "calibration-report", "grant", "binding", "jobs"].includes(
-          queryKind,
-        ) && (
-          <form className="panel query-form" onSubmit={query}>
-            <label htmlFor="request-id">{queryLabels[queryKind as keyof typeof queryLabels]}</label>
+        {queryKind === "jobs" && (
+          <form className="panel query-form" onSubmit={queryJob}>
+            <label htmlFor="job-id">任务 ID</label>
             <input
-              id="request-id"
+              id="job-id"
               className="mono"
-              placeholder={`${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_…`}
-              value={requestId}
+              placeholder="job_…"
+              value={jobId}
               onChange={(e) => {
                 clearResults();
-                setRequestId(e.target.value);
+                setJobId(e.target.value);
               }}
               autoComplete="off"
               spellCheck={false}
-              maxLength={
-                (queryPrefixes[queryKind as keyof typeof queryPrefixes] ?? "req").length + 37
-              }
+              maxLength={40}
               required
-              pattern={`${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`}
-              title={`请输入规范的 ${queryPrefixes[queryKind as keyof typeof queryPrefixes]}_ 前缀 UUIDv7`}
+              pattern="job_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+              title="请输入规范的 job_ 前缀 UUIDv7"
             />
             <button type="submit" disabled={busy.query}>
               {busy.query ? "查询中…" : "查询"}
@@ -681,256 +274,16 @@ export default function LegacyHost({
               />
             </Deferred>
           )}
-        {queryKind === "search" ? (
-          <Deferred>
-            <SearchPanel
-              key={searchPresetVersion}
-              response={search}
-              initialFilter={searchPreset}
-              plan={searchPlan}
-              busy={Boolean(busy.query)}
-              selected={selected}
-              details={eventDetails}
-              onEdit={clearResults}
-              onSubmit={searchEvents}
-              onNext={() => {
-                if (searchPlan && search?.next_cursor) searchEvents(searchPlan, search.next_cursor);
-              }}
-              onSelect={(id) => {
-                clearArtifact();
-                invalidateCausality();
-                setSelected(id);
-              }}
-            />
-          </Deferred>
-        ) : queryKind === "model-list" ? (
-          <ModelCallListPanel
-            response={modelList}
-            plan={modelListPlan}
-            busy={Boolean(busy.query)}
-            onEdit={clearResults}
-            onSubmit={(value) => loadModelCalls(value)}
-            onNext={() => {
-              if (modelListPlan && modelList?.next_cursor)
-                loadModelCalls(modelListPlan, modelList.next_cursor);
-            }}
-            onOpen={(id) => openTarget("model", id)}
-          />
-        ) : queryKind === "audit-health" ? (
-          <AuditHealthPanel response={health} busy={Boolean(busy.query)} onRefresh={loadHealth} />
-        ) : queryKind === "calibration-report" ? (
-          <CalibrationReportPanel
-            response={calibrationReport}
-            busy={Boolean(busy.query)}
-            onRefresh={() => loadCalibrationReport()}
-            onHistory={(reportId) => {
-              prepareSearchHistory({
-                kind: "calibration_report_id",
-                value: reportId,
-              });
-            }}
-          />
-        ) : ledger ? (
-          <Deferred>
-            <LedgerPanel
-              response={ledger}
-              onBinding={(id) => openTarget("binding", id)}
-              onRequest={(id) => openTarget("request", id)}
-              onHistory={(preset) => {
-                prepareSearchHistory(preset);
-              }}
-            />
-          </Deferred>
-        ) : model ? (
-          <>
-            <ModelCallOverview
-              response={model}
-              onOpen={openArtifact}
-              onHistory={(modelCallId) => {
-                prepareSearchHistory({
-                  kind: "model_call_id",
-                  value: modelCallId,
-                });
-              }}
-              onPreviousEvent={(id) => prepareSearchHistory({ kind: "event_id", value: id })}
-              onFollowEvent={(id) =>
-                prepareSearchHistory({ kind: "caused_by_event_id", value: id })
-              }
-            />
-            {(artifact || busy.artifact || problems.artifact) && (
-              <section className="panel detail-panel" aria-label="模型证据详情" aria-live="polite">
-                <div className="panel-heading">
-                  <h2>证据详情</h2>
-                  <button className="text-button" onClick={clearArtifact}>
-                    关闭详情
-                  </button>
-                </div>
-                <Failure problem={problems.artifact ?? null} />
-                {busy.artifact ? (
-                  <p className="empty" role="status">
-                    正在读取证据元数据…
-                  </p>
-                ) : (
-                  artifact && <ArtifactDetail response={artifact} />
-                )}
-              </section>
-            )}
-          </>
-        ) : agentRun ? (
-          <>
-            <AgentRunOverview
-              response={agentRun}
-              onOpen={openArtifact}
-              onRequest={(id) => openTarget("request", id)}
-              onHistory={(agentRunId) => {
-                prepareSearchHistory({
-                  kind: "agent_run_id",
-                  value: agentRunId,
-                });
-              }}
-            />
-            {(artifact || busy.artifact || problems.artifact) && (
-              <section
-                className="panel detail-panel"
-                aria-label="Agent 证据详情"
-                aria-live="polite"
-              >
-                <div className="panel-heading">
-                  <h2>证据详情</h2>
-                  <button className="text-button" onClick={clearArtifact}>
-                    关闭详情
-                  </button>
-                </div>
-                <Failure problem={problems.artifact ?? null} />
-                {busy.artifact ? (
-                  <p className="empty" role="status">
-                    正在读取证据元数据…
-                  </p>
-                ) : (
-                  artifact && <ArtifactDetail response={artifact} />
-                )}
-              </section>
-            )}
-          </>
-        ) : summary ? (
-          <>
-            <WatermarkNotice summary={summary} events={events} />
-            <RequestOverview response={summary} />
-            <div className="tabs" role="tablist" aria-label="调查内容" onKeyDown={tabKey}>
-              <button
-                id="events-tab"
-                role="tab"
-                tabIndex={tab === "events" ? 0 : -1}
-                aria-selected={tab === "events"}
-                aria-controls="investigation-panel"
-                onClick={() => switchTab("events")}
-              >
-                事件时间线
-              </button>
-              <button
-                id="evidence-tab"
-                role="tab"
-                tabIndex={tab === "evidence" ? 0 : -1}
-                aria-selected={tab === "evidence"}
-                aria-controls="investigation-panel"
-                onClick={() => switchTab("evidence")}
-              >
-                证据引用
-              </button>
-            </div>
-            <div className="investigation-grid">
-              <section
-                className="panel"
-                id="investigation-panel"
-                role="tabpanel"
-                aria-labelledby={`${tab}-tab`}
-                aria-busy={Boolean(busy[tab])}
-              >
-                <div className="panel-heading">
-                  <h2>{tab === "events" ? "事件时间线" : "证据引用"}</h2>
-                  <span className="muted">
-                    本页{" "}
-                    {tab === "events"
-                      ? (events?.events.length ?? 0)
-                      : (evidence?.artifacts.length ?? 0)}{" "}
-                    条
-                  </span>
-                </div>
-                <Failure problem={problems[tab] ?? null} />
-                {problems[tab] ? null : busy[tab] ? (
-                  <p className="empty" role="status">
-                    正在读取{tab === "events" ? "事件" : "证据目录"}…
-                  </p>
-                ) : tab === "events" ? (
-                  <EventTable
-                    events={events?.events ?? []}
-                    selected={selected}
-                    onSelect={(id) => {
-                      clearArtifact();
-                      invalidateCausality();
-                      setSelected(id);
-                    }}
-                  />
-                ) : (
-                  <EvidenceTable artifacts={evidence?.artifacts ?? []} onOpen={openArtifact} />
-                )}
-                <div className="pagination">
-                  <button
-                    className="outline"
-                    disabled={
-                      Boolean(busy[tab]) ||
-                      !(tab === "events" ? events?.next_cursor : evidence?.next_cursor)
-                    }
-                    onClick={() => {
-                      if (tab === "events" && events?.next_cursor)
-                        loadEvents(summary.source_request_id, events.next_cursor);
-                      if (tab === "evidence" && evidence?.next_cursor)
-                        loadEvidence(evidence.next_cursor);
-                    }}
-                  >
-                    下一页
-                  </button>
-                  <span className="muted">
-                    {tab === "events" ? "按事件序号分页" : "按目录记录分页"}
-                  </span>
-                  {problems[tab] && (
-                    <button
-                      className="text-button"
-                      onClick={() =>
-                        tab === "events" ? loadEvents(summary.source_request_id) : loadEvidence()
-                      }
-                    >
-                      重新加载首页
-                    </button>
-                  )}
-                </div>
-              </section>
-              {eventDetails}
-            </div>
-          </>
+        {queryKind === "audit-health" ? (
+          <AuditHealthPanel response={health} busy={Boolean(busy.health)} onRefresh={loadHealth} />
         ) : (
-          queryKind !== "api-keys" &&
+          queryKind === "jobs" &&
+          !job &&
           !busy.query &&
           !problems.query && (
             <section className="panel empty-state">
-              <h2>
-                {queryKind === "request"
-                  ? "从一个请求开始"
-                  : queryKind === "model"
-                    ? "查询模型调用"
-                    : queryKind === "agent"
-                      ? "查询 Agent 运行"
-                      : "查询账本记录"}
-              </h2>
-              <p className="muted">
-                {queryKind === "request"
-                  ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
-                  : queryKind === "model"
-                    ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
-                    : queryKind === "agent"
-                      ? "输入 Agent 运行 ID，读取脱敏生命周期与固定事件引用。"
-                      : `输入${queryLabels[queryKind as keyof typeof queryLabels] ?? "目标 ID"}，读取当前状态、代际与期限。`}
-              </p>
+              <h2>查询后台任务</h2>
+              <p className="muted">输入任务 ID，读取后台任务的当前状态与原因码。</p>
             </section>
           )
         )}

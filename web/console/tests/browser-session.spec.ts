@@ -4,23 +4,12 @@ import { REQUEST_ID } from "./fixtures";
 // approvals replace the four evidence pages (案件工作台, 证据访问, 证据保留, 调查导出): 案件工作台
 // also serves the hold role, 审批中心 serves the evidence roles and the policy approver.
 const roleLinks: Record<string, string[]> = {
-  observer: [
-    "概览",
-    "站点状态",
-    "请求调查",
-    "资格与身份账本",
-    "身份绑定",
-    "模型调用列表",
-    "模型调用详情",
-    "Agent 运行",
-    "权限中心",
-  ],
+  observer: ["概览", "站点状态", "请求调查", "身份与资格", "模型调用", "Agent 运行", "权限中心"],
   investigator: [
     "概览",
     "请求调查",
     "结构化检索",
-    "资格与身份账本",
-    "身份绑定",
+    "身份与资格",
     "案件工作台",
     "审批中心",
     "运行状态",

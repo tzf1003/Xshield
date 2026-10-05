@@ -1,0 +1,49 @@
+/* Identity and grants: lookup box, ledger snapshot and its two records. Tokens only. */
+
+.xs-identity .ant-tabs-nav {
+  margin-bottom: 16px;
+}
+
+.xs-ledger {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.xs-lookup {
+  width: min(100%, 560px);
+}
+
+.xs-ledger-result {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.xs-ledger-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.xs-ledger-grid > section {
+  min-width: 0;
+}
+
+.xs-ledger-history {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+.xs-times {
+  display: grid;
+  gap: 2px;
+}
+
+@media (width <= 760px) {
+  .xs-ledger-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

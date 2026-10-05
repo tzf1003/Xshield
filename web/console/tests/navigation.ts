@@ -1,13 +1,13 @@
 import type { Page } from "@playwright/test";
 const links: Record<string, string> = {
   request: "请求调查",
-  model: "模型调用详情",
+  model: "模型调用",
   agent: "Agent 运行",
-  "model-list": "模型调用列表",
+  "model-list": "模型调用",
   "audit-health": "审计发布状态",
   "calibration-report": "校准报告",
-  grant: "资格与身份账本",
-  binding: "身份绑定",
+  grant: "身份与资格",
+  binding: "身份与资格",
   search: "结构化检索",
   case: "案件工作台",
   approvals: "审批中心",

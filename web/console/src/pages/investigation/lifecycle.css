@@ -1,0 +1,61 @@
+/* Lifecycle timeline, the model / agent / calibration detail cards. Tokens only. */
+
+.xs-lifecycle .ant-timeline-item-content {
+  min-width: 0;
+}
+
+.xs-lifecycle .ant-collapse .ant-collapse-item > .ant-collapse-header {
+  flex-wrap: wrap;
+  padding-block: 4px;
+  padding-inline: 0;
+}
+
+.xs-lifecycle .ant-collapse-content-box {
+  padding-inline: 0;
+}
+
+.xs-detail-facts {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.xs-verdicts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.xs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Inside a timeline the card is narrow on a phone: labels and times wrap instead of widening it. */
+.xs-times .xs-when,
+.xs-times .mono {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+@media (width <= 760px) {
+  .xs-lifecycle .ant-descriptions-item-label {
+    white-space: normal;
+  }
+
+  /* The time drops under the title instead of squeezing it into a column of characters. */
+  .xs-lifecycle .ant-collapse .ant-collapse-item > .ant-collapse-header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 8px;
+  }
+
+  .xs-lifecycle .ant-collapse .ant-collapse-item > .ant-collapse-header .ant-collapse-title,
+  .xs-lifecycle .ant-collapse .ant-collapse-item > .ant-collapse-header .ant-collapse-extra {
+    grid-column: 2;
+    margin-inline-start: 0;
+    overflow-wrap: anywhere;
+  }
+}

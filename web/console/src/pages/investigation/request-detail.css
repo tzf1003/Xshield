@@ -1,0 +1,172 @@
+/* Request detail: decision banner, stage tree and the evidence tabs. Tokens only. */
+
+.xs-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.xs-banner-card {
+  display: grid;
+  gap: 10px;
+}
+
+.xs-decision-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.xs-decision-text {
+  margin: 0;
+  color: var(--xs-ink-2);
+}
+
+.xs-fact-tags .ant-tag {
+  margin: 0;
+}
+
+.xs-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.xs-plain-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-plain-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+/* Eight tabs: tighter spacing so they sit on one row at common desktop widths. */
+.xs-tabs-card .ant-tabs-tab {
+  padding-inline: 0;
+}
+
+.xs-tabs-card .ant-tabs-tab + .ant-tabs-tab {
+  margin-inline-start: 16px;
+}
+
+/* ---------- Stage tree ---------- */
+.xs-stages {
+  margin: 0;
+}
+
+.xs-stage {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 8px 10px;
+  color: var(--xs-ink);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--xs-radius-control);
+  font: inherit;
+  cursor: pointer;
+}
+
+.xs-stage:hover {
+  background: var(--xs-surface-subtle);
+}
+
+.xs-stage.is-selected {
+  background: var(--xs-primary-soft);
+  border-color: var(--xs-line-strong);
+}
+
+.xs-stage:focus-visible {
+  outline: 2px solid var(--xs-primary);
+  outline-offset: 1px;
+}
+
+.xs-stage-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.xs-stage-reason {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
+.xs-stage-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+/* ---------- Fact tabs ---------- */
+.xs-stage-facts {
+  display: grid;
+  gap: 12px;
+}
+
+.xs-fact-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+}
+
+.xs-fact-card .xs-card-head {
+  margin: 0;
+}
+
+.xs-fact-card h3 {
+  margin: 0;
+}
+
+.xs-fact-card > .ant-btn {
+  justify-self: start;
+}
+
+.xs-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.xs-facts > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xs-facts dt {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (width <= 1100px) {
+  .xs-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
