@@ -252,6 +252,13 @@ write_dev_env() {
         export XSHIELD_EDGE_APPLY_KEY_HEX="$(generate_hex)"
         printf 'XSHIELD_EDGE_APPLY_KEY_HEX=%q\n' "$XSHIELD_EDGE_APPLY_KEY_HEX" >>"$env_file"
     fi
+    # The edge builds its identity runtime from the bootstrap configuration and needs
+    # a fingerprint key for it; without one, sites delivered by apply that use
+    # protected routes cannot be served.
+    if [[ -z "${XSHIELD_FINGERPRINT_KEY_HEX:-}" ]]; then
+        export XSHIELD_FINGERPRINT_KEY_HEX="$(generate_hex)"
+        printf 'XSHIELD_FINGERPRINT_KEY_HEX=%q\n' "$XSHIELD_FINGERPRINT_KEY_HEX" >>"$env_file"
+    fi
     export XSHIELD_EDGE_APPLY_URL="${XSHIELD_EDGE_APPLY_URL:-http://127.0.0.1:9553/internal/v1/apply}"
     export XSHIELD_EDGE_SNAPSHOT_PATH="${XSHIELD_EDGE_SNAPSHOT_PATH:-$dev_root/edge-snapshot.json}"
     export XSHIELD_EDGE_APPLY_LISTEN="${XSHIELD_EDGE_APPLY_LISTEN:-127.0.0.1:9553}"
@@ -281,6 +288,14 @@ from pathlib import Path
 path = Path(os.environ["BOOTSTRAP_CONFIG"])
 document = json.loads(path.read_text())
 document["audit"]["directory"] = os.environ["VERSIONED_AUDIT_DIR"]
+# A bootstrap file written before the edge could serve protected sites delivered
+# by apply has no identity store and a public placeholder route; bring it up to
+# the example's shape (the placeholder is never served: no business route exists
+# until a signed snapshot arrives).
+document.setdefault("identity_store", {"max_connections": 4, "acquire_timeout_ms": 2000})
+for operation in document.get("operations", []):
+    if operation.get("operation_id") == "bootstrap.reject":
+        operation["admission"] = "AUTHENTICATED_ROOT"
 path.write_text(json.dumps(document, indent=2) + "\n")
 PY
     fi
