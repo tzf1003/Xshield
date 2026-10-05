@@ -58,8 +58,8 @@
 }
 
 .xs-decision-code {
+  /* Full colour: any transparency drops the code below 4.5:1 on the soft tone background. */
   font-weight: 500;
-  opacity: 0.85;
 }
 
 /* ---------- Reason code ---------- */

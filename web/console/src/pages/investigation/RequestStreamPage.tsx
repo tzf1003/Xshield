@@ -530,7 +530,7 @@ function StreamResults({ plan }: { plan: SearchPlan }) {
                       : "当前可见结果已读完"}
               </span>
             </div>
-            <p className="xs-foot">
+            <p className="xs-foot xs-table-foot">
               分页期间的新发布或到期可能改变后续可见记录；游标不是冻结快照。
             </p>
           </>

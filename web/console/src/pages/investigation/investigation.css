@@ -65,6 +65,21 @@
   font-size: 12px;
 }
 
+.xs-page .ant-descriptions-item-label {
+  white-space: nowrap;
+}
+
+.xs-sub {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 /* ---------- Toolbars ---------- */
 .xs-toolbar {
   display: grid;
@@ -167,7 +182,7 @@
   flex-basis: 100%;
 }
 
-.xs-card > .xs-foot {
+.xs-table-foot {
   padding: 4px 20px 14px;
 }
 

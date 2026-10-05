@@ -117,6 +117,10 @@ export function createAppRouteTree(components: RouteComponents) {
       ),
     }),
     page("request", "investigation/requests/$requestId", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/RequestDetailPage"),
+        "RequestDetailPage",
+      ),
       params: idParams("requestId", requestPattern),
     }),
     page("model-list", "investigation/models"),

@@ -12,13 +12,20 @@ type Props = {
   variant?: "stacked" | "inline" | "full";
   /** Keep the copy control out of the tab order (dense tables). */
   quietCopy?: boolean;
+  /** Omit the copy control, for example inside a button where nesting a button is invalid. */
+  copyable?: boolean;
 };
 
 /**
  * A reason code in words, with the raw code kept in monospace next to a copy button. A code the
  * dictionary does not know is shown as received and marked as not described.
  */
-export function ReasonCode({ code, variant = "stacked", quietCopy = false }: Props) {
+export function ReasonCode({
+  code,
+  variant = "stacked",
+  quietCopy = false,
+  copyable = true,
+}: Props) {
   const reason = describeReason(code);
   const className = `xs-reason xs-reason--${reason.tone}${variant === "inline" ? " xs-reason--inline" : ""}`;
   if (reason.code === "") {
@@ -30,7 +37,7 @@ export function ReasonCode({ code, variant = "stacked", quietCopy = false }: Pro
   const raw = (
     <span className="xs-reason-code">
       <code className="mono">{reason.code}</code>
-      <CopyButton value={reason.code} tabbable={!quietCopy} />
+      {copyable ? <CopyButton value={reason.code} tabbable={!quietCopy} /> : null}
     </span>
   );
   if (variant === "full") {

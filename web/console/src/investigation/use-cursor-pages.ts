@@ -1,5 +1,5 @@
 import { useQueries, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ControlClient } from "../api.ts";
 import { guardedQuery, guardedQueryKey } from "../security/guarded-query.ts";
 import { MANUAL_REFRESH } from "../security/query-client.ts";
@@ -32,6 +32,12 @@ type Options<T> = {
   fetchPage: (client: ControlClient, cursor: string | undefined, signal: AbortSignal) => Promise<T>;
   enabled?: boolean;
   maxPages?: number;
+  /**
+   * Drop the loaded pages when the caller unmounts, so the next mount reads the server again
+   * instead of reusing the short-lived cache. For dialogs that must show the current state, such as
+   * the cases an operator may just have created on another page.
+   */
+  discardOnUnmount?: boolean;
 };
 
 /**
@@ -46,11 +52,23 @@ export function useCursorPages<T extends CursorPage>({
   fetchPage,
   enabled = true,
   maxPages = 20,
+  discardOnUnmount = false,
 }: Options<T>): CursorPages<T> {
   const { runtime } = useSession();
   const queryClient = useQueryClient();
   const [cursors, setCursors] = useState<readonly (string | undefined)[]>([undefined]);
   const [generation, setGeneration] = useState(0);
+  const keyText = JSON.stringify(key);
+
+  useEffect(() => {
+    if (!discardOnUnmount) return undefined;
+    return () => {
+      const { epoch } = runtime.store.getState();
+      queryClient.removeQueries({
+        queryKey: guardedQueryKey(epoch, JSON.parse(keyText) as readonly unknown[]),
+      });
+    };
+  }, [discardOnUnmount, keyText, queryClient, runtime]);
 
   const results = useQueries({
     queries: cursors.map((cursor) =>

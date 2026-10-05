@@ -97,6 +97,20 @@ for (const scheme of ["light", "dark"] as const) {
       await expect(page.getByRole("tab", { name: "事件时间线" })).toBeVisible();
       await expect(page.getByText("REQUEST_ACCEPTED", { exact: true })).toBeVisible();
       expect(await serious(page)).toEqual([]);
+      // The event drawer with its causality section, and the evidence tab.
+      await page
+        .getByRole("button", { name: /^查看事件 / })
+        .first()
+        .click();
+      const drawer = page.getByRole("dialog", { name: "事件详情" });
+      await expect(drawer.getByRole("button", { name: "查看因果", exact: true })).toBeVisible();
+      await drawer.getByText("更多事件字段", { exact: true }).click();
+      expect(await serious(page)).toEqual([]);
+      await page.keyboard.press("Escape");
+      await expect(drawer).toHaveCount(0);
+      await page.getByRole("tab", { name: "输入与输出" }).click();
+      await expect(page.getByRole("tabpanel", { name: "输入与输出" })).toContainText("已脱敏");
+      expect(await serious(page)).toEqual([]);
     });
 
     test("request stream with data", async ({ page }) => {

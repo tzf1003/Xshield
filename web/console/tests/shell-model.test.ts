@@ -173,7 +173,9 @@ test("page titles, leads and breadcrumbs", () => {
   assert.deepEqual(breadcrumbs("/sites/new/network", groups)[1], { label: "新建站点" });
   assert.equal(legacyKinds.has("overview"), false);
   assert.equal(legacyKinds.has("session"), false);
-  assert.equal(legacyKinds.has("request"), true);
+  // Routed pages render their own content; the legacy host still renders the rest.
+  assert.equal(legacyKinds.has("request"), false);
+  assert.equal(legacyKinds.has("case"), true);
 });
 
 test("IDs are recognised by prefix and exact canonical shape", () => {

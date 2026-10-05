@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { type Call, mockControl, paint, requestSettled } from "./control-mock";
+import { abandoned, type Call, mockControl, paint, requestSettled } from "./control-mock";
 import { errorFixture, REQUEST_ID } from "./fixtures";
 import { streamFixture, streamRequestId } from "./investigation-fixtures";
 import { openView } from "./navigation";
@@ -308,7 +308,13 @@ test("a superseded plan's late reply never reaches the table", async ({ page }) 
   await paint(page);
   // The "all" reply carried 放行 rows; none of them may appear under the 拒绝 plan.
   await expect(rows(page).getByText("放行", { exact: true })).toHaveCount(0);
-  expect(searches(calls)).toHaveLength(2);
+  // Both plans were sent: the superseded one was abandoned in flight, only the 拒绝 plan answered.
+  await expect.poll(() => searches(abandoned(calls)).length).toBe(1);
+  expect(body(searches(abandoned(calls))[0]).filters).toEqual([
+    { kind: "text", field: "event_type", value: "request.completed" },
+  ]);
+  expect(searches(calls)).toHaveLength(1);
+  expect(body(searches(calls)[0]).filters).toContainEqual({ kind: "outcome", value: "DENY" });
 });
 
 test("failures use the safe message, show the code and request id, and wait for an explicit retry", async ({

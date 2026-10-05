@@ -303,7 +303,6 @@ export function pageMeta(pathname: string): PageMeta {
 
 /** Kinds whose content is still rendered by the legacy host rather than a routed page. */
 export const legacyKinds: ReadonlySet<QueryKind> = new Set<QueryKind>([
-  "request",
   "model",
   "agent",
   "model-list",

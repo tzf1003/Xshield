@@ -1,5 +1,5 @@
 import { useBlocker } from "@tanstack/react-router";
-import type { FormEvent, KeyboardEvent } from "react";
+import type { FormEvent } from "react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiError, validateModelCallListPlan } from "../api";
 import type {
@@ -8,8 +8,6 @@ import type {
   AuditHealthResponse,
   CalibrationReportResponse,
   ControlClient,
-  EventsResponse,
-  EvidenceResponse,
   JobResponse,
   ModelCallListPlan,
   ModelCallListResponse,
@@ -18,7 +16,6 @@ import type {
   SiteConfigResponse,
   SiteListItem,
   SiteRevision,
-  SummaryResponse,
 } from "../api";
 import { routeQueryKind, routeTarget, siteRoute } from "../admin-routes";
 import type { BindingResponse, GrantResponse } from "../ledger";
@@ -28,12 +25,8 @@ import {
   AuditHealthPanel,
   CalibrationReportPanel,
   EventDetail,
-  EventTable,
-  EvidenceTable,
   ModelCallListPanel,
   ModelCallOverview,
-  RequestOverview,
-  WatermarkNotice,
 } from "../panels";
 import { validateCausalityPlan, validateSearchPlan } from "../search";
 import type { CausalityResponse, SearchPlan, SearchResponse } from "../search";
@@ -145,6 +138,9 @@ export type LegacyHostProps = {
   onSearchIntentConsumed: () => void;
 };
 
+/** Kinds whose content is a routed page now; the host renders nothing of its own for them. */
+const routedKinds: ReadonlySet<string> = new Set(["request"]);
+
 /**
  * The pre-redesign pages, kept working while they are rebuilt one by one on the routed data
  * layer. The shell renders it once and keeps it mounted so unconfirmed writes survive navigation.
@@ -213,12 +209,8 @@ export default function LegacyHost({
   const [siteList, setSiteList] = useState<SiteListItem[]>([]);
   const [siteListCursor, setSiteListCursor] = useState<string | null>(null);
   const selectedSiteId = currentSite?.siteId ?? "";
-  const [summary, setSummary] = useState<SummaryResponse | null>(null);
-  const [events, setEvents] = useState<EventsResponse | null>(null);
-  const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
   const [artifact, setArtifact] = useState<ArtifactResponse | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const [tab, setTab] = useState<"events" | "evidence">("events");
   const [busy, setBusy] = useState<Partial<Record<Channel, boolean>>>({});
   const [problems, setProblems] = useState<Partial<Record<Channel, Problem>>>({});
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
@@ -227,7 +219,6 @@ export default function LegacyHost({
     lifetime.current.abort();
     lifetime.current = new AbortController();
     viewGeneration.current += 1;
-    setSummary(null);
     setModel(null);
     setAgentRun(null);
     setModelListPlan(null);
@@ -243,11 +234,8 @@ export default function LegacyHost({
     setSearchPlan(null);
     setSearch(null);
     setCausality(null);
-    setEvents(null);
-    setEvidence(null);
     setArtifact(null);
     setSelected(null);
-    setTab("events");
     setProblems({});
     setBusy({});
   }, []);
@@ -330,8 +318,7 @@ export default function LegacyHost({
     if (!connected) return;
     const target = routeTarget(pathname, queryKind);
     if (!target) return;
-    if (queryKind === "request") loadRequest(target);
-    else if (queryKind === "model")
+    if (queryKind === "model")
       void run(
         "query",
         (api, signal) => api.modelCall(target, signal),
@@ -421,19 +408,6 @@ export default function LegacyHost({
     setBusy((value) => ({ ...value, artifact: false }));
     setProblems((value) => ({ ...value, artifact: undefined }));
   }
-  function loadEvents(target: string, cursor?: string) {
-    setEvents(null);
-    setSelected(null);
-    clearArtifact();
-    void run(
-      "events",
-      (api, signal) => api.events(target, cursor, signal),
-      (response) => {
-        setEvents(response);
-        setSelected(response.events.at(-1)?.event_id ?? null);
-      },
-    );
-  }
   function query(event: FormEvent) {
     event.preventDefault();
     if (
@@ -494,7 +468,6 @@ export default function LegacyHost({
       loadBinding(target);
       return;
     }
-    loadRequest(target);
   }
   function loadBinding(target: string) {
     void run(
@@ -631,16 +604,6 @@ export default function LegacyHost({
     pendingPreset.current = preset;
     navigate("/investigation/search");
   }
-  function loadRequest(target: string) {
-    void run(
-      "query",
-      (api, signal) => api.summary(target, signal),
-      (response) => {
-        setSummary(response);
-        loadEvents(target);
-      },
-    );
-  }
   function searchEvents(value: unknown, cursor?: string) {
     clearResults();
     void run(
@@ -673,16 +636,6 @@ export default function LegacyHost({
     setBusy((value) => ({ ...value, query: false }));
     setProblems((value) => ({ ...value, query: undefined }));
   }
-  function loadEvidence(cursor?: string) {
-    if (!summary) return;
-    setEvidence(null);
-    clearArtifact();
-    void run(
-      "evidence",
-      (api, signal) => api.evidence(summary.source_request_id, cursor, signal),
-      (response) => setEvidence(response),
-    );
-  }
   function openArtifact(id: string) {
     setArtifact(null);
     void run(
@@ -691,27 +644,8 @@ export default function LegacyHost({
       (response) => setArtifact(response),
     );
   }
-  function switchTab(next: "events" | "evidence") {
-    clearArtifact();
-    setTab(next);
-    if (next === "evidence" && !evidence && !busy.evidence) loadEvidence();
-  }
-  function tabKey(event: KeyboardEvent<HTMLDivElement>) {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const next =
-      event.key === "Home"
-        ? "events"
-        : event.key === "End"
-          ? "evidence"
-          : tab === "events"
-            ? "evidence"
-            : "events";
-    switchTab(next);
-    document.getElementById(`${next}-tab`)?.focus();
-  }
-  const event = (search?.events ?? events?.events)?.find((value) => value.event_id === selected);
-  const relatedEvents = search?.events ?? events?.events ?? (event ? [event] : []);
+  const event = search?.events?.find((value) => value.event_id === selected);
+  const relatedEvents = search?.events ?? (event ? [event] : []);
   const eventDetails = (
     <aside className="panel detail-panel" aria-live="polite">
       <div className="panel-heading">
@@ -768,8 +702,9 @@ export default function LegacyHost({
   // While connected, in-session notices are local; once the session ended, why it ended.
   const notice = connected ? sessionNotice : (sessionNotice ?? session.state.notice);
 
-  // The request stream (the list at /investigation/requests) is a routed page now.
-  if (pathname === "/investigation/requests") return null;
+  // Routed pages render their own content. The host stays mounted (and hidden by the shell) on
+  // them so that the workbenches below keep their frozen, unconfirmed writes across navigation.
+  const routed = routedKinds.has(queryKind);
 
   return (
     <div className="legacy">
@@ -810,7 +745,7 @@ export default function LegacyHost({
             )}
           </section>
         )}
-        {["request", "model", "agent", "calibration-report", "grant", "binding", "jobs"].includes(
+        {["model", "agent", "calibration-report", "grant", "binding", "jobs"].includes(
           queryKind,
         ) && (
           <form className="panel query-form" onSubmit={query}>
@@ -1204,124 +1139,25 @@ export default function LegacyHost({
               </section>
             )}
           </>
-        ) : summary ? (
-          <>
-            <WatermarkNotice summary={summary} events={events} />
-            <RequestOverview response={summary} />
-            <div className="tabs" role="tablist" aria-label="调查内容" onKeyDown={tabKey}>
-              <button
-                id="events-tab"
-                role="tab"
-                tabIndex={tab === "events" ? 0 : -1}
-                aria-selected={tab === "events"}
-                aria-controls="investigation-panel"
-                onClick={() => switchTab("events")}
-              >
-                事件时间线
-              </button>
-              <button
-                id="evidence-tab"
-                role="tab"
-                tabIndex={tab === "evidence" ? 0 : -1}
-                aria-selected={tab === "evidence"}
-                aria-controls="investigation-panel"
-                onClick={() => switchTab("evidence")}
-              >
-                证据引用
-              </button>
-            </div>
-            <div className="investigation-grid">
-              <section
-                className="panel"
-                id="investigation-panel"
-                role="tabpanel"
-                aria-labelledby={`${tab}-tab`}
-                aria-busy={Boolean(busy[tab])}
-              >
-                <div className="panel-heading">
-                  <h2>{tab === "events" ? "事件时间线" : "证据引用"}</h2>
-                  <span className="muted">
-                    本页{" "}
-                    {tab === "events"
-                      ? (events?.events.length ?? 0)
-                      : (evidence?.artifacts.length ?? 0)}{" "}
-                    条
-                  </span>
-                </div>
-                <Failure problem={problems[tab] ?? null} />
-                {problems[tab] ? null : busy[tab] ? (
-                  <p className="empty" role="status">
-                    正在读取{tab === "events" ? "事件" : "证据目录"}…
-                  </p>
-                ) : tab === "events" ? (
-                  <EventTable
-                    events={events?.events ?? []}
-                    selected={selected}
-                    onSelect={(id) => {
-                      clearArtifact();
-                      invalidateCausality();
-                      setSelected(id);
-                    }}
-                  />
-                ) : (
-                  <EvidenceTable artifacts={evidence?.artifacts ?? []} onOpen={openArtifact} />
-                )}
-                <div className="pagination">
-                  <button
-                    className="outline"
-                    disabled={
-                      Boolean(busy[tab]) ||
-                      !(tab === "events" ? events?.next_cursor : evidence?.next_cursor)
-                    }
-                    onClick={() => {
-                      if (tab === "events" && events?.next_cursor)
-                        loadEvents(summary.source_request_id, events.next_cursor);
-                      if (tab === "evidence" && evidence?.next_cursor)
-                        loadEvidence(evidence.next_cursor);
-                    }}
-                  >
-                    下一页
-                  </button>
-                  <span className="muted">
-                    {tab === "events" ? "按事件序号分页" : "按目录记录分页"}
-                  </span>
-                  {problems[tab] && (
-                    <button
-                      className="text-button"
-                      onClick={() =>
-                        tab === "events" ? loadEvents(summary.source_request_id) : loadEvidence()
-                      }
-                    >
-                      重新加载首页
-                    </button>
-                  )}
-                </div>
-              </section>
-              {eventDetails}
-            </div>
-          </>
         ) : (
           queryKind !== "api-keys" &&
+          !routed &&
           !busy.query &&
           !problems.query && (
             <section className="panel empty-state">
               <h2>
-                {queryKind === "request"
-                  ? "从一个请求开始"
-                  : queryKind === "model"
-                    ? "查询模型调用"
-                    : queryKind === "agent"
-                      ? "查询 Agent 运行"
-                      : "查询账本记录"}
+                {queryKind === "model"
+                  ? "查询模型调用"
+                  : queryKind === "agent"
+                    ? "查询 Agent 运行"
+                    : "查询账本记录"}
               </h2>
               <p className="muted">
-                {queryKind === "request"
-                  ? "输入请求 ID，读取判定摘要、事件时间线与证据目录。"
-                  : queryKind === "model"
-                    ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
-                    : queryKind === "agent"
-                      ? "输入 Agent 运行 ID，读取脱敏生命周期与固定事件引用。"
-                      : `输入${queryLabels[queryKind as keyof typeof queryLabels] ?? "目标 ID"}，读取当前状态、代际与期限。`}
+                {queryKind === "model"
+                  ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
+                  : queryKind === "agent"
+                    ? "输入 Agent 运行 ID，读取脱敏生命周期与固定事件引用。"
+                    : `输入${queryLabels[queryKind as keyof typeof queryLabels] ?? "目标 ID"}，读取当前状态、代际与期限。`}
               </p>
             </section>
           )
