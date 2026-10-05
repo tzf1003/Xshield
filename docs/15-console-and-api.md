@@ -31,7 +31,7 @@ Operations：节点、队列、存储、密钥引用、告警与审计访问。
 - 工作台（`/`）打开时只读取一次 `GET /control/v1/workbench/overview`，再按角色读取“待我处理”的来源：站点清单首页（服务端只允许 SystemAdmin，其他角色得到 403，页面显示为角色提示）以及 SensitiveEvidenceApprover 的原文访问与导出待办。每个来源独立失败、独立重试，之后不轮询、不在聚焦或网络恢复时重读。四个指标（正在服务的站点、待审批修订、应用失败、审计发布）写明来源与观察时间，读不到时显示“—”和原因而不是 0；`completeness` 为 partial/unavailable 时说明已知原因。站点健康表把 edge 与耐久审计屏障标为读取快照时的实时探测（2 秒上限），把源站标为**最近一次持久化的健康观察**（“上次观察 …”，自带时间，可能很旧，`WORKBENCH_UPSTREAM_NEVER_OBSERVED` 显示“从未观察”），逐行提供“刷新健康”（即站点健康读取，服务端审计并写入观察记录）。`WORKBENCH_*` 原因码都有中文标签与说明（`src/ui/operation-reasons.ts`，单测扫描 `workbench.rs`）。“最近被拒绝的请求”只给 Investigator，只在点击后执行一次结构化检索（`event_type=request.completed`、DENY、24 小时、最新 10 条）。快照的 `queues` 与 `recent_activity` 目前恒为空数组，不渲染。
 - 审计发布状态（`/operations/audit`，AuditAdministrator）只在点击时读取 29.5 的发布快照；后台任务（`/operations/jobs`，Investigator）按 `job_` ID 查询，地址 `?job=` 可直接打开，粘贴其他类型的 ID 时由命令面板的分类器说明并给出对应页面；API Key（`/admin/api-keys`）见本章末“控制台如何呈现 API Key”；权限中心（`/access/session`）列出主体、范围、绝对/闲置到期、MFA 再认证剩余时间，以及每个角色“能做什么”和它解锁的页面，不显示任何秘密。
 
-`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049、导出列表索引 0050 与站点审批绑定 0051，现有开发数据卷无需重置。
+`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049、导出列表索引 0050、站点审批绑定 0051 与站点路由来源流程投影 0052，现有开发数据卷无需重置。
 
 站点策略的 `static_asset_max_path_depth` 默认关闭（`0` 或缺省），站点显式设为 1–16 才启用静态资源兜底。兜底会在没有身份和精确 operation 的情况下放行请求，因此匹配很窄：只放行 `GET`；路径深度不超过该值；路径先做一次严格百分号解码，以解码后的文本判定（源站实际路由的就是这个文本）；最后一段必须有真实的点、非空主名，且扩展名属于 `js`、`css`、`ico`、`png`、`jpg`、`jpeg`、`gif`、`svg`、`webp`、`woff`、`woff2`、`ttf`（大小写不敏感），所以 `/api/json`、`/css` 这类无点名称不会被当成文件。`.json` 与 `.map` 不在列表中：API 响应和 source map 常以这些后缀命名，放行等于让任何人把 API 伪装成资源，需要时请配置显式路由。`;`（路径参数，如 `/admin/users;.js`）、反斜杠、`%2F`、`.`/`..`/空路径段、控制字符、`?`、`#`、解码后仍含 `%`（双重编码）、空格和非 ASCII 字节一律拒绝，其余字符限于字母、数字和 `. _ ~ @ + -`；畸形转义不会被猜测。超过深度、不符合上述规则和 API 路径仍按精确 operation 拒绝。兜底只在没有精确 operation 命中时生效，不改变 WAF、限流或审计链路。已存在站点策略中保存的 `5` 是此前默认值的序列化结果，升级后继续生效，直到重新保存策略；开发靶场脚本 `scripts/register_juice_shop.py` 显式设置 `5`，安全靶场和示例配置不依赖该兜底。
 
@@ -220,7 +220,7 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 
 只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
 
-本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0051 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
+本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0052 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
 
 ## 站点发布审批与应用语义（2026-10-04）
 
@@ -231,6 +231,8 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 **审批绑定到所审阅的修订。** `POST /approve` 在持有租户锁和 apply intent 行锁的单个事务内读取 desired revision、配置摘要、apply_id 与该修订的作者，然后：幂等键只在其批准过的 `(revision, digest, apply_id)` 上重放，对其他修订返回 409 `CONTROL_SITE_APPROVAL_REVISION_MISMATCH`；请求带 `X-Xshield-Expected-Config-Digest`（64 位小写十六进制）时，摘要必须等于当前 desired 摘要，否则同样 409；审批人等于该修订作者时返回 403 `CONTROL_SITE_APPROVAL_SELF_REJECTED`（数据库 CHECK 约束再兜底一次）；清除要求的 UPDATE 同时限定 revision 与 apply_id。审批、拒绝、重放和不需要审批（409 `CONTROL_SITE_APPROVAL_NOT_REQUIRED`）都有独立审计终态；批准记录写入追加式 `site_apply_approvals`。未带摘要头的旧客户端仍可调用，但只能批准事务内读到的 desired，建议控制台随审阅页面的 `config_digest` 一并发送该头。
 
 **直接应用保留，但留痕。** 持有明确作用域 `site.config.apply_direct` 的 Agent API Key 仍可对需要审批的 desired revision 调用 `POST /apply`；控制面在同一事务内写入 `approval_kind=direct_apply` 的审批记录（调用主体、修订、配置摘要、apply_id）并清除要求，因此不会留下阻塞其他站点的过期 `requires_approval`。成功与失败的终态审计分别为 `EDGE_DIRECT_APPLY_CONFIRMED` 与 `EDGE_DIRECT_APPLY_NOT_CONFIRMED`。没有该能力的调用者仍得到 `requires_approval=true` 且不发布。
+
+**浏览器来源流程需要独立审批（2026-10-06）。** 路由现在可以携带认证入口（`auth_entry` + `auth_binding`）、登出撤销（`auth_revoke`）、`SENSOR_HTML` 页面构建、`page_actions`、`issued_by` 与 `resource_grant`（契约见 29“站点浏览器来源流程配置契约”）。涉及这些路由的变更（以及带着它们首次上线）在 `ROUTES_CHANGED` 之外还会得到 `AUTH_ENTRY_CHANGED`、`SENSOR_HTML_CHANGED`、`PAGE_ACTIONS_CHANGED`、`RESOURCE_GRANT_CHANGED`；这四个原因决定谁获得身份、哪些界面操作与资源资格存在，只能由独立 `PolicyApprover` 批准。持有 `site.config.apply_direct` 的 Agent 对这样的修订调用 `POST /apply` 时返回 403 `CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED`（DENY 审计，不写审批记录、不发送快照），判断在锁定 apply intent 的事务内基于已存储的原因进行，本版本不认识的原因同样不可豁免；回滚恢复这些路由时同样适用。控制台的审批说明按同一规则复算这四个原因（`web/console/src/sites/model/risk.ts`），差异视图把流程块的变化归入对应原因，同时列在“路由变更”下。控制台目前没有编辑这些块的界面：读取时严格解码每个块，未知成员使读取失败而不是在下次保存时被静默丢弃，编辑其他字段并保存时这些块逐字节保留；校验层为带这些块的路由附加“只能通过 API 编辑”的警告（不阻止保存，目前没有界面位置展示它），路由表格把 `auth_entry` 显示为“认证入口”。编写与展示界面属于后续任务。
 
 **draft 不可路由。** 保存 draft 不会发布；对 draft 站点调用 `POST /apply` 返回 409 `CONTROL_SITE_DRAFT_NOT_APPLICABLE` 并写 DENY 审计；快照不包含 draft，也不会把 draft 标成已应用；draft→active 属于需要审批的上线。
 

@@ -10,11 +10,11 @@
 
 上游地址校验（SSRF 防护）：`upstream_address` 必须是 IP 字面量套接字（`203.0.113.9:80`、`[2001:4860:4860::8888]:443` 之类），控制面从不代操作者解析名称；端口经类型化地址校验，80/443 等默认端口合法，0 被拒绝。保存时与健康探测连接前使用同一个纯函数（`xshield_core::site::upstream`）按解析后的数值分类，而不是检查文本：回环、未指定、RFC 1918 私网、RFC 6598 共享地址、链路本地、唯一本地、组播、保留/基准/文档段，以及云元数据地址（`169.254.169.254`、`168.63.129.16`、`100.100.100.200`、`192.0.0.192`、`fd00:ec2::254`）一律拒绝；IPv4 映射 IPv6（`::ffff:a.b.c.d`）和 NAT64、6to4、Teredo 等内嵌 IPv4 的形式不展开而直接拒绝。拒绝统一返回 400 `CONTROL_SITE_SSRF_BLOCKED` 并写入 DENY 审计，非 IP 字面量返回 `CONTROL_SITE_UPSTREAM_INVALID`。`upstream_server_name` 必须被探测所用的 URL 解析器识别为域名：`127.0.0.1`、`2130706433`、`0x7f.1` 等会被读成 IP 主机的写法同样返回 `CONTROL_SITE_UPSTREAM_INVALID`，因为 HTTP 客户端不对 IP 主机套用解析覆盖，会直接连接该地址。唯一的显式放行是部署环境变量 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1`（`dev.sh` 为本地靶场设置），它只放行 `127.0.0.0/8` 与 `::1`，不放行私网、元数据、映射或转换形式。健康探测对已持久化的行再次校验，并且只连接已验证的套接字：固定到配置端口、不使用环境代理、禁用重定向，`Host` 携带配置的服务名和端口；升级前写入或被直接改库的行因此也不会让探测向内部地址转发请求。
 
-配置校验与 edge 编译一致性：edge 快照是整体替换，任何一个站点配置被 edge 编译器拒绝都会使该租户所有 apply 失败，所以控制面校验必须不比 edge 宽松。`xshield-core` 的 `SiteConfig::validate`（含 `SitePolicyConfig::validate`）是唯一定义，拒绝 edge 编译器会拒绝的一切：路由路径只允许可打印 ASCII（空格、非 ASCII、控制字符、DEL 均拒绝），不得落入 edge 自用的 `/__xshield/` 命名空间；同方法同固定前缀的 `{param}` 路由（不论参数名）、被 `{param}` 路由同方法匹配的固定路径路由（不论声明顺序）、超过 64 条 `{param}` 路由；请求 crypto 仅限 POST/PUT/PATCH 且不用于 UI 来源操作，明文不超过信封一半、消息有效期不超过 3600 秒、标识符只含字母数字和 `_-.`；响应信封须不小于两倍明文加 1024 字节；`SENSOR_HTML` 响应模式因路由无法表达适配器元数据而拒绝；每站点最多一把请求解密密钥和一把响应加密密钥且不得共用；公开 origin 不接受 IPv6 字面量（edge 按主机名路由），开启 sensor 时明文 HTTP 只允许 `localhost` 与 `127.0.0.1`；站点 ID 加 `edge-` 前缀不得超过 128 字节。失败映射为稳定原因码：上游相关 `CONTROL_SITE_UPSTREAM_INVALID`，策略/路由 `CONTROL_SITE_POLICY_INVALID`，站点 ID `CONTROL_SITE_ID_INVALID`，其余 `CONTROL_SITE_CONFIG_REQUEST_INVALID`。控制面生成的 edge 配置同步调整：身份存储按有效路由的实际需要输出（任一路由需要身份或请求 crypto 即输出，而不只看顶层入口模式），匿名会话创建速率随 TTL 缩放以保持在 edge 的容量模型内（TTL 不超过 5940 秒时与此前一致），sensor origin 去除末尾斜杠。
+配置校验与 edge 编译一致性：edge 快照是整体替换，任何一个站点配置被 edge 编译器拒绝都会使该租户所有 apply 失败，所以控制面校验必须不比 edge 宽松。`xshield-core` 的 `SiteConfig::validate`（含 `SitePolicyConfig::validate`）是唯一定义，拒绝 edge 编译器会拒绝的一切：路由路径只允许可打印 ASCII（空格、非 ASCII、控制字符、DEL 均拒绝），不得落入 edge 自用的 `/__xshield/` 命名空间；同方法同固定前缀的 `{param}` 路由（不论参数名）、被 `{param}` 路由同方法匹配的固定路径路由（不论声明顺序）、超过 64 条 `{param}` 路由；请求 crypto 仅限 POST/PUT/PATCH 且不用于 UI 来源操作，明文不超过信封一半、消息有效期不超过 3600 秒、标识符只含字母数字和 `_-.`；响应信封须不小于两倍明文加 1024 字节；`SENSOR_HTML`、认证入口、页面签发与响应资源资格按“站点浏览器来源流程配置契约”一节镜像 edge 规则；每站点最多一把请求解密密钥和一把响应加密密钥且不得共用；公开 origin 不接受 IPv6 字面量（edge 按主机名路由），开启 sensor 时明文 HTTP 只允许 `localhost` 与 `127.0.0.1`；站点 ID 加 `edge-` 前缀不得超过 128 字节。失败映射为稳定原因码：上游相关 `CONTROL_SITE_UPSTREAM_INVALID`，策略/路由 `CONTROL_SITE_POLICY_INVALID`（浏览器来源流程各规则另有专用原因码，见下文契约一节），站点 ID `CONTROL_SITE_ID_INVALID`，其余 `CONTROL_SITE_CONFIG_REQUEST_INVALID`。控制面生成的 edge 配置同步调整：身份存储按有效路由的实际需要输出（任一路由需要身份或请求 crypto 即输出，而不只看顶层入口模式），匿名会话创建速率随 TTL 缩放以保持在 edge 的容量模型内（TTL 不超过 5940 秒时与此前一致），sensor origin 去除末尾斜杠。
 
 edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，控制面只把封闭集合内的原因码原样记为站点 apply 失败的 `reason_code`（`EDGE_APPLY_STALE_REVISION`、`EDGE_APPLY_VALIDATION_FAILED`、`EDGE_APPLY_SCOPE_DENIED`、`EDGE_APPLY_LISTENER_UNAVAILABLE`、`EDGE_APPLY_IDEMPOTENCY_CONFLICT`、`EDGE_APPLY_SIGNATURE_INVALID`，以及页面签发站点的动作描述供给失败 `EDGE_APPLY_DESCRIPTOR_CONFLICT`、`EDGE_APPLY_DESCRIPTOR_UNAVAILABLE`），其余一律为 `EDGE_APPLY_REJECTED`；管理审计终态仍为 `ERROR`/`EDGE_APPLY_NOT_CONFIRMED`。两个描述供给码的 edge 应答体另带出问题的 `site_id`，控制面当前不使用它（只扣住该站点需要先用自己下发的快照核对这个未签名的名字），语义与运维处理见 19 §19.2。控制面仍拒绝 `page_actions` 等页面签发字段，所以这两个码目前只会出现在直接签名下发的快照上。
 
-本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0051，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
+本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0052，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -477,6 +477,34 @@ found=false 的站点配置响应可以包含 requires_approval=null；客户端
 控制台错误字典的契约测试检查后端 CONTROL_SITE_* 失败原因码集合；成功终态单独登记。GET 失败可以人工刷新；写入结果未知时由操作者确认后按原正文和幂等键重试。站点 status/health/revisions 与配置读取使用各自角色规则，前端不会用配置读取代替 Observer 只读接口。
 
 本地 schema manifest 位于 scripts/dev_postgres_schema.sql，由 scripts/generate_dev_postgres_schema.py 在独立临时数据库中按原 SQL 生成。修改迁移文件后必须审查 SQL 及 manifest 的共同变化；不要通过改写 ledger 绕过 checksum。生产升级由部署流程执行加法迁移；界面/API 可回滚，数据库历史不做破坏性回滚。
+
+## 站点浏览器来源流程配置契约（2026-10-06）
+
+控制面现在可以保存、校验、审批并向 edge 投影真实浏览器闭环（05 §5.3.1、20 §20.19）所用的界面操作来源配置；此前这些字段只能写在手工 `XSHIELD_CONFIG` 里。字段全部位于 `policy.routes[]`，都是可选的强类型块，未设置时不出现在存储、读取和摘要计算的 JSON 中（见下文“摘要稳定”）：
+
+| 字段 | 形状 | 投影到 edge | 规则（与 edge 编译器一致） |
+|---|---|---|---|
+| `security_entry: "auth_entry"` | 路由准入 | `admission: AUTH_ENTRY` | 只用于路由；站点顶层 `security_entry` 仍只能是 public / authenticated_root / ui_action_required |
+| `auth_binding` | `{success_status, principal_pointer, authorization_context_pointer, bearer_pointer, credential_ttl_seconds, session_ttl_seconds}` | `response.auth_binding` | 只用于 `auth_entry`；2xx 且不是 204；三个 JSON Pointer 以 `/` 开头、≤ 512 字节、无 ASCII 控制字符、只含 `~0`/`~1` 转义且互不相同；两个期限 1–86400 秒且凭证不长于会话 |
+| `auth_revoke` | `{success_status}` | `response.auth_revoke` | 只用于 `authenticated_root`；2xx 且不是 204–206 |
+| `response_mode: "SENSOR_HTML"` + `sensor_html` | `{adapter_revision, origin_sha256, injection_offset, additional_adapters?}` | 平铺进 `response` | 二者必须同时出现；GET；不能同时有响应加密、资源资格、身份建立或撤销；修订为字母数字与 `_ - .`；摘要为 64 位小写十六进制；注入偏移小于 `max_response_bytes`；附加构建最多 15 个，修订与摘要在全部构建中唯一；站点必须 `sensor_enabled` |
+| `page_actions` | `{mapping_revision, max_active_pages}` | `response.page_actions` | 只用于 `authenticated_root` 的 GET `SENSOR_HTML` 页面根；活动页面 1–1000；每个页面根被 1–16 条 `issued_by` 引用 |
+| `issued_by` | `{page_operation_id, ttl_seconds}` | `operations[].issued_by` | 只用于不绑定资源的 `ui_action_required` 路由；必须指向声明了 `page_actions` 的页面根；期限 1–86400 秒 |
+| `resource_grant` | `{success_status, items_pointer, resource_pointer, action_ref_field, target_operation_id, target_mapping_revision, ttl_seconds, max_items, max_active_grants}` | `response.resource_grant` | 只用于 `authenticated_root` 或 `ui_action_required`；2xx 且不是 204；目标必须存在且是绑定资源的 `ui_action_required` 路由；单次 1–1000 项、活动资格 1–5000、期限 1–86400 秒 |
+
+跨路由规则：一条响应最多一种身份或资格效果；被观察（`OBSERVE`）的请求体不能喂给会加密、建立/撤销身份或签发资格的响应；探针最多下发 64 条收割规则和 64 条身份变化路由；同一 `(source_action, mapping_revision)` 只能有一种含义（页面签发描述与资源目标描述按 edge 的推导方式比较）。最后一条比 edge 更严：edge 只在有页面声明 `page_actions` 时才推导描述，而描述表本身按该二元组唯一，外部供给时出现两种含义同样是错误配置，因此控制面无条件拒绝。另外，路由 `operation_id` 现在使用 edge `OperationId` 的字母表（不含 `:`）；此前核心校验允许 `:`，edge 却拒绝，会让整个租户的快照失败。
+
+拒绝原因各自稳定：`CONTROL_SITE_AUTH_FLOW_INVALID`、`CONTROL_SITE_SENSOR_HTML_INVALID`、`CONTROL_SITE_PAGE_ACTIONS_INVALID`、`CONTROL_SITE_RESOURCE_GRANT_INVALID`、`CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT`（均为 400，写入 DENY 审计，不产生修订）；其余策略错误仍是 `CONTROL_SITE_POLICY_INVALID`。`POST /sites/{id}/validate` 现在返回与写入相同的具体原因码（此前一律为 `CONTROL_SITE_CONFIG_REQUEST_INVALID`）。edge 支持而控制面仍不管理的功能——`share_issue`、`auth_refresh`、`auth_context_switch`、`evidence_capture`、`COMPATIBILITY` 请求加密以及 `SHARE_ENTRY`/`SERVICE_IDENTITY` 准入——被严格类型拒绝，不会被丢弃；当请求体（PUT/POST/PATCH，路由上或网关式嵌套 `response` 中）点名这些功能时，返回 400 `CONTROL_SITE_FEATURE_UNSUPPORTED` 而不是通用的解析失败。识别只在严格解析已经失败之后进行，从不参与接受。
+
+投影：`SiteConfig::gateway_config` 由类型化结构序列化，未设置的可选成员省略而不是写 `null`（edge DTO 对两者一视同仁），序列化失败返回错误而不再替换为 `OBSERVE` 或空对象；apply 无法生成某站点投影时什么也不发送，目标记为 `EDGE_APPLY_PAYLOAD_INVALID`；配置读取接口在无法投影时把 `gateway_config` 返回为 `null`。`validate_for_site` 另以最长租户 ID 计算投影大小，超过 edge 每站点 1 MiB 上限时以 `CONTROL_SITE_POLICY_INVALID` 拒绝。站点配置写入（`POST /sites`、`PUT /sites/{id}/config`、`PATCH /sites/{id}`、`PUT /site-config`）的请求体上限由 16 KiB 提高到 256 KiB，可容纳 256 条带流程块的路由；投影约为请求体的两倍，仍在 edge 上限内。注意整份租户快照仍受 edge apply 接口 8 MiB 上限约束，单租户大量接近上限的站点会使 apply 失败（`EDGE_APPLY_REJECTED`），目前没有单独的预检。
+
+审批：`assess_change_risk` 新增四个原因 `AUTH_ENTRY_CHANGED`、`SENSOR_HTML_CHANGED`、`PAGE_ACTIONS_CHANGED`、`RESOURCE_GRANT_CHANGED`。每个原因比较一组“参与该环节的路由”的完整内容（认证入口及带身份建立/撤销的路由；SENSOR_HTML 页面；页面根与 `issued_by` 路由；带 `resource_grant` 的路由及其目标），与 `ROUTES_CHANGED` 同时出现；站点首次上线时，配置中已有的环节也会列出。基线仍是 active 修订。这四个原因只能由独立 `PolicyApprover` 清除：持有 `site.config.apply_direct` 的调用返回 403 `CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED`，写 DENY 审计，不记录审批、不发送快照；存储在锁定 apply intent 的同一事务中读取已存储的原因再判断，本版本不认识的原因同样不可豁免。
+
+存储：权威副本仍是 `protected_site_configs.policy_json` 与修订的 `config_json`（JSONB，无需改表）。迁移 `0052_m5_site_route_provenance_flow.sql` 只扩展只写投影 `site_routes`：`admission` 的 CHECK 加入 `AUTH_ENTRY`，新增可空 `issued_by jsonb`（对象检查）；`response_config` 改由与 edge 相同的类型化投影生成，并补写此前遗漏的 `resource_type`。没有该迁移时，含认证入口的写入会在同一事务内失败并整体回滚。开发 reconciliation 现在理解“后续迁移重新定义了早期对象”（0052 重写 0044 建立的 CHECK）：一个阶段记录的定义，被同一对象在之后阶段记录的定义满足即视为已达到；只被重新定义的对象在本阶段执行前不算“半成品”。
+
+摘要稳定：新增字段在未设置时不序列化，因此此前保存的配置重新序列化逐字节不变，存储摘要、幂等重放与“内容相同”的比较都不受影响（核心与 PostgreSQL 测试以变更前的配置样本固定这一点）。
+
+edge 侧尚未完成的部分：带 `page_actions` 的快照需要 edge 在 apply 时供给由配置推导的动作描述，该能力在另一项工作中实现；在其合入前，真实 edge 对任何含 `page_actions` 的租户快照返回 422 `EDGE_APPLY_VALIDATION_FAILED`，整个租户的 apply 都会失败，因此在一个租户中启用页面签发前应确认 edge 已具备该能力。gateway 一致性测试把这一拒绝单独识别为“描述供给屏障”，并证明 edge 编译器本身接受该配置、去掉页面签发后整份快照被接受。留给后续任务：描述集合变化时要求新的 `policy_revision` 标签（edge 以修订绑定描述摘要，同一修订下描述改变会被拒绝启动或应用），以及 edge 描述冲突时由控制面单独扣留站点；控制台编写界面也属于后续任务，当前控制台只保证读取、编辑其他字段和保存时这些块原样保留。
 # Agent API Key 端点
 
 | 方法 | 路径 | 用途 |

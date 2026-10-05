@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 4048,
-  "passed_count": 4048,
+  "checks_total": 4051,
+  "passed_count": 4051,
   "acceptance_cases": {
     "total": 78,
     "planned": 18,
@@ -152,6 +152,21 @@
     },
     {
       "name": "json:tests/security-lab/independent_labels.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:tests/site-config/browser-loop.gateway.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:tests/site-config/browser-loop.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:tests/site-config/pre-flow.json",
       "passed": true,
       "detail": ""
     },
