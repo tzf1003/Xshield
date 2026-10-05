@@ -123,7 +123,7 @@ Agent 详情增量：`GET /control/v1/agent-runs/{agent_run_id}` 已交付 Obser
 | 里程碑 | 完成度 | 已有 | 主要缺口 |
 |---|---|---|---|
 | M0 基础契约与骨架 | 完成 | 领域类型、原因码、阶段事件与 Schema、Mock Ports | 无 |
-| M1 身份与有迹可循 | 约 80% | PostgreSQL 身份绑定与代际、资源资格、分享、界面动作准入；页面交付签发首跳动作、edge 由配置供给摘要绑定的动作描述、探针 1.1.0 出示页面与列表引用，真实浏览器闭环回归（20 §20.19） | 控制台建站与 apply 快照无法表达身份绑定、资格、分享、SENSOR_HTML、`page_actions`/`issued_by`；页面签发只来自启动配置 |
+| M1 身份与有迹可循 | 约 80% | PostgreSQL 身份绑定与代际、资源资格、分享、界面动作准入；页面交付签发首跳动作、edge 由配置供给摘要绑定的动作描述（启动、签名 apply 与重启恢复三条路径同一供给屏障，推导在 `xshield_core::edge_descriptors`）、探针 1.1.0 出示页面与列表引用，真实浏览器闭环经签名 apply 下发整套拓扑（20 §20.19） | 控制台与控制面仍不能编写身份绑定、资格、分享、SENSOR_HTML、`page_actions`/`issued_by`（apply 快照已能承载，但只有直接签名的快照使用）；描述冲突或数据库故障会挡住整个租户快照，控制面尚不能只扣住出问题的站点 |
 | M2 双向协议接管 | 约 45% | 一种 AES-256-GCM JSON 封包适配、observe/compatibility 透传、CSP/SRI 感知的探针注入、原生 TLS 与 HTTP/2 监听 | 注入仅支持预先哈希的静态页面；fetch/XHR 钩子只出示动作引用、不做请求封装加密；无 WSS |
 | M3 完整日志后台 | 约 85–90% | 封存 journal、ClickHouse 检索与因果、加密证据库、案件/保留/审批/导出、OIDC + MFA step-up | 仅本地文件系统证据库；无完整正文导出；无远端耐久 journal |
 | M4 模型与调查 | 约 35% | QueryPlan、检索、因果、离线 Jev 评估、校准基础设施 | 模型不在请求路径；实测仅 4 个合成样本；无调查 Agent、自然语言查询、回放 |
@@ -135,4 +135,6 @@ Agent 详情增量：`GET /control/v1/agent-runs/{agent_run_id}` 已交付 Obser
 
 2026-10-05 更新（二）：M3 百分比不变，但需要更正一处表述。“封存 journal → ClickHouse 索引”对真实网关输出此前并不成立：worker 发布器没有 `crypto_decode`、`crypto_encode`、`sensor_html_inject` 三种阶段、`sensor.observation`、`edge.response`/`edge.unknown` 与 `evidence.captured` 的解析器，包含任一事件的 segment 会停在待发布，其后的 segment 随之停滞，本地 journal 的请求查询回退也失败（11 §11.15）。现已修复，网关的 journal 读取测试、带数据库的集成测试和真实浏览器闭环都用发布器自己的解析器逐条断言；尚未在真实 ClickHouse 上做端到端发布回归（本机没有 Docker），这一项仍列为未验证。
 
-接近可试点首版的优先顺序：（1）浏览器来源闭环的控制面部分：页面动作、动作描述与映射的编写 API 和界面，控制面表达身份绑定/资格/分享/HTML 适配并为 apply 快照提供描述供给屏障（探针出示引用与页面签发已完成，见 05 §5.3.1）；（2）生产传输与打包：原生 TLS + HTTP/2 与 PROXY protocol 已完成（19 §19.2），`scripts/package_release.sh` 已能在大容量卷上生成发行 tarball（19 §19.7），剩余镜像与部署清单、KMS、生产迁移工具；（3）在一个真实应用上试点并执行验收用例、实测性能；（4）站点级 observe → enforce 切换和兼容豁免登记；（5）可信的总览与运维：真实 edge/上游/审计健康已接入总览（30 §30.7），剩余拒绝与覆盖统计。在线 Jev、调查 Agent、自然语言查询、回放和持续适配排在首版之后。
+2026-10-06 更新：apply 快照的描述供给屏障已交付。edge 在签名 apply 写 pending 文件之前、以及重启恢复持久化快照、绑定监听端口之前，为每个声明 `page_actions` 的站点执行与启动配置相同的幂等供给；冲突返回 409 `EDGE_APPLY_DESCRIPTOR_CONFLICT`，数据库不可达或没有身份存储返回 503 `EDGE_APPLY_DESCRIPTOR_UNAVAILABLE`，重启时同类失败拒绝启动（05 §5.3.1、19 §19.2）。真实浏览器闭环改为从最小启动配置起步、经签名 apply 下发整套拓扑。M1 百分比不变：控制面仍不能编写这些字段。
+
+接近可试点首版的优先顺序：（1）浏览器来源闭环的控制面部分：页面动作、动作描述与映射的编写 API 和界面，控制面表达身份绑定/资格/分享/HTML 适配，并在描述冲突时只扣住出问题的站点（探针出示引用、页面签发与 apply/重启的描述供给屏障已完成，见 05 §5.3.1）；（2）生产传输与打包：原生 TLS + HTTP/2 与 PROXY protocol 已完成（19 §19.2），`scripts/package_release.sh` 已能在大容量卷上生成发行 tarball（19 §19.7），剩余镜像与部署清单、KMS、生产迁移工具；（3）在一个真实应用上试点并执行验收用例、实测性能；（4）站点级 observe → enforce 切换和兼容豁免登记；（5）可信的总览与运维：真实 edge/上游/审计健康已接入总览（30 §30.7），剩余拒绝与覆盖统计。在线 Jev、调查 Agent、自然语言查询、回放和持续适配排在首版之后。

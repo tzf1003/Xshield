@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 4047,
-  "passed_count": 4047,
+  "checks_total": 4048,
+  "passed_count": 4048,
   "acceptance_cases": {
     "total": 78,
     "planned": 18,
@@ -19977,6 +19977,11 @@
     },
     {
       "name": "link:docs/31-implemented-mechanisms.md:../web/console/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:19-deployment-operations.md",
       "passed": true,
       "detail": ""
     },

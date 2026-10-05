@@ -66,7 +66,7 @@
 
 ### 2. 多站点运营后台与站点配置发布
 
-多站点运营后台已接入 `GET/POST /control/v1/sites`、站点配置、状态/健康、修订、校验、应用、审批、回滚接口。配置写入先落 PostgreSQL，再由控制面通过 loopback HMAC 通道发送完整租户快照；edge 原子确认后才返回 `active`，否则保留旧快照并返回 `pending`/`failed`。策略字段已覆盖路由、身份、加密、WAF、限流、健康检查和 secret reference；公开入口、敏感策略变化和暂停/恢复由 `PolicyApprover` 独立批准，审批人不能批准自己的修订，浏览器审批还要求近期 step-up 重新认证。edge 由监听器监督器在应用前绑定快照所需的全部内部端口，再原子切换路由；`XSHIELD_EDGE_LISTEN_PORTS` 仅用于启动时的 bootstrap 监听集合，新站点端口可在不中断现有请求的情况下动态绑定。设置 `XSHIELD_EDGE_SNAPSHOT_PATH` 后，已确认快照以 HMAC 签名的 pending/active 文件原子持久化，edge 重启前会先验签和校验完整快照；损坏或作用域不符时拒绝启动，避免回退到未确认配置。
+多站点运营后台已接入 `GET/POST /control/v1/sites`、站点配置、状态/健康、修订、校验、应用、审批、回滚接口。配置写入先落 PostgreSQL，再由控制面通过 loopback HMAC 通道发送完整租户快照；edge 原子确认后才返回 `active`，否则保留旧快照并返回 `pending`/`failed`。策略字段已覆盖路由、身份、加密、WAF、限流、健康检查和 secret reference；公开入口、敏感策略变化和暂停/恢复由 `PolicyApprover` 独立批准，审批人不能批准自己的修订，浏览器审批还要求近期 step-up 重新认证。edge 由监听器监督器在应用前绑定快照所需的全部内部端口，再原子切换路由；快照中声明 `page_actions` 的站点由 edge 在写入 pending 文件之前（以及重启恢复时、监听之前）把由配置推导的动作描述幂等写入 PostgreSQL，描述冲突或数据库不可用时整份快照以 `EDGE_APPLY_DESCRIPTOR_CONFLICT`/`EDGE_APPLY_DESCRIPTOR_UNAVAILABLE` 拒绝并点名站点（见 [19 §19.2](19-deployment-operations.md)）；`XSHIELD_EDGE_LISTEN_PORTS` 仅用于启动时的 bootstrap 监听集合，新站点端口可在不中断现有请求的情况下动态绑定。设置 `XSHIELD_EDGE_SNAPSHOT_PATH` 后，已确认快照以 HMAC 签名的 pending/active 文件原子持久化，edge 重启前会先验签和校验完整快照；损坏或作用域不符时拒绝启动，避免回退到未确认配置。
 
 ### 3. 案件分析 MVP（耐久任务）
 
