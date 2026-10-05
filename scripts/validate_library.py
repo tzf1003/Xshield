@@ -1855,6 +1855,87 @@ def check_calibration_read_capability_issued_contract(schema: dict) -> None:
                   event_type='calibration.read_capability.issued', event_id=event_id)
     check('outbox:calibration_read_capability:reject_legacy_sparse', not valid(schema, sparse))
 
+ACCEPTANCE_STATUSES = ('planned', 'partial', 'automated')
+ACCEPTANCE_CATALOGUE = 'examples/acceptance-cases.json'
+
+def cites_whole_token(body: str, test: str) -> bool:
+    """True when ``test`` occurs in ``body`` without extending into a longer identifier.
+
+    A bare substring check would let ``refresh`` or a truncated test name stay
+    "found" after the real test is renamed, so an end of ``test`` that is a word
+    character must sit next to a non-word character (or the text boundary).
+    """
+    pattern = re.escape(test)
+    if re.match(r'\w', test[0]): pattern = r'(?<!\w)' + pattern
+    if re.match(r'\w', test[-1]): pattern += r'(?!\w)'
+    return re.search(pattern, body) is not None
+
+def check_acceptance_cases(doc: dict) -> dict[str, int]:
+    """Validate every acceptance case's coverage claim and count the statuses.
+
+    ``planned`` carries no claim and must have neither ``covered_by`` nor ``gap``.
+    ``partial`` and ``automated`` must cite at least one ``covered_by`` entry
+    ``{"path", "test"}``: the repository-relative file must exist and contain the
+    ``test`` text as a whole token, so a renamed or deleted test breaks the claim
+    instead of leaving a stale one behind. Documentation (``*.md``), this
+    catalogue and generated or third-party output cannot be cited. ``partial``
+    must also state a non-empty ``gap``; ``automated`` must not.
+
+    This only proves that the cited test text still exists. It does not run the
+    test and cannot judge whether the test really asserts the case; that review
+    belongs to whoever changes a status. Layers that need Docker, ClickHouse,
+    Keycloak, a real load balancer or a real model provider do not count.
+    """
+    counts = {status: 0 for status in ACCEPTANCE_STATUSES}
+    texts: dict[Path, str | None] = {}
+    root = ROOT.resolve()
+
+    def text_of(path: Path) -> str | None:
+        if path not in texts:
+            try: texts[path] = path.read_text(encoding='utf-8', errors='replace')
+            except OSError: texts[path] = None
+        return texts[path]
+
+    for case in doc['cases']:
+        status, covered, gap = case.get('status'), case.get('covered_by'), case.get('gap')
+        problems: list[str] = []
+        if isinstance(status, str) and status in counts: counts[status] += 1
+        else: problems.append(f'status {status!r} is not one of {ACCEPTANCE_STATUSES}')
+        if status == 'planned':
+            if 'covered_by' in case: problems.append('planned must not carry covered_by')
+            if 'gap' in case: problems.append('planned must not carry gap')
+        elif status in ('partial', 'automated'):
+            if not isinstance(covered, list) or not covered:
+                problems.append(f'{status} needs a non-empty covered_by list')
+                covered = []
+            seen: set[tuple[object, object]] = set()
+            for entry in covered:
+                if not isinstance(entry, dict) or set(entry) != {'path', 'test'}:
+                    problems.append(f'covered_by entry must be exactly {{path, test}}: {entry!r}')
+                    continue
+                path, test = entry['path'], entry['test']
+                if not isinstance(path, str) or not path or not isinstance(test, str) or not test.strip():
+                    problems.append(f'covered_by path and test must be non-empty strings: {entry!r}')
+                    continue
+                if (path, test) in seen: problems.append(f'duplicate covered_by entry: {path} :: {test}')
+                seen.add((path, test))
+                resolved = (ROOT / path).resolve()
+                if Path(path).is_absolute() or root not in resolved.parents:
+                    problems.append(f'covered_by path must be repository-relative: {path}')
+                elif DISCOVERY_EXCLUDED_PARTS.intersection(resolved.relative_to(root).parts):
+                    problems.append(f'covered_by path is generated or third-party output: {path}')
+                elif resolved.suffix == '.md' or resolved == (root / ACCEPTANCE_CATALOGUE).resolve():
+                    problems.append(f'covered_by must cite a test, not documentation or this catalogue: {path}')
+                else:
+                    body = text_of(resolved) if resolved.is_file() else None
+                    if body is None: problems.append(f'covered_by file does not exist: {path}')
+                    elif not cites_whole_token(body, test): problems.append(f'test text not found in {path}: {test}')
+            if status == 'partial':
+                if not isinstance(gap, str) or not gap.strip(): problems.append('partial needs a non-empty gap')
+            elif 'gap' in case: problems.append('automated must not carry gap')
+        check(f'acceptance:{case.get("id", "?")}:coverage_claim', not problems, '; '.join(problems))
+    return counts
+
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
         if DISCOVERY_EXCLUDED_PARTS.intersection(p.relative_to(ROOT).parts): continue
@@ -1951,9 +2032,9 @@ def main() -> int:
     check('requirements:traceability',all(x in mapping for x in reqs))
     invs=set(re.findall(r'INV-\d{2}',(ROOT/'docs/01-threat-model-and-invariants.md').read_text()))
     check('invariants:20_ids',len(invs)==20)
-    tests=load('examples/acceptance-cases.json');check('acceptance:count',tests['total']==len(tests['cases']))
-    check('acceptance:not_falsely_executed',all(c['status']=='planned' for c in tests['cases']))
+    tests=load(ACCEPTANCE_CATALOGUE);check('acceptance:count',tests['total']==len(tests['cases']))
     check('acceptance:unique_ids',len({c['id'] for c in tests['cases']})==len(tests['cases']))
+    acceptance=check_acceptance_cases(tests)
     clickhouse=(ROOT/'sql/clickhouse.sql').read_text()
     check('clickhouse:active_views_deduplicate',clickhouse.count('LIMIT 1 BY event_id')==2)
     check('clickhouse:active_views_filter_expiry',clickhouse.count('WHERE retention_expires_at > now64(6)')==2)
@@ -1971,11 +2052,11 @@ def main() -> int:
                 resolved=(p.parent/target).resolve()
                 generated_report=resolved==(ROOT/'validation/report.md').resolve()
                 check('link:'+str(p.relative_to(ROOT))+':'+target,resolved.exists() or generated_report,'generated by this validator' if generated_report else '')
-    result={'scope':'Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.', 'passed':all(c['passed'] for c in checks),'checks_total':len(checks),'passed_count':sum(c['passed'] for c in checks),'planned_security_test_cases':tests['total'],'checks':checks}
+    result={'scope':'Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.', 'passed':all(c['passed'] for c in checks),'checks_total':len(checks),'passed_count':sum(c['passed'] for c in checks),'acceptance_cases':{'total':tests['total'],**acceptance},'checks':checks}
     out=ROOT/'validation';out.mkdir(exist_ok=True)
     (out/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
     failed=[c for c in checks if not c['passed']]
-    report=f'# 文档和合成样例验证\n\n结果：{"通过" if result["passed"] else "存在失败"}；{result["passed_count"]}/{len(checks)} 项检查通过。\n\n覆盖：JSON/YAML、JSON Schema、合成事件/证据/模型契约、摘要及引用闭合、负向约束、文档来源和本地链接。\n\n不覆盖：Rust 编译、PostgreSQL/ClickHouse 实际执行、代理部署、站点安全测试、模型准确率和性能。78 项安全验收用例仍为 planned。\n'
+    report=f'# 文档和合成样例验证\n\n结果：{"通过" if result["passed"] else "存在失败"}；{result["passed_count"]}/{len(checks)} 项检查通过。\n\n覆盖：JSON/YAML、JSON Schema、合成事件/证据/模型契约、摘要及引用闭合、负向约束、文档来源和本地链接。\n\n不覆盖：Rust 编译、PostgreSQL/ClickHouse 实际执行、代理部署、站点安全测试、模型准确率和性能。{tests["total"]} 项安全验收用例：automated {acceptance["automated"]}、partial {acceptance["partial"]}、planned {acceptance["planned"]}；覆盖声明只校验所引用的测试文本仍然存在，不表示该测试已执行或通过。\n'
     if failed: report+='\n失败：\n'+ '\n'.join('- '+str(c) for c in failed)+'\n'
     (out/'report.md').write_text(report,encoding='utf-8')
     print(json.dumps({k:v for k,v in result.items() if k!='checks'},ensure_ascii=False,indent=2))

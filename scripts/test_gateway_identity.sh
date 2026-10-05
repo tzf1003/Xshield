@@ -1,5 +1,21 @@
 #!/usr/bin/env bash
+# macOS ships bash 3.2, where `set -e` ignores a failing `[[ ]]`, so an assertion
+# written that way passes silently. Refuse to run rather than check less than CI.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1))); then
+    echo "error: $0 needs bash >= 4.1 (found $BASH_VERSION); on macOS install a newer bash and put it first in PATH" >&2
+    exit 2
+fi
 set -euo pipefail
+
+# `! cmd` never trips `set -e` (in any bash), so an "absent" assertion written
+# that way cannot fail the script; `refute` can. It names the line, never the
+# pattern, because the pattern is often a token.
+refute() {
+    if "$@"; then
+        echo "assertion failed at line ${BASH_LINENO[0]}: a pattern that must be absent was found" >&2
+        return 1
+    fi
+}
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 test_database="xshield_gateway_${PPID}_${RANDOM}"
@@ -500,7 +516,7 @@ anonymous_rate_status=$(curl -sS -D "$test_dir/anonymous-rate.headers" \
 [[ "$anonymous_rate_status" == "429" ]]
 grep -q '"reason_code":"ANONYMOUS_SESSION_RATE_EXCEEDED"' \
     "$test_dir/anonymous-rate.json"
-! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/anonymous-rate.headers"
+refute grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/anonymous-rate.headers"
 anonymous_rate_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT count(*), min(used), max(used)
 FROM xshield.anonymous_session_rate_limits
@@ -514,7 +530,7 @@ anonymous_repeat_status=$(curl -sS -D "$test_dir/anonymous-repeat.headers" \
     -H "Cookie: __Host-xshield_sid=$anonymous_session_id" \
     http://127.0.0.1:6288/account)
 [[ "$anonymous_repeat_status" == "401" ]]
-! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/anonymous-repeat.headers"
+refute grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/anonymous-repeat.headers"
 anonymous_substitution_status=$(curl -sS -o "$test_dir/anonymous-substitution.json" \
     -w '%{http_code}' -H "Cookie: __Host-xshield_sid=$anonymous_session_id" \
     -H 'Authorization: Bearer unbound-business-token' \
@@ -617,7 +633,7 @@ sensor_missing_session_status=$(curl -sS -o "$test_dir/sensor-missing-session.js
     http://127.0.0.1:6288/__xshield/v1/events/prepare)
 [[ "$sensor_missing_session_status" == "401" ]]
 grep -q 'AUTH_REQUIRED' "$test_dir/sensor-missing-session.json"
-! grep -q '/__xshield/v1/events/prepare' "$test_dir/origin.log"
+refute grep -q '/__xshield/v1/events/prepare' "$test_dir/origin.log"
 
 new_account_status=$(curl -sS -o "$test_dir/new-account.body" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \
@@ -636,7 +652,7 @@ refresh_status=$(curl -sS -D "$test_dir/refresh.headers" -o "$test_dir/refresh.b
     http://127.0.0.1:6288/refresh)
 [[ "$refresh_status" == "200" ]]
 grep -qi '^cache-control: private, no-store' "$test_dir/refresh.headers"
-! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/refresh.headers"
+refute grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/refresh.headers"
 refreshed_bearer=$(python3 -c \
     'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["access_token"])' \
     "$test_dir/refresh.body")
@@ -694,14 +710,15 @@ refreshed_grant_status=$(curl -sS -o "$test_dir/refreshed-grant.body" -w '%{http
     'http://127.0.0.1:6288/orders?order_id=order-refresh')
 [[ "$refreshed_grant_status" == "404" ]]
 
-set +e
-curl -sS -o "$test_dir/refresh-switch.body" -X POST \
+# The origin answers this refresh with a different principal, which a refresh
+# must never do. The edge refuses to deliver that reply: the client gets a bare
+# 502 and none of the origin's body, and (checked below) the generation stays.
+refresh_switch_status=$(curl -sS -o "$test_dir/refresh-switch.body" -w '%{http_code}' -X POST \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \
     -H "Authorization: Bearer $refreshed_bearer" \
-    http://127.0.0.1:6288/refresh-switch >/dev/null 2>&1
-refresh_switch_exit=$?
-set -e
-[[ "$refresh_switch_exit" != "0" ]]
+    http://127.0.0.1:6288/refresh-switch)
+[[ "$refresh_switch_status" == "502" ]]
+[[ ! -s "$test_dir/refresh-switch.body" ]]
 refresh_generation=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT credential_generation FROM xshield.auth_bindings
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -743,7 +760,7 @@ account_switch_status=$(curl -sS -D "$test_dir/account-switch.headers" \
     http://127.0.0.1:6288/account-switch)
 [[ "$account_switch_status" == "200" ]]
 grep -qi '^cache-control: private, no-store' "$test_dir/account-switch.headers"
-! grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/account-switch.headers"
+refute grep -qi '^set-cookie: __Host-xshield_sid=' "$test_dir/account-switch.headers"
 context_admin_bearer=$(python3 -c \
     'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["access_token"])' \
     "$test_dir/account-switch.body")
@@ -816,12 +833,17 @@ old_epoch_grant_status=$(curl -sS -o "$test_dir/old-epoch-grant.json" -w '%{http
 [[ "$old_epoch_grant_status" == "403" ]]
 grep -q '"reason_code":"UI_ACTION_NOT_AVAILABLE"' "$test_dir/old-epoch-grant.json"
 
+# The origin's login reply names an identity the route does not accept. The edge
+# must not deliver it: a bare 502 (or, if the connection is cut first, a failed
+# transfer), never the origin's bytes, and no binding for that principal below.
 set +e
-curl -sS -o "$test_dir/login-invalid.body" \
-    -X POST http://127.0.0.1:6288/login-invalid >/dev/null 2>&1
+invalid_login_status=$(curl -sS -o "$test_dir/login-invalid.body" -w '%{http_code}' \
+    -X POST http://127.0.0.1:6288/login-invalid 2>/dev/null)
 invalid_login_exit=$?
 set -e
-[[ "$invalid_login_exit" != "0" ]]
+[[ "$invalid_login_exit" != "0" || "$invalid_login_status" == "502" ]]
+[[ ! -s "$test_dir/login-invalid.body" ]]
+refute grep -q 'principal_invalid' "$test_dir/login-invalid.body"
 invalid_login_binding_count=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT count(*) FROM xshield.auth_bindings
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -835,18 +857,18 @@ buffered_status=$(curl -sS -o "$test_dir/buffered-valid.json" -w '%{http_code}' 
 [[ "$buffered_status" == "200" ]]
 [[ $(<"$test_dir/buffered-valid.json") == '{"ok":true}' ]]
 
-set +e
-curl -sS -o "$test_dir/buffered-invalid.body" \
-    http://127.0.0.1:6288/buffered-invalid >/dev/null 2>&1
-invalid_buffer_exit=$?
-set -e
-[[ "$invalid_buffer_exit" != "0" ]]
+# A body that is not the JSON the route promises is never released: the client
+# gets a bare 502 and none of the origin's bytes (same as the oversize case below).
+invalid_buffer_status=$(curl -sS -o "$test_dir/buffered-invalid.body" -w '%{http_code}' \
+    http://127.0.0.1:6288/buffered-invalid)
+[[ "$invalid_buffer_status" == "502" ]]
 [[ ! -s "$test_dir/buffered-invalid.body" ]]
+refute grep -q 'private-invalid-json' "$test_dir/buffered-invalid.body"
 
 oversize_status=$(curl -sS -o "$test_dir/buffered-oversize.body" -w '%{http_code}' \
     http://127.0.0.1:6288/buffered-oversize)
 [[ "$oversize_status" == "502" ]]
-! grep -q 'must-not-release' "$test_dir/buffered-oversize.body"
+refute grep -q 'must-not-release' "$test_dir/buffered-oversize.body"
 
 valid_status=$(curl -sS -D "$test_dir/valid.headers" -o "$test_dir/valid.body" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$session_id" \
@@ -855,7 +877,7 @@ valid_status=$(curl -sS -D "$test_dir/valid.headers" -o "$test_dir/valid.body" -
 [[ "$valid_status" == "200" ]]
 grep -qi '^cache-control: private, no-store' "$test_dir/valid.headers"
 grep -qi '^transfer-encoding: chunked' "$test_dir/valid.headers"
-! grep -qi '^content-length:' "$test_dir/valid.headers"
+refute grep -qi '^content-length:' "$test_dir/valid.headers"
 response_action_ref=$(python3 -c \
     'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["orders"][0]["_xshield_action_ref"])' \
     "$test_dir/valid.body")
@@ -1103,7 +1125,7 @@ assert_share_issue_blocked() {
         -H 'X-Xshield-Action-Ref: action_share_issue_primary' \
         'http://127.0.0.1:6288/share-issue?record_id=record-123' 2>/dev/null) || result=$?
     [[ "$status" != "200" || "$result" != "0" ]]
-    ! grep -Eq '"(share_token|ok|padding)"' "$test_dir/share-$label.body" 2>/dev/null
+    refute grep -Eq '"(share_token|ok|padding)"' "$test_dir/share-$label.body" 2>/dev/null
     [[ "$(share_issue_rows)" == "$before" ]]
 }
 
@@ -1120,7 +1142,7 @@ wrong_issue_resource=$(curl -sS -o "$test_dir/share-wrong-resource.json" -w '%{h
     'http://127.0.0.1:6288/share-issue?record_id=record-999')
 [[ "$wrong_issue_resource" == "403" ]]
 grep -q '"reason_code":"CAPABILITY_MISSING"' "$test_dir/share-wrong-resource.json"
-! grep -q '^GET /share-issue' "$test_dir/origin.log"
+refute grep -q '^GET /share-issue' "$test_dir/origin.log"
 [[ "$(share_issue_rows)" == "0|0" ]]
 
 for share_mode in collision duplicate nonobject truncated oversize content-range attachment; do
@@ -1146,7 +1168,7 @@ issued_share_status=$(curl -sS -D "$test_dir/share-issued.headers" \
     'http://127.0.0.1:6288/share-issue?record_id=record-123')
 [[ "$issued_share_status" == "200" ]]
 grep -qi '^cache-control: private, no-store' "$test_dir/share-issued.headers"
-! grep -Eqi '^(content-length|etag):' "$test_dir/share-issued.headers"
+refute grep -Eqi '^(content-length|etag):' "$test_dir/share-issued.headers"
 issued_share_token=$(python3 - "$test_dir/share-issued.body" <<'PY'
 import json
 import re
@@ -1266,10 +1288,14 @@ logout_status=$(curl -sS -D "$test_dir/logout.headers" -o "$test_dir/logout.body
 [[ "$logout_status" == "200" ]]
 [[ "$(<"$test_dir/logout.body")" == '{"logged_out":true}' ]]
 grep -qi '^cache-control: private, no-store' "$test_dir/logout.headers"
-logout_binding_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+# The logout above ends the login session's binding (not the fixed seeded one):
+# it is revoked, no credential of it is left usable, and exactly one
+# binding.revoked event was queued for it.
+logout_binding_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" \
+    -v session_fingerprint="$login_session_fingerprint" <<'SQL'
 SELECT binding.status,
-       count(credential.*) FILTER (WHERE credential.status = 'revoked'),
-       count(outbox.*) FILTER (WHERE outbox.event_type = 'binding.revoked')
+       count(DISTINCT credential.generation) FILTER (WHERE credential.status <> 'revoked'),
+       count(DISTINCT outbox.event_id) FILTER (WHERE outbox.event_type = 'binding.revoked')
 FROM xshield.auth_bindings binding
 LEFT JOIN xshield.credential_bindings credential
   ON credential.tenant_id = binding.tenant_id
@@ -1281,11 +1307,11 @@ LEFT JOIN xshield.audit_outbox outbox
  AND outbox.aggregate_ref = binding.binding_id
 WHERE binding.tenant_id = 'tenant_gateway'
   AND binding.site_id = 'site_gateway'
-  AND binding.binding_id = 'auth_018f2a3b-4c5d-7000-8000-000000000901'
+  AND binding.waf_sid_fingerprint = decode(:'session_fingerprint', 'hex')
 GROUP BY binding.status;
 SQL
 )
-[[ "$logout_binding_state" == "revoked|3|1" ]]
+[[ "$logout_binding_state" == "revoked|0|1" ]]
 logout_secret_events=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" \
     -v bearer="$context_admin_bearer" -v session_id="$login_session_id" <<'SQL'
 SELECT count(*) FROM xshield.audit_outbox
@@ -1335,14 +1361,14 @@ grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 [[ $(grep -c 'GET /buffered-valid' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /buffered-invalid' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /buffered-oversize' "$test_dir/origin.log") == "1" ]]
-! grep -q '__Host-xshield_sid' "$test_dir/origin.log"
-! grep -q 'ActionRef=action_' "$test_dir/origin.log"
-! grep -q 'ServiceCredential=verified-' "$test_dir/origin.log"
-! grep -q 'ShareToken=verified-' "$test_dir/origin.log"
-! grep -q '^ShareToken=.' "$test_dir/origin.log"
-! grep -Fq "$issued_share_token" "$test_dir/origin.log" "$test_dir/gateway.log"
+refute grep -q '__Host-xshield_sid' "$test_dir/origin.log"
+refute grep -q 'ActionRef=action_' "$test_dir/origin.log"
+refute grep -q 'ServiceCredential=verified-' "$test_dir/origin.log"
+refute grep -q 'ShareToken=verified-' "$test_dir/origin.log"
+refute grep -q '^ShareToken=.' "$test_dir/origin.log"
+refute grep -Fq "$issued_share_token" "$test_dir/origin.log" "$test_dir/gateway.log"
 grep -q 'Authorization=Bearer verified-business-token' "$test_dir/origin.log"
-[[ -n $(find "$test_dir/journal" -name 'segment-*.xaj' -type f -print -quit) ]]
+[[ -n $(find "$test_dir/journal" -name 'segment-*.xja' -type f -print -quit) ]]
 
 identity_envelope_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" \
     -v anonymous_request_id="$(awk 'tolower($1) == "x-xshield-request-id:" {gsub("\r", "", $2); print $2}' "$test_dir/anonymous.headers")" \

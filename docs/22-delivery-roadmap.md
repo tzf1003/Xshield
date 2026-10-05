@@ -129,7 +129,7 @@ Agent 详情增量：`GET /control/v1/agent-runs/{agent_run_id}` 已交付 Obser
 | M4 模型与调查 | 约 35% | QueryPlan、检索、因果、离线 Jev 评估、校准基础设施 | 模型不在请求路径；实测仅 4 个合成样本；无调查 Agent、自然语言查询、回放 |
 | M5 持续适配与产品化 | 约 10% | 期望/生效修订、危险变更审批、回滚、HMAC 应用通道 | 构建监测、候选、双身份测试、签名灰度均无代码 |
 
-部署与运维当前没有 Dockerfile、Helm、systemd 单元或安装包；没有指标、告警和就绪探针；控制面约 50 个环境变量、约 37 个密钥放在环境变量中，没有 KMS。78 个验收用例（`examples/acceptance-cases.json`）全部为 `planned`，无基准测试、fuzz 或压测，docs/21 的延迟预算仍是待测目标。
+部署与运维当前没有 Dockerfile、Helm、systemd 单元或安装包；没有指标、告警和就绪探针；控制面约 50 个环境变量、约 37 个密钥放在环境变量中，没有 KMS。78 个验收用例（`examples/acceptance-cases.json`）中 automated 9、partial 50、planned 19（状态含义与计数口径见 docs/20 §20.2），无基准测试、fuzz 或压测，docs/21 的延迟预算仍是待测目标。
 
 2026-10-05 更新：M1 由约 70% 调为约 80%，依据是上表 M1 原列的三项缺口中两项已有代码与真实浏览器回归（动作描述的产品写入路径、探针出示 action_ref），第三项（控制面表达）仍未开始；M2 仅更正已落地的 TLS/HTTP/2 监听描述，百分比不变，因为新增的钩子不涉及协议接管。
 

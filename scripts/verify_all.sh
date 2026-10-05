@@ -19,6 +19,8 @@
 #   XSHIELD_VERIFY_LOG_DIR  where the per-step logs go (default: a fresh directory
 #                           under $TMPDIR). Put it on persistent storage if the
 #                           logs must survive a reboot.
+#   XSHIELD_BASH            a bash >= 4.1 to re-run under when /usr/bin/env bash is older
+#                           (macOS ships 3.2; `brew install bash` or build one on the big volume).
 #   XSHIELD_E2E_PORT        first of the two Playwright ports (default 5175).
 #   XSHIELD_PLAYWRIGHT_PACKAGE  package.json whose @playwright/test the browser
 #                           loop uses (default web/console after `npm ci`).
@@ -28,6 +30,21 @@
 # status is non-zero when any step failed. Docker, ClickHouse and Keycloak
 # regressions are not part of this script (see docs/20).
 set -u
+
+# The real-binary scripts assert with `[[ ]]`, which `set -e` ignores in bash 3.2
+# (macOS /bin/bash): they would pass while checking less than CI does. Run under
+# bash >= 4.1; the scripts refuse to start on an older one.
+modern_bash() { ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1))); }
+if ! modern_bash; then
+    for candidate in "${XSHIELD_BASH:-}" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ] &&
+            "$candidate" -c '((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1)))'; then
+            PATH="$(dirname "$candidate"):$PATH" exec "$candidate" "$0" "$@"
+        fi
+    done
+    echo "error: verify_all.sh needs bash >= 4.1 (found $BASH_VERSION). Install one and put it first in PATH, or set XSHIELD_BASH=/path/to/bash." >&2
+    exit 2
+fi
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$repo_root" || exit 2

@@ -5,6 +5,12 @@
 # Everything lives in a temporary directory: a throwaway CA and edge
 # certificate, a Python origin, gateway journals. Needs python3, curl with
 # HTTP/2 support and openssl. Set CARGO_TARGET_DIR to build outside the repo.
+# macOS ships bash 3.2, where `set -e` ignores a failing `[[ ]]`, so an assertion
+# written that way passes silently. Refuse to run rather than check less than CI.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1))); then
+    echo "error: $0 needs bash >= 4.1 (found $BASH_VERSION); on macOS install a newer bash and put it first in PATH" >&2
+    exit 2
+fi
 set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

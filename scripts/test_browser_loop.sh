@@ -23,6 +23,12 @@
 # Build output honours CARGO_TARGET_DIR; scratch files go under TMPDIR and
 # are removed on exit. XSHIELD_BROWSER_LOOP_TRANSCRIPT=path keeps the JSON
 # transcript of the run.
+# macOS ships bash 3.2, where `set -e` ignores a failing `[[ ]]`, so an assertion
+# written that way passes silently. Refuse to run rather than check less than CI.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1))); then
+    echo "error: $0 needs bash >= 4.1 (found $BASH_VERSION); on macOS install a newer bash and put it first in PATH" >&2
+    exit 2
+fi
 set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

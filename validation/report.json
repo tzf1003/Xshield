@@ -1,9 +1,14 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3954,
-  "passed_count": 3954,
-  "planned_security_test_cases": 78,
+  "checks_total": 4047,
+  "passed_count": 4047,
+  "acceptance_cases": {
+    "total": 78,
+    "planned": 19,
+    "partial": 50,
+    "automated": 9
+  },
   "checks": [
     {
       "name": "json:MANIFEST.sha256.json",
@@ -18586,12 +18591,397 @@
       "detail": ""
     },
     {
-      "name": "acceptance:not_falsely_executed",
+      "name": "acceptance:unique_ids",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "acceptance:unique_ids",
+      "name": "acceptance:AUTH-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-05:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-06:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-07:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-08:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-09:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUTH-10:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-05:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-06:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-07:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-08:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-09:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-10:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:FLOW-11:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-05:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-06:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-07:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-08:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:GRANT-09:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:SHARE-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:SHARE-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:SHARE-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:SHARE-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:SENSOR-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:SENSOR-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:SENSOR-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:SENSOR-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:CRYPTO-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:CRYPTO-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:CRYPTO-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:CRYPTO-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:CRYPTO-05:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:CRYPTO-06:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:CRYPTO-07:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:CRYPTO-08:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:MODEL-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:MODEL-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:MODEL-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:MODEL-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:MODEL-05:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:MODEL-06:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:MODEL-07:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AGENT-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AGENT-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AGENT-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AGENT-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-05:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-06:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-07:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-08:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-09:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-10:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-11:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-12:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-13:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-14:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:AUDIT-15:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:DEV-01:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:DEV-02:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:DEV-03:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:DEV-04:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:DEV-05:coverage_claim",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "acceptance:DEV-06:coverage_claim",
       "passed": true,
       "detail": ""
     },
@@ -19071,257 +19461,57 @@
       "detail": ""
     },
     {
-      "name": "link:README.md:web/console/README.md",
+      "name": "sources:31-implemented-mechanisms.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:README.md:docs/10-jev-and-agents.md",
+      "name": "fences:31-implemented-mechanisms.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:README.md:docs/10-jev-and-agents.md",
+      "name": "no_tool_tokens:31-implemented-mechanisms.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:README.md:docs/16-rust-code-architecture.md",
+      "name": "link:README.md:docs/22-delivery-roadmap.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/30-console-redesign.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/31-implemented-mechanisms.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/19-deployment-operations.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/19-deployment-operations.md",
       "passed": true,
       "detail": ""
     },
     {
       "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
       "passed": true,
       "detail": ""
     },
     {
       "name": "link:README.md:web/console/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/26-runbooks.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/06-capability-ledger.md",
       "passed": true,
       "detail": ""
     },
@@ -19507,6 +19697,11 @@
     },
     {
       "name": "link:README.md:docs/30-console-redesign.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/31-implemented-mechanisms.md",
       "passed": true,
       "detail": ""
     },
@@ -19757,6 +19952,281 @@
     },
     {
       "name": "link:docs/30-console-redesign.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:22-delivery-roadmap.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:30-console-redesign.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:../web/console/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:16-rust-code-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:../web/console/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:26-runbooks.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:12-evidence-capture-and-vault.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/31-implemented-mechanisms.md:06-capability-ledger.md",
       "passed": true,
       "detail": ""
     },

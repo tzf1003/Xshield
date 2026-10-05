@@ -108,7 +108,7 @@ Xshield 是用 Rust 实现的上下文增强型 WAF，采用纯前置代理，�
 | 路径 | 内容 |
 |---|---|
 | schemas/ | 4份自定义 JSON Schema：审计事件、证据manifest、模型调用、站点策略 |
-| examples/ | 禁用状态的站点配置，合成审计事件与证据，78项待实施验收用例 |
+| examples/ | 禁用状态的站点配置，合成审计事件与证据，78 项验收用例（每项标注 planned/partial/automated，见 docs/20） |
 | sql/ | PostgreSQL migration 与 ClickHouse 部署 schema；真实数据库回归见 [20.6](docs/20-testing-and-acceptance.md#206-clickhouse-真实集成回归) |
 | templates/ | PR、ADR、crate说明和只读调查Agent约束 |
 | scripts/ | 可重复运行的文档/Schema/合成证据验证脚本 |

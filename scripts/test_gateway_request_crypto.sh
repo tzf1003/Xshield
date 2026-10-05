@@ -1,5 +1,21 @@
 #!/usr/bin/env bash
+# macOS ships bash 3.2, where `set -e` ignores a failing `[[ ]]`, so an assertion
+# written that way passes silently. Refuse to run rather than check less than CI.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1))); then
+    echo "error: $0 needs bash >= 4.1 (found $BASH_VERSION); on macOS install a newer bash and put it first in PATH" >&2
+    exit 2
+fi
 set -euo pipefail
+
+# `! cmd` never trips `set -e` (in any bash), so an "absent" assertion written
+# that way cannot fail the script; `refute` can. It names the line, never the
+# pattern, because the pattern is often a token.
+refute() {
+    if "$@"; then
+        echo "assertion failed at line ${BASH_LINENO[0]}: a pattern that must be absent was found" >&2
+        return 1
+    fi
+}
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/xshield-gateway-crypto.XXXXXX")
@@ -206,7 +222,7 @@ grep -qi '^x-xshield-sensor-version: 1.1.0' "$test_dir/loader-current-headers"
 curl --fail --silent --show-error -D "$test_dir/home-headers" \
     -o "$test_dir/home.html" "http://127.0.0.1:$gateway_port/home"
 grep -qi '^cache-control: private, no-store' "$test_dir/home-headers"
-! grep -qi '^etag:' "$test_dir/home-headers"
+refute grep -qi '^etag:' "$test_dir/home-headers"
 curl --fail --silent --show-error -o "$test_dir/home-v2.html" \
     "http://127.0.0.1:$gateway_port/home?build=2"
 curl --fail --silent --show-error -D "$test_dir/home-csp.headers" \

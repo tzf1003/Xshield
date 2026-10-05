@@ -6,6 +6,12 @@
 # (built here if missing; honours CARGO_TARGET_DIR so the build can live outside
 # the repository). The Juice Shop part of the lab still needs Docker and is not
 # run here. No model call is made.
+# macOS ships bash 3.2, where `set -e` ignores a failing `[[ ]]`, so an assertion
+# written that way passes silently. Refuse to run rather than check less than CI.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1))); then
+    echo "error: $0 needs bash >= 4.1 (found $BASH_VERSION); on macOS install a newer bash and put it first in PATH" >&2
+    exit 2
+fi
 set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
