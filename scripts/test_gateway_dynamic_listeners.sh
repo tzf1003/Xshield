@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/xshield-gateway-listeners.XXXXXX")
+gateway_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/xshield-gateway"
 origin_pid=""
 gateway_pid=""
 
@@ -77,7 +78,7 @@ XSHIELD_PUBLIC_HOSTS="origin.local" \
 XSHIELD_EDGE_APPLY_KEY_HEX="$key_hex" \
 XSHIELD_EDGE_APPLY_LISTEN="127.0.0.1:$apply_port" \
 XSHIELD_EDGE_SNAPSHOT_PATH="$snapshot_path" \
-    "$repo_root/target/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
+    "$gateway_bin" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!
 
 for _ in {1..80}; do
@@ -270,7 +271,7 @@ XSHIELD_PUBLIC_HOSTS="origin.local" \
 XSHIELD_EDGE_APPLY_KEY_HEX="$key_hex" \
 XSHIELD_EDGE_APPLY_LISTEN="127.0.0.1:$apply_port" \
 XSHIELD_EDGE_SNAPSHOT_PATH="$snapshot_path" \
-    "$repo_root/target/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
+    "$gateway_bin" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!
 for _ in {1..80}; do
     status=$(curl -sS -o "$test_dir/restarted.body" -w '%{http_code}' \

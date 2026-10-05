@@ -77,6 +77,8 @@ request.accepted/completed/aborted；stage.started/completed/skipped；identity.
 
 未路由请求（监听端口与 Host 没有命中任何站点快照）没有站点，也就没有可信的站点作用域，逐请求写持久事件会让洪峰写满 journal，此前它们也完全没有审计。网关因此在内存中按监听端口计数，并每 60 秒为每个有计数的端口追加一条 `edge.unrouted_denied` 聚合事件：`request_id` 为空，tenant/site 取网关进程的引导作用域；封闭 payload 为 `listener_port`、`denied_count`、`first_seen_unix`、`last_seen_unix`、可空 `sample_host` 和固定稳定原因码 `HOST_NOT_ROUTED`。`sample_host` 是窗口内首个 Host，仅保留 0x21–0x7e 且不超过 253 字节的值，属于攻击者可控数据，只作为数据保存和展示。worker 将其发布为 `stage=edge_routing`、`outcome=DENY`、deterministic、`confidence=null/not_applicable`、非终态，并拒绝其他原因码、零端口/零计数、首末时间颠倒、超界或含控制字符的 Host、未知和重复字段。内存只随监听端口数（上限 256）增长，与请求量无关；屏障关闭时计数保留，重开后与新计数合并写出，不丢失。客户端响应保持 503 `SITE_CONFIG_UNAVAILABLE`。窗口内的逐请求明细不持久化，进程在两次写出之间退出时该间隔内尚未写出的计数也会丢失，这是有意的有界审计取舍；新事件类型须先升级 worker 发布器。
 
+在请求出现之前就失败的连接不产生审计事件：原生 TLS 握手失败或超时、受信负载均衡连接的 PROXY 头缺失或无效、因连接建立名额用尽在 accept 时被关闭的连接，都没有请求、站点或可信来源，与未路由请求同理，逐连接写持久事件会让握手洪峰写满 journal。edge 只在进程内对它们计数，经已认证的健康接口返回 `tls_handshake_failures`、`proxy_header_rejections`、`connection_setup_shed`（见 19.2“Edge 传输配置”），不新增事件类型，也不记录失败连接的字节或密钥材料。握手成功之后的每个请求照常经过准入与审计屏障。
+
 不可采样事件：每请求最小记录、每个实际安全判定、资格变更、模型调用、Agent 工具调用、管理动作、证据访问与完整性异常。调试 span 和性能采样可独立配置，但不能让 required 审计消失。
 
 ## 11.6 可解释拒绝图

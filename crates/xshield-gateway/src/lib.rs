@@ -29,8 +29,10 @@ use xshield_core::{
 };
 
 pub mod auth_binding;
+pub mod edge_transport;
 pub mod evidence_capture;
 pub mod multi_site;
+pub mod proxy_protocol;
 pub mod request_crypto;
 pub mod response_crypto;
 pub mod response_grant;

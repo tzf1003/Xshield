@@ -8,7 +8,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 ROOT = Path(__file__).resolve().parents[1]
 # Repository-owned contracts only. Local automation and package installations
 # may carry valid JSON/YAML with unrelated external links and schemas.
-DISCOVERY_EXCLUDED_PARTS = frozenset({'validation', 'target', '.codex', '.claude', 'node_modules'})
+DISCOVERY_EXCLUDED_PARTS = frozenset({'validation', 'target', '.codex', '.claude', 'node_modules', 'test-results'})
 checks: list[dict[str, object]] = []
 def check(name: str, ok: bool, detail: str = '') -> None:
     checks.append({'name': name, 'passed': bool(ok), 'detail': detail})
@@ -1738,11 +1738,11 @@ def check_calibration_read_capability_issued_contract(schema: dict) -> None:
 
 def main() -> int:
     for p in sorted(ROOT.rglob('*.json')):
-        if DISCOVERY_EXCLUDED_PARTS.intersection(p.parts): continue
+        if DISCOVERY_EXCLUDED_PARTS.intersection(p.relative_to(ROOT).parts): continue
         try: json.loads(p.read_text(encoding='utf-8'));check(f'json:{p.relative_to(ROOT)}',True)
         except (ValueError,OSError) as exc: check(f'json:{p.name}',False,str(exc))
     for p in sorted(ROOT.rglob('*.yaml')):
-        if DISCOVERY_EXCLUDED_PARTS.intersection(p.parts): continue
+        if DISCOVERY_EXCLUDED_PARTS.intersection(p.relative_to(ROOT).parts): continue
         try: yaml.safe_load(p.read_text(encoding='utf-8'));check(f'yaml:{p.relative_to(ROOT)}',True)
         except yaml.YAMLError as exc: check(f'yaml:{p.name}',False,str(exc))
     schemas = {p.stem.replace('.schema',''):json.loads(p.read_text()) for p in (ROOT/'schemas').glob('*.json')}
@@ -1843,7 +1843,7 @@ def main() -> int:
         check('fences:'+p.name,len(re.findall(r'^```',text,re.M))%2==0)
         check('no_tool_tokens:'+p.name,'' not in text)
     for p in sorted(ROOT.rglob('*.md')):
-        if DISCOVERY_EXCLUDED_PARTS.intersection(p.parts): continue
+        if DISCOVERY_EXCLUDED_PARTS.intersection(p.relative_to(ROOT).parts): continue
         for target in re.findall(r'\]\(([^)]+)\)',p.read_text()):
             if '://' in target or target.startswith(('#','mailto:')):continue
             target=target.split('#')[0]

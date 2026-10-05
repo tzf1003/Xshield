@@ -75,6 +75,7 @@ jobs:
         timeout-minutes: 5
       - run: scripts/test_gateway_identity.sh
       - run: scripts/test_gateway_request_crypto.sh
+      - run: scripts/test_gateway_transport.sh
       - run: python scripts/validate_library.py
       - run: python scripts/check_audit_event_coverage.py
 
