@@ -3983,6 +3983,29 @@ mod tests {
         assert_eq!(details["upstream_health"]["status"], 503);
     }
 
+    // The edge reports its transport (native TLS, PROXY protocol) and the
+    // connections that failed before admission only in its health body;
+    // the console must receive those fields unchanged.
+    #[test]
+    fn health_details_pass_edge_transport_fields_through() {
+        let edge = json!({
+            "edge_state": "healthy",
+            "audit_state": "healthy",
+            "tls_enabled": true,
+            "tls_handshake_failures": 12,
+            "proxy_protocol_enabled": true,
+            "proxy_header_rejections": 3,
+            "connection_setup_shed": 0
+        });
+        let details = merged_health_details(Some(edge.clone()), None);
+        assert_eq!(details, edge);
+        let with_upstream =
+            merged_health_details(Some(edge), Some(json!({ "upstream_state": "healthy" })));
+        assert_eq!(with_upstream["tls_handshake_failures"], 12);
+        assert_eq!(with_upstream["proxy_header_rejections"], 3);
+        assert_eq!(with_upstream["upstream_state"], "healthy");
+    }
+
     #[test]
     fn site_list_query_rejects_unknown_and_duplicate_parameters() {
         assert_eq!(parse_site_list_query(None).unwrap(), (None, 100));
