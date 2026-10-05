@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3858,
-  "passed_count": 3858,
+  "checks_total": 3948,
+  "passed_count": 3948,
   "planned_security_test_cases": 78,
   "checks": [
     {
@@ -14127,6 +14127,456 @@
     },
     {
       "name": "outbox:response_grant:reject_legacy_sparse",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:valid_first_action",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:valid_second_action",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_schema_version",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_event_type",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_event_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_tenant_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_site_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_request_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_trace_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_span_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_producer_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_producer_boot_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_producer_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_request_seq",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_occurred_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_observed_at",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_policy_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_example_only",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_cause_event_ids",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_envelope_integrity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_reason_code",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_action_ref",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_action_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_binding_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_auth_epoch",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_page_evidence_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_page_template",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_build_fingerprint",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_operation_id",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_method",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_route_template",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_field_profile",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_fields",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_target_kind",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_mapping_revision",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_action_count",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_issued_at_unix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_expires_at_unix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:missing_payload_page_expires_at_unix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_event_id_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_binding_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_page_prefix",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_action_ref_uppercase",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_action_ref_short",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_build_uppercase",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_build_short",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_method_trace",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_fields_present",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_target_resource",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_stage",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_outcome",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_reason",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_route_query",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_route_relative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_count_zero",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_count_over_page_bound",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_epoch_zero",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_epoch_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_issued_negative",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:reject_page_expiry_overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:action_id_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:action_id_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:action_id_unicode",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:page_template_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:page_template_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:page_template_unicode",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:operation_id_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:operation_id_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:operation_id_unicode",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:field_profile_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:field_profile_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:field_profile_unicode",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:mapping_revision_empty",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:mapping_revision_too_long",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:mapping_revision_unicode",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:wrong_producer",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:wrong_sensitivity",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:example_fixture",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:sequence_over_page_bound",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:nonempty_evidence_refs",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:nonempty_causes",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:fractional_time",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:unknown_payload",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:unknown_envelope",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "outbox:ui_action:rust_only_cross_field_checks",
       "passed": true,
       "detail": ""
     },

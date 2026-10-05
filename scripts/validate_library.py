@@ -1187,6 +1187,125 @@ def check_response_grant_contracts(schema: dict) -> None:
                   event_id=first['event_id'], request_id=first['request_id'])
     check('outbox:response_grant:reject_legacy_sparse', not valid(schema, sparse))
 
+def check_ui_action_contracts(schema: dict) -> None:
+    """Exercise the page-issued ui_action.issued envelope and payload boundary."""
+    issued = 1_789_776_000
+    base = {
+        'schema_version': 3,
+        'event_type': 'ui_action.issued',
+        'event_id': 'ev_018f2a3b-4c5d-7000-8000-000000000061',
+        'tenant_id': 'tenant_demo',
+        'site_id': 'site_demo',
+        'request_id': 'req_018f2a3b-4c5d-7000-8000-000000000063',
+        'trace_id': '018f2a3b4c5d70008000000000000063',
+        'span_id': '018f2a3b4c5d7063',
+        'producer_id': 'gateway-ui-action',
+        'producer_boot_id': 'req_018f2a3b-4c5d-7000-8000-000000000063',
+        'producer_seq': 1,
+        'request_seq': 1,
+        'occurred_at': '2026-09-19T00:00:00Z',
+        'observed_at': '2026-09-19T00:00:00Z',
+        'policy_revision': 'policy-r1',
+        'example_only': False,
+        'evidence_refs': [],
+        'cause_event_ids': [],
+        'payload': {
+            'stage': 'ui_action',
+            'outcome': 'PASS',
+            'reason_code': 'UI_ACTION_ISSUED',
+            'action_ref': 'action.' + 'a' * 64,
+            'action_id': 'app.orders.list',
+            'binding_id': 'auth_018f2a3b-4c5d-7000-8000-000000000064',
+            'auth_epoch': 1,
+            'page_evidence_id': 'page_018f2a3b-4c5d-7000-8000-000000000065',
+            'page_template': 'app.page',
+            'build_fingerprint': 'b' * 64,
+            'operation_id': 'orders.list',
+            'method': 'GET',
+            'route_template': '/orders',
+            'field_profile': 'none',
+            'fields': [],
+            'target_kind': 'none',
+            'mapping_revision': 'mapping-r1',
+            'action_count': 2,
+            'issued_at_unix': issued,
+            'expires_at_unix': issued + 600,
+            'page_expires_at_unix': issued + 900,
+        },
+        'sensitivity': 'SENSITIVE',
+        'integrity': {'state': 'pending', 'previous_hash': None, 'event_hash': None},
+    }
+    second = copy.deepcopy(base)
+    second['event_id'] = 'ev_018f2a3b-4c5d-7000-8000-000000000062'
+    second['producer_seq'] = second['request_seq'] = 2
+    second['payload']['action_ref'] = 'action.' + 'c' * 64
+    second['payload']['method'] = 'POST'
+    check('outbox:ui_action:valid_first_action', valid(schema, base))
+    check('outbox:ui_action:valid_second_action', valid(schema, second))
+    for field in base:
+        missing = copy.deepcopy(base)
+        del missing[field]
+        check('outbox:ui_action:missing_envelope_' + field, not valid(schema, missing))
+    for field in base['payload']:
+        missing = copy.deepcopy(base)
+        del missing['payload'][field]
+        check('outbox:ui_action:missing_payload_' + field, not valid(schema, missing))
+    for label, field, value in [
+        ('event_id_prefix', 'event_id', 'grant_018f2a3b-4c5d-7000-8000-000000000061'),
+        ('binding_prefix', 'binding_id', 'page_018f2a3b-4c5d-7000-8000-000000000064'),
+        ('page_prefix', 'page_evidence_id', 'auth_018f2a3b-4c5d-7000-8000-000000000065'),
+        ('action_ref_uppercase', 'action_ref', 'action.' + 'A' * 64),
+        ('action_ref_short', 'action_ref', 'action.' + 'a' * 63),
+        ('build_uppercase', 'build_fingerprint', 'B' * 64),
+        ('build_short', 'build_fingerprint', 'b' * 63),
+        ('method_trace', 'method', 'TRACE'),
+        ('fields_present', 'fields', ['order_id']),
+        ('target_resource', 'target_kind', 'resource'),
+        ('stage', 'stage', 'response_grant'),
+        ('outcome', 'outcome', 'DENY'),
+        ('reason', 'reason_code', 'UI_ACTION_ALREADY_ISSUED'),
+        ('route_query', 'route_template', '/orders?x=1'),
+        ('route_relative', 'route_template', 'orders'),
+        ('count_zero', 'action_count', 0),
+        ('count_over_page_bound', 'action_count', 17),
+        ('epoch_zero', 'auth_epoch', 0),
+        ('epoch_negative', 'auth_epoch', -1),
+        ('issued_negative', 'issued_at_unix', -1),
+        ('page_expiry_overflow', 'page_expires_at_unix', 2 ** 63),
+    ]:
+        invalid = copy.deepcopy(base)
+        target = invalid['payload'] if field in invalid['payload'] else invalid
+        target[field] = value
+        check('outbox:ui_action:reject_' + label, not valid(schema, invalid))
+    for field in ['action_id', 'page_template', 'operation_id', 'field_profile', 'mapping_revision']:
+        for label, value in [('empty', ''), ('too_long', 'a' * 129), ('unicode', 'é')]:
+            invalid = copy.deepcopy(base)
+            invalid['payload'][field] = value
+            check(f'outbox:ui_action:{field}_{label}', not valid(schema, invalid))
+    for label, field, value in [
+        ('wrong_producer', 'producer_id', 'gateway-response-grant'),
+        ('wrong_sensitivity', 'sensitivity', 'INTERNAL'),
+        ('example_fixture', 'example_only', True),
+        ('sequence_over_page_bound', 'producer_seq', 17),
+        ('nonempty_evidence_refs', 'evidence_refs', ['artifact_018f2a3b-4c5d-7000-8000-000000000001']),
+        ('nonempty_causes', 'cause_event_ids', ['ev_018f2a3b-4c5d-7000-8000-000000000002']),
+        ('fractional_time', 'occurred_at', '2026-09-19T00:00:00.1Z'),
+    ]:
+        invalid = copy.deepcopy(base)
+        invalid[field] = value
+        check('outbox:ui_action:' + label, not valid(schema, invalid))
+    for label, fields in [('unknown_payload', {'extra': True}), ('unknown_envelope', {'extra': True})]:
+        invalid = copy.deepcopy(base)
+        (invalid['payload'] if label.endswith('payload') else invalid).update(fields)
+        check('outbox:ui_action:' + label, not valid(schema, invalid))
+    # Cross-field checks (lease ordering, sequence <= count, boot = request) are Rust's.
+    rust_only = copy.deepcopy(base)
+    rust_only['payload']['expires_at_unix'] = rust_only['payload']['page_expires_at_unix'] + 1
+    rust_only['producer_boot_id'] = 'req_018f2a3b-4c5d-7000-8000-000000000066'
+    rust_only['producer_seq'] = rust_only['request_seq'] = 16
+    check('outbox:ui_action:rust_only_cross_field_checks', valid(schema, rust_only))
+
+
 def check_grant_contracts(schema: dict) -> None:
     """Validate generic resource-grant issuance shape; Rust owns row binding."""
     issued = 1_789_776_000
@@ -1817,6 +1936,7 @@ def main() -> int:
     check_model_evaluation_contracts(schemas, model_stage, choice)
     check_outbox_contracts(schemas)
     check_response_grant_contracts(schemas['audit-event'])
+    check_ui_action_contracts(schemas['audit-event'])
     check_grant_contracts(schemas['audit-event'])
     check_share_grant_contracts(schemas['audit-event'])
     check_calibration_report_contract(schemas['audit-event'])
