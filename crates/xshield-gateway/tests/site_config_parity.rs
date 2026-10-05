@@ -1112,8 +1112,8 @@ fn lower_hex(bytes: &[u8]) -> String {
 /// real page; ports and the scratch directory are arbitrary).
 fn script_gateway_config() -> serde_json::Value {
     let start = BROWSER_LOOP_SCRIPT
-        .find("cat >\"$test_dir/gateway.json\" <<JSON\n")
-        .expect("the loop script writes gateway.json from a heredoc");
+        .find("cat >\"$test_dir/site.json\" <<JSON\n")
+        .expect("the loop script writes site.json from a heredoc");
     let body = &BROWSER_LOOP_SCRIPT[start..];
     let body = &body[body.find('\n').unwrap() + 1..];
     let body = &body[..body.find("\nJSON\n").unwrap()];
