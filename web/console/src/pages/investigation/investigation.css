@@ -165,6 +165,33 @@
   gap: 8px;
 }
 
+/* ---------- Option rows and stacked table cells ---------- */
+.xs-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.xs-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
+.xs-option .ant-select {
+  min-width: 112px;
+}
+
+.xs-event-cell {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  min-width: 0;
+}
+
 /* ---------- Tables ---------- */
 .xs-row-link {
   cursor: pointer;

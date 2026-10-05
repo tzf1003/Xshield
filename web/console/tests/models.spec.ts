@@ -81,6 +81,27 @@ test.describe("model call list", () => {
     expect(new URL(`http://console.test${lists[1]?.path}`).searchParams.has("cursor")).toBe(true);
   });
 
+  test("a preset window is converted when it is pressed: whole UTC seconds, 24 hours", async ({
+    page,
+  }) => {
+    const calls = await mockControl(page);
+    await signInQuietly(page);
+    await openView(page, "model-list");
+    await expect(page.getByRole("button", { name: "24 小时", exact: true })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await page.getByRole("button", { name: "读取模型调用", exact: true }).click();
+    await expect(rows(page)).toHaveCount(25);
+    const url = new URL(`http://console.test${listCalls(calls)[0]?.path}`);
+    const start = url.searchParams.get("start") as string;
+    const end = url.searchParams.get("end") as string;
+    expect(start).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    expect(end).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    expect(Date.parse(end) - Date.parse(start)).toBe(24 * 60 * 60 * 1000);
+    expect(url.searchParams.get("limit")).toBe("25");
+  });
+
   test("the plan and scan facts can be read, and editing retires the rows", async ({ page }) => {
     await mockControl(page);
     await signInQuietly(page);

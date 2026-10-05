@@ -52,8 +52,7 @@ export function IdentityPage() {
           }))}
         />
         <p className="xs-foot">
-          {ROLE_OBSERVER_TEXT}
-          历史检索另需 Investigator；账本观察与历史索引各自查询。
+          {ROLE_OBSERVER_TEXT}资格与身份绑定是两本独立的账本，分别读取、分别鉴权。
         </p>
       </section>
     </div>

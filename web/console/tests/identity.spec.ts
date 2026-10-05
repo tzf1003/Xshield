@@ -1,7 +1,13 @@
 import { expect, type Page, test } from "@playwright/test";
 import { type Call, mockControl, paint, requestSettled } from "./control-mock";
 import { errorFixture, REQUEST_ID, SEARCH_PLAN, TOKEN } from "./fixtures";
-import { expectPrefilled, pickRange, signInQuietly, submitSearch } from "./investigation-helpers";
+import {
+  expectPrefilled,
+  pasteId,
+  pickRange,
+  signInQuietly,
+  submitSearch,
+} from "./investigation-helpers";
 import {
   BINDING_ID,
   bindingFixture,
@@ -57,6 +63,23 @@ test("one page, two tabs: both addresses keep resolving and the tab follows the 
   await page.getByRole("button", { name: "查询", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/investigation/bindings/${BINDING_ID}$`));
   await expect(bindingRecord(page)).toContainText(BINDING_ID);
+});
+
+test("⌘K opens a grant or a binding on its own tab", async ({ page }) => {
+  const calls = await mockControl(page);
+  await signInQuietly(page);
+  await pasteId(page, GRANT_ID);
+  await expect(page).toHaveURL(new RegExp(`/investigation/grants/${GRANT_ID}$`));
+  await expect(page.getByRole("tab", { name: "资格", selected: true })).toBeVisible();
+  await expect(grantRecord(page)).toContainText("orders.read");
+  await pasteId(page, BINDING_ID);
+  await expect(page).toHaveURL(new RegExp(`/investigation/bindings/${BINDING_ID}$`));
+  await expect(page.getByRole("tab", { name: "身份绑定", selected: true })).toBeVisible();
+  await expect(bindingRecord(page)).toContainText(BINDING_ID);
+  expect(paths(calls)).toEqual([
+    `/control/v1/grants/${GRANT_ID}`,
+    `/control/v1/auth-bindings/${BINDING_ID}`,
+  ]);
 });
 
 test("a pasted ID of the other kind opens the other tab; bad input sends nothing", async ({

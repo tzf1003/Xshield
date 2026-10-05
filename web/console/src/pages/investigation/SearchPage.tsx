@@ -466,9 +466,7 @@ function ConditionBuilder({ disabled, full, existing, onAdd }: BuilderProps) {
             value={value}
             disabled={disabled}
             status={problem ? "error" : undefined}
-            placeholder={
-              def ? def.placeholder : "粘贴 ID（req_… ev_… 或 32 位 Trace ID）自动识别字段"
-            }
+            placeholder={def ? def.placeholder : "粘贴 ID，自动识别字段"}
             autoComplete="off"
             spellCheck={false}
             maxLength={def?.input === "subject" ? 256 : 160}

@@ -42,25 +42,6 @@
   overflow-wrap: anywhere;
 }
 
-.xs-options {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
-}
-
-.xs-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--xs-ink-2);
-  font-size: 13px;
-}
-
-.xs-option .ant-select {
-  min-width: 112px;
-}
-
 .xs-columns {
   display: grid;
   gap: 6px;

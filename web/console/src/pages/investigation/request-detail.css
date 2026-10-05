@@ -28,13 +28,6 @@
   margin: 0;
 }
 
-.xs-event-cell {
-  display: grid;
-  gap: 2px;
-  justify-items: start;
-  min-width: 0;
-}
-
 .xs-row-actions {
   display: flex;
   flex-wrap: wrap;
