@@ -1,0 +1,196 @@
+/* Event and artifact drawers, causality and the add-to-case dialog. Tokens only. */
+
+.xs-cause {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.xs-times {
+  display: grid;
+  gap: 2px;
+}
+
+.xs-drawer-body {
+  display: grid;
+  gap: 14px;
+}
+
+.xs-drawer-body .ant-descriptions-item-label {
+  width: 104px;
+  min-width: 104px;
+}
+
+.xs-drawer-body .ant-descriptions-item-content .xs-sub {
+  margin-left: 8px;
+}
+
+.xs-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.xs-details .ant-collapse-content-box {
+  display: grid;
+  gap: 8px;
+}
+
+/* ---------- Causality ---------- */
+.xs-causality {
+  display: grid;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--xs-line);
+}
+
+.xs-causality h3,
+.xs-branch h4 {
+  margin: 0;
+}
+
+.xs-causality-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.xs-causality-limits {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.xs-causality-limits label {
+  color: var(--xs-ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.xs-causality-result,
+.xs-local-causal {
+  display: grid;
+  gap: 10px;
+}
+
+.xs-branches {
+  display: grid;
+  gap: 12px;
+}
+
+.xs-branch {
+  display: grid;
+  gap: 6px;
+}
+
+.xs-hop {
+  display: grid;
+  gap: 4px;
+}
+
+.xs-hop-label {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-hop ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-node {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  width: 100%;
+  padding: 6px 10px;
+  color: var(--xs-ink);
+  text-align: left;
+  background: var(--xs-surface);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+  font: inherit;
+  cursor: pointer;
+}
+
+.xs-node:hover {
+  background: var(--xs-primary-soft);
+}
+
+.xs-node:focus-visible {
+  outline: 2px solid var(--xs-primary);
+  outline-offset: 1px;
+}
+
+.xs-node-main {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.xs-node-sub {
+  color: var(--xs-ink-2);
+  font-size: 12px;
+}
+
+.xs-node-id {
+  flex-basis: 100%;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+/* ---------- Add to case ---------- */
+.xs-add-case {
+  display: grid;
+  gap: 12px;
+}
+
+.xs-case-list {
+  display: grid;
+  gap: 8px;
+}
+
+.xs-case-option {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+}
+
+.xs-case-purpose {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.xs-case-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (width <= 760px) {
+  .xs-causality-limits {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

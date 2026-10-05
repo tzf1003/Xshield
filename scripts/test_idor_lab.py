@@ -20,8 +20,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-EDGE = ROOT / "target/debug/xshield-gateway"
-MODEL_EVAL = ROOT / "target/debug/xshield-model-eval"
+# Honour CARGO_TARGET_DIR so builds can live outside the repository (large disk).
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+EDGE = TARGET / "debug/xshield-gateway"
+MODEL_EVAL = TARGET / "debug/xshield-model-eval"
 FINGERPRINT_KEY = "7" * 64
 LABELS = ROOT / "tests/security-lab/independent_labels.json"
 SCENARIOS = {
@@ -441,8 +443,19 @@ def main():
     db_name = "xshield_lab_" + uuid.uuid4().hex[:16]
     db_env = os.environ.copy()
     db_env.pop("XSHIELD_JEV_API_KEY", None)
-    db_env.update({"PGHOST": "127.0.0.1", "PGPORT": "55432", "PGUSER": "xshield_dev",
-                   "PGPASSWORD": os.getenv("XSHIELD_LAB_PGPASSWORD", "xshield_dev")})
+    # Defaults match the development Compose database; XSHIELD_LAB_PG* point the
+    # lab at another PostgreSQL (CI service, local server). An empty password
+    # means trust authentication.
+    pg_user = os.getenv("XSHIELD_LAB_PGUSER", "xshield_dev")
+    pg_password = os.getenv("XSHIELD_LAB_PGPASSWORD", "xshield_dev")
+    pg_host = os.getenv("XSHIELD_LAB_PGHOST", "127.0.0.1")
+    pg_port = os.getenv("XSHIELD_LAB_PGPORT", "55432")
+    db_env.update({"PGHOST": pg_host, "PGPORT": pg_port, "PGUSER": pg_user})
+    if pg_password:
+        db_env["PGPASSWORD"] = pg_password
+    else:
+        db_env.pop("PGPASSWORD", None)
+    credentials_part = f"{pg_user}:{pg_password}" if pg_password else pg_user
     db_command(["createdb", db_name], db_env)
     try:
         for migration in sorted((ROOT / "migrations").glob("*.sql")):
@@ -491,7 +504,7 @@ def main():
                 "XSHIELD_CONFIG": str(config_path), "XSHIELD_PUBLIC_HOSTS": spec["host"],
                 "XSHIELD_EDGE_LISTEN_PORTS": f"127.0.0.1:{listen}",
                 "XSHIELD_JOURNAL_KEY_HEX": "8" * 64, "XSHIELD_FINGERPRINT_KEY_HEX": FINGERPRINT_KEY,
-                "XSHIELD_DATABASE_URL": f"postgresql://xshield_dev:{db_env['PGPASSWORD']}@127.0.0.1:55432/{db_name}",
+                "XSHIELD_DATABASE_URL": f"postgresql://{credentials_part}@{pg_host}:{pg_port}/{db_name}",
             })
             edge_env.pop("XSHIELD_EDGE_APPLY_KEY_HEX", None)
             edge_env.pop("XSHIELD_EDGE_SNAPSHOT_PATH", None)

@@ -1,6 +1,10 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
-import { REQUEST_ID } from "./fixtures";
+import { mockControl } from "./control-mock";
+import { AGENT_RUN_ID, CALIBRATION_REPORT_ID, MODEL_CALL_ID, REQUEST_ID } from "./fixtures";
+import { pickRange } from "./investigation-helpers";
+import { BINDING_ID, GRANT_ID } from "./ledger-fixtures";
+import { openView } from "./navigation";
 import { mockShellApi, SCOPE, signIn } from "./shell-helpers";
 
 // axe-core scans of the redesigned screens in both themes. Only critical and serious findings
@@ -60,7 +64,7 @@ const sitesList = {
 
 for (const scheme of ["light", "dark"] as const) {
   test.describe(`accessibility (${scheme})`, () => {
-    test.use({ colorScheme: scheme });
+    test.use({ colorScheme: scheme, timezoneId: "UTC" });
 
     test("sign-in screen", async ({ page }) => {
       await mockShellApi(page);
@@ -88,11 +92,99 @@ for (const scheme of ["light", "dark"] as const) {
 
     test("request investigation with data", async ({ page }) => {
       await mockShellApi(page);
-      await signIn(page, "/investigation/requests");
-      await page.getByLabel("请求 ID", { exact: true }).fill(REQUEST_ID);
-      await page.getByRole("button", { name: "查询", exact: true }).click();
+      await signIn(page, "/access/session");
+      await page.keyboard.press("Control+KeyK");
+      await page.getByRole("combobox", { name: "命令面板" }).fill(REQUEST_ID);
+      await page.keyboard.press("Enter");
       await expect(page.getByRole("tab", { name: "事件时间线" })).toBeVisible();
       await expect(page.getByText("REQUEST_ACCEPTED", { exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+      // The event drawer with its causality section, and the evidence tab.
+      await page
+        .getByRole("button", { name: /^查看事件 / })
+        .first()
+        .click();
+      const drawer = page.getByRole("dialog", { name: "事件详情" });
+      await expect(drawer.getByRole("button", { name: "查看因果", exact: true })).toBeVisible();
+      await drawer.getByText("更多事件字段", { exact: true }).click();
+      expect(await serious(page)).toEqual([]);
+      await page.keyboard.press("Escape");
+      await expect(drawer).toHaveCount(0);
+      await page.getByRole("tab", { name: "输入与输出" }).click();
+      await expect(page.getByRole("tabpanel", { name: "输入与输出" })).toContainText("已脱敏");
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("request stream with data", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, "/access/session");
+      await openView(page, "request");
+      await expect(page.locator(".ant-table-row")).toHaveCount(25);
+      expect(await serious(page)).toEqual([]);
+      await page.getByRole("button", { name: /更多筛选/ }).click();
+      await expect(page.getByLabel("操作 ID", { exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("structured search with conditions and results", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, "/access/session");
+      await openView(page, "search");
+      await expect(
+        page.getByRole("heading", { name: "结构化事件检索", exact: true }),
+      ).toBeVisible();
+      // The form with a condition, the open column picker and the unfilled range hint.
+      await page.getByLabel("条件值", { exact: true }).fill(REQUEST_ID);
+      await page.getByRole("button", { name: "添加条件", exact: true }).click();
+      await expect(page.getByRole("list", { name: "已添加的检索条件" })).toContainText(REQUEST_ID);
+      expect(await serious(page)).toEqual([]);
+      await pickRange(page, "2026-09-20T00:00", "2026-09-21T00:00");
+      await page.getByRole("button", { name: "检索事件", exact: true }).click();
+      await expect(page.locator(".ant-table-row")).toHaveCount(25);
+      expect(await serious(page)).toEqual([]);
+      await page.getByRole("button", { name: "选择列", exact: true }).click();
+      await expect(page.getByRole("checkbox", { name: "Trace", exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+      await page.keyboard.press("Escape");
+      await page.getByText("查看已提交计划", { exact: true }).click();
+      await expect(page.getByRole("region", { name: "已提交查询计划" })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("identity and grants with a snapshot", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, `/investigation/grants/${GRANT_ID}`);
+      await expect(page.getByRole("region", { name: "资格记录", exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+      await page.getByRole("link", { name: BINDING_ID, exact: true }).click();
+      await expect(page.getByRole("region", { name: "身份绑定记录", exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("model call list and detail", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, "/access/session");
+      await openView(page, "model-list");
+      await page.getByRole("button", { name: "自定义", exact: true }).click();
+      await page.getByLabel("开始时间（本地，含）", { exact: true }).fill("2026-09-20T00:00");
+      await page.getByLabel("结束时间（本地，不含）", { exact: true }).fill("2026-09-21T00:00");
+      await page.getByRole("button", { name: "读取模型调用", exact: true }).click();
+      await expect(page.locator(".ant-table-row")).toHaveCount(25);
+      expect(await serious(page)).toEqual([]);
+      await page.getByRole("link", { name: MODEL_CALL_ID, exact: true }).click();
+      await expect(page.getByText("#3 · model.responded · success")).toBeVisible();
+      await page.getByText("#3 · model.responded · success", { exact: true }).click();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("agent run and calibration report", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, `/investigation/agents/${AGENT_RUN_ID}`);
+      await expect(page.getByText(/agent\.tool_called/)).toBeVisible();
+      await page.getByText(/#2 · agent\.tool_called/).click();
+      expect(await serious(page)).toEqual([]);
+      await signIn(page, `/investigation/calibration/${CALIBRATION_REPORT_ID}`);
+      await expect(page.getByRole("region", { name: "校准报告详情" })).toBeVisible();
       expect(await serious(page)).toEqual([]);
     });
 

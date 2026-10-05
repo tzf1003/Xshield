@@ -33,8 +33,10 @@ use std::{
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
+use xshield_gateway::edge_transport::{EdgeTransport, TransportConfig, http_server_options};
 use xshield_gateway::multi_site::{
-    ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot,
+    ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot, origin_form_target,
+    routing_authority,
 };
 use xshield_gateway::request_crypto::{
     FrozenRequest, KeyAccessPort, KeyAccessQuery, RequestCryptoPolicy,
@@ -67,12 +69,6 @@ use crate::protected_identity::{
 
 const ENCRYPTED_REQUEST_CONTENT_TYPE: &str = "application/vnd.xshield.encrypted+json";
 
-// Pingora normally fills socket metadata in its own listener service. The
-// dynamic listener supervisor uses the public ServerApp API, so carry the
-// accepted socket tuple through the task instead of guessing the route port.
-tokio::task_local! {
-    pub(crate) static DOWNSTREAM_SOCKET: (Option<SocketAddr>, Option<SocketAddr>);
-}
 fn validate_sensor_observation_headers(
     request: &pingora::http::RequestHeader,
     expected_origin: &str,
@@ -229,10 +225,8 @@ impl ProxyHttp for Gateway {
             origin_response_complete: false,
             response_source: ResponseSource::Origin,
             snapshot: None,
-            listener_port: DOWNSTREAM_SOCKET
-                .try_with(|(_, local)| local.map(|address| address.port()))
-                .ok()
-                .flatten(),
+            // Known once request_filter reads the connection's socket digest.
+            listener_port: None,
             host: None,
             audit: None,
         }
@@ -257,40 +251,32 @@ impl ProxyHttp for Gateway {
             .await?;
             return Ok(true);
         }
+        // The edge transport writes the attributed client (the PROXY source
+        // from a trusted balancer, else the TCP peer) and the listener address
+        // into the connection's socket digest, for HTTP/1 and HTTP/2 alike.
         let client_ip = session
             .as_downstream()
             .client_addr()
             .and_then(|address| address.as_inet())
-            .map(std::net::SocketAddr::ip)
-            .or_else(|| {
-                DOWNSTREAM_SOCKET
-                    .try_with(|(peer, _)| peer.map(|address| address.ip()))
-                    .ok()
-                    .flatten()
-            });
-        let request = session.req_header();
-        let method = request.method.as_str().to_owned();
-        let path = request.uri.path().to_owned();
-        let host = request
-            .headers
-            .get("Host")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+            .map(std::net::SocketAddr::ip);
         let listener_port = session
             .as_downstream()
             .server_addr()
             .and_then(|address| address.as_inet().map(std::net::SocketAddr::port))
-            .or_else(|| {
-                DOWNSTREAM_SOCKET
-                    .try_with(|(_, local)| local.map(|address| address.port()))
-                    .ok()
-                    .flatten()
-            })
             .unwrap_or_else(|| context.config(self).listen().port());
+        let request = session.req_header();
+        let method = request.method.as_str().to_owned();
+        let path = request.uri.path().to_owned();
+        // Host and the HTTP/2 :authority or HTTP/1 absolute-form authority
+        // must agree; an ambiguous request has no site and is refused below
+        // exactly like an unknown Host.
+        let authority = routing_authority(request);
+        let host = authority.ok().flatten().map(str::to_owned);
         let snapshot = self.snapshot.load();
-        if snapshot
-            .route(listener_port, host.as_deref().unwrap_or_default())
-            .is_none()
+        if authority.is_err()
+            || snapshot
+                .route(listener_port, host.as_deref().unwrap_or_default())
+                .is_none()
         {
             // No site owns this request, so it cannot be audited under one and
             // a durable event per request would let a flood fill the journal.
@@ -523,6 +509,15 @@ impl ProxyHttp for Gateway {
             }
             upstream_request.insert_header("Content-Type", "application/json")?;
             upstream_request.insert_header("Content-Length", length.to_string())?;
+        }
+        // The origin always receives an origin-form target and its configured
+        // Host. An HTTP/2 request or an HTTP/1 absolute-form target would
+        // otherwise reach it as an absolute URI carrying the client's scheme.
+        // A non-UTF-8 target is left for Pingora, which refuses to rewrite it.
+        if upstream_request.raw_path_is_utf8()
+            && let Some(target) = origin_form_target(upstream_request)
+        {
+            upstream_request.set_uri(target);
         }
         upstream_request.insert_header("Host", context.config(self).origin_server_name())?;
         upstream_request.insert_header("X-Xshield-Request-Id", &context.request_id)?;
@@ -1980,6 +1975,11 @@ fn is_xshield_encrypted_content_type(request: &pingora::http::RequestHeader) -> 
 fn run() -> Result<(), Box<dyn Error>> {
     let config = Arc::new(load_config()?);
     let snapshot_config = load_config()?;
+    // Validated before anything binds or writes: a broken TLS or PROXY
+    // configuration stops startup instead of serving plaintext.
+    let transport = Arc::new(EdgeTransport::new(TransportConfig::from_lookup(|name| {
+        env::var_os(name)
+    })?));
     let apply_key = env::var("XSHIELD_EDGE_APPLY_KEY_HEX")
         .ok()
         .map(|value| apply_api::key_from_hex(&value).ok_or("invalid edge apply key"))
@@ -2075,7 +2075,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let unrouted = Arc::new(UnroutedDenials::default());
     let mut server = Server::new(None)?;
     server.bootstrap();
-    let proxy = pingora::proxy::http_proxy(
+    let mut proxy = pingora::proxy::http_proxy(
         &server.configuration,
         Gateway {
             config: Arc::clone(&config),
@@ -2091,6 +2091,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             unrouted: Arc::clone(&unrouted),
         },
     );
+    proxy.server_options = Some(http_server_options());
     let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -2112,6 +2113,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let supervisor = runtime.block_on(ListenerSupervisor::new(
         Arc::clone(&coordinator),
         Arc::new(proxy),
+        transport,
         config.listen().ip(),
         &listener_addresses,
         shutdown.clone(),

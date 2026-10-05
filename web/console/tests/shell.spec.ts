@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { errorFixture, REQUEST_ID } from "./fixtures";
+import { expectPrefilled } from "./investigation-helpers";
 import {
   CASE_ID,
   mockShellApi,
@@ -42,11 +43,10 @@ test.describe("command palette", () => {
     const option = page.getByRole("option", { name: /在事件检索中查找 Trace ID/ });
     await expect(option).toBeVisible();
     await option.click();
-    await expect(page).toHaveURL(/\/investigation\/search$/);
-    await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("trace_id");
-    await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(TRACE_ID);
-    await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
-    await expect(page.getByText("已预填目标引用，请确认 UTC 时间窗后提交历史检索。")).toBeVisible();
+    await expect(page).toHaveURL(
+      new RegExp(`/investigation/search\\?prefill=trace_id%3A${TRACE_ID}$`),
+    );
+    await expectPrefilled(page, "Trace ID", TRACE_ID);
     expect(calls.some((call) => call.path === "/control/v1/search")).toBe(false);
   });
 
@@ -364,7 +364,7 @@ test.describe("session end clears both layers", () => {
     expect(await storageSnapshot(page)).toEqual({ local: {}, session: {} });
   });
 
-  test("a 401 on a legacy read clears the guarded layer too", async ({ page }) => {
+  test("a 401 on a request read clears the guarded layer too", async ({ page }) => {
     let expired = false;
     await mockShellApi(page, (url) =>
       expired && url.pathname.startsWith("/control/v1/requests/")
@@ -386,8 +386,8 @@ test.describe("session end clears both layers", () => {
       .getByRole("link", { name: "请求调查", exact: true })
       .click();
     expired = true;
-    await page.getByLabel("请求 ID", { exact: true }).fill(REQUEST_ID);
-    await page.getByRole("button", { name: "查询", exact: true }).click();
+    await page.getByLabel("按请求 ID 打开", { exact: true }).fill(REQUEST_ID);
+    await page.getByRole("button", { name: "打开", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("管理会话已失效");
     expect(await seamState(page)).toMatchObject({ status: "disconnected", queries: 0, pending: 0 });
     await expect(page.getByText(REQUEST_ID)).toHaveCount(0);

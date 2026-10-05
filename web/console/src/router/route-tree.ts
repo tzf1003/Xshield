@@ -106,6 +106,19 @@ export function createAppRouteTree(components: RouteComponents) {
     stringify: (params: Record<string, string>) => ({ [name]: params[name] }),
   });
 
+  const agentPage = lazyRouteComponent(
+    () => import("../pages/investigation/AgentPage"),
+    "AgentPage",
+  );
+  const calibrationPage = lazyRouteComponent(
+    () => import("../pages/investigation/CalibrationPage"),
+    "CalibrationPage",
+  );
+  const identityPage = lazyRouteComponent(
+    () => import("../pages/investigation/IdentityPage"),
+    "IdentityPage",
+  );
+
   const children = [
     page("overview", "/", {
       component: lazyRouteComponent(() => import("../pages/OverviewPage"), "OverviewPage"),
@@ -160,32 +173,65 @@ export function createAppRouteTree(components: RouteComponents) {
       },
     }),
     page("api-keys", "admin/api-keys"),
-    page("request", "investigation/requests"),
+    page("request", "investigation/requests", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/RequestStreamPage"),
+        "RequestStreamPage",
+      ),
+    }),
     page("request", "investigation/requests/$requestId", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/RequestDetailPage"),
+        "RequestDetailPage",
+      ),
       params: idParams("requestId", requestPattern),
     }),
-    page("model-list", "investigation/models"),
-    page("model", "investigation/models/lookup"),
+    page("model-list", "investigation/models", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/ModelListPage"),
+        "ModelListPage",
+      ),
+    }),
+    // The lookup form became the ID box of the list, so the old address redirects there.
+    page("model", "investigation/models/lookup", {
+      beforeLoad: () => {
+        throw redirect({ to: "/investigation/models", replace: true } as never);
+      },
+    }),
     page("model", "investigation/models/$modelCallId", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/ModelDetailPage"),
+        "ModelDetailPage",
+      ),
       params: idParams("modelCallId", modelCallPattern),
     }),
-    page("agent", "investigation/agents"),
+    page("agent", "investigation/agents", { component: agentPage }),
     page("agent", "investigation/agents/$agentRunId", {
+      component: agentPage,
       params: idParams("agentRunId", agentRunPattern),
     }),
-    page("grant", "investigation/grants"),
+    // One page with two tabs; every address that used to be a separate page keeps resolving.
+    page("grant", "investigation/grants", { component: identityPage }),
     page("grant", "investigation/grants/$grantId", {
+      component: identityPage,
       params: idParams("grantId", grantPattern),
     }),
-    page("binding", "investigation/bindings"),
+    page("binding", "investigation/bindings", { component: identityPage }),
     page("binding", "investigation/bindings/$bindingId", {
+      component: identityPage,
       params: idParams("bindingId", bindingPattern),
     }),
-    page("calibration-report", "investigation/calibration"),
+    page("calibration-report", "investigation/calibration", { component: calibrationPage }),
     page("calibration-report", "investigation/calibration/$reportId", {
+      component: calibrationPage,
       params: idParams("reportId", calibrationReportPattern),
     }),
-    page("search", "investigation/search"),
+    page("search", "investigation/search", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/SearchPage"),
+        "SearchPage",
+      ),
+    }),
     page("case", "cases", {
       component: lazyRouteComponent(() => import("../pages/cases/CasesPage"), "CasesPage"),
       validateSearch: (search: Record<string, unknown>) => ({

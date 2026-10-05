@@ -4,6 +4,7 @@ import { caseItemFixture } from "./case-fixtures";
 import { exportListFixture, exportListItemFixture } from "./export-fixtures";
 import { ARTIFACT_ID, OTHER_ARTIFACT_ID } from "./fixtures";
 import { holdRecordFixture } from "./hold-fixtures";
+import { expectPrefilled } from "./investigation-helpers";
 import { signIn } from "./shell-helpers";
 import {
   apiCalls,
@@ -397,10 +398,10 @@ test.describe("holds tab", () => {
     });
 
     await page.getByRole("button", { name: `准备历史检索 ${HOLD_ID}` }).click();
-    await expect(page).toHaveURL(/\/investigation\/search$/);
-    await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("evidence_hold_id");
-    await expect(page.getByLabel("条件 1 值", { exact: true })).toHaveValue(HOLD_ID);
-    await expect(page.getByLabel("开始时间（UTC，含）", { exact: true })).toHaveValue("");
+    await expect(page).toHaveURL(
+      new RegExp(`/investigation/search\\?prefill=evidence_hold_id%3A${HOLD_ID}$`),
+    );
+    await expectPrefilled(page, "保留锁 ID", HOLD_ID);
     expect(apiCalls(calls).some((call) => call.path === "/control/v1/search")).toBe(false);
   });
 
@@ -487,8 +488,11 @@ test.describe("analysis tab", () => {
       .poll(() => apiCalls(calls).some((call) => call.path.startsWith("/control/v1/jobs/job_")))
       .toBe(true);
     await job.getByRole("button", { name: "准备任务历史检索" }).click();
-    await expect(page).toHaveURL(/\/investigation\/search$/);
-    await expect(page.getByLabel("条件 1 字段", { exact: true })).toHaveValue("job_id");
+    await expect(page).toHaveURL(/\/investigation\/search\?prefill=job_id%3Ajob_/);
+    await expect(page.getByRole("list", { name: "已添加的检索条件" })).toContainText(
+      "任务 ID：job_",
+    );
+    await expect(page.getByText("已预填目标引用，请确认 UTC 时间窗后提交历史检索。")).toBeVisible();
     expect(apiCalls(calls).some((call) => call.path === "/control/v1/search")).toBe(false);
   });
 });

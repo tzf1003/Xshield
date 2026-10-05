@@ -69,7 +69,7 @@ test.describe("command palette respects role visibility", () => {
     const pages = await optionLabels(page);
     expect(pages.some((text) => text.includes("案件工作台"))).toBe(false);
     expect(pages.some((text) => text.includes("站点状态"))).toBe(true);
-    expect(pages.some((text) => text.includes("模型调用详情"))).toBe(true);
+    expect(pages.some((text) => text.includes("模型调用"))).toBe(true);
   });
 
   test("an investigator searches events; hold-ID search additionally needs the audit role", async ({
@@ -188,6 +188,51 @@ test.describe("step-up status and the session menu", () => {
     await expect(nav.getByRole("link", { name: "案件工作台", exact: true })).toBeVisible();
     await expect(page.locator("main")).toContainText("observer、investigator");
     expect(reads()).toBe(before + 1);
+  });
+});
+
+test.describe("investigation pages state the role they need and leave the decision to the server", () => {
+  const paths = (calls: { path: string }[]) => calls.map((call) => call.path);
+
+  test("an observer reaches the search page by address, sees why it is disabled and sends nothing", async ({
+    page,
+  }) => {
+    const calls = await mockSession(page, { roles: ["observer"] });
+    await page.goto("/investigation/search");
+    await expect(page.getByRole("heading", { name: "结构化事件检索", exact: true })).toBeVisible();
+    await expect(page.getByText(/检索与因果查询需要 Investigator 角色/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "检索事件", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "添加条件", exact: true })).toBeDisabled();
+    expect(paths(calls).filter((path) => path.endsWith("/search"))).toEqual([]);
+  });
+
+  test("the request stream explains the missing Investigator role and still opens a request", async ({
+    page,
+  }) => {
+    const calls = await mockSession(page, { roles: ["observer"] });
+    await page.goto("/investigation/requests");
+    await expect(page.getByText("当前会话没有 Investigator 角色，无法浏览请求列表")).toBeVisible();
+    expect(paths(calls).filter((path) => path.endsWith("/search"))).toEqual([]);
+    await page.getByLabel("按请求 ID 打开", { exact: true }).fill(REQUEST_ID);
+    await page.getByRole("button", { name: "打开", exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/investigation/requests/${REQUEST_ID}$`));
+    // The server has the last word: it refuses here, and the page shows the safe code.
+    await expect(page.getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
+  });
+
+  test("a calibration report is attempted without the audit role, noted, and refused by the server", async ({
+    page,
+  }) => {
+    const calls = await mockSession(page, { roles: ["observer"] });
+    await page.goto("/investigation/calibration/calr_018f2a3b-4c5d-7000-8000-000000000021");
+    await expect(page.getByText(/当前会话没有 AuditAdministrator 角色/)).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
+    // The read was attempted. The development build mounts twice (React StrictMode) and may
+    // repeat the first read; the production build sends one.
+    const reads = paths(calls).filter((path) => path.includes("/calibration-reports/"));
+    expect(reads.length).toBeGreaterThanOrEqual(1);
+    expect(reads.length).toBeLessThanOrEqual(2);
+    await expect(page.getByText("报告正文 tombstone")).toHaveCount(0);
   });
 });
 

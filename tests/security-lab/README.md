@@ -16,6 +16,12 @@
     python3 scripts/test_idor_lab.py --scenario all
     docker compose -f docker-compose.security-lab.yml down
 
+## 不依赖 Docker 的越权回归
+
+`scripts/test_idor_lab_local.sh` 把两个靶场源站作为本机 Python 进程（仅监听 127.0.0.1:53001/53002，由 `LAB_ORIGIN_HOST`/`LAB_ORIGIN_PORT` 控制，容器默认值不变）启动，再运行 `scripts/test_idor_lab.py --scenario all`：脚本创建一次性 PostgreSQL 库并应用全部迁移，启动真实 edge 二进制，分别用本人和他人对象请求。PostgreSQL 连接默认指向开发 Compose（127.0.0.1:55432），可用 `XSHIELD_LAB_PGHOST/PGPORT/PGUSER/PGPASSWORD` 改写（密码留空表示 trust 认证）；edge 二进制取自 `${CARGO_TARGET_DIR:-<仓库>/target}/debug`。该脚本已进入 CI，不调用模型，也不覆盖 Juice Shop（仍需 Docker）。
+
+2026-10-05 本机一次运行结果：源站对两个站点的越权请求都返回 200（故意缺陷），经 edge 后越权请求为 403 `CAPABILITY_MISSING`，本人对象请求仍为 200。这只证明这两个合成站点、这一类对象级越权在该账本流程下被拒绝，不代表其他攻击家族的检出率。
+
 ## 患者 IDOR 手工验证
 
 完整开发栈由 `./dev.sh --all` 启动后，使用下面两个入口对照测试：
