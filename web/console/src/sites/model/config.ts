@@ -1,8 +1,15 @@
 import type {
+  RouteAdmission,
+  SiteAuthBinding,
   SiteConfig,
+  SiteIssuedBy,
+  SitePageActions,
   SitePolicyConfig,
+  SiteResourceGrant,
   SiteRouteConfig,
   SiteSecretReference,
+  SiteSensorHtml,
+  SiteSensorHtmlAdapter,
 } from "../../api.ts";
 
 /** What an operator edits: a site configuration without identity and revision metadata. */
@@ -24,6 +31,12 @@ export const securityEntryLabel: Record<SecurityEntry, string> = {
   public: "公开",
   authenticated_root: "已认证根",
   ui_action_required: "必须有界面操作来源",
+};
+
+/** Route admissions: the site entry's three plus the route-only authentication entry. */
+export const routeAdmissionLabel: Record<RouteAdmission, string> = {
+  ...securityEntryLabel,
+  auth_entry: "认证入口",
 };
 
 export const statusLabel: Record<ConfigStatus, string> = {
@@ -180,6 +193,72 @@ const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback
 
 const methods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const entries = ["public", "authenticated_root", "ui_action_required"] as const;
+const admissions = ["public", "auth_entry", "authenticated_root", "ui_action_required"] as const;
+
+const adapterFromStored = (row: Record_): SiteSensorHtmlAdapter => ({
+  adapter_revision: str(row.adapter_revision),
+  origin_sha256: str(row.origin_sha256),
+  injection_offset: num(row.injection_offset, 0),
+});
+
+const sensorFromStored = (row: Record_): SiteSensorHtml => {
+  const additional = Array.isArray(row.additional_adapters)
+    ? row.additional_adapters.filter(isRecord).map(adapterFromStored)
+    : [];
+  return {
+    ...adapterFromStored(row),
+    ...(additional.length > 0 ? { additional_adapters: additional } : {}),
+  };
+};
+
+const bindingFromStored = (row: Record_): SiteAuthBinding => ({
+  success_status: num(row.success_status, 0),
+  principal_pointer: str(row.principal_pointer),
+  authorization_context_pointer: str(row.authorization_context_pointer),
+  bearer_pointer: str(row.bearer_pointer),
+  credential_ttl_seconds: num(row.credential_ttl_seconds, 0),
+  session_ttl_seconds: num(row.session_ttl_seconds, 0),
+});
+
+const pageFromStored = (row: Record_): SitePageActions => ({
+  mapping_revision: str(row.mapping_revision),
+  max_active_pages: num(row.max_active_pages, 0),
+});
+
+const issuedFromStored = (row: Record_): SiteIssuedBy => ({
+  page_operation_id: str(row.page_operation_id),
+  ttl_seconds: num(row.ttl_seconds, 0),
+});
+
+const grantFromStored = (row: Record_): SiteResourceGrant => ({
+  success_status: num(row.success_status, 0),
+  items_pointer: str(row.items_pointer),
+  resource_pointer: str(row.resource_pointer),
+  action_ref_field: str(row.action_ref_field),
+  target_operation_id: str(row.target_operation_id),
+  target_mapping_revision: str(row.target_mapping_revision),
+  ttl_seconds: num(row.ttl_seconds, 0),
+  max_items: num(row.max_items, 0),
+  max_active_grants: num(row.max_active_grants, 0),
+});
+
+/**
+ * The provenance-flow blocks of a stored route, in the server's order and only when present, so
+ * the approval explanation and diffs of a revision see exactly what the server compares.
+ */
+function flowFromStored(row: Record_): Partial<SiteRouteConfig> {
+  const { auth_binding, auth_revoke, sensor_html, page_actions, issued_by, resource_grant } = row;
+  return {
+    ...(isRecord(auth_binding) ? { auth_binding: bindingFromStored(auth_binding) } : {}),
+    ...(isRecord(auth_revoke)
+      ? { auth_revoke: { success_status: num(auth_revoke.success_status, 0) } }
+      : {}),
+    ...(isRecord(sensor_html) ? { sensor_html: sensorFromStored(sensor_html) } : {}),
+    ...(isRecord(page_actions) ? { page_actions: pageFromStored(page_actions) } : {}),
+    ...(isRecord(issued_by) ? { issued_by: issuedFromStored(issued_by) } : {}),
+    ...(isRecord(resource_grant) ? { resource_grant: grantFromStored(resource_grant) } : {}),
+  };
+}
 
 function routeFromStored(value: unknown): SiteRouteConfig {
   const row = isRecord(value) ? value : {};
@@ -187,7 +266,7 @@ function routeFromStored(value: unknown): SiteRouteConfig {
     operation_id: str(row.operation_id),
     method: oneOf(row.method, methods, "GET"),
     path: str(row.path),
-    security_entry: oneOf(row.security_entry, entries, "public"),
+    security_entry: oneOf(row.security_entry, admissions, "public"),
     source_action: strOrNull(row.source_action),
     resource_type: strOrNull(row.resource_type),
     view_profile: strOrNull(row.view_profile),
@@ -197,6 +276,7 @@ function routeFromStored(value: unknown): SiteRouteConfig {
     response_crypto: isRecord(row.response_crypto) ? row.response_crypto : null,
     response_mode: oneOf(row.response_mode, ["", "BUFFERED_JSON", "SENSOR_HTML"] as const, ""),
     max_response_bytes: num(row.max_response_bytes, 1_048_576),
+    ...flowFromStored(row),
   };
 }
 
@@ -305,12 +385,17 @@ export function configFromStored(
   };
 }
 
-/** Key order independent JSON, so two objects compare equal exactly when the server would. */
+/**
+ * Key order independent JSON, so two objects compare equal exactly when the server would. A
+ * member whose value is `undefined` is left out, as `JSON.stringify` (and so the server) never
+ * sees it: an optional flow block that was cleared and one that was never set are the same.
+ */
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const row = value as Record_;
     return `{${Object.keys(row)
+      .filter((key) => row[key] !== undefined)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${canonicalJson(row[key])}`)
       .join(",")}}`;

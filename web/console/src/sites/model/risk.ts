@@ -1,6 +1,64 @@
+import type { SitePolicyConfig, SiteRouteConfig } from "../../api.ts";
 import { type RiskToken, riskText } from "../../ui/reason-codes.ts";
 import { canonicalJson, effectivePolicy, type SiteConfigDraft } from "./config.ts";
 import { diffConfigs, type FieldChange, isServing } from "./diff.ts";
+
+type FlowToken =
+  | "AUTH_ENTRY_CHANGED"
+  | "SENSOR_HTML_CHANGED"
+  | "PAGE_ACTIONS_CHANGED"
+  | "RESOURCE_GRANT_CHANGED";
+
+/**
+ * `FLOW_FACETS` of risk.rs: which routes take part in each browser provenance-flow facet. A facet
+ * compares its member routes whole, so a page root's path or build is as much part of it as its
+ * `page_actions`, and a route can belong to several facets.
+ */
+const flowFacets: readonly (readonly [
+  FlowToken,
+  (policy: SitePolicyConfig, route: SiteRouteConfig) => boolean,
+])[] = [
+  [
+    "AUTH_ENTRY_CHANGED",
+    (_, route) =>
+      route.security_entry === "auth_entry" ||
+      route.auth_binding !== undefined ||
+      route.auth_revoke !== undefined,
+  ],
+  [
+    "SENSOR_HTML_CHANGED",
+    (_, route) => route.response_mode === "SENSOR_HTML" || route.sensor_html !== undefined,
+  ],
+  [
+    "PAGE_ACTIONS_CHANGED",
+    (_, route) => route.page_actions !== undefined || route.issued_by !== undefined,
+  ],
+  [
+    "RESOURCE_GRANT_CHANGED",
+    (policy, route) =>
+      route.resource_grant !== undefined ||
+      policy.routes.some(
+        (source) => source.resource_grant?.target_operation_id === route.operation_id,
+      ),
+  ],
+];
+
+const byOperation = <T extends { operation_id: string }>(items: readonly T[]) =>
+  [...items].sort((a, b) =>
+    a.operation_id < b.operation_id ? -1 : a.operation_id > b.operation_id ? 1 : 0,
+  );
+
+/** The flow facets whose member routes differ between what is served (or nothing) and `after`. */
+function changedFlowFacets(before: SitePolicyConfig | null, after: SitePolicyConfig): RiskToken[] {
+  const members = (policy: SitePolicyConfig, member: (typeof flowFacets)[number][1]) =>
+    canonicalJson(byOperation(policy.routes.filter((route) => member(policy, route))));
+  return flowFacets
+    .filter(([, member]) => (before ? members(before, member) : "[]") !== members(after, member))
+    .map(([token]) => token);
+}
+
+/** Reasons only an independent PolicyApprover may clear (`requires_independent_approval`). */
+export const independentApprovalTokens: readonly RiskToken[] = flowFacets.map(([token]) => token);
 
 /**
  * Client-side port of `assess_change_risk` (crates/xshield-core/src/site/risk.rs): which of
@@ -18,15 +76,13 @@ export function assessChangeRisk(
 ): RiskToken[] {
   const served = baseline !== null && isServing(baseline) ? baseline : null;
   if (!isServing(desired)) return served ? ["TAKEDOWN"] : [];
-  if (served === null) return ["ACTIVATION"];
+  // Flow routes a site goes live with are new as well, and are named.
+  if (served === null) return ["ACTIVATION", ...changedFlowFacets(null, effectivePolicy(desired))];
 
   const before = effectivePolicy(served);
   const after = effectivePolicy(desired);
   const same = (left: unknown, right: unknown) => canonicalJson(left) === canonicalJson(right);
-  const byId = <T extends { operation_id: string }>(items: readonly T[]) =>
-    [...items].sort((a, b) =>
-      a.operation_id < b.operation_id ? -1 : a.operation_id > b.operation_id ? 1 : 0,
-    );
+  const byId = byOperation;
   const byKind = <T extends { kind: string }>(items: readonly T[]) =>
     [...items].sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
 
@@ -60,7 +116,10 @@ export function assessChangeRisk(
       "OBJECT_ACCESS_CHANGED",
     ],
   ];
-  return checks.filter(([changed]) => changed).map(([, token]) => token);
+  return [
+    ...checks.filter(([changed]) => changed).map(([, token]) => token),
+    ...changedFlowFacets(before, after),
+  ];
 }
 
 export type ApprovalReason = Readonly<{
@@ -87,10 +146,15 @@ export function explainApproval(
 ): ApprovalExplanation {
   const tokens = assessChangeRisk(baseline, desired);
   const changes = baseline ? diffConfigs(baseline, desired) : [];
+  // A flow block's change is attributed to its facet; the server also reports every route
+  // change as ROUTES_CHANGED, so that reason lists all route changes.
   const reasons = tokens.map((token) => ({
     token,
     ...riskText(token),
-    changes: changes.filter((change) => change.risk === token),
+    changes: changes.filter(
+      (change) =>
+        change.risk === token || (token === "ROUTES_CHANGED" && change.group === "routes"),
+    ),
   }));
   return {
     required: tokens.length > 0,

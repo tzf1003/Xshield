@@ -1195,11 +1195,66 @@ export type BrowserSession = {
   step_up_valid: boolean;
 };
 
+/**
+ * Admission of one route. `auth_entry` (an approved authentication entry, edge `AUTH_ENTRY`)
+ * exists only on routes; the site's own entry is never `auth_entry`.
+ */
+export type RouteAdmission = "public" | "auth_entry" | "authenticated_root" | "ui_action_required";
+
+/** Identity establishment on an `auth_entry` route (`xshield_core::site::flow::SiteAuthBinding`). */
+export type SiteAuthBinding = {
+  success_status: number;
+  principal_pointer: string;
+  authorization_context_pointer: string;
+  bearer_pointer: string;
+  credential_ttl_seconds: number;
+  session_ttl_seconds: number;
+};
+
+/** Binding revocation on an `authenticated_root` logout route. */
+export type SiteAuthRevoke = { success_status: number };
+
+/** One approved page build of a `SENSOR_HTML` route. */
+export type SiteSensorHtmlAdapter = {
+  adapter_revision: string;
+  origin_sha256: string;
+  injection_offset: number;
+};
+
+/** The approved builds of a `SENSOR_HTML` page; `additional_adapters` is omitted when empty. */
+export type SiteSensorHtml = SiteSensorHtmlAdapter & {
+  additional_adapters?: SiteSensorHtmlAdapter[];
+};
+
+/** Page issuance settings of a `SENSOR_HTML` page root. */
+export type SitePageActions = { mapping_revision: string; max_active_pages: number };
+
+/** The page root that issues this first-hop UI action. */
+export type SiteIssuedBy = { page_operation_id: string; ttl_seconds: number };
+
+/** Response-derived resource qualification for one resource route. */
+export type SiteResourceGrant = {
+  success_status: number;
+  items_pointer: string;
+  resource_pointer: string;
+  action_ref_field: string;
+  target_operation_id: string;
+  target_mapping_revision: string;
+  ttl_seconds: number;
+  max_items: number;
+  max_active_grants: number;
+};
+
+/**
+ * One route exactly as the server stores it. The browser provenance-flow blocks at the end are
+ * present only when set (the server omits unset ones), so a decoded route serializes back to the
+ * same JSON and a save can never drop or default a block it carried.
+ */
 export type SiteRouteConfig = {
   operation_id: string;
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
-  security_entry: "public" | "authenticated_root" | "ui_action_required";
+  security_entry: RouteAdmission;
   source_action: string | null;
   resource_type: string | null;
   view_profile: string | null;
@@ -1209,7 +1264,23 @@ export type SiteRouteConfig = {
   response_crypto: Record<string, unknown> | null;
   response_mode: "" | "BUFFERED_JSON" | "SENSOR_HTML";
   max_response_bytes: number;
+  auth_binding?: SiteAuthBinding;
+  auth_revoke?: SiteAuthRevoke;
+  sensor_html?: SiteSensorHtml;
+  page_actions?: SitePageActions;
+  issued_by?: SiteIssuedBy;
+  resource_grant?: SiteResourceGrant;
 };
+
+/** The flow blocks of a route, in the server's field order. */
+export const routeFlowKeys = [
+  "auth_binding",
+  "auth_revoke",
+  "sensor_html",
+  "page_actions",
+  "issued_by",
+  "resource_grant",
+] as const satisfies readonly (keyof SiteRouteConfig)[];
 
 export type SitePolicyConfig = {
   routes: SiteRouteConfig[];
@@ -1276,7 +1347,8 @@ export type SiteConfig = {
   updated_by: string;
   created_at: string;
   updated_at: string;
-  gateway_config: Record<string, unknown>;
+  /** The edge projection, for display only; `null` when the server cannot produce it. */
+  gateway_config: Record<string, unknown> | null;
 };
 export type SiteConfigResponse = Envelope & {
   found: boolean;
@@ -1453,6 +1525,157 @@ export type SiteRevisionsResponse = Envelope & {
   revisions: SiteRevision[];
 };
 
+/**
+ * Refuses a member the console does not model. The console saves by sending its whole draft, so
+ * a member it skipped while decoding would silently disappear (or reset to a default) with the
+ * next save; failing the read instead keeps an editor from ever writing such a loss back.
+ */
+function knownFields(row: Record<string, unknown>, keys: readonly string[]): void {
+  ensure(Object.keys(row).every((key) => keys.includes(key)));
+}
+
+const routeKeys: readonly string[] = [
+  "operation_id",
+  "method",
+  "path",
+  "security_entry",
+  "source_action",
+  "resource_type",
+  "view_profile",
+  "resource_query_parameter",
+  "resource_path_parameter",
+  "request_crypto",
+  "response_crypto",
+  "response_mode",
+  "max_response_bytes",
+  ...routeFlowKeys,
+];
+
+const pointer = (value: unknown) => {
+  const result = text(value, 512);
+  ensure(result.startsWith("/"));
+  return result;
+};
+const status = (value: unknown) => integer(value, 100, 599);
+const lease = (value: unknown) => integer(value, 0, 86_400);
+
+function decodeAuthBinding(value: unknown): SiteAuthBinding {
+  const row = object(value);
+  exactFields(row, [
+    "success_status",
+    "principal_pointer",
+    "authorization_context_pointer",
+    "bearer_pointer",
+    "credential_ttl_seconds",
+    "session_ttl_seconds",
+  ]);
+  return {
+    success_status: status(row.success_status),
+    principal_pointer: pointer(row.principal_pointer),
+    authorization_context_pointer: pointer(row.authorization_context_pointer),
+    bearer_pointer: pointer(row.bearer_pointer),
+    credential_ttl_seconds: lease(row.credential_ttl_seconds),
+    session_ttl_seconds: lease(row.session_ttl_seconds),
+  };
+}
+
+function decodeAuthRevoke(value: unknown): SiteAuthRevoke {
+  const row = object(value);
+  exactFields(row, ["success_status"]);
+  return { success_status: status(row.success_status) };
+}
+
+function decodeSensorAdapter(row: Record<string, unknown>): SiteSensorHtmlAdapter {
+  return {
+    adapter_revision: name(row.adapter_revision),
+    origin_sha256: id(row.origin_sha256, /^[0-9a-f]{64}$/),
+    injection_offset: integer(row.injection_offset, 0, 16_777_216),
+  };
+}
+
+function decodeSensorHtml(value: unknown): SiteSensorHtml {
+  const row = object(value);
+  knownFields(row, [
+    "adapter_revision",
+    "origin_sha256",
+    "injection_offset",
+    "additional_adapters",
+  ]);
+  const primary = decodeSensorAdapter(row);
+  if (row.additional_adapters === undefined) return primary;
+  // The server omits an empty list; an empty list here would not round-trip.
+  const additional = list(row.additional_adapters, 15, (item) => {
+    const adapter = object(item);
+    exactFields(adapter, ["adapter_revision", "origin_sha256", "injection_offset"]);
+    return decodeSensorAdapter(adapter);
+  });
+  ensure(additional.length > 0);
+  return { ...primary, additional_adapters: additional };
+}
+
+function decodePageActions(value: unknown): SitePageActions {
+  const row = object(value);
+  exactFields(row, ["mapping_revision", "max_active_pages"]);
+  return {
+    mapping_revision: name(row.mapping_revision),
+    max_active_pages: integer(row.max_active_pages, 1, 1_000),
+  };
+}
+
+function decodeIssuedBy(value: unknown): SiteIssuedBy {
+  const row = object(value);
+  exactFields(row, ["page_operation_id", "ttl_seconds"]);
+  return { page_operation_id: name(row.page_operation_id), ttl_seconds: lease(row.ttl_seconds) };
+}
+
+function decodeResourceGrant(value: unknown): SiteResourceGrant {
+  const row = object(value);
+  exactFields(row, [
+    "success_status",
+    "items_pointer",
+    "resource_pointer",
+    "action_ref_field",
+    "target_operation_id",
+    "target_mapping_revision",
+    "ttl_seconds",
+    "max_items",
+    "max_active_grants",
+  ]);
+  return {
+    success_status: status(row.success_status),
+    items_pointer: pointer(row.items_pointer),
+    resource_pointer: pointer(row.resource_pointer),
+    action_ref_field: name(row.action_ref_field),
+    target_operation_id: name(row.target_operation_id),
+    target_mapping_revision: name(row.target_mapping_revision),
+    ttl_seconds: lease(row.ttl_seconds),
+    max_items: integer(row.max_items, 1, 1_000),
+    max_active_grants: integer(row.max_active_grants, 1, 5_000),
+  };
+}
+
+/** The flow blocks a stored route carries, in the server's order and only when present. */
+function decodeRouteFlow(route: Record<string, unknown>): Partial<SiteRouteConfig> {
+  return {
+    ...(route.auth_binding === undefined
+      ? {}
+      : { auth_binding: decodeAuthBinding(route.auth_binding) }),
+    ...(route.auth_revoke === undefined
+      ? {}
+      : { auth_revoke: decodeAuthRevoke(route.auth_revoke) }),
+    ...(route.sensor_html === undefined
+      ? {}
+      : { sensor_html: decodeSensorHtml(route.sensor_html) }),
+    ...(route.page_actions === undefined
+      ? {}
+      : { page_actions: decodePageActions(route.page_actions) }),
+    ...(route.issued_by === undefined ? {} : { issued_by: decodeIssuedBy(route.issued_by) }),
+    ...(route.resource_grant === undefined
+      ? {}
+      : { resource_grant: decodeResourceGrant(route.resource_grant) }),
+  };
+}
+
 function decodeSitePolicy(value: unknown): SitePolicyConfig {
   const defaults: SitePolicyConfig = {
     routes: [],
@@ -1489,6 +1712,7 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
   };
   if (value === undefined) return defaults;
   const row = object(value);
+  knownFields(row, Object.keys(defaults));
   const optionalObject = (item: unknown): Record<string, unknown> | null =>
     item === null || item === undefined ? null : object(item);
   const identity = row.identity === undefined ? defaults.identity : object(row.identity);
@@ -1497,8 +1721,9 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
   const limits = row.limits === undefined ? defaults.limits : object(row.limits);
   const health = row.health_check === undefined ? defaults.health_check : object(row.health_check);
   return {
-    routes: list(row.routes ?? [], 256, (item) => {
+    routes: list(row.routes ?? [], 256, (item): SiteRouteConfig => {
       const route = object(item);
+      knownFields(route, routeKeys);
       return {
         operation_id: name(route.operation_id),
         method: choice(route.method, [
@@ -1511,6 +1736,7 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
         path: text(route.path, 256),
         security_entry: choice(route.security_entry, [
           "public",
+          "auth_entry",
           "authenticated_root",
           "ui_action_required",
         ]),
@@ -1529,6 +1755,7 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
           "SENSOR_HTML",
         ]) as SiteRouteConfig["response_mode"],
         max_response_bytes: integer(route.max_response_bytes ?? 1_048_576, 1, 16_777_216),
+        ...decodeRouteFlow(route),
       };
     }),
     identity: {
@@ -1655,7 +1882,7 @@ function decodeSiteConfig(value: unknown, status: number): SiteConfigResponse {
       updated_by: text(config.updated_by, 256),
       created_at: timestamp(config.created_at),
       updated_at: timestamp(config.updated_at),
-      gateway_config: object(config.gateway_config),
+      gateway_config: config.gateway_config === null ? null : object(config.gateway_config),
     },
   };
 }

@@ -3,6 +3,7 @@ import {
   DeleteOutlined,
   EditOutlined,
   GlobalOutlined,
+  LoginOutlined,
   PlusOutlined,
   SafetyCertificateOutlined,
   SearchOutlined,
@@ -38,6 +39,7 @@ const admission: Record<
 > = {
   ui_action_required: { label: "界面来源", tone: "allow", icon: <SafetyCertificateOutlined /> },
   authenticated_root: { label: "已认证根", tone: "info", icon: <UserOutlined /> },
+  auth_entry: { label: "认证入口", tone: "observe", icon: <LoginOutlined /> },
   public: { label: "公开", tone: "observe", icon: <GlobalOutlined /> },
 };
 
@@ -61,7 +63,10 @@ function uniqueId(base: string, taken: ReadonlySet<string>): string {
 function withRoutes(draft: SiteConfigDraft, routes: SiteRouteConfig[]): SiteConfigDraft {
   const next = { ...draft, policy: { ...draft.policy, routes } };
   const entry = routes.find((route) => route.operation_id === ENTRY_OPERATION_ID);
-  return entry ? { ...next, entry_path: entry.path, security_entry: entry.security_entry } : next;
+  // The site entry is never an authentication entry; such a route keeps the site's own entry.
+  return entry && entry.security_entry !== "auth_entry"
+    ? { ...next, entry_path: entry.path, security_entry: entry.security_entry }
+    : next;
 }
 
 /**

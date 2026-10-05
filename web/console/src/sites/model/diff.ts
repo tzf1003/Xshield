@@ -3,6 +3,7 @@ import type { RiskToken } from "../../ui/reason-codes.ts";
 import {
   canonicalJson,
   effectivePolicy,
+  routeAdmissionLabel,
   type SiteConfigDraft,
   securityEntryLabel,
   statusLabel,
@@ -312,15 +313,47 @@ const summarizeCrypto = (value: Record<string, unknown> | null): string => {
 
 const modeLabel = (mode: string) => (mode === "" ? "透传" : mode);
 
+const none = "（无）";
+
+/** One-line summaries of the provenance-flow blocks; the raw JSON is shown when they tie. */
+const summarizeBinding = (r: SiteRouteConfig) =>
+  r.auth_binding
+    ? `${r.auth_binding.success_status} · 凭证 ${formatSeconds(r.auth_binding.credential_ttl_seconds)} · 会话 ${formatSeconds(r.auth_binding.session_ttl_seconds)}`
+    : none;
+const summarizeRevoke = (r: SiteRouteConfig) =>
+  r.auth_revoke ? `成功状态 ${r.auth_revoke.success_status}` : none;
+const summarizeSensor = (r: SiteRouteConfig) =>
+  r.sensor_html
+    ? `${r.sensor_html.adapter_revision} · ${r.sensor_html.origin_sha256.slice(0, 12)}… · 共 ${1 + (r.sensor_html.additional_adapters?.length ?? 0)} 个构建`
+    : none;
+const summarizePage = (r: SiteRouteConfig) =>
+  r.page_actions
+    ? `映射 ${r.page_actions.mapping_revision} · 活动页面 ≤ ${r.page_actions.max_active_pages}`
+    : none;
+const summarizeIssued = (r: SiteRouteConfig) =>
+  r.issued_by
+    ? `${r.issued_by.page_operation_id} · ${formatSeconds(r.issued_by.ttl_seconds)}`
+    : none;
+const summarizeGrant = (r: SiteRouteConfig) =>
+  r.resource_grant
+    ? `→ ${r.resource_grant.target_operation_id}（${r.resource_grant.target_mapping_revision}）· ≤ ${r.resource_grant.max_items} 项 · ${formatSeconds(r.resource_grant.ttl_seconds)}`
+    : none;
+
 type RouteSpec = Readonly<{
   id: keyof SiteRouteConfig;
   label: string;
   format: (route: SiteRouteConfig) => string;
+  /** The facet a change of this field falls under; `ROUTES_CHANGED` when absent. */
+  risk?: RiskToken;
 }>;
+/**
+ * Every route field the server stores. Keep in step with `SiteRouteConfig`: a field missing
+ * here would change without ever appearing in a diff or an approval summary.
+ */
 const routeSpecs: readonly RouteSpec[] = [
   { id: "method", label: "方法", format: (r) => r.method },
   { id: "path", label: "路径", format: (r) => r.path },
-  { id: "security_entry", label: "准入", format: (r) => securityEntryLabel[r.security_entry] },
+  { id: "security_entry", label: "准入", format: (r) => routeAdmissionLabel[r.security_entry] },
   { id: "source_action", label: "操作来源", format: (r) => text(r.source_action) },
   { id: "resource_type", label: "资源类型", format: (r) => text(r.resource_type) },
   { id: "view_profile", label: "视图 profile", format: (r) => text(r.view_profile) },
@@ -338,10 +371,31 @@ const routeSpecs: readonly RouteSpec[] = [
   { id: "response_crypto", label: "响应加密", format: (r) => summarizeCrypto(r.response_crypto) },
   { id: "response_mode", label: "响应模式", format: (r) => modeLabel(r.response_mode) },
   { id: "max_response_bytes", label: "响应上限", format: (r) => formatBytes(r.max_response_bytes) },
+  {
+    id: "auth_binding",
+    label: "身份建立",
+    format: summarizeBinding,
+    risk: "AUTH_ENTRY_CHANGED",
+  },
+  { id: "auth_revoke", label: "身份撤销", format: summarizeRevoke, risk: "AUTH_ENTRY_CHANGED" },
+  {
+    id: "sensor_html",
+    label: "SENSOR_HTML 页面构建",
+    format: summarizeSensor,
+    risk: "SENSOR_HTML_CHANGED",
+  },
+  { id: "page_actions", label: "页面签发", format: summarizePage, risk: "PAGE_ACTIONS_CHANGED" },
+  { id: "issued_by", label: "签发页面", format: summarizeIssued, risk: "PAGE_ACTIONS_CHANGED" },
+  {
+    id: "resource_grant",
+    label: "响应资源资格",
+    format: summarizeGrant,
+    risk: "RESOURCE_GRANT_CHANGED",
+  },
 ];
 
 const routeSummary = (route: SiteRouteConfig) =>
-  `${route.method} ${route.path} · ${securityEntryLabel[route.security_entry]}`;
+  `${route.method} ${route.path} · ${routeAdmissionLabel[route.security_entry]}`;
 
 const secretKindLabel: Record<SiteSecretReference["kind"], string> = {
   tls: "TLS",
@@ -430,7 +484,7 @@ export function diffConfigs(before: SiteConfigDraft, after: SiteConfigDraft): Fi
         before: was,
         after: now,
         kind: "changed",
-        risk: "ROUTES_CHANGED",
+        risk: field.risk ?? "ROUTES_CHANGED",
       });
     }
   }

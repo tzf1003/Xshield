@@ -412,6 +412,14 @@ export function RouteDrawer({
                   <span className="xs-choice-hint">{hint}</span>
                 </Radio>
               ))}
+              {route.security_entry === "auth_entry" && (
+                <Radio value="auth_entry">
+                  <span className="xs-choice-title">认证入口</span>
+                  <span className="xs-choice-hint">
+                    批准的登录入口；其身份建立设置目前只能通过 API 编辑。
+                  </span>
+                </Radio>
+              )}
             </Radio.Group>
           </Field>
           <Field
