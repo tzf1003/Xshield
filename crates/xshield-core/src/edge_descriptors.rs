@@ -50,7 +50,10 @@
 //! # Audit and resources
 //! Pure computation: no I/O, no clock, no audit side effects. Callers turn a
 //! refusal into their own stable reason (a refused start, or a refused apply).
-//! Work and memory are linear in the number of operations the caller passes.
+//! Memory is linear in the number of operations the caller passes; work is at
+//! most quadratic, because each `resource_grant` looks its target up among
+//! them. Callers bound the operation list (the edge compiler accepts at most a
+//! 1 MiB configuration).
 
 use crate::{
     admission::AdmissionClass,

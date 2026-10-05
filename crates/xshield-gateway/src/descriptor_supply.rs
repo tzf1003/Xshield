@@ -23,10 +23,10 @@
 //! Failure is fail-closed on every path: a refused apply leaves the serving
 //! snapshot and the persisted files untouched, and a refused start binds no
 //! listener. Refusals carry a stable reason and the site that caused them.
-//! Each write is bounded by a deadline so an unresponsive database cannot hold
-//! the apply lock or startup indefinitely; a write cut off by the deadline is
-//! rolled back with its transaction or, if it had already committed, left as
-//! an idempotent row the next attempt reads as `Existing`.
+//! The writes for one snapshot share one deadline, so an unresponsive database
+//! cannot hold the apply lock or startup indefinitely; a write cut off by the
+//! deadline is rolled back with its transaction or, if it had already
+//! committed, left as an idempotent row the next attempt reads as `Existing`.
 
 use async_trait::async_trait;
 use std::{error::Error, time::Duration};

@@ -140,8 +140,10 @@ impl PostgresRuntime {
         ))
     }
 
-    /// A runtime that connects lazily, on first use: an unreachable database
-    /// fails the request (or the apply) that needs it, not process startup.
+    /// A runtime that connects lazily, on first use, so building it never
+    /// touches the network: an unreachable database fails whatever first
+    /// needs it (a request, an apply, or a startup descriptor supply), and a
+    /// failed connection is retried by the next caller.
     fn new(
         database_url: Zeroizing<String>,
         max_connections: u32,
