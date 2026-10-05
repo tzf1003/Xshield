@@ -17,3 +17,84 @@
   font-size: 12px;
   white-space: nowrap;
 }
+
+.xs-op-title {
+  margin: 0;
+  color: var(--xs-ink);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+/* ---------- Audit publication ---------- */
+.xs-op-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-op-stats li {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+}
+
+.xs-op-stats span {
+  color: var(--xs-ink-2);
+  font-size: 13px;
+}
+
+.xs-op-stats strong {
+  color: var(--xs-ink);
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+
+.xs-op-bar {
+  display: flex;
+  height: 10px;
+  overflow: hidden;
+  background: var(--xs-surface-subtle);
+  border: 1px solid var(--xs-line);
+  border-radius: 999px;
+}
+
+.xs-op-bar .is-published {
+  background: var(--xs-allow);
+}
+
+.xs-op-bar .is-pending {
+  background: var(--xs-observe);
+}
+
+.xs-op-bar .is-unsealed {
+  background: var(--xs-unknown);
+}
+
+/* ---------- Job lookup ---------- */
+.xs-op-lookup {
+  display: grid;
+  gap: 6px;
+  max-width: 640px;
+}
+
+.xs-op-label {
+  color: var(--xs-ink);
+  font-weight: 600;
+}
+
+.xs-op-lookup-row {
+  width: 100%;
+}
+
+@media (width <= 760px) {
+  .xs-op-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

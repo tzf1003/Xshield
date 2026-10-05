@@ -54,6 +54,11 @@ const approvalsSearch = (search: Record<string, unknown>) => ({
   moved: search.moved === "access" ? "access" : undefined,
 });
 
+/** `?job=` names the job the lookup page shows; anything else is dropped. */
+const jobsSearch = (search: Record<string, unknown>) => ({
+  job: typeof search.job === "string" && jobPattern.test(search.job) ? search.job : undefined,
+});
+
 const siteIdPattern = /^[A-Za-z0-9_.-]{1,128}(?![\s\S])/;
 const sectionNames: readonly string[] = siteSections.map(([part]) => part);
 
@@ -72,8 +77,7 @@ export function createAppRouteTree(components: RouteComponents) {
   });
 
   const pages: PageRoute[] = [];
-  // The legacy host renders the content of most pages itself (it stays mounted so unconfirmed
-  // writes survive navigation), so those routes carry no component of their own.
+  // Every page route renders its own component; redirects and the catch-all carry none.
   function page(
     kind: QueryKind,
     path: string,
@@ -124,7 +128,7 @@ export function createAppRouteTree(components: RouteComponents) {
       component: lazyRouteComponent(() => import("../pages/OverviewPage"), "OverviewPage"),
     }),
     page("session", "access/session", {
-      component: lazyRouteComponent(() => import("../pages/SessionPage"), "SessionPage"),
+      component: lazyRouteComponent(() => import("../pages/access/SessionPage"), "SessionPage"),
     }),
     page("site-list", "sites", {
       component: lazyRouteComponent(() => import("../pages/sites/SitesListPage"), "SitesListPage"),
@@ -172,7 +176,9 @@ export function createAppRouteTree(components: RouteComponents) {
         }),
       },
     }),
-    page("api-keys", "admin/api-keys"),
+    page("api-keys", "admin/api-keys", {
+      component: lazyRouteComponent(() => import("../pages/admin/ApiKeysPage"), "ApiKeysPage"),
+    }),
     page("request", "investigation/requests", {
       component: lazyRouteComponent(
         () => import("../pages/investigation/RequestStreamPage"),
@@ -291,8 +297,13 @@ export function createAppRouteTree(components: RouteComponents) {
     // Retired addresses: the pages moved into the case center, so the old bookmarks keep working.
     page("case", "evidence/holds", { beforeLoad: movedTo("/cases", "holds") }),
     page("case", "evidence/exports", { beforeLoad: movedTo("/cases", "exports") }),
-    page("audit-health", "operations/audit"),
-    page("jobs", "operations/jobs"),
+    page("audit-health", "operations/audit", {
+      component: lazyRouteComponent(() => import("../pages/operations/AuditPage"), "AuditPage"),
+    }),
+    page("jobs", "operations/jobs", {
+      component: lazyRouteComponent(() => import("../pages/operations/JobsPage"), "JobsPage"),
+      validateSearch: jobsSearch,
+    }),
     // Anything the table above does not describe.
     page("not-found", "$", { component: components.NotFound }),
   ];

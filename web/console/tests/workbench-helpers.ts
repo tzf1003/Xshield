@@ -2,16 +2,64 @@ import { expect, type Page, type Request } from "@playwright/test";
 import { type SearchPlan, searchPlanDigest, validateSearchPlan } from "../src/search.ts";
 import { accessListFixture } from "./access-fixtures";
 import { exportListFixture } from "./export-fixtures";
-import { errorFixture, REQUEST_ID } from "./fixtures";
+import { auditHealthFixture, errorFixture, REQUEST_ID } from "./fixtures";
 import { type OverviewOptions, workbenchOverviewFixture } from "./overview-fixtures";
 import { SCOPE, sessionBody } from "./shell-helpers";
+import { JOB_ID, jobBody } from "./work-helpers";
 
 export type Reply = { status?: number; body?: unknown };
-export type Call = { path: string; method: string; body: unknown };
+export type Call = {
+  path: string;
+  method: string;
+  body: unknown;
+  /** `Idempotency-Key` and `X-Xshield-CSRF` request headers, when sent. */
+  key: string | null;
+  csrf: string | null;
+};
 export type Override = (
   url: URL,
   request: Request,
 ) => Reply | undefined | Promise<Reply | undefined>;
+
+export const KEY_ID = "key_018f2a3b-4c5d-7000-8000-000000000051";
+export const NEW_KEY_ID = "key_018f2a3b-4c5d-7000-8000-000000000052";
+export const SECRET = `xsk_5e1c7a0b${"9f".repeat(20)}`;
+export { JOB_ID };
+
+/** Key metadata as `GET /agent-api-keys` returns it: no scope, fingerprint or plaintext. */
+export function keyRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    api_key_id: KEY_ID,
+    tenant_id: SCOPE.tenant_id,
+    subject: "agent-deploy",
+    display_name: "部署机器人",
+    key_prefix: "xsk_a1b2c3d4",
+    status: "active",
+    expires_at: "2027-01-01T00:00:00+00:00",
+    created_at: "2026-09-20T08:00:00+00:00",
+    last_used_at: "2026-09-20T08:05:00+00:00",
+    ...overrides,
+  };
+}
+
+export function keyList(keys: unknown[] = [keyRecord()]) {
+  return { request_id: REQUEST_ID, keys };
+}
+
+/** The issuing reply: the server echoes the request's scope rows and returns the plaintext once. */
+export function issuedKey(
+  request: { expires_at: string; scopes: unknown[] },
+  apiKeyId = NEW_KEY_ID,
+) {
+  return {
+    request_id: REQUEST_ID,
+    api_key_id: apiKeyId,
+    api_key: SECRET,
+    key_prefix: SECRET.slice(0, 12),
+    expires_at: request.expires_at,
+    scopes: request.scopes,
+  };
+}
 
 export const DENIED_REQUEST = "req_018f2a3b-4c5d-7000-8000-0000000000d1";
 export const OTHER_DENIED_REQUEST = "req_018f2a3b-4c5d-7000-8000-0000000000d2";
@@ -158,7 +206,13 @@ export async function mockWorkbench(page: Page, mock: WorkbenchMock = {}) {
     } catch {
       body = request.postData();
     }
-    calls.push({ path, method: request.method(), body });
+    calls.push({
+      path,
+      method: request.method(),
+      body,
+      key: await request.headerValue("idempotency-key"),
+      csrf: await request.headerValue("x-xshield-csrf"),
+    });
     const custom = await mock.override?.(url, request);
     let reply: Reply;
     if (custom) reply = custom;
@@ -176,6 +230,20 @@ export async function mockWorkbench(page: Page, mock: WorkbenchMock = {}) {
       reply = { body: siteHealthFixture(url.pathname.split("/")[4] ?? "") };
     } else if (url.pathname === "/control/v1/search") {
       reply = { body: await deniedSearchFixture(validateSearchPlan(request.postDataJSON())) };
+    } else if (path === "/control/v1/audit/health") {
+      reply = { body: auditHealthFixture() };
+    } else if (/^\/control\/v1\/jobs\/job_[0-9a-f-]+$/.test(url.pathname)) {
+      reply = { body: jobBody(undefined, url.pathname.split("/").at(-1)) };
+    } else if (path === "/control/v1/agent-api-keys" && request.method() === "GET") {
+      reply = { body: keyList() };
+    } else if (path === "/control/v1/agent-api-keys" && request.method() === "POST") {
+      reply = { status: 201, body: issuedKey(request.postDataJSON()) };
+    } else if (/^\/control\/v1\/agent-api-keys\/key_[0-9a-f-]+\/rotate$/.test(path)) {
+      reply = { status: 201, body: issuedKey(request.postDataJSON()) };
+    } else if (/^\/control\/v1\/agent-api-keys\/key_[0-9a-f-]+\/revoke$/.test(path)) {
+      reply = {
+        body: { request_id: REQUEST_ID, api_key_id: url.pathname.split("/")[4], status: "revoked" },
+      };
     } else {
       reply = { status: 403, body: errorFixture("CONTROL_SCOPE_DENIED") };
     }

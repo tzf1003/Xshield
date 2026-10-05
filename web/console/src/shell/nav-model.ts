@@ -323,7 +323,8 @@ const leads: Record<QueryKind, string> = {
   approvals: "集中处理等待你审批的原文访问、导出和策略修订，并跟踪你自己的申请。",
   "site-list": "查看受保护站点的发布状态，搜索、筛选并进入站点配置与发布。",
   "site-config": "配置受保护网站、上游、安全入口与反向代理监听端口。",
-  "api-keys": "创建和撤销绑定 tenant、site 与能力集合的 Agent API Key。",
+  "api-keys":
+    "创建、轮换和撤销 Agent API Key：每把 Key 只有逐行列出的“站点 × 能力”，明文只显示一次。",
   jobs: "按任务 ID 读取后台任务的当前状态与原因码。",
   "not-found": "",
 };
@@ -332,13 +333,6 @@ export function pageMeta(pathname: string): PageMeta {
   const kind = routeQueryKind(pathname);
   return { kind, title: titles[kind], lead: leads[kind] };
 }
-
-/** Kinds whose content is still rendered by the legacy host rather than a routed page. */
-export const legacyKinds: ReadonlySet<QueryKind> = new Set<QueryKind>([
-  "audit-health",
-  "api-keys",
-  "jobs",
-]);
 
 export type Crumb = Readonly<{ label: string; href?: string }>;
 

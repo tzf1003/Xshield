@@ -18,6 +18,14 @@ const kinds: Record<TodoKind, { label: string; tone: Tone | "brand" }> = {
   export: { label: "导出审批", tone: "brand" },
 };
 
+/**
+ * A key-issuing write (create or rotate an API key) is retried on its own page only: its reply
+ * carries a plaintext that is shown once, in the dialog of that page.
+ */
+function issuesSecret(path: string): boolean {
+  return /^\/control\/v1\/agent-api-keys(?:\/key_[0-9a-f-]+\/rotate)?$/.test(path);
+}
+
 export type TodoSource = Readonly<{
   key: string;
   label: string;
@@ -144,17 +152,20 @@ export function TodoCard({
                 </small>
               </div>
               <div className="xs-wb-todo-actions">
-                {item.kind === "write" && item.operation && item.operation.phase !== "inflight" && (
-                  <Button
-                    size="small"
-                    type="primary"
-                    loading={busy === item.id}
-                    disabled={busy !== null && busy !== item.id}
-                    onClick={() => void resend(item)}
-                  >
-                    原样重试
-                  </Button>
-                )}
+                {item.kind === "write" &&
+                  item.operation &&
+                  item.operation.phase !== "inflight" &&
+                  !issuesSecret(item.operation.path) && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      loading={busy === item.id}
+                      disabled={busy !== null && busy !== item.id}
+                      onClick={() => void resend(item)}
+                    >
+                      原样重试
+                    </Button>
+                  )}
                 {item.href && (
                   <RouteLink to={item.href} search={item.search}>
                     {item.kind === "write" ? "前往原页面" : "去处理"}
