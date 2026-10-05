@@ -586,7 +586,16 @@ mod tests {
         }
     }
 
+    /// One named way to damage an otherwise valid envelope.
+    type Mutation = (&'static str, fn(&mut Value));
+
     fn envelope(path: &str) -> Vec<u8> {
+        envelope_with_plaintext(path, br#"{"sku":"A-1","quantity":2}"#)
+    }
+
+    /// A correctly encrypted and bound envelope around arbitrary plaintext, so a
+    /// test can reach the checks that only run after authentication succeeds.
+    fn envelope_with_plaintext(path: &str, plaintext: &[u8]) -> Vec<u8> {
         let rule = rule();
         let nonce = [3; NONCE_BYTES];
         let message_id = "msg_018f2a3b-4c5d-7000-8000-000000000901";
@@ -610,7 +619,7 @@ mod tests {
                 expires_at,
             )
             .unwrap(),
-            br#"{"sku":"A-1","quantity":2}"#,
+            plaintext,
             &mut tag,
         )
         .unwrap();
@@ -626,6 +635,22 @@ mod tests {
             "tag": hex(&tag),
         }))
         .unwrap()
+    }
+
+    fn decode_at_five(
+        rule: &RequestCryptoRule,
+        envelope: &[u8],
+    ) -> Result<FrozenRequest, ReasonCode> {
+        rule.decode(
+            "tenant_demo",
+            "site_demo",
+            "orders.create",
+            "POST",
+            "/orders",
+            UnixSeconds::new(5),
+            envelope,
+            &TestKeys,
+        )
     }
 
     #[test]
@@ -692,6 +717,152 @@ mod tests {
             ),
             Err(ReasonCode::RequestCryptoAuthenticationFailed)
         ));
+    }
+
+    // Envelope members are either structure the edge validates before it spends
+    // any cryptography (a refusal for a malformed envelope) or members the AAD
+    // binds (authentication fails when they change). Pinning both keeps a
+    // tampered version, key, revision, identity or lifetime from being accepted
+    // and keeps the two refusals distinguishable in the audit.
+    #[test]
+    fn tampered_and_malformed_envelope_members_are_refused_with_their_reason() {
+        let rule = rule();
+        let valid: Value = serde_json::from_slice(&envelope("/orders")).unwrap();
+        let malformed: [Mutation; 15] = [
+            ("schema version 2", |v| v["schema_version"] = json!(2)),
+            ("schema version as text", |v| {
+                v["schema_version"] = json!("1");
+            }),
+            ("missing schema version", |v| {
+                v.as_object_mut().unwrap().remove("schema_version");
+            }),
+            ("another adapter revision", |v| {
+                v["adapter_revision"] = json!("orders-json-r2");
+            }),
+            ("another key id", |v| v["key_id"] = json!("request-key-r2")),
+            ("an extra member", |v| v["debug"] = json!(true)),
+            ("a malformed message id", |v| {
+                v["message_id"] = json!("msg_1");
+            }),
+            ("a short nonce", |v| {
+                v["nonce"] = json!("03".repeat(NONCE_BYTES - 1));
+            }),
+            ("a non-hex nonce", |v| {
+                v["nonce"] = json!("zz".repeat(NONCE_BYTES));
+            }),
+            ("a short tag", |v| {
+                v["tag"] = json!("00".repeat(TAG_BYTES - 1));
+            }),
+            ("a numeric ciphertext", |v| v["ciphertext"] = json!(7)),
+            ("a negative issue time", |v| v["issued_at"] = json!(-1)),
+            ("a fractional expiry", |v| v["expires_at"] = json!(9.5)),
+            ("a null key id", |v| v["key_id"] = Value::Null),
+            // 9 - 3 = 6 seconds, past the rule's 5: refused before any cryptography.
+            ("a lifetime beyond the maximum", |v| {
+                v["issued_at"] = json!(3);
+            }),
+        ];
+        for (name, mutate) in malformed {
+            let mut envelope = valid.clone();
+            mutate(&mut envelope);
+            assert!(
+                matches!(
+                    decode_at_five(&rule, &serde_json::to_vec(&envelope).unwrap()),
+                    Err(ReasonCode::RequestEnvelopeInvalid)
+                ),
+                "{name}"
+            );
+        }
+        let bound: [Mutation; 5] = [
+            ("another message id", |v| {
+                v["message_id"] = json!("msg_018f2a3b-4c5d-7000-8000-000000000902");
+            }),
+            // Still a valid 4-second lifetime, so only authentication can notice.
+            ("a moved issue time", |v| v["issued_at"] = json!(5)),
+            ("a moved expiry", |v| v["expires_at"] = json!(8)),
+            ("another nonce", |v| {
+                v["nonce"] = json!("04".repeat(NONCE_BYTES));
+            }),
+            ("a flipped ciphertext", |v| {
+                let mut bytes = decode_hex(v["ciphertext"].as_str().unwrap(), 4096).unwrap();
+                bytes[0] ^= 1;
+                v["ciphertext"] = json!(hex(&bytes));
+            }),
+        ];
+        for (name, mutate) in bound {
+            let mut envelope = valid.clone();
+            mutate(&mut envelope);
+            assert!(
+                matches!(
+                    decode_at_five(&rule, &serde_json::to_vec(&envelope).unwrap()),
+                    Err(ReasonCode::RequestCryptoAuthenticationFailed)
+                ),
+                "{name}"
+            );
+        }
+        let mut from_the_future = valid.clone();
+        from_the_future["issued_at"] = json!(8);
+        assert!(matches!(
+            decode_at_five(&rule, &serde_json::to_vec(&from_the_future).unwrap()),
+            Err(ReasonCode::RequestCryptoMessageFromFuture)
+        ));
+        // Text that is not one JSON object with unique members never reaches the cipher.
+        let text = String::from_utf8(envelope("/orders")).unwrap();
+        for (name, bytes) in [
+            (
+                "a repeated member",
+                text.replacen('{', "{\"nonce\":\"00\",", 1).into_bytes(),
+            ),
+            ("trailing data", format!("{text} 1").into_bytes()),
+            ("an array", b"[1]".to_vec()),
+            ("garbage", vec![0xff, 0xfe, 0x00]),
+            ("nothing", Vec::new()),
+        ] {
+            assert!(
+                matches!(
+                    decode_at_five(&rule, &bytes),
+                    Err(ReasonCode::RequestEnvelopeInvalid)
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    // What the origin receives is the decrypted plaintext, so only a strict,
+    // bounded JSON object may come out: duplicate members are ambiguous (an
+    // origin may honor the first or the last), and a scalar, array, empty or
+    // oversized body is not an object the adapter promised.
+    #[test]
+    fn only_a_strict_bounded_json_object_survives_decryption() {
+        let rule = rule();
+        assert!(decode_at_five(&rule, &envelope_with_plaintext("/orders", br#"{"a":1}"#)).is_ok());
+        let oversized = format!(r#"{{"pad":"{}"}}"#, "x".repeat(rule.max_plaintext_bytes));
+        for (name, plaintext) in [
+            (
+                "a duplicate member",
+                br#"{"role":"user","role":"admin"}"#.to_vec(),
+            ),
+            (
+                "a nested duplicate member",
+                br#"{"a":{"b":1,"b":2}}"#.to_vec(),
+            ),
+            ("an array", b"[1,2]".to_vec()),
+            ("a string", br#""text""#.to_vec()),
+            ("a number", b"7".to_vec()),
+            ("null", b"null".to_vec()),
+            ("malformed JSON", br#"{"a":"#.to_vec()),
+            ("trailing data", br#"{"a":1} {"b":2}"#.to_vec()),
+            ("empty plaintext", Vec::new()),
+            ("an oversized object", oversized.into_bytes()),
+        ] {
+            assert!(
+                matches!(
+                    decode_at_five(&rule, &envelope_with_plaintext("/orders", &plaintext)),
+                    Err(ReasonCode::RequestEnvelopeInvalid)
+                ),
+                "{name}"
+            );
+        }
     }
 
     #[test]

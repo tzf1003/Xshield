@@ -850,9 +850,13 @@
         {
           "path": "crates/xshield-gateway/src/request_crypto.rs",
           "test": "decrypts_only_the_exact_bound_request"
+        },
+        {
+          "path": "crates/xshield-gateway/src/request_crypto.rs",
+          "test": "tampered_and_malformed_envelope_members_are_refused_with_their_reason"
         }
       ],
-      "gap": "未断言篡改封包版本字段（schema_version/adapter_revision/key_id）被拒绝，AAD 篡改只在单元层（path 绑定）验证。"
+      "gap": "单元层已逐项断言：篡改 schema_version、adapter_revision、key_id、成员类型/长度及额外成员以 RequestEnvelopeInvalid 拒绝，篡改 message_id、签发/到期时间、nonce、密文以 RequestCryptoAuthenticationFailed 拒绝，未来签发与超长寿命各有原因码；经真实 edge 并断言源站日志无该请求的只有 tag 篡改，其余成员没有端到端断言。"
     },
     {
       "id": "CRYPTO-04",
@@ -915,9 +919,13 @@
         {
           "path": "scripts/test_gateway_identity.sh",
           "test": "encoded_slash_status"
+        },
+        {
+          "path": "crates/xshield-gateway/src/request_crypto.rs",
+          "test": "only_a_strict_bounded_json_object_survives_decryption"
         }
       ],
-      "gap": "加密请求解密后明文中的重复 JSON 键没有测试，且没有与真实源站解析语义的对照（只断言拒绝歧义）。"
+      "gap": "解密后明文中的重复键（含嵌套）、非对象、空与超长在单元层已断言拒绝；仍没有与真实源站解析语义的对照（只断言拒绝歧义），也没有经真实 edge 的端到端断言。"
     },
     {
       "id": "CRYPTO-07",
