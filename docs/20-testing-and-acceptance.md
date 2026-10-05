@@ -256,3 +256,11 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `scripts/test_idor_lab_local.sh` 在没有 Docker 的环境运行 IDOR 靶场：两个故意缺少对象所有者校验的 Python 源站、一次性 PostgreSQL 库（全部迁移加种子）和真实 edge 二进制。断言矩阵为：本人对象经 edge 放行（200），他人对象经 edge 被拒（403 `CAPABILITY_MISSING`），同一请求直连源站则为 200，用来证明保护来自 edge 的资格账本而不是源站。该脚本已加入 CI；它不调用模型，Juice Shop 与 Jev 影子评估仍需 Docker 与外部密钥，不在这个门槛内。结论范围仅限两个合成站点与对象级越权，不构成检出率。
 
+## 20.19 真实浏览器来源闭环回归
+
+`scripts/test_browser_loop.sh`（驱动 `scripts/test_browser_loop.mjs`，已加入 CI 与 `scripts/verify_all.sh gateway`）用真实 Chromium（Playwright，默认取 `web/console` 的安装，`XSHIELD_PLAYWRIGHT_PACKAGE` 可改）经真实 edge 二进制的原生 TLS（一次性自签证书，浏览器上下文忽略信任错误）访问 `tests/browser-loop` 的小型订单应用，后端是一次性 PostgreSQL 库，只应用迁移、不写任何种子：动作描述与策略修订由 edge 启动时自行供给，脚本先断言这一点。应用的详情接口故意不校验对象所有者，页面脚本对 Xshield 一无所知，只带自己的 `Authorization: Bearer`。
+
+正向流程只用页面操作（打开、填写、点击）：登录页 → `AUTHENTICATED_ROOT` 页面以 WAF 会话准入（`PAGE_ROOT_SESSION_ALLOWED`）→ 页面签发的引用随 `GET /orders` 出示 → 列表响应注入的引用随点击后的 `GET /orders/{id}` 出示，两跳均 200；XHR 打开第二个订单同样 200。脚本断言探针出示的恰是 bootstrap 与列表交付的引用，且引用不出现在 HTML 中。随后 10 个不在流程内的请求全部在源站之前被拒（源站计数不变）：他人订单（探针不发明引用，403 `UI_ACTION_NOT_AVAILABLE`）；另一对象的引用（403 `CAPABILITY_MISSING`）；在 bob 的浏览器上下文出示 alice 收割的引用和 alice 的页面引用（403 `UI_ACTION_NOT_AVAILABLE`）；把引用期限改为已过期后由探针照常出示（403 `UI_ACTION_NOT_AVAILABLE`）；登出后的应用式调用与重放引用（403 `AUTH_BINDING_MISMATCH`，且探针已清空引用）；未接管的 Worker、iframe 与预存 fetch 引用（403 `UI_ACTION_NOT_AVAILABLE`）。bob 用 alice 的页面句柄请求 bootstrap 只得到空列表。最后停止 edge，用 journal 密钥读回加密 journal，逐个确认上述请求的判定、原因码与终态，以及 `ui_action_issue`、`sensor_bootstrap` 阶段事件，并确认没有任何 journal 记录含引用；本次写出的全部 `ui_action.issued` outbox 行送入 worker 的 `ui_action` 族解析器。
+
+范围：单站点、一个页面根、两个用户、经原生 TLS 的 Chromium 无头外壳（未单独断言协商出的 HTTP 版本）；不覆盖 Service Worker、WebSocket、其他浏览器、并发多标签和性能。ClickHouse 发布在本地不可用，worker 契约在解析器层验证。
+

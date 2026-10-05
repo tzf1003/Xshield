@@ -29,7 +29,21 @@ ActionGrant：当前主体在特定 scope、期限和使用次数内可以使用
 
 模型识别界面动作是允许的；模型直接编造新动作或只因高分扩大 scope 是禁止的。首版高危动作必须对应独立验证的操作模板。对模型只能识别、无法确定验证的动态 UI，强制模式拒绝或要求重新走已支持入口。
 
-页面来源持久化库入口 `ProvenancePersistence` 以动作期限作为身份与页面证据期限的收缩边界。在持有身份锁、策略/动作描述共享锁后，以及新建提交或精确重试返回前，按数据库当前时间复验动作期限；语义匹配但等待期间到期返回 `UI_ACTION_NOT_AVAILABLE`，本次页面证据、动作和 outbox 写入全部回滚。已有页面证据与动作保持共享锁至事务结束，撤销等语义冲突优先返回 `UI_ACTION_ISSUANCE_CONFLICT`；策略或描述退休返回 `UI_ACTION_NOT_AVAILABLE`。该入口仍是库 API，页面来源 HTTP 发行适配按独立闭环交付。
+页面来源持久化库入口 `ProvenancePersistence` 以动作期限作为身份与页面证据期限的收缩边界。在持有身份锁、策略/动作描述共享锁后，以及新建提交或精确重试返回前，按数据库当前时间复验动作期限；语义匹配但等待期间到期返回 `UI_ACTION_NOT_AVAILABLE`，本次页面证据、动作和 outbox 写入全部回滚。已有页面证据与动作保持共享锁至事务结束，撤销等语义冲突优先返回 `UI_ACTION_ISSUANCE_CONFLICT`；策略或描述退休返回 `UI_ACTION_NOT_AVAILABLE`。页面交付的 HTTP 发行适配见 5.3.1，它逐项复用该命令的跨对象校验。
+
+### 5.3.1 已实现的页面签发与真实浏览器闭环
+
+**配置。** `SENSOR_HTML` 页面根（`GET`、`AUTHENTICATED_ROOT`、精确路径）在响应上声明 `page_actions: {mapping_revision, max_active_pages}`（1–1000）；由它签发的每个 `UI_ACTION_REQUIRED` 非资源 operation 声明 `issued_by: {page_operation_id, ttl_seconds}`（1–86400）。未知页面、未被引用的 `page_actions`、资源型或非 UI 目标、单页超过 16 个动作、同一 `(action_id, mapping_revision)` 两种含义，均在启动编译时拒绝。页面签发的动作没有目标、没有字段，`field_profile` 固定为 `none`。
+
+**动作描述由配置推导并绑定摘要。** 只要有页面声明 `page_actions`，该策略修订即由 edge 管理：页面签发的描述（`page_template` = 页面 operation ID）与 `response.resource_grant` 目标的描述（`page_template` = 目标 operation ID，响应证据不比较页面模板）一起推导，按规范编码计算 SHA-256，写入 `policy_revisions.content_digest`。edge 在绑定任何监听端口之前于单事务内供给：修订不存在则以 `active` 创建；已存在时状态必须为 `active` 且摘要相同，否则拒绝启动（`UI_DESCRIPTOR_CONFLICT`）；每条描述不存在则插入、已存在则逐字段比较（允许字段按集合比较），任何差异整体回滚并拒绝启动；从不更新已有行，并发启动的同配置 edge 收敛为 `Existing`；数据库不可达同样拒绝启动。没有 `page_actions` 的配置保持外部供给（例如靶场种子）。控制面 apply 快照尚无这一供给屏障，因此其中出现 `page_actions` 时整份快照被拒绝。
+
+**页面根准入。** 浏览器顶层导航只携带 `HttpOnly` WAF Cookie，永远不会携带应用自己的 `Authorization`。对声明了 `page_actions` 的页面根，请求不带 `Authorization` 时按 WAF 会话识别 binding：必须是 `active`、未过期且仍持有有效业务凭证的 binding，准入原因 `PAGE_ROOT_SESSION_ALLOWED`；匿名会话 401 `AUTH_REQUIRED`，未知、撤销或过期会话 403 `AUTH_BINDING_MISMATCH`。一旦请求带了 `Authorization`，仍走完整凭证校验，错配照常拒绝。这样放宽是安全的，因为 `SENSOR_HTML` 只释放预先固定摘要的静态字节，不会把按用户生成的源站内容交给仅持有会话的一方；而由此签发的一切都绑定该 binding 与 epoch，并在使用时按完整凭证组合重新校验，单独被盗的 WAF Cookie 得不到可用权限。
+
+**交付时签发。** 精确页面字节通过摘要与注入校验后、正文释放前，edge 在一个事务内写入一条 PageEvidence（模板 = 页面 operation，构建指纹 = 已验证的源站摘要，响应对象引用 = 注入后正文的 SHA-256）和该页声明的全部 ActionGrant 与逐项 `ui_action.issued` outbox。动作期限为配置 TTL 与 binding 绝对期限的较小值，证据期限为其中最长者；引用与事件 ID 由请求、页面实例和动作 HMAC 派生，精确重试得到相同结果。事务先锁 binding 行，再统计同一 binding、epoch 与页面模板下其他未过期页面实例，达到 `max_active_pages` 时返回 `UI_ACTION_CAPACITY_EXCEEDED`；任何一项不合格整体回滚。签发失败从不扣留已验证的页面：页面照常交付但不持有引用，其受控请求随之被拒绝，失败原因写入 `ui_action_issue` 阶段（DENY 或依赖故障 ERROR）。
+
+**交付给浏览器。** 注入的 loader 标签携带本次交付的页面句柄 `pgh_<UUIDv7>`，其 UUID 即页面证据 ID；句柄本身不是凭证。`GET /__xshield/v1/bootstrap?page=<句柄>`（`private, no-store`）只在同源 fetch（`Sec-Fetch-Site` 缺省或为 `same-origin`）且 WAF 会话属于拥有该页面实例的 `active` binding、epoch 一致时，返回该页仍有效的 `actions: [{action_ref, method, path_template, expires_in_seconds}]`（至多 16 条）；另一会话拿到同一句柄只会得到空列表。引用从不进入 HTML、静态资源或日志，journal 只记录交付数量（`sensor_bootstrap` 阶段）。
+
+**浏览器侧出示，网关侧重验。** 探针 1.1.0 只把这些服务端引用原样放进 `X-Xshield-Action-Ref`：页面动作匹配精确的同源方法与路径（带查询串不匹配），列表 → 详情的响应派生引用按 bootstrap 下发的 `resource_grant` 提取提示从已批准列表的 JSON 响应中读取（见 07 §7.4）。网关的 `admit_ui_action` 未作任何放宽：对每个请求重新加载服务端记录并校验 binding、epoch、策略、页面证据、方法、路由、目标、字段与期限，资源路由再精确匹配 ResourceGrant，转发前删除该请求头。真实浏览器回归见 20 §20.19。
 
 ## 5.4 页面中存在代码不等于存在入口
 

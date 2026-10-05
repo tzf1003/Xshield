@@ -6,9 +6,11 @@
 
 探针资源走同源固定路径，bootstrap 动态内容 no-store。静态 HTML 不嵌入跨会话共享的凭证。压缩、ETag、Content-Length、缓存、CSP nonce、script-src/connect-src 与 SRI 必须同步适配；不能为注入而全局关闭 CSP/SRI。SRI 会检查资源内容，改写后须维护对应完整性信息。[S13]
 
-网关在固定版本路径 `/__xshield/v1/sensor/1.0.0.js` 和 `/__xshield/v1/sensor/1.0.0-loader.js` 直接提供普通 JavaScript，使用长期 immutable 缓存、同源资源隔离、`nosniff`、固定版本头和 WAF request_id。启用站点 sensor 配置后，`/__xshield/v1/bootstrap` 以 `private, no-store` 返回服务端固定的页面构建指纹、心跳间隔、prepare 路径及每次请求生成的页面/导航句柄；loader 同源获取该动态配置后启动探针，静态资源不携带会话数据。`POST /__xshield/v1/events/prepare` 仅接收匹配配置 Origin、当前版本和构建的严格 JSON 批次，要求当前未过期 WAF 会话，限制为 16 KiB、16 条连续事件；记录绑定、身份代际和 `client_claimed` 观测，但不产生授权效果。四条路径均属于保留命名空间，站点 operation 不能覆盖，不生成源站转发意图，并以各自稳定原因进入耐久审计。
+网关在固定版本路径直接提供普通 JavaScript，使用长期 immutable 缓存、同源资源隔离、`nosniff`、固定版本头和 WAF request_id。当前注入版本是 1.1.0：`/__xshield/v1/sensor/1.1.0.js`（源码 `sensor/src/sensor-1.1.0.js`）与 `/__xshield/v1/sensor/1.1.0-loader.js`。1.0.0 的两个资源（`sensor/src/sensor.ts`、`sensor/src/loader.ts`）继续按原字节提供，单元测试固定其 SHA-256：此前交付的页面用 SRI 钉住这些字节，滚动升级时旧实例交付的页面也可能向新实例取资源，因此已发布的版本路径可以下线、但字节永远不改；修改探针只能发布新版本路径。
 
-首个 HTML 自动注入适配器使用 operation 级 `SENSOR_HTML` 响应模式，并在配置中固定 `adapter_revision`、规范小写 SHA-256 `origin_sha256`、`injection_offset` 与正文上限；`additional_adapters` 可额外声明至多 15 个修订，修订和摘要均不得重复。它只接受状态 200、`text/html; charset=utf-8`、identity 编码、无 trailer、无下载处置且无 CSP-Report-Only 的 UTF-8 正文；运行时只计算一次完整源站摘要并选择对应批准修订，再验证该修订偏移处精确 `</head>` 后插入上述两个同源外链脚本。两个标签始终携带由网关实际响应字节计算的 SHA-384 SRI；存在强制 CSP 时，网关为每次响应生成 128 位随机 nonce，将同一 nonce 追加到每条策略的 `script-src` / `script-src-elem` 指令及两个脚本标签，因此可满足 `require-sri-for script`。策略数量、长度和指令名有界，重复指令、组合策略、缺少脚本指令或阻止脚本的 sandbox 均关闭。任何构建、偏移、类型或策略偏差均在释放正文前关闭；成功响应移除旧长度、实体校验和摘要头，固定为 `private, no-store`，并以选中修订、原文/注入后摘要及 nonce 应用状态写入耐久审计，nonce 本身不落日志。动态 HTML 须由后续版本化适配器显式支持，不做启发式降级。
+启用站点 sensor 配置后，`/__xshield/v1/bootstrap` 以 `private, no-store` 返回动态配置。不带查询串的请求（1.0.0 loader）得到与 1.0.0 完全相同的文档：服务端固定的页面构建指纹、心跳间隔、prepare 路径及每次请求生成的页面/导航句柄，不含任何引用。1.1.0 loader 读取自身标签上的 `data-xshield-page` 页面句柄并请求 `?page=<句柄>`，得到 `sensor_version: "1.1.0"`、回显的页面句柄，以及 `actions`（该会话拥有的页面实例的有效动作引用，规则见 05 §5.3.1）、`harvest`（由 `response.resource_grant` 编译的非秘密提取提示：来源方法与路径或前缀、列表 JSON Pointer、资源 JSON Pointer、引用字段、目标方法与路径前缀或查询参数、TTL、单响应上限）和 `invalidate`（登录、登出、账号切换等身份变化路由）。其他查询形态返回 400 `SENSOR_BOOTSTRAP_INVALID`，身份存储不可用返回 503，不降级为无引用的成功。`POST /__xshield/v1/events/prepare` 仅接收匹配配置 Origin、构建和当前仍提供的版本（1.1.0 或 1.0.0，单批不得混用）的严格 JSON 批次，要求当前未过期 WAF 会话，限制为 16 KiB、16 条连续事件；记录绑定、身份代际和 `client_claimed` 观测，但不产生授权效果。上述路径均属于保留命名空间，站点 operation 不能覆盖，不生成源站转发意图，并以各自稳定原因进入耐久审计。
+
+首个 HTML 自动注入适配器使用 operation 级 `SENSOR_HTML` 响应模式，并在配置中固定 `adapter_revision`、规范小写 SHA-256 `origin_sha256`、`injection_offset` 与正文上限；`additional_adapters` 可额外声明至多 15 个修订，修订和摘要均不得重复。它只接受状态 200、`text/html; charset=utf-8`、identity 编码、无 trailer、无下载处置且无 CSP-Report-Only 的 UTF-8 正文；运行时只计算一次完整源站摘要并选择对应批准修订，再验证该修订偏移处精确 `</head>` 后插入上述两个同源外链脚本。1.1.0 的两个标签都是同步经典脚本（不带 `defer`/`async`），探针在前：这样它的 fetch/XHR 钩子在文档后续任何脚本运行前已经就位；loader 在后并携带本次交付独有的 `data-xshield-page` 句柄，网关只接受自身生成的规范 `pgh_` UUIDv7，不会把其他内容写进属性。两个标签始终携带由网关实际响应字节计算的 SHA-384 SRI；存在强制 CSP 时，网关为每次响应生成 128 位随机 nonce，将同一 nonce 追加到每条策略的 `script-src` / `script-src-elem` 指令及两个脚本标签，因此可满足 `require-sri-for script`。策略数量、长度和指令名有界，重复指令、组合策略、缺少脚本指令或阻止脚本的 sandbox 均关闭。任何构建、偏移、类型或策略偏差均在释放正文前关闭；成功响应移除旧长度、实体校验和摘要头，固定为 `private, no-store`，并以选中修订、原文/注入后摘要及 nonce 应用状态写入耐久审计，nonce 本身不落日志。动态 HTML 须由后续版本化适配器显式支持，不做启发式降级。
 
 ## 7.2 事件契约
 
@@ -25,6 +27,12 @@ WSS 限制 Origin、连接票据、身份代际、消息率和长度，连接失
 ## 7.4 Hook 的覆盖声明
 
 按站优先完整请求封装入口，保持 Promise、类型、错误语义及密钥轮换。预先保存的函数引用、Worker、WASM、iframe、Service Worker 缓存等需逐项测试。不在“全局 fetch Hook 安装成功”后声称所有加密已接管。
+
+**探针 1.1.0 的实际覆盖（只用于出示动作引用，不做请求封装加密）。** 已接管：本文档的 `window.fetch` 与 `XMLHttpRequest.prototype`（open/setRequestHeader/send），只作用于同源、非 `/__xshield/` 的请求；`XshieldSensor.coverage` 如实声明这一范围。未接管、因而不带任何引用的路径：Dedicated/Shared Worker 内的请求；iframe（包括同源 `about:blank`）自己的 `fetch`/XHR；Service Worker 及其缓存；探针执行前已保存的 `fetch` 引用（例如 `</head>` 注入点之前的内联脚本保存的引用）；注入点之前运行的同步脚本发出的请求；bootstrap 就绪前的同步 XHR；表单提交、顶层导航、`navigator.sendBeacon`、WebSocket。这些路径上的受控请求一律按默认拒绝处理（`UI_ACTION_NOT_AVAILABLE`），从不被静默放行；真实浏览器回归逐一验证了 Worker、iframe 和预存 fetch 引用三条路径被拒绝且未到达源站（20 §20.19）。
+
+**出示规则。** 探针从不创建、推导或猜测引用，只重复两类服务端值：bootstrap 下发的页面动作（精确匹配同源方法与路径，带查询串不匹配）和已批准列表响应里由 edge 注入的引用。后者按 bootstrap 的 `harvest` 提示读取：对匹配来源规则的同源 2xx JSON 响应，在页面拿到响应之前同步 `clone()`，在克隆体上读取至多 1 MiB（声明长度超限直接放弃），严格 UTF-8 与 JSON 解析，按 JSON Pointer 取出至多 `max_items` 项，只接受字符串资源值和 `[A-Za-z0-9_.-]{1,128}` 形状的引用，按（规则, 资源值）保存，表上限 1024 条、先进先出淘汰，客户端租期取规则 TTL（服务端期限仍以账本为准）。目标请求的资源值按 edge 相同的规则解析：路径末段百分号解码一次、不允许额外查询或嵌套段；查询目标要求唯一参数。页面自己设置了 `X-Xshield-Action-Ref` 时从不覆盖。请求在 bootstrap 就绪前最多等待 5 秒；可能是收割目标但尚无引用时，最多等待 2 秒让在途列表完成；之后照常发出（无引用即被拒）。`invalidate` 路由返回 2xx 后清空全部引用；导航自然产生新的页面实例与句柄。
+
+**语义保持与故障隔离。** fetch 钩子保留 `Request` 对象本身、`Headers` 实例、init 中的其余成员（body、signal、credentials、cache 等经原型链保留）以及 `Request` 携带的 referrer 与 referrer policy，返回原生 Promise 与原生 Response，原生失败原样传播；任何钩子内部异常都退回不加修改的原生调用。XHR 钩子只在 send 时追加请求头，异步请求可延迟到 bootstrap 就绪，若期间重新 `open()` 则放弃旧发送；同步 XHR 不等待。读取克隆体从不消费页面自己的正文；取消克隆分支不等待（tee 的另一分支仍被页面持有时取消永远不会完成）。
 
 前端调用栈仅作调用点线索，不是函数入参内存快照。所谓明文必须来自实际接管的请求实体或可信转换，而不是仅来自客户端报告。
 
