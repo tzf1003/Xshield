@@ -269,11 +269,16 @@ fn prefixed_v7(value: &str, prefix: &str) -> bool {
         .is_some_and(|value| value.get_version() == Some(Version::SortRand))
 }
 
+/// A hint is client text: bounded printable ASCII that is never an action
+/// reference. References must not enter the journal or the analytical index, and
+/// the audit publisher refuses such a record, so a hostile client could
+/// otherwise stall publication by sending one. The real sensor never sends a hint.
 fn optional_client_text(value: Option<&str>) -> bool {
     value.is_none_or(|value| {
         !value.is_empty()
             && value.len() <= MAX_CLIENT_TEXT_BYTES
             && value.bytes().all(|byte| byte.is_ascii_graphic())
+            && !value.contains("action.")
     })
 }
 
@@ -319,6 +324,30 @@ mod tests {
         assert!(
             SensorObservationBatch::from_json(&event("HEARTBEAT", 2), &["1.0.1"], BUILD).is_err()
         );
+    }
+
+    #[test]
+    fn a_hint_is_bounded_printable_text_and_never_an_action_reference() {
+        let accepted = &crate::ACCEPTED_SENSOR_VERSIONS[..];
+        let with_hint = |hint: serde_json::Value| {
+            let mut batch: serde_json::Value =
+                serde_json::from_slice(&event("PAGE_READY", 1)).unwrap();
+            batch["events"][0]["action_hint"] = hint;
+            SensorObservationBatch::from_json(batch.to_string().as_bytes(), accepted, BUILD)
+        };
+        assert!(with_hint("orders.submit".into()).is_ok());
+        assert!(with_hint("h".repeat(MAX_CLIENT_TEXT_BYTES).into()).is_ok());
+        let reference = format!("action.{}", "a".repeat(64));
+        for hint in [
+            reference.clone(),
+            format!("try-{reference}"),
+            String::new(),
+            "two words".to_owned(),
+            "h".repeat(MAX_CLIENT_TEXT_BYTES + 1),
+            "caf\u{e9}".to_owned(),
+        ] {
+            assert!(with_hint(hint.clone().into()).is_err(), "{hint}");
+        }
     }
 
     #[test]

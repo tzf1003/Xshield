@@ -1,7 +1,8 @@
 //! Reads the encrypted journal of a finished browser-loop run back and proves
 //! every request the browser observed was audited with its decision, reason
-//! code and terminal event, and that page issuance and bootstrap delivery left
-//! their stages. Run by `scripts/test_browser_loop.sh`; ignored otherwise.
+//! code and terminal event, that page issuance and bootstrap delivery left
+//! their stages, and that the audit publisher's parser accepts every record.
+//! Run by `scripts/test_browser_loop.sh`; ignored otherwise.
 
 use serde::Deserialize;
 use std::{collections::BTreeMap, env, fs, path::PathBuf};
@@ -48,10 +49,19 @@ fn every_browser_loop_request_is_audited_with_its_reason() {
     let limits = JournalLimits::new(16_777_216, 12_582_912, 1_048_576).unwrap();
     let (journal, _) = LocalJournal::open(&directory, "journal-loop-r1", key, limits).unwrap();
     let mut requests = BTreeMap::<String, Observed>::new();
+    let mut rejected = Vec::new();
     journal
         .visit_closed_records(1_000_000, |record| {
             let event: serde_json::Value = serde_json::from_slice(record.plaintext())
                 .map_err(|_| JournalError::InvalidEvent)?;
+            // Whatever the real edge wrote must be publishable: the publisher
+            // parses a whole sealed segment before it indexes any row.
+            if let Err(error) = xshield_worker::check_journal_record(record) {
+                rejected.push(format!(
+                    "{} {} -> {error}",
+                    event["event_type"], event["payload"]["stage"]
+                ));
+            }
             let Some(request_id) = event["request_id"].as_str() else {
                 return Ok(());
             };
@@ -79,6 +89,10 @@ fn every_browser_loop_request_is_audited_with_its_reason() {
             Ok(())
         })
         .unwrap();
+    assert!(
+        rejected.is_empty(),
+        "the publisher rejects what the edge wrote: {rejected:#?}"
+    );
     assert!(!expectations.decisions.is_empty());
     for expected in &expectations.decisions {
         let observed = requests

@@ -19,7 +19,8 @@ use std::{
 };
 use uuid::{Uuid, Version};
 use xshield_audit::{
-    JournalError, JournalKey, SealVerifyingKey, SealedSegmentReader, verify_sealed_segment,
+    AuthenticatedJournalRecord, JournalError, JournalKey, SealVerifyingKey, SealedSegmentReader,
+    verify_sealed_segment,
 };
 use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 
@@ -28,6 +29,7 @@ pub mod calibration_audit;
 pub mod calibration_evaluator;
 mod calibration_vault_reader;
 mod control_audit;
+mod gateway_audit;
 mod local_request;
 pub mod model_eval;
 mod outbox;
@@ -816,6 +818,36 @@ fn set_watermark(report: &mut PublishReport, checkpoint: &Checkpoint) {
     report.watermark_producer_sequence = checkpoint.final_sequence;
 }
 
+/// Applies the publisher's strict per-record contract to one authenticated journal record.
+///
+/// The publisher parses a whole sealed segment before it submits any row, so a
+/// single record it cannot parse stalls that segment and every segment after
+/// it. A producer calls this in its own tests over what it really wrote, which
+/// turns a shape the publisher does not know into a failing test instead of a
+/// stalled index in production.
+///
+/// This is the exact parser [`publish_sealed_segments`] uses: envelope identity
+/// bound to the authenticated event ID, sequence and boot ID, then the closed
+/// payload shape for the event type. It performs no I/O, reads no clock, keeps
+/// nothing and emits no audit event; the record stays owned by the caller.
+///
+/// # Errors
+/// Returns [`PublishError::InvalidEvent`] for a malformed envelope or payload,
+/// [`PublishError::UnsupportedEventType`] for an event type no adapter accepts
+/// from a journal, and [`PublishError::Json`] for undecodable JSON.
+pub fn check_journal_record(record: &AuthenticatedJournalRecord) -> Result<(), PublishError> {
+    let retention = TimeDelta::try_days(1).ok_or(PublishError::InvalidConfig)?;
+    IndexRow::parse(
+        record.plaintext(),
+        record.event_id(),
+        record.producer_sequence(),
+        record.producer_boot_id(),
+        hex(record.plaintext_digest()),
+        retention,
+    )
+    .map(drop)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Row)]
 struct IndexRow {
     tenant_id: String,
@@ -989,6 +1021,11 @@ impl IndexRow {
             // could bypass a dedicated journal parser by naming an outbox type.
             ParseSource::Journal if outbox::supports(&event.event_type) => {
                 return Err(PublishError::UnsupportedEventType);
+            }
+            // Gateway shapes that extend the generic stage payload or have no
+            // generic equivalent keep their own closed parsers.
+            ParseSource::Journal if gateway_audit::supports(&event) => {
+                gateway_audit::parse(&event)?
             }
             ParseSource::Journal => PayloadSummary::parse(&event.event_type, event.payload.get())?,
             ParseSource::Outbox if outbox::supports(&event.event_type) => outbox::parse(&event)?,

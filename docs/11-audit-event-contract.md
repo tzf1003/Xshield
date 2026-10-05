@@ -218,3 +218,20 @@ producer 固定为 `calibration-evidence-reader`，policy revision 为 `calibrat
 API Key 管理事件新增强类型 `target_api_key_id=key_…`（`key_` + UUIDv7，严格前缀校验）：`console.agent_api_key.admin` 成功必须携带，拒绝/故障可携带路径中已校验的 Key 或为空；`console.agent_api_key.list`、`console.agent_api_key.use` 和所有其他事件类型必须为空，错位携带的事件会被发布器以 InvalidEvent 拒绝并停住所在 segment。控制面对创建、撤销、轮换（旧 Key 与新 Key 两条同请求事件，原因码 `CONTROL_API_KEY_ROTATED_OUT`/`CONTROL_API_KEY_ROTATED_IN`，同一 journal 批次）和列表追加成功事件，原因码见 [15 章](15-console-and-api.md)；事件只含管理者主体与 Key ID，不含明文、指纹或前缀。控制面先升级发布器再启用该字段：旧发布器遇到 `target_api_key_id` 会因未知字段停住 segment。`console.agent_api_key.use` 的成功事件主体为 `apikey:{key_id}:{subject}`，预算内的每次尝试恰好一条，预算耗尽的 429 不写事件。
 
 `scripts/check_audit_event_coverage.py` 在 CI 中比较控制面全部 `AccessAction` 与该矩阵，缺任何一项即失败；它是文本级守卫，不替代发布器的真实 ClickHouse 回归（见 20.6、20.11）。
+
+## 11.15 网关 journal 事件的发布契约
+
+封存段发布器在写入任何一行之前解析整个 segment，网关本地 journal 的查询回退（`local_request`）走同一解析路径。2026-10-05 发现，以下网关事件长期没有解析器，包含其中任何一条的 segment 都无法发布，其后的 segment 随之停住，请求时间线也无法从本地 journal 回退读取：`crypto_decode`、`crypto_encode`、`sensor_html_inject` 三种阶段（通用阶段形状的 `facts`/`coverage` 只允许 `operation_id` 与 `admission_checked`，其余成员被拒绝）、`sensor.observation`、`edge.response`/`edge.unknown`、`evidence.captured`。它们现在各有 `crates/xshield-worker/src/gateway_audit.rs` 中的封闭解析器，未知成员、缺失成员、取值越出生产者词表或事实与覆盖自相矛盾都以 `InvalidEvent` 拒绝，且网关事件只能来自 journal，不能借 outbox 通道进入。
+
+| 事件 | 封闭形状与关键不变量 |
+|---|---|
+| `stage.completed` / `crypto_decode` | 通用阶段头（deterministic、`confidence=null/not_applicable`、无模型引用、`rule_revision` 等于 `facts.adapter_revision`）加完整 `facts`（operation、coverage_mode、algorithm、adapter_revision、key_id、approval_ref、source_evidence_ref、message_id、nonce/envelope/rebuilt 摘要、issued/expires）与 `coverage{request_crypto_checked, origin_entity_rebuilt}`。`ENFORCE` 才有 `AES-256-GCM` 与 key_id，`COMPATIBILITY` 才有服务端 approval_ref；`OBSERVE`/`COMPATIBILITY` 不携带消息；覆盖不得声称比事实更多（`request_crypto_checked` 等于是否 ENFORCE，`origin_entity_rebuilt` 等于是否有重建摘要）；ENFORCE 的 PASS 必须带完整消息证据；结果只能是 PASS/DENY/ERROR |
+| `stage.completed` / `crypto_encode` | 同上，但 coverage 为 `{response_crypto_checked, client_entity_rebuilt}`；只有 ENFORCE，无 approval 与页面证据；PASS 必须带完整消息证据，`client_entity_rebuilt` 等于是否有封包摘要 |
+| `stage.completed` / `sensor_html_inject` | 只有 PASS：精确批准的源站摘要与注入后摘要为不同的 64 位小写十六进制，`origin_entity_verified` 与 `sensor_scripts_injected` 均为 true；`csp_nonce_applied` 仅作证据记录 |
+| `edge.response` / `edge.unknown` | 边缘自己产生的响应（拒绝、传感器资源、引导）；`edge_state` 分别为 `response_served`/`unknown`，已送出的响应必须有 100–599 状态码，未知交付可为空；源站响应仍使用 `origin.*` |
+| `evidence.captured` | 固定 `evidence_capture/PASS/EVIDENCE_CAPTURED`，`confidence=null`，恰好一个 artifact 引用和一个 catalog 因果事件，属于某个请求 |
+| `sensor.observation` | 浏览器上报的生命周期事件，索引为 `observation` 证明、无置信度：`claim_status` 必须是 `client_claimed`，`authorization_effect` 必须是 `none`；`PAGE_READY` 当且仅当序号为 1，序号 1–64；binding、`pgh_`/`nav_` 句柄、请求引用、构建与调用点指纹逐项强类型校验；`action_hint` 是 256 字节内的可打印 ASCII 文本，且绝不含动作引用（`action.`），因为引用不得进入 journal 与索引 |
+
+这些事件只是审计事实，不是授权真值：浏览器观测从不改变任何放行结果，加密事件只含摘要与覆盖，不含明文或密钥材料。
+
+**防回归。** `xshield_worker::check_journal_record` 以发布器使用的同一解析器检查一条已认证的 journal 记录。网关 `durable_audit` 的每个读取 journal 的测试都对全部记录调用它（含一个驱动完整加解密、兼容覆盖、`edge.unknown` 与证据捕获的专门测试），带真实数据库的 `evidence_capture` 集成测试与真实浏览器闭环（`scripts/test_browser_loop.sh`，真实 edge 二进制写出的 journal）也对每条记录断言，所以新增网关事件形状而没有同时扩展 worker 解析器，会在这些测试里失败，而不是在生产环境让索引停滞。新增形状时必须同时扩展 `gateway_audit.rs` 及其测试；`scripts/check_audit_event_coverage.py` 仍只守卫控制面事件。

@@ -1988,6 +1988,31 @@ mod tests {
 
     const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 
+    /// Everything the gateway journals must be publishable. The publisher parses
+    /// a whole sealed segment before it indexes any row, so one record it cannot
+    /// parse stalls that segment and every later one.
+    fn assert_publishable(journal: &LocalJournal) {
+        let mut rejected = Vec::new();
+        journal
+            .visit_closed_records(100_000, |record| {
+                if let Err(error) = xshield_worker::check_journal_record(record) {
+                    let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                        .map_err(|_| JournalError::InvalidEvent)?;
+                    rejected.push(format!(
+                        "{} stage={} -> {error}",
+                        event["event_type"], event["payload"]["stage"]
+                    ));
+                }
+                Ok(())
+            })
+            .unwrap();
+        rejected.dedup();
+        assert!(
+            rejected.is_empty(),
+            "the publisher rejects what the gateway wrote: {rejected:#?}"
+        );
+    }
+
     fn directory() -> PathBuf {
         std::env::temp_dir().join(format!("xshield-gateway-audit-{}", Uuid::now_v7()))
     }
@@ -2201,6 +2226,7 @@ mod tests {
         assert_eq!(stage["payload"]["rule_revision"], "home-r1");
         assert_eq!(stage["payload"]["facts"]["csp_nonce_applied"], false);
         assert_eq!(stage["payload"]["confidence"], serde_json::Value::Null);
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2335,6 +2361,7 @@ mod tests {
                 .iter()
                 .all(|event| event["payload"]["rule_revision"] == "mapping-r1")
         );
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2473,6 +2500,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.recovered_records, 10);
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2623,6 +2651,7 @@ mod tests {
         );
         assert_eq!(observations[0]["payload"]["claim_status"], "client_claimed");
         assert_eq!(observations[0]["payload"]["authorization_effect"], "none");
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2687,6 +2716,7 @@ mod tests {
             crypto_stage["payload"]["coverage"]["origin_entity_rebuilt"],
             false
         );
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2759,6 +2789,7 @@ mod tests {
             observed["payload"]["coverage"]["origin_entity_rebuilt"],
             false
         );
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2885,6 +2916,7 @@ mod tests {
             assert_eq!(terminal[1]["payload"]["reason_code"], final_reason);
             assert_eq!(terminal[1]["payload"]["origin_state"], origin_state);
             assert_eq!(terminal[1]["payload"]["status"], 502);
+            assert_publishable(&journal);
             drop(journal);
             fs::remove_dir_all(directory).unwrap();
         }
@@ -2977,10 +3009,215 @@ mod tests {
             terminal[1]["payload"]["reason_code"],
             ReasonCode::ResponseValidationFailed.as_str()
         );
+        assert_publishable(&journal);
         drop(journal);
         let restarted = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
         assert!(restarted.is_ready());
         drop(restarted);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    // The shapes the single-purpose tests above do not reach, all written by the
+    // real writer: a fully proven decode and encode, compatibility coverage with
+    // and without page evidence, an edge response whose delivery ended unknown
+    // and an evidence capture. Every record must pass the publisher's parser.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn complete_crypto_compatibility_unknown_edge_and_capture_shapes_are_publishable() {
+        let directory = directory();
+        let config = config(&directory, 4 * 1024 * 1024);
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let digest = |fill: &str| fill.repeat(64);
+        let enforced = RequestCryptoAudit {
+            coverage_mode: "ENFORCE",
+            algorithm: Some("AES-256-GCM"),
+            adapter_revision: "orders-json-r1".to_owned(),
+            key_id: Some("request-key-r1".to_owned()),
+            approval_ref: None,
+            source_evidence_ref: None,
+            message_id: Some("msg_018f2a3b-4c5d-7000-8000-000000000901".to_owned()),
+            nonce_sha256: Some(digest("a")),
+            issued_at: Some(1_800_000_000),
+            expires_at: Some(1_800_000_060),
+            envelope_sha256: Some(digest("b")),
+            rebuilt_sha256: Some(digest("c")),
+            outcome: "PASS",
+            reason_code: ReasonCode::RequestCryptoDecoded,
+            duration_us: 7,
+        };
+        let encoded = ResponseCryptoAudit {
+            algorithm: "AES-256-GCM",
+            adapter_revision: "health-response-r1".to_owned(),
+            key_id: "response-key-r1".to_owned(),
+            message_id: Some("msg_018f2a3b-4c5d-7000-8000-000000000902".to_owned()),
+            nonce_sha256: Some(digest("d")),
+            issued_at: Some(1_800_000_000),
+            expires_at: Some(1_800_000_060),
+            origin_sha256: Some(digest("e")),
+            envelope_sha256: Some(digest("f")),
+            outcome: "PASS",
+            reason_code: ReasonCode::ResponseCryptoEncoded,
+            duration_us: 9,
+        };
+        let RequestCryptoPolicy::Compatibility(rule) = config
+            .request_crypto_policy("POST", "/orders-legacy")
+            .unwrap()
+        else {
+            panic!("expected compatibility policy");
+        };
+        let page = PageEvidenceId::parse("page_018f2a3b-4c5d-7000-8000-000000000020").unwrap();
+        let compatible = RequestCryptoAudit::compatible(rule, &page, 3);
+        let unproven = RequestCryptoAudit::compatibility_failed(
+            rule,
+            None,
+            ReasonCode::RequestCryptoCompatibilityExpired,
+            3,
+        );
+
+        // (method, path, request id suffix, crypto on the request, crypto on the
+        // response, response source, delivery failed). An edge-served response
+        // is only audited for an allowed decision, hence the public /health.
+        let cases = [
+            (
+                "POST",
+                "/orders",
+                "0031",
+                Some(&enforced),
+                None,
+                ResponseSource::Origin,
+                false,
+            ),
+            (
+                "GET",
+                "/health",
+                "0032",
+                None,
+                Some(&encoded),
+                ResponseSource::Origin,
+                false,
+            ),
+            (
+                "POST",
+                "/orders-legacy",
+                "0033",
+                Some(&compatible),
+                None,
+                ResponseSource::Edge,
+                false,
+            ),
+            (
+                "POST",
+                "/orders-legacy",
+                "0034",
+                Some(&unproven),
+                None,
+                ResponseSource::Edge,
+                false,
+            ),
+            (
+                "GET",
+                "/health",
+                "0035",
+                None,
+                None,
+                ResponseSource::Edge,
+                false,
+            ),
+            (
+                "GET",
+                "/health",
+                "0036",
+                None,
+                None,
+                ResponseSource::Edge,
+                true,
+            ),
+        ];
+        for (method, path, suffix, request_crypto, response_crypto, source, failed) in cases {
+            let request_id = format!("req_018f2a3b-4c5d-7000-8000-00000000{suffix}");
+            let trace_id = "31313131313131313131313131313131";
+            let decision = config.admit(method, path, UnixSeconds::new(1));
+            let admission = audit
+                .commit_admission(AdmissionFacts {
+                    request_id: &request_id,
+                    trace_id,
+                    method,
+                    decision: &decision,
+                    duration_us: 10,
+                    request_crypto,
+                    sensor_observations: &[],
+                    sensor_bootstrap: None,
+                    forward_origin: decision.outcome == GatewayOutcome::Allowed,
+                })
+                .await
+                .unwrap();
+            if suffix == "0031" {
+                audit
+                    .record_evidence_capture(
+                        &request_id,
+                        trace_id,
+                        &admission,
+                        "ev_018f2a3b-4c5d-7000-8000-000000000306",
+                        "ev_018f2a3b-4c5d-7000-8000-000000000305",
+                        "evidence-profile-r1",
+                    )
+                    .await
+                    .unwrap();
+            }
+            audit
+                .finalize(FinalFacts {
+                    request_id: &request_id,
+                    trace_id,
+                    method,
+                    decision: &decision,
+                    admission: &admission,
+                    status: if failed { 0 } else { 200 },
+                    duration_us: 20,
+                    proxy_error: failed,
+                    response_failure: None,
+                    origin_status: (source == ResponseSource::Origin).then_some(200),
+                    origin_response_complete: source == ResponseSource::Origin,
+                    response_crypto,
+                    sensor_html: None,
+                    page_actions: None,
+                    response_source: source,
+                })
+                .await
+                .unwrap();
+        }
+        drop(audit);
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        journal
+            .visit_closed_records(1000, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                seen.insert(format!(
+                    "{} {}",
+                    event["event_type"].as_str().unwrap_or_default(),
+                    event["payload"]["stage"].as_str().unwrap_or_default()
+                ));
+                Ok(())
+            })
+            .unwrap();
+        for expected in [
+            "stage.completed crypto_decode",
+            "stage.completed crypto_encode",
+            "edge.response ",
+            "edge.unknown ",
+            "evidence.captured evidence_capture",
+        ] {
+            assert!(seen.contains(expected), "{expected} not written: {seen:?}");
+        }
+        assert_publishable(&journal);
+        drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3045,6 +3282,7 @@ mod tests {
             terminal[1]["payload"]["reason_code"],
             ReasonCode::OriginOutcomeUnknown.as_str()
         );
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3097,6 +3335,7 @@ mod tests {
         assert_eq!(terminal.len(), 1);
         assert_eq!(terminal[0]["payload"]["decision"], "DENY");
         assert_eq!(terminal[0]["payload"]["status"], serde_json::Value::Null);
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3143,6 +3382,7 @@ mod tests {
             ReasonCode::RequestIncomplete.as_str()
         );
         assert_eq!(terminal[0]["payload"]["status"], serde_json::Value::Null);
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3315,6 +3555,7 @@ mod tests {
             ReasonCode::AuditBarrierReopened.as_str()
         );
         assert_eq!(reopened[0]["payload"]["truncated_bytes"], 0);
+        assert_publishable(&journal);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }

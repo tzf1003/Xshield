@@ -254,8 +254,14 @@ async fn response_capture_is_durable_redacted_and_fail_closed() {
     )
     .unwrap();
     let mut events = Vec::new();
+    let mut rejected = Vec::new();
     journal
         .visit_closed_records(1000, |record| {
+            // The publisher parses a whole sealed segment before it indexes
+            // any row, so everything the edge wrote must pass its parser.
+            if let Err(error) = xshield_worker::check_journal_record(record) {
+                rejected.push(error.to_string());
+            }
             events.push(
                 serde_json::from_slice::<Value>(record.plaintext())
                     .map_err(|_| JournalError::InvalidEvent)?,
@@ -263,6 +269,10 @@ async fn response_capture_is_durable_redacted_and_fail_closed() {
             Ok(())
         })
         .unwrap();
+    assert!(
+        rejected.is_empty(),
+        "the publisher rejects what the edge wrote: {rejected:?}"
+    );
     let captured = events
         .iter()
         .find(|event| {
