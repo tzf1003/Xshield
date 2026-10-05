@@ -52,8 +52,7 @@ test("navigation is regrouped into the console sections; cases and approvals rep
       ["受保护站点", "/sites"],
       ["请求调查", "/investigation/requests"],
       ["结构化检索", "/investigation/search"],
-      ["资格与身份账本", "/investigation/grants"],
-      ["身份绑定", "/investigation/bindings"],
+      ["身份与资格", "/investigation/grants"],
       ["模型调用列表", "/investigation/models"],
       ["模型调用详情", "/investigation/models/lookup"],
       ["Agent 运行", "/investigation/agents"],
@@ -77,8 +76,7 @@ test("role visibility matches the previous shell for every role", () => {
     "概览",
     "站点状态",
     "请求调查",
-    "资格与身份账本",
-    "身份绑定",
+    "身份与资格",
     "模型调用列表",
     "模型调用详情",
     "Agent 运行",
@@ -88,8 +86,7 @@ test("role visibility matches the previous shell for every role", () => {
     "概览",
     "请求调查",
     "结构化检索",
-    "资格与身份账本",
-    "身份绑定",
+    "身份与资格",
     "案件工作台",
     "审批中心",
     "运行状态",
@@ -148,6 +145,11 @@ test("the longest matching entry is current, including ID forms and sub-routes",
   assert.equal(key("/investigation/models/lookup"), "/investigation/models/lookup");
   assert.equal(key(`/investigation/models/${ids.mdl}`), "/investigation/models");
   assert.equal(key(`/investigation/requests/${ids.req}`), "/investigation/requests");
+  // The identity page has a tab with its own address; both addresses highlight the one entry.
+  assert.equal(key("/investigation/grants"), "/investigation/grants");
+  assert.equal(key(`/investigation/grants/${ids.grant}`), "/investigation/grants");
+  assert.equal(key("/investigation/bindings"), "/investigation/grants");
+  assert.equal(key(`/investigation/bindings/${ids.auth}`), "/investigation/grants");
   assert.equal(key("/unknown"), undefined);
   const scoped = flattenNav(visibleNav(["observer"], "site_demo"));
   assert.equal(activeItem("/sites/site_demo/overview", scoped)?.label, "站点状态");

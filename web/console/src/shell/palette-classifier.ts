@@ -114,15 +114,13 @@ export function recognise(value: string): Recognised | null {
   if (grantPattern.test(value)) {
     return {
       noun: "资格 ID",
-      candidates: [
-        open(`/investigation/grants/${value}`, "资格与身份账本", "/investigation/grants"),
-      ],
+      candidates: [open(`/investigation/grants/${value}`, "身份与资格", "/investigation/grants")],
     };
   }
   if (bindingPattern.test(value)) {
     return {
       noun: "身份绑定 ID",
-      candidates: [open(`/investigation/bindings/${value}`, "身份绑定", "/investigation/bindings")],
+      candidates: [open(`/investigation/bindings/${value}`, "身份与资格", "/investigation/grants")],
     };
   }
   if (calibrationReportPattern.test(value)) {

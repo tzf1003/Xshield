@@ -3,6 +3,7 @@ import { expect, type Page, test } from "@playwright/test";
 import { mockControl } from "./control-mock";
 import { REQUEST_ID } from "./fixtures";
 import { pickRange } from "./investigation-helpers";
+import { BINDING_ID, GRANT_ID } from "./ledger-fixtures";
 import { openView } from "./navigation";
 import { mockShellApi, SCOPE, signIn } from "./shell-helpers";
 
@@ -147,6 +148,16 @@ for (const scheme of ["light", "dark"] as const) {
       await page.keyboard.press("Escape");
       await page.getByText("查看已提交计划", { exact: true }).click();
       await expect(page.getByRole("region", { name: "已提交查询计划" })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+    });
+
+    test("identity and grants with a snapshot", async ({ page }) => {
+      await mockControl(page);
+      await signIn(page, `/investigation/grants/${GRANT_ID}`);
+      await expect(page.getByRole("region", { name: "资格记录", exact: true })).toBeVisible();
+      expect(await serious(page)).toEqual([]);
+      await page.getByRole("link", { name: BINDING_ID, exact: true }).click();
+      await expect(page.getByRole("region", { name: "身份绑定记录", exact: true })).toBeVisible();
       expect(await serious(page)).toEqual([]);
     });
 

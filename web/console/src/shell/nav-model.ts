@@ -41,6 +41,8 @@ export type NavItem = Readonly<{
   keywords: readonly string[];
   /** Pathname prefix that marks the entry as the current page. Defaults to `href`. */
   matchPrefix?: string;
+  /** Further prefixes of pages that live under this entry (a tab with its own address). */
+  alsoMatches?: readonly string[];
   /** A count the shell shows beside the label; it is only ever what the last read found. */
   badge?: "approvals";
 }>;
@@ -99,17 +101,20 @@ export const navCatalog: readonly NavGroup[] = [
         "检索",
         "事件",
       ]),
-      item("/investigation/grants", "资格与身份账本", ["investigator", "observer"], "ledger", [
-        "grant",
-        "ledger",
-        "资格",
-        "账本",
-      ]),
-      item("/investigation/bindings", "身份绑定", ["investigator", "observer"], "ledger", [
-        "binding",
-        "auth",
-        "绑定",
-      ]),
+      {
+        ...item("/investigation/grants", "身份与资格", ["investigator", "observer"], "ledger", [
+          "grant",
+          "binding",
+          "auth",
+          "ledger",
+          "资格",
+          "身份",
+          "绑定",
+          "账本",
+        ]),
+        // The identity-binding tab has its own address but is the same page.
+        alsoMatches: ["/investigation/bindings"],
+      },
       item("/investigation/models", "模型调用列表", ["observer"], "model", [
         "model",
         "models",
@@ -267,14 +272,15 @@ export function activeItem(pathname: string, items: readonly NavItem[]): NavItem
   let best: NavItem | null = null;
   let bestLength = -1;
   for (const entry of items) {
-    const prefix = entry.matchPrefix ?? entry.href;
-    const matches =
-      entry.href === "/"
-        ? pathname === "/"
-        : pathname === prefix || pathname.startsWith(`${prefix}/`);
-    if (matches && prefix.length > bestLength) {
-      best = entry;
-      bestLength = prefix.length;
+    for (const prefix of [entry.matchPrefix ?? entry.href, ...(entry.alsoMatches ?? [])]) {
+      const matches =
+        entry.href === "/"
+          ? pathname === "/"
+          : pathname === prefix || pathname.startsWith(`${prefix}/`);
+      if (matches && prefix.length > bestLength) {
+        best = entry;
+        bestLength = prefix.length;
+      }
     }
   }
   return best;
@@ -291,8 +297,8 @@ const titles: Record<QueryKind, string> = {
   "model-list": "模型调用列表",
   "audit-health": "审计发布状态",
   "calibration-report": "校准报告调查",
-  grant: "资格调查",
-  binding: "身份绑定调查",
+  grant: "身份与资格",
+  binding: "身份与资格",
   search: "结构化事件检索",
   case: "案件工作台",
   approvals: "审批中心",
@@ -312,8 +318,8 @@ const leads: Record<QueryKind, string> = {
   "model-list": "在固定 UTC 时间窗内分页发现模型调用；点击条目会重新读取详情并重新鉴权。",
   "audit-health": "按需读取配置审计日志到索引的发布快照。",
   "calibration-report": "读取受限校准报告的冻结元数据与正文保留观察。",
-  grant: "核对当前账本的状态、代际与期限。",
-  binding: "核对当前账本的状态、代际与期限。",
+  grant: "核对账本中资格与身份绑定的状态、代际与期限；这是数据库时刻的观察，不是准入判定。",
+  binding: "核对账本中资格与身份绑定的状态、代际与期限；这是数据库时刻的观察，不是准入判定。",
   search: "按时间与事件字段检索，核对直接引用的历史事实。",
   case: "案件是证据工作的枢纽：证据集合、访问申请、保留锁、导出与分析任务都在案件里完成。",
   approvals: "集中处理等待你审批的原文访问、导出和策略修订，并跟踪你自己的申请。",
@@ -336,8 +342,6 @@ export const legacyKinds: ReadonlySet<QueryKind> = new Set<QueryKind>([
   "model-list",
   "audit-health",
   "calibration-report",
-  "grant",
-  "binding",
   "api-keys",
   "jobs",
 ]);

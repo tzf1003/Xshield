@@ -15,7 +15,6 @@ import type {
 import { routeQueryKind, routeTarget } from "../admin-routes";
 import type { SearchPreset } from "../investigation/search-preset.ts";
 import { useInvestigationNavigate } from "../investigation/navigation.ts";
-import type { BindingResponse, GrantResponse } from "../ledger";
 import {
   AgentRunOverview,
   ArtifactDetail,
@@ -29,9 +28,6 @@ import { unauthorizedNotice } from "../security/session-store.ts";
 
 // Heavy panels load the first time their page is opened. The four workbenches below keep their
 // unconfirmed-write state across navigation, so once mounted they stay mounted (hidden).
-const LedgerPanel = lazy(() =>
-  import("../LedgerPanel").then((module) => ({ default: module.LedgerPanel })),
-);
 const ManagementApiKeyPanel = lazy(() =>
   import("../ManagementApiKeyPanel").then((module) => ({ default: module.ManagementApiKeyPanel })),
 );
@@ -47,8 +43,6 @@ const queryLabels = {
   model: "模型调用 ID",
   agent: "Agent 运行 ID",
   "calibration-report": "校准报告 ID",
-  grant: "资格 ID",
-  binding: "身份绑定 ID",
   jobs: "任务 ID",
 };
 const queryPrefixes = {
@@ -56,8 +50,6 @@ const queryPrefixes = {
   model: "mdl",
   agent: "agt",
   "calibration-report": "calr",
-  grant: "grant",
-  binding: "auth",
   jobs: "job",
 };
 function Failure({ problem }: { problem: Problem | null }) {
@@ -84,7 +76,7 @@ export type LegacyHostProps = {
 };
 
 /** Kinds whose content is a routed page now; the host renders nothing of its own for them. */
-const routedKinds: ReadonlySet<string> = new Set(["request", "search"]);
+const routedKinds: ReadonlySet<string> = new Set(["request", "search", "grant", "binding"]);
 
 /**
  * The pre-redesign pages, kept working while they are rebuilt one by one on the routed data
@@ -121,7 +113,6 @@ export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) 
   });
   const [requestId, setRequestId] = useState("");
   const queryKind = routeQueryKind(pathname);
-  const [ledger, setLedger] = useState<GrantResponse | BindingResponse | null>(null);
   const [model, setModel] = useState<ModelCallResponse | null>(null);
   const [agentRun, setAgentRun] = useState<AgentRunResponse | null>(null);
   const [modelListPlan, setModelListPlan] = useState<ModelCallListPlan | null>(null);
@@ -147,7 +138,6 @@ export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) 
     setHealth(null);
     setJob(null);
     setCalibrationReport(null);
-    setLedger(null);
     setArtifact(null);
     setProblems({});
     setBusy({});
@@ -201,13 +191,6 @@ export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) 
         (api, signal) => api.agentRun(target, signal),
         (response) => setAgentRun(response),
       );
-    else if (queryKind === "grant")
-      void run(
-        "query",
-        (api, signal) => api.grant(target, signal),
-        (response) => setLedger(response),
-      );
-    else if (queryKind === "binding") loadBinding(target);
     else if (queryKind === "calibration-report") loadCalibrationReport(target);
   }, [connected, pathname, queryKind]);
 
@@ -313,25 +296,6 @@ export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) 
       );
       return;
     }
-    if (queryKind === "grant") {
-      void run(
-        "query",
-        (api, signal) => api.grant(target, signal),
-        (response) => setLedger(response),
-      );
-      return;
-    }
-    if (queryKind === "binding") {
-      loadBinding(target);
-      return;
-    }
-  }
-  function loadBinding(target: string) {
-    void run(
-      "query",
-      (api, signal) => api.binding(target, signal),
-      (response) => setLedger(response),
-    );
   }
   function loadModelCalls(value: unknown, cursor?: string) {
     let plan: ModelCallListPlan;
@@ -372,16 +336,14 @@ export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) 
       (response) => setCalibrationReport(response),
     );
   }
-  function openTarget(kind: "request" | "binding" | "model" | "agent", id: string) {
+  function openTarget(kind: "request" | "model" | "agent", id: string) {
     clearResults();
     const route =
       kind === "request"
         ? `/investigation/requests/${id}`
         : kind === "model"
           ? `/investigation/models/${id}`
-          : kind === "agent"
-            ? `/investigation/agents/${id}`
-            : `/investigation/bindings/${id}`;
+          : `/investigation/agents/${id}`;
     navigate(route);
   }
   /** Opens the search page with one condition filled in; nothing is queried until you submit. */
@@ -443,9 +405,7 @@ export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) 
             )}
           </section>
         )}
-        {["model", "agent", "calibration-report", "grant", "binding", "jobs"].includes(
-          queryKind,
-        ) && (
+        {["model", "agent", "calibration-report", "jobs"].includes(queryKind) && (
           <form className="panel query-form" onSubmit={query}>
             <label htmlFor="request-id">{queryLabels[queryKind as keyof typeof queryLabels]}</label>
             <input
@@ -513,17 +473,6 @@ export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) 
               });
             }}
           />
-        ) : ledger ? (
-          <Deferred>
-            <LedgerPanel
-              response={ledger}
-              onBinding={(id) => openTarget("binding", id)}
-              onRequest={(id) => openTarget("request", id)}
-              onHistory={(preset) => {
-                prepareSearchHistory(preset);
-              }}
-            />
-          </Deferred>
         ) : model ? (
           <>
             <ModelCallOverview
@@ -606,14 +555,14 @@ export default function LegacyHost({ pathname, navigate: go }: LegacyHostProps) 
                   ? "查询模型调用"
                   : queryKind === "agent"
                     ? "查询 Agent 运行"
-                    : "查询账本记录"}
+                    : "查询校准报告"}
               </h2>
               <p className="muted">
                 {queryKind === "model"
                   ? "输入模型调用 ID，读取生命周期与输入、输出、调用记录的证据引用。"
                   : queryKind === "agent"
                     ? "输入 Agent 运行 ID，读取脱敏生命周期与固定事件引用。"
-                    : `输入${queryLabels[queryKind as keyof typeof queryLabels] ?? "目标 ID"}，读取当前状态、代际与期限。`}
+                    : `输入${queryLabels[queryKind as keyof typeof queryLabels] ?? "目标 ID"}，读取冻结的元数据。`}
               </p>
             </section>
           )

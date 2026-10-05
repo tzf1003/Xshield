@@ -106,6 +106,11 @@ export function createAppRouteTree(components: RouteComponents) {
     stringify: (params: Record<string, string>) => ({ [name]: params[name] }),
   });
 
+  const identityPage = lazyRouteComponent(
+    () => import("../pages/investigation/IdentityPage"),
+    "IdentityPage",
+  );
+
   const children = [
     page("overview", "/", {
       component: lazyRouteComponent(() => import("../pages/OverviewPage"), "OverviewPage"),
@@ -182,12 +187,15 @@ export function createAppRouteTree(components: RouteComponents) {
     page("agent", "investigation/agents/$agentRunId", {
       params: idParams("agentRunId", agentRunPattern),
     }),
-    page("grant", "investigation/grants"),
+    // One page with two tabs; every address that used to be a separate page keeps resolving.
+    page("grant", "investigation/grants", { component: identityPage }),
     page("grant", "investigation/grants/$grantId", {
+      component: identityPage,
       params: idParams("grantId", grantPattern),
     }),
-    page("binding", "investigation/bindings"),
+    page("binding", "investigation/bindings", { component: identityPage }),
     page("binding", "investigation/bindings/$bindingId", {
+      component: identityPage,
       params: idParams("bindingId", bindingPattern),
     }),
     page("calibration-report", "investigation/calibration"),
