@@ -58,10 +58,11 @@ test("the two policy fields the server owns survive a read, so a save cannot res
   assert.equal(read.config?.policy.static_asset_max_path_depth, 0);
   assert.equal(read.config?.policy.origin_object_access_enforced, true);
 
-  // Absent means the server's defaults, not "off".
+  // Absent means the server's defaults, and for the static fallback that default is off (core
+  // and docs/15): reading it as on would silently re-enable it on the next save.
   t.mock.method(globalThis, "fetch", async () => response(configBody({ routes: [] })));
   const defaults = await new ControlClient(TOKEN).siteConfig("site_a");
-  assert.equal(defaults.config?.policy.static_asset_max_path_depth, 5);
+  assert.equal(defaults.config?.policy.static_asset_max_path_depth, 0);
   assert.equal(defaults.config?.policy.origin_object_access_enforced, false);
 
   t.mock.method(globalThis, "fetch", async () =>
@@ -100,7 +101,8 @@ test("a save sends both fields back exactly as read", async (t) => {
   await client.saveSiteConfig("site_a", draft, KEY);
   const sent = JSON.parse(body) as { policy: Record<string, unknown> };
   assert.equal(sent.policy.origin_object_access_enforced, true);
-  assert.equal(sent.policy.static_asset_max_path_depth, 5);
+  // The stored row carries no depth, so the save sends the default (off) and never turns it on.
+  assert.equal(sent.policy.static_asset_max_path_depth, 0);
 });
 
 test("a failed validation is an answer, not a transport error", async (t) => {

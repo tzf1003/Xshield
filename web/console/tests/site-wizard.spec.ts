@@ -220,6 +220,33 @@ test("saving creates the draft once, with a framework key, and lands on the new 
     "api.items.get",
     "api.items.create",
   ]);
+  // The identity-less static fallback is never on by default.
+  expect(body.policy.static_asset_max_path_depth).toBe(0);
+});
+
+test("the static fallback is an explicit opt-in that says what it admits", async ({ page }) => {
+  const mock = await mockSite(page);
+  await signInAt(page, "/sites/new/basics");
+  await fillBasics(page);
+  await next(page).click();
+  await fillUpstream(page);
+  await next(page).click();
+  await expect(page).toHaveURL(/sites\/new\/entry$/);
+  const toggle = page.getByLabel("放行公开静态资源", { exact: true });
+  await expect(toggle).not.toBeChecked();
+  await expect(page.getByText("默认关闭，未登记的路径一律拒绝。")).toBeVisible();
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect(page.getByText("不需要身份即可访问").first()).toBeVisible();
+  await next(page).click();
+  await page.getByRole("button", { name: /套用示例/ }).click();
+  await next(page).click();
+  await page.getByRole("button", { name: "保存为草稿", exact: true }).click();
+  await expect(page).toHaveURL(/sites\/shop_cn\/overview$/);
+  const created = mock.writes.find((write) => write.method === "POST");
+  const body = JSON.parse(created?.body ?? "{}") as {
+    policy: { static_asset_max_path_depth: number };
+  };
   expect(body.policy.static_asset_max_path_depth).toBe(5);
 });
 

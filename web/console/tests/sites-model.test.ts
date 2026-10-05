@@ -75,7 +75,8 @@ test("a stored revision is read tolerantly and filled with the server's defaults
   );
   assert.ok(old);
   assert.equal(old.policy_revision, "policy-v9");
-  assert.equal(old.policy.static_asset_max_path_depth, 5);
+  // Absent means off, as in core: reading it as on would re-enable the identity-less fallback on save.
+  assert.equal(old.policy.static_asset_max_path_depth, 0);
   assert.equal(old.policy.origin_object_access_enforced, false);
   assert.deepEqual(old.policy.routes, []);
   assert.equal(old.policy.limits.burst, 2000);
@@ -279,7 +280,7 @@ const triggers: [string, (c: SiteConfigDraft) => void, string[]][] = [
   [
     "static asset depth",
     (c) => {
-      c.policy.static_asset_max_path_depth = 0;
+      c.policy.static_asset_max_path_depth = 5;
     },
     ["STATIC_ASSET_POLICY_CHANGED"],
   ],
@@ -430,7 +431,7 @@ test("the diff speaks in operators' words with before and after", () => {
       c.policy.limits.max_request_body_bytes = 2_097_152;
       c.policy.health_check.timeout_ms = 3000;
       c.policy.crypto.failure_strategy = "observe";
-      c.policy.static_asset_max_path_depth = 0;
+      c.policy.static_asset_max_path_depth = 5;
     }),
   );
   const by = Object.fromEntries(changes.map((change) => [change.id, change]));
@@ -456,7 +457,7 @@ test("the diff speaks in operators' words with before and after", () => {
   );
   assert.deepEqual(
     [by.static_asset_max_path_depth?.before, by.static_asset_max_path_depth?.after],
-    ["5", "关闭"],
+    ["关闭", "5"],
   );
   assert.equal(by.display_name, undefined);
   assert.equal(groupChanges(changes).get("network")?.length, 2);

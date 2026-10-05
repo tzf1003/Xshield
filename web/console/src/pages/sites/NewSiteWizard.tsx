@@ -21,6 +21,7 @@ import {
   OriginField,
   ProbeFields,
   SiteIdFields,
+  StaticAssetFields,
   StatusChoice,
   UpstreamFields,
 } from "./tabs/site-fields";
@@ -236,6 +237,9 @@ export function NewSiteWizard({ step }: { step: WizardStep }) {
             </Card>
             <Card title="运行状态" className="xs-card">
               <StatusChoice ws={ws} />
+            </Card>
+            <Card title="静态资源" className="xs-card">
+              <StaticAssetFields ws={ws} />
             </Card>
             <Card title="探针与策略标签" className="xs-card">
               <ProbeFields ws={ws} />

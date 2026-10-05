@@ -1483,7 +1483,8 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
     },
     health_check: { path: "/health", interval_seconds: 15, timeout_ms: 2000, expected_status: 200 },
     secret_refs: [],
-    static_asset_max_path_depth: 5,
+    // Core's default: the identity-less static fallback is off unless a site opts in.
+    static_asset_max_path_depth: 0,
     origin_object_access_enforced: false,
   };
   if (value === undefined) return defaults;

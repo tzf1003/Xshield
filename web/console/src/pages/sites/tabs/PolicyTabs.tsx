@@ -551,7 +551,7 @@ export function PoliciesTab({ ws }: { ws: WorkspaceApi }) {
               id="static-depth"
               label="静态资源兜底深度"
               issue={ws.issueFor("static_asset_max_path_depth")}
-              hint="公开 GET 静态资源（js、css、字体、图片等）可使用的最大路径深度，0 表示关闭，默认 5，最大 16。超过深度或非静态扩展名仍按精确路由拒绝。"
+              hint="0 表示关闭（默认）。开启后，没有身份也没有精确路由的 GET 请求，若路径形如 /assets/app.js（js、css、字体、图片等真实文件名）且不超过该深度（1–16）会被放行；接口路径、.json 与 .map 仍按精确路由拒绝。"
             >
               <NumInput
                 value={draft.policy.static_asset_max_path_depth}

@@ -242,6 +242,37 @@ export function StatusChoice({ ws }: Props) {
   );
 }
 
+/** The depth a site that opts in to the static fallback starts with; the policy tab edits it. */
+const STATIC_FALLBACK_DEPTH = 5;
+
+/**
+ * The static-asset fallback admits GET requests with no identity and no exact route, so it is
+ * off for a new site and turning it on is a visible choice, never a hidden default.
+ */
+export function StaticAssetFields({ ws }: Props) {
+  const draft = ws.draft;
+  if (!draft) return null;
+  const depth = draft.policy.static_asset_max_path_depth;
+  return (
+    <Form.Item
+      label="放行公开静态资源"
+      extra={
+        depth > 0
+          ? `已开启，路径深度不超过 ${depth}：形如 /assets/app.js 的 GET 请求（js、css、字体、图片等真实文件名）不需要身份即可访问；接口路径、.json 与 .map 仍被拒绝。开启或调整需要审批，深度可在“策略”页修改。`
+          : "默认关闭，未登记的路径一律拒绝。单页应用的前端文件（js、css、字体、图片）通常需要开启；开启后，形如 /assets/app.js 的 GET 请求不需要身份即可访问，接口路径、.json 与 .map 仍被拒绝。"
+      }
+    >
+      <Toggle
+        label="放行公开静态资源"
+        checked={depth > 0}
+        onChange={(checked) =>
+          ws.setPolicy("static_asset_max_path_depth", checked ? STATIC_FALLBACK_DEPTH : 0)
+        }
+      />
+    </Form.Item>
+  );
+}
+
 export function ProbeFields({ ws }: Props) {
   const draft = ws.draft;
   if (!draft) return null;

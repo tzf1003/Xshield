@@ -241,7 +241,8 @@ test("saving sends the draft once and the page shows where the new revision stan
     policy: { static_asset_max_path_depth: number; origin_object_access_enforced: boolean };
   };
   expect(body.policy_revision).toBe("policy-v4");
-  // The two policy fields the server owns are sent back as read, never reset.
+  // The two policy fields the server owns are sent back as read, never reset (the fixture
+  // stores a depth of 5).
   expect(body.policy.static_asset_max_path_depth).toBe(5);
   expect(body.policy.origin_object_access_enforced).toBe(false);
 });
