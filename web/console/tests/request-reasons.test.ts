@@ -32,7 +32,10 @@ const roots = [
  */
 const notReasonCodes: Readonly<Record<string, string>> = {
   AUTH_ENTRY: "site policy admission class",
+  AUTHENTICATED_ROOT: "site policy admission class",
+  UI_ACTION_REQUIRED: "site policy admission class",
   BUFFERED_JSON: "site policy response mode",
+  SENSOR_HTML: "site policy response mode",
   COMPATIBILITY: "request-crypto coverage mode",
   DIRECT_ENCRYPT: "site policy crypto mode",
   ENFORCE: "request-crypto coverage mode",

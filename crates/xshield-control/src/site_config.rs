@@ -24,7 +24,10 @@ use xshield_core::{
     SitePolicyConfig,
     admin::ManagementRole,
     domain::SiteId,
-    site::upstream::{parse_upstream_socket, refuse_upstream_socket},
+    site::{
+        flow,
+        upstream::{parse_upstream_socket, refuse_upstream_socket},
+    },
 };
 use xshield_postgres::{
     ProtectedSiteApprovalOutcome, ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
@@ -505,7 +508,9 @@ pub struct SiteConfigView {
     updated_by: String,
     created_at: String,
     updated_at: String,
-    gateway_config: serde_json::Value,
+    /// The edge projection of the stored configuration, for display; `null`
+    /// when it cannot be produced (the apply path refuses such a site).
+    gateway_config: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -1056,12 +1061,11 @@ pub async fn validate_handler(
         status: record.status().to_owned(),
         policy: record.policy().clone(),
     };
-    let valid = validate_request(&payload, &site_id).is_ok();
-    let reason_code = if valid {
-        "CONTROL_SITE_VALIDATED"
-    } else {
-        "CONTROL_SITE_CONFIG_REQUEST_INVALID"
-    };
+    // The same stable reason a write of this content would get, so an
+    // operator sees which rule failed instead of a generic refusal.
+    let verdict = validate_request(&payload, &site_id);
+    let valid = verdict.is_ok();
+    let reason_code = verdict.err().unwrap_or("CONTROL_SITE_VALIDATED");
     if control
         .append_access_event(
             &request_id,
@@ -1864,6 +1868,17 @@ async fn site_apply_state_handler(
                     "site configuration was not found",
                     false,
                     "correct_request",
+                )),
+                // Authentication entries, sensor pages, page-issued actions
+                // and resource grants decide who obtains identity and which
+                // UI actions exist; the capability cannot stand in for the
+                // independent approver there. Nothing was recorded.
+                Ok(ProtectedSiteDirectApplyOutcome::IndependentApprovalRequired) => Some((
+                    StatusCode::FORBIDDEN,
+                    "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED",
+                    "this revision changes the browser provenance flow and needs an independent approver",
+                    false,
+                    "request_approval",
                 )),
                 Err(_) => Some((
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -2682,7 +2697,7 @@ async fn write_site_handler(
             .await
             .into_response();
     };
-    if body.len() > 16 * 1024 {
+    if body.len() > SITE_CONFIG_BODY_BYTES_MAX {
         return control
             .audited_error_async(
                 request_id,
@@ -2734,6 +2749,7 @@ async fn write_site_handler(
                     .into_response();
             }
             Err(_) => {
+                let (reason, message) = rejected_body_reason(&body);
                 return control
                     .audited_error_async(
                         request_id,
@@ -2741,8 +2757,8 @@ async fn write_site_handler(
                         action,
                         None,
                         StatusCode::BAD_REQUEST,
-                        "CONTROL_SITE_CONFIG_REQUEST_INVALID",
-                        "invalid site configuration",
+                        reason,
+                        message,
                         false,
                         "correct_request",
                     )
@@ -2751,25 +2767,24 @@ async fn write_site_handler(
             }
         }
     } else {
-        match serde_json::from_slice(&body) {
-            Ok(payload) => payload,
-            Err(_) => {
-                return control
-                    .audited_error_async(
-                        request_id,
-                        Some(subject),
-                        action,
-                        None,
-                        StatusCode::BAD_REQUEST,
-                        "CONTROL_SITE_CONFIG_REQUEST_INVALID",
-                        "invalid site configuration",
-                        false,
-                        "correct_request",
-                    )
-                    .await
-                    .into_response();
-            }
-        }
+        let Ok(payload) = serde_json::from_slice(&body) else {
+            let (reason, message) = rejected_body_reason(&body);
+            return control
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    action,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    reason,
+                    message,
+                    false,
+                    "correct_request",
+                )
+                .await
+                .into_response();
+        };
+        payload
     };
     if payload
         .site_id
@@ -3247,19 +3262,37 @@ async fn apply_site_snapshot(
             return Err(reason);
         }
     };
-    let sites = plan
+    // A site whose projection cannot be produced is never sent with a
+    // substitute: nothing is published and the target records why.
+    let Ok(sites) = plan
         .served
         .iter()
-        .map(|site| GatewayApplySite {
-            site_id: site.site_id.as_str().to_owned(),
-            listen_port: site.config.listen_port,
-            public_origin: site.config.public_origin.clone(),
-            gateway_config: site
-                .config
-                .gateway_config(control.config.tenant_id.as_str(), &site.site_id),
-            revision: site.revision,
+        .map(|site| {
+            Ok(GatewayApplySite {
+                site_id: site.site_id.as_str().to_owned(),
+                listen_port: site.config.listen_port,
+                public_origin: site.config.public_origin.clone(),
+                gateway_config: site
+                    .config
+                    .gateway_config(control.config.tenant_id.as_str(), &site.site_id)?,
+                revision: site.revision,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, xshield_core::domain::InvalidValue>>()
+    else {
+        control
+            .catalog
+            .mark_protected_site_apply_failed(
+                &control.config.tenant_id,
+                target_site,
+                target_apply.desired_revision,
+                &target_apply.apply_id,
+                "EDGE_APPLY_PAYLOAD_INVALID",
+            )
+            .await
+            .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+        return Err("EDGE_APPLY_PAYLOAD_INVALID");
+    };
     let request = GatewayApplyRequest {
         protocol_version: 1,
         tenant_id: control.config.tenant_id.as_str().to_owned(),
@@ -3438,16 +3471,50 @@ fn validate_upstream_destination(
     Ok(())
 }
 
-/// Maps a core validation failure to the stable control reason code.
-fn validation_reason(field: &str) -> &'static str {
-    if field.starts_with("upstream") {
-        "CONTROL_SITE_UPSTREAM_INVALID"
-    } else if field.starts_with("site_policy") {
-        "CONTROL_SITE_POLICY_INVALID"
-    } else if field == "site_id" {
-        "CONTROL_SITE_ID_INVALID"
+/// Largest site configuration body accepted by the site write endpoints.
+///
+/// 256 routes (the policy limit) with typical provenance-flow blocks fit;
+/// the former 16 KiB held about fifty plain routes. The edge parses at most
+/// 1 MiB per site and its projection repeats the routes (`site_policy` and
+/// `operations`), so a body of this size projects well inside that limit;
+/// `SiteConfig::validate_for_site` still checks the projected size itself,
+/// because default members expand a terse body. The bound also caps the
+/// work of the strict parse and of [`rejected_body_reason`].
+pub(crate) const SITE_CONFIG_BODY_BYTES_MAX: usize = 256 * 1024;
+
+/// The stable reason for a body the strict configuration parse refused: a
+/// specific one when it asks for an edge feature the control plane
+/// deliberately does not manage (share issuance, credential refresh, context
+/// switch, evidence capture, compatibility crypto, share or service entries),
+/// so it is never mistaken for a typo; the generic one otherwise.
+fn rejected_body_reason(body: &[u8]) -> (&'static str, &'static str) {
+    if xshield_core::site::find_unsupported_edge_feature(body).is_some() {
+        (
+            "CONTROL_SITE_FEATURE_UNSUPPORTED",
+            "the configuration uses an edge feature the control plane does not manage",
+        )
     } else {
-        "CONTROL_SITE_CONFIG_REQUEST_INVALID"
+        (
+            "CONTROL_SITE_CONFIG_REQUEST_INVALID",
+            "invalid site configuration",
+        )
+    }
+}
+
+/// Maps a core validation failure to the stable control reason code. The
+/// browser provenance-flow rules each have their own reason so an operator or
+/// agent can tell which block to fix.
+fn validation_reason(field: &str) -> &'static str {
+    match field {
+        flow::AUTH_FLOW_INVALID => "CONTROL_SITE_AUTH_FLOW_INVALID",
+        flow::SENSOR_HTML_INVALID => "CONTROL_SITE_SENSOR_HTML_INVALID",
+        flow::PAGE_ACTIONS_INVALID => "CONTROL_SITE_PAGE_ACTIONS_INVALID",
+        flow::RESOURCE_GRANT_INVALID => "CONTROL_SITE_RESOURCE_GRANT_INVALID",
+        flow::ACTION_DESCRIPTOR_CONFLICT => "CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT",
+        _ if field.starts_with("upstream") => "CONTROL_SITE_UPSTREAM_INVALID",
+        _ if field.starts_with("site_policy") => "CONTROL_SITE_POLICY_INVALID",
+        "site_id" => "CONTROL_SITE_ID_INVALID",
+        _ => "CONTROL_SITE_CONFIG_REQUEST_INVALID",
     }
 }
 
@@ -3567,7 +3634,9 @@ fn view(
         updated_by: record.updated_by().to_owned(),
         created_at: record.created_at().to_rfc3339(),
         updated_at: record.updated_at().to_rfc3339(),
-        gateway_config: config.gateway_config(control.config.tenant_id.as_str(), site_id),
+        gateway_config: config
+            .gateway_config(control.config.tenant_id.as_str(), site_id)
+            .ok(),
     }
 }
 
@@ -3615,6 +3684,74 @@ mod tests {
         assert!(validate_request(&value, &site()).is_ok());
         value.public_origin = "http://public.example".to_owned();
         assert!(validate_request(&value, &site()).is_err());
+    }
+
+    /// The real-browser loop topology as a request body.
+    fn browser_loop() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../tests/site-config/browser-loop.json")).unwrap()
+    }
+
+    /// Each provenance-flow rule surfaces its own stable reason, distinct from
+    /// the generic policy refusal, so the block to fix is named.
+    #[test]
+    fn flow_violations_are_reported_with_their_own_reasons() {
+        let reason = |edit: fn(&mut serde_json::Value)| {
+            let mut body = browser_loop();
+            edit(&mut body);
+            let request: SiteConfigRequest = serde_json::from_value(body).unwrap();
+            validate_request_with(&request, &site(), false).err()
+        };
+        assert_eq!(reason(|_| {}), None);
+        for (expected, edit) in [
+            (
+                "CONTROL_SITE_AUTH_FLOW_INVALID",
+                (|b| b["policy"]["routes"][1]["security_entry"] = json!("public"))
+                    as fn(&mut serde_json::Value),
+            ),
+            ("CONTROL_SITE_SENSOR_HTML_INVALID", |b| {
+                b["sensor_enabled"] = json!(false);
+            }),
+            ("CONTROL_SITE_PAGE_ACTIONS_INVALID", |b| {
+                b["policy"]["routes"][3]["issued_by"]["ttl_seconds"] = json!(0);
+            }),
+            ("CONTROL_SITE_RESOURCE_GRANT_INVALID", |b| {
+                b["policy"]["routes"][3]["resource_grant"]["max_items"] = json!(0);
+            }),
+            ("CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT", |b| {
+                let mut shadow = b["policy"]["routes"][3].clone();
+                shadow["operation_id"] = json!("orders.list.shadow");
+                shadow["path"] = json!("/orders-shadow");
+                shadow.as_object_mut().unwrap().remove("resource_grant");
+                b["policy"]["routes"].as_array_mut().unwrap().push(shadow);
+            }),
+            ("CONTROL_SITE_POLICY_INVALID", |b| {
+                b["policy"]["routes"][0]["operation_id"] = json!("login:page");
+            }),
+        ] {
+            assert_eq!(reason(edit), Some(expected), "{expected}");
+        }
+    }
+
+    #[test]
+    fn rejected_bodies_name_unmanaged_edge_features_and_nothing_else() {
+        let mut body = browser_loop();
+        body["policy"]["routes"][5]["auth_context_switch"] = json!({"success_status": 200});
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(serde_json::from_slice::<SiteConfigRequest>(&bytes).is_err());
+        assert_eq!(
+            super::rejected_body_reason(&bytes).0,
+            "CONTROL_SITE_FEATURE_UNSUPPORTED"
+        );
+        let mut typo = browser_loop();
+        typo["policy"]["routes"][5]["auth_revok"] = json!({"success_status": 200});
+        assert_eq!(
+            super::rejected_body_reason(&serde_json::to_vec(&typo).unwrap()).0,
+            "CONTROL_SITE_CONFIG_REQUEST_INVALID"
+        );
+        assert_eq!(
+            super::rejected_body_reason(b"not json").0,
+            "CONTROL_SITE_CONFIG_REQUEST_INVALID"
+        );
     }
 
     #[test]
@@ -4174,6 +4311,12 @@ mod tests {
             response_crypto: None,
             response_mode: String::new(),
             max_response_bytes: 1_048_576,
+            auth_binding: None,
+            auth_revoke: None,
+            sensor_html: None,
+            page_actions: None,
+            issued_by: None,
+            resource_grant: None,
         }];
         let sibling = input("site_a", broken);
         let plan = super::plan_snapshot(

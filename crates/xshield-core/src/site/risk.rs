@@ -12,8 +12,16 @@
 //! labels. The rule is deliberately a whitelist of what may change freely
 //! rather than a list of what is dangerous: a field added to the configuration
 //! later is risky until someone decides otherwise.
+//!
+//! Routes of the browser provenance flow (authentication entries, sensor
+//! pages, page-issued actions and response-derived resource grants) decide
+//! who obtains identity and which UI actions exist at all. Changes to them get
+//! dedicated reasons on top of `ROUTES_CHANGED`, also when a site goes live
+//! with them, and those reasons can only be cleared by an independent
+//! approver: the `site.config.apply_direct` capability does not waive them
+//! (see [`direct_apply_may_waive`]).
 
-use super::SiteConfig;
+use super::{SiteConfig, SitePolicyConfig, SiteRouteConfig};
 use std::collections::BTreeSet;
 
 /// Why a configuration change needs independent approval.
@@ -55,11 +63,74 @@ pub enum ChangeRisk {
     StaticAssetPolicyChanged,
     /// Trusted object-access marker toward the origin.
     ObjectAccessChanged,
+    /// A route with the `auth_entry` admission, an `auth_binding` or an
+    /// `auth_revoke` was added, removed or changed in any field: who obtains
+    /// or loses an identity binding.
+    AuthEntryChanged,
+    /// A `SENSOR_HTML` route was added, removed or changed in any field:
+    /// which exact page builds the edge injects into and releases.
+    SensorHtmlChanged,
+    /// A page root with `page_actions` or an `issued_by` route was added,
+    /// removed or changed in any field: which first-hop UI actions a page
+    /// issues.
+    PageActionsChanged,
+    /// A route with a `resource_grant` or a route such a grant targets was
+    /// added, removed or changed in any field: which resources a response
+    /// qualifies for which action.
+    ResourceGrantChanged,
     /// A difference that no category above names; risky by default.
     OtherChange,
 }
 
 impl ChangeRisk {
+    /// Every reason, in token order of declaration.
+    pub const ALL: [Self; 21] = [
+        Self::Activation,
+        Self::Takedown,
+        Self::UpstreamChanged,
+        Self::OriginChanged,
+        Self::ListenPortChanged,
+        Self::EntryChanged,
+        Self::RoutesChanged,
+        Self::IdentityChanged,
+        Self::CryptoChanged,
+        Self::WafChanged,
+        Self::LimitsChanged,
+        Self::HealthCheckChanged,
+        Self::SecretRefsChanged,
+        Self::SensorChanged,
+        Self::StaticAssetPolicyChanged,
+        Self::ObjectAccessChanged,
+        Self::AuthEntryChanged,
+        Self::SensorHtmlChanged,
+        Self::PageActionsChanged,
+        Self::ResourceGrantChanged,
+        Self::OtherChange,
+    ];
+
+    /// Parses a stored token; `None` for a token this version does not know.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|risk| risk.as_str() == token)
+    }
+
+    /// Whether only an independent `PolicyApprover` may clear this reason.
+    ///
+    /// The provenance-flow reasons decide who obtains identity and which UI
+    /// actions and resource grants exist; a single principal holding
+    /// `site.config.apply_direct` must not be able to introduce or alter them
+    /// without a second pair of eyes.
+    #[must_use]
+    pub const fn requires_independent_approval(self) -> bool {
+        matches!(
+            self,
+            Self::AuthEntryChanged
+                | Self::SensorHtmlChanged
+                | Self::PageActionsChanged
+                | Self::ResourceGrantChanged
+        )
+    }
+
     /// Returns the stable upper-case token.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -80,9 +151,88 @@ impl ChangeRisk {
             Self::SensorChanged => "SENSOR_CHANGED",
             Self::StaticAssetPolicyChanged => "STATIC_ASSET_POLICY_CHANGED",
             Self::ObjectAccessChanged => "OBJECT_ACCESS_CHANGED",
+            Self::AuthEntryChanged => "AUTH_ENTRY_CHANGED",
+            Self::SensorHtmlChanged => "SENSOR_HTML_CHANGED",
+            Self::PageActionsChanged => "PAGE_ACTIONS_CHANGED",
+            Self::ResourceGrantChanged => "RESOURCE_GRANT_CHANGED",
             Self::OtherChange => "OTHER_CHANGE",
         }
     }
+}
+
+/// Whether the `site.config.apply_direct` capability may stand in for the
+/// independent approval these stored reasons require.
+///
+/// `false` as soon as one reason requires an independent approver, and also
+/// for a token this version does not recognize: a reason written by a newer
+/// release is never waived by an older one.
+#[must_use]
+pub fn direct_apply_may_waive<S: AsRef<str>>(reasons: &[S]) -> bool {
+    reasons.iter().all(|reason| {
+        ChangeRisk::from_token(reason.as_ref())
+            .is_some_and(|risk| !risk.requires_independent_approval())
+    })
+}
+
+/// The provenance-flow facets: which routes of a policy take part in each.
+///
+/// A facet compares its member routes whole, not only the block that makes
+/// them members: a page root's path or approved build is as much part of what
+/// its issued actions mean as its `page_actions`. A route can belong to
+/// several facets (the loop's page root is a sensor page and a page root), and
+/// a change to it names each; every flow reason needs the same independent
+/// approval, so naming one more never weakens anything.
+/// Whether a route of a policy takes part in a facet.
+type FacetMember = fn(&SitePolicyConfig, &SiteRouteConfig) -> bool;
+
+const FLOW_FACETS: [(ChangeRisk, FacetMember); 4] = [
+    (ChangeRisk::AuthEntryChanged, |_, route| {
+        route.security_entry == super::SecurityEntry::AuthEntry
+            || route.auth_binding.is_some()
+            || route.auth_revoke.is_some()
+    }),
+    (ChangeRisk::SensorHtmlChanged, |_, route| {
+        route.response_mode == "SENSOR_HTML" || route.sensor_html.is_some()
+    }),
+    (ChangeRisk::PageActionsChanged, |_, route| {
+        route.page_actions.is_some() || route.issued_by.is_some()
+    }),
+    // A grant's meaning depends on its target route as much as on the grant.
+    (ChangeRisk::ResourceGrantChanged, |policy, route| {
+        route.resource_grant.is_some()
+            || policy.routes.iter().any(|source| {
+                source
+                    .resource_grant
+                    .as_ref()
+                    .is_some_and(|grant| grant.target_operation_id == route.operation_id)
+            })
+    }),
+];
+
+/// The routes of `policy` that take part in a facet, ordered by operation.
+fn facet_routes(policy: &SitePolicyConfig, member: FacetMember) -> Vec<&SiteRouteConfig> {
+    let mut routes = policy
+        .routes
+        .iter()
+        .filter(|route| member(policy, route))
+        .collect::<Vec<_>>();
+    routes.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+    routes
+}
+
+/// The flow facets whose participating routes differ between `before` (what
+/// is served, or nothing) and `after`.
+fn changed_flow_facets(
+    before: Option<&SitePolicyConfig>,
+    after: &SitePolicyConfig,
+) -> impl Iterator<Item = ChangeRisk> {
+    FLOW_FACETS
+        .into_iter()
+        .filter(move |(_, member)| {
+            let served = before.map(|policy| facet_routes(policy, *member));
+            served.unwrap_or_default() != facet_routes(after, *member)
+        })
+        .map(|(risk, _)| risk)
 }
 
 /// The configuration with every cosmetic field neutralized and every
@@ -126,9 +276,14 @@ pub fn assess_change_risk(baseline: Option<&SiteConfig>, desired: &SiteConfig) -
     // Going live is the change an approver exists for, whatever else differs:
     // for a never-served site there is no baseline to compare against, and
     // comparing against the last *desired* draft would let a second save clear
-    // the requirement.
+    // the requirement. Flow routes it goes live with are new as well, and are
+    // named so that a direct apply cannot introduce them unreviewed.
     let Some(before) = served else {
-        return vec![ChangeRisk::Activation];
+        return std::iter::once(ChangeRisk::Activation)
+            .chain(changed_flow_facets(None, &desired.effective_policy()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
     };
 
     let (old, new) = (before.effective_policy(), desired.effective_policy());
@@ -189,6 +344,7 @@ pub fn assess_change_risk(baseline: Option<&SiteConfig>, desired: &SiteConfig) -
             risks.insert(risk);
         }
     }
+    risks.extend(changed_flow_facets(Some(&old), &new));
     // Anything the categories above do not name (a field added later) is
     // still a change to what the edge serves.
     if risks.is_empty() && comparable(before) != comparable(desired) {
@@ -220,6 +376,12 @@ mod tests {
             response_crypto: None,
             response_mode: String::new(),
             max_response_bytes: 1_048_576,
+            auth_binding: None,
+            auth_revoke: None,
+            sensor_html: None,
+            page_actions: None,
+            issued_by: None,
+            resource_grant: None,
         }
     }
 
@@ -696,25 +858,7 @@ mod tests {
 
     #[test]
     fn tokens_are_unique_and_stable() {
-        let all = [
-            ChangeRisk::Activation,
-            ChangeRisk::Takedown,
-            ChangeRisk::UpstreamChanged,
-            ChangeRisk::OriginChanged,
-            ChangeRisk::ListenPortChanged,
-            ChangeRisk::EntryChanged,
-            ChangeRisk::RoutesChanged,
-            ChangeRisk::IdentityChanged,
-            ChangeRisk::CryptoChanged,
-            ChangeRisk::WafChanged,
-            ChangeRisk::LimitsChanged,
-            ChangeRisk::HealthCheckChanged,
-            ChangeRisk::SecretRefsChanged,
-            ChangeRisk::SensorChanged,
-            ChangeRisk::StaticAssetPolicyChanged,
-            ChangeRisk::ObjectAccessChanged,
-            ChangeRisk::OtherChange,
-        ];
+        let all = ChangeRisk::ALL;
         let tokens = all
             .iter()
             .map(|risk| risk.as_str())
@@ -725,5 +869,209 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_uppercase() || byte == b'_')
         }));
+        for risk in all {
+            assert_eq!(ChangeRisk::from_token(risk.as_str()), Some(risk));
+        }
+        assert_eq!(ChangeRisk::from_token("activation"), None);
+        // `ALL` is declared in `Ord` order, which is the order of every result.
+        assert!(all.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    /// The real-browser loop topology as the control plane stores it.
+    fn flow() -> SiteConfig {
+        serde_json::from_str(include_str!(
+            "../../../../tests/site-config/browser-loop.json"
+        ))
+        .unwrap()
+    }
+
+    fn flow_route<'a>(config: &'a mut SiteConfig, id: &str) -> &'a mut SiteRouteConfig {
+        config
+            .policy
+            .routes
+            .iter_mut()
+            .find(|route| route.operation_id == id)
+            .unwrap()
+    }
+
+    /// Each flow facet fires for its own blocks and for the routes they
+    /// depend on, in both directions, always together with `ROUTES_CHANGED`.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn flow_route_changes_name_their_facet_in_both_directions() {
+        use ChangeRisk::*;
+        let cases: Vec<(&str, Mutation, Vec<ChangeRisk>)> = vec![
+            (
+                "credential lease",
+                |c| {
+                    flow_route(c, "auth.login")
+                        .auth_binding
+                        .as_mut()
+                        .unwrap()
+                        .credential_ttl_seconds = 900;
+                },
+                vec![RoutesChanged, AuthEntryChanged],
+            ),
+            (
+                "logout no longer revokes",
+                |c| flow_route(c, "auth.logout").auth_revoke = None,
+                vec![RoutesChanged, AuthEntryChanged],
+            ),
+            (
+                "login path",
+                |c| flow_route(c, "auth.login").path = "/api/signin".to_owned(),
+                vec![RoutesChanged, AuthEntryChanged],
+            ),
+            (
+                "approved page build",
+                |c| {
+                    flow_route(c, "app.page")
+                        .sensor_html
+                        .as_mut()
+                        .unwrap()
+                        .origin_sha256 = "a".repeat(64);
+                },
+                // The page root is a sensor page and a page root.
+                vec![RoutesChanged, SensorHtmlChanged, PageActionsChanged],
+            ),
+            (
+                "page capacity",
+                |c| {
+                    flow_route(c, "app.page")
+                        .page_actions
+                        .as_mut()
+                        .unwrap()
+                        .max_active_pages = 8;
+                },
+                vec![RoutesChanged, SensorHtmlChanged, PageActionsChanged],
+            ),
+            (
+                "issued action lease",
+                |c| {
+                    flow_route(c, "orders.list")
+                        .issued_by
+                        .as_mut()
+                        .unwrap()
+                        .ttl_seconds = 60;
+                },
+                // The list is page-issued and qualifies resources.
+                vec![RoutesChanged, PageActionsChanged, ResourceGrantChanged],
+            ),
+            (
+                "grant item bound",
+                |c| {
+                    flow_route(c, "orders.list")
+                        .resource_grant
+                        .as_mut()
+                        .unwrap()
+                        .max_items = 50;
+                },
+                vec![RoutesChanged, PageActionsChanged, ResourceGrantChanged],
+            ),
+            (
+                "grant target view",
+                |c| flow_route(c, "orders.read").view_profile = Some("full".to_owned()),
+                vec![RoutesChanged, ResourceGrantChanged],
+            ),
+            (
+                "issued list moved",
+                |c| flow_route(c, "orders.list").path = "/orders-v2".to_owned(),
+                vec![RoutesChanged, PageActionsChanged, ResourceGrantChanged],
+            ),
+            (
+                "page root moved",
+                |c| flow_route(c, "app.page").path = "/home".to_owned(),
+                vec![RoutesChanged, SensorHtmlChanged, PageActionsChanged],
+            ),
+            (
+                "an unrelated public route",
+                |c| {
+                    c.policy
+                        .routes
+                        .push(route("docs", "/docs", SecurityEntry::Public));
+                },
+                vec![RoutesChanged],
+            ),
+            (
+                "the public login page",
+                |c| flow_route(c, "login.page").max_response_bytes = 4_096,
+                vec![RoutesChanged],
+            ),
+        ];
+        for (name, mutate, expected) in cases {
+            let before = flow();
+            let mut after = flow();
+            mutate(&mut after);
+            assert_ne!(before, after, "{name} must change the configuration");
+            let expected = sorted(expected);
+            assert_eq!(
+                assess_change_risk(Some(&before), &after),
+                expected,
+                "{name}, forwards"
+            );
+            assert_eq!(
+                assess_change_risk(Some(&after), &before),
+                expected,
+                "{name}, backwards"
+            );
+        }
+        // Reordering flow routes is still cosmetic.
+        let mut reordered = flow();
+        reordered.policy.routes.reverse();
+        assert_eq!(assess_change_risk(Some(&flow()), &reordered), Vec::new());
+    }
+
+    #[test]
+    fn going_live_with_flow_routes_names_every_facet() {
+        use ChangeRisk::*;
+        assert_eq!(
+            assess_change_risk(None, &flow()),
+            vec![
+                Activation,
+                AuthEntryChanged,
+                SensorHtmlChanged,
+                PageActionsChanged,
+                ResourceGrantChanged
+            ]
+        );
+        let mut paused = flow();
+        paused.status = "paused".to_owned();
+        assert_eq!(
+            assess_change_risk(Some(&paused), &flow()).first(),
+            Some(&Activation)
+        );
+        // Taking a flow site down is a takedown only.
+        assert_eq!(assess_change_risk(Some(&flow()), &paused), vec![Takedown]);
+    }
+
+    #[test]
+    fn direct_apply_never_waives_a_flow_reason_or_an_unknown_one() {
+        assert!(direct_apply_may_waive::<&str>(&[]));
+        assert!(direct_apply_may_waive(&["ACTIVATION", "UPSTREAM_CHANGED"]));
+        for risk in ChangeRisk::ALL {
+            assert_eq!(
+                direct_apply_may_waive(&[risk.as_str()]),
+                !risk.requires_independent_approval(),
+                "{risk:?}"
+            );
+        }
+        assert!(!direct_apply_may_waive(&[
+            "ACTIVATION",
+            "PAGE_ACTIONS_CHANGED"
+        ]));
+        assert!(!direct_apply_may_waive(&["A_REASON_FROM_A_NEWER_RELEASE"]));
+        let flow_reasons = ChangeRisk::ALL
+            .into_iter()
+            .filter(|risk| risk.requires_independent_approval())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            flow_reasons,
+            [
+                ChangeRisk::AuthEntryChanged,
+                ChangeRisk::SensorHtmlChanged,
+                ChangeRisk::PageActionsChanged,
+                ChangeRisk::ResourceGrantChanged
+            ]
+        );
     }
 }

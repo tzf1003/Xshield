@@ -1,0 +1,178 @@
+{
+  "display_name": "Orders browser loop",
+  "public_origin": "https://orders.example.test",
+  "upstream_address": "8.8.8.8:9000",
+  "upstream_server_name": "orders.example.test",
+  "upstream_tls": false,
+  "listen_port": 6200,
+  "entry_path": "/",
+  "security_entry": "public",
+  "sensor_enabled": true,
+  "policy_revision": "loop-r1",
+  "status": "active",
+  "policy": {
+    "routes": [
+      {
+        "operation_id": "login.page",
+        "method": "GET",
+        "path": "/",
+        "security_entry": "public",
+        "source_action": null,
+        "resource_type": null,
+        "view_profile": null,
+        "resource_query_parameter": null,
+        "resource_path_parameter": null,
+        "request_crypto": null,
+        "response_crypto": null,
+        "response_mode": "",
+        "max_response_bytes": 1048576
+      },
+      {
+        "operation_id": "auth.login",
+        "method": "POST",
+        "path": "/api/login",
+        "security_entry": "auth_entry",
+        "source_action": null,
+        "resource_type": null,
+        "view_profile": null,
+        "resource_query_parameter": null,
+        "resource_path_parameter": null,
+        "request_crypto": null,
+        "response_crypto": null,
+        "response_mode": "BUFFERED_JSON",
+        "max_response_bytes": 1024,
+        "auth_binding": {
+          "success_status": 200,
+          "principal_pointer": "/identity/id",
+          "authorization_context_pointer": "/identity/authorization_context",
+          "bearer_pointer": "/access_token",
+          "credential_ttl_seconds": 1800,
+          "session_ttl_seconds": 3600
+        }
+      },
+      {
+        "operation_id": "app.page",
+        "method": "GET",
+        "path": "/app",
+        "security_entry": "authenticated_root",
+        "source_action": null,
+        "resource_type": null,
+        "view_profile": null,
+        "resource_query_parameter": null,
+        "resource_path_parameter": null,
+        "request_crypto": null,
+        "response_crypto": null,
+        "response_mode": "SENSOR_HTML",
+        "max_response_bytes": 16384,
+        "sensor_html": {
+          "adapter_revision": "app-r1",
+          "origin_sha256": "f5eb29b7c7fbac05248d0d1d9b4e693b913bc1fbe2aaf3fd878e8384209b43ea",
+          "injection_offset": 293
+        },
+        "page_actions": {
+          "mapping_revision": "app-map-r1",
+          "max_active_pages": 32
+        }
+      },
+      {
+        "operation_id": "orders.list",
+        "method": "GET",
+        "path": "/orders",
+        "security_entry": "ui_action_required",
+        "source_action": "app.orders.list",
+        "resource_type": null,
+        "view_profile": null,
+        "resource_query_parameter": null,
+        "resource_path_parameter": null,
+        "request_crypto": null,
+        "response_crypto": null,
+        "response_mode": "BUFFERED_JSON",
+        "max_response_bytes": 4096,
+        "issued_by": {
+          "page_operation_id": "app.page",
+          "ttl_seconds": 600
+        },
+        "resource_grant": {
+          "success_status": 200,
+          "items_pointer": "/orders",
+          "resource_pointer": "/id",
+          "action_ref_field": "_xshield_action_ref",
+          "target_operation_id": "orders.read",
+          "target_mapping_revision": "orders-map-r1",
+          "ttl_seconds": 600,
+          "max_items": 10,
+          "max_active_grants": 200
+        }
+      },
+      {
+        "operation_id": "orders.read",
+        "method": "GET",
+        "path": "/orders/{order_id}",
+        "security_entry": "ui_action_required",
+        "source_action": "orders.open",
+        "resource_type": "order",
+        "view_profile": "customer_detail",
+        "resource_query_parameter": null,
+        "resource_path_parameter": "order_id",
+        "request_crypto": null,
+        "response_crypto": null,
+        "response_mode": "",
+        "max_response_bytes": 1048576
+      },
+      {
+        "operation_id": "auth.logout",
+        "method": "POST",
+        "path": "/api/logout",
+        "security_entry": "authenticated_root",
+        "source_action": null,
+        "resource_type": null,
+        "view_profile": null,
+        "resource_query_parameter": null,
+        "resource_path_parameter": null,
+        "request_crypto": null,
+        "response_crypto": null,
+        "response_mode": "BUFFERED_JSON",
+        "max_response_bytes": 256,
+        "auth_revoke": {
+          "success_status": 200
+        }
+      }
+    ],
+    "identity": {
+      "enabled": false,
+      "cookie_name": "__Host-xshield_sid",
+      "credential_header": "Authorization",
+      "profile": "default",
+      "session_ttl_seconds": 3600,
+      "generation": 1
+    },
+    "crypto": {
+      "adapter_revision": "observe-v1",
+      "failure_strategy": "fail_closed",
+      "protocol_version": null
+    },
+    "waf": {
+      "enabled": true,
+      "blocked_headers": [],
+      "blocked_query_fragments": [
+        "<script"
+      ],
+      "max_cookie_bytes": 8192
+    },
+    "limits": {
+      "max_request_body_bytes": 1048576,
+      "max_response_body_bytes": 16777216,
+      "requests_per_second": 1000,
+      "burst": 2000
+    },
+    "health_check": {
+      "path": "/health",
+      "interval_seconds": 15,
+      "timeout_ms": 2000,
+      "expected_status": 200
+    },
+    "secret_refs": [],
+    "static_asset_max_path_depth": 0,
+    "origin_object_access_enforced": false
+  }
+}

@@ -23,6 +23,8 @@ use std::{
 struct EdgeState {
     snapshot_revision: u64,
     applies: Vec<Value>,
+    /// Every apply request as received: the raw body and its signature header.
+    signed: Vec<(Vec<u8>, String)>,
     serving: BTreeMap<String, Value>,
 }
 
@@ -56,6 +58,11 @@ impl MockEdge {
 
     fn served_sites(&self) -> Vec<String> {
         self.0.lock().unwrap().serving.keys().cloned().collect()
+    }
+
+    /// The raw body and signature header of the latest apply request.
+    fn last_signed_apply(&self) -> Option<(Vec<u8>, String)> {
+        self.0.lock().unwrap().signed.last().cloned()
     }
 }
 
@@ -91,6 +98,14 @@ async fn edge_apply(
     let request: Value = serde_json::from_slice(&body).unwrap();
     let revision = request["snapshot_revision"].as_u64().unwrap();
     let mut state = edge.0.lock().unwrap();
+    state.signed.push((
+        body.to_vec(),
+        headers
+            .get(xshield_core::edge_channel::APPLY_SIGNATURE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned(),
+    ));
     if revision < state.snapshot_revision {
         return (
             StatusCode::CONFLICT,
@@ -1515,4 +1530,355 @@ async fn an_approval_can_be_pinned_to_the_reviewed_configuration_digest() {
     assert_eq!(status, StatusCode::OK, "{approved}");
     assert_eq!(approved["requires_approval"], false);
     let _ = ctx.finish().await;
+}
+
+// ---- Browser provenance flow -------------------------------------------------
+
+/// The control-plane spelling of the real-browser loop topology.
+const BROWSER_LOOP: &str = include_str!("../../../../tests/site-config/browser-loop.json");
+/// Its edge projection for `tenant_loop`/`site_loop`, without `site_policy`;
+/// the gateway parity test proves it equals the loop script's operations.
+const BROWSER_LOOP_GATEWAY: &str =
+    include_str!("../../../../tests/site-config/browser-loop.gateway.json");
+
+/// The loop topology as a create/replace body for `site`.
+fn loop_body(site: &str) -> Value {
+    let mut body: Value = serde_json::from_str(BROWSER_LOOP).unwrap();
+    body["site_id"] = json!(site);
+    body
+}
+
+/// `POST /sites/{site}/apply` under an Agent API key.
+async fn apply_with_key(ctx: &Ctx, site: &str, api_key: &str) -> (StatusCode, Value) {
+    let response = ctx
+        .author
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/control/v1/sites/{site}/apply"))
+                .header("x-xshield-api-key", api_key)
+                .header("x-xshield-agent-run-id", "run-flow")
+                .header("idempotency-key", ctx.key("direct-flow"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap())
+        .unwrap_or(Value::Null);
+    (status, body)
+}
+
+/// What the mock edge last received for `site`, checked against the
+/// signature header it came with, with the per-test tenant normalized to the
+/// golden's and `site_policy` returned separately.
+fn signed_projection(ctx: &Ctx, site: &str) -> (Value, Value) {
+    let (body, signature) = ctx.edge.last_signed_apply().unwrap();
+    let key = openssl::pkey::PKey::hmac(&[0x11_u8; 32]).unwrap();
+    let mut signer =
+        openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &key).unwrap();
+    signer.update(&body).unwrap();
+    let expected = signer
+        .sign_to_vec()
+        .unwrap()
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            use std::fmt::Write as _;
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        });
+    assert_eq!(signature, expected, "the projection is the signed body");
+    let request: Value = serde_json::from_slice(&body).unwrap();
+    let mut projection = request["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["site_id"] == site)
+        .unwrap()["gateway_config"]
+        .clone();
+    assert_eq!(projection["tenant_id"], ctx.tenant.as_str());
+    projection["tenant_id"] = json!("tenant_loop");
+    let policy = projection
+        .as_object_mut()
+        .unwrap()
+        .remove("site_policy")
+        .unwrap();
+    (projection, policy)
+}
+
+/// The real-browser loop topology goes from a write through validation and an
+/// independent approval to the edge, and the signed snapshot carries exactly
+/// its golden projection. The `site.config.apply_direct` capability can stand
+/// in for the approver neither when the flow goes live, nor when it changes,
+/// nor when a rollback restores it.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn the_browser_loop_reaches_the_edge_as_its_golden_projection_only_through_an_approver() {
+    let ctx = Ctx::new().await;
+    let site = "site_loop";
+    let golden: Value = serde_json::from_str(BROWSER_LOOP_GATEWAY).unwrap();
+    let stored: Value = serde_json::from_str(BROWSER_LOOP).unwrap();
+
+    let (status, created) = ctx.create(&loop_body(site), &ctx.key("create-loop")).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["requires_approval"], true);
+    assert_eq!(
+        created["config"]["policy"], stored["policy"],
+        "read back as written"
+    );
+    let (status, validated) = Ctx::call(
+        &ctx.author,
+        "POST",
+        &format!("/control/v1/sites/{site}/validate"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{validated}");
+    assert_eq!(validated["valid"], true);
+    assert_eq!(validated["reason_code"], "CONTROL_SITE_VALIDATED");
+
+    let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
+            "subject": "agent-flow", "display_name": "flow", "expires_at": expires,
+            "scopes": [{
+                "tenant_id": ctx.tenant.as_str(), "site_id": site,
+                "capabilities": ["site.config.apply_direct", "site.read"]
+            }]
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let api_key = issued["api_key"].as_str().unwrap().to_owned();
+    let refused = |phase: &'static str| {
+        let (ctx, api_key) = (&ctx, api_key.clone());
+        async move {
+            let sent = ctx.edge.apply_count();
+            let (status, body) = apply_with_key(ctx, site, &api_key).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{phase}: {body}");
+            assert_eq!(
+                body["error_code"], "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED",
+                "{phase}"
+            );
+            assert_eq!(ctx.edge.apply_count(), sent, "{phase}: nothing was sent");
+            assert_eq!(ctx.status(site).await["requires_approval"], true, "{phase}");
+        }
+    };
+
+    // Going live with the flow.
+    refused("activation").await;
+    assert_eq!(ctx.edge.served_upstream(site), None);
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-loop")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["apply_state"], "active", "{approved}");
+    let (projection, policy) = signed_projection(&ctx, site);
+    assert_eq!(projection, golden);
+    assert_eq!(policy, stored["policy"]);
+
+    // Changing what a list qualifies.
+    let mut changed = loop_body(site);
+    changed["policy"]["routes"][3]["resource_grant"]["max_items"] = json!(20);
+    let (status, saved) = ctx.put(site, &changed, &ctx.key("grant-change")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    refused("resource grant change").await;
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-change")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let (projection, _) = signed_projection(&ctx, site);
+    assert_eq!(
+        projection["operations"][3]["response"]["resource_grant"]["max_items"],
+        20
+    );
+
+    // Rolling back restores the loop as a new revision, held for approval.
+    let (status, rolled) = rollback(&ctx, site, &ctx.key("rollback-loop")).await;
+    assert!(status.is_success(), "{status} {rolled}");
+    assert_eq!(rolled["desired_revision"], 3);
+    assert_eq!(rolled["requires_approval"], true);
+    refused("rollback").await;
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-rollback")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let (projection, policy) = signed_projection(&ctx, site);
+    assert_eq!(projection, golden);
+    assert_eq!(policy, stored["policy"]);
+
+    let approvals: Vec<String> = sqlx::query_scalar(
+        "SELECT approval_kind FROM xshield.site_apply_approvals
+         WHERE tenant_id = $1 AND site_id = $2 ORDER BY desired_revision",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    assert_eq!(approvals, ["independent", "independent", "independent"]);
+    let events = ctx.finish().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event["payload"]["reason_code"] == "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED"
+                    && event["payload"]["outcome"] == "DENY"
+            })
+            .count(),
+        3
+    );
+}
+
+/// Gateway features the control plane does not manage and violations of each
+/// flow rule are refused with their own stable reasons, and bodies far above
+/// the former 16 KiB limit are accepted.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn flow_refusals_have_their_own_reasons_and_large_sites_fit() {
+    type Edit = fn(&mut Value, usize, usize);
+    let ctx = Ctx::new().await;
+    let site = "site_flow_rules";
+    let (status, created) = ctx.create(&loop_body(site), &ctx.key("create")).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let route = |body: &Value, id: &str| -> usize {
+        body["policy"]["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|route| route["operation_id"] == id)
+            .unwrap()
+    };
+    let cases: [(&str, &str, Edit); 10] = [
+        (
+            "share issuance",
+            "CONTROL_SITE_FEATURE_UNSUPPORTED",
+            |b, list, _| {
+                b["policy"]["routes"][list]["share_issue"] = json!({"success_status": 200});
+            },
+        ),
+        (
+            "service identity",
+            "CONTROL_SITE_FEATURE_UNSUPPORTED",
+            |b, list, _| {
+                b["policy"]["routes"][list]["security_entry"] = json!("service_identity");
+            },
+        ),
+        (
+            "compatibility crypto",
+            "CONTROL_SITE_FEATURE_UNSUPPORTED",
+            |b, list, _| {
+                b["policy"]["routes"][list]["request_crypto"] =
+                    json!({"mode": "COMPATIBILITY", "adapter_revision": "a"});
+            },
+        ),
+        (
+            "credential refresh",
+            "CONTROL_SITE_FEATURE_UNSUPPORTED",
+            |b, _, logout| {
+                b["policy"]["routes"][logout]["auth_refresh"] = json!({"success_status": 200});
+            },
+        ),
+        (
+            "binding on a root",
+            "CONTROL_SITE_AUTH_FLOW_INVALID",
+            |b, _, _| {
+                b["policy"]["routes"][1]["security_entry"] = json!("authenticated_root");
+            },
+        ),
+        (
+            "sensor disabled",
+            "CONTROL_SITE_SENSOR_HTML_INVALID",
+            |b, _, _| {
+                b["sensor_enabled"] = json!(false);
+            },
+        ),
+        (
+            "unknown page",
+            "CONTROL_SITE_PAGE_ACTIONS_INVALID",
+            |b, list, _| {
+                b["policy"]["routes"][list]["issued_by"]["page_operation_id"] = json!("missing");
+            },
+        ),
+        (
+            "missing grant target",
+            "CONTROL_SITE_RESOURCE_GRANT_INVALID",
+            |b, list, _| {
+                b["policy"]["routes"][list]["resource_grant"]["target_operation_id"] =
+                    json!("orders.gone");
+            },
+        ),
+        (
+            "one action, two meanings",
+            "CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT",
+            |b, list, _| {
+                let mut shadow = b["policy"]["routes"][list].clone();
+                shadow["operation_id"] = json!("orders.list.shadow");
+                shadow["path"] = json!("/orders-shadow");
+                shadow.as_object_mut().unwrap().remove("resource_grant");
+                b["policy"]["routes"].as_array_mut().unwrap().push(shadow);
+            },
+        ),
+        (
+            "plain policy violation",
+            "CONTROL_SITE_POLICY_INVALID",
+            |b, list, _| {
+                b["policy"]["routes"][list]["path"] = json!("/a b");
+            },
+        ),
+    ];
+    for (label, reason, edit) in cases {
+        let mut body = loop_body(site);
+        let (list, logout) = (route(&body, "orders.list"), route(&body, "auth.logout"));
+        edit(&mut body, list, logout);
+        let (status, refused) = ctx.put(site, &body, &ctx.key("refused")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {refused}");
+        assert_eq!(refused["error_code"], reason, "{label}");
+    }
+    // A PATCH that asks for an unmanaged feature is named the same way.
+    let mut policy = loop_body(site)["policy"].clone();
+    policy["routes"][0]["evidence_capture"] = json!({"max_bytes": 1});
+    let (status, refused) = Ctx::call(
+        &ctx.author,
+        "PATCH",
+        &format!("/control/v1/sites/{site}"),
+        Some(&json!({"policy": policy})),
+        Some(&ctx.key("patch-refused")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_FEATURE_UNSUPPORTED");
+    // Nothing above created a revision.
+    assert_eq!(ctx.status(site).await["desired_revision"], 1);
+
+    // A site with 200 routes is several times the former 16 KiB body limit.
+    let mut large = loop_body(site);
+    let routes = large["policy"]["routes"].as_array_mut().unwrap();
+    for index in 0..194 {
+        routes.push(json!({
+            "operation_id": format!("docs.page.{index:03}"),
+            "method": "GET",
+            "path": format!("/documentation/{}/section-{index:03}", "a".repeat(200)),
+            "security_entry": "public",
+            "response_mode": "BUFFERED_JSON",
+            "max_response_bytes": 65_536
+        }));
+    }
+    let body_bytes = serde_json::to_vec(&large).unwrap().len();
+    assert!(body_bytes > 4 * 16 * 1024, "{body_bytes} bytes");
+    let (status, saved) = ctx.put(site, &large, &ctx.key("large")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["desired_revision"], 2);
+    // Above the limit the body is refused before it is parsed.
+    let mut too_large = loop_body(site);
+    too_large["display_name"] = json!("x".repeat(300 * 1024));
+    let (status, _) = ctx.put(site, &too_large, &ctx.key("too-large")).await;
+    assert!(status.is_client_error(), "{status}");
+    assert_eq!(ctx.status(site).await["desired_revision"], 2);
+
+    let events = ctx.finish().await;
+    assert!(events.iter().any(|event| {
+        event["payload"]["reason_code"] == "CONTROL_SITE_FEATURE_UNSUPPORTED"
+            && event["payload"]["outcome"] == "DENY"
+    }));
 }

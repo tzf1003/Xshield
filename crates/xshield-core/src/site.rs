@@ -2,17 +2,26 @@
 #![allow(missing_docs)]
 
 use crate::domain::{
-    ActionId, FieldName, InvalidValue, ResourceType, SiteId, TenantId, ViewProfile,
+    ActionId, FieldName, InvalidValue, OperationId, ResourceType, SiteId, TenantId, ViewProfile,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub mod config;
+pub mod flow;
+mod projection;
 pub mod risk;
+pub mod unsupported;
 pub mod upstream;
 
 pub use config::SiteConfig;
-pub use risk::{ChangeRisk, assess_change_risk};
+pub use flow::{
+    SiteAuthBinding, SiteAuthRevoke, SiteIssuedBy, SitePageActions, SiteResourceGrant,
+    SiteSensorHtml, SiteSensorHtmlAdapter,
+};
+pub use projection::{EDGE_MAX_CONFIG_BYTES, gateway_operation};
+pub use risk::{ChangeRisk, assess_change_risk, direct_apply_may_waive};
+pub use unsupported::{UnsupportedEdgeFeature, find_unsupported_edge_feature};
 
 /// An internal edge listener port.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -188,6 +197,11 @@ impl UpstreamEndpoint {
 pub enum SecurityEntry {
     /// No identity gate.
     Public,
+    /// An approved authentication entry (edge `AUTH_ENTRY`): admitted without
+    /// identity, and with an `auth_binding` the only route that may establish
+    /// one. A route-level admission only; the top-level site entry is never
+    /// `auth_entry`.
+    AuthEntry,
     /// A valid authenticated root is required.
     AuthenticatedRoot,
     /// A valid UI operation source is required.
@@ -258,6 +272,41 @@ pub struct SiteRouteConfig {
     pub response_mode: String,
     #[serde(default = "default_route_max_response_bytes")]
     pub max_response_bytes: usize,
+    // The provenance-flow blocks below are absent from every configuration
+    // written before they existed. They are skipped when unset so such a
+    // configuration re-serializes byte for byte, which keeps its stored
+    // digest, idempotency replays and "same content" comparisons stable.
+    /// Identity establishment; only on an `auth_entry` route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<flow::SiteAuthBinding>,
+    /// Binding revocation; only on an `authenticated_root` route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_revoke: Option<flow::SiteAuthRevoke>,
+    /// Approved builds; present exactly when `response_mode` is `SENSOR_HTML`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor_html: Option<flow::SiteSensorHtml>,
+    /// Page issuance settings; only on a `SENSOR_HTML` page root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_actions: Option<flow::SitePageActions>,
+    /// The page root that issues this first-hop UI action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_by: Option<flow::SiteIssuedBy>,
+    /// Response-derived resource qualification for one resource route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_grant: Option<flow::SiteResourceGrant>,
+}
+
+impl SiteRouteConfig {
+    /// Whether releasing this route's response commits an edge side effect
+    /// (encryption, identity change or resource qualification); the edge
+    /// refuses to merely observe the request body of such a route.
+    #[must_use]
+    pub const fn response_has_side_effects(&self) -> bool {
+        self.response_crypto.is_some()
+            || self.resource_grant.is_some()
+            || self.auth_binding.is_some()
+            || self.auth_revoke.is_some()
+    }
 }
 
 fn default_route_response_mode() -> String {
@@ -593,6 +642,11 @@ impl SitePolicyConfig {
                 validation_path,
                 route_config.security_entry,
             )?;
+            // The edge parses every operation ID as an `OperationId`, whose
+            // alphabet has no `:`; `RouteOperation` alone would admit one and
+            // fail the whole tenant snapshot at apply time.
+            OperationId::parse(route_config.operation_id.clone())
+                .map_err(|_| InvalidValue::new("site_policy.route"))?;
             let key = (route_config.method.clone(), route_config.path.clone());
             if !seen.insert(key) {
                 return Err(InvalidValue::new("site_policy.routes"));
@@ -652,8 +706,10 @@ impl SitePolicyConfig {
             {
                 return Err(InvalidValue::new("site_policy.route"));
             }
+            flow::validate_route(route_config)?;
         }
         validate_route_set(&self.routes)?;
+        flow::validate_route_set(&self.routes)?;
         if self.waf.blocked_headers.len() > 64
             || self.waf.blocked_headers.iter().any(|header| {
                 header.is_empty()
@@ -825,11 +881,12 @@ fn route_field_bounds_hold(route: &SiteRouteConfig, limits: &SiteLimitsConfig) -
 
 /// Response handling the edge can compile from what a route can express.
 fn route_response_contract_holds(route: &SiteRouteConfig) -> bool {
-    // The sensor-rewriting mode needs adapter revision, origin digest and
-    // injection offset, which a route cannot carry, so the edge always rejects
-    // it; buffered JSON is the only expressible mode.
-    if !matches!(route.response_mode.as_str(), "" | "BUFFERED_JSON")
-        || route.max_response_bytes > EDGE_MAX_BUFFERED_JSON_BYTES
+    // `SENSOR_HTML` carries its adapter in `sensor_html`; whether the two
+    // agree, and every adapter rule, is checked by `flow::validate_route`.
+    if !matches!(
+        route.response_mode.as_str(),
+        "" | "BUFFERED_JSON" | "SENSOR_HTML"
+    ) || route.max_response_bytes > EDGE_MAX_BUFFERED_JSON_BYTES
     {
         return false;
     }
@@ -868,9 +925,11 @@ fn route_request_crypto_contract_holds(route: &SiteRouteConfig, limits: &SiteLim
         return false;
     }
     match crypto {
-        // Observing a request while rewriting its response is unsupported.
+        // An opaque, observed body cannot feed a response that encrypts,
+        // changes identity or qualifies resources: the edge would act on
+        // content it never verified.
         SiteRequestCrypto::Observe { adapter_revision } => {
-            route.response_crypto.is_none() && edge_scoped_value(adapter_revision)
+            !route.response_has_side_effects() && edge_scoped_value(adapter_revision)
         }
         SiteRequestCrypto::DirectDecrypt {
             adapter_revision,
@@ -1045,16 +1104,33 @@ fn validate_site_route_path(route: &SiteRouteConfig) -> Result<String, InvalidVa
 }
 
 impl SecurityEntry {
-    /// Parses the stable wire value.
+    /// Parses the top-level site entry admission (`SiteConfig::security_entry`).
+    ///
+    /// Only the three admissions a default entry route may have are accepted:
+    /// that route is a bodiless GET, so it can never carry the `auth_binding`
+    /// an `auth_entry` exists for. Route-level `auth_entry` is read by serde.
     ///
     /// # Errors
-    /// Returns [`InvalidValue`] for an unknown wire value.
+    /// Returns [`InvalidValue`] for an unknown or route-only wire value.
     pub fn parse(value: &str) -> Result<Self, InvalidValue> {
         match value {
             "public" => Ok(Self::Public),
             "authenticated_root" => Ok(Self::AuthenticatedRoot),
             "ui_action_required" => Ok(Self::UiActionRequired),
             _ => Err(InvalidValue::new("security_entry")),
+        }
+    }
+
+    /// The edge's admission class name for this entry (gateway
+    /// `AdmissionDto`), as projected to the edge and recorded in
+    /// `site_routes.admission`.
+    #[must_use]
+    pub const fn edge_admission(self) -> &'static str {
+        match self {
+            Self::Public => "PUBLIC",
+            Self::AuthEntry => "AUTH_ENTRY",
+            Self::AuthenticatedRoot => "AUTHENTICATED_ROOT",
+            Self::UiActionRequired => "UI_ACTION_REQUIRED",
         }
     }
 }
@@ -1308,6 +1384,12 @@ mod tests {
             response_crypto: None,
             response_mode: String::new(),
             max_response_bytes: 1_048_576,
+            auth_binding: None,
+            auth_revoke: None,
+            sensor_html: None,
+            page_actions: None,
+            issued_by: None,
+            resource_grant: None,
         });
         assert!(resource_policy.validate().is_ok());
         resource_policy.routes[0].source_action = None;
@@ -1513,6 +1595,12 @@ mod tests {
             response_crypto: None,
             response_mode: String::new(),
             max_response_bytes: 1_048_576,
+            auth_binding: None,
+            auth_revoke: None,
+            sensor_html: None,
+            page_actions: None,
+            issued_by: None,
+            resource_grant: None,
         }
     }
 
@@ -1646,7 +1734,22 @@ mod tests {
 
         let mut sensor = post("c");
         sensor.response_mode = "SENSOR_HTML".to_owned();
-        assert!(!valid(sensor), "adapter metadata cannot be expressed");
+        assert!(!valid(sensor), "a sensor page needs its adapter and GET");
+    }
+
+    #[test]
+    fn operation_ids_use_the_edge_alphabet() {
+        // `:` passed `RouteOperation` but the edge's `OperationId` refuses it.
+        assert!(
+            policy_of(vec![route("a:b", "GET", "/")])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            policy_of(vec![route("a.b-c_d", "GET", "/")])
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]

@@ -2,10 +2,13 @@ use serde_json::json;
 use sqlx::PgPool;
 use std::{env, sync::OnceLock, time::Duration};
 use uuid::Uuid;
-use xshield_core::domain::{SiteId, TenantId};
+use xshield_core::{
+    SiteConfig,
+    domain::{SiteId, TenantId},
+};
 use xshield_postgres::{
     HEALTH_SNAPSHOT_HISTORY, PostgresIdentityStore, ProtectedSiteApprovalOutcome,
-    ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome,
+    ProtectedSiteConfigUpsert, ProtectedSiteConfigWriteOutcome, ProtectedSiteDirectApplyOutcome,
 };
 
 #[tokio::test]
@@ -1063,6 +1066,302 @@ async fn direct_apply_and_pre_authorization_leave_bound_records() {
     created_or_updated(save(&store, &tenant, &site, &Draft::new(3).status("active")).await);
     created_or_updated(save(&store, &tenant, &site, &Draft::new(4).status("paused")).await);
     assert!(apply_state(&store, &tenant, &site).await.requires_approval);
+    cleanup(&pool, &tenant).await;
+}
+
+/// The real-browser loop topology as the control plane stores it.
+const BROWSER_LOOP: &str = include_str!("../../../tests/site-config/browser-loop.json");
+/// A stored configuration exactly as written before the flow fields existed.
+const PRE_FLOW: &str = include_str!("../../../tests/site-config/pre-flow.json");
+
+/// Saves a complete typed configuration the way the control plane does.
+async fn save_config(
+    store: &PostgresIdentityStore,
+    tenant: &TenantId,
+    site: &SiteId,
+    config: &SiteConfig,
+    author: &str,
+    key: u8,
+) -> Result<ProtectedSiteConfigWriteOutcome, xshield_postgres::StoreError> {
+    store
+        .upsert_protected_site_config(ProtectedSiteConfigUpsert {
+            tenant_id: tenant,
+            site_id: site,
+            display_name: &config.display_name,
+            public_origin: &config.public_origin,
+            upstream_address: &config.upstream_address,
+            upstream_server_name: &config.upstream_server_name,
+            upstream_tls: config.upstream_tls,
+            listen_port: config.listen_port,
+            entry_path: &config.entry_path,
+            security_entry: &config.security_entry,
+            sensor_enabled: config.sensor_enabled,
+            policy_revision: &config.policy_revision,
+            status: &config.status,
+            policy: &config.policy,
+            pre_authorized_by: None,
+            config_digest: &[key; 32],
+            updated_by: author,
+            idempotency_digest: &[key.wrapping_add(100); 32],
+            request_digest: &[key.wrapping_add(50); 32],
+        })
+        .await
+}
+
+/// The loop topology survives every place the store keeps it: the current
+/// row, the revision history and the normalized route projection, and it can
+/// only go live through an independent approver.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn the_browser_loop_topology_round_trips_through_every_store_projection() {
+    use sqlx::Row;
+    let (store, pool, tenant, site) = session("browser_loop").await;
+    let config: SiteConfig = serde_json::from_str(BROWSER_LOOP).unwrap();
+    let record = created(
+        save_config(&store, &tenant, &site, &config, "loop-author", 1)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(record.site_config(), config, "the current row");
+    let revision = store
+        .read_protected_site_revision_config(&tenant, &site, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision, config, "the revision history");
+    assert_eq!(
+        serde_json::to_string_pretty(&revision).unwrap(),
+        BROWSER_LOOP.trim_end(),
+        "read back in the canonical stored form"
+    );
+
+    let routes = sqlx::query(
+        "SELECT operation_id, admission, resource_type, source_action, response_config, issued_by
+         FROM xshield.site_routes WHERE tenant_id = $1 AND site_id = $2 ORDER BY operation_id",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let row = |id: &str| {
+        routes
+            .iter()
+            .find(|row| row.get::<String, _>("operation_id") == id)
+            .unwrap()
+    };
+    assert_eq!(routes.len(), 6);
+    assert_eq!(
+        row("auth.login").get::<String, _>("admission"),
+        "AUTH_ENTRY"
+    );
+    assert_eq!(
+        row("auth.login").get::<serde_json::Value, _>("response_config")["auth_binding"]["bearer_pointer"],
+        "/access_token"
+    );
+    let page = row("app.page").get::<serde_json::Value, _>("response_config");
+    assert_eq!(page["mode"], "SENSOR_HTML");
+    assert_eq!(page["injection_offset"], 293);
+    assert_eq!(page["page_actions"]["mapping_revision"], "app-map-r1");
+    assert_eq!(
+        row("orders.list").get::<serde_json::Value, _>("issued_by"),
+        json!({"page_operation_id": "app.page", "ttl_seconds": 600})
+    );
+    assert_eq!(
+        row("orders.list").get::<serde_json::Value, _>("response_config")["resource_grant"]["target_operation_id"],
+        "orders.read"
+    );
+    assert_eq!(
+        row("orders.read").get::<Option<String>, _>("resource_type"),
+        Some("order".to_owned())
+    );
+    assert_eq!(
+        row("auth.logout").get::<serde_json::Value, _>("response_config")["auth_revoke"],
+        json!({"success_status": 200})
+    );
+    assert_eq!(
+        row("login.page").get::<Option<serde_json::Value>, _>("response_config"),
+        None
+    );
+
+    // Going live with the flow names every facet, and those reasons cannot
+    // be cleared by the direct-apply capability.
+    let state = apply_state(&store, &tenant, &site).await;
+    assert!(state.requires_approval);
+    assert_eq!(
+        state.risk_reasons,
+        [
+            "ACTIVATION",
+            "AUTH_ENTRY_CHANGED",
+            "SENSOR_HTML_CHANGED",
+            "PAGE_ACTIONS_CHANGED",
+            "RESOURCE_GRANT_CHANGED"
+        ]
+    );
+    assert_eq!(
+        store
+            .authorize_protected_site_direct_apply(
+                &tenant,
+                &site,
+                &format!("approval_{}", Uuid::now_v7()),
+                "agent-direct",
+                state.desired_revision,
+                &state.apply_id,
+            )
+            .await
+            .unwrap(),
+        ProtectedSiteDirectApplyOutcome::IndependentApprovalRequired
+    );
+    assert!(apply_state(&store, &tenant, &site).await.requires_approval);
+    let approvals: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM xshield.site_apply_approvals WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(approvals, 0, "a refused direct apply records nothing");
+    assert!(matches!(
+        approve(&store, &tenant, &site, "independent-reviewer", 41, None).await,
+        ProtectedSiteApprovalOutcome::Applied { .. }
+    ));
+    confirm(&store, &tenant, &site).await;
+    cleanup(&pool, &tenant).await;
+}
+
+/// A write whose route projection fails rolls back as a whole: the current
+/// row, the revision history, the apply intent, the port lease and the route
+/// projection keep the last committed revision.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn a_failing_route_projection_rolls_the_whole_write_back() {
+    let (store, pool, tenant, site) = session("flow_atomic").await;
+    let config: SiteConfig = serde_json::from_str(BROWSER_LOOP).unwrap();
+    created(
+        save_config(&store, &tenant, &site, &config, "loop-author", 1)
+            .await
+            .unwrap(),
+    );
+    let snapshot = |pool: PgPool, tenant: TenantId| async move {
+        let mut tables = Vec::new();
+        for statement in [
+            "SELECT coalesce(json_agg(t ORDER BY t::text), '[]')::jsonb
+             FROM xshield.protected_site_configs t WHERE tenant_id = $1",
+            "SELECT coalesce(json_agg(t ORDER BY t::text), '[]')::jsonb
+             FROM xshield.site_policy_revisions t WHERE tenant_id = $1",
+            "SELECT coalesce(json_agg(t ORDER BY t::text), '[]')::jsonb
+             FROM xshield.site_apply_intents t WHERE tenant_id = $1",
+            "SELECT coalesce(json_agg(t ORDER BY t::text), '[]')::jsonb
+             FROM xshield.site_port_leases t WHERE tenant_id = $1",
+            "SELECT coalesce(json_agg(t ORDER BY t::text), '[]')::jsonb
+             FROM xshield.site_routes t WHERE tenant_id = $1",
+        ] {
+            tables.push(
+                sqlx::query_scalar::<_, serde_json::Value>(statement)
+                    .bind(tenant.as_str())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+            );
+        }
+        tables
+    };
+    let before = snapshot(pool.clone(), tenant.clone()).await;
+    // The store trusts its caller's validation; a path the normalized table
+    // refuses makes the projection insert fail after the configuration row
+    // was already written inside the transaction.
+    let mut broken = config.clone();
+    broken.display_name = "changed".to_owned();
+    broken.policy.routes[0].path = "/a?b".to_owned();
+    assert!(
+        save_config(&store, &tenant, &site, &broken, "loop-author", 2)
+            .await
+            .is_err()
+    );
+    assert_eq!(snapshot(pool.clone(), tenant.clone()).await, before);
+    cleanup(&pool, &tenant).await;
+}
+
+/// Migration 0052 widens the projection to the new admission and keeps every
+/// other admission value refused.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn the_route_projection_accepts_auth_entry_and_nothing_unknown() {
+    let (store, pool, tenant, site) = session("flow_admission").await;
+    created(save(&store, &tenant, &site, &Draft::new(1)).await);
+    let insert = |admission: &'static str, issued_by: Option<serde_json::Value>| {
+        sqlx::query(
+            "INSERT INTO xshield.site_routes
+                 (tenant_id, site_id, operation_id, method, path, admission, issued_by)
+             VALUES ($1, $2, $3, 'POST', '/probe', $4, $5)",
+        )
+        .bind(tenant.as_str())
+        .bind(site.as_str())
+        .bind(format!("probe.{}", admission.to_ascii_lowercase()))
+        .bind(admission)
+        .bind(issued_by)
+    };
+    insert("AUTH_ENTRY", None).execute(&pool).await.unwrap();
+    assert!(insert("SHARE_ENTRY", None).execute(&pool).await.is_err());
+    assert!(
+        insert(
+            "SERVICE_IDENTITY",
+            Some(json!({"page_operation_id": "p", "ttl_seconds": 1})),
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        insert("UI_ACTION_REQUIRED", Some(json!(["not", "an", "object"])))
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    cleanup(&pool, &tenant).await;
+}
+
+/// A configuration written before the flow fields reads back from both stored
+/// forms to the same bytes, so its digest and "same content" comparisons hold.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn configurations_written_before_the_flow_fields_read_back_byte_identical() {
+    let (store, pool, tenant, site) = session("pre_flow").await;
+    let config: SiteConfig = serde_json::from_str(PRE_FLOW).unwrap();
+    let record = created(
+        save_config(&store, &tenant, &site, &config, "legacy-author", 1)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        serde_json::to_string(&record.site_config()).unwrap(),
+        PRE_FLOW.trim_end()
+    );
+    let revision = store
+        .read_protected_site_revision_config(&tenant, &site, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&revision).unwrap(),
+        PRE_FLOW.trim_end()
+    );
+    // Its route projection keeps the response shape without flow members.
+    let response: serde_json::Value = sqlx::query_scalar(
+        "SELECT response_config FROM xshield.site_routes
+         WHERE tenant_id = $1 AND site_id = $2 AND operation_id = 'pay'",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        response.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["crypto", "max_bytes", "mode"]
+    );
     cleanup(&pool, &tenant).await;
 }
 

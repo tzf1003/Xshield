@@ -8,17 +8,21 @@
 
 use super::{
     RouteOperation, SecurityEntry, SitePolicyConfig, SiteRouteConfig, UpstreamEndpoint,
+    flow::SENSOR_HTML_INVALID,
+    projection::{self, EDGE_MAX_CONFIG_BYTES},
     route_path_is_edge_compilable,
 };
 use crate::domain::{InvalidValue, SiteId};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::net::Ipv4Addr;
 
 /// Prefix of the audit producer identity the edge derives for a site; the edge
 /// caps the whole identity at 128 bytes.
 const AUDIT_PRODUCER_PREFIX: &str = "edge-";
 const AUDIT_PRODUCER_MAX_BYTES: usize = 128;
+/// Length of the longest tenant identifier (`TenantId`), used to bound the
+/// projection size before the tenant is known.
+const MAX_TENANT_ID_BYTES: usize = 128;
 
 /// Everything an operator configures for one site, excluding identity and
 /// revision metadata.
@@ -106,6 +110,12 @@ impl SiteConfig {
                 response_crypto: None,
                 response_mode: String::new(),
                 max_response_bytes: 1_048_576,
+                auth_binding: None,
+                auth_revoke: None,
+                sensor_html: None,
+                page_actions: None,
+                issued_by: None,
+                resource_grant: None,
             });
         }
         policy
@@ -158,7 +168,19 @@ impl SiteConfig {
             return Err(InvalidValue::new("site_config"));
         }
         validate_public_origin(&self.public_origin, self.sensor_enabled)?;
-        self.effective_policy().validate()
+        let policy = self.effective_policy();
+        policy.validate()?;
+        // The edge only injects into pages when the site projects a sensor
+        // block, which it does exactly when the sensor is enabled.
+        if !self.sensor_enabled
+            && policy
+                .routes
+                .iter()
+                .any(|route| route.response_mode == "SENSOR_HTML")
+        {
+            return Err(InvalidValue::new(SENSOR_HTML_INVALID));
+        }
+        Ok(())
     }
 
     /// Validates the configuration as it will be published for `site_id`.
@@ -170,106 +192,45 @@ impl SiteConfig {
     ///
     /// # Errors
     /// Returns [`InvalidValue`] named `site_id` for an identifier the edge
-    /// cannot use, otherwise the error of [`SiteConfig::validate`].
+    /// cannot use, `site_policy.size` when the projection would exceed the
+    /// edge's configuration size limit, otherwise the error of
+    /// [`SiteConfig::validate`].
     pub fn validate_for_site(&self, site_id: &SiteId) -> Result<(), InvalidValue> {
         if AUDIT_PRODUCER_PREFIX.len() + site_id.as_str().len() > AUDIT_PRODUCER_MAX_BYTES {
             return Err(InvalidValue::new("site_id"));
         }
-        self.validate()
+        self.validate()?;
+        // The edge refuses a site configuration above its size limit, which
+        // would fail every site of the tenant. The tenant only appears once
+        // in the projection, so projecting with the longest possible tenant
+        // identifier bounds the real size from above.
+        let longest_tenant = "t".repeat(MAX_TENANT_ID_BYTES);
+        let projected = serde_json::to_vec(&self.gateway_config(&longest_tenant, site_id)?)
+            .map_err(|_| InvalidValue::new("gateway_config"))?;
+        if projected.len() > EDGE_MAX_CONFIG_BYTES {
+            return Err(InvalidValue::new("site_policy.size"));
+        }
+        Ok(())
     }
 
     /// Projects the configuration to the strict JSON the edge compiler
     /// consumes for one site.
-    #[must_use]
-    pub fn gateway_config(&self, tenant_id: &str, site_id: &SiteId) -> serde_json::Value {
-        let policy = self.effective_policy();
-        let operations = policy
-            .routes
-            .iter()
-            .map(gateway_operation)
-            .collect::<Vec<_>>();
-        let mut gateway_config = json!({
-            "listen": format!("127.0.0.1:{}", self.listen_port),
-            "origin": {
-                "address": self.upstream_address,
-                "server_name": self.upstream_server_name,
-                "tls": self.upstream_tls
-            },
-            "tenant_id": tenant_id,
-            "site_id": site_id.as_str(),
-            "policy_revision": self.policy_revision,
-            "site_policy": policy.clone(),
-            "audit": {
-                "directory": format!("target/xshield-audit-{}", site_id.as_str()),
-                "key_id": "deployment-managed",
-                "producer_id": format!("edge-{}", site_id.as_str()),
-                "max_bytes": 16_777_216_u64,
-                "high_watermark_bytes": 12_582_912_u64,
-                "segment_max_bytes": 4_194_304_u64
-            },
-            "operations": operations
-        });
-        if let Some(object) = gateway_config.as_object_mut() {
-            // The edge refuses any route that needs identity, any request
-            // crypto and the sensor without an identity store, so the store is
-            // derived from what the effective routes actually need.
-            let needs_identity_store = policy.identity.enabled
-                || self.security_entry != "public"
-                || self.sensor_enabled
-                || policy.routes.iter().any(|route| {
-                    route.security_entry != SecurityEntry::Public || route.request_crypto.is_some()
-                });
-            if needs_identity_store {
-                object.insert(
-                    "identity_store".to_owned(),
-                    identity_store(policy.identity.session_ttl_seconds),
-                );
-            }
-            if self.sensor_enabled {
-                object.insert(
-                    "sensor".to_owned(),
-                    json!({
-                        // The edge requires a bare `scheme://authority` origin.
-                        "origin": self
-                            .public_origin
-                            .strip_suffix('/')
-                            .unwrap_or(&self.public_origin),
-                        "build_ref": "0000000000000000000000000000000000000000000000000000000000000000",
-                        "heartbeat_seconds": 15
-                    }),
-                );
-            }
-        }
-        gateway_config
+    ///
+    /// The projection never validates, drops or defaults anything (see
+    /// the `projection` module); callers publish only configurations that
+    /// passed [`SiteConfig::validate_for_site`], or that the edge already
+    /// accepted.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] named `gateway_config` when the projection
+    /// cannot be serialized; nothing partial is ever returned.
+    pub fn gateway_config(
+        &self,
+        tenant_id: &str,
+        site_id: &SiteId,
+    ) -> Result<serde_json::Value, InvalidValue> {
+        projection::gateway_config(self, tenant_id, site_id)
     }
-}
-
-/// Anonymous-session settings for the edge identity store.
-///
-/// Sessions created in one rate window all live for the TTL, so the number
-/// alive at once is the per-site creation rate times the windows the TTL
-/// spans (plus one); the edge rejects a store whose product exceeds the
-/// active-session budget. The creation rate is therefore derived from the TTL
-/// instead of being fixed, which keeps every TTL the policy allows applicable.
-fn identity_store(session_ttl_seconds: u64) -> serde_json::Value {
-    const WINDOW_SECONDS: u64 = 60;
-    const MAX_ACTIVE_SESSIONS: u64 = 100_000;
-    const SITE_RATE: u64 = 1_000;
-    const SOURCE_RATE: u64 = 10;
-    let windows = session_ttl_seconds
-        .div_ceil(WINDOW_SECONDS)
-        .saturating_add(1);
-    let per_site = SITE_RATE.min(MAX_ACTIVE_SESSIONS / windows).max(1);
-    let per_source = SOURCE_RATE.min(per_site);
-    json!({
-        "max_connections": 8,
-        "acquire_timeout_ms": 2000,
-        "anonymous_session_ttl_seconds": session_ttl_seconds,
-        "max_active_anonymous_sessions": MAX_ACTIVE_SESSIONS,
-        "anonymous_session_rate_window_seconds": WINDOW_SECONDS,
-        "max_anonymous_session_creations_per_source": per_source,
-        "max_anonymous_session_creations_per_site": per_site
-    })
 }
 
 /// Public origin rules shared by the control plane and the edge router.
@@ -336,47 +297,10 @@ fn validate_public_origin(origin: &str, sensor_enabled: bool) -> Result<(), Inva
     Ok(())
 }
 
-/// Projects one route to the edge's operation DTO.
-#[must_use]
-pub fn gateway_operation(route: &SiteRouteConfig) -> serde_json::Value {
-    let admission = match route.security_entry {
-        SecurityEntry::Public => "PUBLIC",
-        SecurityEntry::AuthenticatedRoot => "AUTHENTICATED_ROOT",
-        SecurityEntry::UiActionRequired => "UI_ACTION_REQUIRED",
-    };
-    let mut operation = json!({
-        "operation_id": route.operation_id,
-        "method": route.method,
-        "path": route.path,
-        "admission": admission,
-        "source_action": route.source_action,
-        "resource_type": route.resource_type,
-        "view_profile": route.view_profile,
-        "resource_query_parameter": route.resource_query_parameter,
-        "resource_path_parameter": route.resource_path_parameter,
-    });
-    if let Some(request_crypto) = &route.request_crypto {
-        operation["request_crypto"] = serde_json::to_value(request_crypto)
-            .unwrap_or_else(|_| json!({ "mode": "OBSERVE", "adapter_revision": "invalid" }));
-    }
-    if route.response_crypto.is_some() || !route.response_mode.is_empty() {
-        let mode = if route.response_mode.is_empty() {
-            "BUFFERED_JSON"
-        } else {
-            route.response_mode.as_str()
-        };
-        let mut response = json!({ "mode": mode, "max_bytes": route.max_response_bytes });
-        if let Some(crypto) = &route.response_crypto {
-            response["crypto"] = serde_json::to_value(crypto).unwrap_or_else(|_| json!({}));
-        }
-        operation["response"] = response;
-    }
-    operation
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn config() -> SiteConfig {
         SiteConfig {
@@ -451,27 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn identity_store_stays_inside_the_edge_capacity_model_for_every_ttl() {
-        for ttl in [1_u64, 59, 60, 61, 3_600, 5_940, 5_941, 43_200, 86_400] {
-            let store = identity_store(ttl);
-            let per_site = store["max_anonymous_session_creations_per_site"]
-                .as_u64()
-                .unwrap();
-            let per_source = store["max_anonymous_session_creations_per_source"]
-                .as_u64()
-                .unwrap();
-            let active = store["max_active_anonymous_sessions"].as_u64().unwrap();
-            let windows = ttl.div_ceil(60) + 1;
-            assert!(per_site * windows <= active, "ttl {ttl}");
-            assert!(per_source >= 1 && per_source <= per_site, "ttl {ttl}");
-        }
-        // TTLs that already fit keep the original, unreduced rates.
-        let default = identity_store(3_600);
-        assert_eq!(default["max_anonymous_session_creations_per_site"], 1_000);
-        assert_eq!(default["max_anonymous_session_creations_per_source"], 10);
-    }
-
-    #[test]
     fn identity_store_follows_the_effective_routes_not_only_the_entry_mode() {
         let mut config = config();
         config.security_entry = "public".to_owned();
@@ -480,7 +383,7 @@ mod tests {
             source_action: None,
             ..config.effective_policy().routes[0].clone()
         }];
-        let projection = config.gateway_config("tenant_a", &site("site_a"));
+        let projection = config.gateway_config("tenant_a", &site("site_a")).unwrap();
         assert!(projection.get("identity_store").is_some());
         let public_only = SiteConfig {
             security_entry: "public".to_owned(),
@@ -494,8 +397,120 @@ mod tests {
             },
             ..config
         };
-        let projection = public_only.gateway_config("tenant_a", &site("site_a"));
+        let projection = public_only
+            .gateway_config("tenant_a", &site("site_a"))
+            .unwrap();
         assert!(projection.get("identity_store").is_none());
+    }
+
+    /// The control-plane spelling of the real-browser loop
+    /// (`scripts/test_browser_loop.sh`), shared with the gateway golden test,
+    /// the control-plane apply test and the console round-trip test.
+    const BROWSER_LOOP: &str = include_str!("../../../../tests/site-config/browser-loop.json");
+    /// Its projection for `tenant_loop`/`site_loop`, without `site_policy`.
+    const BROWSER_LOOP_GATEWAY: &str =
+        include_str!("../../../../tests/site-config/browser-loop.gateway.json");
+    /// A stored configuration exactly as written before the flow fields.
+    const PRE_FLOW: &str = include_str!("../../../../tests/site-config/pre-flow.json");
+
+    fn browser_loop() -> SiteConfig {
+        serde_json::from_str(BROWSER_LOOP).unwrap()
+    }
+
+    #[test]
+    fn the_browser_loop_fixture_is_the_canonical_stored_form_and_valid() {
+        let config = browser_loop();
+        // Byte equality pins the field order and the omission of unset
+        // blocks, which the console round-trip test relies on as well.
+        assert_eq!(
+            serde_json::to_string_pretty(&config).unwrap(),
+            BROWSER_LOOP.trim_end()
+        );
+        config.validate_for_site(&site("site_loop")).unwrap();
+    }
+
+    #[test]
+    fn the_browser_loop_projects_to_the_golden_edge_configuration() {
+        let config = browser_loop();
+        let mut projection = config
+            .gateway_config("tenant_loop", &site("site_loop"))
+            .unwrap();
+        let site_policy = projection
+            .as_object_mut()
+            .unwrap()
+            .remove("site_policy")
+            .unwrap();
+        assert_eq!(site_policy, serde_json::to_value(&config.policy).unwrap());
+        let golden: serde_json::Value = serde_json::from_str(BROWSER_LOOP_GATEWAY).unwrap();
+        assert_eq!(projection, golden);
+    }
+
+    /// Optional flow blocks are omitted when unset, so a configuration stored
+    /// before they existed re-serializes to the same bytes: its stored digest,
+    /// idempotent replays and "same content" comparisons all stay stable.
+    #[test]
+    fn configurations_written_before_the_flow_fields_keep_their_bytes() {
+        let config: SiteConfig = serde_json::from_str(PRE_FLOW).unwrap();
+        assert_eq!(serde_json::to_string(&config).unwrap(), PRE_FLOW.trim_end());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn a_sensor_page_needs_the_sensor() {
+        let mut config = browser_loop();
+        config.sensor_enabled = false;
+        assert_eq!(
+            config.validate().unwrap_err().field(),
+            crate::site::flow::SENSOR_HTML_INVALID
+        );
+    }
+
+    /// The edge refuses a site configuration above 1 MiB, which would fail
+    /// every site of the tenant; the projection size is checked up front.
+    #[test]
+    fn a_projection_the_edge_would_refuse_for_its_size_is_rejected() {
+        let pages = |count: usize| {
+            let mut config = config();
+            config.sensor_enabled = true;
+            config.security_entry = "public".to_owned();
+            config.policy.routes = (0..count)
+                .map(|index| {
+                    let digest = |build: usize| format!("{:064x}", index * 100 + build);
+                    let revision = |build: usize| format!("{build:x}{}", "r".repeat(126));
+                    let mut route = config.effective_policy().routes[0].clone();
+                    route.operation_id = format!("page.{index}");
+                    route.path = format!("/p{index}");
+                    route.security_entry = SecurityEntry::Public;
+                    route.source_action = None;
+                    route.response_mode = "SENSOR_HTML".to_owned();
+                    route.sensor_html = Some(crate::site::SiteSensorHtml {
+                        adapter_revision: revision(0),
+                        origin_sha256: digest(0),
+                        injection_offset: 10,
+                        additional_adapters: (1..16)
+                            .map(|build| crate::site::SiteSensorHtmlAdapter {
+                                adapter_revision: revision(build),
+                                origin_sha256: digest(build),
+                                injection_offset: 10,
+                            })
+                            .collect(),
+                    });
+                    route
+                })
+                .collect();
+            config
+        };
+        let fits = pages(64);
+        fits.validate_for_site(&site("site_a")).unwrap();
+        let too_large = pages(200);
+        too_large.validate().unwrap();
+        assert_eq!(
+            too_large
+                .validate_for_site(&site("site_a"))
+                .unwrap_err()
+                .field(),
+            "site_policy.size"
+        );
     }
 
     #[test]

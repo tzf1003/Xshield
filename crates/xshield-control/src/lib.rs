@@ -4319,19 +4319,25 @@ pub fn router(control: ControlPlane) -> Router {
             site_config::PATH,
             get(site_config::read_handler)
                 .put(site_config::write_handler)
-                .layer(DefaultBodyLimit::max(16 * 1024)),
+                .layer(DefaultBodyLimit::max(
+                    site_config::SITE_CONFIG_BODY_BYTES_MAX,
+                )),
         )
         .route(
             site_config::SITES_PATH,
             get(site_config::list_handler)
                 .post(site_config::create_handler)
-                .layer(DefaultBodyLimit::max(16 * 1024)),
+                .layer(DefaultBodyLimit::max(
+                    site_config::SITE_CONFIG_BODY_BYTES_MAX,
+                )),
         )
         .route(
             site_config::SITE_CONFIG_PATH,
             get(site_config::read_site_path_handler)
                 .put(site_config::write_site_path_handler)
-                .layer(DefaultBodyLimit::max(16 * 1024)),
+                .layer(DefaultBodyLimit::max(
+                    site_config::SITE_CONFIG_BODY_BYTES_MAX,
+                )),
         )
         .route(
             site_config::SITE_REVISIONS_PATH,
@@ -4366,7 +4372,9 @@ pub fn router(control: ControlPlane) -> Router {
             get(site_config::read_site_detail_handler)
                 .patch(site_config::patch_site_path_handler)
                 .delete(site_config::delete_handler)
-                .layer(DefaultBodyLimit::max(16 * 1024)),
+                .layer(DefaultBodyLimit::max(
+                    site_config::SITE_CONFIG_BODY_BYTES_MAX,
+                )),
         )
         .route(HEALTH_PATH, get(health_handler))
         .route(REQUEST_SUMMARY_PATH, get(request_summary_handler))

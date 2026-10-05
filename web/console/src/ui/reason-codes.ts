@@ -103,6 +103,11 @@ export const reasonDictionary = {
     "没有可回滚的目标：站点此前没有生效过其他修订。",
     "在“发布”页查看修订历史；需要还原内容时由配置管理员保存所需配置。",
   ),
+  CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED: entry(
+    "warning",
+    "该修订改变了浏览器来源流程（认证入口、SENSOR_HTML 页面、页面签发或资源资格），只能由另一位审批人批准；“直接应用”能力不能代替审批，什么也没有发布。",
+    "请具备“策略审批”角色的同事在“发布”页审阅差异后批准。",
+  ),
 
   // ---- Request validation ----
   CONTROL_SITE_ID_INVALID: entry(
@@ -125,6 +130,36 @@ export const reasonDictionary = {
     "danger",
     "路由或策略不合法，例如路径重复、准入与操作来源不匹配、限额冲突、引用格式错误。",
     "到“路由与操作”“WAF 与限流”“加密”检查并修正。",
+  ),
+  CONTROL_SITE_AUTH_FLOW_INVALID: entry(
+    "danger",
+    "认证入口或身份建立/撤销规则不合法：auth_binding 只能用于认证入口，auth_revoke 只能用于已认证根，成功状态、JSON 指针或期限越界。",
+    "核对认证入口路由的 auth_binding / auth_revoke 后通过 API 重新提交。",
+  ),
+  CONTROL_SITE_SENSOR_HTML_INVALID: entry(
+    "danger",
+    "SENSOR_HTML 页面不合法：需要启用浏览器探针、GET 方法和完整的构建适配（64 位小写摘要、小于响应上限的注入偏移、不重复的构建），且不能同时加密或签发身份与资格。",
+    "核对页面路由的 sensor_html 适配与站点探针开关后重新提交。",
+  ),
+  CONTROL_SITE_PAGE_ACTIONS_INVALID: entry(
+    "danger",
+    "页面签发不合法：page_actions 只能用于已认证的 SENSOR_HTML 页面根，每个页面签发 1–16 个动作，issued_by 必须指向这样的页面，且只能用于非资源的界面操作路由。",
+    "核对 page_actions 与 issued_by 的对应关系后重新提交。",
+  ),
+  CONTROL_SITE_RESOURCE_GRANT_INVALID: entry(
+    "danger",
+    "响应资源资格不合法：目标必须是已存在、绑定资源的“必须有界面操作来源”路由，指针、数量、期限需在边界内。",
+    "核对 resource_grant 的目标路由与参数后重新提交。",
+  ),
+  CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT: entry(
+    "danger",
+    "同一操作来源与映射修订被两条路由赋予了不同含义，edge 无法为它建立唯一的动作描述。",
+    "为其中一条路由换用不同的操作来源或映射修订后重新提交。",
+  ),
+  CONTROL_SITE_FEATURE_UNSUPPORTED: entry(
+    "danger",
+    "配置使用了控制面尚不能管理的 edge 功能（分享签发、凭证续期、上下文切换、证据采集、兼容加密、分享或服务身份入口），整份配置未保存。",
+    "移除这些字段；需要这些功能时由部署方另行评估。",
   ),
   CONTROL_SITE_PORT_UNAVAILABLE: entry(
     "danger",
@@ -329,6 +364,10 @@ export type RiskToken =
   | "SENSOR_CHANGED"
   | "STATIC_ASSET_POLICY_CHANGED"
   | "OBJECT_ACCESS_CHANGED"
+  | "AUTH_ENTRY_CHANGED"
+  | "SENSOR_HTML_CHANGED"
+  | "PAGE_ACTIONS_CHANGED"
+  | "RESOURCE_GRANT_CHANGED"
   | "OTHER_CHANGE";
 
 export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail: string }>> = {
@@ -380,6 +419,22 @@ export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail:
   OBJECT_ACCESS_CHANGED: {
     label: "源站对象级校验标记变更",
     detail: "是否向源站传递对象所有者校验标记发生变化。",
+  },
+  AUTH_ENTRY_CHANGED: {
+    label: "认证入口或身份建立/撤销变更",
+    detail: "决定谁获得或失去身份绑定；只能由独立审批人批准，直接应用能力不能代替。",
+  },
+  SENSOR_HTML_CHANGED: {
+    label: "SENSOR_HTML 页面变更",
+    detail: "决定 edge 向哪些固定摘要的页面构建注入探针并放行；只能由独立审批人批准。",
+  },
+  PAGE_ACTIONS_CHANGED: {
+    label: "页面签发动作变更",
+    detail: "决定页面交付时签发哪些首跳界面操作；只能由独立审批人批准。",
+  },
+  RESOURCE_GRANT_CHANGED: {
+    label: "响应资源资格变更",
+    detail: "决定列表响应为哪些资源签发哪个详情动作；只能由独立审批人批准。",
   },
   OTHER_CHANGE: {
     label: "其他安全相关字段变更",

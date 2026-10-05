@@ -6,9 +6,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 use xshield_core::{
-    SiteConfig, SitePolicyConfig,
+    SiteConfig, SiteIssuedBy, SitePolicyConfig, SiteRequestCrypto, SiteRouteConfig,
     domain::{SiteId, TenantId},
-    site::assess_change_risk,
+    site::{assess_change_risk, direct_apply_may_waive},
 };
 
 /// Newest health observations kept per site; see
@@ -199,6 +199,10 @@ pub enum ProtectedSiteDirectApplyOutcome {
     NotFound,
     /// The desired revision changed since the caller read it.
     Stale,
+    /// A stored reason (a browser provenance-flow change, or a reason this
+    /// version does not recognize) can only be cleared by an independent
+    /// `PolicyApprover`; nothing was recorded and the requirement stands.
+    IndependentApprovalRequired,
 }
 
 /// A previously stored write recognised by its idempotency key.
@@ -995,6 +999,11 @@ impl PostgresIdentityStore {
     /// apply leaves neither an unrecorded bypass nor a leftover
     /// `requires_approval` that would block other work.
     ///
+    /// It never replaces the second pair of eyes for a provenance-flow change
+    /// (`xshield_core::site::direct_apply_may_waive`): the stored reasons are
+    /// read under the same row lock that decides the outcome, so they belong
+    /// to exactly the revision that would otherwise be authorized.
+    ///
     /// # Errors
     /// Returns [`StoreError`] when the input is invalid or the transaction
     /// cannot complete.
@@ -1025,6 +1034,10 @@ impl PostgresIdentityStore {
         if !target.requires_approval {
             transaction.rollback().await?;
             return Ok(ProtectedSiteDirectApplyOutcome::NotRequired);
+        }
+        if !direct_apply_may_waive(&target.risk_reasons) {
+            transaction.rollback().await?;
+            return Ok(ProtectedSiteDirectApplyOutcome::IndependentApprovalRequired);
         }
         record_approval(
             &mut transaction,
@@ -1595,32 +1608,24 @@ impl PostgresIdentityStore {
             .await?;
         } else {
             for route in &command.policy.routes {
-                let admission = match route.security_entry {
-                    xshield_core::SecurityEntry::Public => "PUBLIC",
-                    xshield_core::SecurityEntry::AuthenticatedRoot => "AUTHENTICATED_ROOT",
-                    xshield_core::SecurityEntry::UiActionRequired => "UI_ACTION_REQUIRED",
-                };
-                let response_config = (!route.response_mode.is_empty()
-                    || route.response_crypto.is_some())
-                    .then(|| serde_json::json!({
-                        "mode": if route.response_mode.is_empty() { "BUFFERED_JSON" } else { route.response_mode.as_str() },
-                        "max_bytes": route.max_response_bytes,
-                        "crypto": route.response_crypto.as_ref(),
-                    }));
+                let projected = RouteProjection::of(route)?;
                 sqlx::query(
                     "INSERT INTO xshield.site_routes
                          (tenant_id, site_id, operation_id, method, path, admission,
-                          source_action, view_profile, resource_query_parameter,
-                          resource_path_parameter, request_crypto, response_config)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                          resource_type, source_action, view_profile, resource_query_parameter,
+                          resource_path_parameter, request_crypto, response_config, issued_by)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                      ON CONFLICT (tenant_id, site_id, operation_id) DO UPDATE SET
                          method = EXCLUDED.method, path = EXCLUDED.path,
-                         admission = EXCLUDED.admission, source_action = EXCLUDED.source_action,
+                         admission = EXCLUDED.admission,
+                         resource_type = EXCLUDED.resource_type,
+                         source_action = EXCLUDED.source_action,
                          view_profile = EXCLUDED.view_profile,
                          resource_query_parameter = EXCLUDED.resource_query_parameter,
                          resource_path_parameter = EXCLUDED.resource_path_parameter,
                          request_crypto = EXCLUDED.request_crypto,
                          response_config = EXCLUDED.response_config,
+                         issued_by = EXCLUDED.issued_by,
                          updated_at = now()",
                 )
                 .bind(command.tenant_id.as_str())
@@ -1628,20 +1633,15 @@ impl PostgresIdentityStore {
                 .bind(&route.operation_id)
                 .bind(&route.method)
                 .bind(&route.path)
-                .bind(admission)
+                .bind(projected.admission)
+                .bind(route.resource_type.as_deref())
                 .bind(route.source_action.as_deref())
                 .bind(route.view_profile.as_deref())
                 .bind(route.resource_query_parameter.as_deref())
                 .bind(route.resource_path_parameter.as_deref())
-                .bind(
-                    route
-                        .request_crypto
-                        .as_ref()
-                        .map(serde_json::to_value)
-                        .transpose()
-                        .map_err(|_| StoreError::InvalidCommand)?,
-                )
-                .bind(response_config)
+                .bind(projected.request_crypto)
+                .bind(projected.response_config)
+                .bind(projected.issued_by)
                 .execute(&mut *transaction)
                 .await?;
             }
@@ -1772,6 +1772,33 @@ impl PostgresIdentityStore {
     }
 }
 
+/// The JSON columns of one `site_routes` row.
+///
+/// `site_routes` is a write-only projection; the authoritative route lives in
+/// `policy_json` and the revision's `config_json`. Its response and request
+/// columns are taken from the same typed edge projection the control plane
+/// publishes, so the row can never describe a different rule than the one the
+/// edge compiles, and nothing a route carries is dropped on the way.
+struct RouteProjection {
+    request_crypto: Option<sqlx::types::Json<SiteRequestCrypto>>,
+    response_config: Option<Value>,
+    issued_by: Option<sqlx::types::Json<SiteIssuedBy>>,
+    admission: &'static str,
+}
+
+impl RouteProjection {
+    fn of(route: &SiteRouteConfig) -> Result<Self, StoreError> {
+        let operation =
+            xshield_core::site::gateway_operation(route).map_err(|_| StoreError::InvalidCommand)?;
+        Ok(Self {
+            request_crypto: route.request_crypto.clone().map(sqlx::types::Json),
+            response_config: operation.get("response").cloned(),
+            issued_by: route.issued_by.clone().map(sqlx::types::Json),
+            admission: route.security_entry.edge_admission(),
+        })
+    }
+}
+
 fn valid_approval_id(value: &str) -> bool {
     value.starts_with("approval_") && value.len() == 45
 }
@@ -1802,6 +1829,8 @@ struct ApprovalTarget {
     revision: i64,
     apply_id: String,
     requires_approval: bool,
+    /// Why the revision needs approval, as stored with it.
+    risk_reasons: Vec<String>,
     config_digest: [u8; 32],
     author: String,
 }
@@ -1814,7 +1843,7 @@ async fn lock_approval_target(
     site_id: &SiteId,
 ) -> Result<Option<ApprovalTarget>, StoreError> {
     let Some(intent) = sqlx::query(
-        "SELECT desired_revision, apply_id, requires_approval
+        "SELECT desired_revision, apply_id, requires_approval, risk_reasons
          FROM xshield.site_apply_intents
          WHERE tenant_id = $1 AND site_id = $2
          FOR UPDATE",
@@ -1845,6 +1874,7 @@ async fn lock_approval_target(
         revision,
         apply_id: intent.try_get("apply_id")?,
         requires_approval: intent.try_get("requires_approval")?,
+        risk_reasons: intent.try_get("risk_reasons")?,
         config_digest: bytes32(&config, "config_digest")?,
         author: config.try_get("updated_by")?,
     }))
