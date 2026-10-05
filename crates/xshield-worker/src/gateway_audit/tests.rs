@@ -785,3 +785,249 @@ fn a_gateway_stage_cannot_borrow_the_weaker_generic_shape() {
         assert!(row(&value).is_err(), "{name} parsed as a generic stage");
     }
 }
+
+/// Deterministic xorshift, so a failure reproduces from its seed alone.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
+    }
+}
+
+/// Every object member and array element under `value`, as a path of keys.
+fn paths(value: &Value, here: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                here.push(key.clone());
+                out.push(here.clone());
+                paths(child, here, out);
+                here.pop();
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                here.push(index.to_string());
+                out.push(here.clone());
+                paths(child, here, out);
+                here.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn at<'a>(value: &'a mut Value, path: &[String]) -> Option<&'a mut Value> {
+    let mut current = value;
+    for step in path {
+        current = match current {
+            Value::Object(map) => map.get_mut(step)?,
+            Value::Array(items) => items.get_mut(step.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// Replaces, removes or retypes one member anywhere in the event.
+fn mutate(value: &mut Value, rng: &mut Rng) {
+    let mut all = Vec::new();
+    paths(value, &mut Vec::new(), &mut all);
+    let Some(path) = all.get(rng.below(all.len())).cloned() else {
+        return;
+    };
+    let (last, parent_path) = path.split_last().unwrap();
+    let swap_with = all.get(rng.below(all.len())).cloned();
+    let donor = swap_with.and_then(|other| at(&mut value.clone(), &other).map(|v| v.clone()));
+    let Some(parent) = at(value, parent_path) else {
+        return;
+    };
+    let words = [
+        "", "x", "ENFORCE", "OBSERVE", "PASS", "action.", "\u{0}", "msg_", "é",
+    ];
+    let long = "A".repeat(300);
+    let numbers = [0_u64, 1, 2, 64, 65, 999, u64::from(u32::MAX), u64::MAX];
+    let replacement = match rng.below(9) {
+        0 => Value::Null,
+        1 => Value::Bool(rng.below(2) == 0),
+        2 => json!(numbers[rng.below(numbers.len())]),
+        3 => json!(-1),
+        4 => json!(words[rng.below(words.len())]),
+        5 => json!(long),
+        6 => json!([]),
+        7 => json!({}),
+        _ => donor.unwrap_or(Value::Null),
+    };
+    match parent {
+        Value::Object(map) => {
+            if rng.below(4) == 0 {
+                map.remove(last);
+            } else {
+                map.insert(last.clone(), replacement);
+            }
+        }
+        Value::Array(items) => {
+            if let Ok(index) = last.parse::<usize>()
+                && index < items.len()
+            {
+                items[index] = replacement;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn text<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .try_fold(value, |current, key| current.get(key))?
+        .as_str()
+}
+
+fn flag(value: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .try_fold(value, |current, key| current.get(key))?
+        .as_bool()
+}
+
+fn present(value: &Value, keys: &[&str]) -> bool {
+    keys.iter()
+        .try_fold(value, |current, key| current.get(key))
+        .is_some_and(|found| !found.is_null())
+}
+
+/// What an accepted event must still say, read straight from its JSON rather
+/// than from the parser, so a lenient parser cannot satisfy its own check.
+fn assert_accepted_event_is_coherent(event: &Value) {
+    let payload = &event["payload"];
+    match event["event_type"].as_str().unwrap() {
+        "sensor.observation" => {
+            assert_eq!(text(payload, &["authorization_effect"]), Some("none"));
+            assert_eq!(text(payload, &["claim_status"]), Some("client_claimed"));
+            if let Some(hint) = text(payload, &["action_hint"]) {
+                assert!(!hint.contains("action.") && hint.len() <= 256 && !hint.is_empty());
+            }
+            let sequence = payload["client_event_seq"].as_u64().unwrap();
+            assert!((1..=64).contains(&sequence));
+            assert_eq!(
+                text(payload, &["sensor_event_type"]) == Some("PAGE_READY"),
+                sequence == 1
+            );
+        }
+        "edge.response" => {
+            assert_eq!(text(payload, &["edge_state"]), Some("response_served"));
+            assert!((100..=599).contains(&payload["status"].as_u64().unwrap()));
+        }
+        "edge.unknown" => assert_eq!(text(payload, &["edge_state"]), Some("unknown")),
+        "evidence.captured" => {
+            assert_eq!(event["evidence_refs"].as_array().unwrap().len(), 1);
+            assert_eq!(event["cause_event_ids"].as_array().unwrap().len(), 1);
+            assert_eq!(text(payload, &["reason_code"]), Some("EVIDENCE_CAPTURED"));
+        }
+        "stage.completed" => {
+            assert_eq!(text(payload, &["proof_kind"]), Some("deterministic"));
+            assert!(payload["confidence"].is_null());
+            assert!(payload["model_call_id"].is_null());
+            match text(payload, &["stage"]).unwrap() {
+                "crypto_decode" => {
+                    let mode = text(payload, &["facts", "coverage_mode"]).unwrap();
+                    assert!(matches!(mode, "ENFORCE" | "OBSERVE" | "COMPATIBILITY"));
+                    assert_eq!(
+                        flag(payload, &["coverage", "request_crypto_checked"]),
+                        Some(mode == "ENFORCE")
+                    );
+                    assert_eq!(
+                        flag(payload, &["coverage", "origin_entity_rebuilt"]),
+                        Some(present(payload, &["facts", "rebuilt_sha256"]))
+                    );
+                    if mode == "ENFORCE" && text(payload, &["outcome"]) == Some("PASS") {
+                        for key in [
+                            "message_id",
+                            "nonce_sha256",
+                            "envelope_sha256",
+                            "rebuilt_sha256",
+                        ] {
+                            assert!(present(payload, &["facts", key]), "{key}");
+                        }
+                    }
+                    if mode != "ENFORCE" {
+                        assert!(!present(payload, &["facts", "message_id"]));
+                    }
+                }
+                "crypto_encode" => {
+                    assert_eq!(text(payload, &["facts", "coverage_mode"]), Some("ENFORCE"));
+                    assert_eq!(
+                        flag(payload, &["coverage", "response_crypto_checked"]),
+                        Some(true)
+                    );
+                    assert!(!present(payload, &["facts", "approval_ref"]));
+                    assert_eq!(
+                        flag(payload, &["coverage", "client_entity_rebuilt"]),
+                        Some(present(payload, &["facts", "envelope_sha256"]))
+                    );
+                }
+                "sensor_html_inject" => {
+                    assert_eq!(text(payload, &["outcome"]), Some("PASS"));
+                    assert_eq!(
+                        flag(payload, &["coverage", "origin_entity_verified"]),
+                        Some(true)
+                    );
+                    assert_eq!(
+                        flag(payload, &["coverage", "sensor_scripts_injected"]),
+                        Some(true)
+                    );
+                    assert_ne!(
+                        text(payload, &["facts", "origin_sha256"]),
+                        text(payload, &["facts", "injected_sha256"])
+                    );
+                }
+                other => panic!("accepted by a gateway parser under stage {other}"),
+            }
+        }
+        other => panic!("unexpected event type {other}"),
+    }
+}
+
+/// Anything the parsers accept after arbitrary damage still holds the
+/// invariants they exist to protect, and nothing panics.
+#[test]
+fn damaged_events_are_refused_or_still_coherent() {
+    let bases = [
+        enforced_pass(),
+        enforced_denial(),
+        observed(),
+        compatible(),
+        encoded_pass(),
+        html_event(),
+        edge_event("edge.response", "response_served", Some(403)),
+        edge_event("edge.unknown", "unknown", None),
+        captured_event(),
+        observation_event(),
+    ];
+    let mut accepted = 0_u32;
+    for (index, base) in bases.iter().enumerate() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ u64::try_from(index + 1).unwrap());
+        for _ in 0..4_000 {
+            let mut damaged = base.clone();
+            for _ in 0..=rng.below(3) {
+                mutate(&mut damaged, &mut rng);
+            }
+            if row(&damaged).is_ok() {
+                accepted += 1;
+                assert_accepted_event_is_coherent(&damaged);
+            }
+        }
+    }
+    // Some damage is harmless (a replaced fact with an equal value, a swapped
+    // identical digest), so the sweep must have exercised acceptance too.
+    assert!(accepted > 0);
+}
