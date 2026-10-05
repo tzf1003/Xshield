@@ -70,7 +70,9 @@ async fn release_after_expiry(
         .fetch_one(&mut *blocker)
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
+    // Eventually-true observation of the lock queue: generous so a loaded machine
+    // does not fail the test; a real regression still fails at the bound.
+    tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",

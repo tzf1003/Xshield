@@ -327,7 +327,9 @@ async fn provision_scope(
 }
 
 async fn wait_for_database_block(pool: &PgPool, waiter: i32, blocker: i32) {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    // Eventually-true observation of the lock queue: generous so a loaded machine
+    // does not fail the test; a real regression still fails at the bound.
+    tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let queued: bool = sqlx::query_scalar("SELECT $2=ANY(pg_blocking_pids($1))")
                 .bind(waiter)

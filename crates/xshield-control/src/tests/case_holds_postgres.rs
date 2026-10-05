@@ -583,7 +583,9 @@ async fn assert_disconnect(
         "http-hold-disconnect-0001",
         body,
     )));
-    tokio::time::timeout(Duration::from_secs(3), async {
+    // Eventually-true observation of the lock queue: generous so a loaded machine
+    // does not fail the test; a real regression still fails at the bound.
+    tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let queued: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))",

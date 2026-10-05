@@ -11,6 +11,14 @@ set -euo pipefail
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-$repo_root/target}
 
+# This runner is for machines without the development Compose stack, so the lab
+# database comes from the standard libpq variables (an explicit XSHIELD_LAB_PG*
+# wins). An unset password means trust authentication.
+export XSHIELD_LAB_PGHOST=${XSHIELD_LAB_PGHOST:-${PGHOST:-127.0.0.1}}
+export XSHIELD_LAB_PGPORT=${XSHIELD_LAB_PGPORT:-${PGPORT:-5432}}
+export XSHIELD_LAB_PGUSER=${XSHIELD_LAB_PGUSER:-${PGUSER:-$(id -un)}}
+export XSHIELD_LAB_PGPASSWORD=${XSHIELD_LAB_PGPASSWORD-${PGPASSWORD-}}
+
 if [[ ! -x "$target_dir/debug/xshield-gateway" ]]; then
     cargo build --quiet --manifest-path "$repo_root/Cargo.toml" -p xshield-gateway --bin xshield-gateway
 fi
