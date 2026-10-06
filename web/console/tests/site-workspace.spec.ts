@@ -434,7 +434,7 @@ test("the route drawer shows the server's route rules as you type", async ({ pag
   // Admission and operation source go together.
   await drawer.getByRole("radio", { name: /^公开/ }).check();
   await expect(drawer.getByLabel("操作来源", { exact: true })).toBeDisabled();
-  await expect(drawer.getByText("绑定资源的路由必须是“必须有界面操作来源”。")).toBeVisible();
+  await expect(drawer.getByText("绑定资源的路由必须是“必须有界面操作来源”或“分享入口”。")).toBeVisible();
   await drawer.getByRole("radio", { name: /^必须有界面操作来源/ }).check();
   await expect(drawer.getByLabel("操作来源", { exact: true })).not.toHaveValue("");
 
