@@ -1,0 +1,13 @@
+# Keep the build context to what cargo needs; nothing here may carry secrets or user data.
+.git
+.claude
+**/target
+target
+**/node_modules
+web/console/dist
+web/console/test-results
+web/console/playwright-report
+validation
+*.tar.gz
+.env
+.env.*
