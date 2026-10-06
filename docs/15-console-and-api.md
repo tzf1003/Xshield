@@ -31,7 +31,7 @@ Operations：节点、队列、存储、密钥引用、告警与审计访问。
 - 工作台（`/`）打开时只读取一次 `GET /control/v1/workbench/overview`，再按角色读取“待我处理”的来源：站点清单首页（服务端只允许 SystemAdmin，其他角色得到 403，页面显示为角色提示）以及 SensitiveEvidenceApprover 的原文访问与导出待办。每个来源独立失败、独立重试，之后不轮询、不在聚焦或网络恢复时重读。四个指标（正在服务的站点、待审批修订、应用失败、审计发布）写明来源与观察时间，读不到时显示“—”和原因而不是 0；`completeness` 为 partial/unavailable 时说明已知原因。站点健康表把 edge 与耐久审计屏障标为读取快照时的实时探测（2 秒上限），把源站标为**最近一次持久化的健康观察**（“上次观察 …”，自带时间，可能很旧，`WORKBENCH_UPSTREAM_NEVER_OBSERVED` 显示“从未观察”），逐行提供“刷新健康”（即站点健康读取，服务端审计并写入观察记录）。`WORKBENCH_*` 原因码都有中文标签与说明（`src/ui/operation-reasons.ts`，单测扫描 `workbench.rs`）。“最近被拒绝的请求”只给 Investigator，只在点击后执行一次结构化检索（`event_type=request.completed`、DENY、24 小时、最新 10 条）。快照的 `queues` 与 `recent_activity` 目前恒为空数组，不渲染。
 - 审计发布状态（`/operations/audit`，AuditAdministrator）只在点击时读取 29.5 的发布快照；后台任务（`/operations/jobs`，Investigator）按 `job_` ID 查询，地址 `?job=` 可直接打开，粘贴其他类型的 ID 时由命令面板的分类器说明并给出对应页面；API Key（`/admin/api-keys`）见本章末“控制台如何呈现 API Key”；权限中心（`/access/session`）列出主体、范围、绝对/闲置到期、MFA 再认证剩余时间，以及每个角色“能做什么”和它解锁的页面，不显示任何秘密。
 
-`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049、导出列表索引 0050、站点审批绑定 0051、站点路由来源流程投影 0052 与站点修订号绑定 0053，现有开发数据卷无需重置。
+`./dev.sh` 启动时以 `xshield.dev_schema_migrations` ledger 和 PostgreSQL advisory lock 增量补齐 M5 站点迁移 0041–0049、导出列表索引 0050、站点审批绑定 0051、站点路由来源流程投影 0052 与站点修订号绑定 0053、分享入口路由投影 0054，现有开发数据卷无需重置。
 
 站点策略的 `static_asset_max_path_depth` 默认关闭（`0` 或缺省），站点显式设为 1–16 才启用静态资源兜底。兜底会在没有身份和精确 operation 的情况下放行请求，因此匹配很窄：只放行 `GET`；路径深度不超过该值；路径先做一次严格百分号解码，以解码后的文本判定（源站实际路由的就是这个文本）；最后一段必须有真实的点、非空主名，且扩展名属于 `js`、`css`、`ico`、`png`、`jpg`、`jpeg`、`gif`、`svg`、`webp`、`woff`、`woff2`、`ttf`（大小写不敏感），所以 `/api/json`、`/css` 这类无点名称不会被当成文件。`.json` 与 `.map` 不在列表中：API 响应和 source map 常以这些后缀命名，放行等于让任何人把 API 伪装成资源，需要时请配置显式路由。`;`（路径参数，如 `/admin/users;.js`）、反斜杠、`%2F`、`.`/`..`/空路径段、控制字符、`?`、`#`、解码后仍含 `%`（双重编码）、空格和非 ASCII 字节一律拒绝，其余字符限于字母、数字和 `. _ ~ @ + -`；畸形转义不会被猜测。超过深度、不符合上述规则和 API 路径仍按精确 operation 拒绝。兜底只在没有精确 operation 命中时生效，不改变 WAF、限流或审计链路。已存在站点策略中保存的 `5` 是此前默认值的序列化结果，升级后继续生效，直到重新保存策略；开发靶场脚本 `scripts/register_juice_shop.py` 显式设置 `5`，安全靶场和示例配置不依赖该兜底。
 
@@ -220,7 +220,7 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 
 只读运行视图和配置编辑独立：Observer 使用当前会话范围的状态/健康/修订 API，SystemAdmin 管理站点配置。PolicyAuthor、PolicyApprover、ReleaseOperator 的发布入口各自只显示获准操作；没有 Observer 不发起状态或修订读取。权限中心显示服务端 subject、scope、角色、绝对/闲置期限和再认证状态。侧边栏可见性不替代 endpoint 授权。
 
-本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0053 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
+本地启动顺序为：端口占用检查 → Docker 依赖就绪 → advisory lock → 0040 基础对象检查 → 0041–0054 迁移与 ledger → schema 检查 → control → 55173 控制台。已登记迁移仍重新核对对象定义；部分对象、缺约束、checksum 变化会阻止启动。开发角色字段按固定本地角色集合同步，其他生成值和生产配置保持原有管理方式。
 
 ## 站点发布审批与应用语义（2026-10-04）
 

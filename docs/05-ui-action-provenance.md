@@ -53,6 +53,12 @@ ActionGrant：当前主体在特定 scope、期限和使用次数内可以使用
 
 **按路由声明的分页参数白名单（`query_pagination`）。** 白名单只允许“分页形状”的参数：最多 4 个，名称为 `[a-z_]{1,32}` 且互不重复，类型只有 `page`（1–10000）、`page_size`（1–上限，默认 200，配置上限不超过 1000）和 `offset`（0–1000000）；没有游标或任何不透明类型，因为不透明值可以编码“列出谁的对象”。名称不得与任何路由的资源位置参数同名（ASCII 不区分大小写）。它只能用于两类路由：发放响应资格的 `AUTHENTICATED_ROOT` GET 列表，以及不绑定资源的 `UI_ACTION_REQUIRED` GET 路由（其余位置 edge 不执行它，故一律拒绝配置）。edge 的判定是：查询串必须为空（无 `?`），或恰好由已声明的参数组成、每个至多一次；空段（`&&`、首尾 `&`）、未声明名称、重复名称、百分号编码的名称或取值、`+`、`;`、`a[]=`、大写、空值、无 `=` 或多个 `=`、非数字、前导零（`02`，单独的 `0` 只对 `offset` 合法）、超出范围的取值、超过 256 字节的查询串，一律以 `FIELD_NOT_ALLOWED` 拒绝并写入终态审计，请求不到达源站。通过后转发给源站的查询串由解析出的整数按声明顺序重建（例如 `?page_size=20&page=2` 以 `page=2&page_size=20` 转发），原始查询串从不转发。资源提取（`response.resource_grant`）不变。审计的阶段事实是封闭模式，没有放细分原因的位置，因此所有拒绝共用 `FIELD_NOT_ALLOWED`；细分类别只存在于代码与测试里（`QueryDenial`）。声明、修改或删除该块属于独立审批原因 `QUERY_PAGINATION_CHANGED`，不能由 `site.config.apply_direct` 代替；它不进入动作描述摘要，因此不要求更换 `policy_revision`。
 
+**分享凭据与会话转换也由控制面编写（2026-10-06）。** 此前这些块只能写在手工 `XSHIELD_CONFIG` 里，现在与其他流程块一样是强类型、`deny_unknown_fields` 的路由块，规则与 edge 编译器逐条一致（一致性测试见 29“站点配置缺口审计”）：
+- `share_issue` 与 `share_entry` 准入：发放路由是绑定资源的 GET `UI_ACTION_REQUIRED` 路由，成功的 JSON 响应对象里 edge 在提交分享后追加一个固定字段（`token_field`，源站不得已有该成员，`null` 也算已有）；凭据只能在目标 `SHARE_ENTRY` 路由兑换，目标是另一条同资源类型、以查询参数定位资源的 GET 路由。不能与响应加密、`SENSOR_HTML` 或任何其他身份/资格效果同用。独立批准的发放范围是 `share_issuance_rules` 表的一行（控制面不写，见 29）。原因 `SHARE_ISSUE_CHANGED`。
+- `auth_refresh` 与 `auth_context_switch`：只用于 `AUTHENTICATED_ROOT`，响应里按三个 JSON Pointer 取主体、授权上下文与替换后的 bearer。刷新在同一主体、同一上下文下换发凭证；上下文切换提交新的授权上下文并使探针失效已缓存的引用（计入 64 条身份变化路由，刷新不计）。原因 `AUTH_TRANSITION_CHANGED`。
+- 三者都不新增动作描述，不进入描述摘要，所以修改它们不要求更换 `policy_revision`；它们的变更是独立审批原因，`site.config.apply_direct` 不能代替。
+- `evidence_capture` 尚未由控制面编写，原因见 29。
+
 **浏览器侧出示，网关侧重验。** 探针 1.1.0 只把这些服务端引用原样放进 `X-Xshield-Action-Ref`：页面动作匹配精确的同源方法与路径（带查询串不匹配），列表 → 详情的响应派生引用按 bootstrap 下发的 `resource_grant` 提取提示从已批准列表的 JSON 响应中读取（见 07 §7.4）。网关的 `admit_ui_action` 未作任何放宽：对每个请求重新加载服务端记录并校验 binding、epoch、策略、页面证据、方法、路由、目标、字段与期限，资源路由再精确匹配 ResourceGrant，转发前删除该请求头。真实浏览器回归见 20 §20.19。
 
 ## 5.4 页面中存在代码不等于存在入口
