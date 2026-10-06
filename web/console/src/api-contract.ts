@@ -140,6 +140,8 @@ export const messages = {
   CONTROL_SITE_RESOURCE_GRANT_INVALID: "响应资源资格（resource_grant）未通过校验。",
   CONTROL_SITE_QUERY_PAGINATION_INVALID: "查询参数白名单（query_pagination）未通过校验。",
   CONTROL_SITE_SHARE_ISSUE_INVALID: "分享凭据发放（share_issue / share_entry）未通过校验。",
+  CONTROL_SITE_SHARE_RULE_CONFLICT:
+    "该策略版本下同名的分享发放规则已存在且内容不同（或已被停用），规则不会被改写，请换新的发放规则 ID。",
   CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT: "同一动作与映射修订被赋予了两种含义。",
   CONTROL_SITE_POLICY_REVISION_REUSED:
     "策略版本标签已绑定另一组页面动作，请为这次变更设置新的策略版本（policy_revision）。",

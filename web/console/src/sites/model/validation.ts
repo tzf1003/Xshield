@@ -767,11 +767,12 @@ export function validateFlowReferences(
         `分享目标“${share.target_operation_id}”必须是已存在的另一条“分享入口”GET 路由，资源类型与本路由相同，并以查询字段定位资源。`,
       );
     }
-    // The rule row is provisioned out of band, and an issuer nobody grants never gets an action.
+    // The control plane writes the rule row when an approval makes the revision eligible, and
+    // never rewrites it; an issuer nobody grants never gets an action.
     add(
       index,
       "share_issue.issuance_rule_id",
-      `发放规则“${share.issuance_rule_id}”对应的 share_issuance_rules 行不由控制面登记：需由数据库管理员按（租户、站点、策略版本、规则 ID）另行登记，缺行时 edge 拒绝发放。`,
+      `发放规则“${share.issuance_rule_id}”的 share_issuance_rules 行由控制面在审批通过时按这一块自动登记（最长期限取“期限”秒数），登记后不会被改写：之后改变期限或视图，需要换一个新的发放规则 ID（或策略版本），否则保存会被 CONTROL_SITE_SHARE_RULE_CONFLICT 拒绝。`,
       "warning",
     );
     if (!routes.some((other) => other.resource_grant?.target_operation_id === route.operation_id)) {

@@ -161,6 +161,11 @@ export const reasonDictionary = {
     "分享凭据发放不合法：发放方必须是绑定资源的 GET“必须有界面操作来源”路由且不加密响应，目标必须是同资源类型、以查询参数定位的另一条“分享入口”GET 路由，数量与期限需在边界内。",
     "在“路由与操作”打开发放方路由，核对“分享凭据发放”的目标分享入口、字段与期限后重新保存。",
   ),
+  CONTROL_SITE_SHARE_RULE_CONFLICT: entry(
+    "danger",
+    "这个策略版本下同名的分享发放规则（share_issuance_rules）已经存在，但与这份配置要求的不一致（另一个最长期限、视图或目标），或已被运维停用。已发出的分享依赖这一行，规则登记后不会被改写，所以本次变更没有保存、没有批准或没有下发。",
+    "把发放规则 ID（issuance_rule_id）改成一个新的值后重新保存；回到某个已用过的规则 ID 时，期限、视图与目标必须与当时完全相同。",
+  ),
   CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT: entry(
     "danger",
     "同一操作来源与映射修订被两条路由赋予了不同含义，edge 无法为它建立唯一的动作描述。",
@@ -461,7 +466,7 @@ export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail:
   SHARE_ISSUE_CHANGED: {
     label: "分享凭据发放变更",
     detail:
-      "决定哪些响应会签发可重复读取的只读凭据，以及哪条分享入口不经身份就能兑换它；只能由独立审批人批准。",
+      "决定哪些响应会签发可重复读取的只读凭据，以及哪条分享入口不经身份就能兑换它；批准同时登记 edge 发放时核对的规则行；只能由独立审批人批准。",
   },
   AUTH_TRANSITION_CHANGED: {
     label: "凭证刷新或授权上下文切换变更",

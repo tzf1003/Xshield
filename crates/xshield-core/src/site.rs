@@ -27,7 +27,7 @@ pub use flow::{
 };
 pub use projection::{EDGE_MAX_CONFIG_BYTES, gateway_operation};
 pub use risk::{ChangeRisk, assess_change_risk, direct_apply_may_waive};
-pub use share::SiteShareIssue;
+pub use share::{ShareIssuanceRule, SiteShareIssue, issuance_rules};
 pub use unsupported::{UnsupportedEdgeFeature, find_unsupported_edge_feature};
 
 /// An internal edge listener port.

@@ -1390,6 +1390,14 @@ pub async fn approve_handler(
             POLICY_REVISION_REUSED_MESSAGE,
             POLICY_REVISION_REUSED_NEXT_ACTION,
         )),
+        // The rows the approved block would produce clash with a registered
+        // one; approving would only move the refusal to the edge.
+        ProtectedSiteApprovalOutcome::ShareRuleConflict => Some((
+            StatusCode::CONFLICT,
+            SHARE_RULE_CONFLICT,
+            SHARE_RULE_CONFLICT_MESSAGE,
+            SHARE_RULE_CONFLICT_NEXT_ACTION,
+        )),
     };
     if let Some((status, reason, message, next_action)) = refusal {
         return control
@@ -1959,6 +1967,13 @@ async fn site_apply_state_handler(
                     false,
                     POLICY_REVISION_REUSED_NEXT_ACTION,
                 )),
+                Ok(ProtectedSiteDirectApplyOutcome::ShareRuleConflict) => Some((
+                    StatusCode::CONFLICT,
+                    SHARE_RULE_CONFLICT,
+                    SHARE_RULE_CONFLICT_MESSAGE,
+                    false,
+                    SHARE_RULE_CONFLICT_NEXT_ACTION,
+                )),
                 Err(_) => Some((
                     StatusCode::SERVICE_UNAVAILABLE,
                     "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
@@ -2051,7 +2066,8 @@ async fn site_apply_state_handler(
         } else if let Some(
             reason @ ("CONTROL_SITE_POLICY_INVALID"
             | "CONTROL_SITE_PORT_UNAVAILABLE"
-            | "CONTROL_SITE_POLICY_REVISION_REUSED"),
+            | "CONTROL_SITE_POLICY_REVISION_REUSED"
+            | SHARE_RULE_CONFLICT),
         ) = apply_failure
         {
             // The configuration itself is why nothing was published.
@@ -2392,6 +2408,23 @@ pub async fn delete_handler(
                         POLICY_REVISION_REUSED_MESSAGE,
                         false,
                         POLICY_REVISION_REUSED_NEXT_ACTION,
+                    )
+                    .await
+                    .into_response();
+            }
+            // A pause is never served, so it has no rule rows to conflict.
+            Ok(ProtectedSiteConfigWriteOutcome::ShareRuleConflict) => {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        DELETE_ACCESS,
+                        None,
+                        StatusCode::CONFLICT,
+                        SHARE_RULE_CONFLICT,
+                        SHARE_RULE_CONFLICT_MESSAGE,
+                        false,
+                        SHARE_RULE_CONFLICT_NEXT_ACTION,
                     )
                     .await
                     .into_response();
@@ -3074,6 +3107,25 @@ async fn write_site_handler(
                 .await
                 .into_response();
         }
+        // The rule rows the `share_issue` block needs exist differently
+        // (immutable): refused at save time so the author hears it before
+        // anyone is asked to approve.
+        ProtectedSiteConfigWriteOutcome::ShareRuleConflict => {
+            return control
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    action,
+                    None,
+                    StatusCode::CONFLICT,
+                    SHARE_RULE_CONFLICT,
+                    SHARE_RULE_CONFLICT_MESSAGE,
+                    false,
+                    SHARE_RULE_CONFLICT_NEXT_ACTION,
+                )
+                .await
+                .into_response();
+        }
     };
     if control
         .append_access_event(&request_id, Some(&subject), action, None, "PASS", reason)
@@ -3182,10 +3234,13 @@ struct PlanInput {
     active_revision: Option<u64>,
     /// The stored configuration of `active_revision`: what the edge serves.
     active_config: Option<SiteConfig>,
-    /// The desired revision's `policy_revision` label already names another
-    /// action-descriptor set (decided by the store under the tenant lock of
-    /// the snapshot read); carrying it would make the edge refuse the tenant.
-    label_conflict: bool,
+    /// Why the store, under the tenant lock of the snapshot read, found the
+    /// desired revision must not be carried although it is eligible: its
+    /// `policy_revision` label already names another action-descriptor set
+    /// (the edge would refuse the whole tenant) or a `share_issuance_rules`
+    /// row it needs exists differently (the edge would fail every share
+    /// issuance closed). The stable reason code.
+    conflict: Option<&'static str>,
 }
 
 impl PlanInput {
@@ -3198,7 +3253,13 @@ impl PlanInput {
             requires_approval: site.requires_approval,
             active_revision: site.active_revision,
             active_config: site.active_config.clone(),
-            label_conflict: site.label_conflict.is_some(),
+            conflict: if site.label_conflict.is_some() {
+                Some("CONTROL_SITE_POLICY_REVISION_REUSED")
+            } else if site.share_rule_conflict {
+                Some(SHARE_RULE_CONFLICT)
+            } else {
+                None
+            },
         }
     }
 }
@@ -3219,7 +3280,7 @@ struct SnapshotPlan {
     /// `policy_revision` label for another descriptor set. Held back and
     /// reported the same way, because the edge would refuse the whole
     /// snapshot for them.
-    reused: Vec<(SiteId, u64, String)>,
+    reused: Vec<(SiteId, u64, String, &'static str)>,
 }
 
 /// Decides, per site, which configuration the snapshot carries.
@@ -3270,8 +3331,8 @@ fn plan_snapshot(
             if desired.is_serving() && desired.validate_for_site(&site.site_id).is_err() {
                 return Err("CONTROL_SITE_POLICY_INVALID");
             }
-            if site.label_conflict {
-                return Err("CONTROL_SITE_POLICY_REVISION_REUSED");
+            if let Some(reason) = site.conflict {
+                return Err(reason);
             }
         }
         let desired_is_compilable =
@@ -3282,14 +3343,15 @@ fn plan_snapshot(
                 site.desired_revision,
                 site.apply_id.clone(),
             ));
-        } else if site.label_conflict {
+        } else if let Some(reason) = site.conflict {
             reused.push((
                 site.site_id.clone(),
                 site.desired_revision,
                 site.apply_id.clone(),
+                reason,
             ));
         }
-        if site.requires_approval || !desired_is_compilable || site.label_conflict {
+        if site.requires_approval || !desired_is_compilable || site.conflict.is_some() {
             // Hold at the last approved configuration if the edge serves one.
             // It is deliberately not validated again: the edge accepted it when
             // it was applied, and dropping a live site because a validator got
@@ -3388,6 +3450,7 @@ async fn apply_site_snapshot(
                 "CONTROL_SITE_POLICY_INVALID"
                     | "CONTROL_SITE_PORT_UNAVAILABLE"
                     | "CONTROL_SITE_POLICY_REVISION_REUSED"
+                    | SHARE_RULE_CONFLICT
             ) {
                 let _ = control
                     .catalog
@@ -3489,13 +3552,13 @@ async fn apply_site_snapshot(
     let held_back = plan
         .invalid
         .iter()
-        .map(|site| (site, "CONTROL_SITE_POLICY_INVALID"))
+        .map(|(site, revision, apply_id)| (site, revision, apply_id, "CONTROL_SITE_POLICY_INVALID"))
         .chain(
             plan.reused
                 .iter()
-                .map(|site| (site, "CONTROL_SITE_POLICY_REVISION_REUSED")),
+                .map(|(site, revision, apply_id, reason)| (site, revision, apply_id, *reason)),
         );
-    for ((site, revision, apply_id), reason) in held_back {
+    for (site, revision, apply_id, reason) in held_back {
         let _ = control
             .catalog
             .mark_protected_site_apply_failed(
@@ -3650,6 +3713,19 @@ const POLICY_REVISION_REUSED_MESSAGE: &str = "this site's policy_revision label 
      policy_revision";
 /// Next action of `CONTROL_SITE_POLICY_REVISION_REUSED`.
 const POLICY_REVISION_REUSED_NEXT_ACTION: &str = "change_policy_revision";
+
+/// Stable reason of a `share_issue` whose `share_issuance_rules` row already
+/// exists differently (or whose policy revision cannot carry it); see
+/// `xshield_postgres` `share_rules`.
+const SHARE_RULE_CONFLICT: &str = "CONTROL_SITE_SHARE_RULE_CONFLICT";
+/// Safe message of [`SHARE_RULE_CONFLICT`]; it names the remedy and never
+/// echoes stored values.
+const SHARE_RULE_CONFLICT_MESSAGE: &str = "the share issuance rule registered for this \
+     policy_revision and issuance_rule_id differs from what this configuration needs \
+     (another ceiling or view, or retired), or the policy revision cannot carry it; \
+     rules are never changed, so use a new issuance_rule_id or policy_revision";
+/// Next action of [`SHARE_RULE_CONFLICT`].
+const SHARE_RULE_CONFLICT_NEXT_ACTION: &str = "change_share_issuance_rule_id";
 
 /// Largest site configuration body accepted by the site write endpoints.
 ///
@@ -4439,7 +4515,7 @@ mod tests {
             requires_approval: false,
             active_revision: Some(1),
             active_config: Some(config("active", "1.1.1.1:9000", 6100)),
-            label_conflict: false,
+            conflict: None,
         }
     }
 
@@ -4448,7 +4524,7 @@ mod tests {
     #[test]
     fn a_target_reusing_its_label_is_refused_before_anything_is_sent() {
         let mut target = input("site_b", config("active", "2.2.2.2:9000", 6101));
-        target.label_conflict = true;
+        target.conflict = Some("CONTROL_SITE_POLICY_REVISION_REUSED");
         let sibling = input("site_a", config("active", "8.8.4.4:9000", 6100));
         assert_eq!(
             super::plan_snapshot(
@@ -4461,6 +4537,42 @@ mod tests {
         );
     }
 
+    /// A rule row the store found to exist differently refuses the target
+    /// with its own stable reason, and holds a sibling back alone with the
+    /// same reason on its status.
+    #[test]
+    fn a_share_rule_conflict_has_its_own_reason_for_target_and_sibling() {
+        let mut target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        target.conflict = Some(super::SHARE_RULE_CONFLICT);
+        let sibling = input("site_a", config("active", "8.8.4.4:9000", 6100));
+        assert_eq!(
+            super::plan_snapshot(
+                &[sibling, target],
+                &SiteId::parse("site_b").unwrap(),
+                &apply_state("site_b"),
+            )
+            .err(),
+            Some("CONTROL_SITE_SHARE_RULE_CONFLICT")
+        );
+        let target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        let mut held = input("site_a", config("active", "8.8.4.4:9000", 6100));
+        held.conflict = Some(super::SHARE_RULE_CONFLICT);
+        let plan = super::plan_snapshot(
+            &[held, target],
+            &SiteId::parse("site_b").unwrap(),
+            &apply_state("site_b"),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.reused
+                .iter()
+                .map(|(site, _, _, reason)| (site.as_str(), *reason))
+                .collect::<Vec<_>>(),
+            [("site_a", "CONTROL_SITE_SHARE_RULE_CONFLICT")]
+        );
+        assert_eq!(confirmed(&plan), ["site_b"]);
+    }
+
     /// A sibling whose desired revision reuses its label is held at its last
     /// approved configuration and reported on its own status; the target and
     /// every other site are planned as if it were not there.
@@ -4468,7 +4580,7 @@ mod tests {
     fn a_sibling_reusing_its_label_is_held_back_alone() {
         let target = input("site_b", config("active", "2.2.2.2:9000", 6101));
         let mut reusing = input("site_a", config("active", "8.8.4.4:9000", 6100));
-        reusing.label_conflict = true;
+        reusing.conflict = Some("CONTROL_SITE_POLICY_REVISION_REUSED");
         let other = input("site_c", config("active", "9.9.9.9:9000", 6102));
         let plan = super::plan_snapshot(
             &[reusing, target, other],
@@ -4488,7 +4600,7 @@ mod tests {
         assert_eq!(
             plan.reused
                 .iter()
-                .map(|(site, revision, _)| (site.as_str(), *revision))
+                .map(|(site, revision, _, _)| (site.as_str(), *revision))
                 .collect::<Vec<_>>(),
             [("site_a", 2)]
         );

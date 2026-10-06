@@ -649,7 +649,7 @@ test("an operator edits the share scope, sees the server's messages and the appr
   await page.getByRole("button", { name: "编辑路由 records.share.issue" }).click();
   drawer = drawerNamed(page, "编辑路由");
   const sharing = group(drawer, "分享凭据发放");
-  await expect(sharing).toContainText("不会替你登记这一行");
+  await expect(sharing).toContainText("登记后不会被改写");
   await field(sharing, "发放规则 ID").fill("");
   await expect(sharing.getByText("发放规则 ID只能含字母、数字和 _ . -")).toBeVisible();
   await expect(apply(drawer)).toBeDisabled();

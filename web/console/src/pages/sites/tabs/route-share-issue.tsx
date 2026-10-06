@@ -6,12 +6,13 @@ import { Field, NumInput } from "../fields";
 import { FlowGroup, type FlowGroupProps, RouteSelect } from "./route-flow-groups";
 
 /**
- * Where the independently provisioned rule row has to come from. The control plane stores and
- * projects the block but does not write `share_issuance_rules`: that row is the second, separate
- * approval the edge checks at issuance time, and without it every issuance fails closed.
+ * Where the rule row comes from. The edge issues only under a `share_issuance_rules` row keyed by
+ * (tenant, site, policy_revision, rule id); the control plane writes exactly that row, derived
+ * from this block and the two routes it names, in the transaction of the independent approval
+ * that makes the revision eligible, and never rewrites it.
  */
 const RULE_NOTE =
-  "发放规则 ID 指向 xshield.share_issuance_rules 里一条独立批准的规则行（租户、站点、策略版本、规则 ID、发放方与分享入口的操作和视图、最长期限）。控制面不会替你登记这一行：缺行时 edge 拒绝发放（失败关闭）。同时需要 edge 启动时配置分享令牌密钥。";
+  "发放规则 ID 对应 xshield.share_issuance_rules 里的一行（租户、站点、策略版本、规则 ID、发放方与分享入口的操作和视图、最长期限＝期限秒数）。控制面在独立审批通过时按这一块自动登记这一行，登记后不会被改写：之后改变期限、视图或目标，请换一个新的发放规则 ID（或策略版本）。同时需要 edge 启动时配置分享令牌密钥。";
 
 /**
  * 分享凭据发放: a successful JSON response from a UI-action resource route gets one extra

@@ -534,7 +534,7 @@ edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启�
 | edge 能力 | edge 位置与规则（摘要） | 控制面现状 | 处置 |
 |---|---|---|---|
 | `SHARE_ENTRY` 准入 | `AdmissionDto::ShareEntry`；必须绑定资源（`ExactResource`），无 `source_action` | 路由准入枚举没有该值；被 `FEATURE_UNSUPPORTED` 拒绝；`site_routes.admission` CHECK 也不含它 | **已完成**（核心模型、校验、迁移 0054、风险 `SHARE_ISSUE_CHANGED`） |
-| `response.share_issue` | `{success_status, token_field, target_operation_id, issuance_rule_id, ttl_seconds, max_active_shares}`；源路由必须是绑定资源的 GET `ui_action_required`；目标必须是另一条 `SHARE_ENTRY` GET 路由，同资源类型且以查询参数定位；与响应加密、其他身份/资格效果互斥；`success_status` 2xx 且不是 204–206；期限 1–86400、活动分享 1–5000 | 无 | **已完成**（`share_issue` 块、跨路由规则、一致性测试） |
+| `response.share_issue` | `{success_status, token_field, target_operation_id, issuance_rule_id, ttl_seconds, max_active_shares}`；源路由必须是绑定资源的 GET `ui_action_required`；目标必须是另一条 `SHARE_ENTRY` GET 路由，同资源类型且以查询参数定位；与响应加密、其他身份/资格效果互斥；`success_status` 2xx 且不是 204–206；期限 1–86400、活动分享 1–5000 | 无 | **已完成**（`share_issue` 块、跨路由规则、一致性测试；`share_issuance_rules` 行由审批事务写入） |
 | `response.auth_refresh` | `AuthRefreshDto{success_status, principal_pointer, authorization_context_pointer, bearer_pointer, credential_ttl_seconds}`；只用于 `authenticated_root`；2xx 且不是 204；指针规则同 `auth_binding`；凭证期限 1–86400 | 无 | **已完成**（`auth_refresh` / `auth_context_switch` 块、一致性测试、风险 `AUTH_TRANSITION_CHANGED`） |
 | `response.auth_context_switch` | 同上结构，同一 DTO；只用于 `authenticated_root`；计入探针的“身份变化路由”预算（64） | 无 | **已完成**（`auth_refresh` / `auth_context_switch` 块、一致性测试、风险 `AUTH_TRANSITION_CHANGED`） |
 | `response.evidence_capture` | `{profile_revision, max_bytes ≤ 响应 max_bytes 且 ≤ 1 MiB, retention_seconds 1–86400, secret_pointers ≤ 64 条}`；启动要求证据写入器与目录存储；与身份建立/刷新共用 bearer 指针自动脱敏 | 无 | **未做**，见本节末尾“实现状态” |
@@ -545,11 +545,30 @@ edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启�
 | `response.mode = BUFFERED_JSON` 的选项 | 只有 `max_bytes` | 已覆盖（`max_response_bytes`） | 无缺口 |
 | `request_crypto.mode = DIRECT_DECRYPT / OBSERVE`、`response.crypto`、`auth_binding`、`auth_revoke`、`SENSOR_HTML`、`page_actions`、`issued_by`、`resource_grant`、`query_pagination` | — | 已覆盖 | 无缺口 |
 
-补充发现：`xshield.share_issuance_rules`（迁移 0005）是 edge 发放分享凭据时核对的、与 `policy_revision` 绑定的“独立批准范围”；仓库里没有任何代码写它（只有测试和 `scripts/test_gateway_identity.sh` 直接插行）。所以即使控制面能编写 `share_issue`，发放仍需要数据库管理员按 `(租户, 站点, policy_revision, issuance_rule_id)` 登记同名规则，缺行时 edge 失败关闭。
+补充发现（已解决，见下一小节）：`xshield.share_issuance_rules`（迁移 0005）是 edge 发放分享凭据时核对的、与 `policy_revision` 绑定的“独立批准范围”，此前没有任何代码写它。现在由控制面在使修订有资格到达 edge 的事务里写入。
+
+### 分享发放规则行由控制面写入（2026-10-07）
+
+`xshield.share_issuance_rules`（迁移 0005，主键 `(tenant_id, site_id, policy_revision, rule_id)`，外键指向 edge 的 `policy_revisions`）是 edge 发放分享凭据时核对的“独立批准范围”：`issue_share_grant` 要求存在 `status = active` 的行，其 `issuer_operation_id`/`issuer_view_id` 等于发放路由的操作与视图（即来源资格的 `operation_id`/`view_id`），`share_operation_id`/`share_view_id` 等于目标 `share_entry` 路由的操作与视图，`max_ttl_seconds` 不小于本次分享期限，并且 `policy_revisions` 里同标签的行是 `active`。此前没有任何代码写它，使用 `share_issue` 的站点需要运维手工插行。现在控制面写它，设计如下。
+
+**行是块的纯函数。** `xshield_core::site::issuance_rules` 只从类型化的 `share_issue` 块和它指名的两条路由推导：`rule_id = issuance_rule_id`，`issuer_operation_id` = 发放路由的 `operation_id`，`issuer_view_id` = 发放路由的 `view_profile`，`share_operation_id = target_operation_id`，`share_view_id` = 目标路由的 `view_profile`，`max_ttl_seconds = ttl_seconds`，`status = active`。没有任何请求里的自由值进入。两个发放路由不能共用一个规则 ID（行只指名一个发放操作，共用的 ID 至多满足一个），这条规则同时进入 `CONTROL_SITE_SHARE_ISSUE_INVALID` 校验。
+
+**放在哪：使修订“有资格到达 edge”的那些事务里，不放在被扣留的保存里。** 与 0053 的标签绑定同一条资格规则、同一把租户锁、同样四处：不需要审批的保存、清除审批要求的批准、直接应用授权、以及快照读取里对旧版本控制服务写入的修订的补写。证据与理由：（1）行是 edge 的授权依据，键是 `policy_revision` 标签，而标签可以与 edge 正在服务的修订相同（调整 `share_issue` 不要求更换标签，见上）；保存时就写，行会在任何人批准产生它的块之前存在，并在修订被驳回或被取代后残留。（2）批准事务在清除 `SHARE_ISSUE_CHANGED` 的同一事务里读取批准所绑定的 `(修订, 摘要, apply id)` 对应的配置并写行，所以批准的是什么，写的就是什么；`site.config.apply_direct` 不能豁免 `SHARE_ISSUE_CHANGED`，因此它不会产生行。（3）每条使修订可被快照携带的路径都调用同一个 `ensure`，所以没有它的行就不能到达 edge：行写入失败（冲突）时批准/保存事务整体回滚，快照读取把该站点扣在上一份已批准配置上。保存被扣留时只做只读预检，冲突在保存时就拒绝，作者不必等到批准才知道。
+
+**不可变历史。** 只插入，从不更新或删除。已存在的行必须与推导结果逐字段相同并且是 `active`，否则是冲突：写入什么也不做，返回 409 `CONTROL_SITE_SHARE_RULE_CONFLICT`（`next_action=change_share_issuance_rule_id`；批准与直接应用同样返回它，审批要求保持不变；快照读取时目标站点 apply 失败并记此原因码、其他站点被扣留并记此原因码）。运维停用（`retired`）的规则永远不会被重新激活。已发出的分享以键引用规则行，所以它们依赖的行不可能被改变；新修订换新标签或在同一标签下换新规则 ID 都是新增行，旧行保留，回滚到旧修订时它的行仍在。代价：在同一标签、同一规则 ID 下调整期限、视图或目标需要换一个新的 `issuance_rule_id`（`policy_revision` 仍可保持）；这是刻意的，以免改写已有分享所依赖的批准范围。
+
+**幂等与并发。** 键 `(租户, 站点, policy_revision, rule_id)` 加 `ON CONFLICT DO NOTHING`，然后读回比较：重复批准、重复保存、重复快照读取都不再产生新行；与运维手工登记的竞争中，行不会被覆盖，读回不一致即冲突。所有写入者在同一租户咨询锁下串行化。租户和站点隔离来自键本身，测试覆盖。
+
+**policy_revisions 行。** 规则行外键指向 edge 的 `policy_revisions` 行。配置含页面签发时，edge 在首次供给描述集时用描述摘要创建同样的行；控制面在写规则行前创建一模一样的行（`active`、同一摘要，`artifact_ref = control.descriptors.sha256.<摘要>`，edge 之后的供给得到 `Existing`），因为 edge 连接之前规则行无处安放；标签是否被绑定到别的摘要已由 `descriptor_binding::check` 在同一事务里先查。没有页面签发的配置，其描述由外部供给、控制面没有可写的摘要：此时该行必须已存在且为 `active`，否则按冲突处理，不猜。
+
+**没有迁移。** 表的列与约束已足够：键、外键、CHECK（期限 1–86400、发放与分享操作不同）正好表达推导结果，因此不新增 0055。刻意不增加来源列（来源修订、审批 ID）：规则是“持有该标签与规则 ID 的任何修订”的纯函数，来源可由 `site_policy_revisions` 与 `site_apply_approvals` 复原；是否需要审计列留作后续评估。回滚：没有迁移可回滚；回退到旧控制服务后已写入的行保留且无害（旧服务不读它们，edge 仍按它们核对）。
+
+**验证。** `crates/xshield-postgres/tests/site_share_rules.rs`（真实 PostgreSQL，随 `test_postgres.sh` 的 `xshield-postgres --tests -- --ignored` 运行）：批准前无行、直接应用被拒且无行、批准后恰好一行并绑定摘要；重放批准/保存/快照不增行；同一规则 ID 下改期限 409 且什么也没存；新规则 ID 在批准前不写行、批准后新增一行且旧行逐字节不变；回滚到旧内容时旧行仍在；运维停用的行永不被重新激活；新标签有自己的行；无 `share_issue` 的站点没有行；站点与租户隔离；快照读取补写缺失行并在行与推导不符时扣留站点；并用 edge 自己的 `issue_share_grant` 证明它接受控制面创建的规则（目标、视图与期限上限之内发放，其他视图、超过上限、未登记的规则 ID 被拒绝；以上都没有手工插行）。`crates/xshield-control/src/tests/site_approval.rs`（`share_issuance_rules_follow_the_approval_and_are_never_rewritten`）走真实的 HTTP 路由：保存后无行、直接应用 403 且无行、批准后一行、重放不变、同 ID 调整 409、新 ID 批准后两行、回滚、跨站点与跨租户隔离、停用后不被重新激活。核心测试覆盖推导与重复规则 ID。真实二进制脚本 `scripts/test_gateway_identity.sh` 没有改动（它仍手工插行，因此不证明控制面写入路径，计数不变）。
+
 
 **实现状态（本节所有结论以此为准）。** 已实现并端到端验证到“控制面保存 → 校验 → 独立审批 → 投影 → 真实 edge 编译器接受”：`share_entry` 准入与 `share_issue`、`auth_refresh`、`auth_context_switch`。规则与 edge 编译器一一对应，`crates/xshield-gateway/tests/site_config_parity.rs` 用手写、边界与穷举样本（分享 5 种准入 × 2 方法 × 2 响应模式 × 64 种块组合 × 2 种目标指向；会话块 5 × 2 × 2 × 256）断言“控制面接受 ⇒ edge 接受”，并把控制面投影与 `scripts/test_gateway_identity.sh` 真实二进制脚本里的 `records.share.*`、`auth.refresh*`、`auth.context.switch*` 操作逐字节比较（脚本本身未改动，没有新增发放请求，ClickHouse 计数不变）。描述摘要：两类块都不新增动作描述，摘要不变，修改它们**不要求**更换 `policy_revision`（有测试，核心与 edge 两侧分别断言）；发放路由作为 `resource_grant` 目标仍是描述，移动它同样受 `CONTROL_SITE_POLICY_REVISION_REUSED` 约束（`share_scope_needs_its_own_independent_approval_and_keeps_the_label`）。三类块都是独立审批原因，`site.config.apply_direct` 不能代替。
 
-仍未覆盖，且是运行前提而非配置问题：（1）`xshield.share_issuance_rules` 行没有任何控制面写入路径（见上），分享凭据发放需要运维按配置里的 `issuance_rule_id` 登记同名规则，且规则里的发放/目标操作与视图、`max_ttl_seconds`（不小于 `share_issue.ttl_seconds`）必须与配置一致；该表以 `policy_revision` 为键，所以换标签要重新登记；（2）edge 是否启用分享发放取决于启动时的 `XSHIELD_CONFIG` 是否含 `share_issue`（决定是否要求 `XSHIELD_SHARE_TOKEN_KEY_HEX`），经签名 apply 才出现 `share_issue` 的 edge 没有该密钥时发放失败关闭，不会降级；（3）`evidence_capture` 没有实现：它要求 edge 部署证据写入器与目录存储（`requires_evidence_capture`），并且会把业务响应（脱敏后）写入证据库——这是新的数据留存面，应与保留期、访问审批一起单独评审，而不是顺带做成一个可编辑字段；控制面仍以 `CONTROL_SITE_FEATURE_UNSUPPORTED` 命名地拒绝它；（4）`site_routes` 投影只写不读，不为新块增加列（`share_issue`、两个会话块随 `response_config` 保存）。
+仍未覆盖，且是运行前提而非配置问题：（1）`share_issuance_rules` 行已由控制面写入（见上一小节），不再是缺口；仍然成立的是：规则行不可变，所以同一标签与规则 ID 下调整期限、视图或目标要换新的 `issuance_rule_id`；控制面与 edge 使用不同数据库时，控制面写的行在它自己的库里，edge 的库需要同样的行（与 0053 的绑定同样的前提）；没有页面签发的配置需要外部先供给 `active` 的 `policy_revisions` 行；（2）edge 是否启用分享发放取决于启动时的 `XSHIELD_CONFIG` 是否含 `share_issue`（决定是否要求 `XSHIELD_SHARE_TOKEN_KEY_HEX`），经签名 apply 才出现 `share_issue` 的 edge 没有该密钥时发放失败关闭，不会降级；（3）`evidence_capture` 没有实现：它要求 edge 部署证据写入器与目录存储（`requires_evidence_capture`），并且会把业务响应（脱敏后）写入证据库——这是新的数据留存面，应与保留期、访问审批一起单独评审，而不是顺带做成一个可编辑字段；控制面仍以 `CONTROL_SITE_FEATURE_UNSUPPORTED` 命名地拒绝它；（4）`site_routes` 投影只写不读，不为新块增加列（`share_issue`、两个会话块随 `response_config` 保存）。
 
 # Agent API Key 端点
 

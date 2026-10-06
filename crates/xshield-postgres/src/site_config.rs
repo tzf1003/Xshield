@@ -5,6 +5,7 @@ use crate::{PostgresIdentityStore, StoreError};
 use chrono::{DateTime, Utc};
 use descriptor_binding::{BoundBy, LabelCheck};
 use serde_json::Value;
+use share_rules::RuleCheck;
 use sqlx::{Row, postgres::PgRow};
 use xshield_core::{
     SiteConfig, SiteIssuedBy, SitePolicyConfig, SiteRequestCrypto, SiteRouteConfig,
@@ -13,6 +14,7 @@ use xshield_core::{
 };
 
 mod descriptor_binding;
+mod share_rules;
 
 /// Newest health observations kept per site; see
 /// [`PostgresIdentityStore::insert_protected_site_health_snapshot`].
@@ -193,6 +195,12 @@ pub enum ProtectedSiteApprovalOutcome {
     /// service, or bound at the edge since); nothing was recorded and the
     /// requirement stands. The revision can only go live under a new label.
     PolicyRevisionReused(LabelReuse),
+    /// Approving would make the revision carriable with a `share_issue` whose
+    /// `share_issuance_rules` row already exists differently (another
+    /// ceiling or view, or retired by an operator); nothing was recorded and
+    /// the requirement stands. The revision can only go live under a new
+    /// `issuance_rule_id` (or `policy_revision`).
+    ShareRuleConflict,
 }
 
 /// Outcome of authorizing a direct apply under the explicit
@@ -214,6 +222,8 @@ pub enum ProtectedSiteDirectApplyOutcome {
     /// Authorizing would let the revision's `policy_revision` label reach
     /// the edge with a second action-descriptor set; nothing was recorded.
     PolicyRevisionReused(LabelReuse),
+    /// As [`ProtectedSiteApprovalOutcome::ShareRuleConflict`].
+    ShareRuleConflict,
 }
 
 /// A previously stored write recognised by its idempotency key.
@@ -243,6 +253,13 @@ pub struct ProtectedSiteSnapshotSite {
     /// action-descriptor set. Decided under the tenant lock of this read;
     /// `None` for every revision that may be carried (or is not eligible).
     pub label_conflict: Option<LabelReuse>,
+    /// Why the desired revision, although eligible to be served, must not be
+    /// carried: it has a `share_issue` whose `share_issuance_rules` row (or
+    /// the policy revision it hangs on) already exists differently, so the
+    /// edge would fail every issuance closed. Decided under the tenant lock
+    /// of this read, which also writes the rows of a revision that does not
+    /// conflict (see `share_rules`).
+    pub share_rule_conflict: bool,
 }
 
 /// Tenant-wide state read in one transaction together with the monotonic
@@ -371,6 +388,11 @@ pub enum ProtectedSiteConfigWriteOutcome {
     /// set for this site (or that the edge holds retired); nothing was
     /// written. The change needs a new label.
     PolicyRevisionReused(LabelReuse),
+    /// The configuration has a `share_issue` whose `share_issuance_rules` row
+    /// already exists differently (another ceiling or view, or retired by an
+    /// operator), or whose policy revision cannot carry it; nothing was
+    /// written. The change needs a new `issuance_rule_id` (or label).
+    ShareRuleConflict,
 }
 
 impl PostgresIdentityStore {
@@ -741,11 +763,13 @@ impl PostgresIdentityStore {
                     active_revision,
                     active_config,
                     label_conflict: None,
+                    share_rule_conflict: false,
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         // The re-check of the apply path, still under the tenant lock.
         descriptor_binding::bind_snapshot_labels(&mut transaction, tenant_id, &mut sites).await?;
+        share_rules::bind_snapshot_rules(&mut transaction, tenant_id, &mut sites).await?;
         transaction.commit().await?;
         Ok(ProtectedSiteSnapshot {
             revision: u64::try_from(revision)
@@ -1009,11 +1033,16 @@ impl PostgresIdentityStore {
         }
         // The approval makes the revision eligible to reach the edge, so its
         // label is checked and bound here, under the same locks.
-        if let Some(reuse) =
+        if let Some(refusal) =
             bind_approved_label(&mut transaction, tenant_id, site_id, &target).await?
         {
             transaction.rollback().await?;
-            return Ok(ProtectedSiteApprovalOutcome::PolicyRevisionReused(reuse));
+            return Ok(match refusal {
+                ApprovalRefusal::Label(reuse) => {
+                    ProtectedSiteApprovalOutcome::PolicyRevisionReused(reuse)
+                }
+                ApprovalRefusal::ShareRule => ProtectedSiteApprovalOutcome::ShareRuleConflict,
+            });
         }
         record_approval(
             &mut transaction,
@@ -1084,11 +1113,16 @@ impl PostgresIdentityStore {
             transaction.rollback().await?;
             return Ok(ProtectedSiteDirectApplyOutcome::IndependentApprovalRequired);
         }
-        if let Some(reuse) =
+        if let Some(refusal) =
             bind_approved_label(&mut transaction, tenant_id, site_id, &target).await?
         {
             transaction.rollback().await?;
-            return Ok(ProtectedSiteDirectApplyOutcome::PolicyRevisionReused(reuse));
+            return Ok(match refusal {
+                ApprovalRefusal::Label(reuse) => {
+                    ProtectedSiteDirectApplyOutcome::PolicyRevisionReused(reuse)
+                }
+                ApprovalRefusal::ShareRule => ProtectedSiteDirectApplyOutcome::ShareRuleConflict,
+            });
         }
         record_approval(
             &mut transaction,
@@ -1553,6 +1587,22 @@ impl PostgresIdentityStore {
             LabelCheck::Bindable { digest, recorded } => Some((digest, recorded)),
             LabelCheck::Free => None,
         };
+        // The rule rows the revision's `share_issue` needs: a conflict is
+        // refused now, even when approval will hold the revision, so the
+        // author hears it at save time. Nothing is written yet.
+        if share_rules::ensure(
+            &mut transaction,
+            command.tenant_id,
+            command.site_id,
+            &desired,
+            false,
+        )
+        .await?
+            == RuleCheck::Conflict
+        {
+            transaction.rollback().await?;
+            return Ok(ProtectedSiteConfigWriteOutcome::ShareRuleConflict);
+        }
         if let Some(previous_port) = existing_port
             && previous_port != requested_port
         {
@@ -1807,6 +1857,24 @@ impl PostgresIdentityStore {
             )
             .await?;
         }
+        // Eligible now means the rule rows are needed now: the very next
+        // snapshot may carry this revision. One held for approval gets its
+        // rows in the approval transaction, from the configuration the
+        // approver bound (see `share_rules`).
+        if !requires_approval
+            && share_rules::ensure(
+                &mut transaction,
+                command.tenant_id,
+                command.site_id,
+                &desired,
+                true,
+            )
+            .await?
+                == RuleCheck::Conflict
+        {
+            transaction.rollback().await?;
+            return Ok(ProtectedSiteConfigWriteOutcome::ShareRuleConflict);
+        }
         let apply_id = format!("apply_{}", uuid::Uuid::now_v7());
         // A draft is never applied; say so in the durable state instead of
         // the generic "not confirmed".
@@ -2002,18 +2070,27 @@ async fn lock_approval_target(
     }))
 }
 
-/// Checks the label of the revision an approval is about to make eligible and
-/// binds it in the approving transaction; `Some` is the refusal, and then
-/// nothing was written.
+/// Why an approval may not make the revision eligible.
+enum ApprovalRefusal {
+    /// The label already denotes another descriptor set.
+    Label(LabelReuse),
+    /// A `share_issuance_rules` row the revision needs exists differently.
+    ShareRule,
+}
+
+/// Checks the label of the revision an approval is about to make eligible,
+/// binds it and writes the `share_issuance_rules` rows its `share_issue` needs,
+/// all in the approving transaction; `Some` is the refusal, and then the
+/// caller rolls back, so nothing stays written.
 async fn bind_approved_label(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &TenantId,
     site_id: &SiteId,
     target: &ApprovalTarget,
-) -> Result<Option<LabelReuse>, StoreError> {
+) -> Result<Option<ApprovalRefusal>, StoreError> {
     match descriptor_binding::check(transaction, tenant_id, site_id, &target.config).await? {
-        LabelCheck::Reused(reuse) => Ok(Some(reuse)),
-        LabelCheck::Free | LabelCheck::Bindable { recorded: true, .. } => Ok(None),
+        LabelCheck::Reused(reuse) => return Ok(Some(ApprovalRefusal::Label(reuse))),
+        LabelCheck::Free | LabelCheck::Bindable { recorded: true, .. } => {}
         LabelCheck::Bindable {
             digest,
             recorded: false,
@@ -2028,9 +2105,16 @@ async fn bind_approved_label(
                 BoundBy::Approval,
             )
             .await?;
-            Ok(None)
         }
     }
+    // The rows the approved block produces, from the configuration the
+    // approval is bound to; the approver cannot have approved any others.
+    if share_rules::ensure(transaction, tenant_id, site_id, &target.config, true).await?
+        == RuleCheck::Conflict
+    {
+        return Ok(Some(ApprovalRefusal::ShareRule));
+    }
+    Ok(None)
 }
 
 /// Inserts the approval record and clears the requirement it covers. The

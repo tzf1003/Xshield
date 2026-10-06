@@ -459,6 +459,9 @@ impl Ctx {
         for statement in [
             "DELETE FROM xshield.protected_site_configs WHERE tenant_id = $1",
             "DELETE FROM xshield.site_descriptor_bindings WHERE tenant_id = $1",
+            // Written by approvals of `share_issue` revisions; they reference
+            // the policy revision rows below.
+            "DELETE FROM xshield.share_issuance_rules WHERE tenant_id = $1",
             "DELETE FROM xshield.policy_revisions WHERE tenant_id = $1",
         ] {
             sqlx::query(statement)
@@ -2058,10 +2061,29 @@ async fn share_scope_needs_its_own_independent_approval_and_keeps_the_label() {
     assert_eq!(status, StatusCode::CREATED, "{issued}");
     let api_key = issued["api_key"].as_str().unwrap().to_owned();
 
-    // Retuning the issuance keeps the label, needs an independent approver.
+    // The approval wrote the rule row the block needs (see
+    // `share_issuance_rules_follow_the_approval_and_are_never_rewritten`).
+    assert_eq!(
+        share_rule_rows(&ctx, site).await,
+        [("share-r1".to_owned(), "record-share-r1".to_owned(), 300)]
+    );
+
+    // Retuning the issuance keeps the label and needs an independent
+    // approver. The rule row it would need under the old rule id exists with
+    // the old ceiling and is never rewritten, so the same id is refused at
+    // save time and a new id carries the retune.
     let mut retuned = share_body(site);
     let source_at = route_index(&retuned, "records.share.issue");
     retuned["policy"]["routes"][source_at]["share_issue"]["ttl_seconds"] = json!(600);
+    let (status, refused) = ctx
+        .put(site, &retuned, &ctx.key("share-retune-same-id"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_SHARE_RULE_CONFLICT");
+    assert_eq!(refused["next_action"], "change_share_issuance_rule_id");
+    assert_eq!(ctx.status(site).await["desired_revision"], 1);
+    retuned["policy"]["routes"][source_at]["share_issue"]["issuance_rule_id"] =
+        json!("record-share-r2");
     let (status, saved) = ctx.put(site, &retuned, &ctx.key("share-retune")).await;
     assert!(status.is_success(), "{saved}");
     assert_eq!(saved["requires_approval"], true);
@@ -2161,6 +2183,200 @@ async fn share_scope_needs_its_own_independent_approval_and_keeps_the_label() {
         assert_eq!(refused["error_code"], expected, "{label}");
     }
     assert_eq!(ctx.status(site).await["desired_revision"], revision);
+    let _ = ctx.finish().await;
+}
+
+/// The `share_issuance_rules` rows of `site` as `(label, rule id, ceiling)`.
+async fn share_rule_rows(ctx: &Ctx, site: &str) -> Vec<(String, String, i64)> {
+    sqlx::query_as(
+        "SELECT policy_revision, rule_id, max_ttl_seconds FROM xshield.share_issuance_rules
+         WHERE tenant_id = $1 AND site_id = $2 ORDER BY policy_revision, rule_id",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap()
+}
+
+/// The full rows, to prove none is ever rewritten.
+async fn share_rule_snapshot(ctx: &Ctx, site: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT rule::text FROM xshield.share_issuance_rules AS rule
+         WHERE tenant_id = $1 AND site_id = $2 ORDER BY policy_revision, rule_id",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap()
+}
+
+/// A `share_issue` block's rule rows come into being with the approval that
+/// covers the block (never at save time, never through the direct-apply
+/// capability), exactly as derived from the typed block, in the same
+/// transaction that lets the revision reach the edge; they are never
+/// rewritten, a rollback finds its rows, a site without the block gets none,
+/// and no row crosses a site or a tenant.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn share_issuance_rules_follow_the_approval_and_are_never_rewritten() {
+    let ctx = Ctx::new().await;
+    let site = "site_share_rules";
+    let (status, created) = ctx
+        .create(&share_body(site), &ctx.key("create-rules"))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["requires_approval"], true);
+    // Saved and held: the approver has approved nothing yet, so no authority
+    // row exists for the edge to find.
+    assert!(share_rule_rows(&ctx, site).await.is_empty());
+
+    // The direct-apply capability cannot release it, and creates no rows.
+    let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
+            "subject": "agent-rules", "display_name": "rules", "expires_at": expires,
+            "scopes": [{
+                "tenant_id": ctx.tenant.as_str(), "site_id": site,
+                "capabilities": ["site.config.apply_direct", "site.read"]
+            }]
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let api_key = issued["api_key"].as_str().unwrap().to_owned();
+    let (status, refused) = apply_with_key(&ctx, site, &api_key).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(share_rule_rows(&ctx, site).await.is_empty());
+    assert_eq!(ctx.edge.apply_count(), 0, "nothing reached the edge");
+
+    // The independent approval writes the row and applies the revision.
+    let approve_key = ctx.key("approve-rules-1");
+    let (status, approved) = ctx.approve(site, &approve_key).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["apply_state"], "active", "{approved}");
+    let first = [("share-r1".to_owned(), "record-share-r1".to_owned(), 300)];
+    assert_eq!(share_rule_rows(&ctx, site).await, first);
+    let first_rows = share_rule_snapshot(&ctx, site).await;
+    let (status, edge_digest): (String, String) = sqlx::query_as(
+        "SELECT status, content_digest FROM xshield.policy_revisions
+         WHERE tenant_id = $1 AND site_id = $2 AND revision = 'share-r1'",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_one(&ctx.pool)
+    .await
+    .map(|row: (String, String)| row)
+    .unwrap();
+    assert_eq!(status, "active");
+    assert_eq!(edge_digest, descriptor_digest(&share_body(site)));
+
+    // Repeating the approval or the apply changes nothing.
+    let (status, replay) = ctx.approve(site, &approve_key).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    let _ = ctx.apply(site, &ctx.key("apply-rules-again")).await;
+    assert_eq!(share_rule_snapshot(&ctx, site).await, first_rows);
+
+    // A retune under the same id is refused (the row is never rewritten); a
+    // new id is held for approval and adds its row only when approved.
+    let mut retuned = share_body(site);
+    let source_at = route_index(&retuned, "records.share.issue");
+    retuned["policy"]["routes"][source_at]["share_issue"]["ttl_seconds"] = json!(600);
+    let (status, refused) = ctx.put(site, &retuned, &ctx.key("rules-same-id")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_SHARE_RULE_CONFLICT");
+    retuned["policy"]["routes"][source_at]["share_issue"]["issuance_rule_id"] =
+        json!("record-share-r2");
+    let (status, saved) = ctx.put(site, &retuned, &ctx.key("rules-new-id")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    assert_eq!(share_rule_snapshot(&ctx, site).await, first_rows);
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-rules-2")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(
+        share_rule_rows(&ctx, site).await,
+        [
+            ("share-r1".to_owned(), "record-share-r1".to_owned(), 300),
+            ("share-r1".to_owned(), "record-share-r2".to_owned(), 600),
+        ]
+    );
+    assert_eq!(share_rule_snapshot(&ctx, site).await[0], first_rows[0]);
+
+    // Rolling back restores the first configuration as a new revision whose
+    // row is still there; nothing is rewritten or added.
+    let (status, rolled) = rollback(&ctx, site, &ctx.key("rules-rollback")).await;
+    assert!(status.is_success(), "{rolled}");
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-rules-3")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["apply_state"], "active", "{approved}");
+    let served = ctx.edge.served_gateway_config(site).unwrap();
+    assert_eq!(
+        served["operations"][source_at]["response"]["share_issue"]["issuance_rule_id"],
+        "record-share-r1"
+    );
+    assert_eq!(share_rule_rows(&ctx, site).await.len(), 2);
+    assert_eq!(share_rule_snapshot(&ctx, site).await[0], first_rows[0]);
+
+    // A site without the block gets none, and the same label and rule id on
+    // another site keep their own row.
+    ctx.create_live("site_share_rules_plain", "8.8.8.8:9000")
+        .await;
+    assert!(
+        share_rule_rows(&ctx, "site_share_rules_plain")
+            .await
+            .is_empty()
+    );
+    let other_site = "site_share_rules_other";
+    let (status, created) = ctx
+        .create(
+            &with(share_body(other_site), "listen_port", json!(0)),
+            &ctx.key("create-rules-other"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert!(share_rule_rows(&ctx, other_site).await.is_empty());
+    let (status, approved) = ctx
+        .approve(other_site, &ctx.key("approve-rules-other"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(share_rule_rows(&ctx, other_site).await, first);
+    assert_eq!(share_rule_rows(&ctx, site).await.len(), 2);
+
+    // Another tenant with the same site id, label and rule id.
+    let second = Ctx::new().await;
+    let (status, created) = second
+        .create(&share_body(site), &second.key("create-rules-tenant-2"))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, approved) = second
+        .approve(site, &second.key("approve-rules-tenant-2"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(share_rule_rows(&second, site).await, first);
+    assert_eq!(share_rule_rows(&ctx, site).await.len(), 2);
+    let _ = second.finish().await;
+
+    // An operator-retired rule is never reactivated: the old content cannot
+    // be saved again under that id.
+    sqlx::query(
+        "UPDATE xshield.share_issuance_rules SET status = 'retired'
+         WHERE tenant_id = $1 AND site_id = $2 AND rule_id = 'record-share-r1'",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    let (status, refused) = ctx
+        .put(
+            site,
+            &with(share_body(site), "display_name", json!("again")),
+            &ctx.key("rules-retired"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_SHARE_RULE_CONFLICT");
     let _ = ctx.finish().await;
 }
 
