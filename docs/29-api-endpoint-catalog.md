@@ -12,9 +12,9 @@
 
 配置校验与 edge 编译一致性：edge 快照是整体替换，任何一个站点配置被 edge 编译器拒绝都会使该租户所有 apply 失败，所以控制面校验必须不比 edge 宽松。`xshield-core` 的 `SiteConfig::validate`（含 `SitePolicyConfig::validate`）是唯一定义，拒绝 edge 编译器会拒绝的一切：路由路径只允许可打印 ASCII（空格、非 ASCII、控制字符、DEL 均拒绝），不得落入 edge 自用的 `/__xshield/` 命名空间；同方法同固定前缀的 `{param}` 路由（不论参数名）、被 `{param}` 路由同方法匹配的固定路径路由（不论声明顺序）、超过 64 条 `{param}` 路由；请求 crypto 仅限 POST/PUT/PATCH 且不用于 UI 来源操作，明文不超过信封一半、消息有效期不超过 3600 秒、标识符只含字母数字和 `_-.`；响应信封须不小于两倍明文加 1024 字节；`SENSOR_HTML`、认证入口、页面签发与响应资源资格按“站点浏览器来源流程配置契约”一节镜像 edge 规则；每站点最多一把请求解密密钥和一把响应加密密钥且不得共用；公开 origin 不接受 IPv6 字面量（edge 按主机名路由），开启 sensor 时明文 HTTP 只允许 `localhost` 与 `127.0.0.1`；站点 ID 加 `edge-` 前缀不得超过 128 字节。失败映射为稳定原因码：上游相关 `CONTROL_SITE_UPSTREAM_INVALID`，策略/路由 `CONTROL_SITE_POLICY_INVALID`（浏览器来源流程各规则另有专用原因码，见下文契约一节），站点 ID `CONTROL_SITE_ID_INVALID`，其余 `CONTROL_SITE_CONFIG_REQUEST_INVALID`。控制面生成的 edge 配置同步调整：身份存储按有效路由的实际需要输出（任一路由需要身份或请求 crypto 即输出，而不只看顶层入口模式），匿名会话创建速率随 TTL 缩放以保持在 edge 的容量模型内（TTL 不超过 5940 秒时与此前一致），sensor origin 去除末尾斜杠。
 
-edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，控制面只把封闭集合内的原因码原样记为站点 apply 失败的 `reason_code`（`EDGE_APPLY_STALE_REVISION`、`EDGE_APPLY_VALIDATION_FAILED`、`EDGE_APPLY_SCOPE_DENIED`、`EDGE_APPLY_LISTENER_UNAVAILABLE`、`EDGE_APPLY_IDEMPOTENCY_CONFLICT`、`EDGE_APPLY_SIGNATURE_INVALID`，以及页面签发站点的动作描述供给失败 `EDGE_APPLY_DESCRIPTOR_CONFLICT`、`EDGE_APPLY_DESCRIPTOR_UNAVAILABLE`），其余一律为 `EDGE_APPLY_REJECTED`；管理审计终态仍为 `ERROR`/`EDGE_APPLY_NOT_CONFIRMED`。两个描述供给码的 edge 应答体另带出问题的 `site_id`，控制面当前不使用它（只扣住该站点需要先用自己下发的快照核对这个未签名的名字），语义与运维处理见 19 §19.2。控制面仍拒绝 `page_actions` 等页面签发字段，所以这两个码目前只会出现在直接签名下发的快照上。
+edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，控制面只把封闭集合内的原因码原样记为站点 apply 失败的 `reason_code`（`EDGE_APPLY_STALE_REVISION`、`EDGE_APPLY_VALIDATION_FAILED`、`EDGE_APPLY_SCOPE_DENIED`、`EDGE_APPLY_LISTENER_UNAVAILABLE`、`EDGE_APPLY_IDEMPOTENCY_CONFLICT`、`EDGE_APPLY_SIGNATURE_INVALID`，以及页面签发站点的动作描述供给失败 `EDGE_APPLY_DESCRIPTOR_CONFLICT`、`EDGE_APPLY_DESCRIPTOR_UNAVAILABLE`），其余一律为 `EDGE_APPLY_REJECTED`；管理审计终态仍为 `ERROR`/`EDGE_APPLY_NOT_CONFIRMED`。两个描述供给码的 edge 应答体另带出问题的 `site_id`。应答不签名，所以这个名字从不作为任何依据，只用来决定失败记在哪个站点上：`EDGE_APPLY_DESCRIPTOR_CONFLICT` 点名的是本次快照以期望修订下发的其他站点时，失败（含原因码）记在该站点，触发 apply 的目标站点保持 `pending`（其请求审计仍为 `ERROR`/`EDGE_APPLY_NOT_CONFIRMED`）；没有名字、名字无效、点名目标本身、点名被扣住或未下发的站点时，仍记在目标站点上。`EDGE_APPLY_DESCRIPTOR_UNAVAILABLE` 是描述存储故障，影响每个页面签发站点，始终记在目标站点。被拒绝的那一次 apply 仍然挡住整个租户，控制面不会自动去掉该站点重发。描述冲突大多已在控制面提前拒绝（见下文“策略修订号与动作描述集合的绑定”），语义与运维处理见 19 §19.2。
 
-本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0052，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
+本地开发启动会先执行 M5 schema reconciliation：`xshield.dev_schema_migrations` 以迁移文件 SHA-256 记录 0041–0053，单次执行持有 PostgreSQL advisory lock。已完整存在的对象只登记 ledger，缺失对象按顺序在事务中应用；半成品或 checksum 不一致会阻止控制服务启动，既不删除数据也不自动回退。站点错误保持稳定 `CONTROL_SITE_*` reason code，并由控制台映射为安全提示和 request ID。
 
 | 方法与路径 | 用途 | 必需审计 |
 |---|---|---|
@@ -504,7 +504,24 @@ found=false 的站点配置响应可以包含 requires_approval=null；客户端
 
 摘要稳定：新增字段在未设置时不序列化，因此此前保存的配置重新序列化逐字节不变，存储摘要、幂等重放与“内容相同”的比较都不受影响（核心与 PostgreSQL 测试以变更前的配置样本固定这一点）。
 
-edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启时恢复——edge 在 apply 锁内、写 pending 文件之前为每个声明页面签发的站点供给由配置推导的动作描述（05 §5.3.1、19 §19.2）。edge 以 `policy_revision` 标签绑定描述摘要：同一标签下换用另一套描述（改变操作来源、映射修订、页面或目标路由等描述字段，期限与容量不算）时整份快照以 409 `EDGE_APPLY_DESCRIPTOR_CONFLICT` 拒绝，edge 继续服务上一份快照。留给后续任务：控制面在保存时要求描述集合变化同步提升 `policy_revision`（另一项工作正在加入这一检查，在此之前由操作者提升标签，控制台在页面签发动作与资源资格的编辑处和批准确认框中提醒），以及 edge 描述冲突时由控制面单独扣留出问题的站点。控制台已能编写这些块（15“控制台编写浏览器来源流程”）：路由抽屉按准入与响应模式显示各块、逐字段校验，跨路由引用只能从草稿中选择，SENSOR_HTML 构建的摘要与注入偏移在浏览器内由页面源码计算；未改动的块保存时仍逐字节保留。
+edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启时恢复——edge 在 apply 锁内、写 pending 文件之前为每个声明页面签发的站点供给由配置推导的动作描述（05 §5.3.1、19 §19.2）。edge 以 `policy_revision` 标签绑定描述摘要：同一标签下换用另一套描述（改变操作来源、映射修订、页面或目标路由等描述字段，期限与容量不算）时整份快照以 409 `EDGE_APPLY_DESCRIPTOR_CONFLICT` 拒绝，edge 继续服务上一份快照。控制面在描述可能到达 edge 之前拒绝复用标签（下一节），控制台在页面签发动作与资源资格的编辑处和批准确认框中提醒提升标签；edge 仍然拒绝的冲突记在应答点名的站点上（本章开头“edge 拒绝原因与 apply 状态”）。控制台已能编写这些块（15“控制台编写浏览器来源流程”）：路由抽屉按准入与响应模式显示各块、逐字段校验，跨路由引用只能从草稿中选择，SENSOR_HTML 构建的摘要与注入偏移在浏览器内由页面源码计算；未改动的块保存时仍逐字节保留。
+
+### 策略修订号与动作描述集合的绑定（2026-10-06）
+
+**规则。** 对一个 `(租户, 站点)`，一个 `policy_revision` 标签只能表示一组 edge 管理的动作描述。edge 供给时把该标签绑定到描述集合的规范摘要，此后同一标签下的另一组描述会被拒绝（`EDGE_APPLY_DESCRIPTOR_CONFLICT`），且整份租户快照一起失败。控制面在描述可能到达 edge 之前执行同一条规则，拒绝原因为 `CONTROL_SITE_POLICY_REVISION_REUSED`。摘要由 `xshield_core::site::descriptors`（`SiteConfig::edge_descriptor_digest`）用与 edge 相同的纯函数 `xshield_core::edge_descriptors::derive` 计算；gateway 一致性测试断言控制面摘要与 gateway 自身推导逐字节相等（黄金样例 `tests/site-config/browser-loop.json`/`browser-loop.gateway.json`，以及双方都接受的整套样本）。摘要只覆盖描述内容：标签本身、签发租期与容量（`ttl_seconds`、`max_active_pages`、`max_items` 等）不进入摘要。没有 `page_actions` 的配置没有摘要，edge 不为它供给，永不冲突。审批仍把标签视为外观字段：只改标签不需要审批，但改变页面动作的修订必须换用新标签。
+
+**哪些修订会绑定标签。** 一个修订“有资格到达 edge”（`status = active` 且不再需要审批）时，其标签与摘要在使修订获得资格的同一事务中、在所有站点写入与快照读取共用的租户锁下记入 `site_descriptor_bindings`（迁移 0053）：不需要审批的保存、清除审批要求的批准或直接应用授权，以及首次承载由旧版本控制服务写入、尚未登记的修订的快照读取。这是充分的：快照对每个站点只承载有资格的期望修订（此时已绑定，或由这次读取在同一把锁下绑定），或者已生效修订（它曾作为期望修订被已确认的快照承载，当时已绑定），而绑定从不更新或删除。草稿、暂停、以及在等待审批期间被后续保存取代的修订从未有资格，不绑定任何标签：快照只承载期望修订或已生效修订，它们既没有、以后也不会被下发。有资格却实际未发出的修订（没有配置 edge、被下一次快照读取之前的保存取代、或在 edge 供给前被拒绝）仍然绑定：未签名的 edge 拒绝和结果未知的传输失败都无法证明 edge 没有供给。绑定行没有指向站点的外键，删除站点不会删除它们（edge 的 `policy_revisions` 行同样不随站点删除），同一 ID 重建的站点也不能把旧标签用于另一组描述。此外，edge 自己的 `xshield.policy_revisions` 行同样计入：它记录 edge 实际供给的内容，包括控制面之外建立的绑定（启动 `XSHIELD_CONFIG`、直接签名的快照、种子数据）和被运维停用的修订；当该行不是 `active` 或摘要不同时拒绝，恰好就是 edge 拒绝的条件，因此不会拒绝 edge 会接受的配置。
+
+**在哪里拒绝。** 只检查会被服务的配置（`status = active`）：草稿或暂停永远不会被供给，下线站点也绝不能被阻止。
+- 写入（`PUT /sites/{id}/config`、`PATCH /sites/{id}`、`POST /sites`、`PUT /site-config`、回滚）：409 `CONTROL_SITE_POLICY_REVISION_REUSED`，`retryable=false`，`next_action=change_policy_revision`，写入任何内容之前即拒绝，不产生修订，DENY 审计。两个并发保存在同一租户锁下串行化：先获得资格的一方绑定标签，另一方随后只会被拒绝或成为从未有资格的被取代修订，同一标签永远不会被绑定到两组描述（PostgreSQL 回归用两个连接验证了两种锁顺序）。
+- `POST /sites/{id}/validate`：对已存储的期望修订做只读检查，标签冲突时返回 422，`valid=false`，`reason_code=CONTROL_SITE_POLICY_REVISION_REUSED`，DENY 审计；检查存储不可用时返回 503 `CONTROL_SITE_CONFIG_UNAVAILABLE`。
+- `POST /sites/{id}/approve` 与持有 `site.config.apply_direct` 的直接应用：在锁定 apply intent 的同一事务内检查，冲突时返回 409，不记录审批，审批要求保持不变，不发送快照，DENY 审计。由旧版本控制服务写入的违规修订因此无法被批准。
+- apply：快照读取在租户锁下复查每个可承载的期望修订。目标站点冲突时什么也不发送，apply 状态记为 `failed` 并带该原因码，终态审计为 `ERROR`；其他站点冲突时把它扣在上一份已批准配置上（与无法编译的期望修订相同），在 apply 成功后把它记为 `failed` 并带该原因码，租户内其余站点照常应用。
+- 写入校验另外要求页面签发配置的描述可以推导（edge 编译时同样推导），不能推导时返回 `CONTROL_SITE_PAGE_ACTIONS_INVALID`。
+
+可以接受的情况：同一标签、同一描述集合（包括只改显示名等外观字段）；新的、从未用过的标签；回滚到与某个已登记修订完全相同的描述集合并沿用它当时的标签（edge 答 `Existing`）；在从未获得资格的修订之后复用其标签。安全提示 `message_safe` 是固定文本，点名 `policy_revision` 字段和处理方法，不回显存储值；控制台的中文说明见 `web/console/src/ui/reason-codes.ts`。不新增审计事件类型：拒绝沿用各端点已有的事件（`console.site.config.write`、`.validate`、`.approve`、`.apply`）。
+
+部署与升级：先应用迁移 `0053_m5_site_descriptor_bindings.sql`（只新增一张表，加法、可重复执行），再替换控制服务；旧控制服务既不读也不写该表，与新服务混跑期间旧服务写入的修订由新服务在审批、校验与快照读取时复查，旧服务自己发出的快照仍由 edge 把关。迁移之前由本分支的早期构建保存、带页面签发的修订（任何已发布版本都不接受 `page_actions`）只能经 edge 自己的行（共用数据库时）或首次快照读取被纳入检查。控制面与 edge 使用不同 PostgreSQL 时，第二项来源为空，控制面只按自己的绑定记录检查，控制面之外建立的绑定仍由 edge 拒绝。开发环境由 `dev.sh` 的 reconciliation 自动补齐 0053。
 # Agent API Key 端点
 
 | 方法 | 路径 | 用途 |
