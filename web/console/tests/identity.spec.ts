@@ -292,6 +292,9 @@ test("403 and database 503 stay safe and wait for an explicit retry", async ({ p
 });
 
 test("invalidated sessions clear the snapshot and every query", async ({ page }) => {
+  // Ten complete sign-in cycles (two kinds, five ways to end the session) in one test: the
+  // default 30 s is more than a two-core CI runner needs for the page loads alone.
+  test.setTimeout(120_000);
   await page.clock.install();
   let expired = false;
   await mockControl(page, () =>
