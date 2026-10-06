@@ -12,6 +12,7 @@ pub mod descriptors;
 pub mod flow;
 mod projection;
 pub mod risk;
+pub mod share;
 pub mod unsupported;
 pub mod upstream;
 
@@ -25,6 +26,7 @@ pub use flow::{
 };
 pub use projection::{EDGE_MAX_CONFIG_BYTES, gateway_operation};
 pub use risk::{ChangeRisk, assess_change_risk, direct_apply_may_waive};
+pub use share::SiteShareIssue;
 pub use unsupported::{UnsupportedEdgeFeature, find_unsupported_edge_feature};
 
 /// An internal edge listener port.
@@ -210,6 +212,11 @@ pub enum SecurityEntry {
     AuthenticatedRoot,
     /// A valid UI operation source is required.
     UiActionRequired,
+    /// A response-issued share credential for exactly one bound resource is
+    /// required (edge `SHARE_ENTRY`): admitted without any identity binding.
+    /// A route-level admission only, always resource-bound; the top-level
+    /// site entry is never `share_entry`.
+    ShareEntry,
 }
 
 /// A route-level request encryption policy accepted by the site compiler.
@@ -302,6 +309,10 @@ pub struct SiteRouteConfig {
     /// any query string is refused where the edge enforces that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_pagination: Option<crate::query_pagination::SiteQueryPagination>,
+    /// Response-issued share credential; only on a `ui_action_required`
+    /// resource route whose target is a `share_entry` route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_issue: Option<share::SiteShareIssue>,
 }
 
 impl SiteRouteConfig {
@@ -314,6 +325,7 @@ impl SiteRouteConfig {
             || self.resource_grant.is_some()
             || self.auth_binding.is_some()
             || self.auth_revoke.is_some()
+            || self.share_issue.is_some()
     }
 }
 
@@ -677,7 +689,10 @@ impl SitePolicyConfig {
                 || route_config.resource_path_parameter.is_some();
             if has_resource_fields {
                 if route_config.method != "GET"
-                    || route_config.security_entry != SecurityEntry::UiActionRequired
+                    || !matches!(
+                        route_config.security_entry,
+                        SecurityEntry::UiActionRequired | SecurityEntry::ShareEntry
+                    )
                     || route_config.resource_type.is_none()
                     || route_config.view_profile.is_none()
                     || (route_config.resource_query_parameter.is_some()
@@ -1139,6 +1154,7 @@ impl SecurityEntry {
             Self::AuthEntry => "AUTH_ENTRY",
             Self::AuthenticatedRoot => "AUTHENTICATED_ROOT",
             Self::UiActionRequired => "UI_ACTION_REQUIRED",
+            Self::ShareEntry => "SHARE_ENTRY",
         }
     }
 }
@@ -1399,6 +1415,7 @@ mod tests {
             issued_by: None,
             resource_grant: None,
             query_pagination: None,
+            share_issue: None,
         });
         assert!(resource_policy.validate().is_ok());
         resource_policy.routes[0].source_action = None;
@@ -1611,6 +1628,7 @@ mod tests {
             issued_by: None,
             resource_grant: None,
             query_pagination: None,
+            share_issue: None,
         }
     }
 

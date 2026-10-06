@@ -3664,8 +3664,8 @@ pub(crate) const SITE_CONFIG_BODY_BYTES_MAX: usize = 256 * 1024;
 
 /// The stable reason for a body the strict configuration parse refused: a
 /// specific one when it asks for an edge feature the control plane
-/// deliberately does not manage (share issuance, credential refresh, context
-/// switch, evidence capture, compatibility crypto, share or service entries),
+/// deliberately does not manage (credential refresh, context switch, evidence
+/// capture, compatibility crypto, service entries),
 /// so it is never mistaken for a typo; the generic one otherwise.
 fn rejected_body_reason(body: &[u8]) -> (&'static str, &'static str) {
     if xshield_core::site::find_unsupported_edge_feature(body).is_some() {
@@ -3690,6 +3690,7 @@ fn validation_reason(field: &str) -> &'static str {
         flow::SENSOR_HTML_INVALID => "CONTROL_SITE_SENSOR_HTML_INVALID",
         flow::PAGE_ACTIONS_INVALID => "CONTROL_SITE_PAGE_ACTIONS_INVALID",
         flow::RESOURCE_GRANT_INVALID => "CONTROL_SITE_RESOURCE_GRANT_INVALID",
+        xshield_core::site::share::SHARE_ISSUE_INVALID => "CONTROL_SITE_SHARE_ISSUE_INVALID",
         xshield_core::query_pagination::QUERY_PAGINATION_INVALID => {
             "CONTROL_SITE_QUERY_PAGINATION_INVALID"
         }
@@ -3928,6 +3929,54 @@ mod tests {
             }),
             ("CONTROL_SITE_POLICY_INVALID", |b| {
                 b["policy"]["routes"][0]["operation_id"] = json!("login:page");
+            }),
+        ] {
+            assert_eq!(reason(edit), Some(expected), "{expected}");
+        }
+    }
+
+    /// Share rules surface their own stable reason, and the valid scope
+    /// passes request validation untouched.
+    #[test]
+    fn share_violations_are_reported_with_their_own_reason() {
+        let share_flow: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/site-config/share-flow.json"))
+                .unwrap();
+        let reason = |edit: fn(&mut serde_json::Value, usize, usize)| {
+            let mut body = share_flow.clone();
+            let index = |body: &serde_json::Value, id: &str| {
+                body["policy"]["routes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .position(|route| route["operation_id"] == id)
+                    .unwrap()
+            };
+            let (issuer, entry) = (
+                index(&body, "records.share.issue"),
+                index(&body, "records.share.read"),
+            );
+            edit(&mut body, issuer, entry);
+            let request: SiteConfigRequest = serde_json::from_value(body).unwrap();
+            validate_request_with(&request, &site(), false).err()
+        };
+        assert_eq!(reason(|_, _, _| {}), None);
+        for (expected, edit) in [
+            (
+                "CONTROL_SITE_SHARE_ISSUE_INVALID",
+                (|b, issuer, _| {
+                    b["policy"]["routes"][issuer]["share_issue"]["ttl_seconds"] = json!(0);
+                }) as fn(&mut serde_json::Value, usize, usize),
+            ),
+            ("CONTROL_SITE_SHARE_ISSUE_INVALID", |b, issuer, _| {
+                b["policy"]["routes"][issuer]["share_issue"]["target_operation_id"] =
+                    json!("records.list");
+            }),
+            ("CONTROL_SITE_SHARE_ISSUE_INVALID", |b, _, entry| {
+                b["policy"]["routes"][entry]["resource_type"] = json!("other");
+            }),
+            ("CONTROL_SITE_POLICY_INVALID", |b, _, entry| {
+                b["policy"]["routes"][entry]["source_action"] = json!("records.read");
             }),
         ] {
             assert_eq!(reason(edit), Some(expected), "{expected}");
@@ -4573,6 +4622,7 @@ mod tests {
             issued_by: None,
             resource_grant: None,
             query_pagination: None,
+            share_issue: None,
         }];
         let sibling = input("site_a", broken);
         let plan = super::plan_snapshot(

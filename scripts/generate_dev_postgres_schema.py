@@ -53,7 +53,7 @@ def main():
     try:
         for file in sorted((ROOT / 'migrations').glob('*.sql')):
             phase = file.name[:4]
-            if phase > '0053': break
+            if phase > '0054': break
             sql(file.read_text())
             if phase < '0040': continue
             payload = sql(SNAPSHOT + "SELECT coalesce(json_agg(o),'[]') FROM dev_schema_objects o;")

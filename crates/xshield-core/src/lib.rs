@@ -29,5 +29,5 @@ pub use site::{
     SiteAuthRevoke, SiteConfig, SiteCryptoConfig, SiteHealthCheckConfig, SiteIdentityConfig,
     SiteIssuedBy, SiteLimitsConfig, SitePageActions, SitePolicyConfig, SiteRequestCrypto,
     SiteResourceGrant, SiteResponseCrypto, SiteRouteConfig, SiteSecretReference, SiteSensorHtml,
-    SiteSensorHtmlAdapter, SiteWafConfig,
+    SiteSensorHtmlAdapter, SiteShareIssue, SiteWafConfig,
 };

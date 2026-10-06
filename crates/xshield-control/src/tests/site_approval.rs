@@ -1839,8 +1839,8 @@ async fn flow_refusals_have_their_own_reasons_and_large_sites_fit() {
     };
     let cases: [(&str, &str, Edit); 11] = [
         (
-            "share issuance",
-            "CONTROL_SITE_FEATURE_UNSUPPORTED",
+            "share issuance without its fields",
+            "CONTROL_SITE_CONFIG_REQUEST_INVALID",
             |b, list, _| {
                 b["policy"]["routes"][list]["share_issue"] = json!({"success_status": 200});
             },
@@ -1977,6 +1977,184 @@ async fn flow_refusals_have_their_own_reasons_and_large_sites_fit() {
         event["payload"]["reason_code"] == "CONTROL_SITE_FEATURE_UNSUPPORTED"
             && event["payload"]["outcome"] == "DENY"
     }));
+}
+
+/// The loop with a share scope (a page-issued list whose grant reaches a
+/// share issuer, and the `share_entry` route that redeems it) as a body.
+const SHARE_FLOW: &str = include_str!("../../../../tests/site-config/share-flow.json");
+
+fn share_body(site: &str) -> Value {
+    let mut body: Value = serde_json::from_str(SHARE_FLOW).unwrap();
+    body["site_id"] = json!(site);
+    body
+}
+
+fn route_index(body: &Value, id: &str) -> usize {
+    body["policy"]["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|route| route["operation_id"] == id)
+        .unwrap()
+}
+
+/// A share scope reaches the edge as `SHARE_ENTRY` plus `share_issue`, and
+/// changing either end is something only an independent approver may release
+/// (`SHARE_ISSUE_CHANGED`; the direct-apply capability cannot waive it). The
+/// scope carries no action descriptor, so retuning it keeps the label, while
+/// moving the issuer route - which is also a grant target, hence a
+/// descriptor - under the same label is refused like any descriptor change.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn share_scope_needs_its_own_independent_approval_and_keeps_the_label() {
+    type Edit = fn(&mut Value, usize, usize);
+    let ctx = Ctx::new().await;
+    let site = "site_share";
+    let (status, created) = ctx
+        .create(&share_body(site), &ctx.key("create-share"))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let stored = share_body(site);
+    assert_eq!(
+        created["config"]["policy"], stored["policy"],
+        "read back as written"
+    );
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-share-1")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let served = ctx.edge.served_gateway_config(site).unwrap();
+    let operation = |id: &str| {
+        served["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["operation_id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(operation("records.share.read")["admission"], "SHARE_ENTRY");
+    assert_eq!(
+        operation("records.share.issue")["response"]["share_issue"]["target_operation_id"],
+        "records.share.read"
+    );
+
+    let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
+            "subject": "agent-share", "display_name": "share", "expires_at": expires,
+            "scopes": [{
+                "tenant_id": ctx.tenant.as_str(), "site_id": site,
+                "capabilities": ["site.config.apply_direct", "site.read"]
+            }]
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let api_key = issued["api_key"].as_str().unwrap().to_owned();
+
+    // Retuning the issuance keeps the label, needs an independent approver.
+    let mut retuned = share_body(site);
+    let source_at = route_index(&retuned, "records.share.issue");
+    retuned["policy"]["routes"][source_at]["share_issue"]["ttl_seconds"] = json!(600);
+    let (status, saved) = ctx.put(site, &retuned, &ctx.key("share-retune")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    let sent = ctx.edge.apply_count();
+    let (status, refused) = apply_with_key(&ctx, site, &api_key).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error_code"],
+        "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED"
+    );
+    assert_eq!(ctx.edge.apply_count(), sent);
+    let reasons: Vec<String> = sqlx::query_scalar(
+        "SELECT unnest(risk_reasons) FROM xshield.site_apply_intents
+         WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    assert!(
+        reasons.iter().any(|reason| reason == "SHARE_ISSUE_CHANGED"),
+        "{reasons:?}"
+    );
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-share-2")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let served = ctx.edge.served_gateway_config(site).unwrap();
+    assert_eq!(
+        served["operations"][source_at]["response"]["share_issue"]["ttl_seconds"],
+        600
+    );
+
+    // The redeeming route moving is the other end of the same facet.
+    let mut moved_entry = retuned.clone();
+    let read_at = route_index(&moved_entry, "records.share.read");
+    moved_entry["policy"]["routes"][read_at]["path"] = json!("/shared");
+    let (status, saved) = ctx.put(site, &moved_entry, &ctx.key("share-entry")).await;
+    assert!(status.is_success(), "{saved}");
+    let (status, refused) = apply_with_key(&ctx, site, &api_key).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error_code"],
+        "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED"
+    );
+
+    // The issuer is a grant target: moving it is a descriptor change, which
+    // the label binding refuses under the unchanged label.
+    let mut moved_issuer = moved_entry.clone();
+    moved_issuer["policy"]["routes"][source_at]["path"] = json!("/share-issue-v2");
+    let (status, refused) = ctx
+        .put(site, &moved_issuer, &ctx.key("share-issuer-moved"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_POLICY_REVISION_REUSED");
+    // Under a new label the same move is stored (and held for approval).
+    let relabelled = with(moved_issuer, "policy_revision", json!("share-r2"));
+    let (status, saved) = ctx.put(site, &relabelled, &ctx.key("share-relabel")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+
+    // Each share rule has its own stable reason and stores nothing.
+    let revision = ctx.status(site).await["desired_revision"].clone();
+    let cases: [(&str, Edit); 5] = [
+        ("missing target", |b, source_at, _| {
+            b["policy"]["routes"][source_at]["share_issue"]["target_operation_id"] = json!("gone");
+        }),
+        ("target is not a share entry", |b, source_at, _| {
+            b["policy"]["routes"][source_at]["share_issue"]["target_operation_id"] =
+                json!("records.list");
+        }),
+        ("ttl above a day", |b, source_at, _| {
+            b["policy"]["routes"][source_at]["share_issue"]["ttl_seconds"] = json!(86_401);
+        }),
+        ("another resource type", |b, _, read_at| {
+            b["policy"]["routes"][read_at]["resource_type"] = json!("other");
+        }),
+        ("share entry with an action", |b, _, read_at| {
+            b["policy"]["routes"][read_at]["source_action"] = json!("records.read");
+        }),
+    ];
+    for (index, (label, edit)) in cases.into_iter().enumerate() {
+        let mut body = share_body(site);
+        let (source_at, read_at) = (
+            route_index(&body, "records.share.issue"),
+            route_index(&body, "records.share.read"),
+        );
+        edit(&mut body, source_at, read_at);
+        let (status, refused) = ctx
+            .put(site, &body, &ctx.key(&format!("share-invalid-{index}")))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {refused}");
+        let expected = if label == "share entry with an action" {
+            "CONTROL_SITE_POLICY_INVALID"
+        } else {
+            "CONTROL_SITE_SHARE_ISSUE_INVALID"
+        };
+        assert_eq!(refused["error_code"], expected, "{label}");
+    }
+    assert_eq!(ctx.status(site).await["desired_revision"], revision);
+    let _ = ctx.finish().await;
 }
 
 /// The loop body for `site` with its page-issued list action moved: the same

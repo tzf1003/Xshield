@@ -22,6 +22,7 @@ use super::{
         SiteAuthBinding, SiteAuthRevoke, SiteIssuedBy, SitePageActions, SiteResourceGrant,
         SiteSensorHtmlAdapter,
     },
+    share::SiteShareIssue,
 };
 use crate::domain::{InvalidValue, SiteId};
 use crate::query_pagination::SiteQueryPagination;
@@ -138,6 +139,8 @@ struct Response<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     resource_grant: Option<&'a SiteResourceGrant>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    share_issue: Option<&'a SiteShareIssue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     auth_binding: Option<&'a SiteAuthBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auth_revoke: Option<&'a SiteAuthRevoke>,
@@ -233,6 +236,7 @@ fn response(route: &SiteRouteConfig) -> Option<Response<'_>> {
     let sensor = route.sensor_html.as_ref();
     let any_block = route.response_crypto.is_some()
         || route.resource_grant.is_some()
+        || route.share_issue.is_some()
         || route.auth_binding.is_some()
         || route.auth_revoke.is_some()
         || route.page_actions.is_some()
@@ -254,6 +258,7 @@ fn response(route: &SiteRouteConfig) -> Option<Response<'_>> {
         page_actions: route.page_actions.as_ref(),
         crypto: route.response_crypto.as_ref(),
         resource_grant: route.resource_grant.as_ref(),
+        share_issue: route.share_issue.as_ref(),
         auth_binding: route.auth_binding.as_ref(),
         auth_revoke: route.auth_revoke.as_ref(),
     })

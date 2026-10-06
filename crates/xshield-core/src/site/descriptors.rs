@@ -196,6 +196,7 @@ impl RouteFacts {
                 SecurityEntry::AuthEntry => AdmissionClass::AuthenticationEntry,
                 SecurityEntry::AuthenticatedRoot => AdmissionClass::AuthenticatedRoot,
                 SecurityEntry::UiActionRequired => AdmissionClass::UiActionRequired,
+                SecurityEntry::ShareEntry => AdmissionClass::ShareEntry,
             },
             source_action: route
                 .source_action
@@ -438,6 +439,54 @@ mod tests {
             });
         paged.validate().unwrap();
         assert_eq!(digest(&paged), base);
+    }
+
+    #[test]
+    fn a_share_scope_does_not_change_the_descriptor_digest_but_its_issuer_route_does() {
+        // The credential an issuer mints and the `share_entry` route that
+        // redeems it carry no action descriptor: the edge derives descriptors
+        // from page actions and grant targets only. So the share block needs
+        // independent approval (SHARE_ISSUE_CHANGED) without forcing a new
+        // policy revision label, while the issuer route *as a grant target*
+        // is a descriptor like any other and moving it does.
+        let share_flow = || -> SiteConfig {
+            serde_json::from_str(include_str!(
+                "../../../../tests/site-config/share-flow.json"
+            ))
+            .unwrap()
+        };
+        let base = digest(&share_flow());
+        let mut stripped = share_flow();
+        route(&mut stripped, "records.share.issue").share_issue = None;
+        stripped
+            .policy
+            .routes
+            .retain(|route| route.operation_id != "records.share.read");
+        stripped.validate().unwrap();
+        assert_eq!(digest(&stripped), base);
+        let mut retuned = share_flow();
+        let share = route(&mut retuned, "records.share.issue")
+            .share_issue
+            .as_mut()
+            .unwrap();
+        share.ttl_seconds = 60;
+        share.max_active_shares = 7;
+        "another-rule".clone_into(&mut share.issuance_rule_id);
+        "token".clone_into(&mut share.token_field);
+        route(&mut retuned, "records.share.read").path = "/shared".to_owned();
+        retuned.validate().unwrap();
+        assert_eq!(digest(&retuned), base);
+        // The issuer is the grant target: its path and view are descriptor
+        // facts, so changing them needs a new label.
+        let mut moved = share_flow();
+        route(&mut moved, "records.share.issue").path = "/share-issue-v2".to_owned();
+        moved.validate().unwrap();
+        assert_ne!(digest(&moved), base);
+        let mut reviewed = share_flow();
+        route(&mut reviewed, "records.share.issue").view_profile =
+            Some("share_controls_v2".to_owned());
+        reviewed.validate().unwrap();
+        assert_ne!(digest(&reviewed), base);
     }
 
     type Edit = fn(&mut SiteConfig);

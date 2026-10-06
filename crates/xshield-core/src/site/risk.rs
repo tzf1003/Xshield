@@ -86,13 +86,17 @@ pub enum ChangeRisk {
     /// in any field: which query parameters a list that issues grants (or a
     /// UI-action route) may carry to the origin.
     QueryPaginationChanged,
+    /// A route with a `share_issue` or a `share_entry` admission was added,
+    /// removed or changed in any field: which responses mint a reusable
+    /// read-only credential and which route redeems it without identity.
+    ShareIssueChanged,
     /// A difference that no category above names; risky by default.
     OtherChange,
 }
 
 impl ChangeRisk {
     /// Every reason, in token order of declaration.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Activation,
         Self::Takedown,
         Self::UpstreamChanged,
@@ -114,6 +118,7 @@ impl ChangeRisk {
         Self::PageActionsChanged,
         Self::ResourceGrantChanged,
         Self::QueryPaginationChanged,
+        Self::ShareIssueChanged,
         Self::OtherChange,
     ];
 
@@ -138,6 +143,7 @@ impl ChangeRisk {
                 | Self::PageActionsChanged
                 | Self::ResourceGrantChanged
                 | Self::QueryPaginationChanged
+                | Self::ShareIssueChanged
         )
     }
 
@@ -166,6 +172,7 @@ impl ChangeRisk {
             Self::PageActionsChanged => "PAGE_ACTIONS_CHANGED",
             Self::ResourceGrantChanged => "RESOURCE_GRANT_CHANGED",
             Self::QueryPaginationChanged => "QUERY_PAGINATION_CHANGED",
+            Self::ShareIssueChanged => "SHARE_ISSUE_CHANGED",
             Self::OtherChange => "OTHER_CHANGE",
         }
     }
@@ -196,7 +203,7 @@ pub fn direct_apply_may_waive<S: AsRef<str>>(reasons: &[S]) -> bool {
 /// Whether a route of a policy takes part in a facet.
 type FacetMember = fn(&SitePolicyConfig, &SiteRouteConfig) -> bool;
 
-const FLOW_FACETS: [(ChangeRisk, FacetMember); 5] = [
+const FLOW_FACETS: [(ChangeRisk, FacetMember); 6] = [
     (ChangeRisk::AuthEntryChanged, |_, route| {
         route.security_entry == super::SecurityEntry::AuthEntry
             || route.auth_binding.is_some()
@@ -212,6 +219,12 @@ const FLOW_FACETS: [(ChangeRisk, FacetMember); 5] = [
     // admits none; widening it is a change to what a caller may influence.
     (ChangeRisk::QueryPaginationChanged, |_, route| {
         route.query_pagination.is_some()
+    }),
+    // A share issuer mints a reusable credential for one resource and its
+    // `share_entry` target redeems it without any identity; either end
+    // changing changes who can read what.
+    (ChangeRisk::ShareIssueChanged, |_, route| {
+        route.share_issue.is_some() || route.security_entry == super::SecurityEntry::ShareEntry
     }),
     // A grant's meaning depends on its target route as much as on the grant.
     (ChangeRisk::ResourceGrantChanged, |policy, route| {
@@ -399,6 +412,7 @@ mod tests {
             issued_by: None,
             resource_grant: None,
             query_pagination: None,
+            share_issue: None,
         }
     }
 
@@ -1057,6 +1071,125 @@ mod tests {
         assert_eq!(assess_change_risk(Some(&flow()), &reordered), Vec::new());
     }
 
+    /// The loop topology with a share scope, as the control plane stores it.
+    fn share_flow() -> SiteConfig {
+        serde_json::from_str(include_str!(
+            "../../../../tests/site-config/share-flow.json"
+        ))
+        .unwrap()
+    }
+
+    /// Either end of a share scope changing needs an independent approver,
+    /// in both directions, and a direct apply must not be able to waive it.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn share_issuance_changes_name_their_facet_in_both_directions() {
+        use ChangeRisk::*;
+        let cases: Vec<(&str, Mutation, Vec<ChangeRisk>)> = vec![
+            (
+                "share lease",
+                |c| {
+                    flow_route(c, "records.share.issue")
+                        .share_issue
+                        .as_mut()
+                        .unwrap()
+                        .ttl_seconds = 600;
+                },
+                vec![RoutesChanged, ResourceGrantChanged, ShareIssueChanged],
+            ),
+            (
+                "live share budget",
+                |c| {
+                    flow_route(c, "records.share.issue")
+                        .share_issue
+                        .as_mut()
+                        .unwrap()
+                        .max_active_shares = 50;
+                },
+                vec![RoutesChanged, ResourceGrantChanged, ShareIssueChanged],
+            ),
+            (
+                "issuance rule",
+                |c| {
+                    "other-rule".clone_into(
+                        &mut flow_route(c, "records.share.issue")
+                            .share_issue
+                            .as_mut()
+                            .unwrap()
+                            .issuance_rule_id,
+                    );
+                },
+                vec![RoutesChanged, ResourceGrantChanged, ShareIssueChanged],
+            ),
+            (
+                "issuer no longer issues",
+                |c| flow_route(c, "records.share.issue").share_issue = None,
+                vec![RoutesChanged, ResourceGrantChanged, ShareIssueChanged],
+            ),
+            (
+                "redeeming route view",
+                |c| {
+                    flow_route(c, "records.share.read").view_profile =
+                        Some("shared_detail".to_owned());
+                },
+                vec![RoutesChanged, ShareIssueChanged],
+            ),
+            (
+                "redeeming route path",
+                |c| flow_route(c, "records.share.read").path = "/shared".to_owned(),
+                vec![RoutesChanged, ShareIssueChanged],
+            ),
+            (
+                "redeeming route made public",
+                |c| {
+                    let route = flow_route(c, "records.share.read");
+                    route.security_entry = SecurityEntry::Public;
+                    route.resource_type = None;
+                    route.view_profile = None;
+                    route.resource_query_parameter = None;
+                    flow_route(c, "records.share.issue").share_issue = None;
+                },
+                vec![RoutesChanged, ResourceGrantChanged, ShareIssueChanged],
+            ),
+        ];
+        for (name, mutate, expected) in cases {
+            let before = share_flow();
+            let mut after = share_flow();
+            mutate(&mut after);
+            assert_ne!(before, after, "{name} must change the configuration");
+            let expected = sorted(expected);
+            assert_eq!(
+                assess_change_risk(Some(&before), &after),
+                expected,
+                "{name}, forwards"
+            );
+            assert_eq!(
+                assess_change_risk(Some(&after), &before),
+                expected,
+                "{name}, backwards"
+            );
+            let reasons = expected
+                .iter()
+                .map(|risk| risk.as_str())
+                .collect::<Vec<_>>();
+            assert!(!direct_apply_may_waive(&reasons), "{name}");
+        }
+        // Going live names the facet as well, so a direct apply cannot
+        // introduce a share scope unreviewed.
+        assert!(assess_change_risk(None, &share_flow()).contains(&ShareIssueChanged));
+        assert!(!assess_change_risk(None, &flow()).contains(&ShareIssueChanged));
+        // A route that is not part of the share scope stays outside the facet.
+        let mut unrelated = share_flow();
+        unrelated
+            .policy
+            .routes
+            .push(route("docs", "/docs", SecurityEntry::Public));
+        assert_eq!(
+            assess_change_risk(Some(&share_flow()), &unrelated),
+            vec![RoutesChanged]
+        );
+    }
+
     #[test]
     fn going_live_with_flow_routes_names_every_facet() {
         use ChangeRisk::*;
@@ -1107,12 +1240,17 @@ mod tests {
                 ChangeRisk::SensorHtmlChanged,
                 ChangeRisk::PageActionsChanged,
                 ChangeRisk::ResourceGrantChanged,
-                ChangeRisk::QueryPaginationChanged
+                ChangeRisk::QueryPaginationChanged,
+                ChangeRisk::ShareIssueChanged
             ]
         );
         assert_eq!(
             ChangeRisk::from_token("QUERY_PAGINATION_CHANGED"),
             Some(ChangeRisk::QueryPaginationChanged)
+        );
+        assert_eq!(
+            ChangeRisk::from_token("SHARE_ISSUE_CHANGED"),
+            Some(ChangeRisk::ShareIssueChanged)
         );
     }
 }

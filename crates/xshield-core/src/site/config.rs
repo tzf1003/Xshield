@@ -120,6 +120,7 @@ impl SiteConfig {
                 issued_by: None,
                 resource_grant: None,
                 query_pagination: None,
+                share_issue: None,
             });
         }
         policy
@@ -431,6 +432,41 @@ mod tests {
             BROWSER_LOOP.trim_end()
         );
         config.validate_for_site(&site("site_loop")).unwrap();
+    }
+
+    /// The loop plus a share scope: a page-issued list whose grant reaches a
+    /// share issuer, and the `share_entry` route that redeems its credentials.
+    const SHARE_FLOW: &str = include_str!("../../../../tests/site-config/share-flow.json");
+
+    #[test]
+    fn the_share_flow_fixture_is_the_canonical_stored_form_and_valid() {
+        let config: SiteConfig = serde_json::from_str(SHARE_FLOW).unwrap();
+        assert_eq!(
+            serde_json::to_string_pretty(&config).unwrap(),
+            SHARE_FLOW.trim_end()
+        );
+        config.validate_for_site(&site("site_loop")).unwrap();
+        // The share blocks are what the edge receives, under `response` for
+        // the issuer and as the admission for the redeeming route.
+        let projection = config
+            .gateway_config("tenant_loop", &site("site_loop"))
+            .unwrap();
+        let operations = projection["operations"].as_array().unwrap();
+        let operation = |id: &str| {
+            operations
+                .iter()
+                .find(|operation| operation["operation_id"] == id)
+                .unwrap()
+        };
+        assert_eq!(operation("records.share.read")["admission"], "SHARE_ENTRY");
+        assert_eq!(
+            operation("records.share.issue")["response"]["share_issue"]["issuance_rule_id"],
+            "record-share-r1"
+        );
+        assert_eq!(
+            operation("records.share.issue")["response"]["mode"],
+            "BUFFERED_JSON"
+        );
     }
 
     #[test]

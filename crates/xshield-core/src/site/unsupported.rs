@@ -2,9 +2,9 @@
 //!
 //! The typed site configuration refuses every member it does not model, so a
 //! body asking for an edge feature the control plane deliberately does not
-//! manage yet (`share_issue`, `auth_refresh`, `auth_context_switch`,
-//! `evidence_capture`, `COMPATIBILITY` request crypto and the `SHARE_ENTRY` /
-//! `SERVICE_IDENTITY` admissions) already fails to parse. That failure is
+//! manage (`auth_refresh`, `auth_context_switch`, `evidence_capture`,
+//! `COMPATIBILITY` request crypto and the `SERVICE_IDENTITY` admission)
+//! already fails to parse. That failure is
 //! correct but anonymous; this module looks at such a body once more, through
 //! a lenient typed view that only knows those features, so the control plane
 //! can answer with a stable "unsupported feature" reason instead of a generic
@@ -19,14 +19,10 @@ use serde::{Deserialize, de::IgnoredAny};
 /// manage yet. Each is refused with `CONTROL_SITE_FEATURE_UNSUPPORTED`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedEdgeFeature {
-    /// `SHARE_ENTRY` admission.
-    ShareEntryAdmission,
     /// `SERVICE_IDENTITY` admission.
     ServiceIdentityAdmission,
     /// `COMPATIBILITY` request crypto (opaque pass-through with approval).
     CompatibilityRequestCrypto,
-    /// `response.share_issue`.
-    ShareIssue,
     /// `response.auth_refresh`.
     AuthRefresh,
     /// `response.auth_context_switch`.
@@ -40,10 +36,8 @@ impl UnsupportedEdgeFeature {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ShareEntryAdmission => "share_entry",
             Self::ServiceIdentityAdmission => "service_identity",
             Self::CompatibilityRequestCrypto => "compatibility_request_crypto",
-            Self::ShareIssue => "share_issue",
             Self::AuthRefresh => "auth_refresh",
             Self::AuthContextSwitch => "auth_context_switch",
             Self::EvidenceCapture => "evidence_capture",
@@ -96,8 +90,6 @@ struct ResponseProbe {
 #[derive(Deserialize)]
 struct EffectsProbe {
     #[serde(default)]
-    share_issue: Option<IgnoredAny>,
-    #[serde(default)]
     auth_refresh: Option<IgnoredAny>,
     #[serde(default)]
     auth_context_switch: Option<IgnoredAny>,
@@ -107,9 +99,7 @@ struct EffectsProbe {
 
 impl EffectsProbe {
     fn feature(&self) -> Option<UnsupportedEdgeFeature> {
-        if self.share_issue.is_some() {
-            Some(UnsupportedEdgeFeature::ShareIssue)
-        } else if self.auth_refresh.is_some() {
+        if self.auth_refresh.is_some() {
             Some(UnsupportedEdgeFeature::AuthRefresh)
         } else if self.auth_context_switch.is_some() {
             Some(UnsupportedEdgeFeature::AuthContextSwitch)
@@ -137,7 +127,6 @@ pub fn find_unsupported_edge_feature(body: &[u8]) -> Option<UnsupportedEdgeFeatu
             .into_iter()
             .flatten()
             .find_map(|value| match value.to_ascii_lowercase().as_str() {
-                "share_entry" => Some(UnsupportedEdgeFeature::ShareEntryAdmission),
                 "service_identity" => Some(UnsupportedEdgeFeature::ServiceIdentityAdmission),
                 _ => None,
             });
@@ -171,24 +160,12 @@ mod tests {
         };
         for (route, feature) in [
             (
-                r#""security_entry":"share_entry""#,
-                UnsupportedEdgeFeature::ShareEntryAdmission,
-            ),
-            (
                 r#""security_entry":"SERVICE_IDENTITY""#,
                 UnsupportedEdgeFeature::ServiceIdentityAdmission,
             ),
             (
-                r#""admission":"SHARE_ENTRY""#,
-                UnsupportedEdgeFeature::ShareEntryAdmission,
-            ),
-            (
                 r#""request_crypto":{"mode":"COMPATIBILITY","approval_ref":"a"}"#,
                 UnsupportedEdgeFeature::CompatibilityRequestCrypto,
-            ),
-            (
-                r#""share_issue":{"success_status":200}"#,
-                UnsupportedEdgeFeature::ShareIssue,
             ),
             (
                 r#""auth_refresh":{"success_status":200}"#,
@@ -214,6 +191,7 @@ mod tests {
         for body in [
             with_route(r#""security_entry":"auth_entry""#),
             with_route(r#""share_issue":null"#),
+            with_route(r#""security_entry":"share_entry""#),
             with_route(r#""request_crypto":{"mode":"OBSERVE"}"#),
             r#"{"policy":{"routes":"not routes"}}"#.to_owned(),
             "not json".to_owned(),

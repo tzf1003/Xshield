@@ -61,6 +61,7 @@ fn exact(id: &str, method: &str, path: &str, entry: SecurityEntry) -> SiteRouteC
         issued_by: None,
         resource_grant: None,
         query_pagination: None,
+        share_issue: None,
     }
 }
 
@@ -1231,6 +1232,13 @@ fn check(tally: &mut Tally, label: &str, mutate: fn(&mut SiteConfig), expect: Ex
     tally.expect(label, &config, expect);
 }
 
+/// Judges the share topology after `mutate`.
+fn check_share(tally: &mut Tally, label: &str, mutate: fn(&mut SiteConfig), expect: Expect) {
+    let mut config = share_flow();
+    mutate(&mut config);
+    tally.expect(label, &config, expect);
+}
+
 /// Every flow rule core mirrors, as an accepted or a refused sample that the
 /// edge judges the same way, including the cross-route rules.
 #[test]
@@ -1876,6 +1884,468 @@ fn generated_query_pagination_routes_never_pass_core_and_fail_the_edge() {
         }
     }
     tally.finish(1, 50);
+}
+
+/// The identity script's share scope: a fixed `share_entry` read and the UI
+/// action that issues credentials for it (`scripts/test_gateway_identity.sh`).
+fn share_read() -> SiteRouteConfig {
+    let mut route = exact(
+        "records.share.read",
+        "GET",
+        "/shared-record",
+        SecurityEntry::ShareEntry,
+    );
+    route.resource_type = Some("record".to_owned());
+    route.view_profile = Some("shared_summary".to_owned());
+    route.resource_query_parameter = Some("record_id".to_owned());
+    route
+}
+
+fn share_issuer() -> SiteRouteConfig {
+    let mut route = exact(
+        "records.share.issue",
+        "GET",
+        "/share-issue",
+        SecurityEntry::UiActionRequired,
+    );
+    route.source_action = Some("records.share".to_owned());
+    route.resource_type = Some("record".to_owned());
+    route.view_profile = Some("share_controls".to_owned());
+    route.resource_query_parameter = Some("record_id".to_owned());
+    "BUFFERED_JSON".clone_into(&mut route.response_mode);
+    route.max_response_bytes = 512;
+    route.share_issue = Some(xshield_core::SiteShareIssue {
+        success_status: 200,
+        token_field: "share_token".to_owned(),
+        target_operation_id: "records.share.read".to_owned(),
+        issuance_rule_id: "record-share-r1".to_owned(),
+        ttl_seconds: 300,
+        max_active_shares: 1,
+    });
+    route
+}
+
+/// The loop topology with the share pair next to it.
+fn share_flow() -> SiteConfig {
+    let mut config = browser_loop();
+    config.policy.routes.push(share_read());
+    config.policy.routes.push(share_issuer());
+    config
+}
+
+fn share_block(config: &mut SiteConfig) -> &mut xshield_core::SiteShareIssue {
+    loop_route(config, "records.share.issue")
+        .share_issue
+        .as_mut()
+        .unwrap()
+}
+
+/// The script that runs the real edge binary against a real database.
+const GATEWAY_IDENTITY_SCRIPT: &str = include_str!("../../../scripts/test_gateway_identity.sh");
+
+/// The operations of the real-binary identity script whose id starts with
+/// `prefix`, without the explicit `null` members its heredoc spells out.
+fn script_operations(prefix: &str) -> Vec<serde_json::Value> {
+    fn strip_nulls(value: &mut serde_json::Value) {
+        if let Some(object) = value.as_object_mut() {
+            object.retain(|_, member| !member.is_null());
+            object.values_mut().for_each(strip_nulls);
+        }
+    }
+    let needle = format!("\"operation_id\":\"{prefix}");
+    let mut operations = GATEWAY_IDENTITY_SCRIPT
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{') && line.contains(&needle))
+        .map(|line| {
+            let mut value: serde_json::Value =
+                serde_json::from_str(line.trim().trim_end_matches(',')).unwrap();
+            strip_nulls(&mut value);
+            value
+        })
+        .collect::<Vec<_>>();
+    operations.sort_by_key(|operation| operation["operation_id"].as_str().map(str::to_owned));
+    operations
+}
+
+/// The share scope the real-binary identity script exercises is exactly what
+/// the control plane projects from its typed model.
+#[test]
+fn the_identity_scripts_share_scope_is_what_the_control_plane_projects() {
+    let scripted = script_operations("records.share.");
+    assert_eq!(scripted.len(), 2, "the script's share operations moved");
+    let mut projected = vec![
+        xshield_core::site::gateway_operation(&share_read()).unwrap(),
+        xshield_core::site::gateway_operation(&share_issuer()).unwrap(),
+    ];
+    projected.sort_by_key(|operation| operation["operation_id"].as_str().map(str::to_owned));
+    assert_eq!(projected, scripted);
+}
+
+/// `share_issue` and the `share_entry` admission, judged by the control plane
+/// and the real edge compiler alike.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn share_issue_rules_match_the_edge() {
+    let mut tally = Tally::new();
+    let both = Expect::BothAccept;
+    let reject = Expect::CoreMustReject;
+
+    tally.expect("the share pair", &share_flow(), both);
+    check(
+        &mut tally,
+        "share entry alone",
+        |c| c.policy.routes.push(share_read()),
+        both,
+    );
+    check(
+        &mut tally,
+        "share entry located by a path segment, no issuer",
+        |c| {
+            let mut entry = share_read();
+            entry.path = "/shared/{record_id}".to_owned();
+            entry.resource_query_parameter = None;
+            entry.resource_path_parameter = Some("record_id".to_owned());
+            c.policy.routes.push(entry);
+        },
+        both,
+    );
+    for (label, status, expect) in [
+        ("status 200", 200, both),
+        ("status 201", 201, both),
+        ("status 299", 299, both),
+        ("status 199", 199, reject),
+        ("status 204", 204, reject),
+        ("status 205", 205, reject),
+        ("status 206", 206, reject),
+        ("status 300", 300, reject),
+    ] {
+        let mut config = share_flow();
+        share_block(&mut config).success_status = status;
+        tally.expect(&format!("share {label}"), &config, expect);
+    }
+    for (label, ttl, expect) in [
+        ("ttl 1", 1, both),
+        ("ttl 86400", 86_400, both),
+        ("ttl 0", 0, reject),
+        ("ttl 86401", 86_401, reject),
+    ] {
+        let mut config = share_flow();
+        share_block(&mut config).ttl_seconds = ttl;
+        tally.expect(&format!("share {label}"), &config, expect);
+    }
+    for (label, active, expect) in [
+        ("active shares 1", 1, both),
+        ("active shares 5000", 5_000, both),
+        ("active shares 0", 0, reject),
+        ("active shares 5001", 5_001, reject),
+    ] {
+        let mut config = share_flow();
+        share_block(&mut config).max_active_shares = active;
+        tally.expect(&format!("share {label}"), &config, expect);
+    }
+    let long = "f".repeat(129);
+    let max = "f".repeat(128);
+    for (label, field, value, expect) in [
+        ("token field of 128", "token_field", max.as_str(), both),
+        ("token field of 129", "token_field", long.as_str(), reject),
+        ("empty token field", "token_field", "", reject),
+        ("token field with a space", "token_field", "a b", reject),
+        ("token field with a slash", "token_field", "a/b", reject),
+        ("rule id of 128", "issuance_rule_id", max.as_str(), both),
+        ("rule id of 129", "issuance_rule_id", long.as_str(), reject),
+        ("empty rule id", "issuance_rule_id", "", reject),
+        ("rule id with a colon", "issuance_rule_id", "a:b", reject),
+        (
+            "unknown target",
+            "target_operation_id",
+            "records.gone",
+            reject,
+        ),
+        ("empty target", "target_operation_id", "", reject),
+        (
+            "target is not a share entry",
+            "target_operation_id",
+            "orders.read",
+            reject,
+        ),
+        (
+            "target is a page",
+            "target_operation_id",
+            "app.page",
+            reject,
+        ),
+        (
+            "target is the issuer",
+            "target_operation_id",
+            "records.share.issue",
+            reject,
+        ),
+    ] {
+        let mut config = share_flow();
+        let block = share_block(&mut config);
+        match field {
+            "token_field" => value.clone_into(&mut block.token_field),
+            "issuance_rule_id" => value.clone_into(&mut block.issuance_rule_id),
+            _ => value.clone_into(&mut block.target_operation_id),
+        }
+        tally.expect(label, &config, expect);
+    }
+    // The issuer must be a UI action GET bound to a resource.
+    check_share(
+        &mut tally,
+        "issuer without a resource binding",
+        |c| {
+            let issuer = loop_route(c, "records.share.issue");
+            issuer.resource_type = None;
+            issuer.view_profile = None;
+            issuer.resource_query_parameter = None;
+        },
+        reject,
+    );
+    for (label, entry) in [
+        (
+            "issuer on an authenticated root",
+            SecurityEntry::AuthenticatedRoot,
+        ),
+        ("issuer on a public route", SecurityEntry::Public),
+        ("issuer on an auth entry", SecurityEntry::AuthEntry),
+        ("issuer on a share entry", SecurityEntry::ShareEntry),
+    ] {
+        let mut config = share_flow();
+        let issuer = loop_route(&mut config, "records.share.issue");
+        issuer.security_entry = entry;
+        issuer.source_action = None;
+        tally.expect(label, &config, reject);
+    }
+    check_share(
+        &mut tally,
+        "issuer as a path-located resource route",
+        |c| {
+            let issuer = loop_route(c, "records.share.issue");
+            issuer.path = "/share-issue/{record_id}".to_owned();
+            issuer.resource_query_parameter = None;
+            issuer.resource_path_parameter = Some("record_id".to_owned());
+        },
+        both,
+    );
+    // The redeeming route.
+    check_share(
+        &mut tally,
+        "target of another resource type",
+        |c| loop_route(c, "records.share.read").resource_type = Some("other".to_owned()),
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "target located by a path segment",
+        |c| {
+            let entry = loop_route(c, "records.share.read");
+            entry.path = "/shared/{record_id}".to_owned();
+            entry.resource_query_parameter = None;
+            entry.resource_path_parameter = Some("record_id".to_owned());
+        },
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "share entry without a resource",
+        |c| {
+            let entry = loop_route(c, "records.share.read");
+            entry.resource_type = None;
+            entry.view_profile = None;
+            entry.resource_query_parameter = None;
+        },
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "share entry with a source action",
+        |c| loop_route(c, "records.share.read").source_action = Some("records.read".to_owned()),
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "share entry that is not a GET",
+        |c| loop_route(c, "records.share.read").method = "POST".to_owned(),
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "paginated share entry",
+        |c| loop_route(c, "records.share.read").query_pagination = Some(paging(&["page"])),
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "share entry carrying a grant",
+        |c| {
+            let grant = loop_route(c, "orders.list").resource_grant.clone();
+            loop_route(c, "records.share.read").resource_grant = grant;
+        },
+        reject,
+    );
+    // Neighbouring effects on the issuer.
+    check_share(
+        &mut tally,
+        "issuer that also qualifies resources",
+        |c| {
+            let grant = loop_route(c, "orders.list").resource_grant.clone();
+            loop_route(c, "records.share.issue").resource_grant = grant;
+        },
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "issuer with response encryption",
+        |c| {
+            loop_route(c, "records.share.issue").response_crypto =
+                Some(response_crypto("rk", 4_096));
+        },
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "issuer served as SENSOR_HTML",
+        |c| {
+            let mut sensor = loop_route(c, "app.page").sensor_html.clone().unwrap();
+            "share-page-r1".clone_into(&mut sensor.adapter_revision);
+            sensor.origin_sha256 = "d".repeat(64);
+            let issuer = loop_route(c, "records.share.issue");
+            issuer.response_mode = "SENSOR_HTML".to_owned();
+            issuer.sensor_html = Some(sensor);
+        },
+        reject,
+    );
+    check_share(
+        &mut tally,
+        "issuer without a response mode",
+        |c| loop_route(c, "records.share.issue").response_mode = String::new(),
+        both,
+    );
+    // The issuer is also a grant target, as in the real flow: the descriptor
+    // the grant provisions is the same on both sides.
+    check_share(
+        &mut tally,
+        "issuer reached through a page-issued grant",
+        |c| {
+            let mut list = loop_route(c, "orders.list").clone();
+            "records.list".clone_into(&mut list.operation_id);
+            "/records".clone_into(&mut list.path);
+            "records.list.open".clone_into(list.source_action.as_mut().unwrap());
+            let grant = list.resource_grant.as_mut().unwrap();
+            "records.share.issue".clone_into(&mut grant.target_operation_id);
+            "share-map-r1".clone_into(&mut grant.target_mapping_revision);
+            c.policy.routes.push(list);
+        },
+        both,
+    );
+    tally.finish(12, 30);
+}
+
+/// The control-plane spelling of the loop with a share scope.
+const SHARE_FLOW_FIXTURE: &str = include_str!("../../../tests/site-config/share-flow.json");
+
+/// The share fixture compiles on the edge, both sides derive one descriptor
+/// digest for it, and the share blocks themselves leave that digest alone:
+/// the edge derives descriptors from page actions and grant targets only, so
+/// a share change must not demand a new `policy_revision` label (the issuer
+/// route, as a grant target, is the one part that does).
+#[test]
+fn the_share_fixture_compiles_and_the_share_blocks_leave_the_descriptor_set_alone() {
+    let mut full: SiteConfig = serde_json::from_str(SHARE_FLOW_FIXTURE).unwrap();
+    full.listen_port = 6100;
+    let mut tally = Tally::new();
+    tally.expect("the share fixture", &full, Expect::BothAccept);
+    let edge_digest = |config: &SiteConfig| {
+        let value = config.gateway_config(TENANT, &site()).unwrap();
+        GatewayConfig::from_json(&serde_json::to_vec(&value).unwrap())
+            .unwrap()
+            .edge_descriptors()
+            .unwrap()
+            .content_digest_hex()
+    };
+    let mut bare = full.clone();
+    loop_route(&mut bare, "records.share.issue").share_issue = None;
+    bare.policy
+        .routes
+        .retain(|route| route.operation_id != "records.share.read");
+    tally.expect(
+        "the fixture without its share scope",
+        &bare,
+        Expect::BothAccept,
+    );
+    assert_eq!(edge_digest(&full), edge_digest(&bare));
+    tally.finish(2, 0);
+}
+
+/// Every combination of admission, method, resource binding and neighbouring
+/// blocks with a `share_issue` or a `share_entry` admission: core may be
+/// stricter than the edge, never looser.
+#[test]
+fn generated_share_routes_never_pass_core_and_fail_the_edge() {
+    let mut tally = Tally::new();
+    let entries = [
+        SecurityEntry::Public,
+        SecurityEntry::AuthEntry,
+        SecurityEntry::AuthenticatedRoot,
+        SecurityEntry::UiActionRequired,
+        SecurityEntry::ShareEntry,
+    ];
+    let issuer = share_issuer();
+    let grant = loop_route(&mut browser_loop(), "orders.list")
+        .resource_grant
+        .clone();
+    let revoke = loop_route(&mut browser_loop(), "auth.logout")
+        .auth_revoke
+        .clone();
+    for entry in entries {
+        for method in ["GET", "POST"] {
+            for mode in ["", "BUFFERED_JSON"] {
+                for blocks in 0_u8..64 {
+                    let mut probe = exact("probe", method, "/probe", entry);
+                    probe.response_mode = mode.to_owned();
+                    probe.max_response_bytes = 16_384;
+                    if blocks & 1 != 0 {
+                        probe.share_issue.clone_from(&issuer.share_issue);
+                    }
+                    if blocks & 2 != 0 {
+                        probe.resource_type = Some("record".to_owned());
+                        probe.view_profile = Some("share_controls".to_owned());
+                        probe.resource_query_parameter = Some("record_id".to_owned());
+                    }
+                    if blocks & 4 != 0 {
+                        probe.response_crypto = Some(response_crypto("rk", 40_000));
+                    }
+                    if blocks & 8 != 0 {
+                        probe.resource_grant.clone_from(&grant);
+                    }
+                    if blocks & 16 != 0 {
+                        probe.auth_revoke.clone_from(&revoke);
+                    }
+                    if blocks & 32 != 0 {
+                        probe.request_crypto = Some(observe("probe-observe-r1"));
+                    }
+                    // The probe stands next to a valid pair, and is also the
+                    // target of the issuer, so that both ends of the
+                    // cross-route rule are exercised.
+                    let mut config = share_flow();
+                    config.policy.routes.push(probe.clone());
+                    tally.implication(
+                        &format!("{entry:?} {method} {mode:?} blocks={blocks:06b}"),
+                        &config,
+                    );
+                    let mut retargeted = share_flow();
+                    share_block(&mut retargeted).target_operation_id = "probe".to_owned();
+                    retargeted.policy.routes.push(probe);
+                    tally.implication(
+                        &format!("{entry:?} {method} {mode:?} blocks={blocks:06b} retargeted"),
+                        &retargeted,
+                    );
+                }
+            }
+        }
+    }
+    tally.finish(20, 500);
 }
 
 fn builds(count: usize) -> Vec<xshield_core::SiteSensorHtmlAdapter> {

@@ -21,14 +21,13 @@
 //! before persistence and again by the edge; nothing is derived from traffic.
 //! The module is pure: no I/O, no clock.
 //!
-//! Gateway features this module does not model (`share_issue`,
-//! `auth_refresh`, `auth_context_switch`, `evidence_capture`, `COMPATIBILITY`
-//! request crypto, `SHARE_ENTRY`/`SERVICE_IDENTITY` admissions) cannot be
-//! stored: the typed configuration rejects unknown members, and
+//! Gateway features this module does not model (`auth_refresh`,
+//! `auth_context_switch`, `evidence_capture`, `COMPATIBILITY` request crypto,
+//! the `SERVICE_IDENTITY` admission) cannot be stored: the typed configuration rejects unknown members, and
 //! [`super::unsupported`] names the feature so the control plane can refuse it
 //! with a stable reason instead of a generic parse error.
 
-use super::{SecurityEntry, SiteRouteConfig, edge_scoped_value};
+use super::{SecurityEntry, SiteRouteConfig, edge_scoped_value, share};
 use crate::domain::{FieldName, InvalidValue, MappingRevision, OperationId, parse_lower_hex_32};
 use crate::query_pagination::QUERY_PAGINATION_INVALID;
 use serde::{Deserialize, Serialize};
@@ -210,11 +209,14 @@ pub(super) fn validate_route(route: &SiteRouteConfig) -> Result<(), InvalidValue
     validate_sensor_html(route)?;
     validate_page_blocks(route)?;
     validate_resource_grant(route)?;
+    share::validate_route(route)?;
     validate_query_pagination(route)?;
     // The edge allows at most one identity or issuance effect per response.
     // `auth_binding` and `resource_grant` cannot meet (their admissions
-    // differ), so only a logout that also qualifies resources reaches this.
+    // differ), so only a logout that also qualifies resources reaches this;
+    // a share issuer is a UI action, which no identity effect admits.
     if usize::from(route.resource_grant.is_some())
+        + usize::from(route.share_issue.is_some())
         + usize::from(route.auth_binding.is_some())
         + usize::from(route.auth_revoke.is_some())
         > 1
@@ -264,6 +266,7 @@ fn validate_sensor_html(route: &SiteRouteConfig) -> Result<(), InvalidValue> {
     if route.method != "GET"
         || route.response_crypto.is_some()
         || route.resource_grant.is_some()
+        || route.share_issue.is_some()
         || route.auth_binding.is_some()
         || route.auth_revoke.is_some()
         || adapter.additional_adapters.len() > EDGE_MAX_ADDITIONAL_ADAPTERS
@@ -468,6 +471,7 @@ pub(super) fn validate_route_set(routes: &[SiteRouteConfig]) -> Result<(), Inval
     if identity_change_routes > EDGE_MAX_SENSOR_ROUTES {
         return Err(InvalidValue::new(AUTH_FLOW_INVALID));
     }
+    share::validate_route_set(routes)?;
     validate_descriptor_meanings(routes, &by_id)
 }
 

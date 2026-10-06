@@ -1071,6 +1071,8 @@ async fn direct_apply_and_pre_authorization_leave_bound_records() {
 
 /// The real-browser loop topology as the control plane stores it.
 const BROWSER_LOOP: &str = include_str!("../../../tests/site-config/browser-loop.json");
+/// The loop plus a share scope, as the control plane stores it.
+const SHARE_FLOW: &str = include_str!("../../../tests/site-config/share-flow.json");
 /// A stored configuration exactly as written before the flow fields existed.
 const PRE_FLOW: &str = include_str!("../../../tests/site-config/pre-flow.json");
 
@@ -1284,11 +1286,11 @@ async fn a_failing_route_projection_rolls_the_whole_write_back() {
     cleanup(&pool, &tenant).await;
 }
 
-/// Migration 0052 widens the projection to the new admission and keeps every
-/// other admission value refused.
+/// Migrations 0052 and 0054 widen the projection to the authentication and
+/// share entries and keep every other admission value refused.
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
-async fn the_route_projection_accepts_auth_entry_and_nothing_unknown() {
+async fn the_route_projection_accepts_auth_and_share_entries_and_nothing_unknown() {
     let (store, pool, tenant, site) = session("flow_admission").await;
     created(save(&store, &tenant, &site, &Draft::new(1)).await);
     let insert = |admission: &'static str, issued_by: Option<serde_json::Value>| {
@@ -1304,7 +1306,7 @@ async fn the_route_projection_accepts_auth_entry_and_nothing_unknown() {
         .bind(issued_by)
     };
     insert("AUTH_ENTRY", None).execute(&pool).await.unwrap();
-    assert!(insert("SHARE_ENTRY", None).execute(&pool).await.is_err());
+    insert("SHARE_ENTRY", None).execute(&pool).await.unwrap();
     assert!(
         insert(
             "SERVICE_IDENTITY",
@@ -1319,6 +1321,58 @@ async fn the_route_projection_accepts_auth_entry_and_nothing_unknown() {
             .execute(&pool)
             .await
             .is_err()
+    );
+    cleanup(&pool, &tenant).await;
+}
+
+/// A share scope is stored whole in both authoritative copies, and its
+/// projection rows carry the `SHARE_ENTRY` admission and the issuer's
+/// `share_issue` as the edge compiles it.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn a_share_scope_round_trips_and_is_projected_to_its_routes() {
+    let (store, pool, tenant, site) = session("share_flow").await;
+    let config: SiteConfig = serde_json::from_str(SHARE_FLOW).unwrap();
+    let record = created(
+        save_config(&store, &tenant, &site, &config, "share-author", 1)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        serde_json::to_string_pretty(&record.site_config()).unwrap(),
+        SHARE_FLOW.trim_end()
+    );
+    let revision = store
+        .read_protected_site_revision_config(&tenant, &site, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string_pretty(&revision).unwrap(),
+        SHARE_FLOW.trim_end()
+    );
+    let admission: String = sqlx::query_scalar(
+        "SELECT admission FROM xshield.site_routes
+         WHERE tenant_id = $1 AND site_id = $2 AND operation_id = 'records.share.read'",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(admission, "SHARE_ENTRY");
+    let response: serde_json::Value = sqlx::query_scalar(
+        "SELECT response_config FROM xshield.site_routes
+         WHERE tenant_id = $1 AND site_id = $2 AND operation_id = 'records.share.issue'",
+    )
+    .bind(tenant.as_str())
+    .bind(site.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        response["share_issue"]["issuance_rule_id"],
+        "record-share-r1"
     );
     cleanup(&pool, &tenant).await;
 }
