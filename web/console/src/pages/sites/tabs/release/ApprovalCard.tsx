@@ -1,8 +1,26 @@
 import { Skeleton } from "antd";
+import { needsIndependentApproval } from "../../../../sites/model/risk.ts";
 import type { WorkspaceApi } from "../../workspace/use-workspace.ts";
 import type { Release } from "./use-release.ts";
 
 const SHOWN_PER_REASON = 4;
+
+/**
+ * The browser provenance-flow reasons can only be cleared by a second person: the server refuses
+ * an Agent key's `site.config.apply_direct` for them (403 CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED,
+ * nothing published), and the same holds when a rollback restores such routes.
+ */
+export function IndependentApprovalNote({ labels }: { labels: readonly string[] }) {
+  if (labels.length === 0) return null;
+  return (
+    <p className="xs-independent-note">
+      其中“{labels.join("”“")}
+      ”属于浏览器来源流程，只能由另一位具备策略审批角色的人批准：持有“直接应用”能力的 Agent Key
+      不能代替（服务端以 CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED
+      拒绝，什么也不发布），回滚恢复这些路由时同样如此。
+    </p>
+  );
+}
 
 /**
  * 为什么需要审批, in the console's words. The server decides and reports only yes or no; the
@@ -94,6 +112,14 @@ export function ApprovalCard({ ws, release }: { ws: WorkspaceApi; release: Relea
             </li>
           ))}
         </ul>
+      )}
+
+      {explanation && need.verdict !== false && (
+        <IndependentApprovalNote
+          labels={explanation.reasons
+            .filter((reason) => needsIndependentApproval(reason.token))
+            .map((reason) => reason.label)}
+        />
       )}
 
       {explanation && explanation.free.length > 0 && (

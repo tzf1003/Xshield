@@ -49,14 +49,21 @@ export function DiffTable({ changes, showRisk = false, empty = "没有差异。"
       key: "risk",
       width: 190,
       // The token pills of the rest of the console: legible in both themes, unlike a preset tag.
-      render: (_, change) =>
-        change.risk ? (
-          <span className="xs-pill xs-pill--sm xs-pill--observe">
-            {riskText(change.risk).label}
+      // A route of the browser provenance flow also names every flow facet it takes part in:
+      // those reasons need an independent approver, so the operator must see them per field.
+      render: (_, change) => {
+        if (!change.risk) return <span className="xs-pill xs-pill--sm">无需审批</span>;
+        const tokens = [change.risk, ...(change.facets ?? []).filter((t) => t !== change.risk)];
+        return (
+          <span className="xs-risk-pills">
+            {tokens.map((token) => (
+              <span key={token} className="xs-pill xs-pill--sm xs-pill--observe">
+                {riskText(token).label}
+              </span>
+            ))}
           </span>
-        ) : (
-          <span className="xs-pill xs-pill--sm">无需审批</span>
-        ),
+        );
+      },
     });
   }
   return (

@@ -2,6 +2,7 @@ import { Alert, Button, Modal, Select } from "antd";
 import { useMemo, useState } from "react";
 import { configFromStored } from "../../../../sites/model/config.ts";
 import { diffConfigs } from "../../../../sites/model/diff.ts";
+import { needsIndependentApproval } from "../../../../sites/model/risk.ts";
 import { IdChip } from "../../../../ui/IdChip";
 import { DiffTable } from "../../DiffView";
 import type { WorkspaceApi } from "../../workspace/use-workspace.ts";
@@ -66,6 +67,35 @@ function ChangeSection({
         <p className="muted">{release.diffNote}</p>
       )}
     </section>
+  );
+}
+
+/**
+ * What approving a browser provenance-flow change means: only this approval can publish it, and
+ * the edge checks the page-action descriptor set against the policy revision label when it applies.
+ */
+function FlowConsequences({ release }: { release: Release }) {
+  const reasons = (release.need.explanation?.reasons ?? []).filter((reason) =>
+    needsIndependentApproval(reason.token),
+  );
+  if (reasons.length === 0) return null;
+  const descriptors = reasons.some(
+    (reason) =>
+      reason.token === "PAGE_ACTIONS_CHANGED" || reason.token === "RESOURCE_GRANT_CHANGED",
+  );
+  return (
+    <>
+      <li>
+        这次修订改变了浏览器来源流程（{reasons.map((reason) => reason.label).join("、")}
+        ）：只有独立审批人的批准能让它发布，“直接应用”能力不能代替。
+      </li>
+      {descriptors && (
+        <li>
+          edge 应用时会按策略版本标签核对页面签发动作的描述集合：标签已用于另一套描述时 edge
+          拒绝应用（EDGE_APPLY_DESCRIPTOR_CONFLICT），继续服务上一版本。动作描述改变时，修订应同时提升“策略版本”标签。
+        </li>
+      )}
+    </>
   );
 }
 
@@ -142,6 +172,7 @@ export function ApproveModal({ ws, release, open, onClose }: ModalProps) {
           </li>
           <li>下发失败时站点显示“应用失败”，edge 继续服务上一版本；可以重试，也可以回滚。</li>
           <li>提交人不能批准自己的修订，服务端会拒绝。</li>
+          <FlowConsequences release={release} />
         </ul>
       </section>
       <StepUpNotice advice={advice} action="批准" />
@@ -305,7 +336,7 @@ function RollbackBody({ ws, release }: { ws: WorkspaceApi; release: Release }) {
           <li>
             {plan.cancelsPendingChange
               ? "新修订与 edge 在用的版本内容相同，没有差异，不需要审批，写入后立即下发。"
-              : "是否需要审批按普通变更的规则判断（与 edge 在用的版本比较）；需要时，另一位审批人批准后才会生效。"}
+              : "是否需要审批按普通变更的规则判断（与 edge 在用的版本比较）；需要时，另一位审批人批准后才会生效。恢复的内容若改变浏览器来源流程，只能由独立审批人批准，“直接应用”能力不能代替。"}
           </li>
           <li>edge 确认之前仍在服务 r{view.active_revision}。</li>
           {ws.access.canObserve && (

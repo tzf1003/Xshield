@@ -70,6 +70,8 @@ test("create: the exact body is frozen, the plaintext is shown once and cleared 
   await page.getByRole("button", { name: "创建 API Key" }).click();
   // The direct-apply consequence is spelled out next to its checkbox before anything is ticked.
   await expect(createDialog(page)).toContainText("跳过“另一位审批人批准”");
+  // ...except for the browser provenance flow, which the server never lets a key waive.
+  await expect(createDialog(page)).toContainText("CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED");
   await fillCreate(page);
   await createDialog(page).getByText("7 天", { exact: true }).click();
   const before = Date.now();

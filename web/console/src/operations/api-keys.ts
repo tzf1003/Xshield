@@ -71,7 +71,8 @@ export const capabilityCatalog: readonly CapabilityInfo[] = [
   {
     name: "site.config.apply_direct",
     label: "直接应用",
-    description: "不经另一位审批人，直接把待审批的修订发布到 edge。",
+    description:
+      "不经另一位审批人，直接把待审批的修订发布到 edge；改变浏览器来源流程（认证入口、SENSOR_HTML 页面、页面签发动作、资源资格）的修订除外，它们只能由独立审批人批准。",
     issuerRoles: ["release_operator", "policy_approver"],
     tenantWide: false,
   },
@@ -99,7 +100,7 @@ export function capabilityInfo(name: string): CapabilityInfo | null {
 
 /** What `site.config.apply_direct` means for approvals, shown next to its checkbox. */
 export const applyDirectWarning =
-  "勾选后，这把 Key 可以跳过“另一位审批人批准”，把需要审批的高风险修订直接发布到 edge。每次直接应用都会以 Key ID 与 Agent 主体写入审批记录和审计（EDGE_DIRECT_APPLY_CONFIRMED），但不会再有第二个人看过这次变更。只在确有自动化发布需求时授予。";
+  "勾选后，这把 Key 可以跳过“另一位审批人批准”，把需要审批的高风险修订直接发布到 edge。每次直接应用都会以 Key ID 与 Agent 主体写入审批记录和审计（EDGE_DIRECT_APPLY_CONFIRMED），但不会再有第二个人看过这次变更。改变浏览器来源流程（认证入口、SENSOR_HTML 页面、页面签发动作、资源资格）的修订不在此列：服务端以 CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED 拒绝，什么也不发布，只能由独立审批人批准。只在确有自动化发布需求时授予。";
 
 export type ScopeRow = Readonly<{
   /** Local row identity for the editor; never sent. */
