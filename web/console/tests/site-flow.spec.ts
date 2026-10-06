@@ -642,6 +642,9 @@ for (const scheme of ["light", "dark"] as const) {
   test.describe(`flow drawer accessibility (${scheme})`, () => {
     test.use({ colorScheme: scheme });
     test("every flow group has no serious violations", async ({ page }) => {
+      // One drawer open, prepare and axe scan per flow group in a single test: the group list
+      // keeps growing, and the default 30 s is not enough for it on a two-core CI runner.
+      test.setTimeout(180_000);
       await mockSite(page, { config: loop() });
       await signInAt(page, "/sites/site_alpha/routes");
       for (const [id, name, prepare] of openGroups) {
@@ -660,6 +663,7 @@ for (const scheme of ["light", "dark"] as const) {
 test("on a 390 px screen the drawer and every flow group fit without sideways scrolling", async ({
   page,
 }) => {
+  test.setTimeout(180_000); // every flow group in one test, see the accessibility test above
   await page.setViewportSize({ width: 390, height: 844 });
   await mockSite(page, { config: loop() });
   await signInAt(page, "/sites/site_alpha/routes");
