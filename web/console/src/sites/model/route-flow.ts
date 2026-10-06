@@ -24,6 +24,7 @@ import type {
   SiteQueryParameter,
   SiteResourceGrant,
   SiteRouteConfig,
+  SiteShareIssue,
   SiteSensorHtmlAdapter,
   routeFlowKeys,
 } from "../../api.ts";
@@ -44,6 +45,7 @@ export const flowBlockLabel: Readonly<Record<FlowBlock, string>> = {
   issued_by: "由页面签发",
   resource_grant: "响应资源资格",
   query_pagination: "分页参数",
+  share_issue: "分享凭据发放",
 };
 
 /** The item member the edge writes each issued reference into (the browser loop's spelling). */
@@ -90,6 +92,22 @@ export const emptyResourceGrant = (target = ""): SiteResourceGrant => ({
   ttl_seconds: 600,
   max_items: 50,
   max_active_grants: 500,
+});
+
+/** The member the edge adds to an issuing response (the identity script's spelling). */
+export const DEFAULT_SHARE_TOKEN_FIELD = "share_token";
+
+/**
+ * A new share issuance: bounded lease and capacity, but the target and the rule ID stay empty
+ * (they name the operator's share entry and the independently provisioned rule row).
+ */
+export const emptyShareIssue = (target = ""): SiteShareIssue => ({
+  success_status: 200,
+  token_field: DEFAULT_SHARE_TOKEN_FIELD,
+  target_operation_id: target,
+  issuance_rule_id: "",
+  ttl_seconds: 300,
+  max_active_shares: 100,
 });
 
 /** A new parameter: the name is the operator's to choose, the kind starts as a page number. */
@@ -148,6 +166,7 @@ const fits: Readonly<Record<FlowBlock, (route: SiteRouteConfig) => boolean>> = {
     (route.security_entry === "authenticated_root" ||
       route.security_entry === "ui_action_required") &&
     notPage(route),
+  share_issue: (route) => routeOnly("ui_action_required")(route) && notPage(route),
 };
 
 export function blockFits(route: SiteRouteConfig, block: FlowBlock): boolean {
@@ -180,6 +199,16 @@ export function blockOffered(route: SiteRouteConfig, block: FlowBlock): boolean 
         : !bindsResource(route))
     );
   }
+  if (block === "share_issue") {
+    // The issuer is the resource-bound GET the caller's action and grant already qualified
+    // (core `share::validate_route`); without a resource there is nothing to share.
+    return (
+      blockFits(route, block) &&
+      route.method === "GET" &&
+      route.response_crypto === null &&
+      Boolean(route.resource_type)
+    );
+  }
   return blockFits(route, block) && !(block === "issued_by" && bindsResource(route));
 }
 
@@ -191,6 +220,7 @@ const blocks: readonly FlowBlock[] = [
   "issued_by",
   "resource_grant",
   "query_pagination",
+  "share_issue",
 ];
 
 /** Sets (or, with `undefined`, removes) one block; the key disappears when removed. */
@@ -310,6 +340,25 @@ export function pageRootOptions(
           : route.security_entry !== "authenticated_root"
             ? "该页面不是“已认证根”"
             : null,
+    }));
+}
+
+/** The routes that can redeem a share: other `share_entry` GET routes located by a query field. */
+export function shareTargetOptions(
+  routes: readonly SiteRouteConfig[],
+  self: number | null,
+): RouteOption[] {
+  const source = self === null ? undefined : routes[self];
+  return others(routes, self)
+    .filter((route) => route.security_entry === "share_entry" && route.method === "GET")
+    .map((route) => ({
+      value: route.operation_id,
+      label: describe(route),
+      note: !route.resource_query_parameter
+        ? "该分享入口用路径段定位资源，而分享凭据只能以查询字段出示"
+        : source?.resource_type && route.resource_type !== source.resource_type
+          ? "该分享入口的资源类型与发放方不同"
+          : null,
     }));
 }
 

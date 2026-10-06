@@ -1,12 +1,13 @@
 import type { SitePolicyConfig, SiteRouteConfig } from "../../api.ts";
 
-/** The four approval reasons of the browser provenance flow (`FLOW_FACETS` of risk.rs). */
+/** The approval reasons of the browser provenance flow (`FLOW_FACETS` of risk.rs). */
 export type FlowToken =
   | "AUTH_ENTRY_CHANGED"
   | "SENSOR_HTML_CHANGED"
   | "PAGE_ACTIONS_CHANGED"
   | "RESOURCE_GRANT_CHANGED"
-  | "QUERY_PAGINATION_CHANGED";
+  | "QUERY_PAGINATION_CHANGED"
+  | "SHARE_ISSUE_CHANGED";
 
 type Member = (policy: SitePolicyConfig, route: SiteRouteConfig) => boolean;
 
@@ -42,6 +43,12 @@ export const flowFacets: readonly (readonly [FlowToken, Member])[] = [
       ),
   ],
   ["QUERY_PAGINATION_CHANGED", (_, route) => route.query_pagination !== undefined],
+  // Either end of a share scope: the issuer that mints the credential and the share entry that
+  // redeems it without any identity.
+  [
+    "SHARE_ISSUE_CHANGED",
+    (_, route) => route.share_issue !== undefined || route.security_entry === "share_entry",
+  ],
 ];
 
 /** The facets `route` belongs to within `policy`, in facet order. */

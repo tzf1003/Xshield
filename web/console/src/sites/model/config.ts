@@ -7,6 +7,7 @@ import type {
   SitePolicyConfig,
   SiteQueryPagination,
   SiteResourceGrant,
+  SiteShareIssue,
   SiteRouteConfig,
   SiteSecretReference,
   SiteSensorHtml,
@@ -34,10 +35,11 @@ export const securityEntryLabel: Record<SecurityEntry, string> = {
   ui_action_required: "必须有界面操作来源",
 };
 
-/** Route admissions: the site entry's three plus the route-only authentication entry. */
+/** Route admissions: the site entry's three plus the route-only authentication and share entries. */
 export const routeAdmissionLabel: Record<RouteAdmission, string> = {
   ...securityEntryLabel,
   auth_entry: "认证入口",
+  share_entry: "分享入口",
 };
 
 export const statusLabel: Record<ConfigStatus, string> = {
@@ -194,7 +196,13 @@ const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback
 
 const methods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const entries = ["public", "authenticated_root", "ui_action_required"] as const;
-const admissions = ["public", "auth_entry", "authenticated_root", "ui_action_required"] as const;
+const admissions = [
+  "public",
+  "auth_entry",
+  "authenticated_root",
+  "ui_action_required",
+  "share_entry",
+] as const;
 
 const adapterFromStored = (row: Record_): SiteSensorHtmlAdapter => ({
   adapter_revision: str(row.adapter_revision),
@@ -253,6 +261,15 @@ const paginationFromStored = (row: Record_): SiteQueryPagination => ({
     : [],
 });
 
+const shareFromStored = (row: Record_): SiteShareIssue => ({
+  success_status: num(row.success_status, 0),
+  token_field: str(row.token_field),
+  target_operation_id: str(row.target_operation_id),
+  issuance_rule_id: str(row.issuance_rule_id),
+  ttl_seconds: num(row.ttl_seconds, 0),
+  max_active_shares: num(row.max_active_shares, 0),
+});
+
 /**
  * The provenance-flow blocks of a stored route, in the server's order and only when present, so
  * the approval explanation and diffs of a revision see exactly what the server compares.
@@ -266,6 +283,7 @@ function flowFromStored(row: Record_): Partial<SiteRouteConfig> {
     issued_by,
     resource_grant,
     query_pagination,
+    share_issue,
   } = row;
   return {
     ...(isRecord(auth_binding) ? { auth_binding: bindingFromStored(auth_binding) } : {}),
@@ -279,6 +297,7 @@ function flowFromStored(row: Record_): Partial<SiteRouteConfig> {
     ...(isRecord(query_pagination)
       ? { query_pagination: paginationFromStored(query_pagination) }
       : {}),
+    ...(isRecord(share_issue) ? { share_issue: shareFromStored(share_issue) } : {}),
   };
 }
 

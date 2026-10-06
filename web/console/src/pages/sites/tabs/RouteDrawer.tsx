@@ -8,6 +8,7 @@ import {
   emptyPageActions,
   emptyQueryPagination,
   emptyResourceGrant,
+  emptyShareIssue,
   emptySensorBuild,
   type FlowBlock,
   flowBlockLabel,
@@ -37,6 +38,7 @@ import {
   ResourceGrantGroup,
 } from "./route-flow-groups";
 import { SensorHtmlGroup } from "./route-sensor-html";
+import { ShareIssueGroup } from "./route-share-issue";
 
 export type DrawerMode = "add" | "edit" | "duplicate";
 
@@ -69,6 +71,11 @@ const admissions: readonly (readonly [RouteAdmission, string, string])[] = [
     "认证入口",
     "登录、代码兑换或认证回调：成功验证之前访问者仍是匿名的；开启下方“身份建立”后，成功的登录响应在 edge 建立身份。",
   ],
+  [
+    "share_entry",
+    "分享入口",
+    "兑换分享凭据的固定只读入口：不需要身份，必须绑定资源（GET），凭据只对它所属的那一个资源有效；由“必须有界面操作来源”路由的“分享凭据发放”指向它。",
+  ],
   ["public", "公开", "任何人都可以访问，不做身份校验。"],
 ];
 
@@ -81,6 +88,7 @@ const fresh: { [K in FlowBlock]: () => NonNullable<SiteRouteConfig[K]> } = {
   issued_by: () => emptyIssuedBy(),
   resource_grant: () => emptyResourceGrant(),
   query_pagination: emptyQueryPagination,
+  share_issue: () => emptyShareIssue(),
 };
 
 /** Section heading inside the drawer. */
@@ -450,6 +458,7 @@ export function RouteDrawer({
         <PageActionsGroup {...flow} />
         <ResourceGrantGroup {...flow} />
         <QueryPaginationGroup {...flow} />
+        <ShareIssueGroup {...flow} />
         <AuthRevokeGroup {...flow} />
 
         <Group

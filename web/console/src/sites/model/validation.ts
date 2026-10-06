@@ -139,6 +139,8 @@ function validPointer(value: string): boolean {
 const inRange = (value: number, min: number, max: number) =>
   Number.isInteger(value) && value >= min && value <= max;
 const successStatus = (status: number) => inRange(status, 200, 299) && status !== 204;
+/** Share issuance needs the complete body too: 204–206 are refused (gateway `compile_response`). */
+const shareStatus = (status: number) => inRange(status, 200, 299) && !inRange(status, 204, 206);
 const hasResourceBinding = (route: SiteRouteConfig) =>
   [
     route.resource_type,
@@ -151,6 +153,7 @@ const hasResourceBinding = (route: SiteRouteConfig) =>
 const responseHasSideEffects = (route: SiteRouteConfig) =>
   route.response_crypto !== null ||
   route.resource_grant !== undefined ||
+  route.share_issue !== undefined ||
   route.auth_binding !== undefined ||
   route.auth_revoke !== undefined;
 
@@ -164,6 +167,7 @@ const flowText = {
   ttl: (what: string) => `${what}须为 1–86400 秒（最长一天）。`,
   scoped: (what: string) => `${what}只能含字母、数字和 _ . -，1–128 个字符。`,
   pick: (what: string) => `请选择${what}。`,
+  shareStatus: "成功状态码须为 2xx，且不能是 204–206：edge 要看到完整 JSON 正文才追加分享凭据。",
 } as const;
 
 /**
@@ -223,12 +227,13 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
       route.method !== "GET" ||
       route.response_crypto !== null ||
       route.resource_grant !== undefined ||
+      route.share_issue !== undefined ||
       binding !== undefined ||
       revoke !== undefined
     ) {
       add(
         "sensor_html",
-        "SENSOR_HTML 页面只能是 GET，且不能同时加密响应、签发资格或建立/撤销身份。",
+        "SENSOR_HTML 页面只能是 GET，且不能同时加密响应、签发资格或分享凭据、建立/撤销身份。",
       );
     }
     if (additional.length > 15) {
@@ -335,6 +340,43 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
       }
     });
   }
+  const share = route.share_issue;
+  if (share) {
+    if (
+      route.security_entry !== "ui_action_required" ||
+      route.method !== "GET" ||
+      !route.source_action ||
+      !route.resource_type
+    ) {
+      add(
+        "share_issue",
+        "分享凭据发放（share_issue）只能用于绑定资源的 GET“必须有界面操作来源”路由。",
+      );
+    } else if (route.response_crypto !== null) {
+      add(
+        "share_issue",
+        "发放分享凭据的响应不能加密：凭据只留在固定的释放缓冲里，加密适配器会把它复制进普通内存。",
+      );
+    }
+    if (!shareStatus(share.success_status)) {
+      add("share_issue.success_status", flowText.shareStatus);
+    }
+    if (!scoped.test(share.token_field)) {
+      add("share_issue.token_field", flowText.scoped("凭据字段名"));
+    }
+    if (share.target_operation_id === "") {
+      add("share_issue.target_operation_id", flowText.pick("兑换凭据的分享入口"));
+    } else if (!scoped.test(share.target_operation_id)) {
+      add("share_issue.target_operation_id", flowText.scoped("目标操作 ID"));
+    }
+    if (!scoped.test(share.issuance_rule_id)) {
+      add("share_issue.issuance_rule_id", flowText.scoped("发放规则 ID"));
+    }
+    ttl("share_issue.ttl_seconds", share.ttl_seconds, "分享期限");
+    if (!inRange(share.max_active_shares, 1, 5_000)) {
+      add("share_issue.max_active_shares", "活动分享上限须为 1–5000。");
+    }
+  }
   const grant = route.resource_grant;
   if (grant) {
     if (
@@ -371,13 +413,14 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
   }
   if (
     (grant !== undefined ? 1 : 0) +
+      (share !== undefined ? 1 : 0) +
       (binding !== undefined ? 1 : 0) +
       (revoke !== undefined ? 1 : 0) >
     1
   ) {
     add(
       "resource_grant",
-      "同一路由的响应最多只能有一种身份或资格效果（身份建立、身份撤销或资源资格选其一）。",
+      "同一路由的响应最多只能有一种身份或资格效果（身份建立、身份撤销、资源资格或分享凭据选其一）。",
     );
   }
   return found;
@@ -448,9 +491,15 @@ export function validateRoute(
     route.resource_query_parameter,
     route.resource_path_parameter,
   ].some((value) => value !== null && value !== "");
+  if (route.security_entry === "share_entry" && !route.resource_type) {
+    // The edge builds a share entry with an exact-resource capability.
+    add("resource_type", "分享入口必须绑定资源：请填写资源类型、视图 profile 与资源字段。");
+  }
   if (hasResource) {
     if (route.method !== "GET") add("method", "绑定资源的路由只能是 GET。");
-    if (!ui) add("security_entry", "绑定资源的路由必须是“必须有界面操作来源”。");
+    if (!ui && route.security_entry !== "share_entry") {
+      add("security_entry", "绑定资源的路由必须是“必须有界面操作来源”或“分享入口”。");
+    }
     if (!route.resource_type) add("resource_type", "绑定资源时必须填写资源类型。");
     if (!route.view_profile) add("view_profile", "绑定资源时必须填写视图 profile。");
     const query = route.resource_query_parameter;
@@ -635,8 +684,12 @@ export function validateFlowReferences(
   routes: readonly SiteRouteConfig[],
 ): Map<number, RouteIssue[]> {
   const found = new Map<number, RouteIssue[]>();
-  const add = (index: number, field: string, message: string) =>
-    found.set(index, [...(found.get(index) ?? []), { field, severity: "error", message }]);
+  const add = (
+    index: number,
+    field: string,
+    message: string,
+    severity: RouteIssue["severity"] = "error",
+  ) => found.set(index, [...(found.get(index) ?? []), { field, severity, message }]);
   const name = (index: number) => routes[index]?.operation_id || `#${index + 1}`;
   const byId = new Map(routes.map((route) => [route.operation_id, route]));
   const issued = new Map<string, number>();
@@ -665,6 +718,40 @@ export function validateFlowReferences(
       );
     } else if (count !== null && count > 16) {
       add(index, "page_actions", `页面根最多签发 16 个动作，当前 ${count} 个。`);
+    }
+  });
+  routes.forEach((route, index) => {
+    const share = route.share_issue;
+    if (!share || share.target_operation_id === "") return;
+    const target = byId.get(share.target_operation_id);
+    if (
+      !target ||
+      target.security_entry !== "share_entry" ||
+      target.method !== "GET" ||
+      target.operation_id === route.operation_id ||
+      target.resource_type !== route.resource_type ||
+      !target.resource_query_parameter
+    ) {
+      add(
+        index,
+        "share_issue.target_operation_id",
+        `分享目标“${share.target_operation_id}”必须是已存在的另一条“分享入口”GET 路由，资源类型与本路由相同，并以查询字段定位资源。`,
+      );
+    }
+    // The rule row is provisioned out of band, and an issuer nobody grants never gets an action.
+    add(
+      index,
+      "share_issue.issuance_rule_id",
+      `发放规则“${share.issuance_rule_id}”对应的 share_issuance_rules 行不由控制面登记：需由数据库管理员按（租户、站点、策略版本、规则 ID）另行登记，缺行时 edge 拒绝发放。`,
+      "warning",
+    );
+    if (!routes.some((other) => other.resource_grant?.target_operation_id === route.operation_id)) {
+      add(
+        index,
+        "share_issue",
+        "没有任何路由的“响应资源资格”指向这条路由：调用者拿不到它的动作引用，永远不会走到发放。",
+        "warning",
+      );
     }
   });
   routes.forEach((route, index) => {

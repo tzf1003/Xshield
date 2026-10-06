@@ -603,6 +603,128 @@ test("an operator declares pagination on the list, with the server's messages ne
   });
 });
 
+const SHARE = JSON.parse(readFileSync(repo("tests/site-config/share-flow.json"), "utf8")) as Json;
+
+test("an operator edits the share scope, sees the server's messages and the approval names it", async ({
+  page,
+}) => {
+  const served = structuredClone(SHARE);
+  const mock = await mockSite(page, { config: structuredClone(SHARE) });
+  mock.intercept = async (route, url) => {
+    if (!url.pathname.endsWith("/config") || route.request().method() !== "PUT") return false;
+    const posted = route.request().postDataJSON() as Json;
+    mock.writes.push({
+      method: "PUT",
+      path: url.pathname,
+      body: JSON.stringify(posted),
+      key: null,
+      digest: null,
+    });
+    mock.config = posted;
+    mock.state = {
+      desired_revision: 4,
+      active_revision: 3,
+      apply_state: "pending",
+      requires_approval: true,
+      reason_code: "CONTROL_SITE_APPROVAL_REQUIRED",
+    };
+    mock.revisions = [
+      { revision: 4, config: posted },
+      { revision: 3, config: served },
+    ];
+    await route.fulfill({ json: configBody(mock.id, mock.config, mock.state) });
+    return true;
+  };
+  await signInAt(page, "/sites/site_alpha/routes");
+  await expect(page.getByRole("row", { name: /^GET \/shared-record/ })).toContainText("分享入口");
+
+  // The share entry is not an issuer: the group is offered on the resource-bound UI action only.
+  await page.getByRole("button", { name: "编辑路由 records.share.read" }).click();
+  let drawer = drawerNamed(page, "编辑路由");
+  await expect(group(drawer, "分享凭据发放")).toHaveCount(0);
+  await drawer.getByRole("button", { name: "取消" }).click();
+
+  await page.getByRole("button", { name: "编辑路由 records.share.issue" }).click();
+  drawer = drawerNamed(page, "编辑路由");
+  const sharing = group(drawer, "分享凭据发放");
+  await expect(sharing).toContainText("不会替你登记这一行");
+  await field(sharing, "发放规则 ID").fill("");
+  await expect(sharing.getByText("发放规则 ID只能含字母、数字和 _ . -")).toBeVisible();
+  await expect(apply(drawer)).toBeDisabled();
+  await field(sharing, "发放规则 ID").fill("record-share-r2");
+  await field(sharing, "成功状态码").fill("204");
+  await expect(sharing.getByText("成功状态码须为 2xx，且不能是 204–206")).toBeVisible();
+  await field(sharing, "成功状态码").fill("200");
+  await field(sharing, "分享期限").fill("600");
+  await field(sharing, "活动分享上限").fill("50");
+  await apply(drawer).click();
+  await expect(drawer).toHaveCount(0);
+
+  await bar(page).getByRole("button", { name: "查看差异" }).click();
+  const diff = page.getByRole("dialog", { name: "未保存修改的差异" });
+  await expect(
+    diff.getByRole("row", { name: /路由 records\.share\.issue · 分享凭据发放/ }),
+  ).toContainText("record-share-r2");
+  await diff.getByRole("button", { name: "关闭" }).last().click();
+  await bar(page).getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("已保存为 r4");
+  const saved = byId(routesOf(sent(mock, "PUT")));
+  expect(saved["records.share.issue"]?.share_issue).toEqual({
+    success_status: 200,
+    token_field: "share_token",
+    target_operation_id: "records.share.read",
+    issuance_rule_id: "record-share-r2",
+    ttl_seconds: 600,
+    max_active_shares: 50,
+  });
+
+  await sectionLink(page, "发布").click();
+  const approval = page.getByRole("region", { name: "审批说明" });
+  await expect(approval).toContainText("分享凭据发放变更");
+  await expect(approval).toContainText("CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED");
+  await expect(page.getByRole("button", { name: /直接应用/ })).toHaveCount(0);
+});
+
+test("choosing the share target in the drawer lists only the draft's share entries", async ({
+  page,
+}) => {
+  const config = structuredClone(SHARE);
+  const issuer = byId(routesOf(config))["records.share.issue"];
+  if (issuer) delete issuer.share_issue;
+  await mockSite(page, { config });
+  await signInAt(page, "/sites/site_alpha/routes");
+  await page.getByRole("button", { name: "编辑路由 records.share.issue" }).click();
+  const drawer = drawerNamed(page, "编辑路由");
+  const sharing = group(drawer, "分享凭据发放");
+  await sharing.getByRole("switch", { name: "发放分享凭据" }).click();
+  await expect(sharing.getByText("请选择兑换凭据的分享入口。")).toBeVisible();
+  await choose(page, field(sharing, "目标分享入口"), "records.share.read");
+  await expect(sharing.getByText("请选择兑换凭据的分享入口。")).toHaveCount(0);
+});
+
+for (const scheme of ["light", "dark"] as const) {
+  test.describe(`share group accessibility (${scheme})`, () => {
+    test.use({ colorScheme: scheme });
+    test("the share group and a share entry route have no serious violations", async ({ page }) => {
+      test.setTimeout(120_000);
+      await mockSite(page, { config: structuredClone(SHARE) });
+      await signInAt(page, "/sites/site_alpha/routes");
+      for (const id of ["records.share.issue", "records.share.read"]) {
+        await page.getByRole("button", { name: `编辑路由 ${id}` }).click();
+        const drawer = drawerNamed(page, "编辑路由");
+        await expect(drawer).toBeVisible();
+        if (id === "records.share.issue") {
+          await expect(group(drawer, "分享凭据发放")).toBeVisible();
+        }
+        await settled(page);
+        expect(await serious(page), id).toEqual([]);
+        await drawer.getByRole("button", { name: "取消" }).click();
+        await expect(drawer).toHaveCount(0);
+      }
+    });
+  });
+}
+
 const openGroups: [string, string, (drawer: Locator, page: Page) => Promise<void>][] = [
   ["auth.login", "身份建立", async () => {}],
   [

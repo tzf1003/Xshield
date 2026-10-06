@@ -74,6 +74,7 @@ function project(route: SiteRouteConfig): Record<string, unknown> {
     auth_entry: "AUTH_ENTRY",
     authenticated_root: "AUTHENTICATED_ROOT",
     ui_action_required: "UI_ACTION_REQUIRED",
+    share_entry: "SHARE_ENTRY",
   }[route.security_entry];
   const present = <T>(key: string, value: T | null | undefined) =>
     value === null || value === undefined ? {} : { [key]: value };

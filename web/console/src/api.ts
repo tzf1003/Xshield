@@ -1196,10 +1196,16 @@ export type BrowserSession = {
 };
 
 /**
- * Admission of one route. `auth_entry` (an approved authentication entry, edge `AUTH_ENTRY`)
- * exists only on routes; the site's own entry is never `auth_entry`.
+ * Admission of one route. `auth_entry` (an approved authentication entry, edge `AUTH_ENTRY`) and
+ * `share_entry` (the fixed, resource-bound read a share credential redeems, edge `SHARE_ENTRY`)
+ * exist only on routes; the site's own entry is never either.
  */
-export type RouteAdmission = "public" | "auth_entry" | "authenticated_root" | "ui_action_required";
+export type RouteAdmission =
+  | "public"
+  | "auth_entry"
+  | "authenticated_root"
+  | "ui_action_required"
+  | "share_entry";
 
 /** Identity establishment on an `auth_entry` route (`xshield_core::site::flow::SiteAuthBinding`). */
 export type SiteAuthBinding = {
@@ -1262,6 +1268,21 @@ export type SiteQueryParameter = {
 export type SiteQueryPagination = { parameters: SiteQueryParameter[] };
 
 /**
+ * Share issuance on a UI-action resource route (`xshield_core::site::share::SiteShareIssue`):
+ * the edge adds `token_field` to a successful JSON object response, carrying a read-only
+ * credential for the one resource the request was qualified for, redeemable at the
+ * `share_entry` route `target_operation_id`.
+ */
+export type SiteShareIssue = {
+  success_status: number;
+  token_field: string;
+  target_operation_id: string;
+  issuance_rule_id: string;
+  ttl_seconds: number;
+  max_active_shares: number;
+};
+
+/**
  * One route exactly as the server stores it. The browser provenance-flow blocks at the end are
  * present only when set (the server omits unset ones), so a decoded route serializes back to the
  * same JSON and a save can never drop or default a block it carried.
@@ -1287,6 +1308,7 @@ export type SiteRouteConfig = {
   issued_by?: SiteIssuedBy;
   resource_grant?: SiteResourceGrant;
   query_pagination?: SiteQueryPagination;
+  share_issue?: SiteShareIssue;
 };
 
 /** The flow blocks of a route, in the server's field order. */
@@ -1298,6 +1320,7 @@ export const routeFlowKeys = [
   "issued_by",
   "resource_grant",
   "query_pagination",
+  "share_issue",
 ] as const satisfies readonly (keyof SiteRouteConfig)[];
 
 export type SitePolicyConfig = {
@@ -1672,6 +1695,26 @@ function decodeResourceGrant(value: unknown): SiteResourceGrant {
   };
 }
 
+function decodeShareIssue(value: unknown): SiteShareIssue {
+  const row = object(value);
+  exactFields(row, [
+    "success_status",
+    "token_field",
+    "target_operation_id",
+    "issuance_rule_id",
+    "ttl_seconds",
+    "max_active_shares",
+  ]);
+  return {
+    success_status: status(row.success_status),
+    token_field: name(row.token_field),
+    target_operation_id: name(row.target_operation_id),
+    issuance_rule_id: name(row.issuance_rule_id),
+    ttl_seconds: lease(row.ttl_seconds),
+    max_active_shares: integer(row.max_active_shares, 1, 5_000),
+  };
+}
+
 function decodeQueryPagination(value: unknown): SiteQueryPagination {
   const row = object(value);
   exactFields(row, ["parameters"]);
@@ -1718,6 +1761,9 @@ function decodeRouteFlow(route: Record<string, unknown>): Partial<SiteRouteConfi
     ...(route.query_pagination === undefined
       ? {}
       : { query_pagination: decodeQueryPagination(route.query_pagination) }),
+    ...(route.share_issue === undefined
+      ? {}
+      : { share_issue: decodeShareIssue(route.share_issue) }),
   };
 }
 
@@ -1784,6 +1830,7 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
           "auth_entry",
           "authenticated_root",
           "ui_action_required",
+          "share_entry",
         ]),
         source_action: route.source_action === null ? null : name(route.source_action),
         resource_type: route.resource_type === null ? null : name(route.resource_type),

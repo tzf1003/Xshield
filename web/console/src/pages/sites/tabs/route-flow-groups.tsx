@@ -98,7 +98,7 @@ const optionLabel = (option: RouteOption) =>
  * `status` and `aria-describedby` come from the surrounding `Field` (rc-select puts the aria
  * attributes on its input, so the label and the messages describe the control).
  */
-function RouteSelect({
+export function RouteSelect({
   id,
   status,
   "aria-describedby": describedBy,

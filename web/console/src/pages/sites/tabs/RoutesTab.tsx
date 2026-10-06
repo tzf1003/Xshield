@@ -7,6 +7,7 @@ import {
   PlusOutlined,
   SafetyCertificateOutlined,
   SearchOutlined,
+  ShareAltOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { Button, Input, Popconfirm, Select, Table, type TableColumnsType, Tooltip } from "antd";
@@ -42,6 +43,7 @@ const admission: Record<
   ui_action_required: { label: "界面来源", tone: "allow", icon: <SafetyCertificateOutlined /> },
   authenticated_root: { label: "已认证根", tone: "info", icon: <UserOutlined /> },
   auth_entry: { label: "认证入口", tone: "observe", icon: <LoginOutlined /> },
+  share_entry: { label: "分享入口", tone: "info", icon: <ShareAltOutlined /> },
   public: { label: "公开", tone: "observe", icon: <GlobalOutlined /> },
 };
 
@@ -65,8 +67,8 @@ function uniqueId(base: string, taken: ReadonlySet<string>): string {
 function withRoutes(draft: SiteConfigDraft, routes: SiteRouteConfig[]): SiteConfigDraft {
   const next = { ...draft, policy: { ...draft.policy, routes } };
   const entry = routes.find((route) => route.operation_id === ENTRY_OPERATION_ID);
-  // The site entry is never an authentication entry; such a route keeps the site's own entry.
-  return entry && entry.security_entry !== "auth_entry"
+  // The site entry is never an authentication or share entry; such a route keeps the site's own.
+  return entry && entry.security_entry !== "auth_entry" && entry.security_entry !== "share_entry"
     ? { ...next, entry_path: entry.path, security_entry: entry.security_entry }
     : next;
 }
@@ -321,6 +323,7 @@ export function RoutesTab({ ws, templates = true }: { ws: WorkspaceApi; template
             { value: "ui_action_required", label: "界面来源" },
             { value: "authenticated_root", label: "已认证根" },
             { value: "auth_entry", label: "认证入口" },
+            { value: "share_entry", label: "分享入口" },
             { value: "public", label: "公开" },
           ]}
         />

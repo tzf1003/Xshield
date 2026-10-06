@@ -356,6 +356,11 @@ const summarizePagination = (r: SiteRouteConfig) =>
         .join("、") || "（空）"
     : none;
 
+const summarizeShare = (r: SiteRouteConfig) =>
+  r.share_issue
+    ? `→ ${r.share_issue.target_operation_id}（规则 ${r.share_issue.issuance_rule_id}）· 字段 ${r.share_issue.token_field} · ≤ ${r.share_issue.max_active_shares} 个 · ${formatSeconds(r.share_issue.ttl_seconds)}`
+    : none;
+
 /**
  * The flow blocks of a route in a few words each, for an added or removed route and the route
  * table: a route that establishes identity or issues actions must not read like a plain one.
@@ -372,6 +377,7 @@ export function flowParts(route: SiteRouteConfig, withMode = true): string[] {
     route.resource_grant && `资源资格 → ${route.resource_grant.target_operation_id || "（未选）"}`,
     route.query_pagination &&
       `分页参数 ${route.query_pagination.parameters.map((parameter) => parameter.name || "（未命名）").join("、")}`,
+    route.share_issue && `发放分享凭据 → ${route.share_issue.target_operation_id || "（未选）"}`,
   ].filter((part): part is string => typeof part === "string");
 }
 
@@ -438,6 +444,12 @@ const routeSpecs: readonly RouteSpec[] = [
     label: "分页参数",
     format: summarizePagination,
     risk: "QUERY_PAGINATION_CHANGED",
+  },
+  {
+    id: "share_issue",
+    label: "分享凭据发放",
+    format: summarizeShare,
+    risk: "SHARE_ISSUE_CHANGED",
   },
 ];
 

@@ -142,7 +142,7 @@ test("the decoder refuses members it does not model instead of dropping them on 
     (config.policy as Record<string, unknown>).future_policy_member = true;
   });
   await refuses((config) => {
-    (routes(config)[0] as Record<string, unknown>).security_entry = "share_entry";
+    (routes(config)[0] as Record<string, unknown>).security_entry = "service_identity";
   });
 });
 
@@ -467,6 +467,7 @@ test("flow changes name their facet like assess_change_risk, in both directions"
     "PAGE_ACTIONS_CHANGED",
     "RESOURCE_GRANT_CHANGED",
     "QUERY_PAGINATION_CHANGED",
+    "SHARE_ISSUE_CHANGED",
   ]);
   // The cases of risk.rs `flow_route_changes_name_their_facet_in_both_directions`.
   const cases: [string, (draft: SiteConfigDraft) => void, string[]][] = [

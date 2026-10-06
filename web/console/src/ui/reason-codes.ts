@@ -156,6 +156,11 @@ export const reasonDictionary = {
     "查询参数白名单不合法：只能用于发放响应资格的“已认证根”GET 列表或非资源的“必须有界面操作来源”GET 路由，最多 4 个小写参数名（a–z 与下划线，1–32 字符，不重复），且不能与任何路由的资源参数同名。",
     "在“路由与操作”打开该路由，核对“分页参数”后重新保存。",
   ),
+  CONTROL_SITE_SHARE_ISSUE_INVALID: entry(
+    "danger",
+    "分享凭据发放不合法：发放方必须是绑定资源的 GET“必须有界面操作来源”路由且不加密响应，目标必须是同资源类型、以查询参数定位的另一条“分享入口”GET 路由，数量与期限需在边界内。",
+    "在“路由与操作”打开发放方路由，核对“分享凭据发放”的目标分享入口、字段与期限后重新保存。",
+  ),
   CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT: entry(
     "danger",
     "同一操作来源与映射修订被两条路由赋予了不同含义，edge 无法为它建立唯一的动作描述。",
@@ -379,6 +384,7 @@ export type RiskToken =
   | "PAGE_ACTIONS_CHANGED"
   | "RESOURCE_GRANT_CHANGED"
   | "QUERY_PAGINATION_CHANGED"
+  | "SHARE_ISSUE_CHANGED"
   | "OTHER_CHANGE";
 
 export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail: string }>> = {
@@ -450,6 +456,11 @@ export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail:
   QUERY_PAGINATION_CHANGED: {
     label: "查询参数白名单变更",
     detail: "决定发放资格的列表或界面操作路由可以把哪些分页参数带给源站；只能由独立审批人批准。",
+  },
+  SHARE_ISSUE_CHANGED: {
+    label: "分享凭据发放变更",
+    detail:
+      "决定哪些响应会签发可重复读取的只读凭据，以及哪条分享入口不经身份就能兑换它；只能由独立审批人批准。",
   },
   OTHER_CHANGE: {
     label: "其他安全相关字段变更",
