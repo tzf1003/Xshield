@@ -523,6 +523,26 @@ edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启�
 可以接受的情况：同一标签、同一描述集合（包括只改显示名等外观字段）；新的、从未用过的标签；回滚到与某个已登记修订完全相同的描述集合并沿用它当时的标签（edge 答 `Existing`）；在从未获得资格的修订之后复用其标签。安全提示 `message_safe` 是固定文本，点名 `policy_revision` 字段和处理方法，不回显存储值；控制台的中文说明见 `web/console/src/ui/reason-codes.ts`。不新增审计事件类型：拒绝沿用各端点已有的事件（`console.site.config.write`、`.validate`、`.approve`、`.apply`）。
 
 部署与升级：先应用迁移 `0053_m5_site_descriptor_bindings.sql`（只新增一张表，加法、可重复执行），再替换控制服务；旧控制服务既不读也不写该表，与新服务混跑期间旧服务写入的修订由新服务在审批、校验与快照读取时复查，旧服务自己发出的快照仍由 edge 把关。迁移之前由本分支的早期构建保存、带页面签发的修订（任何已发布版本都不接受 `page_actions`）只能经 edge 自己的行（共用数据库时）或首次快照读取被纳入检查。控制面与 edge 使用不同 PostgreSQL 时，第二项来源为空，控制面只按自己的绑定记录检查，控制面之外建立的绑定仍由 edge 拒绝。开发环境由 `dev.sh` 的 reconciliation 自动补齐 0053。
+### 站点配置缺口审计：edge 已支持而控制面不能编写的块（2026-10-06）
+
+审计方法：逐个读 `xshield-gateway` 的 DTO（`ConfigDto`、`OperationDto`、`ResponseDto` 及其子结构）与编译函数（`compile_operation`、`compile_response`、`validate_response_contracts`），对照 `SiteConfig` / `SiteRouteConfig` 与投影 `projection.rs`。“无损往返”指：块能写入、读回、出现在差异里并在保存时逐字节保留；目前缺口一律是“类型化解析拒绝（`deny_unknown_fields`）并以 `CONTROL_SITE_FEATURE_UNSUPPORTED` 命名”，没有静默丢弃，因此缺口的代价是“只能手写 `XSHIELD_CONFIG`”，不是数据损坏。
+
+| edge 能力 | edge 位置与规则（摘要） | 控制面现状 | 处置 |
+|---|---|---|---|
+| `SHARE_ENTRY` 准入 | `AdmissionDto::ShareEntry`；必须绑定资源（`ExactResource`），无 `source_action` | 路由准入枚举没有该值；被 `FEATURE_UNSUPPORTED` 拒绝；`site_routes.admission` CHECK 也不含它 | 本任务第 1 项 |
+| `response.share_issue` | `{success_status, token_field, target_operation_id, issuance_rule_id, ttl_seconds, max_active_shares}`；源路由必须是绑定资源的 GET `ui_action_required`；目标必须是另一条 `SHARE_ENTRY` GET 路由，同资源类型且以查询参数定位；与响应加密、其他身份/资格效果互斥；`success_status` 2xx 且不是 204–206；期限 1–86400、活动分享 1–5000 | 无 | 本任务第 1 项 |
+| `response.auth_refresh` | `AuthRefreshDto{success_status, principal_pointer, authorization_context_pointer, bearer_pointer, credential_ttl_seconds}`；只用于 `authenticated_root`；2xx 且不是 204；指针规则同 `auth_binding`；凭证期限 1–86400 | 无 | 本任务第 2 项 |
+| `response.auth_context_switch` | 同上结构，同一 DTO；只用于 `authenticated_root`；计入探针的“身份变化路由”预算（64） | 无 | 本任务第 2 项 |
+| `response.evidence_capture` | `{profile_revision, max_bytes ≤ 响应 max_bytes 且 ≤ 1 MiB, retention_seconds 1–86400, secret_pointers ≤ 64 条}`；启动要求证据写入器与目录存储；与身份建立/刷新共用 bearer 指针自动脱敏 | 无 | 本任务第 3 项；见本节末尾“实现状态” |
+| `request_crypto.mode = COMPATIBILITY` | 不透明透传，需 `approval_ref`、`expires_at`、1–16 个构建指纹；只用于 `ui_action_required` | 无 | 不做：它是带到期时间的临时审批，不是持久站点配置 |
+| `SERVICE_IDENTITY` 准入 | 机器身份；依赖外部登记的服务凭据 | 无 | 不做：需要服务身份供给面，不属于浏览器来源流程 |
+| `identity_store.*`（连接数、匿名会话容量与速率） | `IdentityStoreDto` | 由 `identity.session_ttl_seconds` 推导，其余固定 | 刻意不开放：部署容量参数，不是站点策略 |
+| `audit.*`、`sensor.build_ref/heartbeat_seconds` | `AuditDto`、`SensorDto` | 固定值（部署管理） | 刻意不开放 |
+| `response.mode = BUFFERED_JSON` 的选项 | 只有 `max_bytes` | 已覆盖（`max_response_bytes`） | 无缺口 |
+| `request_crypto.mode = DIRECT_DECRYPT / OBSERVE`、`response.crypto`、`auth_binding`、`auth_revoke`、`SENSOR_HTML`、`page_actions`、`issued_by`、`resource_grant`、`query_pagination` | — | 已覆盖 | 无缺口 |
+
+补充发现：`xshield.share_issuance_rules`（迁移 0005）是 edge 发放分享凭据时核对的、与 `policy_revision` 绑定的“独立批准范围”；仓库里没有任何代码写它（只有测试和 `scripts/test_gateway_identity.sh` 直接插行）。所以即使控制面能编写 `share_issue`，发放仍需要数据库管理员按 `(租户, 站点, policy_revision, issuance_rule_id)` 登记同名规则，缺行时 edge 失败关闭。
+
 # Agent API Key 端点
 
 | 方法 | 路径 | 用途 |
