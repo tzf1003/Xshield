@@ -1161,7 +1161,7 @@ impl LocalJournal {
                     return Err(JournalError::UnsafePath);
                 }
                 #[cfg(unix)]
-                if metadata.permissions().mode() & 0o277 != 0 {
+                if metadata.permissions().mode() & 0o077 != 0 {
                     return Err(JournalError::UnsafePermissions);
                 }
                 paths.push(entry.path());
@@ -1184,6 +1184,7 @@ impl LocalJournal {
                 return Err(JournalError::KeyMismatch);
             }
             let closed = segment_path_state(&path, &identity)?;
+            require_owner_mode(&file, closed)?;
             let mut expected_sequence = 1_u64;
             let mut previous_hash = ZERO_HASH;
             loop {
@@ -1435,6 +1436,27 @@ fn create_segment(
     sync_directory(directory)?;
     let active_path = directory.join(format!("segment-{boot_id}.xja"));
     Ok((file, active_path))
+}
+
+/// Owner-bit check for a segment opened by a read-only investigation.
+///
+/// Group/other access has already been refused. A closed segment is read-only
+/// (0400); the live segment is still open for writing by its owner (0600), so
+/// demanding 0400 of it refused every journal that was being written. Neither
+/// may be executable.
+#[cfg(unix)]
+fn require_owner_mode(file: &File, closed: bool) -> Result<(), JournalError> {
+    let owner_forbidden = if closed { 0o300 } else { 0o100 };
+    if file.metadata()?.permissions().mode() & owner_forbidden != 0 {
+        return Err(JournalError::UnsafePermissions);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn require_owner_mode(_file: &File, _closed: bool) -> Result<(), JournalError> {
+    Ok(())
 }
 
 fn segment_path_state(path: &Path, identity: &SegmentIdentity) -> Result<bool, JournalError> {
@@ -2595,6 +2617,54 @@ mod tests {
             })
             .unwrap();
         assert_eq!(seen, ["one", "two"]);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Found by reading a running control process's journal with a real login
+    /// test: the live (active) segment is created `0600`, but the read-only
+    /// investigation read demanded the closed-segment mode (`0400`) of every
+    /// file and so refused any journal still being written to.
+    #[test]
+    #[cfg(unix)]
+    fn committed_read_accepts_a_live_private_segment_and_refuses_unsafe_modes() {
+        let directory = test_directory();
+        let event = EventId::parse(EVENT).unwrap();
+        let (mut journal, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), limits()).unwrap();
+        journal
+            .append_batch(&[JournalRecord {
+                event_id: &event,
+                plaintext: b"live event",
+            }])
+            .unwrap();
+        let read = |directory: &Path| {
+            let mut seen = Vec::new();
+            LocalJournal::visit_committed_records(
+                directory,
+                "journal-key-r1",
+                &key(),
+                10,
+                1024 * 1024,
+                |record| {
+                    seen.push(String::from_utf8(record.plaintext().to_vec()).unwrap());
+                    Ok(())
+                },
+            )
+            .map(|_| seen)
+        };
+        // The writer still holds the active segment (mode 0600).
+        assert_eq!(read(&directory).unwrap(), ["live event"]);
+        let active = segment(&directory);
+        for unsafe_mode in [0o640, 0o604, 0o660, 0o666, 0o700] {
+            fs::set_permissions(&active, fs::Permissions::from_mode(unsafe_mode)).unwrap();
+            assert!(
+                matches!(read(&directory), Err(JournalError::UnsafePermissions)),
+                "mode {unsafe_mode:o} on an active segment must be refused"
+            );
+        }
+        fs::set_permissions(&active, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read(&directory).unwrap(), ["live event"]);
         drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }

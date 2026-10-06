@@ -16,7 +16,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use openidconnect::{
     AccessTokenHash, AuthenticationContextClass, AuthorizationCode, ClientId, ClientSecret,
     CsrfToken, EndpointMaybeSet, EndpointNotSet, EndpointSet, IssuerUrl, Nonce,
-    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, TokenResponse,
     core::{CoreAuthPrompt, CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
 };
 use openssl::{memcmp, rand::rand_bytes, sha::sha256};
@@ -851,7 +851,8 @@ pub(super) async fn login_handler(State(control): State<std::sync::Arc<ControlPl
             || state,
             || nonce,
         )
-        .add_scope(Scope::new("openid".to_owned()))
+        // `openidconnect` already requests the mandatory `openid` scope for the
+        // authorization-code flow; adding it again sent `scope=openid openid`.
         .add_auth_context_value(provider.required_acr.clone())
         .set_pkce_challenge(challenge)
         .url();
@@ -1071,7 +1072,8 @@ async fn begin_reauthentication(
             || state,
             || nonce,
         )
-        .add_scope(Scope::new("openid".to_owned()))
+        // `openidconnect` already requests the mandatory `openid` scope for the
+        // authorization-code flow; adding it again sent `scope=openid openid`.
         .add_auth_context_value(provider.required_acr.clone())
         .set_max_age(std::time::Duration::ZERO)
         .add_prompt(CoreAuthPrompt::Login)
@@ -1496,7 +1498,7 @@ pub(super) async fn callback_handler(
     let Some(state) = query.state.as_deref() else {
         return fail(StatusCode::BAD_REQUEST, "CONTROL_OIDC_CALLBACK_INVALID");
     };
-    if !memcmp::eq(state.as_bytes(), state_cookie.as_bytes()) {
+    if !secrets_match(state.as_bytes(), state_cookie.as_bytes()) {
         return fail(StatusCode::UNAUTHORIZED, "CONTROL_OIDC_STATE_INVALID");
     }
     let transaction = match control
@@ -1787,8 +1789,18 @@ fn csrf_request_valid(
     single_header(headers, header::ORIGIN.as_str()).is_some_and(|origin| {
         origin == expected_origin
             && single_header(headers, CSRF_HEADER)
-                .is_some_and(|value| memcmp::eq(value.as_bytes(), expected_token.as_bytes()))
+                .is_some_and(|value| secrets_match(value.as_bytes(), expected_token.as_bytes()))
     })
+}
+
+/// Compares an attacker-supplied value with a stored secret.
+///
+/// `memcmp::eq` panics on unequal lengths, and the CSRF header and the callback
+/// `state` are of attacker-chosen length: a panic drops the connection with no
+/// audit record and no stable error code. A length mismatch is a refusal; the
+/// length of these values is not secret (fixed-size random tokens).
+fn secrets_match(supplied: &[u8], expected: &[u8]) -> bool {
+    supplied.len() == expected.len() && memcmp::eq(supplied, expected)
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1876,8 +1888,8 @@ mod tests {
     use super::{
         ApiKeyCapability, AssertedGrant, BrowserRequestAssertion, ManagementRole,
         STEP_UP_AUTH_TIME_MAX_AGE_SECONDS, auth_time_is_recent, can_start_step_up, cookie_value,
-        csrf_request_valid, endpoint_is_secure, lower_hex, parse_callback_query, secure_url,
-        sign_request_assertion, verify_request_assertion,
+        csrf_request_valid, endpoint_is_secure, lower_hex, parse_callback_query, secrets_match,
+        secure_url, sign_request_assertion, verify_request_assertion,
     };
     use axum::http::{HeaderMap, Method, header};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2171,5 +2183,43 @@ mod tests {
             &"a".repeat(64),
             "https://console.example",
         ));
+    }
+
+    /// Found by driving a real Keycloak login (`scripts/test_oidc_login.py`): the
+    /// constant-time comparison panics on unequal lengths, and both the CSRF
+    /// header and the callback `state` are attacker-chosen lengths. A panic drops
+    /// the connection with no audit record and no stable error code.
+    #[test]
+    fn csrf_header_of_any_length_is_refused_not_a_panic() {
+        let expected = "a".repeat(64);
+        for presented in [
+            "",
+            "a",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &"a".repeat(4_000),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, "https://console.example".parse().unwrap());
+            if !presented.is_empty() {
+                headers.insert("x-xshield-csrf", presented.parse().unwrap());
+            }
+            assert!(!csrf_request_valid(
+                &Method::POST,
+                &headers,
+                &expected,
+                "https://console.example",
+            ));
+        }
+    }
+
+    #[test]
+    fn secrets_of_different_length_never_match_and_never_panic() {
+        assert!(secrets_match(b"state", b"state"));
+        assert!(!secrets_match(b"state", b"statf"));
+        assert!(!secrets_match(b"state", b"stat"));
+        assert!(!secrets_match(b"state", b"state-and-more"));
+        assert!(!secrets_match(b"", b"state"));
+        assert!(!secrets_match(b"state", b""));
     }
 }
