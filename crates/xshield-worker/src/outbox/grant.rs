@@ -145,10 +145,10 @@ pub(crate) mod tests {
         assert_eq!(row.confidence, None);
         assert_eq!(row.confidence_status, "not_applicable");
         assert_eq!(row.operation_id, "orders.read");
-        assert!(row.method.is_empty());
+        assert_eq!(row.method, "");
         assert_eq!(row.is_terminal, 0);
         assert_eq!(row.http_status, None);
-        assert!(row.origin_state.is_empty());
+        assert_eq!(row.origin_state, "");
         for ttl in [1, 86_400] {
             let mut value = event();
             value["payload"]["expires_at_unix"] = json!(ISSUED_AT + ttl);

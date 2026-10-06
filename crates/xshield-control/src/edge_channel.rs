@@ -113,7 +113,9 @@ fn decode_signature(value: &str) -> Option<Vec<u8>> {
     Some(
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
             .collect(),
     )

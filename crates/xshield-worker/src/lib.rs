@@ -2676,7 +2676,7 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.is_terminal == 0));
-        assert!(rows[0].cause_event_ids.is_empty());
+        assert_eq!(rows[0].cause_event_ids, [] as [std::string::String; 0]);
         assert_eq!(rows[1].cause_event_ids, fixture.event_ids[..1]);
         assert_eq!(rows[2].cause_event_ids, fixture.event_ids[1..2]);
     }
@@ -2818,7 +2818,7 @@ mod tests {
             let summary = PayloadSummary::parse("stage.completed", &payload.to_string()).unwrap();
             assert_eq!(summary.confidence, None);
             assert_eq!(summary.confidence_status, status);
-            assert!(summary.model_revision.is_empty());
+            assert_eq!(summary.model_revision, "");
         }
         let mut payload = model_stage_payload();
         payload["proof_kind"] = "deterministic".into();
@@ -2828,7 +2828,7 @@ mod tests {
         let summary = PayloadSummary::parse("stage.completed", &payload.to_string()).unwrap();
         assert_eq!(summary.confidence, None);
         assert_eq!(summary.confidence_status, "not_applicable");
-        assert!(summary.model_revision.is_empty());
+        assert_eq!(summary.model_revision, "");
     }
 
     // The gateway records page issuance and bootstrap delivery in the generic

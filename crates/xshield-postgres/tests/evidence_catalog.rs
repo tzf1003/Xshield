@@ -119,15 +119,15 @@ async fn assert_expired_is_hidden(
     site: &SiteId,
     request: &RequestId,
 ) {
-    assert!(
+    assert_eq!(
         store
             .list_request_artifacts(
                 EvidenceCatalogQuery::new(tenant, site, request, None, 16).unwrap()
             )
             .await
             .unwrap()
-            .artifacts()
-            .is_empty()
+            .artifacts(),
+        []
     );
     let artifact_id = ArtifactId::parse(&verified.manifest().artifact_id).unwrap();
     assert!(
@@ -382,37 +382,37 @@ async fn assert_scoped_query(
     assert_eq!(entries.artifacts()[0].manifest(), verified.manifest());
     assert!(entries.next_artifact_id().is_none());
     let other_tenant = TenantId::parse("tenant_other").unwrap();
-    assert!(
+    assert_eq!(
         store
             .list_request_artifacts(
                 EvidenceCatalogQuery::new(&other_tenant, site, request, None, 16).unwrap()
             )
             .await
             .unwrap()
-            .artifacts()
-            .is_empty()
+            .artifacts(),
+        []
     );
     let other_site = SiteId::parse("site_other").unwrap();
-    assert!(
+    assert_eq!(
         store
             .list_request_artifacts(
                 EvidenceCatalogQuery::new(tenant, &other_site, request, None, 16).unwrap()
             )
             .await
             .unwrap()
-            .artifacts()
-            .is_empty()
+            .artifacts(),
+        []
     );
     let other_request = RequestId::parse("req_018f2a3b-4c5d-7000-8000-000000000903").unwrap();
-    assert!(
+    assert_eq!(
         store
             .list_request_artifacts(
                 EvidenceCatalogQuery::new(tenant, site, &other_request, None, 16).unwrap()
             )
             .await
             .unwrap()
-            .artifacts()
-            .is_empty()
+            .artifacts(),
+        []
     );
 }
 

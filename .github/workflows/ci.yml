@@ -61,7 +61,7 @@ jobs:
       # release's new pedantic lints into a red main. Bump both together.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.99.0
           components: clippy,rustfmt
       - uses: actions/setup-python@v5
         with:

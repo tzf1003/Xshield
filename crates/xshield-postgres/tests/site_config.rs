@@ -334,12 +334,12 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
         "the newest observation survives pruning"
     );
     let other_tenant = TenantId::parse("tenant_site_contract_other").unwrap();
-    assert!(
+    assert_eq!(
         store
             .latest_protected_site_health_snapshots(&other_tenant, 128)
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [xshield_postgres::ProtectedSiteHealthSnapshot; 0]
     );
 
     assert!(
@@ -687,7 +687,7 @@ async fn approval_is_decided_from_the_active_revision_and_bound_to_one_revision(
         !state.requires_approval,
         "same as what is served, new label"
     );
-    assert!(state.risk_reasons.is_empty());
+    assert_eq!(state.risk_reasons, [] as [std::string::String; 0]);
 
     // The approval key bound to revision 2 is stale against any other revision.
     created_or_updated(

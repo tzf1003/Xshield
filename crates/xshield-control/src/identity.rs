@@ -560,6 +560,7 @@ pub(super) async fn auth_middleware(
     response
 }
 
+#[allow(clippy::result_large_err)] // the error is the ready HTTP response, which the caller returns as is
 async fn resolve_auth(
     control: &Arc<ControlPlane>,
     method: &Method,
@@ -603,6 +604,7 @@ async fn resolve_auth(
 ///
 /// # Errors
 /// Returns the rejection response (401, 429 or 503) for the middleware to send.
+#[allow(clippy::result_large_err)] // the error is the ready HTTP response, which the caller returns as is
 async fn resolve_api_key(
     control: &Arc<ControlPlane>,
     value: &str,
@@ -1815,7 +1817,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 
 fn cookie_name_present(headers: &HeaderMap, name: &str) -> bool {
     headers.get_all(header::COOKIE).iter().any(|header| {
-        header.to_str().ok().is_some_and(|header| {
+        header.to_str().is_ok_and(|header| {
             header.split(';').any(|cookie| {
                 cookie
                     .split_once('=')
@@ -1835,7 +1837,9 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = (pair[0] as char).to_digit(16)?;
             let low = (pair[1] as char).to_digit(16)?;

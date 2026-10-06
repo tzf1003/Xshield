@@ -204,15 +204,15 @@ async fn response_capture_is_durable_redacted_and_fail_closed() {
     assert!(!String::from_utf8_lossy(&content).contains("exclude-"));
     let (_, oversized_request, body) = fetch("/oversize");
     assert!(!body.windows(16).any(|part| part == b"aaaaaaaaaaaaaaaa"));
-    assert!(
+    assert_eq!(
         store
             .list_request_artifacts(
                 EvidenceCatalogQuery::new(&tenant, &site, &oversized_request, None, 10).unwrap()
             )
             .await
             .unwrap()
-            .artifacts()
-            .is_empty()
+            .artifacts(),
+        []
     );
     // A targeted database constraint rejects only this test's new catalog rows.
     let pool = sqlx::PgPool::connect(&database).await.unwrap();
@@ -233,15 +233,15 @@ async fn response_capture_is_durable_redacted_and_fail_closed() {
         .await
         .unwrap();
     assert!(!body.windows(8).any(|part| part == b"hostile("));
-    assert!(
+    assert_eq!(
         store
             .list_request_artifacts(
                 EvidenceCatalogQuery::new(&tenant, &site, &failed_request, None, 10).unwrap()
             )
             .await
             .unwrap()
-            .artifacts()
-            .is_empty()
+            .artifacts(),
+        []
     );
     // Logging runs after the body filter; wait for its short durability handoff.
     thread::sleep(Duration::from_millis(200));

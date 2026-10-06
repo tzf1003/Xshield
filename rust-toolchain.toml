@@ -1,9 +1,9 @@
 # The toolchain every build, local or CI, is verified with. CI used to float on
 # `stable`, so each Rust release could add pedantic lints that turn `-D warnings`
-# red (clippy 1.99 added several, all in code that is fine on 1.97.1). Upgrading
+# red (that happened with clippy 1.99; the code was moved to 1.99.0 deliberately). Upgrading
 # is a deliberate change: bump the channel here and in .github/workflows/ci.yml
 # together, fix the new lints, and run scripts/verify_all.sh.
 [toolchain]
-channel = "1.97.1"
+channel = "1.99.0"
 profile = "minimal"
 components = ["clippy", "rustfmt"]

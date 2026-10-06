@@ -550,7 +550,9 @@ mod tests {
     fn decode_hex(value: &str) -> Vec<u8> {
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let nibble = |byte| match byte {
                     b'0'..=b'9' => byte - b'0',

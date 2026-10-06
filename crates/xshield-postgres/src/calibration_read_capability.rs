@@ -1910,11 +1910,9 @@ fn frozen_scope_matches(
         && header
             .try_get::<Option<&str>, _>("lineage_review_id")?
             .is_some_and(|review_id| {
-                CalibrationLineageReviewId::parse(review_id)
-                    .ok()
-                    .is_some_and(|review_id| {
-                        scope_digest(capability, &review_id, members) == persisted_digest
-                    })
+                CalibrationLineageReviewId::parse(review_id).is_ok_and(|review_id| {
+                    scope_digest(capability, &review_id, members) == persisted_digest
+                })
             }))
 }
 

@@ -308,12 +308,28 @@ async fn a_label_names_one_descriptor_set_once_a_revision_under_it_may_reach_the
         1
     );
     assert!(apply_state(&store, &tenant, &site).await.requires_approval);
-    assert!(bindings(&pool, &tenant, &site).await.is_empty());
+    assert_eq!(
+        bindings(&pool, &tenant, &site).await,
+        [] as [(
+            std::string::String,
+            std::vec::Vec<u8>,
+            i64,
+            std::string::String
+        ); 0]
+    );
     assert_eq!(
         saved(&store, &tenant, &site, &moved_config("loop-r1"), 2).await,
         2
     );
-    assert!(bindings(&pool, &tenant, &site).await.is_empty());
+    assert_eq!(
+        bindings(&pool, &tenant, &site).await,
+        [] as [(
+            std::string::String,
+            std::vec::Vec<u8>,
+            i64,
+            std::string::String
+        ); 0]
+    );
 
     // The approval makes revision 2 eligible and binds its label.
     assert!(matches!(

@@ -108,9 +108,9 @@ fn management_success_denial_and_error_have_deterministic_nonterminal_summaries(
         assert_eq!(row.confidence_status, "not_applicable");
         assert_eq!(row.is_terminal, 0);
         assert_eq!(row.http_status, None);
-        assert!(row.origin_state.is_empty());
-        assert!(row.operation_id.is_empty());
-        assert!(row.model_revision.is_empty());
+        assert_eq!(row.origin_state, "");
+        assert_eq!(row.operation_id, "");
+        assert_eq!(row.model_revision, "");
         assert_eq!(row.duration_us, 0);
     }
     let mut event = event();
@@ -206,7 +206,7 @@ fn agent_run_access_contract_keeps_tool_payloads_out_of_management_audit() {
     assert_eq!(row.stage, "control_access");
     assert_eq!(row.method, "GET");
     assert_eq!(row.reason_code, "CONTROL_AGENT_RUN_READ");
-    assert!(row.evidence_refs.is_empty());
+    assert_eq!(row.evidence_refs, [] as [std::string::String; 0]);
     let mut invalid = value.clone();
     invalid["payload"]["target_agent_run_id"] = "agent_018f2a3b-4c5d-7000-8000-00000000000d".into();
     rejected(&invalid, "wrong agent run prefix");
@@ -478,10 +478,10 @@ fn access_listing_publishes_scoped_facts_from_authenticated_journal() {
     assert_eq!(row.confidence, None);
     assert_eq!(row.confidence_status, "not_applicable");
     assert_eq!(row.request_id, REQUEST);
-    assert!(row.evidence_refs.is_empty());
+    assert_eq!(row.evidence_refs, [] as [std::string::String; 0]);
     assert_eq!(row.is_terminal, 0);
     assert_eq!(row.http_status, None);
-    assert!(row.origin_state.is_empty());
+    assert_eq!(row.origin_state, "");
     assert!(
         IndexRow::parse_outbox(
             &serde_json::to_vec(&value).unwrap(),
@@ -693,7 +693,7 @@ fn access_details_publish_scoped_metadata_only_from_the_management_journal() {
     assert_eq!(row.evidence_refs, [ARTIFACT]);
     assert_eq!(row.is_terminal, 0);
     assert_eq!(row.http_status, None);
-    assert!(row.origin_state.is_empty());
+    assert_eq!(row.origin_state, "");
     assert!(
         IndexRow::parse_outbox(
             &serde_json::to_vec(&value).unwrap(),
@@ -1340,8 +1340,8 @@ fn hold_management_successes_bind_targets_and_keep_journal_semantics() {
             assert_eq!(row.http_status, None);
             assert_eq!(row.request_id, REQUEST);
             assert_eq!(row.evidence_refs, [ARTIFACT]);
-            assert!(row.origin_state.is_empty());
-            assert!(row.operation_id.is_empty());
+            assert_eq!(row.origin_state, "");
+            assert_eq!(row.operation_id, "");
             assert!(
                 IndexRow::parse_outbox(
                     &serde_json::to_vec(&value).unwrap(),
@@ -1885,10 +1885,10 @@ fn export_listing_publishes_scoped_facts_from_authenticated_journal() {
     assert_eq!(row.confidence, None);
     assert_eq!(row.confidence_status, "not_applicable");
     assert_eq!(row.request_id, REQUEST);
-    assert!(row.evidence_refs.is_empty());
+    assert_eq!(row.evidence_refs, [] as [std::string::String; 0]);
     assert_eq!(row.is_terminal, 0);
     assert_eq!(row.http_status, None);
-    assert!(row.origin_state.is_empty());
+    assert_eq!(row.origin_state, "");
     // The management journal is the only source of this event; an outbox
     // envelope with the same body must not be accepted as a transaction fact.
     assert!(

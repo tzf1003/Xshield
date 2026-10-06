@@ -182,15 +182,15 @@ fn canonical_report_is_a_non_terminal_deterministic_summary() {
     assert_eq!(row.sensitivity, "RESTRICTED");
     assert_eq!(row.producer_boot_id, EVENT);
     assert_eq!(row.evidence_refs, [REPORT_ARTIFACT]);
-    assert!(row.request_id.is_empty());
-    assert!(row.cause_event_ids.is_empty());
+    assert_eq!(row.request_id, "");
+    assert_eq!(row.cause_event_ids, [] as [std::string::String; 0]);
     assert_eq!(row.is_terminal, 0);
     assert_eq!(row.http_status, None);
     assert_eq!(row.duration_us, 0);
-    assert!(row.method.is_empty());
-    assert!(row.operation_id.is_empty());
-    assert!(row.origin_state.is_empty());
-    assert!(row.model_revision.is_empty());
+    assert_eq!(row.method, "");
+    assert_eq!(row.operation_id, "");
+    assert_eq!(row.origin_state, "");
+    assert_eq!(row.model_revision, "");
     assert_eq!(
         serde_json::from_str::<Value>(&row.payload_json).unwrap(),
         value["payload"]
@@ -427,16 +427,16 @@ fn canonical_capability_issuance_is_a_non_terminal_deterministic_summary() {
     assert_eq!(index_row.confidence_status, "not_applicable");
     assert_eq!(index_row.sensitivity, "RESTRICTED");
     assert_eq!(index_row.producer_boot_id, EVENT);
-    assert!(index_row.request_id.is_empty());
-    assert!(index_row.evidence_refs.is_empty());
-    assert!(index_row.cause_event_ids.is_empty());
+    assert_eq!(index_row.request_id, "");
+    assert_eq!(index_row.evidence_refs, [] as [std::string::String; 0]);
+    assert_eq!(index_row.cause_event_ids, [] as [std::string::String; 0]);
     assert_eq!(index_row.is_terminal, 0);
     assert_eq!(index_row.http_status, None);
     assert_eq!(index_row.duration_us, 0);
-    assert!(index_row.method.is_empty());
-    assert!(index_row.operation_id.is_empty());
-    assert!(index_row.origin_state.is_empty());
-    assert!(index_row.model_revision.is_empty());
+    assert_eq!(index_row.method, "");
+    assert_eq!(index_row.operation_id, "");
+    assert_eq!(index_row.origin_state, "");
+    assert_eq!(index_row.model_revision, "");
     assert_eq!(
         serde_json::from_str::<Value>(&index_row.payload_json).unwrap(),
         value["payload"]
@@ -465,9 +465,9 @@ fn completion_is_a_restricted_non_terminal_without_sources_or_lease_material() {
     assert_eq!(index_row.confidence, None);
     assert_eq!(index_row.confidence_status, "not_applicable");
     assert_eq!(index_row.sensitivity, "RESTRICTED");
-    assert!(index_row.request_id.is_empty());
-    assert!(index_row.evidence_refs.is_empty());
-    assert!(index_row.cause_event_ids.is_empty());
+    assert_eq!(index_row.request_id, "");
+    assert_eq!(index_row.evidence_refs, [] as [std::string::String; 0]);
+    assert_eq!(index_row.cause_event_ids, [] as [std::string::String; 0]);
     assert_eq!(index_row.is_terminal, 0);
     for (pointer, replacement) in [
         ("/producer_id", json!("calibration-evaluator")),
@@ -674,10 +674,9 @@ fn calibration_aggregate_field_follows_the_event_contract() {
             "review_id"
         );
     }
-    assert!(
-        super::super::OutboxFamily::Calibration
-            .aggregate_field("calibration.unknown")
-            .is_empty()
+    assert_eq!(
+        super::super::OutboxFamily::Calibration.aggregate_field("calibration.unknown"),
+        ""
     );
 }
 
@@ -829,9 +828,9 @@ fn lineage_review_is_a_restricted_non_terminal_summary_without_graph_content() {
     assert_eq!(index_row.confidence, None);
     assert_eq!(index_row.confidence_status, "not_applicable");
     assert_eq!(index_row.sensitivity, "RESTRICTED");
-    assert!(index_row.request_id.is_empty());
+    assert_eq!(index_row.request_id, "");
     assert_eq!(index_row.evidence_refs, vec![REVIEW_ARTIFACT]);
-    assert!(index_row.cause_event_ids.is_empty());
+    assert_eq!(index_row.cause_event_ids, [] as [std::string::String; 0]);
     assert_eq!(index_row.is_terminal, 0);
     assert_eq!(
         serde_json::from_str::<Value>(&index_row.payload_json).unwrap(),

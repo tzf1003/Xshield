@@ -634,7 +634,7 @@ pub fn key_from_hex(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut key = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = pair[0] - if pair[0] <= b'9' { b'0' } else { b'a' - 10 };
         let low = pair[1] - if pair[1] <= b'9' { b'0' } else { b'a' - 10 };
         key[index] = (high << 4) | low;
@@ -649,7 +649,9 @@ pub(crate) fn decode_hex(value: &str) -> Option<Vec<u8>> {
     let bytes = value.as_bytes();
     Some(
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let nibble = |byte: u8| match byte {
                     b'0'..=b'9' => byte - b'0',
@@ -1200,7 +1202,7 @@ mod tests {
                 "EDGE_APPLY_IDEMPOTENCY_CONFLICT"
             ))
         );
-        assert!(store.calls().is_empty());
+        assert_eq!(store.calls(), [] as [std::string::String; 0]);
         nothing_persisted(&directory);
     }
 
@@ -1216,7 +1218,7 @@ mod tests {
         prepare(&compiled(&request), &request, Some(&down), &path)
             .await
             .unwrap();
-        assert!(down.calls().is_empty());
+        assert_eq!(down.calls(), [] as [std::string::String; 0]);
         assert_eq!(leftovers(&directory), ["snapshot.json.pending"]);
         std::fs::remove_dir_all(directory).unwrap();
     }

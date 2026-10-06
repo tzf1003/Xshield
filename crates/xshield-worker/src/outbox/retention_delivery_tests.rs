@@ -170,7 +170,7 @@ async fn assert_index_and_query(
         assert_eq!(row.producer_id, event["producer_id"]);
         assert_eq!(row.tenant_id, scope.tenant_id().as_str());
         assert_eq!(row.site_id, scope.site_id().as_str());
-        assert!(row.request_id.is_empty());
+        assert_eq!(row.request_id, "");
         assert_eq!(row.is_terminal, 0);
         assert_eq!(row.http_status, None);
         assert_eq!(row.confidence, None);

@@ -88,16 +88,16 @@ fn successful_pre_release_barrier_is_a_restricted_nonbusiness_fact() {
     assert_eq!(row.confidence, None);
     assert_eq!(row.confidence_status, "not_applicable");
     assert_eq!(row.sensitivity, "RESTRICTED");
-    assert!(row.request_id.is_empty());
-    assert!(row.evidence_refs.is_empty());
-    assert!(row.cause_event_ids.is_empty());
+    assert_eq!(row.request_id, "");
+    assert_eq!(row.evidence_refs, [] as [std::string::String; 0]);
+    assert_eq!(row.cause_event_ids, [] as [std::string::String; 0]);
     assert_eq!(row.is_terminal, 0);
     assert_eq!(row.http_status, None);
     assert_eq!(row.duration_us, 0);
-    assert!(row.method.is_empty());
-    assert!(row.operation_id.is_empty());
-    assert!(row.origin_state.is_empty());
-    assert!(row.model_revision.is_empty());
+    assert_eq!(row.method, "");
+    assert_eq!(row.operation_id, "");
+    assert_eq!(row.origin_state, "");
+    assert_eq!(row.model_revision, "");
     assert_eq!(
         serde_json::from_str::<Value>(&row.payload_json).unwrap(),
         value["payload"]

@@ -232,6 +232,7 @@ mod tests {
     struct ReusedCredential;
 
     impl ModelPort for Direct {
+        #[allow(clippy::unused_async_trait_impl)] // the trait method is async; this fake has nothing to await
         async fn send_with_deadline(
             &self,
             _payload: &[u8],
@@ -251,6 +252,7 @@ mod tests {
     }
 
     impl ModelPort for Gateway {
+        #[allow(clippy::unused_async_trait_impl)] // the trait method is async; this fake has nothing to await
         async fn send_with_deadline(
             &self,
             _payload: &[u8],
@@ -274,6 +276,7 @@ mod tests {
     }
 
     impl ModelPort for Alternate {
+        #[allow(clippy::unused_async_trait_impl)] // the trait method is async; this fake has nothing to await
         async fn send_with_deadline(
             &self,
             _payload: &[u8],
@@ -301,6 +304,7 @@ mod tests {
     }
 
     impl ModelPort for ReusedCredential {
+        #[allow(clippy::unused_async_trait_impl)] // the trait method is async; this fake has nothing to await
         async fn send_with_deadline(
             &self,
             _payload: &[u8],

@@ -81,7 +81,7 @@ fn identity_transactions_have_deterministic_nonterminal_summaries() {
         assert_eq!(row.confidence_status, "not_applicable");
         assert_eq!(row.is_terminal, 0);
         assert_eq!(row.http_status, None);
-        assert!(row.origin_state.is_empty());
+        assert_eq!(row.origin_state, "");
         assert_eq!(row.sensitivity, "SENSITIVE");
         assert_eq!(
             serde_json::from_str::<Value>(&row.payload_json).unwrap(),

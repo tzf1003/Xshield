@@ -632,31 +632,31 @@ async fn page_actions_are_returned_only_to_their_live_binding() {
             .all(|view| view.expires_at == UnixSeconds::new(NOW + 1_000))
     );
     // Binding B presenting A's page handle receives nothing.
-    assert!(
+    assert_eq!(
         store
             .load_page_actions(read(bob.snapshot.binding_id(), 1))
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [xshield_postgres::PageActionView; 0]
     );
-    assert!(
+    assert_eq!(
         store
             .load_page_actions(read(alice.snapshot.binding_id(), 2))
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [xshield_postgres::PageActionView; 0]
     );
     sqlx::query("UPDATE xshield.auth_bindings SET status = 'revoked' WHERE binding_id = $1")
         .bind(alice.snapshot.binding_id().as_str())
         .execute(&pool)
         .await
         .unwrap();
-    assert!(
+    assert_eq!(
         store
             .load_page_actions(read(alice.snapshot.binding_id(), 1))
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [xshield_postgres::PageActionView; 0]
     );
 }
 

@@ -157,6 +157,7 @@ async fn cleanup(pool: &PgPool, tenant: &TenantId) {
 /// what the block derives, and repeating the approval or the apply adds none.
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)] // one scenario: approval, replay and apply in order
 async fn rows_are_written_by_the_approval_that_covers_the_block_and_only_once() {
     let (store, pool, tenant, site) = session("rules_once").await;
     let config = share_flow();
@@ -165,7 +166,19 @@ async fn rows_are_written_by_the_approval_that_covers_the_block_and_only_once() 
         ProtectedSiteConfigWriteOutcome::Created(_)
     ));
     // Held for approval: nothing exists that the approver has not approved.
-    assert!(rules(&pool, &tenant, &site).await.is_empty());
+    assert_eq!(
+        rules(&pool, &tenant, &site).await,
+        [] as [(
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            i64,
+            std::string::String
+        ); 0]
+    );
     let policy_rows: i64 =
         sqlx::query_scalar("SELECT count(*) FROM xshield.policy_revisions WHERE tenant_id = $1")
             .bind(tenant.as_str())
@@ -201,7 +214,19 @@ async fn rows_are_written_by_the_approval_that_covers_the_block_and_only_once() 
             .unwrap(),
         ProtectedSiteDirectApplyOutcome::IndependentApprovalRequired
     );
-    assert!(rules(&pool, &tenant, &site).await.is_empty());
+    assert_eq!(
+        rules(&pool, &tenant, &site).await,
+        [] as [(
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            i64,
+            std::string::String
+        ); 0]
+    );
 
     approve(&store, &tenant, &site, 41).await;
     let expected = vec![rule("share-r1", "record-share-r1", 300)];
@@ -387,12 +412,36 @@ async fn rows_are_scoped_and_only_a_share_issue_block_produces_them() {
         rules(&pool, &tenant, &other_site).await,
         vec![rule("share-r1", "record-share-r1", 300)]
     );
-    assert!(rules(&pool, &tenant, &plain_site).await.is_empty());
+    assert_eq!(
+        rules(&pool, &tenant, &plain_site).await,
+        [] as [(
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            i64,
+            std::string::String
+        ); 0]
+    );
 
     // A second tenant with the same site id, label and rule id.
     let other_tenant = TenantId::parse(format!("tenant_rules_scope_{}", Uuid::now_v7())).unwrap();
     save(&store, &other_tenant, &site, &share_flow(), 1).await;
-    assert!(rules(&pool, &other_tenant, &site).await.is_empty());
+    assert_eq!(
+        rules(&pool, &other_tenant, &site).await,
+        [] as [(
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            std::string::String,
+            i64,
+            std::string::String
+        ); 0]
+    );
     approve(&store, &other_tenant, &site, 41).await;
     assert_eq!(rules(&pool, &other_tenant, &site).await.len(), 1);
     assert_eq!(rules(&pool, &tenant, &site).await.len(), 1);

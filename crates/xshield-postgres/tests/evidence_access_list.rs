@@ -153,7 +153,7 @@ async fn assert_visibility_and_paging(store: &PostgresIdentityStore) {
     )
     .await
     .unwrap();
-    assert!(terminal.items().is_empty());
+    assert_eq!(terminal.items(), []);
     assert!(terminal.next_access_request_id().is_none());
     assert!(terminal.as_of() >= third.as_of());
     let review = list(store, "reviewer-1", View::Review, None, 128)
@@ -197,13 +197,13 @@ async fn assert_empty_scope(store: &PostgresIdentityStore) {
                 )
                 .await
                 .unwrap();
-            assert!(page.items().is_empty());
+            assert_eq!(page.items(), []);
             assert!(page.next_access_request_id().is_none());
             assert!(page.as_of().timestamp() > 0);
         }
     }
     let unknown = list(store, "unknown", View::Mine, None, 128).await.unwrap();
-    assert!(unknown.items().is_empty());
+    assert_eq!(unknown.items(), []);
 }
 
 async fn versions(pool: &PgPool) -> Vec<(String, String)> {

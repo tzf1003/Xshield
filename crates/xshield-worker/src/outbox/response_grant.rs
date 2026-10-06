@@ -194,7 +194,7 @@ pub(crate) mod tests {
         assert_eq!(row.operation_id, "resource.read");
         assert_eq!(row.is_terminal, 0);
         assert_eq!(row.http_status, None);
-        assert!(row.origin_state.is_empty());
+        assert_eq!(row.origin_state, "");
     }
 
     #[test]

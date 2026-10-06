@@ -880,7 +880,7 @@ mod tests {
             client,
             AdvertisedClient::Address("[2001:db8::5]:9".parse().unwrap())
         );
-        assert!(surplus.is_empty());
+        assert_eq!(surplus, [] as [u8; 0]);
     }
 
     #[tokio::test]

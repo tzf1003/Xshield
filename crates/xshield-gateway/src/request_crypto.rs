@@ -472,7 +472,9 @@ fn decode_hex(value: &str, max_bytes: usize) -> Result<Vec<u8>, ReasonCode> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = hex_nibble(pair[0])?;
             let low = hex_nibble(pair[1])?;

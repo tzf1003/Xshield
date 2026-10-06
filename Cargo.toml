@@ -40,5 +40,8 @@ zeroize = "1"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# 1.99 asks `assert!(x.is_empty())` to become `assert_eq!(x, [] as [T; 0])` with the element type spelled out,
+# which is less readable in the async test code that uses it; the value shown on failure is the only gain.
+assert_is_empty = "allow"

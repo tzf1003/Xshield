@@ -68,11 +68,9 @@ async fn check_claims(pool: &PgPool, scopes: &[Scope; 3]) -> [OutboxLease; 2] {
     .unwrap();
     let bytes = u64::try_from(bytes).unwrap();
     let too_small = Limits::new(3, bytes - 1, HOUR).unwrap();
-    assert!(
-        claim(pool, scope, too_small, TYPES)
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        claim(pool, scope, too_small, TYPES).await.unwrap(),
+        [] as [xshield_postgres::OutboxEvent; 0]
     );
     let mut lock = pool.begin().await.unwrap();
     sqlx::query("SELECT event_id FROM xshield.audit_outbox WHERE event_id = $1 FOR UPDATE")
@@ -193,7 +191,10 @@ async fn check_retry(pool: &PgPool, scope: &Scope, lease: &OutboxLease, limits: 
     let remaining = claim(pool, scope, limits, TYPES).await.unwrap();
     assert_eq!(remaining.len(), 1);
     assert_ne!(remaining[0].event_id, lease.event_id);
-    assert!(claim(pool, scope, limits, TYPES).await.unwrap().is_empty());
+    assert_eq!(
+        claim(pool, scope, limits, TYPES).await.unwrap(),
+        [] as [xshield_postgres::OutboxEvent; 0]
+    );
     sqlx::query(
         "UPDATE xshield.audit_outbox SET next_attempt_at = clock_timestamp() - interval '1 second'
          WHERE event_id = $1",

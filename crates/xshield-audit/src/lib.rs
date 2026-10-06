@@ -72,7 +72,7 @@ impl JournalKey {
             return Err(JournalError::InvalidKey);
         }
         let mut key = [0; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             key[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
         }
         Ok(Self(key))
@@ -166,7 +166,7 @@ fn decode_32_byte_hex(value: &str) -> Result<[u8; ED25519_BYTES], JournalError> 
         return Err(JournalError::InvalidSealKey);
     }
     let mut bytes = [0; ED25519_BYTES];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         bytes[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
     }
     Ok(bytes)

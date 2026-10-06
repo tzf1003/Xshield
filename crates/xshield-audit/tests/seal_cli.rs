@@ -44,7 +44,7 @@ fn seals_a_rotated_segment_while_the_writer_is_active() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"1\n");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert_eq!(fs::read_dir(&manifest_directory).unwrap().count(), 1);
 
     drop(journal);

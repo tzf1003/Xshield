@@ -459,7 +459,7 @@ async fn assert_history_pages(f: &Fixture) {
     let empty = f.page(&case, None, 1).await;
     assert_eq!(empty.case_id(), &case);
     assert_eq!(empty.case_status(), "open");
-    assert!(empty.items().is_empty());
+    assert_eq!(empty.items(), []);
     assert!(empty.next_hold_id().is_none());
     let missing = CaseId::parse(format!("case_{}", Uuid::now_v7())).unwrap();
     let foreign_tenant = TenantId::parse("tenant_hold_read_other").unwrap();
@@ -512,7 +512,7 @@ async fn assert_history_pages(f: &Fixture) {
     assert!(page_three.as_of() >= records[2].hold_until);
     assert!(page_one.as_of() <= page_two.as_of() && page_two.as_of() <= page_three.as_of());
     let after_last = f.page(&case, Some(&records[2].created_event_id), 128).await;
-    assert!(after_last.items().is_empty());
+    assert_eq!(after_last.items(), []);
     assert!(after_last.next_hold_id().is_none());
     let all = f.page(&case, None, 128).await;
     assert_eq!(all.items(), records);

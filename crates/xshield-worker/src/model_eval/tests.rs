@@ -880,7 +880,7 @@ async fn postgres_evaluation_admission_refuses_capacity_before_evidence_or_http(
         )
         .await
         .unwrap();
-    assert!(catalog.artifacts().is_empty());
+    assert_eq!(catalog.artifacts(), []);
     let outbox: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM xshield.audit_outbox
          WHERE tenant_id=$1 AND site_id=$2

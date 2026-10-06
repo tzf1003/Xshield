@@ -64,7 +64,7 @@ async fn assert_empty_database_clock(
         .fetch_one(pool)
         .await
         .unwrap();
-    assert!(page.items().is_empty());
+    assert_eq!(page.items(), []);
     assert!(page.next_case_id().is_none());
     assert!((lower..=upper).contains(&page.as_of()));
 }
@@ -121,11 +121,11 @@ async fn assert_owner_scope_and_live_pages(
     let refresh = list(store, tenant, site, "owner", None, 2).await;
     assert_eq!(refresh.items(), &[newer, last]);
     let empty = list(store, tenant, site, "owner", Some(first.case_id()), 2).await;
-    assert!(empty.items().is_empty());
+    assert_eq!(empty.items(), []);
     assert!(empty.next_case_id().is_none());
     assert!(empty.as_of() >= next.as_of());
     let outsider = list(store, tenant, site, "no-cases", None, 128).await;
-    assert!(outsider.items().is_empty());
+    assert_eq!(outsider.items(), []);
 }
 
 async fn assert_corrupt_lookahead_and_outbox(
@@ -156,7 +156,7 @@ async fn assert_corrupt_lookahead_and_outbox(
         1,
     )
     .await;
-    assert!(empty.items().is_empty());
+    assert_eq!(empty.items(), []);
     sqlx::query("UPDATE xshield.investigation_cases SET purpose = $2 WHERE case_id = $1")
         .bind(lookahead.case_id().as_str())
         .bind(lookahead.purpose())

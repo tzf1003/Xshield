@@ -137,7 +137,8 @@ fn nonce_bytes(hex: &str) -> Option<[u8; HEALTH_NONCE_BYTES]> {
     if hex.len() != HEALTH_NONCE_BYTES * 2 {
         return None;
     }
-    for (slot, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+    let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+    for (slot, pair) in bytes.iter_mut().zip(pairs) {
         *slot = (nibble(pair[0])? << 4) | nibble(pair[1])?;
     }
     Some(bytes)
@@ -438,7 +439,9 @@ mod tests {
             let mut key = [0_u8; 32];
             for (index, pair) in "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
                 .as_bytes()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .enumerate()
             {
                 key[index] = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();

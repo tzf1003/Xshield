@@ -996,6 +996,7 @@ mod tests {
         type Content = TestContent;
         type Error = TestReadError;
 
+        #[allow(clippy::unused_async_trait_impl)] // the trait method is async; this fake has nothing to await
         async fn read_calibration_evidence<'a>(
             &'a self,
             request: CalibrationEvidenceReadRequest<'a>,
@@ -1077,6 +1078,7 @@ mod tests {
         type Attestation = ();
         type Error = TestVaultError;
 
+        #[allow(clippy::unused_async_trait_impl)] // the trait method is async; this fake has nothing to await
         async fn write_and_attest(
             &self,
             command: CalibrationReportVaultCommand<'_>,
@@ -1100,6 +1102,7 @@ mod tests {
         type Error = TestCommitError;
         type Receipt = &'static str;
 
+        #[allow(clippy::unused_async_trait_impl)] // the trait method is async; this fake has nothing to await
         async fn commit<'command>(
             &'command self,
             command: CalibrationReportCommitCommand<'command, '_, ()>,
@@ -1121,6 +1124,7 @@ mod tests {
     impl CalibrationEvaluationFailureAudit for TestAudit {
         type Error = TestAuditError;
 
+        #[allow(clippy::unused_async_trait_impl)] // the trait method is async; this fake has nothing to await
         async fn record_failure(
             &self,
             failure: CalibrationEvaluationFailure,
@@ -1269,7 +1273,10 @@ mod tests {
             error.reason_code(),
             "CALIBRATION_EVALUATOR_CONTENT_BINDING_MISMATCH"
         );
-        assert!(decoder.accepted.is_empty());
+        assert_eq!(
+            decoder.accepted,
+            [] as [xshield_core::calibration::read_capability::CalibrationEvidenceRole; 0]
+        );
         assert!(vault.reports.lock().expect("test lock").is_empty());
         assert_eq!(*committer.commits.lock().expect("test lock"), 0);
         assert_eq!(

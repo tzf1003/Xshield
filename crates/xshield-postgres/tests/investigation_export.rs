@@ -105,7 +105,7 @@ async fn investigation_export_is_scoped_idempotent_independent_and_download_boun
     };
     assert_eq!(approved_record.status(), "approved");
     assert_eq!(approved_record.decided_by(), Some(approver));
-    assert!(snapshot.artifacts().is_empty());
+    assert_eq!(snapshot.artifacts(), []);
 
     let self_approval = store
         .decide_investigation_export(

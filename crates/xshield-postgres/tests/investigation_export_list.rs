@@ -263,7 +263,7 @@ async fn assert_visibility_and_paging(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    assert!(terminal.items().is_empty());
+    assert_eq!(terminal.items(), []);
     assert!(terminal.next_export_id().is_none());
     assert!(terminal.as_of() >= third.as_of());
     // One shared database observation per page, not one per row.
@@ -382,7 +382,7 @@ async fn assert_empty_scope(fixture: &Fixture) {
                 )
                 .await
                 .unwrap();
-            assert!(page.items().is_empty());
+            assert_eq!(page.items(), []);
             assert!(page.next_export_id().is_none());
             assert!(page.as_of().timestamp() > 0);
         }
@@ -391,7 +391,7 @@ async fn assert_empty_scope(fixture: &Fixture) {
         .list("unknown", View::Mine, None, 128)
         .await
         .unwrap();
-    assert!(unknown.items().is_empty());
+    assert_eq!(unknown.items(), []);
 }
 
 async fn assert_read_only(fixture: &Fixture) {
@@ -415,7 +415,7 @@ async fn assert_read_only(fixture: &Fixture) {
         .await
         .expect("no business row lock waits")
         .unwrap();
-        assert!(!page.items().is_empty());
+        assert_ne!(page.items(), []);
     }
     lock.rollback().await.unwrap();
     assert_eq!(fixture.versions().await, before);
