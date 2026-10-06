@@ -91,6 +91,8 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 发布回归从加密 journal 与签名清单开始，验证真实 `FixedString` 编码、两张物理表的精确摘要和微秒时间读回、同步确认后的水位提交与 checkpoint 重用；继续追加同 event_id 的不同内容时，发布器必须返回完整性冲突，保留原水位并显示待投递段。
 
+真实 ClickHouse 回归（2026-10-06 起）：带 `#[ignore]` 的 ClickHouse 集成测试（`real_schema_publisher`、`clickhouse_search`、`management_audit`、`scripts/test_postgres.sh` 在设置 `XSHIELD_TEST_CLICKHOUSE_URL` 时运行的四个 outbox 投递测试）在 CI 以 `clickhouse/clickhouse-server:25.8.29.51` 服务容器运行，本机可用同版本原生二进制复现（见 CHANGELOG）。它们第一次在真实服务上运行就发现：检索把 `FixedString(32)` 的 `trace_id` 读入 `String` 被客户端拒绝（每次真实检索失败）、证据保全历史过滤的生命周期分支缺少阶段约束，以及多处夹具与契约漂移。仅有模拟服务的单元测试不能替代这组测试：它们只能断言 SQL 文本。
+
 模型阶段回归由实际加密 journal 经封存和发布入库，验证 `mdl_` 调用引用、已知/缺失模型版本以及有界模型版本过滤。阶段汇总回归在同一阶段先写数值置信度，再写 `not_applicable`、`not_provided` 或 `unavailable` 的 null，确认两套 active 视图都返回最新 null 与匹配状态。常规测试另覆盖置信度矛盾、非法模型引用和版本、时间线分页预读行校验；这些合成事件验证审计链路，不代表实际模型推理或准确率测量。
 
 模型调用回归在同一隔离测试库封存并发布 `started → requested → responded`，通过生产 `query_model_call` 验证 tenant/site 隔离、版本、置信度、四类证据引用与因果链完整性；模型完成仍保持业务请求未终结，精确重投复用三段 checkpoint 且物理行数不增加。常规 worker 测试覆盖可见前缀/后缀/中间缺失、发出前失败、Noul 空置信度、畸形生命周期及响应上限；控制测试覆盖 Observer 权限、非法 UTF-8 路径、未命中、审计故障扣留结果、查询预算和 search/model 共用许可在客户端断连后保持到终态审计。
