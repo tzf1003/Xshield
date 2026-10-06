@@ -44,7 +44,7 @@ MUST：保持入口薄、用例编排清晰、纯计算可独立测试；不为�
 
 每个安全规则至少：允许、拒绝、缺失、过期/撤销、跨身份、并发/重试、依赖故障、审计断言。关键解析/转换使用 property testing 与 fuzz。状态和 replay 使用可注入 Clock 与固定 fixture，测试不访问生产服务。
 
-CI：fmt、clippy、cargo test、doc test、schema/example validation、依赖图、依赖/许可证审查、secret scan、迁移验证、接口兼容检查。Clippy lint 按 workspace 管理；不能为了通过 CI 全局 allow 警告。[S27]
+CI：fmt、clippy、cargo test、doc test、schema/example validation、依赖图、依赖/许可证审查、secret scan、迁移验证、接口兼容检查。Clippy lint 按 workspace 管理；不能为了通过 CI 全局 allow 警告。[S27]工具链固定在 `rust-toolchain.toml`（当前 1.97.1），CI 使用同一版本，不跟随浮动的 `stable`：每个 Rust 版本都会带来新的 pedantic lint，浮动会让 `-D warnings` 随编译器发布而变红（clippy 1.99 就新增了 `assert_is_empty`、`chunks_exact_to_as_chunks` 等，共约 130 处）。升级工具链是一次专门的改动：同时修改 `rust-toolchain.toml` 与 CI、修掉新 lint、完整跑一遍 `scripts/verify_all.sh`。
 
 其中依赖与密钥相关的几项当前这样落地（2026-10-06）：`deny.toml` 由 `cargo deny check` 执行，CI 的 `supply-chain` 作业与 `scripts/verify_all.sh rust`（已安装 cargo-deny 时）都会运行——第三方许可证只允许 MIT、Apache-2.0、BSD-2/3、ISC、Unicode-3.0、Zlib、CC0-1.0、Unlicense、BSL-1.0 与 CDLA-Permissive-2.0，RustSec 公告和被撤回（yanked）的版本失败，只允许 crates.io 来源，不允许 git 依赖；工作区各 crate 标记 `publish = false`。公告例外必须写在 `deny.toml` 里并说明为何不适用、何时结束（当前两项：经 `openidconnect` 引入的 `rsa` 只用于验证 ID Token 签名，Marvin 时序泄露针对私钥运算；`derivative` 是 `pingora-core` 内仅构建期使用的 proc-macro，无已知漏洞）。依赖图以 `cargo tree --duplicates` 作为 CI 工件保存。`scripts/check_secrets.py` 对已跟踪文件做高精度模式扫描（私钥块、云与 VCS 令牌、URL 内嵌凭据、疑似密钥的长十六进制字面量），不打印命中的值；它看不到已删除的历史，也不认识模板之外的供应商格式，因此不能代替历史范围的扫描器，合并前仍应对远端仓库启用平台的 secret scanning。接口兼容检查（对外 API 契约的破坏性变更检测）尚未实现，只有 29 章目录与契约测试。新增或升级依赖须按上面的规则说明原因、许可证和更新策略。
 
