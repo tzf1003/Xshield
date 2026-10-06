@@ -365,7 +365,9 @@ test("the sensor learns at most 64 grant lists and 64 identity-change routes", a
   await search.fill("auth.logout65");
   await page.getByRole("button", { name: "编辑路由 auth.logout65" }).click();
   drawer = drawerNamed(page, "编辑路由");
-  await expect(group(drawer, "身份撤销")).toContainText("每个站点最多 64 条建立或撤销身份的路由。");
+  await expect(group(drawer, "身份撤销")).toContainText(
+    "每个站点最多 64 条建立、撤销身份或切换授权上下文的路由。",
+  );
 });
 
 test("the page helper counts bytes, refuses what the edge refuses and keeps nothing", async ({
@@ -716,6 +718,107 @@ for (const scheme of ["light", "dark"] as const) {
         if (id === "records.share.issue") {
           await expect(group(drawer, "分享凭据发放")).toBeVisible();
         }
+        await settled(page);
+        expect(await serious(page), id).toEqual([]);
+        await drawer.getByRole("button", { name: "取消" }).click();
+        await expect(drawer).toHaveCount(0);
+      }
+    });
+  });
+}
+
+const TRANSITION = JSON.parse(
+  readFileSync(repo("tests/site-config/auth-transition-flow.json"), "utf8"),
+) as Json;
+
+test("an operator edits a credential refresh, sees the server's messages and the approval names it", async ({
+  page,
+}) => {
+  const served = structuredClone(TRANSITION);
+  const mock = await mockSite(page, { config: structuredClone(TRANSITION) });
+  mock.intercept = async (route, url) => {
+    if (!url.pathname.endsWith("/config") || route.request().method() !== "PUT") return false;
+    const posted = route.request().postDataJSON() as Json;
+    mock.writes.push({
+      method: "PUT",
+      path: url.pathname,
+      body: JSON.stringify(posted),
+      key: null,
+      digest: null,
+    });
+    mock.config = posted;
+    mock.state = {
+      desired_revision: 4,
+      active_revision: 3,
+      apply_state: "pending",
+      requires_approval: true,
+      reason_code: "CONTROL_SITE_APPROVAL_REQUIRED",
+    };
+    mock.revisions = [
+      { revision: 4, config: posted },
+      { revision: 3, config: served },
+    ];
+    await route.fulfill({ json: configBody(mock.id, mock.config, mock.state) });
+    return true;
+  };
+  await signInAt(page, "/sites/site_alpha/routes");
+
+  // Offered on authenticated roots only: not on the login entry.
+  await page.getByRole("button", { name: "编辑路由 auth.login" }).click();
+  let drawer = drawerNamed(page, "编辑路由");
+  await expect(group(drawer, "刷新凭证")).toHaveCount(0);
+  await expect(group(drawer, "切换授权上下文")).toHaveCount(0);
+  await drawer.getByRole("button", { name: "取消" }).click();
+
+  await page.getByRole("button", { name: "编辑路由 auth.refresh" }).click();
+  drawer = drawerNamed(page, "编辑路由");
+  const refreshing = group(drawer, "刷新凭证");
+  await expect(refreshing).toContainText("独立审批人");
+  await field(refreshing, "业务凭证指针").fill("/identity/id");
+  await expect(refreshing.getByText("三个 JSON 指针必须互不相同。")).toBeVisible();
+  await expect(apply(drawer)).toBeDisabled();
+  await field(refreshing, "业务凭证指针").fill("/access_token");
+  await field(refreshing, "成功状态码").fill("204");
+  await expect(refreshing.getByText("成功状态码须为 2xx，且不能是 204")).toBeVisible();
+  await field(refreshing, "成功状态码").fill("205");
+  await expect(refreshing.getByText("成功状态码须为 2xx，且不能是 204")).toHaveCount(0);
+  await field(refreshing, "成功状态码").fill("200");
+  await field(refreshing, "凭证期限").fill("600");
+  await apply(drawer).click();
+  await expect(drawer).toHaveCount(0);
+
+  await bar(page).getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("已保存为 r4");
+  const saved = byId(routesOf(sent(mock, "PUT")));
+  expect(saved["auth.refresh"]?.auth_refresh).toEqual({
+    success_status: 200,
+    principal_pointer: "/identity/id",
+    authorization_context_pointer: "/identity/authorization_context",
+    bearer_pointer: "/access_token",
+    credential_ttl_seconds: 600,
+  });
+
+  await sectionLink(page, "发布").click();
+  const approval = page.getByRole("region", { name: "审批说明" });
+  await expect(approval).toContainText("凭证刷新或授权上下文切换变更");
+  await expect(approval).toContainText("CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED");
+  await expect(page.getByRole("button", { name: /直接应用/ })).toHaveCount(0);
+});
+
+for (const scheme of ["light", "dark"] as const) {
+  test.describe(`transition groups accessibility (${scheme})`, () => {
+    test.use({ colorScheme: scheme });
+    test("the refresh and switch groups have no serious violations", async ({ page }) => {
+      test.setTimeout(120_000);
+      await mockSite(page, { config: structuredClone(TRANSITION) });
+      await signInAt(page, "/sites/site_alpha/routes");
+      for (const [id, title] of [
+        ["auth.refresh", "刷新凭证"],
+        ["auth.context.switch", "切换授权上下文"],
+      ] as const) {
+        await page.getByRole("button", { name: `编辑路由 ${id}` }).click();
+        const drawer = drawerNamed(page, "编辑路由");
+        await expect(group(drawer, title)).toBeVisible();
         await settled(page);
         expect(await serious(page), id).toEqual([]);
         await drawer.getByRole("button", { name: "取消" }).click();

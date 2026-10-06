@@ -361,6 +361,11 @@ const summarizeShare = (r: SiteRouteConfig) =>
     ? `→ ${r.share_issue.target_operation_id}（规则 ${r.share_issue.issuance_rule_id}）· 字段 ${r.share_issue.token_field} · ≤ ${r.share_issue.max_active_shares} 个 · ${formatSeconds(r.share_issue.ttl_seconds)}`
     : none;
 
+const summarizeTransition = (block: SiteRouteConfig["auth_refresh"]) =>
+  block
+    ? `${block.success_status} · 凭证 ${formatSeconds(block.credential_ttl_seconds)} · 主体 ${block.principal_pointer} · 上下文 ${block.authorization_context_pointer}`
+    : none;
+
 /**
  * The flow blocks of a route in a few words each, for an added or removed route and the route
  * table: a route that establishes identity or issues actions must not read like a plain one.
@@ -378,6 +383,8 @@ export function flowParts(route: SiteRouteConfig, withMode = true): string[] {
     route.query_pagination &&
       `分页参数 ${route.query_pagination.parameters.map((parameter) => parameter.name || "（未命名）").join("、")}`,
     route.share_issue && `发放分享凭据 → ${route.share_issue.target_operation_id || "（未选）"}`,
+    route.auth_refresh && "刷新凭证",
+    route.auth_context_switch && "切换授权上下文",
   ].filter((part): part is string => typeof part === "string");
 }
 
@@ -450,6 +457,18 @@ const routeSpecs: readonly RouteSpec[] = [
     label: "分享凭据发放",
     format: summarizeShare,
     risk: "SHARE_ISSUE_CHANGED",
+  },
+  {
+    id: "auth_refresh",
+    label: "刷新凭证",
+    format: (r) => summarizeTransition(r.auth_refresh),
+    risk: "AUTH_TRANSITION_CHANGED",
+  },
+  {
+    id: "auth_context_switch",
+    label: "切换授权上下文",
+    format: (r) => summarizeTransition(r.auth_context_switch),
+    risk: "AUTH_TRANSITION_CHANGED",
   },
 ];
 

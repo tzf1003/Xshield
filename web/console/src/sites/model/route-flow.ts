@@ -25,6 +25,7 @@ import type {
   SiteResourceGrant,
   SiteRouteConfig,
   SiteShareIssue,
+  SiteAuthTransition,
   SiteSensorHtmlAdapter,
   routeFlowKeys,
 } from "../../api.ts";
@@ -46,6 +47,8 @@ export const flowBlockLabel: Readonly<Record<FlowBlock, string>> = {
   resource_grant: "响应资源资格",
   query_pagination: "分页参数",
   share_issue: "分享凭据发放",
+  auth_refresh: "刷新凭证",
+  auth_context_switch: "切换授权上下文",
 };
 
 /** The item member the edge writes each issued reference into (the browser loop's spelling). */
@@ -92,6 +95,15 @@ export const emptyResourceGrant = (target = ""): SiteResourceGrant => ({
   ttl_seconds: 600,
   max_items: 50,
   max_active_grants: 500,
+});
+
+/** A new refresh or switch: pointers stay empty (they describe the operator's application). */
+export const emptyAuthTransition = (): SiteAuthTransition => ({
+  success_status: 200,
+  principal_pointer: "",
+  authorization_context_pointer: "",
+  bearer_pointer: "",
+  credential_ttl_seconds: 1800,
 });
 
 /** The member the edge adds to an issuing response (the identity script's spelling). */
@@ -167,6 +179,8 @@ const fits: Readonly<Record<FlowBlock, (route: SiteRouteConfig) => boolean>> = {
       route.security_entry === "ui_action_required") &&
     notPage(route),
   share_issue: (route) => routeOnly("ui_action_required")(route) && notPage(route),
+  auth_refresh: (route) => routeOnly("authenticated_root")(route) && notPage(route),
+  auth_context_switch: (route) => routeOnly("authenticated_root")(route) && notPage(route),
 };
 
 export function blockFits(route: SiteRouteConfig, block: FlowBlock): boolean {
@@ -221,6 +235,8 @@ const blocks: readonly FlowBlock[] = [
   "resource_grant",
   "query_pagination",
   "share_issue",
+  "auth_refresh",
+  "auth_context_switch",
 ];
 
 /** Sets (or, with `undefined`, removes) one block; the key disappears when removed. */

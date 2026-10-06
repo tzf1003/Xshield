@@ -7,7 +7,8 @@ export type FlowToken =
   | "PAGE_ACTIONS_CHANGED"
   | "RESOURCE_GRANT_CHANGED"
   | "QUERY_PAGINATION_CHANGED"
-  | "SHARE_ISSUE_CHANGED";
+  | "SHARE_ISSUE_CHANGED"
+  | "AUTH_TRANSITION_CHANGED";
 
 type Member = (policy: SitePolicyConfig, route: SiteRouteConfig) => boolean;
 
@@ -48,6 +49,12 @@ export const flowFacets: readonly (readonly [FlowToken, Member])[] = [
   [
     "SHARE_ISSUE_CHANGED",
     (_, route) => route.share_issue !== undefined || route.security_entry === "share_entry",
+  ],
+  // A refresh replaces a binding's credential; a context switch moves it to another
+  // authorization context (another account): both decide whose data the next requests reach.
+  [
+    "AUTH_TRANSITION_CHANGED",
+    (_, route) => route.auth_refresh !== undefined || route.auth_context_switch !== undefined,
   ],
 ];
 

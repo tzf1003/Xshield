@@ -1283,6 +1283,19 @@ export type SiteShareIssue = {
 };
 
 /**
+ * A credential refresh or an authorization-context switch on an `authenticated_root` route
+ * (`xshield_core::site::flow::SiteAuthTransition`, edge `response.auth_refresh` and
+ * `response.auth_context_switch`). No session lease: neither extends the session.
+ */
+export type SiteAuthTransition = {
+  success_status: number;
+  principal_pointer: string;
+  authorization_context_pointer: string;
+  bearer_pointer: string;
+  credential_ttl_seconds: number;
+};
+
+/**
  * One route exactly as the server stores it. The browser provenance-flow blocks at the end are
  * present only when set (the server omits unset ones), so a decoded route serializes back to the
  * same JSON and a save can never drop or default a block it carried.
@@ -1309,6 +1322,8 @@ export type SiteRouteConfig = {
   resource_grant?: SiteResourceGrant;
   query_pagination?: SiteQueryPagination;
   share_issue?: SiteShareIssue;
+  auth_refresh?: SiteAuthTransition;
+  auth_context_switch?: SiteAuthTransition;
 };
 
 /** The flow blocks of a route, in the server's field order. */
@@ -1321,6 +1336,8 @@ export const routeFlowKeys = [
   "resource_grant",
   "query_pagination",
   "share_issue",
+  "auth_refresh",
+  "auth_context_switch",
 ] as const satisfies readonly (keyof SiteRouteConfig)[];
 
 export type SitePolicyConfig = {
@@ -1695,6 +1712,24 @@ function decodeResourceGrant(value: unknown): SiteResourceGrant {
   };
 }
 
+function decodeAuthTransition(value: unknown): SiteAuthTransition {
+  const row = object(value);
+  exactFields(row, [
+    "success_status",
+    "principal_pointer",
+    "authorization_context_pointer",
+    "bearer_pointer",
+    "credential_ttl_seconds",
+  ]);
+  return {
+    success_status: status(row.success_status),
+    principal_pointer: pointer(row.principal_pointer),
+    authorization_context_pointer: pointer(row.authorization_context_pointer),
+    bearer_pointer: pointer(row.bearer_pointer),
+    credential_ttl_seconds: lease(row.credential_ttl_seconds),
+  };
+}
+
 function decodeShareIssue(value: unknown): SiteShareIssue {
   const row = object(value);
   exactFields(row, [
@@ -1764,6 +1799,12 @@ function decodeRouteFlow(route: Record<string, unknown>): Partial<SiteRouteConfi
     ...(route.share_issue === undefined
       ? {}
       : { share_issue: decodeShareIssue(route.share_issue) }),
+    ...(route.auth_refresh === undefined
+      ? {}
+      : { auth_refresh: decodeAuthTransition(route.auth_refresh) }),
+    ...(route.auth_context_switch === undefined
+      ? {}
+      : { auth_context_switch: decodeAuthTransition(route.auth_context_switch) }),
   };
 }
 

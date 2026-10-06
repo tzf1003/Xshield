@@ -468,6 +468,7 @@ test("flow changes name their facet like assess_change_risk, in both directions"
     "RESOURCE_GRANT_CHANGED",
     "QUERY_PAGINATION_CHANGED",
     "SHARE_ISSUE_CHANGED",
+    "AUTH_TRANSITION_CHANGED",
   ]);
   // The cases of risk.rs `flow_route_changes_name_their_facet_in_both_directions`.
   const cases: [string, (draft: SiteConfigDraft) => void, string[]][] = [

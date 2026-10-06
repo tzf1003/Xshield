@@ -8,6 +8,7 @@ import {
   emptyPageActions,
   emptyQueryPagination,
   emptyResourceGrant,
+  emptyAuthTransition,
   emptyShareIssue,
   emptySensorBuild,
   type FlowBlock,
@@ -38,6 +39,7 @@ import {
   ResourceGrantGroup,
 } from "./route-flow-groups";
 import { SensorHtmlGroup } from "./route-sensor-html";
+import { AuthTransitionGroup } from "./route-auth-transition";
 import { ShareIssueGroup } from "./route-share-issue";
 
 export type DrawerMode = "add" | "edit" | "duplicate";
@@ -89,6 +91,8 @@ const fresh: { [K in FlowBlock]: () => NonNullable<SiteRouteConfig[K]> } = {
   resource_grant: () => emptyResourceGrant(),
   query_pagination: emptyQueryPagination,
   share_issue: () => emptyShareIssue(),
+  auth_refresh: emptyAuthTransition,
+  auth_context_switch: emptyAuthTransition,
 };
 
 /** Section heading inside the drawer. */
@@ -459,6 +463,7 @@ export function RouteDrawer({
         <ResourceGrantGroup {...flow} />
         <QueryPaginationGroup {...flow} />
         <ShareIssueGroup {...flow} />
+        <AuthTransitionGroup {...flow} />
         <AuthRevokeGroup {...flow} />
 
         <Group

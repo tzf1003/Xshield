@@ -385,6 +385,7 @@ export type RiskToken =
   | "RESOURCE_GRANT_CHANGED"
   | "QUERY_PAGINATION_CHANGED"
   | "SHARE_ISSUE_CHANGED"
+  | "AUTH_TRANSITION_CHANGED"
   | "OTHER_CHANGE";
 
 export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail: string }>> = {
@@ -461,6 +462,11 @@ export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail:
     label: "分享凭据发放变更",
     detail:
       "决定哪些响应会签发可重复读取的只读凭据，以及哪条分享入口不经身份就能兑换它；只能由独立审批人批准。",
+  },
+  AUTH_TRANSITION_CHANGED: {
+    label: "凭证刷新或授权上下文切换变更",
+    detail:
+      "决定哪些响应会替换身份绑定的凭证，或把绑定移到另一个授权上下文（另一个账号）；只能由独立审批人批准，直接应用能力不能代替。",
   },
   OTHER_CHANGE: {
     label: "其他安全相关字段变更",

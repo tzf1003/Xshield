@@ -8,6 +8,7 @@ import type {
   SiteQueryPagination,
   SiteResourceGrant,
   SiteShareIssue,
+  SiteAuthTransition,
   SiteRouteConfig,
   SiteSecretReference,
   SiteSensorHtml,
@@ -270,6 +271,14 @@ const shareFromStored = (row: Record_): SiteShareIssue => ({
   max_active_shares: num(row.max_active_shares, 0),
 });
 
+const transitionFromStored = (row: Record_): SiteAuthTransition => ({
+  success_status: num(row.success_status, 0),
+  principal_pointer: str(row.principal_pointer),
+  authorization_context_pointer: str(row.authorization_context_pointer),
+  bearer_pointer: str(row.bearer_pointer),
+  credential_ttl_seconds: num(row.credential_ttl_seconds, 0),
+});
+
 /**
  * The provenance-flow blocks of a stored route, in the server's order and only when present, so
  * the approval explanation and diffs of a revision see exactly what the server compares.
@@ -284,6 +293,8 @@ function flowFromStored(row: Record_): Partial<SiteRouteConfig> {
     resource_grant,
     query_pagination,
     share_issue,
+    auth_refresh,
+    auth_context_switch,
   } = row;
   return {
     ...(isRecord(auth_binding) ? { auth_binding: bindingFromStored(auth_binding) } : {}),
@@ -298,6 +309,10 @@ function flowFromStored(row: Record_): Partial<SiteRouteConfig> {
       ? { query_pagination: paginationFromStored(query_pagination) }
       : {}),
     ...(isRecord(share_issue) ? { share_issue: shareFromStored(share_issue) } : {}),
+    ...(isRecord(auth_refresh) ? { auth_refresh: transitionFromStored(auth_refresh) } : {}),
+    ...(isRecord(auth_context_switch)
+      ? { auth_context_switch: transitionFromStored(auth_context_switch) }
+      : {}),
   };
 }
 

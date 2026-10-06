@@ -155,7 +155,9 @@ const responseHasSideEffects = (route: SiteRouteConfig) =>
   route.resource_grant !== undefined ||
   route.share_issue !== undefined ||
   route.auth_binding !== undefined ||
-  route.auth_revoke !== undefined;
+  route.auth_revoke !== undefined ||
+  route.auth_refresh !== undefined ||
+  route.auth_context_switch !== undefined;
 
 /** Field-level messages of the flow rules, shared by the drawer and the save path. */
 const flowText = {
@@ -209,6 +211,29 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
       }
     }
   }
+  for (const key of ["auth_refresh", "auth_context_switch"] as const) {
+    const transition = route[key];
+    if (!transition) continue;
+    const label =
+      key === "auth_refresh" ? "凭证刷新（auth_refresh）" : "授权上下文切换（auth_context_switch）";
+    if (route.security_entry !== "authenticated_root") {
+      add(key, `${label}只能用于“已认证根”路由。`);
+      continue;
+    }
+    if (!successStatus(transition.success_status)) add(`${key}.success_status`, flowText.status);
+    const seen = new Set<string>();
+    for (const member of [
+      "principal_pointer",
+      "authorization_context_pointer",
+      "bearer_pointer",
+    ] as const) {
+      const value = transition[member];
+      if (!validPointer(value)) add(`${key}.${member}`, flowText.pointer);
+      else if (seen.has(value)) add(`${key}.${member}`, flowText.pointerTaken);
+      seen.add(value);
+    }
+    ttl(`${key}.credential_ttl_seconds`, transition.credential_ttl_seconds, "凭证期限");
+  }
   if (revoke) {
     if (route.security_entry !== "authenticated_root") {
       add("auth_revoke", "身份撤销（auth_revoke）只能用于“已认证根”路由。");
@@ -229,11 +254,13 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
       route.resource_grant !== undefined ||
       route.share_issue !== undefined ||
       binding !== undefined ||
-      revoke !== undefined
+      revoke !== undefined ||
+      route.auth_refresh !== undefined ||
+      route.auth_context_switch !== undefined
     ) {
       add(
         "sensor_html",
-        "SENSOR_HTML 页面只能是 GET，且不能同时加密响应、签发资格或分享凭据、建立/撤销身份。",
+        "SENSOR_HTML 页面只能是 GET，且不能同时加密响应、签发资格或分享凭据、建立/撤销身份、刷新凭证或切换授权上下文。",
       );
     }
     if (additional.length > 15) {
@@ -415,12 +442,14 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
     (grant !== undefined ? 1 : 0) +
       (share !== undefined ? 1 : 0) +
       (binding !== undefined ? 1 : 0) +
-      (revoke !== undefined ? 1 : 0) >
+      (revoke !== undefined ? 1 : 0) +
+      (route.auth_refresh !== undefined ? 1 : 0) +
+      (route.auth_context_switch !== undefined ? 1 : 0) >
     1
   ) {
     add(
       "resource_grant",
-      "同一路由的响应最多只能有一种身份或资格效果（身份建立、身份撤销、资源资格或分享凭据选其一）。",
+      "同一路由的响应最多只能有一种身份或资格效果（身份建立、身份撤销、凭证刷新、授权上下文切换、资源资格或分享凭据选其一）。",
     );
   }
   return found;
@@ -552,7 +581,7 @@ function cryptoProblems(
       if (responseHasSideEffects(route)) {
         found.push({
           field: "request_crypto",
-          text: "仅观察请求时，响应不能加密、建立或撤销身份、签发资格。",
+          text: "仅观察请求时，响应不能加密、建立/撤销/刷新身份、切换授权上下文、签发资格或分享凭据。",
         });
       }
     } else if (request.mode === "DIRECT_DECRYPT") {
@@ -796,12 +825,22 @@ export function validateFlowReferences(
     add(index, "resource_grant", "每个站点最多 64 条响应资源资格。");
   }
   for (const index of indexes(
-    (route) => route.auth_binding !== undefined || route.auth_revoke !== undefined,
+    // The sensor learns these routes as "identity changed"; a refresh keeps the same principal
+    // and context, so it is not counted (gateway `page_actions::sensor_routes`).
+    (route) =>
+      route.auth_binding !== undefined ||
+      route.auth_revoke !== undefined ||
+      route.auth_context_switch !== undefined,
   ).slice(64)) {
+    const route = routes[index];
     add(
       index,
-      routes[index]?.auth_binding ? "auth_binding" : "auth_revoke",
-      "每个站点最多 64 条建立或撤销身份的路由。",
+      route?.auth_binding
+        ? "auth_binding"
+        : route?.auth_revoke
+          ? "auth_revoke"
+          : "auth_context_switch",
+      "每个站点最多 64 条建立、撤销身份或切换授权上下文的路由。",
     );
   }
   // One (action, mapping revision) has one meaning, whoever provisions the descriptors.
