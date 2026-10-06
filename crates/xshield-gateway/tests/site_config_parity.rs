@@ -10,13 +10,6 @@
 //! sample; a new edge rule or a new control field that breaks it fails this
 //! test.
 //!
-//! One edge refusal is not a validation rule: a live snapshot that declares
-//! `page_actions` is refused (`apply page_actions`) until the edge can supply
-//! the derived action descriptors on apply, which is being built separately.
-//! [`edge_verdict`] reports that barrier as its own outcome, and only after
-//! proving that the edge compiler accepts the configuration and that the
-//! snapshot is accepted once the page issuance is taken out. When the edge
-//! starts accepting such snapshots the barrier simply stops occurring.
 
 use xshield_core::{
     GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteConfig, SitePolicyConfig,
@@ -99,9 +92,6 @@ fn site() -> SiteId {
 enum Edge {
     /// The complete snapshot is accepted.
     Accepted,
-    /// Refused only because live snapshots cannot carry `page_actions` yet;
-    /// the edge compiler accepts the configuration itself.
-    DescriptorBarrier,
     /// Refused for the given reason.
     Rejected(String),
 }
@@ -137,32 +127,6 @@ fn snapshot_verdict(config: &SiteConfig) -> Result<(), ConfigError> {
 fn edge_verdict(config: &SiteConfig) -> Edge {
     match snapshot_verdict(config) {
         Ok(()) => Edge::Accepted,
-        Err(ConfigError::Invalid("apply page_actions")) => {
-            // The barrier is checked right after the per-site compile, before
-            // the snapshot-level checks. Classify it as the barrier only when
-            // the compiler accepts the configuration with its page issuance
-            // and the whole snapshot is accepted without it.
-            let compiled = config
-                .gateway_config(TENANT, &site())
-                .map_err(|error| error.to_string())
-                .and_then(|value| serde_json::to_vec(&value).map_err(|error| error.to_string()))
-                .and_then(|bytes| {
-                    GatewayConfig::from_json(&bytes).map_err(|error| error.to_string())
-                });
-            let mut without_issuance = config.clone();
-            for route in &mut without_issuance.policy.routes {
-                route.page_actions = None;
-                route.issued_by = None;
-            }
-            match (compiled, snapshot_verdict(&without_issuance)) {
-                (Ok(compiled), Ok(())) if compiled.edge_descriptors().is_some() => {
-                    Edge::DescriptorBarrier
-                }
-                (Err(error), _) => Edge::Rejected(error),
-                (_, Err(error)) => Edge::Rejected(error.to_string()),
-                (Ok(_), Ok(())) => Edge::Rejected("barrier without page actions".to_owned()),
-            }
-        }
         Err(error) => Edge::Rejected(error.to_string()),
     }
 }
@@ -179,8 +143,6 @@ enum Expect {
 struct Tally {
     core_accepted: usize,
     core_rejected: usize,
-    /// Samples accepted by both but held at the descriptor-supply barrier.
-    barrier: usize,
     failures: Vec<String>,
 }
 
@@ -189,7 +151,6 @@ impl Tally {
         Self {
             core_accepted: 0,
             core_rejected: 0,
-            barrier: 0,
             failures: Vec::new(),
         }
     }
@@ -201,10 +162,6 @@ impl Tally {
                 "core accepted but the edge rejected `{label}`: {edge}"
             )),
             (Ok(()), Edge::Accepted) => self.core_accepted += 1,
-            (Ok(()), Edge::DescriptorBarrier) => {
-                self.core_accepted += 1;
-                self.barrier += 1;
-            }
             (Err(_), _) => self.core_rejected += 1,
         }
     }
@@ -1208,12 +1165,9 @@ fn the_browser_loop_projects_to_the_loop_scripts_edge_operations() {
         projected.sensor_routes().invalidate(),
         scripted.sensor_routes().invalidate()
     );
-    // Until the edge supplies descriptors on apply, the live snapshot path
-    // holds the loop at the barrier; nothing else refuses it.
-    assert!(matches!(
-        edge_verdict(&browser_loop()),
-        Edge::Accepted | Edge::DescriptorBarrier
-    ));
+    // The live snapshot path accepts the loop: the edge supplies its
+    // descriptors when it applies the snapshot.
+    assert!(matches!(edge_verdict(&browser_loop()), Edge::Accepted));
 }
 
 /// Judges the loop topology after `mutate`.
