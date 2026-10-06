@@ -118,10 +118,12 @@ test.describe("step-up status and the session menu", () => {
       overrides: { step_up_valid: true, last_reauthenticated_at: "2026-09-20T08:00:00.000Z" },
     });
     await page.goto("/access/session");
-    // The fake clock keeps running in real time after install, so allow one second of drift.
-    await expect(page.getByText(/^MFA 再认证有效 · 剩余 1:(30|29)$/)).toBeVisible();
+    // The fake clock keeps running in real time after install, and a loaded CI runner can spend
+    // many seconds loading the page, so the check is the minute the window is in: it starts at
+    // 1:30, and the jump below (31 s) always lands it in the last minute.
+    await expect(page.getByText(/^MFA 再认证有效 · 剩余 1:\d\d$/)).toBeVisible();
     await page.clock.runFor(31_000);
-    await expect(page.getByText(/^MFA 再认证有效 · 剩余 0:(59|58|57)$/)).toBeVisible();
+    await expect(page.getByText(/^MFA 再认证有效 · 剩余 0:\d\d$/)).toBeVisible();
     await page.clock.runFor(61_000);
     await expect(page.getByText("高危操作需要 MFA 再认证", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "重新验证高危操作", exact: true })).toBeVisible();

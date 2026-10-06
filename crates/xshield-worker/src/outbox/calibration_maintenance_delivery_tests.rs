@@ -91,11 +91,14 @@ async fn real_calibration_maintenance_outbox_clickhouse_delivery() {
     result.unwrap();
 }
 
+// Only scopes with maintenance facts still waiting: the report regression commits two of them
+// in the scope the lifecycle delivery test drains, and the publisher delivers a whole scope.
+// The dedicated retention scopes carry every maintenance event type between them.
 async fn committed_maintenance_scopes(pool: &PgPool) -> Vec<(TenantId, SiteId)> {
     let rows = sqlx::query(
         "SELECT tenant_id, site_id
          FROM xshield.audit_outbox
-         WHERE event_type = ANY($1::text[])
+         WHERE event_type = ANY($1::text[]) AND published_at IS NULL
            AND (tenant_id LIKE 'tenant_calreport_%' OR tenant_id LIKE 'tenant_calreview_%')
          GROUP BY tenant_id, site_id
          ORDER BY tenant_id, site_id",

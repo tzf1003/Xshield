@@ -312,6 +312,9 @@ test.describe("submitting", () => {
     await expect(page.getByText("operator-1")).toHaveCount(0);
     // Leaving the page forgets it: a low-entropy identifier is not kept around.
     await openView(page, "audit-health");
+    // Leaving counts only once the other page is up: a lazily loaded route on a slow runner
+    // leaves this one mounted, and returning then never reaches a fresh search page.
+    await expect(page.getByRole("heading", { name: "审计发布状态", exact: true })).toBeVisible();
     await openView(page, "search");
     await expect(conditions(page)).toHaveCount(0);
     await expect(page.getByText("operator-1")).toHaveCount(0);
@@ -326,6 +329,9 @@ test.describe("submitting", () => {
     await search(page);
     await expect(rows(page).first()).toBeVisible();
     await openView(page, "audit-health");
+    // Leaving counts only once the other page is up: a lazily loaded route on a slow runner
+    // leaves this one mounted, and returning then never reaches a fresh search page.
+    await expect(page.getByRole("heading", { name: "审计发布状态", exact: true })).toBeVisible();
     await openView(page, "search");
     await expect(conditions(page)).toContainText(`请求 ID：${REQUEST_ID}`);
     await expect(page.getByLabel("开始时间（本地，含）", { exact: true })).toHaveValue(RANGE[0]);

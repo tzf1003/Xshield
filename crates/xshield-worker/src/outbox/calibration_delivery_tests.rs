@@ -15,9 +15,11 @@ use xshield_core::domain::{SiteId, TenantId};
 
 /// The user-facing calibration lifecycle has four event types from the
 /// lineage-review, capability-issuance, and report-completion transactions.
-/// Retention maintenance has a separate production path and scope; keeping
-/// this set exact prevents maintenance rows from silently becoming
-/// prerequisites for lifecycle delivery.
+/// They are the prerequisites a scope must have to be worth publishing here
+/// and select the scopes under test. Everything else the publisher delivers
+/// for the family (the report-retention events the report regression commits in
+/// the same scope, for example) is checked too, through `calibration::EVENT_TYPES`,
+/// because the publisher cannot tell them apart and claims the whole scope.
 const LIFECYCLE_EVENT_TYPES: [&str; 4] = [
     "calibration.partition_lineage.reviewed",
     "calibration.read_capability.issued",
@@ -90,7 +92,14 @@ async fn publish_scope(pool: &PgPool, client: &Client, scope: OutboxScope) {
             .iter()
             .all(|event_type| event_types.contains(event_type))
     );
-    assert_committed_source_rows(pool, &scope, &expected).await;
+    // Retention events originate in the retention queue, which its own regression ties to
+    // committed state; only the lifecycle facts are checked against their source rows here.
+    let lifecycle: BTreeMap<String, Value> = expected
+        .iter()
+        .filter(|(_, event)| LIFECYCLE_EVENT_TYPES.contains(&event["event_type"].as_str().unwrap()))
+        .map(|(id, event)| (id.clone(), event.clone()))
+        .collect();
+    assert_committed_source_rows(pool, &scope, &lifecycle).await;
 
     let store = PostgresIdentityStore::from_pool(pool.clone());
     let config = OutboxPublisherConfig::new(
@@ -126,7 +135,7 @@ async fn committed_envelopes(pool: &PgPool, scope: &OutboxScope) -> BTreeMap<Str
     )
     .bind(scope.tenant_id().as_str())
     .bind(scope.site_id().as_str())
-    .bind(LIFECYCLE_EVENT_TYPES)
+    .bind(calibration::EVENT_TYPES)
     .fetch_all(pool)
     .await
     .unwrap();
@@ -215,7 +224,7 @@ async fn assert_acknowledged(pool: &PgPool, scope: &OutboxScope, count: usize) {
     )
     .bind(scope.tenant_id().as_str())
     .bind(scope.site_id().as_str())
-    .bind(LIFECYCLE_EVENT_TYPES)
+    .bind(calibration::EVENT_TYPES)
     .fetch_one(pool)
     .await
     .unwrap();

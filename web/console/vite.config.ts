@@ -98,6 +98,11 @@ export default defineConfig({
   server: {
     port: 55173,
     strictPort: true,
+    // Every route is a lazily loaded chunk that the dev server compiles on first use. On a cold
+    // checkout (CI) a small runner spends longer on that than a spec's waits allow, so a click
+    // that should have left a page is still pending when the next one arrives. Transforming the
+    // app at start-up keeps first use as fast as the hundredth.
+    warmup: { clientFiles: ["./index.html", "./src/main.tsx", "./src/**/*.{ts,tsx}"] },
     headers: {
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",

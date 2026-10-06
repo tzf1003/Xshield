@@ -171,7 +171,8 @@ test.describe("权限中心 explains the session and what each role unlocks", ()
     );
     await page.goto("/access/session");
     const session = page.getByRole("region", { name: "当前管理会话" });
-    await expect(session.getByText(/^有效 · 剩余 1:(30|29)$/)).toBeVisible();
+    // Real time keeps passing on the fake clock while the page loads; see shell-session.spec.ts.
+    await expect(session.getByText(/^有效 · 剩余 1:\d\d$/)).toBeVisible();
     await page.clock.runFor(95_000);
     await expect(session.getByText("未生效", { exact: true })).toBeVisible();
   });

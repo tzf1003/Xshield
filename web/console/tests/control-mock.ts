@@ -50,7 +50,7 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
   const calls: Call[] = [];
   const dropped: Call[] = [];
   abandonedCalls.set(calls, dropped);
-  const records = new Map<Request, { call: Call; graced: boolean }>();
+  const records = new Map<Request, { call: Call; graced: boolean; answered: boolean }>();
   const forget = (call: Call) => {
     const index = calls.indexOf(call);
     if (index >= 0) calls.splice(index, 1);
@@ -64,6 +64,9 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
   page.on("requestfailed", (request) => {
     const entry = records.get(request);
     if (!entry || request.failure()?.errorText !== "net::ERR_ABORTED") return;
+    // An answered call stays recorded: a late abort of its body (a slow runner delivers the
+    // page's cancellation after the reply) must not erase a request the page really made.
+    if (entry.answered) return;
     if (forget(entry.call) && entry.graced) dropped.push(entry.call);
   });
   await page.route("**/control/v1/**", async (route) => {
@@ -77,7 +80,7 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
         cookie: await request.headerValue("cookie"),
         body: request.postDataJSON(),
       };
-      const entry = { call: record, graced: false };
+      const entry = { call: record, graced: false, answered: false };
       calls.push(record);
       records.set(request, entry);
       // Let an abort that is already on its way (the StrictMode remount above) land first.
@@ -128,6 +131,9 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
           status: reply.status ?? 200,
           json: reply.body,
           headers: { "cache-control": "private, no-store" },
+        })
+        .then(() => {
+          entry.answered = true;
         })
         .catch(() => undefined);
     } catch {

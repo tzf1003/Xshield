@@ -60,6 +60,12 @@ const LIST_ITEMS_MAX: usize = 256;
 const NAME_BYTES_MAX: usize = 128;
 const MAX_METADATA_RETENTION_DAYS: u16 = 3_650;
 const MAX_REQUEST_STAGES: usize = 128;
+// `trace_id` is stored as `FixedString(32)` (the 32 lowercase hex characters of the
+// W3C trace id). The ClickHouse client refuses to read a FixedString column into a
+// Rust `String`, so every read casts it in the projection. Nothing is trimmed: the
+// publisher only writes validated 32-character hex, and a filter on `trace_id` then
+// compares the cast value with the same string.
+const TRACE_ID_PROJECTION: &str = "toString(trace_id) AS trace_id";
 // Historical rows predate the indexed column. Only model-derived events may
 // recover their redacted link from the already-indexed payload; result rows
 // still pass through `ModelCallId::parse` before reaching a caller.
@@ -3360,7 +3366,7 @@ mod tests {
         .unwrap();
         let sql = captured.query().await;
         for fragment in [
-            "event_type IN ('evidence.hold.created','evidence.hold.released')",
+            "stage = 'evidence_hold' AND event_type IN ('evidence.hold.created','evidence.hold.released')",
             "JSONExtractString(payload_json,'hold_id') = 'ev_018f2a3b-4c5d-7000-8000-000000000004'",
             "stage = 'control_access' AND event_type IN ('console.evidence.hold.created','console.evidence.hold.released')",
             "JSONExtractString(payload_json,'target_hold_id') = 'ev_018f2a3b-4c5d-7000-8000-000000000004'",

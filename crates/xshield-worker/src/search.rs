@@ -2,8 +2,8 @@
 //! values are bound parameters, and callers must audit attempts and results.
 
 use super::{
-    MODEL_CALL_ID_PROJECTION, PublishError, PublisherConfig, reject_duplicate_json,
-    valid_confidence, valid_event_type, valid_name, validate_id_list,
+    MODEL_CALL_ID_PROJECTION, PublishError, PublisherConfig, TRACE_ID_PROJECTION,
+    reject_duplicate_json, valid_confidence, valid_event_type, valid_name, validate_id_list,
 };
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row, sql::Identifier};
@@ -1022,21 +1022,22 @@ async fn execute_agent_run(
 ) -> Result<Option<AgentRunSummary>, PublishError> {
     // ponytail: bounded payload scan; add a materialized agent_run_id column
     // only when retained Agent history exceeds this fixed decoder budget.
+    let sql = format!(
+        "SELECT nullIf(request_id,'') AS request_id,event_id,{TRACE_ID_PROJECTION},event_type,
+         nullIf(stage,'') AS stage,nullIf(outcome,'') AS outcome,
+         nullIf(reason_code,'') AS reason_code,nullIf(proof_kind,'') AS proof_kind,confidence,
+         nullIf(confidence_status,'') AS confidence_status,occurred_at,request_seq,duration_us,
+         policy_revision,nullIf(model_revision,'') AS model_revision,
+         nullIf(model_call_id,'') AS model_call_id,
+         evidence_refs,cause_event_ids,sensitivity,payload_json FROM ?
+         WHERE tenant_id = ? AND site_id = ?
+           AND event_type IN ('agent.started','agent.tool_called','agent.tool_result',
+                              'agent.artifact_created','agent.finished')
+           AND JSONExtractString(payload_json,'agent_run_id') = ?
+         ORDER BY request_seq,event_id LIMIT 65",
+    );
     let mut cursor = client
-        .query(
-            "SELECT nullIf(request_id,'') AS request_id,event_id,trace_id,event_type,
-             nullIf(stage,'') AS stage,nullIf(outcome,'') AS outcome,
-             nullIf(reason_code,'') AS reason_code,nullIf(proof_kind,'') AS proof_kind,confidence,
-             nullIf(confidence_status,'') AS confidence_status,occurred_at,request_seq,duration_us,
-             policy_revision,nullIf(model_revision,'') AS model_revision,
-             nullIf(model_call_id,'') AS model_call_id,
-             evidence_refs,cause_event_ids,sensitivity,payload_json FROM ?
-             WHERE tenant_id = ? AND site_id = ?
-               AND event_type IN ('agent.started','agent.tool_called','agent.tool_result',
-                                  'agent.artifact_created','agent.finished')
-               AND JSONExtractString(payload_json,'agent_run_id') = ?
-             ORDER BY request_seq,event_id LIMIT 65",
-        )
+        .query(&sql)
         .bind(Identifier(&config.active_view))
         .bind(tenant_id.as_str())
         .bind(site_id.as_str())
@@ -1197,7 +1198,7 @@ async fn execute_query(
     }
     let descending = matches!(plan.sort(), QuerySort::OccurredAtDesc);
     let mut sql = format!(
-        "SELECT nullIf(request_id,'') AS request_id,event_id,trace_id,event_type,\
+        "SELECT nullIf(request_id,'') AS request_id,event_id,{TRACE_ID_PROJECTION},event_type,\
          nullIf(stage,'') AS stage,nullIf(outcome,'') AS outcome,\
          nullIf(reason_code,'') AS reason_code,nullIf(proof_kind,'') AS proof_kind,confidence,\
          nullIf(confidence_status,'') AS confidence_status,occurred_at,request_seq,duration_us,\
@@ -1274,8 +1275,11 @@ async fn execute_query(
                 "AND event_type = 'console.calibration.report.read' ",
                 "AND JSONExtractString(payload_json,'target_calibration_report_id') = ?))",
             )),
+            // The lifecycle branch pins the producing stage like the case filter does, so a
+            // hold event type carried by another stage is never read as hold history.
             QueryFilter::EvidenceHoldId(_) => sql.push_str(concat!(
-                "((event_type IN ('evidence.hold.created','evidence.hold.released') ",
+                "((stage = 'evidence_hold' ",
+                "AND event_type IN ('evidence.hold.created','evidence.hold.released') ",
                 "AND JSONExtractString(payload_json,'hold_id') = ?) ",
                 "OR (stage = 'control_access' ",
                 "AND event_type IN ('console.evidence.hold.created',",
@@ -2228,7 +2232,10 @@ mod tests {
 
         assert!(result.events.is_empty());
         let sql = recorded.query().await;
-        assert!(sql.contains("event_id,trace_id,event_type"), "{sql}");
+        assert!(
+            sql.contains("event_id,toString(trace_id) AS trace_id,event_type"),
+            "{sql}"
+        );
         assert!(
             sql.contains("trace_id = '018f2a3b4c5d70008000000000000003'"),
             "{sql}"

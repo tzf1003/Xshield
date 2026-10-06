@@ -502,7 +502,11 @@ pub(super) async fn insert_event(
     event["event_id"] = json!(format!("ev_{}", Uuid::now_v7()));
     event["tenant_id"] = json!(scope.tenant_id().as_str());
     event["site_id"] = json!(scope.site_id().as_str());
-    if matches!(family, OutboxFamily::Grant | OutboxFamily::ShareGrant) {
+    // These producers use the event id as their boot id, and their parsers require it.
+    if matches!(
+        family,
+        OutboxFamily::Grant | OutboxFamily::ShareGrant | OutboxFamily::Calibration
+    ) {
         event["producer_boot_id"] = event["event_id"].clone();
     }
     if matches!(family, OutboxFamily::ShareGrant) {

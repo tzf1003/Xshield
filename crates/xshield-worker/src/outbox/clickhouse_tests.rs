@@ -405,7 +405,11 @@ async fn assert_index_rows(
             assert_eq!(row.site_id, scope.site_id().as_str());
             assert_eq!(row.event_type, envelope["event_type"]);
             assert_eq!(row.producer_id, envelope["producer_id"]);
-            assert_eq!(row.request_id, envelope["request_id"]);
+            // The index stores an absent request as the empty string.
+            assert_eq!(
+                row.request_id,
+                envelope["request_id"].as_str().unwrap_or_default()
+            );
             assert_eq!(
                 serde_json::to_value(&row.evidence_refs).unwrap(),
                 envelope["evidence_refs"]
@@ -419,15 +423,12 @@ async fn assert_index_rows(
                 DateTime::parse_from_rfc3339(envelope["occurred_at"].as_str().unwrap()).unwrap()
             );
             assert_eq!(row.observed_at, row.occurred_at);
-            let expected_micros = if matches!(
-                envelope["event_type"].as_str(),
+            let expected_micros = match envelope["event_type"].as_str() {
                 Some(
-                    "grant.issued" | "response_grant.issued" | "share.issued" | "ui_action.issued"
-                )
-            ) {
-                0
-            } else {
-                123_456
+                    "grant.issued" | "response_grant.issued" | "share.issued" | "ui_action.issued",
+                ) => 0,
+                Some(kind) if kind.starts_with("calibration.") => 123_000,
+                _ => 123_456,
             };
             assert_eq!(row.occurred_at.timestamp_subsec_micros(), expected_micros);
             assert_eq!(
@@ -547,7 +548,7 @@ async fn publish_family(
             publish_evidence_retention_outbox_batch(store, client, scope, config).await
         }
     }
-    .unwrap()
+    .unwrap_or_else(|error| panic!("{:?} outbox: {error:?}", family.event_types()))
 }
 
 // Keep the lost-ack, retry, and conflict transitions in execution order.
@@ -694,10 +695,20 @@ fn current_event(mut envelope: Value) -> Value {
         }
         return envelope;
     }
+    // Calibration events carry canonical millisecond clocks and are refused otherwise;
+    // every other family here keeps the microsecond precision the index stores.
+    let (nanos, precision) = if envelope["event_type"]
+        .as_str()
+        .is_some_and(|kind| kind.starts_with("calibration."))
+    {
+        (123_000_000, SecondsFormat::Millis)
+    } else {
+        (123_456_000, SecondsFormat::Micros)
+    };
     let now = Utc::now()
-        .with_nanosecond(123_456_000)
+        .with_nanosecond(nanos)
         .unwrap()
-        .to_rfc3339_opts(SecondsFormat::Micros, true);
+        .to_rfc3339_opts(precision, true);
     envelope["occurred_at"] = json!(now);
     envelope["observed_at"] = envelope["occurred_at"].clone();
     envelope

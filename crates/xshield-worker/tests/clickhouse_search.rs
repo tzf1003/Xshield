@@ -21,6 +21,7 @@ use xshield_worker::{
     query_request_summary,
 };
 
+const MODEL_CALL_ID: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
 const REQUEST_A: &str = "req_018f2a3b-4c5d-7000-8000-000000000001";
 const REQUEST_B: &str = "req_018f2a3b-4c5d-7000-8000-000000000002";
 
@@ -169,6 +170,7 @@ async fn assert_latest_stage_null_confidence(writer: &Client, reader: &Client) {
         previous.stage = status;
         previous.proof_kind = "model";
         previous.model_revision = "jev-1.13.0";
+        previous.model_call_id = MODEL_CALL_ID;
         previous.confidence = Some(0.99);
         previous.confidence_status = "provided";
         let mut latest = previous.clone();
@@ -245,6 +247,7 @@ struct TestEvent {
     duration_us: u64,
     policy_revision: &'static str,
     model_revision: &'static str,
+    model_call_id: &'static str,
     evidence_refs: Vec<String>,
     cause_event_ids: Vec<String>,
     sensitivity: &'static str,
@@ -285,6 +288,7 @@ impl TestEvent {
             duration_us: 42,
             policy_revision: "policy-r1",
             model_revision: "",
+            model_call_id: "",
             evidence_refs: Vec::new(),
             cause_event_ids: Vec::new(),
             sensitivity: "INTERNAL",
@@ -329,6 +333,7 @@ async fn insert_events(client: &Client) -> (QueryWindow, Vec<TestEvent>) {
     model.confidence_status = "provided";
     model.operation_id = "orders.detail";
     model.model_revision = "model-r1";
+    model.model_call_id = MODEL_CALL_ID;
     let mut optional = TestEvent::new(2, model.occurred_at + TimeDelta::microseconds(1), expires);
     optional.request_id = "";
     optional.event_type = "audit.recovered";
@@ -848,9 +853,11 @@ async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
         (321, "console.manifest.read", true, false),
         (322, "evidence.read", true, false),
     ] {
+        // Console hold management names its hold, which is what the hold filter reads.
         let payload = serde_json::json!({
             "target_case_id": (sequence <= 320).then_some(CASE),
             "target_artifact_id": artifact_target.then_some(ARTIFACT),
+            "target_hold_id": matches!(sequence, 318 | 319).then_some(HOLD),
         });
         let mut row = new_row(sequence, kind, "control_access", &payload);
         if page_refs {
@@ -1078,9 +1085,11 @@ async fn assert_case_artifact_search(writer: &Client, reader: &Client) {
             100,
         )
         .unwrap();
+        // Each foreign scope sees only its own copies: the plain case row and the hold row
+        // (a case-family event naming the same case and artifact) it was given above.
         for (tenant, site, ids) in [
-            ("tenant_other", "site_case_search", vec![361]),
-            ("tenant_case_search", "site_other", vec![362]),
+            ("tenant_other", "site_case_search", vec![361, 371]),
+            ("tenant_case_search", "site_other", vec![362, 372]),
             ("tenant_other", "site_other", vec![]),
         ] {
             let result = queried(
@@ -1375,6 +1384,10 @@ fn assert_summary(actual: &SearchEventSummary, expected: &TestEvent) {
     assert_eq!(
         actual.model_revision.as_deref(),
         optional(expected.model_revision)
+    );
+    assert_eq!(
+        actual.model_call_id.as_deref(),
+        optional(expected.model_call_id)
     );
     assert_eq!(actual.evidence_refs, expected.evidence_refs);
     assert_eq!(actual.cause_event_ids, expected.cause_event_ids);
