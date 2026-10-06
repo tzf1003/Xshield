@@ -297,7 +297,7 @@ export function ProbeFields({ ws }: Props) {
         label="策略版本"
         required
         issue={ws.issueFor("policy_revision")}
-        hint="给这一版策略起的标签，例如 policy-v2。仅用于识别，修改它不触发审批。"
+        hint="给这一版策略起的标签，例如 policy-v2。修改它本身不触发审批，但它与页面动作描述绑定：改变页面动作（page_actions、issued_by、resource_grant 及其路由）时必须换一个从未用过的新标签，服务端会拒绝复用。"
       >
         <Input
           value={draft.policy_revision}

@@ -139,6 +139,8 @@ export const messages = {
   CONTROL_SITE_PAGE_ACTIONS_INVALID: "页面签发（page_actions / issued_by）未通过校验。",
   CONTROL_SITE_RESOURCE_GRANT_INVALID: "响应资源资格（resource_grant）未通过校验。",
   CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT: "同一动作与映射修订被赋予了两种含义。",
+  CONTROL_SITE_POLICY_REVISION_REUSED:
+    "策略版本标签已绑定另一组页面动作，请为这次变更设置新的策略版本（policy_revision）。",
   CONTROL_SITE_FEATURE_UNSUPPORTED: "配置使用了控制面尚不能管理的 edge 功能，未保存。",
   CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED:
     "该修订改变了浏览器来源流程，必须由独立审批人批准，直接应用不能代替。",

@@ -48,6 +48,7 @@ test("the scan finds the codes this console must label", () => {
     "EDGE_APPLY_CONFIRMED",
     "EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE",
     "EDGE_DIRECT_APPLY_NOT_CONFIRMED",
+    "CONTROL_SITE_POLICY_REVISION_REUSED",
   ]) {
     assert.ok(found.has(code), `scan no longer sees ${code}: update the scan, not the assertion`);
   }
@@ -121,6 +122,27 @@ test("reasonText labels known codes and never invents text for unknown ones", ()
   // Object.prototype members are not codes.
   assert.equal(reasonText("constructor").known, false);
   assert.equal(reasonText("__proto__").known, false);
+});
+
+test("a reused policy revision label is explained and the field hint tells the truth", () => {
+  const reused = reasonText("CONTROL_SITE_POLICY_REVISION_REUSED");
+  assert.equal(reused.known, true);
+  assert.equal(reused.tone, "danger");
+  assert.match(reused.text, /policy_revision/);
+  assert.match(reused.text, /页面动作/);
+  assert.match(reused.action, /新策略版本标签/);
+  assert.match(messages.CONTROL_SITE_POLICY_REVISION_REUSED, /policy_revision/);
+  // The hint under the policy_revision field no longer calls the label
+  // cosmetic: it is bound to the page-action descriptors and reuse is refused.
+  const fields = readFileSync(
+    new URL("../src/pages/sites/tabs/site-fields.tsx", import.meta.url),
+    "utf8",
+  );
+  const hint = /id="policy-revision"[\s\S]*?hint="([^"]+)"/.exec(fields)?.[1] ?? "";
+  assert.match(hint, /页面动作/);
+  assert.match(hint, /新标签/);
+  assert.match(hint, /拒绝复用/);
+  assert.doesNotMatch(hint, /仅用于识别/);
 });
 
 test("the delete and approve step-up refusals tell the operator how to recover", () => {
