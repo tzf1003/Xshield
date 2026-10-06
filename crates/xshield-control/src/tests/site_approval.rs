@@ -26,6 +26,9 @@ struct EdgeState {
     /// Every apply request as received: the raw body and its signature header.
     signed: Vec<(Vec<u8>, String)>,
     serving: BTreeMap<String, Value>,
+    /// A refusal (status and unsigned body) the next apply answers with,
+    /// applying nothing; armed by [`MockEdge::refuse_next`].
+    refusal: Option<(u16, Value)>,
 }
 
 #[derive(Clone, Default)]
@@ -63,6 +66,12 @@ impl MockEdge {
     /// The raw body and signature header of the latest apply request.
     fn last_signed_apply(&self) -> Option<(Vec<u8>, String)> {
         self.0.lock().unwrap().signed.last().cloned()
+    }
+
+    /// Makes the next apply fail the way the real edge refuses one: this
+    /// status and unsigned body, nothing applied or served.
+    fn refuse_next(&self, status: u16, body: Value) {
+        self.0.lock().unwrap().refusal = Some((status, body));
     }
 }
 
@@ -106,6 +115,9 @@ async fn edge_apply(
             .unwrap_or_default()
             .to_owned(),
     ));
+    if let Some((status, body)) = state.refusal.take() {
+        return (StatusCode::from_u16(status).unwrap(), Json(body)).into_response();
+    }
     if revision < state.snapshot_revision {
         return (
             StatusCode::CONFLICT,
@@ -2141,4 +2153,57 @@ async fn a_reused_label_holds_back_only_its_own_site() {
         event["payload"]["reason_code"] == "CONTROL_SITE_POLICY_REVISION_REUSED"
             && event["payload"]["outcome"] == "ERROR"
     }));
+}
+
+/// An edge descriptor conflict names the site that caused it. That site's
+/// status carries the code, the site whose save triggered the apply stays
+/// pending and the other sites keep their state. A name this plane did not
+/// send as a desired revision (unknown, or the target itself) leaves the
+/// failure on the target, as before.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn a_descriptor_conflict_is_recorded_on_the_site_the_edge_names() {
+    let ctx = Ctx::new().await;
+    for site in ["site_a", "site_b", "site_c"] {
+        ctx.create_live(site, "8.8.8.8:9000").await;
+    }
+    let conflict = |site: &str| {
+        json!({
+            "error": "edge_apply_failed",
+            "reason_code": "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+            "site_id": site
+        })
+    };
+
+    ctx.edge.refuse_next(409, conflict("site_b"));
+    let renamed = with(
+        site_body("site_a", "8.8.8.8:9000"),
+        "display_name",
+        json!("A renamed"),
+    );
+    let (status, saved) = ctx.put("site_a", &renamed, &ctx.key("rename")).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["apply_state"], "pending", "the target caused nothing");
+    assert_eq!(saved["reason_code"], "EDGE_APPLY_NOT_CONFIRMED");
+    let named = ctx.status("site_b").await;
+    assert_eq!(named["apply_state"], "failed", "{named}");
+    assert_eq!(named["reason_code"], "EDGE_APPLY_DESCRIPTOR_CONFLICT");
+    let other = ctx.status("site_c").await;
+    assert_eq!(other["apply_state"], "active", "{other}");
+    assert_eq!(other["reason_code"], "EDGE_APPLY_CONFIRMED");
+
+    for name in ["site_unknown", "site_a"] {
+        ctx.edge.refuse_next(409, conflict(name));
+        let (status, outcome) = ctx.apply("site_a", &ctx.key("apply")).await;
+        assert_eq!(status, StatusCode::OK, "{outcome}");
+        assert_eq!(outcome["apply_state"], "failed", "{name}: {outcome}");
+        assert_eq!(outcome["reason_code"], "EDGE_APPLY_DESCRIPTOR_CONFLICT");
+        assert_eq!(ctx.status("site_c").await["apply_state"], "active");
+    }
+    // Nothing of the refused snapshots was served.
+    assert_eq!(
+        ctx.edge.served_gateway_config("site_a").unwrap()["origin"]["address"],
+        "8.8.8.8:9000"
+    );
+    let _ = ctx.finish().await;
 }

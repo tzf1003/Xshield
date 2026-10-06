@@ -86,7 +86,7 @@ impl EdgeApplyClient {
     pub(crate) async fn apply(
         &self,
         request: &GatewayApplyRequest,
-    ) -> Result<GatewayApplyAck, &'static str> {
+    ) -> Result<GatewayApplyAck, EdgeApplyRefusal> {
         let body = serde_json::to_vec(request).map_err(|_| "EDGE_APPLY_PAYLOAD_INVALID")?;
         let signature = hmac_hex(&self.key, &body).ok_or("EDGE_APPLY_SIGNATURE_UNAVAILABLE")?;
         let response = self
@@ -99,28 +99,8 @@ impl EdgeApplyClient {
             .await
             .map_err(|_| "EDGE_UNAVAILABLE")?;
         if !response.status().is_success() {
-            let body = response.json::<serde_json::Value>().await.ok();
-            let reason = body
-                .as_ref()
-                .and_then(|value| value.get("reason_code"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("EDGE_APPLY_REJECTED");
-            // Refusals are unsigned, so only a closed set of known codes is
-            // kept; anything else is the generic refusal. A descriptor
-            // refusal also names the offending `site_id`, which is not used
-            // yet: holding just that site back needs that name re-checked
-            // against the snapshot this plane sent (it is unsigned too).
-            return Err(match reason {
-                "EDGE_APPLY_STALE_REVISION" => "EDGE_APPLY_STALE_REVISION",
-                "EDGE_APPLY_VALIDATION_FAILED" => "EDGE_APPLY_VALIDATION_FAILED",
-                "EDGE_APPLY_SCOPE_DENIED" => "EDGE_APPLY_SCOPE_DENIED",
-                "EDGE_APPLY_LISTENER_UNAVAILABLE" => "EDGE_APPLY_LISTENER_UNAVAILABLE",
-                "EDGE_APPLY_IDEMPOTENCY_CONFLICT" => "EDGE_APPLY_IDEMPOTENCY_CONFLICT",
-                "EDGE_APPLY_SIGNATURE_INVALID" => "EDGE_APPLY_SIGNATURE_INVALID",
-                "EDGE_APPLY_DESCRIPTOR_CONFLICT" => "EDGE_APPLY_DESCRIPTOR_CONFLICT",
-                "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE" => "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE",
-                _ => "EDGE_APPLY_REJECTED",
-            });
+            let body = response.json::<EdgeRefusalBody>().await.ok();
+            return Err(EdgeApplyRefusal::from_body(body));
         }
         // The ack is trusted only if the edge signed these exact bytes as the
         // answer to this request; content is checked after authenticity.
@@ -160,6 +140,61 @@ impl EdgeApplyClient {
             .json::<serde_json::Value>()
             .await
             .map_err(|_| "EDGE_HEALTH_INVALID")
+    }
+}
+
+/// The members of an edge refusal body this plane reads
+/// (`{"error", "reason_code", "site_id"?}`); everything else is ignored.
+#[derive(Deserialize)]
+struct EdgeRefusalBody {
+    reason_code: Option<String>,
+    site_id: Option<String>,
+}
+
+/// Why an apply did not confirm: an edge refusal or a local failure.
+///
+/// Refusals are unsigned. `reason` is therefore kept only from a closed set
+/// of known codes (anything else is the generic `EDGE_APPLY_REJECTED`), and
+/// `site_id`, which the edge sends only with a descriptor conflict, is never
+/// evidence of anything: it can only choose which site's intent carries the
+/// failure, and only when it names a site this plane itself sent as desired.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct EdgeApplyRefusal {
+    pub(crate) reason: &'static str,
+    pub(crate) site_id: Option<SiteId>,
+}
+
+impl EdgeApplyRefusal {
+    fn from_body(body: Option<EdgeRefusalBody>) -> Self {
+        let (reason, site_id) = body.map_or((None, None), |body| (body.reason_code, body.site_id));
+        let reason = match reason.as_deref() {
+            Some("EDGE_APPLY_STALE_REVISION") => "EDGE_APPLY_STALE_REVISION",
+            Some("EDGE_APPLY_VALIDATION_FAILED") => "EDGE_APPLY_VALIDATION_FAILED",
+            Some("EDGE_APPLY_SCOPE_DENIED") => "EDGE_APPLY_SCOPE_DENIED",
+            Some("EDGE_APPLY_LISTENER_UNAVAILABLE") => "EDGE_APPLY_LISTENER_UNAVAILABLE",
+            Some("EDGE_APPLY_IDEMPOTENCY_CONFLICT") => "EDGE_APPLY_IDEMPOTENCY_CONFLICT",
+            Some("EDGE_APPLY_SIGNATURE_INVALID") => "EDGE_APPLY_SIGNATURE_INVALID",
+            Some("EDGE_APPLY_DESCRIPTOR_CONFLICT") => "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+            Some("EDGE_APPLY_DESCRIPTOR_UNAVAILABLE") => "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE",
+            _ => "EDGE_APPLY_REJECTED",
+        };
+        // Only a conflict is a property of one site's configuration; an
+        // unavailable descriptor store is an outage of every page-issuing
+        // site and stays the target's failure.
+        let site_id = (reason == "EDGE_APPLY_DESCRIPTOR_CONFLICT")
+            .then_some(site_id)
+            .flatten()
+            .and_then(|site| SiteId::parse(site).ok());
+        Self { reason, site_id }
+    }
+}
+
+impl From<&'static str> for EdgeApplyRefusal {
+    fn from(reason: &'static str) -> Self {
+        Self {
+            reason,
+            site_id: None,
+        }
     }
 }
 
@@ -3406,19 +3441,38 @@ async fn apply_site_snapshot(
         snapshot_revision: snapshot.revision,
         sites,
     };
-    if let Err(reason) = client.apply(&request).await {
+    if let Err(refusal) = client.apply(&request).await {
+        // A descriptor conflict is a property of the one site the edge
+        // names, so that site carries it and the target, which caused
+        // nothing, stays pending. The unsigned name is honoured only when it
+        // is a sibling this snapshot carried as its desired revision;
+        // otherwise (no name, the target itself, a site held back or not
+        // sent at all) the target carries the failure as before.
+        let (site, revision, apply_id) = refusal
+            .site_id
+            .as_ref()
+            .filter(|named| *named != target_site)
+            .and_then(|named| plan.confirmed.iter().find(|(site, _, _)| site == named))
+            .map_or(
+                (
+                    target_site,
+                    target_apply.desired_revision,
+                    target_apply.apply_id.as_str(),
+                ),
+                |(site, revision, apply_id)| (site, *revision, apply_id.as_str()),
+            );
         control
             .catalog
             .mark_protected_site_apply_failed(
                 &control.config.tenant_id,
-                target_site,
-                target_apply.desired_revision,
-                &target_apply.apply_id,
-                reason,
+                site,
+                revision,
+                apply_id,
+                refusal.reason,
             )
             .await
             .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
-        return Err(reason);
+        return Err(refusal.reason);
     }
     if !control
         .catalog

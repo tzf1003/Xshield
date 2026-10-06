@@ -418,7 +418,11 @@ mod tests {
         ] {
             let (client, _edge) = edge(ack).await;
             assert_eq!(
-                client.apply(&request()).await.map(|_| ()),
+                client
+                    .apply(&request())
+                    .await
+                    .map(|_| ())
+                    .map_err(|refusal| refusal.reason),
                 Err("EDGE_APPLY_ACK_SIGNATURE_INVALID"),
                 "{ack:?}"
             );
@@ -435,7 +439,11 @@ mod tests {
         // A genuine signature does not excuse an ack for another apply.
         let (client, _edge) = edge(Ack::SignedForAnotherApplyId).await;
         assert_eq!(
-            client.apply(&request()).await.map(|_| ()),
+            client
+                .apply(&request())
+                .await
+                .map(|_| ())
+                .map_err(|refusal| refusal.reason),
             Err("EDGE_APPLY_ACK_INVALID")
         );
     }
@@ -444,15 +452,27 @@ mod tests {
     // action descriptors supplied, naming that site. The control plane keeps
     // the two stable reasons (its apply state and the console explain them)
     // and still turns any code it does not know into the generic refusal.
+    // Only a conflict keeps the named site, and only a valid site ID: the
+    // name decides which site's status carries the failure, nothing more.
     #[tokio::test]
     async fn descriptor_supply_refusals_keep_their_stable_reasons() {
-        for (ack, expected) in [
+        let site_b = Some(xshield_core::domain::SiteId::parse("site_b").unwrap());
+        for (ack, expected, named) in [
             (
                 Ack::Refused(
                     409,
                     r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_DESCRIPTOR_CONFLICT","site_id":"site_b"}"#,
                 ),
                 "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+                site_b,
+            ),
+            (
+                Ack::Refused(
+                    409,
+                    r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_DESCRIPTOR_CONFLICT","site_id":"not a site"}"#,
+                ),
+                "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+                None,
             ),
             (
                 Ack::Refused(
@@ -460,13 +480,15 @@ mod tests {
                     r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_DESCRIPTOR_UNAVAILABLE","site_id":"site_a"}"#,
                 ),
                 "EDGE_APPLY_DESCRIPTOR_UNAVAILABLE",
+                None,
             ),
             (
                 Ack::Refused(
                     409,
-                    r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_STALE_REVISION"}"#,
+                    r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_STALE_REVISION","site_id":"site_b"}"#,
                 ),
                 "EDGE_APPLY_STALE_REVISION",
+                None,
             ),
             (
                 Ack::Refused(
@@ -474,13 +496,15 @@ mod tests {
                     r#"{"error":"edge_apply_failed","reason_code":"EDGE_APPLY_NOT_A_KNOWN_REASON"}"#,
                 ),
                 "EDGE_APPLY_REJECTED",
+                None,
             ),
-            (Ack::Refused(503, "not json"), "EDGE_APPLY_REJECTED"),
+            (Ack::Refused(503, "not json"), "EDGE_APPLY_REJECTED", None),
         ] {
             let (client, _edge) = edge(ack).await;
+            let refusal = client.apply(&request()).await.unwrap_err();
             assert_eq!(
-                client.apply(&request()).await.map(|_| ()),
-                Err(expected),
+                (refusal.reason, refusal.site_id),
+                (expected, named),
                 "{ack:?}"
             );
         }
