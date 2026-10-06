@@ -152,7 +152,9 @@ async fn exercise_gateway_response_grants(pool: &PgPool, client: &Client) {
     ")
     .bind(scope.tenant_id().as_str()).bind(scope.site_id().as_str())
     .fetch_all(pool).await.unwrap();
-    assert_eq!(rows.len(), 3);
+    // The script's grant-issuing lists: the account list (two grants, one request), the
+    // refreshed list (one) and the three accepted pages of the paginated list (one each).
+    assert_eq!(rows.len(), 6);
     let mut expected = BTreeMap::new();
     let mut batches: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for row in rows {
@@ -176,7 +178,7 @@ async fn exercise_gateway_response_grants(pool: &PgPool, client: &Client) {
             .push(envelope["request_seq"].as_u64().unwrap());
         expected.insert(envelope["event_id"].as_str().unwrap().to_owned(), envelope);
     }
-    assert_eq!(batches.len(), 2);
+    assert_eq!(batches.len(), 5);
     for sequence in batches.values_mut() {
         sequence.sort_unstable();
         assert_eq!(
