@@ -90,7 +90,7 @@ mkdir -p -- "$stage/sql" "$stage/examples"
 cp -- "$repo_root/sql/clickhouse.sql" "$stage/sql/"
 cp -- "$repo_root"/examples/gateway-bootstrap-config.json "$stage/examples/"
 cp -- "$repo_root/README.md" "$repo_root/CHANGELOG.md" "$stage/"
-for doc in 19-deployment-operations.md 26-runbooks.md 29-api-endpoint-catalog.md; do
+for doc in 13-audit-storage-reliability.md 15-console-and-api.md 19-deployment-operations.md 21-performance-capacity.md 26-runbooks.md 29-api-endpoint-catalog.md; do
     cp -- "$repo_root/docs/$doc" "$stage/docs/"
 done
 printf '%s\n' "$version" >"$stage/VERSION"
