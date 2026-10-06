@@ -13,10 +13,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::SecondsFormat;
-use openssl::memcmp;
 use serde::Serialize;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
+use xshield_core::constant_time;
 use xshield_core::{admin::ManagementRole, domain::CaseId};
 use xshield_postgres::InvestigationCaseQuery;
 
@@ -247,7 +247,7 @@ impl ControlPlane {
         let expected = self
             .cases_cursor_signature(subject, &case)
             .map_err(|()| CursorError::Unavailable)?;
-        if !memcmp::eq(&supplied, &expected) {
+        if !constant_time::eq(&supplied, &expected) {
             return Err(CursorError::Invalid);
         }
         Ok(case)

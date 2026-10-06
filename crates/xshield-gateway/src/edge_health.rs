@@ -9,12 +9,12 @@
 
 use crate::apply_api::{decode_hex, error, sign};
 use axum::{http::HeaderMap, http::StatusCode, response::Response};
-use openssl::memcmp;
 use std::{
     collections::{HashSet, VecDeque},
     sync::Mutex,
     time::{Duration, Instant},
 };
+use xshield_core::constant_time;
 use xshield_core::edge_channel::{
     APPLY_SIGNATURE_HEADER, HEALTH_NONCE_BYTES, HEALTH_NONCE_HEADER, HEALTH_TIMESTAMP_HEADER,
     HEALTH_WINDOW_SECS, health_message, is_health_nonce, parse_health_timestamp,
@@ -103,8 +103,8 @@ impl HealthGate {
             .ok_or(HealthRefusal::Unauthenticated)?;
         let expected =
             sign(&self.key, &health_message(timestamp, nonce)).ok_or(HealthRefusal::Unavailable)?;
-        // `memcmp::eq` requires equal lengths; a mismatch is a refusal.
-        if expected.len() != signature.len() || !memcmp::eq(&expected, &signature) {
+        // A length mismatch is a refusal: the helper returns false.
+        if !constant_time::eq(&expected, &signature) {
             return Err(HealthRefusal::Unauthenticated);
         }
         if timestamp.abs_diff(now_unix) > HEALTH_WINDOW_SECS {

@@ -13,10 +13,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, FixedOffset, Utc};
-use openssl::{memcmp, sha::sha256};
+use openssl::sha::sha256;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
+use xshield_core::constant_time;
 use xshield_core::{
     admin::ManagementRole,
     domain::{
@@ -349,7 +350,7 @@ impl ControlPlane {
             &event_id,
         )
         .map_err(|()| CursorError::Unavailable)?;
-        if !memcmp::eq(&supplied_signature, &expected_signature) {
+        if !constant_time::eq(&supplied_signature, &expected_signature) {
             return Err(CursorError::Invalid);
         }
         SearchPosition::new(occurred_at, event_id).map_err(|_| CursorError::Invalid)

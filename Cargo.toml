@@ -11,6 +11,7 @@ publish = false
 rust-version = "1.94"
 
 [workspace.dependencies]
+subtle = "2.6"
 async-trait = "0.1"
 axum = "0.8"
 bytes = "1"

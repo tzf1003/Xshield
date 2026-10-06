@@ -47,9 +47,7 @@ use axum::{
 };
 use chrono::{SecondsFormat, Utc};
 use clickhouse::Client;
-use openssl::{
-    hash::MessageDigest, memcmp, pkey::PKey, rand::rand_bytes, sha::sha256, sign::Signer,
-};
+use openssl::{hash::MessageDigest, pkey::PKey, rand::rand_bytes, sha::sha256, sign::Signer};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -59,6 +57,7 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
+use xshield_core::constant_time;
 use xshield_core::{
     admin::{ApiKeyCapability, ApiKeyGrant, ManagementPrincipal, ManagementRole},
     domain::{
@@ -492,7 +491,7 @@ impl ControlConfig {
 }
 
 fn distinct_control_keys(cursor_key: &CursorKey, idempotency_key: &IdempotencyKey) -> bool {
-    !memcmp::eq(&cursor_key.0[..], &idempotency_key.0[..])
+    !constant_time::eq(&cursor_key.0[..], &idempotency_key.0[..])
 }
 
 /// Runtime state for the authenticated audit-health endpoint.
@@ -3127,7 +3126,7 @@ impl ControlPlane {
             &position,
         )
         .map_err(|()| CursorError::Unavailable)?;
-        if !memcmp::eq(&supplied_signature, &expected_signature) {
+        if !constant_time::eq(&supplied_signature, &expected_signature) {
             return Err(CursorError::Invalid);
         }
         Ok(position)
@@ -3184,7 +3183,7 @@ impl ControlPlane {
             &artifact_id,
         )
         .map_err(|()| CursorError::Unavailable)?;
-        if !memcmp::eq(&supplied_signature, &expected_signature) {
+        if !constant_time::eq(&supplied_signature, &expected_signature) {
             return Err(CursorError::Invalid);
         }
         Ok(artifact_id)
@@ -3660,7 +3659,7 @@ impl ControlPlane {
                     .and_then(|value| value.strip_prefix("Bearer "))
                     .filter(|value| value.len() <= TOKEN_BYTES_MAX)
                     .is_some_and(|value| {
-                        memcmp::eq(
+                        constant_time::eq(
                             &sha256(value.as_bytes()),
                             &self.config.credential.token_digest,
                         )

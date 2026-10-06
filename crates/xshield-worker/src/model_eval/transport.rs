@@ -376,7 +376,7 @@ impl ModelPort for JevClient {
     }
 
     fn cache_key_reuses_transport_secret(&self, cache_key: &[u8]) -> bool {
-        openssl::memcmp::eq(self.api_key.as_bytes(), cache_key)
+        xshield_core::constant_time::eq(self.api_key.as_bytes(), cache_key)
     }
 
     fn provider(&self) -> &'static str {

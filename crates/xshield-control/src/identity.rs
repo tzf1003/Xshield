@@ -19,7 +19,7 @@ use openidconnect::{
     OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, TokenResponse,
     core::{CoreAuthPrompt, CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
 };
-use openssl::{memcmp, rand::rand_bytes, sha::sha256};
+use openssl::{rand::rand_bytes, sha::sha256};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -27,6 +27,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use url::Url;
+use xshield_core::constant_time;
 use xshield_core::{
     admin::{ApiKeyCapability, ApiKeyGrant, ManagementPrincipal, ManagementRole},
     domain::{SiteId, TenantId},
@@ -369,7 +370,7 @@ pub(super) fn verify_request_assertion(
         return None;
     }
     let expected = super::component_signature(key, &[ASSERTION_DOMAIN, &payload]).ok()?;
-    if !memcmp::eq(&expected, &signature) {
+    if !constant_time::eq(&expected, &signature) {
         return None;
     }
     let assertion: BrowserRequestAssertion = serde_json::from_slice(&payload).ok()?;
@@ -709,7 +710,7 @@ fn resolve_machine_auth(control: &ControlPlane, authorization: &str) -> AuthCont
         .strip_prefix("Bearer ")
         .filter(|token| token.len() <= super::TOKEN_BYTES_MAX)
         .is_some_and(|token| {
-            memcmp::eq(
+            constant_time::eq(
                 &sha256(token.as_bytes()),
                 &control.config.credential.token_digest,
             )
@@ -1498,7 +1499,7 @@ pub(super) async fn callback_handler(
     let Some(state) = query.state.as_deref() else {
         return fail(StatusCode::BAD_REQUEST, "CONTROL_OIDC_CALLBACK_INVALID");
     };
-    if !secrets_match(state.as_bytes(), state_cookie.as_bytes()) {
+    if !constant_time::eq(state.as_bytes(), state_cookie.as_bytes()) {
         return fail(StatusCode::UNAUTHORIZED, "CONTROL_OIDC_STATE_INVALID");
     }
     let transaction = match control
@@ -1789,18 +1790,8 @@ fn csrf_request_valid(
     single_header(headers, header::ORIGIN.as_str()).is_some_and(|origin| {
         origin == expected_origin
             && single_header(headers, CSRF_HEADER)
-                .is_some_and(|value| secrets_match(value.as_bytes(), expected_token.as_bytes()))
+                .is_some_and(|value| constant_time::eq(value.as_bytes(), expected_token.as_bytes()))
     })
-}
-
-/// Compares an attacker-supplied value with a stored secret.
-///
-/// `memcmp::eq` panics on unequal lengths, and the CSRF header and the callback
-/// `state` are of attacker-chosen length: a panic drops the connection with no
-/// audit record and no stable error code. A length mismatch is a refusal; the
-/// length of these values is not secret (fixed-size random tokens).
-fn secrets_match(supplied: &[u8], expected: &[u8]) -> bool {
-    supplied.len() == expected.len() && memcmp::eq(supplied, expected)
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1888,8 +1879,8 @@ mod tests {
     use super::{
         ApiKeyCapability, AssertedGrant, BrowserRequestAssertion, ManagementRole,
         STEP_UP_AUTH_TIME_MAX_AGE_SECONDS, auth_time_is_recent, can_start_step_up, cookie_value,
-        csrf_request_valid, endpoint_is_secure, lower_hex, parse_callback_query, secrets_match,
-        secure_url, sign_request_assertion, verify_request_assertion,
+        csrf_request_valid, endpoint_is_secure, lower_hex, parse_callback_query, secure_url,
+        sign_request_assertion, verify_request_assertion,
     };
     use axum::http::{HeaderMap, Method, header};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2211,15 +2202,5 @@ mod tests {
                 "https://console.example",
             ));
         }
-    }
-
-    #[test]
-    fn secrets_of_different_length_never_match_and_never_panic() {
-        assert!(secrets_match(b"state", b"state"));
-        assert!(!secrets_match(b"state", b"statf"));
-        assert!(!secrets_match(b"state", b"stat"));
-        assert!(!secrets_match(b"state", b"state-and-more"));
-        assert!(!secrets_match(b"", b"state"));
-        assert!(!secrets_match(b"state", b""));
     }
 }

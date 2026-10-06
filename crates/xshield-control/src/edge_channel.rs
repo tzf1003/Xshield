@@ -4,12 +4,13 @@
 //! which the edge shares, so both sides sign and verify the same bytes. The
 //! HMAC key stays inside [`crate::EdgeApplyClient`], the only caller.
 
-use openssl::{hash::MessageDigest, memcmp, pkey::PKey, rand::rand_bytes, sign::Signer};
+use openssl::{hash::MessageDigest, pkey::PKey, rand::rand_bytes, sign::Signer};
 use reqwest::header::HeaderMap;
 use std::{
     fmt::Write as _,
     time::{SystemTime, UNIX_EPOCH},
 };
+use xshield_core::constant_time;
 use xshield_core::edge_channel::{
     APPLY_ACK_BODY_MAX, APPLY_ACK_SIGNATURE_HEADER, HEALTH_NONCE_BYTES, apply_ack_message,
     health_message,
@@ -72,9 +73,9 @@ pub(crate) fn verify_apply_ack(
         .ok_or(ACK_SIGNATURE_INVALID)?;
     let expected =
         hmac(key, &apply_ack_message(request_signature_hex, body)).ok_or(ACK_SIGNATURE_INVALID)?;
-    // `memcmp::eq` requires equal lengths; both are 32 here, but a length
-    // mismatch must be a refusal, never a panic on a network-supplied value.
-    if expected.len() == presented.len() && memcmp::eq(&expected, &presented) {
+    // A length mismatch is a refusal (the helper returns false), never a panic on a
+    // network-supplied value.
+    if constant_time::eq(&expected, &presented) {
         Ok(())
     } else {
         Err(ACK_SIGNATURE_INVALID)

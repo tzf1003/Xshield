@@ -149,8 +149,9 @@ impl ModelCacheConfiguration {
     /// The evaluator uses this to reject key-role reuse before it starts an
     /// external provider attempt.
     pub(super) fn matches_hex_secret(&self, value: &str) -> bool {
-        parse_key(value)
-            .is_ok_and(|candidate| openssl::memcmp::eq(self.key.as_ref(), candidate.as_ref()))
+        parse_key(value).is_ok_and(|candidate| {
+            xshield_core::constant_time::eq(self.key.as_ref(), candidate.as_ref())
+        })
     }
 
     /// Returns whether a transport credential repeats this cache key.

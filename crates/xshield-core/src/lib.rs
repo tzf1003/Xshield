@@ -12,6 +12,7 @@ pub mod admission;
 pub mod application;
 pub mod audit;
 pub mod calibration;
+pub mod constant_time;
 pub mod domain;
 pub mod edge_channel;
 pub mod edge_descriptors;

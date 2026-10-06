@@ -14,11 +14,12 @@ use axum::{
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
 };
-use openssl::{hash::MessageDigest, memcmp, pkey::PKey, sign::Signer};
+use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
 use url::Url;
+use xshield_core::constant_time;
 use xshield_core::{
     GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SiteConfig, SiteHealthCheckConfig,
     SitePolicyConfig,
@@ -694,7 +695,7 @@ fn decode_site_list_cursor(
             site_id.as_str().as_bytes(),
         ],
     )?;
-    memcmp::eq(&supplied, &expected)
+    constant_time::eq(&supplied, &expected)
         .then_some(site_id)
         .ok_or(())
 }

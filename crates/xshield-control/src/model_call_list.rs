@@ -15,10 +15,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
-use openssl::memcmp;
 use serde::Serialize;
 use std::sync::Arc;
 use uuid::Uuid;
+use xshield_core::constant_time;
 use xshield_core::{
     admin::ManagementRole, domain::ModelCallId, identity::UnixSeconds, query::QueryWindow,
 };
@@ -392,7 +392,7 @@ impl ControlPlane {
         let expected = self
             .model_call_list_cursor_signature(subject, plan, timestamp, &model_call_id)
             .map_err(|()| CursorError::Unavailable)?;
-        if !memcmp::eq(&supplied, &expected) {
+        if !constant_time::eq(&supplied, &expected) {
             return Err(CursorError::Invalid);
         }
         ModelCallListPosition::new(occurred_at, model_call_id).map_err(|_| CursorError::Invalid)

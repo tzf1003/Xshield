@@ -5,7 +5,6 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use openssl::{
     hash::MessageDigest,
-    memcmp,
     pkey::PKey,
     rand::rand_bytes,
     sha::sha256,
@@ -22,6 +21,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+use xshield_core::constant_time;
 use xshield_core::domain::{ArtifactId, RequestId, SiteId, TenantId};
 use zeroize::Zeroizing;
 
@@ -499,7 +499,7 @@ impl LocalEvidenceVault {
         )
         .map_err(hide_absence)?;
         let expected = authenticate_manifest(&self.root_key.0, &bytes)?;
-        if authentication.len() != expected.len() || !memcmp::eq(&authentication, &expected) {
+        if !constant_time::eq(&authentication, &expected) {
             return Err(EvidenceError::CorruptEvidence);
         }
         serde_json::from_slice(&bytes).map_err(|_| EvidenceError::CorruptEvidence)

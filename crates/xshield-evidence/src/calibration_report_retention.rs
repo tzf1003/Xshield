@@ -11,11 +11,12 @@ use super::{
     lower_hex, read_private_bounded, sync_directory, validate_private_directory,
 };
 use chrono::{DateTime, Utc};
-use openssl::{memcmp, sha::sha256};
+use openssl::sha::sha256;
 use std::{
     fs, io,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use xshield_core::constant_time;
 use xshield_core::domain::{ArtifactId, CalibrationReportId, SiteId, TenantId};
 
 #[cfg(unix)]
@@ -384,7 +385,7 @@ fn load_authenticated_report_manifest(
         32,
     )?;
     let expected = authenticate_manifest(&vault.root_key.0, &manifest_bytes)?;
-    if authentication.len() != expected.len() || !memcmp::eq(&authentication, &expected) {
+    if !constant_time::eq(&authentication, &expected) {
         return Err(EvidenceError::CorruptEvidence);
     }
     let manifest =

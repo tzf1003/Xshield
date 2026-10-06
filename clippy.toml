@@ -1,0 +1,6 @@
+# Secrets are compared with xshield_core::constant_time::eq. The OpenSSL function panics on
+# unequal lengths, which turns an attacker-chosen length into a dropped connection with no
+# audit record (found by the real OIDC regression, docs/20).
+disallowed-methods = [
+    { path = "openssl::memcmp::eq", reason = "panics on unequal lengths; use xshield_core::constant_time::eq" },
+]

@@ -14,8 +14,9 @@ use super::{
     write_new_synced,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
-use openssl::{memcmp, rand::rand_bytes, sha::sha256};
+use openssl::{rand::rand_bytes, sha::sha256};
 use serde::{Deserialize, Serialize};
+use xshield_core::constant_time;
 use xshield_core::{
     calibration::lineage_review::{
         CALIBRATION_LINEAGE_REVIEW_ARTIFACT_CONTENT_TYPE, CALIBRATION_LINEAGE_REVIEW_ARTIFACT_KIND,
@@ -403,7 +404,7 @@ impl LocalEvidenceVault {
         )
         .map_err(hide_absence)?;
         let expected = authenticate_manifest(&self.root_key.0, &bytes)?;
-        if authentication.len() != expected.len() || !memcmp::eq(&authentication, &expected) {
+        if !constant_time::eq(&authentication, &expected) {
             return Err(EvidenceError::CorruptEvidence);
         }
         serde_json::from_slice(&bytes).map_err(|_| EvidenceError::CorruptEvidence)

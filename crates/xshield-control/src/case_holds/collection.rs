@@ -12,10 +12,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::SecondsFormat;
-use openssl::memcmp;
 use serde::Serialize;
 use std::sync::Arc;
 use uuid::Uuid;
+use xshield_core::constant_time;
 use xshield_core::{
     admin::ManagementRole,
     domain::{CaseId, EventId},
@@ -238,7 +238,7 @@ impl ControlPlane {
         let expected = self
             .hold_cursor_signature(subject, case, &id)
             .map_err(|()| CursorError::Unavailable)?;
-        if !memcmp::eq(&supplied, &expected) {
+        if !constant_time::eq(&supplied, &expected) {
             return Err(CursorError::Invalid);
         }
         Ok(id)

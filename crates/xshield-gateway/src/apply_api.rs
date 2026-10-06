@@ -18,7 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use openssl::{hash::MessageDigest, memcmp, pkey::PKey, sign::Signer};
+use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Write as _,
@@ -28,6 +28,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tokio::{io::AsyncWriteExt, net::TcpListener};
+use xshield_core::constant_time;
 use xshield_core::{
     GatewayApplyAck, GatewayApplyRequest,
     domain::SiteId,
@@ -135,7 +136,7 @@ async fn apply_handler(
             "EDGE_APPLY_SIGNATURE_UNAVAILABLE",
         );
     };
-    if !memcmp::eq(&expected, &signature) {
+    if !constant_time::eq(&expected, &signature) {
         return error(StatusCode::UNAUTHORIZED, "EDGE_APPLY_SIGNATURE_INVALID");
     }
     let request: GatewayApplyRequest = match serde_json::from_slice(&body) {
@@ -514,7 +515,7 @@ pub(crate) fn load_persisted_snapshot(
             "persisted edge snapshot signature unavailable",
         )
     })?;
-    if !memcmp::eq(&expected, &signature) || envelope.request.tenant_id != tenant_id {
+    if !constant_time::eq(&expected, &signature) || envelope.request.tenant_id != tenant_id {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "persisted edge snapshot signature or scope mismatch",
