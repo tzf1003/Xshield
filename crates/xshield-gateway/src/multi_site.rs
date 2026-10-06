@@ -440,6 +440,20 @@ pub fn origin_form_target(request: &RequestHeader) -> Option<http::Uri> {
     http::Uri::from_parts(parts).ok()
 }
 
+/// Builds the origin-form target `path[?query]` from a validated path and the
+/// frozen pagination query (`None` for no query). Returns `None` when the
+/// pieces do not form a valid target, which the caller treats as a refusal.
+#[must_use]
+pub fn frozen_origin_target(path: &str, query: Option<&str>) -> Option<http::Uri> {
+    let target = match query {
+        Some(query) => format!("{path}?{query}"),
+        None => path.to_owned(),
+    };
+    let mut parts = http::uri::Parts::default();
+    parts.path_and_query = Some(target.parse().ok()?);
+    http::Uri::from_parts(parts).ok()
+}
+
 /// In-memory internal port lease table for an edge supervisor.
 #[derive(Default)]
 pub struct ListenerManager {
@@ -603,6 +617,18 @@ fn valid_host(host: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_frozen_origin_target_is_origin_form_with_only_the_rebuilt_query() {
+        let target = frozen_origin_target("/orders", Some("page=2&page_size=20")).unwrap();
+        assert_eq!(target.to_string(), "/orders?page=2&page_size=20");
+        assert!(target.scheme().is_none() && target.authority().is_none());
+        assert_eq!(
+            frozen_origin_target("/orders", None).unwrap().to_string(),
+            "/orders"
+        );
+        assert!(frozen_origin_target("/or ders", None).is_none());
+    }
 
     fn config(site: &str, port: u16) -> GatewayConfig {
         GatewayConfig::from_json(

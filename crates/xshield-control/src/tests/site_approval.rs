@@ -1628,6 +1628,74 @@ fn signed_projection(ctx: &Ctx, site: &str) -> (Value, Value) {
     (projection, policy)
 }
 
+/// Declaring pagination parameters on a grant-issuing list is a change that
+/// only an independent approver may release, names its own risk token, and
+/// keeps the `policy_revision` label (the block is not part of the action
+/// descriptor digest).
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn query_pagination_needs_its_own_independent_approval() {
+    let ctx = Ctx::new().await;
+    let site = "site_paged";
+    let (status, created) = ctx.create(&loop_body(site), &ctx.key("create-paged")).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-paged-1")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+
+    let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
+            "subject": "agent-paged", "display_name": "paged", "expires_at": expires,
+            "scopes": [{
+                "tenant_id": ctx.tenant.as_str(), "site_id": site,
+                "capabilities": ["site.config.apply_direct", "site.read"]
+            }]
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let api_key = issued["api_key"].as_str().unwrap().to_owned();
+
+    let mut paged = loop_body(site);
+    paged["policy"]["routes"][3]["query_pagination"] = json!({"parameters": [
+        {"name": "page", "kind": "page"},
+        {"name": "page_size", "kind": "page_size", "max_value": 50}
+    ]});
+    let (status, saved) = ctx.put(site, &paged, &ctx.key("paged-save")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    let sent = ctx.edge.apply_count();
+    let (status, refused) = apply_with_key(&ctx, site, &api_key).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error_code"],
+        "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED"
+    );
+    assert_eq!(ctx.edge.apply_count(), sent);
+    let reasons: Vec<String> = sqlx::query_scalar(
+        "SELECT unnest(risk_reasons) FROM xshield.site_apply_intents
+         WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason == "QUERY_PAGINATION_CHANGED"),
+        "{reasons:?}"
+    );
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-paged-2")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let (projection, _) = signed_projection(&ctx, site);
+    assert_eq!(
+        projection["operations"][3]["query_pagination"]["parameters"][1]["max_value"],
+        50
+    );
+    ctx.finish().await;
+}
+
 /// The real-browser loop topology goes from a write through validation and an
 /// independent approval to the edge, and the signed snapshot carries exactly
 /// its golden projection. The `site.config.apply_direct` capability can stand
@@ -1769,7 +1837,7 @@ async fn flow_refusals_have_their_own_reasons_and_large_sites_fit() {
             .position(|route| route["operation_id"] == id)
             .unwrap()
     };
-    let cases: [(&str, &str, Edit); 10] = [
+    let cases: [(&str, &str, Edit); 11] = [
         (
             "share issuance",
             "CONTROL_SITE_FEATURE_UNSUPPORTED",
@@ -1826,6 +1894,14 @@ async fn flow_refusals_have_their_own_reasons_and_large_sites_fit() {
             |b, list, _| {
                 b["policy"]["routes"][list]["resource_grant"]["target_operation_id"] =
                     json!("orders.gone");
+            },
+        ),
+        (
+            "pagination on a resource route",
+            "CONTROL_SITE_QUERY_PAGINATION_INVALID",
+            |b, _, _| {
+                b["policy"]["routes"][4]["query_pagination"] =
+                    json!({"parameters": [{"name": "page", "kind": "page"}]});
             },
         ),
         (

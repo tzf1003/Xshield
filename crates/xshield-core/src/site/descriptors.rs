@@ -420,6 +420,26 @@ mod tests {
         assert_eq!(digest(&leases), base);
     }
 
+    #[test]
+    fn a_query_pagination_block_does_not_change_the_descriptor_digest() {
+        // Pagination parameters never reach an action descriptor: the edge
+        // derives descriptors from path, action, mapping and resource facts
+        // only, so the block needs independent approval (QUERY_PAGINATION_CHANGED)
+        // but must not force a new policy revision label.
+        let base = digest(&browser_loop());
+        let mut paged = browser_loop();
+        route(&mut paged, "orders.list").query_pagination =
+            Some(crate::query_pagination::SiteQueryPagination {
+                parameters: vec![crate::query_pagination::SiteQueryParameter {
+                    name: "page".to_owned(),
+                    kind: crate::query_pagination::PaginationKind::Page,
+                    max_value: None,
+                }],
+            });
+        paged.validate().unwrap();
+        assert_eq!(digest(&paged), base);
+    }
+
     type Edit = fn(&mut SiteConfig);
 
     #[test]

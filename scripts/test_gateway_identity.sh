@@ -341,10 +341,11 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"auth.context.switch.same","method":"POST","path":"/account-switch-same","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
     {"operation_id":"auth.logout","method":"POST","path":"/logout","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"auth_revoke":{"success_status":200}}},
     {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
+    {"operation_id":"account.paged","method":"GET","path":"/paged-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"query_pagination":{"parameters":[{"name":"page","kind":"page"},{"name":"page_size","kind":"page_size","max_value":50}]},"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.slow","method":"GET","path":"/slow-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.current","method":"GET","path":"/whoami","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
     {"operation_id":"account.root","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
-    {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null},
+    {"operation_id":"settings.open","method":"GET","path":"/settings","admission":"UI_ACTION_REQUIRED","source_action":"settings.open","resource_type":null,"view_profile":null,"query_pagination":{"parameters":[{"name":"page","kind":"page"},{"name":"page_size","kind":"page_size","max_value":50}]}},
     {"operation_id":"settings.legacy.submit","method":"POST","path":"/settings-legacy","admission":"UI_ACTION_REQUIRED","source_action":"settings.legacy.submit","resource_type":null,"view_profile":null,"request_crypto":{"mode":"COMPATIBILITY","adapter_revision":"settings-legacy-r1","approval_ref":"approval-42","expires_at":$compatibility_expires_at,"build_fingerprints":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}},
     {"operation_id":"orders.read","method":"GET","path":"/orders","admission":"UI_ACTION_REQUIRED","source_action":"orders.open","resource_type":"order","view_profile":"customer_detail","resource_query_parameter":"order_id"},
     {"operation_id":"orders.path.read","method":"GET","path":"/path-orders/{order_id}","admission":"UI_ACTION_REQUIRED","source_action":"orders.path.open","resource_type":"order","view_profile":"customer_detail","resource_path_parameter":"order_id"},
@@ -390,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
             "/account-switch-same": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"other-business-token"}',
             "/logout": b'{"logged_out":true}',
             "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
+            "/paged-account?page=2&page_size=20": b'{"orders":[{"id":"order-refresh"}]}',
+            "/paged-account": b'{"orders":[{"id":"order-refresh"}]}',
             "/slow-account": b'{"orders":[{"id":"order-late"}]}',
             "/account": b'{"orders":[{"id":"order-456"},{"id":"order-457"}]}',
             "/settings-legacy": b'{"ok":true}',
@@ -654,6 +657,57 @@ new_account_query_status=$(curl -sS -o "$test_dir/new-account-query.json" -w '%{
 [[ "$new_account_query_status" == "403" ]]
 grep -q '"reason_code":"FIELD_NOT_ALLOWED"' "$test_dir/new-account-query.json"
 refute grep -q 'customer=other' "$test_dir/origin.log"
+
+# A route that declares pagination parameters takes exactly those, digits only,
+# and the origin receives a query the edge rebuilt (declared order), never the
+# raw one. Anything else is the same FIELD_NOT_ALLOWED denial and never
+# reaches the origin.
+paged_status=$(curl -sS -o "$test_dir/paged.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    'http://127.0.0.1:6288/paged-account?page=2&page_size=20')
+[[ "$paged_status" == "200" ]]
+grep -q '"_xshield_action_ref"' "$test_dir/paged.body"
+paged_reordered_status=$(curl -sS -o "$test_dir/paged-reordered.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    'http://127.0.0.1:6288/paged-account?page_size=20&page=2')
+[[ "$paged_reordered_status" == "200" ]]
+paged_bare_status=$(curl -sS -o "$test_dir/paged-bare.body" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    http://127.0.0.1:6288/paged-account)
+[[ "$paged_bare_status" == "200" ]]
+while IFS= read -r denied_query; do
+    denied_status=$(curl -sS -g -o "$test_dir/paged-denied.json" -w '%{http_code}' \
+        -H "Cookie: __Host-xshield_sid=$login_session_id" \
+        -H "Authorization: Bearer $login_bearer" \
+        "http://127.0.0.1:6288/paged-account?$denied_query")
+    [[ "$denied_status" == "403" ]]
+    grep -q '"reason_code":"FIELD_NOT_ALLOWED"' "$test_dir/paged-denied.json"
+done <<'QUERIES'
+customerId=B
+page=2&customerId=B
+page=02
+page=0
+page=10001
+page_size=51
+page=1&page=1
+page=%31
+pag%65=1
+page=1;page_size=2
+page=1&&page_size=2
+page[]=1
+page=+1
+page=
+page
+QUERIES
+refute grep -q 'customerId' "$test_dir/origin.log"
+refute grep -q 'page=02' "$test_dir/origin.log"
+refute grep -q 'page_size=51' "$test_dir/origin.log"
+[[ $(grep -c '^GET /paged-account?page=2&page_size=20$' "$test_dir/origin.log") == "2" ]]
+[[ $(grep -c '^GET /paged-account$' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c '^GET /paged-account' "$test_dir/origin.log") == "3" ]]
 
 refresh_status=$(curl -sS -D "$test_dir/refresh.headers" -o "$test_dir/refresh.body" \
     -w '%{http_code}' -X POST \
@@ -952,6 +1006,34 @@ valid_action_status=$(curl -sS -o "$test_dir/valid-action.body" -w '%{http_code}
     -H "X-Xshield-Action-Ref: action_settings_primary" \
     http://127.0.0.1:6288/settings)
 [[ "$valid_action_status" == "404" ]]
+
+# A UI-action route that is not a resource route takes only its declared
+# pagination parameters, and forwards the rebuilt query.
+for allowed_query in 'page=2&page_size=20' 'page_size=20&page=2'; do
+    paged_action_status=$(curl -sS -o "$test_dir/paged-action.body" -w '%{http_code}' \
+        -H "Cookie: __Host-xshield_sid=$session_id" \
+        -H "Authorization: Bearer $bearer" \
+        -H "X-Xshield-Action-Ref: action_settings_primary" \
+        "http://127.0.0.1:6288/settings?$allowed_query")
+    [[ "$paged_action_status" == "404" ]]
+done
+while IFS= read -r denied_query; do
+    denied_action_status=$(curl -sS -g -o "$test_dir/paged-action-denied.json" -w '%{http_code}' \
+        -H "Cookie: __Host-xshield_sid=$session_id" \
+        -H "Authorization: Bearer $bearer" \
+        -H "X-Xshield-Action-Ref: action_settings_primary" \
+        "http://127.0.0.1:6288/settings?$denied_query")
+    [[ "$denied_action_status" == "403" ]]
+    grep -q '"reason_code":"FIELD_NOT_ALLOWED"' "$test_dir/paged-action-denied.json"
+done <<'QUERIES'
+customerId=B
+page=2&customerId=B
+page=02
+page=1&page=2
+page_size=0
+QUERIES
+refute grep -q 'customerId' "$test_dir/origin.log"
+[[ $(grep -c '^GET /settings?page=2&page_size=20$' "$test_dir/origin.log") == "2" ]]
 
 compatibility_status=$(curl -sS -o "$test_dir/compatibility.body" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/octet-stream' \
@@ -1358,7 +1440,7 @@ origin_pid=""
 [[ $(grep -c '^POST /logout$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^GET /slow-account$' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c '^GET /whoami$' "$test_dir/origin.log") == "1" ]]
-[[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /settings' "$test_dir/origin.log") == "3" ]]
 [[ $(grep -c '^POST /settings-legacy$' "$test_dir/origin.log") == "1" ]]
 grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 [[ $(grep -c 'GET /orders?order_id=order-123' "$test_dir/origin.log") == "1" ]]

@@ -24,6 +24,7 @@ use super::{
     },
 };
 use crate::domain::{InvalidValue, SiteId};
+use crate::query_pagination::SiteQueryPagination;
 use serde::Serialize;
 
 /// Gateway `MAX_CONFIG_BYTES`: the largest per-site configuration the edge
@@ -110,6 +111,8 @@ struct EdgeOperation<'a> {
     request_crypto: Option<&'a SiteRequestCrypto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     issued_by: Option<&'a SiteIssuedBy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query_pagination: Option<&'a SiteQueryPagination>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response: Option<Response<'a>>,
 }
@@ -217,6 +220,7 @@ fn operation(route: &SiteRouteConfig) -> EdgeOperation<'_> {
         resource_path_parameter: route.resource_path_parameter.as_deref(),
         request_crypto: route.request_crypto.as_ref(),
         issued_by: route.issued_by.as_ref(),
+        query_pagination: route.query_pagination.as_ref(),
         response: response(route),
     }
 }

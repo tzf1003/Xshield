@@ -37,8 +37,8 @@ use uuid::Uuid;
 use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
 use xshield_gateway::edge_transport::{EdgeTransport, TransportConfig, http_server_options};
 use xshield_gateway::multi_site::{
-    ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot, origin_form_target,
-    routing_authority,
+    ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot, frozen_origin_target,
+    origin_form_target, routing_authority,
 };
 use xshield_gateway::request_crypto::{
     FrozenRequest, KeyAccessPort, KeyAccessQuery, RequestCryptoPolicy,
@@ -187,6 +187,7 @@ struct RequestContext {
     buffered_response: Option<BufferedResponse>,
     response_identity: Option<ResponseIdentity>,
     compatibility_evidence: Option<CompatibilityEvidence>,
+    frozen_query: Option<xshield_gateway::FrozenQuery>,
     sensor_session: Option<SensorSession>,
     sensor_observation_audit: Vec<SensorObservationAudit>,
     sensor_bootstrap: Option<SensorBootstrapDelivery>,
@@ -240,6 +241,7 @@ impl ProxyHttp for Gateway {
             buffered_response: None,
             response_identity: None,
             compatibility_evidence: None,
+            frozen_query: None,
             sensor_session: None,
             sensor_observation_audit: Vec::new(),
             sensor_bootstrap: None,
@@ -391,6 +393,7 @@ impl ProxyHttp for Gateway {
                         context.response_identity = admission.response_identity;
                         context.anonymous_session_cookie = admission.anonymous_session_cookie;
                         context.compatibility_evidence = admission.compatibility_evidence;
+                        context.frozen_query = admission.frozen_query;
                         context.sensor_session = admission.sensor_session;
                         context.sensor_bootstrap_audit = match &admission.sensor_bootstrap {
                             Some(SensorBootstrapDelivery::Page { actions, .. }) => {
@@ -574,6 +577,17 @@ impl ProxyHttp for Gateway {
         if upstream_request.raw_path_is_utf8()
             && let Some(target) = origin_form_target(upstream_request)
         {
+            upstream_request.set_uri(target);
+        }
+        // A route that declared pagination parameters forwards only the query
+        // the edge rebuilt from validated values; the client's raw query
+        // string (its spelling, order and any byte outside the digits) never
+        // reaches the origin. A target that cannot be rebuilt is refused.
+        if let Some(frozen) = context.frozen_query.as_ref() {
+            let Some(target) = frozen_origin_target(upstream_request.uri.path(), frozen.as_deref())
+            else {
+                return request_error(ReasonCode::FieldNotAllowed);
+            };
             upstream_request.set_uri(target);
         }
         upstream_request.insert_header("Host", context.config(self).origin_server_name())?;

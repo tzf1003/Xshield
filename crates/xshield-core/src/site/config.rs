@@ -119,6 +119,7 @@ impl SiteConfig {
                 page_actions: None,
                 issued_by: None,
                 resource_grant: None,
+                query_pagination: None,
             });
         }
         policy

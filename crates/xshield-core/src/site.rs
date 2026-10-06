@@ -298,6 +298,10 @@ pub struct SiteRouteConfig {
     /// Response-derived resource qualification for one resource route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_grant: Option<flow::SiteResourceGrant>,
+    /// Pagination-shaped query parameters the route may carry; absent means
+    /// any query string is refused where the edge enforces that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_pagination: Option<crate::query_pagination::SiteQueryPagination>,
 }
 
 impl SiteRouteConfig {
@@ -1394,6 +1398,7 @@ mod tests {
             page_actions: None,
             issued_by: None,
             resource_grant: None,
+            query_pagination: None,
         });
         assert!(resource_policy.validate().is_ok());
         resource_policy.routes[0].source_action = None;
@@ -1605,6 +1610,7 @@ mod tests {
             page_actions: None,
             issued_by: None,
             resource_grant: None,
+            query_pagination: None,
         }
     }
 

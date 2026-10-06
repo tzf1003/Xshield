@@ -30,6 +30,7 @@
 
 use super::{SecurityEntry, SiteRouteConfig, edge_scoped_value};
 use crate::domain::{FieldName, InvalidValue, MappingRevision, OperationId, parse_lower_hex_32};
+use crate::query_pagination::QUERY_PAGINATION_INVALID;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -209,6 +210,7 @@ pub(super) fn validate_route(route: &SiteRouteConfig) -> Result<(), InvalidValue
     validate_sensor_html(route)?;
     validate_page_blocks(route)?;
     validate_resource_grant(route)?;
+    validate_query_pagination(route)?;
     // The edge allows at most one identity or issuance effect per response.
     // `auth_binding` and `resource_grant` cannot meet (their admissions
     // differ), so only a logout that also qualifies resources reaches this.
@@ -336,6 +338,32 @@ fn validate_resource_grant(route: &SiteRouteConfig) -> Result<(), InvalidValue> 
     Ok(())
 }
 
+/// `query_pagination` opts a route out of the default "no query string"
+/// rule, which only exists where the edge enforces it: a grant-issuing
+/// `authenticated_root` list and a `ui_action_required` route without a
+/// resource binding. Anywhere else the block would promise an allowlist the
+/// edge never applies, so it is refused (gateway `compile_operation`).
+fn validate_query_pagination(route: &SiteRouteConfig) -> Result<(), InvalidValue> {
+    let Some(block) = &route.query_pagination else {
+        return Ok(());
+    };
+    let applicable = route.method == "GET"
+        && match route.security_entry {
+            SecurityEntry::AuthenticatedRoot => route.resource_grant.is_some(),
+            SecurityEntry::UiActionRequired => {
+                route.resource_type.is_none()
+                    && route.view_profile.is_none()
+                    && route.resource_query_parameter.is_none()
+                    && route.resource_path_parameter.is_none()
+            }
+            _ => false,
+        };
+    if !applicable {
+        return Err(InvalidValue::new(QUERY_PAGINATION_INVALID));
+    }
+    block.validate()
+}
+
 /// What the edge stores for one `(action, mapping revision)` key; two routes
 /// deriving different meanings for one key are a conflict.
 #[derive(Debug, Eq, PartialEq)]
@@ -391,6 +419,27 @@ pub(super) fn validate_route_set(routes: &[SiteRouteConfig]) -> Result<(), Inval
         .any(|count| !(1..=EDGE_MAX_PAGE_ACTIONS).contains(count))
     {
         return Err(InvalidValue::new(PAGE_ACTIONS_INVALID));
+    }
+
+    // A pagination name must never double as a resource selector of any
+    // route: the caller could then pick the object a "page" parameter names.
+    let resource_parameters = routes
+        .iter()
+        .flat_map(|route| {
+            [
+                route.resource_query_parameter.as_deref(),
+                route.resource_path_parameter.as_deref(),
+            ]
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    if routes.iter().any(|route| {
+        route
+            .query_pagination
+            .as_ref()
+            .is_some_and(|block| block.collides_with(resource_parameters.iter().copied()))
+    }) {
+        return Err(InvalidValue::new(QUERY_PAGINATION_INVALID));
     }
 
     let mut harvest_rules = 0_usize;
@@ -1109,6 +1158,140 @@ mod tests {
 
     /// A second resource route sharing `orders.read`'s action, and a list
     /// qualifying it under the same mapping revision.
+    fn paging(names: &[&str]) -> crate::query_pagination::SiteQueryPagination {
+        use crate::query_pagination::{PaginationKind, SiteQueryPagination, SiteQueryParameter};
+        SiteQueryPagination {
+            parameters: names
+                .iter()
+                .map(|name| SiteQueryParameter {
+                    name: (*name).to_owned(),
+                    kind: PaginationKind::Page,
+                    max_value: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// An `authenticated_root` GET list that issues grants.
+    fn root_list(config: &mut SiteConfig, with_grant: bool) {
+        let mut list = list_route(
+            "orders.root",
+            "/orders-root",
+            "orders.read",
+            "orders-map-r1",
+        );
+        list.security_entry = SecurityEntry::AuthenticatedRoot;
+        list.source_action = None;
+        if !with_grant {
+            list.resource_grant = None;
+        }
+        config.policy.routes.push(list);
+    }
+
+    #[test]
+    fn query_pagination_follows_the_edge() {
+        let invalid = Err(QUERY_PAGINATION_INVALID);
+        check(vec![
+            (
+                "non-resource UI action list",
+                |c| route(c, "orders.list").query_pagination = Some(paging(&["page"])),
+                Ok(()),
+            ),
+            (
+                "all four parameters",
+                |c| {
+                    route(c, "orders.list").query_pagination =
+                        Some(paging(&["page", "size", "skip", "n"]));
+                },
+                Ok(()),
+            ),
+            (
+                "grant-issuing authenticated root list",
+                |c| {
+                    root_list(c, true);
+                    route(c, "orders.root").query_pagination = Some(paging(&["page"]));
+                },
+                Ok(()),
+            ),
+            (
+                "authenticated root without a grant",
+                |c| {
+                    root_list(c, false);
+                    route(c, "orders.root").query_pagination = Some(paging(&["page"]));
+                },
+                invalid,
+            ),
+            (
+                "resource route",
+                |c| route(c, "orders.read").query_pagination = Some(paging(&["page"])),
+                invalid,
+            ),
+            (
+                "page root",
+                |c| route(c, "app.page").query_pagination = Some(paging(&["page"])),
+                invalid,
+            ),
+            (
+                "public route",
+                |c| route(c, "login.page").query_pagination = Some(paging(&["page"])),
+                invalid,
+            ),
+            (
+                "auth entry",
+                |c| route(c, "auth.login").query_pagination = Some(paging(&["page"])),
+                invalid,
+            ),
+            (
+                "not a GET",
+                |c| {
+                    let list = route(c, "orders.list");
+                    list.method = "POST".to_owned();
+                    list.query_pagination = Some(paging(&["page"]));
+                },
+                invalid,
+            ),
+            (
+                "empty list",
+                |c| route(c, "orders.list").query_pagination = Some(paging(&[])),
+                invalid,
+            ),
+            (
+                "five parameters",
+                |c| {
+                    route(c, "orders.list").query_pagination =
+                        Some(paging(&["a", "b", "c", "d", "e"]));
+                },
+                invalid,
+            ),
+            (
+                "duplicate names",
+                |c| route(c, "orders.list").query_pagination = Some(paging(&["p", "p"])),
+                invalid,
+            ),
+            (
+                "uppercase name",
+                |c| route(c, "orders.list").query_pagination = Some(paging(&["Page"])),
+                invalid,
+            ),
+            (
+                "name equal to a path resource parameter of another route",
+                |c| route(c, "orders.list").query_pagination = Some(paging(&["order_id"])),
+                invalid,
+            ),
+            (
+                "name equal to a query resource parameter of another route",
+                |c| {
+                    let read = route(c, "orders.read");
+                    read.resource_path_parameter = None;
+                    read.path = "/order".to_owned();
+                    read.resource_query_parameter = Some("Order_Id".to_owned());
+                    route(c, "orders.list").query_pagination = Some(paging(&["order_id"]));
+                },
+                invalid,
+            ),
+        ]);
+    }
+
     fn add_second_target(config: &mut SiteConfig) {
         let mut target = route(config, "orders.read").clone();
         target.operation_id = "orders.read.v2".to_owned();

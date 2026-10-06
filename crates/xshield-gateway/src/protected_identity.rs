@@ -30,8 +30,8 @@ use xshield_core::{
     provenance::{ActionTarget, BuildFingerprint},
 };
 use xshield_gateway::{
-    GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig, InternalResponse,
-    ResourceLocation, ResourceOperation,
+    FrozenQuery, GatewayConfig, GatewayDecision, GatewayOutcome, IdentityStoreConfig,
+    InternalResponse, QueryAdmission, ResourceLocation, ResourceOperation,
     auth_binding::{AuthBindingRule, AuthRevokeRule, AuthTransitionRule},
     share_token::ShareTokenIssuer,
 };
@@ -151,6 +151,9 @@ pub(crate) struct ProtectedAdmission {
     pub(crate) compatibility_evidence: Option<CompatibilityEvidence>,
     pub(crate) sensor_session: Option<SensorSession>,
     pub(crate) sensor_bootstrap: Option<SensorBootstrapDelivery>,
+    /// The only query the origin receives when the route declared
+    /// `query_pagination`; rebuilt from validated values, never the raw one.
+    pub(crate) frozen_query: Option<FrozenQuery>,
 }
 
 pub(crate) struct CompatibilityEvidence {
@@ -162,6 +165,7 @@ struct UiActionAdmission {
     decision: GatewayDecision,
     compatibility_evidence: Option<CompatibilityEvidence>,
     share_source: Option<ShareSource>,
+    frozen_query: Option<FrozenQuery>,
 }
 
 impl ProtectedAdmission {
@@ -173,6 +177,7 @@ impl ProtectedAdmission {
             compatibility_evidence: None,
             sensor_session: None,
             sensor_bootstrap: None,
+            frozen_query: None,
         }
     }
 }
@@ -848,37 +853,53 @@ impl ProtectedIdentity {
             .await?;
         Ok(match state {
             IdentityProofState::Verified { binding, snapshot } => {
+                let mut frozen_query = None;
                 let (decision, compatibility_evidence, share_source) = match class {
-                    Some(AdmissionClass::AuthenticatedRoot) => (
-                        if request.uri.query().is_some()
-                            && config.response_grant_operation(method, path).is_some()
-                        {
-                            // Every item a grant-issuing list returns becomes a grant for
-                            // this binding, so the caller must not choose whose objects it
-                            // lists: any query string is a selector the origin may honor
-                            // (`?customerId=B`). The same rule already holds for a
-                            // UI-action route that is not a resource route.
-                            denied_reason(config, method, path, now, ReasonCode::FieldNotAllowed)
+                    Some(AdmissionClass::AuthenticatedRoot) => {
+                        // Every item a grant-issuing list returns becomes a grant for
+                        // this binding, so the caller must not choose whose objects it
+                        // lists: any query string is a selector the origin may honor
+                        // (`?customerId=B`). Only a route that declared pagination
+                        // parameters takes a query, and then only a rebuilt one. The
+                        // same rule holds for a UI-action route that is not a
+                        // resource route.
+                        let query = if config.response_grant_operation(method, path).is_some() {
+                            config.admit_query_string(method, path, request.uri.query())
                         } else {
-                            config.admit_with_proof(
+                            QueryAdmission::Unchanged
+                        };
+                        let decision = match query {
+                            QueryAdmission::Denied(_) => denied_reason(
+                                config,
                                 method,
                                 path,
                                 now,
-                                AdmissionProof::Authenticated {
-                                    binding: &binding,
-                                    snapshot: &snapshot,
-                                },
-                            )
-                        },
-                        None,
-                        None,
-                    ),
+                                ReasonCode::FieldNotAllowed,
+                            ),
+                            query => {
+                                if let QueryAdmission::Forward(frozen) = query {
+                                    frozen_query = Some(frozen);
+                                }
+                                config.admit_with_proof(
+                                    method,
+                                    path,
+                                    now,
+                                    AdmissionProof::Authenticated {
+                                        binding: &binding,
+                                        snapshot: &snapshot,
+                                    },
+                                )
+                            }
+                        };
+                        (decision, None, None)
+                    }
                     Some(AdmissionClass::UiActionRequired) => {
                         let admission = self
                             .admit_ui_action(
                                 config, store, request, method, path, now, &binding, &snapshot,
                             )
                             .await?;
+                        frozen_query = admission.frozen_query;
                         (
                             admission.decision,
                             admission.compatibility_evidence,
@@ -894,6 +915,7 @@ impl ProtectedIdentity {
                         share_source,
                     }),
                     compatibility_evidence,
+                    frozen_query,
                     ..ProtectedAdmission::without_identity(decision)
                 }
             }
@@ -1034,6 +1056,7 @@ impl ProtectedIdentity {
                     decision: config.admit(method, path, now),
                     compatibility_evidence: None,
                     share_source: None,
+                    frozen_query: None,
                 });
             }
             Err(error) => return Err(error),
@@ -1058,6 +1081,7 @@ impl ProtectedIdentity {
                 ),
                 compatibility_evidence: None,
                 share_source: None,
+                frozen_query: None,
             });
         };
         let compatibility_evidence = action
@@ -1070,13 +1094,26 @@ impl ProtectedIdentity {
                 },
             );
         let Some(operation) = config.resource_operation(method, path) else {
-            if request.uri.query().is_some() {
-                return Ok(UiActionAdmission {
-                    decision: denied_reason(config, method, path, now, ReasonCode::FieldNotAllowed),
-                    compatibility_evidence: None,
-                    share_source: None,
-                });
-            }
+            // A non-resource route carries no query unless it declared
+            // pagination parameters; then only a rebuilt query is forwarded.
+            let frozen_query = match config.admit_query_string(method, path, request.uri.query()) {
+                QueryAdmission::Unchanged => None,
+                QueryAdmission::Forward(frozen) => Some(frozen),
+                QueryAdmission::Denied(_) => {
+                    return Ok(UiActionAdmission {
+                        decision: denied_reason(
+                            config,
+                            method,
+                            path,
+                            now,
+                            ReasonCode::FieldNotAllowed,
+                        ),
+                        compatibility_evidence: None,
+                        share_source: None,
+                        frozen_query: None,
+                    });
+                }
+            };
             return Ok(UiActionAdmission {
                 decision: config.admit_with_proof(
                     method,
@@ -1091,6 +1128,7 @@ impl ProtectedIdentity {
                 ),
                 compatibility_evidence,
                 share_source: None,
+                frozen_query,
             });
         };
         let (decision, share_source) = self
@@ -1104,6 +1142,7 @@ impl ProtectedIdentity {
                 .flatten(),
             decision,
             share_source,
+            frozen_query: None,
         })
     }
 

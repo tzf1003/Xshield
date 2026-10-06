@@ -3690,6 +3690,9 @@ fn validation_reason(field: &str) -> &'static str {
         flow::SENSOR_HTML_INVALID => "CONTROL_SITE_SENSOR_HTML_INVALID",
         flow::PAGE_ACTIONS_INVALID => "CONTROL_SITE_PAGE_ACTIONS_INVALID",
         flow::RESOURCE_GRANT_INVALID => "CONTROL_SITE_RESOURCE_GRANT_INVALID",
+        xshield_core::query_pagination::QUERY_PAGINATION_INVALID => {
+            "CONTROL_SITE_QUERY_PAGINATION_INVALID"
+        }
         flow::ACTION_DESCRIPTOR_CONFLICT => "CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT",
         // Decided by the store against the label's bindings, not by
         // validation; mapped here so every flow refusal has one table.
@@ -3905,6 +3908,16 @@ mod tests {
             }),
             ("CONTROL_SITE_RESOURCE_GRANT_INVALID", |b| {
                 b["policy"]["routes"][3]["resource_grant"]["max_items"] = json!(0);
+            }),
+            ("CONTROL_SITE_QUERY_PAGINATION_INVALID", |b| {
+                b["policy"]["routes"][3]["query_pagination"] =
+                    json!({"parameters": [{"name": "Page", "kind": "page"}]});
+            }),
+            ("CONTROL_SITE_QUERY_PAGINATION_INVALID", |b| {
+                // Applies to a grant-issuing list and a non-resource UI action
+                // route only; the page root takes no query.
+                b["policy"]["routes"][2]["query_pagination"] =
+                    json!({"parameters": [{"name": "page", "kind": "page"}]});
             }),
             ("CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT", |b| {
                 let mut shadow = b["policy"]["routes"][3].clone();
@@ -4559,6 +4572,7 @@ mod tests {
             page_actions: None,
             issued_by: None,
             resource_grant: None,
+            query_pagination: None,
         }];
         let sibling = input("site_a", broken);
         let plan = super::plan_snapshot(

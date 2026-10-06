@@ -60,6 +60,7 @@ fn exact(id: &str, method: &str, path: &str, entry: SecurityEntry) -> SiteRouteC
         page_actions: None,
         issued_by: None,
         resource_grant: None,
+        query_pagination: None,
     }
 }
 
@@ -1666,6 +1667,215 @@ fn provenance_flow_rules_match_the_edge() {
         tally.digests
     );
     tally.finish(10, 30);
+}
+
+fn paging(names: &[&str]) -> xshield_core::query_pagination::SiteQueryPagination {
+    use xshield_core::query_pagination::{PaginationKind, SiteQueryPagination, SiteQueryParameter};
+    SiteQueryPagination {
+        parameters: names
+            .iter()
+            .map(|name| SiteQueryParameter {
+                name: (*name).to_owned(),
+                kind: PaginationKind::Page,
+                max_value: None,
+            })
+            .collect(),
+    }
+}
+
+/// A grant-issuing `authenticated_root` list next to the loop topology.
+fn root_list(config: &mut SiteConfig, with_grant: bool) {
+    let mut list = loop_route(config, "orders.list").clone();
+    "orders.root".clone_into(&mut list.operation_id);
+    "/orders-root".clone_into(&mut list.path);
+    list.security_entry = SecurityEntry::AuthenticatedRoot;
+    list.source_action = None;
+    list.issued_by = None;
+    if !with_grant {
+        list.resource_grant = None;
+    }
+    config.policy.routes.push(list);
+}
+
+/// `query_pagination` rules, judged by the control plane and the real edge
+/// compiler alike: where the block applies, its shape and its collision with
+/// resource parameters.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn query_pagination_rules_match_the_edge() {
+    let mut tally = Tally::new();
+    let both = Expect::BothAccept;
+    let reject = Expect::CoreMustReject;
+
+    check(
+        &mut tally,
+        "paged non-resource UI list",
+        |c| loop_route(c, "orders.list").query_pagination = Some(paging(&["page"])),
+        both,
+    );
+    check(
+        &mut tally,
+        "four parameters",
+        |c| {
+            loop_route(c, "orders.list").query_pagination =
+                Some(paging(&["page", "size", "skip", "n"]));
+        },
+        both,
+    );
+    check(
+        &mut tally,
+        "paged grant-issuing root list",
+        |c| {
+            root_list(c, true);
+            loop_route(c, "orders.root").query_pagination = Some(paging(&["page"]));
+        },
+        both,
+    );
+    check(
+        &mut tally,
+        "root list without a grant",
+        |c| {
+            root_list(c, false);
+            loop_route(c, "orders.root").query_pagination = Some(paging(&["page"]));
+        },
+        reject,
+    );
+    check(
+        &mut tally,
+        "resource route",
+        |c| loop_route(c, "orders.read").query_pagination = Some(paging(&["page"])),
+        reject,
+    );
+    check(
+        &mut tally,
+        "page root",
+        |c| loop_route(c, "app.page").query_pagination = Some(paging(&["page"])),
+        reject,
+    );
+    check(
+        &mut tally,
+        "auth entry",
+        |c| loop_route(c, "auth.login").query_pagination = Some(paging(&["page"])),
+        reject,
+    );
+    check(
+        &mut tally,
+        "public route",
+        |c| loop_route(c, "login.page").query_pagination = Some(paging(&["page"])),
+        reject,
+    );
+    check(
+        &mut tally,
+        "not a GET",
+        |c| {
+            let list = loop_route(c, "orders.list");
+            list.method = "POST".to_owned();
+            list.query_pagination = Some(paging(&["page"]));
+        },
+        reject,
+    );
+    for (label, names) in [
+        ("empty list", &[][..]),
+        ("five parameters", &["a", "b", "c", "d", "e"][..]),
+        ("duplicate names", &["p", "p"][..]),
+        ("uppercase", &["Page"][..]),
+        ("digit", &["page1"][..]),
+        ("empty name", &[""][..]),
+        ("collides with a resource parameter", &["order_id"][..]),
+    ] {
+        let mut config = browser_loop();
+        loop_route(&mut config, "orders.list").query_pagination = Some(paging(names));
+        tally.expect(label, &config, reject);
+    }
+    let long = "a".repeat(33);
+    let mut config = browser_loop();
+    loop_route(&mut config, "orders.list").query_pagination = Some(paging(&[&long]));
+    tally.expect("name of 33 bytes", &config, reject);
+    let max = "a".repeat(32);
+    let mut config = browser_loop();
+    loop_route(&mut config, "orders.list").query_pagination = Some(paging(&[&max]));
+    tally.expect("name of 32 bytes", &config, both);
+    // `page_size` bounds, and bounds on kinds that have fixed ranges.
+    for (label, kind, bound, expect) in [
+        ("page size 1000", "page_size", Some(1_000), both),
+        ("page size 1", "page_size", Some(1), both),
+        ("page size 1001", "page_size", Some(1_001), reject),
+        ("page size 0", "page_size", Some(0), reject),
+        ("bound on a page", "page", Some(5), reject),
+        ("bound on an offset", "offset", Some(5), reject),
+        ("default page size", "page_size", None, both),
+    ] {
+        let mut config = browser_loop();
+        let mut block = paging(&["n"]);
+        block.parameters[0].kind = serde_json::from_value(serde_json::json!(kind)).unwrap();
+        block.parameters[0].max_value = bound;
+        loop_route(&mut config, "orders.list").query_pagination = Some(block);
+        tally.expect(label, &config, expect);
+    }
+    // A resource parameter in a query-located resource route collides too.
+    let mut config = browser_loop();
+    {
+        let read = loop_route(&mut config, "orders.read");
+        read.path = "/order".to_owned();
+        read.resource_path_parameter = None;
+        read.resource_query_parameter = Some("Order_Id".to_owned());
+    }
+    loop_route(&mut config, "orders.list").query_pagination = Some(paging(&["order_id"]));
+    tally.expect("case-folded query resource parameter", &config, reject);
+    tally.finish(5, 14);
+}
+
+/// Every combination of admission, method and neighbouring blocks with a
+/// pagination block: core may be stricter than the edge, never looser.
+#[test]
+fn generated_query_pagination_routes_never_pass_core_and_fail_the_edge() {
+    let mut tally = Tally::new();
+    let template = browser_loop();
+    let list = loop_route(&mut browser_loop(), "orders.list").clone();
+    let entries = [
+        SecurityEntry::Public,
+        SecurityEntry::AuthEntry,
+        SecurityEntry::AuthenticatedRoot,
+        SecurityEntry::UiActionRequired,
+    ];
+    let blocks = [
+        paging(&["page"]),
+        paging(&["page", "page"]),
+        paging(&["order_id"]),
+        paging(&[]),
+    ];
+    for entry in entries {
+        for method in ["GET", "POST"] {
+            for with_grant in [false, true] {
+                for with_resource in [false, true] {
+                    for block in &blocks {
+                        let mut probe = exact("probe", method, "/probe", entry);
+                        probe.response_mode = "BUFFERED_JSON".to_owned();
+                        probe.max_response_bytes = 16_384;
+                        if with_grant {
+                            probe.resource_grant.clone_from(&list.resource_grant);
+                        }
+                        if with_resource {
+                            probe.resource_type = Some("order".to_owned());
+                            probe.view_profile = Some("summary".to_owned());
+                            probe.resource_query_parameter = Some("record".to_owned());
+                        }
+                        probe.query_pagination = Some(block.clone());
+                        let mut config = template.clone();
+                        config.listen_port = 6100;
+                        config.policy.routes.push(probe);
+                        tally.implication(
+                            &format!(
+                                "{entry:?} {method} grant={with_grant} resource={with_resource} {block:?}"
+                            ),
+                            &config,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    tally.finish(1, 50);
 }
 
 fn builds(count: usize) -> Vec<xshield_core::SiteSensorHtmlAdapter> {

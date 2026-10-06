@@ -25,6 +25,7 @@ use xshield_core::{
     grant::ResourceKeyHmac,
     identity::UnixSeconds,
     provenance::{ActionTarget, BuildFingerprint, HttpMethod, RouteTemplate},
+    query_pagination::{QueryDenial, QueryPaginationRule, SiteQueryPagination},
     site::PortNumber,
 };
 
@@ -187,6 +188,7 @@ struct CompiledOperation {
     resource: Option<CompiledResource>,
     request_crypto: Option<RequestCryptoPolicy>,
     issued_by: Option<xshield_core::edge_descriptors::IssuedBy>,
+    query_pagination: Option<QueryPaginationRule>,
     response: Option<CompiledResponse>,
 }
 
@@ -382,6 +384,8 @@ struct OperationDto {
     request_crypto: Option<RequestCryptoDto>,
     #[serde(default)]
     issued_by: Option<page_actions::IssuedByDto>,
+    #[serde(default)]
+    query_pagination: Option<SiteQueryPagination>,
     response: Option<ResponseDto>,
 }
 
@@ -915,6 +919,36 @@ impl GatewayConfig {
         })
     }
 
+    /// Applies the query rule of a route that otherwise refuses any query
+    /// string (a grant-issuing authenticated root list, a UI-action route
+    /// without a resource binding).
+    ///
+    /// A route without a `query_pagination` block keeps today's behavior: any
+    /// query is denied. With one, the query must be exactly a subset of the
+    /// declared pagination parameters and the origin receives a query rebuilt
+    /// from the validated values, never the raw one.
+    #[must_use]
+    pub fn admit_query_string(
+        &self,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+    ) -> QueryAdmission {
+        let Some(query) = query else {
+            return QueryAdmission::Unchanged;
+        };
+        let Some(rule) = self
+            .operation(method, path)
+            .and_then(|operation| operation.query_pagination.as_ref())
+        else {
+            return QueryAdmission::Denied(None);
+        };
+        match rule.admit(Some(query)) {
+            Ok(canonical) => QueryAdmission::Forward(FrozenQuery(canonical)),
+            Err(denial) => QueryAdmission::Denied(Some(denial)),
+        }
+    }
+
     /// Returns the complete-buffer limit for an exact private JSON response.
     #[must_use]
     pub fn buffered_json_max_bytes(&self, method: &str, path: &str) -> Option<usize> {
@@ -1321,10 +1355,39 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
         return Err(ConfigError::Invalid("operations.response.crypto.key_id"));
     }
     validate_response_contracts(&exact, &path_resources)?;
+    validate_query_pagination_names(&exact, &path_resources)?;
     Ok(CompiledOperations {
         exact,
         path_resources,
     })
+}
+
+/// A pagination name must never double as a resource selector of any route
+/// (compared ASCII case-insensitively, because an origin may fold case).
+fn validate_query_pagination_names(
+    exact: &BTreeMap<(String, String), CompiledOperation>,
+    path_resources: &[CompiledOperation],
+) -> Result<(), ConfigError> {
+    let operations = exact.values().chain(path_resources);
+    let resource_names = operations
+        .clone()
+        .filter_map(|operation| match &operation.resource.as_ref()?.location {
+            CompiledResourceLocation::Query(name)
+            | CompiledResourceLocation::FinalPathSegment {
+                parameter: name, ..
+            } => Some(name.as_str().to_ascii_lowercase()),
+        })
+        .collect::<BTreeSet<_>>();
+    for operation in operations {
+        if operation
+            .query_pagination
+            .as_ref()
+            .is_some_and(|rule| rule.names().any(|name| resource_names.contains(name)))
+        {
+            return Err(ConfigError::Invalid("operations.query_pagination"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_response_contracts(
@@ -1618,6 +1681,9 @@ fn validate_sensor(sensor: SensorDto) -> Result<SensorConfig, ConfigError> {
     })
 }
 
+// One linear pass over the operation DTO; splitting it would scatter the
+// capability match from the checks that depend on its result.
+#[allow(clippy::too_many_lines)]
 fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError> {
     let method = parse_method(&dto.method).ok_or(ConfigError::Invalid("operations.method"))?;
     if dto.path.starts_with(INTERNAL_PATH_PREFIX)
@@ -1699,6 +1765,21 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
     let response_has_side_effects = response
         .as_ref()
         .is_some_and(CompiledResponse::has_side_effects);
+    let query_pagination = dto
+        .query_pagination
+        .as_ref()
+        .map(|block| {
+            compile_query_pagination(
+                block,
+                method,
+                dto.admission,
+                resource.is_some(),
+                response
+                    .as_ref()
+                    .is_some_and(|response| response.grant.is_some()),
+            )
+        })
+        .transpose()?;
     let request_crypto = dto
         .request_crypto
         .map(|rule| compile_request_crypto(rule, method, dto.admission, response_has_side_effects))
@@ -1715,8 +1796,32 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
             .issued_by
             .map(page_actions::compile_issued_by)
             .transpose()?,
+        query_pagination,
         response,
     })
+}
+
+/// The block only has an effect where the edge otherwise refuses every query
+/// string: a grant-issuing authenticated root list and a UI-action route
+/// without a resource binding. Elsewhere it would promise an allowlist nothing
+/// enforces, so it is refused (core `validate_query_pagination` mirrors this).
+fn compile_query_pagination(
+    block: &SiteQueryPagination,
+    method: HttpMethod,
+    admission: AdmissionDto,
+    has_resource: bool,
+    issues_grants: bool,
+) -> Result<QueryPaginationRule, ConfigError> {
+    let applicable = method == HttpMethod::Get
+        && match admission {
+            AdmissionDto::AuthenticatedRoot => issues_grants,
+            AdmissionDto::UiActionRequired => !has_resource,
+            _ => false,
+        };
+    if !applicable {
+        return Err(ConfigError::Invalid("operations.query_pagination"));
+    }
+    QueryPaginationRule::compile(block).map_err(ConfigError::Domain)
 }
 
 fn compile_request_crypto(
@@ -2282,6 +2387,32 @@ pub enum GatewayOutcome {
     Allowed,
     /// The request must terminate before origin dispatch.
     Denied,
+}
+
+/// The query the origin receives for an admitted request, rebuilt from the
+/// validated parameters. It is the only query the edge forwards for a route
+/// with a `query_pagination` block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrozenQuery(Option<String>);
+
+impl FrozenQuery {
+    /// The canonical query without the leading `?`, or `None` for no query.
+    #[must_use]
+    pub fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+/// Outcome of [`GatewayConfig::admit_query_string`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryAdmission {
+    /// The request carries no query string; nothing to rebuild.
+    Unchanged,
+    /// Allowed; forward exactly this rebuilt query.
+    Forward(FrozenQuery),
+    /// Refused as `FIELD_NOT_ALLOWED`. The detail is for tests and local
+    /// diagnostics only; the closed audit schema carries no sub-reason.
+    Denied(Option<QueryDenial>),
 }
 
 /// Terminal deterministic admission result.
@@ -2877,6 +3008,156 @@ mod tests {
             GatewayConfig::from_json(&serde_json::to_vec(&duplicate_id).unwrap()),
             Err(ConfigError::Invalid("operations.operation_id"))
         ));
+    }
+
+    fn paged_list_config() -> serde_json::Value {
+        serde_json::json!({
+            "listen": "127.0.0.1:6188",
+            "origin": {"address": "127.0.0.1:8080", "server_name": "origin.example", "tls": false},
+            "tenant_id": "tenant_demo",
+            "site_id": "site_demo",
+            "policy_revision": "policy-r1",
+            "audit": {
+                "directory": "target/xshield-query-pagination-test",
+                "key_id": "journal-key-r1",
+                "producer_id": "edge-test",
+                "max_bytes": 1_048_576,
+                "high_watermark_bytes": 786_432,
+                "segment_max_bytes": 262_144
+            },
+            "identity_store": {"max_connections": 4, "acquire_timeout_ms": 1_000},
+            "operations": [
+                {
+                    "operation_id": "orders.list", "method": "GET", "path": "/orders",
+                    "admission": "AUTHENTICATED_ROOT",
+                    "source_action": null, "resource_type": null, "view_profile": null,
+                    "query_pagination": {"parameters": [
+                        {"name": "page", "kind": "page"},
+                        {"name": "page_size", "kind": "page_size", "max_value": 50}
+                    ]},
+                    "response": {
+                        "mode": "BUFFERED_JSON", "max_bytes": 4_096,
+                        "resource_grant": {
+                            "success_status": 200, "items_pointer": "/orders",
+                            "resource_pointer": "/id", "action_ref_field": "_xshield_action_ref",
+                            "target_operation_id": "orders.read",
+                            "target_mapping_revision": "mapping-r1",
+                            "ttl_seconds": 900, "max_items": 100, "max_active_grants": 5_000
+                        }
+                    }
+                },
+                {
+                    "operation_id": "orders.other", "method": "GET", "path": "/orders-plain",
+                    "admission": "AUTHENTICATED_ROOT",
+                    "source_action": null, "resource_type": null, "view_profile": null,
+                    "response": {
+                        "mode": "BUFFERED_JSON", "max_bytes": 4_096,
+                        "resource_grant": {
+                            "success_status": 200, "items_pointer": "/orders",
+                            "resource_pointer": "/id", "action_ref_field": "_xshield_action_ref",
+                            "target_operation_id": "orders.read",
+                            "target_mapping_revision": "mapping-r1",
+                            "ttl_seconds": 900, "max_items": 100, "max_active_grants": 5_000
+                        }
+                    }
+                },
+                {
+                    "operation_id": "orders.read", "method": "GET", "path": "/orders/{order_id}",
+                    "admission": "UI_ACTION_REQUIRED", "source_action": "orders.open",
+                    "resource_type": "order", "view_profile": "customer_detail",
+                    "resource_path_parameter": "order_id"
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn query_pagination_compiles_only_where_the_edge_enforces_it() {
+        let compile = |config: &serde_json::Value| {
+            GatewayConfig::from_json(&serde_json::to_vec(config).unwrap())
+        };
+        let config = compile(&paged_list_config()).unwrap();
+        // Absent block: today's behavior, any query is denied.
+        assert_eq!(
+            config.admit_query_string("GET", "/orders-plain", Some("page=1")),
+            QueryAdmission::Denied(None)
+        );
+        assert_eq!(
+            config.admit_query_string("GET", "/orders-plain", None),
+            QueryAdmission::Unchanged
+        );
+        assert_eq!(
+            config.admit_query_string("GET", "/orders", None),
+            QueryAdmission::Unchanged
+        );
+        // Opted in: the forwarded query is rebuilt in declared order.
+        let QueryAdmission::Forward(frozen) =
+            config.admit_query_string("GET", "/orders", Some("page_size=20&page=2"))
+        else {
+            panic!("paged list must be admitted");
+        };
+        assert_eq!(frozen.as_deref(), Some("page=2&page_size=20"));
+        for query in [
+            "customerId=B",
+            "page=2&customerId=B",
+            "page=02",
+            "page_size=51",
+            "page=1&page=1",
+            "pag%65=1",
+            "page=1;page_size=2",
+            "page=1&&page_size=2",
+            "page[]=1",
+            "page=+1",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    config.admit_query_string("GET", "/orders", Some(query)),
+                    QueryAdmission::Denied(Some(_))
+                ),
+                "{query:?}"
+            );
+        }
+
+        let mut not_a_grant_list = paged_list_config();
+        not_a_grant_list["operations"][0]["response"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resource_grant");
+        assert!(matches!(
+            compile(&not_a_grant_list),
+            Err(ConfigError::Invalid("operations.query_pagination"))
+        ));
+        let mut public = paged_list_config();
+        public["operations"][0]["admission"] = serde_json::json!("PUBLIC");
+        public["operations"][0]["response"]["resource_grant"] = serde_json::Value::Null;
+        assert!(compile(&public).is_err());
+        let mut on_resource_route = paged_list_config();
+        on_resource_route["operations"][2]["query_pagination"] =
+            serde_json::json!({"parameters": [{"name": "page", "kind": "page"}]});
+        assert!(matches!(
+            compile(&on_resource_route),
+            Err(ConfigError::Invalid("operations.query_pagination"))
+        ));
+        let mut collides = paged_list_config();
+        collides["operations"][0]["query_pagination"] =
+            serde_json::json!({"parameters": [{"name": "order_id", "kind": "page"}]});
+        assert!(matches!(
+            compile(&collides),
+            Err(ConfigError::Invalid("operations.query_pagination"))
+        ));
+        for block in [
+            serde_json::json!({"parameters": []}),
+            serde_json::json!({"parameters": [{"name": "Page", "kind": "page"}]}),
+            serde_json::json!({"parameters": [{"name": "c", "kind": "cursor"}]}),
+            serde_json::json!({"parameters": [{"name": "n", "kind": "page_size", "max_value": 1001}]}),
+            serde_json::json!({"parameters": [{"name": "n", "kind": "page", "max_value": 5}]}),
+            serde_json::json!({"parameters": [{"name": "n", "kind": "page"}], "extra": 1}),
+        ] {
+            let mut invalid = paged_list_config();
+            invalid["operations"][0]["query_pagination"] = block;
+            assert!(compile(&invalid).is_err());
+        }
     }
 
     fn share_response_config() -> serde_json::Value {

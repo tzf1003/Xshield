@@ -82,13 +82,17 @@ pub enum ChangeRisk {
     /// added, removed or changed in any field: which resources a response
     /// qualifies for which action.
     ResourceGrantChanged,
+    /// A route with a `query_pagination` block was added, removed or changed
+    /// in any field: which query parameters a list that issues grants (or a
+    /// UI-action route) may carry to the origin.
+    QueryPaginationChanged,
     /// A difference that no category above names; risky by default.
     OtherChange,
 }
 
 impl ChangeRisk {
     /// Every reason, in token order of declaration.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Activation,
         Self::Takedown,
         Self::UpstreamChanged,
@@ -109,6 +113,7 @@ impl ChangeRisk {
         Self::SensorHtmlChanged,
         Self::PageActionsChanged,
         Self::ResourceGrantChanged,
+        Self::QueryPaginationChanged,
         Self::OtherChange,
     ];
 
@@ -132,6 +137,7 @@ impl ChangeRisk {
                 | Self::SensorHtmlChanged
                 | Self::PageActionsChanged
                 | Self::ResourceGrantChanged
+                | Self::QueryPaginationChanged
         )
     }
 
@@ -159,6 +165,7 @@ impl ChangeRisk {
             Self::SensorHtmlChanged => "SENSOR_HTML_CHANGED",
             Self::PageActionsChanged => "PAGE_ACTIONS_CHANGED",
             Self::ResourceGrantChanged => "RESOURCE_GRANT_CHANGED",
+            Self::QueryPaginationChanged => "QUERY_PAGINATION_CHANGED",
             Self::OtherChange => "OTHER_CHANGE",
         }
     }
@@ -189,7 +196,7 @@ pub fn direct_apply_may_waive<S: AsRef<str>>(reasons: &[S]) -> bool {
 /// Whether a route of a policy takes part in a facet.
 type FacetMember = fn(&SitePolicyConfig, &SiteRouteConfig) -> bool;
 
-const FLOW_FACETS: [(ChangeRisk, FacetMember); 4] = [
+const FLOW_FACETS: [(ChangeRisk, FacetMember); 5] = [
     (ChangeRisk::AuthEntryChanged, |_, route| {
         route.security_entry == super::SecurityEntry::AuthEntry
             || route.auth_binding.is_some()
@@ -200,6 +207,11 @@ const FLOW_FACETS: [(ChangeRisk, FacetMember); 4] = [
     }),
     (ChangeRisk::PageActionsChanged, |_, route| {
         route.page_actions.is_some() || route.issued_by.is_some()
+    }),
+    // Which query parameters reach the origin on a route that otherwise
+    // admits none; widening it is a change to what a caller may influence.
+    (ChangeRisk::QueryPaginationChanged, |_, route| {
+        route.query_pagination.is_some()
     }),
     // A grant's meaning depends on its target route as much as on the grant.
     (ChangeRisk::ResourceGrantChanged, |policy, route| {
@@ -386,6 +398,7 @@ mod tests {
             page_actions: None,
             issued_by: None,
             resource_grant: None,
+            query_pagination: None,
         }
     }
 
@@ -973,6 +986,25 @@ mod tests {
                 vec![RoutesChanged, PageActionsChanged, ResourceGrantChanged],
             ),
             (
+                "pagination added to the grant-issuing list",
+                |c| {
+                    flow_route(c, "orders.list").query_pagination =
+                        Some(crate::query_pagination::SiteQueryPagination {
+                            parameters: vec![crate::query_pagination::SiteQueryParameter {
+                                name: "page".to_owned(),
+                                kind: crate::query_pagination::PaginationKind::Page,
+                                max_value: None,
+                            }],
+                        });
+                },
+                vec![
+                    RoutesChanged,
+                    PageActionsChanged,
+                    ResourceGrantChanged,
+                    QueryPaginationChanged,
+                ],
+            ),
+            (
                 "grant target view",
                 |c| flow_route(c, "orders.read").view_profile = Some("full".to_owned()),
                 vec![RoutesChanged, ResourceGrantChanged],
@@ -1074,8 +1106,13 @@ mod tests {
                 ChangeRisk::AuthEntryChanged,
                 ChangeRisk::SensorHtmlChanged,
                 ChangeRisk::PageActionsChanged,
-                ChangeRisk::ResourceGrantChanged
+                ChangeRisk::ResourceGrantChanged,
+                ChangeRisk::QueryPaginationChanged
             ]
+        );
+        assert_eq!(
+            ChangeRisk::from_token("QUERY_PAGINATION_CHANGED"),
+            Some(ChangeRisk::QueryPaginationChanged)
         );
     }
 }
