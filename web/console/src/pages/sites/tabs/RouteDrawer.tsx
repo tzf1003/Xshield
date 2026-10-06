@@ -33,8 +33,8 @@ import {
   IssuedByGroup,
   PageActionsGroup,
   ResourceGrantGroup,
-  SensorHtmlGroup,
 } from "./route-flow-groups";
+import { SensorHtmlGroup } from "./route-sensor-html";
 
 export type DrawerMode = "add" | "edit" | "duplicate";
 
