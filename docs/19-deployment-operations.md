@@ -59,6 +59,8 @@ PROXY protocol：负载均衡器必须只对 edge 的这些监听端口启用 PR
 
 管理 OIDC 由控制服务读取 `XSHIELD_CONTROL_OIDC_ISSUER`、`XSHIELD_CONTROL_OIDC_CLIENT_ID`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CONTROL_OIDC_REQUIRED_ACR`、`XSHIELD_CONTROL_CONSOLE_ORIGIN` 与 `XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON`。只允许 HTTPS IdP 和 HTTPS 控制台 origin（开发例外仅 loopback）；discovery/token 请求限时且不跟随重定向，启动时 issuer metadata 不可用则控制服务不启动。subject→角色 JSON 是部署管理员维护的精确 allowlist，不能直接映射 IdP 自声明角色；当前每个控制服务实例将获准主体限定到其启动配置的单一 tenant/site。client secret 由秘密管理器按用途注入、轮换，不写入仓库或浏览器 bundle。
 
+**真实 IdP 回归（开发 realm）**：`dev/keycloak/xshield-dev-realm.json` 是本地与 CI 回归用的 Keycloak 26.7.4 realm（`docker-compose.dev.yml` 以容器运行；`scripts/test_oidc_login.sh` 用官方发行包 zip 与 JDK 21 原生运行，不需要 Docker，见 docs/20 §20.20）。客户端 `xshield-console-dev` 强制 S256 PKCE（`pkce.code.challenge.method`），重定向 URI 固定为 `http://127.0.0.1:55173/control/v1/auth/oidc/callback`，`acr` 是写死的声明 `1`（所以对应 `XSHIELD_CONTROL_OIDC_REQUIRED_ACR=1`，不代表做过多因素认证）。用户均使用同一个开发口令 `xshield-dev-password`，只用于本地：`developer`（subject `00000000-0000-7000-8000-000000000001`，`dev.sh` 映射全部角色）、`observer-only`（`…0002`，回归里只映射 observer，用来验证无资格发起 step-up）、`unprovisioned`（`…0003`，故意不在 `XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON` 中，用来验证有效 IdP 用户不会自动获得角色）。该 realm 不得用于任何共享或生产环境。
+
 ### 本地受保护站点 HTTPS 入口
 
 `dev.sh --all` 会为 `juice.local` 生成带 SAN 的短期自签证书，并启动本地 TLS 终止器，将 `https://juice.local:5443` 转发到 Gateway 的 HTTP 数据面 `127.0.0.1:56188`。证书和私钥只写入 `target/xshield-dev/tls/`，私钥权限为 `0600`。macOS 可执行 `scripts/generate_dev_tls_cert.sh target/xshield-dev/tls --install` 将证书加入当前登录钥匙串；未安装信任时使用 `curl -k` 做本地测试。该终止器只属于开发启动链，生产入口由 edge 原生 TLS（见 19.2“Edge 传输配置”）或受控 HTTPS 负载均衡器终止，并继续通过控制 API 发布站点配置。

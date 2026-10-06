@@ -13,7 +13,7 @@ Xshield 是用 Rust 实现的上下文增强型 WAF，采用纯前置代理，�
 | 里程碑 | 完成度 | 现状 |
 |---|---|---|
 | M0 基础契约与骨架 | 完成 | 领域类型、原因码、阶段事件与 Schema、Mock Ports |
-| M1 身份与有迹可循 | 约 85% | 身份绑定与代际、资源资格、分享、界面动作准入；页面交付签发、探针 1.1.0 出示引用，真实浏览器闭环已回归；控制台已能编写认证入口、SENSOR_HTML 页面、页面动作与资源资格（尚未在真实 OIDC 登录下验证），分享仍不能编写 |
+| M1 身份与有迹可循 | 约 85% | 身份绑定与代际、资源资格、分享、界面动作准入；页面交付签发、探针 1.1.0 出示引用，真实浏览器闭环已回归；控制台已能编写认证入口、SENSOR_HTML 页面、页面动作与资源资格（OIDC 登录本身已对真实 Keycloak 验证，见 docs/20 §20.20，但这些编写流程尚未在真实登录的会话下端到端运行），分享仍不能编写 |
 | M2 双向协议接管 | 约 45% | AES-256-GCM JSON 封包适配、observe/compatibility 透传、探针注入、原生 TLS/HTTP/2 与 PROXY protocol |
 | M3 完整日志后台 | 约 85–90% | 封存 journal、ClickHouse 检索与因果、加密证据库、案件/保留/审批/导出、OIDC + MFA step-up |
 | M4 模型与调查 | 约 35% | QueryPlan、检索、因果、离线 Jev 评估、校准基础设施；模型不在请求路径 |
@@ -21,7 +21,7 @@ Xshield 是用 Rust 实现的上下文增强型 WAF，采用纯前置代理，�
 
 控制台已按 [30](docs/30-console-redesign.md) 重构完成（站点向导与工作区、请求调查、案件与审批、运维与治理）。逐机制的实现说明在 [31 已实现机制说明](docs/31-implemented-mechanisms.md)，接口契约在 [29](docs/29-api-endpoint-catalog.md)。
 
-**已验证（本机，2026-10-06）**：Rust 814 个测试与 134 个 PostgreSQL 集成测试通过，控制台 373 个单测与 491 个 Playwright 用例（含无障碍扫描）通过；真实二进制回归包括原生 TLS/ALPN/PROXY 传输、动态监听器、双向加密、身份、Docker 外的 IDOR 靶场，以及真实 Chromium 驱动的界面操作来源闭环。另有 157 个 Rust 测试需要 PostgreSQL/ClickHouse/Docker 而默认忽略；shell 回归在 bash 5 下执行（macOS 自带的 3.2 会让失败的 `[[ ]]` 静默通过，脚本在旧 bash 下拒绝运行）。性能只有一份单机基线（docs/21 §21.7）。**GitHub CI 已在 Linux 上全绿**（2026-10-06，`main` a548858：fmt、clippy、全部测试、PostgreSQL 与 ClickHouse 25.8 集成、网关脚本、IDOR 靶场、真实浏览器闭环、供应链门槛、控制台 e2e）；ClickHouse 集成测试此前从未在真实服务上运行，首次运行即发现并修复了检索读取 `trace_id` 的产品缺陷（docs/20）。**尚未验证**：容器镜像在真实编排环境中的运行（镜像本身由 CI 构建，见 docs/19）、Keycloak 真实 OIDC 登录、真实负载均衡、真实应用试点与性能（本机没有 Docker，文档里的延迟预算仍是待测目标）；控制台 e2e 在 2 核 CI 运行器上偶发需要重试（最多 2 次）。验收用例目录见 [验证方法](#验证方法)。
+**已验证（本机，2026-10-06）**：Rust 814 个测试与 134 个 PostgreSQL 集成测试通过，控制台 373 个单测与 491 个 Playwright 用例（含无障碍扫描）通过；真实二进制回归包括原生 TLS/ALPN/PROXY 传输、动态监听器、双向加密、身份、Docker 外的 IDOR 靶场，以及真实 Chromium 驱动的界面操作来源闭环。另有 157 个 Rust 测试需要 PostgreSQL/ClickHouse/Docker 而默认忽略；shell 回归在 bash 5 下执行（macOS 自带的 3.2 会让失败的 `[[ ]]` 静默通过，脚本在旧 bash 下拒绝运行）。性能只有一份单机基线（docs/21 §21.7）。**GitHub CI 已在 Linux 上全绿**（2026-10-06，`main` a548858：fmt、clippy、全部测试、PostgreSQL 与 ClickHouse 25.8 集成、网关脚本、IDOR 靶场、真实浏览器闭环、供应链门槛、控制台 e2e）；ClickHouse 集成测试此前从未在真实服务上运行，首次运行即发现并修复了检索读取 `trace_id` 的产品缺陷（docs/20）。**控制面 OIDC 登录已对真实 Keycloak 26.7.4 验证**（2026-10-07，macOS/arm64 本机：`scripts/test_oidc_login.sh` 197 项断言通过；授权码 + PKCE、回调校验与重放/篡改拒绝、会话 Cookie 属性、CSRF、step-up 及其过期、登出、审计事件；首次运行发现并修复了回调 `state`/CSRF 头长度不等时的 panic、`visit_committed_records` 拒绝活动段、重复 `scope=openid` 三个问题；CI 新增的 `oidc` 作业尚未运行过）；该回归的边界是：没有浏览器（不验证 `__Host-`/`Secure` 的浏览器强制与 HTTPS）、没有控制台同源代理、开发 realm 的 `acr` 是写死的声明而不是真实多因素认证，详见 docs/20 §20.20。**尚未验证**：容器镜像在真实编排环境中的运行（镜像本身由 CI 构建，见 docs/19）、企业 IdP 与真实多因素认证、浏览器经同源代理的完整登录往返、真实负载均衡、真实应用试点与性能（本机没有 Docker，文档里的延迟预算仍是待测目标）；控制台 e2e 在 2 核 CI 运行器上偶发需要重试（最多 2 次）。验收用例目录见 [验证方法](#验证方法)。
 
 **运行与验证**：`scripts/verify_all.sh [rust|gateway|console]` 按 docs/17 §17.10 逐步执行并给出每一步结果（缺少工具时显示 SKIP，不算通过）；构建输出体积很大，请把 `CARGO_TARGET_DIR` 指向大容量卷。发行包由 `scripts/package_release.sh` 生成（见 [19](docs/19-deployment-operations.md) §19.7）。开发栈与控制台用法见 [19](docs/19-deployment-operations.md)、[20](docs/20-testing-and-acceptance.md) 与 [控制台 README](web/console/README.md#回归验证)。
 
