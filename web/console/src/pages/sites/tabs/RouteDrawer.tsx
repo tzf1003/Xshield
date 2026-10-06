@@ -1,9 +1,40 @@
 import { Button, Drawer, Form, Input, Radio } from "antd";
-import { useMemo, useState } from "react";
-import type { SiteRouteConfig } from "../../../api.ts";
+import { useMemo, useRef, useState } from "react";
+import type { RouteAdmission, SiteRouteConfig } from "../../../api.ts";
+import {
+  emptyAuthBinding,
+  emptyAuthRevoke,
+  emptyIssuedBy,
+  emptyPageActions,
+  emptyResourceGrant,
+  emptySensorBuild,
+  type FlowBlock,
+  flowBlockLabel,
+  type FlowStash,
+  withAdmission,
+  withBlock,
+  withResponseMode,
+  withSensorBuilds,
+} from "../../../sites/model/route-flow.ts";
 import { formatBytes } from "../../../sites/model/units.ts";
-import { type Issue, validateRoute, validateRouteSet } from "../../../sites/model/validation.ts";
+import {
+  type Issue,
+  type RouteIssue,
+  validateFlowReferences,
+  validateRoute,
+  validateRouteSet,
+} from "../../../sites/model/validation.ts";
 import { Field, NumInput } from "../fields";
+import { CryptoEditor } from "./route-crypto";
+import {
+  AuthBindingGroup,
+  AuthRevokeGroup,
+  type FlowGroupProps,
+  IssuedByGroup,
+  PageActionsGroup,
+  ResourceGrantGroup,
+  SensorHtmlGroup,
+} from "./route-flow-groups";
 
 export type DrawerMode = "add" | "edit" | "duplicate";
 
@@ -15,6 +46,8 @@ type Props = {
   routes: readonly SiteRouteConfig[];
   index: number | null;
   limits: { max_response_body_bytes: number; max_request_body_bytes: number };
+  /** The draft cannot be changed now (role, or a write still unresolved): view only. */
+  readOnly?: boolean;
   onApply: (route: SiteRouteConfig) => void;
   onClose: () => void;
 };
@@ -26,20 +59,26 @@ const titles: Record<DrawerMode, string> = {
 };
 
 const methods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
-const admissions = [
+const admissions: readonly (readonly [RouteAdmission, string, string])[] = [
   ["ui_action_required", "必须有界面操作来源", "请求须带有页面上的操作来源，适合业务页面。"],
   ["authenticated_root", "已认证根", "访问者须持有有效的已认证根凭证。"],
+  [
+    "auth_entry",
+    "认证入口",
+    "登录、代码兑换或认证回调：成功验证之前访问者仍是匿名的；开启下方“身份建立”后，成功的登录响应在 edge 建立身份。",
+  ],
   ["public", "公开", "任何人都可以访问，不做身份校验。"],
-] as const;
+];
 
-const seconds = (value: unknown) => {
-  const n = typeof value === "number" ? value : Number.NaN;
-  return Number.isFinite(n) && n >= 0 && n < 8.64e12 / 1000
-    ? `${new Date(n * 1000).toISOString().slice(0, 19).replace("T", " ")} UTC`
-    : "—";
+/** Defaults a switched-on block starts from (the values typed before switching it off win). */
+const fresh: { [K in FlowBlock]: () => NonNullable<SiteRouteConfig[K]> } = {
+  auth_binding: emptyAuthBinding,
+  auth_revoke: emptyAuthRevoke,
+  sensor_html: emptySensorBuild,
+  page_actions: emptyPageActions,
+  issued_by: () => emptyIssuedBy(),
+  resource_grant: () => emptyResourceGrant(),
 };
-const num = (value: unknown): number => (typeof value === "number" ? value : Number.NaN);
-const str = (value: unknown): string => (typeof value === "string" ? value : "");
 
 /** Section heading inside the drawer. */
 function Group({
@@ -60,225 +99,60 @@ function Group({
   );
 }
 
-type Crypto = Record<string, unknown> | null;
+const key = (issue: RouteIssue) => `${issue.field}\n${issue.message}`;
 
-/** Request/response encryption: a mode, then only the fields that mode has. */
-function CryptoEditor({
-  kind,
-  value,
-  maxResponseBytes,
-  maxRequestBytes,
-  issue,
-  onChange,
-}: {
-  kind: "request" | "response";
-  value: Crypto;
-  maxResponseBytes: number;
-  maxRequestBytes: number;
-  issue: Issue | undefined;
-  onChange: (next: Crypto) => void;
-}) {
-  const now = Math.floor(Date.now() / 1000);
-  const mode = value === null ? "NONE" : str(value.mode) || "DIRECT_ENCRYPT";
-  const patch = (change: Record<string, unknown>) => onChange({ ...(value ?? {}), ...change });
-  const base = kind === "request" ? "req" : "res";
-  function choose(next: string) {
-    if (next === "NONE") onChange(null);
-    else if (next === "OBSERVE") onChange({ mode: "OBSERVE", adapter_revision: "" });
-    else if (next === "DIRECT_DECRYPT") {
-      onChange({
-        mode: "DIRECT_DECRYPT",
-        adapter_revision: "",
-        key_id: "",
-        key_not_before: now,
-        key_expires_at: now + 365 * 86_400,
-        max_envelope_bytes: Math.min(65_536, maxRequestBytes),
-        max_plaintext_bytes: Math.min(32_768, Math.floor(maxRequestBytes / 2)),
-        max_message_age_seconds: 300,
-        max_future_skew_seconds: 30,
-        max_active_messages: 1000,
-      });
-    } else {
-      onChange({
-        mode: "DIRECT_ENCRYPT",
-        adapter_revision: "",
-        key_id: "",
-        key_not_before: now,
-        key_expires_at: now + 365 * 86_400,
-        message_ttl_seconds: 300,
-        max_envelope_bytes: maxResponseBytes * 2 + 1024,
-      });
-    }
-  }
-  const options =
-    kind === "request"
-      ? ([
-          ["NONE", "无"],
-          ["OBSERVE", "仅观察信封"],
-          ["DIRECT_DECRYPT", "直接解密"],
-        ] as const)
-      : ([
-          ["NONE", "无"],
-          ["DIRECT_ENCRYPT", "直接加密"],
-        ] as const);
-  return (
-    <>
-      <Field
-        id={`${base}-crypto-mode`}
-        group
-        label={kind === "request" ? "请求加密" : "响应加密"}
-        issue={issue}
-      >
-        <Radio.Group
-          aria-label={kind === "request" ? "请求加密" : "响应加密"}
-          value={mode}
-          onChange={(event) => choose(event.target.value)}
-        >
-          {options.map(([option, label]) => (
-            <Radio.Button key={option} value={option}>
-              {label}
-            </Radio.Button>
-          ))}
-        </Radio.Group>
-      </Field>
-      {value !== null && (
-        <div className="xs-crypto-fields">
-          <Field
-            id={`${base}-crypto-adapter`}
-            label="适配器版本"
-            hint="字母、数字和 _ . -，例如 envelope-v1。"
-          >
-            <Input
-              value={str(value.adapter_revision)}
-              spellCheck={false}
-              onChange={(event) => patch({ adapter_revision: event.target.value })}
-            />
-          </Field>
-          {mode !== "OBSERVE" && (
-            <>
-              <Field
-                id={`${base}-crypto-key`}
-                label="Key ID"
-                hint="部署侧管理的密钥标识；每站点最多一把请求解密密钥和一把响应加密密钥，且不得共用。"
-              >
-                <Input
-                  value={str(value.key_id)}
-                  spellCheck={false}
-                  onChange={(event) => patch({ key_id: event.target.value })}
-                />
-              </Field>
-              <Field
-                id={`${base}-crypto-from`}
-                label="密钥生效时间"
-                hint={`Unix 秒。= ${seconds(value.key_not_before)}`}
-              >
-                <NumInput
-                  value={num(value.key_not_before)}
-                  min={0}
-                  unit="秒"
-                  onChange={(next) => patch({ key_not_before: next })}
-                />
-              </Field>
-              <Field
-                id={`${base}-crypto-until`}
-                label="密钥失效时间"
-                hint={`Unix 秒，须晚于生效时间。= ${seconds(value.key_expires_at)}`}
-              >
-                <NumInput
-                  value={num(value.key_expires_at)}
-                  min={0}
-                  unit="秒"
-                  onChange={(next) => patch({ key_expires_at: next })}
-                />
-              </Field>
-              <Field
-                id={`${base}-crypto-envelope`}
-                label="信封上限"
-                hint={
-                  kind === "request"
-                    ? `最大 64 KiB 且不超过请求体上限。当前 = ${formatBytes(num(value.max_envelope_bytes))}。`
-                    : `不小于两倍响应上限加 1024 字节（${formatBytes(maxResponseBytes * 2 + 1024)}）。当前 = ${formatBytes(num(value.max_envelope_bytes))}。`
-                }
-              >
-                <NumInput
-                  value={num(value.max_envelope_bytes)}
-                  min={1}
-                  unit="字节"
-                  onChange={(next) => patch({ max_envelope_bytes: next })}
-                />
-              </Field>
-            </>
-          )}
-          {mode === "DIRECT_DECRYPT" && (
-            <>
-              <Field
-                id="req-crypto-plain"
-                label="明文上限"
-                hint="不超过信封的一半，也不超过请求体上限。"
-              >
-                <NumInput
-                  value={num(value.max_plaintext_bytes)}
-                  min={1}
-                  unit="字节"
-                  onChange={(next) => patch({ max_plaintext_bytes: next })}
-                />
-              </Field>
-              <Field id="req-crypto-age" label="消息有效期" hint="1–3600 秒。">
-                <NumInput
-                  value={num(value.max_message_age_seconds)}
-                  min={1}
-                  max={3600}
-                  unit="秒"
-                  onChange={(next) => patch({ max_message_age_seconds: next })}
-                />
-              </Field>
-              <Field
-                id="req-crypto-skew"
-                label="允许的未来偏差"
-                hint="0–300 秒，容忍客户端时钟快于服务端的时间。"
-              >
-                <NumInput
-                  value={num(value.max_future_skew_seconds)}
-                  min={0}
-                  max={300}
-                  unit="秒"
-                  onChange={(next) => patch({ max_future_skew_seconds: next })}
-                />
-              </Field>
-              <Field
-                id="req-crypto-active"
-                label="同时有效的消息数"
-                hint="1–1,000,000，用于重放保护的容量。"
-              >
-                <NumInput
-                  value={num(value.max_active_messages)}
-                  min={1}
-                  max={1_000_000}
-                  onChange={(next) => patch({ max_active_messages: next })}
-                />
-              </Field>
-            </>
-          )}
-          {mode === "DIRECT_ENCRYPT" && (
-            <Field id="res-crypto-ttl" label="消息有效期" hint="1–3600 秒。">
-              <NumInput
-                value={num(value.message_ttl_seconds)}
-                min={1}
-                max={3600}
-                unit="秒"
-                onChange={(next) => patch({ message_ttl_seconds: next })}
-              />
-            </Field>
-          )}
-        </div>
-      )}
-    </>
+/** What validation says about the edited route, and what applying it would do to the others. */
+function useFindings(
+  route: SiteRouteConfig,
+  routes: readonly SiteRouteConfig[],
+  index: number | null,
+  mode: DrawerMode,
+  limits: Props["limits"],
+) {
+  const before = useMemo(
+    () => ({ set: validateRouteSet(routes), flow: validateFlowReferences(routes) }),
+    [routes],
   );
+  return useMemo(() => {
+    const editing = mode === "edit" && index !== null;
+    const candidate = editing ? index : routes.length;
+    const all = editing
+      ? routes.map((item, at) => (at === index ? route : item))
+      : [...routes, route];
+    const set = validateRouteSet(all);
+    const flow = validateFlowReferences(all);
+    const own: RouteIssue[] = [...validateRoute(route, limits), ...(flow.get(candidate) ?? [])];
+    // Conflicts this edit creates on another route block it as much as its own: a duplicate
+    // path is reported on the later of the two routes, which may be the other one.
+    const conflicts = [...(set.get(candidate) ?? [])];
+    const elsewhere: string[] = [];
+    all.forEach((item, at) => {
+      if (at === candidate) return;
+      const name = item.operation_id || `#${at + 1}`;
+      const had = new Set(before.set.get(at) ?? []);
+      for (const message of set.get(at) ?? []) {
+        if (!had.has(message)) conflicts.push(`路由 ${name}：${message}`);
+      }
+      const hadFlow = new Set((before.flow.get(at) ?? []).map(key));
+      for (const issue of flow.get(at) ?? []) {
+        if (!hadFlow.has(key(issue))) elsewhere.push(`路由 ${name}：${issue.message}`);
+      }
+    });
+    return {
+      own,
+      conflicts,
+      elsewhere,
+      crossFields: new Set((flow.get(candidate) ?? []).map(key)),
+    };
+  }, [route, routes, index, mode, limits, before]);
 }
 
 /**
  * The route editor. It edits a copy: nothing reaches the draft until 应用到草稿, and the same
- * rules the server applies (per route and across routes) are shown as you type.
+ * rules the server applies (per route and across routes) are shown as you type, each next to the
+ * control that fixes it. Errors on this route and conflicts with other routes block 应用到草稿;
+ * the browser provenance-flow references between routes do not, because a page and the actions
+ * it issues name each other and are built one route at a time (they still block saving).
  */
 export function RouteDrawer({
   open,
@@ -287,60 +161,106 @@ export function RouteDrawer({
   routes,
   index,
   limits,
+  readOnly = false,
   onApply,
   onClose,
 }: Props) {
   const [route, setRoute] = useState<SiteRouteConfig>(initial);
+  // Blocks the admission or response mode took off the route, restored when it fits again.
+  const parked = useRef<FlowStash>({});
+  // Values of blocks the operator switched off, so switching back on restores what was typed.
+  const typed = useRef<FlowStash>({});
   const patch = (change: Partial<SiteRouteConfig>) =>
     setRoute((current) => ({ ...current, ...change }));
 
-  const { issues, crossIssues } = useMemo(() => {
-    const candidate = mode === "edit" && index !== null ? index : routes.length;
-    const all =
-      mode === "edit" && index !== null
-        ? routes.map((item, at) => (at === index ? route : item))
-        : [...routes, route];
-    const per: Issue[] = validateRoute(route, limits).map((item) => ({
-      path: item.field,
-      group: "routes",
-      severity: item.severity,
-      message: item.message,
-    }));
-    const across: Issue[] = (validateRouteSet(all).get(candidate) ?? []).map((message) => ({
-      path: "set",
-      group: "routes",
-      severity: "error",
-      message,
-    }));
-    return { issues: per, crossIssues: across };
-  }, [route, routes, index, mode, limits]);
-  const issueFor = (field: string) => issues.find((item) => item.path === field);
-  const blocking = issues.filter((item) => item.severity === "error").length + crossIssues.length;
+  const { own, conflicts, elsewhere, crossFields } = useFindings(
+    route,
+    routes,
+    index,
+    mode,
+    limits,
+  );
+  const issueFor = (field: string): Issue | undefined => {
+    const found = own.find((item) => item.field === field);
+    return found && { path: field, group: "routes", ...found };
+  };
+  const blocking =
+    own.filter((item) => item.severity === "error" && !crossFields.has(key(item))).length +
+    conflicts.length;
+  const pending = own.filter((item) => crossFields.has(key(item))).length;
   const ui = route.security_entry === "ui_action_required";
+  const self = mode === "edit" ? index : null;
+  // Read on every render: each admission or mode switch also sets the route, so this is fresh.
+  const parkedLabels = (Object.keys(parked.current) as FlowBlock[]).map(
+    (block) => flowBlockLabel[block],
+  );
+
+  const flow: FlowGroupProps = {
+    route,
+    routes,
+    self,
+    issueFor,
+    disabled: readOnly,
+    onToggle: (block, on) => {
+      if (on) {
+        setRoute(withBlock(route, block, typed.current[block] ?? fresh[block]()));
+        return;
+      }
+      typed.current = { ...typed.current, [block]: route[block] };
+      setRoute(withBlock(route, block, undefined));
+    },
+    onBlock: (block, value) => setRoute((current) => withBlock(current, block, value)),
+    onBuilds: (builds) => setRoute((current) => withSensorBuilds(current, builds)),
+  };
 
   return (
     <Drawer
       open={open}
       title={titles[mode]}
-      size={560}
+      size={600}
+      // Like the other drawers of the console: never wider than a phone screen.
+      styles={{ wrapper: { maxWidth: "100vw" } }}
       destroyOnHidden
       onClose={onClose}
       footer={
         <div className="xs-drawer-footer">
-          <Button onClick={onClose}>取消</Button>
-          <Button type="primary" disabled={blocking > 0} onClick={() => onApply(route)}>
-            应用到草稿
-          </Button>
+          {pending > 0 && !readOnly && (
+            <span className="xs-drawer-pending">
+              还有 {pending} 项跨路由问题，可以先应用，保存前须解决
+            </span>
+          )}
+          <Button onClick={onClose}>{readOnly ? "关闭" : "取消"}</Button>
+          {!readOnly && (
+            <Button type="primary" disabled={blocking > 0} onClick={() => onApply(route)}>
+              应用到草稿
+            </Button>
+          )}
         </div>
       }
     >
-      <Form layout="vertical" className="xs-form">
-        {crossIssues.length > 0 && (
+      <Form layout="vertical" className="xs-form" disabled={readOnly}>
+        {conflicts.length > 0 && (
           <ul className="xs-issue-list" aria-label="路由冲突">
-            {crossIssues.map((item) => (
-              <li key={item.message}>{item.message}</li>
+            {conflicts.map((message) => (
+              <li key={message}>{message}</li>
             ))}
           </ul>
+        )}
+        {elsewhere.length > 0 && (
+          <div className="xs-drawer-elsewhere">
+            <p>应用后其他路由会出现的问题（保存前须解决）：</p>
+            <ul className="xs-issue-list" aria-label="对其他路由的影响">
+              {elsewhere.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {parkedLabels.length > 0 && (
+          <p className="xs-drawer-parked" role="note">
+            已收起不适用于当前准入或响应模式的设置：{parkedLabels.join("、")}
+            。应用到草稿时它们不会保存；切回原来的准入或响应模式即可恢复。
+          </p>
         )}
         <Group title="匹配" note="哪些请求命中这条路由。未声明的 HTTP 操作继续被拒绝。">
           <Field id="route-method" group label="方法" issue={issueFor("method")}>
@@ -375,7 +295,7 @@ export function RouteDrawer({
             label="操作 ID"
             required
             issue={issueFor("operation_id")}
-            hint="路由的稳定标识，审计和调查里按它引用，例如 orders.get；字母、数字和 _ . : -，不能与其他路由重复。"
+            hint="路由的稳定标识，审计和调查里按它引用，例如 orders.get；字母、数字和 _ . -，不能与其他路由重复。其他路由的签发页面与资源资格目标按它引用这条路由。"
           >
             <Input
               value={route.operation_id}
@@ -388,7 +308,7 @@ export function RouteDrawer({
 
         <Group
           title="准入"
-          note="请求要满足什么才能进入。降低准入（例如改为公开）属于安全相关变更，需要审批。"
+          note="请求要满足什么才能进入。降低准入（例如改为公开）属于安全相关变更，需要审批。切换准入时，不适用的流程设置会暂时收起，切回来即恢复。"
         >
           <Field id="route-admission" group label="安全入口" issue={issueFor("security_entry")}>
             <Radio.Group
@@ -396,14 +316,9 @@ export function RouteDrawer({
               className="xs-choice"
               value={route.security_entry}
               onChange={(event) => {
-                const security_entry = event.target.value as SiteRouteConfig["security_entry"];
-                patch({
-                  security_entry,
-                  source_action:
-                    security_entry === "ui_action_required"
-                      ? route.source_action || `${route.operation_id || "route"}.open`
-                      : null,
-                });
+                const next = withAdmission(route, event.target.value, parked.current);
+                parked.current = next.stash;
+                setRoute(next.route);
               }}
             >
               {admissions.map(([value, title, hint]) => (
@@ -412,14 +327,6 @@ export function RouteDrawer({
                   <span className="xs-choice-hint">{hint}</span>
                 </Radio>
               ))}
-              {route.security_entry === "auth_entry" && (
-                <Radio value="auth_entry">
-                  <span className="xs-choice-title">认证入口</span>
-                  <span className="xs-choice-hint">
-                    批准的登录入口；其身份建立设置目前只能通过 API 编辑。
-                  </span>
-                </Radio>
-              )}
             </Radio.Group>
           </Field>
           <Field
@@ -438,6 +345,8 @@ export function RouteDrawer({
             />
           </Field>
         </Group>
+
+        <AuthBindingGroup {...flow} />
 
         <Group
           title="资源"
@@ -497,18 +406,25 @@ export function RouteDrawer({
           </Field>
         </Group>
 
-        <Group title="响应" note="edge 如何处理源站的响应。">
+        <IssuedByGroup {...flow} />
+
+        <Group
+          title="响应"
+          note="edge 如何处理源站的响应。SENSOR_HTML 只放行预先批准、按摘要固定的静态页面，并注入浏览器探针。"
+        >
           <Field id="route-response-mode" group label="响应模式" issue={issueFor("response_mode")}>
             <Radio.Group
               aria-label="响应模式"
               value={route.response_mode}
-              onChange={(event) => patch({ response_mode: event.target.value })}
+              onChange={(event) => {
+                const next = withResponseMode(route, event.target.value, parked.current);
+                parked.current = next.stash;
+                setRoute(next.route);
+              }}
             >
               <Radio.Button value="">透传</Radio.Button>
               <Radio.Button value="BUFFERED_JSON">BUFFERED_JSON</Radio.Button>
-              {route.response_mode === "SENSOR_HTML" && (
-                <Radio.Button value="SENSOR_HTML">SENSOR_HTML</Radio.Button>
-              )}
+              <Radio.Button value="SENSOR_HTML">SENSOR_HTML</Radio.Button>
             </Radio.Group>
           </Field>
           <Field
@@ -526,6 +442,11 @@ export function RouteDrawer({
             />
           </Field>
         </Group>
+
+        <SensorHtmlGroup {...flow} />
+        <PageActionsGroup {...flow} />
+        <ResourceGrantGroup {...flow} />
+        <AuthRevokeGroup {...flow} />
 
         <Group
           title="加密"

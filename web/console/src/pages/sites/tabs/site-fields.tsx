@@ -278,16 +278,20 @@ export function ProbeFields({ ws }: Props) {
   if (!draft) return null;
   return (
     <>
-      <Form.Item
+      <Field
+        id="sensor-enabled"
+        group
         label="启用浏览器探针运行时"
-        extra="在页面中注入浏览器探针运行时。需要公网入口使用 https；本地靶场只允许 localhost 与 127.0.0.1。"
+        issue={ws.issueFor("sensor_enabled")}
+        hint="在页面中注入浏览器探针运行时；SENSOR_HTML 页面路由（浏览器来源闭环）需要它。需要公网入口使用 https；本地靶场只允许 localhost 与 127.0.0.1。"
       >
         <Toggle
           label="启用浏览器探针运行时"
           checked={draft.sensor_enabled}
+          describedBy="sensor-enabled-msg"
           onChange={(checked) => ws.set("sensor_enabled", checked)}
         />
-      </Form.Item>
+      </Field>
       <Field
         id="policy-revision"
         label="策略版本"

@@ -399,8 +399,20 @@ test("the route drawer shows the server's route rules as you type", async ({ pag
   await page.getByRole("button", { name: "新增路由" }).click();
   const drawer = page.getByRole("dialog", { name: "新增路由" });
   const apply = drawer.getByRole("button", { name: "应用到草稿" });
+  // Exact names: the flow groups (“响应资源资格”, “由页面签发”) contain these words too.
   for (const group of ["匹配", "准入", "资源", "响应", "加密"]) {
-    await expect(drawer.getByRole("region", { name: group })).toBeVisible();
+    await expect(drawer.getByRole("region", { name: group, exact: true })).toBeVisible();
+  }
+  // A new route is a UI action: the flow groups it can take are offered, switched off.
+  for (const [group, toggle] of [
+    ["由页面签发", "由页面签发"],
+    ["响应资源资格", "签发资源资格"],
+  ] as const) {
+    await expect(
+      drawer
+        .getByRole("region", { name: group, exact: true })
+        .getByRole("switch", { name: toggle }),
+    ).not.toBeChecked();
   }
   await expect(apply).toBeEnabled();
 

@@ -77,6 +77,9 @@ type ToggleProps = {
   label: string;
   onText?: string;
   offText?: string;
+  /** Id of the text that explains the switch or reports a problem with it. */
+  describedBy?: string;
+  disabled?: boolean;
 };
 
 /** A switch whose state is also written next to it, so colour is never the only signal. */
@@ -86,12 +89,35 @@ export function Toggle({
   label,
   onText = "启用",
   offText = "关闭",
+  describedBy,
+  disabled,
 }: ToggleProps) {
   return (
     <span className="xs-toggle">
-      <Switch checked={checked} aria-label={label} onChange={onChange} />
+      <Switch
+        checked={checked}
+        aria-label={label}
+        aria-describedby={describedBy}
+        disabled={disabled}
+        onChange={onChange}
+      />
       <span className="xs-toggle-text">{checked ? onText : offText}</span>
     </span>
+  );
+}
+
+/** A finding shown under a group or a switch: an icon and the message, never colour alone. */
+export function IssueLine({ id, issue }: { id?: string; issue: Issue | undefined }) {
+  if (!issue) return null;
+  return (
+    <p id={id} className={`xs-field-issue xs-field-issue--${issue.severity} xs-issue-line`}>
+      {issue.severity === "error" ? (
+        <CloseCircleFilled aria-hidden="true" />
+      ) : (
+        <ExclamationCircleFilled aria-hidden="true" />
+      )}{" "}
+      {issue.message}
+    </p>
   );
 }
 

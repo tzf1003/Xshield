@@ -134,27 +134,27 @@ export const reasonDictionary = {
   CONTROL_SITE_AUTH_FLOW_INVALID: entry(
     "danger",
     "认证入口或身份建立/撤销规则不合法：auth_binding 只能用于认证入口，auth_revoke 只能用于已认证根，成功状态、JSON 指针或期限越界。",
-    "核对认证入口路由的 auth_binding / auth_revoke 后通过 API 重新提交。",
+    "在“路由与操作”打开认证入口或登出路由，按“身份建立”“身份撤销”中的提示修正后重新保存。",
   ),
   CONTROL_SITE_SENSOR_HTML_INVALID: entry(
     "danger",
     "SENSOR_HTML 页面不合法：需要启用浏览器探针、GET 方法和完整的构建适配（64 位小写摘要、小于响应上限的注入偏移、不重复的构建），且不能同时加密或签发身份与资格。",
-    "核对页面路由的 sensor_html 适配与站点探针开关后重新提交。",
+    "在“路由与操作”打开页面路由，用“从页面源码计算”重新填写摘要与偏移，并在“安全入口”启用浏览器探针后重新保存。",
   ),
   CONTROL_SITE_PAGE_ACTIONS_INVALID: entry(
     "danger",
     "页面签发不合法：page_actions 只能用于已认证的 SENSOR_HTML 页面根，每个页面签发 1–16 个动作，issued_by 必须指向这样的页面，且只能用于非资源的界面操作路由。",
-    "核对 page_actions 与 issued_by 的对应关系后重新提交。",
+    "在“路由与操作”核对页面路由的“页面签发动作”和各动作路由的“由页面签发”后重新保存。",
   ),
   CONTROL_SITE_RESOURCE_GRANT_INVALID: entry(
     "danger",
     "响应资源资格不合法：目标必须是已存在、绑定资源的“必须有界面操作来源”路由，指针、数量、期限需在边界内。",
-    "核对 resource_grant 的目标路由与参数后重新提交。",
+    "在“路由与操作”打开列表路由，核对“响应资源资格”的目标详情路由与参数后重新保存。",
   ),
   CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT: entry(
     "danger",
     "同一操作来源与映射修订被两条路由赋予了不同含义，edge 无法为它建立唯一的动作描述。",
-    "为其中一条路由换用不同的操作来源或映射修订后重新提交。",
+    "为其中一条路由换用不同的操作来源或映射修订后重新保存。",
   ),
   CONTROL_SITE_FEATURE_UNSUPPORTED: entry(
     "danger",

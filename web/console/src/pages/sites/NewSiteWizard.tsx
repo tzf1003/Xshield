@@ -6,11 +6,10 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import { useRouter } from "@tanstack/react-router";
-import { Alert, Button, Card, Collapse, Descriptions, Form, Popconfirm, Steps } from "antd";
+import { Alert, Button, Card, Collapse, Descriptions, Form, Steps } from "antd";
 import { type WizardStep, wizardSteps } from "../../admin-routes.ts";
 import { PageActions } from "../../shell/page-actions";
 import { securityEntryLabel, statusLabel } from "../../sites/model/config.ts";
-import { applyRouteTemplate, spaTemplate } from "../../sites/model/route-templates.ts";
 import type { Issue } from "../../sites/model/validation.ts";
 import { DiffTable } from "./DiffView";
 import { busy } from "./fields";
@@ -26,6 +25,7 @@ import {
   UpstreamFields,
 } from "./tabs/site-fields";
 import { RoutesTab } from "./tabs/RoutesTab";
+import { WizardTemplatePicker } from "./tabs/RouteTemplatePicker";
 import { NoticeBanner, PendingBanner } from "./workspace/Banners";
 import { useSiteWorkspace, type WorkspaceApi } from "./workspace/use-workspace.ts";
 import "../../ui/ui.css";
@@ -37,7 +37,8 @@ const owns: Record<WizardStep, (issue: Issue) => boolean> = {
   basics: (issue) => ["site_id", "display_name", "public_origin"].includes(issue.path),
   upstream: (issue) =>
     ["upstream_address", "upstream_server_name", "listen_port"].includes(issue.path),
-  entry: (issue) => ["entry_path", "policy_revision"].includes(issue.path),
+  // The probe switch lives in this step; SENSOR_HTML page routes need it on.
+  entry: (issue) => ["entry_path", "policy_revision", "sensor_enabled"].includes(issue.path),
   routes: (issue) => issue.path.startsWith("routes"),
   review: () => true,
 };
@@ -248,32 +249,16 @@ export function NewSiteWizard({ step }: { step: WizardStep }) {
         </Form>
       );
     } else if (step === "routes") {
-      const customized = draft.policy.routes.length > 0;
-      const apply = () => ws.update((current) => applyRouteTemplate(current, spaTemplate));
       body = (
         <div className="xs-wizard-routes">
           <Card title="快速开始（可选）" className="xs-card">
-            <p>{spaTemplate.description}</p>
-            {customized ? (
-              <Popconfirm
-                title="套用示例会替换当前的路由列表。"
-                okText="替换"
-                cancelText="取消"
-                onConfirm={apply}
-              >
-                <Button disabled={ws.locked}>套用示例：{spaTemplate.title}</Button>
-              </Popconfirm>
-            ) : (
-              <Button disabled={ws.locked} onClick={apply}>
-                套用示例：{spaTemplate.title}
-              </Button>
-            )}
+            <WizardTemplatePicker ws={ws} />
             <p className="muted xs-wizard-note">
               不套用也可以：没有任何路由时，edge 使用入口路径与安全入口生成的默认路由
               protected.entry，之后随时可以在站点的“路由与操作”中补充。
             </p>
           </Card>
-          <RoutesTab ws={ws} />
+          <RoutesTab ws={ws} templates={false} />
         </div>
       );
     } else {

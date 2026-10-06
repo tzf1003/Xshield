@@ -19,9 +19,11 @@ import {
   newRoute,
   type SiteConfigDraft,
 } from "../../../sites/model/config.ts";
+import { flowParts } from "../../../sites/model/diff.ts";
 import { formatBytes } from "../../../sites/model/units.ts";
 import type { WorkspaceApi } from "../workspace/use-workspace.ts";
 import { type DrawerMode, RouteDrawer } from "./RouteDrawer";
+import { RoutesTemplateButton } from "./RouteTemplatePicker";
 
 type Row = { route: SiteRouteConfig; index: number };
 
@@ -71,9 +73,10 @@ function withRoutes(draft: SiteConfigDraft, routes: SiteRouteConfig[]): SiteConf
 
 /**
  * 路由与操作: every operation the edge allows, as a searchable table (a site may have up to 256
- * routes). Rows are edited in a drawer; nothing reaches the draft until 应用到草稿.
+ * routes). Rows are edited in a drawer; nothing reaches the draft until 应用到草稿. `templates`
+ * offers 套用示例 here; the new-site wizard turns it off because its own card offers them.
  */
-export function RoutesTab({ ws }: { ws: WorkspaceApi }) {
+export function RoutesTab({ ws, templates = true }: { ws: WorkspaceApi; templates?: boolean }) {
   const draft = ws.draft;
   const [search, setSearch] = useState("");
   const [method, setMethod] = useState("all");
@@ -227,12 +230,18 @@ export function RoutesTab({ ws }: { ws: WorkspaceApi }) {
       responsive: ["xl"],
       width: 170,
       render: (_, { route }) => (
-        <span>
+        <span className="xs-wrap">
           {route.response_mode === "" ? "透传" : route.response_mode}
           <small className="muted"> · ≤ {formatBytes(route.max_response_bytes)}</small>
           {(route.request_crypto || route.response_crypto) && (
             <small className="muted"> · 加密</small>
           )}
+          {flowParts(route, false).map((part) => (
+            <small key={part} className="muted">
+              {" "}
+              · {part}
+            </small>
+          ))}
         </span>
       ),
     },
@@ -311,6 +320,7 @@ export function RoutesTab({ ws }: { ws: WorkspaceApi }) {
             { value: "all", label: "全部准入" },
             { value: "ui_action_required", label: "界面来源" },
             { value: "authenticated_root", label: "已认证根" },
+            { value: "auth_entry", label: "认证入口" },
             { value: "public", label: "公开" },
           ]}
         />
@@ -324,6 +334,7 @@ export function RoutesTab({ ws }: { ws: WorkspaceApi }) {
             新增路由
           </Button>
         </Tooltip>
+        {templates && <RoutesTemplateButton ws={ws} disabled={!editable} />}
       </div>
       <p className="muted xs-routes-note">
         共 {routes.length} 条路由（最多 {MAX_ROUTES}）
@@ -355,6 +366,7 @@ export function RoutesTab({ ws }: { ws: WorkspaceApi }) {
           routes={routes}
           index={drawer.index}
           limits={limits}
+          readOnly={!editable}
           onApply={apply}
           onClose={() => setDrawer(null)}
         />
