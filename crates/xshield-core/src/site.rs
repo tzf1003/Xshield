@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub mod config;
+pub mod descriptors;
 pub mod flow;
 mod projection;
 pub mod risk;
@@ -15,6 +16,9 @@ pub mod unsupported;
 pub mod upstream;
 
 pub use config::SiteConfig;
+pub use descriptors::{
+    DescriptorDigest, LabelBinding, LabelReuse, POLICY_REVISION_REUSED, check_label_binding,
+};
 pub use flow::{
     SiteAuthBinding, SiteAuthRevoke, SiteIssuedBy, SitePageActions, SiteResourceGrant,
     SiteSensorHtml, SiteSensorHtmlAdapter,

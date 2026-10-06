@@ -8,8 +8,10 @@
 //! in an apply request, and fed through `GatewaySnapshot::from_apply_request`.
 //! The implication "core accepts => edge accepts" is asserted for every
 //! sample; a new edge rule or a new control field that breaks it fails this
-//! test.
-//!
+//! test. Every sample both accept must also derive the same action-descriptor
+//! digest on both sides (`Tally::digest`): the control plane binds each
+//! `policy_revision` label to that digest before it sends anything, so drift
+//! would refuse labels the edge accepts or let a reused label through.
 
 use xshield_core::{
     GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteConfig, SitePolicyConfig,
@@ -143,6 +145,9 @@ enum Expect {
 struct Tally {
     core_accepted: usize,
     core_rejected: usize,
+    /// Accepted samples with page issuance whose descriptor digest the control
+    /// plane and the edge derived identically.
+    digests: usize,
     failures: Vec<String>,
 }
 
@@ -151,6 +156,7 @@ impl Tally {
         Self {
             core_accepted: 0,
             core_rejected: 0,
+            digests: 0,
             failures: Vec::new(),
         }
     }
@@ -161,8 +167,39 @@ impl Tally {
             (Ok(()), Edge::Rejected(edge)) => self.failures.push(format!(
                 "core accepted but the edge rejected `{label}`: {edge}"
             )),
-            (Ok(()), Edge::Accepted) => self.core_accepted += 1,
+            (Ok(()), Edge::Accepted) => {
+                self.core_accepted += 1;
+                self.digest(label, config);
+            }
             (Err(_), _) => self.core_rejected += 1,
+        }
+    }
+
+    /// For a sample both sides accept, the digest the control plane binds the
+    /// `policy_revision` label to must be the one the edge derives and
+    /// supplies (or both must have none). Drift would refuse labels the edge
+    /// accepts, or let a reused label reach the edge and block the tenant.
+    fn digest(&mut self, label: &str, config: &SiteConfig) {
+        let control = config
+            .edge_descriptor_digest()
+            .map(|digest| digest.map(|digest| digest.to_hex()));
+        let edge = config
+            .gateway_config(TENANT, &site())
+            .ok()
+            .and_then(|value| serde_json::to_vec(&value).ok())
+            .and_then(|bytes| GatewayConfig::from_json(&bytes).ok())
+            .map(|compiled| {
+                compiled
+                    .edge_descriptors()
+                    .map(xshield_gateway::page_actions::EdgeDescriptorSet::content_digest_hex)
+            });
+        match (control, edge) {
+            (Ok(control), Some(edge)) if control == edge => {
+                self.digests += usize::from(control.is_some());
+            }
+            (control, edge) => self.failures.push(format!(
+                "descriptor digest drift for `{label}`: control {control:?}, edge {edge:?}"
+            )),
         }
     }
 
@@ -1140,6 +1177,22 @@ fn the_browser_loop_projects_to_the_loop_scripts_edge_operations() {
         scripted.edge_descriptors().unwrap().content_digest_hex(),
         "the control plane would provision different action descriptors"
     );
+    // The digest the control plane binds the label to before it sends
+    // anything is the one the edge derives from the golden projection (and
+    // from the loop script's configuration, asserted just above).
+    let control = config.edge_descriptor_digest().unwrap().unwrap().to_hex();
+    assert_eq!(
+        control,
+        compile(&golden)
+            .edge_descriptors()
+            .unwrap()
+            .content_digest_hex(),
+        "the control plane would bind the label to a digest the edge does not supply"
+    );
+    assert_eq!(
+        control,
+        projected.edge_descriptors().unwrap().content_digest_hex()
+    );
     let plan = |config: &GatewayConfig| {
         let plan = config.page_action_plan("GET", "/app").unwrap();
         (
@@ -1606,6 +1659,12 @@ fn provenance_flow_rules_match_the_edge() {
         },
         both,
     );
+    // Every accepted sample with page issuance compared its descriptor digest.
+    assert!(
+        tally.digests >= 11,
+        "only {} digests compared",
+        tally.digests
+    );
     tally.finish(10, 30);
 }
 
@@ -1709,6 +1768,11 @@ fn generated_flow_routes_never_pass_core_and_fail_the_edge() {
             }
         }
     }
+    assert!(
+        tally.digests >= 46,
+        "only {} digests compared",
+        tally.digests
+    );
     tally.finish(20, 500);
 }
 

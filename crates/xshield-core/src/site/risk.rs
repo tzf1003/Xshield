@@ -11,7 +11,11 @@
 //! Every difference between baseline and desired counts except two cosmetic
 //! labels. The rule is deliberately a whitelist of what may change freely
 //! rather than a list of what is dangerous: a field added to the configuration
-//! later is risky until someone decides otherwise.
+//! later is risky until someone decides otherwise. Changing the
+//! `policy_revision` label needs no approval, but the label is not free: for a
+//! configuration with page issuance it names one action-descriptor set, and
+//! reusing it for another set is refused outright (see
+//! [`super::descriptors`]), whoever approves.
 //!
 //! Routes of the browser provenance flow (authentication entries, sensor
 //! pages, page-issued actions and response-derived resource grants) decide

@@ -48,7 +48,10 @@ pub struct SiteConfig {
     pub security_entry: String,
     /// Whether the browser sensor is injected.
     pub sensor_enabled: bool,
-    /// Operator-chosen policy label; cosmetic.
+    /// Operator-chosen policy label. Approval treats it as cosmetic, but for
+    /// a configuration with page issuance it names the action-descriptor set
+    /// the edge supplies under it, and one label may only ever name one set
+    /// (see [`super::descriptors`]): changing page actions needs a new label.
     pub policy_revision: String,
     /// `draft`, `active` or `paused`; only `active` sites are served.
     pub status: String,
