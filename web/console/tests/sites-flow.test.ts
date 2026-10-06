@@ -146,22 +146,10 @@ test("the decoder refuses members it does not model instead of dropping them on 
   });
 });
 
-test("the loop topology has no validation error; flow routes are marked API-only", async (t) => {
+test("the loop topology has no validation finding: every flow block is editable in the console", async (t) => {
   const draft = await readDraft(t, loop());
-  const issues = validateDraft(draft);
-  assert.deepEqual(
-    issues.filter((issue) => issue.severity === "error"),
-    [],
-  );
-  assert.deepEqual(
-    issues.map((issue) => issue.path),
-    [
-      "routes[auth.login].flow",
-      "routes[app.page].flow",
-      "routes[orders.list].flow",
-      "routes[auth.logout].flow",
-    ],
-  );
+  // The "only through the API" warning is gone with the editor: nothing is left to warn about.
+  assert.deepEqual(validateDraft(draft), []);
 });
 
 test("the console mirrors the flow rules of xshield_core::site::flow", async (t) => {
@@ -188,14 +176,48 @@ test("the console mirrors the flow rules of xshield_core::site::flow", async (t)
         assert.ok(binding);
         binding.bearer_pointer = binding.principal_pointer;
       },
-      "routes[auth.login].auth_binding",
+      "routes[auth.login].auth_binding.bearer_pointer",
+    ],
+    [
+      "pointer with a bare ~",
+      (d) => {
+        const binding = route(d, "auth.login").auth_binding;
+        assert.ok(binding);
+        binding.principal_pointer = "/identity/~2id";
+      },
+      "routes[auth.login].auth_binding.principal_pointer",
+    ],
+    [
+      "credential outlives the session",
+      (d) => {
+        const binding = route(d, "auth.login").auth_binding;
+        assert.ok(binding);
+        binding.credential_ttl_seconds = 7200;
+      },
+      "routes[auth.login].auth_binding.credential_ttl_seconds",
+    ],
+    [
+      "binding without a body",
+      (d) => {
+        const binding = route(d, "auth.login").auth_binding;
+        assert.ok(binding);
+        binding.success_status = 204;
+      },
+      "routes[auth.login].auth_binding.success_status",
     ],
     [
       "revoke status 205",
       (d) => {
         route(d, "auth.logout").auth_revoke = { success_status: 205 };
       },
-      "routes[auth.logout].auth_revoke",
+      "routes[auth.logout].auth_revoke.success_status",
+    ],
+    [
+      "revoke on an authentication entry",
+      (d) => {
+        route(d, "auth.login").auth_revoke = { success_status: 200 };
+      },
+      "routes[auth.login].auth_revoke",
     ],
     [
       "sensor mode without adapter",
@@ -211,7 +233,67 @@ test("the console mirrors the flow rules of xshield_core::site::flow", async (t)
         assert.ok(sensor);
         sensor.injection_offset = 16_384;
       },
+      "routes[app.page].sensor_html.injection_offset",
+    ],
+    [
+      "offset not computed yet",
+      (d) => {
+        const sensor = route(d, "app.page").sensor_html;
+        assert.ok(sensor);
+        sensor.injection_offset = Number.NaN;
+      },
+      "routes[app.page].sensor_html.injection_offset",
+    ],
+    [
+      "uppercase digest",
+      (d) => {
+        const sensor = route(d, "app.page").sensor_html;
+        assert.ok(sensor);
+        sensor.origin_sha256 = sensor.origin_sha256.toUpperCase();
+      },
+      "routes[app.page].sensor_html.origin_sha256",
+    ],
+    [
+      "a second build repeats the digest",
+      (d) => {
+        const sensor = route(d, "app.page").sensor_html;
+        assert.ok(sensor);
+        sensor.additional_adapters = [
+          { adapter_revision: "app-r2", origin_sha256: sensor.origin_sha256, injection_offset: 10 },
+        ];
+      },
+      "routes[app.page].sensor_html.additional_adapters.0.origin_sha256",
+    ],
+    [
+      "sixteen additional builds",
+      (d) => {
+        const sensor = route(d, "app.page").sensor_html;
+        assert.ok(sensor);
+        sensor.additional_adapters = Array.from({ length: 16 }, (_, index) => ({
+          adapter_revision: `app-x${index}`,
+          origin_sha256: index.toString(16).padStart(64, "0"),
+          injection_offset: 10,
+        }));
+      },
       "routes[app.page].sensor_html",
+    ],
+    [
+      "a page that also qualifies resources",
+      (d) => {
+        const list = route(d, "orders.list").resource_grant;
+        assert.ok(list);
+        route(d, "app.page").resource_grant = structuredClone(list);
+      },
+      "routes[app.page].sensor_html",
+    ],
+    [
+      "no live page allowed",
+      (d) => {
+        const page = route(d, "app.page").page_actions;
+        assert.ok(page);
+        page.max_active_pages = 0;
+      },
+      "routes[app.page].page_actions.max_active_pages",
     ],
     [
       "sensor disabled",
@@ -235,18 +317,32 @@ test("the console mirrors the flow rules of xshield_core::site::flow", async (t)
       "routes[orders.read].issued_by",
     ],
     [
+      "issued action lease of zero",
+      (d) => {
+        route(d, "orders.list").issued_by = { page_operation_id: "app.page", ttl_seconds: 0 };
+      },
+      "routes[orders.list].issued_by.ttl_seconds",
+    ],
+    [
       "unknown page",
       (d) => {
         route(d, "orders.list").issued_by = { page_operation_id: "missing", ttl_seconds: 60 };
       },
-      "routes[orders.list]",
+      "routes[orders.list].issued_by.page_operation_id",
+    ],
+    [
+      "page chosen that issues nothing",
+      (d) => {
+        delete route(d, "app.page").page_actions;
+      },
+      "routes[orders.list].issued_by.page_operation_id",
     ],
     [
       "unused page actions",
       (d) => {
         delete route(d, "orders.list").issued_by;
       },
-      "routes[app.page]",
+      "routes[app.page].page_actions",
     ],
     [
       "grant on a public route",
@@ -266,7 +362,45 @@ test("the console mirrors the flow rules of xshield_core::site::flow", async (t)
         assert.ok(grant);
         grant.target_operation_id = "orders.gone";
       },
-      "routes[orders.list]",
+      "routes[orders.list].resource_grant.target_operation_id",
+    ],
+    [
+      "grant target without a resource",
+      (d) => {
+        const target = route(d, "orders.read");
+        target.resource_type = null;
+        target.view_profile = null;
+        target.resource_path_parameter = null;
+        target.path = "/orders/all";
+      },
+      "routes[orders.list].resource_grant.target_operation_id",
+    ],
+    [
+      "grant with a bare ~ in the item pointer",
+      (d) => {
+        const grant = route(d, "orders.list").resource_grant;
+        assert.ok(grant);
+        grant.items_pointer = "/orders~";
+      },
+      "routes[orders.list].resource_grant.items_pointer",
+    ],
+    [
+      "grant of zero items",
+      (d) => {
+        const grant = route(d, "orders.list").resource_grant;
+        assert.ok(grant);
+        grant.max_items = 0;
+      },
+      "routes[orders.list].resource_grant.max_items",
+    ],
+    [
+      "a logout that also qualifies resources",
+      (d) => {
+        const grant = route(d, "orders.list").resource_grant;
+        assert.ok(grant);
+        route(d, "auth.logout").resource_grant = structuredClone(grant);
+      },
+      "routes[auth.logout].resource_grant",
     ],
     [
       "one action with two meanings",
@@ -278,7 +412,20 @@ test("the console mirrors the flow rules of xshield_core::site::flow", async (t)
           resource_grant: undefined,
         });
       },
-      "routes[orders.list.shadow]",
+      "routes[orders.list.shadow].source_action",
+    ],
+    [
+      "one target action with two meanings",
+      (d) => {
+        // A second grant names the detail action under the page's own mapping revision, where
+        // `app.orders.list` already means the page-issued list; reusing the list's action for
+        // the detail gives one key two meanings.
+        route(d, "orders.read").source_action = "app.orders.list";
+        const grant = route(d, "orders.list").resource_grant;
+        assert.ok(grant);
+        grant.target_mapping_revision = "app-map-r1";
+      },
+      "routes[orders.list].resource_grant.target_mapping_revision",
     ],
     [
       "operation id outside the edge alphabet",

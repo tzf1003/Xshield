@@ -1,6 +1,7 @@
-import { routeFlowKeys, type SiteRouteConfig } from "../../api.ts";
+import type { SiteRouteConfig } from "../../api.ts";
 import { effectivePolicy, MAX_ROUTES, MAX_SECRET_REFS, type SiteConfigDraft } from "./config.ts";
 import type { ChangeGroup } from "./diff.ts";
+import { formatBytes } from "./units.ts";
 import { checkServerName, checkUpstreamAddress } from "./upstream.ts";
 
 /**
@@ -153,31 +154,55 @@ const responseHasSideEffects = (route: SiteRouteConfig) =>
   route.auth_binding !== undefined ||
   route.auth_revoke !== undefined;
 
-/** The per-route browser provenance-flow rules of `xshield_core::site::flow`. */
+/** Field-level messages of the flow rules, shared by the drawer and the save path. */
+const flowText = {
+  status: "成功状态码须为 2xx，且不能是 204（204 没有正文，edge 无从读取）。",
+  revokeStatus: "成功状态码须为 2xx，且不能是 204–206：edge 要看到完整正文才撤销身份。",
+  pointer:
+    "JSON 指针须以 / 开头，不超过 512 字节，不含控制字符；~ 只能写作 ~0（表示 ~）或 ~1（表示 /）。",
+  pointerTaken: "三个 JSON 指针必须互不相同。",
+  ttl: (what: string) => `${what}须为 1–86400 秒（最长一天）。`,
+  scoped: (what: string) => `${what}只能含字母、数字和 _ . -，1–128 个字符。`,
+  pick: (what: string) => `请选择${what}。`,
+} as const;
+
+/**
+ * The per-route browser provenance-flow rules of `xshield_core::site::flow` (cross-route ones
+ * are in `validateFlowReferences`). Placement problems are reported on the block (`auth_binding`),
+ * value problems on the member (`auth_binding.bearer_pointer`), so the drawer can put each message
+ * next to the control that fixes it; the save path reports the same text.
+ */
 function flowProblems(route: SiteRouteConfig): { field: string; text: string }[] {
   const found: { field: string; text: string }[] = [];
   const add = (field: string, text: string) => found.push({ field, text });
+  const ttl = (field: string, value: number, what: string) => {
+    if (!inRange(value, 1, 86_400)) add(field, flowText.ttl(what));
+  };
   const { auth_binding: binding, auth_revoke: revoke, sensor_html: sensor } = route;
   if (binding) {
-    const pointers = [
-      binding.principal_pointer,
-      binding.authorization_context_pointer,
-      binding.bearer_pointer,
-    ];
     if (route.security_entry !== "auth_entry") {
       add("auth_binding", "身份建立（auth_binding）只能用于“认证入口”路由。");
-    } else if (
-      !successStatus(binding.success_status) ||
-      !pointers.every(validPointer) ||
-      new Set(pointers).size !== 3 ||
-      !inRange(binding.credential_ttl_seconds, 1, 86_400) ||
-      !inRange(binding.session_ttl_seconds, 1, 86_400) ||
-      binding.credential_ttl_seconds > binding.session_ttl_seconds
-    ) {
-      add(
-        "auth_binding",
-        "身份建立参数不合法：成功状态为 2xx 且不是 204，三个 JSON 指针以 / 开头且互不相同，凭证与会话期限 1–86400 秒且凭证不长于会话。",
-      );
+    } else {
+      if (!successStatus(binding.success_status)) {
+        add("auth_binding.success_status", flowText.status);
+      }
+      const seen = new Set<string>();
+      for (const key of [
+        "principal_pointer",
+        "authorization_context_pointer",
+        "bearer_pointer",
+      ] as const) {
+        const value = binding[key];
+        if (!validPointer(value)) add(`auth_binding.${key}`, flowText.pointer);
+        else if (seen.has(value)) add(`auth_binding.${key}`, flowText.pointerTaken);
+        seen.add(value);
+      }
+      ttl("auth_binding.session_ttl_seconds", binding.session_ttl_seconds, "会话期限");
+      if (!inRange(binding.credential_ttl_seconds, 1, 86_400)) {
+        add("auth_binding.credential_ttl_seconds", flowText.ttl("凭证期限"));
+      } else if (binding.credential_ttl_seconds > binding.session_ttl_seconds) {
+        add("auth_binding.credential_ttl_seconds", "凭证期限不能长于会话期限。");
+      }
     }
   }
   if (revoke) {
@@ -187,13 +212,13 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
       !inRange(revoke.success_status, 200, 299) ||
       inRange(revoke.success_status, 204, 206)
     ) {
-      add("auth_revoke", "身份撤销的成功状态须为 2xx，且不能是 204–206。");
+      add("auth_revoke.success_status", flowText.revokeStatus);
     }
   }
   if ((route.response_mode === "SENSOR_HTML") !== (sensor !== undefined)) {
     add("response_mode", "SENSOR_HTML 响应模式与页面构建适配（sensor_html）必须同时出现。");
   } else if (sensor) {
-    const builds = [sensor, ...(sensor.additional_adapters ?? [])];
+    const additional = sensor.additional_adapters ?? [];
     if (
       route.method !== "GET" ||
       route.response_crypto !== null ||
@@ -205,45 +230,75 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
         "sensor_html",
         "SENSOR_HTML 页面只能是 GET，且不能同时加密响应、签发资格或建立/撤销身份。",
       );
-    } else if (
-      builds.length > 16 ||
-      builds.some(
-        (build) =>
-          !scoped.test(build.adapter_revision) ||
-          !sha256Hex.test(build.origin_sha256) ||
-          !inRange(build.injection_offset, 0, route.max_response_bytes - 1),
-      ) ||
-      new Set(builds.map((build) => build.adapter_revision)).size !== builds.length ||
-      new Set(builds.map((build) => build.origin_sha256)).size !== builds.length
-    ) {
-      add(
-        "sensor_html",
-        "页面构建不合法：最多 16 个构建，版本只含字母数字和 _ . -，摘要为 64 位小写十六进制，注入偏移小于响应上限，版本与摘要均不重复。",
-      );
     }
+    if (additional.length > 15) {
+      add("sensor_html", "一个页面最多 16 个已批准构建（主构建加 15 个附加构建）。");
+    }
+    const revisions = new Set<string>();
+    const digests = new Set<string>();
+    [sensor, ...additional].forEach((build, index) => {
+      const at = index === 0 ? "sensor_html" : `sensor_html.additional_adapters.${index - 1}`;
+      if (!scoped.test(build.adapter_revision)) {
+        add(`${at}.adapter_revision`, flowText.scoped("构建版本"));
+      } else if (revisions.has(build.adapter_revision)) {
+        add(`${at}.adapter_revision`, "构建版本与另一个构建重复。");
+      }
+      revisions.add(build.adapter_revision);
+      if (build.origin_sha256 === "") {
+        add(
+          `${at}.origin_sha256`,
+          "请填写页面摘要（64 位小写十六进制的 SHA-256），可用“从页面源码计算”得到。",
+        );
+      } else if (!sha256Hex.test(build.origin_sha256)) {
+        add(`${at}.origin_sha256`, "页面摘要须是 64 位小写十六进制（SHA-256）。");
+      } else if (digests.has(build.origin_sha256)) {
+        add(`${at}.origin_sha256`, "页面摘要与另一个构建重复。");
+      }
+      digests.add(build.origin_sha256);
+      if (!Number.isFinite(build.injection_offset)) {
+        add(
+          `${at}.injection_offset`,
+          "请填写注入偏移（</head> 在页面字节中的位置），可用“从页面源码计算”得到。",
+        );
+      } else if (!inRange(build.injection_offset, 0, route.max_response_bytes - 1)) {
+        add(
+          `${at}.injection_offset`,
+          `注入偏移须是小于响应上限（${formatBytes(route.max_response_bytes)}）的非负整数。`,
+        );
+      }
+    });
   }
-  if (route.page_actions) {
+  const page = route.page_actions;
+  if (page) {
     if (
       route.response_mode !== "SENSOR_HTML" ||
       route.method !== "GET" ||
       route.security_entry !== "authenticated_root"
     ) {
-      add("page_actions", "页面签发（page_actions）只能用于“已认证根”的 GET SENSOR_HTML 页面。");
-    } else if (
-      !scoped.test(route.page_actions.mapping_revision) ||
-      !inRange(route.page_actions.max_active_pages, 1, 1_000)
-    ) {
-      add("page_actions", "映射修订只含字母数字和 _ . -，活动页面上限 1–1000。");
+      add(
+        "page_actions",
+        "页面签发动作（page_actions）只能用于“已认证根”的 GET SENSOR_HTML 页面。",
+      );
+    } else {
+      if (!scoped.test(page.mapping_revision)) {
+        add("page_actions.mapping_revision", flowText.scoped("映射修订"));
+      }
+      if (!inRange(page.max_active_pages, 1, 1_000)) {
+        add("page_actions.max_active_pages", "活动页面上限须为 1–1000。");
+      }
     }
   }
-  if (route.issued_by) {
+  const issued = route.issued_by;
+  if (issued) {
     if (route.security_entry !== "ui_action_required" || hasResourceBinding(route)) {
-      add("issued_by", "签发页面（issued_by）只能用于不绑定资源的“必须有界面操作来源”路由。");
-    } else if (
-      !scoped.test(route.issued_by.page_operation_id) ||
-      !inRange(route.issued_by.ttl_seconds, 1, 86_400)
-    ) {
-      add("issued_by", "签发页面须是合法的操作 ID，动作期限 1–86400 秒。");
+      add("issued_by", "由页面签发（issued_by）只能用于不绑定资源的“必须有界面操作来源”路由。");
+    } else {
+      if (issued.page_operation_id === "") {
+        add("issued_by.page_operation_id", flowText.pick("签发这个动作的页面"));
+      } else if (!scoped.test(issued.page_operation_id)) {
+        add("issued_by.page_operation_id", flowText.scoped("签发页面的操作 ID"));
+      }
+      ttl("issued_by.ttl_seconds", issued.ttl_seconds, "动作期限");
     }
   }
   const grant = route.resource_grant;
@@ -253,21 +308,31 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
       route.security_entry !== "ui_action_required"
     ) {
       add("resource_grant", "响应资源资格只能用于“已认证根”或“必须有界面操作来源”的路由。");
-    } else if (
-      !successStatus(grant.success_status) ||
-      !validPointer(grant.items_pointer) ||
-      !validPointer(grant.resource_pointer) ||
-      !scoped.test(grant.action_ref_field) ||
-      !scoped.test(grant.target_operation_id) ||
-      !scoped.test(grant.target_mapping_revision) ||
-      !inRange(grant.ttl_seconds, 1, 86_400) ||
-      !inRange(grant.max_items, 1, 1_000) ||
-      !inRange(grant.max_active_grants, 1, 5_000)
-    ) {
-      add(
-        "resource_grant",
-        "响应资源资格参数不合法：成功状态为 2xx 且不是 204，指针以 / 开头，字段、目标与映射只含字母数字和 _ . -，期限 1–86400 秒，单次最多 1000 项、活动资格最多 5000 个。",
-      );
+    } else {
+      if (!successStatus(grant.success_status)) {
+        add("resource_grant.success_status", flowText.status);
+      }
+      for (const key of ["items_pointer", "resource_pointer"] as const) {
+        if (!validPointer(grant[key])) add(`resource_grant.${key}`, flowText.pointer);
+      }
+      if (!scoped.test(grant.action_ref_field)) {
+        add("resource_grant.action_ref_field", flowText.scoped("动作引用字段"));
+      }
+      if (grant.target_operation_id === "") {
+        add("resource_grant.target_operation_id", flowText.pick("资格指向的详情路由"));
+      } else if (!scoped.test(grant.target_operation_id)) {
+        add("resource_grant.target_operation_id", flowText.scoped("目标操作 ID"));
+      }
+      if (!scoped.test(grant.target_mapping_revision)) {
+        add("resource_grant.target_mapping_revision", flowText.scoped("目标映射修订"));
+      }
+      ttl("resource_grant.ttl_seconds", grant.ttl_seconds, "资格期限");
+      if (!inRange(grant.max_items, 1, 1_000)) {
+        add("resource_grant.max_items", "单次最多签发项数须为 1–1000。");
+      }
+      if (!inRange(grant.max_active_grants, 1, 5_000)) {
+        add("resource_grant.max_active_grants", "活动资格上限须为 1–5000。");
+      }
     }
   }
   if (
@@ -276,12 +341,24 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
       (revoke !== undefined ? 1 : 0) >
     1
   ) {
-    add("resource_grant", "同一路由的响应最多只能有一种身份或资格效果。");
+    add(
+      "resource_grant",
+      "同一路由的响应最多只能有一种身份或资格效果（身份建立、身份撤销或资源资格选其一）。",
+    );
   }
   return found;
 }
 
-type RouteIssue = Readonly<{ field: string; severity: "error" | "warning"; message: string }>;
+/**
+ * A finding on one route. `field` names the control that fixes it: a route field (`path`), a
+ * flow block (`auth_binding`) or one member of it (`auth_binding.bearer_pointer`, and for page
+ * builds `sensor_html.additional_adapters.0.origin_sha256`).
+ */
+export type RouteIssue = Readonly<{
+  field: string;
+  severity: "error" | "warning";
+  message: string;
+}>;
 
 /** Per-route rules of `SitePolicyConfig::validate`; cross-route rules are in `validateRouteSet`. */
 export function validateRoute(
@@ -356,13 +433,6 @@ export function validateRoute(
     }
   }
   for (const problem of flowProblems(route)) add(problem.field, problem.text);
-  if (routeFlowKeys.some((key) => route[key] !== undefined)) {
-    add(
-      "flow",
-      "此路由的认证入口、SENSOR_HTML、页面签发或资源资格设置目前只能通过 API 编辑；控制台保存时原样保留。",
-      "warning",
-    );
-  }
   if (route.max_response_bytes < 1 || route.max_response_bytes > 16 * MIB) {
     add("max_response_bytes", "响应上限必须在 1 字节到 16 MiB 之间。");
   } else if (route.max_response_bytes > limits.max_response_body_bytes) {
@@ -457,7 +527,12 @@ function cryptoProblems(
   return found;
 }
 
-/** Cross-route rules of the edge compiler (`validate_route_set` and the uniqueness checks). */
+/**
+ * Route-set integrity rules of the edge compiler (`validate_route_set` of site.rs and the
+ * uniqueness checks): operation IDs and `method path` pairs are unique and `{parameter}` routes
+ * neither collide nor shadow fixed routes. The browser provenance-flow rules across routes are
+ * `validateFlowReferences`; `validateDraft` applies both.
+ */
 export function validateRouteSet(routes: readonly SiteRouteConfig[]): Map<number, string[]> {
   const found = new Map<number, string[]>();
   const add = (index: number, message: string) =>
@@ -513,36 +588,54 @@ export function validateRouteSet(routes: readonly SiteRouteConfig[]): Map<number
       }
     });
   });
-  flowReferenceProblems(routes, add);
   return found;
 }
 
-/** The cross-route flow rules of `xshield_core::site::flow::validate_route_set`. */
-function flowReferenceProblems(
+/**
+ * The cross-route browser provenance-flow rules of `xshield_core::site::flow::validate_route_set`,
+ * per route index and field. A page and the actions it issues reference each other, so while a
+ * flow is being built route by route these are expected to be open for a moment: the drawer
+ * shows them without blocking 应用到草稿, and `validateDraft` reports them, which blocks saving.
+ */
+export function validateFlowReferences(
   routes: readonly SiteRouteConfig[],
-  add: (index: number, message: string) => void,
-): void {
+): Map<number, RouteIssue[]> {
+  const found = new Map<number, RouteIssue[]>();
+  const add = (index: number, field: string, message: string) =>
+    found.set(index, [...(found.get(index) ?? []), { field, severity: "error", message }]);
+  const name = (index: number) => routes[index]?.operation_id || `#${index + 1}`;
   const byId = new Map(routes.map((route) => [route.operation_id, route]));
   const issued = new Map<string, number>();
   for (const route of routes) if (route.page_actions) issued.set(route.operation_id, 0);
   routes.forEach((route, index) => {
-    if (!route.issued_by) return;
-    const count = issued.get(route.issued_by.page_operation_id);
+    const page = route.issued_by?.page_operation_id;
+    if (page === undefined || page === "") return;
+    const count = issued.get(page);
     if (count === undefined) {
-      add(index, `签发页面“${route.issued_by.page_operation_id}”不是声明了页面签发的页面根。`);
+      add(
+        index,
+        "issued_by.page_operation_id",
+        `签发页面“${page}”不是声明了“页面签发动作”的 SENSOR_HTML 页面根。`,
+      );
     } else {
-      issued.set(route.issued_by.page_operation_id, count + 1);
+      issued.set(page, count + 1);
     }
   });
   routes.forEach((route, index) => {
     const count = route.page_actions ? (issued.get(route.operation_id) ?? 0) : null;
-    if (count !== null && (count < 1 || count > 16)) {
-      add(index, `页面根须签发 1–16 个动作，当前 ${count} 个。`);
+    if (count === 0) {
+      add(
+        index,
+        "page_actions",
+        "页面根须签发 1–16 个动作，当前没有：在列表等“必须有界面操作来源”路由的“由页面签发”中选择这个页面。",
+      );
+    } else if (count !== null && count > 16) {
+      add(index, "page_actions", `页面根最多签发 16 个动作，当前 ${count} 个。`);
     }
   });
   routes.forEach((route, index) => {
     const grant = route.resource_grant;
-    if (!grant) return;
+    if (!grant || grant.target_operation_id === "") return;
     const target = byId.get(grant.target_operation_id);
     if (
       !target ||
@@ -552,6 +645,7 @@ function flowReferenceProblems(
     ) {
       add(
         index,
+        "resource_grant.target_operation_id",
         `资源资格目标“${grant.target_operation_id}”必须是已存在、绑定资源的“必须有界面操作来源”路由。`,
       );
     }
@@ -559,16 +653,26 @@ function flowReferenceProblems(
   const indexes = (pick: (route: SiteRouteConfig) => boolean) =>
     routes.flatMap((route, index) => (pick(route) ? [index] : []));
   for (const index of indexes((route) => route.resource_grant !== undefined).slice(64)) {
-    add(index, "每个站点最多 64 条响应资源资格。");
+    add(index, "resource_grant", "每个站点最多 64 条响应资源资格。");
   }
   for (const index of indexes(
     (route) => route.auth_binding !== undefined || route.auth_revoke !== undefined,
   ).slice(64)) {
-    add(index, "每个站点最多 64 条建立或撤销身份的路由。");
+    add(
+      index,
+      routes[index]?.auth_binding ? "auth_binding" : "auth_revoke",
+      "每个站点最多 64 条建立或撤销身份的路由。",
+    );
   }
   // One (action, mapping revision) has one meaning, whoever provisions the descriptors.
   const meanings = new Map<string, { meaning: string; index: number }>();
-  const derive = (index: number, action: string, mapping: string, meaning: unknown[]) => {
+  const derive = (
+    index: number,
+    field: string,
+    action: string,
+    mapping: string,
+    meaning: unknown[],
+  ) => {
     const key = JSON.stringify([action, mapping]);
     const existing = meanings.get(key);
     if (existing === undefined) {
@@ -576,14 +680,15 @@ function flowReferenceProblems(
     } else if (existing.meaning !== JSON.stringify(meaning)) {
       add(
         index,
-        `操作来源“${action}”在映射修订“${mapping}”下与路由 #${existing.index + 1} 含义不同。`,
+        field,
+        `操作来源“${action}”在映射修订“${mapping}”下与路由 ${name(existing.index)} 含义不同：换用另一个操作来源或映射修订。`,
       );
     }
   };
   routes.forEach((route, index) => {
     const page = route.issued_by ? byId.get(route.issued_by.page_operation_id) : undefined;
     if (route.source_action && page?.page_actions) {
-      derive(index, route.source_action, page.page_actions.mapping_revision, [
+      derive(index, "source_action", route.source_action, page.page_actions.mapping_revision, [
         page.operation_id,
         route.operation_id,
         route.method,
@@ -598,17 +703,24 @@ function flowReferenceProblems(
     const grant = route.resource_grant;
     const target = grant ? byId.get(grant.target_operation_id) : undefined;
     if (grant && target?.source_action && target.view_profile) {
-      derive(index, target.source_action, grant.target_mapping_revision, [
-        target.operation_id,
-        target.operation_id,
-        target.method,
-        target.path,
-        target.resource_type,
-        target.resource_query_parameter ?? target.resource_path_parameter,
-        target.view_profile,
-      ]);
+      derive(
+        index,
+        "resource_grant.target_mapping_revision",
+        target.source_action,
+        grant.target_mapping_revision,
+        [
+          target.operation_id,
+          target.operation_id,
+          target.method,
+          target.path,
+          target.resource_type,
+          target.resource_query_parameter ?? target.resource_path_parameter,
+          target.view_profile,
+        ],
+      );
     }
   });
+  return found;
 }
 
 const hasWhitespaceOrControl = (value: string) => /\s/.test(value) || hasControl(value);
@@ -642,9 +754,13 @@ export function validateDraft(
   const routes = policy.routes;
   if (routes.length > MAX_ROUTES) add("routes", "routes", `路由最多 ${MAX_ROUTES} 条。`);
   const crossRoute = validateRouteSet(routes);
+  const references = validateFlowReferences(routes);
   routes.forEach((route, index) => {
     const label = route.operation_id === "" ? `#${index + 1}` : route.operation_id;
-    for (const issue of validateRoute(route, policy.limits)) {
+    for (const issue of [
+      ...validateRoute(route, policy.limits),
+      ...(references.get(index) ?? []),
+    ]) {
       add(
         `routes[${label}].${issue.field}`,
         "routes",

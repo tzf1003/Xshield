@@ -1,47 +1,8 @@
-import type { SitePolicyConfig, SiteRouteConfig } from "../../api.ts";
+import type { SitePolicyConfig } from "../../api.ts";
 import { type RiskToken, riskText } from "../../ui/reason-codes.ts";
 import { canonicalJson, effectivePolicy, type SiteConfigDraft } from "./config.ts";
 import { diffConfigs, type FieldChange, isServing } from "./diff.ts";
-
-type FlowToken =
-  | "AUTH_ENTRY_CHANGED"
-  | "SENSOR_HTML_CHANGED"
-  | "PAGE_ACTIONS_CHANGED"
-  | "RESOURCE_GRANT_CHANGED";
-
-/**
- * `FLOW_FACETS` of risk.rs: which routes take part in each browser provenance-flow facet. A facet
- * compares its member routes whole, so a page root's path or build is as much part of it as its
- * `page_actions`, and a route can belong to several facets.
- */
-const flowFacets: readonly (readonly [
-  FlowToken,
-  (policy: SitePolicyConfig, route: SiteRouteConfig) => boolean,
-])[] = [
-  [
-    "AUTH_ENTRY_CHANGED",
-    (_, route) =>
-      route.security_entry === "auth_entry" ||
-      route.auth_binding !== undefined ||
-      route.auth_revoke !== undefined,
-  ],
-  [
-    "SENSOR_HTML_CHANGED",
-    (_, route) => route.response_mode === "SENSOR_HTML" || route.sensor_html !== undefined,
-  ],
-  [
-    "PAGE_ACTIONS_CHANGED",
-    (_, route) => route.page_actions !== undefined || route.issued_by !== undefined,
-  ],
-  [
-    "RESOURCE_GRANT_CHANGED",
-    (policy, route) =>
-      route.resource_grant !== undefined ||
-      policy.routes.some(
-        (source) => source.resource_grant?.target_operation_id === route.operation_id,
-      ),
-  ],
-];
+import { flowFacets } from "./flow-facets.ts";
 
 const byOperation = <T extends { operation_id: string }>(items: readonly T[]) =>
   [...items].sort((a, b) =>
@@ -59,6 +20,10 @@ function changedFlowFacets(before: SitePolicyConfig | null, after: SitePolicyCon
 
 /** Reasons only an independent PolicyApprover may clear (`requires_independent_approval`). */
 export const independentApprovalTokens: readonly RiskToken[] = flowFacets.map(([token]) => token);
+
+/** Whether a reason can only be cleared by an independent approver, never by a direct apply. */
+export const needsIndependentApproval = (token: RiskToken) =>
+  independentApprovalTokens.includes(token);
 
 /**
  * Client-side port of `assess_change_risk` (crates/xshield-core/src/site/risk.rs): which of
@@ -146,14 +111,17 @@ export function explainApproval(
 ): ApprovalExplanation {
   const tokens = assessChangeRisk(baseline, desired);
   const changes = baseline ? diffConfigs(baseline, desired) : [];
-  // A flow block's change is attributed to its facet; the server also reports every route
-  // change as ROUTES_CHANGED, so that reason lists all route changes.
+  // A flow facet compares its member routes whole, so every change of a member route (its own
+  // block, a path, an added or removed member) is listed under that facet; the server also
+  // reports every route change as ROUTES_CHANGED, so that reason lists all route changes.
   const reasons = tokens.map((token) => ({
     token,
     ...riskText(token),
     changes: changes.filter(
       (change) =>
-        change.risk === token || (token === "ROUTES_CHANGED" && change.group === "routes"),
+        change.risk === token ||
+        change.facets?.some((facet) => facet === token) === true ||
+        (token === "ROUTES_CHANGED" && change.group === "routes"),
     ),
   }));
   return {

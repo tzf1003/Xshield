@@ -1,4 +1,4 @@
-import type { SiteRouteConfig, SiteSecretReference } from "../../api.ts";
+import type { SitePolicyConfig, SiteRouteConfig, SiteSecretReference } from "../../api.ts";
 import type { RiskToken } from "../../ui/reason-codes.ts";
 import {
   canonicalJson,
@@ -8,6 +8,7 @@ import {
   securityEntryLabel,
   statusLabel,
 } from "./config.ts";
+import { type FlowToken, routeFacets } from "./flow-facets.ts";
 import { formatBytes, formatMillis, formatSeconds } from "./units.ts";
 
 /** The editor tab that owns a field; the change bar groups unsaved edits by it. */
@@ -44,6 +45,12 @@ export type FieldChange = Readonly<{
    * the fields that may change freely: the display name, the policy label and ordering.
    */
   risk: RiskToken | null;
+  /**
+   * For a route change: the browser provenance-flow facets the route takes part in, before or
+   * after the change. A facet compares its member routes whole, so any change of a member (its
+   * path as much as its own block) falls under that facet too. Absent for other fields.
+   */
+  facets?: readonly FlowToken[];
 }>;
 
 type Scalar = string | number | boolean | string[] | null;
@@ -339,6 +346,23 @@ const summarizeGrant = (r: SiteRouteConfig) =>
     ? `→ ${r.resource_grant.target_operation_id}（${r.resource_grant.target_mapping_revision}）· ≤ ${r.resource_grant.max_items} 项 · ${formatSeconds(r.resource_grant.ttl_seconds)}`
     : none;
 
+/**
+ * The flow blocks of a route in a few words each, for an added or removed route and the route
+ * table: a route that establishes identity or issues actions must not read like a plain one.
+ * The table already shows the response mode, so there a page reads as its number of builds.
+ */
+export function flowParts(route: SiteRouteConfig, withMode = true): string[] {
+  const builds = 1 + (route.sensor_html?.additional_adapters?.length ?? 0);
+  return [
+    route.auth_binding && "建立身份",
+    route.auth_revoke && "撤销身份",
+    route.sensor_html && (withMode ? "SENSOR_HTML 页面" : `${builds} 个页面构建`),
+    route.page_actions && "签发页面动作",
+    route.issued_by && `由 ${route.issued_by.page_operation_id || "（未选）"} 签发`,
+    route.resource_grant && `资源资格 → ${route.resource_grant.target_operation_id || "（未选）"}`,
+  ].filter((part): part is string => typeof part === "string");
+}
+
 type RouteSpec = Readonly<{
   id: keyof SiteRouteConfig;
   label: string;
@@ -384,8 +408,13 @@ const routeSpecs: readonly RouteSpec[] = [
     format: summarizeSensor,
     risk: "SENSOR_HTML_CHANGED",
   },
-  { id: "page_actions", label: "页面签发", format: summarizePage, risk: "PAGE_ACTIONS_CHANGED" },
-  { id: "issued_by", label: "签发页面", format: summarizeIssued, risk: "PAGE_ACTIONS_CHANGED" },
+  {
+    id: "page_actions",
+    label: "页面签发动作",
+    format: summarizePage,
+    risk: "PAGE_ACTIONS_CHANGED",
+  },
+  { id: "issued_by", label: "由页面签发", format: summarizeIssued, risk: "PAGE_ACTIONS_CHANGED" },
   {
     id: "resource_grant",
     label: "响应资源资格",
@@ -395,7 +424,22 @@ const routeSpecs: readonly RouteSpec[] = [
 ];
 
 const routeSummary = (route: SiteRouteConfig) =>
-  `${route.method} ${route.path} · ${routeAdmissionLabel[route.security_entry]}`;
+  [
+    `${route.method} ${route.path}`,
+    routeAdmissionLabel[route.security_entry],
+    ...flowParts(route),
+  ].join(" · ");
+
+/** The flow facets a route takes part in, in either configuration (deduplicated, facet order). */
+function facetsOf(
+  pairs: readonly (readonly [SitePolicyConfig, SiteRouteConfig | undefined])[],
+): FlowToken[] {
+  const found = new Set<FlowToken>();
+  for (const [policy, route] of pairs) {
+    if (route) for (const token of routeFacets(policy, route)) found.add(token);
+  }
+  return [...found];
+}
 
 const secretKindLabel: Record<SiteSecretReference["kind"], string> = {
   tls: "TLS",
@@ -447,15 +491,17 @@ export function diffConfigs(before: SiteConfigDraft, after: SiteConfigDraft): Fi
     });
   }
 
-  const oldRoutes = new Map(
-    effectivePolicy(before).routes.map((route) => [route.operation_id, route]),
-  );
-  const newRoutes = new Map(
-    effectivePolicy(after).routes.map((route) => [route.operation_id, route]),
-  );
+  const oldPolicy = effectivePolicy(before);
+  const newPolicy = effectivePolicy(after);
+  const oldRoutes = new Map(oldPolicy.routes.map((route) => [route.operation_id, route]));
+  const newRoutes = new Map(newPolicy.routes.map((route) => [route.operation_id, route]));
   for (const [id, route] of newRoutes) {
     const previous = oldRoutes.get(id);
     const name = id === "" ? "（未命名路由）" : id;
+    const facets = facetsOf([
+      [oldPolicy, previous],
+      [newPolicy, route],
+    ]);
     if (!previous) {
       changes.push({
         id: `routes[${id}]`,
@@ -465,6 +511,7 @@ export function diffConfigs(before: SiteConfigDraft, after: SiteConfigDraft): Fi
         after: routeSummary(route),
         kind: "added",
         risk: "ROUTES_CHANGED",
+        facets,
       });
       continue;
     }
@@ -485,6 +532,7 @@ export function diffConfigs(before: SiteConfigDraft, after: SiteConfigDraft): Fi
         after: now,
         kind: "changed",
         risk: field.risk ?? "ROUTES_CHANGED",
+        facets,
       });
     }
   }
@@ -498,6 +546,7 @@ export function diffConfigs(before: SiteConfigDraft, after: SiteConfigDraft): Fi
         after: "（已移除）",
         kind: "removed",
         risk: "ROUTES_CHANGED",
+        facets: facetsOf([[oldPolicy, route]]),
       });
     }
   }
