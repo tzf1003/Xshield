@@ -232,7 +232,9 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 
 **直接应用保留，但留痕。** 持有明确作用域 `site.config.apply_direct` 的 Agent API Key 仍可对需要审批的 desired revision 调用 `POST /apply`；控制面在同一事务内写入 `approval_kind=direct_apply` 的审批记录（调用主体、修订、配置摘要、apply_id）并清除要求，因此不会留下阻塞其他站点的过期 `requires_approval`。成功与失败的终态审计分别为 `EDGE_DIRECT_APPLY_CONFIRMED` 与 `EDGE_DIRECT_APPLY_NOT_CONFIRMED`。没有该能力的调用者仍得到 `requires_approval=true` 且不发布。
 
-**浏览器来源流程需要独立审批（2026-10-06）。** 路由现在可以携带认证入口（`auth_entry` + `auth_binding`）、登出撤销（`auth_revoke`）、`SENSOR_HTML` 页面构建、`page_actions`、`issued_by` 与 `resource_grant`（契约见 29“站点浏览器来源流程配置契约”）。涉及这些路由的变更（以及带着它们首次上线）在 `ROUTES_CHANGED` 之外还会得到 `AUTH_ENTRY_CHANGED`、`SENSOR_HTML_CHANGED`、`PAGE_ACTIONS_CHANGED`、`RESOURCE_GRANT_CHANGED`；这四个原因决定谁获得身份、哪些界面操作与资源资格存在，只能由独立 `PolicyApprover` 批准。持有 `site.config.apply_direct` 的 Agent 对这样的修订调用 `POST /apply` 时返回 403 `CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED`（DENY 审计，不写审批记录、不发送快照），判断在锁定 apply intent 的事务内基于已存储的原因进行，本版本不认识的原因同样不可豁免；回滚恢复这些路由时同样适用。控制台的审批说明按同一规则复算这四个原因（`web/console/src/sites/model/risk.ts`），差异视图把流程块的变化归入对应原因，同时列在“路由变更”下。控制台目前没有编辑这些块的界面：读取时严格解码每个块，未知成员使读取失败而不是在下次保存时被静默丢弃，编辑其他字段并保存时这些块逐字节保留；校验层为带这些块的路由附加“只能通过 API 编辑”的警告（不阻止保存，目前没有界面位置展示它），路由表格把 `auth_entry` 显示为“认证入口”。编写与展示界面属于后续任务。
+**浏览器来源流程需要独立审批（2026-10-06）。** 路由现在可以携带认证入口（`auth_entry` + `auth_binding`）、登出撤销（`auth_revoke`）、`SENSOR_HTML` 页面构建、`page_actions`、`issued_by` 与 `resource_grant`（契约见 29“站点浏览器来源流程配置契约”）。涉及这些路由的变更（以及带着它们首次上线）在 `ROUTES_CHANGED` 之外还会得到 `AUTH_ENTRY_CHANGED`、`SENSOR_HTML_CHANGED`、`PAGE_ACTIONS_CHANGED`、`RESOURCE_GRANT_CHANGED`；这四个原因决定谁获得身份、哪些界面操作与资源资格存在，只能由独立 `PolicyApprover` 批准。持有 `site.config.apply_direct` 的 Agent 对这样的修订调用 `POST /apply` 时返回 403 `CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED`（DENY 审计，不写审批记录、不发送快照），判断在锁定 apply intent 的事务内基于已存储的原因进行，本版本不认识的原因同样不可豁免；回滚恢复这些路由时同样适用。控制台的审批说明按同一规则复算这四个原因（`web/console/src/sites/model/risk.ts`，环节成员规则在 `flow-facets.ts`），差异视图把一条路由的任何变化列在它参与的每个环节下（例如页面根的新构建同时属于 SENSOR_HTML 与页面签发动作两个环节，资源资格目标的视图变化属于资源资格环节），同时列在“路由变更”下；审批说明与批准确认框写明这些原因只能由独立审批人批准、“直接应用”不能代替，回滚恢复这些路由时同样如此。控制台读取时严格解码每个块，未知成员使读取失败而不是在下次保存时被静默丢弃，未改动的块保存时逐字节保留。
+
+**控制台编写浏览器来源流程（2026-10-06）。** 路由抽屉可以编写整条链路，不需要手写 JSON。准入多了“认证入口”，响应模式多了 SENSOR_HTML；流程设置按准入与响应模式出现：认证入口的“身份建立”（三个 JSON 指针各自说明指向什么）、已认证根 GET SENSOR_HTML 页面的“SENSOR_HTML 页面构建”（主构建加最多 15 个附加构建）与“页面签发动作”、不绑定资源的界面操作路由的“由页面签发”、已认证根或界面操作路由的“响应资源资格”和已认证根的“身份撤销”；已有某个块的路由总会显示该分组和它的问题。签发页面与资源资格目标只能从草稿里的路由中选择（分别是 SENSOR_HTML 页面与绑定资源的界面操作路由），不能自由输入。每个字段在输入时显示与保存、服务端校验相同的规则提示；本路由的错误与它造成的路由冲突阻止“应用到草稿”，跨路由的流程引用（页面与它签发的动作互相引用）允许先应用、保存前必须解决，抽屉同时列出这次修改会让其他路由出现的问题。切换准入或响应模式时，不再适用的块被收起并提示应用时不保存，切回即恢复。SENSOR_HTML 构建的摘要与注入偏移由“从页面源码计算”在浏览器内算出：选择源站返回的原始文件（按原始字节）或粘贴源码（按 UTF-8），WebCrypto SHA-256 与第一个 `</head>` 的字节偏移直接填入，页面内容不上传、不保存；非 UTF-8、缺少小写 `</head>`、超过 16 MiB 或超过路由响应上限都有明确说明。向导的“首批路由”与站点路由表的“套用示例”新增“浏览器来源闭环（登录 → 页面 → 列表 → 详情）”模板，生成与 `scripts/test_browser_loop.sh` 相同的六条路由并启用浏览器探针，页面摘要与偏移留空，算好之前不能保存。页面签发动作或资源资格目标改变时，界面提醒同时提升“策略版本”标签：edge 已能在 apply 与重启时供给页面签发站点的动作描述，但拒绝在已用过的策略版本标签下换用另一套描述（`EDGE_APPLY_DESCRIPTOR_CONFLICT`），控制面尚未在保存时检查这一点。这些界面只经过合成契约的浏览器回归，尚未在真实 OIDC 登录的开发栈上验证。
 
 **draft 不可路由。** 保存 draft 不会发布；对 draft 站点调用 `POST /apply` 返回 409 `CONTROL_SITE_DRAFT_NOT_APPLICABLE` 并写 DENY 审计；快照不包含 draft，也不会把 draft 标成已应用；draft→active 属于需要审批的上线。
 
@@ -264,7 +266,7 @@ AuditAdministrator 还可手动读取 29.26 的 `GET /control/v1/calibration-rep
 | `site.health.read` | `GET /sites/{id}/health` | 该行点名的站点 |
 | `site.config.write` | `PUT /sites/{id}/config`、`PATCH /sites/{id}`、旧 `PUT /site-config`（只更新已存在站点） | 该行点名的站点 |
 | `site.config.validate` | `POST /sites/{id}/validate` | 该行点名的站点 |
-| `site.config.apply_direct` | `POST /sites/{id}/apply`（唯一的 apply 能力，无需独立审批，见下） | 该行点名的站点 |
+| `site.config.apply_direct` | `POST /sites/{id}/apply`（唯一的 apply 能力，无需独立审批，见下；改变浏览器来源流程的修订除外，见上文“浏览器来源流程需要独立审批”） | 该行点名的站点 |
 | `site.rollback` | `POST /sites/{id}/rollback` | 该行点名的站点 |
 | `site.create` | `POST /sites`（只创建不存在的站点） | 租户级，必须使用标记 `site_id = "__tenant__"` |
 
@@ -323,7 +325,7 @@ Key 的使用另有 `console.agent_api_key.use`（PASS 的主体为 `apikey:{api
 | `site.health.read` | 读取健康 | 读取站点健康观察，每次读取写入审计与观察记录 | Observer |
 | `site.config.write` | 修改配置 | 为已存在的站点保存新修订，不能创建站点 | SystemAdmin |
 | `site.config.validate` | 校验配置 | 执行服务端校验，不改变任何东西 | PolicyAuthor |
-| `site.config.apply_direct` | 直接应用 | 不经另一位审批人把待审批修订发布到 edge，以 Key ID 与主体留下审批记录和审计 | ReleaseOperator 与 PolicyApprover |
+| `site.config.apply_direct` | 直接应用 | 不经另一位审批人把待审批修订发布到 edge，以 Key ID 与主体留下审批记录和审计；改变浏览器来源流程的修订除外（403 `CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED`，只能由独立审批人批准） | ReleaseOperator 与 PolicyApprover |
 | `site.rollback` | 回滚 | 以先前生效的修订创建新修订，仍按审批规则评估 | ReleaseOperator |
 | `site.create` | 创建站点 | 只能授予“整个租户”（`__tenant__`），不能读取或覆盖已存在的站点 | SystemAdmin（租户范围） |
 
