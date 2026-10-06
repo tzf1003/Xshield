@@ -1718,7 +1718,23 @@ INSERT INTO dev_expected_objects VALUES
 ('0051','table','site_apply_approvals','site_apply_approvals','r'),
 ('0052','column','site_routes','issued_by','jsonb|false|'),
 ('0052','constraint','site_routes','site_routes_admission_check','CHECK ((admission = ANY (ARRAY[''PUBLIC''::text, ''AUTH_ENTRY''::text, ''AUTHENTICATED_ROOT''::text, ''UI_ACTION_REQUIRED''::text])))|true'),
-('0052','constraint','site_routes','site_routes_issued_by_object','CHECK (((issued_by IS NULL) OR (jsonb_typeof(issued_by) = ''object''::text)))|true');
+('0052','constraint','site_routes','site_routes_issued_by_object','CHECK (((issued_by IS NULL) OR (jsonb_typeof(issued_by) = ''object''::text)))|true'),
+('0053','column','site_descriptor_bindings','bound_by','text|true|'),
+('0053','column','site_descriptor_bindings','bound_revision','bigint|true|'),
+('0053','column','site_descriptor_bindings','created_at','timestamp with time zone|true|clock_timestamp()'),
+('0053','column','site_descriptor_bindings','descriptor_digest','bytea|true|'),
+('0053','column','site_descriptor_bindings','policy_revision','text|true|'),
+('0053','column','site_descriptor_bindings','site_id','text|true|'),
+('0053','column','site_descriptor_bindings','tenant_id','text|true|'),
+('0053','constraint','site_descriptor_bindings','site_descriptor_bindings_bound_by_check','CHECK ((bound_by = ANY (ARRAY[''save''::text, ''approval''::text, ''snapshot''::text])))|true'),
+('0053','constraint','site_descriptor_bindings','site_descriptor_bindings_bound_revision_check','CHECK ((bound_revision >= 1))|true'),
+('0053','constraint','site_descriptor_bindings','site_descriptor_bindings_descriptor_digest_check','CHECK ((octet_length(descriptor_digest) = 32))|true'),
+('0053','constraint','site_descriptor_bindings','site_descriptor_bindings_pkey','PRIMARY KEY (tenant_id, site_id, policy_revision)|true'),
+('0053','constraint','site_descriptor_bindings','site_descriptor_bindings_policy_revision_check','CHECK ((policy_revision ~ ''^[A-Za-z0-9_.-]{1,128}$''::text))|true'),
+('0053','constraint','site_descriptor_bindings','site_descriptor_bindings_site_id_check','CHECK ((site_id ~ ''^[A-Za-z0-9_.-]{1,128}$''::text))|true'),
+('0053','constraint','site_descriptor_bindings','site_descriptor_bindings_tenant_id_check','CHECK ((tenant_id ~ ''^[A-Za-z0-9_.-]{1,128}$''::text))|true'),
+('0053','index','site_descriptor_bindings','site_descriptor_bindings_pkey','CREATE UNIQUE INDEX site_descriptor_bindings_pkey ON xshield.site_descriptor_bindings USING btree (tenant_id, site_id, policy_revision)'),
+('0053','table','site_descriptor_bindings','site_descriptor_bindings','r');
 CREATE TEMP TABLE dev_expected_checksums (phase text PRIMARY KEY, sha256 text);
 INSERT INTO dev_expected_checksums VALUES
 ('0041','e6a424c31dc3e78dfcaa6563dcd83f5098c629462dafa1746ea1f52d167ccc1b'),
@@ -1732,7 +1748,8 @@ INSERT INTO dev_expected_checksums VALUES
 ('0049','38e67513d2b50b156c8cc286f21aabfe033a9a3e027bc168bc54c54f9c382dc2'),
 ('0050','50a62be8bf11fe466aee3902a7e839a052bd319b2d7ccef23a822d32974f9079'),
 ('0051','0cd0768dd32b346769e5dd29c9341f9b4d5b43ea04e6dd28226eeda5a2334d87'),
-('0052','269779cbb6ac62f3c392e3f53abb6b5a5aec9a41f725c35679bc31b458a864aa');
+('0052','269779cbb6ac62f3c392e3f53abb6b5a5aec9a41f725c35679bc31b458a864aa'),
+('0053','d4dd6d18785849f45cabc43994bc97aba66616f005072a53da9a75cb4a9add1c');
 
 -- Whether an object reached the definition a phase recorded for it. A later
 -- migration may redefine an object (0052 widens a CHECK created by 0044), so a
