@@ -10,6 +10,21 @@ set -euo pipefail
 # `! cmd` never trips `set -e` (in any bash), so an "absent" assertion written
 # that way cannot fail the script; `refute` can. It names the line, never the
 # pattern, because the pattern is often a token.
+# A refused buffered reply is never delivered. Pingora fixes the response header before its
+# synchronous body filter runs (gateway main.rs, prepare_response_issuance_headers), so when the
+# origin's header and body reach the edge in separate reads the client sees the committed
+# header and then a cut transfer (curl exit 18) instead of a bare 502. Both are a refusal; what
+# must hold in every timing is that no origin body byte arrives, which callers assert on the
+# body file. Sets refused_status and refused_exit.
+fetch_refused() {
+    local out=$1
+    shift
+    set +e
+    refused_status=$(curl -sS -o "$out" -w '%{http_code}' "$@" 2>/dev/null)
+    refused_exit=$?
+    set -e
+}
+
 refute() {
     if "$@"; then
         echo "assertion failed at line ${BASH_LINENO[0]}: a pattern that must be absent was found" >&2
@@ -447,6 +462,10 @@ class Handler(BaseHTTPRequestHandler):
             if share_mode == "attachment":
                 self.send_header("Content-Disposition", 'attachment; filename="record.json"')
         self.end_headers()
+        if self.path in ('/refresh-switch', '/buffered-invalid', '/buffered-oversize') and (Path(sys.argv[3]) / 'split.mode').exists():
+            # Headers and body in separate segments, with a gap the edge's reader sees.
+            self.wfile.flush()
+            time.sleep(0.3)
         self.wfile.write(body)
 
     def log_message(self, format, *args):
@@ -777,11 +796,13 @@ refreshed_grant_status=$(curl -sS -o "$test_dir/refreshed-grant.body" -w '%{http
 # The origin answers this refresh with a different principal, which a refresh
 # must never do. The edge refuses to deliver that reply: the client gets a bare
 # 502 and none of the origin's body, and (checked below) the generation stays.
-refresh_switch_status=$(curl -sS -o "$test_dir/refresh-switch.body" -w '%{http_code}' -X POST \
+touch "$test_dir/split.mode"
+fetch_refused "$test_dir/refresh-switch.body" -X POST \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \
     -H "Authorization: Bearer $refreshed_bearer" \
-    http://127.0.0.1:6288/refresh-switch)
-[[ "$refresh_switch_status" == "502" ]]
+    http://127.0.0.1:6288/refresh-switch
+rm -f "$test_dir/split.mode"
+[[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
 [[ ! -s "$test_dir/refresh-switch.body" ]]
 refresh_generation=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT credential_generation FROM xshield.auth_bindings
@@ -923,16 +944,18 @@ buffered_status=$(curl -sS -o "$test_dir/buffered-valid.json" -w '%{http_code}' 
 
 # A body that is not the JSON the route promises is never released: the client
 # gets a bare 502 and none of the origin's bytes (same as the oversize case below).
-invalid_buffer_status=$(curl -sS -o "$test_dir/buffered-invalid.body" -w '%{http_code}' \
-    http://127.0.0.1:6288/buffered-invalid)
-[[ "$invalid_buffer_status" == "502" ]]
-[[ ! -s "$test_dir/buffered-invalid.body" ]]
-refute grep -q 'private-invalid-json' "$test_dir/buffered-invalid.body"
-
-oversize_status=$(curl -sS -o "$test_dir/buffered-oversize.body" -w '%{http_code}' \
-    http://127.0.0.1:6288/buffered-oversize)
-[[ "$oversize_status" == "502" ]]
-refute grep -q 'must-not-release' "$test_dir/buffered-oversize.body"
+for split in fused split; do
+    if [[ "$split" == "split" ]]; then touch "$test_dir/split.mode"; else rm -f "$test_dir/split.mode"; fi
+    fetch_refused "$test_dir/buffered-invalid.body" http://127.0.0.1:6288/buffered-invalid
+    [[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
+    [[ ! -s "$test_dir/buffered-invalid.body" ]]
+    refute grep -q 'private-invalid-json' "$test_dir/buffered-invalid.body"
+    fetch_refused "$test_dir/buffered-oversize.body" http://127.0.0.1:6288/buffered-oversize
+    [[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
+    [[ ! -s "$test_dir/buffered-oversize.body" ]]
+    refute grep -q 'must-not-release' "$test_dir/buffered-oversize.body"
+done
+rm -f "$test_dir/split.mode"
 
 valid_status=$(curl -sS -D "$test_dir/valid.headers" -o "$test_dir/valid.body" -w '%{http_code}' \
     -H "Cookie: __Host-xshield_sid=$session_id" \
@@ -1451,8 +1474,8 @@ grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 [[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "2" ]]
 [[ $(grep -c '^GET /share-issue?record_id=record-123$' "$test_dir/origin.log") == "13" ]]
 [[ $(grep -c 'GET /buffered-valid' "$test_dir/origin.log") == "1" ]]
-[[ $(grep -c 'GET /buffered-invalid' "$test_dir/origin.log") == "1" ]]
-[[ $(grep -c 'GET /buffered-oversize' "$test_dir/origin.log") == "1" ]]
+[[ $(grep -c 'GET /buffered-invalid' "$test_dir/origin.log") == "2" ]]
+[[ $(grep -c 'GET /buffered-oversize' "$test_dir/origin.log") == "2" ]]
 refute grep -q '__Host-xshield_sid' "$test_dir/origin.log"
 refute grep -q 'ActionRef=action_' "$test_dir/origin.log"
 refute grep -q 'ServiceCredential=verified-' "$test_dir/origin.log"
