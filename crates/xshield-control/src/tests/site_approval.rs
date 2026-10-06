@@ -442,11 +442,19 @@ impl Ctx {
                 let _ = fs::remove_dir_all(directory.parent().unwrap());
             }
         }
-        sqlx::query("DELETE FROM xshield.protected_site_configs WHERE tenant_id = $1")
-            .bind(tenant.as_str())
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Label bindings and edge rows outlive a site by design, so they are
+        // removed explicitly.
+        for statement in [
+            "DELETE FROM xshield.protected_site_configs WHERE tenant_id = $1",
+            "DELETE FROM xshield.site_descriptor_bindings WHERE tenant_id = $1",
+            "DELETE FROM xshield.policy_revisions WHERE tenant_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(tenant.as_str())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
         events
     }
 }
@@ -1880,5 +1888,257 @@ async fn flow_refusals_have_their_own_reasons_and_large_sites_fit() {
     assert!(events.iter().any(|event| {
         event["payload"]["reason_code"] == "CONTROL_SITE_FEATURE_UNSUPPORTED"
             && event["payload"]["outcome"] == "DENY"
+    }));
+}
+
+/// The loop body for `site` with its page-issued list action moved: the same
+/// routes, another action-descriptor set.
+fn moved_loop_body(site: &str) -> Value {
+    let mut body = loop_body(site);
+    for route in body["policy"]["routes"].as_array_mut().unwrap() {
+        if route["operation_id"] == "orders.list" {
+            route["path"] = json!("/orders-all");
+        }
+    }
+    body
+}
+
+/// The descriptor digest the edge derives for a site body, as it stores it.
+fn descriptor_digest(body: &Value) -> String {
+    let mut config = body.clone();
+    config.as_object_mut().unwrap().remove("site_id");
+    serde_json::from_value::<xshield_core::SiteConfig>(config)
+        .unwrap()
+        .edge_descriptor_digest()
+        .unwrap()
+        .unwrap()
+        .to_hex()
+}
+
+/// The edge's own policy-revision row for one label, as the edge's descriptor
+/// supply leaves it (the mock edge does not write `PostgreSQL`).
+async fn edge_binds(ctx: &Ctx, site: &str, label: &str, digest: &str) {
+    sqlx::query(
+        "INSERT INTO xshield.policy_revisions
+             (tenant_id, site_id, revision, status, content_digest, artifact_ref)
+         VALUES ($1, $2, $3, 'active', $4, 'test.seed')
+         ON CONFLICT (tenant_id, site_id, revision)
+         DO UPDATE SET content_digest = EXCLUDED.content_digest",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .bind(label)
+    .bind(digest)
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+}
+
+/// Forgets the control plane's label bindings of `site`: the state a control
+/// service older than migration 0053 leaves, which neither checked nor bound.
+async fn forget_label_bindings(ctx: &Ctx, site: &str) {
+    sqlx::query(
+        "DELETE FROM xshield.site_descriptor_bindings WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+}
+
+/// Moving a page action while keeping the `policy_revision` label is refused
+/// on PUT with its own reason, before anything is stored or sent; validate
+/// and approve refuse a revision an older control service stored that way.
+/// The same change under a new label goes live, and a site without page
+/// issuance edits freely under its label.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn reusing_a_policy_revision_label_for_other_page_actions_never_reaches_the_edge() {
+    let ctx = Ctx::new().await;
+    let site = "site_label";
+    let (status, created) = ctx.create(&loop_body(site), &ctx.key("create")).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, approved) = ctx.approve(site, &ctx.key("approve")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["apply_state"], "active");
+    let applies = ctx.edge.apply_count();
+
+    let (status, refused) = ctx
+        .put(site, &moved_loop_body(site), &ctx.key("reuse"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_POLICY_REVISION_REUSED");
+    assert_eq!(refused["next_action"], "change_policy_revision");
+    assert_eq!(refused["retryable"], false);
+    assert!(
+        refused["message_safe"]
+            .as_str()
+            .unwrap()
+            .contains("new policy_revision"),
+        "{refused}"
+    );
+    assert_eq!(
+        ctx.status(site).await["desired_revision"],
+        1,
+        "nothing stored"
+    );
+    assert_eq!(ctx.edge.apply_count(), applies, "nothing sent");
+
+    // Under a new label the change is stored, approved and served.
+    let moved = with(moved_loop_body(site), "policy_revision", json!("loop-r2"));
+    let (status, saved) = ctx.put(site, &moved, &ctx.key("relabel")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-relabel")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["apply_state"], "active");
+    assert_eq!(
+        ctx.edge.served_gateway_config(site).unwrap()["policy_revision"],
+        "loop-r2"
+    );
+
+    // An older control service stores the original set under loop-r2, which
+    // the edge binds to the moved set.
+    forget_label_bindings(&ctx, site).await;
+    let stale = with(loop_body(site), "policy_revision", json!("loop-r2"));
+    let (status, saved) = ctx.put(site, &stale, &ctx.key("older-service")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    edge_binds(&ctx, site, "loop-r2", &descriptor_digest(&moved)).await;
+    let (status, validated) = Ctx::call(
+        &ctx.author,
+        "POST",
+        &format!("/control/v1/sites/{site}/validate"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{validated}");
+    assert_eq!(validated["valid"], false);
+    assert_eq!(
+        validated["reason_code"],
+        "CONTROL_SITE_POLICY_REVISION_REUSED"
+    );
+    let applies = ctx.edge.apply_count();
+    let (status, refused) = ctx.approve(site, &ctx.key("approve-stale")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_POLICY_REVISION_REUSED");
+    assert_eq!(ctx.status(site).await["requires_approval"], true);
+    assert_eq!(ctx.edge.apply_count(), applies, "nothing sent");
+    assert_eq!(
+        ctx.edge.served_gateway_config(site).unwrap()["policy_revision"],
+        "loop-r2",
+        "the edge keeps serving the approved set"
+    );
+
+    // A plain site renames itself and validates under its unchanged label.
+    ctx.create_live("site_plain", "8.8.8.8:9000").await;
+    let renamed = with(
+        site_body("site_plain", "8.8.8.8:9000"),
+        "display_name",
+        json!("Plain renamed"),
+    );
+    let (status, saved) = ctx
+        .put("site_plain", &renamed, &ctx.key("plain-rename"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["apply_state"], "active", "{saved}");
+    let (status, validated) = Ctx::call(
+        &ctx.author,
+        "POST",
+        "/control/v1/sites/site_plain/validate",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{validated}");
+    assert_eq!(validated["reason_code"], "CONTROL_SITE_VALIDATED");
+
+    let events = ctx.finish().await;
+    let refusals = events
+        .iter()
+        .filter(|event| {
+            event["payload"]["reason_code"] == "CONTROL_SITE_POLICY_REVISION_REUSED"
+                && event["payload"]["outcome"] == "DENY"
+        })
+        .count();
+    assert_eq!(refusals, 3, "the PUT, the validation and the approval");
+}
+
+/// A desired revision that would carry a reused label is held at its last
+/// approved configuration while a sibling's change applies, its own status
+/// says why, and applying it directly is refused before anything is sent.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn a_reused_label_holds_back_only_its_own_site() {
+    let ctx = Ctx::new().await;
+    let (site, sibling) = ("site_reused", "site_sibling");
+    let (status, created) = ctx.create(&loop_body(site), &ctx.key("create")).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, _) = ctx.approve(site, &ctx.key("approve")).await;
+    assert_eq!(status, StatusCode::OK);
+    ctx.create_live(sibling, "8.8.8.8:9000").await;
+
+    // An older control service stored the moved set under loop-r1 and
+    // approved it without binding anything, while the edge binds loop-r1 to
+    // the original set.
+    forget_label_bindings(&ctx, site).await;
+    let (status, saved) = ctx
+        .put(site, &moved_loop_body(site), &ctx.key("older-service"))
+        .await;
+    assert!(status.is_success(), "{saved}");
+    sqlx::query(
+        "UPDATE xshield.site_apply_intents
+         SET requires_approval = false, reason_code = 'CONTROL_SITE_APPROVED'
+         WHERE tenant_id = $1 AND site_id = $2",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    edge_binds(&ctx, site, "loop-r1", &descriptor_digest(&loop_body(site))).await;
+
+    // The sibling's change applies; the reused site stays on what was
+    // approved and reports why on its own status.
+    let renamed = with(
+        site_body(sibling, "8.8.8.8:9000"),
+        "display_name",
+        json!("Sibling renamed"),
+    );
+    let (status, saved) = ctx.put(sibling, &renamed, &ctx.key("sibling")).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["apply_state"], "active", "{saved}");
+    let served = ctx.edge.served_gateway_config(site).unwrap();
+    let list = served["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["operation_id"] == "orders.list")
+        .unwrap()
+        .clone();
+    assert_eq!(list["path"], "/orders", "held at the approved set");
+    let state = ctx.status(site).await;
+    assert_eq!(state["apply_state"], "failed", "{state}");
+    assert_eq!(state["reason_code"], "CONTROL_SITE_POLICY_REVISION_REUSED");
+    assert_eq!(ctx.status(sibling).await["apply_state"], "active");
+
+    // Applying the site itself is refused before anything is sent.
+    let sent = ctx.edge.apply_count();
+    let (status, outcome) = ctx.apply(site, &ctx.key("apply")).await;
+    assert_eq!(status, StatusCode::OK, "{outcome}");
+    assert_eq!(outcome["apply_state"], "failed");
+    assert_eq!(
+        outcome["reason_code"],
+        "CONTROL_SITE_POLICY_REVISION_REUSED"
+    );
+    assert_eq!(ctx.edge.apply_count(), sent, "nothing sent");
+
+    let events = ctx.finish().await;
+    assert!(events.iter().any(|event| {
+        event["payload"]["reason_code"] == "CONTROL_SITE_POLICY_REVISION_REUSED"
+            && event["payload"]["outcome"] == "ERROR"
     }));
 }

@@ -25,7 +25,7 @@ use xshield_core::{
     admin::ManagementRole,
     domain::SiteId,
     site::{
-        flow,
+        POLICY_REVISION_REUSED, flow,
         upstream::{parse_upstream_socket, refuse_upstream_socket},
     },
 };
@@ -1062,8 +1062,37 @@ pub async fn validate_handler(
         policy: record.policy().clone(),
     };
     // The same stable reason a write of this content would get, so an
-    // operator sees which rule failed instead of a generic refusal.
-    let verdict = validate_request(&payload, &site_id);
+    // operator sees which rule failed instead of a generic refusal. That
+    // includes the label binding: a revision written by an older control
+    // service may reuse a label for another descriptor set, which the
+    // approval and apply paths would refuse.
+    let verdict = match validate_request(&payload, &site_id) {
+        Ok(()) => match control
+            .catalog
+            .check_protected_site_label(&control.config.tenant_id, &site_id, &payload.to_config())
+            .await
+        {
+            Ok(None) => Ok(()),
+            Ok(Some(reuse)) => Err(validation_reason(reuse.field())),
+            Err(_) => {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        VALIDATE_ACCESS,
+                        None,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTROL_SITE_CONFIG_UNAVAILABLE",
+                        "site configuration is temporarily unavailable",
+                        true,
+                        "retry_later",
+                    )
+                    .await
+                    .into_response();
+            }
+        },
+        Err(reason) => Err(reason),
+    };
     let valid = verdict.is_ok();
     let reason_code = verdict.err().unwrap_or("CONTROL_SITE_VALIDATED");
     if control
@@ -1317,6 +1346,14 @@ pub async fn approve_handler(
             "CONTROL_SITE_APPROVAL_SELF_REJECTED",
             "the configuration author cannot approve the same revision",
             "independent_approver",
+        )),
+        // Written by an older control service, or its label was bound since:
+        // approving it would only move the refusal to the edge.
+        ProtectedSiteApprovalOutcome::PolicyRevisionReused(reuse) => Some((
+            StatusCode::CONFLICT,
+            validation_reason(reuse.field()),
+            POLICY_REVISION_REUSED_MESSAGE,
+            POLICY_REVISION_REUSED_NEXT_ACTION,
         )),
     };
     if let Some((status, reason, message, next_action)) = refusal {
@@ -1880,6 +1917,13 @@ async fn site_apply_state_handler(
                     false,
                     "request_approval",
                 )),
+                Ok(ProtectedSiteDirectApplyOutcome::PolicyRevisionReused(reuse)) => Some((
+                    StatusCode::CONFLICT,
+                    validation_reason(reuse.field()),
+                    POLICY_REVISION_REUSED_MESSAGE,
+                    false,
+                    POLICY_REVISION_REUSED_NEXT_ACTION,
+                )),
                 Err(_) => Some((
                     StatusCode::SERVICE_UNAVAILABLE,
                     "CONTROL_SITE_APPLY_STATE_UNAVAILABLE",
@@ -1970,7 +2014,9 @@ async fn site_apply_state_handler(
         } else if apply.requires_approval {
             ("DENY", "CONTROL_SITE_APPROVAL_REQUIRED")
         } else if let Some(
-            reason @ ("CONTROL_SITE_POLICY_INVALID" | "CONTROL_SITE_PORT_UNAVAILABLE"),
+            reason @ ("CONTROL_SITE_POLICY_INVALID"
+            | "CONTROL_SITE_PORT_UNAVAILABLE"
+            | "CONTROL_SITE_POLICY_REVISION_REUSED"),
         ) = apply_failure
         {
             // The configuration itself is why nothing was published.
@@ -2293,6 +2339,24 @@ pub async fn delete_handler(
                         "idempotency key belongs to an earlier write that a later one superseded",
                         false,
                         "read_site_status",
+                    )
+                    .await
+                    .into_response();
+            }
+            // The takedown pause is never served, so its label is never
+            // checked; the arm keeps the refusal stable should that change.
+            Ok(ProtectedSiteConfigWriteOutcome::PolicyRevisionReused(reuse)) => {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        DELETE_ACCESS,
+                        None,
+                        StatusCode::CONFLICT,
+                        validation_reason(reuse.field()),
+                        POLICY_REVISION_REUSED_MESSAGE,
+                        false,
+                        POLICY_REVISION_REUSED_NEXT_ACTION,
                     )
                     .await
                     .into_response();
@@ -2957,6 +3021,24 @@ async fn write_site_handler(
                 .await
                 .into_response();
         }
+        // Refused here so it never reaches the edge, which would refuse the
+        // whole tenant snapshot (`EDGE_APPLY_DESCRIPTOR_CONFLICT`).
+        ProtectedSiteConfigWriteOutcome::PolicyRevisionReused(reuse) => {
+            return control
+                .audited_error_async(
+                    request_id,
+                    Some(subject),
+                    action,
+                    None,
+                    StatusCode::CONFLICT,
+                    validation_reason(reuse.field()),
+                    POLICY_REVISION_REUSED_MESSAGE,
+                    false,
+                    POLICY_REVISION_REUSED_NEXT_ACTION,
+                )
+                .await
+                .into_response();
+        }
     };
     if control
         .append_access_event(&request_id, Some(&subject), action, None, "PASS", reason)
@@ -3065,6 +3147,10 @@ struct PlanInput {
     active_revision: Option<u64>,
     /// The stored configuration of `active_revision`: what the edge serves.
     active_config: Option<SiteConfig>,
+    /// The desired revision's `policy_revision` label already names another
+    /// action-descriptor set (decided by the store under the tenant lock of
+    /// the snapshot read); carrying it would make the edge refuse the tenant.
+    label_conflict: bool,
 }
 
 impl PlanInput {
@@ -3077,6 +3163,7 @@ impl PlanInput {
             requires_approval: site.requires_approval,
             active_revision: site.active_revision,
             active_config: site.active_config.clone(),
+            label_conflict: site.label_conflict.is_some(),
         }
     }
 }
@@ -3093,6 +3180,11 @@ struct SnapshotPlan {
     /// failed so its own status says why instead of the tenant failing as a
     /// whole.
     invalid: Vec<(SiteId, u64, String)>,
+    /// Sites other than the target whose desired revision would reuse a
+    /// `policy_revision` label for another descriptor set. Held back and
+    /// reported the same way, because the edge would refuse the whole
+    /// snapshot for them.
+    reused: Vec<(SiteId, u64, String)>,
 }
 
 /// Decides, per site, which configuration the snapshot carries.
@@ -3101,11 +3193,12 @@ struct SnapshotPlan {
 ///
 /// - a site whose desired revision is approved (or never needed approval),
 ///   valid and `active` is served as desired and confirmed;
-/// - a site whose desired revision awaits approval, or whose desired revision
-///   cannot be compiled, is held at its **last approved (active)
-///   configuration**, so the edge keeps serving exactly what was approved and
-///   the unapproved change never reaches it; the site is not confirmed, so its
-///   intent stays pending. A site that was never applied is omitted;
+/// - a site whose desired revision awaits approval, cannot be compiled, or
+///   would reuse its `policy_revision` label for another descriptor set, is
+///   held at its **last approved (active) configuration**, so the edge keeps
+///   serving exactly what was approved and the change never reaches it; the
+///   site is not confirmed, so its intent stays pending. A site that was
+///   never applied is omitted;
 /// - a `paused` desired revision is omitted and confirmed (it applies as
 ///   paused); a `draft` is omitted and never confirmed, because a draft is
 ///   not routable and must not look applied.
@@ -3121,6 +3214,7 @@ fn plan_snapshot(
     let mut served = Vec::new();
     let mut confirmed = Vec::new();
     let mut invalid = Vec::new();
+    let mut reused = Vec::new();
     for site in sites {
         let desired = site.desired.clone();
         let is_target = site.site_id == *target_site;
@@ -3141,6 +3235,9 @@ fn plan_snapshot(
             if desired.is_serving() && desired.validate_for_site(&site.site_id).is_err() {
                 return Err("CONTROL_SITE_POLICY_INVALID");
             }
+            if site.label_conflict {
+                return Err("CONTROL_SITE_POLICY_REVISION_REUSED");
+            }
         }
         let desired_is_compilable =
             !desired.is_serving() || desired.validate_for_site(&site.site_id).is_ok();
@@ -3150,8 +3247,14 @@ fn plan_snapshot(
                 site.desired_revision,
                 site.apply_id.clone(),
             ));
+        } else if site.label_conflict {
+            reused.push((
+                site.site_id.clone(),
+                site.desired_revision,
+                site.apply_id.clone(),
+            ));
         }
-        if site.requires_approval || !desired_is_compilable {
+        if site.requires_approval || !desired_is_compilable || site.label_conflict {
             // Hold at the last approved configuration if the edge serves one.
             // It is deliberately not validated again: the edge accepted it when
             // it was applied, and dropping a live site because a validator got
@@ -3204,6 +3307,7 @@ fn plan_snapshot(
         served,
         confirmed,
         invalid,
+        reused,
     })
 }
 
@@ -3246,7 +3350,9 @@ async fn apply_site_snapshot(
             // are already visible in the state they were decided from.
             if matches!(
                 reason,
-                "CONTROL_SITE_POLICY_INVALID" | "CONTROL_SITE_PORT_UNAVAILABLE"
+                "CONTROL_SITE_POLICY_INVALID"
+                    | "CONTROL_SITE_PORT_UNAVAILABLE"
+                    | "CONTROL_SITE_POLICY_REVISION_REUSED"
             ) {
                 let _ = control
                     .catalog
@@ -3323,9 +3429,19 @@ async fn apply_site_snapshot(
         return Err("CONTROL_SITE_APPLY_STATE_UNAVAILABLE");
     }
     // The snapshot is live. Sites that were held back because their desired
-    // configuration does not compile are reported on their own status; this is
+    // configuration does not compile, or would reuse a label for another
+    // descriptor set, are reported on their own status; this is
     // informational, so a failure to record it does not undo the apply.
-    for (site, revision, apply_id) in &plan.invalid {
+    let held_back = plan
+        .invalid
+        .iter()
+        .map(|site| (site, "CONTROL_SITE_POLICY_INVALID"))
+        .chain(
+            plan.reused
+                .iter()
+                .map(|site| (site, "CONTROL_SITE_POLICY_REVISION_REUSED")),
+        );
+    for ((site, revision, apply_id), reason) in held_back {
         let _ = control
             .catalog
             .mark_protected_site_apply_failed(
@@ -3333,7 +3449,7 @@ async fn apply_site_snapshot(
                 site,
                 *revision,
                 apply_id,
-                "CONTROL_SITE_POLICY_INVALID",
+                reason,
             )
             .await;
     }
@@ -3471,6 +3587,16 @@ fn validate_upstream_destination(
     Ok(())
 }
 
+/// Safe message of `CONTROL_SITE_POLICY_REVISION_REUSED`, the refusal of a
+/// served configuration whose `policy_revision` label already names another
+/// action-descriptor set for the site (or that the edge holds retired). It
+/// names the field and the remedy; it never echoes stored values.
+const POLICY_REVISION_REUSED_MESSAGE: &str = "this site's policy_revision label already names \
+     a different set of page actions, or the edge has retired it; save the change under a new \
+     policy_revision";
+/// Next action of `CONTROL_SITE_POLICY_REVISION_REUSED`.
+const POLICY_REVISION_REUSED_NEXT_ACTION: &str = "change_policy_revision";
+
 /// Largest site configuration body accepted by the site write endpoints.
 ///
 /// 256 routes (the policy limit) with typical provenance-flow blocks fit;
@@ -3511,6 +3637,9 @@ fn validation_reason(field: &str) -> &'static str {
         flow::PAGE_ACTIONS_INVALID => "CONTROL_SITE_PAGE_ACTIONS_INVALID",
         flow::RESOURCE_GRANT_INVALID => "CONTROL_SITE_RESOURCE_GRANT_INVALID",
         flow::ACTION_DESCRIPTOR_CONFLICT => "CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT",
+        // Decided by the store against the label's bindings, not by
+        // validation; mapped here so every flow refusal has one table.
+        POLICY_REVISION_REUSED => "CONTROL_SITE_POLICY_REVISION_REUSED",
         _ if field.starts_with("upstream") => "CONTROL_SITE_UPSTREAM_INVALID",
         _ if field.starts_with("site_policy") => "CONTROL_SITE_POLICY_INVALID",
         "site_id" => "CONTROL_SITE_ID_INVALID",
@@ -3533,9 +3662,15 @@ fn validate_request_with(
     site_id: &SiteId,
     allow_loopback: bool,
 ) -> Result<(), &'static str> {
-    request
-        .to_config()
+    let config = request.to_config();
+    config
         .validate_for_site(site_id)
+        .map_err(|error| validation_reason(error.field()))?;
+    // The edge derives the action descriptors of a page-issuing site when it
+    // compiles it; the store binds the label to the same derivation, so a
+    // configuration it cannot derive is refused here rather than unbound.
+    config
+        .edge_descriptor_digest()
         .map_err(|error| validation_reason(error.field()))?;
     validate_upstream_destination(
         &request.upstream_address,
@@ -4188,7 +4323,60 @@ mod tests {
             requires_approval: false,
             active_revision: Some(1),
             active_config: Some(config("active", "1.1.1.1:9000", 6100)),
+            label_conflict: false,
         }
+    }
+
+    /// A target whose label the store found bound to another descriptor set
+    /// is refused with the stable reason, and nothing is planned for it.
+    #[test]
+    fn a_target_reusing_its_label_is_refused_before_anything_is_sent() {
+        let mut target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        target.label_conflict = true;
+        let sibling = input("site_a", config("active", "8.8.4.4:9000", 6100));
+        assert_eq!(
+            super::plan_snapshot(
+                &[sibling, target],
+                &SiteId::parse("site_b").unwrap(),
+                &apply_state("site_b"),
+            )
+            .err(),
+            Some("CONTROL_SITE_POLICY_REVISION_REUSED")
+        );
+    }
+
+    /// A sibling whose desired revision reuses its label is held at its last
+    /// approved configuration and reported on its own status; the target and
+    /// every other site are planned as if it were not there.
+    #[test]
+    fn a_sibling_reusing_its_label_is_held_back_alone() {
+        let target = input("site_b", config("active", "2.2.2.2:9000", 6101));
+        let mut reusing = input("site_a", config("active", "8.8.4.4:9000", 6100));
+        reusing.label_conflict = true;
+        let other = input("site_c", config("active", "9.9.9.9:9000", 6102));
+        let plan = super::plan_snapshot(
+            &[reusing, target, other],
+            &SiteId::parse("site_b").unwrap(),
+            &apply_state("site_b"),
+        )
+        .unwrap();
+        assert_eq!(
+            served(&plan),
+            [
+                ("site_a".to_owned(), "1.1.1.1:9000".to_owned(), 1),
+                ("site_b".to_owned(), "2.2.2.2:9000".to_owned(), 2),
+                ("site_c".to_owned(), "9.9.9.9:9000".to_owned(), 2),
+            ]
+        );
+        assert_eq!(confirmed(&plan), ["site_b", "site_c"]);
+        assert_eq!(
+            plan.reused
+                .iter()
+                .map(|(site, revision, _)| (site.as_str(), *revision))
+                .collect::<Vec<_>>(),
+            [("site_a", 2)]
+        );
+        assert!(plan.invalid.is_empty());
     }
 
     fn apply_state(id: &str) -> xshield_postgres::ProtectedSiteApplyState {

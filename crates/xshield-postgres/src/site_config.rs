@@ -3,13 +3,16 @@
 
 use crate::{PostgresIdentityStore, StoreError};
 use chrono::{DateTime, Utc};
+use descriptor_binding::{BoundBy, LabelCheck};
 use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 use xshield_core::{
     SiteConfig, SiteIssuedBy, SitePolicyConfig, SiteRequestCrypto, SiteRouteConfig,
     domain::{SiteId, TenantId},
-    site::{assess_change_risk, direct_apply_may_waive},
+    site::{LabelReuse, assess_change_risk, direct_apply_may_waive},
 };
+
+mod descriptor_binding;
 
 /// Newest health observations kept per site; see
 /// [`PostgresIdentityStore::insert_protected_site_health_snapshot`].
@@ -185,6 +188,11 @@ pub enum ProtectedSiteApprovalOutcome {
     RevisionMismatch,
     /// The approver wrote the revision under approval.
     SelfApproval,
+    /// Approving would let the revision's `policy_revision` label reach the
+    /// edge with a second action-descriptor set (written by an older control
+    /// service, or bound at the edge since); nothing was recorded and the
+    /// requirement stands. The revision can only go live under a new label.
+    PolicyRevisionReused(LabelReuse),
 }
 
 /// Outcome of authorizing a direct apply under the explicit
@@ -203,6 +211,9 @@ pub enum ProtectedSiteDirectApplyOutcome {
     /// version does not recognize) can only be cleared by an independent
     /// `PolicyApprover`; nothing was recorded and the requirement stands.
     IndependentApprovalRequired,
+    /// Authorizing would let the revision's `policy_revision` label reach
+    /// the edge with a second action-descriptor set; nothing was recorded.
+    PolicyRevisionReused(LabelReuse),
 }
 
 /// A previously stored write recognised by its idempotency key.
@@ -227,6 +238,11 @@ pub struct ProtectedSiteSnapshotSite {
     /// The stored configuration of `active_revision`, i.e. what the edge
     /// serves for this site today.
     pub active_config: Option<SiteConfig>,
+    /// Why the desired revision, although eligible to be served, must not
+    /// be carried: its `policy_revision` label already denotes another
+    /// action-descriptor set. Decided under the tenant lock of this read;
+    /// `None` for every revision that may be carried (or is not eligible).
+    pub label_conflict: Option<LabelReuse>,
 }
 
 /// Tenant-wide state read in one transaction together with the monotonic
@@ -350,6 +366,11 @@ pub enum ProtectedSiteConfigWriteOutcome {
     /// The idempotency key belongs to an earlier write that a later one has
     /// superseded; replaying it would silently resurrect stale content.
     Superseded,
+    /// The configuration would be served with page issuance under a
+    /// `policy_revision` label that already denotes another action-descriptor
+    /// set for this site (or that the edge holds retired); nothing was
+    /// written. The change needs a new label.
+    PolicyRevisionReused(LabelReuse),
 }
 
 impl PostgresIdentityStore {
@@ -627,8 +648,15 @@ impl PostgresIdentityStore {
     /// the caller can keep a site whose desired revision awaits approval on
     /// its last approved configuration.
     ///
+    /// Each desired revision the snapshot may carry also has its
+    /// `policy_revision` label checked and, if it was not bound yet, bound in
+    /// this transaction; a label that already denotes another descriptor set
+    /// is reported in [`ProtectedSiteSnapshotSite::label_conflict`] so the
+    /// caller holds that site back (see `descriptor_binding`).
+    ///
     /// # Errors
-    /// Returns a storage or corruption error when the state cannot be read.
+    /// Returns a storage or corruption error when the state cannot be read
+    /// or a binding cannot be written; nothing is committed then.
     pub async fn begin_protected_site_snapshot(
         &self,
         tenant_id: &TenantId,
@@ -680,8 +708,7 @@ impl PostgresIdentityStore {
         .bind(tenant_id.as_str())
         .fetch_all(&mut *transaction)
         .await?;
-        transaction.commit().await?;
-        let sites = rows
+        let mut sites = rows
             .into_iter()
             .map(|row| {
                 let active_revision = row
@@ -713,9 +740,13 @@ impl PostgresIdentityStore {
                     requires_approval: row.try_get("requires_approval")?,
                     active_revision,
                     active_config,
+                    label_conflict: None,
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
+        // The re-check of the apply path, still under the tenant lock.
+        descriptor_binding::bind_snapshot_labels(&mut transaction, tenant_id, &mut sites).await?;
+        transaction.commit().await?;
         Ok(ProtectedSiteSnapshot {
             revision: u64::try_from(revision)
                 .map_err(|_| StoreError::CorruptData("snapshot_revision"))?,
@@ -910,6 +941,10 @@ impl PostgresIdentityStore {
     ///   reviewed, must equal the current desired digest;
     /// - the approver must differ from the author of *that* revision, checked
     ///   here and enforced again by a database constraint;
+    /// - the approval makes the revision eligible to reach the edge, so its
+    ///   `policy_revision` label is checked and bound here; a label that
+    ///   already denotes another descriptor set is
+    ///   [`ProtectedSiteApprovalOutcome::PolicyRevisionReused`];
     /// - the approval row and the cleared requirement are written together,
     ///   and the clearing update is conditioned on the revision and apply id
     ///   that were read.
@@ -972,6 +1007,14 @@ impl PostgresIdentityStore {
             transaction.rollback().await?;
             return Ok(ProtectedSiteApprovalOutcome::SelfApproval);
         }
+        // The approval makes the revision eligible to reach the edge, so its
+        // label is checked and bound here, under the same locks.
+        if let Some(reuse) =
+            bind_approved_label(&mut transaction, tenant_id, site_id, &target).await?
+        {
+            transaction.rollback().await?;
+            return Ok(ProtectedSiteApprovalOutcome::PolicyRevisionReused(reuse));
+        }
         record_approval(
             &mut transaction,
             tenant_id,
@@ -1002,7 +1045,9 @@ impl PostgresIdentityStore {
     /// It never replaces the second pair of eyes for a provenance-flow change
     /// (`xshield_core::site::direct_apply_may_waive`): the stored reasons are
     /// read under the same row lock that decides the outcome, so they belong
-    /// to exactly the revision that would otherwise be authorized.
+    /// to exactly the revision that would otherwise be authorized. Like an
+    /// approval it binds the revision's `policy_revision` label, and refuses
+    /// one that already denotes another descriptor set.
     ///
     /// # Errors
     /// Returns [`StoreError`] when the input is invalid or the transaction
@@ -1038,6 +1083,12 @@ impl PostgresIdentityStore {
         if !direct_apply_may_waive(&target.risk_reasons) {
             transaction.rollback().await?;
             return Ok(ProtectedSiteDirectApplyOutcome::IndependentApprovalRequired);
+        }
+        if let Some(reuse) =
+            bind_approved_label(&mut transaction, tenant_id, site_id, &target).await?
+        {
+            transaction.rollback().await?;
+            return Ok(ProtectedSiteDirectApplyOutcome::PolicyRevisionReused(reuse));
         }
         record_approval(
             &mut transaction,
@@ -1245,6 +1296,32 @@ impl PostgresIdentityStore {
         .transpose()
     }
 
+    /// Whether `config` could be supplied to the edge under its
+    /// `policy_revision` label: `Some` says why not (the label already
+    /// denotes another action-descriptor set for `site_id`, or the edge holds
+    /// it retired). A configuration that is not served or has no page
+    /// issuance always answers `None`.
+    ///
+    /// Read-only and advisory: it takes no lock and binds nothing. Saves,
+    /// approvals and snapshot reads decide again under the tenant lock.
+    ///
+    /// # Errors
+    /// Returns a storage or corruption error when a binding cannot be read.
+    pub async fn check_protected_site_label(
+        &self,
+        tenant_id: &TenantId,
+        site_id: &SiteId,
+        config: &SiteConfig,
+    ) -> Result<Option<LabelReuse>, StoreError> {
+        let mut connection = self.pool.acquire().await?;
+        Ok(
+            match descriptor_binding::check(&mut connection, tenant_id, site_id, config).await? {
+                LabelCheck::Reused(reuse) => Some(reuse),
+                LabelCheck::Free | LabelCheck::Bindable { .. } => None,
+            },
+        )
+    }
+
     /// Creates or replaces the scoped configuration.
     ///
     /// The whole decision happens in one transaction under the tenant lock:
@@ -1256,6 +1333,11 @@ impl PostgresIdentityStore {
     ///   from the stored configuration of the site's *active* revision (what
     ///   the edge serves) and the desired one, never from the previous desired
     ///   revision, so re-submitting equal content cannot clear it;
+    /// - a served configuration whose `policy_revision` label already denotes
+    ///   another action-descriptor set is refused as
+    ///   [`ProtectedSiteConfigWriteOutcome::PolicyRevisionReused`] before
+    ///   anything is written, and one that needs no approval binds its label
+    ///   (see `descriptor_binding`);
     /// - the full configuration, its idempotency identity and, for an explicit
     ///   pre-authorization, the approval record are stored with the revision.
     ///
@@ -1452,6 +1534,25 @@ impl PostgresIdentityStore {
             .iter()
             .map(|risk| risk.as_str().to_owned())
             .collect::<Vec<_>>();
+        // One label, one descriptor set (`descriptor_binding`). Checked before
+        // anything is written, under the tenant lock every binding writer and
+        // every snapshot read holds, so two saves racing to give one new label
+        // two sets are serialized and the second one sees the first.
+        let label = match descriptor_binding::check(
+            &mut transaction,
+            command.tenant_id,
+            command.site_id,
+            &desired,
+        )
+        .await?
+        {
+            LabelCheck::Reused(reuse) => {
+                transaction.rollback().await?;
+                return Ok(ProtectedSiteConfigWriteOutcome::PolicyRevisionReused(reuse));
+            }
+            LabelCheck::Bindable { digest, recorded } => Some((digest, recorded)),
+            LabelCheck::Free => None,
+        };
         if let Some(previous_port) = existing_port
             && previous_port != requested_port
         {
@@ -1691,6 +1792,21 @@ impl PostgresIdentityStore {
         .bind(command.idempotency_digest.as_slice())
         .execute(&mut *transaction)
         .await?;
+        // A revision that needs no approval may be carried by the very next
+        // snapshot (its own save-and-apply, or any sibling's apply), so it
+        // binds its label now. One held for approval binds at its approval.
+        if let Some((digest, false)) = label.filter(|_| !requires_approval) {
+            descriptor_binding::record(
+                &mut transaction,
+                command.tenant_id,
+                command.site_id,
+                command.policy_revision,
+                &digest,
+                u64::try_from(revision).map_err(|_| StoreError::InvalidCommand)?,
+                BoundBy::Save,
+            )
+            .await?;
+        }
         let apply_id = format!("apply_{}", uuid::Uuid::now_v7());
         // A draft is never applied; say so in the durable state instead of
         // the generic "not confirmed".
@@ -1833,10 +1949,12 @@ struct ApprovalTarget {
     risk_reasons: Vec<String>,
     config_digest: [u8; 32],
     author: String,
+    /// The desired configuration itself, whose label an approval binds.
+    config: SiteConfig,
 }
 
 /// Locks the site's apply intent and reads the desired revision it points at
-/// together with that revision's digest and author.
+/// together with that revision's digest, author and configuration.
 async fn lock_approval_target(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &TenantId,
@@ -1856,7 +1974,9 @@ async fn lock_approval_target(
         return Ok(None);
     };
     let config = sqlx::query(
-        "SELECT revision, config_digest, updated_by
+        "SELECT display_name, public_origin, upstream_address, upstream_server_name, upstream_tls,
+                listen_port, entry_path, security_entry, sensor_enabled, policy_revision,
+                status, policy_json, revision, config_digest, updated_by, created_at, updated_at
          FROM xshield.protected_site_configs
          WHERE tenant_id = $1 AND site_id = $2",
     )
@@ -1870,14 +1990,47 @@ async fn lock_approval_target(
     if config.try_get::<i64, _>("revision")? != revision {
         return Err(StoreError::CorruptData("desired_revision"));
     }
+    let record = decode_record(&config)?;
     Ok(Some(ApprovalTarget {
         revision,
         apply_id: intent.try_get("apply_id")?,
         requires_approval: intent.try_get("requires_approval")?,
         risk_reasons: intent.try_get("risk_reasons")?,
-        config_digest: bytes32(&config, "config_digest")?,
-        author: config.try_get("updated_by")?,
+        config_digest: record.config_digest,
+        author: record.updated_by.clone(),
+        config: record.site_config(),
     }))
+}
+
+/// Checks the label of the revision an approval is about to make eligible and
+/// binds it in the approving transaction; `Some` is the refusal, and then
+/// nothing was written.
+async fn bind_approved_label(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    target: &ApprovalTarget,
+) -> Result<Option<LabelReuse>, StoreError> {
+    match descriptor_binding::check(transaction, tenant_id, site_id, &target.config).await? {
+        LabelCheck::Reused(reuse) => Ok(Some(reuse)),
+        LabelCheck::Free | LabelCheck::Bindable { recorded: true, .. } => Ok(None),
+        LabelCheck::Bindable {
+            digest,
+            recorded: false,
+        } => {
+            descriptor_binding::record(
+                transaction,
+                tenant_id,
+                site_id,
+                &target.config.policy_revision,
+                &digest,
+                u64::try_from(target.revision).map_err(|_| StoreError::CorruptData("revision"))?,
+                BoundBy::Approval,
+            )
+            .await?;
+            Ok(None)
+        }
+    }
 }
 
 /// Inserts the approval record and clears the requirement it covers. The

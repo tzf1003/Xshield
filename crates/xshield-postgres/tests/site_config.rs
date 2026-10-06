@@ -1371,6 +1371,8 @@ async fn cleanup(pool: &PgPool, tenant: &TenantId) {
         "DELETE FROM xshield.protected_sites WHERE tenant_id = $1",
         "DELETE FROM xshield.site_port_leases WHERE tenant_id = $1",
         "DELETE FROM xshield.site_snapshot_sequences WHERE tenant_id = $1",
+        // Label bindings outlive a deleted site by design (migration 0053).
+        "DELETE FROM xshield.site_descriptor_bindings WHERE tenant_id = $1",
     ] {
         sqlx::query(statement)
             .bind(tenant.as_str())
