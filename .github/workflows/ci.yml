@@ -109,6 +109,56 @@ jobs:
       - run: python scripts/check_env_docs.py
       - run: python scripts/check_secrets.py
 
+  # The control plane's OIDC login against a real Keycloak (the dev realm), with the real
+  # control binary and PostgreSQL, driven without a browser (scripts/test_oidc_login.py).
+  # Keycloak is the release zip, not the container image, so the job needs no registry pull;
+  # the archive is checked against a pinned sha256 before it is unpacked. Keep the version
+  # in step with docker-compose.dev.yml (quay.io/keycloak/keycloak) when it is bumped.
+  oidc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      XSHIELD_TEST_DATABASE_BASE_URL: postgresql://postgres:postgres@localhost:5432
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      KEYCLOAK_VERSION: 26.7.4
+      KEYCLOAK_ZIP_SHA256: a286e98b4296d4e75ee88d8527c7cd463b307caa022f088c9f22cffccc741fa1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Download and verify Keycloak
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/keycloak.zip" \
+            "https://github.com/keycloak/keycloak/releases/download/${KEYCLOAK_VERSION}/keycloak-${KEYCLOAK_VERSION}.zip"
+          echo "${KEYCLOAK_ZIP_SHA256}  $RUNNER_TEMP/keycloak.zip" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/keycloak"
+          unzip -q "$RUNNER_TEMP/keycloak.zip" -d "$RUNNER_TEMP/keycloak"
+          echo "XSHIELD_KEYCLOAK_HOME=$RUNNER_TEMP/keycloak/keycloak-${KEYCLOAK_VERSION}" >> "$GITHUB_ENV"
+      - name: Real OIDC login (Keycloak, real control binary, PostgreSQL)
+        run: scripts/test_oidc_login.sh
+
   # Licenses, RustSec advisories, yanked crates and registry sources (deny.toml).
   # It reads Cargo.lock only, so it needs no database or build.
   supply-chain:

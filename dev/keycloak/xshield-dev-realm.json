@@ -24,6 +24,9 @@
         "http://127.0.0.1:55173/control/v1/auth/oidc/callback"
       ],
       "webOrigins": ["http://127.0.0.1:55173"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
       "protocolMappers": [
         {
           "name": "xshield-dev-acr",
@@ -49,6 +52,38 @@
       "lastName": "Developer",
       "enabled": true,
       "email": "developer@xshield.local",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "xshield-dev-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-7000-8000-000000000002",
+      "username": "observer-only",
+      "firstName": "Xshield",
+      "lastName": "Observer",
+      "enabled": true,
+      "email": "observer-only@xshield.local",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "xshield-dev-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-7000-8000-000000000003",
+      "username": "unprovisioned",
+      "firstName": "Xshield",
+      "lastName": "Unprovisioned",
+      "enabled": true,
+      "email": "unprovisioned@xshield.local",
       "emailVerified": true,
       "credentials": [
         {
