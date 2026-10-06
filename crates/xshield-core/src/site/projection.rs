@@ -19,8 +19,8 @@ use super::{
     SecurityEntry, SiteConfig, SitePolicyConfig, SiteRequestCrypto, SiteResponseCrypto,
     SiteRouteConfig,
     flow::{
-        SiteAuthBinding, SiteAuthRevoke, SiteIssuedBy, SitePageActions, SiteResourceGrant,
-        SiteSensorHtmlAdapter,
+        SiteAuthBinding, SiteAuthRevoke, SiteAuthTransition, SiteIssuedBy, SitePageActions,
+        SiteResourceGrant, SiteSensorHtmlAdapter,
     },
     share::SiteShareIssue,
 };
@@ -144,6 +144,10 @@ struct Response<'a> {
     auth_binding: Option<&'a SiteAuthBinding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auth_revoke: Option<&'a SiteAuthRevoke>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_refresh: Option<&'a SiteAuthTransition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_context_switch: Option<&'a SiteAuthTransition>,
 }
 
 /// Projects the effective policy of `config` for `site_id`.
@@ -239,6 +243,8 @@ fn response(route: &SiteRouteConfig) -> Option<Response<'_>> {
         || route.share_issue.is_some()
         || route.auth_binding.is_some()
         || route.auth_revoke.is_some()
+        || route.auth_refresh.is_some()
+        || route.auth_context_switch.is_some()
         || route.page_actions.is_some()
         || sensor.is_some();
     if route.response_mode.is_empty() && !any_block {
@@ -261,6 +267,8 @@ fn response(route: &SiteRouteConfig) -> Option<Response<'_>> {
         share_issue: route.share_issue.as_ref(),
         auth_binding: route.auth_binding.as_ref(),
         auth_revoke: route.auth_revoke.as_ref(),
+        auth_refresh: route.auth_refresh.as_ref(),
+        auth_context_switch: route.auth_context_switch.as_ref(),
     })
 }
 

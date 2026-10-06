@@ -489,6 +489,39 @@ mod tests {
         assert_ne!(digest(&reviewed), base);
     }
 
+    #[test]
+    fn a_credential_transition_does_not_change_the_descriptor_digest() {
+        // A refresh or an account switch carries no action descriptor: the
+        // edge derives descriptors from page actions and grant targets only.
+        // The blocks need independent approval (AUTH_TRANSITION_CHANGED) but
+        // must not force a new policy revision label.
+        let with: SiteConfig = serde_json::from_str(include_str!(
+            "../../../../tests/site-config/auth-transition-flow.json"
+        ))
+        .unwrap();
+        let mut without = with.clone();
+        without
+            .policy
+            .routes
+            .retain(|route| route.auth_refresh.is_none() && route.auth_context_switch.is_none());
+        with.validate().unwrap();
+        without.validate().unwrap();
+        assert_eq!(digest(&with), digest(&without));
+        assert_eq!(digest(&with), digest(&browser_loop()));
+        let mut retuned = with.clone();
+        for route in &mut retuned.policy.routes {
+            for block in [&mut route.auth_refresh, &mut route.auth_context_switch]
+                .into_iter()
+                .flatten()
+            {
+                block.credential_ttl_seconds = 60;
+                "/token".clone_into(&mut block.bearer_pointer);
+            }
+        }
+        retuned.validate().unwrap();
+        assert_eq!(digest(&retuned), digest(&with));
+    }
+
     type Edit = fn(&mut SiteConfig);
 
     #[test]

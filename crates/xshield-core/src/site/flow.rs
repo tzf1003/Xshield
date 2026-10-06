@@ -21,9 +21,9 @@
 //! before persistence and again by the edge; nothing is derived from traffic.
 //! The module is pure: no I/O, no clock.
 //!
-//! Gateway features this module does not model (`auth_refresh`,
-//! `auth_context_switch`, `evidence_capture`, `COMPATIBILITY` request crypto,
-//! the `SERVICE_IDENTITY` admission) cannot be stored: the typed configuration rejects unknown members, and
+//! Gateway features this module does not model (`evidence_capture`,
+//! `COMPATIBILITY` request crypto, the `SERVICE_IDENTITY` admission) cannot be
+//! stored: the typed configuration rejects unknown members, and
 //! [`super::unsupported`] names the feature so the control plane can refuse it
 //! with a stable reason instead of a generic parse error.
 
@@ -86,6 +86,31 @@ pub struct SiteAuthBinding {
     pub credential_ttl_seconds: u64,
     /// Session lease, 1–86400 seconds.
     pub session_ttl_seconds: u64,
+}
+
+/// Credential and context transition on an `authenticated_root` route (edge
+/// `response.auth_refresh` and `response.auth_context_switch`, which share
+/// one DTO).
+///
+/// A strict JSON success response carries the principal, the authorization
+/// context and the replacement bearer at the three pointers. For a refresh the
+/// edge commits a new credential for the *same* principal and context; for a
+/// context switch it commits the new authorization context (a new identity
+/// generation) before it releases the body. Neither extends the session
+/// lease, so there is no session TTL here.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiteAuthTransition {
+    /// 2xx status that commits the transition; 204 has no body and is refused.
+    pub success_status: u16,
+    /// JSON Pointer to the principal.
+    pub principal_pointer: String,
+    /// JSON Pointer to the authorization context reference.
+    pub authorization_context_pointer: String,
+    /// JSON Pointer to the replacement business bearer credential.
+    pub bearer_pointer: String,
+    /// Replacement credential lease, 1–86400 seconds.
+    pub credential_ttl_seconds: u64,
 }
 
 /// Binding revocation on an `authenticated_root` logout route (edge
@@ -219,6 +244,8 @@ pub(super) fn validate_route(route: &SiteRouteConfig) -> Result<(), InvalidValue
         + usize::from(route.share_issue.is_some())
         + usize::from(route.auth_binding.is_some())
         + usize::from(route.auth_revoke.is_some())
+        + usize::from(route.auth_refresh.is_some())
+        + usize::from(route.auth_context_switch.is_some())
         > 1
     {
         return Err(InvalidValue::new(AUTH_FLOW_INVALID));
@@ -241,6 +268,23 @@ fn validate_auth_blocks(route: &SiteRouteConfig) -> Result<(), InvalidValue> {
             || binding.credential_ttl_seconds > binding.session_ttl_seconds)
     {
         return Err(InvalidValue::new(AUTH_FLOW_INVALID));
+    }
+    for transition in [&route.auth_refresh, &route.auth_context_switch]
+        .into_iter()
+        .flatten()
+    {
+        if route.security_entry != SecurityEntry::AuthenticatedRoot
+            || !(200..=299).contains(&transition.success_status)
+            || transition.success_status == 204
+            || !valid_auth_pointers(
+                &transition.principal_pointer,
+                &transition.authorization_context_pointer,
+                &transition.bearer_pointer,
+            )
+            || !(1..=MAX_TTL_SECONDS).contains(&transition.credential_ttl_seconds)
+        {
+            return Err(InvalidValue::new(AUTH_FLOW_INVALID));
+        }
     }
     if let Some(revoke) = &route.auth_revoke
         && (route.security_entry != SecurityEntry::AuthenticatedRoot
@@ -269,6 +313,8 @@ fn validate_sensor_html(route: &SiteRouteConfig) -> Result<(), InvalidValue> {
         || route.share_issue.is_some()
         || route.auth_binding.is_some()
         || route.auth_revoke.is_some()
+        || route.auth_refresh.is_some()
+        || route.auth_context_switch.is_some()
         || adapter.additional_adapters.len() > EDGE_MAX_ADDITIONAL_ADAPTERS
     {
         return Err(invalid());
@@ -464,9 +510,16 @@ pub(super) fn validate_route_set(routes: &[SiteRouteConfig]) -> Result<(), Inval
     if harvest_rules > EDGE_MAX_SENSOR_ROUTES {
         return Err(InvalidValue::new(RESOURCE_GRANT_INVALID));
     }
+    // The sensor learns which routes invalidate its cached references: the
+    // edge counts binding, revocation and context switch (not refresh, which
+    // keeps the same principal and context).
     let identity_change_routes = routes
         .iter()
-        .filter(|route| route.auth_binding.is_some() || route.auth_revoke.is_some())
+        .filter(|route| {
+            route.auth_binding.is_some()
+                || route.auth_revoke.is_some()
+                || route.auth_context_switch.is_some()
+        })
         .count();
     if identity_change_routes > EDGE_MAX_SENSOR_ROUTES {
         return Err(InvalidValue::new(AUTH_FLOW_INVALID));

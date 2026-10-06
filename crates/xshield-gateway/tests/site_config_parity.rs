@@ -62,6 +62,8 @@ fn exact(id: &str, method: &str, path: &str, entry: SecurityEntry) -> SiteRouteC
         resource_grant: None,
         query_pagination: None,
         share_issue: None,
+        auth_refresh: None,
+        auth_context_switch: None,
     }
 }
 
@@ -2340,6 +2342,393 @@ fn generated_share_routes_never_pass_core_and_fail_the_edge() {
                     tally.implication(
                         &format!("{entry:?} {method} {mode:?} blocks={blocks:06b} retargeted"),
                         &retargeted,
+                    );
+                }
+            }
+        }
+    }
+    tally.finish(20, 500);
+}
+
+/// The identity script's credential refresh and account switch routes.
+fn transition_route(id: &str, path: &str) -> SiteRouteConfig {
+    let mut route = exact(id, "POST", path, SecurityEntry::AuthenticatedRoot);
+    "BUFFERED_JSON".clone_into(&mut route.response_mode);
+    route.max_response_bytes = 512;
+    route
+}
+
+fn transition_block() -> xshield_core::SiteAuthTransition {
+    xshield_core::SiteAuthTransition {
+        success_status: 200,
+        principal_pointer: "/identity/id".to_owned(),
+        authorization_context_pointer: "/identity/authorization_context".to_owned(),
+        bearer_pointer: "/access_token".to_owned(),
+        credential_ttl_seconds: 1_800,
+    }
+}
+
+fn refresh_route() -> SiteRouteConfig {
+    let mut route = transition_route("auth.refresh", "/refresh");
+    route.auth_refresh = Some(transition_block());
+    route
+}
+
+fn switch_route() -> SiteRouteConfig {
+    let mut route = transition_route("auth.context.switch", "/account-switch");
+    route.auth_context_switch = Some(transition_block());
+    route
+}
+
+/// The loop topology with a refresh and an account switch next to it.
+fn transition_flow() -> SiteConfig {
+    let mut config = browser_loop();
+    config.policy.routes.push(refresh_route());
+    config.policy.routes.push(switch_route());
+    config
+}
+
+/// Judges the transition topology after `mutate`.
+fn check_transition(tally: &mut Tally, label: &str, mutate: fn(&mut SiteConfig), expect: Expect) {
+    let mut config = transition_flow();
+    mutate(&mut config);
+    tally.expect(label, &config, expect);
+}
+
+/// Both transition blocks of a route, for rules that hold for either.
+fn transitions(route: &mut SiteRouteConfig) -> [&mut Option<xshield_core::SiteAuthTransition>; 2] {
+    [&mut route.auth_refresh, &mut route.auth_context_switch]
+}
+
+/// The credential refresh and account switch routes the real-binary identity
+/// script exercises are exactly what the control plane projects.
+#[test]
+fn the_identity_scripts_transition_routes_are_what_the_control_plane_projects() {
+    let mut scripted = script_operations("auth.refresh");
+    scripted.extend(script_operations("auth.context.switch"));
+    scripted.sort_by_key(|operation| operation["operation_id"].as_str().map(str::to_owned));
+    assert_eq!(
+        scripted.len(),
+        4,
+        "the script's transition operations moved"
+    );
+    // The script gives the two refresh routes and the two switch routes one
+    // shape each; project the same shapes under its operation ids and paths.
+    let mut projected = Vec::new();
+    for (id, path) in [
+        ("auth.refresh", "/refresh"),
+        ("auth.refresh.switch", "/refresh-switch"),
+    ] {
+        let mut route = transition_route(id, path);
+        route.auth_refresh = Some(transition_block());
+        projected.push(xshield_core::site::gateway_operation(&route).unwrap());
+    }
+    for (id, path) in [
+        ("auth.context.switch", "/account-switch"),
+        ("auth.context.switch.same", "/account-switch-same"),
+    ] {
+        let mut route = transition_route(id, path);
+        route.auth_context_switch = Some(transition_block());
+        projected.push(xshield_core::site::gateway_operation(&route).unwrap());
+    }
+    projected.sort_by_key(|operation| operation["operation_id"].as_str().map(str::to_owned));
+    assert_eq!(projected, scripted);
+}
+
+/// `auth_refresh` and `auth_context_switch`, judged by the control plane and
+/// the real edge compiler alike.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn auth_transition_rules_match_the_edge() {
+    let mut tally = Tally::new();
+    let both = Expect::BothAccept;
+    let reject = Expect::CoreMustReject;
+
+    tally.expect("the transition pair", &transition_flow(), both);
+    for (label, status, expect) in [
+        ("status 200", 200, both),
+        ("status 201", 201, both),
+        ("status 205", 205, both),
+        ("status 299", 299, both),
+        ("status 199", 199, reject),
+        ("status 204", 204, reject),
+        ("status 300", 300, reject),
+    ] {
+        for name in ["refresh", "switch"] {
+            let mut config = transition_flow();
+            let route = loop_route(
+                &mut config,
+                if name == "refresh" {
+                    "auth.refresh"
+                } else {
+                    "auth.context.switch"
+                },
+            );
+            for block in transitions(route).into_iter().flatten() {
+                block.success_status = status;
+            }
+            tally.expect(&format!("{name} {label}"), &config, expect);
+        }
+    }
+    for (label, ttl, expect) in [
+        ("ttl 1", 1, both),
+        ("ttl 86400", 86_400, both),
+        ("ttl 0", 0, reject),
+        ("ttl 86401", 86_401, reject),
+    ] {
+        let mut config = transition_flow();
+        for id in ["auth.refresh", "auth.context.switch"] {
+            for block in transitions(loop_route(&mut config, id))
+                .into_iter()
+                .flatten()
+            {
+                block.credential_ttl_seconds = ttl;
+            }
+        }
+        tally.expect(&format!("transition {label}"), &config, expect);
+    }
+    let long = format!("/{}", "a".repeat(512));
+    let max = format!("/{}", "a".repeat(511));
+    for (label, pointer, expect) in [
+        ("rooted pointer of 512", max.as_str(), both),
+        ("pointer of 513", long.as_str(), reject),
+        ("unrooted pointer", "access_token", reject),
+        ("empty pointer", "", reject),
+        ("bad escape", "/a~2b", reject),
+        ("trailing tilde", "/a~", reject),
+        ("escaped slash", "/a~1b", both),
+        ("control byte", "/a\u{7}b", reject),
+        ("non-ascii", "/名前", both),
+        ("same as the principal", "/identity/id", reject),
+        (
+            "same as the context",
+            "/identity/authorization_context",
+            reject,
+        ),
+    ] {
+        for field in ["bearer", "context", "principal"] {
+            let mut config = transition_flow();
+            for id in ["auth.refresh", "auth.context.switch"] {
+                for block in transitions(loop_route(&mut config, id))
+                    .into_iter()
+                    .flatten()
+                {
+                    match field {
+                        "bearer" => pointer.clone_into(&mut block.bearer_pointer),
+                        "context" => pointer.clone_into(&mut block.authorization_context_pointer),
+                        _ => pointer.clone_into(&mut block.principal_pointer),
+                    }
+                }
+            }
+            // A pointer equal to another member's is only a violation in
+            // the fields where it makes two members the same; every other
+            // sample has one verdict on both sides.
+            if label.starts_with("same as") {
+                tally.implication(&format!("{field} {label}"), &config);
+            } else {
+                tally.expect(&format!("{field} {label}"), &config, expect);
+            }
+        }
+    }
+    // Admission.
+    for (label, entry) in [
+        ("on a public route", SecurityEntry::Public),
+        ("on an auth entry", SecurityEntry::AuthEntry),
+        ("on a UI action", SecurityEntry::UiActionRequired),
+    ] {
+        for id in ["auth.refresh", "auth.context.switch"] {
+            let mut config = transition_flow();
+            let route = loop_route(&mut config, id);
+            route.security_entry = entry;
+            route.source_action =
+                (entry == SecurityEntry::UiActionRequired).then(|| "transition.open".to_owned());
+            tally.expect(&format!("{id} {label}"), &config, reject);
+        }
+    }
+    // One effect per response.
+    check_transition(
+        &mut tally,
+        "refresh and switch on one route",
+        |c| {
+            let switch = loop_route(c, "auth.context.switch")
+                .auth_context_switch
+                .clone();
+            loop_route(c, "auth.refresh").auth_context_switch = switch;
+        },
+        reject,
+    );
+    check_transition(
+        &mut tally,
+        "refresh that also revokes",
+        |c| {
+            let revoke = loop_route(c, "auth.logout").auth_revoke.clone();
+            loop_route(c, "auth.refresh").auth_revoke = revoke;
+        },
+        reject,
+    );
+    check_transition(
+        &mut tally,
+        "switch that also qualifies resources",
+        |c| {
+            let grant = loop_route(c, "orders.list").resource_grant.clone();
+            loop_route(c, "auth.context.switch").resource_grant = grant;
+        },
+        reject,
+    );
+    check_transition(
+        &mut tally,
+        "refresh served as SENSOR_HTML",
+        |c| {
+            let mut sensor = loop_route(c, "app.page").sensor_html.clone().unwrap();
+            "refresh-page-r1".clone_into(&mut sensor.adapter_revision);
+            sensor.origin_sha256 = "c".repeat(64);
+            let route = loop_route(c, "auth.refresh");
+            route.method = "GET".to_owned();
+            "SENSOR_HTML".clone_into(&mut route.response_mode);
+            route.sensor_html = Some(sensor);
+        },
+        reject,
+    );
+    check_transition(
+        &mut tally,
+        "refresh without a response mode",
+        |c| loop_route(c, "auth.refresh").response_mode = String::new(),
+        both,
+    );
+    check_transition(
+        &mut tally,
+        "refresh as a GET",
+        |c| loop_route(c, "auth.refresh").method = "GET".to_owned(),
+        both,
+    );
+    check_transition(
+        &mut tally,
+        "refresh behind an observed request body",
+        |c| loop_route(c, "auth.refresh").request_crypto = Some(observe("refresh-observe-r1")),
+        reject,
+    );
+    check_transition(
+        &mut tally,
+        "switch behind an observed request body",
+        |c| {
+            loop_route(c, "auth.context.switch").request_crypto =
+                Some(observe("switch-observe-r1"));
+        },
+        reject,
+    );
+    check_transition(
+        &mut tally,
+        "switch behind a decrypted request body",
+        |c| loop_route(c, "auth.context.switch").request_crypto = Some(decrypt("switch-key")),
+        both,
+    );
+    // The sensor learns at most 64 identity-change routes: binding,
+    // revocation and context switch count; a refresh does not.
+    for (label, count, expect) in [
+        ("62 switch routes next to the loop's two", 62, both),
+        ("63 switch routes next to the loop's two", 63, reject),
+    ] {
+        let mut config = browser_loop();
+        for index in 0..count {
+            let mut route = switch_route();
+            route.operation_id = format!("auth.switch.{index}");
+            route.path = format!("/switch/{index}");
+            config.policy.routes.push(route);
+        }
+        tally.expect(label, &config, expect);
+    }
+    let mut config = browser_loop();
+    for index in 0..80 {
+        let mut route = refresh_route();
+        route.operation_id = format!("auth.refresh.{index}");
+        route.path = format!("/refresh/{index}");
+        config.policy.routes.push(route);
+    }
+    tally.expect("80 refresh routes", &config, both);
+    tally.finish(20, 30);
+}
+
+/// A transition never changes the action-descriptor set: the edge derives
+/// descriptors from page actions and grant targets only, so adding, removing
+/// or retuning a refresh or a switch must not demand a new label.
+#[test]
+fn transition_blocks_leave_the_descriptor_set_alone() {
+    let mut tally = Tally::new();
+    let edge_digest = |config: &SiteConfig| {
+        let value = config.gateway_config(TENANT, &site()).unwrap();
+        GatewayConfig::from_json(&serde_json::to_vec(&value).unwrap())
+            .unwrap()
+            .edge_descriptors()
+            .unwrap()
+            .content_digest_hex()
+    };
+    let with = transition_flow();
+    tally.expect("loop with transitions", &with, Expect::BothAccept);
+    let without = browser_loop();
+    tally.expect("loop without them", &without, Expect::BothAccept);
+    assert_eq!(edge_digest(&with), edge_digest(&without));
+    tally.finish(2, 0);
+}
+
+/// Every combination of admission, method, neighbouring blocks and request
+/// crypto with the transition blocks: core may be stricter than the edge,
+/// never looser.
+#[test]
+fn generated_transition_routes_never_pass_core_and_fail_the_edge() {
+    let mut tally = Tally::new();
+    let template = transition_flow();
+    let grant = loop_route(&mut browser_loop(), "orders.list")
+        .resource_grant
+        .clone();
+    let revoke = loop_route(&mut browser_loop(), "auth.logout")
+        .auth_revoke
+        .clone();
+    let binding = loop_route(&mut browser_loop(), "auth.login")
+        .auth_binding
+        .clone();
+    let entries = [
+        SecurityEntry::Public,
+        SecurityEntry::AuthEntry,
+        SecurityEntry::AuthenticatedRoot,
+        SecurityEntry::UiActionRequired,
+        SecurityEntry::ShareEntry,
+    ];
+    for entry in entries {
+        for method in ["GET", "POST"] {
+            for mode in ["", "BUFFERED_JSON"] {
+                for blocks in 0_u16..256 {
+                    let mut probe = exact("probe", method, "/probe", entry);
+                    probe.response_mode = mode.to_owned();
+                    probe.max_response_bytes = 16_384;
+                    if blocks & 1 != 0 {
+                        probe.auth_refresh = Some(transition_block());
+                    }
+                    if blocks & 2 != 0 {
+                        probe.auth_context_switch = Some(transition_block());
+                    }
+                    if blocks & 4 != 0 {
+                        probe.auth_revoke.clone_from(&revoke);
+                    }
+                    if blocks & 8 != 0 {
+                        probe.auth_binding.clone_from(&binding);
+                    }
+                    if blocks & 16 != 0 {
+                        probe.resource_grant.clone_from(&grant);
+                    }
+                    if blocks & 32 != 0 {
+                        probe.request_crypto = Some(observe("probe-observe-r1"));
+                    }
+                    if blocks & 64 != 0 {
+                        probe.request_crypto = Some(decrypt("probe-key"));
+                    }
+                    if blocks & 128 != 0 {
+                        probe.response_crypto = Some(response_crypto("probe-response", 40_000));
+                    }
+                    let mut config = template.clone();
+                    config.policy.routes.push(probe);
+                    tally.implication(
+                        &format!("{entry:?} {method} {mode:?} blocks={blocks:08b}"),
+                        &config,
                     );
                 }
             }

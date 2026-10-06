@@ -20,6 +20,7 @@ pub use config::SiteConfig;
 pub use descriptors::{
     DescriptorDigest, LabelBinding, LabelReuse, POLICY_REVISION_REUSED, check_label_binding,
 };
+pub use flow::SiteAuthTransition;
 pub use flow::{
     SiteAuthBinding, SiteAuthRevoke, SiteIssuedBy, SitePageActions, SiteResourceGrant,
     SiteSensorHtml, SiteSensorHtmlAdapter,
@@ -313,6 +314,14 @@ pub struct SiteRouteConfig {
     /// resource route whose target is a `share_entry` route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_issue: Option<share::SiteShareIssue>,
+    /// Same-context credential refresh; only on an `authenticated_root`
+    /// route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_refresh: Option<flow::SiteAuthTransition>,
+    /// Authorization-context switch (account switch); only on an
+    /// `authenticated_root` route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_context_switch: Option<flow::SiteAuthTransition>,
 }
 
 impl SiteRouteConfig {
@@ -326,6 +335,8 @@ impl SiteRouteConfig {
             || self.auth_binding.is_some()
             || self.auth_revoke.is_some()
             || self.share_issue.is_some()
+            || self.auth_refresh.is_some()
+            || self.auth_context_switch.is_some()
     }
 }
 
@@ -1416,6 +1427,8 @@ mod tests {
             resource_grant: None,
             query_pagination: None,
             share_issue: None,
+            auth_refresh: None,
+            auth_context_switch: None,
         });
         assert!(resource_policy.validate().is_ok());
         resource_policy.routes[0].source_action = None;
@@ -1629,6 +1642,8 @@ mod tests {
             resource_grant: None,
             query_pagination: None,
             share_issue: None,
+            auth_refresh: None,
+            auth_context_switch: None,
         }
     }
 

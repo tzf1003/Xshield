@@ -1837,7 +1837,7 @@ async fn flow_refusals_have_their_own_reasons_and_large_sites_fit() {
             .position(|route| route["operation_id"] == id)
             .unwrap()
     };
-    let cases: [(&str, &str, Edit); 11] = [
+    let cases: [(&str, &str, Edit); 12] = [
         (
             "share issuance without its fields",
             "CONTROL_SITE_CONFIG_REQUEST_INVALID",
@@ -1861,8 +1861,15 @@ async fn flow_refusals_have_their_own_reasons_and_large_sites_fit() {
             },
         ),
         (
-            "credential refresh",
+            "evidence capture",
             "CONTROL_SITE_FEATURE_UNSUPPORTED",
+            |b, _, logout| {
+                b["policy"]["routes"][logout]["evidence_capture"] = json!({"max_bytes": 1});
+            },
+        ),
+        (
+            "credential refresh without its fields",
+            "CONTROL_SITE_CONFIG_REQUEST_INVALID",
             |b, _, logout| {
                 b["policy"]["routes"][logout]["auth_refresh"] = json!({"success_status": 200});
             },
@@ -2153,6 +2160,144 @@ async fn share_scope_needs_its_own_independent_approval_and_keeps_the_label() {
         };
         assert_eq!(refused["error_code"], expected, "{label}");
     }
+    assert_eq!(ctx.status(site).await["desired_revision"], revision);
+    let _ = ctx.finish().await;
+}
+
+/// The loop with a credential refresh and an account switch as a body.
+const AUTH_TRANSITION_FLOW: &str =
+    include_str!("../../../../tests/site-config/auth-transition-flow.json");
+
+/// A credential refresh or an account switch reaches the edge as the typed
+/// blocks, and changing either is something only an independent approver may
+/// release (`AUTH_TRANSITION_CHANGED`; the direct-apply capability cannot
+/// waive it). The blocks carry no action descriptor, so retuning them keeps
+/// the `policy_revision` label.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn auth_transitions_need_their_own_independent_approval_and_keep_the_label() {
+    let ctx = Ctx::new().await;
+    let site = "site_transition";
+    let body = |site: &str| -> Value {
+        let mut body: Value = serde_json::from_str(AUTH_TRANSITION_FLOW).unwrap();
+        body["site_id"] = json!(site);
+        body
+    };
+    let (status, created) = ctx.create(&body(site), &ctx.key("create-transition")).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["config"]["policy"],
+        body(site)["policy"],
+        "read back as written"
+    );
+    let (status, approved) = ctx.approve(site, &ctx.key("approve-transition-1")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let served = ctx.edge.served_gateway_config(site).unwrap();
+    let operation = |config: &Value, id: &str| -> Value {
+        config["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["operation_id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        operation(&served, "auth.refresh")["response"]["auth_refresh"]["success_status"],
+        200
+    );
+    assert_eq!(
+        operation(&served, "auth.context.switch")["response"]["auth_context_switch"]["principal_pointer"],
+        "/identity/id"
+    );
+
+    let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
+            "subject": "agent-transition", "display_name": "transition", "expires_at": expires,
+            "scopes": [{
+                "tenant_id": ctx.tenant.as_str(), "site_id": site,
+                "capabilities": ["site.config.apply_direct", "site.read"]
+            }]
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let api_key = issued["api_key"].as_str().unwrap().to_owned();
+
+    for (index, (route, block)) in [
+        ("auth.refresh", "auth_refresh"),
+        ("auth.context.switch", "auth_context_switch"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut retuned = body(site);
+        let at = retuned["policy"]["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|candidate| candidate["operation_id"] == route)
+            .unwrap();
+        retuned["policy"]["routes"][at][block]["credential_ttl_seconds"] = json!(600);
+        let (status, saved) = ctx
+            .put(
+                site,
+                &retuned,
+                &ctx.key(&format!("transition-retune-{index}")),
+            )
+            .await;
+        assert!(status.is_success(), "{route}: {saved}");
+        assert_eq!(saved["requires_approval"], true, "{route}");
+        let sent = ctx.edge.apply_count();
+        let (status, refused) = apply_with_key(&ctx, site, &api_key).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {refused}");
+        assert_eq!(
+            refused["error_code"], "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED",
+            "{route}"
+        );
+        assert_eq!(ctx.edge.apply_count(), sent, "{route}: nothing was sent");
+        let reasons: Vec<String> = sqlx::query_scalar(
+            "SELECT unnest(risk_reasons) FROM xshield.site_apply_intents
+             WHERE tenant_id = $1 AND site_id = $2",
+        )
+        .bind(ctx.tenant.as_str())
+        .bind(site)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason == "AUTH_TRANSITION_CHANGED"),
+            "{route}: {reasons:?}"
+        );
+        let (status, approved) = ctx
+            .approve(site, &ctx.key(&format!("approve-transition-{}", index + 2)))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{route}: {approved}");
+        let served = ctx.edge.served_gateway_config(site).unwrap();
+        assert_eq!(
+            operation(&served, route)["response"][block]["credential_ttl_seconds"],
+            600,
+            "{route}"
+        );
+    }
+
+    // Rules have their own existing reason: a transition off an
+    // authenticated root is an authentication-flow violation.
+    let revision = ctx.status(site).await["desired_revision"].clone();
+    let mut invalid = body(site);
+    let at = invalid["policy"]["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|candidate| candidate["operation_id"] == "auth.refresh")
+        .unwrap();
+    invalid["policy"]["routes"][at]["security_entry"] = json!("public");
+    let (status, refused) = ctx.put(site, &invalid, &ctx.key("transition-public")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_AUTH_FLOW_INVALID");
     assert_eq!(ctx.status(site).await["desired_revision"], revision);
     let _ = ctx.finish().await;
 }

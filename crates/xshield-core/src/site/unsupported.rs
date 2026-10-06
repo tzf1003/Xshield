@@ -2,9 +2,8 @@
 //!
 //! The typed site configuration refuses every member it does not model, so a
 //! body asking for an edge feature the control plane deliberately does not
-//! manage (`auth_refresh`, `auth_context_switch`, `evidence_capture`,
-//! `COMPATIBILITY` request crypto and the `SERVICE_IDENTITY` admission)
-//! already fails to parse. That failure is
+//! manage (`evidence_capture`, `COMPATIBILITY` request crypto and the
+//! `SERVICE_IDENTITY` admission) already fails to parse. That failure is
 //! correct but anonymous; this module looks at such a body once more, through
 //! a lenient typed view that only knows those features, so the control plane
 //! can answer with a stable "unsupported feature" reason instead of a generic
@@ -23,10 +22,6 @@ pub enum UnsupportedEdgeFeature {
     ServiceIdentityAdmission,
     /// `COMPATIBILITY` request crypto (opaque pass-through with approval).
     CompatibilityRequestCrypto,
-    /// `response.auth_refresh`.
-    AuthRefresh,
-    /// `response.auth_context_switch`.
-    AuthContextSwitch,
     /// `response.evidence_capture`.
     EvidenceCapture,
 }
@@ -38,8 +33,6 @@ impl UnsupportedEdgeFeature {
         match self {
             Self::ServiceIdentityAdmission => "service_identity",
             Self::CompatibilityRequestCrypto => "compatibility_request_crypto",
-            Self::AuthRefresh => "auth_refresh",
-            Self::AuthContextSwitch => "auth_context_switch",
             Self::EvidenceCapture => "evidence_capture",
         }
     }
@@ -90,20 +83,12 @@ struct ResponseProbe {
 #[derive(Deserialize)]
 struct EffectsProbe {
     #[serde(default)]
-    auth_refresh: Option<IgnoredAny>,
-    #[serde(default)]
-    auth_context_switch: Option<IgnoredAny>,
-    #[serde(default)]
     evidence_capture: Option<IgnoredAny>,
 }
 
 impl EffectsProbe {
     fn feature(&self) -> Option<UnsupportedEdgeFeature> {
-        if self.auth_refresh.is_some() {
-            Some(UnsupportedEdgeFeature::AuthRefresh)
-        } else if self.auth_context_switch.is_some() {
-            Some(UnsupportedEdgeFeature::AuthContextSwitch)
-        } else if self.evidence_capture.is_some() {
+        if self.evidence_capture.is_some() {
             Some(UnsupportedEdgeFeature::EvidenceCapture)
         } else {
             None
@@ -168,12 +153,8 @@ mod tests {
                 UnsupportedEdgeFeature::CompatibilityRequestCrypto,
             ),
             (
-                r#""auth_refresh":{"success_status":200}"#,
-                UnsupportedEdgeFeature::AuthRefresh,
-            ),
-            (
-                r#""response":{"auth_context_switch":{}}"#,
-                UnsupportedEdgeFeature::AuthContextSwitch,
+                r#""response":{"evidence_capture":{}}"#,
+                UnsupportedEdgeFeature::EvidenceCapture,
             ),
             (
                 r#""evidence_capture":{"max_bytes":1}"#,
@@ -192,6 +173,8 @@ mod tests {
             with_route(r#""security_entry":"auth_entry""#),
             with_route(r#""share_issue":null"#),
             with_route(r#""security_entry":"share_entry""#),
+            with_route(r#""auth_refresh":{"success_status":200}"#),
+            with_route(r#""auth_context_switch":null"#),
             with_route(r#""request_crypto":{"mode":"OBSERVE"}"#),
             r#"{"policy":{"routes":"not routes"}}"#.to_owned(),
             "not json".to_owned(),

@@ -26,8 +26,8 @@ pub mod query_pagination;
 pub mod site;
 pub use site::{
     GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteAuthBinding,
-    SiteAuthRevoke, SiteConfig, SiteCryptoConfig, SiteHealthCheckConfig, SiteIdentityConfig,
-    SiteIssuedBy, SiteLimitsConfig, SitePageActions, SitePolicyConfig, SiteRequestCrypto,
-    SiteResourceGrant, SiteResponseCrypto, SiteRouteConfig, SiteSecretReference, SiteSensorHtml,
-    SiteSensorHtmlAdapter, SiteShareIssue, SiteWafConfig,
+    SiteAuthRevoke, SiteAuthTransition, SiteConfig, SiteCryptoConfig, SiteHealthCheckConfig,
+    SiteIdentityConfig, SiteIssuedBy, SiteLimitsConfig, SitePageActions, SitePolicyConfig,
+    SiteRequestCrypto, SiteResourceGrant, SiteResponseCrypto, SiteRouteConfig, SiteSecretReference,
+    SiteSensorHtml, SiteSensorHtmlAdapter, SiteShareIssue, SiteWafConfig,
 };

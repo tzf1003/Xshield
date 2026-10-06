@@ -3664,8 +3664,8 @@ pub(crate) const SITE_CONFIG_BODY_BYTES_MAX: usize = 256 * 1024;
 
 /// The stable reason for a body the strict configuration parse refused: a
 /// specific one when it asks for an edge feature the control plane
-/// deliberately does not manage (credential refresh, context switch, evidence
-/// capture, compatibility crypto, service entries),
+/// deliberately does not manage (evidence capture, compatibility crypto,
+/// service entries),
 /// so it is never mistaken for a typo; the generic one otherwise.
 fn rejected_body_reason(body: &[u8]) -> (&'static str, &'static str) {
     if xshield_core::site::find_unsupported_edge_feature(body).is_some() {
@@ -3986,7 +3986,7 @@ mod tests {
     #[test]
     fn rejected_bodies_name_unmanaged_edge_features_and_nothing_else() {
         let mut body = browser_loop();
-        body["policy"]["routes"][5]["auth_context_switch"] = json!({"success_status": 200});
+        body["policy"]["routes"][5]["evidence_capture"] = json!({"max_bytes": 1});
         let bytes = serde_json::to_vec(&body).unwrap();
         assert!(serde_json::from_slice::<SiteConfigRequest>(&bytes).is_err());
         assert_eq!(
@@ -4623,6 +4623,8 @@ mod tests {
             resource_grant: None,
             query_pagination: None,
             share_issue: None,
+            auth_refresh: None,
+            auth_context_switch: None,
         }];
         let sibling = input("site_a", broken);
         let plan = super::plan_snapshot(

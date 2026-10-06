@@ -90,13 +90,17 @@ pub enum ChangeRisk {
     /// removed or changed in any field: which responses mint a reusable
     /// read-only credential and which route redeems it without identity.
     ShareIssueChanged,
+    /// A route with an `auth_refresh` or an `auth_context_switch` was added,
+    /// removed or changed in any field: which responses replace a binding's
+    /// credential or move it to another authorization context.
+    AuthTransitionChanged,
     /// A difference that no category above names; risky by default.
     OtherChange,
 }
 
 impl ChangeRisk {
     /// Every reason, in token order of declaration.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Activation,
         Self::Takedown,
         Self::UpstreamChanged,
@@ -119,6 +123,7 @@ impl ChangeRisk {
         Self::ResourceGrantChanged,
         Self::QueryPaginationChanged,
         Self::ShareIssueChanged,
+        Self::AuthTransitionChanged,
         Self::OtherChange,
     ];
 
@@ -144,6 +149,7 @@ impl ChangeRisk {
                 | Self::ResourceGrantChanged
                 | Self::QueryPaginationChanged
                 | Self::ShareIssueChanged
+                | Self::AuthTransitionChanged
         )
     }
 
@@ -173,6 +179,7 @@ impl ChangeRisk {
             Self::ResourceGrantChanged => "RESOURCE_GRANT_CHANGED",
             Self::QueryPaginationChanged => "QUERY_PAGINATION_CHANGED",
             Self::ShareIssueChanged => "SHARE_ISSUE_CHANGED",
+            Self::AuthTransitionChanged => "AUTH_TRANSITION_CHANGED",
             Self::OtherChange => "OTHER_CHANGE",
         }
     }
@@ -203,7 +210,7 @@ pub fn direct_apply_may_waive<S: AsRef<str>>(reasons: &[S]) -> bool {
 /// Whether a route of a policy takes part in a facet.
 type FacetMember = fn(&SitePolicyConfig, &SiteRouteConfig) -> bool;
 
-const FLOW_FACETS: [(ChangeRisk, FacetMember); 6] = [
+const FLOW_FACETS: [(ChangeRisk, FacetMember); 7] = [
     (ChangeRisk::AuthEntryChanged, |_, route| {
         route.security_entry == super::SecurityEntry::AuthEntry
             || route.auth_binding.is_some()
@@ -225,6 +232,12 @@ const FLOW_FACETS: [(ChangeRisk, FacetMember); 6] = [
     // changing changes who can read what.
     (ChangeRisk::ShareIssueChanged, |_, route| {
         route.share_issue.is_some() || route.security_entry == super::SecurityEntry::ShareEntry
+    }),
+    // A refresh replaces a binding's credential and a context switch moves
+    // the binding to another authorization context (another account): both
+    // decide whose data the next requests are authorized for.
+    (ChangeRisk::AuthTransitionChanged, |_, route| {
+        route.auth_refresh.is_some() || route.auth_context_switch.is_some()
     }),
     // A grant's meaning depends on its target route as much as on the grant.
     (ChangeRisk::ResourceGrantChanged, |policy, route| {
@@ -413,6 +426,8 @@ mod tests {
             resource_grant: None,
             query_pagination: None,
             share_issue: None,
+            auth_refresh: None,
+            auth_context_switch: None,
         }
     }
 
@@ -1190,6 +1205,100 @@ mod tests {
         );
     }
 
+    /// The loop topology with a credential refresh and an account switch.
+    fn transition_flow() -> SiteConfig {
+        serde_json::from_str(include_str!(
+            "../../../../tests/site-config/auth-transition-flow.json"
+        ))
+        .unwrap()
+    }
+
+    /// A credential refresh or an account switch changing needs an
+    /// independent approver in both directions, and a direct apply cannot
+    /// waive it.
+    #[test]
+    fn auth_transition_changes_name_their_facet_in_both_directions() {
+        use ChangeRisk::*;
+        let cases: Vec<(&str, Mutation, Vec<ChangeRisk>)> = vec![
+            (
+                "refresh credential lease",
+                |c| {
+                    flow_route(c, "auth.refresh")
+                        .auth_refresh
+                        .as_mut()
+                        .unwrap()
+                        .credential_ttl_seconds = 60;
+                },
+                vec![RoutesChanged, AuthTransitionChanged],
+            ),
+            (
+                "context pointer of the switch",
+                |c| {
+                    "/identity/account".clone_into(
+                        &mut flow_route(c, "auth.context.switch")
+                            .auth_context_switch
+                            .as_mut()
+                            .unwrap()
+                            .authorization_context_pointer,
+                    );
+                },
+                vec![RoutesChanged, AuthTransitionChanged],
+            ),
+            (
+                "switch no longer switches",
+                |c| flow_route(c, "auth.context.switch").auth_context_switch = None,
+                vec![RoutesChanged, AuthTransitionChanged],
+            ),
+            (
+                "refresh path",
+                |c| flow_route(c, "auth.refresh").path = "/api/renew".to_owned(),
+                vec![RoutesChanged, AuthTransitionChanged],
+            ),
+            (
+                "refresh becomes a switch",
+                |c| {
+                    let block = flow_route(c, "auth.refresh").auth_refresh.take();
+                    flow_route(c, "auth.refresh").auth_context_switch = block;
+                },
+                // The route stays a member, but its content differs.
+                vec![RoutesChanged, AuthTransitionChanged],
+            ),
+        ];
+        for (name, mutate, expected) in cases {
+            let before = transition_flow();
+            let mut after = transition_flow();
+            mutate(&mut after);
+            assert_ne!(before, after, "{name} must change the configuration");
+            let expected = sorted(expected);
+            assert_eq!(
+                assess_change_risk(Some(&before), &after),
+                expected,
+                "{name}, forwards"
+            );
+            assert_eq!(
+                assess_change_risk(Some(&after), &before),
+                expected,
+                "{name}, backwards"
+            );
+            let reasons = expected
+                .iter()
+                .map(|risk| risk.as_str())
+                .collect::<Vec<_>>();
+            assert!(!direct_apply_may_waive(&reasons), "{name}");
+        }
+        assert!(assess_change_risk(None, &transition_flow()).contains(&AuthTransitionChanged));
+        assert!(!assess_change_risk(None, &flow()).contains(&AuthTransitionChanged));
+        let mut unrelated = transition_flow();
+        unrelated
+            .policy
+            .routes
+            .push(route("docs", "/docs", SecurityEntry::Public));
+        assert_eq!(
+            assess_change_risk(Some(&transition_flow()), &unrelated),
+            vec![RoutesChanged]
+        );
+    }
+
     #[test]
     fn going_live_with_flow_routes_names_every_facet() {
         use ChangeRisk::*;
@@ -1241,7 +1350,8 @@ mod tests {
                 ChangeRisk::PageActionsChanged,
                 ChangeRisk::ResourceGrantChanged,
                 ChangeRisk::QueryPaginationChanged,
-                ChangeRisk::ShareIssueChanged
+                ChangeRisk::ShareIssueChanged,
+                ChangeRisk::AuthTransitionChanged
             ]
         );
         assert_eq!(
@@ -1251,6 +1361,10 @@ mod tests {
         assert_eq!(
             ChangeRisk::from_token("SHARE_ISSUE_CHANGED"),
             Some(ChangeRisk::ShareIssueChanged)
+        );
+        assert_eq!(
+            ChangeRisk::from_token("AUTH_TRANSITION_CHANGED"),
+            Some(ChangeRisk::AuthTransitionChanged)
         );
     }
 }
