@@ -147,4 +147,12 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npx playwright install --with-deps chromium --only-shell
-      - run: npm run test:e2e
+      # A two-core runner running two Chromium workers and two dev servers sometimes starves a
+      # spec past even two retries (the mock tells a duplicate read by timing). Specs that
+      # still failed get one more serial pass on a quiet machine; if they fail again the job fails.
+      - name: Browser end-to-end suite
+        run: |
+          npm run test:e2e || {
+            echo "::warning::re-running only the failed specs once, serially"
+            npx playwright test --last-failed --workers=1
+          }
