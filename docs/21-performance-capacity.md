@@ -58,4 +58,18 @@ storage_capacity = Σ每日量 × 保留天数 × 副本系数 + 索引/恢复�
 
 **随后的修复：组提交**（13.9）。同一台机器、同样的 debug 构建，journal 在 SSD 上：1 并发约 116 请求/秒（8.9 ms，不变）、4 并发约 290 请求/秒（P50 13 ms）、16 并发约 920 请求/秒（P50 16 ms）、32 并发约 1380 请求/秒（P50 23 ms），此前不论并发都约 130–150 请求/秒。
 
-这些是形状，不是验证过的指标：debug 构建、机器上同时有其他任务（运行前的 load average 约 3.4）、桩源站与客户端都是 Python。Linux 与本地 NVMe 上 fsync 便宜得多，数字会大不相同。要引用任何数字，请在安静的机器上用 release 构建（`CARGO_TARGET_DIR=/Volumes/XshieldBuild/target-release scripts/bench_gateway.py`）重跑，并连同脚本打印的环境信息一起保存。尚未度量：身份路径（PostgreSQL 往返）、加密路径、TLS、HTTP/2 与长连接数、正文大小、多站点与 ClickHouse 发布滞后。
+**release 构建的基线（同一台机器，2026-10-06）。** `scripts/bench_gateway.py`，release 二进制，每行 6 s，闭环、每个客户端一条 keep-alive 连接，桩源站与客户端都是 Python；运行前 load average 约 6–8（机器上有其他项目在跑，不是安静状态）。edge 的公开路由，journal 的位置不同：
+
+| journal 位置 | 并发 | 请求/秒 | P50（ms） | P95（ms） | edge 比直连多出（P50 / P95，ms） |
+|---|---:|---:|---:|---:|---:|
+| macOS SSD（`F_FULLFSYNC`） | 1 | 137 | 7.0 | 9.0 | 6.9 / 8.7 |
+| macOS SSD | 16 | 885 | 16.6 | 24.9 | 14.7 / 20.4 |
+| macOS SSD | 64 | 3 709 | 16.7 | 24.9 | 客户端已饱和，增量无意义 |
+| 内存盘（无 fsync 成本） | 1 | 1 294 | 0.67 | 1.49 | 0.50 / 0.90 |
+| 内存盘 | 16 | 7 248 | 2.0 | 4.0 | 与直连相当（受 Python 客户端限制） |
+
+读法：edge 自身的软件开销（准入、两个审计批次的编码与追加、终态审计、转发）在这条路径上不到 1 ms；SSD 上多出的 6–7 ms 就是准入批次在转发前必须耐久的那一次同步，加上终态批次排队时对准入批次的挤占。1 个客户端时（P95 多出 8.7 ms）在“新增 P95 ≤ 15 ms”的目标之内；并发到 16 时同步排队使 P95 多出约 20 ms，超出目标。因此 journal 应放在低延迟的本地存储上（Linux 上的 NVMe 通常快得多，这台 macOS 笔记本的 `F_FULLFSYNC` 偏慢），目标是否成立必须在生产形态的存储上重测。每个简单 GET 写入约 5.2 KB 的 journal（两个批次，一次约 6 个事件，约 0.9 KB 一个），与 21.3 的假设同量级。
+
+这些是形状，不是验证过的指标：load average 不低，桩源站与客户端是 Python，只测了一台机器与一种存储。要引用任何数字，请在安静的机器上重跑（`CARGO_TARGET_DIR=/Volumes/XshieldBuild/target-release scripts/bench_gateway.py`）并连同脚本打印的环境信息一起保存。
+
+尚未度量：身份路径（PostgreSQL 往返）、加密路径、TLS、HTTP/2 与长连接数、正文大小、多站点与 ClickHouse 发布滞后。

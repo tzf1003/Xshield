@@ -25,8 +25,11 @@ What it does and does not measure
 Needs: cargo, python3. Build output goes under CARGO_TARGET_DIR, which must be
 set (the script refuses an in-repo default so a release build never lands on the
 system disk by accident). The journal and logs live in a scratch directory under
---scratch (default: TMPDIR) and are removed on exit; the journal is capped at
-256 MiB.
+--scratch (default: TMPDIR) and are removed on exit. The journal grows by about
+two durable batches per request (its size is printed at the end) and is allowed
+up to 8 GiB so the run never meets the fail-closed quota that production relieves
+by publishing sealed segments; make sure the scratch volume has room for the
+run you ask for (a 10 s row at 6,000 requests/s writes a few hundred MB).
 
   CARGO_TARGET_DIR=/Volumes/XshieldBuild/target-release scripts/bench_gateway.py
 """
@@ -149,8 +152,8 @@ def edge_config(directory: Path, edge_port: int, origin_port: int) -> Path:
             "directory": str(audit),
             "key_id": "journal-bench-r1",
             "producer_id": "edge-bench",
-            "max_bytes": 268_435_456,
-            "high_watermark_bytes": 201_326_592,
+            "max_bytes": 8_589_934_592,
+            "high_watermark_bytes": 6_442_450_944,
             "segment_max_bytes": 8_388_608,
         },
         # The default site rate limit (1000 requests/s) would turn a benchmark
@@ -270,6 +273,11 @@ def main() -> int:
         for clients in sorted({clients for _name, clients in rows}):
             origin, edge = rows[("origin", clients)], rows[("edge", clients)]
             print(f"| {clients} | {edge[1] - origin[1]:.3f} | {edge[2] - origin[2]:.3f} | {edge[3] - origin[3]:.3f} |")
+        print()
+        journal_bytes = sum(item.stat().st_size for item in (scratch / "audit").rglob("*") if item.is_file())
+        served = sum(value[5] for key, value in rows.items() if key[0] != "origin")
+        print(f"Journal written: {journal_bytes / 1e6:,.0f} MB for {served:,} edge requests "
+              f"(about {journal_bytes / max(served, 1):,.0f} bytes each, two durable batches per request).")
         print()
         print("Budget (docs/21): added P95 <= 15 ms for the no-model path. This table is one machine's")
         print("indication, not a verified result; see the script header for what is not measured.")
