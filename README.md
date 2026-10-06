@@ -103,6 +103,7 @@ Xshield 是用 Rust 实现的上下文增强型 WAF，采用纯前置代理，�
 | 29 | [控制 API 与审计责任清单](docs/29-api-endpoint-catalog.md) |
 | 30 | [控制台重构方案与实施记录](docs/30-console-redesign.md) |
 | 31 | [已实现机制说明](docs/31-implemented-mechanisms.md) |
+| 32 | [站点 observe → enforce 上线流程（提案，待决策）](docs/32-observe-to-enforce-rollout.md) |
 
 ## 配套材料
 

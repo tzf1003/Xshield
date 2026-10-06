@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 4052,
-  "passed_count": 4052,
+  "checks_total": 4058,
+  "passed_count": 4058,
   "acceptance_cases": {
     "total": 78,
     "planned": 18,
@@ -156,6 +156,11 @@
       "detail": ""
     },
     {
+      "name": "json:tests/site-config/auth-transition-flow.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "json:tests/site-config/browser-loop.gateway.json",
       "passed": true,
       "detail": ""
@@ -167,6 +172,11 @@
     },
     {
       "name": "json:tests/site-config/pre-flow.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:tests/site-config/share-flow.json",
       "passed": true,
       "detail": ""
     },
@@ -19491,6 +19501,21 @@
       "detail": ""
     },
     {
+      "name": "sources:32-observe-to-enforce-rollout.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:32-observe-to-enforce-rollout.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:32-observe-to-enforce-rollout.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:docs/22-delivery-roadmap.md",
       "passed": true,
       "detail": ""
@@ -19717,6 +19742,11 @@
     },
     {
       "name": "link:README.md:docs/31-implemented-mechanisms.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/32-observe-to-enforce-rollout.md",
       "passed": true,
       "detail": ""
     },
