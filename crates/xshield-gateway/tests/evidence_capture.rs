@@ -148,6 +148,12 @@ async fn response_capture_is_durable_redacted_and_fail_closed() {
     runtime.gateway = Some(start());
     wait_for_listener(address);
     let fetch = |path: &str| {
+        // curl creates its output files only when bytes arrive. A fail-closed answer can end
+        // with headers and no body, so files left by the previous request must not be
+        // mistaken for this one's (that made the checks below flaky under load: the earlier
+        // successful body, which holds the hostile text, was read back as the failed reply).
+        let _ = fs::remove_file(root.join("headers"));
+        let _ = fs::remove_file(root.join("body"));
         let result = Command::new("curl")
             .args(["--silent", "--max-time", "5", "--http1.0", "-D"])
             .arg(root.join("headers"))
@@ -156,7 +162,7 @@ async fn response_capture_is_durable_redacted_and_fail_closed() {
             .arg(format!("http://{address}{path}"))
             .output()
             .unwrap();
-        let headers = fs::read_to_string(root.join("headers")).unwrap();
+        let headers = fs::read_to_string(root.join("headers")).unwrap_or_default();
         let request_id = headers
             .lines()
             .find_map(|line| {
