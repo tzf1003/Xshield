@@ -45,8 +45,18 @@ jobs:
       XSHIELD_TEST_CLICKHOUSE_URL: http://localhost:8123
       XSHIELD_TEST_CLICKHOUSE_USER: xshield_test
       XSHIELD_TEST_CLICKHOUSE_PASSWORD: xshield_test
+      # A debug build of this workspace plus its test binaries is about 16 GB with
+      # full debug info, more than the runner has free. Line tables keep backtraces
+      # useful at a fraction of the size, and incremental artifacts are never reused.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
+      # The hosted runner ships tens of GB of toolchains this job never uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       # Pinned to rust-toolchain.toml's channel: a floating `stable` turns every Rust
       # release's new pedantic lints into a red main. Bump both together.
       - uses: dtolnay/rust-toolchain@master
