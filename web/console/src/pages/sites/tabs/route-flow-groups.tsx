@@ -1,7 +1,9 @@
-import { Input, Select } from "antd";
+import { Button, Input, Select } from "antd";
 import { type ReactNode, useId } from "react";
 import type {
+  PaginationKind,
   SiteAuthBinding,
+  SiteQueryPagination,
   SiteIssuedBy,
   SitePageActions,
   SiteResourceGrant,
@@ -10,10 +12,15 @@ import type {
 } from "../../../api.ts";
 import {
   blockOffered,
+  DEFAULT_MAX_PAGE_SIZE,
+  emptyQueryParameter,
   type FlowBlock,
   grantTargetOptions,
+  MAX_QUERY_PARAMETERS,
+  PAGE_SIZE_CEILING,
   pageRootOptions,
   type RouteOption,
+  withQueryParameter,
 } from "../../../sites/model/route-flow.ts";
 import { formatSeconds } from "../../../sites/model/units.ts";
 import type { Issue } from "../../../sites/model/validation.ts";
@@ -437,7 +444,7 @@ export function ResourceGrantGroup(props: FlowGroupProps) {
   return (
     <FlowGroup
       title="响应资源资格"
-      note="列表响应以成功状态码返回且通过严格 JSON 校验后，edge 为其中每一项向当前身份签发一个详情动作资格，并把不透明引用写进每项的“动作引用字段”；浏览器打开详情时出示它。开启后这条路由不接受任何查询串，调用者不能借参数选择列出谁的对象。"
+      note="列表响应以成功状态码返回且通过严格 JSON 校验后，edge 为其中每一项向当前身份签发一个详情动作资格，并把不透明引用写进每项的“动作引用字段”；浏览器打开详情时出示它。默认这条路由不接受任何查询串，调用者不能借参数选择列出谁的对象；需要翻页时在下方“分页参数”声明。"
       toggle={{
         label: "签发资源资格",
         checked: grant !== undefined,
@@ -502,6 +509,115 @@ export function ResourceGrantGroup(props: FlowGroupProps) {
           {num("max_items", "单次最多项数", "一次响应最多为多少项签发资格，1–1000。", 1_000)}
           {num("max_active_grants", "活动资格上限", "同一身份同时有效的资格数，1–5000。", 5_000)}
           <p className="muted xs-flow-count">{DESCRIPTOR_NOTE}</p>
+        </div>
+      )}
+    </FlowGroup>
+  );
+}
+
+const KIND_LABEL: Readonly<Record<PaginationKind, string>> = {
+  page: "页码 page（1–10000）",
+  page_size: "页长 page_size（1–上限）",
+  offset: "偏移 offset（0–1000000）",
+};
+
+/**
+ * 分页参数: the only query string a list that issues grants (or a non-resource UI action) may
+ * carry. Values are plain digits within fixed ranges and the origin receives a query the edge
+ * rebuilt, so the caller still cannot choose whose objects are listed.
+ */
+export function QueryPaginationGroup(props: FlowGroupProps) {
+  const { route, issueFor, disabled, onToggle, onBlock } = props;
+  const block = route.query_pagination;
+  if (!block && !blockOffered(route, "query_pagination")) return null;
+  const replace = (next: SiteQueryPagination) => onBlock("query_pagination", next);
+  return (
+    <FlowGroup
+      title="分页参数"
+      note="默认这条路由不接受任何查询串。声明后只接受下列分页参数，每个至多一次，值只能是十进制数字（不带前导零、不做任何编码），否则以 FIELD_NOT_ALLOWED 拒绝；转发给源站的查询串由 edge 按声明顺序重建。没有游标或不透明类型：它们可能编码出“列出谁的对象”。变更需独立审批人批准。"
+      toggle={{
+        label: "接受分页参数",
+        checked: block !== undefined,
+        onChange: (on) => onToggle("query_pagination", on),
+        disabled,
+      }}
+      issue={issueFor("query_pagination")}
+    >
+      {block && (
+        <div className="xs-flow-fields">
+          {block.parameters.map((parameter, at) => {
+            const field = `query_pagination.parameters.${at}`;
+            return (
+              // biome-ignore lint/suspicious/noArrayIndexKey: parameters have no identity; they are edited in place by position
+              <fieldset key={at} className="xs-flow-fields" aria-label={`分页参数 ${at + 1}`}>
+                <Field
+                  id={`flow-paging-name-${at}`}
+                  label={`参数名 ${at + 1}`}
+                  required
+                  issue={issueFor(`${field}.name`)}
+                  hint="小写字母 a–z 与下划线，1–32 个字符，例如 page；不能与任何路由的资源参数同名。"
+                >
+                  <Input
+                    className="mono"
+                    value={parameter.name}
+                    maxLength={64}
+                    spellCheck={false}
+                    onChange={(event) =>
+                      replace(withQueryParameter(block, at, { name: event.target.value }))
+                    }
+                  />
+                </Field>
+                <Field id={`flow-paging-kind-${at}`} label={`类型 ${at + 1}`}>
+                  <Select<PaginationKind>
+                    value={parameter.kind}
+                    disabled={disabled}
+                    options={(Object.keys(KIND_LABEL) as PaginationKind[]).map((value) => ({
+                      value,
+                      label: KIND_LABEL[value],
+                    }))}
+                    onChange={(value) => replace(withQueryParameter(block, at, { kind: value }))}
+                  />
+                </Field>
+                {parameter.kind === "page_size" && (
+                  <Field
+                    id={`flow-paging-max-${at}`}
+                    label={`页长上限 ${at + 1}`}
+                    issue={issueFor(`${field}.max_value`)}
+                    hint={`1–${PAGE_SIZE_CEILING}，留空为默认 ${DEFAULT_MAX_PAGE_SIZE}。`}
+                  >
+                    <NumInput
+                      value={parameter.max_value ?? Number.NaN}
+                      min={1}
+                      max={PAGE_SIZE_CEILING}
+                      onChange={(value) =>
+                        replace(
+                          withQueryParameter(block, at, {
+                            max_value: Number.isFinite(value) ? value : undefined,
+                          }),
+                        )
+                      }
+                    />
+                  </Field>
+                )}
+                <Button
+                  size="small"
+                  disabled={disabled || block.parameters.length <= 1}
+                  onClick={() =>
+                    replace({ parameters: block.parameters.filter((_, index) => index !== at) })
+                  }
+                >
+                  删除参数 {at + 1}
+                </Button>
+              </fieldset>
+            );
+          })}
+          <Button
+            size="small"
+            disabled={disabled || block.parameters.length >= MAX_QUERY_PARAMETERS}
+            onClick={() => replace({ parameters: [...block.parameters, emptyQueryParameter()] })}
+          >
+            添加参数
+          </Button>
         </div>
       )}
     </FlowGroup>

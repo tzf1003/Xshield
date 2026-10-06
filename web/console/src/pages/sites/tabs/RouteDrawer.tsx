@@ -6,6 +6,7 @@ import {
   emptyAuthRevoke,
   emptyIssuedBy,
   emptyPageActions,
+  emptyQueryPagination,
   emptyResourceGrant,
   emptySensorBuild,
   type FlowBlock,
@@ -32,6 +33,7 @@ import {
   type FlowGroupProps,
   IssuedByGroup,
   PageActionsGroup,
+  QueryPaginationGroup,
   ResourceGrantGroup,
 } from "./route-flow-groups";
 import { SensorHtmlGroup } from "./route-sensor-html";
@@ -78,6 +80,7 @@ const fresh: { [K in FlowBlock]: () => NonNullable<SiteRouteConfig[K]> } = {
   page_actions: emptyPageActions,
   issued_by: () => emptyIssuedBy(),
   resource_grant: () => emptyResourceGrant(),
+  query_pagination: emptyQueryPagination,
 };
 
 /** Section heading inside the drawer. */
@@ -446,6 +449,7 @@ export function RouteDrawer({
         <SensorHtmlGroup {...flow} />
         <PageActionsGroup {...flow} />
         <ResourceGrantGroup {...flow} />
+        <QueryPaginationGroup {...flow} />
         <AuthRevokeGroup {...flow} />
 
         <Group

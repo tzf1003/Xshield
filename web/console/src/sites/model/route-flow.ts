@@ -20,6 +20,8 @@ import type {
   SiteAuthRevoke,
   SiteIssuedBy,
   SitePageActions,
+  SiteQueryPagination,
+  SiteQueryParameter,
   SiteResourceGrant,
   SiteRouteConfig,
   SiteSensorHtmlAdapter,
@@ -41,6 +43,7 @@ export const flowBlockLabel: Readonly<Record<FlowBlock, string>> = {
   page_actions: "页面签发动作",
   issued_by: "由页面签发",
   resource_grant: "响应资源资格",
+  query_pagination: "分页参数",
 };
 
 /** The item member the edge writes each issued reference into (the browser loop's spelling). */
@@ -89,6 +92,38 @@ export const emptyResourceGrant = (target = ""): SiteResourceGrant => ({
   max_active_grants: 500,
 });
 
+/** A new parameter: the name is the operator's to choose, the kind starts as a page number. */
+export const emptyQueryParameter = (): SiteQueryParameter => ({ name: "", kind: "page" });
+
+export const emptyQueryPagination = (): SiteQueryPagination => ({
+  parameters: [{ name: "page", kind: "page" }],
+});
+
+/** Most parameters one route may declare (core `MAX_PAGINATION_PARAMETERS`). */
+export const MAX_QUERY_PARAMETERS = 4;
+/** Default and hard upper bound of a `page_size` value. */
+export const DEFAULT_MAX_PAGE_SIZE = 200;
+export const PAGE_SIZE_CEILING = 1_000;
+
+/** Replaces one parameter; `max_value` exists only for `page_size` and is dropped otherwise. */
+export function withQueryParameter(
+  block: SiteQueryPagination,
+  index: number,
+  change: Partial<SiteQueryParameter>,
+): SiteQueryPagination {
+  return {
+    parameters: block.parameters.map((parameter, at) => {
+      if (at !== index) return parameter;
+      const next = { ...parameter, ...change };
+      if (next.kind !== "page_size") {
+        const { max_value: _dropped, ...rest } = next;
+        return rest;
+      }
+      return next;
+    }),
+  };
+}
+
 const routeOnly = (admission: RouteAdmission) => (route: SiteRouteConfig) =>
   route.security_entry === admission;
 const notPage = (route: SiteRouteConfig) => route.response_mode !== "SENSOR_HTML";
@@ -106,6 +141,10 @@ const fits: Readonly<Record<FlowBlock, (route: SiteRouteConfig) => boolean>> = {
     route.response_mode === "SENSOR_HTML" && routeOnly("authenticated_root")(route),
   issued_by: routeOnly("ui_action_required"),
   resource_grant: (route) =>
+    (route.security_entry === "authenticated_root" ||
+      route.security_entry === "ui_action_required") &&
+    notPage(route),
+  query_pagination: (route) =>
     (route.security_entry === "authenticated_root" ||
       route.security_entry === "ui_action_required") &&
     notPage(route),
@@ -130,6 +169,17 @@ export const bindsResource = (route: SiteRouteConfig) =>
  * first-hop actions only (such a route is reached through a list's resource grant instead).
  */
 export function blockOffered(route: SiteRouteConfig, block: FlowBlock): boolean {
+  if (block === "query_pagination") {
+    // Only where the edge otherwise refuses every query: a grant-issuing root list or a
+    // non-resource UI action, and only for GET (core `validate_query_pagination`).
+    return (
+      blockFits(route, block) &&
+      route.method === "GET" &&
+      (route.security_entry === "authenticated_root"
+        ? route.resource_grant !== undefined
+        : !bindsResource(route))
+    );
+  }
   return blockFits(route, block) && !(block === "issued_by" && bindsResource(route));
 }
 
@@ -140,6 +190,7 @@ const blocks: readonly FlowBlock[] = [
   "page_actions",
   "issued_by",
   "resource_grant",
+  "query_pagination",
 ];
 
 /** Sets (or, with `undefined`, removes) one block; the key disappears when removed. */

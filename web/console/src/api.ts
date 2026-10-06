@@ -1245,6 +1245,22 @@ export type SiteResourceGrant = {
   max_active_grants: number;
 };
 
+/** What a pagination query parameter selects; there is deliberately no cursor kind. */
+export type PaginationKind = "page" | "page_size" | "offset";
+
+/** One declared pagination parameter; `max_value` exists only for `page_size`. */
+export type SiteQueryParameter = {
+  name: string;
+  kind: PaginationKind;
+  max_value?: number;
+};
+
+/**
+ * The pagination-shaped query parameters a route may carry
+ * (`xshield_core::query_pagination::SiteQueryPagination`). Absent means any query is refused.
+ */
+export type SiteQueryPagination = { parameters: SiteQueryParameter[] };
+
 /**
  * One route exactly as the server stores it. The browser provenance-flow blocks at the end are
  * present only when set (the server omits unset ones), so a decoded route serializes back to the
@@ -1270,6 +1286,7 @@ export type SiteRouteConfig = {
   page_actions?: SitePageActions;
   issued_by?: SiteIssuedBy;
   resource_grant?: SiteResourceGrant;
+  query_pagination?: SiteQueryPagination;
 };
 
 /** The flow blocks of a route, in the server's field order. */
@@ -1280,6 +1297,7 @@ export const routeFlowKeys = [
   "page_actions",
   "issued_by",
   "resource_grant",
+  "query_pagination",
 ] as const satisfies readonly (keyof SiteRouteConfig)[];
 
 export type SitePolicyConfig = {
@@ -1654,6 +1672,30 @@ function decodeResourceGrant(value: unknown): SiteResourceGrant {
   };
 }
 
+function decodeQueryPagination(value: unknown): SiteQueryPagination {
+  const row = object(value);
+  exactFields(row, ["parameters"]);
+  return {
+    parameters: list(row.parameters, 4, (item) => {
+      const parameter = object(item);
+      knownFields(parameter, ["name", "kind", "max_value"]);
+      ensure(parameter.name !== undefined && parameter.kind !== undefined);
+      const kind = (["page", "page_size", "offset"] as const).find(
+        (candidate) => candidate === text(parameter.kind, 16),
+      );
+      ensure(kind !== undefined);
+      return {
+        name: text(parameter.name, 64),
+        kind,
+        // The server omits an unset bound, so an absent key must stay absent to round-trip.
+        ...(parameter.max_value === undefined
+          ? {}
+          : { max_value: integer(parameter.max_value, 0, 1_000_000) }),
+      };
+    }),
+  };
+}
+
 /** The flow blocks a stored route carries, in the server's order and only when present. */
 function decodeRouteFlow(route: Record<string, unknown>): Partial<SiteRouteConfig> {
   return {
@@ -1673,6 +1715,9 @@ function decodeRouteFlow(route: Record<string, unknown>): Partial<SiteRouteConfi
     ...(route.resource_grant === undefined
       ? {}
       : { resource_grant: decodeResourceGrant(route.resource_grant) }),
+    ...(route.query_pagination === undefined
+      ? {}
+      : { query_pagination: decodeQueryPagination(route.query_pagination) }),
   };
 }
 

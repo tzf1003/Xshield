@@ -138,6 +138,7 @@ export const messages = {
   CONTROL_SITE_SENSOR_HTML_INVALID: "SENSOR_HTML 页面适配未通过校验。",
   CONTROL_SITE_PAGE_ACTIONS_INVALID: "页面签发（page_actions / issued_by）未通过校验。",
   CONTROL_SITE_RESOURCE_GRANT_INVALID: "响应资源资格（resource_grant）未通过校验。",
+  CONTROL_SITE_QUERY_PAGINATION_INVALID: "查询参数白名单（query_pagination）未通过校验。",
   CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT: "同一动作与映射修订被赋予了两种含义。",
   CONTROL_SITE_POLICY_REVISION_REUSED:
     "策略版本标签已绑定另一组页面动作，请为这次变更设置新的策略版本（policy_revision）。",

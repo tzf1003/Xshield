@@ -301,6 +301,40 @@ function flowProblems(route: SiteRouteConfig): { field: string; text: string }[]
       ttl("issued_by.ttl_seconds", issued.ttl_seconds, "动作期限");
     }
   }
+  const paging = route.query_pagination;
+  if (paging) {
+    const applicable =
+      route.method === "GET" &&
+      (route.security_entry === "authenticated_root"
+        ? route.resource_grant !== undefined
+        : route.security_entry === "ui_action_required" && !hasResourceBinding(route));
+    if (!applicable) {
+      add(
+        "query_pagination",
+        "分页参数（query_pagination）只能用于发放响应资源资格的“已认证根”GET 列表，或不绑定资源的“必须有界面操作来源”GET 路由。",
+      );
+    }
+    if (paging.parameters.length < 1 || paging.parameters.length > 4) {
+      add("query_pagination", "分页参数须声明 1–4 个。");
+    }
+    const names = new Set<string>();
+    paging.parameters.forEach((parameter, at) => {
+      const field = `query_pagination.parameters.${at}`;
+      if (!/^[a-z_]{1,32}$/.test(parameter.name)) {
+        add(`${field}.name`, "参数名只能含小写字母 a–z 和下划线，1–32 个字符。");
+      } else if (names.has(parameter.name)) {
+        add(`${field}.name`, "参数名与另一个参数重复。");
+      }
+      names.add(parameter.name);
+      if (parameter.kind === "page_size") {
+        if (parameter.max_value !== undefined && !inRange(parameter.max_value, 1, 1_000)) {
+          add(`${field}.max_value`, "页长上限须为 1–1000（默认 200）。");
+        }
+      } else if (parameter.max_value !== undefined) {
+        add(`${field}.max_value`, "只有页长（page_size）可以设置上限；页码与偏移的范围固定。");
+      }
+    });
+  }
   const grant = route.resource_grant;
   if (grant) {
     if (
@@ -649,6 +683,25 @@ export function validateFlowReferences(
         `资源资格目标“${grant.target_operation_id}”必须是已存在、绑定资源的“必须有界面操作来源”路由。`,
       );
     }
+  });
+  // A pagination name must never double as a resource selector of any route (case-folded).
+  const resourceNames = new Set(
+    routes.flatMap((route) =>
+      [route.resource_query_parameter, route.resource_path_parameter].flatMap((value) =>
+        value ? [value.toLowerCase()] : [],
+      ),
+    ),
+  );
+  routes.forEach((route, index) => {
+    route.query_pagination?.parameters.forEach((parameter, at) => {
+      if (resourceNames.has(parameter.name.toLowerCase())) {
+        add(
+          index,
+          `query_pagination.parameters.${at}.name`,
+          `参数名“${parameter.name}”与某条路由的资源参数同名（不区分大小写），调用者可能借它选择对象。`,
+        );
+      }
+    });
   });
   const indexes = (pick: (route: SiteRouteConfig) => boolean) =>
     routes.flatMap((route, index) => (pick(route) ? [index] : []));

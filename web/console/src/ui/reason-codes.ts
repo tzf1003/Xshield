@@ -151,6 +151,11 @@ export const reasonDictionary = {
     "响应资源资格不合法：目标必须是已存在、绑定资源的“必须有界面操作来源”路由，指针、数量、期限需在边界内。",
     "在“路由与操作”打开列表路由，核对“响应资源资格”的目标详情路由与参数后重新保存。",
   ),
+  CONTROL_SITE_QUERY_PAGINATION_INVALID: entry(
+    "danger",
+    "查询参数白名单不合法：只能用于发放响应资格的“已认证根”GET 列表或非资源的“必须有界面操作来源”GET 路由，最多 4 个小写参数名（a–z 与下划线，1–32 字符，不重复），且不能与任何路由的资源参数同名。",
+    "在“路由与操作”打开该路由，核对“分页参数”后重新保存。",
+  ),
   CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT: entry(
     "danger",
     "同一操作来源与映射修订被两条路由赋予了不同含义，edge 无法为它建立唯一的动作描述。",
@@ -373,6 +378,7 @@ export type RiskToken =
   | "SENSOR_HTML_CHANGED"
   | "PAGE_ACTIONS_CHANGED"
   | "RESOURCE_GRANT_CHANGED"
+  | "QUERY_PAGINATION_CHANGED"
   | "OTHER_CHANGE";
 
 export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail: string }>> = {
@@ -440,6 +446,10 @@ export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail:
   RESOURCE_GRANT_CHANGED: {
     label: "响应资源资格变更",
     detail: "决定列表响应为哪些资源签发哪个详情动作；只能由独立审批人批准。",
+  },
+  QUERY_PAGINATION_CHANGED: {
+    label: "查询参数白名单变更",
+    detail: "决定发放资格的列表或界面操作路由可以把哪些分页参数带给源站；只能由独立审批人批准。",
   },
   OTHER_CHANGE: {
     label: "其他安全相关字段变更",

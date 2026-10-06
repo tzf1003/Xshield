@@ -5,7 +5,8 @@ export type FlowToken =
   | "AUTH_ENTRY_CHANGED"
   | "SENSOR_HTML_CHANGED"
   | "PAGE_ACTIONS_CHANGED"
-  | "RESOURCE_GRANT_CHANGED";
+  | "RESOURCE_GRANT_CHANGED"
+  | "QUERY_PAGINATION_CHANGED";
 
 type Member = (policy: SitePolicyConfig, route: SiteRouteConfig) => boolean;
 
@@ -40,6 +41,7 @@ export const flowFacets: readonly (readonly [FlowToken, Member])[] = [
         (source) => source.resource_grant?.target_operation_id === route.operation_id,
       ),
   ],
+  ["QUERY_PAGINATION_CHANGED", (_, route) => route.query_pagination !== undefined],
 ];
 
 /** The facets `route` belongs to within `policy`, in facet order. */

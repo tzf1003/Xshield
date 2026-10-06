@@ -346,6 +346,16 @@ const summarizeGrant = (r: SiteRouteConfig) =>
     ? `→ ${r.resource_grant.target_operation_id}（${r.resource_grant.target_mapping_revision}）· ≤ ${r.resource_grant.max_items} 项 · ${formatSeconds(r.resource_grant.ttl_seconds)}`
     : none;
 
+const summarizePagination = (r: SiteRouteConfig) =>
+  r.query_pagination
+    ? r.query_pagination.parameters
+        .map(
+          (parameter) =>
+            `${parameter.name}（${parameter.kind}${parameter.max_value === undefined ? "" : ` ≤ ${parameter.max_value}`}）`,
+        )
+        .join("、") || "（空）"
+    : none;
+
 /**
  * The flow blocks of a route in a few words each, for an added or removed route and the route
  * table: a route that establishes identity or issues actions must not read like a plain one.
@@ -360,6 +370,8 @@ export function flowParts(route: SiteRouteConfig, withMode = true): string[] {
     route.page_actions && "签发页面动作",
     route.issued_by && `由 ${route.issued_by.page_operation_id || "（未选）"} 签发`,
     route.resource_grant && `资源资格 → ${route.resource_grant.target_operation_id || "（未选）"}`,
+    route.query_pagination &&
+      `分页参数 ${route.query_pagination.parameters.map((parameter) => parameter.name || "（未命名）").join("、")}`,
   ].filter((part): part is string => typeof part === "string");
 }
 
@@ -420,6 +432,12 @@ const routeSpecs: readonly RouteSpec[] = [
     label: "响应资源资格",
     format: summarizeGrant,
     risk: "RESOURCE_GRANT_CHANGED",
+  },
+  {
+    id: "query_pagination",
+    label: "分页参数",
+    format: summarizePagination,
+    risk: "QUERY_PAGINATION_CHANGED",
   },
 ];
 

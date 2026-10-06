@@ -655,3 +655,8 @@ details.xs-card,
     padding: 14px;
   }
 }
+
+fieldset.xs-flow-fields {
+  border: 0;
+  min-width: 0;
+}

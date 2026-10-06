@@ -5,6 +5,7 @@ import type {
   SiteIssuedBy,
   SitePageActions,
   SitePolicyConfig,
+  SiteQueryPagination,
   SiteResourceGrant,
   SiteRouteConfig,
   SiteSecretReference,
@@ -242,12 +243,30 @@ const grantFromStored = (row: Record_): SiteResourceGrant => ({
   max_active_grants: num(row.max_active_grants, 0),
 });
 
+const paginationFromStored = (row: Record_): SiteQueryPagination => ({
+  parameters: Array.isArray(row.parameters)
+    ? row.parameters.filter(isRecord).map((parameter) => ({
+        name: str(parameter.name),
+        kind: oneOf(parameter.kind, ["page", "page_size", "offset"] as const, "page"),
+        ...(typeof parameter.max_value === "number" ? { max_value: parameter.max_value } : {}),
+      }))
+    : [],
+});
+
 /**
  * The provenance-flow blocks of a stored route, in the server's order and only when present, so
  * the approval explanation and diffs of a revision see exactly what the server compares.
  */
 function flowFromStored(row: Record_): Partial<SiteRouteConfig> {
-  const { auth_binding, auth_revoke, sensor_html, page_actions, issued_by, resource_grant } = row;
+  const {
+    auth_binding,
+    auth_revoke,
+    sensor_html,
+    page_actions,
+    issued_by,
+    resource_grant,
+    query_pagination,
+  } = row;
   return {
     ...(isRecord(auth_binding) ? { auth_binding: bindingFromStored(auth_binding) } : {}),
     ...(isRecord(auth_revoke)
@@ -257,6 +276,9 @@ function flowFromStored(row: Record_): Partial<SiteRouteConfig> {
     ...(isRecord(page_actions) ? { page_actions: pageFromStored(page_actions) } : {}),
     ...(isRecord(issued_by) ? { issued_by: issuedFromStored(issued_by) } : {}),
     ...(isRecord(resource_grant) ? { resource_grant: grantFromStored(resource_grant) } : {}),
+    ...(isRecord(query_pagination)
+      ? { query_pagination: paginationFromStored(query_pagination) }
+      : {}),
   };
 }
 

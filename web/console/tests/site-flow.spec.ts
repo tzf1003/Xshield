@@ -551,6 +551,58 @@ test("flow edits show in the diff and the approval banner, and nothing offers a 
   await expect(confirm).toContainText("CONTROL_SITE_POLICY_REVISION_REUSED");
 });
 
+test("an operator declares pagination on the list, with the server's messages next to each field", async ({
+  page,
+}) => {
+  const mock = await mockSite(page, { config: loop() });
+  await signInAt(page, "/sites/site_alpha/routes");
+
+  // Offered where the edge enforces it, and nowhere else.
+  await page.getByRole("button", { name: "编辑路由 orders.read" }).click();
+  let drawer = drawerNamed(page, "编辑路由");
+  await expect(group(drawer, "分页参数")).toHaveCount(0);
+  await drawer.getByRole("button", { name: "取消" }).click();
+
+  await page.getByRole("button", { name: "编辑路由 orders.list" }).click();
+  drawer = drawerNamed(page, "编辑路由");
+  const paging = group(drawer, "分页参数");
+  await paging.getByRole("switch", { name: "接受分页参数" }).click();
+  await expect(field(paging, "参数名 1")).toHaveValue("page");
+
+  // Each rule names itself next to the control that fixes it.
+  await field(paging, "参数名 1").fill("order_id");
+  await expect(paging.getByText("与某条路由的资源参数同名")).toBeVisible();
+  await expect(apply(drawer)).toBeEnabled();
+  await field(paging, "参数名 1").fill("Page");
+  await expect(paging.getByText("参数名只能含小写字母 a–z 和下划线")).toBeVisible();
+  await expect(apply(drawer)).toBeDisabled();
+  await field(paging, "参数名 1").fill("page");
+  await paging.getByRole("button", { name: "添加参数" }).click();
+  await field(paging, "参数名 2").fill("page");
+  await expect(paging.getByText("参数名与另一个参数重复")).toBeVisible();
+  await field(paging, "参数名 2").fill("page_size");
+  await choose(page, field(paging, "类型 2"), "页长 page_size");
+  await field(paging, "页长上限 2").fill("50");
+  await apply(drawer).click();
+
+  await bar(page).getByRole("button", { name: "查看差异" }).click();
+  const diff = page.getByRole("dialog", { name: "未保存修改的差异" });
+  await expect(diff.getByRole("row", { name: /路由 orders\.list · 分页参数/ })).toContainText(
+    "page_size（page_size ≤ 50）",
+  );
+  await diff.getByRole("button", { name: "关闭" }).last().click();
+
+  await bar(page).getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("已保存为");
+  const saved = byId(routesOf(sent(mock, "PUT")));
+  expect(saved["orders.list"]?.query_pagination).toEqual({
+    parameters: [
+      { name: "page", kind: "page" },
+      { name: "page_size", kind: "page_size", max_value: 50 },
+    ],
+  });
+});
+
 const openGroups: [string, string, (drawer: Locator, page: Page) => Promise<void>][] = [
   ["auth.login", "身份建立", async () => {}],
   [
@@ -565,6 +617,17 @@ const openGroups: [string, string, (drawer: Locator, page: Page) => Promise<void
     },
   ],
   ["orders.list", "响应资源资格", async () => {}],
+  [
+    "orders.list",
+    "分页参数",
+    async (drawer) => {
+      const paging = group(drawer, "分页参数");
+      await paging.getByRole("switch", { name: "接受分页参数" }).click();
+      await paging.getByRole("button", { name: "添加参数" }).click();
+      await field(paging, "参数名 2").fill("Bad");
+      await expect(paging.getByText("参数名只能含小写字母 a–z 和下划线")).toBeVisible();
+    },
+  ],
   [
     "auth.logout",
     "身份撤销",

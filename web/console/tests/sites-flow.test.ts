@@ -466,6 +466,7 @@ test("flow changes name their facet like assess_change_risk, in both directions"
     "SENSOR_HTML_CHANGED",
     "PAGE_ACTIONS_CHANGED",
     "RESOURCE_GRANT_CHANGED",
+    "QUERY_PAGINATION_CHANGED",
   ]);
   // The cases of risk.rs `flow_route_changes_name_their_facet_in_both_directions`.
   const cases: [string, (draft: SiteConfigDraft) => void, string[]][] = [
@@ -502,6 +503,20 @@ test("flow changes name their facet like assess_change_risk, in both directions"
         grant.max_items = 50;
       },
       ["ROUTES_CHANGED", "PAGE_ACTIONS_CHANGED", "RESOURCE_GRANT_CHANGED"],
+    ],
+    [
+      "pagination added to the grant-issuing list",
+      (d) => {
+        route(d, "orders.list").query_pagination = {
+          parameters: [{ name: "page", kind: "page" }],
+        };
+      },
+      [
+        "ROUTES_CHANGED",
+        "PAGE_ACTIONS_CHANGED",
+        "RESOURCE_GRANT_CHANGED",
+        "QUERY_PAGINATION_CHANGED",
+      ],
     ],
     [
       "grant target view",
