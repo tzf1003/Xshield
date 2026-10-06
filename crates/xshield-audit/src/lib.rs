@@ -817,6 +817,10 @@ pub struct LocalJournal {
     sequence: u64,
     previous_hash: [u8; HASH_BYTES],
     healthy: bool,
+    /// Bytes written by `append_batch_unsynced` that no `sync` has made durable yet.
+    unsynced: bool,
+    /// Durability syncs performed by this handle, for observability and tests.
+    syncs: u64,
 }
 
 impl LocalJournal {
@@ -874,6 +878,8 @@ impl LocalJournal {
                 sequence: 0,
                 previous_hash: ZERO_HASH,
                 healthy: true,
+                unsynced: false,
+                syncs: 0,
             },
             report,
         ))
@@ -889,6 +895,37 @@ impl LocalJournal {
     /// Returns [`JournalError`] for an empty or oversized batch, encryption
     /// failure, quota exhaustion, a poisoned handle, or filesystem failure.
     pub fn append_batch(
+        &mut self,
+        records: &[JournalRecord<'_>],
+    ) -> Result<Vec<JournalReceipt>, JournalError> {
+        let receipts = self.append_batch_unsynced(records)?;
+        self.sync()?;
+        Ok(receipts)
+    }
+
+    /// Encrypts and appends a bounded batch without making it durable.
+    ///
+    /// This is the first half of [`append_batch`](Self::append_batch), for a
+    /// writer that appends several batches and then calls [`sync`](Self::sync)
+    /// once (group commit): the fsync dominates the cost of an append, so
+    /// sharing it among everything that is waiting multiplies throughput without
+    /// weakening any caller's guarantee.
+    ///
+    /// **A receipt returned here is not durable until `sync` returns `Ok`.** The
+    /// caller must not release a receipt, forward a request or tell anyone the
+    /// event is recorded before that. If the process dies first, the batch may be
+    /// lost, which is acceptable only because nothing was acknowledged.
+    ///
+    /// A refusal that happens before any byte is written (empty or oversized
+    /// batch, bad event, quota) leaves the handle untouched and healthy, so one
+    /// bad batch cannot fail the others in a group. A write error poisons the
+    /// handle, and batches already appended since the last sync are then of
+    /// unknown durability: the caller must treat them as failed.
+    ///
+    /// # Errors
+    /// Same as [`append_batch`](Self::append_batch) except for sync failures,
+    /// which [`sync`](Self::sync) reports.
+    pub fn append_batch_unsynced(
         &mut self,
         records: &[JournalRecord<'_>],
     ) -> Result<Vec<JournalReceipt>, JournalError> {
@@ -941,11 +978,7 @@ impl LocalJournal {
         if new_used > self.limits.max {
             return Err(JournalError::Full);
         }
-        if let Err(error) = self
-            .file
-            .write_all(&encoded_batch)
-            .and_then(|()| self.file.sync_data())
-        {
+        if let Err(error) = self.file.write_all(&encoded_batch) {
             self.healthy = false;
             return Err(JournalError::Io(error));
         }
@@ -953,13 +986,44 @@ impl LocalJournal {
         self.segment_bytes = new_segment_bytes;
         self.sequence = sequence;
         self.previous_hash = previous_hash;
+        self.unsynced = true;
+        Ok(receipts)
+    }
+
+    /// Makes every batch appended so far durable with one sync, then rotates
+    /// the segment if it has reached its size limit.
+    ///
+    /// Rotation follows the sync so a closed segment never contains bytes that
+    /// were not durable. A sync or rotation error poisons the handle.
+    ///
+    /// # Errors
+    /// Returns [`JournalError::Poisoned`] for an unhealthy handle, or the
+    /// filesystem error that made the durable boundary unknown.
+    pub fn sync(&mut self) -> Result<(), JournalError> {
+        if !self.healthy {
+            return Err(JournalError::Poisoned);
+        }
+        if self.unsynced {
+            if let Err(error) = self.file.sync_data() {
+                self.healthy = false;
+                return Err(JournalError::Io(error));
+            }
+            self.unsynced = false;
+            self.syncs = self.syncs.saturating_add(1);
+        }
         if self.segment_bytes >= self.limits.segment_max
             && let Err(error) = self.rotate()
         {
             self.healthy = false;
             return Err(error);
         }
-        Ok(receipts)
+        Ok(())
+    }
+
+    /// Number of durability syncs this handle has performed.
+    #[must_use]
+    pub const fn sync_count(&self) -> u64 {
+        self.syncs
     }
 
     /// Returns quota and readiness information while keeping paths and keys private.
@@ -2375,6 +2439,163 @@ mod tests {
             }]),
             Err(JournalError::Poisoned)
         ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    // Group commit: several batches appended, one sync. The receipts are only
+    // meaningful after the sync, so the test reads the journal back from disk.
+    #[test]
+    fn grouped_batches_are_durable_after_one_sync_and_keep_their_order() {
+        let directory = test_directory();
+        let events: Vec<EventId> = (1..=3)
+            .map(|n| EventId::parse(format!("ev_018f2a3b-4c5d-7000-8000-00000000010{n}")).unwrap())
+            .collect();
+        let (mut journal, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), limits()).unwrap();
+        let mut sequences = Vec::new();
+        for (index, event) in events.iter().enumerate() {
+            let plaintext = format!("group record {index}");
+            let receipts = journal
+                .append_batch_unsynced(&[JournalRecord {
+                    event_id: event,
+                    plaintext: plaintext.as_bytes(),
+                }])
+                .unwrap();
+            sequences.push(receipts[0].producer_sequence);
+        }
+        assert_eq!(sequences, [1, 2, 3]);
+        assert_eq!(
+            journal.sync_count(),
+            0,
+            "nothing is durable before the sync"
+        );
+        journal.sync().unwrap();
+        assert_eq!(journal.sync_count(), 1, "three batches shared one sync");
+        // A second sync with nothing new is free and does not count.
+        journal.sync().unwrap();
+        assert_eq!(journal.sync_count(), 1);
+        drop(journal);
+
+        let (reopened, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), limits()).unwrap();
+        let mut seen = Vec::new();
+        reopened
+            .visit_closed_records(10, |record| {
+                seen.push((
+                    record.producer_sequence(),
+                    String::from_utf8(record.plaintext().to_vec()).unwrap(),
+                ));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            [
+                (1, "group record 0".to_owned()),
+                (2, "group record 1".to_owned()),
+                (3, "group record 2".to_owned()),
+            ]
+        );
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    // One batch the journal refuses before writing a byte must not take the
+    // others in its group down: the handle stays healthy and the neighbours are
+    // durable after the shared sync.
+    #[test]
+    fn a_refused_batch_leaves_the_rest_of_its_group_intact() {
+        let directory = test_directory();
+        let small = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000111").unwrap();
+        let big = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000112").unwrap();
+        let after = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000113").unwrap();
+        // Room for the header and a few small records, not for the large one.
+        let tight = JournalLimits::new(6 * 1024, 4 * 1024, 5 * 1024).unwrap();
+        let (mut journal, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), tight).unwrap();
+        assert!(
+            journal
+                .append_batch_unsynced(&[JournalRecord {
+                    event_id: &small,
+                    plaintext: b"first"
+                }])
+                .is_ok()
+        );
+        let oversized = vec![b'x'; 8 * 1024];
+        assert!(matches!(
+            journal.append_batch_unsynced(&[JournalRecord {
+                event_id: &big,
+                plaintext: &oversized
+            }]),
+            Err(JournalError::Full | JournalError::InvalidEvent)
+        ));
+        assert!(
+            journal.status().healthy,
+            "a refusal before any write must not poison"
+        );
+        assert!(
+            journal
+                .append_batch_unsynced(&[JournalRecord {
+                    event_id: &after,
+                    plaintext: b"third"
+                }])
+                .is_ok()
+        );
+        journal.sync().unwrap();
+        drop(journal);
+
+        let (reopened, _) = LocalJournal::open(&directory, "journal-key-r1", key(), tight).unwrap();
+        let mut plaintexts = Vec::new();
+        reopened
+            .visit_closed_records(10, |record| {
+                plaintexts.push(String::from_utf8(record.plaintext().to_vec()).unwrap());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(plaintexts, ["first", "third"]);
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    // The size limit is enforced after the sync, so a closed segment never holds
+    // bytes that were not durable, and a group may overshoot it by its own size.
+    #[test]
+    fn rotation_waits_for_the_sync_of_the_group() {
+        let directory = test_directory();
+        let first = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000121").unwrap();
+        let second = EventId::parse("ev_018f2a3b-4c5d-7000-8000-000000000122").unwrap();
+        let rotating = JournalLimits::new(1024 * 1024, 768 * 1024, 1).unwrap();
+        let (mut journal, _) =
+            LocalJournal::open(&directory, "journal-key-r1", key(), rotating).unwrap();
+        let boot = journal.producer_boot_id();
+        journal
+            .append_batch_unsynced(&[JournalRecord {
+                event_id: &first,
+                plaintext: b"one",
+            }])
+            .unwrap();
+        journal
+            .append_batch_unsynced(&[JournalRecord {
+                event_id: &second,
+                plaintext: b"two",
+            }])
+            .unwrap();
+        assert_eq!(
+            journal.producer_boot_id(),
+            boot,
+            "no rotation before the sync"
+        );
+        journal.sync().unwrap();
+        assert_ne!(journal.producer_boot_id(), boot, "one rotation after it");
+        let mut seen = Vec::new();
+        journal
+            .visit_closed_records(10, |record| {
+                seen.push(String::from_utf8(record.plaintext().to_vec()).unwrap());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, ["one", "two"]);
+        drop(journal);
         fs::remove_dir_all(directory).unwrap();
     }
 }

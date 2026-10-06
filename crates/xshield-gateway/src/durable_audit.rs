@@ -1,6 +1,8 @@
 use chrono::{SecondsFormat, Utc};
+mod group_commit;
 mod reconcile;
 
+use group_commit::{AuditScope, GroupCommit};
 use reconcile::{IncompleteRequest, incomplete_requests};
 use serde::Serialize;
 use std::{
@@ -63,6 +65,9 @@ pub(crate) struct DurableAudit {
     site_id: String,
     policy_revision: String,
     producer_id: String,
+    /// The one writer every append goes through, so concurrent appends share a
+    /// durability sync (see `group_commit`). Shared by every scoped clone.
+    commits: Arc<GroupCommit>,
     /// What it takes to reopen the journal after a durability failure; absent
     /// for writers built without a recoverable key.
     reopen: Option<Arc<ReopenSource>>,
@@ -446,14 +451,17 @@ impl DurableAudit {
             config.audit_limits(),
         )?;
         let incomplete = incomplete_requests(&journal, config)?;
+        let journal = Arc::new(Mutex::new(Some(journal)));
+        let commits = Arc::new(GroupCommit::start(Arc::clone(&journal))?);
         let audit = Self {
-            journal: Arc::new(Mutex::new(Some(journal))),
+            journal,
             ready: Arc::new(AtomicBool::new(true)),
             failure_code: Arc::new(AtomicU8::new(0)),
             tenant_id: config.tenant_id().as_str().to_owned(),
             site_id: config.site_id().as_str().to_owned(),
             policy_revision: config.policy_revision().as_str().to_owned(),
             producer_id: config.audit_producer_id().to_owned(),
+            commits,
             reopen: None,
         };
         if recovery.truncated_bytes > 0 {
@@ -505,6 +513,7 @@ impl DurableAudit {
             site_id: config.site_id().as_str().to_owned(),
             policy_revision: config.policy_revision().as_str().to_owned(),
             producer_id: config.audit_producer_id().to_owned(),
+            commits: Arc::clone(&self.commits),
             reopen: self.reopen.clone(),
         }
     }
@@ -1040,34 +1049,18 @@ impl DurableAudit {
         if !self.is_ready() {
             return Err(DurableAuditError::Unavailable);
         }
-        let journal = Arc::clone(&self.journal);
-        let ready = Arc::clone(&self.ready);
-        let tenant_id = self.tenant_id.clone();
-        let site_id = self.site_id.clone();
-        let policy_revision = self.policy_revision.clone();
-        let producer_id = self.producer_id.clone();
-        // ponytail: one writer preserves ordering; shard by producer only after measured contention.
-        let result = tokio::task::spawn_blocking(move || {
-            append_locked(
-                &journal,
-                &tenant_id,
-                &site_id,
-                &policy_revision,
-                &producer_id,
-                &context,
-                &events,
-            )
-        })
-        .await;
-        match result {
-            Ok(Ok(receipts)) => Ok(receipts),
-            Ok(Err(error)) => {
-                ready.store(false, Ordering::Release);
-                Err(error)
-            }
+        let scope = AuditScope {
+            tenant_id: self.tenant_id.clone(),
+            site_id: self.site_id.clone(),
+            policy_revision: self.policy_revision.clone(),
+            producer_id: self.producer_id.clone(),
+        };
+        // One writer preserves ordering and lets concurrent appends share a sync.
+        match self.commits.commit(scope, context, events).await {
+            Ok(receipts) => Ok(receipts),
             Err(error) => {
-                ready.store(false, Ordering::Release);
-                Err(DurableAuditError::Join(error))
+                self.ready.store(false, Ordering::Release);
+                Err(error)
             }
         }
     }
@@ -1542,6 +1535,36 @@ fn append_events(
     context: &BatchContext,
     events: &[PendingEvent],
 ) -> Result<Vec<JournalReceipt>, DurableAuditError> {
+    append_events_with(
+        journal,
+        tenant_id,
+        site_id,
+        policy_revision,
+        producer_id,
+        context,
+        events,
+        LocalJournal::append_batch,
+    )
+}
+
+/// Encodes `events` and hands them to `append`, which is the journal's
+/// durable `append_batch` for a lone append or `append_batch_unsynced` for a
+/// writer that syncs a whole group once. The receipts it returns are only
+/// durable in the first case.
+#[allow(clippy::too_many_arguments)]
+fn append_events_with(
+    journal: &mut LocalJournal,
+    tenant_id: &str,
+    site_id: &str,
+    policy_revision: &str,
+    producer_id: &str,
+    context: &BatchContext,
+    events: &[PendingEvent],
+    append: fn(
+        &mut LocalJournal,
+        &[JournalRecord<'_>],
+    ) -> Result<Vec<JournalReceipt>, JournalError>,
+) -> Result<Vec<JournalReceipt>, DurableAuditError> {
     let first_sequence = journal
         .next_sequence()
         .ok_or(DurableAuditError::SequenceExhausted)?;
@@ -1570,7 +1593,7 @@ fn append_events(
             plaintext,
         })
         .collect::<Vec<_>>();
-    let receipts = journal.append_batch(&records)?;
+    let receipts = append(journal, &records)?;
     let receipts_match = receipts.len() == events.len()
         && receipts.iter().enumerate().all(|(index, receipt)| {
             u64::try_from(index)
@@ -3215,6 +3238,108 @@ mod tests {
             "evidence.captured evidence_capture",
         ] {
             assert!(seen.contains(expected), "{expected} not written: {seen:?}");
+        }
+        assert_publishable(&journal);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    // Group commit: while the journal is busy, concurrent requests queue up and
+    // are then made durable together. Every request still gets contiguous,
+    // unique sequences for its own events and nothing is lost or reordered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_commits_share_syncs_and_keep_their_events_contiguous() {
+        const REQUESTS: u64 = 64;
+        let directory = directory();
+        let config = config(&directory, 4 * 1024 * 1024);
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", "/health", UnixSeconds::new(1));
+
+        // Hold the journal from another thread so the writer cannot start:
+        // everything below queues behind it.
+        let (locked, wait_for_lock) = std::sync::mpsc::channel();
+        let (release, wait_for_release) = std::sync::mpsc::channel::<()>();
+        let journal_slot = Arc::clone(&audit.journal);
+        let holder = std::thread::spawn(move || {
+            let guard = journal_slot.lock().unwrap();
+            locked.send(()).unwrap();
+            wait_for_release.recv().unwrap();
+            drop(guard);
+        });
+        wait_for_lock.recv().unwrap();
+        let mut tasks = Vec::new();
+        for number in 0..REQUESTS {
+            let audit = audit.clone();
+            let decision = decision.clone();
+            tasks.push(tokio::spawn(async move {
+                let request_id = format!("req_018f2a3b-4c5d-7000-8000-{number:012}");
+                audit
+                    .commit_admission(AdmissionFacts {
+                        request_id: &request_id,
+                        trace_id: "41414141414141414141414141414141",
+                        method: "GET",
+                        decision: &decision,
+                        duration_us: 10,
+                        request_crypto: None,
+                        sensor_observations: &[],
+                        sensor_bootstrap: None,
+                        forward_origin: true,
+                    })
+                    .await
+                    .unwrap();
+            }));
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while audit.commits.stats().snapshot().0 < REQUESTS {
+            assert!(std::time::Instant::now() < deadline, "commits never queued");
+            tokio::task::yield_now().await;
+        }
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let (queued, answered, syncs, largest) = audit.commits.stats().snapshot();
+        assert_eq!((queued, answered), (REQUESTS, REQUESTS));
+        // The writer took the first commit alone, or none of the queue yet, so
+        // the burst needed at most two groups: one sync each, not one per request.
+        assert!(syncs <= 2, "{REQUESTS} commits needed {syncs} syncs");
+        assert!(largest >= REQUESTS / 2, "largest group was {largest}");
+        drop(audit);
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let mut sequences = Vec::new();
+        let mut by_request = std::collections::BTreeMap::<String, Vec<u64>>::new();
+        journal
+            .visit_closed_records(10_000, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                sequences.push(record.producer_sequence());
+                if let Some(request) = event["request_id"].as_str() {
+                    by_request
+                        .entry(request.to_owned())
+                        .or_default()
+                        .push(record.producer_sequence());
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(by_request.len() as u64, REQUESTS);
+        assert!(
+            sequences.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "journal sequences are not contiguous"
+        );
+        for (request, own) in &by_request {
+            assert!(
+                own.windows(2).all(|pair| pair[1] == pair[0] + 1),
+                "{request} events were interleaved with another request's: {own:?}"
+            );
         }
         assert_publishable(&journal);
         drop(journal);

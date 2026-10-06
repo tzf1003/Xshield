@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 4051,
-  "passed_count": 4051,
+  "checks_total": 4052,
+  "passed_count": 4052,
   "acceptance_cases": {
     "total": 78,
     "planned": 18,
@@ -19832,6 +19832,11 @@
     },
     {
       "name": "link:docs/13-audit-storage-reliability.md:11-audit-event-contract.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/13-audit-storage-reliability.md:21-performance-capacity.md",
       "passed": true,
       "detail": ""
     },
