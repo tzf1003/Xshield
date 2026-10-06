@@ -91,8 +91,7 @@ function FlowConsequences({ release }: { release: Release }) {
       </li>
       {descriptors && (
         <li>
-          edge 应用时会按策略版本标签核对页面签发动作的描述集合：标签已用于另一套描述时 edge
-          拒绝应用（EDGE_APPLY_DESCRIPTOR_CONFLICT），继续服务上一版本。动作描述改变时，修订应同时提升“策略版本”标签。
+          控制面与 edge 都按策略版本标签核对页面签发动作的描述集合：标签已绑定另一套描述时，保存、批准与应用都会被拒绝（CONTROL_SITE_POLICY_REVISION_REUSED），继续服务上一版本。动作描述改变时，修订应同时提升“策略版本”标签。
         </li>
       )}
     </>

@@ -548,7 +548,7 @@ test("flow edits show in the diff and the approval banner, and nothing offers a 
   await page.getByRole("button", { name: "批准并应用" }).click();
   const confirm = page.getByRole("dialog", { name: "批准并应用 r4" });
   await expect(confirm).toContainText("只有独立审批人的批准能让它发布");
-  await expect(confirm).toContainText("EDGE_APPLY_DESCRIPTOR_CONFLICT");
+  await expect(confirm).toContainText("CONTROL_SITE_POLICY_REVISION_REUSED");
 });
 
 const openGroups: [string, string, (drawer: Locator, page: Page) => Promise<void>][] = [

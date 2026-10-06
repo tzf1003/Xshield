@@ -41,7 +41,7 @@ export type FlowGroupProps = Readonly<{
  * label it already knows, so the label has to move with the set.
  */
 const DESCRIPTOR_NOTE =
-  "页面签发动作、由页面签发的路由（操作来源、方法、路径）和资源资格目标共同构成 edge 的动作描述集合（期限与容量不在其中）。改变它时请同时在“安全入口”提升“策略版本”标签：edge 拒绝在已用过的策略版本下换用另一套描述，应用会以 EDGE_APPLY_DESCRIPTOR_CONFLICT 失败。";
+  "页面签发动作、由页面签发的路由（操作来源、方法、路径）和资源资格目标共同构成 edge 的动作描述集合（期限与容量不在其中）。改变它时请同时在“安全入口”提升“策略版本”标签：同一个标签只能对应一套描述，控制面在保存、校验、批准和应用时都会拒绝重用（CONTROL_SITE_POLICY_REVISION_REUSED），edge 也不接受（EDGE_APPLY_DESCRIPTOR_CONFLICT）。";
 
 /** One flow block: what it does, its switch, the block-level finding, then its fields. */
 export function FlowGroup({
