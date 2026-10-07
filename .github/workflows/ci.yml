@@ -110,7 +110,8 @@ jobs:
       - run: python scripts/check_secrets.py
 
   # The control plane's OIDC login against a real Keycloak (the dev realm), with the real
-  # control binary and PostgreSQL, driven without a browser (scripts/test_oidc_login.py).
+  # control binary and PostgreSQL, driven without a browser (scripts/test_oidc_login.py) and
+  # then by a real Chromium through the console's Vite dev server (scripts/test_oidc_browser.sh).
   # Keycloak is the release zip, not the container image, so the job needs no registry pull;
   # the archive is checked against a pinned sha256 before it is unpacked. Keep the version
   # in step with docker-compose.dev.yml (quay.io/keycloak/keycloak) when it is bumped.
@@ -158,6 +159,18 @@ jobs:
           echo "XSHIELD_KEYCLOAK_HOME=$RUNNER_TEMP/keycloak/keycloak-${KEYCLOAK_VERSION}" >> "$GITHUB_ENV"
       - name: Real OIDC login (Keycloak, real control binary, PostgreSQL)
         run: scripts/test_oidc_login.sh
+      # Both scripts build the control binary themselves; the second finds it already built.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/console/package-lock.json
+      - name: Real-browser OIDC login (Chromium, console dev server and proxy, Keycloak)
+        run: |
+          npm ci --prefix web/console --no-audit --no-fund
+          (cd web/console && npx playwright install --with-deps chromium --only-shell)
+          scripts/test_oidc_browser.sh
+        timeout-minutes: 10
 
   # Licenses, RustSec advisories, yanked crates and registry sources (deny.toml).
   # It reads Cargo.lock only, so it needs no database or build.
