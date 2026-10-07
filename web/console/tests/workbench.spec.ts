@@ -55,6 +55,56 @@ test("opens with one snapshot read plus the todo sources, and nothing reads agai
   expect(await storageSnapshot(page)).toEqual({ local: {}, session: {} });
 });
 
+test("the two audit-journal todo reads never overlap: the control plane serves one at a time", async ({
+  page,
+}) => {
+  // The real control process gives its case/evidence/export reads one permit and answers a read
+  // that arrives while another is in flight 429 *_BUSY (found by the real-browser OIDC run,
+  // scripts/test_oidc_browser.sh: the landing page of an approver always lost one of the two).
+  // Only an overlap of the two different sources counts: the development build's StrictMode
+  // sends one aborted duplicate of the same read, which production never does.
+  const inFlight = new Map<string, number>();
+  let overlapped = 0;
+  const calls = await open(page, {
+    override: async (url) => {
+      const busy =
+        url.pathname === "/control/v1/evidence-access-requests"
+          ? "CONTROL_EVIDENCE_ACCESS_BUSY"
+          : url.pathname === "/control/v1/exports"
+            ? "CONTROL_EXPORT_BUSY"
+            : null;
+      if (busy === null) return undefined;
+      if ([...inFlight].some(([path, count]) => path !== url.pathname && count > 0)) {
+        overlapped += 1;
+        return { status: 429, body: errorFixture(busy) };
+      }
+      inFlight.set(url.pathname, (inFlight.get(url.pathname) ?? 0) + 1);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      inFlight.set(url.pathname, (inFlight.get(url.pathname) ?? 1) - 1);
+      return undefined;
+    },
+  });
+  await expect(todo(page).getByText("原文访问申请待审批")).toBeVisible();
+  await expect(todo(page).getByText("导出申请待审批")).toBeVisible();
+  await settledReads(page, calls, OPENING);
+  expect(overlapped).toBe(0);
+  await expect(todo(page).getByRole("alert")).toHaveCount(0);
+  // The refresh button reads both again, and in the same order.
+  const before = calls.length;
+  await todo(page).getByRole("button", { name: "刷新待办" }).click();
+  await expect
+    .poll(() => calls.slice(before).map((call) => call.path))
+    .toEqual(
+      expect.arrayContaining([
+        "/control/v1/evidence-access-requests?view=review",
+        "/control/v1/exports?view=review",
+      ]),
+    );
+  await expect(todo(page).getByRole("button", { name: "刷新待办" })).toBeEnabled();
+  expect(overlapped).toBe(0);
+  await expect(todo(page).getByRole("alert")).toHaveCount(0);
+});
+
 test("the KPI strip names each source and its time", async ({ page }) => {
   await open(page);
   await expect(kpi(page, "正在服务的站点")).toContainText("3");
