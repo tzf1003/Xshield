@@ -588,6 +588,38 @@ test.describe("the navigation badge", () => {
     await expect(page).toHaveURL(/\/approvals$/);
   });
 
+  test("reads its two journal-backed sources one after the other, as the control plane serves one at a time", async ({
+    page,
+  }) => {
+    // A read that arrives while the other source is in flight is answered 429 *_BUSY by the real
+    // control process, which made the badge always partial (found by scripts/test_oidc_browser.sh).
+    const inFlight = new Map<string, number>();
+    let overlapped = 0;
+    await mockWork(page, async (url) => {
+      const busy =
+        url.pathname === "/control/v1/evidence-access-requests"
+          ? "CONTROL_EVIDENCE_ACCESS_BUSY"
+          : url.pathname === "/control/v1/exports"
+            ? "CONTROL_EXPORT_BUSY"
+            : null;
+      if (busy === null) return undefined;
+      if ([...inFlight].some(([path, count]) => path !== url.pathname && count > 0)) {
+        overlapped += 1;
+        return refuse(429, busy);
+      }
+      inFlight.set(url.pathname, (inFlight.get(url.pathname) ?? 0) + 1);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      inFlight.set(url.pathname, (inFlight.get(url.pathname) ?? 1) - 1);
+      return undefined;
+    });
+    await signIn(page, "/access/session");
+    await sidebar(page)
+      .getByRole("button", { name: /审批待办数量/ })
+      .click();
+    await expect(sidebar(page).getByRole("button", { name: /^审批待办 3 项/ })).toBeVisible();
+    expect(overlapped).toBe(0);
+  });
+
   test("the approval center updates it when it loads, and a partial read is marked as a lower bound", async ({
     page,
   }) => {

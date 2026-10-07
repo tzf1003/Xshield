@@ -125,7 +125,12 @@ export function Workbench() {
   });
   const sitesQuery = useGuardedQuery(specs.siteApprovals(plan.sites));
   const accessQuery = useGuardedQuery(specs.accessList("review", undefined, plan.review));
-  const exportQuery = useGuardedQuery(specs.exportList("review", undefined, plan.review));
+  // The control plane serves its case, evidence and export reads one at a time and answers an
+  // overlapping one 429 *_BUSY, so the export read starts only once the access read has settled
+  // (answered or failed); the two used to race and the loser always showed as a failed source.
+  const exportQuery = useGuardedQuery(
+    specs.exportList("review", undefined, plan.review && accessQuery.status !== "pending"),
+  );
   const pending = usePendingOperations();
 
   const overview = sourceOf(overviewQuery, true);
@@ -176,10 +181,10 @@ export function Workbench() {
   ];
 
   function refreshTodos() {
+    // The journal-backed reads go one after the other for the reason given at `exportQuery`.
     void Promise.allSettled([
       plan.sites ? sitesQuery.refetch() : undefined,
-      plan.review ? accessQuery.refetch() : undefined,
-      plan.review ? exportQuery.refetch() : undefined,
+      plan.review ? accessQuery.refetch().then(() => exportQuery.refetch()) : undefined,
     ]);
   }
 
