@@ -91,6 +91,19 @@ async fn owner_pages_are_descending_keyset_ordered_and_owner_scoped() {
     assert!(nobody.items().is_empty());
     assert!(nobody.next_job_id().is_none());
     assert!(nobody.as_of() <= chrono::Utc::now() + chrono::Duration::seconds(60));
+
+    // Every ignored PostgreSQL test shares one database per CI run, and others
+    // count whole tables. Remove this test's rows: jobs first, since they reference cases.
+    sqlx::query("DELETE FROM xshield.control_jobs WHERE tenant_id = $1")
+        .bind(tenant.as_str())
+        .execute(&pool)
+        .await
+        .expect("job cleanup succeeds");
+    sqlx::query("DELETE FROM xshield.investigation_cases WHERE tenant_id = $1")
+        .bind(tenant.as_str())
+        .execute(&pool)
+        .await
+        .expect("case cleanup succeeds");
 }
 
 fn job_id() -> JobId {
