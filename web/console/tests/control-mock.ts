@@ -35,14 +35,22 @@ export type Call = {
 };
 
 const abandonedCalls = new WeakMap<Call[], Call[]>();
+const sentCalls = new WeakMap<Call[], Call[]>();
 
 /**
- * Requests the page sent and then abandoned (aborted) before an answer arrived, for example the
- * read of a plan that was superseded while it was in flight. They are kept apart from `calls`, so
- * a test can still prove that a superseded request went out and was dropped rather than answered.
+ * Reads the page aborted after the grace window and before the server answered them, a plan
+ * superseded in flight. They left `calls`.
  */
 export function abandoned(calls: Call[]): Call[] {
   return abandonedCalls.get(calls) ?? [];
+}
+
+/**
+ * Every read the page sent past the grace window, in order, including the ones it superseded in
+ * flight, which `calls` leaves out.
+ */
+export function sent(calls: Call[]): Call[] {
+  return sentCalls.get(calls) ?? [];
 }
 
 /** Browser checks exercise the real client with explicit synthetic HTTP responses. */
@@ -50,7 +58,9 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
   const calls: Call[] = [];
   const dropped: Call[] = [];
   abandonedCalls.set(calls, dropped);
-  const records = new Map<Request, { call: Call; graced: boolean }>();
+  const sentList: Call[] = [];
+  sentCalls.set(calls, sentList);
+  const records = new Map<Request, { call: Call; graced: boolean; answered: boolean }>();
   const forget = (call: Call) => {
     const index = calls.indexOf(call);
     if (index >= 0) calls.splice(index, 1);
@@ -60,10 +70,12 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
   // cancels the first read of a query when its observer unmounts; the production build never
   // sends that duplicate. A call is recorded as soon as it arrives, but one the page aborts within
   // the short grace period below is that duplicate: it is forgotten and never reaches the
-  // override. A call aborted later was sent and then abandoned, and moves to `abandoned(calls)`.
+  // override. A call aborted after the grace period but before the server answers was superseded,
+  // and moves to `abandoned(calls)`. A call the server has already answered stays in `calls` even
+  // if the page then cancels its response: the page made the request, and the cancel is a race.
   page.on("requestfailed", (request) => {
     const entry = records.get(request);
-    if (!entry || request.failure()?.errorText !== "net::ERR_ABORTED") return;
+    if (!entry || entry.answered || request.failure()?.errorText !== "net::ERR_ABORTED") return;
     if (forget(entry.call) && entry.graced) dropped.push(entry.call);
   });
   await page.route("**/control/v1/**", async (route) => {
@@ -77,7 +89,7 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
         cookie: await request.headerValue("cookie"),
         body: request.postDataJSON(),
       };
-      const entry = { call: record, graced: false };
+      const entry = { call: record, graced: false, answered: false };
       calls.push(record);
       records.set(request, entry);
       // Let an abort that is already on its way (the StrictMode remount above) land first.
@@ -87,6 +99,7 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
         return;
       }
       entry.graced = true;
+      sentList.push(record);
       const custom = await override?.(url, request);
       let reply: Reply;
       if (custom) reply = custom;
@@ -123,6 +136,9 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
           reply = { body: evidenceFixture(id, url.searchParams.has("cursor")) };
         } else reply = { body: summaryFixture(id) };
       }
+      // Aborted while the override held the answer: the abort handler has already dropped it.
+      if (request.failure()) return;
+      entry.answered = true;
       await route
         .fulfill({
           status: reply.status ?? 200,

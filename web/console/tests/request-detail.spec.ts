@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 import { resolve } from "node:path";
-import { type Call, mockControl, paint, requestSettled } from "./control-mock";
+import { type Call, mockControl, paint, requestSettled, sent } from "./control-mock";
 import {
   ARTIFACT_ID,
   artifactFixture,
@@ -403,7 +403,7 @@ test("a 401 while loading more clears everything on screen", async ({ page }) =>
   await expect(page.getByText("AUTH_BINDING_VALID", { exact: true })).toHaveCount(0);
   await expect(page.getByText(REQUEST_ID, { exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
-  expect(calls).toHaveLength(3);
+  expect(sent(calls)).toHaveLength(3);
 });
 
 test("fifteen idle minutes and a reload clear the session and what it showed", async ({ page }) => {
@@ -425,7 +425,7 @@ test("fifteen idle minutes and a reload clear the session and what it showed", a
   await expect(page.getByLabel("管理凭证", { exact: true })).toHaveValue("");
   await expect(page.getByText("AUTH_BINDING_VALID", { exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
-  expect(paths(calls)).toEqual([
+  expect(paths(sent(calls))).toEqual([
     `/control/v1/requests/${REQUEST_ID}`,
     `/control/v1/requests/${REQUEST_ID}/events`,
     `/control/v1/requests/${REQUEST_ID}`,
@@ -447,12 +447,12 @@ test("403 and 429 show the safe message and code and wait for an explicit retry"
   await expect(page.getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
   await expect(page.getByRole("alert")).toContainText("req_018f2a3b-4c5d-7000-8000-000000000099");
   await page.clock.fastForward(60_000);
-  expect(calls).toHaveLength(1);
+  expect(sent(calls)).toHaveLength(1);
   status = 429;
   await page.getByRole("button", { name: "重新读取", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("CONTROL_RATE_LIMITED");
   await page.clock.fastForward(60_000);
-  expect(calls).toHaveLength(2);
+  expect(sent(calls)).toHaveLength(2);
   await expect(page.getByText("Synthetic server detail must not be rendered")).toHaveCount(0);
 });
 

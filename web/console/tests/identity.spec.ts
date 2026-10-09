@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { type Call, mockControl, paint, requestSettled } from "./control-mock";
+import { type Call, mockControl, paint, requestSettled, sent } from "./control-mock";
 import { errorFixture, REQUEST_ID, SEARCH_PLAN, TOKEN } from "./fixtures";
 import {
   expectPrefilled,
@@ -51,14 +51,14 @@ test("one page, two tabs: both addresses keep resolving and the tab follows the 
   await expect(grantRecord(page)).toContainText("orders.read");
   await expect(page.getByRole("tab", { name: "资格", selected: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "身份与资格", exact: true })).toBeVisible();
-  expect(paths(calls)).toEqual([`/control/v1/grants/${GRANT_ID}`]);
+  expect(paths(sent(calls))).toEqual([`/control/v1/grants/${GRANT_ID}`]);
   // The binding tab is another address; moving there keeps the session and reads nothing yet.
   await page.getByRole("tab", { name: "身份绑定" }).click();
   await expect(page).toHaveURL(/\/investigation\/bindings$/);
   await expect(page.getByRole("tab", { name: "身份绑定", selected: true })).toBeVisible();
   await expect(grantRecord(page)).toHaveCount(0);
   await paint(page);
-  expect(calls).toHaveLength(1);
+  expect(sent(calls)).toHaveLength(1);
   await lookup(page, "binding").fill(BINDING_ID);
   await page.getByRole("button", { name: "查询", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/investigation/bindings/${BINDING_ID}$`));
@@ -129,7 +129,7 @@ test("ledger grant and binding snapshots show independent facts and navigate kno
   await page.getByRole("link", { name: REQUEST_ID, exact: true }).click();
   await expect(page.getByRole("heading", { name: "请求调查", exact: true })).toBeVisible();
   await expect(page.getByText("AUTH_BINDING_VALID", { exact: true })).toBeVisible();
-  expect(paths(calls)).toEqual([
+  expect(paths(sent(calls))).toEqual([
     `/control/v1/grants/${GRANT_ID}`,
     `/control/v1/auth-bindings/${BINDING_ID}`,
     `/control/v1/grants/${GRANT_ID}`,
@@ -137,7 +137,7 @@ test("ledger grant and binding snapshots show independent facts and navigate kno
     `/control/v1/requests/${REQUEST_ID}/events`,
   ]);
   expect(
-    calls.every((call) => call.method === "GET" && call.authorized && call.cookie === null),
+    sent(calls).every((call) => call.method === "GET" && call.authorized && call.cookie === null),
   ).toBe(true);
 });
 
@@ -162,15 +162,15 @@ test.describe("history", () => {
         kind === "grant" ? "资格 ID" : "身份绑定 ID",
         kind === "grant" ? GRANT_ID : BINDING_ID,
       );
-      const count = calls.length;
+      const count = sent(calls).length;
       // No range yet: the search page asks for one and sends nothing.
       await submitSearch(page);
       await expect(page.getByRole("alert")).toContainText("请先选择时间范围");
-      expect(calls).toHaveLength(count);
+      expect(sent(calls)).toHaveLength(count);
       await pickRange(page, "2026-09-20T00:00", "2026-09-21T00:00");
       await submitSearch(page);
       await expect(page.getByRole("alert")).toContainText("CONTROL_SCOPE_DENIED");
-      expect(calls.at(-1)?.body).toEqual({
+      expect(sent(calls).at(-1)?.body).toEqual({
         ...SEARCH_PLAN,
         limit: 25,
         filters: [
@@ -284,11 +284,12 @@ test("403 and database 503 stay safe and wait for an explicit retry", async ({ p
     }
   }
   await page.clock.fastForward(60_000);
-  expect(calls).toHaveLength(4);
+  // The page can cancel a read after it has rendered the answer, so count sends, not answers.
+  expect(sent(calls)).toHaveLength(4);
   // The retry is a button, and it reads again.
   status = 403;
   await page.getByRole("button", { name: "重新读取", exact: true }).click();
-  await expect.poll(() => calls.length).toBe(5);
+  await expect.poll(() => sent(calls).length).toBe(5);
 });
 
 test("invalidated sessions clear the snapshot and every query", async ({ page }) => {
