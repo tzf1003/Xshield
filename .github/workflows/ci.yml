@@ -8,7 +8,45 @@ on:
 permissions:
   contents: read
 
+# Hosted minutes are metered. A newer push to the same pull request supersedes the older run
+# (cancelled), while pushes to main are keyed by commit and always complete.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Decides which of the expensive jobs a pull request needs. Pushes to main run everything.
+  # The patterns err on the side of running: anything that can change what a job builds or
+  # tests (including this workflow) selects it. `validate` and `supply-chain` always run.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      web: ${{ steps.diff.outputs.web }}
+      images: ${{ steps.diff.outputs.images }}
+      oidc: ${{ steps.diff.outputs.oidc }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            printf 'web=true\nimages=true\noidc=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE"...HEAD)
+          echo "$files"
+          match() { if printf '%s\n' "$files" | grep -Eq "$1"; then echo true; else echo false; fi; }
+          {
+            echo "web=$(match '^(web/console/|tests/site-config/|\.github/)')"
+            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|sensor/|migrations/|tests/site-config/|\.github/)')"
+            echo "oidc=$(match '^(crates/xshield-(control|audit|core)/|Cargo\.(toml|lock)|rust-toolchain\.toml|scripts/(test_oidc|lib/)|dev/keycloak/|web/console/|migrations/|\.github/)')"
+          } >> "$GITHUB_OUTPUT"
+
   validate:
     runs-on: ubuntu-latest
     services:
@@ -116,6 +154,8 @@ jobs:
   # the archive is checked against a pinned sha256 before it is unpacked. Keep the version
   # in step with docker-compose.dev.yml (quay.io/keycloak/keycloak) when it is bumped.
   oidc:
+    needs: changes
+    if: needs.changes.outputs.oidc == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -194,6 +234,8 @@ jobs:
   # reproducible from the lockfile and that every binary finds the shared libraries it
   # links in the runtime image, which a local macOS run cannot show.
   container-images:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -223,6 +265,8 @@ jobs:
           done
 
   console:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     # The browser suite has several hundred specs; a two-core runner needs
     # well over the ten minutes the original handful of specs took.
