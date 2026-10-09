@@ -97,6 +97,8 @@ import {
   exportPattern,
 } from "./exports.ts";
 import type { ExportDownload, ExportList, ExportListView, InvestigationExport } from "./exports.ts";
+import { decodeJobList, validateJobListCursor } from "./job-list.ts";
+import type { JobList } from "./job-list.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -3039,6 +3041,20 @@ export class ControlClient {
   /** Read the requester's own export history or the independent review queue (29.33). Every
    * page is freshly authorized and audited, the cursor is bound to the view, and a listing
    * grants neither approval nor download capability. No automatic reads. */
+  /** `GET /control/v1/jobs[?cursor=...]`: the caller's own jobs, one live page at a time. */
+  async jobList(cursor?: string, signal?: AbortSignal): Promise<JobList> {
+    validateJobListCursor(cursor);
+    const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
+    return this.#request(
+      `jobs${query}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeJobList(value, cursor);
+      },
+      signal,
+    );
+  }
+
   async exportList(
     view: ExportListView,
     cursor?: string,
