@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { type Call, mockControl, paint, requestSettled } from "./control-mock";
+import { type Call, mockControl, paint, requestSettled, sent } from "./control-mock";
 import {
   AGENT_RUN_ID,
   ARTIFACT_ID,
@@ -65,9 +65,9 @@ test.describe("model call list", () => {
     await page.getByRole("link", { name: THIRD_MODEL_CALL_ID, exact: true }).click();
     await expect(page.getByRole("heading", { name: "模型调用调查", exact: true })).toBeVisible();
     await expect
-      .poll(() => paths(calls).at(-1))
+      .poll(() => paths(sent(calls)).at(-1))
       .toBe(`/control/v1/model-calls/${THIRD_MODEL_CALL_ID}`);
-    const lists = listCalls(calls);
+    const lists = listCalls(sent(calls));
     expect(lists).toHaveLength(2);
     for (const call of lists) {
       const url = new URL(`http://console.test${call.path}`);
@@ -370,7 +370,7 @@ test.describe("agent run", () => {
     await signInQuietly(page);
     await openView(page, "agent");
     await expect(page.getByLabel("Agent 运行 ID", { exact: true })).toBeVisible();
-    expect(calls).toHaveLength(0);
+    expect(sent(calls)).toHaveLength(0);
     await pasteId(page, "invalid-agent-id");
     await pasteId(page, AGENT_RUN_ID);
     await expect(page.getByRole("heading", { name: "Agent 运行调查", exact: true })).toBeVisible();
@@ -382,7 +382,7 @@ test.describe("agent run", () => {
     await expect(index(page, "Agent 查询索引状态")).toContainText("生命周期完整");
     await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
     await expectPrefilled(page, "Agent 运行 ID", AGENT_RUN_ID);
-    expect(paths(calls)).toEqual([`/control/v1/agent-runs/${AGENT_RUN_ID}`]);
+    expect(paths(sent(calls))).toEqual([`/control/v1/agent-runs/${AGENT_RUN_ID}`]);
   });
 
   test("the ID box checks the shape and a missing run is stated as such", async ({ page }) => {
@@ -417,14 +417,16 @@ test.describe("calibration report", () => {
     await expect(
       page.getByText(/不显示或读取报告正文、样本、标签、概率、指标、提示词/),
     ).toBeVisible();
-    expect(paths(calls)).toEqual([`/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`]);
-    expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
-    expect(calls.some((call) => call.path.includes("/content"))).toBe(false);
+    expect(paths(sent(calls))).toEqual([
+      `/control/v1/calibration-reports/${CALIBRATION_REPORT_ID}`,
+    ]);
+    expect(sent(calls).every((call) => call.authorized && call.cookie === null)).toBe(true);
+    expect(sent(calls).some((call) => call.path.includes("/content"))).toBe(false);
     await page.getByRole("button", { name: "手动刷新报告", exact: true }).click();
-    await expect.poll(() => calls.length).toBe(2);
+    await expect.poll(() => sent(calls).length).toBe(2);
     await page.getByRole("button", { name: "准备历史检索", exact: true }).click();
     await expectPrefilled(page, "校准报告 ID", CALIBRATION_REPORT_ID);
-    expect(calls).toHaveLength(2);
+    expect(sent(calls)).toHaveLength(2);
   });
 
   test("a missing report is stated without implying it exists elsewhere", async ({ page }) => {

@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 import type { SearchPlan } from "../src/search.ts";
-import { type Call, mockControl, paint, requestSettled } from "./control-mock";
+import { type Call, mockControl, paint, requestSettled, sent } from "./control-mock";
 import {
   ARTIFACT_ID,
   errorFixture,
@@ -191,8 +191,8 @@ test.describe("submitting", () => {
     await expect(rows(page)).toHaveCount(LIMIT);
     await expect(results(page)).toContainText(`已加载 ${LIMIT} 条`);
     const plan = { ...SEARCH_PLAN, limit: 25, filters };
-    expect(searches(calls)).toHaveLength(1);
-    expect(searches(calls)[0]).toMatchObject({
+    expect(searches(sent(calls))).toHaveLength(1);
+    expect(searches(sent(calls))[0]).toMatchObject({
       path: "/control/v1/search",
       method: "POST",
       authorized: true,
@@ -207,7 +207,7 @@ test.describe("submitting", () => {
     // Freeze: the next page repeats the plan and adds the cursor; rows are appended.
     await loadMore(page).click();
     await expect(results(page)).toContainText(`已加载 ${LIMIT + 1} 条`);
-    expect(body(searches(calls)[1])).toEqual({
+    expect(body(searches(sent(calls))[1])).toEqual({
       ...plan,
       cursor: (await pagedSearchFixture(plan)).next_cursor,
     });
@@ -220,7 +220,7 @@ test.describe("submitting", () => {
     await addCondition(page, "请求 ID", OTHER_REQUEST_ID);
     await submitSearch(page);
     await expect(rows(page).first()).toBeVisible();
-    expect(body(searches(calls)[2])).toEqual({
+    expect(body(searches(sent(calls))[2])).toEqual({
       ...plan,
       filters: [...filters.slice(1), { kind: "request_id", value: OTHER_REQUEST_ID }],
     });
@@ -312,9 +312,9 @@ test.describe("submitting", () => {
     await expect(page.getByText("operator-1")).toHaveCount(0);
     // Leaving the page forgets it: a low-entropy identifier is not kept around.
     await openView(page, "audit-health");
-    // Leaving counts only once the other page is up: a lazily loaded route on a slow runner
-    // leaves this one mounted, and returning then never reaches a fresh search page.
-    await expect(page.getByRole("heading", { name: "审计发布状态", exact: true })).toBeVisible();
+    // The shell heading follows the address before the lazily loaded page replaces this one, so
+    // returning earlier reuses this page with its state: wait until it has left the screen.
+    await expect(results(page)).toHaveCount(0);
     await openView(page, "search");
     await expect(conditions(page)).toHaveCount(0);
     await expect(page.getByText("operator-1")).toHaveCount(0);
@@ -329,9 +329,9 @@ test.describe("submitting", () => {
     await search(page);
     await expect(rows(page).first()).toBeVisible();
     await openView(page, "audit-health");
-    // Leaving counts only once the other page is up: a lazily loaded route on a slow runner
-    // leaves this one mounted, and returning then never reaches a fresh search page.
-    await expect(page.getByRole("heading", { name: "审计发布状态", exact: true })).toBeVisible();
+    // The shell heading follows the address before the lazily loaded page replaces this one, so
+    // returning earlier reuses this page with its state: wait until it has left the screen.
+    await expect(results(page)).toHaveCount(0);
     await openView(page, "search");
     await expect(conditions(page)).toContainText(`请求 ID：${REQUEST_ID}`);
     await expect(page.getByLabel("开始时间（本地，含）", { exact: true })).toHaveValue(RANGE[0]);
@@ -392,8 +392,10 @@ test.describe("the results", () => {
     ).toContainText("未记录");
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
-    // Clicking the row itself does the same.
-    await rows(page).nth(1).click();
+    // Clicking the row itself does the same; the center may be a request link, so click a corner.
+    await rows(page)
+      .nth(1)
+      .click({ position: { x: 2, y: 2 } });
     await expect(drawer.getByText(EVENT_2, { exact: true })).toBeVisible();
   });
 
@@ -415,15 +417,15 @@ test.describe("the results", () => {
     await expect(conditions(page)).toContainText(`Trace ID：${TRACE}`);
     await expect(results(page)).toHaveCount(0);
     await expect(page.getByText("已预填目标引用，请确认 UTC 时间窗后提交历史检索。")).toBeVisible();
-    expect(searches(calls)).toHaveLength(1);
+    expect(searches(sent(calls))).toHaveLength(1);
     await submitSearch(page);
     await expect(page.getByRole("alert")).toContainText("请先选择时间范围");
-    expect(searches(calls)).toHaveLength(1);
+    expect(searches(sent(calls))).toHaveLength(1);
     await pickRange(page, ...RANGE);
     await submitSearch(page);
     await expect(results(page)).toContainText(`已加载 ${LIMIT} 条`);
-    expect(body(searches(calls)[1]).filters).toEqual([{ kind: "trace_id", value: TRACE }]);
-    expect(calls.every((call) => call.authorized && call.cookie === null)).toBe(true);
+    expect(body(searches(sent(calls))[1]).filters).toEqual([{ kind: "trace_id", value: TRACE }]);
+    expect(sent(calls).every((call) => call.authorized && call.cookie === null)).toBe(true);
   });
 
   test("Observer detail permissions stay independent of search", async ({ page }) => {
@@ -483,7 +485,7 @@ test.describe("failures and session end", () => {
       await expect(results(page).locator(".ant-table")).toHaveCount(0);
     }
     await page.clock.fastForward(60_000);
-    expect(searches(calls)).toHaveLength(4);
+    expect(searches(sent(calls))).toHaveLength(4);
     await expect(page.getByText("Synthetic server detail must not be rendered")).toHaveCount(0);
     reply = { status: 401, body: errorFixture("CONTROL_AUTH_REQUIRED") };
     await submitSearch(page);

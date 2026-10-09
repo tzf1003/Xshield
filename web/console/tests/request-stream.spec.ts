@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { abandoned, type Call, mockControl, paint, requestSettled } from "./control-mock";
+import { abandoned, type Call, mockControl, paint, requestSettled, sent } from "./control-mock";
 import { errorFixture, REQUEST_ID } from "./fixtures";
 import { streamFixture, streamRequestId } from "./investigation-fixtures";
 import { openView } from "./navigation";
@@ -67,8 +67,8 @@ test("outcome chips and the aborted toggle narrow the search", async ({ page }) 
   await expect(rows(page)).toHaveCount(25);
 
   await chip(page, "拒绝").click();
-  await expect.poll(() => searches(calls).length).toBe(2);
-  expect(body(searches(calls)[1]).filters).toEqual([
+  await expect.poll(() => searches(sent(calls)).length).toBe(2);
+  expect(body(searches(sent(calls))[1]).filters).toEqual([
     { kind: "text", field: "event_type", value: "request.completed" },
     { kind: "outcome", value: "DENY" },
   ]);
@@ -76,8 +76,8 @@ test("outcome chips and the aborted toggle narrow the search", async ({ page }) 
   await expect(rows(page).getByText("放行", { exact: true })).toHaveCount(0);
 
   await chip(page, "放行").click();
-  await expect.poll(() => searches(calls).length).toBe(3);
-  expect(body(searches(calls)[2]).filters).toEqual([
+  await expect.poll(() => searches(sent(calls)).length).toBe(3);
+  expect(body(searches(sent(calls))[2]).filters).toEqual([
     { kind: "text", field: "event_type", value: "request.completed" },
     { kind: "outcome", value: "ALLOW" },
   ]);
@@ -87,17 +87,17 @@ test("outcome chips and the aborted toggle narrow the search", async ({ page }) 
   // Search has no OR, so aborted requests are their own view. Only they can carry UNKNOWN.
   await expect(chip(page, "未知")).toHaveCount(0);
   await page.getByRole("switch", { name: /中止 \/ 未完成/ }).click();
-  await expect.poll(() => searches(calls).length).toBe(4);
-  expect(body(searches(calls)[3]).filters).toEqual([
+  await expect.poll(() => searches(sent(calls)).length).toBe(4);
+  expect(body(searches(sent(calls))[3]).filters).toEqual([
     { kind: "text", field: "event_type", value: "request.aborted" },
     { kind: "outcome", value: "ALLOW" },
   ]);
-  // Aborted requests are never ALLOW: wait for that (empty) answer before changing the plan again,
-  // or the earlier read would be abandoned in flight and no longer counted as answered.
+  // Aborted requests are never ALLOW: wait for that (empty) answer to render before the plan changes
+  // again, so each plan's answer is checked before the next plan replaces it.
   await expect(page.getByText("空结果不证明没有流量")).toBeVisible();
   await chip(page, "未知").click();
-  await expect.poll(() => searches(calls).length).toBe(5);
-  expect(body(searches(calls)[4]).filters).toEqual([
+  await expect.poll(() => searches(sent(calls)).length).toBe(5);
+  expect(body(searches(sent(calls))[4]).filters).toEqual([
     { kind: "text", field: "event_type", value: "request.aborted" },
     { kind: "outcome", value: "UNKNOWN" },
   ]);
@@ -111,7 +111,7 @@ test("load more continues the submitted plan and appends the next page", async (
   await expect(rows(page)).toHaveCount(25);
   await page.getByRole("button", { name: "加载更多", exact: true }).click();
   await expect(rows(page)).toHaveCount(40);
-  const [first, second] = searches(calls);
+  const [first, second] = searches(sent(calls));
   expect(body(first).cursor).toBeUndefined();
   expect(body(second).cursor).toMatch(/^v1\.\d+\.ev_[0-9a-f-]+\.0{64}$/);
   const { cursor: _cursor, ...continued } = body(second);
@@ -121,7 +121,7 @@ test("load more continues the submitted plan and appends the next page", async (
   await expect(page.getByText("当前可见结果已读完")).toBeVisible();
   // The first page is still there: the list grows instead of replacing pages.
   await expect(rows(page).first()).toContainText("PUBLIC_ENTRY_ALLOWED");
-  expect(searches(calls)).toHaveLength(2);
+  expect(searches(sent(calls))).toHaveLength(2);
 });
 
 test("an explicit refresh drops the loaded pages and reads the first one again", async ({
@@ -134,8 +134,8 @@ test("an explicit refresh drops the loaded pages and reads the first one again",
   await expect(rows(page)).toHaveCount(40);
   await page.getByRole("button", { name: "刷新", exact: true }).click();
   await expect(rows(page)).toHaveCount(25);
-  expect(searches(calls)).toHaveLength(3);
-  expect(body(searches(calls)[2]).cursor).toBeUndefined();
+  expect(searches(sent(calls))).toHaveLength(3);
+  expect(body(searches(sent(calls))[2]).cursor).toBeUndefined();
   await expect(page.getByRole("button", { name: "加载更多", exact: true })).toBeEnabled();
 });
 
@@ -247,13 +247,13 @@ test("a row, its request chip and the ID box all open the request detail", async
   await box.fill("req_123");
   await page.getByRole("button", { name: "打开", exact: true }).click();
   await expect(page.getByText("请输入规范的请求 ID（req_ 加小写 UUIDv7）。")).toBeVisible();
-  expect(calls).toHaveLength(1);
+  expect(sent(calls)).toHaveLength(1);
 
   await box.fill(`  "${REQUEST_ID}" `);
   await page.getByRole("button", { name: "打开", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/investigation/requests/${REQUEST_ID}$`));
   await expect
-    .poll(() => calls.some((call) => call.path === `/control/v1/requests/${REQUEST_ID}`))
+    .poll(() => sent(calls).some((call) => call.path === `/control/v1/requests/${REQUEST_ID}`))
     .toBe(true);
 
   await openView(page, "request");
