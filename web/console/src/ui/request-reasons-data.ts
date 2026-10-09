@@ -1415,6 +1415,24 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "调用方提交的任务 ID 不是规范格式，请求被拒绝。",
     "改用规范的任务 ID（job_ 前缀）后重新查询。",
   ],
+  CONTROL_JOB_LIST_BUSY: [
+    "error",
+    "任务列表繁忙",
+    "案件与证据相关读取的在途容量已占满，本次任务列表请求被拒绝。",
+    "稍后重试。",
+  ],
+  CONTROL_JOB_LIST_REQUEST_INVALID: [
+    "deny",
+    "任务列表请求无效",
+    "任务列表只接受可选的 cursor 参数，其余形状被拒绝。",
+    "去掉多余参数后重新读取，或从第一页开始。",
+  ],
+  CONTROL_JOBS_READ: [
+    "info",
+    "已读取任务列表",
+    "一次本人任务列表的管理读取已记入审计日志。",
+    "无需处理。",
+  ],
   CONTROL_JOB_READ: [
     "info",
     "已读取任务状态",
