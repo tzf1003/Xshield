@@ -80,22 +80,26 @@ export async function refreshBadge(
   const epoch = runtime.store.getState().epoch;
   store.setBusy(true);
   const client = runtime.queryClient;
-  const reads: Promise<BadgeSource>[] = [];
+  const sources: BadgeSource[] = [];
+  // The control plane serves its case, evidence and export reads one at a time and answers an
+  // overlapping one 429 *_BUSY, so the two journal-backed reads run one after the other.
   if (hasRole(roles, role.approver)) {
-    reads.push(
-      client.fetchQuery(guardedQuery(runtime, specs.accessList("review"))).then(
+    sources.push(
+      await client.fetchQuery(guardedQuery(runtime, specs.accessList("review"))).then(
         (page) => ({ loaded: true, count: page.items.length, truncated: page.truncated }),
         () => failed,
       ),
-      client.fetchQuery(guardedQuery(runtime, specs.exportList("review"))).then(
+    );
+    sources.push(
+      await client.fetchQuery(guardedQuery(runtime, specs.exportList("review"))).then(
         (page) => ({ loaded: true, count: page.items.length, truncated: page.truncated }),
         () => failed,
       ),
     );
   }
   if (hasRole(roles, role.policyApprover)) {
-    reads.push(
-      client.fetchQuery(guardedQuery(runtime, specs.siteApprovals())).then(
+    sources.push(
+      await client.fetchQuery(guardedQuery(runtime, specs.siteApprovals())).then(
         (page) => ({
           loaded: true,
           count: siteApprovals(page.sites).length,
@@ -105,7 +109,6 @@ export async function refreshBadge(
       ),
     );
   }
-  const sources = await Promise.all(reads);
   // A session that ended meanwhile has already reset the store; never repopulate it from a
   // reply that belongs to an earlier session lifetime.
   if (!runtime.store.isCurrent(epoch)) return;
