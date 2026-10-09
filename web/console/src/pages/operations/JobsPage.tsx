@@ -31,7 +31,7 @@ import {
 import { specs } from "../../work/queries.ts";
 import type { JobListItem } from "../../job-list.ts";
 import { jobPill } from "../../work/status.ts";
-import { useRoles } from "../../work/roles.ts";
+import { hasRole, role, useRoles } from "../../work/roles.ts";
 import { WorkRoot } from "../../work/WorkRoot";
 import "../../operations/operations.css";
 
@@ -63,22 +63,40 @@ function classify(value: string, roles: readonly string[] | null, siteId: string
   };
 }
 
+type JobRow = JobListItem & { owner_ref?: string };
+
 /**
- * 我的任务: the caller's own jobs, newest identity first. Each row opens the same by-ID view as
- * the lookup, so the owner-scoped detail read stays the only source of a job's status.
+ * A job list section. `mine` reads the caller's own jobs; `all` reads every job in the scope and
+ * adds the submitter column, for audit administrators only (the server refuses other roles).
+ * Each row opens the same by-ID view as the lookup, so the owner-scoped detail read stays the
+ * only source of a job's status.
  */
-function MyJobs() {
-  const pager = usePager("jobs:mine");
-  const query = useGuardedQuery(specs.jobList(pager.cursor));
+function JobListSection({ scope }: { scope: "mine" | "all" }) {
+  const pager = usePager(`jobs:${scope}`);
+  const mine = specs.jobList(pager.cursor, scope === "mine");
+  const all = specs.adminJobList(pager.cursor, scope === "all");
+  const query = useGuardedQuery(scope === "mine" ? mine : all);
   const go = useGo();
   const page = query.data;
-  const columns: TableColumnsType<JobListItem> = [
+  const columns: TableColumnsType<JobRow> = [
     {
       title: "任务",
       key: "id",
       onCell: labelled("任务"),
       render: (_, row) => <IdChip id={row.job_id} label="任务 ID" />,
     },
+    ...(scope === "all"
+      ? [
+          {
+            title: "提交者",
+            key: "owner",
+            onCell: labelled("提交者"),
+            render: (_: unknown, row: JobRow) => (
+              <span className="mono">{row.owner_ref ?? "—"}</span>
+            ),
+          },
+        ]
+      : []),
     {
       title: "状态",
       key: "status",
@@ -117,8 +135,9 @@ function MyJobs() {
       ),
     },
   ];
+  const title = scope === "mine" ? "我的任务" : "全部任务（审计）";
   return (
-    <section className="xs-w-card" aria-label="我的任务">
+    <section className="xs-w-card" aria-label={title}>
       <div className="xs-w-between xs-w-toolbar">
         {page ? <Observed asOf={page.as_of} requestId={page.request_id} /> : <span />}
         <Button
@@ -132,7 +151,7 @@ function MyJobs() {
       <LoadState pending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
         {page && (
           <>
-            <Table<JobListItem>
+            <Table<JobRow>
               className="xs-w-table"
               rowKey="job_id"
               size="middle"
@@ -140,7 +159,9 @@ function MyJobs() {
               columns={columns}
               dataSource={page.items}
               loading={query.isFetching && !query.isPending}
-              locale={{ emptyText: "没有本人提交的任务。" }}
+              locale={{
+                emptyText: scope === "mine" ? "没有本人提交的任务。" : "本站点没有任务。",
+              }}
             />
             <Pager
               pager={pager}
@@ -251,7 +272,8 @@ function JobsBody() {
           />
         )}
       </section>
-      {investigator && <MyJobs />}
+      {investigator && <JobListSection scope="mine" />}
+      {hasRole(roles, role.audit) && <JobListSection scope="all" />}
       {jobId !== null && (
         <section className="xs-w-card" aria-label="任务状态">
           <div className="xs-w-between">

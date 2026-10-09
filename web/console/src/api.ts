@@ -97,8 +97,8 @@ import {
   exportPattern,
 } from "./exports.ts";
 import type { ExportDownload, ExportList, ExportListView, InvestigationExport } from "./exports.ts";
-import { decodeJobList, validateJobListCursor } from "./job-list.ts";
-import type { JobList } from "./job-list.ts";
+import { decodeAdminJobList, decodeJobList, validateJobListCursor } from "./job-list.ts";
+import type { AdminJobList, JobList } from "./job-list.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -3050,6 +3050,20 @@ export class ControlClient {
       (value, status) => {
         ensure(status === 200);
         return decodeJobList(value, cursor);
+      },
+      signal,
+    );
+  }
+
+  /** `GET /control/v1/admin/jobs[?cursor=...]`: every job in the scope, for audit administrators. */
+  async adminJobList(cursor?: string, signal?: AbortSignal): Promise<AdminJobList> {
+    validateJobListCursor(cursor);
+    const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
+    return this.#request(
+      `admin/jobs${query}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeAdminJobList(value, cursor);
       },
       signal,
     );

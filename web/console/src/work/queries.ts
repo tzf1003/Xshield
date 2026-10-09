@@ -9,7 +9,7 @@ import type { CaseCollection, CaseList } from "../cases.ts";
 import type { AccessInspection, AccessList, AccessListView } from "../evidence-access.ts";
 import type { HoldCollection } from "../evidence-holds.ts";
 import type { ExportList, ExportListView, InvestigationExport } from "../exports.ts";
-import type { JobList } from "../job-list.ts";
+import type { AdminJobList, JobList } from "../job-list.ts";
 import type { GuardedQuerySpec } from "../security/guarded-query.ts";
 import { MANUAL_REFRESH } from "../security/query-client.ts";
 
@@ -26,6 +26,7 @@ export const keys = {
     ["evidence", "export-list", view, cursor ?? ""] as const,
   exportDetail: (exportId: string) => ["evidence", "export", exportId] as const,
   jobList: (cursor?: string) => ["operations", "job-list", cursor ?? ""] as const,
+  adminJobList: (cursor?: string) => ["operations", "admin-job-list", cursor ?? ""] as const,
   siteApprovals: () => ["sites", "approvals"] as const,
 };
 
@@ -106,6 +107,12 @@ export const specs = {
     staleTime: MANUAL_REFRESH,
     enabled,
     fetch: (client, signal) => client.jobList(cursor, signal),
+  }),
+  adminJobList: (cursor?: string, enabled = true): GuardedQuerySpec<AdminJobList> => ({
+    key: keys.adminJobList(cursor),
+    staleTime: MANUAL_REFRESH,
+    enabled,
+    fetch: (client, signal) => client.adminJobList(cursor, signal),
   }),
   exportDetail: (exportId: string, enabled = true): GuardedQuerySpec<InvestigationExport> => ({
     key: keys.exportDetail(exportId),

@@ -129,6 +129,17 @@ test.describe("job lookup", () => {
     await expect.poll(() => detailReads(calls)).toEqual([`/control/v1/jobs/${JOB_ID}`]);
   });
 
+  test("the audit view lists every job with its submitter, and reads only on load", async ({
+    page,
+  }) => {
+    const calls = await open(page, "/operations/jobs");
+    const all = page.getByRole("region", { name: "全部任务（审计）" });
+    await expect(all).toContainText("investigator-alpha");
+    await expect(all).toContainText("investigator-beta");
+    await expect.poll(() => reads(calls)).toContain("/control/v1/admin/jobs");
+    expect(detailReads(calls)).toEqual([]);
+  });
+
   test("a deep link reads its job; an unknown job stays opaque", async ({ page }) => {
     const calls = await open(page, `/operations/jobs?job=${OTHER_JOB}`, (url) =>
       url.pathname === `/control/v1/jobs/${OTHER_JOB}`

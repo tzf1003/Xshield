@@ -95,16 +95,38 @@ function listItem(value: unknown): JobListItem {
   return item;
 }
 
+export type AdminJobListItem = JobListItem & { owner_ref: string };
+export type AdminJobList = Omit<JobList, "items"> & { items: AdminJobListItem[] };
+
+function adminListItem(value: unknown): AdminJobListItem {
+  const row = object(value);
+  // The owner reference is the submitter's subject; it is shown to audit administrators only.
+  return { ...listItem(value), owner_ref: text(row.owner_ref, 256) };
+}
+
 /** A complete page from the live snapshot. Order follows the job identity across page
  * boundaries, and the next cursor must name the last row it returned. */
 export function decodeJobList(value: unknown, cursor?: string): JobList {
+  return decodePage(value, cursor, listItem);
+}
+
+/** The audit administrator's site-wide page: the same rules, plus each job's owner reference. */
+export function decodeAdminJobList(value: unknown, cursor?: string): AdminJobList {
+  return decodePage(value, cursor, adminListItem);
+}
+
+function decodePage<T extends JobListItem>(
+  value: unknown,
+  cursor: string | undefined,
+  decodeItem: (value: unknown) => T,
+): JobList & { items: T[] } {
   const row = object(value);
   ensure(row.schema_version === 1);
-  const result: JobList = {
+  const result: JobList & { items: T[] } = {
     ...envelope(row),
     schema_version: 1,
     as_of: micros(row.as_of),
-    items: list(row.items, 128, listItem),
+    items: list(row.items, 128, decodeItem),
     ...pagination(row),
   };
   let previous = validateJobListCursor(cursor);
