@@ -19,6 +19,7 @@ mod evidence_access_list;
 mod export_list;
 mod exports;
 mod identity;
+mod job_list;
 mod jobs;
 mod ledger_inspection;
 mod management_api_key;
@@ -4389,6 +4390,10 @@ pub fn router(control: ControlPlane) -> Router {
             get(jobs::read_handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(
+            job_list::PATH,
+            get(job_list::handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
             exports::PATH,
             post(exports::request_handler).layer(DefaultBodyLimit::max(exports::MAX_BODY_BYTES)),
         )
@@ -5483,6 +5488,7 @@ mod tests {
     mod evidence_lifecycle;
     mod export_list;
     mod hold_console_wire;
+    mod job_list;
     mod ledger_inspection;
     mod model_call_list;
     mod search_references;

@@ -337,7 +337,7 @@ async fn existing_job(
     Ok(Some(ControlJobWriteOutcome::Existing(record)))
 }
 
-fn decode_job(row: &PgRow) -> Result<ControlJobRecord, StoreError> {
+pub(crate) fn decode_job(row: &PgRow) -> Result<ControlJobRecord, StoreError> {
     let job_id = JobId::parse(row.try_get::<String, _>("job_id")?)
         .map_err(|_| StoreError::CorruptData("job_id"))?;
     let kind = row.try_get::<String, _>("kind")?;
