@@ -46,6 +46,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.agent.read"
             | "console.case.analyze"
             | "console.job.read"
+            | "console.job.list"
             | "console.calibration.report.read"
             | "console.grant.read"
             | "console.binding.read"
@@ -128,6 +129,9 @@ impl AccessPayload {
         }
         if event.event_type == "console.export.list" {
             self.validate_export_list_reason()?;
+        }
+        if event.event_type == "console.job.list" {
+            self.validate_job_list_reason()?;
         }
         if event.event_type == "console.model.list" {
             self.validate_model_list_reason()?;
@@ -492,6 +496,35 @@ impl AccessPayload {
     // contract. `CONTROL_SESSION_UNAVAILABLE` is the one reason beyond the
     // access-list set: the shared authenticator can emit it for any endpoint,
     // and an unpublishable event would stop its whole segment.
+    fn validate_job_list_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_JOBS_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_CURSOR_INVALID"
+                    | "CONTROL_JOB_LIST_REQUEST_INVALID"
+                    | "CONTROL_JOB_LIST_BUSY"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CURSOR_UNAVAILABLE"
+                    | "CONTROL_JOB_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_SESSION_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
+    }
+
     fn validate_export_list_reason(&self) -> Result<(), PublishError> {
         let valid = match self.outcome.as_str() {
             "PASS" => self.reason_code == "CONTROL_EXPORTS_READ",
@@ -580,6 +613,7 @@ impl AccessPayload {
             "console.evidence.hold.read" => self.reason_code == "CONTROL_EVIDENCE_HOLD_READ",
             "console.workbench.overview.read" => self.reason_code == "WORKBENCH_OVERVIEW_READ",
             "console.export.read" => self.reason_code == "CONTROL_EXPORT_READ",
+            "console.job.list" => self.reason_code == "CONTROL_JOBS_READ",
             "export.requested" => matches!(
                 self.reason_code.as_str(),
                 "EXPORT_REQUESTED" | "EXPORT_REQUEST_REPLAYED"
@@ -656,6 +690,7 @@ impl AccessPayload {
             | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests")
             | ("console.job.read", "GET", "/control/v1/jobs/{job_id}")
+            | ("console.job.list", "GET", "/control/v1/jobs")
             | ("console.causality.read", "POST", "/control/v1/causality") => [false; 10],
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")

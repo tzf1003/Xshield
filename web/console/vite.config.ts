@@ -78,6 +78,14 @@ function validExportListQuery(url: string): boolean {
   return /^view=(mine|review)(&cursor=[A-Za-z0-9_.-]{1,256})?$/.test(url.slice(index + 1));
 }
 
+/** `GET /control/v1/jobs[?cursor=...]`: the bare collection or one cursor, matched whole. */
+const jobListPath = "/control/v1/jobs";
+function validJobListQuery(url: string): boolean {
+  if (url === jobListPath) return true;
+  const prefix = `${jobListPath}?cursor=`;
+  return url.startsWith(prefix) && /^[A-Za-z0-9_.-]{1,256}$/.test(url.slice(prefix.length));
+}
+
 function validSiteListQuery(url: string): boolean {
   const [path, query] = url.split("?", 2);
   if (path !== sitesPath || query === undefined) return false;
@@ -120,6 +128,7 @@ export default defineConfig({
             (request.method === "GET" &&
               ((path === oidcLoginPath && request.url === path) ||
                 validExportListQuery(request.url ?? "") ||
+                validJobListQuery(request.url ?? "") ||
                 path === oidcCallbackPath ||
                 (path === sessionPath && request.url === path) ||
                 (path === modelCallListPath

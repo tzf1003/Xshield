@@ -2103,3 +2103,61 @@ fn export_listing_duplicate_fields_fail_before_indexing() {
         ));
     }
 }
+
+fn job_list_event() -> Value {
+    surface_event(
+        "console.job.list",
+        "GET",
+        "/control/v1/jobs",
+        "CONTROL_JOBS_READ",
+    )
+}
+
+#[test]
+fn job_listing_publishes_owner_facts_and_rejects_other_shapes() {
+    let value = job_list_event();
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    assert_eq!(row.method, "GET");
+    assert_eq!(row.outcome, "PASS");
+    assert_eq!(row.reason_code, "CONTROL_JOBS_READ");
+    assert_eq!(row.confidence, None);
+    assert_eq!(row.evidence_refs, [] as [std::string::String; 0]);
+
+    // The list route owns neither the single-job reason nor a job target.
+    for (field, content) in [
+        ("reason_code", json!("CONTROL_JOB_READ")),
+        ("reason_code", json!("CONTROL_EXPORTS_READ")),
+        ("path", json!("/control/v1/jobs/{job_id}")),
+        ("path", json!("/control/v1/jobs?cursor=opaque")),
+        ("method", json!("POST")),
+        ("outcome", json!("UNKNOWN")),
+        ("cursor", json!("opaque")),
+        ("items", json!([])),
+        ("view", json!("mine")),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
+    }
+    let mut targeted = value.clone();
+    targeted["payload"]["target_job_id"] = json!(JOB);
+    rejected(&targeted, "job target on a list event");
+    let mut evidence = value.clone();
+    evidence["evidence_refs"] = json!([ARTIFACT]);
+    rejected(&evidence, "list evidence reference");
+
+    // Denials and dependency failures keep their closed reason sets.
+    let mut denied = value.clone();
+    denied["payload"]["outcome"] = json!("DENY");
+    denied["payload"]["reason_code"] = json!("CONTROL_JOB_LIST_BUSY");
+    assert!(index(&denied).is_ok());
+    denied["payload"]["reason_code"] = json!("CONTROL_JOB_STORE_UNAVAILABLE");
+    rejected(&denied, "store failure recorded as a denial");
+    let mut failed = value;
+    failed["payload"]["outcome"] = json!("ERROR");
+    failed["payload"]["reason_code"] = json!("CONTROL_JOB_STORE_UNAVAILABLE");
+    assert!(index(&failed).is_ok());
+    failed["payload"]["reason_code"] = json!("CONTROL_JOB_LIST_BUSY");
+    rejected(&failed, "busy recorded as an error");
+}
