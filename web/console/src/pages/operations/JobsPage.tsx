@@ -1,6 +1,6 @@
 import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { useSearch } from "@tanstack/react-router";
-import { Alert, Button, Input, Space } from "antd";
+import { Alert, Button, Input, Space, Table, type TableColumnsType } from "antd";
 import { type FormEvent, useState } from "react";
 import { jobPattern } from "../../api-contract.ts";
 import { RoleHint } from "../../operations/Parts";
@@ -17,8 +17,20 @@ import {
 import { operationReason } from "../../ui/operation-reasons.ts";
 import { JobCard } from "../../work/JobCard";
 import { RouteLink, useGo } from "../../work/nav";
-import { ErrorNotice, LoadState } from "../../work/Parts";
+import {
+  ErrorNotice,
+  IdChip,
+  labelled,
+  LoadState,
+  Observed,
+  Pager,
+  StatePill,
+  Time,
+  usePager,
+} from "../../work/Parts";
 import { specs } from "../../work/queries.ts";
+import type { JobListItem } from "../../job-list.ts";
+import { jobPill } from "../../work/status.ts";
 import { useRoles } from "../../work/roles.ts";
 import { WorkRoot } from "../../work/WorkRoot";
 import "../../operations/operations.css";
@@ -49,6 +61,99 @@ function classify(value: string, roles: readonly string[] | null, siteId: string
     text: outcome.notice ?? "这不是任务 ID：任务 ID 以 job_ 开头，后接小写 UUIDv7。",
     options: [],
   };
+}
+
+/**
+ * 我的任务: the caller's own jobs, newest identity first. Each row opens the same by-ID view as
+ * the lookup, so the owner-scoped detail read stays the only source of a job's status.
+ */
+function MyJobs() {
+  const pager = usePager("jobs:mine");
+  const query = useGuardedQuery(specs.jobList(pager.cursor));
+  const go = useGo();
+  const page = query.data;
+  const columns: TableColumnsType<JobListItem> = [
+    {
+      title: "任务",
+      key: "id",
+      onCell: labelled("任务"),
+      render: (_, row) => <IdChip id={row.job_id} label="任务 ID" />,
+    },
+    {
+      title: "状态",
+      key: "status",
+      onCell: labelled("状态"),
+      render: (_, row) => <StatePill pill={jobPill[row.status]} />,
+    },
+    {
+      title: "检查点",
+      key: "checkpoint",
+      onCell: labelled("检查点"),
+      render: (_, row) => <span className="mono">{row.checkpoint}</span>,
+    },
+    {
+      title: "案件",
+      key: "case",
+      onCell: labelled("案件"),
+      render: (_, row) => <IdChip id={row.case_id} label="案件 ID" />,
+    },
+    {
+      title: "创建时间",
+      key: "created",
+      onCell: labelled("创建时间"),
+      render: (_, row) => <Time value={row.created_at} />,
+    },
+    {
+      title: "操作",
+      key: "open",
+      onCell: labelled("操作"),
+      render: (_, row) => (
+        <Button
+          size="small"
+          onClick={() => go("/operations/jobs", { search: { job: row.job_id } })}
+        >
+          查看
+        </Button>
+      ),
+    },
+  ];
+  return (
+    <section className="xs-w-card" aria-label="我的任务">
+      <div className="xs-w-between xs-w-toolbar">
+        {page ? <Observed asOf={page.as_of} requestId={page.request_id} /> : <span />}
+        <Button
+          icon={<ReloadOutlined aria-hidden="true" />}
+          loading={query.isFetching}
+          onClick={() => void query.refetch()}
+        >
+          刷新
+        </Button>
+      </div>
+      <LoadState pending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
+        {page && (
+          <>
+            <Table<JobListItem>
+              className="xs-w-table"
+              rowKey="job_id"
+              size="middle"
+              pagination={false}
+              columns={columns}
+              dataSource={page.items}
+              loading={query.isFetching && !query.isPending}
+              locale={{ emptyText: "没有本人提交的任务。" }}
+            />
+            <Pager
+              pager={pager}
+              count={page.items.length}
+              nextCursor={page.next_cursor}
+              busy={query.isFetching}
+              noun="条任务"
+            />
+          </>
+        )}
+      </LoadState>
+    </section>
+  );
 }
 
 function JobsBody() {
@@ -146,6 +251,7 @@ function JobsBody() {
           />
         )}
       </section>
+      {investigator && <MyJobs />}
       {jobId !== null && (
         <section className="xs-w-card" aria-label="任务状态">
           <div className="xs-w-between">

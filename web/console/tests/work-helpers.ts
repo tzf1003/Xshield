@@ -95,6 +95,30 @@ export function jobBody(caseId = CASE_ID, jobId = JOB_ID) {
   };
 }
 
+/** The caller's own jobs: the lookup job and one older running job, newest identity first. */
+export function jobListFixture() {
+  // A list row carries no replay flag: that belongs to the write response only.
+  const { replayed: _replayed, ...newer } = jobBody().job;
+  return {
+    ...ENVELOPE,
+    schema_version: 1,
+    as_of: "2026-09-20T08:01:00.123456Z",
+    items: [
+      newer,
+      {
+        ...newer,
+        job_id: "job_018f2a3b-4c5d-7000-8000-000000000001",
+        status: "running",
+        checkpoint: "inventory_pending",
+        reason_code: "CONTROL_CASE_ANALYSIS_RUNNING",
+        completed_at: null,
+      },
+    ],
+    truncated: false,
+    next_cursor: null,
+  };
+}
+
 /** Two cases on one page: an open one and a closed one, newest first. */
 export function casesPage() {
   const base = caseListFixture();

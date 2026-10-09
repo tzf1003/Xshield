@@ -5,7 +5,7 @@ import { exportListFixture } from "./export-fixtures";
 import { auditHealthFixture, errorFixture, REQUEST_ID } from "./fixtures";
 import { type OverviewOptions, workbenchOverviewFixture } from "./overview-fixtures";
 import { SCOPE, sessionBody } from "./shell-helpers";
-import { JOB_ID, jobBody } from "./work-helpers";
+import { JOB_ID, jobBody, jobListFixture } from "./work-helpers";
 
 export type Reply = { status?: number; body?: unknown };
 export type Call = {
@@ -232,6 +232,8 @@ export async function mockWorkbench(page: Page, mock: WorkbenchMock = {}) {
       reply = { body: await deniedSearchFixture(validateSearchPlan(request.postDataJSON())) };
     } else if (path === "/control/v1/audit/health") {
       reply = { body: auditHealthFixture() };
+    } else if (path === "/control/v1/jobs") {
+      reply = { body: jobListFixture() };
     } else if (/^\/control\/v1\/jobs\/job_[0-9a-f-]+$/.test(url.pathname)) {
       reply = { body: jobBody(undefined, url.pathname.split("/").at(-1)) };
     } else if (path === "/control/v1/agent-api-keys" && request.method() === "GET") {

@@ -16,6 +16,9 @@ async function open(page: Page, path: string, override?: Override) {
 }
 
 const paths = (calls: readonly { path: string }[]) => calls.map((call) => call.path);
+// The my-jobs list is its own GET; these assertions count only the job-detail reads.
+const detailReads = (calls: Parameters<typeof reads>[0]) =>
+  reads(calls).filter((path) => path.startsWith("/control/v1/jobs/"));
 
 test.describe("audit publication", () => {
   test("reads only when asked, and never again by itself", async ({ page }) => {
@@ -81,7 +84,8 @@ test.describe("job lookup", () => {
     await input.fill(JOB_ID.toUpperCase());
     await page.getByRole("button", { name: "查询", exact: true }).click();
     await expect(page.getByText(/任务 ID 的格式不对/)).toBeVisible();
-    expect(calls).toHaveLength(0);
+    // The page's own my-jobs list may load; a rejected lookup must read no job.
+    expect(detailReads(calls)).toEqual([]);
   });
 
   test("a valid ID becomes the address and is read once; the result explains itself", async ({
@@ -100,13 +104,29 @@ test.describe("job lookup", () => {
       "href",
       `/cases/${CASE_ID}/analysis`,
     );
-    await expect.poll(() => reads(calls)).toEqual([`/control/v1/jobs/${JOB_ID}`]);
+    await expect.poll(() => detailReads(calls)).toEqual([`/control/v1/jobs/${JOB_ID}`]);
     const read = calls.length;
     await page.clock.fastForward(10 * 60_000);
     await page.waitForTimeout(300);
     expect(calls).toHaveLength(read);
     await card.getByRole("button", { name: "重新读取" }).click();
     await expect.poll(() => calls.length).toBe(read + 1);
+  });
+
+  test("my jobs lists the caller's jobs and opens one through the same detail read", async ({
+    page,
+  }) => {
+    const calls = await open(page, "/operations/jobs");
+    const mine = page.getByRole("region", { name: "我的任务" });
+    await expect(mine).toContainText("已完成");
+    await expect(mine).toContainText("运行中");
+    await expect(mine.getByText(JOB_ID)).toBeVisible();
+    await expect.poll(() => reads(calls)).toContain("/control/v1/jobs");
+    expect(detailReads(calls)).toEqual([]);
+    await mine.getByRole("button", { name: "查看", exact: true }).first().click();
+    await expect(page).toHaveURL(new RegExp(`/operations/jobs\\?job=${JOB_ID}$`));
+    await expect(page.getByRole("region", { name: "任务状态" })).toContainText("已完成");
+    await expect.poll(() => detailReads(calls)).toEqual([`/control/v1/jobs/${JOB_ID}`]);
   });
 
   test("a deep link reads its job; an unknown job stays opaque", async ({ page }) => {
@@ -124,7 +144,7 @@ test.describe("job lookup", () => {
         : undefined,
     );
     await expect(page.getByText("当前主体范围内未找到该任务")).toBeVisible();
-    expect(reads(calls)).toEqual([`/control/v1/jobs/${OTHER_JOB}`]);
+    expect(detailReads(calls)).toEqual([`/control/v1/jobs/${OTHER_JOB}`]);
     // A malformed `?job=` is dropped by the route, so nothing is read for it.
     await page.goto("/operations/jobs?job=job_bad");
     await page
@@ -133,7 +153,7 @@ test.describe("job lookup", () => {
     await page.getByRole("button", { name: "连接", exact: true }).click();
     await expect(page.getByLabel("任务 ID", { exact: true })).toHaveValue("");
     await expect(page.getByRole("region", { name: "任务状态" })).toHaveCount(0);
-    expect(reads(calls)).toEqual([`/control/v1/jobs/${OTHER_JOB}`]);
+    expect(detailReads(calls)).toEqual([`/control/v1/jobs/${OTHER_JOB}`]);
   });
 });
 
