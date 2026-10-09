@@ -79,6 +79,7 @@ export const specs = {
     key: keys.accessList(view, cursor),
     staleTime: MANUAL_REFRESH,
     enabled,
+    oneAtATime: true,
     fetch: (client, signal) => client.evidenceAccessList(view, cursor, signal),
   }),
   accessDetail: (accessId: string, enabled = true): GuardedQuerySpec<AccessInspection> => ({
@@ -95,6 +96,7 @@ export const specs = {
     key: keys.exportList(view, cursor),
     staleTime: MANUAL_REFRESH,
     enabled,
+    oneAtATime: true,
     fetch: (client, signal) => client.exportList(view, cursor, signal),
   }),
   exportDetail: (exportId: string, enabled = true): GuardedQuerySpec<InvestigationExport> => ({

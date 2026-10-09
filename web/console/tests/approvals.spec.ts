@@ -3,7 +3,7 @@
  * exports and site revisions that await a policy decision, each source loaded and failing on its
  * own, a detail pane with the decision form, and the requester's own history.
  */
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, type Request, test } from "@playwright/test";
 import {
   ACCESS_ID,
   accessDecisionFixture,
@@ -99,6 +99,70 @@ test.describe("待我审批", () => {
     expect(writes(calls)).toEqual([]);
     await expectQuiet(page, calls);
     expect(seen).toEqual([]);
+  });
+
+  // The control plane admits one case-evidence list read at a time; an overlap gets 429 *_BUSY.
+  async function oneListReadAtATime(page: Page) {
+    const busyCodes = new Map([
+      ["/control/v1/evidence-access-requests", "CONTROL_EVIDENCE_ACCESS_BUSY"],
+      ["/control/v1/exports", "CONTROL_EXPORT_BUSY"],
+    ]);
+    const held = new Set<Request>();
+    const freed = new Map<Request, () => void>();
+    const counts = { arrived: 0, overlapped: 0 };
+    // Aborted after the server took it: the slot is free again.
+    page.on("requestfailed", (request) => freed.get(request)?.());
+    const serve: Override = async (url, request) => {
+      const busy = busyCodes.get(url.pathname);
+      if (busy === undefined) return undefined;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      // Aborted within the StrictMode grace period: it never reached the server.
+      if (request.failure()) return undefined;
+      counts.arrived += 1;
+      if (held.size > 0) {
+        counts.overlapped += 1;
+        return refuse(429, busy);
+      }
+      held.add(request);
+      await Promise.race([
+        new Promise((resolve) => setTimeout(resolve, 250)),
+        new Promise<void>((resolve) => freed.set(request, resolve)),
+      ]);
+      held.delete(request);
+      return undefined;
+    };
+    await mockWork(page, serve);
+    return { counts, held };
+  }
+
+  test("reads the review queues one after the other when the page opens and when it is refreshed", async ({
+    page,
+  }) => {
+    const { counts, held } = await oneListReadAtATime(page);
+    await signIn(page, "/approvals");
+    await expect.poll(() => counts.arrived).toBeGreaterThanOrEqual(2);
+    expect(counts.overlapped).toBe(0);
+    const rows = page
+      .getByRole("row")
+      .filter({ has: page.getByRole("button", { name: /^(处理|查看) / }) });
+    await expect(rows).toHaveCount(3);
+    const before = counts.arrived;
+    await page.getByRole("button", { name: "刷新待办", exact: true }).click();
+    await expect.poll(() => counts.arrived).toBe(before + 2);
+    await expect.poll(() => held.size).toBe(0);
+    expect(counts.overlapped).toBe(0);
+    await expect(rows).toHaveCount(3);
+  });
+
+  test("reads the requester's own queues one after the other with the review queues", async ({
+    page,
+  }) => {
+    const { counts, held } = await oneListReadAtATime(page);
+    await signIn(page, "/approvals/mine");
+    // Both review sources and both own sources: four case-evidence list reads.
+    await expect.poll(() => counts.arrived).toBeGreaterThanOrEqual(4);
+    await expect.poll(() => held.size).toBe(0);
+    expect(counts.overlapped).toBe(0);
   });
 
   test("an empty inbox says so and explains that nothing refreshes by itself", async ({ page }) => {

@@ -1,5 +1,6 @@
 import type { ControlClient } from "../api.ts";
 import { runGuardedRead } from "./guarded.ts";
+import { readLaneOf } from "./read-lane.ts";
 import type { SessionRuntime } from "./runtime.ts";
 import type { ScopedResponse } from "./scope.ts";
 
@@ -14,6 +15,8 @@ export type GuardedQuerySpec<T extends ScopedResponse> = {
   staleTime: number;
   /** Multi-site reads answer for this site instead of the session's own site. */
   expectedSiteId?: string;
+  /** Queued in the session's read lane; the control plane answers an overlapping read 429 *_BUSY. */
+  oneAtATime?: boolean;
   enabled?: boolean;
   gcTime?: number;
 };
@@ -38,13 +41,16 @@ export function guardedQuery<T extends ScopedResponse>(
   const epoch = state.epoch;
   return {
     queryKey: guardedQueryKey(epoch, spec.key),
-    queryFn: ({ signal }: { signal: AbortSignal }) =>
-      runGuardedRead(store, {
-        fetch: spec.fetch,
-        expectedSiteId: spec.expectedSiteId,
-        epoch,
-        signal,
-      }),
+    queryFn: ({ signal }: { signal: AbortSignal }) => {
+      const read = () =>
+        runGuardedRead(store, {
+          fetch: spec.fetch,
+          expectedSiteId: spec.expectedSiteId,
+          epoch,
+          signal,
+        });
+      return spec.oneAtATime ? readLaneOf(store).run(read) : read();
+    },
     enabled: state.status === "connected" && spec.enabled !== false,
     staleTime: spec.staleTime,
     gcTime: spec.gcTime ?? runtime.queryGcMs,
