@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`GET /control/v1/jobs[?cursor=...]`（29.34）、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`GET /control/v1/jobs[?cursor=...]`（29.34）、`GET /control/v1/admin/jobs[?cursor=...]`（29.35，AuditAdministrator）、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 站点接入后台的配置写入要求 `SystemAdmin`，按固定 tenant/site 保存受保护站点、源站、安全入口、策略版本、状态和唯一监听端口；写入使用 `Idempotency-Key`，响应同时返回经过校验的 gateway 启动配置草稿。
 
@@ -68,6 +68,7 @@ edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，�
 | POST /control/v1/exports/{export_id}/deny | 独立拒绝导出请求 | export.denied |
 | GET /control/v1/exports/{export_id}/download | 领取加密元数据包（最多两次） | export.downloaded |
 | GET /control/v1/jobs | 本人任务列表，按 job_id 降序分页（已实现，29.34） | console.job.list |
+| GET /control/v1/admin/jobs | 管理员全部任务列表与提交者引用（已实现，29.35，仅 AuditAdministrator） | console.job.admin_list |
 | GET /control/v1/jobs/{id} | 查看本人任务进度与错误 | console.job.read |
 | POST /control/v1/sites/{id}/candidates | 提交配置候选（设计，尚未实现） | policy.proposed |
 | POST /control/v1/candidates/{id}/validate | 受控验证（设计，尚未实现） | policy.tested |
@@ -478,6 +479,16 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 每次认证后的尝试（含拒绝与依赖故障）恰好写一条 `console.job.list` 管理审计，成功为 `PASS/CONTROL_JOBS_READ`，拒绝仅限 `CONTROL_AUTH_REQUIRED`、`CONTROL_SCOPE_DENIED`、`CONTROL_RATE_LIMITED`、`CONTROL_CURSOR_INVALID`、`CONTROL_JOB_LIST_REQUEST_INVALID`、`CONTROL_JOB_LIST_BUSY`，故障为 `CONTROL_CURSOR_UNAVAILABLE`、`CONTROL_JOB_STORE_UNAVAILABLE`、`CONTROL_RATE_UNAVAILABLE`、`CONTROL_CLOCK_UNAVAILABLE`、`CONTROL_SESSION_UNAVAILABLE`。审计不携带游标、列表内容或他人主体；target 字段全部为空。
 
 列表读取占用案件/证据在途许可并保持到审计落盘，繁忙返回 429 `CONTROL_JOB_LIST_BUSY`；单任务读取不占用该许可，二者互不排队。部署先应用既有迁移 0038（不新增迁移），再升级识别 `console.job.list` 的管理 journal 发布器，最后开放路由。回滚停用路由即可，已写入的审计按保留策略保存。控制台列表页不在本契约内，前端增量另行交付。
+
+## 29.35 已实现的管理员全部任务列表契约
+
+`GET /control/v1/admin/jobs[?cursor=...]` 列出固定 tenant/site 作用域内全部耐久任务，只允许 `AuditAdministrator`（访问决定记录于本章，不扩大 `Investigator` 的可见范围）。查询形状与 29.34 相同：只接受可选 `cursor`，其余形状在取得在途许可之前返回 400 `CONTROL_ADMIN_JOB_LIST_REQUEST_INVALID`；游标是 `v1.<job_id>.<hmac>`，绑定凭证摘要、调用者主体、tenant/site 与页大小，跨主体或跨作用域重放返回 400 `CONTROL_CURSOR_INVALID`。
+
+每条目在任务投影之外返回提交者的 `owner_ref`，供访问复核定位主体；该字段只出现在响应中，不进入任何审计载荷。页按规范 `job_` ID 字节序降序，数据库在单个只读事务内读取，语句与锁等待各限 5 秒，调用方总超时 15 秒，取回的行逐一校验顺序。列表不授予读取、批准或执行任务的资格，单任务读取仍只允许提交者本人。
+
+每次认证后的尝试恰好写一条 `console.job.admin_list` 管理审计，成功为 `PASS/CONTROL_ADMIN_JOBS_READ`，拒绝仅限 `CONTROL_AUTH_REQUIRED`、`CONTROL_SCOPE_DENIED`、`CONTROL_RATE_LIMITED`、`CONTROL_CURSOR_INVALID`、`CONTROL_ADMIN_JOB_LIST_REQUEST_INVALID`、`CONTROL_ADMIN_JOB_LIST_BUSY`，故障为 `CONTROL_CURSOR_UNAVAILABLE`、`CONTROL_ADMIN_JOB_STORE_UNAVAILABLE`、`CONTROL_RATE_UNAVAILABLE`、`CONTROL_CLOCK_UNAVAILABLE`、`CONTROL_SESSION_UNAVAILABLE`。审计不含游标、列表条目或任何 `owner_ref`，target 字段全部为空。
+
+部署先应用既有迁移 0038（不新增迁移），再升级识别 `console.job.admin_list` 的管理 journal 发布器，最后开放路由。回滚停用路由即可。控制台的管理员视图不在本契约内，前端增量另行交付。
 
 ## 站点诊断与控制台契约补充（2026-09-27）
 

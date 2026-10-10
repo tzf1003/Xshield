@@ -119,6 +119,18 @@ export function jobListFixture() {
   };
 }
 
+/** Every job in the scope, with each submitter's reference, for the audit administrator. */
+export function adminJobListFixture() {
+  const mine = jobListFixture();
+  return {
+    ...mine,
+    items: mine.items.map((item, index) => ({
+      ...item,
+      owner_ref: index === 0 ? "investigator-alpha" : "investigator-beta",
+    })),
+  };
+}
+
 /** Two cases on one page: an open one and a closed one, newest first. */
 export function casesPage() {
   const base = caseListFixture();

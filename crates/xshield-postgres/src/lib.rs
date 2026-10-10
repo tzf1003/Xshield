@@ -19,6 +19,7 @@ mod case_evidence_holds;
 mod case_evidence_read;
 mod case_list;
 mod control_job;
+mod control_job_admin_list;
 mod control_job_list;
 mod evidence_access_decision;
 mod evidence_access_inspection;
@@ -91,6 +92,9 @@ pub use case_evidence_read::{
 };
 pub use case_list::{InvestigationCasePage, InvestigationCaseQuery};
 pub use control_job::{CaseAnalysisJobCreate, ControlJobRecord, ControlJobWriteOutcome};
+pub use control_job_admin_list::{
+    ControlJobAdminListItem, ControlJobAdminListPage, ControlJobAdminListQuery,
+};
 pub use control_job_list::{ControlJobListPage, ControlJobListQuery};
 pub use evidence_access_decision::{
     EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,

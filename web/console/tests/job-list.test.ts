@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ApiError } from "../src/api-contract.ts";
-import { decodeJobList, validateJobListCursor } from "../src/job-list.ts";
+import { decodeAdminJobList, decodeJobList, validateJobListCursor } from "../src/job-list.ts";
 
 const CASE_ID = "case_018f2a3b-4c5d-7000-8000-000000000031";
 const JOB_NEW = "job_018f2a3b-4c5d-7000-8000-000000000052";
@@ -106,4 +106,28 @@ test("cursor validation accepts only the job cursor shape", () => {
   for (const bad of ["", "v1.case_x.aa", `v2.${JOB_OLD}.${"a".repeat(64)}`, `v1.${JOB_OLD}.zz`]) {
     assert.throws(() => validateJobListCursor(bad), ApiError);
   }
+});
+
+test("the admin page requires each row's owner reference and keeps the same order", () => {
+  const decoded = decodeAdminJobList(
+    page([
+      item(JOB_NEW, { owner_ref: "investigator-1" }),
+      item(JOB_OLD, { owner_ref: "investigator-2" }),
+    ]),
+  );
+  assert.deepEqual(
+    decoded.items.map((row) => [row.job_id, row.owner_ref]),
+    [
+      [JOB_NEW, "investigator-1"],
+      [JOB_OLD, "investigator-2"],
+    ],
+  );
+  assert.throws(() => decodeAdminJobList(page([item(JOB_NEW)])), ApiError);
+  assert.throws(
+    () =>
+      decodeAdminJobList(
+        page([item(JOB_OLD, { owner_ref: "a" }), item(JOB_NEW, { owner_ref: "b" })]),
+      ),
+    ApiError,
+  );
 });

@@ -2161,3 +2161,52 @@ fn job_listing_publishes_owner_facts_and_rejects_other_shapes() {
     failed["payload"]["reason_code"] = json!("CONTROL_JOB_LIST_BUSY");
     rejected(&failed, "busy recorded as an error");
 }
+
+fn admin_job_list_event() -> Value {
+    surface_event(
+        "console.job.admin_list",
+        "GET",
+        "/control/v1/admin/jobs",
+        "CONTROL_ADMIN_JOBS_READ",
+    )
+}
+
+#[test]
+fn admin_job_listing_publishes_site_facts_and_rejects_other_shapes() {
+    let value = admin_job_list_event();
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    assert_eq!(row.method, "GET");
+    assert_eq!(row.outcome, "PASS");
+    assert_eq!(row.reason_code, "CONTROL_ADMIN_JOBS_READ");
+    assert_eq!(row.evidence_refs, [] as [std::string::String; 0]);
+
+    // Owner-list and single-job reasons, the owner route and job targets do not fit here.
+    for (field, content) in [
+        ("reason_code", json!("CONTROL_JOBS_READ")),
+        ("reason_code", json!("CONTROL_JOB_READ")),
+        ("path", json!("/control/v1/jobs")),
+        ("path", json!("/control/v1/admin/jobs?cursor=opaque")),
+        ("method", json!("POST")),
+        ("owner_ref", json!("investigator-1")),
+        ("items", json!([])),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
+    }
+    let mut targeted = value.clone();
+    targeted["payload"]["target_job_id"] = json!(JOB);
+    rejected(&targeted, "job target on an admin list event");
+
+    let mut denied = value.clone();
+    denied["payload"]["outcome"] = json!("DENY");
+    denied["payload"]["reason_code"] = json!("CONTROL_ADMIN_JOB_LIST_BUSY");
+    assert!(index(&denied).is_ok());
+    denied["payload"]["reason_code"] = json!("CONTROL_ADMIN_JOB_STORE_UNAVAILABLE");
+    rejected(&denied, "store failure recorded as a denial");
+    let mut failed = value;
+    failed["payload"]["outcome"] = json!("ERROR");
+    failed["payload"]["reason_code"] = json!("CONTROL_ADMIN_JOB_STORE_UNAVAILABLE");
+    assert!(index(&failed).is_ok());
+}
