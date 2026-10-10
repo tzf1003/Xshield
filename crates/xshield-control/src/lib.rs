@@ -25,6 +25,7 @@ mod jobs;
 mod ledger_inspection;
 mod management_api_key;
 mod model_call_list;
+mod saved_views;
 mod search;
 mod site_config;
 mod workbench;
@@ -45,7 +46,7 @@ use axum::{
     },
     middleware::from_fn_with_state,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use chrono::{SecondsFormat, Utc};
 use clickhouse::Client;
@@ -4399,6 +4400,20 @@ pub fn router(control: ControlPlane) -> Router {
             get(job_admin_list::handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(
+            saved_views::PATH,
+            get(saved_views::list_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        // Same collection path, different method: axum merges the two method routers.
+        .route(
+            saved_views::PATH,
+            post(saved_views::create_handler)
+                .layer(DefaultBodyLimit::max(saved_views::CREATE_BODY_BYTES_MAX)),
+        )
+        .route(
+            saved_views::DELETE_PATH,
+            delete(saved_views::delete_handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
             exports::PATH,
             post(exports::request_handler).layer(DefaultBodyLimit::max(exports::MAX_BODY_BYTES)),
         )
@@ -5497,6 +5512,7 @@ mod tests {
     mod job_list;
     mod ledger_inspection;
     mod model_call_list;
+    mod saved_views;
     mod search_references;
     mod site_admin;
     mod site_approval;

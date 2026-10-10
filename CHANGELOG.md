@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 增加保存检索视图 API：`POST/GET /control/v1/saved-views` 与 `DELETE /control/v1/saved-views/{view_id}`，只允许 `Investigator`，保存经校验的检索请求（不含游标、不超过 8 KiB），同名 409 且不写入；每次尝试写对应 `console.saved_view.*` 审计，worker 发布矩阵与封闭原因集同步扩展。控制台入口未接入。
 - 增加保存检索视图的存储层：迁移 `0055_m5_saved_views.sql` 建立 `xshield.saved_search_views`，按 owner 保存已校验的检索请求（不含游标、不超过 8 KiB），名称在 owner 内唯一；PostgreSQL 回归 `saved_search_view` 覆盖唯一冲突、续页顺序、跨主体隔离、删除与不合法请求的拒绝。HTTP 端点与控制台尚未接入，部署前须先应用该迁移。
 - 增加管理员全部任务列表 API：`GET /control/v1/admin/jobs[?cursor=...]` 只允许 `AuditAdministrator`（访问范围为本次决定：不扩大 Investigator 可见性，每次读取写 `console.job.admin_list` 审计），按 `job_` 降序有界分页，每条目附提交者 `owner_ref`，该字段不进入审计载荷；游标绑定凭证、调用者、作用域与页大小。PostgreSQL 回归 `control_job_admin_list` 覆盖跨主体续页与顺序；worker 发布矩阵、封闭原因集与覆盖检查同步扩展（63 个控制事件）。不新增迁移，控制台视图未接入。
 - 增加本人任务列表 API：`GET /control/v1/jobs[?cursor=...]` 只允许 `Investigator`，按规范 `job_` ID 降序有界分页，游标绑定凭证、主体、作用域与页大小，条目与单任务读取投影一致且不含幂等键或主体引用。列表读取写独立 `console.job.list` 审计（成功 `CONTROL_JOBS_READ`），worker 发布矩阵、封闭原因集与发布回归同步扩展；不新增迁移（沿用 0038）。PostgreSQL 回归 `control_job_list` 与控制层预准入回归覆盖排序、游标续页、跨主体隔离与非法输入。控制台列表页未接入，本次未改动 `web/`。

@@ -2210,3 +2210,59 @@ fn admin_job_listing_publishes_site_facts_and_rejects_other_shapes() {
     failed["payload"]["reason_code"] = json!("CONTROL_ADMIN_JOB_STORE_UNAVAILABLE");
     assert!(index(&failed).is_ok());
 }
+
+#[test]
+fn saved_view_events_publish_their_own_reasons_and_reject_crossed_routes() {
+    for (kind, method, path, reason) in [
+        (
+            "console.saved_view.create",
+            "POST",
+            "/control/v1/saved-views",
+            "CONTROL_SAVED_VIEW_CREATED",
+        ),
+        (
+            "console.saved_view.list",
+            "GET",
+            "/control/v1/saved-views",
+            "CONTROL_SAVED_VIEWS_READ",
+        ),
+        (
+            "console.saved_view.delete",
+            "DELETE",
+            "/control/v1/saved-views/{view_id}",
+            "CONTROL_SAVED_VIEW_DELETED",
+        ),
+    ] {
+        let value = surface_event(kind, method, path, reason);
+        let row = index(&value).unwrap();
+        assert_eq!(row.outcome, "PASS", "{kind}");
+        assert_eq!(row.reason_code, reason, "{kind}");
+        assert_eq!(row.evidence_refs, [] as [std::string::String; 0]);
+        // A saved view event never names a view, a name or a search body.
+        let mut named = value.clone();
+        named["payload"]["view_id"] = json!("view_018f2a3b-4c5d-7000-8000-000000000001");
+        rejected(&named, "view identity in payload");
+        let mut crossed = value.clone();
+        crossed["payload"]["path"] = json!("/control/v1/jobs");
+        rejected(&crossed, "saved view event on a job route");
+    }
+    // The list reason does not fit the create route, and the create reason not the list.
+    let wrong = surface_event(
+        "console.saved_view.create",
+        "POST",
+        "/control/v1/saved-views",
+        "CONTROL_SAVED_VIEWS_READ",
+    );
+    rejected(&wrong, "list reason on the create event");
+    // A conflict is a denial, never a dependency failure.
+    let mut conflict = surface_event(
+        "console.saved_view.create",
+        "POST",
+        "/control/v1/saved-views",
+        "CONTROL_SAVED_VIEW_NAME_TAKEN",
+    );
+    conflict["payload"]["outcome"] = json!("DENY");
+    assert!(index(&conflict).is_ok());
+    conflict["payload"]["outcome"] = json!("ERROR");
+    rejected(&conflict, "name conflict recorded as an error");
+}
