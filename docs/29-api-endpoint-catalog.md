@@ -68,6 +68,9 @@ edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，�
 | POST /control/v1/exports/{export_id}/deny | 独立拒绝导出请求 | export.denied |
 | GET /control/v1/exports/{export_id}/download | 领取加密元数据包（最多两次） | export.downloaded |
 | GET /control/v1/jobs | 本人任务列表，按 job_id 降序分页（已实现，29.34） | console.job.list |
+| POST /control/v1/saved-views | 保存已校验的检索请求（已实现，29.36） | console.saved_view.create |
+| GET /control/v1/saved-views | 本人保存的检索视图分页（已实现，29.36） | console.saved_view.list |
+| DELETE /control/v1/saved-views/{view_id} | 删除本人保存的检索视图（已实现，29.36） | console.saved_view.delete |
 | GET /control/v1/admin/jobs | 管理员全部任务列表与提交者引用（已实现，29.35，仅 AuditAdministrator） | console.job.admin_list |
 | GET /control/v1/jobs/{id} | 查看本人任务进度与错误 | console.job.read |
 | POST /control/v1/sites/{id}/candidates | 提交配置候选（设计，尚未实现） | policy.proposed |
@@ -489,6 +492,14 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 每次认证后的尝试恰好写一条 `console.job.admin_list` 管理审计，成功为 `PASS/CONTROL_ADMIN_JOBS_READ`，拒绝仅限 `CONTROL_AUTH_REQUIRED`、`CONTROL_SCOPE_DENIED`、`CONTROL_RATE_LIMITED`、`CONTROL_CURSOR_INVALID`、`CONTROL_ADMIN_JOB_LIST_REQUEST_INVALID`、`CONTROL_ADMIN_JOB_LIST_BUSY`，故障为 `CONTROL_CURSOR_UNAVAILABLE`、`CONTROL_ADMIN_JOB_STORE_UNAVAILABLE`、`CONTROL_RATE_UNAVAILABLE`、`CONTROL_CLOCK_UNAVAILABLE`、`CONTROL_SESSION_UNAVAILABLE`。审计不含游标、列表条目或任何 `owner_ref`，target 字段全部为空。
 
 部署先应用既有迁移 0038（不新增迁移），再升级识别 `console.job.admin_list` 的管理 journal 发布器，最后开放路由。回滚停用路由即可。控制台的管理员视图不在本契约内，前端增量另行交付。
+
+## 29.36 已实现的保存检索视图契约
+
+`POST /control/v1/saved-views`、`GET /control/v1/saved-views[?cursor=...]` 与 `DELETE /control/v1/saved-views/{view_id}` 只允许 `Investigator`，保存的是已校验的检索请求，而不是结果。创建体为 `{"schema_version":1,"name":...,"search":...}`：`search` 必须能解析为 schema 3 的检索请求并通过当前上限的计划校验，且不得含 `cursor`，序列化后不超过 8 KiB；名称 1–160 字节、无控制字符，并在 owner 内唯一。不合法请求返回 400 `CONTROL_SAVED_VIEW_REQUEST_INVALID`；同名返回 409 `CONTROL_SAVED_VIEW_NAME_TAKEN`，且不写入。
+
+列表按 `view_` 标识降序分页，游标绑定凭证、调用者、作用域与页大小，格式错误返回 400 `CONTROL_CURSOR_INVALID`。删除只能删除调用者自己的视图，他人或不存在的标识统一返回 404 `CONTROL_SAVED_VIEW_NOT_FOUND`，非法标识返回 400 `CONTROL_SAVED_VIEW_ID_INVALID`。读取视图的结果不是缓存：执行时仍是一次普通检索，经既有 `console.query.executed` 审计。
+
+浏览器写请求经既有 CSRF 检查。每次认证后的尝试恰好写一条 `console.saved_view.create`、`console.saved_view.list` 或 `console.saved_view.delete` 管理审计，成功分别为 `PASS/CONTROL_SAVED_VIEW_CREATED`、`PASS/CONTROL_SAVED_VIEWS_READ`、`PASS/CONTROL_SAVED_VIEW_DELETED`；审计不含视图标识、名称、检索内容或游标。部署先应用迁移 0055，再升级管理 journal 发布器，最后开放路由。回滚停用路由，已写入的视图按保留策略保存。控制台的保存与打开入口不在本契约内，另行交付。
 
 ## 站点诊断与控制台契约补充（2026-09-27）
 

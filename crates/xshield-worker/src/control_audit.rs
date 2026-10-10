@@ -48,6 +48,9 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.job.read"
             | "console.job.list"
             | "console.job.admin_list"
+            | "console.saved_view.create"
+            | "console.saved_view.list"
+            | "console.saved_view.delete"
             | "console.calibration.report.read"
             | "console.grant.read"
             | "console.binding.read"
@@ -136,6 +139,12 @@ impl AccessPayload {
         }
         if event.event_type == "console.job.admin_list" {
             self.validate_admin_job_list_reason()?;
+        }
+        if matches!(
+            event.event_type.as_str(),
+            "console.saved_view.create" | "console.saved_view.list" | "console.saved_view.delete"
+        ) {
+            self.validate_saved_view_reason(&event.event_type)?;
         }
         if event.event_type == "console.model.list" {
             self.validate_model_list_reason()?;
@@ -529,6 +538,68 @@ impl AccessPayload {
         }
     }
 
+    fn validate_saved_view_reason(&self, event_type: &str) -> Result<(), PublishError> {
+        // Denials and dependency failures keep the closed sets of the producer; every
+        // saved view event carries no target and no evidence.
+        let valid = match (event_type, self.outcome.as_str()) {
+            ("console.saved_view.create", "PASS") => {
+                self.reason_code == "CONTROL_SAVED_VIEW_CREATED"
+            }
+            ("console.saved_view.create", "DENY") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_SAVED_VIEW_REQUEST_INVALID"
+                    | "CONTROL_SAVED_VIEW_NAME_TAKEN"
+            ),
+            ("console.saved_view.create", "ERROR") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_SAVED_VIEW_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_SESSION_UNAVAILABLE"
+            ),
+            ("console.saved_view.list", "PASS") => self.reason_code == "CONTROL_SAVED_VIEWS_READ",
+            ("console.saved_view.list", "DENY") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_CURSOR_INVALID"
+                    | "CONTROL_SAVED_VIEW_REQUEST_INVALID"
+            ),
+            ("console.saved_view.list", "ERROR") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CURSOR_UNAVAILABLE"
+                    | "CONTROL_SAVED_VIEW_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_SESSION_UNAVAILABLE"
+            ),
+            ("console.saved_view.delete", "PASS") => {
+                self.reason_code == "CONTROL_SAVED_VIEW_DELETED"
+            }
+            ("console.saved_view.delete", "DENY") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_SAVED_VIEW_ID_INVALID"
+                    | "CONTROL_SAVED_VIEW_NOT_FOUND"
+            ),
+            ("console.saved_view.delete", "ERROR") => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_SAVED_VIEW_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_SESSION_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        valid.then_some(()).ok_or(PublishError::InvalidEvent)
+    }
+
     fn validate_admin_job_list_reason(&self) -> Result<(), PublishError> {
         let valid = match self.outcome.as_str() {
             "PASS" => self.reason_code == "CONTROL_ADMIN_JOBS_READ",
@@ -648,6 +719,9 @@ impl AccessPayload {
             "console.export.read" => self.reason_code == "CONTROL_EXPORT_READ",
             "console.job.list" => self.reason_code == "CONTROL_JOBS_READ",
             "console.job.admin_list" => self.reason_code == "CONTROL_ADMIN_JOBS_READ",
+            "console.saved_view.create" => self.reason_code == "CONTROL_SAVED_VIEW_CREATED",
+            "console.saved_view.list" => self.reason_code == "CONTROL_SAVED_VIEWS_READ",
+            "console.saved_view.delete" => self.reason_code == "CONTROL_SAVED_VIEW_DELETED",
             "export.requested" => matches!(
                 self.reason_code.as_str(),
                 "EXPORT_REQUESTED" | "EXPORT_REQUEST_REPLAYED"
@@ -726,6 +800,9 @@ impl AccessPayload {
             | ("console.job.read", "GET", "/control/v1/jobs/{job_id}")
             | ("console.job.list", "GET", "/control/v1/jobs")
             | ("console.job.admin_list", "GET", "/control/v1/admin/jobs")
+            | ("console.saved_view.create", "POST", "/control/v1/saved-views")
+            | ("console.saved_view.list", "GET", "/control/v1/saved-views")
+            | ("console.saved_view.delete", "DELETE", "/control/v1/saved-views/{view_id}")
             | ("console.causality.read", "POST", "/control/v1/causality") => [false; 10],
             ("console.query.executed", "POST", "/control/v1/search")
             | ("console.request.read", "GET", "/control/v1/requests/{request_id}")
