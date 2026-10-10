@@ -10,6 +10,7 @@ import type { AccessInspection, AccessList, AccessListView } from "../evidence-a
 import type { HoldCollection } from "../evidence-holds.ts";
 import type { ExportList, ExportListView, InvestigationExport } from "../exports.ts";
 import type { AdminJobList, JobList } from "../job-list.ts";
+import type { SavedViewList } from "../saved-views.ts";
 import type { GuardedQuerySpec } from "../security/guarded-query.ts";
 import { MANUAL_REFRESH } from "../security/query-client.ts";
 
@@ -27,6 +28,7 @@ export const keys = {
   exportDetail: (exportId: string) => ["evidence", "export", exportId] as const,
   jobList: (cursor?: string) => ["operations", "job-list", cursor ?? ""] as const,
   adminJobList: (cursor?: string) => ["operations", "admin-job-list", cursor ?? ""] as const,
+  savedViews: (cursor?: string) => ["investigation", "saved-views", cursor ?? ""] as const,
   siteApprovals: () => ["sites", "approvals"] as const,
 };
 
@@ -107,6 +109,12 @@ export const specs = {
     staleTime: MANUAL_REFRESH,
     enabled,
     fetch: (client, signal) => client.jobList(cursor, signal),
+  }),
+  savedViews: (cursor?: string, enabled = true): GuardedQuerySpec<SavedViewList> => ({
+    key: keys.savedViews(cursor),
+    staleTime: MANUAL_REFRESH,
+    enabled,
+    fetch: (client, signal) => client.savedViews(cursor, signal),
   }),
   adminJobList: (cursor?: string, enabled = true): GuardedQuerySpec<AdminJobList> => ({
     key: keys.adminJobList(cursor),

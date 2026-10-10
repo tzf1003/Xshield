@@ -695,7 +695,8 @@ test.describe("mobile", () => {
     // The table scrolls inside its own container instead of widening the page.
     expect(
       await page.evaluate(() => {
-        const content = document.querySelector(".ant-table-content");
+        // Scoped to the results: the saved-views table on this page is a second table.
+        const content = document.querySelector('[aria-label="搜索事件结果"] .ant-table-content');
         return content ? content.scrollWidth > content.clientWidth : false;
       }),
     ).toBe(true);

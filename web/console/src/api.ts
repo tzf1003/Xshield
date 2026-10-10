@@ -99,6 +99,15 @@ import {
 import type { ExportDownload, ExportList, ExportListView, InvestigationExport } from "./exports.ts";
 import { decodeAdminJobList, decodeJobList, validateJobListCursor } from "./job-list.ts";
 import type { AdminJobList, JobList } from "./job-list.ts";
+import {
+  decodeSavedViewCreated,
+  decodeSavedViewDeleted,
+  decodeSavedViewList,
+  savedViewCreateBody,
+  validateSavedViewCursor,
+  validateSavedViewId,
+} from "./saved-views.ts";
+import type { SavedViewCreated, SavedViewDeleted, SavedViewList } from "./saved-views.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -3056,6 +3065,55 @@ export class ControlClient {
   }
 
   /** `GET /control/v1/admin/jobs[?cursor=...]`: every job in the scope, for audit administrators. */
+  /** `GET /control/v1/saved-views[?cursor=...]`: the caller's own saved searches. */
+  async savedViews(cursor?: string, signal?: AbortSignal): Promise<SavedViewList> {
+    validateSavedViewCursor(cursor);
+    const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
+    return this.#request(
+      `saved-views${query}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeSavedViewList(value, cursor);
+      },
+      signal,
+    );
+  }
+
+  /** `POST /control/v1/saved-views`: stores a validated search under a name; grants no read. */
+  async createSavedView(
+    name: string,
+    plan: SearchPlan,
+    signal?: AbortSignal,
+  ): Promise<SavedViewCreated> {
+    const body = savedViewCreateBody(name, plan);
+    return this.#request(
+      "saved-views",
+      (value, status) => {
+        ensure(status === 201);
+        return decodeSavedViewCreated(value, name);
+      },
+      signal,
+      body,
+    );
+  }
+
+  /** `DELETE /control/v1/saved-views/{view_id}`: removes the saved parameters only. */
+  async deleteSavedView(viewId: string, signal?: AbortSignal): Promise<SavedViewDeleted> {
+    validateSavedViewId(viewId);
+    return this.#transport(
+      `saved-views/${viewId}`,
+      async (response, combined) => {
+        ensure(response.status === 200);
+        return decodeSavedViewDeleted(await readJson(response, combined), viewId);
+      },
+      signal,
+      undefined,
+      undefined,
+      undefined,
+      "DELETE",
+    );
+  }
+
   async adminJobList(cursor?: string, signal?: AbortSignal): Promise<AdminJobList> {
     validateJobListCursor(cursor);
     const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
