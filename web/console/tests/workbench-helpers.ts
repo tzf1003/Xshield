@@ -5,7 +5,13 @@ import { exportListFixture } from "./export-fixtures";
 import { auditHealthFixture, errorFixture, REQUEST_ID } from "./fixtures";
 import { type OverviewOptions, workbenchOverviewFixture } from "./overview-fixtures";
 import { SCOPE, sessionBody } from "./shell-helpers";
-import { adminJobListFixture, JOB_ID, jobBody, jobListFixture } from "./work-helpers";
+import {
+  adminJobListFixture,
+  JOB_ID,
+  jobBody,
+  jobListFixture,
+  savedViewListFixture,
+} from "./work-helpers";
 
 export type Reply = { status?: number; body?: unknown };
 export type Call = {
@@ -234,6 +240,33 @@ export async function mockWorkbench(page: Page, mock: WorkbenchMock = {}) {
       reply = { body: auditHealthFixture() };
     } else if (path === "/control/v1/jobs") {
       reply = { body: jobListFixture() };
+    } else if (path === "/control/v1/saved-views" && request.method() === "GET") {
+      reply = { body: savedViewListFixture() };
+    } else if (path === "/control/v1/saved-views" && request.method() === "POST") {
+      const sent = request.postDataJSON() as { name: string };
+      reply = {
+        status: 201,
+        body: {
+          request_id: REQUEST_ID,
+          tenant_id: "tenant_demo",
+          site_id: "site_demo",
+          schema_version: 1,
+          view_id: "view_018f2a3b-4c5d-7000-8000-000000000002",
+          name: sent.name,
+          created_at: "2026-09-20T08:02:00.000Z",
+        },
+      };
+    } else if (/^\/control\/v1\/saved-views\/view_[0-9a-f-]+$/.test(url.pathname)) {
+      reply = {
+        body: {
+          request_id: REQUEST_ID,
+          tenant_id: "tenant_demo",
+          site_id: "site_demo",
+          schema_version: 1,
+          view_id: url.pathname.split("/").at(-1),
+          deleted: true,
+        },
+      };
     } else if (path === "/control/v1/admin/jobs") {
       reply = { body: adminJobListFixture() };
     } else if (/^\/control\/v1\/jobs\/job_[0-9a-f-]+$/.test(url.pathname)) {

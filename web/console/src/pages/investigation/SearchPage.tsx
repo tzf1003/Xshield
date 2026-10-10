@@ -30,6 +30,7 @@ import { canSearch, ROLE_SEARCH_TEXT } from "../../investigation/roles.ts";
 import { decodePrefill, type SearchPreset } from "../../investigation/search-preset.ts";
 import { useCursorPages } from "../../investigation/use-cursor-pages.ts";
 import { useRemembered } from "../../investigation/view-memory.ts";
+import { SavedViewsPanel } from "./SavedViewsPanel";
 import type { SearchEvent, SearchPlan, SearchResponse } from "../../search.ts";
 import { useSession } from "../../security/SessionProvider";
 import { normalizePaste } from "../../shell/palette-classifier.ts";
@@ -346,6 +347,19 @@ export function SearchPage() {
         </p>
       </section>
       {formError ? <ErrorState error={formError} title="查询条件未通过校验" /> : null}
+      {allowed ? (
+        <SavedViewsPanel
+          current={applied?.plan ?? null}
+          onRun={(plan) => {
+            // Running a saved view is the same submission as the search button: a new read.
+            submissions += 1;
+            setArrived(null);
+            setFormError(null);
+            setRangeNotice(null);
+            setApplied({ plan, nonce: submissions });
+          }}
+        />
+      ) : null}
       {applied ? (
         <SearchResults
           key={applied.nonce}

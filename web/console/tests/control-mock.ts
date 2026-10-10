@@ -89,6 +89,27 @@ export async function mockControl(page: Page, override?: Override): Promise<Call
         cookie: await request.headerValue("cookie"),
         body: request.postDataJSON(),
       };
+      // The search page's saved-view list is page chrome, not an investigation read: answer it
+      // empty and keep it out of the recorded calls these specs count.
+      if (url.pathname === "/control/v1/saved-views" && request.method() === "GET") {
+        await route
+          .fulfill({
+            status: 200,
+            json: {
+              request_id: "req_018f2a3b-4c5d-7000-8000-0000000000c1",
+              tenant_id: "tenant_demo",
+              site_id: "site_demo",
+              schema_version: 1,
+              as_of: "2026-09-20T08:01:00.123456Z",
+              items: [],
+              truncated: false,
+              next_cursor: null,
+            },
+            headers: { "cache-control": "private, no-store" },
+          })
+          .catch(() => undefined);
+        return;
+      }
       const entry = { call: record, graced: false, answered: false };
       calls.push(record);
       records.set(request, entry);

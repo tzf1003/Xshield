@@ -131,6 +131,32 @@ export function adminJobListFixture() {
   };
 }
 
+/** One saved search owned by the caller, for the search page's saved-views panel. */
+export function savedViewListFixture() {
+  return {
+    ...ENVELOPE,
+    schema_version: 1,
+    as_of: "2026-09-20T08:01:00.123456Z",
+    items: [
+      {
+        view_id: "view_018f2a3b-4c5d-7000-8000-000000000001",
+        name: "Weekly review",
+        search: {
+          schema_version: 3,
+          start: "2026-09-20T00:00:00Z",
+          end: "2026-09-21T00:00:00Z",
+          filters: [],
+          sort: "occurred_at_desc",
+          limit: 25,
+        },
+        created_at: "2026-09-20T08:00:00.000Z",
+      },
+    ],
+    truncated: false,
+    next_cursor: null,
+  };
+}
+
 /** Two cases on one page: an open one and a closed one, newest first. */
 export function casesPage() {
   const base = caseListFixture();
