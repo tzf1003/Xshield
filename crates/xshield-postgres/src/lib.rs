@@ -44,6 +44,7 @@ mod page_action_read;
 mod provenance;
 mod request_replay;
 mod response_grant;
+mod saved_search_view;
 mod service_identity_read;
 mod share_grant_issue;
 mod share_grant_read;
@@ -154,6 +155,9 @@ pub use provenance::{
 pub use request_replay::{RequestCryptoMessage, RequestCryptoMessageOutcome};
 pub use response_grant::{
     CommittedResponseGrant, ResponseGrantItem, ResponseGrantPersistence, ResponseGrantWriteOutcome,
+};
+pub use saved_search_view::{
+    SavedSearchView, SavedSearchViewCreate, SavedSearchViewPage, SavedSearchViewWrite,
 };
 pub use share_grant_issue::{ShareGrantPersistence, ShareGrantWriteOutcome};
 pub use site_config::{

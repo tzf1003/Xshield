@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 增加保存检索视图的存储层：迁移 `0055_m5_saved_views.sql` 建立 `xshield.saved_search_views`，按 owner 保存已校验的检索请求（不含游标、不超过 8 KiB），名称在 owner 内唯一；PostgreSQL 回归 `saved_search_view` 覆盖唯一冲突、续页顺序、跨主体隔离、删除与不合法请求的拒绝。HTTP 端点与控制台尚未接入，部署前须先应用该迁移。
 - 增加管理员全部任务列表 API：`GET /control/v1/admin/jobs[?cursor=...]` 只允许 `AuditAdministrator`（访问范围为本次决定：不扩大 Investigator 可见性，每次读取写 `console.job.admin_list` 审计），按 `job_` 降序有界分页，每条目附提交者 `owner_ref`，该字段不进入审计载荷；游标绑定凭证、调用者、作用域与页大小。PostgreSQL 回归 `control_job_admin_list` 覆盖跨主体续页与顺序；worker 发布矩阵、封闭原因集与覆盖检查同步扩展（63 个控制事件）。不新增迁移，控制台视图未接入。
 - 增加本人任务列表 API：`GET /control/v1/jobs[?cursor=...]` 只允许 `Investigator`，按规范 `job_` ID 降序有界分页，游标绑定凭证、主体、作用域与页大小，条目与单任务读取投影一致且不含幂等键或主体引用。列表读取写独立 `console.job.list` 审计（成功 `CONTROL_JOBS_READ`），worker 发布矩阵、封闭原因集与发布回归同步扩展；不新增迁移（沿用 0038）。PostgreSQL 回归 `control_job_list` 与控制层预准入回归覆盖排序、游标续页、跨主体隔离与非法输入。控制台列表页未接入，本次未改动 `web/`。
 - CI 按改动选择昂贵作业并取消被取代的运行（托管分钟数有计量；这一阶段连续约二十几次完整运行之后，Actions 的作业开始不分配运行器、2 到 4 秒内失败，疑为额度用尽，无法用现有令牌确认）：新增 `changes` 作业，仅对 pull request 用 `git diff base...HEAD` 判断，`console` 只在 `web/console/`、`tests/site-config/` 或工作流变化时运行，`container-images` 只在 Cargo/工具链/Dockerfile/`crates/`/`sql/`/`sensor/`/`migrations/` 等变化时运行，`oidc` 只在控制面/审计/core、OIDC 脚本、Keycloak realm、控制台等变化时运行，工作流自身的改动会选中全部；推送到 main 一律全部运行；`validate` 与 `supply-chain` 始终运行。同一 pull request 的新推送取消旧运行（main 按提交分组，不取消）。选择逻辑已用十类典型改动离线模拟（仅文档、控制台、core、网关、工作流、Dockerfile、OIDC 脚本、其他脚本、realm、锁文件）；最近一次 PR 运行选中全部作业并全部通过，跳过的作业（仅文档等改动）尚未在 Actions 上验证。
