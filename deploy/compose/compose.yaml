@@ -1,0 +1,400 @@
+# Reference single-host deployment of one Xshield tenant/site (docs/19 19.8).
+#
+#   cp env.example .env && $EDITOR .env
+#   ./init.sh                      # secrets, edge config, bootstrap bearer
+#   docker compose up -d
+#
+# Images are the Dockerfile targets (docker build --target edge|control|worker);
+# set XSHIELD_IMAGE_PREFIX and XSHIELD_IMAGE_TAG to the ones you built or pulled.
+# Every secret reaches a process as a file under /run/secrets through the
+# NAME_FILE convention, never as an environment value.
+#
+# Topology. The control API and the edge apply channel are loopback-only by
+# design, so edge and control share one network namespace, held by the `net`
+# service: control reaches http://127.0.0.1:9553 and the management proxy
+# (yours, see README) reaches the control API on 127.0.0.1:9443 by joining the
+# same namespace. The edge binds its data listeners on a fixed private address
+# of the xshield network.
+
+x-image: &image-defaults
+  restart: unless-stopped
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
+x-worker: &worker
+  <<: *image-defaults
+  image: ${XSHIELD_IMAGE_PREFIX:-xshield-}worker:${XSHIELD_IMAGE_TAG:-latest}
+  depends_on:
+    volumes-init: {condition: service_completed_successfully}
+
+x-clickhouse-env: &clickhouse-env
+  XSHIELD_CLICKHOUSE_URL: http://clickhouse:8123
+  XSHIELD_CLICKHOUSE_DATABASE: xshield
+  XSHIELD_CLICKHOUSE_USER: xshield
+  XSHIELD_CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+  XSHIELD_AUDIT_METADATA_RETENTION_DAYS: ${XSHIELD_AUDIT_METADATA_RETENTION_DAYS:-30}
+
+x-outbox: &outbox
+  <<: *worker
+  entrypoint: ["/usr/local/bin/xshield-outbox-worker"]
+  networks: [xshield]
+  command: ["${XSHIELD_TENANT_ID:?set XSHIELD_TENANT_ID in .env}", "${XSHIELD_SITE_ID:?set XSHIELD_SITE_ID in .env}"]
+  secrets: [database_url, clickhouse_password]
+  volumes:
+    - heartbeat:/var/lib/xshield/heartbeat
+  depends_on:
+    volumes-init: {condition: service_completed_successfully}
+    postgres: {condition: service_healthy}
+    clickhouse: {condition: service_healthy}
+
+x-outbox-env: &outbox-env
+  <<: *clickhouse-env
+  XSHIELD_DATABASE_URL_FILE: /run/secrets/database_url
+  XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS: "2"
+  XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS: "2000"
+  XSHIELD_OUTBOX_MAX_EVENTS: "256"
+  XSHIELD_OUTBOX_MAX_BYTES: "8388608"
+  XSHIELD_OUTBOX_LEASE_SECONDS: "60"
+  XSHIELD_OUTBOX_RETRY_SECONDS: "30"
+  XSHIELD_RUN_INTERVAL_SECONDS: ${XSHIELD_OUTBOX_INTERVAL_SECONDS:-5}
+
+services:
+  # Named volumes start root-owned; every Xshield process runs as uid 10001
+  # and refuses audit directories that others can read.
+  volumes-init:
+    image: ${XSHIELD_IMAGE_PREFIX:-xshield-}worker:${XSHIELD_IMAGE_TAG:-latest}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        for d in edge-audit edge-manifests edge-checkpoints edge-snapshot
+        control-audit control-manifests control-checkpoints evidence heartbeat;
+        do install -d -m 0700 -o 10001 -g 10001 /var/lib/xshield/$$d || exit 1;
+        chown 10001:10001 /var/lib/xshield/$$d && chmod 0700 /var/lib/xshield/$$d || exit 1;
+        done
+    network_mode: none
+    volumes:
+      - edge-audit:/var/lib/xshield/edge-audit
+      - edge-manifests:/var/lib/xshield/edge-manifests
+      - edge-checkpoints:/var/lib/xshield/edge-checkpoints
+      - edge-snapshot:/var/lib/xshield/edge-snapshot
+      - control-audit:/var/lib/xshield/control-audit
+      - control-manifests:/var/lib/xshield/control-manifests
+      - control-checkpoints:/var/lib/xshield/control-checkpoints
+      - evidence:/var/lib/xshield/evidence
+      - heartbeat:/var/lib/xshield/heartbeat
+
+  postgres:
+    image: postgres:16.10-alpine3.22@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: xshield
+      POSTGRES_USER: xshield
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    networks: [xshield]
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      # First start only. Later migrations are applied by the operator before
+      # the matching release (docs/19 19.8).
+      - ${XSHIELD_REPO_ROOT:-../..}/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xshield -d xshield"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8.29.51@sha256:aec6fb9892becb6a20eb8d57708b8cf9c777b2ad1f4eb70bbece7a70eaed9fd0
+    restart: unless-stopped
+    secrets: [clickhouse_password]
+    networks: [xshield]
+    volumes:
+      - clickhouse:/var/lib/clickhouse
+      - ${XSHIELD_REPO_ROOT:-../..}/sql/clickhouse.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      - ./clickhouse-user.sh:/docker-entrypoint-initdb.d/002-user.sh:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # Holds the network namespace edge and control share (like a pod's pause
+  # container): it never restarts, so restarting edge or control does not
+  # strand the other in a dead namespace. Ports are published here.
+  net:
+    <<: *image-defaults
+    image: ${XSHIELD_IMAGE_PREFIX:-xshield-}worker:${XSHIELD_IMAGE_TAG:-latest}
+    entrypoint: ["/bin/sleep", "infinity"]
+    networks:
+      xshield:
+        ipv4_address: ${XSHIELD_EDGE_IP:-172.30.0.10}
+    ports:
+      # Data listeners: put your WAF/CDN or load balancer in front of these.
+      - "${XSHIELD_EDGE_PUBLISH_ADDRESS:-127.0.0.1}:${XSHIELD_EDGE_SITE_PORTS:-6400-6409}:${XSHIELD_EDGE_SITE_PORTS:-6400-6409}"
+      # Unauthenticated ops endpoints of the edge and of control.
+      - "127.0.0.1:9554:9554"
+      - "127.0.0.1:9555:9555"
+
+  edge:
+    <<: *image-defaults
+    image: ${XSHIELD_IMAGE_PREFIX:-xshield-}edge:${XSHIELD_IMAGE_TAG:-latest}
+    network_mode: service:net
+    depends_on:
+      net: {condition: service_started}
+      volumes-init: {condition: service_completed_successfully}
+      postgres: {condition: service_healthy}
+    environment:
+      XSHIELD_CONFIG: /etc/xshield/edge.json
+      XSHIELD_EDGE_BOOTSTRAP_ONLY: "1"
+      XSHIELD_EDGE_OPS_LISTEN: ${XSHIELD_EDGE_IP:-172.30.0.10}:9554
+      XSHIELD_EDGE_APPLY_LISTEN: 127.0.0.1:9553
+      XSHIELD_EDGE_SNAPSHOT_PATH: /var/lib/xshield/edge-snapshot/snapshot.json
+      XSHIELD_EDGE_APPLY_KEY_HEX_FILE: /run/secrets/edge_apply_key
+      XSHIELD_JOURNAL_KEY_HEX_FILE: /run/secrets/edge_journal_key
+      XSHIELD_DATABASE_URL_FILE: /run/secrets/database_url
+      XSHIELD_FINGERPRINT_KEY_HEX_FILE: /run/secrets/fingerprint_key
+      XSHIELD_SHARE_TOKEN_KEY_HEX_FILE: /run/secrets/share_token_key
+    secrets: [edge_apply_key, edge_journal_key, database_url, fingerprint_key, share_token_key]
+    volumes:
+      - ./edge-config.json:/etc/xshield/edge.json:ro
+      - edge-audit:/var/lib/xshield/edge-audit
+      - edge-snapshot:/var/lib/xshield/edge-snapshot
+
+  control:
+    <<: *image-defaults
+    image: ${XSHIELD_IMAGE_PREFIX:-xshield-}control:${XSHIELD_IMAGE_TAG:-latest}
+    network_mode: service:net
+    depends_on:
+      edge: {condition: service_started}
+      clickhouse: {condition: service_healthy}
+    command:
+      - /var/lib/xshield/edge-audit
+      - /var/lib/xshield/edge-manifests
+      - /var/lib/xshield/edge-checkpoints
+      - /var/lib/xshield/control-audit
+    env_file: [./control-token.env]
+    environment:
+      <<: *clickhouse-env
+      XSHIELD_TENANT_ID: ${XSHIELD_TENANT_ID:?set XSHIELD_TENANT_ID in .env}
+      XSHIELD_SITE_ID: ${XSHIELD_SITE_ID:?set XSHIELD_SITE_ID in .env}
+      XSHIELD_CONTROL_LISTEN: 127.0.0.1:9443
+      XSHIELD_CONTROL_OPS_LISTEN: ${XSHIELD_EDGE_IP:-172.30.0.10}:9555
+      XSHIELD_CONTROL_SUBJECT: bootstrap-operator
+      XSHIELD_CONTROL_ROLES: ${XSHIELD_CONTROL_ROLES:-observer}
+      XSHIELD_CONTROL_TOKEN_FILE: /run/secrets/control_token
+      XSHIELD_CONTROL_OIDC_ISSUER: ${XSHIELD_CONTROL_OIDC_ISSUER:?set XSHIELD_CONTROL_OIDC_ISSUER in .env}
+      XSHIELD_CONTROL_OIDC_CLIENT_ID: ${XSHIELD_CONTROL_OIDC_CLIENT_ID:?set XSHIELD_CONTROL_OIDC_CLIENT_ID in .env}
+      XSHIELD_CONTROL_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      XSHIELD_CONTROL_OIDC_REQUIRED_ACR: ${XSHIELD_CONTROL_OIDC_REQUIRED_ACR:?set XSHIELD_CONTROL_OIDC_REQUIRED_ACR in .env}
+      XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON: ${XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON:?set XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON in .env}
+      XSHIELD_CONTROL_CONSOLE_ORIGIN: ${XSHIELD_CONTROL_CONSOLE_ORIGIN:?set XSHIELD_CONTROL_CONSOLE_ORIGIN in .env}
+      XSHIELD_CONTROL_CURSOR_KEY_HEX_FILE: /run/secrets/control_cursor_key
+      XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX_FILE: /run/secrets/control_idempotency_key
+      XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX_FILE: /run/secrets/control_api_key_hash_key
+      XSHIELD_CONTROL_AUDIT_KEY_ID: control-audit-r1
+      XSHIELD_CONTROL_AUDIT_KEY_HEX_FILE: /run/secrets/control_journal_key
+      XSHIELD_CONTROL_AUDIT_MAX_BYTES: "268435456"
+      XSHIELD_CONTROL_AUDIT_HIGH_WATERMARK_BYTES: "201326592"
+      XSHIELD_CONTROL_AUDIT_SEGMENT_MAX_BYTES: "16777216"
+      XSHIELD_JOURNAL_KEY_ID: edge-journal-r1
+      XSHIELD_JOURNAL_KEY_HEX_FILE: /run/secrets/edge_journal_key
+      XSHIELD_SEAL_KEY_ID: edge-seal-r1
+      XSHIELD_SEAL_PUBLIC_KEY_HEX_FILE: /run/secrets/edge_seal_public_key
+      XSHIELD_INDEX_TARGET_ID: clickhouse-primary
+      XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES: "16777216"
+      XSHIELD_DATABASE_URL_FILE: /run/secrets/database_url
+      XSHIELD_CONTROL_DATABASE_MAX_CONNECTIONS: "8"
+      XSHIELD_CONTROL_DATABASE_ACQUIRE_TIMEOUT_MS: "2000"
+      XSHIELD_CONTROL_REQUESTS_PER_MINUTE: "120"
+      XSHIELD_CONTROL_MAX_QUERY_EVENTS: "1000"
+      XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS: "128"
+      XSHIELD_CONTROL_MAX_OPEN_CASES: "32"
+      XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS: "32"
+      XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS: "120"
+      XSHIELD_EVIDENCE_ROOT: /var/lib/xshield/evidence
+      XSHIELD_EVIDENCE_KEY_ID: evidence-r1
+      XSHIELD_EVIDENCE_KEY_HEX_FILE: /run/secrets/evidence_key
+      XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES: "67108864"
+      XSHIELD_EVIDENCE_MAX_RETENTION_DAYS: "30"
+      XSHIELD_EDGE_APPLY_URL: http://127.0.0.1:9553/internal/v1/apply
+      XSHIELD_EDGE_APPLY_KEY_HEX_FILE: /run/secrets/edge_apply_key
+    secrets:
+      - control_token
+      - oidc_client_secret
+      - control_cursor_key
+      - control_idempotency_key
+      - control_api_key_hash_key
+      - control_journal_key
+      - edge_journal_key
+      - edge_seal_public_key
+      - database_url
+      - clickhouse_password
+      - evidence_key
+      - edge_apply_key
+    volumes:
+      - edge-audit:/var/lib/xshield/edge-audit:ro
+      - edge-manifests:/var/lib/xshield/edge-manifests:ro
+      - edge-checkpoints:/var/lib/xshield/edge-checkpoints:ro
+      - control-audit:/var/lib/xshield/control-audit
+      - evidence:/var/lib/xshield/evidence
+
+  # Sealing and publishing, once per journal source (docs/13): the edge's
+  # request journal and control's management journal never share directories,
+  # keys or checkpoints.
+  edge-seal:
+    <<: *worker
+    entrypoint: ["/usr/local/bin/xshield-audit-seal"]
+    command: [/var/lib/xshield/edge-audit, /var/lib/xshield/edge-manifests]
+    network_mode: none
+    environment:
+      XSHIELD_JOURNAL_KEY_ID: edge-journal-r1
+      XSHIELD_JOURNAL_KEY_HEX_FILE: /run/secrets/edge_journal_key
+      XSHIELD_SEAL_KEY_ID: edge-seal-r1
+      XSHIELD_SEAL_KEY_HEX_FILE: /run/secrets/edge_seal_key
+      XSHIELD_RUN_INTERVAL_SECONDS: ${XSHIELD_SEAL_INTERVAL_SECONDS:-30}
+      XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/edge-seal
+    secrets: [edge_journal_key, edge_seal_key]
+    volumes:
+      - edge-audit:/var/lib/xshield/edge-audit:ro
+      - edge-manifests:/var/lib/xshield/edge-manifests
+      - heartbeat:/var/lib/xshield/heartbeat
+
+  edge-publish:
+    <<: *worker
+    networks: [xshield]
+    command: [/var/lib/xshield/edge-audit, /var/lib/xshield/edge-manifests, /var/lib/xshield/edge-checkpoints]
+    depends_on:
+      volumes-init: {condition: service_completed_successfully}
+      clickhouse: {condition: service_healthy}
+    environment:
+      <<: *clickhouse-env
+      XSHIELD_JOURNAL_KEY_ID: edge-journal-r1
+      XSHIELD_JOURNAL_KEY_HEX_FILE: /run/secrets/edge_journal_key
+      XSHIELD_SEAL_KEY_ID: edge-seal-r1
+      XSHIELD_SEAL_PUBLIC_KEY_HEX_FILE: /run/secrets/edge_seal_public_key
+      XSHIELD_INDEX_TARGET_ID: clickhouse-primary
+      XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES: "16777216"
+      XSHIELD_RUN_INTERVAL_SECONDS: ${XSHIELD_PUBLISH_INTERVAL_SECONDS:-15}
+      XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/edge-publish
+    secrets: [edge_journal_key, edge_seal_public_key, clickhouse_password]
+    volumes:
+      - edge-audit:/var/lib/xshield/edge-audit:ro
+      - edge-manifests:/var/lib/xshield/edge-manifests:ro
+      - edge-checkpoints:/var/lib/xshield/edge-checkpoints
+      - heartbeat:/var/lib/xshield/heartbeat
+
+  control-seal:
+    <<: *worker
+    entrypoint: ["/usr/local/bin/xshield-audit-seal"]
+    command: [/var/lib/xshield/control-audit, /var/lib/xshield/control-manifests]
+    network_mode: none
+    environment:
+      XSHIELD_JOURNAL_KEY_ID: control-audit-r1
+      XSHIELD_JOURNAL_KEY_HEX_FILE: /run/secrets/control_journal_key
+      XSHIELD_SEAL_KEY_ID: control-seal-r1
+      XSHIELD_SEAL_KEY_HEX_FILE: /run/secrets/control_seal_key
+      XSHIELD_RUN_INTERVAL_SECONDS: ${XSHIELD_SEAL_INTERVAL_SECONDS:-30}
+      XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/control-seal
+    secrets: [control_journal_key, control_seal_key]
+    volumes:
+      - control-audit:/var/lib/xshield/control-audit:ro
+      - control-manifests:/var/lib/xshield/control-manifests
+      - heartbeat:/var/lib/xshield/heartbeat
+
+  control-publish:
+    <<: *worker
+    networks: [xshield]
+    command: [/var/lib/xshield/control-audit, /var/lib/xshield/control-manifests, /var/lib/xshield/control-checkpoints]
+    depends_on:
+      volumes-init: {condition: service_completed_successfully}
+      clickhouse: {condition: service_healthy}
+    environment:
+      <<: *clickhouse-env
+      XSHIELD_JOURNAL_KEY_ID: control-audit-r1
+      XSHIELD_JOURNAL_KEY_HEX_FILE: /run/secrets/control_journal_key
+      XSHIELD_SEAL_KEY_ID: control-seal-r1
+      XSHIELD_SEAL_PUBLIC_KEY_HEX_FILE: /run/secrets/control_seal_public_key
+      XSHIELD_INDEX_TARGET_ID: clickhouse-primary
+      XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES: "16777216"
+      XSHIELD_RUN_INTERVAL_SECONDS: ${XSHIELD_PUBLISH_INTERVAL_SECONDS:-15}
+      XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/control-publish
+    secrets: [control_journal_key, control_seal_public_key, clickhouse_password]
+    volumes:
+      - control-audit:/var/lib/xshield/control-audit:ro
+      - control-manifests:/var/lib/xshield/control-manifests:ro
+      - control-checkpoints:/var/lib/xshield/control-checkpoints
+      - heartbeat:/var/lib/xshield/heartbeat
+
+  # One publisher per transactional outbox family (docs/13).
+  outbox-case:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: case, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-case}
+  outbox-evidence-catalog:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: evidence_catalog, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-evidence_catalog}
+  outbox-evidence-access:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: evidence_access, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-evidence_access}
+  outbox-evidence-retention:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: evidence_retention, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-evidence_retention}
+  outbox-calibration:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: calibration, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-calibration}
+  outbox-identity:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: identity, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-identity}
+  outbox-grant:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: grant, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-grant}
+  outbox-response-grant:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: response_grant, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-response_grant}
+  outbox-share-grant:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: share_grant, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-share_grant}
+  outbox-ui-action:
+    <<: *outbox
+    environment: {<<: *outbox-env, XSHIELD_OUTBOX_FAMILY: ui_action, XSHIELD_RUN_HEARTBEAT_FILE: /var/lib/xshield/heartbeat/outbox-ui_action}
+
+networks:
+  xshield:
+    ipam:
+      config:
+        - subnet: ${XSHIELD_SUBNET:-172.30.0.0/24}
+
+volumes:
+  postgres:
+  clickhouse:
+  edge-audit:
+  edge-manifests:
+  edge-checkpoints:
+  edge-snapshot:
+  control-audit:
+  control-manifests:
+  control-checkpoints:
+  evidence:
+  heartbeat:
+
+# Written by init.sh; compose mounts each as /run/secrets/<name>.
+secrets:
+  postgres_password: {file: ./secrets/postgres_password}
+  clickhouse_password: {file: ./secrets/clickhouse_password}
+  database_url: {file: ./secrets/database_url}
+  oidc_client_secret: {file: ./secrets/oidc_client_secret}
+  control_token: {file: ./secrets/control_token}
+  control_cursor_key: {file: ./secrets/control_cursor_key}
+  control_idempotency_key: {file: ./secrets/control_idempotency_key}
+  control_api_key_hash_key: {file: ./secrets/control_api_key_hash_key}
+  control_journal_key: {file: ./secrets/control_journal_key}
+  control_seal_key: {file: ./secrets/control_seal_key}
+  control_seal_public_key: {file: ./secrets/control_seal_public_key}
+  edge_journal_key: {file: ./secrets/edge_journal_key}
+  edge_seal_key: {file: ./secrets/edge_seal_key}
+  edge_seal_public_key: {file: ./secrets/edge_seal_public_key}
+  edge_apply_key: {file: ./secrets/edge_apply_key}
+  fingerprint_key: {file: ./secrets/fingerprint_key}
+  share_token_key: {file: ./secrets/share_token_key}
+  evidence_key: {file: ./secrets/evidence_key}
