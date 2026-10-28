@@ -272,7 +272,9 @@ async fn assert_rollout_report(writer: &Client, reader: &Client) {
     for (index, (request_id, operation, outcome, reason, rollout)) in
         requests.into_iter().enumerate()
     {
-        let sequence = 300 + u32::try_from(index).unwrap() * 2;
+        // Event ids are unique across the whole fixture database: the active
+        // views keep one row per event_id, and 300-372 belong to case search.
+        let sequence = 500 + u32::try_from(index).unwrap() * 2;
         let at = start + TimeDelta::milliseconds(i64::try_from(index).unwrap() * 100);
         let mut accepted = TestEvent::new(sequence, at, expires);
         accepted.site_id = "site_rollout";
