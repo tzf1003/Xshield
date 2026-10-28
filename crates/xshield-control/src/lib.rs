@@ -26,6 +26,7 @@ mod jobs;
 mod ledger_inspection;
 mod management_api_key;
 mod model_call_list;
+pub mod ops;
 mod rollout_report;
 mod saved_views;
 mod search;
@@ -515,6 +516,7 @@ pub struct ControlPlane {
     evidence_read: Option<Arc<EvidenceReadPort>>,
     gateway_apply: Option<Arc<site_config::EdgeApplyClient>>,
     access_journal: Mutex<LocalJournal>,
+    metrics: Arc<ops::ControlMetrics>,
     unauthenticated_rate: Mutex<RateWindow>,
     rate: Mutex<RateWindow>,
 }
@@ -554,6 +556,7 @@ impl ControlPlane {
             evidence_read: None,
             gateway_apply: None,
             access_journal: Mutex::new(access_journal),
+            metrics: Arc::new(ops::ControlMetrics::default()),
         }
     }
 
@@ -4277,10 +4280,12 @@ impl ControlPlane {
             },
         };
         let bytes = serde_json::to_vec(&event)?;
-        let receipts = journal.append_batch(&[JournalRecord {
+        let appended = journal.append_batch(&[JournalRecord {
             event_id: &event_id,
             plaintext: &bytes,
-        }])?;
+        }]);
+        self.metrics.audit_append(appended.is_ok());
+        let receipts = appended?;
         if receipts.len() != 1 || receipts[0].producer_sequence != producer_sequence {
             return Err(ControlError::ReceiptMismatch);
         }
@@ -4292,10 +4297,18 @@ impl ControlPlane {
 ///
 /// Read routes have no production side effects. Mutations use their documented
 /// transactional outbox and every route writes the required management audit.
-#[allow(clippy::too_many_lines)]
 pub fn router(control: ControlPlane) -> Router {
+    routers(control).0
+}
+
+/// The management API router and, over the same control plane, the
+/// unauthenticated ops router ([`ops::ops_router`]) for a separate listener.
+#[allow(clippy::too_many_lines)]
+pub fn routers(control: ControlPlane) -> (Router, Router) {
     let state = Arc::new(control);
-    Router::new()
+    let metrics = Arc::clone(&state.metrics);
+    let ops = ops::ops_router(Arc::clone(&state));
+    let api = Router::new()
         .route(identity::LOGIN_PATH, get(identity::login_handler))
         .route(identity::CALLBACK_PATH, get(identity::callback_handler))
         .route(
@@ -4520,6 +4533,8 @@ pub fn router(control: ControlPlane) -> Router {
         )
         .with_state(Arc::clone(&state))
         .layer(from_fn_with_state(state, identity::auth_middleware))
+        .layer(from_fn_with_state(metrics, ops::track));
+    (api, ops)
 }
 
 async fn evidence_access_approve_handler(
@@ -5510,6 +5525,7 @@ mod tests {
     mod case_items;
     mod case_list;
     mod causality;
+    mod control_ops;
     mod evidence_access_inspection;
     mod evidence_access_list;
     mod evidence_lifecycle;

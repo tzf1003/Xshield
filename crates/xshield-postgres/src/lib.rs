@@ -490,6 +490,15 @@ impl PostgresIdentityStore {
         Ok(Self { pool })
     }
 
+    /// Checks that a pooled connection answers, for readiness probes.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when no connection can be acquired or used.
+    pub async fn ping(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Uses an existing pool configured by the executable composition root.
     #[must_use]
     pub const fn from_pool(pool: PgPool) -> Self {
