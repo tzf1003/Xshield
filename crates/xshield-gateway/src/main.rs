@@ -143,9 +143,11 @@ struct PostgresRuntime {
 }
 
 impl PostgresRuntime {
-    fn from_env(config: xshield_gateway::IdentityStoreConfig) -> Result<Self, env::VarError> {
+    fn from_env(
+        config: xshield_gateway::IdentityStoreConfig,
+    ) -> Result<Self, xshield_core::secret_env::SecretEnvError> {
         Ok(Self::new(
-            Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?),
+            Zeroizing::new(xshield_core::secret_env::var("XSHIELD_DATABASE_URL")?),
             config.max_connections(),
             Duration::from_millis(config.acquire_timeout_ms()),
         ))
@@ -2149,7 +2151,9 @@ impl EnvRequestKey {
         let Some(key_id) = config.request_crypto_key_id() else {
             return Ok(None);
         };
-        let value = Zeroizing::new(env::var("XSHIELD_REQUEST_DECRYPTION_KEY_HEX")?);
+        let value = Zeroizing::new(xshield_core::secret_env::var(
+            "XSHIELD_REQUEST_DECRYPTION_KEY_HEX",
+        )?);
         let key = parse_crypto_key(&value).ok_or("invalid request decryption key")?;
         Ok(Some(Self {
             tenant_id: config.tenant_id().as_str().to_owned(),
@@ -2189,7 +2193,9 @@ impl EnvResponseKey {
         let Some(key_id) = config.response_crypto_key_id() else {
             return Ok(None);
         };
-        let value = Zeroizing::new(env::var("XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX")?);
+        let value = Zeroizing::new(xshield_core::secret_env::var(
+            "XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX",
+        )?);
         let key = parse_crypto_key(&value).ok_or("invalid response encryption key")?;
         Ok(Some(Self {
             tenant_id: config.tenant_id().as_str().to_owned(),
@@ -2287,8 +2293,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let transport = Arc::new(EdgeTransport::new(TransportConfig::from_lookup(|name| {
         env::var_os(name)
     })?));
-    let apply_key = env::var("XSHIELD_EDGE_APPLY_KEY_HEX")
-        .ok()
+    let apply_key = xshield_core::secret_env::var_opt("XSHIELD_EDGE_APPLY_KEY_HEX")?
         .map(|value| apply_api::key_from_hex(&value).ok_or("invalid edge apply key"))
         .transpose()?;
     let snapshot_path = env::var_os("XSHIELD_EDGE_SNAPSHOT_PATH").map(PathBuf::from);
@@ -2350,7 +2355,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let coordinator = Arc::new(ApplyCoordinator::new(Arc::new(ConfigSnapshotStore::new(
         initial_snapshot,
     ))));
-    let key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
+    let key_hex = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let audit = DurableAudit::open_recoverable(&config, &key_hex)?;
     let postgres = config
         .identity_store()

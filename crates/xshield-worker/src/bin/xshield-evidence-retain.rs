@@ -43,8 +43,11 @@ async fn run() -> Result<(), &'static str> {
     }
     let root = env::var("XSHIELD_EVIDENCE_ROOT").map_err(|_| CONFIG)?;
     let key_id = env::var("XSHIELD_EVIDENCE_KEY_ID").map_err(|_| CONFIG)?;
-    let key = Zeroizing::new(env::var("XSHIELD_EVIDENCE_KEY_HEX").map_err(|_| CONFIG)?);
-    let database = Zeroizing::new(env::var("XSHIELD_DATABASE_URL").map_err(|_| CONFIG)?);
+    let key = Zeroizing::new(
+        xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX").map_err(|_| CONFIG)?,
+    );
+    let database =
+        Zeroizing::new(xshield_core::secret_env::var("XSHIELD_DATABASE_URL").map_err(|_| CONFIG)?);
     let orphan_grace = env::var("XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS")
         .ok()
         .map(|value| value.parse::<u64>().map(Duration::from_secs))

@@ -73,9 +73,13 @@ control 与 edge 之间的 HMAC 通道对三类消息分别认证，并共用同
 
 浏览器仅持有 `Secure; HttpOnly; SameSite=Lax; Path=/` 的不透明随机会话 Cookie；PostgreSQL 仅以 SHA-256 摘要索引会话 token，保存单独的 CSRF token，并由数据库时钟执行 15 分钟闲置/8 小时绝对到期和撤销。`__Host-` Cookie 要求 TLS 且不得配置 Domain。身份会话数据进入数据库备份，故备份权限与恢复流程须按管理身份材料保护；恢复后先撤销不应复活的浏览器会话。控制台通过同源代理访问 API，代理只转发 Xshield 会话/短期 OIDC state Cookie，其他 Cookie 剥离。
 
+从文件读取秘密：control、edge、worker、`xshield-outbox-worker`、`xshield-evidence-retain` 与 `xshield-audit-seal` 读取的每个秘密变量（数据库 URL、各 `*_KEY_HEX`、`XSHIELD_CONTROL_TOKEN`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CLICKHOUSE_PASSWORD` 等）都可以改为设置 `<变量名>_FILE`，值为一个文件路径，进程从该文件读取秘密，适合 Docker/Kubernetes secret 卷，秘密因此不出现在 `/proc/<pid>/environ`、`docker inspect` 或编排器的环境变量展示里。规则：同时设置 `NAME` 与 `NAME_FILE` 拒绝启动（避免过期变量悄悄压过挂载的文件）；文件只去掉末尾一个换行（`\n` 或 `\r\n`），其余字节原样保留；文件必须是 UTF-8 且不超过 64 KiB；进程不检查文件权限，由部署方把文件设为只有服务用户可读（Kubernetes secret 卷可设 `defaultMode: 0400`）。错误信息只给出变量名，不包含值或文件内容。非秘密配置（监听地址、URL、开关）仍只读普通变量。
+
 密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取，KMS 故障不能退回硬编码默认密钥或明文证据。
 
 edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的持久批次完成后自动切换 producer boot。部署方预建仅封存身份可写的私有 manifest 目录，并周期运行 `xshield-audit-seal JOURNAL_DIRECTORY MANIFEST_DIRECTORY`。该进程读取 journal 密钥并独占日志签名私钥；edge 不取得签名私钥。重复任务会验证既有清单与关闭段完全一致，再处理新段。
+
+常驻模式：`xshield-audit-seal`、`xshield-worker`（审计发布）与 `xshield-outbox-worker` 默认执行一轮有界处理后退出，适合 cron 或 Kubernetes CronJob。设置 `XSHIELD_RUN_INTERVAL_SECONDS`（1 到 86400 的整数）后进程常驻，每轮结束后等待该秒数再执行下一轮，适合 Compose 服务或 Kubernetes Deployment；单轮失败只向 stderr 报告并在下一轮重试，不退出（一次性模式下失败仍以退出码 1 结束）。`xshield-outbox-worker` 常驻时连接池跨轮复用，一轮领取满 `XSHIELD_OUTBOX_MAX_EVENTS` 条时不等待直接进入下一轮。可选 `XSHIELD_RUN_HEARTBEAT_FILE`（只能与间隔一起设置）：每轮成功后以“写临时文件再 rename”的方式写入当前 Unix 秒，探针据此判断进程是否仍在成功工作（例如文件超过三个间隔未更新即视为不健康），因为一直失败的常驻进程本身不会退出。每一轮本来就可以安全中断（outbox 租约到期后重领，发布检查点与封存清单都以 rename 替换），所以停止常驻进程直接发送默认的 SIGTERM 即可，没有额外的优雅退出逻辑。
 
 ## 19.4 配置与升级
 
