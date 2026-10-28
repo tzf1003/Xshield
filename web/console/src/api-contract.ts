@@ -39,6 +39,10 @@ export const messages = {
     "模型调用列表条件无效，请检查 UTC 时间窗、页大小和分页凭证。",
   CONTROL_MODEL_CALLS_INDEX_UNAVAILABLE: "模型调用索引暂时不可用，请稍后重试。",
   CONTROL_MODEL_CALLS_HEALTH_UNAVAILABLE: "模型调用索引水位暂时不可用，请稍后重试。",
+  CONTROL_ROLLOUT_REPORT_REQUEST_INVALID: "退出报告条件无效，请检查观察标签与 UTC 时间窗。",
+  CONTROL_ROLLOUT_REPORT_INDEX_UNAVAILABLE: "审计索引暂时不可用，退出报告无法生成，请稍后重试。",
+  CONTROL_ROLLOUT_REPORT_HEALTH_UNAVAILABLE:
+    "审计索引水位暂时不可用，退出报告无法判断，请稍后重试。",
   CONTROL_GRANT_ID_INVALID: "请输入规范的资格 ID。",
   CONTROL_BINDING_ID_INVALID: "请输入规范的身份绑定 ID。",
   CONTROL_GRANT_STORE_UNAVAILABLE: "资格账本暂时不可用，请稍后重试。",

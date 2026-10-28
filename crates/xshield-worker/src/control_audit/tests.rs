@@ -391,6 +391,47 @@ fn model_listing_publishes_only_scoped_access_facts() {
 }
 
 #[test]
+fn rollout_report_reads_publish_only_scoped_access_facts() {
+    let mut value = event();
+    value["event_type"] = "console.rollout_report.read".into();
+    value["payload"]["path"] = "/control/v1/rollout-report".into();
+    value["payload"]["target_case_id"] = Value::Null;
+    value["payload"]["reason_code"] = "CONTROL_ROLLOUT_REPORT_READ".into();
+    value["evidence_refs"] = json!([]);
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    for (field, content) in [
+        ("method", json!("POST")),
+        ("path", json!("/control/v1/rollout-report?revision=r1")),
+        ("target_case_id", json!(CASE)),
+        ("query_digest", json!("a".repeat(64))),
+        ("reason_code", json!("CONTROL_MODEL_CALLS_READ")),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
+    }
+    for (outcome, reason) in [
+        ("DENY", "CONTROL_ROLLOUT_REPORT_REQUEST_INVALID"),
+        ("DENY", "CONTROL_QUERY_CAPACITY_EXHAUSTED"),
+        ("DENY", "CONTROL_QUERY_BUDGET_EXCEEDED"),
+        ("ERROR", "CONTROL_QUERY_TIMEOUT"),
+        ("ERROR", "CONTROL_ROLLOUT_REPORT_INDEX_UNAVAILABLE"),
+        ("ERROR", "CONTROL_ROLLOUT_REPORT_HEALTH_UNAVAILABLE"),
+    ] {
+        let mut terminal = value.clone();
+        terminal["payload"]["subject_ref"] = Value::Null;
+        terminal["payload"]["outcome"] = outcome.into();
+        terminal["payload"]["reason_code"] = reason.into();
+        assert_eq!(index(&terminal).unwrap().outcome, outcome);
+    }
+    let mut wrong = value.clone();
+    wrong["payload"]["outcome"] = "DENY".into();
+    wrong["payload"]["reason_code"] = "CONTROL_CURSOR_INVALID".into();
+    rejected(&wrong, "no cursor on a report");
+}
+
+#[test]
 fn calibration_report_read_requires_a_validated_target_after_path_parsing() {
     let mut value = event();
     value["event_type"] = "console.calibration.report.read".into();

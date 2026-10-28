@@ -4,6 +4,8 @@ import { useGuardedQuery } from "../../security/hooks.ts";
 import { guardedQueryKey } from "../../security/guarded-query.ts";
 import { MANUAL_REFRESH } from "../../security/query-client.ts";
 import { useSession } from "../../security/SessionProvider.tsx";
+import { ApiError } from "../../api-contract.ts";
+import type { RolloutReportRequest } from "../../rollout-report.ts";
 import { siteKeys } from "./queries.ts";
 
 /**
@@ -64,6 +66,38 @@ export function useSiteHealth(siteId: string) {
     });
     await refetch();
   }, [runtime, siteId, refetch]);
+  return { ...query, read };
+}
+
+/**
+ * The exit report of one observe window, read only on request like health: each read is audited
+ * and scans the index. The control plane reports on the site it indexes, so a reply for another
+ * site throws instead of rendering.
+ */
+export function useRolloutReport(siteId: string, request: RolloutReportRequest | null) {
+  const { runtime } = useSession();
+  const key = siteKeys.rolloutReport(
+    siteId,
+    request?.revision ?? "",
+    request?.start ?? "",
+    request?.end ?? "",
+  );
+  const query = useGuardedQuery({
+    key,
+    enabled: false,
+    expectedSiteId: siteId,
+    staleTime: MANUAL_REFRESH,
+    fetch: (client, signal) => {
+      if (!request) throw new ApiError("CONTROL_ROLLOUT_REPORT_REQUEST_INVALID");
+      return client.rolloutReport(request, signal);
+    },
+  });
+  const { refetch } = query;
+  const read = useCallback(async () => {
+    const epoch = runtime.store.getState().epoch;
+    runtime.queryClient.removeQueries({ queryKey: guardedQueryKey(epoch, key) });
+    await refetch();
+  }, [runtime, key, refetch]);
   return { ...query, read };
 }
 

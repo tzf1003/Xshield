@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 观察退出报告（docs/32 32.4，接口见 docs/29 29.37）：worker 新增 `query_rollout_report`，在 active 视图上按请求聚合终态，统计窗口内完成的请求、某个观察标签转发的 `OBSERVED_WOULD_DENY`（按路由与原因，最多 200 组）以及未匹配路由的拒绝，并校验计数自洽；控制面新增 `GET /control/v1/rollout-report`（`Observer`，占用调查查询名额，附索引水位、`index_complete` 与报告摘要），每次尝试写 `console.rollout_report.read` 审计，worker 发布矩阵同步扩展。控制台“发布”页在 edge 服务观察配置时显示“观察退出报告”，按需生成，索引不完整显示“不足以判断”。**未验证**：本机没有 ClickHouse，聚合 SQL 只在 CI 的真实 ClickHouse 回归（`clickhouse_search`）里运行；大流量站点 30 天窗口可能超出现有扫描预算，此时报告返回预算错误而不是部分结果。
+
 - 控制台观察模式（docs/32 第 4 步的编辑部分）：站点“策略”页新增“上线模式”卡片，可在强制与观察之间切换；观察时编辑截止时间（本地时间，30 天内，默认 7 天）、观察标签与“已验证、单独强制的路由”（只列出 edge 实际会观察的非 PUBLIC、GET、无效果块路由）。客户端按服务端规则预检截止时间、标签与路由引用（`sites/model/rollout.ts`），过期的观察提示改回强制。站点页顶部在 edge 正在观察时显示提示，截止前 24 小时起改为警告。**未覆盖**：退出报告与审批记录中的报告摘要（需要新的聚合检索接口）。
 
 - 站点级 observe → enforce 上线的 edge 部分（docs/32 第 3 步）：edge 读取站点策略的 `rollout` 块。观察窗口内，对非 `PUBLIC`、GET/HEAD、未被单独强制且不带响应模式/加密/认证/传感器/页面/资格/分页/分享/流转块的路由，若确定性规则以“缺少登录或资格”类原因（`AUTH_REQUIRED`、认证绑定类、`CAPABILITY_MISSING`、`OPERATION_NOT_GRANTED`、`UI_ACTION_NOT_AVAILABLE`、`UI_EVIDENCE_UNVERIFIED`、`TARGET_SCOPE_MISMATCH`）拒绝，请求仍转发到源站；写操作、其他拒绝原因与过期的观察一律按强制拒绝，客户端无法选择模式。审计：准入阶段仍记 DENY 与原因，`decision.composed` 与终态写 `OBSERVED_WOULD_DENY` 和 `rollout_revision`，正常完成的终态保留拒绝原因，失败终态保留源站结局；重启补偿按同一规则校验与补写。`/metrics` 新增 `outcome="observed"` 与 `xshield_edge_observed_refusals_total{reason_code}`。`scripts/test_gateway_transport.sh` 增加真实二进制的 observe/enforce 对照阶段，因此现在需要 PostgreSQL 客户端工具（`verify_all.sh` 在缺少时跳过）。**未覆盖**：控制台编辑界面、退出报告与审批记录中的报告摘要（第 4 步）；到期前 24 小时的控制台告警。

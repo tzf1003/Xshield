@@ -1,4 +1,5 @@
-import type { SitePolicyConfig, SiteRollout, SiteRouteConfig } from "../../api.ts";
+import type { SitePolicyConfig, SiteRevision, SiteRollout, SiteRouteConfig } from "../../api.ts";
+import { type RolloutReportRequest, reportTime } from "../../rollout-report.ts";
 
 /** `MAX_OBSERVE_WINDOW_SECONDS`: the longest observe window a save may request. */
 export const MAX_OBSERVE_WINDOW_SECONDS = 30 * 24 * 3600;
@@ -99,4 +100,34 @@ export function rolloutProblems(
     found.push({ field: "rollout.enforced_operations", text: "单独强制的路由不能重复。" });
   }
   return found;
+}
+
+/** The rollout label a stored revision carries, read tolerantly (null when it enforces). */
+function storedRolloutRevision(revision: SiteRevision): string | null {
+  const policy = revision.config.policy as Record<string, unknown> | undefined;
+  const rollout = policy?.rollout as Record<string, unknown> | undefined;
+  return rollout?.mode === "observe" && typeof rollout.revision === "string"
+    ? rollout.revision
+    : null;
+}
+
+/**
+ * The window an exit report covers: from the first stored revision that carried this rollout
+ * label (no earlier than the longest window allows) to the deadline, or to now while it still
+ * observes. Null before the window has a second in it.
+ */
+export function reportWindow(
+  rollout: SiteRollout,
+  revisions: readonly SiteRevision[],
+  nowUnix: number,
+): RolloutReportRequest | null {
+  const created = revisions
+    .filter((revision) => storedRolloutRevision(revision) === rollout.revision)
+    .map((revision) => Math.floor(Date.parse(revision.created_at) / 1000))
+    .filter(Number.isFinite);
+  const earliest = rollout.observe_until_unix - MAX_OBSERVE_WINDOW_SECONDS;
+  const start = Math.max(earliest, created.length > 0 ? Math.min(...created) : earliest);
+  const end = Math.min(Math.floor(nowUnix), rollout.observe_until_unix);
+  if (end <= start) return null;
+  return { revision: rollout.revision, start: reportTime(start), end: reportTime(end) };
 }

@@ -9,6 +9,8 @@ export const siteKeys = {
   status: (siteId: string) => ["sites", siteId, "status"] as const,
   revisions: (siteId: string) => ["sites", siteId, "revisions"] as const,
   health: (siteId: string) => ["sites", siteId, "health"] as const,
+  rolloutReport: (siteId: string, revision: string, start: string, end: string) =>
+    ["sites", siteId, "rollout-report", revision, start, end] as const,
 };
 
 /**

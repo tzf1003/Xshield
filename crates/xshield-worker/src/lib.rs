@@ -50,6 +50,10 @@ pub use search::{
     ModelCallEventSummary, ModelCallListPlan, ModelCallListPlanError, ModelCallListPosition,
     ModelCallListResult, ModelCallListSummary, ModelCallSummary, SearchEventSummary,
     SearchPosition, query_agent_run, query_audit_events, query_model_call, query_model_calls,
+    rollout_report::{
+        ROLLOUT_REPORT_ROWS_MAX, RolloutObservation, RolloutReport, RolloutReportPlan,
+        query_rollout_report,
+    },
 };
 
 #[cfg(unix)]

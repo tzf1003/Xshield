@@ -23,6 +23,7 @@ edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，�
 | GET /control/v1/requests/{request_id}/evidence | 证据manifest清单 | console.manifest.read |
 | GET /control/v1/model-calls | 窗口内模型调用最新脱敏状态分页 | console.model.list |
 | GET /control/v1/model-calls/{model_call_id} | 模型调用、实际输入输出引用 | console.model.read |
+| GET /control/v1/rollout-report | 观察窗口退出报告（计数、按路由与原因、索引状态、报告摘要，29.37） | console.rollout_report.read |
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定账本快照、来源请求引用 | console.grant.read |
 | GET /control/v1/auth-bindings/{binding_id} | 当前身份与凭证代际、状态、期限 | console.binding.read |
 | GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树（脱敏生命周期，已实现，29.30） | console.agent.read |
@@ -500,6 +501,14 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 列表按 `view_` 标识降序分页，游标绑定凭证、调用者、作用域与页大小，格式错误返回 400 `CONTROL_CURSOR_INVALID`。删除只能删除调用者自己的视图，他人或不存在的标识统一返回 404 `CONTROL_SAVED_VIEW_NOT_FOUND`，非法标识返回 400 `CONTROL_SAVED_VIEW_ID_INVALID`。读取视图的结果不是缓存：执行时仍是一次普通检索，经既有 `console.query.executed` 审计。
 
 浏览器写请求经既有 CSRF 检查。每次认证后的尝试恰好写一条 `console.saved_view.create`、`console.saved_view.list` 或 `console.saved_view.delete` 管理审计，成功分别为 `PASS/CONTROL_SAVED_VIEW_CREATED`、`PASS/CONTROL_SAVED_VIEWS_READ`、`PASS/CONTROL_SAVED_VIEW_DELETED`；审计不含视图标识、名称、检索内容或游标。部署先应用迁移 0055，再升级管理 journal 发布器，最后开放路由。回滚停用路由，已写入的视图按保留策略保存。控制台的保存与打开入口不在本契约内，另行交付。
+
+## 29.37 已实现的观察退出报告契约
+
+`GET /control/v1/rollout-report?revision=…&start=…&end=…` 只允许 `Observer` 与服务端固定 tenant/site（控制面索引的那个站点）；三个参数各出现一次，`revision` 为观察标签（名称规则同 `policy_revision`），start/end 为精确到秒的 UTC RFC 3339（`:` 可写作 `%3A`），窗口不超过 31 天；其他参数、非空 body 或重复认证头在读取索引前拒绝（400 `CONTROL_ROLLOUT_REPORT_REQUEST_INVALID`）。读取占用调查查询并发名额，预算与超时沿用调查检索（429 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/`CONTROL_QUERY_BUDGET_EXCEEDED`，503 `CONTROL_QUERY_TIMEOUT`/`CONTROL_ROLLOUT_REPORT_INDEX_UNAVAILABLE`/`CONTROL_ROLLOUT_REPORT_HEALTH_UNAVAILABLE`）。
+
+响应 `schema_version=1`：管理 `request_id`、tenant/site、`rollout_revision`、回显的 start/end；窗口内到达终态的请求数 `completed_requests`，其中由该观察标签转发的 `observed_requests`（终态 `OBSERVED_WOULD_DENY` 且 `rollout_revision` 相同），未匹配任何路由而被拒绝的 `unrouted_refusals`；`observations` 按次数降序列出最多 200 组 `{operation_id, reason_code, count, last_seen}`（路由取自该请求较早的事件，请求在窗口开始前进入时为空串），超出时 `truncated=true`；以及 `watermark_scope=configured_journal`、`as_of`、`index_watermark`、`has_gaps`、`pending_segments` 和 `index_complete`（无缺口且无待发布段）。`report_digest` 是上述事实（不含 request_id 与 as_of）序列化后的小写 SHA-256，供审批引用。报告只陈述事实：索引不完整时控制台显示“不足以判断”，窗口内没有请求时显示“无法说明影响”，不以 0 代替。服务端在返回前校验各计数相加一致，不一致按索引不可用处理。
+
+每次已认证尝试追加一条 `console.rollout_report.read` 管理 journal：成功 `PASS/CONTROL_ROLLOUT_REPORT_READ`，失败按上述原因码区分 DENY/ERROR；事件不含观察标签、窗口、计数或摘要。worker 发布器只接受这一路径与原因集合。
 
 ## 站点诊断与控制台契约补充（2026-09-27）
 

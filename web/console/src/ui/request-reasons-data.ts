@@ -1312,6 +1312,30 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "一次模型调用列表读取已记入审计日志。",
     "无需处理。",
   ],
+  CONTROL_ROLLOUT_REPORT_HEALTH_UNAVAILABLE: [
+    "error",
+    "退出报告水位不可用",
+    "审计索引水位暂时无法读取，报告无法判断是否完整。",
+    "稍后重试；持续出现请联系平台管理员并附管理请求 ID。",
+  ],
+  CONTROL_ROLLOUT_REPORT_INDEX_UNAVAILABLE: [
+    "error",
+    "退出报告索引不可用",
+    "审计索引暂时不可用，退出报告无法生成。",
+    "稍后重试；持续出现请联系平台管理员并附管理请求 ID。",
+  ],
+  CONTROL_ROLLOUT_REPORT_READ: [
+    "info",
+    "已读取退出报告",
+    "一次观察退出报告读取已记入审计日志。",
+    "无需处理。",
+  ],
+  CONTROL_ROLLOUT_REPORT_REQUEST_INVALID: [
+    "deny",
+    "退出报告条件无效",
+    "观察标签或 UTC 时间窗未通过校验。",
+    "修正观察标签与时间窗后重试。",
+  ],
   CONTROL_MODEL_CALLS_REQUEST_INVALID: [
     "deny",
     "模型调用列表条件无效",

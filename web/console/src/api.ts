@@ -108,6 +108,12 @@ import {
   validateSavedViewId,
 } from "./saved-views.ts";
 import type { SavedViewCreated, SavedViewDeleted, SavedViewList } from "./saved-views.ts";
+import {
+  decodeRolloutReport,
+  type RolloutReport,
+  type RolloutReportRequest,
+  rolloutReportQuery,
+} from "./rollout-report.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -3111,6 +3117,19 @@ export class ControlClient {
   }
 
   /** `GET /control/v1/admin/jobs[?cursor=...]`: every job in the scope, for audit administrators. */
+  /** `GET /control/v1/rollout-report`: what the index holds about one observe window. */
+  async rolloutReport(request: RolloutReportRequest, signal?: AbortSignal): Promise<RolloutReport> {
+    const query = rolloutReportQuery(request);
+    return this.#request(
+      `rollout-report?${query}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeRolloutReport(value, request);
+      },
+      signal,
+    );
+  }
+
   /** `GET /control/v1/saved-views[?cursor=...]`: the caller's own saved searches. */
   async savedViews(cursor?: string, signal?: AbortSignal): Promise<SavedViewList> {
     validateSavedViewCursor(cursor);
