@@ -3,8 +3,10 @@ import { useState } from "react";
 import { refreshSessionInfo } from "../../../security/session-queries.ts";
 import { useSession } from "../../../security/SessionProvider";
 import { stepUpStatus } from "../../../shell/step-up.ts";
+import { rolloutPhase } from "../../../sites/model/rollout.ts";
 import { operationKind, writeKindLabel } from "../../../sites/state/write-kinds.ts";
 import { ProblemAlert } from "../../../ui/ProblemAlert";
+import { useNowUnix } from "../tabs/RolloutCard";
 import type { WorkspaceApi } from "./use-workspace.ts";
 
 /**
@@ -143,6 +145,34 @@ export function NoticeBanner({ ws }: { ws: WorkspaceApi }) {
         title={notice.title}
         description={notice.detail ?? undefined}
         closable={{ onClose: () => ws.setNotice(null), "aria-label": "关闭提示" }}
+      />
+    </div>
+  );
+}
+
+/**
+ * The observe rollout the edge serves now (docs/32): a standing note while it observes, a warning
+ * from 24 hours before the deadline, nothing once enforced. The edge switches by itself at the
+ * deadline, so an expired window needs no banner.
+ */
+export function RolloutBanner({ ws }: { ws: WorkspaceApi }) {
+  const now = useNowUnix();
+  const rollout = ws.activeConfig?.policy.rollout;
+  const phase = rolloutPhase(rollout, now);
+  if (!rollout || (phase !== "observing" && phase !== "expiring")) return null;
+  const until = new Date(rollout.observe_until_unix * 1000).toLocaleString();
+  return (
+    <div className="xs-notice">
+      <Alert
+        type={phase === "expiring" ? "warning" : "info"}
+        showIcon
+        role="status"
+        title={
+          phase === "expiring"
+            ? `观察将在 24 小时内结束：${until} 起自动强制。`
+            : `站点处于观察模式（${rollout.revision}），${until} 起自动强制。`
+        }
+        description="观察期间本应拒绝的只读请求仍会到达源站，并在审计中记为 OBSERVED_WOULD_DENY。延长观察需要另一位审批人在 MFA 再认证后批准。"
       />
     </div>
   );

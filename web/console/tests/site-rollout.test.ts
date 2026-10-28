@@ -14,6 +14,13 @@ import {
   needsStepUp,
   rolloutRelaxes,
 } from "../src/sites/model/risk.ts";
+import {
+  rolloutPhase,
+  rolloutProblems,
+  routeObservable,
+  startObserve,
+} from "../src/sites/model/rollout.ts";
+import { validateDraft } from "../src/sites/model/validation.ts";
 
 const LOOP = readFileSync(
   new URL("../../../tests/site-config/browser-loop.json", import.meta.url),
@@ -110,4 +117,80 @@ test("the approval explanation lists the rollout rows under the reason that appl
   const rows = explanation.reasons[0]?.changes.map((change) => change.id) ?? [];
   assert.deepEqual(rows, ["rollout.mode", "rollout.observe_until_unix", "rollout.revision"]);
   assert.ok(explanation.reasons[0]?.label.includes("观察"));
+});
+
+test("the rollout phase follows the deadline the edge enforces by itself", () => {
+  const until = 2_000_000_000;
+  assert.equal(rolloutPhase(undefined, until), "enforce");
+  assert.equal(rolloutPhase(observe(until), until - 2 * 86_400), "observing");
+  assert.equal(rolloutPhase(observe(until), until - 86_400), "expiring");
+  assert.equal(rolloutPhase(observe(until), until - 1), "expiring");
+  assert.equal(rolloutPhase(observe(until), until), "expired");
+});
+
+test("only plain non-public reads are observable, as SiteRollout::observes decides", () => {
+  const base = draft().policy.routes;
+  const read = base.find((route) => route.method === "GET" && route.security_entry !== "public");
+  assert.ok(read);
+  const plain = {
+    ...read,
+    response_mode: "" as const,
+    request_crypto: null,
+    response_crypto: null,
+    auth_binding: undefined,
+    auth_revoke: undefined,
+    sensor_html: undefined,
+    page_actions: undefined,
+    resource_grant: undefined,
+    query_pagination: undefined,
+    share_issue: undefined,
+    auth_refresh: undefined,
+    auth_context_switch: undefined,
+  };
+  assert.equal(routeObservable(plain), true);
+  assert.equal(routeObservable({ ...plain, security_entry: "public" }), false);
+  assert.equal(routeObservable({ ...plain, method: "POST" }), false);
+  assert.equal(routeObservable({ ...plain, response_mode: "BUFFERED_JSON" }), false);
+  assert.equal(routeObservable({ ...plain, request_crypto: {} }), false);
+  // issued_by marks where a page action comes from; it adds no edge effect to this route.
+  assert.equal(
+    routeObservable({
+      ...plain,
+      issued_by: { page_operation_id: "p", action_id: "a" } as never,
+    }),
+    true,
+  );
+});
+
+test("a save the server would refuse for its rollout is flagged before it is sent", () => {
+  const now = 1_900_000_000;
+  const routes = draft().policy.routes;
+  const known = routes[0]?.operation_id ?? "";
+  const fields = (rollout: SiteRollout) =>
+    rolloutProblems(rollout, routes, now).map((problem) => problem.field);
+  assert.deepEqual(fields(observe(now + 86_400, [known])), []);
+  assert.deepEqual(fields(observe(now)), ["rollout.observe_until_unix"]);
+  assert.deepEqual(fields(observe(now + 31 * 86_400)), ["rollout.observe_until_unix"]);
+  assert.deepEqual(fields({ ...observe(now + 60), revision: "" }), ["rollout.revision"]);
+  assert.deepEqual(fields({ ...observe(now + 60), revision: "has space" }), ["rollout.revision"]);
+  assert.deepEqual(fields(observe(now + 60, ["missing.route"])), ["rollout.enforced_operations"]);
+  assert.deepEqual(fields(observe(now + 60, [known, known])), ["rollout.enforced_operations"]);
+  assert.deepEqual(rolloutProblems(undefined, routes, now), []);
+  const issues = validateDraft(draft(observe(now - 1)), { nowUnix: now });
+  assert.ok(
+    issues.some(
+      (issue) => issue.path === "rollout.observe_until_unix" && issue.group === "policies",
+    ),
+  );
+  assert.ok(!validateDraft(draft(), { nowUnix: now }).some((i) => i.path.startsWith("rollout")));
+});
+
+test("a new observe window starts seven days out with a dated label", () => {
+  const now = Date.UTC(2026, 9, 28, 12) / 1000;
+  assert.deepEqual(startObserve(now), {
+    mode: "observe",
+    observe_until_unix: now + 7 * 86_400,
+    revision: "rollout-20261028",
+  });
+  assert.deepEqual(rolloutProblems(startObserve(now), [], now), []);
 });

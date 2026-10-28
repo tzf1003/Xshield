@@ -90,6 +90,7 @@ async fn approve(store: &PostgresIdentityStore, tenant: &TenantId, site: &SiteId
             &[key; 32],
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -260,6 +261,7 @@ async fn rows_are_written_by_the_approval_that_covers_the_block_and_only_once() 
             &[41; 32],
             None,
             false,
+            None,
         )
         .await
         .unwrap();

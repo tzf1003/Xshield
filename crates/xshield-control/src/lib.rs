@@ -25,6 +25,7 @@ mod jobs;
 mod ledger_inspection;
 mod management_api_key;
 mod model_call_list;
+mod rollout_report;
 mod saved_views;
 mod search;
 mod site_config;
@@ -4385,6 +4386,10 @@ pub fn router(control: ControlPlane) -> Router {
             model_call_list::PATH,
             get(model_call_list::handler).layer(DefaultBodyLimit::max(0)),
         )
+        .route(
+            rollout_report::PATH,
+            get(rollout_report::handler).layer(DefaultBodyLimit::max(0)),
+        )
         .route(MODEL_CALL_PATH, get(model_call_handler))
         .route(AGENT_RUN_PATH, get(agent_run_handler))
         .route(
@@ -5512,6 +5517,7 @@ mod tests {
     mod job_list;
     mod ledger_inspection;
     mod model_call_list;
+    mod rollout_report;
     mod saved_views;
     mod search_references;
     mod site_admin;

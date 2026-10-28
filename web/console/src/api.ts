@@ -108,6 +108,12 @@ import {
   validateSavedViewId,
 } from "./saved-views.ts";
 import type { SavedViewCreated, SavedViewDeleted, SavedViewList } from "./saved-views.ts";
+import {
+  decodeRolloutReport,
+  type RolloutReport,
+  type RolloutReportRequest,
+  rolloutReportQuery,
+} from "./rollout-report.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -3111,6 +3117,19 @@ export class ControlClient {
   }
 
   /** `GET /control/v1/admin/jobs[?cursor=...]`: every job in the scope, for audit administrators. */
+  /** `GET /control/v1/rollout-report`: what the index holds about one observe window. */
+  async rolloutReport(request: RolloutReportRequest, signal?: AbortSignal): Promise<RolloutReport> {
+    const query = rolloutReportQuery(request);
+    return this.#request(
+      `rollout-report?${query}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeRolloutReport(value, request);
+      },
+      signal,
+    );
+  }
+
   /** `GET /control/v1/saved-views[?cursor=...]`: the caller's own saved searches. */
   async savedViews(cursor?: string, signal?: AbortSignal): Promise<SavedViewList> {
     validateSavedViewCursor(cursor);
@@ -3609,17 +3628,28 @@ export class ControlClient {
    * `expectedConfigDigest` pins the approval to the configuration the reviewer looked at: the
    * server answers 409 CONTROL_SITE_APPROVAL_REVISION_MISMATCH when the staged revision is no
    * longer that one. 64 lowercase hex characters, exactly as `config_digest` is reported.
+   * `exitReportDigest` is the `report_digest` of the observe exit report the approver relied on
+   * (docs/32 32.4); the server stores it with the approval and never judges it.
    */
   async approveSite(
     siteId: string,
     key: string,
     signal?: AbortSignal,
     expectedConfigDigest?: string,
+    exitReportDigest?: string,
   ): Promise<SiteApplyResponse> {
     this.#idempotencyKey(key);
-    if (expectedConfigDigest !== undefined && !/^[0-9a-f]{64}$/.test(expectedConfigDigest)) {
+    const digest = /^[0-9a-f]{64}$/;
+    if (
+      (expectedConfigDigest !== undefined && !digest.test(expectedConfigDigest)) ||
+      (exitReportDigest !== undefined && !digest.test(exitReportDigest))
+    ) {
       throw new ApiError("CONTROL_SITE_CONFIG_REQUEST_INVALID");
     }
+    const headers: Record<string, string> = {};
+    if (expectedConfigDigest !== undefined)
+      headers["X-Xshield-Expected-Config-Digest"] = expectedConfigDigest;
+    if (exitReportDigest !== undefined) headers["X-Xshield-Exit-Report-Digest"] = exitReportDigest;
     return this.#transport(
       `sites/${name(siteId)}/approve`,
       async (response, combined) =>
@@ -3629,9 +3659,7 @@ export class ControlClient {
       key,
       undefined,
       undefined,
-      expectedConfigDigest === undefined
-        ? undefined
-        : { headers: { "X-Xshield-Expected-Config-Digest": expectedConfigDigest } },
+      Object.keys(headers).length === 0 ? undefined : { headers },
     );
   }
 

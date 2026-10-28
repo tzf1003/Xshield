@@ -194,6 +194,34 @@ test("an approval is pinned to the digest of the revision that was reviewed", as
   assert.equal(network.mock.callCount(), 0);
 });
 
+test("an approval that ends observe can carry the exit report it relied on", async (t) => {
+  const REPORT = "b".repeat(64);
+  const seen: { digest: string | null; report: string | null }[] = [];
+  t.mock.method(globalThis, "fetch", async (_path: string, options: RequestInit) => {
+    const headers = new Headers(options.headers);
+    seen.push({
+      digest: headers.get("X-Xshield-Expected-Config-Digest"),
+      report: headers.get("X-Xshield-Exit-Report-Digest"),
+    });
+    return response(applyBody);
+  });
+  const client = new ControlClient(TOKEN);
+  await client.approveSite("site_a", KEY, undefined, DIGEST, REPORT);
+  await client.approveSite("site_a", KEY, undefined, undefined, REPORT);
+  assert.deepEqual(seen, [
+    { digest: DIGEST, report: REPORT },
+    { digest: null, report: REPORT },
+  ]);
+  const network = t.mock.method(globalThis, "fetch", async () => response(applyBody));
+  for (const bad of ["", "B".repeat(64), "b".repeat(63)]) {
+    await assert.rejects(
+      client.approveSite("site_a", KEY, undefined, DIGEST, bad),
+      (error: unknown) => error instanceof ApiError,
+    );
+  }
+  assert.equal(network.mock.callCount(), 0);
+});
+
 test("the revision conflict of an approval keeps its stable code", async (t) => {
   t.mock.method(globalThis, "fetch", async () =>
     response(errorFixture("CONTROL_SITE_APPROVAL_REVISION_MISMATCH"), 409),

@@ -2943,3 +2943,83 @@ async fn relaxing_the_rollout_needs_a_stepped_up_independent_approver() {
     assert_eq!(refused["error_code"], "CONTROL_SITE_ROLLOUT_INVALID");
     let _ = ctx.finish().await;
 }
+
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn an_approval_records_the_exit_report_it_relied_on() {
+    let ctx = Ctx::new().await;
+    let site = "site_exit_report";
+    ctx.create_live(site, "8.8.8.8:9000").await;
+    let stepped_up = ctx
+        .principal_with_step_up(
+            "approver-mfa",
+            &[ManagementRole::PolicyApprover, ManagementRole::Observer],
+            true,
+        )
+        .await;
+    let until = Utc::now().timestamp().unsigned_abs() + 7 * 24 * 3_600;
+    let observe = with(
+        site_body(site, "8.8.8.8:9000"),
+        "policy",
+        json!({"rollout": {
+            "mode": "observe", "observe_until_unix": until, "revision": "rollout-1"
+        }}),
+    );
+    let (status, saved) = ctx.put(site, &observe, &ctx.key("observe")).await;
+    assert!(status.is_success(), "{saved}");
+    let (status, approved) = Ctx::call(
+        &stepped_up,
+        "POST",
+        &format!("/control/v1/sites/{site}/approve"),
+        None,
+        Some(&ctx.key("approve-observe")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+
+    let (status, saved) = ctx
+        .put(site, &site_body(site, "8.8.8.8:9000"), &ctx.key("enforce"))
+        .await;
+    assert!(status.is_success(), "{saved}");
+    let approve_with = |digest: &str, key: String| {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/control/v1/sites/{site}/approve"))
+            .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header("idempotency-key", key)
+            .header("x-xshield-exit-report-digest", digest)
+            .body(Body::empty())
+            .unwrap();
+        let app = ctx.approver.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+    let (status, refused) = approve_with(&"A".repeat(64), ctx.key("approve-bad")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_CONFIG_REQUEST_INVALID");
+    let digest = "ab".repeat(32);
+    let (status, approved) = approve_with(&digest, ctx.key("approve-enforce")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let recorded: Vec<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT exit_report_digest FROM xshield.site_apply_approvals
+         WHERE tenant_id = $1 AND site_id = $2 AND approval_kind = 'independent'
+         ORDER BY created_at",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    // Going live and entering observe recorded none; tightening records it.
+    let (last, earlier) = recorded.split_last().unwrap();
+    assert_eq!(last.as_deref(), Some([0xab; 32].as_slice()));
+    assert!(earlier.iter().all(Option::is_none));
+    let _ = ctx.finish().await;
+}
