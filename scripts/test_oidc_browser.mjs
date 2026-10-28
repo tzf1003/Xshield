@@ -329,7 +329,8 @@ try {
   // Browser console noise is only the refused responses the run provokes or tolerates on purpose:
   // the unauthenticated session probe (401), the CSRF probe (403) and *_BUSY 429 (see above).
   const tolerated = (line) =>
-    /^GET \/control\/v1\/session -> 401 /.test(line) ||
+    // A probe whose page navigated away (sign-out) loses its body, so the code may be missing.
+    /^GET \/control\/v1\/session -> 401( [A-Z_]+)?$/.test(line) ||
     /^POST \/control\/v1\/cases -> 403 CONTROL_CSRF_REQUIRED$/.test(line) ||
     // The body of a read the page aborted meanwhile (the StrictMode duplicate) is gone: no code.
     /^GET \/control\/v1\/.* -> 429( CONTROL_[A-Z_]*BUSY)?$/.test(line);
