@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 审批记录退出报告摘要（docs/32 32.4）：迁移 `0056_m5_site_approval_exit_report.sql` 给 `xshield.site_apply_approvals` 增加可空列 `exit_report_digest`（32 字节，CHECK 长度），**部署前须先应用该迁移**；回滚只需删列，旧控制服务不读写它。`POST /control/v1/sites/{site_id}/approve` 接受可选 `X-Xshield-Exit-Report-Digest`（格式不合法为 400 `CONTROL_SITE_CONFIG_REQUEST_INVALID`），独立批准把它原样写入批准行，直接应用写空。控制台批准对话框在修订结束观察（`ROLLOUT_MODE_TIGHTENED`）时显示本次会话最近生成的退出报告结论与摘要并随批准发送；没有报告时说明记录将为空，不阻止批准。回归：控制面 `an_approval_records_the_exit_report_it_relied_on`（真实 PostgreSQL）与控制台请求头测试。
+
 - 观察退出报告（docs/32 32.4，接口见 docs/29 29.37）：worker 新增 `query_rollout_report`，在 active 视图上按请求聚合终态，统计窗口内完成的请求、某个观察标签转发的 `OBSERVED_WOULD_DENY`（按路由与原因，最多 200 组）以及未匹配路由的拒绝，并校验计数自洽；控制面新增 `GET /control/v1/rollout-report`（`Observer`，占用调查查询名额，附索引水位、`index_complete` 与报告摘要），每次尝试写 `console.rollout_report.read` 审计，worker 发布矩阵同步扩展。控制台“发布”页在 edge 服务观察配置时显示“观察退出报告”，按需生成，索引不完整显示“不足以判断”。**未验证**：本机没有 ClickHouse，聚合 SQL 只在 CI 的真实 ClickHouse 回归（`clickhouse_search`）里运行；大流量站点 30 天窗口可能超出现有扫描预算，此时报告返回预算错误而不是部分结果。
 
 - 控制台观察模式（docs/32 第 4 步的编辑部分）：站点“策略”页新增“上线模式”卡片，可在强制与观察之间切换；观察时编辑截止时间（本地时间，30 天内，默认 7 天）、观察标签与“已验证、单独强制的路由”（只列出 edge 实际会观察的非 PUBLIC、GET、无效果块路由）。客户端按服务端规则预检截止时间、标签与路由引用（`sites/model/rollout.ts`），过期的观察提示改回强制。站点页顶部在 edge 正在观察时显示提示，截止前 24 小时起改为警告。**未覆盖**：退出报告与审批记录中的报告摘要（需要新的聚合检索接口）。

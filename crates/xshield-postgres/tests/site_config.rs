@@ -93,6 +93,7 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
             &[41; 32],
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -125,6 +126,7 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
                 &[42; 32],
                 None,
                 false,
+                None,
             )
             .await
             .unwrap(),
@@ -544,6 +546,7 @@ async fn approve(
             &[key; 32],
             expected_digest,
             false,
+            None,
         )
         .await
         .unwrap()

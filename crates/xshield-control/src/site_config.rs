@@ -1312,6 +1312,31 @@ pub async fn approve_handler(
             Some(digest)
         }
     };
+    // docs/32 32.7: an approver tightening an observe rollout may record the
+    // exit report (GET /control/v1/rollout-report) it relied on. It is a
+    // record, not a condition: nothing is authorized because of it.
+    let exit_report_digest = match single_header(&headers, "x-xshield-exit-report-digest") {
+        None => None,
+        Some(value) => {
+            let Some(digest) = decode_hex_key(&value) else {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        APPROVE_ACCESS,
+                        None,
+                        StatusCode::BAD_REQUEST,
+                        "CONTROL_SITE_CONFIG_REQUEST_INVALID",
+                        "invalid exit report digest",
+                        false,
+                        "correct_request",
+                    )
+                    .await
+                    .into_response();
+            };
+            Some(digest)
+        }
+    };
     let Some(idempotency_digest) = signature(
         &control,
         b"site-config-approve-idempotency-v1",
@@ -1336,6 +1361,7 @@ pub async fn approve_handler(
             &idempotency_digest,
             expected_digest.as_ref(),
             auth.step_up_valid(),
+            exit_report_digest.as_ref(),
         )
         .await
     {

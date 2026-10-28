@@ -1,8 +1,10 @@
 import { Alert, Button, Modal, Select } from "antd";
 import { useMemo, useState } from "react";
+import { type RolloutReport, reportVerdict } from "../../../../rollout-report.ts";
 import { configFromStored } from "../../../../sites/model/config.ts";
 import { diffConfigs } from "../../../../sites/model/diff.ts";
 import { needsIndependentApproval } from "../../../../sites/model/risk.ts";
+import { useLatestRolloutReport } from "../../../../sites/state/detail-queries.ts";
 import { IdChip } from "../../../../ui/IdChip";
 import { DiffTable } from "../../DiffView";
 import type { WorkspaceApi } from "../../workspace/use-workspace.ts";
@@ -99,16 +101,57 @@ function FlowConsequences({ release }: { release: Release }) {
   );
 }
 
+const verdictWords = {
+  incomplete: "索引不完整，不足以判断",
+  no_traffic: "窗口内没有完成的请求",
+  would_deny: "有本应被拒绝的请求",
+  clean: "没有本应被拒绝的请求",
+} as const;
+
+/**
+ * Ending observe (docs/32 32.4): the approval records the digest of the exit report the approver
+ * generated last in this session, so the audit trail shows which facts the decision relied on.
+ * The report never decides; without one the approval proceeds and records none.
+ */
+function ExitReportSection({ report }: { report: RolloutReport | null }) {
+  return (
+    <section className="xs-modal-section">
+      <h4>观察退出报告</h4>
+      {report ? (
+        <>
+          <p className="xs-modal-note muted">
+            批准会记录你最近生成的退出报告（{report.rollout_revision}，{report.start} – {report.end}
+            ）：{verdictWords[reportVerdict(report)]}，完成 {report.completed_requests} 个请求，其中{" "}
+            {report.observed_requests} 个本应被拒绝。
+          </p>
+          <IdChip value={report.report_digest} label="退出报告摘要" maxLength={20} />
+        </>
+      ) : (
+        <p className="muted">
+          这次修订结束观察、改为强制，但本次会话还没有生成退出报告。可以先在“观察退出报告”中生成并核对；不生成也能批准，审批记录中不会有报告摘要。
+        </p>
+      )}
+    </section>
+  );
+}
+
 export function ApproveModal({ ws, release, open, onClose }: ModalProps) {
   const advice = useStepUpAdvice(open);
   const { view } = ws;
   const { review } = release;
   const name = revisionName(view.desired_revision);
   const active = servingName(view.active_revision);
+  const tightens = (release.need.explanation?.reasons ?? []).some(
+    (reason) => reason.token === "ROLLOUT_MODE_TIGHTENED",
+  );
+  const latest = useLatestRolloutReport(ws.siteId ?? "");
+  const report = tightens && open ? latest : null;
 
   function confirm() {
     onClose();
-    void ws.run("approve", () => ws.writes.approve.submit({ digest: review.digest }));
+    void ws.run("approve", () =>
+      ws.writes.approve.submit({ digest: review.digest, exitReport: report?.report_digest }),
+    );
   }
 
   return (
@@ -163,6 +206,7 @@ export function ApproveModal({ ws, release, open, onClose }: ModalProps) {
           : "当前读不到配置摘要，批准不绑定摘要：服务端批准的是它此刻暂存的修订。"}
       </p>
       <ChangeSection release={release} heading="将要发布的变更" />
+      {tightens && <ExitReportSection report={report} />}
       <section className="xs-modal-section">
         <h4>批准之后</h4>
         <ul className="xs-consequences">
