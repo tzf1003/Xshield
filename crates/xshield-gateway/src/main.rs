@@ -1,5 +1,6 @@
 mod apply_api;
 mod buffered_json;
+mod buffered_relay;
 mod descriptor_supply;
 mod durable_audit;
 mod edge_health;
@@ -18,7 +19,13 @@ use bytes::Bytes;
 use pingora::{
     Error as PingoraError, ErrorType, Result as PingoraResult,
     http::ResponseHeader,
-    proxy::{ProxyHttp, Session},
+    proxy::{
+        ProxyHttp, Session,
+        subrequest::{
+            BodyMode, Ctx as SubrequestCtx,
+            pipe::{InputBody, InputBodyType, pipe_subrequest},
+        },
+    },
     server::Server,
     upstreams::peer::HttpPeer,
 };
@@ -198,6 +205,8 @@ struct RequestContext {
     response_failure: Option<ReasonCode>,
     origin_status: Option<u16>,
     origin_response_complete: bool,
+    // A buffered route's subrequest failed in the proxy rather than in a filter.
+    relayed_proxy_error: bool,
     response_source: ResponseSource,
     snapshot: Option<Arc<GatewaySnapshot>>,
     listener_port: Option<u16>,
@@ -252,6 +261,7 @@ impl ProxyHttp for Gateway {
             response_failure: None,
             origin_status: None,
             origin_response_complete: false,
+            relayed_proxy_error: false,
             response_source: ResponseSource::Origin,
             snapshot: None,
             // Known once request_filter reads the connection's socket digest.
@@ -269,6 +279,15 @@ impl ProxyHttp for Gateway {
         session: &mut Session,
         context: &mut Self::CTX,
     ) -> PingoraResult<bool> {
+        // A buffered route's subrequest carries the parent's admitted context:
+        // admission, audit and request transformation already ran once.
+        if let Some(handoff) = buffered_relay::handoff::<RequestContext>(session) {
+            let Some(parked) = handoff.take_context() else {
+                return response_error(ReasonCode::OriginOutcomeUnknown);
+            };
+            *context = parked;
+            return Ok(false);
+        }
         if !self.audit.is_ready() {
             respond_denial(
                 session,
@@ -521,7 +540,19 @@ impl ProxyHttp for Gateway {
             }
             return Ok(true);
         }
+        if context
+            .config(self)
+            .buffered_response_policy(&method, &path)
+            .is_some()
+        {
+            self.relay_buffered(session, context).await?;
+            return Ok(true);
+        }
         Ok(false)
+    }
+
+    fn allow_spawning_subrequest(&self, session: &Session, _context: &Self::CTX) -> bool {
+        session.subrequest_ctx.is_none()
     }
 
     async fn upstream_peer(
@@ -831,6 +862,11 @@ impl ProxyHttp for Gateway {
         error: Option<&pingora::Error>,
         context: &mut Self::CTX,
     ) {
+        if let Some(handoff) = buffered_relay::handoff::<RequestContext>(session) {
+            context.relayed_proxy_error = error.is_some();
+            handoff.give_back(std::mem::replace(context, self.new_ctx()));
+            return;
+        }
         let status = session
             .response_written()
             .map_or(0, |response| response.status.as_u16());
@@ -852,7 +888,7 @@ impl ProxyHttp for Gateway {
                 admission,
                 status,
                 duration_us: elapsed_us(context.started_at),
-                proxy_error: error.is_some(),
+                proxy_error: error.is_some() || context.relayed_proxy_error,
                 response_failure: context.response_failure,
                 origin_status: context.origin_status,
                 origin_response_complete: context.origin_response_complete,
@@ -873,6 +909,117 @@ impl ProxyHttp for Gateway {
 }
 
 impl Gateway {
+    /// Serves a buffered route through a subrequest and releases its reply
+    /// only once it finished cleanly; any other outcome is a `502` naming the
+    /// reason and carrying none of the origin's bytes. See [`buffered_relay`].
+    async fn relay_buffered(
+        &self,
+        session: &mut Session,
+        context: &mut RequestContext,
+    ) -> PingoraResult<()> {
+        let request_id = context.request_id.clone();
+        let body_pending = !session.as_downstream_mut().is_body_done();
+        let Ok(restated) =
+            buffered_relay::restated_head(session.as_downstream(), body_pending).await
+        else {
+            context.relayed_proxy_error = true;
+            return respond_denial(
+                session,
+                502,
+                &request_id,
+                ReasonCode::OriginOutcomeUnknown,
+                None,
+            )
+            .await;
+        };
+        // An edge-rebuilt body was read in full during admission; the
+        // subrequest substitutes it from the parked context.
+        // Otherwise the client's body is piped to the subrequest as it
+        // arrives; a subrequest without a body drops its body headers.
+        let (input, body_mode) = if context.rebuilt_request_len.is_some() {
+            (InputBodyType::Preset(InputBody::NoBody), BodyMode::NoBody)
+        } else if body_pending {
+            (InputBodyType::SaveBody(0), BodyMode::ExpectBody)
+        } else {
+            (InputBodyType::SaveBody(0), BodyMode::NoBody)
+        };
+        let Some(spawner) = session.subrequest_spawner.as_ref() else {
+            context.relayed_proxy_error = true;
+            return respond_denial(
+                session,
+                502,
+                &request_id,
+                ReasonCode::OriginOutcomeUnknown,
+                None,
+            )
+            .await;
+        };
+        let (handoff, returned) =
+            buffered_relay::Handoff::new(std::mem::replace(context, self.new_ctx()));
+        let (subrequest, handle) = spawner.create_subrequest(
+            restated.as_ref().unwrap_or_else(|| session.as_downstream()),
+            SubrequestCtx::builder()
+                .body_mode(body_mode)
+                .user_ctx(Box::new(handoff))
+                .build(),
+        );
+        let mut collected = buffered_relay::Collected::default();
+        let piped = pipe_subrequest(
+            session,
+            subrequest,
+            handle,
+            |task| {
+                collected.hold(task);
+                Ok(None)
+            },
+            input,
+        )
+        .await;
+        let piped_ok = piped.is_ok();
+        // Dropping the pipe state lets an unfinished subrequest fail and
+        // return the context instead of waiting on a reader that is gone.
+        drop(piped);
+        if let Ok(restored) = returned.await {
+            *context = restored;
+        } else {
+            // The subrequest ended without returning the context, so the
+            // admitted request has no final event here; journal recovery
+            // records its origin outcome as unknown.
+            context.request_id = request_id;
+            context.relayed_proxy_error = true;
+        }
+        if !piped_ok {
+            context.relayed_proxy_error = true;
+        }
+        // The origin status proves the subrequest ran this request's own
+        // filters: a subrequest that failed before them (an unparsable head)
+        // writes Pingora's error page, which is not a reply to release.
+        let released = if !context.relayed_proxy_error
+            && context.origin_status.is_some()
+            && context.response_failure.is_none()
+            && collected.is_complete()
+        {
+            collected.into_tasks()
+        } else {
+            None
+        };
+        if let Some(tasks) = released {
+            session.write_response_tasks(tasks).await?;
+            return Ok(());
+        }
+        let reason = context
+            .response_failure
+            .unwrap_or(ReasonCode::OriginOutcomeUnknown);
+        respond_denial(
+            session,
+            502,
+            &context.request_id,
+            reason,
+            context.anonymous_session_cookie.as_deref(),
+        )
+        .await
+    }
+
     // Pingora fixes headers before the body commit barrier. Keep issuance-only
     // cache and cookie preparation together across all response issuers.
     fn prepare_response_issuance_headers(

@@ -61,15 +61,28 @@ journal_key=8888888888888888888888888888888888888888888888888888888888888888
 # exactly what the edge forwarded.
 python3 - "$origin_port" <<'PY' >"$test_dir/origin.log" 2>&1 &
 import http.server
+import json
 import sys
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def do_POST(self):
+        received = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = json.dumps({"received": received.decode()}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         body = f"origin:{self.path}".encode()
+        content_type = "text/plain"
+        if self.path == "/json":
+            body, content_type = b'{"origin":"json"}', "application/json"
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", content_type)
         self.send_header("X-Origin-Host", self.headers.get("Host", ""))
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -133,7 +146,7 @@ write_config() {
   "site_id":"site_a",
   "policy_revision":"policy-r1",
   "audit":{"directory":"$test_dir/audit-$run","key_id":"journal-key-r1","producer_id":"edge-transport-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
-  "operations":[{"operation_id":"entry","method":"GET","path":"/","admission":"PUBLIC"},{"operation_id":"probe","method":"GET","path":"/h2","admission":"PUBLIC"},{"operation_id":"absolute","method":"GET","path":"/abs","admission":"PUBLIC"}]$policy
+  "operations":[{"operation_id":"entry","method":"GET","path":"/","admission":"PUBLIC"},{"operation_id":"probe","method":"GET","path":"/h2","admission":"PUBLIC"},{"operation_id":"absolute","method":"GET","path":"/abs","admission":"PUBLIC"},{"operation_id":"buffered","method":"GET","path":"/json","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}},{"operation_id":"buffered.text","method":"GET","path":"/json-text","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}},{"operation_id":"buffered.post","method":"POST","path":"/json-echo","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}}]$policy
 }
 JSON
 }
@@ -358,6 +371,31 @@ version=$("${curl_tls[@]}" --http1.1 -o "$test_dir/h1.body" -w '%{http_version} 
     "https://site-a.example:$edge_port/")
 [[ "$version" == "1.1 200" ]] || { echo "expected HTTP/1.1 200, got $version" >&2; exit 1; }
 [[ "$(<"$test_dir/h1.body")" == "origin:/" ]]
+# A buffered route is released whole after validation, and a reply that fails
+# validation is a complete 502 naming the reason, never origin bytes. The
+# request body reaches the origin over either protocol.
+version=$("${curl_tls[@]}" --http2 -o "$test_dir/h2-json.body" -w '%{http_version} %{http_code}' \
+    "https://site-a.example:$edge_port/json")
+[[ "$version" == "2 200" ]] || { echo "expected buffered HTTP/2 200, got $version" >&2; exit 1; }
+[[ "$(<"$test_dir/h2-json.body")" == '{"origin":"json"}' ]]
+version=$("${curl_tls[@]}" --http2 -o "$test_dir/h2-json-text.body" -w '%{http_version} %{http_code}' \
+    "https://site-a.example:$edge_port/json-text")
+[[ "$version" == "2 502" ]] || { echo "expected buffered HTTP/2 502, got $version" >&2; exit 1; }
+grep -q '"reason_code":"' "$test_dir/h2-json-text.body"
+if grep -q 'origin:' "$test_dir/h2-json-text.body"; then
+    echo "origin bytes released on a refused buffered reply" >&2
+    exit 1
+fi
+version=$("${curl_tls[@]}" --http2 -H 'Content-Type: application/json' --data-binary '{"n":1}' \
+    -o "$test_dir/h2-json-echo.body" -w '%{http_version} %{http_code}' \
+    "https://site-a.example:$edge_port/json-echo")
+[[ "$version" == "2 200" ]] || { echo "expected buffered HTTP/2 POST 200, got $version" >&2; exit 1; }
+version=$("${curl_tls[@]}" --http1.1 -H 'Content-Type: application/json' --data-binary '{"n":1}' \
+    -o "$test_dir/h1-json-echo.body" -w '%{http_version} %{http_code}' \
+    "https://site-a.example:$edge_port/json-echo")
+[[ "$version" == "1.1 200" ]] || { echo "expected buffered HTTP/1.1 POST 200, got $version" >&2; exit 1; }
+[[ "$(<"$test_dir/h1-json-echo.body")" == '{"received": "{\"n\":1}"}' ]]
+[[ "$(<"$test_dir/h2-json-echo.body")" == '{"received": "{\"n\":1}"}' ]]
 
 # Phase C: TLS plus PROXY protocol from a trusted balancer (this loopback
 # peer). Each source address may make one request (1 rps, burst 1), so the
