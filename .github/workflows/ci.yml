@@ -25,6 +25,7 @@ jobs:
       web: ${{ steps.diff.outputs.web }}
       images: ${{ steps.diff.outputs.images }}
       oidc: ${{ steps.diff.outputs.oidc }}
+      fuzz: ${{ steps.diff.outputs.fuzz }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,7 +36,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$EVENT" != "pull_request" ]; then
-            printf 'web=true\nimages=true\noidc=true\n' >> "$GITHUB_OUTPUT"
+            printf 'web=true\nimages=true\noidc=true\nfuzz=true\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files=$(git diff --name-only "$BASE"...HEAD)
@@ -45,6 +46,7 @@ jobs:
             echo "web=$(match '^(web/console/|tests/site-config/|\.github/)')"
             echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|sensor/|migrations/|tests/site-config/|deploy/|dev/keycloak/|scripts/test_(compose|helm)_deployment\.sh|\.github/)')"
             echo "oidc=$(match '^(crates/xshield-(control|audit|core)/|Cargo\.(toml|lock)|rust-toolchain\.toml|scripts/(test_oidc|lib/)|dev/keycloak/|web/console/|migrations/|\.github/)')"
+            echo "fuzz=$(match '^(crates/xshield-(core|gateway|audit)/|sensor/src/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|tests/site-config/|\.github/)')"
           } >> "$GITHUB_OUTPUT"
 
   validate:
@@ -214,6 +216,32 @@ jobs:
 
   # Licenses, RustSec advisories, yanked crates and registry sources (deny.toml).
   # It reads Cargo.lock only, so it needs no database or build.
+  # The fuzz targets (fuzz/) on the stable toolchain: every checked-in seed, including
+  # each crash ever found, and fixed deterministic mutations of them. Coverage-guided
+  # runs are in fuzz.yml. The crate is its own workspace, so it is linted here.
+  fuzz-replay:
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: clippy,rustfmt
+      - run: cargo fmt --check
+      # Not --locked: fuzz/Cargo.lock follows the product crates it depends on by path,
+      # so a dependency change there updates it here; commit that update with it.
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   supply-chain:
     runs-on: ubuntu-latest
     timeout-minutes: 10

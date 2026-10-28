@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
+  - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
+  - CI 新增 `fuzz-replay` 作业：用稳定版回放所有种子和固定数量的确定性变异，同时对该 crate 运行 fmt 与 clippy。新增 `.github/workflows/fuzz.yml`：每天在稳定版上做覆盖引导的模糊测试（不加 sanitizer），在两次运行之间缓存语料，发现崩溃时上传。
+  - 新依赖只在 `fuzz/` 内使用，不进入产品依赖树与 `cargo deny`：`libfuzzer-sys` 0.4（(MIT OR Apache-2.0) AND NCSA）及其依赖 `arbitrary` 1.x（MIT OR Apache-2.0）；`cargo-fuzz` 0.13.2 在 CI 里从 crates.io 构建。
+  - 本机每个目标先跑 90 秒，再在同一语料上跑 5 分钟（每个目标 900 万到 4.5 亿次执行），没有发现崩溃。
+  - **未覆盖**：压缩与插件解析（产品中不存在）；journal 帧（读取前已由 MAC 认证）；控制台前端与 worker 的 ClickHouse 行解析；只在 edge 二进制内部的解析函数（WAF Cookie 与引导查询），它们不经过库接口。
+
 - 拒绝与覆盖统计（可行性建议 P1“拒绝与覆盖统计”，docs/29 29.39、docs/11）：试点需要知道每条路由放行和拒绝了多少、因为什么拒绝，以及哪些端点还没有路由覆盖，此前只能逐条检索。
   - 新增 `GET /control/v1/coverage-report?start=…&end=…`（Observer），返回窗口内按路由的流量、按路由与原因的拒绝、未覆盖端点、索引状态与报告摘要；每次读取写 `console.coverage_report.read` 管理审计。
   - 未覆盖端点只记录路径形状：edge 对未匹配路由的拒绝在 `decision.composed` 写 `unmatched_path`，像 ID 的段写作 `{}`（`xshield_core::path_shape`），原始路径不进索引。worker 发布器与 edge 重启补偿只在这种拒绝上接受该字段。

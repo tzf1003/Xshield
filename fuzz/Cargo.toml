@@ -1,0 +1,128 @@
+# Coverage-guided fuzzing of the parsers that read external bytes. Kept out of
+# the product workspace: libfuzzer-sys only builds here, and `cargo fuzz` needs
+# its own manifest. See src/lib.rs for what each target asserts.
+[package]
+name = "xshield-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# An empty workspace of its own, so the product workspace neither builds nor
+# locks this crate.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pingora = { version = "=0.9.0", default-features = false, features = ["openssl", "proxy"] }
+serde_json = "1"
+xshield-audit = { path = "../crates/xshield-audit" }
+xshield-core = { path = "../crates/xshield-core" }
+xshield-gateway = { path = "../crates/xshield-gateway" }
+zeroize = "1"
+
+# The product workspace's lints (../Cargo.toml).
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+assert_is_empty = "allow"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "proxy_header"
+path = "fuzz_targets/proxy_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path_shape"
+path = "fuzz_targets/path_shape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "route_admission"
+path = "fuzz_targets/route_admission.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "query_pagination"
+path = "fuzz_targets/query_pagination.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "routing_authority"
+path = "fuzz_targets/routing_authority.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "request_crypto"
+path = "fuzz_targets/request_crypto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_binding"
+path = "fuzz_targets/auth_binding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "strict_json"
+path = "fuzz_targets/strict_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sensor_batch"
+path = "fuzz_targets/sensor_batch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "site_config"
+path = "fuzz_targets/site_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "page_fingerprint"
+path = "fuzz_targets/page_fingerprint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upstream_address"
+path = "fuzz_targets/upstream_address.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seal_manifest"
+path = "fuzz_targets/seal_manifest.rs"
+test = false
+doc = false
+bench = false
