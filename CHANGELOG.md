@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 发布镜像签名（可行性建议“最小运维底座”，docs/19 19.7）：新增 `.github/workflows/release-images.yml`，只在推送 `v*` 标签时运行。它把 edge、control、worker 镜像推到 GHCR，附带构建来源证明与 SBOM，并用 Sigstore 无密钥签名（证书绑定该工作流与标签），签名后立即验证一次。**未运行**：尚未打过发布标签，工作流本身没有在 GitHub 上执行过；首次发布时须确认仓库允许 Actions 写 Packages。
+
 - 单机参考部署（可行性建议“最小运维底座”，docs/19 19.8）：新增 `deploy/compose/`，用 Docker Compose 在一台主机上运行一个租户、一个站点的全部组件，包括 edge、control、两组常驻封存/发布任务（edge 请求 journal 与 control 管理 journal）、十个 outbox 发布任务、PostgreSQL 与 ClickHouse。
   - edge 与 control 共享由 `net` 服务持有的网络命名空间，因为管理 API 与 apply 通道只监听 loopback；重启任一方不会让另一方失联。
   - `init.sh` 生成全部密钥（含 Ed25519 封存密钥对），以 compose secrets 挂载，进程全部经 `NAME_FILE` 读取。它还生成 edge 引导配置与 24 小时的引导 Bearer。

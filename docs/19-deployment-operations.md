@@ -124,7 +124,14 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 
 在 macOS 上若使用外接 exFAT 磁盘，不要直接把 `CARGO_TARGET_DIR` 放在其上：exFAT 没有硬链接和 POSIX 权限，随附的 OpenSSL 源码构建会以 `Directory not empty` 失败。可以在该磁盘上创建 APFS 稀疏包（`hdiutil create -size 400g -type SPARSEBUNDLE -fs APFS -volname XshieldBuild -attach <磁盘>/xshield-build.sparsebundle`），把构建与打包目录放在其挂载点下；磁盘空间只在该外接盘上按需增长。
 
-打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像；仓库根的 `Dockerfile` 给出 edge、control、worker 三个镜像目标（`docker build --target edge|control|worker .`，基础镜像按 digest 固定，运行用户 uid 10001，只含发布二进制与其链接的库，不带任何配置、密钥或证书），CI 的 `container-images` 作业在 Linux 上构建三个目标并检查每个二进制的共享库都能解析；镜像不推送、不签名。单机 Docker Compose 参考部署见 19.8，CI 用这三个镜像把它整体拉起验证；Helm 清单与 systemd 单元仍没有（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
+打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像；仓库根的 `Dockerfile` 给出 edge、control、worker 三个镜像目标（`docker build --target edge|control|worker .`，基础镜像按 digest 固定，运行用户 uid 10001，只含发布二进制与其链接的库，不带任何配置、密钥或证书），CI 的 `container-images` 作业在 Linux 上构建三个目标并检查每个二进制的共享库都能解析；CI 构建的镜像不推送。发布镜像由 `.github/workflows/release-images.yml` 在推送 `v*` 标签时完成，步骤如下：
+
+- 把三个目标推到 `ghcr.io/<owner>/xshield-{edge,control,worker}:<标签>`，附带 BuildKit 构建来源证明（provenance，`mode=max`）与 SBOM；
+- 对推送的 digest 做 Sigstore 无密钥签名，签名证书绑定该工作流与标签，并在同一作业里立即验证一次。
+
+部署方应按 digest 引用镜像，并在使用前验证：`cosign verify <镜像>@sha256:… --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/release-images\.yml@refs/tags/v'`。该工作流还没有实际运行过（尚未打过发布标签）。
+
+单机 Docker Compose 参考部署见 19.8，CI 用这三个镜像把它整体拉起验证；Helm 清单与 systemd 单元仍没有（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
 
 ## 19.8 参考部署（Docker Compose）
 
