@@ -28,7 +28,7 @@ pub use flow::{
 };
 pub use projection::{EDGE_MAX_CONFIG_BYTES, gateway_operation};
 pub use risk::{ChangeRisk, approval_requires_step_up, assess_change_risk, direct_apply_may_waive};
-pub use rollout::{RolloutMode, SiteRollout};
+pub use rollout::{RolloutMode, SiteRollout, observable_refusal};
 pub use share::{ShareIssuanceRule, SiteShareIssue, issuance_rules};
 pub use unsupported::{UnsupportedEdgeFeature, find_unsupported_edge_feature};
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # End-to-end proof of the edge transport against the real gateway binary:
 # native TLS (versions, ALPN h2/http1.1, refusals) and routing over it, PROXY
-# protocol v1/v2 from trusted and untrusted peers, and fail-closed startup.
-# Everything lives in a temporary directory: a throwaway CA and edge
-# certificate, a Python origin, gateway journals. Needs python3, curl with
-# HTTP/2 support and openssl. Set CARGO_TARGET_DIR to build outside the repo.
+# protocol v1/v2 from trusted and untrusted peers, an observe rollout, and
+# fail-closed startup. Everything lives in a temporary directory: a throwaway CA
+# and edge certificate, a Python origin, gateway journals, plus a throwaway
+# PostgreSQL database for the rollout phase. Needs python3, curl with HTTP/2
+# support, openssl and the PostgreSQL client tools (PG* variables as for
+# scripts/test_gateway_identity.sh). Set CARGO_TARGET_DIR to build outside the repo.
 # macOS ships bash 3.2, where `set -e` ignores a failing `[[ ]]`, so an assertion
 # written that way passes silently. Refuse to run rather than check less than CI.
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1))); then
@@ -20,6 +22,7 @@ test_dir=$(mktemp -d "${TMPDIR:-/tmp}/xshield-gateway-transport.XXXXXX")
 gateway_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/xshield-gateway"
 origin_pid=""
 gateway_pid=""
+test_database=""
 run=0
 
 stop_gateway() {
@@ -38,6 +41,7 @@ cleanup() {
     stop_gateway
     [[ -z "$origin_pid" ]] || kill "$origin_pid" 2>/dev/null || true
     wait "$origin_pid" 2>/dev/null || true
+    [[ -z "$test_database" ]] || dropdb --if-exists "$test_database" >/dev/null || true
     rm -rf -- "$test_dir"
 }
 trap cleanup EXIT INT TERM
@@ -132,12 +136,22 @@ cp "$pki/edge.key" "$pki/open.key"
 chmod 644 "$pki/open.key"
 
 # Writes a bootstrap config; a second argument "limited" adds a per-source
-# budget of one request (1 rps, burst 1) so the limiter key is observable.
+# budget of one request (1 rps, burst 1) so the limiter key is observable, and
+# "observe"/"enforce" add a signed-in-only read whose site is (or is not) in an
+# observe rollout for the next hour.
 write_config() {
     local path=$1 limits=${2:-}
-    local policy=""
+    local policy="" account="" identity=""
     if [[ "$limits" == "limited" ]]; then
         policy=',"site_policy":{"limits":{"requests_per_second":1,"burst":1}}'
+    elif [[ "$limits" == "observe" || "$limits" == "enforce" ]]; then
+        account=',{"operation_id":"account","method":"GET","path":"/account","admission":"AUTHENTICATED_ROOT"}'
+        local rollout=""
+        if [[ "$limits" == "observe" ]]; then
+            rollout=',"rollout":{"mode":"observe","observe_until_unix":'"$(($(date +%s) + 3600))"',"revision":"rollout-r1"}'
+        fi
+        identity=',"identity_store":{"max_connections":1,"acquire_timeout_ms":1000}'
+        policy=',"site_policy":{"routes":[{"operation_id":"entry","method":"GET","path":"/","security_entry":"public"},{"operation_id":"account","method":"GET","path":"/account","security_entry":"authenticated_root"}]'"$rollout"'}'
     fi
     cat >"$path" <<JSON
 {
@@ -145,9 +159,9 @@ write_config() {
   "origin":{"address":"127.0.0.1:$origin_port","server_name":"origin.local","tls":false},
   "tenant_id":"tenant_transport",
   "site_id":"site_a",
-  "policy_revision":"policy-r1",
+  "policy_revision":"policy-r1"$identity,
   "audit":{"directory":"$test_dir/audit-$run","key_id":"journal-key-r1","producer_id":"edge-transport-test","max_bytes":1048576,"high_watermark_bytes":786432,"segment_max_bytes":262144},
-  "operations":[{"operation_id":"entry","method":"GET","path":"/","admission":"PUBLIC"},{"operation_id":"probe","method":"GET","path":"/h2","admission":"PUBLIC"},{"operation_id":"absolute","method":"GET","path":"/abs","admission":"PUBLIC"},{"operation_id":"buffered","method":"GET","path":"/json","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}},{"operation_id":"buffered.text","method":"GET","path":"/json-text","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}},{"operation_id":"buffered.post","method":"POST","path":"/json-echo","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}}]$policy
+  "operations":[{"operation_id":"entry","method":"GET","path":"/","admission":"PUBLIC"},{"operation_id":"probe","method":"GET","path":"/h2","admission":"PUBLIC"},{"operation_id":"absolute","method":"GET","path":"/abs","admission":"PUBLIC"},{"operation_id":"buffered","method":"GET","path":"/json","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}},{"operation_id":"buffered.text","method":"GET","path":"/json-text","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}},{"operation_id":"buffered.post","method":"POST","path":"/json-echo","admission":"PUBLIC","response":{"mode":"BUFFERED_JSON","max_bytes":512}}$account]$policy
 }
 JSON
 }
@@ -269,8 +283,8 @@ def exchange(sock, request):
     return status, head.decode("latin-1").lower(), body.decode("latin-1")
 
 
-def get(prefix=b"", host="site-a.example", target="/", **connection):
-    request = f"GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
+def get(prefix=b"", host="site-a.example", target="/", headers="", **connection):
+    request = f"GET {target} HTTP/1.1\r\nHost: {host}\r\n{headers}Connection: close\r\n\r\n".encode()
     return exchange(connect(prefix, **connection), request)
 
 
@@ -459,6 +473,38 @@ assert get(proxy_v2("203.0.113.9"), tls=False)[0] in (400, None)
 assert [get(tls=False)[0], get(tls=False)[0]] == [200, 429]
 state = health()
 assert state["proxy_protocol_enabled"] is True and state["proxy_header_rejections"] == 0, state
+PY
+stop_gateway
+
+# Phase F: an observe rollout (docs/32). A signed-in-only read without a
+# session reaches the origin and is counted as observed; the same request is
+# refused once the site enforces, and no client header selects the mode.
+test_database="xshield_transport_${PPID}_${RANDOM}"
+createdb "$test_database"
+for migration in "$repo_root"/migrations/*.sql; do
+    PGOPTIONS="-c client_min_messages=warning" psql -X -q -v ON_ERROR_STOP=1 -d "$test_database" -f "$migration" >/dev/null
+done
+database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
+identity_env=(XSHIELD_DATABASE_URL="$database_base_url/$test_database" XSHIELD_FINGERPRINT_KEY_HEX="$journal_key")
+start_gateway observe "${identity_env[@]}" XSHIELD_EDGE_OPS_LISTEN="127.0.0.1:$ops_port"
+probe <<'PY'
+from edge_probe import get
+status, _, body = get(tls=False, target="/account")
+assert (status, body) == (200, "origin:/account"), (status, body)
+status, _, body = get(tls=False)
+assert (status, body) == (200, "origin:/"), (status, body)
+PY
+"${ops[@]}" -o "$test_dir/metrics-observe.txt" "http://127.0.0.1:$ops_port/metrics"
+grep -qx 'xshield_edge_requests_total{outcome="observed"} 1' "$test_dir/metrics-observe.txt"
+grep -qx 'xshield_edge_requests_total{outcome="served"} 1' "$test_dir/metrics-observe.txt"
+grep -qx 'xshield_edge_observed_refusals_total{reason_code="AUTH_REQUIRED"} 1' "$test_dir/metrics-observe.txt"
+start_gateway enforce "${identity_env[@]}"
+probe <<'PY'
+from edge_probe import get
+status, _, body = get(tls=False, target="/account")
+assert status == 401 and "AUTH_REQUIRED" in body, (status, body)
+status, _, body = get(tls=False, target="/account", headers="X-Xshield-Rollout: observe\r\nCookie: xshield_rollout=observe\r\n")
+assert status == 401 and "AUTH_REQUIRED" in body, (status, body)
 PY
 stop_gateway
 

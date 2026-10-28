@@ -1,6 +1,6 @@
 # 32 站点 observe → enforce 上线流程（已决定，待实现）
 
-状态：**设计已定（2026-10-28，32.5 的五个问题已由产品负责人决定，见 32.7）；32.6 第 1 步（审计契约）与第 2 步（控制面模型、校验、风险原因与审批）已实现，edge 与控制台界面未实现**。docs/00 §0.3 已定“新接入先 observe 验证，再 enforce；产品目标为强制模式”，但今天只有请求加密一层有 observe（docs/08：`OBSERVE` 透传并记录候选，不解密）。站点级的“先观察、后强制”没有状态、没有审计词汇、没有退出标准，所以新站点只能直接 enforce，或手工把路由放成 `PUBLIC`。本文给出一个可评审的最小设计，并把需要产品负责人拍板的问题单列出来。
+状态：**设计已定（2026-10-28，32.5 的五个问题已由产品负责人决定，见 32.7）；32.6 第 1 步（审计契约）、第 2 步（控制面模型、校验、风险原因与审批）与第 3 步（edge 判定、转发、审计与指标）已实现，控制台界面与退出报告未实现**。docs/00 §0.3 已定“新接入先 observe 验证，再 enforce；产品目标为强制模式”，但今天只有请求加密一层有 observe（docs/08：`OBSERVE` 透传并记录候选，不解密）。站点级的“先观察、后强制”没有状态、没有审计词汇、没有退出标准，所以新站点只能直接 enforce，或手工把路由放成 `PUBLIC`。本文给出一个可评审的最小设计，并把需要产品负责人拍板的问题单列出来。
 
 ## 32.1 要解决的问题
 
@@ -50,6 +50,8 @@
 5. 运行：真实 ClickHouse 回归（本机原生 25.8，见 docs/20）与完整 `verify_all.sh`。
 
 第 2 步的落地形状：`SitePolicyConfig.rollout`（而不是 `SiteConfig` 顶层，这样它随 `site_policy` 投影到 edge，edge 用同一类型解析和校验）为 `{mode, observe_until_unix, revision, enforced_operations}`。路由的单向收紧用站点块里的 `enforced_operations` 列表表达，块里没有任何字段能把路由放宽。`rollout_revision` 取 `revision`。到期不需要写配置：edge 按 `observe_until_unix` 与当前时间判定，过了就是强制；控制面保存时拒绝过去或 30 天以后的截止时间。
+
+第 3 步的落地形状：edge 先按强制规则完整判定，只有判定为拒绝、方法为 GET/HEAD、路由满足 `SiteRollout::observes`（观察窗口内、非 `PUBLIC`、未单独强制、没有响应模式、加密、认证绑定、传感器、页面、资格、分页、分享或流转块，这些块的拒绝在 observe 下也不放行）且原因属于 `observable_refusal` 的请求才转发。可观察的原因只有“缺少登录或资格”一类：`AUTH_REQUIRED`、认证绑定不符/纪元变化/凭据代际变化/已撤销/会话过期、`CAPABILITY_MISSING`、`OPERATION_NOT_GRANTED`、`UI_ACTION_NOT_AVAILABLE`、`UI_EVIDENCE_UNVERIFIED`、`TARGET_SCOPE_MISMATCH`；WAF、限流、字段、身份存储不可用等拒绝照常执行。被转发的请求按透传流程到达源站，审计按 docs/11 写 `OBSERVED_WOULD_DENY` 与 `rollout_revision`，`/metrics` 计入 `outcome="observed"` 与 `xshield_edge_observed_refusals_total{reason_code}`。截止时间由 edge 按自身时钟判定，过期即强制，不需要新配置。
 
 32.5 的问题已在 32.7 定下，按上面的顺序实施。
 
