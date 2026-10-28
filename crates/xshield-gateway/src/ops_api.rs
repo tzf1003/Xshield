@@ -55,11 +55,28 @@ pub(crate) const fn readiness(audit_ready: bool, listener_count: usize) -> Resul
     Ok(())
 }
 
+// A poisoned map only lost a concurrent increment; keep counting.
+fn count_reason(map: &Mutex<BTreeMap<&'static str, u64>>, reason: ReasonCode) {
+    let mut counts = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *counts.entry(reason.as_str()).or_default() += 1;
+}
+
+fn snapshot(map: &Mutex<BTreeMap<&'static str, u64>>) -> BTreeMap<&'static str, u64> {
+    map.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// How one request ended, as counted by [`EdgeMetrics`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ending {
     /// Admitted and answered with the origin's (or the edge's own) reply.
     Served,
+    /// A refusal an observe rollout forwarded and the origin answered; the
+    /// reason is the refusal the enforced policy would have applied.
+    Observed(ReasonCode),
     /// Refused before the origin, or the reply was withheld after it.
     Refused(ReasonCode),
     /// The proxy failed after admission; the origin outcome is unknown.
@@ -75,6 +92,7 @@ pub(crate) struct EdgeMetrics {
     proxy_failed: AtomicU64,
     unadmitted: AtomicU64,
     refused: Mutex<BTreeMap<&'static str, u64>>,
+    observed: Mutex<BTreeMap<&'static str, u64>>,
     duration_buckets: [AtomicU64; DURATION_BUCKETS.len()],
     duration_count: AtomicU64,
     duration_sum_micros: AtomicU64,
@@ -92,14 +110,8 @@ impl EdgeMetrics {
             Ending::Unadmitted => {
                 self.unadmitted.fetch_add(1, Ordering::Relaxed);
             }
-            Ending::Refused(reason) => {
-                // A poisoned map only lost a concurrent increment; keep counting.
-                let mut refused = self
-                    .refused
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                *refused.entry(reason.as_str()).or_default() += 1;
-            }
+            Ending::Refused(reason) => count_reason(&self.refused, reason),
+            Ending::Observed(reason) => count_reason(&self.observed, reason),
         }
         let seconds = elapsed.as_secs_f64();
         for (bound, bucket) in DURATION_BUCKETS.iter().zip(&self.duration_buckets) {
@@ -149,27 +161,30 @@ impl EdgeMetrics {
             "xshield_edge_requests_total{{outcome=\"unadmitted\"}} {}",
             self.unadmitted.load(Ordering::Relaxed)
         );
-        let refused = self
-            .refused
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let refused = snapshot(&self.refused);
+        let observed = snapshot(&self.observed);
         let refused_total: u64 = refused.values().sum();
+        let observed_total: u64 = observed.values().sum();
         let _ = writeln!(
             out,
             "xshield_edge_requests_total{{outcome=\"refused\"}} {refused_total}"
         );
         let _ = writeln!(
             out,
-            "# HELP xshield_edge_refusals_total Refused requests and withheld replies by stable reason code.\n\
-             # TYPE xshield_edge_refusals_total counter"
+            "xshield_edge_requests_total{{outcome=\"observed\"}} {observed_total}"
         );
-        for (reason, count) in &refused {
-            let _ = writeln!(
-                out,
-                "xshield_edge_refusals_total{{reason_code=\"{reason}\"}} {count}"
-            );
-        }
+        by_reason(
+            &mut out,
+            "xshield_edge_refusals_total",
+            "Refused requests and withheld replies by stable reason code.",
+            &refused,
+        );
+        by_reason(
+            &mut out,
+            "xshield_edge_observed_refusals_total",
+            "Requests an observe rollout forwarded, by the refusal enforcement would have applied.",
+            &observed,
+        );
         let _ = writeln!(
             out,
             "# HELP xshield_edge_request_duration_seconds Time from admission start to the final log.\n\
@@ -225,6 +240,13 @@ fn counter(out: &mut String, name: &str, help: &str, value: u64) {
         out,
         "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}"
     );
+}
+
+fn by_reason(out: &mut String, name: &str, help: &str, counts: &BTreeMap<&'static str, u64>) {
+    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter");
+    for (reason, count) in counts {
+        let _ = writeln!(out, "{name}{{reason_code=\"{reason}\"}} {count}");
+    }
 }
 
 /// Accepts loopback, private, link-local and unspecified addresses. A public
@@ -364,6 +386,10 @@ mod tests {
         );
         metrics.record(Ending::ProxyFailed, Duration::from_secs(20));
         metrics.record(Ending::Unadmitted, Duration::from_secs(60));
+        metrics.record(
+            Ending::Observed(ReasonCode::UiActionNotAvailable),
+            Duration::from_millis(2),
+        );
         let text = metrics.render(Ok(()), transport());
         assert!(text.contains("xshield_edge_ready 1\n"));
         assert!(text.contains("xshield_edge_requests_total{outcome=\"served\"} 2\n"));
@@ -373,12 +399,16 @@ mod tests {
             "xshield_edge_refusals_total{{reason_code=\"{}\"}} 1\n",
             ReasonCode::AuthRequired.as_str()
         )));
-        assert!(text.contains("xshield_edge_request_duration_seconds_bucket{le=\"0.005\"} 2\n"));
-        assert!(text.contains("xshield_edge_request_duration_seconds_bucket{le=\"0.05\"} 3\n"));
-        assert!(text.contains("xshield_edge_request_duration_seconds_bucket{le=\"10\"} 3\n"));
+        assert!(text.contains("xshield_edge_request_duration_seconds_bucket{le=\"0.005\"} 3\n"));
+        assert!(text.contains("xshield_edge_request_duration_seconds_bucket{le=\"0.05\"} 4\n"));
+        assert!(text.contains("xshield_edge_request_duration_seconds_bucket{le=\"10\"} 4\n"));
         assert!(text.contains("xshield_edge_requests_total{outcome=\"unadmitted\"} 1\n"));
-        assert!(text.contains("xshield_edge_request_duration_seconds_bucket{le=\"+Inf\"} 5\n"));
-        assert!(text.contains("xshield_edge_request_duration_seconds_count 5\n"));
+        assert!(text.contains("xshield_edge_requests_total{outcome=\"observed\"} 1\n"));
+        assert!(text.contains(
+            "xshield_edge_observed_refusals_total{reason_code=\"UI_ACTION_NOT_AVAILABLE\"} 1\n"
+        ));
+        assert!(text.contains("xshield_edge_request_duration_seconds_bucket{le=\"+Inf\"} 6\n"));
+        assert!(text.contains("xshield_edge_request_duration_seconds_count 6\n"));
         assert!(text.contains("xshield_edge_tls_handshake_failures_total 3\n"));
         assert!(text.contains("xshield_edge_connection_setup_shed_total 1\n"));
     }

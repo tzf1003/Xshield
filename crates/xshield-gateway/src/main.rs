@@ -42,7 +42,9 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use uuid::Uuid;
-use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
+use xshield_core::{
+    audit::ReasonCode, domain::RequestId, identity::UnixSeconds, site::observable_refusal,
+};
 use xshield_gateway::edge_transport::{EdgeTransport, TransportConfig, http_server_options};
 use xshield_gateway::multi_site::{
     ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot, frozen_origin_target,
@@ -455,6 +457,21 @@ impl ProxyHttp for Gateway {
             .await;
         self.apply_request_crypto(session, context, &method, &path, now, &mut decision)
             .await;
+        // Last, after every refusal has been decided: an observe rollout
+        // forwards only the refusals it exists to measure, and records them.
+        let observed_rollout = if internal_response.is_none() {
+            observed_rollout(
+                selected_config.site_policy(),
+                &method,
+                &decision,
+                wall_time.as_secs(),
+            )
+        } else {
+            None
+        };
+        if observed_rollout.is_some() {
+            decision.outcome = GatewayOutcome::Allowed;
+        }
         let audit_result = context
             .audit
             .as_ref()
@@ -469,6 +486,7 @@ impl ProxyHttp for Gateway {
                 sensor_observations: &context.sensor_observation_audit,
                 sensor_bootstrap: context.sensor_bootstrap_audit.as_ref(),
                 forward_origin: internal_response.is_none(),
+                observed_rollout: observed_rollout.as_deref(),
             })
             .await;
         let admission_audit = match audit_result {
@@ -1886,6 +1904,13 @@ fn request_ending(context: &RequestContext, proxy_error: bool) -> ops_api::Endin
     if proxy_error {
         return ops_api::Ending::ProxyFailed;
     }
+    if context
+        .admission_audit
+        .as_ref()
+        .is_some_and(|admission| admission.observed_rollout.is_some())
+    {
+        return ops_api::Ending::Observed(decision.reason_code);
+    }
     ops_api::Ending::Served
 }
 
@@ -2020,6 +2045,34 @@ fn decode_waf_query(query: &str) -> Option<String> {
         return None;
     }
     Some(decoded.to_ascii_lowercase())
+}
+
+/// The observe window that forwards this refusal, if the site's approved
+/// rollout observes it: a deterministic identity or provenance refusal of a
+/// read-only, plain pass-through route inside the window (docs/32). Nothing
+/// the client sends takes part.
+fn observed_rollout(
+    policy: Option<&xshield_core::SitePolicyConfig>,
+    method: &str,
+    decision: &GatewayDecision,
+    now_unix: u64,
+) -> Option<String> {
+    if decision.outcome != GatewayOutcome::Denied
+        || !observable_refusal(decision.reason_code)
+        || !matches!(method, "GET" | "HEAD")
+    {
+        return None;
+    }
+    let policy = policy?;
+    let operation = decision.operation_id.as_ref()?;
+    let route = policy
+        .routes
+        .iter()
+        .find(|route| route.operation_id == operation.as_str())?;
+    policy
+        .rollout
+        .observes(route, now_unix)
+        .then(|| policy.rollout.revision.clone())
 }
 
 async fn respond_denial(
@@ -2527,6 +2580,94 @@ mod tests {
         ] {
             assert_eq!(denial_status(reason), 403, "{}", reason.as_str());
         }
+    }
+
+    /// A site observing until `NOW + 100` with one UI-action read, one
+    /// UI-action write, one public read and one read enforced on its own.
+    fn observing_policy() -> xshield_core::SitePolicyConfig {
+        let route = |id: &str, method: &str, path: &str, admission: &str| {
+            serde_json::json!({
+                "operation_id": id, "method": method, "path": path,
+                "security_entry": admission,
+                "source_action": (admission == "ui_action_required").then(|| format!("{id}.open")),
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "routes": [
+                route("orders.list", "GET", "/orders", "ui_action_required"),
+                route("orders.save", "POST", "/orders", "ui_action_required"),
+                route("docs.read", "GET", "/docs", "public"),
+                route("account.read", "GET", "/account", "ui_action_required"),
+            ],
+            "rollout": {
+                "mode": "observe", "observe_until_unix": NOW + 100, "revision": "rollout-1",
+                "enforced_operations": ["account.read"]
+            }
+        }))
+        .unwrap()
+    }
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn refused(operation: &str, reason: ReasonCode) -> GatewayDecision {
+        GatewayDecision {
+            outcome: GatewayOutcome::Denied,
+            operation_id: Some(
+                xshield_core::domain::OperationId::parse(operation.to_owned()).unwrap(),
+            ),
+            reason_code: reason,
+        }
+    }
+
+    #[test]
+    fn only_observable_refusals_of_observed_reads_are_forwarded() {
+        let policy = observing_policy();
+        policy.validate().unwrap();
+        let observed = |method: &str, decision: &GatewayDecision, now: u64| {
+            observed_rollout(Some(&policy), method, decision, now)
+        };
+        let missing = refused("orders.list", ReasonCode::UiActionNotAvailable);
+        assert_eq!(observed("GET", &missing, NOW).as_deref(), Some("rollout-1"));
+        assert_eq!(
+            observed("HEAD", &missing, NOW).as_deref(),
+            Some("rollout-1")
+        );
+        // The deadline passed: enforced without any configuration change.
+        assert_eq!(observed("GET", &missing, NOW + 100), None);
+        // Writes, routes enforced on their own and refusals observe does not
+        // measure stay refusals.
+        let write = refused("orders.save", ReasonCode::UiActionNotAvailable);
+        assert_eq!(observed("POST", &write, NOW), None);
+        let verified = refused("account.read", ReasonCode::UiActionNotAvailable);
+        assert_eq!(observed("GET", &verified, NOW), None);
+        for reason in [
+            ReasonCode::WafQueryBlocked,
+            ReasonCode::SiteRateLimitExceeded,
+            ReasonCode::IdentityStoreUnavailable,
+            ReasonCode::FieldNotAllowed,
+        ] {
+            assert_eq!(observed("GET", &refused("orders.list", reason), NOW), None);
+        }
+        let unmatched = GatewayDecision {
+            operation_id: None,
+            ..refused("orders.list", ReasonCode::UiActionNotAvailable)
+        };
+        assert_eq!(observed("GET", &unmatched, NOW), None);
+        let allowed = GatewayDecision {
+            outcome: GatewayOutcome::Allowed,
+            ..refused("orders.list", ReasonCode::UiActionAllowed)
+        };
+        assert_eq!(observed("GET", &allowed, NOW), None);
+        // An enforced site never observes.
+        let enforced = xshield_core::SitePolicyConfig {
+            rollout: xshield_core::site::SiteRollout::default(),
+            ..observing_policy()
+        };
+        assert_eq!(
+            observed_rollout(Some(&enforced), "GET", &missing, NOW),
+            None
+        );
+        assert_eq!(observed_rollout(None, "GET", &missing, NOW), None);
     }
 
     fn limited_policy(burst: u32) -> xshield_core::SitePolicyConfig {

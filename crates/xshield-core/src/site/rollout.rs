@@ -9,6 +9,7 @@
 //! changes the mode.
 
 use super::{SecurityEntry, SiteRouteConfig};
+use crate::audit::ReasonCode;
 use crate::domain::InvalidValue;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -128,12 +129,18 @@ impl SiteRollout {
 
     /// Whether a refusal on `route` may be forwarded as observed at
     /// `now_unix`: the site is observing, the route is not enforced on its
-    /// own, is not `PUBLIC`, and is read-only.
+    /// own, is not `PUBLIC`, is read-only, and is a plain pass-through.
+    ///
+    /// A route whose request or response carries an edge effect (crypto, a
+    /// sensor page, identity or grant issuance, page actions, a share, a
+    /// pagination allow-list) stays enforced: those effects assume the
+    /// admission that observe skipped.
     #[must_use]
     pub fn observes(&self, route: &SiteRouteConfig, now_unix: u64) -> bool {
         self.observing(now_unix)
             && route.security_entry != SecurityEntry::Public
             && matches!(route.method.as_str(), "GET" | "HEAD")
+            && plain_pass_through(route)
             && !self.enforced_operations.contains(&route.operation_id)
     }
 
@@ -164,6 +171,44 @@ impl SiteRollout {
                 .iter()
                 .any(|operation| !self.enforced_operations.contains(operation))
     }
+}
+
+/// Whether a route has no request or response effect at the edge.
+fn plain_pass_through(route: &SiteRouteConfig) -> bool {
+    route.response_mode.is_empty()
+        && route.request_crypto.is_none()
+        && route.response_crypto.is_none()
+        && route.auth_binding.is_none()
+        && route.auth_revoke.is_none()
+        && route.sensor_html.is_none()
+        && route.page_actions.is_none()
+        && route.resource_grant.is_none()
+        && route.query_pagination.is_none()
+        && route.share_issue.is_none()
+        && route.auth_refresh.is_none()
+        && route.auth_context_switch.is_none()
+}
+
+/// Whether a refusal may be observed instead of enforced: only the
+/// deterministic identity and UI-provenance refusals that observe exists to
+/// measure. Input, WAF, rate, size and dependency refusals, and a request
+/// that matched no route, are always enforced.
+#[must_use]
+pub const fn observable_refusal(reason: ReasonCode) -> bool {
+    matches!(
+        reason,
+        ReasonCode::AuthRequired
+            | ReasonCode::AuthBindingMismatch
+            | ReasonCode::AuthEpochChanged
+            | ReasonCode::AuthCredentialGenerationChanged
+            | ReasonCode::AuthBindingRevoked
+            | ReasonCode::AuthSessionExpired
+            | ReasonCode::CapabilityMissing
+            | ReasonCode::OperationNotGranted
+            | ReasonCode::UiActionNotAvailable
+            | ReasonCode::UiEvidenceUnverified
+            | ReasonCode::TargetScopeMismatch
+    )
 }
 
 /// The same alphabet and bounds as a `policy_revision` label.
@@ -311,6 +356,34 @@ mod tests {
         assert!(!rollout.observes(&route("verified", "GET", ui), NOW));
         assert!(!rollout.observes(&route("list", "GET", ui), NOW + 100));
         assert!(!SiteRollout::default().observes(&route("list", "GET", ui), NOW));
+        let mut paged = route("list", "GET", ui);
+        paged.response_mode = "BUFFERED_JSON".to_owned();
+        assert!(!rollout.observes(&paged, NOW));
+    }
+
+    #[test]
+    fn only_identity_and_provenance_refusals_are_observable() {
+        for reason in [
+            ReasonCode::AuthRequired,
+            ReasonCode::CapabilityMissing,
+            ReasonCode::UiActionNotAvailable,
+            ReasonCode::TargetScopeMismatch,
+        ] {
+            assert!(observable_refusal(reason), "{reason:?}");
+        }
+        for reason in [
+            ReasonCode::OperationNotMatched,
+            ReasonCode::FieldNotAllowed,
+            ReasonCode::WafQueryBlocked,
+            ReasonCode::SiteRateLimitExceeded,
+            ReasonCode::RequestBodyTooLarge,
+            ReasonCode::IdentityStoreUnavailable,
+            ReasonCode::AuditDurabilityFailed,
+            ReasonCode::ShareScopeMismatch,
+            ReasonCode::UiActionAllowed,
+        ] {
+            assert!(!observable_refusal(reason), "{reason:?}");
+        }
     }
 
     #[test]
