@@ -14,6 +14,7 @@ mod case_holds;
 mod case_items;
 mod case_list;
 mod causality;
+mod coverage_report;
 mod edge_channel;
 mod evidence_access_inspection;
 mod evidence_access_list;
@@ -4404,6 +4405,10 @@ pub fn routers(control: ControlPlane) -> (Router, Router) {
             rollout_report::PATH,
             get(rollout_report::handler).layer(DefaultBodyLimit::max(0)),
         )
+        .route(
+            coverage_report::PATH,
+            get(coverage_report::handler).layer(DefaultBodyLimit::max(0)),
+        )
         .route(MODEL_CALL_PATH, get(model_call_handler))
         .route(AGENT_RUN_PATH, get(agent_run_handler))
         .route(
@@ -5526,6 +5531,7 @@ mod tests {
     mod case_list;
     mod causality;
     mod control_ops;
+    mod coverage_report;
     mod evidence_access_inspection;
     mod evidence_access_list;
     mod evidence_lifecycle;

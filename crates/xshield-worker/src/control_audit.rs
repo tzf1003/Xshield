@@ -44,6 +44,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.model.read"
             | "console.model.list"
             | "console.rollout_report.read"
+            | "console.coverage_report.read"
             | "console.agent.read"
             | "console.case.analyze"
             | "console.job.read"
@@ -153,6 +154,9 @@ impl AccessPayload {
         if event.event_type == "console.rollout_report.read" {
             self.validate_rollout_report_reason()?;
         }
+        if event.event_type == "console.coverage_report.read" {
+            self.validate_coverage_report_reason()?;
+        }
         if event.event_type == "console.calibration.report.read" {
             self.validate_calibration_report_read_reason()?;
         }
@@ -236,6 +240,30 @@ impl AccessPayload {
                 "CONTROL_QUERY_TIMEOUT"
                     | "CONTROL_ROLLOUT_REPORT_INDEX_UNAVAILABLE"
                     | "CONTROL_ROLLOUT_REPORT_HEALTH_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
+    }
+
+    fn validate_coverage_report_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_COVERAGE_REPORT_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_COVERAGE_REPORT_REQUEST_INVALID"
+                    | "CONTROL_QUERY_CAPACITY_EXHAUSTED"
+                    | "CONTROL_QUERY_BUDGET_EXCEEDED"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_QUERY_TIMEOUT"
+                    | "CONTROL_COVERAGE_REPORT_INDEX_UNAVAILABLE"
+                    | "CONTROL_COVERAGE_REPORT_HEALTH_UNAVAILABLE"
             ),
             _ => false,
         };
@@ -825,6 +853,7 @@ impl AccessPayload {
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
             | ("console.rollout_report.read", "GET", "/control/v1/rollout-report")
+            | ("console.coverage_report.read", "GET", "/control/v1/coverage-report")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests")
             | ("console.job.read", "GET", "/control/v1/jobs/{job_id}")
             | ("console.job.list", "GET", "/control/v1/jobs")

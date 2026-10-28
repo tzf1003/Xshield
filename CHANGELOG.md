@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- 拒绝与覆盖统计（可行性建议 P1“拒绝与覆盖统计”，docs/29 29.39、docs/11）：试点需要知道每条路由放行和拒绝了多少、因为什么拒绝，以及哪些端点还没有路由覆盖，此前只能逐条检索。
+  - 新增 `GET /control/v1/coverage-report?start=…&end=…`（Observer），返回窗口内按路由的流量、按路由与原因的拒绝、未覆盖端点、索引状态与报告摘要；每次读取写 `console.coverage_report.read` 管理审计。
+  - 未覆盖端点只记录路径形状：edge 对未匹配路由的拒绝在 `decision.composed` 写 `unmatched_path`，像 ID 的段写作 `{}`（`xshield_core::path_shape`），原始路径不进索引。worker 发布器与 edge 重启补偿只在这种拒绝上接受该字段。
+  - 部署顺序：先升级 worker 发布器，再升级 edge 与控制面；旧 worker 会拒绝带新字段的事件。
+  - 回归：core 路径形状单测（含 2 万次随机输入）；edge 审计单测 2 个；worker 解析与管理审计单测；控制面 HTTP 测试 4 个；真实 ClickHouse 集成测试 `clickhouse_search.rs` 新增覆盖统计场景。
+  - **未覆盖**：控制台页面尚未接入（原因码文案已加入）；未在多副本 edge 或大数据量下测查询耗时。
+  - 顺带修复：上一项证据清理新增的三个 `/metrics` 失败原因标签未在控制台原因码测试中归类，导致 `web/console` 测试失败（该改动未触发 web 作业）；现归为运维指标标签。
+
 - 网关内置证据清理（可行性建议 P1“证据保留不停机”，docs/12 12.8、RB-10）：此前到期证据只能用 `xshield-evidence-retain` 清理，而它要求先停网关，回收的配额也要重启网关才生效。
   - 设置 `XSHIELD_EVIDENCE_RETENTION_INTERVAL_SECONDS` 后，网关在独立线程上按间隔执行同一轮清理，批量由 `XSHIELD_EVIDENCE_RETENTION_BATCH_LIMIT` 设定。每轮结束后重新扫描根目录、重算配额，不再需要重启。不设置时行为不变。
   - 清理一轮的实现从命令中抽出为 `xshield_postgres::retention_pass`，命令与网关共用，命令的输出与退出码不变。`xshield-postgres` 的 `tokio` 从开发依赖改为正式依赖，它本来就经 sqlx 在依赖树里。
