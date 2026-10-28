@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 mod api_key_authz;
+pub mod build_cli;
 mod calibration_report_inspection;
 mod case_close;
 mod case_collection;
@@ -5499,6 +5500,7 @@ mod tests {
     mod api_key_harness;
     mod api_key_lifecycle;
     mod audit_publish;
+    mod build_cli;
     mod calibration_report_inspection;
     mod case_close;
     mod case_collection;
