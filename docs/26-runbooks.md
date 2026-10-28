@@ -40,7 +40,11 @@
 
 ## RB-10 本地到期证据清理
 
-确认站点批准的保留计划、tenant/site、根目录与 key-id 对应关系，完成迁移 0015/0016；需要案件 pin 的站点先等待该能力落地。停止共享该根目录的网关写入者，保留现有私有目录权限，使用秘密管理设施注入维护环境变量，可按现场计划设置 `XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS`（无效值会在任何删除前拒绝）。执行 `cargo run -p xshield-worker --bin xshield-evidence-retain -- TENANT_ID SITE_ID 32`，检查 `selected/deleted/failed`、`orphan_selected/orphan_deleted/orphan_failed` 和 outbox 中的 `evidence.purge_requested`、`evidence.deleted`、`evidence.purge_failed`、`evidence.orphan.purge_requested`、`evidence.orphan.deleted`、`evidence.orphan.purge_failed`。每次每类最多 32 个，成功后按维护计划重复至各项 selected=0，再启动网关重新计量配额。
+确认站点批准的保留计划、tenant/site、根目录与 key-id 对应关系，完成迁移 0015/0016；需要案件 pin 的站点先等待该能力落地。
+
+推荐方式是在网关上设置 `XSHIELD_EVIDENCE_RETENTION_INTERVAL_SECONDS`（例如 300）后重启一次，由网关定期清理（12.8）。之后不再需要停机：看 `xshield_edge_evidence_retention_failures_total` 是否增长、`xshield_edge_evidence_retention_last_success_timestamp_seconds` 是否持续更新、`xshield_edge_evidence_capacity_remaining_bytes` 是否在清理后回升；失败原因码同时写到网关的标准错误输出。outbox 事件与下文相同。
+
+不启用网关内置清理时，按以下一次性步骤执行。停止共享该根目录的网关写入者，保留现有私有目录权限，使用秘密管理设施注入维护环境变量，可按现场计划设置 `XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS`（无效值会在任何删除前拒绝）。执行 `cargo run -p xshield-worker --bin xshield-evidence-retain -- TENANT_ID SITE_ID 32`，检查 `selected/deleted/failed`、`orphan_selected/orphan_deleted/orphan_failed` 和 outbox 中的 `evidence.purge_requested`、`evidence.deleted`、`evidence.purge_failed`、`evidence.orphan.purge_requested`、`evidence.orphan.deleted`、`evidence.orphan.purge_failed`。每次每类最多 32 个，成功后按维护计划重复至各项 selected=0，再启动网关重新计量配额。
 
 配置 [11.8](11-audit-event-contract.md#118-已实现的按事件族-outbox-发布) 的发布环境并完成迁移 0019 后，按相同 tenant/site 调度 `XSHIELD_OUTBOX_FAMILY=evidence_retention` 的 `xshield-outbox-worker`。检查 claimed/published、未确认行及 last_error_code；发布器升级可消费既有完整清理事件，索引期限仍按原始发生时间计算。通过有界搜索按 event_id 或两个维护阶段复核 artifact/cause 引用；request_id 为 null，维护事实不出现在原请求时间线。确认发布成功仅表示索引可追踪，不替代删除意图、tombstone 与本地文件复验。
 

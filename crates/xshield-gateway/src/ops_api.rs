@@ -7,6 +7,7 @@
 //! authenticated `/internal/v1/health` channel.
 
 use crate::durable_audit::AuditReadiness;
+use crate::evidence_writer::EvidenceWriter;
 use crate::listener_supervisor::ListenerSupervisor;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
@@ -96,6 +97,10 @@ pub(crate) struct EdgeMetrics {
     duration_buckets: [AtomicU64; DURATION_BUCKETS.len()],
     duration_count: AtomicU64,
     duration_sum_micros: AtomicU64,
+    retention_passes: AtomicU64,
+    retention_failures: Mutex<BTreeMap<&'static str, u64>>,
+    retention_deleted: AtomicU64,
+    retention_last_success: AtomicU64,
 }
 
 impl EdgeMetrics {
@@ -126,8 +131,43 @@ impl EdgeMetrics {
         );
     }
 
+    /// One pass of the in-process evidence retention: the ciphertext objects
+    /// it deleted, or why it failed (a stable reason code) and what it had
+    /// deleted by then.
+    pub(crate) fn record_retention_pass(&self, outcome: Result<usize, (&'static str, usize)>) {
+        self.retention_passes.fetch_add(1, Ordering::Relaxed);
+        let deleted = match outcome {
+            Ok(deleted) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                self.retention_last_success.store(now, Ordering::Relaxed);
+                deleted
+            }
+            Err((reason, deleted)) => {
+                let mut counts = self
+                    .retention_failures
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *counts.entry(reason).or_default() += 1;
+                deleted
+            }
+        };
+        self.retention_deleted.fetch_add(
+            u64::try_from(deleted).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
     /// The Prometheus text exposition (format 0.0.4) of every edge metric.
-    pub(crate) fn render(&self, ready: Result<(), NotReady>, transport: TransportStatus) -> String {
+    /// `evidence` is the capture budget's remaining bytes and files, when
+    /// the edge captures evidence.
+    pub(crate) fn render(
+        &self,
+        ready: Result<(), NotReady>,
+        transport: TransportStatus,
+        evidence: Option<(u64, u64)>,
+    ) -> String {
         let mut out = String::with_capacity(4096);
         gauge(
             &mut out,
@@ -224,7 +264,49 @@ impl EdgeMetrics {
             "Connections closed because every setup slot was busy.",
             transport.setup_shed,
         );
+        self.render_evidence(&mut out, evidence);
         out
+    }
+
+    fn render_evidence(&self, out: &mut String, evidence: Option<(u64, u64)>) {
+        if let Some((bytes, files)) = evidence {
+            gauge(
+                out,
+                "xshield_edge_evidence_capacity_remaining_bytes",
+                "Bytes the evidence writer may still charge before captures are refused.",
+                bytes,
+            );
+            gauge(
+                out,
+                "xshield_edge_evidence_capacity_remaining_files",
+                "Files the evidence writer may still create before captures are refused.",
+                files,
+            );
+        }
+        counter(
+            out,
+            "xshield_edge_evidence_retention_passes_total",
+            "Passes of the in-process evidence retention, successful or not.",
+            self.retention_passes.load(Ordering::Relaxed),
+        );
+        by_reason(
+            out,
+            "xshield_edge_evidence_retention_failures_total",
+            "Failed evidence retention passes by stable reason code.",
+            &snapshot(&self.retention_failures),
+        );
+        counter(
+            out,
+            "xshield_edge_evidence_retention_deleted_total",
+            "Evidence ciphertext objects the in-process retention deleted.",
+            self.retention_deleted.load(Ordering::Relaxed),
+        );
+        gauge(
+            out,
+            "xshield_edge_evidence_retention_last_success_timestamp_seconds",
+            "Unix time of the last fully successful retention pass; 0 before the first.",
+            self.retention_last_success.load(Ordering::Relaxed),
+        );
     }
 }
 
@@ -271,6 +353,7 @@ pub(crate) struct OpsState {
     supervisor: Arc<ListenerSupervisor>,
     audit: AuditReadiness,
     metrics: Arc<EdgeMetrics>,
+    evidence: Option<Arc<EvidenceWriter>>,
 }
 
 impl OpsState {
@@ -278,11 +361,13 @@ impl OpsState {
         supervisor: Arc<ListenerSupervisor>,
         audit: AuditReadiness,
         metrics: Arc<EdgeMetrics>,
+        evidence: Option<Arc<EvidenceWriter>>,
     ) -> Self {
         Self {
             supervisor,
             audit,
             metrics,
+            evidence,
         }
     }
 
@@ -331,9 +416,11 @@ async fn readyz(State(state): State<OpsState>) -> Response {
 
 async fn metrics(State(state): State<OpsState>) -> Response {
     let ready = state.readiness().await;
-    let body = state
-        .metrics
-        .render(ready, state.supervisor.transport_status());
+    let body = state.metrics.render(
+        ready,
+        state.supervisor.transport_status(),
+        state.evidence.as_deref().map(EvidenceWriter::remaining),
+    );
     no_store(
         StatusCode::OK,
         "text/plain; version=0.0.4; charset=utf-8",
@@ -390,7 +477,7 @@ mod tests {
             Ending::Observed(ReasonCode::UiActionNotAvailable),
             Duration::from_millis(2),
         );
-        let text = metrics.render(Ok(()), transport());
+        let text = metrics.render(Ok(()), transport(), None);
         assert!(text.contains("xshield_edge_ready 1\n"));
         assert!(text.contains("xshield_edge_requests_total{outcome=\"served\"} 2\n"));
         assert!(text.contains("xshield_edge_requests_total{outcome=\"refused\"} 1\n"));
@@ -415,10 +502,11 @@ mod tests {
 
     #[test]
     fn metrics_report_a_closed_audit_barrier() {
-        let text = EdgeMetrics::default().render(Err(NotReady::AuditUnavailable), transport());
+        let text =
+            EdgeMetrics::default().render(Err(NotReady::AuditUnavailable), transport(), None);
         assert!(text.contains("xshield_edge_ready 0\n"));
         assert!(text.contains("xshield_edge_audit_ready 0\n"));
-        let text = EdgeMetrics::default().render(Err(NotReady::NoListeners), transport());
+        let text = EdgeMetrics::default().render(Err(NotReady::NoListeners), transport(), None);
         assert!(text.contains("xshield_edge_ready 0\n"));
         assert!(text.contains("xshield_edge_audit_ready 1\n"));
     }
@@ -430,12 +518,37 @@ mod tests {
             Ending::Refused(ReasonCode::SiteConfigUnavailable),
             Duration::ZERO,
         );
-        for line in metrics.render(Ok(()), transport()).lines() {
+        metrics.record_retention_pass(Err(("EVIDENCE_PURGE_UNAVAILABLE", 0)));
+        for line in metrics.render(Ok(()), transport(), Some((1, 1))).lines() {
             assert!(
                 line.starts_with("# ") || line.starts_with("xshield_edge_"),
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn metrics_count_retention_passes_and_report_capacity() {
+        let metrics = EdgeMetrics::default();
+        let text = metrics.render(Ok(()), transport(), None);
+        assert!(!text.contains("xshield_edge_evidence_capacity"));
+        assert!(
+            text.contains("xshield_edge_evidence_retention_last_success_timestamp_seconds 0\n")
+        );
+        metrics.record_retention_pass(Ok(3));
+        metrics.record_retention_pass(Err(("EVIDENCE_PURGE_FAILED", 2)));
+        metrics.record_retention_pass(Err(("EVIDENCE_PURGE_FAILED", 0)));
+        let text = metrics.render(Ok(()), transport(), Some((4096, 7)));
+        assert!(text.contains("xshield_edge_evidence_capacity_remaining_bytes 4096\n"));
+        assert!(text.contains("xshield_edge_evidence_capacity_remaining_files 7\n"));
+        assert!(text.contains("xshield_edge_evidence_retention_passes_total 3\n"));
+        assert!(text.contains("xshield_edge_evidence_retention_deleted_total 5\n"));
+        assert!(text.contains(
+            "xshield_edge_evidence_retention_failures_total{reason_code=\"EVIDENCE_PURGE_FAILED\"} 2\n"
+        ));
+        assert!(
+            !text.contains("xshield_edge_evidence_retention_last_success_timestamp_seconds 0\n")
+        );
     }
 
     #[test]

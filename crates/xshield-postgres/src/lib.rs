@@ -44,6 +44,7 @@ mod page_action_read;
 mod provenance;
 mod request_replay;
 mod response_grant;
+pub mod retention_pass;
 mod saved_search_view;
 mod service_identity_read;
 mod share_grant_issue;

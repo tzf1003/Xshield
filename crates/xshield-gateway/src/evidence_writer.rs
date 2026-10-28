@@ -3,8 +3,11 @@ use serde_json::json;
 use std::{
     env,
     fs::{self, File},
-    path::Path,
-    sync::Mutex,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
@@ -32,8 +35,14 @@ const WRITE_OVERHEAD: u64 = 64 * 1024 + 61;
 
 pub(crate) struct EvidenceWriter {
     vault: LocalEvidenceVault,
+    root: PathBuf,
+    max_bytes: u64,
     _root_lock: File,
     budget: Mutex<Budget>,
+    // Copies of the budget for the metrics endpoint, which must not wait for
+    // the lock a write holds through its fsyncs.
+    remaining_bytes: AtomicU64,
+    remaining_files: AtomicU64,
     capacity: Semaphore,
 }
 
@@ -89,6 +98,21 @@ impl EvidenceWriter {
         // do not acquire the exclusive directory lock. Unix deployment only.
         let root_lock = File::open(root)?;
         root_lock.try_lock()?;
+        let budget = Self::scan(root, max_bytes)?;
+        Ok(Self {
+            vault,
+            root: root.to_path_buf(),
+            max_bytes,
+            _root_lock: root_lock,
+            remaining_bytes: AtomicU64::new(budget.remaining_bytes),
+            remaining_files: AtomicU64::new(budget.remaining_files),
+            budget: Mutex::new(budget),
+            capacity: Semaphore::new(1),
+        })
+    }
+
+    /// Charges every regular file already in the root, orphans included.
+    fn scan(root: &Path, max_bytes: u64) -> Result<Budget, Box<dyn std::error::Error>> {
         let mut remaining_bytes = max_bytes;
         let mut remaining_files = MAX_FILES;
         for entry in fs::read_dir(root)? {
@@ -103,15 +127,44 @@ impl EvidenceWriter {
                 .checked_sub(1)
                 .ok_or("evidence file capacity exhausted")?;
         }
-        Ok(Self {
-            vault,
-            _root_lock: root_lock,
-            budget: Mutex::new(Budget {
-                remaining_bytes,
-                remaining_files,
-            }),
-            capacity: Semaphore::new(1),
+        Ok(Budget {
+            remaining_bytes,
+            remaining_files,
         })
+    }
+
+    /// Recomputes the budget from the root, as a restart would, after
+    /// retention removed ciphertext. Holding the budget lock keeps any write
+    /// out of the root while it is counted. A root that no longer scans
+    /// leaves the old, conservative budget in place.
+    pub(crate) fn refresh_budget(&self) -> Result<(), &'static str> {
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| "EVIDENCE_CAPACITY_REFRESH_FAILED")?;
+        *budget = Self::scan(&self.root, self.max_bytes)
+            .map_err(|_| "EVIDENCE_CAPACITY_REFRESH_FAILED")?;
+        self.publish(&budget);
+        Ok(())
+    }
+
+    /// Remaining bytes and files, as of the last write or refresh.
+    pub(crate) fn remaining(&self) -> (u64, u64) {
+        (
+            self.remaining_bytes.load(Ordering::Relaxed),
+            self.remaining_files.load(Ordering::Relaxed),
+        )
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn publish(&self, budget: &Budget) {
+        self.remaining_bytes
+            .store(budget.remaining_bytes, Ordering::Relaxed);
+        self.remaining_files
+            .store(budget.remaining_files, Ordering::Relaxed);
     }
 
     /// Acquire before parsing, keep through vault/catalog/journal publication.
@@ -139,10 +192,11 @@ impl EvidenceWriter {
             return Err(ReasonCode::EvidenceCaptureCapacityExhausted);
         }
         // ponytail: conservatively charge failed writes and maximum sidecar size
-        // until restart; external retention cleanup + restart reclaims capacity.
+        // until the next rescan (restart, or a pass of the in-process retention).
         // This bounds orphans too, without a per-request directory scan.
         budget.remaining_bytes -= reservation;
         budget.remaining_files -= 3;
+        self.publish(&budget);
         self.vault
             .write(&EvidenceWrite {
                 tenant_id: config.tenant_id(),
