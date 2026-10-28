@@ -33,6 +33,9 @@ fail() {
     k describe pod "$pod" 2>/dev/null | tail -n 60 >&2 || true
     k logs "$pod" --all-containers --prefix --tail 30 >&2 || true
     k logs deploy/xshield-outbox --all-containers --prefix --tail 10 >&2 || true
+    for dep in smoke-postgres smoke-clickhouse; do
+        k logs "deploy/$dep" --previous --tail 30 >&2 2>/dev/null || k logs "deploy/$dep" --tail 30 >&2 || true
+    done
     exit 1
 }
 cleanup() {

@@ -16,6 +16,10 @@ spec:
   template:
     metadata: {labels: {app: smoke-postgres}}
     spec:
+      # The service account token would be mounted under /var/run/secrets,
+      # which is the secret volume at /run/secrets in these images.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
       containers:
         - name: postgres
           image: postgres:16.10-alpine3.22@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
@@ -48,6 +52,10 @@ spec:
   template:
     metadata: {labels: {app: smoke-clickhouse}}
     spec:
+      # The service account token would be mounted under /var/run/secrets,
+      # which is the secret volume at /run/secrets in these images.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
       containers:
         - name: clickhouse
           image: clickhouse/clickhouse-server:25.8.29.51@sha256:aec6fb9892becb6a20eb8d57708b8cf9c777b2ad1f4eb70bbece7a70eaed9fd0
