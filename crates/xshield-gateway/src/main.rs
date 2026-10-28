@@ -475,6 +475,10 @@ impl ProxyHttp for Gateway {
         if observed_rollout.is_some() {
             decision.outcome = GatewayOutcome::Allowed;
         }
+        let unmatched_path = (decision.outcome == GatewayOutcome::Denied
+            && decision.reason_code == ReasonCode::OperationNotMatched
+            && decision.operation_id.is_none())
+        .then(|| xshield_core::path_shape::path_shape(&path));
         let audit_result = context
             .audit
             .as_ref()
@@ -490,6 +494,7 @@ impl ProxyHttp for Gateway {
                 sensor_bootstrap: context.sensor_bootstrap_audit.as_ref(),
                 forward_origin: internal_response.is_none(),
                 observed_rollout: observed_rollout.as_deref(),
+                unmatched_path: unmatched_path.as_deref(),
             })
             .await;
         let admission_audit = match audit_result {

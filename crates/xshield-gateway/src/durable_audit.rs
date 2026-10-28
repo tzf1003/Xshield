@@ -113,6 +113,9 @@ pub(crate) struct AdmissionFacts<'a> {
     /// Set when an observe rollout forwards a request whose `decision`
     /// carries the refusal the enforced policy would have applied.
     pub(crate) observed_rollout: Option<&'a str>,
+    /// For a refusal that matched no route, the shape of the requested path
+    /// (`xshield_core::path_shape`), so coverage reports can list it.
+    pub(crate) unmatched_path: Option<&'a str>,
 }
 
 /// What one versioned bootstrap delivered. Counts only: references never
@@ -786,6 +789,7 @@ impl DurableAudit {
                 reason_code: facts.decision.reason_code.as_str(),
                 origin_state: "not_sent",
                 rollout_revision: facts.observed_rollout.map(str::to_owned),
+                unmatched_path: facts.unmatched_path.map(str::to_owned),
             },
         ));
         request_sequence += 1;
@@ -1821,6 +1825,8 @@ enum Payload {
         origin_state: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         rollout_revision: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unmatched_path: Option<String>,
     },
     Origin {
         method: String,
@@ -2229,6 +2235,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2339,6 +2346,7 @@ mod tests {
                     sensor_bootstrap: bootstrap.as_ref(),
                     forward_origin: true,
                     observed_rollout: None,
+                    unmatched_path: None,
                 })
                 .await
                 .unwrap();
@@ -2491,6 +2499,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2528,6 +2537,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2641,6 +2651,7 @@ mod tests {
                     sensor_bootstrap: None,
                     forward_origin: false,
                     observed_rollout: None,
+                    unmatched_path: None,
                 })
                 .await
                 .unwrap();
@@ -2745,6 +2756,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2811,6 +2823,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2919,6 +2932,7 @@ mod tests {
                     sensor_bootstrap: None,
                     forward_origin: true,
                     observed_rollout: None,
+                    unmatched_path: None,
                 })
                 .await
                 .unwrap();
@@ -3000,6 +3014,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -3209,6 +3224,7 @@ mod tests {
                     sensor_bootstrap: None,
                     forward_origin: decision.outcome == GatewayOutcome::Allowed,
                     observed_rollout: None,
+                    unmatched_path: None,
                 })
                 .await
                 .unwrap();
@@ -3323,6 +3339,7 @@ mod tests {
                         sensor_bootstrap: None,
                         forward_origin: true,
                         observed_rollout: None,
+                        unmatched_path: None,
                     })
                     .await
                     .unwrap();
@@ -3404,6 +3421,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -3496,6 +3514,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: Some("rollout-1"),
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -3566,6 +3585,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refusal_that_matched_no_route_records_only_the_shape_of_its_path() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000045";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", "/api/users/4711/orders", UnixSeconds::new(1));
+        assert_eq!(decision.reason_code, ReasonCode::OperationNotMatched);
+        let shape = xshield_core::path_shape::path_shape("/api/users/4711/orders");
+        let admission = audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "45454545454545454545454545454545",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+                request_crypto: None,
+                sensor_observations: &[],
+                sensor_bootstrap: None,
+                forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: Some(&shape),
+            })
+            .await
+            .unwrap();
+        audit
+            .finalize(FinalFacts {
+                request_id,
+                trace_id: "45454545454545454545454545454545",
+                method: "GET",
+                decision: &decision,
+                admission: &admission,
+                status: 404,
+                duration_us: 20,
+                proxy_error: false,
+                response_failure: None,
+                origin_status: None,
+                origin_response_complete: false,
+                response_crypto: None,
+                sensor_html: None,
+                page_actions: None,
+                response_source: ResponseSource::Origin,
+            })
+            .await
+            .unwrap();
+        drop(audit);
+        // Reopening validates the recorded chain as the recovery reads it.
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let events = request_events(&journal, request_id);
+        let decided = events
+            .iter()
+            .find(|event| event["event_type"] == "decision.composed")
+            .unwrap();
+        assert_eq!(decided["payload"]["reason_code"], "OPERATION_NOT_MATCHED");
+        assert_eq!(decided["payload"]["unmatched_path"], "/api/users/{}/orders");
+        assert!(!serde_json::to_string(&events).unwrap().contains("4711"));
+        assert_publishable(&journal);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_accepts_a_path_shape_only_on_an_unmatched_refusal() {
+        use super::reconcile::valid_unmatched_path;
+        assert!(valid_unmatched_path("DENY", "OPERATION_NOT_MATCHED", None));
+        assert!(valid_unmatched_path("ALLOW", "OPERATION_ALLOWED", None));
+        assert!(valid_unmatched_path(
+            "DENY",
+            "OPERATION_NOT_MATCHED",
+            Some("/api/{}")
+        ));
+        assert!(!valid_unmatched_path(
+            "DENY",
+            "AUTH_REQUIRED",
+            Some("/api/{}")
+        ));
+        assert!(!valid_unmatched_path(
+            "ALLOW",
+            "OPERATION_NOT_MATCHED",
+            Some("/api/{}")
+        ));
+        assert!(!valid_unmatched_path(
+            "DENY",
+            "OPERATION_NOT_MATCHED",
+            Some("/api/4711")
+        ));
+    }
+
+    #[tokio::test]
     async fn an_observed_request_cut_off_after_forwarding_is_reconciled_as_observed() {
         let directory = directory();
         let config = config(&directory, 1024 * 1024);
@@ -3584,6 +3699,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: Some("rollout-1"),
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -3631,6 +3747,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -3750,6 +3867,7 @@ mod tests {
                 sensor_bootstrap: None,
                 forward_origin: true,
                 observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap_err();
@@ -3774,6 +3892,7 @@ mod tests {
             sensor_bootstrap: None,
             forward_origin: true,
             observed_rollout: None,
+            unmatched_path: None,
         }
     }
 

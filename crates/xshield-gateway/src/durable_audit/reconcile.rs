@@ -105,6 +105,8 @@ struct HistoricalDecision {
     origin_state: String,
     #[serde(default)]
     rollout_revision: Option<String>,
+    #[serde(default)]
+    unmatched_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +320,11 @@ fn apply_decision(
             "ALLOW" | "DENY" | OBSERVED_WOULD_DENY
         )
         || !valid_rollout(&payload.decision, payload.rollout_revision.as_deref())
+        || !valid_unmatched_path(
+            &payload.decision,
+            &payload.reason_code,
+            payload.unmatched_path.as_deref(),
+        )
         || payload.origin_state != "not_sent"
         || !valid_reason_code(&payload.reason_code)
     {
@@ -422,6 +429,15 @@ fn valid_rollout(decision: &str, rollout_revision: Option<&str>) -> bool {
         None => decision != OBSERVED_WOULD_DENY,
         Some(revision) => decision == OBSERVED_WOULD_DENY && valid_audit_name(revision),
     }
+}
+
+/// Only a refusal that matched no route names the shape of its path.
+pub(super) fn valid_unmatched_path(decision: &str, reason_code: &str, shape: Option<&str>) -> bool {
+    shape.is_none_or(|shape| {
+        decision == "DENY"
+            && reason_code == "OPERATION_NOT_MATCHED"
+            && xshield_core::path_shape::valid_path_shape(shape)
+    })
 }
 
 fn valid_method(value: &str) -> bool {

@@ -1336,6 +1336,30 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "观察标签或 UTC 时间窗未通过校验。",
     "修正观察标签与时间窗后重试。",
   ],
+  CONTROL_COVERAGE_REPORT_HEALTH_UNAVAILABLE: [
+    "error",
+    "覆盖统计水位不可用",
+    "审计索引水位暂时无法读取，统计无法判断是否完整。",
+    "稍后重试；持续出现请联系平台管理员并附管理请求 ID。",
+  ],
+  CONTROL_COVERAGE_REPORT_INDEX_UNAVAILABLE: [
+    "error",
+    "覆盖统计索引不可用",
+    "审计索引暂时不可用，覆盖统计无法生成。",
+    "稍后重试；持续出现请联系平台管理员并附管理请求 ID。",
+  ],
+  CONTROL_COVERAGE_REPORT_READ: [
+    "info",
+    "已读取覆盖统计",
+    "一次拒绝与覆盖统计读取已记入审计日志。",
+    "无需处理。",
+  ],
+  CONTROL_COVERAGE_REPORT_REQUEST_INVALID: [
+    "deny",
+    "覆盖统计条件无效",
+    "UTC 时间窗未通过校验。",
+    "修正时间窗后重试。",
+  ],
   CONTROL_MODEL_CALLS_REQUEST_INVALID: [
     "deny",
     "模型调用列表条件无效",

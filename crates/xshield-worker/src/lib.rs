@@ -49,7 +49,12 @@ pub use search::{
     AgentRunEventSummary, AgentRunSummary, AuditSearchResult, MODEL_CALL_LIST_LIMIT_MAX,
     ModelCallEventSummary, ModelCallListPlan, ModelCallListPlanError, ModelCallListPosition,
     ModelCallListResult, ModelCallListSummary, ModelCallSummary, SearchEventSummary,
-    SearchPosition, query_agent_run, query_audit_events, query_model_call, query_model_calls,
+    SearchPosition,
+    coverage_report::{
+        COVERAGE_REPORT_ROWS_MAX, COVERAGE_REPORT_UNCOVERED_MAX, CoverageReport, RouteRefusal,
+        RouteTraffic, UncoveredEndpoint, query_coverage_report,
+    },
+    query_agent_run, query_audit_events, query_model_call, query_model_calls,
     rollout_report::{
         ROLLOUT_REPORT_ROWS_MAX, RolloutObservation, RolloutReport, RolloutReportPlan,
         query_rollout_report,
@@ -1426,6 +1431,10 @@ struct DecisionPayload {
     origin_state: String,
     #[serde(default, deserialize_with = "present_string")]
     rollout_revision: Option<String>,
+    /// Only on a refusal that matched no route: the shape of its path
+    /// (`xshield_core::path_shape`), never the path itself.
+    #[serde(default, deserialize_with = "present_string")]
+    unmatched_path: Option<String>,
 }
 
 impl DecisionPayload {
@@ -1436,6 +1445,11 @@ impl DecisionPayload {
         ) || !valid_name(&self.reason_code)
             || self.origin_state != "not_sent"
             || !valid_rollout(&self.decision, self.rollout_revision.as_deref())
+            || self.unmatched_path.as_deref().is_some_and(|shape| {
+                self.decision != "DENY"
+                    || self.reason_code != "OPERATION_NOT_MATCHED"
+                    || !xshield_core::path_shape::valid_path_shape(shape)
+            })
         {
             return Err(PublishError::InvalidEvent);
         }
@@ -4346,6 +4360,35 @@ mod tests {
         assert!(PayloadSummary::parse("request.completed", unscoped).is_err());
         let aborted = r#"{"decision":"OBSERVED_WOULD_DENY","reason_code":"ORIGIN_OUTCOME_UNKNOWN","status":null,"origin_state":"unknown","duration_us":10,"rollout_revision":"rollout-r1"}"#;
         assert!(PayloadSummary::parse("request.aborted", aborted).is_ok());
+    }
+
+    #[test]
+    fn only_an_unmatched_refusal_carries_a_path_shape() {
+        let decision = |decision: &str, reason: &str, shape: &str| {
+            format!(
+                r#"{{"decision":"{decision}","reason_code":"{reason}","origin_state":"not_sent","unmatched_path":{shape}}}"#
+            )
+        };
+        let shaped = decision("DENY", "OPERATION_NOT_MATCHED", "\"/api/users/{}/orders\"");
+        assert!(PayloadSummary::parse("decision.composed", &shaped).is_ok());
+        let long = format!("\"{}\"", "/a".repeat(200));
+        for rejected in [
+            // A raw identifier, not a shape.
+            decision("DENY", "OPERATION_NOT_MATCHED", "\"/api/users/4711\""),
+            decision("DENY", "OPERATION_NOT_MATCHED", "\"/api?q=1\""),
+            decision("DENY", "OPERATION_NOT_MATCHED", "\"\""),
+            decision("DENY", "OPERATION_NOT_MATCHED", "null"),
+            decision("DENY", "OPERATION_NOT_MATCHED", "7"),
+            decision("DENY", "OPERATION_NOT_MATCHED", &long),
+            // Only an unmatched refusal has an unmatched path.
+            decision("DENY", "AUTH_REQUIRED", "\"/api/{}\""),
+            decision("ALLOW", "OPERATION_NOT_MATCHED", "\"/api/{}\""),
+        ] {
+            assert!(
+                PayloadSummary::parse("decision.composed", &rejected).is_err(),
+                "{rejected}"
+            );
+        }
     }
 
     #[test]

@@ -24,6 +24,7 @@ edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，�
 | GET /control/v1/model-calls | 窗口内模型调用最新脱敏状态分页 | console.model.list |
 | GET /control/v1/model-calls/{model_call_id} | 模型调用、实际输入输出引用 | console.model.read |
 | GET /control/v1/rollout-report | 观察窗口退出报告（计数、按路由与原因、索引状态、报告摘要，29.37） | console.rollout_report.read |
+| GET /control/v1/coverage-report | 拒绝与覆盖统计（按路由流量、按路由与原因的拒绝、未覆盖端点的路径形状、索引状态、报告摘要，29.39） | console.coverage_report.read |
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定账本快照、来源请求引用 | console.grant.read |
 | GET /control/v1/auth-bindings/{binding_id} | 当前身份与凭证代际、状态、期限 | console.binding.read |
 | GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树（脱敏生命周期，已实现，29.30） | console.agent.read |
@@ -520,6 +521,16 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 工具只暂存修订，从不批准或应用：构建变化是 `SENSOR_HTML_CHANGED`，只有独立 `PolicyApprover` 能清除（产品决定 8：试点期间每次人工批准）。推荐流程是：CI 构建后 `register` 新构建，审批人在控制台批准，edge 确认后再发布新前端；发布完成后用 `--retire` 删除旧构建并再次审批。保存接口不比较读取时的修订，所以工具保存后读取 `GET /sites/{id}/revisions`：如果自己修订之前的最新修订不是读取时的那个，说明期间有人保存过，新修订包含对方的改动，此时以退出码 3 提示审批人核对差异。退出码：0 已暂存或无需暂存，1 本地错误（参数、页面、配置不合规则），2 控制面拒绝或不可达（输出 `error_code`），3 期间有其他修订。
 
 输出为一行 JSON：`state`（`staged`/`unchanged`/`dry_run`）、站点、路由、标签、摘要、偏移、删除的构建、读取时的修订，暂存时另附 `desired_revision`、`active_revision`、`apply_state`、`requires_approval`、`reason_code`、`config_digest`。保存与读取都按 Agent API Key 审计（`console.agent_api_key.use` 与对应站点事件），`X-Xshield-Agent-Run-Id` 每次运行新生成。回归：核心登记逻辑的单测（`xshield-core` `site::build`）与控制面 HTTP 回归 `a_release_stages_its_build_for_independent_approval`（真实 PostgreSQL，经真实 TCP 调用路由）。
+
+## 29.39 已实现的拒绝与覆盖统计契约
+
+`GET /control/v1/coverage-report?start=…&end=…` 只允许 `Observer` 与服务端固定 tenant/site；两个参数各出现一次，规则与 29.37 相同（精确到秒的 UTC RFC 3339，窗口不超过 31 天），其他参数、非空 body 或重复认证头在读取索引前拒绝（400 `CONTROL_COVERAGE_REPORT_REQUEST_INVALID`）。并发名额、预算与超时沿用调查检索（429 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/`CONTROL_QUERY_BUDGET_EXCEEDED`，503 `CONTROL_QUERY_TIMEOUT`/`CONTROL_COVERAGE_REPORT_INDEX_UNAVAILABLE`/`CONTROL_COVERAGE_REPORT_HEALTH_UNAVAILABLE`）。
+
+响应 `schema_version=1`，`facts` 包含：tenant/site 与回显的 start/end；窗口内到达终态的 `completed_requests`，其中被拒绝的 `refused_requests`、由观察灰度转发的 `observed_requests`、未匹配任何路由而被拒绝的 `unrouted_refusals`，以及其中没有路径形状的 `unshaped_unrouted_refusals`（升级前的 edge 写入，或请求在窗口开始前进入）；`routes` 按流量降序列出最多 200 条 `{operation_id, completed, refused, observed}`；`refusals` 按次数降序列出最多 200 组 `{operation_id, reason_code, count, last_seen}`（未匹配路由时 `operation_id` 为空串）；`uncovered` 按次数降序列出最多 100 个 `{method, path_shape, count, last_seen}`。三个列表各有 `*_truncated` 标志。索引状态字段（`watermark_scope`、`as_of`、`index_watermark`、`has_gaps`、`pending_segments`、`index_complete`）与 `report_digest` 的含义同 29.37。服务端在返回前校验各计数相加一致，不一致按索引不可用处理。
+
+未覆盖端点只按路径形状列出，不保存原始路径：edge 对未匹配路由的拒绝在 `decision.composed` 写入 `unmatched_path`（见 docs/11），每段只有 1–24 字节、以字母开头、仅含 `[A-Za-z0-9._-]` 且最多 2 个数字时保留原文，其余段写作 `{}`，超过 10 段时以 `/**` 结尾。因此 ID、令牌、邮箱等不会进入索引，统计用于决定下一步要补哪些路由，也是观察退出报告的补充数据。
+
+每次已认证尝试追加一条 `console.coverage_report.read` 管理 journal：成功 `PASS/CONTROL_COVERAGE_REPORT_READ`，失败按上述原因码区分 DENY/ERROR；事件不含窗口、计数或摘要。worker 发布器只接受这一路径与原因集合。部署顺序：先升级 worker 发布器（接受 `unmatched_path` 与新管理事件），再升级 edge 与控制面。控制台页面另行交付。
 
 ## 站点诊断与控制台契约补充（2026-09-27）
 

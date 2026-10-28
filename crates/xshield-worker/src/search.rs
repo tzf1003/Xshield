@@ -1,6 +1,7 @@
 //! Bounded, scoped analytical queries. Only typed plans enter this adapter;
 //! values are bound parameters, and callers must audit attempts and results.
 
+pub mod coverage_report;
 pub mod rollout_report;
 
 use super::{
