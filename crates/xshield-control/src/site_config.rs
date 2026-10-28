@@ -27,7 +27,7 @@ use xshield_core::{
     domain::SiteId,
     site::{
         POLICY_REVISION_REUSED, flow,
-        upstream::{parse_upstream_socket, refuse_upstream_socket},
+        upstream::{UpstreamAllowance, parse_upstream_socket},
     },
 };
 use xshield_postgres::{
@@ -213,13 +213,41 @@ fn validate_apply_ack(
     Ok(())
 }
 
-/// Whether the deployment opted in to loopback upstreams (the local lab only).
+/// The deployment's exceptions to the upstream destination policy.
 ///
-/// The opt-in is read at each use so a lab restart picks it up without a code
-/// path caching a stale answer; it unlocks `127.0.0.0/8` and `::1` and nothing
-/// else (see `xshield_core::site::upstream`).
-fn loopback_upstream_allowed() -> bool {
-    std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1")
+/// Read at each use so a restart picks up a change without a cached answer.
+/// `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1` is the local-lab opt-in for
+/// `127.0.0.0/8` and `::1`; `XSHIELD_ALLOWED_UPSTREAM_CIDRS` lists private
+/// networks (RFC 1918, `fc00::/7`) the deployment admits. An invalid list
+/// admits nothing here (fail closed); startup calls
+/// [`upstream_allowance_from_env`] so such a list stops the process instead.
+fn upstream_allowance() -> UpstreamAllowance {
+    upstream_allowance_from_env().unwrap_or_else(|_| {
+        UpstreamAllowance::new(
+            std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1"),
+            Vec::new(),
+        )
+    })
+}
+
+/// Reads the upstream allowance, refusing an invalid admitted-network list.
+///
+/// # Errors
+/// Returns a static message when `XSHIELD_ALLOWED_UPSTREAM_CIDRS` is not a
+/// list of at most 32 private CIDR networks without host bits.
+pub fn upstream_allowance_from_env() -> Result<UpstreamAllowance, &'static str> {
+    let loopback = std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1");
+    let admitted = match std::env::var("XSHIELD_ALLOWED_UPSTREAM_CIDRS") {
+        Ok(list) => UpstreamAllowance::parse_admitted(&list).map_err(|_| {
+            "XSHIELD_ALLOWED_UPSTREAM_CIDRS must list at most 32 private CIDR networks \
+             (RFC 1918 or fc00::/7) without host bits"
+        })?,
+        Err(std::env::VarError::NotPresent) => Vec::new(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("XSHIELD_ALLOWED_UPSTREAM_CIDRS is not valid Unicode");
+        }
+    };
+    Ok(UpstreamAllowance::new(loopback, admitted))
 }
 
 /// A health probe whose destination has been re-validated for this request.
@@ -248,10 +276,10 @@ fn plan_upstream_probe(
     server_name: &str,
     tls: bool,
     health_path: &str,
-    allow_loopback: bool,
+    allowance: &UpstreamAllowance,
 ) -> Result<UpstreamProbePlan, &'static str> {
     let socket = parse_upstream_socket(address).map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
-    if refuse_upstream_socket(socket, allow_loopback).is_some() {
+    if allowance.refuse_socket(socket).is_some() {
         return Err("CONTROL_SITE_SSRF_BLOCKED");
     }
     if !server_name_is_dns_name(server_name) {
@@ -286,9 +314,9 @@ async fn probe_upstream(
     server_name: &str,
     tls: bool,
     health: &SiteHealthCheckConfig,
-    allow_loopback: bool,
+    allowance: &UpstreamAllowance,
 ) -> serde_json::Value {
-    let plan = match plan_upstream_probe(address, server_name, tls, &health.path, allow_loopback) {
+    let plan = match plan_upstream_probe(address, server_name, tls, &health.path, allowance) {
         Ok(plan) => plan,
         Err(reason) => {
             return json!({
@@ -1917,7 +1945,7 @@ async fn site_apply_state_handler(
                 record.upstream_server_name(),
                 record.upstream_tls(),
                 &record.policy().health_check,
-                loopback_upstream_allowed(),
+                &upstream_allowance(),
             )
             .await,
         )
@@ -3716,7 +3744,7 @@ fn server_name_is_dns_name(name: &str) -> bool {
 fn validate_upstream_destination(
     address: &str,
     server_name: &str,
-    allow_loopback: bool,
+    allowance: &UpstreamAllowance,
 ) -> Result<(), &'static str> {
     let Ok(socket) = parse_upstream_socket(address) else {
         // Names are never resolved on an operator's behalf. Known internal
@@ -3731,7 +3759,7 @@ fn validate_upstream_destination(
             "CONTROL_SITE_UPSTREAM_INVALID"
         });
     };
-    if refuse_upstream_socket(socket, allow_loopback).is_some() {
+    if allowance.refuse_socket(socket).is_some() {
         return Err("CONTROL_SITE_SSRF_BLOCKED");
     }
     if !server_name_is_dns_name(server_name) {
@@ -3829,7 +3857,7 @@ fn validation_reason(field: &str) -> &'static str {
 /// in the future and at most thirty days ahead, so an expired window can only
 /// be saved again as enforce.
 fn validate_request(request: &SiteConfigRequest, site_id: &SiteId) -> Result<(), &'static str> {
-    validate_request_with(request, site_id, loopback_upstream_allowed())?;
+    validate_request_with(request, site_id, &upstream_allowance())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?
@@ -3845,7 +3873,7 @@ fn validate_request(request: &SiteConfigRequest, site_id: &SiteId) -> Result<(),
 fn validate_request_with(
     request: &SiteConfigRequest,
     site_id: &SiteId,
-    allow_loopback: bool,
+    allowance: &UpstreamAllowance,
 ) -> Result<(), &'static str> {
     let config = request.to_config();
     config
@@ -3860,7 +3888,7 @@ fn validate_request_with(
     validate_upstream_destination(
         &request.upstream_address,
         &request.upstream_server_name,
-        allow_loopback,
+        allowance,
     )
 }
 
@@ -3974,7 +4002,13 @@ mod tests {
         validate_request_with,
     };
     use serde_json::json;
-    use xshield_core::{GatewayApplyAck, GatewayApplyRequest, domain::SiteId};
+    use xshield_core::{
+        GatewayApplyAck, GatewayApplyRequest, domain::SiteId, site::upstream::UpstreamAllowance,
+    };
+
+    fn lab(loopback: bool) -> UpstreamAllowance {
+        UpstreamAllowance::new(loopback, Vec::new())
+    }
 
     fn site() -> SiteId {
         SiteId::parse("site_a").unwrap()
@@ -4069,7 +4103,7 @@ mod tests {
             let mut body = browser_loop();
             edit(&mut body);
             let request: SiteConfigRequest = serde_json::from_value(body).unwrap();
-            validate_request_with(&request, &site(), false).err()
+            validate_request_with(&request, &site(), &lab(false)).err()
         };
         assert_eq!(reason(|_| {}), None);
         for (expected, edit) in [
@@ -4135,7 +4169,7 @@ mod tests {
             );
             edit(&mut body, issuer, entry);
             let request: SiteConfigRequest = serde_json::from_value(body).unwrap();
-            validate_request_with(&request, &site(), false).err()
+            validate_request_with(&request, &site(), &lab(false)).err()
         };
         assert_eq!(reason(|_, _, _| {}), None);
         for (expected, edit) in [
@@ -4250,9 +4284,47 @@ mod tests {
             let mut value = request();
             value.upstream_address = address.to_owned();
             assert_eq!(
-                validate_request_with(&value, &site(), false),
+                validate_request_with(&value, &site(), &lab(false)),
                 Err("CONTROL_SITE_SSRF_BLOCKED"),
                 "{address} must be refused as an internal upstream"
+            );
+        }
+    }
+
+    #[test]
+    fn admitted_private_networks_unlock_only_their_own_origins() {
+        let admitted = UpstreamAllowance::new(
+            false,
+            UpstreamAllowance::parse_admitted("10.20.0.0/16").unwrap(),
+        );
+        let mut value = request();
+        value.upstream_address = "10.20.3.4:8080".to_owned();
+        assert_eq!(
+            validate_request_with(&value, &site(), &lab(false)),
+            Err("CONTROL_SITE_SSRF_BLOCKED"),
+            "private origins stay refused by default"
+        );
+        assert_eq!(validate_request_with(&value, &site(), &admitted), Ok(()));
+        let plan = plan_upstream_probe(
+            "10.20.3.4:8080",
+            "origin.internal",
+            false,
+            "/health",
+            &admitted,
+        )
+        .unwrap();
+        assert_eq!(plan.address.to_string(), "10.20.3.4:8080");
+        for refused in [
+            "10.21.0.1:8080",
+            "127.0.0.1:8080",
+            "169.254.169.254:80",
+            "[::ffff:10.20.3.4]:8080",
+        ] {
+            value.upstream_address = refused.to_owned();
+            assert_eq!(
+                validate_request_with(&value, &site(), &admitted),
+                Err("CONTROL_SITE_SSRF_BLOCKED"),
+                "{refused}"
             );
         }
     }
@@ -4282,7 +4354,7 @@ mod tests {
             value.upstream_address = address.to_owned();
             value.upstream_tls = tls;
             assert_eq!(
-                validate_request_with(&value, &site(), false),
+                validate_request_with(&value, &site(), &lab(false)),
                 Ok(()),
                 "{address} tls={tls} is a public upstream"
             );
@@ -4293,9 +4365,9 @@ mod tests {
     fn site_config_loopback_opt_in_allows_only_loopback() {
         let mut value = request();
         value.upstream_address = "127.0.0.1:9000".to_owned();
-        assert_eq!(validate_request_with(&value, &site(), true), Ok(()));
+        assert_eq!(validate_request_with(&value, &site(), &lab(true)), Ok(()));
         value.upstream_address = "[::1]:9000".to_owned();
-        assert_eq!(validate_request_with(&value, &site(), true), Ok(()));
+        assert_eq!(validate_request_with(&value, &site(), &lab(true)), Ok(()));
         // The opt-in is for the local lab only; it never unlocks private,
         // metadata, mapped or translated destinations.
         for address in [
@@ -4307,7 +4379,7 @@ mod tests {
         ] {
             value.upstream_address = address.to_owned();
             assert_eq!(
-                validate_request_with(&value, &site(), true),
+                validate_request_with(&value, &site(), &lab(true)),
                 Err("CONTROL_SITE_SSRF_BLOCKED"),
                 "{address} stays blocked even with the loopback opt-in"
             );
@@ -4334,7 +4406,7 @@ mod tests {
             let mut value = request();
             value.upstream_server_name = name.to_owned();
             assert_eq!(
-                validate_request_with(&value, &site(), false),
+                validate_request_with(&value, &site(), &lab(false)),
                 Err("CONTROL_SITE_UPSTREAM_INVALID"),
                 "{name} is not a DNS name"
             );
@@ -4343,7 +4415,7 @@ mod tests {
             let mut value = request();
             value.upstream_server_name = name.to_owned();
             assert_eq!(
-                validate_request_with(&value, &site(), false),
+                validate_request_with(&value, &site(), &lab(false)),
                 Ok(()),
                 "{name}"
             );
@@ -4357,7 +4429,7 @@ mod tests {
             "Origin.Example.Test",
             false,
             "/health",
-            false,
+            &lab(false),
         )
         .unwrap();
         // The old probe built `http://{server_name}/health`, which dials the
@@ -4366,7 +4438,7 @@ mod tests {
         assert_eq!(plan.host, "origin.example.test");
         assert_eq!(plan.address, "8.8.8.8:9000".parse().unwrap());
         let default_port =
-            plan_upstream_probe("8.8.8.8:443", "origin.test", true, "/h", false).unwrap();
+            plan_upstream_probe("8.8.8.8:443", "origin.test", true, "/h", &lab(false)).unwrap();
         assert_eq!(default_port.address.port(), 443);
         assert_eq!(default_port.url, "https://origin.test/h");
     }
@@ -4384,20 +4456,20 @@ mod tests {
             "[64:ff9b::7f00:1]:80",
         ] {
             assert_eq!(
-                plan_upstream_probe(address, "origin.test", false, "/health", false),
+                plan_upstream_probe(address, "origin.test", false, "/health", &lab(false)),
                 Err("CONTROL_SITE_SSRF_BLOCKED"),
                 "{address}"
             );
         }
         for name in ["127.0.0.1", "2130706433", "0x7f.1", "127.1", "[::1]", "a b"] {
             assert_eq!(
-                plan_upstream_probe("8.8.8.8:9000", name, false, "/health", false),
+                plan_upstream_probe("8.8.8.8:9000", name, false, "/health", &lab(false)),
                 Err("CONTROL_SITE_UPSTREAM_INVALID"),
                 "{name}"
             );
         }
         assert_eq!(
-            plan_upstream_probe("origin.test:80", "origin.test", false, "/h", false),
+            plan_upstream_probe("origin.test:80", "origin.test", false, "/h", &lab(false)),
             Err("CONTROL_SITE_UPSTREAM_INVALID")
         );
     }
@@ -4444,7 +4516,7 @@ mod tests {
             "origin.example.test",
             false,
             &health,
-            true,
+            &lab(true),
         )
         .await;
         assert_eq!(result["upstream_state"], "degraded", "{result}");
@@ -4484,14 +4556,15 @@ mod tests {
             "origin.example.test",
             false,
             &health,
-            false,
+            &lab(false),
         )
         .await;
         assert_eq!(mapped["reason_code"], "CONTROL_SITE_SSRF_BLOCKED");
         assert_eq!(mapped["upstream_state"], "unavailable");
         // A public address with a loopback IP literal as server name used to
         // dial 127.0.0.1:80 because the resolver override skips IP hosts.
-        let literal = probe_upstream("8.8.8.8:9000", "127.0.0.1", false, &health, false).await;
+        let literal =
+            probe_upstream("8.8.8.8:9000", "127.0.0.1", false, &health, &lab(false)).await;
         assert_eq!(literal["reason_code"], "CONTROL_SITE_UPSTREAM_INVALID");
         // Even with the lab opt-in the mapped form stays blocked.
         let opted_in = probe_upstream(
@@ -4499,7 +4572,7 @@ mod tests {
             "origin.example.test",
             false,
             &health,
-            true,
+            &lab(true),
         )
         .await;
         assert_eq!(opted_in["reason_code"], "CONTROL_SITE_SSRF_BLOCKED");

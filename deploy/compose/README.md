@@ -60,6 +60,6 @@ curl -s http://127.0.0.1:9555/readyz   # control
 ## 限制
 
 - 单机部署，没有高可用。PostgreSQL 与 ClickHouse 的备份按 docs/19 19.6 自行安排。
-- 控制面拒绝私网和回环上游地址。源站必须能经公网地址到达（docs/19 19.8）。
+- 控制面默认拒绝私网和回环上游地址。源站在内网时，在 `.env` 的 `XSHIELD_ALLOWED_UPSTREAM_CIDRS` 列出它所在的网段（docs/19 19.2），并改动后重启 control。
 - 站点端口必须落在 `XSHIELD_EDGE_SITE_PORTS` 发布的范围内（默认 6400–6409）。bootstrap 占用 6400，站点从 6401 起选。
-- `compose.smoke.yaml` 只用于 CI 冒烟，里面的开发 Keycloak 与回环源站不得用于任何共享环境。
+- `compose.smoke.yaml` 只用于 CI 冒烟，里面的开发 Keycloak 与示例源站不得用于任何共享环境。

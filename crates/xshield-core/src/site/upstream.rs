@@ -268,6 +268,138 @@ pub fn refuse_upstream_socket(
         .or_else(|| refuse_upstream_ip(address.ip().to_canonical(), allow_loopback))
 }
 
+/// Most networks a deployment may admit; a longer list suggests the setting
+/// is being used as a general bypass.
+pub const MAX_ADMITTED_NETWORKS: usize = 32;
+
+/// Private parents an admitted network must lie inside: RFC 1918 and
+/// `fc00::/7`. Nothing else (loopback, link-local, shared, metadata,
+/// translation) can be admitted.
+const ADMISSIBLE_V4: [(u32, u8); 3] = [
+    (v4(10, 0, 0, 0), 8),
+    (v4(172, 16, 0, 0), 12),
+    (v4(192, 168, 0, 0), 16),
+];
+const ADMISSIBLE_V6: (u128, u8) = (v6([0xfc00, 0, 0, 0, 0, 0, 0, 0]), 7);
+
+/// One private network the deployment explicitly admits as an upstream
+/// destination, written as CIDR (`10.20.0.0/16`, `fd12:3456::/48`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdmittedNetwork {
+    base: IpAddr,
+    prefix: u8,
+}
+
+impl AdmittedNetwork {
+    /// Parses one CIDR network.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] unless the text is `address/prefix` with no
+    /// host bits set and the whole network lies inside RFC 1918 or
+    /// `fc00::/7`.
+    pub fn parse(text: &str) -> Result<Self, InvalidValue> {
+        let invalid = || InvalidValue::new("admitted_upstream_network");
+        let (address, prefix) = text.split_once('/').ok_or_else(invalid)?;
+        if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        let base: IpAddr = address.parse().map_err(|_| invalid())?;
+        let prefix: u8 = prefix.parse().map_err(|_| invalid())?;
+        let admissible = match base {
+            IpAddr::V4(address) => {
+                let value = u32::from(address);
+                (1..=32).contains(&prefix)
+                    && value & !(u32::MAX << (32 - u32::from(prefix))) == 0
+                    && ADMISSIBLE_V4.iter().any(|(parent, parent_prefix)| {
+                        prefix >= *parent_prefix && in_v4(value, *parent, *parent_prefix)
+                    })
+            }
+            IpAddr::V6(address) => {
+                let value = u128::from(address);
+                let (parent, parent_prefix) = ADMISSIBLE_V6;
+                (1..=128).contains(&prefix)
+                    && value & !(u128::MAX << (128 - u32::from(prefix))) == 0
+                    && prefix >= parent_prefix
+                    && in_v6(value, parent, parent_prefix)
+            }
+        };
+        if admissible {
+            Ok(Self { base, prefix })
+        } else {
+            Err(invalid())
+        }
+    }
+
+    fn contains(self, address: IpAddr) -> bool {
+        match (self.base, address) {
+            (IpAddr::V4(base), IpAddr::V4(address)) => {
+                in_v4(u32::from(address), u32::from(base), self.prefix)
+            }
+            (IpAddr::V6(base), IpAddr::V6(address)) => {
+                in_v6(u128::from(address), u128::from(base), self.prefix)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The deployment's explicit exceptions to the upstream destination policy.
+///
+/// The default admits nothing. `loopback` is the local-lab opt-in; admitted
+/// networks lift only the [`UpstreamRefusal::Private`] and
+/// [`UpstreamRefusal::UniqueLocal`] refusals for addresses inside them, so a
+/// metadata address, a mapped or translated form, or anything outside the
+/// listed networks stays refused.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UpstreamAllowance {
+    loopback: bool,
+    admitted: Vec<AdmittedNetwork>,
+}
+
+impl UpstreamAllowance {
+    /// An allowance with the loopback opt-in and the given private networks.
+    #[must_use]
+    pub const fn new(loopback: bool, admitted: Vec<AdmittedNetwork>) -> Self {
+        Self { loopback, admitted }
+    }
+
+    /// Parses a comma-separated list of admitted networks; blank entries are
+    /// ignored and an empty list admits nothing.
+    ///
+    /// # Errors
+    /// Returns [`InvalidValue`] for any invalid entry or more than
+    /// [`MAX_ADMITTED_NETWORKS`] entries.
+    pub fn parse_admitted(list: &str) -> Result<Vec<AdmittedNetwork>, InvalidValue> {
+        let admitted = list
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(AdmittedNetwork::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        if admitted.len() > MAX_ADMITTED_NETWORKS {
+            return Err(InvalidValue::new("admitted_upstream_network"));
+        }
+        Ok(admitted)
+    }
+
+    /// Classifies a destination under this allowance; `None` means it may
+    /// be dialled.
+    #[must_use]
+    pub fn refuse_socket(&self, address: SocketAddr) -> Option<UpstreamRefusal> {
+        match refuse_upstream_socket(address, self.loopback)? {
+            UpstreamRefusal::Private | UpstreamRefusal::UniqueLocal
+                if self
+                    .admitted
+                    .iter()
+                    .any(|network| network.contains(address.ip())) =>
+            {
+                None
+            }
+            refusal => Some(refusal),
+        }
+    }
+}
+
 /// Parses a literal `ipv4:port` or `[ipv6]:port` upstream address.
 ///
 /// The host must be an IP literal: the control plane never resolves operator
@@ -411,6 +543,80 @@ mod tests {
                 "{text} stays refused with the loopback opt-in"
             );
         }
+    }
+
+    #[test]
+    fn admitted_networks_are_private_cidrs_only() {
+        for valid in [
+            "10.20.0.0/16",
+            "10.0.0.0/8",
+            "172.16.5.0/24",
+            "192.168.1.7/32",
+            "fd12:3456::/48",
+            "fc00::/7",
+        ] {
+            assert!(AdmittedNetwork::parse(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "10.20.0.1/16",   // host bits set
+            "10.0.0.0/7",     // wider than the private parent
+            "11.0.0.0/8",     // public
+            "100.64.0.0/10",  // shared address space
+            "169.254.0.0/16", // link-local, metadata
+            "127.0.0.0/8",    // loopback
+            "0.0.0.0/0",
+            "fe80::/10",
+            "::ffff:10.0.0.0/104",
+            "10.0.0.0",
+            "10.0.0.0/",
+            "10.0.0.0/+8",
+            "10.0.0.0/33",
+            "10.0.0.0/0",
+        ] {
+            assert!(AdmittedNetwork::parse(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(UpstreamAllowance::parse_admitted(" ,").unwrap(), []);
+        let many = vec!["10.0.0.0/24"; MAX_ADMITTED_NETWORKS + 1].join(",");
+        assert!(UpstreamAllowance::parse_admitted(&many).is_err());
+    }
+
+    #[test]
+    fn admitted_networks_lift_only_their_own_private_refusals() {
+        let socket = |text: &str| text.parse::<SocketAddr>().unwrap();
+        let allowance = UpstreamAllowance::new(
+            false,
+            UpstreamAllowance::parse_admitted("10.20.0.0/16, fd12:3456::/48").unwrap(),
+        );
+        assert_eq!(allowance.refuse_socket(socket("10.20.3.4:443")), None);
+        assert_eq!(allowance.refuse_socket(socket("[fd12:3456::9]:443")), None);
+        assert_eq!(allowance.refuse_socket(socket("8.8.8.8:443")), None);
+        for (refused, expected) in [
+            ("10.21.0.1:443", UpstreamRefusal::Private),
+            ("192.168.0.1:443", UpstreamRefusal::Private),
+            ("[fd12:3457::1]:443", UpstreamRefusal::UniqueLocal),
+            ("[::ffff:10.20.3.4]:443", UpstreamRefusal::Mapped),
+            ("127.0.0.1:443", UpstreamRefusal::Loopback),
+            ("169.254.169.254:80", UpstreamRefusal::CloudMetadata),
+        ] {
+            assert_eq!(
+                allowance.refuse_socket(socket(refused)),
+                Some(expected),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            UpstreamAllowance::default().refuse_socket(socket("10.20.3.4:443")),
+            Some(UpstreamRefusal::Private)
+        );
+        // The metadata service inside fc00::/7 stays refused even when admitted.
+        let wide = UpstreamAllowance::new(
+            false,
+            UpstreamAllowance::parse_admitted("fc00::/7").unwrap(),
+        );
+        assert_eq!(
+            wide.refuse_socket(socket("[fd00:ec2::254]:80")),
+            Some(UpstreamRefusal::CloudMetadata)
+        );
     }
 
     #[test]

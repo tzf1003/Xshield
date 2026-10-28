@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- 私网源站显式放行（试点决策，docs/19 19.2、docs/29“上游地址校验”）：新增部署变量 `XSHIELD_ALLOWED_UPSTREAM_CIDRS`，列出源站所在的私网网段（RFC 1918 或 `fc00::/7` 内不含主机位的 CIDR，最多 32 个）。
+  - 只解除列出网段内地址的私网/唯一本地拒绝；回环、链路本地、共享地址、云元数据、映射与转换形式照旧拒绝。
+  - 默认不设置，行为不变；列表不合法时控制服务拒绝启动。
+  - 判定在 `xshield_core::site::upstream::UpstreamAllowance`，保存校验与健康探测共用；上游变更仍需独立审批（`UPSTREAM_CHANGED`）。
+  - Compose 参考部署透传该变量。CI 冒烟改为接入一个放行网段内的私网源站，不再用回环开关，并检查网段外的私网地址被拒绝。
+  - 回归：核心单测 2 个（网段解析、只解除本网段的私网拒绝且元数据仍拒绝），控制面单测 1 个（保存与探测计划）；本机用真实二进制镜像跑通 Compose 冒烟。
+  - **未覆盖**：edge 本身不校验上游地址（与此前相同，edge 信任签名快照）。
+
 - 发布镜像签名（可行性建议“最小运维底座”，docs/19 19.7）：新增 `.github/workflows/release-images.yml`，只在推送 `v*` 标签时运行。它把 edge、control、worker 镜像推到 GHCR，附带构建来源证明与 SBOM，并用 Sigstore 无密钥签名（证书绑定该工作流与标签），签名后立即验证一次。**未运行**：尚未打过发布标签，工作流本身没有在 GitHub 上执行过；首次发布时须确认仓库允许 Actions 写 Packages。
 
 - 单机参考部署（可行性建议“最小运维底座”，docs/19 19.8）：新增 `deploy/compose/`，用 Docker Compose 在一台主机上运行一个租户、一个站点的全部组件，包括 edge、control、两组常驻封存/发布任务（edge 请求 journal 与 control 管理 journal）、十个 outbox 发布任务、PostgreSQL 与 ClickHouse。

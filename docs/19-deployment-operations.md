@@ -12,7 +12,7 @@
 
 WAF 终止 TLS 并重新验证上游证书，固定 upstream allowlist，不接受客户端任意 Host 变成开放代理。浏览器→WAF 与 WAF→源站的信任变化必须在站点接入说明中体现。
 
-控制面拒绝指向回环、私网、链路本地、云元数据以及 IPv4 映射/NAT64 等转换形式的上游地址（规则见 29 章“上游地址校验”）。本地靶场的源站在回环地址上，因此需要显式设置环境变量 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1`（`dev.sh` 已设置）；它只放行 `127.0.0.0/8` 与 `::1`，生产部署不得设置，且不存在放行私网地址的开关。
+控制面拒绝指向回环、私网、链路本地、云元数据以及 IPv4 映射/NAT64 等转换形式的上游地址（规则见 29 章“上游地址校验”）。本地靶场的源站在回环地址上，因此需要显式设置环境变量 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1`（`dev.sh` 已设置）；它只放行 `127.0.0.0/8` 与 `::1`，生产部署不得设置。源站在私网时，部署方可以用 `XSHIELD_ALLOWED_UPSTREAM_CIDRS` 显式列出源站所在的网段（逗号分隔的 CIDR，如 `10.20.0.0/16,fd12:3456::/48`，最多 32 个），只能是 RFC 1918 或 `fc00::/7` 内不含主机位的网段；它只解除列出网段内地址的“私网/唯一本地”拒绝，回环、链路本地、共享地址、云元数据（包括 `fc00::/7` 内的 `fd00:ec2::254`）、映射与转换形式照旧拒绝。默认不设置，行为与此前相同；列表不合法时控制服务拒绝启动。上游地址的任何变更仍需独立审批（`UPSTREAM_CHANGED`），所以放行网段是部署级边界，具体源站仍由两个人确认。
 
 **当前实现状态（2026-10-05 核查）**：edge 的数据面监听器仍只绑定内网或 loopback 地址（`XSHIELD_EDGE_LISTEN_PORTS` 与站点端口的既有限制不变），部署可以启用两项传输加固（配置见下文“Edge 传输配置”）。其一是原生 TLS：同时设置 `XSHIELD_EDGE_TLS_CERT_PATH` 与 `XSHIELD_EDGE_TLS_KEY_PATH` 后，**每个**数据面端口都由 edge 终止 TLS（OpenSSL，Mozilla intermediate v5 配置，TLS 1.2 起，ALPN 依次为 `h2`、`http/1.1`，HTTP/2 下游由 Pingora 桥接到 HTTP/1.1 源站，不签发 session ticket，不允许重协商）；两个变量都未设置时行为与此前完全一致（明文 HTTP/1.1），配置不完整或证书/密钥不可用时拒绝启动，绝不退回明文。其二是 PROXY protocol v1/v2：`XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED` 列出的负载均衡地址必须在连接起始处发送 PROXY 头，头中的源地址取代 TCP 对端，用于按来源限流和匿名会话来源指纹；未列出的对端发送的 PROXY 头从不被解析。仍不在范围内：按站点（SNI）选择证书和从秘密管理器解析证书（全进程一张证书，SNI 不参与路由，路由仍按监听端口加 Host/`:authority`）、证书热更新（轮换证书需重启 edge）、HTTP/3/QUIC、PROXY v2 TLV 的任何语义（全部跳过、不信任）以及 `X-Forwarded-For`/`Forwarded` 等转发头（仍不信任）。开发环境的本地 stunnel 终止器（见 `dev.sh`）不变。上游 TLS 的证书校验和固定 allowlist 已按本节实现。
 
@@ -144,12 +144,12 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 - 迁移：PostgreSQL 首次启动时按序执行 `migrations/`；之后的新迁移须由运维在升级对应版本前手工应用（本仓库尚无生产迁移执行器）。ClickHouse 首次启动执行 `sql/clickhouse.sql` 并按秘密文件创建 `xshield` 用户。
 - 运维方自备：管理面的 HTTPS 同源代理与控制台静态文件（要求见 `web/console/README.md` 与 docs/15，代理须加入同一网络命名空间才能访问 loopback 管理 API）、企业 OIDC IdP（必须是 HTTPS）、edge 前置的 TLS/WAF/CDN、备份（19.6）与告警。
 
-上游地址限制：控制面拒绝私网与回环上游（19.2、29“上游地址校验”），只有本地靶场开关 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1` 放行回环。源站只有私网地址的试点无法直接接入，须让 edge 经可路由的公网地址访问源站。
+上游地址：控制面默认拒绝私网与回环上游（19.2、29“上游地址校验”）。源站只有内网地址时，在 `.env` 设置 `XSHIELD_ALLOWED_UPSTREAM_CIDRS` 列出源站网段；CI 冒烟就用这种方式接入一个私网源站，并检查网段外的私网地址仍被拒绝。
 
-CI 的 `compose` 作业用仓库 `Dockerfile` 构建三个镜像后运行 `scripts/test_compose_deployment.sh`。脚本在 `compose.smoke.yaml` 叠加一个开发 Keycloak 和一个回环源站，检查以下各项：
+CI 的 `compose` 作业用仓库 `Dockerfile` 构建三个镜像后运行 `scripts/test_compose_deployment.sh`。脚本在 `compose.smoke.yaml` 叠加一个开发 Keycloak 和一个私网源站，检查以下各项：
 
 - 两个运维端点就绪，数据面对未配置主机返回 `SITE_CONFIG_UNAVAILABLE`；
-- 管理 API 只接受引导 Bearer，站点保存成功，control 经签名通道取到 edge 健康，首个 apply 等待独立审批；
+- 管理 API 只接受引导 Bearer；放行网段内的私网源站可以保存，网段外的被拒绝；control 经签名通道取到 edge 健康，首个 apply 等待独立审批；
 - 控制面指标计数；
 - edge 与 control 各自重启后恢复就绪；
 - 管理审计事件经封存、发布进入 ClickHouse；

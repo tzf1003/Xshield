@@ -220,6 +220,8 @@ services:
       XSHIELD_EVIDENCE_MAX_RETENTION_DAYS: "30"
       XSHIELD_EDGE_APPLY_URL: http://127.0.0.1:9553/internal/v1/apply
       XSHIELD_EDGE_APPLY_KEY_HEX_FILE: /run/secrets/edge_apply_key
+      # Private networks your origins live in (docs/19 19.2); empty admits none.
+      XSHIELD_ALLOWED_UPSTREAM_CIDRS: ${XSHIELD_ALLOWED_UPSTREAM_CIDRS:-}
     secrets:
       - control_token
       - oidc_client_secret

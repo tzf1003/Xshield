@@ -98,6 +98,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Zeroizing::new(xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
     let evidence_max_artifact_bytes = env::var("XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES")?.parse()?;
     let evidence_max_retention_days = env::var("XSHIELD_EVIDENCE_MAX_RETENTION_DAYS")?.parse()?;
+    // An invalid admitted-network list stops startup rather than silently
+    // admitting nothing on every later save.
+    xshield_control::upstream_allowance_from_env()?;
     let listen: SocketAddr = env::var("XSHIELD_CONTROL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9443".to_owned())
         .parse()?;
