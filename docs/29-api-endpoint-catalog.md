@@ -510,6 +510,17 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 
 每次已认证尝试追加一条 `console.rollout_report.read` 管理 journal：成功 `PASS/CONTROL_ROLLOUT_REPORT_READ`，失败按上述原因码区分 DENY/ERROR；事件不含观察标签、窗口、计数或摘要。worker 发布器只接受这一路径与原因集合。
 
+## 29.38 发版联动的页面构建登记（`xshield-build`）
+
+前端每次发版都会产出一个新的静态页面，`SENSOR_HTML` 路由只放行完整 SHA-256 与已批准构建一致的页面，新构建未登记就失败关闭。`xshield-build` 是随控制面构建的可选命令行工具（不是网关依赖，不改变任何接口），供前端 CI 使用：
+
+- `xshield-build fingerprint <page.html>`：离线输出 `{"origin_sha256","injection_offset","bytes"}`。摘要按原始字节计算，偏移是第一个小写 `</head>` 的字节位置，与控制台“从页面源码计算”一致；空文件、超过 16 MiB 或没有小写 `</head>` 时退出码 1。
+- `xshield-build register --control <url> --site <site_id> --operation <operation_id> --revision <adapter_revision> --page <page.html> [--retire <adapter_revision>]... [--dry-run]`：用环境变量 `XSHIELD_API_KEY` 中的 Agent API Key（需要该站点的 `site.read` 与 `site.config.write`，不需要也不应授予 `site.config.apply_direct`）读取 `GET /sites/{id}/config`，把新构建加在已服务构建旁边（同一路由最多 16 个，超过时必须同时 `--retire`），`--retire` 删除旧构建，删除主构建时下一个构建成为主构建；本地 `SiteConfig::validate` 通过后用确定性 `Idempotency-Key` 调用 `PUT /sites/{id}/config`。同一构建、同一标签再次运行且没有要删除的构建时不写任何修订（`state=unchanged`）。`--dry-run` 只做读取与本地校验。`--control` 必须是 https，仅回环地址允许 http；不跟随重定向。
+
+工具只暂存修订，从不批准或应用：构建变化是 `SENSOR_HTML_CHANGED`，只有独立 `PolicyApprover` 能清除（产品决定 8：试点期间每次人工批准）。推荐流程是：CI 构建后 `register` 新构建，审批人在控制台批准，edge 确认后再发布新前端；发布完成后用 `--retire` 删除旧构建并再次审批。保存接口不比较读取时的修订，所以工具保存后读取 `GET /sites/{id}/revisions`：如果自己修订之前的最新修订不是读取时的那个，说明期间有人保存过，新修订包含对方的改动，此时以退出码 3 提示审批人核对差异。退出码：0 已暂存或无需暂存，1 本地错误（参数、页面、配置不合规则），2 控制面拒绝或不可达（输出 `error_code`），3 期间有其他修订。
+
+输出为一行 JSON：`state`（`staged`/`unchanged`/`dry_run`）、站点、路由、标签、摘要、偏移、删除的构建、读取时的修订，暂存时另附 `desired_revision`、`active_revision`、`apply_state`、`requires_approval`、`reason_code`、`config_digest`。保存与读取都按 Agent API Key 审计（`console.agent_api_key.use` 与对应站点事件），`X-Xshield-Agent-Run-Id` 每次运行新生成。回归：核心登记逻辑的单测（`xshield-core` `site::build`）与控制面 HTTP 回归 `a_release_stages_its_build_for_independent_approval`（真实 PostgreSQL，经真实 TCP 调用路由）。
+
 ## 站点诊断与控制台契约补充（2026-09-27）
 
 found=false 的站点配置响应可以包含 requires_approval=null；客户端不得将其解读为发布许可或格式错误。持久化 listen_port 范围为 6100–65535；请求值 0 是自动分配指令。

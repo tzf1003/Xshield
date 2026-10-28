@@ -7,6 +7,7 @@ use crate::domain::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub mod build;
 pub mod config;
 pub mod descriptors;
 pub mod flow;
