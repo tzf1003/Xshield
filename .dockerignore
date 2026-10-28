@@ -11,3 +11,5 @@ validation
 *.tar.gz
 .env
 .env.*
+# Fuzzing harness and corpora; not part of any image.
+fuzz
