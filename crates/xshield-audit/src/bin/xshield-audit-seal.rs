@@ -1,5 +1,6 @@
 use std::{env, error::Error, path::PathBuf};
 use xshield_audit::{JournalKey, SealSigningKey, seal_closed_segments};
+use xshield_core::resident::Schedule;
 use zeroize::Zeroizing;
 
 fn run() -> Result<usize, Box<dyn Error>> {
@@ -36,11 +37,31 @@ fn run() -> Result<usize, Box<dyn Error>> {
 }
 
 fn main() {
-    match run() {
-        Ok(count) => println!("{count}"),
+    let schedule = match Schedule::from_env() {
+        Ok(schedule) => schedule,
         Err(error) => {
             eprintln!("xshield audit sealing failed: {error}");
             std::process::exit(1);
         }
+    };
+    loop {
+        match run() {
+            Ok(count) => {
+                println!("{count}");
+                if let Err(error) = schedule.record_success() {
+                    eprintln!("xshield audit sealing heartbeat failed: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("xshield audit sealing failed: {error}");
+                if schedule.interval().is_none() {
+                    std::process::exit(1);
+                }
+            }
+        }
+        let Some(interval) = schedule.interval() else {
+            return;
+        };
+        std::thread::sleep(interval);
     }
 }

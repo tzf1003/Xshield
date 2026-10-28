@@ -79,6 +79,8 @@ control 与 edge 之间的 HMAC 通道对三类消息分别认证，并共用同
 
 edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的持久批次完成后自动切换 producer boot。部署方预建仅封存身份可写的私有 manifest 目录，并周期运行 `xshield-audit-seal JOURNAL_DIRECTORY MANIFEST_DIRECTORY`。该进程读取 journal 密钥并独占日志签名私钥；edge 不取得签名私钥。重复任务会验证既有清单与关闭段完全一致，再处理新段。
 
+常驻模式：`xshield-audit-seal`、`xshield-worker`（审计发布）与 `xshield-outbox-worker` 默认执行一轮有界处理后退出，适合 cron 或 Kubernetes CronJob。设置 `XSHIELD_RUN_INTERVAL_SECONDS`（1 到 86400 的整数）后进程常驻，每轮结束后等待该秒数再执行下一轮，适合 Compose 服务或 Kubernetes Deployment；单轮失败只向 stderr 报告并在下一轮重试，不退出（一次性模式下失败仍以退出码 1 结束）。`xshield-outbox-worker` 常驻时连接池跨轮复用，一轮领取满 `XSHIELD_OUTBOX_MAX_EVENTS` 条时不等待直接进入下一轮。可选 `XSHIELD_RUN_HEARTBEAT_FILE`（只能与间隔一起设置）：每轮成功后以“写临时文件再 rename”的方式写入当前 Unix 秒，探针据此判断进程是否仍在成功工作（例如文件超过三个间隔未更新即视为不健康），因为一直失败的常驻进程本身不会退出。每一轮本来就可以安全中断（outbox 租约到期后重领，发布检查点与封存清单都以 rename 替换），所以停止常驻进程直接发送默认的 SIGTERM 即可，没有额外的优雅退出逻辑。
+
 ## 19.4 配置与升级
 
 草稿 → validate → 独立测试 → 审批 → 签名 → shadow → canary → active。数据面固定版本读，旧新构建并行范围明确。控制面丢失连接可使用未过期签名配置，但不得跳过身份/资格存储不可用。

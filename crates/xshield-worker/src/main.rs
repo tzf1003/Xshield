@@ -1,6 +1,7 @@
 use clickhouse::Client;
 use std::{env, error::Error, path::PathBuf};
 use xshield_audit::{JournalKey, SealVerifyingKey};
+use xshield_core::resident::Schedule;
 use xshield_worker::{PublisherConfig, publish_sealed_segments};
 use zeroize::Zeroizing;
 
@@ -70,8 +71,30 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("xshield audit publication failed: {error}");
-        std::process::exit(1);
+    let schedule = match Schedule::from_env() {
+        Ok(schedule) => schedule,
+        Err(error) => {
+            eprintln!("xshield audit publication failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    loop {
+        match run().await {
+            Ok(()) => {
+                if let Err(error) = schedule.record_success() {
+                    eprintln!("xshield audit publication heartbeat failed: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("xshield audit publication failed: {error}");
+                if schedule.interval().is_none() {
+                    std::process::exit(1);
+                }
+            }
+        }
+        let Some(interval) = schedule.interval() else {
+            return;
+        };
+        tokio::time::sleep(interval).await;
     }
 }
