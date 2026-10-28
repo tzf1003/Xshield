@@ -124,6 +124,25 @@ applied=$(management -X POST -H 'Idempotency-Key: helm-smoke-apply-1' \
 grep -q '"reason_code":"CONTROL_SITE_APPROVAL_REQUIRED"' <<<"$applied" || fail "apply: $applied"
 echo 'ok: admitted private origin saved, others refused; control reached the edge over the signed channel; apply waits for approval'
 
+# The edge, the jobs and the outbox publishers never restarted (control may
+# have, while Keycloak was starting).
+restarts=$(k get pods -l app.kubernetes.io/instance="$release" -o \
+    jsonpath='{range .items[*].status.containerStatuses[*]}{.name}={.restartCount}{"\n"}{end}' |
+    awk -F= '$1 != "control" && $1 != "oidc" && $2 != 0')
+[[ -z "$restarts" ]] || fail "containers restarted: $restarts"
+echo 'ok: no edge, job or outbox container restarted'
+
+# A new pod (and pod IP) on the same volume: the edge re-renders its listen
+# address, the journals carry on, the saved site is still there. The new
+# control process also starts a new journal segment, which closes the one
+# holding the site creation so it can be sealed and published.
+k delete pod "$pod" --wait=true >/dev/null || fail 'delete pod'
+k rollout status statefulset/"$release" --timeout=10m >/dev/null || fail 'pod did not come back'
+wait_ready 'edge and control did not recover on a new pod'
+sites=$(management http://127.0.0.1:9443/control/v1/sites)
+grep -q '"site_id":"site_pilot"' <<<"$sites" || fail "site missing after the pod was replaced: $sites"
+echo 'ok: a replaced pod is ready again on the same volume'
+
 published=0
 for _ in $(seq 1 60); do
     published=$(k exec deploy/smoke-clickhouse -- clickhouse-client --query \
@@ -150,20 +169,4 @@ for family in case evidence_catalog evidence_access evidence_retention calibrati
 done
 echo 'ok: all 14 resident jobs record successful passes'
 
-# The edge, the jobs and the outbox publishers never restarted (control may
-# have, while Keycloak was starting).
-restarts=$(k get pods -l app.kubernetes.io/instance="$release" -o \
-    jsonpath='{range .items[*].status.containerStatuses[*]}{.name}={.restartCount}{"\n"}{end}' |
-    awk -F= '$1 != "control" && $1 != "oidc" && $2 != 0')
-[[ -z "$restarts" ]] || fail "containers restarted: $restarts"
-echo 'ok: no edge, job or outbox container restarted'
-
-# A new pod (and pod IP) on the same volume: the edge re-renders its listen
-# address, the journals carry on, the saved site is still there.
-k delete pod "$pod" --wait=true >/dev/null || fail 'delete pod'
-k rollout status statefulset/"$release" --timeout=10m >/dev/null || fail 'pod did not come back'
-wait_ready 'edge and control did not recover on a new pod'
-sites=$(management http://127.0.0.1:9443/control/v1/sites)
-grep -q '"site_id":"site_pilot"' <<<"$sites" || fail "site missing after the pod was replaced: $sites"
-echo 'ok: a replaced pod is ready again on the same volume'
 echo 'helm deployment smoke passed'
