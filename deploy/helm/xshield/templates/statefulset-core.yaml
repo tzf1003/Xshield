@@ -1,0 +1,278 @@
+{{- $name := include "xshield.fullname" . -}}
+{{- $ports := until (int .Values.edge.sitePorts.count) -}}
+{{- $first := int .Values.edge.sitePorts.first -}}
+{{- if gt (add $first (len $ports)) 65536 }}
+{{- fail "edge.sitePorts runs past port 65535" }}
+{{- end }}
+# Edge and control in one pod: the control API (127.0.0.1:9443) and the edge
+# apply channel (127.0.0.1:9553) are loopback-only by design, so they must
+# share a network namespace. The seal and publish jobs of both journals run
+# beside them because they read the same volume. Exactly one replica: each
+# journal, manifest set and checkpoint has a single writer (docs/13).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core
+spec:
+  replicas: 1
+  serviceName: {{ $name }}-ops
+  selector:
+    matchLabels:
+      {{- include "xshield.selector" (dict "root" . "component" "core") | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    # Unpublished journals and evidence outlive the release.
+    whenDeleted: Retain
+    whenScaled: Retain
+  template:
+    metadata:
+      labels:
+        {{- include "xshield.selector" (dict "root" . "component" "core") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/edge-config: {{ include (print $.Template.BasePath "/configmap-edge.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "xshield.podSecurity" . | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: prepare
+          image: {{ .Values.images.worker }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          {{- include "xshield.containerSecurity" . | nindent 10 }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              for d in edge-audit edge-manifests edge-checkpoints edge-snapshot \
+                  control-audit control-manifests control-checkpoints evidence; do
+                mkdir -p "/state/$d"
+                chmod 0700 "/state/$d"
+              done
+              sed "s/__POD_IP__/$POD_IP/" /etc/xshield-template/edge.json.template >/etc/xshield/edge.json
+          env:
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          volumeMounts:
+            - {name: state, mountPath: /state}
+            - {name: edge-config-template, mountPath: /etc/xshield-template, readOnly: true}
+            - {name: edge-config, mountPath: /etc/xshield}
+          resources:
+            {{- toYaml .Values.jobs.resources | nindent 12 }}
+      containers:
+        - name: edge
+          image: {{ .Values.images.edge }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          {{- include "xshield.containerSecurity" . | nindent 10 }}
+          env:
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - {name: XSHIELD_CONFIG, value: /etc/xshield/edge.json}
+            - {name: XSHIELD_EDGE_BOOTSTRAP_ONLY, value: "1"}
+            - {name: XSHIELD_EDGE_OPS_LISTEN, value: "$(POD_IP):9554"}
+            - {name: XSHIELD_EDGE_APPLY_LISTEN, value: "127.0.0.1:9553"}
+            - {name: XSHIELD_EDGE_SNAPSHOT_PATH, value: /var/lib/xshield/edge-snapshot/snapshot.json}
+            - {name: XSHIELD_EDGE_APPLY_KEY_HEX_FILE, value: /run/secrets/edge_apply_key}
+            - {name: XSHIELD_JOURNAL_KEY_HEX_FILE, value: /run/secrets/edge_journal_key}
+            - {name: XSHIELD_DATABASE_URL_FILE, value: /run/secrets/database_url}
+            - {name: XSHIELD_FINGERPRINT_KEY_HEX_FILE, value: /run/secrets/fingerprint_key}
+            - {name: XSHIELD_SHARE_TOKEN_KEY_HEX_FILE, value: /run/secrets/share_token_key}
+          ports:
+            {{- range $ports }}
+            - {name: site-{{ add $first . }}, containerPort: {{ add $first . }}, protocol: TCP}
+            {{- end }}
+            - {name: edge-ops, containerPort: 9554, protocol: TCP}
+          readinessProbe:
+            httpGet: {path: /readyz, port: edge-ops}
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: edge-ops}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - {name: secrets-edge, mountPath: /run/secrets, readOnly: true}
+            - {name: edge-config, mountPath: /etc/xshield, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/edge-audit, subPath: edge-audit}
+            - {name: state, mountPath: /var/lib/xshield/edge-snapshot, subPath: edge-snapshot}
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+
+        # No readiness probe: the pod's readiness gates the data plane, which
+        # must not leave rotation because the management side is unhealthy.
+        # Scrape control's /readyz and /metrics on port 9555 instead.
+        - name: control
+          image: {{ .Values.images.control }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          {{- include "xshield.containerSecurity" . | nindent 10 }}
+          args:
+            - /var/lib/xshield/edge-audit
+            - /var/lib/xshield/edge-manifests
+            - /var/lib/xshield/edge-checkpoints
+            - /var/lib/xshield/control-audit
+          env:
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            {{- include "xshield.clickhouseEnv" . | nindent 12 }}
+            - {name: XSHIELD_TENANT_ID, value: {{ .Values.tenantId | quote }}}
+            - {name: XSHIELD_SITE_ID, value: {{ .Values.siteId | quote }}}
+            - {name: XSHIELD_CONTROL_LISTEN, value: "127.0.0.1:9443"}
+            - {name: XSHIELD_CONTROL_OPS_LISTEN, value: "$(POD_IP):9555"}
+            - {name: XSHIELD_CONTROL_SUBJECT, value: {{ .Values.control.bootstrapSubject | quote }}}
+            - {name: XSHIELD_CONTROL_ROLES, value: {{ .Values.control.bootstrapRoles | quote }}}
+            - {name: XSHIELD_CONTROL_TOKEN_FILE, value: /run/secrets/control_token}
+            - name: XSHIELD_CONTROL_TOKEN_ISSUED_AT
+              valueFrom: {secretKeyRef: {name: {{ .Values.existingSecret }}, key: control_token_issued_at}}
+            - name: XSHIELD_CONTROL_TOKEN_EXPIRES_AT
+              valueFrom: {secretKeyRef: {name: {{ .Values.existingSecret }}, key: control_token_expires_at}}
+            - {name: XSHIELD_CONTROL_OIDC_ISSUER, value: {{ .Values.oidc.issuer | quote }}}
+            - {name: XSHIELD_CONTROL_OIDC_CLIENT_ID, value: {{ .Values.oidc.clientId | quote }}}
+            - {name: XSHIELD_CONTROL_OIDC_CLIENT_SECRET_FILE, value: /run/secrets/oidc_client_secret}
+            - {name: XSHIELD_CONTROL_OIDC_REQUIRED_ACR, value: {{ .Values.oidc.requiredAcr | quote }}}
+            - {name: XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON, value: {{ .Values.oidc.subjectRolesJson | quote }}}
+            - {name: XSHIELD_CONTROL_CONSOLE_ORIGIN, value: {{ .Values.oidc.consoleOrigin | quote }}}
+            - {name: XSHIELD_CONTROL_CURSOR_KEY_HEX_FILE, value: /run/secrets/control_cursor_key}
+            - {name: XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX_FILE, value: /run/secrets/control_idempotency_key}
+            - {name: XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX_FILE, value: /run/secrets/control_api_key_hash_key}
+            - {name: XSHIELD_CONTROL_AUDIT_KEY_ID, value: control-audit-r1}
+            - {name: XSHIELD_CONTROL_AUDIT_KEY_HEX_FILE, value: /run/secrets/control_journal_key}
+            - {name: XSHIELD_CONTROL_AUDIT_MAX_BYTES, value: "268435456"}
+            - {name: XSHIELD_CONTROL_AUDIT_HIGH_WATERMARK_BYTES, value: "201326592"}
+            - {name: XSHIELD_CONTROL_AUDIT_SEGMENT_MAX_BYTES, value: "16777216"}
+            - {name: XSHIELD_JOURNAL_KEY_ID, value: edge-journal-r1}
+            - {name: XSHIELD_JOURNAL_KEY_HEX_FILE, value: /run/secrets/edge_journal_key}
+            - {name: XSHIELD_SEAL_KEY_ID, value: edge-seal-r1}
+            - {name: XSHIELD_SEAL_PUBLIC_KEY_HEX_FILE, value: /run/secrets/edge_seal_public_key}
+            - {name: XSHIELD_INDEX_TARGET_ID, value: clickhouse-primary}
+            - {name: XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES, value: "16777216"}
+            - {name: XSHIELD_DATABASE_URL_FILE, value: /run/secrets/database_url}
+            - {name: XSHIELD_CONTROL_DATABASE_MAX_CONNECTIONS, value: {{ .Values.control.databaseMaxConnections | quote }}}
+            - {name: XSHIELD_CONTROL_DATABASE_ACQUIRE_TIMEOUT_MS, value: "2000"}
+            - {name: XSHIELD_CONTROL_REQUESTS_PER_MINUTE, value: {{ .Values.control.requestsPerMinute | quote }}}
+            - {name: XSHIELD_CONTROL_MAX_QUERY_EVENTS, value: "1000"}
+            - {name: XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS, value: "128"}
+            - {name: XSHIELD_CONTROL_MAX_OPEN_CASES, value: "32"}
+            - {name: XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS, value: "32"}
+            - {name: XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS, value: "120"}
+            - {name: XSHIELD_EVIDENCE_ROOT, value: /var/lib/xshield/evidence}
+            - {name: XSHIELD_EVIDENCE_KEY_ID, value: evidence-r1}
+            - {name: XSHIELD_EVIDENCE_KEY_HEX_FILE, value: /run/secrets/evidence_key}
+            - {name: XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES, value: "67108864"}
+            - {name: XSHIELD_EVIDENCE_MAX_RETENTION_DAYS, value: "30"}
+            - {name: XSHIELD_EDGE_APPLY_URL, value: "http://127.0.0.1:9553/internal/v1/apply"}
+            - {name: XSHIELD_EDGE_APPLY_KEY_HEX_FILE, value: /run/secrets/edge_apply_key}
+            - {name: XSHIELD_ALLOWED_UPSTREAM_CIDRS, value: {{ join "," .Values.control.allowedUpstreamCidrs | quote }}}
+          ports:
+            - {name: control-ops, containerPort: 9555, protocol: TCP}
+          livenessProbe:
+            httpGet: {path: /livez, port: control-ops}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - {name: secrets-control, mountPath: /run/secrets, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/edge-audit, subPath: edge-audit, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/edge-manifests, subPath: edge-manifests, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/edge-checkpoints, subPath: edge-checkpoints, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/control-audit, subPath: control-audit}
+            - {name: state, mountPath: /var/lib/xshield/evidence, subPath: evidence}
+          resources:
+            {{- toYaml .Values.control.resources | nindent 12 }}
+
+        {{- range $source := list "edge" "control" }}
+        {{- $journalKey := ternary "edge-journal-r1" "control-audit-r1" (eq $source "edge") }}
+        {{- $journalSecret := ternary "edge_journal_key" "control_journal_key" (eq $source "edge") }}
+        # Seals closed segments of the {{ $source }} journal (docs/13).
+        - name: {{ $source }}-seal
+          image: {{ $.Values.images.worker }}
+          imagePullPolicy: {{ $.Values.images.pullPolicy }}
+          {{- include "xshield.containerSecurity" $ | nindent 10 }}
+          command: ["/usr/local/bin/xshield-audit-seal"]
+          args: [/var/lib/xshield/{{ $source }}-audit, /var/lib/xshield/{{ $source }}-manifests]
+          env:
+            - {name: XSHIELD_JOURNAL_KEY_ID, value: {{ $journalKey }}}
+            - {name: XSHIELD_JOURNAL_KEY_HEX_FILE, value: /run/secrets/{{ $journalSecret }}}
+            - {name: XSHIELD_SEAL_KEY_ID, value: {{ $source }}-seal-r1}
+            - {name: XSHIELD_SEAL_KEY_HEX_FILE, value: /run/secrets/{{ $source }}_seal_key}
+            - {name: XSHIELD_RUN_INTERVAL_SECONDS, value: {{ $.Values.jobs.sealIntervalSeconds | quote }}}
+            - {name: XSHIELD_RUN_HEARTBEAT_FILE, value: /var/lib/xshield/heartbeat/{{ $source }}-seal}
+          {{- include "xshield.heartbeatProbes" (dict "root" $ "name" (printf "%s-seal" $source) "interval" (int $.Values.jobs.sealIntervalSeconds)) | nindent 10 }}
+          volumeMounts:
+            - {name: secrets-{{ $source }}-seal, mountPath: /run/secrets, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/{{ $source }}-audit, subPath: {{ $source }}-audit, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/{{ $source }}-manifests, subPath: {{ $source }}-manifests}
+            - {name: heartbeat, mountPath: /var/lib/xshield/heartbeat}
+          {{- include "xshield.jobResources" $ | nindent 10 }}
+
+        # Publishes sealed {{ $source }} segments to ClickHouse.
+        - name: {{ $source }}-publish
+          image: {{ $.Values.images.worker }}
+          imagePullPolicy: {{ $.Values.images.pullPolicy }}
+          {{- include "xshield.containerSecurity" $ | nindent 10 }}
+          args:
+            - /var/lib/xshield/{{ $source }}-audit
+            - /var/lib/xshield/{{ $source }}-manifests
+            - /var/lib/xshield/{{ $source }}-checkpoints
+          env:
+            {{- include "xshield.clickhouseEnv" $ | nindent 12 }}
+            - {name: XSHIELD_JOURNAL_KEY_ID, value: {{ $journalKey }}}
+            - {name: XSHIELD_JOURNAL_KEY_HEX_FILE, value: /run/secrets/{{ $journalSecret }}}
+            - {name: XSHIELD_SEAL_KEY_ID, value: {{ $source }}-seal-r1}
+            - {name: XSHIELD_SEAL_PUBLIC_KEY_HEX_FILE, value: /run/secrets/{{ $source }}_seal_public_key}
+            - {name: XSHIELD_INDEX_TARGET_ID, value: clickhouse-primary}
+            - {name: XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES, value: "16777216"}
+            - {name: XSHIELD_RUN_INTERVAL_SECONDS, value: {{ $.Values.jobs.publishIntervalSeconds | quote }}}
+            - {name: XSHIELD_RUN_HEARTBEAT_FILE, value: /var/lib/xshield/heartbeat/{{ $source }}-publish}
+          {{- include "xshield.heartbeatProbes" (dict "root" $ "name" (printf "%s-publish" $source) "interval" (int $.Values.jobs.publishIntervalSeconds)) | nindent 10 }}
+          volumeMounts:
+            - {name: secrets-{{ $source }}-publish, mountPath: /run/secrets, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/{{ $source }}-audit, subPath: {{ $source }}-audit, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/{{ $source }}-manifests, subPath: {{ $source }}-manifests, readOnly: true}
+            - {name: state, mountPath: /var/lib/xshield/{{ $source }}-checkpoints, subPath: {{ $source }}-checkpoints}
+            - {name: heartbeat, mountPath: /var/lib/xshield/heartbeat}
+          {{- include "xshield.jobResources" $ | nindent 10 }}
+        {{- end }}
+        {{- with .Values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: edge-config-template
+          configMap:
+            name: {{ $name }}-edge
+        - name: edge-config
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        - name: heartbeat
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        {{- include "xshield.secretVolume" (dict "root" . "name" "edge" "keys" (list "edge_apply_key" "edge_journal_key" "database_url" "fingerprint_key" "share_token_key")) | nindent 8 }}
+        {{- include "xshield.secretVolume" (dict "root" . "name" "control" "keys" (list "control_token" "oidc_client_secret" "control_cursor_key" "control_idempotency_key" "control_api_key_hash_key" "control_journal_key" "edge_journal_key" "edge_seal_public_key" "database_url" "clickhouse_password" "evidence_key" "edge_apply_key")) | nindent 8 }}
+        {{- include "xshield.secretVolume" (dict "root" . "name" "edge-seal" "keys" (list "edge_journal_key" "edge_seal_key")) | nindent 8 }}
+        {{- include "xshield.secretVolume" (dict "root" . "name" "edge-publish" "keys" (list "edge_journal_key" "edge_seal_public_key" "clickhouse_password")) | nindent 8 }}
+        {{- include "xshield.secretVolume" (dict "root" . "name" "control-seal" "keys" (list "control_journal_key" "control_seal_key")) | nindent 8 }}
+        {{- include "xshield.secretVolume" (dict "root" . "name" "control-publish" "keys" (list "control_journal_key" "control_seal_public_key" "clickhouse_password")) | nindent 8 }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+        labels:
+          {{- include "xshield.selector" (dict "root" . "component" "core") | nindent 10 }}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

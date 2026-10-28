@@ -1,0 +1,29 @@
+{{- $name := include "xshield.fullname" . -}}
+{{- $first := int .Values.edge.sitePorts.first -}}
+# The data plane: every site port. Put your WAF/CDN or load balancer in front.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-edge
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core
+  {{- with .Values.edge.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.edge.service.type }}
+  {{- with .Values.edge.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.edge.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- include "xshield.selector" (dict "root" . "component" "core") | nindent 4 }}
+  ports:
+    {{- range until (int .Values.edge.sitePorts.count) }}
+    - {name: site-{{ add $first . }}, port: {{ add $first . }}, targetPort: {{ add $first . }}, protocol: TCP}
+    {{- end }}

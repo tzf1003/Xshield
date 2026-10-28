@@ -1,0 +1,124 @@
+# Values for one Xshield tenant and site (docs/19 19.9). Settings marked
+# "required" have no usable default; values.schema.json refuses an install
+# without them. No secret value belongs here: every key comes from the Secret
+# named in existingSecret (see README.md and xshield-secrets.sh).
+
+# The one tenant and site this release serves; control is scoped to it.
+tenantId: ""  # required
+siteId: ""  # required
+
+# Images built from the repository Dockerfile targets. Pin by digest in
+# production ("ghcr.io/<owner>/xshield-edge@sha256:...") and verify the
+# signature first (docs/19 19.7).
+images:
+  edge: ""  # required
+  control: ""  # required
+  worker: ""  # required
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Secret holding every key, password and the bootstrap bearer, one file per
+# key. xshield-secrets.sh writes the files; README.md lists the keys.
+existingSecret: ""  # required
+
+# The operator's PostgreSQL (its URL is the database_url key of the Secret) and
+# ClickHouse (password is the clickhouse_password key). Apply migrations/ and
+# sql/clickhouse.sql before the first install and before each upgrade that
+# ships new ones.
+clickhouse:
+  url: ""  # required, e.g. http://clickhouse.xshield-data:8123
+  database: xshield
+  user: xshield
+  # Retention written on audit rows (docs/13).
+  metadataRetentionDays: 30
+
+# Management sign-in (docs/19 19.3, docs/15).
+oidc:
+  issuer: ""  # required; HTTPS (loopback HTTP is accepted for development only)
+  clientId: ""  # required
+  requiredAcr: ""  # required; the acr your IdP issues for MFA
+  # JSON list of {"subject": "<IdP sub>", "roles": [...]}.
+  subjectRolesJson: ""  # required
+  consoleOrigin: ""  # required; https origin of your management proxy
+
+control:
+  # Roles of the bootstrap bearer (control_token in the Secret, at most 24 h).
+  bootstrapRoles: observer
+  bootstrapSubject: bootstrap-operator
+  # Private networks your origins live in (RFC 1918 or fc00::/7 CIDRs, at most
+  # 32). Empty refuses every private upstream address (docs/19 19.2).
+  allowedUpstreamCidrs: []
+  databaseMaxConnections: 8
+  requestsPerMinute: 120
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+edge:
+  # Data listeners bind the pod IP on these ports; the bootstrap configuration
+  # takes the first one, sites pick from the rest (6100-65535 pool).
+  sitePorts:
+    first: 6400
+    count: 10
+  service:
+    type: ClusterIP
+    annotations: {}
+    # For a LoadBalancer: keep client addresses (PROXY protocol or not, see
+    # docs/19 19.2) and restrict who may connect.
+    externalTrafficPolicy: ""
+    loadBalancerSourceRanges: []
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+# Resident seal and publish jobs beside edge and control, and the outbox
+# publishers. A job whose heartbeat is older than three intervals plus a
+# minute is restarted by its liveness probe.
+jobs:
+  sealIntervalSeconds: 30
+  publishIntervalSeconds: 15
+  outboxIntervalSeconds: 5
+  # How long after a job starts its liveness probe begins checking the
+  # heartbeat, so dependencies may come up first.
+  firstSuccessGraceSeconds: 600
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {memory: 256Mi}
+
+# State of edge and control: journals, seal manifests, publish checkpoints,
+# the signed edge snapshot and the evidence store. One ReadWriteOnce volume;
+# losing it loses unpublished audit and evidence (docs/19 19.6).
+persistence:
+  storageClassName: ""
+  size: 20Gi
+
+# Unauthenticated /livez, /readyz and /metrics of edge (9554) and control
+# (9555) on the pod IP; they disclose no topology (docs/19 19.5).
+metrics:
+  service:
+    annotations: {}
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+# Restricts ingress to the pod: site ports from dataPlaneFrom, ops ports from
+# opsFrom (both lists of NetworkPolicyPeer). Egress is left open because
+# origins, PostgreSQL, ClickHouse and the IdP are deployment-specific.
+networkPolicy:
+  enabled: false
+  dataPlaneFrom: []
+  opsFrom: []
+
+# Containers added to the edge/control pod. They share its network namespace,
+# which is how the management HTTPS proxy reaches the control API on
+# 127.0.0.1:9443 (README.md).
+extraContainers: []
+extraVolumes: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

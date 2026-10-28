@@ -131,7 +131,7 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 
 部署方应按 digest 引用镜像，并在使用前验证：`cosign verify <镜像>@sha256:… --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/release-images\.yml@refs/tags/v'`。该工作流还没有实际运行过（尚未打过发布标签）。
 
-单机 Docker Compose 参考部署见 19.8，CI 用这三个镜像把它整体拉起验证；Helm 清单与 systemd 单元仍没有（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
+单机 Docker Compose 参考部署见 19.8，Kubernetes 的 Helm chart 见 19.9，CI 用这三个镜像把两者都整体拉起验证；systemd 单元仍没有（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
 
 ## 19.8 参考部署（Docker Compose）
 
@@ -156,3 +156,44 @@ CI 的 `compose` 作业用仓库 `Dockerfile` 构建三个镜像后运行 `scrip
 - 14 个常驻任务都有新鲜心跳。
 
 **未覆盖**：站点经 edge 实际服务流量，因为首次 apply 需要 OIDC 浏览器会话的独立审批，这部分由控制面与网关的其他回归覆盖；管理代理与控制台；真实企业 IdP、TLS 与 MFA。
+
+## 19.9 Kubernetes（Helm chart）
+
+`deploy/helm/xshield/` 把一个租户、一个站点部署到 Kubernetes，用法见 `deploy/helm/README.md`。拓扑与 19.8 相同，按 Kubernetes 的方式落地：
+
+- **Pod 拓扑**：edge、control 以及两组 journal 的封存与发布任务放在一个单副本 StatefulSet 的同一个 Pod 里。
+  - 管理 API 与 apply 通道只监听 loopback，所以 edge 与 control 必须共享网络命名空间。
+  - 封存和发布任务读写同一个持久卷 `state`。各目录 0700，由初始化容器以 uid 10001 创建。
+  - 持久卷在卸载后保留。
+  - 十个 outbox 发布任务是独立的 Deployment。
+- **数据面**：
+  - edge 的引导配置是 ConfigMap 模板，Pod 启动时由初始化容器填入 Pod IP，因为数据面监听器只绑定私网地址。Pod 网段必须在 RFC 1918 范围内。
+  - 站点端口默认 6400–6409，由 Service `<release>-edge` 暴露。
+  - 运维端点绑定在 Pod IP 上，由 Service `<release>-ops` 暴露；可选 ServiceMonitor。
+- **就绪与存活**：
+  - Pod 就绪只看 edge 的 `/readyz`，管理面异常不应把数据面撤出流量。control 只有 liveness 探针，它的 `/readyz` 供监控抓取。
+  - 常驻任务没有就绪探针。它们的 liveness 探针检查心跳文件：启动宽限期过后，心跳超过三个间隔加一分钟未更新即重启该容器（19.3）。
+  - **代价**：control 进程反复崩溃时（例如启动时 IdP 不可达），Pod 仍会未就绪，这是 loopback 设计带来的耦合。
+- **秘密**：
+  - 全部来自运维创建的 Secret，`deploy/helm/xshield-secrets.sh` 生成除数据库 URL、ClickHouse 密码与 IdP 客户端密钥以外的键。
+  - 每个容器只投影自己用到的键，Secret 卷权限 0440，组为 fsGroup；进程仍经 `NAME_FILE` 读取。
+  - 引导 Bearer 的签发与过期时间也在 Secret 里。
+- **安全上下文**：所有 Xshield 容器以 uid 10001 运行，`runAsNonRoot`、根文件系统只读、去除全部 capability、禁止提权、seccomp `RuntimeDefault`，不挂载 ServiceAccount 令牌。符合 Pod Security `restricted` 的要求。
+  - `fsGroupChangePolicy: OnRootMismatch` 防止 kubelet 给 journal 加组权限，审计读取方会拒绝组可读的文件。
+- **可选 NetworkPolicy**：只放行站点端口与运维端口的入站，来源可分别限定。outbox Pod 不接受入站。出站不限制，因为源站、数据库与 IdP 因部署而异。
+- **运维自备**：PostgreSQL 与 ClickHouse（迁移与 schema 由运维在安装和升级前执行）、企业 OIDC IdP、管理面 HTTPS 同源代理（以 `extraContainers` 加入 Pod）、edge 前置的负载均衡或 WAF/CDN、备份（19.6）与告警。
+
+CI 的 `helm` 作业先做静态检查：缺少必填值时 schema 拒绝渲染；`helm lint --strict`；渲染结果与测试依赖清单用 kubeconform 按 Kubernetes 1.29 严格校验。随后在 kind 集群里装入仓库 `Dockerfile` 构建的三个镜像，运行 `scripts/test_helm_deployment.sh`。脚本用 `deploy/helm/smoke/` 部署测试用 PostgreSQL、ClickHouse、一个私网源站，并在 Pod 内加入开发 Keycloak 与 curl 工具容器，然后检查以下各项：
+
+- 两个运维端点就绪，数据面经 Service 对未配置主机返回 `SITE_CONFIG_UNAVAILABLE`；
+- 管理 API 只接受引导 Bearer；放行网段内的源站可以保存，网段外的被拒绝；control 经签名通道取到 edge 健康，首个 apply 等待独立审批；
+- 管理审计事件经封存、发布进入 ClickHouse；
+- 14 个常驻任务都有新鲜心跳，edge、任务与 outbox 容器没有重启；
+- 删除 Pod 后，新 Pod（新 IP）在同一持久卷上恢复就绪，已保存的站点仍在。
+
+**未覆盖**：
+- 站点经 edge 实际服务流量（原因同 19.8）；
+- 管理代理与控制台；
+- 真实企业 IdP、TLS 与 MFA；
+- 升级路径（`helm upgrade` 与迁移）；
+- ServiceMonitor 与 NetworkPolicy 在真实监控和 CNI 下的效果，CI 只校验渲染结果，kind 默认 CNI 只做基本执行。

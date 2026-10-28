@@ -1,0 +1,36 @@
+{{- $name := include "xshield.fullname" . -}}
+# Static bootstrap configuration: one placeholder route that never serves, so
+# the edge starts with its identity runtime and waits for the first apply.
+# __POD_IP__ is replaced at pod start: data listeners bind the pod's private
+# address, which is only known then.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-edge
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+data:
+  edge.json.template: |
+    {
+      "listen": "__POD_IP__:{{ .Values.edge.sitePorts.first }}",
+      "origin": {"address": "127.0.0.1:1", "server_name": "bootstrap.invalid", "tls": false},
+      "tenant_id": {{ .Values.tenantId | toJson }},
+      "site_id": {{ .Values.siteId | toJson }},
+      "policy_revision": "bootstrap-r1",
+      "audit": {
+        "directory": "/var/lib/xshield/edge-audit",
+        "key_id": "edge-journal-r1",
+        "producer_id": "edge-1",
+        "max_bytes": 268435456,
+        "high_watermark_bytes": 201326592,
+        "segment_max_bytes": 16777216,
+        "reconcile_max_records": 1000000
+      },
+      "identity_store": {"max_connections": 4, "acquire_timeout_ms": 2000},
+      "operations": [{
+        "operation_id": "bootstrap.reject",
+        "method": "GET",
+        "path": "/__bootstrap__",
+        "admission": "AUTHENTICATED_ROOT"
+      }]
+    }

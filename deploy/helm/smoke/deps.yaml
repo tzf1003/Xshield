@@ -1,0 +1,86 @@
+# Test-only dependencies for scripts/test_helm_deployment.sh: PostgreSQL and
+# ClickHouse initialised from the repository schema, and a private origin.
+# Production uses the operator's own databases (deploy/helm/README.md).
+apiVersion: v1
+kind: Service
+metadata: {name: postgres}
+spec:
+  selector: {app: smoke-postgres}
+  ports: [{port: 5432}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: smoke-postgres}
+spec:
+  selector: {matchLabels: {app: smoke-postgres}}
+  template:
+    metadata: {labels: {app: smoke-postgres}}
+    spec:
+      # The service account token would be mounted under /var/run/secrets,
+      # which is the secret volume at /run/secrets in these images.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: postgres
+          image: postgres:16.10-alpine3.22@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+          env:
+            - {name: POSTGRES_DB, value: xshield}
+            - {name: POSTGRES_USER, value: xshield}
+            - {name: POSTGRES_PASSWORD_FILE, value: /run/secrets/postgres_password}
+          readinessProbe:
+            exec: {command: [pg_isready, -U, xshield, -d, xshield]}
+            periodSeconds: 3
+          volumeMounts:
+            - {name: migrations, mountPath: /docker-entrypoint-initdb.d, readOnly: true}
+            - {name: secrets, mountPath: /run/secrets, readOnly: true}
+      volumes:
+        - {name: migrations, configMap: {name: smoke-migrations}}
+        - {name: secrets, secret: {secretName: smoke-databases}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: clickhouse}
+spec:
+  selector: {app: smoke-clickhouse}
+  ports: [{port: 8123}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: smoke-clickhouse}
+spec:
+  selector: {matchLabels: {app: smoke-clickhouse}}
+  template:
+    metadata: {labels: {app: smoke-clickhouse}}
+    spec:
+      # The service account token would be mounted under /var/run/secrets,
+      # which is the secret volume at /run/secrets in these images.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:25.8.29.51@sha256:aec6fb9892becb6a20eb8d57708b8cf9c777b2ad1f4eb70bbece7a70eaed9fd0
+          readinessProbe:
+            exec: {command: [clickhouse-client, --query, "SELECT count() FROM system.users WHERE name = 'xshield'"]}
+            periodSeconds: 3
+          volumeMounts:
+            - {name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true}
+            - {name: secrets, mountPath: /run/secrets, readOnly: true}
+      volumes:
+        - name: init
+          configMap:
+            name: smoke-clickhouse-init
+            defaultMode: 0755
+        - {name: secrets, secret: {secretName: smoke-databases}}
+---
+# A static origin on a pod address, admitted through
+# control.allowedUpstreamCidrs.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smoke-origin
+  labels: {app: smoke-origin}
+spec:
+  containers:
+    - name: origin
+      image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+      command: ["sh", "-c", "mkdir -p /tmp/www && echo smoke-origin-ok > /tmp/www/index.html && exec httpd -f -p 8080 -h /tmp/www"]

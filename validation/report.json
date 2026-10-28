@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 4059,
-  "passed_count": 4059,
+  "checks_total": 4070,
+  "passed_count": 4070,
   "acceptance_cases": {
     "total": 78,
     "planned": 18,
@@ -12,6 +12,11 @@
   "checks": [
     {
       "name": "json:MANIFEST.sha256.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:deploy/helm/xshield/values.schema.json",
       "passed": true,
       "detail": ""
     },
@@ -197,6 +202,36 @@
     },
     {
       "name": "json:web/console/tsconfig.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "yaml:deploy/compose/compose.smoke.yaml",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "yaml:deploy/compose/compose.yaml",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "yaml:deploy/helm/smoke/deps.yaml",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "yaml:deploy/helm/smoke/values.yaml",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "yaml:deploy/helm/xshield/Chart.yaml",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "yaml:deploy/helm/xshield/values.yaml",
       "passed": true,
       "detail": ""
     },
@@ -19762,6 +19797,26 @@
     },
     {
       "name": "link:README.md:CHANGELOG.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:deploy/compose/README.md:../../docs/19-deployment-operations.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:deploy/compose/README.md:../../web/console/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:deploy/helm/README.md:../../docs/19-deployment-operations.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:deploy/helm/README.md:../../web/console/README.md",
       "passed": true,
       "detail": ""
     },

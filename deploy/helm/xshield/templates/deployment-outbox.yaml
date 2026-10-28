@@ -1,0 +1,59 @@
+{{- $name := include "xshield.fullname" . -}}
+# One resident publisher per transactional outbox family (docs/13). They only
+# talk to PostgreSQL and ClickHouse, and claims are leased, so this pod is
+# independent of the edge/control pod and may be rolled at any time.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-outbox
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+    app.kubernetes.io/component: outbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "xshield.selector" (dict "root" . "component" "outbox") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "xshield.selector" (dict "root" . "component" "outbox") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "xshield.podSecurity" . | nindent 6 }}
+      containers:
+        {{- range $family := list "case" "evidence_catalog" "evidence_access" "evidence_retention" "calibration" "identity" "grant" "response_grant" "share_grant" "ui_action" }}
+        - name: {{ $family | replace "_" "-" }}
+          image: {{ $.Values.images.worker }}
+          imagePullPolicy: {{ $.Values.images.pullPolicy }}
+          {{- include "xshield.containerSecurity" $ | nindent 10 }}
+          command: ["/usr/local/bin/xshield-outbox-worker"]
+          args: [{{ $.Values.tenantId | quote }}, {{ $.Values.siteId | quote }}]
+          env:
+            {{- include "xshield.clickhouseEnv" $ | nindent 12 }}
+            - {name: XSHIELD_DATABASE_URL_FILE, value: /run/secrets/database_url}
+            - {name: XSHIELD_OUTBOX_FAMILY, value: {{ $family }}}
+            - {name: XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS, value: "2"}
+            - {name: XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS, value: "2000"}
+            - {name: XSHIELD_OUTBOX_MAX_EVENTS, value: "256"}
+            - {name: XSHIELD_OUTBOX_MAX_BYTES, value: "8388608"}
+            - {name: XSHIELD_OUTBOX_LEASE_SECONDS, value: "60"}
+            - {name: XSHIELD_OUTBOX_RETRY_SECONDS, value: "30"}
+            - {name: XSHIELD_RUN_INTERVAL_SECONDS, value: {{ $.Values.jobs.outboxIntervalSeconds | quote }}}
+            - {name: XSHIELD_RUN_HEARTBEAT_FILE, value: /var/lib/xshield/heartbeat/outbox-{{ $family }}}
+          {{- include "xshield.heartbeatProbes" (dict "root" $ "name" (printf "outbox-%s" $family) "interval" (int $.Values.jobs.outboxIntervalSeconds)) | nindent 10 }}
+          volumeMounts:
+            - {name: secrets-outbox, mountPath: /run/secrets, readOnly: true}
+            - {name: heartbeat, mountPath: /var/lib/xshield/heartbeat}
+          {{- include "xshield.jobResources" $ | nindent 10 }}
+        {{- end }}
+      volumes:
+        - name: heartbeat
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        {{- include "xshield.secretVolume" (dict "root" . "name" "outbox" "keys" (list "database_url" "clickhouse_password")) | nindent 8 }}

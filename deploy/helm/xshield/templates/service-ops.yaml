@@ -1,0 +1,24 @@
+{{- $name := include "xshield.fullname" . -}}
+# Unauthenticated ops endpoints of edge (9554) and control (9555), for probes
+# and Prometheus. Keep them on the cluster network (networkPolicy.opsFrom).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-ops
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  # Control is not part of the pod's readiness; its endpoint must stay
+  # reachable while the pod is out of rotation so it can be diagnosed.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "xshield.selector" (dict "root" . "component" "core") | nindent 4 }}
+  ports:
+    - {name: edge-ops, port: 9554, targetPort: edge-ops, protocol: TCP}
+    - {name: control-ops, port: 9555, targetPort: control-ops, protocol: TCP}
