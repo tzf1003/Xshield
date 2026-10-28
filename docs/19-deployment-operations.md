@@ -124,5 +124,28 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 
 在 macOS 上若使用外接 exFAT 磁盘，不要直接把 `CARGO_TARGET_DIR` 放在其上：exFAT 没有硬链接和 POSIX 权限，随附的 OpenSSL 源码构建会以 `Directory not empty` 失败。可以在该磁盘上创建 APFS 稀疏包（`hdiutil create -size 400g -type SPARSEBUNDLE -fs APFS -volname XshieldBuild -attach <磁盘>/xshield-build.sparsebundle`），把构建与打包目录放在其挂载点下；磁盘空间只在该外接盘上按需增长。
 
-打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像；仓库根的 `Dockerfile` 给出 edge、control、worker 三个镜像目标（`docker build --target edge|control|worker .`，基础镜像按 digest 固定，运行用户 uid 10001，只含发布二进制与其链接的库，不带任何配置、密钥或证书），CI 的 `container-images` 作业在 Linux 上构建三个目标并检查每个二进制的共享库都能解析；镜像不推送、不签名，也没有在真实编排环境（Kubernetes/Compose）中运行过。Helm 清单与 systemd 单元仍没有，生产部署仍需自行编排（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
+打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像；仓库根的 `Dockerfile` 给出 edge、control、worker 三个镜像目标（`docker build --target edge|control|worker .`，基础镜像按 digest 固定，运行用户 uid 10001，只含发布二进制与其链接的库，不带任何配置、密钥或证书），CI 的 `container-images` 作业在 Linux 上构建三个目标并检查每个二进制的共享库都能解析；镜像不推送、不签名。单机 Docker Compose 参考部署见 19.8，CI 用这三个镜像把它整体拉起验证；Helm 清单与 systemd 单元仍没有（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
 
+## 19.8 参考部署（Docker Compose）
+
+`deploy/compose/` 是单机、单租户单站点的参考部署，用法与逐项说明见其 `README.md`。它不是高可用方案，目的是让试点能在一台主机上按本章的约束把全部组件跑起来，并作为编写其他编排（Kubernetes 等）时的对照。
+
+- 拓扑：管理 API（`127.0.0.1:9443`）和 edge apply 通道（`127.0.0.1:9553`）按设计只监听 loopback，所以 edge 与 control 共享一个网络命名空间，由永不重启的 `net` 服务持有（相当于 Pod 的 pause 容器），重启 edge 或 control 不会让另一方失联；edge 的数据面监听器绑定在该命名空间的固定私网地址（默认 `172.30.0.10`，端口 6400–6409 发布给前置 WAF/CDN 或负载均衡），两个运维端口 9554/9555 只发布到宿主机 `127.0.0.1`。
+- 秘密：`init.sh` 生成全部密钥（含两对 Ed25519 封存密钥），以 compose secrets 挂载到 `/run/secrets/`，进程全部经 `NAME_FILE` 读取（19.3），环境变量里没有秘密值。秘密目录 0700，文件本身 0444，因为 PostgreSQL、ClickHouse 与 uid 10001 的服务用户各不相同。
+- 审计：edge 请求 journal 与 control 管理 journal 各有一组常驻的封存与发布任务（`XSHIELD_RUN_INTERVAL_SECONDS`，19.3），十个 outbox 家族各一个常驻发布任务，均写心跳文件；目录、密钥与检查点按 docs/13 互不混用。
+- 引导凭据：`init.sh` 签发的管理 Bearer 有效期不超过 24 小时（控制面上限），角色由 `.env` 的 `XSHIELD_CONTROL_ROLES` 决定，默认只有 `observer`。日常管理走 OIDC 浏览器会话，Agent API Key 也只能由浏览器会话签发。
+- 迁移：PostgreSQL 首次启动时按序执行 `migrations/`；之后的新迁移须由运维在升级对应版本前手工应用（本仓库尚无生产迁移执行器）。ClickHouse 首次启动执行 `sql/clickhouse.sql` 并按秘密文件创建 `xshield` 用户。
+- 运维方自备：管理面的 HTTPS 同源代理与控制台静态文件（要求见 `web/console/README.md` 与 docs/15，代理须加入同一网络命名空间才能访问 loopback 管理 API）、企业 OIDC IdP（必须是 HTTPS）、edge 前置的 TLS/WAF/CDN、备份（19.6）与告警。
+
+上游地址限制：控制面拒绝私网与回环上游（19.2、29“上游地址校验”），只有本地靶场开关 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1` 放行回环。源站只有私网地址的试点无法直接接入，须让 edge 经可路由的公网地址访问源站。
+
+CI 的 `compose` 作业用仓库 `Dockerfile` 构建三个镜像后运行 `scripts/test_compose_deployment.sh`。脚本在 `compose.smoke.yaml` 叠加一个开发 Keycloak 和一个回环源站，检查以下各项：
+
+- 两个运维端点就绪，数据面对未配置主机返回 `SITE_CONFIG_UNAVAILABLE`；
+- 管理 API 只接受引导 Bearer，站点保存成功，control 经签名通道取到 edge 健康，首个 apply 等待独立审批；
+- 控制面指标计数；
+- edge 与 control 各自重启后恢复就绪；
+- 管理审计事件经封存、发布进入 ClickHouse；
+- 14 个常驻任务都有新鲜心跳。
+
+**未覆盖**：站点经 edge 实际服务流量，因为首次 apply 需要 OIDC 浏览器会话的独立审批，这部分由控制面与网关的其他回归覆盖；管理代理与控制台；真实企业 IdP、TLS 与 MFA。

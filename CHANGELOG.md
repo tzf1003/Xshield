@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- 单机参考部署（可行性建议“最小运维底座”，docs/19 19.8）：新增 `deploy/compose/`，用 Docker Compose 在一台主机上运行一个租户、一个站点的全部组件，包括 edge、control、两组常驻封存/发布任务（edge 请求 journal 与 control 管理 journal）、十个 outbox 发布任务、PostgreSQL 与 ClickHouse。
+  - edge 与 control 共享由 `net` 服务持有的网络命名空间，因为管理 API 与 apply 通道只监听 loopback；重启任一方不会让另一方失联。
+  - `init.sh` 生成全部密钥（含 Ed25519 封存密钥对），以 compose secrets 挂载，进程全部经 `NAME_FILE` 读取。它还生成 edge 引导配置与 24 小时的引导 Bearer。
+  - 镜像基于 digest 固定，容器只读、去除全部 capability、禁止提权。
+  - 新增 `scripts/test_compose_deployment.sh` 与 CI 作业 `compose`：用仓库 `Dockerfile` 构建三个镜像并整体拉起，检查就绪、数据面拒绝、管理 API 只认引导 Bearer、站点保存与签名通道、控制面指标、edge/control 重启恢复、管理审计进入 ClickHouse、14 个常驻任务心跳。本机用本地构建的镜像跑通了全部 8 项。
+  - **未覆盖**：站点经 edge 实际服务流量（首次 apply 需要 OIDC 浏览器会话的独立审批）、管理 HTTPS 代理与控制台（运维自备，要求见 README）、真实企业 IdP/TLS/MFA、高可用。
+  - **试点注意**：控制面拒绝私网与回环上游，源站只有私网地址的试点需要可路由的公网地址。
+
 - 后台任务常驻模式（可行性建议“最小运维底座”）：`xshield-audit-seal`、`xshield-worker` 与 `xshield-outbox-worker` 设置 `XSHIELD_RUN_INTERVAL_SECONDS` 后常驻并按间隔重复执行，单轮失败报告后下一轮重试；可选 `XSHIELD_RUN_HEARTBEAT_FILE` 在每轮成功后写入时间戳供探针使用（docs/19 19.3）。不设置时行为不变。outbox 常驻时复用连接池、满批时立即继续。实现集中在 `xshield_core::resident`，没有新依赖。回归：核心单测 2 个；本机用真实 `xshield-audit-seal` 二进制验证了一次性、常驻成功（心跳更新）、常驻失败重试、非法间隔与 `_FILE` 冲突。**未覆盖**：`xshield-worker` 与 `xshield-outbox-worker` 的常驻循环没有真实进程测试（需要 ClickHouse）；没有进程内指标端点，健康只靠心跳文件。
 
 - 秘密从文件读取（可行性建议“最小运维底座”）：所有二进制读取的秘密变量都可以改用 `<变量名>_FILE` 指向挂载的秘密文件（docs/19 19.3）；两者同时设置拒绝启动，文件只去掉末尾一个换行，上限 64 KiB，错误信息只含变量名。实现集中在 `xshield_core::secret_env`，没有新依赖；网关 `PostgresRuntime::from_env` 改为返回 `Result`。`scripts/test_gateway_identity.sh` 改用 `_FILE` 形式传入 journal 密钥与数据库 URL，覆盖真实二进制路径。回归：核心单测 2 个（变量/文件来源、去换行、冲突、不可读、超限、非 UTF-8）。**未覆盖**：各二进制只有网关经过真实进程验证；不检查文件权限。

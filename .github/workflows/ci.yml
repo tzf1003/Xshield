@@ -43,7 +43,7 @@ jobs:
           match() { if printf '%s\n' "$files" | grep -Eq "$1"; then echo true; else echo false; fi; }
           {
             echo "web=$(match '^(web/console/|tests/site-config/|\.github/)')"
-            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|sensor/|migrations/|tests/site-config/|\.github/)')"
+            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|sensor/|migrations/|tests/site-config/|deploy/|dev/keycloak/|scripts/test_compose_deployment\.sh|\.github/)')"
             echo "oidc=$(match '^(crates/xshield-(control|audit|core)/|Cargo\.(toml|lock)|rust-toolchain\.toml|scripts/(test_oidc|lib/)|dev/keycloak/|web/console/|migrations/|\.github/)')"
           } >> "$GITHUB_OUTPUT"
 
@@ -263,6 +263,44 @@ jobs:
             if [ -n "$missing" ]; then echo "$binary: $missing"; exit 1; fi
             echo "$binary: libraries resolve"
           done
+
+  # The reference Compose deployment (deploy/compose, docs/19 19.8) brought up
+  # whole from the three images: readiness, management API, signed apply
+  # channel, restarts, resident jobs and audit publication into ClickHouse.
+  compose:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: edge
+          load: true
+          push: false
+          tags: xshield-edge:ci
+          cache-from: type=gha,scope=edge
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: control
+          load: true
+          push: false
+          tags: xshield-control:ci
+          cache-from: type=gha,scope=control
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: worker
+          load: true
+          push: false
+          tags: xshield-worker:ci
+          cache-from: type=gha,scope=worker
+      - name: Reference deployment smoke
+        run: XSHIELD_IMAGE_TAG=ci scripts/test_compose_deployment.sh
 
   console:
     needs: changes

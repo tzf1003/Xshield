@@ -1,0 +1,37 @@
+# Test-only overlay for scripts/test_compose_deployment.sh: a development
+# Keycloak (dev/keycloak realm, never for shared use) inside the shared network
+# namespace, so control's loopback-HTTP issuer exception applies. Production
+# points XSHIELD_CONTROL_OIDC_ISSUER at the organisation's HTTPS IdP instead.
+services:
+  oidc:
+    image: quay.io/keycloak/keycloak:26.7.4@sha256:82a77884f3af238beab1e7afd63b5f530e1b5c0590bd7aa60b40a40463e29b2c
+    command: ["start-dev", "--http-port=8080", "--import-realm"]
+    network_mode: service:net
+    depends_on:
+      edge: {condition: service_started}
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: dev-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: dev-admin-password
+      KC_HOSTNAME: http://127.0.0.1:8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    volumes:
+      - ${XSHIELD_REPO_ROOT:-../..}/dev/keycloak/xshield-dev-realm.json:/opt/keycloak/data/import/xshield-dev-realm.json:ro
+
+  # A static origin for the smoke site. The control plane refuses private and
+  # loopback upstreams; the documented lab switch admits loopback only, so the
+  # origin joins the shared namespace and the switch is set for this test.
+  origin:
+    image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+    command: ["sh", "-c", "mkdir -p /tmp/www && echo smoke-origin-ok > /tmp/www/index.html && exec httpd -f -p 127.0.0.1:18080 -h /tmp/www"]
+    network_mode: service:net
+    depends_on:
+      edge: {condition: service_started}
+
+  edge:
+    environment:
+      XSHIELD_ALLOW_LOOPBACK_UPSTREAM: "1"
+
+  control:
+    environment:
+      XSHIELD_ALLOW_LOOPBACK_UPSTREAM: "1"
