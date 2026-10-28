@@ -17,6 +17,11 @@ yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "Marvin timing leak in the rsa crate affects private-key operations. It enters only through openidconnect, which uses rsa to verify ID-token signatures (a public-key operation); this product never decrypts or signs with an RSA key. Ends when rsa ships a constant-time implementation or openidconnect drops it." },
     { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained but is only a build-time proc-macro inside pingora-core, with no known vulnerability. Ends with the next pingora upgrade that stops using it." },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained (no known vulnerability). It enters only through serde_yaml in pingora-core, which parses pingora's own YAML server configuration; Xshield builds that configuration in code and never feeds request data to it. Ends with the next pingora upgrade that drops serde_yaml." },
+    { id = "RUSTSEC-2026-0387", reason = "Timing variability in crypto-bigint 0.5 matters for operations on secret values. It enters only through p256/p384 inside openidconnect, which this product uses to verify ID-token signatures (public keys, public data); the control plane never signs or decrypts with an EC key. Ends when openidconnect moves to crypto-bigint >= 0.7.6." },
+    { id = "RUSTSEC-2026-0391", reason = "zstd stream encoders/decoders reused through with_context. Pingora 0.9.0 pins zstd 0.13 (pingora-header-serde) and resolves 0.14.0 for pingora-core. The gateway enables neither pingora's response compression nor pingora-cache, so no zstd stream runs; pingora-core only ever creates fresh encoders. Ends with the pingora upgrade that allows zstd >= 0.14.3." },
+    { id = "RUSTSEC-2026-0398", reason = "Seekable::decompress requires zstd-safe's 'seekable' feature, which is not enabled anywhere in this graph (cargo tree -e features). Ends with the pingora upgrade that allows zstd-safe >= 8.2.0." },
+    { id = "RUSTSEC-2026-0403", reason = "Affects DCtx::decompress_stream (zstd::stream::write::Decoder) on corrupt legacy frames. Pingora 0.9.0 only compresses with zstd and decompresses cached headers with the bulk API in pingora-cache, which the gateway does not use; the bulk API is not affected. Ends with the pingora upgrade that allows zstd-safe >= 8.2.0." },
 ]
 
 [licenses]
