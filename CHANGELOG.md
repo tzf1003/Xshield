@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Kubernetes 部署（可行性建议“最小运维底座”的最后一项，docs/19 19.9）：新增 Helm chart `deploy/helm/xshield/`，部署一个租户、一个站点。
+  - **拓扑**：edge、control 与两组 journal 的封存/发布任务放在单副本 StatefulSet 的同一个 Pod 里，共用一个卸载后保留的持久卷。十个 outbox 发布任务是独立的 Deployment。
+  - **Service**：`<release>-edge` 暴露站点端口；`<release>-ops` 暴露两个运维端点。可选 ServiceMonitor 与 NetworkPolicy。
+  - **edge 配置**：引导配置在 Pod 启动时填入 Pod IP。
+  - **就绪与存活**：Pod 就绪只看 edge，control 与常驻任务只有 liveness 探针（任务按心跳），管理面或 ClickHouse 异常不会把数据面撤出流量。
+  - **秘密与安全上下文**：秘密来自运维创建的 Secret，每个容器只投影自己用到的键。新增 `deploy/helm/xshield-secrets.sh` 生成这些键。所有 Xshield 容器符合 Pod Security `restricted`。
+  - **values 校验**：values 有 JSON Schema，缺必填项时拒绝渲染。
+  - **测试**：新增 `scripts/test_helm_deployment.sh` 与 CI 作业 `helm`。静态检查包括 schema 拒绝、`helm lint --strict` 与 kubeconform；随后在 kind 集群里安装 chart，检查就绪、经 Service 的数据面、Pod 内管理 API、私网源站放行与拒绝、签名通道、审计进入 ClickHouse、14 个任务心跳、容器无重启，以及删除 Pod 后在同一卷上恢复。本机做了 lint、schema 与 kubeconform 校验；本机没有运行 kind 冒烟，只在 CI 上运行。
+  - **未覆盖**：站点实际服务流量、管理代理与控制台、真实 IdP/TLS/MFA、`helm upgrade` 与迁移路径、ServiceMonitor 与 NetworkPolicy 的实际效果。
+
 - 私网源站显式放行（试点决策，docs/19 19.2、docs/29“上游地址校验”）：新增部署变量 `XSHIELD_ALLOWED_UPSTREAM_CIDRS`，列出源站所在的私网网段（RFC 1918 或 `fc00::/7` 内不含主机位的 CIDR，最多 32 个）。
   - 只解除列出网段内地址的私网/唯一本地拒绝；回环、链路本地、共享地址、云元数据、映射与转换形式照旧拒绝。
   - 默认不设置，行为不变；列表不合法时控制服务拒绝启动。
@@ -18,7 +28,7 @@
   - 镜像基于 digest 固定，容器只读、去除全部 capability、禁止提权。
   - 新增 `scripts/test_compose_deployment.sh` 与 CI 作业 `compose`：用仓库 `Dockerfile` 构建三个镜像并整体拉起，检查就绪、数据面拒绝、管理 API 只认引导 Bearer、站点保存与签名通道、控制面指标、edge/control 重启恢复、管理审计进入 ClickHouse、14 个常驻任务心跳。本机用本地构建的镜像跑通了全部 8 项。
   - **未覆盖**：站点经 edge 实际服务流量（首次 apply 需要 OIDC 浏览器会话的独立审批）、管理 HTTPS 代理与控制台（运维自备，要求见 README）、真实企业 IdP/TLS/MFA、高可用。
-  - **试点注意**：控制面拒绝私网与回环上游，源站只有私网地址的试点需要可路由的公网地址。
+  - **试点注意**（已由下文的私网源站显式放行解决）：控制面拒绝私网与回环上游，源站只有私网地址的试点需要可路由的公网地址。
 
 - 后台任务常驻模式（可行性建议“最小运维底座”）：`xshield-audit-seal`、`xshield-worker` 与 `xshield-outbox-worker` 设置 `XSHIELD_RUN_INTERVAL_SECONDS` 后常驻并按间隔重复执行，单轮失败报告后下一轮重试；可选 `XSHIELD_RUN_HEARTBEAT_FILE` 在每轮成功后写入时间戳供探针使用（docs/19 19.3）。不设置时行为不变。outbox 常驻时复用连接池、满批时立即继续。实现集中在 `xshield_core::resident`，没有新依赖。回归：核心单测 2 个；本机用真实 `xshield-audit-seal` 二进制验证了一次性、常驻成功（心跳更新）、常驻失败重试、非法间隔与 `_FILE` 冲突。**未覆盖**：`xshield-worker` 与 `xshield-outbox-worker` 的常驻循环没有真实进程测试（需要 ClickHouse）；没有进程内指标端点，健康只靠心跳文件。
 

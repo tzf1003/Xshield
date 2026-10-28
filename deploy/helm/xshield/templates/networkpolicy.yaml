@@ -1,0 +1,46 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $name := include "xshield.fullname" . -}}
+{{- $first := int .Values.edge.sitePorts.first -}}
+# Ingress to the edge/control pod: site ports and ops ports only, each from
+# the peers you list. The control API and apply channel are loopback-only and
+# never reachable from outside the pod. The outbox pod accepts no ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-core
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "xshield.selector" (dict "root" . "component" "core") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        {{- range until (int .Values.edge.sitePorts.count) }}
+        - {port: {{ add $first . }}, protocol: TCP}
+        {{- end }}
+      {{- with .Values.networkPolicy.dataPlaneFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    - ports:
+        - {port: 9554, protocol: TCP}
+        - {port: 9555, protocol: TCP}
+      {{- with .Values.networkPolicy.opsFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-outbox
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "xshield.selector" (dict "root" . "component" "outbox") | nindent 6 }}
+  policyTypes: [Ingress]
+{{- end }}

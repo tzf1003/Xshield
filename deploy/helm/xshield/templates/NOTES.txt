@@ -1,0 +1,12 @@
+Xshield {{ .Chart.AppVersion }} for tenant {{ .Values.tenantId }}, site {{ .Values.siteId }}.
+
+Data plane:  service {{ include "xshield.fullname" . }}-edge, ports {{ .Values.edge.sitePorts.first }}-{{ add .Values.edge.sitePorts.first .Values.edge.sitePorts.count -1 }}
+             (the bootstrap configuration holds {{ .Values.edge.sitePorts.first }}; sites pick from the rest)
+Ops:         service {{ include "xshield.fullname" . }}-ops, edge 9554 and control 9555 (/livez, /readyz, /metrics)
+Control API: 127.0.0.1:9443 inside the {{ include "xshield.fullname" . }}-0 pod only; serve it through your
+             HTTPS management proxy added with extraContainers (README.md).
+
+The bootstrap bearer in the Secret expires at control_token_expires_at (at most 24 hours).
+{{- if not .Values.control.allowedUpstreamCidrs }}
+No private upstream network is admitted (control.allowedUpstreamCidrs is empty).
+{{- end }}
