@@ -56,6 +56,8 @@ const notReasonCodes: Readonly<Record<string, string>> = {
   VISIBILITY: "browser sensor event type",
   CARGO_PKG_VERSION: "cargo build environment variable",
   SCREAMING_SNAKE_CASE: "serde rename rule",
+  AUDIT_UNAVAILABLE: "edge readiness reason on the unauthenticated ops endpoint",
+  NO_LISTENERS: "edge readiness reason on the unauthenticated ops endpoint",
 };
 /** Environment variable names and API key names are configuration, not reasons. */
 const notReasonPatterns: readonly RegExp[] = [/^XSHIELD_/, /_API_KEY$/];
