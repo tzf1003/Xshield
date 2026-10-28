@@ -10,12 +10,11 @@ set -euo pipefail
 # `! cmd` never trips `set -e` (in any bash), so an "absent" assertion written
 # that way cannot fail the script; `refute` can. It names the line, never the
 # pattern, because the pattern is often a token.
-# A refused buffered reply is never delivered. Pingora fixes the response header before its
-# synchronous body filter runs (gateway main.rs, prepare_response_issuance_headers), so when the
-# origin's header and body reach the edge in separate reads the client sees the committed
-# header and then a cut transfer (curl exit 18) instead of a bare 502. Both are a refusal; what
-# must hold in every timing is that no origin body byte arrives, which callers assert on the
-# body file. Sets refused_status and refused_exit.
+# A refused buffered reply is never delivered. The edge exchanges with the origin in a
+# subrequest and writes nothing to the client until that reply has been validated and
+# committed, so in every timing (header and body in one read or several) a refusal is a
+# complete 502 whose body names the reason and holds none of the origin's bytes. Sets
+# refused_status and refused_exit; assert_refused checks them against a body file.
 fetch_refused() {
     local out=$1
     shift
@@ -23,6 +22,13 @@ fetch_refused() {
     refused_status=$(curl -sS -o "$out" -w '%{http_code}' "$@" 2>/dev/null)
     refused_exit=$?
     set -e
+}
+
+# assert_refused BODY_FILE ORIGIN_MARKER
+assert_refused() {
+    [[ "$refused_exit" == "0" && "$refused_status" == "502" ]]
+    grep -q '"reason_code":"' "$1"
+    refute grep -q "$2" "$1"
 }
 
 refute() {
@@ -802,8 +808,7 @@ fetch_refused "$test_dir/refresh-switch.body" -X POST \
     -H "Authorization: Bearer $refreshed_bearer" \
     http://127.0.0.1:6288/refresh-switch
 rm -f "$test_dir/split.mode"
-[[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
-[[ ! -s "$test_dir/refresh-switch.body" ]]
+assert_refused "$test_dir/refresh-switch.body" 'other-business-token'
 refresh_generation=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT credential_generation FROM xshield.auth_bindings
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -816,7 +821,8 @@ curl -sS -o "$test_dir/account-switch-same.body" -X POST \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \
     -H "Authorization: Bearer $refreshed_bearer" \
     http://127.0.0.1:6288/account-switch-same >/dev/null 2>&1 || true
-[[ ! -s "$test_dir/account-switch-same.body" ]]
+grep -q '"reason_code":"' "$test_dir/account-switch-same.body"
+refute grep -q 'other-business-token' "$test_dir/account-switch-same.body"
 refresh_generation_after_same=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT credential_generation FROM xshield.auth_bindings
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -891,7 +897,8 @@ SQL
 [[ "$switch_state" == "principal_login|tenant_gateway:admin|2|3|1|1|1" ]]
 
 wait "$slow_request_pid"
-[[ ! -s "$test_dir/slow-account.body" ]]
+grep -q '"reason_code":"' "$test_dir/slow-account.body"
+refute grep -q 'order-late' "$test_dir/slow-account.body"
 late_grant_count=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT count(*) FROM xshield.response_evidence
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -919,16 +926,10 @@ old_epoch_grant_status=$(curl -sS -o "$test_dir/old-epoch-grant.json" -w '%{http
 grep -q '"reason_code":"UI_ACTION_NOT_AVAILABLE"' "$test_dir/old-epoch-grant.json"
 
 # The origin's login reply names an identity the route does not accept. The edge
-# must not deliver it: a bare 502 (or, if the connection is cut first, a failed
-# transfer), never the origin's bytes, and no binding for that principal below.
-set +e
-invalid_login_status=$(curl -sS -o "$test_dir/login-invalid.body" -w '%{http_code}' \
-    -X POST http://127.0.0.1:6288/login-invalid 2>/dev/null)
-invalid_login_exit=$?
-set -e
-[[ "$invalid_login_exit" != "0" || "$invalid_login_status" == "502" ]]
-[[ ! -s "$test_dir/login-invalid.body" ]]
-refute grep -q 'principal_invalid' "$test_dir/login-invalid.body"
+# must not deliver it: a 502 naming the reason, never the origin's bytes, and no
+# binding for that principal below.
+fetch_refused "$test_dir/login-invalid.body" -X POST http://127.0.0.1:6288/login-invalid
+assert_refused "$test_dir/login-invalid.body" 'principal_invalid'
 invalid_login_binding_count=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT count(*) FROM xshield.auth_bindings
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -943,17 +944,13 @@ buffered_status=$(curl -sS -o "$test_dir/buffered-valid.json" -w '%{http_code}' 
 [[ $(<"$test_dir/buffered-valid.json") == '{"ok":true}' ]]
 
 # A body that is not the JSON the route promises is never released: the client
-# gets a bare 502 and none of the origin's bytes (same as the oversize case below).
+# gets a 502 naming the reason and none of the origin's bytes (same as the oversize case below).
 for split in fused split; do
     if [[ "$split" == "split" ]]; then touch "$test_dir/split.mode"; else rm -f "$test_dir/split.mode"; fi
     fetch_refused "$test_dir/buffered-invalid.body" http://127.0.0.1:6288/buffered-invalid
-    [[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
-    [[ ! -s "$test_dir/buffered-invalid.body" ]]
-    refute grep -q 'private-invalid-json' "$test_dir/buffered-invalid.body"
+    assert_refused "$test_dir/buffered-invalid.body" 'private-invalid-json'
     fetch_refused "$test_dir/buffered-oversize.body" http://127.0.0.1:6288/buffered-oversize
-    [[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
-    [[ ! -s "$test_dir/buffered-oversize.body" ]]
-    refute grep -q 'must-not-release' "$test_dir/buffered-oversize.body"
+    assert_refused "$test_dir/buffered-oversize.body" 'must-not-release'
 done
 rm -f "$test_dir/split.mode"
 
