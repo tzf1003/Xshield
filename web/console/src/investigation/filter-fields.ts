@@ -135,6 +135,7 @@ export const outcomeValues = [
   "PASS",
   "ALLOW",
   "DENY",
+  "OBSERVED_WOULD_DENY",
   "UNKNOWN",
   "ERROR",
   "SKIPPED",

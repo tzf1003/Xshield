@@ -48,6 +48,8 @@ const notReasonCodes: Readonly<Record<string, string>> = {
   CANCELLED: "stage outcome label",
   SKIPPED: "stage outcome label",
   UNKNOWN: "decision and outcome label",
+  OBSERVED_WOULD_DENY:
+    "decision and outcome label of an observe rollout; reason_code carries the refusal",
   DELETE: "HTTP method name",
   NOT_CONFIGURED:
     "final decision label of the in-process M0 audit; wire decisions are ALLOW/DENY/UNKNOWN",

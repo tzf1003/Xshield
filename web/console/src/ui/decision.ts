@@ -46,6 +46,8 @@ export function describeDecision(
       return { tone: "error", icon: "error", label: "错误", code: value };
     case "OBSERVE":
       return { tone: "observe", icon: "observe", label: "观察", code: value };
+    case "OBSERVED_WOULD_DENY":
+      return { tone: "observe", icon: "observe", label: "观察：本应拒绝", code: value };
     case "UNKNOWN":
       return { tone: "unknown", icon: "unknown", label: "未知", code: value };
     case "SKIPPED":

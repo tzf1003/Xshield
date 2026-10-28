@@ -39,7 +39,16 @@ const textFields = [
   "operation_id",
   "model_revision",
 ] as const;
-const outcomes = ["PASS", "ALLOW", "DENY", "UNKNOWN", "ERROR", "SKIPPED", "CANCELLED"] as const;
+const outcomes = [
+  "PASS",
+  "ALLOW",
+  "DENY",
+  "OBSERVED_WOULD_DENY",
+  "UNKNOWN",
+  "ERROR",
+  "SKIPPED",
+  "CANCELLED",
+] as const;
 const traceIdPattern = /^[0-9a-f]{32}$/;
 const idPatterns = {
   request_id: requestPattern,

@@ -1420,13 +1420,18 @@ struct DecisionPayload {
     decision: String,
     reason_code: String,
     origin_state: String,
+    #[serde(default, deserialize_with = "present_string")]
+    rollout_revision: Option<String>,
 }
 
 impl DecisionPayload {
     fn validate(self) -> Result<PayloadSummary, PublishError> {
-        if !matches!(self.decision.as_str(), "ALLOW" | "DENY")
-            || !valid_name(&self.reason_code)
+        if !matches!(
+            self.decision.as_str(),
+            "ALLOW" | "DENY" | OBSERVED_WOULD_DENY
+        ) || !valid_name(&self.reason_code)
             || self.origin_state != "not_sent"
+            || !valid_rollout(&self.decision, self.rollout_revision.as_deref())
         {
             return Err(PublishError::InvalidEvent);
         }
@@ -1487,11 +1492,22 @@ struct CompletionPayload {
     status: Option<u16>,
     origin_state: String,
     duration_us: u64,
+    #[serde(default, deserialize_with = "present_string")]
+    rollout_revision: Option<String>,
 }
 
 impl CompletionPayload {
     fn validate(self, requires_status: bool) -> Result<PayloadSummary, PublishError> {
-        if !matches!(self.decision.as_str(), "ALLOW" | "DENY" | "UNKNOWN")
+        // `requires_status` marks request.completed: an observed request that
+        // completed was forwarded, so its origin answered.
+        let observed_unforwarded = self.decision == OBSERVED_WOULD_DENY
+            && requires_status
+            && self.origin_state != "response_received";
+        if !matches!(
+            self.decision.as_str(),
+            "ALLOW" | "DENY" | "UNKNOWN" | OBSERVED_WOULD_DENY
+        ) || !valid_rollout(&self.decision, self.rollout_revision.as_deref())
+            || observed_unforwarded
             || (self.decision == "UNKNOWN" && requires_status)
             || !valid_name(&self.reason_code)
             || (requires_status && self.status.is_none())
@@ -1899,6 +1915,28 @@ fn valid_uuid_v7(value: &str) -> Result<(), PublishError> {
         return Err(PublishError::InvalidEvent);
     }
     Ok(())
+}
+
+/// A refusal the site's observe rollout forwarded instead; `reason_code`
+/// keeps the stable reason enforce would have refused with (docs/32).
+const OBSERVED_WOULD_DENY: &str = "OBSERVED_WOULD_DENY";
+
+/// `rollout_revision` is absent or a name, and an observed decision always
+/// names the rollout that forwarded it.
+fn valid_rollout(decision: &str, rollout_revision: Option<&str>) -> bool {
+    match rollout_revision {
+        Some(revision) => valid_name(revision),
+        None => decision != OBSERVED_WOULD_DENY,
+    }
+}
+
+/// An optional member that, when present, must be a string: `null` is refused
+/// rather than read as absent.
+fn present_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 fn valid_name(value: &str) -> bool {
@@ -4282,6 +4320,88 @@ mod tests {
         let summary = PayloadSummary::parse("request.aborted", prefix).unwrap();
         assert_eq!(summary.outcome, "UNKNOWN");
         assert!(PayloadSummary::parse("request.completed", prefix).is_err());
+    }
+
+    #[test]
+    fn observed_would_deny_requires_a_rollout_revision() {
+        let decision = r#"{"decision":"OBSERVED_WOULD_DENY","reason_code":"UI_ACTION_NOT_AVAILABLE","origin_state":"not_sent","rollout_revision":"rollout-r1"}"#;
+        let summary = PayloadSummary::parse("decision.composed", decision).unwrap();
+        assert_eq!(summary.outcome, "OBSERVED_WOULD_DENY");
+        assert_eq!(summary.reason_code, "UI_ACTION_NOT_AVAILABLE");
+        // The would-be decision is meaningless outside a rollout.
+        let unscoped = r#"{"decision":"OBSERVED_WOULD_DENY","reason_code":"UI_ACTION_NOT_AVAILABLE","origin_state":"not_sent"}"#;
+        assert!(PayloadSummary::parse("decision.composed", unscoped).is_err());
+        let null = r#"{"decision":"OBSERVED_WOULD_DENY","reason_code":"UI_ACTION_NOT_AVAILABLE","origin_state":"not_sent","rollout_revision":null}"#;
+        assert!(PayloadSummary::parse("decision.composed", null).is_err());
+
+        let completed = r#"{"decision":"OBSERVED_WOULD_DENY","reason_code":"CAPABILITY_MISSING","status":200,"origin_state":"response_received","duration_us":10,"rollout_revision":"rollout-r1"}"#;
+        let summary = PayloadSummary::parse("request.completed", completed).unwrap();
+        assert_eq!(summary.outcome, "OBSERVED_WOULD_DENY");
+        assert_eq!(summary.http_status, Some(200));
+        let unscoped = r#"{"decision":"OBSERVED_WOULD_DENY","reason_code":"CAPABILITY_MISSING","status":200,"origin_state":"response_received","duration_us":10}"#;
+        assert!(PayloadSummary::parse("request.completed", unscoped).is_err());
+        let aborted = r#"{"decision":"OBSERVED_WOULD_DENY","reason_code":"ORIGIN_OUTCOME_UNKNOWN","status":null,"origin_state":"unknown","duration_us":10,"rollout_revision":"rollout-r1"}"#;
+        assert!(PayloadSummary::parse("request.aborted", aborted).is_ok());
+    }
+
+    #[test]
+    fn a_completed_observed_request_reached_the_origin() {
+        // Observe only changes whether a refused request is forwarded; a
+        // completed one that was never sent cannot be an observation.
+        for origin_state in ["not_sent", "unknown"] {
+            let payload = format!(
+                r#"{{"decision":"OBSERVED_WOULD_DENY","reason_code":"CAPABILITY_MISSING","status":200,"origin_state":"{origin_state}","duration_us":10,"rollout_revision":"rollout-r1"}}"#
+            );
+            assert!(
+                PayloadSummary::parse("request.completed", &payload).is_err(),
+                "{origin_state}"
+            );
+        }
+    }
+
+    #[test]
+    fn rollout_revision_is_optional_for_enforced_decisions_and_strict_when_present() {
+        for decision in ["ALLOW", "DENY"] {
+            let bare = format!(
+                r#"{{"decision":"{decision}","reason_code":"PUBLIC_ENTRY_ALLOWED","origin_state":"not_sent"}}"#
+            );
+            assert!(PayloadSummary::parse("decision.composed", &bare).is_ok());
+            let scoped = format!(
+                r#"{{"decision":"{decision}","reason_code":"PUBLIC_ENTRY_ALLOWED","origin_state":"not_sent","rollout_revision":"rollout-r1"}}"#
+            );
+            assert!(PayloadSummary::parse("decision.composed", &scoped).is_ok());
+        }
+        for revision in [
+            "",
+            "rollout r1",
+            "rollout/r1",
+            &"r".repeat(super::NAME_BYTES_MAX + 1),
+        ] {
+            let payload = format!(
+                r#"{{"decision":"ALLOW","reason_code":"PUBLIC_ENTRY_ALLOWED","origin_state":"not_sent","rollout_revision":"{revision}"}}"#
+            );
+            assert!(
+                PayloadSummary::parse("decision.composed", &payload).is_err(),
+                "{revision}"
+            );
+        }
+        let numeric = r#"{"decision":"ALLOW","reason_code":"PUBLIC_ENTRY_ALLOWED","origin_state":"not_sent","rollout_revision":1}"#;
+        assert!(PayloadSummary::parse("decision.composed", numeric).is_err());
+    }
+
+    #[test]
+    fn decision_vocabulary_stays_closed() {
+        for decision in ["OBSERVE", "observed_would_deny", "WOULD_DENY", "UNKNOWN"] {
+            let payload = format!(
+                r#"{{"decision":"{decision}","reason_code":"CAPABILITY_MISSING","origin_state":"not_sent","rollout_revision":"rollout-r1"}}"#
+            );
+            assert!(
+                PayloadSummary::parse("decision.composed", &payload).is_err(),
+                "{decision}"
+            );
+        }
+        let extra = r#"{"decision":"OBSERVED_WOULD_DENY","reason_code":"CAPABILITY_MISSING","origin_state":"not_sent","rollout_revision":"rollout-r1","mode":"observe"}"#;
+        assert!(PayloadSummary::parse("decision.composed", extra).is_err());
     }
 
     fn checkpoint_segment(fixture: &Fixture, index: usize) -> String {
