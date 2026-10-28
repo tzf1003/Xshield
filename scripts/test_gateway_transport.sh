@@ -54,6 +54,7 @@ PY
 origin_port=$(free_port)
 edge_port=$(free_port)
 apply_port=$(free_port)
+ops_port=$(free_port)
 apply_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 journal_key=8888888888888888888888888888888888888888888888888888888888888888
 
@@ -309,8 +310,8 @@ cargo build --quiet --manifest-path "$repo_root/Cargo.toml" -p xshield-gateway -
 tls_env=(XSHIELD_EDGE_TLS_CERT_PATH="$pki/edge.pem" XSHIELD_EDGE_TLS_KEY_PATH="$pki/edge.key")
 
 # Phase A: plaintext, no PROXY protocol: today's behaviour, and the baseline a
-# wrong Host over TLS is compared with.
-start_gateway plain
+# wrong Host over TLS is compared with. The unauthenticated ops endpoints are on.
+start_gateway plain XSHIELD_EDGE_OPS_LISTEN="127.0.0.1:$ops_port"
 probe <<'PY'
 from edge_probe import get, health
 status, head, body = get(tls=False)
@@ -321,6 +322,26 @@ state = health()
 assert state["tls_enabled"] is False and state["proxy_protocol_enabled"] is False, state
 assert state["tls_handshake_failures"] == 0 and state["proxy_header_rejections"] == 0, state
 PY
+# Liveness, readiness and metrics answer without a signature and name no
+# tenant, site, host, port or origin; the two requests above are counted.
+ops=(curl -sS --noproxy '*')
+[[ "$("${ops[@]}" "http://127.0.0.1:$ops_port/livez")" == '{"live":true}' ]]
+[[ "$("${ops[@]}" "http://127.0.0.1:$ops_port/readyz")" == '{"ready":true}' ]]
+"${ops[@]}" -D "$test_dir/metrics.headers" -o "$test_dir/metrics.txt" "http://127.0.0.1:$ops_port/metrics"
+grep -qi '^content-type: text/plain; version=0.0.4' "$test_dir/metrics.headers"
+grep -qi '^cache-control: no-store' "$test_dir/metrics.headers"
+grep -qx 'xshield_edge_ready 1' "$test_dir/metrics.txt"
+grep -qx 'xshield_edge_requests_total{outcome="served"} 1' "$test_dir/metrics.txt"
+grep -qx 'xshield_edge_refusals_total{reason_code="SITE_CONFIG_UNAVAILABLE"} 1' "$test_dir/metrics.txt"
+if grep -qE 'tenant_transport|site_a|site-a|unknown\.example|origin\.local' "$test_dir/metrics.txt" ||
+    grep -qwE "$edge_port|$origin_port|$apply_port" "$test_dir/metrics.txt"; then
+    echo "ops metrics disclose deployment topology" >&2
+    exit 1
+fi
+if grep -vqE '^(# (HELP|TYPE) xshield_edge_|xshield_edge_)' "$test_dir/metrics.txt"; then
+    echo "ops metrics carry a line outside the edge's closed set" >&2
+    exit 1
+fi
 
 # Phase B: native TLS on the same listener.
 start_gateway plain "${tls_env[@]}"

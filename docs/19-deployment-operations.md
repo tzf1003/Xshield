@@ -89,6 +89,12 @@ edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的
 
 liveness 仅说明进程存活；readiness 根据必要配置、状态存储和审计耐久性判断；推理不可用是否撤 readiness 依赖该节点承接的模型必需端点。拒绝流量尖峰不自动认定业务故障或自动降级。
 
+edge 运维端点：设置 `XSHIELD_EDGE_OPS_LISTEN`（如 `127.0.0.1:9554`，未设置则不开启）后，edge 在该地址提供不需认证的 `GET /livez`、`GET /readyz` 与 `GET /metrics`，供编排器探针和 Prometheus 抓取。地址只接受 loopback、私有、链路本地或未指定地址，公网地址拒绝启动；端口仍应只对管理网络开放。因为不认证，这些响应**不包含任何拓扑**：没有租户、站点、主机名、端口、revision 或源站，标签只来自封闭集合（结果类别与稳定原因码）；站点级详情仍只走带 HMAC 的 `/internal/v1/health`。
+
+- `/livez`：进程能响应即 200 `{"live":true}`。
+- `/readyz`：审计屏障打开且至少绑定一个数据面监听器时 200 `{"ready":true}`；否则 503 `{"ready":false,"reason_code":"AUDIT_UNAVAILABLE"}` 或 `"NO_LISTENERS"`。审计屏障关闭时准入本就全部拒绝，撤出流量与其一致。
+- `/metrics`（Prometheus 文本格式 0.0.4，`Cache-Control: no-store`）：`xshield_edge_ready`、`xshield_edge_audit_ready`；`xshield_edge_requests_total{outcome}`，outcome 为 `served`、`refused`、`proxy_failed`、`unadmitted`（在网关过滤器运行之前就结束的请求）；`xshield_edge_refusals_total{reason_code}`（准入拒绝与缓冲响应被扣留，按稳定原因码）；`xshield_edge_request_duration_seconds` 直方图；以及与健康接口同源的 `xshield_edge_tls_handshake_failures_total`、`xshield_edge_proxy_header_rejections_total`、`xshield_edge_connection_setup_shed_total`。计数从进程启动累计，重启归零，不替代审计事件。
+
 自动化指标：资格发行失败、绑定串用、无来源操作、解密覆盖、兼容比例、模型低信心/超时、journal 剩余空间、索引延迟、证据缺失/摘要失败、原文读取与大导出。
 
 ## 19.6 备份与恢复

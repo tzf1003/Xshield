@@ -6,6 +6,7 @@ mod durable_audit;
 mod edge_health;
 mod evidence_writer;
 mod listener_supervisor;
+mod ops_api;
 mod protected_identity;
 mod rate_limit;
 mod sensor_delivery;
@@ -129,6 +130,7 @@ struct Gateway {
     evidence: Option<evidence_writer::EvidenceWriter>,
     rate_limiter: Arc<SiteRateLimiter>,
     unrouted: Arc<UnroutedDenials>,
+    metrics: Arc<ops_api::EdgeMetrics>,
 }
 
 struct PostgresRuntime {
@@ -207,6 +209,8 @@ struct RequestContext {
     origin_response_complete: bool,
     // A buffered route's subrequest failed in the proxy rather than in a filter.
     relayed_proxy_error: bool,
+    // Why the edge answered before a decision existed (unrouted, audit down).
+    edge_refusal: Option<ReasonCode>,
     response_source: ResponseSource,
     snapshot: Option<Arc<GatewaySnapshot>>,
     listener_port: Option<u16>,
@@ -262,6 +266,7 @@ impl ProxyHttp for Gateway {
             origin_status: None,
             origin_response_complete: false,
             relayed_proxy_error: false,
+            edge_refusal: None,
             response_source: ResponseSource::Origin,
             snapshot: None,
             // Known once request_filter reads the connection's socket digest.
@@ -289,6 +294,7 @@ impl ProxyHttp for Gateway {
             return Ok(false);
         }
         if !self.audit.is_ready() {
+            context.edge_refusal = Some(ReasonCode::AuditDurabilityFailed);
             respond_denial(
                 session,
                 503,
@@ -336,6 +342,7 @@ impl ProxyHttp for Gateway {
                     .duration_since(UNIX_EPOCH)
                     .map_or(1, |elapsed| elapsed.as_secs().max(1)),
             );
+            context.edge_refusal = Some(ReasonCode::SiteConfigUnavailable);
             respond_denial(
                 session,
                 503,
@@ -359,6 +366,7 @@ impl ProxyHttp for Gateway {
         context.audit = Some(self.audit.scoped(selected_config));
         let internal_response = selected_config.internal_response(&method, &path);
         let Ok(wall_time) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            context.edge_refusal = Some(ReasonCode::ClockUnavailable);
             respond_denial(
                 session,
                 503,
@@ -371,6 +379,7 @@ impl ProxyHttp for Gateway {
         };
         let now = UnixSeconds::new(wall_time.as_secs());
         let Ok(request_id) = RequestId::parse(&context.request_id) else {
+            context.edge_refusal = Some(ReasonCode::RequestIncomplete);
             respond_denial(
                 session,
                 503,
@@ -470,6 +479,7 @@ impl ProxyHttp for Gateway {
                     .as_ref()
                     .unwrap_or(&self.audit)
                     .observe_failure(&error);
+                context.edge_refusal = Some(ReasonCode::AuditDurabilityFailed);
                 respond_denial(
                     session,
                     503,
@@ -867,6 +877,11 @@ impl ProxyHttp for Gateway {
             handoff.give_back(std::mem::replace(context, self.new_ctx()));
             return;
         }
+        let proxy_error = error.is_some() || context.relayed_proxy_error;
+        self.metrics.record(
+            request_ending(context, proxy_error),
+            context.started_at.elapsed(),
+        );
         let status = session
             .response_written()
             .map_or(0, |response| response.status.as_u16());
@@ -888,7 +903,7 @@ impl ProxyHttp for Gateway {
                 admission,
                 status,
                 duration_us: elapsed_us(context.started_at),
-                proxy_error: error.is_some() || context.relayed_proxy_error,
+                proxy_error,
                 response_failure: context.response_failure,
                 origin_status: context.origin_status,
                 origin_response_complete: context.origin_response_complete,
@@ -1854,6 +1869,26 @@ fn filter_response_trailers(
     Err(ReasonCode::ResponseValidationFailed)
 }
 
+/// How a request ended, for the process metrics. A request Pingora refused
+/// before the gateway's filters ran has neither a decision nor an edge refusal.
+fn request_ending(context: &RequestContext, proxy_error: bool) -> ops_api::Ending {
+    let Some(decision) = context.decision.as_ref() else {
+        return context
+            .edge_refusal
+            .map_or(ops_api::Ending::Unadmitted, ops_api::Ending::Refused);
+    };
+    if decision.outcome == GatewayOutcome::Denied {
+        return ops_api::Ending::Refused(decision.reason_code);
+    }
+    if let Some(reason) = context.response_failure {
+        return ops_api::Ending::Refused(reason);
+    }
+    if proxy_error {
+        return ops_api::Ending::ProxyFailed;
+    }
+    ops_api::Ending::Served
+}
+
 fn response_error<T>(reason: ReasonCode) -> PingoraResult<T> {
     Err(PingoraError::explain(
         ErrorType::HTTPStatus(502),
@@ -2297,6 +2332,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let unrouted = Arc::new(UnroutedDenials::default());
     let mut server = Server::new(None)?;
     server.bootstrap();
+    let metrics = Arc::new(ops_api::EdgeMetrics::default());
     let mut proxy = pingora::proxy::http_proxy(
         &server.configuration,
         Gateway {
@@ -2311,6 +2347,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
             rate_limiter: Arc::new(SiteRateLimiter::new()),
             unrouted: Arc::clone(&unrouted),
+            metrics: Arc::clone(&metrics),
         },
     );
     proxy.server_options = Some(http_server_options());
@@ -2353,14 +2390,35 @@ fn run() -> Result<(), Box<dyn Error>> {
             StartupSource::PersistedSnapshot,
         ))?;
     }
-    let supervisor = runtime.block_on(ListenerSupervisor::new(
+    let supervisor = Arc::new(runtime.block_on(ListenerSupervisor::new(
         Arc::clone(&coordinator),
         Arc::new(proxy),
         transport,
         config.listen().ip(),
         &listener_addresses,
         shutdown.clone(),
-    ))?;
+    ))?);
+    // Liveness, readiness and metrics for orchestrators and scrapers. They are
+    // unauthenticated, so they disclose no topology (see ops_api).
+    if let Ok(value) = env::var("XSHIELD_EDGE_OPS_LISTEN") {
+        let listen: SocketAddr = value.parse()?;
+        if !ops_api::ops_address_allowed(listen) {
+            return Err(
+                "edge ops listener must use a loopback, private or unspecified address".into(),
+            );
+        }
+        let ops_listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
+        let state = ops_api::OpsState::new(
+            Arc::clone(&supervisor),
+            audit_readiness.clone(),
+            Arc::clone(&metrics),
+        );
+        runtime.spawn(async move {
+            if let Err(error) = ops_api::serve(ops_listener, state).await {
+                eprintln!("xshield edge ops listener stopped: {error}");
+            }
+        });
+    }
     if let Some(key) = apply_key {
         let listen: SocketAddr = env::var("XSHIELD_EDGE_APPLY_LISTEN")
             .unwrap_or_else(|_| "127.0.0.1:9553".to_owned())
@@ -2370,7 +2428,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         let apply_listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
         let state = apply_api::ApplyState::new(
-            Arc::new(supervisor),
+            supervisor,
             config.tenant_id().as_str().to_owned(),
             key,
             snapshot_path,
