@@ -13,7 +13,9 @@ import type {
   SiteSecretReference,
   SiteSensorHtml,
   SiteSensorHtmlAdapter,
+  SiteRollout,
 } from "../../api.ts";
+import { decodeRollout, rolloutMember } from "../../api.ts";
 
 /** What an operator edits: a site configuration without identity and revision metadata. */
 export type SiteConfigDraft = Omit<
@@ -437,8 +439,21 @@ export function configFromStored(
         policy.origin_object_access_enforced,
         defaults.origin_object_access_enforced,
       ),
+      ...rolloutMember(rolloutFromStored(policy.rollout)),
     },
   };
+}
+
+/**
+ * The rollout of a stored revision. The server validated it before storing it, so a block that
+ * does not decode cannot come from it; such a block reads as enforce, the stricter mode.
+ */
+function rolloutFromStored(value: unknown): SiteRollout | undefined {
+  try {
+    return decodeRollout(value);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

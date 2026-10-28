@@ -144,6 +144,7 @@ export const messages = {
   CONTROL_SITE_PAGE_ACTIONS_INVALID: "页面签发（page_actions / issued_by）未通过校验。",
   CONTROL_SITE_RESOURCE_GRANT_INVALID: "响应资源资格（resource_grant）未通过校验。",
   CONTROL_SITE_QUERY_PAGINATION_INVALID: "查询参数白名单（query_pagination）未通过校验。",
+  CONTROL_SITE_ROLLOUT_INVALID: "观察模式设置（rollout）未通过校验。",
   CONTROL_SITE_SHARE_ISSUE_INVALID: "分享凭据发放（share_issue / share_entry）未通过校验。",
   CONTROL_SITE_SHARE_RULE_CONFLICT:
     "该策略版本下同名的分享发放规则已存在且内容不同（或已被停用），规则不会被改写，请换新的发放规则 ID。",

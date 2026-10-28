@@ -1335,6 +1335,7 @@ pub async fn approve_handler(
             &subject,
             &idempotency_digest,
             expected_digest.as_ref(),
+            auth.step_up_valid(),
         )
         .await
     {
@@ -1382,6 +1383,14 @@ pub async fn approve_handler(
             "CONTROL_SITE_APPROVAL_SELF_REJECTED",
             "the configuration author cannot approve the same revision",
             "independent_approver",
+        )),
+        // Relaxing the rollout forwards refusals that are enforced today; an
+        // API key, or a console session without a recent step-up, cannot.
+        ProtectedSiteApprovalOutcome::StepUpRequired => Some((
+            StatusCode::UNAUTHORIZED,
+            "CONTROL_STEP_UP_REQUIRED",
+            "relaxing the rollout requires a console approver with recent reauthentication",
+            "reauthenticate",
         )),
         // Written by an older control service, or its label was bound since:
         // approving it would only move the refusal to the edge.
@@ -3772,6 +3781,7 @@ fn validation_reason(field: &str) -> &'static str {
             "CONTROL_SITE_QUERY_PAGINATION_INVALID"
         }
         flow::ACTION_DESCRIPTOR_CONFLICT => "CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT",
+        xshield_core::site::rollout::ROLLOUT_INVALID => "CONTROL_SITE_ROLLOUT_INVALID",
         // Decided by the store against the label's bindings, not by
         // validation; mapped here so every flow refusal has one table.
         POLICY_REVISION_REUSED => "CONTROL_SITE_POLICY_REVISION_REUSED",
@@ -3788,8 +3798,22 @@ fn validation_reason(field: &str) -> &'static str {
 /// [`SiteConfig::validate_for_site`], the single definition the edge compiler
 /// is held to by the gateway parity test; this adds only the destination
 /// rules, which depend on the loopback opt-in.
+///
+/// An observe deadline is also checked against the clock here: it must lie
+/// in the future and at most thirty days ahead, so an expired window can only
+/// be saved again as enforce.
 fn validate_request(request: &SiteConfigRequest, site_id: &SiteId) -> Result<(), &'static str> {
-    validate_request_with(request, site_id, loopback_upstream_allowed())
+    validate_request_with(request, site_id, loopback_upstream_allowed())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?
+        .as_secs();
+    request
+        .to_config()
+        .policy
+        .rollout
+        .validate_window(now)
+        .map_err(|error| validation_reason(error.field()))
 }
 
 fn validate_request_with(
@@ -3954,6 +3978,56 @@ mod tests {
         assert!(validate_request(&value, &site()).is_ok());
         value.public_origin = "http://public.example".to_owned();
         assert!(validate_request(&value, &site()).is_err());
+    }
+
+    /// An observe rollout needs a label and a deadline within thirty days;
+    /// anything incoherent, or a deadline in the past, has its own reason.
+    #[test]
+    fn rollout_blocks_are_validated_with_their_own_reason() {
+        use xshield_core::site::{RolloutMode, SiteRollout};
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let observe = |until: u64| SiteRollout {
+            mode: RolloutMode::Observe,
+            observe_until_unix: Some(until),
+            revision: "rollout-1".to_owned(),
+            enforced_operations: Vec::new(),
+        };
+        let mut value = request();
+        value.policy.rollout = observe(now + 3_600);
+        assert_eq!(validate_request(&value, &site()), Ok(()));
+        for rollout in [
+            observe(now.saturating_sub(1)),
+            observe(now + 31 * 24 * 3_600),
+            SiteRollout {
+                revision: String::new(),
+                ..observe(now + 3_600)
+            },
+            SiteRollout {
+                enforced_operations: vec!["missing".to_owned()],
+                ..observe(now + 3_600)
+            },
+            SiteRollout {
+                revision: "rollout-1".to_owned(),
+                ..SiteRollout::default()
+            },
+        ] {
+            value.policy.rollout = rollout;
+            assert_eq!(
+                validate_request(&value, &site()),
+                Err("CONTROL_SITE_ROLLOUT_INVALID"),
+                "{:?}",
+                value.policy.rollout
+            );
+        }
+        // The default entry route can be enforced on its own by name.
+        value.policy.rollout = SiteRollout {
+            enforced_operations: vec!["protected.entry".to_owned()],
+            ..observe(now + 3_600)
+        };
+        assert_eq!(validate_request(&value, &site()), Ok(()));
     }
 
     /// The real-browser loop topology as a request body.

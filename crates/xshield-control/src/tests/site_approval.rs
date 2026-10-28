@@ -2822,3 +2822,124 @@ async fn a_descriptor_conflict_is_recorded_on_the_site_the_edge_names() {
     );
     let _ = ctx.finish().await;
 }
+
+/// Moving a served site to observe forwards refusals that are enforced today,
+/// so it needs an independent `PolicyApprover` with a fresh step-up: neither
+/// `site.config.apply_direct` nor an approver without step-up can release it.
+/// Going back to enforce is named but may be applied directly.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn relaxing_the_rollout_needs_a_stepped_up_independent_approver() {
+    let ctx = Ctx::new().await;
+    let site = "site_rollout";
+    ctx.create_live(site, "8.8.8.8:9000").await;
+    let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
+            "subject": "agent-rollout", "display_name": "rollout", "expires_at": expires,
+            "scopes": [{
+                "tenant_id": ctx.tenant.as_str(), "site_id": site,
+                "capabilities": ["site.config.apply_direct", "site.read"]
+            }]
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let api_key = issued["api_key"].as_str().unwrap().to_owned();
+    let stepped_up = ctx
+        .principal_with_step_up(
+            "approver-mfa",
+            &[ManagementRole::PolicyApprover, ManagementRole::Observer],
+            true,
+        )
+        .await;
+    let reasons = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT unnest(risk_reasons) FROM xshield.site_apply_intents
+             WHERE tenant_id = $1 AND site_id = $2",
+        )
+        .bind(ctx.tenant.as_str())
+        .bind(site)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap()
+    };
+
+    let until = Utc::now().timestamp().unsigned_abs() + 7 * 24 * 3_600;
+    let observe = with(
+        site_body(site, "8.8.8.8:9000"),
+        "policy",
+        json!({"rollout": {
+            "mode": "observe", "observe_until_unix": until, "revision": "rollout-1"
+        }}),
+    );
+    let (status, saved) = ctx.put(site, &observe, &ctx.key("observe")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    assert_eq!(reasons().await, ["ROLLOUT_MODE_RELAXED"]);
+
+    let sent = ctx.edge.apply_count();
+    let (status, refused) = apply_with_key(&ctx, site, &api_key).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error_code"],
+        "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED"
+    );
+    let (status, refused) = ctx.approve(site, &ctx.key("approve-no-step-up")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_STEP_UP_REQUIRED");
+    assert_eq!(refused["next_action"], "reauthenticate");
+    assert_eq!(ctx.edge.apply_count(), sent, "nothing was sent");
+    assert!(
+        ctx.edge.served_gateway_config(site).unwrap()["site_policy"]
+            .get("rollout")
+            .is_none(),
+        "the served site stays enforced"
+    );
+
+    let (status, approved) = Ctx::call(
+        &stepped_up,
+        "POST",
+        &format!("/control/v1/sites/{site}/approve"),
+        None,
+        Some(&ctx.key("approve-step-up")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let served = ctx.edge.served_gateway_config(site).unwrap();
+    assert_eq!(served["site_policy"]["rollout"]["mode"], "observe");
+    assert_eq!(
+        served["site_policy"]["rollout"]["observe_until_unix"],
+        until
+    );
+
+    // Back to enforce: named, and the direct-apply capability may release it.
+    let (status, saved) = ctx
+        .put(site, &site_body(site, "8.8.8.8:9000"), &ctx.key("enforce"))
+        .await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    assert_eq!(reasons().await, ["ROLLOUT_MODE_TIGHTENED"]);
+    let (status, applied) = apply_with_key(&ctx, site, &api_key).await;
+    assert!(status.is_success(), "{applied}");
+    assert!(
+        ctx.edge.served_gateway_config(site).unwrap()["site_policy"]
+            .get("rollout")
+            .is_none()
+    );
+
+    // A deadline in the past is refused with its own reason.
+    let past_deadline = with(
+        site_body(site, "8.8.8.8:9000"),
+        "policy",
+        json!({"rollout": {
+            "mode": "observe", "observe_until_unix": 1, "revision": "rollout-2"
+        }}),
+    );
+    let (status, refused) = ctx
+        .put(site, &past_deadline, &ctx.key("past_deadline"))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_ROLLOUT_INVALID");
+    let _ = ctx.finish().await;
+}

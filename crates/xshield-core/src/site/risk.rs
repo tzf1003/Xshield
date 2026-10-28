@@ -25,7 +25,7 @@
 //! approver: the `site.config.apply_direct` capability does not waive them
 //! (see [`direct_apply_may_waive`]).
 
-use super::{SiteConfig, SitePolicyConfig, SiteRouteConfig};
+use super::{SiteConfig, SitePolicyConfig, SiteRollout, SiteRouteConfig};
 use std::collections::BTreeSet;
 
 /// Why a configuration change needs independent approval.
@@ -94,13 +94,21 @@ pub enum ChangeRisk {
     /// removed or changed in any field: which responses replace a binding's
     /// credential or move it to another authorization context.
     AuthTransitionChanged,
+    /// The rollout observes more than what is served: enforce to observe
+    /// (also when a site goes live observing), a later observe deadline, or a
+    /// route released from enforce. Refusals that were enforced would be
+    /// forwarded, so this needs an independent approver with a recent step-up.
+    RolloutRelaxed,
+    /// Any other rollout change: observe to enforce, an earlier deadline, a
+    /// route enforced on its own, or a new window label.
+    RolloutTightened,
     /// A difference that no category above names; risky by default.
     OtherChange,
 }
 
 impl ChangeRisk {
     /// Every reason, in token order of declaration.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::Activation,
         Self::Takedown,
         Self::UpstreamChanged,
@@ -124,6 +132,8 @@ impl ChangeRisk {
         Self::QueryPaginationChanged,
         Self::ShareIssueChanged,
         Self::AuthTransitionChanged,
+        Self::RolloutRelaxed,
+        Self::RolloutTightened,
         Self::OtherChange,
     ];
 
@@ -150,7 +160,15 @@ impl ChangeRisk {
                 | Self::QueryPaginationChanged
                 | Self::ShareIssueChanged
                 | Self::AuthTransitionChanged
+                | Self::RolloutRelaxed
         )
+    }
+
+    /// Whether the independent approver must also have reauthenticated
+    /// recently (MFA step-up), which an API key cannot.
+    #[must_use]
+    pub const fn requires_step_up(self) -> bool {
+        matches!(self, Self::RolloutRelaxed)
     }
 
     /// Returns the stable upper-case token.
@@ -180,6 +198,8 @@ impl ChangeRisk {
             Self::QueryPaginationChanged => "QUERY_PAGINATION_CHANGED",
             Self::ShareIssueChanged => "SHARE_ISSUE_CHANGED",
             Self::AuthTransitionChanged => "AUTH_TRANSITION_CHANGED",
+            Self::RolloutRelaxed => "ROLLOUT_MODE_RELAXED",
+            Self::RolloutTightened => "ROLLOUT_MODE_TIGHTENED",
             Self::OtherChange => "OTHER_CHANGE",
         }
     }
@@ -197,6 +217,28 @@ pub fn direct_apply_may_waive<S: AsRef<str>>(reasons: &[S]) -> bool {
         ChangeRisk::from_token(reason.as_ref())
             .is_some_and(|risk| !risk.requires_independent_approval())
     })
+}
+
+/// Whether approving these stored reasons needs an approver with a recent
+/// step-up: `true` as soon as one reason requires it, and also for a token
+/// this version does not recognize.
+#[must_use]
+pub fn approval_requires_step_up<S: AsRef<str>>(reasons: &[S]) -> bool {
+    reasons.iter().any(|reason| {
+        ChangeRisk::from_token(reason.as_ref()).is_none_or(ChangeRisk::requires_step_up)
+    })
+}
+
+/// The rollout reason for going from `before` (what is served, or nothing)
+/// to `after`, if their rollouts differ.
+fn rollout_change(before: Option<&SiteRollout>, after: &SiteRollout) -> Option<ChangeRisk> {
+    if after.relaxes(before) {
+        Some(ChangeRisk::RolloutRelaxed)
+    } else if before.is_some_and(|before| before != after) {
+        Some(ChangeRisk::RolloutTightened)
+    } else {
+        None
+    }
 }
 
 /// The provenance-flow facets: which routes of a policy take part in each.
@@ -321,8 +363,10 @@ pub fn assess_change_risk(baseline: Option<&SiteConfig>, desired: &SiteConfig) -
     // the requirement. Flow routes it goes live with are new as well, and are
     // named so that a direct apply cannot introduce them unreviewed.
     let Some(before) = served else {
+        let policy = desired.effective_policy();
         return std::iter::once(ChangeRisk::Activation)
-            .chain(changed_flow_facets(None, &desired.effective_policy()))
+            .chain(changed_flow_facets(None, &policy))
+            .chain(rollout_change(None, &policy.rollout))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -387,6 +431,7 @@ pub fn assess_change_risk(baseline: Option<&SiteConfig>, desired: &SiteConfig) -
         }
     }
     risks.extend(changed_flow_facets(Some(&old), &new));
+    risks.extend(rollout_change(Some(&old.rollout), &new.rollout));
     // Anything the categories above do not name (a field added later) is
     // still a change to what the edge serves.
     if risks.is_empty() && comparable(before) != comparable(desired) {
@@ -1351,7 +1396,8 @@ mod tests {
                 ChangeRisk::ResourceGrantChanged,
                 ChangeRisk::QueryPaginationChanged,
                 ChangeRisk::ShareIssueChanged,
-                ChangeRisk::AuthTransitionChanged
+                ChangeRisk::AuthTransitionChanged,
+                ChangeRisk::RolloutRelaxed
             ]
         );
         assert_eq!(
@@ -1365,6 +1411,81 @@ mod tests {
         assert_eq!(
             ChangeRisk::from_token("AUTH_TRANSITION_CHANGED"),
             Some(ChangeRisk::AuthTransitionChanged)
+        );
+    }
+
+    fn observing(until: u64) -> SiteConfig {
+        let mut config = base();
+        config.policy.rollout = SiteRollout {
+            mode: crate::site::RolloutMode::Observe,
+            observe_until_unix: Some(until),
+            revision: "rollout-1".to_owned(),
+            enforced_operations: Vec::new(),
+        };
+        config
+    }
+
+    #[test]
+    fn relaxing_the_rollout_needs_a_stepped_up_independent_approver() {
+        use ChangeRisk::*;
+        let enforced = base();
+        let observed = observing(2_000_000_000);
+        // Going live observing, or moving a served site to observe.
+        assert_eq!(
+            assess_change_risk(None, &observed),
+            vec![Activation, RolloutRelaxed]
+        );
+        assert_eq!(
+            assess_change_risk(Some(&enforced), &observed),
+            vec![RolloutRelaxed]
+        );
+        // Extending the window, or releasing a route back to observe.
+        let extended = observing(2_000_000_001);
+        assert_eq!(
+            assess_change_risk(Some(&observed), &extended),
+            vec![RolloutRelaxed]
+        );
+        let mut tightened = observed.clone();
+        tightened.policy.rollout.enforced_operations = vec!["home".to_owned()];
+        assert_eq!(
+            assess_change_risk(Some(&tightened), &observed),
+            vec![RolloutRelaxed]
+        );
+        // Every tightening is named but may be applied directly.
+        for (from, to) in [
+            (&observed, &enforced),
+            (&extended, &observed),
+            (&observed, &tightened),
+        ] {
+            assert_eq!(assess_change_risk(Some(from), to), vec![RolloutTightened]);
+        }
+        let mut relabelled = observed.clone();
+        relabelled.policy.rollout.revision = "rollout-2".to_owned();
+        assert_eq!(
+            assess_change_risk(Some(&observed), &relabelled),
+            vec![RolloutTightened]
+        );
+        assert_eq!(assess_change_risk(Some(&observed), &observed), Vec::new());
+        assert!(direct_apply_may_waive(&["ROLLOUT_MODE_TIGHTENED"]));
+        assert!(!direct_apply_may_waive(&["ROLLOUT_MODE_RELAXED"]));
+        assert!(!approval_requires_step_up(&[
+            "ROUTES_CHANGED",
+            "ROLLOUT_MODE_TIGHTENED"
+        ]));
+        assert!(approval_requires_step_up(&[
+            "ROUTES_CHANGED",
+            "ROLLOUT_MODE_RELAXED"
+        ]));
+        assert!(approval_requires_step_up(&[
+            "A_REASON_FROM_A_NEWER_RELEASE"
+        ]));
+        assert!(!approval_requires_step_up::<&str>(&[]));
+        assert_eq!(
+            ChangeRisk::ALL
+                .into_iter()
+                .filter(|risk| risk.requires_step_up())
+                .collect::<Vec<_>>(),
+            [RolloutRelaxed]
         );
     }
 }
