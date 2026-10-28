@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.0 — 2026-10-28
+
+首个可部署的软件版本（与 Cargo 工作区及 Helm chart 的版本一致；下文的 3.0 是设计文档库的版本，不是软件版本）。镜像由 `v0.1.0` 标签触发 `release-images.yml` 发布到 GHCR，附签名、构建来源证明与 SBOM（docs/19 19.7）。
+
 - Kubernetes 部署（可行性建议“最小运维底座”的最后一项，docs/19 19.9）：新增 Helm chart `deploy/helm/xshield/`，部署一个租户、一个站点。
   - **拓扑**：edge、control 与两组 journal 的封存/发布任务放在单副本 StatefulSet 的同一个 Pod 里，共用一个卸载后保留的持久卷。十个 outbox 发布任务是独立的 Deployment。
   - **Service**：`<release>-edge` 暴露站点端口；`<release>-ops` 暴露两个运维端点。可选 ServiceMonitor 与 NetworkPolicy。
