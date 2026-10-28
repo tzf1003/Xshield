@@ -34,7 +34,7 @@ mod site_config;
 mod workbench;
 
 pub use identity::{IdentityConfigError, OidcProvider};
-pub use site_config::EdgeApplyClient;
+pub use site_config::{EdgeApplyClient, upstream_allowance_from_env};
 
 use axum::{
     Extension, Json, Router,

@@ -52,6 +52,7 @@ XSHIELD_CONTROL_ROLES=observer,system_admin,release_operator
 XSHIELD_SEAL_INTERVAL_SECONDS=3
 XSHIELD_PUBLISH_INTERVAL_SECONDS=3
 XSHIELD_OUTBOX_INTERVAL_SECONDS=3
+XSHIELD_ALLOWED_UPSTREAM_CIDRS=172.30.0.20/32
 EOF
 XSHIELD_OIDC_CLIENT_SECRET=xshield-dev-client-secret "$work/init.sh" >/dev/null
 token=$(head -n 1 "$work/secrets/control_token")
@@ -87,7 +88,12 @@ unauthenticated=$(docker run --rm --network "container:$(compose ps -q net)" "$c
 [[ "$unauthenticated" == 401 ]] || fail "management API without a bearer answered $unauthenticated"
 echo 'ok: management API reachable with the bootstrap bearer only'
 
-site='{"site_id":"site_pilot","display_name":"Compose smoke","public_origin":"https://pilot.example.test","upstream_address":"127.0.0.1:18080","upstream_server_name":"origin.internal","upstream_tls":false,"listen_port":6401,"entry_path":"/","security_entry":"public","sensor_enabled":false,"policy_revision":"smoke-r1","status":"active","policy":{"routes":[{"operation_id":"smoke.home","method":"GET","path":"/","security_entry":"public"}]}}'
+site='{"site_id":"site_pilot","display_name":"Compose smoke","public_origin":"https://pilot.example.test","upstream_address":"172.30.0.20:8080","upstream_server_name":"origin.internal","upstream_tls":false,"listen_port":6401,"entry_path":"/","security_entry":"public","sensor_enabled":false,"policy_revision":"smoke-r1","status":"active","policy":{"routes":[{"operation_id":"smoke.home","method":"GET","path":"/","security_entry":"public"}]}}'
+# Only the admitted private network may be an origin.
+outside=$(management -X POST -H 'Content-Type: application/json' \
+    -H 'Idempotency-Key: compose-smoke-create-0' --data-binary @- \
+    http://127.0.0.1:9443/control/v1/sites <<<"${site/172.30.0.20:8080/172.30.0.21:8080}")
+grep -q '"error_code":"CONTROL_SITE_SSRF_BLOCKED"' <<<"$outside" || fail "private origin outside the admitted network: $outside"
 created=$(management -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' \
     -H 'Idempotency-Key: compose-smoke-create-1' --data-binary @- \
     http://127.0.0.1:9443/control/v1/sites <<<"$site")
@@ -98,7 +104,7 @@ applied=$(management -X POST -H 'Idempotency-Key: compose-smoke-apply-1' \
     http://127.0.0.1:9443/control/v1/sites/site_pilot/apply)
 # A first apply waits for an independent approval.
 grep -q '"reason_code":"CONTROL_SITE_APPROVAL_REQUIRED"' <<<"$applied" || fail "apply: $applied"
-echo 'ok: site saved; control reached the edge over the signed channel; apply waits for approval'
+echo 'ok: admitted private origin saved, others refused; control reached the edge over the signed channel; apply waits for approval'
 
 metrics=$(curl -s --max-time 5 http://127.0.0.1:9555/metrics)
 grep -q '^xshield_control_responses_total{class="2xx"} [1-9]' <<<"$metrics" || fail 'control metrics did not count the 2xx responses'
