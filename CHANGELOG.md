@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 站点级 observe → enforce 上线的控制面部分（docs/32 第 2 步）：站点策略新增可选块 `rollout`（`xshield_core::site::SiteRollout`，强类型、`deny_unknown_fields`）。缺省与 `mode: enforce` 等价且不序列化，已有配置字节不变；`mode: observe` 必须带 `observe_until_unix` 与标签 `revision`（规则同 `policy_revision`），可选 `enforced_operations` 只能把已存在的路由单独收紧为强制，不能反向。保存时截止时间必须在未来 30 天内，过期的观察只能改回强制；违规返回 400 `CONTROL_SITE_ROLLOUT_INVALID`。审批新增两个原因：`ROLLOUT_MODE_RELAXED`（转为观察，含以观察状态首次上线；延后截止时间；让路由回到观察）只能由独立 `PolicyApprover` 批准，且该审批人必须有有效的 MFA step-up，`site.config.apply_direct` 与无 step-up 的审批都被拒绝（401 `CONTROL_STEP_UP_REQUIRED`，存储在锁定修订的同一事务里判断，本版本不认识的原因同样要求 step-up）；`ROLLOUT_MODE_TIGHTENED`（回到强制、提前截止、单独强制路由、换标签）会被记录，可以直接应用。核心另提供 edge 将要使用的判定：只有观察窗口内、非 `PUBLIC`、GET/HEAD、未被单独强制的路由才可观察（`SiteRollout::observes`），以及截止前 24 小时告警判定。控制台数据层无损往返该块（严格解码、强制读作缺省），差异与审批说明列出新原因。**未覆盖**：edge 还不读取该块，观察中的站点今天仍按强制服务（第 3 步）；控制台还没有编辑界面与退出报告（第 4 步）；退出报告摘要写入审批记录随退出报告一起做。
+
 - 增加保存检索视图 API：`POST/GET /control/v1/saved-views` 与 `DELETE /control/v1/saved-views/{view_id}`，只允许 `Investigator`，保存经校验的检索请求（不含游标、不超过 8 KiB），同名 409 且不写入；每次尝试写对应 `console.saved_view.*` 审计，worker 发布矩阵与封闭原因集同步扩展。控制台入口未接入。
 - 增加保存检索视图的存储层：迁移 `0055_m5_saved_views.sql` 建立 `xshield.saved_search_views`，按 owner 保存已校验的检索请求（不含游标、不超过 8 KiB），名称在 owner 内唯一；PostgreSQL 回归 `saved_search_view` 覆盖唯一冲突、续页顺序、跨主体隔离、删除与不合法请求的拒绝。HTTP 端点与控制台尚未接入，部署前须先应用该迁移。
 - 增加管理员全部任务列表 API：`GET /control/v1/admin/jobs[?cursor=...]` 只允许 `AuditAdministrator`（访问范围为本次决定：不扩大 Investigator 可见性，每次读取写 `console.job.admin_list` 审计），按 `job_` 降序有界分页，每条目附提交者 `owner_ref`，该字段不进入审计载荷；游标绑定凭证、调用者、作用域与页大小。PostgreSQL 回归 `control_job_admin_list` 覆盖跨主体续页与顺序；worker 发布矩阵、封闭原因集与覆盖检查同步扩展（63 个控制事件）。不新增迁移，控制台视图未接入。

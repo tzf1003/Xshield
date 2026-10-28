@@ -1392,7 +1392,45 @@ export type SitePolicyConfig = {
   static_asset_max_path_depth: number;
   /** Whether the edge asks the origin to enforce object ownership (server default false). */
   origin_object_access_enforced: boolean;
+  /**
+   * Observe → enforce rollout (docs/32). Absent means enforce, which the server never writes out;
+   * present only while the site observes until `observe_until_unix`.
+   */
+  rollout?: SiteRollout;
 };
+
+/** A site observing deterministic refusals until a deadline (`xshield_core::site::SiteRollout`). */
+export type SiteRollout = {
+  mode: "observe";
+  /** UTC second after which the site is enforced without any configuration change. */
+  observe_until_unix: number;
+  /** Label of this observe window, recorded on every observed refusal as `rollout_revision`. */
+  revision: string;
+  /** Routes already enforced on their own while the rest of the site observes. */
+  enforced_operations?: string[];
+};
+
+/** Decodes a stored rollout block; the enforced default reads as absent. */
+export function decodeRollout(value: unknown): SiteRollout | undefined {
+  if (value === undefined) return undefined;
+  const row = object(value);
+  knownFields(row, ["mode", "observe_until_unix", "revision", "enforced_operations"]);
+  if (choice(row.mode ?? "enforce", ["enforce", "observe"]) === "enforce") {
+    ensure(Object.keys(row).every((key) => key === "mode"));
+    return undefined;
+  }
+  const enforced =
+    row.enforced_operations === undefined
+      ? []
+      : list(row.enforced_operations, 256, (item) => name(item));
+  ensure(new Set(enforced).size === enforced.length);
+  return {
+    mode: "observe",
+    observe_until_unix: integer(row.observe_until_unix, 1),
+    revision: name(row.revision),
+    ...(enforced.length > 0 ? { enforced_operations: enforced } : {}),
+  };
+}
 
 export type SiteSecretReference = {
   kind: "tls" | "session_hmac" | "request_crypto" | "response_crypto" | "model";
@@ -1858,7 +1896,7 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
   };
   if (value === undefined) return defaults;
   const row = object(value);
-  knownFields(row, Object.keys(defaults));
+  knownFields(row, [...Object.keys(defaults), "rollout"]);
   const optionalObject = (item: unknown): Record<string, unknown> | null =>
     item === null || item === undefined ? null : object(item);
   const identity = row.identity === undefined ? defaults.identity : object(row.identity);
@@ -1965,8 +2003,13 @@ function decodeSitePolicy(value: unknown): SitePolicyConfig {
       row.origin_object_access_enforced === undefined
         ? defaults.origin_object_access_enforced
         : bool(row.origin_object_access_enforced),
+    ...rolloutMember(decodeRollout(row.rollout)),
   };
 }
+
+/** Spreads a rollout into a policy only when there is one, so enforce stays absent. */
+export const rolloutMember = (rollout: SiteRollout | undefined): { rollout?: SiteRollout } =>
+  rollout === undefined ? {} : { rollout };
 
 function decodeSiteConfig(value: unknown, status: number): SiteConfigResponse {
   ensure(status === 200 || status === 201);

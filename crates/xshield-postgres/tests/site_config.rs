@@ -92,6 +92,7 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
             "independent-approver",
             &[41; 32],
             None,
+            false,
         )
         .await
         .unwrap();
@@ -123,6 +124,7 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
                 "independent-approver",
                 &[42; 32],
                 None,
+                false,
             )
             .await
             .unwrap(),
@@ -541,6 +543,7 @@ async fn approve(
             approver,
             &[key; 32],
             expected_digest,
+            false,
         )
         .await
         .unwrap()
