@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- 网关内置证据清理（可行性建议 P1“证据保留不停机”，docs/12 12.8、RB-10）：此前到期证据只能用 `xshield-evidence-retain` 清理，而它要求先停网关，回收的配额也要重启网关才生效。
+  - 设置 `XSHIELD_EVIDENCE_RETENTION_INTERVAL_SECONDS` 后，网关在独立线程上按间隔执行同一轮清理，批量由 `XSHIELD_EVIDENCE_RETENTION_BATCH_LIMIT` 设定。每轮结束后重新扫描根目录、重算配额，不再需要重启。不设置时行为不变。
+  - 清理一轮的实现从命令中抽出为 `xshield_postgres::retention_pass`，命令与网关共用，命令的输出与退出码不变。`xshield-postgres` 的 `tokio` 从开发依赖改为正式依赖，它本来就经 sqlx 在依赖树里。
+  - `/metrics` 新增证据配额余量与清理轮次、失败原因码、删除数、上次成功时间。
+  - 回归：网关单测 1 个（清理指标与配额余量）；新增真实 PostgreSQL 集成测试 `crates/xshield-gateway/tests/evidence_retention.rs`，网关运行中采集一份 1 秒到期的证据，检查它被删除、配额余量回到与目录实际占用一致、之后仍能正常服务和采集，已接入 `scripts/test_postgres.sh`。
+  - **未覆盖**：多实例共享同一根目录（仍然只允许一个写入者）；Helm 与 Compose 参考部署没有加这个开关，因为它们的 edge 引导配置不启用证据采集。
+
 ## 0.1.0 — 2026-10-28
 
 首个可部署的软件版本（与 Cargo 工作区及 Helm chart 的版本一致；下文的 3.0 是设计文档库的版本，不是软件版本）。镜像由 `v0.1.0` 标签触发 `release-images.yml` 发布到 GHCR，附签名、构建来源证明与 SBOM（docs/19 19.7）。

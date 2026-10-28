@@ -4,6 +4,7 @@ mod buffered_relay;
 mod descriptor_supply;
 mod durable_audit;
 mod edge_health;
+mod evidence_retention;
 mod evidence_writer;
 mod listener_supervisor;
 mod ops_api;
@@ -129,7 +130,7 @@ struct Gateway {
     response_key: Option<EnvResponseKey>,
     postgres: Option<Arc<PostgresRuntime>>,
     buffered_body_budget: Arc<Semaphore>,
-    evidence: Option<evidence_writer::EvidenceWriter>,
+    evidence: Option<Arc<evidence_writer::EvidenceWriter>>,
     rate_limiter: Arc<SiteRateLimiter>,
     unrouted: Arc<UnroutedDenials>,
     metrics: Arc<ops_api::EdgeMetrics>,
@@ -2376,7 +2377,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         .transpose()?;
     let request_key = EnvRequestKey::from_env(&config)?;
     let response_key = EnvResponseKey::from_env(&config)?;
-    let evidence = evidence_writer::EvidenceWriter::from_env(&config)?;
+    let evidence = evidence_writer::EvidenceWriter::from_env(&config)?.map(Arc::new);
+    let retention = evidence_retention::EvidenceRetention::from_env(
+        evidence.as_ref(),
+        config.tenant_id(),
+        config.site_id(),
+    )?;
     if request_key
         .as_ref()
         .zip(response_key.as_ref())
@@ -2400,7 +2406,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             identity,
             request_key,
             response_key,
-            evidence,
+            evidence: evidence.clone(),
             postgres: postgres.clone(),
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
             rate_limiter: Arc::new(SiteRateLimiter::new()),
@@ -2427,6 +2433,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         FLUSH_INTERVAL,
         shutdown.clone(),
     ));
+    if let Some(retention) = retention {
+        retention.spawn(Arc::clone(&metrics))?;
+    }
     // Descriptors must exist, unchanged, before any listener can admit a page
     // root or a gated request against them; any refusal stops startup. The
     // bootstrap configuration and a restored snapshot get the same idempotent
@@ -2470,6 +2479,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             Arc::clone(&supervisor),
             audit_readiness.clone(),
             Arc::clone(&metrics),
+            evidence.clone(),
         );
         runtime.spawn(async move {
             if let Err(error) = ops_api::serve(ops_listener, state).await {

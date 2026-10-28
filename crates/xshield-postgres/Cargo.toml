@@ -12,13 +12,12 @@ openssl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
+# Already in the tree through sqlx; retention_pass bounds each step with a timeout.
+tokio.workspace = true
 uuid.workspace = true
 xshield-core = { path = "../xshield-core" }
 xshield-evidence = { path = "../xshield-evidence" }
 zeroize.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true
 
 [lints]
 workspace = true

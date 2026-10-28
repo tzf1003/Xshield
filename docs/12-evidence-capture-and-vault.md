@@ -86,7 +86,7 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 
 采集点位于完整 JSON 校验后、身份/资格提交和响应加密前，只转换证据副本。对象 kind=response_decoded、classification=RESTRICTED、fidelity=redacted，content_type=application/vnd.xshield.captured-json+json；密文内的版本 1 文档含 value、profile_revision、source_representation=application_json、source_bytes_observed、excluded_http_headers=true 和逐路径 exclusions（EVIDENCE_SECRET_EXCLUDED），被排除值为 null。manifest 的 bytes_observed/bytes_saved 是该文档长度，源实体长度在文档中；complete 只表示这一受限表示完整。单路径最长 1024 字节，排除清单最多 1024 项，序列化文档最多 4 MiB；重复键、超限或解析失败关闭正文释放。当前不采集 HTTP 头、请求、最终客户端封包、HTML 或流式实体；全站 full_protected 覆盖仍待后续采集点实现。
 
-启用采集必须配置 identity_store 和 `XSHIELD_DATABASE_URL`。部署 Unix 本地文件系统，预建独立私有证据根目录（0700），注入 `XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、独立 32 字节小写 hex 的 `XSHIELD_EVIDENCE_KEY_HEX` 及 `XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`（4259901 字节至 1 TiB）。根目录只允许一个网关写入者；同根控制面只读，共享文件系统部署需另行验证锁语义。启动时计入所有已有常规文件，包括孤儿对象，最多 100000 文件；每次写入先保守预留文档、最大 manifest 与认证侧车占用，失败也保留预留。进程内一个采集许可覆盖解析、加密、落盘、catalog 和 journal，忙时立即拒绝。到期立即禁止读取；已登记密文和超过宽限期的孤儿 `.xev` 可按 12.8 的维护流程清理，重启网关后重新计算余量。
+启用采集必须配置 identity_store 和 `XSHIELD_DATABASE_URL`。部署 Unix 本地文件系统，预建独立私有证据根目录（0700），注入 `XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、独立 32 字节小写 hex 的 `XSHIELD_EVIDENCE_KEY_HEX` 及 `XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`（4259901 字节至 1 TiB）。根目录只允许一个网关写入者；同根控制面只读，共享文件系统部署需另行验证锁语义。启动时计入所有已有常规文件，包括孤儿对象，最多 100000 文件；每次写入先保守预留文档、最大 manifest 与认证侧车占用，失败也保留预留。进程内一个采集许可覆盖解析、加密、落盘、catalog 和 journal，忙时立即拒绝。到期立即禁止读取；已登记密文和超过宽限期的孤儿 `.xev` 可按 12.8 的维护流程清理。网关内置的定期清理每轮结束后重新计算余量；用一次性命令清理时，重启网关后重新计算。
 
 释放顺序为：加密对象及侧车耐久写入 → PostgreSQL catalog 与 evidence.cataloged outbox 原子提交 → 本地 evidence.captured 耐久审计 → 后续响应处理和正文释放。catalog 操作的整体等待受 identity_store.acquire_timeout_ms 约束；事务结果不确定时也保留独立 request_seq，避免终态复用序号。事件只含受限引用、版本和结果，正文不进入索引或普通日志；规则 confidence=null。EVIDENCE_CAPTURE_INVALID、EVIDENCE_CAPTURE_LIMIT_EXCEEDED、EVIDENCE_CAPTURE_CAPACITY_EXHAUSTED、EVIDENCE_CAPTURE_UNAVAILABLE 形成 request.aborted；必需 journal 失败关闭网关就绪状态并在重启恢复缺失终态。源站已返回和客户端已释放是独立事实，失败不触发业务重放。落盘后目录或审计失败可能保留有界对象，已登记对象沿用独立审批读取流程。
 
@@ -95,6 +95,15 @@ PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 w
 ## 12.8 已实现：到期密文、孤儿维护与故障重试
 
 迁移 `0015_m3_evidence_retention.sql` 为 catalog 增加删除意图/完成事件引用与有界检索索引，`0016_m3_evidence_orphan_retention.sql` 为无 catalog 的本地孤儿观察增加意图表。`xshield-evidence-retain TENANT_ID SITE_ID BATCH_LIMIT` 是一次性维护命令，批量为 1–32；复用 `XSHIELD_DATABASE_URL`、`XSHIELD_EVIDENCE_ROOT`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_KEY_HEX`，可用 `XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS` 调整 1 秒至 30 天的孤儿宽限期（默认 1 小时）。根目录须为 Unix 私有本地目录，与该 catalog/key 对应的唯一活动存储位置。命令取得与网关写入者相同的排他目录锁，需先停对应网关；控制面到期检查继续有效。具体步骤见 RB-10。
+
+网关也可以自己定期执行同一轮清理，不必停机。设置 `XSHIELD_EVIDENCE_RETENTION_INTERVAL_SECONDS`（1–86400 秒）后，网关在独立线程、独立运行时和独立的单连接数据库池上每隔该间隔执行一轮，批量由 `XSHIELD_EVIDENCE_RETENTION_BATCH_LIMIT` 设定（1–32，默认 32），孤儿宽限期同样读 `XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS`。这些设置在启动时校验，无效值或未启用证据采集时拒绝启动；未设置间隔时行为不变。
+
+- **与采集并行**：清理不占用采集许可。采集写入的密文在 catalog 提交前只短暂处于无登记状态，远小于孤儿宽限期，已登记密文只在到期后删除，所以清理不会删掉在途写入。
+- **配额回收**：每轮结束后，无论成败，网关在配额锁内重新扫描根目录、重算剩余字节和文件数，效果与重启相同。扫描期间新的采集写入会等待扫描结束。根目录无法扫描时保留原来的保守余量。
+- **观测**：`/metrics` 增加 `xshield_edge_evidence_capacity_remaining_bytes`、`xshield_edge_evidence_capacity_remaining_files`、`xshield_edge_evidence_retention_passes_total`、`xshield_edge_evidence_retention_failures_total{reason_code}`、`xshield_edge_evidence_retention_deleted_total` 和 `xshield_edge_evidence_retention_last_success_timestamp_seconds`。失败的一轮留下可重试的意图，下一轮重试，并在标准错误输出原因码。
+- **代码位置**：一轮清理的实现是 `xshield_postgres::retention_pass::run_retention_pass`，一次性命令与网关共用。
+
+启用后不要再对同一根目录运行一次性命令：命令会因目录锁返回 `EVIDENCE_PURGE_BUSY`，不会造成损坏。
 
 流程：按完整 tenant/site/key 与数据库时钟选择 active 到期行 → 行锁内原子提交 `evidence.purge_requested` outbox 与意图引用 → 本地重验 manifest HMAC、全部 catalog 字段、作用域、key、期限、私有常规文件与密文摘要 → 只删除精确 `.xev` 并同步目录 → 重验 catalog 快照，原子提交 `status=deleted`、`deleted_at`、完成引用和 `evidence.deleted` outbox。读取已在过期时关闭，不依赖本流程执行及时性。删除不解密对象，最多读取单对象 64 MiB 加封包开销；一次只有一个对象在途。
 
