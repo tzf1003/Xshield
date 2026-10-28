@@ -482,9 +482,14 @@ PY
 python3 "$test_dir/origin.py" "$test_dir/origin.log" "$test_dir/slow.started" "$test_dir" &
 origin_pid=$!
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
+# Two secrets arrive as mounted files (with the newline `echo` adds), the way
+# an orchestrator provides them; the rest stay in the environment.
+printf '%s\n' "8888888888888888888888888888888888888888888888888888888888888888" >"$test_dir/journal.key"
+printf '%s\n' "$database_base_url/$test_database" >"$test_dir/database.url"
+chmod 600 "$test_dir/journal.key" "$test_dir/database.url"
 XSHIELD_CONFIG="$test_dir/config.json" \
-XSHIELD_JOURNAL_KEY_HEX="8888888888888888888888888888888888888888888888888888888888888888" \
-XSHIELD_DATABASE_URL="$database_base_url/$test_database" \
+XSHIELD_JOURNAL_KEY_HEX_FILE="$test_dir/journal.key" \
+XSHIELD_DATABASE_URL_FILE="$test_dir/database.url" \
 XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
 XSHIELD_SHARE_TOKEN_KEY_HEX="$share_token_key" \
     "${CARGO_TARGET_DIR:-$repo_root/target}/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &

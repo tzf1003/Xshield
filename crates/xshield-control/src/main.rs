@@ -42,28 +42,41 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let roles = parse_roles(&env::var("XSHIELD_CONTROL_ROLES")?)?;
     let oidc_issuer = env::var("XSHIELD_CONTROL_OIDC_ISSUER")?;
     let oidc_client_id = env::var("XSHIELD_CONTROL_OIDC_CLIENT_ID")?;
-    let oidc_client_secret = Zeroizing::new(env::var("XSHIELD_CONTROL_OIDC_CLIENT_SECRET")?);
+    let oidc_client_secret = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CONTROL_OIDC_CLIENT_SECRET",
+    )?);
     let console_origin = env::var("XSHIELD_CONTROL_CONSOLE_ORIGIN")?;
     let required_acr = env::var("XSHIELD_CONTROL_OIDC_REQUIRED_ACR")?;
     let oidc_subject_roles =
         parse_oidc_subject_roles(&env::var("XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON")?)?;
-    let token = Zeroizing::new(env::var("XSHIELD_CONTROL_TOKEN")?);
-    let cursor_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_CURSOR_KEY_HEX")?);
-    let idempotency_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX")?);
-    let api_key_hash_key_hex = env::var("XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX").ok();
+    let token = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_CONTROL_TOKEN")?);
+    let cursor_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CONTROL_CURSOR_KEY_HEX",
+    )?);
+    let idempotency_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX",
+    )?);
+    let api_key_hash_key_hex =
+        xshield_core::secret_env::var_opt("XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX")?;
     let source_key_id = env::var("XSHIELD_JOURNAL_KEY_ID")?;
-    let source_key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
+    let source_key_hex = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let seal_key_id = env::var("XSHIELD_SEAL_KEY_ID")?;
-    let seal_key_hex = Zeroizing::new(env::var("XSHIELD_SEAL_PUBLIC_KEY_HEX")?);
+    let seal_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_SEAL_PUBLIC_KEY_HEX",
+    )?);
     let control_key_id = env::var("XSHIELD_CONTROL_AUDIT_KEY_ID")?;
-    let control_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_AUDIT_KEY_HEX")?);
+    let control_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CONTROL_AUDIT_KEY_HEX",
+    )?);
     let target_id = env::var("XSHIELD_INDEX_TARGET_ID")?;
     let table = env::var("XSHIELD_CLICKHOUSE_TABLE").unwrap_or_else(|_| "audit_events".to_owned());
     let clickhouse_url = env::var("XSHIELD_CLICKHOUSE_URL")?;
     let clickhouse_database = env::var("XSHIELD_CLICKHOUSE_DATABASE")?;
     let clickhouse_user = env::var("XSHIELD_CLICKHOUSE_USER")?;
-    let clickhouse_password = Zeroizing::new(env::var("XSHIELD_CLICKHOUSE_PASSWORD")?);
-    let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
+    let clickhouse_password = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CLICKHOUSE_PASSWORD",
+    )?);
+    let database_url = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_DATABASE_URL")?);
     let database_max_connections = env::var("XSHIELD_CONTROL_DATABASE_MAX_CONNECTIONS")?.parse()?;
     let database_acquire_timeout =
         Duration::from_millis(env::var("XSHIELD_CONTROL_DATABASE_ACQUIRE_TIMEOUT_MS")?.parse()?);
@@ -81,7 +94,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         env::var("XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS")?.parse()?;
     let evidence_root = PathBuf::from(env::var("XSHIELD_EVIDENCE_ROOT")?);
     let evidence_key_id = env::var("XSHIELD_EVIDENCE_KEY_ID")?;
-    let evidence_key_hex = Zeroizing::new(env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
+    let evidence_key_hex =
+        Zeroizing::new(xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
     let evidence_max_artifact_bytes = env::var("XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES")?.parse()?;
     let evidence_max_retention_days = env::var("XSHIELD_EVIDENCE_MAX_RETENTION_DAYS")?.parse()?;
     let listen: SocketAddr = env::var("XSHIELD_CONTROL_LISTEN")
@@ -179,13 +193,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_evidence_read_port(EvidenceReadPort::new(evidence_vault))
         .with_oidc_provider(oidc_provider)?;
     let control = match (
-        env::var("XSHIELD_EDGE_APPLY_URL"),
-        env::var("XSHIELD_EDGE_APPLY_KEY_HEX"),
+        env::var("XSHIELD_EDGE_APPLY_URL").ok(),
+        xshield_core::secret_env::var_opt("XSHIELD_EDGE_APPLY_KEY_HEX")?.map(Zeroizing::new),
     ) {
-        (Ok(endpoint), Ok(key_hex)) => {
+        (Some(endpoint), Some(key_hex)) => {
             control.with_edge_apply_client(EdgeApplyClient::new(endpoint, &key_hex)?)
         }
-        (Err(_), Err(_)) => control,
+        (None, None) => control,
         _ => return Err("edge apply URL and key must be configured together".into()),
     };
     let (api, ops) = routers(control);

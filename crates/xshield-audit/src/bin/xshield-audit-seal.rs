@@ -20,9 +20,9 @@ fn run() -> Result<usize, Box<dyn Error>> {
     }
 
     let journal_key_id = env::var("XSHIELD_JOURNAL_KEY_ID")?;
-    let journal_key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
+    let journal_key_hex = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let seal_key_id = env::var("XSHIELD_SEAL_KEY_ID")?;
-    let seal_key_hex = Zeroizing::new(env::var("XSHIELD_SEAL_KEY_HEX")?);
+    let seal_key_hex = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_SEAL_KEY_HEX")?);
     let journal_key = JournalKey::from_hex(&journal_key_hex)?;
     let seal_key = SealSigningKey::from_hex(seal_key_id, &seal_key_hex)?;
     Ok(seal_closed_segments(

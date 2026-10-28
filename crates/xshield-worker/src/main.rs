@@ -18,13 +18,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let journal_key_id = env::var("XSHIELD_JOURNAL_KEY_ID")?;
-    let journal_key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
+    let journal_key_hex = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let seal_key_id = env::var("XSHIELD_SEAL_KEY_ID")?;
-    let seal_public_key_hex = Zeroizing::new(env::var("XSHIELD_SEAL_PUBLIC_KEY_HEX")?);
+    let seal_public_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_SEAL_PUBLIC_KEY_HEX",
+    )?);
     let url = env::var("XSHIELD_CLICKHOUSE_URL")?;
     let database = env::var("XSHIELD_CLICKHOUSE_DATABASE")?;
     let user = env::var("XSHIELD_CLICKHOUSE_USER")?;
-    let password = Zeroizing::new(env::var("XSHIELD_CLICKHOUSE_PASSWORD")?);
+    let password = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CLICKHOUSE_PASSWORD",
+    )?);
     let target_id = env::var("XSHIELD_INDEX_TARGET_ID")?;
     let table = env::var("XSHIELD_CLICKHOUSE_TABLE").unwrap_or_else(|_| "audit_events".to_owned());
     let metadata_retention_days = env::var("XSHIELD_AUDIT_METADATA_RETENTION_DAYS")?.parse()?;

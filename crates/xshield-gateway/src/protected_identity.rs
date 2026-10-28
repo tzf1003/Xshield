@@ -193,9 +193,13 @@ impl ProtectedIdentity {
         store: Arc<crate::PostgresRuntime>,
         share_issuance_enabled: bool,
     ) -> Result<Self, IdentityRuntimeError> {
-        let key_hex = Zeroizing::new(env::var("XSHIELD_FINGERPRINT_KEY_HEX")?);
+        let key_hex = Zeroizing::new(xshield_core::secret_env::var(
+            "XSHIELD_FINGERPRINT_KEY_HEX",
+        )?);
         let share_tokens = if share_issuance_enabled {
-            let token_key = Zeroizing::new(env::var("XSHIELD_SHARE_TOKEN_KEY_HEX")?);
+            let token_key = Zeroizing::new(xshield_core::secret_env::var(
+                "XSHIELD_SHARE_TOKEN_KEY_HEX",
+            )?);
             Some(
                 ShareTokenIssuer::from_hex(&token_key, &key_hex)
                     .map_err(|_| IdentityRuntimeError::InvalidKey)?,
@@ -1674,6 +1678,7 @@ pub(crate) enum IdentityRuntimeError {
     ClientAddressUnavailable,
     LocalRateState,
     Environment(env::VarError),
+    Secret(xshield_core::secret_env::SecretEnvError),
     OpenSsl(openssl::error::ErrorStack),
     Store(StoreError),
 }
@@ -1681,6 +1686,12 @@ pub(crate) enum IdentityRuntimeError {
 impl From<env::VarError> for IdentityRuntimeError {
     fn from(value: env::VarError) -> Self {
         Self::Environment(value)
+    }
+}
+
+impl From<xshield_core::secret_env::SecretEnvError> for IdentityRuntimeError {
+    fn from(value: xshield_core::secret_env::SecretEnvError) -> Self {
+        Self::Secret(value)
     }
 }
 
@@ -1706,6 +1717,7 @@ impl fmt::Display for IdentityRuntimeError {
             Self::ClientAddressUnavailable => formatter.write_str("client address unavailable"),
             Self::LocalRateState => formatter.write_str("anonymous rate state unavailable"),
             Self::Environment(_) => formatter.write_str("identity environment unavailable"),
+            Self::Secret(error) => error.fmt(formatter),
             Self::Store(error) => error.fmt(formatter),
         }
     }
@@ -1715,6 +1727,7 @@ impl std::error::Error for IdentityRuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Environment(error) => Some(error),
+            Self::Secret(error) => Some(error),
             Self::OpenSsl(error) => Some(error),
             Self::Store(error) => Some(error),
             Self::Missing

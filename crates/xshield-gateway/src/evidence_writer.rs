@@ -51,7 +51,7 @@ impl EvidenceWriter {
         }
         let root = env::var("XSHIELD_EVIDENCE_ROOT")?;
         let key_id = env::var("XSHIELD_EVIDENCE_KEY_ID")?;
-        let key = Zeroizing::new(env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
+        let key = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
         for other in [
             "XSHIELD_JOURNAL_KEY_HEX",
             "XSHIELD_REQUEST_DECRYPTION_KEY_HEX",

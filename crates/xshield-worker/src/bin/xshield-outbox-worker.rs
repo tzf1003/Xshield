@@ -55,7 +55,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     ) {
         return Err(USAGE.into());
     }
-    let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
+    let database_url = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_DATABASE_URL")?);
     let database_max_connections: u32 =
         env::var("XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS")?.parse()?;
     let database_acquire_timeout =
@@ -63,7 +63,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let clickhouse_url = env::var("XSHIELD_CLICKHOUSE_URL")?;
     let clickhouse_database = env::var("XSHIELD_CLICKHOUSE_DATABASE")?;
     let clickhouse_user = env::var("XSHIELD_CLICKHOUSE_USER")?;
-    let clickhouse_password = Zeroizing::new(env::var("XSHIELD_CLICKHOUSE_PASSWORD")?);
+    let clickhouse_password = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CLICKHOUSE_PASSWORD",
+    )?);
     let table = env::var("XSHIELD_CLICKHOUSE_TABLE").unwrap_or_else(|_| "audit_events".to_owned());
     let retention_days: u16 = env::var("XSHIELD_AUDIT_METADATA_RETENTION_DAYS")?.parse()?;
     let max_events: u32 = env::var("XSHIELD_OUTBOX_MAX_EVENTS")?.parse()?;

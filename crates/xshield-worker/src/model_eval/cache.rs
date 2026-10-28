@@ -62,7 +62,8 @@ impl ModelCacheConfiguration {
             .into_string()
             .map_err(|_| CACHE_CONFIGURATION_INVALID)?;
         let source = Zeroizing::new(
-            env::var("XSHIELD_MODEL_CACHE_KEY_HEX").map_err(|_| CACHE_CONFIGURATION_INVALID)?,
+            xshield_core::secret_env::var("XSHIELD_MODEL_CACHE_KEY_HEX")
+                .map_err(|_| CACHE_CONFIGURATION_INVALID)?,
         );
         Self::from_values(model, Some(&domain), Some(source.as_str()))
     }

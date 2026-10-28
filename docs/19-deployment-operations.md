@@ -73,6 +73,8 @@ control 与 edge 之间的 HMAC 通道对三类消息分别认证，并共用同
 
 浏览器仅持有 `Secure; HttpOnly; SameSite=Lax; Path=/` 的不透明随机会话 Cookie；PostgreSQL 仅以 SHA-256 摘要索引会话 token，保存单独的 CSRF token，并由数据库时钟执行 15 分钟闲置/8 小时绝对到期和撤销。`__Host-` Cookie 要求 TLS 且不得配置 Domain。身份会话数据进入数据库备份，故备份权限与恢复流程须按管理身份材料保护；恢复后先撤销不应复活的浏览器会话。控制台通过同源代理访问 API，代理只转发 Xshield 会话/短期 OIDC state Cookie，其他 Cookie 剥离。
 
+从文件读取秘密：control、edge、worker、`xshield-outbox-worker`、`xshield-evidence-retain` 与 `xshield-audit-seal` 读取的每个秘密变量（数据库 URL、各 `*_KEY_HEX`、`XSHIELD_CONTROL_TOKEN`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CLICKHOUSE_PASSWORD` 等）都可以改为设置 `<变量名>_FILE`，值为一个文件路径，进程从该文件读取秘密，适合 Docker/Kubernetes secret 卷，秘密因此不出现在 `/proc/<pid>/environ`、`docker inspect` 或编排器的环境变量展示里。规则：同时设置 `NAME` 与 `NAME_FILE` 拒绝启动（避免过期变量悄悄压过挂载的文件）；文件只去掉末尾一个换行（`\n` 或 `\r\n`），其余字节原样保留；文件必须是 UTF-8 且不超过 64 KiB；进程不检查文件权限，由部署方把文件设为只有服务用户可读（Kubernetes secret 卷可设 `defaultMode: 0400`）。错误信息只给出变量名，不包含值或文件内容。非秘密配置（监听地址、URL、开关）仍只读普通变量。
+
 密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取，KMS 故障不能退回硬编码默认密钥或明文证据。
 
 edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的持久批次完成后自动切换 producer boot。部署方预建仅封存身份可写的私有 manifest 目录，并周期运行 `xshield-audit-seal JOURNAL_DIRECTORY MANIFEST_DIRECTORY`。该进程读取 journal 密钥并独占日志签名私钥；edge 不取得签名私钥。重复任务会验证既有清单与关闭段完全一致，再处理新段。
