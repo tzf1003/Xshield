@@ -7,6 +7,7 @@ import { formatBytes, formatMillis, formatSeconds } from "../../../sites/model/u
 import { Field, NumInput, Toggle } from "../fields";
 import type { WorkspaceApi } from "../workspace/use-workspace.ts";
 import { HealthPanel } from "./HealthPanel";
+import { RolloutCard } from "./RolloutCard";
 
 const off = (ws: WorkspaceApi) => ws.locked || !ws.access.canConfigure;
 
@@ -465,7 +466,7 @@ export function WafLimitsTab({ ws }: { ws: WorkspaceApi }) {
   );
 }
 
-/** 策略与健康: the upstream health probe, two edge fallbacks, and the manual runtime health. */
+/** 策略与健康: the rollout mode, the upstream health probe, two edge fallbacks, and the manual runtime health. */
 export function PoliciesTab({ ws }: { ws: WorkspaceApi }) {
   const draft = ws.draft;
   const canEdit = ws.access.canConfigure && draft !== null;
@@ -473,6 +474,7 @@ export function PoliciesTab({ ws }: { ws: WorkspaceApi }) {
     <div className="xs-cards">
       {canEdit && draft && (
         <Form layout="vertical" className="xs-form xs-cards-form" disabled={off(ws)}>
+          <RolloutCard ws={ws} />
           <Card title="健康检查（上游探测）" className="xs-card">
             <Field
               id="health-path"

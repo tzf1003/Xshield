@@ -3,6 +3,7 @@ import { effectivePolicy, MAX_ROUTES, MAX_SECRET_REFS, type SiteConfigDraft } fr
 import type { ChangeGroup } from "./diff.ts";
 import { formatBytes } from "./units.ts";
 import { checkServerName, checkUpstreamAddress } from "./upstream.ts";
+import { rolloutProblems } from "./rollout.ts";
 
 /**
  * Client-side mirror of the rules in `xshield_core::site` (SiteConfig::validate and
@@ -908,7 +909,7 @@ const hasWhitespaceOrControl = (value: string) => /\s/.test(value) || hasControl
 /** Everything the console can check before the server does, grouped by the tab that owns it. */
 export function validateDraft(
   draft: SiteConfigDraft,
-  options: { creating?: boolean; siteId?: string } = {},
+  options: { creating?: boolean; siteId?: string; nowUnix?: number } = {},
 ): Issue[] {
   const issues: Issue[] = [];
   const add = (
@@ -958,6 +959,13 @@ export function validateDraft(
       "有 SENSOR_HTML 页面路由时必须启用浏览器探针，edge 才会注入并放行这些页面。",
     );
   }
+
+  for (const problem of rolloutProblems(
+    policy.rollout,
+    routes,
+    options.nowUnix ?? Math.floor(Date.now() / 1000),
+  ))
+    add(problem.field, "policies", problem.text);
 
   const { identity, crypto, waf, limits, health_check: health, secret_refs: secrets } = policy;
   if (identity.session_ttl_seconds < 1 || identity.session_ttl_seconds > 86_400) {

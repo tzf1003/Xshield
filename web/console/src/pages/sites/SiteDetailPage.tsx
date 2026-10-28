@@ -9,7 +9,7 @@ import { groupChanges } from "../../sites/model/diff.ts";
 import { configSections, sectionLabel, visibleSections } from "../../sites/sections.ts";
 import { ProblemAlert } from "../../ui/ProblemAlert";
 import { busy } from "./fields";
-import { NoticeBanner, PendingBanner } from "./workspace/Banners";
+import { NoticeBanner, PendingBanner, RolloutBanner } from "./workspace/Banners";
 import { ChangeBar } from "./workspace/ChangeBar";
 import { SectionNav } from "./workspace/SectionNav";
 import { SiteHeader } from "./workspace/SiteHeader";
@@ -141,6 +141,7 @@ function SiteWorkspace({ siteId, section }: { siteId: string; section: SiteSecti
       <SiteHeader ws={ws} />
       <PendingBanner ws={ws} />
       <NoticeBanner ws={ws} />
+      <RolloutBanner ws={ws} />
       {sections.length > 0 && (
         <SectionNav basePath={basePath} sections={sections} current={section} unsaved={unsaved} />
       )}
