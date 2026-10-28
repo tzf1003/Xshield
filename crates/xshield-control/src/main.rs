@@ -11,7 +11,8 @@ use std::{
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
 use xshield_control::{
     ControlConfig, ControlLimits, ControlPlane, CursorKey, EdgeApplyClient, EvidenceReadPort,
-    IdempotencyKey, ManagementCredential, OidcProvider, parse_management_api_key_hash_key, router,
+    IdempotencyKey, ManagementCredential, OidcProvider, ops::ops_address_allowed,
+    parse_management_api_key_hash_key, routers,
 };
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
@@ -187,7 +188,24 @@ async fn run() -> Result<(), Box<dyn Error>> {
         (Err(_), Err(_)) => control,
         _ => return Err("edge apply URL and key must be configured together".into()),
     };
-    axum::serve(listener, router(control)).await?;
+    let (api, ops) = routers(control);
+    // Liveness, readiness and metrics for orchestrators and scrapers. They are
+    // unauthenticated, so they disclose no topology (see ops).
+    if let Ok(value) = env::var("XSHIELD_CONTROL_OPS_LISTEN") {
+        let ops_listen: SocketAddr = value.parse()?;
+        if !ops_address_allowed(ops_listen) {
+            return Err(
+                "control ops listener must use a loopback, private or unspecified address".into(),
+            );
+        }
+        let ops_listener = tokio::net::TcpListener::bind(ops_listen).await?;
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(ops_listener, ops).await {
+                eprintln!("xshield control ops listener stopped: {error}");
+            }
+        });
+    }
+    axum::serve(listener, api).await?;
     Ok(())
 }
 

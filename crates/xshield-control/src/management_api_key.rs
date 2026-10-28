@@ -375,7 +375,9 @@ impl ControlPlane {
                 plaintext: bytes,
             })
             .collect();
-        let receipts = journal.append_batch(&records)?;
+        let appended = journal.append_batch(&records);
+        self.metrics.audit_append(appended.is_ok());
+        let receipts = appended?;
         if receipts.len() != built.len()
             || receipts
                 .iter()

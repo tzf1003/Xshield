@@ -63,6 +63,7 @@ binaries=(
     xshield-evidence-retain
     xshield-model-eval
     xshield-audit-seal
+    xshield-build
 )
 
 rm -rf -- "$stage"

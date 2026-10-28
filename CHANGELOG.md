@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 控制面运维端点（可行性建议“最小运维底座”的第一块，edge 已有）：设置 `XSHIELD_CONTROL_OPS_LISTEN` 后，控制面另开不认证的 `/livez`、`/readyz`、`/metrics`（只接受 loopback/私有/链路本地/未指定地址，不披露租户、站点、主体或路径）。就绪由两件事决定：最近 30 秒内有无管理审计追加失败、数据库能否在 2 秒内回答 `SELECT 1`；指标为就绪状态、按状态类别的响应计数、请求时延直方图与审计追加失败计数。新增 `xshield_control::routers`（API 与运维路由共享同一控制面，`router` 行为不变）与 `PostgresIdentityStore::ping`。`scripts/package_release.sh` 的发布包加入 `xshield-build`。回归：指标与就绪的单测 3 个，HTTP 回归 3 个（不可达数据库、真实审计追加失败、真实 PostgreSQL 就绪）。**未覆盖**：没有在编排器里实际配置探针；worker 与 outbox 等后台任务的指标、密钥从文件读取与部署清单仍待后续。
+
 - 发版联动的页面构建登记（docs/29 29.38，可行性建议“构建登记”）：新增可选命令行工具 `xshield-build`（随 `xshield-control` 构建）。`fingerprint` 离线计算页面 SHA-256 与第一个 `</head>` 偏移；`register` 用 Agent API Key（`site.read` + `site.config.write`）读取站点配置，把新构建加在已服务构建旁（最多 16 个，可 `--retire` 旧构建），本地校验后幂等保存，不批准、不应用，修订仍需独立 PolicyApprover 批准；保存后核对期间是否有他人保存，有则退出码 3。纯逻辑在 `xshield_core::site::build`。`xshield-control` 新增直接依赖 `sha2`（工作区已有，用于幂等键）。回归：核心单测 5 个、控制面真实 PostgreSQL HTTP 回归 1 个、离线指纹测试 1 个。**未覆盖**：“期间有他人保存”的分支没有自动化测试（无法在单次调用中插入并发保存）；没有提供 CI 模板文件。
 
 - 审批记录退出报告摘要（docs/32 32.4）：迁移 `0056_m5_site_approval_exit_report.sql` 给 `xshield.site_apply_approvals` 增加可空列 `exit_report_digest`（32 字节，CHECK 长度），**部署前须先应用该迁移**；回滚只需删列，旧控制服务不读写它。`POST /control/v1/sites/{site_id}/approve` 接受可选 `X-Xshield-Exit-Report-Digest`（格式不合法为 400 `CONTROL_SITE_CONFIG_REQUEST_INVALID`），独立批准把它原样写入批准行，直接应用写空。控制台批准对话框在修订结束观察（`ROLLOUT_MODE_TIGHTENED`）时显示本次会话最近生成的退出报告结论与摘要并随批准发送；没有报告时说明记录将为空，不阻止批准。回归：控制面 `an_approval_records_the_exit_report_it_relied_on`（真实 PostgreSQL）与控制台请求头测试。
