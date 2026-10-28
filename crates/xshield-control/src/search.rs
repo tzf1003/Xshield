@@ -692,6 +692,8 @@ enum SearchOutcomeRequest {
     Error,
     Skipped,
     Cancelled,
+    #[serde(rename = "OBSERVED_WOULD_DENY")]
+    ObservedWouldDeny,
 }
 
 impl SearchOutcomeRequest {
@@ -704,6 +706,7 @@ impl SearchOutcomeRequest {
             Self::Error => QueryOutcome::Error,
             Self::Skipped => QueryOutcome::Skipped,
             Self::Cancelled => QueryOutcome::Cancelled,
+            Self::ObservedWouldDeny => QueryOutcome::ObservedWouldDeny,
         }
     }
 }
@@ -833,5 +836,34 @@ impl SearchFailure {
                 next_action,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SearchFilterRequest;
+    use xshield_core::query::{QueryFilter, QueryOutcome};
+
+    fn outcome(value: &str) -> Option<QueryOutcome> {
+        let json = format!(r#"{{"kind":"outcome","value":"{value}"}}"#);
+        match serde_json::from_str::<SearchFilterRequest>(&json)
+            .ok()?
+            .into_domain()
+        {
+            Ok(QueryFilter::Outcome(outcome)) => Some(outcome),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_observed_refusal_is_a_searchable_outcome() {
+        assert_eq!(
+            outcome("OBSERVED_WOULD_DENY"),
+            Some(QueryOutcome::ObservedWouldDeny)
+        );
+        assert_eq!(outcome("DENY"), Some(QueryOutcome::Deny));
+        for spelling in ["OBSERVEDWOULDDENY", "observed_would_deny", "OBSERVED"] {
+            assert_eq!(outcome(spelling), None, "{spelling}");
+        }
     }
 }

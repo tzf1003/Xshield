@@ -191,6 +191,7 @@ const outcomes: Readonly<Record<string, string>> = {
   PASS: "通过",
   ALLOW: "放行",
   DENY: "拒绝",
+  OBSERVED_WOULD_DENY: "观察：本应拒绝",
   UNKNOWN: "未知",
   ERROR: "错误",
   SKIPPED: "已跳过",

@@ -859,6 +859,34 @@ test("missing and pending results retain honest completeness and nullable fields
   assert.deepEqual(await client.artifact(ARTIFACT_ID), unavailable);
 });
 
+test("an observed refusal decodes as its own decision and outcome", async (t) => {
+  const summary = summaryFixture();
+  summary.summary.decision = "OBSERVED_WOULD_DENY";
+  summary.summary.status = 200;
+  summary.summary.origin_state = "response_received";
+  summary.summary.forwarded = true;
+  summary.summary.business_result_confirmed = true;
+  const events = eventsFixture();
+  const first = events.events[0];
+  assert.ok(first);
+  first.outcome = "OBSERVED_WOULD_DENY";
+  const fixtures = [summary, events];
+  let index = 0;
+  t.mock.method(globalThis, "fetch", async () => response(fixtures[index++]));
+  const client = new ControlClient(TOKEN);
+  assert.equal((await client.summary(REQUEST_ID)).summary?.decision, "OBSERVED_WOULD_DENY");
+  assert.equal(
+    (await client.events(REQUEST_ID, EVENT_CURSOR)).events[0]?.outcome,
+    "OBSERVED_WOULD_DENY",
+  );
+  for (const decision of ["OBSERVED", "observed_would_deny", "WOULD_DENY"]) {
+    const wrong = summaryFixture();
+    wrong.summary.decision = decision;
+    t.mock.method(globalThis, "fetch", async () => response(wrong));
+    await assert.rejects(client.summary(REQUEST_ID));
+  }
+});
+
 test("malformed summary facts are rejected instead of filling missing data", async (t) => {
   const client = new ControlClient(TOKEN);
   const mutations: Array<(value: ReturnType<typeof summaryFixture>) => void> = [

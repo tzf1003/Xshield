@@ -109,6 +109,8 @@ pub enum QueryOutcome {
     Skipped,
     /// The stage was cancelled before completion.
     Cancelled,
+    /// An observe rollout forwarded a request the enforced policy would refuse.
+    ObservedWouldDeny,
 }
 
 impl QueryOutcome {
@@ -123,6 +125,7 @@ impl QueryOutcome {
             Self::Error => "ERROR",
             Self::Skipped => "SKIPPED",
             Self::Cancelled => "CANCELLED",
+            Self::ObservedWouldDeny => "OBSERVED_WOULD_DENY",
         }
     }
 }

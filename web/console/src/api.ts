@@ -126,7 +126,7 @@ export type Summary = {
   last_occurred_at: string;
   method: string | null;
   operation_id: string | null;
-  decision: "ALLOW" | "DENY" | "UNKNOWN" | null;
+  decision: "ALLOW" | "DENY" | "UNKNOWN" | "OBSERVED_WOULD_DENY" | null;
   reason_code: string | null;
   status: number | null;
   origin_state: "not_sent" | "unknown" | "response_received" | null;
@@ -648,7 +648,9 @@ function summary(value: unknown): Summary {
       return method;
     }),
     operation_id: nullable(row.operation_id, name),
-    decision: nullable(row.decision, (item) => choice(item, ["ALLOW", "DENY", "UNKNOWN"])),
+    decision: nullable(row.decision, (item) =>
+      choice(item, ["ALLOW", "DENY", "UNKNOWN", "OBSERVED_WOULD_DENY"]),
+    ),
     reason_code: nullable(row.reason_code, name),
     status: nullable(row.status, (item) => integer(item, 100, 599)),
     origin_state: nullable(row.origin_state, (item) =>
@@ -688,6 +690,7 @@ function auditEvent(value: unknown): AuditEvent {
       "PASS",
       "ALLOW",
       "DENY",
+      "OBSERVED_WOULD_DENY",
       "UNKNOWN",
       "ERROR",
       "SKIPPED",

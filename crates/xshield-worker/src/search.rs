@@ -1530,6 +1530,7 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
                     | "ERROR"
                     | "SKIPPED"
                     | "CANCELLED"
+                    | "OBSERVED_WOULD_DENY"
                     | "not_sent"
                     | "unknown"
                     | "response_received"

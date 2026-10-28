@@ -73,6 +73,8 @@ request.accepted/completed/aborted；stage.started/completed/skipped；identity.
 
 恢复补偿产生的 request.aborted 允许 `status=null`，并以 cause_event_ids 指向已知的 decision、request.accepted、origin.response 或新追加的 origin.unknown；准入批次只留下 accepted 前缀时使用 `decision=UNKNOWN` 与 `reason_code=REQUEST_INCOMPLETE`。它表达审计终态，不虚构客户端实际收到的状态码。
 
+观察灰度（[32](32-observe-to-enforce-rollout.md)）为决策与终态事件增加一个封闭取值 `OBSERVED_WOULD_DENY`，表示站点处于 observe 灰度、严格策略本应拒绝、网关仍按灰度规则转发。携带该值的决策与 request.completed/aborted 必须带 `rollout_revision`（与策略修订同一命名规则），`reason_code` 保留本应生效的拒绝原因；request.completed 还要求 `origin_state=response_received`。`rollout_revision` 对 ALLOW/DENY/UNKNOWN 可缺省，出现时必须为合法名称且不得为 null。该值同时作为检索 outcome 开放给受限查询，不改变 DENY 的含义：被执行的拒绝仍只写 DENY。旧 worker 会拒绝该值，部署顺序为先升级 worker 发布器，再升级控制面，最后启用边缘 observe。
+
 网关的 `audit.recovered` 与请求无关，只有两种可发布形态：修复崩溃尾部（`reason_code=AUDIT_TAIL_RECOVERED`，`truncated_bytes>0`）和持久写入失败后重开屏障（`reason_code=AUDIT_BARRIER_REOPENED`，`truncated_bytes=0`，见 [13.3](13-audit-storage-reliability.md)）；其他原因码或字节数组合会被发布器以 InvalidEvent 拒绝。
 
 未路由请求（监听端口与 Host 没有命中任何站点快照）没有站点，也就没有可信的站点作用域，逐请求写持久事件会让洪峰写满 journal，此前它们也完全没有审计。网关因此在内存中按监听端口计数，并每 60 秒为每个有计数的端口追加一条 `edge.unrouted_denied` 聚合事件：`request_id` 为空，tenant/site 取网关进程的引导作用域；封闭 payload 为 `listener_port`、`denied_count`、`first_seen_unix`、`last_seen_unix`、可空 `sample_host` 和固定稳定原因码 `HOST_NOT_ROUTED`。`sample_host` 是窗口内首个 Host，仅保留 0x21–0x7e 且不超过 253 字节的值，属于攻击者可控数据，只作为数据保存和展示。worker 将其发布为 `stage=edge_routing`、`outcome=DENY`、deterministic、`confidence=null/not_applicable`、非终态，并拒绝其他原因码、零端口/零计数、首末时间颠倒、超界或含控制字符的 Host、未知和重复字段。内存只随监听端口数（上限 256）增长，与请求量无关；屏障关闭时计数保留，重开后与新计数合并写出，不丢失。客户端响应保持 503 `SITE_CONFIG_UNAVAILABLE`。窗口内的逐请求明细不持久化，进程在两次写出之间退出时该间隔内尚未写出的计数也会丢失，这是有意的有界审计取舍；新事件类型须先升级 worker 发布器。
