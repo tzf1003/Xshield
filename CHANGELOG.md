@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-10-29
+
+首个经 `release.yml` 发布的版本：镜像推到 GHCR 并签名（docs/19 19.7）。0.1.0 没有发布镜像：`GITHUB_TOKEN` 不能给工作流文件与 main 不同的提交打标签，而 0.1.0 的切版本提交 aebaa67 之后 CI 与发版工作流都改过。
+
 - Linux 性能基线（可行性建议 P1“性能基线”，docs/21 §21.8）：此前唯一的基线来自一台 macOS 笔记本，文档要求在 Linux 生产形态的存储上重测。
   - 两台 Linux 机器上的 release 结果：16 vCPU Hyper-V 虚拟机（虚拟盘同步 P50 约 1.3 ms）上，edge 公开路由 1 并发比直连多 2.9 / 4.3–4.8 ms（P50/P95），16 并发约 2 450 请求/秒、P95 多约 3.8 ms，均在“新增 P95 ≤ 15 ms”之内；journal 放在 tmpfs 时只多约 0.24 ms，即 edge 自身开销。AWS EBS（2 vCPU，同步 P50 约 3.1 ms）上 1 并发多 7.1 / 9.8 ms，4–16 并发 P95 多 14.2–14.3 ms，刚好压在预算线上，说明这类网络盘不适合放 journal。
   - 修复 `scripts/bench_gateway.py` 在 Linux 上的缺陷：桩源站应答头与正文分两次写出，Nagle 把正文压到延迟 ACK 之后，直连每请求固定约 41 ms，增量失真；现在关闭 Nagle。脚本还会打印 CPU 型号与 journal 所在卷。
@@ -24,6 +28,7 @@
   - `release-images.yml` 可以被调用，并给镜像加上版本与源码提交标签。验证签名身份的正则同时接受标签（推送触发）和 main（经 `release.yml` 触发），文档里的 `cosign verify` 命令已相应更新。
   - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
   - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
+  - `release.yml` 只能给工作流文件与 main 一致的提交打标签：GitHub 拒绝用 `GITHUB_TOKEN` 推送这类引用（缺少 `workflows` 权限）。打标签前先比较，不一致时直接报错说明原因。
   - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
 
 - 试点路径验收用例补测（可行性建议 P1 #8，docs/20）：`examples/acceptance-cases.json` 由 automated 9 / partial 51 / planned 18 改为 automated 11 / partial 60 / planned 7。
