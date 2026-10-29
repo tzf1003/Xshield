@@ -46,7 +46,9 @@ use uuid::Uuid;
 use xshield_core::{
     audit::ReasonCode, domain::RequestId, identity::UnixSeconds, site::observable_refusal,
 };
-use xshield_gateway::edge_transport::{EdgeTransport, TransportConfig, http_server_options};
+use xshield_gateway::edge_transport::{
+    EdgeTransport, TLS_RELOAD_INTERVAL, TransportConfig, http_server_options,
+};
 use xshield_gateway::multi_site::{
     ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot, frozen_origin_target,
     origin_form_target, routing_authority,
@@ -2462,6 +2464,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             StartupSource::PersistedSnapshot,
         ))?;
     }
+    // Certificate rotation without a restart: changed files are re-read and
+    // served to new handshakes; a refused set keeps the current certificates.
+    runtime.spawn(Arc::clone(&transport).watch_tls(TLS_RELOAD_INTERVAL, shutdown.clone()));
     let supervisor = Arc::new(runtime.block_on(ListenerSupervisor::new(
         Arc::clone(&coordinator),
         Arc::new(proxy),

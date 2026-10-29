@@ -401,7 +401,8 @@ fn unix_now() -> u64 {
 /// when requests are being refused for lack of durable evidence.
 ///
 /// The transport fields report configuration (`tls_enabled`,
-/// `proxy_protocol_enabled`) and process-lifetime counts of connections that
+/// `tls_certificates`, `proxy_protocol_enabled`), process-lifetime counts of
+/// certificate reloads that were applied or refused, and counts of connections that
 /// never reached admission: TLS handshakes that failed or timed out, trusted
 /// balancer connections refused for their PROXY header, and connections shed
 /// because every setup slot was busy. Such connections have no request, so
@@ -422,6 +423,9 @@ fn health_body(
         "edge_state": if listener_count == 0 { "unavailable" } else { "healthy" },
         "audit_state": if audit_ready { "healthy" } else { "unavailable" },
         "tls_enabled": transport.tls_enabled,
+        "tls_certificates": transport.tls_certificates,
+        "tls_reloads": transport.tls_reloads,
+        "tls_reload_failures": transport.tls_reload_failures,
         "tls_handshake_failures": transport.tls_handshake_failures,
         "proxy_protocol_enabled": transport.proxy_protocol_enabled,
         "proxy_header_rejections": transport.proxy_header_rejections,
@@ -674,6 +678,9 @@ mod tests {
 
     const PLAINTEXT: TransportStatus = TransportStatus {
         tls_enabled: false,
+        tls_certificates: 0,
+        tls_reloads: 0,
+        tls_reload_failures: 0,
         tls_handshake_failures: 0,
         proxy_protocol_enabled: false,
         proxy_header_rejections: 0,
@@ -707,6 +714,9 @@ mod tests {
             true,
             TransportStatus {
                 tls_enabled: true,
+                tls_certificates: 3,
+                tls_reloads: 5,
+                tls_reload_failures: 6,
                 tls_handshake_failures: 4,
                 proxy_protocol_enabled: true,
                 proxy_header_rejections: 2,
@@ -715,6 +725,9 @@ mod tests {
         );
         assert_eq!(body["tls_enabled"], true);
         assert_eq!(body["tls_handshake_failures"], 4);
+        assert_eq!(body["tls_certificates"], 3);
+        assert_eq!(body["tls_reloads"], 5);
+        assert_eq!(body["tls_reload_failures"], 6);
         assert_eq!(body["proxy_protocol_enabled"], true);
         assert_eq!(body["proxy_header_rejections"], 2);
         assert_eq!(body["connection_setup_shed"], 1);

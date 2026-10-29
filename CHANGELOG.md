@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Edge TLS 证书热加载与按 SNI 多证书（可行性评估 P2“多实例”，docs/19 19.2“Edge 传输配置”）：此前全进程只有一张证书，轮换要重启 edge。
+  - 新增 `XSHIELD_EDGE_TLS_SNI_CERTS`（逗号分隔的 `证书:私钥` 对）：SNI 匹配某张附加证书的 DNS 名时出示它，精确名优先于单级通配符；未匹配或无 SNI 时出示主证书。SNI 仍不参与路由。重复主机名、没有 DNS 名的证书、格式错误的列表均拒绝启动。
+  - 证书与私钥文件每 30 秒按元数据检查一次，变化后整组重新校验；通过则新握手使用新证书，失败则保留当前证书并在下次变化时重试。
+  - 健康接口新增 `tls_certificates`、`tls_reloads`、`tls_reload_failures`；`/metrics` 新增 `xshield_edge_tls_certificates`、`xshield_edge_tls_reloads_total`、`xshield_edge_tls_reload_failures_total`。证书错误信息改为带出具体变量名（附加证书的错误指向新变量）。
+  - 回归：edge_transport 新增 4 个测试（SNI 选择含通配符与大小写、配置拒绝、轮换与半写入/缺失/过期回退、后台检查与停止），ops/apply 健康与指标测试同步更新。
+  - **未覆盖**：增删附加证书仍需重启；不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程的轮换场景。
+
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
   - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
   - CI 新增 `fuzz-replay` 作业：用稳定版回放所有种子和固定数量的确定性变异，同时对该 crate 运行 fmt 与 clippy。新增 `.github/workflows/fuzz.yml`：每天在稳定版上做覆盖引导的模糊测试（不加 sanitizer），在两次运行之间缓存语料，发现崩溃时上传。
