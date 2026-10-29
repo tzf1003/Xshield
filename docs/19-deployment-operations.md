@@ -75,6 +75,8 @@ control 与 edge 之间的 HMAC 通道对三类消息分别认证，并共用同
 
 从文件读取秘密：control、edge、worker、`xshield-outbox-worker`、`xshield-evidence-retain` 与 `xshield-audit-seal` 读取的每个秘密变量（数据库 URL、各 `*_KEY_HEX`、`XSHIELD_CONTROL_TOKEN`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CLICKHOUSE_PASSWORD` 等）都可以改为设置 `<变量名>_FILE`，值为一个文件路径，进程从该文件读取秘密，适合 Docker/Kubernetes secret 卷，秘密因此不出现在 `/proc/<pid>/environ`、`docker inspect` 或编排器的环境变量展示里。规则：同时设置 `NAME` 与 `NAME_FILE` 拒绝启动（避免过期变量悄悄压过挂载的文件）；文件只去掉末尾一个换行（`\n` 或 `\r\n`），其余字节原样保留；文件必须是 UTF-8 且不超过 64 KiB；进程不检查文件权限，由部署方把文件设为只有服务用户可读（Kubernetes secret 卷可设 `defaultMode: 0400`）。错误信息只给出变量名，不包含值或文件内容。非秘密配置（监听地址、URL、开关）仍只读普通变量。
 
+请求解密与响应加密密钥：启动配置站点使用 `request_crypto`/`response_crypto` 时，其 key-id 的密钥来自 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX`（64 位小写 hex）。经 apply 下发的站点与轮换中的新 key-id 改用密钥环 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`：值是 JSON 数组，每项 `{"tenant_id","site_id","key_id","key_hex"}`，每个方向 1–256 项，未知字段、重复的（租户、站点、key-id）、非法 key-id 或密钥都拒绝启动，错误只给出变量名与序号，不含密钥。推荐用 `_FILE` 挂载。单值变量与密钥环同时给出启动站点的同一 key-id 时拒绝启动；启动站点需要的 key-id 两处都没有时同样拒绝启动；同一密钥出现在两个方向时拒绝启动。轮换顺序：把新 key-id 加入密钥环并滚动重启 edge，发布引用新 key-id 的站点修订，确认客户端不再使用旧 key-id 后再从密钥环删除。密钥环在启动时读取，修改后需重启 edge。
+
 密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取，KMS 故障不能退回硬编码默认密钥或明文证据。
 
 edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的持久批次完成后自动切换 producer boot。部署方预建仅封存身份可写的私有 manifest 目录，并周期运行 `xshield-audit-seal JOURNAL_DIRECTORY MANIFEST_DIRECTORY`。该进程读取 journal 密钥并独占日志签名私钥；edge 不取得签名私钥。重复任务会验证既有清单与关闭段完全一致，再处理新段。
