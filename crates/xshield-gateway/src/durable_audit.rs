@@ -1473,7 +1473,7 @@ fn edge_response_reason(facts: &FinalFacts<'_>) -> ReasonCode {
         .map(xshield_core::domain::OperationId::as_str);
     match operation {
         Some("xshield.sensor.bootstrap") => ReasonCode::SensorBootstrapServed,
-        Some("xshield.sensor.loader" | "xshield.sensor.legacy_loader") => {
+        Some("xshield.sensor.loader" | "xshield.sensor.frozen_loader") => {
             ReasonCode::SensorLoaderServed
         }
         Some("xshield.sensor.prepare") => ReasonCode::SensorObservationAccepted,
