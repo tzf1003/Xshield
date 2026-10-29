@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Edge TLS 证书热加载与按 SNI 多证书（可行性评估 P2“多实例”，docs/19 19.2“Edge 传输配置”）：此前全进程只有一张证书，轮换要重启 edge。
+  - 新增 `XSHIELD_EDGE_TLS_SNI_CERTS`（逗号分隔的 `证书:私钥` 对）：SNI 匹配某张附加证书的 DNS 名时出示它，精确名优先于单级通配符；未匹配或无 SNI 时出示主证书。SNI 仍不参与路由。重复主机名、没有 DNS 名的证书、格式错误的列表均拒绝启动。
+  - 证书与私钥文件每 30 秒按元数据检查一次，变化后整组重新校验；通过则新握手使用新证书，失败则保留当前证书并在下次变化时重试。
+  - 健康接口新增 `tls_certificates`、`tls_reloads`、`tls_reload_failures`；`/metrics` 新增 `xshield_edge_tls_certificates`、`xshield_edge_tls_reloads_total`、`xshield_edge_tls_reload_failures_total`。证书错误信息改为带出具体变量名（附加证书的错误指向新变量）。
+  - 回归：edge_transport 新增 4 个测试（SNI 选择含通配符与大小写、配置拒绝、轮换与半写入/缺失/过期回退、后台检查与停止），ops/apply 健康与指标测试同步更新。
+  - **未覆盖**：增删附加证书仍需重启；不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程的轮换场景。
+
 ## 0.1.1 — 2026-10-29
 
 首个经 `release.yml` 发布的版本：镜像推到 GHCR 并签名（docs/19 19.7）。0.1.0 没有发布镜像：`GITHUB_TOKEN` 不能给工作流文件与 main 不同的提交打标签，而 0.1.0 的切版本提交 aebaa67 之后 CI 与发版工作流都改过。
