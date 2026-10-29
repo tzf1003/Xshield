@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- 在 GitHub 上发版，不必在本地推标签（docs/19 19.7）：此前发布镜像只能靠推送 `v*` 标签触发，而会话与 CI 都不能推标签。
+  - 新增 `.github/workflows/release.yml`（workflow_dispatch，输入版本号，可选指定提交）。它先检查版本号与提交是否对应：提交在 main 上，Cargo 与 Helm chart 版本一致，CHANGELOG 有该版本标题，main 上 CI 已通过。检查通过后创建 `v<版本>` 标签，以 workflow_call 调用 `release-images.yml` 构建、推送、证明并签名镜像，最后创建带 CHANGELOG 段落和镜像 digest 的 GitHub Release。
+  - `release-images.yml` 可以被调用，并给镜像加上版本与源码提交标签。验证签名身份的正则同时接受标签（推送触发）和 main（经 `release.yml` 触发），文档里的 `cosign verify` 命令已相应更新。
+  - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
+  - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
+
 - 试点路径验收用例补测（可行性建议 P1 #8，docs/20）：`examples/acceptance-cases.json` 由 automated 9 / partial 51 / planned 18 改为 automated 11 / partial 60 / planned 7。
   - automated：DEV-01（`crates/xshield-core/tests/dependency_boundary.rs` 解析 `Cargo.lock`，领域 crate 的传递依赖触及数据库、HTTP、异步运行时、TLS 或其他 xshield crate 即失败，另有合成违规锁文件的反例与源码禁开套接字检查）；SHARE-04（`scripts/test_gateway_identity.sh` 经真实 edge 用同一分享令牌三次 Range 读取，均 206、分享行不变）。
   - partial（缺口逐条写在 `gap`）：AUTH-09、FLOW-10、GRANT-08、SHARE-03、SENSOR-01/02、CRYPTO-04/07、DEV-02。DEV-02 新增 worker 侧 `ReasonCode` 穷举契约测试与 `scripts/test_check_audit_event_coverage.py`（已接入 CI）；`check_audit_event_coverage.py` 的源路径可由测试传入，默认行为不变。
