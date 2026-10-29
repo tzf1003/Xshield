@@ -22,9 +22,35 @@ use xshield_postgres::{
     ResponseGrantWriteOutcome,
 };
 
+/// A response grant batch derived from a verified response but not yet
+/// written. Its action references are final, so the response can carry them
+/// and pass every remaining release step (encryption) before any grant exists.
+pub(crate) struct PreparedResponseGrants {
+    evidence: ResponseEvidence,
+    artifact_ref: String,
+    actions: Vec<ActionGrant>,
+    grants: Vec<GrantDraft>,
+    event_ids: Vec<EventId>,
+    envelopes: Vec<Value>,
+    now: UnixSeconds,
+    max_active_grants: u32,
+}
+
+impl PreparedResponseGrants {
+    /// Action references in response item order.
+    pub(crate) fn action_refs(&self) -> Vec<ActionRef> {
+        self.actions
+            .iter()
+            .map(|action| action.action_ref().clone())
+            .collect()
+    }
+}
+
 impl ProtectedIdentity {
+    /// Derives the response's grant batch without writing it. Returns `None`
+    /// when the response issues no grants.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    pub(crate) async fn commit_response_grants(
+    pub(crate) async fn prepare_response_grants(
         &self,
         config: &GatewayConfig,
         identity: &ResponseIdentity,
@@ -35,7 +61,7 @@ impl ProtectedIdentity {
         response_status: u16,
         body: &[u8],
         now: UnixSeconds,
-    ) -> Result<Option<Vec<ActionRef>>, ReasonCode> {
+    ) -> Result<Option<PreparedResponseGrants>, ReasonCode> {
         let resources = match operation
             .rule
             .extract(response_status, body)
@@ -208,26 +234,48 @@ impl ProtectedIdentity {
             actions.push(action);
             event_ids.push(event_id);
         }
+        Ok(Some(PreparedResponseGrants {
+            evidence,
+            artifact_ref: format!("sha256.{response_body_sha256}"),
+            actions,
+            grants,
+            event_ids,
+            envelopes,
+            now,
+            max_active_grants: operation.rule.max_active_grants(),
+        }))
+    }
+
+    /// Writes a prepared batch all or nothing. The committed references must
+    /// be exactly the prepared ones the released response already carries.
+    pub(crate) async fn persist_response_grants(
+        &self,
+        prepared: &PreparedResponseGrants,
+    ) -> Result<(), ReasonCode> {
+        let store = self
+            .store()
+            .await
+            .map_err(|_| ReasonCode::IdentityStoreUnavailable)?;
         let constraints = Value::Object(Map::default());
-        let items = actions
+        let items = prepared
+            .actions
             .iter()
-            .zip(&grants)
-            .zip(&event_ids)
-            .zip(&envelopes)
+            .zip(&prepared.grants)
+            .zip(&prepared.event_ids)
+            .zip(&prepared.envelopes)
             .map(|(((action, grant), event_id), envelope)| {
                 ResponseGrantItem::new(action, grant, &constraints, event_id, envelope)
                     .map_err(|_| ReasonCode::ResponseValidationFailed)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let artifact_ref = format!("sha256.{response_body_sha256}");
         let outcome = store
             .issue_response_grants(
                 ResponseGrantPersistence::new(
-                    &evidence,
-                    &artifact_ref,
+                    &prepared.evidence,
+                    &prepared.artifact_ref,
                     &items,
-                    now,
-                    operation.rule.max_active_grants(),
+                    prepared.now,
+                    prepared.max_active_grants,
                 )
                 .map_err(|_| ReasonCode::ResponseValidationFailed)?,
             )
@@ -235,12 +283,17 @@ impl ProtectedIdentity {
             .map_err(|_| ReasonCode::IdentityStoreUnavailable)?;
         match outcome {
             ResponseGrantWriteOutcome::Created(committed)
-            | ResponseGrantWriteOutcome::Existing(committed) => Ok(Some(
-                committed
-                    .into_iter()
-                    .map(|grant| grant.action_ref)
-                    .collect(),
-            )),
+            | ResponseGrantWriteOutcome::Existing(committed) => {
+                if committed
+                    .iter()
+                    .map(|grant| &grant.action_ref)
+                    .eq(prepared.actions.iter().map(ActionGrant::action_ref))
+                {
+                    Ok(())
+                } else {
+                    Err(ReasonCode::GrantIssuanceConflict)
+                }
+            }
             denied => Err(denied.reason_code()),
         }
     }
