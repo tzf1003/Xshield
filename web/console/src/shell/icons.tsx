@@ -1,6 +1,7 @@
 import {
   ApartmentOutlined,
   AuditOutlined,
+  BarChartOutlined,
   DatabaseOutlined,
   ExperimentOutlined,
   ExportOutlined,
@@ -31,6 +32,7 @@ const icons: Record<IconKey, ReactNode> = {
   jobs: <DatabaseOutlined />,
   audit: <AuditOutlined />,
   calibration: <AuditOutlined />,
+  coverage: <BarChartOutlined />,
   key: <KeyOutlined />,
   session: <SettingOutlined />,
 };

@@ -1,0 +1,50 @@
+/* 拒绝与覆盖统计: the totals as a row of figures, then one card per list. */
+
+.xs-cov-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xs-cov-stats > li {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--xs-line);
+  border-radius: var(--xs-radius-control);
+  background: var(--xs-surface-subtle);
+}
+
+.xs-cov-stats span {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-cov-stats strong {
+  font-family: var(--xs-font-mono);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.xs-cov-stats small {
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-cov-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  color: var(--xs-ink-3);
+  font-size: 12px;
+}
+
+.xs-cov-shape {
+  font-family: var(--xs-font-mono);
+  overflow-wrap: anywhere;
+}

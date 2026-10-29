@@ -232,6 +232,12 @@ export function createAppRouteTree(components: RouteComponents) {
       component: calibrationPage,
       params: idParams("reportId", calibrationReportPattern),
     }),
+    page("coverage-report", "investigation/coverage", {
+      component: lazyRouteComponent(
+        () => import("../pages/investigation/CoveragePage"),
+        "CoveragePage",
+      ),
+    }),
     page("search", "investigation/search", {
       component: lazyRouteComponent(
         () => import("../pages/investigation/SearchPage"),

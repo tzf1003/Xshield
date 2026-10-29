@@ -530,7 +530,7 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 
 未覆盖端点只按路径形状列出，不保存原始路径：edge 对未匹配路由的拒绝在 `decision.composed` 写入 `unmatched_path`（见 docs/11），每段只有 1–24 字节、以字母开头、仅含 `[A-Za-z0-9._-]` 且最多 2 个数字时保留原文，其余段写作 `{}`，超过 10 段时以 `/**` 结尾。因此 ID、令牌、邮箱等不会进入索引，统计用于决定下一步要补哪些路由，也是观察退出报告的补充数据。
 
-每次已认证尝试追加一条 `console.coverage_report.read` 管理 journal：成功 `PASS/CONTROL_COVERAGE_REPORT_READ`，失败按上述原因码区分 DENY/ERROR；事件不含窗口、计数或摘要。worker 发布器只接受这一路径与原因集合。部署顺序：先升级 worker 发布器（接受 `unmatched_path` 与新管理事件），再升级 edge 与控制面。控制台页面另行交付。
+每次已认证尝试追加一条 `console.coverage_report.read` 管理 journal：成功 `PASS/CONTROL_COVERAGE_REPORT_READ`，失败按上述原因码区分 DENY/ERROR；事件不含窗口、计数或摘要。worker 发布器只接受这一路径与原因集合。部署顺序：先升级 worker 发布器（接受 `unmatched_path` 与新管理事件），再升级 edge 与控制面。控制台页面为 `/investigation/coverage`（拒绝与覆盖），按需生成，不自动刷新。
 
 ## 站点诊断与控制台契约补充（2026-09-27）
 

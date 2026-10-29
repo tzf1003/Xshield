@@ -114,6 +114,12 @@ import {
   type RolloutReportRequest,
   rolloutReportQuery,
 } from "./rollout-report.ts";
+import {
+  type CoverageReport,
+  type CoverageReportRequest,
+  coverageReportQuery,
+  decodeCoverageReport,
+} from "./coverage-report.ts";
 export type Stage = {
   stage: string;
   outcome: string;
@@ -3125,6 +3131,22 @@ export class ControlClient {
       (value, status) => {
         ensure(status === 200);
         return decodeRolloutReport(value, request);
+      },
+      signal,
+    );
+  }
+
+  /** `GET /control/v1/coverage-report`: refusals per route and reason, and uncovered endpoints. */
+  async coverageReport(
+    request: CoverageReportRequest,
+    signal?: AbortSignal,
+  ): Promise<CoverageReport> {
+    const query = coverageReportQuery(request);
+    return this.#request(
+      `coverage-report?${query}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeCoverageReport(value, request);
       },
       signal,
     );
