@@ -2244,6 +2244,71 @@ fn job_listing_publishes_owner_facts_and_rejects_other_shapes() {
     rejected(&failed, "busy recorded as an error");
 }
 
+fn case_job_list_event() -> Value {
+    let mut value = surface_event(
+        "console.case.job.list",
+        "GET",
+        "/control/v1/cases/{case_id}/jobs",
+        "CONTROL_CASE_JOBS_READ",
+    );
+    value["payload"]["target_case_id"] = json!(CASE);
+    value
+}
+
+#[test]
+fn case_job_listing_publishes_case_scoped_facts_and_rejects_other_shapes() {
+    let value = case_job_list_event();
+    let row = index(&value).unwrap();
+    assert_eq!(row.stage, "control_access");
+    assert_eq!(row.method, "GET");
+    assert_eq!(row.outcome, "PASS");
+    assert_eq!(row.reason_code, "CONTROL_CASE_JOBS_READ");
+    assert_eq!(row.confidence, None);
+    assert_eq!(row.evidence_refs, [] as [std::string::String; 0]);
+
+    // Success requires the case target that scopes the page.
+    let mut missing_case = value.clone();
+    missing_case["payload"]["target_case_id"] = Value::Null;
+    rejected(&missing_case, "missing case target on success");
+
+    // The route owns neither the owner-scoped list's reason nor a job target.
+    for (field, content) in [
+        ("reason_code", json!("CONTROL_JOBS_READ")),
+        ("reason_code", json!("CONTROL_CASE_EVIDENCE_READ")),
+        ("path", json!("/control/v1/jobs")),
+        (
+            "path",
+            json!("/control/v1/cases/{case_id}/jobs?cursor=opaque"),
+        ),
+        ("method", json!("POST")),
+        ("outcome", json!("UNKNOWN")),
+    ] {
+        let mut invalid = value.clone();
+        invalid["payload"][field] = content;
+        rejected(&invalid, field);
+    }
+    let mut targeted = value.clone();
+    targeted["payload"]["target_job_id"] = json!(JOB);
+    rejected(&targeted, "job target on a case-scoped list event");
+    let mut evidence = value.clone();
+    evidence["evidence_refs"] = json!([ARTIFACT]);
+    rejected(&evidence, "list evidence reference");
+
+    // Denials and dependency failures keep their closed reason sets.
+    let mut denied = value.clone();
+    denied["payload"]["outcome"] = json!("DENY");
+    denied["payload"]["reason_code"] = json!("CONTROL_CASE_JOB_LIST_BUSY");
+    assert!(index(&denied).is_ok());
+    denied["payload"]["reason_code"] = json!("CONTROL_JOB_STORE_UNAVAILABLE");
+    rejected(&denied, "store failure recorded as a denial");
+    let mut failed = value;
+    failed["payload"]["outcome"] = json!("ERROR");
+    failed["payload"]["reason_code"] = json!("CONTROL_JOB_STORE_UNAVAILABLE");
+    assert!(index(&failed).is_ok());
+    failed["payload"]["reason_code"] = json!("CONTROL_CASE_JOB_LIST_BUSY");
+    rejected(&failed, "busy recorded as an error");
+}
+
 fn admin_job_list_event() -> Value {
     surface_event(
         "console.job.admin_list",
