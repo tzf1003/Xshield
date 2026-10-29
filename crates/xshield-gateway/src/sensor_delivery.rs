@@ -8,17 +8,15 @@
 //! only references the identity adapter resolved for its own session and page
 //! instance plus non-secret routing hints. References are never logged.
 
-use crate::protected_identity::SensorBootstrapDelivery;
+use crate::protected_identity::{EnvelopeHookBootstrap, SensorBootstrapDelivery};
 use bytes::Bytes;
 use pingora::{Result as PingoraResult, http::ResponseHeader, proxy::Session};
 use serde_json::{Value, json};
 use uuid::Uuid;
 use xshield_core::identity::UnixSeconds;
 use xshield_gateway::{
-    LEGACY_SENSOR_ASSET_BYTES, LEGACY_SENSOR_LOADER_BYTES, LEGACY_SENSOR_VERSION,
-    PREVIOUS_SENSOR_ASSET_BYTES, PREVIOUS_SENSOR_LOADER_BYTES, PREVIOUS_SENSOR_VERSION,
-    SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES, SENSOR_PREPARE_PATH, SENSOR_VERSION, SENSOR_WS_PATH,
-    SensorConfig,
+    LEGACY_SENSOR_VERSION, SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES, SENSOR_PREPARE_PATH,
+    SENSOR_VERSION, SENSOR_WS_PATH, SensorConfig,
     page_actions::{HarvestSource, HarvestTarget, SensorRoutes},
 };
 
@@ -38,22 +36,11 @@ impl SensorScript {
         bytes: SENSOR_LOADER_BYTES,
         version: SENSOR_VERSION,
     };
-    pub(crate) const PREVIOUS: Self = Self {
-        bytes: PREVIOUS_SENSOR_ASSET_BYTES,
-        version: PREVIOUS_SENSOR_VERSION,
-    };
-    pub(crate) const PREVIOUS_LOADER: Self = Self {
-        bytes: PREVIOUS_SENSOR_LOADER_BYTES,
-        version: PREVIOUS_SENSOR_VERSION,
-    };
-    pub(crate) const LEGACY: Self = Self {
-        bytes: LEGACY_SENSOR_ASSET_BYTES,
-        version: LEGACY_SENSOR_VERSION,
-    };
-    pub(crate) const LEGACY_LOADER: Self = Self {
-        bytes: LEGACY_SENSOR_LOADER_BYTES,
-        version: LEGACY_SENSOR_VERSION,
-    };
+
+    /// Builds a script from a frozen-version entry's asset or loader bytes.
+    pub(crate) const fn new(bytes: &'static [u8], version: &'static str) -> Self {
+        Self { bytes, version }
+    }
 }
 
 pub(crate) async fn respond_sensor_script(
@@ -119,6 +106,7 @@ pub(crate) fn bootstrap_document(
         page_handle,
         sensor_version,
         actions,
+        envelope_hook,
     }) = delivery
     else {
         return base(LEGACY_SENSOR_VERSION, format!("pgh_{}", Uuid::now_v7()));
@@ -126,6 +114,9 @@ pub(crate) fn bootstrap_document(
     let mut document = base(sensor_version, page_handle.clone());
     if *sensor_version == SENSOR_VERSION {
         document["ws_url"] = Value::String(SENSOR_WS_PATH.to_owned());
+    }
+    if let Some(envelope_hook) = envelope_hook {
+        apply_envelope_hook(&mut document, envelope_hook);
     }
     document["actions"] = Value::Array(
         actions
@@ -186,14 +177,53 @@ pub(crate) fn bootstrap_document(
     document
 }
 
+/// Embeds the `ENVELOPE_HOOK` session key and operation list into a page
+/// bootstrap document, gated exactly as `ws_url` already is.
+fn apply_envelope_hook(document: &mut Value, envelope_hook: &EnvelopeHookBootstrap) {
+    document["tenant_id"] = Value::String(envelope_hook.tenant_id.clone());
+    document["site_id"] = Value::String(envelope_hook.site_id.clone());
+    document["envelope_key"] = Value::String(hex(&envelope_hook.key));
+    document["envelope_key_id"] = Value::String(envelope_hook.key_id.clone());
+    document["envelope_operations"] = Value::Array(
+        envelope_hook
+            .operations
+            .iter()
+            .map(|operation| {
+                json!({
+                    "method": operation.method,
+                    "path": operation.path,
+                    "operation_id": operation.operation_id,
+                    "adapter_revision": operation.adapter_revision,
+                })
+            })
+            .collect(),
+    );
+}
+
+fn hex(bytes: &[u8; 32]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(64);
+    for byte in bytes {
+        value.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        value.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protected_identity::EnvelopeHookOperation;
     use xshield_core::{
         domain::ActionRef,
         provenance::{HttpMethod, RouteTemplate},
     };
-    use xshield_gateway::GatewayConfig;
+    use xshield_gateway::{
+        GatewayConfig, LEGACY_SENSOR_ASSET_BYTES, LEGACY_SENSOR_LOADER_BYTES,
+        PREVIOUS_SENSOR_ASSET_BYTES, PREVIOUS_SENSOR_LOADER_BYTES, PREVIOUS_SENSOR_VERSION,
+        SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES, SUPERSEDED_1_1_0_SENSOR_LOADER_BYTES,
+        SUPERSEDED_1_1_0_SENSOR_VERSION,
+    };
     use xshield_postgres::PageActionView;
 
     const PAGE: &str = "pgh_018f2a3b-4c5d-7000-8000-000000000001";
@@ -287,6 +317,7 @@ mod tests {
             page_handle: PAGE.to_owned(),
             sensor_version: "1.1.0",
             actions: vec![action("action.live", 160), action("action.expired", 100)],
+            envelope_hook: None,
         };
         let document = bootstrap_document(
             "req_1",
@@ -324,6 +355,7 @@ mod tests {
             page_handle: PAGE.to_owned(),
             sensor_version: SENSOR_VERSION,
             actions: Vec::new(),
+            envelope_hook: None,
         };
         let document = bootstrap_document(
             "req_1",
@@ -337,38 +369,168 @@ mod tests {
     }
 
     #[test]
+    fn current_page_bootstrap_carries_the_envelope_hook_key_and_operations() {
+        let config = config();
+        let mut key = [0_u8; 32];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = u8::try_from(index + 1).unwrap();
+        }
+        let delivery = SensorBootstrapDelivery::Page {
+            page_handle: PAGE.to_owned(),
+            sensor_version: SENSOR_VERSION,
+            actions: Vec::new(),
+            envelope_hook: Some(EnvelopeHookBootstrap {
+                tenant_id: "tenant_demo".to_owned(),
+                site_id: "site_demo".to_owned(),
+                key_id: "ehk.7".to_owned(),
+                key: zeroize::Zeroizing::new(key),
+                operations: vec![EnvelopeHookOperation {
+                    method: "POST".to_owned(),
+                    path: "/checkout".to_owned(),
+                    operation_id: "checkout.submit".to_owned(),
+                    adapter_revision: "checkout-json-r1".to_owned(),
+                }],
+            }),
+        };
+        let document = bootstrap_document(
+            "req_1",
+            config.sensor().unwrap(),
+            config.sensor_routes(),
+            Some(&delivery),
+            UnixSeconds::new(100),
+        );
+        assert_eq!(document["tenant_id"], "tenant_demo");
+        assert_eq!(document["site_id"], "site_demo");
+        assert_eq!(document["envelope_key_id"], "ehk.7");
+        assert_eq!(
+            document["envelope_key"],
+            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+        );
+        assert_eq!(
+            document["envelope_operations"],
+            json!([{"method": "POST", "path": "/checkout",
+                    "operation_id": "checkout.submit",
+                    "adapter_revision": "checkout-json-r1"}])
+        );
+    }
+
+    #[test]
+    fn earlier_page_bootstraps_never_carry_envelope_hook_fields() {
+        let config = config();
+        for sensor_version in ["1.1.0", "1.2.0"] {
+            let delivery = SensorBootstrapDelivery::Page {
+                page_handle: PAGE.to_owned(),
+                sensor_version,
+                actions: Vec::new(),
+                envelope_hook: None,
+            };
+            let document = bootstrap_document(
+                "req_1",
+                config.sensor().unwrap(),
+                config.sensor_routes(),
+                Some(&delivery),
+                UnixSeconds::new(100),
+            );
+            assert!(document.get("envelope_key").is_none());
+            assert!(document.get("envelope_key_id").is_none());
+            assert!(document.get("envelope_operations").is_none());
+            assert!(document.get("tenant_id").is_none());
+            assert!(document.get("site_id").is_none());
+        }
+    }
+
+    #[test]
     fn served_sensor_versions_are_pinned_and_frozen() {
         // Every served version path is immutable and SRI-pinned by pages that
         // were delivered with it; any edit must ship as a new version path.
         assert_eq!(
-            openssl::sha::sha256(SensorScript::LEGACY.bytes),
+            openssl::sha::sha256(LEGACY_SENSOR_ASSET_BYTES),
             hex32("60dac1e039186a9ae1519c7399d871b1446dd49748a30a9688f9a54ab2288df7")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::LEGACY_LOADER.bytes),
+            openssl::sha::sha256(LEGACY_SENSOR_LOADER_BYTES),
             hex32("7e4b2c44e3cff6c7f1c1b15e51f62c8066ae9ef5164fd69693488262e6ff2950")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::PREVIOUS.bytes),
+            openssl::sha::sha256(SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES),
             hex32("31b0537aa333d79e77ed3237a813e78d13fc44dd0048b0acbe49af17fcdacd1f")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::PREVIOUS_LOADER.bytes),
+            openssl::sha::sha256(SUPERSEDED_1_1_0_SENSOR_LOADER_BYTES),
             hex32("bd869b6aab0a506c50a72427c4efc8c9f8fc75c4d6d59597963bd204432e26db")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::CURRENT.bytes),
+            openssl::sha::sha256(PREVIOUS_SENSOR_ASSET_BYTES),
             hex32("2ec180c1b7e3e31c5e752cdaeb107ded56c55c1b2aec6d2bca6c03745228d8d7")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::LOADER.bytes),
+            openssl::sha::sha256(PREVIOUS_SENSOR_LOADER_BYTES),
             hex32("f5e8c40a7425ec4730c4437b0b4696736b425cc8e150d36b8746674e45323681")
         );
-        assert_eq!(SensorScript::LEGACY.version, "1.0.0");
-        assert_eq!(SensorScript::PREVIOUS.version, "1.1.0");
-        assert_eq!(SensorScript::CURRENT.version, "1.2.0");
-        assert_ne!(SensorScript::CURRENT.bytes, SensorScript::PREVIOUS.bytes);
-        assert_ne!(SensorScript::PREVIOUS.bytes, SensorScript::LEGACY.bytes);
+        assert_eq!(
+            openssl::sha::sha256(SensorScript::CURRENT.bytes),
+            hex32("4785ee14801d0b03609e54ba259ffe948c137149679dbdf932d9e86591710158")
+        );
+        assert_eq!(
+            openssl::sha::sha256(SensorScript::LOADER.bytes),
+            hex32("20cd2e268e07f51c5ef8ad1ec6513181bb41e538252ff1f806b55e2f27c57ff6")
+        );
+        assert_eq!(SensorScript::CURRENT.version, "1.3.0");
+        assert_ne!(SensorScript::CURRENT.bytes, PREVIOUS_SENSOR_ASSET_BYTES);
+        assert_ne!(
+            PREVIOUS_SENSOR_ASSET_BYTES,
+            SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES
+        );
+        assert_ne!(
+            SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES,
+            LEGACY_SENSOR_ASSET_BYTES
+        );
+
+        // The generalized frozen-version list carries the exact same bytes,
+        // oldest first, and never the current version: a future bump adds
+        // one more entry here rather than replacing one of these three.
+        assert_eq!(xshield_gateway::FROZEN_SENSOR_VERSIONS.len(), 3);
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[0].version,
+            LEGACY_SENSOR_VERSION
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[0].asset_bytes,
+            LEGACY_SENSOR_ASSET_BYTES
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[0].loader_bytes,
+            LEGACY_SENSOR_LOADER_BYTES
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[1].version,
+            SUPERSEDED_1_1_0_SENSOR_VERSION
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[1].asset_bytes,
+            SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[1].loader_bytes,
+            SUPERSEDED_1_1_0_SENSOR_LOADER_BYTES
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[2].version,
+            PREVIOUS_SENSOR_VERSION
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[2].asset_bytes,
+            PREVIOUS_SENSOR_ASSET_BYTES
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[2].loader_bytes,
+            PREVIOUS_SENSOR_LOADER_BYTES
+        );
+        assert!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS
+                .iter()
+                .all(|frozen| frozen.version != SENSOR_VERSION)
+        );
     }
 
     fn hex32(value: &str) -> [u8; 32] {
