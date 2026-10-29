@@ -55,6 +55,11 @@ ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS origin_state LowCardin
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS http_status Nullable(UInt16) DEFAULT NULL AFTER origin_state;
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS is_terminal UInt8 DEFAULT 0 AFTER http_status;
 ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS model_call_id String DEFAULT '' AFTER model_revision;
+-- 从观察流量导入路由（docs/30 §30.7）：非空仅出现在 request.accepted 且未匹配任何
+-- 操作（operation_id 为空）的行，是 gateway 对请求路径的有界规范化模板，不是原始
+-- 路径，也绝不作为鉴权或路由依据。升级物化视图目标，再升级来源表。
+ALTER TABLE xshield.events_by_time ADD COLUMN IF NOT EXISTS path_template String DEFAULT '' AFTER operation_id;
+ALTER TABLE xshield.audit_events ADD COLUMN IF NOT EXISTS path_template String DEFAULT '' AFTER operation_id;
 CREATE MATERIALIZED VIEW IF NOT EXISTS xshield.mv_events_by_time
 TO xshield.events_by_time AS SELECT * FROM xshield.audit_events;
 ALTER TABLE xshield.mv_events_by_time MODIFY QUERY

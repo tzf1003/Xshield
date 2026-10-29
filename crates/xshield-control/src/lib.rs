@@ -16,6 +16,7 @@ mod case_job_list;
 mod case_list;
 mod causality;
 mod coverage_report;
+mod discovered_routes;
 mod edge_channel;
 mod evidence_access_inspection;
 mod evidence_access_list;
@@ -4374,6 +4375,7 @@ pub fn routers(control: ControlPlane) -> (Router, Router, Arc<ControlPlane>) {
             site_config::SITE_REVISIONS_PATH,
             get(site_config::revisions_handler),
         )
+        .route(discovered_routes::PATH, get(discovered_routes::handler))
         .route(
             site_config::SITE_STATUS_PATH,
             get(site_config::status_handler),
@@ -5555,6 +5557,7 @@ mod tests {
     mod causality;
     mod control_ops;
     mod coverage_report;
+    mod discovered_routes;
     mod evidence_access_inspection;
     mod evidence_access_list;
     mod evidence_lifecycle;

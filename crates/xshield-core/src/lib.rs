@@ -21,6 +21,7 @@ pub mod identity;
 pub mod investigation;
 pub mod model_evaluation_admission;
 pub mod path_shape;
+pub mod path_template;
 pub mod ports;
 pub mod provenance;
 pub mod query;

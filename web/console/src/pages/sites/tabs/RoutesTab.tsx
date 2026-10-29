@@ -23,6 +23,7 @@ import {
 import { flowParts } from "../../../sites/model/diff.ts";
 import { formatBytes } from "../../../sites/model/units.ts";
 import type { WorkspaceApi } from "../workspace/use-workspace.ts";
+import { DiscoveredRoutesPanel } from "./DiscoveredRoutesPanel";
 import { type DrawerMode, RouteDrawer } from "./RouteDrawer";
 import { RoutesTemplateButton } from "./RouteTemplatePicker";
 
@@ -57,14 +58,14 @@ function resourceText(route: SiteRouteConfig): string {
   return [route.resource_type, route.view_profile, binding].filter(Boolean).join(" · ");
 }
 
-function uniqueId(base: string, taken: ReadonlySet<string>): string {
+export function uniqueId(base: string, taken: ReadonlySet<string>): string {
   if (!taken.has(base)) return base;
   for (let n = 2; n < 10_000; n += 1) if (!taken.has(`${base}.${n}`)) return `${base}.${n}`;
   return `${base}.${Date.now()}`;
 }
 
 /** The entry fields and the `protected.entry` route describe one door: keep them together. */
-function withRoutes(draft: SiteConfigDraft, routes: SiteRouteConfig[]): SiteConfigDraft {
+export function withRoutes(draft: SiteConfigDraft, routes: SiteRouteConfig[]): SiteConfigDraft {
   const next = { ...draft, policy: { ...draft.policy, routes } };
   const entry = routes.find((route) => route.operation_id === ENTRY_OPERATION_ID);
   // The site entry is never an authentication or share entry; such a route keeps the site's own.
@@ -373,6 +374,9 @@ export function RoutesTab({ ws, templates = true }: { ws: WorkspaceApi; template
           onApply={apply}
           onClose={() => setDrawer(null)}
         />
+      )}
+      {!ws.creating && ws.siteId && ws.access.canConfigure && (
+        <DiscoveredRoutesPanel ws={ws} siteId={ws.siteId} />
       )}
     </section>
   );

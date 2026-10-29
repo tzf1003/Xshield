@@ -34,6 +34,7 @@ import {
   modelCallFixture,
   agentRunFixture,
   modelCallListFixture,
+  discoveredRoutesFixture,
 } from "./fixtures.ts";
 import { EXPORT_ID } from "./export-fixtures.ts";
 
@@ -639,6 +640,89 @@ test("model-call list rejects malformed rows, ordering and response plan drift",
     change(value);
     t.mock.method(globalThis, "fetch", async () => response(value));
     await assert.rejects(client.modelCalls(plan), errorIs("INVALID_RESPONSE", 200));
+  }
+});
+
+test("discovered routes binds its site, UTC window and page size, has no cursor", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const plan = {
+    start: "2026-09-20T00:00:00Z",
+    end: "2026-09-21T00:00:00Z",
+    limit: 2,
+  };
+  t.mock.method(globalThis, "fetch", async (path: string) => {
+    assert.equal(
+      path,
+      "/control/v1/sites/site_demo/discovered-routes?start=2026-09-20T00%3A00%3A00Z&end=2026-09-21T00%3A00%3A00Z&limit=2",
+    );
+    return response(discoveredRoutesFixture());
+  });
+  const page = await client.discoveredRoutes("site_demo", plan);
+  assert.equal(page.routes[0]?.path_template, "/orders/{id}");
+  assert.equal(page.routes.length, 2);
+  for (const invalid of [
+    { ...plan, limit: 0 },
+    { ...plan, limit: 201 },
+    { ...plan, start: "2026-09-20T00:00:00.000Z" },
+    { ...plan, end: plan.start },
+    { ...plan, extra: true },
+    { ...plan, cursor: "v1.x" },
+  ])
+    await assert.rejects(
+      client.discoveredRoutes("site_demo", invalid),
+      errorIs("CONTROL_DISCOVERED_ROUTES_REQUEST_INVALID"),
+    );
+});
+
+test("discovered routes rejects malformed groups, drifted plans and non-monotonic pages", async (t) => {
+  const client = new ControlClient(TOKEN);
+  const plan = {
+    start: "2026-09-20T00:00:00Z",
+    end: "2026-09-21T00:00:00Z",
+    limit: 2,
+  };
+  const mutate: Array<(value: ReturnType<typeof discoveredRoutesFixture>) => void> = [
+    (value) => {
+      value.end = "2026-09-22T00:00:00Z";
+    },
+    (value) => {
+      value.routes.reverse();
+    },
+    (value) => {
+      value.routes[0]!.hits = 0;
+    },
+    (value) => {
+      value.routes[0]!.method = "get";
+    },
+    (value) => {
+      value.routes[0]!.path_template = "orders";
+    },
+    (value) => {
+      value.routes[0]!.path_template = "/orders/{order_id}";
+    },
+    (value) => {
+      value.routes[0]!.first_seen = "2026-09-19T23:59:59Z";
+    },
+    (value) => {
+      value.routes[0]!.first_seen = value.routes[0]!.last_seen;
+      value.routes[0]!.last_seen = "2026-09-20T00:00:10Z";
+    },
+    (value) => {
+      value.routes[1] = { ...value.routes[0]! };
+    },
+    (value) => {
+      value.truncated = true;
+      value.routes = [value.routes[0]!];
+    },
+  ];
+  for (const change of mutate) {
+    const value = discoveredRoutesFixture();
+    change(value);
+    t.mock.method(globalThis, "fetch", async () => response(value));
+    await assert.rejects(
+      client.discoveredRoutes("site_demo", plan),
+      errorIs("INVALID_RESPONSE", 200),
+    );
   }
 });
 

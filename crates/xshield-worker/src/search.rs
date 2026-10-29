@@ -6,7 +6,8 @@ pub mod rollout_report;
 
 use super::{
     MODEL_CALL_ID_PROJECTION, PublishError, PublisherConfig, TRACE_ID_PROJECTION,
-    reject_duplicate_json, valid_confidence, valid_event_type, valid_name, validate_id_list,
+    reject_duplicate_json, valid_confidence, valid_event_type, valid_method, valid_name,
+    valid_path_template, validate_id_list,
 };
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row, sql::Identifier};
@@ -251,6 +252,90 @@ impl ModelCallListPlan {
 pub enum ModelCallListPlanError {
     /// The requested page size is outside the list's fixed resource budget.
     InvalidLimit,
+}
+
+/// Maximum number of distinct `(method, path_template)` groups one page of
+/// route discovery exposes. Groups, not events, so this stays far below the
+/// generic event-search budget.
+pub const DISCOVERED_ROUTES_LIMIT_MAX: u16 = 200;
+
+/// A validated, bounded request for route-discovery aggregation: the
+/// distinct `(method, path_template)` groups a site's unmatched traffic
+/// produced within one window, most frequent first.
+///
+/// This type deliberately has no tenant or site field: the authenticated
+/// control-plane composition root supplies those values to the query
+/// adapter. It carries no cursor — the result is one bounded page of
+/// aggregate groups, not a per-event list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiscoveredRoutesPlan {
+    window: QueryWindow,
+    limit: u16,
+}
+
+impl DiscoveredRoutesPlan {
+    /// Validates a route-discovery page.
+    ///
+    /// # Errors
+    /// Returns [`DiscoveredRoutesPlanError::InvalidLimit`] when the page is
+    /// empty, exceeds this list's own budget, or exceeds the workspace query
+    /// maximum.
+    pub const fn new(window: QueryWindow, limit: u16) -> Result<Self, DiscoveredRoutesPlanError> {
+        if limit == 0 || limit > DISCOVERED_ROUTES_LIMIT_MAX || limit > MAX_LIMIT {
+            return Err(DiscoveredRoutesPlanError::InvalidLimit);
+        }
+        Ok(Self { window, limit })
+    }
+
+    /// Returns the required half-open UTC investigation window.
+    #[must_use]
+    pub const fn window(self) -> QueryWindow {
+        self.window
+    }
+
+    /// Returns the maximum number of groups to expose.
+    #[must_use]
+    pub const fn limit(self) -> u16 {
+        self.limit
+    }
+}
+
+/// Static validation failures for [`DiscoveredRoutesPlan`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiscoveredRoutesPlanError {
+    /// The requested page size is outside the list's fixed resource budget.
+    InvalidLimit,
+}
+
+/// One `(method, path_template)` group of unmatched requests: a route
+/// discovery candidate, never an authorization or routing fact.
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveredRouteSummary {
+    /// Exact HTTP method of every request in this group.
+    pub method: String,
+    /// The gateway's bounded, normalized path template (see docs/11 §11.5).
+    pub path_template: String,
+    /// Number of distinct unmatched requests observed in this group.
+    pub hits: u64,
+    /// Earliest occurrence within the requested window.
+    #[serde(serialize_with = "serialize_event_time")]
+    pub first_seen: DateTime<Utc>,
+    /// Latest occurrence within the requested window.
+    #[serde(serialize_with = "serialize_event_time")]
+    pub last_seen: DateTime<Utc>,
+}
+
+/// One bounded page of route-discovery groups.
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveredRoutesResult {
+    /// Groups ordered by hit count, most frequent first.
+    pub routes: Vec<DiscoveredRouteSummary>,
+    /// True when more groups exist beyond this page's limit.
+    pub truncated: bool,
+    /// Index rows scanned to answer the query, when the index reports it.
+    pub scanned_rows: Option<u64>,
+    /// Index bytes scanned to answer the query, when the index reports it.
+    pub scanned_bytes: Option<u64>,
 }
 
 /// Stable keyset position for descending model-call discovery.
@@ -789,6 +874,138 @@ async fn execute_model_call_list(
         model_calls,
         truncated,
         next_position,
+        scanned_rows,
+        scanned_bytes,
+    })
+}
+
+/// Raw aggregate row for one `(method, path_template)` group.
+#[derive(Clone, Debug, Deserialize, Serialize, Row)]
+struct DiscoveredRouteRow {
+    method: String,
+    path_template: String,
+    hits: u64,
+    #[serde(
+        deserialize_with = "deserialize_event_time",
+        serialize_with = "serialize_event_time"
+    )]
+    first_seen: DateTime<Utc>,
+    #[serde(
+        deserialize_with = "deserialize_event_time",
+        serialize_with = "serialize_event_time"
+    )]
+    last_seen: DateTime<Utc>,
+}
+
+/// Groups a site's unmatched traffic into route-discovery candidates: the
+/// distinct `(method, path_template)` pairs `request.accepted` recorded with
+/// no matched operation inside `plan`'s window, most frequent first.
+///
+/// `path_template` is non-empty on exactly the rows this groups: the gateway
+/// writes it only when `operation_id` is absent (see docs/11 §11.5), so this
+/// adapter needs no second event type or join to find them.
+///
+/// # Errors
+/// Returns [`PublishError::QueryTimeout`] past the adapter's own deadline,
+/// [`PublishError::QueryBudgetExceeded`] over the row/byte/time budget, and
+/// [`PublishError::InvalidEvent`] when the index returns a row this query
+/// cannot have legitimately produced.
+pub async fn query_discovered_routes(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    plan: &DiscoveredRoutesPlan,
+) -> Result<DiscoveredRoutesResult, PublishError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        execute_discovered_routes(config, client, tenant_id, site_id, plan),
+    )
+    .await
+    .map_err(|_| PublishError::QueryTimeout)?
+}
+
+async fn execute_discovered_routes(
+    config: &PublisherConfig,
+    client: &Client,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    plan: &DiscoveredRoutesPlan,
+) -> Result<DiscoveredRoutesResult, PublishError> {
+    let start = i64::try_from(plan.window().start().value())
+        .ok()
+        .and_then(|value| value.checked_mul(1_000_000))
+        .ok_or(PublishError::InvalidConfig)?;
+    let end = i64::try_from(plan.window().end().value())
+        .ok()
+        .and_then(|value| value.checked_mul(1_000_000))
+        .ok_or(PublishError::InvalidConfig)?;
+
+    let sql = "SELECT method,path_template,uniqExact(event_id) AS hits, \
+               min(occurred_at) AS first_seen,max(occurred_at) AS last_seen \
+               FROM ? WHERE tenant_id = ? AND site_id = ? \
+                 AND occurred_at >= fromUnixTimestamp64Micro(?) \
+                 AND occurred_at < fromUnixTimestamp64Micro(?) \
+                 AND event_type = 'request.accepted' AND path_template != '' \
+               GROUP BY method,path_template \
+               ORDER BY hits DESC,method ASC,path_template ASC LIMIT ?";
+
+    let fetch_limit = u64::from(plan.limit()) + 1;
+    let mut cursor = client
+        .query(sql)
+        .bind(Identifier(&config.active_view))
+        .bind(tenant_id.as_str())
+        .bind(site_id.as_str())
+        .bind(start)
+        .bind(end)
+        .bind(fetch_limit)
+        .with_setting("max_execution_time", "2")
+        .with_setting("timeout_before_checking_execution_speed", "0")
+        .with_setting("max_rows_to_read", "1000000")
+        .with_setting("max_bytes_to_read", "67108864")
+        .with_setting("read_overflow_mode", "throw")
+        .with_setting("timeout_overflow_mode", "throw")
+        .with_setting("max_result_bytes", "1048576")
+        .with_setting("result_overflow_mode", "throw")
+        .with_setting("max_memory_usage", "268435456")
+        .with_setting("max_threads", "2")
+        .with_setting("prefer_column_name_to_alias", "1")
+        .with_setting("wait_end_of_query", "1")
+        .fetch::<DiscoveredRouteRow>()
+        .map_err(query_error)?;
+    let mut routes = Vec::with_capacity(usize::from(plan.limit()) + 1);
+    while let Some(row) = cursor.next().await.map_err(query_error)? {
+        if routes.len() > usize::from(plan.limit()) {
+            return Err(PublishError::InvalidEvent);
+        }
+        if row.hits == 0
+            || !valid_method(&row.method)
+            || !valid_path_template(&row.path_template)
+            || row.first_seen > row.last_seen
+            || !(start..end).contains(&row.first_seen.timestamp_micros())
+            || !(start..end).contains(&row.last_seen.timestamp_micros())
+        {
+            return Err(PublishError::InvalidEvent);
+        }
+        routes.push(DiscoveredRouteSummary {
+            method: row.method,
+            path_template: row.path_template,
+            hits: row.hits,
+            first_seen: row.first_seen,
+            last_seen: row.last_seen,
+        });
+    }
+    let scanned_rows = cursor
+        .summary()
+        .and_then(clickhouse::QuerySummary::read_rows);
+    let scanned_bytes = cursor
+        .summary()
+        .and_then(clickhouse::QuerySummary::read_bytes);
+    let truncated = routes.len() > usize::from(plan.limit());
+    routes.truncate(usize::from(plan.limit()));
+    Ok(DiscoveredRoutesResult {
+        routes,
+        truncated,
         scanned_rows,
         scanned_bytes,
     })
@@ -1567,11 +1784,12 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentRunRow, AgentRunSummary, MODEL_CALL_ID_PROJECTION, MODEL_CALL_LIST_LIMIT_MAX,
+        AgentRunRow, AgentRunSummary, DISCOVERED_ROUTES_LIMIT_MAX, DiscoveredRouteRow,
+        DiscoveredRoutesPlan, MODEL_CALL_ID_PROJECTION, MODEL_CALL_LIST_LIMIT_MAX,
         ModelCallListPlan, ModelCallListPosition, ModelCallListResult, ModelCallListRow,
         ModelCallRow, ModelCallSummary, PublishError, SearchEventSummary, query_agent_run,
-        query_audit_events, query_error, query_model_call, query_model_calls,
-        validate_search_event,
+        query_audit_events, query_discovered_routes, query_error, query_model_call,
+        query_model_calls, validate_search_event,
     };
     use crate::PublisherConfig;
     use chrono::{DateTime, Utc};
@@ -2196,6 +2414,166 @@ mod tests {
         assert!(sql.contains("tuple(occurred_at,model_call_id) <"), "{sql}");
         assert!(
             sql.contains("ORDER BY occurred_at DESC,model_call_id DESC"),
+            "{sql}"
+        );
+    }
+
+    fn discovered_routes_plan(limit: u16) -> DiscoveredRoutesPlan {
+        DiscoveredRoutesPlan::new(
+            QueryWindow::new(
+                UnixSeconds::new(1_789_776_000),
+                UnixSeconds::new(1_789_776_100),
+            )
+            .unwrap(),
+            limit,
+        )
+        .unwrap()
+    }
+
+    fn discovered_route_row(
+        method: &str,
+        path_template: &str,
+        hits: u64,
+        second: u8,
+    ) -> DiscoveredRouteRow {
+        DiscoveredRouteRow {
+            method: method.to_owned(),
+            path_template: path_template.to_owned(),
+            hits,
+            first_seen: DateTime::parse_from_rfc3339("2026-09-19T00:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            last_seen: DateTime::parse_from_rfc3339(&format!("2026-09-19T00:00:{second:02}.000Z"))
+                .unwrap()
+                .with_timezone(&Utc),
+        }
+    }
+
+    async fn query_discovered_route_rows(
+        rows: Vec<DiscoveredRouteRow>,
+        limit: u16,
+    ) -> Result<super::DiscoveredRoutesResult, PublishError> {
+        let mut mock = test::Mock::new();
+        if !rows.is_empty() {
+            mock.add(test::handlers::provide(rows));
+        }
+        mock.non_exhaustive();
+        let config = PublisherConfig::new(
+            "/tmp/xshield-discovered-routes-query-journal",
+            "/tmp/xshield-discovered-routes-query-manifest",
+            "/tmp/xshield-discovered-routes-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        query_discovered_routes(
+            &config,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_demo").unwrap(),
+            &SiteId::parse("site_demo").unwrap(),
+            &discovered_routes_plan(limit),
+        )
+        .await
+    }
+
+    #[test]
+    fn discovered_routes_plan_enforces_its_decoder_page_budget() {
+        let window = QueryWindow::new(
+            UnixSeconds::new(1_789_776_000),
+            UnixSeconds::new(1_789_776_100),
+        )
+        .unwrap();
+        assert!(DiscoveredRoutesPlan::new(window, 1).is_ok());
+        assert!(DiscoveredRoutesPlan::new(window, DISCOVERED_ROUTES_LIMIT_MAX).is_ok());
+        for invalid in [0, DISCOVERED_ROUTES_LIMIT_MAX + 1] {
+            assert!(DiscoveredRoutesPlan::new(window, invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn discovered_routes_groups_unmatched_traffic_most_frequent_first() {
+        let rows = vec![
+            discovered_route_row("GET", "/orders/{id}", 40, 10),
+            discovered_route_row("GET", "/orders", 5, 20),
+        ];
+        let page = query_discovered_route_rows(rows, 1).await.unwrap();
+        assert!(page.truncated);
+        assert_eq!(page.routes.len(), 1);
+        assert_eq!(page.routes[0].path_template, "/orders/{id}");
+        assert_eq!(page.routes[0].hits, 40);
+
+        let rows = vec![
+            discovered_route_row("GET", "/orders/{id}", 40, 10),
+            discovered_route_row("GET", "/orders", 5, 20),
+        ];
+        let page = query_discovered_route_rows(rows, 2).await.unwrap();
+        assert!(!page.truncated);
+        assert_eq!(page.routes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn discovered_routes_rejects_a_row_this_query_cannot_have_produced() {
+        for (name, row) in [
+            ("zero hits", discovered_route_row("GET", "/orders", 0, 10)),
+            (
+                "lowercase method",
+                discovered_route_row("get", "/orders", 1, 10),
+            ),
+            (
+                "relative template",
+                discovered_route_row("GET", "orders", 1, 10),
+            ),
+            (
+                "non-id brace content",
+                discovered_route_row("GET", "/orders/{order_id}", 1, 10),
+            ),
+        ] {
+            assert!(
+                query_discovered_route_rows(vec![row], 10).await.is_err(),
+                "accepted {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn discovered_routes_compiles_scoped_grouped_aggregate_query() {
+        let fixture = PublisherConfig::new(
+            "/tmp/xshield-discovered-routes-query-journal",
+            "/tmp/xshield-discovered-routes-query-manifest",
+            "/tmp/xshield-discovered-routes-query-checkpoint",
+            "target",
+            "audit_events",
+            30,
+            1024,
+        )
+        .unwrap();
+        let mock = test::Mock::new();
+        let recorded = mock.add(test::handlers::record_ddl());
+        let result = query_discovered_routes(
+            &fixture,
+            &Client::default().with_mock(&mock),
+            &TenantId::parse("tenant_demo").unwrap(),
+            &SiteId::parse("site_demo").unwrap(),
+            &discovered_routes_plan(2),
+        )
+        .await
+        .unwrap();
+        assert!(result.routes.is_empty());
+        let sql = recorded.query().await;
+        assert!(
+            sql.contains("WHERE tenant_id = 'tenant_demo' AND site_id = 'site_demo'"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("AND event_type = 'request.accepted' AND path_template != ''"),
+            "{sql}"
+        );
+        assert!(sql.contains("GROUP BY method,path_template"), "{sql}");
+        assert!(sql.contains("uniqExact(event_id) AS hits"), "{sql}");
+        assert!(
+            sql.contains("ORDER BY hits DESC,method ASC,path_template ASC"),
             "{sql}"
         );
     }

@@ -22,6 +22,7 @@ use xshield_audit::{
 };
 use xshield_core::audit::ReasonCode;
 use xshield_core::domain::{EventId, InvalidValue, PageEvidenceId};
+use xshield_core::path_template;
 use zeroize::Zeroizing;
 
 use xshield_gateway::request_crypto::{
@@ -104,6 +105,11 @@ pub(crate) struct AdmissionFacts<'a> {
     pub(crate) request_id: &'a str,
     pub(crate) trace_id: &'a str,
     pub(crate) method: &'a str,
+    /// The raw request path. Only ever used, via a bounded normalization, to
+    /// describe a request that matched no configured operation; it never
+    /// changes admission and is dropped entirely once `decision` carries a
+    /// matched operation.
+    pub(crate) path: &'a str,
     pub(crate) decision: &'a GatewayDecision,
     pub(crate) duration_us: u64,
     pub(crate) request_crypto: Option<&'a RequestCryptoAudit>,
@@ -856,6 +862,14 @@ impl DurableAudit {
                 decision_name(facts.decision.outcome),
             )
         };
+        // A path template is a route-discovery aid, not an authorization or
+        // routing fact: it is only ever computed for a request that matched
+        // no configured operation, and dropped (None) the moment one did.
+        let path_template = if operation_id.is_none() {
+            path_template::normalize(facts.path)
+        } else {
+            None
+        };
         let mut events = vec![
             PendingEvent::new(
                 accepted_id.clone(),
@@ -866,6 +880,7 @@ impl DurableAudit {
                     method: facts.method.to_owned(),
                     operation_id: operation_id.clone(),
                     origin_state: "not_sent",
+                    path_template,
                 },
             ),
             PendingEvent::new(
@@ -1989,6 +2004,10 @@ enum Payload {
         method: String,
         operation_id: Option<String>,
         origin_state: &'static str,
+        /// Present only when `operation_id` is absent: a bounded, normalized
+        /// template of the request path, used solely to group unmatched
+        /// requests for route discovery.
+        path_template: Option<String>,
     },
     StageCompleted {
         stage: &'static str,
@@ -2463,6 +2482,7 @@ mod tests {
                 request_id,
                 trace_id: "28282828282828282828282828282828",
                 method: "GET",
+                path: "/home",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -2574,6 +2594,7 @@ mod tests {
                     request_id,
                     trace_id: "31313131313131313131313131313131",
                     method: "GET",
+                    path: "/home",
                     decision: &decision,
                     duration_us: 10,
                     request_crypto: None,
@@ -2727,6 +2748,7 @@ mod tests {
                 request_id: "req_018f2a3b-4c5d-7000-8000-000000000001",
                 trace_id: "11111111111111111111111111111111",
                 method: "GET",
+                path: "/health",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -2765,6 +2787,7 @@ mod tests {
                 request_id: "req_018f2a3b-4c5d-7000-8000-000000000003",
                 trace_id: "33333333333333333333333333333333",
                 method: "GET",
+                path: "/unknown",
                 decision: &denied,
                 duration_us: 10,
                 request_crypto: None,
@@ -2879,6 +2902,7 @@ mod tests {
                     request_id,
                     trace_id: "21212121212121212121212121212121",
                     method,
+                    path,
                     decision: &decision,
                     duration_us: 10,
                     request_crypto: None,
@@ -2984,6 +3008,7 @@ mod tests {
                 request_id,
                 trace_id: "99999999999999999999999999999999",
                 method: "POST",
+                path: "/orders",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: Some(&crypto),
@@ -3051,6 +3076,7 @@ mod tests {
                 request_id,
                 trace_id: "19191919191919191919191919191919",
                 method: "POST",
+                path: "/orders-observe",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: Some(&crypto),
@@ -3132,6 +3158,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One journal round trip per outcome keeps the matrix readable.
     async fn distinguishes_complete_response_delivery_failure_from_truncation() {
         for (complete, event_type, origin_state, origin_reason, final_reason) in [
             (
@@ -3160,6 +3187,7 @@ mod tests {
                     request_id,
                     trace_id,
                     method: "GET",
+                    path: "/health",
                     decision: &decision,
                     duration_us: 10,
                     request_crypto: None,
@@ -3242,6 +3270,7 @@ mod tests {
                 request_id,
                 trace_id: "88888888888888888888888888888888",
                 method: "GET",
+                path: "/health",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -3452,6 +3481,7 @@ mod tests {
                     request_id: &request_id,
                     trace_id,
                     method,
+                    path,
                     decision: &decision,
                     duration_us: 10,
                     request_crypto,
@@ -3567,6 +3597,7 @@ mod tests {
                         request_id: &request_id,
                         trace_id: "41414141414141414141414141414141",
                         method: "GET",
+                        path: "/health",
                         decision: &decision,
                         duration_us: 10,
                         request_crypto: None,
@@ -3649,6 +3680,7 @@ mod tests {
                 request_id,
                 trace_id: "44444444444444444444444444444444",
                 method: "GET",
+                path: "/health",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -3742,6 +3774,7 @@ mod tests {
                 request_id,
                 trace_id: "41414141414141414141414141414141",
                 method: "GET",
+                path: "/",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -3833,6 +3866,7 @@ mod tests {
                 request_id,
                 trace_id: "45454545454545454545454545454545",
                 method: "GET",
+                path: "/api/users/4711/orders",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -3927,6 +3961,7 @@ mod tests {
                 request_id,
                 trace_id: "42424242424242424242424242424242",
                 method: "GET",
+                path: "/",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -3975,6 +4010,7 @@ mod tests {
                 request_id,
                 trace_id: "66666666666666666666666666666666",
                 method: "GET",
+                path: "/unknown",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -4095,6 +4131,7 @@ mod tests {
                 request_id: "req_018f2a3b-4c5d-7000-8000-000000000002",
                 trace_id: "22222222222222222222222222222222",
                 method: "GET",
+                path: "/health",
                 decision: &decision,
                 duration_us: 10,
                 request_crypto: None,
@@ -4120,6 +4157,7 @@ mod tests {
             request_id,
             trace_id: "22222222222222222222222222222222",
             method: "GET",
+            path: "/health",
             decision,
             duration_us: 10,
             request_crypto: None,

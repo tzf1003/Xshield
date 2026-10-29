@@ -414,6 +414,35 @@ export function modelCallListFixture(nextPage = false) {
   };
 }
 
+export function discoveredRoutesFixture(truncated = false) {
+  const group = (
+    method: string,
+    pathTemplate: string,
+    hits: number,
+    firstSeen: string,
+    lastSeen: string,
+  ) => ({ method, path_template: pathTemplate, hits, first_seen: firstSeen, last_seen: lastSeen });
+  const routes = [
+    group("GET", "/orders/{id}", 40, "2026-09-20T00:00:10Z", "2026-09-20T23:00:00Z"),
+    group("POST", "/webhooks/stripe", 5, "2026-09-20T01:00:00Z", "2026-09-20T02:00:00Z"),
+  ];
+  return {
+    ...envelope(),
+    schema_version: 1,
+    start: "2026-09-20T00:00:00Z",
+    end: "2026-09-21T00:00:00Z",
+    watermark_scope: "configured_journal",
+    as_of: AS_OF,
+    index_watermark: summaryFixture().index_watermark,
+    has_gaps: true,
+    pending_segments: 2,
+    scanned_rows: 24,
+    scanned_bytes: 2048,
+    routes,
+    truncated,
+  };
+}
+
 import { searchPlanDigest } from "../src/search.ts";
 import type {
   CausalityPlan,
