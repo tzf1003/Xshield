@@ -1,0 +1,41 @@
+# One publisher per transactional outbox family (docs/13 11.8). Install to
+# /etc/systemd/system/xshield-outbox@.service, then enable one instance per
+# family, e.g. `systemctl enable --now xshield-outbox@case.timer`. The
+# families currently published (docs/13, docs/11 §11.8) are: case,
+# evidence_catalog, evidence_access, evidence_retention, calibration,
+# identity, grant, response_grant, share_grant, ui_action.
+[Unit]
+Description=Xshield outbox publish (%i family)
+Documentation=https://github.com/tzf1003/Xshield/blob/main/docs/13-audit-storage-reliability.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=xshield
+Group=xshield
+EnvironmentFile=/etc/xshield/outbox-common.env
+Environment=XSHIELD_OUTBOX_FAMILY=%i
+ExecStart=/opt/xshield/current/bin/xshield-outbox-worker ${XSHIELD_TENANT_ID} ${XSHIELD_SITE_ID}
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

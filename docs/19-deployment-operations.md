@@ -157,7 +157,7 @@ v0.1.1 是第一个由 `release.yml` 发布的版本（[Release](https://github.
 - 推送标签触发时，签名身份绑定到标签（`@refs/tags/v…`）。
 - 经 `release.yml` 触发时，签名身份是 main 上的这个工作流文件（`@refs/heads/main`）。这时镜像的 `org.opencontainers.image.version` 与 `org.opencontainers.image.revision` 标签，以及构建来源证明，给出发布版本和源码提交。能以这一身份签名的，只有 main 上运行的 release-images。它只在推送 `v*` 标签或被 `release.yml` 调用时运行，而运行 `release.yml` 需要仓库写权限。
 
-单机 Docker Compose 参考部署见 19.8，Kubernetes 的 Helm chart 见 19.9，CI 用这三个镜像把两者都整体拉起验证；systemd 单元仍没有（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
+单机 Docker Compose 参考部署见 19.8，Kubernetes 的 Helm chart 见 19.9，systemd 参考部署见 19.10，CI 分别把三者整体拉起验证（systemd 一项因为不涉及容器或数据库，只做 `systemd-analyze verify` 加命名约定核对，见 `scripts/test_systemd_units.sh`）；TLS 仍是由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态。
 
 ## 19.8 参考部署（Docker Compose）
 
@@ -223,3 +223,15 @@ CI 的 `helm` 作业先做静态检查：缺少必填值时 schema 拒绝渲染�
 - 真实企业 IdP、TLS 与 MFA；
 - 升级路径（`helm upgrade` 与迁移）；
 - ServiceMonitor 与 NetworkPolicy 在真实监控和 CNI 下的效果，CI 只校验渲染结果，kind 默认 CNI 只做基本执行。
+
+## 19.10 systemd 参考部署
+
+`deploy/systemd/` 把同一拓扑（edge、control、两个来源的封存与发布、十个 outbox 发布家族、按需的证据保留清理）跑成 systemd 单元，供不经容器编排的单机或虚拟机部署使用，用法见 `deploy/systemd/README.md`。与 19.8 的差异：
+
+- loopback 在同一主机上天然共享，所以不需要 Compose 的 `net` 占位容器：edge 的签名 apply 通道（`127.0.0.1:9553`）与 control 的管理 API（`127.0.0.1:9443`）直接互通。
+- 常驻维护进程（`xshield-audit-seal`、审计发布、outbox 发布）在这里不是 19.4 描述的 `XSHIELD_RUN_INTERVAL_SECONDS` 常驻循环，而是 systemd 自带调度的 oneshot + timer 模板单元，对应本章给出的另一种选择（“一次性模式……适合 cron 或 Kubernetes CronJob”）；因此不设置 `XSHIELD_RUN_HEARTBEAT_FILE`（只能与常驻间隔一起设置），是否按时成功运行改读 systemd 自身状态（`systemctl list-timers`、单元的 `OnFailure=`、journal）。
+- 证据保留清理（`xshield-evidence-retain`）不随任何 target 启用、没有配套 timer：按 26 的运行手册手工执行，确认节奏后再自行决定是否加定时器，因为它是删除路径。
+- 服务账号固定为 uid/gid 10001，与容器镜像一致（`xshield.sysusers.conf`）；数据目录由 `xshield.tmpfiles.conf` 以 0700 创建一次，不在后续启动时被覆盖。
+- 单元按角色加固：`User=xshield`、`NoNewPrivileges=yes`、`ProtectSystem=strict` 配合逐单元收紧的 `ReadWritePaths=`/`ReadOnlyPaths=`，以及去特权的 `Protect*`/`Restrict*` 系列；只有 edge、control 及需要连 ClickHouse/PostgreSQL 的发布与 outbox 单元保留网络，封存单元额外 `PrivateNetwork=yes`（对应 Compose 里 `edge-seal`/`control-seal` 的 `network_mode: none`）。
+
+CI 的 `systemd` 作业只做 `scripts/test_systemd_units.sh`：不涉及容器或数据库，用 `systemd-analyze verify` 校验全部单元文件语法与依赖（临时在 `/opt/xshield/current/bin` 放置可执行占位文件满足存在性检查，之后清理），再核对每个 `EnvironmentFile=` 都有对应的 `*.env.example`、每个 `ExecStart=` 引用的二进制都是本仓库实际构建的目标。**未覆盖**：真实安装与启动（没有运行中的 systemd 实例校验 `User=`/`ReadWritePaths=` 等运行时行为）、反向代理与控制台（仍需操作方自备同源代理，见 `web/console/README.md`）、高可用（单机，限制同 19.8）。

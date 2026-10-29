@@ -129,7 +129,7 @@ Agent 详情增量：`GET /control/v1/agent-runs/{agent_run_id}` 已交付 Obser
 | M4 模型与调查 | 约 35% | QueryPlan、检索、因果、离线 Jev 评估、校准基础设施 | 模型不在请求路径；实测仅 4 个合成样本；无调查 Agent、自然语言查询、回放 |
 | M5 持续适配与产品化 | 约 10% | 期望/生效修订、危险变更审批、回滚、HMAC 应用通道 | 构建监测、候选、双身份测试、签名灰度均无代码 |
 
-部署与运维：仓库根有 `Dockerfile`（edge、control、worker 三个目标），发版由 GitHub Actions 的 `release.yml`（手动触发）完成：校验版本与提交、创建标签、构建并签名推送 GHCR 镜像、发布 Release（19 §19.7）；v0.1.1 已经由它发布，三个镜像的签名用 `cosign verify` 验证通过。另有单机 Docker Compose 参考部署（§19.8）与 Kubernetes Helm chart（§19.9），CI 都把它们整体拉起验证。edge 与 control 有 `/livez`、`/readyz` 与 Prometheus 指标（§19.5），秘密可经 `_FILE` 从文件读取（§19.3）。仍没有 systemd 单元、告警规则、KMS 与高可用部署。78 个验收用例（`examples/acceptance-cases.json`）中 automated 9、partial 51、planned 18（状态含义与计数口径见 docs/20 §20.2），外部输入解析器有 fuzz（`fuzz/README.md`：13 个目标，PR 回放种子，覆盖引导的模糊测试每天运行），无基准测试或压测，docs/21 的延迟预算仍是待测目标。
+部署与运维：仓库根有 `Dockerfile`（edge、control、worker 三个目标），发版由 GitHub Actions 的 `release.yml`（手动触发）完成：校验版本与提交、创建标签、构建并签名推送 GHCR 镜像、发布 Release（19 §19.7）；v0.1.1 已经由它发布，三个镜像的签名用 `cosign verify` 验证通过。另有单机 Docker Compose 参考部署（§19.8）与 Kubernetes Helm chart（§19.9），CI 都把它们整体拉起验证。edge 与 control 有 `/livez`、`/readyz` 与 Prometheus 指标（§19.5），秘密可经 `_FILE` 从文件读取（§19.3）。systemd 参考部署已交付（§19.10），CI 用 `scripts/test_systemd_units.sh` 校验单元文件；仍没有告警规则、KMS 与高可用部署。78 个验收用例（`examples/acceptance-cases.json`）中 automated 9、partial 51、planned 18（状态含义与计数口径见 docs/20 §20.2），外部输入解析器有 fuzz（`fuzz/README.md`：13 个目标，PR 回放种子，覆盖引导的模糊测试每天运行），无基准测试或压测，docs/21 的延迟预算仍是待测目标。
 
 接近可试点首版的优先顺序：（1）浏览器来源闭环的控制面部分：控制面 API 与控制台已能表达并编写身份绑定、资格与 HTML 适配，edge 的 apply/重启描述供给屏障与控制面的修订号绑定也已完成（05 §5.3.1），剩余在真实登录的开发栈上验证编写界面，以及控制台对分享的编写界面（分享的控制面 API 已于 2026-10-07 完成，见 29“分享发放规则行由控制面写入”）；（2）生产传输与打包：原生 TLS + HTTP/2 与 PROXY protocol 已完成（19 §19.2），`scripts/package_release.sh` 已能在大容量卷上生成发行 tarball（19 §19.7），容器镜像、Compose 参考部署与 Helm chart 也已完成并在 CI 中整体拉起（19 §19.7–19.9），剩余 KMS 与生产迁移工具；（3）在一个真实应用上试点并执行验收用例、实测性能；（4）站点级 observe → enforce 切换和兼容豁免登记；（5）可信的总览与运维：真实 edge/上游/审计健康已接入总览（30 §30.7），拒绝与覆盖统计的控制面接口已完成（29 §29.39），剩余控制台页面。在线 Jev、调查 Agent、自然语言查询、回放和持续适配排在首版之后。
 
@@ -153,3 +153,5 @@ Agent 详情增量：`GET /control/v1/agent-runs/{agent_run_id}` 已交付 Obser
 
 
 2026-10-29 更新：各里程碑百分比不变，整体仍约 40%。本表改为全项目唯一的状态表，README 只保留摘要与链接。期间交付的是试点前的运维与验证能力，不改变里程碑范围内的缺口：拒绝与覆盖统计接口（29 §29.39）、13 个外部输入解析器的模糊测试与 CI 回放（20、`fuzz/README.md`）、在 GitHub Actions 上发版的 `release.yml`（19 §19.7），以及按租户、站点与 key-id 的请求解密与响应加密密钥环，使 apply 下发的站点也能使用双向加密，轮换不再需要并行 edge（19、31）；多副本部署可用 `XSHIELD_EDGE_RATE_LIMIT_SHARE` 按副本分摊按来源限流（19、21）。
+
+2026-10-29 更新（二）：部署与运维缺口表去掉“systemd 单元”一项：`deploy/systemd/` 交付了不经容器编排的单机/虚拟机参考部署（19 §19.10），语义对齐 Compose 参考部署，常驻维护任务换成 systemd 自己的 oneshot + timer 调度；CI 新增 `systemd` 作业，用 `scripts/test_systemd_units.sh` 做 `systemd-analyze verify` 与命名约定核对（不涉及容器或数据库，因此比 `compose`/`helm` 两个作业轻）。里程碑百分比不变，因为这一项在“实现状态核查”表之外、只属于部署与运维段落。仍没有告警规则、KMS 与高可用部署。

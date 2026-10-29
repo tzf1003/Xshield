@@ -1,0 +1,12 @@
+# Pairs with xshield-outbox@.service. 5s matches the Compose reference's
+# default XSHIELD_OUTBOX_INTERVAL_SECONDS (docs/19 19.8); adjust both together.
+[Unit]
+Description=Periodic Xshield outbox publish (%i family)
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=5s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

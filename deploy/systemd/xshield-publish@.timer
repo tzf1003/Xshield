@@ -1,0 +1,12 @@
+# Pairs with xshield-publish@.service. 15s matches the Compose reference's
+# default XSHIELD_PUBLISH_INTERVAL_SECONDS (docs/19 19.8); adjust both together.
+[Unit]
+Description=Periodic Xshield audit publish (%i journal)
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

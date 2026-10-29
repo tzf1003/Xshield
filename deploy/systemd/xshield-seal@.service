@@ -1,0 +1,45 @@
+# Journal sealing, once per source. Install to
+# /etc/systemd/system/xshield-seal@.service, then enable one instance per
+# journal source: `systemctl enable --now xshield-seal@edge.timer` and
+# `xshield-seal@control.timer` (docs/13).
+#
+# Runs as a bounded oneshot triggered by the matching .timer rather than the
+# resident `XSHIELD_RUN_INTERVAL_SECONDS` loop docs/19 offers for Compose:
+# systemd already owns scheduling, retries and "did the last run succeed"
+# (`systemctl status`, `OnFailure=`), so there is no XSHIELD_RUN_HEARTBEAT_FILE
+# here (docs/19: it may only be set together with the interval loop).
+[Unit]
+Description=Xshield audit seal (%i journal)
+Documentation=https://github.com/tzf1003/Xshield/blob/main/docs/13-audit-storage-reliability.md
+
+[Service]
+Type=oneshot
+User=xshield
+Group=xshield
+EnvironmentFile=/etc/xshield/seal-%i.env
+ExecStart=/opt/xshield/current/bin/xshield-audit-seal /var/lib/xshield/%i-audit /var/lib/xshield/%i-manifests
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ReadOnlyPaths=/var/lib/xshield/%i-audit
+ReadWritePaths=/var/lib/xshield/%i-manifests
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
