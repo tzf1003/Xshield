@@ -135,7 +135,7 @@ group_gateway() {
         return
     fi
     if have node; then
-        run_step sensor-unit node --test sensor/test/sensor.test.mjs sensor/test/sensor-1.1.0.test.mjs
+        run_step sensor-unit node --test sensor/test/sensor.test.mjs sensor/test/sensor-1.1.0.test.mjs sensor/test/sensor-1.2.0.test.mjs
     else
         skip_step sensor-unit "node not found"
     fi
