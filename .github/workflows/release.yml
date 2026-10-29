@@ -65,9 +65,11 @@ jobs:
           fi
           sha=$(git rev-parse --verify "$COMMIT^{commit}") || fail "unknown commit '$COMMIT'"
           git merge-base --is-ancestor "$sha" origin/main || fail "$sha is not on main"
-          git show "$sha:CHANGELOG.md" | grep -q "^$heading" || fail "CHANGELOG.md at $sha has no '$heading' heading"
+          # grep -q would exit at the first match and, under pipefail, the
+          # SIGPIPE it gives git show would read as "no match".
+          git show "$sha:CHANGELOG.md" | grep "^$heading" >/dev/null || fail "CHANGELOG.md at $sha has no '$heading' heading"
           for manifest in crates/xshield-gateway/Cargo.toml deploy/helm/xshield/Chart.yaml; do
-            git show "$sha:$manifest" | grep -Eq "^version: ?\"?$VERSION\"?$|^version = \"$VERSION\"$" \
+            git show "$sha:$manifest" | grep -E "^version: ?\"?$VERSION\"?$|^version = \"$VERSION\"$" >/dev/null \
               || fail "$manifest at $sha is not version $VERSION"
           done
           # Only a commit whose CI run on main passed is released.
