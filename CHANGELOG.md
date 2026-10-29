@@ -8,6 +8,11 @@
   - 回归：`xshield-evidence` 新增分页/过滤单测；2 个真实 MinIO 集成测试并入既有 `object-storage` CI 作业（迁移并锁定、重复调用幂等；密钥不匹配拒绝、篡改的本地 HMAC 不留下部分复制、已过期对象拒绝迁移）。
   - **未覆盖**：不迁移校准报告与 lineage-review 对象（12.10“不在 S3 上的对象”）；不支持跨桶 KMS 包裹密钥或分块上传；没有进度持久化，大型本地库的单次运行时长随对象数线性增长。
 
+- 新建站点向导补上观察模式入口（docs/32 32.6 第 4 步，docs/30 的五步向导设计）：此前“入口与模式”步骤没有上线模式选项，新站点只能先按强制创建，再到已保存站点的“策略”页另外切换到观察，多一轮保存。
+  - 向导“入口与模式”步骤接入既有的“上线模式”卡片（`RolloutCard`），与站点详情页“策略”标签共用同一张卡片、同一套校验（`sites/model/rollout.ts` 的 `rolloutProblems`）：可以在创建时直接选择观察并填写截止时间、观察标签与提前单独强制的路由，观察标签留空、截止时间超出 30 天或引用不存在的路由时该步骤即被拦住，与已有站点编辑的报错一致。校验结果与复核页新增“上线模式”行，默认仍是强制,不改变任何默认值或服务端校验。
+  - 回归：`tests/site-wizard.spec.ts` 新增一条端到端用例，覆盖向导内切到观察、标签必填校验、切回强制后观察字段消失、复核页展示观察截止时间；既有的 390px 布局与明暗主题无障碍用例覆盖了新卡片插入后的页面。
+  - **未覆盖**：`docs/32` 的其余条目（审计契约、核心模型与风险令牌、edge 判定转发、退出报告、审批记录摘要、apply_direct 豁免拒绝）此前已实现，本次未改动；本条目只补齐向导入口。
+
 - S3 证据存储：存储桶侧 SSE-KMS 与大对象 multipart 上传（docs/12 12.10、docs/19 19.4）：此前 S3 后端（#44）只测过 MinIO 的基础对象操作，未覆盖服务端加密配置，且单对象硬上限与本地后端共用的 64 MiB。
   - 新增可选 `XSHIELD_EVIDENCE_S3_SSE_KMS`（`off`/`aws-kms`）与 `XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID`：开启后每次写入都带 `x-amz-server-side-encryption: aws:kms`，可选显式 KMS key id，留空用存储桶默认 key。这是存储桶自己的加密，叠加在证据库自身的 AEAD 信封之上，不是把应用层数据密钥交给 KMS 包裹。
   - 密文超过 8 MiB 时改走 S3 multipart upload（`CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload`），分 8 MiB 一片；完成请求同样带 `If-None-Match: *`，create-only 语义不因分片而改变，任一步失败都先 `AbortMultipartUpload` 再把错误上抛。S3 后端的单 artifact 上限随之从 64 MiB 提到 1 GiB（本地后端不变，仍是 64 MiB），因为桶对象不必像本地一次写入那样整体放进一次 HTTP 请求。
