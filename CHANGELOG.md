@@ -8,10 +8,10 @@
   - **未覆盖**：`docs/32` 的其余条目（审计契约、核心模型与风险令牌、edge 判定转发、退出报告、审批记录摘要、apply_direct 豁免拒绝）此前已实现，本次未改动；本条目只补齐向导入口。
 
 - Helm chart 高可用：edge+control 多副本 + 控制面收敛回放（docs/24 ADR-014、docs/19 19.9.1）：此前 Helm chart 把 edge、control 与两组 journal 封存/发布任务固定在单副本 StatefulSet 的同一个 Pod 里，该 Pod 是单点故障。调研确认 journal 封存/发布（幂等重放）与 outbox 发布（PostgreSQL 行级租约）本来就支持多副本并发，不需要新增 leader election 或外部协调服务；真正缺的是 edge+control 的配置收敛机制。
-  - `values.yaml` 新增 `replicaCount`（默认 **2**，此前固定为 1）：StatefulSet 的每个副本仍是一套独立的 edge+control+journal 任务+PVC，loopback 耦合和安全边界不变。新增 `outbox.replicaCount`（默认 2）放开 outbox Deployment 的副本数。**升级到本版本会把现有单副本安装默认扩成 2 副本**；需要保持单副本的部署应显式设置两者为 `1`。
+  - `values.yaml` 新增 `replicaCount`（默认仍是 **1**，StatefulSet 从固定 1 变为可配置，但默认值不变）与 `outbox.replicaCount`（同样默认 1，放开 outbox Deployment 的副本数）：每个副本仍是一套独立的 edge+control+journal 任务+PVC，loopback 耦合和安全边界不变。新增 `deploy/helm/xshield/values-ha.yaml`：一个可选叠加层（`-f values.yaml -f values-ha.yaml`），把两者都设为 2 并随之打开下面的 PodDisruptionBudget 与默认反亲和；**`helm upgrade` 不叠加这个文件时，副本数与资源占用与升级前完全一致**，不会悄悄扩容既有安装。
   - `xshield-control` 新增常驻收敛回放任务：按 `XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS`（Helm 的 `jobs.reconcileIntervalSeconds`，默认 30 秒）周期性重新计算当前已批准的完整站点配置并重放给本地 edge，复用既有的 `apply_site_snapshot`/幂等 apply 协议；配置未变时是一次快速空操作。环境变量未设置时行为与此前完全一致（apply 只在写请求时触发一次）。`xshield_control::routers()` 相应改为同时返回共享的 `Arc<ControlPlane>`，供 `main.rs` 把这个任务和路由绑在同一个控制面状态上。
   - 新增 `poddisruptionbudget-core.yaml`/`poddisruptionbudget-outbox.yaml`：对应副本数 > 1 时渲染 `maxUnavailable: 1` 的 PodDisruptionBudget，副本数为 1 时不渲染。`xshield.podSecurity` 这个共享模板现在按 `(root, component, replicas)` 取参：未显式设置 `.Values.affinity` 且副本数 > 1 时，给出一个按 `kubernetes.io/hostname` 分散的默认软反亲和（`preferredDuringSchedulingIgnoredDuringExecution`），单节点集群（kind）仍能调度全部副本；显式设置 `.Values.affinity` 时完全按原样传递，行为不变。
-  - 回归：`scripts/test_helm_deployment.sh` 的 CI 冒烟改为验证两个副本：各自独立达到就绪、两个 control 进程通过共享 PostgreSQL 看到同一个站点、删除一个副本期间 Service 仍能通过另一个副本应答、恢复的副本在原持久卷上重新就绪、两个副本各自的 journal 封存/发布心跳与两个 outbox 副本的十个家族心跳均新鲜、全程没有容器因收敛任务的常态空操作而重启。
+  - 回归：CI 的 `helm` 作业（lint/kubeconform 渲染校验与 `scripts/test_helm_deployment.sh` 的 kind 冒烟）都叠加 `values-ha.yaml`，用两个副本验证：各自独立达到就绪、两个 control 进程通过共享 PostgreSQL 看到同一个站点、删除一个副本期间 Service 仍能通过另一个副本应答、恢复的副本在原持久卷上重新就绪、两个副本各自的 journal 封存/发布心跳与两个 outbox 副本的十个家族心跳均新鲜、全程没有容器因收敛任务的常态空操作而重启。
   - **未覆盖**：按副本粒度的收敛可观测性（现有 desired/active 状态位仍是"至少一个 edge 已收敛"的全局状态，见 docs/23）；跨 Region/跨故障域（docs/19 19.6 维持原状）；Compose 与 systemd 两种参考部署仍是单机，本次 HA 范围只覆盖 Kubernetes/Helm；KMS 通用密钥管理集成不在本次范围内。
 
 - S3 证据存储：存储桶侧 SSE-KMS 与大对象 multipart 上传（docs/12 12.10、docs/19 19.4）：此前 S3 后端（#44）只测过 MinIO 的基础对象操作，未覆盖服务端加密配置，且单对象硬上限与本地后端共用的 64 MiB。

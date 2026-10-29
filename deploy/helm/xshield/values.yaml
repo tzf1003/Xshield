@@ -11,9 +11,12 @@ siteId: ""  # required
 # independent edge+control+journal pair with its own PVC; control's resident
 # reconcile task (jobs.reconcileIntervalSeconds) keeps every replica's local
 # edge converged on the current approved configuration with no coordination
-# between replicas. 1 keeps the pre-HA single-pod topology; production should
-# use 2 or more with podDisruptionBudget.core enabled.
-replicaCount: 2
+# between replicas. Defaults to 1 (the pre-HA single-pod topology) so
+# `helm upgrade` never silently changes an existing install's replica count or
+# resource footprint; layer values-ha.yaml (-f values.yaml -f values-ha.yaml)
+# to opt into 2 or more, which also turns on podDisruptionBudget.core and the
+# default anti-affinity below.
+replicaCount: 1
 
 # Images built from the repository Dockerfile targets. Pin by digest in
 # production ("ghcr.io/<owner>/xshield-edge@sha256:...") and verify the
@@ -99,9 +102,10 @@ jobs:
 
 # The resident outbox publishers (docs/13): one Deployment, ten containers
 # per pod (one per family), all lease-claiming from PostgreSQL so any number
-# of replicas may run concurrently with no duplicate processing.
+# of replicas may run concurrently with no duplicate processing. Defaults to
+# 1; values-ha.yaml raises it to 2 alongside replicaCount above.
 outbox:
-  replicaCount: 2
+  replicaCount: 1
 
 # One PodDisruptionBudget per multi-replica workload, so a voluntary
 # disruption (node drain, cluster upgrade) cannot take every replica down at

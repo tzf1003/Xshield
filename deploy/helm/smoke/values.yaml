@@ -16,14 +16,12 @@ oidc:
   requiredAcr: "1"
   subjectRolesJson: '[{"subject":"smoke-subject","roles":["observer"]}]'
   consoleOrigin: http://127.0.0.1:55173
-# Two independent edge+control+journal replicas and two outbox replicas, so
-# scripts/test_helm_deployment.sh can verify convergence and failover across
-# more than one (docs/19 19.9.1, ADR-014). Each gets its own dev Keycloak and
-# toolbox sidecar (extraContainers, below), since those share the pod network
-# like edge and control do.
-replicaCount: 2
-outbox:
-  replicaCount: 2
+# Replica counts come from values-ha.yaml, which scripts/test_helm_deployment.sh
+# layers on top of this file so it can verify convergence and failover across
+# more than one edge+control+journal replica and more than one outbox replica
+# (docs/19 19.9.1, ADR-014). extraContainers (below) is part of the shared pod
+# template, so each replica gets its own dev Keycloak and toolbox sidecar too,
+# since those share the pod network like edge and control do.
 control:
   bootstrapRoles: observer,system_admin,release_operator
 jobs:

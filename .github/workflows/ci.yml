@@ -420,7 +420,7 @@ jobs:
             echo 'the chart rendered without its required values' >&2
             exit 1
           fi
-          values=(-f deploy/helm/smoke/values.yaml
+          values=(-f deploy/helm/smoke/values.yaml -f deploy/helm/xshield/values-ha.yaml
             --set images.edge=xshield-edge:ci --set images.control=xshield-control:ci
             --set images.worker=xshield-worker:ci
             --set-json 'control.allowedUpstreamCidrs=["10.0.0.0/8"]'

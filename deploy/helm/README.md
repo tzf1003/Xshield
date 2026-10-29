@@ -25,6 +25,8 @@ kubectl -n xshield create secret generic xshield --from-file=./xshield-secrets
 
 # 2. 写 values（必填项见 values.yaml 中标注 required 的字段），然后安装
 helm install xshield deploy/helm/xshield -n xshield -f my-values.yaml
+# 多副本高可用（可选，见下文"高可用"）：再叠加 values-ha.yaml
+# helm install xshield deploy/helm/xshield -n xshield -f my-values.yaml -f deploy/helm/xshield/values-ha.yaml
 ```
 
 `./xshield-secrets` 里的文件和 PostgreSQL 数据同等重要，要离线备份，不要提交。丢失封存密钥或 journal 密钥后，已有审计将无法验证（docs/19 19.6）。
@@ -43,8 +45,8 @@ Secret 需要的键：
 
 | 对象 | 内容 |
 | --- | --- |
-| StatefulSet `<release>`（`replicaCount` 个副本，默认 2） | 每个副本各自一个 Pod：运行 edge、control、两组封存与发布任务，挂载各自独立的持久卷 `state` |
-| Deployment `<release>-outbox`（`outbox.replicaCount` 个副本，默认 2） | 十个 outbox 家族的常驻发布任务，每个副本运行全部十个 |
+| StatefulSet `<release>`（`replicaCount` 个副本，默认 **1**） | 每个副本各自一个 Pod：运行 edge、control、两组封存与发布任务，挂载各自独立的持久卷 `state` |
+| Deployment `<release>-outbox`（`outbox.replicaCount` 个副本，默认 **1**） | 十个 outbox 家族的常驻发布任务，每个副本运行全部十个 |
 | Service `<release>-edge` | 数据面站点端口，默认 6400–6409，按 Pod 就绪状态在全部副本间负载均衡 |
 | Service `<release>-ops` | edge 9554、control 9555 的 `/livez`、`/readyz`、`/metrics`，均不认证 |
 | ConfigMap `<release>-edge` | edge 引导配置模板，Pod 启动时填入 Pod IP |
@@ -58,6 +60,8 @@ edge 与 control 必须在同一个 Pod 里，因为管理 API（`127.0.0.1:9443
 持久卷 `state` 在 `helm uninstall` 后保留（`persistentVolumeClaimRetentionPolicy: Retain`），因为其中有尚未发布的审计和证据；每个副本有自己的一份，互不共享。
 
 ## 高可用（`replicaCount`/`outbox.replicaCount` > 1，ADR-014）
+
+两者都默认 **1**（与升级前的单 Pod 拓扑完全一致，`helm upgrade` 不会悄悄改变已有安装的副本数或资源占用）。要开启多副本，叠加本目录下的 `values-ha.yaml`（`-f values.yaml -f values-ha.yaml`，或把它的两个字段合并进自己的 values），把两者都提到 2；它同时打开 `podDisruptionBudget.core`/`podDisruptionBudget.outbox`（仅在对应副本数 > 1 时渲染）和下文的默认反亲和。
 
 每个副本是一套完全独立的 edge+control+journal 任务+PVC，副本之间不直接通信：
 

@@ -80,6 +80,7 @@ token=$(cat "$work/secrets/control_token")
 
 helm install "$release" "$repo_root/deploy/helm/xshield" -n "$ns" \
     -f "$repo_root/deploy/helm/smoke/values.yaml" \
+    -f "$repo_root/deploy/helm/xshield/values-ha.yaml" \
     --set "images.edge=xshield-edge:$tag" \
     --set "images.control=xshield-control:$tag" \
     --set "images.worker=xshield-worker:$tag" \
