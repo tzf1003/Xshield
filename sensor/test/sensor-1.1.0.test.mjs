@@ -81,8 +81,14 @@ function fakeXhrClass(log) {
 
 // One sensor instance in a fresh realm. `route` answers every native fetch;
 // the bootstrap is answered from `document` unless the route handles it.
-function harness({ document = bootstrap(), route = () => json({}), delayBootstrap = false } = {}) {
+function harness({
+  document = bootstrap(),
+  route = () => json({}),
+  delayBootstrap = false,
+  telemetryDown = false,
+} = {}) {
   const calls = [];
+  const listeners = new Map();
   const xhrs = [];
   const timers = [];
   const clock = { now: 1_800_000_000_000 };
@@ -97,7 +103,7 @@ function harness({ document = bootstrap(), route = () => json({}), delayBootstra
     location: new URL("https://app.example/app"),
     document: {
       visibilityState: "visible",
-      addEventListener: () => undefined,
+      addEventListener: (name, listener) => listeners.set(name, listener),
     },
     Date: { now: () => clock.now },
     setTimeout: (callback, delay) => {
@@ -119,7 +125,11 @@ function harness({ document = bootstrap(), route = () => json({}), delayBootstra
           releaseBootstrap = () => resolve(response);
         });
       }
-      if (url.pathname === "/__xshield/v1/events/prepare") return Promise.resolve(new Response(null, { status: 202 }));
+      if (url.pathname === "/__xshield/v1/events/prepare") {
+        // A dropped telemetry channel surfaces like a failed native fetch.
+        if (telemetryDown) return Promise.reject(new TypeError("network error"));
+        return Promise.resolve(new Response(null, { status: 202 }));
+      }
       // Like the real fetch, failures surface as rejected promises.
       return new Promise((resolve) => resolve(route(url, input, init)));
     },
@@ -139,7 +149,23 @@ function harness({ document = bootstrap(), route = () => json({}), delayBootstra
     }
   };
   const businessCalls = () => calls.filter((call) => !target(call.input).includes("/__xshield/"));
-  return { sandbox, calls, xhrs, timers, clock, app, reference, businessCalls, release: () => releaseBootstrap() };
+  const observations = () =>
+    calls
+      .filter((call) => target(call.input).endsWith("/events/prepare"))
+      .flatMap((call) => JSON.parse(call.init.body).events);
+  return {
+    sandbox,
+    calls,
+    xhrs,
+    timers,
+    clock,
+    listeners,
+    app,
+    reference,
+    businessCalls,
+    observations,
+    release: () => releaseBootstrap(),
+  };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -257,6 +283,70 @@ test("waits for the bootstrap before deciding, and still lets a late one apply",
   await lateBoot;
   await late.app("/orders");
   assert.equal(late.reference(late.businessCalls()[1]), PAGE_REF);
+});
+
+test("a hidden, frozen or disconnected page keeps its edge checks and never fakes liveness", async () => {
+  const sensor = harness({ telemetryDown: true });
+  assert.equal(await sensor.sandbox.XshieldSensor.boot(HANDLE), true);
+  // The page goes to the background and its timers freeze: no heartbeat fires,
+  // and every observation fails like a dropped connection.
+  sensor.sandbox.document.visibilityState = "hidden";
+  sensor.listeners.get("visibilitychange")();
+  await settle();
+  assert.deepEqual(
+    sensor.observations().map((event) => [event.event_type, event.client_event_seq, event.visibility]),
+    [
+      ["PAGE_READY", 1, "visible"],
+      ["VISIBILITY", 2, "hidden"],
+    ],
+    "the sensor reports the state change and never backfills missed heartbeats",
+  );
+  // Business calls are neither blocked nor stripped: the edge still receives
+  // the same reference and applies its identity and grant checks to it.
+  await sensor.app("/orders");
+  await sensor.app("/orders/ord-unknown");
+  const [listed, unknown] = sensor.businessCalls();
+  assert.equal(sensor.reference(listed), PAGE_REF);
+  assert.equal(sensor.reference(unknown), null, "a missing heartbeat never widens what is presented");
+
+  // When the timers thaw, the next heartbeat continues the same page sequence.
+  sensor.sandbox.document.visibilityState = "visible";
+  sensor.timers.find((timer) => timer.delay === 15_000).callback();
+  await settle();
+  const last = sensor.observations().at(-1);
+  assert.deepEqual([last.event_type, last.client_event_seq, last.visibility], ["HEARTBEAT", 3, "visible"]);
+  assert.equal(last.page_handle, HANDLE);
+});
+
+test("a business request that beats the telemetry is never paired with a later heartbeat", async () => {
+  const sensor = harness({ delayBootstrap: true });
+  const booting = sensor.sandbox.XshieldSensor.boot(HANDLE);
+  const early = sensor.app("/orders");
+  sensor.timers.find((timer) => timer.delay === 5000).callback();
+  await early;
+  assert.equal(sensor.observations().length, 0, "the request reached the edge before any telemetry");
+  const [first] = sensor.businessCalls();
+  assert.equal(sensor.reference(first), null, "it falls under the missing-reference rule");
+  const headers = first.init?.headers;
+  assert.deepEqual(
+    headers instanceof Headers ? [...headers.keys()].filter((name) => name.startsWith("x-xshield")) : [],
+    [],
+    "no telemetry handle rides on the business call",
+  );
+
+  sensor.release();
+  await booting;
+  sensor.timers.find((timer) => timer.delay === 15_000).callback();
+  await settle();
+  const events = sensor.observations();
+  assert.deepEqual(events.map((event) => event.event_type), ["PAGE_READY", "HEARTBEAT"]);
+  for (const event of events) {
+    assert.equal(event.client_request_id, null, "telemetry never claims a business request");
+    assert.equal(event.action_hint, null);
+  }
+  // The late bootstrap applies only to calls made after it, never retroactively.
+  await sensor.app("/orders");
+  assert.deepEqual(sensor.businessCalls().map(sensor.reference), [null, PAGE_REF]);
 });
 
 test("harvests list references without consuming the page's body", async () => {

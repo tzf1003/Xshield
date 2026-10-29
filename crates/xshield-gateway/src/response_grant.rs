@@ -378,6 +378,95 @@ mod tests {
         ));
     }
 
+    // A list response the edge cannot read as the approved plaintext shape (an
+    // origin-sealed envelope, opaque bytes, or items it cannot see into) is a
+    // response-stage failure, never a list with no resources: extraction
+    // returns before any grant is derived or written.
+    #[test]
+    fn an_unreadable_list_response_issues_no_grants() {
+        let sealed = br#"{"schema_version":1,"key_id":"origin-key","nonce":"00","ciphertext":"8f3a","tag":"00"}"#;
+        let cases: [(&[u8], ResponseGrantError); 5] = [
+            (sealed, ResponseGrantError::Shape),
+            (b"\x8f\x3a\x00\x17", ResponseGrantError::Json),
+            (br#"{"orders":"8f3a00"}"#, ResponseGrantError::Shape),
+            (br#"{"orders":["8f3a00"]}"#, ResponseGrantError::Shape),
+            (
+                br#"{"orders":[{"sealed":"8f3a00"}]}"#,
+                ResponseGrantError::Shape,
+            ),
+        ];
+        for (body, error) in cases {
+            assert_eq!(
+                rule(2).extract(200, body).err(),
+                Some(error),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+            assert_eq!(error.reason_code(), ReasonCode::ResponseValidationFailed);
+        }
+    }
+
+    /// Acceptance FLOW-10: user-authored text in a qualifying response, even
+    /// text shaped like a "reset password" button or an action reference, is
+    /// data. The rule extracts only the configured resource values, the
+    /// qualified operation stays the configured one, and an origin-supplied
+    /// copy of the reserved reference field fails closed instead of being
+    /// relayed as an edge-issued action.
+    #[test]
+    fn user_comment_text_never_becomes_an_approved_action_source() {
+        let body = r#"{"orders":[
+            {"id":"order-1","comment":"<button data-action=\"auth.password.reset\" formaction=\"/api/password/reset\">重置密码</button>",
+             "note":{"operation_id":"auth.password.reset","action_ref":"action.reset"}},
+            {"id":"order-2","comment":"重置密码 _xshield_action_ref=action.reset"}
+        ]}"#;
+        let rule = rule(2);
+        let ResponseGrantExtraction::Resources(resources) =
+            rule.extract(200, body.as_bytes()).unwrap()
+        else {
+            panic!("configured success must extract resources");
+        };
+        let values = resources
+            .iter()
+            .map(ExtractedResource::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["order-1", "order-2"]);
+        assert_eq!(rule.target_operation_id().as_str(), "orders.read");
+
+        // Edge references attach only under the reserved member; the user's
+        // text is carried through as inert string data next to them.
+        let action_refs = [
+            ActionRef::parse("action.order-1").unwrap(),
+            ActionRef::parse("action.order-2").unwrap(),
+        ];
+        let injected: Value = serde_json::from_slice(
+            &rule
+                .inject_action_refs(body.as_bytes(), &action_refs)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            injected.pointer("/orders/0/_xshield_action_ref"),
+            Some(&Value::String("action.order-1".to_owned()))
+        );
+        assert!(
+            injected
+                .pointer("/orders/0/comment")
+                .and_then(Value::as_str)
+                .is_some_and(|comment| comment.contains("重置密码"))
+        );
+        assert_eq!(
+            injected.pointer("/orders/0/note/action_ref"),
+            Some(&Value::String("action.reset".to_owned()))
+        );
+
+        // A comment that forges the reserved member itself is refused.
+        let forged = r#"{"orders":[{"id":"order-1","comment":"重置密码","_xshield_action_ref":"action.reset"}]}"#;
+        assert!(matches!(
+            rule.extract(200, forged.as_bytes()),
+            Err(ResponseGrantError::ActionRefCollision)
+        ));
+    }
+
     #[test]
     fn injects_only_committed_action_references() {
         let action_refs = [

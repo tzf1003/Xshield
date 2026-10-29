@@ -11,6 +11,14 @@
 //! (denying new sources while the table is full) lets an attacker with many
 //! source addresses lock out every legitimate newcomer, and an evicted bucket
 //! can only belong to a source that had been quiet longer than the others.
+//!
+//! The buckets are per process. Behind a load balancer that keeps each source
+//! on one edge (source-IP affinity, or one replica) the site's limits hold as
+//! written. When a balancer spreads one source over `N` replicas instead, each
+//! replica takes `1/N` of the rate and burst (`XSHIELD_EDGE_RATE_LIMIT_SHARE`),
+//! so the fleet admits about what the policy says rather than `N` times it. A
+//! shared store would be exact but puts a network round trip before every
+//! request, including the floods this limiter exists to absorb.
 
 use std::{
     collections::HashMap,
@@ -77,11 +85,15 @@ impl Shard {
     }
 }
 
+/// Largest replica share accepted for `XSHIELD_EDGE_RATE_LIMIT_SHARE`.
+pub(crate) const MAX_SHARE: u32 = 64;
+
 pub(crate) struct SiteRateLimiter {
-    // ponytail: process-local source buckets; use a shared limiter when edge replicas need one quota.
     shards: Vec<Mutex<Shard>>,
     slots_per_shard: usize,
     hasher: std::collections::hash_map::RandomState,
+    /// How many replicas one source's traffic is spread over; 1 is exact.
+    share: f64,
 }
 
 /// IPv6 sources are metered per /64: one subscriber owns the whole prefix, so
@@ -97,6 +109,16 @@ fn meter_address(address: IpAddr) -> IpAddr {
     }
 }
 
+const SHARE_ERROR: &str = "XSHIELD_EDGE_RATE_LIMIT_SHARE must be a whole number from 1 to 64";
+
+fn parse_share(value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|share| (1..=MAX_SHARE).contains(share) && !value.starts_with('+'))
+        .ok_or_else(|| SHARE_ERROR.to_owned())
+}
+
 impl SiteRateLimiter {
     pub(crate) fn new() -> Self {
         Self::with_capacity(SHARDS, DEFAULT_SLOTS_PER_SHARD)
@@ -109,6 +131,26 @@ impl SiteRateLimiter {
             shards: (0..shards).map(|_| Mutex::new(Shard::default())).collect(),
             slots_per_shard: slots_per_shard.max(1),
             hasher: std::collections::hash_map::RandomState::new(),
+            share: 1.0,
+        }
+    }
+
+    /// The same limiter, enforcing `1/share` of each site's rate and burst.
+    /// A burst is never cut below one request.
+    pub(crate) fn shared_by(mut self, share: u32) -> Self {
+        self.share = f64::from(share.clamp(1, MAX_SHARE));
+        self
+    }
+
+    /// The replica share from `XSHIELD_EDGE_RATE_LIMIT_SHARE` (default 1).
+    ///
+    /// # Errors
+    /// A value that is not a whole number from 1 to [`MAX_SHARE`].
+    pub(crate) fn share_from_env() -> Result<u32, String> {
+        match std::env::var("XSHIELD_EDGE_RATE_LIMIT_SHARE") {
+            Err(std::env::VarError::NotPresent) => Ok(1),
+            Ok(value) => parse_share(&value),
+            Err(std::env::VarError::NotUnicode(_)) => Err(SHARE_ERROR.to_owned()),
         }
     }
 
@@ -130,8 +172,8 @@ impl SiteRateLimiter {
         let key = self.hasher.hash_one((site_id, meter_address(source)));
         let shard_count = u64::try_from(self.shards.len()).unwrap_or(1);
         let shard = usize::try_from(key % shard_count).unwrap_or(0);
-        let rate = f64::from(policy.limits.requests_per_second);
-        let burst = f64::from(policy.limits.burst);
+        let rate = f64::from(policy.limits.requests_per_second) / self.share;
+        let burst = (f64::from(policy.limits.burst) / self.share).max(1.0);
         let mut shard = self.shards[shard]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -208,6 +250,23 @@ mod tests {
         // second even in a debug build; a full-table scan per insert would not
         // scale like this once the table is large. This is a coarse bound only.
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_replica_share_divides_rate_and_burst_but_keeps_one_request() {
+        let limiter = SiteRateLimiter::new().shared_by(4);
+        let allowed = (0..20)
+            .filter(|_| limiter.allow("site_a", Some(source(1)), &policy(1, 12)))
+            .count();
+        assert_eq!(allowed, 3, "12 / 4 replicas");
+        let tiny = SiteRateLimiter::new().shared_by(8);
+        assert!(tiny.allow("site_a", Some(source(2)), &policy(1, 2)));
+        assert!(!tiny.allow("site_a", Some(source(2)), &policy(1, 2)));
+        assert_eq!(parse_share("1"), Ok(1));
+        assert_eq!(parse_share("64"), Ok(64));
+        for invalid in ["0", "65", "", "-1", "+2", "2.5", " 2", "two"] {
+            assert!(parse_share(invalid).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]

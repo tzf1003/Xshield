@@ -350,6 +350,34 @@ mod tests {
         }
     }
 
+    // A frozen or backgrounded page misses heartbeats and resumes later. The
+    // edge holds no liveness expectation, so the gap is neither an invalid
+    // observation nor a refusal signal; each batch is judged on its own.
+    #[test]
+    fn a_page_resuming_after_missed_heartbeats_is_accepted_not_flagged() {
+        let accepted = &crate::ACCEPTED_SENSOR_VERSIONS[..];
+        let mut resumed: serde_json::Value =
+            serde_json::from_slice(&event("VISIBILITY", 2)).unwrap();
+        resumed["events"][0]["visibility"] = "hidden".into();
+        let hidden =
+            SensorObservationBatch::from_json(resumed.to_string().as_bytes(), accepted, BUILD)
+                .unwrap();
+        assert_eq!(
+            hidden.observations()[0].visibility(),
+            SensorVisibility::Hidden
+        );
+        let late = SensorObservationBatch::from_json(
+            &event("HEARTBEAT", MAX_CLIENT_EVENT_SEQUENCE),
+            accepted,
+            BUILD,
+        )
+        .unwrap();
+        let observation = &late.observations()[0];
+        assert_eq!(observation.event_type(), SensorEventType::Heartbeat);
+        assert_eq!(observation.client_event_seq(), MAX_CLIENT_EVENT_SEQUENCE);
+        assert_eq!(observation.client_request_id(), None);
+    }
+
     #[test]
     fn accepts_every_served_version_but_never_a_mixed_batch() {
         let accepted = &crate::ACCEPTED_SENSOR_VERSIONS[..];

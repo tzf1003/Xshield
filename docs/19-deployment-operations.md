@@ -20,6 +20,8 @@ WAF 终止 TLS 并重新验证上游证书，固定 upstream allowlist，不接�
 
 按来源限流和匿名会话来源指纹使用 edge 归属的客户端地址：默认是 TCP 对端；对端属于 `XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED` 时是它在 PROXY 头中声明的源地址。客户端转发头一律不信任。放在未启用 PROXY protocol 的代理或负载均衡之后时，其后的所有客户端仍会被归为同一来源，站点总限流照常生效。
 
+多个 edge 副本：令牌桶在每个 edge 进程内计量。负载均衡按源地址保持亲和（或只有一个副本）时，站点的 `requests_per_second`/`burst` 按原值生效，`XSHIELD_EDGE_RATE_LIMIT_SHARE` 保持默认 1。负载均衡把同一来源轮流分到 N 个副本时，在每个副本上设 `XSHIELD_EDGE_RATE_LIMIT_SHARE=N`（1–64 的整数，其他值拒绝启动）：每个副本只放行 1/N 的速率与突发（突发至少 1 个请求），整组副本合计约等于策略值，而不是 N 倍。副本数变化时需同步调整该值；分流不均时，偏重的副本会比策略更早返回 429。没有跨副本共享计数：共享存储需要在每个请求（包括它要吸收的洪峰）之前做一次网络往返，见 21。
+
 ### 页面签发、动作描述供给与探针 1.1.0
 
 新增网关配置字段（语义见 05 §5.3.1）：`SENSOR_HTML` 响应的 `page_actions: {"mapping_revision": "...", "max_active_pages": 1–1000}`，以及 `UI_ACTION_REQUIRED` 非资源 operation 的 `issued_by: {"page_operation_id": "...", "ttl_seconds": 1–86400}`。没有新增 edge 环境变量；页面签发沿用 `XSHIELD_DATABASE_URL` 与 `identity_store`。worker 新增 `XSHIELD_OUTBOX_FAMILY=ui_action`。

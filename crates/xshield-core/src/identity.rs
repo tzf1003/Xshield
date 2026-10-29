@@ -1069,6 +1069,84 @@ mod tests {
         );
     }
 
+    /// Acceptance AUTH-09: binding proves possession of the complete bound
+    /// credential set, not that the presenter is the device that received it.
+    /// `verify` takes no device, network or client fact, so an exact copy of
+    /// A's WAF session and business credentials yields a snapshot identical to
+    /// the original holder's, and nothing in it can be read as device proof.
+    /// Only a partial copy (A/B splicing) is detected.
+    #[test]
+    fn complete_credential_copy_is_session_possession_not_device_proof() {
+        let binding = binding();
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let session = WafSessionId::parse("ses_018f2a3b-4c5d-7000-8000-000000000002").unwrap();
+        let mut business = credentials(A);
+        business.insert(
+            CredentialSlot::Bearer,
+            CredentialFingerprint::parse(C).unwrap(),
+        );
+        let binding = AuthBinding::new(
+            binding.binding_id().clone(),
+            session.clone(),
+            tenant.clone(),
+            site.clone(),
+            binding.principal_ref(),
+            binding.authorization_context_ref().clone(),
+            binding.epoch(),
+            binding.generation(),
+            business.clone(),
+            binding.absolute_expires_at(),
+        )
+        .unwrap();
+
+        let original = binding
+            .verify(&tenant, &site, &session, &business, UnixSeconds::new(100))
+            .unwrap();
+        // The copy is presented later from wherever the thief runs it; the
+        // inputs are byte-identical because that is all the edge can observe.
+        let copied = binding
+            .verify(
+                &tenant,
+                &site,
+                &session.clone(),
+                &business.clone(),
+                UnixSeconds::new(150),
+            )
+            .unwrap();
+        assert_eq!(copied, original);
+        assert_eq!(binding.status(), BindingStatus::Active);
+        assert_eq!(binding.generation(), CredentialGeneration::new(2));
+
+        // Splicing A's WAF session with another business credential, or
+        // dropping one bound credential, is still refused.
+        let mut spliced = business.clone();
+        spliced.insert(
+            CredentialSlot::Bearer,
+            CredentialFingerprint::parse(B).unwrap(),
+        );
+        assert_eq!(
+            binding.verify(&tenant, &site, &session, &spliced, UnixSeconds::new(150)),
+            Err(IdentityDenied::BindingMismatch)
+        );
+        assert_eq!(
+            binding.verify(
+                &tenant,
+                &site,
+                &session,
+                &credentials(A),
+                UnixSeconds::new(150)
+            ),
+            Err(IdentityDenied::BindingMismatch)
+        );
+        // The only signal a copy hits is the server-side lease, which bounds
+        // exposure time; it is not theft detection.
+        assert_eq!(
+            binding.verify(&tenant, &site, &session, &business, UnixSeconds::new(200)),
+            Err(IdentityDenied::SessionExpired)
+        );
+    }
+
     #[test]
     fn revocation_stops_request_and_response_paths() {
         let mut binding = binding();

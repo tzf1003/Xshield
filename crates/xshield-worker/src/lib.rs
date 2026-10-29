@@ -2122,6 +2122,8 @@ impl From<xshield_postgres::StoreError> for PublishError {
 }
 
 #[cfg(test)]
+mod reason_code_contract;
+#[cfg(test)]
 mod tests {
     use super::{
         AuditEventSummary, Checkpoint, ExistingDigest, IndexRow, MODEL_CALL_ID_PROJECTION,
