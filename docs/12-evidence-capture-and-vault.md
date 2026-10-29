@@ -49,7 +49,7 @@ capture_status：complete、partial_limit、partial_cancelled、unavailable、no
 
 使用 EvidenceReadPort 统一授权：读元数据、读脱敏内容、读敏感原文、导出是不同权限。访问前记审批/目的/范围，访问后记实际对象和字节数。敏感原文的临时访问授权短期有效，不能靠长期公开下载 URL。
 
-当前 `xshield-evidence` 本地 MVP 只接受完整且在配置容量/最长保留期内的单对象写入，整对象硬上限 64 MiB，业务配置只能继续收紧。对象使用随机 nonce 与 artifact 作用域 HMAC 派生数据密钥执行 AES-256-GCM，AAD 绑定 tenant/site/request/artifact/kind 和最终 chunk 标记；typed manifest 另以用途隔离 HMAC 认证。manifest 读取使用库内当前时钟重验私有路径、作用域、期限与 key-id，内容读取额外重验密文摘要和 AEAD。对象先于 manifest 耐久发布，崩溃最多留下不可达孤儿密文，不会产生指向缺失密文的已返回 manifest。同一对象格式也可以存进 S3 兼容存储桶并启用 Object Lock，见 12.10；分块与 KMS 包裹仍待实现。
+当前 `xshield-evidence` 本地 MVP 只接受完整且在配置容量/最长保留期内的单对象写入，整对象硬上限 64 MiB，业务配置只能继续收紧。对象使用随机 nonce 与 artifact 作用域 HMAC 派生数据密钥执行 AES-256-GCM，AAD 绑定 tenant/site/request/artifact/kind 和最终 chunk 标记；typed manifest 另以用途隔离 HMAC 认证。manifest 读取使用库内当前时钟重验私有路径、作用域、期限与 key-id，内容读取额外重验密文摘要和 AEAD。对象先于 manifest 耐久发布，崩溃最多留下不可达孤儿密文，不会产生指向缺失密文的已返回 manifest。同一对象格式也可以存进 S3 兼容存储桶并启用 Object Lock，见 12.10；S3 后端额外支持大对象的 multipart 传输与存储桶侧 SSE-KMS，但两者都是存储层特性，不改变这里的单对象整体 AEAD 信封——12.4 描述的按 chunk 独立加密、manifest 记录逐 chunk 状态的流式设计，以及用 KMS 包裹应用层数据密钥（而不是本地 HMAC 派生），仍未实现。
 
 PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 wire struct 不能进入发布命令。首次发布把显式列与 `evidence.cataloged` outbox 事件原子提交；精确重放返回 existing，同 artifact 绑定不同 manifest 或事件返回 conflict。按 request 查询强制 tenant/site/request 三元组、数据库当前时钟、active/deleted 条件与 128 条上限。catalog 用于检索，内容释放仍必须由 vault 认证对象侧 manifest HMAC、ciphertext digest 与 AEAD，并经过独立 EvidenceReadPort 审批。
 
@@ -138,11 +138,12 @@ hold_until 使用规范 UTC 毫秒（秒为 00–59），创建时按数据库�
 本地证据库只能写在一台主机的私有目录，且只允许一个网关写入（12.7）。`xshield_evidence::S3EvidenceVault` 把同样的加密对象存进 S3 兼容存储桶：密文信封、typed manifest 和 manifest HMAC 与本地逐字节相同，catalog、控制面读取和审批流程不变，只是存储位置不同。
 
 - 对象键：`{前缀}t-{tenant}/s-{site}/{artifact_id}.xev`，另有 `.manifest.json` 与 `.manifest.hmac` 两个侧车。tenant/site 只含 `[A-Za-z0-9_.-]`，`t-`/`s-` 前缀避免出现 `.` 或 `..` 段。键里没有请求内容。
-- 写入：先写密文，再写两个侧车，每次都带 `If-None-Match: *`，已存在的键不会被覆盖，因此多个网关和控制面实例可以写同一个桶，不需要目录锁和单写入者。中途失败只留下不可达的孤儿密文，与本地语义相同。
+- 写入：先写密文，再写两个侧车，每次都带 `If-None-Match: *`，已存在的键不会被覆盖，因此多个网关和控制面实例可以写同一个桶，不需要目录锁和单写入者。中途失败只留下不可达的孤儿密文，与本地语义相同。密文超过 8 MiB 时改走 S3 multipart upload（分 8 MiB 一片，最后一片可更小），完成请求（`CompleteMultipartUpload`）同样带 `If-None-Match: *`，create-only 语义不因分片而改变；任一分片或完成请求失败都会先尝试 `AbortMultipartUpload` 再把错误返回给调用者。S3 后端的单对象上限是 1 GiB（而不是本地/MVP 的 64 MiB），因为桶对象不必像本地一次写入那样整体放进一次写；真正的按 chunk 独立 AEAD（12.4）仍未实现——multipart 只是同一个已整体加密的信封分成多次 HTTP 请求传输。
+- 服务端加密：配置后，每次写入（单次 `PUT` 或 multipart 的 `CreateMultipartUpload`）都带 `x-amz-server-side-encryption: aws:kms`，可选再带显式 KMS key id/alias/ARN；留空则用存储桶自己的默认 KMS key。这是存储桶自己的加密，叠加在本加密证据库自身的 AEAD 信封之上，用于防御存储侧单点失守和满足"桶内数据必须走 KMS"的合规要求；不是把应用层数据密钥交给 KMS 包裹（那部分仍是本地 HMAC 派生，未实现）。
 - Object Lock：配置后，三个对象都以所选模式（`compliance` 或 `governance`）锁定到 manifest 的 `expires_at`。到期前存储桶本身拒绝删除或替换，即使拿到写入凭据也不行；到期后清理才能删除。打开证据库时会探测存储桶：要求锁定但存储桶未开启 Object Lock 或未开启版本控制时拒绝启动。
 - 删除：清理先读回密文并核对摘要，再按读到的那个版本号永久删除，所以开了版本控制的桶不会只加一个删除标记、把到期密文留在旧版本里。锁未到期时删除失败，记为可重试，下一轮再试。
 - 孤儿：按 `ListObjectsV2` 分页列出超过宽限期、且锁已到期的 `.xev`；侧车判断规则与本地相同，单次扫描最多 100000 个键。删除前重新核对大小、修改时间（到秒）和侧车，只删除核对过的版本。
-- 请求：SigV4 签名，报文摘要按实际内容计算；整请求超时 1–300 秒；不读取环境代理，不跟随重定向；默认只允许 `https://`。错误信息不含响应正文和凭据。
+- 请求：SigV4 签名，报文摘要按实际内容计算；整请求超时 1–300 秒，按单次 HTTP 请求计算（multipart 的每个分片、创建与完成请求各自独立计时，不是整个上传过程共用一个超时）；不读取环境代理，不跟随重定向；默认只允许 `https://`。错误信息不含响应正文和凭据。
 - 不在 S3 上的对象：校准报告与 lineage-review 对象仍只存本地。使用 S3 后端的清理轮次跳过这两类，由本地根目录上的 `xshield-evidence-retain` 处理。
 
 配置（网关、控制面与 `xshield-evidence-retain` 读同一组变量，见 docs/19 19.4）：
@@ -156,6 +157,8 @@ hold_until 使用规范 UTC 毫秒（秒为 00–59），创建时按数据库�
 | `XSHIELD_EVIDENCE_S3_PREFIX` | 可选，空或以 `/` 结尾的若干段 |
 | `XSHIELD_EVIDENCE_S3_ADDRESSING` | `path`（默认，自建服务通常需要）或 `virtual-hosted` |
 | `XSHIELD_EVIDENCE_S3_OBJECT_LOCK` | 必填：`compliance`、`governance` 或 `off` |
+| `XSHIELD_EVIDENCE_S3_SSE_KMS` | 可选，默认 `off`；`aws-kms` 时每次写入都请求存储桶侧 SSE-KMS |
+| `XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID` | 可选，仅在 `XSHIELD_EVIDENCE_S3_SSE_KMS=aws-kms` 时允许设置；显式 KMS key id/alias/ARN，留空用存储桶默认 KMS key |
 | `XSHIELD_EVIDENCE_S3_ALLOW_PLAIN_HTTP` | `true` 时允许 `http://` 端点，仅用于可信网络；对象本身仍加密，但键和元数据不加密 |
 | `XSHIELD_EVIDENCE_S3_REQUEST_TIMEOUT_SECONDS` | 默认 30，范围 1–300 |
 | `XSHIELD_EVIDENCE_S3_ACCESS_KEY_ID`、`XSHIELD_EVIDENCE_S3_SECRET_ACCESS_KEY` | 签名凭据，可用 `_FILE` 形式（19.3） |
@@ -163,7 +166,17 @@ hold_until 使用规范 UTC 毫秒（秒为 00–59），创建时按数据库�
 
 S3 后端下网关不再计算本地配额，`/metrics` 也不输出 `xshield_edge_evidence_capacity_remaining_*`，容量由存储桶配额负责；`XSHIELD_EVIDENCE_MAX_TOTAL_BYTES` 与 `XSHIELD_EVIDENCE_ROOT` 不再需要。网关内置清理（12.8）与 `xshield-evidence-retain` 都可在网关运行时执行，S3 后端下后者不取目录锁。
 
-验证：`cargo test -p xshield-evidence --lib s3_minio -- --ignored` 对真实 MinIO 运行（CI `object-storage` 作业），覆盖：锁定对象在到期前被存储桶拒绝删除，到期后清理删除已核对的版本，且该版本确实不存在；未开启锁的桶在要求锁定时拒绝启动，错误密钥被拒绝；篡改密文与 manifest 被识别；孤儿列出、分页、核对与删除，未完成侧车与未到期锁定的对象不被列出。SigV4 实现另有 AWS 文档签名样例的单测。
+验证：`cargo test -p xshield-evidence --lib s3_minio -- --ignored` 对真实 MinIO 运行（CI `object-storage` 作业，MinIO 启动时带一个临时单密钥 KMS 用于 SSE-KMS 用例），覆盖：锁定对象在到期前被存储桶拒绝删除，到期后清理删除已核对的版本，且该版本确实不存在；未开启锁的桶在要求锁定时拒绝启动，错误密钥被拒绝；篡改密文与 manifest 被识别；孤儿列出、分页、核对与删除，未完成侧车与未到期锁定的对象不被列出；超过 multipart 阈值的大对象走分片上传、读回内容一致，且 multipart 完成请求同样拒绝覆盖已有键；SSE-KMS 配置后存储桶 HEAD 确实报告 `x-amz-server-side-encryption: aws:kms`（小对象单次 `PUT` 与大对象 multipart 两条路径都覆盖）。SigV4 实现另有 AWS 文档签名样例的单测。
 
-**未覆盖**：AWS S3 本身及其他兼容服务（只测了 MinIO）；KMS 包裹的数据密钥与服务端加密配置；分块和大于 64 MiB 的对象；存储桶默认保留策略与我们写入的保留期冲突时的行为；跨区域复制。
+**未覆盖**：AWS S3 本身及其他兼容服务（只测了 MinIO）；用 KMS 包裹应用层数据密钥本身（当前仍是本地 HMAC 派生，SSE-KMS 只加密存储桶里的字节）；12.4 描述的按 chunk 独立 AEAD 加密与逐 chunk manifest（multipart 只是同一个整体信封的传输优化）；大于 1 GiB 的对象；存储桶默认保留策略与我们写入的保留期冲突时的行为；跨区域复制。
+
+## 12.11 已实现：本地证据迁移到 S3
+
+切换 `XSHIELD_EVIDENCE_BACKEND=s3`（12.10）本身不迁移本地根目录上已有的对象：网关、控制面和清理都立即改读存储桶，旧对象仍躺在本地目录，只能等各自 `expires_at` 到期后由仍指向该目录的 `xshield-evidence-retain`（12.8）清理掉（docs/19 19.4）。`xshield-worker` 的 `xshield-evidence-migrate` 命令补上这一步：在切换前把尚未到期的本地对象原样复制进目标桶，不必等待自然过期。
+
+- 用法：`xshield-evidence-migrate [BATCH_LIMIT]`（默认 32，1–256），读 `XSHIELD_EVIDENCE_ROOT` 作为迁移源、这里的 S3 配置表作为目的地，`XSHIELD_EVIDENCE_KEY_ID`/`XSHIELD_EVIDENCE_KEY_HEX` 两侧共用（迁移只搬运既有密文，不重新加密，源和目的地的根密钥必须是同一个）。命令本身不连数据库：catalog 的 artifact ID 和 manifest 与存储后端无关，物理对象搬到哪个后端都不用改写任何 catalog 行。
+- 范围：只迁移完整、已认证、尚未过期的通用证据对象（密文连同 `.manifest.json`、`.manifest.hmac` 两个侧车都存在且可用根密钥认证）；校准报告与 lineage-review 对象（12.10 “不在 S3 上的对象”）、残缺侧车和已过期对象一律跳过，留给本地清理按既有流程处理——过期对象在任何后端都已读不出来，搬不搬不影响可读性。
+- 可重入、可校验：目的地的每次写入都带 `If-None-Match: *`，已经迁移过的 artifact 第二次运行只是确认性空操作（`EvidenceMigrationOutcome::AlreadyMigrated`）；每个 artifact 写完后立即原样读回目的地 manifest 并与本地读到的逐字段比较，核对一致才算完成。命令按 artifact ID 游标分页扫描整座本地库，中途失败、被打断或重启后可以直接重新执行同一条命令，已迁移的对象会被安全跳过，不会重复计费或留下部分对象。源密钥与目的地密钥不一致时直接拒绝，不读取任何本地文件。
+- 不做的事：不读取或改写任何本地文件（只读源目录），不触碰 Postgres，不删除已迁移的本地对象——本地清理按原计划继续运行，直到本地根目录自然清空为止；需要跨桶 KMS 包裹密钥或分块上传的证据超出当前范围（见 12.10 “未覆盖”）。
+- 验证：`cargo test -p xshield-evidence --lib s3_minio -- --ignored` 同一 CI 作业覆盖该命令底层的 `S3EvidenceVault::migrate_from_local`：原样复制并在目标桶按配置的 Object Lock 模式锁定、重复调用幂等、密钥不匹配拒绝、篡改的本地 HMAC 不留下部分复制、已过期对象拒绝迁移。
 

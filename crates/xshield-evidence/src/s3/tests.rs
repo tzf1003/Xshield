@@ -1,6 +1,6 @@
 use super::*;
-use crate::{EvidenceClassification, EvidenceFidelity};
-use std::{env, thread};
+use crate::{EvidenceClassification, EvidenceFidelity, EvidenceVaultConfig};
+use std::{env, fs, path::PathBuf, thread};
 use uuid::Uuid;
 use xshield_core::domain::RequestId;
 
@@ -19,6 +19,7 @@ fn settings(endpoint: &str) -> S3EvidenceStoreSettings<'_> {
         addressing: S3Addressing::Path,
         credentials: credentials(),
         object_lock: None,
+        sse_kms: None,
         allow_plain_http: false,
         request_timeout: Duration::from_secs(10),
     }
@@ -88,6 +89,48 @@ fn config_rejects_unsafe_endpoints_and_names() {
     );
 }
 
+#[test]
+fn config_validates_sse_kms_key_id() {
+    let bucket_default = S3EvidenceStoreSettings {
+        sse_kms: Some(S3SseKms { key_id: None }),
+        ..settings("https://s3.example.test")
+    };
+    assert!(S3EvidenceStoreConfig::new(bucket_default).is_ok());
+    let named_key = S3EvidenceStoreSettings {
+        sse_kms: Some(S3SseKms {
+            key_id: Some("arn:aws:kms:us-east-1:111122223333:key/my-key".to_owned()),
+        }),
+        ..settings("https://s3.example.test")
+    };
+    assert!(S3EvidenceStoreConfig::new(named_key).is_ok());
+    for key_id in ["", "a\tb", &"a".repeat(SSE_KMS_KEY_ID_BYTES_MAX + 1)] {
+        let settings = S3EvidenceStoreSettings {
+            sse_kms: Some(S3SseKms {
+                key_id: Some(key_id.to_owned()),
+            }),
+            ..settings("https://s3.example.test")
+        };
+        assert!(S3EvidenceStoreConfig::new(settings).is_err(), "{key_id:?}");
+    }
+}
+
+#[test]
+fn open_rejects_artifact_ceiling_before_any_network_call() {
+    // No real endpoint is reachable here; a ceiling violation must be
+    // caught before the bucket probe that would otherwise need one.
+    let store = S3EvidenceStoreConfig::new(settings("https://s3.example.test")).unwrap();
+    assert!(matches!(
+        S3EvidenceVault::open(
+            store,
+            "evidence-test",
+            S3_MAX_ARTIFACT_BYTES + 1,
+            1,
+            EvidenceKey::from_hex(KEY_HEX).unwrap(),
+        ),
+        Err(EvidenceError::InvalidConfig)
+    ));
+}
+
 // The tests below need an S3-compatible service; CI runs them against MinIO:
 //   XSHIELD_TEST_S3_ENDPOINT=http://127.0.0.1:9000 \
 //   XSHIELD_TEST_S3_ACCESS_KEY_ID=... XSHIELD_TEST_S3_SECRET_ACCESS_KEY=... \
@@ -98,6 +141,9 @@ struct Minio {
     endpoint: String,
     access_key_id: String,
     secret_access_key: String,
+    /// Name of the single-key KMS key `MinIO`'s own CI container is started
+    /// with; `None` outside CI's SSE-KMS tests.
+    sse_kms_key_id: Option<String>,
 }
 
 impl Minio {
@@ -108,10 +154,16 @@ impl Minio {
                 .expect("XSHIELD_TEST_S3_ACCESS_KEY_ID"),
             secret_access_key: env::var("XSHIELD_TEST_S3_SECRET_ACCESS_KEY")
                 .expect("XSHIELD_TEST_S3_SECRET_ACCESS_KEY"),
+            sse_kms_key_id: env::var("XSHIELD_TEST_S3_SSE_KMS_KEY_ID").ok(),
         }
     }
 
-    fn config(&self, bucket: &str, object_lock: Option<S3ObjectLockMode>) -> S3EvidenceStoreConfig {
+    fn config(
+        &self,
+        bucket: &str,
+        object_lock: Option<S3ObjectLockMode>,
+        sse_kms: Option<S3SseKms>,
+    ) -> S3EvidenceStoreConfig {
         S3EvidenceStoreConfig::new(S3EvidenceStoreSettings {
             endpoint: &self.endpoint,
             region: "us-east-1",
@@ -125,6 +177,7 @@ impl Minio {
             )
             .unwrap(),
             object_lock,
+            sse_kms,
             allow_plain_http: true,
             request_timeout: Duration::from_secs(10),
         })
@@ -134,7 +187,7 @@ impl Minio {
     /// Creates a fresh bucket and returns its name.
     fn bucket(&self, object_lock: bool) -> String {
         let name = format!("xshield-test-{}", Uuid::now_v7().simple());
-        S3Client::new(self.config(&name, None))
+        S3Client::new(self.config(&name, None, None))
             .create_bucket(object_lock)
             .unwrap();
         name
@@ -142,7 +195,7 @@ impl Minio {
 
     fn vault(&self, bucket: &str, object_lock: Option<S3ObjectLockMode>) -> S3EvidenceVault {
         S3EvidenceVault::open(
-            self.config(bucket, object_lock),
+            self.config(bucket, object_lock, None),
             "evidence-test",
             1024 * 1024,
             1,
@@ -151,8 +204,24 @@ impl Minio {
         .unwrap()
     }
 
+    /// A vault that also asks the bucket for SSE-KMS on every write, using
+    /// the key CI's `MinIO` container is configured with.
+    fn vault_with_sse_kms(&self, bucket: &str) -> S3EvidenceVault {
+        let sse_kms = Some(S3SseKms {
+            key_id: self.sse_kms_key_id.clone(),
+        });
+        S3EvidenceVault::open(
+            self.config(bucket, None, sse_kms),
+            "evidence-test",
+            1024 * 1024 * 1024,
+            1,
+            EvidenceKey::from_hex(KEY_HEX).unwrap(),
+        )
+        .unwrap()
+    }
+
     fn client(&self, bucket: &str) -> S3Client {
-        S3Client::new(self.config(bucket, None))
+        S3Client::new(self.config(bucket, None, None))
     }
 }
 
@@ -198,6 +267,47 @@ fn object_key(scope: &Scope, name: &str) -> String {
         scope.tenant.as_str(),
         scope.site.as_str()
     )
+}
+
+fn local_temp_directory() -> PathBuf {
+    let root = env::temp_dir().join(format!("xshield-evidence-migrate-test-{}", Uuid::now_v7()));
+    fs::create_dir(&root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    root
+}
+
+fn local_vault(root: &std::path::Path, key_id: &str) -> LocalEvidenceVault {
+    LocalEvidenceVault::open(
+        EvidenceVaultConfig::new(root, key_id, 1024 * 1024, 1).unwrap(),
+        EvidenceKey::from_hex(KEY_HEX).unwrap(),
+    )
+    .unwrap()
+}
+
+fn local_write(
+    vault: &LocalEvidenceVault,
+    scope: &Scope,
+    plaintext: &[u8],
+    expires_at: DateTime<Utc>,
+) -> VerifiedEvidenceManifest {
+    vault
+        .write(&EvidenceWrite {
+            tenant_id: &scope.tenant,
+            site_id: &scope.site,
+            request_id: &scope.request,
+            kind: "http.request.body.v1",
+            content_type: "application/json",
+            fidelity: EvidenceFidelity::EntityExact,
+            classification: EvidenceClassification::Sensitive,
+            parent_refs: &[],
+            expires_at,
+            plaintext,
+        })
+        .unwrap()
 }
 
 #[test]
@@ -283,7 +393,7 @@ fn s3_minio_open_fails_closed_without_bucket_lock() {
     let bucket = minio.bucket(false);
     assert!(matches!(
         S3EvidenceVault::open(
-            minio.config(&bucket, Some(S3ObjectLockMode::Compliance)),
+            minio.config(&bucket, Some(S3ObjectLockMode::Compliance), None),
             "evidence-test",
             1024,
             1,
@@ -293,7 +403,7 @@ fn s3_minio_open_fails_closed_without_bucket_lock() {
     ));
     assert!(
         S3EvidenceVault::open(
-            minio.config("xshield-test-missing-bucket", None),
+            minio.config("xshield-test-missing-bucket", None, None),
             "evidence-test",
             1024,
             1,
@@ -314,6 +424,7 @@ fn s3_minio_open_fails_closed_without_bucket_lock() {
         )
         .unwrap(),
         object_lock: None,
+        sse_kms: None,
         allow_plain_http: true,
         request_timeout: Duration::from_secs(10),
     })
@@ -539,4 +650,203 @@ fn s3_minio_lists_and_purges_orphans_but_skips_locked_ones() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+#[ignore = "needs an S3-compatible service (XSHIELD_TEST_S3_ENDPOINT)"]
+fn s3_minio_migrates_local_evidence_idempotently_and_locks_the_copy() {
+    let minio = Minio::from_env();
+    let bucket = minio.bucket(true);
+    let destination = minio.vault(&bucket, Some(S3ObjectLockMode::Governance));
+    let client = minio.client(&bucket);
+    let root = local_temp_directory();
+    let local = local_vault(&root, "evidence-test");
+    let scope = scope();
+    let expires_at = Utc::now() + chrono::TimeDelta::hours(1);
+    let written = local_write(&local, &scope, b"{\"card\":\"4111\"}", expires_at);
+    let artifact_id = written.manifest().artifact_id.clone();
+
+    assert_eq!(
+        destination
+            .migrate_from_local(&local, &artifact_id)
+            .unwrap(),
+        EvidenceMigrationOutcome::Migrated
+    );
+    assert_eq!(
+        destination
+            .read_content(&scope.tenant, &scope.site, &artifact_id)
+            .unwrap()
+            .as_slice(),
+        b"{\"card\":\"4111\"}"
+    );
+    assert_eq!(
+        destination
+            .read_manifest(&scope.tenant, &scope.site, &artifact_id)
+            .unwrap()
+            .manifest(),
+        written.manifest()
+    );
+    // The migration tool only ever reads the local vault.
+    assert!(
+        local
+            .read_content(&scope.tenant, &scope.site, &artifact_id)
+            .is_ok()
+    );
+    // The bucket locks a migrated object exactly as it would a direct write.
+    let head = client
+        .head(&object_key(&scope, &written.manifest().storage.locator))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        head.retain_until
+            .map(|until| until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        Some(expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    );
+
+    // Re-running the same migration is a safe, verified no-op.
+    assert_eq!(
+        destination
+            .migrate_from_local(&local, &artifact_id)
+            .unwrap(),
+        EvidenceMigrationOutcome::AlreadyMigrated
+    );
+    assert!(matches!(
+        destination.migrate_from_local(&local, "artifact_018f2a3b-4c5d-7000-8000-000000000001"),
+        Err(EvidenceError::NotAvailable)
+    ));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "needs an S3-compatible service (XSHIELD_TEST_S3_ENDPOINT)"]
+fn s3_minio_migration_rejects_mismatched_keys_tampering_and_expired_objects() {
+    let minio = Minio::from_env();
+    let bucket = minio.bucket(false);
+    let destination = minio.vault(&bucket, None);
+    let root = local_temp_directory();
+    let local = local_vault(&root, "evidence-test");
+    let scope = scope();
+
+    // A destination opened under a different key id refuses outright.
+    let mismatched_key = S3EvidenceVault::open(
+        minio.config(&bucket, None, None),
+        "a-different-key",
+        1024 * 1024,
+        1,
+        EvidenceKey::from_hex(KEY_HEX).unwrap(),
+    )
+    .unwrap();
+    let live = local_write(
+        &local,
+        &scope,
+        b"live",
+        Utc::now() + chrono::TimeDelta::hours(1),
+    );
+    let live_id = live.manifest().artifact_id.clone();
+    assert!(matches!(
+        mismatched_key.migrate_from_local(&local, &live_id),
+        Err(EvidenceError::InvalidConfig)
+    ));
+
+    // A locally tampered manifest HMAC is never copied into the bucket.
+    let hmac_path = root.join(format!("{live_id}.manifest.hmac"));
+    let original_hmac = fs::read(&hmac_path).unwrap();
+    let mut tampered_hmac = original_hmac.clone();
+    tampered_hmac[0] ^= 1;
+    fs::write(&hmac_path, &tampered_hmac).unwrap();
+    assert!(matches!(
+        destination.migrate_from_local(&local, &live_id),
+        Err(EvidenceError::CorruptEvidence)
+    ));
+    fs::write(&hmac_path, &original_hmac).unwrap();
+    assert!(
+        destination
+            .load_authenticated_manifest(&scope.tenant, &scope.site, &live_id)
+            .unwrap()
+            .is_none(),
+        "the tampered attempt must not have left a partial copy"
+    );
+
+    // An already-expired local object is left for local retention, not copied.
+    let expiring = local_write(
+        &local,
+        &scope,
+        b"expiring",
+        Utc::now() + chrono::TimeDelta::seconds(2),
+    );
+    let expiring_id = expiring.manifest().artifact_id.clone();
+    thread::sleep(Duration::from_millis(2100));
+    assert!(matches!(
+        destination.migrate_from_local(&local, &expiring_id),
+        Err(EvidenceError::NotAvailable)
+    ));
+    assert!(
+        destination
+            .load_authenticated_manifest(&scope.tenant, &scope.site, &expiring_id)
+            .unwrap()
+            .is_none()
+    );
+
+    // The untampered live object still migrates cleanly afterward.
+    assert_eq!(
+        destination.migrate_from_local(&local, &live_id).unwrap(),
+        EvidenceMigrationOutcome::Migrated
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "needs an S3-compatible service (XSHIELD_TEST_S3_ENDPOINT)"]
+fn s3_minio_multipart_and_sse_kms_round_trip_refuses_overwrite() {
+    let minio = Minio::from_env();
+    let bucket = minio.bucket(false);
+    let vault = minio.vault_with_sse_kms(&bucket);
+    let client = minio.client(&bucket);
+    let scope = scope();
+    let expires_at = Utc::now() + chrono::TimeDelta::hours(1);
+
+    // Well above `client::MULTIPART_THRESHOLD_BYTES`, so this round trip
+    // only passes through a multipart upload, combined here with the
+    // bucket's own SSE-KMS.
+    let plaintext = vec![0x5au8; 10 * 1024 * 1024];
+    let written = write(&vault, &scope, &plaintext, expires_at);
+    let manifest = written.manifest();
+    let artifact_id = manifest.artifact_id.as_str();
+
+    assert_eq!(
+        vault
+            .read_content(&scope.tenant, &scope.site, artifact_id)
+            .unwrap()
+            .as_slice(),
+        plaintext.as_slice()
+    );
+
+    let key = object_key(&scope, &manifest.storage.locator);
+    let head = client.head(&key).unwrap().unwrap();
+    assert_eq!(head.bytes, plaintext.len() as u64 + 29);
+    assert_eq!(head.server_side_encryption.as_deref(), Some("aws:kms"));
+
+    // A multipart upload completes create-only exactly like a single `PUT`.
+    assert!(matches!(
+        client.put_new(&key, &plaintext, expires_at),
+        Err(EvidenceError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+}
+
+#[test]
+#[ignore = "needs an S3-compatible service (XSHIELD_TEST_S3_ENDPOINT)"]
+fn s3_minio_sse_kms_applies_to_small_single_put_objects_too() {
+    let minio = Minio::from_env();
+    let bucket = minio.bucket(false);
+    let vault = minio.vault_with_sse_kms(&bucket);
+    let client = minio.client(&bucket);
+    let scope = scope();
+    let expires_at = Utc::now() + chrono::TimeDelta::hours(1);
+
+    let written = write(&vault, &scope, b"small", expires_at);
+    let manifest = written.manifest();
+    let key = object_key(&scope, &manifest.storage.locator);
+    let head = client.head(&key).unwrap().unwrap();
+    assert_eq!(head.server_side_encryption.as_deref(), Some("aws:kms"));
 }

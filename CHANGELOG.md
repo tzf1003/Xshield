@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- 本地证据迁移到 S3（docs/12 12.11、docs/19 19.4）：S3 证据存储（P2 #10）落地后，切换 `XSHIELD_EVIDENCE_BACKEND=s3` 不迁移已有对象，旧对象只能等各自到期由仍指向本地目录的 `xshield-evidence-retain` 清理；此前没有工具能在切换前主动把它们搬过去。
+  - 新增 `xshield-worker` 的 `xshield-evidence-migrate [BATCH_LIMIT]` 命令：按 artifact ID 游标分页扫描本地根目录，把完整、已认证、尚未过期的通用证据对象原样复制进配置的 S3 桶（密文与两个侧车逐字节不变，按配置的 Object Lock 模式锁定到同一个 `expires_at`）；不连数据库，不删除或改写任何本地文件。
+  - `xshield-evidence` 新增 `LocalEvidenceVault::list_generic_artifact_ids_after`（不需要预先知道 tenant/site 即可分页枚举完整对象，跳过校准报告与 lineage-review 专用对象族）与 `S3EvidenceVault::migrate_from_local`；目的地写入全部 `If-None-Match: *`，已迁移的 artifact 重新运行是确认性空操作（`EvidenceMigrationOutcome::AlreadyMigrated`），写完立即原样读回核对，源/目的地密钥不一致直接拒绝。已过期的本地对象一律跳过，留给本地清理处理。
+  - 回归：`xshield-evidence` 新增分页/过滤单测；2 个真实 MinIO 集成测试并入既有 `object-storage` CI 作业（迁移并锁定、重复调用幂等；密钥不匹配拒绝、篡改的本地 HMAC 不留下部分复制、已过期对象拒绝迁移）。
+  - **未覆盖**：不迁移校准报告与 lineage-review 对象（12.10“不在 S3 上的对象”）；不支持跨桶 KMS 包裹密钥或分块上传；没有进度持久化，大型本地库的单次运行时长随对象数线性增长。
+
+- 新建站点向导补上观察模式入口（docs/32 32.6 第 4 步，docs/30 的五步向导设计）：此前“入口与模式”步骤没有上线模式选项，新站点只能先按强制创建，再到已保存站点的“策略”页另外切换到观察，多一轮保存。
+  - 向导“入口与模式”步骤接入既有的“上线模式”卡片（`RolloutCard`），与站点详情页“策略”标签共用同一张卡片、同一套校验（`sites/model/rollout.ts` 的 `rolloutProblems`）：可以在创建时直接选择观察并填写截止时间、观察标签与提前单独强制的路由，观察标签留空、截止时间超出 30 天或引用不存在的路由时该步骤即被拦住，与已有站点编辑的报错一致。校验结果与复核页新增“上线模式”行，默认仍是强制,不改变任何默认值或服务端校验。
+  - 回归：`tests/site-wizard.spec.ts` 新增一条端到端用例，覆盖向导内切到观察、标签必填校验、切回强制后观察字段消失、复核页展示观察截止时间；既有的 390px 布局与明暗主题无障碍用例覆盖了新卡片插入后的页面。
+  - **未覆盖**：`docs/32` 的其余条目（审计契约、核心模型与风险令牌、edge 判定转发、退出报告、审批记录摘要、apply_direct 豁免拒绝）此前已实现，本次未改动；本条目只补齐向导入口。
+
+- Helm chart 高可用：edge+control 多副本 + 控制面收敛回放（docs/24 ADR-014、docs/19 19.9.1）：此前 Helm chart 把 edge、control 与两组 journal 封存/发布任务固定在单副本 StatefulSet 的同一个 Pod 里，该 Pod 是单点故障。调研确认 journal 封存/发布（幂等重放）与 outbox 发布（PostgreSQL 行级租约）本来就支持多副本并发，不需要新增 leader election 或外部协调服务；真正缺的是 edge+control 的配置收敛机制。
+  - `values.yaml` 新增 `replicaCount`（默认仍是 **1**，StatefulSet 从固定 1 变为可配置，但默认值不变）与 `outbox.replicaCount`（同样默认 1，放开 outbox Deployment 的副本数）：每个副本仍是一套独立的 edge+control+journal 任务+PVC，loopback 耦合和安全边界不变。新增 `deploy/helm/xshield/values-ha.yaml`：一个可选叠加层（`-f values.yaml -f values-ha.yaml`），把两者都设为 2 并随之打开下面的 PodDisruptionBudget 与默认反亲和；**`helm upgrade` 不叠加这个文件时，副本数与资源占用与升级前完全一致**，不会悄悄扩容既有安装。
+  - `xshield-control` 新增常驻收敛回放任务：按 `XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS`（Helm 的 `jobs.reconcileIntervalSeconds`，默认 30 秒）周期性重新计算当前已批准的完整站点配置并重放给本地 edge，复用既有的 `apply_site_snapshot`/幂等 apply 协议；配置未变时是一次快速空操作。环境变量未设置时行为与此前完全一致（apply 只在写请求时触发一次）。`xshield_control::routers()` 相应改为同时返回共享的 `Arc<ControlPlane>`，供 `main.rs` 把这个任务和路由绑在同一个控制面状态上。
+  - 新增 `poddisruptionbudget-core.yaml`/`poddisruptionbudget-outbox.yaml`：对应副本数 > 1 时渲染 `maxUnavailable: 1` 的 PodDisruptionBudget，副本数为 1 时不渲染。`xshield.podSecurity` 这个共享模板现在按 `(root, component, replicas)` 取参：未显式设置 `.Values.affinity` 且副本数 > 1 时，给出一个按 `kubernetes.io/hostname` 分散的默认软反亲和（`preferredDuringSchedulingIgnoredDuringExecution`），单节点集群（kind）仍能调度全部副本；显式设置 `.Values.affinity` 时完全按原样传递，行为不变。
+  - 回归：CI 的 `helm` 作业（lint/kubeconform 渲染校验与 `scripts/test_helm_deployment.sh` 的 kind 冒烟）都叠加 `values-ha.yaml`，用两个副本验证：各自独立达到就绪、两个 control 进程通过共享 PostgreSQL 看到同一个站点、删除一个副本期间 Service 仍能通过另一个副本应答、恢复的副本在原持久卷上重新就绪、两个副本各自的 journal 封存/发布心跳与两个 outbox 副本的十个家族心跳均新鲜、全程没有容器因收敛任务的常态空操作而重启。
+  - **未覆盖**：按副本粒度的收敛可观测性（现有 desired/active 状态位仍是"至少一个 edge 已收敛"的全局状态，见 docs/23）；跨 Region/跨故障域（docs/19 19.6 维持原状）；Compose 与 systemd 两种参考部署仍是单机，本次 HA 范围只覆盖 Kubernetes/Helm；KMS 通用密钥管理集成不在本次范围内。
+
+- S3 证据存储：存储桶侧 SSE-KMS 与大对象 multipart 上传（docs/12 12.10、docs/19 19.4）：此前 S3 后端（#44）只测过 MinIO 的基础对象操作，未覆盖服务端加密配置，且单对象硬上限与本地后端共用的 64 MiB。
+  - 新增可选 `XSHIELD_EVIDENCE_S3_SSE_KMS`（`off`/`aws-kms`）与 `XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID`：开启后每次写入都带 `x-amz-server-side-encryption: aws:kms`，可选显式 KMS key id，留空用存储桶默认 key。这是存储桶自己的加密，叠加在证据库自身的 AEAD 信封之上，不是把应用层数据密钥交给 KMS 包裹。
+  - 密文超过 8 MiB 时改走 S3 multipart upload（`CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload`），分 8 MiB 一片；完成请求同样带 `If-None-Match: *`，create-only 语义不因分片而改变，任一步失败都先 `AbortMultipartUpload` 再把错误上抛。S3 后端的单 artifact 上限随之从 64 MiB 提到 1 GiB（本地后端不变，仍是 64 MiB），因为桶对象不必像本地一次写入那样整体放进一次 HTTP 请求。
+  - 不改变已有行为：两个新变量都是可选的，不设置时 SSE 与 multipart 阈值均不生效（小对象仍走此前的单次 `PUT`）；Object Lock、create-only、孤儿扫描与清理语义不变。
+  - 回归：配置校验新增 KMS key id 合法性与上限前置检查的单测；真实 MinIO 集成测试新增大对象 multipart 往返（含拒绝覆盖）与 SSE-KMS 往返（单次 `PUT`、multipart 各一个用例，HEAD 核对存储桶确实报告 `aws:kms`），CI `object-storage` 作业的 MinIO 启动时新增一个仅本次运行使用的临时单密钥 KMS。
+  - **未覆盖**：用 KMS 包裹应用层数据密钥本身（仍是本地 HMAC 派生）；12.4 描述的按 chunk 独立 AEAD 与逐 chunk manifest（multipart 只是同一整体信封的传输优化）；大于 1 GiB 的对象；AWS S3 本身和其他兼容服务。
+
 - Edge 附加证书的增删免重启（docs/19 19.2“Edge 传输配置”）：此前 `XSHIELD_EDGE_TLS_SNI_CERTS` 在启动时固定，新增或删除一项仍需重启；内容变化的热加载已有（见下方“Edge TLS 证书热加载与按 SNI 多证书”条目），缺口只在增删本身。
   - 新增 `XSHIELD_EDGE_TLS_SNI_CERTS_DIR`：一个目录，每个直接子目录是一对附加证书，恰好含 `tls.crt` 与 `tls.key`（Kubernetes `kubernetes.io/tls` secret 挂载的文件名）；子目录名字不参与证书选择，只是标识。与证书内容轮换走同一个每 30 秒的检查：创建或删除一个子目录即可增删一张证书，下次检查生效，不必重启；子目录内文件的校验规则（可读、普通文件、不超过 1 MiB、私钥权限、证书当前有效、私钥匹配、叶证书至少一个 DNS 名）与固定列表相同，与固定列表、与主证书的主机名重复同样拒绝。目录不存在、不可列出或不是目录拒绝启动；运行中目录变得不可列出则整组证书保持不变，计入 `tls_reload_failures`，下次目录可列出时重试。
   - `XSHIELD_EDGE_TLS_SNI_CERTS` 本身仍需同时设置主证书才能使用，增删其中一项仍需重启；两种来源可以同时使用，证书计数、健康字段与指标不区分来源。
@@ -15,7 +40,7 @@
   - 网关写入、控制面读取与清理（网关内置和 `xshield-evidence-retain`）通过 `XSHIELD_EVIDENCE_BACKEND=s3` 与 `XSHIELD_EVIDENCE_S3_*` 切换；不设置时行为不变。新增 `EvidenceVault` 统一两种后端；清理轮次的校准两类对象只在本地后端执行。
   - 新依赖 `ureq` 3.5（MIT OR Apache-2.0，`default-features = false`，只开 `rustls`），用于同步的 S3 请求；新增传递依赖 `ureq-proto`、`utf8-zero`（均 MIT OR Apache-2.0），其余（rustls、webpki-roots、http、base64）已在依赖树中。SigV4 自行实现，未引入 AWS SDK。更新随 `cargo deny` 与依赖审查。
   - 回归：SigV4 用 AWS 文档的三个签名样例单测；配置与环境变量解析单测；4 个真实 MinIO 集成测试，CI 新增 `object-storage` 作业（MinIO 镜像固定 digest）。
-  - **未覆盖**：AWS S3 本身和其他兼容服务；KMS 包裹密钥；分块与大对象；本地到 S3 的存量迁移；Helm 与 Compose 参考部署未加 S3 配置。
+  - **未覆盖**：AWS S3 本身和其他兼容服务；KMS 包裹密钥；分块与大对象；Helm 与 Compose 参考部署未加 S3 配置。本地到 S3 的存量迁移现由 `xshield-evidence-migrate` 提供，见下一项。
 
 - 控制台“拒绝与覆盖统计”页（docs/29 29.39）：上一项拒绝与覆盖统计只有接口，控制台没有入口。
   - 新增 `/investigation/coverage`（导航“流量与调查 › 拒绝与覆盖”，Observer 可见），按 UTC 时间窗（1 小时、24 小时、7 天或自定义，最多 31 天）按需生成统计：总计数与拒绝占比、按路由的流量与拒绝率、按路由与原因的拒绝、未覆盖端点的方法与路径形状，以及索引观察时间、报告摘要与截断说明。索引有缺口或待发布段时提示“不足以判断”，窗口内无流量时不给结论。

@@ -1,7 +1,10 @@
 {{- $name := include "xshield.fullname" . -}}
 # One resident publisher per transactional outbox family (docs/13). They only
 # talk to PostgreSQL and ClickHouse, and claims are leased, so this pod is
-# independent of the edge/control pod and may be rolled at any time.
+# independent of the edge/control pod and may be rolled at any time; the
+# same lease means outbox.replicaCount may be more than 1 with no
+# coordination between replicas (docs/19 19.9.1, ADR-014) — a lease any
+# replica holds is simply not claimable by the others until it expires.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,7 +13,7 @@ metadata:
     {{- include "xshield.labels" . | nindent 4 }}
     app.kubernetes.io/component: outbox
 spec:
-  replicas: 1
+  replicas: {{ .Values.outbox.replicaCount }}
   selector:
     matchLabels:
       {{- include "xshield.selector" (dict "root" . "component" "outbox") | nindent 6 }}
@@ -26,7 +29,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      {{- include "xshield.podSecurity" . | nindent 6 }}
+      {{- include "xshield.podSecurity" (dict "root" . "component" "outbox" "replicas" .Values.outbox.replicaCount) | nindent 6 }}
       containers:
         {{- range $family := list "case" "evidence_catalog" "evidence_access" "evidence_retention" "calibration" "identity" "grant" "response_grant" "share_grant" "ui_action" }}
         - name: {{ $family | replace "_" "-" }}

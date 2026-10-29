@@ -133,6 +133,48 @@ test("each step explains itself and stops at what the server would refuse", asyn
   await expect(page.getByRole("button", { name: "保存为草稿", exact: true })).toBeEnabled();
 });
 
+test("the entry step can start a site in observe and validates the rollout fields", async ({
+  page,
+}) => {
+  await mockSite(page);
+  await signInAt(page, "/sites/new/basics");
+  await fillBasics(page);
+  await next(page).click();
+  await fillUpstream(page);
+  await next(page).click();
+
+  await expect(page).toHaveURL(/sites\/new\/entry$/);
+  await page.getByLabel("入口路径", { exact: true }).fill("/");
+  await expect(page.getByRole("radio", { name: /^强制/ })).toBeChecked();
+  await expect(page.getByLabel("观察标签", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("radio", { name: /^观察/ }).check();
+  await expect(page.getByLabel("观察标签", { exact: true })).toHaveValue(/^rollout-\d{8}$/);
+  await expect(next(page)).toBeEnabled();
+
+  await page.getByLabel("观察标签", { exact: true }).fill("");
+  await expect(page.getByText("请填写观察标签。")).toBeVisible();
+  await expect(next(page)).toBeDisabled();
+  await page.getByLabel("观察标签", { exact: true }).fill("pilot-01");
+  await expect(next(page)).toBeEnabled();
+  await next(page).click();
+
+  // routes and review carry the observe choice through to the saved draft
+  await expect(page).toHaveURL(/sites\/new\/routes$/);
+  await next(page).click();
+  await expect(page).toHaveURL(/sites\/new\/review$/);
+  await expect(page.getByText(/^观察，至 /)).toBeVisible();
+  const checks = page.getByRole("list", { name: "校验结果" });
+  await expect(checks).not.toContainText("有错误");
+
+  // switching back to enforce drops the observe fields and their validation
+  await step(page, "入口与模式").click();
+  await page.getByRole("radio", { name: /^强制/ }).check();
+  await expect(page.getByLabel("观察标签", { exact: true })).toHaveCount(0);
+  await step(page, "校验与保存").click();
+  await expect(page.getByText("强制", { exact: true })).toBeVisible();
+});
+
 test("the draft survives step changes and the browser's back and forward", async ({ page }) => {
   await mockSite(page);
   await signInAt(page, "/sites/new/basics");

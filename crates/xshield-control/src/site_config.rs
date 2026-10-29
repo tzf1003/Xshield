@@ -3637,6 +3637,49 @@ async fn apply_site_snapshot(
     Ok(true)
 }
 
+/// Reconciles this control instance's own local edge to the current
+/// desired/active state of its one configured site, independent of any
+/// write request landing on this replica. `apply_site_snapshot` already
+/// recomputes the full snapshot from PostgreSQL and the edge apply protocol
+/// is idempotent (`EDGE_APPLY_IDEMPOTENCY_CONFLICT` semantics), so every
+/// control+edge replica can run this identically on its own schedule with no
+/// coordination between replicas (ADR-014, docs/19 19.9.1).
+///
+/// # Errors
+/// Returns the apply protocol's reason code when nothing could be
+/// reconciled this tick (for example `CONTROL_SITE_APPROVAL_REQUIRED` while a
+/// change is still pending review, or no edge apply client configured). The
+/// caller logs and retries on the next tick.
+pub(crate) async fn reconcile_local_edge(control: &ControlPlane) -> Result<bool, &'static str> {
+    let site_id = control.config.site_id.clone();
+    let record = control
+        .catalog
+        .read_protected_site_config(&control.config.tenant_id, &site_id)
+        .await
+        .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?
+        .ok_or("CONTROL_SITE_NOT_FOUND")?;
+    let apply = control
+        .catalog
+        .read_protected_site_apply_state(&control.config.tenant_id, &site_id)
+        .await
+        .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?
+        .ok_or("CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+    apply_site_snapshot(control, &site_id, &apply, record.status()).await
+}
+
+/// Runs [`reconcile_local_edge`] on a fixed interval until the process
+/// exits. Started at most once per control instance (see `main.rs`);
+/// failures are the ordinary "nothing pending" case and are not logged as
+/// errors, since they recur every tick between real changes.
+pub async fn run_edge_reconcile_loop(control: Arc<ControlPlane>, period: Duration) {
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let _ = reconcile_local_edge(&control).await;
+    }
+}
+
 async fn merge_patch_payload(
     control: &ControlPlane,
     site_id: &SiteId,

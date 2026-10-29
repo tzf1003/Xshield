@@ -49,8 +49,8 @@ pub use calibration_report::{
 };
 pub use calibration_report_retention::CalibrationReportOrphanCandidate;
 pub use s3::{
-    S3Addressing, S3Credentials, S3EvidenceStoreConfig, S3EvidenceStoreSettings, S3EvidenceVault,
-    S3ObjectLockMode,
+    EvidenceMigrationOutcome, S3Addressing, S3Credentials, S3EvidenceStoreConfig,
+    S3EvidenceStoreSettings, S3EvidenceVault, S3ObjectLockMode, S3SseKms,
 };
 pub use vault::EvidenceVault;
 
@@ -67,6 +67,9 @@ const MAX_SINGLE_ENVELOPE_BYTES: u64 =
     MAX_SINGLE_ARTIFACT_BYTES as u64 + 1 + NONCE_BYTES as u64 + TAG_BYTES as u64;
 const MAX_VAULT_FILES: usize = 100_000;
 const MAX_RETENTION_DAYS: u16 = 3_650;
+/// Largest page a migration or audit tool may request when enumerating a
+/// vault without a known tenant or site.
+const ARTIFACT_LIST_LIMIT_MAX: u16 = 256;
 type EnvelopeParts<'a> = (&'a [u8; NONCE_BYTES], &'a [u8; TAG_BYTES], &'a [u8]);
 
 /// Zeroizing root key used only to derive artifact-scoped AES-256-GCM keys.
@@ -106,7 +109,12 @@ impl EvidenceVaultConfig {
     ) -> Result<Self, EvidenceError> {
         let root = root.into();
         let key_id = key_id.into();
-        let max_retention = validate_vault_policy(&key_id, max_artifact_bytes, max_retention_days)?;
+        let max_retention = validate_vault_policy(
+            &key_id,
+            max_artifact_bytes,
+            max_retention_days,
+            MAX_SINGLE_ARTIFACT_BYTES,
+        )?;
         if root.as_os_str().is_empty() {
             return Err(EvidenceError::InvalidConfig);
         }
@@ -120,17 +128,22 @@ impl EvidenceVaultConfig {
 }
 
 /// Checks the storage-independent vault limits and returns the retention cap.
+///
+/// `max_allowed_artifact_bytes` is the backend's own ceiling: the local vault
+/// passes [`MAX_SINGLE_ARTIFACT_BYTES`], while the S3 backend allows a higher
+/// one since its objects never need to fit a single local write.
 fn validate_vault_policy(
     key_id: &str,
     max_artifact_bytes: usize,
     max_retention_days: u16,
+    max_allowed_artifact_bytes: usize,
 ) -> Result<chrono::TimeDelta, EvidenceError> {
     let max_retention = chrono::TimeDelta::try_days(i64::from(max_retention_days))
         .filter(|_| (1..=MAX_RETENTION_DAYS).contains(&max_retention_days))
         .ok_or(EvidenceError::InvalidConfig)?;
     if !valid_name(key_id)
         || max_artifact_bytes == 0
-        || max_artifact_bytes > MAX_SINGLE_ARTIFACT_BYTES
+        || max_artifact_bytes > max_allowed_artifact_bytes
     {
         return Err(EvidenceError::InvalidConfig);
     }
@@ -636,6 +649,83 @@ impl LocalEvidenceVault {
             });
         }
         Ok(candidates)
+    }
+
+    /// Lists the next page of complete generic-evidence artifact IDs after a
+    /// cursor, without requiring the caller to already know any object's
+    /// tenant or site.
+    ///
+    /// A migration or audit tool pages through an entire vault this way. A
+    /// bare ciphertext with no manifest, or a manifest with no HMAC sidecar
+    /// (see [`Self::list_orphan_candidates_after`]), is never returned; nor
+    /// is the calibration-report or lineage-review family, each of which has
+    /// its own dedicated, locally-only contract.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError`] for an unsafe root, an invalid bound, or an
+    /// invalid cursor.
+    pub fn list_generic_artifact_ids_after(
+        &self,
+        limit: u16,
+        after: Option<&str>,
+    ) -> Result<Vec<String>, EvidenceError> {
+        if !(1..=ARTIFACT_LIST_LIMIT_MAX).contains(&limit) {
+            return Err(EvidenceError::InvalidConfig);
+        }
+        if after.is_some_and(|cursor| validate_artifact_id(cursor).is_err()) {
+            return Err(EvidenceError::InvalidConfig);
+        }
+        validate_private_directory(&self.config.root)?;
+        let mut artifact_ids = BTreeSet::new();
+        let mut file_count = 0usize;
+        for entry in fs::read_dir(&self.config.root)? {
+            let entry = entry?;
+            file_count = file_count.checked_add(1).ok_or(EvidenceError::UnsafePath)?;
+            if file_count > MAX_VAULT_FILES {
+                return Err(EvidenceError::UnsafePath);
+            }
+            let metadata = entry.path().symlink_metadata()?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(EvidenceError::UnsafePath);
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(artifact_id) = name.strip_suffix(".xev").filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            if validate_artifact_id(artifact_id).is_ok() {
+                artifact_ids.insert(artifact_id.to_owned());
+            }
+        }
+        let mut result = Vec::new();
+        for artifact_id in &artifact_ids {
+            if result.len() == usize::from(limit) {
+                break;
+            }
+            if after.is_some_and(|cursor| artifact_id.as_str() <= cursor) {
+                continue;
+            }
+            if dedicated_sidecars_present(&self.config.root, artifact_id)? {
+                continue;
+            }
+            let has_manifest = sidecar_present(
+                &self
+                    .config
+                    .root
+                    .join(format!("{artifact_id}.manifest.json")),
+            )?;
+            let has_hmac = sidecar_present(
+                &self
+                    .config
+                    .root
+                    .join(format!("{artifact_id}.manifest.hmac")),
+            )?;
+            if has_manifest && has_hmac {
+                result.push(artifact_id.clone());
+            }
+        }
+        Ok(result)
     }
 
     /// Removes one previously observed orphan ciphertext after rechecking its
@@ -1752,6 +1842,80 @@ mod tests {
         assert!(!root.join(format!("{raw_id}.xev")).exists());
         assert!(root.join(format!("{partial_id}.xev")).exists());
         assert!(root.join(format!("{partial_id}.manifest.json")).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generic_artifact_listing_pages_complete_objects_and_skips_the_rest() {
+        let root = private_temp_directory();
+        let vault = LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(&root, "evidence-key-r1", 1024, 30).unwrap(),
+            EvidenceKey::from_hex(KEY).unwrap(),
+        )
+        .unwrap();
+        let tenant = TenantId::parse("tenant_list").unwrap();
+        let site = SiteId::parse("site_list").unwrap();
+        let request = RequestId::parse(format!("req_{}", Uuid::now_v7())).unwrap();
+        let mut complete_ids = Vec::new();
+        for plaintext in [b"first".as_slice(), b"second".as_slice()] {
+            let written = vault
+                .write(&EvidenceWrite {
+                    tenant_id: &tenant,
+                    site_id: &site,
+                    request_id: &request,
+                    kind: "response_decoded",
+                    content_type: "application/json",
+                    fidelity: EvidenceFidelity::Redacted,
+                    classification: EvidenceClassification::Restricted,
+                    parent_refs: &[],
+                    expires_at: Utc::now() + TimeDelta::hours(1),
+                    plaintext,
+                })
+                .unwrap();
+            complete_ids.push(written.manifest().artifact_id.clone());
+        }
+        complete_ids.sort();
+
+        let bare_id = format!("artifact_{}", Uuid::now_v7());
+        fs::write(root.join(format!("{bare_id}.xev")), b"orphan").unwrap();
+        let partial_id = format!("artifact_{}", Uuid::now_v7());
+        fs::write(root.join(format!("{partial_id}.xev")), b"partial").unwrap();
+        fs::write(root.join(format!("{partial_id}.manifest.json")), b"partial").unwrap();
+        let calibration_id = format!("artifact_{}", Uuid::now_v7());
+        fs::write(root.join(format!("{calibration_id}.xev")), b"calibration").unwrap();
+        fs::write(
+            root.join(format!("{calibration_id}.calibration-report.manifest.json")),
+            b"calibration",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            vault.list_generic_artifact_ids_after(0, None),
+            Err(EvidenceError::InvalidConfig)
+        ));
+        assert!(matches!(
+            vault.list_generic_artifact_ids_after(8, Some("not an artifact id")),
+            Err(EvidenceError::InvalidConfig)
+        ));
+
+        let first_page = vault.list_generic_artifact_ids_after(1, None).unwrap();
+        assert_eq!(first_page, [complete_ids[0].clone()]);
+        let second_page = vault
+            .list_generic_artifact_ids_after(8, Some(&first_page[0]))
+            .unwrap();
+        assert_eq!(second_page, [complete_ids[1].clone()]);
+        assert!(
+            vault
+                .list_generic_artifact_ids_after(8, Some(&second_page[0]))
+                .unwrap()
+                .is_empty()
+        );
+
+        let whole_vault = vault.list_generic_artifact_ids_after(8, None).unwrap();
+        assert_eq!(whole_vault, complete_ids);
+        assert!(!whole_vault.contains(&bare_id));
+        assert!(!whole_vault.contains(&partial_id));
+        assert!(!whole_vault.contains(&calibration_id));
         fs::remove_dir_all(root).unwrap();
     }
 

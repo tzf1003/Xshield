@@ -219,9 +219,11 @@ jobs:
 
   # The S3 evidence backend (docs/12 12.10) against a real MinIO: SigV4 as a
   # server checks it, create-only writes, Object Lock refusing early deletion,
-  # version-exact purge and orphan listing. MinIO's own image is no longer
-  # published, so this is Chainguard's build, pinned by digest. A service
-  # container cannot pass `server`, hence `docker run`.
+  # version-exact purge, orphan listing, multipart upload and SSE-KMS. MinIO's
+  # own image is no longer published, so this is Chainguard's build, pinned by
+  # digest. A service container cannot pass `server`, hence `docker run`. The
+  # KMS key is single-use test material generated fresh for this job, not a
+  # secret shared with anything else.
   object-storage:
     needs: changes
     if: needs.changes.outputs.evidence == 'true'
@@ -233,6 +235,7 @@ jobs:
       XSHIELD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
       XSHIELD_TEST_S3_ACCESS_KEY_ID: xshieldtest
       XSHIELD_TEST_S3_SECRET_ACCESS_KEY: xshieldtestsecret
+      XSHIELD_TEST_S3_SSE_KMS_KEY_ID: xshield-test-key
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -243,6 +246,7 @@ jobs:
           docker run -d --name minio -p 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER="$XSHIELD_TEST_S3_ACCESS_KEY_ID" \
             -e MINIO_ROOT_PASSWORD="$XSHIELD_TEST_S3_SECRET_ACCESS_KEY" \
+            -e MINIO_KMS_SECRET_KEY="${XSHIELD_TEST_S3_SSE_KMS_KEY_ID}:$(openssl rand -base64 32)" \
             cgr.dev/chainguard/minio@sha256:e70b2b1e74d79457f808710483bd726ff364529ca30736eaa15a6ab547d3a5a7 \
             server /tmp/data
           for _ in $(seq 60); do
@@ -416,7 +420,7 @@ jobs:
             echo 'the chart rendered without its required values' >&2
             exit 1
           fi
-          values=(-f deploy/helm/smoke/values.yaml
+          values=(-f deploy/helm/smoke/values.yaml -f deploy/helm/xshield/values-ha.yaml
             --set images.edge=xshield-edge:ci --set images.control=xshield-control:ci
             --set images.worker=xshield-worker:ci
             --set-json 'control.allowedUpstreamCidrs=["10.0.0.0/8"]'
