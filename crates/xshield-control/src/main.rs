@@ -6,6 +6,7 @@ use std::{
     error::Error,
     net::SocketAddr,
     path::PathBuf,
+    sync::Arc,
     time::Duration,
 };
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
@@ -224,7 +225,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
         (None, None) => control,
         _ => return Err("edge apply URL and key must be configured together".into()),
     };
-    let (api, ops) = routers(control);
+    let (api, ops, shared) = routers(control);
+    // Converges this replica's own local edge to the current desired/active
+    // state on a fixed interval, independent of whichever replica a write
+    // request lands on (ADR-014, docs/19 19.9.1). Unset (the pre-HA default)
+    // leaves behavior exactly as before: apply only runs when a write
+    // request triggers it.
+    if let Ok(value) = env::var("XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS") {
+        let seconds: u64 = value
+            .parse()
+            .map_err(|_| "invalid XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS")?;
+        if !(1..=86400).contains(&seconds) {
+            return Err("invalid XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS".into());
+        }
+        let reconciler = Arc::clone(&shared);
+        tokio::spawn(xshield_control::run_edge_reconcile_loop(
+            reconciler,
+            Duration::from_secs(seconds),
+        ));
+    }
     // Liveness, readiness and metrics for orchestrators and scrapers. They are
     // unauthenticated, so they disclose no topology (see ops).
     if let Ok(value) = env::var("XSHIELD_CONTROL_OPS_LISTEN") {

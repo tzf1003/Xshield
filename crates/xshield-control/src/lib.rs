@@ -35,7 +35,7 @@ mod site_config;
 mod workbench;
 
 pub use identity::{IdentityConfigError, OidcProvider};
-pub use site_config::{EdgeApplyClient, upstream_allowance_from_env};
+pub use site_config::{EdgeApplyClient, run_edge_reconcile_loop, upstream_allowance_from_env};
 
 use axum::{
     Extension, Json, Router,
@@ -4302,11 +4302,15 @@ pub fn router(control: ControlPlane) -> Router {
     routers(control).0
 }
 
-/// The management API router and, over the same control plane, the
-/// unauthenticated ops router ([`ops::ops_router`]) for a separate listener.
+/// The management API router, over the same control plane the
+/// unauthenticated ops router ([`ops::ops_router`]) for a separate listener,
+/// and the shared control plane handle itself so a caller can also run
+/// background work (such as [`site_config::run_edge_reconcile_loop`])
+/// against the exact same state the routers serve.
 #[allow(clippy::too_many_lines)]
-pub fn routers(control: ControlPlane) -> (Router, Router) {
+pub fn routers(control: ControlPlane) -> (Router, Router, Arc<ControlPlane>) {
     let state = Arc::new(control);
+    let shared = Arc::clone(&state);
     let metrics = Arc::clone(&state.metrics);
     let ops = ops::ops_router(Arc::clone(&state));
     let api = Router::new()
@@ -4539,7 +4543,7 @@ pub fn routers(control: ControlPlane) -> (Router, Router) {
         .with_state(Arc::clone(&state))
         .layer(from_fn_with_state(state, identity::auth_middleware))
         .layer(from_fn_with_state(metrics, ops::track));
-    (api, ops)
+    (api, ops, shared)
 }
 
 async fn evidence_access_approve_handler(

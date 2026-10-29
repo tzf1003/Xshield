@@ -190,11 +190,11 @@ CI 的 `compose` 作业用仓库 `Dockerfile` 构建三个镜像后运行 `scrip
 
 `deploy/helm/xshield/` 把一个租户、一个站点部署到 Kubernetes，用法见 `deploy/helm/README.md`。拓扑与 19.8 相同，按 Kubernetes 的方式落地：
 
-- **Pod 拓扑**：edge、control 以及两组 journal 的封存与发布任务放在一个单副本 StatefulSet 的同一个 Pod 里。
-  - 管理 API 与 apply 通道只监听 loopback，所以 edge 与 control 必须共享网络命名空间。
-  - 封存和发布任务读写同一个持久卷 `state`。各目录 0700，由初始化容器以 uid 10001 创建。
+- **Pod 拓扑**：edge、control 以及两组 journal 的封存与发布任务放在 StatefulSet 的同一个 Pod 里，副本数由 `replicaCount` 控制（默认 2，见 19.9.1/ADR-014）；每个副本是一套完全独立的 edge+control+journal 任务。
+  - 管理 API 与 apply 通道只监听 loopback，所以 edge 与 control 必须共享网络命名空间——这一耦合与副本数无关，每个副本各自成立。
+  - 封存和发布任务读写同一个持久卷 `state`，但每个副本各自一份独立 PVC（`volumeClaimTemplates` 按 Pod 序号分配），不跨副本共享。各目录 0700，由初始化容器以 uid 10001 创建。
   - 持久卷在卸载后保留。
-  - 十个 outbox 发布任务是独立的 Deployment。
+  - 十个 outbox 发布任务是独立的 Deployment，副本数由 `outbox.replicaCount` 控制（默认 2）。
 - **数据面**：
   - edge 的引导配置是 ConfigMap 模板，Pod 启动时由初始化容器填入 Pod IP，因为数据面监听器只绑定私网地址。Pod 网段必须在 RFC 1918 范围内。
   - 站点端口默认 6400–6409，由 Service `<release>-edge` 暴露。
@@ -212,16 +212,16 @@ CI 的 `compose` 作业用仓库 `Dockerfile` 构建三个镜像后运行 `scrip
 - **可选 NetworkPolicy**：只放行站点端口与运维端口的入站，来源可分别限定。outbox Pod 不接受入站。出站不限制，因为源站、数据库与 IdP 因部署而异。
 - **运维自备**：PostgreSQL 与 ClickHouse（迁移与 schema 由运维在安装和升级前执行）、企业 OIDC IdP、管理面 HTTPS 同源代理（以 `extraContainers` 加入 Pod）、edge 前置的负载均衡或 WAF/CDN、备份（19.6）与告警。
 
-CI 的 `helm` 作业先做静态检查：缺少必填值时 schema 拒绝渲染；`helm lint --strict`；渲染结果与测试依赖清单用 kubeconform 按 Kubernetes 1.29 严格校验。随后在 kind 集群里装入仓库 `Dockerfile` 构建的三个镜像，运行 `scripts/test_helm_deployment.sh`。脚本用 `deploy/helm/smoke/` 部署测试用 PostgreSQL、ClickHouse、一个私网源站，并在 Pod 内加入开发 Keycloak 与 curl 工具容器，然后检查以下各项：
+CI 的 `helm` 作业先做静态检查：缺少必填值时 schema 拒绝渲染；`helm lint --strict`；渲染结果与测试依赖清单用 kubeconform 按 Kubernetes 1.29 严格校验。随后在 kind 集群里装入仓库 `Dockerfile` 构建的三个镜像，运行 `scripts/test_helm_deployment.sh`（`replicaCount`/`outbox.replicaCount` 均为 2）。脚本用 `deploy/helm/smoke/` 部署测试用 PostgreSQL、ClickHouse、一个私网源站，每个 StatefulSet 副本各自的 Pod 内加入开发 Keycloak 与 curl 工具容器，然后检查以下各项：
 
-- 两个运维端点就绪，数据面经 Service 对未配置主机返回 `SITE_CONFIG_UNAVAILABLE`；
-- 管理 API 只接受引导 Bearer；放行网段内的源站可以保存，网段外的被拒绝；control 经签名通道取到 edge 健康，首个 apply 等待独立审批；
+- 两个副本各自的两个运维端点都就绪，数据面经 Service 对未配置主机返回 `SITE_CONFIG_UNAVAILABLE`；
+- 管理 API 只接受引导 Bearer；放行网段内的源站可以保存，网段外的被拒绝；control 经签名通道取到本地 edge 健康，首个 apply 等待独立审批；两个副本的 control 各自以自己的数据库连接池读到同一个站点（共享 PostgreSQL 真值，不是副本间直接通信）；
 - 管理审计事件经封存、发布进入 ClickHouse；
-- 14 个常驻任务都有新鲜心跳，edge、任务与 outbox 容器没有重启；
-- 删除 Pod 后，新 Pod（新 IP）在同一持久卷上恢复就绪，已保存的站点仍在。
+- 两个副本各自的全部常驻任务都有新鲜心跳（含收敛回放任务按 `jobs.reconcileIntervalSeconds` 反复空操作不导致重启），两个 outbox 副本的十个家族心跳也都新鲜，全部容器没有重启；
+- 删除一个副本期间，Service 仍能通过另一个副本应答；该副本恢复后在同一持久卷上重新就绪，已保存的站点仍在。
 
 **未覆盖**：
-- 站点经 edge 实际服务流量（原因同 19.8）；
+- 站点经 edge 实际服务流量（原因同 19.8：首次 apply 需要 OIDC 浏览器会话的独立审批，因此也没有验证"同一个站点在两个副本的 edge 上都实际放行流量"，只验证了两个副本的 control 从共享 PostgreSQL 读到同一个站点）；
 - 管理代理与控制台；
 - 真实企业 IdP、TLS 与 MFA；
 - 升级路径（`helm upgrade` 与迁移）；
@@ -229,24 +229,24 @@ CI 的 `helm` 作业先做静态检查：缺少必填值时 schema 拒绝渲染�
 
 ### 19.9.1 高可用（ADR-014）
 
-上文描述的拓扑此前固定 `replicas: 1`：edge 的 apply 通道（127.0.0.1:9553）和 control 的管理 API（127.0.0.1:9443）只监听 loopback 必须共享网络命名空间，这个 Pod 因此是单点故障。ADR-014 确定的方向，以及它落地前后的状态如下。
+上文描述的拓扑此前固定 `replicas: 1`：edge 的 apply 通道（127.0.0.1:9553）和 control 的管理 API（127.0.0.1:9443）只监听 loopback 必须共享网络命名空间，这个 Pod 因此是单点故障。ADR-014 确定的方向已经落地：
 
-**调研结论（已确认，不需要额外改动即可成立）**：
+**调研结论（journal 封存/发布与 outbox 不需要改动即可支持多副本）**：
 
 - `xshield-outbox-worker` 按 PostgreSQL 行级租约认领任务，多实例并发天然安全；
 - journal 封存（`xshield-audit-seal`）与发布任务按清单/checkpoint 幂等重放，两个实例同时处理同一 journal 目录不冲突；
-- 真正的单写者约束只是"一个 journal 目录只能有一个进程追加写"（docs/13），这与副本数无关——只要每个副本有自己独立的 journal（`volumeClaimTemplates` 已经按 Pod 序号分配独立 PVC），该约束天然满足。
+- 真正的单写者约束只是"一个 journal 目录只能有一个进程追加写"（docs/13），这与副本数无关——只要每个副本有自己独立的 journal（`volumeClaimTemplates` 按 Pod 序号分配独立 PVC），该约束天然满足。
 
-因此本次高可用改造**不引入 leader election**，也不引入 etcd/Redis 等外部协调服务：journal 封存/发布与 outbox 只需放开副本数；真正要新增的是 edge+control 的配置收敛机制。
+因此这次高可用改造**没有引入 leader election**，也没有引入 etcd/Redis 等外部协调服务：journal 封存/发布与 outbox 只是放开了副本数；新增的只有 edge+control 的配置收敛机制。
 
-**目标设计**：
+**已实现**：
 
-1. StatefulSet 的副本数从固定 1 改为 `values.yaml` 的 `replicaCount`（生产建议 ≥2），每个副本仍是一套独立的 edge+control+两组 journal 任务+独立 PVC，loopback 耦合和安全边界不变。
-2. control 新增一个收敛回放常驻任务（复用 `XSHIELD_RUN_INTERVAL_SECONDS` 模式）：按固定间隔重新计算当前已批准的完整租户快照并重放给本地 edge；这是 `apply_site_snapshot` 已经在做的计算（每次都从 PostgreSQL 重新算出全量快照），只是改为定期而不是只在收到写请求时跑一次。多个副本各自独立运行这个循环，借助既有的幂等 apply 协议（`EDGE_APPLY_IDEMPOTENCY_CONFLICT` 等）收敛到同一配置，不需要副本之间互相通信。
-3. 新增 Pod 反亲和（`values.yaml` 的 `affinity`/`topologySpreadConstraints`，默认尽量分散到不同节点）与 PodDisruptionBudget（`maxUnavailable: 1`）；`deployment-outbox.yaml` 的副本数同样放开为可配置项。
-4. 已知限制：现有"desired/active" apply 状态位按"至少一个 edge 已收敛"记录，不是"全部副本已收敛"；本次不新增按副本粒度的收敛状态表（见 docs/23），运维通过各 Pod 的签名健康接口或 control `/metrics` 的 snapshot revision 观察滚动是否完成。跨 Region/跨故障域仍不在范围内（19.6）。
+1. StatefulSet 的副本数从固定 1 改为 `values.yaml` 的 `replicaCount`（默认 **2**；升级到这个版本会把既有单副本安装扩成 2 副本，要保持单副本必须显式设回 `1`），每个副本仍是一套独立的 edge+control+两组 journal 任务+独立 PVC，loopback 耦合和安全边界不变。
+2. control 新增一个收敛回放常驻任务（`XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS`，Helm 为 `jobs.reconcileIntervalSeconds`，默认 30 秒；未设置该环境变量时行为与此前完全一致）：按固定间隔读取当前已批准的站点配置，重新调用 `apply_site_snapshot`（crates/xshield-control/src/site_config.rs，`reconcile_local_edge`/`run_edge_reconcile_loop`）把它重放给本地 edge——这正是 `apply_site_snapshot` 本来就在做的计算（每次都从 PostgreSQL 重新算出完整快照），只是从"只在收到写请求时跑一次"变成"额外定期跑一次"。多个副本各自独立运行这个循环，借助既有的幂等 apply 协议（`EDGE_APPLY_IDEMPOTENCY_CONFLICT` 等）收敛到同一配置，不需要副本之间互相通信；`xshield_control::routers()` 相应改为同时返回共享的 `Arc<ControlPlane>`。
+3. 新增 Pod 反亲和与 PodDisruptionBudget：`xshield.podSecurity` 这个共享模板按 `(root, component, replicas)` 取参，未显式设置 `.Values.affinity` 且该工作负载副本数 > 1 时给出按 `kubernetes.io/hostname` 的默认软反亲和（不阻塞单节点集群的调度）；显式设置 `.Values.affinity` 时按原样传递。`poddisruptionbudget-core.yaml`/`poddisruptionbudget-outbox.yaml` 在对应副本数 > 1 时渲染 `maxUnavailable: 1`。`deployment-outbox.yaml` 的副本数同样放开为 `outbox.replicaCount`（默认 2）。
+4. 已知限制：现有"desired/active" apply 状态位按"至少一个 edge 已收敛"记录，不是"全部副本已收敛"；没有新增按副本粒度的收敛状态表（见 docs/23），运维通过各 Pod 的签名健康接口或 control `/metrics` 的 snapshot revision 观察滚动是否完成。跨 Region/跨故障域仍不在范围内（19.6）。
 
-CI 的 kind 作业相应扩展为 N≥2 副本场景：验证一次配置写入最终收敛到全部副本的本地 edge、删除一个 Pod 后数据面不中断且其余副本的常驻任务心跳不受影响、恢复的副本重新收敛到当前 revision。compose（19.8）与 systemd（19.10）两种参考部署保持单机，不在本次范围内。
+CI 的 kind 作业相应扩展为 2 副本场景，见上文"未覆盖"之前的检查列表。compose（19.8）与 systemd（19.10）两种参考部署保持单机，不在本次范围内。
 
 ## 19.10 systemd 参考部署
 

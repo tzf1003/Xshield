@@ -16,12 +16,26 @@ oidc:
   requiredAcr: "1"
   subjectRolesJson: '[{"subject":"smoke-subject","roles":["observer"]}]'
   consoleOrigin: http://127.0.0.1:55173
+# Two independent edge+control+journal replicas and two outbox replicas, so
+# scripts/test_helm_deployment.sh can verify convergence and failover across
+# more than one (docs/19 19.9.1, ADR-014). Each gets its own dev Keycloak and
+# toolbox sidecar (extraContainers, below), since those share the pod network
+# like edge and control do.
+replicaCount: 2
+outbox:
+  replicaCount: 2
 control:
   bootstrapRoles: observer,system_admin,release_operator
 jobs:
   sealIntervalSeconds: 3
   publishIntervalSeconds: 3
   outboxIntervalSeconds: 3
+  # Short enough that the smoke test's run observes several ticks; every
+  # tick on every replica hits CONTROL_SITE_APPROVAL_REQUIRED harmlessly
+  # while the smoke site stays pending approval (no OIDC browser session
+  # here to grant it), which is exactly the no-op case this is meant to
+  # prove does not crash or restart either control process.
+  reconcileIntervalSeconds: 3
   firstSuccessGraceSeconds: 240
 persistence:
   size: 1Gi

@@ -7,8 +7,15 @@
 # Edge and control in one pod: the control API (127.0.0.1:9443) and the edge
 # apply channel (127.0.0.1:9553) are loopback-only by design, so they must
 # share a network namespace. The seal and publish jobs of both journals run
-# beside them because they read the same volume. Exactly one replica: each
-# journal, manifest set and checkpoint has a single writer (docs/13).
+# beside them because they read the same volume.
+#
+# replicaCount may be more than 1 (docs/19 19.9.1, ADR-014): each replica is
+# a complete, independent edge+control+journal pair with its own PVC
+# (volumeClaimTemplates below already give each StatefulSet ordinal its own
+# volume), so "a journal, manifest set and checkpoint has a single writer"
+# (docs/13) holds per replica, not for the release as a whole. control's
+# resident reconcile task converges every replica's local edge to the same
+# approved configuration independently; no replica talks to another.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -17,7 +24,7 @@ metadata:
     {{- include "xshield.labels" . | nindent 4 }}
     app.kubernetes.io/component: core
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   serviceName: {{ $name }}-ops
   selector:
     matchLabels:
@@ -41,7 +48,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      {{- include "xshield.podSecurity" . | nindent 6 }}
+      {{- include "xshield.podSecurity" (dict "root" . "component" "core" "replicas" .Values.replicaCount) | nindent 6 }}
       terminationGracePeriodSeconds: 30
       initContainers:
         - name: prepare
@@ -172,6 +179,7 @@ spec:
             - {name: XSHIELD_EDGE_APPLY_URL, value: "http://127.0.0.1:9553/internal/v1/apply"}
             - {name: XSHIELD_EDGE_APPLY_KEY_HEX_FILE, value: /run/secrets/edge_apply_key}
             - {name: XSHIELD_ALLOWED_UPSTREAM_CIDRS, value: {{ join "," .Values.control.allowedUpstreamCidrs | quote }}}
+            - {name: XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS, value: {{ .Values.jobs.reconcileIntervalSeconds | quote }}}
           ports:
             - {name: control-ops, containerPort: 9555, protocol: TCP}
           livenessProbe:

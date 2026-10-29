@@ -7,6 +7,13 @@
   - 回归：`tests/site-wizard.spec.ts` 新增一条端到端用例，覆盖向导内切到观察、标签必填校验、切回强制后观察字段消失、复核页展示观察截止时间；既有的 390px 布局与明暗主题无障碍用例覆盖了新卡片插入后的页面。
   - **未覆盖**：`docs/32` 的其余条目（审计契约、核心模型与风险令牌、edge 判定转发、退出报告、审批记录摘要、apply_direct 豁免拒绝）此前已实现，本次未改动；本条目只补齐向导入口。
 
+- Helm chart 高可用：edge+control 多副本 + 控制面收敛回放（docs/24 ADR-014、docs/19 19.9.1）：此前 Helm chart 把 edge、control 与两组 journal 封存/发布任务固定在单副本 StatefulSet 的同一个 Pod 里，该 Pod 是单点故障。调研确认 journal 封存/发布（幂等重放）与 outbox 发布（PostgreSQL 行级租约）本来就支持多副本并发，不需要新增 leader election 或外部协调服务；真正缺的是 edge+control 的配置收敛机制。
+  - `values.yaml` 新增 `replicaCount`（默认 **2**，此前固定为 1）：StatefulSet 的每个副本仍是一套独立的 edge+control+journal 任务+PVC，loopback 耦合和安全边界不变。新增 `outbox.replicaCount`（默认 2）放开 outbox Deployment 的副本数。**升级到本版本会把现有单副本安装默认扩成 2 副本**；需要保持单副本的部署应显式设置两者为 `1`。
+  - `xshield-control` 新增常驻收敛回放任务：按 `XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS`（Helm 的 `jobs.reconcileIntervalSeconds`，默认 30 秒）周期性重新计算当前已批准的完整站点配置并重放给本地 edge，复用既有的 `apply_site_snapshot`/幂等 apply 协议；配置未变时是一次快速空操作。环境变量未设置时行为与此前完全一致（apply 只在写请求时触发一次）。`xshield_control::routers()` 相应改为同时返回共享的 `Arc<ControlPlane>`，供 `main.rs` 把这个任务和路由绑在同一个控制面状态上。
+  - 新增 `poddisruptionbudget-core.yaml`/`poddisruptionbudget-outbox.yaml`：对应副本数 > 1 时渲染 `maxUnavailable: 1` 的 PodDisruptionBudget，副本数为 1 时不渲染。`xshield.podSecurity` 这个共享模板现在按 `(root, component, replicas)` 取参：未显式设置 `.Values.affinity` 且副本数 > 1 时，给出一个按 `kubernetes.io/hostname` 分散的默认软反亲和（`preferredDuringSchedulingIgnoredDuringExecution`），单节点集群（kind）仍能调度全部副本；显式设置 `.Values.affinity` 时完全按原样传递，行为不变。
+  - 回归：`scripts/test_helm_deployment.sh` 的 CI 冒烟改为验证两个副本：各自独立达到就绪、两个 control 进程通过共享 PostgreSQL 看到同一个站点、删除一个副本期间 Service 仍能通过另一个副本应答、恢复的副本在原持久卷上重新就绪、两个副本各自的 journal 封存/发布心跳与两个 outbox 副本的十个家族心跳均新鲜、全程没有容器因收敛任务的常态空操作而重启。
+  - **未覆盖**：按副本粒度的收敛可观测性（现有 desired/active 状态位仍是"至少一个 edge 已收敛"的全局状态，见 docs/23）；跨 Region/跨故障域（docs/19 19.6 维持原状）；Compose 与 systemd 两种参考部署仍是单机，本次 HA 范围只覆盖 Kubernetes/Helm；KMS 通用密钥管理集成不在本次范围内。
+
 - S3 证据存储：存储桶侧 SSE-KMS 与大对象 multipart 上传（docs/12 12.10、docs/19 19.4）：此前 S3 后端（#44）只测过 MinIO 的基础对象操作，未覆盖服务端加密配置，且单对象硬上限与本地后端共用的 64 MiB。
   - 新增可选 `XSHIELD_EVIDENCE_S3_SSE_KMS`（`off`/`aws-kms`）与 `XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID`：开启后每次写入都带 `x-amz-server-side-encryption: aws:kms`，可选显式 KMS key id，留空用存储桶默认 key。这是存储桶自己的加密，叠加在证据库自身的 AEAD 信封之上，不是把应用层数据密钥交给 KMS 包裹。
   - 密文超过 8 MiB 时改走 S3 multipart upload（`CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload`），分 8 MiB 一片；完成请求同样带 `If-None-Match: *`，create-only 语义不因分片而改变，任一步失败都先 `AbortMultipartUpload` 再把错误上抛。S3 后端的单 artifact 上限随之从 64 MiB 提到 1 GiB（本地后端不变，仍是 64 MiB），因为桶对象不必像本地一次写入那样整体放进一次 HTTP 请求。

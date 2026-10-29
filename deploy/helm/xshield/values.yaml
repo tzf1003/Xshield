@@ -7,6 +7,14 @@
 tenantId: ""  # required
 siteId: ""  # required
 
+# Edge+control replicas (docs/19 19.9.1, ADR-014). Each replica is a complete,
+# independent edge+control+journal pair with its own PVC; control's resident
+# reconcile task (jobs.reconcileIntervalSeconds) keeps every replica's local
+# edge converged on the current approved configuration with no coordination
+# between replicas. 1 keeps the pre-HA single-pod topology; production should
+# use 2 or more with podDisruptionBudget.core enabled.
+replicaCount: 2
+
 # Images built from the repository Dockerfile targets. Pin by digest in
 # production ("ghcr.io/<owner>/xshield-edge@sha256:...") and verify the
 # signature first (docs/19 19.7).
@@ -78,6 +86,10 @@ jobs:
   sealIntervalSeconds: 30
   publishIntervalSeconds: 15
   outboxIntervalSeconds: 5
+  # How often each control replica replays the current approved snapshot to
+  # its own local edge (docs/19 19.9.1, ADR-014); harmless and cheap at
+  # replicaCount 1 too, since a replay that changes nothing is a fast no-op.
+  reconcileIntervalSeconds: 30
   # How long after a job starts its liveness probe begins checking the
   # heartbeat, so dependencies may come up first.
   firstSuccessGraceSeconds: 600
@@ -85,9 +97,26 @@ jobs:
     requests: {cpu: 20m, memory: 32Mi}
     limits: {memory: 256Mi}
 
+# The resident outbox publishers (docs/13): one Deployment, ten containers
+# per pod (one per family), all lease-claiming from PostgreSQL so any number
+# of replicas may run concurrently with no duplicate processing.
+outbox:
+  replicaCount: 2
+
+# One PodDisruptionBudget per multi-replica workload, so a voluntary
+# disruption (node drain, cluster upgrade) cannot take every replica down at
+# once. Ignored (chart renders no PDB) while that workload's replica count
+# is 1, since a budget cannot allow any unavailability there.
+podDisruptionBudget:
+  core:
+    maxUnavailable: 1
+  outbox:
+    maxUnavailable: 1
+
 # State of edge and control: journals, seal manifests, publish checkpoints,
-# the signed edge snapshot and the evidence store. One ReadWriteOnce volume;
-# losing it loses unpublished audit and evidence (docs/19 19.6).
+# the signed edge snapshot and the evidence store. One ReadWriteOnce volume
+# per replica; losing one loses that replica's unpublished audit and
+# evidence (docs/19 19.6).
 persistence:
   storageClassName: ""
   size: 20Gi
@@ -120,5 +149,9 @@ podAnnotations: {}
 podLabels: {}
 nodeSelector: {}
 tolerations: []
+# Empty (the default) gets a preferred (soft) anti-affinity spreading each
+# multi-replica workload's own pods across nodes by hostname, so it never
+# blocks scheduling on a single-node cluster; set this to replace it
+# entirely with your own affinity rules.
 affinity: {}
 priorityClassName: ""
