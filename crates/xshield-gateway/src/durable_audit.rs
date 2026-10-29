@@ -181,6 +181,48 @@ pub(crate) struct SensorObservationAudit {
     callsite_fingerprint: Option<String>,
 }
 
+/// Which leg of a relayed business WebSocket connection a message travelled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BusinessWsDirection {
+    /// Browser to the protected site's own origin.
+    ToOrigin,
+    /// The origin back to the browser.
+    ToClient,
+}
+
+impl BusinessWsDirection {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ToOrigin => "to_origin",
+            Self::ToClient => "to_client",
+        }
+    }
+}
+
+/// One audited business WebSocket message, ready to durably record.
+#[derive(Clone, Debug)]
+pub(crate) struct BusinessWsMessageAudit {
+    pub(crate) direction: BusinessWsDirection,
+    pub(crate) kind: &'static str,
+    pub(crate) byte_len: u64,
+    pub(crate) frame_count: u32,
+    pub(crate) degraded: bool,
+}
+
+/// A connection-wide traffic summary, independent of how many individual
+/// messages were kept in detail.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BusinessWsSummary {
+    pub(crate) messages_to_origin: u64,
+    pub(crate) messages_to_client: u64,
+    pub(crate) bytes_to_origin: u64,
+    pub(crate) bytes_to_client: u64,
+    /// Set when any message (kept in detail or only counted in this
+    /// summary) could not be fully accounted for.
+    pub(crate) degraded: bool,
+    pub(crate) duration_us: u64,
+}
+
 impl SensorObservationAudit {
     pub(crate) fn new(session: &SensorSession, observation: &SensorObservation) -> Self {
         Self {
@@ -659,6 +701,68 @@ impl DurableAudit {
                 },
             ));
             last_event_id = observation_id.as_str().to_owned();
+        }
+        self.append(
+            BatchContext {
+                request_id: None,
+                trace_id: trace_id.to_owned(),
+            },
+            events,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Durably records one business WebSocket connection's traffic once it
+    /// closes: a summary plus up to the first `messages.len()` individual
+    /// messages (the caller bounds that list; see `business_ws::MAX_AUDITED_MESSAGES`
+    /// in `main.rs`). Like a probe WSS connection, the handshake itself was
+    /// already audited as an ordinary admitted request, and no single
+    /// terminal event closes a long-lived connection's lifecycle, so this
+    /// chain stands on its own (docs/11 §1: a business message carries its
+    /// own `message_id`, separate from the handshake request).
+    #[allow(clippy::assigning_clones)]
+    pub(crate) async fn record_business_ws_connection(
+        &self,
+        trace_id: &str,
+        operation_id: &str,
+        summary: BusinessWsSummary,
+        messages: &[BusinessWsMessageAudit],
+    ) -> Result<(), DurableAuditError> {
+        let closed_id = new_event_id()?;
+        let mut events = vec![PendingEvent::new(
+            closed_id.clone(),
+            "business_ws.closed",
+            1,
+            Vec::new(),
+            Payload::BusinessWsClosed {
+                operation_id: operation_id.to_owned(),
+                messages_to_origin: summary.messages_to_origin,
+                messages_to_client: summary.messages_to_client,
+                bytes_to_origin: summary.bytes_to_origin,
+                bytes_to_client: summary.bytes_to_client,
+                degraded: summary.degraded,
+                duration_us: summary.duration_us,
+            },
+        )];
+        let mut last_event_id = closed_id.as_str().to_owned();
+        for (sequence, message) in (2u32..).zip(messages) {
+            let message_id = new_event_id()?;
+            events.push(PendingEvent::new(
+                message_id.clone(),
+                "business_ws.message",
+                sequence,
+                vec![last_event_id],
+                Payload::BusinessWsMessage {
+                    operation_id: operation_id.to_owned(),
+                    direction: message.direction.as_str(),
+                    kind: message.kind,
+                    byte_len: message.byte_len,
+                    frame_count: message.frame_count,
+                    degraded: message.degraded,
+                },
+            ));
+            last_event_id = message_id.as_str().to_owned();
         }
         self.append(
             BatchContext {
@@ -1971,6 +2075,23 @@ enum Payload {
         channel: &'static str,
         outcome: &'static str,
         reason_code: &'static str,
+    },
+    BusinessWsClosed {
+        operation_id: String,
+        messages_to_origin: u64,
+        messages_to_client: u64,
+        bytes_to_origin: u64,
+        bytes_to_client: u64,
+        degraded: bool,
+        duration_us: u64,
+    },
+    BusinessWsMessage {
+        operation_id: String,
+        direction: &'static str,
+        kind: &'static str,
+        byte_len: u64,
+        frame_count: u32,
+        degraded: bool,
     },
     SensorHtmlStageCompleted {
         stage: &'static str,

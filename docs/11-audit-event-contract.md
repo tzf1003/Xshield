@@ -4,7 +4,7 @@
 
 输入一个请求 ID，调查者能够回答：收到什么、使用哪个身份绑定、经过哪些层、每层依据是什么、规则/模型怎么判、为什么跳过某层、是否降级、实际转发了什么、源站返回什么、给客户端返回什么、是否发行新资格、完整证据保存到哪里。
 
-所有被 Xshield 解析接收的 HTTP 请求均有 request.accepted 和最终/补偿状态；包括正常、拒绝、静态资源、内部管理、模型调用及失败请求。连接在形成 HTTP 请求前失败时记 connection/security 事件并带 connection_id，不虚构完整请求。业务 WS 支持时，每个业务消息有 message_id，与连接握手请求分开。
+所有被 Xshield 解析接收的 HTTP 请求均有 request.accepted 和最终/补偿状态；包括正常、拒绝、静态资源、内部管理、模型调用及失败请求。连接在形成 HTTP 请求前失败时记 connection/security 事件并带 connection_id，不虚构完整请求。业务 WS（站点自身的 WebSocket 流量，docs/22 M2）已支持：每个业务消息有 message_id，与连接握手请求分开（见 11.15 `business_ws.*`）；这一增量只做 OBSERVE 覆盖，握手时鉴权一次，不逐帧重新鉴权，也不对帧内容加解密。
 
 ## 11.2 ID 体系
 
@@ -238,6 +238,7 @@ API Key 管理事件新增强类型 `target_api_key_id=key_…`（`key_` + UUIDv
 | `edge.response` / `edge.unknown` | 边缘自己产生的响应（拒绝、传感器资源、引导）；`edge_state` 分别为 `response_served`/`unknown`，已送出的响应必须有 100–599 状态码，未知交付可为空；源站响应仍使用 `origin.*` |
 | `evidence.captured` | 固定 `evidence_capture/PASS/EVIDENCE_CAPTURED`，`confidence=null`，恰好一个 artifact 引用和一个 catalog 因果事件，属于某个请求 |
 | `sensor.observation` | 浏览器上报的生命周期事件，索引为 `observation` 证明、无置信度：`claim_status` 必须是 `client_claimed`，`authorization_effect` 必须是 `none`；`PAGE_READY` 当且仅当序号为 1，序号 1–64；binding、`pgh_`/`nav_` 句柄、请求引用、构建与调用点指纹逐项强类型校验；`action_hint` 是 256 字节内的可打印 ASCII 文本，且绝不含动作引用（`action.`），因为引用不得进入 journal 与索引 |
+| `business_ws.closed` / `business_ws.message` | 站点自身业务 WebSocket 连接的代理审计（docs/22 M2，OBSERVE 覆盖；区别于探针 WSS 的 `sensor.observation`）。握手本身已作为普通已放行请求审计过；升级成功后，`business_ws.closed` 是连接级汇总（`operation_id`、双向消息/字节计数、`degraded`、`duration_us`），链上最多再带 256 条 `business_ws.message`（`direction` 为 `to_origin`/`to_client`，`kind` 为 `text`/`binary`/`close`/`ping`/`pong`/`other`，`byte_len`、`frame_count`、`degraded`）；索引均为 `observation` 证明、无置信度，不含帧内容；一条消息的 `message_id` 即其 `event_id`，与握手请求的 `request_id` 分开（11.1）；超过 256 条明细后仍计入汇总但不再逐条记录，`degraded` 置真 |
 
 这些事件只是审计事实，不是授权真值：浏览器观测从不改变任何放行结果，加密事件只含摘要与覆盖，不含明文或密钥材料。
 

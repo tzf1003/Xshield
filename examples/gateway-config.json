@@ -144,6 +144,19 @@
       "resource_type": "record",
       "view_profile": "shared_summary",
       "resource_query_parameter": "record_id"
+    },
+    {
+      "operation_id": "chat.ws",
+      "method": "GET",
+      "path": "/ws/chat",
+      "admission": "PUBLIC",
+      "source_action": null,
+      "resource_type": null,
+      "view_profile": null,
+      "business_websocket": {
+        "adapter_revision": "chat-ws-r1",
+        "max_observed_frame_bytes": 65536
+      }
     }
   ]
 }
