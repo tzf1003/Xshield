@@ -362,6 +362,7 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"auth.context.switch.same","method":"POST","path":"/account-switch-same","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
     {"operation_id":"auth.logout","method":"POST","path":"/logout","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"auth_revoke":{"success_status":200}}},
     {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
+    {"operation_id":"account.sealed","method":"GET","path":"/sealed-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"crypto":{"mode":"DIRECT_ENCRYPT","adapter_revision":"sealed-account-r1","key_id":"response-key-future","key_not_before":4000000000,"key_expires_at":4102444800,"message_ttl_seconds":60,"max_envelope_bytes":3072},"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.paged","method":"GET","path":"/paged-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"query_pagination":{"parameters":[{"name":"page","kind":"page"},{"name":"page_size","kind":"page_size","max_value":50}]},"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.slow","method":"GET","path":"/slow-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.current","method":"GET","path":"/whoami","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
@@ -412,6 +413,7 @@ class Handler(BaseHTTPRequestHandler):
             "/account-switch-same": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"other-business-token"}',
             "/logout": b'{"logged_out":true}',
             "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
+            "/sealed-account": b'{"orders":[{"id":"order-sealed"}]}',
             "/paged-account?page=2&page_size=20": b'{"orders":[{"id":"order-refresh"}]}',
             "/paged-account": b'{"orders":[{"id":"order-refresh"}]}',
             "/slow-account": b'{"orders":[{"id":"order-late"}]}',
@@ -492,6 +494,7 @@ XSHIELD_JOURNAL_KEY_HEX_FILE="$test_dir/journal.key" \
 XSHIELD_DATABASE_URL_FILE="$test_dir/database.url" \
 XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
 XSHIELD_SHARE_TOKEN_KEY_HEX="$share_token_key" \
+XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX="9999999999999999999999999999999999999999999999999999999999999999" \
     "${CARGO_TARGET_DIR:-$repo_root/target}/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!
 
@@ -677,6 +680,30 @@ login_action_ref=$(python3 -c \
     'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["orders"][0]["_xshield_action_ref"])' \
     "$test_dir/new-account.body")
 [[ "$login_action_ref" == action.* ]]
+
+# Grants are written only after every release step: when response encryption
+# fails (here the key's lease has not begun), the origin's list is withheld and
+# none of its items becomes a grant, an action, or a grant event.
+sealed_status=$(curl -sS -o "$test_dir/sealed-account.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    http://127.0.0.1:6288/sealed-account)
+[[ "$sealed_status" == "502" ]]
+grep -q '"reason_code":"RESPONSE_CRYPTO_KEY_UNAVAILABLE"' "$test_dir/sealed-account.json"
+refute grep -q 'order-sealed' "$test_dir/sealed-account.json"
+grep -q '/sealed-account' "$test_dir/origin.log"
+sealed_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT
+    (SELECT count(*) FROM xshield.response_evidence
+     WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+       AND source_operation_id = 'account.sealed'),
+    (SELECT count(*) FROM xshield.audit_outbox
+     WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+       AND event_type = 'response_grant.issued'
+       AND envelope->'payload'->>'source_operation_id' = 'account.sealed');
+SQL
+)
+[[ "$sealed_state" == "0|0" ]]
 
 # A grant-issuing root list admits no query string: the caller must not choose
 # whose objects it lists, because every item it returns becomes a grant.

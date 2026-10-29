@@ -76,8 +76,8 @@ use crate::durable_audit::{
     SensorObservationAudit, new_trace_id, supervise_recovery,
 };
 use crate::protected_identity::{
-    CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity,
-    SensorBootstrapDelivery, WAF_COOKIE, store_failure_reason, strip_edge_proofs,
+    CompatibilityEvidence, PendingAuthBinding, PreparedResponseGrants, ProtectedIdentity,
+    ResponseIdentity, SensorBootstrapDelivery, WAF_COOKIE, store_failure_reason, strip_edge_proofs,
 };
 use crate::sensor_delivery::{
     SensorScript, bootstrap_document, respond_sensor_bootstrap, respond_sensor_script,
@@ -209,6 +209,9 @@ struct RequestContext {
     page_action_audit: Option<PageActionAudit>,
     anonymous_session_cookie: Option<String>,
     pending_auth_binding: Option<PendingAuthBinding>,
+    // Grants the released body references, written only once every release
+    // step (response encryption included) has succeeded.
+    pending_response_grants: Option<PreparedResponseGrants>,
     response_failure: Option<ReasonCode>,
     origin_status: Option<u16>,
     origin_response_complete: bool,
@@ -267,6 +270,7 @@ impl ProxyHttp for Gateway {
             page_action_audit: None,
             anonymous_session_cookie: None,
             pending_auth_binding: None,
+            pending_response_grants: None,
             response_failure: None,
             origin_status: None,
             origin_response_complete: false,
@@ -849,9 +853,10 @@ impl ProxyHttp for Gateway {
                     .and_then(|body| self.commit_auth_binding(session, context, body))
                     .and_then(|body| self.commit_auth_transition(session, context, body))
                     .and_then(|body| self.commit_auth_revoke(session, context, body))
-                    .and_then(|body| self.commit_response_grants(session, context, body))
+                    .and_then(|body| self.prepare_response_grants(session, context, body))
                     .and_then(|body| self.commit_response_share(session, context, body))
-                    .and_then(|body| self.encrypt_response(session, context, body));
+                    .and_then(|body| self.encrypt_response(session, context, body))
+                    .and_then(|body| self.commit_response_grants(context, body));
                 match released {
                     Ok(released) => *body = Some(released),
                     Err(reason) => {
@@ -1548,10 +1553,13 @@ impl Gateway {
         })
     }
 
-    fn commit_response_grants(
+    /// Derives the response's grants and injects their action references, but
+    /// writes nothing: a later release step can still withhold the body, and a
+    /// grant must never outlive a response the client did not receive.
+    fn prepare_response_grants(
         &self,
         session: &Session,
-        context: &RequestContext,
+        context: &mut RequestContext,
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
@@ -1585,8 +1593,8 @@ impl Gateway {
             .map_err(|_| ReasonCode::ClockUnavailable)?;
         // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
         // barrier to an async body hook when the proxy API provides one.
-        let action_refs = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(identity.commit_response_grants(
+        let prepared = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(identity.prepare_response_grants(
                 context.config(self),
                 response_identity,
                 operation,
@@ -1598,14 +1606,38 @@ impl Gateway {
                 now,
             ))
         })?;
-        let Some(action_refs) = action_refs else {
+        let Some(prepared) = prepared else {
             return Ok(body);
         };
-        operation
+        let body = operation
             .rule
-            .inject_action_refs(&body, &action_refs)
+            .inject_action_refs(&body, &prepared.action_refs())
             .map(Bytes::from)
-            .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)
+            .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)?;
+        context.pending_response_grants = Some(prepared);
+        Ok(body)
+    }
+
+    /// Writes the prepared grants as the last step before the body is
+    /// released; a failure here still withholds the body.
+    fn commit_response_grants(
+        &self,
+        context: &mut RequestContext,
+        body: Bytes,
+    ) -> Result<Bytes, ReasonCode> {
+        let Some(prepared) = context.pending_response_grants.take() else {
+            return Ok(body);
+        };
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or(ReasonCode::GrantSourceIneligible)?;
+        // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
+        // barrier to an async body hook when the proxy API provides one.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(identity.persist_response_grants(&prepared))
+        })?;
+        Ok(body)
     }
 
     fn commit_response_share(
