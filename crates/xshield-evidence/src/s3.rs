@@ -36,14 +36,15 @@ mod tests;
 
 use crate::{
     EvidenceError, EvidenceKey, EvidenceManifest, EvidenceOrphanCandidate, EvidencePurgeOutcome,
-    EvidenceWrite, MANIFEST_BYTES_MAX, NONCE_BYTES, TAG_BYTES, VerifiedEvidenceManifest,
-    decode_authenticated_manifest, lower_hex, open_envelope, seal, validate_artifact_id,
-    validate_manifest, validate_manifest_fields, validate_vault_policy,
+    EvidenceWrite, LocalEvidenceVault, MANIFEST_BYTES_MAX, NONCE_BYTES, TAG_BYTES,
+    VerifiedEvidenceManifest, decode_authenticated_manifest, hide_absence, lower_hex,
+    open_envelope, read_private_bounded, seal, validate_artifact_id, validate_manifest,
+    validate_manifest_fields, validate_vault_policy,
 };
 use chrono::{DateTime, Utc};
 use client::S3Client;
 use openssl::sha::sha256;
-use std::{fmt, time::Duration};
+use std::{fmt, io, time::Duration};
 use url::Url;
 use xshield_core::domain::{SiteId, TenantId};
 use zeroize::Zeroizing;
@@ -82,6 +83,15 @@ pub enum S3ObjectLockMode {
     Governance,
     /// No principal, including the account root, can delete before expiry.
     Compliance,
+}
+
+/// Durable result of one [`S3EvidenceVault::migrate_from_local`] attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvidenceMigrationOutcome {
+    /// The ciphertext and both sidecars were newly written to the bucket.
+    Migrated,
+    /// The bucket already held this artifact; every write was a no-op.
+    AlreadyMigrated,
 }
 
 /// Server-side encryption with AWS KMS, requested on every write in addition
@@ -728,6 +738,99 @@ impl S3EvidenceVault {
         }
         self.client.delete(&key, head.version_id.as_deref())?;
         Ok(EvidencePurgeOutcome::Removed)
+    }
+
+    /// Copies one complete, not-yet-expired generic evidence object out of
+    /// `local` into this bucket, unchanged: the same ciphertext, typed
+    /// manifest and manifest HMAC bytes, locked (if configured) to the same
+    /// `expires_at`. The catalog keeps pointing at the same artifact ID
+    /// either way, since both backends store identical objects (see the
+    /// module docs).
+    ///
+    /// Already-expired local objects are left to the local retention pass:
+    /// no reader can authorize them on either backend, so there is nothing
+    /// to gain from copying them before they are purged.
+    ///
+    /// Every write is create-only, so re-running this on an
+    /// already-migrated artifact is a safe no-op: see
+    /// [`EvidenceMigrationOutcome::AlreadyMigrated`]. A migration tool may
+    /// always retry the whole vault after a partial failure or a restart.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError::InvalidConfig`] when `local` and this bucket
+    /// were not opened with the same key id; [`EvidenceError::NotAvailable`]
+    /// for an artifact id with no local object, or one already expired;
+    /// [`EvidenceError::CorruptEvidence`] when the local manifest, HMAC or
+    /// ciphertext digest does not check out, or when what lands in the
+    /// bucket does not read back as the same manifest. Otherwise as a
+    /// failed local read or bucket request.
+    pub fn migrate_from_local(
+        &self,
+        local: &LocalEvidenceVault,
+        artifact_id: &str,
+    ) -> Result<EvidenceMigrationOutcome, EvidenceError> {
+        if self.key_id != local.config.key_id {
+            return Err(EvidenceError::InvalidConfig);
+        }
+        validate_artifact_id(artifact_id)?;
+        let manifest_name = format!("{artifact_id}.manifest.json");
+        let hmac_name = format!("{artifact_id}.manifest.hmac");
+        let manifest_bytes =
+            read_private_bounded(&local.config.root.join(&manifest_name), MANIFEST_BYTES_MAX)
+                .map_err(hide_absence)?;
+        let manifest_auth =
+            read_private_bounded(&local.config.root.join(&hmac_name), 32).map_err(hide_absence)?;
+        let manifest =
+            decode_authenticated_manifest(&local.root_key, &manifest_bytes, &manifest_auth)?;
+        let tenant_id =
+            TenantId::parse(&manifest.tenant_id).map_err(|_| EvidenceError::CorruptEvidence)?;
+        let site_id =
+            SiteId::parse(&manifest.site_id).map_err(|_| EvidenceError::CorruptEvidence)?;
+        let expires_at = validate_manifest_fields(
+            &manifest,
+            &tenant_id,
+            &site_id,
+            artifact_id,
+            &local.config.key_id,
+        )?;
+        if expires_at <= Utc::now() {
+            return Err(EvidenceError::NotAvailable);
+        }
+        let envelope = read_private_bounded(
+            &local.config.root.join(&manifest.storage.locator),
+            self.max_envelope_bytes(),
+        )
+        .map_err(hide_absence)?;
+        if lower_hex(&sha256(&envelope)) != manifest.integrity.digest {
+            return Err(EvidenceError::CorruptEvidence);
+        }
+        let scope = self.scope(&tenant_id, &site_id);
+        let already_present = self
+            .load_authenticated_manifest(&tenant_id, &site_id, artifact_id)?
+            .is_some();
+        for (key, bytes) in [
+            (
+                format!("{scope}{}", manifest.storage.locator),
+                envelope.as_slice(),
+            ),
+            (format!("{scope}{manifest_name}"), manifest_bytes.as_slice()),
+            (format!("{scope}{hmac_name}"), manifest_auth.as_slice()),
+        ] {
+            match self.client.put_new(&key, bytes, expires_at) {
+                Ok(()) => {}
+                Err(EvidenceError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let verified = self.read_manifest_at(&tenant_id, &site_id, artifact_id, Utc::now())?;
+        if verified.manifest() != &manifest {
+            return Err(EvidenceError::CorruptEvidence);
+        }
+        Ok(if already_present {
+            EvidenceMigrationOutcome::AlreadyMigrated
+        } else {
+            EvidenceMigrationOutcome::Migrated
+        })
     }
 
     fn scope(&self, tenant_id: &TenantId, site_id: &SiteId) -> String {
