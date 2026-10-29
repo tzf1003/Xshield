@@ -3503,7 +3503,7 @@ async fn apply_site_snapshot(
         .iter()
         .map(PlanInput::from_store)
         .collect::<Vec<_>>();
-    let plan = match plan_snapshot(&inputs, target_site, target_apply) {
+    let mut plan = match plan_snapshot(&inputs, target_site, target_apply) {
         Ok(plan) => plan,
         Err(reason) => {
             // Failures the target is itself responsible for are recorded on
@@ -3530,76 +3530,117 @@ async fn apply_site_snapshot(
             return Err(reason);
         }
     };
-    // A site whose projection cannot be produced is never sent with a
-    // substitute: nothing is published and the target records why.
-    let Ok(sites) = plan
-        .served
-        .iter()
-        .map(|site| {
-            Ok(GatewayApplySite {
-                site_id: site.site_id.as_str().to_owned(),
-                listen_port: site.config.listen_port,
-                public_origin: site.config.public_origin.clone(),
-                gateway_config: site
-                    .config
-                    .gateway_config(control.config.tenant_id.as_str(), &site.site_id)?,
-                revision: site.revision,
+    // Sites the edge itself excludes by naming a descriptor conflict, held
+    // at their last approved configuration like any other held-back site
+    // and reported the same way once the smaller snapshot is live. Each
+    // retry removes exactly the one site the edge named from `confirmed`,
+    // so the loop is bounded by its length at the start and always either
+    // makes progress or returns.
+    let mut descriptor_conflicts: Vec<(SiteId, u64, String)> = Vec::new();
+    loop {
+        // A site whose projection cannot be produced is never sent with a
+        // substitute: nothing is published and the target records why.
+        let Ok(sites) = plan
+            .served
+            .iter()
+            .map(|site| {
+                Ok(GatewayApplySite {
+                    site_id: site.site_id.as_str().to_owned(),
+                    listen_port: site.config.listen_port,
+                    public_origin: site.config.public_origin.clone(),
+                    gateway_config: site
+                        .config
+                        .gateway_config(control.config.tenant_id.as_str(), &site.site_id)?,
+                    revision: site.revision,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, xshield_core::domain::InvalidValue>>()
-    else {
-        control
-            .catalog
-            .mark_protected_site_apply_failed(
-                &control.config.tenant_id,
-                target_site,
-                target_apply.desired_revision,
-                &target_apply.apply_id,
-                "EDGE_APPLY_PAYLOAD_INVALID",
-            )
-            .await
-            .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
-        return Err("EDGE_APPLY_PAYLOAD_INVALID");
-    };
-    let request = GatewayApplyRequest {
-        protocol_version: 1,
-        tenant_id: control.config.tenant_id.as_str().to_owned(),
-        apply_id: target_apply.apply_id.clone(),
-        snapshot_revision: snapshot.revision,
-        sites,
-    };
-    if let Err(refusal) = client.apply(&request).await {
+            .collect::<Result<Vec<_>, xshield_core::domain::InvalidValue>>()
+        else {
+            control
+                .catalog
+                .mark_protected_site_apply_failed(
+                    &control.config.tenant_id,
+                    target_site,
+                    target_apply.desired_revision,
+                    &target_apply.apply_id,
+                    "EDGE_APPLY_PAYLOAD_INVALID",
+                )
+                .await
+                .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            return Err("EDGE_APPLY_PAYLOAD_INVALID");
+        };
+        let request = GatewayApplyRequest {
+            protocol_version: 1,
+            tenant_id: control.config.tenant_id.as_str().to_owned(),
+            apply_id: target_apply.apply_id.clone(),
+            snapshot_revision: snapshot.revision,
+            sites,
+        };
+        let Err(refusal) = client.apply(&request).await else {
+            break;
+        };
         // A descriptor conflict is a property of the one site the edge
-        // names, so that site carries it and the target, which caused
-        // nothing, stays pending. The unsigned name is honoured only when it
-        // is a sibling this snapshot carried as its desired revision;
-        // otherwise (no name, the target itself, a site held back or not
-        // sent at all) the target carries the failure as before.
-        let (site, revision, apply_id) = refusal
+        // names. When it names a sibling this snapshot carried as a desired
+        // revision (never the target), that site alone is excluded and the
+        // smaller snapshot is retried, so a conflict it did not cause never
+        // blocks the change that triggered this apply. Any other name (none,
+        // the target itself, a site already held back or not sent at all)
+        // leaves the failure on the target, as before.
+        let named_index = refusal
             .site_id
             .as_ref()
             .filter(|named| *named != target_site)
-            .and_then(|named| plan.confirmed.iter().find(|(site, _, _)| site == named))
-            .map_or(
-                (
+            .and_then(|named| plan.confirmed.iter().position(|(site, _, _)| site == named));
+        let Some(index) = named_index else {
+            control
+                .catalog
+                .mark_protected_site_apply_failed(
+                    &control.config.tenant_id,
                     target_site,
                     target_apply.desired_revision,
-                    target_apply.apply_id.as_str(),
-                ),
-                |(site, revision, apply_id)| (site, *revision, apply_id.as_str()),
-            );
-        control
-            .catalog
-            .mark_protected_site_apply_failed(
-                &control.config.tenant_id,
-                site,
-                revision,
-                apply_id,
-                refusal.reason,
-            )
-            .await
-            .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
-        return Err(refusal.reason);
+                    &target_apply.apply_id,
+                    refusal.reason,
+                )
+                .await
+                .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            return Err(refusal.reason);
+        };
+        let excluded = plan.confirmed.remove(index);
+        plan.served.retain(|site| site.site_id != excluded.0);
+        if let Some(input) = inputs.iter().find(|input| input.site_id == excluded.0)
+            && let (Some(previous), Some(previous_revision)) =
+                (input.active_config.as_ref(), input.active_revision)
+            && previous.is_serving()
+        {
+            plan.served.push(ServedSite {
+                site_id: excluded.0.clone(),
+                config: previous.clone(),
+                revision: previous_revision,
+            });
+        }
+        // The excluded site may now serve its last approved port, which
+        // another site's desired revision could since have claimed; the
+        // edge would refuse the whole smaller snapshot too.
+        let mut ports = std::collections::BTreeSet::new();
+        if !plan
+            .served
+            .iter()
+            .all(|site| ports.insert(site.config.listen_port))
+        {
+            control
+                .catalog
+                .mark_protected_site_apply_failed(
+                    &control.config.tenant_id,
+                    target_site,
+                    target_apply.desired_revision,
+                    &target_apply.apply_id,
+                    "CONTROL_SITE_PORT_UNAVAILABLE",
+                )
+                .await
+                .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            return Err("CONTROL_SITE_PORT_UNAVAILABLE");
+        }
+        descriptor_conflicts.push(excluded);
     }
     if !control
         .catalog
@@ -3610,9 +3651,10 @@ async fn apply_site_snapshot(
         return Err("CONTROL_SITE_APPLY_STATE_UNAVAILABLE");
     }
     // The snapshot is live. Sites that were held back because their desired
-    // configuration does not compile, or would reuse a label for another
-    // descriptor set, are reported on their own status; this is
-    // informational, so a failure to record it does not undo the apply.
+    // configuration does not compile, would reuse a label for another
+    // descriptor set, or were excluded after the edge named a descriptor
+    // conflict, are reported on their own status; this is informational, so
+    // a failure to record it does not undo the apply.
     let held_back = plan
         .invalid
         .iter()
@@ -3621,6 +3663,13 @@ async fn apply_site_snapshot(
             plan.reused
                 .iter()
                 .map(|(site, revision, apply_id, reason)| (site, revision, apply_id, *reason)),
+        )
+        .chain(
+            descriptor_conflicts
+                .iter()
+                .map(|(site, revision, apply_id)| {
+                    (site, revision, apply_id, "EDGE_APPLY_DESCRIPTOR_CONFLICT")
+                }),
         );
     for (site, revision, apply_id, reason) in held_back {
         let _ = control
