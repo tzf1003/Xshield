@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 确定 SQLi/XSS 等通用签名检测由部署在 Xshield 之前的现有 WAF/CDN 承担（docs/24 ADR-013、docs/02 2.3、docs/19 19.2）：首版不自研签名引擎，也不实现 BaselineInspectionPort 适配器。部署说明写明链路、PROXY protocol 传递客户端地址、两段网络放行、TLS 重新加密、审计边界与受保护路径不缓存的要求。仅文档变更。
+
 - S3 兼容证据存储与 Object Lock（可行性建议 P2 #10，docs/12 12.10、docs/19 19.4）：此前证据只能写本地私有目录，且只允许一个网关写入。
   - 新增 `S3EvidenceVault`：对象格式与本地相同，写入一律 `If-None-Match: *`，多实例可共用一个桶；可选 `compliance`/`governance` 锁定到对象到期时间，打开时探测存储桶，要求锁定而桶未开启时拒绝启动。清理按读到并核对过的版本永久删除，不留删除标记后的旧版本；孤儿扫描跳过锁未到期的对象。
   - 网关写入、控制面读取与清理（网关内置和 `xshield-evidence-retain`）通过 `XSHIELD_EVIDENCE_BACKEND=s3` 与 `XSHIELD_EVIDENCE_S3_*` 切换；不设置时行为不变。新增 `EvidenceVault` 统一两种后端；清理轮次的校准两类对象只在本地后端执行。

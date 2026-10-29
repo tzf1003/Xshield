@@ -47,3 +47,15 @@
 ## ADR-012｜不把规则命中伪装成模型置信度
 
 状态：采纳。proof_kind、outcome、概率、confidence、风险和覆盖独立。后果：前后端必须支持 null/不适用与未知，不能要求每层都有一个百分数。
+
+## ADR-013｜SQLi/XSS 等通用签名检测由前置的现有 WAF/CDN 承担
+
+状态：采纳（2026-10-29）。Xshield 的价值在界面操作来源、身份绑定与资格准入，以及全链路审计；成熟的 SQLi/XSS 规则库、DDoS 清洗与通用 Bot 管理已由现有 WAF/CDN 提供，首版不自研签名引擎，也不实现 2.3 的 BaselineInspectionPort 适配器。部署链路固定为：客户端 → 现有 WAF/CDN（签名规则、清洗）→ Xshield edge（来源准入、资格、加密接管、审计）→ 源站。
+
+后果：
+- edge 不执行基线检测阶段；站点策略的 `waf.blocked_query_fragments` 只是有界的查询片段拒绝列表，不能当作签名规则库对外宣称。没有前置 WAF/CDN 的部署不具备通用注入防护，接入评审必须确认这一层存在。
+- 客户端地址经 PROXY protocol 从前置层传入（19“Edge 传输配置”与“按来源限流”）；edge 不信任 `X-Forwarded-For` 等转发头。前置层不支持 PROXY protocol 时，所有客户端在 edge 上归为同一来源，按来源限流与匿名会话来源指纹退化为站点总量。
+- 前置层拦截的请求不进入 Xshield 审计，调查时需结合前置层自身日志；Xshield 审计只覆盖到达 edge 的请求。
+- 源站只接受来自 Xshield edge 的连接，edge 的数据面只接受来自前置层的连接（网络策略或 PROXY 可信地址列表），否则可绕过任一层。
+- 以后若要内置签名检测，按 2.3 新增 BaselineInspectionPort 适配器并另立 ADR，不改变本 ADR 对已部署站点的要求。
+
