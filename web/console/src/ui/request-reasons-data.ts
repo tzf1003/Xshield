@@ -1439,6 +1439,24 @@ export const reasonData: Readonly<Record<string, ReasonTuple>> = {
     "调用方提交的案件 ID 不是规范格式，请求被拒绝。",
     "改用规范的案件 ID（case_ 前缀）后重新请求。",
   ],
+  CONTROL_CASE_JOB_LIST_BUSY: [
+    "error",
+    "案件任务列表繁忙",
+    "案件与证据相关读取的在途容量已占满，本次案件任务列表请求被拒绝。",
+    "稍后重试。",
+  ],
+  CONTROL_CASE_JOB_LIST_REQUEST_INVALID: [
+    "deny",
+    "案件任务列表请求无效",
+    "案件任务列表只接受可选的 cursor 参数，其余形状被拒绝。",
+    "去掉多余参数后重新读取，或从第一页开始。",
+  ],
+  CONTROL_CASE_JOBS_READ: [
+    "info",
+    "已读取案件任务列表",
+    "一次该案件已产生的任务列表的管理读取已记入审计日志。",
+    "无需处理。",
+  ],
   CONTROL_IDEMPOTENCY_CONFLICT: [
     "deny",
     "幂等键冲突",

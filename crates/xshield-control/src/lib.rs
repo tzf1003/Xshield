@@ -12,6 +12,7 @@ mod case_close;
 mod case_collection;
 mod case_holds;
 mod case_items;
+mod case_job_list;
 mod case_list;
 mod causality;
 mod coverage_report;
@@ -4521,6 +4522,10 @@ pub fn routers(control: ControlPlane) -> (Router, Router, Arc<ControlPlane>) {
             post(jobs::analyze_handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(
+            case_job_list::PATH,
+            get(case_job_list::handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
             case_items::PATH,
             post(case_items::handler)
                 .get(case_collection::handler)
@@ -5532,6 +5537,7 @@ mod tests {
     mod case_holds;
     mod case_holds_postgres;
     mod case_items;
+    mod case_job_list;
     mod case_list;
     mod causality;
     mod control_ops;

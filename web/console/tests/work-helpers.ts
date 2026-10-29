@@ -119,6 +119,16 @@ export function jobListFixture() {
   };
 }
 
+/** Every job one case has produced: the same two jobs, scoped to a case instead of a caller. */
+export function caseJobListFixture(caseId = CASE_ID) {
+  const list = jobListFixture();
+  return {
+    ...list,
+    case_id: caseId,
+    items: list.items.map(({ case_id: _caseId, ...item }) => item),
+  };
+}
+
 /** Every job in the scope, with each submitter's reference, for the audit administrator. */
 export function adminJobListFixture() {
   const mine = jobListFixture();
@@ -227,6 +237,8 @@ function defaults(url: URL, method: string, body: Record<string, unknown> | null
     if (path === "/control/v1/cases") return { body: casesPage() };
     let match = /^\/control\/v1\/cases\/(case_[^/]+)\/items$/.exec(path);
     if (match?.[1]) return { body: collection(match[1]) };
+    match = /^\/control\/v1\/cases\/(case_[^/]+)\/jobs$/.exec(path);
+    if (match?.[1]) return { body: caseJobListFixture(match[1]) };
     match = /^\/control\/v1\/cases\/(case_[^/]+)\/holds$/.exec(path);
     if (match?.[1]) return { body: holds(match[1]) };
     if (path === "/control/v1/evidence-access-requests") {
