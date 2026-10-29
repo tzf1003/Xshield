@@ -13,11 +13,11 @@
 
 use std::{env, error::Error, sync::Arc, thread, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
-use xshield_evidence::LocalEvidenceVault;
+use xshield_evidence::{EvidenceVault, S3EvidenceStoreConfig};
 use xshield_postgres::PostgresIdentityStore;
 use xshield_postgres::retention_pass::{
     DEFAULT_ORPHAN_GRACE, MAX_ORPHAN_GRACE, RETENTION_BATCH_LIMIT_MAX, RetentionPassReport,
-    open_retention_vault, run_retention_pass,
+    open_retention_vault, open_s3_retention_vault, run_retention_pass,
 };
 use zeroize::Zeroizing;
 
@@ -31,7 +31,7 @@ pub(crate) struct EvidenceRetention {
     limit: u16,
     orphan_grace: Duration,
     key_id: String,
-    vault: LocalEvidenceVault,
+    vault: EvidenceVault,
     writer: Arc<EvidenceWriter>,
     tenant: TenantId,
     site: SiteId,
@@ -70,7 +70,16 @@ impl EvidenceRetention {
         }
         let key_id = env::var("XSHIELD_EVIDENCE_KEY_ID")?;
         let key = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
-        let vault = open_retention_vault(writer.root(), &key_id, &key)?;
+        let vault = match writer.root() {
+            Some(root) => open_retention_vault(root, &key_id, &key)?,
+            None => open_s3_retention_vault(
+                S3EvidenceStoreConfig::from_env()
+                    .map_err(|error| error.to_string())?
+                    .ok_or("evidence retention needs the writer's backend")?,
+                &key_id,
+                &key,
+            )?,
+        };
         Ok(Some(Self {
             interval: Duration::from_secs(interval),
             limit,

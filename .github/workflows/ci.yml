@@ -26,6 +26,7 @@ jobs:
       images: ${{ steps.diff.outputs.images }}
       oidc: ${{ steps.diff.outputs.oidc }}
       fuzz: ${{ steps.diff.outputs.fuzz }}
+      evidence: ${{ steps.diff.outputs.evidence }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,7 +37,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$EVENT" != "pull_request" ]; then
-            printf 'web=true\nimages=true\noidc=true\nfuzz=true\n' >> "$GITHUB_OUTPUT"
+            printf 'web=true\nimages=true\noidc=true\nfuzz=true\nevidence=true\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files=$(git diff --name-only "$BASE"...HEAD)
@@ -47,6 +48,7 @@ jobs:
             echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|sensor/|migrations/|tests/site-config/|deploy/|dev/keycloak/|scripts/test_(compose|helm)_deployment\.sh|\.github/)')"
             echo "oidc=$(match '^(crates/xshield-(control|audit|core)/|Cargo\.(toml|lock)|rust-toolchain\.toml|scripts/(test_oidc|lib/)|dev/keycloak/|web/console/|migrations/|\.github/)')"
             echo "fuzz=$(match '^(crates/xshield-(core|gateway|audit)/|sensor/src/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|tests/site-config/|\.github/)')"
+            echo "evidence=$(match '^(crates/xshield-(core|evidence)/|Cargo\.(toml|lock)|rust-toolchain\.toml|\.github/)')"
           } >> "$GITHUB_OUTPUT"
 
   validate:
@@ -214,6 +216,43 @@ jobs:
           (cd web/console && npx playwright install --with-deps chromium --only-shell)
           scripts/test_oidc_browser.sh
         timeout-minutes: 10
+
+  # The S3 evidence backend (docs/12 12.10) against a real MinIO: SigV4 as a
+  # server checks it, create-only writes, Object Lock refusing early deletion,
+  # version-exact purge and orphan listing. MinIO's own image is no longer
+  # published, so this is Chainguard's build, pinned by digest. A service
+  # container cannot pass `server`, hence `docker run`.
+  object-storage:
+    needs: changes
+    if: needs.changes.outputs.evidence == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      XSHIELD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      XSHIELD_TEST_S3_ACCESS_KEY_ID: xshieldtest
+      XSHIELD_TEST_S3_SECRET_ACCESS_KEY: xshieldtestsecret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER="$XSHIELD_TEST_S3_ACCESS_KEY_ID" \
+            -e MINIO_ROOT_PASSWORD="$XSHIELD_TEST_S3_SECRET_ACCESS_KEY" \
+            cgr.dev/chainguard/minio@sha256:e70b2b1e74d79457f808710483bd726ff364529ca30736eaa15a6ab547d3a5a7 \
+            server /tmp/data
+          for _ in $(seq 60); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          docker logs minio
+          exit 1
+      - name: S3 evidence vault against MinIO
+        run: cargo test -p xshield-evidence --lib s3_minio -- --ignored
 
   # Licenses, RustSec advisories, yanked crates and registry sources (deny.toml).
   # It reads Cargo.lock only, so it needs no database or build.

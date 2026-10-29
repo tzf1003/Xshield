@@ -42,6 +42,10 @@ KEY_ASSIGNMENT = re.compile(
 ALLOW: dict[tuple[str, str], str] = {
     ("crates/xshield-control/src/identity.rs", "url-credentials"):
         "negative test: an IdP URL with embedded credentials must be rejected; user:pass is a placeholder",
+    ("crates/xshield-evidence/src/s3/sigv4.rs", "aws-access-key-id"):
+        "the documented example access key of the AWS SigV4 test vectors the signer is checked against",
+    ("crates/xshield-evidence/src/s3/tests.rs", "url-credentials"):
+        "negative test: an S3 endpoint with embedded credentials must be rejected; user:pass is a placeholder",
     ("scripts/lib/oidc_stack.sh", "key-like-hex-literal"):
         "RFC 8032 section 7.1 test vector 1 public key: a valid Ed25519 verifying key that has no secret behind it",
     (".github/workflows/ci.yml", "key-like-hex-literal"):

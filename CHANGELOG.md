@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- S3 兼容证据存储与 Object Lock（可行性建议 P2 #10，docs/12 12.10、docs/19 19.4）：此前证据只能写本地私有目录，且只允许一个网关写入。
+  - 新增 `S3EvidenceVault`：对象格式与本地相同，写入一律 `If-None-Match: *`，多实例可共用一个桶；可选 `compliance`/`governance` 锁定到对象到期时间，打开时探测存储桶，要求锁定而桶未开启时拒绝启动。清理按读到并核对过的版本永久删除，不留删除标记后的旧版本；孤儿扫描跳过锁未到期的对象。
+  - 网关写入、控制面读取与清理（网关内置和 `xshield-evidence-retain`）通过 `XSHIELD_EVIDENCE_BACKEND=s3` 与 `XSHIELD_EVIDENCE_S3_*` 切换；不设置时行为不变。新增 `EvidenceVault` 统一两种后端；清理轮次的校准两类对象只在本地后端执行。
+  - 新依赖 `ureq` 3.5（MIT OR Apache-2.0，`default-features = false`，只开 `rustls`），用于同步的 S3 请求；新增传递依赖 `ureq-proto`、`utf8-zero`（均 MIT OR Apache-2.0），其余（rustls、webpki-roots、http、base64）已在依赖树中。SigV4 自行实现，未引入 AWS SDK。更新随 `cargo deny` 与依赖审查。
+  - 回归：SigV4 用 AWS 文档的三个签名样例单测；配置与环境变量解析单测；4 个真实 MinIO 集成测试，CI 新增 `object-storage` 作业（MinIO 镜像固定 digest）。
+  - **未覆盖**：AWS S3 本身和其他兼容服务；KMS 包裹密钥；分块与大对象；本地到 S3 的存量迁移；Helm 与 Compose 参考部署未加 S3 配置。
+
 - 控制台“拒绝与覆盖统计”页（docs/29 29.39）：上一项拒绝与覆盖统计只有接口，控制台没有入口。
   - 新增 `/investigation/coverage`（导航“流量与调查 › 拒绝与覆盖”，Observer 可见），按 UTC 时间窗（1 小时、24 小时、7 天或自定义，最多 31 天）按需生成统计：总计数与拒绝占比、按路由的流量与拒绝率、按路由与原因的拒绝、未覆盖端点的方法与路径形状，以及索引观察时间、报告摘要与截断说明。索引有缺口或待发布段时提示“不足以判断”，窗口内无流量时不给结论。
   - 页面打开、聚焦或定时都不会读取；每次点击“生成统计”才读一次，服务端照常审计。客户端严格解码：字段集合、计数嵌套、列表排序与去重、`last_seen` 在窗口内、列表与总数相加一致（截断时严格小于），路径形状只接受 edge 能产生的形状，否则按无效响应处理，不渲染。
