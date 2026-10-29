@@ -85,7 +85,7 @@ control 与 edge 之间的 HMAC 通道对三类消息分别认证，并共用同
 
 请求解密与响应加密密钥：启动配置站点使用 `request_crypto`/`response_crypto` 时，其 key-id 的密钥来自 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX`（64 位小写 hex）。经 apply 下发的站点与轮换中的新 key-id 改用密钥环 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`：值是 JSON 数组，每项 `{"tenant_id","site_id","key_id","key_hex"}`，每个方向 1–256 项，未知字段、重复的（租户、站点、key-id）、非法 key-id 或密钥都拒绝启动，错误只给出变量名与序号，不含密钥。推荐用 `_FILE` 挂载。单值变量与密钥环同时给出启动站点的同一 key-id 时拒绝启动；启动站点需要的 key-id 两处都没有时同样拒绝启动；同一密钥出现在两个方向时拒绝启动。轮换顺序：把新 key-id 加入密钥环并滚动重启 edge，发布引用新 key-id 的站点修订，确认客户端不再使用旧 key-id 后再从密钥环删除。密钥环在启动时读取，修改后需重启 edge。
 
-密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取，KMS 故障不能退回硬编码默认密钥或明文证据。
+密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取。接入外部 KMS 不在当前计划内（ADR-015）：全部密钥由运营方自行生成，经本节的环境变量/`_FILE` 注入，部署方自己负责生成、分发与轮换材料本身的机密性；S3 证据后端可选的存储桶侧 SSE-KMS（12.10 `XSHIELD_EVIDENCE_S3_SSE_KMS`）是存储层特性，与此处的应用层密钥管理无关，默认关闭、不受本决定影响。
 
 edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的持久批次完成后自动切换 producer boot。部署方预建仅封存身份可写的私有 manifest 目录，并周期运行 `xshield-audit-seal JOURNAL_DIRECTORY MANIFEST_DIRECTORY`。该进程读取 journal 密钥并独占日志签名私钥；edge 不取得签名私钥。重复任务会验证既有清单与关闭段完全一致，再处理新段。
 
@@ -123,7 +123,7 @@ edge 运维端点：设置 `XSHIELD_EDGE_OPS_LISTEN`（如 `127.0.0.1:9554`，�
 
 ## 19.6 备份与恢复
 
-PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与独立权限复制；签名验证材料和 KMS 恢复流程同样不可缺少。恢复演练包括身份 epoch、过期资格、保留 tombstone、未完成请求和重复投递。密钥丢失导致证据不可读应记录为不可恢复，而不是显示空白。
+PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与独立权限复制；签名验证材料的备份同样不可缺少。恢复演练包括身份 epoch、过期资格、保留 tombstone、未完成请求和重复投递。密钥不经 KMS 管理（19.3、ADR-015），丢失运营方自行持有的密钥导致证据不可读应记录为不可恢复，而不是显示空白。
 
 首版不作跨区域强一致承诺。新增多区域时先给出故障域、RPO/RTO、网络分区策略和实际演练报告。
 # Edge 配置发布
