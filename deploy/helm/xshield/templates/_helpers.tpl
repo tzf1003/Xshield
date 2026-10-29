@@ -37,6 +37,13 @@ Pod-level settings shared by both workloads. fsGroup lets uid 10001 read the
 Secret files (mode 0440) and create its 0700 state directories on a fresh
 volume; OnRootMismatch keeps the kubelet from adding group bits to the
 journals afterwards, which the audit readers refuse.
+
+Also decides pod scheduling: an explicit .Values.affinity always wins and is
+passed through untouched; otherwise, a workload with more than one replica
+gets a default preferred (soft) anti-affinity spreading its own pods across
+nodes by hostname (docs/19 19.9.1, ADR-014), so a single-node cluster (kind)
+still schedules every replica instead of leaving some Pending.
+Arguments: root, component, replicas.
 */}}
 {{- define "xshield.podSecurity" -}}
 securityContext:
@@ -49,23 +56,33 @@ securityContext:
     type: RuntimeDefault
 automountServiceAccountToken: false
 enableServiceLinks: false
-{{- with .Values.imagePullSecrets }}
+{{- with .root.Values.imagePullSecrets }}
 imagePullSecrets:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.nodeSelector }}
+{{- with .root.Values.nodeSelector }}
 nodeSelector:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.tolerations }}
+{{- with .root.Values.tolerations }}
 tolerations:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.affinity }}
+{{- if .root.Values.affinity }}
 affinity:
-  {{- toYaml . | nindent 2 }}
+  {{- toYaml .root.Values.affinity | nindent 2 }}
+{{- else if gt (int .replicas) 1 }}
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              {{- include "xshield.selector" (dict "root" .root "component" .component) | nindent 14 }}
 {{- end }}
-{{- with .Values.priorityClassName }}
+{{- with .root.Values.priorityClassName }}
 priorityClassName: {{ . }}
 {{- end }}
 {{- end -}}

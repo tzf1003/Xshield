@@ -1,0 +1,16 @@
+{{- if gt (int .Values.outbox.replicaCount) 1 }}
+{{- $name := include "xshield.fullname" . -}}
+# Same reasoning as poddisruptionbudget-core.yaml, for the outbox Deployment.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-outbox
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+    app.kubernetes.io/component: outbox
+spec:
+  maxUnavailable: {{ min (int .Values.podDisruptionBudget.outbox.maxUnavailable) (sub (int .Values.outbox.replicaCount) 1) }}
+  selector:
+    matchLabels:
+      {{- include "xshield.selector" (dict "root" . "component" "outbox") | nindent 6 }}
+{{- end }}

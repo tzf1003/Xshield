@@ -37,7 +37,7 @@ fn assert_no_topology(body: &str) {
 async fn ops_count_responses_and_report_an_unreachable_database() {
     let fixture = Fixture::new(10, ManagementRole::Observer);
     let access_directory = fixture.access_directory.clone();
-    let (api, ops) = routers(fixture.control);
+    let (api, ops, _state) = routers(fixture.control);
     let (status, cache, body) = get(&ops, "/livez").await;
     assert_eq!((status, cache.as_str()), (StatusCode::OK, "no-store"));
     assert_eq!(body, r#"{"live":true}"#);
@@ -109,7 +109,7 @@ async fn a_failed_access_audit_append_makes_the_control_plane_unready() {
     .unwrap();
     *fixture.control.access_journal.lock().unwrap() = journal;
     let root = fixture.access_directory.parent().unwrap().to_owned();
-    let (api, ops) = routers(fixture.control);
+    let (api, ops, _state) = routers(fixture.control);
     let mut refused = false;
     for _ in 0..32 {
         let response = api
@@ -155,7 +155,7 @@ async fn a_reachable_database_makes_the_control_plane_ready() {
         10,
     );
     let root = fixture.access_directory.parent().unwrap().to_owned();
-    let (_, ops) = routers(fixture.control);
+    let (_, ops, _state) = routers(fixture.control);
     let (status, _, body) = get(&ops, "/readyz").await;
     assert_eq!(
         (status, body.as_str()),
