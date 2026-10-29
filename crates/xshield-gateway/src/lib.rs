@@ -47,7 +47,9 @@ pub mod share_token;
 
 use auth_binding::{AuthBindingRule, AuthRevokeRule, AuthTransitionRule};
 use evidence_capture::{EvidenceCaptureDto, EvidenceCaptureRule};
-use request_crypto::{RequestCryptoObserveRule, RequestCryptoPolicy, RequestCryptoRule};
+use request_crypto::{
+    RequestCryptoEnvelopeHookRule, RequestCryptoObserveRule, RequestCryptoPolicy, RequestCryptoRule,
+};
 use response_crypto::ResponseCryptoRule;
 use response_grant::ResponseGrantRule;
 use share_response::ResponseShareRule;
@@ -478,6 +480,14 @@ enum RequestCryptoDto {
         approval_ref: String,
         expires_at: u64,
         build_fingerprints: Vec<String>,
+    },
+    EnvelopeHook {
+        adapter_revision: String,
+        max_envelope_bytes: usize,
+        max_plaintext_bytes: usize,
+        max_message_age_seconds: u64,
+        max_future_skew_seconds: u64,
+        max_active_messages: u32,
     },
 }
 
@@ -1067,7 +1077,9 @@ impl GatewayConfig {
     pub fn request_crypto_rule(&self, method: &str, path: &str) -> Option<&RequestCryptoRule> {
         match self.request_crypto_policy(method, path)? {
             RequestCryptoPolicy::Enforce(rule) => Some(rule),
-            RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
+            RequestCryptoPolicy::Observe(_)
+            | RequestCryptoPolicy::Compatibility(_)
+            | RequestCryptoPolicy::EnvelopeHook(_) => None,
         }
     }
 
@@ -1079,7 +1091,9 @@ impl GatewayConfig {
             .chain(self.path_resource_operations.iter())
             .find_map(|operation| match operation.request_crypto.as_ref()? {
                 RequestCryptoPolicy::Enforce(rule) => Some(rule.key_id()),
-                RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
+                RequestCryptoPolicy::Observe(_)
+                | RequestCryptoPolicy::Compatibility(_)
+                | RequestCryptoPolicy::EnvelopeHook(_) => None,
             })
     }
 
@@ -1423,7 +1437,9 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
                 .as_ref()
                 .and_then(|policy| match policy {
                     RequestCryptoPolicy::Enforce(rule) => Some(rule.key_id()),
-                    RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
+                    RequestCryptoPolicy::Observe(_)
+                    | RequestCryptoPolicy::Compatibility(_)
+                    | RequestCryptoPolicy::EnvelopeHook(_) => None,
                 })
         })
         .collect::<BTreeSet<_>>();
@@ -1915,6 +1931,7 @@ fn compile_query_pagination(
     QueryPaginationRule::compile(block).map_err(ConfigError::Domain)
 }
 
+#[allow(clippy::too_many_lines)]
 fn compile_request_crypto(
     dto: RequestCryptoDto,
     method: HttpMethod,
@@ -2015,7 +2032,65 @@ fn compile_request_crypto(
                     .ok_or(ConfigError::Invalid("operations.request_crypto"))?,
             }))
         }
+        RequestCryptoDto::EnvelopeHook {
+            adapter_revision,
+            max_envelope_bytes,
+            max_plaintext_bytes,
+            max_message_age_seconds,
+            max_future_skew_seconds,
+            max_active_messages,
+        } => compile_envelope_hook_request_crypto(
+            adapter_revision,
+            max_envelope_bytes,
+            max_plaintext_bytes,
+            max_message_age_seconds,
+            max_future_skew_seconds,
+            max_active_messages,
+            admission,
+        ),
     }
+}
+
+/// Session-bound keying (docs/08 §8.1) only makes sense once the request
+/// already carries a verified session; restricted to exactly
+/// `AUTHENTICATED_ROOT` rather than merely excluding `UI_ACTION_REQUIRED`,
+/// unlike the other `request_crypto` modes.
+#[allow(clippy::too_many_arguments)]
+fn compile_envelope_hook_request_crypto(
+    adapter_revision: String,
+    max_envelope_bytes: usize,
+    max_plaintext_bytes: usize,
+    max_message_age_seconds: u64,
+    max_future_skew_seconds: u64,
+    max_active_messages: u32,
+    admission: AdmissionDto,
+) -> Result<RequestCryptoPolicy, ConfigError> {
+    if !matches!(admission, AdmissionDto::AuthenticatedRoot)
+        || !valid_scoped_value(&adapter_revision)
+        || !(1..=MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES).contains(&max_envelope_bytes)
+        || max_plaintext_bytes == 0
+        || max_plaintext_bytes > max_envelope_bytes / 2
+        || !(1..=3_600).contains(&max_message_age_seconds)
+        || max_future_skew_seconds > 300
+        || !(1..=1_000_000).contains(&max_active_messages)
+    {
+        return Err(ConfigError::Invalid("operations.request_crypto"));
+    }
+    Ok(RequestCryptoPolicy::EnvelopeHook(
+        RequestCryptoEnvelopeHookRule {
+            adapter_revision,
+            max_envelope_bytes,
+            max_plaintext_bytes,
+            max_message_age_seconds,
+            max_future_skew_seconds,
+            max_active_messages,
+            max_in_flight_bytes: max_envelope_bytes
+                .checked_mul(3)
+                .and_then(|bytes| bytes.checked_add(REQUEST_CRYPTO_FIXED_IN_FLIGHT_BYTES))
+                .filter(|bytes| *bytes <= MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)
+                .ok_or(ConfigError::Invalid("operations.request_crypto"))?,
+        },
+    ))
 }
 
 fn compile_optional_response(

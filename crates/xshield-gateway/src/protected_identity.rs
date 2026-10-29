@@ -43,6 +43,7 @@ use xshield_postgres::{
 };
 use zeroize::Zeroizing;
 
+mod envelope_hook_keys;
 mod page_issue;
 mod response_issue;
 mod share_entry;

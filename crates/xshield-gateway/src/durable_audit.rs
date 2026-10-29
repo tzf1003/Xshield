@@ -25,8 +25,8 @@ use xshield_core::domain::{EventId, InvalidValue, PageEvidenceId};
 use zeroize::Zeroizing;
 
 use xshield_gateway::request_crypto::{
-    RequestCryptoCompatibilityRule, RequestCryptoEvidence, RequestCryptoObserveRule,
-    RequestCryptoRule,
+    RequestCryptoCompatibilityRule, RequestCryptoEnvelopeHookRule, RequestCryptoEvidence,
+    RequestCryptoObserveRule, RequestCryptoRule,
 };
 use xshield_gateway::response_crypto::{ResponseCryptoEvidence, ResponseCryptoRule};
 use xshield_gateway::sensor::SensorObservation;
@@ -327,6 +327,48 @@ impl RequestCryptoAudit {
             algorithm: Some(rule.algorithm()),
             adapter_revision: rule.adapter_revision().to_owned(),
             key_id: Some(rule.key_id().to_owned()),
+            approval_ref: None,
+            source_evidence_ref: None,
+            message_id: None,
+            nonce_sha256: None,
+            issued_at: None,
+            expires_at: None,
+            envelope_sha256: None,
+            rebuilt_sha256: None,
+            outcome,
+            reason_code,
+            duration_us,
+        }
+    }
+
+    /// Same success shape as [`Self::passed`], labeled `ENVELOPE_HOOK`
+    /// rather than `ENFORCE` so the two coverage modes stay distinguishable
+    /// in the audit trail.
+    pub(crate) fn envelope_hook_passed(evidence: &RequestCryptoEvidence, duration_us: u64) -> Self {
+        Self {
+            coverage_mode: "ENVELOPE_HOOK",
+            ..Self::passed(evidence, duration_us)
+        }
+    }
+
+    /// Same denial shape as [`Self::failed`], for a rule with no static
+    /// `key_id` to report.
+    pub(crate) fn envelope_hook_failed(
+        rule: &RequestCryptoEnvelopeHookRule,
+        reason_code: ReasonCode,
+        duration_us: u64,
+    ) -> Self {
+        let outcome = match reason_code {
+            ReasonCode::RequestBufferCapacityExhausted
+            | ReasonCode::RequestCryptoKeyUnavailable
+            | ReasonCode::RequestCryptoReplayStoreUnavailable => "ERROR",
+            _ => "DENY",
+        };
+        Self {
+            coverage_mode: "ENVELOPE_HOOK",
+            algorithm: Some(rule.algorithm()),
+            adapter_revision: rule.adapter_revision().to_owned(),
+            key_id: None,
             approval_ref: None,
             source_evidence_ref: None,
             message_id: None,
