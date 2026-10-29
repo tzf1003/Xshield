@@ -3,6 +3,7 @@
 
 use super::{
     S3Addressing, S3Credentials, S3EvidenceStoreConfig, S3EvidenceStoreSettings, S3ObjectLockMode,
+    S3SseKms,
 };
 use std::{env, error::Error, time::Duration};
 use xshield_core::secret_env;
@@ -40,6 +41,10 @@ impl S3EvidenceStoreConfig {
         let addressing =
             parse_addressing(env::var("XSHIELD_EVIDENCE_S3_ADDRESSING").ok().as_deref())?;
         let object_lock = parse_object_lock(&required("XSHIELD_EVIDENCE_S3_OBJECT_LOCK")?)?;
+        let sse_kms = parse_sse_kms(
+            env::var("XSHIELD_EVIDENCE_S3_SSE_KMS").ok().as_deref(),
+            env::var("XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID").ok(),
+        )?;
         let allow_plain_http = parse_flag(
             env::var("XSHIELD_EVIDENCE_S3_ALLOW_PLAIN_HTTP")
                 .ok()
@@ -65,12 +70,13 @@ impl S3EvidenceStoreConfig {
             addressing,
             credentials,
             object_lock,
+            sse_kms,
             allow_plain_http,
             request_timeout,
         })
         .map(Some)
         .map_err(|_| {
-            "invalid XSHIELD_EVIDENCE_S3_* settings (endpoint, region, bucket, prefix or timeout)"
+            "invalid XSHIELD_EVIDENCE_S3_* settings (endpoint, region, bucket, prefix, sse kms key id or timeout)"
                 .into()
         })
     }
@@ -90,6 +96,26 @@ fn parse_object_lock(value: &str) -> EnvResult<Option<S3ObjectLockMode>> {
         "governance" => Ok(Some(S3ObjectLockMode::Governance)),
         "off" => Ok(None),
         _ => Err("XSHIELD_EVIDENCE_S3_OBJECT_LOCK must be compliance, governance or off".into()),
+    }
+}
+
+/// `off` (default) keeps writes as this crate encrypts them, with no bucket
+/// request for server-side encryption. `aws-kms` asks the bucket for
+/// SSE-KMS on every write, with the optional key ID naming the CMK; without
+/// one the bucket's own default KMS key applies. A key ID without the mode
+/// set to `aws-kms` is rejected rather than silently ignored.
+fn parse_sse_kms(mode: Option<&str>, key_id: Option<String>) -> EnvResult<Option<S3SseKms>> {
+    match mode {
+        None | Some("off") => {
+            if key_id.is_some() {
+                return Err("XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID requires \
+                    XSHIELD_EVIDENCE_S3_SSE_KMS=aws-kms"
+                    .into());
+            }
+            Ok(None)
+        }
+        Some("aws-kms") => Ok(Some(S3SseKms { key_id })),
+        Some(_) => Err("XSHIELD_EVIDENCE_S3_SSE_KMS must be off or aws-kms".into()),
     }
 }
 
@@ -127,5 +153,20 @@ mod tests {
         assert!(!parse_flag(None).unwrap());
         assert!(parse_flag(Some("true")).unwrap());
         assert!(parse_flag(Some("1")).is_err());
+        assert_eq!(parse_sse_kms(None, None).unwrap(), None);
+        assert_eq!(parse_sse_kms(Some("off"), None).unwrap(), None);
+        assert_eq!(
+            parse_sse_kms(Some("aws-kms"), None).unwrap(),
+            Some(S3SseKms { key_id: None })
+        );
+        assert_eq!(
+            parse_sse_kms(Some("aws-kms"), Some("my-key".to_owned())).unwrap(),
+            Some(S3SseKms {
+                key_id: Some("my-key".to_owned())
+            })
+        );
+        assert!(parse_sse_kms(Some("off"), Some("my-key".to_owned())).is_err());
+        assert!(parse_sse_kms(None, Some("my-key".to_owned())).is_err());
+        assert!(parse_sse_kms(Some("AWS-KMS"), None).is_err());
     }
 }

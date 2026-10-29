@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- S3 证据存储：存储桶侧 SSE-KMS 与大对象 multipart 上传（docs/12 12.10、docs/19 19.4）：此前 S3 后端（#44）只测过 MinIO 的基础对象操作，未覆盖服务端加密配置，且单对象硬上限与本地后端共用的 64 MiB。
+  - 新增可选 `XSHIELD_EVIDENCE_S3_SSE_KMS`（`off`/`aws-kms`）与 `XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID`：开启后每次写入都带 `x-amz-server-side-encryption: aws:kms`，可选显式 KMS key id，留空用存储桶默认 key。这是存储桶自己的加密，叠加在证据库自身的 AEAD 信封之上，不是把应用层数据密钥交给 KMS 包裹。
+  - 密文超过 8 MiB 时改走 S3 multipart upload（`CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload`），分 8 MiB 一片；完成请求同样带 `If-None-Match: *`，create-only 语义不因分片而改变，任一步失败都先 `AbortMultipartUpload` 再把错误上抛。S3 后端的单 artifact 上限随之从 64 MiB 提到 1 GiB（本地后端不变，仍是 64 MiB），因为桶对象不必像本地一次写入那样整体放进一次 HTTP 请求。
+  - 不改变已有行为：两个新变量都是可选的，不设置时 SSE 与 multipart 阈值均不生效（小对象仍走此前的单次 `PUT`）；Object Lock、create-only、孤儿扫描与清理语义不变。
+  - 回归：配置校验新增 KMS key id 合法性与上限前置检查的单测；真实 MinIO 集成测试新增大对象 multipart 往返（含拒绝覆盖）与 SSE-KMS 往返（单次 `PUT`、multipart 各一个用例，HEAD 核对存储桶确实报告 `aws:kms`），CI `object-storage` 作业的 MinIO 启动时新增一个仅本次运行使用的临时单密钥 KMS。
+  - **未覆盖**：用 KMS 包裹应用层数据密钥本身（仍是本地 HMAC 派生）；12.4 描述的按 chunk 独立 AEAD 与逐 chunk manifest（multipart 只是同一整体信封的传输优化）；大于 1 GiB 的对象；AWS S3 本身和其他兼容服务。
+
 - 确定 SQLi/XSS 等通用签名检测由部署在 Xshield 之前的现有 WAF/CDN 承担（docs/24 ADR-013、docs/02 2.3、docs/19 19.2）：首版不自研签名引擎，也不实现 BaselineInspectionPort 适配器。部署说明写明链路、PROXY protocol 传递客户端地址、两段网络放行、TLS 重新加密、审计边界与受保护路径不缓存的要求。仅文档变更。
 
 - S3 兼容证据存储与 Object Lock（可行性建议 P2 #10，docs/12 12.10、docs/19 19.4）：此前证据只能写本地私有目录，且只允许一个网关写入。
