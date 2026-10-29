@@ -239,6 +239,7 @@ fn assert_index_rows(rows: &[IndexRow], expected: &BTreeMap<String, Value>) {
                 .as_str()
                 .unwrap()
                 .to_owned(),
+            path_template: String::new(),
             origin_state: String::new(),
             http_status: None,
             is_terminal: 0,

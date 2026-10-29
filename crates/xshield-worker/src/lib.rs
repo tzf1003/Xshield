@@ -46,10 +46,12 @@ pub use outbox::{
     publish_share_grant_outbox_batch, publish_ui_action_outbox_batch,
 };
 pub use search::{
-    AgentRunEventSummary, AgentRunSummary, AuditSearchResult, MODEL_CALL_LIST_LIMIT_MAX,
-    ModelCallEventSummary, ModelCallListPlan, ModelCallListPlanError, ModelCallListPosition,
-    ModelCallListResult, ModelCallListSummary, ModelCallSummary, SearchEventSummary,
-    SearchPosition, query_agent_run, query_audit_events, query_model_call, query_model_calls,
+    AgentRunEventSummary, AgentRunSummary, AuditSearchResult, DISCOVERED_ROUTES_LIMIT_MAX,
+    DiscoveredRouteSummary, DiscoveredRoutesPlan, DiscoveredRoutesPlanError,
+    DiscoveredRoutesResult, MODEL_CALL_LIST_LIMIT_MAX, ModelCallEventSummary, ModelCallListPlan,
+    ModelCallListPlanError, ModelCallListPosition, ModelCallListResult, ModelCallListSummary,
+    ModelCallSummary, SearchEventSummary, SearchPosition, query_agent_run, query_audit_events,
+    query_discovered_routes, query_model_call, query_model_calls,
 };
 
 #[cfg(unix)]
@@ -880,6 +882,10 @@ struct IndexRow {
     request_seq: u32,
     method: String,
     operation_id: String,
+    // Kept next to `operation_id`, matching the `AFTER operation_id` ALTER
+    // placement: non-empty only on `request.accepted` rows where no operation
+    // matched, and always empty otherwise (see `RequestAcceptedPayload`).
+    path_template: String,
     origin_state: String,
     http_status: Option<u16>,
     is_terminal: u8,
@@ -1064,6 +1070,7 @@ impl IndexRow {
             request_seq: event.request_seq,
             method: summary.method,
             operation_id: summary.operation_id,
+            path_template: summary.path_template,
             origin_state: summary.origin_state,
             http_status: summary.http_status,
             is_terminal: u8::from(summary.is_terminal),
@@ -1260,6 +1267,7 @@ struct PayloadSummary {
     model_call_id: String,
     method: String,
     operation_id: String,
+    path_template: String,
     origin_state: String,
     http_status: Option<u16>,
     is_terminal: bool,
@@ -1304,6 +1312,10 @@ struct RequestAcceptedPayload {
     method: String,
     operation_id: Option<String>,
     origin_state: String,
+    /// Only ever present when `operation_id` is absent: a bounded,
+    /// normalized template of the unmatched request path, used solely to
+    /// group route-discovery candidates. See docs/11 §11.5.
+    path_template: Option<String>,
 }
 
 impl RequestAcceptedPayload {
@@ -1314,12 +1326,18 @@ impl RequestAcceptedPayload {
                 .as_deref()
                 .is_some_and(|value| !valid_name(value))
             || self.origin_state != "not_sent"
+            || self.operation_id.is_some() && self.path_template.is_some()
+            || self
+                .path_template
+                .as_deref()
+                .is_some_and(|value| !valid_path_template(value))
         {
             return Err(PublishError::InvalidEvent);
         }
         Ok(PayloadSummary {
             method: self.method,
             operation_id: self.operation_id.unwrap_or_default(),
+            path_template: self.path_template.unwrap_or_default(),
             origin_state: self.origin_state,
             ..PayloadSummary::default()
         })
@@ -1933,6 +1951,21 @@ fn valid_event_type(value: &str) -> bool {
 
 fn valid_method(value: &str) -> bool {
     !value.is_empty() && value.len() <= 16 && value.bytes().all(|byte| byte.is_ascii_uppercase())
+}
+
+/// Bounds a route-discovery path template independently of the gateway's own
+/// normalization: an absolute, bounded path with no control bytes, whose
+/// only brace content is the exact `{id}` placeholder. This mirrors
+/// [`xshield_core::path_template::normalize`]'s own input bound rather than
+/// restricting to ASCII, so a literal non-ASCII path segment (unchanged by
+/// that heuristic) is not rejected here.
+fn valid_path_template(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= xshield_core::path_template::MAX_PATH_BYTES
+        && value.starts_with('/')
+        && !value.contains(['?', '#'])
+        && value.bytes().all(|byte| !byte.is_ascii_control())
+        && !value.replace("{id}", "").contains(['{', '}'])
 }
 
 fn valid_lower_hex(value: &str, bytes: usize) -> bool {
@@ -3593,6 +3626,64 @@ mod tests {
             r#""denied_count":5000,"denied_count":1,"#,
         );
         assert!(crate::reject_duplicate_json(duplicate.as_bytes()).is_err());
+    }
+
+    // A path template is a route-discovery aid, never an authorization or
+    // routing fact: it may be present only on the unmatched (no operation_id)
+    // shape, and even then only within a bounded, printable, `{id}`-only
+    // brace vocabulary.
+    #[test]
+    fn request_accepted_path_template_is_only_present_when_unmatched_and_bounded() {
+        let parse = |operation_id: &str, path_template: &str| {
+            PayloadSummary::parse(
+                "request.accepted",
+                &serde_json::json!({
+                    "method": "GET",
+                    "operation_id": if operation_id.is_empty() { None } else { Some(operation_id) },
+                    "origin_state": "not_sent",
+                    "path_template": if path_template.is_empty() { None } else { Some(path_template) },
+                })
+                .to_string(),
+            )
+        };
+        assert!(parse("", "").is_ok(), "no template at all is always fine");
+        let unmatched = parse("", "/orders/{id}").unwrap();
+        assert_eq!(unmatched.path_template, "/orders/{id}");
+        assert_eq!(unmatched.operation_id, "");
+        assert!(
+            parse("orders.list", "").is_ok(),
+            "a matched operation with no template is the common case"
+        );
+        assert!(
+            parse("orders.list", "/orders/{id}").is_err(),
+            "a matched operation must never also carry a discovery template"
+        );
+        for (name, bad) in [
+            ("relative", "orders"),
+            ("query string", "/orders?page=2"),
+            ("fragment", "/orders#frag"),
+            ("control byte", "/orders/\u{7}1"),
+            ("stray open brace", "/orders/{oops"),
+            ("stray close brace", "/orders/oops}"),
+            ("non-id brace content", "/orders/{order_id}"),
+            ("too long", &format!("/{}", "a".repeat(300))),
+            ("empty string", ""),
+        ] {
+            if name == "empty string" {
+                // An empty string is a distinct, deliberately rejected shape
+                // from "field absent"; `parse("", "")` above tests absence.
+                assert!(
+                    PayloadSummary::parse(
+                        "request.accepted",
+                        r#"{"method":"GET","operation_id":null,"origin_state":"not_sent","path_template":""}"#,
+                    )
+                    .is_err(),
+                    "accepted {name}"
+                );
+                continue;
+            }
+            assert!(parse("", bad).is_err(), "accepted {name}");
+        }
     }
 
     // `audit.recovered` is the one gateway event not tied to a request. It has

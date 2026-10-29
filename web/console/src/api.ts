@@ -320,6 +320,38 @@ export type ModelCallListResponse = Envelope & {
   truncated: boolean;
   next_cursor: string | null;
 };
+/** A bounded investigation window for one site's unmatched-route discovery.
+ * There is no cursor: one page is the entire grouped result. */
+export type DiscoveredRoutesPlan = {
+  start: string;
+  end: string;
+  limit: number;
+};
+/** One `(method, path_template)` group of unmatched requests: a route
+ * discovery candidate, never an authorization or routing fact. A template
+ * containing `{id}` is a hint only; the console never guesses a resource
+ * type from it and only offers literal paths for one-click import. */
+export type DiscoveredRouteGroup = {
+  method: string;
+  path_template: string;
+  hits: number;
+  first_seen: string;
+  last_seen: string;
+};
+export type DiscoveredRoutesResponse = Envelope & {
+  schema_version: 1;
+  start: string;
+  end: string;
+  watermark_scope: "configured_journal";
+  as_of: string;
+  index_watermark: Watermark | null;
+  has_gaps: boolean;
+  pending_segments: number;
+  scanned_rows: number | null;
+  scanned_bytes: number | null;
+  routes: DiscoveredRouteGroup[];
+  truncated: boolean;
+};
 
 /** Frozen restricted calibration-report metadata. This projection deliberately
  * contains no report body, source sample, label, probability, metric, prompt,
@@ -558,6 +590,63 @@ export function validateModelCallListPlan(value: unknown): ModelCallListPlan {
   } catch {
     throw new ApiError("CONTROL_MODEL_CALLS_REQUEST_INVALID");
   }
+}
+
+/** Validate a local discovery plan before it can become an audited GET request. */
+export function validateDiscoveredRoutesPlan(value: unknown): DiscoveredRoutesPlan {
+  try {
+    const row = object(value);
+    ensure(
+      Object.keys(row).length === 3 &&
+        ["start", "end", "limit"].every((key) => Object.hasOwn(row, key)),
+    );
+    const start = modelCallListTime(row.start);
+    const end = modelCallListTime(row.end);
+    const duration = Date.parse(end) - Date.parse(start);
+    ensure(
+      duration > 0 &&
+        duration <= 31 * 24 * 60 * 60 * 1000 &&
+        Date.parse(start) >= 0 &&
+        Date.parse(end) <= 10_413_792_000_000,
+    );
+    return { start, end, limit: integer(row.limit, 1, 200) };
+  } catch {
+    throw new ApiError("CONTROL_DISCOVERED_ROUTES_REQUEST_INVALID");
+  }
+}
+
+/** Mirrors the worker's own independent re-validation of a discovery group row:
+ * an absolute, bounded path whose only brace content is the literal `{id}`
+ * placeholder, and an uppercase method, never trusting the gateway's write-time
+ * normalization. */
+function discoveredRoutePathTemplate(value: unknown): string {
+  const result = text(value, 256);
+  ensure(result.startsWith("/") && !/[?#]/.test(result));
+  ensure(!/[{}]/.test(result.replaceAll("{id}", "")));
+  return result;
+}
+function discoveredRouteMethod(value: unknown): string {
+  const result = text(value, 16);
+  ensure(/^[A-Z]+$/.test(result));
+  return result;
+}
+function discoveredRouteGroup(value: unknown): DiscoveredRouteGroup {
+  const row = object(value);
+  ensure(
+    Object.keys(row).length === 5 &&
+      ["method", "path_template", "hits", "first_seen", "last_seen"].every((key) =>
+        Object.hasOwn(row, key),
+      ),
+  );
+  const result: DiscoveredRouteGroup = {
+    method: discoveredRouteMethod(row.method),
+    path_template: discoveredRoutePathTemplate(row.path_template),
+    hits: integer(row.hits, 1),
+    first_seen: timestamp(row.first_seen),
+    last_seen: timestamp(row.last_seen),
+  };
+  ensure(Date.parse(result.first_seen) <= Date.parse(result.last_seen));
+  return result;
 }
 
 function modelCallListItem(value: unknown): ModelCallListItem {
@@ -2780,6 +2869,88 @@ export class ControlClient {
           previous = current;
         }
         ensure(result.next_cursor === null || result.next_cursor !== cursor);
+        return result;
+      },
+      signal,
+    );
+  }
+
+  /** Discover `(method, path_template)` groups one protected site's unmatched
+   * traffic produced inside a fixed UTC window, for the "从观察流量导入路由"
+   * panel. There is no cursor: one page is the entire grouped result, never a
+   * per-event list, and a template is a read-only hint, never an import
+   * target by itself. */
+  async discoveredRoutes(
+    siteId: string,
+    value: unknown,
+    signal?: AbortSignal,
+  ): Promise<DiscoveredRoutesResponse> {
+    const plan = validateDiscoveredRoutesPlan(value);
+    const parameters = new URLSearchParams({
+      start: plan.start,
+      end: plan.end,
+      limit: String(plan.limit),
+    });
+    return this.#request(
+      `sites/${name(siteId)}/discovered-routes?${parameters.toString()}`,
+      (value) => {
+        const row = object(value);
+        ensure(
+          row.schema_version === 1 &&
+            Object.keys(row).length === 15 &&
+            [
+              "schema_version",
+              "request_id",
+              "tenant_id",
+              "site_id",
+              "start",
+              "end",
+              "watermark_scope",
+              "as_of",
+              "index_watermark",
+              "has_gaps",
+              "pending_segments",
+              "scanned_rows",
+              "scanned_bytes",
+              "routes",
+              "truncated",
+            ].every((key) => Object.hasOwn(row, key)),
+        );
+        const result: DiscoveredRoutesResponse = {
+          ...envelope(row),
+          ...watermarked(row),
+          schema_version: 1,
+          start: modelCallListTime(row.start),
+          end: modelCallListTime(row.end),
+          watermark_scope: choice(row.watermark_scope, ["configured_journal"]),
+          pending_segments: integer(row.pending_segments),
+          scanned_rows: nullable(row.scanned_rows, integer),
+          scanned_bytes: nullable(row.scanned_bytes, integer),
+          routes: list(row.routes, plan.limit, discoveredRouteGroup),
+          truncated: bool(row.truncated),
+        };
+        ensure(result.start === plan.start && result.end === plan.end);
+        ensure(!result.truncated || result.routes.length === plan.limit);
+        const start = Date.parse(plan.start);
+        const end = Date.parse(plan.end);
+        const seen = new Set<string>();
+        let previous: DiscoveredRouteGroup | null = null;
+        for (const group of result.routes) {
+          ensure(Date.parse(group.first_seen) >= start && Date.parse(group.first_seen) < end);
+          ensure(Date.parse(group.last_seen) >= start && Date.parse(group.last_seen) < end);
+          const key = `${group.method} ${group.path_template}`;
+          ensure(!seen.has(key));
+          seen.add(key);
+          if (previous)
+            ensure(
+              group.hits < previous.hits ||
+                (group.hits === previous.hits &&
+                  (group.method > previous.method ||
+                    (group.method === previous.method &&
+                      group.path_template >= previous.path_template))),
+            );
+          previous = group;
+        }
         return result;
       },
       signal,

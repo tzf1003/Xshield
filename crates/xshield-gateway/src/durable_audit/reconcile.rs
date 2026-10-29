@@ -85,6 +85,11 @@ struct HistoricalAccepted {
     method: String,
     operation_id: Option<String>,
     origin_state: String,
+    /// Recovery only re-derives `method`/`operation_id`; the discovery
+    /// template plays no part in crash reconciliation, but the closed parser
+    /// must still accept the field this event type now carries.
+    #[allow(dead_code)]
+    path_template: Option<String>,
 }
 
 #[derive(Deserialize)]

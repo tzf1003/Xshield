@@ -435,6 +435,7 @@ impl ProxyHttp for Gateway {
                 request_id: &context.request_id,
                 trace_id: &context.trace_id,
                 method: &method,
+                path: &path,
                 decision: &decision,
                 duration_us: elapsed_us(context.started_at),
                 request_crypto: context.request_crypto_audit.as_ref(),

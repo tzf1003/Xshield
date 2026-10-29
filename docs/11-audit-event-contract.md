@@ -81,6 +81,8 @@ request.accepted/completed/aborted；stage.started/completed/skipped；identity.
 
 不可采样事件：每请求最小记录、每个实际安全判定、资格变更、模型调用、Agent 工具调用、管理动作、证据访问与完整性异常。调试 span 和性能采样可独立配置，但不能让 required 审计消失。
 
+`request.accepted` 新增可选 `path_template`，服务于“从观察流量导入路由”发现（见 [30.7](30-console-redesign.md#307-控制台重设计待交付清单)）。该字段仅在网关未能把请求匹配到任一已配置 operation（即 `operation_id` 为空）时才非空，由网关对原始请求路径做一次确定性、有界规范化：仅将全数字或规范 UUID 的路径段替换为 `{id}`，其余字节原样保留；拒绝空路径、相对路径、含查询串/片段/控制字节或超过 256 字节的输入，此时字段保持为空而不是写入猜测值。它是网关写时的辅助提示，既不是鉴权或路由依据，也不证明该路径此后仍未覆盖；worker 在发布前对其形状独立重新校验（见 [29.37](29-api-endpoint-catalog.md#2937-已实现的未覆盖端点发现契约)），不信任网关侧已满足的约束。ClickHouse `audit_events`/`events_by_time` 按既有 expand-contract 惯例新增同名列，默认空字符串，物化视图目标先于来源表升级（见 `sql/clickhouse.sql`）。
+
 ## 11.6 可解释拒绝图
 
 final decision 保存 cause_event_ids、required_checks、completed_checks、skipped_checks、coverage_gaps 和 origin_state。后台展示“身份通过 → 无相应页面动作 → 拒绝 → 模型未执行”，而不是“模型没有发现异常”。明确区分 WAF 策略拒绝、已验证业务拒绝、疑似攻击及内部服务失败。

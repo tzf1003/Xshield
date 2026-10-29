@@ -186,6 +186,54 @@ export const revisionsBody = (id: string, items: StoredRevision[]) => ({
   })),
 });
 
+export type DiscoveredRouteGroupFixture = {
+  method: string;
+  path_template: string;
+  hits: number;
+  first_seen?: string;
+  last_seen?: string;
+};
+
+/** `window` must echo the request's own `start`/`end`: the client rejects a page whose window
+ * does not match what it submitted (a 24 小时 preset resolves against the real clock, so a fixed
+ * pair of dates would never match it). */
+export const discoveredRoutesBody = (
+  id: string,
+  window: { start: string; end: string },
+  groups: DiscoveredRouteGroupFixture[],
+  over: Record<string, unknown> = {},
+) => {
+  // Defaults sit inside [start, end) relative to the submitted window itself, since the window
+  // is a live "24 小时" preset resolved against the real clock, not a fixed pair of dates.
+  const startMs = Date.parse(window.start);
+  const within = (offsetMs: number) => new Date(startMs + offsetMs).toISOString();
+  return {
+    ...envelope(id),
+    schema_version: 1,
+    start: window.start,
+    end: window.end,
+    watermark_scope: "configured_journal",
+    as_of: AT,
+    index_watermark: {
+      producer_boot_id: "018f2a3b-4c5d-7000-8000-000000000088",
+      producer_sequence: 42,
+    },
+    has_gaps: false,
+    pending_segments: 0,
+    scanned_rows: 12,
+    scanned_bytes: 512,
+    routes: groups.map((group) => ({
+      method: group.method,
+      path_template: group.path_template,
+      hits: group.hits,
+      first_seen: group.first_seen ?? within(60_000),
+      last_seen: group.last_seen ?? within(23 * 60 * 60_000),
+    })),
+    truncated: false,
+    ...over,
+  };
+};
+
 export type Write = {
   method: string;
   path: string;
@@ -203,6 +251,7 @@ export type SiteMock = {
   /** Overrides a single request; return true when handled. */
   intercept?: (route: Route, url: URL) => Promise<boolean>;
   calls: string[];
+  discoveredRoutes: DiscoveredRouteGroupFixture[];
 };
 
 /** Routes every control call of one site; PUT echoes the posted configuration back as saved. */
@@ -214,6 +263,10 @@ export async function mockSite(page: Page, init: Partial<SiteMock> = {}): Promis
     revisions: [],
     writes: [],
     calls: [],
+    discoveredRoutes: [
+      { method: "GET", path_template: "/orders/{id}", hits: 40 },
+      { method: "POST", path_template: "/webhooks/stripe", hits: 5 },
+    ],
     ...init,
   };
   await page.route("**/control/v1/**", async (route) => {
@@ -311,6 +364,14 @@ export async function mockSite(page: Page, init: Partial<SiteMock> = {}): Promis
       });
     } else if (["apply", "approve", "rollback"].includes(tail)) {
       await route.fulfill({ json: applyBody(mock.id, mock.state) });
+    } else if (tail === "discovered-routes") {
+      await route.fulfill({
+        json: discoveredRoutesBody(
+          mock.id,
+          { start: url.searchParams.get("start") ?? "", end: url.searchParams.get("end") ?? "" },
+          mock.discoveredRoutes,
+        ),
+      });
     } else {
       await route.fulfill({ status: 404, json: errorFixture("CONTROL_SITE_NOT_FOUND") });
     }
