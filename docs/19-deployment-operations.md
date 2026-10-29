@@ -227,6 +227,27 @@ CI 的 `helm` 作业先做静态检查：缺少必填值时 schema 拒绝渲染�
 - 升级路径（`helm upgrade` 与迁移）；
 - ServiceMonitor 与 NetworkPolicy 在真实监控和 CNI 下的效果，CI 只校验渲染结果，kind 默认 CNI 只做基本执行。
 
+### 19.9.1 高可用（ADR-014）
+
+上文描述的拓扑此前固定 `replicas: 1`：edge 的 apply 通道（127.0.0.1:9553）和 control 的管理 API（127.0.0.1:9443）只监听 loopback 必须共享网络命名空间，这个 Pod 因此是单点故障。ADR-014 确定的方向，以及它落地前后的状态如下。
+
+**调研结论（已确认，不需要额外改动即可成立）**：
+
+- `xshield-outbox-worker` 按 PostgreSQL 行级租约认领任务，多实例并发天然安全；
+- journal 封存（`xshield-audit-seal`）与发布任务按清单/checkpoint 幂等重放，两个实例同时处理同一 journal 目录不冲突；
+- 真正的单写者约束只是"一个 journal 目录只能有一个进程追加写"（docs/13），这与副本数无关——只要每个副本有自己独立的 journal（`volumeClaimTemplates` 已经按 Pod 序号分配独立 PVC），该约束天然满足。
+
+因此本次高可用改造**不引入 leader election**，也不引入 etcd/Redis 等外部协调服务：journal 封存/发布与 outbox 只需放开副本数；真正要新增的是 edge+control 的配置收敛机制。
+
+**目标设计**：
+
+1. StatefulSet 的副本数从固定 1 改为 `values.yaml` 的 `replicaCount`（生产建议 ≥2），每个副本仍是一套独立的 edge+control+两组 journal 任务+独立 PVC，loopback 耦合和安全边界不变。
+2. control 新增一个收敛回放常驻任务（复用 `XSHIELD_RUN_INTERVAL_SECONDS` 模式）：按固定间隔重新计算当前已批准的完整租户快照并重放给本地 edge；这是 `apply_site_snapshot` 已经在做的计算（每次都从 PostgreSQL 重新算出全量快照），只是改为定期而不是只在收到写请求时跑一次。多个副本各自独立运行这个循环，借助既有的幂等 apply 协议（`EDGE_APPLY_IDEMPOTENCY_CONFLICT` 等）收敛到同一配置，不需要副本之间互相通信。
+3. 新增 Pod 反亲和（`values.yaml` 的 `affinity`/`topologySpreadConstraints`，默认尽量分散到不同节点）与 PodDisruptionBudget（`maxUnavailable: 1`）；`deployment-outbox.yaml` 的副本数同样放开为可配置项。
+4. 已知限制：现有"desired/active" apply 状态位按"至少一个 edge 已收敛"记录，不是"全部副本已收敛"；本次不新增按副本粒度的收敛状态表（见 docs/23），运维通过各 Pod 的签名健康接口或 control `/metrics` 的 snapshot revision 观察滚动是否完成。跨 Region/跨故障域仍不在范围内（19.6）。
+
+CI 的 kind 作业相应扩展为 N≥2 副本场景：验证一次配置写入最终收敛到全部副本的本地 edge、删除一个 Pod 后数据面不中断且其余副本的常驻任务心跳不受影响、恢复的副本重新收敛到当前 revision。compose（19.8）与 systemd（19.10）两种参考部署保持单机，不在本次范围内。
+
 ## 19.10 systemd 参考部署
 
 `deploy/systemd/` 把同一拓扑（edge、control、两个来源的封存与发布、十个 outbox 发布家族、按需的证据保留清理）跑成 systemd 单元，供不经容器编排的单机或虚拟机部署使用，用法见 `deploy/systemd/README.md`。与 19.8 的差异：
