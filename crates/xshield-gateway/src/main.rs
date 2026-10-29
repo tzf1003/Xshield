@@ -1,6 +1,7 @@
 mod apply_api;
 mod buffered_json;
 mod buffered_relay;
+mod crypto_keys;
 mod descriptor_supply;
 mod durable_audit;
 mod edge_health;
@@ -53,12 +54,8 @@ use xshield_gateway::multi_site::{
     ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot, frozen_origin_target,
     origin_form_target, routing_authority,
 };
-use xshield_gateway::request_crypto::{
-    FrozenRequest, KeyAccessPort, KeyAccessQuery, RequestCryptoPolicy,
-};
-use xshield_gateway::response_crypto::{
-    ENCRYPTED_RESPONSE_CONTENT_TYPE, ResponseKeyAccessPort, ResponseKeyAccessQuery,
-};
+use xshield_gateway::request_crypto::{FrozenRequest, RequestCryptoPolicy};
+use xshield_gateway::response_crypto::ENCRYPTED_RESPONSE_CONTENT_TYPE;
 use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
 use xshield_gateway::{
     BufferedResponsePolicy, GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
@@ -128,8 +125,8 @@ struct Gateway {
     snapshot: Arc<ConfigSnapshotStore>,
     audit: DurableAudit,
     identity: Option<ProtectedIdentity>,
-    request_key: Option<EnvRequestKey>,
-    response_key: Option<EnvResponseKey>,
+    request_keys: crypto_keys::KeyRing,
+    response_keys: crypto_keys::KeyRing,
     postgres: Option<Arc<PostgresRuntime>>,
     buffered_body_budget: Arc<Semaphore>,
     evidence: Option<Arc<evidence_writer::EvidenceWriter>>,
@@ -1350,10 +1347,7 @@ impl Gateway {
             .operation_id
             .as_ref()
             .ok_or(ReasonCode::RequestEnvelopeInvalid)?;
-        let keys = self
-            .request_key
-            .as_ref()
-            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let keys = &self.request_keys;
         let frozen = rule.decode(
             context.config(self).tenant_id().as_str(),
             context.config(self).site_id().as_str(),
@@ -1427,10 +1421,7 @@ impl Gateway {
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| UnixSeconds::new(duration.as_secs()))
                 .map_err(|_| ReasonCode::ClockUnavailable)?;
-            let keys = self
-                .response_key
-                .as_ref()
-                .ok_or(ReasonCode::ResponseCryptoKeyUnavailable)?;
+            let keys = &self.response_keys;
             rule.encode(
                 context.config(self).tenant_id().as_str(),
                 context.config(self).site_id().as_str(),
@@ -2147,110 +2138,6 @@ fn load_config() -> Result<GatewayConfig, Box<dyn Error>> {
     Ok(GatewayConfig::from_json(&bytes)?)
 }
 
-struct EnvRequestKey {
-    tenant_id: String,
-    site_id: String,
-    key_id: String,
-    key: Zeroizing<[u8; 32]>,
-}
-
-impl EnvRequestKey {
-    fn from_env(config: &GatewayConfig) -> Result<Option<Self>, Box<dyn Error>> {
-        let Some(key_id) = config.request_crypto_key_id() else {
-            return Ok(None);
-        };
-        let value = Zeroizing::new(xshield_core::secret_env::var(
-            "XSHIELD_REQUEST_DECRYPTION_KEY_HEX",
-        )?);
-        let key = parse_crypto_key(&value).ok_or("invalid request decryption key")?;
-        Ok(Some(Self {
-            tenant_id: config.tenant_id().as_str().to_owned(),
-            site_id: config.site_id().as_str().to_owned(),
-            key_id: key_id.to_owned(),
-            key: Zeroizing::new(key),
-        }))
-    }
-}
-
-impl KeyAccessPort for EnvRequestKey {
-    fn request_decryption_key(
-        &self,
-        query: KeyAccessQuery<'_>,
-    ) -> Result<Zeroizing<[u8; 32]>, ReasonCode> {
-        if query.tenant_id != self.tenant_id
-            || query.site_id != self.site_id
-            || query.key_id != self.key_id
-            || query.purpose != "request_direct_decrypt"
-            || query.at == UnixSeconds::new(0)
-        {
-            return Err(ReasonCode::RequestCryptoKeyUnavailable);
-        }
-        Ok(Zeroizing::new(*self.key))
-    }
-}
-
-struct EnvResponseKey {
-    tenant_id: String,
-    site_id: String,
-    key_id: String,
-    key: Zeroizing<[u8; 32]>,
-}
-
-impl EnvResponseKey {
-    fn from_env(config: &GatewayConfig) -> Result<Option<Self>, Box<dyn Error>> {
-        let Some(key_id) = config.response_crypto_key_id() else {
-            return Ok(None);
-        };
-        let value = Zeroizing::new(xshield_core::secret_env::var(
-            "XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX",
-        )?);
-        let key = parse_crypto_key(&value).ok_or("invalid response encryption key")?;
-        Ok(Some(Self {
-            tenant_id: config.tenant_id().as_str().to_owned(),
-            site_id: config.site_id().as_str().to_owned(),
-            key_id: key_id.to_owned(),
-            key: Zeroizing::new(key),
-        }))
-    }
-}
-
-impl ResponseKeyAccessPort for EnvResponseKey {
-    fn response_encryption_key(
-        &self,
-        query: ResponseKeyAccessQuery<'_>,
-    ) -> Result<Zeroizing<[u8; 32]>, ReasonCode> {
-        if query.tenant_id != self.tenant_id
-            || query.site_id != self.site_id
-            || query.key_id != self.key_id
-            || query.purpose != "response_direct_encrypt"
-            || query.at == UnixSeconds::new(0)
-        {
-            return Err(ReasonCode::ResponseCryptoKeyUnavailable);
-        }
-        Ok(Zeroizing::new(*self.key))
-    }
-}
-
-fn parse_crypto_key(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return None;
-    }
-    let mut key = [0; 32];
-    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        let nibble = |byte| match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            _ => 0,
-        };
-        key[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
-    }
-    Some(key)
-}
-
 fn validate_encrypted_request_headers(
     request: &pingora::http::RequestHeader,
     max_bytes: usize,
@@ -2382,19 +2269,15 @@ fn run() -> Result<(), Box<dyn Error>> {
                 })
         })
         .transpose()?;
-    let request_key = EnvRequestKey::from_env(&config)?;
-    let response_key = EnvResponseKey::from_env(&config)?;
+    let request_keys = crypto_keys::KeyRing::requests(&config)?;
+    let response_keys = crypto_keys::KeyRing::responses(&config)?;
     let evidence = evidence_writer::EvidenceWriter::from_env(&config)?.map(Arc::new);
     let retention = evidence_retention::EvidenceRetention::from_env(
         evidence.as_ref(),
         config.tenant_id(),
         config.site_id(),
     )?;
-    if request_key
-        .as_ref()
-        .zip(response_key.as_ref())
-        .is_some_and(|(request, response)| request.key.as_ref() == response.key.as_ref())
-    {
+    if request_keys.shares_key_with(&response_keys) {
         return Err("request and response encryption keys must differ".into());
     }
     let audit_readiness = audit.readiness();
@@ -2411,8 +2294,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             snapshot: coordinator.snapshot_store(),
             audit,
             identity,
-            request_key,
-            response_key,
+            request_keys,
+            response_keys,
             evidence: evidence.clone(),
             postgres: postgres.clone(),
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
