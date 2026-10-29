@@ -34,6 +34,7 @@ export const reasonDictionary = {
   CONTROL_SITE_STATUS_READ: entry("success", "站点状态已读取。", NONE),
   CONTROL_SITE_REVISIONS_READ: entry("success", "修订历史已读取。", NONE),
   CONTROL_SITE_HEALTH_OBSERVED: entry("success", "健康观察已读取。", NONE),
+  CONTROL_SITE_APPLY_EVENTS_SUBSCRIBED: entry("success", "已订阅应用状态推送。", NONE),
   CONTROL_SITE_CONFIG_CREATED: entry(
     "success",
     "站点已创建，配置保存为第一个修订。",

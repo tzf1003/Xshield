@@ -1,17 +1,8 @@
 import { useGuardedInfiniteQuery } from "../../security/hooks.ts";
 import { MANUAL_REFRESH } from "../../security/query-client.ts";
+import { siteKeys } from "./site-keys.ts";
 
-/** Domain keys; the session epoch is prefixed by the guarded query helpers. */
-export const siteKeys = {
-  list: ["sites", "list"] as const,
-  site: (siteId: string) => ["sites", siteId] as const,
-  config: (siteId: string) => ["sites", siteId, "config"] as const,
-  status: (siteId: string) => ["sites", siteId, "status"] as const,
-  revisions: (siteId: string) => ["sites", siteId, "revisions"] as const,
-  health: (siteId: string) => ["sites", siteId, "health"] as const,
-  rolloutReport: (siteId: string, revision: string, start: string, end: string) =>
-    ["sites", siteId, "rollout-report", revision, start, end] as const,
-};
+export { siteKeys };
 
 /**
  * The tenant's sites, one signed-cursor page at a time. Pages are read when the operator

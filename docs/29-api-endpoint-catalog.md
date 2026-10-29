@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`GET /control/v1/sites/{site_id}/discovered-routes`（29.37）、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`GET /control/v1/jobs[?cursor=...]`（29.34）、`GET /control/v1/admin/jobs[?cursor=...]`（29.35，AuditAdministrator）、`GET /control/v1/cases/{case_id}/jobs[?cursor=...]`（29.40）、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`GET /control/v1/sites/{site_id}/discovered-routes`（29.42）、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`GET /control/v1/jobs[?cursor=...]`（29.34）、`GET /control/v1/admin/jobs[?cursor=...]`（29.35，AuditAdministrator）、`GET /control/v1/cases/{case_id}/jobs[?cursor=...]`（29.40）、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 站点接入后台的配置写入要求 `SystemAdmin`，按固定 tenant/site 保存受保护站点、源站、安全入口、策略版本、状态和唯一监听端口；写入使用 `Idempotency-Key`，响应同时返回经过校验的 gateway 启动配置草稿。
 
@@ -650,7 +650,17 @@ edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启�
 
 列表读取占用案件/证据在途许可并保持到审计落盘，繁忙返回 429 `CONTROL_CASE_JOB_LIST_BUSY`。部署先应用迁移 0057（新增索引，`BEGIN`/`COMMIT` 内 `CREATE INDEX`，无并发选项，大表需维护窗口），再升级识别 `console.case.job.list` 的管理 journal 发布器，最后开放路由。回滚停用路由并回退迁移（仅移除新增索引，`control_jobs` 表结构不变）即可，已写入的审计按保留策略保存。控制台案件详情页的"分析"页签新增"历史任务"表格读取本契约，分页复用既有游标栈组件。
 
-## 29.41 已实现的未覆盖端点发现契约
+## 29.41 已实现的站点应用状态推送契约
+
+`GET /control/v1/sites/apply-events` 以 Server-Sent Events 推送站点应用状态变化的信号，补齐 30.7 列出的缺口：此前站点的 `apply_state`（`pending`/`active`/`failed`，含后台 `reconcile_local_edge` 独立于任何写请求触发的变化）只能由操作者手动重新读取 `GET /sites/{id}/status` 才能发现。本契约只允许携带角色的浏览器会话（`Xshield-Session` 断言）订阅；Key 主体没有角色，恒定返回 403 `CONTROL_SCOPE_DENIED`。
+
+推送帧只是一次重读的信号，从不是状态本身：每帧为 `event: site_apply_changed`，`data` 是 `{"site_id","desired_revision","apply_id","status","reason_code","at"}`，`status` 取 `"confirmed"`（边缘确认了快照；具体是 `active` 还是 `paused` 仍需调用方自己读 `GET /sites/{id}/status` 得到)或 `"failed"`。连接本身只在建立时写一条 `console.site.apply_events.subscribe` 管理审计（成功 `PASS/CONTROL_SITE_APPLY_EVENTS_SUBSCRIBED`），此后收到的每一帧都不单独审计、也不读取数据库——真正的状态仍只能通过既有的、逐次审计的 `status`/`health`/列表端点读到，本端点从不绕开 30.5 "读取都会写管理审计，不自动轮询" 这条不变量,只是把"何时该再读一次"从人工定时刷新换成服务端主动提示。
+
+可见性在每一帧发出时逐条核对，核对方式与 `GET /sites/{id}/status` 完全相同（`authorizes_site(Observer, tenant, site)`）：`SystemAdmin` 等租户级角色看到租户内全部站点的信号，仅持有某个站点精确作用域的角色（例如该站点的 `Observer`）只看到那一个站点的信号,从未被这次订阅看到的站点不会在帧里出现。推送信道是进程内的有界、有损广播（`tokio::sync::broadcast`，容量 256）：只影响这一个控制面副本在这次连接建立之后发生的变化,连接建立前已经发生的变化不会补发,一个落后太多或已断开的订阅者会直接丢帧而不是阻塞发布方——两种情况下操作者都只需要重新读一次 `status`，这正是本端点存在的唯一目的。多副本部署下（ADR-014），只有把这次写请求处理掉的那个副本会发出信号；`reconcile_local_edge` 在其它副本上独立触发的确认，由那个副本自己的订阅者看到。
+
+连接保持 SSE keep-alive；客户端断开或租户配置重载不写入额外审计。本端点不接受任何请求体或查询参数，`DefaultBodyLimit` 为 0。控制台接入见 15 章。
+
+## 29.42 已实现的未覆盖端点发现契约
 
 `GET /control/v1/sites/{site_id}/discovered-routes?start=<UTC>&end=<UTC>&limit=<1..200>` 按单个受保护站点聚合窗口内未能匹配任一已配置 operation 的流量，供"从观察流量导入路由"控制台面板发现候选端点（见 [30.7](30-console-redesign.md#307-控制台重设计待交付清单)、[11.5](11-audit-event-contract.md#115-必须记录的事件族)）。路径 `site_id` 先按既有强类型校验，再以 `SystemAdmin` 经 `authorize_site` 鉴权，与站点配置写入同一角色,因为发现结果直接驱动路由草稿。`start`、`end` 必须是规范 `YYYY-MM-DDTHH:MM:SSZ` UTC 整秒，表示 `[start,end)`；`limit` 为无前导零的 1–200 十进制整数。没有游标：一页就是该窗口内全部 `(method,path_template)` 分组，按命中数降序、方法与模板升序打破平局，不是逐事件列表。参数形状异常（缺失、重复、未知参数、非规范时间、空窗口、非空请求体）在取得查询许可之前返回 400 `CONTROL_DISCOVERED_ROUTES_REQUEST_INVALID`。
 

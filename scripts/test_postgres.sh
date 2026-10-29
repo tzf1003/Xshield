@@ -146,3 +146,5 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control --lib site_admin -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control --lib site_approval -- --ignored
+XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
+    cargo test -p xshield-control --lib apply_events -- --ignored

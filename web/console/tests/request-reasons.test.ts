@@ -39,6 +39,7 @@ const notReasonCodes: Readonly<Record<string, string>> = {
   SENSOR_HTML: "site policy response mode",
   COMPATIBILITY: "request-crypto coverage mode",
   DIRECT_ENCRYPT: "site policy crypto mode",
+  ENVELOPE_HOOK: "site policy crypto mode",
   ENFORCE: "request-crypto coverage mode",
   OBSERVE: "request-crypto coverage mode",
   PUBLIC: "admission class and sensitivity label",

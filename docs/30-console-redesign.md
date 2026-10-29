@@ -91,10 +91,10 @@
 | 案件关联任务列表（`GET /control/v1/cases/{case_id}/jobs`，29.40） | 已交付（前后端） |
 | 站点修订待审批列表 | 已交付（控制台由现有 `GET /control/v1/sites` 的站点状态派生，`siteApprovals`，不增加后端端点） |
 | 管理员全部任务列表（`GET /control/v1/admin/jobs`，29.35，后端已交付，仅 AuditAdministrator；控制台视图未接入） | 已交付（后端） |
-| 从观察流量导入路由（`GET /control/v1/sites/{site_id}/discovered-routes`，29.41，前后端已交付） | 已交付（前后端） |
+| 从观察流量导入路由（`GET /control/v1/sites/{site_id}/discovered-routes`，29.42，前后端已交付） | 已交付（前后端） |
 | 按操作聚合的命中/拒绝统计（`GET /control/v1/coverage-report`，29 §29.39） | 已交付（前后端，`/investigation/coverage`） |
 | 保存的检索视图（`/control/v1/saved-views`） | 已交付（前后端，调查检索页 `SavedViewsPanel`） |
-| 应用状态推送（当前只能轮询站点状态，无 SSE/推送通道） | 未交付 |
+| 应用状态推送（`GET /control/v1/sites/apply-events`，29.41；控制台不再需要手动刷新才能发现 `reconcile_local_edge` 等后台触发的状态变化） | 已交付 |
 
 ## 30.8 已知缺口与风险
 

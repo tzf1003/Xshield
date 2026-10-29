@@ -32,6 +32,9 @@ serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 sqlx = { version = "=0.9.0", default-features = false, features = ["chrono", "json", "postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
 tokio = { version = "~1.51", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# Wraps a tokio::sync::mpsc::Receiver as a Stream for the apply-events SSE
+# endpoint; by the tokio-rs team, MIT.
+tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
 tower = "0.5"
 # Blocking HTTP for the S3 evidence adapter, whose vault API is synchronous and runs
 # on blocking threads; no environment proxy, rustls with webpki roots, no gzip.

@@ -16,6 +16,7 @@ import {
   statusFilterOrder,
   summarize,
 } from "../../sites/list-model.ts";
+import { useApplyEventsSubscription } from "../../sites/state/use-apply-events.ts";
 import { takeListNotice } from "../../sites/state/list-flash.ts";
 import { useSiteList } from "../../sites/state/queries.ts";
 import type { Outcome } from "../../sites/outcome.ts";
@@ -38,6 +39,7 @@ export function SitesListPage() {
   const router = useRouter();
   const { state } = useSession();
   const access = siteAccess(state.roles);
+  useApplyEventsSubscription();
   const query = useSiteList();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<StatusFilter>("all");
