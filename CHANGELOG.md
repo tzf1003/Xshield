@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- 多个 edge 副本下的按来源限流（docs/19“多个 edge 副本”、docs/21）：令牌桶在每个进程内计量，负载均衡把同一来源分到 N 个副本时，整组实际放行约为策略值的 N 倍。
+  - 新增 `XSHIELD_EDGE_RATE_LIMIT_SHARE`（1–64，默认 1）：设为 N 时每个副本只放行 1/N 的速率与突发，突发至少保留 1 个请求；非法值拒绝启动。按源地址亲和或单副本部署保持默认即可，行为不变。
+  - 没有引入跨副本共享计数（如 Redis）：那需要在每个请求、包括洪峰中先访问共享存储，并引入新的故障模式。
+  - **未覆盖**：分流不均时偏重的副本会更早限流；副本数变化需要手动同步该值。
+
 - 请求解密与响应加密支持多站点、多 key-id（docs/19、docs/31）：此前每个方向只有一把绑定启动配置站点的密钥，经 apply 下发的站点一旦启用 `DIRECT_DECRYPT`/`DIRECT_ENCRYPT` 就只能失败关闭，轮换也要起第二个 edge。
   - edge 新增密钥环变量 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`（也可 `_FILE`）：JSON 数组，每项 `tenant_id`、`site_id`、`key_id`、`key_hex`，每个方向最多 256 项。查找按租户、站点、key-id 与用途精确匹配，未列出的组合仍是 `REQUEST_CRYPTO_KEY_UNAVAILABLE`/`RESPONSE_CRYPTO_KEY_UNAVAILABLE`。
   - 原来的 `*_KEY_HEX` 单值变量含义不变，继续服务启动站点的 key-id，已有部署无需改动。格式错误、重复作用域、单值与密钥环重复给出启动站点 key-id、启动站点缺密钥、任一密钥跨方向复用，都拒绝启动；错误信息不含密钥。
