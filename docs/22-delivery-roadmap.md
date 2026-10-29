@@ -157,3 +157,5 @@ Agent 详情增量：`GET /control/v1/agent-runs/{agent_run_id}` 已交付 Obser
 2026-10-29 更新（二）：部署与运维缺口表去掉“systemd 单元”一项：`deploy/systemd/` 交付了不经容器编排的单机/虚拟机参考部署（19 §19.10），语义对齐 Compose 参考部署，常驻维护任务换成 systemd 自己的 oneshot + timer 调度；CI 新增 `systemd` 作业，用 `scripts/test_systemd_units.sh` 做 `systemd-analyze verify` 与命名约定核对（不涉及容器或数据库，因此比 `compose`/`helm` 两个作业轻）。里程碑百分比不变，因为这一项在“实现状态核查”表之外、只属于部署与运维段落。仍没有告警规则、KMS 与高可用部署。
 
 2026-10-29 更新（三）：部署与运维缺口表再去掉“告警规则”一项：`deploy/prometheus/alerts.yml` 针对 19.5 的 edge/control `/metrics` 给出一组告警规则（就绪、审计屏障、拒绝/错误比例、代理失败、TLS 握手与重载失败、延迟、证据容量与清理、管理面审计追加失败），字段名取自导出代码而不是文档文字；CI 新增 `prometheus-alerts` 作业，用官方镜像的 `promtool check rules` 校验（同样不涉及 Xshield 自身组件）。比例/延迟阈值是起点，不是已验证的 SLO。里程碑百分比不变，原因同上一条。仍没有 KMS 与高可用部署。
+
+2026-10-29 更新（四）：里程碑百分比不变。控制台已知缺口表去掉“案件详情页不随案件展示触发过的任务”一项：新增 `GET /control/v1/cases/{case_id}/jobs[?cursor=...]`（29 §29.40），直接以 `(tenant_id, site_id, owner_ref, case_id)` 过滤 `control_jobs`（迁移 0057 新增索引），游标额外绑定 `case_id` 防止跨案件重放；控制台案件详情页“分析”页签新增“历史任务”分页表格读取该端点，替换此前“只显示本次打开页面后提交的任务”的说明。这一项在“实现状态核查”表之外、只属于 30 §30.8 的控制台已知缺口段落，因此百分比不变。

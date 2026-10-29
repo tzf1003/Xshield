@@ -99,6 +99,8 @@ import {
 import type { ExportDownload, ExportList, ExportListView, InvestigationExport } from "./exports.ts";
 import { decodeAdminJobList, decodeJobList, validateJobListCursor } from "./job-list.ts";
 import type { AdminJobList, JobList } from "./job-list.ts";
+import { decodeCaseJobList, validateCaseJobListCursor } from "./case-job-list.ts";
+import type { CaseJobList } from "./case-job-list.ts";
 import {
   decodeSavedViewCreated,
   decodeSavedViewDeleted,
@@ -3075,6 +3077,21 @@ export class ControlClient {
     return this.#request(
       `jobs/${jobId}`,
       (value, status) => decodeJobResponse(value, status),
+      signal,
+    );
+  }
+
+  /** `GET /control/v1/cases/{case_id}/jobs[?cursor=...]`: every job this owned case has
+   * produced, one live page at a time. */
+  async caseJobList(caseId: string, cursor?: string, signal?: AbortSignal): Promise<CaseJobList> {
+    validateCaseId(caseId);
+    validateCaseJobListCursor(cursor);
+    return this.#request(
+      `cases/${caseId}/jobs${this.#cursor(cursor)}`,
+      (value, status) => {
+        ensure(status === 200);
+        return decodeCaseJobList(value, caseId, cursor);
+      },
       signal,
     );
   }

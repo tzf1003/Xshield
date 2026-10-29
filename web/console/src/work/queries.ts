@@ -6,6 +6,7 @@
  */
 import type { ArtifactResponse, JobResponse, SiteListResponse } from "../api.ts";
 import type { CaseCollection, CaseList } from "../cases.ts";
+import type { CaseJobList } from "../case-job-list.ts";
 import type { AccessInspection, AccessList, AccessListView } from "../evidence-access.ts";
 import type { HoldCollection } from "../evidence-holds.ts";
 import type { ExportList, ExportListView, InvestigationExport } from "../exports.ts";
@@ -17,6 +18,8 @@ import { MANUAL_REFRESH } from "../security/query-client.ts";
 export const keys = {
   caseList: (cursor?: string) => ["cases", "list", cursor ?? ""] as const,
   caseItems: (caseId: string, cursor?: string) => ["cases", "items", caseId, cursor ?? ""] as const,
+  caseJobList: (caseId: string, cursor?: string) =>
+    ["cases", "job-list", caseId, cursor ?? ""] as const,
   holds: (caseId: string, cursor?: string) => ["cases", "holds", caseId, cursor ?? ""] as const,
   job: (jobId: string) => ["cases", "job", jobId] as const,
   artifact: (artifactId: string) => ["cases", "artifact", artifactId] as const,
@@ -57,6 +60,16 @@ export const specs = {
     staleTime: MANUAL_REFRESH,
     enabled,
     fetch: (client, signal) => client.caseItems(caseId, cursor, signal),
+  }),
+  caseJobList: (
+    caseId: string,
+    cursor?: string,
+    enabled = true,
+  ): GuardedQuerySpec<CaseJobList> => ({
+    key: keys.caseJobList(caseId, cursor),
+    staleTime: MANUAL_REFRESH,
+    enabled,
+    fetch: (client, signal) => client.caseJobList(caseId, cursor, signal),
   }),
   holds: (caseId: string, cursor?: string, enabled = true): GuardedQuerySpec<HoldCollection> => ({
     key: keys.holds(caseId, cursor),
