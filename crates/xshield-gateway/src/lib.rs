@@ -2853,6 +2853,35 @@ mod tests {
         ));
     }
 
+    /// Acceptance GRANT-08 at the edge: a route naming both a parent and a
+    /// child identifier would key admission on one of them alone, so it is
+    /// refused at configuration time rather than checked as two independent
+    /// resources. The composite reference has to be one resource key.
+    #[test]
+    fn parent_child_route_is_refused_rather_than_split_into_independent_resources() {
+        let nested = CONFIG
+            .replace(
+                "\"method\":\"POST\",\"path\":\"/account\"",
+                "\"method\":\"GET\",\"path\":\"/orders/{order_id}/items/{item_id}\"",
+            )
+            .replace(
+                "\"resource_type\":null,\"view_profile\":null}\n      ]",
+                "\"resource_type\":\"order_item\",\"view_profile\":\"item_detail\",\"resource_path_parameter\":\"item_id\"}\n      ]",
+            );
+        assert!(matches!(
+            GatewayConfig::from_json(nested.as_bytes()),
+            Err(ConfigError::Invalid("operations.path"))
+        ));
+        let parent_marker = nested.replace(
+            "\"resource_path_parameter\":\"item_id\"",
+            "\"resource_path_parameter\":\"order_id\"",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(parent_marker.as_bytes()),
+            Err(ConfigError::Invalid("operations.path"))
+        ));
+    }
+
     #[test]
     fn validates_bounded_json_response_configuration() {
         let buffered = CONFIG.replace(
