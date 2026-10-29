@@ -21,8 +21,24 @@
 //! connections keep the certificate they negotiated. Anything less (a missing
 //! file, a key that does not match yet, an expired leaf) leaves the current
 //! certificates in place, is counted, and is retried on the next change.
+//!
+//! Additional certificates, add and remove. Besides the fixed pairs named by
+//! [`super::TLS_SNI_CERTS_ENV`] (which, like the primary pair's own
+//! variables, are read once at startup), a directory named by
+//! [`super::TLS_SNI_CERTS_DIR_ENV`] is rescanned on every reload tick: each
+//! immediate subdirectory holding exactly `tls.crt` and `tls.key` (the names
+//! a Kubernetes `kubernetes.io/tls` secret mounts) is one additional pair,
+//! keyed by its own leaf's DNS names, never by the subdirectory's name.
+//! Creating or deleting a subdirectory therefore adds or removes a
+//! certificate without a restart, on the same schedule and under the same
+//! all-or-nothing validation as a content rotation; a subdirectory created
+//! but not yet fully written (secret volumes populate `tls.crt` and
+//! `tls.key` separately) is simply the same "not current yet" case the
+//! content reload already retries.
 
-use super::{TLS_CERT_PATH_ENV, TLS_KEY_PATH_ENV, TransportConfigError, read_pem_file};
+use super::{
+    TLS_CERT_PATH_ENV, TLS_KEY_PATH_ENV, TLS_SNI_CERTS_DIR_ENV, TransportConfigError, read_pem_file,
+};
 // The same openssl crate Pingora's TLS layer is built on (one version in the
 // lock file), so these are the types `pingora::protocols::tls` accepts.
 use openssl::{
@@ -38,10 +54,16 @@ use openssl::{
 use std::{
     cmp::Ordering,
     collections::HashMap,
+    ffi::OsString,
     os::unix::fs::MetadataExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, PoisonError, RwLock},
 };
+
+/// The two files one additional-certificate subdirectory must hold, named as
+/// a Kubernetes TLS secret mounts them.
+const DIR_CERT_FILE: &str = "tls.crt";
+const DIR_KEY_FILE: &str = "tls.key";
 
 /// Server ALPN preference in wire format: HTTP/2, then HTTP/1.1.
 const ALPN_PREFERENCE: &[u8] = b"\x02h2\x08http/1.1";
@@ -93,43 +115,130 @@ struct FileStamp {
     changed: (i64, i64),
 }
 
-/// One stamp per configured file; `None` for a file that cannot be examined.
-type Fingerprint = Vec<Option<FileStamp>>;
+/// One directory entry's name and the stamps of its `tls.crt`/`tls.key`.
+type DirectoryEntryStamps = (OsString, Option<FileStamp>, Option<FileStamp>);
 
-/// Every configured pair, primary first.
+/// One stamp per statically configured file, in a fixed order, plus the
+/// directory-discovered pairs (name, certificate stamp, key stamp) in
+/// directory order; `Err` when the directory itself could not be listed.
+/// Any difference from the previous attempt (a changed stamp, a pair
+/// appearing or disappearing, the directory becoming readable or not)
+/// triggers a reload attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Fingerprint {
+    files: Vec<Option<FileStamp>>,
+    directory: Option<Result<Vec<DirectoryEntryStamps>, ()>>,
+}
+
+fn stamp(path: &Path) -> Option<FileStamp> {
+    std::fs::metadata(path).ok().map(|metadata| FileStamp {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        length: metadata.len(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+
+/// Immediate subdirectories of `directory`, sorted by name; a symlink to a
+/// directory (as a Kubernetes secret volume mounts one) counts.
+fn list_subdirectories(directory: &Path) -> Result<Vec<(OsString, PathBuf)>, ()> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(|_| ())? {
+        let entry = entry.map_err(|_| ())?;
+        if std::fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()) {
+            found.push((entry.file_name(), entry.path()));
+        }
+    }
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(found)
+}
+
+fn directory_fingerprint(directory: &Path) -> Result<Vec<DirectoryEntryStamps>, ()> {
+    Ok(list_subdirectories(directory)?
+        .into_iter()
+        .map(|(name, path)| {
+            let certificate = stamp(&path.join(DIR_CERT_FILE));
+            let key = stamp(&path.join(DIR_KEY_FILE));
+            (name, certificate, key)
+        })
+        .collect())
+}
+
+/// One additional pair per immediate subdirectory of `directory`, in
+/// directory order.
+fn directory_sources(directory: &Path) -> Result<Vec<CertificateSource>, TransportConfigError> {
+    let entries = list_subdirectories(directory).map_err(|()| {
+        TransportConfigError::SniCertsDirUnreadable {
+            path: directory.to_path_buf(),
+        }
+    })?;
+    Ok(entries
+        .into_iter()
+        .map(|(_, path)| {
+            CertificateSource::additional(
+                TLS_SNI_CERTS_DIR_ENV,
+                path.join(DIR_CERT_FILE),
+                path.join(DIR_KEY_FILE),
+            )
+        })
+        .collect())
+}
+
+/// Every configured pair: the primary, the pairs fixed at startup, and the
+/// directory rescanned on every reload.
 #[derive(Clone, Debug)]
-pub(super) struct TlsSources(Vec<CertificateSource>);
+pub(super) struct TlsSources {
+    primary: CertificateSource,
+    fixed_additional: Vec<CertificateSource>,
+    directory: Option<PathBuf>,
+}
 
 impl TlsSources {
-    pub(super) fn new(primary: CertificateSource, additional: Vec<CertificateSource>) -> Self {
-        let mut sources = Vec::with_capacity(additional.len() + 1);
-        sources.push(primary);
-        sources.extend(additional);
-        Self(sources)
+    pub(super) fn new(
+        primary: CertificateSource,
+        fixed_additional: Vec<CertificateSource>,
+        directory: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            primary,
+            fixed_additional,
+            directory,
+        }
+    }
+
+    /// The pairs fixed at startup together with whatever the directory holds
+    /// right now; `None` directory entries need a restart to go away, so
+    /// this is the only part that can change between two calls.
+    fn additional(&self) -> Result<Vec<CertificateSource>, TransportConfigError> {
+        let mut additional = self.fixed_additional.clone();
+        if let Some(directory) = &self.directory {
+            additional.extend(directory_sources(directory)?);
+        }
+        Ok(additional)
     }
 
     fn fingerprint(&self) -> Fingerprint {
-        self.0
-            .iter()
+        let files = std::iter::once(&self.primary)
+            .chain(&self.fixed_additional)
             .flat_map(|source| [&source.certificate, &source.key])
-            .map(|path| {
-                std::fs::metadata(path).ok().map(|metadata| FileStamp {
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                    length: metadata.len(),
-                    modified: (metadata.mtime(), metadata.mtime_nsec()),
-                    changed: (metadata.ctime(), metadata.ctime_nsec()),
-                })
-            })
-            .collect()
+            .map(|path| stamp(path))
+            .collect();
+        let directory = self.directory.as_deref().map(directory_fingerprint);
+        Fingerprint { files, directory }
     }
 
     /// Loads, validates and cross-checks every pair, then builds the
-    /// acceptor. Nothing is logged; errors name variables and paths only.
-    fn load(&self) -> Result<SslAcceptor, TransportConfigError> {
-        let mut pairs = self.0.iter().map(LoadedPair::load);
-        let primary = pairs.next().ok_or(TransportConfigError::TlsBackend)??;
-        let additional = pairs.collect::<Result<Vec<_>, _>>()?;
+    /// acceptor and counts it was built from (the primary included).
+    /// Nothing is logged; errors name variables and paths only.
+    fn load(&self) -> Result<(SslAcceptor, usize), TransportConfigError> {
+        let additional = self.additional()?;
+        let certificate_count = 1 + additional.len();
+        let primary = LoadedPair::load(&self.primary)?;
+        let additional = additional
+            .iter()
+            .map(LoadedPair::load)
+            .collect::<Result<Vec<_>, _>>()?;
         let mut by_name = HashMap::new();
         for name in &primary.names {
             by_name.insert(name.clone(), None);
@@ -137,6 +246,7 @@ impl TlsSources {
         for pair in &additional {
             if pair.names.is_empty() {
                 return Err(TransportConfigError::NoCertificateNames {
+                    variable: pair.source.certificate_variable,
                     path: pair.source.certificate.clone(),
                 });
             }
@@ -171,7 +281,7 @@ impl TlsSources {
                 Ok(())
             });
         }
-        Ok(builder.build())
+        Ok((builder.build(), certificate_count))
     }
 }
 
@@ -327,6 +437,7 @@ pub(super) struct TlsSettings {
     sources: TlsSources,
     fingerprint: Fingerprint,
     acceptor: SslAcceptor,
+    certificates: usize,
 }
 
 impl TlsSettings {
@@ -334,17 +445,18 @@ impl TlsSettings {
     pub(super) fn load(sources: TlsSources) -> Result<Self, TransportConfigError> {
         // Taken before reading so a change during the read is seen again.
         let fingerprint = sources.fingerprint();
-        let acceptor = sources.load()?;
+        let (acceptor, certificates) = sources.load()?;
         Ok(Self {
             sources,
             fingerprint,
             acceptor,
+            certificates,
         })
     }
 
     /// Configured certificate/key pairs, the primary included.
-    pub(super) fn certificates(&self) -> usize {
-        self.sources.0.len()
+    pub(super) const fn certificates(&self) -> usize {
+        self.certificates
     }
 }
 
@@ -364,7 +476,7 @@ pub(super) struct ReloadableTls {
     /// Metadata of the last attempt, held for the whole attempt so reloads
     /// never interleave.
     attempted: Mutex<Fingerprint>,
-    current: RwLock<SslAcceptor>,
+    current: RwLock<(SslAcceptor, usize)>,
 }
 
 impl ReloadableTls {
@@ -372,7 +484,7 @@ impl ReloadableTls {
         Self {
             sources: settings.sources,
             attempted: Mutex::new(settings.fingerprint),
-            current: RwLock::new(settings.acceptor),
+            current: RwLock::new((settings.acceptor, settings.certificates)),
         }
     }
 
@@ -381,14 +493,22 @@ impl ReloadableTls {
         self.current
             .read()
             .unwrap_or_else(PoisonError::into_inner)
+            .0
             .clone()
     }
 
+    /// Certificate/key pairs the acceptor currently in service was built
+    /// from, the primary included; reflects the last successful reload, not
+    /// necessarily what the directory holds between reload ticks.
     pub(super) fn certificates(&self) -> usize {
-        self.sources.0.len()
+        self.current
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
     }
 
-    /// Re-reads the files when any of them changed since the last attempt.
+    /// Re-reads the files, and rescans the additional-certificate directory,
+    /// when anything changed since the last attempt.
     pub(super) fn reload(&self) -> Reload {
         let mut attempted = self
             .attempted
@@ -400,8 +520,8 @@ impl ReloadableTls {
         }
         *attempted = fingerprint;
         match self.sources.load() {
-            Ok(acceptor) => {
-                *self.current.write().unwrap_or_else(PoisonError::into_inner) = acceptor;
+            Ok(loaded) => {
+                *self.current.write().unwrap_or_else(PoisonError::into_inner) = loaded;
                 Reload::Replaced
             }
             Err(error) => Reload::Refused(error),
