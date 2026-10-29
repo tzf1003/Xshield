@@ -59,8 +59,8 @@ use xshield_gateway::response_crypto::ENCRYPTED_RESPONSE_CONTENT_TYPE;
 use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
 use xshield_gateway::sensor_ws::{self, MAX_WS_FRAME_BYTES, WsOpcode};
 use xshield_gateway::{
-    BufferedResponsePolicy, GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
-    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_BUFFERED_JSON_BYTES, MAX_CONFIG_BYTES,
+    BufferedResponsePolicy, FROZEN_SENSOR_VERSIONS, GatewayConfig, GatewayDecision, GatewayOutcome,
+    InternalResponse, MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_BUFFERED_JSON_BYTES, MAX_CONFIG_BYTES,
 };
 use xshield_postgres::{
     PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, SensorSession,
@@ -616,27 +616,21 @@ impl ProxyHttp for Gateway {
                     respond_sensor_script(session, &context.request_id, SensorScript::LOADER)
                         .await?;
                 }
-                InternalResponse::PreviousSensorAsset => {
-                    respond_sensor_script(session, &context.request_id, SensorScript::PREVIOUS)
-                        .await?;
-                }
-                InternalResponse::PreviousSensorLoader => {
+                InternalResponse::FrozenSensorAsset(index) => {
+                    let frozen = &FROZEN_SENSOR_VERSIONS[index];
                     respond_sensor_script(
                         session,
                         &context.request_id,
-                        SensorScript::PREVIOUS_LOADER,
+                        SensorScript::new(frozen.asset_bytes, frozen.version),
                     )
                     .await?;
                 }
-                InternalResponse::LegacySensorAsset => {
-                    respond_sensor_script(session, &context.request_id, SensorScript::LEGACY)
-                        .await?;
-                }
-                InternalResponse::LegacySensorLoader => {
+                InternalResponse::FrozenSensorLoader(index) => {
+                    let frozen = &FROZEN_SENSOR_VERSIONS[index];
                     respond_sensor_script(
                         session,
                         &context.request_id,
-                        SensorScript::LEGACY_LOADER,
+                        SensorScript::new(frozen.loader_bytes, frozen.version),
                     )
                     .await?;
                 }

@@ -108,6 +108,43 @@ pub const LEGACY_SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src
 pub const LEGACY_SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
 /// Version embedded in the legacy asset paths.
 pub const LEGACY_SENSOR_VERSION: &str = "1.0.0";
+/// One sensor (or loader) version no longer served as [`SENSOR_VERSION`],
+/// kept byte-identical forever: a page an older edge already delivered — or
+/// a browser tab still open from before the next release — pins these exact
+/// bytes by URL and SRI, so the URL must keep resolving no matter how many
+/// releases have shipped since.
+pub struct FrozenSensorVersion {
+    /// The version string this entry serves, exactly as originally shipped.
+    pub version: &'static str,
+    /// The sensor asset's immutable path.
+    pub asset_path: &'static str,
+    /// The loader's immutable path.
+    pub loader_path: &'static str,
+    /// The sensor asset's immutable bytes.
+    pub asset_bytes: &'static [u8],
+    /// The loader's immutable bytes.
+    pub loader_bytes: &'static [u8],
+}
+/// Every sensor version superseded by [`SENSOR_VERSION`], oldest first.
+/// Growing this list (when the next version ships) is the only change a
+/// future release needs to keep an older version's pages served: unlike
+/// [`SENSOR_VERSION`] itself, there is no fixed slot count to run out of.
+pub const FROZEN_SENSOR_VERSIONS: &[FrozenSensorVersion] = &[
+    FrozenSensorVersion {
+        version: LEGACY_SENSOR_VERSION,
+        asset_path: LEGACY_SENSOR_ASSET_PATH,
+        loader_path: LEGACY_SENSOR_LOADER_PATH,
+        asset_bytes: LEGACY_SENSOR_ASSET_BYTES,
+        loader_bytes: LEGACY_SENSOR_LOADER_BYTES,
+    },
+    FrozenSensorVersion {
+        version: PREVIOUS_SENSOR_VERSION,
+        asset_path: PREVIOUS_SENSOR_ASSET_PATH,
+        loader_path: PREVIOUS_SENSOR_LOADER_PATH,
+        asset_bytes: PREVIOUS_SENSOR_ASSET_BYTES,
+        loader_bytes: PREVIOUS_SENSOR_LOADER_BYTES,
+    },
+];
 /// Dynamic browser sensor bootstrap document.
 pub const SENSOR_BOOTSTRAP_PATH: &str = "/__xshield/v1/bootstrap";
 /// Same-origin observation preparation endpoint advertised by bootstrap.
@@ -125,10 +162,8 @@ pub const ACCEPTED_SENSOR_VERSIONS: [&str; 3] = [
 ];
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
 const SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.loader";
-const PREVIOUS_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.previous_asset";
-const PREVIOUS_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.previous_loader";
-const LEGACY_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.legacy_asset";
-const LEGACY_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.legacy_loader";
+const FROZEN_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.frozen_asset";
+const FROZEN_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.frozen_loader";
 const SENSOR_BOOTSTRAP_OPERATION_ID: &str = "xshield.sensor.bootstrap";
 const SENSOR_PREPARE_OPERATION_ID: &str = "xshield.sensor.prepare";
 const SENSOR_WS_OPERATION_ID: &str = "xshield.sensor.ws";
@@ -141,14 +176,12 @@ pub enum InternalResponse {
     SensorAsset,
     /// The immutable browser sensor bootstrap loader.
     SensorLoader,
-    /// The frozen 1.1.0 sensor asset kept for already-delivered pages.
-    PreviousSensorAsset,
-    /// The frozen 1.1.0 loader asset kept for already-delivered pages.
-    PreviousSensorLoader,
-    /// The frozen 1.0.0 sensor asset kept for already-delivered pages.
-    LegacySensorAsset,
-    /// The frozen 1.0.0 loader asset kept for already-delivered pages.
-    LegacySensorLoader,
+    /// A superseded sensor asset kept for already-delivered pages, indexing
+    /// [`FROZEN_SENSOR_VERSIONS`].
+    FrozenSensorAsset(usize),
+    /// A superseded loader asset kept for already-delivered pages, indexing
+    /// [`FROZEN_SENSOR_VERSIONS`].
+    FrozenSensorLoader(usize),
     /// A per-navigation browser sensor bootstrap document.
     SensorBootstrap,
     /// A session-bound browser observation preparation request.
@@ -914,10 +947,8 @@ impl GatewayConfig {
                 }
                 InternalResponse::SensorAsset
                 | InternalResponse::SensorLoader
-                | InternalResponse::PreviousSensorAsset
-                | InternalResponse::PreviousSensorLoader
-                | InternalResponse::LegacySensorAsset
-                | InternalResponse::LegacySensorLoader
+                | InternalResponse::FrozenSensorAsset(_)
+                | InternalResponse::FrozenSensorLoader(_)
                 | InternalResponse::SensorBootstrap => AdmissionClass::Public,
             });
         }
@@ -931,10 +962,6 @@ impl GatewayConfig {
         match (method, path) {
             ("GET", SENSOR_ASSET_PATH) => Some(InternalResponse::SensorAsset),
             ("GET", SENSOR_LOADER_PATH) => Some(InternalResponse::SensorLoader),
-            ("GET", PREVIOUS_SENSOR_ASSET_PATH) => Some(InternalResponse::PreviousSensorAsset),
-            ("GET", PREVIOUS_SENSOR_LOADER_PATH) => Some(InternalResponse::PreviousSensorLoader),
-            ("GET", LEGACY_SENSOR_ASSET_PATH) => Some(InternalResponse::LegacySensorAsset),
-            ("GET", LEGACY_SENSOR_LOADER_PATH) => Some(InternalResponse::LegacySensorLoader),
             ("GET", SENSOR_BOOTSTRAP_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorBootstrap)
             }
@@ -944,6 +971,16 @@ impl GatewayConfig {
             ("GET", SENSOR_WS_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorWsUpgrade)
             }
+            ("GET", path) => FROZEN_SENSOR_VERSIONS
+                .iter()
+                .position(|frozen| frozen.asset_path == path)
+                .map(InternalResponse::FrozenSensorAsset)
+                .or_else(|| {
+                    FROZEN_SENSOR_VERSIONS
+                        .iter()
+                        .position(|frozen| frozen.loader_path == path)
+                        .map(InternalResponse::FrozenSensorLoader)
+                }),
             _ => None,
         }
     }
@@ -1234,10 +1271,8 @@ impl GatewayConfig {
             let operation = match response {
                 InternalResponse::SensorAsset => SENSOR_ASSET_OPERATION_ID,
                 InternalResponse::SensorLoader => SENSOR_LOADER_OPERATION_ID,
-                InternalResponse::PreviousSensorAsset => PREVIOUS_SENSOR_ASSET_OPERATION_ID,
-                InternalResponse::PreviousSensorLoader => PREVIOUS_SENSOR_LOADER_OPERATION_ID,
-                InternalResponse::LegacySensorAsset => LEGACY_SENSOR_ASSET_OPERATION_ID,
-                InternalResponse::LegacySensorLoader => LEGACY_SENSOR_LOADER_OPERATION_ID,
+                InternalResponse::FrozenSensorAsset(_) => FROZEN_SENSOR_ASSET_OPERATION_ID,
+                InternalResponse::FrozenSensorLoader(_) => FROZEN_SENSOR_LOADER_OPERATION_ID,
                 InternalResponse::SensorBootstrap => SENSOR_BOOTSTRAP_OPERATION_ID,
                 InternalResponse::SensorPrepare => {
                     return GatewayDecision {

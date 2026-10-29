@@ -15,10 +15,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use xshield_core::identity::UnixSeconds;
 use xshield_gateway::{
-    LEGACY_SENSOR_ASSET_BYTES, LEGACY_SENSOR_LOADER_BYTES, LEGACY_SENSOR_VERSION,
-    PREVIOUS_SENSOR_ASSET_BYTES, PREVIOUS_SENSOR_LOADER_BYTES, PREVIOUS_SENSOR_VERSION,
-    SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES, SENSOR_PREPARE_PATH, SENSOR_VERSION, SENSOR_WS_PATH,
-    SensorConfig,
+    LEGACY_SENSOR_VERSION, SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES, SENSOR_PREPARE_PATH,
+    SENSOR_VERSION, SENSOR_WS_PATH, SensorConfig,
     page_actions::{HarvestSource, HarvestTarget, SensorRoutes},
 };
 
@@ -38,22 +36,11 @@ impl SensorScript {
         bytes: SENSOR_LOADER_BYTES,
         version: SENSOR_VERSION,
     };
-    pub(crate) const PREVIOUS: Self = Self {
-        bytes: PREVIOUS_SENSOR_ASSET_BYTES,
-        version: PREVIOUS_SENSOR_VERSION,
-    };
-    pub(crate) const PREVIOUS_LOADER: Self = Self {
-        bytes: PREVIOUS_SENSOR_LOADER_BYTES,
-        version: PREVIOUS_SENSOR_VERSION,
-    };
-    pub(crate) const LEGACY: Self = Self {
-        bytes: LEGACY_SENSOR_ASSET_BYTES,
-        version: LEGACY_SENSOR_VERSION,
-    };
-    pub(crate) const LEGACY_LOADER: Self = Self {
-        bytes: LEGACY_SENSOR_LOADER_BYTES,
-        version: LEGACY_SENSOR_VERSION,
-    };
+
+    /// Builds a script from a frozen-version entry's asset or loader bytes.
+    pub(crate) const fn new(bytes: &'static [u8], version: &'static str) -> Self {
+        Self { bytes, version }
+    }
 }
 
 pub(crate) async fn respond_sensor_script(
@@ -193,7 +180,10 @@ mod tests {
         domain::ActionRef,
         provenance::{HttpMethod, RouteTemplate},
     };
-    use xshield_gateway::GatewayConfig;
+    use xshield_gateway::{
+        GatewayConfig, LEGACY_SENSOR_ASSET_BYTES, LEGACY_SENSOR_LOADER_BYTES,
+        PREVIOUS_SENSOR_ASSET_BYTES, PREVIOUS_SENSOR_LOADER_BYTES, PREVIOUS_SENSOR_VERSION,
+    };
     use xshield_postgres::PageActionView;
 
     const PAGE: &str = "pgh_018f2a3b-4c5d-7000-8000-000000000001";
@@ -341,19 +331,19 @@ mod tests {
         // Every served version path is immutable and SRI-pinned by pages that
         // were delivered with it; any edit must ship as a new version path.
         assert_eq!(
-            openssl::sha::sha256(SensorScript::LEGACY.bytes),
+            openssl::sha::sha256(LEGACY_SENSOR_ASSET_BYTES),
             hex32("60dac1e039186a9ae1519c7399d871b1446dd49748a30a9688f9a54ab2288df7")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::LEGACY_LOADER.bytes),
+            openssl::sha::sha256(LEGACY_SENSOR_LOADER_BYTES),
             hex32("7e4b2c44e3cff6c7f1c1b15e51f62c8066ae9ef5164fd69693488262e6ff2950")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::PREVIOUS.bytes),
+            openssl::sha::sha256(PREVIOUS_SENSOR_ASSET_BYTES),
             hex32("31b0537aa333d79e77ed3237a813e78d13fc44dd0048b0acbe49af17fcdacd1f")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::PREVIOUS_LOADER.bytes),
+            openssl::sha::sha256(PREVIOUS_SENSOR_LOADER_BYTES),
             hex32("bd869b6aab0a506c50a72427c4efc8c9f8fc75c4d6d59597963bd204432e26db")
         );
         assert_eq!(
@@ -364,11 +354,43 @@ mod tests {
             openssl::sha::sha256(SensorScript::LOADER.bytes),
             hex32("f5e8c40a7425ec4730c4437b0b4696736b425cc8e150d36b8746674e45323681")
         );
-        assert_eq!(SensorScript::LEGACY.version, "1.0.0");
-        assert_eq!(SensorScript::PREVIOUS.version, "1.1.0");
         assert_eq!(SensorScript::CURRENT.version, "1.2.0");
-        assert_ne!(SensorScript::CURRENT.bytes, SensorScript::PREVIOUS.bytes);
-        assert_ne!(SensorScript::PREVIOUS.bytes, SensorScript::LEGACY.bytes);
+        assert_ne!(SensorScript::CURRENT.bytes, PREVIOUS_SENSOR_ASSET_BYTES);
+        assert_ne!(PREVIOUS_SENSOR_ASSET_BYTES, LEGACY_SENSOR_ASSET_BYTES);
+
+        // The generalized frozen-version list carries the exact same bytes,
+        // oldest first, and never the current version: a future bump adds
+        // one more entry here rather than replacing one of these two.
+        assert_eq!(xshield_gateway::FROZEN_SENSOR_VERSIONS.len(), 2);
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[0].version,
+            LEGACY_SENSOR_VERSION
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[0].asset_bytes,
+            LEGACY_SENSOR_ASSET_BYTES
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[0].loader_bytes,
+            LEGACY_SENSOR_LOADER_BYTES
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[1].version,
+            PREVIOUS_SENSOR_VERSION
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[1].asset_bytes,
+            PREVIOUS_SENSOR_ASSET_BYTES
+        );
+        assert_eq!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS[1].loader_bytes,
+            PREVIOUS_SENSOR_LOADER_BYTES
+        );
+        assert!(
+            xshield_gateway::FROZEN_SENSOR_VERSIONS
+                .iter()
+                .all(|frozen| frozen.version != SENSOR_VERSION)
+        );
     }
 
     fn hex32(value: &str) -> [u8; 32] {
