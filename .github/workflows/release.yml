@@ -81,6 +81,11 @@ jobs:
             # another commit is never moved.
             [[ "$existing" == "$sha" ]] || fail "$tag already names $existing, not $sha"
           else
+            # GitHub refuses a GITHUB_TOKEN push of a ref whose workflow files
+            # differ from main's ("without `workflows` permission"), so only a
+            # commit carrying main's .github/workflows can be tagged from here.
+            git diff --quiet "$sha" origin/main -- .github/workflows \
+              || fail "$sha has other workflow files than main; GITHUB_TOKEN cannot tag it (cut the version on a newer commit)"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag -a "$tag" "$sha" -m "Xshield $VERSION"
