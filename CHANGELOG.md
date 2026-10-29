@@ -7,6 +7,19 @@
   - 页面打开、聚焦或定时都不会读取；每次点击“生成统计”才读一次，服务端照常审计。客户端严格解码：字段集合、计数嵌套、列表排序与去重、`last_seen` 在窗口内、列表与总数相加一致（截断时严格小于），路径形状只接受 edge 能产生的形状，否则按无效响应处理，不渲染。
   - 回归：`tests/coverage-report.test.ts`（解码、结论、查询串、路径形状、占比）；`tests/coverage.spec.ts`（Playwright：只在点击后读取、三张表与结论、索引未追上、失败不留旧结果、计数不一致拒绝渲染）；导航与路由表测试加入新页面。
 
+- 请求解密与响应加密支持多站点、多 key-id（docs/19、docs/31）：此前每个方向只有一把绑定启动配置站点的密钥，经 apply 下发的站点一旦启用 `DIRECT_DECRYPT`/`DIRECT_ENCRYPT` 就只能失败关闭，轮换也要起第二个 edge。
+  - edge 新增密钥环变量 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`（也可 `_FILE`）：JSON 数组，每项 `tenant_id`、`site_id`、`key_id`、`key_hex`，每个方向最多 256 项。查找按租户、站点、key-id 与用途精确匹配，未列出的组合仍是 `REQUEST_CRYPTO_KEY_UNAVAILABLE`/`RESPONSE_CRYPTO_KEY_UNAVAILABLE`。
+  - 原来的 `*_KEY_HEX` 单值变量含义不变，继续服务启动站点的 key-id，已有部署无需改动。格式错误、重复作用域、单值与密钥环重复给出启动站点 key-id、启动站点缺密钥、任一密钥跨方向复用，都拒绝启动；错误信息不含密钥。
+  - 轮换流程改为：把新 key-id 加入密钥环并重启 edge，发布引用新 key-id 的修订，客户端不再使用旧 key-id 后再删除。`scripts/test_gateway_request_crypto.sh` 改为从密钥环读取响应密钥（同时含一个轮换 key-id）。
+  - **未覆盖**：密钥环只在启动时读取，不支持热加载；`test_gateway_request_crypto.sh` 在本机因环境原因（未改动的 main 上同样失败）没有跑通，由 CI 验证。
+
+- 在 GitHub 上发版，不必在本地推标签（docs/19 19.7）：此前发布镜像只能靠推送 `v*` 标签触发，而会话与 CI 都不能推标签。
+  - 新增 `.github/workflows/release.yml`（workflow_dispatch，输入版本号，可选指定提交）。它先检查版本号与提交是否对应：提交在 main 上，Cargo 与 Helm chart 版本一致，CHANGELOG 有该版本标题，main 上 CI 已通过。检查通过后创建 `v<版本>` 标签，以 workflow_call 调用 `release-images.yml` 构建、推送、证明并签名镜像，最后创建带 CHANGELOG 段落和镜像 digest 的 GitHub Release。
+  - `release-images.yml` 可以被调用，并给镜像加上版本与源码提交标签。验证签名身份的正则同时接受标签（推送触发）和 main（经 `release.yml` 触发），文档里的 `cosign verify` 命令已相应更新。
+  - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
+  - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
+  - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
+
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
   - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
   - CI 新增 `fuzz-replay` 作业：用稳定版回放所有种子和固定数量的确定性变异，同时对该 crate 运行 fmt 与 clippy。新增 `.github/workflows/fuzz.yml`：每天在稳定版上做覆盖引导的模糊测试（不加 sanitizer），在两次运行之间缓存语料，发现崩溃时上传。

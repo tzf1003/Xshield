@@ -1,0 +1,147 @@
+name: release
+
+# Cuts a release from GitHub Actions, without anyone pushing a tag by hand
+# (docs/19 19.7). Run it from the Actions tab (or `gh workflow run release.yml
+# -f version=0.1.0`); it needs write access to the repository, like any
+# workflow_dispatch.
+#
+#   1. tag:     checks the version against the commit and creates the tag v<version>;
+#   2. images:  release-images.yml builds, pushes, attests and signs the images;
+#   3. publish: creates the GitHub Release with the CHANGELOG section and the digests.
+#
+# A tag pushed with GITHUB_TOKEN does not start other workflows, so the images
+# are built here through workflow_call rather than by the tag push. A tag a
+# person pushes still runs release-images.yml on its own.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v, e.g. 0.1.0 (must match Cargo.toml and a CHANGELOG heading)"
+        required: true
+      commit:
+        description: "Commit on main to release; empty = the commit that added the CHANGELOG heading"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - id: check
+        name: Check the version against the commit
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must be MAJOR.MINOR.PATCH, got '$VERSION'"
+          tag="v$VERSION"
+          heading="## $VERSION —"
+          if [[ -z "$COMMIT" ]]; then
+            # The commit that cut the version is the one that added its heading.
+            COMMIT=$(git log --format=%H -S"$heading" origin/main -- CHANGELOG.md | tail -n 1)
+            [[ -n "$COMMIT" ]] || fail "no commit on main adds '$heading' to CHANGELOG.md"
+          fi
+          sha=$(git rev-parse --verify "$COMMIT^{commit}") || fail "unknown commit '$COMMIT'"
+          git merge-base --is-ancestor "$sha" origin/main || fail "$sha is not on main"
+          # grep -q would exit at the first match and, under pipefail, the
+          # SIGPIPE it gives git show would read as "no match".
+          git show "$sha:CHANGELOG.md" | grep "^$heading" >/dev/null || fail "CHANGELOG.md at $sha has no '$heading' heading"
+          for manifest in crates/xshield-gateway/Cargo.toml deploy/helm/xshield/Chart.yaml; do
+            git show "$sha:$manifest" | grep -E "^version: ?\"?$VERSION\"?$|^version = \"$VERSION\"$" >/dev/null \
+              || fail "$manifest at $sha is not version $VERSION"
+          done
+          # Only a commit whose CI run on main passed is released.
+          passed=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&event=push" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          [[ "$passed" -gt 0 ]] || fail "CI on main has not passed for $sha"
+          if existing=$(git rev-parse --verify -q "refs/tags/$tag^{commit}"); then
+            # Re-running a release whose images failed reuses the tag; a tag on
+            # another commit is never moved.
+            [[ "$existing" == "$sha" ]] || fail "$tag already names $existing, not $sha"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" "$sha" -m "Xshield $VERSION"
+            git push origin "refs/tags/$tag"
+          fi
+          {
+            echo "tag=$tag"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+          echo "release $tag at $sha" >> "$GITHUB_STEP_SUMMARY"
+
+  images:
+    needs: tag
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/release-images.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+
+  publish:
+    needs: [tag, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.sha }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          VERSION: ${{ inputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # The version's own CHANGELOG section, up to the next heading.
+          awk -v v="$VERSION" '$1 == "##" { if (on) exit; on = ($2 == v) ; next } on' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "## Images"
+            echo
+            echo "Deploy by digest and verify each image first (docs/19 19.7):"
+            echo
+            for target in edge control worker; do
+              image="ghcr.io/${OWNER,,}/xshield-$target"
+              digest=$(docker buildx imagetools inspect "$image:$TAG" --format '{{.Manifest.Digest}}')
+              echo "- \`$image@$digest\`"
+            done
+          } >> notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "Xshield ${VERSION}" --notes-file notes.md
+          else
+            gh release create "$TAG" --verify-tag --title "Xshield ${VERSION}" --notes-file notes.md
+          fi

@@ -171,10 +171,12 @@ cat >"$test_dir/config.json" <<JSON
 JSON
 
 cargo build --quiet --manifest-path "$repo_root/Cargo.toml" -p xshield-gateway --bin xshield-gateway
+# The request key comes from the single variable and the response key from a
+# keyring that also holds a rotation key-id, so both startup paths are used.
 XSHIELD_CONFIG="$test_dir/config.json" \
 XSHIELD_JOURNAL_KEY_HEX="8888888888888888888888888888888888888888888888888888888888888888" \
 XSHIELD_REQUEST_DECRYPTION_KEY_HEX="$request_key" \
-XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX="$response_key" \
+XSHIELD_RESPONSE_ENCRYPTION_KEYS="[{\"tenant_id\":\"tenant_crypto\",\"site_id\":\"site_crypto\",\"key_id\":\"response-key-r1\",\"key_hex\":\"$response_key\"},{\"tenant_id\":\"tenant_crypto\",\"site_id\":\"site_crypto\",\"key_id\":\"response-key-r2\",\"key_hex\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]" \
 XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
 XSHIELD_DATABASE_URL="$database_url" \
     "${CARGO_TARGET_DIR:-$repo_root/target}/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &

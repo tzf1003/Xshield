@@ -75,6 +75,8 @@ control 与 edge 之间的 HMAC 通道对三类消息分别认证，并共用同
 
 从文件读取秘密：control、edge、worker、`xshield-outbox-worker`、`xshield-evidence-retain` 与 `xshield-audit-seal` 读取的每个秘密变量（数据库 URL、各 `*_KEY_HEX`、`XSHIELD_CONTROL_TOKEN`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CLICKHOUSE_PASSWORD` 等）都可以改为设置 `<变量名>_FILE`，值为一个文件路径，进程从该文件读取秘密，适合 Docker/Kubernetes secret 卷，秘密因此不出现在 `/proc/<pid>/environ`、`docker inspect` 或编排器的环境变量展示里。规则：同时设置 `NAME` 与 `NAME_FILE` 拒绝启动（避免过期变量悄悄压过挂载的文件）；文件只去掉末尾一个换行（`\n` 或 `\r\n`），其余字节原样保留；文件必须是 UTF-8 且不超过 64 KiB；进程不检查文件权限，由部署方把文件设为只有服务用户可读（Kubernetes secret 卷可设 `defaultMode: 0400`）。错误信息只给出变量名，不包含值或文件内容。非秘密配置（监听地址、URL、开关）仍只读普通变量。
 
+请求解密与响应加密密钥：启动配置站点使用 `request_crypto`/`response_crypto` 时，其 key-id 的密钥来自 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX`（64 位小写 hex）。经 apply 下发的站点与轮换中的新 key-id 改用密钥环 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`：值是 JSON 数组，每项 `{"tenant_id","site_id","key_id","key_hex"}`，每个方向 1–256 项，未知字段、重复的（租户、站点、key-id）、非法 key-id 或密钥都拒绝启动，错误只给出变量名与序号，不含密钥。推荐用 `_FILE` 挂载。单值变量与密钥环同时给出启动站点的同一 key-id 时拒绝启动；启动站点需要的 key-id 两处都没有时同样拒绝启动；同一密钥出现在两个方向时拒绝启动。轮换顺序：把新 key-id 加入密钥环并滚动重启 edge，发布引用新 key-id 的站点修订，确认客户端不再使用旧 key-id 后再从密钥环删除。密钥环在启动时读取，修改后需重启 edge。
+
 密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取，KMS 故障不能退回硬编码默认密钥或明文证据。
 
 edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的持久批次完成后自动切换 producer boot。部署方预建仅封存身份可写的私有 manifest 目录，并周期运行 `xshield-audit-seal JOURNAL_DIRECTORY MANIFEST_DIRECTORY`。该进程读取 journal 密钥并独占日志签名私钥；edge 不取得签名私钥。重复任务会验证既有清单与关闭段完全一致，再处理新段。
@@ -124,12 +126,25 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 
 在 macOS 上若使用外接 exFAT 磁盘，不要直接把 `CARGO_TARGET_DIR` 放在其上：exFAT 没有硬链接和 POSIX 权限，随附的 OpenSSL 源码构建会以 `Directory not empty` 失败。可以在该磁盘上创建 APFS 稀疏包（`hdiutil create -size 400g -type SPARSEBUNDLE -fs APFS -volname XshieldBuild -attach <磁盘>/xshield-build.sparsebundle`），把构建与打包目录放在其挂载点下；磁盘空间只在该外接盘上按需增长。
 
-打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像；仓库根的 `Dockerfile` 给出 edge、control、worker 三个镜像目标（`docker build --target edge|control|worker .`，基础镜像按 digest 固定，运行用户 uid 10001，只含发布二进制与其链接的库，不带任何配置、密钥或证书），CI 的 `container-images` 作业在 Linux 上构建三个目标并检查每个二进制的共享库都能解析；CI 构建的镜像不推送。发布镜像由 `.github/workflows/release-images.yml` 在推送 `v*` 标签时完成，步骤如下：
+打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像；仓库根的 `Dockerfile` 给出 edge、control、worker 三个镜像目标（`docker build --target edge|control|worker .`，基础镜像按 digest 固定，运行用户 uid 10001，只含发布二进制与其链接的库，不带任何配置、密钥或证书），CI 的 `container-images` 作业在 Linux 上构建三个目标并检查每个二进制的共享库都能解析；CI 构建的镜像不推送。发布镜像由 `.github/workflows/release-images.yml` 完成。有两种触发方式：一是有人推送 `v*` 标签；二是在 Actions 页面运行 `release.yml` 并填入版本号（见下文），这样不需要任何人在本地推标签。release-images 的步骤如下：
 
 - 把三个目标推到 `ghcr.io/<owner>/xshield-{edge,control,worker}:<标签>`，附带 BuildKit 构建来源证明（provenance，`mode=max`）与 SBOM；
 - 对推送的 digest 做 Sigstore 无密钥签名，签名证书绑定该工作流与标签，并在同一作业里立即验证一次。
 
-部署方应按 digest 引用镜像，并在使用前验证：`cosign verify <镜像>@sha256:… --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/release-images\.yml@refs/tags/v'`。该工作流还没有实际运行过（尚未打过发布标签）。
+`release.yml`（workflow_dispatch，需要仓库写权限）依次完成三步：
+
+1. 检查版本号与提交是否对应：提交必须在 main 上；该提交的 Cargo 工作区与 Helm chart 都是这个版本；CHANGELOG 有该版本的标题；main 上针对该提交的 CI 已通过。不指定提交时，取第一次加入该版本 CHANGELOG 标题的提交，也就是切版本的那个提交。检查通过后在该提交上创建 `v<版本>` 标签。
+2. 以 workflow_call 调用 release-images 构建并签名镜像。用 `GITHUB_TOKEN` 推送的标签不会触发其他工作流，所以镜像在这一步构建。
+3. 创建 GitHub Release，正文是该版本的 CHANGELOG 段落，附三个镜像的 digest。
+
+标签已经在同一提交上时，重跑会复用它，适用于镜像步骤失败后重试；标签指向其他提交时，工作流拒绝运行，从不移动已有标签。
+
+部署方应按 digest 引用镜像，并在使用前验证：`cosign verify <镜像>@sha256:… --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\.com/<owner>/<repo>/\.github/workflows/release-images\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$'`。
+
+签名身份与触发方式有关：
+
+- 推送标签触发时，签名身份绑定到标签（`@refs/tags/v…`）。
+- 经 `release.yml` 触发时，签名身份是 main 上的这个工作流文件（`@refs/heads/main`）。这时镜像的 `org.opencontainers.image.version` 与 `org.opencontainers.image.revision` 标签，以及构建来源证明，给出发布版本和源码提交。能以这一身份签名的，只有 main 上运行的 release-images。它只在推送 `v*` 标签或被 `release.yml` 调用时运行，而运行 `release.yml` 需要仓库写权限。
 
 单机 Docker Compose 参考部署见 19.8，Kubernetes 的 Helm chart 见 19.9，CI 用这三个镜像把两者都整体拉起验证；systemd 单元仍没有（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
 
