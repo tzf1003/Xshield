@@ -9,5 +9,5 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 image="prom/prometheus@sha256:565ee86501224ebbb98fc10b332fa54440b100469924003359edf49cbce374bd"
 
-docker run --rm -v "$PWD/deploy/prometheus:/rules:ro" "$image" \
-    promtool check rules /rules/alerts.yml
+docker run --rm --entrypoint=/bin/promtool -v "$PWD/deploy/prometheus:/rules:ro" "$image" \
+    check rules /rules/alerts.yml

@@ -14,10 +14,7 @@
 # "this instance stopped reporting at all" so they still fire per
 # target/instance once your scrape config adds its own labels.
 #
-# Validate with: docker run --rm -v "$PWD/deploy/prometheus:/rules:ro" \
-#   prom/prometheus@sha256:565ee86501224ebbb98fc10b332fa54440b100469924003359edf49cbce374bd \
-#   promtool check rules /rules/alerts.yml
-# (also wired into CI, see scripts/test_prometheus_alerts.sh).
+# Validate with: scripts/test_prometheus_alerts.sh (also wired into CI).
 #
 # Thresholds marked "adjust for your traffic" are starting points, not
 # validated SLOs: docs/21's latency budget is still an unmeasured target
