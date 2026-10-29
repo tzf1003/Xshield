@@ -54,6 +54,7 @@ test("navigation is regrouped into the console sections; cases and approvals rep
       ["身份与资格", "/investigation/grants"],
       ["模型调用", "/investigation/models"],
       ["Agent 运行", "/investigation/agents"],
+      ["拒绝与覆盖", "/investigation/coverage"],
       ["案件工作台", "/cases"],
       ["审批中心", "/approvals"],
       ["运行状态", "/operations/jobs"],
@@ -77,6 +78,7 @@ test("role visibility matches the previous shell for every role", () => {
     "身份与资格",
     "模型调用",
     "Agent 运行",
+    "拒绝与覆盖",
     "权限中心",
   ]);
   assert.deepEqual(labels(["investigator"]), [

@@ -26,6 +26,7 @@ export type IconKey =
   | "jobs"
   | "audit"
   | "calibration"
+  | "coverage"
   | "key"
   | "session";
 
@@ -125,6 +126,16 @@ export const navCatalog: readonly NavGroup[] = [
         "详情",
       ]),
       item("/investigation/agents", "Agent 运行", ["observer"], "agent", ["agent", "agt", "运行"]),
+      item("/investigation/coverage", "拒绝与覆盖", ["observer"], "coverage", [
+        "coverage",
+        "refusal",
+        "deny",
+        "unrouted",
+        "拒绝",
+        "覆盖",
+        "未覆盖",
+        "统计",
+      ]),
     ],
   },
   {
@@ -294,6 +305,7 @@ const titles: Record<QueryKind, string> = {
   "model-list": "模型调用",
   "audit-health": "审计发布状态",
   "calibration-report": "校准报告调查",
+  "coverage-report": "拒绝与覆盖统计",
   grant: "身份与资格",
   binding: "身份与资格",
   search: "结构化事件检索",
@@ -316,6 +328,8 @@ const leads: Record<QueryKind, string> = {
     "在固定 UTC 时间窗内分页发现模型调用，或按模型调用 ID 直接打开；打开条目会重新读取详情并重新鉴权。",
   "audit-health": "按需读取配置审计日志到索引的发布快照。",
   "calibration-report": "读取受限校准报告的冻结元数据与正文保留观察。",
+  "coverage-report":
+    "按 UTC 时间窗统计每条路由的流量与拒绝原因，并按路径形状列出还没有路由覆盖的端点。",
   grant: "核对账本中资格与身份绑定的状态、代际与期限；这是数据库时刻的观察，不是准入判定。",
   binding: "核对账本中资格与身份绑定的状态、代际与期限；这是数据库时刻的观察，不是准入判定。",
   search: "按时间与事件字段检索，核对直接引用的历史事实。",
