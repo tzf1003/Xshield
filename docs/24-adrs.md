@@ -59,3 +59,33 @@
 - 源站只接受来自 Xshield edge 的连接，edge 的数据面只接受来自前置层的连接（网络策略或 PROXY 可信地址列表），否则可绕过任一层。
 - 以后若要内置签名检测，按 2.3 新增 BaselineInspectionPort 适配器并另立 ADR，不改变本 ADR 对已部署站点的要求。
 
+## ADR-014｜Helm 高可用：放开副本数 + 控制面收敛回放，不引入外部协调服务
+
+状态：采纳（2026-10-29）。
+
+背景：docs/19 19.8/19.9/19.10 三种参考部署都明确写着"不是高可用方案"。Helm chart 把 edge、control 与两组 journal 封存/发布任务放进单副本 StatefulSet 的同一个 Pod（因为 control 管理 API 与 edge apply 通道按设计只监听 loopback，必须共享网络命名空间），该 Pod 是单点故障；10 个 outbox 发布任务已经是独立 Deployment，但同样固定 1 个副本。KMS 的通用密钥管理集成不在本次范围内。
+
+调研结论（crates/xshield-audit、crates/xshield-worker、crates/xshield-postgres、deploy/helm）：
+
+- `xshield-outbox-worker` 基于 PostgreSQL 行级租约认领任务（`xshield_postgres::OutboxLeaseConfig`），多个实例并发跑天然安全、不会重复处理，Helm 里 `deployment-outbox.yaml` 本身的注释也写明"claims are leased... may be rolled at any time"。
+- `xshield-audit-seal` 与 journal 发布任务都按已存在的清单/checkpoint 幂等重放（已有清单按内容复验、`AlreadyExists` 分支处理），两个实例同时处理同一 journal 目录不会冲突、不需要互斥。
+- 真正的单写者约束只在"同一个 journal 目录只能有一个 edge（或 control）进程在追加写"（docs/13），这是进程自己持有的文件锁，与副本数无关：只要每个副本有自己独立的 journal 目录（现有 StatefulSet 的 `volumeClaimTemplates` 本来就按 Pod 序号分配独立 PVC），这条约束天然满足。
+
+因此 journal 封存/发布与 outbox 都不需要新增 leader election，只需放开副本数。真正阻碍多副本的是 edge↔control 的耦合：apply 由一次管理写请求同步触发，只推给发起方那个 control 实例自己的本地 edge（`crates/xshield-control/src/site_config.rs` 的 `apply_site_snapshot`）；多个 edge+control 副本各自独立运行时，没有机制把配置变更扇出到其余副本的本地 edge，它们会停在旧快照上——这才是 19.9 目前只能单副本的真正原因，不是审计链路本身。
+
+决定：
+
+1. 保留 edge+control 同 Pod、同网络命名空间的 loopback 耦合，不新增跨 Pod 的 apply 网络面、不改变既有安全边界；把 StatefulSet 的副本数放开为可配置的 N（默认建议 ≥2 用于生产），每个副本各自一套 edge+control+两组 journal 任务+独立 PVC（现有 `volumeClaimTemplates` 已支持，只是从未把 `replicas` 调大过）。
+2. 新增 control 侧的收敛回放任务，复用已有的 `XSHIELD_RUN_INTERVAL_SECONDS` 常驻模式：按固定间隔对本地 edge 重放当前已批准（approved/active）的完整租户快照。这正是 `apply_site_snapshot` 已经在做的计算（它本来就从 PostgreSQL 重新算出全量快照再整体下发），只是目前只在收到写请求时跑一次；让每个副本独立、定期地把同一个计算结果重放给自己的本地 edge，依赖的是已有、已验证的幂等 apply 协议（`EDGE_APPLY_IDEMPOTENCY_CONFLICT` 等语义）——不需要副本互相通信，不需要引入 etcd/Redis 等外部协调服务，也不需要新的分布式锁。
+3. 不引入 leader election：调研没有找到真正要求"全局恰好一个活跃实例"的组件；PostgreSQL 已有的 `pg_advisory_xact_lock` 用于互斥单次写操作已经足够，不需要会话级常驻 leader 或额外依赖。
+4. 新增 Pod 反亲和（尽量分散到不同节点）与 PodDisruptionBudget（`maxUnavailable: 1`），outbox Deployment 的副本数同样放开为可配置项。
+
+已知限制（见 docs/23）：现有"desired/active" apply 状态位按"至少一个 edge 已收敛"记录，不是"全部副本已收敛"；本次不新增按副本粒度的收敛状态表，运维通过每个 Pod 的签名健康接口或 control `/metrics` 的 snapshot revision 观察滚动是否完成。跨 Region/跨故障域的强一致不在本次范围内（19.6 已有此限制，继续保留）。
+
+后果：
+
+- Helm chart：`values.yaml` 新增副本数、Pod 反亲和与 PodDisruptionBudget 相关字段；`statefulset-core.yaml` 顶部"Exactly one replica"的注释与假设需要重写；`deployment-outbox.yaml` 的副本数同样放开。
+- control 新增一个收敛回放任务及其配置项（间隔、开关），复用既有 `EdgeApplyClient`，不新增网络面、不新增密钥材料。
+- CI 的 `helm`/kind 作业需要扩展到 N≥2 副本场景：验证配置变更收敛到全部副本、删除一个 Pod 后数据面不中断、恢复的副本重新收敛到当前 revision。
+- compose 与 systemd 两种参考部署仍是单机（19.8、19.10 维持原状），本次 HA 范围只覆盖 Kubernetes/Helm。
+
