@@ -148,6 +148,8 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 
 部署方应按 digest 引用镜像，并在使用前验证：`cosign verify <镜像>@sha256:… --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\.com/<owner>/<repo>/\.github/workflows/release-images\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$'`。
 
+v0.1.1 是第一个由 `release.yml` 发布的版本（[Release](https://github.com/tzf1003/Xshield/releases/tag/v0.1.1)，标签指向 5588652），三个镜像的 digest 列在 Release 正文里，用上面的命令在仓库外逐一验证通过。
+
 签名身份与触发方式有关：
 
 - 推送标签触发时，签名身份绑定到标签（`@refs/tags/v…`）。

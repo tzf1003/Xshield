@@ -53,7 +53,7 @@
   - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
   - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
   - `release.yml` 只能给工作流文件与 main 一致的提交打标签：GitHub 拒绝用 `GITHUB_TOKEN` 推送这类引用（缺少 `workflows` 权限）。打标签前先比较，不一致时直接报错说明原因。
-  - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
+  - 已实际运行：`release.yml` 发布了 v0.1.1（Actions run 40809536790），三个镜像推到 GHCR 并签名，Release 附 digest；在仓库外用 `cosign verify`（docs/19 19.7 的身份正则）逐一验证通过。
 
 - 试点路径验收用例补测（可行性建议 P1 #8，docs/20）：`examples/acceptance-cases.json` 由 automated 9 / partial 51 / planned 18 改为 automated 11 / partial 60 / planned 7。
   - automated：DEV-01（`crates/xshield-core/tests/dependency_boundary.rs` 解析 `Cargo.lock`，领域 crate 的传递依赖触及数据库、HTTP、异步运行时、TLS 或其他 xshield crate 即失败，另有合成违规锁文件的反例与源码禁开套接字检查）；SHARE-04（`scripts/test_gateway_identity.sh` 经真实 edge 用同一分享令牌三次 Range 读取，均 206、分享行不变）。
