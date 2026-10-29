@@ -48,6 +48,8 @@ const notReasonCodes: Readonly<Record<string, string>> = {
   CANCELLED: "stage outcome label",
   SKIPPED: "stage outcome label",
   UNKNOWN: "decision and outcome label",
+  OBSERVED_WOULD_DENY:
+    "decision and outcome label of an observe rollout; reason_code carries the refusal",
   DELETE: "HTTP method name",
   NOT_CONFIGURED:
     "final decision label of the in-process M0 audit; wire decisions are ALLOW/DENY/UNKNOWN",
@@ -56,6 +58,12 @@ const notReasonCodes: Readonly<Record<string, string>> = {
   VISIBILITY: "browser sensor event type",
   CARGO_PKG_VERSION: "cargo build environment variable",
   SCREAMING_SNAKE_CASE: "serde rename rule",
+  AUDIT_UNAVAILABLE: "edge readiness reason on the unauthenticated ops endpoint",
+  NO_LISTENERS: "edge readiness reason on the unauthenticated ops endpoint",
+  EVIDENCE_PURGE_TIMEOUT: "edge evidence retention failure label on the ops metrics endpoint",
+  EVIDENCE_PURGE_UNAVAILABLE: "edge evidence retention failure label on the ops metrics endpoint",
+  EVIDENCE_CAPACITY_REFRESH_FAILED:
+    "edge evidence retention failure label on the ops metrics endpoint",
 };
 /** Environment variable names and API key names are configuration, not reasons. */
 const notReasonPatterns: readonly RegExp[] = [/^XSHIELD_/, /_API_KEY$/];

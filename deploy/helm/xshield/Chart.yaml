@@ -1,0 +1,14 @@
+apiVersion: v2
+name: xshield
+description: >-
+  One Xshield tenant and site on Kubernetes: edge and control in one pod (their
+  management and apply channels are loopback-only), the journal seal and publish
+  jobs beside them, and the transactional outbox publishers. PostgreSQL,
+  ClickHouse, the OIDC IdP and the management HTTPS proxy are the operator's.
+type: application
+version: 0.1.1
+appVersion: "0.1.1"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/tzf1003/Xshield
+sources:
+  - https://github.com/tzf1003/Xshield

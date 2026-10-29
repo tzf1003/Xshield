@@ -27,8 +27,15 @@ fn key_pair() -> PKey<Private> {
     PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap()
 }
 
-/// A self-signed leaf valid from `from` to `until` days relative to now.
+/// A self-signed leaf for `site-a.example` valid from `from` to `until` days
+/// relative to now.
 fn certificate(key: &PKey<Private>, from: i64, until: i64) -> X509 {
+    named_certificate(key, from, until, &["site-a.example"])
+}
+
+/// A self-signed leaf whose subject alternative names are `names` (none at
+/// all, and no common name, when empty).
+fn named_certificate(key: &PKey<Private>, from: i64, until: i64, names: &[&str]) -> X509 {
     let now = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -37,7 +44,10 @@ fn certificate(key: &PKey<Private>, from: i64, until: i64) -> X509 {
     )
     .unwrap();
     let mut name = X509NameBuilder::new().unwrap();
-    name.append_entry_by_text("CN", "site-a.example").unwrap();
+    match names.first() {
+        Some(first) => name.append_entry_by_text("CN", first).unwrap(),
+        None => name.append_entry_by_text("O", "no host names").unwrap(),
+    }
     let name = name.build();
     let mut builder = X509::builder().unwrap();
     builder.set_version(2).unwrap();
@@ -52,11 +62,14 @@ fn certificate(key: &PKey<Private>, from: i64, until: i64) -> X509 {
     builder
         .set_not_after(&Asn1Time::from_unix(now + until * DAY).unwrap())
         .unwrap();
-    let san = SubjectAlternativeName::new()
-        .dns("site-a.example")
-        .build(&builder.x509v3_context(None, None))
-        .unwrap();
-    builder.append_extension(san).unwrap();
+    if !names.is_empty() {
+        let mut san = SubjectAlternativeName::new();
+        for name in names {
+            san.dns(name);
+        }
+        let san = san.build(&builder.x509v3_context(None, None)).unwrap();
+        builder.append_extension(san).unwrap();
+    }
     builder.sign(key, MessageDigest::sha256()).unwrap();
     builder.build()
 }
@@ -187,6 +200,9 @@ fn no_variables_mean_plaintext_without_proxy_protocol() {
         status,
         TransportStatus {
             tls_enabled: false,
+            tls_certificates: 0,
+            tls_reloads: 0,
+            tls_reload_failures: 0,
             tls_handshake_failures: 0,
             proxy_protocol_enabled: false,
             proxy_header_rejections: 0,
@@ -304,7 +320,10 @@ fn unusable_certificate_material_stops_startup_without_echoing_it() {
     };
     assert!(matches!(
         load(&good_cert, &wrong_key),
-        TransportConfigError::KeyMismatch
+        TransportConfigError::KeyMismatch {
+            variable: TLS_KEY_PATH_ENV,
+            ..
+        }
     ));
     assert!(matches!(
         load(&expired, &good_key),
@@ -717,4 +736,527 @@ async fn silent_tls_connections_are_closed_after_the_first_request_deadline() {
     let error = stream.read(&mut [0; 8]).await.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     drop(client);
+}
+
+/// Writes a fresh key and a certificate for `names` as `<stem>.pem` and
+/// `<stem>.key`, replacing earlier files of the same name.
+fn write_named_pair(scratch: &Scratch, stem: &str, names: &[&str]) -> (PathBuf, PathBuf) {
+    let key = key_pair();
+    let cert = scratch.write(
+        &format!("{stem}.pem"),
+        &named_certificate(&key, -1, 30, names).to_pem().unwrap(),
+        0o644,
+    );
+    let key = scratch.write(
+        &format!("{stem}.key"),
+        &key.private_key_to_pem_pkcs8().unwrap(),
+        0o600,
+    );
+    (cert, key)
+}
+
+fn sni_list(pairs: &[&(PathBuf, PathBuf)]) -> OsString {
+    let entries: Vec<String> = pairs
+        .iter()
+        .map(|(cert, key)| format!("{}:{}", cert.display(), key.display()))
+        .collect();
+    OsString::from(entries.join(","))
+}
+
+fn sni_config(
+    primary: &(PathBuf, PathBuf),
+    additional: Option<OsString>,
+) -> Result<TransportConfig, TransportConfigError> {
+    sni_config_with_dir(primary, additional, None)
+}
+
+fn sni_config_with_dir(
+    primary: &(PathBuf, PathBuf),
+    additional: Option<OsString>,
+    certs_dir: Option<&Path>,
+) -> Result<TransportConfig, TransportConfigError> {
+    let mut entries = vec![
+        (TLS_CERT_PATH_ENV, primary.0.clone().into_os_string()),
+        (TLS_KEY_PATH_ENV, primary.1.clone().into_os_string()),
+    ];
+    if let Some(additional) = additional {
+        entries.push((TLS_SNI_CERTS_ENV, additional));
+    }
+    if let Some(certs_dir) = certs_dir {
+        entries.push((TLS_SNI_CERTS_DIR_ENV, certs_dir.as_os_str().to_owned()));
+    }
+    TransportConfig::from_lookup(lookup(entries))
+}
+
+/// Writes `<directory>/<name>/tls.crt` and `<directory>/<name>/tls.key` (the
+/// names a Kubernetes TLS secret mounts), replacing an existing pair of the
+/// same name, and returns the subdirectory.
+fn write_dir_pair(directory: &Path, name: &str, names: &[&str]) -> PathBuf {
+    let subdirectory = directory.join(name);
+    std::fs::create_dir_all(&subdirectory).unwrap();
+    let key = key_pair();
+    std::fs::write(
+        subdirectory.join("tls.crt"),
+        named_certificate(&key, -1, 30, names).to_pem().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        subdirectory.join("tls.key"),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        subdirectory.join("tls.key"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    subdirectory
+}
+
+/// The first DNS name of the certificate the edge presents to a client that
+/// sends `server_name` as SNI (none when `None`).
+async fn served_name(transport: &Arc<EdgeTransport>, server_name: Option<&str>) -> String {
+    let (address, server) = serve_one(Arc::clone(transport)).await;
+    let mut configuration = connector(SslVersion::TLS1_3).configure().unwrap();
+    configuration.set_use_server_name_indication(server_name.is_some());
+    configuration.set_verify_hostname(false);
+    let ssl = configuration
+        .into_ssl(server_name.unwrap_or("unused.invalid"))
+        .unwrap();
+    let mut client = SslStream::new(ssl, TcpStream::connect(address).await.unwrap()).unwrap();
+    client.connect().await.unwrap();
+    // The ALPN profile holds whichever certificate was selected.
+    assert_eq!(client.ssl().selected_alpn_protocol(), Some(&b"h2"[..]));
+    let stream = server.await.unwrap().expect("handshake succeeds");
+    drop(stream);
+    let certificate = client.ssl().peer_certificate().unwrap();
+    certificate
+        .subject_alt_names()
+        .and_then(|names| {
+            names
+                .iter()
+                .find_map(|name| name.dnsname().map(str::to_owned))
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn sni_selects_the_certificate_and_unknown_names_get_the_primary() {
+    let scratch = Scratch::new("sni");
+    let primary = write_named_pair(&scratch, "primary", &["site-a.example"]);
+    let site_b = write_named_pair(
+        &scratch,
+        "site-b",
+        &["site-b.example", "www.site-b.example"],
+    );
+    let wildcard = write_named_pair(&scratch, "wild", &["*.wild.example"]);
+    let exact = write_named_pair(&scratch, "exact", &["api.wild.example"]);
+    let config = sni_config(&primary, Some(sni_list(&[&site_b, &wildcard, &exact]))).unwrap();
+    assert_eq!(config.tls_certificates(), 4);
+    let transport = Arc::new(EdgeTransport::new(config));
+    assert_eq!(transport.status().tls_certificates, 4);
+    for (sni, expected) in [
+        (Some("site-b.example"), "site-b.example"),
+        (Some("WWW.Site-B.example."), "site-b.example"),
+        (Some("one.wild.example"), "*.wild.example"),
+        // An exact name wins over a wildcard covering it.
+        (Some("api.wild.example"), "api.wild.example"),
+        // A wildcard covers exactly one label.
+        (Some("a.b.wild.example"), "site-a.example"),
+        (Some("wild.example"), "site-a.example"),
+        (Some("site-a.example"), "site-a.example"),
+        (Some("unknown.example"), "site-a.example"),
+        (None, "site-a.example"),
+    ] {
+        assert_eq!(served_name(&transport, sni).await, expected, "{sni:?}");
+    }
+    assert_eq!(transport.status().tls_handshake_failures, 0);
+}
+
+#[test]
+fn unusable_sni_certificate_lists_stop_startup() {
+    let scratch = Scratch::new("sni-config");
+    let primary = write_named_pair(&scratch, "primary", &["site-a.example"]);
+    let site_b = write_named_pair(&scratch, "site-b", &["site-b.example"]);
+    let also_b = write_named_pair(&scratch, "also-b", &["SITE-B.example"]);
+    let also_a = write_named_pair(&scratch, "also-a", &["site-a.example"]);
+    let nameless = write_named_pair(&scratch, "nameless", &[]);
+    let mismatched = (site_b.0.clone(), also_b.1.clone());
+    let error = |value: OsString| sni_config(&primary, Some(value)).err().unwrap();
+
+    for (value, position) in [
+        ("", None),
+        ("  ", None),
+        ("only-one-path.pem", Some(1)),
+        ("a.pem:a.key,", Some(2)),
+        (":a.key", Some(1)),
+        ("a.pem:", Some(1)),
+        ("a.pem:b:c.key", Some(1)),
+        ("same.pem:same.pem", Some(1)),
+    ] {
+        let found = error(OsString::from(value));
+        match position {
+            None => assert!(
+                matches!(
+                    found,
+                    TransportConfigError::EmptyValue {
+                        variable: TLS_SNI_CERTS_ENV
+                    }
+                ),
+                "{value:?}: {found}"
+            ),
+            Some(expected) => assert!(
+                matches!(found, TransportConfigError::InvalidSniEntry { position } if position == expected),
+                "{value:?}: {found}"
+            ),
+        }
+    }
+    let found = error(sni_list(&[&site_b, &also_b]));
+    assert!(
+        matches!(&found, TransportConfigError::DuplicateCertificateName { name } if name == "site-b.example"),
+        "{found}"
+    );
+    assert!(matches!(
+        error(sni_list(&[&also_a])),
+        TransportConfigError::DuplicateCertificateName { .. }
+    ));
+    assert!(matches!(
+        error(sni_list(&[&nameless])),
+        TransportConfigError::NoCertificateNames { .. }
+    ));
+    let found = error(sni_list(&[&mismatched]));
+    assert!(
+        matches!(
+            found,
+            TransportConfigError::KeyMismatch {
+                variable: TLS_SNI_CERTS_ENV,
+                ..
+            }
+        ),
+        "{found}"
+    );
+    assert!(found.to_string().starts_with(TLS_SNI_CERTS_ENV));
+    std::fs::set_permissions(&site_b.1, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(
+        error(sni_list(&[&site_b])),
+        TransportConfigError::KeyPermissions {
+            variable: TLS_SNI_CERTS_ENV,
+            ..
+        }
+    ));
+    // Additional certificates without a primary pair are a partial setup.
+    let only_sni =
+        TransportConfig::from_lookup(lookup(vec![(TLS_SNI_CERTS_ENV, sni_list(&[&also_b]))]));
+    assert!(matches!(
+        only_sni,
+        Err(TransportConfigError::TlsPartiallyConfigured {
+            missing: TLS_CERT_PATH_ENV
+        })
+    ));
+}
+
+#[tokio::test]
+async fn changed_certificate_files_are_served_without_a_restart() {
+    let scratch = Scratch::new("reload");
+    let primary = write_named_pair(&scratch, "primary", &["site-a.example"]);
+    let site_b = write_named_pair(&scratch, "site-b", &["site-b.example"]);
+    let transport = Arc::new(EdgeTransport::new(
+        sni_config(&primary, Some(sni_list(&[&site_b]))).unwrap(),
+    ));
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Unchanged);
+    assert_eq!(served_name(&transport, None).await, "site-a.example");
+
+    // Rotation: both pairs replaced, the additional one with a new name.
+    write_named_pair(&scratch, "primary", &["rotated-a.example"]);
+    write_named_pair(&scratch, "site-b", &["site-c.example"]);
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Replaced);
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Unchanged);
+    assert_eq!(served_name(&transport, None).await, "rotated-a.example");
+    assert_eq!(
+        served_name(&transport, Some("site-c.example")).await,
+        "site-c.example"
+    );
+    assert_eq!(
+        served_name(&transport, Some("site-b.example")).await,
+        "rotated-a.example"
+    );
+
+    // A half-written rotation (new certificate, old key) is refused once and
+    // the previous certificates stay in service until the key arrives.
+    let next_key = key_pair();
+    scratch.write(
+        "primary.pem",
+        &named_certificate(&next_key, -1, 30, &["next-a.example"])
+            .to_pem()
+            .unwrap(),
+        0o644,
+    );
+    assert!(matches!(
+        transport.reload_tls(),
+        Err(TransportConfigError::KeyMismatch {
+            variable: TLS_KEY_PATH_ENV,
+            ..
+        })
+    ));
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Unchanged);
+    assert_eq!(served_name(&transport, None).await, "rotated-a.example");
+    scratch.write(
+        "primary.key",
+        &next_key.private_key_to_pem_pkcs8().unwrap(),
+        0o600,
+    );
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Replaced);
+    assert_eq!(served_name(&transport, None).await, "next-a.example");
+
+    // A missing file and an expired replacement are refused the same way.
+    std::fs::remove_file(&site_b.0).unwrap();
+    assert!(matches!(
+        transport.reload_tls(),
+        Err(TransportConfigError::Unreadable {
+            variable: TLS_SNI_CERTS_ENV,
+            ..
+        })
+    ));
+    assert_eq!(
+        served_name(&transport, Some("site-c.example")).await,
+        "site-c.example"
+    );
+    let expired_key = key_pair();
+    scratch.write(
+        "site-b.pem",
+        &named_certificate(&expired_key, -10, -1, &["site-c.example"])
+            .to_pem()
+            .unwrap(),
+        0o644,
+    );
+    scratch.write(
+        "site-b.key",
+        &expired_key.private_key_to_pem_pkcs8().unwrap(),
+        0o600,
+    );
+    assert!(matches!(
+        transport.reload_tls(),
+        Err(TransportConfigError::CertificateNotCurrentlyValid { .. })
+    ));
+    assert_eq!(
+        served_name(&transport, Some("site-c.example")).await,
+        "site-c.example"
+    );
+
+    let status = transport.status();
+    assert_eq!(status.tls_reloads, 2);
+    assert_eq!(status.tls_reload_failures, 3);
+    assert_eq!(status.tls_certificates, 2);
+    assert_eq!(status.tls_handshake_failures, 0);
+}
+
+#[tokio::test]
+async fn the_reload_watcher_applies_changes_and_stops_on_shutdown() {
+    let scratch = Scratch::new("watch");
+    let primary = write_named_pair(&scratch, "primary", &["site-a.example"]);
+    let transport = Arc::new(EdgeTransport::new(sni_config(&primary, None).unwrap()));
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let watcher =
+        tokio::spawn(Arc::clone(&transport).watch_tls(Duration::from_millis(20), shutdown.clone()));
+    write_named_pair(&scratch, "primary", &["watched-a.example"]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while transport.status().tls_reloads == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "no reload");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(served_name(&transport, None).await, "watched-a.example");
+    stop.send(true).unwrap();
+    timeout(Duration::from_secs(5), watcher)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Without TLS there is nothing to watch.
+    let plain = Arc::new(EdgeTransport::new(TransportConfig::plaintext()));
+    assert_eq!(plain.reload_tls().unwrap(), TlsReload::Disabled);
+    timeout(
+        Duration::from_secs(1),
+        plain.watch_tls(Duration::from_millis(1), shutdown),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_certificate_directory_entry_is_added_and_removed_without_a_restart() {
+    let scratch = Scratch::new("certs-dir");
+    let primary = write_named_pair(&scratch, "primary", &["site-a.example"]);
+    let certs_dir = scratch.0.join("sni-dir");
+    std::fs::create_dir_all(&certs_dir).unwrap();
+    let transport = Arc::new(EdgeTransport::new(
+        sni_config_with_dir(&primary, None, Some(&certs_dir)).unwrap(),
+    ));
+    assert_eq!(transport.status().tls_certificates, 1);
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Unchanged);
+
+    // Dropping in a new subdirectory adds a certificate on the next tick.
+    write_dir_pair(&certs_dir, "site-b", &["site-b.example"]);
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Replaced);
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Unchanged);
+    assert_eq!(transport.status().tls_certificates, 2);
+    assert_eq!(
+        served_name(&transport, Some("site-b.example")).await,
+        "site-b.example"
+    );
+    assert_eq!(served_name(&transport, None).await, "site-a.example");
+
+    // A second subdirectory is additive.
+    write_dir_pair(&certs_dir, "site-c", &["site-c.example"]);
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Replaced);
+    assert_eq!(transport.status().tls_certificates, 3);
+    assert_eq!(
+        served_name(&transport, Some("site-c.example")).await,
+        "site-c.example"
+    );
+
+    // Deleting a subdirectory removes its certificate; SNI for it now falls
+    // back to the primary, exactly as an unknown name does.
+    std::fs::remove_dir_all(certs_dir.join("site-b")).unwrap();
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Replaced);
+    assert_eq!(transport.status().tls_certificates, 2);
+    assert_eq!(
+        served_name(&transport, Some("site-b.example")).await,
+        "site-a.example"
+    );
+    assert_eq!(
+        served_name(&transport, Some("site-c.example")).await,
+        "site-c.example"
+    );
+}
+
+#[tokio::test]
+async fn a_half_written_directory_entry_is_refused_without_losing_existing_certificates() {
+    let scratch = Scratch::new("certs-dir-partial");
+    let primary = write_named_pair(&scratch, "primary", &["site-a.example"]);
+    let certs_dir = scratch.0.join("sni-dir");
+    std::fs::create_dir_all(&certs_dir).unwrap();
+    write_dir_pair(&certs_dir, "site-b", &["site-b.example"]);
+    let transport = Arc::new(EdgeTransport::new(
+        sni_config_with_dir(&primary, None, Some(&certs_dir)).unwrap(),
+    ));
+    assert_eq!(transport.status().tls_certificates, 2);
+
+    // A new subdirectory appears with only its certificate: a secret volume
+    // in the middle of populating two files, or an operator mid-copy.
+    let site_c = certs_dir.join("site-c");
+    std::fs::create_dir_all(&site_c).unwrap();
+    std::fs::write(
+        site_c.join("tls.crt"),
+        named_certificate(&key_pair(), -1, 30, &["site-c.example"])
+            .to_pem()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        transport.reload_tls(),
+        Err(TransportConfigError::Unreadable {
+            variable: TLS_SNI_CERTS_DIR_ENV,
+            ..
+        })
+    ));
+    assert_eq!(transport.status().tls_certificates, 2);
+    assert_eq!(
+        served_name(&transport, Some("site-b.example")).await,
+        "site-b.example"
+    );
+
+    // Writing the missing key completes the pair; the next tick picks it up.
+    let key = key_pair();
+    std::fs::write(
+        site_c.join("tls.crt"),
+        named_certificate(&key, -1, 30, &["site-c.example"])
+            .to_pem()
+            .unwrap(),
+    )
+    .unwrap();
+    let key_path = site_c.join("tls.key");
+    std::fs::write(&key_path, key.private_key_to_pem_pkcs8().unwrap()).unwrap();
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(transport.reload_tls().unwrap(), TlsReload::Replaced);
+    assert_eq!(transport.status().tls_certificates, 3);
+    assert_eq!(
+        served_name(&transport, Some("site-c.example")).await,
+        "site-c.example"
+    );
+
+    let status = transport.status();
+    assert_eq!(status.tls_reloads, 1);
+    assert_eq!(status.tls_reload_failures, 1);
+}
+
+#[test]
+fn a_name_shared_with_the_fixed_list_or_bad_directory_stops_startup() {
+    let scratch = Scratch::new("certs-dir-invalid");
+    let primary = write_named_pair(&scratch, "primary", &["site-a.example"]);
+    let site_b = write_named_pair(&scratch, "site-b", &["site-b.example"]);
+    let certs_dir = scratch.0.join("sni-dir");
+    std::fs::create_dir_all(&certs_dir).unwrap();
+
+    // The same DNS name from the fixed list and the directory is still a
+    // conflict: SNI could not choose between them.
+    write_dir_pair(&certs_dir, "also-b", &["site-b.example"]);
+    let found = sni_config_with_dir(&primary, Some(sni_list(&[&site_b])), Some(&certs_dir))
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&found, TransportConfigError::DuplicateCertificateName { name } if name == "site-b.example"),
+        "{found}"
+    );
+    std::fs::remove_dir_all(certs_dir.join("also-b")).unwrap();
+
+    // A leaf with no DNS name is refused, naming the directory variable.
+    write_dir_pair(&certs_dir, "nameless", &[]);
+    let found = sni_config_with_dir(&primary, None, Some(&certs_dir))
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            found,
+            TransportConfigError::NoCertificateNames {
+                variable: TLS_SNI_CERTS_DIR_ENV,
+                ..
+            }
+        ),
+        "{found}"
+    );
+    std::fs::remove_dir_all(certs_dir.join("nameless")).unwrap();
+
+    // A directory that cannot be listed stops startup rather than silently
+    // serving only the primary certificate.
+    let missing = scratch.0.join("does-not-exist");
+    assert!(matches!(
+        sni_config_with_dir(&primary, None, Some(&missing)),
+        Err(TransportConfigError::SniCertsDirUnreadable { .. })
+    ));
+    let not_a_directory = scratch.write("not-a-directory", b"x", 0o644);
+    assert!(matches!(
+        sni_config_with_dir(&primary, None, Some(&not_a_directory)),
+        Err(TransportConfigError::SniCertsDirUnreadable { .. })
+    ));
+
+    // An empty directory is fine: the primary certificate alone.
+    assert_eq!(
+        sni_config_with_dir(&primary, None, Some(&certs_dir))
+            .unwrap()
+            .tls_certificates(),
+        1
+    );
+
+    // The directory variable without a primary pair is a partial setup, like
+    // the fixed list.
+    let only_dir = TransportConfig::from_lookup(lookup(vec![(
+        TLS_SNI_CERTS_DIR_ENV,
+        certs_dir.into_os_string(),
+    )]));
+    assert!(matches!(
+        only_dir,
+        Err(TransportConfigError::TlsPartiallyConfigured {
+            missing: TLS_CERT_PATH_ENV
+        })
+    ));
 }

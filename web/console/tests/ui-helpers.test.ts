@@ -72,6 +72,13 @@ test("decisions carry a word, an icon and a tone, and missing is not unknown", (
   assert.deepEqual(view("DENY"), { tone: "deny", icon: "deny", label: "拒绝", code: "DENY" });
   assert.equal(view("ERROR").tone, "error");
   assert.equal(view("OBSERVE").tone, "observe");
+  // An observed refusal was forwarded: it reads as an observation, never as a pass.
+  assert.deepEqual(view("OBSERVED_WOULD_DENY"), {
+    tone: "observe",
+    icon: "observe",
+    label: "观察：本应拒绝",
+    code: "OBSERVED_WOULD_DENY",
+  });
   assert.equal(view("PASS").label, "通过");
   assert.equal(view("SKIPPED").label, "已跳过");
   assert.equal(view("CANCELLED").label, "已取消");

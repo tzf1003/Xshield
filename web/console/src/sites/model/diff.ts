@@ -308,6 +308,39 @@ const scalarSpecs: readonly Spec[] = [
     (d) => d.policy.origin_object_access_enforced,
     onOff,
   ),
+  // One token for every rollout row: whether the change relaxes or tightens depends on the
+  // direction, which the approval explanation decides from the reasons (risk.ts).
+  spec(
+    "rollout.mode",
+    "上线模式",
+    "policies",
+    "ROLLOUT_MODE_TIGHTENED",
+    (d) => (d.policy.rollout ? "observe" : "enforce"),
+    (v) => (v === "observe" ? "观察（本应拒绝的只读请求仍转发）" : "强制"),
+  ),
+  spec(
+    "rollout.observe_until_unix",
+    "观察截止时间",
+    "policies",
+    "ROLLOUT_MODE_TIGHTENED",
+    (d) => d.policy.rollout?.observe_until_unix ?? null,
+    (v) => (typeof v === "number" ? new Date(v * 1000).toISOString() : text(v)),
+  ),
+  spec(
+    "rollout.revision",
+    "观察标签",
+    "policies",
+    "ROLLOUT_MODE_TIGHTENED",
+    (d) => d.policy.rollout?.revision ?? null,
+  ),
+  spec(
+    "rollout.enforced_operations",
+    "单独强制的路由",
+    "policies",
+    "ROLLOUT_MODE_TIGHTENED",
+    (d) => [...(d.policy.rollout?.enforced_operations ?? [])].sort(),
+    list,
+  ),
 ];
 
 const summarizeCrypto = (value: Record<string, unknown> | null): string => {

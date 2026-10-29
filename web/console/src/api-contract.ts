@@ -42,6 +42,14 @@ export const messages = {
   CONTROL_DISCOVERED_ROUTES_REQUEST_INVALID: "未覆盖端点发现条件无效，请检查 UTC 时间窗与页大小。",
   CONTROL_DISCOVERED_ROUTES_INDEX_UNAVAILABLE: "未覆盖端点发现索引暂时不可用，请稍后重试。",
   CONTROL_DISCOVERED_ROUTES_HEALTH_UNAVAILABLE: "未覆盖端点发现索引水位暂时不可用，请稍后重试。",
+  CONTROL_ROLLOUT_REPORT_REQUEST_INVALID: "退出报告条件无效，请检查观察标签与 UTC 时间窗。",
+  CONTROL_ROLLOUT_REPORT_INDEX_UNAVAILABLE: "审计索引暂时不可用，退出报告无法生成，请稍后重试。",
+  CONTROL_ROLLOUT_REPORT_HEALTH_UNAVAILABLE:
+    "审计索引水位暂时不可用，退出报告无法判断，请稍后重试。",
+  CONTROL_COVERAGE_REPORT_REQUEST_INVALID: "覆盖统计条件无效，请检查 UTC 时间窗。",
+  CONTROL_COVERAGE_REPORT_INDEX_UNAVAILABLE: "审计索引暂时不可用，覆盖统计无法生成，请稍后重试。",
+  CONTROL_COVERAGE_REPORT_HEALTH_UNAVAILABLE:
+    "审计索引水位暂时不可用，覆盖统计无法判断，请稍后重试。",
   CONTROL_GRANT_ID_INVALID: "请输入规范的资格 ID。",
   CONTROL_BINDING_ID_INVALID: "请输入规范的身份绑定 ID。",
   CONTROL_GRANT_STORE_UNAVAILABLE: "资格账本暂时不可用，请稍后重试。",
@@ -147,6 +155,7 @@ export const messages = {
   CONTROL_SITE_PAGE_ACTIONS_INVALID: "页面签发（page_actions / issued_by）未通过校验。",
   CONTROL_SITE_RESOURCE_GRANT_INVALID: "响应资源资格（resource_grant）未通过校验。",
   CONTROL_SITE_QUERY_PAGINATION_INVALID: "查询参数白名单（query_pagination）未通过校验。",
+  CONTROL_SITE_ROLLOUT_INVALID: "观察模式设置（rollout）未通过校验。",
   CONTROL_SITE_SHARE_ISSUE_INVALID: "分享凭据发放（share_issue / share_entry）未通过校验。",
   CONTROL_SITE_SHARE_RULE_CONFLICT:
     "该策略版本下同名的分享发放规则已存在且内容不同（或已被停用），规则不会被改写，请换新的发放规则 ID。",

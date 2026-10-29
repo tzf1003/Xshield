@@ -348,16 +348,15 @@ cargo run -p xshield-control -- \
 
 ### 51. 身份存储（identity_store）配置
 
-身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。配置 `response.share_issue` 时还须注入不同的 `XSHIELD_SHARE_TOKEN_KEY_HEX`；示例中的分享发行 GET 具有创建资格的副作用，须预先批准对应来源动作、资源资格及数据库发行规则，配置边界见 [6.5](06-capability-ledger.md#65-分享)。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用，当前进程每个方向只接受一个精确 key-id，轮换通过并行版本实例完成。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；PostgreSQL 账号只授予 catalog 查询、案件、证据访问申请/决策、outbox 及 advisory-lock 所需权限。请求摘要、脱敏事件和证据 manifest 查询均使用服务端作用域并写独立管理审计。事件与 manifest 游标由同一独立分页密钥按不同用途域签名，不能跨接口、主体、作用域、目标请求或配置复用；管理变更幂等摘要使用另一独立密钥并继续按动作分域。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
+身份存储由可选的 `identity_store` 配置启用；受保护入口或请求防重放存在时必须配置。运行时从 `XSHIELD_DATABASE_URL` 和 `XSHIELD_FINGERPRINT_KEY_HEX` 读取数据库连接与 32 字节 HMAC 密钥。配置 `response.share_issue` 时还须注入不同的 `XSHIELD_SHARE_TOKEN_KEY_HEX`；示例中的分享发行 GET 具有创建资格的副作用，须预先批准对应来源动作、资源资格及数据库发行规则，配置边界见 [6.5](06-capability-ledger.md#65-分享)。请求与响应加密分别从 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` 注入不同的 32 字节用途密钥；两侧 key-id 和实际密钥不得复用。这两个单值变量只服务启动配置站点的 key-id；apply 下发的其他站点与轮换用的新 key-id 放进 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS` 密钥环（JSON 数组，每项 `tenant_id`、`site_id`、`key_id`、`key_hex`，每个方向最多 256 项，也可用 `_FILE`），查找按租户、站点、key-id 与用途精确匹配，未列出的组合仍以 `*_KEY_UNAVAILABLE` 失败关闭；轮换时先把新 key-id 加入密钥环并重启 edge，再发布引用新 key-id 的修订，旧 key-id 在客户端不再使用后移除，不再需要并行实例。任一密钥在两个方向重复出现则拒绝启动。UI 动作、服务调用和限权分享使用独立边缘证明，转发前全部剥离；网关只信任 PostgreSQL 中与当前作用域、期限和活动状态精确匹配的记录。封存目标目录须预先以私有权限创建；独立任务周期运行 `xshield-audit-seal`，其 Ed25519 私钥仅注入封存进程。控制服务的 ClickHouse 账号只授予 active 视图读取权限；PostgreSQL 账号只授予 catalog 查询、案件、证据访问申请/决策、outbox 及 advisory-lock 所需权限。请求摘要、脱敏事件和证据 manifest 查询均使用服务端作用域并写独立管理审计。事件与 manifest 游标由同一独立分页密钥按不同用途域签名，不能跨接口、主体、作用域、目标请求或配置复用；管理变更幂等摘要使用另一独立密钥并继续按动作分域。生产秘密均应由秘密管理器按用途注入和轮换，不写入配置文件或日志。
 
 ## 被拒绝的缓冲响应，客户端看到什么
 
 `BUFFERED_JSON`（以及其上的身份、资格、分享、证据采集、响应加密）要求完整校验源站响应之后才释放。保证的是：**校验或提交失败时，源站正文的任何字节都不会到达客户端**，源站的 `Set-Cookie` 已被边缘剥离，身份与资格事务不提交。
 
-客户端看到的形态取决于时序，两种都是拒绝：
+客户端看到的形态与时序无关：**一个完整的 502**，正文是与其他拒绝相同的 JSON（`request_id` 与 `reason_code`，如 `RESPONSE_VALIDATION_FAILED`、`RESPONSE_BODY_TOO_LARGE`），不含源站的任何字节。
 
-- 源站的响应头与正文在同一次读取中到达：边缘在写出任何内容之前失败，客户端收到只含原因标识的 502。
-- 响应头先到、正文稍后到：Pingora 在其同步正文过滤器运行之前就固定并写出响应头（`prepare_response_issuance_headers` 中的注释说明了这一点，WAF 会话 Cookie 因此在提交前只指向未绑定会话），正文校验失败时只能切断连接，客户端先看到 `200` 与源站的 `Content-Length`，随后传输被截断（curl 退出码 18），没有正文。
+Pingora 在同步正文过滤器运行之前就把响应头写给客户端，所以缓冲路由不再走流式代理：准入与审计完成后，网关把已准入的请求上下文交给进程内子请求（`buffered_relay.rs`），由子请求完成源站交换、完整校验与身份/资格/证据提交；子请求写出的响应头与正文全部留在边缘，只有子请求干净结束、没有 `response_failure` 且收齐最终响应头与正文结束标记时，才把它们一次写给客户端，否则写出 502。请求上下文在子请求结束时交回，终态审计仍由原请求写出一次；子请求在代理层失败（源站不可达、超时）记为 `proxy_error`，源站结果按既有规则记为未知。若子请求异常退出而未交回上下文，客户端仍得到 502，该请求缺少终态事件，由网关下次启动时的 journal 恢复补记 `origin.unknown`。
 
-后者是架构上的已知限制：状态行为 200 具有误导性，但没有正文、没有凭证被释放。彻底消除需要在边缘自行完成上游读取后再响应（不再依赖 Pingora 的流式代理），尚未规划。`scripts/test_gateway_identity.sh` 对两种时序都做了确定性断言（桩源站的 `split.mode` 把响应头与正文拆开发送）；此前该脚本只断言 502，CI 上随时序偶发失败（`curl: (18) transfer closed with N bytes remaining`）。
+`prepare_response_issuance_headers` 中“提交前只指向未绑定会话”的 WAF Cookie 仍然保留：它现在只会随成功提交的响应一起到达客户端。`scripts/test_gateway_identity.sh` 对两种时序（桩源站的 `split.mode` 把响应头与正文拆开发送）都断言退出码 0、状态 502、正文含原因码且不含源站标记；此前分开到达时客户端先看到 `200` 再被截断（curl 退出码 18）。
 

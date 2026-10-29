@@ -1,0 +1,61 @@
+# Test-only values for scripts/test_helm_deployment.sh, layered over the
+# values the script passes (images, origin network). The development Keycloak
+# runs inside the edge/control pod so control's loopback-HTTP issuer exception
+# applies; the curl container is how the script reaches the loopback-only
+# management API, as a management proxy would.
+tenantId: tenant_pilot
+siteId: site_pilot
+existingSecret: xshield
+images:
+  pullPolicy: Never
+clickhouse:
+  url: http://clickhouse:8123
+oidc:
+  issuer: http://127.0.0.1:8080/realms/xshield-dev
+  clientId: xshield-console-dev
+  requiredAcr: "1"
+  subjectRolesJson: '[{"subject":"smoke-subject","roles":["observer"]}]'
+  consoleOrigin: http://127.0.0.1:55173
+# Replica counts come from values-ha.yaml, which scripts/test_helm_deployment.sh
+# layers on top of this file so it can verify convergence and failover across
+# more than one edge+control+journal replica and more than one outbox replica
+# (docs/19 19.9.1, ADR-014). extraContainers (below) is part of the shared pod
+# template, so each replica gets its own dev Keycloak and toolbox sidecar too,
+# since those share the pod network like edge and control do.
+control:
+  bootstrapRoles: observer,system_admin,release_operator
+jobs:
+  sealIntervalSeconds: 3
+  publishIntervalSeconds: 3
+  outboxIntervalSeconds: 3
+  # Short enough that the smoke test's run observes several ticks; every
+  # tick on every replica hits CONTROL_SITE_APPROVAL_REQUIRED harmlessly
+  # while the smoke site stays pending approval (no OIDC browser session
+  # here to grant it), which is exactly the no-op case this is meant to
+  # prove does not crash or restart either control process.
+  reconcileIntervalSeconds: 3
+  firstSuccessGraceSeconds: 240
+persistence:
+  size: 1Gi
+networkPolicy:
+  enabled: true
+extraContainers:
+  - name: oidc
+    image: quay.io/keycloak/keycloak:26.7.4@sha256:82a77884f3af238beab1e7afd63b5f530e1b5c0590bd7aa60b40a40463e29b2c
+    args: ["start-dev", "--http-port=8080", "--import-realm"]
+    securityContext: {runAsUser: 1000, runAsGroup: 0, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+    env:
+      - {name: KC_BOOTSTRAP_ADMIN_USERNAME, value: dev-admin}
+      - {name: KC_BOOTSTRAP_ADMIN_PASSWORD, value: dev-admin-password}
+      - {name: KC_HOSTNAME, value: "http://127.0.0.1:8080"}
+      - {name: KC_HOSTNAME_STRICT, value: "false"}
+      - {name: KC_HTTP_ENABLED, value: "true"}
+    volumeMounts:
+      - {name: smoke-realm, mountPath: /opt/keycloak/data/import, readOnly: true}
+  - name: toolbox
+    image: curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+    command: ["/bin/sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done"]
+    securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+extraVolumes:
+  - name: smoke-realm
+    configMap: {name: smoke-realm}

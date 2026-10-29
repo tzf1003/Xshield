@@ -2770,11 +2770,13 @@ async fn a_reused_label_holds_back_only_its_own_site() {
     }));
 }
 
-/// An edge descriptor conflict names the site that caused it. That site's
-/// status carries the code, the site whose save triggered the apply stays
-/// pending and the other sites keep their state. A name this plane did not
-/// send as a desired revision (unknown, or the target itself) leaves the
-/// failure on the target, as before.
+/// An edge descriptor conflict names the site that caused it. When that
+/// name is a sibling this snapshot carried as a desired revision, the plane
+/// excludes it and resends, so the change that triggered the apply still
+/// goes through; the named sibling's own status carries the code instead.
+/// A name this plane did not send as a desired revision (unknown, or the
+/// target itself) leaves the failure on the target, as before, and nothing
+/// is resent.
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
 async fn a_descriptor_conflict_is_recorded_on_the_site_the_edge_names() {
@@ -2798,27 +2800,274 @@ async fn a_descriptor_conflict_is_recorded_on_the_site_the_edge_names() {
     );
     let (status, saved) = ctx.put("site_a", &renamed, &ctx.key("rename")).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(saved["apply_state"], "pending", "the target caused nothing");
-    assert_eq!(saved["reason_code"], "EDGE_APPLY_NOT_CONFIRMED");
+    assert_eq!(
+        saved["apply_state"], "active",
+        "excluding site_b let the rename through"
+    );
+    assert_eq!(saved["reason_code"], "EDGE_APPLY_CONFIRMED");
     let named = ctx.status("site_b").await;
     assert_eq!(named["apply_state"], "failed", "{named}");
     assert_eq!(named["reason_code"], "EDGE_APPLY_DESCRIPTOR_CONFLICT");
     let other = ctx.status("site_c").await;
     assert_eq!(other["apply_state"], "active", "{other}");
     assert_eq!(other["reason_code"], "EDGE_APPLY_CONFIRMED");
+    // site_b was never dropped from service, only held at what it already
+    // served; site_a's rename reached the edge on the retried snapshot.
+    assert!(ctx.edge.served_sites().contains(&"site_b".to_owned()));
 
     for name in ["site_unknown", "site_a"] {
         ctx.edge.refuse_next(409, conflict(name));
+        let sent = ctx.edge.apply_count();
         let (status, outcome) = ctx.apply("site_a", &ctx.key("apply")).await;
         assert_eq!(status, StatusCode::OK, "{outcome}");
         assert_eq!(outcome["apply_state"], "failed", "{name}: {outcome}");
         assert_eq!(outcome["reason_code"], "EDGE_APPLY_DESCRIPTOR_CONFLICT");
         assert_eq!(ctx.status("site_c").await["apply_state"], "active");
+        // Neither name is a sibling carried in the snapshot, so nothing
+        // reachable is excluded and nothing of the refused attempt is sent.
+        assert_eq!(ctx.edge.apply_count(), sent, "{name}: nothing resent");
     }
-    // Nothing of the refused snapshots was served.
     assert_eq!(
         ctx.edge.served_gateway_config("site_a").unwrap()["origin"]["address"],
         "8.8.8.8:9000"
     );
+    let _ = ctx.finish().await;
+}
+
+/// A descriptor conflict naming a sibling is excluded and the snapshot is
+/// resent, so an edge binding the control plane cannot see no longer blocks
+/// every other site's delivery, only the one the edge named (docs/22,
+/// "edge 拒绝后自动去掉被点名的站点重发").
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn a_descriptor_conflict_naming_a_sibling_is_excluded_and_resent() {
+    let ctx = Ctx::new().await;
+    for site in ["site_a", "site_b"] {
+        ctx.create_live(site, "8.8.8.8:9000").await;
+    }
+    ctx.edge.refuse_next(
+        409,
+        json!({
+            "error": "edge_apply_failed",
+            "reason_code": "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+            "site_id": "site_b"
+        }),
+    );
+    let sent = ctx.edge.apply_count();
+    let (status, outcome) = ctx.apply("site_a", &ctx.key("apply")).await;
+    assert_eq!(status, StatusCode::OK, "{outcome}");
+    assert_eq!(outcome["apply_state"], "active", "{outcome}");
+    assert_eq!(outcome["reason_code"], "EDGE_APPLY_CONFIRMED");
+    // Exactly one snapshot reached the edge: the refusal was not forwarded
+    // as a second attempt the caller has to retry itself.
+    assert_eq!(ctx.edge.apply_count(), sent + 1);
+    let named = ctx.status("site_b").await;
+    assert_eq!(named["apply_state"], "failed", "{named}");
+    assert_eq!(named["reason_code"], "EDGE_APPLY_DESCRIPTOR_CONFLICT");
+    assert!(
+        ctx.edge.served_sites().contains(&"site_b".to_owned()),
+        "excluded means held at its last approved configuration, not dropped"
+    );
+    let _ = ctx.finish().await;
+}
+
+/// Moving a served site to observe forwards refusals that are enforced today,
+/// so it needs an independent `PolicyApprover` with a fresh step-up: neither
+/// `site.config.apply_direct` nor an approver without step-up can release it.
+/// Going back to enforce is named but may be applied directly.
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn relaxing_the_rollout_needs_a_stepped_up_independent_approver() {
+    let ctx = Ctx::new().await;
+    let site = "site_rollout";
+    ctx.create_live(site, "8.8.8.8:9000").await;
+    let expires = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    let (status, issued) = ctx
+        .issue_api_key(&json!({
+            "subject": "agent-rollout", "display_name": "rollout", "expires_at": expires,
+            "scopes": [{
+                "tenant_id": ctx.tenant.as_str(), "site_id": site,
+                "capabilities": ["site.config.apply_direct", "site.read"]
+            }]
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let api_key = issued["api_key"].as_str().unwrap().to_owned();
+    let stepped_up = ctx
+        .principal_with_step_up(
+            "approver-mfa",
+            &[ManagementRole::PolicyApprover, ManagementRole::Observer],
+            true,
+        )
+        .await;
+    let reasons = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT unnest(risk_reasons) FROM xshield.site_apply_intents
+             WHERE tenant_id = $1 AND site_id = $2",
+        )
+        .bind(ctx.tenant.as_str())
+        .bind(site)
+        .fetch_all(&ctx.pool)
+        .await
+        .unwrap()
+    };
+
+    let until = Utc::now().timestamp().unsigned_abs() + 7 * 24 * 3_600;
+    let observe = with(
+        site_body(site, "8.8.8.8:9000"),
+        "policy",
+        json!({"rollout": {
+            "mode": "observe", "observe_until_unix": until, "revision": "rollout-1"
+        }}),
+    );
+    let (status, saved) = ctx.put(site, &observe, &ctx.key("observe")).await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    assert_eq!(reasons().await, ["ROLLOUT_MODE_RELAXED"]);
+
+    let sent = ctx.edge.apply_count();
+    let (status, refused) = apply_with_key(&ctx, site, &api_key).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(
+        refused["error_code"],
+        "CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED"
+    );
+    let (status, refused) = ctx.approve(site, &ctx.key("approve-no-step-up")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_STEP_UP_REQUIRED");
+    assert_eq!(refused["next_action"], "reauthenticate");
+    assert_eq!(ctx.edge.apply_count(), sent, "nothing was sent");
+    assert!(
+        ctx.edge.served_gateway_config(site).unwrap()["site_policy"]
+            .get("rollout")
+            .is_none(),
+        "the served site stays enforced"
+    );
+
+    let (status, approved) = Ctx::call(
+        &stepped_up,
+        "POST",
+        &format!("/control/v1/sites/{site}/approve"),
+        None,
+        Some(&ctx.key("approve-step-up")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let served = ctx.edge.served_gateway_config(site).unwrap();
+    assert_eq!(served["site_policy"]["rollout"]["mode"], "observe");
+    assert_eq!(
+        served["site_policy"]["rollout"]["observe_until_unix"],
+        until
+    );
+
+    // Back to enforce: named, and the direct-apply capability may release it.
+    let (status, saved) = ctx
+        .put(site, &site_body(site, "8.8.8.8:9000"), &ctx.key("enforce"))
+        .await;
+    assert!(status.is_success(), "{saved}");
+    assert_eq!(saved["requires_approval"], true);
+    assert_eq!(reasons().await, ["ROLLOUT_MODE_TIGHTENED"]);
+    let (status, applied) = apply_with_key(&ctx, site, &api_key).await;
+    assert!(status.is_success(), "{applied}");
+    assert!(
+        ctx.edge.served_gateway_config(site).unwrap()["site_policy"]
+            .get("rollout")
+            .is_none()
+    );
+
+    // A deadline in the past is refused with its own reason.
+    let past_deadline = with(
+        site_body(site, "8.8.8.8:9000"),
+        "policy",
+        json!({"rollout": {
+            "mode": "observe", "observe_until_unix": 1, "revision": "rollout-2"
+        }}),
+    );
+    let (status, refused) = ctx
+        .put(site, &past_deadline, &ctx.key("past_deadline"))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_ROLLOUT_INVALID");
+    let _ = ctx.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn an_approval_records_the_exit_report_it_relied_on() {
+    let ctx = Ctx::new().await;
+    let site = "site_exit_report";
+    ctx.create_live(site, "8.8.8.8:9000").await;
+    let stepped_up = ctx
+        .principal_with_step_up(
+            "approver-mfa",
+            &[ManagementRole::PolicyApprover, ManagementRole::Observer],
+            true,
+        )
+        .await;
+    let until = Utc::now().timestamp().unsigned_abs() + 7 * 24 * 3_600;
+    let observe = with(
+        site_body(site, "8.8.8.8:9000"),
+        "policy",
+        json!({"rollout": {
+            "mode": "observe", "observe_until_unix": until, "revision": "rollout-1"
+        }}),
+    );
+    let (status, saved) = ctx.put(site, &observe, &ctx.key("observe")).await;
+    assert!(status.is_success(), "{saved}");
+    let (status, approved) = Ctx::call(
+        &stepped_up,
+        "POST",
+        &format!("/control/v1/sites/{site}/approve"),
+        None,
+        Some(&ctx.key("approve-observe")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+
+    let (status, saved) = ctx
+        .put(site, &site_body(site, "8.8.8.8:9000"), &ctx.key("enforce"))
+        .await;
+    assert!(status.is_success(), "{saved}");
+    let approve_with = |digest: &str, key: String| {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/control/v1/sites/{site}/approve"))
+            .header(AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header("idempotency-key", key)
+            .header("x-xshield-exit-report-digest", digest)
+            .body(Body::empty())
+            .unwrap();
+        let app = ctx.approver.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+    let (status, refused) = approve_with(&"A".repeat(64), ctx.key("approve-bad")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error_code"], "CONTROL_SITE_CONFIG_REQUEST_INVALID");
+    let digest = "ab".repeat(32);
+    let (status, approved) = approve_with(&digest, ctx.key("approve-enforce")).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    let recorded: Vec<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT exit_report_digest FROM xshield.site_apply_approvals
+         WHERE tenant_id = $1 AND site_id = $2 AND approval_kind = 'independent'
+         ORDER BY created_at",
+    )
+    .bind(ctx.tenant.as_str())
+    .bind(site)
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap();
+    // Going live and entering observe recorded none; tightening records it.
+    let (last, earlier) = recorded.split_last().unwrap();
+    assert_eq!(last.as_deref(), Some([0xab; 32].as_slice()));
+    assert!(earlier.iter().all(Option::is_none));
     let _ = ctx.finish().await;
 }

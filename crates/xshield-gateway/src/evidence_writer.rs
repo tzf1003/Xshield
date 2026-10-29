@@ -3,8 +3,11 @@ use serde_json::json;
 use std::{
     env,
     fs::{self, File},
-    path::Path,
-    sync::Mutex,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
@@ -13,8 +16,9 @@ use xshield_core::{
     domain::{EventId, RequestId},
 };
 use xshield_evidence::{
-    EvidenceClassification, EvidenceFidelity, EvidenceKey, EvidenceVaultConfig, EvidenceWrite,
-    LocalEvidenceVault, VerifiedEvidenceManifest,
+    EvidenceClassification, EvidenceFidelity, EvidenceKey, EvidenceVault, EvidenceVaultConfig,
+    EvidenceWrite, LocalEvidenceVault, S3EvidenceStoreConfig, S3EvidenceVault,
+    VerifiedEvidenceManifest,
 };
 use xshield_gateway::{GatewayConfig, evidence_capture::EvidenceCaptureRule};
 use xshield_postgres::{EvidenceCatalogPublish, EvidenceCatalogWriteOutcome};
@@ -31,10 +35,22 @@ const MAX_FILES: u64 = 100_000;
 const WRITE_OVERHEAD: u64 = 64 * 1024 + 61;
 
 pub(crate) struct EvidenceWriter {
-    vault: LocalEvidenceVault,
-    _root_lock: File,
+    vault: EvidenceVault,
+    /// The private root this writer exclusively owns; `None` for a bucket,
+    /// whose capacity is the bucket's quota and which many writers share.
+    local: Option<LocalRoot>,
     budget: Mutex<Budget>,
+    // Copies of the budget for the metrics endpoint, which must not wait for
+    // the lock a write holds through its fsyncs.
+    remaining_bytes: AtomicU64,
+    remaining_files: AtomicU64,
     capacity: Semaphore,
+}
+
+struct LocalRoot {
+    root: PathBuf,
+    max_bytes: u64,
+    _lock: File,
 }
 
 struct Budget {
@@ -49,9 +65,8 @@ impl EvidenceWriter {
         if !config.requires_evidence_capture() {
             return Ok(None);
         }
-        let root = env::var("XSHIELD_EVIDENCE_ROOT")?;
         let key_id = env::var("XSHIELD_EVIDENCE_KEY_ID")?;
-        let key = Zeroizing::new(env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
+        let key = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
         for other in [
             "XSHIELD_JOURNAL_KEY_HEX",
             "XSHIELD_REQUEST_DECRYPTION_KEY_HEX",
@@ -66,8 +81,41 @@ impl EvidenceWriter {
                 return Err("evidence key must be independent".into());
             }
         }
+        if let Some(store) = S3EvidenceStoreConfig::from_env().map_err(|error| error.to_string())? {
+            return Self::open_s3(store, &key_id, &key).map(Some);
+        }
+        let root = env::var("XSHIELD_EVIDENCE_ROOT")?;
         let max_bytes = env::var("XSHIELD_EVIDENCE_MAX_TOTAL_BYTES")?.parse()?;
         Self::open(Path::new(&root), &key_id, &key, max_bytes).map(Some)
+    }
+
+    /// A writer into a bucket. Writes are create-only, so gateways need no
+    /// shared lock; the probe in `open` refuses a bucket without the
+    /// configured object lock.
+    fn open_s3(
+        store: S3EvidenceStoreConfig,
+        key_id: &str,
+        key: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let vault = S3EvidenceVault::open(
+            store,
+            key_id,
+            MAX_DOCUMENT_BYTES,
+            1,
+            EvidenceKey::from_hex(key)?,
+        )?;
+        let budget = Budget {
+            remaining_bytes: u64::MAX,
+            remaining_files: u64::MAX,
+        };
+        Ok(Self {
+            vault: vault.into(),
+            local: None,
+            remaining_bytes: AtomicU64::new(budget.remaining_bytes),
+            remaining_files: AtomicU64::new(budget.remaining_files),
+            budget: Mutex::new(budget),
+            capacity: Semaphore::new(1),
+        })
     }
 
     fn open(
@@ -89,6 +137,23 @@ impl EvidenceWriter {
         // do not acquire the exclusive directory lock. Unix deployment only.
         let root_lock = File::open(root)?;
         root_lock.try_lock()?;
+        let budget = Self::scan(root, max_bytes)?;
+        Ok(Self {
+            vault: vault.into(),
+            local: Some(LocalRoot {
+                root: root.to_path_buf(),
+                max_bytes,
+                _lock: root_lock,
+            }),
+            remaining_bytes: AtomicU64::new(budget.remaining_bytes),
+            remaining_files: AtomicU64::new(budget.remaining_files),
+            budget: Mutex::new(budget),
+            capacity: Semaphore::new(1),
+        })
+    }
+
+    /// Charges every regular file already in the root, orphans included.
+    fn scan(root: &Path, max_bytes: u64) -> Result<Budget, Box<dyn std::error::Error>> {
         let mut remaining_bytes = max_bytes;
         let mut remaining_files = MAX_FILES;
         for entry in fs::read_dir(root)? {
@@ -103,15 +168,51 @@ impl EvidenceWriter {
                 .checked_sub(1)
                 .ok_or("evidence file capacity exhausted")?;
         }
-        Ok(Self {
-            vault,
-            _root_lock: root_lock,
-            budget: Mutex::new(Budget {
-                remaining_bytes,
-                remaining_files,
-            }),
-            capacity: Semaphore::new(1),
+        Ok(Budget {
+            remaining_bytes,
+            remaining_files,
         })
+    }
+
+    /// Recomputes the budget from the root, as a restart would, after
+    /// retention removed ciphertext. Holding the budget lock keeps any write
+    /// out of the root while it is counted. A root that no longer scans
+    /// leaves the old, conservative budget in place.
+    pub(crate) fn refresh_budget(&self) -> Result<(), &'static str> {
+        let Some(local) = &self.local else {
+            return Ok(());
+        };
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| "EVIDENCE_CAPACITY_REFRESH_FAILED")?;
+        *budget = Self::scan(&local.root, local.max_bytes)
+            .map_err(|_| "EVIDENCE_CAPACITY_REFRESH_FAILED")?;
+        self.publish(&budget);
+        Ok(())
+    }
+
+    /// Remaining bytes and files, as of the last write or refresh; `None`
+    /// for a bucket, which this writer does not meter.
+    pub(crate) fn remaining(&self) -> Option<(u64, u64)> {
+        self.local.as_ref().map(|_| {
+            (
+                self.remaining_bytes.load(Ordering::Relaxed),
+                self.remaining_files.load(Ordering::Relaxed),
+            )
+        })
+    }
+
+    /// The local root, or `None` when evidence goes to a bucket.
+    pub(crate) fn root(&self) -> Option<&Path> {
+        self.local.as_ref().map(|local| local.root.as_path())
+    }
+
+    fn publish(&self, budget: &Budget) {
+        self.remaining_bytes
+            .store(budget.remaining_bytes, Ordering::Relaxed);
+        self.remaining_files
+            .store(budget.remaining_files, Ordering::Relaxed);
     }
 
     /// Acquire before parsing, keep through vault/catalog/journal publication.
@@ -134,15 +235,18 @@ impl EvidenceWriter {
             .budget
             .lock()
             .map_err(|_| ReasonCode::EvidenceCaptureUnavailable)?;
-        let reservation = document.len() as u64 + WRITE_OVERHEAD;
-        if reservation > budget.remaining_bytes || budget.remaining_files < 3 {
-            return Err(ReasonCode::EvidenceCaptureCapacityExhausted);
+        if self.local.is_some() {
+            let reservation = document.len() as u64 + WRITE_OVERHEAD;
+            if reservation > budget.remaining_bytes || budget.remaining_files < 3 {
+                return Err(ReasonCode::EvidenceCaptureCapacityExhausted);
+            }
+            // ponytail: conservatively charge failed writes and maximum sidecar size
+            // until the next rescan (restart, or a pass of the in-process retention).
+            // This bounds orphans too, without a per-request directory scan.
+            budget.remaining_bytes -= reservation;
+            budget.remaining_files -= 3;
+            self.publish(&budget);
         }
-        // ponytail: conservatively charge failed writes and maximum sidecar size
-        // until restart; external retention cleanup + restart reclaims capacity.
-        // This bounds orphans too, without a per-request directory scan.
-        budget.remaining_bytes -= reservation;
-        budget.remaining_files -= 3;
         self.vault
             .write(&EvidenceWrite {
                 tenant_id: config.tenant_id(),

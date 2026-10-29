@@ -585,6 +585,87 @@ mod tests {
         );
     }
 
+    /// Acceptance GRANT-08: having separately seen order A and item B grants
+    /// no operation on the pair. A nested operation is authorized only by a
+    /// grant issued for its own composite resource key (the adapter's HMAC of
+    /// the parent/child reference, issued from a response that listed B under
+    /// A); grants for each object alone never stand in for that relationship.
+    #[test]
+    fn separately_seen_parent_and_child_never_authorize_their_composite() {
+        const ITEM_B: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+        const A_WITH_B: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+        const A_WITH_OTHER: &str =
+            "5555555555555555555555555555555555555555555555555555555555555555";
+        let (binding, snapshot) = setup();
+        let mut ledger = GrantLedger::new(4).unwrap();
+        ledger
+            .issue(
+                &binding,
+                &snapshot,
+                draft(1, "order-a", R1),
+                UnixSeconds::new(100),
+            )
+            .unwrap();
+        let mut item = draft(2, "item-b", ITEM_B);
+        item.resource_type = ResourceType::parse("order_item").unwrap();
+        item.operation_id = OperationId::parse("order_items.read").unwrap();
+        item.view_profile = ViewProfile::parse("item_detail").unwrap();
+        ledger
+            .issue(&binding, &snapshot, item, UnixSeconds::new(100))
+            .unwrap();
+
+        let order_type = ResourceType::parse("order").unwrap();
+        let item_type = ResourceType::parse("order_item").unwrap();
+        let nested = OperationId::parse("orders.items.read").unwrap();
+        let view = ViewProfile::parse("item_detail").unwrap();
+        let order_a = ResourceKeyHmac::parse(R1).unwrap();
+        let item_b = ResourceKeyHmac::parse(ITEM_B).unwrap();
+        let pair = ResourceKeyHmac::parse(A_WITH_B).unwrap();
+        let other_pair = ResourceKeyHmac::parse(A_WITH_OTHER).unwrap();
+        // Neither independent grant reaches the nested operation...
+        for (resource_type, resource) in [(&order_type, &order_a), (&item_type, &item_b)] {
+            assert_eq!(
+                ledger.authorize(
+                    &binding,
+                    query(&snapshot, resource_type, resource, &nested, &view, 120),
+                ),
+                Err(GrantDenied::OperationNotGranted)
+            );
+        }
+        // ...and the composite reference itself was never qualified.
+        assert_eq!(
+            ledger.authorize(
+                &binding,
+                query(&snapshot, &item_type, &pair, &nested, &view, 120),
+            ),
+            Err(GrantDenied::CapabilityMissing)
+        );
+
+        // Only a grant for the exact composite key authorizes the pair, and it
+        // does not extend to A with any other child.
+        let mut composite = draft(3, "order-a-items", A_WITH_B);
+        composite.resource_type = item_type.clone();
+        composite.operation_id = nested.clone();
+        composite.view_profile = view.clone();
+        ledger
+            .issue(&binding, &snapshot, composite, UnixSeconds::new(100))
+            .unwrap();
+        assert_eq!(
+            ledger.authorize(
+                &binding,
+                query(&snapshot, &item_type, &pair, &nested, &view, 120),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            ledger.authorize(
+                &binding,
+                query(&snapshot, &item_type, &other_pair, &nested, &view, 120),
+            ),
+            Err(GrantDenied::CapabilityMissing)
+        );
+    }
+
     #[test]
     fn identity_change_capacity_and_expiry_fail_closed() {
         let (mut binding, snapshot) = setup();

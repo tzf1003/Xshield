@@ -27,7 +27,7 @@ use xshield_core::{
     domain::SiteId,
     site::{
         POLICY_REVISION_REUSED, flow,
-        upstream::{parse_upstream_socket, refuse_upstream_socket},
+        upstream::{UpstreamAllowance, parse_upstream_socket},
     },
 };
 use xshield_postgres::{
@@ -213,13 +213,41 @@ fn validate_apply_ack(
     Ok(())
 }
 
-/// Whether the deployment opted in to loopback upstreams (the local lab only).
+/// The deployment's exceptions to the upstream destination policy.
 ///
-/// The opt-in is read at each use so a lab restart picks it up without a code
-/// path caching a stale answer; it unlocks `127.0.0.0/8` and `::1` and nothing
-/// else (see `xshield_core::site::upstream`).
-fn loopback_upstream_allowed() -> bool {
-    std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1")
+/// Read at each use so a restart picks up a change without a cached answer.
+/// `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1` is the local-lab opt-in for
+/// `127.0.0.0/8` and `::1`; `XSHIELD_ALLOWED_UPSTREAM_CIDRS` lists private
+/// networks (RFC 1918, `fc00::/7`) the deployment admits. An invalid list
+/// admits nothing here (fail closed); startup calls
+/// [`upstream_allowance_from_env`] so such a list stops the process instead.
+fn upstream_allowance() -> UpstreamAllowance {
+    upstream_allowance_from_env().unwrap_or_else(|_| {
+        UpstreamAllowance::new(
+            std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1"),
+            Vec::new(),
+        )
+    })
+}
+
+/// Reads the upstream allowance, refusing an invalid admitted-network list.
+///
+/// # Errors
+/// Returns a static message when `XSHIELD_ALLOWED_UPSTREAM_CIDRS` is not a
+/// list of at most 32 private CIDR networks without host bits.
+pub fn upstream_allowance_from_env() -> Result<UpstreamAllowance, &'static str> {
+    let loopback = std::env::var("XSHIELD_ALLOW_LOOPBACK_UPSTREAM").as_deref() == Ok("1");
+    let admitted = match std::env::var("XSHIELD_ALLOWED_UPSTREAM_CIDRS") {
+        Ok(list) => UpstreamAllowance::parse_admitted(&list).map_err(|_| {
+            "XSHIELD_ALLOWED_UPSTREAM_CIDRS must list at most 32 private CIDR networks \
+             (RFC 1918 or fc00::/7) without host bits"
+        })?,
+        Err(std::env::VarError::NotPresent) => Vec::new(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("XSHIELD_ALLOWED_UPSTREAM_CIDRS is not valid Unicode");
+        }
+    };
+    Ok(UpstreamAllowance::new(loopback, admitted))
 }
 
 /// A health probe whose destination has been re-validated for this request.
@@ -248,10 +276,10 @@ fn plan_upstream_probe(
     server_name: &str,
     tls: bool,
     health_path: &str,
-    allow_loopback: bool,
+    allowance: &UpstreamAllowance,
 ) -> Result<UpstreamProbePlan, &'static str> {
     let socket = parse_upstream_socket(address).map_err(|_| "CONTROL_SITE_UPSTREAM_INVALID")?;
-    if refuse_upstream_socket(socket, allow_loopback).is_some() {
+    if allowance.refuse_socket(socket).is_some() {
         return Err("CONTROL_SITE_SSRF_BLOCKED");
     }
     if !server_name_is_dns_name(server_name) {
@@ -286,9 +314,9 @@ async fn probe_upstream(
     server_name: &str,
     tls: bool,
     health: &SiteHealthCheckConfig,
-    allow_loopback: bool,
+    allowance: &UpstreamAllowance,
 ) -> serde_json::Value {
-    let plan = match plan_upstream_probe(address, server_name, tls, &health.path, allow_loopback) {
+    let plan = match plan_upstream_probe(address, server_name, tls, &health.path, allowance) {
         Ok(plan) => plan,
         Err(reason) => {
             return json!({
@@ -1312,6 +1340,31 @@ pub async fn approve_handler(
             Some(digest)
         }
     };
+    // docs/32 32.7: an approver tightening an observe rollout may record the
+    // exit report (GET /control/v1/rollout-report) it relied on. It is a
+    // record, not a condition: nothing is authorized because of it.
+    let exit_report_digest = match single_header(&headers, "x-xshield-exit-report-digest") {
+        None => None,
+        Some(value) => {
+            let Some(digest) = decode_hex_key(&value) else {
+                return control
+                    .audited_error_async(
+                        request_id,
+                        Some(subject),
+                        APPROVE_ACCESS,
+                        None,
+                        StatusCode::BAD_REQUEST,
+                        "CONTROL_SITE_CONFIG_REQUEST_INVALID",
+                        "invalid exit report digest",
+                        false,
+                        "correct_request",
+                    )
+                    .await
+                    .into_response();
+            };
+            Some(digest)
+        }
+    };
     let Some(idempotency_digest) = signature(
         &control,
         b"site-config-approve-idempotency-v1",
@@ -1335,6 +1388,8 @@ pub async fn approve_handler(
             &subject,
             &idempotency_digest,
             expected_digest.as_ref(),
+            auth.step_up_valid(),
+            exit_report_digest.as_ref(),
         )
         .await
     {
@@ -1382,6 +1437,14 @@ pub async fn approve_handler(
             "CONTROL_SITE_APPROVAL_SELF_REJECTED",
             "the configuration author cannot approve the same revision",
             "independent_approver",
+        )),
+        // Relaxing the rollout forwards refusals that are enforced today; an
+        // API key, or a console session without a recent step-up, cannot.
+        ProtectedSiteApprovalOutcome::StepUpRequired => Some((
+            StatusCode::UNAUTHORIZED,
+            "CONTROL_STEP_UP_REQUIRED",
+            "relaxing the rollout requires a console approver with recent reauthentication",
+            "reauthenticate",
         )),
         // Written by an older control service, or its label was bound since:
         // approving it would only move the refusal to the edge.
@@ -1882,7 +1945,7 @@ async fn site_apply_state_handler(
                 record.upstream_server_name(),
                 record.upstream_tls(),
                 &record.policy().health_check,
-                loopback_upstream_allowed(),
+                &upstream_allowance(),
             )
             .await,
         )
@@ -3440,7 +3503,7 @@ async fn apply_site_snapshot(
         .iter()
         .map(PlanInput::from_store)
         .collect::<Vec<_>>();
-    let plan = match plan_snapshot(&inputs, target_site, target_apply) {
+    let mut plan = match plan_snapshot(&inputs, target_site, target_apply) {
         Ok(plan) => plan,
         Err(reason) => {
             // Failures the target is itself responsible for are recorded on
@@ -3467,76 +3530,117 @@ async fn apply_site_snapshot(
             return Err(reason);
         }
     };
-    // A site whose projection cannot be produced is never sent with a
-    // substitute: nothing is published and the target records why.
-    let Ok(sites) = plan
-        .served
-        .iter()
-        .map(|site| {
-            Ok(GatewayApplySite {
-                site_id: site.site_id.as_str().to_owned(),
-                listen_port: site.config.listen_port,
-                public_origin: site.config.public_origin.clone(),
-                gateway_config: site
-                    .config
-                    .gateway_config(control.config.tenant_id.as_str(), &site.site_id)?,
-                revision: site.revision,
+    // Sites the edge itself excludes by naming a descriptor conflict, held
+    // at their last approved configuration like any other held-back site
+    // and reported the same way once the smaller snapshot is live. Each
+    // retry removes exactly the one site the edge named from `confirmed`,
+    // so the loop is bounded by its length at the start and always either
+    // makes progress or returns.
+    let mut descriptor_conflicts: Vec<(SiteId, u64, String)> = Vec::new();
+    loop {
+        // A site whose projection cannot be produced is never sent with a
+        // substitute: nothing is published and the target records why.
+        let Ok(sites) = plan
+            .served
+            .iter()
+            .map(|site| {
+                Ok(GatewayApplySite {
+                    site_id: site.site_id.as_str().to_owned(),
+                    listen_port: site.config.listen_port,
+                    public_origin: site.config.public_origin.clone(),
+                    gateway_config: site
+                        .config
+                        .gateway_config(control.config.tenant_id.as_str(), &site.site_id)?,
+                    revision: site.revision,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, xshield_core::domain::InvalidValue>>()
-    else {
-        control
-            .catalog
-            .mark_protected_site_apply_failed(
-                &control.config.tenant_id,
-                target_site,
-                target_apply.desired_revision,
-                &target_apply.apply_id,
-                "EDGE_APPLY_PAYLOAD_INVALID",
-            )
-            .await
-            .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
-        return Err("EDGE_APPLY_PAYLOAD_INVALID");
-    };
-    let request = GatewayApplyRequest {
-        protocol_version: 1,
-        tenant_id: control.config.tenant_id.as_str().to_owned(),
-        apply_id: target_apply.apply_id.clone(),
-        snapshot_revision: snapshot.revision,
-        sites,
-    };
-    if let Err(refusal) = client.apply(&request).await {
+            .collect::<Result<Vec<_>, xshield_core::domain::InvalidValue>>()
+        else {
+            control
+                .catalog
+                .mark_protected_site_apply_failed(
+                    &control.config.tenant_id,
+                    target_site,
+                    target_apply.desired_revision,
+                    &target_apply.apply_id,
+                    "EDGE_APPLY_PAYLOAD_INVALID",
+                )
+                .await
+                .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            return Err("EDGE_APPLY_PAYLOAD_INVALID");
+        };
+        let request = GatewayApplyRequest {
+            protocol_version: 1,
+            tenant_id: control.config.tenant_id.as_str().to_owned(),
+            apply_id: target_apply.apply_id.clone(),
+            snapshot_revision: snapshot.revision,
+            sites,
+        };
+        let Err(refusal) = client.apply(&request).await else {
+            break;
+        };
         // A descriptor conflict is a property of the one site the edge
-        // names, so that site carries it and the target, which caused
-        // nothing, stays pending. The unsigned name is honoured only when it
-        // is a sibling this snapshot carried as its desired revision;
-        // otherwise (no name, the target itself, a site held back or not
-        // sent at all) the target carries the failure as before.
-        let (site, revision, apply_id) = refusal
+        // names. When it names a sibling this snapshot carried as a desired
+        // revision (never the target), that site alone is excluded and the
+        // smaller snapshot is retried, so a conflict it did not cause never
+        // blocks the change that triggered this apply. Any other name (none,
+        // the target itself, a site already held back or not sent at all)
+        // leaves the failure on the target, as before.
+        let named_index = refusal
             .site_id
             .as_ref()
             .filter(|named| *named != target_site)
-            .and_then(|named| plan.confirmed.iter().find(|(site, _, _)| site == named))
-            .map_or(
-                (
+            .and_then(|named| plan.confirmed.iter().position(|(site, _, _)| site == named));
+        let Some(index) = named_index else {
+            control
+                .catalog
+                .mark_protected_site_apply_failed(
+                    &control.config.tenant_id,
                     target_site,
                     target_apply.desired_revision,
-                    target_apply.apply_id.as_str(),
-                ),
-                |(site, revision, apply_id)| (site, *revision, apply_id.as_str()),
-            );
-        control
-            .catalog
-            .mark_protected_site_apply_failed(
-                &control.config.tenant_id,
-                site,
-                revision,
-                apply_id,
-                refusal.reason,
-            )
-            .await
-            .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
-        return Err(refusal.reason);
+                    &target_apply.apply_id,
+                    refusal.reason,
+                )
+                .await
+                .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            return Err(refusal.reason);
+        };
+        let excluded = plan.confirmed.remove(index);
+        plan.served.retain(|site| site.site_id != excluded.0);
+        if let Some(input) = inputs.iter().find(|input| input.site_id == excluded.0)
+            && let (Some(previous), Some(previous_revision)) =
+                (input.active_config.as_ref(), input.active_revision)
+            && previous.is_serving()
+        {
+            plan.served.push(ServedSite {
+                site_id: excluded.0.clone(),
+                config: previous.clone(),
+                revision: previous_revision,
+            });
+        }
+        // The excluded site may now serve its last approved port, which
+        // another site's desired revision could since have claimed; the
+        // edge would refuse the whole smaller snapshot too.
+        let mut ports = std::collections::BTreeSet::new();
+        if !plan
+            .served
+            .iter()
+            .all(|site| ports.insert(site.config.listen_port))
+        {
+            control
+                .catalog
+                .mark_protected_site_apply_failed(
+                    &control.config.tenant_id,
+                    target_site,
+                    target_apply.desired_revision,
+                    &target_apply.apply_id,
+                    "CONTROL_SITE_PORT_UNAVAILABLE",
+                )
+                .await
+                .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            return Err("CONTROL_SITE_PORT_UNAVAILABLE");
+        }
+        descriptor_conflicts.push(excluded);
     }
     if !control
         .catalog
@@ -3547,9 +3651,10 @@ async fn apply_site_snapshot(
         return Err("CONTROL_SITE_APPLY_STATE_UNAVAILABLE");
     }
     // The snapshot is live. Sites that were held back because their desired
-    // configuration does not compile, or would reuse a label for another
-    // descriptor set, are reported on their own status; this is
-    // informational, so a failure to record it does not undo the apply.
+    // configuration does not compile, would reuse a label for another
+    // descriptor set, or were excluded after the edge named a descriptor
+    // conflict, are reported on their own status; this is informational, so
+    // a failure to record it does not undo the apply.
     let held_back = plan
         .invalid
         .iter()
@@ -3558,6 +3663,13 @@ async fn apply_site_snapshot(
             plan.reused
                 .iter()
                 .map(|(site, revision, apply_id, reason)| (site, revision, apply_id, *reason)),
+        )
+        .chain(
+            descriptor_conflicts
+                .iter()
+                .map(|(site, revision, apply_id)| {
+                    (site, revision, apply_id, "EDGE_APPLY_DESCRIPTOR_CONFLICT")
+                }),
         );
     for (site, revision, apply_id, reason) in held_back {
         let _ = control
@@ -3572,6 +3684,49 @@ async fn apply_site_snapshot(
             .await;
     }
     Ok(true)
+}
+
+/// Reconciles this control instance's own local edge to the current
+/// desired/active state of its one configured site, independent of any
+/// write request landing on this replica. `apply_site_snapshot` already
+/// recomputes the full snapshot from PostgreSQL and the edge apply protocol
+/// is idempotent (`EDGE_APPLY_IDEMPOTENCY_CONFLICT` semantics), so every
+/// control+edge replica can run this identically on its own schedule with no
+/// coordination between replicas (ADR-014, docs/19 19.9.1).
+///
+/// # Errors
+/// Returns the apply protocol's reason code when nothing could be
+/// reconciled this tick (for example `CONTROL_SITE_APPROVAL_REQUIRED` while a
+/// change is still pending review, or no edge apply client configured). The
+/// caller logs and retries on the next tick.
+pub(crate) async fn reconcile_local_edge(control: &ControlPlane) -> Result<bool, &'static str> {
+    let site_id = control.config.site_id.clone();
+    let record = control
+        .catalog
+        .read_protected_site_config(&control.config.tenant_id, &site_id)
+        .await
+        .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?
+        .ok_or("CONTROL_SITE_NOT_FOUND")?;
+    let apply = control
+        .catalog
+        .read_protected_site_apply_state(&control.config.tenant_id, &site_id)
+        .await
+        .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?
+        .ok_or("CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+    apply_site_snapshot(control, &site_id, &apply, record.status()).await
+}
+
+/// Runs [`reconcile_local_edge`] on a fixed interval until the process
+/// exits. Started at most once per control instance (see `main.rs`);
+/// failures are the ordinary "nothing pending" case and are not logged as
+/// errors, since they recur every tick between real changes.
+pub async fn run_edge_reconcile_loop(control: Arc<ControlPlane>, period: Duration) {
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let _ = reconcile_local_edge(&control).await;
+    }
 }
 
 async fn merge_patch_payload(
@@ -3681,7 +3836,7 @@ fn server_name_is_dns_name(name: &str) -> bool {
 fn validate_upstream_destination(
     address: &str,
     server_name: &str,
-    allow_loopback: bool,
+    allowance: &UpstreamAllowance,
 ) -> Result<(), &'static str> {
     let Ok(socket) = parse_upstream_socket(address) else {
         // Names are never resolved on an operator's behalf. Known internal
@@ -3696,7 +3851,7 @@ fn validate_upstream_destination(
             "CONTROL_SITE_UPSTREAM_INVALID"
         });
     };
-    if refuse_upstream_socket(socket, allow_loopback).is_some() {
+    if allowance.refuse_socket(socket).is_some() {
         return Err("CONTROL_SITE_SSRF_BLOCKED");
     }
     if !server_name_is_dns_name(server_name) {
@@ -3772,6 +3927,7 @@ fn validation_reason(field: &str) -> &'static str {
             "CONTROL_SITE_QUERY_PAGINATION_INVALID"
         }
         flow::ACTION_DESCRIPTOR_CONFLICT => "CONTROL_SITE_ACTION_DESCRIPTOR_CONFLICT",
+        xshield_core::site::rollout::ROLLOUT_INVALID => "CONTROL_SITE_ROLLOUT_INVALID",
         // Decided by the store against the label's bindings, not by
         // validation; mapped here so every flow refusal has one table.
         POLICY_REVISION_REUSED => "CONTROL_SITE_POLICY_REVISION_REUSED",
@@ -3788,14 +3944,28 @@ fn validation_reason(field: &str) -> &'static str {
 /// [`SiteConfig::validate_for_site`], the single definition the edge compiler
 /// is held to by the gateway parity test; this adds only the destination
 /// rules, which depend on the loopback opt-in.
+///
+/// An observe deadline is also checked against the clock here: it must lie
+/// in the future and at most thirty days ahead, so an expired window can only
+/// be saved again as enforce.
 fn validate_request(request: &SiteConfigRequest, site_id: &SiteId) -> Result<(), &'static str> {
-    validate_request_with(request, site_id, loopback_upstream_allowed())
+    validate_request_with(request, site_id, &upstream_allowance())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "CONTROL_SITE_CONFIG_REQUEST_INVALID")?
+        .as_secs();
+    request
+        .to_config()
+        .policy
+        .rollout
+        .validate_window(now)
+        .map_err(|error| validation_reason(error.field()))
 }
 
 fn validate_request_with(
     request: &SiteConfigRequest,
     site_id: &SiteId,
-    allow_loopback: bool,
+    allowance: &UpstreamAllowance,
 ) -> Result<(), &'static str> {
     let config = request.to_config();
     config
@@ -3810,7 +3980,7 @@ fn validate_request_with(
     validate_upstream_destination(
         &request.upstream_address,
         &request.upstream_server_name,
-        allow_loopback,
+        allowance,
     )
 }
 
@@ -3924,7 +4094,13 @@ mod tests {
         validate_request_with,
     };
     use serde_json::json;
-    use xshield_core::{GatewayApplyAck, GatewayApplyRequest, domain::SiteId};
+    use xshield_core::{
+        GatewayApplyAck, GatewayApplyRequest, domain::SiteId, site::upstream::UpstreamAllowance,
+    };
+
+    fn lab(loopback: bool) -> UpstreamAllowance {
+        UpstreamAllowance::new(loopback, Vec::new())
+    }
 
     fn site() -> SiteId {
         SiteId::parse("site_a").unwrap()
@@ -3956,6 +4132,56 @@ mod tests {
         assert!(validate_request(&value, &site()).is_err());
     }
 
+    /// An observe rollout needs a label and a deadline within thirty days;
+    /// anything incoherent, or a deadline in the past, has its own reason.
+    #[test]
+    fn rollout_blocks_are_validated_with_their_own_reason() {
+        use xshield_core::site::{RolloutMode, SiteRollout};
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let observe = |until: u64| SiteRollout {
+            mode: RolloutMode::Observe,
+            observe_until_unix: Some(until),
+            revision: "rollout-1".to_owned(),
+            enforced_operations: Vec::new(),
+        };
+        let mut value = request();
+        value.policy.rollout = observe(now + 3_600);
+        assert_eq!(validate_request(&value, &site()), Ok(()));
+        for rollout in [
+            observe(now.saturating_sub(1)),
+            observe(now + 31 * 24 * 3_600),
+            SiteRollout {
+                revision: String::new(),
+                ..observe(now + 3_600)
+            },
+            SiteRollout {
+                enforced_operations: vec!["missing".to_owned()],
+                ..observe(now + 3_600)
+            },
+            SiteRollout {
+                revision: "rollout-1".to_owned(),
+                ..SiteRollout::default()
+            },
+        ] {
+            value.policy.rollout = rollout;
+            assert_eq!(
+                validate_request(&value, &site()),
+                Err("CONTROL_SITE_ROLLOUT_INVALID"),
+                "{:?}",
+                value.policy.rollout
+            );
+        }
+        // The default entry route can be enforced on its own by name.
+        value.policy.rollout = SiteRollout {
+            enforced_operations: vec!["protected.entry".to_owned()],
+            ..observe(now + 3_600)
+        };
+        assert_eq!(validate_request(&value, &site()), Ok(()));
+    }
+
     /// The real-browser loop topology as a request body.
     fn browser_loop() -> serde_json::Value {
         serde_json::from_str(include_str!("../../../tests/site-config/browser-loop.json")).unwrap()
@@ -3969,7 +4195,7 @@ mod tests {
             let mut body = browser_loop();
             edit(&mut body);
             let request: SiteConfigRequest = serde_json::from_value(body).unwrap();
-            validate_request_with(&request, &site(), false).err()
+            validate_request_with(&request, &site(), &lab(false)).err()
         };
         assert_eq!(reason(|_| {}), None);
         for (expected, edit) in [
@@ -4035,7 +4261,7 @@ mod tests {
             );
             edit(&mut body, issuer, entry);
             let request: SiteConfigRequest = serde_json::from_value(body).unwrap();
-            validate_request_with(&request, &site(), false).err()
+            validate_request_with(&request, &site(), &lab(false)).err()
         };
         assert_eq!(reason(|_, _, _| {}), None);
         for (expected, edit) in [
@@ -4150,9 +4376,47 @@ mod tests {
             let mut value = request();
             value.upstream_address = address.to_owned();
             assert_eq!(
-                validate_request_with(&value, &site(), false),
+                validate_request_with(&value, &site(), &lab(false)),
                 Err("CONTROL_SITE_SSRF_BLOCKED"),
                 "{address} must be refused as an internal upstream"
+            );
+        }
+    }
+
+    #[test]
+    fn admitted_private_networks_unlock_only_their_own_origins() {
+        let admitted = UpstreamAllowance::new(
+            false,
+            UpstreamAllowance::parse_admitted("10.20.0.0/16").unwrap(),
+        );
+        let mut value = request();
+        value.upstream_address = "10.20.3.4:8080".to_owned();
+        assert_eq!(
+            validate_request_with(&value, &site(), &lab(false)),
+            Err("CONTROL_SITE_SSRF_BLOCKED"),
+            "private origins stay refused by default"
+        );
+        assert_eq!(validate_request_with(&value, &site(), &admitted), Ok(()));
+        let plan = plan_upstream_probe(
+            "10.20.3.4:8080",
+            "origin.internal",
+            false,
+            "/health",
+            &admitted,
+        )
+        .unwrap();
+        assert_eq!(plan.address.to_string(), "10.20.3.4:8080");
+        for refused in [
+            "10.21.0.1:8080",
+            "127.0.0.1:8080",
+            "169.254.169.254:80",
+            "[::ffff:10.20.3.4]:8080",
+        ] {
+            value.upstream_address = refused.to_owned();
+            assert_eq!(
+                validate_request_with(&value, &site(), &admitted),
+                Err("CONTROL_SITE_SSRF_BLOCKED"),
+                "{refused}"
             );
         }
     }
@@ -4182,7 +4446,7 @@ mod tests {
             value.upstream_address = address.to_owned();
             value.upstream_tls = tls;
             assert_eq!(
-                validate_request_with(&value, &site(), false),
+                validate_request_with(&value, &site(), &lab(false)),
                 Ok(()),
                 "{address} tls={tls} is a public upstream"
             );
@@ -4193,9 +4457,9 @@ mod tests {
     fn site_config_loopback_opt_in_allows_only_loopback() {
         let mut value = request();
         value.upstream_address = "127.0.0.1:9000".to_owned();
-        assert_eq!(validate_request_with(&value, &site(), true), Ok(()));
+        assert_eq!(validate_request_with(&value, &site(), &lab(true)), Ok(()));
         value.upstream_address = "[::1]:9000".to_owned();
-        assert_eq!(validate_request_with(&value, &site(), true), Ok(()));
+        assert_eq!(validate_request_with(&value, &site(), &lab(true)), Ok(()));
         // The opt-in is for the local lab only; it never unlocks private,
         // metadata, mapped or translated destinations.
         for address in [
@@ -4207,7 +4471,7 @@ mod tests {
         ] {
             value.upstream_address = address.to_owned();
             assert_eq!(
-                validate_request_with(&value, &site(), true),
+                validate_request_with(&value, &site(), &lab(true)),
                 Err("CONTROL_SITE_SSRF_BLOCKED"),
                 "{address} stays blocked even with the loopback opt-in"
             );
@@ -4234,7 +4498,7 @@ mod tests {
             let mut value = request();
             value.upstream_server_name = name.to_owned();
             assert_eq!(
-                validate_request_with(&value, &site(), false),
+                validate_request_with(&value, &site(), &lab(false)),
                 Err("CONTROL_SITE_UPSTREAM_INVALID"),
                 "{name} is not a DNS name"
             );
@@ -4243,7 +4507,7 @@ mod tests {
             let mut value = request();
             value.upstream_server_name = name.to_owned();
             assert_eq!(
-                validate_request_with(&value, &site(), false),
+                validate_request_with(&value, &site(), &lab(false)),
                 Ok(()),
                 "{name}"
             );
@@ -4257,7 +4521,7 @@ mod tests {
             "Origin.Example.Test",
             false,
             "/health",
-            false,
+            &lab(false),
         )
         .unwrap();
         // The old probe built `http://{server_name}/health`, which dials the
@@ -4266,7 +4530,7 @@ mod tests {
         assert_eq!(plan.host, "origin.example.test");
         assert_eq!(plan.address, "8.8.8.8:9000".parse().unwrap());
         let default_port =
-            plan_upstream_probe("8.8.8.8:443", "origin.test", true, "/h", false).unwrap();
+            plan_upstream_probe("8.8.8.8:443", "origin.test", true, "/h", &lab(false)).unwrap();
         assert_eq!(default_port.address.port(), 443);
         assert_eq!(default_port.url, "https://origin.test/h");
     }
@@ -4284,20 +4548,20 @@ mod tests {
             "[64:ff9b::7f00:1]:80",
         ] {
             assert_eq!(
-                plan_upstream_probe(address, "origin.test", false, "/health", false),
+                plan_upstream_probe(address, "origin.test", false, "/health", &lab(false)),
                 Err("CONTROL_SITE_SSRF_BLOCKED"),
                 "{address}"
             );
         }
         for name in ["127.0.0.1", "2130706433", "0x7f.1", "127.1", "[::1]", "a b"] {
             assert_eq!(
-                plan_upstream_probe("8.8.8.8:9000", name, false, "/health", false),
+                plan_upstream_probe("8.8.8.8:9000", name, false, "/health", &lab(false)),
                 Err("CONTROL_SITE_UPSTREAM_INVALID"),
                 "{name}"
             );
         }
         assert_eq!(
-            plan_upstream_probe("origin.test:80", "origin.test", false, "/h", false),
+            plan_upstream_probe("origin.test:80", "origin.test", false, "/h", &lab(false)),
             Err("CONTROL_SITE_UPSTREAM_INVALID")
         );
     }
@@ -4344,7 +4608,7 @@ mod tests {
             "origin.example.test",
             false,
             &health,
-            true,
+            &lab(true),
         )
         .await;
         assert_eq!(result["upstream_state"], "degraded", "{result}");
@@ -4384,14 +4648,15 @@ mod tests {
             "origin.example.test",
             false,
             &health,
-            false,
+            &lab(false),
         )
         .await;
         assert_eq!(mapped["reason_code"], "CONTROL_SITE_SSRF_BLOCKED");
         assert_eq!(mapped["upstream_state"], "unavailable");
         // A public address with a loopback IP literal as server name used to
         // dial 127.0.0.1:80 because the resolver override skips IP hosts.
-        let literal = probe_upstream("8.8.8.8:9000", "127.0.0.1", false, &health, false).await;
+        let literal =
+            probe_upstream("8.8.8.8:9000", "127.0.0.1", false, &health, &lab(false)).await;
         assert_eq!(literal["reason_code"], "CONTROL_SITE_UPSTREAM_INVALID");
         // Even with the lab opt-in the mapped form stays blocked.
         let opted_in = probe_upstream(
@@ -4399,7 +4664,7 @@ mod tests {
             "origin.example.test",
             false,
             &health,
-            true,
+            &lab(true),
         )
         .await;
         assert_eq!(opted_in["reason_code"], "CONTROL_SITE_SSRF_BLOCKED");

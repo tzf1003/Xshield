@@ -1,0 +1,42 @@
+# Journal publication into ClickHouse, once per source. Install to
+# /etc/systemd/system/xshield-publish@.service, then enable
+# `xshield-publish@edge.timer` and `xshield-publish@control.timer` (docs/13).
+[Unit]
+Description=Xshield audit publish (%i journal)
+Documentation=https://github.com/tzf1003/Xshield/blob/main/docs/13-audit-storage-reliability.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=xshield
+Group=xshield
+EnvironmentFile=/etc/xshield/publish-%i.env
+ExecStart=/opt/xshield/current/bin/xshield-worker \
+    /var/lib/xshield/%i-audit \
+    /var/lib/xshield/%i-manifests \
+    /var/lib/xshield/%i-checkpoints
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/var/lib/xshield/%i-audit /var/lib/xshield/%i-manifests
+ReadWritePaths=/var/lib/xshield/%i-checkpoints
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

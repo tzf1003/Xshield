@@ -33,6 +33,9 @@ sha2 = "0.10"
 sqlx = { version = "=0.9.0", default-features = false, features = ["chrono", "json", "postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
 tokio = { version = "~1.51", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = "0.5"
+# Blocking HTTP for the S3 evidence adapter, whose vault API is synchronous and runs
+# on blocking threads; no environment proxy, rustls with webpki roots, no gzip.
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 uuid = { version = "1", features = ["v7"] }
 url = "2"
 zeroize = "1"

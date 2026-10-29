@@ -1,4 +1,4 @@
-use super::DurableAuditError;
+use super::{DurableAuditError, OBSERVED_WOULD_DENY};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +36,15 @@ pub(super) struct RecoveredDecision {
     pub(super) event_id: String,
     pub(super) outcome: String,
     pub(super) reason_code: String,
+    /// The observe window of an `OBSERVED_WOULD_DENY` decision.
+    pub(super) rollout_revision: Option<String>,
+}
+
+impl RecoveredDecision {
+    /// Whether the decision let the request reach the origin.
+    fn forwards(&self) -> bool {
+        matches!(self.outcome.as_str(), "ALLOW" | OBSERVED_WOULD_DENY)
+    }
 }
 
 pub(super) struct RecoveredForward {
@@ -56,6 +65,7 @@ pub(super) struct RecoveredOrigin {
 struct RecoveredTerminal {
     event_type: String,
     decision: String,
+    rollout_revision: Option<String>,
     reason_code: String,
     status: Option<u16>,
     origin_state: String,
@@ -98,6 +108,10 @@ struct HistoricalDecision {
     decision: String,
     reason_code: String,
     origin_state: String,
+    #[serde(default)]
+    rollout_revision: Option<String>,
+    #[serde(default)]
+    unmatched_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +128,8 @@ struct HistoricalOrigin {
 #[serde(deny_unknown_fields)]
 struct HistoricalCompletion {
     decision: String,
+    #[serde(default)]
+    rollout_revision: Option<String>,
     reason_code: String,
     status: Option<u16>,
     origin_state: String,
@@ -142,6 +158,7 @@ pub(super) fn incomplete_requests(
                     .ok_or(DurableAuditError::InvalidHistoricalEvent)?,
                 outcome: "UNKNOWN".to_owned(),
                 reason_code: ReasonCode::RequestIncomplete.as_str().to_owned(),
+                rollout_revision: None,
             });
             Ok(Some(IncompleteRequest {
                 request_id: request.request_id,
@@ -222,21 +239,7 @@ fn apply_request_event(
             }
             request.accepted_event_id = Some(event.event_id);
         }
-        "decision.composed" => {
-            let payload: HistoricalDecision = serde_json::from_str(event.payload.get())?;
-            if request.decision.is_some()
-                || !matches!(payload.decision.as_str(), "ALLOW" | "DENY")
-                || payload.origin_state != "not_sent"
-                || !valid_reason_code(&payload.reason_code)
-            {
-                return Err(DurableAuditError::InvalidHistoricalEvent);
-            }
-            request.decision = Some(RecoveredDecision {
-                event_id: event.event_id,
-                outcome: payload.decision,
-                reason_code: payload.reason_code,
-            });
-        }
+        "decision.composed" => apply_decision(request, event)?,
         "origin.forward_intent" => {
             let payload: HistoricalOrigin = serde_json::from_str(event.payload.get())?;
             if request.forward.is_some()
@@ -285,7 +288,11 @@ fn apply_request_event(
         "request.completed" | "request.aborted" => {
             let payload: HistoricalCompletion = serde_json::from_str(event.payload.get())?;
             if request.terminal.is_some()
-                || !matches!(payload.decision.as_str(), "ALLOW" | "DENY" | "UNKNOWN")
+                || !matches!(
+                    payload.decision.as_str(),
+                    "ALLOW" | "DENY" | "UNKNOWN" | OBSERVED_WOULD_DENY
+                )
+                || !valid_rollout(&payload.decision, payload.rollout_revision.as_deref())
                 || !valid_reason_code(&payload.reason_code)
                 || (event.event_type == "request.completed" && payload.status.is_none())
                 || (payload.decision == "UNKNOWN" && event.event_type != "request.aborted")
@@ -296,6 +303,7 @@ fn apply_request_event(
             request.terminal = Some(RecoveredTerminal {
                 event_type: event.event_type,
                 decision: payload.decision,
+                rollout_revision: payload.rollout_revision,
                 reason_code: payload.reason_code,
                 status: payload.status,
                 origin_state: payload.origin_state,
@@ -306,14 +314,43 @@ fn apply_request_event(
     Ok(())
 }
 
+fn apply_decision(
+    request: &mut RecoveryState,
+    event: HistoricalEvent,
+) -> Result<(), DurableAuditError> {
+    let payload: HistoricalDecision = serde_json::from_str(event.payload.get())?;
+    if request.decision.is_some()
+        || !matches!(
+            payload.decision.as_str(),
+            "ALLOW" | "DENY" | OBSERVED_WOULD_DENY
+        )
+        || !valid_rollout(&payload.decision, payload.rollout_revision.as_deref())
+        || !valid_unmatched_path(
+            &payload.decision,
+            &payload.reason_code,
+            payload.unmatched_path.as_deref(),
+        )
+        || payload.origin_state != "not_sent"
+        || !valid_reason_code(&payload.reason_code)
+    {
+        return Err(DurableAuditError::InvalidHistoricalEvent);
+    }
+    request.decision = Some(RecoveredDecision {
+        event_id: event.event_id,
+        outcome: payload.decision,
+        reason_code: payload.reason_code,
+        rollout_revision: payload.rollout_revision,
+    });
+    Ok(())
+}
+
 fn validate_recovery_state(request: &RecoveryState) -> Result<(), DurableAuditError> {
     if request.accepted_event_id.is_none()
         || request.forward.is_some()
-            && request
+            && !request
                 .decision
                 .as_ref()
-                .map(|decision| decision.outcome.as_str())
-                != Some("ALLOW")
+                .is_some_and(RecoveredDecision::forwards)
         || request.origin.is_some() && request.forward.is_none()
         || request.decision.is_none() && (request.forward.is_some() || request.origin.is_some())
     {
@@ -345,46 +382,67 @@ fn validate_recovery_state(request: &RecoveryState) -> Result<(), DurableAuditEr
                 && ((terminal.event_type == "request.completed" && terminal.status.is_some())
                     || (terminal.event_type == "request.aborted" && terminal.status.is_none()))
         }
-        (None, Some(decision)) if decision.outcome == "ALLOW" => {
+        (None, Some(decision)) if decision.forwards() => {
             terminal.event_type == "request.aborted"
                 && terminal.origin_state == "not_sent"
                 && terminal.reason_code == ReasonCode::RequestIncomplete.as_str()
                 && terminal.status.is_none()
         }
         (Some(origin), Some(decision))
-            if decision.outcome == "ALLOW" && origin.state == "response_received" =>
+            if decision.forwards() && origin.state == "response_received" =>
         {
             // A complete upstream response can still fail the response barrier
             // or downstream delivery. Preserve that recorded abort on restart.
+            // A completed observed request keeps the refusal it was forwarded past.
+            let completed_reason = if decision.outcome == OBSERVED_WOULD_DENY {
+                decision.reason_code.as_str()
+            } else {
+                ReasonCode::OriginResponseReceived.as_str()
+            };
             terminal.origin_state == origin.state
-                && terminal.reason_code == origin.reason_code
                 && ((terminal.event_type == "request.aborted"
+                    && terminal.reason_code == origin.reason_code
                     && origin.reason_code != ReasonCode::OriginResponseReceived.as_str())
                     || (terminal.event_type == "request.completed"
-                        && terminal.reason_code == ReasonCode::OriginResponseReceived.as_str()
+                        && origin.reason_code == ReasonCode::OriginResponseReceived.as_str()
+                        && terminal.reason_code == completed_reason
                         && terminal.status == origin.status))
         }
-        (Some(origin), Some(decision))
-            if decision.outcome == "ALLOW" && origin.state == "unknown" =>
-        {
+        (Some(origin), Some(decision)) if decision.forwards() && origin.state == "unknown" => {
             terminal.event_type == "request.aborted"
                 && terminal.origin_state == origin.state
                 && terminal.reason_code == ReasonCode::OriginOutcomeUnknown.as_str()
         }
         _ => false,
     };
-    if request
-        .decision
-        .as_ref()
-        .is_some_and(|decision| terminal.decision != decision.outcome)
-        || terminal
-            .status
-            .is_some_and(|status| !(100..=599).contains(&status))
+    if request.decision.as_ref().is_some_and(|decision| {
+        terminal.decision != decision.outcome
+            || terminal.rollout_revision != decision.rollout_revision
+    }) || terminal
+        .status
+        .is_some_and(|status| !(100..=599).contains(&status))
         || !terminal_matches
     {
         return Err(DurableAuditError::InvalidHistoricalEvent);
     }
     Ok(())
+}
+
+/// An observed decision names its window; no other decision carries one.
+fn valid_rollout(decision: &str, rollout_revision: Option<&str>) -> bool {
+    match rollout_revision {
+        None => decision != OBSERVED_WOULD_DENY,
+        Some(revision) => decision == OBSERVED_WOULD_DENY && valid_audit_name(revision),
+    }
+}
+
+/// Only a refusal that matched no route names the shape of its path.
+pub(super) fn valid_unmatched_path(decision: &str, reason_code: &str, shape: Option<&str>) -> bool {
+    shape.is_none_or(|shape| {
+        decision == "DENY"
+            && reason_code == "OPERATION_NOT_MATCHED"
+            && xshield_core::path_shape::valid_path_shape(shape)
+    })
 }
 
 fn valid_method(value: &str) -> bool {

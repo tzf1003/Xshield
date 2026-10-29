@@ -92,6 +92,8 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
             "independent-approver",
             &[41; 32],
             None,
+            false,
+            None,
         )
         .await
         .unwrap();
@@ -122,6 +124,8 @@ async fn site_config_is_scoped_idempotent_port_safe_and_apply_bounded() {
                 &format!("approval_{}", Uuid::now_v7()),
                 "independent-approver",
                 &[42; 32],
+                None,
+                false,
                 None,
             )
             .await
@@ -541,6 +545,8 @@ async fn approve(
             approver,
             &[key; 32],
             expected_digest,
+            false,
+            None,
         )
         .await
         .unwrap()

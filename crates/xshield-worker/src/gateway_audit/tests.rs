@@ -271,6 +271,89 @@ fn observation_event() -> Value {
     )
 }
 
+fn business_ws_closed_event() -> Value {
+    event(
+        "business_ws.closed",
+        json!({
+            "operation_id": "chat.ws",
+            "messages_to_origin": 3,
+            "messages_to_client": 5,
+            "bytes_to_origin": 120,
+            "bytes_to_client": 980,
+            "degraded": false,
+            "duration_us": 45_000
+        }),
+    )
+}
+
+fn business_ws_message_event() -> Value {
+    event(
+        "business_ws.message",
+        json!({
+            "operation_id": "chat.ws",
+            "direction": "to_origin",
+            "kind": "text",
+            "byte_len": 42,
+            "frame_count": 1,
+            "degraded": false
+        }),
+    )
+}
+
+#[test]
+fn business_ws_events_are_observations_carrying_no_plaintext() {
+    let closed = row(&business_ws_closed_event()).unwrap();
+    assert_eq!(closed.event_type, "business_ws.closed");
+    assert_eq!(closed.proof_kind, "observation");
+    assert_eq!(closed.confidence_status, "not_applicable");
+    assert_eq!(closed.operation_id, "chat.ws");
+    assert_eq!(closed.duration_us, 45_000);
+
+    let message = row(&business_ws_message_event()).unwrap();
+    assert_eq!(message.event_type, "business_ws.message");
+    assert_eq!(message.proof_kind, "observation");
+    assert_eq!(message.operation_id, "chat.ws");
+}
+
+#[test]
+fn business_ws_closed_rejects_malformed_shapes() {
+    assert_all_rejected(
+        &business_ws_closed_event(),
+        &[
+            ("a blank operation id", |v| {
+                v["payload"]["operation_id"] = json!("");
+            }),
+            ("an extra member", |v| {
+                v["payload"]["note"] = json!("x");
+            }),
+            ("a missing member", |v| {
+                v["payload"].as_object_mut().unwrap().remove("degraded");
+            }),
+        ],
+    );
+}
+
+#[test]
+fn business_ws_message_rejects_an_unknown_direction_kind_or_zero_frame_count() {
+    assert_all_rejected(
+        &business_ws_message_event(),
+        &[
+            ("an unknown direction", |v| {
+                v["payload"]["direction"] = json!("sideways");
+            }),
+            ("an unknown kind", |v| {
+                v["payload"]["kind"] = json!("continuation");
+            }),
+            ("a zero frame count", |v| {
+                v["payload"]["frame_count"] = json!(0);
+            }),
+            ("an extra member", |v| {
+                v["payload"]["note"] = json!("x");
+            }),
+        ],
+    );
+}
+
 /// One named way to break an otherwise valid event.
 type Mutation = (&'static str, fn(&mut Value));
 
@@ -928,6 +1011,19 @@ fn assert_accepted_event_is_coherent(event: &Value) {
             assert!((100..=599).contains(&payload["status"].as_u64().unwrap()));
         }
         "edge.unknown" => assert_eq!(text(payload, &["edge_state"]), Some("unknown")),
+        "business_ws.closed" => {
+            assert!(present(payload, &["operation_id"]));
+        }
+        "business_ws.message" => {
+            let direction = text(payload, &["direction"]).unwrap();
+            assert!(matches!(direction, "to_origin" | "to_client"));
+            let kind = text(payload, &["kind"]).unwrap();
+            assert!(matches!(
+                kind,
+                "text" | "binary" | "close" | "ping" | "pong" | "other"
+            ));
+            assert!(payload["frame_count"].as_u64().unwrap() > 0);
+        }
         "evidence.captured" => {
             assert_eq!(event["evidence_refs"].as_array().unwrap().len(), 1);
             assert_eq!(event["cause_event_ids"].as_array().unwrap().len(), 1);
@@ -1012,6 +1108,8 @@ fn damaged_events_are_refused_or_still_coherent() {
         edge_event("edge.unknown", "unknown", None),
         captured_event(),
         observation_event(),
+        business_ws_closed_event(),
+        business_ws_message_event(),
     ];
     let mut accepted = 0_u32;
     for (index, base) in bases.iter().enumerate() {

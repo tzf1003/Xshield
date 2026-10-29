@@ -4,7 +4,7 @@
 # backed by an isolated PostgreSQL database. The page's own script, which
 # knows nothing about Xshield, logs in, lists orders (a page-issued first-hop
 # action) and opens one (a response-derived, resource-bound action) with its
-# own Authorization header; sensor 1.1.0 attaches the server-issued
+# own Authorization header; sensor 1.3.0 attaches the server-issued
 # references. Requests that did not follow the flow, references from another
 # object, another browser context or an expired lease, calls after logout and
 # calls from unhooked contexts (Worker, iframe, a saved fetch reference) must

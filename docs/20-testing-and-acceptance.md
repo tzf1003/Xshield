@@ -6,7 +6,7 @@
 
 ## 20.1 分层测试
 
-单元：纯政策、ID/时间/字段校验、同主体续期与换账号隔离。性质测试：任意目标/动作扩张不应通过精确资格；不同租户同 ID 不串域；输入排序/重复键不会引入解析差异。Fuzz：HTTP/JSON/压缩/协议适配/插件/事件解码。
+单元：纯政策、ID/时间/字段校验、同主体续期与换账号隔离。性质测试：任意目标/动作扩张不应通过精确资格；不同租户同 ID 不串域；输入排序/重复键不会引入解析差异。Fuzz：HTTP/JSON/压缩/协议适配/插件/事件解码。已实现的部分见 `fuzz/README.md`，共 13 个目标：PROXY 头、路由与分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址和封存清单。PR 回放种子，覆盖引导的模糊测试每天运行。还没有目标的部分：压缩（edge 只接受 identity 编码）、插件（尚不存在）、journal 帧（读取前已经过 MAC 认证）。
 
 集成：PostgreSQL 条件提交、outbox、journal 崩溃恢复、ClickHouse 重复事件和水位、证据加密/读取授权、模型 timeout/cancel。端到端：受控浏览器 + 含有已知授权缺陷的测试源站，验证 Xshield 附加流程，不访问真实业务用户数据。
 
@@ -26,7 +26,7 @@
 | CONSOLE | ID 横向访问、原文审批、导出、自然语言查询、有界因果查询/邻域 | 不绕过租户/敏感权限；关联只沿已发布引用，历史检索仍显式授权与提交 |
 | RECOVERY | 重放、取消、未知源站结果、撤权、备份恢复 | 不重发非幂等写，不复活旧资格 |
 
-机器化验收目录见 examples/acceptance-cases.json，每个用例有独立 case_id、步骤和期望。`status` 只取三值：`planned` 表示没有自动化测试断言该期望；`partial` 表示只断言了部分条件，或只在比用例描述更低的层次（领域、存储、解析器、合成夹具）断言，必须用 `gap` 写明缺口；`automated` 表示已有自动化测试在用例描述的层次断言该期望。后两者必须在 `covered_by` 中列出 `{path, test}`。`scripts/validate_library.py` 只机器校验所引文件在仓库内存在、不是文档或本目录、且以完整标识包含该测试文本（测试改名或删除即失败），既不运行测试，也不判断它是否真的断言了该用例；这一判断由修改状态的人逐条阅读测试正文完成。当前 automated 9、partial 51、planned 18；只能在 Docker、ClickHouse、Keycloak、真实负载均衡或真实模型供应商环境（含仅 CI 配置了这些服务的用例）运行的层不计入覆盖。真实二进制脚本（`scripts/test_*.sh`）需要 bash ≥ 4.1：macOS 自带的 3.2 会让 `set -e` 忽略失败的 `[[ ]]`，这些脚本在旧 bash 下拒绝运行；“不得出现”类断言必须写成 `refute grep …`，因为 `! cmd` 在任何 bash 里都不会触发 `set -e`。`scripts/test_gateway_identity.sh` 曾因这两点在本机一直通过、在 Linux CI 上却必然失败，已在 bash 5.2 下严格重跑并修正，它的断言现在可以作为用例 `automated` 的依据。
+机器化验收目录见 examples/acceptance-cases.json，每个用例有独立 case_id、步骤和期望。`status` 只取三值：`planned` 表示没有自动化测试断言该期望；`partial` 表示只断言了部分条件，或只在比用例描述更低的层次（领域、存储、解析器、合成夹具）断言，必须用 `gap` 写明缺口；`automated` 表示已有自动化测试在用例描述的层次断言该期望。后两者必须在 `covered_by` 中列出 `{path, test}`。`scripts/validate_library.py` 只机器校验所引文件在仓库内存在、不是文档或本目录、且以完整标识包含该测试文本（测试改名或删除即失败），既不运行测试，也不判断它是否真的断言了该用例；这一判断由修改状态的人逐条阅读测试正文完成。当前 automated 11、partial 60、planned 7（剩余 planned 为 MODEL-01/06、AGENT-01/02、AUDIT-06、AUDIT-13、DEV-03：模型在线判定、适配 Agent、远端耐久、回放与真实负载性能尚未实现或须在试点环境执行）；只能在 Docker、ClickHouse、Keycloak、真实负载均衡或真实模型供应商环境（含仅 CI 配置了这些服务的用例）运行的层不计入覆盖。真实二进制脚本（`scripts/test_*.sh`）需要 bash ≥ 4.1：macOS 自带的 3.2 会让 `set -e` 忽略失败的 `[[ ]]`，这些脚本在旧 bash 下拒绝运行；“不得出现”类断言必须写成 `refute grep …`，因为 `! cmd` 在任何 bash 里都不会触发 `set -e`。`scripts/test_gateway_identity.sh` 曾因这两点在本机一直通过、在 Linux CI 上却必然失败，已在 bash 5.2 下严格重跑并修正，它的断言现在可以作为用例 `automated` 的依据。
 
 管理身份的本地回归覆盖 callback query 闭合解析、HTTPS/loopback URL 边界、短时 HMAC 断言防伪造和篡改、重复 Cookie、严格 Origin/CSRF 头、认证响应 no-store，以及重复 `Authorization` 不能被 handler 重新解释。step-up 单测覆盖 `auth_time` 新鲜度与时钟偏差、API client 的 CSRF/安全授权 URL，以及未 step-up 的原文读取拒绝。Rust 控制 API、Node 与 Playwright 的普通控制台回归不模拟真实 IdP。`xshield-postgres` 的 `oidc_transactions_are_one_use_and_browser_sessions_are_revocable` 需独立 PostgreSQL、迁移 0035–0036 与显式解除 ignored 才验证一次性 state、session digest 绑定、数据库 step-up 窗口和撤销路径；因此本地测试通过不能替代该集成用例、真实企业 IdP/MFA 联调或部署代理/Cookie/TLS 验收。
 
@@ -56,7 +56,7 @@
 
 ## 20.4 并发/故障必测
 
-匿名会话同来源并发创建、跨来源站点容量和限流窗口恢复；登录切换与旧列表响应；双刷新乱序；授权查询与撤销交叉；多个 edge 重复消费 nonce；资格事务提交但 outbox publisher 崩溃；转发后终态日志未写；内容已持久但索引未到；对象丢块/重复 event_id 不同内容；模型请求已计费但响应超时；节点 journal 与 KMS 同时不可用。
+匿名会话同来源并发创建、跨来源站点容量和限流窗口恢复；登录切换与旧列表响应；双刷新乱序；授权查询与撤销交叉；多个 edge 重复消费 nonce；资格事务提交但 outbox publisher 崩溃；转发后终态日志未写；内容已持久但索引未到；对象丢块/重复 event_id 不同内容；模型请求已计费但响应超时；节点 journal 不可用（密钥不经 KMS 管理，见 ADR-015）。
 
 每个故障注入注明实际故障范围，进程 kill 测试不等于整盘损坏测试，单节点测试不等于跨区域一致性测试。
 
@@ -91,7 +91,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 发布回归从加密 journal 与签名清单开始，验证真实 `FixedString` 编码、两张物理表的精确摘要和微秒时间读回、同步确认后的水位提交与 checkpoint 重用；继续追加同 event_id 的不同内容时，发布器必须返回完整性冲突，保留原水位并显示待投递段。
 
-真实 ClickHouse 回归（2026-10-06 起）：带 `#[ignore]` 的 ClickHouse 集成测试（`real_schema_publisher`、`clickhouse_search`、`management_audit`、`scripts/test_postgres.sh` 在设置 `XSHIELD_TEST_CLICKHOUSE_URL` 时运行的四个 outbox 投递测试）在 CI 以 `clickhouse/clickhouse-server:25.8.29.51` 服务容器运行，本机可用同版本原生二进制复现（见 CHANGELOG）。它们第一次在真实服务上运行就发现：检索把 `FixedString(32)` 的 `trace_id` 读入 `String` 被客户端拒绝（每次真实检索失败）、证据保全历史过滤的生命周期分支缺少阶段约束，以及多处夹具与契约漂移。仅有模拟服务的单元测试不能替代这组测试：它们只能断言 SQL 文本。
+真实 ClickHouse 回归（2026-10-06 起）：带 `#[ignore]` 的 ClickHouse 集成测试（`real_schema_publisher`、`clickhouse_search`、`management_audit`、`scripts/test_postgres.sh` 在设置 `XSHIELD_TEST_CLICKHOUSE_URL` 时运行的四个 outbox 投递测试）在 CI 以 `clickhouse/clickhouse-server:25.8.29.51` 服务容器运行，本机可用同版本原生二进制复现（见 CHANGELOG）。它们第一次在真实服务上运行就发现：检索把 `FixedString(32)` 的 `trace_id` 读入 `String` 被客户端拒绝（每次真实检索失败）、证据保全历史过滤的生命周期分支缺少阶段约束，以及多处夹具与契约漂移。仅有模拟服务的单元测试不能替代这组测试：它们只能断言 SQL 文本。`clickhouse_search` 另含观察退出报告回归：独立站点上六个请求（同一观察标签转发的三个、另一标签的一个、未匹配路由的拒绝一个、放行一个）在两个 active 视图上都得到总数 6、观察 3、未匹配 1，以及按次数排序的两组路由与原因；路由取自请求较早的 `request.accepted`，终态行本身不带路由。
 
 模型阶段回归由实际加密 journal 经封存和发布入库，验证 `mdl_` 调用引用、已知/缺失模型版本以及有界模型版本过滤。阶段汇总回归在同一阶段先写数值置信度，再写 `not_applicable`、`not_provided` 或 `unavailable` 的 null，确认两套 active 视图都返回最新 null 与匹配状态。常规测试另覆盖置信度矛盾、非法模型引用和版本、时间线分页预读行校验；这些合成事件验证审计链路，不代表实际模型推理或准确率测量。
 
@@ -234,7 +234,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 
 `cargo test -p xshield-gateway --lib proxy_protocol` 以表驱动覆盖 PROXY v1 的 TCP4/TCP6/UNKNOWN、最长合法行（TCP6 104 字节、UNKNOWN 107 字节）与多一个字节即超长、各种畸形形态（缺 CR、多余空格、字段多或少、地址族与地址不符、八进制样式地址、端口越界/前导零/符号、小写关键字、控制字符和非 ASCII），以及 v2 的 IPv4/IPv6、LOCAL（忽略地址族和地址块）、UNSPEC、TLV 跳过（authority TLV 不改变结果）、536 字节上限（仅凭长度字段即拒绝）、错误版本/命令/地址族、过短地址块和 UDP/UNIX 传输；每个合法头的每个严格前缀都是“未完成”，普通 HTTP/TLS/h2c 前言都不是头。确定性 xorshift 模糊用例对 6 万个随机与变异输入断言不 panic、声明长度不超过输入和版本上限、只在上限之内报告“未完成”。异步读取用例覆盖分片到达、头后字节原样交还、提前结束与无限长输入的有界拒绝；受信列表用例覆盖 CIDR 匹配（含 IPv4 映射对端）和全部启动拒绝形态。`cargo test -p xshield-gateway --lib edge_transport` 在真实回环套接字和测试中生成的证书上运行：两个 TLS 变量缺一、空值、私钥权限 0644/0640/0604/0620/0602/0660 均拒绝而 0600/0400 接受，错配私钥、过期与未生效证书、非证书内容、垃圾私钥（错误消息不含其内容）、缺失文件和目录路径均拒绝；TLS 1.3 与 1.2 完成握手并选中 `h2`（只报 `http/1.1` 的客户端得到 HTTP/1.1），套接字摘要记录真实对端与监听地址；手工构造的 TLS 1.1 ClientHello 得到 protocol_version 告警、明文请求与沉默客户端都计为握手失败；受信对端的 v1、v2、IPv4 映射 v6 头设定客户端地址且同一次写入里的后续字节原样到达 HTTP，连接内第二个 PROXY 头只是字节，LOCAL/UNKNOWN/UNSPEC 保留对端地址，缺失、截断、畸形、UDP 地址族、沉默和中途断开都被关闭并计数，非受信对端的头不被解析；PROXY 头先于 TLS 握手；连接建立名额按监听端口和进程两级限制、释放后可再用，明文且未启用 PROXY 的连接不占名额；握手后沉默的 TLS 连接在首读期限到达时被关闭。`cargo test -p xshield-gateway --lib multi_site` 的 `host_and_authority_must_name_one_host` 与 `upstream_targets_are_origin_form` 覆盖 HTTP/2 无 Host 按 `:authority` 路由、HTTP/1 绝对形式目标按其 authority 路由、两者同名（大小写/端口/末尾点不同）接受而异名、userinfo、重复或不可读 Host 拒绝，以及转发给源站的目标总是 origin-form。`cargo test -p xshield-gateway --bin xshield-gateway apply_api` 固定健康响应的五个传输字段；`cargo test -p xshield-control --lib health_details` 固定 control 把这些字段原样交给控制台。
 
-`scripts/test_gateway_transport.sh` 对真实 gateway 二进制、Python 源站和临时 CA 证书执行端到端回归：明文基线（正确 Host 200、未知 Host 503 `SITE_CONFIG_UNAVAILABLE`、健康 `tls_enabled=false`）；原生 TLS 下 TLS 1.3 与 1.2 握手并协商 `h2`、TLS 1.1 收到 protocol_version 告警、TLS 端口上的明文请求得不到 HTTP 响应、`curl --http2` 以 HTTP/2 取得源站响应而 `--http1.1` 以 HTTP/1.1 取得、未知 Host 无论 SNI 都与明文一样被拒、绝对形式目标以 origin-form 和源站自身 Host 到达源站而 Host 与之不符时 400、健康恰好计入两次握手失败；受信对端发送 PROXY v1/v2 时，在每来源 1 次/秒、突发 1 的限额下每个声明的源地址各有独立预算（第二次请求 429 `SITE_RATE_LIMIT_EXCEEDED`），LOCAL 计在均衡器自身地址上，TLS 流内的 PROXY 行得到 400，缺头的受信对端在握手前被关闭且 `proxy_header_rejections=1`；非受信对端的 v1/v2 头只得到 HTTP 400，且按自身地址限流；最后私钥 0644、只设一个或设空的 TLS 变量、错配私钥、非证书文件、缺失文件和 `0.0.0.0/0` 受信列表都使进程以非零状态退出，日志不含 PEM 内容。该脚本接入 CI。未覆盖：真实负载均衡器（HAProxy、云 NLB）的互通、IPv6 监听、证书链含中间证书的客户端校验、握手名额耗尽时的真实洪峰（仅单元级证明）以及长时间运行下的内存。
+`scripts/test_gateway_transport.sh` 对真实 gateway 二进制、Python 源站和临时 CA 证书执行端到端回归：明文基线（正确 Host 200、未知 Host 503 `SITE_CONFIG_UNAVAILABLE`、健康 `tls_enabled=false`）；原生 TLS 下 TLS 1.3 与 1.2 握手并协商 `h2`、TLS 1.1 收到 protocol_version 告警、TLS 端口上的明文请求得不到 HTTP 响应、`curl --http2` 以 HTTP/2 取得源站响应而 `--http1.1` 以 HTTP/1.1 取得、未知 Host 无论 SNI 都与明文一样被拒、绝对形式目标以 origin-form 和源站自身 Host 到达源站而 Host 与之不符时 400、健康恰好计入两次握手失败；受信对端发送 PROXY v1/v2 时，在每来源 1 次/秒、突发 1 的限额下每个声明的源地址各有独立预算（第二次请求 429 `SITE_RATE_LIMIT_EXCEEDED`），LOCAL 计在均衡器自身地址上，TLS 流内的 PROXY 行得到 400，缺头的受信对端在握手前被关闭且 `proxy_header_rejections=1`；非受信对端的 v1/v2 头只得到 HTTP 400，且按自身地址限流；observe 灰度阶段（临时 PostgreSQL 库）里无会话的 `AUTHENTICATED_ROOT` GET 到达源站，`/metrics` 记 `outcome="observed"` 与 `xshield_edge_observed_refusals_total{reason_code="AUTH_REQUIRED"}`，同一配置去掉 `rollout` 后同一请求得到 401 `AUTH_REQUIRED`，客户端自带的模式头或 Cookie 不改变结果；最后私钥 0644、只设一个或设空的 TLS 变量、错配私钥、非证书文件、缺失文件和 `0.0.0.0/0` 受信列表都使进程以非零状态退出，日志不含 PEM 内容。该脚本接入 CI。未覆盖：真实负载均衡器（HAProxy、云 NLB）的互通、IPv6 监听、证书链含中间证书的客户端校验、握手名额耗尽时的真实洪峰（仅单元级证明）以及长时间运行下的内存。
 
 ## 管理后台与开发数据卷验收（2026-09-27）
 
@@ -245,7 +245,7 @@ cargo test -p xshield-worker --test clickhouse_search -- --ignored
 - python3 scripts/test_dev_postgres_migrations.py：在脚本拥有的临时库上覆盖基础 schema 缺失、新库 ledger 登记、旧库增量补齐、半成品拒绝、重复/并发启动、checksum、已登记约束损坏及非空站点/版本保留，并执行真实站点存储与 HTTP 契约测试；退出时删除临时库。
 - scripts/test_postgres.sh：已有 PostgreSQL、gateway、worker、control 的真实持久化与 HTTP 契约集成套件，使用独立测试数据库。
 - bash scripts/test_gateway_dynamic_listeners.sh：实际 edge 动态监听器、签名快照确认和重启恢复。
-- bash scripts/test_gateway_transport.sh：实际 edge 的原生 TLS/ALPN、HTTP/2 桥接、PROXY protocol 受信与非受信对端、传输配置启动拒绝（见 20.17）。
+- bash scripts/test_gateway_transport.sh：实际 edge 的原生 TLS/ALPN、HTTP/2 桥接、PROXY protocol 受信与非受信对端、observe 灰度转发与强制对照、传输配置启动拒绝（见 20.17；需要 PostgreSQL 客户端工具）。
 - node scripts/test_console_oidc.mjs：运行中的 55173 控制台，真实本地 OIDC 登录、session、站点列表/详情、分类表单、资格账本和只读权限中心；检查控制 API 200、运行时错误与桌面/窄屏布局。只读 smoke 不更改业务站点或保存身份凭证。
 
 后端站点 HTTP 测试验证空库列表 200、缺失站点状态、创建与幂等重放、确定性校验、自审拒绝、独立审批和未确认 edge 的 pending 语义；拒绝与存储失败均验证稳定原因码和终态审计。迁移测试保护既有数据，生产升级继续使用部署侧审批与备份流程。本地 OIDC 开发 ACR 与合成浏览器角色不是企业 MFA 或生产发布认证。

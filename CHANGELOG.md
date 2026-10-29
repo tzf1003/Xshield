@@ -2,6 +2,170 @@
 
 ## Unreleased
 
+- 本地证据迁移到 S3（docs/12 12.11、docs/19 19.4）：S3 证据存储（P2 #10）落地后，切换 `XSHIELD_EVIDENCE_BACKEND=s3` 不迁移已有对象，旧对象只能等各自到期由仍指向本地目录的 `xshield-evidence-retain` 清理；此前没有工具能在切换前主动把它们搬过去。
+  - 新增 `xshield-worker` 的 `xshield-evidence-migrate [BATCH_LIMIT]` 命令：按 artifact ID 游标分页扫描本地根目录，把完整、已认证、尚未过期的通用证据对象原样复制进配置的 S3 桶（密文与两个侧车逐字节不变，按配置的 Object Lock 模式锁定到同一个 `expires_at`）；不连数据库，不删除或改写任何本地文件。
+  - `xshield-evidence` 新增 `LocalEvidenceVault::list_generic_artifact_ids_after`（不需要预先知道 tenant/site 即可分页枚举完整对象，跳过校准报告与 lineage-review 专用对象族）与 `S3EvidenceVault::migrate_from_local`；目的地写入全部 `If-None-Match: *`，已迁移的 artifact 重新运行是确认性空操作（`EvidenceMigrationOutcome::AlreadyMigrated`），写完立即原样读回核对，源/目的地密钥不一致直接拒绝。已过期的本地对象一律跳过，留给本地清理处理。
+  - 回归：`xshield-evidence` 新增分页/过滤单测；2 个真实 MinIO 集成测试并入既有 `object-storage` CI 作业（迁移并锁定、重复调用幂等；密钥不匹配拒绝、篡改的本地 HMAC 不留下部分复制、已过期对象拒绝迁移）。
+  - **未覆盖**：不迁移校准报告与 lineage-review 对象（12.10“不在 S3 上的对象”）；不支持跨桶 KMS 包裹密钥或分块上传；没有进度持久化，大型本地库的单次运行时长随对象数线性增长。
+
+- 新建站点向导补上观察模式入口（docs/32 32.6 第 4 步，docs/30 的五步向导设计）：此前“入口与模式”步骤没有上线模式选项，新站点只能先按强制创建，再到已保存站点的“策略”页另外切换到观察，多一轮保存。
+  - 向导“入口与模式”步骤接入既有的“上线模式”卡片（`RolloutCard`），与站点详情页“策略”标签共用同一张卡片、同一套校验（`sites/model/rollout.ts` 的 `rolloutProblems`）：可以在创建时直接选择观察并填写截止时间、观察标签与提前单独强制的路由，观察标签留空、截止时间超出 30 天或引用不存在的路由时该步骤即被拦住，与已有站点编辑的报错一致。校验结果与复核页新增“上线模式”行，默认仍是强制,不改变任何默认值或服务端校验。
+  - 回归：`tests/site-wizard.spec.ts` 新增一条端到端用例，覆盖向导内切到观察、标签必填校验、切回强制后观察字段消失、复核页展示观察截止时间；既有的 390px 布局与明暗主题无障碍用例覆盖了新卡片插入后的页面。
+  - **未覆盖**：`docs/32` 的其余条目（审计契约、核心模型与风险令牌、edge 判定转发、退出报告、审批记录摘要、apply_direct 豁免拒绝）此前已实现，本次未改动；本条目只补齐向导入口。
+
+- Helm chart 高可用：edge+control 多副本 + 控制面收敛回放（docs/24 ADR-014、docs/19 19.9.1）：此前 Helm chart 把 edge、control 与两组 journal 封存/发布任务固定在单副本 StatefulSet 的同一个 Pod 里，该 Pod 是单点故障。调研确认 journal 封存/发布（幂等重放）与 outbox 发布（PostgreSQL 行级租约）本来就支持多副本并发，不需要新增 leader election 或外部协调服务；真正缺的是 edge+control 的配置收敛机制。
+  - `values.yaml` 新增 `replicaCount`（默认仍是 **1**，StatefulSet 从固定 1 变为可配置，但默认值不变）与 `outbox.replicaCount`（同样默认 1，放开 outbox Deployment 的副本数）：每个副本仍是一套独立的 edge+control+journal 任务+PVC，loopback 耦合和安全边界不变。新增 `deploy/helm/xshield/values-ha.yaml`：一个可选叠加层（`-f values.yaml -f values-ha.yaml`），把两者都设为 2 并随之打开下面的 PodDisruptionBudget 与默认反亲和；**`helm upgrade` 不叠加这个文件时，副本数与资源占用与升级前完全一致**，不会悄悄扩容既有安装。
+  - `xshield-control` 新增常驻收敛回放任务：按 `XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS`（Helm 的 `jobs.reconcileIntervalSeconds`，默认 30 秒）周期性重新计算当前已批准的完整站点配置并重放给本地 edge，复用既有的 `apply_site_snapshot`/幂等 apply 协议；配置未变时是一次快速空操作。环境变量未设置时行为与此前完全一致（apply 只在写请求时触发一次）。`xshield_control::routers()` 相应改为同时返回共享的 `Arc<ControlPlane>`，供 `main.rs` 把这个任务和路由绑在同一个控制面状态上。
+  - 新增 `poddisruptionbudget-core.yaml`/`poddisruptionbudget-outbox.yaml`：对应副本数 > 1 时渲染 `maxUnavailable: 1` 的 PodDisruptionBudget，副本数为 1 时不渲染。`xshield.podSecurity` 这个共享模板现在按 `(root, component, replicas)` 取参：未显式设置 `.Values.affinity` 且副本数 > 1 时，给出一个按 `kubernetes.io/hostname` 分散的默认软反亲和（`preferredDuringSchedulingIgnoredDuringExecution`），单节点集群（kind）仍能调度全部副本；显式设置 `.Values.affinity` 时完全按原样传递，行为不变。
+  - 回归：CI 的 `helm` 作业（lint/kubeconform 渲染校验与 `scripts/test_helm_deployment.sh` 的 kind 冒烟）都叠加 `values-ha.yaml`，用两个副本验证：各自独立达到就绪、两个 control 进程通过共享 PostgreSQL 看到同一个站点、删除一个副本期间 Service 仍能通过另一个副本应答、恢复的副本在原持久卷上重新就绪、两个副本各自的 journal 封存/发布心跳与两个 outbox 副本的十个家族心跳均新鲜、全程没有容器因收敛任务的常态空操作而重启。
+  - **未覆盖**：按副本粒度的收敛可观测性（现有 desired/active 状态位仍是"至少一个 edge 已收敛"的全局状态，见 docs/23）；跨 Region/跨故障域（docs/19 19.6 维持原状）；Compose 与 systemd 两种参考部署仍是单机，本次 HA 范围只覆盖 Kubernetes/Helm；KMS 通用密钥管理集成不在本次范围内。
+
+- S3 证据存储：存储桶侧 SSE-KMS 与大对象 multipart 上传（docs/12 12.10、docs/19 19.4）：此前 S3 后端（#44）只测过 MinIO 的基础对象操作，未覆盖服务端加密配置，且单对象硬上限与本地后端共用的 64 MiB。
+  - 新增可选 `XSHIELD_EVIDENCE_S3_SSE_KMS`（`off`/`aws-kms`）与 `XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID`：开启后每次写入都带 `x-amz-server-side-encryption: aws:kms`，可选显式 KMS key id，留空用存储桶默认 key。这是存储桶自己的加密，叠加在证据库自身的 AEAD 信封之上，不是把应用层数据密钥交给 KMS 包裹。
+  - 密文超过 8 MiB 时改走 S3 multipart upload（`CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload`），分 8 MiB 一片；完成请求同样带 `If-None-Match: *`，create-only 语义不因分片而改变，任一步失败都先 `AbortMultipartUpload` 再把错误上抛。S3 后端的单 artifact 上限随之从 64 MiB 提到 1 GiB（本地后端不变，仍是 64 MiB），因为桶对象不必像本地一次写入那样整体放进一次 HTTP 请求。
+  - 不改变已有行为：两个新变量都是可选的，不设置时 SSE 与 multipart 阈值均不生效（小对象仍走此前的单次 `PUT`）；Object Lock、create-only、孤儿扫描与清理语义不变。
+  - 回归：配置校验新增 KMS key id 合法性与上限前置检查的单测；真实 MinIO 集成测试新增大对象 multipart 往返（含拒绝覆盖）与 SSE-KMS 往返（单次 `PUT`、multipart 各一个用例，HEAD 核对存储桶确实报告 `aws:kms`），CI `object-storage` 作业的 MinIO 启动时新增一个仅本次运行使用的临时单密钥 KMS。
+  - **未覆盖**：用 KMS 包裹应用层数据密钥本身（仍是本地 HMAC 派生）；12.4 描述的按 chunk 独立 AEAD 与逐 chunk manifest（multipart 只是同一整体信封的传输优化）；大于 1 GiB 的对象；AWS S3 本身和其他兼容服务。
+
+- Edge 附加证书的增删免重启（docs/19 19.2“Edge 传输配置”）：此前 `XSHIELD_EDGE_TLS_SNI_CERTS` 在启动时固定，新增或删除一项仍需重启；内容变化的热加载已有（见下方“Edge TLS 证书热加载与按 SNI 多证书”条目），缺口只在增删本身。
+  - 新增 `XSHIELD_EDGE_TLS_SNI_CERTS_DIR`：一个目录，每个直接子目录是一对附加证书，恰好含 `tls.crt` 与 `tls.key`（Kubernetes `kubernetes.io/tls` secret 挂载的文件名）；子目录名字不参与证书选择，只是标识。与证书内容轮换走同一个每 30 秒的检查：创建或删除一个子目录即可增删一张证书，下次检查生效，不必重启；子目录内文件的校验规则（可读、普通文件、不超过 1 MiB、私钥权限、证书当前有效、私钥匹配、叶证书至少一个 DNS 名）与固定列表相同，与固定列表、与主证书的主机名重复同样拒绝。目录不存在、不可列出或不是目录拒绝启动；运行中目录变得不可列出则整组证书保持不变，计入 `tls_reload_failures`，下次目录可列出时重试。
+  - `XSHIELD_EDGE_TLS_SNI_CERTS` 本身仍需同时设置主证书才能使用，增删其中一项仍需重启；两种来源可以同时使用，证书计数、健康字段与指标不区分来源。
+  - 回归：edge_transport 新增 3 个测试（目录新增/删除子目录即时生效且不影响既有证书、子目录文件半写入时整组证书不变并在写完后重试、与固定列表重名/无 DNS 名/目录不可读均拒绝启动）。
+  - **未覆盖**：不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程对该目录的增删场景。
+
+- 确定 SQLi/XSS 等通用签名检测由部署在 Xshield 之前的现有 WAF/CDN 承担（docs/24 ADR-013、docs/02 2.3、docs/19 19.2）：首版不自研签名引擎，也不实现 BaselineInspectionPort 适配器。部署说明写明链路、PROXY protocol 传递客户端地址、两段网络放行、TLS 重新加密、审计边界与受保护路径不缓存的要求。仅文档变更。
+
+- S3 兼容证据存储与 Object Lock（可行性建议 P2 #10，docs/12 12.10、docs/19 19.4）：此前证据只能写本地私有目录，且只允许一个网关写入。
+  - 新增 `S3EvidenceVault`：对象格式与本地相同，写入一律 `If-None-Match: *`，多实例可共用一个桶；可选 `compliance`/`governance` 锁定到对象到期时间，打开时探测存储桶，要求锁定而桶未开启时拒绝启动。清理按读到并核对过的版本永久删除，不留删除标记后的旧版本；孤儿扫描跳过锁未到期的对象。
+  - 网关写入、控制面读取与清理（网关内置和 `xshield-evidence-retain`）通过 `XSHIELD_EVIDENCE_BACKEND=s3` 与 `XSHIELD_EVIDENCE_S3_*` 切换；不设置时行为不变。新增 `EvidenceVault` 统一两种后端；清理轮次的校准两类对象只在本地后端执行。
+  - 新依赖 `ureq` 3.5（MIT OR Apache-2.0，`default-features = false`，只开 `rustls`），用于同步的 S3 请求；新增传递依赖 `ureq-proto`、`utf8-zero`（均 MIT OR Apache-2.0），其余（rustls、webpki-roots、http、base64）已在依赖树中。SigV4 自行实现，未引入 AWS SDK。更新随 `cargo deny` 与依赖审查。
+  - 回归：SigV4 用 AWS 文档的三个签名样例单测；配置与环境变量解析单测；4 个真实 MinIO 集成测试，CI 新增 `object-storage` 作业（MinIO 镜像固定 digest）。
+  - **未覆盖**：AWS S3 本身和其他兼容服务；KMS 包裹密钥；分块与大对象；Helm 与 Compose 参考部署未加 S3 配置。本地到 S3 的存量迁移现由 `xshield-evidence-migrate` 提供，见下一项。
+
+- 控制台“拒绝与覆盖统计”页（docs/29 29.39）：上一项拒绝与覆盖统计只有接口，控制台没有入口。
+  - 新增 `/investigation/coverage`（导航“流量与调查 › 拒绝与覆盖”，Observer 可见），按 UTC 时间窗（1 小时、24 小时、7 天或自定义，最多 31 天）按需生成统计：总计数与拒绝占比、按路由的流量与拒绝率、按路由与原因的拒绝、未覆盖端点的方法与路径形状，以及索引观察时间、报告摘要与截断说明。索引有缺口或待发布段时提示“不足以判断”，窗口内无流量时不给结论。
+  - 页面打开、聚焦或定时都不会读取；每次点击“生成统计”才读一次，服务端照常审计。客户端严格解码：字段集合、计数嵌套、列表排序与去重、`last_seen` 在窗口内、列表与总数相加一致（截断时严格小于），路径形状只接受 edge 能产生的形状，否则按无效响应处理，不渲染。
+  - 回归：`tests/coverage-report.test.ts`（解码、结论、查询串、路径形状、占比）；`tests/coverage.spec.ts`（Playwright：只在点击后读取、三张表与结论、索引未追上、失败不留旧结果、计数不一致拒绝渲染）；导航与路由表测试加入新页面。
+
+- 修复：同时启用 `resource_grant` 与响应加密的路由，加密失败时会留下已写入的资源资格（试点路径验收补测时发现）。
+  - 原先 edge 在响应体过滤里先提交资格、再加密响应；加密失败时客户端拿到 502，但响应证据、动作资格、资源资格和 `response_grant.issued` 事件已经落库。
+  - 现在资格分两步：先推导整批资格并把动作引用注入响应体，不写库；加密等所有放行步骤成功后，最后一步才整批写入。写入失败同样扣下响应体。动作引用由请求确定性推导，写入结果必须与已注入的引用逐一相同，否则拒绝放行。
+  - 回归：`scripts/test_gateway_identity.sh` 新增一条同时启用资格与加密、加密密钥尚未生效的路由，断言返回 502 `RESPONSE_CRYPTO_KEY_UNAVAILABLE`、不含源站数据、且没有响应证据与资格事件；旧代码下该断言失败（各留 1 行）。
+
+- Edge TLS 证书热加载与按 SNI 多证书（可行性评估 P2“多实例”，docs/19 19.2“Edge 传输配置”）：此前全进程只有一张证书，轮换要重启 edge。
+  - 新增 `XSHIELD_EDGE_TLS_SNI_CERTS`（逗号分隔的 `证书:私钥` 对）：SNI 匹配某张附加证书的 DNS 名时出示它，精确名优先于单级通配符；未匹配或无 SNI 时出示主证书。SNI 仍不参与路由。重复主机名、没有 DNS 名的证书、格式错误的列表均拒绝启动。
+  - 证书与私钥文件每 30 秒按元数据检查一次，变化后整组重新校验；通过则新握手使用新证书，失败则保留当前证书并在下次变化时重试。
+  - 健康接口新增 `tls_certificates`、`tls_reloads`、`tls_reload_failures`；`/metrics` 新增 `xshield_edge_tls_certificates`、`xshield_edge_tls_reloads_total`、`xshield_edge_tls_reload_failures_total`。证书错误信息改为带出具体变量名（附加证书的错误指向新变量）。
+  - 回归：edge_transport 新增 4 个测试（SNI 选择含通配符与大小写、配置拒绝、轮换与半写入/缺失/过期回退、后台检查与停止），ops/apply 健康与指标测试同步更新。
+  - **未覆盖**：增删附加证书仍需重启（`XSHIELD_EDGE_TLS_SNI_CERTS_DIR` 已解决，见上方条目；本列表 `XSHIELD_EDGE_TLS_SNI_CERTS` 依旧）；不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程的轮换场景。
+
+## 0.1.1 — 2026-10-29
+
+首个经 `release.yml` 发布的版本：镜像推到 GHCR 并签名（docs/19 19.7）。0.1.0 没有发布镜像：`GITHUB_TOKEN` 不能给工作流文件与 main 不同的提交打标签，而 0.1.0 的切版本提交 aebaa67 之后 CI 与发版工作流都改过。
+
+- Linux 性能基线（可行性建议 P1“性能基线”，docs/21 §21.8）：此前唯一的基线来自一台 macOS 笔记本，文档要求在 Linux 生产形态的存储上重测。
+  - 两台 Linux 机器上的 release 结果：16 vCPU Hyper-V 虚拟机（虚拟盘同步 P50 约 1.3 ms）上，edge 公开路由 1 并发比直连多 2.9 / 4.3–4.8 ms（P50/P95），16 并发约 2 450 请求/秒、P95 多约 3.8 ms，均在“新增 P95 ≤ 15 ms”之内；journal 放在 tmpfs 时只多约 0.24 ms，即 edge 自身开销。AWS EBS（2 vCPU，同步 P50 约 3.1 ms）上 1 并发多 7.1 / 9.8 ms，4–16 并发 P95 多 14.2–14.3 ms，刚好压在预算线上，说明这类网络盘不适合放 journal。
+  - 修复 `scripts/bench_gateway.py` 在 Linux 上的缺陷：桩源站应答头与正文分两次写出，Nagle 把正文压到延迟 ACK 之后，直连每请求固定约 41 ms，增量失真；现在关闭 Nagle。脚本还会打印 CPU 型号与 journal 所在卷。
+  - 新增 `scripts/bench_fsync.py`：在给定目录上测“追加一个审计批次 + `fdatasync`”的延迟分布，用来在部署前判断 journal 卷能否满足预算（P95 同步延迟 × 2 约等于单请求增量下限）。
+  - **未覆盖**：两台机器都不是本地 NVMe（EBS 在客户机里显示为 NVMe，但是网络块存储），也不是专用压测机；客户端与桩源站是 Python，约 7 500 请求/秒封顶；身份、加密、TLS、大正文与 ClickHouse 发布仍未度量。
+
+- 多个 edge 副本下的按来源限流（docs/19“多个 edge 副本”、docs/21）：令牌桶在每个进程内计量，负载均衡把同一来源分到 N 个副本时，整组实际放行约为策略值的 N 倍。
+  - 新增 `XSHIELD_EDGE_RATE_LIMIT_SHARE`（1–64，默认 1）：设为 N 时每个副本只放行 1/N 的速率与突发，突发至少保留 1 个请求；非法值拒绝启动。按源地址亲和或单副本部署保持默认即可，行为不变。
+  - 没有引入跨副本共享计数（如 Redis）：那需要在每个请求、包括洪峰中先访问共享存储，并引入新的故障模式。
+  - **未覆盖**：分流不均时偏重的副本会更早限流；副本数变化需要手动同步该值。
+
+- 请求解密与响应加密支持多站点、多 key-id（docs/19、docs/31）：此前每个方向只有一把绑定启动配置站点的密钥，经 apply 下发的站点一旦启用 `DIRECT_DECRYPT`/`DIRECT_ENCRYPT` 就只能失败关闭，轮换也要起第二个 edge。
+  - edge 新增密钥环变量 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`（也可 `_FILE`）：JSON 数组，每项 `tenant_id`、`site_id`、`key_id`、`key_hex`，每个方向最多 256 项。查找按租户、站点、key-id 与用途精确匹配，未列出的组合仍是 `REQUEST_CRYPTO_KEY_UNAVAILABLE`/`RESPONSE_CRYPTO_KEY_UNAVAILABLE`。
+  - 原来的 `*_KEY_HEX` 单值变量含义不变，继续服务启动站点的 key-id，已有部署无需改动。格式错误、重复作用域、单值与密钥环重复给出启动站点 key-id、启动站点缺密钥、任一密钥跨方向复用，都拒绝启动；错误信息不含密钥。
+  - 轮换流程改为：把新 key-id 加入密钥环并重启 edge，发布引用新 key-id 的修订，客户端不再使用旧 key-id 后再删除。`scripts/test_gateway_request_crypto.sh` 改为从密钥环读取响应密钥（同时含一个轮换 key-id）。
+  - **未覆盖**：密钥环只在启动时读取，不支持热加载；`test_gateway_request_crypto.sh` 在本机因环境原因（未改动的 main 上同样失败）没有跑通，由 CI 验证。
+
+- 在 GitHub 上发版，不必在本地推标签（docs/19 19.7）：此前发布镜像只能靠推送 `v*` 标签触发，而会话与 CI 都不能推标签。
+  - 新增 `.github/workflows/release.yml`（workflow_dispatch，输入版本号，可选指定提交）。它先检查版本号与提交是否对应：提交在 main 上，Cargo 与 Helm chart 版本一致，CHANGELOG 有该版本标题，main 上 CI 已通过。检查通过后创建 `v<版本>` 标签，以 workflow_call 调用 `release-images.yml` 构建、推送、证明并签名镜像，最后创建带 CHANGELOG 段落和镜像 digest 的 GitHub Release。
+  - `release-images.yml` 可以被调用，并给镜像加上版本与源码提交标签。验证签名身份的正则同时接受标签（推送触发）和 main（经 `release.yml` 触发），文档里的 `cosign verify` 命令已相应更新。
+  - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
+  - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
+  - `release.yml` 只能给工作流文件与 main 一致的提交打标签：GitHub 拒绝用 `GITHUB_TOKEN` 推送这类引用（缺少 `workflows` 权限）。打标签前先比较，不一致时直接报错说明原因。
+  - 已实际运行：`release.yml` 发布了 v0.1.1（Actions run 40809536790），三个镜像推到 GHCR 并签名，Release 附 digest；在仓库外用 `cosign verify`（docs/19 19.7 的身份正则）逐一验证通过。
+
+- 试点路径验收用例补测（可行性建议 P1 #8，docs/20）：`examples/acceptance-cases.json` 由 automated 9 / partial 51 / planned 18 改为 automated 11 / partial 60 / planned 7。
+  - automated：DEV-01（`crates/xshield-core/tests/dependency_boundary.rs` 解析 `Cargo.lock`，领域 crate 的传递依赖触及数据库、HTTP、异步运行时、TLS 或其他 xshield crate 即失败，另有合成违规锁文件的反例与源码禁开套接字检查）；SHARE-04（`scripts/test_gateway_identity.sh` 经真实 edge 用同一分享令牌三次 Range 读取，均 206、分享行不变）。
+  - partial（缺口逐条写在 `gap`）：AUTH-09、FLOW-10、GRANT-08、SHARE-03、SENSOR-01/02、CRYPTO-04/07、DEV-02。DEV-02 新增 worker 侧 `ReasonCode` 穷举契约测试与 `scripts/test_check_audit_event_coverage.py`（已接入 CI）；`check_audit_event_coverage.py` 的源路径可由测试传入，默认行为不变。
+  - 仍为 planned：MODEL-01/06、AGENT-01/02、AUDIT-13、DEV-03 属首版之后或须在试点环境执行；AUDIT-06 的 `remote_durable` 只是 Schema 枚举值，没有实现。
+  - 补测发现的产品风险（未修改）：`response_body_filter` 先提交资源资格再加密响应，配置允许 `resource_grant` 与响应加密同时启用，响应加密失败时已写入的资格不会撤回（见 CRYPTO-04 的 gap）。
+
+- 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
+  - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
+  - CI 新增 `fuzz-replay` 作业：用稳定版回放所有种子和固定数量的确定性变异，同时对该 crate 运行 fmt 与 clippy。新增 `.github/workflows/fuzz.yml`：每天在稳定版上做覆盖引导的模糊测试（不加 sanitizer），在两次运行之间缓存语料，发现崩溃时上传。
+  - 新依赖只在 `fuzz/` 内使用，不进入产品依赖树与 `cargo deny`：`libfuzzer-sys` 0.4（(MIT OR Apache-2.0) AND NCSA）及其依赖 `arbitrary` 1.x（MIT OR Apache-2.0）；`cargo-fuzz` 0.13.2 在 CI 里从 crates.io 构建。
+  - 本机每个目标先跑 90 秒，再在同一语料上跑 5 分钟（每个目标 900 万到 4.5 亿次执行），没有发现崩溃。
+  - **未覆盖**：压缩与插件解析（产品中不存在）；journal 帧（读取前已由 MAC 认证）；控制台前端与 worker 的 ClickHouse 行解析；只在 edge 二进制内部的解析函数（WAF Cookie 与引导查询），它们不经过库接口。
+
+- 拒绝与覆盖统计（可行性建议 P1“拒绝与覆盖统计”，docs/29 29.39、docs/11）：试点需要知道每条路由放行和拒绝了多少、因为什么拒绝，以及哪些端点还没有路由覆盖，此前只能逐条检索。
+  - 新增 `GET /control/v1/coverage-report?start=…&end=…`（Observer），返回窗口内按路由的流量、按路由与原因的拒绝、未覆盖端点、索引状态与报告摘要；每次读取写 `console.coverage_report.read` 管理审计。
+  - 未覆盖端点只记录路径形状：edge 对未匹配路由的拒绝在 `decision.composed` 写 `unmatched_path`，像 ID 的段写作 `{}`（`xshield_core::path_shape`），原始路径不进索引。worker 发布器与 edge 重启补偿只在这种拒绝上接受该字段。
+  - 部署顺序：先升级 worker 发布器，再升级 edge 与控制面；旧 worker 会拒绝带新字段的事件。
+  - 回归：core 路径形状单测（含 2 万次随机输入）；edge 审计单测 2 个；worker 解析与管理审计单测；控制面 HTTP 测试 4 个；真实 ClickHouse 集成测试 `clickhouse_search.rs` 新增覆盖统计场景。
+  - **未覆盖**：控制台页面尚未接入（原因码文案已加入）；未在多副本 edge 或大数据量下测查询耗时。
+  - 顺带修复：上一项证据清理新增的三个 `/metrics` 失败原因标签未在控制台原因码测试中归类，导致 `web/console` 测试失败（该改动未触发 web 作业）；现归为运维指标标签。
+
+- 网关内置证据清理（可行性建议 P1“证据保留不停机”，docs/12 12.8、RB-10）：此前到期证据只能用 `xshield-evidence-retain` 清理，而它要求先停网关，回收的配额也要重启网关才生效。
+  - 设置 `XSHIELD_EVIDENCE_RETENTION_INTERVAL_SECONDS` 后，网关在独立线程上按间隔执行同一轮清理，批量由 `XSHIELD_EVIDENCE_RETENTION_BATCH_LIMIT` 设定。每轮结束后重新扫描根目录、重算配额，不再需要重启。不设置时行为不变。
+  - 清理一轮的实现从命令中抽出为 `xshield_postgres::retention_pass`，命令与网关共用，命令的输出与退出码不变。`xshield-postgres` 的 `tokio` 从开发依赖改为正式依赖，它本来就经 sqlx 在依赖树里。
+  - `/metrics` 新增证据配额余量与清理轮次、失败原因码、删除数、上次成功时间。
+  - 回归：网关单测 1 个（清理指标与配额余量）；新增真实 PostgreSQL 集成测试 `crates/xshield-gateway/tests/evidence_retention.rs`，网关运行中采集一份 1 秒到期的证据，检查它被删除、配额余量回到与目录实际占用一致、之后仍能正常服务和采集，已接入 `scripts/test_postgres.sh`。
+  - **未覆盖**：多实例共享同一根目录（仍然只允许一个写入者）；Helm 与 Compose 参考部署没有加这个开关，因为它们的 edge 引导配置不启用证据采集。
+
+## 0.1.0 — 2026-10-28
+
+首个可部署的软件版本（与 Cargo 工作区及 Helm chart 的版本一致；下文的 3.0 是设计文档库的版本，不是软件版本）。镜像由 `v0.1.0` 标签触发 `release-images.yml` 发布到 GHCR，附签名、构建来源证明与 SBOM（docs/19 19.7）。
+
+- Kubernetes 部署（可行性建议“最小运维底座”的最后一项，docs/19 19.9）：新增 Helm chart `deploy/helm/xshield/`，部署一个租户、一个站点。
+  - **拓扑**：edge、control 与两组 journal 的封存/发布任务放在单副本 StatefulSet 的同一个 Pod 里，共用一个卸载后保留的持久卷。十个 outbox 发布任务是独立的 Deployment。
+  - **Service**：`<release>-edge` 暴露站点端口；`<release>-ops` 暴露两个运维端点。可选 ServiceMonitor 与 NetworkPolicy。
+  - **edge 配置**：引导配置在 Pod 启动时填入 Pod IP。
+  - **就绪与存活**：Pod 就绪只看 edge，control 与常驻任务只有 liveness 探针（任务按心跳），管理面或 ClickHouse 异常不会把数据面撤出流量。
+  - **秘密与安全上下文**：秘密来自运维创建的 Secret，每个容器只投影自己用到的键。新增 `deploy/helm/xshield-secrets.sh` 生成这些键。所有 Xshield 容器符合 Pod Security `restricted`。
+  - **values 校验**：values 有 JSON Schema，缺必填项时拒绝渲染。
+  - **测试**：新增 `scripts/test_helm_deployment.sh` 与 CI 作业 `helm`。静态检查包括 schema 拒绝、`helm lint --strict` 与 kubeconform；随后在 kind 集群里安装 chart，检查就绪、经 Service 的数据面、Pod 内管理 API、私网源站放行与拒绝、签名通道、审计进入 ClickHouse、14 个任务心跳、容器无重启，以及删除 Pod 后在同一卷上恢复。本机做了 lint、schema 与 kubeconform 校验；本机没有运行 kind 冒烟，只在 CI 上运行。
+  - **未覆盖**：站点实际服务流量、管理代理与控制台、真实 IdP/TLS/MFA、`helm upgrade` 与迁移路径、ServiceMonitor 与 NetworkPolicy 的实际效果。
+
+- 私网源站显式放行（试点决策，docs/19 19.2、docs/29“上游地址校验”）：新增部署变量 `XSHIELD_ALLOWED_UPSTREAM_CIDRS`，列出源站所在的私网网段（RFC 1918 或 `fc00::/7` 内不含主机位的 CIDR，最多 32 个）。
+  - 只解除列出网段内地址的私网/唯一本地拒绝；回环、链路本地、共享地址、云元数据、映射与转换形式照旧拒绝。
+  - 默认不设置，行为不变；列表不合法时控制服务拒绝启动。
+  - 判定在 `xshield_core::site::upstream::UpstreamAllowance`，保存校验与健康探测共用；上游变更仍需独立审批（`UPSTREAM_CHANGED`）。
+  - Compose 参考部署透传该变量。CI 冒烟改为接入一个放行网段内的私网源站，不再用回环开关，并检查网段外的私网地址被拒绝。
+  - 回归：核心单测 2 个（网段解析、只解除本网段的私网拒绝且元数据仍拒绝），控制面单测 1 个（保存与探测计划）；本机用真实二进制镜像跑通 Compose 冒烟。
+  - **未覆盖**：edge 本身不校验上游地址（与此前相同，edge 信任签名快照）。
+
+- 发布镜像签名（可行性建议“最小运维底座”，docs/19 19.7）：新增 `.github/workflows/release-images.yml`，只在推送 `v*` 标签时运行。它把 edge、control、worker 镜像推到 GHCR，附带构建来源证明与 SBOM，并用 Sigstore 无密钥签名（证书绑定该工作流与标签），签名后立即验证一次。**未运行**：尚未打过发布标签，工作流本身没有在 GitHub 上执行过；首次发布时须确认仓库允许 Actions 写 Packages。
+
+- 单机参考部署（可行性建议“最小运维底座”，docs/19 19.8）：新增 `deploy/compose/`，用 Docker Compose 在一台主机上运行一个租户、一个站点的全部组件，包括 edge、control、两组常驻封存/发布任务（edge 请求 journal 与 control 管理 journal）、十个 outbox 发布任务、PostgreSQL 与 ClickHouse。
+  - edge 与 control 共享由 `net` 服务持有的网络命名空间，因为管理 API 与 apply 通道只监听 loopback；重启任一方不会让另一方失联。
+  - `init.sh` 生成全部密钥（含 Ed25519 封存密钥对），以 compose secrets 挂载，进程全部经 `NAME_FILE` 读取。它还生成 edge 引导配置与 24 小时的引导 Bearer。
+  - 镜像基于 digest 固定，容器只读、去除全部 capability、禁止提权。
+  - 新增 `scripts/test_compose_deployment.sh` 与 CI 作业 `compose`：用仓库 `Dockerfile` 构建三个镜像并整体拉起，检查就绪、数据面拒绝、管理 API 只认引导 Bearer、站点保存与签名通道、控制面指标、edge/control 重启恢复、管理审计进入 ClickHouse、14 个常驻任务心跳。本机用本地构建的镜像跑通了全部 8 项。
+  - **未覆盖**：站点经 edge 实际服务流量（首次 apply 需要 OIDC 浏览器会话的独立审批）、管理 HTTPS 代理与控制台（运维自备，要求见 README）、真实企业 IdP/TLS/MFA、高可用。
+  - **试点注意**（已由下文的私网源站显式放行解决）：控制面拒绝私网与回环上游，源站只有私网地址的试点需要可路由的公网地址。
+
+- 后台任务常驻模式（可行性建议“最小运维底座”）：`xshield-audit-seal`、`xshield-worker` 与 `xshield-outbox-worker` 设置 `XSHIELD_RUN_INTERVAL_SECONDS` 后常驻并按间隔重复执行，单轮失败报告后下一轮重试；可选 `XSHIELD_RUN_HEARTBEAT_FILE` 在每轮成功后写入时间戳供探针使用（docs/19 19.3）。不设置时行为不变。outbox 常驻时复用连接池、满批时立即继续。实现集中在 `xshield_core::resident`，没有新依赖。回归：核心单测 2 个；本机用真实 `xshield-audit-seal` 二进制验证了一次性、常驻成功（心跳更新）、常驻失败重试、非法间隔与 `_FILE` 冲突。**未覆盖**：`xshield-worker` 与 `xshield-outbox-worker` 的常驻循环没有真实进程测试（需要 ClickHouse）；没有进程内指标端点，健康只靠心跳文件。
+
+- 秘密从文件读取（可行性建议“最小运维底座”）：所有二进制读取的秘密变量都可以改用 `<变量名>_FILE` 指向挂载的秘密文件（docs/19 19.3）；两者同时设置拒绝启动，文件只去掉末尾一个换行，上限 64 KiB，错误信息只含变量名。实现集中在 `xshield_core::secret_env`，没有新依赖；网关 `PostgresRuntime::from_env` 改为返回 `Result`。`scripts/test_gateway_identity.sh` 改用 `_FILE` 形式传入 journal 密钥与数据库 URL，覆盖真实二进制路径。回归：核心单测 2 个（变量/文件来源、去换行、冲突、不可读、超限、非 UTF-8）。**未覆盖**：各二进制只有网关经过真实进程验证；不检查文件权限。
+
+- 控制面运维端点（可行性建议“最小运维底座”的第一块，edge 已有）：设置 `XSHIELD_CONTROL_OPS_LISTEN` 后，控制面另开不认证的 `/livez`、`/readyz`、`/metrics`（只接受 loopback/私有/链路本地/未指定地址，不披露租户、站点、主体或路径）。就绪由两件事决定：最近 30 秒内有无管理审计追加失败、数据库能否在 2 秒内回答 `SELECT 1`；指标为就绪状态、按状态类别的响应计数、请求时延直方图与审计追加失败计数。新增 `xshield_control::routers`（API 与运维路由共享同一控制面，`router` 行为不变）与 `PostgresIdentityStore::ping`。`scripts/package_release.sh` 的发布包加入 `xshield-build`。回归：指标与就绪的单测 3 个，HTTP 回归 3 个（不可达数据库、真实审计追加失败、真实 PostgreSQL 就绪）。**未覆盖**：没有在编排器里实际配置探针；worker 与 outbox 等后台任务的指标、密钥从文件读取与部署清单仍待后续。
+
+- 发版联动的页面构建登记（docs/29 29.38，可行性建议“构建登记”）：新增可选命令行工具 `xshield-build`（随 `xshield-control` 构建）。`fingerprint` 离线计算页面 SHA-256 与第一个 `</head>` 偏移；`register` 用 Agent API Key（`site.read` + `site.config.write`）读取站点配置，把新构建加在已服务构建旁（最多 16 个，可 `--retire` 旧构建），本地校验后幂等保存，不批准、不应用，修订仍需独立 PolicyApprover 批准；保存后核对期间是否有他人保存，有则退出码 3。纯逻辑在 `xshield_core::site::build`。`xshield-control` 新增直接依赖 `sha2`（工作区已有，用于幂等键）。回归：核心单测 5 个、控制面真实 PostgreSQL HTTP 回归 1 个、离线指纹测试 1 个。**未覆盖**：“期间有他人保存”的分支没有自动化测试（无法在单次调用中插入并发保存）；没有提供 CI 模板文件。
+
+- 审批记录退出报告摘要（docs/32 32.4）：迁移 `0056_m5_site_approval_exit_report.sql` 给 `xshield.site_apply_approvals` 增加可空列 `exit_report_digest`（32 字节，CHECK 长度），**部署前须先应用该迁移**；回滚只需删列，旧控制服务不读写它。`POST /control/v1/sites/{site_id}/approve` 接受可选 `X-Xshield-Exit-Report-Digest`（格式不合法为 400 `CONTROL_SITE_CONFIG_REQUEST_INVALID`），独立批准把它原样写入批准行，直接应用写空。控制台批准对话框在修订结束观察（`ROLLOUT_MODE_TIGHTENED`）时显示本次会话最近生成的退出报告结论与摘要并随批准发送；没有报告时说明记录将为空，不阻止批准。回归：控制面 `an_approval_records_the_exit_report_it_relied_on`（真实 PostgreSQL）与控制台请求头测试。
+
+- 观察退出报告（docs/32 32.4，接口见 docs/29 29.37）：worker 新增 `query_rollout_report`，在 active 视图上按请求聚合终态，统计窗口内完成的请求、某个观察标签转发的 `OBSERVED_WOULD_DENY`（按路由与原因，最多 200 组）以及未匹配路由的拒绝，并校验计数自洽；控制面新增 `GET /control/v1/rollout-report`（`Observer`，占用调查查询名额，附索引水位、`index_complete` 与报告摘要），每次尝试写 `console.rollout_report.read` 审计，worker 发布矩阵同步扩展。控制台“发布”页在 edge 服务观察配置时显示“观察退出报告”，按需生成，索引不完整显示“不足以判断”。**未验证**：本机没有 ClickHouse，聚合 SQL 只在 CI 的真实 ClickHouse 回归（`clickhouse_search`）里运行；大流量站点 30 天窗口可能超出现有扫描预算，此时报告返回预算错误而不是部分结果。
+
+- 控制台观察模式（docs/32 第 4 步的编辑部分）：站点“策略”页新增“上线模式”卡片，可在强制与观察之间切换；观察时编辑截止时间（本地时间，30 天内，默认 7 天）、观察标签与“已验证、单独强制的路由”（只列出 edge 实际会观察的非 PUBLIC、GET、无效果块路由）。客户端按服务端规则预检截止时间、标签与路由引用（`sites/model/rollout.ts`），过期的观察提示改回强制。站点页顶部在 edge 正在观察时显示提示，截止前 24 小时起改为警告。**未覆盖**：退出报告与审批记录中的报告摘要（需要新的聚合检索接口）。
+
+- 站点级 observe → enforce 上线的 edge 部分（docs/32 第 3 步）：edge 读取站点策略的 `rollout` 块。观察窗口内，对非 `PUBLIC`、GET/HEAD、未被单独强制且不带响应模式/加密/认证/传感器/页面/资格/分页/分享/流转块的路由，若确定性规则以“缺少登录或资格”类原因（`AUTH_REQUIRED`、认证绑定类、`CAPABILITY_MISSING`、`OPERATION_NOT_GRANTED`、`UI_ACTION_NOT_AVAILABLE`、`UI_EVIDENCE_UNVERIFIED`、`TARGET_SCOPE_MISMATCH`）拒绝，请求仍转发到源站；写操作、其他拒绝原因与过期的观察一律按强制拒绝，客户端无法选择模式。审计：准入阶段仍记 DENY 与原因，`decision.composed` 与终态写 `OBSERVED_WOULD_DENY` 和 `rollout_revision`，正常完成的终态保留拒绝原因，失败终态保留源站结局；重启补偿按同一规则校验与补写。`/metrics` 新增 `outcome="observed"` 与 `xshield_edge_observed_refusals_total{reason_code}`。`scripts/test_gateway_transport.sh` 增加真实二进制的 observe/enforce 对照阶段，因此现在需要 PostgreSQL 客户端工具（`verify_all.sh` 在缺少时跳过）。**未覆盖**：控制台编辑界面、退出报告与审批记录中的报告摘要（第 4 步）；到期前 24 小时的控制台告警。
+
+- 站点级 observe → enforce 上线的控制面部分（docs/32 第 2 步）：站点策略新增可选块 `rollout`（`xshield_core::site::SiteRollout`，强类型、`deny_unknown_fields`）。缺省与 `mode: enforce` 等价且不序列化，已有配置字节不变；`mode: observe` 必须带 `observe_until_unix` 与标签 `revision`（规则同 `policy_revision`），可选 `enforced_operations` 只能把已存在的路由单独收紧为强制，不能反向。保存时截止时间必须在未来 30 天内，过期的观察只能改回强制；违规返回 400 `CONTROL_SITE_ROLLOUT_INVALID`。审批新增两个原因：`ROLLOUT_MODE_RELAXED`（转为观察，含以观察状态首次上线；延后截止时间；让路由回到观察）只能由独立 `PolicyApprover` 批准，且该审批人必须有有效的 MFA step-up，`site.config.apply_direct` 与无 step-up 的审批都被拒绝（401 `CONTROL_STEP_UP_REQUIRED`，存储在锁定修订的同一事务里判断，本版本不认识的原因同样要求 step-up）；`ROLLOUT_MODE_TIGHTENED`（回到强制、提前截止、单独强制路由、换标签）会被记录，可以直接应用。核心另提供 edge 将要使用的判定：只有观察窗口内、非 `PUBLIC`、GET/HEAD、未被单独强制的路由才可观察（`SiteRollout::observes`），以及截止前 24 小时告警判定。控制台数据层无损往返该块（严格解码、强制读作缺省），差异与审批说明列出新原因。**未覆盖**：edge 的判定见上一条（第 3 步）；控制台还没有编辑界面与退出报告（第 4 步）；退出报告摘要写入审批记录随退出报告一起做。
+
 - 增加保存检索视图 API：`POST/GET /control/v1/saved-views` 与 `DELETE /control/v1/saved-views/{view_id}`，只允许 `Investigator`，保存经校验的检索请求（不含游标、不超过 8 KiB），同名 409 且不写入；每次尝试写对应 `console.saved_view.*` 审计，worker 发布矩阵与封闭原因集同步扩展。控制台入口未接入。
 - 增加保存检索视图的存储层：迁移 `0055_m5_saved_views.sql` 建立 `xshield.saved_search_views`，按 owner 保存已校验的检索请求（不含游标、不超过 8 KiB），名称在 owner 内唯一；PostgreSQL 回归 `saved_search_view` 覆盖唯一冲突、续页顺序、跨主体隔离、删除与不合法请求的拒绝。HTTP 端点与控制台尚未接入，部署前须先应用该迁移。
 - 增加管理员全部任务列表 API：`GET /control/v1/admin/jobs[?cursor=...]` 只允许 `AuditAdministrator`（访问范围为本次决定：不扩大 Investigator 可见性，每次读取写 `console.job.admin_list` 审计），按 `job_` 降序有界分页，每条目附提交者 `owner_ref`，该字段不进入审计载荷；游标绑定凭证、调用者、作用域与页大小。PostgreSQL 回归 `control_job_admin_list` 覆盖跨主体续页与顺序；worker 发布矩阵、封闭原因集与覆盖检查同步扩展（63 个控制事件）。不新增迁移，控制台视图未接入。

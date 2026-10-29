@@ -53,14 +53,24 @@ export function useSiteWrites(siteId: string) {
     execute: (client, _vars, context) =>
       client.applySite(siteId, context.idempotencyKey, context.signal),
   });
-  /** `digest` is the config digest of the revision the reviewer read (never typed by hand). */
-  const approve = useGuardedMutation<{ digest: string | null }, SiteApplyResponse>({
+  /** `digest` is the config digest of the revision the reviewer read (never typed by hand);
+   * `exitReport` the digest of the observe exit report shown to them, when there was one. */
+  const approve = useGuardedMutation<
+    { digest: string | null; exitReport?: string | null },
+    SiteApplyResponse
+  >({
     label: `批准并应用 · ${siteId}`,
     method: "POST",
     path: () => `${sitePath(siteId)}/approve`,
     expectedSiteId: () => siteId,
     execute: (client, vars, context) =>
-      client.approveSite(siteId, context.idempotencyKey, context.signal, vars.digest ?? undefined),
+      client.approveSite(
+        siteId,
+        context.idempotencyKey,
+        context.signal,
+        vars.digest ?? undefined,
+        vars.exitReport ?? undefined,
+      ),
   });
   const rollback = useGuardedMutation<Record<string, never>, SiteApplyResponse>({
     label: `回滚站点配置 · ${siteId}`,

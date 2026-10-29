@@ -1,6 +1,9 @@
 //! Bounded, scoped analytical queries. Only typed plans enter this adapter;
 //! values are bound parameters, and callers must audit attempts and results.
 
+pub mod coverage_report;
+pub mod rollout_report;
+
 use super::{
     MODEL_CALL_ID_PROJECTION, PublishError, PublisherConfig, TRACE_ID_PROJECTION,
     reject_duplicate_json, valid_confidence, valid_event_type, valid_method, valid_name,
@@ -1747,6 +1750,7 @@ fn validate_search_event(event: &SearchEventSummary) -> Result<(), PublishError>
                     | "ERROR"
                     | "SKIPPED"
                     | "CANCELLED"
+                    | "OBSERVED_WOULD_DENY"
                     | "not_sent"
                     | "unknown"
                     | "response_received"

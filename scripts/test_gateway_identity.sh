@@ -10,12 +10,11 @@ set -euo pipefail
 # `! cmd` never trips `set -e` (in any bash), so an "absent" assertion written
 # that way cannot fail the script; `refute` can. It names the line, never the
 # pattern, because the pattern is often a token.
-# A refused buffered reply is never delivered. Pingora fixes the response header before its
-# synchronous body filter runs (gateway main.rs, prepare_response_issuance_headers), so when the
-# origin's header and body reach the edge in separate reads the client sees the committed
-# header and then a cut transfer (curl exit 18) instead of a bare 502. Both are a refusal; what
-# must hold in every timing is that no origin body byte arrives, which callers assert on the
-# body file. Sets refused_status and refused_exit.
+# A refused buffered reply is never delivered. The edge exchanges with the origin in a
+# subrequest and writes nothing to the client until that reply has been validated and
+# committed, so in every timing (header and body in one read or several) a refusal is a
+# complete 502 whose body names the reason and holds none of the origin's bytes. Sets
+# refused_status and refused_exit; assert_refused checks them against a body file.
 fetch_refused() {
     local out=$1
     shift
@@ -23,6 +22,13 @@ fetch_refused() {
     refused_status=$(curl -sS -o "$out" -w '%{http_code}' "$@" 2>/dev/null)
     refused_exit=$?
     set -e
+}
+
+# assert_refused BODY_FILE ORIGIN_MARKER
+assert_refused() {
+    [[ "$refused_exit" == "0" && "$refused_status" == "502" ]]
+    grep -q '"reason_code":"' "$1"
+    refute grep -q "$2" "$1"
 }
 
 refute() {
@@ -356,6 +362,7 @@ cat >"$test_dir/config.json" <<JSON
     {"operation_id":"auth.context.switch.same","method":"POST","path":"/account-switch-same","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"auth_context_switch":{"success_status":200,"principal_pointer":"/identity/id","authorization_context_pointer":"/identity/authorization_context","bearer_pointer":"/access_token","credential_ttl_seconds":1800}}},
     {"operation_id":"auth.logout","method":"POST","path":"/logout","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":256,"auth_revoke":{"success_status":200}}},
     {"operation_id":"account.new","method":"GET","path":"/new-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
+    {"operation_id":"account.sealed","method":"GET","path":"/sealed-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"crypto":{"mode":"DIRECT_ENCRYPT","adapter_revision":"sealed-account-r1","key_id":"response-key-future","key_not_before":4000000000,"key_expires_at":4102444800,"message_ttl_seconds":60,"max_envelope_bytes":3072},"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.paged","method":"GET","path":"/paged-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"query_pagination":{"parameters":[{"name":"page","kind":"page"},{"name":"page_size","kind":"page_size","max_value":50}]},"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.slow","method":"GET","path":"/slow-account","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null,"response":{"mode":"BUFFERED_JSON","max_bytes":512,"resource_grant":{"success_status":200,"items_pointer":"/orders","resource_pointer":"/id","action_ref_field":"_xshield_action_ref","target_operation_id":"orders.read","target_mapping_revision":"mapping-r1","ttl_seconds":900,"max_items":10,"max_active_grants":100}}},
     {"operation_id":"account.current","method":"GET","path":"/whoami","admission":"AUTHENTICATED_ROOT","source_action":null,"resource_type":null,"view_profile":null},
@@ -406,6 +413,7 @@ class Handler(BaseHTTPRequestHandler):
             "/account-switch-same": b'{"identity":{"id":"principal_login","authorization_context":"tenant_gateway:user"},"access_token":"other-business-token"}',
             "/logout": b'{"logged_out":true}',
             "/new-account": b'{"orders":[{"id":"order-refresh"}]}',
+            "/sealed-account": b'{"orders":[{"id":"order-sealed"}]}',
             "/paged-account?page=2&page_size=20": b'{"orders":[{"id":"order-refresh"}]}',
             "/paged-account": b'{"orders":[{"id":"order-refresh"}]}',
             "/slow-account": b'{"orders":[{"id":"order-late"}]}',
@@ -448,12 +456,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        # The shared record also serves byte ranges, the way a media resource
+        # does, so repeated segment reads under one share can be exercised.
+        content_range = None
+        if self.path == "/shared-record?record_id=record-123" and self.headers.get("Range"):
+            first, _, last = self.headers["Range"].removeprefix("bytes=").partition("-")
+            first = int(first)
+            last = int(last) if last else len(body) - 1
+            content_range = f"bytes {first}-{last}/{len(body)}"
+            body = body[first:last + 1]
+            status = 206
         if self.path == "/slow-account":
             open(sys.argv[2], "w", encoding="utf-8").close()
             time.sleep(1)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body) + (16 if truncated else 0)))
+        if content_range is not None:
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Range", content_range)
         if self.path == "/share-issue?record_id=record-123":
             self.send_header("Cache-Control", "public, max-age=600")
             self.send_header("ETag", '"origin-share-response"')
@@ -476,11 +497,17 @@ PY
 python3 "$test_dir/origin.py" "$test_dir/origin.log" "$test_dir/slow.started" "$test_dir" &
 origin_pid=$!
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
+# Two secrets arrive as mounted files (with the newline `echo` adds), the way
+# an orchestrator provides them; the rest stay in the environment.
+printf '%s\n' "8888888888888888888888888888888888888888888888888888888888888888" >"$test_dir/journal.key"
+printf '%s\n' "$database_base_url/$test_database" >"$test_dir/database.url"
+chmod 600 "$test_dir/journal.key" "$test_dir/database.url"
 XSHIELD_CONFIG="$test_dir/config.json" \
-XSHIELD_JOURNAL_KEY_HEX="8888888888888888888888888888888888888888888888888888888888888888" \
-XSHIELD_DATABASE_URL="$database_base_url/$test_database" \
+XSHIELD_JOURNAL_KEY_HEX_FILE="$test_dir/journal.key" \
+XSHIELD_DATABASE_URL_FILE="$test_dir/database.url" \
 XSHIELD_FINGERPRINT_KEY_HEX="$fingerprint_key" \
 XSHIELD_SHARE_TOKEN_KEY_HEX="$share_token_key" \
+XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX="9999999999999999999999999999999999999999999999999999999999999999" \
     "${CARGO_TARGET_DIR:-$repo_root/target}/debug/xshield-gateway" >"$test_dir/gateway.log" 2>&1 &
 gateway_pid=$!
 
@@ -667,6 +694,30 @@ login_action_ref=$(python3 -c \
     "$test_dir/new-account.body")
 [[ "$login_action_ref" == action.* ]]
 
+# Grants are written only after every release step: when response encryption
+# fails (here the key's lease has not begun), the origin's list is withheld and
+# none of its items becomes a grant, an action, or a grant event.
+sealed_status=$(curl -sS -o "$test_dir/sealed-account.json" -w '%{http_code}' \
+    -H "Cookie: __Host-xshield_sid=$login_session_id" \
+    -H "Authorization: Bearer $login_bearer" \
+    http://127.0.0.1:6288/sealed-account)
+[[ "$sealed_status" == "502" ]]
+grep -q '"reason_code":"RESPONSE_CRYPTO_KEY_UNAVAILABLE"' "$test_dir/sealed-account.json"
+refute grep -q 'order-sealed' "$test_dir/sealed-account.json"
+grep -q '/sealed-account' "$test_dir/origin.log"
+sealed_state=$(psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
+SELECT
+    (SELECT count(*) FROM xshield.response_evidence
+     WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+       AND source_operation_id = 'account.sealed'),
+    (SELECT count(*) FROM xshield.audit_outbox
+     WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
+       AND event_type = 'response_grant.issued'
+       AND envelope->'payload'->>'source_operation_id' = 'account.sealed');
+SQL
+)
+[[ "$sealed_state" == "0|0" ]]
+
 # A grant-issuing root list admits no query string: the caller must not choose
 # whose objects it lists, because every item it returns becomes a grant.
 new_account_query_status=$(curl -sS -o "$test_dir/new-account-query.json" -w '%{http_code}' \
@@ -802,8 +853,7 @@ fetch_refused "$test_dir/refresh-switch.body" -X POST \
     -H "Authorization: Bearer $refreshed_bearer" \
     http://127.0.0.1:6288/refresh-switch
 rm -f "$test_dir/split.mode"
-[[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
-[[ ! -s "$test_dir/refresh-switch.body" ]]
+assert_refused "$test_dir/refresh-switch.body" 'other-business-token'
 refresh_generation=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT credential_generation FROM xshield.auth_bindings
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -816,7 +866,8 @@ curl -sS -o "$test_dir/account-switch-same.body" -X POST \
     -H "Cookie: __Host-xshield_sid=$login_session_id" \
     -H "Authorization: Bearer $refreshed_bearer" \
     http://127.0.0.1:6288/account-switch-same >/dev/null 2>&1 || true
-[[ ! -s "$test_dir/account-switch-same.body" ]]
+grep -q '"reason_code":"' "$test_dir/account-switch-same.body"
+refute grep -q 'other-business-token' "$test_dir/account-switch-same.body"
 refresh_generation_after_same=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT credential_generation FROM xshield.auth_bindings
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -891,7 +942,8 @@ SQL
 [[ "$switch_state" == "principal_login|tenant_gateway:admin|2|3|1|1|1" ]]
 
 wait "$slow_request_pid"
-[[ ! -s "$test_dir/slow-account.body" ]]
+grep -q '"reason_code":"' "$test_dir/slow-account.body"
+refute grep -q 'order-late' "$test_dir/slow-account.body"
 late_grant_count=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT count(*) FROM xshield.response_evidence
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -919,16 +971,10 @@ old_epoch_grant_status=$(curl -sS -o "$test_dir/old-epoch-grant.json" -w '%{http
 grep -q '"reason_code":"UI_ACTION_NOT_AVAILABLE"' "$test_dir/old-epoch-grant.json"
 
 # The origin's login reply names an identity the route does not accept. The edge
-# must not deliver it: a bare 502 (or, if the connection is cut first, a failed
-# transfer), never the origin's bytes, and no binding for that principal below.
-set +e
-invalid_login_status=$(curl -sS -o "$test_dir/login-invalid.body" -w '%{http_code}' \
-    -X POST http://127.0.0.1:6288/login-invalid 2>/dev/null)
-invalid_login_exit=$?
-set -e
-[[ "$invalid_login_exit" != "0" || "$invalid_login_status" == "502" ]]
-[[ ! -s "$test_dir/login-invalid.body" ]]
-refute grep -q 'principal_invalid' "$test_dir/login-invalid.body"
+# must not deliver it: a 502 naming the reason, never the origin's bytes, and no
+# binding for that principal below.
+fetch_refused "$test_dir/login-invalid.body" -X POST http://127.0.0.1:6288/login-invalid
+assert_refused "$test_dir/login-invalid.body" 'principal_invalid'
 invalid_login_binding_count=$(psql -X -At -v ON_ERROR_STOP=1 -d "$test_database" <<'SQL'
 SELECT count(*) FROM xshield.auth_bindings
 WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway'
@@ -943,17 +989,13 @@ buffered_status=$(curl -sS -o "$test_dir/buffered-valid.json" -w '%{http_code}' 
 [[ $(<"$test_dir/buffered-valid.json") == '{"ok":true}' ]]
 
 # A body that is not the JSON the route promises is never released: the client
-# gets a bare 502 and none of the origin's bytes (same as the oversize case below).
+# gets a 502 naming the reason and none of the origin's bytes (same as the oversize case below).
 for split in fused split; do
     if [[ "$split" == "split" ]]; then touch "$test_dir/split.mode"; else rm -f "$test_dir/split.mode"; fi
     fetch_refused "$test_dir/buffered-invalid.body" http://127.0.0.1:6288/buffered-invalid
-    [[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
-    [[ ! -s "$test_dir/buffered-invalid.body" ]]
-    refute grep -q 'private-invalid-json' "$test_dir/buffered-invalid.body"
+    assert_refused "$test_dir/buffered-invalid.body" 'private-invalid-json'
     fetch_refused "$test_dir/buffered-oversize.body" http://127.0.0.1:6288/buffered-oversize
-    [[ "$refused_exit" != "0" || "$refused_status" == "502" ]]
-    [[ ! -s "$test_dir/buffered-oversize.body" ]]
-    refute grep -q 'must-not-release' "$test_dir/buffered-oversize.body"
+    assert_refused "$test_dir/buffered-oversize.body" 'must-not-release'
 done
 rm -f "$test_dir/split.mode"
 
@@ -1211,6 +1253,25 @@ valid_share_status=$(curl -sS -o "$test_dir/valid-share.body" -w '%{http_code}' 
     -H "X-Xshield-Share-Token: $share_token" \
     'http://127.0.0.1:6288/shared-record?record_id=record-123')
 [[ "$valid_share_status" == "200" ]]
+
+# A limited share is a reusable read lease, not a one-time ticket: the same
+# token reads the same resource again in byte-range segments, the range reaches
+# the origin and its partial reply comes back unchanged, and the share row is
+# neither consumed nor altered by those reads.
+share_row() {
+    psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" -c \
+        "SELECT status, use_policy, expires_at FROM xshield.share_grants WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND share_id = 'share_018f2a3b-4c5d-7000-8000-000000000908'"
+}
+share_row_before=$(share_row)
+for segment in 'bytes=0-9' 'bytes=10-' 'bytes=0-9'; do
+    range_share_status=$(curl -sS -o "$test_dir/range-share.body" -D "$test_dir/range-share.headers" \
+        -w '%{http_code}' -H "X-Xshield-Share-Token: $share_token" -H "Range: $segment" \
+        'http://127.0.0.1:6288/shared-record?record_id=record-123')
+    [[ "$range_share_status" == "206" ]]
+    grep -qi "^content-range: bytes ${segment#bytes=}" "$test_dir/range-share.headers"
+done
+[[ "$(cat "$test_dir/range-share.body")" == '{"record_i' ]]
+[[ "$(share_row)" == "$share_row_before" ]]
 
 psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
     "UPDATE xshield.share_grants SET status = 'revoked' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND share_id = 'share_018f2a3b-4c5d-7000-8000-000000000908'" >/dev/null
@@ -1471,7 +1532,8 @@ grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 [[ $(grep -c 'GET /orders?order_id=order-refresh' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /path-orders/order%2D123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
-[[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "2" ]]
+# Two whole reads plus the three range segments, each forwarded exactly once.
+[[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "5" ]]
 [[ $(grep -c '^GET /share-issue?record_id=record-123$' "$test_dir/origin.log") == "13" ]]
 [[ $(grep -c 'GET /buffered-valid' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /buffered-invalid' "$test_dir/origin.log") == "2" ]]

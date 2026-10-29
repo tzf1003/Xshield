@@ -1,0 +1,17 @@
+# Optional high-availability overlay (docs/19 19.9.1, ADR-014). values.yaml
+# alone stays single-replica so `helm upgrade` never silently doubles an
+# existing install's replica count or resource footprint; layer this file to
+# opt in:
+#
+#   helm upgrade --install xshield deploy/helm/xshield \
+#     -f my-values.yaml -f deploy/helm/xshield/values-ha.yaml
+#
+# This only raises replica counts. It turns on podDisruptionBudget.core and
+# podDisruptionBudget.outbox (both render only once their workload's replica
+# count is above 1) and the default pod anti-affinity in xshield.podSecurity
+# (only applied while .Values.affinity is unset); it does not touch
+# tenant/site identity, images, secrets, or any other setting, so layer it
+# alongside your own values rather than in place of them.
+replicaCount: 2
+outbox:
+  replicaCount: 2

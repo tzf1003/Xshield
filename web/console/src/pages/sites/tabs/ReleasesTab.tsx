@@ -4,6 +4,7 @@ import { ApprovalCard } from "./release/ApprovalCard";
 import { DangerZone } from "./release/DangerZone";
 import { ReleaseActions } from "./release/ReleaseActions";
 import { RevisionHistory } from "./release/RevisionHistory";
+import { RolloutReportPanel } from "./release/RolloutReportPanel";
 import { StateCard } from "./release/StateCard";
 import { useRelease } from "./release/use-release.ts";
 import "./release/release.css";
@@ -21,6 +22,9 @@ export function ReleasesTab({ ws }: { ws: WorkspaceApi }) {
       <StateCard ws={ws} release={release} />
       <ApprovalCard ws={ws} release={release} />
       <ReleaseActions ws={ws} release={release} />
+      {ws.access.canObserve && ws.siteId !== null && ws.activeConfig?.policy.rollout && (
+        <RolloutReportPanel ws={ws} rollout={ws.activeConfig.policy.rollout} />
+      )}
       {ws.access.canObserve && <RevisionHistory ws={ws} />}
       {ws.access.canObserve && ws.siteId !== null && <HealthPanel siteId={ws.siteId} />}
       {ws.configQuery.data?.config && (

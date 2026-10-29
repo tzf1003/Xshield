@@ -151,6 +151,11 @@ export const reasonDictionary = {
     "响应资源资格不合法：目标必须是已存在、绑定资源的“必须有界面操作来源”路由，指针、数量、期限需在边界内。",
     "在“路由与操作”打开列表路由，核对“响应资源资格”的目标详情路由与参数后重新保存。",
   ),
+  CONTROL_SITE_ROLLOUT_INVALID: entry(
+    "danger",
+    "观察模式设置不合法：观察必须有标签和截止时间（未来 30 天内），单独强制的路由必须存在且不重复；强制模式不能带这些字段。",
+    "在站点策略里核对观察模式的截止时间、标签与单独强制的路由；已过期的观察只能改回强制后保存。",
+  ),
   CONTROL_SITE_QUERY_PAGINATION_INVALID: entry(
     "danger",
     "查询参数白名单不合法：只能用于发放响应资格的“已认证根”GET 列表或非资源的“必须有界面操作来源”GET 路由，最多 4 个小写参数名（a–z 与下划线，1–32 字符，不重复），且不能与任何路由的资源参数同名。",
@@ -391,6 +396,8 @@ export type RiskToken =
   | "QUERY_PAGINATION_CHANGED"
   | "SHARE_ISSUE_CHANGED"
   | "AUTH_TRANSITION_CHANGED"
+  | "ROLLOUT_MODE_RELAXED"
+  | "ROLLOUT_MODE_TIGHTENED"
   | "OTHER_CHANGE";
 
 export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail: string }>> = {
@@ -472,6 +479,15 @@ export const riskDictionary: Record<RiskToken, Readonly<{ label: string; detail:
     label: "凭证刷新或授权上下文切换变更",
     detail:
       "决定哪些响应会替换身份绑定的凭证，或把绑定移到另一个授权上下文（另一个账号）；只能由独立审批人批准，直接应用能力不能代替。",
+  },
+  ROLLOUT_MODE_RELAXED: {
+    label: "放宽为观察模式",
+    detail:
+      "转为观察、延后观察截止时间或让路由回到观察，都会把今天被拒绝的只读请求转发给源站；只能由独立审批人在近期完成 MFA 复核后批准，直接应用能力不能代替。",
+  },
+  ROLLOUT_MODE_TIGHTENED: {
+    label: "收紧观察范围",
+    detail: "回到强制、提前截止时间、单独强制某条路由或更换观察标签；会被审计，可以直接应用。",
   },
   OTHER_CHANGE: {
     label: "其他安全相关字段变更",

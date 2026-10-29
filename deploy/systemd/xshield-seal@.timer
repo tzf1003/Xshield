@@ -1,0 +1,12 @@
+# Pairs with xshield-seal@.service. 30s matches the Compose reference's
+# default XSHIELD_SEAL_INTERVAL_SECONDS (docs/19 19.8); adjust both together.
+[Unit]
+Description=Periodic Xshield audit seal (%i journal)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

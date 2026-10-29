@@ -1,0 +1,55 @@
+# Management plane (xshield-control). Install to
+# /etc/systemd/system/xshield-control.service.
+#
+# Equivalent to deploy/compose/compose.yaml's `control` service. The binary
+# takes four positional directory arguments: edge's journal and manifest
+# directories (control reads edge's sealed journal for investigation/query),
+# edge's checkpoint directory, and control's own journal directory.
+[Unit]
+Description=Xshield control (management API)
+Documentation=https://github.com/tzf1003/Xshield/blob/main/docs/19-deployment-operations.md
+After=network-online.target xshield-edge.service
+Wants=network-online.target
+Requires=xshield-edge.service
+
+[Service]
+Type=simple
+User=xshield
+Group=xshield
+EnvironmentFile=/etc/xshield/control.env
+EnvironmentFile=/etc/xshield/control-token.env
+ExecStart=/opt/xshield/current/bin/xshield-control \
+    /var/lib/xshield/edge-audit \
+    /var/lib/xshield/edge-manifests \
+    /var/lib/xshield/edge-checkpoints \
+    /var/lib/xshield/control-audit
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/var/lib/xshield/edge-audit /var/lib/xshield/edge-manifests /var/lib/xshield/edge-checkpoints
+ReadWritePaths=/var/lib/xshield/control-audit /var/lib/xshield/evidence
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

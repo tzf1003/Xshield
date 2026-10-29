@@ -6,13 +6,16 @@
 #![warn(missing_docs)]
 
 mod api_key_authz;
+pub mod build_cli;
 mod calibration_report_inspection;
 mod case_close;
 mod case_collection;
 mod case_holds;
 mod case_items;
+mod case_job_list;
 mod case_list;
 mod causality;
+mod coverage_report;
 mod discovered_routes;
 mod edge_channel;
 mod evidence_access_inspection;
@@ -26,13 +29,15 @@ mod jobs;
 mod ledger_inspection;
 mod management_api_key;
 mod model_call_list;
+pub mod ops;
+mod rollout_report;
 mod saved_views;
 mod search;
 mod site_config;
 mod workbench;
 
 pub use identity::{IdentityConfigError, OidcProvider};
-pub use site_config::EdgeApplyClient;
+pub use site_config::{EdgeApplyClient, run_edge_reconcile_loop, upstream_allowance_from_env};
 
 use axum::{
     Extension, Json, Router,
@@ -75,8 +80,8 @@ use xshield_core::{
     },
 };
 use xshield_evidence::{
-    EvidenceClassification, EvidenceError, EvidenceFidelity, EvidenceManifest, EvidenceWrite,
-    LocalEvidenceVault, VerifiedEvidenceManifest,
+    EvidenceClassification, EvidenceError, EvidenceFidelity, EvidenceManifest, EvidenceVault,
+    EvidenceWrite, VerifiedEvidenceManifest,
 };
 use xshield_postgres::{
     EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,
@@ -251,7 +256,7 @@ pub fn parse_management_api_key_hash_key(value: &str) -> Result<[u8; 32], Contro
 
 /// Vault-backed port that consumes an already validated evidence capability.
 pub struct EvidenceReadPort {
-    vault: LocalEvidenceVault,
+    vault: EvidenceVault,
     capacity: Arc<Semaphore>,
 }
 
@@ -261,9 +266,9 @@ impl EvidenceReadPort {
     /// The reservation covers decryption, audit, and all response-buffer clones.
     /// Saturated reads receive an audited retryable error before vault I/O.
     #[must_use]
-    pub fn new(vault: LocalEvidenceVault) -> Self {
+    pub fn new(vault: impl Into<EvidenceVault>) -> Self {
         Self {
-            vault,
+            vault: vault.into(),
             // ponytail: one retained object per port; use a weighted byte budget
             // when measured download throughput requires parallel reads.
             capacity: Arc::new(Semaphore::new(1)),
@@ -514,6 +519,7 @@ pub struct ControlPlane {
     evidence_read: Option<Arc<EvidenceReadPort>>,
     gateway_apply: Option<Arc<site_config::EdgeApplyClient>>,
     access_journal: Mutex<LocalJournal>,
+    metrics: Arc<ops::ControlMetrics>,
     unauthenticated_rate: Mutex<RateWindow>,
     rate: Mutex<RateWindow>,
 }
@@ -553,6 +559,7 @@ impl ControlPlane {
             evidence_read: None,
             gateway_apply: None,
             access_journal: Mutex::new(access_journal),
+            metrics: Arc::new(ops::ControlMetrics::default()),
         }
     }
 
@@ -4276,10 +4283,12 @@ impl ControlPlane {
             },
         };
         let bytes = serde_json::to_vec(&event)?;
-        let receipts = journal.append_batch(&[JournalRecord {
+        let appended = journal.append_batch(&[JournalRecord {
             event_id: &event_id,
             plaintext: &bytes,
-        }])?;
+        }]);
+        self.metrics.audit_append(appended.is_ok());
+        let receipts = appended?;
         if receipts.len() != 1 || receipts[0].producer_sequence != producer_sequence {
             return Err(ControlError::ReceiptMismatch);
         }
@@ -4291,10 +4300,22 @@ impl ControlPlane {
 ///
 /// Read routes have no production side effects. Mutations use their documented
 /// transactional outbox and every route writes the required management audit.
-#[allow(clippy::too_many_lines)]
 pub fn router(control: ControlPlane) -> Router {
+    routers(control).0
+}
+
+/// The management API router, over the same control plane the
+/// unauthenticated ops router ([`ops::ops_router`]) for a separate listener,
+/// and the shared control plane handle itself so a caller can also run
+/// background work (such as [`site_config::run_edge_reconcile_loop`])
+/// against the exact same state the routers serve.
+#[allow(clippy::too_many_lines)]
+pub fn routers(control: ControlPlane) -> (Router, Router, Arc<ControlPlane>) {
     let state = Arc::new(control);
-    Router::new()
+    let shared = Arc::clone(&state);
+    let metrics = Arc::clone(&state.metrics);
+    let ops = ops::ops_router(Arc::clone(&state));
+    let api = Router::new()
         .route(identity::LOGIN_PATH, get(identity::login_handler))
         .route(identity::CALLBACK_PATH, get(identity::callback_handler))
         .route(
@@ -4386,6 +4407,14 @@ pub fn router(control: ControlPlane) -> Router {
         .route(
             model_call_list::PATH,
             get(model_call_list::handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
+            rollout_report::PATH,
+            get(rollout_report::handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
+            coverage_report::PATH,
+            get(coverage_report::handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(MODEL_CALL_PATH, get(model_call_handler))
         .route(AGENT_RUN_PATH, get(agent_run_handler))
@@ -4495,6 +4524,10 @@ pub fn router(control: ControlPlane) -> Router {
             post(jobs::analyze_handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(
+            case_job_list::PATH,
+            get(case_job_list::handler).layer(DefaultBodyLimit::max(0)),
+        )
+        .route(
             case_items::PATH,
             post(case_items::handler)
                 .get(case_collection::handler)
@@ -4516,6 +4549,8 @@ pub fn router(control: ControlPlane) -> Router {
         )
         .with_state(Arc::clone(&state))
         .layer(from_fn_with_state(state, identity::auth_middleware))
+        .layer(from_fn_with_state(metrics, ops::track));
+    (api, ops, shared)
 }
 
 async fn evidence_access_approve_handler(
@@ -5496,6 +5531,7 @@ mod tests {
     mod api_key_harness;
     mod api_key_lifecycle;
     mod audit_publish;
+    mod build_cli;
     mod calibration_report_inspection;
     mod case_close;
     mod case_collection;
@@ -5503,8 +5539,11 @@ mod tests {
     mod case_holds;
     mod case_holds_postgres;
     mod case_items;
+    mod case_job_list;
     mod case_list;
     mod causality;
+    mod control_ops;
+    mod coverage_report;
     mod discovered_routes;
     mod evidence_access_inspection;
     mod evidence_access_list;
@@ -5515,6 +5554,7 @@ mod tests {
     mod job_list;
     mod ledger_inspection;
     mod model_call_list;
+    mod rollout_report;
     mod saved_views;
     mod search_references;
     mod site_admin;

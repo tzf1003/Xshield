@@ -12,13 +12,17 @@
 
 WAF 终止 TLS 并重新验证上游证书，固定 upstream allowlist，不接受客户端任意 Host 变成开放代理。浏览器→WAF 与 WAF→源站的信任变化必须在站点接入说明中体现。
 
-控制面拒绝指向回环、私网、链路本地、云元数据以及 IPv4 映射/NAT64 等转换形式的上游地址（规则见 29 章“上游地址校验”）。本地靶场的源站在回环地址上，因此需要显式设置环境变量 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1`（`dev.sh` 已设置）；它只放行 `127.0.0.0/8` 与 `::1`，生产部署不得设置，且不存在放行私网地址的开关。
+前置 WAF/CDN（ADR-013）：Xshield 不做 SQLi/XSS 等通用签名检测，生产与试点部署须放在现有 WAF/CDN 之后，链路为客户端 → WAF/CDN → Xshield edge → 源站。接入时确认：（1）前置层到 edge 使用 PROXY protocol，并把前置层出口地址列入 `XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED`，否则按来源限流只能按站点总量生效；（2）edge 数据面只放行前置层出口，源站只放行 edge，避免绕过任一层；（3）前置层到 edge 的 TLS 由前置层重新加密并校验 edge 证书（edge 原生 TLS 见下文）；（4）前置层拦截的请求不进入 Xshield 审计，事件调查需要同时查前置层日志；（5）前置层的缓存不得缓存带身份或资格的响应，按站点把受保护路径设为不缓存。
 
-**当前实现状态（2026-10-05 核查）**：edge 的数据面监听器仍只绑定内网或 loopback 地址（`XSHIELD_EDGE_LISTEN_PORTS` 与站点端口的既有限制不变），部署可以启用两项传输加固（配置见下文“Edge 传输配置”）。其一是原生 TLS：同时设置 `XSHIELD_EDGE_TLS_CERT_PATH` 与 `XSHIELD_EDGE_TLS_KEY_PATH` 后，**每个**数据面端口都由 edge 终止 TLS（OpenSSL，Mozilla intermediate v5 配置，TLS 1.2 起，ALPN 依次为 `h2`、`http/1.1`，HTTP/2 下游由 Pingora 桥接到 HTTP/1.1 源站，不签发 session ticket，不允许重协商）；两个变量都未设置时行为与此前完全一致（明文 HTTP/1.1），配置不完整或证书/密钥不可用时拒绝启动，绝不退回明文。其二是 PROXY protocol v1/v2：`XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED` 列出的负载均衡地址必须在连接起始处发送 PROXY 头，头中的源地址取代 TCP 对端，用于按来源限流和匿名会话来源指纹；未列出的对端发送的 PROXY 头从不被解析。仍不在范围内：按站点（SNI）选择证书和从秘密管理器解析证书（全进程一张证书，SNI 不参与路由，路由仍按监听端口加 Host/`:authority`）、证书热更新（轮换证书需重启 edge）、HTTP/3/QUIC、PROXY v2 TLV 的任何语义（全部跳过、不信任）以及 `X-Forwarded-For`/`Forwarded` 等转发头（仍不信任）。开发环境的本地 stunnel 终止器（见 `dev.sh`）不变。上游 TLS 的证书校验和固定 allowlist 已按本节实现。
+控制面拒绝指向回环、私网、链路本地、云元数据以及 IPv4 映射/NAT64 等转换形式的上游地址（规则见 29 章“上游地址校验”）。本地靶场的源站在回环地址上，因此需要显式设置环境变量 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1`（`dev.sh` 已设置）；它只放行 `127.0.0.0/8` 与 `::1`，生产部署不得设置。源站在私网时，部署方可以用 `XSHIELD_ALLOWED_UPSTREAM_CIDRS` 显式列出源站所在的网段（逗号分隔的 CIDR，如 `10.20.0.0/16,fd12:3456::/48`，最多 32 个），只能是 RFC 1918 或 `fc00::/7` 内不含主机位的网段；它只解除列出网段内地址的“私网/唯一本地”拒绝，回环、链路本地、共享地址、云元数据（包括 `fc00::/7` 内的 `fd00:ec2::254`）、映射与转换形式照旧拒绝。默认不设置，行为与此前相同；列表不合法时控制服务拒绝启动。上游地址的任何变更仍需独立审批（`UPSTREAM_CHANGED`），所以放行网段是部署级边界，具体源站仍由两个人确认。
+
+**当前实现状态（2026-10-05 核查）**：edge 的数据面监听器仍只绑定内网或 loopback 地址（`XSHIELD_EDGE_LISTEN_PORTS` 与站点端口的既有限制不变），部署可以启用两项传输加固（配置见下文“Edge 传输配置”）。其一是原生 TLS：同时设置 `XSHIELD_EDGE_TLS_CERT_PATH` 与 `XSHIELD_EDGE_TLS_KEY_PATH` 后，**每个**数据面端口都由 edge 终止 TLS（OpenSSL，Mozilla intermediate v5 配置，TLS 1.2 起，ALPN 依次为 `h2`、`http/1.1`，HTTP/2 下游由 Pingora 桥接到 HTTP/1.1 源站，不签发 session ticket，不允许重协商）；两个变量都未设置时行为与此前完全一致（明文 HTTP/1.1），配置不完整或证书/密钥不可用时拒绝启动，绝不退回明文。其二是 PROXY protocol v1/v2：`XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED` 列出的负载均衡地址必须在连接起始处发送 PROXY 头，头中的源地址取代 TCP 对端，用于按来源限流和匿名会话来源指纹；未列出的对端发送的 PROXY 头从不被解析。主证书之外可用 `XSHIELD_EDGE_TLS_SNI_CERTS` 按 SNI 为其他主机名提供证书，证书与私钥文件变化后 edge 在运行中自动重载（2026-10-29 起，见下文）；`XSHIELD_EDGE_TLS_SNI_CERTS_DIR` 另外提供一个按子目录增删的来源，创建或删除子目录即可增删证书而不必重启。SNI 只用于选证书，不参与路由，路由仍按监听端口加 Host/`:authority`。仍不在范围内：从秘密管理器解析证书、HTTP/3/QUIC、PROXY v2 TLV 的任何语义（全部跳过、不信任）以及 `X-Forwarded-For`/`Forwarded` 等转发头（仍不信任）。开发环境的本地 stunnel 终止器（见 `dev.sh`）不变。上游 TLS 的证书校验和固定 allowlist 已按本节实现。
 
 站点策略的 waf.blocked_query_fragments 可配置最多 32 个 ASCII 片段；edge 对有查询串的请求先执行有界、单次严格百分号解码和加号空格转换，再做不区分 ASCII 大小写的匹配。命中返回 WAF_QUERY_BLOCKED/403，畸形编码返回 WAF_QUERY_INVALID/400，均发生在源站转发前并记录请求审计。该规则只适合经过站点验证的具体片段；上线前应使用正常业务查询样本检查误拒，并以新策略修订发布。撤回此规则只需发布移除片段的配置快照，不删除已经产生的审计。
 
 按来源限流和匿名会话来源指纹使用 edge 归属的客户端地址：默认是 TCP 对端；对端属于 `XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED` 时是它在 PROXY 头中声明的源地址。客户端转发头一律不信任。放在未启用 PROXY protocol 的代理或负载均衡之后时，其后的所有客户端仍会被归为同一来源，站点总限流照常生效。
+
+多个 edge 副本：令牌桶在每个 edge 进程内计量。负载均衡按源地址保持亲和（或只有一个副本）时，站点的 `requests_per_second`/`burst` 按原值生效，`XSHIELD_EDGE_RATE_LIMIT_SHARE` 保持默认 1。负载均衡把同一来源轮流分到 N 个副本时，在每个副本上设 `XSHIELD_EDGE_RATE_LIMIT_SHARE=N`（1–64 的整数，其他值拒绝启动）：每个副本只放行 1/N 的速率与突发（突发至少 1 个请求），整组副本合计约等于策略值，而不是 N 倍。副本数变化时需同步调整该值；分流不均时，偏重的副本会比策略更早返回 429。没有跨副本共享计数：共享存储需要在每个请求（包括它要吸收的洪峰）之前做一次网络往返，见 21。
 
 ### 页面签发、动作描述供给与探针 1.1.0
 
@@ -39,19 +43,23 @@ WAF 终止 TLS 并重新验证上游证书，固定 upstream allowlist，不接�
 
 ### Edge 传输配置（原生 TLS 与 PROXY protocol）
 
-以下变量只由 edge 进程在启动时读取并完整校验，作用于全部数据面端口（不按站点配置）；任一校验失败都以 `xshield gateway startup failed: ...` 退出，错误只包含变量名与路径，不回显文件内容。
+以下变量只由 edge 进程在启动时读取并完整校验，作用于全部数据面端口（不按端口配置）；任一校验失败都以 `xshield gateway startup failed: ...` 退出，错误只包含变量名与路径，不回显文件内容。变量本身只在启动时读取；它们指向的证书与私钥文件在运行中会被重新读取（见下文“证书轮换与热加载”）。
 
 | 变量 | 取值 | 未设置 | 校验与失败 |
 | --- | --- | --- | --- |
 | `XSHIELD_EDGE_TLS_CERT_PATH` | PEM 证书链，叶证书在前，可附中间证书 | 明文监听 | 必须与私钥变量同时设置；设置为空串、只设置一个、文件不可读、不是普通文件或超过 1 MiB、无法解析为证书、叶证书已过期或尚未生效，均拒绝启动 |
 | `XSHIELD_EDGE_TLS_KEY_PATH` | 未加密的 PEM 私钥 | 明文监听 | 同上；文件权限含任何 group/other 位（`mode & 0o077 != 0`，如 0644、0640）、与证书公钥不匹配或被 TLS 库拒绝（如强度不足），均拒绝启动 |
+| `XSHIELD_EDGE_TLS_SNI_CERTS` | 逗号分隔的 `证书路径:私钥路径` 对，每对的文件要求与上两项相同 | 无附加证书（除非设置了 `XSHIELD_EDGE_TLS_SNI_CERTS_DIR`） | 必须同时设置主证书与私钥；空串、某项不是恰好一个 `:` 分隔的两个非空且不同的路径、文件不满足上两项任一条件、叶证书没有任何 DNS 名（SAN 的 dNSName，没有 SAN 时取 CN）、两张证书（含主证书、含 `XSHIELD_EDGE_TLS_SNI_CERTS_DIR` 目录中的证书）声明同一主机名，均拒绝启动。本变量在启动时读入后固定：增删某一项仍需重启，只有其中已配置路径指向的文件内容会在运行中热加载（见下文） |
+| `XSHIELD_EDGE_TLS_SNI_CERTS_DIR` | 一个目录；每个直接子目录是一对附加证书，必须恰好含 `tls.crt` 与 `tls.key`（Kubernetes `kubernetes.io/tls` secret 挂载时的文件名） | 无目录来源的附加证书 | 必须同时设置主证书与私钥；目录不存在、不可列出或不是目录均拒绝启动；每个子目录内 `tls.crt`/`tls.key` 的文件要求与主证书/私钥相同（可读、普通文件、不超过 1 MiB、私钥 0600/0400、证书当前有效、私钥与证书匹配）；叶证书没有任何 DNS 名、或与另一张证书（含主证书、含 `XSHIELD_EDGE_TLS_SNI_CERTS`）声明同一主机名，均拒绝该次校验（启动时即拒绝启动，热加载时见下文）；子目录自身的名字不参与证书选择，只是人类可读的标识。与证书轮换走同一个每 30 秒的检查：新增、删除或替换一个子目录都无需重启，详见下文“证书轮换与热加载” |
 | `XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED` | 逗号分隔的 IPv4/IPv6 地址或 CIDR，最多 64 项；单个地址即单主机块 | 关闭（空串同） | 空项、非法地址或前缀、主机位非零（如 `10.0.0.1/8`）、前缀长度 0、IPv4 映射的 IPv6 块均拒绝启动 |
 
-原生 TLS：一张证书服务全部站点端口，证书应覆盖所有公开主机名；edge 不检查 SNI，错误 Host 的请求与明文时一样以 503 `SITE_CONFIG_UNAVAILABLE` 拒绝并计入 `edge.unrouted_denied`。私钥文件须为 0600 或 0400；Kubernetes secret 卷默认 0644，需设置 `defaultMode: 0400`。轮换证书时替换文件后重启 edge，不支持热加载。每个连接的握手在独立任务中进行并限时 5 秒；握手连同 PROXY 头读取占用连接建立名额，每个监听端口 256 个、全进程 1024 个，名额用尽时新连接在 accept 时直接关闭，半开连接洪峰不会无界占用内存或任务；握手完成后 60 秒内没有任何请求字节的连接被关闭（HTTP/1 另有 Pingora 自身的 60 秒请求头读取上限，HTTP/2 的连接前言等待没有上限，此限制补上），没有活动流的 HTTP/2 连接空闲 60 秒后关闭。握手之后的准入、WAF、限流、审计屏障与快照路由不变。HTTP/2 请求按 `:authority` 路由（可以没有 Host）；Pingora 0.9 在 HTTP/1 与 HTTP/2 入口处已以 400 拒绝重复 Host、userinfo 以及 Host 与 `:authority`/绝对形式目标不一致的请求，路由层再以同一规范化（大小写、末尾点和端口不计）复核，任何歧义按未路由拒绝。源站始终收到 origin-form 请求目标和站点配置的 Host，不会收到客户端的 scheme 或 authority。`__Host-` 会话 Cookie 的 `Secure` 属性在原生 TLS 下直接满足；sensor 的 `origin` 仍是站点配置的 HTTPS 公开源，与连接方式无关。
+原生 TLS：全部站点端口共用同一组证书。客户端 SNI 与某张附加证书的 DNS 名匹配时出示该证书（不区分大小写、忽略末尾点；精确名优先于通配符，`*.example.com` 只匹配一级标签）；SNI 不匹配任何附加证书或没有 SNI 时出示主证书，不因 SNI 拒绝握手。每张证书使用相同的 TLS 配置（版本、套件、ALPN）。SNI 只决定出示哪张证书，不参与路由：SNI 与 Host 指向不同站点的请求仍按 Host 路由，错误 Host 的请求与明文时一样以 503 `SITE_CONFIG_UNAVAILABLE` 拒绝并计入 `edge.unrouted_denied`。私钥文件须为 0600 或 0400；Kubernetes secret 卷默认 0644，需设置 `defaultMode: 0400`。
+
+证书轮换与热加载：edge 每 30 秒检查一次全部证书与私钥文件的元数据（设备、inode、大小、修改与变更时间，跟随符号链接，因此原地改写、重命名覆盖和 Kubernetes secret 卷的符号链接切换都能发现），以及（设置了 `XSHIELD_EDGE_TLS_SNI_CERTS_DIR` 时）该目录当前的直接子目录列表。有任一变化时重新读取并按启动时的全部规则校验整组文件（固定列表加目录当时的内容）：全部通过则新握手立即使用新的一组证书，已建立的连接保留原证书直到关闭；任一失败（文件缺失、证书与私钥暂不匹配、已过期、目录不可列出等）则整组继续使用当前证书，在标准错误输出一行只含变量名与路径的原因，并在下次变化时重试，所以先写证书后写私钥的轮换、或新增子目录时先出现目录再分两步写入两个文件，都只会在中间记一次失败。轮换时应先写入新文件再原子重命名（或使用 secret 卷），不必重启 edge。`XSHIELD_EDGE_TLS_SNI_CERTS` 列表本身增删一项仍需重启；`XSHIELD_EDGE_TLS_SNI_CERTS_DIR` 下创建或删除一个子目录（各自是独立的 Kubernetes secret 挂载点时，即为增删一张证书）在下一次检查即生效，不必重启，这正是两者的区别。两种来源的证书合并后按同一规则互查主机名重复，也共享 `/internal/v1/health` 与 `/metrics` 的 `tls_certificates`（当前生效的对数，含主证书）。每个连接的握手在独立任务中进行并限时 5 秒；握手连同 PROXY 头读取占用连接建立名额，每个监听端口 256 个、全进程 1024 个，名额用尽时新连接在 accept 时直接关闭，半开连接洪峰不会无界占用内存或任务；握手完成后 60 秒内没有任何请求字节的连接被关闭（HTTP/1 另有 Pingora 自身的 60 秒请求头读取上限，HTTP/2 的连接前言等待没有上限，此限制补上），没有活动流的 HTTP/2 连接空闲 60 秒后关闭。握手之后的准入、WAF、限流、审计屏障与快照路由不变。HTTP/2 请求按 `:authority` 路由（可以没有 Host）；Pingora 0.9 在 HTTP/1 与 HTTP/2 入口处已以 400 拒绝重复 Host、userinfo 以及 Host 与 `:authority`/绝对形式目标不一致的请求，路由层再以同一规范化（大小写、末尾点和端口不计）复核，任何歧义按未路由拒绝。源站始终收到 origin-form 请求目标和站点配置的 Host，不会收到客户端的 scheme 或 authority。`__Host-` 会话 Cookie 的 `Secure` 属性在原生 TLS 下直接满足；sensor 的 `origin` 仍是站点配置的 HTTPS 公开源，与连接方式无关。
 
 PROXY protocol：负载均衡器必须只对 edge 的这些监听端口启用 PROXY protocol（v1 或 v2，TCP 模式）。同时启用原生 TLS 时，PROXY 头位于 TLS 握手之前，即均衡器以 TCP 直通加 PROXY 头的方式转发，edge 按此顺序处理。受信对端的判断只使用套接字的真实对端地址（IPv4 映射的 IPv6 对端按 IPv4 比较），与连接内容无关；受信对端必须在 3 秒内发送完整有效的头，缺失、格式错误、超长（v1 超过 107 字节、v2 超过 536 字节）或声明 UDP/UNIX 传输的头都会关闭连接，不回退为 TCP 对端地址。`LOCAL` 命令（均衡器健康检查）和 `UNKNOWN`/`UNSPEC` 地址族保留 TCP 对端地址；v2 的 TLV（包括 authority、SNI）全部跳过、不作任何信任依据。头中的源地址取代 TCP 对端用于 edge 归属客户端的所有位置（按来源限流键、匿名会话来源指纹），IPv4 映射地址按 IPv4 计量；审计事件本身不记录客户端 IP。客户端无法在 HTTP 流内自带 PROXY 头伪造地址：只解析连接最开头的一个头，其后的字节属于 TLS 或 HTTP，非受信对端发来的 PROXY 头同样只是会被 HTTP 解析拒绝的普通字节。
 
-失败计数：握手失败或超时、受信对端的 PROXY 头被拒、因名额用尽被关闭的连接都没有到达准入，因此没有请求、也不产生逐请求审计事件；它们只在进程内计数，通过已认证的 loopback 健康接口 `/internal/v1/health` 返回（HMAC 请求认证不变，响应仍不签名、仅用于展示）：`tls_enabled`、`tls_handshake_failures`、`proxy_protocol_enabled`、`proxy_header_rejections`、`connection_setup_shed`。计数从进程启动累计、重启归零；`edge_state` 不受这些计数影响。edge 不记录失败连接的任何字节、证书或私钥材料。control 把健康 JSON 原样并入站点健康详情，控制台可直接展示这些字段，工作台仍只读取 `edge_state`。
+失败计数：握手失败或超时、受信对端的 PROXY 头被拒、因名额用尽被关闭的连接都没有到达准入，因此没有请求、也不产生逐请求审计事件；它们只在进程内计数，通过已认证的 loopback 健康接口 `/internal/v1/health` 返回（HMAC 请求认证不变，响应仍不签名、仅用于展示）：`tls_enabled`、`tls_certificates`（主证书加附加证书的对数）、`tls_reloads`（成功的热加载次数）、`tls_reload_failures`（被拒绝的文件变化次数）、`tls_handshake_failures`、`proxy_protocol_enabled`、`proxy_header_rejections`、`connection_setup_shed`。计数从进程启动累计、重启归零；`edge_state` 不受这些计数影响。edge 不记录失败连接的任何字节、证书或私钥材料。control 把健康 JSON 原样并入站点健康详情，控制台可直接展示这些字段，工作台仍只读取 `edge_state`。
 
 ## 19.3 密钥与秘密
 
@@ -73,9 +81,15 @@ control 与 edge 之间的 HMAC 通道对三类消息分别认证，并共用同
 
 浏览器仅持有 `Secure; HttpOnly; SameSite=Lax; Path=/` 的不透明随机会话 Cookie；PostgreSQL 仅以 SHA-256 摘要索引会话 token，保存单独的 CSRF token，并由数据库时钟执行 15 分钟闲置/8 小时绝对到期和撤销。`__Host-` Cookie 要求 TLS 且不得配置 Domain。身份会话数据进入数据库备份，故备份权限与恢复流程须按管理身份材料保护；恢复后先撤销不应复活的浏览器会话。控制台通过同源代理访问 API，代理只转发 Xshield 会话/短期 OIDC state Cookie，其他 Cookie 剥离。
 
-密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取，KMS 故障不能退回硬编码默认密钥或明文证据。
+从文件读取秘密：control、edge、worker、`xshield-outbox-worker`、`xshield-evidence-retain` 与 `xshield-audit-seal` 读取的每个秘密变量（数据库 URL、各 `*_KEY_HEX`、`XSHIELD_CONTROL_TOKEN`、`XSHIELD_CONTROL_OIDC_CLIENT_SECRET`、`XSHIELD_CLICKHOUSE_PASSWORD` 等）都可以改为设置 `<变量名>_FILE`，值为一个文件路径，进程从该文件读取秘密，适合 Docker/Kubernetes secret 卷，秘密因此不出现在 `/proc/<pid>/environ`、`docker inspect` 或编排器的环境变量展示里。规则：同时设置 `NAME` 与 `NAME_FILE` 拒绝启动（避免过期变量悄悄压过挂载的文件）；文件只去掉末尾一个换行（`\n` 或 `\r\n`），其余字节原样保留；文件必须是 UTF-8 且不超过 64 KiB；进程不检查文件权限，由部署方把文件设为只有服务用户可读（Kubernetes secret 卷可设 `defaultMode: 0400`）。错误信息只给出变量名，不包含值或文件内容。非秘密配置（监听地址、URL、开关）仍只读普通变量。
+
+请求解密与响应加密密钥：启动配置站点使用 `request_crypto`/`response_crypto` 时，其 key-id 的密钥来自 `XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX`（64 位小写 hex）。经 apply 下发的站点与轮换中的新 key-id 改用密钥环 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`：值是 JSON 数组，每项 `{"tenant_id","site_id","key_id","key_hex"}`，每个方向 1–256 项，未知字段、重复的（租户、站点、key-id）、非法 key-id 或密钥都拒绝启动，错误只给出变量名与序号，不含密钥。推荐用 `_FILE` 挂载。单值变量与密钥环同时给出启动站点的同一 key-id 时拒绝启动；启动站点需要的 key-id 两处都没有时同样拒绝启动；同一密钥出现在两个方向时拒绝启动。轮换顺序：把新 key-id 加入密钥环并滚动重启 edge，发布引用新 key-id 的站点修订，确认客户端不再使用旧 key-id 后再从密钥环删除。密钥环在启动时读取，修改后需重启 edge。
+
+密钥不进入 Git、普通日志、模板、测试 fixture 或 Crash dump。服务最小权限获取。接入外部 KMS 不在当前计划内（ADR-015）：全部密钥由运营方自行生成，经本节的环境变量/`_FILE` 注入，部署方自己负责生成、分发与轮换材料本身的机密性；S3 证据后端可选的存储桶侧 SSE-KMS（12.10 `XSHIELD_EVIDENCE_S3_SSE_KMS`）是存储层特性，与此处的应用层密钥管理无关，默认关闭、不受本决定影响。
 
 edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的持久批次完成后自动切换 producer boot。部署方预建仅封存身份可写的私有 manifest 目录，并周期运行 `xshield-audit-seal JOURNAL_DIRECTORY MANIFEST_DIRECTORY`。该进程读取 journal 密钥并独占日志签名私钥；edge 不取得签名私钥。重复任务会验证既有清单与关闭段完全一致，再处理新段。
+
+常驻模式：`xshield-audit-seal`、`xshield-worker`（审计发布）与 `xshield-outbox-worker` 默认执行一轮有界处理后退出，适合 cron 或 Kubernetes CronJob。设置 `XSHIELD_RUN_INTERVAL_SECONDS`（1 到 86400 的整数）后进程常驻，每轮结束后等待该秒数再执行下一轮，适合 Compose 服务或 Kubernetes Deployment；单轮失败只向 stderr 报告并在下一轮重试，不退出（一次性模式下失败仍以退出码 1 结束）。`xshield-outbox-worker` 常驻时连接池跨轮复用，一轮领取满 `XSHIELD_OUTBOX_MAX_EVENTS` 条时不等待直接进入下一轮。可选 `XSHIELD_RUN_HEARTBEAT_FILE`（只能与间隔一起设置）：每轮成功后以“写临时文件再 rename”的方式写入当前 Unix 秒，探针据此判断进程是否仍在成功工作（例如文件超过三个间隔未更新即视为不健康），因为一直失败的常驻进程本身不会退出。每一轮本来就可以安全中断（outbox 租约到期后重领，发布检查点与封存清单都以 rename 替换），所以停止常驻进程直接发送默认的 SIGTERM 即可，没有额外的优雅退出逻辑。
 
 ## 19.4 配置与升级
 
@@ -85,15 +99,31 @@ edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的
 
 启用 OIDC 浏览器会话前先应用迁移 0035、更新控制 journal 发布器以识别 `console.auth.*` 事件，再部署控制 API、同源代理和静态控制台。启用原文 MFA step-up 前还须应用迁移 0036、部署识别 `console.auth.reauth.*` 的发布器，并确认代理为 `POST /control/v1/auth/oidc/reauth/start` 透传 `Set-Cookie` 且不缓存/记录正文。回滚 OIDC 前先停用其路由并撤销活动管理会话；单独回滚迁移 0036 前须先禁用原文内容路由，或保持 step-up-aware 控制服务运行，绝不可先移除 step-up 字段。
 
+证据存储后端：默认本地私有目录（`XSHIELD_EVIDENCE_ROOT`）。设置 `XSHIELD_EVIDENCE_BACKEND=s3` 后改用 S3 兼容存储桶，多个网关与控制面实例可以共用；变量与语义见 docs/12 12.10。启用 Object Lock 须在创建存储桶时开启（之后无法再开），并先在测试桶上确认保留模式：`compliance` 到期前任何人都无法删除，包括误写入的对象。切换本身不迁移已有对象：网关、控制面和清理都立即改读存储桶，旧对象仍留在原目录，不迁移就只能等它们各自到期由仍指向原目录的 `xshield-evidence-retain` 清理。要在切换前主动搬完，先对本地根目录运行 `xshield-evidence-migrate`（docs/12 12.11）把尚未到期的对象原样复制进目标桶，可重入、可重试，核对一致才算完成；之后旧目录仍可按原计划继续清理到自然清空。
+
 ## 19.5 运行状态
 
 liveness 仅说明进程存活；readiness 根据必要配置、状态存储和审计耐久性判断；推理不可用是否撤 readiness 依赖该节点承接的模型必需端点。拒绝流量尖峰不自动认定业务故障或自动降级。
 
+edge 运维端点：设置 `XSHIELD_EDGE_OPS_LISTEN`（如 `127.0.0.1:9554`，未设置则不开启）后，edge 在该地址提供不需认证的 `GET /livez`、`GET /readyz` 与 `GET /metrics`，供编排器探针和 Prometheus 抓取。地址只接受 loopback、私有、链路本地或未指定地址，公网地址拒绝启动；端口仍应只对管理网络开放。因为不认证，这些响应**不包含任何拓扑**：没有租户、站点、主机名、端口、revision 或源站，标签只来自封闭集合（结果类别与稳定原因码）；站点级详情仍只走带 HMAC 的 `/internal/v1/health`。
+
+- `/livez`：进程能响应即 200 `{"live":true}`。
+- `/readyz`：审计屏障打开且至少绑定一个数据面监听器时 200 `{"ready":true}`；否则 503 `{"ready":false,"reason_code":"AUDIT_UNAVAILABLE"}` 或 `"NO_LISTENERS"`。审计屏障关闭时准入本就全部拒绝，撤出流量与其一致。
+- `/metrics`（Prometheus 文本格式 0.0.4，`Cache-Control: no-store`）：`xshield_edge_ready`、`xshield_edge_audit_ready`；`xshield_edge_requests_total{outcome}`，outcome 为 `served`、`refused`、`proxy_failed`、`unadmitted`（在网关过滤器运行之前就结束的请求）、`observed`（observe 灰度下本应拒绝、仍被转发的请求，docs/32）；`xshield_edge_refusals_total{reason_code}`（准入拒绝与缓冲响应被扣留，按稳定原因码）；`xshield_edge_observed_refusals_total{reason_code}`（observe 转发的请求按本应生效的拒绝原因计数）；`xshield_edge_request_duration_seconds` 直方图；以及与健康接口同源的 `xshield_edge_tls_certificates`、`xshield_edge_tls_reloads_total`、`xshield_edge_tls_reload_failures_total`、`xshield_edge_tls_handshake_failures_total`、`xshield_edge_proxy_header_rejections_total`、`xshield_edge_connection_setup_shed_total`。启用证据采集时另有证据配额余量；启用网关内置证据清理时另有清理轮次、失败原因码、删除数与上次成功时间（docs/12 12.8）。计数从进程启动累计，重启归零，不替代审计事件。
+
+控制面运维端点：设置 `XSHIELD_CONTROL_OPS_LISTEN`（如 `127.0.0.1:9555`，未设置则不开启）后，控制面在该地址另开一个不需认证的监听器，提供同样的 `GET /livez`、`GET /readyz` 与 `GET /metrics`；地址规则与不披露拓扑的约束与 edge 相同（没有租户、站点、主体、路径或地址，标签只来自封闭集合），管理 API 本身仍只监听 loopback 并要求认证。
+
+- `/livez`：进程能响应即 200 `{"live":true}`。
+- `/readyz`：最近 30 秒内有管理审计追加失败时 503 `{"ready":false,"reason_code":"AUDIT_UNAVAILABLE"}`（此时需要审计的接口都返回 `AUDIT_DURABILITY_FAILED`；之所以按时间窗而不是粘滞，是因为被摘除流量后没有请求能清除粘滞状态）；否则用连接池执行一次 `SELECT 1`（2 秒上限），失败为 503 `DATABASE_UNAVAILABLE`；都通过为 200 `{"ready":true}`。ClickHouse 与 OIDC 不参与就绪判断：它们只影响调查与登录，相应接口自己返回稳定错误码。
+- `/metrics`：`xshield_control_ready`、`xshield_control_not_ready{reason}`、`xshield_control_responses_total{class="1xx".."5xx"}`、`xshield_control_request_duration_seconds`（与 edge 相同的 11 个桶）、`xshield_control_audit_append_failures_total`。每次抓取都会执行一次数据库探测。
+
 自动化指标：资格发行失败、绑定串用、无来源操作、解密覆盖、兼容比例、模型低信心/超时、journal 剩余空间、索引延迟、证据缺失/摘要失败、原文读取与大导出。
+
+针对以上 edge、control 两组 `/metrics` 的 Prometheus 告警规则见 19.11。
 
 ## 19.6 备份与恢复
 
-PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与独立权限复制；签名验证材料和 KMS 恢复流程同样不可缺少。恢复演练包括身份 epoch、过期资格、保留 tombstone、未完成请求和重复投递。密钥丢失导致证据不可读应记录为不可恢复，而不是显示空白。
+PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与独立权限复制；签名验证材料的备份同样不可缺少。恢复演练包括身份 epoch、过期资格、保留 tombstone、未完成请求和重复投递。密钥不经 KMS 管理（19.3、ADR-015），丢失运营方自行持有的密钥导致证据不可读应记录为不可恢复，而不是显示空白。
 
 首版不作跨区域强一致承诺。新增多区域时先给出故障域、RPO/RTO、网络分区策略和实际演练报告。
 # Edge 配置发布
@@ -108,5 +138,136 @@ PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与
 
 在 macOS 上若使用外接 exFAT 磁盘，不要直接把 `CARGO_TARGET_DIR` 放在其上：exFAT 没有硬链接和 POSIX 权限，随附的 OpenSSL 源码构建会以 `Directory not empty` 失败。可以在该磁盘上创建 APFS 稀疏包（`hdiutil create -size 400g -type SPARSEBUNDLE -fs APFS -volname XshieldBuild -attach <磁盘>/xshield-build.sparsebundle`），把构建与打包目录放在其挂载点下；磁盘空间只在该外接盘上按需增长。
 
-打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像；仓库根的 `Dockerfile` 给出 edge、control、worker 三个镜像目标（`docker build --target edge|control|worker .`，基础镜像按 digest 固定，运行用户 uid 10001，只含发布二进制与其链接的库，不带任何配置、密钥或证书），CI 的 `container-images` 作业在 Linux 上构建三个目标并检查每个二进制的共享库都能解析；镜像不推送、不签名，也没有在真实编排环境（Kubernetes/Compose）中运行过。Helm 清单与 systemd 单元仍没有，生产部署仍需自行编排（TLS 由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态）。
+打包不运行测试、不签名、不发布也不部署；版本取自 `git describe`，工作区有未提交改动时会警告。它也不构建容器镜像；仓库根的 `Dockerfile` 给出 edge、control、worker 三个镜像目标（`docker build --target edge|control|worker .`，基础镜像按 digest 固定，运行用户 uid 10001，只含发布二进制与其链接的库，不带任何配置、密钥或证书），CI 的 `container-images` 作业在 Linux 上构建三个目标并检查每个二进制的共享库都能解析；CI 构建的镜像不推送。发布镜像由 `.github/workflows/release-images.yml` 完成。有两种触发方式：一是有人推送 `v*` 标签；二是在 Actions 页面运行 `release.yml` 并填入版本号（见下文），这样不需要任何人在本地推标签。release-images 的步骤如下：
 
+- 把三个目标推到 `ghcr.io/<owner>/xshield-{edge,control,worker}:<标签>`，附带 BuildKit 构建来源证明（provenance，`mode=max`）与 SBOM；
+- 对推送的 digest 做 Sigstore 无密钥签名，签名证书绑定该工作流与标签，并在同一作业里立即验证一次。
+
+`release.yml`（workflow_dispatch，需要仓库写权限）依次完成三步：
+
+1. 检查版本号与提交是否对应：提交必须在 main 上；该提交的 Cargo 工作区与 Helm chart 都是这个版本；CHANGELOG 有该版本的标题；main 上针对该提交的 CI 已通过。不指定提交时，取第一次加入该版本 CHANGELOG 标题的提交，也就是切版本的那个提交。检查通过后在该提交上创建 `v<版本>` 标签。
+2. 以 workflow_call 调用 release-images 构建并签名镜像。用 `GITHUB_TOKEN` 推送的标签不会触发其他工作流，所以镜像在这一步构建。
+3. 创建 GitHub Release，正文是该版本的 CHANGELOG 段落，附三个镜像的 digest。
+
+标签已经在同一提交上时，重跑会复用它，适用于镜像步骤失败后重试；标签指向其他提交时，工作流拒绝运行，从不移动已有标签。
+
+部署方应按 digest 引用镜像，并在使用前验证：`cosign verify <镜像>@sha256:… --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp '^https://github\.com/<owner>/<repo>/\.github/workflows/release-images\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$'`。
+
+v0.1.1 是第一个由 `release.yml` 发布的版本（[Release](https://github.com/tzf1003/Xshield/releases/tag/v0.1.1)，标签指向 5588652），三个镜像的 digest 列在 Release 正文里，用上面的命令在仓库外逐一验证通过。
+
+签名身份与触发方式有关：
+
+- 推送标签触发时，签名身份绑定到标签（`@refs/tags/v…`）。
+- 经 `release.yml` 触发时，签名身份是 main 上的这个工作流文件（`@refs/heads/main`）。这时镜像的 `org.opencontainers.image.version` 与 `org.opencontainers.image.revision` 标签，以及构建来源证明，给出发布版本和源码提交。能以这一身份签名的，只有 main 上运行的 release-images。它只在推送 `v*` 标签或被 `release.yml` 调用时运行，而运行 `release.yml` 需要仓库写权限。
+
+单机 Docker Compose 参考部署见 19.8，Kubernetes 的 Helm chart 见 19.9，systemd 参考部署见 19.10，CI 分别把三者整体拉起验证（systemd 一项因为不涉及容器或数据库，只做 `systemd-analyze verify` 加命名约定核对，见 `scripts/test_systemd_units.sh`）；TLS 仍是由 edge 原生终止或由前置终止器终止，见 19.2 的当前实现状态。
+
+## 19.8 参考部署（Docker Compose）
+
+`deploy/compose/` 是单机、单租户单站点的参考部署，用法与逐项说明见其 `README.md`。它不是高可用方案，目的是让试点能在一台主机上按本章的约束把全部组件跑起来，并作为编写其他编排（Kubernetes 等）时的对照。
+
+- 拓扑：管理 API（`127.0.0.1:9443`）和 edge apply 通道（`127.0.0.1:9553`）按设计只监听 loopback，所以 edge 与 control 共享一个网络命名空间，由永不重启的 `net` 服务持有（相当于 Pod 的 pause 容器），重启 edge 或 control 不会让另一方失联；edge 的数据面监听器绑定在该命名空间的固定私网地址（默认 `172.30.0.10`，端口 6400–6409 发布给前置 WAF/CDN 或负载均衡），两个运维端口 9554/9555 只发布到宿主机 `127.0.0.1`。
+- 秘密：`init.sh` 生成全部密钥（含两对 Ed25519 封存密钥），以 compose secrets 挂载到 `/run/secrets/`，进程全部经 `NAME_FILE` 读取（19.3），环境变量里没有秘密值。秘密目录 0700，文件本身 0444，因为 PostgreSQL、ClickHouse 与 uid 10001 的服务用户各不相同。
+- 审计：edge 请求 journal 与 control 管理 journal 各有一组常驻的封存与发布任务（`XSHIELD_RUN_INTERVAL_SECONDS`，19.3），十个 outbox 家族各一个常驻发布任务，均写心跳文件；目录、密钥与检查点按 docs/13 互不混用。
+- 引导凭据：`init.sh` 签发的管理 Bearer 有效期不超过 24 小时（控制面上限），角色由 `.env` 的 `XSHIELD_CONTROL_ROLES` 决定，默认只有 `observer`。日常管理走 OIDC 浏览器会话，Agent API Key 也只能由浏览器会话签发。
+- 迁移：PostgreSQL 首次启动时按序执行 `migrations/`；之后的新迁移须由运维在升级对应版本前手工应用（本仓库尚无生产迁移执行器）。ClickHouse 首次启动执行 `sql/clickhouse.sql` 并按秘密文件创建 `xshield` 用户。
+- 运维方自备：管理面的 HTTPS 同源代理与控制台静态文件（要求见 `web/console/README.md` 与 docs/15，代理须加入同一网络命名空间才能访问 loopback 管理 API）、企业 OIDC IdP（必须是 HTTPS）、edge 前置的 TLS/WAF/CDN、备份（19.6）与告警。
+
+上游地址：控制面默认拒绝私网与回环上游（19.2、29“上游地址校验”）。源站只有内网地址时，在 `.env` 设置 `XSHIELD_ALLOWED_UPSTREAM_CIDRS` 列出源站网段；CI 冒烟就用这种方式接入一个私网源站，并检查网段外的私网地址仍被拒绝。
+
+CI 的 `compose` 作业用仓库 `Dockerfile` 构建三个镜像后运行 `scripts/test_compose_deployment.sh`。脚本在 `compose.smoke.yaml` 叠加一个开发 Keycloak 和一个私网源站，检查以下各项：
+
+- 两个运维端点就绪，数据面对未配置主机返回 `SITE_CONFIG_UNAVAILABLE`；
+- 管理 API 只接受引导 Bearer；放行网段内的私网源站可以保存，网段外的被拒绝；control 经签名通道取到 edge 健康，首个 apply 等待独立审批；
+- 控制面指标计数；
+- edge 与 control 各自重启后恢复就绪；
+- 管理审计事件经封存、发布进入 ClickHouse；
+- 14 个常驻任务都有新鲜心跳。
+
+**未覆盖**：站点经 edge 实际服务流量，因为首次 apply 需要 OIDC 浏览器会话的独立审批，这部分由控制面与网关的其他回归覆盖；管理代理与控制台；真实企业 IdP、TLS 与 MFA。
+
+## 19.9 Kubernetes（Helm chart）
+
+`deploy/helm/xshield/` 把一个租户、一个站点部署到 Kubernetes，用法见 `deploy/helm/README.md`。拓扑与 19.8 相同，按 Kubernetes 的方式落地：
+
+- **Pod 拓扑**：edge、control 以及两组 journal 的封存与发布任务放在 StatefulSet 的同一个 Pod 里，副本数由 `replicaCount` 控制（默认 **1**，与升级前一致；叠加 `deploy/helm/xshield/values-ha.yaml` 可选 2 或更多，见 19.9.1/ADR-014）；每个副本是一套完全独立的 edge+control+journal 任务。
+  - 管理 API 与 apply 通道只监听 loopback，所以 edge 与 control 必须共享网络命名空间——这一耦合与副本数无关，每个副本各自成立。
+  - 封存和发布任务读写同一个持久卷 `state`，但每个副本各自一份独立 PVC（`volumeClaimTemplates` 按 Pod 序号分配），不跨副本共享。各目录 0700，由初始化容器以 uid 10001 创建。
+  - 持久卷在卸载后保留。
+  - 十个 outbox 发布任务是独立的 Deployment，副本数由 `outbox.replicaCount` 控制（默认 **1**，`values-ha.yaml` 同样提到 2）。
+- **数据面**：
+  - edge 的引导配置是 ConfigMap 模板，Pod 启动时由初始化容器填入 Pod IP，因为数据面监听器只绑定私网地址。Pod 网段必须在 RFC 1918 范围内。
+  - 站点端口默认 6400–6409，由 Service `<release>-edge` 暴露。
+  - 运维端点绑定在 Pod IP 上，由 Service `<release>-ops` 暴露；可选 ServiceMonitor。
+- **就绪与存活**：
+  - Pod 就绪只看 edge 的 `/readyz`，管理面异常不应把数据面撤出流量。control 只有 liveness 探针，它的 `/readyz` 供监控抓取。
+  - 常驻任务没有就绪探针。它们的 liveness 探针检查心跳文件：启动宽限期过后，心跳超过三个间隔加一分钟未更新即重启该容器（19.3）。
+  - **代价**：control 进程反复崩溃时（例如启动时 IdP 不可达），Pod 仍会未就绪，这是 loopback 设计带来的耦合。
+- **秘密**：
+  - 全部来自运维创建的 Secret，`deploy/helm/xshield-secrets.sh` 生成除数据库 URL、ClickHouse 密码与 IdP 客户端密钥以外的键。
+  - 每个容器只投影自己用到的键，Secret 卷权限 0440，组为 fsGroup；进程仍经 `NAME_FILE` 读取。
+  - 引导 Bearer 的签发与过期时间也在 Secret 里。
+- **安全上下文**：所有 Xshield 容器以 uid 10001 运行，`runAsNonRoot`、根文件系统只读、去除全部 capability、禁止提权、seccomp `RuntimeDefault`，不挂载 ServiceAccount 令牌。符合 Pod Security `restricted` 的要求。
+  - `fsGroupChangePolicy: OnRootMismatch` 防止 kubelet 给 journal 加组权限，审计读取方会拒绝组可读的文件。
+- **可选 NetworkPolicy**：只放行站点端口与运维端口的入站，来源可分别限定。outbox Pod 不接受入站。出站不限制，因为源站、数据库与 IdP 因部署而异。
+- **运维自备**：PostgreSQL 与 ClickHouse（迁移与 schema 由运维在安装和升级前执行）、企业 OIDC IdP、管理面 HTTPS 同源代理（以 `extraContainers` 加入 Pod）、edge 前置的负载均衡或 WAF/CDN、备份（19.6）与告警。
+
+CI 的 `helm` 作业先做静态检查：缺少必填值时 schema 拒绝渲染；`helm lint --strict`；渲染结果与测试依赖清单用 kubeconform 按 Kubernetes 1.29 严格校验，这两步都叠加 `values-ha.yaml` 一并校验多副本渲染。随后在 kind 集群里装入仓库 `Dockerfile` 构建的三个镜像，运行 `scripts/test_helm_deployment.sh`（同样叠加 `values-ha.yaml`，`replicaCount`/`outbox.replicaCount` 均为 2）。脚本用 `deploy/helm/smoke/` 部署测试用 PostgreSQL、ClickHouse、一个私网源站，每个 StatefulSet 副本各自的 Pod 内加入开发 Keycloak 与 curl 工具容器，然后检查以下各项：
+
+- 两个副本各自的两个运维端点都就绪，数据面经 Service 对未配置主机返回 `SITE_CONFIG_UNAVAILABLE`；
+- 管理 API 只接受引导 Bearer；放行网段内的源站可以保存，网段外的被拒绝；control 经签名通道取到本地 edge 健康，首个 apply 等待独立审批；两个副本的 control 各自以自己的数据库连接池读到同一个站点（共享 PostgreSQL 真值，不是副本间直接通信）；
+- 管理审计事件经封存、发布进入 ClickHouse；
+- 两个副本各自的全部常驻任务都有新鲜心跳（含收敛回放任务按 `jobs.reconcileIntervalSeconds` 反复空操作不导致重启），两个 outbox 副本的十个家族心跳也都新鲜，全部容器没有重启；
+- 删除一个副本期间，Service 仍能通过另一个副本应答；该副本恢复后在同一持久卷上重新就绪，已保存的站点仍在。
+
+**未覆盖**：
+- 站点经 edge 实际服务流量（原因同 19.8：首次 apply 需要 OIDC 浏览器会话的独立审批，因此也没有验证"同一个站点在两个副本的 edge 上都实际放行流量"，只验证了两个副本的 control 从共享 PostgreSQL 读到同一个站点）；
+- 管理代理与控制台；
+- 真实企业 IdP、TLS 与 MFA；
+- 升级路径（`helm upgrade` 与迁移）；
+- ServiceMonitor 与 NetworkPolicy 在真实监控和 CNI 下的效果，CI 只校验渲染结果，kind 默认 CNI 只做基本执行。
+
+### 19.9.1 高可用（ADR-014）
+
+上文描述的拓扑此前固定 `replicas: 1`：edge 的 apply 通道（127.0.0.1:9553）和 control 的管理 API（127.0.0.1:9443）只监听 loopback 必须共享网络命名空间，这个 Pod 因此是单点故障。ADR-014 确定的方向已经落地：
+
+**调研结论（journal 封存/发布与 outbox 不需要改动即可支持多副本）**：
+
+- `xshield-outbox-worker` 按 PostgreSQL 行级租约认领任务，多实例并发天然安全；
+- journal 封存（`xshield-audit-seal`）与发布任务按清单/checkpoint 幂等重放，两个实例同时处理同一 journal 目录不冲突；
+- 真正的单写者约束只是"一个 journal 目录只能有一个进程追加写"（docs/13），这与副本数无关——只要每个副本有自己独立的 journal（`volumeClaimTemplates` 按 Pod 序号分配独立 PVC），该约束天然满足。
+
+因此这次高可用改造**没有引入 leader election**，也没有引入 etcd/Redis 等外部协调服务：journal 封存/发布与 outbox 只是放开了副本数；新增的只有 edge+control 的配置收敛机制。
+
+**已实现**：
+
+1. StatefulSet 的副本数从固定 1 改为 `values.yaml` 的 `replicaCount`（默认仍是 **1**，`helm upgrade` 不会改变既有安装的副本数或资源占用；要开启多副本，叠加 `deploy/helm/xshield/values-ha.yaml`，把它和 `outbox.replicaCount` 一起提到 2），每个副本仍是一套独立的 edge+control+两组 journal 任务+独立 PVC，loopback 耦合和安全边界不变。
+2. control 新增一个收敛回放常驻任务（`XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS`，Helm 为 `jobs.reconcileIntervalSeconds`，默认 30 秒；未设置该环境变量时行为与此前完全一致）：按固定间隔读取当前已批准的站点配置，重新调用 `apply_site_snapshot`（crates/xshield-control/src/site_config.rs，`reconcile_local_edge`/`run_edge_reconcile_loop`）把它重放给本地 edge——这正是 `apply_site_snapshot` 本来就在做的计算（每次都从 PostgreSQL 重新算出完整快照），只是从"只在收到写请求时跑一次"变成"额外定期跑一次"。多个副本各自独立运行这个循环，借助既有的幂等 apply 协议（`EDGE_APPLY_IDEMPOTENCY_CONFLICT` 等）收敛到同一配置，不需要副本之间互相通信；`xshield_control::routers()` 相应改为同时返回共享的 `Arc<ControlPlane>`。
+3. 新增 Pod 反亲和与 PodDisruptionBudget：`xshield.podSecurity` 这个共享模板按 `(root, component, replicas)` 取参，未显式设置 `.Values.affinity` 且该工作负载副本数 > 1 时给出按 `kubernetes.io/hostname` 的默认软反亲和（不阻塞单节点集群的调度）；显式设置 `.Values.affinity` 时按原样传递。`poddisruptionbudget-core.yaml`/`poddisruptionbudget-outbox.yaml` 在对应副本数 > 1 时渲染 `maxUnavailable: 1`。`deployment-outbox.yaml` 的副本数同样放开为 `outbox.replicaCount`（默认 1，`values-ha.yaml` 提到 2）。
+4. 已知限制：现有"desired/active" apply 状态位按"至少一个 edge 已收敛"记录，不是"全部副本已收敛"；没有新增按副本粒度的收敛状态表（见 docs/23），运维通过各 Pod 的签名健康接口或 control `/metrics` 的 snapshot revision 观察滚动是否完成。跨 Region/跨故障域仍不在范围内（19.6）。
+
+CI 的 kind 作业相应扩展为 2 副本场景，见上文"未覆盖"之前的检查列表。compose（19.8）与 systemd（19.10）两种参考部署保持单机，不在本次范围内。
+
+## 19.10 systemd 参考部署
+
+`deploy/systemd/` 把同一拓扑（edge、control、两个来源的封存与发布、十个 outbox 发布家族、按需的证据保留清理）跑成 systemd 单元，供不经容器编排的单机或虚拟机部署使用，用法见 `deploy/systemd/README.md`。与 19.8 的差异：
+
+- loopback 在同一主机上天然共享，所以不需要 Compose 的 `net` 占位容器：edge 的签名 apply 通道（`127.0.0.1:9553`）与 control 的管理 API（`127.0.0.1:9443`）直接互通。
+- 常驻维护进程（`xshield-audit-seal`、审计发布、outbox 发布）在这里不是 19.4 描述的 `XSHIELD_RUN_INTERVAL_SECONDS` 常驻循环，而是 systemd 自带调度的 oneshot + timer 模板单元，对应本章给出的另一种选择（“一次性模式……适合 cron 或 Kubernetes CronJob”）；因此不设置 `XSHIELD_RUN_HEARTBEAT_FILE`（只能与常驻间隔一起设置），是否按时成功运行改读 systemd 自身状态（`systemctl list-timers`、单元的 `OnFailure=`、journal）。
+- 证据保留清理（`xshield-evidence-retain`）不随任何 target 启用、没有配套 timer：按 26 的运行手册手工执行，确认节奏后再自行决定是否加定时器，因为它是删除路径。
+- 服务账号固定为 uid/gid 10001，与容器镜像一致（`xshield.sysusers.conf`）；数据目录由 `xshield.tmpfiles.conf` 以 0700 创建一次，不在后续启动时被覆盖。
+- 单元按角色加固：`User=xshield`、`NoNewPrivileges=yes`、`ProtectSystem=strict` 配合逐单元收紧的 `ReadWritePaths=`/`ReadOnlyPaths=`，以及去特权的 `Protect*`/`Restrict*` 系列；只有 edge、control 及需要连 ClickHouse/PostgreSQL 的发布与 outbox 单元保留网络，封存单元额外 `PrivateNetwork=yes`（对应 Compose 里 `edge-seal`/`control-seal` 的 `network_mode: none`）。
+
+CI 的 `systemd` 作业只做 `scripts/test_systemd_units.sh`：不涉及容器或数据库，用 `systemd-analyze verify` 校验全部单元文件语法与依赖（临时在 `/opt/xshield/current/bin` 放置可执行占位文件满足存在性检查，之后清理），再核对每个 `EnvironmentFile=` 都有对应的 `*.env.example`、每个 `ExecStart=` 引用的二进制都是本仓库实际构建的目标。**未覆盖**：真实安装与启动（没有运行中的 systemd 实例校验 `User=`/`ReadWritePaths=` 等运行时行为）、反向代理与控制台（仍需操作方自备同源代理，见 `web/console/README.md`）、高可用（单机，限制同 19.8）。
+
+## 19.11 Prometheus 告警规则
+
+`deploy/prometheus/alerts.yml` 是针对 19.5 两组 `/metrics` 的告警规则，字段名直接取自导出代码而不是本章文字，用法与范围说明见 `deploy/prometheus/README.md`。要点：
+
+- 覆盖 edge：抓取目标消失、未就绪、审计屏障关闭、高拒绝比例、代理失败、连接丢弃、TLS 握手/重载失败、p99 延迟、证据容量趋势性耗尽、证据清理失败/停滞；control：抓取目标消失、未就绪、数据库/审计不可用、管理审计追加失败、5xx 比例、p99 延迟。
+- 不假定任何 `job`/`instance` 标注约定——Helm 的 ServiceMonitor 与手写 `scrape_configs` 打的标签不同，规则只按已经互不冲突的指标名前缀（`xshield_edge_*`/`xshield_control_*`）区分角色。
+- 比例与延迟类阈值标注“按你的流量调整”，不是已验证的 SLO；docs/21 的延迟预算仍是待测目标。
+- 证据与 TLS 相关规则在对应功能未启用时天然没有样本或恒为 0，不会误报，没有另外按配置条件化。
+- 不覆盖 19.10 systemd 维护单元自身的运行状态（它们不暴露 `/metrics`，见 19.10 与 `deploy/systemd/README.md`），也不含 Alertmanager 路由/分组配置。
+
+CI 的 `prometheus-alerts` 作业用 `scripts/test_prometheus_alerts.sh`，经官方 `prom/prometheus` 镜像运行 `promtool check rules` 校验规则文件本身的语法与结构；不校验表达式在真实指标数据上的数值效果。

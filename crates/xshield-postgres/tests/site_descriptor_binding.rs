@@ -131,6 +131,8 @@ async fn approve(
             REVIEWER,
             &seeded(seed, 4),
             None,
+            false,
+            None,
         )
         .await
         .unwrap()

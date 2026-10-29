@@ -433,4 +433,44 @@ mod tests {
             Err(AccessDenied::ShareScopeMismatch)
         );
     }
+
+    /// Acceptance SHARE-04: a limited share is a reusable read lease, not a
+    /// one-time ticket. Each `Range` or segment request of the shared
+    /// resource re-presents the same token for the same exact scope, and
+    /// verification neither consumes nor mutates the grant; only the lease,
+    /// revocation and the exact scope bound reuse.
+    #[test]
+    fn limited_share_allows_repeated_reads_within_its_lease() {
+        let tenant = TenantId::parse("tenant_a").unwrap();
+        let site = SiteId::parse("site_a").unwrap();
+        let token = ShareTokenFingerprint::parse(TOKEN).unwrap();
+        let resource_type = ResourceType::parse("record").unwrap();
+        let resource = ResourceKeyHmac::parse(RESOURCE).unwrap();
+        let operation = OperationId::parse("records.share.read").unwrap();
+        let view = ViewProfile::parse("shared_summary").unwrap();
+        let mut share = share();
+        let issued = share.clone();
+        let read = |share: &ShareGrant, now| {
+            share.authorize(
+                &tenant,
+                &site,
+                &token,
+                &resource_type,
+                &resource,
+                &operation,
+                &view,
+                HttpMethod::Get,
+                UnixSeconds::new(now),
+            )
+        };
+        // Repeated and concurrent-looking segment reads, including the same
+        // instant twice, all pass and leave the grant exactly as issued.
+        for now in [100, 120, 120, 121, 150, 199] {
+            assert_eq!(read(&share, now), Ok(()), "segment read at {now}");
+        }
+        assert_eq!(share, issued);
+        assert_eq!(read(&share, 200), Err(AccessDenied::ShareScopeMismatch));
+        share.revoke();
+        assert_eq!(read(&share, 150), Err(AccessDenied::ShareScopeMismatch));
+    }
 }

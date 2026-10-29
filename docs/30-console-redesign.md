@@ -88,16 +88,19 @@
 | 工作台真实健康：edge 探测、edge 审计屏障、最近一次上游观察（带各自观察时间） | 已交付 |
 | 请求流 | 基于现有结构化检索（`event_type=request.completed`），列出已索引的终态事件，不是实时流量，存在索引滞后；检索响应不含 method、operation、HTTP 状态、身份引用 |
 | 本人任务列表（`GET /control/v1/jobs`，29.34，后端已交付；控制台列表页未接入） | 已交付（后端） |
+| 案件关联任务列表（`GET /control/v1/cases/{case_id}/jobs`，29.40） | 已交付（前后端） |
 | 站点修订待审批列表 | 已交付（控制台由现有 `GET /control/v1/sites` 的站点状态派生，`siteApprovals`，不增加后端端点） |
 | 管理员全部任务列表（`GET /control/v1/admin/jobs`，29.35，后端已交付，仅 AuditAdministrator；控制台视图未接入） | 已交付（后端） |
-| 从观察流量导入路由（`GET /control/v1/sites/{site_id}/discovered-routes`，29.37，后端已交付；控制台面板正在接入） | 已交付（后端） |
-| 按操作聚合的命中/拒绝统计（需先定义覆盖口径）、保存的检索视图、应用状态推送 | 未交付 |
+| 从观察流量导入路由（`GET /control/v1/sites/{site_id}/discovered-routes`，29.41，前后端已交付） | 已交付（前后端） |
+| 按操作聚合的命中/拒绝统计（`GET /control/v1/coverage-report`，29 §29.39） | 已交付（前后端，`/investigation/coverage`） |
+| 保存的检索视图（`/control/v1/saved-views`） | 已交付（前后端，调查检索页 `SavedViewsPanel`） |
+| 应用状态推送（当前只能轮询站点状态，无 SSE/推送通道） | 未交付 |
 
 ## 30.8 已知缺口与风险
 
 - 浏览器测试里的控制 API mock 用 25 毫秒的中止窗口区分 StrictMode 的重复读取和真实读取；窗口放长会让“真实刷新紧接着被下一次点击中止”的用例失败，放短在慢速共享机器上偶尔漏判。没有一个对两边都成立的值，所以 CI 允许一次重试（重试通过会被报告为 flaky），根治需要让这类用例不依赖时间窗口。
 - API Key 列表接口不返回 scopes，只有本会话新建的 Key 能显示自己的范围，轮换时需要重新选择；创建在服务端不是幂等的，未知结果后重试可能签发第二把 Key（页面如实说明，由操作者核对列表）。
-- 工作台与任务页没有“本会话启动的任务”列表（案件工作区不保存它）；任务只能按 ID 查询。
+- 任务页已有“我的任务”列表（本人发起的任务，`GET /control/v1/jobs`）与站点管理员的全量任务列表；工作台的快速链接会在该页进入导航时指向它。案件详情页的“分析”页签现已展示该案件触发过的全部任务历史（`GET /control/v1/cases/{case_id}/jobs`，29.40），不再局限于本次打开页面后提交的任务。
 
 - 站点列表需要 SystemAdmin，因此只有 PolicyApprover 角色的用户在审批中心看不到策略来源；`reauth/start` 需要 Reader，仅有 Approver 角色的用户无法发起 step-up。
 - 列表响应不含申请理由；理由在选中行后才读取。导出详情没有 `as_of`。

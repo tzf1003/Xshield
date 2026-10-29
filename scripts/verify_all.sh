@@ -135,13 +135,13 @@ group_gateway() {
         return
     fi
     if have node; then
-        run_step sensor-unit node --test sensor/test/sensor.test.mjs sensor/test/sensor-1.1.0.test.mjs
+        run_step sensor-unit node --test sensor/test/sensor.test.mjs sensor/test/sensor-1.1.0.test.mjs sensor/test/sensor-1.2.0.test.mjs sensor/test/sensor-1.3.0.test.mjs
     else
         skip_step sensor-unit "node not found"
     fi
-    run_step gw-transport scripts/test_gateway_transport.sh
     run_step gw-dynamic scripts/test_gateway_dynamic_listeners.sh
     if have psql && have createdb; then
+        run_step gw-transport scripts/test_gateway_transport.sh
         run_step gw-request-crypto scripts/test_gateway_request_crypto.sh
         run_step gw-identity scripts/test_gateway_identity.sh
         run_step idor-lab scripts/test_idor_lab_local.sh
@@ -151,6 +151,7 @@ group_gateway() {
             skip_step browser-loop "@playwright/test not installed (npm ci in web/console)"
         fi
     else
+        skip_step gw-transport "psql/createdb not found"
         skip_step gw-request-crypto "psql/createdb not found"
         skip_step gw-identity "psql/createdb not found"
         skip_step idor-lab "psql/createdb not found"

@@ -22,13 +22,17 @@
 //! no request and produces no per-request audit event. Failures are counted in
 //! process memory and reported by the authenticated health endpoint; nothing
 //! from a failed connection (bytes, certificate or key material) is logged.
+//!
+//! Certificates. Besides the primary pair, additional pairs can be selected
+//! by SNI, and every pair is reloaded from its files while the edge runs
+//! ([`EdgeTransport::reload_tls`], [`EdgeTransport::watch_tls`]); see the
+//! `tls` module for the rules.
 
 mod first_read;
 mod tls;
 
 use crate::proxy_protocol::{AdvertisedClient, TrustedProxies, TrustedProxiesError, read_header};
 use first_read::FirstReadDeadline;
-use openssl::ssl::SslAcceptor;
 use pingora::{
     apps::HttpServerOptions,
     protocols::{
@@ -54,10 +58,24 @@ use tokio::{
     time::timeout,
 };
 
-/// PEM certificate chain (leaf first) served on every data-plane listener.
+/// PEM certificate chain (leaf first) served on every data-plane listener to
+/// clients whose SNI matches no additional certificate.
 pub const TLS_CERT_PATH_ENV: &str = "XSHIELD_EDGE_TLS_CERT_PATH";
 /// PEM private key of the leaf certificate; must not be group/other accessible.
 pub const TLS_KEY_PATH_ENV: &str = "XSHIELD_EDGE_TLS_KEY_PATH";
+/// Comma-separated `certificate_path:key_path` pairs served, by SNI, for the
+/// DNS names of their leaf certificates. Requires the primary pair. Fixed at
+/// startup: adding or removing an entry needs a restart (see
+/// [`TLS_SNI_CERTS_DIR_ENV`] for additional certificates without one).
+pub const TLS_SNI_CERTS_ENV: &str = "XSHIELD_EDGE_TLS_SNI_CERTS";
+/// A directory whose immediate subdirectories are additional certificates,
+/// each holding exactly `tls.crt` and `tls.key` (as a Kubernetes
+/// `kubernetes.io/tls` secret mounts them). Requires the primary pair.
+/// Rescanned on every reload tick (see [`TLS_RELOAD_INTERVAL`]), so creating
+/// or deleting a subdirectory adds or removes a certificate without a
+/// restart; a certificate is still selected by SNI against its own leaf's
+/// DNS names, never by the subdirectory's name.
+pub const TLS_SNI_CERTS_DIR_ENV: &str = "XSHIELD_EDGE_TLS_SNI_CERTS_DIR";
 /// Comma-separated addresses/CIDR blocks of balancers that must send a PROXY
 /// header; unset or empty leaves the PROXY protocol off.
 pub const PROXY_PROTOCOL_TRUSTED_ENV: &str = "XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED";
@@ -73,6 +91,8 @@ pub const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_mins(1);
 /// Idle time after which a downstream HTTP/2 connection with no open stream is
 /// closed, matching the HTTP/1 keep-alive Pingora applies.
 pub const H2_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+/// How often the certificate and key files are checked for changes.
+pub const TLS_RELOAD_INTERVAL: Duration = Duration::from_secs(30);
 /// Connections in pre-HTTP setup across the whole process.
 pub const MAX_PENDING_SETUPS: usize = 1024;
 /// Connections in pre-HTTP setup on one listener, so a flood against one
@@ -85,7 +105,7 @@ const MAX_PEM_BYTES: u64 = 1 << 20;
 /// Validated process-wide transport configuration.
 #[derive(Clone)]
 pub struct TransportConfig {
-    tls: Option<SslAcceptor>,
+    tls: Option<tls::TlsSettings>,
     trusted_proxies: Option<TrustedProxies>,
 }
 
@@ -125,6 +145,8 @@ pub enum TransportConfigError {
     },
     /// The private key file is readable or writable by group or other.
     KeyPermissions {
+        /// The variable naming the file.
+        variable: &'static str,
         /// The configured path.
         path: PathBuf,
         /// The file's permission bits.
@@ -132,22 +154,58 @@ pub enum TransportConfigError {
     },
     /// The certificate file holds no parsable PEM certificate chain.
     InvalidCertificate {
+        /// The variable naming the file.
+        variable: &'static str,
         /// The configured path.
         path: PathBuf,
     },
     /// The leaf certificate is expired or not yet valid.
     CertificateNotCurrentlyValid {
+        /// The variable naming the file.
+        variable: &'static str,
         /// The configured path.
         path: PathBuf,
     },
     /// The key file holds no parsable unencrypted PEM private key, or the TLS
     /// library refused it (for example as too weak).
     InvalidPrivateKey {
+        /// The variable naming the file.
+        variable: &'static str,
         /// The configured path.
         path: PathBuf,
     },
     /// The private key does not belong to the leaf certificate.
-    KeyMismatch,
+    KeyMismatch {
+        /// The variable naming the key.
+        variable: &'static str,
+        /// The certificate the key was checked against.
+        path: PathBuf,
+    },
+    /// An additional pair is not `certificate_path:key_path`, or names the
+    /// same file twice.
+    InvalidSniEntry {
+        /// The 1-based position of the entry in the list.
+        position: usize,
+    },
+    /// [`TLS_SNI_CERTS_DIR_ENV`] is set but cannot be listed (missing, not a
+    /// directory, or unreadable).
+    SniCertsDirUnreadable {
+        /// The configured directory.
+        path: PathBuf,
+    },
+    /// An additional certificate covers no DNS name, so SNI can never select
+    /// it.
+    NoCertificateNames {
+        /// The variable that named this pair.
+        variable: &'static str,
+        /// The configured path.
+        path: PathBuf,
+    },
+    /// Two certificates cover the same DNS name, so SNI could not choose.
+    DuplicateCertificateName {
+        /// The name, as written in the certificates (public, not secret).
+        name: String,
+    },
     /// The TLS library could not build the acceptor profile.
     TlsBackend,
     /// The trusted-balancer list is invalid.
@@ -174,30 +232,53 @@ impl fmt::Display for TransportConfigError {
                 "{variable}: {} is not a regular file of at most 1 MiB",
                 path.display()
             ),
-            Self::KeyPermissions { path, mode } => write!(
+            Self::KeyPermissions {
+                variable,
+                path,
+                mode,
+            } => write!(
                 formatter,
-                "{TLS_KEY_PATH_ENV}: {} has mode {:o}; the private key must not be accessible by group or other (chmod 600)",
+                "{variable}: {} has mode {:o}; the private key must not be accessible by group or other (chmod 600)",
                 path.display(),
                 mode & 0o777
             ),
-            Self::InvalidCertificate { path } => write!(
+            Self::InvalidCertificate { variable, path } => write!(
                 formatter,
-                "{TLS_CERT_PATH_ENV}: {} holds no PEM certificate chain",
+                "{variable}: {} holds no PEM certificate chain",
                 path.display()
             ),
-            Self::CertificateNotCurrentlyValid { path } => write!(
+            Self::CertificateNotCurrentlyValid { variable, path } => write!(
                 formatter,
-                "{TLS_CERT_PATH_ENV}: the leaf certificate in {} is expired or not yet valid",
+                "{variable}: the leaf certificate in {} is expired or not yet valid",
                 path.display()
             ),
-            Self::InvalidPrivateKey { path } => write!(
+            Self::InvalidPrivateKey { variable, path } => write!(
                 formatter,
-                "{TLS_KEY_PATH_ENV}: {} holds no usable unencrypted PEM private key",
+                "{variable}: {} holds no usable unencrypted PEM private key",
                 path.display()
             ),
-            Self::KeyMismatch => write!(
+            Self::KeyMismatch { variable, path } => write!(
                 formatter,
-                "{TLS_KEY_PATH_ENV} does not match the certificate in {TLS_CERT_PATH_ENV}"
+                "{variable}: the private key does not match the certificate in {}",
+                path.display()
+            ),
+            Self::InvalidSniEntry { position } => write!(
+                formatter,
+                "{TLS_SNI_CERTS_ENV}: entry {position} is not certificate_path:key_path"
+            ),
+            Self::SniCertsDirUnreadable { path } => write!(
+                formatter,
+                "{TLS_SNI_CERTS_DIR_ENV}: {} cannot be listed",
+                path.display()
+            ),
+            Self::NoCertificateNames { variable, path } => write!(
+                formatter,
+                "{variable}: the leaf certificate in {} names no DNS host",
+                path.display()
+            ),
+            Self::DuplicateCertificateName { name } => write!(
+                formatter,
+                "two edge certificates cover {name}; SNI must select exactly one"
             ),
             Self::TlsBackend => write!(formatter, "the TLS acceptor could not be configured"),
             Self::TrustedProxies(error) => {
@@ -226,8 +307,9 @@ impl TransportConfig {
     ///
     /// # Errors
     /// [`TransportConfigError`] for a partial or empty TLS configuration, an
-    /// unreadable, invalid, mismatched or over-permissive certificate/key, or
-    /// an invalid trusted-balancer list.
+    /// unreadable, invalid, mismatched or over-permissive certificate/key, an
+    /// unusable additional-certificate list, or an invalid trusted-balancer
+    /// list.
     pub fn from_lookup<F>(lookup: F) -> Result<Self, TransportConfigError>
     where
         F: Fn(&str) -> Option<OsString>,
@@ -246,8 +328,24 @@ impl TransportConfig {
                     missing: TLS_CERT_PATH_ENV,
                 });
             }
-            (Some(certificate), Some(key)) => Some(tls::load_acceptor(&certificate, &key)?),
+            (Some(certificate), Some(key)) => {
+                let additional = sni_sources(lookup(TLS_SNI_CERTS_ENV))?;
+                let certs_dir =
+                    configured_path(TLS_SNI_CERTS_DIR_ENV, lookup(TLS_SNI_CERTS_DIR_ENV))?;
+                Some(tls::TlsSettings::load(tls::TlsSources::new(
+                    tls::CertificateSource::primary(certificate, key),
+                    additional,
+                    certs_dir,
+                ))?)
+            }
         };
+        if tls.is_none()
+            && (lookup(TLS_SNI_CERTS_ENV).is_some() || lookup(TLS_SNI_CERTS_DIR_ENV).is_some())
+        {
+            return Err(TransportConfigError::TlsPartiallyConfigured {
+                missing: TLS_CERT_PATH_ENV,
+            });
+        }
         let trusted_proxies = match lookup(PROXY_PROTOCOL_TRUSTED_ENV) {
             None => None,
             Some(value) => {
@@ -276,6 +374,50 @@ impl TransportConfig {
     pub const fn proxy_protocol_enabled(&self) -> bool {
         self.trusted_proxies.is_some()
     }
+
+    /// Configured certificate/key pairs, the primary included; 0 without TLS.
+    #[must_use]
+    pub fn tls_certificates(&self) -> usize {
+        self.tls.as_ref().map_or(0, tls::TlsSettings::certificates)
+    }
+}
+
+/// Parses the additional-certificate list; unset means none.
+fn sni_sources(
+    value: Option<OsString>,
+) -> Result<Vec<tls::CertificateSource>, TransportConfigError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| TransportConfigError::NotUnicode {
+            variable: TLS_SNI_CERTS_ENV,
+        })?;
+    if value.trim().is_empty() {
+        return Err(TransportConfigError::EmptyValue {
+            variable: TLS_SNI_CERTS_ENV,
+        });
+    }
+    value
+        .split(',')
+        .enumerate()
+        .map(|(index, entry)| {
+            let invalid = || TransportConfigError::InvalidSniEntry {
+                position: index + 1,
+            };
+            let (certificate, key) = entry.trim().split_once(':').ok_or_else(invalid)?;
+            let (certificate, key) = (certificate.trim(), key.trim());
+            if certificate.is_empty() || key.is_empty() || key.contains(':') || certificate == key {
+                return Err(invalid());
+            }
+            Ok(tls::CertificateSource::additional(
+                TLS_SNI_CERTS_ENV,
+                PathBuf::from(certificate),
+                PathBuf::from(key),
+            ))
+        })
+        .collect()
 }
 
 fn configured_path(
@@ -304,6 +446,13 @@ pub fn http_server_options() -> HttpServerOptions {
 pub struct TransportStatus {
     /// Every data-plane listener terminates TLS.
     pub tls_enabled: bool,
+    /// Configured certificate/key pairs, the primary included.
+    pub tls_certificates: u64,
+    /// Reloads that replaced the certificates after their files changed.
+    pub tls_reloads: u64,
+    /// Changed certificate files that were refused; the previous
+    /// certificates stayed in service.
+    pub tls_reload_failures: u64,
     /// TLS handshakes that failed or exceeded their deadline.
     pub tls_handshake_failures: u64,
     /// Trusted balancers must send a PROXY header.
@@ -313,6 +462,17 @@ pub struct TransportStatus {
     pub proxy_header_rejections: u64,
     /// Connections closed at accept time because every setup slot was busy.
     pub setup_shed: u64,
+}
+
+/// What [`EdgeTransport::reload_tls`] did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TlsReload {
+    /// TLS is off; there is nothing to reload.
+    Disabled,
+    /// No certificate or key file changed since the last attempt.
+    Unchanged,
+    /// New handshakes use the changed files.
+    Replaced,
 }
 
 /// The per-listener share of the setup budget. One per listening socket.
@@ -357,9 +517,12 @@ impl TransportLimits {
 
 /// Turns accepted TCP sockets into Pingora streams. Shared by all listeners.
 pub struct EdgeTransport {
-    config: TransportConfig,
+    tls: Option<tls::ReloadableTls>,
+    trusted_proxies: Option<TrustedProxies>,
     limits: TransportLimits,
     setup_slots: Arc<Semaphore>,
+    tls_reloads: AtomicU64,
+    tls_reload_failures: AtomicU64,
     tls_handshake_failures: AtomicU64,
     proxy_header_rejections: AtomicU64,
     setup_shed: AtomicU64,
@@ -374,9 +537,12 @@ impl EdgeTransport {
 
     fn with_limits(config: TransportConfig, limits: TransportLimits, setup_slots: usize) -> Self {
         Self {
-            config,
+            tls: config.tls.map(tls::ReloadableTls::new),
+            trusted_proxies: config.trusted_proxies,
             limits,
             setup_slots: Arc::new(Semaphore::new(setup_slots)),
+            tls_reloads: AtomicU64::new(0),
+            tls_reload_failures: AtomicU64::new(0),
             tls_handshake_failures: AtomicU64::new(0),
             proxy_header_rejections: AtomicU64::new(0),
             setup_shed: AtomicU64::new(0),
@@ -387,11 +553,71 @@ impl EdgeTransport {
     #[must_use]
     pub fn status(&self) -> TransportStatus {
         TransportStatus {
-            tls_enabled: self.config.tls_enabled(),
+            tls_enabled: self.tls.is_some(),
+            tls_certificates: self.tls.as_ref().map_or(0, |tls| {
+                u64::try_from(tls.certificates()).unwrap_or(u64::MAX)
+            }),
+            tls_reloads: self.tls_reloads.load(Ordering::Relaxed),
+            tls_reload_failures: self.tls_reload_failures.load(Ordering::Relaxed),
             tls_handshake_failures: self.tls_handshake_failures.load(Ordering::Relaxed),
-            proxy_protocol_enabled: self.config.proxy_protocol_enabled(),
+            proxy_protocol_enabled: self.trusted_proxies.is_some(),
             proxy_header_rejections: self.proxy_header_rejections.load(Ordering::Relaxed),
             setup_shed: self.setup_shed.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Re-reads the certificate and key files when any of them changed since
+    /// the last attempt and, when the new set is complete and valid, serves
+    /// it to new handshakes. A refused set leaves the current certificates in
+    /// service and is counted; the error names variables and paths only.
+    ///
+    /// # Errors
+    /// The [`TransportConfigError`] that refused the changed files.
+    pub fn reload_tls(&self) -> Result<TlsReload, TransportConfigError> {
+        let Some(tls) = self.tls.as_ref() else {
+            return Ok(TlsReload::Disabled);
+        };
+        match tls.reload() {
+            tls::Reload::Unchanged => Ok(TlsReload::Unchanged),
+            tls::Reload::Replaced => {
+                self.tls_reloads.fetch_add(1, Ordering::Relaxed);
+                Ok(TlsReload::Replaced)
+            }
+            tls::Reload::Refused(error) => {
+                self.tls_reload_failures.fetch_add(1, Ordering::Relaxed);
+                Err(error)
+            }
+        }
+    }
+
+    /// Checks the certificate files every `interval` until `shutdown`
+    /// changes, reporting each refused change once on standard error. Returns
+    /// at once when TLS is off.
+    pub async fn watch_tls(
+        self: Arc<Self>,
+        interval: Duration,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        if self.tls.is_none() {
+            return;
+        }
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(interval) => {}
+                _ = shutdown.changed() => return,
+            }
+            let transport = Arc::clone(&self);
+            // File reads and key parsing block; keep them off the reactor.
+            let outcome = tokio::task::spawn_blocking(move || transport.reload_tls()).await;
+            match outcome {
+                Ok(Ok(TlsReload::Replaced)) => {
+                    eprintln!("xshield edge TLS certificates reloaded");
+                }
+                Ok(Err(error)) => eprintln!(
+                    "xshield edge TLS reload refused; the current certificates stay in service: {error}"
+                ),
+                Ok(Ok(TlsReload::Unchanged | TlsReload::Disabled)) | Err(_) => {}
+            }
         }
     }
 
@@ -404,11 +630,10 @@ impl EdgeTransport {
     #[must_use]
     pub fn admit(&self, peer: SocketAddr, listener: &ListenerSetupSlots) -> Option<PendingSetup> {
         let expects_proxy_header = self
-            .config
             .trusted_proxies
             .as_ref()
             .is_some_and(|trusted| trusted.contains(peer.ip()));
-        let slots = if expects_proxy_header || self.config.tls_enabled() {
+        let slots = if expects_proxy_header || self.tls.is_some() {
             // The process slot is only tried once the listener has room, so a
             // flood on one full listener never touches the shared budget.
             let reserved =
@@ -463,10 +688,10 @@ impl EdgeTransport {
             stream.rewind(&surplus);
         }
         attach_addresses(&mut stream, client, local)?;
-        let Some(acceptor) = self.config.tls.as_ref() else {
+        let Some(acceptor) = self.tls.as_ref().map(tls::ReloadableTls::acceptor) else {
             return Some(Box::new(stream));
         };
-        let Ok(Ok(tls)) = timeout(self.limits.tls_handshake, handshake(acceptor, stream)).await
+        let Ok(Ok(tls)) = timeout(self.limits.tls_handshake, handshake(&acceptor, stream)).await
         else {
             self.tls_handshake_failures.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -530,6 +755,7 @@ fn read_pem_file(
     let mode = metadata.permissions().mode();
     if private && mode & 0o077 != 0 {
         return Err(TransportConfigError::KeyPermissions {
+            variable,
             path: path.to_path_buf(),
             mode,
         });

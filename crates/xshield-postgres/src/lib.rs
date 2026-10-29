@@ -20,6 +20,7 @@ mod case_evidence_read;
 mod case_list;
 mod control_job;
 mod control_job_admin_list;
+mod control_job_case_list;
 mod control_job_list;
 mod evidence_access_decision;
 mod evidence_access_inspection;
@@ -44,6 +45,7 @@ mod page_action_read;
 mod provenance;
 mod request_replay;
 mod response_grant;
+pub mod retention_pass;
 mod saved_search_view;
 mod service_identity_read;
 mod share_grant_issue;
@@ -96,6 +98,7 @@ pub use control_job::{CaseAnalysisJobCreate, ControlJobRecord, ControlJobWriteOu
 pub use control_job_admin_list::{
     ControlJobAdminListItem, ControlJobAdminListPage, ControlJobAdminListQuery,
 };
+pub use control_job_case_list::{ControlJobCaseListPage, ControlJobCaseListQuery};
 pub use control_job_list::{ControlJobListPage, ControlJobListQuery};
 pub use evidence_access_decision::{
     EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,
@@ -488,6 +491,15 @@ impl PostgresIdentityStore {
             .connect(database_url)
             .await?;
         Ok(Self { pool })
+    }
+
+    /// Checks that a pooled connection answers, for readiness probes.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when no connection can be acquired or used.
+    pub async fn ping(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
     }
 
     /// Uses an existing pool configured by the executable composition root.

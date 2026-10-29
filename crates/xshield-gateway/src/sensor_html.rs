@@ -1,6 +1,6 @@
 //! Exact-build browser sensor HTML injection.
 //!
-//! Sensor 1.1.0 is injected as two classic synchronous scripts at the pinned
+//! Sensor 1.3.0 is injected as two classic synchronous scripts at the pinned
 //! `</head>` offset: the sensor first, so its fetch/XHR hooks exist before any
 //! later script of the document runs, then the loader, whose tag carries the
 //! per-delivery page handle. The handle is not a credential: the bootstrap
@@ -14,8 +14,8 @@ use openssl::{
 use std::sync::LazyLock;
 use uuid::{Uuid, Version};
 
-const SENSOR_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.1.0.js\"";
-const LOADER_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.1.0-loader.js\"";
+const SENSOR_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.3.0.js\"";
+const LOADER_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.3.0-loader.js\"";
 const SCRIPT_END: &str = "></script>";
 const NONCE_ATTRIBUTE_OVERHEAD: usize = " nonce=\"\"".len();
 const NONCE_BYTES: usize = 32;
@@ -277,6 +277,39 @@ mod tests {
             rule.inject(b"<!doctype html><html></html>", None, PAGE)
                 .is_err()
         );
+    }
+
+    /// Acceptance FLOW-10 for pages: an approved page root is pinned by the
+    /// digest of its exact bytes, so a page whose HTML now carries a user
+    /// comment (a "reset password" button or its text) is no longer the
+    /// approved page. It is refused before any page handle, sensor or
+    /// page-issued action is attached to it.
+    #[test]
+    fn page_carrying_user_comment_html_is_not_the_approved_page() {
+        let approved =
+            "<!doctype html><html><head></head><body><ul id=\"comments\"></ul></body></html>";
+        let rule = SensorHtmlRule::new(
+            512,
+            vec![(
+                "home-r1".to_owned(),
+                encode_hex(sha256(approved.as_bytes())),
+                27,
+            )],
+        );
+        assert!(rule.inject(approved.as_bytes(), None, PAGE).is_ok());
+        for comment in [
+            "<li>重置密码</li>",
+            "<li><button data-xshield-action=\"auth.password.reset\" \
+             formaction=\"/api/password/reset\">重置密码</button></li>",
+        ] {
+            let commented = approved.replace("</ul>", &format!("{comment}</ul>"));
+            // Same insertion point, same size bound: only the content differs.
+            assert_eq!(commented.find("</head>"), Some(27));
+            assert!(
+                rule.inject(commented.as_bytes(), None, PAGE).is_err(),
+                "{comment}"
+            );
+        }
     }
 
     #[test]

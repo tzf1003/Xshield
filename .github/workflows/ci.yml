@@ -25,6 +25,8 @@ jobs:
       web: ${{ steps.diff.outputs.web }}
       images: ${{ steps.diff.outputs.images }}
       oidc: ${{ steps.diff.outputs.oidc }}
+      fuzz: ${{ steps.diff.outputs.fuzz }}
+      evidence: ${{ steps.diff.outputs.evidence }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,7 +37,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$EVENT" != "pull_request" ]; then
-            printf 'web=true\nimages=true\noidc=true\n' >> "$GITHUB_OUTPUT"
+            printf 'web=true\nimages=true\noidc=true\nfuzz=true\nevidence=true\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files=$(git diff --name-only "$BASE"...HEAD)
@@ -43,8 +45,10 @@ jobs:
           match() { if printf '%s\n' "$files" | grep -Eq "$1"; then echo true; else echo false; fi; }
           {
             echo "web=$(match '^(web/console/|tests/site-config/|\.github/)')"
-            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|sensor/|migrations/|tests/site-config/|\.github/)')"
+            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|sensor/|migrations/|tests/site-config/|deploy/|dev/keycloak/|scripts/test_(compose|helm)_deployment\.sh|\.github/)')"
             echo "oidc=$(match '^(crates/xshield-(control|audit|core)/|Cargo\.(toml|lock)|rust-toolchain\.toml|scripts/(test_oidc|lib/)|dev/keycloak/|web/console/|migrations/|\.github/)')"
+            echo "fuzz=$(match '^(crates/xshield-(core|gateway|audit)/|sensor/src/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|tests/site-config/|\.github/)')"
+            echo "evidence=$(match '^(crates/xshield-(core|evidence)/|Cargo\.(toml|lock)|rust-toolchain\.toml|\.github/)')"
           } >> "$GITHUB_OUTPUT"
 
   validate:
@@ -144,6 +148,7 @@ jobs:
         timeout-minutes: 10
       - run: python scripts/validate_library.py
       - run: python scripts/check_audit_event_coverage.py
+      - run: python scripts/test_check_audit_event_coverage.py
       - run: python scripts/check_env_docs.py
       - run: python scripts/check_secrets.py
 
@@ -212,8 +217,75 @@ jobs:
           scripts/test_oidc_browser.sh
         timeout-minutes: 10
 
+  # The S3 evidence backend (docs/12 12.10) against a real MinIO: SigV4 as a
+  # server checks it, create-only writes, Object Lock refusing early deletion,
+  # version-exact purge, orphan listing, multipart upload and SSE-KMS. MinIO's
+  # own image is no longer published, so this is Chainguard's build, pinned by
+  # digest. A service container cannot pass `server`, hence `docker run`. The
+  # KMS key is single-use test material generated fresh for this job, not a
+  # secret shared with anything else.
+  object-storage:
+    needs: changes
+    if: needs.changes.outputs.evidence == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      XSHIELD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      XSHIELD_TEST_S3_ACCESS_KEY_ID: xshieldtest
+      XSHIELD_TEST_S3_SECRET_ACCESS_KEY: xshieldtestsecret
+      XSHIELD_TEST_S3_SSE_KMS_KEY_ID: xshield-test-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER="$XSHIELD_TEST_S3_ACCESS_KEY_ID" \
+            -e MINIO_ROOT_PASSWORD="$XSHIELD_TEST_S3_SECRET_ACCESS_KEY" \
+            -e MINIO_KMS_SECRET_KEY="${XSHIELD_TEST_S3_SSE_KMS_KEY_ID}:$(openssl rand -base64 32)" \
+            cgr.dev/chainguard/minio@sha256:e70b2b1e74d79457f808710483bd726ff364529ca30736eaa15a6ab547d3a5a7 \
+            server /tmp/data
+          for _ in $(seq 60); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          docker logs minio
+          exit 1
+      - name: S3 evidence vault against MinIO
+        run: cargo test -p xshield-evidence --lib s3_minio -- --ignored
+
   # Licenses, RustSec advisories, yanked crates and registry sources (deny.toml).
   # It reads Cargo.lock only, so it needs no database or build.
+  # The fuzz targets (fuzz/) on the stable toolchain: every checked-in seed, including
+  # each crash ever found, and fixed deterministic mutations of them. Coverage-guided
+  # runs are in fuzz.yml. The crate is its own workspace, so it is linted here.
+  fuzz-replay:
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: clippy,rustfmt
+      - run: cargo fmt --check
+      # Not --locked: fuzz/Cargo.lock follows the product crates it depends on by path,
+      # so a dependency change there updates it here; commit that update with it.
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   supply-chain:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -263,6 +335,134 @@ jobs:
             if [ -n "$missing" ]; then echo "$binary: $missing"; exit 1; fi
             echo "$binary: libraries resolve"
           done
+
+  # The reference Compose deployment (deploy/compose, docs/19 19.8) brought up
+  # whole from the three images: readiness, management API, signed apply
+  # channel, restarts, resident jobs and audit publication into ClickHouse.
+  compose:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: edge
+          load: true
+          push: false
+          tags: xshield-edge:ci
+          cache-from: type=gha,scope=edge
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: control
+          load: true
+          push: false
+          tags: xshield-control:ci
+          cache-from: type=gha,scope=control
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: worker
+          load: true
+          push: false
+          tags: xshield-worker:ci
+          cache-from: type=gha,scope=worker
+      - name: Reference deployment smoke
+        run: XSHIELD_IMAGE_TAG=ci scripts/test_compose_deployment.sh
+
+  # systemd reference deployment (deploy/systemd, docs/19): no containers or
+  # database involved, just `systemd-analyze verify` against the unit files
+  # the runner's own systemd already ships (docs/19: no HA/orchestrator
+  # claim, this only guards the unit syntax and the env-file naming it
+  # promises in deploy/systemd/README.md).
+  systemd:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate unit files
+        run: scripts/test_systemd_units.sh
+
+  # Prometheus alerting rules (deploy/prometheus, docs/19 19.5): no Xshield
+  # component involved, just `promtool check rules` via the upstream image.
+  prometheus-alerts:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check alerting rules
+        run: scripts/test_prometheus_alerts.sh
+
+  helm:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Lint and validate the chart
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/xshield
+          # The schema refuses an install that leaves a required value empty.
+          if helm template probe "$chart" >/dev/null 2>&1; then
+            echo 'the chart rendered without its required values' >&2
+            exit 1
+          fi
+          values=(-f deploy/helm/smoke/values.yaml -f deploy/helm/xshield/values-ha.yaml
+            --set images.edge=xshield-edge:ci --set images.control=xshield-control:ci
+            --set images.worker=xshield-worker:ci
+            --set-json 'control.allowedUpstreamCidrs=["10.0.0.0/8"]'
+            --set metrics.serviceMonitor.enabled=true)
+          helm lint --strict "$chart" "${values[@]}"
+          helm template xshield "$chart" "${values[@]}" >"$RUNNER_TEMP/chart.yaml"
+          docker run --rm -v "$RUNNER_TEMP:/v" -v "$PWD/deploy/helm/smoke:/s" \
+            ghcr.io/yannh/kubeconform:v0.6.7@sha256:0925177fb05b44ce18574076141b5c3d83235e1904d3f952182ac99ddc45762c \
+            -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas /v/chart.yaml /s/deps.yaml
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: edge
+          load: true
+          push: false
+          tags: xshield-edge:ci
+          cache-from: type=gha,scope=edge
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: control
+          load: true
+          push: false
+          tags: xshield-control:ci
+          cache-from: type=gha,scope=control
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: worker
+          load: true
+          push: false
+          tags: xshield-worker:ci
+          cache-from: type=gha,scope=worker
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.25.0
+          cluster_name: xshield
+      - name: Load images into the cluster
+        run: kind load docker-image xshield-edge:ci xshield-control:ci xshield-worker:ci --name xshield
+      - name: Helm deployment smoke
+        run: XSHIELD_IMAGE_TAG=ci scripts/test_helm_deployment.sh
 
   console:
     needs: changes

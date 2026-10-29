@@ -32,6 +32,8 @@ mod calibration_lineage_review;
 mod calibration_lineage_review_retention;
 mod calibration_report;
 mod calibration_report_retention;
+mod s3;
+mod vault;
 
 pub use calibration_lineage_review::{
     AttestedCalibrationLineageReviewManifest, CALIBRATION_LINEAGE_REVIEW_CANONICAL_BODY_ENCODING,
@@ -46,6 +48,11 @@ pub use calibration_report::{
     CalibrationReportEvidenceWrite, VerifiedCalibrationReportManifest,
 };
 pub use calibration_report_retention::CalibrationReportOrphanCandidate;
+pub use s3::{
+    EvidenceMigrationOutcome, S3Addressing, S3Credentials, S3EvidenceStoreConfig,
+    S3EvidenceStoreSettings, S3EvidenceVault, S3ObjectLockMode, S3SseKms,
+};
+pub use vault::EvidenceVault;
 
 const SCHEMA_VERSION: u8 = 3;
 const NONCE_BYTES: usize = 12;
@@ -60,6 +67,9 @@ const MAX_SINGLE_ENVELOPE_BYTES: u64 =
     MAX_SINGLE_ARTIFACT_BYTES as u64 + 1 + NONCE_BYTES as u64 + TAG_BYTES as u64;
 const MAX_VAULT_FILES: usize = 100_000;
 const MAX_RETENTION_DAYS: u16 = 3_650;
+/// Largest page a migration or audit tool may request when enumerating a
+/// vault without a known tenant or site.
+const ARTIFACT_LIST_LIMIT_MAX: u16 = 256;
 type EnvelopeParts<'a> = (&'a [u8; NONCE_BYTES], &'a [u8; TAG_BYTES], &'a [u8]);
 
 /// Zeroizing root key used only to derive artifact-scoped AES-256-GCM keys.
@@ -99,14 +109,13 @@ impl EvidenceVaultConfig {
     ) -> Result<Self, EvidenceError> {
         let root = root.into();
         let key_id = key_id.into();
-        let max_retention = chrono::TimeDelta::try_days(i64::from(max_retention_days))
-            .filter(|_| (1..=MAX_RETENTION_DAYS).contains(&max_retention_days))
-            .ok_or(EvidenceError::InvalidConfig)?;
-        if root.as_os_str().is_empty()
-            || !valid_name(&key_id)
-            || max_artifact_bytes == 0
-            || max_artifact_bytes > MAX_SINGLE_ARTIFACT_BYTES
-        {
+        let max_retention = validate_vault_policy(
+            &key_id,
+            max_artifact_bytes,
+            max_retention_days,
+            MAX_SINGLE_ARTIFACT_BYTES,
+        )?;
+        if root.as_os_str().is_empty() {
             return Err(EvidenceError::InvalidConfig);
         }
         Ok(Self {
@@ -116,6 +125,29 @@ impl EvidenceVaultConfig {
             max_retention,
         })
     }
+}
+
+/// Checks the storage-independent vault limits and returns the retention cap.
+///
+/// `max_allowed_artifact_bytes` is the backend's own ceiling: the local vault
+/// passes [`MAX_SINGLE_ARTIFACT_BYTES`], while the S3 backend allows a higher
+/// one since its objects never need to fit a single local write.
+fn validate_vault_policy(
+    key_id: &str,
+    max_artifact_bytes: usize,
+    max_retention_days: u16,
+    max_allowed_artifact_bytes: usize,
+) -> Result<chrono::TimeDelta, EvidenceError> {
+    let max_retention = chrono::TimeDelta::try_days(i64::from(max_retention_days))
+        .filter(|_| (1..=MAX_RETENTION_DAYS).contains(&max_retention_days))
+        .ok_or(EvidenceError::InvalidConfig)?;
+    if !valid_name(key_id)
+        || max_artifact_bytes == 0
+        || max_artifact_bytes > max_allowed_artifact_bytes
+    {
+        return Err(EvidenceError::InvalidConfig);
+    }
+    Ok(max_retention)
 }
 
 /// Validated command for one complete evidence object.
@@ -385,68 +417,31 @@ impl LocalEvidenceVault {
         &self,
         command: &EvidenceWrite<'_>,
     ) -> Result<VerifiedEvidenceManifest, EvidenceError> {
-        validate_write(
-            command,
+        let sealed = seal(
+            &self.root_key,
+            &self.config.key_id,
             self.config.max_artifact_bytes,
             self.config.max_retention,
-            Utc::now(),
+            command,
         )?;
-        let artifact_id = format!("artifact_{}", Uuid::now_v7());
-        let locator = format!("{artifact_id}.xev");
+        let artifact_id = sealed.manifest.artifact_id.as_str();
         let manifest_locator = format!("{artifact_id}.manifest.json");
         let manifest_auth_locator = format!("{artifact_id}.manifest.hmac");
-        let aad = aad(
-            command.tenant_id,
-            command.site_id,
-            command.request_id,
-            &artifact_id,
-            command.kind,
-        )?;
-        let data_key = derive_key(&self.root_key.0, &aad)?;
-        let mut nonce = [0; NONCE_BYTES];
-        rand_bytes(&mut nonce)?;
-        let (ciphertext, tag) = encrypt(&data_key, &nonce, &aad, command.plaintext)?;
-        let envelope = envelope(&nonce, &tag, &ciphertext)?;
-        let digest = lower_hex(&sha256(&envelope));
-        let bytes_saved =
-            u64::try_from(command.plaintext.len()).map_err(|_| EvidenceError::InvalidWrite)?;
-        let manifest = EvidenceManifest {
-            schema_version: SCHEMA_VERSION,
-            artifact_id,
-            request_id: command.request_id.as_str().to_owned(),
-            tenant_id: command.tenant_id.as_str().to_owned(),
-            site_id: command.site_id.as_str().to_owned(),
-            kind: command.kind.to_owned(),
-            content_type: command.content_type.to_owned(),
-            capture_status: "complete".to_owned(),
-            fidelity: command.fidelity,
-            bytes_observed: bytes_saved,
-            bytes_saved,
-            classification: command.classification,
-            example_only: false,
-            storage: EvidenceStorage {
-                profile: "aead_envelope_v1".to_owned(),
-                locator: locator.clone(),
-                key_ref: Some(self.config.key_id.clone()),
-            },
-            integrity: EvidenceIntegrity {
-                algorithm: "sha256_ciphertext".to_owned(),
-                digest,
-            },
-            parent_refs: command.parent_refs.to_vec(),
-            expires_at: command
-                .expires_at
-                .to_rfc3339_opts(SecondsFormat::Millis, true),
-        };
-        let manifest_bytes = serde_json::to_vec(&manifest)?;
-        let manifest_auth = authenticate_manifest(&self.root_key.0, &manifest_bytes)?;
         // ponytail: object-first sidecars fail closed but may leave an unreachable
         // ciphertext after a crash; add catalog reconciliation with the remote adapter.
-        write_new_synced(&self.config.root, &locator, &envelope)?;
-        write_new_synced(&self.config.root, &manifest_locator, &manifest_bytes)?;
-        write_new_synced(&self.config.root, &manifest_auth_locator, &manifest_auth)?;
+        write_new_synced(
+            &self.config.root,
+            &sealed.manifest.storage.locator,
+            &sealed.envelope,
+        )?;
+        write_new_synced(&self.config.root, &manifest_locator, &sealed.manifest_bytes)?;
+        write_new_synced(
+            &self.config.root,
+            &manifest_auth_locator,
+            &sealed.manifest_auth,
+        )?;
         sync_directory(&self.config.root)?;
-        Ok(VerifiedEvidenceManifest(manifest))
+        Ok(VerifiedEvidenceManifest(sealed.manifest))
     }
 
     /// Loads and validates one scoped manifest while leaving plaintext unread.
@@ -498,11 +493,7 @@ impl LocalEvidenceVault {
             32,
         )
         .map_err(hide_absence)?;
-        let expected = authenticate_manifest(&self.root_key.0, &bytes)?;
-        if !constant_time::eq(&authentication, &expected) {
-            return Err(EvidenceError::CorruptEvidence);
-        }
-        serde_json::from_slice(&bytes).map_err(|_| EvidenceError::CorruptEvidence)
+        decode_authenticated_manifest(&self.root_key, &bytes, &authentication)
     }
 
     /// Removes only expired ciphertext matching the exact catalog manifest.
@@ -658,6 +649,83 @@ impl LocalEvidenceVault {
             });
         }
         Ok(candidates)
+    }
+
+    /// Lists the next page of complete generic-evidence artifact IDs after a
+    /// cursor, without requiring the caller to already know any object's
+    /// tenant or site.
+    ///
+    /// A migration or audit tool pages through an entire vault this way. A
+    /// bare ciphertext with no manifest, or a manifest with no HMAC sidecar
+    /// (see [`Self::list_orphan_candidates_after`]), is never returned; nor
+    /// is the calibration-report or lineage-review family, each of which has
+    /// its own dedicated, locally-only contract.
+    ///
+    /// # Errors
+    /// Returns [`EvidenceError`] for an unsafe root, an invalid bound, or an
+    /// invalid cursor.
+    pub fn list_generic_artifact_ids_after(
+        &self,
+        limit: u16,
+        after: Option<&str>,
+    ) -> Result<Vec<String>, EvidenceError> {
+        if !(1..=ARTIFACT_LIST_LIMIT_MAX).contains(&limit) {
+            return Err(EvidenceError::InvalidConfig);
+        }
+        if after.is_some_and(|cursor| validate_artifact_id(cursor).is_err()) {
+            return Err(EvidenceError::InvalidConfig);
+        }
+        validate_private_directory(&self.config.root)?;
+        let mut artifact_ids = BTreeSet::new();
+        let mut file_count = 0usize;
+        for entry in fs::read_dir(&self.config.root)? {
+            let entry = entry?;
+            file_count = file_count.checked_add(1).ok_or(EvidenceError::UnsafePath)?;
+            if file_count > MAX_VAULT_FILES {
+                return Err(EvidenceError::UnsafePath);
+            }
+            let metadata = entry.path().symlink_metadata()?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(EvidenceError::UnsafePath);
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(artifact_id) = name.strip_suffix(".xev").filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            if validate_artifact_id(artifact_id).is_ok() {
+                artifact_ids.insert(artifact_id.to_owned());
+            }
+        }
+        let mut result = Vec::new();
+        for artifact_id in &artifact_ids {
+            if result.len() == usize::from(limit) {
+                break;
+            }
+            if after.is_some_and(|cursor| artifact_id.as_str() <= cursor) {
+                continue;
+            }
+            if dedicated_sidecars_present(&self.config.root, artifact_id)? {
+                continue;
+            }
+            let has_manifest = sidecar_present(
+                &self
+                    .config
+                    .root
+                    .join(format!("{artifact_id}.manifest.json")),
+            )?;
+            let has_hmac = sidecar_present(
+                &self
+                    .config
+                    .root
+                    .join(format!("{artifact_id}.manifest.hmac")),
+            )?;
+            if has_manifest && has_hmac {
+                result.push(artifact_id.clone());
+            }
+        }
+        Ok(result)
     }
 
     /// Removes one previously observed orphan ciphertext after rechecking its
@@ -868,22 +936,128 @@ impl LocalEvidenceVault {
             max_envelope,
         )
         .map_err(hide_absence)?;
-        if lower_hex(&sha256(&envelope)) != manifest.integrity.digest {
-            return Err(EvidenceError::CorruptEvidence);
-        }
-        let (nonce, tag, ciphertext) = parse_envelope(&envelope)?;
-        let request_id =
-            RequestId::parse(&manifest.request_id).map_err(|_| EvidenceError::CorruptEvidence)?;
-        let aad = aad(tenant_id, site_id, &request_id, artifact_id, &manifest.kind)?;
-        let data_key = derive_key(&self.root_key.0, &aad)?;
-        let plaintext = decrypt(&data_key, nonce, &aad, ciphertext, tag)?;
-        if u64::try_from(plaintext.len()).map_err(|_| EvidenceError::CorruptEvidence)?
-            != manifest.bytes_saved
-        {
-            return Err(EvidenceError::CorruptEvidence);
-        }
-        Ok(Zeroizing::new(plaintext))
+        open_envelope(
+            &self.root_key,
+            tenant_id,
+            site_id,
+            artifact_id,
+            manifest,
+            &envelope,
+        )
     }
+}
+
+/// One encrypted object and its authenticated manifest, ready for any backend
+/// to publish ciphertext first and the two sidecars after it.
+struct SealedObject {
+    manifest: EvidenceManifest,
+    envelope: Vec<u8>,
+    manifest_bytes: Vec<u8>,
+    manifest_auth: [u8; 32],
+}
+
+/// Validates one write and encrypts it under a fresh `UUIDv7` artifact ID.
+/// Storage-independent: the local and S3 vaults persist the same bytes.
+fn seal(
+    root_key: &EvidenceKey,
+    key_id: &str,
+    max_artifact_bytes: usize,
+    max_retention: chrono::TimeDelta,
+    command: &EvidenceWrite<'_>,
+) -> Result<SealedObject, EvidenceError> {
+    validate_write(command, max_artifact_bytes, max_retention, Utc::now())?;
+    let artifact_id = format!("artifact_{}", Uuid::now_v7());
+    let locator = format!("{artifact_id}.xev");
+    let aad = aad(
+        command.tenant_id,
+        command.site_id,
+        command.request_id,
+        &artifact_id,
+        command.kind,
+    )?;
+    let data_key = derive_key(&root_key.0, &aad)?;
+    let mut nonce = [0; NONCE_BYTES];
+    rand_bytes(&mut nonce)?;
+    let (ciphertext, tag) = encrypt(&data_key, &nonce, &aad, command.plaintext)?;
+    let envelope = envelope(&nonce, &tag, &ciphertext)?;
+    let digest = lower_hex(&sha256(&envelope));
+    let bytes_saved =
+        u64::try_from(command.plaintext.len()).map_err(|_| EvidenceError::InvalidWrite)?;
+    let manifest = EvidenceManifest {
+        schema_version: SCHEMA_VERSION,
+        artifact_id,
+        request_id: command.request_id.as_str().to_owned(),
+        tenant_id: command.tenant_id.as_str().to_owned(),
+        site_id: command.site_id.as_str().to_owned(),
+        kind: command.kind.to_owned(),
+        content_type: command.content_type.to_owned(),
+        capture_status: "complete".to_owned(),
+        fidelity: command.fidelity,
+        bytes_observed: bytes_saved,
+        bytes_saved,
+        classification: command.classification,
+        example_only: false,
+        storage: EvidenceStorage {
+            profile: "aead_envelope_v1".to_owned(),
+            locator,
+            key_ref: Some(key_id.to_owned()),
+        },
+        integrity: EvidenceIntegrity {
+            algorithm: "sha256_ciphertext".to_owned(),
+            digest,
+        },
+        parent_refs: command.parent_refs.to_vec(),
+        expires_at: command
+            .expires_at
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let manifest_auth = authenticate_manifest(&root_key.0, &manifest_bytes)?;
+    Ok(SealedObject {
+        manifest,
+        envelope,
+        manifest_bytes,
+        manifest_auth,
+    })
+}
+
+/// Authenticates manifest bytes against their stored HMAC before decoding.
+fn decode_authenticated_manifest(
+    root_key: &EvidenceKey,
+    bytes: &[u8],
+    authentication: &[u8],
+) -> Result<EvidenceManifest, EvidenceError> {
+    let expected = authenticate_manifest(&root_key.0, bytes)?;
+    if !constant_time::eq(authentication, &expected) {
+        return Err(EvidenceError::CorruptEvidence);
+    }
+    serde_json::from_slice(bytes).map_err(|_| EvidenceError::CorruptEvidence)
+}
+
+/// Checks the ciphertext digest, then AEAD-decrypts under the manifest's scope.
+fn open_envelope(
+    root_key: &EvidenceKey,
+    tenant_id: &TenantId,
+    site_id: &SiteId,
+    artifact_id: &str,
+    manifest: &EvidenceManifest,
+    envelope: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, EvidenceError> {
+    if lower_hex(&sha256(envelope)) != manifest.integrity.digest {
+        return Err(EvidenceError::CorruptEvidence);
+    }
+    let (nonce, tag, ciphertext) = parse_envelope(envelope)?;
+    let request_id =
+        RequestId::parse(&manifest.request_id).map_err(|_| EvidenceError::CorruptEvidence)?;
+    let aad = aad(tenant_id, site_id, &request_id, artifact_id, &manifest.kind)?;
+    let data_key = derive_key(&root_key.0, &aad)?;
+    let plaintext = decrypt(&data_key, nonce, &aad, ciphertext, tag)?;
+    if u64::try_from(plaintext.len()).map_err(|_| EvidenceError::CorruptEvidence)?
+        != manifest.bytes_saved
+    {
+        return Err(EvidenceError::CorruptEvidence);
+    }
+    Ok(Zeroizing::new(plaintext))
 }
 
 fn validate_write(
@@ -1668,6 +1842,80 @@ mod tests {
         assert!(!root.join(format!("{raw_id}.xev")).exists());
         assert!(root.join(format!("{partial_id}.xev")).exists());
         assert!(root.join(format!("{partial_id}.manifest.json")).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generic_artifact_listing_pages_complete_objects_and_skips_the_rest() {
+        let root = private_temp_directory();
+        let vault = LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(&root, "evidence-key-r1", 1024, 30).unwrap(),
+            EvidenceKey::from_hex(KEY).unwrap(),
+        )
+        .unwrap();
+        let tenant = TenantId::parse("tenant_list").unwrap();
+        let site = SiteId::parse("site_list").unwrap();
+        let request = RequestId::parse(format!("req_{}", Uuid::now_v7())).unwrap();
+        let mut complete_ids = Vec::new();
+        for plaintext in [b"first".as_slice(), b"second".as_slice()] {
+            let written = vault
+                .write(&EvidenceWrite {
+                    tenant_id: &tenant,
+                    site_id: &site,
+                    request_id: &request,
+                    kind: "response_decoded",
+                    content_type: "application/json",
+                    fidelity: EvidenceFidelity::Redacted,
+                    classification: EvidenceClassification::Restricted,
+                    parent_refs: &[],
+                    expires_at: Utc::now() + TimeDelta::hours(1),
+                    plaintext,
+                })
+                .unwrap();
+            complete_ids.push(written.manifest().artifact_id.clone());
+        }
+        complete_ids.sort();
+
+        let bare_id = format!("artifact_{}", Uuid::now_v7());
+        fs::write(root.join(format!("{bare_id}.xev")), b"orphan").unwrap();
+        let partial_id = format!("artifact_{}", Uuid::now_v7());
+        fs::write(root.join(format!("{partial_id}.xev")), b"partial").unwrap();
+        fs::write(root.join(format!("{partial_id}.manifest.json")), b"partial").unwrap();
+        let calibration_id = format!("artifact_{}", Uuid::now_v7());
+        fs::write(root.join(format!("{calibration_id}.xev")), b"calibration").unwrap();
+        fs::write(
+            root.join(format!("{calibration_id}.calibration-report.manifest.json")),
+            b"calibration",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            vault.list_generic_artifact_ids_after(0, None),
+            Err(EvidenceError::InvalidConfig)
+        ));
+        assert!(matches!(
+            vault.list_generic_artifact_ids_after(8, Some("not an artifact id")),
+            Err(EvidenceError::InvalidConfig)
+        ));
+
+        let first_page = vault.list_generic_artifact_ids_after(1, None).unwrap();
+        assert_eq!(first_page, [complete_ids[0].clone()]);
+        let second_page = vault
+            .list_generic_artifact_ids_after(8, Some(&first_page[0]))
+            .unwrap();
+        assert_eq!(second_page, [complete_ids[1].clone()]);
+        assert!(
+            vault
+                .list_generic_artifact_ids_after(8, Some(&second_page[0]))
+                .unwrap()
+                .is_empty()
+        );
+
+        let whole_vault = vault.list_generic_artifact_ids_after(8, None).unwrap();
+        assert_eq!(whole_vault, complete_ids);
+        assert!(!whole_vault.contains(&bare_id));
+        assert!(!whole_vault.contains(&partial_id));
+        assert!(!whole_vault.contains(&calibration_id));
         fs::remove_dir_all(root).unwrap();
     }
 

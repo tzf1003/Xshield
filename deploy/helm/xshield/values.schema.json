@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["tenantId", "siteId", "images", "existingSecret", "clickhouse", "oidc"],
+  "definitions": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+    "nonEmpty": {"type": "string", "minLength": 1},
+    "interval": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "replicas": {"type": "integer", "minimum": 1, "maximum": 50}
+  },
+  "properties": {
+    "tenantId": {"$ref": "#/definitions/identifier"},
+    "siteId": {"$ref": "#/definitions/identifier"},
+    "replicaCount": {"$ref": "#/definitions/replicas"},
+    "images": {
+      "type": "object",
+      "required": ["edge", "control", "worker"],
+      "properties": {
+        "edge": {"$ref": "#/definitions/nonEmpty"},
+        "control": {"$ref": "#/definitions/nonEmpty"},
+        "worker": {"$ref": "#/definitions/nonEmpty"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "existingSecret": {"$ref": "#/definitions/nonEmpty"},
+    "clickhouse": {
+      "type": "object",
+      "required": ["url", "database", "user"],
+      "properties": {
+        "url": {"type": "string", "pattern": "^https?://"},
+        "database": {"$ref": "#/definitions/nonEmpty"},
+        "user": {"$ref": "#/definitions/nonEmpty"},
+        "metadataRetentionDays": {"type": "integer", "minimum": 1}
+      }
+    },
+    "oidc": {
+      "type": "object",
+      "required": ["issuer", "clientId", "requiredAcr", "subjectRolesJson", "consoleOrigin"],
+      "properties": {
+        "issuer": {"type": "string", "pattern": "^https?://"},
+        "clientId": {"$ref": "#/definitions/nonEmpty"},
+        "requiredAcr": {"$ref": "#/definitions/nonEmpty"},
+        "subjectRolesJson": {"$ref": "#/definitions/nonEmpty"},
+        "consoleOrigin": {"type": "string", "pattern": "^https?://"}
+      }
+    },
+    "control": {
+      "type": "object",
+      "properties": {
+        "bootstrapRoles": {"$ref": "#/definitions/nonEmpty"},
+        "bootstrapSubject": {"$ref": "#/definitions/nonEmpty"},
+        "allowedUpstreamCidrs": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
+        "databaseMaxConnections": {"type": "integer", "minimum": 1},
+        "requestsPerMinute": {"type": "integer", "minimum": 1}
+      }
+    },
+    "edge": {
+      "type": "object",
+      "properties": {
+        "sitePorts": {
+          "type": "object",
+          "required": ["first", "count"],
+          "properties": {
+            "first": {"type": "integer", "minimum": 6100, "maximum": 65535},
+            "count": {"type": "integer", "minimum": 1, "maximum": 100}
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": {"enum": ["ClusterIP", "NodePort", "LoadBalancer"]}
+          }
+        }
+      }
+    },
+    "jobs": {
+      "type": "object",
+      "properties": {
+        "sealIntervalSeconds": {"$ref": "#/definitions/interval"},
+        "publishIntervalSeconds": {"$ref": "#/definitions/interval"},
+        "outboxIntervalSeconds": {"$ref": "#/definitions/interval"},
+        "reconcileIntervalSeconds": {"$ref": "#/definitions/interval"},
+        "firstSuccessGraceSeconds": {"type": "integer", "minimum": 30}
+      }
+    },
+    "outbox": {
+      "type": "object",
+      "properties": {
+        "replicaCount": {"$ref": "#/definitions/replicas"}
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "core": {
+          "type": "object",
+          "properties": {
+            "maxUnavailable": {"type": "integer", "minimum": 1}
+          }
+        },
+        "outbox": {
+          "type": "object",
+          "properties": {
+            "maxUnavailable": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "required": ["size"],
+      "properties": {
+        "storageClassName": {"type": "string"},
+        "size": {"$ref": "#/definitions/nonEmpty"}
+      }
+    }
+  }
+}

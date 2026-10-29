@@ -4,6 +4,8 @@ import { useGuardedQuery } from "../../security/hooks.ts";
 import { guardedQueryKey } from "../../security/guarded-query.ts";
 import { MANUAL_REFRESH } from "../../security/query-client.ts";
 import { useSession } from "../../security/SessionProvider.tsx";
+import { ApiError } from "../../api-contract.ts";
+import type { RolloutReport, RolloutReportRequest } from "../../rollout-report.ts";
 import { siteKeys } from "./queries.ts";
 
 /**
@@ -67,6 +69,38 @@ export function useSiteHealth(siteId: string) {
   return { ...query, read };
 }
 
+/**
+ * The exit report of one observe window, read only on request like health: each read is audited
+ * and scans the index. The control plane reports on the site it indexes, so a reply for another
+ * site throws instead of rendering.
+ */
+export function useRolloutReport(siteId: string, request: RolloutReportRequest | null) {
+  const { runtime } = useSession();
+  const key = siteKeys.rolloutReport(
+    siteId,
+    request?.revision ?? "",
+    request?.start ?? "",
+    request?.end ?? "",
+  );
+  const query = useGuardedQuery({
+    key,
+    enabled: false,
+    expectedSiteId: siteId,
+    staleTime: MANUAL_REFRESH,
+    fetch: (client, signal) => {
+      if (!request) throw new ApiError("CONTROL_ROLLOUT_REPORT_REQUEST_INVALID");
+      return client.rolloutReport(request, signal);
+    },
+  });
+  const { refetch } = query;
+  const read = useCallback(async () => {
+    const epoch = runtime.store.getState().epoch;
+    runtime.queryClient.removeQueries({ queryKey: guardedQueryKey(epoch, key) });
+    await refetch();
+  }, [runtime, key, refetch]);
+  return { ...query, read };
+}
+
 /** Cache maintenance after a write that the server confirmed. Health is never re-read. */
 export function useSiteCache(siteId: string) {
   const { runtime } = useSession();
@@ -103,4 +137,25 @@ export function useSiteCache(siteId: string) {
     });
   }, [runtime, queryClient, siteId]);
   return { setConfig, refreshDetail, dropSite };
+}
+
+/**
+ * The exit report this operator generated most recently for the site in this session, read from
+ * the cache only (no request, no audit row): the approval records which report the approver saw.
+ */
+export function useLatestRolloutReport(siteId: string): RolloutReport | null {
+  const { runtime } = useSession();
+  const epoch = runtime.store.getState().epoch;
+  let latest: RolloutReport | null = null;
+  let at = -1;
+  for (const query of runtime.queryClient
+    .getQueryCache()
+    .findAll({ queryKey: guardedQueryKey(epoch, ["sites", siteId, "rollout-report"]) })) {
+    const data = query.state.data as RolloutReport | undefined;
+    if (data?.site_id === siteId && query.state.dataUpdatedAt > at) {
+      latest = data;
+      at = query.state.dataUpdatedAt;
+    }
+  }
+  return latest;
 }

@@ -1,0 +1,72 @@
+name: Fuzz
+
+# Coverage-guided fuzzing of the parsers that read external bytes (fuzz/README.md).
+# Daily and on demand; pull requests replay the seeds instead (ci.yml, fuzz-replay).
+# The corpus each run grows is cached for the next one; a crash fails the run and is
+# uploaded, to be minimized and added under fuzz/seeds/<target>/.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "180"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      SECONDS_PER_TARGET: ${{ inputs.seconds || '180' }}
+      # cargo-fuzz itself is built from crates.io at this exact version.
+      CARGO_FUZZ_VERSION: 0.13.2
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
+      # Stable toolchain, so no sanitizer: libFuzzer still instruments for coverage, and
+      # what the targets check is panics and broken invariants in safe Rust.
+      - name: Build targets
+        run: cargo fuzz build -s none -O
+      - uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Run every target
+        run: |
+          mkdir -p artifacts
+          status=0
+          for target in $(cargo fuzz list); do
+            mkdir -p "corpus/$target" "artifacts/$target"
+            cp --update=none seeds/"$target"/* "corpus/$target/"
+            echo "::group::$target"
+            if ! cargo fuzz run -s none -O "$target" "corpus/$target" -- \
+                -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=2048 -timeout=10 \
+                -artifact_prefix="artifacts/$target/" -print_final_stats=1; then
+              status=1
+              echo "::error::fuzz target $target failed"
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts

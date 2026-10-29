@@ -3,12 +3,13 @@
 use clickhouse::Client;
 use std::{env, error::Error, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
+use xshield_core::resident::Schedule;
 use xshield_postgres::{OutboxLeaseConfig, OutboxScope, PostgresIdentityStore};
 use xshield_worker::{
-    OutboxPublisherConfig, publish_calibration_outbox_batch, publish_case_outbox_batch,
-    publish_evidence_access_outbox_batch, publish_evidence_catalog_outbox_batch,
-    publish_evidence_retention_outbox_batch, publish_grant_outbox_batch,
-    publish_identity_outbox_batch, publish_response_grant_outbox_batch,
+    OutboxPublishReport, OutboxPublisherConfig, publish_calibration_outbox_batch,
+    publish_case_outbox_batch, publish_evidence_access_outbox_batch,
+    publish_evidence_catalog_outbox_batch, publish_evidence_retention_outbox_batch,
+    publish_grant_outbox_batch, publish_identity_outbox_batch, publish_response_grant_outbox_batch,
     publish_share_grant_outbox_batch, publish_ui_action_outbox_batch,
 };
 use zeroize::Zeroizing;
@@ -16,7 +17,7 @@ use zeroize::Zeroizing;
 const USAGE: &str = "usage: xshield-outbox-worker TENANT_ID SITE_ID (XSHIELD_OUTBOX_FAMILY=case|evidence_catalog|evidence_access|evidence_retention|calibration|identity|grant|response_grant|share_grant|ui_action)";
 
 #[allow(clippy::too_many_lines)] // Bounded fixed environment assembly keeps every operator input visible.
-async fn run() -> Result<(), Box<dyn Error>> {
+async fn setup() -> Result<Publisher, Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
     let tenant_id = TenantId::parse(
         arguments
@@ -55,7 +56,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     ) {
         return Err(USAGE.into());
     }
-    let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
+    let database_url = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_DATABASE_URL")?);
     let database_max_connections: u32 =
         env::var("XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS")?.parse()?;
     let database_acquire_timeout =
@@ -63,7 +64,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let clickhouse_url = env::var("XSHIELD_CLICKHOUSE_URL")?;
     let clickhouse_database = env::var("XSHIELD_CLICKHOUSE_DATABASE")?;
     let clickhouse_user = env::var("XSHIELD_CLICKHOUSE_USER")?;
-    let clickhouse_password = Zeroizing::new(env::var("XSHIELD_CLICKHOUSE_PASSWORD")?);
+    let clickhouse_password = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CLICKHOUSE_PASSWORD",
+    )?);
     let table = env::var("XSHIELD_CLICKHOUSE_TABLE").unwrap_or_else(|_| "audit_events".to_owned());
     let retention_days: u16 = env::var("XSHIELD_AUDIT_METADATA_RETENTION_DAYS")?.parse()?;
     let max_events: u32 = env::var("XSHIELD_OUTBOX_MAX_EVENTS")?.parse()?;
@@ -90,41 +93,99 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_password(clickhouse_password.as_str())
         .with_setting("max_execution_time", "30")
         .with_product_info("xshield-outbox-worker", env!("CARGO_PKG_VERSION"));
-    let scope = OutboxScope::new(&tenant_id, &site_id);
-    let report = match family.as_str() {
-        "case" => publish_case_outbox_batch(&store, &client, &scope, &config).await?,
-        "evidence_catalog" => {
-            publish_evidence_catalog_outbox_batch(&store, &client, &scope, &config).await?
-        }
-        "evidence_access" => {
-            publish_evidence_access_outbox_batch(&store, &client, &scope, &config).await?
-        }
-        "calibration" => publish_calibration_outbox_batch(&store, &client, &scope, &config).await?,
-        "identity" => publish_identity_outbox_batch(&store, &client, &scope, &config).await?,
-        "evidence_retention" => {
-            publish_evidence_retention_outbox_batch(&store, &client, &scope, &config).await?
-        }
-        "grant" => publish_grant_outbox_batch(&store, &client, &scope, &config).await?,
-        "response_grant" => {
-            publish_response_grant_outbox_batch(&store, &client, &scope, &config).await?
-        }
-        "share_grant" => publish_share_grant_outbox_batch(&store, &client, &scope, &config).await?,
-        "ui_action" => publish_ui_action_outbox_batch(&store, &client, &scope, &config).await?,
-        _ => return Err(USAGE.into()),
-    };
-    println!(
-        "family={family} claimed={} published={} table={}",
-        report.claimed,
-        report.published,
-        config.table(),
-    );
-    Ok(())
+    Ok(Publisher {
+        family,
+        scope: OutboxScope::new(&tenant_id, &site_id),
+        store,
+        client,
+        config,
+        max_events,
+    })
+}
+
+/// Everything one pass needs; built once so a resident process keeps its
+/// connection pool between passes.
+struct Publisher {
+    family: String,
+    scope: OutboxScope,
+    store: PostgresIdentityStore,
+    client: Client,
+    config: OutboxPublisherConfig,
+    max_events: u32,
+}
+
+impl Publisher {
+    async fn pass(&self) -> Result<OutboxPublishReport, Box<dyn Error>> {
+        let Self {
+            family,
+            scope,
+            store,
+            client,
+            config,
+            ..
+        } = self;
+        let report = match family.as_str() {
+            "case" => publish_case_outbox_batch(store, client, scope, config).await?,
+            "evidence_catalog" => {
+                publish_evidence_catalog_outbox_batch(store, client, scope, config).await?
+            }
+            "evidence_access" => {
+                publish_evidence_access_outbox_batch(store, client, scope, config).await?
+            }
+            "calibration" => publish_calibration_outbox_batch(store, client, scope, config).await?,
+            "identity" => publish_identity_outbox_batch(store, client, scope, config).await?,
+            "evidence_retention" => {
+                publish_evidence_retention_outbox_batch(store, client, scope, config).await?
+            }
+            "grant" => publish_grant_outbox_batch(store, client, scope, config).await?,
+            "response_grant" => {
+                publish_response_grant_outbox_batch(store, client, scope, config).await?
+            }
+            "share_grant" => publish_share_grant_outbox_batch(store, client, scope, config).await?,
+            "ui_action" => publish_ui_action_outbox_batch(store, client, scope, config).await?,
+            _ => return Err(USAGE.into()),
+        };
+        println!(
+            "family={family} claimed={} published={} table={}",
+            report.claimed,
+            report.published,
+            config.table(),
+        );
+        Ok(report)
+    }
+}
+
+fn fail(error: &dyn std::fmt::Display) -> ! {
+    eprintln!("xshield outbox publication failed: {error}; {USAGE}");
+    std::process::exit(1);
 }
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("xshield outbox publication failed: {error}; {USAGE}");
-        std::process::exit(1);
+    let schedule = Schedule::from_env().unwrap_or_else(|error| fail(&error));
+    let publisher = setup().await.unwrap_or_else(|error| fail(&error));
+    loop {
+        let full = match publisher.pass().await {
+            Ok(report) => {
+                if let Err(error) = schedule.record_success() {
+                    eprintln!("xshield outbox publication heartbeat failed: {error}");
+                }
+                // A full batch means more is waiting: take it without waiting.
+                u32::try_from(report.claimed).is_ok_and(|claimed| claimed >= publisher.max_events)
+            }
+            Err(error) => {
+                if schedule.interval().is_none() {
+                    fail(&error);
+                }
+                eprintln!("xshield outbox publication failed: {error}");
+                false
+            }
+        };
+        let Some(interval) = schedule.interval() else {
+            return;
+        };
+        if !full {
+            tokio::time::sleep(interval).await;
+        }
     }
 }

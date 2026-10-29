@@ -1,0 +1,19 @@
+{{- if gt (int .Values.replicaCount) 1 }}
+{{- $name := include "xshield.fullname" . -}}
+# Keeps a voluntary disruption (node drain, cluster upgrade) from evicting
+# every edge+control replica at once (docs/19 19.9.1, ADR-014). Rendered
+# only above 1 replica: a budget cannot permit any unavailability at exactly
+# one, and Kubernetes refuses maxUnavailable >= replicas on drain anyway.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-core
+  labels:
+    {{- include "xshield.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core
+spec:
+  maxUnavailable: {{ min (int .Values.podDisruptionBudget.core.maxUnavailable) (sub (int .Values.replicaCount) 1) }}
+  selector:
+    matchLabels:
+      {{- include "xshield.selector" (dict "root" . "component" "core") | nindent 6 }}
+{{- end }}

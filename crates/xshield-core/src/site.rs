@@ -7,11 +7,13 @@ use crate::domain::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub mod build;
 pub mod config;
 pub mod descriptors;
 pub mod flow;
 mod projection;
 pub mod risk;
+pub mod rollout;
 pub mod share;
 pub mod unsupported;
 pub mod upstream;
@@ -26,7 +28,8 @@ pub use flow::{
     SiteSensorHtml, SiteSensorHtmlAdapter,
 };
 pub use projection::{EDGE_MAX_CONFIG_BYTES, gateway_operation};
-pub use risk::{ChangeRisk, assess_change_risk, direct_apply_may_waive};
+pub use risk::{ChangeRisk, approval_requires_step_up, assess_change_risk, direct_apply_may_waive};
+pub use rollout::{RolloutMode, SiteRollout, observable_refusal};
 pub use share::{ShareIssuanceRule, SiteShareIssue, issuance_rules};
 pub use unsupported::{UnsupportedEdgeFeature, find_unsupported_edge_feature};
 
@@ -525,6 +528,11 @@ pub struct SitePolicyConfig {
     /// enforce object ownership before returning or mutating a resource.
     #[serde(default)]
     pub origin_object_access_enforced: bool,
+    /// Observe → enforce rollout (docs/32). Absent means enforce, and an
+    /// enforced block is not serialized, so existing configurations keep
+    /// their exact bytes.
+    #[serde(default, skip_serializing_if = "SiteRollout::is_default")]
+    pub rollout: SiteRollout,
 }
 
 impl Default for SitePolicyConfig {
@@ -539,6 +547,7 @@ impl Default for SitePolicyConfig {
             secret_refs: Vec::new(),
             static_asset_max_path_depth: default_static_asset_max_path_depth(),
             origin_object_access_enforced: false,
+            rollout: SiteRollout::default(),
         }
     }
 }
@@ -810,7 +819,8 @@ impl SitePolicyConfig {
                 return Err(InvalidValue::new("site_policy.secret_refs"));
             }
         }
-        Ok(())
+        self.rollout
+            .validate(self.routes.iter().map(|route| route.operation_id.as_str()))
     }
 
     /// Returns whether a public GET may use the opt-in static-asset fallback.

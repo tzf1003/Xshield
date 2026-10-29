@@ -1,4 +1,4 @@
-import type { SitePolicyConfig } from "../../api.ts";
+import type { SitePolicyConfig, SiteRollout } from "../../api.ts";
 import { type RiskToken, riskText } from "../../ui/reason-codes.ts";
 import { canonicalJson, effectivePolicy, type SiteConfigDraft } from "./config.ts";
 import { diffConfigs, type FieldChange, isServing } from "./diff.ts";
@@ -18,8 +18,39 @@ function changedFlowFacets(before: SitePolicyConfig | null, after: SitePolicyCon
     .map(([token]) => token);
 }
 
+/**
+ * `SiteRollout::relaxes`: whether `after` observes more than `before` (enforce when absent):
+ * entering observe, a later deadline, or a route released from enforce.
+ */
+export function rolloutRelaxes(before: SiteRollout | undefined, after: SiteRollout | undefined) {
+  if (after === undefined) return false;
+  if (before === undefined) return true;
+  const kept = after.enforced_operations ?? [];
+  return (
+    after.observe_until_unix > before.observe_until_unix ||
+    (before.enforced_operations ?? []).some((operation) => !kept.includes(operation))
+  );
+}
+
+/** The rollout reason for going from `before` (served, or nothing) to `after`, if any. */
+function rolloutChange(
+  before: SiteRollout | undefined | null,
+  after: SiteRollout | undefined,
+): RiskToken[] {
+  if (rolloutRelaxes(before ?? undefined, after)) return ["ROLLOUT_MODE_RELAXED"];
+  if (before !== null && canonicalJson(before ?? null) !== canonicalJson(after ?? null))
+    return ["ROLLOUT_MODE_TIGHTENED"];
+  return [];
+}
+
 /** Reasons only an independent PolicyApprover may clear (`requires_independent_approval`). */
-export const independentApprovalTokens: readonly RiskToken[] = flowFacets.map(([token]) => token);
+export const independentApprovalTokens: readonly RiskToken[] = [
+  ...flowFacets.map(([token]) => token),
+  "ROLLOUT_MODE_RELAXED",
+];
+
+/** Reasons whose approver must also have reauthenticated recently (`requires_step_up`). */
+export const needsStepUp = (token: RiskToken) => token === "ROLLOUT_MODE_RELAXED";
 
 /** Whether a reason can only be cleared by an independent approver, never by a direct apply. */
 export const needsIndependentApproval = (token: RiskToken) =>
@@ -42,7 +73,14 @@ export function assessChangeRisk(
   const served = baseline !== null && isServing(baseline) ? baseline : null;
   if (!isServing(desired)) return served ? ["TAKEDOWN"] : [];
   // Flow routes a site goes live with are new as well, and are named.
-  if (served === null) return ["ACTIVATION", ...changedFlowFacets(null, effectivePolicy(desired))];
+  if (served === null) {
+    const policy = effectivePolicy(desired);
+    return [
+      "ACTIVATION",
+      ...changedFlowFacets(null, policy),
+      ...rolloutChange(null, policy.rollout),
+    ];
+  }
 
   const before = effectivePolicy(served);
   const after = effectivePolicy(desired);
@@ -84,6 +122,7 @@ export function assessChangeRisk(
   return [
     ...checks.filter(([changed]) => changed).map(([, token]) => token),
     ...changedFlowFacets(before, after),
+    ...rolloutChange(before.rollout, after.rollout),
   ];
 }
 
@@ -104,6 +143,9 @@ export type ApprovalExplanation = Readonly<{
   hasBaseline: boolean;
 }>;
 
+const isRolloutToken = (token: RiskToken) =>
+  token === "ROLLOUT_MODE_RELAXED" || token === "ROLLOUT_MODE_TIGHTENED";
+
 /** Why the staged revision needs approval, in words, from the two revisions' stored configs. */
 export function explainApproval(
   baseline: SiteConfigDraft | null,
@@ -121,7 +163,9 @@ export function explainApproval(
       (change) =>
         change.risk === token ||
         change.facets?.some((facet) => facet === token) === true ||
-        (token === "ROUTES_CHANGED" && change.group === "routes"),
+        (token === "ROUTES_CHANGED" && change.group === "routes") ||
+        // The rollout rows carry one token; the direction decides which reason applies.
+        (isRolloutToken(token) && change.risk !== null && isRolloutToken(change.risk)),
     ),
   }));
   return {

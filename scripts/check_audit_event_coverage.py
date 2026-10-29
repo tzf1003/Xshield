@@ -27,47 +27,56 @@ MATRIX = re.compile(
 )
 
 
-def control_sources() -> dict[pathlib.Path, str]:
-    return {path: path.read_text(encoding="utf-8") for path in sorted(CONTROL.rglob("*.rs"))
-            if "tests" not in path.relative_to(CONTROL).parts}
+def control_sources(control: pathlib.Path) -> dict[pathlib.Path, str]:
+    return {path: path.read_text(encoding="utf-8") for path in sorted(control.rglob("*.rs"))
+            if "tests" not in path.relative_to(control).parts}
 
 
-def module_files(path: pathlib.Path, qualifier: str | None) -> list[pathlib.Path]:
+def module_files(path: pathlib.Path, qualifier: str | None, control: pathlib.Path) -> list[pathlib.Path]:
     """Files that may define a constant referenced from `path` (qualified or imported from `super`)."""
     if qualifier:
-        return [CONTROL / f"{qualifier}.rs", CONTROL / qualifier / "mod.rs"]
+        return [control / f"{qualifier}.rs", control / qualifier / "mod.rs"]
     parent = path.parent
-    return [parent / "mod.rs", parent.with_suffix(".rs"), CONTROL / "lib.rs"]
+    return [parent / "mod.rs", parent.with_suffix(".rs"), control / "lib.rs"]
 
 
-def resolve(name: str, path: pathlib.Path, per_file: dict[pathlib.Path, dict[str, str]]) -> str | None:
+def resolve(name: str, path: pathlib.Path, per_file: dict[pathlib.Path, dict[str, str]],
+            control: pathlib.Path) -> str | None:
     if name.startswith('"'):
         return name.strip('"')
     *qualifiers, bare = name.split("::")
     if not qualifiers and bare in per_file[path]:
         return per_file[path][bare]
-    for candidate in module_files(path, qualifiers[-1] if qualifiers else None):
+    for candidate in module_files(path, qualifiers[-1] if qualifiers else None, control):
         if bare in per_file.get(candidate, {}):
             return per_file[candidate][bare]
     return None
 
 
-def main() -> int:
-    sources = control_sources()
+def display(path: pathlib.Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def main(control: pathlib.Path = CONTROL, worker: pathlib.Path = WORKER) -> int:
+    """Returns 0 when every emitted control audit event is publishable; the paths exist for tests."""
+    sources = control_sources(control)
     per_file = {path: dict(CONST.findall(text)) for path, text in sources.items()}
 
     emitted: dict[tuple[str, str, str], str] = {}
     unresolved: list[str] = []
     for path, text in sources.items():
         for event_type, method, raw_path in ACTION.findall(text):
-            resolved = resolve(raw_path, path, per_file)
-            where = str(path.relative_to(ROOT))
+            resolved = resolve(raw_path, path, per_file, control)
+            where = display(path)
             if resolved is None:
                 unresolved.append(f"{where}: {event_type} {method} path={raw_path}")
             else:
                 emitted[(event_type, method, resolved)] = where
 
-    worker_text = WORKER.read_text(encoding="utf-8")
+    worker_text = worker.read_text(encoding="utf-8")
     # The publisher first asks `supports(event_type)`; an event type missing there skips
     # the management parser entirely, even when the matrix below lists it.
     supports_body = worker_text.split("fn supports(", 1)[1].split("\n}\n", 1)[0]

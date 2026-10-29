@@ -10,7 +10,7 @@ use sqlx::{Row, postgres::PgRow};
 use xshield_core::{
     SiteConfig, SiteIssuedBy, SitePolicyConfig, SiteRequestCrypto, SiteRouteConfig,
     domain::{SiteId, TenantId},
-    site::{LabelReuse, assess_change_risk, direct_apply_may_waive},
+    site::{LabelReuse, approval_requires_step_up, assess_change_risk, direct_apply_may_waive},
 };
 
 mod descriptor_binding;
@@ -190,6 +190,9 @@ pub enum ProtectedSiteApprovalOutcome {
     RevisionMismatch,
     /// The approver wrote the revision under approval.
     SelfApproval,
+    /// The revision relaxes the rollout (or carries a reason this version
+    /// does not know), and the approver has not reauthenticated recently.
+    StepUpRequired,
     /// Approving would let the revision's `policy_revision` label reach the
     /// edge with a second action-descriptor set (written by an older control
     /// service, or bound at the edge since); nothing was recorded and the
@@ -985,6 +988,8 @@ impl PostgresIdentityStore {
         approved_by: &str,
         idempotency_digest: &[u8; 32],
         expected_config_digest: Option<&[u8; 32]>,
+        approver_stepped_up: bool,
+        exit_report_digest: Option<&[u8; 32]>,
     ) -> Result<ProtectedSiteApprovalOutcome, StoreError> {
         if !valid_approval_id(approval_id) || approved_by.is_empty() || approved_by.len() > 256 {
             return Err(StoreError::InvalidCommand);
@@ -1031,6 +1036,12 @@ impl PostgresIdentityStore {
             transaction.rollback().await?;
             return Ok(ProtectedSiteApprovalOutcome::SelfApproval);
         }
+        // Read under the same lock as the revision it would approve, so a
+        // relaxing revision saved after the caller looked is still caught.
+        if !approver_stepped_up && approval_requires_step_up(&target.risk_reasons) {
+            transaction.rollback().await?;
+            return Ok(ProtectedSiteApprovalOutcome::StepUpRequired);
+        }
         // The approval makes the revision eligible to reach the edge, so its
         // label is checked and bound here, under the same locks.
         if let Some(refusal) =
@@ -1053,6 +1064,7 @@ impl PostgresIdentityStore {
             "independent",
             approved_by,
             Some(idempotency_digest),
+            exit_report_digest,
         )
         .await?;
         transaction.commit().await?;
@@ -1132,6 +1144,7 @@ impl PostgresIdentityStore {
             approval_id,
             "direct_apply",
             applied_by,
+            None,
             None,
         )
         .await?;
@@ -2130,12 +2143,13 @@ async fn record_approval(
     kind: &'static str,
     approved_by: &str,
     idempotency_digest: Option<&[u8; 32]>,
+    exit_report_digest: Option<&[u8; 32]>,
 ) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO xshield.site_apply_approvals
              (tenant_id, site_id, approval_id, desired_revision, config_digest, apply_id,
-              approval_kind, approved_by, authored_by, idempotency_digest)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+              approval_kind, approved_by, authored_by, idempotency_digest, exit_report_digest)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(tenant_id.as_str())
     .bind(site_id.as_str())
@@ -2147,6 +2161,7 @@ async fn record_approval(
     .bind(approved_by)
     .bind(&target.author)
     .bind(idempotency_digest.map(<[u8; 32]>::as_slice))
+    .bind(exit_report_digest.map(<[u8; 32]>::as_slice))
     .execute(&mut **transaction)
     .await?;
     let cleared = sqlx::query(

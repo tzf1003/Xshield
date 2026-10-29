@@ -53,7 +53,7 @@ let submissions = 0;
 /**
  * 从观察流量导入路由: an operator-triggered discovery of `(method, path_template)` groups the
  * gateway admitted but could not match to any configured operation (docs/30 §30.7, docs/29
- * §29.37). Only literal paths with a route-capable method ever become one-click imports; a
+ * §29.41). Only literal paths with a route-capable method ever become one-click imports; a
  * templated hint (containing `{id}`) stays read-only so this console never guesses a resource
  * type. Importing only edits the draft — nothing is sent until the workspace is saved.
  */

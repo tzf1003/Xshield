@@ -43,6 +43,8 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.manifest.read"
             | "console.model.read"
             | "console.model.list"
+            | "console.rollout_report.read"
+            | "console.coverage_report.read"
             | "console.agent.read"
             | "console.case.analyze"
             | "console.job.read"
@@ -58,6 +60,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.causality.read"
             | "console.case.read"
             | "console.case.list"
+            | "console.case.job.list"
             | "console.evidence.access.read"
             | "console.evidence.access.list"
             | "console.evidence.hold.created"
@@ -140,6 +143,9 @@ impl AccessPayload {
         if event.event_type == "console.job.admin_list" {
             self.validate_admin_job_list_reason()?;
         }
+        if event.event_type == "console.case.job.list" {
+            self.validate_case_job_list_reason()?;
+        }
         if matches!(
             event.event_type.as_str(),
             "console.saved_view.create" | "console.saved_view.list" | "console.saved_view.delete"
@@ -148,6 +154,12 @@ impl AccessPayload {
         }
         if event.event_type == "console.model.list" {
             self.validate_model_list_reason()?;
+        }
+        if event.event_type == "console.rollout_report.read" {
+            self.validate_rollout_report_reason()?;
+        }
+        if event.event_type == "console.coverage_report.read" {
+            self.validate_coverage_report_reason()?;
         }
         if event.event_type == "console.calibration.report.read" {
             self.validate_calibration_report_read_reason()?;
@@ -216,6 +228,54 @@ impl AccessPayload {
             self.validate_evidence(event)?;
         }
         Ok(())
+    }
+
+    fn validate_rollout_report_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_ROLLOUT_REPORT_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_ROLLOUT_REPORT_REQUEST_INVALID"
+                    | "CONTROL_QUERY_CAPACITY_EXHAUSTED"
+                    | "CONTROL_QUERY_BUDGET_EXCEEDED"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_QUERY_TIMEOUT"
+                    | "CONTROL_ROLLOUT_REPORT_INDEX_UNAVAILABLE"
+                    | "CONTROL_ROLLOUT_REPORT_HEALTH_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
+    }
+
+    fn validate_coverage_report_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_COVERAGE_REPORT_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_COVERAGE_REPORT_REQUEST_INVALID"
+                    | "CONTROL_QUERY_CAPACITY_EXHAUSTED"
+                    | "CONTROL_QUERY_BUDGET_EXCEEDED"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_QUERY_TIMEOUT"
+                    | "CONTROL_COVERAGE_REPORT_INDEX_UNAVAILABLE"
+                    | "CONTROL_COVERAGE_REPORT_HEALTH_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
     }
 
     fn validate_model_list_reason(&self) -> Result<(), PublishError> {
@@ -538,6 +598,39 @@ impl AccessPayload {
         }
     }
 
+    // The case-scoped list shares the owner-scoped list's dependency codes but
+    // keeps its own request/cursor/busy codes, since its cursor additionally
+    // binds the case and its request validation rejects a bad case id too.
+    fn validate_case_job_list_reason(&self) -> Result<(), PublishError> {
+        let valid = match self.outcome.as_str() {
+            "PASS" => self.reason_code == "CONTROL_CASE_JOBS_READ",
+            "DENY" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_AUTH_REQUIRED"
+                    | "CONTROL_SCOPE_DENIED"
+                    | "CONTROL_RATE_LIMITED"
+                    | "CONTROL_CASE_ID_INVALID"
+                    | "CONTROL_CURSOR_INVALID"
+                    | "CONTROL_CASE_JOB_LIST_REQUEST_INVALID"
+                    | "CONTROL_CASE_JOB_LIST_BUSY"
+            ),
+            "ERROR" => matches!(
+                self.reason_code.as_str(),
+                "CONTROL_CURSOR_UNAVAILABLE"
+                    | "CONTROL_JOB_STORE_UNAVAILABLE"
+                    | "CONTROL_RATE_UNAVAILABLE"
+                    | "CONTROL_CLOCK_UNAVAILABLE"
+                    | "CONTROL_SESSION_UNAVAILABLE"
+            ),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PublishError::InvalidEvent)
+        }
+    }
+
     fn validate_saved_view_reason(&self, event_type: &str) -> Result<(), PublishError> {
         // Denials and dependency failures keep the closed sets of the producer; every
         // saved view event carries no target and no evidence.
@@ -706,6 +799,7 @@ impl AccessPayload {
             "console.auth.session.read" => self.reason_code == "CONTROL_BROWSER_SESSION_READ",
             "console.auth.session.logout" => self.reason_code == "CONTROL_BROWSER_SESSION_REVOKED",
             "console.case.list" => self.reason_code == "CONTROL_CASES_READ",
+            "console.case.job.list" => self.reason_code == "CONTROL_CASE_JOBS_READ",
             "console.evidence.hold.created" => matches!(
                 self.reason_code.as_str(),
                 "CONTROL_EVIDENCE_HOLD_CREATED" | "CONTROL_EVIDENCE_HOLD_CREATE_REPLAYED"
@@ -796,6 +890,8 @@ impl AccessPayload {
             | ("console.export.list", "GET", "/control/v1/exports")
             | ("console.case.list", "GET", "/control/v1/cases")
             | ("console.model.list", "GET", "/control/v1/model-calls")
+            | ("console.rollout_report.read", "GET", "/control/v1/rollout-report")
+            | ("console.coverage_report.read", "GET", "/control/v1/coverage-report")
             | ("console.evidence.access.list", "GET", "/control/v1/evidence-access-requests")
             | ("console.job.read", "GET", "/control/v1/jobs/{job_id}")
             | ("console.job.list", "GET", "/control/v1/jobs")
@@ -839,6 +935,7 @@ impl AccessPayload {
             | ("case.closed", "POST", "/control/v1/cases/{case_id}/close")
             | ("console.case.read", "GET", "/control/v1/cases/{case_id}/items")
             | ("console.evidence.hold.read", "GET", "/control/v1/cases/{case_id}/holds")
+            | ("console.case.job.list", "GET", "/control/v1/cases/{case_id}/jobs")
             | ("console.case.analyze", "POST", "/control/v1/cases/{case_id}/analyze") => [
                 false, false, true, false, false, false, false, false, false, false,
             ],

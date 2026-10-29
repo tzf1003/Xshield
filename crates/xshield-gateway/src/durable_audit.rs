@@ -26,8 +26,8 @@ use xshield_core::path_template;
 use zeroize::Zeroizing;
 
 use xshield_gateway::request_crypto::{
-    RequestCryptoCompatibilityRule, RequestCryptoEvidence, RequestCryptoObserveRule,
-    RequestCryptoRule,
+    RequestCryptoCompatibilityRule, RequestCryptoEnvelopeHookRule, RequestCryptoEvidence,
+    RequestCryptoObserveRule, RequestCryptoRule,
 };
 use xshield_gateway::response_crypto::{ResponseCryptoEvidence, ResponseCryptoRule};
 use xshield_gateway::sensor::SensorObservation;
@@ -93,7 +93,13 @@ pub(crate) struct AdmissionAudit {
     pub(crate) decision_event_id: String,
     pub(crate) forward_intent_event_id: Option<String>,
     pub(crate) next_request_sequence: u32,
+    /// The observe window under which a refusal was forwarded, if it was.
+    pub(crate) observed_rollout: Option<String>,
 }
+
+/// The decision value of a request: an observed refusal is forwarded like an
+/// allowed request but is never recorded as `ALLOW`.
+pub(crate) const OBSERVED_WOULD_DENY: &str = "OBSERVED_WOULD_DENY";
 
 pub(crate) struct AdmissionFacts<'a> {
     pub(crate) request_id: &'a str,
@@ -110,6 +116,12 @@ pub(crate) struct AdmissionFacts<'a> {
     pub(crate) sensor_observations: &'a [SensorObservationAudit],
     pub(crate) sensor_bootstrap: Option<&'a SensorBootstrapAudit>,
     pub(crate) forward_origin: bool,
+    /// Set when an observe rollout forwards a request whose `decision`
+    /// carries the refusal the enforced policy would have applied.
+    pub(crate) observed_rollout: Option<&'a str>,
+    /// For a refusal that matched no route, the shape of the requested path
+    /// (`xshield_core::path_shape`), so coverage reports can list it.
+    pub(crate) unmatched_path: Option<&'a str>,
 }
 
 /// What one versioned bootstrap delivered. Counts only: references never
@@ -173,6 +185,48 @@ pub(crate) struct SensorObservationAudit {
     visibility: &'static str,
     event_type: &'static str,
     callsite_fingerprint: Option<String>,
+}
+
+/// Which leg of a relayed business WebSocket connection a message travelled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BusinessWsDirection {
+    /// Browser to the protected site's own origin.
+    ToOrigin,
+    /// The origin back to the browser.
+    ToClient,
+}
+
+impl BusinessWsDirection {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ToOrigin => "to_origin",
+            Self::ToClient => "to_client",
+        }
+    }
+}
+
+/// One audited business WebSocket message, ready to durably record.
+#[derive(Clone, Debug)]
+pub(crate) struct BusinessWsMessageAudit {
+    pub(crate) direction: BusinessWsDirection,
+    pub(crate) kind: &'static str,
+    pub(crate) byte_len: u64,
+    pub(crate) frame_count: u32,
+    pub(crate) degraded: bool,
+}
+
+/// A connection-wide traffic summary, independent of how many individual
+/// messages were kept in detail.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BusinessWsSummary {
+    pub(crate) messages_to_origin: u64,
+    pub(crate) messages_to_client: u64,
+    pub(crate) bytes_to_origin: u64,
+    pub(crate) bytes_to_client: u64,
+    /// Set when any message (kept in detail or only counted in this
+    /// summary) could not be fully accounted for.
+    pub(crate) degraded: bool,
+    pub(crate) duration_us: u64,
 }
 
 impl SensorObservationAudit {
@@ -321,6 +375,48 @@ impl RequestCryptoAudit {
             algorithm: Some(rule.algorithm()),
             adapter_revision: rule.adapter_revision().to_owned(),
             key_id: Some(rule.key_id().to_owned()),
+            approval_ref: None,
+            source_evidence_ref: None,
+            message_id: None,
+            nonce_sha256: None,
+            issued_at: None,
+            expires_at: None,
+            envelope_sha256: None,
+            rebuilt_sha256: None,
+            outcome,
+            reason_code,
+            duration_us,
+        }
+    }
+
+    /// Same success shape as [`Self::passed`], labeled `ENVELOPE_HOOK`
+    /// rather than `ENFORCE` so the two coverage modes stay distinguishable
+    /// in the audit trail.
+    pub(crate) fn envelope_hook_passed(evidence: &RequestCryptoEvidence, duration_us: u64) -> Self {
+        Self {
+            coverage_mode: "ENVELOPE_HOOK",
+            ..Self::passed(evidence, duration_us)
+        }
+    }
+
+    /// Same denial shape as [`Self::failed`], for a rule with no static
+    /// `key_id` to report.
+    pub(crate) fn envelope_hook_failed(
+        rule: &RequestCryptoEnvelopeHookRule,
+        reason_code: ReasonCode,
+        duration_us: u64,
+    ) -> Self {
+        let outcome = match reason_code {
+            ReasonCode::RequestBufferCapacityExhausted
+            | ReasonCode::RequestCryptoKeyUnavailable
+            | ReasonCode::RequestCryptoReplayStoreUnavailable => "ERROR",
+            _ => "DENY",
+        };
+        Self {
+            coverage_mode: "ENVELOPE_HOOK",
+            algorithm: Some(rule.algorithm()),
+            adapter_revision: rule.adapter_revision().to_owned(),
+            key_id: None,
             approval_ref: None,
             source_evidence_ref: None,
             message_id: None,
@@ -556,6 +652,135 @@ impl DurableAudit {
         Ok(())
     }
 
+    /// Durably records one authenticated probe-WSS message, independent of
+    /// any single HTTP admission: a WSS connection carries many of these over
+    /// its lifetime, and each gets the same evidentiary treatment one HTTPS
+    /// `events/prepare` request would (docs/00 0.4). Not tracked as a
+    /// `request.accepted` request, since no single terminal event ever closes
+    /// a long-lived connection's lifecycle.
+    // `last_event_id` is moved into `vec![last_event_id]` each iteration, so
+    // the loop body always reinitializes it by assignment, never through an
+    // in-place `clone_into` on what the borrow checker treats as moved-from.
+    #[allow(clippy::assigning_clones)]
+    pub(crate) async fn record_sensor_ws_observations(
+        &self,
+        trace_id: &str,
+        outcome: GatewayOutcome,
+        reason_code: ReasonCode,
+        observations: &[SensorObservationAudit],
+    ) -> Result<(), DurableAuditError> {
+        let message_id = new_event_id()?;
+        let mut events = vec![PendingEvent::new(
+            message_id.clone(),
+            "sensor.ws_message",
+            1,
+            Vec::new(),
+            Payload::SensorWsMessage {
+                channel: "wss",
+                outcome: stage_outcome(outcome),
+                reason_code: reason_code.as_str(),
+            },
+        )];
+        let mut last_event_id = message_id.as_str().to_owned();
+        for (sequence, observation) in (2u32..).zip(observations) {
+            let observation_id = new_event_id()?;
+            events.push(PendingEvent::new(
+                observation_id.clone(),
+                "sensor.observation",
+                sequence,
+                vec![last_event_id],
+                Payload::SensorObservation {
+                    binding_id: observation.binding_id.clone(),
+                    auth_epoch: observation.auth_epoch,
+                    authenticated: observation.authenticated,
+                    build_ref: observation.build_ref.clone(),
+                    page_handle: observation.page_handle.clone(),
+                    navigation_id: observation.navigation_id.clone(),
+                    action_hint: observation.action_hint.clone(),
+                    client_request_id: observation.client_request_id.clone(),
+                    client_event_seq: observation.client_event_seq,
+                    visibility: observation.visibility,
+                    sensor_event_type: observation.event_type,
+                    callsite_fingerprint: observation.callsite_fingerprint.clone(),
+                    claim_status: "client_claimed",
+                    authorization_effect: "none",
+                },
+            ));
+            last_event_id = observation_id.as_str().to_owned();
+        }
+        self.append(
+            BatchContext {
+                request_id: None,
+                trace_id: trace_id.to_owned(),
+            },
+            events,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Durably records one business WebSocket connection's traffic once it
+    /// closes: a summary plus up to the first `messages.len()` individual
+    /// messages (the caller bounds that list; see `business_ws::MAX_AUDITED_MESSAGES`
+    /// in `main.rs`). Like a probe WSS connection, the handshake itself was
+    /// already audited as an ordinary admitted request, and no single
+    /// terminal event closes a long-lived connection's lifecycle, so this
+    /// chain stands on its own (docs/11 §1: a business message carries its
+    /// own `message_id`, separate from the handshake request).
+    #[allow(clippy::assigning_clones)]
+    pub(crate) async fn record_business_ws_connection(
+        &self,
+        trace_id: &str,
+        operation_id: &str,
+        summary: BusinessWsSummary,
+        messages: &[BusinessWsMessageAudit],
+    ) -> Result<(), DurableAuditError> {
+        let closed_id = new_event_id()?;
+        let mut events = vec![PendingEvent::new(
+            closed_id.clone(),
+            "business_ws.closed",
+            1,
+            Vec::new(),
+            Payload::BusinessWsClosed {
+                operation_id: operation_id.to_owned(),
+                messages_to_origin: summary.messages_to_origin,
+                messages_to_client: summary.messages_to_client,
+                bytes_to_origin: summary.bytes_to_origin,
+                bytes_to_client: summary.bytes_to_client,
+                degraded: summary.degraded,
+                duration_us: summary.duration_us,
+            },
+        )];
+        let mut last_event_id = closed_id.as_str().to_owned();
+        for (sequence, message) in (2u32..).zip(messages) {
+            let message_id = new_event_id()?;
+            events.push(PendingEvent::new(
+                message_id.clone(),
+                "business_ws.message",
+                sequence,
+                vec![last_event_id],
+                Payload::BusinessWsMessage {
+                    operation_id: operation_id.to_owned(),
+                    direction: message.direction.as_str(),
+                    kind: message.kind,
+                    byte_len: message.byte_len,
+                    frame_count: message.frame_count,
+                    degraded: message.degraded,
+                },
+            ));
+            last_event_id = message_id.as_str().to_owned();
+        }
+        self.append(
+            BatchContext {
+                request_id: None,
+                trace_id: trace_id.to_owned(),
+            },
+            events,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Tries once to bring a closed barrier back; admission stays refused until
     /// this succeeds.
     ///
@@ -627,8 +852,16 @@ impl DurableAudit {
         let stage_id = new_event_id()?;
         let decision_id = new_event_id()?;
         let operation_id = operation_id(facts.decision);
-        let outcome = stage_outcome(facts.decision.outcome);
-        let decision = decision_name(facts.decision.outcome);
+        // The admission stage did refuse an observed request; only the
+        // decision forwards it.
+        let (outcome, decision) = if facts.observed_rollout.is_some() {
+            ("DENY", OBSERVED_WOULD_DENY)
+        } else {
+            (
+                stage_outcome(facts.decision.outcome),
+                decision_name(facts.decision.outcome),
+            )
+        };
         // A path template is a route-discovery aid, not an authorization or
         // routing fact: it is only ever computed for a request that matched
         // no configured operation, and dropped (None) the moment one did.
@@ -783,6 +1016,8 @@ impl DurableAudit {
                 decision,
                 reason_code: facts.decision.reason_code.as_str(),
                 origin_state: "not_sent",
+                rollout_revision: facts.observed_rollout.map(str::to_owned),
+                unmatched_path: facts.unmatched_path.map(str::to_owned),
             },
         ));
         request_sequence += 1;
@@ -822,6 +1057,7 @@ impl DurableAudit {
                 + u32::from(
                     facts.decision.outcome == GatewayOutcome::Allowed && facts.forward_origin,
                 ),
+            observed_rollout: facts.observed_rollout.map(str::to_owned),
         })
     }
 
@@ -879,10 +1115,12 @@ impl DurableAudit {
             request_sequence,
             completion_causes,
             Payload::RequestCompleted {
-                decision: match facts.decision.outcome {
-                    GatewayOutcome::Allowed => "ALLOW".to_owned(),
-                    GatewayOutcome::Denied => "DENY".to_owned(),
+                decision: if facts.admission.observed_rollout.is_some() {
+                    OBSERVED_WOULD_DENY.to_owned()
+                } else {
+                    decision_name(facts.decision.outcome).to_owned()
                 },
+                rollout_revision: facts.admission.observed_rollout.clone(),
                 reason_code: completion_reason(&facts).to_owned(),
                 status: (facts.status != 0).then_some(facts.status),
                 origin_state: match facts.response_source {
@@ -939,17 +1177,23 @@ impl DurableAudit {
             let mut events = Vec::new();
             let (event_type, completion_cause, reason_code, status, origin_state) =
                 if let Some(origin) = request.origin {
-                    let event_type = if origin.state == "response_received"
-                        && origin.reason_code == ReasonCode::OriginResponseReceived.as_str()
-                    {
-                        "request.completed"
-                    } else {
-                        "request.aborted"
-                    };
+                    let completed = origin.state == "response_received"
+                        && origin.reason_code == ReasonCode::OriginResponseReceived.as_str();
+                    // A completed observed request keeps the refusal it was forwarded past.
+                    let reason_code =
+                        if completed && request.decision.outcome == OBSERVED_WOULD_DENY {
+                            request.decision.reason_code.clone()
+                        } else {
+                            origin.reason_code
+                        };
                     (
-                        event_type,
+                        if completed {
+                            "request.completed"
+                        } else {
+                            "request.aborted"
+                        },
                         origin.event_id,
-                        origin.reason_code,
+                        reason_code,
                         origin.status,
                         origin.state,
                     )
@@ -999,6 +1243,7 @@ impl DurableAudit {
                 vec![completion_cause],
                 Payload::RequestCompleted {
                     decision: request.decision.outcome,
+                    rollout_revision: request.decision.rollout_revision,
                     reason_code,
                     status,
                     origin_state,
@@ -1370,6 +1615,9 @@ fn completion_reason(facts: &FinalFacts<'_>) -> &'static str {
                 ReasonCode::RequestIncomplete.as_str()
             } else if facts.proxy_error {
                 ReasonCode::OriginOutcomeUnknown.as_str()
+            } else if facts.admission.observed_rollout.is_some() {
+                // docs/11: an observed request completes with the refusal it was forwarded past.
+                facts.decision.reason_code.as_str()
             } else {
                 ReasonCode::OriginResponseReceived.as_str()
             }
@@ -1386,7 +1634,7 @@ fn edge_response_reason(facts: &FinalFacts<'_>) -> ReasonCode {
         .map(xshield_core::domain::OperationId::as_str);
     match operation {
         Some("xshield.sensor.bootstrap") => ReasonCode::SensorBootstrapServed,
-        Some("xshield.sensor.loader" | "xshield.sensor.legacy_loader") => {
+        Some("xshield.sensor.loader" | "xshield.sensor.frozen_loader") => {
             ReasonCode::SensorLoaderServed
         }
         Some("xshield.sensor.prepare") => ReasonCode::SensorObservationAccepted,
@@ -1807,6 +2055,10 @@ enum Payload {
         decision: &'static str,
         reason_code: &'static str,
         origin_state: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rollout_revision: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unmatched_path: Option<String>,
     },
     Origin {
         method: String,
@@ -1838,6 +2090,28 @@ enum Payload {
         claim_status: &'static str,
         authorization_effect: &'static str,
     },
+    SensorWsMessage {
+        channel: &'static str,
+        outcome: &'static str,
+        reason_code: &'static str,
+    },
+    BusinessWsClosed {
+        operation_id: String,
+        messages_to_origin: u64,
+        messages_to_client: u64,
+        bytes_to_origin: u64,
+        bytes_to_client: u64,
+        degraded: bool,
+        duration_us: u64,
+    },
+    BusinessWsMessage {
+        operation_id: String,
+        direction: &'static str,
+        kind: &'static str,
+        byte_len: u64,
+        frame_count: u32,
+        degraded: bool,
+    },
     SensorHtmlStageCompleted {
         stage: &'static str,
         stage_execution_id: String,
@@ -1854,6 +2128,8 @@ enum Payload {
     },
     RequestCompleted {
         decision: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rollout_revision: Option<String>,
         reason_code: String,
         status: Option<u16>,
         origin_state: String,
@@ -2213,6 +2489,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2323,6 +2601,8 @@ mod tests {
                     sensor_observations: &[],
                     sensor_bootstrap: bootstrap.as_ref(),
                     forward_origin: true,
+                    observed_rollout: None,
+                    unmatched_path: None,
                 })
                 .await
                 .unwrap();
@@ -2475,6 +2755,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2512,6 +2794,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2625,6 +2909,8 @@ mod tests {
                     sensor_observations,
                     sensor_bootstrap: None,
                     forward_origin: false,
+                    observed_rollout: None,
+                    unmatched_path: None,
                 })
                 .await
                 .unwrap();
@@ -2729,6 +3015,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2795,6 +3083,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -2904,6 +3194,8 @@ mod tests {
                     sensor_observations: &[],
                     sensor_bootstrap: None,
                     forward_origin: true,
+                    observed_rollout: None,
+                    unmatched_path: None,
                 })
                 .await
                 .unwrap();
@@ -2935,22 +3227,15 @@ mod tests {
                 config.audit_limits(),
             )
             .unwrap();
-            let mut terminal = Vec::new();
-            journal
-                .visit_closed_records(100, |record| {
-                    let event: serde_json::Value = serde_json::from_slice(record.plaintext())
-                        .map_err(|_| JournalError::InvalidEvent)?;
-                    if event["request_id"] == request_id
-                        && matches!(
-                            event["event_type"].as_str(),
-                            Some("origin.response" | "origin.unknown" | "request.aborted")
-                        )
-                    {
-                        terminal.push(event);
-                    }
-                    Ok(())
+            let terminal: Vec<_> = request_events(&journal, request_id)
+                .into_iter()
+                .filter(|event| {
+                    matches!(
+                        event["event_type"].as_str(),
+                        Some("origin.response" | "origin.unknown" | "request.aborted")
+                    )
                 })
-                .unwrap();
+                .collect();
             assert_eq!(terminal.len(), 2);
             assert_eq!(terminal[0]["event_type"], event_type);
             assert_eq!(terminal[0]["payload"]["origin_state"], origin_state);
@@ -2992,6 +3277,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -3201,6 +3488,8 @@ mod tests {
                     sensor_observations: &[],
                     sensor_bootstrap: None,
                     forward_origin: decision.outcome == GatewayOutcome::Allowed,
+                    observed_rollout: None,
+                    unmatched_path: None,
                 })
                 .await
                 .unwrap();
@@ -3315,6 +3604,8 @@ mod tests {
                         sensor_observations: &[],
                         sensor_bootstrap: None,
                         forward_origin: true,
+                        observed_rollout: None,
+                        unmatched_path: None,
                     })
                     .await
                     .unwrap();
@@ -3396,6 +3687,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -3444,6 +3737,264 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// The events of `request_id`, in journal order.
+    fn request_events(journal: &LocalJournal, request_id: &str) -> Vec<serde_json::Value> {
+        let mut events = Vec::new();
+        journal
+            .visit_closed_records(100, |record| {
+                let event: serde_json::Value = serde_json::from_slice(record.plaintext())
+                    .map_err(|_| JournalError::InvalidEvent)?;
+                if event["request_id"] == request_id {
+                    events.push(event);
+                }
+                Ok(())
+            })
+            .unwrap();
+        events
+    }
+
+    /// A refusal forwarded by an observe rollout, as the edge decides it: the
+    /// refusal's reason with the forwarding outcome.
+    fn observed_decision(config: &GatewayConfig) -> GatewayDecision {
+        let mut decision = config.admit("GET", "/health", UnixSeconds::new(1));
+        decision.outcome = GatewayOutcome::Allowed;
+        decision.reason_code = ReasonCode::UiActionNotAvailable;
+        decision
+    }
+
+    #[tokio::test]
+    async fn an_observed_refusal_is_recorded_as_such_from_admission_to_completion() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000041";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = observed_decision(&config);
+        let admission = audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "41414141414141414141414141414141",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+                request_crypto: None,
+                sensor_observations: &[],
+                sensor_bootstrap: None,
+                forward_origin: true,
+                observed_rollout: Some("rollout-1"),
+                unmatched_path: None,
+            })
+            .await
+            .unwrap();
+        assert!(admission.forward_intent_event_id.is_some());
+        audit
+            .finalize(FinalFacts {
+                request_id,
+                trace_id: "41414141414141414141414141414141",
+                method: "GET",
+                decision: &decision,
+                admission: &admission,
+                status: 200,
+                duration_us: 20,
+                proxy_error: false,
+                response_failure: None,
+                origin_status: Some(200),
+                origin_response_complete: false,
+                response_crypto: None,
+                sensor_html: None,
+                page_actions: None,
+                response_source: ResponseSource::Origin,
+            })
+            .await
+            .unwrap();
+        drop(audit);
+        // Reopening validates the recorded chain as the recovery reads it.
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let events = request_events(&journal, request_id);
+        let of = |event_type: &str| {
+            events
+                .iter()
+                .find(|event| event["event_type"] == event_type)
+                .unwrap_or_else(|| panic!("{event_type} missing: {events:#?}"))
+        };
+        let stage = of("stage.completed");
+        assert_eq!(stage["payload"]["stage"], "operation_admission");
+        assert_eq!(stage["payload"]["outcome"], "DENY");
+        assert_eq!(stage["payload"]["reason_code"], "UI_ACTION_NOT_AVAILABLE");
+        let composed = of("decision.composed");
+        assert_eq!(composed["payload"]["decision"], OBSERVED_WOULD_DENY);
+        assert_eq!(
+            composed["payload"]["reason_code"],
+            "UI_ACTION_NOT_AVAILABLE"
+        );
+        assert_eq!(composed["payload"]["rollout_revision"], "rollout-1");
+        of("origin.forward_intent");
+        of("origin.response");
+        let completed = of("request.completed");
+        assert_eq!(completed["payload"]["decision"], OBSERVED_WOULD_DENY);
+        assert_eq!(
+            completed["payload"]["reason_code"],
+            "UI_ACTION_NOT_AVAILABLE"
+        );
+        assert_eq!(completed["payload"]["rollout_revision"], "rollout-1");
+        assert_eq!(completed["payload"]["origin_state"], "response_received");
+        assert_eq!(completed["payload"]["status"], 200);
+        assert_publishable(&journal);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_matched_no_route_records_only_the_shape_of_its_path() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000045";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = config.admit("GET", "/api/users/4711/orders", UnixSeconds::new(1));
+        assert_eq!(decision.reason_code, ReasonCode::OperationNotMatched);
+        let shape = xshield_core::path_shape::path_shape("/api/users/4711/orders");
+        let admission = audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "45454545454545454545454545454545",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+                request_crypto: None,
+                sensor_observations: &[],
+                sensor_bootstrap: None,
+                forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: Some(&shape),
+            })
+            .await
+            .unwrap();
+        audit
+            .finalize(FinalFacts {
+                request_id,
+                trace_id: "45454545454545454545454545454545",
+                method: "GET",
+                decision: &decision,
+                admission: &admission,
+                status: 404,
+                duration_us: 20,
+                proxy_error: false,
+                response_failure: None,
+                origin_status: None,
+                origin_response_complete: false,
+                response_crypto: None,
+                sensor_html: None,
+                page_actions: None,
+                response_source: ResponseSource::Origin,
+            })
+            .await
+            .unwrap();
+        drop(audit);
+        // Reopening validates the recorded chain as the recovery reads it.
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let events = request_events(&journal, request_id);
+        let decided = events
+            .iter()
+            .find(|event| event["event_type"] == "decision.composed")
+            .unwrap();
+        assert_eq!(decided["payload"]["reason_code"], "OPERATION_NOT_MATCHED");
+        assert_eq!(decided["payload"]["unmatched_path"], "/api/users/{}/orders");
+        assert!(!serde_json::to_string(&events).unwrap().contains("4711"));
+        assert_publishable(&journal);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_accepts_a_path_shape_only_on_an_unmatched_refusal() {
+        use super::reconcile::valid_unmatched_path;
+        assert!(valid_unmatched_path("DENY", "OPERATION_NOT_MATCHED", None));
+        assert!(valid_unmatched_path("ALLOW", "OPERATION_ALLOWED", None));
+        assert!(valid_unmatched_path(
+            "DENY",
+            "OPERATION_NOT_MATCHED",
+            Some("/api/{}")
+        ));
+        assert!(!valid_unmatched_path(
+            "DENY",
+            "AUTH_REQUIRED",
+            Some("/api/{}")
+        ));
+        assert!(!valid_unmatched_path(
+            "ALLOW",
+            "OPERATION_NOT_MATCHED",
+            Some("/api/{}")
+        ));
+        assert!(!valid_unmatched_path(
+            "DENY",
+            "OPERATION_NOT_MATCHED",
+            Some("/api/4711")
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_observed_request_cut_off_after_forwarding_is_reconciled_as_observed() {
+        let directory = directory();
+        let config = config(&directory, 1024 * 1024);
+        let request_id = "req_018f2a3b-4c5d-7000-8000-000000000042";
+        let audit = DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap();
+        let decision = observed_decision(&config);
+        audit
+            .commit_admission(AdmissionFacts {
+                request_id,
+                trace_id: "42424242424242424242424242424242",
+                method: "GET",
+                decision: &decision,
+                duration_us: 10,
+                request_crypto: None,
+                sensor_observations: &[],
+                sensor_bootstrap: None,
+                forward_origin: true,
+                observed_rollout: Some("rollout-1"),
+                unmatched_path: None,
+            })
+            .await
+            .unwrap();
+        drop(audit);
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+        drop(DurableAudit::open(&config, JournalKey::from_hex(KEY).unwrap()).unwrap());
+
+        let (journal, _) = LocalJournal::open(
+            &directory,
+            "journal-key-r1",
+            JournalKey::from_hex(KEY).unwrap(),
+            config.audit_limits(),
+        )
+        .unwrap();
+        let events = request_events(&journal, request_id);
+        let aborted = events
+            .iter()
+            .filter(|event| event["event_type"] == "request.aborted")
+            .collect::<Vec<_>>();
+        assert_eq!(aborted.len(), 1, "{events:#?}");
+        assert_eq!(aborted[0]["payload"]["decision"], OBSERVED_WOULD_DENY);
+        assert_eq!(aborted[0]["payload"]["rollout_revision"], "rollout-1");
+        assert_eq!(aborted[0]["payload"]["origin_state"], "unknown");
+        assert_publishable(&journal);
+        drop(journal);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn reconciles_denied_request_without_inventing_a_status() {
         let directory = directory();
@@ -3463,6 +4014,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap();
@@ -3582,6 +4135,8 @@ mod tests {
                 sensor_observations: &[],
                 sensor_bootstrap: None,
                 forward_origin: true,
+                observed_rollout: None,
+                unmatched_path: None,
             })
             .await
             .unwrap_err();
@@ -3606,6 +4161,8 @@ mod tests {
             sensor_observations: &[],
             sensor_bootstrap: None,
             forward_origin: true,
+            observed_rollout: None,
+            unmatched_path: None,
         }
     }
 

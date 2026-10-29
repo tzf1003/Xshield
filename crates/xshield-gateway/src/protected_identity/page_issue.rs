@@ -31,11 +31,17 @@ use xshield_core::{
         ProvenanceError,
     },
 };
-use xshield_gateway::{GatewayConfig, GatewayOutcome, page_actions::PageActionPlan};
+use xshield_gateway::{
+    GatewayConfig, GatewayOutcome,
+    page_actions::PageActionPlan,
+    request_crypto::{envelope_hook_key_id, envelope_hook_key_window},
+};
 use xshield_postgres::{
     DocumentSessionQuery, PageActionQuery, PageActionView, PageProvenanceBatch,
-    PageProvenanceOutcome, ProvenancePersistence, SensorSessionQuery, SensorSessionState,
+    PageProvenanceOutcome, ProvenancePersistence, SensorSession, SensorSessionQuery,
+    SensorSessionState,
 };
+use zeroize::Zeroizing;
 
 /// What the bootstrap may deliver for one request.
 pub(crate) enum SensorBootstrapDelivery {
@@ -44,14 +50,55 @@ pub(crate) enum SensorBootstrapDelivery {
     /// One page instance; `actions` is empty unless this session owns it.
     Page {
         page_handle: String,
+        /// The exact page-delivery document shape to render, named by the
+        /// query itself (see [`BootstrapQuery::Page`]).
+        sensor_version: &'static str,
         actions: Vec<PageActionView>,
+        /// The `ENVELOPE_HOOK` session key and operation list, present only
+        /// for the current sensor version and an authenticated session with
+        /// at least one configured `ENVELOPE_HOOK` operation (docs/08 §8.1).
+        envelope_hook: Option<EnvelopeHookBootstrap>,
     },
 }
 
-/// Parsed bootstrap query: absent, exactly one `page=pgh_<UUIDv7>`, or invalid.
+/// `ENVELOPE_HOOK` key and operation material for one bootstrap delivery.
+pub(crate) struct EnvelopeHookBootstrap {
+    pub(crate) tenant_id: String,
+    pub(crate) site_id: String,
+    pub(crate) key_id: String,
+    pub(crate) key: Zeroizing<[u8; 32]>,
+    pub(crate) operations: Vec<EnvelopeHookOperation>,
+}
+
+/// One operation the browser sensor may seal into an `ENVELOPE_HOOK` request.
+pub(crate) struct EnvelopeHookOperation {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) operation_id: String,
+    pub(crate) adapter_revision: String,
+}
+
+/// The page-based bootstrap query format 1.1.0 has used since it first
+/// shipped: `page=<handle>` with no other parameter. This exact format and
+/// its exact response shape (no `ws_url`, `sensor_version: "1.1.0"`) are
+/// pinned to this literal version forever, independent of whichever sensor
+/// version is current, for as long as 1.1.0's script bytes are still served
+/// (docs/07 §7.1): a later sensor version must announce itself explicitly
+/// instead of reusing this slot, so an already-shipped, byte-frozen 1.1.0
+/// page never receives a response shape its hardcoded validation rejects.
+const ORIGINAL_PAGE_BOOTSTRAP_VERSION: &str = "1.1.0";
+
+/// Parsed bootstrap query: absent, one page-based request naming the exact
+/// sensor version it is shaped for, or invalid.
 enum BootstrapQuery<'a> {
     Legacy,
-    Page(&'a str),
+    /// `page=pgh_<UUIDv7>` (pinned to [`ORIGINAL_PAGE_BOOTSTRAP_VERSION`]) or
+    /// `page=pgh_<UUIDv7>&sensor_version=<SENSOR_VERSION>` (any later version
+    /// that names itself explicitly).
+    Page {
+        page_handle: &'a str,
+        sensor_version: &'static str,
+    },
     Invalid,
 }
 
@@ -59,8 +106,30 @@ fn bootstrap_query(query: Option<&str>) -> BootstrapQuery<'_> {
     let Some(query) = query else {
         return BootstrapQuery::Legacy;
     };
+    // A second parameter only ever means an explicit version announcement:
+    // check for it before stripping "page=", since that prefix alone would
+    // otherwise also match the first segment of this longer query.
+    if let Some((page_part, version_part)) = query.split_once('&') {
+        let (Some(handle), Some(version)) = (
+            page_part.strip_prefix("page="),
+            version_part.strip_prefix("sensor_version="),
+        ) else {
+            return BootstrapQuery::Invalid;
+        };
+        return if page_evidence_id(handle).is_some() && version == xshield_gateway::SENSOR_VERSION {
+            BootstrapQuery::Page {
+                page_handle: handle,
+                sensor_version: xshield_gateway::SENSOR_VERSION,
+            }
+        } else {
+            BootstrapQuery::Invalid
+        };
+    }
     match query.strip_prefix("page=") {
-        Some(handle) if page_evidence_id(handle).is_some() => BootstrapQuery::Page(handle),
+        Some(handle) if page_evidence_id(handle).is_some() => BootstrapQuery::Page {
+            page_handle: handle,
+            sensor_version: ORIGINAL_PAGE_BOOTSTRAP_VERSION,
+        },
         _ => BootstrapQuery::Invalid,
     }
 }
@@ -172,7 +241,7 @@ impl ProtectedIdentity {
         now: UnixSeconds,
     ) -> Result<ProtectedAdmission, IdentityRuntimeError> {
         let decision = config.admit(method, path, now);
-        let page_handle = match bootstrap_query(request.uri.query()) {
+        let (page_handle, sensor_version) = match bootstrap_query(request.uri.query()) {
             BootstrapQuery::Legacy => {
                 return Ok(ProtectedAdmission {
                     sensor_bootstrap: Some(SensorBootstrapDelivery::Legacy),
@@ -188,18 +257,74 @@ impl ProtectedIdentity {
                     ReasonCode::SensorBootstrapInvalid,
                 )));
             }
-            BootstrapQuery::Page(page_handle) => page_handle,
+            BootstrapQuery::Page {
+                page_handle,
+                sensor_version,
+            } => (page_handle, sensor_version),
         };
-        let actions = self
+        let (actions, sensor_session) = self
             .session_page_actions(config, request, page_handle, now)
             .await?;
+        let envelope_hook =
+            self.envelope_hook_bootstrap(config, sensor_version, sensor_session.as_ref(), now)?;
         Ok(ProtectedAdmission {
             sensor_bootstrap: Some(SensorBootstrapDelivery::Page {
                 page_handle: page_handle.to_owned(),
+                sensor_version,
                 actions,
+                envelope_hook,
             }),
             ..ProtectedAdmission::without_identity(decision)
         })
+    }
+
+    /// Derives the `ENVELOPE_HOOK` session key and operation list for the
+    /// current time window, only for the current sensor version, an
+    /// authenticated session, and at least one configured operation: the
+    /// same gating [`bootstrap_document`] in `sensor_delivery.rs` already
+    /// applies to `ws_url`.
+    fn envelope_hook_bootstrap(
+        &self,
+        config: &GatewayConfig,
+        sensor_version: &str,
+        sensor_session: Option<&SensorSession>,
+        now: UnixSeconds,
+    ) -> Result<Option<EnvelopeHookBootstrap>, IdentityRuntimeError> {
+        if sensor_version != xshield_gateway::SENSOR_VERSION {
+            return Ok(None);
+        }
+        let operations = config.envelope_hook_operations();
+        if operations.is_empty() {
+            return Ok(None);
+        }
+        let Some(sensor_session) = sensor_session.filter(|session| session.authenticated()) else {
+            return Ok(None);
+        };
+        let window = envelope_hook_key_window(now);
+        let key = self.envelope_hook_key(
+            config.tenant_id(),
+            config.site_id(),
+            sensor_session.binding_id(),
+            sensor_session.epoch(),
+            window,
+        )?;
+        Ok(Some(EnvelopeHookBootstrap {
+            tenant_id: config.tenant_id().as_str().to_owned(),
+            site_id: config.site_id().as_str().to_owned(),
+            key_id: envelope_hook_key_id(window),
+            key,
+            operations: operations
+                .into_iter()
+                .map(
+                    |(method, path, operation_id, adapter_revision)| EnvelopeHookOperation {
+                        method: method.to_owned(),
+                        path: path.to_owned(),
+                        operation_id: operation_id.to_owned(),
+                        adapter_revision: adapter_revision.to_owned(),
+                    },
+                )
+                .collect(),
+        }))
     }
 
     async fn session_page_actions(
@@ -208,21 +333,21 @@ impl ProtectedIdentity {
         request: &RequestHeader,
         page_handle: &str,
         now: UnixSeconds,
-    ) -> Result<Vec<PageActionView>, IdentityRuntimeError> {
+    ) -> Result<(Vec<PageActionView>, Option<SensorSession>), IdentityRuntimeError> {
         let Some(page_evidence_id) = page_evidence_id(page_handle) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         };
         let session = match unique_cookie(request, WAF_COOKIE) {
             Ok(session) if session.len() <= MAX_SESSION_BYTES && same_origin_fetch(request) => {
                 session
             }
             Ok(_) | Err(IdentityRuntimeError::Missing | IdentityRuntimeError::Malformed) => {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), None));
             }
             Err(error) => return Err(error),
         };
         if WafSessionId::parse(session).is_err() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
         let session_fingerprint = fingerprint(&self.fingerprint_key, session.as_bytes())?;
         let store = self.store().await?;
@@ -235,12 +360,12 @@ impl ProtectedIdentity {
             })
             .await?
         else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         };
         if !sensor_session.authenticated() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Some(sensor_session)));
         }
-        Ok(store
+        let actions = store
             .load_page_actions(PageActionQuery {
                 tenant_id: config.tenant_id(),
                 site_id: config.site_id(),
@@ -250,7 +375,8 @@ impl ProtectedIdentity {
                 policy_revision: config.policy_revision(),
                 now,
             })
-            .await?)
+            .await?;
+        Ok((actions, Some(sensor_session)))
     }
 
     /// Issues every action the delivered page root declares, atomically.
@@ -433,7 +559,20 @@ mod tests {
         assert!(matches!(bootstrap_query(None), BootstrapQuery::Legacy));
         assert!(matches!(
             bootstrap_query(Some(&format!("page={HANDLE}"))),
-            BootstrapQuery::Page(HANDLE)
+            BootstrapQuery::Page {
+                page_handle: HANDLE,
+                sensor_version: "1.1.0"
+            }
+        ));
+        assert!(matches!(
+            bootstrap_query(Some(&format!(
+                "page={HANDLE}&sensor_version={}",
+                xshield_gateway::SENSOR_VERSION
+            ))),
+            BootstrapQuery::Page {
+                page_handle: HANDLE,
+                ..
+            }
         ));
         for query in [
             String::new(),
@@ -441,6 +580,8 @@ mod tests {
             format!("page={HANDLE}&page={HANDLE}"),
             format!("page={HANDLE}&v=1"),
             format!("v=1&page={HANDLE}"),
+            format!("page={HANDLE}&sensor_version=1.1.0"),
+            format!("page={HANDLE}&sensor_version=9.9.9"),
             "page=pgh_018f2a3b-4c5d-4000-8000-000000000001".to_owned(),
             "page=pgh_018F2A3B-4C5D-7000-8000-000000000001".to_owned(),
             "page=pgh_018f2a3b4c5d70008000000000000001".to_owned(),

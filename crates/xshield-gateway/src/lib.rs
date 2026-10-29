@@ -30,6 +30,7 @@ use xshield_core::{
 };
 
 pub mod auth_binding;
+pub mod business_ws;
 pub mod edge_transport;
 pub mod evidence_capture;
 pub mod multi_site;
@@ -40,13 +41,16 @@ pub mod response_crypto;
 pub mod response_grant;
 pub mod sensor;
 pub mod sensor_html;
+pub mod sensor_ws;
 pub mod share_issue;
 pub mod share_response;
 pub mod share_token;
 
 use auth_binding::{AuthBindingRule, AuthRevokeRule, AuthTransitionRule};
 use evidence_capture::{EvidenceCaptureDto, EvidenceCaptureRule};
-use request_crypto::{RequestCryptoObserveRule, RequestCryptoPolicy, RequestCryptoRule};
+use request_crypto::{
+    RequestCryptoEnvelopeHookRule, RequestCryptoObserveRule, RequestCryptoPolicy, RequestCryptoRule,
+};
 use response_crypto::ResponseCryptoRule;
 use response_grant::ResponseGrantRule;
 use share_response::ResponseShareRule;
@@ -70,18 +74,49 @@ pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 const STATIC_ASSET_OPERATION_ID: &str = "site.static_asset";
 /// Versioned same-origin browser sensor asset injected into new pages.
-pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.1.0.js";
+pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.3.0.js";
 /// Immutable browser sensor bootstrap loader injected into new pages.
-pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.1.0-loader.js";
+pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.3.0-loader.js";
 /// Exact versioned sensor bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor-1.1.0.js");
+pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor-1.3.0.js");
 /// Exact versioned loader bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader-1.1.0.js");
+pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader-1.3.0.js");
 /// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
-pub const SENSOR_VERSION: &str = "1.1.0";
-/// Superseded sensor asset, still served byte-identical: pages delivered by
-/// an older edge (or another instance during a rolling upgrade) pin these
-/// exact bytes with SRI, so the URL may disappear but must never change.
+pub const SENSOR_VERSION: &str = "1.3.0";
+/// Superseded 1.2.0 sensor asset, still served byte-identical: pages
+/// delivered by an older edge (or another instance during a rolling
+/// upgrade) pin these exact bytes with SRI, so the URL may disappear but
+/// must never change.
+pub const PREVIOUS_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.2.0.js";
+/// Superseded 1.2.0 loader asset, still served byte-identical.
+pub const PREVIOUS_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.2.0-loader.js";
+/// Frozen 1.2.0 sensor bytes.
+pub const PREVIOUS_SENSOR_ASSET_BYTES: &[u8] =
+    include_bytes!("../../../sensor/src/sensor-1.2.0.js");
+/// Frozen 1.2.0 loader bytes.
+pub const PREVIOUS_SENSOR_LOADER_BYTES: &[u8] =
+    include_bytes!("../../../sensor/src/loader-1.2.0.js");
+/// Version embedded in the previous-tier asset paths.
+pub const PREVIOUS_SENSOR_VERSION: &str = "1.2.0";
+/// Superseded 1.1.0 sensor asset, still served byte-identical: this tier's
+/// name no longer rotates (unlike [`PREVIOUS_SENSOR_VERSION`], which will
+/// move again on the next release) because 1.1.0 is no longer the
+/// next-to-current version; it has its own permanent frozen slot below.
+pub const SUPERSEDED_1_1_0_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.1.0.js";
+/// Superseded 1.1.0 loader asset, still served byte-identical.
+pub const SUPERSEDED_1_1_0_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.1.0-loader.js";
+/// Frozen 1.1.0 sensor bytes.
+pub const SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES: &[u8] =
+    include_bytes!("../../../sensor/src/sensor-1.1.0.js");
+/// Frozen 1.1.0 loader bytes.
+pub const SUPERSEDED_1_1_0_SENSOR_LOADER_BYTES: &[u8] =
+    include_bytes!("../../../sensor/src/loader-1.1.0.js");
+/// Version embedded in the permanent 1.1.0 frozen-tier asset paths.
+pub const SUPERSEDED_1_1_0_SENSOR_VERSION: &str = "1.1.0";
+/// Superseded 1.0.0 sensor asset, still served byte-identical: pages
+/// delivered by an older edge (or another instance during a rolling
+/// upgrade) pin these exact bytes with SRI, so the URL may disappear but
+/// must never change.
 pub const LEGACY_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
 /// Superseded loader asset, still served byte-identical.
 pub const LEGACY_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.0.0-loader.js";
@@ -91,19 +126,73 @@ pub const LEGACY_SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src
 pub const LEGACY_SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader.ts");
 /// Version embedded in the legacy asset paths.
 pub const LEGACY_SENSOR_VERSION: &str = "1.0.0";
+/// One sensor (or loader) version no longer served as [`SENSOR_VERSION`],
+/// kept byte-identical forever: a page an older edge already delivered — or
+/// a browser tab still open from before the next release — pins these exact
+/// bytes by URL and SRI, so the URL must keep resolving no matter how many
+/// releases have shipped since.
+pub struct FrozenSensorVersion {
+    /// The version string this entry serves, exactly as originally shipped.
+    pub version: &'static str,
+    /// The sensor asset's immutable path.
+    pub asset_path: &'static str,
+    /// The loader's immutable path.
+    pub loader_path: &'static str,
+    /// The sensor asset's immutable bytes.
+    pub asset_bytes: &'static [u8],
+    /// The loader's immutable bytes.
+    pub loader_bytes: &'static [u8],
+}
+/// Every sensor version superseded by [`SENSOR_VERSION`], oldest first.
+/// Growing this list (when the next version ships) is the only change a
+/// future release needs to keep an older version's pages served: unlike
+/// [`SENSOR_VERSION`] itself, there is no fixed slot count to run out of.
+pub const FROZEN_SENSOR_VERSIONS: &[FrozenSensorVersion] = &[
+    FrozenSensorVersion {
+        version: LEGACY_SENSOR_VERSION,
+        asset_path: LEGACY_SENSOR_ASSET_PATH,
+        loader_path: LEGACY_SENSOR_LOADER_PATH,
+        asset_bytes: LEGACY_SENSOR_ASSET_BYTES,
+        loader_bytes: LEGACY_SENSOR_LOADER_BYTES,
+    },
+    FrozenSensorVersion {
+        version: SUPERSEDED_1_1_0_SENSOR_VERSION,
+        asset_path: SUPERSEDED_1_1_0_SENSOR_ASSET_PATH,
+        loader_path: SUPERSEDED_1_1_0_SENSOR_LOADER_PATH,
+        asset_bytes: SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES,
+        loader_bytes: SUPERSEDED_1_1_0_SENSOR_LOADER_BYTES,
+    },
+    FrozenSensorVersion {
+        version: PREVIOUS_SENSOR_VERSION,
+        asset_path: PREVIOUS_SENSOR_ASSET_PATH,
+        loader_path: PREVIOUS_SENSOR_LOADER_PATH,
+        asset_bytes: PREVIOUS_SENSOR_ASSET_BYTES,
+        loader_bytes: PREVIOUS_SENSOR_LOADER_BYTES,
+    },
+];
 /// Dynamic browser sensor bootstrap document.
 pub const SENSOR_BOOTSTRAP_PATH: &str = "/__xshield/v1/bootstrap";
 /// Same-origin observation preparation endpoint advertised by bootstrap.
 pub const SENSOR_PREPARE_PATH: &str = "/__xshield/v1/events/prepare";
-/// Observation versions the prepare endpoint accepts: every version whose
-/// assets this edge still serves.
-pub const ACCEPTED_SENSOR_VERSIONS: [&str; 2] = [SENSOR_VERSION, LEGACY_SENSOR_VERSION];
+/// Same-origin probe WSS channel advertised by the 1.2.0+ bootstrap
+/// (docs/07 7.3): heartbeat and event reporting terminated at the edge, with
+/// HTTPS prepare as the fallback transport.
+pub const SENSOR_WS_PATH: &str = "/__xshield/v1/sensor/ws";
+/// Observation versions the prepare endpoint and the WSS channel accept:
+/// every version whose assets this edge still serves.
+pub const ACCEPTED_SENSOR_VERSIONS: [&str; 4] = [
+    SENSOR_VERSION,
+    PREVIOUS_SENSOR_VERSION,
+    SUPERSEDED_1_1_0_SENSOR_VERSION,
+    LEGACY_SENSOR_VERSION,
+];
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
 const SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.loader";
-const LEGACY_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.legacy_asset";
-const LEGACY_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.legacy_loader";
+const FROZEN_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.frozen_asset";
+const FROZEN_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.frozen_loader";
 const SENSOR_BOOTSTRAP_OPERATION_ID: &str = "xshield.sensor.bootstrap";
 const SENSOR_PREPARE_OPERATION_ID: &str = "xshield.sensor.prepare";
+const SENSOR_WS_OPERATION_ID: &str = "xshield.sensor.ws";
 const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
 
 /// Local edge response selected from the reserved Xshield namespace.
@@ -113,14 +202,18 @@ pub enum InternalResponse {
     SensorAsset,
     /// The immutable browser sensor bootstrap loader.
     SensorLoader,
-    /// The frozen 1.0.0 sensor asset kept for already-delivered pages.
-    LegacySensorAsset,
-    /// The frozen 1.0.0 loader asset kept for already-delivered pages.
-    LegacySensorLoader,
+    /// A superseded sensor asset kept for already-delivered pages, indexing
+    /// [`FROZEN_SENSOR_VERSIONS`].
+    FrozenSensorAsset(usize),
+    /// A superseded loader asset kept for already-delivered pages, indexing
+    /// [`FROZEN_SENSOR_VERSIONS`].
+    FrozenSensorLoader(usize),
     /// A per-navigation browser sensor bootstrap document.
     SensorBootstrap,
     /// A session-bound browser observation preparation request.
     SensorPrepare,
+    /// A session-bound probe WSS upgrade request.
+    SensorWsUpgrade,
 }
 
 /// Fully validated gateway configuration selected at process startup.
@@ -190,6 +283,36 @@ struct CompiledOperation {
     issued_by: Option<xshield_core::edge_descriptors::IssuedBy>,
     query_pagination: Option<QueryPaginationRule>,
     response: Option<CompiledResponse>,
+    business_websocket: Option<BusinessWebSocketPolicy>,
+}
+
+/// A declared business WebSocket route: the gateway admits the handshake
+/// exactly like any other operation, then lets Pingora relay the upgraded
+/// connection's raw bytes to the origin untouched. `business_ws::FrameScanner`
+/// observes those bytes in both directions to audit one record per logical
+/// message (docs/11 §1); nothing here decrypts, rewrites, or blocks a frame
+/// (docs/22 M2, OBSERVE-only coverage — see docs/24 ADR on the WSS scope).
+#[derive(Debug, Clone)]
+pub struct BusinessWebSocketPolicy {
+    adapter_revision: String,
+    max_observed_frame_bytes: usize,
+}
+
+impl BusinessWebSocketPolicy {
+    /// Operator-chosen label carried into every audit record for this route,
+    /// so a later adapter change is traceable; never interpreted.
+    #[must_use]
+    pub fn adapter_revision(&self) -> &str {
+        &self.adapter_revision
+    }
+
+    /// Frames at or under this many payload bytes are fully accounted for in
+    /// the message audit; larger ones still relay but degrade their
+    /// message's audit coverage (`business_ws::FrameScanner`).
+    #[must_use]
+    pub const fn max_observed_frame_bytes(&self) -> usize {
+        self.max_observed_frame_bytes
+    }
 }
 
 #[derive(Debug)]
@@ -387,6 +510,21 @@ struct OperationDto {
     #[serde(default)]
     query_pagination: Option<SiteQueryPagination>,
     response: Option<ResponseDto>,
+    #[serde(default)]
+    business_websocket: Option<BusinessWebSocketDto>,
+}
+
+/// Upper bound on [`BusinessWebSocketDto::max_observed_frame_bytes`]: large
+/// enough for ordinary JSON/binary application messages, small enough that
+/// one connection's reassembly buffer stays bounded regardless of operator
+/// configuration.
+const MAX_BUSINESS_WS_OBSERVE_FRAME_BYTES: usize = 256 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BusinessWebSocketDto {
+    adapter_revision: String,
+    max_observed_frame_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -411,6 +549,14 @@ enum RequestCryptoDto {
         approval_ref: String,
         expires_at: u64,
         build_fingerprints: Vec<String>,
+    },
+    EnvelopeHook {
+        adapter_revision: String,
+        max_envelope_bytes: usize,
+        max_plaintext_bytes: usize,
+        max_message_age_seconds: u64,
+        max_future_skew_seconds: u64,
+        max_active_messages: u32,
     },
 }
 
@@ -808,21 +954,25 @@ impl GatewayConfig {
         self.sensor.as_ref()
     }
 
-    /// Admits the reserved prepare operation after the identity adapter loaded
-    /// an exact current WAF session.
+    /// Admits the reserved prepare operation or the WSS upgrade after the
+    /// identity adapter loaded an exact current WAF session.
     ///
     /// The result authorizes metadata ingestion only. It is not an
     /// [`AdmissionProof`] and cannot admit a configured business operation.
     #[must_use]
     pub fn admit_sensor_session(&self, method: &str, path: &str) -> GatewayDecision {
-        if self.internal_response(method, path) != Some(InternalResponse::SensorPrepare) {
-            return GatewayDecision {
-                outcome: GatewayOutcome::Denied,
-                operation_id: None,
-                reason_code: ReasonCode::OperationNotMatched,
-            };
-        }
-        match OperationId::parse(SENSOR_PREPARE_OPERATION_ID) {
+        let operation = match self.internal_response(method, path) {
+            Some(InternalResponse::SensorPrepare) => SENSOR_PREPARE_OPERATION_ID,
+            Some(InternalResponse::SensorWsUpgrade) => SENSOR_WS_OPERATION_ID,
+            _ => {
+                return GatewayDecision {
+                    outcome: GatewayOutcome::Denied,
+                    operation_id: None,
+                    reason_code: ReasonCode::OperationNotMatched,
+                };
+            }
+        };
+        match OperationId::parse(operation) {
             Ok(operation_id) => GatewayDecision {
                 outcome: GatewayOutcome::Allowed,
                 operation_id: Some(operation_id),
@@ -871,11 +1021,13 @@ impl GatewayConfig {
     pub fn admission_class(&self, method: &str, path: &str) -> Option<AdmissionClass> {
         if let Some(response) = self.internal_response(method, path) {
             return Some(match response {
-                InternalResponse::SensorPrepare => AdmissionClass::AuthenticatedRoot,
+                InternalResponse::SensorPrepare | InternalResponse::SensorWsUpgrade => {
+                    AdmissionClass::AuthenticatedRoot
+                }
                 InternalResponse::SensorAsset
                 | InternalResponse::SensorLoader
-                | InternalResponse::LegacySensorAsset
-                | InternalResponse::LegacySensorLoader
+                | InternalResponse::FrozenSensorAsset(_)
+                | InternalResponse::FrozenSensorLoader(_)
                 | InternalResponse::SensorBootstrap => AdmissionClass::Public,
             });
         }
@@ -889,14 +1041,25 @@ impl GatewayConfig {
         match (method, path) {
             ("GET", SENSOR_ASSET_PATH) => Some(InternalResponse::SensorAsset),
             ("GET", SENSOR_LOADER_PATH) => Some(InternalResponse::SensorLoader),
-            ("GET", LEGACY_SENSOR_ASSET_PATH) => Some(InternalResponse::LegacySensorAsset),
-            ("GET", LEGACY_SENSOR_LOADER_PATH) => Some(InternalResponse::LegacySensorLoader),
             ("GET", SENSOR_BOOTSTRAP_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorBootstrap)
             }
             ("POST", SENSOR_PREPARE_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorPrepare)
             }
+            ("GET", SENSOR_WS_PATH) if self.sensor.is_some() => {
+                Some(InternalResponse::SensorWsUpgrade)
+            }
+            ("GET", path) => FROZEN_SENSOR_VERSIONS
+                .iter()
+                .position(|frozen| frozen.asset_path == path)
+                .map(InternalResponse::FrozenSensorAsset)
+                .or_else(|| {
+                    FROZEN_SENSOR_VERSIONS
+                        .iter()
+                        .position(|frozen| frozen.loader_path == path)
+                        .map(InternalResponse::FrozenSensorLoader)
+                }),
             _ => None,
         }
     }
@@ -972,6 +1135,17 @@ impl GatewayConfig {
         })
     }
 
+    /// Returns the declared business WebSocket policy for an exact operation,
+    /// when its handshake route has one.
+    #[must_use]
+    pub fn business_websocket_policy(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<&BusinessWebSocketPolicy> {
+        self.operation(method, path)?.business_websocket.as_ref()
+    }
+
     /// Returns the server-selected request decryption rule for an exact operation.
     #[must_use]
     pub fn request_crypto_policy(&self, method: &str, path: &str) -> Option<&RequestCryptoPolicy> {
@@ -983,7 +1157,9 @@ impl GatewayConfig {
     pub fn request_crypto_rule(&self, method: &str, path: &str) -> Option<&RequestCryptoRule> {
         match self.request_crypto_policy(method, path)? {
             RequestCryptoPolicy::Enforce(rule) => Some(rule),
-            RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
+            RequestCryptoPolicy::Observe(_)
+            | RequestCryptoPolicy::Compatibility(_)
+            | RequestCryptoPolicy::EnvelopeHook(_) => None,
         }
     }
 
@@ -995,8 +1171,33 @@ impl GatewayConfig {
             .chain(self.path_resource_operations.iter())
             .find_map(|operation| match operation.request_crypto.as_ref()? {
                 RequestCryptoPolicy::Enforce(rule) => Some(rule.key_id()),
-                RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
+                RequestCryptoPolicy::Observe(_)
+                | RequestCryptoPolicy::Compatibility(_)
+                | RequestCryptoPolicy::EnvelopeHook(_) => None,
             })
+    }
+
+    /// Returns every exact operation whose request-crypto policy is
+    /// `ENVELOPE_HOOK`, as `(method, path, operation_id, adapter_revision)`,
+    /// for the bootstrap document to advertise to the browser sensor.
+    #[must_use]
+    pub fn envelope_hook_operations(&self) -> Vec<(&str, &str, &str, &str)> {
+        self.operations
+            .iter()
+            .filter_map(
+                |((method, path), operation)| match operation.request_crypto.as_ref()? {
+                    RequestCryptoPolicy::EnvelopeHook(rule) => Some((
+                        method.as_str(),
+                        path.as_str(),
+                        operation.policy.operation_id().as_str(),
+                        rule.adapter_revision(),
+                    )),
+                    RequestCryptoPolicy::Enforce(_)
+                    | RequestCryptoPolicy::Observe(_)
+                    | RequestCryptoPolicy::Compatibility(_) => None,
+                },
+            )
+            .collect()
     }
 
     /// Returns the response encryption rule for one exact operation.
@@ -1187,13 +1388,20 @@ impl GatewayConfig {
             let operation = match response {
                 InternalResponse::SensorAsset => SENSOR_ASSET_OPERATION_ID,
                 InternalResponse::SensorLoader => SENSOR_LOADER_OPERATION_ID,
-                InternalResponse::LegacySensorAsset => LEGACY_SENSOR_ASSET_OPERATION_ID,
-                InternalResponse::LegacySensorLoader => LEGACY_SENSOR_LOADER_OPERATION_ID,
+                InternalResponse::FrozenSensorAsset(_) => FROZEN_SENSOR_ASSET_OPERATION_ID,
+                InternalResponse::FrozenSensorLoader(_) => FROZEN_SENSOR_LOADER_OPERATION_ID,
                 InternalResponse::SensorBootstrap => SENSOR_BOOTSTRAP_OPERATION_ID,
                 InternalResponse::SensorPrepare => {
                     return GatewayDecision {
                         outcome: GatewayOutcome::Denied,
                         operation_id: OperationId::parse(SENSOR_PREPARE_OPERATION_ID).ok(),
+                        reason_code: ReasonCode::AuthRequired,
+                    };
+                }
+                InternalResponse::SensorWsUpgrade => {
+                    return GatewayDecision {
+                        outcome: GatewayOutcome::Denied,
+                        operation_id: OperationId::parse(SENSOR_WS_OPERATION_ID).ok(),
                         reason_code: ReasonCode::AuthRequired,
                     };
                 }
@@ -1332,7 +1540,9 @@ fn compile_operations(operations: Vec<OperationDto>) -> Result<CompiledOperation
                 .as_ref()
                 .and_then(|policy| match policy {
                     RequestCryptoPolicy::Enforce(rule) => Some(rule.key_id()),
-                    RequestCryptoPolicy::Observe(_) | RequestCryptoPolicy::Compatibility(_) => None,
+                    RequestCryptoPolicy::Observe(_)
+                    | RequestCryptoPolicy::Compatibility(_)
+                    | RequestCryptoPolicy::EnvelopeHook(_) => None,
                 })
         })
         .collect::<BTreeSet<_>>();
@@ -1784,6 +1994,15 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         .request_crypto
         .map(|rule| compile_request_crypto(rule, method, dto.admission, response_has_side_effects))
         .transpose()?;
+    let business_websocket = compile_business_websocket(
+        dto.business_websocket,
+        method,
+        response.is_none()
+            && request_crypto.is_none()
+            && resource.is_none()
+            && query_pagination.is_none()
+            && source_action.is_none(),
+    )?;
     Ok(CompiledOperation {
         method,
         route,
@@ -1798,7 +2017,36 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
             .transpose()?,
         query_pagination,
         response,
+        business_websocket,
     })
+}
+
+/// A business WebSocket route is otherwise the simplest possible operation:
+/// a bare `GET` admission check at handshake time, with no response
+/// transform, request decryption, resource binding, pagination, or source
+/// action — every one of those concerns responses to the *handshake*
+/// request, and this route has no response to transform once the handshake
+/// is admitted and the connection becomes a raw relayed byte pipe.
+fn compile_business_websocket(
+    dto: Option<BusinessWebSocketDto>,
+    method: HttpMethod,
+    otherwise_bare: bool,
+) -> Result<Option<BusinessWebSocketPolicy>, ConfigError> {
+    let Some(dto) = dto else {
+        return Ok(None);
+    };
+    if method != HttpMethod::Get
+        || !otherwise_bare
+        || dto.adapter_revision.trim().is_empty()
+        || dto.max_observed_frame_bytes == 0
+        || dto.max_observed_frame_bytes > MAX_BUSINESS_WS_OBSERVE_FRAME_BYTES
+    {
+        return Err(ConfigError::Invalid("operations.business_websocket"));
+    }
+    Ok(Some(BusinessWebSocketPolicy {
+        adapter_revision: dto.adapter_revision,
+        max_observed_frame_bytes: dto.max_observed_frame_bytes,
+    }))
 }
 
 /// The block only has an effect where the edge otherwise refuses every query
@@ -1824,6 +2072,7 @@ fn compile_query_pagination(
     QueryPaginationRule::compile(block).map_err(ConfigError::Domain)
 }
 
+#[allow(clippy::too_many_lines)]
 fn compile_request_crypto(
     dto: RequestCryptoDto,
     method: HttpMethod,
@@ -1924,7 +2173,65 @@ fn compile_request_crypto(
                     .ok_or(ConfigError::Invalid("operations.request_crypto"))?,
             }))
         }
+        RequestCryptoDto::EnvelopeHook {
+            adapter_revision,
+            max_envelope_bytes,
+            max_plaintext_bytes,
+            max_message_age_seconds,
+            max_future_skew_seconds,
+            max_active_messages,
+        } => compile_envelope_hook_request_crypto(
+            adapter_revision,
+            max_envelope_bytes,
+            max_plaintext_bytes,
+            max_message_age_seconds,
+            max_future_skew_seconds,
+            max_active_messages,
+            admission,
+        ),
     }
+}
+
+/// Session-bound keying (docs/08 §8.1) only makes sense once the request
+/// already carries a verified session; restricted to exactly
+/// `AUTHENTICATED_ROOT` rather than merely excluding `UI_ACTION_REQUIRED`,
+/// unlike the other `request_crypto` modes.
+#[allow(clippy::too_many_arguments)]
+fn compile_envelope_hook_request_crypto(
+    adapter_revision: String,
+    max_envelope_bytes: usize,
+    max_plaintext_bytes: usize,
+    max_message_age_seconds: u64,
+    max_future_skew_seconds: u64,
+    max_active_messages: u32,
+    admission: AdmissionDto,
+) -> Result<RequestCryptoPolicy, ConfigError> {
+    if !matches!(admission, AdmissionDto::AuthenticatedRoot)
+        || !valid_scoped_value(&adapter_revision)
+        || !(1..=MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES).contains(&max_envelope_bytes)
+        || max_plaintext_bytes == 0
+        || max_plaintext_bytes > max_envelope_bytes / 2
+        || !(1..=3_600).contains(&max_message_age_seconds)
+        || max_future_skew_seconds > 300
+        || !(1..=1_000_000).contains(&max_active_messages)
+    {
+        return Err(ConfigError::Invalid("operations.request_crypto"));
+    }
+    Ok(RequestCryptoPolicy::EnvelopeHook(
+        RequestCryptoEnvelopeHookRule {
+            adapter_revision,
+            max_envelope_bytes,
+            max_plaintext_bytes,
+            max_message_age_seconds,
+            max_future_skew_seconds,
+            max_active_messages,
+            max_in_flight_bytes: max_envelope_bytes
+                .checked_mul(3)
+                .and_then(|bytes| bytes.checked_add(REQUEST_CRYPTO_FIXED_IN_FLIGHT_BYTES))
+                .filter(|bytes| *bytes <= MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)
+                .ok_or(ConfigError::Invalid("operations.request_crypto"))?,
+        },
+    ))
 }
 
 fn compile_optional_response(
@@ -2552,6 +2859,64 @@ mod tests {
     }
 
     #[test]
+    fn business_websocket_route_admits_like_any_other_operation_but_has_no_buffered_response() {
+        let ws_operation = r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"chat-ws-r1","max_observed_frame_bytes":65536}},"#;
+        let configured = CONFIG.replace(
+            "\"operations\":[",
+            &format!("\"operations\":[{ws_operation}"),
+        );
+        let config = GatewayConfig::from_json(configured.as_bytes()).unwrap();
+        let decision = config.admit("GET", "/ws/chat", UnixSeconds::new(1));
+        assert_eq!(decision.outcome, GatewayOutcome::Allowed);
+        assert_eq!(decision.operation_id.unwrap().as_str(), "chat.ws");
+        assert!(config.buffered_response_policy("GET", "/ws/chat").is_none());
+        let policy = config.business_websocket_policy("GET", "/ws/chat").unwrap();
+        assert_eq!(policy.adapter_revision(), "chat-ws-r1");
+        assert_eq!(policy.max_observed_frame_bytes(), 65536);
+        // An ordinary operation never declares a business websocket policy.
+        assert!(
+            config
+                .business_websocket_policy("GET", "/catalog")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn business_websocket_rejects_anything_beyond_a_bare_get_handshake() {
+        let rejects = |operation: &str| {
+            let configured =
+                CONFIG.replace("\"operations\":[", &format!("\"operations\":[{operation}"));
+            assert!(
+                GatewayConfig::from_json(configured.as_bytes()).is_err(),
+                "{operation}"
+            );
+        };
+        // Declares a response transform alongside the websocket policy.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":1024},"response":{"mode":"BUFFERED_JSON","max_bytes":1024}},"#,
+        );
+        // Not a GET handshake.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"POST","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":1024}},"#,
+        );
+        // A zero or an above-ceiling observation cap.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":0}},"#,
+        );
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":99999999}},"#,
+        );
+        // A blank adapter revision.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"  ","max_observed_frame_bytes":1024}},"#,
+        );
+        // Carries a source action, which only means something for a response.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":"chat.open","resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":1024}},"#,
+        );
+    }
+
+    #[test]
     fn static_asset_fallback_is_opt_in_and_never_admits_api_paths() {
         let denied = |config: &GatewayConfig, path: &str| {
             let decision = config.admit("GET", path, UnixSeconds::new(1));
@@ -2850,6 +3215,35 @@ mod tests {
         assert!(matches!(
             GatewayConfig::from_json(two_locations.as_bytes()),
             Err(ConfigError::Invalid("operation capability"))
+        ));
+    }
+
+    /// Acceptance GRANT-08 at the edge: a route naming both a parent and a
+    /// child identifier would key admission on one of them alone, so it is
+    /// refused at configuration time rather than checked as two independent
+    /// resources. The composite reference has to be one resource key.
+    #[test]
+    fn parent_child_route_is_refused_rather_than_split_into_independent_resources() {
+        let nested = CONFIG
+            .replace(
+                "\"method\":\"POST\",\"path\":\"/account\"",
+                "\"method\":\"GET\",\"path\":\"/orders/{order_id}/items/{item_id}\"",
+            )
+            .replace(
+                "\"resource_type\":null,\"view_profile\":null}\n      ]",
+                "\"resource_type\":\"order_item\",\"view_profile\":\"item_detail\",\"resource_path_parameter\":\"item_id\"}\n      ]",
+            );
+        assert!(matches!(
+            GatewayConfig::from_json(nested.as_bytes()),
+            Err(ConfigError::Invalid("operations.path"))
+        ));
+        let parent_marker = nested.replace(
+            "\"resource_path_parameter\":\"item_id\"",
+            "\"resource_path_parameter\":\"order_id\"",
+        );
+        assert!(matches!(
+            GatewayConfig::from_json(parent_marker.as_bytes()),
+            Err(ConfigError::Invalid("operations.path"))
         ));
     }
 

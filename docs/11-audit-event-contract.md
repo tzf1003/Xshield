@@ -4,7 +4,7 @@
 
 输入一个请求 ID，调查者能够回答：收到什么、使用哪个身份绑定、经过哪些层、每层依据是什么、规则/模型怎么判、为什么跳过某层、是否降级、实际转发了什么、源站返回什么、给客户端返回什么、是否发行新资格、完整证据保存到哪里。
 
-所有被 Xshield 解析接收的 HTTP 请求均有 request.accepted 和最终/补偿状态；包括正常、拒绝、静态资源、内部管理、模型调用及失败请求。连接在形成 HTTP 请求前失败时记 connection/security 事件并带 connection_id，不虚构完整请求。业务 WS 支持时，每个业务消息有 message_id，与连接握手请求分开。
+所有被 Xshield 解析接收的 HTTP 请求均有 request.accepted 和最终/补偿状态；包括正常、拒绝、静态资源、内部管理、模型调用及失败请求。连接在形成 HTTP 请求前失败时记 connection/security 事件并带 connection_id，不虚构完整请求。业务 WS（站点自身的 WebSocket 流量，docs/22 M2）已支持：每个业务消息有 message_id，与连接握手请求分开（见 11.15 `business_ws.*`）；这一增量只做 OBSERVE 覆盖，握手时鉴权一次，不逐帧重新鉴权，也不对帧内容加解密。
 
 ## 11.2 ID 体系
 
@@ -73,6 +73,10 @@ request.accepted/completed/aborted；stage.started/completed/skipped；identity.
 
 恢复补偿产生的 request.aborted 允许 `status=null`，并以 cause_event_ids 指向已知的 decision、request.accepted、origin.response 或新追加的 origin.unknown；准入批次只留下 accepted 前缀时使用 `decision=UNKNOWN` 与 `reason_code=REQUEST_INCOMPLETE`。它表达审计终态，不虚构客户端实际收到的状态码。
 
+未匹配任何路由的拒绝（`decision=DENY`、`reason_code=OPERATION_NOT_MATCHED`、无 `operation_id`）的 `decision.composed` 可带 `unmatched_path`：请求路径的形状，不是路径本身。每段只有 1–24 字节、以字母开头、仅含 `[A-Za-z0-9._-]` 且最多 2 个数字时保留原文，其余段写作 `{}`；超过 10 段时第 10 段写作 `**`，末尾斜杠保留，不以 `/` 开头的输入写作 `/{}`。其他决策不得携带该字段，出现时必须是合法形状且不得为 null；worker 发布器与 edge 重启补偿都按此校验，旧 worker 会拒绝该字段，因此先升级 worker 再升级 edge。控制面 `GET /control/v1/coverage-report`（docs/29 29.39）按形状汇总未覆盖端点。
+
+观察灰度（[32](32-observe-to-enforce-rollout.md)）为决策与终态事件增加一个封闭取值 `OBSERVED_WOULD_DENY`，表示站点处于 observe 灰度、严格策略本应拒绝、网关仍按灰度规则转发。携带该值的决策与 request.completed/aborted 必须带 `rollout_revision`（与策略修订同一命名规则），`reason_code` 保留本应生效的拒绝原因；request.completed 还要求 `origin_state=response_received`。`rollout_revision` 对 ALLOW/DENY/UNKNOWN 可缺省，出现时必须为合法名称且不得为 null。该值同时作为检索 outcome 开放给受限查询，不改变 DENY 的含义：被执行的拒绝仍只写 DENY。旧 worker 会拒绝该值，部署顺序为先升级 worker 发布器，再升级控制面，最后启用边缘 observe。edge 的写法：准入阶段的 `stage.completed` 仍是 `outcome=DENY` 与拒绝原因（确定性规则的判定不变），`decision.composed` 写 `OBSERVED_WOULD_DENY`，随后照常写 origin.forward_intent 与 origin.response/unknown；正常结束的 request.completed 的 `reason_code` 是同一拒绝原因，源站失败或下游中断的 request.aborted 仍写源站结局的原因（`ORIGIN_OUTCOME_UNKNOWN`、`REQUEST_INCOMPLETE` 等）。重启补偿沿用同一规则，并要求终态的 `decision` 与 `rollout_revision` 和决策事件一致。
+
 网关的 `audit.recovered` 与请求无关，只有两种可发布形态：修复崩溃尾部（`reason_code=AUDIT_TAIL_RECOVERED`，`truncated_bytes>0`）和持久写入失败后重开屏障（`reason_code=AUDIT_BARRIER_REOPENED`，`truncated_bytes=0`，见 [13.3](13-audit-storage-reliability.md)）；其他原因码或字节数组合会被发布器以 InvalidEvent 拒绝。
 
 未路由请求（监听端口与 Host 没有命中任何站点快照）没有站点，也就没有可信的站点作用域，逐请求写持久事件会让洪峰写满 journal，此前它们也完全没有审计。网关因此在内存中按监听端口计数，并每 60 秒为每个有计数的端口追加一条 `edge.unrouted_denied` 聚合事件：`request_id` 为空，tenant/site 取网关进程的引导作用域；封闭 payload 为 `listener_port`、`denied_count`、`first_seen_unix`、`last_seen_unix`、可空 `sample_host` 和固定稳定原因码 `HOST_NOT_ROUTED`。`sample_host` 是窗口内首个 Host，仅保留 0x21–0x7e 且不超过 253 字节的值，属于攻击者可控数据，只作为数据保存和展示。worker 将其发布为 `stage=edge_routing`、`outcome=DENY`、deterministic、`confidence=null/not_applicable`、非终态，并拒绝其他原因码、零端口/零计数、首末时间颠倒、超界或含控制字符的 Host、未知和重复字段。内存只随监听端口数（上限 256）增长，与请求量无关；屏障关闭时计数保留，重开后与新计数合并写出，不丢失。客户端响应保持 503 `SITE_CONFIG_UNAVAILABLE`。窗口内的逐请求明细不持久化，进程在两次写出之间退出时该间隔内尚未写出的计数也会丢失，这是有意的有界审计取舍；新事件类型须先升级 worker 发布器。
@@ -81,7 +85,7 @@ request.accepted/completed/aborted；stage.started/completed/skipped；identity.
 
 不可采样事件：每请求最小记录、每个实际安全判定、资格变更、模型调用、Agent 工具调用、管理动作、证据访问与完整性异常。调试 span 和性能采样可独立配置，但不能让 required 审计消失。
 
-`request.accepted` 新增可选 `path_template`，服务于“从观察流量导入路由”发现（见 [30.7](30-console-redesign.md#307-控制台重设计待交付清单)）。该字段仅在网关未能把请求匹配到任一已配置 operation（即 `operation_id` 为空）时才非空，由网关对原始请求路径做一次确定性、有界规范化：仅将全数字或规范 UUID 的路径段替换为 `{id}`，其余字节原样保留；拒绝空路径、相对路径、含查询串/片段/控制字节或超过 256 字节的输入，此时字段保持为空而不是写入猜测值。它是网关写时的辅助提示，既不是鉴权或路由依据，也不证明该路径此后仍未覆盖；worker 在发布前对其形状独立重新校验（见 [29.37](29-api-endpoint-catalog.md#2937-已实现的未覆盖端点发现契约)），不信任网关侧已满足的约束。ClickHouse `audit_events`/`events_by_time` 按既有 expand-contract 惯例新增同名列，默认空字符串，物化视图目标先于来源表升级（见 `sql/clickhouse.sql`）。
+`request.accepted` 新增可选 `path_template`，服务于“从观察流量导入路由”发现（见 [30.7](30-console-redesign.md#307-控制台重设计待交付清单)）。该字段仅在网关未能把请求匹配到任一已配置 operation（即 `operation_id` 为空）时才非空，由网关对原始请求路径做一次确定性、有界规范化：仅将全数字或规范 UUID 的路径段替换为 `{id}`，其余字节原样保留；拒绝空路径、相对路径、含查询串/片段/控制字节或超过 256 字节的输入，此时字段保持为空而不是写入猜测值。它是网关写时的辅助提示，既不是鉴权或路由依据，也不证明该路径此后仍未覆盖；worker 在发布前对其形状独立重新校验（见 [29.41](29-api-endpoint-catalog.md#2941-已实现的未覆盖端点发现契约)），不信任网关侧已满足的约束。ClickHouse `audit_events`/`events_by_time` 按既有 expand-contract 惯例新增同名列，默认空字符串，物化视图目标先于来源表升级（见 `sql/clickhouse.sql`）。
 
 ## 11.6 可解释拒绝图
 
@@ -236,6 +240,7 @@ API Key 管理事件新增强类型 `target_api_key_id=key_…`（`key_` + UUIDv
 | `edge.response` / `edge.unknown` | 边缘自己产生的响应（拒绝、传感器资源、引导）；`edge_state` 分别为 `response_served`/`unknown`，已送出的响应必须有 100–599 状态码，未知交付可为空；源站响应仍使用 `origin.*` |
 | `evidence.captured` | 固定 `evidence_capture/PASS/EVIDENCE_CAPTURED`，`confidence=null`，恰好一个 artifact 引用和一个 catalog 因果事件，属于某个请求 |
 | `sensor.observation` | 浏览器上报的生命周期事件，索引为 `observation` 证明、无置信度：`claim_status` 必须是 `client_claimed`，`authorization_effect` 必须是 `none`；`PAGE_READY` 当且仅当序号为 1，序号 1–64；binding、`pgh_`/`nav_` 句柄、请求引用、构建与调用点指纹逐项强类型校验；`action_hint` 是 256 字节内的可打印 ASCII 文本，且绝不含动作引用（`action.`），因为引用不得进入 journal 与索引 |
+| `business_ws.closed` / `business_ws.message` | 站点自身业务 WebSocket 连接的代理审计（docs/22 M2，OBSERVE 覆盖；区别于探针 WSS 的 `sensor.observation`）。握手本身已作为普通已放行请求审计过；升级成功后，`business_ws.closed` 是连接级汇总（`operation_id`、双向消息/字节计数、`degraded`、`duration_us`），链上最多再带 256 条 `business_ws.message`（`direction` 为 `to_origin`/`to_client`，`kind` 为 `text`/`binary`/`close`/`ping`/`pong`/`other`，`byte_len`、`frame_count`、`degraded`）；索引均为 `observation` 证明、无置信度，不含帧内容；一条消息的 `message_id` 即其 `event_id`，与握手请求的 `request_id` 分开（11.1）；超过 256 条明细后仍计入汇总但不再逐条记录，`degraded` 置真 |
 
 这些事件只是审计事实，不是授权真值：浏览器观测从不改变任何放行结果，加密事件只含摘要与覆盖，不含明文或密钥材料。
 

@@ -1,6 +1,6 @@
-# 32 站点 observe → enforce 上线流程（提案，待产品决策）
+# 32 站点 observe → enforce 上线流程（已决定，待实现）
 
-状态：**提案，未实现**。docs/00 §0.3 已定“新接入先 observe 验证，再 enforce；产品目标为强制模式”，但今天只有请求加密一层有 observe（docs/08：`OBSERVE` 透传并记录候选，不解密）。站点级的“先观察、后强制”没有状态、没有审计词汇、没有退出标准，所以新站点只能直接 enforce，或手工把路由放成 `PUBLIC`。本文给出一个可评审的最小设计，并把需要产品负责人拍板的问题单列出来。
+状态：**设计已定（2026-10-28，32.5 的五个问题已由产品负责人决定，见 32.7）；32.6 第 1 步（审计契约）、第 2 步（控制面模型、校验、风险原因与审批）与第 3 步（edge 判定、转发、审计与指标）已实现；第 4 步的控制台编辑、到期提示、退出报告（29.37）、审批记录中的报告摘要（迁移 0056）与新建站点向导“入口与模式”步骤的观察选项均已实现**。docs/00 §0.3 已定“新接入先 observe 验证，再 enforce；产品目标为强制模式”，但今天只有请求加密一层有 observe（docs/08：`OBSERVE` 透传并记录候选，不解密）。站点级的“先观察、后强制”没有状态、没有审计词汇、没有退出标准，所以新站点只能直接 enforce，或手工把路由放成 `PUBLIC`。本文给出一个可评审的最小设计，并把需要产品负责人拍板的问题单列出来。
 
 ## 32.1 要解决的问题
 
@@ -31,7 +31,7 @@
 - 仍未被任何路由或页面动作覆盖的端点清单；
 - 索引水位与待发布段（审计没有跟上时报告标为“不足以判断”，不是“通过”）。
 
-报告只给事实；是否收紧仍由审批人决定，批准写入“依据哪一份报告摘要”。索引读不到时界面写明“无法判断”，不用 0 代替。
+报告只给事实；是否收紧仍由审批人决定，批准写入“依据哪一份报告摘要”：控制台在批准结束观察的修订时，把审批人本次会话最近生成的报告摘要放进 `X-Xshield-Exit-Report-Digest`，控制面原样存入 `site_apply_approvals.exit_report_digest`（迁移 0056，可空：没有生成报告也可以批准，记录为空）。索引读不到时界面写明“无法判断”，不用 0 代替。
 
 ## 32.5 需要产品负责人决定的问题
 
@@ -49,4 +49,18 @@
 4. 控制台：向导“入口与模式”的 observe 选项、发布页退出报告、审批文案。
 5. 运行：真实 ClickHouse 回归（本机原生 25.8，见 docs/20）与完整 `verify_all.sh`。
 
-在 32.5 的问题定下来之前不开始实现；第 1 条与第 2 条的答案会改变 edge 与控制面的大部分设计。
+第 2 步的落地形状：`SitePolicyConfig.rollout`（而不是 `SiteConfig` 顶层，这样它随 `site_policy` 投影到 edge，edge 用同一类型解析和校验）为 `{mode, observe_until_unix, revision, enforced_operations}`。路由的单向收紧用站点块里的 `enforced_operations` 列表表达，块里没有任何字段能把路由放宽。`rollout_revision` 取 `revision`。到期不需要写配置：edge 按 `observe_until_unix` 与当前时间判定，过了就是强制；控制面保存时拒绝过去或 30 天以后的截止时间。
+
+第 3 步的落地形状：edge 先按强制规则完整判定，只有判定为拒绝、方法为 GET/HEAD、路由满足 `SiteRollout::observes`（观察窗口内、非 `PUBLIC`、未单独强制、没有响应模式、加密、认证绑定、传感器、页面、资格、分页、分享或流转块，这些块的拒绝在 observe 下也不放行）且原因属于 `observable_refusal` 的请求才转发。可观察的原因只有“缺少登录或资格”一类：`AUTH_REQUIRED`、认证绑定不符/纪元变化/凭据代际变化/已撤销/会话过期、`CAPABILITY_MISSING`、`OPERATION_NOT_GRANTED`、`UI_ACTION_NOT_AVAILABLE`、`UI_EVIDENCE_UNVERIFIED`、`TARGET_SCOPE_MISMATCH`；WAF、限流、字段、身份存储不可用等拒绝照常执行。被转发的请求按透传流程到达源站，审计按 docs/11 写 `OBSERVED_WOULD_DENY` 与 `rollout_revision`，`/metrics` 计入 `outcome="observed"` 与 `xshield_edge_observed_refusals_total{reason_code}`。截止时间由 edge 按自身时钟判定，过期即强制，不需要新配置。
+
+32.5 的问题已在 32.7 定下，按上面的顺序实施。
+
+## 32.7 已定决策（2026-10-28）
+
+产品负责人采纳了以下方案，实现以此为准：
+
+1. **转发范围**：observe 只转发 `PUBLIC` 以外的只读请求（GET/HEAD）；写操作在 observe 下仍按 enforce 拒绝，并照常审计。
+2. **到期行为**：到期自动转 enforce；到期前 24 小时起在控制台与审计中告警；不得静默延续。
+3. **粒度**：站点级 `rollout`，路由只能单向收紧为 enforce（32.3）。
+4. **数据保留**：`OBSERVED_WOULD_DENY` 沿用现有脱敏与保留期；批准收紧时把所依据的退出报告摘要写入审批记录。
+5. **谁可以放宽**：enforce → observe、延长 `observe_until`、把路由放回 observe，都需要独立 `PolicyApprover` 并要求有效的 MFA step-up；`site.config.apply_direct` 不能豁免。

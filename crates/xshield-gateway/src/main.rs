@@ -1,10 +1,14 @@
 mod apply_api;
 mod buffered_json;
+mod buffered_relay;
+mod crypto_keys;
 mod descriptor_supply;
 mod durable_audit;
 mod edge_health;
+mod evidence_retention;
 mod evidence_writer;
 mod listener_supervisor;
+mod ops_api;
 mod protected_identity;
 mod rate_limit;
 mod sensor_delivery;
@@ -18,7 +22,13 @@ use bytes::Bytes;
 use pingora::{
     Error as PingoraError, ErrorType, Result as PingoraResult,
     http::ResponseHeader,
-    proxy::{ProxyHttp, Session},
+    proxy::{
+        ProxyHttp, Session,
+        subrequest::{
+            BodyMode, Ctx as SubrequestCtx,
+            pipe::{InputBody, InputBodyType, pipe_subrequest},
+        },
+    },
     server::Server,
     upstreams::peer::HttpPeer,
 };
@@ -34,22 +44,27 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use uuid::Uuid;
-use xshield_core::{audit::ReasonCode, domain::RequestId, identity::UnixSeconds};
-use xshield_gateway::edge_transport::{EdgeTransport, TransportConfig, http_server_options};
+use xshield_core::{
+    audit::ReasonCode, domain::RequestId, identity::UnixSeconds, site::observable_refusal,
+};
+use xshield_gateway::business_ws;
+use xshield_gateway::edge_transport::{
+    EdgeTransport, TLS_RELOAD_INTERVAL, TransportConfig, http_server_options,
+};
 use xshield_gateway::multi_site::{
     ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot, frozen_origin_target,
     origin_form_target, routing_authority,
 };
 use xshield_gateway::request_crypto::{
-    FrozenRequest, KeyAccessPort, KeyAccessQuery, RequestCryptoPolicy,
+    EnvelopeHookKeys, FrozenRequest, RequestCryptoEnvelopeHookRule, RequestCryptoPolicy,
+    envelope_hook_key_window,
 };
-use xshield_gateway::response_crypto::{
-    ENCRYPTED_RESPONSE_CONTENT_TYPE, ResponseKeyAccessPort, ResponseKeyAccessQuery,
-};
+use xshield_gateway::response_crypto::ENCRYPTED_RESPONSE_CONTENT_TYPE;
 use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
+use xshield_gateway::sensor_ws::{self, MAX_WS_FRAME_BYTES, WsOpcode};
 use xshield_gateway::{
-    BufferedResponsePolicy, GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
-    MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_BUFFERED_JSON_BYTES, MAX_CONFIG_BYTES,
+    BufferedResponsePolicy, FROZEN_SENSOR_VERSIONS, GatewayConfig, GatewayDecision, GatewayOutcome,
+    InternalResponse, MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_BUFFERED_JSON_BYTES, MAX_CONFIG_BYTES,
 };
 use xshield_postgres::{
     PostgresIdentityStore, RequestCryptoMessage, RequestCryptoMessageOutcome, SensorSession,
@@ -65,8 +80,8 @@ use crate::durable_audit::{
     SensorObservationAudit, new_trace_id, supervise_recovery,
 };
 use crate::protected_identity::{
-    CompatibilityEvidence, PendingAuthBinding, ProtectedIdentity, ResponseIdentity,
-    SensorBootstrapDelivery, WAF_COOKIE, store_failure_reason, strip_edge_proofs,
+    CompatibilityEvidence, PendingAuthBinding, PreparedResponseGrants, ProtectedIdentity,
+    ResponseIdentity, SensorBootstrapDelivery, WAF_COOKIE, store_failure_reason, strip_edge_proofs,
 };
 use crate::sensor_delivery::{
     SensorScript, bootstrap_document, respond_sensor_bootstrap, respond_sensor_script,
@@ -110,18 +125,86 @@ fn validate_sensor_observation_headers(
     Ok(length)
 }
 
+/// Validates the probe WSS handshake request against docs/07 §7.3: exact
+/// configured Origin, a genuine `Upgrade: websocket` request, and a
+/// well-formed `Sec-WebSocket-Key`. Returns the validated key.
+fn validate_sensor_ws_handshake_headers(
+    request: &pingora::http::RequestHeader,
+    expected_origin: &str,
+) -> Result<String, ReasonCode> {
+    if request.uri.query().is_some() {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut origins = request.headers.get_all("Origin").iter();
+    if origins.next().and_then(|value| value.to_str().ok()) != Some(expected_origin)
+        || origins.next().is_some()
+    {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut upgrades = request.headers.get_all("Upgrade").iter();
+    let upgrade_ok = upgrades
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    if !upgrade_ok || upgrades.next().is_some() {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let connection_has_upgrade = request.headers.get_all("Connection").iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    });
+    if !connection_has_upgrade {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut versions = request.headers.get_all("Sec-WebSocket-Version").iter();
+    if versions.next().and_then(|value| value.to_str().ok()) != Some("13")
+        || versions.next().is_some()
+    {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut keys = request.headers.get_all("Sec-WebSocket-Key").iter();
+    let key = keys
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| sensor_ws::valid_websocket_key(value))
+        .ok_or(ReasonCode::SensorObservationInvalid)?;
+    if keys.next().is_some() {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    Ok(key.to_owned())
+}
+
+/// Idle read timeout for an open probe WSS connection: well past the 15s+
+/// jitter heartbeat docs/07 §7.3 recommends, so backgrounded tabs (which
+/// pause JS and so miss heartbeats) are not closed spuriously.
+const SENSOR_WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Hard cap on a single probe WSS connection's lifetime; docs/07 §7.3 requires
+/// that an invalidated connection close and reauthenticate rather than run
+/// forever on a stale identity epoch.
+const SENSOR_WS_MAX_LIFETIME: Duration = Duration::from_mins(20);
+/// Message-rate window and cap, matching docs/07 §7.3's "单页短时 64 条摘要".
+const SENSOR_WS_RATE_WINDOW: Duration = Duration::from_secs(60);
+const SENSOR_WS_RATE_LIMIT: u32 = 64;
+/// Bound on buffered-but-not-yet-parsed bytes for one connection: one max
+/// frame plus the largest possible client frame header.
+const SENSOR_WS_MAX_BUFFERED_BYTES: usize = MAX_WS_FRAME_BYTES + 32;
+
 struct Gateway {
     config: Arc<GatewayConfig>,
     snapshot: Arc<ConfigSnapshotStore>,
     audit: DurableAudit,
     identity: Option<ProtectedIdentity>,
-    request_key: Option<EnvRequestKey>,
-    response_key: Option<EnvResponseKey>,
+    request_keys: crypto_keys::KeyRing,
+    response_keys: crypto_keys::KeyRing,
     postgres: Option<Arc<PostgresRuntime>>,
     buffered_body_budget: Arc<Semaphore>,
-    evidence: Option<evidence_writer::EvidenceWriter>,
+    evidence: Option<Arc<evidence_writer::EvidenceWriter>>,
     rate_limiter: Arc<SiteRateLimiter>,
     unrouted: Arc<UnroutedDenials>,
+    metrics: Arc<ops_api::EdgeMetrics>,
 }
 
 struct PostgresRuntime {
@@ -132,9 +215,11 @@ struct PostgresRuntime {
 }
 
 impl PostgresRuntime {
-    fn from_env(config: xshield_gateway::IdentityStoreConfig) -> Result<Self, env::VarError> {
+    fn from_env(
+        config: xshield_gateway::IdentityStoreConfig,
+    ) -> Result<Self, xshield_core::secret_env::SecretEnvError> {
         Ok(Self::new(
-            Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?),
+            Zeroizing::new(xshield_core::secret_env::var("XSHIELD_DATABASE_URL")?),
             config.max_connections(),
             Duration::from_millis(config.acquire_timeout_ms()),
         ))
@@ -190,19 +275,94 @@ struct RequestContext {
     frozen_query: Option<xshield_gateway::FrozenQuery>,
     sensor_session: Option<SensorSession>,
     sensor_observation_audit: Vec<SensorObservationAudit>,
+    // The validated `Sec-WebSocket-Key`, set once the handshake headers pass.
+    sensor_ws_key: Option<String>,
     sensor_bootstrap: Option<SensorBootstrapDelivery>,
     sensor_bootstrap_audit: Option<SensorBootstrapAudit>,
     page_action_audit: Option<PageActionAudit>,
     anonymous_session_cookie: Option<String>,
     pending_auth_binding: Option<PendingAuthBinding>,
+    // Grants the released body references, written only once every release
+    // step (response encryption included) has succeeded.
+    pending_response_grants: Option<PreparedResponseGrants>,
     response_failure: Option<ReasonCode>,
     origin_status: Option<u16>,
     origin_response_complete: bool,
+    // A buffered route's subrequest failed in the proxy rather than in a filter.
+    relayed_proxy_error: bool,
+    // Why the edge answered before a decision existed (unrouted, audit down).
+    edge_refusal: Option<ReasonCode>,
     response_source: ResponseSource,
     snapshot: Option<Arc<GatewaySnapshot>>,
     listener_port: Option<u16>,
     host: Option<String>,
     audit: Option<DurableAudit>,
+    business_ws: Option<BusinessWsRelay>,
+}
+
+/// Bound on how many individual messages one business WebSocket connection
+/// keeps in audit detail; a busier connection still relays and audits its
+/// traffic volume, just with `BusinessWsSummary::degraded` set once this cap
+/// is passed (docs/08 §8.5: an incomplete coverage status must be explicit).
+const BUSINESS_WS_MAX_AUDITED_MESSAGES: usize = 256;
+
+/// Per-direction frame scanners and the accumulated audit for one business
+/// WebSocket connection, lazily created the first time its upgraded bytes
+/// are seen in either direction (main.rs's `request_body_filter` and
+/// `response_body_filter`).
+struct BusinessWsRelay {
+    operation_id: String,
+    to_origin: business_ws::FrameScanner,
+    to_client: business_ws::FrameScanner,
+    messages: Vec<durable_audit::BusinessWsMessageAudit>,
+    summary: durable_audit::BusinessWsSummary,
+}
+
+impl BusinessWsRelay {
+    fn new(operation_id: String, observe_cap: usize) -> Self {
+        Self {
+            operation_id,
+            to_origin: business_ws::FrameScanner::new(observe_cap),
+            to_client: business_ws::FrameScanner::new(observe_cap),
+            messages: Vec::new(),
+            summary: durable_audit::BusinessWsSummary::default(),
+        }
+    }
+
+    fn record(
+        &mut self,
+        direction: durable_audit::BusinessWsDirection,
+        audits: Vec<business_ws::MessageAudit>,
+    ) {
+        for audit in audits {
+            match direction {
+                durable_audit::BusinessWsDirection::ToOrigin => {
+                    self.summary.messages_to_origin += 1;
+                    self.summary.bytes_to_origin =
+                        self.summary.bytes_to_origin.saturating_add(audit.byte_len);
+                }
+                durable_audit::BusinessWsDirection::ToClient => {
+                    self.summary.messages_to_client += 1;
+                    self.summary.bytes_to_client =
+                        self.summary.bytes_to_client.saturating_add(audit.byte_len);
+                }
+            }
+            self.summary.degraded |= audit.degraded;
+            if self.messages.len() < BUSINESS_WS_MAX_AUDITED_MESSAGES {
+                self.messages.push(durable_audit::BusinessWsMessageAudit {
+                    direction,
+                    kind: audit.kind,
+                    byte_len: audit.byte_len,
+                    frame_count: audit.frame_count,
+                    degraded: audit.degraded,
+                });
+            } else {
+                // Past the detail cap: still counted in the summary above,
+                // but no longer individually audited.
+                self.summary.degraded = true;
+            }
+        }
+    }
 }
 
 impl RequestContext {
@@ -244,20 +404,25 @@ impl ProxyHttp for Gateway {
             frozen_query: None,
             sensor_session: None,
             sensor_observation_audit: Vec::new(),
+            sensor_ws_key: None,
             sensor_bootstrap: None,
             sensor_bootstrap_audit: None,
             page_action_audit: None,
             anonymous_session_cookie: None,
             pending_auth_binding: None,
+            pending_response_grants: None,
             response_failure: None,
             origin_status: None,
             origin_response_complete: false,
+            relayed_proxy_error: false,
+            edge_refusal: None,
             response_source: ResponseSource::Origin,
             snapshot: None,
             // Known once request_filter reads the connection's socket digest.
             listener_port: None,
             host: None,
             audit: None,
+            business_ws: None,
         }
     }
 
@@ -269,7 +434,17 @@ impl ProxyHttp for Gateway {
         session: &mut Session,
         context: &mut Self::CTX,
     ) -> PingoraResult<bool> {
+        // A buffered route's subrequest carries the parent's admitted context:
+        // admission, audit and request transformation already ran once.
+        if let Some(handoff) = buffered_relay::handoff::<RequestContext>(session) {
+            let Some(parked) = handoff.take_context() else {
+                return response_error(ReasonCode::OriginOutcomeUnknown);
+            };
+            *context = parked;
+            return Ok(false);
+        }
         if !self.audit.is_ready() {
+            context.edge_refusal = Some(ReasonCode::AuditDurabilityFailed);
             respond_denial(
                 session,
                 503,
@@ -317,6 +492,7 @@ impl ProxyHttp for Gateway {
                     .duration_since(UNIX_EPOCH)
                     .map_or(1, |elapsed| elapsed.as_secs().max(1)),
             );
+            context.edge_refusal = Some(ReasonCode::SiteConfigUnavailable);
             respond_denial(
                 session,
                 503,
@@ -340,6 +516,7 @@ impl ProxyHttp for Gateway {
         context.audit = Some(self.audit.scoped(selected_config));
         let internal_response = selected_config.internal_response(&method, &path);
         let Ok(wall_time) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            context.edge_refusal = Some(ReasonCode::ClockUnavailable);
             respond_denial(
                 session,
                 503,
@@ -352,6 +529,7 @@ impl ProxyHttp for Gateway {
         };
         let now = UnixSeconds::new(wall_time.as_secs());
         let Ok(request_id) = RequestId::parse(&context.request_id) else {
+            context.edge_refusal = Some(ReasonCode::RequestIncomplete);
             respond_denial(
                 session,
                 503,
@@ -425,8 +603,28 @@ impl ProxyHttp for Gateway {
         }
         self.apply_sensor_observation(session, context, internal_response, &mut decision)
             .await;
+        self.apply_sensor_ws_handshake(session, context, internal_response, &mut decision);
         self.apply_request_crypto(session, context, &method, &path, now, &mut decision)
             .await;
+        // Last, after every refusal has been decided: an observe rollout
+        // forwards only the refusals it exists to measure, and records them.
+        let observed_rollout = if internal_response.is_none() {
+            observed_rollout(
+                selected_config.site_policy(),
+                &method,
+                &decision,
+                wall_time.as_secs(),
+            )
+        } else {
+            None
+        };
+        if observed_rollout.is_some() {
+            decision.outcome = GatewayOutcome::Allowed;
+        }
+        let unmatched_path = (decision.outcome == GatewayOutcome::Denied
+            && decision.reason_code == ReasonCode::OperationNotMatched
+            && decision.operation_id.is_none())
+        .then(|| xshield_core::path_shape::path_shape(&path));
         let audit_result = context
             .audit
             .as_ref()
@@ -442,6 +640,8 @@ impl ProxyHttp for Gateway {
                 sensor_observations: &context.sensor_observation_audit,
                 sensor_bootstrap: context.sensor_bootstrap_audit.as_ref(),
                 forward_origin: internal_response.is_none(),
+                observed_rollout: observed_rollout.as_deref(),
+                unmatched_path: unmatched_path.as_deref(),
             })
             .await;
         let admission_audit = match audit_result {
@@ -452,6 +652,7 @@ impl ProxyHttp for Gateway {
                     .as_ref()
                     .unwrap_or(&self.audit)
                     .observe_failure(&error);
+                context.edge_refusal = Some(ReasonCode::AuditDurabilityFailed);
                 respond_denial(
                     session,
                     503,
@@ -487,15 +688,21 @@ impl ProxyHttp for Gateway {
                     respond_sensor_script(session, &context.request_id, SensorScript::LOADER)
                         .await?;
                 }
-                InternalResponse::LegacySensorAsset => {
-                    respond_sensor_script(session, &context.request_id, SensorScript::LEGACY)
-                        .await?;
-                }
-                InternalResponse::LegacySensorLoader => {
+                InternalResponse::FrozenSensorAsset(index) => {
+                    let frozen = &FROZEN_SENSOR_VERSIONS[index];
                     respond_sensor_script(
                         session,
                         &context.request_id,
-                        SensorScript::LEGACY_LOADER,
+                        SensorScript::new(frozen.asset_bytes, frozen.version),
+                    )
+                    .await?;
+                }
+                InternalResponse::FrozenSensorLoader(index) => {
+                    let frozen = &FROZEN_SENSOR_VERSIONS[index];
+                    respond_sensor_script(
+                        session,
+                        &context.request_id,
+                        SensorScript::new(frozen.loader_bytes, frozen.version),
                     )
                     .await?;
                 }
@@ -519,10 +726,25 @@ impl ProxyHttp for Gateway {
                 InternalResponse::SensorPrepare => {
                     respond_sensor_observation(session, &context.request_id).await?;
                 }
+                InternalResponse::SensorWsUpgrade => {
+                    self.run_sensor_ws(session, context).await?;
+                }
             }
             return Ok(true);
         }
+        if context
+            .config(self)
+            .buffered_response_policy(&method, &path)
+            .is_some()
+        {
+            self.relay_buffered(session, context).await?;
+            return Ok(true);
+        }
         Ok(false)
+    }
+
+    fn allow_spawning_subrequest(&self, session: &Session, _context: &Self::CTX) -> bool {
+        session.subrequest_ctx.is_none()
     }
 
     async fn upstream_peer(
@@ -598,11 +820,24 @@ impl ProxyHttp for Gateway {
 
     async fn request_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
+        if session.as_downstream().was_upgraded() {
+            // A whole-body size cap makes no sense once relaying becomes an
+            // indefinitely long raw byte stream; a business WebSocket route
+            // audits at message granularity instead (business_ws::FrameScanner).
+            self.ensure_business_ws(session, context);
+            if let Some(chunk) = body.as_ref()
+                && let Some(relay) = context.business_ws.as_mut()
+            {
+                let audits = relay.to_origin.feed(chunk);
+                relay.record(durable_audit::BusinessWsDirection::ToOrigin, audits);
+            }
+            return Ok(());
+        }
         if context.rebuilt_request_len.is_none() {
             if let Some(chunk) = body.as_ref() {
                 context.request_body_len = context.request_body_len.saturating_add(chunk.len());
@@ -740,6 +975,16 @@ impl ProxyHttp for Gateway {
         context: &mut Self::CTX,
     ) -> PingoraResult<Option<std::time::Duration>> {
         if context.buffered_response.is_none() {
+            if session.as_downstream().was_upgraded() {
+                self.ensure_business_ws(session, context);
+                if let Some(chunk) = body.as_ref()
+                    && let Some(relay) = context.business_ws.as_mut()
+                {
+                    let audits = relay.to_client.feed(chunk);
+                    relay.record(durable_audit::BusinessWsDirection::ToClient, audits);
+                }
+                return Ok(None);
+            }
             if let Some(chunk) = body.as_ref() {
                 context.response_body_len = context.response_body_len.saturating_add(chunk.len());
                 let limit = context
@@ -783,9 +1028,10 @@ impl ProxyHttp for Gateway {
                     .and_then(|body| self.commit_auth_binding(session, context, body))
                     .and_then(|body| self.commit_auth_transition(session, context, body))
                     .and_then(|body| self.commit_auth_revoke(session, context, body))
-                    .and_then(|body| self.commit_response_grants(session, context, body))
+                    .and_then(|body| self.prepare_response_grants(session, context, body))
                     .and_then(|body| self.commit_response_share(session, context, body))
-                    .and_then(|body| self.encrypt_response(session, context, body));
+                    .and_then(|body| self.encrypt_response(session, context, body))
+                    .and_then(|body| self.commit_response_grants(context, body));
                 match released {
                     Ok(released) => *body = Some(released),
                     Err(reason) => {
@@ -832,6 +1078,16 @@ impl ProxyHttp for Gateway {
         error: Option<&pingora::Error>,
         context: &mut Self::CTX,
     ) {
+        if let Some(handoff) = buffered_relay::handoff::<RequestContext>(session) {
+            context.relayed_proxy_error = error.is_some();
+            handoff.give_back(std::mem::replace(context, self.new_ctx()));
+            return;
+        }
+        let proxy_error = error.is_some() || context.relayed_proxy_error;
+        self.metrics.record(
+            request_ending(context, proxy_error),
+            context.started_at.elapsed(),
+        );
         let status = session
             .response_written()
             .map_or(0, |response| response.status.as_u16());
@@ -853,7 +1109,7 @@ impl ProxyHttp for Gateway {
                 admission,
                 status,
                 duration_us: elapsed_us(context.started_at),
-                proxy_error: error.is_some(),
+                proxy_error,
                 response_failure: context.response_failure,
                 origin_status: context.origin_status,
                 origin_response_complete: context.origin_response_complete,
@@ -870,10 +1126,163 @@ impl ProxyHttp for Gateway {
                 .unwrap_or(&self.audit)
                 .observe_failure(&error);
         }
+        if let Some(mut relay) = context.business_ws.take() {
+            relay.summary.duration_us = elapsed_us(context.started_at);
+            let _ = context
+                .audit
+                .as_ref()
+                .unwrap_or(&self.audit)
+                .record_business_ws_connection(
+                    &context.trace_id,
+                    &relay.operation_id,
+                    relay.summary,
+                    &relay.messages,
+                )
+                .await;
+        }
     }
 }
 
 impl Gateway {
+    /// Lazily attaches the business WebSocket relay state the first time
+    /// either direction of an upgraded connection is seen, from the
+    /// handshake route's declared policy. A no-op once attached, and for any
+    /// upgraded connection whose route declared no such policy (nothing here
+    /// then scans or audits its bytes, but the connection still relays: see
+    /// the `was_upgraded()` guard at each call site).
+    fn ensure_business_ws(&self, session: &Session, context: &mut RequestContext) {
+        if context.business_ws.is_some() {
+            return;
+        }
+        let request = session.req_header();
+        let Some(policy) = context
+            .config(self)
+            .business_websocket_policy(request.method.as_str(), request.uri.path())
+        else {
+            return;
+        };
+        let operation_id = context
+            .decision
+            .as_ref()
+            .and_then(|decision| decision.operation_id.as_ref())
+            .map_or_else(String::new, |id| id.as_str().to_owned());
+        context.business_ws = Some(BusinessWsRelay::new(
+            operation_id,
+            policy.max_observed_frame_bytes(),
+        ));
+    }
+
+    /// Serves a buffered route through a subrequest and releases its reply
+    /// only once it finished cleanly; any other outcome is a `502` naming the
+    /// reason and carrying none of the origin's bytes. See [`buffered_relay`].
+    async fn relay_buffered(
+        &self,
+        session: &mut Session,
+        context: &mut RequestContext,
+    ) -> PingoraResult<()> {
+        let request_id = context.request_id.clone();
+        let body_pending = !session.as_downstream_mut().is_body_done();
+        let Ok(restated) =
+            buffered_relay::restated_head(session.as_downstream(), body_pending).await
+        else {
+            context.relayed_proxy_error = true;
+            return respond_denial(
+                session,
+                502,
+                &request_id,
+                ReasonCode::OriginOutcomeUnknown,
+                None,
+            )
+            .await;
+        };
+        // An edge-rebuilt body was read in full during admission; the
+        // subrequest substitutes it from the parked context.
+        // Otherwise the client's body is piped to the subrequest as it
+        // arrives; a subrequest without a body drops its body headers.
+        let (input, body_mode) = if context.rebuilt_request_len.is_some() {
+            (InputBodyType::Preset(InputBody::NoBody), BodyMode::NoBody)
+        } else if body_pending {
+            (InputBodyType::SaveBody(0), BodyMode::ExpectBody)
+        } else {
+            (InputBodyType::SaveBody(0), BodyMode::NoBody)
+        };
+        let Some(spawner) = session.subrequest_spawner.as_ref() else {
+            context.relayed_proxy_error = true;
+            return respond_denial(
+                session,
+                502,
+                &request_id,
+                ReasonCode::OriginOutcomeUnknown,
+                None,
+            )
+            .await;
+        };
+        let (handoff, returned) =
+            buffered_relay::Handoff::new(std::mem::replace(context, self.new_ctx()));
+        let (subrequest, handle) = spawner.create_subrequest(
+            restated.as_ref().unwrap_or_else(|| session.as_downstream()),
+            SubrequestCtx::builder()
+                .body_mode(body_mode)
+                .user_ctx(Box::new(handoff))
+                .build(),
+        );
+        let mut collected = buffered_relay::Collected::default();
+        let piped = pipe_subrequest(
+            session,
+            subrequest,
+            handle,
+            |task| {
+                collected.hold(task);
+                Ok(None)
+            },
+            input,
+        )
+        .await;
+        let piped_ok = piped.is_ok();
+        // Dropping the pipe state lets an unfinished subrequest fail and
+        // return the context instead of waiting on a reader that is gone.
+        drop(piped);
+        if let Ok(restored) = returned.await {
+            *context = restored;
+        } else {
+            // The subrequest ended without returning the context, so the
+            // admitted request has no final event here; journal recovery
+            // records its origin outcome as unknown.
+            context.request_id = request_id;
+            context.relayed_proxy_error = true;
+        }
+        if !piped_ok {
+            context.relayed_proxy_error = true;
+        }
+        // The origin status proves the subrequest ran this request's own
+        // filters: a subrequest that failed before them (an unparsable head)
+        // writes Pingora's error page, which is not a reply to release.
+        let released = if !context.relayed_proxy_error
+            && context.origin_status.is_some()
+            && context.response_failure.is_none()
+            && collected.is_complete()
+        {
+            collected.into_tasks()
+        } else {
+            None
+        };
+        if let Some(tasks) = released {
+            session.write_response_tasks(tasks).await?;
+            return Ok(());
+        }
+        let reason = context
+            .response_failure
+            .unwrap_or(ReasonCode::OriginOutcomeUnknown);
+        respond_denial(
+            session,
+            502,
+            &context.request_id,
+            reason,
+            context.anonymous_session_cookie.as_deref(),
+        )
+        .await
+    }
+
     // Pingora fixes headers before the body commit barrier. Keep issuance-only
     // cache and cookie preparation together across all response issuers.
     fn prepare_response_issuance_headers(
@@ -1043,6 +1452,172 @@ impl Gateway {
             .collect())
     }
 
+    /// Validates the probe WSS handshake headers once admission has loaded
+    /// the exact current WAF session (the same `AdmissionClass::AuthenticatedRoot`
+    /// path `SensorPrepare` uses). Denies closed on any mismatch rather than
+    /// falling back to the HTTPS-only path silently.
+    fn apply_sensor_ws_handshake(
+        &self,
+        session: &Session,
+        context: &mut RequestContext,
+        internal_response: Option<InternalResponse>,
+        decision: &mut GatewayDecision,
+    ) {
+        if internal_response != Some(InternalResponse::SensorWsUpgrade)
+            || decision.outcome != GatewayOutcome::Allowed
+        {
+            return;
+        }
+        let Some(sensor) = context.config(self).sensor() else {
+            decision.outcome = GatewayOutcome::Denied;
+            decision.reason_code = ReasonCode::SensorObservationInvalid;
+            return;
+        };
+        match validate_sensor_ws_handshake_headers(session.req_header(), sensor.origin()) {
+            Ok(key) => context.sensor_ws_key = Some(key),
+            Err(reason) => {
+                decision.outcome = GatewayOutcome::Denied;
+                decision.reason_code = reason;
+            }
+        }
+    }
+
+    /// Completes the RFC 6455 handshake and runs the probe WSS frame loop
+    /// until the peer closes, the connection goes idle or stale, or a
+    /// protocol/rate/size violation forces it shut (docs/07 §7.3). Each text
+    /// frame is treated as one `events/prepare`-shaped batch and audited the
+    /// same way, but outside the per-request completion tracking: a
+    /// long-lived connection has no terminal "request.completed" event.
+    async fn run_sensor_ws(
+        &self,
+        session: &mut Session,
+        context: &mut RequestContext,
+    ) -> PingoraResult<()> {
+        let Some(key) = context.sensor_ws_key.take() else {
+            return respond_denial(
+                session,
+                500,
+                &context.request_id,
+                ReasonCode::SensorObservationInvalid,
+                None,
+            )
+            .await;
+        };
+        let mut response = ResponseHeader::build(101, Some(4))?;
+        response.insert_header("Upgrade", "websocket")?;
+        response.insert_header("Connection", "Upgrade")?;
+        response.insert_header("Sec-WebSocket-Accept", sensor_ws::accept_key(&key))?;
+        response.insert_header("X-Xshield-Request-Id", context.request_id.as_str())?;
+        session
+            .write_response_header(Box::new(response), false)
+            .await?;
+        session.set_read_timeout(Some(SENSOR_WS_IDLE_TIMEOUT));
+        session.set_write_timeout(Some(SENSOR_WS_IDLE_TIMEOUT));
+
+        let started_at = Instant::now();
+        let mut window_started_at = Instant::now();
+        let mut window_messages: u32 = 0;
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            if started_at.elapsed() >= SENSOR_WS_MAX_LIFETIME {
+                return close_sensor_ws(session, 1001, "lifetime").await;
+            }
+            let Ok(Some(chunk)) = session.read_request_body().await else {
+                return Ok(());
+            };
+            if buf.len().saturating_add(chunk.len()) > SENSOR_WS_MAX_BUFFERED_BYTES {
+                return close_sensor_ws(session, 1009, "too large").await;
+            }
+            buf.extend_from_slice(&chunk);
+            loop {
+                let parsed = match sensor_ws::parse_frame(&buf) {
+                    Ok(Some(parsed)) => parsed,
+                    Ok(None) => break,
+                    Err(error) => {
+                        return close_sensor_ws(session, error.close_code(), "protocol").await;
+                    }
+                };
+                buf.drain(..parsed.consumed);
+                match parsed.opcode {
+                    WsOpcode::Close => return close_sensor_ws(session, 1000, "bye").await,
+                    WsOpcode::Ping => {
+                        session
+                            .write_response_body(
+                                Some(Bytes::from(sensor_ws::build_frame(
+                                    WsOpcode::Pong,
+                                    &parsed.payload,
+                                ))),
+                                false,
+                            )
+                            .await?;
+                    }
+                    WsOpcode::Pong => {}
+                    WsOpcode::Binary => {
+                        return close_sensor_ws(session, 1003, "binary unsupported").await;
+                    }
+                    WsOpcode::Text => {
+                        if window_started_at.elapsed() >= SENSOR_WS_RATE_WINDOW {
+                            window_started_at = Instant::now();
+                            window_messages = 0;
+                        }
+                        window_messages += 1;
+                        if window_messages > SENSOR_WS_RATE_LIMIT {
+                            return close_sensor_ws(session, 1008, "rate limited").await;
+                        }
+                        self.handle_sensor_ws_message(context, &parsed.payload)
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Validates one WS text frame as an `events/prepare`-shaped batch and
+    /// durably records the per-message outcome, bypassing request-completion
+    /// tracking (see [`DurableAudit::record_sensor_ws_observations`]).
+    async fn handle_sensor_ws_message(&self, context: &RequestContext, payload: &[u8]) {
+        let parsed = context
+            .config(self)
+            .sensor()
+            .ok_or(ReasonCode::SensorObservationInvalid)
+            .and_then(|sensor| {
+                SensorObservationBatch::from_json(
+                    payload,
+                    &xshield_gateway::ACCEPTED_SENSOR_VERSIONS,
+                    sensor.build_ref(),
+                )
+                .map_err(|_| ReasonCode::SensorObservationInvalid)
+            })
+            .and_then(|batch| {
+                context
+                    .sensor_session
+                    .as_ref()
+                    .ok_or(ReasonCode::AuthBindingMismatch)
+                    .map(|sensor_session| {
+                        batch
+                            .observations()
+                            .iter()
+                            .map(|observation| {
+                                SensorObservationAudit::new(sensor_session, observation)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+            });
+        let (outcome, reason_code, observations) = match parsed {
+            Ok(observations) => (
+                GatewayOutcome::Allowed,
+                ReasonCode::SensorObservationAccepted,
+                observations,
+            ),
+            Err(reason) => (GatewayOutcome::Denied, reason, Vec::new()),
+        };
+        let _ = self
+            .audit
+            .record_sensor_ws_observations(&context.trace_id, outcome, reason_code, &observations)
+            .await;
+    }
+
+    #[allow(clippy::too_many_lines)]
     async fn apply_request_crypto(
         &self,
         session: &mut Session,
@@ -1098,6 +1673,41 @@ impl Gateway {
                 }
                 return;
             }
+            RequestCryptoPolicy::EnvelopeHook(rule) => {
+                let started_at = Instant::now();
+                match self
+                    .decrypt_envelope_hook_request(
+                        session,
+                        context,
+                        rule,
+                        now,
+                        decision,
+                        &context.request_id,
+                    )
+                    .await
+                {
+                    Ok(frozen) => {
+                        context.rebuilt_request_len = Some(frozen.body_len());
+                        context.request_crypto_audit =
+                            Some(RequestCryptoAudit::envelope_hook_passed(
+                                frozen.evidence(),
+                                elapsed_us(started_at),
+                            ));
+                        context.rebuilt_request_body = Some(frozen.into_body());
+                    }
+                    Err(reason) => {
+                        context.request_crypto_audit =
+                            Some(RequestCryptoAudit::envelope_hook_failed(
+                                rule,
+                                reason,
+                                elapsed_us(started_at),
+                            ));
+                        decision.outcome = GatewayOutcome::Denied;
+                        decision.reason_code = reason;
+                    }
+                }
+                return;
+            }
             RequestCryptoPolicy::Enforce(rule) => rule,
         };
         let started_at = Instant::now();
@@ -1121,6 +1731,118 @@ impl Gateway {
                 ));
                 decision.outcome = GatewayOutcome::Denied;
                 decision.reason_code = reason;
+            }
+        }
+    }
+
+    /// Mirrors [`Self::decrypt_request`] for `ENVELOPE_HOOK`: the key is
+    /// derived per authenticated session rather than loaded from
+    /// [`Self::request_keys`], so this buffers, derives, decodes, and
+    /// records replay separately rather than sharing that method's body.
+    async fn decrypt_envelope_hook_request(
+        &self,
+        session: &mut Session,
+        context: &RequestContext,
+        rule: &RequestCryptoEnvelopeHookRule,
+        now: UnixSeconds,
+        decision: &GatewayDecision,
+        request_id: &str,
+    ) -> Result<FrozenRequest, ReasonCode> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let response_identity = context
+            .response_identity
+            .as_ref()
+            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let tenant_id = context.config(self).tenant_id();
+        let site_id = context.config(self).site_id();
+        let binding_id = response_identity.snapshot.binding_id();
+        let epoch = response_identity.snapshot.epoch();
+        let window = envelope_hook_key_window(now);
+        let current_key = identity
+            .envelope_hook_key(tenant_id, site_id, binding_id, epoch, window)
+            .map_err(|_| ReasonCode::RequestCryptoKeyUnavailable)?;
+        let previous = window
+            .checked_sub(1)
+            .map(|previous_window| {
+                identity
+                    .envelope_hook_key(tenant_id, site_id, binding_id, epoch, previous_window)
+                    .map(|key| (previous_window, key))
+                    .map_err(|_| ReasonCode::RequestCryptoKeyUnavailable)
+            })
+            .transpose()?;
+        let keys = EnvelopeHookKeys::new(window, current_key, previous);
+        validate_encrypted_request_headers(session.req_header(), rule.max_envelope_bytes())?;
+        let method = session.req_header().method.as_str().to_owned();
+        let path = session.req_header().uri.path().to_owned();
+        session.as_mut().enable_retry_buffering();
+        let permits = u32::try_from(rule.max_in_flight_bytes())
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        let _permit = Arc::clone(&self.buffered_body_budget)
+            .try_acquire_many_owned(permits)
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        let mut envelope = Vec::new();
+        envelope
+            .try_reserve_exact(rule.max_envelope_bytes())
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        while let Some(chunk) = session
+            .read_request_body()
+            .await
+            .map_err(|_| ReasonCode::RequestEnvelopeInvalid)?
+        {
+            if envelope.len().saturating_add(chunk.len()) > rule.max_envelope_bytes() {
+                return Err(ReasonCode::RequestBodyTooLarge);
+            }
+            envelope.extend_from_slice(&chunk);
+        }
+        let operation_id = decision
+            .operation_id
+            .as_ref()
+            .ok_or(ReasonCode::RequestEnvelopeInvalid)?;
+        let frozen = rule.decode(
+            tenant_id.as_str(),
+            site_id.as_str(),
+            operation_id.as_str(),
+            &method,
+            &path,
+            now,
+            &envelope,
+            &keys,
+        )?;
+        let request_id = RequestId::parse(request_id)
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let postgres = self
+            .postgres
+            .as_ref()
+            .ok_or(ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let message = RequestCryptoMessage::new(
+            tenant_id,
+            site_id,
+            frozen.evidence().key_id(),
+            frozen.message_id(),
+            frozen.nonce(),
+            &request_id,
+            frozen.expires_at(),
+            now,
+            rule.max_active_messages(),
+        )
+        .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let store = postgres
+            .store()
+            .await
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        match store
+            .consume_request_crypto_message(message)
+            .await
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?
+        {
+            RequestCryptoMessageOutcome::Consumed => Ok(frozen),
+            RequestCryptoMessageOutcome::Replayed => Err(ReasonCode::RequestCryptoReplayDetected),
+            RequestCryptoMessageOutcome::Expired => Err(ReasonCode::RequestCryptoMessageExpired),
+            RequestCryptoMessageOutcome::CapacityExceeded => {
+                Err(ReasonCode::RequestCryptoReplayCapacityExceeded)
             }
         }
     }
@@ -1161,10 +1883,7 @@ impl Gateway {
             .operation_id
             .as_ref()
             .ok_or(ReasonCode::RequestEnvelopeInvalid)?;
-        let keys = self
-            .request_key
-            .as_ref()
-            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let keys = &self.request_keys;
         let frozen = rule.decode(
             context.config(self).tenant_id().as_str(),
             context.config(self).site_id().as_str(),
@@ -1238,10 +1957,7 @@ impl Gateway {
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| UnixSeconds::new(duration.as_secs()))
                 .map_err(|_| ReasonCode::ClockUnavailable)?;
-            let keys = self
-                .response_key
-                .as_ref()
-                .ok_or(ReasonCode::ResponseCryptoKeyUnavailable)?;
+            let keys = &self.response_keys;
             rule.encode(
                 context.config(self).tenant_id().as_str(),
                 context.config(self).site_id().as_str(),
@@ -1361,10 +2077,13 @@ impl Gateway {
         })
     }
 
-    fn commit_response_grants(
+    /// Derives the response's grants and injects their action references, but
+    /// writes nothing: a later release step can still withhold the body, and a
+    /// grant must never outlive a response the client did not receive.
+    fn prepare_response_grants(
         &self,
         session: &Session,
-        context: &RequestContext,
+        context: &mut RequestContext,
         body: Bytes,
     ) -> Result<Bytes, ReasonCode> {
         let request = session.req_header();
@@ -1398,8 +2117,8 @@ impl Gateway {
             .map_err(|_| ReasonCode::ClockUnavailable)?;
         // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
         // barrier to an async body hook when the proxy API provides one.
-        let action_refs = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(identity.commit_response_grants(
+        let prepared = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(identity.prepare_response_grants(
                 context.config(self),
                 response_identity,
                 operation,
@@ -1411,14 +2130,38 @@ impl Gateway {
                 now,
             ))
         })?;
-        let Some(action_refs) = action_refs else {
+        let Some(prepared) = prepared else {
             return Ok(body);
         };
-        operation
+        let body = operation
             .rule
-            .inject_action_refs(&body, &action_refs)
+            .inject_action_refs(&body, &prepared.action_refs())
             .map(Bytes::from)
-            .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)
+            .map_err(xshield_gateway::response_grant::ResponseGrantError::reason_code)?;
+        context.pending_response_grants = Some(prepared);
+        Ok(body)
+    }
+
+    /// Writes the prepared grants as the last step before the body is
+    /// released; a failure here still withholds the body.
+    fn commit_response_grants(
+        &self,
+        context: &mut RequestContext,
+        body: Bytes,
+    ) -> Result<Bytes, ReasonCode> {
+        let Some(prepared) = context.pending_response_grants.take() else {
+            return Ok(body);
+        };
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or(ReasonCode::GrantSourceIneligible)?;
+        // ponytail: Pingora 0.9 exposes a synchronous body filter; move this
+        // barrier to an async body hook when the proxy API provides one.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(identity.persist_response_grants(&prepared))
+        })?;
+        Ok(body)
     }
 
     fn commit_response_share(
@@ -1708,6 +2451,33 @@ fn filter_response_trailers(
     Err(ReasonCode::ResponseValidationFailed)
 }
 
+/// How a request ended, for the process metrics. A request Pingora refused
+/// before the gateway's filters ran has neither a decision nor an edge refusal.
+fn request_ending(context: &RequestContext, proxy_error: bool) -> ops_api::Ending {
+    let Some(decision) = context.decision.as_ref() else {
+        return context
+            .edge_refusal
+            .map_or(ops_api::Ending::Unadmitted, ops_api::Ending::Refused);
+    };
+    if decision.outcome == GatewayOutcome::Denied {
+        return ops_api::Ending::Refused(decision.reason_code);
+    }
+    if let Some(reason) = context.response_failure {
+        return ops_api::Ending::Refused(reason);
+    }
+    if proxy_error {
+        return ops_api::Ending::ProxyFailed;
+    }
+    if context
+        .admission_audit
+        .as_ref()
+        .is_some_and(|admission| admission.observed_rollout.is_some())
+    {
+        return ops_api::Ending::Observed(decision.reason_code);
+    }
+    ops_api::Ending::Served
+}
+
 fn response_error<T>(reason: ReasonCode) -> PingoraResult<T> {
     Err(PingoraError::explain(
         ErrorType::HTTPStatus(502),
@@ -1841,6 +2611,34 @@ fn decode_waf_query(query: &str) -> Option<String> {
     Some(decoded.to_ascii_lowercase())
 }
 
+/// The observe window that forwards this refusal, if the site's approved
+/// rollout observes it: a deterministic identity or provenance refusal of a
+/// read-only, plain pass-through route inside the window (docs/32). Nothing
+/// the client sends takes part.
+fn observed_rollout(
+    policy: Option<&xshield_core::SitePolicyConfig>,
+    method: &str,
+    decision: &GatewayDecision,
+    now_unix: u64,
+) -> Option<String> {
+    if decision.outcome != GatewayOutcome::Denied
+        || !observable_refusal(decision.reason_code)
+        || !matches!(method, "GET" | "HEAD")
+    {
+        return None;
+    }
+    let policy = policy?;
+    let operation = decision.operation_id.as_ref()?;
+    let route = policy
+        .routes
+        .iter()
+        .find(|route| route.operation_id == operation.as_str())?;
+    policy
+        .rollout
+        .observes(route, now_unix)
+        .then(|| policy.rollout.revision.clone())
+}
+
 async fn respond_denial(
     session: &mut Session,
     status: u16,
@@ -1884,6 +2682,15 @@ async fn respond_sensor_observation(session: &mut Session, request_id: &str) -> 
     session.write_response_body(Some(body), true).await
 }
 
+/// Sends an RFC 6455 close frame on an upgraded probe WSS connection and
+/// ends the stream. Write failures are not surfaced: the peer is going away
+/// either way, and the caller has nothing further to report to it.
+async fn close_sensor_ws(session: &mut Session, code: u16, reason: &str) -> PingoraResult<()> {
+    let frame = Bytes::from(sensor_ws::close_frame(code, reason));
+    let _ = session.write_response_body(Some(frame), true).await;
+    Ok(())
+}
+
 fn denial_body(request_id: &str, reason: ReasonCode) -> Bytes {
     let body = serde_json::json!({
         "error": "request_denied",
@@ -1901,106 +2708,6 @@ fn load_config() -> Result<GatewayConfig, Box<dyn Error>> {
     }
     let bytes = fs::read(path)?;
     Ok(GatewayConfig::from_json(&bytes)?)
-}
-
-struct EnvRequestKey {
-    tenant_id: String,
-    site_id: String,
-    key_id: String,
-    key: Zeroizing<[u8; 32]>,
-}
-
-impl EnvRequestKey {
-    fn from_env(config: &GatewayConfig) -> Result<Option<Self>, Box<dyn Error>> {
-        let Some(key_id) = config.request_crypto_key_id() else {
-            return Ok(None);
-        };
-        let value = Zeroizing::new(env::var("XSHIELD_REQUEST_DECRYPTION_KEY_HEX")?);
-        let key = parse_crypto_key(&value).ok_or("invalid request decryption key")?;
-        Ok(Some(Self {
-            tenant_id: config.tenant_id().as_str().to_owned(),
-            site_id: config.site_id().as_str().to_owned(),
-            key_id: key_id.to_owned(),
-            key: Zeroizing::new(key),
-        }))
-    }
-}
-
-impl KeyAccessPort for EnvRequestKey {
-    fn request_decryption_key(
-        &self,
-        query: KeyAccessQuery<'_>,
-    ) -> Result<Zeroizing<[u8; 32]>, ReasonCode> {
-        if query.tenant_id != self.tenant_id
-            || query.site_id != self.site_id
-            || query.key_id != self.key_id
-            || query.purpose != "request_direct_decrypt"
-            || query.at == UnixSeconds::new(0)
-        {
-            return Err(ReasonCode::RequestCryptoKeyUnavailable);
-        }
-        Ok(Zeroizing::new(*self.key))
-    }
-}
-
-struct EnvResponseKey {
-    tenant_id: String,
-    site_id: String,
-    key_id: String,
-    key: Zeroizing<[u8; 32]>,
-}
-
-impl EnvResponseKey {
-    fn from_env(config: &GatewayConfig) -> Result<Option<Self>, Box<dyn Error>> {
-        let Some(key_id) = config.response_crypto_key_id() else {
-            return Ok(None);
-        };
-        let value = Zeroizing::new(env::var("XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX")?);
-        let key = parse_crypto_key(&value).ok_or("invalid response encryption key")?;
-        Ok(Some(Self {
-            tenant_id: config.tenant_id().as_str().to_owned(),
-            site_id: config.site_id().as_str().to_owned(),
-            key_id: key_id.to_owned(),
-            key: Zeroizing::new(key),
-        }))
-    }
-}
-
-impl ResponseKeyAccessPort for EnvResponseKey {
-    fn response_encryption_key(
-        &self,
-        query: ResponseKeyAccessQuery<'_>,
-    ) -> Result<Zeroizing<[u8; 32]>, ReasonCode> {
-        if query.tenant_id != self.tenant_id
-            || query.site_id != self.site_id
-            || query.key_id != self.key_id
-            || query.purpose != "response_direct_encrypt"
-            || query.at == UnixSeconds::new(0)
-        {
-            return Err(ReasonCode::ResponseCryptoKeyUnavailable);
-        }
-        Ok(Zeroizing::new(*self.key))
-    }
-}
-
-fn parse_crypto_key(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return None;
-    }
-    let mut key = [0; 32];
-    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        let nibble = |byte| match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            _ => 0,
-        };
-        key[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
-    }
-    Some(key)
 }
 
 fn validate_encrypted_request_headers(
@@ -2053,8 +2760,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let transport = Arc::new(EdgeTransport::new(TransportConfig::from_lookup(|name| {
         env::var_os(name)
     })?));
-    let apply_key = env::var("XSHIELD_EDGE_APPLY_KEY_HEX")
-        .ok()
+    let apply_key = xshield_core::secret_env::var_opt("XSHIELD_EDGE_APPLY_KEY_HEX")?
         .map(|value| apply_api::key_from_hex(&value).ok_or("invalid edge apply key"))
         .transpose()?;
     let snapshot_path = env::var_os("XSHIELD_EDGE_SNAPSHOT_PATH").map(PathBuf::from);
@@ -2116,7 +2822,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let coordinator = Arc::new(ApplyCoordinator::new(Arc::new(ConfigSnapshotStore::new(
         initial_snapshot,
     ))));
-    let key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
+    let key_hex = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let audit = DurableAudit::open_recoverable(&config, &key_hex)?;
     let postgres = config
         .identity_store()
@@ -2135,22 +2841,25 @@ fn run() -> Result<(), Box<dyn Error>> {
                 })
         })
         .transpose()?;
-    let request_key = EnvRequestKey::from_env(&config)?;
-    let response_key = EnvResponseKey::from_env(&config)?;
-    let evidence = evidence_writer::EvidenceWriter::from_env(&config)?;
-    if request_key
-        .as_ref()
-        .zip(response_key.as_ref())
-        .is_some_and(|(request, response)| request.key.as_ref() == response.key.as_ref())
-    {
+    let request_keys = crypto_keys::KeyRing::requests(&config)?;
+    let response_keys = crypto_keys::KeyRing::responses(&config)?;
+    let evidence = evidence_writer::EvidenceWriter::from_env(&config)?.map(Arc::new);
+    let retention = evidence_retention::EvidenceRetention::from_env(
+        evidence.as_ref(),
+        config.tenant_id(),
+        config.site_id(),
+    )?;
+    if request_keys.shares_key_with(&response_keys) {
         return Err("request and response encryption keys must differ".into());
     }
+    let rate_limit_share = SiteRateLimiter::share_from_env()?;
     let audit_readiness = audit.readiness();
     let audit_recovery = audit.clone();
     let audit_unrouted = audit.clone();
     let unrouted = Arc::new(UnroutedDenials::default());
     let mut server = Server::new(None)?;
     server.bootstrap();
+    let metrics = Arc::new(ops_api::EdgeMetrics::default());
     let mut proxy = pingora::proxy::http_proxy(
         &server.configuration,
         Gateway {
@@ -2158,13 +2867,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             snapshot: coordinator.snapshot_store(),
             audit,
             identity,
-            request_key,
-            response_key,
-            evidence,
+            request_keys,
+            response_keys,
+            evidence: evidence.clone(),
             postgres: postgres.clone(),
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
-            rate_limiter: Arc::new(SiteRateLimiter::new()),
+            rate_limiter: Arc::new(SiteRateLimiter::new().shared_by(rate_limit_share)),
             unrouted: Arc::clone(&unrouted),
+            metrics: Arc::clone(&metrics),
         },
     );
     proxy.server_options = Some(http_server_options());
@@ -2186,6 +2896,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         FLUSH_INTERVAL,
         shutdown.clone(),
     ));
+    if let Some(retention) = retention {
+        retention.spawn(Arc::clone(&metrics))?;
+    }
     // Descriptors must exist, unchanged, before any listener can admit a page
     // root or a gated request against them; any refusal stops startup. The
     // bootstrap configuration and a restored snapshot get the same idempotent
@@ -2207,14 +2920,39 @@ fn run() -> Result<(), Box<dyn Error>> {
             StartupSource::PersistedSnapshot,
         ))?;
     }
-    let supervisor = runtime.block_on(ListenerSupervisor::new(
+    // Certificate rotation without a restart: changed files are re-read and
+    // served to new handshakes; a refused set keeps the current certificates.
+    runtime.spawn(Arc::clone(&transport).watch_tls(TLS_RELOAD_INTERVAL, shutdown.clone()));
+    let supervisor = Arc::new(runtime.block_on(ListenerSupervisor::new(
         Arc::clone(&coordinator),
         Arc::new(proxy),
         transport,
         config.listen().ip(),
         &listener_addresses,
         shutdown.clone(),
-    ))?;
+    ))?);
+    // Liveness, readiness and metrics for orchestrators and scrapers. They are
+    // unauthenticated, so they disclose no topology (see ops_api).
+    if let Ok(value) = env::var("XSHIELD_EDGE_OPS_LISTEN") {
+        let listen: SocketAddr = value.parse()?;
+        if !ops_api::ops_address_allowed(listen) {
+            return Err(
+                "edge ops listener must use a loopback, private or unspecified address".into(),
+            );
+        }
+        let ops_listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
+        let state = ops_api::OpsState::new(
+            Arc::clone(&supervisor),
+            audit_readiness.clone(),
+            Arc::clone(&metrics),
+            evidence.clone(),
+        );
+        runtime.spawn(async move {
+            if let Err(error) = ops_api::serve(ops_listener, state).await {
+                eprintln!("xshield edge ops listener stopped: {error}");
+            }
+        });
+    }
     if let Some(key) = apply_key {
         let listen: SocketAddr = env::var("XSHIELD_EDGE_APPLY_LISTEN")
             .unwrap_or_else(|_| "127.0.0.1:9553".to_owned())
@@ -2224,7 +2962,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         let apply_listener = runtime.block_on(tokio::net::TcpListener::bind(listen))?;
         let state = apply_api::ApplyState::new(
-            Arc::new(supervisor),
+            supervisor,
             config.tenant_id().as_str().to_owned(),
             key,
             snapshot_path,
@@ -2323,6 +3061,94 @@ mod tests {
         ] {
             assert_eq!(denial_status(reason), 403, "{}", reason.as_str());
         }
+    }
+
+    /// A site observing until `NOW + 100` with one UI-action read, one
+    /// UI-action write, one public read and one read enforced on its own.
+    fn observing_policy() -> xshield_core::SitePolicyConfig {
+        let route = |id: &str, method: &str, path: &str, admission: &str| {
+            serde_json::json!({
+                "operation_id": id, "method": method, "path": path,
+                "security_entry": admission,
+                "source_action": (admission == "ui_action_required").then(|| format!("{id}.open")),
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "routes": [
+                route("orders.list", "GET", "/orders", "ui_action_required"),
+                route("orders.save", "POST", "/orders", "ui_action_required"),
+                route("docs.read", "GET", "/docs", "public"),
+                route("account.read", "GET", "/account", "ui_action_required"),
+            ],
+            "rollout": {
+                "mode": "observe", "observe_until_unix": NOW + 100, "revision": "rollout-1",
+                "enforced_operations": ["account.read"]
+            }
+        }))
+        .unwrap()
+    }
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn refused(operation: &str, reason: ReasonCode) -> GatewayDecision {
+        GatewayDecision {
+            outcome: GatewayOutcome::Denied,
+            operation_id: Some(
+                xshield_core::domain::OperationId::parse(operation.to_owned()).unwrap(),
+            ),
+            reason_code: reason,
+        }
+    }
+
+    #[test]
+    fn only_observable_refusals_of_observed_reads_are_forwarded() {
+        let policy = observing_policy();
+        policy.validate().unwrap();
+        let observed = |method: &str, decision: &GatewayDecision, now: u64| {
+            observed_rollout(Some(&policy), method, decision, now)
+        };
+        let missing = refused("orders.list", ReasonCode::UiActionNotAvailable);
+        assert_eq!(observed("GET", &missing, NOW).as_deref(), Some("rollout-1"));
+        assert_eq!(
+            observed("HEAD", &missing, NOW).as_deref(),
+            Some("rollout-1")
+        );
+        // The deadline passed: enforced without any configuration change.
+        assert_eq!(observed("GET", &missing, NOW + 100), None);
+        // Writes, routes enforced on their own and refusals observe does not
+        // measure stay refusals.
+        let write = refused("orders.save", ReasonCode::UiActionNotAvailable);
+        assert_eq!(observed("POST", &write, NOW), None);
+        let verified = refused("account.read", ReasonCode::UiActionNotAvailable);
+        assert_eq!(observed("GET", &verified, NOW), None);
+        for reason in [
+            ReasonCode::WafQueryBlocked,
+            ReasonCode::SiteRateLimitExceeded,
+            ReasonCode::IdentityStoreUnavailable,
+            ReasonCode::FieldNotAllowed,
+        ] {
+            assert_eq!(observed("GET", &refused("orders.list", reason), NOW), None);
+        }
+        let unmatched = GatewayDecision {
+            operation_id: None,
+            ..refused("orders.list", ReasonCode::UiActionNotAvailable)
+        };
+        assert_eq!(observed("GET", &unmatched, NOW), None);
+        let allowed = GatewayDecision {
+            outcome: GatewayOutcome::Allowed,
+            ..refused("orders.list", ReasonCode::UiActionAllowed)
+        };
+        assert_eq!(observed("GET", &allowed, NOW), None);
+        // An enforced site never observes.
+        let enforced = xshield_core::SitePolicyConfig {
+            rollout: xshield_core::site::SiteRollout::default(),
+            ..observing_policy()
+        };
+        assert_eq!(
+            observed_rollout(Some(&enforced), "GET", &missing, NOW),
+            None
+        );
+        assert_eq!(observed_rollout(None, "GET", &missing, NOW), None);
     }
 
     fn limited_policy(burst: u32) -> xshield_core::SitePolicyConfig {
@@ -2485,6 +3311,43 @@ mod tests {
             pingora::http::RequestHeader::build("GET", b"/search?q=green+apple", Some(1)).unwrap();
         assert_eq!(site_waf_denial(&safe, &policy), None);
         assert_eq!(denial_status(ReasonCode::WafQueryInvalid), 400);
+    }
+
+    /// Acceptance SHARE-03: a public limited-share entry is an admission
+    /// exception, not an inspection exception. The site WAF runs before any
+    /// admission class is consulted, so a request presenting a share token
+    /// with attack content is refused by the content check exactly as any
+    /// other request would be, and the token neither exempts nor triggers it.
+    #[test]
+    fn share_entry_requests_keep_the_site_content_check() {
+        let mut policy = xshield_core::SitePolicyConfig::default();
+        policy.waf.blocked_query_fragments = vec!["' or 1=1--".to_owned()];
+        policy.waf.blocked_headers = vec!["x-attack".to_owned()];
+        let share_request = |target: &[u8]| {
+            let mut request = pingora::http::RequestHeader::build("GET", target, Some(2)).unwrap();
+            request
+                .insert_header("X-Xshield-Share-Token", "verified-share-token")
+                .unwrap();
+            request
+        };
+        let attack = share_request(b"/shared-record?record_id=record-123%27+OR+1%3D1--");
+        assert_eq!(
+            site_waf_denial(&attack, &policy),
+            Some(ReasonCode::WafQueryBlocked)
+        );
+        let mut header_attack = share_request(b"/shared-record?record_id=record-123");
+        header_attack.insert_header("X-Attack", "1").unwrap();
+        assert_eq!(
+            site_waf_denial(&header_attack, &policy),
+            Some(ReasonCode::WafHeaderBlocked)
+        );
+        let malformed = share_request(b"/shared-record?record_id=%GG");
+        assert_eq!(
+            site_waf_denial(&malformed, &policy),
+            Some(ReasonCode::WafQueryInvalid)
+        );
+        let clean = share_request(b"/shared-record?record_id=record-123");
+        assert_eq!(site_waf_denial(&clean, &policy), None);
     }
 
     #[test]

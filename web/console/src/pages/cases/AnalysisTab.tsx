@@ -1,15 +1,121 @@
 import { ReloadOutlined, ThunderboltOutlined } from "@ant-design/icons";
-import { App as AntdApp, Alert, Button, Space } from "antd";
+import { App as AntdApp, Alert, Button, Space, Table, type TableColumnsType } from "antd";
 import { useState } from "react";
 import type { JobResponse } from "../../api.ts";
+import type { CaseJobListItem } from "../../case-job-list.ts";
 import { useGuardedQuery } from "../../security/hooks";
 import { useShellActions } from "../../shell/actions";
 import { JobCard } from "../../work/JobCard";
 import { owners } from "../../work/operations.ts";
-import { ErrorNotice } from "../../work/Parts";
+import {
+  ErrorNotice,
+  IdChip,
+  labelled,
+  LoadState,
+  Observed,
+  Pager,
+  StatePill,
+  Time,
+  usePager,
+} from "../../work/Parts";
 import { domains, specs } from "../../work/queries.ts";
+import { jobPill } from "../../work/status.ts";
 import { useWrite } from "../../work/use-write.ts";
 import { FrozenOperation } from "../../work/WriteDialog";
+
+/**
+ * Every job this case has ever produced, read from the durable store directly (not from local
+ * state), so it survives a page reload and shows jobs submitted before this page was opened.
+ */
+function CaseJobHistory({ caseId }: { caseId: string }) {
+  const pager = usePager(`case-jobs:${caseId}`);
+  const query = useGuardedQuery(specs.caseJobList(caseId, pager.cursor));
+  const shell = useShellActions();
+  const page = query.data;
+  const columns: TableColumnsType<CaseJobListItem> = [
+    {
+      title: "任务",
+      key: "id",
+      onCell: labelled("任务"),
+      render: (_, row) => <IdChip id={row.job_id} label="任务 ID" />,
+    },
+    {
+      title: "状态",
+      key: "status",
+      onCell: labelled("状态"),
+      render: (_, row) => <StatePill pill={jobPill[row.status]} />,
+    },
+    {
+      title: "检查点",
+      key: "checkpoint",
+      onCell: labelled("检查点"),
+      render: (_, row) => <span className="mono">{row.checkpoint}</span>,
+    },
+    {
+      title: "创建时间",
+      key: "created",
+      onCell: labelled("创建时间"),
+      render: (_, row) => <Time value={row.created_at} />,
+    },
+    {
+      title: "操作",
+      key: "open",
+      onCell: labelled("操作"),
+      render: (_, row) =>
+        shell && (
+          <Button
+            size="small"
+            onClick={() =>
+              shell.run({ type: "search", preset: { kind: "job_id", value: row.job_id } })
+            }
+          >
+            查看
+          </Button>
+        ),
+    },
+  ];
+  return (
+    <section className="xs-w-card" aria-label="历史任务">
+      <div className="xs-w-between xs-w-toolbar">
+        <h4>历史任务</h4>
+        <Space wrap>
+          {page ? <Observed asOf={page.as_of} requestId={page.request_id} /> : <span />}
+          <Button
+            size="small"
+            icon={<ReloadOutlined aria-hidden="true" />}
+            loading={query.isFetching}
+            onClick={() => void query.refetch()}
+          >
+            刷新
+          </Button>
+        </Space>
+      </div>
+      <LoadState pending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
+        {page && (
+          <>
+            <Table<CaseJobListItem>
+              className="xs-w-table"
+              rowKey="job_id"
+              size="middle"
+              pagination={false}
+              columns={columns}
+              dataSource={page.items}
+              loading={query.isFetching && !query.isPending}
+              locale={{ emptyText: "该案件尚未产生任何任务。" }}
+            />
+            <Pager
+              pager={pager}
+              count={page.items.length}
+              nextCursor={page.next_cursor}
+              busy={query.isFetching}
+              noun="条任务"
+            />
+          </>
+        )}
+      </LoadState>
+    </section>
+  );
+}
 
 /**
  * 分析任务: a read-only inventory of the case (reference and catalog counts) written to a
@@ -101,14 +207,11 @@ export function AnalysisTab({ caseId, canWrite }: { caseId: string; canWrite: bo
           </div>
           {reread.error && <ErrorNotice error={reread.error} />}
           <JobCard job={job} requestId={shown.request_id} />
-          <p className="xs-w-muted">
-            此处只显示本次打开页面后提交的任务；更早的任务可在命令面板粘贴 job_ ID
-            查询。历史检索只预填任务引用，仍需填写 UTC 时间窗并主动提交。
-          </p>
         </section>
       ) : (
         <p className="xs-w-muted">尚未提交分析任务。</p>
       )}
+      <CaseJobHistory caseId={caseId} />
     </div>
   );
 }

@@ -483,6 +483,11 @@ test.describe("analysis tab", () => {
     const [post] = writes(calls);
     expect(post).toMatchObject({ path: `/control/v1/cases/${OTHER_CASE_ID}/analyze` });
     expect(post?.key).toMatch(keyPattern);
+    const history = page.getByRole("region", { name: "历史任务" });
+    await expect(history).toContainText("inventory_pending");
+    expect(
+      apiCalls(calls).some((call) => call.path === `/control/v1/cases/${OTHER_CASE_ID}/jobs`),
+    ).toBe(true);
     await job.getByRole("button", { name: "重新读取任务状态" }).click();
     await expect
       .poll(() => apiCalls(calls).some((call) => call.path.startsWith("/control/v1/jobs/job_")))

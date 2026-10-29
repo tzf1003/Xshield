@@ -20,11 +20,14 @@ pub mod grant;
 pub mod identity;
 pub mod investigation;
 pub mod model_evaluation_admission;
+pub mod path_shape;
 pub mod path_template;
 pub mod ports;
 pub mod provenance;
 pub mod query;
 pub mod query_pagination;
+pub mod resident;
+pub mod secret_env;
 pub mod site;
 pub use site::{
     GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteAuthBinding,

@@ -24,6 +24,7 @@ import {
   StatusChoice,
   UpstreamFields,
 } from "./tabs/site-fields";
+import { RolloutCard } from "./tabs/RolloutCard";
 import { RoutesTab } from "./tabs/RoutesTab";
 import { WizardTemplatePicker } from "./tabs/RouteTemplatePicker";
 import { NoticeBanner, PendingBanner } from "./workspace/Banners";
@@ -38,7 +39,9 @@ const owns: Record<WizardStep, (issue: Issue) => boolean> = {
   upstream: (issue) =>
     ["upstream_address", "upstream_server_name", "listen_port"].includes(issue.path),
   // The probe switch lives in this step; SENSOR_HTML page routes need it on.
-  entry: (issue) => ["entry_path", "policy_revision", "sensor_enabled"].includes(issue.path),
+  entry: (issue) =>
+    ["entry_path", "policy_revision", "sensor_enabled"].includes(issue.path) ||
+    issue.path.startsWith("rollout"),
   routes: (issue) => issue.path.startsWith("routes"),
   review: () => true,
 };
@@ -46,7 +49,7 @@ const owns: Record<WizardStep, (issue: Issue) => boolean> = {
 const stepNote: Record<WizardStep, string> = {
   basics: "站点 ID、名称与公网入口",
   upstream: "源站地址、服务名、TLS 与监听端口",
-  entry: "入口路径、准入、探针与状态",
+  entry: "入口路径、准入、探针、状态与上线模式",
   routes: "edge 允许的操作",
   review: "核对后保存",
 };
@@ -148,6 +151,13 @@ function ReviewStep({ ws }: { ws: WorkspaceApi }) {
             },
             { key: "status", label: "状态", children: statusLabel[draft.status] },
             {
+              key: "rollout",
+              label: "上线模式",
+              children: draft.policy.rollout
+                ? `观察，至 ${new Date(draft.policy.rollout.observe_until_unix * 1000).toLocaleString()}`
+                : "强制",
+            },
+            {
               key: "routes",
               label: "路由",
               children:
@@ -245,6 +255,7 @@ export function NewSiteWizard({ step }: { step: WizardStep }) {
             <Card title="探针与策略标签" className="xs-card">
               <ProbeFields ws={ws} />
             </Card>
+            <RolloutCard ws={ws} />
           </div>
         </Form>
       );

@@ -17,8 +17,9 @@ use xshield_core::{
     },
 };
 use xshield_worker::{
-    AuditSearchResult, PublishError, PublisherConfig, SearchEventSummary, query_audit_events,
-    query_request_summary,
+    AuditSearchResult, PublishError, PublisherConfig, RolloutObservation, RolloutReportPlan,
+    RouteTraffic, SearchEventSummary, query_audit_events, query_coverage_report,
+    query_request_summary, query_rollout_report,
 };
 
 const MODEL_CALL_ID: &str = "mdl_018f2a3b-4c5d-7000-8000-000000000001";
@@ -93,6 +94,8 @@ async fn real_schema_search_is_scoped_typed_paginated_and_retention_aware() {
         assert_grant_binding_search(&client, &reader).await;
         assert_case_artifact_search(&client, &reader).await;
         assert_latest_stage_null_confidence(&client, &reader).await;
+        assert_rollout_report(&client, &reader).await;
+        assert_coverage_report(&client, &reader).await;
     })
     .await;
     let cleanup = admin
@@ -212,6 +215,323 @@ async fn assert_latest_stage_null_confidence(writer: &Client, reader: &Client) {
             assert_eq!(stage.last_request_seq, expected.request_seq);
             assert_eq!(stage.event_count, 2);
         }
+    }
+}
+
+/// Six requests completed in one window on their own site: three forwarded by
+/// rollout-1 (two of one route and reason), one by another rollout, one
+/// refused without a route and one allowed.
+#[allow(clippy::too_many_lines)]
+async fn assert_rollout_report(writer: &Client, reader: &Client) {
+    let now = Utc::now();
+    let start = DateTime::from_timestamp(now.timestamp() - 3_600, 0).unwrap();
+    let expires = now + TimeDelta::hours(1);
+    let requests: [(&'static str, &'static str, &'static str, &'static str, &str); 6] = [
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000301",
+            "orders.list",
+            "OBSERVED_WOULD_DENY",
+            "UI_ACTION_NOT_AVAILABLE",
+            "rollout-1",
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000302",
+            "orders.list",
+            "OBSERVED_WOULD_DENY",
+            "UI_ACTION_NOT_AVAILABLE",
+            "rollout-1",
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000303",
+            "account.read",
+            "OBSERVED_WOULD_DENY",
+            "AUTH_REQUIRED",
+            "rollout-1",
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000304",
+            "orders.list",
+            "OBSERVED_WOULD_DENY",
+            "AUTH_REQUIRED",
+            "rollout-0",
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000305",
+            "",
+            "DENY",
+            "OPERATION_NOT_FOUND",
+            "",
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000306",
+            "orders.list",
+            "ALLOW",
+            "ORIGIN_RESPONSE_RECEIVED",
+            "",
+        ),
+    ];
+    let mut rows = Vec::new();
+    for (index, (request_id, operation, outcome, reason, rollout)) in
+        requests.into_iter().enumerate()
+    {
+        // Event ids are unique across the whole fixture database: the active
+        // views keep one row per event_id, and 300-372 belong to case search.
+        let sequence = 500 + u32::try_from(index).unwrap() * 2;
+        let at = start + TimeDelta::milliseconds(i64::try_from(index).unwrap() * 100);
+        let mut accepted = TestEvent::new(sequence, at, expires);
+        accepted.site_id = "site_rollout";
+        accepted.request_id = request_id;
+        accepted.event_type = "request.accepted";
+        accepted.stage = "";
+        accepted.outcome = "";
+        accepted.reason_code = "";
+        accepted.operation_id = operation;
+        accepted.request_seq = 1;
+        let mut terminal = accepted.clone();
+        terminal.event_id = event_id(sequence + 1);
+        terminal.producer_seq = u64::from(sequence + 1);
+        terminal.request_seq = 2;
+        terminal.occurred_at = at + TimeDelta::milliseconds(10);
+        terminal.observed_at = terminal.occurred_at;
+        terminal.event_type = "request.completed";
+        terminal.outcome = outcome;
+        terminal.reason_code = reason;
+        terminal.operation_id = "";
+        terminal.is_terminal = 1;
+        terminal.payload_json = if rollout.is_empty() {
+            "{}".to_owned()
+        } else {
+            format!("{{\"rollout_revision\":\"{rollout}\"}}")
+        };
+        rows.extend([accepted, terminal]);
+    }
+    let mut insert = writer.insert::<TestEvent>("audit_events").await.unwrap();
+    for row in &rows {
+        insert.write(row).await.unwrap();
+    }
+    insert.end().await.unwrap();
+    let window = QueryWindow::new(
+        UnixSeconds::new(u64::try_from(start.timestamp()).unwrap()),
+        UnixSeconds::new(u64::try_from(start.timestamp()).unwrap() + 2),
+    )
+    .unwrap();
+    let observation = |operation: &str, reason: &str, count, index: i64| RolloutObservation {
+        operation_id: operation.to_owned(),
+        reason_code: reason.to_owned(),
+        count,
+        last_seen: start + TimeDelta::milliseconds(index * 100 + 10),
+    };
+    for table in ["audit_events", "events_by_time"] {
+        let report = query_rollout_report(
+            &query_config(table),
+            reader,
+            &TenantId::parse("tenant_search").unwrap(),
+            &SiteId::parse("site_rollout").unwrap(),
+            &RolloutReportPlan::new(window, "rollout-1").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.completed_requests, 6, "{table}");
+        assert_eq!(report.observed_requests, 3, "{table}");
+        assert_eq!(report.unrouted_refusals, 1, "{table}");
+        assert!(!report.truncated);
+        assert_eq!(
+            report.observations,
+            vec![
+                observation("orders.list", "UI_ACTION_NOT_AVAILABLE", 2, 1),
+                observation("account.read", "AUTH_REQUIRED", 1, 2),
+            ],
+            "{table}"
+        );
+    }
+}
+
+/// Eight requests on their own site: orders.list allowed once, refused twice
+/// and forwarded once by an observe rollout; account.read allowed once; three
+/// that matched no route, two recorded with the same path shape.
+#[allow(clippy::too_many_lines)]
+async fn assert_coverage_report(writer: &Client, reader: &Client) {
+    let now = Utc::now();
+    let start = DateTime::from_timestamp(now.timestamp() - 3_600, 0).unwrap();
+    let expires = now + TimeDelta::hours(1);
+    let requests: [(
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<&str>,
+    ); 8] = [
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000601",
+            "orders.list",
+            "ALLOW",
+            "ORIGIN_RESPONSE_RECEIVED",
+            None,
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000602",
+            "orders.list",
+            "DENY",
+            "AUTH_REQUIRED",
+            None,
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000603",
+            "orders.list",
+            "DENY",
+            "AUTH_REQUIRED",
+            None,
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000604",
+            "orders.list",
+            "OBSERVED_WOULD_DENY",
+            "CAPABILITY_MISSING",
+            None,
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000605",
+            "account.read",
+            "ALLOW",
+            "ORIGIN_RESPONSE_RECEIVED",
+            None,
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000606",
+            "",
+            "DENY",
+            "OPERATION_NOT_MATCHED",
+            Some("/api/users/{}"),
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000607",
+            "",
+            "DENY",
+            "OPERATION_NOT_MATCHED",
+            Some("/api/users/{}"),
+        ),
+        (
+            "req_018f2a3b-4c5d-7000-8000-000000000608",
+            "",
+            "DENY",
+            "OPERATION_NOT_MATCHED",
+            None,
+        ),
+    ];
+    let mut rows = Vec::new();
+    for (index, (request_id, operation, outcome, reason, shape)) in requests.into_iter().enumerate()
+    {
+        // Event ids are unique across the fixture database; 600-623 are ours.
+        let sequence = 600 + u32::try_from(index).unwrap() * 3;
+        let at = start + TimeDelta::milliseconds(i64::try_from(index).unwrap() * 100);
+        let mut accepted = TestEvent::new(sequence, at, expires);
+        accepted.site_id = "site_coverage";
+        accepted.request_id = request_id;
+        accepted.event_type = "request.accepted";
+        accepted.stage = "";
+        accepted.outcome = "";
+        accepted.reason_code = "";
+        accepted.operation_id = operation;
+        accepted.request_seq = 1;
+        let mut decided = accepted.clone();
+        decided.event_id = event_id(sequence + 1);
+        decided.producer_seq = u64::from(sequence + 1);
+        decided.request_seq = 2;
+        decided.event_type = "decision.composed";
+        decided.method = "";
+        decided.operation_id = "";
+        decided.outcome = if outcome == "ALLOW" { "ALLOW" } else { "DENY" };
+        decided.reason_code = reason;
+        decided.payload_json = shape.map_or_else(
+            || "{}".to_owned(),
+            |shape| format!("{{\"unmatched_path\":\"{shape}\"}}"),
+        );
+        let mut terminal = accepted.clone();
+        terminal.event_id = event_id(sequence + 2);
+        terminal.producer_seq = u64::from(sequence + 2);
+        terminal.request_seq = 3;
+        terminal.occurred_at = at + TimeDelta::milliseconds(10);
+        terminal.observed_at = terminal.occurred_at;
+        terminal.event_type = "request.completed";
+        terminal.method = "";
+        terminal.outcome = outcome;
+        terminal.reason_code = reason;
+        terminal.operation_id = "";
+        terminal.is_terminal = 1;
+        rows.extend([accepted, decided, terminal]);
+    }
+    let mut insert = writer.insert::<TestEvent>("audit_events").await.unwrap();
+    for row in &rows {
+        insert.write(row).await.unwrap();
+    }
+    insert.end().await.unwrap();
+    let window = QueryWindow::new(
+        UnixSeconds::new(u64::try_from(start.timestamp()).unwrap()),
+        UnixSeconds::new(u64::try_from(start.timestamp()).unwrap() + 2),
+    )
+    .unwrap();
+    let traffic = |operation: &str, completed, refused, observed| RouteTraffic {
+        operation_id: operation.to_owned(),
+        completed,
+        refused,
+        observed,
+    };
+    for table in ["audit_events", "events_by_time"] {
+        let report = query_coverage_report(
+            &query_config(table),
+            reader,
+            &TenantId::parse("tenant_search").unwrap(),
+            &SiteId::parse("site_coverage").unwrap(),
+            window,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.completed_requests, 8, "{table}");
+        assert_eq!(report.refused_requests, 5, "{table}");
+        assert_eq!(report.observed_requests, 1, "{table}");
+        assert_eq!(report.unrouted_refusals, 3, "{table}");
+        assert_eq!(report.unshaped_unrouted_refusals, 1, "{table}");
+        assert_eq!(
+            report.routes,
+            vec![
+                traffic("orders.list", 4, 2, 1),
+                traffic("account.read", 1, 0, 0)
+            ],
+            "{table}"
+        );
+        let refusals = report
+            .refusals
+            .iter()
+            .map(|row| {
+                (
+                    row.operation_id.as_str(),
+                    row.reason_code.as_str(),
+                    row.count,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refusals,
+            vec![
+                ("", "OPERATION_NOT_MATCHED", 3),
+                ("orders.list", "AUTH_REQUIRED", 2)
+            ],
+            "{table}"
+        );
+        let uncovered = report
+            .uncovered
+            .iter()
+            .map(|row| (row.method.as_str(), row.path_shape.as_str(), row.count))
+            .collect::<Vec<_>>();
+        assert_eq!(uncovered, vec![("GET", "/api/users/{}", 2)], "{table}");
+        assert_eq!(
+            report.uncovered[0].last_seen,
+            start + TimeDelta::milliseconds(610),
+            "{table}"
+        );
+        assert!(
+            !report.routes_truncated && !report.refusals_truncated && !report.uncovered_truncated
+        );
     }
 }
 

@@ -6,18 +6,23 @@ use std::{
     error::Error,
     net::SocketAddr,
     path::PathBuf,
+    sync::Arc,
     time::Duration,
 };
 use xshield_audit::{JournalKey, JournalLimits, LocalJournal, SealVerifyingKey};
 use xshield_control::{
     ControlConfig, ControlLimits, ControlPlane, CursorKey, EdgeApplyClient, EvidenceReadPort,
-    IdempotencyKey, ManagementCredential, OidcProvider, parse_management_api_key_hash_key, router,
+    IdempotencyKey, ManagementCredential, OidcProvider, ops::ops_address_allowed,
+    parse_management_api_key_hash_key, routers,
 };
 use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{SiteId, TenantId},
 };
-use xshield_evidence::{EvidenceKey, EvidenceVaultConfig, LocalEvidenceVault};
+use xshield_evidence::{
+    EvidenceKey, EvidenceVault, EvidenceVaultConfig, LocalEvidenceVault, S3EvidenceStoreConfig,
+    S3EvidenceVault,
+};
 use xshield_postgres::PostgresIdentityStore;
 use xshield_worker::PublisherConfig;
 use zeroize::Zeroizing;
@@ -41,28 +46,41 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let roles = parse_roles(&env::var("XSHIELD_CONTROL_ROLES")?)?;
     let oidc_issuer = env::var("XSHIELD_CONTROL_OIDC_ISSUER")?;
     let oidc_client_id = env::var("XSHIELD_CONTROL_OIDC_CLIENT_ID")?;
-    let oidc_client_secret = Zeroizing::new(env::var("XSHIELD_CONTROL_OIDC_CLIENT_SECRET")?);
+    let oidc_client_secret = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CONTROL_OIDC_CLIENT_SECRET",
+    )?);
     let console_origin = env::var("XSHIELD_CONTROL_CONSOLE_ORIGIN")?;
     let required_acr = env::var("XSHIELD_CONTROL_OIDC_REQUIRED_ACR")?;
     let oidc_subject_roles =
         parse_oidc_subject_roles(&env::var("XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON")?)?;
-    let token = Zeroizing::new(env::var("XSHIELD_CONTROL_TOKEN")?);
-    let cursor_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_CURSOR_KEY_HEX")?);
-    let idempotency_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX")?);
-    let api_key_hash_key_hex = env::var("XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX").ok();
+    let token = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_CONTROL_TOKEN")?);
+    let cursor_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CONTROL_CURSOR_KEY_HEX",
+    )?);
+    let idempotency_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX",
+    )?);
+    let api_key_hash_key_hex =
+        xshield_core::secret_env::var_opt("XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX")?;
     let source_key_id = env::var("XSHIELD_JOURNAL_KEY_ID")?;
-    let source_key_hex = Zeroizing::new(env::var("XSHIELD_JOURNAL_KEY_HEX")?);
+    let source_key_hex = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_JOURNAL_KEY_HEX")?);
     let seal_key_id = env::var("XSHIELD_SEAL_KEY_ID")?;
-    let seal_key_hex = Zeroizing::new(env::var("XSHIELD_SEAL_PUBLIC_KEY_HEX")?);
+    let seal_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_SEAL_PUBLIC_KEY_HEX",
+    )?);
     let control_key_id = env::var("XSHIELD_CONTROL_AUDIT_KEY_ID")?;
-    let control_key_hex = Zeroizing::new(env::var("XSHIELD_CONTROL_AUDIT_KEY_HEX")?);
+    let control_key_hex = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CONTROL_AUDIT_KEY_HEX",
+    )?);
     let target_id = env::var("XSHIELD_INDEX_TARGET_ID")?;
     let table = env::var("XSHIELD_CLICKHOUSE_TABLE").unwrap_or_else(|_| "audit_events".to_owned());
     let clickhouse_url = env::var("XSHIELD_CLICKHOUSE_URL")?;
     let clickhouse_database = env::var("XSHIELD_CLICKHOUSE_DATABASE")?;
     let clickhouse_user = env::var("XSHIELD_CLICKHOUSE_USER")?;
-    let clickhouse_password = Zeroizing::new(env::var("XSHIELD_CLICKHOUSE_PASSWORD")?);
-    let database_url = Zeroizing::new(env::var("XSHIELD_DATABASE_URL")?);
+    let clickhouse_password = Zeroizing::new(xshield_core::secret_env::var(
+        "XSHIELD_CLICKHOUSE_PASSWORD",
+    )?);
+    let database_url = Zeroizing::new(xshield_core::secret_env::var("XSHIELD_DATABASE_URL")?);
     let database_max_connections = env::var("XSHIELD_CONTROL_DATABASE_MAX_CONNECTIONS")?.parse()?;
     let database_acquire_timeout =
         Duration::from_millis(env::var("XSHIELD_CONTROL_DATABASE_ACQUIRE_TIMEOUT_MS")?.parse()?);
@@ -78,11 +96,19 @@ async fn run() -> Result<(), Box<dyn Error>> {
         env::var("XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS")?.parse()?;
     let max_evidence_access_ttl_seconds =
         env::var("XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS")?.parse()?;
-    let evidence_root = PathBuf::from(env::var("XSHIELD_EVIDENCE_ROOT")?);
+    let evidence_s3 = S3EvidenceStoreConfig::from_env().map_err(|error| error.to_string())?;
+    let evidence_root = match evidence_s3 {
+        Some(_) => None,
+        None => Some(PathBuf::from(env::var("XSHIELD_EVIDENCE_ROOT")?)),
+    };
     let evidence_key_id = env::var("XSHIELD_EVIDENCE_KEY_ID")?;
-    let evidence_key_hex = Zeroizing::new(env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
+    let evidence_key_hex =
+        Zeroizing::new(xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
     let evidence_max_artifact_bytes = env::var("XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES")?.parse()?;
     let evidence_max_retention_days = env::var("XSHIELD_EVIDENCE_MAX_RETENTION_DAYS")?.parse()?;
+    // An invalid admitted-network list stops startup rather than silently
+    // admitting nothing on every later save.
+    xshield_control::upstream_allowance_from_env()?;
     let listen: SocketAddr = env::var("XSHIELD_CONTROL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9443".to_owned())
         .parse()?;
@@ -132,15 +158,27 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let source_key = JournalKey::from_hex(&source_key_hex)?;
     let seal_key = SealVerifyingKey::from_hex(seal_key_id, &seal_key_hex)?;
     let control_key = JournalKey::from_hex(&control_key_hex)?;
-    let evidence_vault = LocalEvidenceVault::open(
-        EvidenceVaultConfig::new(
-            evidence_root,
+    let evidence_vault: EvidenceVault = match (evidence_s3, evidence_root) {
+        (Some(store), _) => S3EvidenceVault::open(
+            store,
             evidence_key_id,
             evidence_max_artifact_bytes,
             evidence_max_retention_days,
-        )?,
-        EvidenceKey::from_hex(&evidence_key_hex)?,
-    )?;
+            EvidenceKey::from_hex(&evidence_key_hex)?,
+        )?
+        .into(),
+        (None, Some(root)) => LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(
+                root,
+                evidence_key_id,
+                evidence_max_artifact_bytes,
+                evidence_max_retention_days,
+            )?,
+            EvidenceKey::from_hex(&evidence_key_hex)?,
+        )?
+        .into(),
+        (None, None) => return Err("XSHIELD_EVIDENCE_ROOT is required".into()),
+    };
     let journal_limits = JournalLimits::new(
         env::var("XSHIELD_CONTROL_AUDIT_MAX_BYTES")?.parse()?,
         env::var("XSHIELD_CONTROL_AUDIT_HIGH_WATERMARK_BYTES")?.parse()?,
@@ -178,16 +216,51 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .with_evidence_read_port(EvidenceReadPort::new(evidence_vault))
         .with_oidc_provider(oidc_provider)?;
     let control = match (
-        env::var("XSHIELD_EDGE_APPLY_URL"),
-        env::var("XSHIELD_EDGE_APPLY_KEY_HEX"),
+        env::var("XSHIELD_EDGE_APPLY_URL").ok(),
+        xshield_core::secret_env::var_opt("XSHIELD_EDGE_APPLY_KEY_HEX")?.map(Zeroizing::new),
     ) {
-        (Ok(endpoint), Ok(key_hex)) => {
+        (Some(endpoint), Some(key_hex)) => {
             control.with_edge_apply_client(EdgeApplyClient::new(endpoint, &key_hex)?)
         }
-        (Err(_), Err(_)) => control,
+        (None, None) => control,
         _ => return Err("edge apply URL and key must be configured together".into()),
     };
-    axum::serve(listener, router(control)).await?;
+    let (api, ops, shared) = routers(control);
+    // Converges this replica's own local edge to the current desired/active
+    // state on a fixed interval, independent of whichever replica a write
+    // request lands on (ADR-014, docs/19 19.9.1). Unset (the pre-HA default)
+    // leaves behavior exactly as before: apply only runs when a write
+    // request triggers it.
+    if let Ok(value) = env::var("XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS") {
+        let seconds: u64 = value
+            .parse()
+            .map_err(|_| "invalid XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS")?;
+        if !(1..=86400).contains(&seconds) {
+            return Err("invalid XSHIELD_CONTROL_RECONCILE_INTERVAL_SECONDS".into());
+        }
+        let reconciler = Arc::clone(&shared);
+        tokio::spawn(xshield_control::run_edge_reconcile_loop(
+            reconciler,
+            Duration::from_secs(seconds),
+        ));
+    }
+    // Liveness, readiness and metrics for orchestrators and scrapers. They are
+    // unauthenticated, so they disclose no topology (see ops).
+    if let Ok(value) = env::var("XSHIELD_CONTROL_OPS_LISTEN") {
+        let ops_listen: SocketAddr = value.parse()?;
+        if !ops_address_allowed(ops_listen) {
+            return Err(
+                "control ops listener must use a loopback, private or unspecified address".into(),
+            );
+        }
+        let ops_listener = tokio::net::TcpListener::bind(ops_listen).await?;
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(ops_listener, ops).await {
+                eprintln!("xshield control ops listener stopped: {error}");
+            }
+        });
+    }
+    axum::serve(listener, api).await?;
     Ok(())
 }
 

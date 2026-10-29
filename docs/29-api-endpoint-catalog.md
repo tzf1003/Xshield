@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`GET /control/v1/sites/{site_id}/discovered-routes`（29.37）、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`GET /control/v1/jobs[?cursor=...]`（29.34）、`GET /control/v1/admin/jobs[?cursor=...]`（29.35，AuditAdministrator）、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`GET /control/v1/sites/{site_id}/discovered-routes`（29.37）、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`GET /control/v1/jobs[?cursor=...]`（29.34）、`GET /control/v1/admin/jobs[?cursor=...]`（29.35，AuditAdministrator）、`GET /control/v1/cases/{case_id}/jobs[?cursor=...]`（29.40）、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 站点接入后台的配置写入要求 `SystemAdmin`，按固定 tenant/site 保存受保护站点、源站、安全入口、策略版本、状态和唯一监听端口；写入使用 `Idempotency-Key`，响应同时返回经过校验的 gateway 启动配置草稿。
 
@@ -8,7 +8,7 @@
 
 端口请求为 `0` 时，新站点从租户端口池取得最小空闲端口；已有站点更新会复用原 active lease，只有显式指定新端口才迁移租约。迁移、释放和唯一性检查都在同一事务锁内完成。
 
-上游地址校验（SSRF 防护）：`upstream_address` 必须是 IP 字面量套接字（`203.0.113.9:80`、`[2001:4860:4860::8888]:443` 之类），控制面从不代操作者解析名称；端口经类型化地址校验，80/443 等默认端口合法，0 被拒绝。保存时与健康探测连接前使用同一个纯函数（`xshield_core::site::upstream`）按解析后的数值分类，而不是检查文本：回环、未指定、RFC 1918 私网、RFC 6598 共享地址、链路本地、唯一本地、组播、保留/基准/文档段，以及云元数据地址（`169.254.169.254`、`168.63.129.16`、`100.100.100.200`、`192.0.0.192`、`fd00:ec2::254`）一律拒绝；IPv4 映射 IPv6（`::ffff:a.b.c.d`）和 NAT64、6to4、Teredo 等内嵌 IPv4 的形式不展开而直接拒绝。拒绝统一返回 400 `CONTROL_SITE_SSRF_BLOCKED` 并写入 DENY 审计，非 IP 字面量返回 `CONTROL_SITE_UPSTREAM_INVALID`。`upstream_server_name` 必须被探测所用的 URL 解析器识别为域名：`127.0.0.1`、`2130706433`、`0x7f.1` 等会被读成 IP 主机的写法同样返回 `CONTROL_SITE_UPSTREAM_INVALID`，因为 HTTP 客户端不对 IP 主机套用解析覆盖，会直接连接该地址。唯一的显式放行是部署环境变量 `XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1`（`dev.sh` 为本地靶场设置），它只放行 `127.0.0.0/8` 与 `::1`，不放行私网、元数据、映射或转换形式。健康探测对已持久化的行再次校验，并且只连接已验证的套接字：固定到配置端口、不使用环境代理、禁用重定向，`Host` 携带配置的服务名和端口；升级前写入或被直接改库的行因此也不会让探测向内部地址转发请求。
+上游地址校验（SSRF 防护）：`upstream_address` 必须是 IP 字面量套接字（`203.0.113.9:80`、`[2001:4860:4860::8888]:443` 之类），控制面从不代操作者解析名称；端口经类型化地址校验，80/443 等默认端口合法，0 被拒绝。保存时与健康探测连接前使用同一个纯函数（`xshield_core::site::upstream`）按解析后的数值分类，而不是检查文本：回环、未指定、RFC 1918 私网、RFC 6598 共享地址、链路本地、唯一本地、组播、保留/基准/文档段，以及云元数据地址（`169.254.169.254`、`168.63.129.16`、`100.100.100.200`、`192.0.0.192`、`fd00:ec2::254`）一律拒绝；IPv4 映射 IPv6（`::ffff:a.b.c.d`）和 NAT64、6to4、Teredo 等内嵌 IPv4 的形式不展开而直接拒绝。拒绝统一返回 400 `CONTROL_SITE_SSRF_BLOCKED` 并写入 DENY 审计，非 IP 字面量返回 `CONTROL_SITE_UPSTREAM_INVALID`。`upstream_server_name` 必须被探测所用的 URL 解析器识别为域名：`127.0.0.1`、`2130706433`、`0x7f.1` 等会被读成 IP 主机的写法同样返回 `CONTROL_SITE_UPSTREAM_INVALID`，因为 HTTP 客户端不对 IP 主机套用解析覆盖，会直接连接该地址。显式放行只有两种部署环境变量。`XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1`（`dev.sh` 为本地靶场设置）只放行 `127.0.0.0/8` 与 `::1`。`XSHIELD_ALLOWED_UPSTREAM_CIDRS` 列出部署方承认的私网网段（RFC 1918 或 `fc00::/7` 内、不含主机位的 CIDR，最多 32 个），只解除列出网段内地址的私网/唯一本地拒绝（`UpstreamAllowance`，同一纯函数）。两者都不放行元数据、链路本地、共享地址、映射或转换形式；网段列表不合法时控制服务拒绝启动。健康探测对已持久化的行再次校验，并且只连接已验证的套接字：固定到配置端口、不使用环境代理、禁用重定向，`Host` 携带配置的服务名和端口；升级前写入或被直接改库的行因此也不会让探测向内部地址转发请求。
 
 配置校验与 edge 编译一致性：edge 快照是整体替换，任何一个站点配置被 edge 编译器拒绝都会使该租户所有 apply 失败，所以控制面校验必须不比 edge 宽松。`xshield-core` 的 `SiteConfig::validate`（含 `SitePolicyConfig::validate`）是唯一定义，拒绝 edge 编译器会拒绝的一切：路由路径只允许可打印 ASCII（空格、非 ASCII、控制字符、DEL 均拒绝），不得落入 edge 自用的 `/__xshield/` 命名空间；同方法同固定前缀的 `{param}` 路由（不论参数名）、被 `{param}` 路由同方法匹配的固定路径路由（不论声明顺序）、超过 64 条 `{param}` 路由；请求 crypto 仅限 POST/PUT/PATCH 且不用于 UI 来源操作，明文不超过信封一半、消息有效期不超过 3600 秒、标识符只含字母数字和 `_-.`；响应信封须不小于两倍明文加 1024 字节；`SENSOR_HTML`、认证入口、页面签发与响应资源资格按“站点浏览器来源流程配置契约”一节镜像 edge 规则；每站点最多一把请求解密密钥和一把响应加密密钥且不得共用；公开 origin 不接受 IPv6 字面量（edge 按主机名路由），开启 sensor 时明文 HTTP 只允许 `localhost` 与 `127.0.0.1`；站点 ID 加 `edge-` 前缀不得超过 128 字节。失败映射为稳定原因码：上游相关 `CONTROL_SITE_UPSTREAM_INVALID`，策略/路由 `CONTROL_SITE_POLICY_INVALID`（浏览器来源流程各规则另有专用原因码，见下文契约一节），站点 ID `CONTROL_SITE_ID_INVALID`，其余 `CONTROL_SITE_CONFIG_REQUEST_INVALID`。控制面生成的 edge 配置同步调整：身份存储按有效路由的实际需要输出（任一路由需要身份或请求 crypto 即输出，而不只看顶层入口模式），匿名会话创建速率随 TTL 缩放以保持在 edge 的容量模型内（TTL 不超过 5940 秒时与此前一致），sensor origin 去除末尾斜杠。
 
@@ -23,6 +23,8 @@ edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，�
 | GET /control/v1/requests/{request_id}/evidence | 证据manifest清单 | console.manifest.read |
 | GET /control/v1/model-calls | 窗口内模型调用最新脱敏状态分页 | console.model.list |
 | GET /control/v1/model-calls/{model_call_id} | 模型调用、实际输入输出引用 | console.model.read |
+| GET /control/v1/rollout-report | 观察窗口退出报告（计数、按路由与原因、索引状态、报告摘要，29.37） | console.rollout_report.read |
+| GET /control/v1/coverage-report | 拒绝与覆盖统计（按路由流量、按路由与原因的拒绝、未覆盖端点的路径形状、索引状态、报告摘要，29.39） | console.coverage_report.read |
 | GET /control/v1/grants/{grant_id} | 资格与当前绑定账本快照、来源请求引用 | console.grant.read |
 | GET /control/v1/auth-bindings/{binding_id} | 当前身份与凭证代际、状态、期限 | console.binding.read |
 | GET /control/v1/agent-runs/{agent_run_id} | Agent 运行及工具树（脱敏生命周期，已实现，29.30） | console.agent.read |
@@ -41,7 +43,7 @@ edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，�
 | GET /control/v1/sites/{site_id}/discovered-routes | 窗口内未匹配任何已配置路由的 (method,path_template) 聚合发现（已实现，29.37） | console.site.routes.discover |
 | POST /control/v1/sites/{site_id}/validate | 校验已持久化站点配置 | console.site.config.validate |
 | POST /control/v1/sites/{site_id}/apply | 请求受保护的 edge 应用；draft 站点稳定拒绝，持有 `site.config.apply_direct` 的 Agent 可直接应用并留下审批记录 | console.site.config.apply |
-| POST /control/v1/sites/{site_id}/approve | PolicyApprover 独立批准绑定到当前 desired revision 的高风险修订并触发应用；可选 `X-Xshield-Expected-Config-Digest` 固定所审阅的配置 | console.site.config.approve |
+| POST /control/v1/sites/{site_id}/approve | PolicyApprover 独立批准绑定到当前 desired revision 的高风险修订并触发应用；可选 `X-Xshield-Expected-Config-Digest` 固定所审阅的配置；可选 `X-Xshield-Exit-Report-Digest`（64 位小写十六进制，29.37 的 `report_digest`）随批准写入 `site_apply_approvals.exit_report_digest` | console.site.config.approve |
 | POST /control/v1/sites/{site_id}/rollback | 以先前 active 修订的完整配置创建新修订（修订号不复用），按审批规则评估、幂等、写审计 | console.site.config.rollback |
 | GET /control/v1/artifacts/{artifact_id} | 单个证据manifest | console.manifest.read |
 | POST /control/v1/search | 受限查询AST，非任意SQL | console.query.executed |
@@ -69,6 +71,7 @@ edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，�
 | POST /control/v1/exports/{export_id}/deny | 独立拒绝导出请求 | export.denied |
 | GET /control/v1/exports/{export_id}/download | 领取加密元数据包（最多两次） | export.downloaded |
 | GET /control/v1/jobs | 本人任务列表，按 job_id 降序分页（已实现，29.34） | console.job.list |
+| GET /control/v1/cases/{case_id}/jobs | 该案件已产生的全部任务，按 job_id 降序分页（已实现，29.40） | console.case.job.list |
 | POST /control/v1/saved-views | 保存已校验的检索请求（已实现，29.36） | console.saved_view.create |
 | GET /control/v1/saved-views | 本人保存的检索视图分页（已实现，29.36） | console.saved_view.list |
 | DELETE /control/v1/saved-views/{view_id} | 删除本人保存的检索视图（已实现，29.36） | console.saved_view.delete |
@@ -502,17 +505,34 @@ binding 包含 binding_id、current_auth_epoch、credential_generation、stored_
 
 浏览器写请求经既有 CSRF 检查。每次认证后的尝试恰好写一条 `console.saved_view.create`、`console.saved_view.list` 或 `console.saved_view.delete` 管理审计，成功分别为 `PASS/CONTROL_SAVED_VIEW_CREATED`、`PASS/CONTROL_SAVED_VIEWS_READ`、`PASS/CONTROL_SAVED_VIEW_DELETED`；审计不含视图标识、名称、检索内容或游标。部署先应用迁移 0055，再升级管理 journal 发布器，最后开放路由。回滚停用路由，已写入的视图按保留策略保存。控制台的保存与打开入口不在本契约内，另行交付。
 
-## 29.37 已实现的未覆盖端点发现契约
+## 29.37 已实现的观察退出报告契约
 
-`GET /control/v1/sites/{site_id}/discovered-routes?start=<UTC>&end=<UTC>&limit=<1..200>` 按单个受保护站点聚合窗口内未能匹配任一已配置 operation 的流量，供“从观察流量导入路由”控制台面板发现候选端点（见 [30.7](30-console-redesign.md#307-控制台重设计待交付清单)、[11.5](11-audit-event-contract.md#115-必须记录的事件族)）。路径 `site_id` 先按既有强类型校验，再以 `SystemAdmin` 经 `authorize_site` 鉴权，与站点配置写入同一角色,因为发现结果直接驱动路由草稿。`start`、`end` 必须是规范 `YYYY-MM-DDTHH:MM:SSZ` UTC 整秒，表示 `[start,end)`；`limit` 为无前导零的 1–200 十进制整数。没有游标：一页就是该窗口内全部 `(method,path_template)` 分组，按命中数降序、方法与模板升序打破平局，不是逐事件列表。参数形状异常（缺失、重复、未知参数、非规范时间、空窗口、非空请求体）在取得查询许可之前返回 400 `CONTROL_DISCOVERED_ROUTES_REQUEST_INVALID`。
+`GET /control/v1/rollout-report?revision=…&start=…&end=…` 只允许 `Observer` 与服务端固定 tenant/site（控制面索引的那个站点）；三个参数各出现一次，`revision` 为观察标签（名称规则同 `policy_revision`），start/end 为精确到秒的 UTC RFC 3339（`:` 可写作 `%3A`），窗口不超过 31 天；其他参数、非空 body 或重复认证头在读取索引前拒绝（400 `CONTROL_ROLLOUT_REPORT_REQUEST_INVALID`）。读取占用调查查询并发名额，预算与超时沿用调查检索（429 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/`CONTROL_QUERY_BUDGET_EXCEEDED`，503 `CONTROL_QUERY_TIMEOUT`/`CONTROL_ROLLOUT_REPORT_INDEX_UNAVAILABLE`/`CONTROL_ROLLOUT_REPORT_HEALTH_UNAVAILABLE`）。
 
-服务端只统计 `event_type='request.accepted'` 且 `path_template` 非空的行，按 `(method,path_template)` 分组计 `uniqExact(event_id)` 命中数与首末出现时间；索引返回越出本查询能产生的行形状（零命中、非法方法、非规范模板、首末时间颠倒或越界）均视为完整性故障而非结果,拒绝为 `ERROR/CONTROL_DISCOVERED_ROUTES_INDEX_UNAVAILABLE`。响应额外携带与 [29.25](#2925-已实现的模型调用列表契约) 相同形状的 `watermark_scope`/`as_of`/`index_watermark`/`has_gaps`/`pending_segments`，用于判断发现结果相对已确认审计发布的滞后，而不是该站点当前路由覆盖率的即时证明；`path_template` 只是网关写时的有界规范化提示（见 11.5），不是路由或鉴权依据，前端对含 `{id}` 的模板只做只读展示，一键导入仅限原样字面路径,不猜测资源类型。
+响应 `schema_version=1`：管理 `request_id`、tenant/site、`rollout_revision`、回显的 start/end；窗口内到达终态的请求数 `completed_requests`，其中由该观察标签转发的 `observed_requests`（终态 `OBSERVED_WOULD_DENY` 且 `rollout_revision` 相同），未匹配任何路由而被拒绝的 `unrouted_refusals`；`observations` 按次数降序列出最多 200 组 `{operation_id, reason_code, count, last_seen}`（路由取自该请求较早的事件，请求在窗口开始前进入时为空串），超出时 `truncated=true`；以及 `watermark_scope=configured_journal`、`as_of`、`index_watermark`、`has_gaps`、`pending_segments` 和 `index_complete`（无缺口且无待发布段）。`report_digest` 是上述事实（不含 request_id 与 as_of）序列化后的小写 SHA-256，供审批引用。报告只陈述事实：索引不完整时控制台显示“不足以判断”，窗口内没有请求时显示“无法说明影响”，不以 0 代替。服务端在返回前校验各计数相加一致，不一致按索引不可用处理。
 
-该端点与 [29.25](#2925-已实现的模型调用列表契约)、[29.15](#2915-已实现的模型调用查询契约) 等调查查询共用单实例在途许可,忙时返回 429 `CONTROL_QUERY_CAPACITY_EXHAUSTED`；确定性查询预算耗尽返回 429 `CONTROL_QUERY_BUDGET_EXCEEDED`（`retryable=false`、`next_action=narrow_query`）；客户端超时返回 503 `CONTROL_QUERY_TIMEOUT`。已准入查询在客户端断连后继续执行至索引结果与终态审计。
+每次已认证尝试追加一条 `console.rollout_report.read` 管理 journal：成功 `PASS/CONTROL_ROLLOUT_REPORT_READ`，失败按上述原因码区分 DENY/ERROR；事件不含观察标签、窗口、计数或摘要。worker 发布器只接受这一路径与原因集合。
 
-每次认证后的尝试恰好写一条 `console.site.routes.discover` 管理审计，成功为 `PASS/CONTROL_DISCOVERED_ROUTES_READ`；拒绝仅限 `CONTROL_AUTH_REQUIRED`、`CONTROL_SCOPE_DENIED`、`CONTROL_RATE_LIMITED`、`CONTROL_SITE_ID_INVALID`、`CONTROL_DISCOVERED_ROUTES_REQUEST_INVALID`、`CONTROL_QUERY_CAPACITY_EXHAUSTED`、`CONTROL_QUERY_BUDGET_EXCEEDED`；故障仅限 `CONTROL_QUERY_TIMEOUT`、`CONTROL_DISCOVERED_ROUTES_INDEX_UNAVAILABLE`、`CONTROL_DISCOVERED_ROUTES_HEALTH_UNAVAILABLE`。审计是一次集合观察而非目标访问：不记录返回的方法、路径模板或游标,全部 `target_*`、`query_digest`、`bytes_read` 字段保持缺省/null，evidence_refs 为空。必需审计失败返回 503 `AUDIT_DURABILITY_FAILED` 并扣留结果；所有响应统一 `Cache-Control: private, no-store`。
+## 29.38 发版联动的页面构建登记（`xshield-build`）
 
-部署先应用 `sql/clickhouse.sql` 中 `audit_events`/`events_by_time` 的 `path_template` 列扩展（物化视图目标先于来源表），再升级网关与 worker 以写入和解析该字段，最后开放本路由；回滚只需停用路由，已写入的列和历史事件按既有保留策略保存，不影响其余查询契约。控制台的发现面板与一键导入草稿路由不在本契约内，前端增量另行交付。
+前端每次发版都会产出一个新的静态页面，`SENSOR_HTML` 路由只放行完整 SHA-256 与已批准构建一致的页面，新构建未登记就失败关闭。`xshield-build` 是随控制面构建的可选命令行工具（不是网关依赖，不改变任何接口），供前端 CI 使用：
+
+- `xshield-build fingerprint <page.html>`：离线输出 `{"origin_sha256","injection_offset","bytes"}`。摘要按原始字节计算，偏移是第一个小写 `</head>` 的字节位置，与控制台“从页面源码计算”一致；空文件、超过 16 MiB 或没有小写 `</head>` 时退出码 1。
+- `xshield-build register --control <url> --site <site_id> --operation <operation_id> --revision <adapter_revision> --page <page.html> [--retire <adapter_revision>]... [--dry-run]`：用环境变量 `XSHIELD_API_KEY`（或 `XSHIELD_API_KEY_FILE` 指向的文件，见 docs/19 19.3）中的 Agent API Key（需要该站点的 `site.read` 与 `site.config.write`，不需要也不应授予 `site.config.apply_direct`）读取 `GET /sites/{id}/config`，把新构建加在已服务构建旁边（同一路由最多 16 个，超过时必须同时 `--retire`），`--retire` 删除旧构建，删除主构建时下一个构建成为主构建；本地 `SiteConfig::validate` 通过后用确定性 `Idempotency-Key` 调用 `PUT /sites/{id}/config`。同一构建、同一标签再次运行且没有要删除的构建时不写任何修订（`state=unchanged`）。`--dry-run` 只做读取与本地校验。`--control` 必须是 https，仅回环地址允许 http；不跟随重定向。
+
+工具只暂存修订，从不批准或应用：构建变化是 `SENSOR_HTML_CHANGED`，只有独立 `PolicyApprover` 能清除（产品决定 8：试点期间每次人工批准）。推荐流程是：CI 构建后 `register` 新构建，审批人在控制台批准，edge 确认后再发布新前端；发布完成后用 `--retire` 删除旧构建并再次审批。保存接口不比较读取时的修订，所以工具保存后读取 `GET /sites/{id}/revisions`：如果自己修订之前的最新修订不是读取时的那个，说明期间有人保存过，新修订包含对方的改动，此时以退出码 3 提示审批人核对差异。退出码：0 已暂存或无需暂存，1 本地错误（参数、页面、配置不合规则），2 控制面拒绝或不可达（输出 `error_code`），3 期间有其他修订。
+
+输出为一行 JSON：`state`（`staged`/`unchanged`/`dry_run`）、站点、路由、标签、摘要、偏移、删除的构建、读取时的修订，暂存时另附 `desired_revision`、`active_revision`、`apply_state`、`requires_approval`、`reason_code`、`config_digest`。保存与读取都按 Agent API Key 审计（`console.agent_api_key.use` 与对应站点事件），`X-Xshield-Agent-Run-Id` 每次运行新生成。回归：核心登记逻辑的单测（`xshield-core` `site::build`）与控制面 HTTP 回归 `a_release_stages_its_build_for_independent_approval`（真实 PostgreSQL，经真实 TCP 调用路由）。
+
+## 29.39 已实现的拒绝与覆盖统计契约
+
+`GET /control/v1/coverage-report?start=…&end=…` 只允许 `Observer` 与服务端固定 tenant/site；两个参数各出现一次，规则与 29.37 相同（精确到秒的 UTC RFC 3339，窗口不超过 31 天），其他参数、非空 body 或重复认证头在读取索引前拒绝（400 `CONTROL_COVERAGE_REPORT_REQUEST_INVALID`）。并发名额、预算与超时沿用调查检索（429 `CONTROL_QUERY_CAPACITY_EXHAUSTED`/`CONTROL_QUERY_BUDGET_EXCEEDED`，503 `CONTROL_QUERY_TIMEOUT`/`CONTROL_COVERAGE_REPORT_INDEX_UNAVAILABLE`/`CONTROL_COVERAGE_REPORT_HEALTH_UNAVAILABLE`）。
+
+响应 `schema_version=1`，`facts` 包含：tenant/site 与回显的 start/end；窗口内到达终态的 `completed_requests`，其中被拒绝的 `refused_requests`、由观察灰度转发的 `observed_requests`、未匹配任何路由而被拒绝的 `unrouted_refusals`，以及其中没有路径形状的 `unshaped_unrouted_refusals`（升级前的 edge 写入，或请求在窗口开始前进入）；`routes` 按流量降序列出最多 200 条 `{operation_id, completed, refused, observed}`；`refusals` 按次数降序列出最多 200 组 `{operation_id, reason_code, count, last_seen}`（未匹配路由时 `operation_id` 为空串）；`uncovered` 按次数降序列出最多 100 个 `{method, path_shape, count, last_seen}`。三个列表各有 `*_truncated` 标志。索引状态字段（`watermark_scope`、`as_of`、`index_watermark`、`has_gaps`、`pending_segments`、`index_complete`）与 `report_digest` 的含义同 29.37。服务端在返回前校验各计数相加一致，不一致按索引不可用处理。
+
+未覆盖端点只按路径形状列出，不保存原始路径：edge 对未匹配路由的拒绝在 `decision.composed` 写入 `unmatched_path`（见 docs/11），每段只有 1–24 字节、以字母开头、仅含 `[A-Za-z0-9._-]` 且最多 2 个数字时保留原文，其余段写作 `{}`，超过 10 段时以 `/**` 结尾。因此 ID、令牌、邮箱等不会进入索引，统计用于决定下一步要补哪些路由，也是观察退出报告的补充数据。
+
+每次已认证尝试追加一条 `console.coverage_report.read` 管理 journal：成功 `PASS/CONTROL_COVERAGE_REPORT_READ`，失败按上述原因码区分 DENY/ERROR；事件不含窗口、计数或摘要。worker 发布器只接受这一路径与原因集合。部署顺序：先升级 worker 发布器（接受 `unmatched_path` 与新管理事件），再升级 edge 与控制面。控制台页面为 `/investigation/coverage`（拒绝与覆盖），按需生成，不自动刷新。
 
 ## 站点诊断与控制台契约补充（2026-09-27）
 
@@ -550,6 +570,8 @@ found=false 的站点配置响应可以包含 requires_approval=null；客户端
 投影：`SiteConfig::gateway_config` 由类型化结构序列化，未设置的可选成员省略而不是写 `null`（edge DTO 对两者一视同仁），序列化失败返回错误而不再替换为 `OBSERVE` 或空对象；apply 无法生成某站点投影时什么也不发送，目标记为 `EDGE_APPLY_PAYLOAD_INVALID`；配置读取接口在无法投影时把 `gateway_config` 返回为 `null`。`validate_for_site` 另以最长租户 ID 计算投影大小，超过 edge 每站点 1 MiB 上限时以 `CONTROL_SITE_POLICY_INVALID` 拒绝。站点配置写入（`POST /sites`、`PUT /sites/{id}/config`、`PATCH /sites/{id}`、`PUT /site-config`）的请求体上限由 16 KiB 提高到 256 KiB，可容纳 256 条带流程块的路由；投影约为请求体的两倍，仍在 edge 上限内。注意整份租户快照仍受 edge apply 接口 8 MiB 上限约束，单租户大量接近上限的站点会使 apply 失败（`EDGE_APPLY_REJECTED`），目前没有单独的预检。
 
 审批：`assess_change_risk` 新增七个原因 `AUTH_ENTRY_CHANGED`、`SENSOR_HTML_CHANGED`、`PAGE_ACTIONS_CHANGED`、`RESOURCE_GRANT_CHANGED`、`QUERY_PAGINATION_CHANGED`（带 `query_pagination` 的路由）、`SHARE_ISSUE_CHANGED`（带 `share_issue` 的路由与全部 `share_entry` 路由：发放凭据的一端与不经身份兑换凭据的一端任何一端改变，都是改变谁能读什么）和 `AUTH_TRANSITION_CHANGED`（带 `auth_refresh` 或 `auth_context_switch` 的路由：替换凭证、把 binding 移到另一个授权上下文）。每个原因比较一组“参与该环节的路由”的完整内容（认证入口及带身份建立/撤销的路由；SENSOR_HTML 页面；页面根与 `issued_by` 路由；带 `resource_grant` 的路由及其目标），与 `ROUTES_CHANGED` 同时出现；站点首次上线时，配置中已有的环节也会列出。基线仍是 active 修订。这七个原因只能由独立 `PolicyApprover` 清除：持有 `site.config.apply_direct` 的调用返回 403 `CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED`，写 DENY 审计，不记录审批、不发送快照；存储在锁定 apply intent 的同一事务中读取已存储的原因再判断，本版本不认识的原因同样不可豁免。
+
+观察上线（docs/32）：站点策略可选块 `rollout`，缺省为强制且不序列化；`mode: observe` 需要 `observe_until_unix`（保存时必须在未来 30 天内）与 `revision`，`enforced_operations` 只能列出已存在的路由，强制模式不能带任何其他字段；违规为 400 `CONTROL_SITE_ROLLOUT_INVALID`。审批原因 `ROLLOUT_MODE_RELAXED`（转为观察、以观察状态首次上线、延后截止、让路由回到观察）只能由独立 `PolicyApprover` 清除，且审批人必须持有有效的 MFA step-up：直接应用返回 403 `CONTROL_SITE_INDEPENDENT_APPROVAL_REQUIRED`，没有 step-up 的审批（含 API Key）返回 401 `CONTROL_STEP_UP_REQUIRED`，两者都写 DENY 审计、不记录审批、不发送快照。`ROLLOUT_MODE_TIGHTENED`（其余任何 rollout 变化）可以直接应用。
 
 存储：权威副本仍是 `protected_site_configs.policy_json` 与修订的 `config_json`（JSONB，无需改表）。迁移 `0052_m5_site_route_provenance_flow.sql` 只扩展只写投影 `site_routes`：`admission` 的 CHECK 加入 `AUTH_ENTRY`，新增可空 `issued_by jsonb`（对象检查）；`response_config` 改由与 edge 相同的类型化投影生成，并补写此前遗漏的 `resource_type`。没有该迁移时，含认证入口的写入会在同一事务内失败并整体回滚。迁移 `0054_m5_site_route_share_entry.sql` 同理把 `SHARE_ENTRY` 加入该 CHECK（`share_issue` 与两个会话块不需要新列：它们随 `site_routes.response_config` 由同一份类型化投影写入）；没有 0054 时含分享入口的写入会整体回滚。迁移之间的升级顺序：先 0054，再替换控制服务；旧控制服务不会写 `SHARE_ENTRY` 行。开发 reconciliation 的 schema 清单已用本仓库生成器重新生成（先在旧截止点复现提交的清单逐字节相同，再加入 0054，只多出 0054 的一条 CHECK 与校验和）。开发 reconciliation 现在理解“后续迁移重新定义了早期对象”（0052 重写 0044 建立的 CHECK）：一个阶段记录的定义，被同一对象在之后阶段记录的定义满足即视为已达到；只被重新定义的对象在本阶段执行前不算“半成品”。
 
@@ -615,6 +637,30 @@ edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启�
 **实现状态（本节所有结论以此为准）。** 已实现并端到端验证到“控制面保存 → 校验 → 独立审批 → 投影 → 真实 edge 编译器接受”：`share_entry` 准入与 `share_issue`、`auth_refresh`、`auth_context_switch`。规则与 edge 编译器一一对应，`crates/xshield-gateway/tests/site_config_parity.rs` 用手写、边界与穷举样本（分享 5 种准入 × 2 方法 × 2 响应模式 × 64 种块组合 × 2 种目标指向；会话块 5 × 2 × 2 × 256）断言“控制面接受 ⇒ edge 接受”，并把控制面投影与 `scripts/test_gateway_identity.sh` 真实二进制脚本里的 `records.share.*`、`auth.refresh*`、`auth.context.switch*` 操作逐字节比较（脚本本身未改动，没有新增发放请求，ClickHouse 计数不变）。描述摘要：两类块都不新增动作描述，摘要不变，修改它们**不要求**更换 `policy_revision`（有测试，核心与 edge 两侧分别断言）；发放路由作为 `resource_grant` 目标仍是描述，移动它同样受 `CONTROL_SITE_POLICY_REVISION_REUSED` 约束（`share_scope_needs_its_own_independent_approval_and_keeps_the_label`）。三类块都是独立审批原因，`site.config.apply_direct` 不能代替。
 
 仍未覆盖，且是运行前提而非配置问题：（1）`share_issuance_rules` 行已由控制面写入（见上一小节），不再是缺口；仍然成立的是：规则行不可变，所以同一标签与规则 ID 下调整期限、视图或目标要换新的 `issuance_rule_id`；控制面与 edge 使用不同数据库时，控制面写的行在它自己的库里，edge 的库需要同样的行（与 0053 的绑定同样的前提）；没有页面签发的配置需要外部先供给 `active` 的 `policy_revisions` 行；（2）edge 是否启用分享发放取决于启动时的 `XSHIELD_CONFIG` 是否含 `share_issue`（决定是否要求 `XSHIELD_SHARE_TOKEN_KEY_HEX`），经签名 apply 才出现 `share_issue` 的 edge 没有该密钥时发放失败关闭，不会降级；（3）`evidence_capture` 没有实现：它要求 edge 部署证据写入器与目录存储（`requires_evidence_capture`），并且会把业务响应（脱敏后）写入证据库——这是新的数据留存面，应与保留期、访问审批一起单独评审，而不是顺带做成一个可编辑字段；控制面仍以 `CONTROL_SITE_FEATURE_UNSUPPORTED` 命名地拒绝它；（4）`site_routes` 投影只写不读，不为新块增加列（`share_issue`、两个会话块随 `response_config` 保存）。
+
+## 29.40 已实现的案件任务列表契约
+
+`GET /control/v1/cases/{case_id}/jobs[?cursor=...]` 列出调用者本人名下该案件已产生的全部耐久任务，只允许 `Investigator`。补齐 29.31 的缺口：此前案件详情页只能看到本次打开页面后提交的任务，更早的任务只能去任务页按 `job_` ID 单独查询；现在案件详情页的"分析"页签直接分页展示该案件的完整任务历史。
+
+路径 case 使用规范强类型 ID，格式错误在取得在途许可之前返回 400 `CONTROL_CASE_ID_INVALID`。查询参数只接受一个可选 `cursor`，其余形状（空参数、重复或未知参数、`cursor` 为空、超过 256 字节或含 `&`）返回 400 `CONTROL_CASE_JOB_LIST_REQUEST_INVALID`。游标是 `v1.<job_id>.<hmac>`，HMAC 用途域与 29.34 的本人任务列表不同（`xshield-control-case-job-list-v1`），并额外绑定路径中的 `case_id`：为一个案件签发的游标在另一个案件、他人或其他作用域下重放均返回 400 `CONTROL_CURSOR_INVALID`，不回显存在性。
+
+该查询直接以 `(tenant_id, site_id, owner_ref, case_id)` 过滤 `control_jobs`（迁移 0057 新增 `control_jobs_case_owner_lookup` 索引），不与 `investigation_cases` 做 join：案件不存在、不属于调用者或暂无任务，三者统一返回空页，与案件是否存在无关——是否存在该案件只由既有的案件读取端点回答。页按规范 `job_` ID 的字节序降序排列，页大小为服务端 `max_query_artifacts`，数据库在单个只读事务中读取，语句与锁等待各限 5 秒，调用方总超时 15 秒；取回的每一行重新校验顺序，乱序或越界行使整页失败。条目投影与 29.34 相同但不含 `case_id`（已在页级给出且对本页全部条目恒定），不返回原幂等键、请求摘要或主体引用；列表不授予任何新的读取、批准或执行资格。
+
+每次认证后的尝试（含拒绝与依赖故障）恰好写一条 `console.case.job.list` 管理审计，成功为 `PASS/CONTROL_CASE_JOBS_READ`，拒绝仅限 `CONTROL_AUTH_REQUIRED`、`CONTROL_SCOPE_DENIED`、`CONTROL_RATE_LIMITED`、`CONTROL_CASE_ID_INVALID`、`CONTROL_CURSOR_INVALID`、`CONTROL_CASE_JOB_LIST_REQUEST_INVALID`、`CONTROL_CASE_JOB_LIST_BUSY`，故障为 `CONTROL_CURSOR_UNAVAILABLE`、`CONTROL_JOB_STORE_UNAVAILABLE`、`CONTROL_RATE_UNAVAILABLE`、`CONTROL_CLOCK_UNAVAILABLE`、`CONTROL_SESSION_UNAVAILABLE`。审计携带 `target_case_id`，不携带游标、列表内容或他人主体。
+
+列表读取占用案件/证据在途许可并保持到审计落盘，繁忙返回 429 `CONTROL_CASE_JOB_LIST_BUSY`。部署先应用迁移 0057（新增索引，`BEGIN`/`COMMIT` 内 `CREATE INDEX`，无并发选项，大表需维护窗口），再升级识别 `console.case.job.list` 的管理 journal 发布器，最后开放路由。回滚停用路由并回退迁移（仅移除新增索引，`control_jobs` 表结构不变）即可，已写入的审计按保留策略保存。控制台案件详情页的"分析"页签新增"历史任务"表格读取本契约，分页复用既有游标栈组件。
+
+## 29.41 已实现的未覆盖端点发现契约
+
+`GET /control/v1/sites/{site_id}/discovered-routes?start=<UTC>&end=<UTC>&limit=<1..200>` 按单个受保护站点聚合窗口内未能匹配任一已配置 operation 的流量，供"从观察流量导入路由"控制台面板发现候选端点（见 [30.7](30-console-redesign.md#307-控制台重设计待交付清单)、[11.5](11-audit-event-contract.md#115-必须记录的事件族)）。路径 `site_id` 先按既有强类型校验，再以 `SystemAdmin` 经 `authorize_site` 鉴权，与站点配置写入同一角色,因为发现结果直接驱动路由草稿。`start`、`end` 必须是规范 `YYYY-MM-DDTHH:MM:SSZ` UTC 整秒，表示 `[start,end)`；`limit` 为无前导零的 1–200 十进制整数。没有游标：一页就是该窗口内全部 `(method,path_template)` 分组，按命中数降序、方法与模板升序打破平局，不是逐事件列表。参数形状异常（缺失、重复、未知参数、非规范时间、空窗口、非空请求体）在取得查询许可之前返回 400 `CONTROL_DISCOVERED_ROUTES_REQUEST_INVALID`。
+
+服务端只统计 `event_type='request.accepted'` 且 `path_template` 非空的行，按 `(method,path_template)` 分组计 `uniqExact(event_id)` 命中数与首末出现时间；索引返回越出本查询能产生的行形状（零命中、非法方法、非规范模板、首末时间颠倒或越界）均视为完整性故障而非结果,拒绝为 `ERROR/CONTROL_DISCOVERED_ROUTES_INDEX_UNAVAILABLE`。响应额外携带与 [29.25](#2925-已实现的模型调用列表契约) 相同形状的 `watermark_scope`/`as_of`/`index_watermark`/`has_gaps`/`pending_segments`，用于判断发现结果相对已确认审计发布的滞后，而不是该站点当前路由覆盖率的即时证明；`path_template` 只是网关写时的有界规范化提示（见 11.5），不是路由或鉴权依据，前端对含 `{id}` 的模板只做只读展示，一键导入仅限原样字面路径,不猜测资源类型。
+
+该端点与 [29.25](#2925-已实现的模型调用列表契约)、[29.15](#2915-已实现的模型调用查询契约) 等调查查询共用单实例在途许可,忙时返回 429 `CONTROL_QUERY_CAPACITY_EXHAUSTED`；确定性查询预算耗尽返回 429 `CONTROL_QUERY_BUDGET_EXCEEDED`（`retryable=false`、`next_action=narrow_query`）；客户端超时返回 503 `CONTROL_QUERY_TIMEOUT`。已准入查询在客户端断连后继续执行至索引结果与终态审计。
+
+每次认证后的尝试恰好写一条 `console.site.routes.discover` 管理审计，成功为 `PASS/CONTROL_DISCOVERED_ROUTES_READ`；拒绝仅限 `CONTROL_AUTH_REQUIRED`、`CONTROL_SCOPE_DENIED`、`CONTROL_RATE_LIMITED`、`CONTROL_SITE_ID_INVALID`、`CONTROL_DISCOVERED_ROUTES_REQUEST_INVALID`、`CONTROL_QUERY_CAPACITY_EXHAUSTED`、`CONTROL_QUERY_BUDGET_EXCEEDED`；故障仅限 `CONTROL_QUERY_TIMEOUT`、`CONTROL_DISCOVERED_ROUTES_INDEX_UNAVAILABLE`、`CONTROL_DISCOVERED_ROUTES_HEALTH_UNAVAILABLE`。审计是一次集合观察而非目标访问：不记录返回的方法、路径模板或游标,全部 `target_*`、`query_digest`、`bytes_read` 字段保持缺省/null，evidence_refs 为空。必需审计失败返回 503 `AUDIT_DURABILITY_FAILED` 并扣留结果；所有响应统一 `Cache-Control: private, no-store`。
+
+部署先应用 `sql/clickhouse.sql` 中 `audit_events`/`events_by_time` 的 `path_template` 列扩展（物化视图目标先于来源表），再升级网关与 worker 以写入和解析该字段，最后开放本路由；回滚只需停用路由，已写入的列和历史事件按既有保留策略保存，不影响其余查询契约。控制台的发现面板与一键导入草稿路由不在本契约内，前端增量另行交付。
 
 # Agent API Key 端点
 

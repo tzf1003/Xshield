@@ -1943,7 +1943,9 @@ def main() -> int:
         except (ValueError,OSError) as exc: check(f'json:{p.name}',False,str(exc))
     for p in sorted(ROOT.rglob('*.yaml')):
         if DISCOVERY_EXCLUDED_PARTS.intersection(p.relative_to(ROOT).parts): continue
-        try: yaml.safe_load(p.read_text(encoding='utf-8'));check(f'yaml:{p.relative_to(ROOT)}',True)
+        # Helm templates are Go templates, not YAML; CI's helm job lints and renders them.
+        if p.parent.name=='templates' and (p.parent.parent/'Chart.yaml').is_file(): continue
+        try: list(yaml.safe_load_all(p.read_text(encoding='utf-8')));check(f'yaml:{p.relative_to(ROOT)}',True)
         except yaml.YAMLError as exc: check(f'yaml:{p.name}',False,str(exc))
     schemas = {p.stem.replace('.schema',''):json.loads(p.read_text()) for p in (ROOT/'schemas').glob('*.json')}
     for name,s in schemas.items():
