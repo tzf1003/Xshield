@@ -15,6 +15,12 @@
   - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
   - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
 
+- 试点路径验收用例补测（可行性建议 P1 #8，docs/20）：`examples/acceptance-cases.json` 由 automated 9 / partial 51 / planned 18 改为 automated 11 / partial 60 / planned 7。
+  - automated：DEV-01（`crates/xshield-core/tests/dependency_boundary.rs` 解析 `Cargo.lock`，领域 crate 的传递依赖触及数据库、HTTP、异步运行时、TLS 或其他 xshield crate 即失败，另有合成违规锁文件的反例与源码禁开套接字检查）；SHARE-04（`scripts/test_gateway_identity.sh` 经真实 edge 用同一分享令牌三次 Range 读取，均 206、分享行不变）。
+  - partial（缺口逐条写在 `gap`）：AUTH-09、FLOW-10、GRANT-08、SHARE-03、SENSOR-01/02、CRYPTO-04/07、DEV-02。DEV-02 新增 worker 侧 `ReasonCode` 穷举契约测试与 `scripts/test_check_audit_event_coverage.py`（已接入 CI）；`check_audit_event_coverage.py` 的源路径可由测试传入，默认行为不变。
+  - 仍为 planned：MODEL-01/06、AGENT-01/02、AUDIT-13、DEV-03 属首版之后或须在试点环境执行；AUDIT-06 的 `remote_durable` 只是 Schema 枚举值，没有实现。
+  - 补测发现的产品风险（未修改）：`response_body_filter` 先提交资源资格再加密响应，配置允许 `resource_grant` 与响应加密同时启用，响应加密失败时已写入的资格不会撤回（见 CRYPTO-04 的 gap）。
+
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
   - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
   - CI 新增 `fuzz-replay` 作业：用稳定版回放所有种子和固定数量的确定性变异，同时对该 crate 运行 fmt 与 clippy。新增 `.github/workflows/fuzz.yml`：每天在稳定版上做覆盖引导的模糊测试（不加 sanitizer），在两次运行之间缓存语料，发现崩溃时上传。

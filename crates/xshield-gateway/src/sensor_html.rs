@@ -279,6 +279,39 @@ mod tests {
         );
     }
 
+    /// Acceptance FLOW-10 for pages: an approved page root is pinned by the
+    /// digest of its exact bytes, so a page whose HTML now carries a user
+    /// comment (a "reset password" button or its text) is no longer the
+    /// approved page. It is refused before any page handle, sensor or
+    /// page-issued action is attached to it.
+    #[test]
+    fn page_carrying_user_comment_html_is_not_the_approved_page() {
+        let approved =
+            "<!doctype html><html><head></head><body><ul id=\"comments\"></ul></body></html>";
+        let rule = SensorHtmlRule::new(
+            512,
+            vec![(
+                "home-r1".to_owned(),
+                encode_hex(sha256(approved.as_bytes())),
+                27,
+            )],
+        );
+        assert!(rule.inject(approved.as_bytes(), None, PAGE).is_ok());
+        for comment in [
+            "<li>重置密码</li>",
+            "<li><button data-xshield-action=\"auth.password.reset\" \
+             formaction=\"/api/password/reset\">重置密码</button></li>",
+        ] {
+            let commented = approved.replace("</ul>", &format!("{comment}</ul>"));
+            // Same insertion point, same size bound: only the content differs.
+            assert_eq!(commented.find("</head>"), Some(27));
+            assert!(
+                rule.inject(commented.as_bytes(), None, PAGE).is_err(),
+                "{comment}"
+            );
+        }
+    }
+
     #[test]
     fn injects_synchronous_sensor_before_the_page_bound_loader() {
         let source = b"<!doctype html><html><head></head><body>ok</body></html>";
