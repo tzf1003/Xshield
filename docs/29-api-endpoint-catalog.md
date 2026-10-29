@@ -649,6 +649,16 @@ edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启�
 
 列表读取占用案件/证据在途许可并保持到审计落盘，繁忙返回 429 `CONTROL_CASE_JOB_LIST_BUSY`。部署先应用迁移 0057（新增索引，`BEGIN`/`COMMIT` 内 `CREATE INDEX`，无并发选项，大表需维护窗口），再升级识别 `console.case.job.list` 的管理 journal 发布器，最后开放路由。回滚停用路由并回退迁移（仅移除新增索引，`control_jobs` 表结构不变）即可，已写入的审计按保留策略保存。控制台案件详情页的"分析"页签新增"历史任务"表格读取本契约，分页复用既有游标栈组件。
 
+## 29.41 已实现的站点应用状态推送契约
+
+`GET /control/v1/sites/apply-events` 以 Server-Sent Events 推送站点应用状态变化的信号，补齐 30.7 列出的缺口：此前站点的 `apply_state`（`pending`/`active`/`failed`，含后台 `reconcile_local_edge` 独立于任何写请求触发的变化）只能由操作者手动重新读取 `GET /sites/{id}/status` 才能发现。本契约只允许携带角色的浏览器会话（`Xshield-Session` 断言）订阅；Key 主体没有角色，恒定返回 403 `CONTROL_SCOPE_DENIED`。
+
+推送帧只是一次重读的信号，从不是状态本身：每帧为 `event: site_apply_changed`，`data` 是 `{"site_id","desired_revision","apply_id","status","reason_code","at"}`，`status` 取 `"confirmed"`（边缘确认了快照；具体是 `active` 还是 `paused` 仍需调用方自己读 `GET /sites/{id}/status` 得到)或 `"failed"`。连接本身只在建立时写一条 `console.site.apply_events.subscribe` 管理审计（成功 `PASS/CONTROL_SITE_APPLY_EVENTS_SUBSCRIBED`），此后收到的每一帧都不单独审计、也不读取数据库——真正的状态仍只能通过既有的、逐次审计的 `status`/`health`/列表端点读到，本端点从不绕开 30.5 "读取都会写管理审计，不自动轮询" 这条不变量,只是把"何时该再读一次"从人工定时刷新换成服务端主动提示。
+
+可见性在每一帧发出时逐条核对，核对方式与 `GET /sites/{id}/status` 完全相同（`authorizes_site(Observer, tenant, site)`）：`SystemAdmin` 等租户级角色看到租户内全部站点的信号，仅持有某个站点精确作用域的角色（例如该站点的 `Observer`）只看到那一个站点的信号,从未被这次订阅看到的站点不会在帧里出现。推送信道是进程内的有界、有损广播（`tokio::sync::broadcast`，容量 256）：只影响这一个控制面副本在这次连接建立之后发生的变化,连接建立前已经发生的变化不会补发,一个落后太多或已断开的订阅者会直接丢帧而不是阻塞发布方——两种情况下操作者都只需要重新读一次 `status`，这正是本端点存在的唯一目的。多副本部署下（ADR-014），只有把这次写请求处理掉的那个副本会发出信号；`reconcile_local_edge` 在其它副本上独立触发的确认，由那个副本自己的订阅者看到。
+
+连接保持 SSE keep-alive；客户端断开或租户配置重载不写入额外审计。本端点不接受任何请求体或查询参数，`DefaultBodyLimit` 为 0。控制台接入见 15 章。
+
 # Agent API Key 端点
 
 | 方法 | 路径 | 用途 |
