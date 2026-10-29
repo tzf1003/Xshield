@@ -207,19 +207,32 @@ curl --fail --silent --show-error -D "$test_dir/loader-headers" \
 cmp "$repo_root/sensor/src/loader.ts" "$test_dir/loader.js"
 grep -qi '^cache-control: public, max-age=31536000, immutable' "$test_dir/loader-headers"
 
-# Sensor 1.1.0 is what new pages reference; 1.0.0 above stays byte-identical
-# for pages delivered before the upgrade (its SRI pins those bytes).
+# Sensor 1.2.0 is what new pages reference; 1.0.0/1.1.0 above stay
+# byte-identical for pages delivered before each upgrade (their SRI pins
+# those bytes).
+curl --fail --silent --show-error -D "$test_dir/sensor-previous-headers" \
+    -o "$test_dir/sensor-previous.js" \
+    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.1.0.js"
+cmp "$repo_root/sensor/src/sensor-1.1.0.js" "$test_dir/sensor-previous.js"
+grep -qi '^x-xshield-sensor-version: 1.1.0' "$test_dir/sensor-previous-headers"
+grep -qi '^cache-control: public, max-age=31536000, immutable' "$test_dir/sensor-previous-headers"
+curl --fail --silent --show-error -D "$test_dir/loader-previous-headers" \
+    -o "$test_dir/loader-previous.js" \
+    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.1.0-loader.js"
+cmp "$repo_root/sensor/src/loader-1.1.0.js" "$test_dir/loader-previous.js"
+grep -qi '^x-xshield-sensor-version: 1.1.0' "$test_dir/loader-previous-headers"
+
 curl --fail --silent --show-error -D "$test_dir/sensor-current-headers" \
     -o "$test_dir/sensor-current.js" \
-    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.1.0.js"
-cmp "$repo_root/sensor/src/sensor-1.1.0.js" "$test_dir/sensor-current.js"
-grep -qi '^x-xshield-sensor-version: 1.1.0' "$test_dir/sensor-current-headers"
+    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.2.0.js"
+cmp "$repo_root/sensor/src/sensor-1.2.0.js" "$test_dir/sensor-current.js"
+grep -qi '^x-xshield-sensor-version: 1.2.0' "$test_dir/sensor-current-headers"
 grep -qi '^cache-control: public, max-age=31536000, immutable' "$test_dir/sensor-current-headers"
 curl --fail --silent --show-error -D "$test_dir/loader-current-headers" \
     -o "$test_dir/loader-current.js" \
-    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.1.0-loader.js"
-cmp "$repo_root/sensor/src/loader-1.1.0.js" "$test_dir/loader-current.js"
-grep -qi '^x-xshield-sensor-version: 1.1.0' "$test_dir/loader-current-headers"
+    "http://127.0.0.1:$gateway_port/__xshield/v1/sensor/1.2.0-loader.js"
+cmp "$repo_root/sensor/src/loader-1.2.0.js" "$test_dir/loader-current.js"
+grep -qi '^x-xshield-sensor-version: 1.2.0' "$test_dir/loader-current-headers"
 
 curl --fail --silent --show-error -D "$test_dir/home-headers" \
     -o "$test_dir/home.html" "http://127.0.0.1:$gateway_port/home"
@@ -245,8 +258,8 @@ loader_integrity = "sha384-" + base64.b64encode(
     hashlib.sha384(pathlib.Path(sys.argv[2]).read_bytes()).digest()
 ).decode()
 expected = {
-    "/__xshield/v1/sensor/1.1.0.js": sensor_integrity,
-    "/__xshield/v1/sensor/1.1.0-loader.js": loader_integrity,
+    "/__xshield/v1/sensor/1.2.0.js": sensor_integrity,
+    "/__xshield/v1/sensor/1.2.0-loader.js": loader_integrity,
 }
 
 class Scripts(HTMLParser):
