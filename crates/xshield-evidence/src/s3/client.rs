@@ -18,6 +18,14 @@ use ureq::{Agent, http::Response};
 const XML_BYTES_MAX: u64 = 1024 * 1024;
 /// Keys requested per `ListObjectsV2` page.
 const LIST_PAGE_KEYS: u16 = 1000;
+/// Bodies at or under this size use one conditional `PUT`; larger ones use
+/// multipart upload, split into parts of this same size (the last part may
+/// be smaller). Above the service minimum of 5 MiB for a non-final part, so
+/// every part but the last qualifies.
+pub(super) const MULTIPART_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
+/// S3 allows at most 10,000 parts per upload; this body size and part size
+/// stay far under that, so this is only a defensive sanity bound.
+const MULTIPART_PARTS_MAX: usize = 10_000;
 
 pub(super) struct S3Client {
     agent: Agent,
@@ -36,6 +44,12 @@ pub(super) struct ObjectHead {
     pub version_id: Option<String>,
     pub last_modified: DateTime<Utc>,
     pub retain_until: Option<DateTime<Utc>>,
+    /// The bucket's own server-side encryption, such as `"aws:kms"`; `None`
+    /// when the bucket applied none. Independent of this crate's envelope.
+    /// Observed only by tests, which confirm the header this crate asks for
+    /// was actually honored; no caller needs it at run time.
+    #[cfg(test)]
+    pub server_side_encryption: Option<String>,
 }
 
 /// One key from `ListObjectsV2`.
@@ -72,7 +86,23 @@ impl S3Client {
     /// Stores `body` under `key` only if no current object has that key.
     ///
     /// With object lock configured, the object is locked until `retain_until`.
+    /// A `body` above [`MULTIPART_THRESHOLD_BYTES`] goes through a multipart
+    /// upload instead of one request; completion is still conditional, so
+    /// the create-only guarantee is the same either way.
     pub(super) fn put_new(
+        &self,
+        key: &str,
+        body: &[u8],
+        retain_until: DateTime<Utc>,
+    ) -> Result<(), EvidenceError> {
+        if body.len() > MULTIPART_THRESHOLD_BYTES {
+            self.put_new_multipart(key, body, retain_until)
+        } else {
+            self.put_new_single(key, body, retain_until)
+        }
+    }
+
+    fn put_new_single(
         &self,
         key: &str,
         body: &[u8],
@@ -90,20 +120,8 @@ impl S3Client {
                 base64::encode_block(&payload_sha256),
             ),
         ];
-        if let Some(mode) = self.config.object_lock {
-            headers.push((
-                "x-amz-object-lock-mode".to_owned(),
-                match mode {
-                    S3ObjectLockMode::Governance => "GOVERNANCE",
-                    S3ObjectLockMode::Compliance => "COMPLIANCE",
-                }
-                .to_owned(),
-            ));
-            headers.push((
-                "x-amz-object-lock-retain-until-date".to_owned(),
-                retain_until.to_rfc3339_opts(SecondsFormat::Millis, true),
-            ));
-        }
+        headers.extend(self.object_lock_headers(retain_until));
+        headers.extend(self.sse_headers());
         let response = self.send(
             "PUT",
             Some(key),
@@ -119,6 +137,207 @@ impl S3Client {
             ))),
             status => Err(status_error(status)),
         }
+    }
+
+    /// Uploads `body` as a multipart upload, completing only if no current
+    /// object has `key`. A failure aborts the upload so it does not linger
+    /// as an invisible, billable partial object.
+    fn put_new_multipart(
+        &self,
+        key: &str,
+        body: &[u8],
+        retain_until: DateTime<Utc>,
+    ) -> Result<(), EvidenceError> {
+        let upload_id = self.create_multipart_upload(key, retain_until)?;
+        match self.upload_parts_and_complete(key, &upload_id, body) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = self.abort_multipart_upload(key, &upload_id);
+                Err(error)
+            }
+        }
+    }
+
+    fn create_multipart_upload(
+        &self,
+        key: &str,
+        retain_until: DateTime<Utc>,
+    ) -> Result<String, EvidenceError> {
+        // No `x-amz-checksum-algorithm` here: declaring one would require
+        // echoing every part's checksum back in the completion XML below,
+        // and signing already covers transport integrity per request; the
+        // manifest's own digest covers the reassembled object.
+        let mut headers = vec![(
+            "content-type".to_owned(),
+            "application/octet-stream".to_owned(),
+        )];
+        headers.extend(self.object_lock_headers(retain_until));
+        headers.extend(self.sse_headers());
+        let mut response = self.send(
+            "POST",
+            Some(key),
+            "uploads=",
+            headers,
+            Some((&[], EMPTY_PAYLOAD_SHA256)),
+        )?;
+        match response.status().as_u16() {
+            200 => {}
+            status => return Err(status_error(status)),
+        }
+        let body = read_bounded(&mut response, XML_BYTES_MAX)
+            .map_err(|()| protocol_error("oversized multipart-create response"))?;
+        let body = std::str::from_utf8(&body)
+            .map_err(|_| protocol_error("non-UTF-8 multipart-create response"))?;
+        xml_elements(body, "UploadId")
+            .next()
+            .map(str::to_owned)
+            .ok_or_else(|| protocol_error("multipart create without upload id"))
+    }
+
+    /// Uploads every part of `body`, then completes the upload create-only.
+    fn upload_parts_and_complete(
+        &self,
+        key: &str,
+        upload_id: &str,
+        body: &[u8],
+    ) -> Result<(), EvidenceError> {
+        let chunks = body.chunks(MULTIPART_THRESHOLD_BYTES);
+        if chunks.len() > MULTIPART_PARTS_MAX {
+            return Err(EvidenceError::UnsafePath);
+        }
+        let mut parts = Vec::with_capacity(chunks.len());
+        for (index, chunk) in chunks.enumerate() {
+            let part_number = u16::try_from(index + 1).map_err(|_| EvidenceError::UnsafePath)?;
+            let etag = self.upload_part(key, upload_id, part_number, chunk)?;
+            parts.push((part_number, etag));
+        }
+        self.complete_multipart_upload(key, upload_id, &parts)
+    }
+
+    fn upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: u16,
+        body: &[u8],
+    ) -> Result<String, EvidenceError> {
+        let payload_sha256 = sha256(body);
+        let query = format!(
+            "partNumber={part_number}&uploadId={}",
+            sigv4::uri_encode(upload_id, false)
+        );
+        let response = self.send(
+            "PUT",
+            Some(key),
+            &query,
+            Vec::new(),
+            Some((body, &sigv4::lower_hex(&payload_sha256))),
+        )?;
+        match response.status().as_u16() {
+            200 => {}
+            status => return Err(status_error(status)),
+        }
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| protocol_error("upload part without etag"))?;
+        // Carried verbatim into the completion XML below as element text; it
+        // never needs `<` or `&`, so reject rather than escape it.
+        if etag.bytes().any(|byte| byte == b'<' || byte == b'&') {
+            return Err(protocol_error("unsafe etag"));
+        }
+        Ok(etag.to_owned())
+    }
+
+    fn complete_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: &[(u16, String)],
+    ) -> Result<(), EvidenceError> {
+        use std::fmt::Write as _;
+        let mut xml = String::from("<CompleteMultipartUpload>");
+        for (number, etag) in parts {
+            let _ = write!(
+                xml,
+                "<Part><PartNumber>{number}</PartNumber><ETag>{etag}</ETag></Part>"
+            );
+        }
+        xml.push_str("</CompleteMultipartUpload>");
+        let payload_sha256 = sha256(xml.as_bytes());
+        let headers = vec![
+            ("content-type".to_owned(), "application/xml".to_owned()),
+            ("if-none-match".to_owned(), "*".to_owned()),
+        ];
+        let query = format!("uploadId={}", sigv4::uri_encode(upload_id, false));
+        let response = self.send(
+            "POST",
+            Some(key),
+            &query,
+            headers,
+            Some((xml.as_bytes(), &sigv4::lower_hex(&payload_sha256))),
+        )?;
+        match response.status().as_u16() {
+            200 => Ok(()),
+            412 => Err(EvidenceError::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "evidence object already exists",
+            ))),
+            status => Err(status_error(status)),
+        }
+    }
+
+    /// Best-effort cleanup of an upload that will never complete; the bucket
+    /// also expires abandoned multipart uploads on its own lifecycle rules.
+    fn abort_multipart_upload(&self, key: &str, upload_id: &str) -> Result<(), EvidenceError> {
+        let query = format!("uploadId={}", sigv4::uri_encode(upload_id, false));
+        let response = self.send("DELETE", Some(key), &query, Vec::new(), None)?;
+        match response.status().as_u16() {
+            200 | 204 | 404 => Ok(()),
+            status => Err(status_error(status)),
+        }
+    }
+
+    /// Headers requesting the configured object lock; empty when unset.
+    fn object_lock_headers(&self, retain_until: DateTime<Utc>) -> Vec<(String, String)> {
+        let Some(mode) = self.config.object_lock else {
+            return Vec::new();
+        };
+        vec![
+            (
+                "x-amz-object-lock-mode".to_owned(),
+                match mode {
+                    S3ObjectLockMode::Governance => "GOVERNANCE",
+                    S3ObjectLockMode::Compliance => "COMPLIANCE",
+                }
+                .to_owned(),
+            ),
+            (
+                "x-amz-object-lock-retain-until-date".to_owned(),
+                retain_until.to_rfc3339_opts(SecondsFormat::Millis, true),
+            ),
+        ]
+    }
+
+    /// Headers requesting the configured bucket-side SSE-KMS; empty when
+    /// unset, in which case only this crate's own envelope encrypts the
+    /// object.
+    fn sse_headers(&self) -> Vec<(String, String)> {
+        let Some(sse) = &self.config.sse_kms else {
+            return Vec::new();
+        };
+        let mut headers = vec![(
+            "x-amz-server-side-encryption".to_owned(),
+            "aws:kms".to_owned(),
+        )];
+        if let Some(key_id) = &sse.key_id {
+            headers.push((
+                "x-amz-server-side-encryption-aws-kms-key-id".to_owned(),
+                key_id.clone(),
+            ));
+        }
+        headers
     }
 
     /// Fetches at most `max_bytes`, or `None` when the key has no current object.
@@ -180,6 +399,8 @@ impl S3Client {
             version_id: version_id(&response),
             last_modified,
             retain_until,
+            #[cfg(test)]
+            server_side_encryption: header("x-amz-server-side-encryption").map(str::to_owned),
         }))
     }
 

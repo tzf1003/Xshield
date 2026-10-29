@@ -50,7 +50,7 @@ pub use calibration_report::{
 pub use calibration_report_retention::CalibrationReportOrphanCandidate;
 pub use s3::{
     EvidenceMigrationOutcome, S3Addressing, S3Credentials, S3EvidenceStoreConfig,
-    S3EvidenceStoreSettings, S3EvidenceVault, S3ObjectLockMode,
+    S3EvidenceStoreSettings, S3EvidenceVault, S3ObjectLockMode, S3SseKms,
 };
 pub use vault::EvidenceVault;
 
@@ -109,7 +109,12 @@ impl EvidenceVaultConfig {
     ) -> Result<Self, EvidenceError> {
         let root = root.into();
         let key_id = key_id.into();
-        let max_retention = validate_vault_policy(&key_id, max_artifact_bytes, max_retention_days)?;
+        let max_retention = validate_vault_policy(
+            &key_id,
+            max_artifact_bytes,
+            max_retention_days,
+            MAX_SINGLE_ARTIFACT_BYTES,
+        )?;
         if root.as_os_str().is_empty() {
             return Err(EvidenceError::InvalidConfig);
         }
@@ -123,17 +128,22 @@ impl EvidenceVaultConfig {
 }
 
 /// Checks the storage-independent vault limits and returns the retention cap.
+///
+/// `max_allowed_artifact_bytes` is the backend's own ceiling: the local vault
+/// passes [`MAX_SINGLE_ARTIFACT_BYTES`], while the S3 backend allows a higher
+/// one since its objects never need to fit a single local write.
 fn validate_vault_policy(
     key_id: &str,
     max_artifact_bytes: usize,
     max_retention_days: u16,
+    max_allowed_artifact_bytes: usize,
 ) -> Result<chrono::TimeDelta, EvidenceError> {
     let max_retention = chrono::TimeDelta::try_days(i64::from(max_retention_days))
         .filter(|_| (1..=MAX_RETENTION_DAYS).contains(&max_retention_days))
         .ok_or(EvidenceError::InvalidConfig)?;
     if !valid_name(key_id)
         || max_artifact_bytes == 0
-        || max_artifact_bytes > MAX_SINGLE_ARTIFACT_BYTES
+        || max_artifact_bytes > max_allowed_artifact_bytes
     {
         return Err(EvidenceError::InvalidConfig);
     }

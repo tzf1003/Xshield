@@ -219,9 +219,11 @@ jobs:
 
   # The S3 evidence backend (docs/12 12.10) against a real MinIO: SigV4 as a
   # server checks it, create-only writes, Object Lock refusing early deletion,
-  # version-exact purge and orphan listing. MinIO's own image is no longer
-  # published, so this is Chainguard's build, pinned by digest. A service
-  # container cannot pass `server`, hence `docker run`.
+  # version-exact purge, orphan listing, multipart upload and SSE-KMS. MinIO's
+  # own image is no longer published, so this is Chainguard's build, pinned by
+  # digest. A service container cannot pass `server`, hence `docker run`. The
+  # KMS key is single-use test material generated fresh for this job, not a
+  # secret shared with anything else.
   object-storage:
     needs: changes
     if: needs.changes.outputs.evidence == 'true'
@@ -233,6 +235,7 @@ jobs:
       XSHIELD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
       XSHIELD_TEST_S3_ACCESS_KEY_ID: xshieldtest
       XSHIELD_TEST_S3_SECRET_ACCESS_KEY: xshieldtestsecret
+      XSHIELD_TEST_S3_SSE_KMS_KEY_ID: xshield-test-key
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -243,6 +246,7 @@ jobs:
           docker run -d --name minio -p 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER="$XSHIELD_TEST_S3_ACCESS_KEY_ID" \
             -e MINIO_ROOT_PASSWORD="$XSHIELD_TEST_S3_SECRET_ACCESS_KEY" \
+            -e MINIO_KMS_SECRET_KEY="${XSHIELD_TEST_S3_SSE_KMS_KEY_ID}:$(openssl rand -base64 32)" \
             cgr.dev/chainguard/minio@sha256:e70b2b1e74d79457f808710483bd726ff364529ca30736eaa15a6ab547d3a5a7 \
             server /tmp/data
           for _ in $(seq 60); do
@@ -369,6 +373,33 @@ jobs:
           cache-from: type=gha,scope=worker
       - name: Reference deployment smoke
         run: XSHIELD_IMAGE_TAG=ci scripts/test_compose_deployment.sh
+
+  # systemd reference deployment (deploy/systemd, docs/19): no containers or
+  # database involved, just `systemd-analyze verify` against the unit files
+  # the runner's own systemd already ships (docs/19: no HA/orchestrator
+  # claim, this only guards the unit syntax and the env-file naming it
+  # promises in deploy/systemd/README.md).
+  systemd:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate unit files
+        run: scripts/test_systemd_units.sh
+
+  # Prometheus alerting rules (deploy/prometheus, docs/19 19.5): no Xshield
+  # component involved, just `promtool check rules` via the upstream image.
+  prometheus-alerts:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check alerting rules
+        run: scripts/test_prometheus_alerts.sh
 
   helm:
     needs: changes

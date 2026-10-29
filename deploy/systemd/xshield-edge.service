@@ -1,0 +1,58 @@
+# Data plane (xshield-gateway). Install to /etc/systemd/system/xshield-edge.service.
+#
+# Equivalent to deploy/compose/compose.yaml's `edge` service, minus the shared
+# network namespace trick Compose needs: on bare metal or a VM, edge's signed
+# apply channel (127.0.0.1:9553) and control's management API
+# (127.0.0.1:9443, see xshield-control.service) are already on the same
+# loopback, so no `net` placeholder unit is required here.
+#
+# Config: XSHIELD_CONFIG names a JSON file (not shipped; see docs/19 and
+# examples/gateway-bootstrap-config.json for the shape) describing the
+# bootstrap site topology. Edit /etc/xshield/edge.env (copy it from
+# edge.env.example) before starting; it is read by this unit's
+# EnvironmentFile= and is not tracked in Git.
+[Unit]
+Description=Xshield edge (data plane)
+Documentation=https://github.com/tzf1003/Xshield/blob/main/docs/19-deployment-operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xshield
+Group=xshield
+EnvironmentFile=/etc/xshield/edge.env
+ExecStart=/opt/xshield/current/bin/xshield-gateway
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+# Hardening. Edge only ever writes its own request journal and the signed
+# apply snapshot; everything else it reads (config, secrets, TLS material)
+# stays under the default read-only tree that ProtectSystem=strict leaves in
+# place for paths that are not listed below.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/xshield/edge-audit /var/lib/xshield/edge-snapshot
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -7,6 +7,14 @@
   - `xshield-evidence` 新增 `LocalEvidenceVault::list_generic_artifact_ids_after`（不需要预先知道 tenant/site 即可分页枚举完整对象，跳过校准报告与 lineage-review 专用对象族）与 `S3EvidenceVault::migrate_from_local`；目的地写入全部 `If-None-Match: *`，已迁移的 artifact 重新运行是确认性空操作（`EvidenceMigrationOutcome::AlreadyMigrated`），写完立即原样读回核对，源/目的地密钥不一致直接拒绝。已过期的本地对象一律跳过，留给本地清理处理。
   - 回归：`xshield-evidence` 新增分页/过滤单测；2 个真实 MinIO 集成测试并入既有 `object-storage` CI 作业（迁移并锁定、重复调用幂等；密钥不匹配拒绝、篡改的本地 HMAC 不留下部分复制、已过期对象拒绝迁移）。
   - **未覆盖**：不迁移校准报告与 lineage-review 对象（12.10“不在 S3 上的对象”）；不支持跨桶 KMS 包裹密钥或分块上传；没有进度持久化，大型本地库的单次运行时长随对象数线性增长。
+
+- S3 证据存储：存储桶侧 SSE-KMS 与大对象 multipart 上传（docs/12 12.10、docs/19 19.4）：此前 S3 后端（#44）只测过 MinIO 的基础对象操作，未覆盖服务端加密配置，且单对象硬上限与本地后端共用的 64 MiB。
+  - 新增可选 `XSHIELD_EVIDENCE_S3_SSE_KMS`（`off`/`aws-kms`）与 `XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID`：开启后每次写入都带 `x-amz-server-side-encryption: aws:kms`，可选显式 KMS key id，留空用存储桶默认 key。这是存储桶自己的加密，叠加在证据库自身的 AEAD 信封之上，不是把应用层数据密钥交给 KMS 包裹。
+  - 密文超过 8 MiB 时改走 S3 multipart upload（`CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload`），分 8 MiB 一片；完成请求同样带 `If-None-Match: *`，create-only 语义不因分片而改变，任一步失败都先 `AbortMultipartUpload` 再把错误上抛。S3 后端的单 artifact 上限随之从 64 MiB 提到 1 GiB（本地后端不变，仍是 64 MiB），因为桶对象不必像本地一次写入那样整体放进一次 HTTP 请求。
+  - 不改变已有行为：两个新变量都是可选的，不设置时 SSE 与 multipart 阈值均不生效（小对象仍走此前的单次 `PUT`）；Object Lock、create-only、孤儿扫描与清理语义不变。
+  - 回归：配置校验新增 KMS key id 合法性与上限前置检查的单测；真实 MinIO 集成测试新增大对象 multipart 往返（含拒绝覆盖）与 SSE-KMS 往返（单次 `PUT`、multipart 各一个用例，HEAD 核对存储桶确实报告 `aws:kms`），CI `object-storage` 作业的 MinIO 启动时新增一个仅本次运行使用的临时单密钥 KMS。
+  - **未覆盖**：用 KMS 包裹应用层数据密钥本身（仍是本地 HMAC 派生）；12.4 描述的按 chunk 独立 AEAD 与逐 chunk manifest（multipart 只是同一整体信封的传输优化）；大于 1 GiB 的对象；AWS S3 本身和其他兼容服务。
+
 - Edge 附加证书的增删免重启（docs/19 19.2“Edge 传输配置”）：此前 `XSHIELD_EDGE_TLS_SNI_CERTS` 在启动时固定，新增或删除一项仍需重启；内容变化的热加载已有（见下方“Edge TLS 证书热加载与按 SNI 多证书”条目），缺口只在增删本身。
   - 新增 `XSHIELD_EDGE_TLS_SNI_CERTS_DIR`：一个目录，每个直接子目录是一对附加证书，恰好含 `tls.crt` 与 `tls.key`（Kubernetes `kubernetes.io/tls` secret 挂载的文件名）；子目录名字不参与证书选择，只是标识。与证书内容轮换走同一个每 30 秒的检查：创建或删除一个子目录即可增删一张证书，下次检查生效，不必重启；子目录内文件的校验规则（可读、普通文件、不超过 1 MiB、私钥权限、证书当前有效、私钥匹配、叶证书至少一个 DNS 名）与固定列表相同，与固定列表、与主证书的主机名重复同样拒绝。目录不存在、不可列出或不是目录拒绝启动；运行中目录变得不可列出则整组证书保持不变，计入 `tls_reload_failures`，下次目录可列出时重试。
   - `XSHIELD_EDGE_TLS_SNI_CERTS` 本身仍需同时设置主证书才能使用，增删其中一项仍需重启；两种来源可以同时使用，证书计数、健康字段与指标不区分来源。
