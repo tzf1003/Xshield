@@ -721,6 +721,48 @@ mod tests {
         ));
     }
 
+    // The entity the edge checked is the entity it dispatches: the frozen body
+    // can only be moved out whole, its audited digest names exactly those
+    // bytes, and the same sealed P cannot be re-aimed at another operation,
+    // method or route after the decision, because each is bound by the AAD.
+    #[test]
+    fn the_dispatched_entity_is_the_checked_plaintext_and_cannot_be_retargeted() {
+        let rule = rule();
+        let plaintext = br#"{"sku":"A-1","quantity":2}"#;
+        let envelope = envelope("/orders");
+        let frozen = decode_at_five(&rule, &envelope).unwrap();
+        assert_eq!(frozen.evidence().rebuilt_sha256(), hex(&sha256(plaintext)));
+        assert_eq!(frozen.evidence().envelope_sha256(), hex(&sha256(&envelope)));
+        assert_eq!(frozen.body_len(), plaintext.len());
+        let digest = frozen.evidence().rebuilt_sha256().to_owned();
+        let dispatched = frozen.into_body();
+        assert_eq!(dispatched, Bytes::from_static(plaintext));
+        assert_eq!(hex(&sha256(&dispatched)), digest);
+
+        for (operation_id, method, path) in [
+            ("orders.delete", "POST", "/orders"),
+            ("orders.create", "PUT", "/orders"),
+            ("orders.create", "POST", "/orders/1"),
+        ] {
+            assert!(
+                matches!(
+                    rule.decode(
+                        "tenant_demo",
+                        "site_demo",
+                        operation_id,
+                        method,
+                        path,
+                        UnixSeconds::new(5),
+                        &envelope,
+                        &TestKeys,
+                    ),
+                    Err(ReasonCode::RequestCryptoAuthenticationFailed)
+                ),
+                "{operation_id} {method} {path}"
+            );
+        }
+    }
+
     // Envelope members are either structure the edge validates before it spends
     // any cryptography (a refusal for a malformed envelope) or members the AAD
     // binds (authentication fails when they change). Pinning both keeps a
