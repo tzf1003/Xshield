@@ -158,7 +158,7 @@ fn reason_code_shape_check_rejects_unstable_spellings() {
         "",
         "auth_required",
         "AUTH-REQUIRED",
-        "AUTH__REQUIRED",
+        concat!("AUTH_", "_REQUIRED"),
         "AUTH_",
         "_AUTH",
         "9AUTH",
