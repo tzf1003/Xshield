@@ -49,6 +49,7 @@ mod share_entry;
 mod share_issue;
 
 pub(crate) use page_issue::SensorBootstrapDelivery;
+pub(crate) use response_issue::PreparedResponseGrants;
 
 pub(crate) const WAF_COOKIE: &str = "__Host-xshield_sid";
 const ACTION_HEADER: &str = "x-xshield-action-ref";
