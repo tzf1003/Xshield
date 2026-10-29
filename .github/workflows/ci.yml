@@ -370,6 +370,33 @@ jobs:
       - name: Reference deployment smoke
         run: XSHIELD_IMAGE_TAG=ci scripts/test_compose_deployment.sh
 
+  # systemd reference deployment (deploy/systemd, docs/19): no containers or
+  # database involved, just `systemd-analyze verify` against the unit files
+  # the runner's own systemd already ships (docs/19: no HA/orchestrator
+  # claim, this only guards the unit syntax and the env-file naming it
+  # promises in deploy/systemd/README.md).
+  systemd:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate unit files
+        run: scripts/test_systemd_units.sh
+
+  # Prometheus alerting rules (deploy/prometheus, docs/19 19.5): no Xshield
+  # component involved, just `promtool check rules` via the upstream image.
+  prometheus-alerts:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check alerting rules
+        run: scripts/test_prometheus_alerts.sh
+
   helm:
     needs: changes
     if: needs.changes.outputs.images == 'true'
