@@ -89,3 +89,22 @@
 - CI 的 `helm`/kind 作业需要扩展到 N≥2 副本场景：验证配置变更收敛到全部副本、删除一个 Pod 后数据面不中断、恢复的副本重新收敛到当前 revision。
 - compose 与 systemd 两种参考部署仍是单机（19.8、19.10 维持原状），本次 HA 范围只覆盖 Kubernetes/Helm。
 
+## ADR-015｜不接入外部 KMS，密钥继续由运营方生成并经环境变量/`_FILE` 注入
+
+状态：采纳（2026-10-29）。
+
+背景：此前的部署文档（19 §19.3）写着"KMS 故障不能退回硬编码默认密钥或明文证据"，但项目没有、也没打算接入任何外部 KMS（AWS KMS、Vault 等），这条要求一直是空话。曾就"接入通用 KMS"写过技术方案（三条路线：A 最小可行一次性拉取、B 加 Vault 与运行时热轮换、C KMS 插件协议）并新增了一个路线无关的 `SecretSource` trait 抽象层（PR #62），用户审阅后决定不需要这层能力，直接要求撤掉。
+
+决定：
+
+1. 不接入任何外部 KMS。证据根密钥、journal/seal 密钥、各 HMAC 密钥（fingerprint/share-token/cursor/idempotency/api-key-hash）、请求/响应加密密钥环、OIDC client secret 等全部密钥材料继续由运营方自行生成，经现有的环境变量或 `<NAME>_FILE` 挂载文件注入（`xshield_core::secret_env`，19 §19.3），这一机制不变。
+2. 撤回 PR #62 引入的 `SecretSource` trait 抽象层，不合入 `main`：没有第二个 provider 要接，这层间接性没有对应的使用场景。
+3. 密钥材料本身的机密性、分发与轮换由部署方负责（Docker/Kubernetes secret、Vault 等运营方自己的秘密管理手段都可以把值放进挂载文件，Xshield 侧不关心来源），不是 Xshield 的职责范围。密钥丢失按不可恢复处理（19 §19.6），不依赖任何恢复流程找回。
+4. S3 证据后端可选的存储桶侧 SSE-KMS（12.10 `XSHIELD_EVIDENCE_S3_SSE_KMS`，默认关闭）是存储层特性，和这里撤回的应用层密钥管理无关，不受本决定影响，继续保留。
+
+后果：
+
+- docs/19 §19.3、§19.6，docs/13 §13.7/§13.8，docs/20 §20.4，docs/12 §12.5/§12.10 里描述"KMS 故障 fail-closed"或"KMS 包裹应用层数据密钥待实现"的措辞一并订正为"不在计划内"，避免再被当成遗留缺口排期。
+- docs/22 部署与运维缺口表不再列 KMS 为待办（更新记录见该文档"核查记录"）。
+- 后续如果运营方确有外部 KMS 托管密钥材料的需求，仍可把密钥的值放进 `_FILE` 指向的文件（文件由运营方自己的 KMS 客户端写入），不需要 Xshield 代码改动；只有需要 Xshield 进程自己持有 KMS 凭据、直接调用 KMS API 解密时，才需要重新评估并另立 ADR。
+
