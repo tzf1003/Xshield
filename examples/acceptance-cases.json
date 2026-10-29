@@ -201,7 +201,14 @@
         "复制完整 A 的有效业务和 WAF 凭证"
       ],
       "expected": "标注会话盗用边界，不把绑定通过称作原设备证明",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "crates/xshield-core/src/identity.rs",
+          "test": "complete_credential_copy_is_session_possession_not_device_proof"
+        }
+      ],
+      "gap": "只在领域层断言完整复制的 A 凭证与原持有者得到相同快照、绑定不含任何设备事实且仅拼接被拒；产品没有在审计、控制台或身份事件中标注“会话盗用边界/绑定通过不是原设备证明”，该标注既无实现也无测试，edge 层也未断言复制凭证从另一客户端重放。"
     },
     {
       "id": "AUTH-10",
@@ -439,7 +446,18 @@
         "模型读入"
       ],
       "expected": "用户内容不能变成批准的动作来源",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "crates/xshield-gateway/src/response_grant.rs",
+          "test": "user_comment_text_never_becomes_an_approved_action_source"
+        },
+        {
+          "path": "crates/xshield-gateway/src/sensor_html.rs",
+          "test": "page_carrying_user_comment_html_is_not_the_approved_page"
+        }
+      ],
+      "gap": "只在网关解析器/注入层断言评论中的“重置密码”文字或按钮 HTML 不改变响应授予的目标操作、伪造保留引用字段被拒、带评论的页面因摘要不符不注入；未经真实 edge 或浏览器断言，且产品的动作来源链路没有模型参与，“模型读入”这一步既无实现也无测试。"
     },
     {
       "id": "FLOW-11",
@@ -622,7 +640,18 @@
         "分别见过订单A和条目B但B不属A"
       ],
       "expected": "检查组合关系，不以独立存在代替关系",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "crates/xshield-core/src/grant.rs",
+          "test": "separately_seen_parent_and_child_never_authorize_their_composite"
+        },
+        {
+          "path": "crates/xshield-gateway/src/lib.rs",
+          "test": "parent_child_route_is_refused_rather_than_split_into_independent_resources"
+        }
+      ],
+      "gap": "领域层只断言分别见过的父、子授予都不能代替组合资源键、配置层只断言含父子两个参数的路由被拒；edge 不支持嵌套父子路由，也没有从父列表响应发行组合资源键的适配器，真实请求下的组合关系检查既无实现也无测试。"
     },
     {
       "id": "GRANT-09",
@@ -707,7 +736,14 @@
         "通过公开分享入口请求带攻击内容"
       ],
       "expected": "保留内容检查和完整审计链",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "crates/xshield-gateway/src/main.rs",
+          "test": "share_entry_requests_keep_the_site_content_check"
+        }
+      ],
+      "gap": "只在网关单元层断言带分享令牌的请求仍经站点 WAF 内容检查、令牌不豁免；未经真实 edge 断言公开分享入口被拒后的完整审计链（决定、原因码、终态事件写入日志），身份脚本配置也没有启用站点 WAF 策略。"
     },
     {
       "id": "SHARE-04",
@@ -717,7 +753,17 @@
         "有效限权分享进行合法Range/分片"
       ],
       "expected": "按资源协议允许重复，不误套一次性票据",
-      "status": "planned"
+      "status": "automated",
+      "covered_by": [
+        {
+          "path": "scripts/test_gateway_identity.sh",
+          "test": "range_share_status"
+        },
+        {
+          "path": "crates/xshield-core/src/access.rs",
+          "test": "limited_share_allows_repeated_reads_within_its_lease"
+        }
+      ]
     },
     {
       "id": "SENSOR-01",
@@ -727,7 +773,18 @@
         "页面休眠、后台冻结、WSS断线"
       ],
       "expected": "保留身份/资格检查，状态变stale，不凭心跳缺失定攻击",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "sensor/test/sensor-1.1.0.test.mjs",
+          "test": "a hidden, frozen or disconnected page keeps its edge checks and never fakes liveness"
+        },
+        {
+          "path": "crates/xshield-gateway/src/sensor.rs",
+          "test": "a_page_resuming_after_missed_heartbeats_is_accepted_not_flagged"
+        }
+      ],
+      "gap": "产品没有 WSS 通道，也没有 stale 状态：心跳只是经 HTTPS prepare 端点上报、仅入审计的观测，网关不维护页面活性；测试只在探针层断言休眠/冻结/遥测失败时业务请求照常携带边缘签发的引用、不补发心跳，并在解析层断言心跳缺口后的批次照常接受，没有经真实 edge 断言身份/资格检查保持不变、心跳缺失不触发拒绝或告警。"
     },
     {
       "id": "SENSOR-02",
@@ -737,7 +794,18 @@
         "延迟遥测，让业务请求先到"
       ],
       "expected": "不串配最新心跳；按缺失/prepare规则",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "sensor/test/sensor-1.1.0.test.mjs",
+          "test": "a business request that beats the telemetry is never paired with a later heartbeat"
+        },
+        {
+          "path": "sensor/test/sensor-1.1.0.test.mjs",
+          "test": "waits for the bootstrap before deciding, and still lets a late one apply"
+        }
+      ],
+      "gap": "产品没有 WSS，也没有心跳与业务请求的关联逻辑（网关只审计观测），“不串配”由结构保证而非检查；测试只在探针层断言先于遥测的业务请求不带引用和遥测标识、后到的观测 client_request_id 为空、迟到的 bootstrap 不追溯生效，没有经真实 edge 断言该请求按缺失引用规则被拒，也没有对审计记录不关联最新心跳的断言。"
     },
     {
       "id": "SENSOR-03",
@@ -866,7 +934,22 @@
         "请求解密成功、列表响应解密失败"
       ],
       "expected": "单独记录响应覆盖缺口，不发资格",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "crates/xshield-gateway/src/response_grant.rs",
+          "test": "an_unreadable_list_response_issues_no_grants"
+        },
+        {
+          "path": "crates/xshield-gateway/src/buffered_json.rs",
+          "test": "rejects_oversize_encoded_or_invalid_json_without_releasing_a_chunk"
+        },
+        {
+          "path": "crates/xshield-gateway/src/durable_audit.rs",
+          "test": "records_response_validation_failure_as_received_and_aborted"
+        }
+      ],
+      "gap": "网关不解密源站响应，只要求源站返回可读的严格 JSON：单元层断言不可读的列表响应（密封信封、不透明字节、看不到条目内容）在提取阶段以 RESPONSE_VALIDATION_FAILED 失败、不派生资格，审计层断言响应失败作为独立 crypto_encode 阶段记录；但没有“请求解密成功 + 响应失败”同一请求的组合回归，也没有经真实 edge 读回 journal 和资格表的断言；且实现中资格在响应加密之前提交，resource_grant 与响应加密组合时加密失败仍会留下已写入的资格。"
     },
     {
       "id": "CRYPTO-05",
@@ -935,7 +1018,18 @@
         "决策后适配器改变业务目标"
       ],
       "expected": "不满足同一冻结P不变量，禁止转发并告警",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "crates/xshield-gateway/src/request_crypto.rs",
+          "test": "the_dispatched_entity_is_the_checked_plaintext_and_cannot_be_retargeted"
+        },
+        {
+          "path": "crates/xshield-gateway/src/request_crypto.rs",
+          "test": "decrypts_only_the_exact_bound_request"
+        }
+      ],
+      "gap": "产品没有决策后可改写请求的适配器/插件阶段，冻结 P 不变量由类型保证（FrozenRequest 只能整体移交）：单元层断言转发字节与审计 rebuilt_sha256 一致，同一密封 P 改投其他 operation/method/路径时认证失败；没有决策后篡改业务目标的反例、转发前的不变量复核或告警，也没有经真实 edge 断言源站收到的正是被检查的 P。"
     },
     {
       "id": "CRYPTO-08",
@@ -1500,7 +1594,21 @@
         "领域代码引用数据库/HTTP SDK"
       ],
       "expected": "依赖图CI拒绝违规",
-      "status": "planned"
+      "status": "automated",
+      "covered_by": [
+        {
+          "path": "crates/xshield-core/tests/dependency_boundary.rs",
+          "test": "domain_crate_dependency_closure_reaches_no_database_http_runtime_or_adapter_crate"
+        },
+        {
+          "path": "crates/xshield-core/tests/dependency_boundary.rs",
+          "test": "dependency_gate_rejects_a_domain_crate_that_reaches_a_database_or_http_sdk"
+        },
+        {
+          "path": "crates/xshield-core/tests/dependency_boundary.rs",
+          "test": "domain_sources_open_no_sockets"
+        }
+      ]
     },
     {
       "id": "DEV-02",
@@ -1510,7 +1618,22 @@
         "新增拒绝或异常分支无原因码事件"
       ],
       "expected": "评审与覆盖测试失败",
-      "status": "planned"
+      "status": "partial",
+      "covered_by": [
+        {
+          "path": "crates/xshield-worker/src/reason_code_contract.rs",
+          "test": "every_edge_reason_code_is_listed_stable_unique_and_publishable"
+        },
+        {
+          "path": "scripts/test_check_audit_event_coverage.py",
+          "test": "test_new_event_missing_from_matrix_fails"
+        },
+        {
+          "path": "scripts/test_check_audit_event_coverage.py",
+          "test": "test_new_event_missing_from_supports_fails"
+        }
+      ],
+      "gap": "没有测试能发现新增拒绝或异常分支根本未写审计事件：边缘层只保证每个新 ReasonCode 变体必须登记（穷举 match 编译失败）、编码唯一、为大写蛇形且能被 worker 发布器接受；控制面只由 scripts/check_audit_event_coverage.py（其自测已接入 CI）检查端点审计事件可被 worker 发布。"
     },
     {
       "id": "DEV-03",

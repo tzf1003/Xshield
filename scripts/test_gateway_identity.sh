@@ -454,12 +454,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        # The shared record also serves byte ranges, the way a media resource
+        # does, so repeated segment reads under one share can be exercised.
+        content_range = None
+        if self.path == "/shared-record?record_id=record-123" and self.headers.get("Range"):
+            first, _, last = self.headers["Range"].removeprefix("bytes=").partition("-")
+            first = int(first)
+            last = int(last) if last else len(body) - 1
+            content_range = f"bytes {first}-{last}/{len(body)}"
+            body = body[first:last + 1]
+            status = 206
         if self.path == "/slow-account":
             open(sys.argv[2], "w", encoding="utf-8").close()
             time.sleep(1)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body) + (16 if truncated else 0)))
+        if content_range is not None:
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Range", content_range)
         if self.path == "/share-issue?record_id=record-123":
             self.send_header("Cache-Control", "public, max-age=600")
             self.send_header("ETag", '"origin-share-response"')
@@ -1214,6 +1227,25 @@ valid_share_status=$(curl -sS -o "$test_dir/valid-share.body" -w '%{http_code}' 
     'http://127.0.0.1:6288/shared-record?record_id=record-123')
 [[ "$valid_share_status" == "200" ]]
 
+# A limited share is a reusable read lease, not a one-time ticket: the same
+# token reads the same resource again in byte-range segments, the range reaches
+# the origin and its partial reply comes back unchanged, and the share row is
+# neither consumed nor altered by those reads.
+share_row() {
+    psql -X -At -F '|' -v ON_ERROR_STOP=1 -d "$test_database" -c \
+        "SELECT status, use_policy, expires_at FROM xshield.share_grants WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND share_id = 'share_018f2a3b-4c5d-7000-8000-000000000908'"
+}
+share_row_before=$(share_row)
+for segment in 'bytes=0-9' 'bytes=10-' 'bytes=0-9'; do
+    range_share_status=$(curl -sS -o "$test_dir/range-share.body" -D "$test_dir/range-share.headers" \
+        -w '%{http_code}' -H "X-Xshield-Share-Token: $share_token" -H "Range: $segment" \
+        'http://127.0.0.1:6288/shared-record?record_id=record-123')
+    [[ "$range_share_status" == "206" ]]
+    grep -qi "^content-range: bytes ${segment#bytes=}" "$test_dir/range-share.headers"
+done
+[[ "$(cat "$test_dir/range-share.body")" == '{"record_i' ]]
+[[ "$(share_row)" == "$share_row_before" ]]
+
 psql -X -v ON_ERROR_STOP=1 -d "$test_database" -c \
     "UPDATE xshield.share_grants SET status = 'revoked' WHERE tenant_id = 'tenant_gateway' AND site_id = 'site_gateway' AND share_id = 'share_018f2a3b-4c5d-7000-8000-000000000908'" >/dev/null
 revoked_share_status=$(curl -sS -o "$test_dir/revoked-share.json" -w '%{http_code}' \
@@ -1473,7 +1505,8 @@ grep -q '^Body=legacy=on&value=1$' "$test_dir/origin.log"
 [[ $(grep -c 'GET /orders?order_id=order-refresh' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /path-orders/order%2D123' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'POST /service/report' "$test_dir/origin.log") == "1" ]]
-[[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "2" ]]
+# Two whole reads plus the three range segments, each forwarded exactly once.
+[[ $(grep -c 'GET /shared-record?record_id=record-123' "$test_dir/origin.log") == "5" ]]
 [[ $(grep -c '^GET /share-issue?record_id=record-123$' "$test_dir/origin.log") == "13" ]]
 [[ $(grep -c 'GET /buffered-valid' "$test_dir/origin.log") == "1" ]]
 [[ $(grep -c 'GET /buffered-invalid' "$test_dir/origin.log") == "2" ]]
