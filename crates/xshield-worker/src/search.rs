@@ -2517,8 +2517,14 @@ mod tests {
     async fn discovered_routes_rejects_a_row_this_query_cannot_have_produced() {
         for (name, row) in [
             ("zero hits", discovered_route_row("GET", "/orders", 0, 10)),
-            ("lowercase method", discovered_route_row("get", "/orders", 1, 10)),
-            ("relative template", discovered_route_row("GET", "orders", 1, 10)),
+            (
+                "lowercase method",
+                discovered_route_row("get", "/orders", 1, 10),
+            ),
+            (
+                "relative template",
+                discovered_route_row("GET", "orders", 1, 10),
+            ),
             (
                 "non-id brace content",
                 discovered_route_row("GET", "/orders/{order_id}", 1, 10),

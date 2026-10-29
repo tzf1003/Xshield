@@ -99,7 +99,10 @@ mod tests {
         assert_eq!(normalize("/orders"), Some("/orders".to_owned()));
         assert_eq!(normalize("/"), Some(String::new() + "/"));
         assert_eq!(normalize("/orders/"), Some("/orders/".to_owned()));
-        assert_eq!(normalize("/orders/order-42"), Some("/orders/order-42".to_owned()));
+        assert_eq!(
+            normalize("/orders/order-42"),
+            Some("/orders/order-42".to_owned())
+        );
         assert_eq!(normalize("/v2/users"), Some("/v2/users".to_owned()));
         // A near-UUID with the wrong hyphen positions or length stays literal.
         assert_eq!(
@@ -115,7 +118,10 @@ mod tests {
         assert_eq!(normalize("/orders?page=2"), None);
         assert_eq!(normalize("/orders#frag"), None);
         assert_eq!(normalize("/orders/\u{7}1"), None);
-        assert_eq!(normalize(&("/".to_owned() + &"a".repeat(MAX_PATH_BYTES))), None);
+        assert_eq!(
+            normalize(&("/".to_owned() + &"a".repeat(MAX_PATH_BYTES))),
+            None
+        );
     }
 
     #[test]
