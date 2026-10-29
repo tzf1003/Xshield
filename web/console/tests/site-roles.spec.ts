@@ -33,9 +33,12 @@ async function asRoles(page: Page, roles: string[], init: Partial<SiteMock> = {}
 
 const tabs = (page: Page) =>
   page.getByRole("navigation", { name: "站点运营导航" }).getByRole("link").allTextContents();
+// `apply-events` is a tenant-wide push subscription, not a per-site resource read (it carries no
+// state of its own, see docs/29 §29.41), so it is excluded here even though its path happens to
+// share the `/control/v1/sites/` prefix with the per-site reads this helper tracks.
 const reads = (mock: SiteMock) =>
   mock.calls
-    .filter((call) => call.startsWith("GET /control/v1/sites/"))
+    .filter((call) => call.startsWith("GET /control/v1/sites/") && !call.endsWith("/apply-events"))
     .map((call) => call.split("/").at(-1));
 
 test("an observer reads status, revisions and health, and is offered no editor", async ({

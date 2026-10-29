@@ -111,7 +111,7 @@ export function useSiteWorkspace(siteId: string | null) {
   const router = useRouter();
   const { runtime, state } = useSession();
   const access = siteAccess(state.roles);
-  useApplyEventsSubscription(!creating);
+  useApplyEventsSubscription(!creating && (access.canConfigure || access.canObserve));
 
   const configQuery = useSiteConfig(id, !creating && access.canConfigure);
   const statusQuery = useSiteStatus(id, !creating && !access.canConfigure && access.canObserve);
