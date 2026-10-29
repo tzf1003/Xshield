@@ -24,6 +24,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.site.create"
             | "console.site.delete"
             | "console.site.status.read"
+            | "console.site.apply_events.subscribe"
             | "console.site.config.validate"
             | "console.site.config.apply"
             | "console.site.config.approve"
@@ -873,6 +874,7 @@ impl AccessPayload {
             | ("console.site.config.write", "PUT", "/control/v1/sites/{site_id}/config")
             | ("console.site.config.write", "PATCH", "/control/v1/sites/{site_id}")
             | ("console.sites.list", "GET", "/control/v1/sites")
+            | ("console.site.apply_events.subscribe", "GET", "/control/v1/sites/apply-events")
             | ("console.site.create", "POST", "/control/v1/sites")
             | ("console.site.delete", "DELETE", "/control/v1/sites/{site_id}")
             | ("console.site.status.read", "GET", "/control/v1/sites/{site_id}/status")

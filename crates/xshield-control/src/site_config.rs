@@ -12,12 +12,18 @@ use axum::{
     body::Bytes,
     extract::{Path, RawQuery, State},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
+use chrono::{DateTime, Utc};
 use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
+use std::{convert::Infallible, fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 use xshield_core::constant_time;
 use xshield_core::{
@@ -397,6 +403,10 @@ pub const SITE_HEALTH_PATH: &str = "/control/v1/sites/{site_id}/health";
 pub const SITE_VALIDATE_PATH: &str = "/control/v1/sites/{site_id}/validate";
 pub const SITE_APPLY_PATH: &str = "/control/v1/sites/{site_id}/apply";
 pub const SITE_APPROVE_PATH: &str = "/control/v1/sites/{site_id}/approve";
+/// A tenant-wide SSE subscription; it is a static sibling of
+/// `/control/v1/sites/{site_id}`, not a per-site path, so it is registered
+/// once and filtered per event against the caller's own site scope.
+pub const SITE_APPLY_EVENTS_PATH: &str = "/control/v1/sites/apply-events";
 pub const SITE_ROLLBACK_PATH: &str = "/control/v1/sites/{site_id}/rollback";
 const ACCESS: AccessAction = AccessAction {
     event_type: "console.site.config.write",
@@ -468,6 +478,17 @@ const REVISIONS_ACCESS: AccessAction = AccessAction {
     event_type: "console.site.status.read",
     method: "GET",
     path: SITE_REVISIONS_PATH,
+    role: ManagementRole::Observer,
+};
+// The role here is descriptive only: unlike every other `AccessAction`, this
+// one is not checked against a single path site_id at connect time (there is
+// none). Visibility is instead decided per event, against the same
+// `authorizes_site(Observer, ...)` call `STATUS_ACCESS` uses, so a session
+// only ever receives signals for sites it could already read the status of.
+const APPLY_EVENTS_ACCESS: AccessAction = AccessAction {
+    event_type: "console.site.apply_events.subscribe",
+    method: "GET",
+    path: SITE_APPLY_EVENTS_PATH,
     role: ManagementRole::Observer,
 };
 const VALIDATE_ACCESS: AccessAction = AccessAction {
@@ -955,6 +976,139 @@ pub async fn health_handler(
     headers: HeaderMap,
 ) -> Response {
     site_apply_state_handler(control, site_id, headers, HEALTH_ACCESS, false, true, false).await
+}
+
+/// A best-effort signal that one site's apply state changed. It is never the
+/// source of truth: `status`/`reason_code` summarize what a write path just
+/// committed, but a subscriber must still fetch [`SITE_STATUS_PATH`] (or the
+/// sites list) to get an audited, scope-checked read of the current state.
+/// This only tells it when to ask again instead of polling on a timer.
+#[derive(Clone, Debug)]
+pub(crate) struct ApplyStatusEvent {
+    pub(crate) site_id: SiteId,
+    pub(crate) desired_revision: u64,
+    pub(crate) apply_id: String,
+    /// `"confirmed"` (the edge accepted the snapshot; the site's own next
+    /// read reports whether that is `active` or `paused`) or `"failed"`.
+    pub(crate) status: &'static str,
+    pub(crate) reason_code: Option<&'static str>,
+    pub(crate) at: DateTime<Utc>,
+}
+
+/// Publishes an [`ApplyStatusEvent`] to every current subscriber.
+///
+/// Lossy by design: `tokio::sync::broadcast` drops the oldest event for a
+/// receiver that falls too far behind, and a subscriber with none at all is
+/// simply not listening right now. Either way the loss is harmless, because
+/// the event is only ever a hint to re-read, never the state itself.
+fn publish_apply_event(
+    control: &ControlPlane,
+    site_id: &SiteId,
+    desired_revision: u64,
+    apply_id: &str,
+    status: &'static str,
+    reason_code: Option<&'static str>,
+) {
+    let _ = control.apply_events.send(ApplyStatusEvent {
+        site_id: site_id.clone(),
+        desired_revision,
+        apply_id: apply_id.to_owned(),
+        status,
+        reason_code,
+        at: Utc::now(),
+    });
+}
+
+/// Streams [`ApplyStatusEvent`]s as Server-Sent Events, filtered to exactly
+/// the sites this session could already read the status of.
+///
+/// An API-key principal carries no roles and so can never match
+/// `authorizes_site` below; it is refused up front instead of being handed a
+/// connection that could never emit anything for it. Every other principal is
+/// allowed to connect (there is no single site to check against yet, unlike
+/// every other site route) and one subscribe audit event is written; from
+/// then on each broadcast event is independently checked against the
+/// session's own site scope before it is ever serialized, so a session never
+/// receives a hint about a site it is not already allowed to read.
+pub async fn apply_events_handler(
+    State(control): State<Arc<ControlPlane>>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id = format!("req_{}", uuid::Uuid::now_v7());
+    let authorization = single_header(&headers, AUTHORIZATION.as_str());
+    let identity = match control.authenticate_request(
+        authorization.as_deref(),
+        &request_id,
+        APPLY_EVENTS_ACCESS,
+    ) {
+        Ok(identity) => identity,
+        Err(response) => return (*response).into_response(),
+    };
+    let subject = identity.principal.subject().to_owned();
+    if identity.principal.is_api_key() {
+        return control
+            .audited_error_async(
+                request_id,
+                Some(subject),
+                APPLY_EVENTS_ACCESS,
+                None,
+                StatusCode::FORBIDDEN,
+                "CONTROL_SCOPE_DENIED",
+                "management operation forbidden",
+                false,
+                "request_scope",
+            )
+            .await
+            .into_response();
+    }
+    if control
+        .append_access_event(
+            &request_id,
+            Some(&subject),
+            APPLY_EVENTS_ACCESS,
+            None,
+            "PASS",
+            "CONTROL_SITE_APPLY_EVENTS_SUBSCRIBED",
+        )
+        .is_err()
+    {
+        return super::audit_unavailable(&request_id).into_response();
+    }
+    let tenant = control.config.tenant_id.clone();
+    let principal = identity.principal;
+    let mut receiver = control.apply_events.subscribe();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(16);
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    if !principal.authorizes_site(ManagementRole::Observer, &tenant, &event.site_id)
+                    {
+                        continue;
+                    }
+                    let payload = json!({
+                        "site_id": event.site_id.as_str(),
+                        "desired_revision": event.desired_revision,
+                        "apply_id": event.apply_id,
+                        "status": event.status,
+                        "reason_code": event.reason_code,
+                        "at": event.at.to_rfc3339(),
+                    });
+                    let sse_event = Event::default()
+                        .event("site_apply_changed")
+                        .data(payload.to_string());
+                    if tx.send(Ok(sse_event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 pub async fn revisions_handler(
@@ -3526,6 +3680,14 @@ async fn apply_site_snapshot(
                         reason,
                     )
                     .await;
+                publish_apply_event(
+                    control,
+                    target_site,
+                    target_apply.desired_revision,
+                    &target_apply.apply_id,
+                    "failed",
+                    Some(reason),
+                );
             }
             return Err(reason);
         }
@@ -3567,6 +3729,14 @@ async fn apply_site_snapshot(
                 )
                 .await
                 .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            publish_apply_event(
+                control,
+                target_site,
+                target_apply.desired_revision,
+                &target_apply.apply_id,
+                "failed",
+                Some("EDGE_APPLY_PAYLOAD_INVALID"),
+            );
             return Err("EDGE_APPLY_PAYLOAD_INVALID");
         };
         let request = GatewayApplyRequest {
@@ -3603,6 +3773,14 @@ async fn apply_site_snapshot(
                 )
                 .await
                 .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            publish_apply_event(
+                control,
+                target_site,
+                target_apply.desired_revision,
+                &target_apply.apply_id,
+                "failed",
+                Some(refusal.reason),
+            );
             return Err(refusal.reason);
         };
         let excluded = plan.confirmed.remove(index);
@@ -3638,6 +3816,14 @@ async fn apply_site_snapshot(
                 )
                 .await
                 .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?;
+            publish_apply_event(
+                control,
+                target_site,
+                target_apply.desired_revision,
+                &target_apply.apply_id,
+                "failed",
+                Some("CONTROL_SITE_PORT_UNAVAILABLE"),
+            );
             return Err("CONTROL_SITE_PORT_UNAVAILABLE");
         }
         descriptor_conflicts.push(excluded);
@@ -3649,6 +3835,9 @@ async fn apply_site_snapshot(
         .map_err(|_| "CONTROL_SITE_APPLY_STATE_UNAVAILABLE")?
     {
         return Err("CONTROL_SITE_APPLY_STATE_UNAVAILABLE");
+    }
+    for (site, revision, apply_id) in &plan.confirmed {
+        publish_apply_event(control, site, *revision, apply_id, "confirmed", None);
     }
     // The snapshot is live. Sites that were held back because their desired
     // configuration does not compile, would reuse a label for another
@@ -3682,6 +3871,7 @@ async fn apply_site_snapshot(
                 reason,
             )
             .await;
+        publish_apply_event(control, site, *revision, apply_id, "failed", Some(reason));
     }
     Ok(true)
 }

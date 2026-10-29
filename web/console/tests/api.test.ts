@@ -2790,6 +2790,7 @@ test("every backend site failure retains stable safe diagnostics", async (t) => 
     "utf8",
   );
   const terminalFacts = new Set([
+    "CONTROL_SITE_APPLY_EVENTS_SUBSCRIBED",
     "CONTROL_SITE_APPROVED_AND_APPLIED",
     "CONTROL_SITE_APPROVED_PENDING",
     "CONTROL_SITE_CONFIG_CREATED",

@@ -62,7 +62,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use uuid::Uuid;
 use xshield_audit::{JournalError, JournalKey, JournalRecord, LocalJournal, SealVerifyingKey};
 use xshield_core::constant_time;
@@ -521,6 +521,13 @@ pub struct ControlPlane {
     metrics: Arc<ops::ControlMetrics>,
     unauthenticated_rate: Mutex<RateWindow>,
     rate: Mutex<RateWindow>,
+    /// Best-effort fan-out of site apply-state changes to SSE subscribers
+    /// (`site_config::apply_events_handler`); never read back as state. A
+    /// bounded, lossy channel is correct here: it caps a slow subscriber's
+    /// backlog instead of growing it without bound, and a dropped event is
+    /// harmless because every subscriber treats this only as a hint to
+    /// re-read, never as the state itself.
+    apply_events: broadcast::Sender<site_config::ApplyStatusEvent>,
 }
 
 impl ControlPlane {
@@ -559,6 +566,7 @@ impl ControlPlane {
             gateway_apply: None,
             access_journal: Mutex::new(access_journal),
             metrics: Arc::new(ops::ControlMetrics::default()),
+            apply_events: broadcast::channel(256).0,
         }
     }
 
@@ -3548,7 +3556,7 @@ impl ControlPlane {
         Ok(identity)
     }
 
-    fn authenticate_request(
+    pub(crate) fn authenticate_request(
         &self,
         authorization: Option<&str>,
         request_id: &str,
@@ -4373,6 +4381,10 @@ pub fn routers(control: ControlPlane) -> (Router, Router, Arc<ControlPlane>) {
         .route(
             site_config::SITE_HEALTH_PATH,
             get(site_config::health_handler),
+        )
+        .route(
+            site_config::SITE_APPLY_EVENTS_PATH,
+            get(site_config::apply_events_handler).layer(DefaultBodyLimit::max(0)),
         )
         .route(
             site_config::SITE_VALIDATE_PATH,
@@ -5528,6 +5540,7 @@ mod tests {
     mod api_key_authz;
     mod api_key_harness;
     mod api_key_lifecycle;
+    mod apply_events;
     mod audit_publish;
     mod build_cli;
     mod calibration_report_inspection;
