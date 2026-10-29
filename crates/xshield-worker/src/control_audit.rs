@@ -25,6 +25,7 @@ pub(super) fn supports(event_type: &str) -> bool {
             | "console.site.delete"
             | "console.site.status.read"
             | "console.site.apply_events.subscribe"
+            | "console.site.routes.discover"
             | "console.site.config.validate"
             | "console.site.config.apply"
             | "console.site.config.approve"
@@ -880,6 +881,11 @@ impl AccessPayload {
             | ("console.site.status.read", "GET", "/control/v1/sites/{site_id}/status")
             | ("console.site.status.read", "GET", "/control/v1/sites/{site_id}/health")
             | ("console.site.status.read", "GET", "/control/v1/sites/{site_id}/revisions")
+            | (
+                "console.site.routes.discover",
+                "GET",
+                "/control/v1/sites/{site_id}/discovered-routes",
+            )
             | ("console.site.config.validate", "POST", "/control/v1/sites/{site_id}/validate")
             | ("console.site.config.apply", "POST", "/control/v1/sites/{site_id}/apply")
             | ("console.site.config.approve", "POST", "/control/v1/sites/{site_id}/approve")
