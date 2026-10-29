@@ -947,9 +947,13 @@
         {
           "path": "crates/xshield-gateway/src/durable_audit.rs",
           "test": "records_response_validation_failure_as_received_and_aborted"
+        },
+        {
+          "path": "scripts/test_gateway_identity.sh",
+          "test": "sealed_state"
         }
       ],
-      "gap": "网关不解密源站响应，只要求源站返回可读的严格 JSON：单元层断言不可读的列表响应（密封信封、不透明字节、看不到条目内容）在提取阶段以 RESPONSE_VALIDATION_FAILED 失败、不派生资格，审计层断言响应失败作为独立 crypto_encode 阶段记录；但没有“请求解密成功 + 响应失败”同一请求的组合回归，也没有经真实 edge 读回 journal 和资格表的断言；且实现中资格在响应加密之前提交，resource_grant 与响应加密组合时加密失败仍会留下已写入的资格。"
+      "gap": "网关不解密源站响应，只要求源站返回可读的严格 JSON：单元层断言不可读的列表响应（密封信封、不透明字节、看不到条目内容）在提取阶段以 RESPONSE_VALIDATION_FAILED 失败、不派生资格，审计层断言响应失败作为独立 crypto_encode 阶段记录；但没有“请求解密成功 + 响应失败”同一请求的组合回归，也没有经真实 edge 读回 journal 和资格表的断言。resource_grant 与响应加密组合时，资格在加密成功后才写入，scripts/test_gateway_identity.sh 经真实 edge 断言加密失败不留下响应证据与资格事件。"
     },
     {
       "id": "CRYPTO-05",

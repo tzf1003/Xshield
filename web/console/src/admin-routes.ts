@@ -51,6 +51,7 @@ export type QueryKind =
   | "model-list"
   | "audit-health"
   | "calibration-report"
+  | "coverage-report"
   | "grant"
   | "binding"
   | "search"
@@ -73,6 +74,7 @@ const paths: Record<string, QueryKind> = {
   "/investigation/grants": "grant",
   "/investigation/bindings": "binding",
   "/investigation/calibration": "calibration-report",
+  "/investigation/coverage": "coverage-report",
   "/investigation/search": "search",
   "/cases": "case",
   "/approvals": "approvals",
