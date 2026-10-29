@@ -41,6 +41,7 @@ import {
   useSiteStatus,
 } from "../../../sites/state/detail-queries.ts";
 import { leaveListNotice } from "../../../sites/state/list-flash.ts";
+import { useApplyEventsSubscription } from "../../../sites/state/use-apply-events.ts";
 import {
   operationKind,
   operationsOfSite,
@@ -110,6 +111,7 @@ export function useSiteWorkspace(siteId: string | null) {
   const router = useRouter();
   const { runtime, state } = useSession();
   const access = siteAccess(state.roles);
+  useApplyEventsSubscription(!creating);
 
   const configQuery = useSiteConfig(id, !creating && access.canConfigure);
   const statusQuery = useSiteStatus(id, !creating && !access.canConfigure && access.canObserve);
