@@ -7,6 +7,17 @@
   - 页面打开、聚焦或定时都不会读取；每次点击“生成统计”才读一次，服务端照常审计。客户端严格解码：字段集合、计数嵌套、列表排序与去重、`last_seen` 在窗口内、列表与总数相加一致（截断时严格小于），路径形状只接受 edge 能产生的形状，否则按无效响应处理，不渲染。
   - 回归：`tests/coverage-report.test.ts`（解码、结论、查询串、路径形状、占比）；`tests/coverage.spec.ts`（Playwright：只在点击后读取、三张表与结论、索引未追上、失败不留旧结果、计数不一致拒绝渲染）；导航与路由表测试加入新页面。
 
+- Edge TLS 证书热加载与按 SNI 多证书（可行性评估 P2“多实例”，docs/19 19.2“Edge 传输配置”）：此前全进程只有一张证书，轮换要重启 edge。
+  - 新增 `XSHIELD_EDGE_TLS_SNI_CERTS`（逗号分隔的 `证书:私钥` 对）：SNI 匹配某张附加证书的 DNS 名时出示它，精确名优先于单级通配符；未匹配或无 SNI 时出示主证书。SNI 仍不参与路由。重复主机名、没有 DNS 名的证书、格式错误的列表均拒绝启动。
+  - 证书与私钥文件每 30 秒按元数据检查一次，变化后整组重新校验；通过则新握手使用新证书，失败则保留当前证书并在下次变化时重试。
+  - 健康接口新增 `tls_certificates`、`tls_reloads`、`tls_reload_failures`；`/metrics` 新增 `xshield_edge_tls_certificates`、`xshield_edge_tls_reloads_total`、`xshield_edge_tls_reload_failures_total`。证书错误信息改为带出具体变量名（附加证书的错误指向新变量）。
+  - 回归：edge_transport 新增 4 个测试（SNI 选择含通配符与大小写、配置拒绝、轮换与半写入/缺失/过期回退、后台检查与停止），ops/apply 健康与指标测试同步更新。
+  - **未覆盖**：增删附加证书仍需重启；不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程的轮换场景。
+
+## 0.1.1 — 2026-10-29
+
+首个经 `release.yml` 发布的版本：镜像推到 GHCR 并签名（docs/19 19.7）。0.1.0 没有发布镜像：`GITHUB_TOKEN` 不能给工作流文件与 main 不同的提交打标签，而 0.1.0 的切版本提交 aebaa67 之后 CI 与发版工作流都改过。
+
 - Linux 性能基线（可行性建议 P1“性能基线”，docs/21 §21.8）：此前唯一的基线来自一台 macOS 笔记本，文档要求在 Linux 生产形态的存储上重测。
   - 两台 Linux 机器上的 release 结果：16 vCPU Hyper-V 虚拟机（虚拟盘同步 P50 约 1.3 ms）上，edge 公开路由 1 并发比直连多 2.9 / 4.3–4.8 ms（P50/P95），16 并发约 2 450 请求/秒、P95 多约 3.8 ms，均在“新增 P95 ≤ 15 ms”之内；journal 放在 tmpfs 时只多约 0.24 ms，即 edge 自身开销。AWS EBS（2 vCPU，同步 P50 约 3.1 ms）上 1 并发多 7.1 / 9.8 ms，4–16 并发 P95 多 14.2–14.3 ms，刚好压在预算线上，说明这类网络盘不适合放 journal。
   - 修复 `scripts/bench_gateway.py` 在 Linux 上的缺陷：桩源站应答头与正文分两次写出，Nagle 把正文压到延迟 ACK 之后，直连每请求固定约 41 ms，增量失真；现在关闭 Nagle。脚本还会打印 CPU 型号与 journal 所在卷。
@@ -29,6 +40,7 @@
   - `release-images.yml` 可以被调用，并给镜像加上版本与源码提交标签。验证签名身份的正则同时接受标签（推送触发）和 main（经 `release.yml` 触发），文档里的 `cosign verify` 命令已相应更新。
   - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
   - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
+  - `release.yml` 只能给工作流文件与 main 一致的提交打标签：GitHub 拒绝用 `GITHUB_TOKEN` 推送这类引用（缺少 `workflows` 权限）。打标签前先比较，不一致时直接报错说明原因。
   - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
 
 - 试点路径验收用例补测（可行性建议 P1 #8，docs/20）：`examples/acceptance-cases.json` 由 automated 9 / partial 51 / planned 18 改为 automated 11 / partial 60 / planned 7。

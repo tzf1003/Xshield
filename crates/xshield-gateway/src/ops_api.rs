@@ -246,24 +246,7 @@ impl EdgeMetrics {
         let sum = self.duration_sum_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0;
         let _ = writeln!(out, "xshield_edge_request_duration_seconds_sum {sum}");
         let _ = writeln!(out, "xshield_edge_request_duration_seconds_count {count}");
-        counter(
-            &mut out,
-            "xshield_edge_tls_handshake_failures_total",
-            "TLS handshakes that failed or exceeded their deadline.",
-            transport.tls_handshake_failures,
-        );
-        counter(
-            &mut out,
-            "xshield_edge_proxy_header_rejections_total",
-            "Trusted balancer connections refused for their PROXY header.",
-            transport.proxy_header_rejections,
-        );
-        counter(
-            &mut out,
-            "xshield_edge_connection_setup_shed_total",
-            "Connections closed because every setup slot was busy.",
-            transport.setup_shed,
-        );
+        render_transport(&mut out, transport);
         self.render_evidence(&mut out, evidence);
         out
     }
@@ -308,6 +291,46 @@ impl EdgeMetrics {
             self.retention_last_success.load(Ordering::Relaxed),
         );
     }
+}
+
+/// Connection-setup and certificate state shared with the health endpoint.
+fn render_transport(out: &mut String, transport: TransportStatus) {
+    counter(
+        out,
+        "xshield_edge_tls_handshake_failures_total",
+        "TLS handshakes that failed or exceeded their deadline.",
+        transport.tls_handshake_failures,
+    );
+    gauge(
+        out,
+        "xshield_edge_tls_certificates",
+        "Configured TLS certificate/key pairs, the primary included.",
+        transport.tls_certificates,
+    );
+    counter(
+        out,
+        "xshield_edge_tls_reloads_total",
+        "Certificate reloads that replaced the certificates after their files changed.",
+        transport.tls_reloads,
+    );
+    counter(
+        out,
+        "xshield_edge_tls_reload_failures_total",
+        "Changed certificate files refused; the previous certificates stayed in service.",
+        transport.tls_reload_failures,
+    );
+    counter(
+        out,
+        "xshield_edge_proxy_header_rejections_total",
+        "Trusted balancer connections refused for their PROXY header.",
+        transport.proxy_header_rejections,
+    );
+    counter(
+        out,
+        "xshield_edge_connection_setup_shed_total",
+        "Connections closed because every setup slot was busy.",
+        transport.setup_shed,
+    );
 }
 
 fn gauge(out: &mut String, name: &str, help: &str, value: u64) {
@@ -447,6 +470,9 @@ mod tests {
     fn transport() -> TransportStatus {
         TransportStatus {
             tls_enabled: true,
+            tls_certificates: 2,
+            tls_reloads: 4,
+            tls_reload_failures: 5,
             tls_handshake_failures: 3,
             proxy_protocol_enabled: false,
             proxy_header_rejections: 0,
@@ -498,6 +524,9 @@ mod tests {
         assert!(text.contains("xshield_edge_request_duration_seconds_count 6\n"));
         assert!(text.contains("xshield_edge_tls_handshake_failures_total 3\n"));
         assert!(text.contains("xshield_edge_connection_setup_shed_total 1\n"));
+        assert!(text.contains("xshield_edge_tls_certificates 2\n"));
+        assert!(text.contains("xshield_edge_tls_reloads_total 4\n"));
+        assert!(text.contains("xshield_edge_tls_reload_failures_total 5\n"));
     }
 
     #[test]
