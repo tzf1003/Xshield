@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Linux 性能基线（可行性建议 P1“性能基线”，docs/21 §21.8）：此前唯一的基线来自一台 macOS 笔记本，文档要求在 Linux 生产形态的存储上重测。
+  - 两台 Linux 机器上的 release 结果：16 vCPU Hyper-V 虚拟机（虚拟盘同步 P50 约 1.3 ms）上，edge 公开路由 1 并发比直连多 2.9 / 4.3–4.8 ms（P50/P95），16 并发约 2 450 请求/秒、P95 多约 3.8 ms，均在“新增 P95 ≤ 15 ms”之内；journal 放在 tmpfs 时只多约 0.24 ms，即 edge 自身开销。AWS EBS（2 vCPU，同步 P50 约 3.1 ms）上 1 并发多 7.1 / 9.8 ms，4–16 并发 P95 多 14.2–14.3 ms，刚好压在预算线上，说明这类网络盘不适合放 journal。
+  - 修复 `scripts/bench_gateway.py` 在 Linux 上的缺陷：桩源站应答头与正文分两次写出，Nagle 把正文压到延迟 ACK 之后，直连每请求固定约 41 ms，增量失真；现在关闭 Nagle。脚本还会打印 CPU 型号与 journal 所在卷。
+  - 新增 `scripts/bench_fsync.py`：在给定目录上测“追加一个审计批次 + `fdatasync`”的延迟分布，用来在部署前判断 journal 卷能否满足预算（P95 同步延迟 × 2 约等于单请求增量下限）。
+  - **未覆盖**：两台机器都不是本地 NVMe（EBS 在客户机里显示为 NVMe，但是网络块存储），也不是专用压测机；客户端与桩源站是 Python，约 7 500 请求/秒封顶；身份、加密、TLS、大正文与 ClickHouse 发布仍未度量。
+
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
   - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
   - CI 新增 `fuzz-replay` 作业：用稳定版回放所有种子和固定数量的确定性变异，同时对该 crate 运行 fmt 与 clippy。新增 `.github/workflows/fuzz.yml`：每天在稳定版上做覆盖引导的模糊测试（不加 sanitizer），在两次运行之间缓存语料，发现崩溃时上传。
