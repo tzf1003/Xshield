@@ -9,6 +9,12 @@
   - 回归：edge_transport 新增 4 个测试（SNI 选择含通配符与大小写、配置拒绝、轮换与半写入/缺失/过期回退、后台检查与停止），ops/apply 健康与指标测试同步更新。
   - **未覆盖**：增删附加证书仍需重启；不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程的轮换场景。
 
+- 在 GitHub 上发版，不必在本地推标签（docs/19 19.7）：此前发布镜像只能靠推送 `v*` 标签触发，而会话与 CI 都不能推标签。
+  - 新增 `.github/workflows/release.yml`（workflow_dispatch，输入版本号，可选指定提交）。它先检查版本号与提交是否对应：提交在 main 上，Cargo 与 Helm chart 版本一致，CHANGELOG 有该版本标题，main 上 CI 已通过。检查通过后创建 `v<版本>` 标签，以 workflow_call 调用 `release-images.yml` 构建、推送、证明并签名镜像，最后创建带 CHANGELOG 段落和镜像 digest 的 GitHub Release。
+  - `release-images.yml` 可以被调用，并给镜像加上版本与源码提交标签。验证签名身份的正则同时接受标签（推送触发）和 main（经 `release.yml` 触发），文档里的 `cosign verify` 命令已相应更新。
+  - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
+  - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
+
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
   - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
   - CI 新增 `fuzz-replay` 作业：用稳定版回放所有种子和固定数量的确定性变异，同时对该 crate 运行 fmt 与 clippy。新增 `.github/workflows/fuzz.yml`：每天在稳定版上做覆盖引导的模糊测试（不加 sanitizer），在两次运行之间缓存语料，发现崩溃时上传。
