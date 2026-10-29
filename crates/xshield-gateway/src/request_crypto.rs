@@ -1380,6 +1380,54 @@ mod tests {
         ));
     }
 
+    // A fixed vector sealed by the browser sensor's own WebCrypto
+    // implementation (sensor-1.3.0.js), not by this file's own `aad`/AES-GCM
+    // calls: this is the one test that would catch the two implementations
+    // silently drifting apart (byte order, field order, or tag placement)
+    // even though each side's own round-trip tests would still pass.
+    #[test]
+    fn decodes_a_vector_sealed_by_the_browser_sensors_own_webcrypto_implementation() {
+        let rule = RequestCryptoEnvelopeHookRule {
+            adapter_revision: "checkout-json-r1".to_owned(),
+            max_envelope_bytes: 4096,
+            max_plaintext_bytes: 1024,
+            max_message_age_seconds: 5,
+            max_future_skew_seconds: 1,
+            max_active_messages: 100,
+            max_in_flight_bytes: 16_384,
+        };
+        let mut key = [0_u8; 32];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = u8::try_from(index + 1).unwrap();
+        }
+        let keys = EnvelopeHookKeys::new(7, Zeroizing::new(key), None);
+        let envelope = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "adapter_revision": "checkout-json-r1",
+            "key_id": "ehk.7",
+            "message_id": "msg_018f2a3b-4c5d-7000-8000-000000000a01",
+            "issued_at": 4,
+            "expires_at": 9,
+            "nonce": "6465666768696a6b6c6d6e6f",
+            "ciphertext": "1b7d0027e4a0865bb97a9eba65",
+            "tag": "776677d5b0cd220805cd1d0777feac99",
+        }))
+        .unwrap();
+        let frozen = rule
+            .decode(
+                "tenant_demo",
+                "site_demo",
+                "checkout.submit",
+                "POST",
+                "/checkout",
+                UnixSeconds::new(5),
+                &envelope,
+                &keys,
+            )
+            .unwrap();
+        assert_eq!(frozen.into_body(), Bytes::from_static(br#"{"sku":"A-1"}"#));
+    }
+
     #[test]
     fn envelope_hook_rejects_a_different_path_or_operation() {
         let rule = envelope_hook_rule();
