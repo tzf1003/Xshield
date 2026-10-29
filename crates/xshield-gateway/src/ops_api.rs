@@ -419,7 +419,10 @@ async fn metrics(State(state): State<OpsState>) -> Response {
     let body = state.metrics.render(
         ready,
         state.supervisor.transport_status(),
-        state.evidence.as_deref().map(EvidenceWriter::remaining),
+        state
+            .evidence
+            .as_deref()
+            .and_then(EvidenceWriter::remaining),
     );
     no_store(
         StatusCode::OK,

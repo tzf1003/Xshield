@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- S3 兼容证据存储与 Object Lock（可行性建议 P2 #10，docs/12 12.10、docs/19 19.4）：此前证据只能写本地私有目录，且只允许一个网关写入。
+  - 新增 `S3EvidenceVault`：对象格式与本地相同，写入一律 `If-None-Match: *`，多实例可共用一个桶；可选 `compliance`/`governance` 锁定到对象到期时间，打开时探测存储桶，要求锁定而桶未开启时拒绝启动。清理按读到并核对过的版本永久删除，不留删除标记后的旧版本；孤儿扫描跳过锁未到期的对象。
+  - 网关写入、控制面读取与清理（网关内置和 `xshield-evidence-retain`）通过 `XSHIELD_EVIDENCE_BACKEND=s3` 与 `XSHIELD_EVIDENCE_S3_*` 切换；不设置时行为不变。新增 `EvidenceVault` 统一两种后端；清理轮次的校准两类对象只在本地后端执行。
+  - 新依赖 `ureq` 3.5（MIT OR Apache-2.0，`default-features = false`，只开 `rustls`），用于同步的 S3 请求；新增传递依赖 `ureq-proto`、`utf8-zero`（均 MIT OR Apache-2.0），其余（rustls、webpki-roots、http、base64）已在依赖树中。SigV4 自行实现，未引入 AWS SDK。更新随 `cargo deny` 与依赖审查。
+  - 回归：SigV4 用 AWS 文档的三个签名样例单测；配置与环境变量解析单测；4 个真实 MinIO 集成测试，CI 新增 `object-storage` 作业（MinIO 镜像固定 digest）。
+  - **未覆盖**：AWS S3 本身和其他兼容服务；KMS 包裹密钥；分块与大对象；本地到 S3 的存量迁移；Helm 与 Compose 参考部署未加 S3 配置。
+
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
   - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
   - CI 新增 `fuzz-replay` 作业：用稳定版回放所有种子和固定数量的确定性变异，同时对该 crate 运行 fmt 与 clippy。新增 `.github/workflows/fuzz.yml`：每天在稳定版上做覆盖引导的模糊测试（不加 sanitizer），在两次运行之间缓存语料，发现崩溃时上传。

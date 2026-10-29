@@ -78,8 +78,8 @@ use xshield_core::{
     },
 };
 use xshield_evidence::{
-    EvidenceClassification, EvidenceError, EvidenceFidelity, EvidenceManifest, EvidenceWrite,
-    LocalEvidenceVault, VerifiedEvidenceManifest,
+    EvidenceClassification, EvidenceError, EvidenceFidelity, EvidenceManifest, EvidenceVault,
+    EvidenceWrite, VerifiedEvidenceManifest,
 };
 use xshield_postgres::{
     EvidenceAccessCapability, EvidenceAccessDecisionCreate, EvidenceAccessDecisionRecord,
@@ -254,7 +254,7 @@ pub fn parse_management_api_key_hash_key(value: &str) -> Result<[u8; 32], Contro
 
 /// Vault-backed port that consumes an already validated evidence capability.
 pub struct EvidenceReadPort {
-    vault: LocalEvidenceVault,
+    vault: EvidenceVault,
     capacity: Arc<Semaphore>,
 }
 
@@ -264,9 +264,9 @@ impl EvidenceReadPort {
     /// The reservation covers decryption, audit, and all response-buffer clones.
     /// Saturated reads receive an audited retryable error before vault I/O.
     #[must_use]
-    pub fn new(vault: LocalEvidenceVault) -> Self {
+    pub fn new(vault: impl Into<EvidenceVault>) -> Self {
         Self {
-            vault,
+            vault: vault.into(),
             // ponytail: one retained object per port; use a weighted byte budget
             // when measured download throughput requires parallel reads.
             capacity: Arc::new(Semaphore::new(1)),

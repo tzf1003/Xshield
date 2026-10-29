@@ -18,7 +18,10 @@ use xshield_core::{
     admin::{ManagementPrincipal, ManagementRole},
     domain::{SiteId, TenantId},
 };
-use xshield_evidence::{EvidenceKey, EvidenceVaultConfig, LocalEvidenceVault};
+use xshield_evidence::{
+    EvidenceKey, EvidenceVault, EvidenceVaultConfig, LocalEvidenceVault, S3EvidenceStoreConfig,
+    S3EvidenceVault,
+};
 use xshield_postgres::PostgresIdentityStore;
 use xshield_worker::PublisherConfig;
 use zeroize::Zeroizing;
@@ -92,7 +95,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         env::var("XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS")?.parse()?;
     let max_evidence_access_ttl_seconds =
         env::var("XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS")?.parse()?;
-    let evidence_root = PathBuf::from(env::var("XSHIELD_EVIDENCE_ROOT")?);
+    let evidence_s3 = S3EvidenceStoreConfig::from_env().map_err(|error| error.to_string())?;
+    let evidence_root = match evidence_s3 {
+        Some(_) => None,
+        None => Some(PathBuf::from(env::var("XSHIELD_EVIDENCE_ROOT")?)),
+    };
     let evidence_key_id = env::var("XSHIELD_EVIDENCE_KEY_ID")?;
     let evidence_key_hex =
         Zeroizing::new(xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX")?);
@@ -150,15 +157,27 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let source_key = JournalKey::from_hex(&source_key_hex)?;
     let seal_key = SealVerifyingKey::from_hex(seal_key_id, &seal_key_hex)?;
     let control_key = JournalKey::from_hex(&control_key_hex)?;
-    let evidence_vault = LocalEvidenceVault::open(
-        EvidenceVaultConfig::new(
-            evidence_root,
+    let evidence_vault: EvidenceVault = match (evidence_s3, evidence_root) {
+        (Some(store), _) => S3EvidenceVault::open(
+            store,
             evidence_key_id,
             evidence_max_artifact_bytes,
             evidence_max_retention_days,
-        )?,
-        EvidenceKey::from_hex(&evidence_key_hex)?,
-    )?;
+            EvidenceKey::from_hex(&evidence_key_hex)?,
+        )?
+        .into(),
+        (None, Some(root)) => LocalEvidenceVault::open(
+            EvidenceVaultConfig::new(
+                root,
+                evidence_key_id,
+                evidence_max_artifact_bytes,
+                evidence_max_retention_days,
+            )?,
+            EvidenceKey::from_hex(&evidence_key_hex)?,
+        )?
+        .into(),
+        (None, None) => return Err("XSHIELD_EVIDENCE_ROOT is required".into()),
+    };
     let journal_limits = JournalLimits::new(
         env::var("XSHIELD_CONTROL_AUDIT_MAX_BYTES")?.parse()?,
         env::var("XSHIELD_CONTROL_AUDIT_HIGH_WATERMARK_BYTES")?.parse()?,

@@ -33,6 +33,7 @@ mod calibration_lineage_review_retention;
 mod calibration_report;
 mod calibration_report_retention;
 mod s3;
+mod vault;
 
 pub use calibration_lineage_review::{
     AttestedCalibrationLineageReviewManifest, CALIBRATION_LINEAGE_REVIEW_CANONICAL_BODY_ENCODING,
@@ -51,6 +52,7 @@ pub use s3::{
     S3Addressing, S3Credentials, S3EvidenceStoreConfig, S3EvidenceStoreSettings, S3EvidenceVault,
     S3ObjectLockMode,
 };
+pub use vault::EvidenceVault;
 
 const SCHEMA_VERSION: u8 = 3;
 const NONCE_BYTES: usize = 12;

@@ -15,7 +15,10 @@ use crate::{
 };
 use std::{collections::HashSet, path::Path, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
-use xshield_evidence::{EvidenceError, EvidenceKey, EvidenceVaultConfig, LocalEvidenceVault};
+use xshield_evidence::{
+    EvidenceError, EvidenceKey, EvidenceVault, EvidenceVaultConfig, LocalEvidenceVault,
+    S3EvidenceStoreConfig, S3EvidenceVault,
+};
 
 const DEADLINE: Duration = Duration::from_secs(15);
 
@@ -36,11 +39,33 @@ pub fn open_retention_vault(
     root: &Path,
     key_id: &str,
     key_hex: &str,
-) -> Result<LocalEvidenceVault, EvidenceError> {
+) -> Result<EvidenceVault, EvidenceError> {
     LocalEvidenceVault::open(
         EvidenceVaultConfig::new(root, key_id, 64 * 1024 * 1024, 3_650)?,
         EvidenceKey::from_hex(key_hex)?,
     )
+    .map(EvidenceVault::from)
+}
+
+/// The same retention view over an S3 bucket. Its passes skip the calibration
+/// phases, whose objects are only stored locally.
+///
+/// # Errors
+///
+/// Returns the vault's refusal of the key id or key, or of the bucket.
+pub fn open_s3_retention_vault(
+    store: S3EvidenceStoreConfig,
+    key_id: &str,
+    key_hex: &str,
+) -> Result<EvidenceVault, EvidenceError> {
+    S3EvidenceVault::open(
+        store,
+        key_id,
+        64 * 1024 * 1024,
+        3_650,
+        EvidenceKey::from_hex(key_hex)?,
+    )
+    .map(EvidenceVault::from)
 }
 
 /// What one pass selected, deleted and failed to delete, per phase.
@@ -142,7 +167,7 @@ impl std::fmt::Display for RetentionPassReport {
 #[allow(clippy::too_many_lines)]
 pub async fn run_retention_pass(
     store: &PostgresIdentityStore,
-    vault: &LocalEvidenceVault,
+    vault: &EvidenceVault,
     tenant: &TenantId,
     site: &SiteId,
     key_id: &str,
@@ -194,6 +219,105 @@ pub async fn run_retention_pass(
             failed += 1;
         }
     }
+    // Calibration report and lineage-review objects are only ever stored
+    // locally; an S3-backed pass leaves them to a local-root pass.
+    let calibration = match vault.as_local() {
+        Some(local) => {
+            run_calibration_phases(store, local, tenant, site, key_id, limit, orphan_grace).await?
+        }
+        None => RetentionPassReport::default(),
+    };
+    let pending_orphans = tokio::time::timeout(
+        DEADLINE,
+        store.pending_evidence_orphan_purges(tenant, site, limit),
+    )
+    .await
+    .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
+    .map_err(|_| "EVIDENCE_ORPHAN_PURGE_UNAVAILABLE")?;
+    let mut seen_orphans = HashSet::new();
+    let mut orphan_selected = pending_orphans.len();
+    let mut orphan_deleted = 0;
+    let mut orphan_failed = 0;
+    for job in &pending_orphans {
+        seen_orphans.insert(job.artifact_id().as_str().to_owned());
+        let result = orphan_result(vault, job.tenant_id(), job.site_id(), job.candidate());
+        tokio::time::timeout(DEADLINE, store.finish_evidence_orphan_purge(job, result))
+            .await
+            .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
+            .map_err(|_| "EVIDENCE_ORPHAN_COMPLETION_UNAVAILABLE")?;
+        if matches!(result, EvidenceOrphanPurgeResult::Deleted(_)) {
+            orphan_deleted += 1;
+        } else {
+            orphan_failed += 1;
+        }
+    }
+    let orphan_remaining = usize::from(limit).saturating_sub(pending_orphans.len());
+    let mut orphan_scanned = 0usize;
+    let mut cursor = None;
+    while orphan_scanned < orphan_remaining {
+        let page_limit = u16::try_from(orphan_remaining - orphan_scanned)
+            .map_err(|_| "EVIDENCE_ORPHAN_SCAN_UNAVAILABLE")?;
+        let page = vault
+            .list_orphan_candidates_after(tenant, site, orphan_grace, page_limit, cursor.as_deref())
+            .map_err(|_| "EVIDENCE_ORPHAN_SCAN_UNAVAILABLE")?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        cursor = Some(last.artifact_id().to_owned());
+        let candidates = page
+            .into_iter()
+            .filter(|candidate| !seen_orphans.contains(candidate.artifact_id()))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            continue;
+        }
+        let orphan_jobs = tokio::time::timeout(
+            DEADLINE,
+            store.prepare_evidence_orphan_purge(tenant, site, &candidates),
+        )
+        .await
+        .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
+        .map_err(|_| "EVIDENCE_ORPHAN_PURGE_UNAVAILABLE")?;
+        orphan_selected += orphan_jobs.len();
+        orphan_scanned += orphan_jobs.len();
+        for job in &orphan_jobs {
+            let result = orphan_result(vault, job.tenant_id(), job.site_id(), job.candidate());
+            tokio::time::timeout(DEADLINE, store.finish_evidence_orphan_purge(job, result))
+                .await
+                .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
+                .map_err(|_| "EVIDENCE_ORPHAN_COMPLETION_UNAVAILABLE")?;
+            if matches!(result, EvidenceOrphanPurgeResult::Deleted(_)) {
+                orphan_deleted += 1;
+            } else {
+                orphan_failed += 1;
+            }
+        }
+    }
+    Ok(RetentionPassReport {
+        cache_deleted,
+        selected: jobs.len(),
+        deleted,
+        failed,
+        orphan_selected,
+        orphan_deleted,
+        orphan_failed,
+        ..calibration
+    })
+}
+
+/// The calibration report and lineage-review phases of one pass, run
+/// between the generic expiry and orphan phases. Only the calibration
+/// fields of the returned report are set.
+#[allow(clippy::too_many_lines)]
+async fn run_calibration_phases(
+    store: &PostgresIdentityStore,
+    vault: &LocalEvidenceVault,
+    tenant: &TenantId,
+    site: &SiteId,
+    key_id: &str,
+    limit: u16,
+    orphan_grace: Duration,
+) -> Result<RetentionPassReport, &'static str> {
     let report_jobs = tokio::time::timeout(
         DEADLINE,
         store.prepare_calibration_report_purge(tenant, site, key_id, limit),
@@ -408,77 +532,7 @@ pub async fn run_retention_pass(
             }
         }
     }
-    let pending_orphans = tokio::time::timeout(
-        DEADLINE,
-        store.pending_evidence_orphan_purges(tenant, site, limit),
-    )
-    .await
-    .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
-    .map_err(|_| "EVIDENCE_ORPHAN_PURGE_UNAVAILABLE")?;
-    let mut seen_orphans = HashSet::new();
-    let mut orphan_selected = pending_orphans.len();
-    let mut orphan_deleted = 0;
-    let mut orphan_failed = 0;
-    for job in &pending_orphans {
-        seen_orphans.insert(job.artifact_id().as_str().to_owned());
-        let result = orphan_result(vault, job.tenant_id(), job.site_id(), job.candidate());
-        tokio::time::timeout(DEADLINE, store.finish_evidence_orphan_purge(job, result))
-            .await
-            .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
-            .map_err(|_| "EVIDENCE_ORPHAN_COMPLETION_UNAVAILABLE")?;
-        if matches!(result, EvidenceOrphanPurgeResult::Deleted(_)) {
-            orphan_deleted += 1;
-        } else {
-            orphan_failed += 1;
-        }
-    }
-    let orphan_remaining = usize::from(limit).saturating_sub(pending_orphans.len());
-    let mut orphan_scanned = 0usize;
-    let mut cursor = None;
-    while orphan_scanned < orphan_remaining {
-        let page_limit = u16::try_from(orphan_remaining - orphan_scanned)
-            .map_err(|_| "EVIDENCE_ORPHAN_SCAN_UNAVAILABLE")?;
-        let page = vault
-            .list_orphan_candidates_after(tenant, site, orphan_grace, page_limit, cursor.as_deref())
-            .map_err(|_| "EVIDENCE_ORPHAN_SCAN_UNAVAILABLE")?;
-        let Some(last) = page.last() else {
-            break;
-        };
-        cursor = Some(last.artifact_id().to_owned());
-        let candidates = page
-            .into_iter()
-            .filter(|candidate| !seen_orphans.contains(candidate.artifact_id()))
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            continue;
-        }
-        let orphan_jobs = tokio::time::timeout(
-            DEADLINE,
-            store.prepare_evidence_orphan_purge(tenant, site, &candidates),
-        )
-        .await
-        .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
-        .map_err(|_| "EVIDENCE_ORPHAN_PURGE_UNAVAILABLE")?;
-        orphan_selected += orphan_jobs.len();
-        orphan_scanned += orphan_jobs.len();
-        for job in &orphan_jobs {
-            let result = orphan_result(vault, job.tenant_id(), job.site_id(), job.candidate());
-            tokio::time::timeout(DEADLINE, store.finish_evidence_orphan_purge(job, result))
-                .await
-                .map_err(|_| "EVIDENCE_PURGE_TIMEOUT")?
-                .map_err(|_| "EVIDENCE_ORPHAN_COMPLETION_UNAVAILABLE")?;
-            if matches!(result, EvidenceOrphanPurgeResult::Deleted(_)) {
-                orphan_deleted += 1;
-            } else {
-                orphan_failed += 1;
-            }
-        }
-    }
     Ok(RetentionPassReport {
-        cache_deleted,
-        selected: jobs.len(),
-        deleted,
-        failed,
         report_selected: report_jobs.len(),
         report_deleted,
         report_failed,
@@ -491,9 +545,7 @@ pub async fn run_retention_pass(
         lineage_review_orphan_selected,
         lineage_review_orphan_deleted,
         lineage_review_orphan_failed,
-        orphan_selected,
-        orphan_deleted,
-        orphan_failed,
+        ..RetentionPassReport::default()
     })
 }
 
@@ -584,7 +636,7 @@ fn consume_lineage_review_orphan_scan_budget(remaining: &mut usize, observed_can
 }
 
 fn orphan_result(
-    vault: &LocalEvidenceVault,
+    vault: &EvidenceVault,
     tenant: &TenantId,
     site: &SiteId,
     candidate: &xshield_evidence::EvidenceOrphanCandidate,

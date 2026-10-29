@@ -21,6 +21,7 @@
 //! remove once it is older than the orphan grace and no longer locked.
 
 mod client;
+mod env;
 mod sigv4;
 #[cfg(test)]
 mod tests;

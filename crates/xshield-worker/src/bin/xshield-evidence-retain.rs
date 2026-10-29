@@ -2,10 +2,11 @@
 
 use std::{env, fs::File, path::Path, time::Duration};
 use xshield_core::domain::{SiteId, TenantId};
+use xshield_evidence::S3EvidenceStoreConfig;
 use xshield_postgres::PostgresIdentityStore;
 use xshield_postgres::retention_pass::{
     DEFAULT_ORPHAN_GRACE, MAX_ORPHAN_GRACE, RETENTION_BATCH_LIMIT_MAX, open_retention_vault,
-    run_retention_pass,
+    open_s3_retention_vault, run_retention_pass,
 };
 use zeroize::Zeroizing;
 
@@ -38,7 +39,7 @@ async fn run() -> Result<(), &'static str> {
     if args.next().is_some() || !(1..=RETENTION_BATCH_LIMIT_MAX).contains(&limit) {
         return Err(CONFIG);
     }
-    let root = env::var("XSHIELD_EVIDENCE_ROOT").map_err(|_| CONFIG)?;
+    let s3 = S3EvidenceStoreConfig::from_env().map_err(|_| CONFIG)?;
     let key_id = env::var("XSHIELD_EVIDENCE_KEY_ID").map_err(|_| CONFIG)?;
     let key = Zeroizing::new(
         xshield_core::secret_env::var("XSHIELD_EVIDENCE_KEY_HEX").map_err(|_| CONFIG)?,
@@ -54,12 +55,21 @@ async fn run() -> Result<(), &'static str> {
     if orphan_grace.is_zero() || orphan_grace > MAX_ORPHAN_GRACE {
         return Err(CONFIG);
     }
-    let vault = open_retention_vault(Path::new(&root), &key_id, &key).map_err(|_| CONFIG)?;
-    // ponytail: one Unix local directory owner, shared with the gateway writer.
-    // A gateway with XSHIELD_EVIDENCE_RETENTION_INTERVAL_SECONDS runs these
-    // passes itself; this command is for a stopped gateway.
-    let root_lock = File::open(&root).map_err(|_| "EVIDENCE_PURGE_UNAVAILABLE")?;
-    root_lock.try_lock().map_err(|_| "EVIDENCE_PURGE_BUSY")?;
+    // A bucket has no single owner: writes are create-only and each deletion
+    // first commits its intent, so the pass runs beside live gateways.
+    let (vault, _root_lock) = if let Some(s3) = s3 {
+        let vault = open_s3_retention_vault(s3, &key_id, &key).map_err(|_| CONFIG)?;
+        (vault, None)
+    } else {
+        let root = env::var("XSHIELD_EVIDENCE_ROOT").map_err(|_| CONFIG)?;
+        let vault = open_retention_vault(Path::new(&root), &key_id, &key).map_err(|_| CONFIG)?;
+        // ponytail: one Unix local directory owner, shared with the gateway writer.
+        // A gateway with XSHIELD_EVIDENCE_RETENTION_INTERVAL_SECONDS runs these
+        // passes itself; this command is for a stopped gateway.
+        let root_lock = File::open(&root).map_err(|_| "EVIDENCE_PURGE_UNAVAILABLE")?;
+        root_lock.try_lock().map_err(|_| "EVIDENCE_PURGE_BUSY")?;
+        (vault, Some(root_lock))
+    };
     let store = tokio::time::timeout(
         DEADLINE,
         PostgresIdentityStore::connect(&database, 1, Duration::from_secs(5)),
