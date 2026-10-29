@@ -15,6 +15,39 @@ const ALGORITHM: &str = "AES-256-GCM";
 const ORIGIN_CONTENT_TYPE: &str = "application/json";
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
+const DIRECT_DECRYPT_PROTOCOL_LABEL: &str = "xshield.request.direct-decrypt.v1";
+
+/// AAD protocol label for `ENVELOPE_HOOK` (docs/08 §8.1): distinct from
+/// [`DIRECT_DECRYPT_PROTOCOL_LABEL`] so the two modes' envelopes can never be
+/// cross-decrypted, even if a key happened to collide.
+const ENVELOPE_HOOK_PROTOCOL_LABEL: &str = "xshield.request.envelope-hook.v1";
+
+/// Prefix of every `ENVELOPE_HOOK` envelope's presented `key_id`, naming the
+/// session-key time window it was encrypted under (see
+/// [`envelope_hook_key_window`]). There is no statically configured key, so
+/// unlike `DIRECT_DECRYPT` this is a dynamic label, not a fixed value.
+pub const ENVELOPE_HOOK_KEY_ID_PREFIX: &str = "ehk.";
+
+/// Rotation period for the `ENVELOPE_HOOK` session key (docs/08 §8.1 / Option
+/// A). A message encrypted just before rollover is still accepted during the
+/// grace window: [`RequestCryptoEnvelopeHookRule::decode`] accepts the
+/// current window's key or the immediately preceding one.
+pub const ENVELOPE_HOOK_KEY_WINDOW_SECONDS: u64 = 3600;
+
+/// Returns the window index covering `now`. Key derivation (issued at
+/// bootstrap) and decode-time validation (at live-request time) must divide
+/// time identically, so both sides call this one function.
+#[must_use]
+pub const fn envelope_hook_key_window(now: UnixSeconds) -> u64 {
+    now.value() / ENVELOPE_HOOK_KEY_WINDOW_SECONDS
+}
+
+/// Returns the exact `key_id` a sensor must present for messages encrypted
+/// under the session key issued for `window`.
+#[must_use]
+pub fn envelope_hook_key_id(window: u64) -> String {
+    format!("{ENVELOPE_HOOK_KEY_ID_PREFIX}{window}")
+}
 
 /// Server-selected request protocol coverage for one operation.
 #[derive(Debug)]
@@ -25,6 +58,9 @@ pub enum RequestCryptoPolicy {
     Observe(RequestCryptoObserveRule),
     /// A time-bound approved page build may use its original protocol.
     Compatibility(RequestCryptoCompatibilityRule),
+    /// Injected business-entry-point encryption, keyed per authenticated
+    /// session rather than by a statically configured key (docs/08 §8.1).
+    EnvelopeHook(RequestCryptoEnvelopeHookRule),
 }
 
 /// Validated server approval for one bounded compatibility scope.
@@ -88,12 +124,32 @@ impl RequestCryptoObserveRule {
 }
 
 struct ParsedEnvelope {
+    key_id: String,
     message_id: String,
     issued_at: UnixSeconds,
     expires_at: UnixSeconds,
     nonce: [u8; NONCE_BYTES],
     ciphertext: Vec<u8>,
     tag: Vec<u8>,
+}
+
+/// Structural bounds [`parse_envelope`] enforces before any cryptography runs.
+/// Shared by every [`RequestCryptoPolicy::Enforce`] variant so the envelope
+/// shape, size limits, and lifetime checks stay identical; only the key
+/// identifier and key-lease window differ per adapter.
+struct EnvelopeBounds<'a> {
+    adapter_revision: &'a str,
+    /// `Some` pins the presented `key_id` to this exact static value
+    /// (`DIRECT_DECRYPT`); `None` accepts whatever the caller presents, since
+    /// `ENVELOPE_HOOK` has no statically configured key (docs/08 §8.1).
+    expected_key_id: Option<&'a str>,
+    max_envelope_bytes: usize,
+    max_plaintext_bytes: usize,
+    max_message_age_seconds: u64,
+    max_future_skew_seconds: u64,
+    /// `Some` additionally requires the message's lifetime to sit inside this
+    /// key's configured lease window (`DIRECT_DECRYPT` only).
+    key_lease: Option<(UnixSeconds, UnixSeconds)>,
 }
 
 /// Validated server-side rule for the first direct-decryption adapter.
@@ -319,7 +375,16 @@ impl RequestCryptoRule {
         envelope: &[u8],
         keys: &dyn KeyAccessPort,
     ) -> Result<FrozenRequest, ReasonCode> {
-        let parsed = parse_envelope(self, now, envelope)?;
+        let bounds = EnvelopeBounds {
+            adapter_revision: &self.adapter_revision,
+            expected_key_id: Some(&self.key_id),
+            max_envelope_bytes: self.max_envelope_bytes,
+            max_plaintext_bytes: self.max_plaintext_bytes,
+            max_message_age_seconds: self.max_message_age_seconds,
+            max_future_skew_seconds: self.max_future_skew_seconds,
+            key_lease: Some((self.key_not_before, self.key_expires_at)),
+        };
+        let parsed = parse_envelope(&bounds, now, envelope)?;
         if now < self.key_not_before || now >= self.key_expires_at {
             return Err(ReasonCode::RequestCryptoKeyUnavailable);
         }
@@ -331,6 +396,7 @@ impl RequestCryptoRule {
             at: now,
         })?;
         let aad = aad(
+            DIRECT_DECRYPT_PROTOCOL_LABEL,
             tenant_id,
             site_id,
             operation_id,
@@ -382,12 +448,190 @@ impl RequestCryptoRule {
     }
 }
 
+/// Validated server-side rule for injected business-entry-point encryption,
+/// keyed per authenticated session rather than by a statically configured key
+/// (docs/08 §8.1, Option A). Unlike [`RequestCryptoRule`] it carries no
+/// `key_id`, no key-lease window, and no [`KeyAccessPort`]: the caller derives
+/// the session key independently (see `envelope_hook_key` on the identity
+/// adapter) and presents it through [`EnvelopeHookKeys`].
+#[derive(Debug)]
+pub struct RequestCryptoEnvelopeHookRule {
+    pub(crate) adapter_revision: String,
+    pub(crate) max_envelope_bytes: usize,
+    pub(crate) max_plaintext_bytes: usize,
+    pub(crate) max_message_age_seconds: u64,
+    pub(crate) max_future_skew_seconds: u64,
+    pub(crate) max_active_messages: u32,
+    pub(crate) max_in_flight_bytes: usize,
+}
+
+/// The session-bound symmetric keys a caller derived for the current and
+/// (if distinct) immediately preceding time window, so a message encrypted
+/// just before rollover still decodes during the grace period.
+pub struct EnvelopeHookKeys {
+    current_window: u64,
+    current_key: Zeroizing<[u8; 32]>,
+    previous: Option<(u64, Zeroizing<[u8; 32]>)>,
+}
+
+impl EnvelopeHookKeys {
+    /// Builds the two-window key set `decode` validates a presented `key_id`
+    /// against.
+    #[must_use]
+    pub const fn new(
+        current_window: u64,
+        current_key: Zeroizing<[u8; 32]>,
+        previous: Option<(u64, Zeroizing<[u8; 32]>)>,
+    ) -> Self {
+        Self {
+            current_window,
+            current_key,
+            previous,
+        }
+    }
+
+    fn key_for_window(&self, window: u64) -> Option<&[u8; 32]> {
+        if window == self.current_window {
+            return Some(&self.current_key);
+        }
+        self.previous
+            .as_ref()
+            .and_then(|(previous_window, key)| (window == *previous_window).then_some(&**key))
+    }
+}
+
+impl RequestCryptoEnvelopeHookRule {
+    /// Returns the fixed authenticated-encryption algorithm.
+    #[must_use]
+    pub const fn algorithm(&self) -> &'static str {
+        ALGORITHM
+    }
+
+    /// Returns the maximum accepted serialized envelope size.
+    #[must_use]
+    pub const fn max_envelope_bytes(&self) -> usize {
+        self.max_envelope_bytes
+    }
+
+    /// Returns the exact configured adapter revision.
+    #[must_use]
+    pub fn adapter_revision(&self) -> &str {
+        &self.adapter_revision
+    }
+
+    /// Returns the site-wide active replay-record bound.
+    #[must_use]
+    pub const fn max_active_messages(&self) -> u32 {
+        self.max_active_messages
+    }
+
+    /// Returns the shared-memory reservation required before buffering.
+    #[must_use]
+    pub const fn max_in_flight_bytes(&self) -> usize {
+        self.max_in_flight_bytes
+    }
+
+    /// Authenticates, decrypts, validates, and freezes one request entity
+    /// using a session-derived key rather than a statically configured one.
+    ///
+    /// The presented `key_id` must name a window `keys` was derived for; any
+    /// other value is refused before any cryptography runs. The AAD binds
+    /// the ciphertext to tenant, site, operation, HTTP semantics, adapter
+    /// revision, the presented key identifier, and rebuilt media type.
+    ///
+    /// # Errors
+    /// Returns a stable denial reason for invalid envelopes, an unrecognized
+    /// key window, failed authentication, oversized plaintext, or invalid
+    /// JSON.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode(
+        &self,
+        tenant_id: &str,
+        site_id: &str,
+        operation_id: &str,
+        method: &str,
+        path: &str,
+        now: UnixSeconds,
+        envelope: &[u8],
+        keys: &EnvelopeHookKeys,
+    ) -> Result<FrozenRequest, ReasonCode> {
+        let bounds = EnvelopeBounds {
+            adapter_revision: &self.adapter_revision,
+            expected_key_id: None,
+            max_envelope_bytes: self.max_envelope_bytes,
+            max_plaintext_bytes: self.max_plaintext_bytes,
+            max_message_age_seconds: self.max_message_age_seconds,
+            max_future_skew_seconds: self.max_future_skew_seconds,
+            key_lease: None,
+        };
+        let parsed = parse_envelope(&bounds, now, envelope)?;
+        let window = parsed
+            .key_id
+            .strip_prefix(ENVELOPE_HOOK_KEY_ID_PREFIX)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let key = keys
+            .key_for_window(window)
+            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let aad = aad(
+            ENVELOPE_HOOK_PROTOCOL_LABEL,
+            tenant_id,
+            site_id,
+            operation_id,
+            method,
+            path,
+            &self.adapter_revision,
+            &parsed.key_id,
+            &parsed.message_id,
+            parsed.issued_at,
+            parsed.expires_at,
+        )?;
+        let plaintext = openssl::symm::decrypt_aead(
+            Cipher::aes_256_gcm(),
+            key,
+            Some(&parsed.nonce),
+            &aad,
+            &parsed.ciphertext,
+            &parsed.tag,
+        )
+        .map_err(|_| ReasonCode::RequestCryptoAuthenticationFailed)?;
+        if plaintext.is_empty() || plaintext.len() > self.max_plaintext_bytes {
+            return Err(ReasonCode::RequestEnvelopeInvalid);
+        }
+        let plaintext = Zeroizing::new(plaintext);
+        if !strict_json(&plaintext)
+            .map_err(|_| ReasonCode::RequestEnvelopeInvalid)?
+            .is_object()
+        {
+            return Err(ReasonCode::RequestEnvelopeInvalid);
+        }
+        let evidence = RequestCryptoEvidence {
+            algorithm: ALGORITHM,
+            adapter_revision: self.adapter_revision.clone(),
+            key_id: parsed.key_id.clone(),
+            message_id: parsed.message_id.clone(),
+            nonce_sha256: hex(&sha256(&parsed.nonce)),
+            issued_at: parsed.issued_at,
+            expires_at: parsed.expires_at,
+            envelope_sha256: hex(&sha256(envelope)),
+            rebuilt_sha256: hex(&sha256(&plaintext)),
+        };
+        Ok(FrozenRequest {
+            body: Bytes::copy_from_slice(&plaintext),
+            evidence,
+            message_id: parsed.message_id,
+            nonce: parsed.nonce,
+            expires_at: parsed.expires_at,
+        })
+    }
+}
+
 fn parse_envelope(
-    rule: &RequestCryptoRule,
+    bounds: &EnvelopeBounds<'_>,
     now: UnixSeconds,
     envelope: &[u8],
 ) -> Result<ParsedEnvelope, ReasonCode> {
-    if envelope.is_empty() || envelope.len() > rule.max_envelope_bytes {
+    if envelope.is_empty() || envelope.len() > bounds.max_envelope_bytes {
         return Err(ReasonCode::RequestEnvelopeInvalid);
     }
     let value = strict_json(envelope).map_err(|_| ReasonCode::RequestEnvelopeInvalid)?;
@@ -405,11 +649,14 @@ fn parse_envelope(
         "schema_version",
         "tag",
     ];
+    let key_id = string(object, "key_id")?;
     if object.len() != expected.len()
         || expected.iter().any(|name| !object.contains_key(*name))
         || object.get("schema_version").and_then(Value::as_u64) != Some(SCHEMA_VERSION)
-        || string(object, "adapter_revision")? != rule.adapter_revision
-        || string(object, "key_id")? != rule.key_id
+        || string(object, "adapter_revision")? != bounds.adapter_revision
+        || bounds
+            .expected_key_id
+            .is_some_and(|expected_key_id| key_id != expected_key_id)
     {
         return Err(ReasonCode::RequestEnvelopeInvalid);
     }
@@ -418,24 +665,28 @@ fn parse_envelope(
     if expires_at <= now {
         return Err(ReasonCode::RequestCryptoMessageExpired);
     }
-    if issued_at.value() > now.value().saturating_add(rule.max_future_skew_seconds) {
+    if issued_at.value() > now.value().saturating_add(bounds.max_future_skew_seconds) {
         return Err(ReasonCode::RequestCryptoMessageFromFuture);
     }
+    let (key_not_before, key_expires_at) = bounds
+        .key_lease
+        .unwrap_or((UnixSeconds::new(0), UnixSeconds::new(u64::MAX)));
     if expires_at <= issued_at
-        || expires_at.value().saturating_sub(issued_at.value()) > rule.max_message_age_seconds
-        || issued_at < rule.key_not_before
-        || expires_at > rule.key_expires_at
+        || expires_at.value().saturating_sub(issued_at.value()) > bounds.max_message_age_seconds
+        || issued_at < key_not_before
+        || expires_at > key_expires_at
     {
         return Err(ReasonCode::RequestEnvelopeInvalid);
     }
     Ok(ParsedEnvelope {
+        key_id: key_id.to_owned(),
         message_id: canonical_message_id(string(object, "message_id")?)?,
         issued_at,
         expires_at,
         nonce: decode_hex_exact(string(object, "nonce")?, NONCE_BYTES)?
             .try_into()
             .map_err(|_| ReasonCode::RequestEnvelopeInvalid)?,
-        ciphertext: decode_hex(string(object, "ciphertext")?, rule.max_plaintext_bytes)?,
+        ciphertext: decode_hex(string(object, "ciphertext")?, bounds.max_plaintext_bytes)?,
         tag: decode_hex_exact(string(object, "tag")?, TAG_BYTES)?,
     })
 }
@@ -506,6 +757,7 @@ fn hex_nibble(value: u8) -> Result<u8, ReasonCode> {
 
 #[allow(clippy::too_many_arguments)]
 fn aad(
+    protocol_label: &str,
     tenant_id: &str,
     site_id: &str,
     operation_id: &str,
@@ -521,7 +773,7 @@ fn aad(
     let expires_at = expires_at.value().to_string();
     let mut output = Vec::new();
     for value in [
-        "xshield.request.direct-decrypt.v1",
+        protocol_label,
         tenant_id,
         site_id,
         operation_id,
@@ -609,6 +861,7 @@ mod tests {
             &[7; 32],
             Some(&nonce),
             &aad(
+                DIRECT_DECRYPT_PROTOCOL_LABEL,
                 "tenant_demo",
                 "site_demo",
                 "orders.create",
@@ -934,5 +1187,265 @@ mod tests {
             rule.authorize(UnixSeconds::new(10), &approved),
             Err(ReasonCode::RequestCryptoCompatibilityExpired)
         );
+    }
+
+    fn envelope_hook_rule() -> RequestCryptoEnvelopeHookRule {
+        RequestCryptoEnvelopeHookRule {
+            adapter_revision: "checkout-json-r1".to_owned(),
+            max_envelope_bytes: 4096,
+            max_plaintext_bytes: 1024,
+            max_message_age_seconds: 5,
+            max_future_skew_seconds: 1,
+            max_active_messages: 100,
+            max_in_flight_bytes: 16_384,
+        }
+    }
+
+    fn envelope_hook_envelope(key_id: &str, path: &str, plaintext: &[u8]) -> Vec<u8> {
+        let rule = envelope_hook_rule();
+        let nonce = [5; NONCE_BYTES];
+        let message_id = "msg_018f2a3b-4c5d-7000-8000-000000000a01";
+        let issued_at = UnixSeconds::new(4);
+        let expires_at = UnixSeconds::new(9);
+        let mut tag = [0; TAG_BYTES];
+        let ciphertext = encrypt_aead(
+            Cipher::aes_256_gcm(),
+            &[9; 32],
+            Some(&nonce),
+            &aad(
+                ENVELOPE_HOOK_PROTOCOL_LABEL,
+                "tenant_demo",
+                "site_demo",
+                "checkout.submit",
+                "POST",
+                path,
+                rule.adapter_revision(),
+                key_id,
+                message_id,
+                issued_at,
+                expires_at,
+            )
+            .unwrap(),
+            plaintext,
+            &mut tag,
+        )
+        .unwrap();
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "adapter_revision": rule.adapter_revision(),
+            "key_id": key_id,
+            "message_id": message_id,
+            "issued_at": issued_at.value(),
+            "expires_at": expires_at.value(),
+            "nonce": hex(&nonce),
+            "ciphertext": hex(&ciphertext),
+            "tag": hex(&tag),
+        }))
+        .unwrap()
+    }
+
+    fn decode_envelope_hook_at_five(
+        rule: &RequestCryptoEnvelopeHookRule,
+        keys: &EnvelopeHookKeys,
+        envelope: &[u8],
+    ) -> Result<FrozenRequest, ReasonCode> {
+        rule.decode(
+            "tenant_demo",
+            "site_demo",
+            "checkout.submit",
+            "POST",
+            "/checkout",
+            UnixSeconds::new(5),
+            envelope,
+            keys,
+        )
+    }
+
+    // A message encrypted under the current window's key decodes; one
+    // encrypted under the immediately preceding window still decodes during
+    // the grace period; and the AAD binding prevents a presented key_id from
+    // being paired with any other window's key.
+    #[test]
+    fn envelope_hook_accepts_the_current_or_previous_window_key() {
+        let rule = envelope_hook_rule();
+        let keys = EnvelopeHookKeys::new(
+            7,
+            Zeroizing::new([9; 32]),
+            Some((6, Zeroizing::new([1; 32]))),
+        );
+        let plaintext = br#"{"sku":"A-1"}"#;
+        let current = envelope_hook_envelope(&envelope_hook_key_id(7), "/checkout", plaintext);
+        let frozen = decode_envelope_hook_at_five(&rule, &keys, &current).unwrap();
+        assert_eq!(frozen.evidence().key_id(), "ehk.7");
+        assert_eq!(frozen.into_body(), Bytes::from_static(plaintext));
+
+        let unknown_window =
+            envelope_hook_envelope(&envelope_hook_key_id(9), "/checkout", plaintext);
+        assert!(matches!(
+            decode_envelope_hook_at_five(&rule, &keys, &unknown_window),
+            Err(ReasonCode::RequestCryptoKeyUnavailable)
+        ));
+
+        let malformed_key_id = envelope_hook_envelope("ehk.not-a-number", "/checkout", plaintext);
+        assert!(matches!(
+            decode_envelope_hook_at_five(&rule, &keys, &malformed_key_id),
+            Err(ReasonCode::RequestCryptoKeyUnavailable)
+        ));
+    }
+
+    #[test]
+    fn envelope_hook_previous_window_key_decodes_a_message_encrypted_under_it() {
+        let rule = envelope_hook_rule();
+        let keys = EnvelopeHookKeys::new(
+            7,
+            Zeroizing::new([9; 32]),
+            Some((6, Zeroizing::new([1; 32]))),
+        );
+        let plaintext = br#"{"sku":"A-1"}"#;
+        let mut rule_previous = envelope_hook_rule();
+        rule_previous.adapter_revision = rule.adapter_revision.clone();
+        let nonce = [5; NONCE_BYTES];
+        let message_id = "msg_018f2a3b-4c5d-7000-8000-000000000a02";
+        let issued_at = UnixSeconds::new(4);
+        let expires_at = UnixSeconds::new(9);
+        let key_id = envelope_hook_key_id(6);
+        let mut tag = [0; TAG_BYTES];
+        let ciphertext = encrypt_aead(
+            Cipher::aes_256_gcm(),
+            &[1; 32],
+            Some(&nonce),
+            &aad(
+                ENVELOPE_HOOK_PROTOCOL_LABEL,
+                "tenant_demo",
+                "site_demo",
+                "checkout.submit",
+                "POST",
+                "/checkout",
+                rule.adapter_revision(),
+                &key_id,
+                message_id,
+                issued_at,
+                expires_at,
+            )
+            .unwrap(),
+            plaintext,
+            &mut tag,
+        )
+        .unwrap();
+        let envelope = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "adapter_revision": rule.adapter_revision(),
+            "key_id": key_id,
+            "message_id": message_id,
+            "issued_at": issued_at.value(),
+            "expires_at": expires_at.value(),
+            "nonce": hex(&nonce),
+            "ciphertext": hex(&ciphertext),
+            "tag": hex(&tag),
+        }))
+        .unwrap();
+        let frozen = decode_envelope_hook_at_five(&rule, &keys, &envelope).unwrap();
+        assert_eq!(frozen.into_body(), Bytes::from_static(plaintext));
+
+        // With no previous-window key at all (the very first window a
+        // session ever used), the same message is refused instead of
+        // silently accepted under some other key.
+        let no_grace = EnvelopeHookKeys::new(7, Zeroizing::new([9; 32]), None);
+        assert!(matches!(
+            decode_envelope_hook_at_five(&rule, &no_grace, &envelope),
+            Err(ReasonCode::RequestCryptoKeyUnavailable)
+        ));
+    }
+
+    // ENVELOPE_HOOK has no static key_id to check structurally, so a tampered
+    // key_id is only caught once it is paired against the wrong AAD: the
+    // ciphertext was bound to the *original* key_id and cannot authenticate
+    // under a different one, even when that other one also names a key the
+    // caller holds.
+    #[test]
+    fn envelope_hook_key_id_is_bound_by_the_aad_not_just_presented() {
+        let rule = envelope_hook_rule();
+        let keys = EnvelopeHookKeys::new(
+            7,
+            Zeroizing::new([9; 32]),
+            Some((6, Zeroizing::new([1; 32]))),
+        );
+        let plaintext = br#"{"sku":"A-1"}"#;
+        let envelope = envelope_hook_envelope(&envelope_hook_key_id(7), "/checkout", plaintext);
+        let mut retargeted: Value = serde_json::from_slice(&envelope).unwrap();
+        retargeted["key_id"] = json!(envelope_hook_key_id(6));
+        assert!(matches!(
+            decode_envelope_hook_at_five(&rule, &keys, &serde_json::to_vec(&retargeted).unwrap()),
+            Err(ReasonCode::RequestCryptoAuthenticationFailed)
+        ));
+    }
+
+    // A fixed vector sealed by the browser sensor's own WebCrypto
+    // implementation (sensor-1.3.0.js), not by this file's own `aad`/AES-GCM
+    // calls: this is the one test that would catch the two implementations
+    // silently drifting apart (byte order, field order, or tag placement)
+    // even though each side's own round-trip tests would still pass.
+    #[test]
+    fn decodes_a_vector_sealed_by_the_browser_sensors_own_webcrypto_implementation() {
+        let rule = RequestCryptoEnvelopeHookRule {
+            adapter_revision: "checkout-json-r1".to_owned(),
+            max_envelope_bytes: 4096,
+            max_plaintext_bytes: 1024,
+            max_message_age_seconds: 5,
+            max_future_skew_seconds: 1,
+            max_active_messages: 100,
+            max_in_flight_bytes: 16_384,
+        };
+        let mut key = [0_u8; 32];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = u8::try_from(index + 1).unwrap();
+        }
+        let keys = EnvelopeHookKeys::new(7, Zeroizing::new(key), None);
+        let envelope = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "adapter_revision": "checkout-json-r1",
+            "key_id": "ehk.7",
+            "message_id": "msg_018f2a3b-4c5d-7000-8000-000000000a01",
+            "issued_at": 4,
+            "expires_at": 9,
+            "nonce": "6465666768696a6b6c6d6e6f",
+            "ciphertext": "1b7d0027e4a0865bb97a9eba65",
+            "tag": "776677d5b0cd220805cd1d0777feac99",
+        }))
+        .unwrap();
+        let frozen = rule
+            .decode(
+                "tenant_demo",
+                "site_demo",
+                "checkout.submit",
+                "POST",
+                "/checkout",
+                UnixSeconds::new(5),
+                &envelope,
+                &keys,
+            )
+            .unwrap();
+        assert_eq!(frozen.into_body(), Bytes::from_static(br#"{"sku":"A-1"}"#));
+    }
+
+    #[test]
+    fn envelope_hook_rejects_a_different_path_or_operation() {
+        let rule = envelope_hook_rule();
+        let keys = EnvelopeHookKeys::new(7, Zeroizing::new([9; 32]), None);
+        let envelope =
+            envelope_hook_envelope(&envelope_hook_key_id(7), "/checkout", br#"{"sku":"A-1"}"#);
+        assert!(matches!(
+            rule.decode(
+                "tenant_demo",
+                "site_demo",
+                "checkout.submit",
+                "POST",
+                "/checkout/other",
+                UnixSeconds::new(5),
+                &envelope,
+                &keys,
+            ),
+            Err(ReasonCode::RequestCryptoAuthenticationFailed)
+        ));
     }
 }

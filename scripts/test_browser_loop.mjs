@@ -2,7 +2,7 @@
  * Real-browser provenance loop, driven by scripts/test_browser_loop.sh.
  *
  * The happy path uses only page interactions (goto, fill, click): the app's
- * own script sends its Authorization header and the 1.2.0 sensor attaches
+ * own script sends its Authorization header and the 1.3.0 sensor attaches
  * the server-issued references. Attack cases then replay what a user, a
  * script or another browser could send; each must be denied with its stable
  * reason code before the origin sees it. Writes the request IDs it observed
@@ -163,7 +163,7 @@ try {
   //    (response-derived action), all through the page's own script.
   const alice = await signIn(browser, "alice");
   assert.equal(alice.app.status(), 200);
-  assert.equal(alice.bootstrap.sensor_version, "1.2.0");
+  assert.equal(alice.bootstrap.sensor_version, "1.3.0");
   assert.equal(alice.bootstrap.page_handle, alice.pageHandle);
   assert.deepEqual(
     alice.bootstrap.actions.map(({ method, path_template }) => `${method} ${path_template}`),

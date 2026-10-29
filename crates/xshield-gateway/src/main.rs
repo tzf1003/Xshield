@@ -54,7 +54,10 @@ use xshield_gateway::multi_site::{
     ApplyCoordinator, ConfigSnapshotStore, GatewaySite, GatewaySnapshot, frozen_origin_target,
     origin_form_target, routing_authority,
 };
-use xshield_gateway::request_crypto::{FrozenRequest, RequestCryptoPolicy};
+use xshield_gateway::request_crypto::{
+    EnvelopeHookKeys, FrozenRequest, RequestCryptoEnvelopeHookRule, RequestCryptoPolicy,
+    envelope_hook_key_window,
+};
 use xshield_gateway::response_crypto::ENCRYPTED_RESPONSE_CONTENT_TYPE;
 use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
 use xshield_gateway::sensor_ws::{self, MAX_WS_FRAME_BYTES, WsOpcode};
@@ -1480,6 +1483,7 @@ impl Gateway {
             .await;
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn apply_request_crypto(
         &self,
         session: &mut Session,
@@ -1535,6 +1539,41 @@ impl Gateway {
                 }
                 return;
             }
+            RequestCryptoPolicy::EnvelopeHook(rule) => {
+                let started_at = Instant::now();
+                match self
+                    .decrypt_envelope_hook_request(
+                        session,
+                        context,
+                        rule,
+                        now,
+                        decision,
+                        &context.request_id,
+                    )
+                    .await
+                {
+                    Ok(frozen) => {
+                        context.rebuilt_request_len = Some(frozen.body_len());
+                        context.request_crypto_audit =
+                            Some(RequestCryptoAudit::envelope_hook_passed(
+                                frozen.evidence(),
+                                elapsed_us(started_at),
+                            ));
+                        context.rebuilt_request_body = Some(frozen.into_body());
+                    }
+                    Err(reason) => {
+                        context.request_crypto_audit =
+                            Some(RequestCryptoAudit::envelope_hook_failed(
+                                rule,
+                                reason,
+                                elapsed_us(started_at),
+                            ));
+                        decision.outcome = GatewayOutcome::Denied;
+                        decision.reason_code = reason;
+                    }
+                }
+                return;
+            }
             RequestCryptoPolicy::Enforce(rule) => rule,
         };
         let started_at = Instant::now();
@@ -1558,6 +1597,118 @@ impl Gateway {
                 ));
                 decision.outcome = GatewayOutcome::Denied;
                 decision.reason_code = reason;
+            }
+        }
+    }
+
+    /// Mirrors [`Self::decrypt_request`] for `ENVELOPE_HOOK`: the key is
+    /// derived per authenticated session rather than loaded from
+    /// [`Self::request_keys`], so this buffers, derives, decodes, and
+    /// records replay separately rather than sharing that method's body.
+    async fn decrypt_envelope_hook_request(
+        &self,
+        session: &mut Session,
+        context: &RequestContext,
+        rule: &RequestCryptoEnvelopeHookRule,
+        now: UnixSeconds,
+        decision: &GatewayDecision,
+        request_id: &str,
+    ) -> Result<FrozenRequest, ReasonCode> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let response_identity = context
+            .response_identity
+            .as_ref()
+            .ok_or(ReasonCode::RequestCryptoKeyUnavailable)?;
+        let tenant_id = context.config(self).tenant_id();
+        let site_id = context.config(self).site_id();
+        let binding_id = response_identity.snapshot.binding_id();
+        let epoch = response_identity.snapshot.epoch();
+        let window = envelope_hook_key_window(now);
+        let current_key = identity
+            .envelope_hook_key(tenant_id, site_id, binding_id, epoch, window)
+            .map_err(|_| ReasonCode::RequestCryptoKeyUnavailable)?;
+        let previous = window
+            .checked_sub(1)
+            .map(|previous_window| {
+                identity
+                    .envelope_hook_key(tenant_id, site_id, binding_id, epoch, previous_window)
+                    .map(|key| (previous_window, key))
+                    .map_err(|_| ReasonCode::RequestCryptoKeyUnavailable)
+            })
+            .transpose()?;
+        let keys = EnvelopeHookKeys::new(window, current_key, previous);
+        validate_encrypted_request_headers(session.req_header(), rule.max_envelope_bytes())?;
+        let method = session.req_header().method.as_str().to_owned();
+        let path = session.req_header().uri.path().to_owned();
+        session.as_mut().enable_retry_buffering();
+        let permits = u32::try_from(rule.max_in_flight_bytes())
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        let _permit = Arc::clone(&self.buffered_body_budget)
+            .try_acquire_many_owned(permits)
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        let mut envelope = Vec::new();
+        envelope
+            .try_reserve_exact(rule.max_envelope_bytes())
+            .map_err(|_| ReasonCode::RequestBufferCapacityExhausted)?;
+        while let Some(chunk) = session
+            .read_request_body()
+            .await
+            .map_err(|_| ReasonCode::RequestEnvelopeInvalid)?
+        {
+            if envelope.len().saturating_add(chunk.len()) > rule.max_envelope_bytes() {
+                return Err(ReasonCode::RequestBodyTooLarge);
+            }
+            envelope.extend_from_slice(&chunk);
+        }
+        let operation_id = decision
+            .operation_id
+            .as_ref()
+            .ok_or(ReasonCode::RequestEnvelopeInvalid)?;
+        let frozen = rule.decode(
+            tenant_id.as_str(),
+            site_id.as_str(),
+            operation_id.as_str(),
+            &method,
+            &path,
+            now,
+            &envelope,
+            &keys,
+        )?;
+        let request_id = RequestId::parse(request_id)
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let postgres = self
+            .postgres
+            .as_ref()
+            .ok_or(ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let message = RequestCryptoMessage::new(
+            tenant_id,
+            site_id,
+            frozen.evidence().key_id(),
+            frozen.message_id(),
+            frozen.nonce(),
+            &request_id,
+            frozen.expires_at(),
+            now,
+            rule.max_active_messages(),
+        )
+        .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        let store = postgres
+            .store()
+            .await
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?;
+        match store
+            .consume_request_crypto_message(message)
+            .await
+            .map_err(|_| ReasonCode::RequestCryptoReplayStoreUnavailable)?
+        {
+            RequestCryptoMessageOutcome::Consumed => Ok(frozen),
+            RequestCryptoMessageOutcome::Replayed => Err(ReasonCode::RequestCryptoReplayDetected),
+            RequestCryptoMessageOutcome::Expired => Err(ReasonCode::RequestCryptoMessageExpired),
+            RequestCryptoMessageOutcome::CapacityExceeded => {
+                Err(ReasonCode::RequestCryptoReplayCapacityExceeded)
             }
         }
     }

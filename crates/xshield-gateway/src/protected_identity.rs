@@ -43,12 +43,15 @@ use xshield_postgres::{
 };
 use zeroize::Zeroizing;
 
+mod envelope_hook_keys;
 mod page_issue;
 mod response_issue;
 mod share_entry;
 mod share_issue;
 
-pub(crate) use page_issue::SensorBootstrapDelivery;
+#[cfg(test)]
+pub(crate) use page_issue::EnvelopeHookOperation;
+pub(crate) use page_issue::{EnvelopeHookBootstrap, SensorBootstrapDelivery};
 pub(crate) use response_issue::PreparedResponseGrants;
 
 pub(crate) const WAF_COOKIE: &str = "__Host-xshield_sid";
