@@ -39,6 +39,8 @@ enum Family {
     EdgeUnknown,
     EvidenceCaptured,
     SensorObservation,
+    BusinessWsClosed,
+    BusinessWsMessage,
 }
 
 /// Reads only the stage name so the whole payload is parsed once, by the
@@ -54,6 +56,8 @@ fn family(event: &WireEvent) -> Option<Family> {
         "edge.unknown" => Some(Family::EdgeUnknown),
         "evidence.captured" => Some(Family::EvidenceCaptured),
         "sensor.observation" => Some(Family::SensorObservation),
+        "business_ws.closed" => Some(Family::BusinessWsClosed),
+        "business_ws.message" => Some(Family::BusinessWsMessage),
         "stage.completed" | "stage.skipped" => {
             let name: StageName = serde_json::from_str(event.payload.get()).ok()?;
             match name.stage.as_str() {
@@ -83,6 +87,8 @@ pub(super) fn parse(event: &WireEvent) -> Result<PayloadSummary, PublishError> {
         Family::EdgeUnknown => edge(event, json, "unknown"),
         Family::EvidenceCaptured => evidence_captured(event, json),
         Family::SensorObservation => sensor_observation(json),
+        Family::BusinessWsClosed => business_ws_closed(json),
+        Family::BusinessWsMessage => business_ws_message(json),
     }
 }
 
@@ -473,6 +479,77 @@ fn valid_client_hint(value: &str) -> bool {
         && value.len() <= MAX_CLIENT_TEXT_BYTES
         && value.bytes().all(|byte| byte.is_ascii_graphic())
         && !value.contains("action.")
+}
+
+/// One business WebSocket connection's traffic summary, written once the
+/// connection closes (`durable_audit::record_business_ws_connection`).
+/// Carries no plaintext: only the direction/kind/byte-length shape the
+/// gateway's passive frame scanner observes, never message content.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BusinessWsClosed {
+    operation_id: String,
+    messages_to_origin: u64,
+    messages_to_client: u64,
+    bytes_to_origin: u64,
+    bytes_to_client: u64,
+    degraded: bool,
+    duration_us: u64,
+}
+
+fn business_ws_closed(json: &str) -> Result<PayloadSummary, PublishError> {
+    let payload: BusinessWsClosed = serde_json::from_str(json)?;
+    if !valid_name(&payload.operation_id) {
+        return Err(PublishError::InvalidEvent);
+    }
+    let _ = (
+        payload.messages_to_origin,
+        payload.messages_to_client,
+        payload.bytes_to_origin,
+        payload.bytes_to_client,
+        payload.degraded,
+    );
+    Ok(PayloadSummary {
+        operation_id: payload.operation_id,
+        proof_kind: "observation".to_owned(),
+        confidence_status: "not_applicable".to_owned(),
+        duration_us: payload.duration_us,
+        ..PayloadSummary::default()
+    })
+}
+
+/// One reassembled business WebSocket message, chained from its
+/// connection's `business_ws.closed` event.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BusinessWsMessage {
+    operation_id: String,
+    direction: String,
+    kind: String,
+    byte_len: u64,
+    frame_count: u32,
+    degraded: bool,
+}
+
+fn business_ws_message(json: &str) -> Result<PayloadSummary, PublishError> {
+    let payload: BusinessWsMessage = serde_json::from_str(json)?;
+    if !valid_name(&payload.operation_id)
+        || !matches!(payload.direction.as_str(), "to_origin" | "to_client")
+        || !matches!(
+            payload.kind.as_str(),
+            "text" | "binary" | "close" | "ping" | "pong" | "other"
+        )
+        || payload.frame_count == 0
+    {
+        return Err(PublishError::InvalidEvent);
+    }
+    let _ = (payload.byte_len, payload.degraded);
+    Ok(PayloadSummary {
+        operation_id: payload.operation_id,
+        proof_kind: "observation".to_owned(),
+        confidence_status: "not_applicable".to_owned(),
+        ..PayloadSummary::default()
+    })
 }
 
 fn sensor_observation(json: &str) -> Result<PayloadSummary, PublishError> {

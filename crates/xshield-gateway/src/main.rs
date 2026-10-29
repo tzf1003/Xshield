@@ -47,6 +47,7 @@ use uuid::Uuid;
 use xshield_core::{
     audit::ReasonCode, domain::RequestId, identity::UnixSeconds, site::observable_refusal,
 };
+use xshield_gateway::business_ws;
 use xshield_gateway::edge_transport::{
     EdgeTransport, TLS_RELOAD_INTERVAL, TransportConfig, http_server_options,
 };
@@ -293,6 +294,68 @@ struct RequestContext {
     listener_port: Option<u16>,
     host: Option<String>,
     audit: Option<DurableAudit>,
+    business_ws: Option<BusinessWsRelay>,
+}
+
+/// Bound on how many individual messages one business WebSocket connection
+/// keeps in audit detail; a busier connection still relays and audits its
+/// traffic volume, just with `BusinessWsSummary::degraded` set once this cap
+/// is passed (docs/08 §8.5: an incomplete coverage status must be explicit).
+const BUSINESS_WS_MAX_AUDITED_MESSAGES: usize = 256;
+
+/// Per-direction frame scanners and the accumulated audit for one business
+/// WebSocket connection, lazily created the first time its upgraded bytes
+/// are seen in either direction (main.rs's `request_body_filter` and
+/// `response_body_filter`).
+struct BusinessWsRelay {
+    operation_id: String,
+    to_origin: business_ws::FrameScanner,
+    to_client: business_ws::FrameScanner,
+    messages: Vec<durable_audit::BusinessWsMessageAudit>,
+    summary: durable_audit::BusinessWsSummary,
+}
+
+impl BusinessWsRelay {
+    fn new(operation_id: String, observe_cap: usize) -> Self {
+        Self {
+            operation_id,
+            to_origin: business_ws::FrameScanner::new(observe_cap),
+            to_client: business_ws::FrameScanner::new(observe_cap),
+            messages: Vec::new(),
+            summary: durable_audit::BusinessWsSummary::default(),
+        }
+    }
+
+    fn record(&mut self, direction: durable_audit::BusinessWsDirection, audits: Vec<business_ws::MessageAudit>) {
+        for audit in audits {
+            match direction {
+                durable_audit::BusinessWsDirection::ToOrigin => {
+                    self.summary.messages_to_origin += 1;
+                    self.summary.bytes_to_origin =
+                        self.summary.bytes_to_origin.saturating_add(audit.byte_len);
+                }
+                durable_audit::BusinessWsDirection::ToClient => {
+                    self.summary.messages_to_client += 1;
+                    self.summary.bytes_to_client =
+                        self.summary.bytes_to_client.saturating_add(audit.byte_len);
+                }
+            }
+            self.summary.degraded |= audit.degraded;
+            if self.messages.len() < BUSINESS_WS_MAX_AUDITED_MESSAGES {
+                self.messages.push(durable_audit::BusinessWsMessageAudit {
+                    direction,
+                    kind: audit.kind,
+                    byte_len: audit.byte_len,
+                    frame_count: audit.frame_count,
+                    degraded: audit.degraded,
+                });
+            } else {
+                // Past the detail cap: still counted in the summary above,
+                // but no longer individually audited.
+                self.summary.degraded = true;
+            }
+        }
+    }
 }
 
 impl RequestContext {
@@ -352,6 +415,7 @@ impl ProxyHttp for Gateway {
             listener_port: None,
             host: None,
             audit: None,
+            business_ws: None,
         }
     }
 
@@ -748,11 +812,24 @@ impl ProxyHttp for Gateway {
 
     async fn request_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
         context: &mut Self::CTX,
     ) -> PingoraResult<()> {
+        if session.as_downstream().was_upgraded() {
+            // A whole-body size cap makes no sense once relaying becomes an
+            // indefinitely long raw byte stream; a business WebSocket route
+            // audits at message granularity instead (business_ws::FrameScanner).
+            self.ensure_business_ws(session, context);
+            if let Some(chunk) = body.as_ref()
+                && let Some(relay) = context.business_ws.as_mut()
+            {
+                let audits = relay.to_origin.feed(chunk);
+                relay.record(durable_audit::BusinessWsDirection::ToOrigin, audits);
+            }
+            return Ok(());
+        }
         if context.rebuilt_request_len.is_none() {
             if let Some(chunk) = body.as_ref() {
                 context.request_body_len = context.request_body_len.saturating_add(chunk.len());
@@ -890,6 +967,16 @@ impl ProxyHttp for Gateway {
         context: &mut Self::CTX,
     ) -> PingoraResult<Option<std::time::Duration>> {
         if context.buffered_response.is_none() {
+            if session.as_downstream().was_upgraded() {
+                self.ensure_business_ws(session, context);
+                if let Some(chunk) = body.as_ref()
+                    && let Some(relay) = context.business_ws.as_mut()
+                {
+                    let audits = relay.to_client.feed(chunk);
+                    relay.record(durable_audit::BusinessWsDirection::ToClient, audits);
+                }
+                return Ok(None);
+            }
             if let Some(chunk) = body.as_ref() {
                 context.response_body_len = context.response_body_len.saturating_add(chunk.len());
                 let limit = context
@@ -1031,10 +1118,52 @@ impl ProxyHttp for Gateway {
                 .unwrap_or(&self.audit)
                 .observe_failure(&error);
         }
+        if let Some(mut relay) = context.business_ws.take() {
+            relay.summary.duration_us = elapsed_us(context.started_at);
+            let _ = context
+                .audit
+                .as_ref()
+                .unwrap_or(&self.audit)
+                .record_business_ws_connection(
+                    &context.trace_id,
+                    &relay.operation_id,
+                    relay.summary,
+                    &relay.messages,
+                )
+                .await;
+        }
     }
 }
 
 impl Gateway {
+    /// Lazily attaches the business WebSocket relay state the first time
+    /// either direction of an upgraded connection is seen, from the
+    /// handshake route's declared policy. A no-op once attached, and for any
+    /// upgraded connection whose route declared no such policy (nothing here
+    /// then scans or audits its bytes, but the connection still relays: see
+    /// the `was_upgraded()` guard at each call site).
+    fn ensure_business_ws(&self, session: &Session, context: &mut RequestContext) {
+        if context.business_ws.is_some() {
+            return;
+        }
+        let request = session.req_header();
+        let Some(policy) = context
+            .config(self)
+            .business_websocket_policy(request.method.as_str(), request.uri.path())
+        else {
+            return;
+        };
+        let operation_id = context
+            .decision
+            .as_ref()
+            .and_then(|decision| decision.operation_id.as_ref())
+            .map_or_else(String::new, |id| id.as_str().to_owned());
+        context.business_ws = Some(BusinessWsRelay::new(
+            operation_id,
+            policy.max_observed_frame_bytes(),
+        ));
+    }
+
     /// Serves a buffered route through a subrequest and releases its reply
     /// only once it finished cleanly; any other outcome is a `502` naming the
     /// reason and carrying none of the origin's bytes. See [`buffered_relay`].

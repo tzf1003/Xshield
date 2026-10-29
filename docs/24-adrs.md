@@ -108,3 +108,25 @@
 - docs/22 部署与运维缺口表不再列 KMS 为待办（更新记录见该文档"核查记录"）。
 - 后续如果运营方确有外部 KMS 托管密钥材料的需求，仍可把密钥的值放进 `_FILE` 指向的文件（文件由运营方自己的 KMS 客户端写入），不需要 Xshield 代码改动；只有需要 Xshield 进程自己持有 KMS 凭据、直接调用 KMS API 解密时，才需要重新评估并另立 ADR。
 
+## ADR-016｜业务 WebSocket 流量接管先做 OBSERVE 级代理+逐消息审计，不做内容级加解密或逐帧重新鉴权
+
+状态：采纳（2026-10-29）。
+
+背景：docs/22 M2 列出的"无 WSS"缺口指的是受保护站点自身业务 WebSocket 流量的 edge 代理与审计，与已交付的探针上报通道（#60，docs/07 §7.3，edge 自行终结的单向浏览器→edge 通道）是两件事；此前 edge 对声明了 Upgrade 的业务路由没有任何处理：Pingora 原生的 HTTP/1 非缓冲代理路径虽然已经支持双向 Upgrade 透传，但 (a) 这类路由在准入侧没有被当作一等操作声明和校验，(b) 既有的累计请求体大小限制会在长连接 WS 会话上误触发断连，(c) docs/11 要求的逐请求审计在已升级连接上完全缺失。
+
+调研结论：读取 vendor 的 pingora-proxy/pingora-core 源码确认 `HttpTask::UpgradedBody` 已经双向透传、`session.as_downstream().was_upgraded()` 是检测升级完成的公开 API；由于网关只是在真实浏览器与真实源站之间做哑字节转发，端到端帧完全由两端自己维护，被动审计扫描器不需要重建掩码或帧，只需要在不管是否被掩码的情况下正确跟踪帧/消息边界，对无法完全处理的内容（超过观测上限的超大帧、未知/保留位、孤立续传帧）优雅降级为"降级标记"而不是阻断连接。
+
+决定：
+
+1. 复用现有 `OperationDto`/`CompiledOperation`/准入体系，新增 `business_websocket` 声明块（`compile_business_websocket`），让业务 WS 路由像其它操作一样走 PUBLIC/AUTHENTICATED_ROOT 等既有准入策略，只在握手请求（裸 GET，不带响应转换、请求加密、资源视图、分页、source_action）时鉴权一次；不做逐帧重新鉴权，不新增并行的路由表抽象。
+2. 升级完成后（`was_upgraded()` 为真）绕开原有累计请求体/响应体大小限制逻辑，交给 Pingora 原生双向 Upgrade 透传；新增 `FrameScanner`（RFC 6455 帧头解析，掩码无关、容忍 RSV 位）在 `request_body_filter`/`response_body_filter` 中以只读旁路方式对两个方向分别跟踪消息边界，只产出 `MessageAudit`（kind/byte_len/frame_count/degraded），不修改、不重建、不阻断已转发的字节。
+3. 单连接审计明细上限 256 条消息（`BUSINESS_WS_MAX_AUDITED_MESSAGES`），超过后降级为仅保留汇总，不无限增长内存；观测帧长度上限可按路由配置（`max_observed_frame_bytes`，默认 256 KiB），超限帧标记 `degraded: true` 但继续转发，不断开连接。
+4. 连接关闭时把本次连接的消息审计明细/汇总写入既有的哈希链审计 journal（新增 `Payload::BusinessWs{Closed,Message}` 两个事件类型），并同步在 `xshield-worker` 侧新增对应的解析器（`family()`/`parse()` 分支）与测试覆盖，避免未注册事件类型导致整段 journal 发布中止。
+5. 不支持扩展协商（如 permessage-deflate）、不支持内容级加解密接管、不提供控制台编排——业务 WS 路由目前只能通过 `gateway-config.json` 声明；以上均为后续如需可另立 ADR 的范围，不在本次交付。
+
+后果：
+
+- docs/22 M2 完成度从约 45% 上调至约 48%，"主要缺口"改为精确描述仍缺的逐帧重新鉴权、任意流式响应、WASM 加密接管、HTTP/3；docs/00 §0.3、docs/11 §11.1/§11.15 同步更新为"OBSERVE 已交付，逐帧鉴权未交付"的准确表述。
+- 运维侵入性极小：对没有声明 `business_websocket` 的路由，行为与之前完全一致（走 Pingora 原生非缓冲路径），不影响既有缓冲响应/请求加密的操作。
+- 若未来需要逐帧重新鉴权或内容级加密接管，需要新的、与本 ADR 不同的设计（例如维护每帧的授权状态机、或引入内容转换层），到时应另立 ADR，不能假设本次交付的 OBSERVE 能力可以无缝升级。
+

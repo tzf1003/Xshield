@@ -30,6 +30,7 @@ use xshield_core::{
 };
 
 pub mod auth_binding;
+pub mod business_ws;
 pub mod edge_transport;
 pub mod evidence_capture;
 pub mod multi_site;
@@ -257,6 +258,36 @@ struct CompiledOperation {
     issued_by: Option<xshield_core::edge_descriptors::IssuedBy>,
     query_pagination: Option<QueryPaginationRule>,
     response: Option<CompiledResponse>,
+    business_websocket: Option<BusinessWebSocketPolicy>,
+}
+
+/// A declared business WebSocket route: the gateway admits the handshake
+/// exactly like any other operation, then lets Pingora relay the upgraded
+/// connection's raw bytes to the origin untouched. `business_ws::FrameScanner`
+/// observes those bytes in both directions to audit one record per logical
+/// message (docs/11 §1); nothing here decrypts, rewrites, or blocks a frame
+/// (docs/22 M2, OBSERVE-only coverage — see docs/24 ADR on the WSS scope).
+#[derive(Debug, Clone)]
+pub struct BusinessWebSocketPolicy {
+    adapter_revision: String,
+    max_observed_frame_bytes: usize,
+}
+
+impl BusinessWebSocketPolicy {
+    /// Operator-chosen label carried into every audit record for this route,
+    /// so a later adapter change is traceable; never interpreted.
+    #[must_use]
+    pub fn adapter_revision(&self) -> &str {
+        &self.adapter_revision
+    }
+
+    /// Frames at or under this many payload bytes are fully accounted for in
+    /// the message audit; larger ones still relay but degrade their
+    /// message's audit coverage (`business_ws::FrameScanner`).
+    #[must_use]
+    pub const fn max_observed_frame_bytes(&self) -> usize {
+        self.max_observed_frame_bytes
+    }
 }
 
 #[derive(Debug)]
@@ -454,6 +485,21 @@ struct OperationDto {
     #[serde(default)]
     query_pagination: Option<SiteQueryPagination>,
     response: Option<ResponseDto>,
+    #[serde(default)]
+    business_websocket: Option<BusinessWebSocketDto>,
+}
+
+/// Upper bound on [`BusinessWebSocketDto::max_observed_frame_bytes`]: large
+/// enough for ordinary JSON/binary application messages, small enough that
+/// one connection's reassembly buffer stays bounded regardless of operator
+/// configuration.
+const MAX_BUSINESS_WS_OBSERVE_FRAME_BYTES: usize = 256 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BusinessWebSocketDto {
+    adapter_revision: String,
+    max_observed_frame_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -1054,6 +1100,17 @@ impl GatewayConfig {
             },
             ResponseKind::SensorHtml(rule) => BufferedResponsePolicy::SensorHtml(rule),
         })
+    }
+
+    /// Returns the declared business WebSocket policy for an exact operation,
+    /// when its handshake route has one.
+    #[must_use]
+    pub fn business_websocket_policy(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<&BusinessWebSocketPolicy> {
+        self.operation(method, path)?.business_websocket.as_ref()
     }
 
     /// Returns the server-selected request decryption rule for an exact operation.
@@ -1875,6 +1932,15 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
         .request_crypto
         .map(|rule| compile_request_crypto(rule, method, dto.admission, response_has_side_effects))
         .transpose()?;
+    let business_websocket = compile_business_websocket(
+        dto.business_websocket,
+        method,
+        response.is_none()
+            && request_crypto.is_none()
+            && resource.is_none()
+            && query_pagination.is_none()
+            && source_action.is_none(),
+    )?;
     Ok(CompiledOperation {
         method,
         route,
@@ -1889,7 +1955,36 @@ fn compile_operation(dto: OperationDto) -> Result<CompiledOperation, ConfigError
             .transpose()?,
         query_pagination,
         response,
+        business_websocket,
     })
+}
+
+/// A business WebSocket route is otherwise the simplest possible operation:
+/// a bare `GET` admission check at handshake time, with no response
+/// transform, request decryption, resource binding, pagination, or source
+/// action — every one of those concerns responses to the *handshake*
+/// request, and this route has no response to transform once the handshake
+/// is admitted and the connection becomes a raw relayed byte pipe.
+fn compile_business_websocket(
+    dto: Option<BusinessWebSocketDto>,
+    method: HttpMethod,
+    otherwise_bare: bool,
+) -> Result<Option<BusinessWebSocketPolicy>, ConfigError> {
+    let Some(dto) = dto else {
+        return Ok(None);
+    };
+    if method != HttpMethod::Get
+        || !otherwise_bare
+        || dto.adapter_revision.trim().is_empty()
+        || dto.max_observed_frame_bytes == 0
+        || dto.max_observed_frame_bytes > MAX_BUSINESS_WS_OBSERVE_FRAME_BYTES
+    {
+        return Err(ConfigError::Invalid("operations.business_websocket"));
+    }
+    Ok(Some(BusinessWebSocketPolicy {
+        adapter_revision: dto.adapter_revision,
+        max_observed_frame_bytes: dto.max_observed_frame_bytes,
+    }))
 }
 
 /// The block only has an effect where the edge otherwise refuses every query
@@ -2640,6 +2735,58 @@ mod tests {
         let prepare = config.admit_sensor_session("POST", SENSOR_PREPARE_PATH);
         assert_eq!(prepare.outcome, GatewayOutcome::Allowed);
         assert_eq!(prepare.reason_code, ReasonCode::SensorObservationAccepted);
+    }
+
+    #[test]
+    fn business_websocket_route_admits_like_any_other_operation_but_has_no_buffered_response() {
+        let ws_operation = r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"chat-ws-r1","max_observed_frame_bytes":65536}},"#;
+        let configured =
+            CONFIG.replace("\"operations\":[", &format!("\"operations\":[{ws_operation}"));
+        let config = GatewayConfig::from_json(configured.as_bytes()).unwrap();
+        let decision = config.admit("GET", "/ws/chat", UnixSeconds::new(1));
+        assert_eq!(decision.outcome, GatewayOutcome::Allowed);
+        assert_eq!(decision.operation_id.unwrap().as_str(), "chat.ws");
+        assert!(config.buffered_response_policy("GET", "/ws/chat").is_none());
+        let policy = config.business_websocket_policy("GET", "/ws/chat").unwrap();
+        assert_eq!(policy.adapter_revision(), "chat-ws-r1");
+        assert_eq!(policy.max_observed_frame_bytes(), 65536);
+        // An ordinary operation never declares a business websocket policy.
+        assert!(config.business_websocket_policy("GET", "/catalog").is_none());
+    }
+
+    #[test]
+    fn business_websocket_rejects_anything_beyond_a_bare_get_handshake() {
+        let rejects = |operation: &str| {
+            let configured =
+                CONFIG.replace("\"operations\":[", &format!("\"operations\":[{operation}"));
+            assert!(
+                GatewayConfig::from_json(configured.as_bytes()).is_err(),
+                "{operation}"
+            );
+        };
+        // Declares a response transform alongside the websocket policy.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":1024},"response":{"mode":"BUFFERED_JSON","max_bytes":1024}},"#,
+        );
+        // Not a GET handshake.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"POST","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":1024}},"#,
+        );
+        // A zero or an above-ceiling observation cap.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":0}},"#,
+        );
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":99999999}},"#,
+        );
+        // A blank adapter revision.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"  ","max_observed_frame_bytes":1024}},"#,
+        );
+        // Carries a source action, which only means something for a response.
+        rejects(
+            r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":"chat.open","resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"r1","max_observed_frame_bytes":1024}},"#,
+        );
     }
 
     #[test]
