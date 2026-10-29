@@ -43,13 +43,13 @@ capture_status：complete、partial_limit、partial_cancelled、unavailable、no
 
 ## 12.5 信封加密与访问
 
-每证据对象/分块使用独立随机数据密钥或经审查的密钥派生，AEAD 绑定 tenant/site/artifact/version/chunk 作为 AAD，nonce 保证密钥范围内唯一。数据密钥由 KMS 管理的 KEK 包裹；master key 和解密权限与日志写入者分离。
+每证据对象/分块使用独立随机数据密钥或经审查的密钥派生，AEAD 绑定 tenant/site/artifact/version/chunk 作为 AAD，nonce 保证密钥范围内唯一。master key 和解密权限与日志写入者分离；master key（证据根密钥）本身不经外部 KMS 包裹，由运营方生成并经 19.3 的环境变量/`_FILE` 注入（ADR-015）。
 
 对象名不包含真实姓名、病历 ID、账号、Cookie 或 Token。普通索引只有脱敏摘要、受限引用和密文摘要；低熵秘密不得用公开 SHA256 充当匿名化，关联用租户隔离 HMAC。
 
 使用 EvidenceReadPort 统一授权：读元数据、读脱敏内容、读敏感原文、导出是不同权限。访问前记审批/目的/范围，访问后记实际对象和字节数。敏感原文的临时访问授权短期有效，不能靠长期公开下载 URL。
 
-当前 `xshield-evidence` 本地 MVP 只接受完整且在配置容量/最长保留期内的单对象写入，整对象硬上限 64 MiB，业务配置只能继续收紧。对象使用随机 nonce 与 artifact 作用域 HMAC 派生数据密钥执行 AES-256-GCM，AAD 绑定 tenant/site/request/artifact/kind 和最终 chunk 标记；typed manifest 另以用途隔离 HMAC 认证。manifest 读取使用库内当前时钟重验私有路径、作用域、期限与 key-id，内容读取额外重验密文摘要和 AEAD。对象先于 manifest 耐久发布，崩溃最多留下不可达孤儿密文，不会产生指向缺失密文的已返回 manifest。同一对象格式也可以存进 S3 兼容存储桶并启用 Object Lock，见 12.10；S3 后端额外支持大对象的 multipart 传输与存储桶侧 SSE-KMS，但两者都是存储层特性，不改变这里的单对象整体 AEAD 信封——12.4 描述的按 chunk 独立加密、manifest 记录逐 chunk 状态的流式设计，以及用 KMS 包裹应用层数据密钥（而不是本地 HMAC 派生），仍未实现。
+当前 `xshield-evidence` 本地 MVP 只接受完整且在配置容量/最长保留期内的单对象写入，整对象硬上限 64 MiB，业务配置只能继续收紧。对象使用随机 nonce 与 artifact 作用域 HMAC 派生数据密钥执行 AES-256-GCM，AAD 绑定 tenant/site/request/artifact/kind 和最终 chunk 标记；typed manifest 另以用途隔离 HMAC 认证。manifest 读取使用库内当前时钟重验私有路径、作用域、期限与 key-id，内容读取额外重验密文摘要和 AEAD。对象先于 manifest 耐久发布，崩溃最多留下不可达孤儿密文，不会产生指向缺失密文的已返回 manifest。同一对象格式也可以存进 S3 兼容存储桶并启用 Object Lock，见 12.10；S3 后端额外支持大对象的 multipart 传输与存储桶侧 SSE-KMS，但两者都是存储层特性，不改变这里的单对象整体 AEAD 信封——12.4 描述的按 chunk 独立加密、manifest 记录逐 chunk 状态的流式设计仍未实现；应用层数据密钥改用外部 KMS 包裹（而不是本地 HMAC 派生）不在计划内（ADR-015），这里的信封加密设计以本地派生为最终方案，不是过渡状态。
 
 PostgreSQL catalog adapter 只接受 `VerifiedEvidenceManifest`，因此普通 wire struct 不能进入发布命令。首次发布把显式列与 `evidence.cataloged` outbox 事件原子提交；精确重放返回 existing，同 artifact 绑定不同 manifest 或事件返回 conflict。按 request 查询强制 tenant/site/request 三元组、数据库当前时钟、active/deleted 条件与 128 条上限。catalog 用于检索，内容释放仍必须由 vault 认证对象侧 manifest HMAC、ciphertext digest 与 AEAD，并经过独立 EvidenceReadPort 审批。
 
@@ -168,7 +168,7 @@ S3 后端下网关不再计算本地配额，`/metrics` 也不输出 `xshield_ed
 
 验证：`cargo test -p xshield-evidence --lib s3_minio -- --ignored` 对真实 MinIO 运行（CI `object-storage` 作业，MinIO 启动时带一个临时单密钥 KMS 用于 SSE-KMS 用例），覆盖：锁定对象在到期前被存储桶拒绝删除，到期后清理删除已核对的版本，且该版本确实不存在；未开启锁的桶在要求锁定时拒绝启动，错误密钥被拒绝；篡改密文与 manifest 被识别；孤儿列出、分页、核对与删除，未完成侧车与未到期锁定的对象不被列出；超过 multipart 阈值的大对象走分片上传、读回内容一致，且 multipart 完成请求同样拒绝覆盖已有键；SSE-KMS 配置后存储桶 HEAD 确实报告 `x-amz-server-side-encryption: aws:kms`（小对象单次 `PUT` 与大对象 multipart 两条路径都覆盖）。SigV4 实现另有 AWS 文档签名样例的单测。
 
-**未覆盖**：AWS S3 本身及其他兼容服务（只测了 MinIO）；用 KMS 包裹应用层数据密钥本身（当前仍是本地 HMAC 派生，SSE-KMS 只加密存储桶里的字节）；12.4 描述的按 chunk 独立 AEAD 加密与逐 chunk manifest（multipart 只是同一个整体信封的传输优化）；大于 1 GiB 的对象；存储桶默认保留策略与我们写入的保留期冲突时的行为；跨区域复制。
+**未覆盖**：AWS S3 本身及其他兼容服务（只测了 MinIO）；12.4 描述的按 chunk 独立 AEAD 加密与逐 chunk manifest（multipart 只是同一个整体信封的传输优化）；大于 1 GiB 的对象；存储桶默认保留策略与我们写入的保留期冲突时的行为；跨区域复制。应用层数据密钥改用 KMS 包裹（而不是本地 HMAC 派生）不在计划内（ADR-015），不是本节的覆盖缺口；SSE-KMS 只加密存储桶里的字节，与此无关。
 
 ## 12.11 已实现：本地证据迁移到 S3
 

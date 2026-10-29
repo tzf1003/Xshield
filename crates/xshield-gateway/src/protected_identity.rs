@@ -772,9 +772,9 @@ impl ProtectedIdentity {
         let method = request.method.as_str();
         let path = request.uri.path();
         match config.internal_response(method, path) {
-            Some(InternalResponse::SensorPrepare) => {
+            Some(InternalResponse::SensorPrepare | InternalResponse::SensorWsUpgrade) => {
                 return self
-                    .admit_sensor_prepare(config, request, method, path, now)
+                    .admit_sensor_channel(config, request, method, path, now)
                     .await;
             }
             Some(InternalResponse::SensorBootstrap) => {
@@ -930,7 +930,7 @@ impl ProtectedIdentity {
         })
     }
 
-    async fn admit_sensor_prepare(
+    async fn admit_sensor_channel(
         &self,
         config: &GatewayConfig,
         request: &RequestHeader,

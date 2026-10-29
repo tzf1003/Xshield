@@ -16,7 +16,9 @@ use uuid::Uuid;
 use xshield_core::identity::UnixSeconds;
 use xshield_gateway::{
     LEGACY_SENSOR_ASSET_BYTES, LEGACY_SENSOR_LOADER_BYTES, LEGACY_SENSOR_VERSION,
-    SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES, SENSOR_PREPARE_PATH, SENSOR_VERSION, SensorConfig,
+    PREVIOUS_SENSOR_ASSET_BYTES, PREVIOUS_SENSOR_LOADER_BYTES, PREVIOUS_SENSOR_VERSION,
+    SENSOR_ASSET_BYTES, SENSOR_LOADER_BYTES, SENSOR_PREPARE_PATH, SENSOR_VERSION, SENSOR_WS_PATH,
+    SensorConfig,
     page_actions::{HarvestSource, HarvestTarget, SensorRoutes},
 };
 
@@ -35,6 +37,14 @@ impl SensorScript {
     pub(crate) const LOADER: Self = Self {
         bytes: SENSOR_LOADER_BYTES,
         version: SENSOR_VERSION,
+    };
+    pub(crate) const PREVIOUS: Self = Self {
+        bytes: PREVIOUS_SENSOR_ASSET_BYTES,
+        version: PREVIOUS_SENSOR_VERSION,
+    };
+    pub(crate) const PREVIOUS_LOADER: Self = Self {
+        bytes: PREVIOUS_SENSOR_LOADER_BYTES,
+        version: PREVIOUS_SENSOR_VERSION,
     };
     pub(crate) const LEGACY: Self = Self {
         bytes: LEGACY_SENSOR_ASSET_BYTES,
@@ -107,12 +117,16 @@ pub(crate) fn bootstrap_document(
     };
     let Some(SensorBootstrapDelivery::Page {
         page_handle,
+        sensor_version,
         actions,
     }) = delivery
     else {
         return base(LEGACY_SENSOR_VERSION, format!("pgh_{}", Uuid::now_v7()));
     };
-    let mut document = base(SENSOR_VERSION, page_handle.clone());
+    let mut document = base(sensor_version, page_handle.clone());
+    if *sensor_version == SENSOR_VERSION {
+        document["ws_url"] = Value::String(SENSOR_WS_PATH.to_owned());
+    }
     document["actions"] = Value::Array(
         actions
             .iter()
@@ -265,9 +279,13 @@ mod tests {
 
     #[test]
     fn page_bootstrap_carries_live_references_and_routing_hints_only() {
+        // The 1.1.0 page-bootstrap shape (bare `page=` query) is pinned
+        // forever while 1.1.0's script bytes are still served: no `ws_url`,
+        // exactly the fields it has always validated.
         let config = config();
         let delivery = SensorBootstrapDelivery::Page {
             page_handle: PAGE.to_owned(),
+            sensor_version: "1.1.0",
             actions: vec![action("action.live", 160), action("action.expired", 100)],
         };
         let document = bootstrap_document(
@@ -279,6 +297,7 @@ mod tests {
         );
         assert_eq!(document["sensor_version"], "1.1.0");
         assert_eq!(document["page_handle"], PAGE);
+        assert!(document.get("ws_url").is_none());
         assert_eq!(
             document["actions"],
             json!([{"action_ref": "action.live", "method": "GET", "path_template": "/orders",
@@ -299,6 +318,25 @@ mod tests {
     }
 
     #[test]
+    fn current_page_bootstrap_carries_the_wss_url() {
+        let config = config();
+        let delivery = SensorBootstrapDelivery::Page {
+            page_handle: PAGE.to_owned(),
+            sensor_version: SENSOR_VERSION,
+            actions: Vec::new(),
+        };
+        let document = bootstrap_document(
+            "req_1",
+            config.sensor().unwrap(),
+            config.sensor_routes(),
+            Some(&delivery),
+            UnixSeconds::new(100),
+        );
+        assert_eq!(document["sensor_version"], SENSOR_VERSION);
+        assert_eq!(document["ws_url"], xshield_gateway::SENSOR_WS_PATH);
+    }
+
+    #[test]
     fn served_sensor_versions_are_pinned_and_frozen() {
         // Every served version path is immutable and SRI-pinned by pages that
         // were delivered with it; any edit must ship as a new version path.
@@ -311,16 +349,26 @@ mod tests {
             hex32("7e4b2c44e3cff6c7f1c1b15e51f62c8066ae9ef5164fd69693488262e6ff2950")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::CURRENT.bytes),
+            openssl::sha::sha256(SensorScript::PREVIOUS.bytes),
             hex32("31b0537aa333d79e77ed3237a813e78d13fc44dd0048b0acbe49af17fcdacd1f")
         );
         assert_eq!(
-            openssl::sha::sha256(SensorScript::LOADER.bytes),
+            openssl::sha::sha256(SensorScript::PREVIOUS_LOADER.bytes),
             hex32("bd869b6aab0a506c50a72427c4efc8c9f8fc75c4d6d59597963bd204432e26db")
         );
+        assert_eq!(
+            openssl::sha::sha256(SensorScript::CURRENT.bytes),
+            hex32("2ec180c1b7e3e31c5e752cdaeb107ded56c55c1b2aec6d2bca6c03745228d8d7")
+        );
+        assert_eq!(
+            openssl::sha::sha256(SensorScript::LOADER.bytes),
+            hex32("f5e8c40a7425ec4730c4437b0b4696736b425cc8e150d36b8746674e45323681")
+        );
         assert_eq!(SensorScript::LEGACY.version, "1.0.0");
-        assert_eq!(SensorScript::CURRENT.version, "1.1.0");
-        assert_ne!(SensorScript::CURRENT.bytes, SensorScript::LEGACY.bytes);
+        assert_eq!(SensorScript::PREVIOUS.version, "1.1.0");
+        assert_eq!(SensorScript::CURRENT.version, "1.2.0");
+        assert_ne!(SensorScript::CURRENT.bytes, SensorScript::PREVIOUS.bytes);
+        assert_ne!(SensorScript::PREVIOUS.bytes, SensorScript::LEGACY.bytes);
     }
 
     fn hex32(value: &str) -> [u8; 32] {
