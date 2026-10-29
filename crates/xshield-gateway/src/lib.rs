@@ -73,30 +73,45 @@ pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 const STATIC_ASSET_OPERATION_ID: &str = "site.static_asset";
 /// Versioned same-origin browser sensor asset injected into new pages.
-pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.2.0.js";
+pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.3.0.js";
 /// Immutable browser sensor bootstrap loader injected into new pages.
-pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.2.0-loader.js";
+pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.3.0-loader.js";
 /// Exact versioned sensor bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor-1.2.0.js");
+pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor-1.3.0.js");
 /// Exact versioned loader bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader-1.2.0.js");
+pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader-1.3.0.js");
 /// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
-pub const SENSOR_VERSION: &str = "1.2.0";
-/// Superseded 1.1.0 sensor asset, still served byte-identical: pages
+pub const SENSOR_VERSION: &str = "1.3.0";
+/// Superseded 1.2.0 sensor asset, still served byte-identical: pages
 /// delivered by an older edge (or another instance during a rolling
 /// upgrade) pin these exact bytes with SRI, so the URL may disappear but
 /// must never change.
-pub const PREVIOUS_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.1.0.js";
-/// Superseded 1.1.0 loader asset, still served byte-identical.
-pub const PREVIOUS_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.1.0-loader.js";
-/// Frozen 1.1.0 sensor bytes.
+pub const PREVIOUS_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.2.0.js";
+/// Superseded 1.2.0 loader asset, still served byte-identical.
+pub const PREVIOUS_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.2.0-loader.js";
+/// Frozen 1.2.0 sensor bytes.
 pub const PREVIOUS_SENSOR_ASSET_BYTES: &[u8] =
+    include_bytes!("../../../sensor/src/sensor-1.2.0.js");
+/// Frozen 1.2.0 loader bytes.
+pub const PREVIOUS_SENSOR_LOADER_BYTES: &[u8] =
+    include_bytes!("../../../sensor/src/loader-1.2.0.js");
+/// Version embedded in the previous-tier asset paths.
+pub const PREVIOUS_SENSOR_VERSION: &str = "1.2.0";
+/// Superseded 1.1.0 sensor asset, still served byte-identical: this tier's
+/// name no longer rotates (unlike [`PREVIOUS_SENSOR_VERSION`], which will
+/// move again on the next release) because 1.1.0 is no longer the
+/// next-to-current version; it has its own permanent frozen slot below.
+pub const SUPERSEDED_1_1_0_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.1.0.js";
+/// Superseded 1.1.0 loader asset, still served byte-identical.
+pub const SUPERSEDED_1_1_0_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.1.0-loader.js";
+/// Frozen 1.1.0 sensor bytes.
+pub const SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES: &[u8] =
     include_bytes!("../../../sensor/src/sensor-1.1.0.js");
 /// Frozen 1.1.0 loader bytes.
-pub const PREVIOUS_SENSOR_LOADER_BYTES: &[u8] =
+pub const SUPERSEDED_1_1_0_SENSOR_LOADER_BYTES: &[u8] =
     include_bytes!("../../../sensor/src/loader-1.1.0.js");
-/// Version embedded in the previous-tier asset paths.
-pub const PREVIOUS_SENSOR_VERSION: &str = "1.1.0";
+/// Version embedded in the permanent 1.1.0 frozen-tier asset paths.
+pub const SUPERSEDED_1_1_0_SENSOR_VERSION: &str = "1.1.0";
 /// Superseded 1.0.0 sensor asset, still served byte-identical: pages
 /// delivered by an older edge (or another instance during a rolling
 /// upgrade) pin these exact bytes with SRI, so the URL may disappear but
@@ -140,6 +155,13 @@ pub const FROZEN_SENSOR_VERSIONS: &[FrozenSensorVersion] = &[
         loader_bytes: LEGACY_SENSOR_LOADER_BYTES,
     },
     FrozenSensorVersion {
+        version: SUPERSEDED_1_1_0_SENSOR_VERSION,
+        asset_path: SUPERSEDED_1_1_0_SENSOR_ASSET_PATH,
+        loader_path: SUPERSEDED_1_1_0_SENSOR_LOADER_PATH,
+        asset_bytes: SUPERSEDED_1_1_0_SENSOR_ASSET_BYTES,
+        loader_bytes: SUPERSEDED_1_1_0_SENSOR_LOADER_BYTES,
+    },
+    FrozenSensorVersion {
         version: PREVIOUS_SENSOR_VERSION,
         asset_path: PREVIOUS_SENSOR_ASSET_PATH,
         loader_path: PREVIOUS_SENSOR_LOADER_PATH,
@@ -157,9 +179,10 @@ pub const SENSOR_PREPARE_PATH: &str = "/__xshield/v1/events/prepare";
 pub const SENSOR_WS_PATH: &str = "/__xshield/v1/sensor/ws";
 /// Observation versions the prepare endpoint and the WSS channel accept:
 /// every version whose assets this edge still serves.
-pub const ACCEPTED_SENSOR_VERSIONS: [&str; 3] = [
+pub const ACCEPTED_SENSOR_VERSIONS: [&str; 4] = [
     SENSOR_VERSION,
     PREVIOUS_SENSOR_VERSION,
+    SUPERSEDED_1_1_0_SENSOR_VERSION,
     LEGACY_SENSOR_VERSION,
 ];
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
@@ -1095,6 +1118,29 @@ impl GatewayConfig {
                 | RequestCryptoPolicy::Compatibility(_)
                 | RequestCryptoPolicy::EnvelopeHook(_) => None,
             })
+    }
+
+    /// Returns every exact operation whose request-crypto policy is
+    /// `ENVELOPE_HOOK`, as `(method, path, operation_id, adapter_revision)`,
+    /// for the bootstrap document to advertise to the browser sensor.
+    #[must_use]
+    pub fn envelope_hook_operations(&self) -> Vec<(&str, &str, &str, &str)> {
+        self.operations
+            .iter()
+            .filter_map(
+                |((method, path), operation)| match operation.request_crypto.as_ref()? {
+                    RequestCryptoPolicy::EnvelopeHook(rule) => Some((
+                        method.as_str(),
+                        path.as_str(),
+                        operation.policy.operation_id().as_str(),
+                        rule.adapter_revision(),
+                    )),
+                    RequestCryptoPolicy::Enforce(_)
+                    | RequestCryptoPolicy::Observe(_)
+                    | RequestCryptoPolicy::Compatibility(_) => None,
+                },
+            )
+            .collect()
     }
 
     /// Returns the response encryption rule for one exact operation.

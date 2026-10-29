@@ -31,11 +31,17 @@ use xshield_core::{
         ProvenanceError,
     },
 };
-use xshield_gateway::{GatewayConfig, GatewayOutcome, page_actions::PageActionPlan};
+use xshield_gateway::{
+    GatewayConfig, GatewayOutcome,
+    page_actions::PageActionPlan,
+    request_crypto::{envelope_hook_key_id, envelope_hook_key_window},
+};
 use xshield_postgres::{
     DocumentSessionQuery, PageActionQuery, PageActionView, PageProvenanceBatch,
-    PageProvenanceOutcome, ProvenancePersistence, SensorSessionQuery, SensorSessionState,
+    PageProvenanceOutcome, ProvenancePersistence, SensorSession, SensorSessionQuery,
+    SensorSessionState,
 };
+use zeroize::Zeroizing;
 
 /// What the bootstrap may deliver for one request.
 pub(crate) enum SensorBootstrapDelivery {
@@ -48,7 +54,28 @@ pub(crate) enum SensorBootstrapDelivery {
         /// query itself (see [`BootstrapQuery::Page`]).
         sensor_version: &'static str,
         actions: Vec<PageActionView>,
+        /// The `ENVELOPE_HOOK` session key and operation list, present only
+        /// for the current sensor version and an authenticated session with
+        /// at least one configured `ENVELOPE_HOOK` operation (docs/08 §8.1).
+        envelope_hook: Option<EnvelopeHookBootstrap>,
     },
+}
+
+/// `ENVELOPE_HOOK` key and operation material for one bootstrap delivery.
+pub(crate) struct EnvelopeHookBootstrap {
+    pub(crate) tenant_id: String,
+    pub(crate) site_id: String,
+    pub(crate) key_id: String,
+    pub(crate) key: Zeroizing<[u8; 32]>,
+    pub(crate) operations: Vec<EnvelopeHookOperation>,
+}
+
+/// One operation the browser sensor may seal into an `ENVELOPE_HOOK` request.
+pub(crate) struct EnvelopeHookOperation {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) operation_id: String,
+    pub(crate) adapter_revision: String,
 }
 
 /// The page-based bootstrap query format 1.1.0 has used since it first
@@ -235,17 +262,69 @@ impl ProtectedIdentity {
                 sensor_version,
             } => (page_handle, sensor_version),
         };
-        let actions = self
+        let (actions, sensor_session) = self
             .session_page_actions(config, request, page_handle, now)
             .await?;
+        let envelope_hook =
+            self.envelope_hook_bootstrap(config, sensor_version, sensor_session.as_ref(), now)?;
         Ok(ProtectedAdmission {
             sensor_bootstrap: Some(SensorBootstrapDelivery::Page {
                 page_handle: page_handle.to_owned(),
                 sensor_version,
                 actions,
+                envelope_hook,
             }),
             ..ProtectedAdmission::without_identity(decision)
         })
+    }
+
+    /// Derives the `ENVELOPE_HOOK` session key and operation list for the
+    /// current time window, only for the current sensor version, an
+    /// authenticated session, and at least one configured operation: the
+    /// same gating [`bootstrap_document`] in `sensor_delivery.rs` already
+    /// applies to `ws_url`.
+    fn envelope_hook_bootstrap(
+        &self,
+        config: &GatewayConfig,
+        sensor_version: &str,
+        sensor_session: Option<&SensorSession>,
+        now: UnixSeconds,
+    ) -> Result<Option<EnvelopeHookBootstrap>, IdentityRuntimeError> {
+        if sensor_version != xshield_gateway::SENSOR_VERSION {
+            return Ok(None);
+        }
+        let operations = config.envelope_hook_operations();
+        if operations.is_empty() {
+            return Ok(None);
+        }
+        let Some(sensor_session) = sensor_session.filter(|session| session.authenticated()) else {
+            return Ok(None);
+        };
+        let window = envelope_hook_key_window(now);
+        let key = self.envelope_hook_key(
+            config.tenant_id(),
+            config.site_id(),
+            sensor_session.binding_id(),
+            sensor_session.epoch(),
+            window,
+        )?;
+        Ok(Some(EnvelopeHookBootstrap {
+            tenant_id: config.tenant_id().as_str().to_owned(),
+            site_id: config.site_id().as_str().to_owned(),
+            key_id: envelope_hook_key_id(window),
+            key,
+            operations: operations
+                .into_iter()
+                .map(
+                    |(method, path, operation_id, adapter_revision)| EnvelopeHookOperation {
+                        method: method.to_owned(),
+                        path: path.to_owned(),
+                        operation_id: operation_id.to_owned(),
+                        adapter_revision: adapter_revision.to_owned(),
+                    },
+                )
+                .collect(),
+        }))
     }
 
     async fn session_page_actions(
@@ -254,21 +333,21 @@ impl ProtectedIdentity {
         request: &RequestHeader,
         page_handle: &str,
         now: UnixSeconds,
-    ) -> Result<Vec<PageActionView>, IdentityRuntimeError> {
+    ) -> Result<(Vec<PageActionView>, Option<SensorSession>), IdentityRuntimeError> {
         let Some(page_evidence_id) = page_evidence_id(page_handle) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         };
         let session = match unique_cookie(request, WAF_COOKIE) {
             Ok(session) if session.len() <= MAX_SESSION_BYTES && same_origin_fetch(request) => {
                 session
             }
             Ok(_) | Err(IdentityRuntimeError::Missing | IdentityRuntimeError::Malformed) => {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), None));
             }
             Err(error) => return Err(error),
         };
         if WafSessionId::parse(session).is_err() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
         let session_fingerprint = fingerprint(&self.fingerprint_key, session.as_bytes())?;
         let store = self.store().await?;
@@ -281,12 +360,12 @@ impl ProtectedIdentity {
             })
             .await?
         else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         };
         if !sensor_session.authenticated() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Some(sensor_session)));
         }
-        Ok(store
+        let actions = store
             .load_page_actions(PageActionQuery {
                 tenant_id: config.tenant_id(),
                 site_id: config.site_id(),
@@ -296,7 +375,8 @@ impl ProtectedIdentity {
                 policy_revision: config.policy_revision(),
                 now,
             })
-            .await?)
+            .await?;
+        Ok((actions, Some(sensor_session)))
     }
 
     /// Issues every action the delivered page root declares, atomically.
