@@ -58,6 +58,10 @@ BODY = json.dumps({"ok": True, "padding": "x" * 40}).encode()
 
 class Origin(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # The headers and the body leave in two writes. With Nagle on, Linux holds the
+    # body until the client's delayed ACK (about 40 ms), so every "origin" row read
+    # 41 ms there; macOS's shorter delayed ACK hid it.
+    disable_nagle_algorithm = True
 
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
         self.send_response(200)
@@ -169,13 +173,21 @@ def edge_config(directory: Path, edge_port: int, origin_port: int) -> Path:
     return path
 
 
-def describe_machine() -> list[str]:
-    lines = [f"- {platform.platform()} on {platform.machine()}, python {platform.python_version()}"]
-    for command in (["sysctl", "-n", "machdep.cpu.brand_string"], ["sysctl", "-n", "hw.ncpu"]):
+def describe_machine(scratch: Path) -> list[str]:
+    lines = [f"- {platform.platform()} on {platform.machine()}, python {platform.python_version()}, {os.cpu_count()} CPUs"]
+    commands = (
+        ["sysctl", "-n", "machdep.cpu.brand_string"],
+        ["sed", "-n", "s/^model name[[:space:]]*: //p;T;q", "/proc/cpuinfo"],
+        # The journal's volume decides the numbers (13.9), so name it.
+        ["findmnt", "-n", "-o", "SOURCE,FSTYPE,OPTIONS", "--target", str(scratch)],
+    )
+    for command in commands:
         try:
-            lines.append("- " + subprocess.run(command, capture_output=True, text=True, check=True).stdout.strip())
+            output = subprocess.run(command, capture_output=True, text=True, check=True).stdout.strip()
         except (OSError, subprocess.CalledProcessError):
-            pass
+            continue
+        if output:
+            lines.append(("- journal volume: " if command[0] == "findmnt" else "- ") + output)
     try:
         load = os.getloadavg()
         lines.append(f"- load average before the run: {load[0]:.2f} {load[1]:.2f} {load[2]:.2f} (a quiet machine is below ~1)")
@@ -238,7 +250,7 @@ def main() -> int:
         wait_for(edge_port)
 
         print("## Environment")
-        print("\n".join(describe_machine()))
+        print("\n".join(describe_machine(scratch)))
         print(f"- binary: {binary} ({binary.stat().st_size // 1024} KiB), {args.seconds:g} s per row, closed loop, one keep-alive connection per client")
         print()
         targets = [("origin", origin_port, "/bench"), ("edge", edge_port, "/bench"), ("denied", edge_port, "/denied")]
