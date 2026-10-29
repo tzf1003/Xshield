@@ -15,6 +15,14 @@
 //!   never keeps expired ciphertext behind a delete marker.
 //! - Opening the vault probes the bucket and fails closed when object lock
 //!   is requested but the bucket was not created with it.
+//! - Every write may also carry bucket-side SSE-KMS (`x-amz-server-side-
+//!   encryption: aws:kms`), on top of this crate's own envelope encryption;
+//!   a compromised bucket operator still only sees AEAD ciphertext, so this
+//!   is defense in depth and key-rotation convenience, not a substitute.
+//! - A ciphertext above the multipart threshold (`client::MULTIPART_THRESHOLD_BYTES`)
+//!   is sent as an S3 multipart upload instead of one `PUT`, bounding each
+//!   HTTP exchange and letting a transient failure retry one part instead of
+//!   the whole object; the completed object is still created-only.
 //!
 //! Like the local vault, the ciphertext is published before its manifest; a
 //! crash in between leaves an unreachable orphan that the retention pass may
@@ -28,9 +36,9 @@ mod tests;
 
 use crate::{
     EvidenceError, EvidenceKey, EvidenceManifest, EvidenceOrphanCandidate, EvidencePurgeOutcome,
-    EvidenceWrite, MANIFEST_BYTES_MAX, MAX_SINGLE_ENVELOPE_BYTES, NONCE_BYTES, TAG_BYTES,
-    VerifiedEvidenceManifest, decode_authenticated_manifest, lower_hex, open_envelope, seal,
-    validate_artifact_id, validate_manifest, validate_manifest_fields, validate_vault_policy,
+    EvidenceWrite, MANIFEST_BYTES_MAX, NONCE_BYTES, TAG_BYTES, VerifiedEvidenceManifest,
+    decode_authenticated_manifest, lower_hex, open_envelope, seal, validate_artifact_id,
+    validate_manifest, validate_manifest_fields, validate_vault_policy,
 };
 use chrono::{DateTime, Utc};
 use client::S3Client;
@@ -45,6 +53,18 @@ const REQUEST_TIMEOUT_MAX: Duration = Duration::from_mins(5);
 /// Keys an orphan scan may examine in one call, matching the local vault's
 /// directory-entry ceiling.
 const SCAN_KEYS_MAX: usize = 100_000;
+/// Ceiling on one S3-backed artifact. Unlike the local vault, an S3 object
+/// never has to fit one local write, and multipart upload (12.10) removes
+/// the need to hold an entire multi-hundred-megabyte request in one HTTP
+/// exchange, so the bucket backend allows a much larger object.
+const S3_MAX_ARTIFACT_BYTES: usize = 1024 * 1024 * 1024;
+/// `S3_MAX_ARTIFACT_BYTES` plus the envelope framing overhead (version byte,
+/// nonce, authentication tag).
+const S3_MAX_ENVELOPE_BYTES: u64 =
+    S3_MAX_ARTIFACT_BYTES as u64 + 1 + NONCE_BYTES as u64 + TAG_BYTES as u64;
+/// Non-secret identifier for a KMS key; printable and well under any real
+/// key ARN or alias length.
+const SSE_KMS_KEY_ID_BYTES_MAX: usize = 2048;
 
 /// How requests name the bucket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +82,15 @@ pub enum S3ObjectLockMode {
     Governance,
     /// No principal, including the account root, can delete before expiry.
     Compliance,
+}
+
+/// Server-side encryption with AWS KMS, requested on every write in addition
+/// to this crate's own per-object AEAD envelope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct S3SseKms {
+    /// `None` asks for the bucket's default KMS key; `Some` names one
+    /// explicitly (key ID, alias, or ARN).
+    pub key_id: Option<String>,
 }
 
 /// Static credentials for `SigV4` signing. The secret and session token are
@@ -124,6 +153,7 @@ pub struct S3EvidenceStoreConfig {
     addressing: S3Addressing,
     credentials: S3Credentials,
     object_lock: Option<S3ObjectLockMode>,
+    sse_kms: Option<S3SseKms>,
     allow_plain_http: bool,
     request_timeout: Duration,
 }
@@ -144,6 +174,9 @@ pub struct S3EvidenceStoreSettings<'a> {
     pub credentials: S3Credentials,
     /// Object lock mode; `None` stores objects without retention.
     pub object_lock: Option<S3ObjectLockMode>,
+    /// Server-side KMS encryption requested on every write; `None` relies on
+    /// the bucket's own default (if any) instead of asking for one.
+    pub sse_kms: Option<S3SseKms>,
     /// Permits an `http://` endpoint, for a service on a trusted network.
     /// Objects are encrypted either way, but metadata and keys are not.
     pub allow_plain_http: bool,
@@ -186,9 +219,17 @@ impl S3EvidenceStoreConfig {
             // A dotted bucket breaks TLS name checks under virtual-hosted style.
             && !(settings.addressing == S3Addressing::VirtualHosted
                 && settings.bucket.contains('.'));
+        let sse_kms_valid = settings.sse_kms.as_ref().is_none_or(|sse| {
+            sse.key_id.as_deref().is_none_or(|key_id| {
+                !key_id.is_empty()
+                    && key_id.len() <= SSE_KMS_KEY_ID_BYTES_MAX
+                    && key_id.bytes().all(|byte| byte.is_ascii_graphic())
+            })
+        });
         if !region_valid
             || !bucket_valid
             || !valid_prefix(settings.prefix)
+            || !sse_kms_valid
             || settings.request_timeout < Duration::from_secs(1)
             || settings.request_timeout > REQUEST_TIMEOUT_MAX
         {
@@ -203,6 +244,7 @@ impl S3EvidenceStoreConfig {
             addressing: settings.addressing,
             credentials: settings.credentials,
             object_lock: settings.object_lock,
+            sse_kms: settings.sse_kms,
             allow_plain_http: settings.allow_plain_http,
             request_timeout: settings.request_timeout,
         })
@@ -256,7 +298,12 @@ impl S3EvidenceVault {
         root_key: EvidenceKey,
     ) -> Result<Self, EvidenceError> {
         let key_id = key_id.into();
-        let max_retention = validate_vault_policy(&key_id, max_artifact_bytes, max_retention_days)?;
+        let max_retention = validate_vault_policy(
+            &key_id,
+            max_artifact_bytes,
+            max_retention_days,
+            S3_MAX_ARTIFACT_BYTES,
+        )?;
         let client = S3Client::new(store);
         let versioned = client.versioning_enabled()?;
         if client.config().object_lock.is_some() && !(versioned && client.object_lock_enabled()?) {
@@ -696,7 +743,7 @@ impl S3EvidenceVault {
 
     fn max_envelope_bytes(&self) -> u64 {
         (self.max_artifact_bytes as u64 + 1 + NONCE_BYTES as u64 + TAG_BYTES as u64)
-            .min(MAX_SINGLE_ENVELOPE_BYTES)
+            .min(S3_MAX_ENVELOPE_BYTES)
     }
 }
 
