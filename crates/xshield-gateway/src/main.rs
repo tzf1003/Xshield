@@ -2852,6 +2852,43 @@ mod tests {
         assert_eq!(denial_status(ReasonCode::WafQueryInvalid), 400);
     }
 
+    /// Acceptance SHARE-03: a public limited-share entry is an admission
+    /// exception, not an inspection exception. The site WAF runs before any
+    /// admission class is consulted, so a request presenting a share token
+    /// with attack content is refused by the content check exactly as any
+    /// other request would be, and the token neither exempts nor triggers it.
+    #[test]
+    fn share_entry_requests_keep_the_site_content_check() {
+        let mut policy = xshield_core::SitePolicyConfig::default();
+        policy.waf.blocked_query_fragments = vec!["' or 1=1--".to_owned()];
+        policy.waf.blocked_headers = vec!["x-attack".to_owned()];
+        let share_request = |target: &[u8]| {
+            let mut request = pingora::http::RequestHeader::build("GET", target, Some(2)).unwrap();
+            request
+                .insert_header("X-Xshield-Share-Token", "verified-share-token")
+                .unwrap();
+            request
+        };
+        let attack = share_request(b"/shared-record?record_id=record-123%27+OR+1%3D1--");
+        assert_eq!(
+            site_waf_denial(&attack, &policy),
+            Some(ReasonCode::WafQueryBlocked)
+        );
+        let mut header_attack = share_request(b"/shared-record?record_id=record-123");
+        header_attack.insert_header("X-Attack", "1").unwrap();
+        assert_eq!(
+            site_waf_denial(&header_attack, &policy),
+            Some(ReasonCode::WafHeaderBlocked)
+        );
+        let malformed = share_request(b"/shared-record?record_id=%GG");
+        assert_eq!(
+            site_waf_denial(&malformed, &policy),
+            Some(ReasonCode::WafQueryInvalid)
+        );
+        let clean = share_request(b"/shared-record?record_id=record-123");
+        assert_eq!(site_waf_denial(&clean, &policy), None);
+    }
+
     #[test]
     fn site_rate_limiter_enforces_burst_per_source() {
         let limiter = SiteRateLimiter::new();
