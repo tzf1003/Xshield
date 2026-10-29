@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-10-29
+
+首个经 `release.yml` 发布的版本：镜像推到 GHCR 并签名（docs/19 19.7）。0.1.0 没有发布镜像：`GITHUB_TOKEN` 不能给工作流文件与 main 不同的提交打标签，而 0.1.0 的切版本提交 aebaa67 之后 CI 与发版工作流都改过。
+
 - 请求解密与响应加密支持多站点、多 key-id（docs/19、docs/31）：此前每个方向只有一把绑定启动配置站点的密钥，经 apply 下发的站点一旦启用 `DIRECT_DECRYPT`/`DIRECT_ENCRYPT` 就只能失败关闭，轮换也要起第二个 edge。
   - edge 新增密钥环变量 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`（也可 `_FILE`）：JSON 数组，每项 `tenant_id`、`site_id`、`key_id`、`key_hex`，每个方向最多 256 项。查找按租户、站点、key-id 与用途精确匹配，未列出的组合仍是 `REQUEST_CRYPTO_KEY_UNAVAILABLE`/`RESPONSE_CRYPTO_KEY_UNAVAILABLE`。
   - 原来的 `*_KEY_HEX` 单值变量含义不变，继续服务启动站点的 key-id，已有部署无需改动。格式错误、重复作用域、单值与密钥环重复给出启动站点 key-id、启动站点缺密钥、任一密钥跨方向复用，都拒绝启动；错误信息不含密钥。
@@ -13,6 +17,7 @@
   - `release-images.yml` 可以被调用，并给镜像加上版本与源码提交标签。验证签名身份的正则同时接受标签（推送触发）和 main（经 `release.yml` 触发），文档里的 `cosign verify` 命令已相应更新。
   - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
   - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
+  - `release.yml` 只能给工作流文件与 main 一致的提交打标签：GitHub 拒绝用 `GITHUB_TOKEN` 推送这类引用（缺少 `workflows` 权限）。打标签前先比较，不一致时直接报错说明原因。
   - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
 
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
