@@ -1,6 +1,6 @@
 # 29 控制 API 与审计责任清单
 
-本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`GET /control/v1/jobs[?cursor=...]`（29.34）、`GET /control/v1/admin/jobs[?cursor=...]`（29.35，AuditAdministrator）、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
+本章定义自定义接口；当前 `GET /control/v1/audit/health`、`GET /control/v1/requests/{request_id}`、`GET /control/v1/requests/{request_id}/events`、`POST /control/v1/search`、`POST /control/v1/causality`、`GET /control/v1/requests/{request_id}/evidence`、`GET /control/v1/model-calls`、`GET /control/v1/model-calls/{model_call_id}`、`GET /control/v1/agent-runs/{agent_run_id}`、`GET /control/v1/grants/{grant_id}`、`GET /control/v1/auth-bindings/{binding_id}`、`GET /control/v1/artifacts/{artifact_id}`、`GET /control/v1/artifacts/{artifact_id}/content`、`POST /control/v1/cases`、`GET /control/v1/cases`、`POST /control/v1/cases/{case_id}/items`、`GET /control/v1/cases/{case_id}/items`、`POST /control/v1/cases/{case_id}/close`、`POST /control/v1/cases/{case_id}/analyze`、`GET /control/v1/jobs/{job_id}`、`GET /control/v1/jobs[?cursor=...]`（29.34）、`GET /control/v1/admin/jobs[?cursor=...]`（29.35，AuditAdministrator）、`GET /control/v1/cases/{case_id}/jobs[?cursor=...]`（29.40）、`POST /control/v1/exports`、`GET /control/v1/exports?view=mine|review`（29.33）、`GET /control/v1/exports/{export_id}`、导出批准/拒绝/下载、`POST /control/v1/artifacts/{id}/access`、证据访问批准/拒绝、OIDC 登录/会话/再认证及 29.21 的保留锁创建/释放/列表端点已由 `xshield-control` 实现，其余条目仍是设计契约。所有 `/control/v1` 接口经管理身份验证、tenant/site作用域检查与速率限制；用户数据API和控制API必须分网络/认证边界。状态变更使用CSRF或对应机器凭证防护，GET不得产生重放或生产业务副作用。
 
 站点接入后台的配置写入要求 `SystemAdmin`，按固定 tenant/site 保存受保护站点、源站、安全入口、策略版本、状态和唯一监听端口；写入使用 `Idempotency-Key`，响应同时返回经过校验的 gateway 启动配置草稿。
 
@@ -70,6 +70,7 @@ edge 拒绝原因与 apply 状态：edge 对一次 apply 的拒绝不签名，�
 | POST /control/v1/exports/{export_id}/deny | 独立拒绝导出请求 | export.denied |
 | GET /control/v1/exports/{export_id}/download | 领取加密元数据包（最多两次） | export.downloaded |
 | GET /control/v1/jobs | 本人任务列表，按 job_id 降序分页（已实现，29.34） | console.job.list |
+| GET /control/v1/cases/{case_id}/jobs | 该案件已产生的全部任务，按 job_id 降序分页（已实现，29.40） | console.case.job.list |
 | POST /control/v1/saved-views | 保存已校验的检索请求（已实现，29.36） | console.saved_view.create |
 | GET /control/v1/saved-views | 本人保存的检索视图分页（已实现，29.36） | console.saved_view.list |
 | DELETE /control/v1/saved-views/{view_id} | 删除本人保存的检索视图（已实现，29.36） | console.saved_view.delete |
@@ -635,6 +636,18 @@ edge 侧：带 `page_actions` 的快照可以经签名 apply 下发并在重启�
 **实现状态（本节所有结论以此为准）。** 已实现并端到端验证到“控制面保存 → 校验 → 独立审批 → 投影 → 真实 edge 编译器接受”：`share_entry` 准入与 `share_issue`、`auth_refresh`、`auth_context_switch`。规则与 edge 编译器一一对应，`crates/xshield-gateway/tests/site_config_parity.rs` 用手写、边界与穷举样本（分享 5 种准入 × 2 方法 × 2 响应模式 × 64 种块组合 × 2 种目标指向；会话块 5 × 2 × 2 × 256）断言“控制面接受 ⇒ edge 接受”，并把控制面投影与 `scripts/test_gateway_identity.sh` 真实二进制脚本里的 `records.share.*`、`auth.refresh*`、`auth.context.switch*` 操作逐字节比较（脚本本身未改动，没有新增发放请求，ClickHouse 计数不变）。描述摘要：两类块都不新增动作描述，摘要不变，修改它们**不要求**更换 `policy_revision`（有测试，核心与 edge 两侧分别断言）；发放路由作为 `resource_grant` 目标仍是描述，移动它同样受 `CONTROL_SITE_POLICY_REVISION_REUSED` 约束（`share_scope_needs_its_own_independent_approval_and_keeps_the_label`）。三类块都是独立审批原因，`site.config.apply_direct` 不能代替。
 
 仍未覆盖，且是运行前提而非配置问题：（1）`share_issuance_rules` 行已由控制面写入（见上一小节），不再是缺口；仍然成立的是：规则行不可变，所以同一标签与规则 ID 下调整期限、视图或目标要换新的 `issuance_rule_id`；控制面与 edge 使用不同数据库时，控制面写的行在它自己的库里，edge 的库需要同样的行（与 0053 的绑定同样的前提）；没有页面签发的配置需要外部先供给 `active` 的 `policy_revisions` 行；（2）edge 是否启用分享发放取决于启动时的 `XSHIELD_CONFIG` 是否含 `share_issue`（决定是否要求 `XSHIELD_SHARE_TOKEN_KEY_HEX`），经签名 apply 才出现 `share_issue` 的 edge 没有该密钥时发放失败关闭，不会降级；（3）`evidence_capture` 没有实现：它要求 edge 部署证据写入器与目录存储（`requires_evidence_capture`），并且会把业务响应（脱敏后）写入证据库——这是新的数据留存面，应与保留期、访问审批一起单独评审，而不是顺带做成一个可编辑字段；控制面仍以 `CONTROL_SITE_FEATURE_UNSUPPORTED` 命名地拒绝它；（4）`site_routes` 投影只写不读，不为新块增加列（`share_issue`、两个会话块随 `response_config` 保存）。
+
+## 29.40 已实现的案件任务列表契约
+
+`GET /control/v1/cases/{case_id}/jobs[?cursor=...]` 列出调用者本人名下该案件已产生的全部耐久任务，只允许 `Investigator`。补齐 29.31 的缺口：此前案件详情页只能看到本次打开页面后提交的任务，更早的任务只能去任务页按 `job_` ID 单独查询；现在案件详情页的"分析"页签直接分页展示该案件的完整任务历史。
+
+路径 case 使用规范强类型 ID，格式错误在取得在途许可之前返回 400 `CONTROL_CASE_ID_INVALID`。查询参数只接受一个可选 `cursor`，其余形状（空参数、重复或未知参数、`cursor` 为空、超过 256 字节或含 `&`）返回 400 `CONTROL_CASE_JOB_LIST_REQUEST_INVALID`。游标是 `v1.<job_id>.<hmac>`，HMAC 用途域与 29.34 的本人任务列表不同（`xshield-control-case-job-list-v1`），并额外绑定路径中的 `case_id`：为一个案件签发的游标在另一个案件、他人或其他作用域下重放均返回 400 `CONTROL_CURSOR_INVALID`，不回显存在性。
+
+该查询直接以 `(tenant_id, site_id, owner_ref, case_id)` 过滤 `control_jobs`（迁移 0057 新增 `control_jobs_case_owner_lookup` 索引），不与 `investigation_cases` 做 join：案件不存在、不属于调用者或暂无任务，三者统一返回空页，与案件是否存在无关——是否存在该案件只由既有的案件读取端点回答。页按规范 `job_` ID 的字节序降序排列，页大小为服务端 `max_query_artifacts`，数据库在单个只读事务中读取，语句与锁等待各限 5 秒，调用方总超时 15 秒；取回的每一行重新校验顺序，乱序或越界行使整页失败。条目投影与 29.34 相同但不含 `case_id`（已在页级给出且对本页全部条目恒定），不返回原幂等键、请求摘要或主体引用；列表不授予任何新的读取、批准或执行资格。
+
+每次认证后的尝试（含拒绝与依赖故障）恰好写一条 `console.case.job.list` 管理审计，成功为 `PASS/CONTROL_CASE_JOBS_READ`，拒绝仅限 `CONTROL_AUTH_REQUIRED`、`CONTROL_SCOPE_DENIED`、`CONTROL_RATE_LIMITED`、`CONTROL_CASE_ID_INVALID`、`CONTROL_CURSOR_INVALID`、`CONTROL_CASE_JOB_LIST_REQUEST_INVALID`、`CONTROL_CASE_JOB_LIST_BUSY`，故障为 `CONTROL_CURSOR_UNAVAILABLE`、`CONTROL_JOB_STORE_UNAVAILABLE`、`CONTROL_RATE_UNAVAILABLE`、`CONTROL_CLOCK_UNAVAILABLE`、`CONTROL_SESSION_UNAVAILABLE`。审计携带 `target_case_id`，不携带游标、列表内容或他人主体。
+
+列表读取占用案件/证据在途许可并保持到审计落盘，繁忙返回 429 `CONTROL_CASE_JOB_LIST_BUSY`。部署先应用迁移 0057（新增索引，`BEGIN`/`COMMIT` 内 `CREATE INDEX`，无并发选项，大表需维护窗口），再升级识别 `console.case.job.list` 的管理 journal 发布器，最后开放路由。回滚停用路由并回退迁移（仅移除新增索引，`control_jobs` 表结构不变）即可，已写入的审计按保留策略保存。控制台案件详情页的"分析"页签新增"历史任务"表格读取本契约，分页复用既有游标栈组件。
 
 # Agent API Key 端点
 

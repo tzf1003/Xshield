@@ -2770,11 +2770,13 @@ async fn a_reused_label_holds_back_only_its_own_site() {
     }));
 }
 
-/// An edge descriptor conflict names the site that caused it. That site's
-/// status carries the code, the site whose save triggered the apply stays
-/// pending and the other sites keep their state. A name this plane did not
-/// send as a desired revision (unknown, or the target itself) leaves the
-/// failure on the target, as before.
+/// An edge descriptor conflict names the site that caused it. When that
+/// name is a sibling this snapshot carried as a desired revision, the plane
+/// excludes it and resends, so the change that triggered the apply still
+/// goes through; the named sibling's own status carries the code instead.
+/// A name this plane did not send as a desired revision (unknown, or the
+/// target itself) leaves the failure on the target, as before, and nothing
+/// is resent.
 #[tokio::test]
 #[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
 async fn a_descriptor_conflict_is_recorded_on_the_site_the_edge_names() {
@@ -2798,27 +2800,73 @@ async fn a_descriptor_conflict_is_recorded_on_the_site_the_edge_names() {
     );
     let (status, saved) = ctx.put("site_a", &renamed, &ctx.key("rename")).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(saved["apply_state"], "pending", "the target caused nothing");
-    assert_eq!(saved["reason_code"], "EDGE_APPLY_NOT_CONFIRMED");
+    assert_eq!(
+        saved["apply_state"], "active",
+        "excluding site_b let the rename through"
+    );
+    assert_eq!(saved["reason_code"], "EDGE_APPLY_CONFIRMED");
     let named = ctx.status("site_b").await;
     assert_eq!(named["apply_state"], "failed", "{named}");
     assert_eq!(named["reason_code"], "EDGE_APPLY_DESCRIPTOR_CONFLICT");
     let other = ctx.status("site_c").await;
     assert_eq!(other["apply_state"], "active", "{other}");
     assert_eq!(other["reason_code"], "EDGE_APPLY_CONFIRMED");
+    // site_b was never dropped from service, only held at what it already
+    // served; site_a's rename reached the edge on the retried snapshot.
+    assert!(ctx.edge.served_sites().contains(&"site_b".to_owned()));
 
     for name in ["site_unknown", "site_a"] {
         ctx.edge.refuse_next(409, conflict(name));
+        let sent = ctx.edge.apply_count();
         let (status, outcome) = ctx.apply("site_a", &ctx.key("apply")).await;
         assert_eq!(status, StatusCode::OK, "{outcome}");
         assert_eq!(outcome["apply_state"], "failed", "{name}: {outcome}");
         assert_eq!(outcome["reason_code"], "EDGE_APPLY_DESCRIPTOR_CONFLICT");
         assert_eq!(ctx.status("site_c").await["apply_state"], "active");
+        // Neither name is a sibling carried in the snapshot, so nothing
+        // reachable is excluded and nothing of the refused attempt is sent.
+        assert_eq!(ctx.edge.apply_count(), sent, "{name}: nothing resent");
     }
-    // Nothing of the refused snapshots was served.
     assert_eq!(
         ctx.edge.served_gateway_config("site_a").unwrap()["origin"]["address"],
         "8.8.8.8:9000"
+    );
+    let _ = ctx.finish().await;
+}
+
+/// A descriptor conflict naming a sibling is excluded and the snapshot is
+/// resent, so an edge binding the control plane cannot see no longer blocks
+/// every other site's delivery, only the one the edge named (docs/22,
+/// "edge 拒绝后自动去掉被点名的站点重发").
+#[tokio::test]
+#[ignore = "requires XSHIELD_TEST_DATABASE_URL"]
+async fn a_descriptor_conflict_naming_a_sibling_is_excluded_and_resent() {
+    let ctx = Ctx::new().await;
+    for site in ["site_a", "site_b"] {
+        ctx.create_live(site, "8.8.8.8:9000").await;
+    }
+    ctx.edge.refuse_next(
+        409,
+        json!({
+            "error": "edge_apply_failed",
+            "reason_code": "EDGE_APPLY_DESCRIPTOR_CONFLICT",
+            "site_id": "site_b"
+        }),
+    );
+    let sent = ctx.edge.apply_count();
+    let (status, outcome) = ctx.apply("site_a", &ctx.key("apply")).await;
+    assert_eq!(status, StatusCode::OK, "{outcome}");
+    assert_eq!(outcome["apply_state"], "active", "{outcome}");
+    assert_eq!(outcome["reason_code"], "EDGE_APPLY_CONFIRMED");
+    // Exactly one snapshot reached the edge: the refusal was not forwarded
+    // as a second attempt the caller has to retry itself.
+    assert_eq!(ctx.edge.apply_count(), sent + 1);
+    let named = ctx.status("site_b").await;
+    assert_eq!(named["apply_state"], "failed", "{named}");
+    assert_eq!(named["reason_code"], "EDGE_APPLY_DESCRIPTOR_CONFLICT");
+    assert!(
+        ctx.edge.served_sites().contains(&"site_b".to_owned()),
+        "excluded means held at its last approved configuration, not dropped"
     );
     let _ = ctx.finish().await;
 }
