@@ -2740,8 +2740,10 @@ mod tests {
     #[test]
     fn business_websocket_route_admits_like_any_other_operation_but_has_no_buffered_response() {
         let ws_operation = r#"{"operation_id":"chat.ws","method":"GET","path":"/ws/chat","admission":"PUBLIC","source_action":null,"resource_type":null,"view_profile":null,"business_websocket":{"adapter_revision":"chat-ws-r1","max_observed_frame_bytes":65536}},"#;
-        let configured =
-            CONFIG.replace("\"operations\":[", &format!("\"operations\":[{ws_operation}"));
+        let configured = CONFIG.replace(
+            "\"operations\":[",
+            &format!("\"operations\":[{ws_operation}"),
+        );
         let config = GatewayConfig::from_json(configured.as_bytes()).unwrap();
         let decision = config.admit("GET", "/ws/chat", UnixSeconds::new(1));
         assert_eq!(decision.outcome, GatewayOutcome::Allowed);
@@ -2751,7 +2753,11 @@ mod tests {
         assert_eq!(policy.adapter_revision(), "chat-ws-r1");
         assert_eq!(policy.max_observed_frame_bytes(), 65536);
         // An ordinary operation never declares a business websocket policy.
-        assert!(config.business_websocket_policy("GET", "/catalog").is_none());
+        assert!(
+            config
+                .business_websocket_policy("GET", "/catalog")
+                .is_none()
+        );
     }
 
     #[test]

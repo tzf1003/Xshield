@@ -245,7 +245,9 @@ impl FrameScanner {
     /// Never: only called while `self.skipping` is `Some`.
     fn advance_skip(&mut self, available: usize, out: &mut Vec<MessageAudit>) -> (usize, bool) {
         let skip = self.skipping.as_mut().expect("caller checked Some");
-        let take = skip.remaining.min(u64::try_from(available).unwrap_or(u64::MAX));
+        let take = skip
+            .remaining
+            .min(u64::try_from(available).unwrap_or(u64::MAX));
         skip.remaining -= take;
         // `take <= available`, which is itself a `usize`, so this always fits.
         let take = usize::try_from(take).unwrap_or(available);

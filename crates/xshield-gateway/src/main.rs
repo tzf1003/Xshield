@@ -326,7 +326,11 @@ impl BusinessWsRelay {
         }
     }
 
-    fn record(&mut self, direction: durable_audit::BusinessWsDirection, audits: Vec<business_ws::MessageAudit>) {
+    fn record(
+        &mut self,
+        direction: durable_audit::BusinessWsDirection,
+        audits: Vec<business_ws::MessageAudit>,
+    ) {
         for audit in audits {
             match direction {
                 durable_audit::BusinessWsDirection::ToOrigin => {
