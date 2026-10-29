@@ -44,14 +44,34 @@ pub(crate) enum SensorBootstrapDelivery {
     /// One page instance; `actions` is empty unless this session owns it.
     Page {
         page_handle: String,
+        /// The exact page-delivery document shape to render, named by the
+        /// query itself (see [`BootstrapQuery::Page`]).
+        sensor_version: &'static str,
         actions: Vec<PageActionView>,
     },
 }
 
-/// Parsed bootstrap query: absent, exactly one `page=pgh_<UUIDv7>`, or invalid.
+/// The page-based bootstrap query format 1.1.0 has used since it first
+/// shipped: `page=<handle>` with no other parameter. This exact format and
+/// its exact response shape (no `ws_url`, `sensor_version: "1.1.0"`) are
+/// pinned to this literal version forever, independent of whichever sensor
+/// version is current, for as long as 1.1.0's script bytes are still served
+/// (docs/07 §7.1): a later sensor version must announce itself explicitly
+/// instead of reusing this slot, so an already-shipped, byte-frozen 1.1.0
+/// page never receives a response shape its hardcoded validation rejects.
+const ORIGINAL_PAGE_BOOTSTRAP_VERSION: &str = "1.1.0";
+
+/// Parsed bootstrap query: absent, one page-based request naming the exact
+/// sensor version it is shaped for, or invalid.
 enum BootstrapQuery<'a> {
     Legacy,
-    Page(&'a str),
+    /// `page=pgh_<UUIDv7>` (pinned to [`ORIGINAL_PAGE_BOOTSTRAP_VERSION`]) or
+    /// `page=pgh_<UUIDv7>&sensor_version=<SENSOR_VERSION>` (any later version
+    /// that names itself explicitly).
+    Page {
+        page_handle: &'a str,
+        sensor_version: &'static str,
+    },
     Invalid,
 }
 
@@ -59,8 +79,30 @@ fn bootstrap_query(query: Option<&str>) -> BootstrapQuery<'_> {
     let Some(query) = query else {
         return BootstrapQuery::Legacy;
     };
+    // A second parameter only ever means an explicit version announcement:
+    // check for it before stripping "page=", since that prefix alone would
+    // otherwise also match the first segment of this longer query.
+    if let Some((page_part, version_part)) = query.split_once('&') {
+        let (Some(handle), Some(version)) = (
+            page_part.strip_prefix("page="),
+            version_part.strip_prefix("sensor_version="),
+        ) else {
+            return BootstrapQuery::Invalid;
+        };
+        return if page_evidence_id(handle).is_some() && version == xshield_gateway::SENSOR_VERSION {
+            BootstrapQuery::Page {
+                page_handle: handle,
+                sensor_version: xshield_gateway::SENSOR_VERSION,
+            }
+        } else {
+            BootstrapQuery::Invalid
+        };
+    }
     match query.strip_prefix("page=") {
-        Some(handle) if page_evidence_id(handle).is_some() => BootstrapQuery::Page(handle),
+        Some(handle) if page_evidence_id(handle).is_some() => BootstrapQuery::Page {
+            page_handle: handle,
+            sensor_version: ORIGINAL_PAGE_BOOTSTRAP_VERSION,
+        },
         _ => BootstrapQuery::Invalid,
     }
 }
@@ -172,7 +214,7 @@ impl ProtectedIdentity {
         now: UnixSeconds,
     ) -> Result<ProtectedAdmission, IdentityRuntimeError> {
         let decision = config.admit(method, path, now);
-        let page_handle = match bootstrap_query(request.uri.query()) {
+        let (page_handle, sensor_version) = match bootstrap_query(request.uri.query()) {
             BootstrapQuery::Legacy => {
                 return Ok(ProtectedAdmission {
                     sensor_bootstrap: Some(SensorBootstrapDelivery::Legacy),
@@ -188,7 +230,10 @@ impl ProtectedIdentity {
                     ReasonCode::SensorBootstrapInvalid,
                 )));
             }
-            BootstrapQuery::Page(page_handle) => page_handle,
+            BootstrapQuery::Page {
+                page_handle,
+                sensor_version,
+            } => (page_handle, sensor_version),
         };
         let actions = self
             .session_page_actions(config, request, page_handle, now)
@@ -196,6 +241,7 @@ impl ProtectedIdentity {
         Ok(ProtectedAdmission {
             sensor_bootstrap: Some(SensorBootstrapDelivery::Page {
                 page_handle: page_handle.to_owned(),
+                sensor_version,
                 actions,
             }),
             ..ProtectedAdmission::without_identity(decision)
@@ -433,7 +479,20 @@ mod tests {
         assert!(matches!(bootstrap_query(None), BootstrapQuery::Legacy));
         assert!(matches!(
             bootstrap_query(Some(&format!("page={HANDLE}"))),
-            BootstrapQuery::Page(HANDLE)
+            BootstrapQuery::Page {
+                page_handle: HANDLE,
+                sensor_version: "1.1.0"
+            }
+        ));
+        assert!(matches!(
+            bootstrap_query(Some(&format!(
+                "page={HANDLE}&sensor_version={}",
+                xshield_gateway::SENSOR_VERSION
+            ))),
+            BootstrapQuery::Page {
+                page_handle: HANDLE,
+                ..
+            }
         ));
         for query in [
             String::new(),
@@ -441,6 +500,8 @@ mod tests {
             format!("page={HANDLE}&page={HANDLE}"),
             format!("page={HANDLE}&v=1"),
             format!("v=1&page={HANDLE}"),
+            format!("page={HANDLE}&sensor_version=1.1.0"),
+            format!("page={HANDLE}&sensor_version=9.9.9"),
             "page=pgh_018f2a3b-4c5d-4000-8000-000000000001".to_owned(),
             "page=pgh_018F2A3B-4C5D-7000-8000-000000000001".to_owned(),
             "page=pgh_018f2a3b4c5d70008000000000000001".to_owned(),

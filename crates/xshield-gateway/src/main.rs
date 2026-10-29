@@ -57,6 +57,7 @@ use xshield_gateway::multi_site::{
 use xshield_gateway::request_crypto::{FrozenRequest, RequestCryptoPolicy};
 use xshield_gateway::response_crypto::ENCRYPTED_RESPONSE_CONTENT_TYPE;
 use xshield_gateway::sensor::{MAX_SENSOR_OBSERVATION_BYTES, SensorObservationBatch};
+use xshield_gateway::sensor_ws::{self, MAX_WS_FRAME_BYTES, WsOpcode};
 use xshield_gateway::{
     BufferedResponsePolicy, GatewayConfig, GatewayDecision, GatewayOutcome, InternalResponse,
     MAX_BUFFERED_BODY_IN_FLIGHT_BYTES, MAX_BUFFERED_JSON_BYTES, MAX_CONFIG_BYTES,
@@ -119,6 +120,73 @@ fn validate_sensor_observation_headers(
     }
     Ok(length)
 }
+
+/// Validates the probe WSS handshake request against docs/07 §7.3: exact
+/// configured Origin, a genuine `Upgrade: websocket` request, and a
+/// well-formed `Sec-WebSocket-Key`. Returns the validated key.
+fn validate_sensor_ws_handshake_headers(
+    request: &pingora::http::RequestHeader,
+    expected_origin: &str,
+) -> Result<String, ReasonCode> {
+    if request.uri.query().is_some() {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut origins = request.headers.get_all("Origin").iter();
+    if origins.next().and_then(|value| value.to_str().ok()) != Some(expected_origin)
+        || origins.next().is_some()
+    {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut upgrades = request.headers.get_all("Upgrade").iter();
+    let upgrade_ok = upgrades
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    if !upgrade_ok || upgrades.next().is_some() {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let connection_has_upgrade = request.headers.get_all("Connection").iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    });
+    if !connection_has_upgrade {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut versions = request.headers.get_all("Sec-WebSocket-Version").iter();
+    if versions.next().and_then(|value| value.to_str().ok()) != Some("13")
+        || versions.next().is_some()
+    {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    let mut keys = request.headers.get_all("Sec-WebSocket-Key").iter();
+    let key = keys
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| sensor_ws::valid_websocket_key(value))
+        .ok_or(ReasonCode::SensorObservationInvalid)?;
+    if keys.next().is_some() {
+        return Err(ReasonCode::SensorObservationInvalid);
+    }
+    Ok(key.to_owned())
+}
+
+/// Idle read timeout for an open probe WSS connection: well past the 15s+
+/// jitter heartbeat docs/07 §7.3 recommends, so backgrounded tabs (which
+/// pause JS and so miss heartbeats) are not closed spuriously.
+const SENSOR_WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Hard cap on a single probe WSS connection's lifetime; docs/07 §7.3 requires
+/// that an invalidated connection close and reauthenticate rather than run
+/// forever on a stale identity epoch.
+const SENSOR_WS_MAX_LIFETIME: Duration = Duration::from_mins(20);
+/// Message-rate window and cap, matching docs/07 §7.3's "单页短时 64 条摘要".
+const SENSOR_WS_RATE_WINDOW: Duration = Duration::from_secs(60);
+const SENSOR_WS_RATE_LIMIT: u32 = 64;
+/// Bound on buffered-but-not-yet-parsed bytes for one connection: one max
+/// frame plus the largest possible client frame header.
+const SENSOR_WS_MAX_BUFFERED_BYTES: usize = MAX_WS_FRAME_BYTES + 32;
 
 struct Gateway {
     config: Arc<GatewayConfig>,
@@ -203,6 +271,8 @@ struct RequestContext {
     frozen_query: Option<xshield_gateway::FrozenQuery>,
     sensor_session: Option<SensorSession>,
     sensor_observation_audit: Vec<SensorObservationAudit>,
+    // The validated `Sec-WebSocket-Key`, set once the handshake headers pass.
+    sensor_ws_key: Option<String>,
     sensor_bootstrap: Option<SensorBootstrapDelivery>,
     sensor_bootstrap_audit: Option<SensorBootstrapAudit>,
     page_action_audit: Option<PageActionAudit>,
@@ -264,6 +334,7 @@ impl ProxyHttp for Gateway {
             frozen_query: None,
             sensor_session: None,
             sensor_observation_audit: Vec::new(),
+            sensor_ws_key: None,
             sensor_bootstrap: None,
             sensor_bootstrap_audit: None,
             page_action_audit: None,
@@ -461,6 +532,7 @@ impl ProxyHttp for Gateway {
         }
         self.apply_sensor_observation(session, context, internal_response, &mut decision)
             .await;
+        self.apply_sensor_ws_handshake(session, context, internal_response, &mut decision);
         self.apply_request_crypto(session, context, &method, &path, now, &mut decision)
             .await;
         // Last, after every refusal has been decided: an observe rollout
@@ -544,6 +616,18 @@ impl ProxyHttp for Gateway {
                     respond_sensor_script(session, &context.request_id, SensorScript::LOADER)
                         .await?;
                 }
+                InternalResponse::PreviousSensorAsset => {
+                    respond_sensor_script(session, &context.request_id, SensorScript::PREVIOUS)
+                        .await?;
+                }
+                InternalResponse::PreviousSensorLoader => {
+                    respond_sensor_script(
+                        session,
+                        &context.request_id,
+                        SensorScript::PREVIOUS_LOADER,
+                    )
+                    .await?;
+                }
                 InternalResponse::LegacySensorAsset => {
                     respond_sensor_script(session, &context.request_id, SensorScript::LEGACY)
                         .await?;
@@ -575,6 +659,9 @@ impl ProxyHttp for Gateway {
                 }
                 InternalResponse::SensorPrepare => {
                     respond_sensor_observation(session, &context.request_id).await?;
+                }
+                InternalResponse::SensorWsUpgrade => {
+                    self.run_sensor_ws(session, context).await?;
                 }
             }
             return Ok(true);
@@ -1232,6 +1319,171 @@ impl Gateway {
             .iter()
             .map(|observation| SensorObservationAudit::new(sensor_session, observation))
             .collect())
+    }
+
+    /// Validates the probe WSS handshake headers once admission has loaded
+    /// the exact current WAF session (the same `AdmissionClass::AuthenticatedRoot`
+    /// path `SensorPrepare` uses). Denies closed on any mismatch rather than
+    /// falling back to the HTTPS-only path silently.
+    fn apply_sensor_ws_handshake(
+        &self,
+        session: &Session,
+        context: &mut RequestContext,
+        internal_response: Option<InternalResponse>,
+        decision: &mut GatewayDecision,
+    ) {
+        if internal_response != Some(InternalResponse::SensorWsUpgrade)
+            || decision.outcome != GatewayOutcome::Allowed
+        {
+            return;
+        }
+        let Some(sensor) = context.config(self).sensor() else {
+            decision.outcome = GatewayOutcome::Denied;
+            decision.reason_code = ReasonCode::SensorObservationInvalid;
+            return;
+        };
+        match validate_sensor_ws_handshake_headers(session.req_header(), sensor.origin()) {
+            Ok(key) => context.sensor_ws_key = Some(key),
+            Err(reason) => {
+                decision.outcome = GatewayOutcome::Denied;
+                decision.reason_code = reason;
+            }
+        }
+    }
+
+    /// Completes the RFC 6455 handshake and runs the probe WSS frame loop
+    /// until the peer closes, the connection goes idle or stale, or a
+    /// protocol/rate/size violation forces it shut (docs/07 §7.3). Each text
+    /// frame is treated as one `events/prepare`-shaped batch and audited the
+    /// same way, but outside the per-request completion tracking: a
+    /// long-lived connection has no terminal "request.completed" event.
+    async fn run_sensor_ws(
+        &self,
+        session: &mut Session,
+        context: &mut RequestContext,
+    ) -> PingoraResult<()> {
+        let Some(key) = context.sensor_ws_key.take() else {
+            return respond_denial(
+                session,
+                500,
+                &context.request_id,
+                ReasonCode::SensorObservationInvalid,
+                None,
+            )
+            .await;
+        };
+        let mut response = ResponseHeader::build(101, Some(4))?;
+        response.insert_header("Upgrade", "websocket")?;
+        response.insert_header("Connection", "Upgrade")?;
+        response.insert_header("Sec-WebSocket-Accept", sensor_ws::accept_key(&key))?;
+        response.insert_header("X-Xshield-Request-Id", context.request_id.as_str())?;
+        session
+            .write_response_header(Box::new(response), false)
+            .await?;
+        session.set_read_timeout(Some(SENSOR_WS_IDLE_TIMEOUT));
+        session.set_write_timeout(Some(SENSOR_WS_IDLE_TIMEOUT));
+
+        let started_at = Instant::now();
+        let mut window_started_at = Instant::now();
+        let mut window_messages: u32 = 0;
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            if started_at.elapsed() >= SENSOR_WS_MAX_LIFETIME {
+                return close_sensor_ws(session, 1001, "lifetime").await;
+            }
+            let Ok(Some(chunk)) = session.read_request_body().await else {
+                return Ok(());
+            };
+            if buf.len().saturating_add(chunk.len()) > SENSOR_WS_MAX_BUFFERED_BYTES {
+                return close_sensor_ws(session, 1009, "too large").await;
+            }
+            buf.extend_from_slice(&chunk);
+            loop {
+                let parsed = match sensor_ws::parse_frame(&buf) {
+                    Ok(Some(parsed)) => parsed,
+                    Ok(None) => break,
+                    Err(error) => {
+                        return close_sensor_ws(session, error.close_code(), "protocol").await;
+                    }
+                };
+                buf.drain(..parsed.consumed);
+                match parsed.opcode {
+                    WsOpcode::Close => return close_sensor_ws(session, 1000, "bye").await,
+                    WsOpcode::Ping => {
+                        session
+                            .write_response_body(
+                                Some(Bytes::from(sensor_ws::build_frame(
+                                    WsOpcode::Pong,
+                                    &parsed.payload,
+                                ))),
+                                false,
+                            )
+                            .await?;
+                    }
+                    WsOpcode::Pong => {}
+                    WsOpcode::Binary => {
+                        return close_sensor_ws(session, 1003, "binary unsupported").await;
+                    }
+                    WsOpcode::Text => {
+                        if window_started_at.elapsed() >= SENSOR_WS_RATE_WINDOW {
+                            window_started_at = Instant::now();
+                            window_messages = 0;
+                        }
+                        window_messages += 1;
+                        if window_messages > SENSOR_WS_RATE_LIMIT {
+                            return close_sensor_ws(session, 1008, "rate limited").await;
+                        }
+                        self.handle_sensor_ws_message(context, &parsed.payload)
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Validates one WS text frame as an `events/prepare`-shaped batch and
+    /// durably records the per-message outcome, bypassing request-completion
+    /// tracking (see [`DurableAudit::record_sensor_ws_observations`]).
+    async fn handle_sensor_ws_message(&self, context: &RequestContext, payload: &[u8]) {
+        let parsed = context
+            .config(self)
+            .sensor()
+            .ok_or(ReasonCode::SensorObservationInvalid)
+            .and_then(|sensor| {
+                SensorObservationBatch::from_json(
+                    payload,
+                    &xshield_gateway::ACCEPTED_SENSOR_VERSIONS,
+                    sensor.build_ref(),
+                )
+                .map_err(|_| ReasonCode::SensorObservationInvalid)
+            })
+            .and_then(|batch| {
+                context
+                    .sensor_session
+                    .as_ref()
+                    .ok_or(ReasonCode::AuthBindingMismatch)
+                    .map(|sensor_session| {
+                        batch
+                            .observations()
+                            .iter()
+                            .map(|observation| {
+                                SensorObservationAudit::new(sensor_session, observation)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+            });
+        let (outcome, reason_code, observations) = match parsed {
+            Ok(observations) => (
+                GatewayOutcome::Allowed,
+                ReasonCode::SensorObservationAccepted,
+                observations,
+            ),
+            Err(reason) => (GatewayOutcome::Denied, reason, Vec::new()),
+        };
+        let _ = self
+            .audit
+            .record_sensor_ws_observations(&context.trace_id, outcome, reason_code, &observations)
+            .await;
     }
 
     async fn apply_request_crypto(
@@ -2149,6 +2401,15 @@ async fn respond_sensor_observation(session: &mut Session, request_id: &str) -> 
         .write_response_header(Box::new(response), false)
         .await?;
     session.write_response_body(Some(body), true).await
+}
+
+/// Sends an RFC 6455 close frame on an upgraded probe WSS connection and
+/// ends the stream. Write failures are not surfaced: the peer is going away
+/// either way, and the caller has nothing further to report to it.
+async fn close_sensor_ws(session: &mut Session, code: u16, reason: &str) -> PingoraResult<()> {
+    let frame = Bytes::from(sensor_ws::close_frame(code, reason));
+    let _ = session.write_response_body(Some(frame), true).await;
+    Ok(())
 }
 
 fn denial_body(request_id: &str, reason: ReasonCode) -> Bytes {

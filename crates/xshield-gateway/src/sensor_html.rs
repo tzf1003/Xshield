@@ -1,6 +1,6 @@
 //! Exact-build browser sensor HTML injection.
 //!
-//! Sensor 1.1.0 is injected as two classic synchronous scripts at the pinned
+//! Sensor 1.2.0 is injected as two classic synchronous scripts at the pinned
 //! `</head>` offset: the sensor first, so its fetch/XHR hooks exist before any
 //! later script of the document runs, then the loader, whose tag carries the
 //! per-delivery page handle. The handle is not a credential: the bootstrap
@@ -14,8 +14,8 @@ use openssl::{
 use std::sync::LazyLock;
 use uuid::{Uuid, Version};
 
-const SENSOR_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.1.0.js\"";
-const LOADER_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.1.0-loader.js\"";
+const SENSOR_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.2.0.js\"";
+const LOADER_SCRIPT: &str = "<script src=\"/__xshield/v1/sensor/1.2.0-loader.js\"";
 const SCRIPT_END: &str = "></script>";
 const NONCE_ATTRIBUTE_OVERHEAD: usize = " nonce=\"\"".len();
 const NONCE_BYTES: usize = 32;
