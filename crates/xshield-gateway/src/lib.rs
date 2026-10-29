@@ -40,6 +40,7 @@ pub mod response_crypto;
 pub mod response_grant;
 pub mod sensor;
 pub mod sensor_html;
+pub mod sensor_ws;
 pub mod share_issue;
 pub mod share_response;
 pub mod share_token;
@@ -70,18 +71,34 @@ pub const MAX_ENCRYPTED_REQUEST_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_PATH_RESOURCE_OPERATIONS: usize = 64;
 const STATIC_ASSET_OPERATION_ID: &str = "site.static_asset";
 /// Versioned same-origin browser sensor asset injected into new pages.
-pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.1.0.js";
+pub const SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.2.0.js";
 /// Immutable browser sensor bootstrap loader injected into new pages.
-pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.1.0-loader.js";
+pub const SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.2.0-loader.js";
 /// Exact versioned sensor bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor-1.1.0.js");
+pub const SENSOR_ASSET_BYTES: &[u8] = include_bytes!("../../../sensor/src/sensor-1.2.0.js");
 /// Exact versioned loader bytes served by the gateway and bound into HTML SRI.
-pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader-1.1.0.js");
+pub const SENSOR_LOADER_BYTES: &[u8] = include_bytes!("../../../sensor/src/loader-1.2.0.js");
 /// Browser sensor version embedded in [`SENSOR_ASSET_PATH`].
-pub const SENSOR_VERSION: &str = "1.1.0";
-/// Superseded sensor asset, still served byte-identical: pages delivered by
-/// an older edge (or another instance during a rolling upgrade) pin these
-/// exact bytes with SRI, so the URL may disappear but must never change.
+pub const SENSOR_VERSION: &str = "1.2.0";
+/// Superseded 1.1.0 sensor asset, still served byte-identical: pages
+/// delivered by an older edge (or another instance during a rolling
+/// upgrade) pin these exact bytes with SRI, so the URL may disappear but
+/// must never change.
+pub const PREVIOUS_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.1.0.js";
+/// Superseded 1.1.0 loader asset, still served byte-identical.
+pub const PREVIOUS_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.1.0-loader.js";
+/// Frozen 1.1.0 sensor bytes.
+pub const PREVIOUS_SENSOR_ASSET_BYTES: &[u8] =
+    include_bytes!("../../../sensor/src/sensor-1.1.0.js");
+/// Frozen 1.1.0 loader bytes.
+pub const PREVIOUS_SENSOR_LOADER_BYTES: &[u8] =
+    include_bytes!("../../../sensor/src/loader-1.1.0.js");
+/// Version embedded in the previous-tier asset paths.
+pub const PREVIOUS_SENSOR_VERSION: &str = "1.1.0";
+/// Superseded 1.0.0 sensor asset, still served byte-identical: pages
+/// delivered by an older edge (or another instance during a rolling
+/// upgrade) pin these exact bytes with SRI, so the URL may disappear but
+/// must never change.
 pub const LEGACY_SENSOR_ASSET_PATH: &str = "/__xshield/v1/sensor/1.0.0.js";
 /// Superseded loader asset, still served byte-identical.
 pub const LEGACY_SENSOR_LOADER_PATH: &str = "/__xshield/v1/sensor/1.0.0-loader.js";
@@ -95,15 +112,26 @@ pub const LEGACY_SENSOR_VERSION: &str = "1.0.0";
 pub const SENSOR_BOOTSTRAP_PATH: &str = "/__xshield/v1/bootstrap";
 /// Same-origin observation preparation endpoint advertised by bootstrap.
 pub const SENSOR_PREPARE_PATH: &str = "/__xshield/v1/events/prepare";
-/// Observation versions the prepare endpoint accepts: every version whose
-/// assets this edge still serves.
-pub const ACCEPTED_SENSOR_VERSIONS: [&str; 2] = [SENSOR_VERSION, LEGACY_SENSOR_VERSION];
+/// Same-origin probe WSS channel advertised by the 1.2.0+ bootstrap
+/// (docs/07 7.3): heartbeat and event reporting terminated at the edge, with
+/// HTTPS prepare as the fallback transport.
+pub const SENSOR_WS_PATH: &str = "/__xshield/v1/sensor/ws";
+/// Observation versions the prepare endpoint and the WSS channel accept:
+/// every version whose assets this edge still serves.
+pub const ACCEPTED_SENSOR_VERSIONS: [&str; 3] = [
+    SENSOR_VERSION,
+    PREVIOUS_SENSOR_VERSION,
+    LEGACY_SENSOR_VERSION,
+];
 const SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.asset";
 const SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.loader";
+const PREVIOUS_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.previous_asset";
+const PREVIOUS_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.previous_loader";
 const LEGACY_SENSOR_ASSET_OPERATION_ID: &str = "xshield.sensor.legacy_asset";
 const LEGACY_SENSOR_LOADER_OPERATION_ID: &str = "xshield.sensor.legacy_loader";
 const SENSOR_BOOTSTRAP_OPERATION_ID: &str = "xshield.sensor.bootstrap";
 const SENSOR_PREPARE_OPERATION_ID: &str = "xshield.sensor.prepare";
+const SENSOR_WS_OPERATION_ID: &str = "xshield.sensor.ws";
 const INTERNAL_PATH_PREFIX: &str = "/__xshield/";
 
 /// Local edge response selected from the reserved Xshield namespace.
@@ -113,6 +141,10 @@ pub enum InternalResponse {
     SensorAsset,
     /// The immutable browser sensor bootstrap loader.
     SensorLoader,
+    /// The frozen 1.1.0 sensor asset kept for already-delivered pages.
+    PreviousSensorAsset,
+    /// The frozen 1.1.0 loader asset kept for already-delivered pages.
+    PreviousSensorLoader,
     /// The frozen 1.0.0 sensor asset kept for already-delivered pages.
     LegacySensorAsset,
     /// The frozen 1.0.0 loader asset kept for already-delivered pages.
@@ -121,6 +153,8 @@ pub enum InternalResponse {
     SensorBootstrap,
     /// A session-bound browser observation preparation request.
     SensorPrepare,
+    /// A session-bound probe WSS upgrade request.
+    SensorWsUpgrade,
 }
 
 /// Fully validated gateway configuration selected at process startup.
@@ -808,21 +842,25 @@ impl GatewayConfig {
         self.sensor.as_ref()
     }
 
-    /// Admits the reserved prepare operation after the identity adapter loaded
-    /// an exact current WAF session.
+    /// Admits the reserved prepare operation or the WSS upgrade after the
+    /// identity adapter loaded an exact current WAF session.
     ///
     /// The result authorizes metadata ingestion only. It is not an
     /// [`AdmissionProof`] and cannot admit a configured business operation.
     #[must_use]
     pub fn admit_sensor_session(&self, method: &str, path: &str) -> GatewayDecision {
-        if self.internal_response(method, path) != Some(InternalResponse::SensorPrepare) {
-            return GatewayDecision {
-                outcome: GatewayOutcome::Denied,
-                operation_id: None,
-                reason_code: ReasonCode::OperationNotMatched,
-            };
-        }
-        match OperationId::parse(SENSOR_PREPARE_OPERATION_ID) {
+        let operation = match self.internal_response(method, path) {
+            Some(InternalResponse::SensorPrepare) => SENSOR_PREPARE_OPERATION_ID,
+            Some(InternalResponse::SensorWsUpgrade) => SENSOR_WS_OPERATION_ID,
+            _ => {
+                return GatewayDecision {
+                    outcome: GatewayOutcome::Denied,
+                    operation_id: None,
+                    reason_code: ReasonCode::OperationNotMatched,
+                };
+            }
+        };
+        match OperationId::parse(operation) {
             Ok(operation_id) => GatewayDecision {
                 outcome: GatewayOutcome::Allowed,
                 operation_id: Some(operation_id),
@@ -871,9 +909,13 @@ impl GatewayConfig {
     pub fn admission_class(&self, method: &str, path: &str) -> Option<AdmissionClass> {
         if let Some(response) = self.internal_response(method, path) {
             return Some(match response {
-                InternalResponse::SensorPrepare => AdmissionClass::AuthenticatedRoot,
+                InternalResponse::SensorPrepare | InternalResponse::SensorWsUpgrade => {
+                    AdmissionClass::AuthenticatedRoot
+                }
                 InternalResponse::SensorAsset
                 | InternalResponse::SensorLoader
+                | InternalResponse::PreviousSensorAsset
+                | InternalResponse::PreviousSensorLoader
                 | InternalResponse::LegacySensorAsset
                 | InternalResponse::LegacySensorLoader
                 | InternalResponse::SensorBootstrap => AdmissionClass::Public,
@@ -889,6 +931,8 @@ impl GatewayConfig {
         match (method, path) {
             ("GET", SENSOR_ASSET_PATH) => Some(InternalResponse::SensorAsset),
             ("GET", SENSOR_LOADER_PATH) => Some(InternalResponse::SensorLoader),
+            ("GET", PREVIOUS_SENSOR_ASSET_PATH) => Some(InternalResponse::PreviousSensorAsset),
+            ("GET", PREVIOUS_SENSOR_LOADER_PATH) => Some(InternalResponse::PreviousSensorLoader),
             ("GET", LEGACY_SENSOR_ASSET_PATH) => Some(InternalResponse::LegacySensorAsset),
             ("GET", LEGACY_SENSOR_LOADER_PATH) => Some(InternalResponse::LegacySensorLoader),
             ("GET", SENSOR_BOOTSTRAP_PATH) if self.sensor.is_some() => {
@@ -896,6 +940,9 @@ impl GatewayConfig {
             }
             ("POST", SENSOR_PREPARE_PATH) if self.sensor.is_some() => {
                 Some(InternalResponse::SensorPrepare)
+            }
+            ("GET", SENSOR_WS_PATH) if self.sensor.is_some() => {
+                Some(InternalResponse::SensorWsUpgrade)
             }
             _ => None,
         }
@@ -1187,6 +1234,8 @@ impl GatewayConfig {
             let operation = match response {
                 InternalResponse::SensorAsset => SENSOR_ASSET_OPERATION_ID,
                 InternalResponse::SensorLoader => SENSOR_LOADER_OPERATION_ID,
+                InternalResponse::PreviousSensorAsset => PREVIOUS_SENSOR_ASSET_OPERATION_ID,
+                InternalResponse::PreviousSensorLoader => PREVIOUS_SENSOR_LOADER_OPERATION_ID,
                 InternalResponse::LegacySensorAsset => LEGACY_SENSOR_ASSET_OPERATION_ID,
                 InternalResponse::LegacySensorLoader => LEGACY_SENSOR_LOADER_OPERATION_ID,
                 InternalResponse::SensorBootstrap => SENSOR_BOOTSTRAP_OPERATION_ID,
@@ -1194,6 +1243,13 @@ impl GatewayConfig {
                     return GatewayDecision {
                         outcome: GatewayOutcome::Denied,
                         operation_id: OperationId::parse(SENSOR_PREPARE_OPERATION_ID).ok(),
+                        reason_code: ReasonCode::AuthRequired,
+                    };
+                }
+                InternalResponse::SensorWsUpgrade => {
+                    return GatewayDecision {
+                        outcome: GatewayOutcome::Denied,
+                        operation_id: OperationId::parse(SENSOR_WS_OPERATION_ID).ok(),
                         reason_code: ReasonCode::AuthRequired,
                     };
                 }

@@ -562,6 +562,73 @@ impl DurableAudit {
         Ok(())
     }
 
+    /// Durably records one authenticated probe-WSS message, independent of
+    /// any single HTTP admission: a WSS connection carries many of these over
+    /// its lifetime, and each gets the same evidentiary treatment one HTTPS
+    /// `events/prepare` request would (docs/00 0.4). Not tracked as a
+    /// `request.accepted` request, since no single terminal event ever closes
+    /// a long-lived connection's lifecycle.
+    // `last_event_id` is moved into `vec![last_event_id]` each iteration, so
+    // the loop body always reinitializes it by assignment, never through an
+    // in-place `clone_into` on what the borrow checker treats as moved-from.
+    #[allow(clippy::assigning_clones)]
+    pub(crate) async fn record_sensor_ws_observations(
+        &self,
+        trace_id: &str,
+        outcome: GatewayOutcome,
+        reason_code: ReasonCode,
+        observations: &[SensorObservationAudit],
+    ) -> Result<(), DurableAuditError> {
+        let message_id = new_event_id()?;
+        let mut events = vec![PendingEvent::new(
+            message_id.clone(),
+            "sensor.ws_message",
+            1,
+            Vec::new(),
+            Payload::SensorWsMessage {
+                channel: "wss",
+                outcome: stage_outcome(outcome),
+                reason_code: reason_code.as_str(),
+            },
+        )];
+        let mut last_event_id = message_id.as_str().to_owned();
+        for (sequence, observation) in (2u32..).zip(observations) {
+            let observation_id = new_event_id()?;
+            events.push(PendingEvent::new(
+                observation_id.clone(),
+                "sensor.observation",
+                sequence,
+                vec![last_event_id],
+                Payload::SensorObservation {
+                    binding_id: observation.binding_id.clone(),
+                    auth_epoch: observation.auth_epoch,
+                    authenticated: observation.authenticated,
+                    build_ref: observation.build_ref.clone(),
+                    page_handle: observation.page_handle.clone(),
+                    navigation_id: observation.navigation_id.clone(),
+                    action_hint: observation.action_hint.clone(),
+                    client_request_id: observation.client_request_id.clone(),
+                    client_event_seq: observation.client_event_seq,
+                    visibility: observation.visibility,
+                    sensor_event_type: observation.event_type,
+                    callsite_fingerprint: observation.callsite_fingerprint.clone(),
+                    claim_status: "client_claimed",
+                    authorization_effect: "none",
+                },
+            ));
+            last_event_id = observation_id.as_str().to_owned();
+        }
+        self.append(
+            BatchContext {
+                request_id: None,
+                trace_id: trace_id.to_owned(),
+            },
+            events,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Tries once to bring a closed barrier back; admission stays refused until
     /// this succeeds.
     ///
@@ -1857,6 +1924,11 @@ enum Payload {
         callsite_fingerprint: Option<String>,
         claim_status: &'static str,
         authorization_effect: &'static str,
+    },
+    SensorWsMessage {
+        channel: &'static str,
+        outcome: &'static str,
+        reason_code: &'static str,
     },
     SensorHtmlStageCompleted {
         stage: &'static str,
