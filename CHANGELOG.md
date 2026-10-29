@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- 本地证据迁移到 S3（docs/12 12.11、docs/19 19.4）：S3 证据存储（P2 #10）落地后，切换 `XSHIELD_EVIDENCE_BACKEND=s3` 不迁移已有对象，旧对象只能等各自到期由仍指向本地目录的 `xshield-evidence-retain` 清理；此前没有工具能在切换前主动把它们搬过去。
+  - 新增 `xshield-worker` 的 `xshield-evidence-migrate [BATCH_LIMIT]` 命令：按 artifact ID 游标分页扫描本地根目录，把完整、已认证、尚未过期的通用证据对象原样复制进配置的 S3 桶（密文与两个侧车逐字节不变，按配置的 Object Lock 模式锁定到同一个 `expires_at`）；不连数据库，不删除或改写任何本地文件。
+  - `xshield-evidence` 新增 `LocalEvidenceVault::list_generic_artifact_ids_after`（不需要预先知道 tenant/site 即可分页枚举完整对象，跳过校准报告与 lineage-review 专用对象族）与 `S3EvidenceVault::migrate_from_local`；目的地写入全部 `If-None-Match: *`，已迁移的 artifact 重新运行是确认性空操作（`EvidenceMigrationOutcome::AlreadyMigrated`），写完立即原样读回核对，源/目的地密钥不一致直接拒绝。已过期的本地对象一律跳过，留给本地清理处理。
+  - 回归：`xshield-evidence` 新增分页/过滤单测；2 个真实 MinIO 集成测试并入既有 `object-storage` CI 作业（迁移并锁定、重复调用幂等；密钥不匹配拒绝、篡改的本地 HMAC 不留下部分复制、已过期对象拒绝迁移）。
+  - **未覆盖**：不迁移校准报告与 lineage-review 对象（12.10“不在 S3 上的对象”）；不支持跨桶 KMS 包裹密钥或分块上传；没有进度持久化，大型本地库的单次运行时长随对象数线性增长。
+
 - 确定 SQLi/XSS 等通用签名检测由部署在 Xshield 之前的现有 WAF/CDN 承担（docs/24 ADR-013、docs/02 2.3、docs/19 19.2）：首版不自研签名引擎，也不实现 BaselineInspectionPort 适配器。部署说明写明链路、PROXY protocol 传递客户端地址、两段网络放行、TLS 重新加密、审计边界与受保护路径不缓存的要求。仅文档变更。
 
 - S3 兼容证据存储与 Object Lock（可行性建议 P2 #10，docs/12 12.10、docs/19 19.4）：此前证据只能写本地私有目录，且只允许一个网关写入。
@@ -9,7 +15,7 @@
   - 网关写入、控制面读取与清理（网关内置和 `xshield-evidence-retain`）通过 `XSHIELD_EVIDENCE_BACKEND=s3` 与 `XSHIELD_EVIDENCE_S3_*` 切换；不设置时行为不变。新增 `EvidenceVault` 统一两种后端；清理轮次的校准两类对象只在本地后端执行。
   - 新依赖 `ureq` 3.5（MIT OR Apache-2.0，`default-features = false`，只开 `rustls`），用于同步的 S3 请求；新增传递依赖 `ureq-proto`、`utf8-zero`（均 MIT OR Apache-2.0），其余（rustls、webpki-roots、http、base64）已在依赖树中。SigV4 自行实现，未引入 AWS SDK。更新随 `cargo deny` 与依赖审查。
   - 回归：SigV4 用 AWS 文档的三个签名样例单测；配置与环境变量解析单测；4 个真实 MinIO 集成测试，CI 新增 `object-storage` 作业（MinIO 镜像固定 digest）。
-  - **未覆盖**：AWS S3 本身和其他兼容服务；KMS 包裹密钥；分块与大对象；本地到 S3 的存量迁移；Helm 与 Compose 参考部署未加 S3 配置。
+  - **未覆盖**：AWS S3 本身和其他兼容服务；KMS 包裹密钥；分块与大对象；Helm 与 Compose 参考部署未加 S3 配置。本地到 S3 的存量迁移现由 `xshield-evidence-migrate` 提供，见下一项。
 
 - 控制台“拒绝与覆盖统计”页（docs/29 29.39）：上一项拒绝与覆盖统计只有接口，控制台没有入口。
   - 新增 `/investigation/coverage`（导航“流量与调查 › 拒绝与覆盖”，Observer 可见），按 UTC 时间窗（1 小时、24 小时、7 天或自定义，最多 31 天）按需生成统计：总计数与拒绝占比、按路由的流量与拒绝率、按路由与原因的拒绝、未覆盖端点的方法与路径形状，以及索引观察时间、报告摘要与截断说明。索引有缺口或待发布段时提示“不足以判断”，窗口内无流量时不给结论。

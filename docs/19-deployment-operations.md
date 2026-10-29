@@ -98,7 +98,7 @@ edge 配置用 `audit.segment_max_bytes` 控制关闭段大小，达到阈值的
 
 启用 OIDC 浏览器会话前先应用迁移 0035、更新控制 journal 发布器以识别 `console.auth.*` 事件，再部署控制 API、同源代理和静态控制台。启用原文 MFA step-up 前还须应用迁移 0036、部署识别 `console.auth.reauth.*` 的发布器，并确认代理为 `POST /control/v1/auth/oidc/reauth/start` 透传 `Set-Cookie` 且不缓存/记录正文。回滚 OIDC 前先停用其路由并撤销活动管理会话；单独回滚迁移 0036 前须先禁用原文内容路由，或保持 step-up-aware 控制服务运行，绝不可先移除 step-up 字段。
 
-证据存储后端：默认本地私有目录（`XSHIELD_EVIDENCE_ROOT`）。设置 `XSHIELD_EVIDENCE_BACKEND=s3` 后改用 S3 兼容存储桶，多个网关与控制面实例可以共用；变量与语义见 docs/12 12.10。启用 Object Lock 须在创建存储桶时开启（之后无法再开），并先在测试桶上确认保留模式：`compliance` 到期前任何人都无法删除，包括误写入的对象。从本地切到 S3 不迁移已有对象，旧对象仍需在原目录上读取与清理，直到全部到期。
+证据存储后端：默认本地私有目录（`XSHIELD_EVIDENCE_ROOT`）。设置 `XSHIELD_EVIDENCE_BACKEND=s3` 后改用 S3 兼容存储桶，多个网关与控制面实例可以共用；变量与语义见 docs/12 12.10。启用 Object Lock 须在创建存储桶时开启（之后无法再开），并先在测试桶上确认保留模式：`compliance` 到期前任何人都无法删除，包括误写入的对象。切换本身不迁移已有对象：网关、控制面和清理都立即改读存储桶，旧对象仍留在原目录，不迁移就只能等它们各自到期由仍指向原目录的 `xshield-evidence-retain` 清理。要在切换前主动搬完，先对本地根目录运行 `xshield-evidence-migrate`（docs/12 12.11）把尚未到期的对象原样复制进目标桶，可重入、可重试，核对一致才算完成；之后旧目录仍可按原计划继续清理到自然清空。
 
 ## 19.5 运行状态
 

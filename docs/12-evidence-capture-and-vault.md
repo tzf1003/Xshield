@@ -167,3 +167,13 @@ S3 后端下网关不再计算本地配额，`/metrics` 也不输出 `xshield_ed
 
 **未覆盖**：AWS S3 本身及其他兼容服务（只测了 MinIO）；KMS 包裹的数据密钥与服务端加密配置；分块和大于 64 MiB 的对象；存储桶默认保留策略与我们写入的保留期冲突时的行为；跨区域复制。
 
+## 12.11 已实现：本地证据迁移到 S3
+
+切换 `XSHIELD_EVIDENCE_BACKEND=s3`（12.10）本身不迁移本地根目录上已有的对象：网关、控制面和清理都立即改读存储桶，旧对象仍躺在本地目录，只能等各自 `expires_at` 到期后由仍指向该目录的 `xshield-evidence-retain`（12.8）清理掉（docs/19 19.4）。`xshield-worker` 的 `xshield-evidence-migrate` 命令补上这一步：在切换前把尚未到期的本地对象原样复制进目标桶，不必等待自然过期。
+
+- 用法：`xshield-evidence-migrate [BATCH_LIMIT]`（默认 32，1–256），读 `XSHIELD_EVIDENCE_ROOT` 作为迁移源、这里的 S3 配置表作为目的地，`XSHIELD_EVIDENCE_KEY_ID`/`XSHIELD_EVIDENCE_KEY_HEX` 两侧共用（迁移只搬运既有密文，不重新加密，源和目的地的根密钥必须是同一个）。命令本身不连数据库：catalog 的 artifact ID 和 manifest 与存储后端无关，物理对象搬到哪个后端都不用改写任何 catalog 行。
+- 范围：只迁移完整、已认证、尚未过期的通用证据对象（密文连同 `.manifest.json`、`.manifest.hmac` 两个侧车都存在且可用根密钥认证）；校准报告与 lineage-review 对象（12.10 “不在 S3 上的对象”）、残缺侧车和已过期对象一律跳过，留给本地清理按既有流程处理——过期对象在任何后端都已读不出来，搬不搬不影响可读性。
+- 可重入、可校验：目的地的每次写入都带 `If-None-Match: *`，已经迁移过的 artifact 第二次运行只是确认性空操作（`EvidenceMigrationOutcome::AlreadyMigrated`）；每个 artifact 写完后立即原样读回目的地 manifest 并与本地读到的逐字段比较，核对一致才算完成。命令按 artifact ID 游标分页扫描整座本地库，中途失败、被打断或重启后可以直接重新执行同一条命令，已迁移的对象会被安全跳过，不会重复计费或留下部分对象。源密钥与目的地密钥不一致时直接拒绝，不读取任何本地文件。
+- 不做的事：不读取或改写任何本地文件（只读源目录），不触碰 Postgres，不删除已迁移的本地对象——本地清理按原计划继续运行，直到本地根目录自然清空为止；需要跨桶 KMS 包裹密钥或分块上传的证据超出当前范围（见 12.10 “未覆盖”）。
+- 验证：`cargo test -p xshield-evidence --lib s3_minio -- --ignored` 同一 CI 作业覆盖该命令底层的 `S3EvidenceVault::migrate_from_local`：原样复制并在目标桶按配置的 Object Lock 模式锁定、重复调用幂等、密钥不匹配拒绝、篡改的本地 HMAC 不留下部分复制、已过期对象拒绝迁移。
+
