@@ -2310,6 +2310,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     if request_keys.shares_key_with(&response_keys) {
         return Err("request and response encryption keys must differ".into());
     }
+    let rate_limit_share = SiteRateLimiter::share_from_env()?;
     let audit_readiness = audit.readiness();
     let audit_recovery = audit.clone();
     let audit_unrouted = audit.clone();
@@ -2329,7 +2330,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             evidence: evidence.clone(),
             postgres: postgres.clone(),
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
-            rate_limiter: Arc::new(SiteRateLimiter::new()),
+            rate_limiter: Arc::new(SiteRateLimiter::new().shared_by(rate_limit_share)),
             unrouted: Arc::clone(&unrouted),
             metrics: Arc::clone(&metrics),
         },
@@ -2765,6 +2766,43 @@ mod tests {
             pingora::http::RequestHeader::build("GET", b"/search?q=green+apple", Some(1)).unwrap();
         assert_eq!(site_waf_denial(&safe, &policy), None);
         assert_eq!(denial_status(ReasonCode::WafQueryInvalid), 400);
+    }
+
+    /// Acceptance SHARE-03: a public limited-share entry is an admission
+    /// exception, not an inspection exception. The site WAF runs before any
+    /// admission class is consulted, so a request presenting a share token
+    /// with attack content is refused by the content check exactly as any
+    /// other request would be, and the token neither exempts nor triggers it.
+    #[test]
+    fn share_entry_requests_keep_the_site_content_check() {
+        let mut policy = xshield_core::SitePolicyConfig::default();
+        policy.waf.blocked_query_fragments = vec!["' or 1=1--".to_owned()];
+        policy.waf.blocked_headers = vec!["x-attack".to_owned()];
+        let share_request = |target: &[u8]| {
+            let mut request = pingora::http::RequestHeader::build("GET", target, Some(2)).unwrap();
+            request
+                .insert_header("X-Xshield-Share-Token", "verified-share-token")
+                .unwrap();
+            request
+        };
+        let attack = share_request(b"/shared-record?record_id=record-123%27+OR+1%3D1--");
+        assert_eq!(
+            site_waf_denial(&attack, &policy),
+            Some(ReasonCode::WafQueryBlocked)
+        );
+        let mut header_attack = share_request(b"/shared-record?record_id=record-123");
+        header_attack.insert_header("X-Attack", "1").unwrap();
+        assert_eq!(
+            site_waf_denial(&header_attack, &policy),
+            Some(ReasonCode::WafHeaderBlocked)
+        );
+        let malformed = share_request(b"/shared-record?record_id=%GG");
+        assert_eq!(
+            site_waf_denial(&malformed, &policy),
+            Some(ReasonCode::WafQueryInvalid)
+        );
+        let clean = share_request(b"/shared-record?record_id=record-123");
+        assert_eq!(site_waf_denial(&clean, &policy), None);
     }
 
     #[test]

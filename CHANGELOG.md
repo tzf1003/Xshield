@@ -7,6 +7,17 @@
   - 现在资格分两步：先推导整批资格并把动作引用注入响应体，不写库；加密等所有放行步骤成功后，最后一步才整批写入。写入失败同样扣下响应体。动作引用由请求确定性推导，写入结果必须与已注入的引用逐一相同，否则拒绝放行。
   - 回归：`scripts/test_gateway_identity.sh` 新增一条同时启用资格与加密、加密密钥尚未生效的路由，断言返回 502 `RESPONSE_CRYPTO_KEY_UNAVAILABLE`、不含源站数据、且没有响应证据与资格事件；旧代码下该断言失败（各留 1 行）。
 
+- Linux 性能基线（可行性建议 P1“性能基线”，docs/21 §21.8）：此前唯一的基线来自一台 macOS 笔记本，文档要求在 Linux 生产形态的存储上重测。
+  - 两台 Linux 机器上的 release 结果：16 vCPU Hyper-V 虚拟机（虚拟盘同步 P50 约 1.3 ms）上，edge 公开路由 1 并发比直连多 2.9 / 4.3–4.8 ms（P50/P95），16 并发约 2 450 请求/秒、P95 多约 3.8 ms，均在“新增 P95 ≤ 15 ms”之内；journal 放在 tmpfs 时只多约 0.24 ms，即 edge 自身开销。AWS EBS（2 vCPU，同步 P50 约 3.1 ms）上 1 并发多 7.1 / 9.8 ms，4–16 并发 P95 多 14.2–14.3 ms，刚好压在预算线上，说明这类网络盘不适合放 journal。
+  - 修复 `scripts/bench_gateway.py` 在 Linux 上的缺陷：桩源站应答头与正文分两次写出，Nagle 把正文压到延迟 ACK 之后，直连每请求固定约 41 ms，增量失真；现在关闭 Nagle。脚本还会打印 CPU 型号与 journal 所在卷。
+  - 新增 `scripts/bench_fsync.py`：在给定目录上测“追加一个审计批次 + `fdatasync`”的延迟分布，用来在部署前判断 journal 卷能否满足预算（P95 同步延迟 × 2 约等于单请求增量下限）。
+  - **未覆盖**：两台机器都不是本地 NVMe（EBS 在客户机里显示为 NVMe，但是网络块存储），也不是专用压测机；客户端与桩源站是 Python，约 7 500 请求/秒封顶；身份、加密、TLS、大正文与 ClickHouse 发布仍未度量。
+
+- 多个 edge 副本下的按来源限流（docs/19“多个 edge 副本”、docs/21）：令牌桶在每个进程内计量，负载均衡把同一来源分到 N 个副本时，整组实际放行约为策略值的 N 倍。
+  - 新增 `XSHIELD_EDGE_RATE_LIMIT_SHARE`（1–64，默认 1）：设为 N 时每个副本只放行 1/N 的速率与突发，突发至少保留 1 个请求；非法值拒绝启动。按源地址亲和或单副本部署保持默认即可，行为不变。
+  - 没有引入跨副本共享计数（如 Redis）：那需要在每个请求、包括洪峰中先访问共享存储，并引入新的故障模式。
+  - **未覆盖**：分流不均时偏重的副本会更早限流；副本数变化需要手动同步该值。
+
 - 请求解密与响应加密支持多站点、多 key-id（docs/19、docs/31）：此前每个方向只有一把绑定启动配置站点的密钥，经 apply 下发的站点一旦启用 `DIRECT_DECRYPT`/`DIRECT_ENCRYPT` 就只能失败关闭，轮换也要起第二个 edge。
   - edge 新增密钥环变量 `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`（也可 `_FILE`）：JSON 数组，每项 `tenant_id`、`site_id`、`key_id`、`key_hex`，每个方向最多 256 项。查找按租户、站点、key-id 与用途精确匹配，未列出的组合仍是 `REQUEST_CRYPTO_KEY_UNAVAILABLE`/`RESPONSE_CRYPTO_KEY_UNAVAILABLE`。
   - 原来的 `*_KEY_HEX` 单值变量含义不变，继续服务启动站点的 key-id，已有部署无需改动。格式错误、重复作用域、单值与密钥环重复给出启动站点 key-id、启动站点缺密钥、任一密钥跨方向复用，都拒绝启动；错误信息不含密钥。
@@ -19,6 +30,12 @@
   - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
   - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
   - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
+
+- 试点路径验收用例补测（可行性建议 P1 #8，docs/20）：`examples/acceptance-cases.json` 由 automated 9 / partial 51 / planned 18 改为 automated 11 / partial 60 / planned 7。
+  - automated：DEV-01（`crates/xshield-core/tests/dependency_boundary.rs` 解析 `Cargo.lock`，领域 crate 的传递依赖触及数据库、HTTP、异步运行时、TLS 或其他 xshield crate 即失败，另有合成违规锁文件的反例与源码禁开套接字检查）；SHARE-04（`scripts/test_gateway_identity.sh` 经真实 edge 用同一分享令牌三次 Range 读取，均 206、分享行不变）。
+  - partial（缺口逐条写在 `gap`）：AUTH-09、FLOW-10、GRANT-08、SHARE-03、SENSOR-01/02、CRYPTO-04/07、DEV-02。DEV-02 新增 worker 侧 `ReasonCode` 穷举契约测试与 `scripts/test_check_audit_event_coverage.py`（已接入 CI）；`check_audit_event_coverage.py` 的源路径可由测试传入，默认行为不变。
+  - 仍为 planned：MODEL-01/06、AGENT-01/02、AUDIT-13、DEV-03 属首版之后或须在试点环境执行；AUDIT-06 的 `remote_durable` 只是 Schema 枚举值，没有实现。
+  - 补测发现的产品风险（未修改）：`response_body_filter` 先提交资源资格再加密响应，配置允许 `resource_grant` 与响应加密同时启用，响应加密失败时已写入的资格不会撤回（见 CRYPTO-04 的 gap）。
 
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
   - 新增独立 crate `fuzz/`，有 13 个 libFuzzer 目标：PROXY 头、未匹配路径形状、路由匹配、分页查询、Host 与 authority、请求加密封包、登录响应、严格 JSON、传感器批次、站点配置、页面指纹、上游地址、封存清单。每个目标除了要求不 panic，还检查一条不变量，例如分页查询重建后再次准入得到同一文本，PROXY 头的每个严格前缀都是“未完成”。
