@@ -2278,6 +2278,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     if request_keys.shares_key_with(&response_keys) {
         return Err("request and response encryption keys must differ".into());
     }
+    let rate_limit_share = SiteRateLimiter::share_from_env()?;
     let audit_readiness = audit.readiness();
     let audit_recovery = audit.clone();
     let audit_unrouted = audit.clone();
@@ -2297,7 +2298,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             evidence: evidence.clone(),
             postgres: postgres.clone(),
             buffered_body_budget: Arc::new(Semaphore::new(MAX_BUFFERED_BODY_IN_FLIGHT_BYTES)),
-            rate_limiter: Arc::new(SiteRateLimiter::new()),
+            rate_limiter: Arc::new(SiteRateLimiter::new().shared_by(rate_limit_share)),
             unrouted: Arc::clone(&unrouted),
             metrics: Arc::clone(&metrics),
         },
