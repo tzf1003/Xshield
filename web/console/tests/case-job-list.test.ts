@@ -50,10 +50,7 @@ test("a complete page decodes, keeping the server's descending order", () => {
 });
 
 test("a page for a different case than requested is rejected", () => {
-  assert.throws(
-    () => decodeCaseJobList(page([item(JOB_NEW)]), OTHER_CASE_ID),
-    ApiError,
-  );
+  assert.throws(() => decodeCaseJobList(page([item(JOB_NEW)]), OTHER_CASE_ID), ApiError);
 });
 
 test("a continuation page must start below its cursor and name its last row", () => {
@@ -67,10 +64,7 @@ test("a continuation page must start below its cursor and name its last row", ()
   assert.throws(() => decodeCaseJobList(page([item(JOB_OLD)]), CASE_ID, CURSOR), ApiError);
   assert.throws(
     () =>
-      decodeCaseJobList(
-        page([item(JOB_NEW)], { truncated: true, next_cursor: CURSOR }),
-        CASE_ID,
-      ),
+      decodeCaseJobList(page([item(JOB_NEW)], { truncated: true, next_cursor: CURSOR }), CASE_ID),
     ApiError,
   );
 });
@@ -122,10 +116,7 @@ test("items reject foreign shapes and unknown statuses", () => {
 });
 
 test("a case reference on a row is not projected into the result", () => {
-  const decoded = decodeCaseJobList(
-    page([item(JOB_NEW, { case_id: OTHER_CASE_ID })]),
-    CASE_ID,
-  );
+  const decoded = decodeCaseJobList(page([item(JOB_NEW, { case_id: OTHER_CASE_ID })]), CASE_ID);
   assert.equal("case_id" in decoded.items[0]!, false);
 });
 
