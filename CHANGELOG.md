@@ -12,6 +12,7 @@
   - 新增 `.github/workflows/release.yml`（workflow_dispatch，输入版本号，可选指定提交）。它先检查版本号与提交是否对应：提交在 main 上，Cargo 与 Helm chart 版本一致，CHANGELOG 有该版本标题，main 上 CI 已通过。检查通过后创建 `v<版本>` 标签，以 workflow_call 调用 `release-images.yml` 构建、推送、证明并签名镜像，最后创建带 CHANGELOG 段落和镜像 digest 的 GitHub Release。
   - `release-images.yml` 可以被调用，并给镜像加上版本与源码提交标签。验证签名身份的正则同时接受标签（推送触发）和 main（经 `release.yml` 触发），文档里的 `cosign verify` 命令已相应更新。
   - Helm 冒烟测试在 Service 端点生效前访问数据面时会偶发连接被拒（curl 退出码 7），main 上 #35 与 #36 的 CI 因此失败。现在最多重试 60 秒。
+  - 首次运行 `release.yml` 时，版本检查误报“CHANGELOG 没有 0.1.0 标题”：`git show … | grep -q` 在 `pipefail` 下，grep 找到后提前退出，git show 收到 SIGPIPE，整条管道判为失败。改为 grep 输出到 `/dev/null`。
   - **未覆盖**：本 PR 合并后才能实际运行 `release.yml`，结果在合并后验证。
 
 - 外部输入解析器的模糊测试（可行性建议 P1“外部解析器模糊测试”，docs/20、`fuzz/README.md`）：此前只有 PROXY 头做过确定性随机测试。
