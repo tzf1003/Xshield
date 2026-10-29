@@ -98,7 +98,13 @@ wait_ready() {
 wait_ready 'edge and control did not become ready'
 echo 'ok: edge and control ready'
 
-denied=$(in_pod -H 'Host: pilot.example.test' "http://$release-edge:6400/")
+# The pod answers on its own IP as soon as it is Ready, but the Service only
+# forwards once its endpoint is published and the node's rules are programmed,
+# which can lag by a few seconds (curl then exits 7, connection refused).
+for _ in $(seq 1 30); do
+    denied=$(in_pod -H 'Host: pilot.example.test' "http://$release-edge:6400/") && break
+    sleep 2
+done
 grep -q '"reason_code":"SITE_CONFIG_UNAVAILABLE"' <<<"$denied" || fail "data plane: $denied"
 echo 'ok: data plane refuses an unconfigured host through its Service'
 
