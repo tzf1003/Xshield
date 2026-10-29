@@ -1,0 +1,214 @@
+# Prometheus alerting rules for Xshield's edge and control ops metrics
+# (docs/19 19.5: unauthenticated /metrics on XSHIELD_EDGE_OPS_LISTEN and
+# XSHIELD_CONTROL_OPS_LISTEN). Metric and label names are taken from the
+# exporters themselves (crates/xshield-gateway/src/ops_api.rs,
+# crates/xshield-control/src/ops.rs), not from docs prose, so they track the
+# wire format exactly.
+#
+# These rules do not assume a `job` or `instance` relabeling convention —
+# none is mandated by docs/19, and the Helm ServiceMonitor
+# (deploy/helm/xshield/templates/servicemonitor.yaml) and a systemd + plain
+# scrape_config (deploy/systemd) would label scrapes differently. Alerts key
+# off the metric names alone, which are already unique per role
+# (`xshield_edge_*` vs `xshield_control_*`), and use `absent_over_time` for
+# "this instance stopped reporting at all" so they still fire per
+# target/instance once your scrape config adds its own labels.
+#
+# Validate with: docker run --rm -v "$PWD/deploy/prometheus:/rules:ro" \
+#   prom/prometheus@sha256:565ee86501224ebbb98fc10b332fa54440b100469924003359edf49cbce374bd \
+#   promtool check rules /rules/alerts.yml
+# (also wired into CI, see scripts/test_prometheus_alerts.sh).
+#
+# Thresholds marked "adjust for your traffic" are starting points, not
+# validated SLOs: docs/21's latency budget is still an unmeasured target
+# (one-machine baseline only, docs/21 §21.7), so this file does not claim to
+# encode it.
+groups:
+  - name: xshield-edge
+    rules:
+      - alert: XshieldEdgeTargetMissing
+        expr: absent_over_time(xshield_edge_ready[5m])
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "An Xshield edge instance stopped reporting /metrics"
+          description: "No xshield_edge_ready sample in the last 5m on {{ $labels.instance }}. Either the process is down or its ops listener (XSHIELD_EDGE_OPS_LISTEN) is unreachable."
+
+      - alert: XshieldEdgeNotReady
+        expr: xshield_edge_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Xshield edge is not ready"
+          description: "{{ $labels.instance }} has reported xshield_edge_ready == 0 for 2m: no data-plane listener is bound, or the audit durability barrier is closed (docs/19 19.5)."
+
+      - alert: XshieldEdgeAuditNotReady
+        expr: xshield_edge_audit_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Xshield edge's audit durability barrier is closed"
+          description: "{{ $labels.instance }} cannot append to its request journal; every admission fails closed while this holds (docs/19 19.5, docs/11)."
+
+      - alert: XshieldEdgeHighRefusalRatio
+        expr: >-
+          sum by (instance) (rate(xshield_edge_requests_total{outcome="refused"}[5m]))
+            /
+          sum by (instance) (rate(xshield_edge_requests_total[5m]))
+          > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Most requests to an Xshield edge are being refused"
+          description: "{{ $labels.instance }} refused over half of its requests over the last 10m (adjust the 0.5 threshold for your traffic). Check xshield_edge_refusals_total by reason_code for the dominant cause."
+
+      - alert: XshieldEdgeProxyFailures
+        expr: sum by (instance) (rate(xshield_edge_requests_total{outcome="proxy_failed"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Xshield edge cannot reach its origin"
+          description: "{{ $labels.instance }} has sustained outcome=\"proxy_failed\" responses for 10m: the configured upstream is unreachable or failing TLS validation (docs/19 19.2)."
+
+      - alert: XshieldEdgeConnectionsShedding
+        expr: increase(xshield_edge_connection_setup_shed_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Xshield edge is shedding new connections"
+          description: "{{ $labels.instance }} shed {{ $value }} connection(s) at setup over the last 5m, which only happens under load shedding."
+
+      - alert: XshieldEdgeTlsHandshakeFailuresHigh
+        expr: rate(xshield_edge_tls_handshake_failures_total[5m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated native-TLS handshake failures on an Xshield edge"
+          description: "{{ $labels.instance }} is failing more than 1 TLS handshake/s averaged over 10m (adjust for your traffic). Only fires when native TLS termination is enabled (docs/19 19.2)."
+
+      - alert: XshieldEdgeTlsReloadFailing
+        expr: increase(xshield_edge_tls_reload_failures_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Xshield edge failed to hot-reload a TLS certificate or key"
+          description: "{{ $labels.instance }} saw {{ $value }} failed reload(s) in 15m; the edge keeps serving the previous certificate, but check for an upcoming expiry it will fail to pick up (docs/19 19.2)."
+
+      - alert: XshieldEdgeRequestLatencyHigh
+        expr: >-
+          histogram_quantile(0.99,
+            sum by (instance, le) (rate(xshield_edge_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 admission-to-log latency is elevated on an Xshield edge"
+          description: "{{ $labels.instance }}'s p99 xshield_edge_request_duration_seconds over 5m exceeds 1s for 10m (adjust the 1s threshold; docs/21's latency budget is not yet a measured target)."
+
+      - alert: XshieldEdgeEvidenceCapacityExhaustingSoon
+        expr: predict_linear(xshield_edge_evidence_capacity_remaining_bytes[1h], 4 * 3600) < 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Xshield edge evidence storage is on track to fill up within 4h"
+          description: "{{ $labels.instance }}'s xshield_edge_evidence_capacity_remaining_bytes is trending to exhaustion. Only present when response.evidence_capture is in use (docs/12)."
+
+      - alert: XshieldEdgeEvidenceRetentionFailing
+        expr: increase(xshield_edge_evidence_retention_failures_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Xshield edge's built-in evidence cleanup is failing"
+          description: "{{ $labels.instance }} recorded {{ $value }} evidence-retention failure(s) in 15m (docs/12 12.8)."
+
+      - alert: XshieldEdgeEvidenceRetentionStalled
+        expr: time() - xshield_edge_evidence_retention_last_success_timestamp_seconds > 3600
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Xshield edge's built-in evidence cleanup has not succeeded recently"
+          description: "{{ $labels.instance }} has gone over an hour without a successful evidence-retention pass; capacity alerts above may follow (docs/12 12.8)."
+
+  - name: xshield-control
+    rules:
+      - alert: XshieldControlTargetMissing
+        expr: absent_over_time(xshield_control_ready[5m])
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "An Xshield control instance stopped reporting /metrics"
+          description: "No xshield_control_ready sample in the last 5m on {{ $labels.instance }}. Either the process is down or its ops listener (XSHIELD_CONTROL_OPS_LISTEN) is unreachable."
+
+      - alert: XshieldControlNotReady
+        expr: xshield_control_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Xshield control is not ready"
+          description: "{{ $labels.instance }} has reported xshield_control_ready == 0 for 2m. Check xshield_control_not_ready by reason for which precondition failed (docs/19 19.5)."
+
+      - alert: XshieldControlDatabaseUnavailable
+        expr: xshield_control_not_ready{reason="DATABASE_UNAVAILABLE"} == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Xshield control cannot reach PostgreSQL"
+          description: "{{ $labels.instance }} has failed its SELECT 1 readiness probe for 2m; management API calls that need the database will fail closed."
+
+      - alert: XshieldControlAuditDurabilityFailed
+        expr: xshield_control_not_ready{reason="AUDIT_UNAVAILABLE"} == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Xshield control's management audit append is failing"
+          description: "{{ $labels.instance }} has had a management-audit append failure within the last 30s-rolling readiness window for 2m straight; endpoints that require audit now return AUDIT_DURABILITY_FAILED (docs/19 19.5)."
+
+      - alert: XshieldControlAuditAppendFailures
+        expr: increase(xshield_control_audit_append_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Xshield control failed to append to its management journal"
+          description: "{{ $labels.instance }} recorded {{ $value }} management-audit append failure(s) in 5m."
+
+      - alert: XshieldControlHighErrorRatio
+        expr: >-
+          sum by (instance) (rate(xshield_control_responses_total{class="5xx"}[5m]))
+            /
+          sum by (instance) (rate(xshield_control_responses_total[5m]))
+          > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated 5xx ratio on the Xshield management API"
+          description: "{{ $labels.instance }} has returned over 10% 5xx responses over the last 10m (adjust the 0.1 threshold for your traffic)."
+
+      - alert: XshieldControlRequestLatencyHigh
+        expr: >-
+          histogram_quantile(0.99,
+            sum by (instance, le) (rate(xshield_control_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 management API latency is elevated"
+          description: "{{ $labels.instance }}'s p99 xshield_control_request_duration_seconds over 5m exceeds 2s for 10m (adjust the 2s threshold for your deployment)."

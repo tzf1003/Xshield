@@ -118,6 +118,8 @@ edge 运维端点：设置 `XSHIELD_EDGE_OPS_LISTEN`（如 `127.0.0.1:9554`，�
 
 自动化指标：资格发行失败、绑定串用、无来源操作、解密覆盖、兼容比例、模型低信心/超时、journal 剩余空间、索引延迟、证据缺失/摘要失败、原文读取与大导出。
 
+针对以上 edge、control 两组 `/metrics` 的 Prometheus 告警规则见 19.11。
+
 ## 19.6 备份与恢复
 
 PostgreSQL 配置/资格及 outbox 按恢复目标备份；证据库版本化与独立权限复制；签名验证材料和 KMS 恢复流程同样不可缺少。恢复演练包括身份 epoch、过期资格、保留 tombstone、未完成请求和重复投递。密钥丢失导致证据不可读应记录为不可恢复，而不是显示空白。
@@ -235,3 +237,15 @@ CI 的 `helm` 作业先做静态检查：缺少必填值时 schema 拒绝渲染�
 - 单元按角色加固：`User=xshield`、`NoNewPrivileges=yes`、`ProtectSystem=strict` 配合逐单元收紧的 `ReadWritePaths=`/`ReadOnlyPaths=`，以及去特权的 `Protect*`/`Restrict*` 系列；只有 edge、control 及需要连 ClickHouse/PostgreSQL 的发布与 outbox 单元保留网络，封存单元额外 `PrivateNetwork=yes`（对应 Compose 里 `edge-seal`/`control-seal` 的 `network_mode: none`）。
 
 CI 的 `systemd` 作业只做 `scripts/test_systemd_units.sh`：不涉及容器或数据库，用 `systemd-analyze verify` 校验全部单元文件语法与依赖（临时在 `/opt/xshield/current/bin` 放置可执行占位文件满足存在性检查，之后清理），再核对每个 `EnvironmentFile=` 都有对应的 `*.env.example`、每个 `ExecStart=` 引用的二进制都是本仓库实际构建的目标。**未覆盖**：真实安装与启动（没有运行中的 systemd 实例校验 `User=`/`ReadWritePaths=` 等运行时行为）、反向代理与控制台（仍需操作方自备同源代理，见 `web/console/README.md`）、高可用（单机，限制同 19.8）。
+
+## 19.11 Prometheus 告警规则
+
+`deploy/prometheus/alerts.yml` 是针对 19.5 两组 `/metrics` 的告警规则，字段名直接取自导出代码而不是本章文字，用法与范围说明见 `deploy/prometheus/README.md`。要点：
+
+- 覆盖 edge：抓取目标消失、未就绪、审计屏障关闭、高拒绝比例、代理失败、连接丢弃、TLS 握手/重载失败、p99 延迟、证据容量趋势性耗尽、证据清理失败/停滞；control：抓取目标消失、未就绪、数据库/审计不可用、管理审计追加失败、5xx 比例、p99 延迟。
+- 不假定任何 `job`/`instance` 标注约定——Helm 的 ServiceMonitor 与手写 `scrape_configs` 打的标签不同，规则只按已经互不冲突的指标名前缀（`xshield_edge_*`/`xshield_control_*`）区分角色。
+- 比例与延迟类阈值标注“按你的流量调整”，不是已验证的 SLO；docs/21 的延迟预算仍是待测目标。
+- 证据与 TLS 相关规则在对应功能未启用时天然没有样本或恒为 0，不会误报，没有另外按配置条件化。
+- 不覆盖 19.10 systemd 维护单元自身的运行状态（它们不暴露 `/metrics`，见 19.10 与 `deploy/systemd/README.md`），也不含 Alertmanager 路由/分组配置。
+
+CI 的 `prometheus-alerts` 作业用 `scripts/test_prometheus_alerts.sh`，经官方 `prom/prometheus` 镜像运行 `promtool check rules` 校验规则文件本身的语法与结构；不校验表达式在真实指标数据上的数值效果。
