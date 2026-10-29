@@ -7,6 +7,11 @@
   - `xshield-evidence` 新增 `LocalEvidenceVault::list_generic_artifact_ids_after`（不需要预先知道 tenant/site 即可分页枚举完整对象，跳过校准报告与 lineage-review 专用对象族）与 `S3EvidenceVault::migrate_from_local`；目的地写入全部 `If-None-Match: *`，已迁移的 artifact 重新运行是确认性空操作（`EvidenceMigrationOutcome::AlreadyMigrated`），写完立即原样读回核对，源/目的地密钥不一致直接拒绝。已过期的本地对象一律跳过，留给本地清理处理。
   - 回归：`xshield-evidence` 新增分页/过滤单测；2 个真实 MinIO 集成测试并入既有 `object-storage` CI 作业（迁移并锁定、重复调用幂等；密钥不匹配拒绝、篡改的本地 HMAC 不留下部分复制、已过期对象拒绝迁移）。
   - **未覆盖**：不迁移校准报告与 lineage-review 对象（12.10“不在 S3 上的对象”）；不支持跨桶 KMS 包裹密钥或分块上传；没有进度持久化，大型本地库的单次运行时长随对象数线性增长。
+- Edge 附加证书的增删免重启（docs/19 19.2“Edge 传输配置”）：此前 `XSHIELD_EDGE_TLS_SNI_CERTS` 在启动时固定，新增或删除一项仍需重启；内容变化的热加载已有（见下方“Edge TLS 证书热加载与按 SNI 多证书”条目），缺口只在增删本身。
+  - 新增 `XSHIELD_EDGE_TLS_SNI_CERTS_DIR`：一个目录，每个直接子目录是一对附加证书，恰好含 `tls.crt` 与 `tls.key`（Kubernetes `kubernetes.io/tls` secret 挂载的文件名）；子目录名字不参与证书选择，只是标识。与证书内容轮换走同一个每 30 秒的检查：创建或删除一个子目录即可增删一张证书，下次检查生效，不必重启；子目录内文件的校验规则（可读、普通文件、不超过 1 MiB、私钥权限、证书当前有效、私钥匹配、叶证书至少一个 DNS 名）与固定列表相同，与固定列表、与主证书的主机名重复同样拒绝。目录不存在、不可列出或不是目录拒绝启动；运行中目录变得不可列出则整组证书保持不变，计入 `tls_reload_failures`，下次目录可列出时重试。
+  - `XSHIELD_EDGE_TLS_SNI_CERTS` 本身仍需同时设置主证书才能使用，增删其中一项仍需重启；两种来源可以同时使用，证书计数、健康字段与指标不区分来源。
+  - 回归：edge_transport 新增 3 个测试（目录新增/删除子目录即时生效且不影响既有证书、子目录文件半写入时整组证书不变并在写完后重试、与固定列表重名/无 DNS 名/目录不可读均拒绝启动）。
+  - **未覆盖**：不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程对该目录的增删场景。
 
 - 确定 SQLi/XSS 等通用签名检测由部署在 Xshield 之前的现有 WAF/CDN 承担（docs/24 ADR-013、docs/02 2.3、docs/19 19.2）：首版不自研签名引擎，也不实现 BaselineInspectionPort 适配器。部署说明写明链路、PROXY protocol 传递客户端地址、两段网络放行、TLS 重新加密、审计边界与受保护路径不缓存的要求。仅文档变更。
 
@@ -32,7 +37,7 @@
   - 证书与私钥文件每 30 秒按元数据检查一次，变化后整组重新校验；通过则新握手使用新证书，失败则保留当前证书并在下次变化时重试。
   - 健康接口新增 `tls_certificates`、`tls_reloads`、`tls_reload_failures`；`/metrics` 新增 `xshield_edge_tls_certificates`、`xshield_edge_tls_reloads_total`、`xshield_edge_tls_reload_failures_total`。证书错误信息改为带出具体变量名（附加证书的错误指向新变量）。
   - 回归：edge_transport 新增 4 个测试（SNI 选择含通配符与大小写、配置拒绝、轮换与半写入/缺失/过期回退、后台检查与停止），ops/apply 健康与指标测试同步更新。
-  - **未覆盖**：增删附加证书仍需重启；不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程的轮换场景。
+  - **未覆盖**：增删附加证书仍需重启（`XSHIELD_EDGE_TLS_SNI_CERTS_DIR` 已解决，见上方条目；本列表 `XSHIELD_EDGE_TLS_SNI_CERTS` 依旧）；不支持从秘密管理器读取证书；`scripts/test_gateway_transport.sh` 未加入真实进程的轮换场景。
 
 ## 0.1.1 — 2026-10-29
 

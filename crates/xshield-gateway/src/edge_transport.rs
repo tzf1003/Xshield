@@ -64,8 +64,18 @@ pub const TLS_CERT_PATH_ENV: &str = "XSHIELD_EDGE_TLS_CERT_PATH";
 /// PEM private key of the leaf certificate; must not be group/other accessible.
 pub const TLS_KEY_PATH_ENV: &str = "XSHIELD_EDGE_TLS_KEY_PATH";
 /// Comma-separated `certificate_path:key_path` pairs served, by SNI, for the
-/// DNS names of their leaf certificates. Requires the primary pair.
+/// DNS names of their leaf certificates. Requires the primary pair. Fixed at
+/// startup: adding or removing an entry needs a restart (see
+/// [`TLS_SNI_CERTS_DIR_ENV`] for additional certificates without one).
 pub const TLS_SNI_CERTS_ENV: &str = "XSHIELD_EDGE_TLS_SNI_CERTS";
+/// A directory whose immediate subdirectories are additional certificates,
+/// each holding exactly `tls.crt` and `tls.key` (as a Kubernetes
+/// `kubernetes.io/tls` secret mounts them). Requires the primary pair.
+/// Rescanned on every reload tick (see [`TLS_RELOAD_INTERVAL`]), so creating
+/// or deleting a subdirectory adds or removes a certificate without a
+/// restart; a certificate is still selected by SNI against its own leaf's
+/// DNS names, never by the subdirectory's name.
+pub const TLS_SNI_CERTS_DIR_ENV: &str = "XSHIELD_EDGE_TLS_SNI_CERTS_DIR";
 /// Comma-separated addresses/CIDR blocks of balancers that must send a PROXY
 /// header; unset or empty leaves the PROXY protocol off.
 pub const PROXY_PROTOCOL_TRUSTED_ENV: &str = "XSHIELD_EDGE_PROXY_PROTOCOL_TRUSTED";
@@ -177,9 +187,17 @@ pub enum TransportConfigError {
         /// The 1-based position of the entry in the list.
         position: usize,
     },
+    /// [`TLS_SNI_CERTS_DIR_ENV`] is set but cannot be listed (missing, not a
+    /// directory, or unreadable).
+    SniCertsDirUnreadable {
+        /// The configured directory.
+        path: PathBuf,
+    },
     /// An additional certificate covers no DNS name, so SNI can never select
     /// it.
     NoCertificateNames {
+        /// The variable that named this pair.
+        variable: &'static str,
         /// The configured path.
         path: PathBuf,
     },
@@ -248,9 +266,14 @@ impl fmt::Display for TransportConfigError {
                 formatter,
                 "{TLS_SNI_CERTS_ENV}: entry {position} is not certificate_path:key_path"
             ),
-            Self::NoCertificateNames { path } => write!(
+            Self::SniCertsDirUnreadable { path } => write!(
                 formatter,
-                "{TLS_SNI_CERTS_ENV}: the leaf certificate in {} names no DNS host",
+                "{TLS_SNI_CERTS_DIR_ENV}: {} cannot be listed",
+                path.display()
+            ),
+            Self::NoCertificateNames { variable, path } => write!(
+                formatter,
+                "{variable}: the leaf certificate in {} names no DNS host",
                 path.display()
             ),
             Self::DuplicateCertificateName { name } => write!(
@@ -307,13 +330,18 @@ impl TransportConfig {
             }
             (Some(certificate), Some(key)) => {
                 let additional = sni_sources(lookup(TLS_SNI_CERTS_ENV))?;
+                let certs_dir =
+                    configured_path(TLS_SNI_CERTS_DIR_ENV, lookup(TLS_SNI_CERTS_DIR_ENV))?;
                 Some(tls::TlsSettings::load(tls::TlsSources::new(
                     tls::CertificateSource::primary(certificate, key),
                     additional,
+                    certs_dir,
                 ))?)
             }
         };
-        if tls.is_none() && lookup(TLS_SNI_CERTS_ENV).is_some() {
+        if tls.is_none()
+            && (lookup(TLS_SNI_CERTS_ENV).is_some() || lookup(TLS_SNI_CERTS_DIR_ENV).is_some())
+        {
             return Err(TransportConfigError::TlsPartiallyConfigured {
                 missing: TLS_CERT_PATH_ENV,
             });
