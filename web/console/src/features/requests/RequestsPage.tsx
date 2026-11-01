@@ -367,6 +367,18 @@ export function RequestsPage() {
         liveDisabled={false}
       />
 
+      {scope.range === "custom" ? (
+        <Notice tone="info">
+          时间窗 {hm(scope.since)}–{hm(scope.until)} ·{" "}
+          <button
+            type="button"
+            className="linkbtn"
+            onClick={() => setSearch({ range: "24h", since: undefined, until: undefined })}
+          >
+            清除
+          </button>
+        </Notice>
+      ) : null}
       {gapNotice ? (
         <Notice tone={gapNotice.tone}>
           {gapNotice.lost > 0 ? (
