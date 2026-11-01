@@ -1,6 +1,6 @@
 # 07 控制台与请求追溯：技术方案
 
-版本 4.0｜2026-11-01｜状态：设计稿，待实现。界面见 [06 控制台界面设计](06-console-ui.md)，可点击原型在 [design/console-v4](../design/console-v4/README.md)。本章取代 [03.4](03-admin-config-audit.md#34-判定日志) 中判定日志的字段清单和 [03.5](03-admin-config-audit.md#35-控制台范围) 的控制台范围，并定义 [03.2](03-admin-config-audit.md#32-站点配置) 新增的 `advanced` 段。判定规则本身（[01](01-request-flow.md)、[02](02-jev.md)）不变。
+版本 4.1｜2026-11-01｜状态：设计稿，待实现。界面见 [06 控制台界面设计](06-console-ui.md)，可点击原型在 [design/console-v4](../design/console-v4/README.md)。本章取代 [03.4](03-admin-config-audit.md#34-判定日志) 中判定日志的字段清单和 [03.5](03-admin-config-audit.md#35-控制台范围) 的控制台范围，并定义 [03.2](03-admin-config-audit.md#32-站点配置) 新增的 `advanced` 段。判定规则本身（[01](01-request-flow.md)、[02](02-jev.md)）不变。
 
 ## 7.1 目标与约束
 
@@ -10,7 +10,7 @@
 |---|---|
 | 保留高级配置 | 站点的全部字段都能在界面上改，包括会话凭证用请求头、`bypass`、`on_jev_unavailable`；可以直接编辑 YAML/JSON；每次修改有版本号、差异和回滚；新增站点级判定参数 `advanced`（Jev 超时、调用限额、放行缓存时长、追加脱敏字段、同义词，[7.6](#76-站点级判定参数advanced)）；其余运行参数只读展示网关的实际值 |
 | 兼顾便捷性 | 常用操作不进表单：从一条请求直接“登记为入口 / 加入绕过”，保存前给出影响预估；观察模式下自动汇总调优建议，建议可以一键应用（包括调整判定参数）；按请求 ID、会话、路径一个搜索框直达；批量粘贴请求 ID 对照结论 |
-| 每个请求都可追溯 | 网关处理的**每个**请求都有一条记录，包括目前不记录的绕过、413、未知站点（第四轮试跑里有两个探针因为命中 `/assets/*` 绕过而查不到记录，[04.5.4](04-deployment-testing.md#454-第四轮548-条记录)）；记录之间可以跳转：值从哪个响应学到（来源请求 ID）、缓存放行复用了哪次 Jev 结论、会话由哪个登录请求签发、判定时用的是哪个配置版本 |
+| 每个请求都可追溯 | 网关处理的**每个**请求都有一条记录，包括目前不记录的绕过、413、未知站点（第四轮试跑里有两个探针因为命中 `/assets/*` 绕过而查不到记录，[04.5.4](04-deployment-testing.md#454-第四轮548-条记录)）；记录之间可以跳转：值从哪个响应学到（来源请求 ID）、缓存放行复用了哪次 Jev 结论、会话由哪个登录请求签发、判定时用的是哪个配置版本；网关队列拥堵时先丢绕过的简记录并计数，缺口在控制台如实显示（[7.4.1](#741-每个请求一条)） |
 | Jev 调用可查看详细上下文 | 保存发给 Jev 的 `state` 原文、指令版本（可还原完整请求）、原始响应、概率、耗时、超时、裁剪级别和失败码；控制台按结构化、JSON、原文三种视图展示，并把 `state` 里的每个值和最近访问链接到对应的请求 |
 
 ### 7.1.2 不变的约束
@@ -79,7 +79,7 @@ AGENTS.md 要求新增配置项、表、依赖之前先确认现有机制不够�
 
 ### 7.3.1 请求标识
 
-`request_id` 沿用现有格式：`req_` 加 UUIDv7 的 32 位小写十六进制（`uuid::Uuid::now_v7().simple()`）。前 12 位十六进制是毫秒时间戳，例如 `req_01a19741107477ff9224781077354552` 生成于 2026-11-01 13:16:26.100 UTC。控制面按 ID 查询时先解出时间，只扫描对应的日分区。
+`request_id` 沿用现有格式：`req_` 加 UUIDv7 的 32 位小写十六进制（`uuid::Uuid::now_v7().simple()`）。前 12 位十六进制是毫秒时间戳，例如 `req_01a19741107477ff9224781077354552` 生成于 2026-11-01 13:16:26.100 UTC。控制面按 ID 查询时先解出时间 `t`，查 `at_millis BETWEEN t − 60 秒 AND t + 60 秒` 且 `request_id` 相等的行：`at_millis` 取自请求到达时刻，与 ID 生成时刻只差几毫秒，留 60 秒余量是为了不依赖这个假设；跨午夜时窗口自然落在相邻两个分区，PostgreSQL 只扫这两个。解不出时间的输入（不是 `req_` 加 32 位十六进制）不按 ID 查询。
 
 请求 ID 出现在：网关返回给客户端的每个响应头 `X-Xshield-Request-Id`；拦截响应体 `{"error":"forbidden","request_id":"req_…"}`；转发给源站的请求头 `X-Xshield-Request-Id`（源站日志可以用它关联）。用户反馈“被拦了”时，让他提供这个 ID。
 
@@ -105,10 +105,10 @@ POST /login ──签发会话──▶ 会话 7c1e9a40…
 GET /api/patients ──响应里出现 id=7──┐
                                      ▼
                      GET /api/patients/7  快速放行（7 已核验，来源 = 上一行）
-                     GET /api/patients/8  Jev 拦截（8 只以 age 出现过，来源 = …/7）
+                     GET /api/patients/8  Jev 拒绝（8 只以 age 出现过，来源 = …/7）
 ```
 
-来源请求 ID 在网关内存的会话上下文里保存（[7.7.1](#771-会话上下文增加请求-id)），所以网关重启后新学到的值才有来源 ID；会话本身在重启后也会清空（[01.2](01-request-flow.md#12-会话与上下文)），两者一致。
+来源请求 ID 保存在网关内存的会话上下文里（[7.7.1](#771-会话上下文增加请求-id)）。上下文在网关重启时整体清空（[01.2](01-request-flow.md#12-会话与上下文)），所以正常情况下每个来源都带请求 ID；没有 ID 的来源只会出现在导入的旧格式记录和测试数据里，界面照常显示来源说明，只是不可点。来源请求本身可能已过保留期（7 天），那时详情接口的 `sources` 里没有它，界面显示“已过保留期”。
 
 ## 7.4 判定记录（DecisionRecord v2）
 
@@ -124,13 +124,17 @@ GET /api/patients ──响应里出现 id=7──┐
 | `no_session` | 没有会话凭证且不是入口 | `blocked` / `would_block` | 判定记录 |
 | `fast_allow` | 全部请求值已核验 | `allowed` | 判定记录 |
 | `cached_allow` | 缓存时长内同一请求已由 Jev 放行 | `allowed` | 判定记录 |
-| `jev_allow` | Jev 放行 | `allowed` | Jev 记录 |
+| `jev_allow` | Jev 通过 | `allowed` | Jev 记录 |
 | `jev_deny` | Jev 判越权或攻击 | `blocked` / `would_block` | Jev 记录 |
 | `jev_unavailable` | Jev 超时、出错、限额用尽或答 UNKNOWN | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽时没有 `state`） |
 
 `413` 和 `404` 与模式无关，观察模式下也拒绝（现有行为，[01.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。源站不可达等转发错误不是新的判定路径：记录照常写，`status` 为网关返回的 502/504，`trace.upstream_error` 写原因。
 
 “简记录”只有请求行、状态码、耗时和命中的规则；“判定记录”另有请求值、核验结果和会话摘要；“Jev 记录”再加 `jev` 交换内容和最近访问。
+
+**“已判定”的范围**：`bypass`（静态资源，常占流量的大半）和 `unknown_site`（公网网关会收到大量扫描器发来的任意 Host，没有站点可归属）不是对某个站点请求的判定。列表、计数和统计默认把它们排除在外，其余路径合称“已判定”（含 `body_not_inspectable`：拒绝本身是一次判定）。这两类记录照常保存、可以查到，API 用 `scope` 参数切换（[7.9.3](#793-请求列表)）。
+
+**记录并非绝对不丢**：发送队列有界，写入失败不重试（[7.7.4](#774-日志发送)）。网关在队列超过 80% 时先丢弃 `bypass` 简记录并计入 `dropped_bypass`，判定记录只在队列满时才丢；丢失的区间通过心跳上报，控制台如实提示“这段时间的请求可能查不到”，而不是让用户误以为没有发生。
 
 ### 7.4.2 顶层字段
 
@@ -199,7 +203,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values[]` | 请求里拆出的**全部**值，按提取顺序，含惰性值（`inert: true`）；最多 200 个（`REQUEST_VALUES_MAX`） |
 | `values[].kind` | `reference` / `route` / `input`，与 `state` 里的 `kind` 同一函数（`values::value_kind`） |
 | `values[].seen` / `verified` | 会话里见过这个值 / 网关已按同类对象核验（快速放行的依据） |
-| `values[].sources[]` | 最多 3 个来源，顺序与 `state` 里的 `seen_as` 相同（最相关的在前）；`request_id`、`at_millis` 在网关重启前学到的值上为 null |
+| `values[].sources[]` | 最多 3 个来源，顺序与 `state` 里的 `seen_as` 相同（最相关的在前，[7.5.2](#752-state-与追溯信息的对齐)）；`request_id`、`at_millis` 正常情况下都有（上下文随网关重启清空，[7.3.2](#732-追溯链路)），只有导入的旧格式记录和测试数据可能为 null；同一 `(field, request)` 再次出现时保留最早的那次（[7.7.1](#771-会话上下文增加请求-id)） |
 | `values_truncated` | 请求体未结构化、超过 64 KiB 解析上限或值数到上限（即 `ExtractedRequest::truncated`） |
 | `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条）；`known_values` 是会话已见值数量 |
 | `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
@@ -243,8 +247,8 @@ GET /api/patients ──响应里出现 id=7──┐
 
 | 字段 | 说明 |
 |---|---|
-| `state` | 发出的 `state` 原文（已脱敏，≤ 8 KiB），与现有字段相同 |
-| `prompt` | 指令版本 ID：`jq_` 加 `questions` JSON 的 SHA-256 前 16 位十六进制；全文在 `jev_prompts` 表（新增） |
+| `state` | 发出的 `state` 原文（已脱敏，≤ 8 KiB），与现有字段相同。**以字符串保存**（紧凑 JSON，就是发出的字节），不要改成嵌套对象：`jsonb` 会重排键、丢掉空白，无法逐字节还原。格式化只在控制台展示时做，所以“原文”视图和“复制 state”拿到的是网关实际发出的内容 |
+| `prompt` | 指令版本 ID：`jq_` 加 `questions` JSON 的 SHA-256 前 16 位十六进制；全文在 `jev_prompts` 表（新增）。完整请求体由 `model`、`state`、`questions` 三者拼回，是“还原值”：键的顺序可能与实际发出的不同，字节数以 `request_bytes` 为准 |
 | `model` / `route` | 线上模型名（`typesafe-ai/jev`、`jev-1.13.0` 或 `XSHIELD_JEV_MODEL`）；线路 `gateway` / `direct` / `custom`（新增） |
 | `timeout_ms` | 这次调用实际使用的超时：站点 `advanced.jev_timeout_ms`，没写时取 `XSHIELD_JEV_TIMEOUT_MS`（新增） |
 | `trim` | `state` 裁剪级别 0–4（新增，见 7.5.3） |
@@ -267,8 +271,12 @@ GET /api/patients ──响应里出现 id=7──┐
 - `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`。
 - `state.recent` 是最近访问的最后 N 条（N 由裁剪级别决定），对应 `trace.session.recent` 的最后 N 条。
 - `state.session.entries_passed[k]` 对应 `trace.session.entries_passed[k]`。
+- `state.entry` 只有 `matched`（布尔值），没有规则原文：命中的是哪条入口规则只在 `trace.entry`，结构化视图的“入口”一行以 `trace.entry` 为准。`state` 里的值也没有 `key` 字段，字段名取 `trace.values[].key`。
+- `seen_as` 是该值全部来源按相关度排序（`Seen::ranked`）后反过来取前 N 个，最相关的在前，N 由裁剪级别决定（[7.5.3](#753-裁剪级别)）。`trace.values[].sources` 必须用同一个函数、同一个顺序生成，对齐才是按下标而不是按内容猜。
 
-实现要求：`build_state` 的输入和输出不变，新增一个单元测试固定一组输入的 `state` 字节（黄金样本），并断言 `state` 不含 `req_`。
+**对不上时不猜**：`align.ts` 先校验非惰性值个数等于 `state.request.values` 长度，且每个下标上的 `at` 相同；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
+
+实现要求：`build_state` 的输入和输出不变，新增一个单元测试固定一组输入的 `state` 字节（黄金样本），并断言 `state` 不含 `req_`；另一个测试用同一组输入生成 `trace`，断言按上面的规则能对齐，并覆盖脱敏值、被截断的长值、数组元素共享同一个 `at` 三种情形。
 
 ### 7.5.3 裁剪级别
 
@@ -372,6 +380,8 @@ advanced:
 
 `SessionContext::remember` 返回本次新增的值数。内存影响：每个来源多 24 字节；单会话上限 5000 值 × 6 来源时多约 0.7 MiB，典型会话远小于此。`ContextStore` 的上限、淘汰规则不变。
 
+**来源去重只比较 `(field, request)`**。现在 `Origin` 派生了 `PartialEq`，`remember` 用 `origins.contains(&origin)` 去重；给 `Origin` 加上 `request_id`、`at_ms` 后直接沿用派生，同一个列表接口刷新十次就会因为请求 ID 不同而追加十个来源，6 个名额被同一条说明占满，真正不同的来源被挤掉，`state` 里的 `seen_as` 随之改变，违反“`state` 逐字节不变”。要求：手写 `PartialEq`（或在 `remember` 里显式比较 `field` 和 `request`），重复出现时保留最早那次的 `request_id`，不覆盖。界面把这个 ID 标为“首次学到于”。新增单元测试：同一 `(field, request)` 连续出现 10 次，`origins` 长度为 1 且 `request_id` 是第一次的；`state` 与加字段前的黄金样本相同。
+
 ### 7.7.2 Judge 接口
 
 - `RequestFacts` 已有 `request_id`，判定时把它解析为 `u128` 用于写入缓存来源。
@@ -394,19 +404,24 @@ advanced:
 
 `crates/xshield-edge/src/sink.rs`：
 
-- 后台任务攒满 500 条或等满 250 ms 后一次多行 `INSERT`（`sqlx::QueryBuilder::push_values`），替换现在的逐行插入。
-- 计数器：`written`、`dropped`（队列满丢弃）、`write_errors`（插入失败丢失的行数），经心跳上报。插入失败不重试，丢失计数让控制台显示“日志缺口”。
+- 后台任务攒满 500 条或等满 250 ms 后一次多行 `INSERT`（`sqlx::QueryBuilder::push_values`），替换现在的逐行插入。整批失败时 500 ms 后重试一次（数据库瞬断、主从切换），仍失败才丢弃整批并计入 `write_errors`，不再重试，以免队列堵住。
+- **队列压力下先丢简记录**。`QUEUE_CAPACITY` 仍是 10,000。`send` 在队列已用超过 80% 时，对 `decision_path == bypass` 的记录不入队，只给 `dropped_bypass` 加一；其他记录照常入队，队列满时才丢弃并给 `dropped` 加一。取舍：绕过记录量大、价值低（静态资源），判定记录（含拦截、Jev 调用）是追溯的核心，必须尽量保住。
+- 计数器：`written`、`dropped`（队列满丢弃）、`dropped_bypass`（压力下主动丢弃的绕过记录）、`write_errors`（写入失败丢失的行数），经心跳上报。
+- **缺口历史**。心跳只有累计计数，看不出“什么时候丢的”。sink 按分钟累计丢失数（只保留最近 24 小时、有丢失的分钟），心跳把连续的分钟合并成区间 `gaps: [{from_ms, to_ms, dropped, dropped_bypass, write_errors}]`，最多 50 个最新的。控制台列表上方的“日志缺口”提示、系统页的缺口列表都读它。网关重启后历史清空，累计计数也重新开始，这是已知限制。
 - 文件模式（`XSHIELD_EDGE_SITES_FILE`）仍把完整记录按 JSON 行写到标准输出，内容与数据库行一致，可以导入控制台（[7.9.9](#799-导入与导出)）。
 
 ### 7.7.5 心跳
 
-`crates/xshield-edge/src/status.rs`（新增模块）每 10 秒、以及站点表变化后立即 upsert `edge_status` 一行：实例名、启动时间、构建版本、监听端口、是否 TLS、每个站点加载的版本和错误、会话数、队列长度、三个计数器、Jev 线路配置（线路、端点主机名、模型、默认超时、指令 ID，不含密钥）和运行参数（[7.9.8](#798-系统)）。文件模式下不写。
+`crates/xshield-edge/src/status.rs`（新增模块）每 10 秒、以及站点表变化后立即 upsert `edge_status` 一行：实例名、启动时间、构建版本、监听端口、是否 TLS、每个站点加载的版本和错误、会话数、队列长度、四个计数器（`written`、`dropped`、`dropped_bypass`、`write_errors`）、缺口历史 `gaps`（[7.7.4](#774-日志发送)）、Jev 线路配置（线路、端点主机名、模型、默认超时、指令 ID，不含密钥）和运行参数（[7.9.8](#798-系统)）。文件模式下不写。
+
+控制面认为一个实例“在线”的条件是 `seen_at` 在 30 秒内；超过 24 小时没有心跳的行被清理（[7.8.2](#782-分区与保留)）。多个实例各写一行，控制台按实例分别显示，不求平均。
 
 ### 7.7.6 测试要求
 
-- judge：`state` 黄金样本不变；`trace.values` 与 `state.request.values` 能按 7.5.2 对齐；来源请求 ID、缓存来源、经过入口的 ID 正确；脱敏覆盖 `trace.values` 和 `query`；16 KiB 上限的裁剪顺序；7.6.3 的站点参数用例。
+- judge：`state` 黄金样本不变；`trace.values` 与 `state.request.values` 能按 7.5.2 对齐；来源请求 ID、缓存来源、经过入口的 ID 正确；脱敏覆盖 `trace.values` 和 `query`；16 KiB 上限的裁剪顺序；7.6.3 的站点参数用例；来源去重只比较 `(field, request)`（7.7.1）。
 - edge（`tests/scenarios.rs`）：绕过、413、未知站点各产生一条记录；A1 的快速放行记录里值 `7` 的来源 ID 等于列表请求的 ID；登录请求的 `issued_session` 等于后续请求的 `session`；源站关闭时记录 502 和 `upstream_error`。
-- edge（`tests/postgres.rs`）：批量写入、心跳 upsert、指令登记。
+- edge（`sink.rs` 单元测试）：队列用到 80% 以上后 `bypass` 记录被丢弃并只增加 `dropped_bypass`，判定记录照常入队；队列满时增加 `dropped`；缺口按分钟合并成区间，最多 50 个。
+- edge（`tests/postgres.rs`）：批量写入、整批失败后重试一次、心跳 upsert、指令登记；目标日期没有分区时插入失败并计入 `write_errors`（没有默认分区兜底，7.8.2）。
 
 ## 7.8 数据库
 
@@ -462,7 +477,10 @@ CREATE TABLE decision_log (
     PRIMARY KEY (at_millis, id)
 ) PARTITION BY RANGE (at_millis);
 
-CREATE TABLE decision_log_default PARTITION OF decision_log DEFAULT;
+-- 故意不建默认分区：已在 PostgreSQL 16 上验证，默认分区里一旦有某天范围内的行，
+-- 就无法再创建那一天的分区（"updated partition constraint for default partition
+-- would be violated by some row"），分区维护会从此卡死。没有对应分区时插入直接失败，
+-- 由网关计入 write_errors 并在控制台显示缺口，比悄悄堆进默认分区更容易发现和修复。
 
 CREATE INDEX decision_log_request_idx ON decision_log (request_id);
 CREATE INDEX decision_log_site_idx    ON decision_log (site, at_millis DESC);
@@ -483,8 +501,10 @@ CREATE TABLE edge_status (
     sessions     integer NOT NULL,
     queue        integer NOT NULL,
     written      bigint NOT NULL,
-    dropped      bigint NOT NULL,
+    dropped      bigint NOT NULL,            -- 队列满丢弃
+    dropped_bypass bigint NOT NULL,          -- 队列压力下主动丢弃的绕过简记录（7.7.4）
     write_errors bigint NOT NULL,
+    gaps         jsonb NOT NULL,             -- [{"from_ms":…,"to_ms":…,"dropped":37,"dropped_bypass":0,"write_errors":0}]，最近 24 小时
     jev          jsonb NOT NULL,
     params       jsonb NOT NULL
 );
@@ -501,7 +521,9 @@ CREATE TABLE jev_prompts (
 ### 7.8.2 分区与保留
 
 - 按 UTC 自然日分区，分区名 `decision_log_pYYYYMMDD`，范围 `[当日 00:00, 次日 00:00)` 的毫秒值。
-- 控制面启动时和之后每小时：确保昨天到后天的分区存在；删除上界早于“现在 − 7 天”的分区；对默认分区执行有界 `DELETE`（时钟异常的行）。
+- 控制面启动时和之后每小时：确保从昨天到 7 天后的分区都存在（`CREATE TABLE IF NOT EXISTS … PARTITION OF … FOR VALUES FROM … TO …`）；删除上界早于“现在 − 7 天”的分区（先 `DETACH PARTITION … CONCURRENTLY` 再 `DROP TABLE`，不长时间锁父表）。
+- **提前 7 天建分区，是因为没有默认分区兜底**：控制面停机期间网关照常写入，提前量就是控制面最长能停机的时间；超过它网关的插入会失败，控制台显示日志缺口（[7.7.4](#774-日志发送)）。系统页在“今天没有分区”或“未来分区不足 2 天”时告警，`GET /api/system` 返回每个分区的范围。
+- 时钟严重偏离的行（`at_millis` 落在任何分区之外）无处可写，插入失败并计入 `write_errors`，不为它们留默认分区。
 - 保留期 7 天是代码默认值（[03.4](03-admin-config-audit.md#34-判定日志)），不做配置。
 - `site_config_history`、`jev_prompts` 不清理；`edge_status` 中 24 小时没有心跳的实例行删除。
 
@@ -509,14 +531,22 @@ CREATE TABLE jev_prompts (
 
 | 查询 | 用到的索引 |
 |---|---|
-| 按请求 ID 打开详情 | 从 ID 解出时间 → 只扫当日分区 → `decision_log_request_idx` |
-| 列表（站点 + 时间窗 + 结论 / 判定路径 / 方法 / 状态） | `decision_log_site_idx`，其余条件在扫描中过滤 |
+| 按请求 ID 打开详情 | 解出时间 `t` → `at_millis BETWEEN t ± 60 秒` 加 `request_id = $1`（[7.3.1](#731-请求标识)）→ 一两个分区的 `decision_log_request_idx` |
+| 列表（站点 + 时间窗 + 结论 / 判定路径 / 方法 / 状态） | `decision_log_site_idx`，其余条件在扫描中过滤；没有站点条件时走主键 `(at_millis, id)` 的范围扫描 |
 | 路径前缀或精确路径 | `decision_log_path_idx`（`path LIKE '/rest/%'`，`%`、`_` 需转义） |
-| 会话时间线 | `decision_log_session_idx` |
-| 需要关注的记录（拦截、本应拦截、未经判定） | `decision_log_attention_idx` |
-| Jev 调用列表与统计 | `decision_log_jev_idx` |
+| 会话时间线 | `decision_log_session_idx`，SQL 里必须逐字写 `AND session <> ''` |
+| 需要关注的记录（拦截、本应拦截、未经判定） | `decision_log_attention_idx`，SQL 里必须逐字写 `AND outcome IN ('blocked','would_block','unjudged')` |
+| Jev 调用列表与统计 | `decision_log_jev_idx`，SQL 里必须逐字写 `AND jev IS NOT NULL` |
+| 快捷筛选计数 | 一次扫描、用 `count(*) FILTER (WHERE …)` 同时算出全部标签，不要每个标签一条查询 |
+| 实时模式 | 主键范围扫描：`at_millis >= 已收到的最新值 − 60 秒`（[7.9.3](#793-请求列表)） |
 
-列表按 `(at_millis, id)` 倒序做游标分页；实时模式按 `id > 上次最大 id` 且 `at_millis > now − 10 分钟` 轮询（写入顺序不严格等于到达时间，按 `id` 才不漏行）。
+列表按 `(at_millis, id)` 倒序做游标分页，`next_cursor` 是最后一行的 `at_millis` 和 `id`。
+
+**部分索引的使用条件**。三个部分索引（会话、需要关注、Jev）只有在查询里出现与索引谓词逐字相同的条件时才会被用上。用参数绑定表达同样意思（`outcome = ANY($1)`）时，PostgreSQL 在泛型计划里证明不了谓词成立，会退回主键索引加过滤；sqlx 的预备语句执行几次后就可能切到泛型计划，平时用小数据量看不出来。已在 PostgreSQL 16 上验证过这一点。所以控制面对这三类查询拼接字面条件，其余值才用参数；`tests/postgres.rs` 对三类查询各设一次 `plan_cache_mode = force_generic_plan` 后 `EXPLAIN`，断言用到了对应索引。
+
+**实时模式不用 `id` 做增量游标**。`id` 在 `INSERT` 时取号，提交顺序不一定等于取号顺序：多个网关实例并发批量写入时，取号小的批次可能后提交，`id > 上次最大 id` 会永远漏掉它们；记录又是在响应结束后才写入，慢响应的行出现得比它的 `at_millis` 晚得多。做法是按 `at_millis` 回看 60 秒重新拉取，客户端按 `request_id` 去重合并。
+
+**数据量与耗时（PostgreSQL 16 实测）**：单日分区 40 万行、合计 120 万行、索引按 7.8.1 建好时，按 ID 打开、24 小时窗口列表首页、路径前缀、Jev 列表、实时模式拉取都不到 1 ms；会话时间线约 50 ms（合成数据里单个会话的行数很多）；快捷筛选计数是整天分区的顺序扫描，约 90 ms。都在 [7.10.7](#7107-性能预算) 的预算之内。更大的数据量见 7.8.4。
 
 ### 7.8.4 容量估算
 
@@ -546,7 +576,7 @@ CREATE TABLE jev_prompts (
 |---|---|
 | `POST /api/login`、`POST /api/logout`、`GET /api/session` | 口令登录（沿用 PR #73：PBKDF2 哈希、HMAC 签名的无状态 Cookie、12 小时）；同一来源 IP 10 分钟内失败 10 次返回 429 |
 | `GET /api/requests` | 请求列表（7.9.3） |
-| `GET /api/requests/counts` | 同样的筛选条件下按结论、判定路径计数，给快捷筛选标签 |
+| `GET /api/requests/counts` | 同样的筛选条件下一次扫描算出各快捷筛选标签的计数（7.9.3） |
 | `GET /api/requests/{request_id}` | 请求详情（7.9.4） |
 | `POST /api/requests/lookup` | 批量对照，最多 1000 个 ID（7.9.5） |
 | `GET /api/requests/export` | 按筛选导出 JSONL 或 CSV，最多 10 万行，流式输出 |
@@ -554,19 +584,22 @@ CREATE TABLE jev_prompts (
 | `GET /api/stats/summary`、`GET /api/stats/timeseries` | 总览指标、按判定路径堆叠的时间序列 |
 | `GET /api/sessions`、`GET /api/sessions/{label}` | 会话列表（按时间窗聚合）、会话时间线（7.9.6） |
 | `GET /api/jev/status`、`GET /api/jev/stats`、`GET /api/jev/prompts/{id}` | Jev 健康、耗时与置信度分布、指令全文（7.9.7） |
-| `GET /api/sites`、`POST /api/sites` | 站点列表（含网关加载状态和 24 小时计数）、新建 |
-| `GET/PUT/DELETE /api/sites/{name}` | 读取、整体替换、删除 |
+| `GET /api/sites`、`POST /api/sites` | 站点列表（含生效进度 `rollout` 和 24 小时计数，7.9.13）、新建 |
+| `GET/PUT/DELETE /api/sites/{name}` | 读取（含 `rollout`）、整体替换、删除 |
 | `GET /api/sites/{name}/versions`、`GET /api/sites/{name}/versions/{v}` | 版本列表（含自动生成的变更摘要）、某个版本全文 |
 | `POST /api/sites/{name}/rollback` | 以某版本全文生成新版本 |
 | `POST /api/sites/validate` | 校验一份配置，返回错误码和出错字段 |
 | `POST /api/sites/{name}/preview` | 改动的影响预估（7.9.10） |
 | `GET /api/sites/{name}/insights` | 调优建议和切换模式的就绪检查（7.9.11） |
 | `GET /api/sites/{name}/evidence` | 判定参数旁边显示的证据：最近 24 小时 Jev 耗时 p50/p95/p99、超时次数、调用上限触发次数和每分钟最高调用数、缓存放行次数 |
-| `GET /api/system` | 网关实例、日志存储、运行参数（7.9.8） |
+| `GET /api/status` | 顶栏状态灯和“配置生效”需要的轻量状态，每 15 秒轮询一次（7.9.13） |
+| `GET /api/system` | 网关实例、日志存储、运行参数（7.9.8）；只在系统页按需读取，不轮询 |
 
 ### 7.9.3 请求列表
 
-`GET /api/requests` 查询参数：`site`、`since_millis`、`until_millis`、`outcome`（逗号分隔多选）、`decision_path`（多选）、`method`、`status`（`404` 或 `4xx`）、`path`（精确；以 `*` 结尾为前缀）、`session`、`client`、`request_id`、`jev_access`、`jev_attack`、`jev_failure`、`max_confidence`、`min_ms`、`site_version`、`entry`（`true`/`false`）、`cursor`、`after_id`、`limit`。
+`GET /api/requests` 查询参数：`site`、`since_millis`、`until_millis`、`scope`、`outcome`（逗号分隔多选）、`decision_path`（多选）、`method`、`status`（`404` 或 `4xx`）、`path`（精确；以 `*` 结尾为前缀）、`session`、`client`、`request_id`、`jev_access`、`jev_attack`、`jev_failure`、`max_confidence`、`min_ms`、`site_version`、`entry`（`true`/`false`，读 `trace.entry`，没有索引，靠时间窗和其他条件缩小范围）、`cursor`、`limit`。
+
+`scope`：`judged`（缺省）不含 `bypass` 和 `unknown_site`（[7.4.1](#741-每个请求一条)）；`all` 含全部。`decision_path` 明确列出这两类之一时按列出的返回，不受 `scope` 限制。控制台按请求 ID、会话标签、精确路径查找时发 `scope=all`，避免第四轮试跑那种“查不到”（[06.4.3](06-console-ui.md#643-请求追溯)）。
 
 ```json
 {
@@ -583,12 +616,22 @@ CREATE TABLE jev_prompts (
       "jev": { "access": "DENY", "attack": "BENIGN", "confidence": 0.86, "ms": 512, "failure": null }
     }
   ],
-  "next_cursor": "1793538986100.91234",
-  "max_id": 91240
+  "next_cursor": "1793538986100.91234"
 }
 ```
 
 列表行不含 `trace` 和 `jev` 全文，只从列读取。
+
+**实时模式**用同一个接口：每 2 秒带上其余筛选条件，`since_millis = 已收到的最新 at_millis − 60000`、`limit=200`，客户端按 `request_id` 去重后插到顶部。回看 60 秒是因为记录在响应结束后才写入（慢响应、Jev 调用、批量写入、多个网关实例各自成批提交），且 `id` 的提交顺序不可靠（[7.8.3](#783-查询模式)）；比 60 秒更晚写入的记录刷新列表后可见。返回满 200 行且最旧一行仍在回看范围内时，界面提示“新请求太多，实时模式只显示最新 200 条，请增加筛选条件”。
+
+**快捷筛选计数**：`GET /api/requests/counts` 接受与列表相同的参数（`cursor`、`limit`、`scope`、`outcome`、`decision_path` 除外：它们就是各标签自己的条件），一次扫描返回：
+
+```json
+{ "judged": 6204, "attention": 37, "blocked": 23, "would_block": 14, "unjudged": 0,
+  "jev": 412, "no_session": 96, "bypass": 12000, "unknown_site": 0, "complete": true }
+```
+
+除 `bypass` 和 `unknown_site` 外，每个数都在“已判定”范围内计算：`attention` 是 `outcome` 为 `blocked`、`would_block`、`unjudged` 之一，`jev` 是有 Jev 记录（含没有发出调用的限额、上下文过大），`no_session` 是 `decision_path = no_session`。
 
 ### 7.9.4 请求详情
 
@@ -606,7 +649,7 @@ CREATE TABLE jev_prompts (
 }
 ```
 
-`neighbors` 是同一会话的前一个、后一个请求；`sources` 是 `trace` 里引用到的所有请求 ID 的摘要（来源、缓存来源、最近访问），一次返回，界面悬停即可显示，不必逐个请求。已过保留期的 ID 不出现在 `sources` 里，界面显示“已过保留期”。
+`neighbors` 是同一会话的前一个、后一个请求；`sources` 是 `trace` 里引用到的所有请求 ID 的摘要（值的来源、缓存来源、最近访问、经过的入口、签发的会话），一次返回，界面悬停即可显示，不必逐个请求。已过保留期的 ID 不出现在 `sources` 里，界面显示“已过保留期”。
 
 ### 7.9.5 批量对照
 
@@ -615,7 +658,7 @@ CREATE TABLE jev_prompts (
 ### 7.9.6 会话
 
 - `GET /api/sessions?site=&since_millis=&until_millis=&flag=blocked|jev&limit=`：在时间窗内按 `session` 聚合，返回标签、上下文类型、站点、首末时间、请求数、Jev 调用数、拦截与本应拦截数、签发它的请求 ID（来自 `trace.response.issued_session`），按最后活动倒序，最多 200 个。时间窗缺省 24 小时。
-- `GET /api/sessions/{label}?site=&only=judged|jev|blocks&cursor=`：会话摘要和按时间正序的请求行；每行附带 `learned`（`trace.response.new_values`）、`entry_passed`、`issued_session`，供时间线标注。
+- `GET /api/sessions/{label}?site=&only=judged|jev|blocks&cursor=`：会话摘要和按时间正序的请求行；每行附带 `learned`（`trace.response.new_values`）、`entry_passed`、`issued_session`，供时间线标注。签发这个会话的登录请求发生在会话建立之前，按客户端地址记账（`context = address`），带的不是这个会话标签；时间线把它按 `trace.response.issued_session = {label}` 另外查出，排在第一行。
 
 ### 7.9.7 Jev
 
@@ -640,7 +683,7 @@ CREATE TABLE jev_prompts (
 
 ### 7.9.8 系统
 
-`GET /api/system` 返回控制面构建版本、PostgreSQL 版本、每个网关实例的心跳内容和是否在线（30 秒内有心跳）、判定日志按分区的行数和大小、最早记录时间、保留期，以及网关上报的运行参数。参数分两组：可按站点覆盖的默认值，和不可配置的代码默认值：
+`GET /api/system` 返回控制面构建版本、PostgreSQL 版本、每个网关实例的心跳内容（含四个计数器和 `gaps` 缺口历史）和是否在线（30 秒内有心跳）、判定日志按分区的范围、行数和大小、最早记录时间、保留期，以及网关上报的运行参数。它比 `/api/status` 重（要统计分区），只在系统页读取。参数分两组：可按站点覆盖的默认值，和不可配置的代码默认值：
 
 ```json
 {
@@ -653,7 +696,7 @@ CREATE TABLE jev_prompts (
     "fixed": {
       "seen_max": 5000, "sources_max": 6, "recent_max": 50, "idle_hours": 24, "sessions_max": 20000,
       "long_value_chars": 8, "state_bytes_max": 8192, "request_body_max": 49152,
-      "response_parse_max": 1048576, "request_values_max": 200
+      "response_parse_max": 1048576, "request_values_max": 200, "queue_capacity": 10000
     }
   }
 }
@@ -723,6 +766,54 @@ CREATE TABLE jev_prompts (
 - 请求体最大 64 KiB；`note` 最长 500 字符。
 - `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。
 
+### 7.9.13 状态灯与配置生效
+
+`GET /api/status` 是顶栏两个状态灯和总览“需要处理”共用的轻量接口，只读 `edge_status`、`site_configs` 和最近 5 分钟的 Jev 记录，每 15 秒轮询一次：
+
+```json
+{
+  "gateway": {
+    "light": "warn",
+    "edges": { "online": 2, "total": 3 },
+    "problems": [
+      { "kind": "site_load_failed", "edge": "edge-2", "site": "shop", "error": "SITE_CONFIG_ORIGIN_INVALID" },
+      { "kind": "version_behind", "edge": "edge-2", "site": "emr", "expected": 13, "loaded": 12, "saved_at_millis": 1793538900000 },
+      { "kind": "edge_offline", "edge": "edge-3", "last_seen_ms": 1793528224000, "loaded": { "emr": 11, "juice": 7 } },
+      { "kind": "log_gap", "edge": "edge-1", "from_ms": 1793538120000, "to_ms": 1793538300000,
+        "dropped": 37, "dropped_bypass": 0, "write_errors": 0 },
+      { "kind": "queue_pressure", "edge": "edge-1", "queue": 8400, "capacity": 10000 },
+      { "kind": "partition_missing", "days_ahead": 1 }
+    ]
+  },
+  "jev": { "health": "ok", "calls": 42, "failures": {}, "p50_ms": 540, "p95_ms": 910 }
+}
+```
+
+`gateway.light` 的规则：
+
+| 值 | 条件 |
+|---|---|
+| `down`（红） | 没有在线实例：`edges.online` 为 0 |
+| `warn`（琥珀） | `problems` 非空 |
+| `ok`（绿） | 其余 |
+
+`problems` 的产生规则：`site_load_failed`：任一在线实例的 `sites[x].error` 非空（含 Host 冲突落选，错误码 `SITE_HOST_TAKEN`）；`version_behind`：在线实例加载的版本低于 `site_configs.version`，**且最新版本已保存超过 30 秒**（刚保存后的前 30 秒是正常的生效过程，不告警）；`edge_offline`：24 小时内发过心跳、现在 `seen_at` 超过 30 秒前的实例，带最后心跳时间和它停在的各站点版本（离线实例不参与 `version_behind` 判断，免得同一件事报两次）；`log_gap`：最近 15 分钟内有缺口；`queue_pressure`：发送队列超过容量的 80%；`partition_missing`：今天没有分区或未来分区不足 2 天（[7.8.2](#782-分区与保留)）；`heartbeat_late`：在线实例的心跳间隔超过 15 秒。
+
+“在线”指 `seen_at` 在 30 秒内。`edges.total` 包含 24 小时内发过心跳的全部实例，离线的计入 `total` 而不计入 `online`，所以“2/3 在线”能被看到。`jev` 与 `GET /api/jev/status` 的同名字段相同（[7.9.7](#797-jev)），省略 `config`。
+
+**生效进度**。`GET /api/sites` 的每一行和 `GET /api/sites/{name}` 都带 `rollout`：
+
+```json
+"rollout": {
+  "version": 13,
+  "edges_online": 2, "edges_loaded": 1,
+  "edges": [ { "edge": "edge-1", "online": true, "loaded_version": 13, "error": null },
+             { "edge": "edge-2", "online": true, "loaded_version": 12, "error": null } ]
+}
+```
+
+`edges_loaded` 是在线且 `loaded_version == version` 的实例数。界面显示“N/M 个网关已生效”：两者相等且大于 0 时是“● v13 已生效”；`edges_online` 为 0 时是“没有在线的网关，配置已保存，网关上线后加载”；有实例报错时显示该实例的错误码文案。离线实例不拖住进度，只在摘要里另注“edge-3 离线”。保存后界面每秒轮询 `GET /api/sites/{name}`，全部生效或 30 秒后停止。
+
 ## 7.10 控制台前端架构
 
 ### 7.10.1 技术栈与依赖
@@ -772,11 +863,11 @@ web/console/src/
 
 | 数据 | 查询键 | 缓存策略 |
 |---|---|---|
-| 请求列表 | `['requests', filters]` | `staleTime` 10 s；实时模式每 2 s 用 `after_id` 拉增量并插到顶部，10 分钟无操作自动停止 |
+| 请求列表 | `['requests', filters]` | `staleTime` 10 s；实时模式每 2 s 用 `since_millis = 最新 at_millis − 60 s` 重新拉取，按 `request_id` 去重后插到顶部（7.9.3），10 分钟无操作自动停止 |
 | 请求详情 | `['request', id]` | 记录不会再变，`staleTime: Infinity`；列表行悬停 150 ms 预取 |
 | 计数、统计 | `['counts', filters]`、`['stats', …]` | 30 s |
-| 网关与 Jev 状态 | `['system']`、`['jev-status']` | 每 15 s 轮询（顶栏状态灯） |
-| 站点、版本 | `['sites']`、`['site', name]`、`['versions', name]` | 保存后失效；保存后每 1 s 轮询站点直到 `edge.loaded_version` 等于新版本，最长 30 s |
+| 网关与 Jev 状态 | `['status']` | 每 15 s 轮询 `/api/status`（顶栏状态灯、总览“需要处理”）；`['system']`、`['jev-status']` 只在系统页、Jev 页读取 |
+| 站点、版本 | `['sites']`、`['site', name]`、`['versions', name]` | 保存后失效；保存后每 1 s 轮询 `['site', name]` 直到 `rollout` 显示全部在线网关已加载新版本，最长 30 s（7.9.13） |
 | 参数证据 | `['evidence', name]` | 60 s，只在打开“高级”分组时请求 |
 | 指令全文 | `['prompt', id]` | `Infinity` |
 
@@ -805,7 +896,7 @@ web/console/src/
 
 ### 7.10.8 测试
 
-- 单元（`node --test`）：`filter-dsl.ts` 解析与序列化往返；`explain.ts` 覆盖每种判定路径和失败码；`patterns.ts` 与 Rust `PathPattern` 共用一组用例（从 `crates/xshield-core/src/context/config.rs` 的测试复制，含 `;` 路径参数）；`site-validate.ts` 的 `advanced` 范围与词规则；`align.ts` 处理裁剪和数组值；YAML↔JSON 往返；CSV 防公式注入。
+- 单元（`node --test`）：`filter-dsl.ts` 解析与序列化往返；`explain.ts` 覆盖每种判定路径和失败码；`patterns.ts` 与 Rust `PathPattern` 共用一组用例（从 `crates/xshield-core/src/context/config.rs` 的测试复制，含 `;` 路径参数）；`site-validate.ts` 的 `advanced` 范围与词规则；`align.ts` 处理裁剪、数组值和对不上时的 `aligned: false`（7.5.2）；实时模式的合并去重（按 `request_id`，回看窗口内重复行不重复插入）；YAML↔JSON 往返；CSV 防公式注入。
 - 端到端（Playwright，`page.route` 返回固定数据，不需要后端）：登录；⌘K 输入请求 ID 打开详情；筛选本应拦截并用 j/k、Enter 浏览；Jev 视图三种模式切换和来源跳转；从无会话记录“登记为入口”、看影响预估、保存、等到“已生效”；改 Jev 超时并看影响预估；版本差异与回滚；观察切拦截；粘贴 TSV 批量对照。每个页面跑一次 axe，明暗两种主题。
 - 契约：Rust 侧对 `DecisionRecord`、API 响应做 serde 往返测试，样例 JSON 与前端端到端测试使用同一批文件（放在 `web/console/tests/fixtures/`）。
 
@@ -829,10 +920,16 @@ web/console/src/
 
 每个线程的完成标准：`cargo fmt`、`cargo clippy --workspace --all-targets -- -D warnings`、相关 `cargo test`（PostgreSQL 用例在 CI 的 `validate` 任务里执行）；控制台 `npm run lint`、`npm test`、`npm run build`、`npx playwright test` 全部通过；`scripts/validate_library.py`、`scripts/check_env_docs.py` 通过。
 
-优先级：
+**优先级与里程碑**。P0 是四项要求的最小闭环，但一次交付太大，所以按里程碑切开：三个线程对齐到同一个里程碑，每个里程碑结束时控制台都能单独使用，也能尽早暴露接口分歧。
 
-- **P0**（四项要求的最小闭环）：每个请求一条记录和完整追溯链；请求列表、预览面板、详情、Jev 上下文三视图；会话时间线；批量对照；站点表单与 YAML 编辑、`advanced` 判定参数（含证据与影响预估）、版本差异与回滚；从请求一键登记入口或绕过（含影响预估）；切换模式与就绪检查；网关与 Jev 状态；命令面板和键盘操作；实时模式。
-- **P1**：调优建议页签；导入导出；Jev 调用对比视图；Jev 统计图；会话列表的筛选。
-- **P2**：分钟级汇总表（数据量超过 7.8.4 的估算时）。
+| 里程碑 | 用户得到什么 | A 网关 | B 控制面 | C 控制台 |
+|---|---|---|---|---|
+| **M1 能追溯**（P0） | 每个请求都能按 ID 打开，看到判定依据和 Jev 的完整上下文（结构化、JSON、原文、指令四视图）；会话时间线；⌘K 按 ID 直达；网关与 Jev 状态灯 | 记录与 `trace`、简记录、计时、心跳（含缺口历史）、指令登记、批量写、压力下丢简记录 | 登录、分区维护、`requests`（含 `scope`、`counts`）、详情、`sessions`、`jev/*`、`status`、`system`、导入 | 框架与主题、请求追溯、请求详情、Jev 查看器、会话、系统（只读）、`vocab.ts` 与 `explain.ts` |
+| **M2 能配置**（P0） | 站点的全部字段在表单和 YAML 里都能改，高级判定参数带证据和影响预估，版本差异与回滚，保存后看到“N/M 个网关已生效” | `advanced` 校验与判定代码改动（7.6.3） | 站点 CRUD、版本表、`validate`、`preview`、`evidence`、`rollout` | 站点列表与详情、表单与 YAML 编辑、高级判定参数、保存对话框、变更历史 |
+| **M3 更便捷**（P0） | 从一条请求直接登记入口、加入绕过、调参；切拦截模式前的就绪检查；批量对照；实时模式；总览；新建站点（粘贴 YAML 或表单） | — | `lookup`、`insights` 的 `readiness` | 快捷规则对话框、模式切换、批量对照、实时模式、总览、命令面板完整功能与快捷键 |
+| **P1** | 接入向导四步、调优建议页签、导出与导入、Jev 对比视图和统计图、会话列表筛选 | — | `insights` 的 `suggestions`、`export`、`import`、`jev/stats` | 对应页面 |
+| **P2** | 分钟级汇总表（数据量超过 7.8.4 的估算时） | — | 汇总表与查询 | — |
+
+M3 里的实时模式和命令面板的非查找类命令可以最后做；它们不影响四项要求的闭环。
 
 PR #73 的去向：线程 B 合并它的后端（登录、站点存储、判定日志查询）和对 v3 控制台的删除，前端按 06 重写；B 的 PR 合并后关闭 #73。

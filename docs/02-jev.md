@@ -12,7 +12,7 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 
 ```json
 {
-  "entry": { "matched": false, "pattern": null },
+  "entry": { "matched": false },
   "session": { "age_seconds": 640, "entries_passed": ["/login", "/api/home", "/api/patients"] },
   "recent": [
     { "method": "GET", "path": "/api/patients", "status": 200 },
@@ -22,13 +22,14 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
     "method": "GET",
     "path": "/api/patients/8",
     "values": [
-      { "at": "path[2]", "value": "8", "seen_as": ["age @ GET /api/patients/7"] }
-    ]
+      { "at": "path[2]", "kind": "reference", "value": "8", "seen_as": ["age @ GET /api/patients/7"] }
+    ],
+    "truncated": false
   }
 }
 ```
 
-`seen_as` 为空表示这个值从未出现过。上例中 `8` 只以"年龄"出现过，从未作为患者 ID 出现，Jev 据此判断这是越权引用。
+`kind` 是 `reference`（像对象引用）、`route`（路径里的词）或 `input`（其他输入）；网关已用响应核验过同类对象的值多一个 `"verified": true`；`truncated` 表示请求体被摘要或截断。`seen_as` 为空表示这个值从未出现过。上例中 `8` 只以"年龄"出现过，从未作为患者 ID 出现，Jev 据此判断这是越权引用。
 
 两个问题：
 
