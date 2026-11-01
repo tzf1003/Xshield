@@ -25,7 +25,7 @@
     const judged = recs.filter((r) => r.decision_path !== 'bypass'); const wb = judged.filter((r) => r.outcome === 'would_block' || r.outcome === 'blocked').length;
     return { count: judged.length, text: judged.length ? `${judged.length} 个原本判定的请求不再判定，其中本应拦截或已拦截 ${wb} 个` : '没有原本判定的请求受影响', sample: recs[0] && recs[0].path };
   }
-  function evidenceFor(s) { return M.EVIDENCE[s.name] || { jev: { p50_ms: 0, p95_ms: 0, p99_ms: 0, timeouts: 0, calls: 0, timeout_ms_used: 2000 }, call_limit: { session_peak: 0, address_peak: 0, session_hits: 0, address_hits: 0 }, cache: { cached_allows: 0 }, histogram: [] }; }
+  function evidenceFor(s) { return X.evidence(s.name); }
   function impactLines(s, a, b) {
     const lines = []; const ev = evidenceFor(s); const A = a.advanced || {}; const B = b.advanced || {};
     b.entries.filter((p) => !a.entries.includes(p)).forEach((p) => { const i = ruleImpact(s, p, 'entry'); lines.push({ w: false, text: `入口 ＋ ${p}：${i.text}`, sample: i.sample }); });
@@ -106,8 +106,10 @@
       const v = X.validateSpec(sp); if (X.site(sp.name)) v.errors.unshift({ msg: '已有同名站点' });
       const clash = X.sites.find((s) => s.hosts.some((x) => sp.hosts.includes(x))); if (clash) v.errors.unshift({ msg: `Host ${sp.hosts.find((x) => clash.hosts.includes(x))} 已属于其他站点 ${clash.name}` });
       if (v.errors.length) { err.classList.remove('hidden'); err.innerHTML = v.errors.map((e) => esc(e.msg)).join('<br>'); $('.n', bar).innerHTML = `<span class="lvl-serious">■</span> ${v.errors.length} 处需要修改：${esc(v.errors[0].msg)}`; err.scrollIntoView({ block: 'center' }); return; } err.classList.add('hidden'); $('.n', bar).textContent = '填写后创建 v1';
-      const s = { name: sp.name, mode: 'observe', hosts: sp.hosts, origin: sp.origin, version: 1, saved_at: X.now(), observing_since: X.now(), requests_24h: 0, blocked_24h: 0, would_block_24h: 0, jev_calls_24h: 0, suggestions: 0, spec: clone(sp), versions: [{ version: 1, at: X.now(), change: 'create', note: '', spec: clone(sp) }] };
-      X.sites.push(s); M.INSIGHTS[s.name] = { window_hours: 24, suggestions: [], readiness: null }; X.loaded[s.name] = {}; M.SYSTEM.edges.forEach((e) => { X.loaded[s.name][e.edge] = 0; }); X.simulateRollout(s); X.renderSiteSelect && X.renderSiteSelect();
+      const enforce = sp.mode === 'enforce';
+      const s = { name: sp.name, mode: enforce ? 'enforce' : 'observe', hosts: sp.hosts, origin: sp.origin, version: 1, saved_at: X.now(), observing_since: enforce ? null : X.now(), requests_24h: 0, blocked_24h: 0, would_block_24h: 0, jev_calls_24h: 0, suggestions: 0, spec: clone(sp), versions: [{ version: 1, at: X.now(), change: 'create', note: '', spec: clone(sp) }] };
+      X.sites.push(s); M.INSIGHTS[s.name] = { window_hours: 24, suggestions: [], readiness: null }; M.EVIDENCE[s.name] = X.evidence(s.name); X.loaded[s.name] = {}; M.SYSTEM.edges.forEach((e) => { X.loaded[s.name][e.edge] = 0; }); X.simulateRollout(s); X.renderSiteSelect && X.renderSiteSelect();
+      if (enforce) X.toast('YAML 里是拦截模式：新站点没有观察期，入口和绕过设错会直接拦截正常请求');
       X.justCreated = s.name; go(`#/sites/${s.name}`);
     };
     const bar = h('<div class="draftbar"><span class="n">填写后创建 v1</span><span class="sp"></span></div>'); bar.appendChild(btn('取消', () => go('#/sites'))); bar.appendChild(btn('创建站点', create, 'primary')); page.appendChild(bar);
@@ -264,7 +266,7 @@
     if (!d[key].length) list.appendChild(h(`<div class="rulerow dim">${key === 'entries' ? '入口至少一条' : '还没有绕过规则'}</div>`));
     wrap.appendChild(list);
     const add = h(`<div class="addrow"><input type="text" placeholder="添加${kindName}，例如 /rest/admin/*" aria-label="添加${kindName}"><button type="button" class="btn">添加</button></div>`); const inp = $('input', add);
-    const doAdd = () => { const v = inp.value.trim(); if (!v) return; const err = !v.startsWith('/') ? '规则以 / 开头' : /[?#\s]/.test(v) ? '规则不能含查询串或空白' : v.slice(0, -1).includes('*') ? '* 只能在末尾' : v.split('/').some((x) => x === '.' || x === '..') ? '不能含 . 或 .. 段' : d[key].includes(v) ? '已有这条规则' : d[key].length >= 64 ? '最多 64 条' : null; if (err) { msg.textContent = err; msg.classList.remove('hidden'); msg.classList.add('err'); return; } d[key].push(v); ctx.rerender(); };
+    const doAdd = () => { const v = inp.value.trim(); if (!v) return; const err = X.pathError(v) || (d[key].includes(v) ? '已有这条规则' : d[key].length >= 64 ? '最多 64 条' : null); if (err) { msg.textContent = err; msg.classList.remove('hidden'); msg.classList.add('err'); return; } d[key].push(v); ctx.rerender(); };
     inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); doAdd(); } }; $('button', add).onclick = doAdd; wrap.appendChild(add); return wrap;
   }
 
@@ -486,7 +488,7 @@
       c.appendChild(h(`<div class="dim small" style="margin-top:8px">保留期 ${st.retention_days} 天（代码默认值）· 最早记录 ${X.fmtTime(st.earliest_at, true)} · 提前建好 ${future} 天分区${future < 2 ? ' ▲ 不足 2 天，需要处理' : '（够用）'}</div>`)); page.appendChild(c);
       const gaps = []; M.SYSTEM.edges.forEach((e) => (e.gaps || []).forEach((g) => gaps.push(Object.assign({ edge: e.edge }, g)))); gaps.sort((a, b) => b.from_ms - a.from_ms);
       const gc = h('<div class="card" style="margin-top:12px"><h2>日志缺口</h2></div>');
-      gc.appendChild(h(`<div class="tablewrap short"><table class="data"><thead><tr><th>时间段</th><th>实例</th><th>丢失的判定记录</th><th>压力下丢弃的绕过记录</th><th>写入失败</th><th></th></tr></thead><tbody>${gaps.map((g) => `<tr><td class="tnum">${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)}</td><td>${esc(g.edge)}</td><td class="tnum">${g.dropped}</td><td class="tnum">${n(g.dropped_bypass)}</td><td class="tnum">${g.write_errors}</td><td><a href="#/requests?since=${g.from_ms}&until=${g.to_ms}&scope=all">查看这段时间的请求</a></td></tr>`).join('') || '<tr><td colspan="6" class="dim">没有缺口</td></tr>'}</tbody></table></div>`)); gc.appendChild(h('<div class="dim small" style="margin-top:6px">数据来自网关心跳；网关重启后清空，重启之前的缺口看不到。</div>')); page.appendChild(gc);
+      gc.appendChild(h(`<div class="tablewrap short"><table class="data"><thead><tr><th>时间段</th><th>实例</th><th>队列满丢弃的判定记录</th><th>压力下丢弃的绕过记录</th><th>写入失败</th><th></th></tr></thead><tbody>${gaps.map((g) => `<tr><td class="tnum">${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)}</td><td>${esc(g.edge)}</td><td class="tnum">${g.dropped}</td><td class="tnum">${n(g.dropped_bypass)}</td><td class="tnum">${g.write_errors}</td><td><a href="#/requests?range=custom&since=${g.from_ms}&until=${g.to_ms}&scope=all">查看这段时间的请求</a></td></tr>`).join('') || '<tr><td colspan="6" class="dim">没有缺口</td></tr>'}</tbody></table></div>`)); gc.appendChild(h('<div class="dim small" style="margin-top:6px">数据来自网关心跳；网关重启后清空，重启之前的缺口看不到。</div>')); page.appendChild(gc);
     } else if (tab === 'params') {
       const p = M.SYSTEM.params; const sites = X.sites;
       const cols = [['jev_timeout_ms', 'Jev 超时 ms'], ['session_calls_per_minute', '会话上限'], ['address_calls_per_minute', '地址上限'], ['allow_cache_minutes', '缓存分钟'], ['secret_fields', '追加脱敏词'], ['synonyms', '同义词']];
@@ -499,7 +501,7 @@
       fx.appendChild(h(`<div class="tablewrap short"><table class="data"><thead><tr><th>参数</th><th>值</th><th>说明</th></tr></thead><tbody>${Object.entries(p.fixed).map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td class="tnum">${n(v)}${FIXED[k] && FIXED[k][1] ? ` ${FIXED[k][1]}` : ''}</td><td class="muted">${esc(FIXED[k] ? FIXED[k][0] : '')}</td></tr>`).join('')}</tbody></table></div>`)); page.appendChild(fx);
     } else if (tab === 'import') {
       const c = h('<div class="card"><h2>导入判定日志</h2><div class="muted">选择网关文件模式输出的 JSON 行文件（最大 100 MiB）。导入的记录网关实例记为 import；旧格式记录在详情页标注“没有判定依据”。</div><div style="margin-top:12px"><input type="file" aria-label="选择 JSON 行文件"></div><div class="impact" id="impres" style="margin-top:12px;display:none"></div></div>');
-      $('input', c).onchange = (e) => { const f = e.target.files[0]; const r = $('#impres', c); r.style.display = ''; r.innerHTML = f ? `原型不处理文件。真实导入会显示进度，并给出：导入 / 跳过 / 出错行数和前 20 个出错行号。所选文件：${esc(f.name)}（${X.bytes(f.size)}）` : ''; };
+      $('input', c).onchange = (e) => { const f = e.target.files[0]; const r = $('#impres', c); r.style.display = ''; r.innerHTML = f ? `原型不处理文件。真实导入会显示进度，并给出：导入 / 跳过 / 超出保留期（早于 7 天，不入库）/ 出错行数和前 20 个出错行号。所选文件：${esc(f.name)}（${X.bytes(f.size)}）` : ''; };
       page.appendChild(c);
     }
   });

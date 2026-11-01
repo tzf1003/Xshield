@@ -144,6 +144,14 @@
   };
 
   // ---------------------------------------------------------------- status lights (docs/07 7.9.13)
+  // A log gap counts both rows dropped from a full queue and rows lost to failed writes (docs/07 7.7.4).
+  X.gapLost = (g) => (g.dropped || 0) + (g.write_errors || 0);
+  X.gapCause = (g) => (g.dropped && g.write_errors ? '队列满、写入失败' : g.write_errors ? '写入失败' : '队列满');
+  // Evidence for a site; a site created in this session has none yet.
+  X.evidence = (name) => M.EVIDENCE[name] || {
+    window_hours: 24, jev: { p50_ms: 0, p95_ms: 0, p99_ms: 0, timeouts: 0, calls: 0, timeout_ms_used: M.SYSTEM.params.site_overridable.jev_timeout_ms },
+    call_limit: { session_peak: 0, address_peak: 0, session_hits: 0, address_hits: 0 }, cache: { cached_allows: 0 }, histogram: new Array(30).fill(0),
+  };
   X.computeStatus = () => {
     const now = X.now(); const edges = M.SYSTEM.edges; const on = edges.filter((e) => e.online); const problems = [];
     edges.filter((e) => !e.online).forEach((e) => problems.push({ kind: 'edge_offline', level: 'warn', text: `${e.edge} 已离线 ${Math.max(1, Math.round((now - e.seen_at) / 60000))} 分钟（最后心跳 ${X.fmtHMS(e.seen_at)}）`, href: '#/system?tab=edges', act: '查看系统' }));
@@ -152,7 +160,7 @@
       if (behind.length && now - s.saved_at > X.BEHIND_MS) problems.push({ kind: 'version_behind', level: 'serious', text: `${s.name} v${s.version} 保存后仍有 ${behind.length}/${ro.edges_online} 个网关没加载（${behind.map((e) => `${e.edge} 停在 v${e.version}`).join('、')}）`, href: '#/system?tab=edges', act: '查看系统' });
     });
     edges.forEach((e) => (e.gaps || []).forEach((g) => {
-      if (g.dropped + g.write_errors > 0 && now - g.to_ms < 15 * 60000) problems.push({ kind: 'log_gap', level: 'serious', text: `${e.edge} 在 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} 有 ${g.dropped} 条判定记录未写入，这段时间的请求可能查不到`, href: `#/requests?since=${g.from_ms}&until=${g.to_ms}&scope=all`, act: '查看缺口' });
+      if (X.gapLost(g) > 0 && now - g.to_ms < 15 * 60000) problems.push({ kind: 'log_gap', level: 'serious', text: `${e.edge} 在 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} 有 ${X.gapLost(g)} 条判定记录未写入（${X.gapCause(g)}），这段时间的请求可能查不到`, href: `#/requests?range=custom&since=${g.from_ms}&until=${g.to_ms}&scope=all`, act: '查看缺口' });
     }));
     edges.forEach((e) => { if (e.online && e.queue / M.SYSTEM.params.fixed.queue_capacity > 0.8) problems.push({ kind: 'queue_pressure', level: 'warn', text: `${e.edge} 发送队列超过 80%`, href: '#/system?tab=edges', act: '查看系统' }); });
     const order = { serious: 0, warn: 1, info: 2 }; problems.sort((a, b) => order[a.level] - order[b.level]);
@@ -250,7 +258,23 @@
     const raw = (location.hash || '#/').slice(1); const i = raw.indexOf('?');
     return { parts: (i < 0 ? raw : raw.slice(0, i)).split('/').filter(Boolean).map(decodeURIComponent), q: new URLSearchParams(i < 0 ? '' : raw.slice(i + 1)) };
   };
-  X.go = (hash) => { if (location.hash === hash) X.render(); else location.hash = hash; };
+  // docs/06 6.2.2: the site scope lives in the address and nowhere else (no `site` means all sites). A link or button that
+  // does not name a site carries the current scope to its target, so Back and Forward return to the scope of that page.
+  // The global scope is the site and the time range (`range`, and for `range=custom` its `since`/`until`). Whatever the target
+  // names itself is kept; only what it leaves out is filled in from the current address.
+  X.scoped = (hash) => {
+    if (typeof hash !== 'string' || hash[0] !== '#') return hash;
+    const i = hash.indexOf('?'); const own = new URLSearchParams(i < 0 ? '' : hash.slice(i + 1)); const cur = X.parseHash().q; const add = [];
+    if (X.state.site !== 'all' && !own.has('site')) add.push(['site', X.state.site]);
+    if (!own.has('range') && cur.get('range')) {
+      add.push(['range', cur.get('range')]);
+      if (cur.get('range') === 'custom') ['since', 'until'].forEach((k) => { if (!own.has(k) && cur.get(k)) add.push([k, cur.get(k)]); });
+    }
+    return add.length ? `${hash}${i < 0 ? '?' : '&'}${add.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')}` : hash;
+  };
+  // A custom time window is `range=custom` with `since`/`until` in Unix ms (docs/06 6.2.2); without `range=custom` they are not read.
+  X.customWindow = (q) => (q.get('range') === 'custom' && q.get('since') ? { since: Number(q.get('since')) || 0, until: Number(q.get('until')) || Infinity } : null);
+  X.go = (hash) => { const next = X.scoped(hash); if (location.hash === next) X.render(); else location.hash = next; };
   X.hashWith = (patch, base) => {
     const { parts, q } = base || X.parseHash(); const nq = new URLSearchParams(q.toString());
     Object.keys(patch).forEach((k) => { if (patch[k] == null || patch[k] === '') nq.delete(k); else nq.set(k, patch[k]); });
@@ -266,6 +290,9 @@
   X.state = { site: 'all' };
   X.render = () => {
     const page = $('#page'); const { parts, q } = X.parseHash(); const key = parts[0] || 'overview';
+    // The address is the only source of the scope (see X.scoped): no `site`, or one that names no site, means all sites.
+    const urlSite = q.get('site');
+    X.state.site = urlSite && X.sites.some((s) => s.name === urlSite) ? urlSite : 'all';
     if (X.routeKey === 'requests' && !X.parseHashPrev) X.scroll.requests = page.scrollTop;
     X.closePopover();
     $$('.nav-item[data-route]').forEach((b) => b.classList.toggle('active', b.dataset.route === key));
@@ -336,7 +363,7 @@
   X.ADV_KEYS = ADV_KEYS;
   X.specToYaml = (spec) => {
     const L = [`name: ${spec.name}`, `hosts: [${spec.hosts.join(', ')}]`, `origin: ${spec.origin}`, 'session:', spec.session.header ? `  header: ${spec.session.header}` : `  cookie: ${spec.session.cookie}`];
-    L.push('entries:'); spec.entries.forEach((e) => L.push(`  - ${e}`));
+    if (spec.entries.length) { L.push('entries:'); spec.entries.forEach((e) => L.push(`  - ${e}`)); } else L.push('entries: []');
     if (spec.bypass.length) { L.push('bypass:'); spec.bypass.forEach((e) => L.push(`  - ${e}`)); } else L.push('bypass: []');
     L.push(`mode: ${spec.mode}`, `on_jev_unavailable: ${spec.on_jev_unavailable}`);
     const a = spec.advanced || {}; const ks = ADV_KEYS.filter((k) => a[k] != null && (!Array.isArray(a[k]) || a[k].length));
@@ -354,6 +381,27 @@
     const lines = text.split('\n').map((raw, i) => ({ raw: raw.replace(/\s+#.*$/, '').replace(/\s+$/, ''), i: i + 1 })).filter((l) => l.raw.trim() && !l.raw.trim().startsWith('#'));
     let pos = 0; const ind = (s) => s.match(/^ */)[0].length;
     const fail = (l, msg) => { throw { line: l.i, msg }; };
+    const at = {}; // the line of each key, by path (`hosts`, `session.cookie`), for the shape errors below
+    const isStr = (v) => typeof v === 'string';
+    const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+    // Every field has one type. A wrong one stops the parse at its key, so nothing after this has to guess what a field holds
+    // (a number, a nested list, one text where a list belongs): the same check the console runs after the YAML library.
+    // A key that is written must carry a value of its type: `hosts:` with nothing after it is an error on that line, not an empty
+    // list, and `mode:` is not quietly observe. Only `advanced` and its parameters may be written empty (they are optional).
+    const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    const shape = (obj) => {
+      const bad = (key, msg) => fail({ i: at[key] || 1 }, msg);
+      if (Array.isArray(obj)) fail(lines[0], '最外层要写成“键: 值”，不是列表');
+      ['name', 'origin', 'mode', 'on_jev_unavailable'].forEach((k) => { if (has(obj, k) && !isStr(obj[k])) bad(k, `${k} 后面要写文本：不能留空，也不能是数字或列表（纯数字的值请加引号）`); });
+      ['hosts', 'entries', 'bypass'].forEach((k) => { if (has(obj, k) && !(Array.isArray(obj[k]) && obj[k].every(isStr))) bad(k, `${k} 要写成文本列表：[a, b]，或每行一个“- 值”；不能留空，数字和嵌套列表也不行（纯数字的值请加引号）`); });
+      if (has(obj, 'session') && !isObj(obj.session)) bad('session', 'session 下面要缩进写 cookie: 名称 或 header: 名称');
+      const sess = isObj(obj.session) ? obj.session : {};
+      ['cookie', 'header'].forEach((k) => { if (has(sess, k) && !isStr(sess[k])) bad(`session.${k}`, `session.${k} 后面要写文本：不能留空，也不能是数字或列表（纯数字的值请加引号）`); });
+      if (obj.advanced != null && !isObj(obj.advanced)) bad('advanced', 'advanced 下面要缩进写“键: 值”');
+      const a = isObj(obj.advanced) ? obj.advanced : {};
+      if (Array.isArray(a.secret_fields) && !a.secret_fields.every(isStr)) bad('advanced.secret_fields', 'secret_fields 里的每个词都要写成文本');
+      if (a.synonyms != null && !(Array.isArray(a.synonyms) && a.synonyms.every((p) => isStr(p) || (Array.isArray(p) && p.every(isStr))))) bad('advanced.synonyms', 'synonyms 要写成列表，每项两个词，例如 - [user, member]');
+    };
     const scalar = (s, l) => {
       s = s.trim();
       if (s.startsWith('[')) { if (!s.endsWith(']')) fail(l, '列表缺少右方括号 ]'); const inner = s.slice(1, -1).trim(); return inner ? inner.split(',').map((x) => scalar(x, l)) : []; }
@@ -373,7 +421,7 @@
         if (!m) fail(l, '这一行不是“键: 值”的格式');
         if (allowed && !allowed.includes(m[1])) fail(l, `不认识的字段 ${m[1]}${path ? `（在 ${path} 下）` : ''}`);
         if (m[1] in obj) fail(l, `字段 ${m[1]} 重复`);
-        pos += 1;
+        pos += 1; at[path ? `${path}.${m[1]}` : m[1]] = l.i;
         if (m[2] === '') obj[m[1]] = pos < lines.length && ind(lines[pos].raw) > indent ? block(ind(lines[pos].raw), m[1] === 'advanced' ? ADV_KEYS : m[1] === 'session' ? ['cookie', 'header'] : null, m[1]) : null;
         else obj[m[1]] = scalar(m[2], l);
       }
@@ -384,29 +432,55 @@
       if (!lines.length) return { error: { line: 1, msg: '内容为空' } };
       const obj = block(ind(lines[0].raw), TOP_KEYS, '');
       if (pos < lines.length) fail(lines[pos], '缩进与上一级不一致');
+      shape(obj);
       const spec = { name: obj.name || '', hosts: obj.hosts || [], origin: obj.origin || '', session: obj.session || {}, entries: obj.entries || [], bypass: obj.bypass || [], mode: obj.mode || 'observe', on_jev_unavailable: obj.on_jev_unavailable || 'deny', advanced: obj.advanced || {} };
       if (spec.advanced.synonyms) spec.advanced.synonyms = spec.advanced.synonyms.map((p) => (Array.isArray(p) ? p : String(p).split(/\s*,\s*/)));
       if (spec.advanced.secret_fields && !Array.isArray(spec.advanced.secret_fields)) spec.advanced.secret_fields = [String(spec.advanced.secret_fields)];
       return { spec };
     } catch (e) { if (e && e.line) return { error: e }; throw e; }
   };
-  const pathOk = (p) => p.startsWith('/') && !/[?#\s]/.test(p) && !p.slice(0, -1).includes('*') && !p.split('/').some((seg) => seg === '.' || seg === '..');
+  // These mirror crates/xshield-core/src/context/config.rs (valid_host, valid_origin, valid_token, PathPattern::parse).
+  // Each one answers false for anything that is not text, so a value of the wrong type is a validation error, not an exception.
+  const hostOk = (x) => typeof x === 'string' && x.length > 0 && x.length <= 253 && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(x) && !x.includes('..');
+  const originOk = (o) => { const m = typeof o === 'string' ? /^https?:\/\/([^:/]*)(?::(\d*))?$/.exec(o) : null; return !!m && hostOk(m[1]) && (m[2] == null || (m[2].length >= 1 && m[2].length <= 5)); };
+  const tokenOk = (t) => typeof t === 'string' && /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(t);
+  // PathPattern::parse. The length is UTF-8 bytes (a Chinese character counts 3, an emoji 4), not String.length; only the ASCII
+  // space and the ASCII control bytes count as whitespace; everything but the optional last `*` is checked as the literal.
+  // The form's add-rule box and the validator share this, and the box shows the reason for the first rule that is broken.
+  const utf8Len = (s) => new TextEncoder().encode(s).length;
+  X.pathError = (p) => {
+    if (typeof p !== 'string') return '规则要写成文本';
+    const literal = p.endsWith('*') ? p.slice(0, -1) : p;
+    if (!p.startsWith('/')) return '规则以 / 开头';
+    if (utf8Len(p) > 256) return '规则最长 256 字节（一个汉字算 3 个）';
+    if (/[?#\\]/.test(literal)) return '规则不能含查询串（? 或 #）或反斜杠';
+    if (/[ \x00-\x1f\x7f]/.test(literal)) return '规则不能含空格或控制字符';
+    if (literal.includes('*')) return '* 只能在末尾';
+    if (literal.split('/').some((seg) => seg === '.' || seg === '..')) return '不能含 . 或 .. 段';
+    return null;
+  };
+  const pathOk = (p) => !X.pathError(p);
   X.validateSpec = (spec) => {
     const errors = []; const warnings = []; const add = (g, f, msg) => errors.push({ group: g, field: f, msg });
-    if (!/^[a-z0-9_-]{1,64}$/.test(spec.name || '')) add('basic', 'name', '站点名只能用小写字母、数字、-、_，最长 64 个字符');
-    if (!spec.hosts.length || spec.hosts.length > 16 || spec.hosts.some((x) => !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d+)?$/i.test(x))) add('basic', 'hosts', 'Host 不能为空，最多 16 个，每个必须是有效的主机名');
-    if (!/^https?:\/\/[^/\s]+$/i.test(spec.origin || '')) add('basic', 'origin', '源站地址必须是 http://主机[:端口] 或 https://主机[:端口]，不带路径');
+    // The spec may come from pasted YAML or from a draft; a field of the wrong type is an error on that field, never an exception.
+    const strs = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+    const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+    if (typeof spec.name !== 'string' || !/^[a-z0-9_-]{1,64}$/.test(spec.name)) add('basic', 'name', '站点名只能用小写字母、数字、-、_，最长 64 个字符');
+    if (!strs(spec.hosts) || !spec.hosts.length || spec.hosts.length > 16 || spec.hosts.some((x) => !hostOk(x))) add('basic', 'hosts', 'Host 不能为空，最多 16 个，每个必须是有效的主机名（不带端口）');
+    if (!originOk(spec.origin)) add('basic', 'origin', '源站地址必须是 http://主机[:端口] 或 https://主机[:端口]，不带路径');
     if (!['observe', 'enforce'].includes(spec.mode)) add('mode', 'mode', '模式只能是 observe（观察）或 enforce（拦截）');
     if (!['allow', 'deny'].includes(spec.on_jev_unavailable)) add('mode', 'on_jev_unavailable', 'Jev 不可用时只能是 allow（放行）或 deny（拒绝）');
-    const sess = spec.session || {}; if ((!sess.cookie && !sess.header) || (sess.cookie && sess.header)) add('session', 'session', '会话凭证需要一个有效的 Cookie 名或请求头名');
-    if (!spec.entries.length || spec.entries.length > 64 || spec.entries.some((p) => !pathOk(p))) add('entries', 'entries', '入口至少一条、最多 64 条；每条以 / 开头，* 只能在末尾，不能含查询串、. 或 .. 段');
-    if (spec.bypass.length > 64 || spec.bypass.some((p) => !pathOk(p))) add('bypass', 'bypass', '绕过最多 64 条，规则格式同入口');
-    const a = spec.advanced || {}; const range = (k, lo, hi, label) => { if (a[k] != null && (!Number.isInteger(a[k]) || a[k] < lo || a[k] > hi)) add('advanced', k, `${label}需在 ${lo}–${hi} 之间`); };
+    const sess = isObj(spec.session) ? spec.session : {}; if ((!sess.cookie && !sess.header) || (sess.cookie && sess.header) || !tokenOk(sess.cookie || sess.header)) add('session', 'session', '会话凭证需要一个有效的 Cookie 名或请求头名（字母、数字和 !#$%&\'*+-.^_`|~，最长 64）');
+    if (!strs(spec.entries) || !spec.entries.length || spec.entries.length > 64 || spec.entries.some((p) => !pathOk(p))) add('entries', 'entries', '入口至少一条、最多 64 条；每条以 / 开头、最长 256 字节（一个汉字算 3 个），* 只能在末尾，不能含查询串、空格、. 或 .. 段');
+    if (!strs(spec.bypass) || spec.bypass.length > 64 || spec.bypass.some((p) => !pathOk(p))) add('bypass', 'bypass', '绕过最多 64 条，规则格式同入口');
+    const a = isObj(spec.advanced) ? spec.advanced : {}; const range = (k, lo, hi, label) => { if (a[k] != null && (!Number.isInteger(a[k]) || a[k] < lo || a[k] > hi)) add('advanced', k, `${label}需在 ${lo}–${hi} 之间`); };
+    if (spec.advanced != null && !isObj(spec.advanced)) add('advanced', 'advanced', '高级参数要写成“键: 值”');
     range('jev_timeout_ms', 100, 30000, 'Jev 超时（ms）'); range('session_calls_per_minute', 1, 600, '会话调用上限'); range('address_calls_per_minute', 1, 600, '地址调用上限'); range('allow_cache_minutes', 0, 60, '放行缓存时长（分钟）');
-    (a.secret_fields || []).forEach((w) => { if (!/^[a-z0-9_-]{3,32}$/.test(w)) add('advanced', 'secret_fields', `脱敏词 ${w} 需为 3–32 个字符的小写字母、数字、_ 或 -`); });
-    if ((a.secret_fields || []).length > 32) add('advanced', 'secret_fields', '追加脱敏词最多 32 个');
-    (a.synonyms || []).forEach((p) => { if (p.length !== 2 || p.some((w) => !/^[a-z]{3,24}$/.test(w)) || p[0] === p[1]) add('advanced', 'synonyms', `同义词 ${p.join(' ↔ ')} 需为两个不同的 3–24 位小写字母词`); });
-    if (spec.entries.some((p) => p === '/*' || /^\/[^/]*\/\*$/.test(p) && p.split('/').length <= 3 && p.endsWith('/*') && p.length <= 6)) warnings.push({ group: 'entries', msg: '前缀入口会放大无会话可达的范围' });
+    if (a.secret_fields != null && !strs(a.secret_fields)) add('advanced', 'secret_fields', '脱敏词要写成文本列表');
+    else { (a.secret_fields || []).forEach((w) => { if (!/^[a-z0-9_-]{3,32}$/.test(w)) add('advanced', 'secret_fields', `脱敏词 ${w} 需为 3–32 个字符的小写字母、数字、_ 或 -`); }); if ((a.secret_fields || []).length > 32) add('advanced', 'secret_fields', '追加脱敏词最多 32 个'); }
+    if (a.synonyms != null && !(Array.isArray(a.synonyms) && a.synonyms.every(strs))) add('advanced', 'synonyms', '同义词要写成两个词一组的列表');
+    else (a.synonyms || []).forEach((p) => { if (p.length !== 2 || p.some((w) => !/^[a-z]{3,24}$/.test(w)) || p[0] === p[1]) add('advanced', 'synonyms', `同义词 ${p.join(' ↔ ')} 需为两个不同的 3–24 位小写字母词`); });
+    if (strs(spec.entries) && spec.entries.some((p) => p === '/*' || /^\/[^/]*\/\*$/.test(p) && p.split('/').length <= 3 && p.endsWith('/*') && p.length <= 6)) warnings.push({ group: 'entries', msg: '前缀入口会放大无会话可达的范围' });
     return { errors, warnings };
   };
   // Mirrors PathPattern: odd spellings never match any entry or bypass rule.

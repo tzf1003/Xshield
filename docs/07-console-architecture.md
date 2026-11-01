@@ -134,7 +134,7 @@ GET /api/patients ──响应里出现 id=7──┐
 
 **“已判定”的范围**：`bypass`（静态资源，常占流量的大半）和 `unknown_site`（公网网关会收到大量扫描器发来的任意 Host，没有站点可归属）不是对某个站点请求的判定。列表、计数和统计默认把它们排除在外，其余路径合称“已判定”（含 `body_not_inspectable`：拒绝本身是一次判定）。这两类记录照常保存、可以查到，API 用 `scope` 参数切换（[7.9.3](#793-请求列表)）。
 
-**记录并非绝对不丢**：发送队列有界，写入失败不重试（[7.7.4](#774-日志发送)）。网关在队列超过 80% 时先丢弃 `bypass` 简记录并计入 `dropped_bypass`，判定记录只在队列满时才丢；丢失的区间通过心跳上报，控制台如实提示“这段时间的请求可能查不到”，而不是让用户误以为没有发生。
+**记录并非绝对不丢**：发送队列有界，整批写入失败只重试一次，仍失败就丢弃整批（[7.7.4](#774-日志发送)）。网关在队列超过 80% 时先丢弃 `bypass` 简记录并计入 `dropped_bypass`，判定记录只在队列满时才丢；丢失的区间通过心跳上报，控制台如实提示“这段时间的请求可能查不到”，而不是让用户误以为没有发生。
 
 ### 7.4.2 顶层字段
 
@@ -268,13 +268,13 @@ GET /api/patients ──响应里出现 id=7──┐
 `state` 不带请求 ID，也不因控制台改变（Jev 不需要 ID，多写只增加 token）。控制台展示时把 `state` 和 `trace` 对齐：
 
 - `state.request.values` 由非惰性值按提取顺序构成，所以 `state.request.values[i]` 对应 `trace.values` 中第 i 个 `inert == false` 的元素。不用 `at` 对齐，因为数组元素会共享同一个 `at`（`body.ids[]`）。
-- `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`。
+- `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`：`seen_as` 是 `sources` 的前缀，裁剪级别 3、4 只发 1 个来源，所以可以更短，不要求等长。
 - `state.recent` 是最近访问的最后 N 条（N 由裁剪级别决定），对应 `trace.session.recent` 的最后 N 条。
 - `state.session.entries_passed[k]` 对应 `trace.session.entries_passed[k]`。
 - `state.entry` 只有 `matched`（布尔值），没有规则原文：命中的是哪条入口规则只在 `trace.entry`，结构化视图的“入口”一行以 `trace.entry` 为准。`state` 里的值也没有 `key` 字段，字段名取 `trace.values[].key`。
 - `seen_as` 是该值全部来源按相关度排序（`Seen::ranked`）后反过来取前 N 个，最相关的在前，N 由裁剪级别决定（[7.5.3](#753-裁剪级别)）。`trace.values[].sources` 必须用同一个函数、同一个顺序生成，对齐才是按下标而不是按内容猜。
 
-**对不上时不猜**：`align.ts` 先校验非惰性值个数等于 `state.request.values` 长度，且每个下标上的 `at` 相同；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
+**对不上时不猜**：`align.ts` 先校验非惰性值个数等于 `state.request.values` 长度，且每个下标上的 `at` 相同；每个值的 `seen_as` 不比 `sources` 长（`trace.trimmed` 为真时来源可能已被减到 1 个，只比较公共前缀，多出的 `seen_as` 条目没有来源链接），且 `seen_as[j]` 逐字等于 `` `${sources[j].field} @ ${sources[j].request}` ``（网关生成 `seen_as` 的格式，`engine.rs`）——只比个数会放过次序互换，要求等长又会让裁剪过的正常记录失去来源链接；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
 
 实现要求：`build_state` 的输入和输出不变，新增一个单元测试固定一组输入的 `state` 字节（黄金样本），并断言 `state` 不含 `req_`；另一个测试用同一组输入生成 `trace`，断言按上面的规则能对齐，并覆盖脱敏值、被截断的长值、数组元素共享同一个 `at` 三种情形。
 
@@ -521,11 +521,13 @@ CREATE TABLE jev_prompts (
 ### 7.8.2 分区与保留
 
 - 按 UTC 自然日分区，分区名 `decision_log_pYYYYMMDD`，范围 `[当日 00:00, 次日 00:00)` 的毫秒值。
-- 控制面启动时和之后每小时：确保从昨天到 7 天后的分区都存在（`CREATE TABLE IF NOT EXISTS … PARTITION OF … FOR VALUES FROM … TO …`）；删除上界早于“现在 − 7 天”的分区（先 `DETACH PARTITION … CONCURRENTLY` 再 `DROP TABLE`，不长时间锁父表）。
+- 控制面启动时和之后每小时：确保从 7 天前（保留窗口的起点）到 7 天后的分区都存在（`CREATE TABLE IF NOT EXISTS … PARTITION OF … FOR VALUES FROM … TO …`）；删除上界早于“现在 − 7 天”的分区（先 `DETACH PARTITION … CONCURRENTLY` 再 `DROP TABLE`，不长时间锁父表）。
+- **往回补齐到保留窗口的起点，是为了导入**：首次部署控制面之后，网关文件模式留下的、仍在保留期内的较早记录（[7.9.9](#799-导入与导出)）也要有分区可写；空分区几乎没有成本。早于 `now − 7 天` 的日期不建分区，对应的记录不入库。
 - **提前 7 天建分区，是因为没有默认分区兜底**：控制面停机期间网关照常写入，提前量就是控制面最长能停机的时间；超过它网关的插入会失败，控制台显示日志缺口（[7.7.4](#774-日志发送)）。系统页在“今天没有分区”或“未来分区不足 2 天”时告警，`GET /api/system` 返回每个分区的范围。
 - 时钟严重偏离的行（`at_millis` 落在任何分区之外）无处可写，插入失败并计入 `write_errors`，不为它们留默认分区。
 - 保留期 7 天是代码默认值（[03.4](03-admin-config-audit.md#34-判定日志)），不做配置。
 - `site_config_history`、`jev_prompts` 不清理；`edge_status` 中 24 小时没有心跳的实例行删除。
+- 测试要求（`xshield-postgres`，空库）：分区维护跑完后，分区覆盖 `now − 7 天` 到 `now + 7 天`；再跑一次不报错（幂等）；导入一条 5 天前的文件模式记录成功，导入一条 9 天前的记录计入 `out_of_range` 而不是出错。
 
 ### 7.8.3 查询模式
 
@@ -705,7 +707,7 @@ CREATE TABLE jev_prompts (
 ### 7.9.9 导入与导出
 
 - 导出：`GET /api/requests/export?format=jsonl|csv&…`。JSONL 每行一条完整记录，格式与网关文件模式的标准输出相同，已有的离线分析脚本可以直接用；CSV 只含列表列，单元格以 `=`、`+`、`-`、`@` 开头时前置 `'`，防止表格软件执行公式。
-- 导入：`POST /api/import`，请求体为 JSON 行（`application/x-ndjson`，最大 100 MiB），逐行解析为 `DecisionRecord`，`edge` 记为 `import`，同一 `request_id` 与时间已存在的跳过。v4 当前格式（没有 `trace`）的行也接受，`trace` 记为 `{"v":0}`，界面标“旧格式记录”。返回导入、跳过、出错的行数和前 20 个错误行号。用途：把 Windows 文件模式试跑的 `decisions.jsonl` 放进控制台看。
+- 导入：`POST /api/import`，请求体为 JSON 行（`application/x-ndjson`，最大 100 MiB），逐行解析为 `DecisionRecord`，`edge` 记为 `import`，同一 `request_id` 与时间已存在的跳过。v4 当前格式（没有 `trace`）的行也接受，`trace` 记为 `{"v":0}`，界面标“旧格式记录”。`at_millis` 超出保留窗口（早于 `now − 7 天`，或晚于 `now + 7 天`）的行没有分区可写，不入库，单独计入 `out_of_range`，不算出错。返回导入、跳过、超出保留窗口、出错的行数和前 20 个错误行号。用途：把 Windows 文件模式试跑的 `decisions.jsonl` 放进控制台看。
 
 ### 7.9.10 影响预估
 
@@ -857,7 +859,7 @@ web/console/src/
 
 ### 7.10.3 路由与 URL 状态
 
-筛选、标签页、视图模式都放在 URL 查询参数里（TanStack Router `validateSearch`，手写校验函数，不引入 zod），刷新、后退、复制链接都能还原。路由表见 [06.2](06-console-ui.md#62-信息架构)。全局站点范围 `site` 也放在 URL，并在 `localStorage` 记住上一次的选择。
+筛选、标签页、视图模式都放在 URL 查询参数里（TanStack Router `validateSearch`，手写校验函数，不引入 zod），刷新、后退、复制链接都能还原。路由表见 [06.2](06-console-ui.md#62-信息架构)。全局范围（`site`、`range`，以及 `range=custom` 时的 `since`/`until`，见 [06.2.2](06-console-ui.md#622-路由)）也只放在 URL，不存 `localStorage`。读：地址里没有 `site` 就是全部站点，`since`/`until` 只在 `range=custom` 时读。带：页内链接、导航按钮、命令面板和快捷键跳到没有写明范围的地址时，把当前范围带过去（`keepScope`），目标自己写明的不改；顶栏切换站点用替换历史项，不新增。这样后退、前进回到的地址就是当时的范围，不会被内存里“上一次的选择”改写。
 
 ### 7.10.4 数据获取
 
@@ -896,7 +898,7 @@ web/console/src/
 
 ### 7.10.8 测试
 
-- 单元（`node --test`）：`filter-dsl.ts` 解析与序列化往返；`explain.ts` 覆盖每种判定路径和失败码；`patterns.ts` 与 Rust `PathPattern` 共用一组用例（从 `crates/xshield-core/src/context/config.rs` 的测试复制，含 `;` 路径参数）；`site-validate.ts` 的 `advanced` 范围与词规则；`align.ts` 处理裁剪、数组值和对不上时的 `aligned: false`（7.5.2）；实时模式的合并去重（按 `request_id`，回看窗口内重复行不重复插入）；YAML↔JSON 往返；CSV 防公式注入。
+- 单元（`node --test`）：`filter-dsl.ts` 解析与序列化往返；`explain.ts` 覆盖每种判定路径和失败码；`patterns.ts` 与 Rust `PathPattern` 共用一组用例（从 `crates/xshield-core/src/context/config.rs` 的测试复制，含 `;` 路径参数）；`site-validate.ts` 的 `advanced` 范围与词规则，Host（不带端口）、源站地址、凭证名和路径规则与 Rust 的 `valid_host`、`valid_origin`、`valid_token`、`PathPattern::parse` 共用一组边界用例（Host 带端口或含 `..`、源站地址带路径或端口越界、路径含 `\\`、超过 256 字节；路径长度按 UTF-8 字节算（`TextEncoder`），不是 `String.length`，中文、emoji 跨过 256 字节的用例要有；Rust 只拒绝空格和 ASCII 控制字符，不拒绝全角空格等其他空白）；`yaml.ts` 在 YAML/JSON 转成配置对象后先检查字段类型（Host、入口、绕过是文本列表，名称、源站、模式是文本，`session`、`advanced` 是键值），缺少必填字段、写了键却留空（`hosts:`、`bypass:`、`mode:` 读出来是 null，不能当成空列表或默认值）、数字 Host、`hosts: a.example.com`（单个文本）、列表里夹数字或嵌套列表都要变成指出字段的报错（能定位时带行号），只有 `advanced` 和它下面的参数可以留空，`validateSpec` 对任何类型的输入都不抛异常，也不会把类型不对的值当成合法，这一组用例要有；`scope.ts` 的 `keepScope` 把当前范围带到不含 `site` 的地址、已含 `site` 的地址不改，缺省的 `site` 读成全部站点；`align.ts` 处理裁剪（`seen_as` 比 `sources` 短仍对得上）、次序互换（对不上）、数组值和对不上时的 `aligned: false`（7.5.2）；实时模式的合并去重（按 `request_id`，回看窗口内重复行不重复插入）；YAML↔JSON 往返；CSV 防公式注入。
 - 端到端（Playwright，`page.route` 返回固定数据，不需要后端）：登录；⌘K 输入请求 ID 打开详情；筛选本应拦截并用 j/k、Enter 浏览；Jev 视图三种模式切换和来源跳转；从无会话记录“登记为入口”、看影响预估、保存、等到“已生效”；改 Jev 超时并看影响预估；版本差异与回滚；观察切拦截；粘贴 TSV 批量对照。每个页面跑一次 axe，明暗两种主题。
 - 契约：Rust 侧对 `DecisionRecord`、API 响应做 serde 往返测试，样例 JSON 与前端端到端测试使用同一批文件（放在 `web/console/tests/fixtures/`）。
 
