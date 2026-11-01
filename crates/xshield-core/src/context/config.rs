@@ -1,0 +1,484 @@
+//! Minimal v4 site configuration (docs/03 section 3.2).
+//!
+//! Everything else (context capacity, Jev timeout, call limits, cache time) is a
+//! code default, not a site option.
+
+use serde::{Deserialize, Serialize};
+
+const NAME_MAX: usize = 64;
+const HOSTS_MAX: usize = 16;
+const HOST_MAX: usize = 253;
+const PATTERNS_MAX: usize = 64;
+const PATTERN_MAX: usize = 256;
+const CREDENTIAL_NAME_MAX: usize = 64;
+
+/// Why a site configuration was rejected. Messages never echo configured values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigError {
+    /// The document is not valid JSON for the site schema (unknown field, wrong type).
+    Malformed,
+    /// `name` is empty, too long or contains characters outside `[a-z0-9_-]`.
+    Name,
+    /// `hosts` is empty, too long, or holds an invalid host name.
+    Hosts,
+    /// `origin` is not a plain `http(s)://host[:port]` URL.
+    Origin,
+    /// `session` names no credential or an invalid cookie/header name.
+    Session,
+    /// `entries` is empty or holds an invalid pattern.
+    Entries,
+    /// `bypass` holds an invalid pattern.
+    Bypass,
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Malformed => "SITE_CONFIG_MALFORMED",
+            Self::Name => "SITE_CONFIG_NAME_INVALID",
+            Self::Hosts => "SITE_CONFIG_HOSTS_INVALID",
+            Self::Origin => "SITE_CONFIG_ORIGIN_INVALID",
+            Self::Session => "SITE_CONFIG_SESSION_INVALID",
+            Self::Entries => "SITE_CONFIG_ENTRIES_INVALID",
+            Self::Bypass => "SITE_CONFIG_BYPASS_INVALID",
+        })
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// Whether blocked requests are enforced or only recorded (docs/00 section 0.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Judge and record; always forward. The default for a new site.
+    #[default]
+    Observe,
+    /// Return 403 for requests judged unsafe.
+    Enforce,
+}
+
+/// What to do when Jev times out, fails, is rate limited or answers UNKNOWN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnJevUnavailable {
+    /// Refuse the request. The default.
+    #[default]
+    Deny,
+    /// Forward the request and mark it as not judged in the decision log.
+    Allow,
+}
+
+/// Where the origin's session credential travels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCredential {
+    /// A cookie name, for example `SESSIONID`.
+    Cookie(String),
+    /// A request header name, for example `Authorization`.
+    Header(String),
+}
+
+/// An exact path, or a prefix when it ends in `*`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PathPattern(String);
+
+impl PathPattern {
+    /// Parses a pattern: absolute path, no query, `*` only as the last byte.
+    ///
+    /// # Errors
+    /// Returns `None` for empty, relative, oversized, control-byte, query,
+    /// dot-segment or interior-wildcard patterns.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let literal = raw.strip_suffix('*').unwrap_or(raw);
+        let valid = !raw.is_empty()
+            && raw.len() <= PATTERN_MAX
+            && raw.starts_with('/')
+            && !literal.contains(['*', '?', '#', '\\'])
+            && !literal
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b' ')
+            && !has_dot_segment(literal);
+        valid.then(|| Self(raw.to_owned()))
+    }
+
+    /// The pattern as configured.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `path` (without query) is covered by this pattern.
+    ///
+    /// A path with dot segments, doubled slashes, a backslash, a control byte or
+    /// an encoded slash/dot/backslash never matches: a bypass or entry must not
+    /// be reachable through a spelling the origin may resolve differently.
+    #[must_use]
+    pub fn matches(&self, path: &str) -> bool {
+        if !is_plain_path(path) {
+            return false;
+        }
+        match self.0.strip_suffix('*') {
+            Some(prefix) => path.starts_with(prefix),
+            None => path == self.0,
+        }
+    }
+}
+
+fn has_dot_segment(path: &str) -> bool {
+    path.split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
+/// True when `path` has one unambiguous spelling.
+#[must_use]
+pub fn is_plain_path(path: &str) -> bool {
+    if !path.starts_with('/')
+        || path.contains("//")
+        || path.contains(['\\', '?', '#'])
+        || path.bytes().any(|byte| byte.is_ascii_control())
+        || has_dot_segment(path)
+    {
+        return false;
+    }
+    let lower = path.to_ascii_lowercase();
+    !["%2e", "%2f", "%5c", "%00"]
+        .iter()
+        .any(|bad| lower.contains(bad))
+}
+
+/// A validated site (docs/03 section 3.2). Deserializing re-validates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "SiteSpecDto")]
+pub struct SiteSpec {
+    name: String,
+    hosts: Vec<String>,
+    origin: String,
+    session: SessionCredential,
+    entries: Vec<PathPattern>,
+    bypass: Vec<PathPattern>,
+    mode: Mode,
+    on_jev_unavailable: OnJevUnavailable,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SiteSpecDto {
+    name: String,
+    hosts: Vec<String>,
+    origin: String,
+    session: SessionCredential,
+    entries: Vec<String>,
+    #[serde(default)]
+    bypass: Vec<String>,
+    #[serde(default)]
+    mode: Mode,
+    #[serde(default)]
+    on_jev_unavailable: OnJevUnavailable,
+}
+
+impl TryFrom<SiteSpecDto> for SiteSpec {
+    type Error = ConfigError;
+
+    fn try_from(dto: SiteSpecDto) -> Result<Self, ConfigError> {
+        if !valid_name(&dto.name) {
+            return Err(ConfigError::Name);
+        }
+        if dto.hosts.is_empty()
+            || dto.hosts.len() > HOSTS_MAX
+            || !dto.hosts.iter().all(|host| valid_host(host))
+        {
+            return Err(ConfigError::Hosts);
+        }
+        if !valid_origin(&dto.origin) {
+            return Err(ConfigError::Origin);
+        }
+        let credential = match &dto.session {
+            SessionCredential::Cookie(name) | SessionCredential::Header(name) => name,
+        };
+        if !valid_token(credential) {
+            return Err(ConfigError::Session);
+        }
+        if dto.entries.is_empty() || dto.entries.len() > PATTERNS_MAX {
+            return Err(ConfigError::Entries);
+        }
+        if dto.bypass.len() > PATTERNS_MAX {
+            return Err(ConfigError::Bypass);
+        }
+        let entries = parse_patterns(&dto.entries).ok_or(ConfigError::Entries)?;
+        let bypass = parse_patterns(&dto.bypass).ok_or(ConfigError::Bypass)?;
+        let hosts = dto
+            .hosts
+            .iter()
+            .map(|host| host.to_ascii_lowercase())
+            .collect();
+        Ok(Self {
+            name: dto.name,
+            hosts,
+            origin: dto.origin,
+            session: dto.session,
+            entries,
+            bypass,
+            mode: dto.mode,
+            on_jev_unavailable: dto.on_jev_unavailable,
+        })
+    }
+}
+
+impl SiteSpec {
+    /// Parses and validates one site from its JSON form.
+    ///
+    /// # Errors
+    /// [`ConfigError::Malformed`] for syntax, type or unknown-field problems,
+    /// otherwise the first invalid section.
+    pub fn from_json(text: &str) -> Result<Self, ConfigError> {
+        let dto: SiteSpecDto = serde_json::from_str(text).map_err(|_| ConfigError::Malformed)?;
+        dto.try_into()
+    }
+
+    /// Site name, unique per deployment.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Host names (lowercase) the gateway routes to this site.
+    #[must_use]
+    pub fn hosts(&self) -> &[String] {
+        &self.hosts
+    }
+
+    /// Origin base URL.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// Where the session credential is carried.
+    #[must_use]
+    pub fn session(&self) -> &SessionCredential {
+        &self.session
+    }
+
+    /// Enforcement mode.
+    #[must_use]
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Behaviour when Jev cannot answer.
+    #[must_use]
+    pub fn on_jev_unavailable(&self) -> OnJevUnavailable {
+        self.on_jev_unavailable
+    }
+
+    /// Whether `path` is registered as an entry.
+    #[must_use]
+    pub fn is_entry(&self, path: &str) -> bool {
+        self.entries.iter().any(|pattern| pattern.matches(path))
+    }
+
+    /// Whether `path` skips judging and logging entirely.
+    #[must_use]
+    pub fn is_bypass(&self, path: &str) -> bool {
+        self.bypass.iter().any(|pattern| pattern.matches(path))
+    }
+
+    /// Whether `host` (any case, optional `:port`) belongs to this site.
+    #[must_use]
+    pub fn serves_host(&self, host: &str) -> bool {
+        let bare = host.rsplit_once(':').map_or(host, |(name, port)| {
+            if port.bytes().all(|byte| byte.is_ascii_digit()) {
+                name
+            } else {
+                host
+            }
+        });
+        let bare = bare.to_ascii_lowercase();
+        self.hosts.contains(&bare)
+    }
+}
+
+fn parse_patterns(raw: &[String]) -> Option<Vec<PathPattern>> {
+    raw.iter()
+        .map(|pattern| PathPattern::parse(pattern))
+        .collect()
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= NAME_MAX
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+}
+
+fn valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= HOST_MAX
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && !host.contains("..")
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+}
+
+fn valid_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= CREDENTIAL_NAME_MAX
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+fn valid_origin(origin: &str) -> bool {
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let (host, port) = rest
+        .rsplit_once(':')
+        .map_or((rest, None), |(host, port)| (host, Some(port)));
+    valid_host(host)
+        && port.is_none_or(|port| {
+            !port.is_empty() && port.len() <= 5 && port.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL: &str = r#"{
+        "name": "emr",
+        "hosts": ["EMR.example.com"],
+        "origin": "http://10.0.0.5:8080",
+        "session": {"cookie": "SESSIONID"},
+        "entries": ["/login", "/api/home", "/share/*"]
+    }"#;
+
+    #[test]
+    fn minimal_site_gets_safe_defaults() {
+        let site = SiteSpec::from_json(MINIMAL).unwrap();
+        assert_eq!(site.mode(), Mode::Observe);
+        assert_eq!(site.on_jev_unavailable(), OnJevUnavailable::Deny);
+        assert_eq!(site.hosts(), ["emr.example.com"]);
+        assert!(!site.is_bypass("/static/app.js"));
+    }
+
+    #[test]
+    fn hosts_match_ignoring_case_and_port() {
+        let site = SiteSpec::from_json(MINIMAL).unwrap();
+        assert!(site.serves_host("emr.EXAMPLE.com:5443"));
+        assert!(!site.serves_host("evil.example.com"));
+        assert!(!site.serves_host("emr.example.com.evil.test"));
+    }
+
+    #[test]
+    fn entries_match_exact_or_prefix() {
+        let site = SiteSpec::from_json(MINIMAL).unwrap();
+        assert!(site.is_entry("/login"));
+        assert!(!site.is_entry("/login/extra"));
+        assert!(site.is_entry("/share/abc123"));
+        assert!(!site.is_entry("/api/patients/8"));
+    }
+
+    #[test]
+    fn ambiguous_spellings_never_match_a_pattern() {
+        let site = SiteSpec::from_json(MINIMAL).unwrap();
+        for path in [
+            "/share/../api/patients/8",
+            "/share//x",
+            "/share/%2e%2e/api",
+            "/share/%2F",
+            "/share/a\\b",
+            "/share/a\u{0}b",
+            "share/x",
+        ] {
+            assert!(!site.is_entry(path), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn bypass_is_prefix_matched_and_defaults_empty() {
+        let text = MINIMAL.replace(
+            "\"entries\"",
+            "\"bypass\": [\"/static/*\", \"/favicon.ico\"], \"entries\"",
+        );
+        let site = SiteSpec::from_json(&text).unwrap();
+        assert!(site.is_bypass("/static/app.js"));
+        assert!(site.is_bypass("/favicon.ico"));
+        assert!(!site.is_bypass("/static/../api/patients"));
+    }
+
+    #[test]
+    fn modes_parse() {
+        let text = MINIMAL.replace(
+            "\"entries\"",
+            "\"mode\": \"enforce\", \"on_jev_unavailable\": \"allow\", \"entries\"",
+        );
+        let site = SiteSpec::from_json(&text).unwrap();
+        assert_eq!(site.mode(), Mode::Enforce);
+        assert_eq!(site.on_jev_unavailable(), OnJevUnavailable::Allow);
+    }
+
+    #[test]
+    fn invalid_sections_are_rejected() {
+        let cases = [
+            (
+                MINIMAL.replace("\"emr\"", "\"Bad Name\""),
+                ConfigError::Name,
+            ),
+            (
+                MINIMAL.replace("[\"EMR.example.com\"]", "[]"),
+                ConfigError::Hosts,
+            ),
+            (
+                MINIMAL.replace("EMR.example.com", "a..b"),
+                ConfigError::Hosts,
+            ),
+            (
+                MINIMAL.replace("http://10.0.0.5:8080", "http://user@host/x"),
+                ConfigError::Origin,
+            ),
+            (MINIMAL.replace("http://", "ftp://"), ConfigError::Origin),
+            (
+                MINIMAL.replace("SESSIONID", "bad name"),
+                ConfigError::Session,
+            ),
+            (
+                MINIMAL.replace("[\"/login\", \"/api/home\", \"/share/*\"]", "[]"),
+                ConfigError::Entries,
+            ),
+            (
+                MINIMAL.replace("\"/login\"", "\"login\""),
+                ConfigError::Entries,
+            ),
+            (
+                MINIMAL.replace("\"/login\"", "\"/lo*gin\""),
+                ConfigError::Entries,
+            ),
+            (
+                MINIMAL.replace("\"name\"", "\"extra\": 1, \"name\""),
+                ConfigError::Malformed,
+            ),
+            ("not json".to_owned(), ConfigError::Malformed),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(SiteSpec::from_json(&text).unwrap_err(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn site_round_trips_through_json() {
+        let site = SiteSpec::from_json(MINIMAL).unwrap();
+        let text = serde_json::to_string(&site).unwrap();
+        // The stored form is the struct's own layout and must re-validate.
+        let again: SiteSpec = serde_json::from_str(&text).unwrap();
+        assert_eq!(site, again);
+    }
+}
