@@ -766,6 +766,8 @@ export interface ImportResult {
   errors: number;
   /** Line numbers of the first 20 rows that could not be read. */
   error_lines: number[];
+  /** Rows dated outside the stored window (docs/07 7.9.9): not stored and not counted as errors. */
+  out_of_range?: number;
 }
 
 // ------------------------------------------------------------------ errors and session

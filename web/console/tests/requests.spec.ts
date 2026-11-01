@@ -128,7 +128,9 @@ test("a loss window in the time range is named above the list, with a way to the
   await useFixtures(page);
   await page.goto("/requests");
 
-  await expect(page.getByText("21:10–21:12 edge-1 有 31 条记录未写入")).toBeVisible();
+  await expect(
+    page.getByText("21:10–21:12 edge-1 有 31 条判定记录未写入（队列满 31）"),
+  ).toBeVisible();
   await expect(page.getByText("缺口历史来自网关心跳，网关重启后清空")).toBeVisible();
   await page.getByRole("link", { name: "查看系统" }).click();
   await expect(page).toHaveURL(/\/system$/);

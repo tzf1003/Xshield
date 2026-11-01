@@ -19,7 +19,7 @@ import type {
   TraceValue,
   ValueKind,
 } from "../../api/types.ts";
-import { type AlignedValue, alignRecent, alignValues } from "../../lib/align.ts";
+import { type AlignedValue, alignRecent, alignValues, seenAsAligned } from "../../lib/align.ts";
 import { topOf } from "../../lib/explain.ts";
 import { fmtBytes, fmtElapsed, fmtInt, pct } from "../../lib/format.ts";
 import {
@@ -109,15 +109,24 @@ export function parseState(text: string | null): ParsedState {
 export type Alignment = { aligned: true; sent: AlignedValue[] } | { aligned: false };
 
 /**
- * The check of docs/07 7.5.2: the non-inert trace values and the state's values must have the same
- * count and the same location at each index, and the state's recent and entry lists may not be
- * longer than the trace's. When it fails, the views show the state alone and no source links.
+ * The check of docs/07 7.5.2: the non-inert trace values and the state's values pair up by index. Each
+ * pair must have the same location, and the state's `seen_as` must match the sources in order (see
+ * `seenAsAligned`). The state's recent and entry lists may not be longer than the trace's. When it fails,
+ * the views show the state alone and no source links.
  */
 export function alignState(state: JevState, trace: Trace): Alignment {
   const sent = alignValues(trace.values ?? []);
   const theirs = state.request.values;
   if (sent.length !== theirs.length) return { aligned: false };
-  const same = sent.every((item, index) => theirs[index]?.at === item.value.at);
+  const trimmed = trace.trimmed === true;
+  const same = sent.every((item, index) => {
+    const stateValue = theirs[index];
+    return (
+      stateValue !== undefined &&
+      stateValue.at === item.value.at &&
+      seenAsAligned(stateValue.seen_as, item.value.sources, trimmed)
+    );
+  });
   if (!same) return { aligned: false };
   const recentCount = trace.session?.recent.length ?? 0;
   const entryCount = trace.session?.entries_passed.length ?? 0;

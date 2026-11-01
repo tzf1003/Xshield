@@ -9,13 +9,21 @@ import type {
   JevHealth,
   StatusResponse,
 } from "../api/types.ts";
-import { fmtClock } from "./format.ts";
+import { fmtClock, fmtInt } from "./format.ts";
 import { errorText, FAILURE_INFO } from "./vocab.ts";
 
 export type Tone = "ok" | "warn" | "down" | "idle" | "unknown";
 export type Light = { tone: Tone; label: string; lines: string[] };
 
 const GATEWAY_TONE: Record<GatewayLight, Tone> = { ok: "ok", warn: "warn", down: "down" };
+
+/** The reasons a gap lost decision records, in words: `队列满 3、写入失败 1` (docs/07 7.7.4). */
+export function lostReasons(gap: { dropped: number; write_errors: number }): string {
+  const reasons: string[] = [];
+  if (gap.dropped > 0) reasons.push(`队列满 ${fmtInt(gap.dropped)}`);
+  if (gap.write_errors > 0) reasons.push(`写入失败 ${fmtInt(gap.write_errors)}`);
+  return reasons.join("、");
+}
 
 /** One line of the gateway problem list, in words (docs/06 6.3.2). */
 export function problemText(problem: GatewayProblem): string {
@@ -24,8 +32,14 @@ export function problemText(problem: GatewayProblem): string {
       return `${problem.edge} 加载 ${problem.site} 失败：${errorText(problem.error)}`;
     case "version_behind":
       return `${problem.site} v${problem.expected} 保存后未生效，${problem.edge} 仍是 v${problem.loaded}`;
-    case "log_gap":
-      return `${problem.edge} ${fmtClock(problem.from_ms)}–${fmtClock(problem.to_ms)} 有 ${problem.dropped + problem.dropped_bypass + problem.write_errors} 条记录未写入（队列丢弃 ${problem.dropped}，压力下丢弃绕过简记录 ${problem.dropped_bypass}，写入出错 ${problem.write_errors}）`;
+    case "log_gap": {
+      const span = `${problem.edge} ${fmtClock(problem.from_ms)}–${fmtClock(problem.to_ms)}`;
+      const lost = problem.dropped + problem.write_errors;
+      // Bypass records dropped under pressure are a note, not lost decisions (docs/06 6.4.2).
+      if (lost === 0)
+        return `${span} 丢弃了 ${fmtInt(problem.dropped_bypass)} 条绕过记录，判定记录不受影响`;
+      return `${span} 有 ${fmtInt(lost)} 条判定记录未写入（${lostReasons(problem)}）`;
+    }
     case "queue_pressure":
       return `${problem.edge} 发送队列 ${problem.queue} / ${problem.capacity}`;
     case "partition_missing":

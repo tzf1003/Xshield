@@ -26,7 +26,9 @@ function hasControl(text: string): boolean {
 /** Parses an entry or bypass rule: an absolute path, no query, `*` only as the last byte. */
 export function parsePattern(raw: string): PatternParse {
   if (raw.length === 0) return { ok: false, reason: "不能为空" };
-  if (raw.length > PATTERN_MAX) return { ok: false, reason: `不能超过 ${PATTERN_MAX} 个字符` };
+  // The gateway counts bytes (`raw.len()`), so a pattern with CJK characters reaches the limit sooner.
+  if (new TextEncoder().encode(raw).length > PATTERN_MAX)
+    return { ok: false, reason: `不能超过 ${PATTERN_MAX} 字节` };
   if (!raw.startsWith("/")) return { ok: false, reason: "必须以 / 开头" };
   const prefix = raw.endsWith("*");
   const literal = prefix ? raw.slice(0, -1) : raw;

@@ -10,6 +10,7 @@ import type { ChipId } from "../../app/search-schema.ts";
 import { keepScope, type Scope, useScope, useSetSearch } from "../../app/scope.ts";
 import { useKeys } from "../../app/keys.ts";
 import { fmtInt } from "../../lib/format.ts";
+import { lostReasons } from "../../lib/health.ts";
 import { isStaticAsset } from "../../lib/quick-rules.ts";
 import { readJson, writeJson } from "../../lib/storage.ts";
 import { RANGE_LABEL } from "../../lib/vocab.ts";
@@ -370,7 +371,7 @@ export function RequestsPage() {
         <Notice tone={gapNotice.tone}>
           {hm(gapNotice.gap.from_ms)}–{hm(gapNotice.gap.to_ms)} {gapNotice.gap.edge}
           {gapNotice.lost > 0 ? (
-            <> 有 {fmtInt(gapNotice.lost)} 条记录未写入（队列满），这段时间的请求可能查不到 · </>
+            ` 有 ${fmtInt(gapNotice.lost)} 条判定记录未写入（${lostReasons(gapNotice.gap)}），这段时间的请求可能查不到 · `
           ) : (
             <> 丢弃了 {fmtInt(gapNotice.gap.dropped_bypass)} 条绕过记录，判定记录不受影响 · </>
           )}

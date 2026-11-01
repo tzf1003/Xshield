@@ -65,7 +65,8 @@ export function validOrigin(origin: string): boolean {
   const host = colon >= 0 ? rest.slice(0, colon) : rest;
   const port = colon >= 0 ? rest.slice(colon + 1) : null;
   if (!validHost(host)) return false;
-  return port === null || (/^[0-9]{1,5}$/.test(port) && Number(port) <= 65535);
+  // One to five digits, as config.rs reads it; the gateway does not range-check the number.
+  return port === null || /^[0-9]{1,5}$/.test(port);
 }
 
 /** Cookie names and header names: RFC 7230 token characters. */

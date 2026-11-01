@@ -12,7 +12,9 @@ const MAX_BYTES = 100 * 1024 * 1024;
 
 function ImportOutcome({ result }: { result: ImportResult }) {
   const listed = result.error_lines.length;
-  const summary = `导入 ${fmtInt(result.imported)} 条，跳过 ${fmtInt(result.skipped)} 条（同一请求 ID 与时间已存在），出错 ${fmtInt(result.errors)} 行。`;
+  const outside =
+    result.out_of_range === undefined ? "" : `超出保留期 ${fmtInt(result.out_of_range)} 条，`;
+  const summary = `导入 ${fmtInt(result.imported)} 条，跳过 ${fmtInt(result.skipped)} 条（同一请求 ID 与时间已存在），${outside}出错 ${fmtInt(result.errors)} 行。`;
   const lines =
     listed > 0
       ? `出错的行：第 ${result.error_lines.join("、")} 行${result.errors > listed ? `（只列出前 ${fmtInt(listed)} 行）` : ""}`

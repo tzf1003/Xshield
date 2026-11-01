@@ -38,7 +38,7 @@ test("the gateway light takes its colour from the server and counts the online e
   const gap = gapOf(status);
   assert.deepEqual(light.lines, [
     "emr v13 保存后未生效，edge-2 仍是 v12",
-    `edge-1 ${fmtClock(gap.from_ms)}–${fmtClock(gap.to_ms)} 有 37 条记录未写入（队列丢弃 31，压力下丢弃绕过简记录 6，写入出错 0）`,
+    `edge-1 ${fmtClock(gap.from_ms)}–${fmtClock(gap.to_ms)} 有 31 条判定记录未写入（队列满 31）`,
   ]);
 });
 
@@ -92,18 +92,23 @@ test("each problem kind has its own sentence", () => {
   );
 });
 
-test("the log gap sentence counts every lost record and names the three causes", () => {
+test("the log gap sentence counts the lost decisions and names their causes", () => {
+  // Bypass records dropped under pressure are not lost decisions (docs/07 7.7.4): they get their own note.
   assert.equal(
     gapSentence(31, 6, 0),
-    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 37 条记录未写入（队列丢弃 31，压力下丢弃绕过简记录 6，写入出错 0）`,
+    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 31 条判定记录未写入（队列满 31）`,
   );
   assert.equal(
     gapSentence(0, 0, 5),
-    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 5 条记录未写入（队列丢弃 0，压力下丢弃绕过简记录 0，写入出错 5）`,
+    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 5 条判定记录未写入（写入失败 5）`,
   );
   assert.equal(
     gapSentence(2, 0, 3),
-    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 5 条记录未写入（队列丢弃 2，压力下丢弃绕过简记录 0，写入出错 3）`,
+    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 5 条判定记录未写入（队列满 2、写入失败 3）`,
+  );
+  assert.equal(
+    gapSentence(0, 6, 0),
+    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 丢弃了 6 条绕过记录，判定记录不受影响`,
   );
 });
 

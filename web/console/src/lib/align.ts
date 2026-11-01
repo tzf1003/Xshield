@@ -1,7 +1,7 @@
 // Aligns what Jev saw (`state`) with what the trace recorded (docs/07 7.5.2 and 7.5.3). The state
 // itself is never changed, so the alignment is a view over two parallel structures.
 
-import type { EntryPass, RecentAccess, TraceValue } from "../api/types.ts";
+import type { EntryPass, RecentAccess, TraceSource, TraceValue } from "../api/types.ts";
 
 export type AlignedValue = { jevIndex: number; traceIndex: number; value: TraceValue };
 
@@ -30,6 +30,25 @@ export function alignRecent(
 /** `state.session.entries_passed[k]` is `trace.session.entries_passed[k]`. */
 export function alignEntries(traceEntries: EntryPass[] | null | undefined): EntryPass[] {
   return traceEntries ?? [];
+}
+
+/** The `seen_as` text the gateway writes for one source: `field @ request` (xshield-judge's engine). */
+export function seenAsText(source: TraceSource): string {
+  return `${source.field} @ ${source.request}`;
+}
+
+/**
+ * docs/07 7.5.2: `seen_as` is a prefix of the sources, compared entry by entry. A trimmed trace may keep
+ * fewer sources (trim levels 3 and 4), so a shorter list passes only then. A swapped order never passes,
+ * because each index must carry the text of its own source.
+ */
+export function seenAsAligned(seenAs: string[], sources: TraceSource[], trimmed: boolean): boolean {
+  if (seenAs.length > sources.length) return false;
+  if (!trimmed && seenAs.length !== sources.length) return false;
+  return seenAs.every((text, index) => {
+    const source = sources[index];
+    return source !== undefined && text === seenAsText(source);
+  });
 }
 
 export type TrimLevel = {
