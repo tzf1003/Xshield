@@ -1,5 +1,6 @@
 /target/
 .DS_Store
+/.claude/worktrees/
 /web/console/node_modules/
 /web/console/dist/
 /web/console/test-results/

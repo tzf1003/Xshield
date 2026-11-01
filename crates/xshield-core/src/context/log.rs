@@ -50,6 +50,9 @@ pub struct JevRecord {
     pub attack: BTreeMap<String, f64>,
     /// Round trip time in milliseconds.
     pub millis: u32,
+    /// Stable failure code (`JEV_TIMEOUT`, `JEV_UNKNOWN`, ...) when no usable
+    /// answer came back; the probability maps are then empty.
+    pub failure: Option<String>,
 }
 
 /// One decision log row.

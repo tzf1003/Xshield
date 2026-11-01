@@ -4,7 +4,7 @@
 
 v3 已经实现了 Jev 的接入（`xshield-worker` 的 `model_eval`，经 Vercel AI Gateway 调用 `typesafe-ai/jev`），但它只是一个**离线一次性命令行工具**：操作员准备一份已批准、已脱敏的 JSON 文件，跑一次评估，产出证据，结果不连接网关的放行路径。线上请求里看不到 Jev，原因就在这里。
 
-v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步骤) 第 6 步同步调用 Jev，结果直接决定放行还是拦截。供应商接入沿用 v3 已验证的部分：固定 HTTPS 目标、拒绝重定向、密钥只从环境变量读取（默认 `AI_GATEWAY_API_KEY`；`XSHIELD_JEV_ROUTE=direct` 时使用 `XSHIELD_JEV_API_KEY` 直连 TypeSafe）、响应结构严格校验。
+v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步骤) 第 6 步同步调用 Jev，结果直接决定放行还是拦截。供应商接入沿用 v3 已验证的部分：固定 HTTPS 目标、拒绝重定向、密钥只从环境变量读取（默认 `AI_GATEWAY_API_KEY`；`XSHIELD_JEV_ROUTE=direct` 时使用 `XSHIELD_JEV_API_KEY` 直连 TypeSafe）、响应结构严格校验。实现在 `crates/xshield-judge`，该 crate 不依赖 v3 的 worker。
 
 ## 2.2 调用内容
 

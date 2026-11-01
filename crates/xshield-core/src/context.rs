@@ -1,11 +1,9 @@
-//! v4 session-context authorization: the pure logic behind docs/00–03.
+//! v4 site configuration and decision log types (docs/03).
 //!
-//! A request may only reference values the origin already showed this session,
-//! or arrive through a registered entry; everything else goes to Jev. This
-//! module owns the site configuration, value extraction, session context and
-//! decision steps. It performs no I/O.
+//! The judging logic lives in the `xshield-judge` crate.
 
 pub mod config;
 pub mod log;
 
 pub use config::{ConfigError, Mode, OnJevUnavailable, PathPattern, SessionCredential, SiteSpec};
+pub use log::{DecisionPath, DecisionRecord, JevRecord, Outcome};
