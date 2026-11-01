@@ -46,7 +46,7 @@
   const DP = {
     bypass: { name: '绕过', g: '⤳' }, fast_allow: { name: '快速放行', g: '⚡' },
     cached_allow: { name: '缓存放行', g: '↺' }, jev_allow: { name: 'Jev 放行', g: '✦' },
-    jev_deny: { name: 'Jev 拦截', g: '✦' }, jev_unavailable: { name: 'Jev 不可用', g: '⚠' },
+    jev_deny: { name: 'Jev 拒绝', g: '✦' }, jev_unavailable: { name: 'Jev 不可用', g: '⚠' },
     no_session: { name: '无会话', g: '⊘' }, body_not_inspectable: { name: '请求体不可判定', g: '⧉' },
     unknown_site: { name: '未知站点', g: '⌀' },
   };
@@ -144,7 +144,7 @@
     // attention
     const attn = h(`<div class="card" style="margin-bottom:16px"><h2>需要处理</h2><div class="attn"></div></div>`);
     const items = [
-      { lvl: 'warn', g: '▲', msg: `juice 观察中 6 天：本应拦截 14 条（Jev 拦截 11、无会话 3）`, act: ['查看', () => go('#/requests?site=juice&chip=would')], act2: ['就绪检查', () => openModeSwitch('juice')] },
+      { lvl: 'warn', g: '▲', msg: `juice 观察中 6 天：本应拦截 14 条（Jev 拒绝 11、无会话 3）`, act: ['查看', () => go('#/requests?site=juice&chip=would')], act2: ['就绪检查', () => openModeSwitch('juice')] },
       { lvl: 'info', g: '▲', msg: `juice 有 2 条调优建议：登记入口 1、加入绕过 1`, act: ['查看建议', () => go('#/sites/juice?tab=insights')] },
       { lvl: 'serious', g: '■', msg: `edge-1 有 37 条判定记录未写入（21:02–21:05 队列满），这段时间的请求可能查不到`, act: ['查看系统', () => go('#/system?tab=storage')] },
       { lvl: 'info', g: '●', msg: `emr Jev 超时 3 次 / 412 次调用（p95 1.8 s，超时 3 s）`, act: ['查看证据', () => go('#/sites/emr?tab=config&group=advanced')] },
@@ -837,7 +837,7 @@
     const ins = M.INSIGHTS[s.name];
     if (!ins.suggestions.length) { body.appendChild(h(`<div class="empty">暂时没有建议。观察模式下积累更多请求后再来看</div>`)); return; }
     if (ins.readiness) {
-      body.appendChild(h(`<div class="card" style="margin-bottom:12px"><h2>就绪检查</h2><div class="muted">本应拦截 ${ins.readiness.would_block.jev_deny + ins.readiness.would_block.no_session} 条（Jev 拦截 ${ins.readiness.would_block.jev_deny}、无会话 ${ins.readiness.would_block.no_session}）· 待处理建议 ${ins.readiness.open_suggestions} 条 · Jev ${ins.readiness.jev_health === 'ok' ? '正常' : ins.readiness.jev_health}</div></div>`));
+      body.appendChild(h(`<div class="card" style="margin-bottom:12px"><h2>就绪检查</h2><div class="muted">本应拦截 ${ins.readiness.would_block.jev_deny + ins.readiness.would_block.no_session} 条（Jev 拒绝 ${ins.readiness.would_block.jev_deny}、无会话 ${ins.readiness.would_block.no_session}）· 待处理建议 ${ins.readiness.open_suggestions} 条 · Jev ${ins.readiness.jev_health === 'ok' ? '正常' : ins.readiness.jev_health}</div></div>`));
     }
     ins.suggestions.forEach((sg) => {
       const kindName = { entry_candidate: '登记入口', bypass_candidate: '加入绕过', upload_candidate: '上传接口加入绕过', raise_jev_timeout: '调大 Jev 超时', raise_call_limit: '调大调用上限', secret_field_candidate: '追加脱敏词', hot_would_block: '本应拦截集中' }[sg.kind];
@@ -942,7 +942,7 @@
       <div class="field"><label>就绪检查（最近 24 小时）</label>
       <div style="line-height:2">
         <div>✓ 已观察 6 天 4 小时</div>
-        <div><span class="lvl-warn">▲</span> 本应拦截 ${wb} 条：Jev 拦截 ${rd.would_block.jev_deny} · 无会话 ${rd.would_block.no_session}</div>
+        <div><span class="lvl-warn">▲</span> 本应拦截 ${wb} 条：Jev 拒绝 ${rd.would_block.jev_deny} · 无会话 ${rd.would_block.no_session}</div>
         <div><span class="lvl-warn">▲</span> 待处理建议 ${rd.open_suggestions} 条</div>
         <div>✓ Jev 正常（p95 910 ms，超时 0.7%）</div>
         <div><span class="lvl-warn">▲</span> 由本应拦截请求学到的值被后续请求引用 ${rd.after_would_block_refs} 次（切换后这些请求也可能被拦截）</div>
