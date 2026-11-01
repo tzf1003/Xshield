@@ -363,7 +363,7 @@
   X.ADV_KEYS = ADV_KEYS;
   X.specToYaml = (spec) => {
     const L = [`name: ${spec.name}`, `hosts: [${spec.hosts.join(', ')}]`, `origin: ${spec.origin}`, 'session:', spec.session.header ? `  header: ${spec.session.header}` : `  cookie: ${spec.session.cookie}`];
-    L.push('entries:'); spec.entries.forEach((e) => L.push(`  - ${e}`));
+    if (spec.entries.length) { L.push('entries:'); spec.entries.forEach((e) => L.push(`  - ${e}`)); } else L.push('entries: []');
     if (spec.bypass.length) { L.push('bypass:'); spec.bypass.forEach((e) => L.push(`  - ${e}`)); } else L.push('bypass: []');
     L.push(`mode: ${spec.mode}`, `on_jev_unavailable: ${spec.on_jev_unavailable}`);
     const a = spec.advanced || {}; const ks = ADV_KEYS.filter((k) => a[k] != null && (!Array.isArray(a[k]) || a[k].length));
@@ -386,13 +386,17 @@
     const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
     // Every field has one type. A wrong one stops the parse at its key, so nothing after this has to guess what a field holds
     // (a number, a nested list, one text where a list belongs): the same check the console runs after the YAML library.
+    // A key that is written must carry a value of its type: `hosts:` with nothing after it is an error on that line, not an empty
+    // list, and `mode:` is not quietly observe. Only `advanced` and its parameters may be written empty (they are optional).
+    const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
     const shape = (obj) => {
       const bad = (key, msg) => fail({ i: at[key] || 1 }, msg);
       if (Array.isArray(obj)) fail(lines[0], '最外层要写成“键: 值”，不是列表');
-      ['name', 'origin', 'mode', 'on_jev_unavailable'].forEach((k) => { if (obj[k] != null && !isStr(obj[k])) bad(k, `${k} 要写成文本，不是数字或列表（纯数字的值请加引号）`); });
-      ['hosts', 'entries', 'bypass'].forEach((k) => { if (obj[k] != null && !(Array.isArray(obj[k]) && obj[k].every(isStr))) bad(k, `${k} 要写成文本列表：[a, b]，或每行一个“- 值”（数字和嵌套列表不行，纯数字的值请加引号）`); });
-      if (obj.session != null && !isObj(obj.session)) bad('session', 'session 下面要缩进写 cookie: 名称 或 header: 名称');
-      ['cookie', 'header'].forEach((k) => { const v = isObj(obj.session) ? obj.session[k] : null; if (v != null && !isStr(v)) bad(`session.${k}`, `session.${k} 要写成文本（纯数字的值请加引号）`); });
+      ['name', 'origin', 'mode', 'on_jev_unavailable'].forEach((k) => { if (has(obj, k) && !isStr(obj[k])) bad(k, `${k} 后面要写文本：不能留空，也不能是数字或列表（纯数字的值请加引号）`); });
+      ['hosts', 'entries', 'bypass'].forEach((k) => { if (has(obj, k) && !(Array.isArray(obj[k]) && obj[k].every(isStr))) bad(k, `${k} 要写成文本列表：[a, b]，或每行一个“- 值”；不能留空，数字和嵌套列表也不行（纯数字的值请加引号）`); });
+      if (has(obj, 'session') && !isObj(obj.session)) bad('session', 'session 下面要缩进写 cookie: 名称 或 header: 名称');
+      const sess = isObj(obj.session) ? obj.session : {};
+      ['cookie', 'header'].forEach((k) => { if (has(sess, k) && !isStr(sess[k])) bad(`session.${k}`, `session.${k} 后面要写文本：不能留空，也不能是数字或列表（纯数字的值请加引号）`); });
       if (obj.advanced != null && !isObj(obj.advanced)) bad('advanced', 'advanced 下面要缩进写“键: 值”');
       const a = isObj(obj.advanced) ? obj.advanced : {};
       if (Array.isArray(a.secret_fields) && !a.secret_fields.every(isStr)) bad('advanced.secret_fields', 'secret_fields 里的每个词都要写成文本');
