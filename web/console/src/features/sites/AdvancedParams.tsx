@@ -11,7 +11,12 @@ import { IMPACT_INFO, PARAM_INFO } from "../../lib/vocab.ts";
 import { Histogram } from "../../ui/Charts.tsx";
 import { ErrorBar, Loading } from "../../ui/Page.tsx";
 import { TagInput } from "./TagInput.tsx";
-import { customAdvanced, NUMERIC_ADVANCED, type NumericAdvanced, withAdvanced } from "./spec-model.ts";
+import {
+  customAdvanced,
+  NUMERIC_ADVANCED,
+  type NumericAdvanced,
+  withAdvanced,
+} from "./spec-model.ts";
 
 type Props = {
   name: string;
@@ -32,7 +37,8 @@ function prune(value: Advanced): Advanced | undefined {
     const item = value[key];
     if (item !== undefined) out[key] = item;
   }
-  if (value.secret_fields && value.secret_fields.length > 0) out.secret_fields = value.secret_fields;
+  if (value.secret_fields && value.secret_fields.length > 0)
+    out.secret_fields = value.secret_fields;
   if (value.synonyms && value.synonyms.length > 0) out.synonyms = value.synonyms;
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -91,7 +97,12 @@ function NumericItem({
         <span className="adv-name">{info.label}</span>
         <span className="adv-choice" role="radiogroup" aria-label={`${info.label}的取值`}>
           <label className="adv-radio">
-            <input type="radio" name={groupName} checked={value === undefined} onChange={() => onCommit(undefined)} />
+            <input
+              type="radio"
+              name={groupName}
+              checked={value === undefined}
+              onChange={() => onCommit(undefined)}
+            />
             默认 {fmtInt(defaultValue ?? 0)} {info.unit}（部署设置）
           </label>
           <label className="adv-radio">
@@ -191,7 +202,11 @@ function SynonymsItem({
               aria-label="第一个词"
               value={row.a}
               onChange={(event) =>
-                update(rows.map((item) => (item.id === row.id ? { ...item, a: event.target.value } : item)))
+                update(
+                  rows.map((item) =>
+                    item.id === row.id ? { ...item, a: event.target.value } : item,
+                  ),
+                )
               }
             />
             <span aria-hidden="true">↔</span>
@@ -200,7 +215,11 @@ function SynonymsItem({
               aria-label="第二个词"
               value={row.b}
               onChange={(event) =>
-                update(rows.map((item) => (item.id === row.id ? { ...item, b: event.target.value } : item)))
+                update(
+                  rows.map((item) =>
+                    item.id === row.id ? { ...item, b: event.target.value } : item,
+                  ),
+                )
               }
             />
             <button
@@ -222,7 +241,9 @@ function SynonymsItem({
       <div className="adv-help small">
         按词根比较，结尾的 s 会被忽略。例：字段 paymentId 的值来自 /api/Cards，就是 payment ↔ card。
       </div>
-      <div className="field-warn">▲ 同义词改变核验结果，无法从历史记录预估影响，保存后请观察一段时间</div>
+      <div className="field-warn">
+        ▲ 同义词改变核验结果，无法从历史记录预估影响，保存后请观察一段时间
+      </div>
       {problems.map((message) => (
         <div key={message} className="field-error" role="alert">
           {message}
@@ -259,8 +280,10 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
   const defaults = system.data?.params.site_overridable;
   const advanced = spec.advanced;
   const labels = customAdvanced(advanced);
-  const issueFor = (field: string) => issues.filter((issue) => issue.field === field).map((issue) => issue.message);
-  const warnFor = (field: string) => warnings.filter((warning) => warning.field === field).map((warning) => warning.message);
+  const issueFor = (field: string) =>
+    issues.filter((issue) => issue.field === field).map((issue) => issue.message);
+  const warnFor = (field: string) =>
+    warnings.filter((warning) => warning.field === field).map((warning) => warning.message);
 
   const commit = (patch: Advanced) => {
     onChange(withAdvanced(spec, prune({ ...(advanced ?? {}), ...patch })));
@@ -268,8 +291,10 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
 
   const suggestions = insights.data?.suggestions ?? [];
   const timeoutSuggestion =
-    suggestions.find((item) => item.kind === "raise_jev_timeout")?.actions[0]?.set_advanced?.jev_timeout_ms ?? null;
-  const limitAction = suggestions.find((item) => item.kind === "raise_call_limit")?.actions[0]?.set_advanced;
+    suggestions.find((item) => item.kind === "raise_jev_timeout")?.actions[0]?.set_advanced
+      ?.jev_timeout_ms ?? null;
+  const limitAction = suggestions.find((item) => item.kind === "raise_call_limit")?.actions[0]
+    ?.set_advanced;
   const ev = evidence.data;
   const timeoutChange = changeOf(impact, "jev_timeout");
   const limitChange = changeOf(impact, "call_limit");
@@ -279,7 +304,9 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
   const evidenceBlock = (
     <>
       {evidence.isPending ? <Loading height={28} /> : null}
-      {evidence.isError ? <ErrorBar error={evidence.error} onRetry={() => void evidence.refetch()} /> : null}
+      {evidence.isError ? (
+        <ErrorBar error={evidence.error} onRetry={() => void evidence.refetch()} />
+      ) : null}
     </>
   );
 
@@ -287,7 +314,9 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
     <div className="stack">
       <div className="row between adv-summary">
         <span>
-          {labels.length === 0 ? "全部使用默认值" : `已自定义 ${labels.length} 项：${labels.join("、")}`}
+          {labels.length === 0
+            ? "全部使用默认值"
+            : `已自定义 ${labels.length} 项：${labels.join("、")}`}
         </span>
         {labels.length > 0 ? (
           <button
@@ -327,7 +356,13 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
               label="Jev 耗时分布，最近 24 小时"
               height={96}
               threshold={{
-                index: Math.min(ev.histogram.length - 1, Math.floor((advanced?.jev_timeout_ms ?? defaults?.jev_timeout_ms ?? 0) / ev.histogram_bucket_ms)),
+                index: Math.min(
+                  ev.histogram.length - 1,
+                  Math.floor(
+                    (advanced?.jev_timeout_ms ?? defaults?.jev_timeout_ms ?? 0) /
+                      ev.histogram_bucket_ms,
+                  ),
+                ),
                 text: `本站点 ${fmtInt(advanced?.jev_timeout_ms ?? defaults?.jev_timeout_ms ?? 0)} ms`,
               }}
             />
@@ -337,7 +372,9 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
                 <thead>
                   <tr>
                     <th scope="col">耗时</th>
-                    <th scope="col" className="num">调用次数</th>
+                    <th scope="col" className="num">
+                      调用次数
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -375,13 +412,16 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
       >
         {ev ? (
           <div className="small dim">
-            最近 24 小时最高 1 分钟 {fmtInt(ev.call_limit.session_peak)} 次 · 触发上限 {fmtInt(ev.call_limit.session_hits)} 次
+            最近 24 小时最高 1 分钟 {fmtInt(ev.call_limit.session_peak)} 次 · 触发上限{" "}
+            {fmtInt(ev.call_limit.session_hits)} 次
           </div>
         ) : (
           evidenceBlock
         )}
         {limitChange && advanced?.session_calls_per_minute !== undefined ? (
-          <div className="impact-line small">{IMPACT_INFO.call_limit}：{fmtInt(limitChange.count)} 次</div>
+          <div className="impact-line small">
+            {IMPACT_INFO.call_limit}：{fmtInt(limitChange.count)} 次
+          </div>
         ) : null}
       </NumericItem>
 
@@ -395,14 +435,15 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
       >
         {ev ? (
           <div className="small dim">
-            最近 24 小时最高 1 分钟 {fmtInt(ev.call_limit.address_peak)} 次 · 触发上限 {fmtInt(ev.call_limit.address_hits)} 次
-            {ev.call_limit.address_hits > 0 ? " ▲" : ""}
+            最近 24 小时最高 1 分钟 {fmtInt(ev.call_limit.address_peak)} 次 · 触发上限{" "}
+            {fmtInt(ev.call_limit.address_hits)} 次{ev.call_limit.address_hits > 0 ? " ▲" : ""}
           </div>
         ) : (
           evidenceBlock
         )}
         <div className="adv-help small">
-          NAT 或代理后多个用户共用一个地址时需要调大。触发过上限时先看是不是未登录页面在轮询；那种情况登记入口或绕过通常更合适。
+          NAT
+          或代理后多个用户共用一个地址时需要调大。触发过上限时先看是不是未登录页面在轮询；那种情况登记入口或绕过通常更合适。
         </div>
       </NumericItem>
 
@@ -414,11 +455,19 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
         suggestion={null}
         onCommit={(value) => commit({ allow_cache_minutes: value })}
       >
-        {ev ? <div className="small dim">缓存放行 {fmtInt(ev.cache.cached_allows)} 次</div> : evidenceBlock}
+        {ev ? (
+          <div className="small dim">缓存放行 {fmtInt(ev.cache.cached_allows)} 次</div>
+        ) : (
+          evidenceBlock
+        )}
         {advanced?.allow_cache_minutes === 0 ? (
           <div className="field-warn">▲ 0 时每个未核验的请求都会调用 Jev</div>
         ) : null}
-        {cacheChange ? <div className="impact-line small">{IMPACT_INFO.cache}：{fmtInt(cacheChange.count)} 次</div> : null}
+        {cacheChange ? (
+          <div className="impact-line small">
+            {IMPACT_INFO.cache}：{fmtInt(cacheChange.count)} 次
+          </div>
+        ) : null}
       </NumericItem>
 
       <section className="adv-item" aria-label={PARAM_INFO.secret_fields.label}>
@@ -426,7 +475,8 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
           <span className="adv-name">追加脱敏词</span>
         </div>
         <div className="adv-help small">
-          命中的值发给 Jev 和写日志时都写成 &lt;redacted&gt;。被脱敏的值 Jev 只看到长度，只加纯输入字段（身份证号、银行卡号），不要加对象引用字段。
+          命中的值发给 Jev 和写日志时都写成 &lt;redacted&gt;。被脱敏的值 Jev
+          只看到长度，只加纯输入字段（身份证号、银行卡号），不要加对象引用字段。
         </div>
         <TagInput
           id="site-field-secret"
@@ -438,7 +488,8 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
           placeholder="例如 idcard，按 Enter 添加"
           check={(word) => {
             if (!SECRET_WORD.test(word)) return "3–32 个字符，小写字母、数字、_ 或 -";
-            if ((defaults?.secret_fields ?? []).includes(word)) return "这是内置词，已经在脱敏范围内";
+            if ((defaults?.secret_fields ?? []).includes(word))
+              return "这是内置词，已经在脱敏范围内";
             return null;
           }}
           onChange={(words) => commit({ secret_fields: words })}
@@ -452,7 +503,9 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
         {secretChange ? (
           <div className="impact-line small">
             过去 24 小时有 {fmtInt(secretChange.count)} 次 Jev 调用会有值被脱敏
-            {fieldNames(secretChange).length > 0 ? `，涉及字段 ${fieldNames(secretChange).join("、")}` : ""}
+            {fieldNames(secretChange).length > 0
+              ? `，涉及字段 ${fieldNames(secretChange).join("、")}`
+              : ""}
           </div>
         ) : null}
       </section>

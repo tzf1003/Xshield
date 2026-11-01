@@ -38,7 +38,7 @@ export function SystemPage() {
   } else if (!data) {
     body = <ErrorBar error={system.error} onRetry={() => void system.refetch()} />;
   } else if (tab === "edges") {
-    body = <EdgesTable edges={data.edges} gaps={data.storage.gaps} now={now} />;
+    body = <EdgesTable edges={data.edges} now={now} />;
   } else if (tab === "storage") {
     body = <StoragePanel system={data} now={now} />;
   } else {

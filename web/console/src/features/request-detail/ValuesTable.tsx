@@ -18,6 +18,9 @@ import { SourceChip } from "../../ui/SourceChip.tsx";
 import { REDACTED, secretMatchOf } from "./detail-model.ts";
 import { keyed, ValueText, useFlash } from "./parts.tsx";
 
+/** At most this many source tags per value; the rest are counted (docs/06 6.4.4). */
+const SOURCE_TAGS = 3;
+
 export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number | undefined }) {
   const { summary, trace, sources } = detail;
   const values = trace.values ?? [];
@@ -51,7 +54,9 @@ export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number 
   const inertCount = values.filter((value) => value.inert).length;
   const rows = values
     .map((value, traceIndex) => ({ value, traceIndex }))
-    .filter(({ value }) => (onlyNeeds ? !value.inert && !value.verified : !value.inert || showInert));
+    .filter(({ value }) =>
+      onlyNeeds ? !value.inert && !value.verified : !value.inert || showInert,
+    );
   const term = query.trim();
   const hits =
     term === ""
@@ -82,8 +87,13 @@ export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number 
         <span className="small dim" role="status">
           {term === "" ? "" : `${hits} 处`}
         </span>
-        <label className="check">
-          <Switch size="small" checked={onlyNeeds} onChange={(checked) => setOnlyNeeds(checked)} />
+        <Switch
+          id="rd-only-needs"
+          size="small"
+          checked={onlyNeeds}
+          onChange={(checked) => setOnlyNeeds(checked)}
+        />
+        <label htmlFor="rd-only-needs" className="check">
           只看需核验的值
         </label>
       </div>
@@ -172,7 +182,11 @@ function ValueRow({
         <SafeText text={value.at} query={query} />
       </td>
       <td className="mono rd-clip">
-        {value.key === null ? <span className="dim">—</span> : <SafeText text={value.key} query={query} />}
+        {value.key === null ? (
+          <span className="dim">—</span>
+        ) : (
+          <SafeText text={value.key} query={query} />
+        )}
       </td>
       <td className="rd-valcell">
         <span className="mono rd-clip">
@@ -194,11 +208,15 @@ function ValueRow({
       <td>
         {value.sources.length > 0 ? (
           <span className="rd-srcs">
-            {keyed(value.sources, (source) => `${source.field}|${source.request}|${source.request_id ?? ""}`).map(
-              ({ key, item }) => (
-                <SourceChip key={key} source={item} sources={summaries} copyable />
-              ),
-            )}
+            {keyed(
+              value.sources.slice(0, SOURCE_TAGS),
+              (source) => `${source.field}|${source.request}|${source.request_id ?? ""}`,
+            ).map(({ key, item }) => (
+              <SourceChip key={key} source={item} sources={summaries} copyable />
+            ))}
+            {value.sources.length > SOURCE_TAGS ? (
+              <span className="small dim">另 {value.sources.length - SOURCE_TAGS} 个</span>
+            ) : null}
           </span>
         ) : (
           <span className="dim">—</span>
@@ -208,7 +226,12 @@ function ValueRow({
         {jevNumber === null ? (
           <span className="dim">–</span>
         ) : (
-          <button type="button" className="linkbtn" onClick={onJev} title="在 Jev 上下文中查看这个值">
+          <button
+            type="button"
+            className="linkbtn"
+            onClick={onJev}
+            title="在 Jev 上下文中查看这个值"
+          >
             #{jevNumber}
           </button>
         )}

@@ -1,16 +1,12 @@
 // The "日志存储" tab (docs/06 6.4.11): the daily partitions with their range, rows and size; the earliest
-// record, the retention and the PostgreSQL version; and the gaps the gateways reported (docs/07 7.7.4).
+// record, the retention and the PostgreSQL version; and the loss windows the gateways reported over the
+// last 24 hours (docs/07 7.7.4), each with its dropped, bypass-dropped and write-error counts.
 
-import type { LogGap, SystemInfo } from "../../api/types.ts";
+import type { SystemInfo } from "../../api/types.ts";
 import { fmtBytes, fmtInt, fmtLocalDateTime } from "../../lib/format.ts";
 import { Card, Empty, Notice } from "../../ui/Page.tsx";
 import { hm, shortDateTime, utcDay } from "./clock.ts";
 import { aheadText, DAY_MS, storageWarnings, withDays } from "./partitions.ts";
-
-const GAP_REASON: Record<LogGap["reason"], string> = {
-  queue_full: "队列满",
-  write_error: "写入失败",
-};
 
 export function StoragePanel({ system, now }: { system: SystemInfo; now: number }) {
   const storage = system.storage;
@@ -20,7 +16,9 @@ export function StoragePanel({ system, now }: { system: SystemInfo; now: number 
     (sum, row) => ({ rows: sum.rows + row.rows, bytes: sum.bytes + row.bytes }),
     { rows: 0, bytes: 0 },
   );
-  const gaps = [...storage.gaps].sort((a, b) => b.from_millis - a.from_millis);
+  const gaps = system.edges
+    .flatMap((edge) => edge.gaps.map((gap) => ({ ...gap, edge: edge.edge })))
+    .sort((a, b) => b.from_ms - a.from_ms);
 
   return (
     <>
@@ -94,21 +92,25 @@ export function StoragePanel({ system, now }: { system: SystemInfo; now: number 
                   <tr>
                     <th scope="col">起止时间</th>
                     <th scope="col">实例</th>
-                    <th scope="col" className="num">
-                      丢失的判定记录
+                    <th scope="col" className="num" title="队列满时丢弃的判定记录">
+                      丢弃
                     </th>
-                    <th scope="col">原因</th>
+                    <th scope="col" className="num" title="队列压力下主动丢弃的绕过简记录">
+                      绕过丢弃
+                    </th>
+                    <th scope="col" className="num" title="写入失败丢失的行数">
+                      写入失败
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {gaps.map((gap) => (
-                    <tr key={`${gap.edge}-${gap.from_millis}-${gap.reason}`}>
-                      <td className="tnum">
-                        {shortDateTime(gap.from_millis)} – {hm(gap.to_millis)}
-                      </td>
+                    <tr key={`${gap.edge}-${gap.from_ms}`}>
+                      <td className="tnum">{`${shortDateTime(gap.from_ms)} – ${hm(gap.to_ms)}`}</td>
                       <td>{gap.edge}</td>
-                      <td className="num tnum">{fmtInt(gap.rows)}</td>
-                      <td>{GAP_REASON[gap.reason]}</td>
+                      <td className="num tnum">{fmtInt(gap.dropped)}</td>
+                      <td className="num tnum">{fmtInt(gap.dropped_bypass)}</td>
+                      <td className="num tnum">{fmtInt(gap.write_errors)}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -47,7 +47,8 @@ function ChangeRow({ change }: { change: ImpactChange }) {
           <ul className="impact-top">
             {top.map(([method, path, count]) => (
               <li key={`${method} ${path}`}>
-                <span className="mono">{method}</span> <span className="mono">{path}</span> {fmtInt(count)}
+                <span className="mono">{method}</span> <span className="mono">{path}</span>{" "}
+                {fmtInt(count)}
               </li>
             ))}
           </ul>

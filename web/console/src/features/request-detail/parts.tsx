@@ -35,7 +35,15 @@ export function LinkedRequest({
 }
 
 /** A copy button whose accessible name is its own label, so a long text never becomes the name. */
-export function CopyAction({ text, label, className = "copy-btn" }: { text: string; label: string; className?: string }) {
+export function CopyAction({
+  text,
+  label,
+  className = "copy-btn",
+}: {
+  text: string;
+  label: string;
+  className?: string;
+}) {
   const [done, setDone] = useState(false);
   const copy = async () => {
     try {
@@ -97,7 +105,15 @@ export function HintMark({ reading }: { reading: Reading }) {
 }
 
 /** A thin bar for a ratio of 0 to 1; amber when the reading is near its limit. */
-export function Gauge({ ratio, warn = false, label }: { ratio: number; warn?: boolean; label: string }) {
+export function Gauge({
+  ratio,
+  warn = false,
+  label,
+}: {
+  ratio: number;
+  warn?: boolean;
+  label: string;
+}) {
   const clamped = Math.min(1, Math.max(0, Number.isFinite(ratio) ? ratio : 0));
   return (
     <div

@@ -119,21 +119,35 @@ export function DetailHead({ detail, requestId }: { detail: RequestDetail; reque
         <CopyButton text={requestId} label="复制 ID" />
         <span className="rd-neighbors">
           {prev !== null ? (
-            <Link to="/requests/$requestId" params={{ requestId: prev }} search={neighborSearch} title="上一个请求，快捷键 [">
+            <Link
+              to="/requests/$requestId"
+              params={{ requestId: prev }}
+              search={neighborSearch}
+              title="上一个请求，快捷键 ["
+            >
               ‹ 上一个
             </Link>
           ) : (
             <span className="dim">‹ 上一个</span>
           )}
           {sessionLabel !== null ? (
-            <Link to="/sessions/$label" params={{ label: sessionLabel }} search={timelineSearch(requestId)}>
+            <Link
+              to="/sessions/$label"
+              params={{ label: sessionLabel }}
+              search={timelineSearch(requestId)}
+            >
               同一会话
             </Link>
           ) : (
             <span className="dim">同一会话</span>
           )}
           {next !== null ? (
-            <Link to="/requests/$requestId" params={{ requestId: next }} search={neighborSearch} title="下一个请求，快捷键 ]">
+            <Link
+              to="/requests/$requestId"
+              params={{ requestId: next }}
+              search={neighborSearch}
+              title="下一个请求，快捷键 ]"
+            >
               下一个 ›
             </Link>
           ) : (
@@ -159,7 +173,9 @@ export function DetailHead({ detail, requestId }: { detail: RequestDetail; reque
           </div>
         </div>
 
-        {summary.query !== null ? <QueryLine query={summary.query} values={trace.values ?? []} /> : null}
+        {summary.query !== null ? (
+          <QueryLine query={summary.query} values={trace.values ?? []} />
+        ) : null}
 
         <div className="explain">
           <SafeText text={explanation} />
@@ -179,7 +195,11 @@ export function DetailHead({ detail, requestId }: { detail: RequestDetail; reque
         </div>
         <div className="meta-line rd-meta">
           {siteName !== null && version !== null ? (
-            <Link to="/sites/$name" params={{ name: siteName }} search={{ tab: "history", diff: String(version) }}>
+            <Link
+              to="/sites/$name"
+              params={{ name: siteName }}
+              search={{ tab: "history", diff: String(version) }}
+            >
               配置 v{version}
             </Link>
           ) : (
@@ -188,7 +208,12 @@ export function DetailHead({ detail, requestId }: { detail: RequestDetail; reque
           <span>{edge}</span>
           {sessionLabel !== null ? (
             <span>
-              <Link to="/sessions/$label" params={{ label: sessionLabel }} search={timelineSearch(requestId)} className="mono">
+              <Link
+                to="/sessions/$label"
+                params={{ label: sessionLabel }}
+                search={timelineSearch(requestId)}
+                className="mono"
+              >
                 会话 {shortSession(sessionLabel)}
               </Link>
               {trace.session ? `（已 ${fmtElapsed(trace.session.age_seconds)}）` : ""}

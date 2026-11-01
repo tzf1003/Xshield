@@ -165,7 +165,11 @@ function rowFromTrace(jevIndex: number, traceIndex: number, value: TraceValue): 
  * The values Jev received. Aligned: the trace's non-inert values, in order, with their sources.
  * Not aligned but parsed: the state alone. Without a state (a broken one): the trace's values.
  */
-export function sentRows(trace: Trace, state: JevState | null, alignment: Alignment | null): SentRow[] {
+export function sentRows(
+  trace: Trace,
+  state: JevState | null,
+  alignment: Alignment | null,
+): SentRow[] {
   if (alignment?.aligned) {
     return alignment.sent.map((item) => rowFromTrace(item.jevIndex, item.traceIndex, item.value));
   }
@@ -197,7 +201,11 @@ export type SessionView = {
 };
 
 /** The session entries and recent accesses, aligned with the state when the check passes (docs/07 7.5.2). */
-export function sessionView(trace: Trace, state: JevState | null, alignment: Alignment | null): SessionView {
+export function sessionView(
+  trace: Trace,
+  state: JevState | null,
+  alignment: Alignment | null,
+): SessionView {
   const traceEntries = trace.session?.entries_passed ?? [];
   const traceRecent = trace.session?.recent ?? [];
   if (state === null) return { entries: traceEntries, recent: traceRecent, fallback: false };
@@ -209,7 +217,11 @@ export function sessionView(trace: Trace, state: JevState | null, alignment: Ali
     };
   }
   return {
-    entries: state.session.entries_passed.map((path) => ({ path, at_millis: null, request_id: null })),
+    entries: state.session.entries_passed.map((path) => ({
+      path,
+      at_millis: null,
+      request_id: null,
+    })),
     recent: state.recent.map((item) => ({
       method: item.method,
       path: item.path,
@@ -223,7 +235,11 @@ export function sessionView(trace: Trace, state: JevState | null, alignment: Ali
 
 // ------------------------------------------------------------------ reading hints (docs/06 6.5.3, 6.6.2)
 
-export type Reading = { mark: "✓" | "–" | "!" | "✕"; tone: "ok" | "none" | "warn" | "bad"; text: string };
+export type Reading = {
+  mark: "✓" | "–" | "!" | "✕";
+  tone: "ok" | "none" | "warn" | "bad";
+  text: string;
+};
 
 /**
  * The reading of a value, from the trace's flags only. These are the gateway's own records, not
@@ -262,7 +278,8 @@ export function secretMatchOf(value: TraceValue, extra: readonly string[]): Secr
 /** A field name that looks like personal data and went to Jev unredacted (docs/07 7.9.10). */
 export function sensitiveFieldOf(trace: Trace): string | null {
   for (const value of trace.values ?? []) {
-    if (value.inert || value.kind !== "input" || value.value === REDACTED || value.key === null) continue;
+    if (value.inert || value.kind !== "input" || value.value === REDACTED || value.key === null)
+      continue;
     const key = value.key.toLowerCase();
     const word = SENSITIVE_FIELD_WORDS.find((item) => key.includes(item));
     if (word !== undefined) return word;
@@ -292,7 +309,9 @@ export function valueCounts(values: TraceValue[]): {
 export function jevConfidence(jev: JevRecord): number | null {
   const top = (probabilities: Partial<Record<string, number>> | null): number | null => {
     if (!probabilities) return null;
-    const values = Object.values(probabilities).filter((value): value is number => typeof value === "number");
+    const values = Object.values(probabilities).filter(
+      (value): value is number => typeof value === "number",
+    );
     return values.length === 0 ? null : Math.max(...values);
   };
   const access = top(jev.access);
@@ -378,7 +397,10 @@ function sessionDetail(trace: Trace): string {
 
 function modeOf(outcome: Outcome, path: DecisionPath): string | null {
   if (outcome === "would_block") return "观察模式";
-  if (outcome === "blocked" && (path === "jev_deny" || path === "no_session" || path === "jev_unavailable")) {
+  if (
+    outcome === "blocked" &&
+    (path === "jev_deny" || path === "no_session" || path === "jev_unavailable")
+  ) {
     return "拦截模式";
   }
   return null;
@@ -456,7 +478,11 @@ function learningStep(summary: RequestRow, trace: Trace): PipelineStep | null {
  * conclusion is marked decisive, and the steps after it are not listed. A record in the old format
  * has only the site and the execution.
  */
-export function pipelineSteps(summary: RequestRow, trace: Trace, jev: JevRecord | null): PipelineStep[] {
+export function pipelineSteps(
+  summary: RequestRow,
+  trace: Trace,
+  jev: JevRecord | null,
+): PipelineStep[] {
   const steps: PipelineStep[] = [];
   const add = (init: StepInit): void => {
     steps.push({ ms: null, decisive: false, links: [], notes: [], attention: null, ...init });
@@ -546,7 +572,10 @@ export function pipelineSteps(summary: RequestRow, trace: Trace, jev: JevRecord 
       name: "快速放行",
       done: true,
       decisive: true,
-      reason: counts.sent > 0 ? `${counts.sent} 个需核验的值都已核验，没有调用 Jev` : "请求里没有需要核验的值，没有调用 Jev",
+      reason:
+        counts.sent > 0
+          ? `${counts.sent} 个需核验的值都已核验，没有调用 Jev`
+          : "请求里没有需要核验的值，没有调用 Jev",
     });
     return finish();
   }
@@ -554,7 +583,8 @@ export function pipelineSteps(summary: RequestRow, trace: Trace, jev: JevRecord 
     id: "fast",
     name: "快速放行",
     done: false,
-    reason: counts.unverified > 0 ? `不满足：${counts.unverified} 未核验` : "不满足：没有需核验的值",
+    reason:
+      counts.unverified > 0 ? `不满足：${counts.unverified} 未核验` : "不满足：没有需核验的值",
   });
 
   if (path === "cached_allow") {
@@ -564,9 +594,16 @@ export function pipelineSteps(summary: RequestRow, trace: Trace, jev: JevRecord 
       done: true,
       decisive: true,
       reason: "同一会话此前的相同请求已由 Jev 放行，在缓存时长内直接复用",
-      links: trace.cache_source && isRequestId(trace.cache_source)
-        ? [{ kind: "request", id: trace.cache_source, text: `来源 ${shortRequestId(trace.cache_source)}` }]
-        : [],
+      links:
+        trace.cache_source && isRequestId(trace.cache_source)
+          ? [
+              {
+                kind: "request",
+                id: trace.cache_source,
+                text: `来源 ${shortRequestId(trace.cache_source)}`,
+              },
+            ]
+          : [],
     });
     return finish();
   }
@@ -574,7 +611,13 @@ export function pipelineSteps(summary: RequestRow, trace: Trace, jev: JevRecord 
 
   const jevDecides = path === "jev_allow" || path === "jev_deny" || path === "jev_unavailable";
   if (jev === null) {
-    add({ id: "jev", name: "Jev", done: false, decisive: path === "jev_unavailable", reason: "没有调用 Jev" });
+    add({
+      id: "jev",
+      name: "Jev",
+      done: false,
+      decisive: path === "jev_unavailable",
+      reason: "没有调用 Jev",
+    });
   } else if (jev.failure === "JEV_CALL_LIMIT" || jev.failure === "JEV_STATE_TOO_LARGE") {
     add({
       id: "jev",
@@ -620,7 +663,10 @@ export type Waterfall = {
 };
 
 /** The timing bar: judging, origin and the rest of the total (docs/06 6.4.4). Null without timing. */
-export function waterfallOf(timing: TraceTiming | undefined, jevMs: number | null): Waterfall | null {
+export function waterfallOf(
+  timing: TraceTiming | undefined,
+  jevMs: number | null,
+): Waterfall | null {
   const total = timing?.total_ms;
   if (typeof total !== "number" || total <= 0) return null;
   const judge = typeof timing?.judge_ms === "number" ? timing.judge_ms : null;
@@ -642,8 +688,13 @@ export function waterfallOf(timing: TraceTiming | undefined, jevMs: number | nul
 // ------------------------------------------------------------------ requests that are not found
 
 /** Log gaps the status reports, for the not-found reason (docs/06 6.7.2). */
-export function logGaps(problems: GatewayProblem[]): Array<Extract<GatewayProblem, { kind: "log_gap" }>> {
-  return problems.filter((problem): problem is Extract<GatewayProblem, { kind: "log_gap" }> => problem.kind === "log_gap");
+export function logGaps(
+  problems: GatewayProblem[],
+): Array<Extract<GatewayProblem, { kind: "log_gap" }>> {
+  return problems.filter(
+    (problem): problem is Extract<GatewayProblem, { kind: "log_gap" }> =>
+      problem.kind === "log_gap",
+  );
 }
 
 function localDay(ms: number): string {
@@ -663,7 +714,7 @@ export function missingReason(
   if (millis > now + 60_000) return "ID 时间异常，可能不是本系统生成的。";
   if (now - millis > RETENTION_MS) return `生成于 ${localDay(millis)}，已超过 7 天保留期。`;
   const gap = gaps.find((item) => millis >= item.from_ms && millis <= item.to_ms);
-  if (gap) return `当时 ${gap.edge} 丢失了 ${fmtInt(gap.dropped)} 条记录，这段时间的请求可能查不到。`;
+  if (gap)
+    return `当时 ${gap.edge} 丢失了 ${fmtInt(gap.dropped)} 条记录，这段时间的请求可能查不到。`;
   return "可能来自其他环境的网关。";
 }
-

@@ -17,7 +17,14 @@ import { LazyYamlEditor } from "./yaml-lazy.ts";
 
 export type ConfigGroupId = FormGroup | "advanced";
 
-export const CONFIG_GROUPS: ConfigGroupId[] = ["basics", "session", "entries", "bypass", "mode", "advanced"];
+export const CONFIG_GROUPS: ConfigGroupId[] = [
+  "basics",
+  "session",
+  "entries",
+  "bypass",
+  "mode",
+  "advanced",
+];
 
 export function isConfigGroup(value: string | undefined): value is ConfigGroupId {
   return CONFIG_GROUPS.some((group) => group === value);
@@ -157,7 +164,9 @@ export function ConfigTab({
                 >
                   <span>{label}</span>
                   {count ? <span className="count">{count}</span> : null}
-                  {groupError(id) ? <span className="err-dot" role="img" aria-label="有需要修正的内容" /> : null}
+                  {groupError(id) ? (
+                    <span className="err-dot" role="img" aria-label="有需要修正的内容" />
+                  ) : null}
                 </button>
               );
             })}
@@ -195,7 +204,9 @@ export function ConfigTab({
         <div className="draftbar" role="region" aria-label="未保存的改动">
           <span className="tnum">未保存的改动 {fmtInt(Math.max(1, changeCount))} 处</span>
           {hasErrors ? (
-            <span className="field-error">有 {fmtInt(issues.errors.length)} 项需要修正，修好后才能保存</span>
+            <span className="field-error">
+              有 {fmtInt(issues.errors.length)} 项需要修正，修好后才能保存
+            </span>
           ) : null}
           <span className="grow" />
           <button type="button" className="btn" onClick={reviewFirst}>

@@ -19,8 +19,8 @@
         "edge": "edge-1",
         "from_ms": 1793538600000,
         "to_ms": 1793538720000,
-        "dropped": 37,
-        "dropped_bypass": 0,
+        "dropped": 31,
+        "dropped_bypass": 6,
         "write_errors": 0
       }
     ]

@@ -10,7 +10,13 @@ import { isSessionLabel } from "../../lib/ids.ts";
 import { OutcomeTag } from "../../ui/Badges.tsx";
 import { Card, Notice } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
-import { type PipelineStep, pipelineSteps, type StepLink, type Waterfall, waterfallOf } from "./detail-model.ts";
+import {
+  type PipelineStep,
+  pipelineSteps,
+  type StepLink,
+  type Waterfall,
+  waterfallOf,
+} from "./detail-model.ts";
 import { LinkedRequest } from "./parts.tsx";
 
 export function Pipeline({ detail }: { detail: RequestDetail }) {
@@ -23,19 +29,21 @@ export function Pipeline({ detail }: { detail: RequestDetail }) {
         <Notice tone="info">旧格式记录没有判定依据，这里只有站点和执行。</Notice>
       ) : null}
       {water ? <Timing water={water} /> : null}
-      <div className="steps rd-steps" role="list" aria-label="判定步骤">
+      <ol className="steps rd-steps" aria-label="判定步骤">
         {steps.map((step) => (
           <StepRow key={step.id} step={step} outcome={summary.outcome} />
         ))}
-      </div>
+      </ol>
     </Card>
   );
 }
 
 function Timing({ water }: { water: Waterfall }) {
   const width = (value: number) => `${water.scale > 0 ? (value / water.scale) * 100 : 0}%`;
-  const share = (value: number) => `${water.scale > 0 ? Math.round((value / water.scale) * 100) : 0}%`;
-  const jevWidth = water.jev !== null && water.judge > 0 ? `${(water.jev / water.judge) * 100}%` : "0%";
+  const share = (value: number) =>
+    `${water.scale > 0 ? Math.round((value / water.scale) * 100) : 0}%`;
+  const jevWidth =
+    water.jev !== null && water.judge > 0 ? `${(water.jev / water.judge) * 100}%` : "0%";
   return (
     <div className="rd-timing">
       <div className="rd-wf" aria-hidden="true">
@@ -45,7 +53,11 @@ function Timing({ water }: { water: Waterfall }) {
           title={`判定 ${fmtMs(water.judge)}，占 ${share(water.judge)}`}
         >
           {water.jev !== null && water.jev > 0 ? (
-            <span className="rd-wf-jev" style={{ width: jevWidth }} title={`Jev ${fmtMs(water.jev)}`} />
+            <span
+              className="rd-wf-jev"
+              style={{ width: jevWidth }}
+              title={`Jev ${fmtMs(water.jev)}`}
+            />
           ) : null}
         </span>
         <span
@@ -78,7 +90,7 @@ function StepRow({ step, outcome }: { step: PipelineStep; outcome: Outcome }) {
   if (step.decisive) classes.push("dec", `rd-${outcome}`);
   if (!step.done) classes.push("skipped");
   return (
-    <div role="listitem" className={classes.join(" ")}>
+    <li className={classes.join(" ")}>
       <span className="step-mark" role="img" aria-label={step.done ? "已执行" : "未执行或不满足"}>
         {step.done ? "✓" : "–"}
       </span>
@@ -98,7 +110,11 @@ function StepRow({ step, outcome }: { step: PipelineStep; outcome: Outcome }) {
         {step.links.length > 0 ? (
           <div className="step-detail rd-steplinks">
             {step.links.map((link) => (
-              <StepLinkView key={linkKey(link)} link={link} onJev={() => setSearch({ tab: "jev" })} />
+              <StepLinkView
+                key={linkKey(link)}
+                link={link}
+                onJev={() => setSearch({ tab: "jev" })}
+              />
             ))}
           </div>
         ) : null}
@@ -107,7 +123,7 @@ function StepRow({ step, outcome }: { step: PipelineStep; outcome: Outcome }) {
         {step.ms !== null ? <span className="tnum">{fmtMs(step.ms)}</span> : null}
         {step.decisive ? <OutcomeTag outcome={outcome} /> : null}
       </span>
-    </div>
+    </li>
   );
 }
 

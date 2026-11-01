@@ -1,0 +1,425 @@
+/* The request detail page (docs/06 6.4.4 to 6.4.5). Shared parts (cards, tables, steps, key-value
+   lists, notices, the answer bars) come from global.css; these rules lay out the head, the tabs beside
+   the related rail, the value cards and the Jev views, and the timing bar. */
+
+.rd-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* Head */
+
+.rd-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.rd-reqid {
+  color: var(--ink-3);
+  word-break: break-all;
+}
+
+.rd-neighbors {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.rd-headrow {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.rd-reqline {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.rd-method {
+  flex: none;
+  color: var(--ink-2);
+}
+
+.rd-path {
+  margin: 0;
+  word-break: break-all;
+}
+
+.rd-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.rd-query {
+  margin-top: 6px;
+  word-break: break-all;
+}
+
+.rd-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.rd-clip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rd-srcs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rd-srcwrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.rd-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+/* Layout: tabs and rail */
+
+.rd-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: start;
+  gap: 16px;
+}
+
+.rd-tabs {
+  min-width: 0;
+}
+
+.rd-rail {
+  position: sticky;
+  top: 12px;
+  min-width: 0;
+}
+
+.rd-related {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rd-ops {
+  align-items: flex-start;
+}
+
+.rd-ops .linkbtn {
+  text-align: left;
+}
+
+/* Pipeline */
+
+.rd-timing {
+  margin: 8px 0 12px;
+}
+
+.rd-wf {
+  display: flex;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--sunken);
+}
+
+.rd-wf > span {
+  flex: none;
+  height: 100%;
+}
+
+.rd-wf-judge {
+  position: relative;
+  background: var(--s1);
+}
+
+.rd-wf-jev {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--s2);
+}
+
+.rd-wf-origin {
+  background: var(--s3);
+}
+
+.rd-wf-other {
+  background: var(--neutral-seg);
+}
+
+.rd-wf-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 4px;
+  color: var(--ink-3);
+}
+
+.rd-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rd-step {
+  grid-template-columns: 22px 92px minmax(0, 1fr) auto;
+}
+
+.rd-stepname {
+  min-width: 0;
+}
+
+.rd-steplinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.rd-attention {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.rd-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+/* Request values */
+
+.rd-values {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rd-valuebar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.rd-search {
+  width: 220px;
+  max-width: 100%;
+}
+
+.rd-tbl-wrap {
+  overflow-x: auto;
+}
+
+.rd-table {
+  width: 100%;
+}
+
+.rd-valcell {
+  max-width: 280px;
+}
+
+.rd-row td {
+  vertical-align: top;
+}
+
+.rd-row.rd-needs td:first-child {
+  box-shadow: inset 3px 0 0 var(--would);
+}
+
+.rd-row.rd-inert {
+  color: var(--ink-3);
+}
+
+.rd-fold {
+  margin-top: 4px;
+}
+
+/* Jev views */
+
+.rd-viewtools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.rd-jev-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.rd-vlist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rd-vcard {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.rd-vcard.rd-attn {
+  border-left: 3px solid var(--would);
+}
+
+.rd-vhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rd-vhead .rd-clip {
+  flex: 1 1 auto;
+}
+
+.rd-vhead .linkbtn {
+  flex: none;
+}
+
+.rd-vbody {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.rd-val {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.rd-vline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 4px;
+}
+
+.rd-gateway {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.rd-gauge-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: 8px;
+}
+
+.rd-gauge {
+  width: 160px;
+  max-width: 100%;
+}
+
+.rd-gauge.rd-warn > span {
+  background: var(--would);
+}
+
+.rd-failure {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rd-criteria .rd-criterion {
+  display: contents;
+}
+
+/* Not found */
+
+.rd-notfound {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 24px 0;
+}
+
+/* Flash on the value a link asked for */
+
+.rd-flash {
+  animation: rd-flash 2s ease-out;
+}
+
+@keyframes rd-flash {
+  from {
+    background-color: var(--accent-weak);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rd-flash {
+    animation: none;
+    background-color: var(--accent-weak);
+  }
+}
+
+@media (max-width: 1100px) {
+  .rd-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rd-rail {
+    position: static;
+  }
+}
+
+@media (max-width: 900px) {
+  .rd-jev-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rd-search {
+    width: 100%;
+  }
+}

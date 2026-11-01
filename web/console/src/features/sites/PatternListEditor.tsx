@@ -20,7 +20,9 @@ function hitText(hits: Record<string, number> | undefined, rule: string): string
 /** A prefix whose only segment is the first one, such as `/*`: it reaches almost every path. */
 function isWidePrefix(rule: string): boolean {
   const parsed = parsePattern(rule);
-  return parsed.ok && parsed.value.prefix && parsed.value.literal.split("/").filter(Boolean).length <= 1;
+  return (
+    parsed.ok && parsed.value.prefix && parsed.value.literal.split("/").filter(Boolean).length <= 1
+  );
 }
 
 export function PatternListEditor({
@@ -102,7 +104,9 @@ export function PatternListEditor({
           return (
             <li key={rule} className={`rulerow${error ? " err" : ""}`}>
               <span className="mono path">{rule}</span>
-              <span className={`hits${hits?.[rule] === 0 ? " dim" : ""}`}>{hitText(hits, rule)}</span>
+              <span className={`hits${hits?.[rule] === 0 ? " dim" : ""}`}>
+                {hitText(hits, rule)}
+              </span>
               <button
                 type="button"
                 className="btn"
@@ -123,7 +127,9 @@ export function PatternListEditor({
         <input
           className="native-input mono"
           value={text}
-          placeholder={kind === "entries" ? "添加入口，例如 /rest/admin/*" : "添加绕过，例如 /static/*"}
+          placeholder={
+            kind === "entries" ? "添加入口，例如 /rest/admin/*" : "添加绕过，例如 /static/*"
+          }
           aria-label={`添加${label}规则`}
           onChange={(event) => {
             setText(event.target.value);

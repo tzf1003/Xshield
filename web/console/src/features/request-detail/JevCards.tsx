@@ -33,7 +33,16 @@ type Props = {
   hl: number | undefined;
 };
 
-export function JevStructured({ rows, session, trace, sessionLabel, requestId, summaries, query, hl }: Props) {
+export function JevStructured({
+  rows,
+  session,
+  trace,
+  sessionLabel,
+  requestId,
+  summaries,
+  query,
+  hl,
+}: Props) {
   const flashing = useFlash(hl);
   const [calmOpen, setCalmOpen] = useState(false);
   const container = useRef<HTMLDivElement | null>(null);
@@ -53,7 +62,10 @@ export function JevStructured({ rows, session, trace, sessionLabel, requestId, s
 
   return (
     <div className="rd-jev-cols" ref={container}>
-      <Card title="本次请求" aside={`发给 Jev ${fmtInt(rows.length)} 个值，其中 ${fmtInt(missing)} 个缺少佐证`}>
+      <Card
+        title="本次请求"
+        aside={`发给 Jev ${fmtInt(rows.length)} 个值，其中 ${fmtInt(missing)} 个缺少佐证`}
+      >
         {rows.length === 0 ? (
           <Empty title="这次调用没有发出请求值" />
         ) : (
@@ -77,7 +89,12 @@ export function JevStructured({ rows, session, trace, sessionLabel, requestId, s
               />
             ))}
             {rows.length > FOLD_ABOVE ? (
-              <button type="button" className="linkbtn rd-foldbtn" aria-expanded={!folded} onClick={() => setCalmOpen((open) => !open)}>
+              <button
+                type="button"
+                className="linkbtn rd-foldbtn"
+                aria-expanded={!folded}
+                onClick={() => setCalmOpen((open) => !open)}
+              >
                 {folded ? `另有 ${fmtInt(calm.length)} 个值无异常 · 展开` : "收起无异常的值"}
               </button>
             ) : null}
@@ -118,14 +135,23 @@ function ValueCard({
   const position = row.traceIndex !== null ? `trace.values[${row.traceIndex}] · ${row.at}` : row.at;
 
   return (
-    <article className={classes.join(" ")} data-trace-index={row.traceIndex ?? undefined} title={position}>
+    <article
+      className={classes.join(" ")}
+      data-trace-index={row.traceIndex ?? undefined}
+      title={position}
+    >
       <header className="rd-vhead">
         <span className="mono small tnum">#{row.jevIndex}</span>
         <span className="mono small rd-clip">
           <SafeText text={row.at} query={query} />
         </span>
         <span className="small dim">{VALUE_KIND_LABEL[row.kind]}</span>
-        <button type="button" className="linkbtn small" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <button
+          type="button"
+          className="linkbtn small"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
           {open ? "收起" : "展开"}
         </button>
       </header>
@@ -140,11 +166,12 @@ function ValueCard({
           </div>
           {row.sources.length > 0 ? (
             <div className="rd-srcs">
-              {keyed(row.sources, (source) => `${source.field}|${source.request}|${source.request_id ?? ""}`).map(
-                ({ key, item }) => (
-                  <SourceChip key={key} source={item} sources={summaries} copyable />
-                ),
-              )}
+              {keyed(
+                row.sources,
+                (source) => `${source.field}|${source.request}|${source.request_id ?? ""}`,
+              ).map(({ key, item }) => (
+                <SourceChip key={key} source={item} sources={summaries} copyable />
+              ))}
             </div>
           ) : null}
           {row.sources.length === 0 && row.seenAs.length > 0 ? (

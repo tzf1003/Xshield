@@ -44,7 +44,11 @@ export function readinessRows(readiness: Readiness, now: number): Row[] {
   );
   rows.push(
     readiness.open_suggestions > 0
-      ? { key: "suggestions", mark: "▲", text: `待处理建议 ${fmtInt(readiness.open_suggestions)} 条` }
+      ? {
+          key: "suggestions",
+          mark: "▲",
+          text: `待处理建议 ${fmtInt(readiness.open_suggestions)} 条`,
+        }
       : { key: "suggestions", mark: "✓", text: "没有待处理建议" },
   );
   const health = HEALTH_LABEL[readiness.jev_health].name;
@@ -79,7 +83,11 @@ export function readinessRows(readiness: Readiness, now: number): Row[] {
 }
 
 const MARK_WORD: Record<ReadyMark, string> = { "✓": "正常", "▲": "需要注意", "–": "不适用" };
-const MARK_CLASS: Record<ReadyMark, string> = { "✓": "hint-ok", "▲": "hint-warn", "–": "hint-none" };
+const MARK_CLASS: Record<ReadyMark, string> = {
+  "✓": "hint-ok",
+  "▲": "hint-warn",
+  "–": "hint-none",
+};
 
 export function ReadinessList({ readiness, now }: { readiness: Readiness | null; now: number }) {
   if (readiness === null) return <div className="small muted">暂无就绪检查数据</div>;

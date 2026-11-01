@@ -44,9 +44,14 @@ export function writeCopy(spec: SiteSpec): void {
 }
 
 export function readCopy(): SiteSpec | null {
-  return readJson<SiteSpec | null>(COPY_KEY, null, (value): value is SiteSpec | null => {
-    return value === null || isSpecLike(value);
-  }, "session");
+  return readJson<SiteSpec | null>(
+    COPY_KEY,
+    null,
+    (value): value is SiteSpec | null => {
+      return value === null || isSpecLike(value);
+    },
+    "session",
+  );
 }
 
 export function clearCopy(): void {
@@ -63,7 +68,12 @@ export function readCreated(name: string): { name: string; version: number } | n
     CREATED_KEY,
     null,
     (candidate): candidate is { name: string; version: number } | null => {
-      return candidate === null || (isRecord(candidate) && typeof candidate.name === "string" && typeof candidate.version === "number");
+      return (
+        candidate === null ||
+        (isRecord(candidate) &&
+          typeof candidate.name === "string" &&
+          typeof candidate.version === "number")
+      );
     },
     "session",
   );

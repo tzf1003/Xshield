@@ -74,7 +74,9 @@ export function JevJson({ doc, parsed, body, bodyNote, response, query }: DocPro
           <JsonTree key={`state-${tree}`} value={parsed.state} openDepth={depth} query={query} />
         ) : parsed.status === "invalid" ? (
           <>
-            <Notice tone="bad">这次调用的 state 不是合法的 JSON，无法展开。原文视图仍显示原始文本。</Notice>
+            <Notice tone="bad">
+              这次调用的 state 不是合法的 JSON，无法展开。原文视图仍显示原始文本。
+            </Notice>
             <pre className="codeblock">
               <SafeText text={parsed.text} query={query} />
             </pre>
@@ -90,7 +92,9 @@ export function JevJson({ doc, parsed, body, bodyNote, response, query }: DocPro
           <Notice tone="info">{bodyNote}</Notice>
         )
       ) : null}
-      {doc === "response" ? <ResponseView response={response} query={query} tree={tree} depth={depth} /> : null}
+      {doc === "response" ? (
+        <ResponseView response={response} query={query} tree={tree} depth={depth} />
+      ) : null}
     </div>
   );
 }
@@ -111,7 +115,9 @@ function ResponseView({
   }
   const parsed = parseJson(response);
   if (parsed.ok) {
-    return <JsonTree key={`response-${tree}`} value={parsed.value} openDepth={depth} query={query} />;
+    return (
+      <JsonTree key={`response-${tree}`} value={parsed.value} openDepth={depth} query={query} />
+    );
   }
   return (
     <pre className="codeblock">
@@ -120,7 +126,15 @@ function ResponseView({
   );
 }
 
-export function JevRaw({ doc, parsed, body, bodyNote, response, query, wrap }: DocProps & { wrap: boolean }) {
+export function JevRaw({
+  doc,
+  parsed,
+  body,
+  bodyNote,
+  response,
+  query,
+  wrap,
+}: DocProps & { wrap: boolean }) {
   const [formatted, setFormatted] = useState(false);
   const stateText =
     parsed.status === "ok"
@@ -148,13 +162,17 @@ export function JevRaw({ doc, parsed, body, bodyNote, response, query, wrap }: D
             onChange={(value) => setFormatted(String(value) === "formatted")}
           />
         ) : null}
-        {shown !== null ? <span className="small dim tnum">{fmtBytes(utf8Bytes(shown))}</span> : null}
+        {shown !== null ? (
+          <span className="small dim tnum">{fmtBytes(utf8Bytes(shown))}</span>
+        ) : null}
       </div>
       {doc === "body" && body === null ? <Notice tone="info">{bodyNote}</Notice> : null}
       {doc === "response" && response === null ? (
         <Empty title="没有原始响应">超时、连接失败或没有发出调用时，没有响应。</Empty>
       ) : null}
-      {shown !== null && !(doc === "response" && response === null) && !(doc === "body" && body === null) ? (
+      {shown !== null &&
+      !(doc === "response" && response === null) &&
+      !(doc === "body" && body === null) ? (
         <pre className={classes}>
           <SafeText text={shown} query={query} />
         </pre>
@@ -179,7 +197,9 @@ export function PromptView({
         <Notice tone="warn">这次调用用的是旧版指令（当前 {current}）。</Notice>
       ) : null}
       {prompt.isPending ? <Loading height={120} /> : null}
-      {prompt.isError ? <ErrorBar error={prompt.error} onRetry={() => void prompt.refetch()} /> : null}
+      {prompt.isError ? (
+        <ErrorBar error={prompt.error} onRetry={() => void prompt.refetch()} />
+      ) : null}
       {data !== undefined ? (
         <>
           <QuestionBlock title="访问有依据吗" question={data.questions.access} />

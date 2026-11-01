@@ -49,7 +49,10 @@ type Props = {
 /** The messages of a field, including the messages of its list items (`hosts[2]`). */
 export function problemsOf(issues: FieldIssue[], group: FieldGroup, field: string): string[] {
   return issues
-    .filter((issue) => issue.group === group && (issue.field === field || issue.field.startsWith(`${field}[`)))
+    .filter(
+      (issue) =>
+        issue.group === group && (issue.field === field || issue.field.startsWith(`${field}[`)),
+    )
     .map((issue) => issue.message);
 }
 
@@ -93,7 +96,12 @@ function Field({
   );
 }
 
-function BasicsGroup({ spec, mode, onChange, issues }: Pick<Props, "spec" | "mode" | "onChange" | "issues">) {
+function BasicsGroup({
+  spec,
+  mode,
+  onChange,
+  issues,
+}: Pick<Props, "spec" | "mode" | "onChange" | "issues">) {
   return (
     <div className="stack">
       <Field
@@ -154,11 +162,19 @@ function BasicsGroup({ spec, mode, onChange, issues }: Pick<Props, "spec" | "mod
   );
 }
 
-function SessionGroup({ spec, saved, mode, onChange, issues }: Pick<Props, "spec" | "saved" | "mode" | "onChange" | "issues">) {
+function SessionGroup({
+  spec,
+  saved,
+  mode,
+  onChange,
+  issues,
+}: Pick<Props, "spec" | "saved" | "mode" | "onChange" | "issues">) {
   const kind = sessionKind(spec);
   const name = sessionName(spec);
   const changed =
-    mode === "edit" && saved !== null && (sessionKind(saved) !== kind || sessionName(saved) !== name);
+    mode === "edit" &&
+    saved !== null &&
+    (sessionKind(saved) !== kind || sessionName(saved) !== name);
   const errors = problemsOf(issues, "session", "session");
   return (
     <div className="stack">
@@ -172,10 +188,19 @@ function SessionGroup({ spec, saved, mode, onChange, issues }: Pick<Props, "spec
             { label: "Cookie", value: "cookie" },
             { label: "请求头", value: "header" },
           ]}
-          onChange={(value) => onChange(withSession(spec, value === "header" ? "header" : "cookie", name))}
+          onChange={(value) =>
+            onChange(withSession(spec, value === "header" ? "header" : "cookie", name))
+          }
         />
       </Field>
-      <Field label="名称" htmlFor="site-field-session" errors={errors} warnings={changed ? ["修改会话凭证后，现有会话的上下文全部作废，用户需要重新从入口进入"] : []}>
+      <Field
+        label="名称"
+        htmlFor="site-field-session"
+        errors={errors}
+        warnings={
+          changed ? ["修改会话凭证后，现有会话的上下文全部作废，用户需要重新从入口进入"] : []
+        }
+      >
         <input
           id="site-field-session"
           className="native-input mono"
@@ -202,7 +227,14 @@ function SessionGroup({ spec, saved, mode, onChange, issues }: Pick<Props, "spec
   );
 }
 
-function EntriesGroup({ spec, saved, mode, hits, onChange, issues }: Pick<Props, "spec" | "saved" | "mode" | "hits" | "onChange" | "issues">) {
+function EntriesGroup({
+  spec,
+  saved,
+  mode,
+  hits,
+  onChange,
+  issues,
+}: Pick<Props, "spec" | "saved" | "mode" | "hits" | "onChange" | "issues">) {
   return (
     <div className="stack">
       <Field
@@ -229,7 +261,15 @@ function EntriesGroup({ spec, saved, mode, hits, onChange, issues }: Pick<Props,
   );
 }
 
-function BypassGroup({ spec, saved, mode, hits, impact, onChange, issues }: Pick<Props, "spec" | "saved" | "mode" | "hits" | "impact" | "onChange" | "issues">) {
+function BypassGroup({
+  spec,
+  saved,
+  mode,
+  hits,
+  impact,
+  onChange,
+  issues,
+}: Pick<Props, "spec" | "saved" | "mode" | "hits" | "impact" | "onChange" | "issues">) {
   const change = impact.find((item) => item.kind === "judged_to_bypass");
   const notice = change
     ? `这条绕过会让 ${fmtInt(change.count)} 个原本判定的请求不再判定${
@@ -263,7 +303,13 @@ function BypassGroup({ spec, saved, mode, hits, impact, onChange, issues }: Pick
   );
 }
 
-function ModeGroup({ spec, mode, onChange, onSwitchMode, observingText }: Pick<Props, "spec" | "mode" | "onChange" | "onSwitchMode" | "observingText">) {
+function ModeGroup({
+  spec,
+  mode,
+  onChange,
+  onSwitchMode,
+  observingText,
+}: Pick<Props, "spec" | "mode" | "onChange" | "onSwitchMode" | "observingText">) {
   const current = spec.mode ?? "observe";
   return (
     <div className="stack">
@@ -282,11 +328,17 @@ function ModeGroup({ spec, mode, onChange, onSwitchMode, observingText }: Pick<P
               { label: "观察（推荐）", value: "observe" },
               { label: "拦截", value: "enforce" },
             ]}
-            onChange={(value) => onChange({ ...spec, mode: value === "enforce" ? "enforce" : "observe" })}
+            onChange={(value) =>
+              onChange({ ...spec, mode: value === "enforce" ? "enforce" : "observe" })
+            }
           />
         ) : (
           <div className="row">
-            <span>{current === "enforce" ? "拦截模式" : `观察模式${observingText ? `（${observingText}）` : ""}`}</span>
+            <span>
+              {current === "enforce"
+                ? "拦截模式"
+                : `观察模式${observingText ? `（${observingText}）` : ""}`}
+            </span>
             <button type="button" className="btn" onClick={onSwitchMode}>
               切换…
             </button>
@@ -312,7 +364,9 @@ function ModeGroup({ spec, mode, onChange, onSwitchMode, observingText }: Pick<P
             { label: "拒绝（推荐）", value: "deny" },
             { label: "放行", value: "allow" },
           ]}
-          onChange={(value) => onChange({ ...spec, on_jev_unavailable: value === "allow" ? "allow" : "deny" })}
+          onChange={(value) =>
+            onChange({ ...spec, on_jev_unavailable: value === "allow" ? "allow" : "deny" })
+          }
         />
       </Field>
     </div>

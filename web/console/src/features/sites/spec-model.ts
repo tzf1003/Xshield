@@ -3,17 +3,18 @@
 // a suggestion to a draft, and how a value reads in words. Pure functions: no React, no requests.
 
 import { parseDocument } from "yaml";
-import type {
-  Advanced,
-  SessionCredential,
-  SiteSpec,
-  SuggestionAction,
-} from "../../api/types.ts";
+import type { Advanced, SessionCredential, SiteSpec, SuggestionAction } from "../../api/types.ts";
 import { isRecord } from "../../lib/storage.ts";
 import { parseSiteText } from "../../lib/yaml.ts";
 import { PARAM_INFO } from "../../lib/vocab.ts";
 
-export const SESSION_NAMES = ["JSESSIONID", "SESSIONID", "connect.sid", "token", "Authorization"] as const;
+export const SESSION_NAMES = [
+  "JSESSIONID",
+  "SESSIONID",
+  "connect.sid",
+  "token",
+  "Authorization",
+] as const;
 export const LOGIN_PATHS = ["/login", "/api/login", "/rest/user/login"] as const;
 export const STATIC_PATHS = ["/static/*", "/assets/*", "/favicon.ico"] as const;
 
@@ -74,9 +75,11 @@ export function customAdvanced(advanced: Advanced | undefined): string[] {
   if (!advanced) return labels;
   for (const key of NUMERIC_ADVANCED) {
     const value = advanced[key];
-    if (value !== undefined) labels.push(`${PARAM_INFO[key].label} ${value} ${PARAM_INFO[key].unit}`);
+    if (value !== undefined)
+      labels.push(`${PARAM_INFO[key].label} ${value} ${PARAM_INFO[key].unit}`);
   }
-  if (advanced.secret_fields !== undefined) labels.push(`追加脱敏词 ${advanced.secret_fields.length} 个`);
+  if (advanced.secret_fields !== undefined)
+    labels.push(`追加脱敏词 ${advanced.secret_fields.length} 个`);
   if (advanced.synonyms !== undefined) labels.push(`同义词 ${advanced.synonyms.length} 组`);
   return labels;
 }
@@ -91,7 +94,8 @@ export function actionLines(action: SuggestionAction): string[] {
   if (set) {
     for (const key of NUMERIC_ADVANCED) {
       const value = set[key];
-      if (value !== undefined) lines.push(`${PARAM_INFO[key].label} → ${value} ${PARAM_INFO[key].unit}`);
+      if (value !== undefined)
+        lines.push(`${PARAM_INFO[key].label} → ${value} ${PARAM_INFO[key].unit}`);
     }
   }
   return lines;
@@ -101,7 +105,8 @@ export function actionLines(action: SuggestionAction): string[] {
 export function applyAction(spec: SiteSpec, action: SuggestionAction): SiteSpec {
   let next: SiteSpec = { ...spec };
   if (action.add_entry) next = { ...next, entries: addUnique(next.entries, [action.add_entry]) };
-  if (action.add_bypass) next = { ...next, bypass: addUnique(next.bypass ?? [], [action.add_bypass]) };
+  if (action.add_bypass)
+    next = { ...next, bypass: addUnique(next.bypass ?? [], [action.add_bypass]) };
   const advanced: Advanced = { ...(next.advanced ?? {}) };
   if (action.add_secret_field) {
     advanced.secret_fields = addUnique(advanced.secret_fields ?? [], [action.add_secret_field]);
@@ -136,7 +141,11 @@ function listOf(value: unknown, label: string, example: string): Check<string[]>
   return fail(`${label} 应为列表，例如 ${example}`);
 }
 
-function enumOf<T extends string>(value: unknown, options: readonly T[], label: string): Check<T | undefined> {
+function enumOf<T extends string>(
+  value: unknown,
+  options: readonly T[],
+  label: string,
+): Check<T | undefined> {
   if (value === undefined || value === null) return { ok: true, value: undefined };
   const found = options.find((option) => option === value);
   if (found === undefined) return fail(`${label} 只能是 ${options.join(" 或 ")}`);
@@ -175,10 +184,16 @@ function advancedOf(value: unknown): Check<Advanced | undefined> {
     out.secret_fields = words.value;
   }
   if (value.synonyms !== undefined && value.synonyms !== null) {
-    if (!Array.isArray(value.synonyms)) return fail("synonyms 应为词组列表，例如 [[payment, card]]");
+    if (!Array.isArray(value.synonyms))
+      return fail("synonyms 应为词组列表，例如 [[payment, card]]");
     const pairs: Array<[string, string]> = [];
     for (const pair of value.synonyms) {
-      if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || typeof pair[1] !== "string") {
+      if (
+        !Array.isArray(pair) ||
+        pair.length !== 2 ||
+        typeof pair[0] !== "string" ||
+        typeof pair[1] !== "string"
+      ) {
         return fail("synonyms 每组应为两个词，例如 [payment, card]");
       }
       pairs.push([pair[0], pair[1]]);

@@ -81,7 +81,10 @@ export type MockOptions = {
 const REPLY = Symbol("reply");
 
 /** Overrides one response with a status: `reply(409, { error: "VERSION_CONFLICT", current_version: 14 })`. */
-export function reply(status: number, body?: unknown): { [REPLY]: true; status: number; body: unknown } {
+export function reply(
+  status: number,
+  body?: unknown,
+): { [REPLY]: true; status: number; body: unknown } {
   return { [REPLY]: true, status, body };
 }
 
@@ -109,7 +112,13 @@ export async function mockApi(page: Page, options: MockOptions = {}): Promise<vo
       raw: raw ?? "",
     };
     const answer = answerFor(call, state, options);
-    served.push({ method: call.method, path: call.path, query: url.search.slice(1), body: call.body, status: answer.status });
+    served.push({
+      method: call.method,
+      path: call.path,
+      query: url.search.slice(1),
+      body: call.body,
+      status: answer.status,
+    });
     await route.fulfill({
       status: answer.status,
       contentType: answer.type ?? "application/json",
@@ -158,13 +167,17 @@ function parseBody(raw: string | null): unknown {
 }
 
 function answerFor(call: Call, state: State, options: MockOptions): Answer {
-  const override = options.overrides?.[`${call.method} ${call.path}`] ?? options.overrides?.[call.path];
-  if (override !== undefined) return isReply(override) ? { status: override.status, body: override.body } : ok(override);
-  if (!state.signedIn && !AUTH_FREE.has(call.path)) return { status: 401, body: { error: "UNAUTHENTICATED" } };
+  const override =
+    options.overrides?.[`${call.method} ${call.path}`] ?? options.overrides?.[call.path];
+  if (override !== undefined)
+    return isReply(override) ? { status: override.status, body: override.body } : ok(override);
+  if (!state.signedIn && !AUTH_FREE.has(call.path))
+    return { status: 401, body: { error: "UNAUTHENTICATED" } };
   try {
     return dispatch(call, state, options);
   } catch (error) {
-    if (error instanceof ApiFailure) return { status: error.status, body: { error: error.code, ...error.extra } };
+    if (error instanceof ApiFailure)
+      return { status: error.status, body: { error: error.code, ...error.extra } };
     throw error;
   }
 }
@@ -240,8 +253,16 @@ const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
   ["GET", /^\/api\/sites\/([^/]+)\/versions$/, (m, _c, s) => versionList(m, s)],
   ["GET", /^\/api\/sites\/([^/]+)\/versions\/(\d+)$/, (m, _c, s) => versionOne(m, s)],
   ["POST", /^\/api\/sites\/([^/]+)\/rollback$/, (m, c, s, o) => rollbackSite(m, c, s, o)],
-  ["POST", /^\/api\/sites\/([^/]+)\/preview$/, (m, _c, s) => siteOr(s, m, (): Answer => ok(preview as ImpactPreview))],
-  ["GET", /^\/api\/sites\/([^/]+)\/insights$/, (m, _c, s) => siteOr(s, m, (site) => ok(insightsFor(site)))],
+  [
+    "POST",
+    /^\/api\/sites\/([^/]+)\/preview$/,
+    (m, _c, s) => siteOr(s, m, (): Answer => ok(preview as ImpactPreview)),
+  ],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/insights$/,
+    (m, _c, s) => siteOr(s, m, (site) => ok(insightsFor(site))),
+  ],
   ["GET", /^\/api\/sites\/([^/]+)\/evidence$/, (m, _c, s) => siteOr(s, m, () => ok(evidence))],
   ["GET", /^\/api\/status$/, () => ok(status)],
   ["GET", /^\/api\/system$/, () => ok(system)],
@@ -305,7 +326,9 @@ function matchRows(params: URLSearchParams, includeHidden: boolean): RequestRow[
   const decisions = listParam(params, "decision_path");
   const outcomes = listParam(params, "outcome");
   const showHidden =
-    includeHidden || params.get("scope") === "all" || decisions.some((path) => HIDDEN_PATHS.has(path));
+    includeHidden ||
+    params.get("scope") === "all" ||
+    decisions.some((path) => HIDDEN_PATHS.has(path));
   const since = numberParam(params, "since_millis") ?? FIXTURE_NOW_MS - DAY_MS;
   const until = numberParam(params, "until_millis") ?? FIXTURE_NOW_MS;
   if (until - since > 7 * DAY_MS) throw new ApiFailure(400, "WINDOW_TOO_LARGE");
@@ -339,7 +362,10 @@ function matchRows(params: URLSearchParams, includeHidden: boolean): RequestRow[
     if (jevAccess !== null && row.jev?.access !== jevAccess) return false;
     if (jevAttack !== null && row.jev?.attack !== jevAttack) return false;
     if (jevFailure !== null && row.jev?.failure !== jevFailure) return false;
-    if (maxConfidence !== undefined && (row.jev?.confidence ?? Number.POSITIVE_INFINITY) > maxConfidence) {
+    if (
+      maxConfidence !== undefined &&
+      (row.jev?.confidence ?? Number.POSITIVE_INFINITY) > maxConfidence
+    ) {
       return false;
     }
     if (minMs !== undefined && !(row.total_ms !== null && row.total_ms >= minMs)) return false;
@@ -368,7 +394,8 @@ function listRequests(call: Call): Answer {
     const [atText = "", idText = ""] = cursor.split(".");
     const at = Number(atText);
     const id = Number(idText);
-    if (!Number.isFinite(at) || !Number.isFinite(id)) throw new ApiFailure(400, "INVALID_FILTER", { field: "cursor" });
+    if (!Number.isFinite(at) || !Number.isFinite(id))
+      throw new ApiFailure(400, "INVALID_FILTER", { field: "cursor" });
     rest = rows.filter((row) => row.at_millis < at || (row.at_millis === at && row.id < id));
   }
   const page = rest.slice(0, limit);
@@ -383,8 +410,10 @@ function listRequests(call: Call): Answer {
 function countRequests(call: Call): Answer {
   const rows = matchRows(call.params, true);
   const judged = rows.filter((row) => !HIDDEN_PATHS.has(row.decision_path));
-  const outcomeCount = (outcome: Outcome): number => judged.filter((row) => row.outcome === outcome).length;
-  const pathCount = (path: DecisionPath): number => rows.filter((row) => row.decision_path === path).length;
+  const outcomeCount = (outcome: Outcome): number =>
+    judged.filter((row) => row.outcome === outcome).length;
+  const pathCount = (path: DecisionPath): number =>
+    rows.filter((row) => row.decision_path === path).length;
   const blocked = outcomeCount("blocked");
   const wouldBlock = outcomeCount("would_block");
   const unjudged = outcomeCount("unjudged");
@@ -427,7 +456,8 @@ function csvCell(value: unknown): string {
 
 function exportRequests(call: Call): Answer {
   const format = call.params.get("format") ?? "jsonl";
-  if (format !== "jsonl" && format !== "csv") throw new ApiFailure(400, "INVALID_FILTER", { field: "format" });
+  if (format !== "jsonl" && format !== "csv")
+    throw new ApiFailure(400, "INVALID_FILTER", { field: "format" });
   const rows = matchRows(call.params, false).slice(0, 100_000);
   if (format === "jsonl") {
     return {
@@ -442,7 +472,7 @@ function exportRequests(call: Call): Answer {
     status: 200,
     type: "text/csv; charset=utf-8",
     headers: { "content-disposition": 'attachment; filename="requests.csv"' },
-    text: [CSV_COLUMNS.join(","), ...lines].join("\r\n") + "\r\n",
+    text: `${[CSV_COLUMNS.join(","), ...lines].join("\r\n")}\r\n`,
   };
 }
 
@@ -456,14 +486,18 @@ function lookupRequests(call: Call): Answer {
   return ok({
     rows: unique.map((id) => {
       const row = ROWS_BY_ID.get(id);
-      return row === undefined ? { request_id: id, found: false } : { request_id: id, found: true, summary: row };
+      return row === undefined
+        ? { request_id: id, found: false }
+        : { request_id: id, found: true, summary: row };
     }),
   });
 }
 
 // ------------------------------------------------------------------ request detail
 
-const FIXTURE_DETAILS = new Map(requestDetails.map((detail) => [detail.summary.request_id, detail]));
+const FIXTURE_DETAILS = new Map(
+  requestDetails.map((detail) => [detail.summary.request_id, detail]),
+);
 
 function requestDetail(id: string): Answer {
   const fixture = FIXTURE_DETAILS.get(id as RequestId);
@@ -495,7 +529,15 @@ function jevFromSummary(row: RequestRow): JevRecord | null {
   const access = jev.access;
   const attack = jev.attack;
   const conclusion: JevConclusion | null =
-    jev.failure === "JEV_CALL_LIMIT" ? null : access === null ? "unknown" : access === "DENY" || attack === "ATTACK" ? "deny" : access === "ALLOW" ? "allow" : "unknown";
+    jev.failure === "JEV_CALL_LIMIT"
+      ? null
+      : access === null
+        ? "unknown"
+        : access === "DENY" || attack === "ATTACK"
+          ? "deny"
+          : access === "ALLOW"
+            ? "allow"
+            : "unknown";
   return {
     state:
       jev.failure === "JEV_CALL_LIMIT"
@@ -515,8 +557,14 @@ function jevFromSummary(row: RequestRow): JevRecord | null {
     http_status: jev.failure === null ? 200 : null,
     response: null,
     usage: null,
-    access: access === null ? null : { [access]: jev.confidence ?? 0 } as Partial<Record<JevAccess, number>>,
-    attack: attack === null ? null : { [attack]: jev.confidence ?? 0 } as Partial<Record<JevAttack, number>>,
+    access:
+      access === null
+        ? null
+        : ({ [access]: jev.confidence ?? 0 } as Partial<Record<JevAccess, number>>),
+    attack:
+      attack === null
+        ? null
+        : ({ [attack]: jev.confidence ?? 0 } as Partial<Record<JevAttack, number>>),
     conclusion,
     millis: jev.ms,
     failure: jev.failure,
@@ -532,7 +580,10 @@ function listSessions(call: Call): Answer {
   const until = numberParam(call.params, "until_millis") ?? FIXTURE_NOW_MS;
   const limit = numberParam(call.params, "limit") ?? 200;
   let rows = sessionList.rows.filter(
-    (row) => (site === null || row.site === site) && row.last_at_millis >= since && row.first_at_millis <= until,
+    (row) =>
+      (site === null || row.site === site) &&
+      row.last_at_millis >= since &&
+      row.first_at_millis <= until,
   );
   if (flag === "blocked") rows = rows.filter((row) => row.blocked > 0);
   if (flag === "jev") rows = rows.filter((row) => row.jev_calls > 0);
@@ -546,7 +597,13 @@ function sessionDetail(label: string): Answer {
   // Other sessions are built from the request list; the trace-only columns stay empty.
   const rows: TimelineRow[] = ALL_ROWS.filter((row) => row.session === label)
     .reverse()
-    .map((row) => ({ ...row, learned: null, entry_passed: false, issued_session: null, after_would_block: false }));
+    .map((row) => ({
+      ...row,
+      learned: null,
+      entry_passed: false,
+      issued_session: null,
+      after_would_block: false,
+    }));
   return ok({ summary: summaryRow, rows, next_cursor: null });
 }
 
@@ -561,11 +618,16 @@ function summaryOf(detail: SiteDetail): SiteSummary {
 
 function specOf(call: Call): SiteSpec {
   const spec = (call.body as { spec?: SiteSpec } | undefined)?.spec;
-  if (spec === undefined || typeof spec !== "object") throw new ApiFailure(400, "SITE_CONFIG_MALFORMED");
+  if (spec === undefined || typeof spec !== "object")
+    throw new ApiFailure(400, "SITE_CONFIG_MALFORMED");
   return spec;
 }
 
-function siteOr(state: State, match: RegExpMatchArray, found: (site: SiteDetail) => Answer): Answer {
+function siteOr(
+  state: State,
+  match: RegExpMatchArray,
+  found: (site: SiteDetail) => Answer,
+): Answer {
   const site = state.sites.get(decodeURIComponent(match[1] ?? ""));
   return site === undefined ? { status: 404, body: { error: "SITE_NOT_FOUND" } } : found(site);
 }
@@ -626,7 +688,12 @@ function commit(
   const version = current.version + 1;
   const changedAt = new Date().toISOString().replace(".000Z", "Z");
   const mode = spec.mode ?? "observe";
-  const observing = mode === "observe" ? (current.mode === "observe" ? current.observing_since_millis : Date.now()) : null;
+  const observing =
+    mode === "observe"
+      ? current.mode === "observe"
+        ? current.observing_since_millis
+        : Date.now()
+      : null;
   const next = applyLoad(
     {
       ...current,
@@ -659,7 +726,8 @@ function createSite(call: Call, state: State, options: MockOptions): Answer {
   const note = (call.body as { note?: string } | undefined)?.note ?? null;
   if (state.sites.has(spec.name)) throw new ApiFailure(409, "SITE_EXISTS");
   const clash = hostClash(spec.name, spec.hosts, state);
-  if (clash !== null) throw new ApiFailure(409, "SITE_HOST_TAKEN", { field: `hosts[${spec.hosts.indexOf(clash)}]` });
+  if (clash !== null)
+    throw new ApiFailure(409, "SITE_HOST_TAKEN", { field: `hosts[${spec.hosts.indexOf(clash)}]` });
   const now = new Date().toISOString().replace(".000Z", "Z");
   const base: SiteDetail = {
     name: spec.name,
@@ -688,11 +756,21 @@ function createSite(call: Call, state: State, options: MockOptions): Answer {
 
 /** Edge rows of a new site, one per gateway on the system page, none loaded yet. */
 function siteEdges(): EdgeLoad[] {
-  return system.edges.map((edge) => ({ edge: edge.edge, version: null, error: null, loaded_at_millis: null }));
+  return system.edges.map((edge) => ({
+    edge: edge.edge,
+    version: null,
+    error: null,
+    loaded_at_millis: null,
+  }));
 }
 
 function siteRollout(): EdgeRollout[] {
-  return system.edges.map((edge) => ({ edge: edge.edge, online: edge.online, loaded_version: null, error: null }));
+  return system.edges.map((edge) => ({
+    edge: edge.edge,
+    online: edge.online,
+    loaded_version: null,
+    error: null,
+  }));
 }
 
 function saveSite(match: RegExpMatchArray, call: Call, state: State, options: MockOptions): Answer {
@@ -704,7 +782,8 @@ function saveSite(match: RegExpMatchArray, call: Call, state: State, options: Mo
   const write = call.body as { expected_version?: number; note?: string };
   checkExpected(current, write.expected_version);
   const clash = hostClash(name, spec.hosts, state);
-  if (clash !== null) throw new ApiFailure(409, "SITE_HOST_TAKEN", { field: `hosts[${spec.hosts.indexOf(clash)}]` });
+  if (clash !== null)
+    throw new ApiFailure(409, "SITE_HOST_TAKEN", { field: `hosts[${spec.hosts.indexOf(clash)}]` });
   return ok(commit(state, current, spec, "update", write.note ?? null, null, options));
 }
 
@@ -728,7 +807,12 @@ function versionOne(match: RegExpMatchArray, state: State): Answer {
   return found === undefined ? notFound() : ok(found);
 }
 
-function rollbackSite(match: RegExpMatchArray, call: Call, state: State, options: MockOptions): Answer {
+function rollbackSite(
+  match: RegExpMatchArray,
+  call: Call,
+  state: State,
+  options: MockOptions,
+): Answer {
   const name = decodeURIComponent(match[1] ?? "");
   const current = state.sites.get(name);
   if (current === undefined) return { status: 404, body: { error: "SITE_NOT_FOUND" } };
@@ -737,7 +821,9 @@ function rollbackSite(match: RegExpMatchArray, call: Call, state: State, options
   const target = state.versions.get(name)?.find((item) => item.version === body.to_version);
   if (target === undefined) return notFound();
   if (target.spec === null) throw new ApiFailure(409, "ROLLBACK_TARGET_DELETED");
-  return ok(commit(state, current, target.spec, "rollback", body.note ?? null, body.to_version, options));
+  return ok(
+    commit(state, current, target.spec, "rollback", body.note ?? null, body.to_version, options),
+  );
 }
 
 /** The checks a draft gets before it is saved (the server rules, 7.9.12, in short form). */
@@ -755,10 +841,15 @@ function validateSpec(spec: SiteSpec): ValidateResult {
     return { valid: false, error: "SITE_CONFIG_ENTRIES_INVALID", field: "entries" };
   }
   const badEntry = spec.entries.findIndex((entry) => !entry.startsWith("/") || entry.includes("?"));
-  if (badEntry >= 0) return { valid: false, error: "SITE_CONFIG_ENTRIES_INVALID", field: `entries[${badEntry}]` };
+  if (badEntry >= 0)
+    return { valid: false, error: "SITE_CONFIG_ENTRIES_INVALID", field: `entries[${badEntry}]` };
   const timeout = spec.advanced?.jev_timeout_ms;
   if (timeout !== undefined && (timeout < 100 || timeout > 30_000)) {
-    return { valid: false, error: "SITE_CONFIG_ADVANCED_INVALID", field: "advanced.jev_timeout_ms" };
+    return {
+      valid: false,
+      error: "SITE_CONFIG_ADVANCED_INVALID",
+      field: "advanced.jev_timeout_ms",
+    };
   }
   return { valid: true };
 }
@@ -775,5 +866,10 @@ function importLines(call: Call): Answer {
       errorLines.push(index + 1);
     }
   });
-  return ok({ imported, skipped: 0, errors: errorLines.length, error_lines: errorLines.slice(0, 20) });
+  return ok({
+    imported,
+    skipped: 0,
+    errors: errorLines.length,
+    error_lines: errorLines.slice(0, 20),
+  });
 }

@@ -13,8 +13,18 @@
       "sessions": 1841,
       "queue": 3,
       "written": 1820422,
-      "dropped": 37,
+      "dropped": 31,
+      "dropped_bypass": 6,
       "write_errors": 0,
+      "gaps": [
+        {
+          "from_ms": 1793538600000,
+          "to_ms": 1793538720000,
+          "dropped": 31,
+          "dropped_bypass": 6,
+          "write_errors": 0
+        }
+      ],
       "sites": {
         "emr": {
           "version": 13
@@ -43,7 +53,17 @@
       "queue": 1200,
       "written": 1603011,
       "dropped": 0,
-      "write_errors": 0,
+      "dropped_bypass": 0,
+      "write_errors": 5,
+      "gaps": [
+        {
+          "from_ms": 1793445600000,
+          "to_ms": 1793445960000,
+          "dropped": 0,
+          "dropped_bypass": 0,
+          "write_errors": 5
+        }
+      ],
       "sites": {
         "emr": {
           "version": 12
@@ -72,7 +92,9 @@
       "queue": 0,
       "written": 412004,
       "dropped": 0,
+      "dropped_bypass": 0,
       "write_errors": 0,
+      "gaps": [],
       "sites": {
         "emr": {
           "version": 12
@@ -118,22 +140,6 @@
         "name": "decision_log_p20261103",
         "rows": 0,
         "bytes": 0
-      }
-    ],
-    "gaps": [
-      {
-        "edge": "edge-1",
-        "from_millis": 1793538600000,
-        "to_millis": 1793538720000,
-        "rows": 37,
-        "reason": "queue_full"
-      },
-      {
-        "edge": "edge-2",
-        "from_millis": 1793445600000,
-        "to_millis": 1793445960000,
-        "rows": 5,
-        "reason": "write_error"
       }
     ]
   },

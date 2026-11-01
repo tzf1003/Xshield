@@ -24,7 +24,15 @@ type Props = {
   onPrompt: () => void;
 };
 
-export function JevAnswerArea({ jev, outcome, status, path, defaultTimeout, stateBytes, onPrompt }: Props) {
+export function JevAnswerArea({
+  jev,
+  outcome,
+  status,
+  path,
+  defaultTimeout,
+  stateBytes,
+  onPrompt,
+}: Props) {
   const gateway = gatewayText(outcome, status, path);
   const usage: Record<string, unknown> = jev.usage ?? {};
   const input = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
@@ -46,7 +54,10 @@ export function JevAnswerArea({ jev, outcome, status, path, defaultTimeout, stat
         </>
       )}
 
-      <div className="jevmeta" title={jev.request_bytes !== null ? `完整请求体 ${fmtBytes(jev.request_bytes)}` : undefined}>
+      <div
+        className="jevmeta"
+        title={jev.request_bytes !== null ? `完整请求体 ${fmtBytes(jev.request_bytes)}` : undefined}
+      >
         模型 <span className="mono">{jev.model}</span> · {ROUTE_LABEL[jev.route]} · 指令{" "}
         <button type="button" className="linkbtn mono" onClick={onPrompt}>
           {jev.prompt}
@@ -72,10 +83,11 @@ export function JevAnswerArea({ jev, outcome, status, path, defaultTimeout, stat
 
       {stateBytes !== null ? (
         <div className="rd-gauge-row">
-          <span className="small tnum">
-            state {fmtBytes(stateBytes)} / 8 KiB
-          </span>
-          <Gauge ratio={stateBytes / STATE_LIMIT_BYTES} label={`state 占 8 KiB 上限的 ${pct(stateBytes / STATE_LIMIT_BYTES)}`} />
+          <span className="small tnum">state {fmtBytes(stateBytes)} / 8 KiB</span>
+          <Gauge
+            ratio={stateBytes / STATE_LIMIT_BYTES}
+            label={`state 占 8 KiB 上限的 ${pct(stateBytes / STATE_LIMIT_BYTES)}`}
+          />
           {trim !== null ? <div className="small dim">{trim}</div> : null}
         </div>
       ) : null}

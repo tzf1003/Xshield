@@ -55,7 +55,9 @@ export function DiffView({ ops, mode = "unified" }: { ops: LineOp[]; mode?: "uni
             <div className={`diff-cell ${pair.left?.op ?? "empty"}`} role="cell">
               {pair.left ? (
                 <>
-                  <span className="sign" aria-hidden="true">{SIGN[pair.left.op]}</span>
+                  <span className="sign" aria-hidden="true">
+                    {SIGN[pair.left.op]}
+                  </span>
                   <span>{pair.left.text}</span>
                 </>
               ) : null}
@@ -63,7 +65,9 @@ export function DiffView({ ops, mode = "unified" }: { ops: LineOp[]; mode?: "uni
             <div className={`diff-cell ${pair.right?.op ?? "empty"}`} role="cell">
               {pair.right ? (
                 <>
-                  <span className="sign" aria-hidden="true">{SIGN[pair.right.op]}</span>
+                  <span className="sign" aria-hidden="true">
+                    {SIGN[pair.right.op]}
+                  </span>
                   <span>{pair.right.text}</span>
                 </>
               ) : null}
@@ -86,7 +90,9 @@ export function DiffView({ ops, mode = "unified" }: { ops: LineOp[]; mode?: "uni
             {SIGN[op.op]}
           </span>
           <span>
-            <span className="sr-only">{op.op === "add" ? "新增 " : op.op === "del" ? "删除 " : ""}</span>
+            <span className="sr-only">
+              {op.op === "add" ? "新增 " : op.op === "del" ? "删除 " : ""}
+            </span>
             {op.text}
           </span>
         </div>

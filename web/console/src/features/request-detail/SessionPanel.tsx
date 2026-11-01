@@ -79,16 +79,18 @@ export function SessionSummary({
           <div className="small dim">没有记录经过的入口</div>
         ) : (
           <ul className="rd-list">
-            {keyed(entries, (entry) => `${entry.path}|${entry.request_id ?? ""}`).map(({ key, item }) => (
-              <li key={key}>
-                <LinkedRequest id={item.request_id} className="mono">
-                  <SafeText text={item.path} />
-                </LinkedRequest>
-                {item.at_millis !== null ? (
-                  <span className="small dim tnum"> · {fmtLocalDateTime(item.at_millis)}</span>
-                ) : null}
-              </li>
-            ))}
+            {keyed(entries, (entry) => `${entry.path}|${entry.request_id ?? ""}`).map(
+              ({ key, item }) => (
+                <li key={key}>
+                  <LinkedRequest id={item.request_id} className="mono">
+                    <SafeText text={item.path} />
+                  </LinkedRequest>
+                  {item.at_millis !== null ? (
+                    <span className="small dim tnum"> · {fmtLocalDateTime(item.at_millis)}</span>
+                  ) : null}
+                </li>
+              ),
+            )}
           </ul>
         )}
       </div>
@@ -99,16 +101,18 @@ export function SessionSummary({
           <div className="small dim">最近访问只在调用 Jev 的记录里保存；完整顺序见会话时间线。</div>
         ) : (
           <ul className="rd-list">
-            {keyed(recent, (item) => `${item.method} ${item.path}|${item.at_millis ?? ""}|${item.request_id ?? ""}`).map(
-              ({ key, item }) => (
-                <li key={key}>
-                  <LinkedRequest id={item.request_id} className="mono">
-                    <SafeText text={`${item.method} ${item.path}`} />
-                  </LinkedRequest>{" "}
-                  <span className="small dim tnum">{item.status ?? "—"}</span>
-                </li>
-              ),
-            )}
+            {keyed(
+              recent,
+              (item) =>
+                `${item.method} ${item.path}|${item.at_millis ?? ""}|${item.request_id ?? ""}`,
+            ).map(({ key, item }) => (
+              <li key={key}>
+                <LinkedRequest id={item.request_id} className="mono">
+                  <SafeText text={`${item.method} ${item.path}`} />
+                </LinkedRequest>{" "}
+                <span className="small dim tnum">{item.status ?? "—"}</span>
+              </li>
+            ))}
           </ul>
         )}
       </div>
@@ -116,7 +120,12 @@ export function SessionSummary({
       {issued !== null && isSessionLabel(issued) ? (
         <div className="small">
           这次响应签发了会话{" "}
-          <Link to="/sessions/$label" params={{ label: issued }} search={timelineSearch(requestId)} className="mono">
+          <Link
+            to="/sessions/$label"
+            params={{ label: issued }}
+            search={timelineSearch(requestId)}
+            className="mono"
+          >
             {shortSession(issued)}…
           </Link>
         </div>

@@ -14,6 +14,7 @@ import { ErrorBar, Loading } from "../../ui/Page.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { ImpactView } from "./ImpactPreview.tsx";
 import { type Choices, rebaseSpec, sameJson, valueText } from "./spec-model.ts";
+import { serverProblem } from "./site-messages.ts";
 
 type Props = {
   site: SiteDetail;
@@ -33,16 +34,6 @@ type Rebase = {
   choices: Choices;
 };
 
-/** The server's message for a refused configuration; a host clash names the host (docs/06 6.6.5). */
-function serverProblem(code: string, field: string | undefined, spec: SiteSpec): string {
-  if (code === "SITE_HOST_TAKEN" && field) {
-    const index = /^hosts\[(\d+)\]$/.exec(field)?.[1];
-    const host = index === undefined ? field : spec.hosts[Number(index)];
-    return `Host ${host ?? field} 已属于其他站点`;
-  }
-  return errorText(code);
-}
-
 export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDiscard }: Props) {
   const save = useSaveSite();
   const validate = useValidate();
@@ -54,7 +45,8 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
   const [showLatest, setShowLatest] = useState(false);
   const [rebase, setRebase] = useState<Rebase | null>(null);
 
-  const base = versions.data?.versions.find((item) => item.version === baseVersion)?.spec ?? site.spec;
+  const base =
+    versions.data?.versions.find((item) => item.version === baseVersion)?.spec ?? site.spec;
   const rebased = useMemo(
     () => (rebase ? rebaseSpec(rebase.base, rebase.mine, rebase.latest, rebase.choices) : null),
     [rebase],
@@ -72,12 +64,17 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
   }, [localOk, validateRemote, working]);
 
   const remote =
-    validate.variables !== undefined && sameJson(validate.variables, working) ? validate.data : undefined;
+    validate.variables !== undefined && sameJson(validate.variables, working)
+      ? validate.data
+      : undefined;
   const remoteProblem =
     remote && !remote.valid ? serverProblem(remote.error, remote.field, working) : null;
   const changes = semanticChanges(current, working);
   const unchanged = canonical(current) === canonical(working);
-  const unresolved = rebased && rebase ? rebased.conflicts.filter((item) => rebase.choices[item.field] === undefined).length : 0;
+  const unresolved =
+    rebased && rebase
+      ? rebased.conflicts.filter((item) => rebase.choices[item.field] === undefined).length
+      : 0;
   const conflictBlocked = conflict !== null && rebase === null;
   const canSave =
     localOk &&
@@ -86,7 +83,8 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
     !save.isPending &&
     !conflictBlocked &&
     unresolved === 0;
-  const saveError = save.error instanceof ApiError && save.error.code === "VERSION_CONFLICT" ? null : save.error;
+  const saveError =
+    save.error instanceof ApiError && save.error.code === "VERSION_CONFLICT" ? null : save.error;
 
   const submit = () => {
     save.mutate(
@@ -120,7 +118,9 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
   };
 
   const choose = (field: string, choice: "mine" | "theirs") => {
-    setRebase((previous) => (previous ? { ...previous, choices: { ...previous.choices, [field]: choice } } : previous));
+    setRebase((previous) =>
+      previous ? { ...previous, choices: { ...previous.choices, [field]: choice } } : previous,
+    );
   };
 
   const latestChanges = latest.data ? semanticChanges(base, latest.data.spec) : [];
@@ -135,7 +135,11 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
               配置已被修改（当前 v{theirVersion}）。你的改动基于 v{baseVersion}，保存前需要先处理。
             </div>
             <div className="row" style={{ marginTop: 8 }}>
-              <button type="button" className="linkbtn" onClick={() => setShowLatest((value) => !value)}>
+              <button
+                type="button"
+                className="linkbtn"
+                onClick={() => setShowLatest((value) => !value)}
+              >
                 查看 v{theirVersion} 的改动
               </button>
               <button type="button" className="btn" disabled={!latest.data} onClick={startRebase}>
@@ -146,7 +150,11 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
               </button>
             </div>
             {showLatest ? (
-              <ul className="changes" aria-label={`v${theirVersion} 的改动`} style={{ marginTop: 8 }}>
+              <ul
+                className="changes"
+                aria-label={`v${theirVersion} 的改动`}
+                style={{ marginTop: 8 }}
+              >
                 {latestChanges.length === 0 ? <li>没有可以列出的改动。</li> : null}
                 {latestChanges.map((change) => (
                   <li key={change}>· {change}</li>
@@ -244,7 +252,9 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
         ) : null}
 
         <div aria-live="polite" className="small">
-          {validate.isPending && remote === undefined ? <span className="muted">正在校验…</span> : null}
+          {validate.isPending && remote === undefined ? (
+            <span className="muted">正在校验…</span>
+          ) : null}
           {remoteProblem ? (
             <span className="field-error" role="alert">
               {remoteProblem}
