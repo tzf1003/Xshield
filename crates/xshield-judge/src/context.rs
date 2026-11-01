@@ -184,8 +184,17 @@ fn kind_words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Words for one kind of object that differ between a field and the endpoint
+/// that lists it (`paymentId` selects a card of `/api/Cards`).
+const SYNONYMS: [(&str, &str); 1] = [("payment", "card")];
+
 fn related(left: &str, right: &str) -> bool {
-    left.contains(right) || right.contains(left)
+    left.contains(right)
+        || right.contains(left)
+        || SYNONYMS.iter().any(|(first, second)| {
+            (left.contains(first) && right.contains(second))
+                || (left.contains(second) && right.contains(first))
+        })
 }
 
 /// One remembered request.
@@ -472,6 +481,17 @@ mod tests {
         let ranked = seen.ranked("/api/BasketItems/", Some("ProductId"));
         assert_eq!(ranked.last().unwrap().request, "GET /rest/products/search");
         assert_eq!(ranked[0].field, "quantity");
+    }
+
+    #[test]
+    fn a_payment_id_is_a_card_the_list_showed() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(&key, "GET /api/Cards", &[response("id", "7")]);
+        let seen = session.lookup(&key, "7").unwrap();
+        assert!(seen.is_specific("7", "/rest/basket/22/checkout", Some("paymentId")));
+        assert!(!seen.is_specific("7", "/rest/basket/22/checkout", Some("addressId")));
     }
 
     #[test]

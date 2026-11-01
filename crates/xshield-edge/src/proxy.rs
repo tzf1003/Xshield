@@ -374,6 +374,7 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
             site.spec(),
             &Observation {
                 credential: ctx.credential.as_deref(),
+                client: &ctx.client,
                 issued_credential: ctx.issued.as_deref(),
                 method: request.method.as_str(),
                 path: request.uri.path(),

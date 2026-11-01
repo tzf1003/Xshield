@@ -85,6 +85,7 @@ async fn live_business_traffic_and_evasions() {
         &site,
         &Observation {
             credential: Some("doctorA"),
+            client: "10.0.0.1",
             issued_credential: None,
             method: "GET",
             path: "/api/patients",
@@ -239,6 +240,7 @@ async fn live_acceptance_scenarios() {
             &site,
             &Observation {
                 credential: Some(session),
+                client: "10.0.0.1",
                 issued_credential: None,
                 method: "GET",
                 path: "/api/patients",
@@ -254,6 +256,7 @@ async fn live_acceptance_scenarios() {
         &site,
         &Observation {
             credential: Some("recipient"),
+            client: "10.0.0.1",
             issued_credential: None,
             method: "POST",
             path: "/api/share/redeem",
@@ -425,8 +428,7 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
 /// The Juice Shop checkout flow recorded on the Windows trial (docs/04 section
 /// 4.5): camel-case route names, small numeric ids and card fields that the
 /// first trial answered DENY for although every id had been shown. The
-/// checkout POST itself is left out: the model still answers DENY at about
-/// 0.55 because `paymentId` 7 was shown only as a card id (docs/04 section 4.5).
+/// checkout POST is covered too: `paymentId` 7 was shown only as a card id.
 #[tokio::test]
 #[ignore = "needs XSHIELD_JEV_API_KEY and network access"]
 async fn live_juice_shop_checkout_flow() {
@@ -445,6 +447,7 @@ async fn live_juice_shop_checkout_flow() {
             &site,
             &Observation {
                 credential: Some("tokenA"),
+                client: "10.0.0.1",
                 issued_credential: None,
                 method: "GET",
                 path,
@@ -594,10 +597,81 @@ async fn live_juice_shop_checkout_flow() {
             true,
         ),
         post(
+            "checkout own basket",
+            "/rest/basket/22/checkout",
+            r#"{"couponData":"bnVsbA==","orderDetails":{"paymentId":"7","addressId":"7","deliveryMethodId":"1"}}"#,
+            Some("tokenA"),
+            false,
+        ),
+        post(
             "checkout foreign basket",
             "/rest/basket/1/checkout",
             r#"{"couponData":"bnVsbA==","orderDetails":{"paymentId":"7","addressId":"7","deliveryMethodId":"1"}}"#,
             Some("tokenA"),
+            true,
+        ),
+    ];
+    run(&judge, &site, &cases, 2_000).await;
+}
+
+/// The Juice Shop sign-up flow: a client without a session is shown the
+/// security questions and the id of the user it just created, then answers
+/// with both. The first third Windows round judged that DENY.
+#[tokio::test]
+#[ignore = "needs XSHIELD_JEV_API_KEY and network access"]
+async fn live_juice_shop_sign_up_flow() {
+    let judge = Judge::new(
+        ContextKey::new(vec![6; 32]),
+        JevClient::from_environment().expect("Jev configuration"),
+    );
+    let site = SiteSpec::from_json(
+        r#"{"name":"juice","hosts":["juice.test"],"origin":"http://o:1","session":{"cookie":"token"},
+            "entries":["/","/rest/user/login","/api/Users/","/api/SecurityQuestions/","/api/SecurityAnswers/"],
+            "bypass":["/assets/*"],"mode":"enforce"}"#,
+    )
+    .expect("site");
+    for (method, path, body, now_ms) in [
+        (
+            "GET",
+            "/api/SecurityQuestions/",
+            br#"{"status":"success","data":[{"id":1,"question":"Your eldest siblings middle name?"},{"id":2,"question":"Mother's maiden name?"}]}"#.as_slice(),
+            1_000,
+        ),
+        (
+            "POST",
+            "/api/Users/",
+            br#"{"status":"success","data":{"id":52,"email":"new.user@example.com","role":"customer","isActive":true}}"#.as_slice(),
+            1_001,
+        ),
+    ] {
+        judge.observe(
+            &site,
+            &Observation {
+                credential: None,
+                client: "10.0.0.1",
+                issued_credential: None,
+                method,
+                path,
+                status: 200,
+                content_type: Some("application/json"),
+                body,
+                now_ms,
+            },
+        );
+    }
+    let cases = [
+        post(
+            "answer for the user just created",
+            "/api/SecurityAnswers/",
+            r#"{"UserId":52,"answer":"iYPJ_o3lz87lCk1v8arjsUK1","SecurityQuestionId":1}"#,
+            None,
+            false,
+        ),
+        post(
+            "answer for someone else's user",
+            "/api/SecurityAnswers/",
+            r#"{"UserId":1,"answer":"iYPJ_o3lz87lCk1v8arjsUK1","SecurityQuestionId":1}"#,
+            None,
             true,
         ),
     ];
