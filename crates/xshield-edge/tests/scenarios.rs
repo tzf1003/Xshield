@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use pingora::prelude::Opt;
 use serde_json::{Value, json};
-use xshield_core::context::{DecisionPath, DecisionRecord, Outcome, SiteSpec};
+use xshield_core::context::{DecisionPath, DecisionRecord, Outcome, SiteSpec, Skip};
 use xshield_edge::proxy::EdgeProxy;
 use xshield_edge::server::build_server;
 use xshield_edge::sink::DecisionSink;
@@ -44,7 +44,19 @@ impl JevPort for ScriptedJev {
         "scripted"
     }
 
-    async fn ask(&self, body: Vec<u8>) -> Result<Vec<u8>, JevFailure> {
+    fn route(&self) -> &'static str {
+        "scripted"
+    }
+
+    fn endpoint_host(&self) -> &'static str {
+        "scripted.test"
+    }
+
+    fn default_timeout(&self) -> Duration {
+        Duration::from_secs(2)
+    }
+
+    async fn ask(&self, body: Vec<u8>, _timeout: Duration) -> Result<Vec<u8>, JevFailure> {
         let document: Value = serde_json::from_slice(&body).expect("request is JSON");
         let request = &document["state"]["request"];
         let text = request.to_string().to_ascii_lowercase();
@@ -214,7 +226,7 @@ fn site(name: &str, host: &str, origin_port: u16, extra: &str) -> Arc<EdgeSite> 
            "entries":["/login","/api/home","/api/patients","/share/*"],
            "bypass":["/static/*"]{extra}}}"#
     );
-    Arc::new(EdgeSite::new(SiteSpec::from_json(&json).expect("spec")).expect("site"))
+    Arc::new(EdgeSite::new(SiteSpec::from_json(&json).expect("spec"), 1).expect("site"))
 }
 
 fn harness() -> &'static Harness {
@@ -223,6 +235,8 @@ fn harness() -> &'static Harness {
         let origin_hits = Arc::new(Mutex::new(Vec::new()));
         let origin_port = origin(Arc::clone(&origin_hits));
         let table = Arc::new(SiteTable::new());
+        // A port with nothing listening: the origin refuses the connection.
+        let closed_port = free_port();
         table.replace(vec![
             site(
                 "enforce",
@@ -231,6 +245,7 @@ fn harness() -> &'static Harness {
                 r#","mode":"enforce""#,
             ),
             site("observe", "observe.test", origin_port, ""),
+            site("down", "down.test", closed_port, ""),
             site(
                 "lenient",
                 "lenient.test",
@@ -249,7 +264,7 @@ fn harness() -> &'static Harness {
         let judge = Arc::new(Judge::new(ContextKey::new(vec![9; 32]), ScriptedJev));
         let edge_port = free_port();
         let server = build_server(
-            EdgeProxy::new(table, judge, sink),
+            EdgeProxy::new(table, judge, sink, "edge-test".to_owned()),
             &[format!("127.0.0.1:{edge_port}")],
             None,
             Some(Opt::default()),
@@ -377,6 +392,20 @@ fn a1_a_patient_from_the_list_is_opened_without_asking_jev() {
     assert_eq!(row.outcome, Outcome::Allowed);
     assert_eq!(row.status, Some(200));
     assert!(row.jev.is_none());
+    // The id was shown by the list, so its source is that list request.
+    let id = row
+        .trace
+        .values
+        .iter()
+        .find(|value| value.at == "path[2]")
+        .expect("the patient id");
+    assert_eq!(
+        id.sources[0].request_id.as_deref(),
+        Some(listed.request_id.as_str())
+    );
+    assert_eq!(row.site_version, Some(1));
+    assert_eq!(row.edge, "edge-test");
+    assert_eq!(row.host, "enforce.test");
 }
 
 #[test]
@@ -403,7 +432,10 @@ fn a3_a_session_that_never_listed_anything_is_refused() {
     assert_eq!(origin_saw("/api/patients/patient-B-a3"), 0);
     let anonymous = get("enforce.test", "/api/patients/patient-B-a3", None);
     assert_eq!(anonymous.status, 401);
-    assert_eq!(record(&anonymous).decision_path, DecisionPath::NoSession);
+    let row = record(&anonymous);
+    assert_eq!(row.decision_path, DecisionPath::NoSession);
+    let response = row.trace.response.expect("a refused request says so");
+    assert_eq!(response.skip, Some(Skip::NotForwarded));
 }
 
 #[test]
@@ -468,7 +500,10 @@ fn c3_observe_mode_forwards_and_logs_would_block() {
     let reply = get("observe.test", "/api/patients/patient-D-c3", Some("s-c3"));
     assert_eq!(reply.status, 200);
     assert_eq!(origin_saw("/api/patients/patient-D-c3"), 1);
-    assert_eq!(record(&reply).outcome, Outcome::WouldBlock);
+    let row = record(&reply);
+    assert_eq!(row.outcome, Outcome::WouldBlock);
+    let response = row.trace.response.expect("the response was observed");
+    assert!(response.after_would_block);
 }
 
 #[test]
@@ -492,7 +527,14 @@ fn a_login_redirect_creates_the_session_the_next_requests_use() {
         Some("sess-nurse1"),
     );
     assert_eq!(opened.status, 200);
-    assert_eq!(record(&opened).decision_path, DecisionPath::FastAllow);
+    let next = record(&opened);
+    assert_eq!(next.decision_path, DecisionPath::FastAllow);
+    // The session the login issued is the one the later requests carry.
+    let issued = record(&login)
+        .trace
+        .response
+        .and_then(|response| response.issued_session);
+    assert_eq!(issued.as_deref(), Some(next.session.as_str()));
 }
 
 #[test]
@@ -513,6 +555,13 @@ fn request_bodies_reach_the_origin_intact_and_oversized_ones_are_refused() {
     );
     assert_eq!(refused.status, 413);
     assert_eq!(origin_saw("/api/notes-big"), 0);
+    let row = record(&refused);
+    assert_eq!(row.decision_path, DecisionPath::BodyNotInspectable);
+    assert_eq!(row.outcome, Outcome::Blocked);
+    assert_eq!(row.status, Some(413));
+    assert_eq!(row.site.as_deref(), Some("enforce"));
+    assert_eq!(row.site_version, Some(1));
+    assert_eq!(row.trace.refused.as_deref(), Some("body_not_inspectable"));
 
     // Bypass paths are not judged, so large uploads stream through untouched.
     let upload = call(
@@ -524,13 +573,42 @@ fn request_bodies_reach_the_origin_intact_and_oversized_ones_are_refused() {
     );
     assert_eq!(upload.status, 200);
     assert_eq!(upload.body.len(), 60_000);
+    assert_eq!(record(&upload).decision_path, DecisionPath::Bypass);
 }
 
 #[test]
-fn static_paths_and_unknown_hosts() {
+fn static_paths_are_forwarded_and_logged_as_bypass() {
     let asset = get("enforce.test", "/static/app.js", None);
     assert_eq!(asset.status, 200);
     assert_eq!(asset.text(), "console.log(1)");
+    let row = record(&asset);
+    assert_eq!(row.decision_path, DecisionPath::Bypass);
+    assert_eq!(row.outcome, Outcome::Allowed);
+    assert_eq!(row.trace.bypass.as_deref(), Some("/static/*"));
+    assert_eq!(row.status, Some(200));
+    let response = row.trace.response.expect("the response summary");
+    assert_eq!(response.skip, Some(Skip::Bypass));
+}
+
+#[test]
+fn unknown_hosts_are_refused_with_a_simple_row() {
     let unknown = get("nobody.test", "/", None);
     assert_eq!(unknown.status, 404);
+    let row = record(&unknown);
+    assert_eq!(row.decision_path, DecisionPath::UnknownSite);
+    assert_eq!(row.outcome, Outcome::Blocked);
+    assert_eq!(row.site, None);
+    assert_eq!(row.status, Some(404));
+    assert_eq!(row.host, "nobody.test");
+    assert_eq!(row.trace.refused.as_deref(), Some("unknown_site"));
+}
+
+#[test]
+fn an_unreachable_origin_is_a_502_with_its_cause() {
+    let reply = get("down.test", "/api/home", None);
+    assert_eq!(reply.status, 502);
+    let row = record(&reply);
+    assert_eq!(row.status, Some(502));
+    assert_eq!(row.trace.upstream_error.as_deref(), Some("connect_refused"));
+    assert_eq!(row.outcome, Outcome::Allowed);
 }

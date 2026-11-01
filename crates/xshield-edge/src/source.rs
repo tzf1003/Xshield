@@ -1,8 +1,8 @@
 //! Where sites come from: the control plane's `site_configs` table, or a JSON
 //! file for development and tests.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::time::Duration;
 use sqlx::{PgPool, Row};
 use xshield_core::context::SiteSpec;
 
-use crate::sites::{EdgeSite, SiteTable};
+use crate::sites::{EdgeSite, HOST_TAKEN, ORIGIN_INVALID, SiteStatus, SiteTable};
 
 /// How often the table is re-read.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -30,7 +30,14 @@ pub struct SiteLoader {
     source: SiteSource,
     table: Arc<SiteTable>,
     known: HashMap<String, (i64, Arc<EdgeSite>)>,
+    losers: Vec<String>,
     last_file: Option<String>,
+}
+
+/// Why a site was not loaded: the stable code for its status, and the detail for stderr.
+struct Rejection {
+    code: String,
+    detail: String,
 }
 
 impl SiteLoader {
@@ -41,14 +48,17 @@ impl SiteLoader {
             source,
             table,
             known: HashMap::new(),
+            losers: Vec::new(),
             last_file: None,
         }
     }
 
-    /// Reads the source once and replaces the table if anything changed.
+    /// Reads the source once, replaces the routes when a site changed, and
+    /// publishes every site's status.
     ///
     /// A site that fails validation keeps its previous version, so a bad edit
-    /// never takes a site offline.
+    /// never takes a site offline; its status then carries both the version it
+    /// still serves and the error.
     ///
     /// # Errors
     /// A message when the source cannot be read at all; the table is then left as it was.
@@ -64,27 +74,37 @@ impl SiteLoader {
             },
         };
         let mut next: HashMap<String, (i64, Arc<EdgeSite>)> = HashMap::new();
-        let mut changed = rows.len() != self.known.len();
+        let mut statuses: BTreeMap<String, SiteStatus> = BTreeMap::new();
         for (name, version, value) in rows {
             if let Some((known_version, site)) = self.known.get(&name)
                 && *known_version == version
             {
+                statuses.insert(name.clone(), SiteStatus::serving(version));
                 next.insert(name, (version, Arc::clone(site)));
                 continue;
             }
-            match build(&value) {
+            match build(&value, version) {
                 Ok(site) => {
-                    changed = true;
+                    statuses.insert(name.clone(), SiteStatus::serving(version));
                     next.insert(name, (version, Arc::new(site)));
                 }
-                Err(error) => {
-                    eprintln!("xshield-edge: site {name} not loaded: {error}");
-                    if let Some(previous) = self.known.get(&name) {
-                        next.insert(name, previous.clone());
+                Err(rejection) => {
+                    eprintln!("xshield-edge: site {name} not loaded: {}", rejection.detail);
+                    let previous = self.known.get(&name).cloned();
+                    let served = previous.as_ref().map(|(version, _)| *version);
+                    statuses.insert(name.clone(), SiteStatus::failed(served, &rejection.code));
+                    if let Some(previous) = previous {
+                        next.insert(name, previous);
                     }
                 }
             }
         }
+        let changed = next.len() != self.known.len()
+            || next.iter().any(|(name, (version, _))| {
+                self.known
+                    .get(name)
+                    .is_none_or(|(known_version, _)| known_version != version)
+            });
         if changed {
             let mut ordered: Vec<_> = next.iter().collect();
             ordered.sort_by(|a, b| a.0.cmp(b.0));
@@ -92,10 +112,19 @@ impl SiteLoader {
                 .iter()
                 .map(|(_, (_, site))| Arc::clone(site))
                 .collect();
-            for loser in self.table.replace(sites) {
+            self.losers = self.table.replace(sites);
+            for loser in &self.losers {
                 eprintln!("xshield-edge: site {loser} shares a host with an earlier site");
             }
         }
+        for loser in &self.losers {
+            if let Some(status) = statuses.get_mut(loser)
+                && status.error.is_none()
+            {
+                status.error = Some(HOST_TAKEN.to_owned());
+            }
+        }
+        self.table.set_statuses(statuses);
         self.known = next;
         Ok(())
     }
@@ -111,9 +140,18 @@ impl SiteLoader {
     }
 }
 
-fn build(value: &serde_json::Value) -> Result<EdgeSite, String> {
-    let spec: SiteSpec = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
-    EdgeSite::new(spec).map_err(|e| e.to_string())
+fn build(value: &serde_json::Value, version: i64) -> Result<EdgeSite, Rejection> {
+    let spec = SiteSpec::from_value(value).map_err(|error| {
+        let code = error.to_string();
+        Rejection {
+            detail: code.clone(),
+            code,
+        }
+    })?;
+    EdgeSite::new(spec, version).map_err(|error| Rejection {
+        code: ORIGIN_INVALID.to_owned(),
+        detail: error.to_string(),
+    })
 }
 
 type Rows = Vec<(String, i64, serde_json::Value)>;
@@ -177,6 +215,8 @@ mod tests {
         let mut loader = SiteLoader::new(SiteSource::File(path.clone()), Arc::clone(&table));
         loader.refresh().await.expect("first");
         assert!(table.find("a.test").is_some());
+        let first = table.statuses()["a"].clone();
+        assert_eq!(first.error, None);
 
         std::fs::write(
             &path,
@@ -186,16 +226,45 @@ mod tests {
         loader.refresh().await.expect("second");
         assert!(table.find("b.test").is_some());
 
-        // An invalid origin for "a" must not take it offline.
+        // An invalid origin for "a" must not take it offline; its status keeps
+        // the version it serves and names the error.
         let bad = spec("a", "a.test").replace("http://127.0.0.1:9", "ftp://x");
         std::fs::write(&path, format!("[{bad},{}]", spec("b", "b.test"))).expect("write");
         loader.refresh().await.expect("third");
         assert!(table.find("a.test").is_some());
+        let stale = &table.statuses()["a"];
+        assert_eq!(stale.version, first.version);
+        assert_eq!(stale.error.as_deref(), Some(ORIGIN_INVALID));
 
         // A removed site disappears.
         std::fs::write(&path, format!("[{}]", spec("b", "b.test"))).expect("write");
         loader.refresh().await.expect("fourth");
         assert!(table.find("a.test").is_none());
+        assert!(!table.statuses().contains_key("a"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_host_taken_by_an_earlier_site_is_reported() {
+        let table = Arc::new(SiteTable::new());
+        let dir = std::env::temp_dir().join(format!("xshield-edge-taken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("sites.json");
+        std::fs::write(
+            &path,
+            format!(
+                "[{},{}]",
+                spec("a", "shared.test"),
+                spec("b", "shared.test")
+            ),
+        )
+        .expect("write");
+        let mut loader = SiteLoader::new(SiteSource::File(path), Arc::clone(&table));
+        loader.refresh().await.expect("refresh");
+        let statuses = table.statuses();
+        assert_eq!(statuses["a"].error, None);
+        assert_eq!(statuses["b"].error.as_deref(), Some(HOST_TAKEN));
+        assert!(statuses["b"].version.is_some());
         std::fs::remove_dir_all(dir).ok();
     }
 

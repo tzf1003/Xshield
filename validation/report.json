@@ -5,16 +5,11 @@
   "passed_count": 3844,
   "acceptance_cases": {
     "total": 78,
-    "planned": 57,
-    "partial": 19,
+    "planned": 61,
+    "partial": 15,
     "automated": 2
   },
   "checks": [
-    {
-      "name": "json:dev/keycloak/xshield-dev-realm.json",
-      "passed": true,
-      "detail": ""
-    },
     {
       "name": "json:examples/acceptance-cases.json",
       "passed": true,
@@ -19222,6 +19217,11 @@
     },
     {
       "name": "link:docs/05-v3-removal.md:04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:web/console/README.md:../../docs/03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
