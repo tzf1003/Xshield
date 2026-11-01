@@ -403,15 +403,29 @@ impl<J: JevPort> Judge<J> {
     /// Remembers what the origin returned (docs/01 section 1.4 step 8).
     ///
     /// Only 2xx responses count; a failed request teaches the session nothing.
+    /// The one exception is a redirect that issues a credential (a login form
+    /// answering `302` with `Set-Cookie`): the new session is created, empty.
     pub fn observe(&self, site: &SiteSpec, observation: &Observation<'_>) {
-        if !(200..300).contains(&observation.status) || site.is_bypass(observation.path) {
+        let success = (200..300).contains(&observation.status);
+        let issuing_redirect =
+            (300..400).contains(&observation.status) && observation.issued_credential.is_some();
+        if !(success || issuing_redirect) || site.is_bypass(observation.path) {
             return;
         }
-        let values = extract_response(observation.content_type, observation.body);
+        let values = if success {
+            extract_response(observation.content_type, observation.body)
+        } else {
+            Vec::new()
+        };
         let request = format!("{} {}", observation.method, observation.path);
         let entry = site.is_entry(observation.path);
         let mut inner = self.lock();
-        for credential in [observation.credential, observation.issued_credential]
+        let seeded = if success {
+            observation.credential
+        } else {
+            None
+        };
+        for credential in [seeded, observation.issued_credential]
             .into_iter()
             .flatten()
             .filter(|c| !c.is_empty())
@@ -965,6 +979,41 @@ mod tests {
         assert!(verdict.forward && verdict.record.is_none());
         assert_eq!(fake.calls(), 0);
         assert_eq!(judge.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_login_redirect_that_issues_a_cookie_seeds_the_new_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site("");
+        judge.observe(
+            &site,
+            &Observation {
+                credential: None,
+                issued_credential: Some("fresh"),
+                method: "POST",
+                path: "/login",
+                status: 302,
+                content_type: None,
+                body: b"",
+                now_ms: 1,
+            },
+        );
+        assert_eq!(judge.session_count(), 1);
+        judge.observe(
+            &site,
+            &Observation {
+                credential: Some("other"),
+                issued_credential: None,
+                method: "GET",
+                path: "/missing",
+                status: 302,
+                content_type: None,
+                body: b"",
+                now_ms: 2,
+            },
+        );
+        assert_eq!(judge.session_count(), 1, "a plain redirect teaches nothing");
     }
 
     #[tokio::test]

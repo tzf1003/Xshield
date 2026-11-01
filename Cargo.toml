@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/xshield-audit", "crates/xshield-control", "crates/xshield-core", "crates/xshield-evidence", "crates/xshield-gateway", "crates/xshield-judge", "crates/xshield-postgres", "crates/xshield-worker"]
+members = ["crates/xshield-audit", "crates/xshield-control", "crates/xshield-core", "crates/xshield-evidence", "crates/xshield-gateway", "crates/xshield-judge",
+    "crates/xshield-edge", "crates/xshield-postgres", "crates/xshield-worker"]
 resolver = "3"
 
 [workspace.package]

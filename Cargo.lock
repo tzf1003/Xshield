@@ -4174,6 +4174,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "xshield-edge"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "pingora",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "uuid",
+ "xshield-core",
+ "xshield-judge",
+]
+
+[[package]]
 name = "xshield-evidence"
 version = "0.1.1"
 dependencies = [
