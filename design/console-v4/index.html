@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Xshield 控制台原型</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="login-root" class="hidden"></div>
+  <div id="app">
+    <nav class="side">
+      <div class="brand"><span class="logo"></span><span>Xshield</span></div>
+      <div class="nav-items">
+        <button class="nav-item" data-route="overview" data-href="#/"><span class="ico">▦</span><span class="label">总览</span></button>
+        <button class="nav-item" data-route="requests" data-href="#/requests"><span class="ico">≡</span><span class="label">请求追溯</span></button>
+        <button class="nav-item" data-route="sessions" data-href="#/sessions"><span class="ico">◎</span><span class="label">会话</span></button>
+        <button class="nav-item" data-route="jev" data-href="#/jev"><span class="ico">✦</span><span class="label">Jev 调用</span></button>
+        <button class="nav-item" data-route="sites" data-href="#/sites"><span class="ico">⚙</span><span class="label">站点</span></button>
+        <button class="nav-item" data-route="system" data-href="#/system"><span class="ico">▤</span><span class="label">系统</span></button>
+      </div>
+      <div class="nav-foot">
+        <div class="modes"><span class="chip">观察 1</span><span class="chip">拦截 1</span></div>
+        <button class="nav-item" id="nav-toggle"><span class="ico">⇆</span><span class="label">折叠导航</span></button>
+      </div>
+    </nav>
+    <main>
+      <div class="topbar">
+        <select class="select" id="site-select">
+          <option value="all">全部站点</option>
+          <option value="emr">emr（拦截）</option>
+          <option value="juice">juice（观察）</option>
+        </select>
+        <div class="search" id="search-box">⌕ <span>粘贴请求 ID、会话、路径或站点名…</span><kbd>⌘K</kbd></div>
+        <div class="lights">
+          <button class="light" id="theme-toggle" title="切换浅色 / 深色">主题</button>
+          <button class="light"><span class="dot ok"></span>网关</button>
+          <button class="light"><span class="dot ok"></span>Jev</button>
+        </div>
+      </div>
+      <div class="page" id="page"></div>
+    </main>
+  </div>
+  <div class="toasts" id="toasts"></div>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
